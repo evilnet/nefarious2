@@ -2434,171 +2434,13 @@ void bounce_legacy_burst_gate_tick(void)
 }
 
 /** Event-callback wrapper for the periodic 1-second tick.  Registered
- * from ircd.c as a TT_PERIODIC timer.  Also drives the frontier-
- * introducer pending-canon list. */
+ * from ircd.c as a TT_PERIODIC timer. */
 void bounce_legacy_burst_gate_callback(struct Event *ev)
 {
   (void)ev;
   bounce_legacy_burst_gate_tick();
-  bounce_pending_canon_tick();
 }
 
-/* ---------------------------------------------------------------- */
-/* Frontier introducer: pending-canon list                           */
-/* ---------------------------------------------------------------- */
-
-/* When a bouncer-account user finishes registration on a BX-aware
- * server, register_user emits N to BX-aware peers immediately (so the
- * BX-aware ring can converge via D.2 at-N-time) but DEFERS the N
- * emission to legacy peers.  After a brief settle window, if the
- * client is still primary (not demoted to alias by the convergence),
- * we emit N to legacy peers retroactively.  Per design intent #135
- * + #254: legacy peers see exactly one face per session, and that
- * face is the post-convergence canonical primary. */
-struct PendingCanon {
-  struct Client *cli;
-  time_t deadline;
-  struct PendingCanon *next;
-};
-static struct PendingCanon *pending_canons = NULL;
-
-#define BOUNCE_PENDING_CANON_SECS 5
-
-void bounce_pending_canon_register(struct Client *cli)
-{
-  struct PendingCanon *p;
-  if (!cli) return;
-  p = MyMalloc(sizeof *p);
-  if (!p) return;
-  p->cli      = cli;
-  p->deadline = CurrentTime + BOUNCE_PENDING_CANON_SECS;
-  p->next     = pending_canons;
-  pending_canons = p;
-}
-
-void bounce_pending_canon_unregister(struct Client *cli)
-{
-  struct PendingCanon **pp = &pending_canons;
-  while (*pp) {
-    if ((*pp)->cli == cli) {
-      struct PendingCanon *gone = *pp;
-      *pp = gone->next;
-      MyFree(gone);
-      return;
-    }
-    pp = &(*pp)->next;
-  }
-}
-
-/** Emit an N introduction toward locally-connected legacy (non-IRCv3-
- * aware, non-services) peers for a single client.  Mirrors set_nick_name's
- * pair of broadcasts (IPv6-aware variant + legacy-IP variant) but targets
- * only legacy peers via direct sendcmdto_one.
- *
- * Per-peer legacy-face suppression: if the client's bouncer session
- * already has a face recorded toward a peer, skip that peer.  Otherwise
- * emit and record.  Result: legacy peers see exactly one N per session.
- * Subsequent calls for other clients of the same session no-op for peers
- * that already have a face. */
-void bounce_emit_legacy_n_intro(struct Client *cli)
-{
-  struct DLink *lp;
-  char *tmpstr;
-  char ip6_b64[25];
-  char ip4_b64[25];
-  struct User *user;
-  struct BouncerSession *bs;
-
-  if (!cli || !IsUser(cli) || IsBouncerAlias(cli))
-    return;
-  user = cli_user(cli);
-  if (!user)
-    return;
-
-  tmpstr = umode_str(cli);
-  iptobase64(ip6_b64, &cli_ip(cli), sizeof(ip6_b64), 1);
-  iptobase64(ip4_b64, &cli_ip(cli), sizeof(ip4_b64), 0);
-
-  if (!cli_serv(&me))
-    return;
-
-  /* Look up session for face-tracking.  May be NULL for non-bouncer
-   * clients; in that case fall through with no per-peer suppression
-   * (treat as a regular client). */
-  bs = bounce_get_session(cli);
-  if (!bs && IsAccount(cli))
-    bs = bounce_find_any_session(cli_account(cli));
-
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-    struct Client *peer = lp->value.cptr;
-    const char *ip_b64;
-
-    if (!peer || !IsServer(peer)) continue;
-    if (IsIRCv3Aware(peer)) continue;     /* not legacy */
-    if (IsService(peer))    continue;     /* services exempt */
-    if (IsBurstGated(peer)) continue;     /* burst gate still active; will be drained later */
-
-    /* Skip if this peer already has a face for the session. */
-    if (bs && bounce_session_legacy_face_for(bs, cli_yxx(peer))) {
-      Debug((DEBUG_INFO,
-             "Bouncer: skipping legacy N to %s for %s — session %s "
-             "already has face %s",
-             cli_name(peer), cli_name(cli), bs->hs_sessid,
-             bounce_session_legacy_face_for(bs, cli_yxx(peer))));
-      continue;
-    }
-
-    ip_b64 = IsIPv6(peer) ? ip6_b64 : ip4_b64;
-    /* No bounce_set_n_sessid_hint here — this loop is gated to legacy
-     * peers only (IsIRCv3Aware skipped above), which strip @-prefixed
-     * tags at parse.  An override set here would never be consumed and
-     * would leak into the next IRCv3-aware emission with a stale
-     * sessid pointed at an unrelated client. */
-    sendcmdto_one(user->server, CMD_NICK, peer,
-                  "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
-                  cli_name(cli), cli_hopcount(cli) + 1,
-                  cli_lastnick(cli),
-                  user->username, user->realhost,
-                  *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
-                  ip_b64, NumNick(cli), cli_info(cli));
-
-    if (bs) {
-      char face_buf[6];
-      ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",
-                    cli_yxx(user->server), cli_yxx(cli));
-      bounce_session_record_legacy_intro(bs, cli_yxx(peer), face_buf);
-    }
-  }
-}
-
-void bounce_pending_canon_tick(void)
-{
-  struct PendingCanon **pp = &pending_canons;
-  while (*pp) {
-    struct PendingCanon *p = *pp;
-    int drop = 0;
-    if (!p->cli || IsDead(p->cli) || HasFlag(p->cli, FLAG_KILLED)) {
-      drop = 1;
-    } else if (IsBouncerAlias(p->cli)) {
-      /* Convergence demoted us — IsBouncerAlias filter handles
-       * future emissions; nothing to release for legacy. */
-      drop = 1;
-    } else if (p->deadline <= CurrentTime) {
-      Debug((DEBUG_INFO,
-             "Bouncer: emitting deferred legacy N for %s "
-             "(canonical primary, frontier-introducer release)",
-             cli_name(p->cli)));
-      bounce_emit_legacy_n_intro(p->cli);
-      drop = 1;
-    }
-    if (drop) {
-      *pp = p->next;
-      MyFree(p);
-    } else {
-      pp = &p->next;
-    }
-  }
-}
 
 /* ---------------------------------------------------------------- */
 /* Legacy-face suppression                                           */
@@ -6489,12 +6331,15 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
                       ":Promoted to alias of %s", cli_name(new_primary));
       }
       /* Clear the legacy-face record(s) for this demoted face: the Q
-       * just retracted it from legacy peers' view, so the next emit
-       * (pending-canon tick for the new primary, or a relay-path emit)
-       * is authorized to introduce a fresh face.  Without this clear,
-       * the recorded BjAAA face stays in hs_legacy_intros forever and
-       * future emits skip — legacy ends up with no representation of
-       * the session at all. */
+       * just retracted it from legacy peers' view, so a later emit (a
+       * relay-path N, the next burst) is authorized to introduce a fresh
+       * face.  Without this clear, the recorded BjAAA face stays in
+       * hs_legacy_intros forever and future emits skip.  Nothing here
+       * introduces the new primary to these peers: the pending-canon
+       * tick that once did was removed with the frontier introducer
+       * (6523611, then deleted as dead code), so until a relay or a
+       * burst does, a legacy peer may hold no face for the session --
+       * an open gap (deferred-items register). */
       bounce_session_clear_legacy_face(session, demoted_face);
     }
   }

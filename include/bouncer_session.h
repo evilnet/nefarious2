@@ -1298,21 +1298,6 @@ extern void bounce_remove_pending_registration(struct Client *cli);
  * still-Unknown deferred client. */
 extern int bounce_is_pending_registration(const struct Client *cli);
 
-/** Frontier introducer (per design intent #135 + #254): defer N
- * emission to legacy peers for fresh bouncer-account users until
- * BX-aware-ring convergence has had time to demote any loser side.
- * Caller (register_user) sets sendcmdto_set_skip_legacy_canon before
- * the N broadcast (BX-aware peers get it now), then registers the
- * client here.  After BOUNCE_PENDING_CANON_SECS the periodic tick
- * emits N to legacy peers if the client is still primary (i.e., didn't
- * become IsBouncerAlias during convergence). */
-extern void bounce_pending_canon_register(struct Client *cli);
-/** Cleanup hook (exit_one_client / m_nick demote-to-alias). */
-extern void bounce_pending_canon_unregister(struct Client *cli);
-/** Walk the pending-canon list and emit / drop entries; called from
- * the 1-second bounce_legacy_burst_gate_tick. */
-extern void bounce_pending_canon_tick(void);
-
 /* ---------------------------------------------------------------- */
 /* Legacy-face suppression                                           */
 /* ---------------------------------------------------------------- */
@@ -1372,13 +1357,6 @@ extern void bounce_null_hs_client_pointing_at(struct Client *cli);
 extern int bounce_hs_client_assign_checked(struct BouncerSession *session,
                                            struct Client *candidate,
                                            const char *site_label);
-
-/** Emit N to all directly-connected legacy peers that don't yet have a
- * face for this client's session, recording each successful emit.
- * No-op if the client is an alias or has no associated session.  Used
- * by the pending-canon ticker (frontier-introducer post-defer release)
- * and by direct emit paths that want per-peer face suppression. */
-extern void bounce_emit_legacy_n_intro(struct Client *cli);
 
 /* bounce_session_is_local retired in Phase 5; use session_has_local_holder
  * for the runtime "do we hold this locally?" check. */
