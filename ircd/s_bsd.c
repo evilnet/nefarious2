@@ -1123,10 +1123,14 @@ void update_write(struct Client* cptr)
   /* If there are messages that need to be sent along, or if the client
    * is in the middle of a /list, then we need to tell the engine that
    * we're interested in writable events--otherwise, we need to drop
-   * that interest.
+   * that interest.  A WebSocket frame left pending on the wire (an
+   * out-of-band PING or PONG that went want-write, with nothing queued
+   * behind it) counts: without the event, send_queued never completes it
+   * and it waits for the next line.
    */
   socket_events(&(cli_socket(cptr)),
-		((MsgQLength(&cli_sendQ(cptr)) || cli_listing(cptr) || cli_replay(cptr)) ?
+		((MsgQLength(&cli_sendQ(cptr)) || cli_listing(cptr) || cli_replay(cptr)
+		  || (IsWebSocket(cptr) && con_ws_txrem(cli_connect(cptr)))) ?
 		 SOCK_ACTION_ADD : SOCK_ACTION_DEL) | SOCK_EVENT_WRITABLE);
 }
 
