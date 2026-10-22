@@ -105,7 +105,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 10
+#define BOUNCER_DB_VERSION 11
 
 /** Persisted alias roster entry (v8+).  Records "this session has an
  * alias on server YY with numeric NNN, last active at T, with caps C."
@@ -186,6 +186,70 @@ struct BounceSessionRecord {
   /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
    * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
    * keyed on bsr_oper_name (looked up in the local O:line config). */
+  char     bsr_oper_name[NICKLEN + 1];
+  int64_t  bsr_oper_granted_at;
+  /* Server notice mask (v11+): the session's own, which the oper grant
+   * gives back after a restart instead of the O:line default.  Zero
+   * bsr_snomask_known (every pre-v11 record) means none was recorded. */
+  uint32_t bsr_snomask;
+  uint32_t bsr_snomask_known;
+};
+
+/** Frozen v10 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=10.  v11
+ * only appends the snomask fields, so a v10 record is a prefix of a v11
+ * one (bounce_db_restore checks that at compile time). */
+struct BounceSessionRecord_v10 {
+  uint32_t bsr_version;
+  /* Session identity */
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];
+  int32_t  bsr_hold_override;
+  /* Timestamps */
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;
+  int64_t  bsr_last_msg_time;
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  /* Ghost client identity */
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  /* Last connection metadata */
+  struct irc_in_addr bsr_ip;
+  char     bsr_sock_ip[SOCKIPLEN + 1];
+  char     bsr_sockhost[HOSTLEN + 1];
+  uint16_t bsr_listener_port;
+  /* Session-level aggregate counters */
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  /* Connection history */
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[10]; /* frozen: v10 BOUNCER_MAX_CONN_HISTORY */
+  /* Channel memberships */
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;
+    int32_t  join_tv_usec;
+    char     join_msgid[16];
+  } bsr_channels[50]; /* frozen: v10 BOUNCER_MAX_CHANNELS */
+  /* Alias roster */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[16]; /* frozen: v10 BOUNCER_MAX_ALIASES */
+  /* Session-anchored oper grant */
   char     bsr_oper_name[NICKLEN + 1];
   int64_t  bsr_oper_granted_at;
 };
@@ -476,6 +540,14 @@ struct BouncerSession {
    * the session is not opered. */
   char hs_oper_name[NICKLEN + 1];
   time_t hs_oper_granted_at;
+  /* The session's server notice mask.  close_connection() zeroes a
+   * held socket's mask but leaves its modes, +s included, so
+   * bounce_hold_client() keeps it here for the revive to give back;
+   * persisted, it is what the oper grant restores after a restart in
+   * place of the O:line default.  hs_snomask_known is 0 until one was
+   * recorded (a session restored from a pre-v11 record). */
+  unsigned int hs_snomask;
+  int hs_snomask_known;
 
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost

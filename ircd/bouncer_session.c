@@ -86,6 +86,7 @@
 #include <sys/uio.h>
 #include <sys/ioctl.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -2894,6 +2895,17 @@ static int bounce_db_put(struct BouncerSession *session)
                sizeof(rec.bsr_oper_name));
   rec.bsr_oper_granted_at = (int64_t)session->hs_oper_granted_at;
 
+  /* Server notice mask (v11+): the live one while a socket holds the
+   * session, otherwise the one bounce_hold_client() kept (the held
+   * socket's own was zeroed by close_connection()). */
+  if (ghost && MyConnect(ghost) && !IsBouncerHold(ghost)) {
+    rec.bsr_snomask = HasFlag(ghost, FLAG_SERVNOTICE) ? cli_snomask(ghost) : 0;
+    rec.bsr_snomask_known = 1;
+  } else {
+    rec.bsr_snomask = session->hs_snomask;
+    rec.bsr_snomask_known = session->hs_snomask_known ? 1 : 0;
+  }
+
   /* Write through the abstraction */
   wb = db_writebatch_new(env);
   if (!wb)
@@ -3188,6 +3200,7 @@ int bounce_db_restore(void)
   int restored = 0;
   int expired = 0;
   int migrated_v7 = 0;
+  int migrated = 0;   /* v8..v10 records read through a frozen layout */
   time_t max_hold;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
@@ -3244,10 +3257,27 @@ int bounce_db_restore(void)
     memcpy(&version, vbuf, sizeof(version));
 
     if (version == BOUNCER_DB_VERSION) {
-      /* v10: current schema, parse directly from on-disk bytes. */
+      /* v11: current schema, parse directly from on-disk bytes. */
       if (vlen != sizeof(struct BounceSessionRecord))
         continue;
       rec = (struct BounceSessionRecord *)vbuf;
+    } else if (version == 10) {
+      /* v10: v11 without the trailing snomask fields, which stay zero
+       * (no mask recorded: the oper grant falls back to the O:line's). */
+      /* Compile-time check: a v10 record is a prefix of a v11 one. */
+      (void)sizeof(char[(sizeof(struct BounceSessionRecord_v10)
+                         == offsetof(struct BounceSessionRecord, bsr_snomask))
+                        ? 1 : -1]);
+      if (vlen != sizeof(struct BounceSessionRecord_v10))
+        continue;
+      memset(&rec_buf, 0, sizeof(rec_buf));
+      memcpy(&rec_buf, vbuf, sizeof(struct BounceSessionRecord_v10));
+      rec_buf.bsr_version = BOUNCER_DB_VERSION;
+      rec = &rec_buf;
+      migrated++;
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "bouncer_persist: migrated v10 record (account=%s) → v%d",
+                rec->bsr_account, BOUNCER_DB_VERSION);
     } else if (version == 9) {
       /* v9: identical to v10 except bsr_aliases[] was sized 4.  Read
        * with the frozen v9 struct and copy field-by-field; the alias
@@ -3302,9 +3332,10 @@ int bounce_db_restore(void)
       ircd_strncpy(rec_buf.bsr_oper_name, v9->bsr_oper_name, NICKLEN + 1);
       rec_buf.bsr_oper_granted_at = v9->bsr_oper_granted_at;
       rec = &rec_buf;
+      migrated++;
       log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v9 record (account=%s) → v10",
-                rec->bsr_account);
+                "bouncer_persist: migrated v9 record (account=%s) → v%d",
+                rec->bsr_account, BOUNCER_DB_VERSION);
     } else if (version == 8) {
       /* v8: legacy schema.  Read with the frozen v8 struct, then build
        * a v9 record in-place; v9 only adds oper-grant fields (left
@@ -3359,6 +3390,7 @@ int bounce_db_restore(void)
       /* bsr_oper_name + bsr_oper_granted_at left zero — pre-v9 sessions
        * had no session-level oper grant. */
       rec = &rec_buf;
+      migrated++;
       log_write(LS_SYSTEM, L_INFO, 0,
                 "bouncer_persist: migrated v8 record (account=%s) → current",
                 rec->bsr_account);
@@ -3491,6 +3523,10 @@ int bounce_db_restore(void)
     ircd_strncpy(session->hs_oper_name, rec->bsr_oper_name,
                  sizeof(session->hs_oper_name));
     session->hs_oper_granted_at = (time_t)rec->bsr_oper_granted_at;
+    /* The session's own server notice mask (v11+), which the grant below
+     * restores in place of the O:line default. */
+    session->hs_snomask = rec->bsr_snomask;
+    session->hs_snomask_known = rec->bsr_snomask_known ? 1 : 0;
 
     /* If the session had an oper grant when persisted, re-apply it to
      * the just-created ghost so the held identity carries oper rights
@@ -3636,10 +3672,13 @@ int bounce_db_restore(void)
               expired, migrated_v7);
   }
 
-  /* If we migrated any v7 records, persist their v8 forms now under the
-   * new UUID keys.  Otherwise the migrated state is in-memory only and
-   * would be lost without the runtime triggering a session-write. */
-  if (migrated_v7 > 0) {
+  /* If we migrated any records, persist them in the current form now (v7
+   * under the new UUID keys, later versions over their old ones).
+   * Otherwise the migrated state is in-memory only: a held session is
+   * never marked dirty, and the eviction pass above deletes every record
+   * that is not the current version whenever anything expired -- one
+   * more restart before a revive would then lose the session. */
+  if (migrated_v7 > 0 || migrated > 0) {
     struct AccountSessions *as_iter;
     struct BouncerSession *s;
     unsigned int b;
@@ -3652,8 +3691,8 @@ int bounce_db_restore(void)
   }
 
   log_write(LS_SYSTEM, L_INFO, 0,
-            "bouncer_persist: restored %d sessions (%d migrated from v7)",
-            restored, migrated_v7);
+            "bouncer_persist: restored %d sessions (%d migrated from v7, "
+            "%d from v8-v10)", restored, migrated_v7, migrated);
   return restored;
 }
 
@@ -5364,6 +5403,13 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   if (IsWebSocket(cptr) && !IsDead(cptr) && cli_fd(cptr) >= 0)
     websocket_send_close(cptr, 1000, comment ? comment : "held");
 
+  /* close_connection() below zeroes the server notice mask and leaves
+   * the modes, +s included, on the ghost.  Keep the mask with the
+   * session: the revive gives it back, and persisted it is what the oper
+   * grant restores after a restart. */
+  session->hs_snomask = HasFlag(cptr, FLAG_SERVNOTICE) ? cli_snomask(cptr) : 0;
+  session->hs_snomask_known = 1;
+
   /* Close the socket but keep the client structure alive.
    * Note: We do NOT call exit_client() here - that would destroy the client.
    * We only want to close the socket connection.
@@ -5888,6 +5934,16 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   session->hs_attach_time = CurrentTime;
   session->hs_disconnect_time = 0;
   bounce_emit_connect_count(session);
+
+  /* The held socket's server notice mask went with it (close_connection
+   * zeroes it; bounce_hold_client kept it): give it back, or the revived
+   * connection keeps +s with a zero mask -- no server notices, and
+   * MODE <me> answers "008 <me> 0 :: Server notice mask (0x0)" (field
+   * report 2026-10-21).  Before register_user's send_umode_signon, so
+   * the 008 there reports it. */
+  if (HasFlag(ghost, FLAG_SERVNOTICE) && !cli_snomask(ghost)
+      && session->hs_snomask_known && session->hs_snomask)
+    set_snomask(ghost, session->hs_snomask, SNO_SET);
 
   /* Phase 3 hs_enforced: a reviving client on a CRFLAG_BOUNCER class
    * re-enforces the session.  temp_con (now transplanted) is the
@@ -7264,11 +7320,20 @@ static void bounce_apply_oper_grant(struct Client *cptr,
    * notices) that opers normally rely on.  Applies to BS O receivers,
    * ghost revivals, and any other non-/OPER grant entry. */
   SetFlag(cptr, FLAG_WALLOP);
-  SetFlag(cptr, FLAG_SERVNOTICE);
   SetFlag(cptr, FLAG_DEBUG);
-  {
+  if (sess->hs_snomask_known) {
+    /* The oper's own mask, kept with the session (saved at hold,
+     * persisted): what they had, not the O:line default -- and no +s if
+     * they had turned it off (user, 2026-10-21: the mask comes back
+     * wherever +o does). */
+    if (sess->hs_snomask) {
+      SetFlag(cptr, FLAG_SERVNOTICE);
+      set_snomask(cptr, sess->hs_snomask & SNO_ALL, SNO_SET);
+    }
+  } else {
     unsigned int snomask = ConfSnoMask(aconf) & SNO_ALL;
     snomask |= aconf->snomask & SNO_ALL;
+    SetFlag(cptr, FLAG_SERVNOTICE);
     if (snomask)
       set_snomask(cptr, snomask, SNO_ADD);
     else
@@ -7392,6 +7457,18 @@ void bounce_sync_session_umodes(struct Client *source)
     return;
 
   primary = sess->hs_client;
+
+  /* The session's own copy of the mask follows a local member's (the
+   * live one; a held ghost's was zeroed with its socket), marked dirty
+   * so a restart restores the current one. */
+  if (MyConnect(source) && !IsBouncerHold(source)) {
+    unsigned int mask = HasFlag(source, FLAG_SERVNOTICE) ? cli_snomask(source) : 0;
+    if (!sess->hs_snomask_known || sess->hs_snomask != mask) {
+      sess->hs_snomask = mask;
+      sess->hs_snomask_known = 1;
+      bounce_mark_dirty(source);
+    }
+  }
 
   /* Apply source's umode/privs/snomask to one target Client.  Self
    * (source == target) is skipped — bounce_copy_umodes would be wasted

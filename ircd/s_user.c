@@ -2554,8 +2554,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     {
       if (tmpmask != cli_snomask(acptr))
 	set_snomask(acptr, tmpmask, SNO_SET);
+      /* The answer goes to whoever asked: an alias's MODE <nick> acts on
+       * its primary (the _alias_of_target carve-out above), and the 008
+       * landed on the primary's socket while the alias that asked got
+       * none (field report 2026-10-21).  A server or services change
+       * still tells the user it changed. */
       if (cli_snomask(acptr) && snomask_given)
-	send_reply(acptr, RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
+	send_reply((sptr != acptr && cli_user(sptr)
+	            && cli_user(sptr)->alias_primary == acptr) ? sptr : acptr,
+	           RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
     }
     else
       set_snomask(acptr, 0, SNO_SET);
