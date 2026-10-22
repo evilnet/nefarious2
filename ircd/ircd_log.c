@@ -356,6 +356,21 @@ log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   va_end(vl);
 }
 
+/** The bytes ircd_snprintf() put in a buffer of @a cap bytes.  It returns
+ * the length the text WOULD have had untruncated, so handing that to
+ * writev() for a message longer than the buffer wrote the stack beyond it
+ * into the log (valgrind, 2026-09-22: "points to uninitialised byte(s)").
+ * @param[in] n What ircd_snprintf() returned.
+ * @param[in] cap Size of the buffer it wrote, terminating NUL included.
+ * @return The length of the text actually in the buffer.
+ */
+static size_t log_written_len(int n, size_t cap)
+{
+  if (n <= 0 || cap == 0)
+    return 0;
+  return ((size_t)n < cap) ? (size_t)n : cap - 1;
+}
+
 /** Write a logging entry using a va_list.
  * @param[in] subsys Target subsystem.
  * @param[in] severity Severity of message.
@@ -422,8 +437,9 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   /* save the length for writev */
   /* Log format: "SYSTEM [SEVERITY]: log message" */
   vector[1].iov_len =
-    ircd_snprintf(0, buf, sizeof(buf), "%s [%s]: %v", desc->name,
-		  ldata->string, &vd);
+    log_written_len(ircd_snprintf(0, buf, sizeof(buf), "%s [%s]: %v",
+                                  desc->name, ldata->string, &vd),
+                    sizeof(buf));
 
   /* if we have something to write to... */
   if (flags & LOG_DOFILELOG) {
@@ -431,10 +447,10 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
     tstamp = localtime(&curtime); /* build the timestamp */
 
     vector[0].iov_len =
-      ircd_snprintf(0, timebuf, sizeof(timebuf), "[%d-%d-%d %d:%02d:%02d] ",
+      log_written_len(ircd_snprintf(0, timebuf, sizeof(timebuf), "[%d-%d-%d %d:%02d:%02d] ",
 		    tstamp->tm_year + 1900, tstamp->tm_mon + 1,
 		    tstamp->tm_mday, tstamp->tm_hour, tstamp->tm_min,
-		    tstamp->tm_sec);
+		    tstamp->tm_sec), sizeof(timebuf));
 
     /* set up the remaining parts of the writev vector... */
     vector[0].iov_base = timebuf;
@@ -449,8 +465,10 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
       char async_buf[LOG_BUFSIZE + 64];
       int async_len;
 
-      async_len = ircd_snprintf(0, async_buf, sizeof(async_buf), "%s%s\n",
-                                timebuf, buf);
+      async_len = (int)log_written_len(ircd_snprintf(0, async_buf,
+                                                     sizeof(async_buf),
+                                                     "%s%s\n", timebuf, buf),
+                                       sizeof(async_buf));
 
       /* Use async write - if it fails or falls back, that's OK */
       if (log_async_write(desc->file->fd,
