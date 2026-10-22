@@ -402,9 +402,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
                         ACCOUNTLEN + 1);
 
-        if (parc > 4) {
-          cli_user(acptr)->acc_create = atoi(parv[4]);
-        }
+        /* No timestamp in the reply: none, not whatever an earlier login
+         * of this connection left (as the R/M path above does). */
+        cli_user(acptr)->acc_create = (parc > 4) ? atoi(parv[4]) : 0;
         cli_user(acptr)->kc_id[0] = '\0';   /* the reply from services carries no id */
 
         if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
