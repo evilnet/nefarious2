@@ -297,7 +297,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
   /* Sync oper mode flags across all members of this client's bouncer
    * session — handles /OPER on alias as well as on primary.  Must be
    * after all mode and ConfUmode changes are applied. */
-  bounce_sync_session_umodes(sptr);
+  bounce_sync_session_umodes(sptr, NULL, sptr);
 
   send_reply(sptr, RPL_YOUREOPER);
 

@@ -2156,7 +2156,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
               }
               pp = mode_arg;
             }
-            bounce_sync_session_umodes(acptr);
+            bounce_sync_session_umodes(acptr, NULL, NULL);
           }
         }
 
@@ -2820,7 +2820,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
   /* Sync user mode flags to all aliases of this primary.
    * Must be after mode application so aliases reflect the new state. */
-  bounce_sync_session_umodes(acptr);
+  bounce_sync_session_umodes(acptr, &setflags,
+                             MyUser(cptr) ? cptr : (force ? acptr : NULL));
   /* An alias whose primary is remote holds the mask itself: the mask (and
    * only the mask -- its other flags, FLAG_SSL among them, are its own)
    * goes from it to the primary's server and the other members by BX K;
