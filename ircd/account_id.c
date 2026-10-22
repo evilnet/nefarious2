@@ -11,7 +11,6 @@
 #include "account_id.h"
 #include "webpush_keyring.h"
 
-#include <ctype.h>
 #include <string.h>
 
 static int hexval(int c)
@@ -64,7 +63,10 @@ int account_id_valid(const char *id)
     return 0;
   for (i = 0; id[i]; i++) {
     int c = (unsigned char)id[i];
-    if (!(isalnum(c) || c == '-' || c == '_'))
+    /* The base64url alphabet, spelled out: isalnum() follows the locale,
+     * and a Latin-1 one takes bytes above 0x7f as letters. */
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+          || (c >= '0' && c <= '9') || c == '-' || c == '_'))
       return 0;
   }
   return i == ACCOUNT_ID_LEN;
