@@ -4,6 +4,8 @@
  */
 #include "bouncer_rebind_auth.h"
 
+#include <string.h>
+
 enum BounceRebindAuth
 bounce_rebind_auth(int origin_match, int sessid_match, int acc_ts_match)
 {
@@ -31,4 +33,12 @@ bounce_rebind_auth_name(enum BounceRebindAuth auth)
   case BRA_NONE:   break;
   }
   return "none";
+}
+
+int
+bounce_rebind_kc_conflict(const char *ghost_id, const char *incoming_id)
+{
+  if (!ghost_id || !*ghost_id || !incoming_id || !*incoming_id)
+    return 0;
+  return strcmp(ghost_id, incoming_id) != 0;
 }

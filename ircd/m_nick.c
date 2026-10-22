@@ -90,6 +90,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
+#include "account_id.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
@@ -472,6 +473,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   const char *incoming_acct = NULL;
   char incoming_acct_buf[ACCOUNTLEN + 1];
   time_t incoming_acc_ts = 0;
+  char incoming_kc_id[ACCOUNT_ID_LEN + 1] = "";
   if (IsServer(sptr) && parc > 7 && parv[6] && *parv[6] == '+') {
     /* Walk parv[6] flag string, counting arg-taking flags before 'r'.
      * Argument order in N matches umode_str() output order: r, h, f, C, c.
@@ -494,8 +496,14 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           /* +r value is "account[:ts]"; capture the TS so the bouncer
            * rebind auth gate can use it as a per-account identity
            * signal when neither origin nor sessid match. */
-          if (colon)
+          if (colon) {
+            const char *idp = strchr(colon + 1, ':');
             incoming_acc_ts = (time_t)strtoll(colon + 1, NULL, 10);
+            /* "account:ts:id": the Keycloak id vetoes a rebind of a
+             * ghost that carries a different one. */
+            if (idp && account_id_valid(idp + 1))
+              ircd_strncpy(incoming_kc_id, idp + 1, sizeof(incoming_kc_id));
+          }
           break;
         }
         argi++;
@@ -518,7 +526,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                       lastnick, parv[4],
                                                       parv[5], &ip,
                                                       parv[parc - 1],
-                                                      incoming_acc_ts);
+                                                      incoming_acc_ts,
+                                                      incoming_kc_id);
     if (rebind_rc == 0) {
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "Bouncer rebind: %C ghost rebound to %s on %C "

@@ -21,6 +21,14 @@ extern enum BounceRebindAuth bounce_rebind_auth(int origin_match,
                                                 int sessid_match,
                                                 int acc_ts_match);
 
+/** Do the held ghost and the incoming introduction carry Keycloak ids that
+ * differ?  Then they are different users and the rebind is refused,
+ * whatever authorized it: a VETO only -- the id is account-level, it
+ * cannot say which session, so it never authorizes; and a missing id
+ * (a legacy hop strips it, a restored ghost may lack it) never vetoes. */
+extern int bounce_rebind_kc_conflict(const char *ghost_id,
+                                     const char *incoming_id);
+
 /** Stable name for logging. Never NULL. */
 extern const char *bounce_rebind_auth_name(enum BounceRebindAuth auth);
 
