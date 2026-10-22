@@ -70,6 +70,34 @@ static void test_names_are_stable(void **state)
   assert_string_equal(bounce_rebind_auth_name(BRA_ACC_TS), "account-TS");
 }
 
+/* The Keycloak id vetoes, never authorizes: account-level, so it says
+ * nothing about WHICH session; it only proves a different user. */
+static void test_kc_ids_that_differ_conflict(void **state)
+{
+  (void)state;
+  assert_true(bounce_rebind_kc_conflict("a6p7gJ2tEdGAtADAT9QwyA",
+                                        "AAAAAAAAAAAAAAAAAAAAAA"));
+}
+
+static void test_same_kc_id_does_not_conflict(void **state)
+{
+  (void)state;
+  assert_false(bounce_rebind_kc_conflict("a6p7gJ2tEdGAtADAT9QwyA",
+                                         "a6p7gJ2tEdGAtADAT9QwyA"));
+}
+
+/* A missing id never vetoes: legacy hops strip it, restored ghosts may
+ * lack it. */
+static void test_missing_kc_id_does_not_conflict(void **state)
+{
+  (void)state;
+  assert_false(bounce_rebind_kc_conflict("", "a6p7gJ2tEdGAtADAT9QwyA"));
+  assert_false(bounce_rebind_kc_conflict("a6p7gJ2tEdGAtADAT9QwyA", ""));
+  assert_false(bounce_rebind_kc_conflict(NULL, "a6p7gJ2tEdGAtADAT9QwyA"));
+  assert_false(bounce_rebind_kc_conflict("a6p7gJ2tEdGAtADAT9QwyA", NULL));
+  assert_false(bounce_rebind_kc_conflict(NULL, NULL));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -80,6 +108,9 @@ int main(void)
     cmocka_unit_test(test_sessid_supersedes_origin),
     cmocka_unit_test(test_stronger_signal_wins_over_acc_ts),
     cmocka_unit_test(test_names_are_stable),
+    cmocka_unit_test(test_kc_ids_that_differ_conflict),
+    cmocka_unit_test(test_same_kc_id_does_not_conflict),
+    cmocka_unit_test(test_missing_kc_id_does_not_conflict),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

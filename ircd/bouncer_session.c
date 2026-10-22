@@ -5965,7 +5965,8 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                           const char *host,
                                           const struct irc_in_addr *new_ip,
                                           const char *info,
-                                          time_t incoming_acc_ts)
+                                          time_t incoming_acc_ts,
+                                          const char *incoming_kc_id)
 {
   struct BouncerSession *session;
   struct Membership *member;
@@ -6043,6 +6044,18 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
            "introducing server %s, account %s",
            bounce_rebind_auth_name(rebind_auth), session->hs_sessid,
            session->hs_origin, cli_yxx(server), cli_user(ghost)->account));
+  }
+
+  /* Whatever authorized it, a Keycloak id that differs from the ghost's is
+   * a different user under the same name: refused, and the collision
+   * handling the caller falls back to decides (bouncer_rebind_auth.h). */
+  if (bounce_rebind_kc_conflict(cli_user(ghost)->kc_id, incoming_kc_id)) {
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer rebind refused: ghost %s (account %s) carries Keycloak "
+              "id %s, the introduction from %s carries %s",
+              cli_name(ghost), cli_user(ghost)->account, cli_user(ghost)->kc_id,
+              cli_name(server), incoming_kc_id);
+    return -1;
   }
 
   Debug((DEBUG_INFO,
