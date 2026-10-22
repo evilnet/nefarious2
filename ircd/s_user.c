@@ -2035,6 +2035,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   char* fakehost = NULL;
   char* sethost = NULL;
   struct Client *acptr = NULL;
+  struct Client *snoc = NULL;
+  int sno_touched = 0;
 
   if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
@@ -2125,6 +2127,17 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
   }
 
+  /* The connection whose server notice mask this command reads and sets:
+   * the target when it is ours, else the asking alias when its primary is
+   * on another server.  A mask lives where its connection is (a remote
+   * Client's cli_snomask is its uplink link's Connection field); the
+   * session's other servers hear of it by BX K. */
+  if (MyConnect(acptr))
+    snoc = acptr;
+  else if (MyConnect(sptr) && sptr != acptr && cli_user(sptr)
+           && cli_user(sptr)->alias_primary == acptr)
+    snoc = sptr;
+
   if (parc < 3)
   {
     m = buf;
@@ -2148,12 +2161,24 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
      * reply to the primary's socket and the alias never saw its own
      * umode query response. */
     send_reply(sptr, RPL_UMODEIS, buf);
-    if (HasFlag(acptr, FLAG_SERVNOTICE) && MyConnect(sptr)
-        && cli_snomask(acptr) !=
-        (unsigned int)(IsOper(acptr) ? feature_int(FEAT_SNOMASK_OPERDEFAULT) :
+    if (snoc && HasFlag(snoc, FLAG_SERVNOTICE) && MyConnect(sptr)
+        && cli_snomask(snoc) !=
+        (unsigned int)(IsOper(snoc) ? feature_int(FEAT_SNOMASK_OPERDEFAULT) :
          feature_int(FEAT_SNOMASK_DEFAULT)))
-      send_reply(sptr, RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
+      send_reply(sptr, RPL_SNOMASK, cli_snomask(snoc), cli_snomask(snoc));
     return 0;
+  }
+
+  /* For an alias of a remote primary, the primary's +s here is a
+   * replica's (P10 never carries it): take the alias's own before setflags
+   * is, or the echo of this command (send_umode against setflags) shows a
+   * change of +s that did not happen and misses one that did. */
+  if (snoc && snoc != acptr)
+  {
+    if (HasFlag(snoc, FLAG_SERVNOTICE))
+      SetServNotice(acptr);
+    else
+      ClearServNotice(acptr);
   }
 
   /*
@@ -2162,8 +2187,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    */
   setflags = cli_flags(acptr);
 
-  if (MyConnect(acptr))
-    tmpmask = cli_snomask(acptr);
+  if (snoc)
+    tmpmask = cli_snomask(snoc);
 
   /*
    * parse mode change string(s)
@@ -2178,6 +2203,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         what = MODE_DEL;
         break;
       case 's':
+        sno_touched = 1;
         if (*(p + 1) && is_snomask(*(p + 1))) {
           snomask_given = 1;
           tmpmask = umode_make_snomask(tmpmask, *++p, what);
@@ -2208,12 +2234,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClrFlag(acptr, FLAG_ADMIN);
           ClrFlag(acptr, FLAG_OPERED_LOCAL);
           ClrFlag(acptr, FLAG_OPERED_REMOTE);
-          if (MyConnect(acptr))
+          if (snoc)
           {
-            tmpmask = cli_snomask(acptr) & ~SNO_OPER;
-            if (MyUser(acptr))
-              cli_handler(acptr) = CLIENT_HANDLER;
+            tmpmask = cli_snomask(snoc) & ~SNO_OPER;
+            sno_touched = 1;
           }
+          if (MyUser(acptr))
+            cli_handler(acptr) = CLIENT_HANDLER;
           /* Clear the session-level oper grant.  Mirrors the do_oper
            * grant-set: state survives across primary changes, so we
            * must explicitly clear it on /DEOPER so a subsequent
@@ -2244,12 +2271,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClrFlag(acptr, FLAG_LOCOP);
           ClrFlag(acptr, FLAG_OPERED_LOCAL);
           ClrFlag(acptr, FLAG_OPERED_REMOTE);
-          if (MyConnect(acptr))
+          if (snoc)
           {
-            tmpmask = cli_snomask(acptr) & ~SNO_OPER;
-            if (MyUser(acptr))
-              cli_handler(acptr) = CLIENT_HANDLER;
+            tmpmask = cli_snomask(snoc) & ~SNO_OPER;
+            sno_touched = 1;
           }
+          if (MyUser(acptr))
+            cli_handler(acptr) = CLIENT_HANDLER;
           _oper_sess = bounce_get_session(acptr);
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
@@ -2567,6 +2595,29 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     else
       set_snomask(acptr, 0, SNO_SET);
   }
+  else if (snoc && sno_touched)
+  {
+    /* A local alias of a primary on another server: the mask is this
+     * connection's own.  Only what the command touched (+s/-s, a mask,
+     * a -o strip) changes it -- the primary's flags here are a replica,
+     * and +s never travels in P10. */
+    if (tmpmask && feature_bool(FEAT_HIS_SNOTICES_OPER_ONLY)
+        && !IsAnOper(acptr) && !HasFlag(snoc, FLAG_SERVNOTICE))
+      tmpmask = 0;
+    if (tmpmask)
+    {
+      SetServNotice(snoc);
+      if (tmpmask != cli_snomask(snoc))
+        set_snomask(snoc, tmpmask, SNO_SET);
+      if (cli_snomask(snoc) && snomask_given)
+        send_reply(sptr, RPL_SNOMASK, cli_snomask(snoc), cli_snomask(snoc));
+    }
+    else
+    {
+      ClearServNotice(snoc);
+      set_snomask(snoc, 0, SNO_SET);
+    }
+  }
   /*
    * Compare new flags with old flags and send string which
    * will cause servers to update correctly.
@@ -2726,6 +2777,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   /* Sync user mode flags to all aliases of this primary.
    * Must be after mode application so aliases reflect the new state. */
   bounce_sync_session_umodes(acptr);
+  /* An alias whose primary is remote holds the mask itself: the mask (and
+   * only the mask -- its other flags, FLAG_SSL among them, are its own)
+   * goes from it to the primary's server and the other members by BX K;
+   * the sync from a remote acptr leaves the mask alone. */
+  if (snoc && snoc != acptr)
+    bounce_sync_session_snomask(snoc);
 
   return 0;
 }
