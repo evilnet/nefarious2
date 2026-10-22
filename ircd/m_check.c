@@ -814,6 +814,20 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
          ircd_snprintf(0, outbuf, sizeof(outbuf), "  Session since:: %s", myctime(session->hs_created));
          send_reply(sptr, RPL_DATASTR, outbuf);
 
+         /* What the earned hold is made of (bounce_hold_earned): the
+          * active time as this server knows it -- closed stretches, plus
+          * the open one when the primary is attached here -- and the
+          * connection count. */
+         {
+            time_t active = session->hs_total_active;
+            if (session->hs_attach_time > 0 && CurrentTime > session->hs_attach_time)
+               active += CurrentTime - session->hs_attach_time;
+            ircd_snprintf(0, outbuf, sizeof(outbuf),
+                          "    Active time:: %lus (%u connections)",
+                          (unsigned long)active, session->hs_connect_count);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
          /* HOLDING-specific: disconnect time and hold expiry */
          if (session->hs_state == BOUNCE_HOLDING) {
             if (session->hs_disconnect_time) {

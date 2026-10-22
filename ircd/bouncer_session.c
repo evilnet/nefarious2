@@ -686,6 +686,7 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
 /** Timer callback: session hold has expired. */
 static void bounce_arm_hold_timer(struct BouncerSession *session, time_t min_delay);
 static void bounce_emit_connect_count(struct BouncerSession *session);
+static void bounce_emit_total_active(struct BouncerSession *session);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -3676,9 +3677,16 @@ void bounce_burst(struct Client *cptr)
       /* The connection count is not on the BS C line (positional, kept
        * as is for older peers); it rides on BX U like la= and aw=. */
       if (s->hs_client && cli_user(s->hs_client) && cli_user(s->hs_client)->server)
+      {
         sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "U %s%s cc=%u",
                       cli_yxx(cli_user(s->hs_client)->server),
                       cli_yxx(s->hs_client), s->hs_connect_count);
+        /* BS C does not update a replica that already exists: ta= does,
+         * by the larger figure. */
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "U %s%s ta=%Tu",
+                      cli_yxx(cli_user(s->hs_client)->server),
+                      cli_yxx(s->hs_client), s->hs_total_active);
+      }
       /* Follow with BS O if this session carries an oper grant, so
        * the newly-linked peer records it on its session.  Without
        * the burst replay, a grant set before the link existed would
@@ -4873,6 +4881,8 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
                         "T %s %s %s",
                         session->hs_account, session->hs_sessid,
                         winner_server);
+  /* The outgoing stretch was just accrued: the new holder gets the total. */
+  bounce_emit_total_active(session);
 
   /* A4: Remove old primary from channels silently.
    * After this, callers' exit_client() produces no visible QUIT
@@ -5160,6 +5170,25 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
   return NULL;
 }
 
+/** Tell the peers a session's active time (BX U ta=): a replica learns it
+ * only from the BS C that created it, so the server that becomes the
+ * holder by a promotion or a move armed the earned hold from a stale
+ * figure (deferred-items B3).  Sent where it grows (the hold, a
+ * promotion, a split-merge demote) and in the burst; receivers keep the
+ * larger, so order and stale bursts cannot lower it. */
+static void bounce_emit_total_active(struct BouncerSession *session)
+{
+  char full_numeric[16];
+  struct Client *primary = session->hs_client;
+
+  if (!primary || !cli_user(primary) || !cli_user(primary)->server)
+    return;
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(primary)->server), cli_yxx(primary));
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "U %s ta=%Tu", full_numeric, session->hs_total_active);
+}
+
 /** Tell the BX-aware peers a session's connection count (BX U cc=), so a
  * replica that later becomes the holder arms the same earned hold. */
 static void bounce_emit_connect_count(struct BouncerSession *session)
@@ -5235,6 +5264,7 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    * hold is the earned one (spec: adaptive hold), not the flat base. */
   bounce_accrue_active(session);
   bounce_arm_hold_timer(session, 1);
+  bounce_emit_total_active(session);
 
   /* Broadcast detach to all servers (sends channel list for cross-server) */
   bounce_broadcast(session, 'D', NULL);
@@ -6182,6 +6212,10 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
   ircd_strncpy(session->hs_origin, cli_yxx(new_primary_server),
                sizeof(session->hs_origin));
   session->hs_origin[sizeof(session->hs_origin) - 1] = '\0';  /* redundant: strlcpy already terminates */
+  /* The demoted connection's attached stretch is active time; the new
+   * primary's server keeps its own (sent once the new primary is
+   * adopted, bounce_adopt_new_primary). */
+  bounce_accrue_active(session);
   session->hs_client = NULL;
 
   if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
@@ -6220,6 +6254,7 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
 
   session->hs_client = new_primary;
   cli_user(demoted_alias)->alias_primary = new_primary;
+  bounce_emit_total_active(session);
 
   /* Adopt the primary's nick.  Aliases share the primary's nick for
    * outgoing message attribution and identity-routing.  Without this:
@@ -9061,6 +9096,20 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
               && la > sess->hs_aliases[i].ba_last_active)
             sess->hs_aliases[i].ba_last_active = la;
       }
+    }
+    goto forward;
+  }
+  if (0 == strncmp(field_value, "ta=", 3)) {
+    /* A session's active time (bounce_emit_total_active): it only grows,
+     * so the larger figure wins whatever the order. */
+    struct Client *who = bx_find_user_strict(alias_numeric);
+    time_t ta = (time_t)strtoul(field_value + 3, NULL, 10);
+    if (who && IsUser(who) && IsAccount(who) && !IsBouncerAlias(who)) {
+      struct AccountSessions *as = bounce_find_by_account(cli_user(who)->account);
+      struct BouncerSession *sess;
+      for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext)
+        if (sess->hs_client == who && ta > sess->hs_total_active)
+          sess->hs_total_active = ta;
     }
     goto forward;
   }
