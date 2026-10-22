@@ -31,6 +31,7 @@
 #endif
 #ifndef INCLUDED_bouncer_deauth_h
 #include "bouncer_deauth.h"
+#include "account_id.h"
 #endif
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
@@ -105,7 +106,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 11
+#define BOUNCER_DB_VERSION 12
 
 /** Persisted alias roster entry (v8+).  Records "this session has an
  * alias on server YY with numeric NNN, last active at T, with caps C."
@@ -183,6 +184,77 @@ struct BounceSessionRecord {
   /* Alias roster (per-alias activity + caps, v8+) */
   uint16_t bsr_aliascount;
   struct BounceSessionAliasRecord bsr_aliases[BOUNCER_MAX_ALIASES];
+  /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
+   * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
+   * keyed on bsr_oper_name (looked up in the local O:line config). */
+  char     bsr_oper_name[NICKLEN + 1];
+  int64_t  bsr_oper_granted_at;
+  /* Server notice mask (v11+): the session's own, which the oper grant
+   * gives back after a restart instead of the O:line default.  Zero
+   * bsr_snomask_known (every pre-v11 record) means none was recorded. */
+  uint32_t bsr_snomask;
+  uint32_t bsr_snomask_known;
+  /* The primary's Keycloak id, compact (v12+); "" = none known.  Without
+   * it a restored ghost carried no id until it revived, and its restore
+   * burst introduced it without one. */
+  char     bsr_kc_id[ACCOUNT_ID_LEN + 1];
+};
+
+/** Frozen v11 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=11.  v12
+ * only appends bsr_kc_id, so a v11 record is a prefix of a v12 one
+ * (bounce_db_restore checks that at compile time). */
+struct BounceSessionRecord_v11 {
+  uint32_t bsr_version;
+  /* Session identity */
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];        /**< Historical: server numeric that created this.
+                                            *   NOT used for authorization or behavior. */
+  int32_t  bsr_hold_override;
+  /* Timestamps */
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;                /**< Primary's last-active (per-connection split) */
+  int64_t  bsr_last_msg_time;              /**< Last PRIVMSG time (user idle) */
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  /* Ghost client identity */
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];          /**< Displayed/hidden host */
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  /* Last connection metadata (historical, reconciled on revive) */
+  struct irc_in_addr bsr_ip;                /**< Last connection IP (binary) */
+  char     bsr_sock_ip[SOCKIPLEN + 1];      /**< Last connection IP (string) */
+  char     bsr_sockhost[HOSTLEN + 1];       /**< Last resolved hostname */
+  uint16_t bsr_listener_port;               /**< Server listener port */
+  /* Session-level aggregate counters (lifetime totals from dead connections) */
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  /* Connection history (unique hosts, most recent first) */
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[10]; /* frozen: v11 history size */
+  /* Channel memberships */
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;       /**< Original JOIN time (seconds) */
+    int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
+    char     join_msgid[16];    /**< Original JOIN msgid */
+  } bsr_channels[50]; /* frozen: v11 channel count */
+  /* Alias roster (per-alias activity + caps, v8+) */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[16]; /* frozen: v11 alias count */
   /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
    * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
    * keyed on bsr_oper_name (looked up in the local O:line config). */
@@ -829,6 +901,7 @@ extern void bounce_emit_alias_update(struct Client *primary,
  */
 extern void bounce_sync_session_umodes(struct Client *source);
 extern void bounce_sync_session_snomask(struct Client *source);
+extern void bounce_sync_alias_identity(struct Client *primary);
 
 /** Echo an outgoing PM/NOTICE to all other members of the sender's session.
  * @param[in] sender  Client that sent the PM (primary or alias).

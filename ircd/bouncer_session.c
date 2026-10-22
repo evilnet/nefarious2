@@ -27,6 +27,7 @@
 #include "bouncer_session.h"
 #include "bouncer_converge.h"
 #include "bouncer_rebind_auth.h"
+#include "account_id.h"
 #include "websocket.h"
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
@@ -2750,6 +2751,10 @@ static int bounce_db_put(struct BouncerSession *session)
     rec.bsr_snomask_known = session->hs_snomask_known ? 1 : 0;
   }
 
+  /* The primary's Keycloak id (v12+). */
+  if (ghost && cli_user(ghost) && account_id_valid(cli_user(ghost)->kc_id))
+    ircd_strncpy(rec.bsr_kc_id, cli_user(ghost)->kc_id, sizeof(rec.bsr_kc_id));
+
   /* Write through the abstraction */
   wb = db_writebatch_new(env);
   if (!wb)
@@ -2900,6 +2905,10 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   /* Set account */
   ircd_strncpy(user->account, rec->bsr_account_name, ACCOUNTLEN + 1);
   user->acc_create = (time_t)rec->bsr_acc_create;
+  /* The Keycloak id (v12+): the restore burst introduces the ghost with
+   * it, as the live client was. */
+  if (account_id_valid(rec->bsr_kc_id))
+    ircd_strncpy(user->kc_id, rec->bsr_kc_id, sizeof(user->kc_id));
   user->server = &me;
 
   /* Restore last connection metadata (historical, reconciled on revive) */
@@ -3044,7 +3053,7 @@ int bounce_db_restore(void)
   int restored = 0;
   int expired = 0;
   int migrated_v7 = 0;
-  int migrated = 0;   /* v8..v10 records read through a frozen layout */
+  int migrated = 0;   /* v8..v11 records read through a frozen layout */
   time_t max_hold;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
@@ -3101,12 +3110,28 @@ int bounce_db_restore(void)
     memcpy(&version, vbuf, sizeof(version));
 
     if (version == BOUNCER_DB_VERSION) {
-      /* v11: current schema, parse directly from on-disk bytes. */
+      /* v12: current schema, parse directly from on-disk bytes. */
       if (vlen != sizeof(struct BounceSessionRecord))
         continue;
       rec = (struct BounceSessionRecord *)vbuf;
+    } else if (version == 11) {
+      /* v11: v12 without the trailing bsr_kc_id, which stays empty (the
+       * revive adopts the login's id). */
+      (void)sizeof(char[(sizeof(struct BounceSessionRecord_v11)
+                         == offsetof(struct BounceSessionRecord, bsr_kc_id))
+                        ? 1 : -1]);
+      if (vlen != sizeof(struct BounceSessionRecord_v11))
+        continue;
+      memset(&rec_buf, 0, sizeof(rec_buf));
+      memcpy(&rec_buf, vbuf, sizeof(struct BounceSessionRecord_v11));
+      rec_buf.bsr_version = BOUNCER_DB_VERSION;
+      rec = &rec_buf;
+      migrated++;
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "bouncer_persist: migrated v11 record (account=%s) → v%d",
+                rec->bsr_account, BOUNCER_DB_VERSION);
     } else if (version == 10) {
-      /* v10: v11 without the trailing snomask fields, which stay zero
+      /* v10: v12 without the trailing snomask and id fields, which stay zero
        * (no mask recorded: the oper grant falls back to the O:line's). */
       /* Compile-time check: a v10 record is a prefix of a v11 one. */
       (void)sizeof(char[(sizeof(struct BounceSessionRecord_v10)
@@ -3536,7 +3561,7 @@ int bounce_db_restore(void)
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "bouncer_persist: restored %d sessions (%d migrated from v7, "
-            "%d from v8-v10)", restored, migrated_v7, migrated);
+            "%d from v8-v11)", restored, migrated_v7, migrated);
   return restored;
 }
 
@@ -5827,6 +5852,18 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       ClearServNotice(ghost);
   }
 
+  /* The login just proved its Keycloak id: a ghost without one (restored
+   * from a pre-v12 record, logged in through X3) adopts it (user decision
+   * 2026-10-21) and so do its aliases here; the next burst carries it.  A
+   * ghost with a different id never gets here -- register_user refuses
+   * that revive. */
+  if (cli_user(ghost) && cli_user(temp) && !cli_user(ghost)->kc_id[0]
+      && account_id_valid(cli_user(temp)->kc_id)) {
+    ircd_strncpy(cli_user(ghost)->kc_id, cli_user(temp)->kc_id,
+                 sizeof(cli_user(ghost)->kc_id));
+    bounce_sync_alias_identity(ghost);
+  }
+
   /* Phase 3 hs_enforced: a reviving client on a CRFLAG_BOUNCER class
    * re-enforces the session.  temp_con (now transplanted) is the
    * Connection that holds the class. */
@@ -6922,17 +6959,42 @@ void bounce_apply_alias_field(struct Client *alias, enum BounceAliasField id,
     ircd_strncpy(cli_user(alias)->username, value, USERLEN + 1);
     break;
 
-  case BX_ALIAS_FIELD_ACCOUNT:
+  case BX_ALIAS_FIELD_ACCOUNT: {
     /* Both directions: "" clears, anything else sets.  This case was
      * absent from the local-apply block, so every account set (SASL
      * success, AC R, AC M) and every clear (AC U, webhook deauth) was
-     * lost for aliases on the primary's own server. */
+     * lost for aliases on the primary's own server.
+     *
+     * The account's identity travels with its name: the timestamp and the
+     * Keycloak id come from the primary, never from the account the alias
+     * had before.  Left alone, the next burst announced
+     * newaccount:oldts:oldid, which X3 takes for a recreated account and
+     * resets.  On a server where this update arrives before the AC that
+     * changes the primary, the AC path catches up
+     * (bounce_sync_alias_identity). */
+    struct Client *primary = cli_user(alias)->alias_primary;
+
     ircd_strncpy(cli_user(alias)->account, value, ACCOUNTLEN + 1);
-    if (value[0] != '\0')
+    if (value[0] != '\0') {
       SetAccount(alias);
-    else
+      if (primary && cli_user(primary)
+          && 0 == ircd_strcmp(cli_user(primary)->account, value)) {
+        cli_user(alias)->acc_create = cli_user(primary)->acc_create;
+        ircd_strncpy(cli_user(alias)->kc_id, cli_user(primary)->kc_id,
+                     sizeof(cli_user(alias)->kc_id));
+      } else {
+        cli_user(alias)->acc_create = 0;
+        cli_user(alias)->kc_id[0] = '\0';
+      }
+      Debug((DEBUG_DEBUG, "Alias %s follows account \"%s\" with id \"%s\"",
+             cli_name(alias), value, cli_user(alias)->kc_id));
+    } else {
       ClearAccount(alias);
+      cli_user(alias)->acc_create = 0;
+      cli_user(alias)->kc_id[0] = '\0';
+    }
     break;
+  }
 
   case BX_ALIAS_FIELD_CAPS: {
     /* Update the BounceAlias entry's ba_caps for this alias.  Walk
@@ -7007,6 +7069,35 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "U %s %s=%s",
                           sess->hs_aliases[i].ba_numeric, field, value);
+  }
+}
+
+/** Bring this server's aliases of @a primary (its own connections and the
+ * replicas of others) to the primary's account timestamp and Keycloak id
+ * when they name its account.  The primary's server sends BX U account=
+ * before the AC that changes the primary, so on the other servers the
+ * alias took the primary's previous ts/id; the AC path calls this once the
+ * primary is updated, and either order ends the same. */
+void bounce_sync_alias_identity(struct Client *primary)
+{
+  struct BouncerSession *sess;
+  int i;
+
+  if (!primary || !cli_user(primary) || !IsAccount(primary)
+      || IsBouncerAlias(primary))
+    return;
+  sess = bounce_get_session(primary);
+  if (!sess)
+    return;
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+    if (!alias || !IsBouncerAlias(alias) || !cli_user(alias)
+        || cli_user(alias)->alias_primary != primary
+        || 0 != ircd_strcmp(cli_user(alias)->account, cli_user(primary)->account))
+      continue;
+    cli_user(alias)->acc_create = cli_user(primary)->acc_create;
+    ircd_strncpy(cli_user(alias)->kc_id, cli_user(primary)->kc_id,
+                 sizeof(cli_user(alias)->kc_id));
   }
 }
 

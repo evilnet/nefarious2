@@ -750,12 +750,14 @@ void sasl_complete_login(struct Client *sptr, const char *account,
         presence_anchor_transfer(sptr, presence_old_acct, 0,
                                  cli_user(sptr)->account, 0);
 
-      bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
-
       /* X3's stamp on the relay path, 0 for a local login (step 4 above);
-       * a re-authentication drops whatever the previous account carried. */
+       * a re-authentication drops whatever the previous account carried.
+       * Before the aliases are told: they take the primary's ts and id
+       * with the name (bounce_apply_alias_field). */
       cli_user(sptr)->acc_create = cli_saslacccreate(sptr);
       ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr), sizeof(cli_user(sptr)->kc_id));
+
+      bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 
       /* Notify channel members with account-notify capability */
       sendcmdto_common_channels_capab_butone(sptr, CMD_ACCOUNT, sptr,
@@ -794,6 +796,16 @@ void sasl_complete_login(struct Client *sptr, const char *account,
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(sptr))
         hide_hostmask(sptr);
+    } else if (account_id_valid(cli_saslkcid(sptr))
+               && 0 != strcmp(cli_user(sptr)->kc_id, cli_saslkcid(sptr))) {
+      /* The same account name, proved again with another Keycloak id (the
+       * account was recreated): the connection takes the id it just
+       * proved, and its aliases here with it.  The network learns it from
+       * the next burst -- an unmodified hop drops a same-name AC, so an
+       * announcement waits for the hops (deferred-items). */
+      ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr),
+                   sizeof(cli_user(sptr)->kc_id));
+      bounce_sync_alias_identity(sptr);
     }
   }
 

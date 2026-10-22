@@ -511,6 +511,13 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
+   /* The account's Keycloak id as this server holds it (the wire carries
+    * it on N and AC; X3 binds the handle to it). */
+   if (IsAccount(acptr) && cli_user(acptr)->kc_id[0]) {
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "    Keycloak id:: %s", cli_user(acptr)->kc_id);
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+
    if (cli_version(acptr)) {
      if (strlen(cli_version(acptr)) > 0) {
        ircd_snprintf(0, outbuf, sizeof(outbuf), "   CTCP Version:: %s", cli_version(acptr));
