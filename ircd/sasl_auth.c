@@ -291,7 +291,6 @@ struct poscache_entry {
   char                  username[ACCOUNTLEN + 1];
   char                  account[ACCOUNTLEN + 1];
   time_t                timestamp;
-  time_t                created_at;   /**< Account creation time (epoch), 0 = unknown */
   char                  kc_id[ACCOUNT_ID_LEN + 1]; /**< Keycloak user id, compact; "" = unknown */
 };
 
@@ -299,7 +298,7 @@ static struct poscache_entry *poscache_table[AUTHCACHE_BUCKETS];
 
 /** Insert or update a positive cache entry. */
 static void poscache_insert(const char *username, const char *account,
-                            uint64_t hash, time_t created_at, const char *kc_id)
+                            uint64_t hash, const char *kc_id)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -308,7 +307,6 @@ static void poscache_insert(const char *username, const char *account,
   for (e = poscache_table[bucket]; e; e = e->next) {
     if (e->hash == hash) {
       e->timestamp = CurrentTime;
-      e->created_at = created_at;
       ircd_strncpy(e->kc_id, kc_id ? kc_id : "", sizeof(e->kc_id));
       ircd_strncpy(e->account, account, sizeof(e->account));
       return;
@@ -321,7 +319,6 @@ static void poscache_insert(const char *username, const char *account,
   ircd_strncpy(e->username, username, sizeof(e->username));
   ircd_strncpy(e->account, account, sizeof(e->account));
   e->timestamp = CurrentTime;
-  e->created_at = created_at;
   ircd_strncpy(e->kc_id, kc_id ? kc_id : "", sizeof(e->kc_id));
   e->next = poscache_table[bucket];
   poscache_table[bucket] = e;
@@ -330,11 +327,11 @@ static void poscache_insert(const char *username, const char *account,
 
 /** Check if credentials are in the positive cache.
  *  @param[out] account     Filled with cached account name on hit.
- *  @param[out] created_at  Filled with cached creation timestamp on hit.
+ *  @param[out] kc_id       Filled with the cached Keycloak id on hit.
  *  @return 1 if cached (recent success), 0 if not.
  */
 static int poscache_check(uint64_t hash, char *account, size_t account_size,
-                          time_t *created_at, char *kc_id, size_t kc_id_size)
+                          char *kc_id, size_t kc_id_size)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -347,8 +344,6 @@ static int poscache_check(uint64_t hash, char *account, size_t account_size,
     if (e->hash == hash) {
       if (CurrentTime - e->timestamp <= ttl) {
         ircd_strncpy(account, e->account, account_size);
-        if (created_at)
-          *created_at = e->created_at;
         if (kc_id)
           ircd_strncpy(kc_id, e->kc_id, kc_id_size);
         cache_stats.pos_hits++;
@@ -877,7 +872,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
 
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, session->authcid, session->cred_hash,
-                      0, kcid);
+                      kcid);
       negcache_remove(session->cred_hash);
     }
 
@@ -1019,9 +1014,8 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
     {
       char cached_account[ACCOUNTLEN + 1];
       char cached_kcid[ACCOUNT_ID_LEN + 1] = "";
-      time_t cached_created_at = 0;
       if (poscache_check(cred_hash, cached_account, sizeof(cached_account),
-                         &cached_created_at, cached_kcid, sizeof(cached_kcid))) {
+                         cached_kcid, sizeof(cached_kcid))) {
         const char *login_as = sasl_resolve_login_identity(session, cached_account);
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
@@ -1609,7 +1603,6 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
   MyFree(session->scram_salt_b64);          /* free prior before re-dup (F-SW3) */
   DupString(session->scram_salt_b64, user->scram_salt);
   session->scram_iterations = user->scram_iterations;
-  session->acc_created_at = user->created_at;
   session->kc_id[0] = '\0';
   if (user->id)
     account_id_from_uuid(user->id, session->kc_id);
@@ -1941,7 +1934,6 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
   MyFree(session->scram_client_first_bare); /* free prior before re-dup (F-SW3) */
   DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
   /* (Reusing scram_client_first_bare to store ecdsa_pubkey — it's just a string slot) */
-  session->acc_created_at = user->created_at;
   session->kc_id[0] = '\0';
   if (user->id)
     account_id_from_uuid(user->id, session->kc_id);
