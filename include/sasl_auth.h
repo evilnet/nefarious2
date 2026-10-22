@@ -77,8 +77,6 @@ struct SASLSession {
   char              *scram_salt_b64;           /**< Base64 salt from KC */
   int                scram_iterations;         /**< Iteration count from KC */
 
-  /* Account creation timestamp from Keycloak (epoch secs, 0 = unknown) */
-  time_t             acc_created_at;
   /* Keycloak user id of the verified identity, compact ("" = not in hand) */
   char               kc_id[ACCOUNT_ID_LEN + 1];
 };
