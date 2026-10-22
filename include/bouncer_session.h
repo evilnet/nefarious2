@@ -899,7 +899,17 @@ extern void bounce_emit_alias_update(struct Client *primary,
  * Call after mode changes on the primary so aliases stay in sync.
  * @param[in] primary The primary client whose modes changed.
  */
-extern void bounce_sync_session_umodes(struct Client *source);
+struct Flags;
+/** Copy @a source's user modes (and privileges, snomask) to the other
+ * members of its session and tell each local one what changed for it.
+ * @param[in] source        The member whose modes changed.
+ * @param[in] source_before Its flags before the change, to tell it too
+ *                          when it is not @a told; NULL not to.
+ * @param[in] told          The connection the change was already echoed
+ *                          to (set_user_mode's cptr), or NULL. */
+extern void bounce_sync_session_umodes(struct Client *source,
+                                       const struct Flags *source_before,
+                                       struct Client *told);
 extern void bounce_sync_session_snomask(struct Client *source);
 extern void bounce_sync_alias_identity(struct Client *primary);
 

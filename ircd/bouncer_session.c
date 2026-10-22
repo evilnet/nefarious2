@@ -7208,7 +7208,10 @@ static const int umode_sync_flags[] = {
   FLAG_ACCOUNTONLY, FLAG_BOT, FLAG_PRIVDEAF, FLAG_ADMIN,
   FLAG_XTRAOP, FLAG_NOLINK, FLAG_MULTILINE_EXPAND, FLAG_NOSTORAGE,
   FLAG_OPERED_LOCAL, FLAG_OPERED_REMOTE,
-  FLAG_CLOAKIP, FLAG_CLOAKHOST, FLAG_SSL,
+  FLAG_CLOAKIP, FLAG_CLOAKHOST,
+  /* Not FLAG_SSL: each connection's TLS is its own.  Synced, a plaintext
+   * member's mode change took +z from a TLS alias (alias setup re-asserts
+   * it once, the live sync never did). */
   /* FLAG_SERVNOTICE gates ALL server-notice delivery via
    * sendto_opmask_butone's opsarray walk.  Without it, an alias has
    * an inherited snomask but lands in NO bucket, so /OPER + cross-
@@ -7618,10 +7621,19 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
  * legacy peers don't see bouncer aliases at all, and BX is a v3
  * extension; emitting to legacy would be wasted bytes at best and a
  * misrouted command at worst. */
-void bounce_sync_session_umodes(struct Client *source)
+void bounce_sync_session_umodes(struct Client *source,
+                                const struct Flags *source_before,
+                                struct Client *told)
 {
   struct BouncerSession *sess;
   struct Client *primary;
+  /* The other live local members, as they were before the copy: each is
+   * told its own change afterwards (deferred-items, Rubin's #124 review:
+   * a device already attached when X3 opers the session, or another
+   * device runs OPER, was never told). */
+  struct { struct Client *c; struct Flags flags; unsigned int mask; }
+    before[BOUNCER_MAX_ALIASES + 1];
+  int nbefore = 0;
   int i;
 
   if (!source || !IsUser(source))
@@ -7632,6 +7644,17 @@ void bounce_sync_session_umodes(struct Client *source)
     return;
 
   primary = sess->hs_client;
+
+  for (i = -1; i < sess->hs_alias_count && nbefore < BOUNCER_MAX_ALIASES + 1; i++) {
+    struct Client *m = (i < 0) ? primary : findNUser(sess->hs_aliases[i].ba_numeric);
+    if (!m || m == source || !IsUser(m) || !MyConnect(m) || IsBouncerHold(m)
+        || (i >= 0 && !IsBouncerAlias(m)))
+      continue;
+    before[nbefore].c = m;
+    before[nbefore].flags = cli_flags(m);
+    before[nbefore].mask = cli_snomask(m);
+    nbefore++;
+  }
 
   /* Apply source's umode flags and privs to one target Client.  Self
    * (source == target) is skipped — bounce_copy_umodes would be wasted
@@ -7664,6 +7687,22 @@ void bounce_sync_session_umodes(struct Client *source)
 #undef APPLY_TO
 
   bounce_sync_session_snomask(source);
+
+  /* Tell each member what changed for it (its own before/after, so a
+   * second application -- BS O then MODE, a clamp then BX K -- tells
+   * nothing), except the connection the change was already echoed to.
+   * Here, not between a send_umode() and a read of its umodeBuf. */
+  for (i = 0; i < nbefore; i++) {
+    struct Client *m = before[i].c;
+    if (m == told || !MyConnect(m) || IsDead(m))
+      continue;
+    send_umode(m, m, &before[i].flags, ALL_UMODES);
+    if (cli_snomask(m) && cli_snomask(m) != before[i].mask)
+      send_reply(m, RPL_SNOMASK, cli_snomask(m), cli_snomask(m));
+  }
+  if (source_before && source != told && MyConnect(source)
+      && !IsBouncerHold(source) && !IsDead(source))
+    send_umode(source, source, (struct Flags *)source_before, ALL_UMODES);
 }
 
 /** The server notice mask half of a session sync.
