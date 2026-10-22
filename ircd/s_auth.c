@@ -460,8 +460,9 @@ static void auth_loc_timeout_callback(struct Event* ev)
 static void auth_complete_sasl(struct Client *client)
 {
   if (IsSASLComplete(client) && cli_saslaccount(client)[0]) {
-    if (cli_saslacccreate(client))
-      cli_user(client)->acc_create = cli_saslacccreate(client);
+    /* The login's own timestamp (0 for a Keycloak login), never one left
+     * by an earlier login of this connection. */
+    cli_user(client)->acc_create = cli_saslacccreate(client);
     ircd_strncpy(cli_user(client)->account, cli_saslaccount(client), ACCOUNTLEN + 1);
     ircd_strncpy(cli_user(client)->kc_id, cli_saslkcid(client), sizeof(cli_user(client)->kc_id));
     SetAccount(client);
@@ -2884,12 +2885,16 @@ static int iauth_cmd_done_account(struct IAuth *iauth, struct Client *cli,
     sendto_iauth(cli, "E Invalid :Account parameter too long");
     return 0;
   }
-  /* If account has a creation timestamp, use it. */
+  /* If account has a creation timestamp, use it -- and only it: without
+   * one, none, not what an earlier login of this connection left.  IAuth
+   * carries no Keycloak id either. */
   assert(cli_user(cli) != NULL);
   if (params[0][len] == ':') {
     cli_user(cli)->acc_create = strtoul(params[0] + len + 1, NULL, 10);
     params[0][len] = '\0';
-  }
+  } else
+    cli_user(cli)->acc_create = 0;
+  cli_user(cli)->kc_id[0] = '\0';
 
   /* Copy account name to User structure. */
   ircd_strncpy(cli_user(cli)->account, params[0], ACCOUNTLEN + 1);

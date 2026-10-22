@@ -241,9 +241,9 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     return 0;
   } else if (reply[0] == 'L') {
-    /* Store account name and creation time for sasl_complete_login() on D S */
-    if (parc > 5)
-      cli_saslacccreate(acptr) = atoi(parv[5]);
+    /* Store account name and creation time for sasl_complete_login() on D S.
+     * No timestamp in the reply: none, not an earlier attempt's. */
+    cli_saslacccreate(acptr) = (parc > 5) ? atoi(parv[5]) : 0;
     ircd_strncpy(cli_saslaccount(acptr), data, ACCOUNTLEN + 1);
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
