@@ -102,6 +102,7 @@
 #include "send.h"
 #include "s_auth.h"
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "shun.h"
 #include "sys.h"
 
@@ -571,6 +572,18 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       && IsAccount(acptr) && IsUser(acptr)
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
     struct BouncerSession *bsess = bounce_get_session(acptr);
+    /* Sessions of different Keycloak users (the account was recreated
+     * while the network was split) are never merged (user, 2026-10-23):
+     * the classic collision rules below decide.  Both sides compare the
+     * same two ids, so both skip the merge. */
+    if (bsess && bounce_rebind_kc_conflict(bounce_session_kc_id(bsess),
+                                           incoming_kc_id)) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Bouncer split-merge: not merging %s on %C into %C "
+                           "(account %s): Keycloak ids differ",
+                           parv[parc - 2], cptr, acptr, incoming_acct);
+      bsess = NULL;
+    }
     if (bsess && bsess->hs_client == acptr) {
       /* Compare cli_lastnick to the wire's lastnick (parv[3]), not
        * cli_firsttime — those are different fields and using

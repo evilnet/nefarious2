@@ -554,6 +554,12 @@ struct BouncerSession {
   struct BouncerSession **hs_aprev_p; /**< Prev pointer for O(1) removal */
 
   char hs_account[ACCOUNTLEN + 1];    /**< Owning account name */
+  /** The Keycloak user the session belongs to, compact; "" = none known
+   * (a session begun by an X3 login, a record from before the id was
+   * kept).  Set at create and when a session without one adopts a
+   * login's (the transition), persisted (bsr_kc_id), replicated by
+   * BX U kcid=.  Never changed to a different id (user, 2026-10-23). */
+  char hs_kc_id[ACCOUNT_ID_LEN + 1];
   char hs_sessid[BOUNCER_SESSID_LEN]; /**< Session ID — 22-char base64 of UUID v7 raw bytes (no padding) */
   char hs_token[BOUNCER_TOKEN_LEN+1]; /**< Session token (base64) */
   char hs_name[BOUNCER_NAME_LEN];     /**< User-assigned name */
@@ -1600,6 +1606,21 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * Caller (register_user) should bounce_defer_registration and let the
  * drain-on-BS-C path retry the auto_resume once peer data is processed. */
 #define BOUNCE_RESUME_DEFER_PEER_INBOUND 7
+/** A session of this account belongs to a different Keycloak user and is
+ * still in use: the login is refused, never attached to it (caller
+ * register_user exits the client). */
+#define BOUNCE_RESUME_REJECT_KC_CONFLICT 8
+/** The Keycloak id a session belongs to, as this server knows it (its
+ * primary's or held ghost's, else an alias's); "" when none is known. */
+extern const char *bounce_session_kc_id(struct BouncerSession *session);
+/** A session that has no Keycloak id adopts @a id (the transition): the
+ * session, every member here that carries none, and the network
+ * (BX U kcid=).  A session that has one is never changed. */
+extern void bounce_session_adopt_kc_id(struct BouncerSession *session,
+                                       const char *id);
+/** Does a session of @a account belong to a Keycloak id other than
+ * @a kc_id?  (A missing id on either side never conflicts.) */
+extern int bounce_account_kc_conflict(const char *account, const char *kc_id);
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);

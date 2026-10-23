@@ -98,6 +98,37 @@ static void test_missing_kc_id_does_not_conflict(void **state)
   assert_false(bounce_rebind_kc_conflict(NULL, NULL));
 }
 
+/* Whether a login may join a session (user, 2026-10-23): a new Keycloak id
+ * never attaches to an old session, and an old session is never tied to a
+ * new id.  A session with no id joins (the transition: X3 logins, records
+ * from before the id was kept); so does a login without one. */
+static void test_kc_join_same_or_missing_id_joins(void **state)
+{
+  (void)state;
+  assert_int_equal(bounce_kc_join("a6p7gJ2tEdGAtADAT9QwyA", "a6p7gJ2tEdGAtADAT9QwyA", 0), BKJ_JOIN);
+  assert_int_equal(bounce_kc_join("", "a6p7gJ2tEdGAtADAT9QwyA", 0), BKJ_JOIN);
+  assert_int_equal(bounce_kc_join("a6p7gJ2tEdGAtADAT9QwyA", "", 1), BKJ_JOIN);
+  assert_int_equal(bounce_kc_join(NULL, NULL, 1), BKJ_JOIN);
+}
+
+/* The previous user's leftover with nothing connected anywhere ends; the
+ * login then registers on its own. */
+static void test_kc_join_conflict_ends_an_unused_leftover(void **state)
+{
+  (void)state;
+  assert_int_equal(bounce_kc_join("a6p7gJ2tEdGAtADAT9QwyA", "AAAAAAAAAAAAAAAAAAAAAA", 1),
+                   BKJ_END_STALE);
+}
+
+/* A session still in use (a live primary, aliases anywhere, a ghost on
+ * another server) refuses the login: registering beside it collides. */
+static void test_kc_join_conflict_refuses_while_in_use(void **state)
+{
+  (void)state;
+  assert_int_equal(bounce_kc_join("a6p7gJ2tEdGAtADAT9QwyA", "AAAAAAAAAAAAAAAAAAAAAA", 0),
+                   BKJ_REFUSE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -111,6 +142,9 @@ int main(void)
     cmocka_unit_test(test_kc_ids_that_differ_conflict),
     cmocka_unit_test(test_same_kc_id_does_not_conflict),
     cmocka_unit_test(test_missing_kc_id_does_not_conflict),
+    cmocka_unit_test(test_kc_join_same_or_missing_id_joins),
+    cmocka_unit_test(test_kc_join_conflict_ends_an_unused_leftover),
+    cmocka_unit_test(test_kc_join_conflict_refuses_while_in_use),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

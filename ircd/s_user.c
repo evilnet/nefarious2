@@ -558,23 +558,28 @@ int register_user(struct Client *cptr, struct Client *sptr)
        * was deleted and recreated): the held session is not this
        * login's (user decision 2026-10-21).  A held session with no
        * other connection ends -- its user is gone -- and this connection
-       * registers fresh; one with aliases elsewhere is only refused (a
-       * KILL-style teardown would have to reach them; deferred-items).
-       * A ghost without an id adopts the login's (bounce_revive). */
+       * registers fresh; one with aliases elsewhere is not revived, and
+       * bounce_auto_resume() below refuses the login rather than attach
+       * it to that session (user, 2026-10-23).  A ghost without an id
+       * adopts the login's (bounce_revive). */
       if (revive_target && revive_target->hs_client
-          && cli_user(revive_target->hs_client)
-          && bounce_rebind_kc_conflict(cli_user(revive_target->hs_client)->kc_id,
+          && bounce_rebind_kc_conflict(bounce_session_kc_id(revive_target),
                                        cli_user(sptr)->kc_id)) {
         struct Client *stale = revive_target->hs_client;
         log_write(LS_USER, L_INFO, 0,
-                  "Bouncer: not reviving %s for %s: the session carries Keycloak id "
-                  "%s, the login %s%s", cli_name(stale), cli_account(sptr),
-                  cli_user(stale)->kc_id, cli_user(sptr)->kc_id,
+                  "Bouncer: not reviving %s for %s: the session belongs to Keycloak "
+                  "id %s, the login %s%s", cli_name(stale), cli_account(sptr),
+                  bounce_session_kc_id(revive_target), cli_user(sptr)->kc_id,
                   (revive_target->hs_state == BOUNCE_HOLDING
-                   && revive_target->hs_alias_count == 0)
+                   && revive_target->hs_alias_count == 0
+                   && cli_saslkcidlive(sptr))
                     ? "; ending the stale session" : "");
+        /* Ended only by a login Keycloak itself just confirmed (user,
+         * 2026-10-23): a deleted user's cached login or still-valid token
+         * must not end the current owner's session. */
         if (revive_target->hs_state == BOUNCE_HOLDING
-            && revive_target->hs_alias_count == 0 && IsBouncerHold(stale)) {
+            && revive_target->hs_alias_count == 0 && IsBouncerHold(stale)
+            && cli_saslkcidlive(sptr)) {
           bounce_kill_session(revive_target,
                               "Session ended: its Keycloak account was replaced");
           ClearBouncerHold(stale);
@@ -728,6 +733,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * max reached, or TLS policy mismatch).  Proceeding with a normal
      * NICK N introduction would collide with the primary on upstream
      * servers (same user@host kill).  Reject the duplicate. */
+    /* A session of this account belongs to a different Keycloak user and
+     * is still in use: never joined (bounce_auto_resume), and this login
+     * cannot register beside it.  Nothing was introduced, so no QUIT. */
+    if (auto_resumed == BOUNCE_RESUME_REJECT_KC_CONFLICT) {
+      ++ServerStats->is_ref;
+      SetFlag(sptr, FLAG_KILLED);
+      return exit_client(cptr, sptr, &me,
+                         "This account's session belongs to its previous "
+                         "Keycloak user; ask an operator");
+    }
+
     if (auto_resumed == BOUNCE_RESUME_REJECT_DUPLICATE) {
       ++ServerStats->is_ref;
       /* See note above: no numeric, no prior introduction → no QUIT. */
