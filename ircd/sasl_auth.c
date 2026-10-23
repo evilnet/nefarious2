@@ -30,6 +30,7 @@
 #include "random.h"
 #include "send.h"
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_debug.h"
@@ -674,9 +675,46 @@ static const char *sasl_id_for(const char *login_as, const char *verified,
  *   7. auth_sasl_done to unblock registration
  *   8. Clean up SASL session state and timer
  */
-void sasl_complete_login(struct Client *sptr, const char *account,
-                         time_t acc_create, const char *kc_id)
+/** The Keycloak id a logged-in connection belongs to: its bouncer
+ * session's when it has one (a primary or an alias), else its own. */
+static const char *sasl_conn_kc_id(struct Client *sptr)
 {
+  struct BouncerSession *session = bounce_get_session(sptr);
+  const char *id = session ? bounce_session_kc_id(session) : "";
+
+  return id[0] ? id : cli_user(sptr)->kc_id;
+}
+
+void sasl_complete_login(struct Client *sptr, const char *account,
+                         time_t acc_create, const char *kc_id, int id_live)
+{
+  /* 0. A connection logged in to this account under one Keycloak id proves
+   * the same name under another: the account was deleted and recreated,
+   * and this connection -- with the bouncer session it belongs to -- is
+   * the previous user's.  It is never tied to the new id (user,
+   * 2026-10-23): the login fails before anything is announced, and the
+   * connection keeps what it had. */
+  if (IsRegistered(sptr) && cli_user(sptr) && IsAccount(sptr)
+      && 0 == ircd_strcmp(cli_user(sptr)->account, account)
+      && kc_id && account_id_valid(kc_id)
+      && bounce_rebind_kc_conflict(sasl_conn_kc_id(sptr), kc_id)) {
+    log_write(LS_USER, L_INFO, 0,
+              "SASL: %C proved account %s with Keycloak id %s; the connection "
+              "belongs to %s: login refused", sptr, account, kc_id,
+              sasl_conn_kc_id(sptr));
+    send_reply(sptr, ERR_SASLFAIL,
+               ": this connection belongs to the account's previous Keycloak user");
+    if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
+      cli_saslagentref(cli_saslagent(sptr))--;
+    cli_saslagent(sptr) = NULL;
+    cli_saslcookie(sptr) = 0;
+    cli_saslstart(sptr) = 0;
+    if (t_active(&cli_sasltimeout(sptr)))
+      timer_del(&cli_sasltimeout(sptr));
+    sasl_session_free(sptr);
+    return;
+  }
+
   /* 1. Set account name */
   ircd_strncpy(cli_saslaccount(sptr), account, ACCOUNTLEN + 1);
 
@@ -704,6 +742,10 @@ void sasl_complete_login(struct Client *sptr, const char *account,
   ircd_strncpy(cli_saslkcid(sptr),
                (kc_id && account_id_valid(kc_id)) ? kc_id : "",
                sizeof(cli_saslkcid(sptr)));
+  /* Confirmed by Keycloak in this login, not answered from a cache or a
+   * locally checked token: only such a login may end the previous
+   * user's leftover bouncer session (user, 2026-10-23). */
+  cli_saslkcidlive(sptr) = (cli_saslkcid(sptr)[0] && id_live) ? 1 : 0;
   Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
          kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
@@ -796,16 +838,21 @@ void sasl_complete_login(struct Client *sptr, const char *account,
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(sptr))
         hide_hostmask(sptr);
-    } else if (account_id_valid(cli_saslkcid(sptr))
-               && 0 != strcmp(cli_user(sptr)->kc_id, cli_saslkcid(sptr))) {
-      /* The same account name, proved again with another Keycloak id (the
-       * account was recreated): the connection takes the id it just
-       * proved, and its aliases here with it.  The network learns it from
+    } else if (!sasl_conn_kc_id(sptr)[0]
+               && account_id_valid(cli_saslkcid(sptr))) {
+      /* The same account name proved again, with a Keycloak id this
+       * connection did not carry (it logged in through X3, or its session
+       * was restored from a record older than the id): it adopts it, and
+       * its aliases here with it -- the transition, as a revive adopts.  A
+       * DIFFERENT id never gets here (step 0).  The network learns it from
        * the next burst -- an unmodified hop drops a same-name AC, so an
        * announcement waits for the hops (deferred-items). */
       ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr),
                    sizeof(cli_user(sptr)->kc_id));
-      bounce_sync_alias_identity(sptr);
+      if (bounce_get_session(sptr))   /* the session, its members, the network */
+        bounce_session_adopt_kc_id(bounce_get_session(sptr), cli_saslkcid(sptr));
+      else
+        bounce_sync_alias_identity(sptr);
     }
   }
 
@@ -893,7 +940,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
               login_as, acptr);
     sasl_complete_login(acptr, login_as,
                         0,
-                        sasl_id_for(login_as, session->authcid, kcid));
+                        sasl_id_for(login_as, session->authcid, kcid), 1);  /* the grant */
   } else {
     if (result == KC_UNVERIFIED) {
       /* Account exists and Keycloak is healthy — the account has a pending
@@ -1027,13 +1074,18 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
       char cached_account[ACCOUNTLEN + 1];
       char cached_kcid[ACCOUNT_ID_LEN + 1] = "";
       if (poscache_check(cred_hash, cached_account, sizeof(cached_account),
-                         cached_kcid, sizeof(cached_kcid))) {
+                         cached_kcid, sizeof(cached_kcid))
+          && !bounce_account_kc_conflict(cached_account, cached_kcid)) {
+        /* (A session of this account belonging to another Keycloak id:
+         * no cached answer -- the grant below asks Keycloak, and only a
+         * login it confirms may end that session; user, 2026-10-23.) */
         const char *login_as = sasl_resolve_login_identity(session, cached_account);
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
         sasl_complete_login(sptr, login_as, 0,
-                            sasl_id_for(login_as, cached_account, cached_kcid));
+                            sasl_id_for(login_as, cached_account, cached_kcid),
+                            0);  /* a cached answer */
         return 0;
       }
     }
@@ -1097,7 +1149,8 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
         account_id_from_uuid(users[0].id, kcid);
       sasl_complete_login(acptr, users[0].username,
                           0,
-                          kcid[0] ? kcid : NULL);   /* no authzid on this path */
+                          kcid[0] ? kcid : NULL,    /* no authzid on this path */
+                          1);                       /* the user search */
     }
   } else if (count > 1) {
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -1299,7 +1352,8 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
              info->sub ? info->sub : "", kcid));
       sasl_complete_login(acptr, login_as,
                           0,
-                          sasl_id_for(login_as, info->username, kcid));
+                          sasl_id_for(login_as, info->username, kcid),
+                          1);  /* introspection */
     }
   } else {
     /* Connectivity errors should degrade health; invalid/inactive tokens should not */
@@ -1410,12 +1464,26 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
         account_id_from_uuid(info->sub, kcid);   /* the client's own token; none without "sub" */
       Debug((DEBUG_DEBUG, "SASL OAUTHBEARER: local sub \"%s\", compact id \"%s\"",
              info->sub ? info->sub : "", kcid));
+      /* A session of this account belonging to another Keycloak id: the
+       * local check is not enough -- a deleted user's token still passes
+       * it.  Keycloak decides by introspection below, and only a login it
+       * confirms may end that session (user, 2026-10-23). */
+      if (bounce_account_kc_conflict(login_as,
+                                     sasl_id_for(login_as, info->username, kcid))) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "SASL OAUTHBEARER: %s has a session of another Keycloak id; "
+                  "introspecting %C's token", login_as, sptr);
+        kc_jwt_token_info_free(info);
+        info = NULL;
+        goto oauth_introspect;
+      }
       log_write(LS_SYSTEM, L_INFO, 0,
                 "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
                 login_as, sptr);
       MyFree(token_nul);
       sasl_complete_login(sptr, login_as, 0,
-                          sasl_id_for(login_as, info->username, kcid));
+                          sasl_id_for(login_as, info->username, kcid),
+                          0);  /* a token checked locally */
       kc_jwt_token_info_free(info);
       return 0;
     }
@@ -1426,6 +1494,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
     info = NULL;
   }
 
+ oauth_introspect:
   /* A verdict the local check is sure of -- not a JWT at all, a bad
    * signature, expired -- is final: asking Keycloak to introspect the
    * same bytes can only say the same, at the cost of a round trip per
@@ -1898,7 +1967,8 @@ static int sasl_scram_complete(struct Client *sptr)
             login_as, sptr);
   sasl_complete_login(sptr, login_as,
                       0,
-                      sasl_id_for(login_as, session->authcid, session->kc_id));
+                      sasl_id_for(login_as, session->authcid, session->kc_id),
+                      1);  /* the credentials were read from Keycloak */
   return 0;
 }
 
@@ -2075,7 +2145,8 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
               login_as, sptr);
     sasl_complete_login(sptr, login_as,
                         0,
-                        sasl_id_for(login_as, session->authcid, session->kc_id));
+                        sasl_id_for(login_as, session->authcid, session->kc_id),
+                        1);  /* the key was read from Keycloak */
     return 0;
   }
 

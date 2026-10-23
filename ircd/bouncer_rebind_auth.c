@@ -42,3 +42,11 @@ bounce_rebind_kc_conflict(const char *ghost_id, const char *incoming_id)
     return 0;
   return strcmp(ghost_id, incoming_id) != 0;
 }
+
+enum BounceKcJoin
+bounce_kc_join(const char *session_id, const char *login_id, int session_unused)
+{
+  if (!bounce_rebind_kc_conflict(session_id, login_id))
+    return BKJ_JOIN;
+  return session_unused ? BKJ_END_STALE : BKJ_REFUSE;
+}

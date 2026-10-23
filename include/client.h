@@ -584,6 +584,9 @@ struct Client {
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
   char cli_saslkcid[ACCOUNT_ID_LEN + 1]; /**< SASL authenticated Keycloak user id, compact; "" = none */
+  unsigned char cli_saslkcidlive; /**< 1 when Keycloak itself confirmed that id during this login
+                                   *   (a grant, a user lookup, introspection) -- not a cached answer
+                                   *   or a token checked locally, which a deleted user can still hold */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
   struct SASLSession* cli_saslsession; /**< Local SASL session state (NULL if not using local path) */
@@ -797,6 +800,7 @@ struct Client {
 #define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
 /** Get SASL authenticated Keycloak user id (compact). */
 #define cli_saslkcid(cli)       ((cli)->cli_saslkcid)
+#define cli_saslkcidlive(cli)   ((cli)->cli_saslkcidlive)
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 /** Get SASL start timestamp. */

@@ -1092,6 +1092,127 @@ static int bounce_max_aliases(void)
   return (v > BOUNCER_MAX_ALIASES) ? BOUNCER_MAX_ALIASES : v;
 }
 
+/** Whether @a c is a member of @a session here that speaks for its
+ * account: the primary under the session's account, or one of its aliases
+ * (an alias numeric is checked against the session, as
+ * bounce_sync_alias_identity checks it). */
+static int bounce_member_of_account(struct BouncerSession *session,
+                                    struct Client *c, int alias)
+{
+  if (!c || !cli_user(c) || !IsAccount(c)
+      || 0 != ircd_strcmp(cli_user(c)->account, session->hs_account))
+    return 0;
+  if (!alias)
+    return !IsBouncerAlias(c);
+  return IsBouncerAlias(c) && cli_user(c)->alias_primary
+         && cli_user(c)->alias_primary == session->hs_client;
+}
+
+const char *bounce_session_kc_id(struct BouncerSession *session)
+{
+  int i;
+
+  if (!session)
+    return "";
+  if (account_id_valid(session->hs_kc_id))
+    return session->hs_kc_id;
+  /* A replica that has not heard BX U kcid= (an older peer): the members
+   * this server knows, as their introductions carried the id. */
+  if (bounce_member_of_account(session, session->hs_client, 0)
+      && account_id_valid(cli_user(session->hs_client)->kc_id))
+    return cli_user(session->hs_client)->kc_id;
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *a = findNUser(session->hs_aliases[i].ba_numeric);
+    if (bounce_member_of_account(session, a, 1)
+        && account_id_valid(cli_user(a)->kc_id))
+      return cli_user(a)->kc_id;
+  }
+  return "";
+}
+
+/** Tell the peers the Keycloak id a session belongs to (BX U kcid=), keyed
+ * by its primary like cc= and ta=. */
+static void bounce_emit_session_kc_id(struct BouncerSession *session)
+{
+  char full_numeric[16];
+  struct Client *primary = session->hs_client;
+
+  if (!account_id_valid(session->hs_kc_id) || !primary || !cli_user(primary)
+      || !cli_user(primary)->server || !cli_yxx(primary)[0])
+    return;   /* before SetLocalNumNick: the BS A after it carries it */
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(primary)->server), cli_yxx(primary));
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "U %s kcid=%s", full_numeric, session->hs_kc_id);
+}
+
+/** Give the session's members here that carry no id the session's. */
+static void bounce_session_fill_member_ids(struct BouncerSession *session)
+{
+  int i;
+
+  if (!account_id_valid(session->hs_kc_id))
+    return;
+  if (bounce_member_of_account(session, session->hs_client, 0)
+      && !cli_user(session->hs_client)->kc_id[0])
+    ircd_strncpy(cli_user(session->hs_client)->kc_id, session->hs_kc_id,
+                 sizeof(cli_user(session->hs_client)->kc_id));
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *a = findNUser(session->hs_aliases[i].ba_numeric);
+    if (bounce_member_of_account(session, a, 1) && !cli_user(a)->kc_id[0])
+      ircd_strncpy(cli_user(a)->kc_id, session->hs_kc_id,
+                   sizeof(cli_user(a)->kc_id));
+  }
+}
+
+int bounce_account_kc_conflict(const char *account, const char *kc_id)
+{
+  struct AccountSessions *as = account ? bounce_find_by_account(account) : NULL;
+  struct BouncerSession *s;
+
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    if (bounce_rebind_kc_conflict(bounce_session_kc_id(s), kc_id))
+      return 1;
+  return 0;
+}
+
+/** The primary of a peer's session @a sessid of @a account, introduced
+ * from the direction of @a cptr (the burst sends users before sessions):
+ * BS C carries no Keycloak id, its primary does.  NULL if not seen. */
+static struct Client *bounce_peer_session_primary(struct Client *cptr,
+                                                  const char *account,
+                                                  const char *sessid)
+{
+  struct Client *peer;
+
+  for (peer = GlobalClientList; peer; peer = cli_next(peer)) {
+    if (IsUser(peer) && !IsBouncerAlias(peer) && IsAccount(peer)
+        && cli_from(peer) == cptr
+        && 0 == ircd_strcmp(cli_user(peer)->account, account)
+        && 0 == strcmp(cli_session_id(peer), sessid))
+      return peer;
+  }
+  return NULL;
+}
+
+void bounce_session_adopt_kc_id(struct BouncerSession *session, const char *id)
+{
+  const char *members;
+
+  if (!session || !account_id_valid(id) || session->hs_kc_id[0])
+    return;
+  /* A member that already speaks for another id: never re-tied. */
+  members = bounce_session_kc_id(session);
+  if (members[0] && strcmp(members, id))
+    return;
+  log_write(LS_USER, L_INFO, 0, "Bouncer: session %s of %s adopts Keycloak id %s",
+            session->hs_sessid, session->hs_account, id);
+  ircd_strncpy(session->hs_kc_id, id, sizeof(session->hs_kc_id));
+  bounce_session_fill_member_ids(session);
+  bounce_db_put(session);
+  bounce_emit_session_kc_id(session);
+}
+
 /** SASL-triggered automatic resume.
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
@@ -1154,6 +1275,61 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
              && !bounce_has_sessions(account)) {
     return 0; /* No preference set, network default is no-hold,
                  and no session exists for this account. */
+  }
+
+  /* A session belongs to one Keycloak user (user, 2026-10-23: a new id
+   * never attaches to an old session).  Before any path below attaches
+   * this login -- a held revive, a remote or local alias, an orphan
+   * reclaim -- every session of the account is checked: the previous
+   * user's leftover, held here with nothing connected, ends (as
+   * register_user's revive check ends it); one still in use refuses the
+   * login -- registering beside it would collide, as REJECT_DUPLICATE
+   * notes. */
+  {
+    struct AccountSessions *as;
+    struct BouncerSession *s;
+
+  recheck_kc:
+    as = bounce_find_by_account(account);
+    for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext) {
+      struct Client *stale;
+      int unused;
+
+      /* The branches below fill in a remote session's primary from its
+       * ghost before attaching; read the id after the same step. */
+      if (!s->hs_client || !MyConnect(s->hs_client))
+        bounce_resolve_hs_client_from_ghost(s, "Keycloak-id check");
+      stale = s->hs_client;
+      /* Ended only by a login Keycloak itself just confirmed: a deleted
+       * user's cached login or still-valid token never ends the current
+       * owner's session (user, 2026-10-23). */
+      unused = s->hs_state == BOUNCE_HOLDING && s->hs_alias_count == 0
+               && stale && MyConnect(stale) && IsBouncerHold(stale)
+               && cli_saslkcidlive(cptr);
+
+      switch (bounce_kc_join(bounce_session_kc_id(s), cli_user(cptr)->kc_id,
+                             unused)) {
+      case BKJ_JOIN:
+        break;
+      case BKJ_END_STALE:
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: ending %s's session %s: it carries Keycloak id %s, "
+                  "the login %s", account, s->hs_sessid, bounce_session_kc_id(s),
+                  cli_user(cptr)->kc_id);
+        bounce_kill_session(s, "Session ended: its Keycloak account was replaced");
+        ClearBouncerHold(stale);
+        exit_client(stale, stale, &me,
+                    "Session ended: its Keycloak account was replaced");
+        goto recheck_kc;   /* the session list changed */
+      case BKJ_REFUSE:
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: refusing %s for %s: session %s carries Keycloak id "
+                  "%s, the login %s", cli_name(cptr), account, s->hs_sessid,
+                  bounce_session_kc_id(s), cli_user(cptr)->kc_id);
+        *out_session = s;
+        return BOUNCE_RESUME_REJECT_KC_CONFLICT;
+      }
+    }
   }
 
   /* Try to find a held session to resume */
@@ -1413,6 +1589,8 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   /* Allocate and initialize */
   session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
   ircd_strncpy(session->hs_account, cli_account(cptr), ACCOUNTLEN + 1);
+  if (cli_user(cptr) && account_id_valid(cli_user(cptr)->kc_id))
+    ircd_strncpy(session->hs_kc_id, cli_user(cptr)->kc_id, sizeof(session->hs_kc_id));
   /* Adopt the Client's pre-existing sessid (minted at make_client) so
    * cli_session_id and hs_sessid agree.  Defensive mint if the Client
    * came via a path that didn't populate cli_session_id. */
@@ -1648,6 +1826,12 @@ void bounce_post_burst_reconcile(void)
           if (0 != ircd_strcmp(cli_account(acptr), s->hs_account)) continue;
           if (!cli_session_id(acptr)[0]) continue;
           if (0 != strcmp(cli_session_id(acptr), s->hs_sessid)) continue;
+          /* A different Keycloak user is never merged in (user,
+           * 2026-10-23: sessions of different ids stay apart after a
+           * split); the peer reads our ids the same way. */
+          if (bounce_rebind_kc_conflict(bounce_session_kc_id(s),
+                                        cli_user(acptr)->kc_id))
+            continue;
           if (peer_primary) {
             multiple_candidates = 1;
             break;
@@ -1805,6 +1989,12 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   session->hs_attach_time = CurrentTime;
   session->hs_disconnect_time = 0;
   bounce_emit_connect_count(session);
+  /* The session's Keycloak id: adopted from this login when it had none
+   * (the transition), else given to this connection when it carries none.
+   * A different one never attaches (bounce_auto_resume's gate). */
+  if (cli_user(cptr) && account_id_valid(cli_user(cptr)->kc_id))
+    bounce_session_adopt_kc_id(session, cli_user(cptr)->kc_id);
+  bounce_session_fill_member_ids(session);
 
   /* Record connect event in connection history */
   bounce_history_connect(session, cli_sock_ip(cptr), cli_sockhost(cptr));
@@ -2612,6 +2802,18 @@ int bounce_hs_client_assign_checked(struct BouncerSession *session,
               IsAccount(candidate) ? cli_account(candidate) : "<none>");
     return 0;
   }
+  /* Never a primary of another Keycloak user (user, 2026-10-23): a peer's
+   * BS A for a session kept apart after a split would otherwise point ours
+   * at it. */
+  if (cli_user(candidate)
+      && bounce_rebind_kc_conflict(session->hs_kc_id, cli_user(candidate)->kc_id)) {
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: refusing %s hs_client install for session %s: it "
+              "belongs to Keycloak id %s, %s carries %s",
+              site_label ? site_label : "?", session->hs_sessid,
+              session->hs_kc_id, cli_name(candidate), cli_user(candidate)->kc_id);
+    return 0;
+  }
   session->hs_client = candidate;
   return 1;
 }
@@ -2753,9 +2955,9 @@ static int bounce_db_put(struct BouncerSession *session)
     rec.bsr_snomask_known = session->hs_snomask_known ? 1 : 0;
   }
 
-  /* The primary's Keycloak id (v12+). */
-  if (ghost && cli_user(ghost) && account_id_valid(cli_user(ghost)->kc_id))
-    ircd_strncpy(rec.bsr_kc_id, cli_user(ghost)->kc_id, sizeof(rec.bsr_kc_id));
+  /* The Keycloak user the session belongs to (v12+). */
+  if (account_id_valid(bounce_session_kc_id(session)))
+    ircd_strncpy(rec.bsr_kc_id, bounce_session_kc_id(session), sizeof(rec.bsr_kc_id));
 
   /* Write through the abstraction */
   wb = db_writebatch_new(env);
@@ -3386,6 +3588,8 @@ int bounce_db_restore(void)
     session->hs_attach_count = rec->bsr_attach_count;
     session->hs_connect_count = rec->bsr_connect_count;
     session->hs_total_active = (time_t)rec->bsr_total_active;
+    if (account_id_valid(rec->bsr_kc_id))
+      ircd_strncpy(session->hs_kc_id, rec->bsr_kc_id, sizeof(session->hs_kc_id));
 
     /* Restore the session-anchored oper grant (v9+).  bsr_oper_name is
      * empty for v8-and-earlier records (migration leaves it zero) and
@@ -3747,6 +3951,15 @@ void bounce_burst(struct Client *cptr)
                       cli_yxx(s->hs_client),
                       (unsigned long)s->hs_last_active);
 
+      /* The Keycloak user the session belongs to (a new peer's attach
+       * gate and merges read it).  After BS A: the receiver files it under
+       * the session whose primary BS A just resolved. */
+      if (account_id_valid(s->hs_kc_id) && s->hs_client
+          && cli_user(s->hs_client) && cli_user(s->hs_client)->server)
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "U %s%s kcid=%s",
+                      cli_yxx(cli_user(s->hs_client)->server),
+                      cli_yxx(s->hs_client), s->hs_kc_id);
+
       /* Burst existing aliases via BX C so the new server learns about
        * alias Client identities before the channel BURST references
        * them as members.  Aliases are filtered out of the NICK burst
@@ -3914,6 +4127,7 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
                           session->hs_account, session->hs_sessid,
                           extra ? extra : "",
                           (unsigned long)la, caps);
+    bounce_emit_session_kc_id(session);
     break;
   }
 
@@ -4074,6 +4288,19 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                       cli_yxx(sptr));
             return 0;
           }
+          /* A different Keycloak user behind the peer's copy: kept
+           * apart, our ghost not dropped for it (user, 2026-10-23). */
+          {
+            struct Client *peer = bounce_peer_session_primary(cptr, account, sessid);
+            if (peer && bounce_rebind_kc_conflict(bounce_session_kc_id(existing),
+                                                  cli_user(peer)->kc_id)) {
+              log_write(LS_USER, L_INFO, 0,
+                        "Bouncer reconcile: not yielding session %s to %s: "
+                        "Keycloak ids differ (%s, %s)", sessid, cli_name(sptr),
+                        bounce_session_kc_id(existing), cli_user(peer)->kc_id);
+              return 0;
+            }
+          }
           {
             struct Client *ghost = existing->hs_client;
             log_write(LS_USER, L_INFO, 0,
@@ -4132,6 +4359,28 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
          * here since bounce_find_by_token would have caught it). */
         if (0 == strcmp(local->hs_sessid, sessid))
           goto bsc_forward;
+
+        /* A session of a different Keycloak user (the account was
+         * recreated while the network was split) is neither merged into
+         * ours nor retires it, and is not mirrored here (user,
+         * 2026-10-23).  BS C carries no id: the peer session's primary,
+         * introduced earlier in the burst, does.  The peer does the same
+         * with ours.  Outside a burst a fresh session's BS C goes out
+         * before its primary's N, so this finds nothing; what follows
+         * then retires a held session of ours (ending it, not tying it)
+         * or renames by age -- neither re-ties an id. */
+        {
+          struct Client *peer = bounce_peer_session_primary(cptr, account, sessid);
+          if (peer && bounce_rebind_kc_conflict(bounce_session_kc_id(local),
+                                                cli_user(peer)->kc_id)) {
+            log_write(LS_USER, L_INFO, 0,
+                      "BS C: %s's session %s from %s belongs to Keycloak id "
+                      "%s, ours (%s) to %s: kept apart", account, sessid,
+                      cli_name(sptr), cli_user(peer)->kc_id, local->hs_sessid,
+                      bounce_session_kc_id(local));
+            goto bsc_forward;
+          }
+        }
 
         /* State outranks age: the record with a live primary is the
          * account's one identity.  When ours is HOLDING (a held ghost or
@@ -4341,6 +4590,17 @@ bsc_forward:
       ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                     cli_yxx(sptr), parv[4]);
       primary = findNUser(full_numeric);
+      /* A primary of another Keycloak user is a session kept apart after
+       * a split that shares this sessid: none of its BS A applies here
+       * (user, 2026-10-23). */
+      if (primary && IsUser(primary) && cli_user(primary)
+          && bounce_rebind_kc_conflict(session->hs_kc_id, cli_user(primary)->kc_id)) {
+        log_write(LS_USER, L_INFO, 0, "BS A: session %s of %s belongs to Keycloak "
+                  "id %s, %s's attach carries %s: not applied", session->hs_sessid,
+                  session->hs_account, session->hs_kc_id, cli_name(sptr),
+                  cli_user(primary)->kc_id);
+        goto bsa_forward;
+      }
       if (primary && IsUser(primary))
         bounce_hs_client_assign_checked(session, primary, "BS A");
       ircd_strncpy(session->hs_ghost_numeric, parv[4],
@@ -4393,6 +4653,7 @@ bsc_forward:
       session->hs_disconnect_time = 0;
     }
 
+  bsa_forward:
     /* Forward — preserve extended fields when present (per C.3) */
     if (parc >= 7) {
       sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
@@ -5868,17 +6129,14 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       && cli_info(temp)[0] && !exit_reason_is_clobbered_info(cli_info(temp)))
     bounce_repair_realname(ghost, cli_info(temp));
 
-  /* The login just proved its Keycloak id: a ghost without one (restored
-   * from a pre-v12 record, logged in through X3) adopts it (user decision
-   * 2026-10-21) and so do its aliases here; the next burst carries it.  A
-   * ghost with a different id never gets here -- register_user refuses
-   * that revive. */
-  if (cli_user(ghost) && cli_user(temp) && !cli_user(ghost)->kc_id[0]
-      && account_id_valid(cli_user(temp)->kc_id)) {
-    ircd_strncpy(cli_user(ghost)->kc_id, cli_user(temp)->kc_id,
-                 sizeof(cli_user(ghost)->kc_id));
-    bounce_sync_alias_identity(ghost);
-  }
+  /* The login just proved its Keycloak id: a session without one (a record
+   * from before the id was kept, an X3 login) adopts it (user decision
+   * 2026-10-21) -- the ghost, its aliases here, the network.  A session
+   * with a different id never gets here -- register_user refuses that
+   * revive. */
+  if (cli_user(temp) && account_id_valid(cli_user(temp)->kc_id))
+    bounce_session_adopt_kc_id(session, cli_user(temp)->kc_id);
+  bounce_session_fill_member_ids(session);
 
   /* Phase 3 hs_enforced: a reviving client on a CRFLAG_BOUNCER class
    * re-enforces the session.  temp_con (now transplanted) is the
@@ -7995,13 +8253,15 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
   {
     struct BouncerSession *bsess = bounce_find_by_token_sessid(
         cli_account(old_client), sessid);
-    if (bsess) {
+    /* Through the checked install: never a primary of another account or
+     * Keycloak user (a session kept apart after a split can share this
+     * sessid). */
+    if (bsess && bounce_hs_client_assign_checked(bsess, new_client, "BX P")) {
       int k;
       /* Point session to new primary.
        * Transition to ACTIVE — the promoted alias is a live connection.
        * Without this, the session stays HOLDING on remote replicas and
        * exit_one_client destroys it instead of re-holding on disconnect. */
-      bsess->hs_client = new_client;
       bsess->hs_state = BOUNCE_ACTIVE;
       bsess->hs_last_active = CurrentTime;
       bsess->hs_disconnect_time = 0;
@@ -8791,13 +9051,35 @@ track_alias:
   session = bounce_find_by_token_sessid(account, sessid);
   if (!session) {
     struct AccountSessions *as = bounce_find_by_account(account);
-    if (as && as->as_sessions) {
+    /* ... unless that session belongs to another Keycloak user than this
+     * alias's primary: sessions kept apart after a split leave two per
+     * account (user, 2026-10-23), and the alias is then tracked in
+     * neither rather than in the wrong one. */
+    if (as && as->as_sessions && primary && cli_user(primary)
+        && bounce_rebind_kc_conflict(bounce_session_kc_id(as->as_sessions),
+                                     cli_user(primary)->kc_id)) {
+      log_write(LS_USER, L_INFO, 0,
+                "BX C: sessid %s not found; account fallback session %s "
+                "belongs to another Keycloak id: alias %s not tracked",
+                sessid, as->as_sessions->hs_sessid, alias_numeric);
+    } else if (as && as->as_sessions) {
       session = as->as_sessions;
       Debug((DEBUG_INFO,
              "BX C: sessid %s not found, using account-fallback "
              "session %s for alias %s",
              sessid, session->hs_sessid, alias_numeric));
     }
+  }
+  /* Exact match too: a session kept apart after a split can share the
+   * sessid of another Keycloak user's (user, 2026-10-23). */
+  if (session && primary && cli_user(primary)
+      && bounce_rebind_kc_conflict(bounce_session_kc_id(session),
+                                   cli_user(primary)->kc_id)) {
+    log_write(LS_USER, L_INFO, 0, "BX C: session %s belongs to Keycloak id %s, "
+              "alias %s's primary carries %s: alias not tracked",
+              session->hs_sessid, bounce_session_kc_id(session), alias_numeric,
+              cli_user(primary)->kc_id);
+    session = NULL;
   }
   if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
     struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
@@ -9292,6 +9574,37 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
       for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext)
         if (sess->hs_client == who && ta > sess->hs_total_active)
           sess->hs_total_active = ta;
+    }
+    goto forward;
+  }
+  if (0 == strncmp(field_value, "kcid=", 5)) {
+    /* The Keycloak user a session belongs to (bounce_emit_session_kc_id).
+     * A replica without one takes it; one with a different id keeps its
+     * own (never re-tied, user 2026-10-23) and says so. */
+    struct Client *who = bx_find_user_strict(alias_numeric);
+    const char *id = field_value + 5;
+    if (who && IsUser(who) && IsAccount(who) && !IsBouncerAlias(who)
+        && account_id_valid(id)) {
+      struct AccountSessions *as = bounce_find_by_account(cli_user(who)->account);
+      struct BouncerSession *sess;
+      for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
+        const char *have;
+        if (sess->hs_client != who)
+          continue;
+        have = bounce_session_kc_id(sess);
+        if (!sess->hs_kc_id[0] && (!have[0] || !strcmp(have, id))) {
+          ircd_strncpy(sess->hs_kc_id, id, sizeof(sess->hs_kc_id));
+          bounce_session_fill_member_ids(sess);
+        } else if (strcmp(have, id))
+          log_write(LS_USER, L_INFO, 0, "Bouncer: BX U kcid=%s for session %s "
+                    "of %s, which belongs to %s: kept", id, sess->hs_sessid,
+                    sess->hs_account, have);
+      }
+      /* The member itself, when it carries none: if no session matched
+       * yet (a replica's primary comes with BS A), the id is still known
+       * here through it. */
+      if (!cli_user(who)->kc_id[0])
+        ircd_strncpy(cli_user(who)->kc_id, id, sizeof(cli_user(who)->kc_id));
     }
     goto forward;
   }

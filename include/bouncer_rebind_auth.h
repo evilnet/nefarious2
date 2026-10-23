@@ -29,6 +29,28 @@ extern enum BounceRebindAuth bounce_rebind_auth(int origin_match,
 extern int bounce_rebind_kc_conflict(const char *ghost_id,
                                      const char *incoming_id);
 
+/** What a login does with an existing session of its account, by their
+ * Keycloak ids (user, 2026-10-23: a new id never attaches to an old
+ * session, and an old session is never tied to a new id). */
+enum BounceKcJoin {
+  BKJ_JOIN,       /**< Same id, or one side has none (the transition). */
+  BKJ_END_STALE,  /**< Different ids, and the session is the previous user's
+                   *   leftover with nothing connected: end it. */
+  BKJ_REFUSE      /**< Different ids, and the session is in use: refuse the
+                   *   login (registering beside it collides). */
+};
+
+/** Decide whether a login with @a login_id may join a session that belongs
+ * to @a session_id.
+ * @param[in] session_unused Non-zero when the session may be ended: held
+ *            here with nothing connected anywhere (no aliases), and the
+ *            login's id confirmed by Keycloak itself during this login
+ *            (user, 2026-10-23).
+ */
+extern enum BounceKcJoin bounce_kc_join(const char *session_id,
+                                        const char *login_id,
+                                        int session_unused);
+
 /** Stable name for logging. Never NULL. */
 extern const char *bounce_rebind_auth_name(enum BounceRebindAuth auth);
 

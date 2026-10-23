@@ -43,6 +43,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
@@ -143,6 +144,15 @@ static int bouncer_resume(struct Client *sptr, const char *token)
       0 != ircd_strcmp(cli_account(sptr), session->hs_account)) {
     send_fail(sptr, "BOUNCER", "INVALID_TOKEN", NULL,
               "Invalid or expired session token");
+    return 0;
+  }
+
+  /* A session belongs to one Keycloak user: a login under another id never
+   * attaches to it, token or not (user, 2026-10-23). */
+  if (bounce_rebind_kc_conflict(bounce_session_kc_id(session),
+                                cli_user(sptr)->kc_id)) {
+    send_fail(sptr, "BOUNCER", "INVALID_TOKEN", NULL,
+              "Session belongs to a different Keycloak user");
     return 0;
   }
 
