@@ -582,8 +582,11 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
 
   /* Compact format: @A<time_7><msgid_14>[,S<sessid>][,C<client_tags>]
    *
-   * Segments are appended in order: ,S before ,C.  Receiver parses
-   * any number of segments in any order; emit order is conventional
+   * Segments are appended in order: ,S before ,C.  ,C is always the
+   * LAST segment and must never be followed by another segment: a
+   * client-tag value may itself contain a comma, so receivers read
+   * ,C to the end of the tag region rather than stopping at the
+   * next comma (audit 0.1). Emit order otherwise is conventional
    * for readability in raw S2S logs. */
   inttobase64_64(time_b64, epoch_ms, 7);
   if (has_sessid && has_ctags)

@@ -1837,7 +1837,16 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
            * segment type:
            *   C — client-only tags (literal IRCv3 client-tag string)
            * Unknown markers are silently skipped (forward-compatible
-           * for future segments). */
+           * for future segments).
+           *
+           * ,C is always the LAST segment and its data runs to
+           * tagend, full stop. Client-tag values are arbitrary
+           * IRCv3 tag-value strings and may themselves contain
+           * commas, so there is no safe inner delimiter for it —
+           * unlike every other segment, we must not look for a
+           * terminating comma inside ,C's data. A sender never
+           * emits anything after ,C (see format_s2s_tags_with_client
+           * in send.c); walking stops as soon as ,C is seen. */
           while (seg_start && seg_start < tagend) {
             char marker;
             char *seg_data;
@@ -1848,16 +1857,21 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
               break;
             marker = seg_start[1];
             seg_data = seg_start + 2;
-            seg_end = memchr(seg_data, ',', tagend - seg_data);
-            if (!seg_end)
+            if (marker == 'C')
               seg_end = tagend;
+            else {
+              seg_end = memchr(seg_data, ',', tagend - seg_data);
+              if (!seg_end)
+                seg_end = tagend;
+            }
 
             switch (marker) {
             case 'C': {
               /* Client-only tags segment: literal IRCv3 client-tag
                * string, copy verbatim into per-Connection buffer for
                * ms_privmsg/ms_notice/ms_tagmsg to forward to local
-               * recipients. */
+               * recipients. Terminal segment — runs to tagend (see
+               * comment above the loop). */
               size_t data_len = seg_end - seg_data;
               if (data_len > 0 &&
                   data_len < sizeof(con_s2s_client_tags(cli_connect(cptr)))) {
@@ -1885,7 +1899,11 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
               break;
             }
 
-            seg_start = (seg_end < tagend) ? seg_end : NULL;
+            /* ,C is terminal: stop walking regardless of its
+             * (always tagend) seg_end. Every other segment continues
+             * to whatever follows, if anything remains. */
+            seg_start = (marker == 'C') ? NULL :
+                        (seg_end < tagend) ? seg_end : NULL;
           }
         }
 
