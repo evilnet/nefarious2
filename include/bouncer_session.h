@@ -1348,7 +1348,9 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
  * creates it).
  *
  * @param[in] acptr Live local primary to demote.
- * @param[in] new_primary_server The introducing server (becomes session origin).
+ * @param[in] new_primary_server The new primary's HOME server,
+ *            cli_user(new_primary)->server -- never the link it arrived
+ *            on (becomes session origin).
  * @return 0 on success, -1 on no matching session, non-primary input,
  *         or a new primary homed on a server that is not IRCv3-aware.
  */

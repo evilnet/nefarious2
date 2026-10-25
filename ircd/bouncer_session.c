@@ -11006,9 +11006,11 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
   /* Only a member of the session carries its id: the primary, the held
    * ghost, or a connection on the session's alias roster -- exactly what
    * bounce_get_session() finds.  A peer that receives this id treats the
-   * client as part of the session (the rebind auth gate, D.2, the
-   * post-burst reconcile), so naming a non-member here hands the session
-   * to it.
+   * client as part of the session: the ghost-rebind auth gate reads it
+   * off the wire, and the receiver adopts it as the client's
+   * cli_session_id, which the post-burst reconcile and PM history's
+   * same-session lookups match on.  Naming a non-member here hands the
+   * session to it.
    *
    * 8cf493c added an account fallback: a client in no session took the
    * id of any session of its account.  It served a local user who had
@@ -11016,11 +11018,16 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * session: the user stayed sessionless, and at the relink its burst N
    * needed the held ghost's id for the peer's rebind, which the fallback
    * read from the replica of that session this server still kept from
-   * before the split.  841f3ce made that case unreachable: SQUIT now
-   * destroys a replica with no local holder, so no record is left to
-   * read at the relink burst, and bounce_auto_resume discards an
-   * unattachable replica, so a login that sees one gets a session of its
-   * own.  What the fallback still reached was the harmful case: a
+   * before the split.  841f3ce made that case rare: SQUIT now destroys a
+   * replica of the departed server with no local holder, and
+   * bounce_auto_resume discards an unattachable replica, so a login that
+   * sees one gets a session of its own.  It can still happen: SQUIT
+   * matches replicas by hs_origin, which can be stale, and a replica
+   * whose primary never resolved (no hs_client, only hs_ghost_numeric)
+   * is neither discarded nor cleaned up when the ghost exits, so a login
+   * beside it registers sessionless.  Without the fallback that login
+   * meets the peer's held ghost as a non-member: classic collision.
+   * What the fallback mostly reached was the harmful case: a
    * same-account client that is NOT in the session -- an alt on a legacy
    * server whose N we relay, or a connection that never joined -- was
    * stamped with the session's id, and a fork peer then merged the live
