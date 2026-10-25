@@ -2750,26 +2750,30 @@ void bounce_clear_legacy_faces_for_peer(const char *peer_yxx)
   }
 }
 
-/** Record `face_yxx` as the session's face toward `peer_yxx`, replacing
- * the entry for that peer in place when there is one.
+/** Where the session recorded `old_face` toward `peer_yxx`, record
+ * `new_face` in its place; no-op otherwise.
  * bounce_session_record_legacy_intro keeps an existing entry (the burst
  * records only a first introduction); a BX P swap changes the face the
- * peer holds, so the entry must change with it. */
-static void bounce_session_set_legacy_face(struct BouncerSession *session,
-                                           const char *peer_yxx,
-                                           const char *face_yxx)
+ * peer holds, so the entry must change with it.  A missing entry stays
+ * missing (it already means "the peer may hold any face"), and an entry
+ * naming another face is not this swap's. */
+static void bounce_session_swap_legacy_face(struct BouncerSession *session,
+                                            const char *peer_yxx,
+                                            const char *old_face,
+                                            const char *new_face)
 {
   int i;
-  if (!session || !peer_yxx || !*peer_yxx || !face_yxx || !*face_yxx)
+  if (!session || !peer_yxx || !*peer_yxx || !old_face || !*old_face
+      || !new_face || !*new_face)
     return;
   for (i = 0; i < session->hs_legacy_intro_count; i++) {
-    if (0 == strcmp(session->hs_legacy_intros[i].bli_peer, peer_yxx)) {
-      ircd_strncpy(session->hs_legacy_intros[i].bli_face, face_yxx,
+    if (0 == strcmp(session->hs_legacy_intros[i].bli_peer, peer_yxx)
+        && 0 == strcmp(session->hs_legacy_intros[i].bli_face, old_face)) {
+      ircd_strncpy(session->hs_legacy_intros[i].bli_face, new_face,
                    sizeof(session->hs_legacy_intros[i].bli_face));
       return;
     }
   }
-  bounce_session_record_legacy_intro(session, peer_yxx, face_yxx);
 }
 
 /** See include/bouncer_session.h. */
@@ -2794,40 +2798,51 @@ void bounce_legacy_face_change(struct Client *face, struct BouncerSession *sess,
    * alias source to its primary for a legacy next hop, and a caller may
    * already have made the face an alias (finish-demote), so the Q would
    * leave the link as a QUIT of the surviving user.  sendcmdto_one adds
-   * no tags toward a legacy link and consumes no S2S override. */
+   * no tag region toward a legacy link, but its untagged branch clears
+   * the S2S overrides (cptr, msgid, sessid, time): a caller that needs
+   * one for a later send must arm it after this call.
+   *
+   * Every legacy link that may know the face is told, whatever the
+   * session's burst records say: a face also reaches a link by the
+   * plain N relay, which records nothing, and a record can be stale.  A
+   * stock server drops a Q from a numeric it does not know and leaves a
+   * BX P for an unknown old numeric alone, so telling a link that never
+   * knew the face costs nothing. */
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
     struct Client *peer = dlp->value.cptr;
 
     if (!peer || !IsServer(peer) || peer == except_link)
       continue;
     if (!bounce_legacy_link_knows(IsIRCv3Aware(peer), IsBurstGated(peer),
-                                  !MyConnect(face) && cli_from(face) == peer,
-                                  bounce_session_legacy_face_for(sess, cli_yxx(peer)),
-                                  face_full))
+                                  !MyConnect(face) && cli_from(face) == peer))
       continue;
 
     if (new_numeric) {
       /* The link renumbers its user in place (the stock BX P handler's
-       * numeric swap); it now holds new_numeric as the session's face. */
+       * numeric swap); a record of the old face for it now names the
+       * new numeric. */
       sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, peer, "P %s %s %s %s",
                     face_full, new_numeric,
                     (sess && sess->hs_sessid[0]) ? sess->hs_sessid : "*",
                     cli_name(face));
-      bounce_session_set_legacy_face(sess, cli_yxx(peer), new_numeric);
-      Debug((DEBUG_INFO, "Bouncer: legacy face %s -> %s toward %s (BX P)",
-             face_full, new_numeric, cli_name(peer)));
+      bounce_session_swap_legacy_face(sess, cli_yxx(peer), face_full,
+                                      new_numeric);
+      Debug((DEBUG_INFO, "Bouncer: legacy face %s swapped to %s toward %s "
+             "(BX P)", face_full, new_numeric, cli_name(peer)));
     } else {
       sendcmdto_one(face, CMD_QUIT, peer, ":%s",
                     (reason && *reason) ? reason : "Bouncer session moved");
-      Debug((DEBUG_INFO, "Bouncer: legacy face %s (%s) retracted toward %s",
-             face_full, cli_name(face), cli_name(peer)));
+      Debug((DEBUG_INFO, "Bouncer: legacy face %s retracted toward %s (%s)",
+             face_full, cli_name(peer),
+             (reason && *reason) ? reason : "Bouncer session moved"));
     }
   }
 
   /* No link holds the old face any more: drop every record of it, in
    * this session and in any other of the account (a record names the
-   * session the burst found at the time).  A swap's new entries carry
-   * new_numeric and stay. */
+   * session the burst found at the time), so the burst suppression they
+   * serve never waits on a face that is gone.  A swap's replaced entries
+   * carry new_numeric and stay. */
   if (sess)
     bounce_session_clear_legacy_face(sess, face_full);
   if (IsAccount(face)) {
@@ -6781,14 +6796,13 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
      * as a regular primary — and when the winner side's primary N
      * arrives via mesh forwarding, legacy's m_nick fires same-user@host
      * collision rules and one or both sides die.  Retract the demoted
-     * face from the legacy links that know it ("Promoted to alias"
+     * face from the legacy links that may know it ("Promoted to alias"
      * reason — legacy interprets as a normal QUIT, removes from its
-     * view).  bounce_legacy_face_change skips aware links, links still
-     * under the burst gate (their N hasn't been emitted yet; when the
-     * gate releases the IsBouncerAlias filter on the N loop skips this
-     * client) and links the session showed another face, and clears
-     * the records of this face so a later emit (a relay-path N, the
-     * next burst) may introduce a fresh one.
+     * view).  bounce_legacy_face_change skips aware links and links
+     * still under the burst gate (their N hasn't been emitted yet; when
+     * the gate releases the IsBouncerAlias filter on the N loop skips
+     * this client), and clears the records of this face so a later emit
+     * (a relay-path N, the next burst) may introduce a fresh one.
      *
      * Nothing here introduces the new primary to these peers: the
      * pending-canon tick that once did was removed with the frontier

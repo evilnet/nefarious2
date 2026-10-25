@@ -1453,22 +1453,26 @@ extern void bounce_session_clear_legacy_face(struct BouncerSession *session,
  * unannounced numerics. */
 extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
 
-/** Tell every direct legacy link that knows `face` (bounce_legacy_link_knows,
- * bouncer_wire.h) that it changed, except toward `except_link`.
+/** Tell every direct legacy link that may know `face`
+ * (bounce_legacy_link_knows, bouncer_wire.h: not IRCv3-aware, not
+ * burst-gated, not the face's own direction) that it changed, except
+ * toward `except_link`.  The session's burst records do not narrow it.
  *
  * new_numeric != NULL: a swap, "BX P <face> <new_numeric> <sessid|*> <nick>"
- * from us; the link renumbers its user in place, and the session records
- * new_numeric as its face toward that link.
- * new_numeric == NULL: a retraction, "Q :<reason>" from `face`; every
- * record of the face is cleared.
+ * from us; the link renumbers its user in place, and a record of the face
+ * toward that link is replaced by new_numeric.
+ * new_numeric == NULL: a retraction, "Q :<reason>" from `face`.
+ * Either way no record of the old face is left.
  *
  * Call it while `face` still has the numeric the links know.  Sent per
  * link (sendcmdto_one), never through a serv_butone sender: those rewrite
- * an alias source to its primary for a legacy next hop.
+ * an alias source to its primary for a legacy next hop.  Each send clears
+ * the S2S overrides (cptr, msgid, sessid, time): arm any a later send
+ * needs after this call.
  *
  * @param[in] face        The client legacy links know by N.
- * @param[in] sess        The session whose records say which face each
- *                        link holds (NULL: none recorded).
+ * @param[in] sess        The session the face belongs to (NULL: none);
+ *                        gives the BX P its session id.
  * @param[in] except_link A link to skip (the line's own direction), or NULL.
  * @param[in] new_numeric Full YYXXX to swap the face to, or NULL to retract.
  * @param[in] reason      QUIT reason for a retraction.
