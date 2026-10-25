@@ -466,7 +466,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * the old code delivered no msgid while the store minted one
      * nobody ever saw. */
     if (feature_bool(FEAT_MSGID) && !cli_s2s_msgid(cptr)[0])
-      generate_msgid(cli_s2s_msgid(cptr), S2S_MSGID_BUFSIZE);
+      s2s_mint_link_event(cptr);
     if (cli_s2s_msgid(cptr)[0])
       sendcmdto_set_client_event(cli_s2s_msgid(cptr), history_event_time_ms(cptr));
 
@@ -508,7 +508,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Unified msgid (see the channel arm above): reuse or mint into
      * the link buffer so delivery and storage share one id. */
     if (feature_bool(FEAT_MSGID) && !cli_s2s_msgid(cptr)[0])
-      generate_msgid(cli_s2s_msgid(cptr), S2S_MSGID_BUFSIZE);
+      s2s_mint_link_event(cptr);
     if (cli_s2s_msgid(cptr)[0])
       sendcmdto_set_client_event(cli_s2s_msgid(cptr), history_event_time_ms(cptr));
 

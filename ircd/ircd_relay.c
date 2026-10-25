@@ -856,11 +856,12 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
     client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
   }
 
-  /* Unified msgid: if no incoming S2S msgid, generate one now so
-   * format_s2s_tags() (relay) and storage both use the same value.
-   * Handles messages from legacy servers without P10_MESSAGE_TAGS. */
+  /* Unified msgid: if no incoming S2S msgid, mint one (with its mint
+   * time) into the link's stash now so format_s2s_tags() (relay) and
+   * storage both use the same msgid and time.  Handles messages from
+   * legacy servers without P10_MESSAGE_TAGS. */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
-    generate_msgid(cli_s2s_msgid(one), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(one);
 
   /* Alias source rewriting: use primary's P10 numeric for S2S.
    * The alias numeric (from BX C) is only known to BX-aware servers.
@@ -951,7 +952,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
   /* Unified msgid (see server_relay_channel_message) */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
-    generate_msgid(cli_s2s_msgid(one), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(one);
 
   /* Alias source rewriting (see server_relay_channel_message) */
   if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
@@ -1651,7 +1652,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   /* Unified msgid: pre-populate before pm_msgid generation and relay */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
       && !cli_s2s_msgid(cli_from(sptr))[0])
-    generate_msgid(cli_s2s_msgid(cli_from(sptr)), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(cli_from(sptr));
 
   /* Generate shared msgid + timestamp for alias forwarding and history.
    * Prefer S2S msgid for federation dedup — sptr is never reassigned
@@ -1761,7 +1762,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   /* Unified msgid: pre-populate before pm_msgid generation and relay */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
       && !cli_s2s_msgid(cli_from(sptr))[0])
-    generate_msgid(cli_s2s_msgid(cli_from(sptr)), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(cli_from(sptr));
 
   /* Generate shared msgid + timestamp (prefer S2S msgid for federation dedup) */
   pm_msgid[0] = '\0';

@@ -104,6 +104,14 @@ extern int send_s2s_tags_on(struct Client *to);
 extern void sendcmdto_set_s2s_client_tags(const char *client_tags);
 /* Pre-built S2S tag prefix for multi-msgid (batched CREATE/PART) */
 extern void sendcmdto_set_s2s_raw_tags(const char *tags);
+/* Clear every S2S override (cptr, msgid, time, sessid, ,M, ,C, raw tags,
+ * want-tags, alias source) -- the end of the event that armed them.
+ * packet.c calls it after each parsed line.  Client-facing overrides
+ * (client msgid/time, forwarded batch id) are untouched. */
+extern void sendcmdto_reset_s2s_overrides(void);
+/* Mint a fresh msgid into a link's S2S stash for an event that arrived
+ * from it with none, and stamp the stash with the msgid's mint time. */
+extern void s2s_mint_link_event(struct Client *link);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,

@@ -92,8 +92,14 @@ int server_dopacket(struct Client* cptr, const char* buffer, int length)
 
       update_messages_received(cptr);
 
-      if (parse_server(cptr, cli_buffer(cptr), endp) == CPTR_KILLED)
-        return CPTR_KILLED;
+      {
+        int rc = parse_server(cptr, cli_buffer(cptr), endp);
+        /* The line's event is over: no S2S tag override it armed may
+         * stamp a later, unrelated line (audit 0.4b). */
+        sendcmdto_reset_s2s_overrides();
+        if (rc == CPTR_KILLED)
+          return CPTR_KILLED;
+      }
       /*
        *  Socket is dead so exit
        */
@@ -198,8 +204,12 @@ int connect_dopacket(struct Client *cptr, const char *buffer, int length)
 
       update_messages_received(cptr);
 
-      if (parse_client(cptr, cli_buffer(cptr), endp) == CPTR_KILLED)
-        return CPTR_KILLED;
+      {
+        int rc = parse_client(cptr, cli_buffer(cptr), endp);
+        sendcmdto_reset_s2s_overrides();   /* see server_dopacket */
+        if (rc == CPTR_KILLED)
+          return CPTR_KILLED;
+      }
       /* Socket is dead so exit (unless bouncer hold already claimed it) */
       if (IsDead(cptr)) {
         /* Exit it, or hold it like a dropped connection: a held ghost
@@ -229,15 +239,19 @@ int connect_dopacket(struct Client *cptr, const char *buffer, int length)
  */
 int client_dopacket(struct Client *cptr, unsigned int length)
 {
+  int rc;
+
   assert(0 != cptr);
 
   update_bytes_received(cptr, length);
   update_messages_received(cptr);
 
-  if (CPTR_KILLED == parse_client(cptr, cli_buffer(cptr), cli_buffer(cptr) + length))
+  rc = parse_client(cptr, cli_buffer(cptr), cli_buffer(cptr) + length);
+  sendcmdto_reset_s2s_overrides();   /* see server_dopacket */
+  if (CPTR_KILLED == rc)
     return CPTR_KILLED;
   else if (IsDead(cptr)) {
-    int rc = exit_dead_client(cptr, "Dead socket");   /* or holds it */
+    rc = exit_dead_client(cptr, "Dead socket");   /* or holds it */
     return rc ? rc : 1;
   }
 

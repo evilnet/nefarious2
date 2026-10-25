@@ -329,6 +329,47 @@ void sendcmdto_want_s2s_tags(int want)
   s2s_want_tags = want;
 }
 
+/** End of the event: clear every S2S override (audit 0.4b).
+ *
+ * Each override is armed for one event's send(s) and consumed there,
+ * but not every path consumes all of them -- a handler that arms and
+ * then returns early (m_nick's alias source before a 433), a sender
+ * that reads an override without clearing it, a tags-off or legacy
+ * branch.  Whatever survives would stamp the next, unrelated
+ * server-bound line with this event's msgid and time (a QUIT relay, a
+ * forwarded command, even a PING), source it from an alias, or tag it
+ * with another event's ,S/,M/,C.  packet.c calls this after every
+ * parsed line, so no override outlives the line that armed it.
+ *
+ * The client-facing overrides (client msgid/time, the forwarded batch
+ * id) are left alone: their senders clear them. */
+void sendcmdto_reset_s2s_overrides(void)
+{
+  s2s_cptr_override = NULL;
+  s2s_alias_source = NULL;
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
+  s2s_sessid_override[0] = '\0';
+  s2s_ml_override[0] = '\0';
+  s2s_client_tags_override = NULL;
+  s2s_raw_tags[0] = '\0';
+  s2s_want_tags = 0;
+}
+
+/** Mint a fresh msgid into \a link's S2S stash for an event that
+ * arrived from it with none (a legacy peer, or tags off), and stamp the
+ * stash with that msgid's mint time.  The stash is what delivery,
+ * storage and the onward relay read (cli_s2s_msgid/cli_s2s_time_ms of
+ * the link), so they share one msgid and one time; a stash holding a
+ * msgid but no time made the relay take its time from wherever it
+ * could (audit 0.4b).  parse_server() clears the stash per line. */
+void s2s_mint_link_event(struct Client *link)
+{
+  generate_msgid(cli_s2s_msgid(link), S2S_MSGID_BUFSIZE);
+  /* Minting advanced the HLC: its physical time is the mint time. */
+  cli_s2s_time_ms(link) = hlc_global()->physical_ms;
+}
+
 
 
 /** Format current time as ISO 8601 timestamp for server-time capability.
@@ -3043,6 +3084,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
     va_end(vd.vd_args);
   }
+  /* The msgid/time override was armed for this message alone (audit
+   * 0.4b): consume it now that the prefix is built (or tags are off),
+   * as the serv_butone family does.  Left armed, it stamped the next
+   * server-bound line -- a QUIT relay, a forwarded command -- with this
+   * message's msgid and time. */
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
 
   /* Build alias S2S buffer for the primary's server direction */
   if (alias_from) {
@@ -3228,29 +3276,61 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
    * (serv_mb_legacy, below) -- they don't parse the @A... prefix and
    * it eats bytes against their 512-byte limit (audit 1.5). When tags
    * are off or format_s2s_tags fails, serv_mb is already untagged and
-   * doubles as the legacy buffer. */
-  if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
-    va_start(vd.vd_args, pattern);
-    serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
-    va_end(vd.vd_args);
-    serv_mb = serv_mb_tags;
+   * doubles as the legacy buffer.
+   *
+   * The tag region is formatted ONCE (audit 0.4b).  Two format calls
+   * minted two msgids when neither an override nor the link's stash
+   * supplied one -- the ,C copy and the plain copy of one message went
+   * out under different ids -- and the first call consumed the ,S
+   * hint, so only the plain copy carried it.  With client tags, the
+   * ,C prefix is built and the plain prefix is that string cut before
+   * its ,C segment: the time and msgid are base64 and the ,S and ,M
+   * data hold no comma, so the first ",C" after them starts the client
+   * tags. */
+  {
+    int has_prefix = 0;
 
-    va_start(vd.vd_args, pattern);
-    serv_mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
-    va_end(vd.vd_args);
+    if (has_ctags) {
+      if (format_s2s_tags_with_client(s2s_tagbuf_v3, sizeof(s2s_tagbuf_v3),
+                                      cptr, client_tags, NULL, 0)) {
+        const char *head = s2s_tagbuf_v3 + 2;   /* past "@A" */
+        const char *cseg = strstr(head + strcspn(head, ", "), ",C");
+        size_t plen = cseg ? (size_t)(cseg - s2s_tagbuf_v3) : 0;
 
-    if (has_ctags &&
-        format_s2s_tags_with_client(s2s_tagbuf_v3, sizeof(s2s_tagbuf_v3),
-                                    cptr, client_tags, NULL, 0)) {
+        if (cseg && plen + 2 <= sizeof(s2s_tagbuf)) {
+          memcpy(s2s_tagbuf, s2s_tagbuf_v3, plen);
+          s2s_tagbuf[plen] = ' ';
+          s2s_tagbuf[plen + 1] = '\0';
+          has_prefix = 1;
+        }
+      }
+    } else if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0))
+      has_prefix = 1;
+
+    if (has_prefix) {
       va_start(vd.vd_args, pattern);
-      serv_mb_v3 = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_v3, from, tok, &vd);
+      serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+      va_end(vd.vd_args);
+      serv_mb = serv_mb_tags;
+
+      va_start(vd.vd_args, pattern);
+      serv_mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
+      va_end(vd.vd_args);
+
+      if (has_ctags) {
+        va_start(vd.vd_args, pattern);
+        serv_mb_v3 = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_v3, from, tok, &vd);
+        va_end(vd.vd_args);
+      }
+    } else {
+      va_start(vd.vd_args, pattern);
+      serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
       va_end(vd.vd_args);
     }
-  } else {
-    va_start(vd.vd_args, pattern);
-    serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-    va_end(vd.vd_args);
   }
+  /* Consumed: armed for this message alone (see sendcmdto_channel_butone). */
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
 
   /* Build alias S2S buffer for the primary's server direction */
   if (alias_from) {
