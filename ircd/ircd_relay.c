@@ -1715,7 +1715,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   }
 
   /* Forward PM to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(from, acptr, cli_from(sptr), CMD_PRIVATE, text,
+  bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_PRIVATE, text,
                                pm_msgid, history_parse_ms(pm_timestamp),
                                client_tags);
 
@@ -1848,7 +1848,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   }
 
   /* Forward notice to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(from, acptr, cli_from(sptr), CMD_NOTICE, text,
+  bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_NOTICE, text,
                                pm_msgid, history_parse_ms(pm_timestamp),
                                client_tags);
 

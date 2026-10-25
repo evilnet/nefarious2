@@ -850,7 +850,8 @@ extern void bounce_send_alias_join_replies(struct Channel *chptr, struct Client 
 /** Forward a PM/NOTICE to all aliases of the target bouncer primary,
  * under the message's own msgid and time; each alias gets one copy
  * network-wide (see bouncer_session.c).
- * @param[in] from        Client that sent the message.
+ * @param[in] from        The original sender, never rewritten to its
+ *                        session primary.
  * @param[in] target      Target client (primary).
  * @param[in] inbound     Server link the message arrived on, NULL if local.
  * @param[in] cmd         Long command name (MSG_PRIVATE or MSG_NOTICE).

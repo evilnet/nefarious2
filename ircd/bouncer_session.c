@@ -6986,8 +6986,10 @@ void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *primary)
  * copy carries its msgid and time: a local alias gets them as client tags
  * (with the sender's client-only tags, as the primary did), a remote
  * alias as the S2S tag region its server takes them from.  A remote
- * alias's next hop is always IRCv3-aware (aliases are introduced by BX C,
- * which legacy peers drop), so that region always goes out.
+ * alias's next hop is always IRCv3-aware (the fork sends BX C only to
+ * aware peers, so an alias is known only behind them), so that region
+ * goes out whenever P10_MESSAGE_TAGS is on; with it off the line goes
+ * bare and the alias's server mints its own msgid.
  *
  * Every server on the message's path runs this for the aliases in its
  * own replica of the session, so a remote alias is sent a copy only by
@@ -6997,7 +6999,18 @@ void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *primary)
  *    served further along (at the latest by the target's own server).
  * Sending in either case gave the alias the message twice.
  *
- * @param[in] from        Client that sent the message.
+ * Every copy is sourced from the sender's session primary, as the
+ * primary's own delivery is, except a remote copy whose alias lies in
+ * that primary's direction: the alias's server would get it over a link
+ * other than the source's own and drop it as a fake direction (with a
+ * third fork direction; the server that skips the alias by the rules
+ * above counts on this copy), so that copy is sourced from \a from.
+ * Its direction is never the alias's (a remote \a from came over
+ * \a inbound, whose aliases are skipped above), and an alias \a from is
+ * known wherever the alias is (BX C introduces it to every aware server).
+ *
+ * @param[in] from        The original sender, never rewritten to its
+ *                        session primary (this function does that).
  * @param[in] target      Target client (must be the primary, not an alias).
  * @param[in] inbound     Server link the message arrived on, or NULL when
  *                        its sender is local.
@@ -7016,6 +7029,7 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
                                   uint64_t event_ms, const char *client_tags)
 {
   struct BouncerSession *sess;
+  struct Client *primary;
   int i;
 
   /* Only forward for bouncer primaries with aliases */
@@ -7029,8 +7043,13 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
   if (msgid && !*msgid)
     msgid = NULL;
 
+  primary = (IsBouncerAlias(from) && cli_user(from)->alias_primary)
+            ? cli_user(from)->alias_primary : from;
+
   for (i = 0; i < sess->hs_alias_count; i++) {
     struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+    struct Client *src;
+
     if (!alias || alias == target || !IsBouncerAlias(alias))
       continue;
 
@@ -7040,7 +7059,7 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
        * cannot stamp a later send. */
       if (msgid)
         sendcmdto_set_client_event(msgid, event_ms);
-      sendcmdto_one_tags_with_client(from, cmd, tok, alias, msgid,
+      sendcmdto_one_tags_with_client(primary, cmd, tok, alias, msgid,
                                      client_tags, "%C :%s", alias, text);
       sendcmdto_set_client_msgid(NULL);
       continue;
@@ -7051,12 +7070,16 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
     if (!MyConnect(target) && cli_from(alias) == cli_from(target))
       continue;
 
+    src = primary;
+    if (src != from && !MyUser(src) && cli_from(src) == cli_from(alias))
+      src = from;
+
     /* Armed per alias: the send consumes the overrides.  With msgids off
      * the inbound line's own tags (if any) are relayed. */
     sendcmdto_set_s2s_cptr(inbound);
     if (msgid)
       sendcmdto_set_s2s_tags(event_ms, msgid);
-    sendcmdto_one_tags_with_client(from, cmd, tok, alias, msgid,
+    sendcmdto_one_tags_with_client(src, cmd, tok, alias, msgid,
                                    client_tags, "%C :%s", alias, text);
   }
 }
