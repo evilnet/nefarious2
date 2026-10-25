@@ -529,6 +529,51 @@ int ircd_utf8_clamp(char* s, size_t maxbytes)
   return 1;
 }
 
+/** Compute the length to keep \a line at or under \a body_max body
+ * bytes, never splitting a UTF-8 sequence.  Pure function: it only
+ * measures, it does not write to \a line.
+ *
+ * If \a line starts with '@' (an S2S tag region), the body is
+ * everything after the first space; a tagged line with no space has
+ * no body to measure, so the whole line is kept.  Otherwise the body
+ * is the whole line.  When the body is already within \a body_max,
+ * \a len is returned unchanged; otherwise the cut is backed off over
+ * any trailing UTF-8 continuation bytes so a multi-byte sequence is
+ * never left half-written.
+ *
+ * @param[in] line     Line to measure (tag region + body, or just a
+ *                      body); may be NULL.
+ * @param[in] len       Length of \a line in bytes.
+ * @param[in] body_max  Maximum number of body bytes to keep.
+ * @return The length (<= \a len) that keeps the body at or under
+ *         \a body_max bytes.
+ */
+size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
+{
+  size_t head = 0;
+  size_t cut;
+
+  if (!line || len == 0)
+    return len;
+
+  if (line[0] == '@') {
+    const char* sp = memchr(line, ' ', len);
+    if (!sp)
+      return len; /* no space after the tag region: nothing to measure */
+    head = (size_t)(sp - line) + 1;
+  }
+
+  if (len - head <= body_max)
+    return len;
+
+  cut = head + body_max;
+  /* Back off over UTF-8 continuation bytes so the byte at the cut
+   * index is a lead byte (or ASCII), same rule as ircd_utf8_clamp(). */
+  while (cut > head && ((unsigned char)line[cut] & 0xC0) == 0x80)
+    --cut;
+  return cut;
+}
+
 /** Case-insensitive word-boundary search for \a nick in \a text, using
  * the IRC nickname character class as the boundary definition: a match
  * counts only when the characters on both sides of it are not nickname

@@ -609,6 +609,72 @@ static void test_utf8_clamp_null_safe(void **state)
   assert_int_equal(0, ircd_utf8_clamp(NULL, 5));
 }
 
+/* --- ircd_line_body_clamp --- */
+
+static void test_line_body_clamp_tagged(void **state)
+{
+  /* "@Axx " (5-byte tag region) + 600 x 'a', clamped to a 510-byte body. */
+  char line[700];
+  (void)state;
+  memcpy(line, "@Axx ", 5);
+  memset(line + 5, 'a', 600);
+  assert_int_equal(5 + 510, ircd_line_body_clamp(line, 605, 510));
+}
+
+static void test_line_body_clamp_untagged(void **state)
+{
+  /* No tag region: the whole line is the body. */
+  char line[600];
+  (void)state;
+  memset(line, 'a', 600);
+  assert_int_equal(510, ircd_line_body_clamp(line, 600, 510));
+}
+
+static void test_line_body_clamp_fits(void **state)
+{
+  /* "@A " (3-byte tag region) + a 510-byte body: already at the cap. */
+  char line[513];
+  (void)state;
+  memcpy(line, "@A ", 3);
+  memset(line + 3, 'a', 510);
+  assert_int_equal(513, ircd_line_body_clamp(line, 513, 510));
+}
+
+static void test_line_body_clamp_utf8(void **state)
+{
+  /* "@A " + 300 x (2-byte) 'e-acute': clamped to a 509-byte body backs
+   * off one byte to land on a lead byte, keeping 508 body bytes. */
+  char line[603];
+  int i;
+  (void)state;
+  memcpy(line, "@A ", 3);
+  for (i = 0; i < 300; i++) {
+    line[3 + 2 * i] = '\303';
+    line[3 + 2 * i + 1] = '\251';
+  }
+  assert_int_equal(3 + 508, ircd_line_body_clamp(line, 603, 509));
+}
+
+static void test_line_body_clamp_tag_no_space(void **state)
+{
+  /* A tag region with no trailing space has no body to measure. */
+  char line[701];
+  (void)state;
+  line[0] = '@';
+  memset(line + 1, 'a', 700);
+  assert_int_equal(701, ircd_line_body_clamp(line, 701, 510));
+}
+
+static void test_line_body_clamp_tagged_512_cap(void **state)
+{
+  /* Ruling P1: a tagged line's body cap is 512, not 510. */
+  char line[700];
+  (void)state;
+  memcpy(line, "@Axx ", 5);
+  memset(line + 5, 'a', 600);
+  assert_int_equal(5 + 512, ircd_line_body_clamp(line, 605, 512));
+}
+
 /* --- string_is_valid_utf8 / string_sanitize_utf8 --- */
 
 /* A line as an IRC client actually sends it: CTCP delimiters and the mIRC
@@ -874,6 +940,14 @@ int main(void)
         cmocka_unit_test(test_utf8_clamp_multibyte_boundary),
         cmocka_unit_test(test_utf8_clamp_keeps_complete_sequence),
         cmocka_unit_test(test_utf8_clamp_null_safe),
+
+        /* ircd_line_body_clamp */
+        cmocka_unit_test(test_line_body_clamp_tagged),
+        cmocka_unit_test(test_line_body_clamp_untagged),
+        cmocka_unit_test(test_line_body_clamp_fits),
+        cmocka_unit_test(test_line_body_clamp_utf8),
+        cmocka_unit_test(test_line_body_clamp_tag_no_space),
+        cmocka_unit_test(test_line_body_clamp_tagged_512_cap),
 
         /* ircd_text_mentions */
         cmocka_unit_test(test_mentions_basic_and_case),

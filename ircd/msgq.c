@@ -24,6 +24,7 @@
 
 #include "msgq.h"
 #include "capab.h"
+#include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_defs.h"
@@ -31,6 +32,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
+#include "ircd_string.h"
 #include "numeric.h"
 #include "send.h"
 #include "s_debug.h"
@@ -350,6 +352,19 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
   } else {
     if (len > BUFSIZE - 2)
       len = BUFSIZE - 2;
+  }
+
+  /* S2S wire hygiene (audit 0.1): every line bound for another server
+   * (or &me, which stands in for one on the sending side) keeps its
+   * body within the receiving fork server's cap -- 512 for a tagged
+   * line (recv_classify.c's msg_cap = BUFSIZE), 510 for an untagged
+   * one (what a legacy peer needs, same as today). Applied after the
+   * clamps above so it only ever tightens, never loosens, the length;
+   * cuts at a UTF-8 boundary so neither this server's own copy nor a
+   * downstream re-send splits a multi-byte sequence. */
+  if (dest && (IsServer(dest) || IsMe(dest))) {
+    size_t body_max = (fmt_scratch[0] == '@') ? BUFSIZE : BUFSIZE - 2;
+    len = (int)ircd_line_body_clamp(fmt_scratch, (size_t)len, body_max);
   }
 
   /* Allocate at least BUFSIZE to preserve slack for msgq_append() */
