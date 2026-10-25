@@ -675,6 +675,43 @@ static void test_line_body_clamp_tagged_512_cap(void **state)
   assert_int_equal(5 + 512, ircd_line_body_clamp(line, 605, 512));
 }
 
+static void test_line_body_clamp_latin1_run(void **state)
+{
+  /* Not UTF-8: a Latin-1 / cp1252 run of 0x80-0xBF bytes ("\260" is the
+   * Latin-1 degree sign).  No lead byte within three bytes of the cut,
+   * so the back-off must not walk into the run: the cut stays at 510. */
+  char line[603];
+  (void)state;
+  memcpy(line, "@A ", 3);
+  memset(line + 3, '\260', 600);
+  assert_int_equal(3 + 510, ircd_line_body_clamp(line, 603, 510));
+}
+
+static void test_line_body_clamp_utf8_4byte(void **state)
+{
+  /* 150 x U+1F600 (F0 9F 98 80): a 511-byte cap lands on the third
+   * continuation byte of the 128th character, so the back-off takes all
+   * three bytes back to its lead byte and keeps 127 whole characters. */
+  char line[600];
+  int i;
+  (void)state;
+  for (i = 0; i < 150; i++)
+    memcpy(line + 4 * i, "\360\237\230\200", 4);
+  assert_int_equal(508, ircd_line_body_clamp(line, 600, 511));
+}
+
+static void test_line_body_clamp_stray_continuation(void **state)
+{
+  /* 'a' x 508, a complete U+00E9 (C3 A9), then a stray A9: the cut at 510
+   * lands on the stray byte, whose lead's sequence is already complete
+   * before the cut -- nothing is split, so the cut stays at 510. */
+  char line[514];
+  (void)state;
+  memset(line, 'a', 508);
+  memcpy(line + 508, "\303\251\251bbb", 6);
+  assert_int_equal(510, ircd_line_body_clamp(line, 514, 510));
+}
+
 /* --- string_is_valid_utf8 / string_sanitize_utf8 --- */
 
 /* A line as an IRC client actually sends it: CTCP delimiters and the mIRC
@@ -948,6 +985,9 @@ int main(void)
         cmocka_unit_test(test_line_body_clamp_utf8),
         cmocka_unit_test(test_line_body_clamp_tag_no_space),
         cmocka_unit_test(test_line_body_clamp_tagged_512_cap),
+        cmocka_unit_test(test_line_body_clamp_latin1_run),
+        cmocka_unit_test(test_line_body_clamp_utf8_4byte),
+        cmocka_unit_test(test_line_body_clamp_stray_continuation),
 
         /* ircd_text_mentions */
         cmocka_unit_test(test_mentions_basic_and_case),
