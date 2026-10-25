@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
+#include <stdint.h>
 #include <cmocka.h>
 
 #include "../../include/crdt_hlc.h"
@@ -100,6 +101,40 @@ static void test_remote_behind_unchanged(void **state)
   assert_int_equal(4, r.logical);
 }
 
+/* I1 fix: the bound check must not compute now_ms + max_forward_ms — that
+ * sum can overflow uint64_t when max_forward_ms is very large (as happens
+ * when a negative FEAT_HLC_MAX_FORWARD_MS sign-extends on the parse.c call
+ * site before this fix). A huge max_forward_ms must still mean "basically
+ * unbounded", not "wrap around and refuse everything". */
+static void test_huge_max_still_adopts(void **state)
+{
+  struct HLC local = { 1000, 0, 1 };
+  struct HLC remote = { 1000000000000ULL, 5, 2 };
+  int rej = -1;
+  struct HLC r;
+  (void)state;
+
+  r = hlc_receive_bounded(&local, &remote, 1000, UINT64_MAX, &rej);
+
+  assert_int_equal(0, rej);
+  assert_true(r.physical_ms == 1000000000000ULL);
+}
+
+static void test_huge_max_remote_behind_unchanged(void **state)
+{
+  struct HLC local = { 5000, 3, 1 };
+  struct HLC remote = { 1000, 9, 2 };
+  int rej = -1;
+  struct HLC r;
+  (void)state;
+
+  r = hlc_receive_bounded(&local, &remote, 1000, UINT64_MAX - 500, &rej);
+
+  assert_int_equal(0, rej);
+  assert_true(r.physical_ms == 5000);
+  assert_int_equal(4, r.logical);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -109,6 +144,8 @@ int main(void)
     cmocka_unit_test(test_beyond_bound_wall_moved),
     cmocka_unit_test(test_zero_is_unbounded),
     cmocka_unit_test(test_remote_behind_unchanged),
+    cmocka_unit_test(test_huge_max_still_adopts),
+    cmocka_unit_test(test_huge_max_remote_behind_unchanged),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
