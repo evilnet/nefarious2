@@ -723,13 +723,18 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (!acptr || !IsMe(acptr)) {
       /* Not for us, forward -- unless the next hop toward it is a
        * legacy (non-IRCv3-aware) link, in which case drop the forward:
-       * GITSYNC is a fork-only token that link doesn't understand. */
+       * GITSYNC is a fork-only token that link doesn't understand.
+       * The oper's own server only saw an aware next hop (us), so this
+       * hop owes them the refusal mo_gitsync gives locally. */
       if (acptr && IsIRCv3Aware(cli_from(acptr))) {
         if (subarg)
           sendcmdto_one(sptr, CMD_GITSYNC, acptr, "%C %s %s", acptr, action, subarg);
         else
           sendcmdto_one(sptr, CMD_GITSYNC, acptr, "%C %s", acptr, action);
-      }
+      } else if (acptr && IsUser(sptr))
+        send_reply(sptr, SND_EXPLICIT | ERR_NOSUCHSERVER,
+                   "%s :Server does not take GITSYNC over a legacy link",
+                   cli_name(acptr));
       return 0;
     }
     /* Fall through to handle locally */
