@@ -150,6 +150,25 @@ static char s2s_sessid_override[S2S_SESSID_BUFSIZE] = "";
  * sendcmdto_one_tags_with_client whether or not it was used. */
 static char s2s_ml_override[S2S_ML_BUFSIZE] = "";
 
+/** Client-only tags (compact-tag ,C segment) for the next S2S emit
+ * through sendcmdto_serv_butone_v3() (audit 0.1): a channel TAGMSG
+ * with a large client tag used to ride the message body, which could
+ * push an S2S line past the receiving peer's 512-byte cap and drop
+ * the whole link. format_s2s_tags_with_client() already takes
+ * client_tags as a direct parameter (used by
+ * sendcmdto_one_tags_with_client for the DM path); this override
+ * exists only to carry that value through sendcmdto_serv_butone_v3()'s
+ * cmd/pattern/varargs forwarding, which has no slot for it.
+ *
+ * Unlike the other overrides, this stores the pointer itself, not a
+ * copy: the caller's buffer (cli_client_tags(sptr) or
+ * cli_s2s_client_tags(cptr)) must stay valid until the consuming call
+ * runs, which is true for every current site (set immediately before
+ * that call). Consumed and cleared by sendcmdto_serv_butone_v3();
+ * cleared unconsumed by every other serv_butone variant, since
+ * legacy/v1 peers have no ,C slot to put it in. */
+static const char *s2s_client_tags_override = NULL;
+
 /** Override msgid for client-side channel broadcasts.
  * When non-empty, format_message_tags_ex includes msgid for clients with
  * message-tags capability. Auto-cleared after channel broadcast completes.
@@ -257,6 +276,18 @@ void sendcmdto_set_s2s_ml(char flag, const char *batch_ref)
     ircd_strncpy(s2s_ml_override + 1, batch_ref, sizeof(s2s_ml_override) - 1);
   } else
     s2s_ml_override[0] = '\0';
+}
+
+/** Arm client-only tags (,C<client_tags>) for the next
+ * sendcmdto_serv_butone_v3() call (audit 0.1).  Stores \a client_tags
+ * itself rather than a copy: the caller's buffer must stay valid until
+ * that call runs.  sendcmdto_serv_butone_v3() reads it, passes it
+ * through to format_s2s_tags_with_client(), and clears it whether or
+ * not it built a tagged variant; every other serv_butone variant
+ * clears it unconsumed. A NULL or empty \a client_tags disarms. */
+void sendcmdto_set_s2s_client_tags(const char *client_tags)
+{
+  s2s_client_tags_override = (client_tags && *client_tags) ? client_tags : NULL;
 }
 
 /** Whether a line sent toward \a to through
@@ -1856,6 +1887,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
         char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
@@ -1876,6 +1908,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         /* Clear overrides consumed by format_s2s_tags */
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       }
     } else {
       s2s_cptr_override = NULL;
@@ -1883,6 +1916,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
 
     /* Untagged variants for legacy peers — also serve as the only
@@ -2026,6 +2060,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
         char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
@@ -2047,6 +2082,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         /* Clear overrides consumed by format_s2s_tags */
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       }
     } else {
       /* No tagged variant was built, so nothing consumed the overrides.
@@ -2059,6 +2095,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
 
     /* Untagged variants for legacy peers — also serve as the only
@@ -2187,19 +2224,42 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
-        char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
                                 : (MyConnect(from) ? NULL : cli_from(from));
         s2s_cptr_override = NULL;
-        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
-          va_start(vd.vd_args, pattern);
-          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
-          va_end(vd.vd_args);
-          if (alias_from) {
+        if (s2s_client_tags_override) {
+          /* Client-only tags ride ,C instead of the message body
+           * (audit 0.1): a channel TAGMSG with a large client tag no
+           * longer risks the receiver's 512-byte S2S cap. Sized for
+           * the IRCv3 4094-byte client-tag maximum plus the compact
+           * prefix (,S/,M included). */
+          char s2s_tagbuf_ctags[4200];
+          const char *ctags = s2s_client_tags_override;
+          s2s_client_tags_override = NULL;  /* consumed */
+          if (format_s2s_tags_with_client(s2s_tagbuf_ctags, sizeof(s2s_tagbuf_ctags),
+                                          tag_cptr, ctags, NULL, 0)) {
             va_start(vd.vd_args, pattern);
-            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+            mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_ctags, from, tok, &vd);
             va_end(vd.vd_args);
+            if (alias_from) {
+              va_start(vd.vd_args, pattern);
+              mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_ctags, alias_from, tok, &vd);
+              va_end(vd.vd_args);
+            }
+          }
+        } else {
+          char s2s_tagbuf[128];
+          if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+            va_start(vd.vd_args, pattern);
+            mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+            va_end(vd.vd_args);
+            if (alias_from) {
+              va_start(vd.vd_args, pattern);
+              mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+              va_end(vd.vd_args);
+            }
           }
         }
         s2s_msgid_override[0] = '\0';
@@ -2216,6 +2276,7 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
   }
 
@@ -2315,6 +2376,7 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
         char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
@@ -2332,6 +2394,7 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
         }
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       }
     } else {
       /* No tagged variant was built, so nothing consumed the overrides.
@@ -2344,6 +2407,7 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
   }
 
