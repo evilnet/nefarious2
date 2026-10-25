@@ -322,12 +322,16 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 /** Send the deferred-able tail of the burst: N tokens for users,
  * BS for bouncer sessions, channel BURST modes, EB.
  *
- * For IRCv3-aware peers this runs from the BX F handler after both
- * sides' reconcile is complete; for legacy peers it runs inline at the
- * end of server_estab.  Either way, by the time we reach this point any
- * active-vs-active demote has flipped its loser to alias state, so the
- * IsBouncerAlias filter on the N loop (and on bounce_burst's session
- * iteration) keeps duplicate racing-nick N's off the wire.
+ * For any peer, IRCv3-aware or legacy: it runs inline at the end of
+ * server_estab (the peer's SERVER line) unless bouncer convergence is
+ * in flight, in which case server_estab gates the peer and this runs at
+ * release instead -- from bounce_release_idle_gates at a
+ * convergence-completion site (a peer's EB, an attach or revive) or
+ * from the 1-second bounce_legacy_burst_gate_tick fallback.  Either
+ * way, by the time we reach this point any active-vs-active demote has
+ * flipped its loser to alias state, so the IsBouncerAlias filter on the
+ * N loop (and on bounce_burst's session iteration) keeps duplicate
+ * racing-nick N's off the wire.
  */
 int server_finish_burst(struct Client *cptr)
 {
@@ -404,15 +408,17 @@ int server_finish_burst(struct Client *cptr)
        * can dispatch at-N-time convergence in m_nick.  Only toward an
        * IRCv3-aware peer (a legacy one gets no tag region).
        *
-       * The hint is consumed right after the send, not left to
-       * format_s2s_tags_with_client: that takes ,S from the arriving
-       * link's stash when there is one and then leaves the override
-       * armed -- a remote acptr behind a link whose last line carried
-       * ,S.  This burst also runs from the burst-gate timer and
-       * bounce_release_idle_gates, where no per-line reset follows,
-       * so a leftover hint would ride the next tagged line (a later
-       * burst line, the EB, any timer send) with this user's sessid
-       * (audit 0.4b). */
+       * The hint is cleared right after the send, not left to
+       * format_s2s_tags_with_client, which consumes it only when it
+       * uses it.  For an acptr two or more hops away the tag source is
+       * the link toward it, and while that link's line is being
+       * handled (this burst can run inside a peer's EB line, through
+       * bounce_release_idle_gates) format prefers the link's own ,S,
+       * if it has one, and leaves the hint armed.  And the burst also
+       * runs from the burst-gate timer and from callbacks, where no
+       * per-line reset follows.  A leftover hint would ride the next
+       * tagged line (a later burst line, the EB, any timer send) with
+       * this user's sessid. */
       if (IsIRCv3Aware(cptr))
         bounce_set_n_sessid_hint(acptr);
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
