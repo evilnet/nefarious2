@@ -1784,6 +1784,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_multi_msgid(cptr)[0] = '\0';
   cli_s2s_client_tags(cptr)[0] = '\0';
   cli_s2s_sessid(cptr)[0] = '\0';
+  cli_s2s_ml(cptr)[0] = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1835,6 +1836,8 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
            * ',<marker><data>' where data runs until the next ',' or
            * tagend. Marker is a single ASCII char identifying the
            * segment type:
+           *   S — bouncer session-identity hint
+           *   M — multiline framing, <flag><batchref> (ML lines only)
            *   C — client-only tags (literal IRCv3 client-tag string)
            * Unknown markers are silently skipped (forward-compatible
            * for future segments).
@@ -1891,6 +1894,32 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
                   data_len < sizeof(con_s2s_sessid(cli_connect(cptr)))) {
                 memcpy(cli_s2s_sessid(cptr), seg_data, data_len);
                 cli_s2s_sessid(cptr)[data_len] = '\0';
+              }
+              break;
+            }
+            case 'M': {
+              /* Multiline framing (audit 0.1): one flag byte ('+'
+               * start, 'c' concat, '-' end, '.' plain) followed by the
+               * batch reference.  Carrying it here instead of in the
+               * ML body keeps that body one byte longer than the
+               * client's PRIVMSG, so a client line at the maximum
+               * crosses the link whole.  ms_multiline reads it, and
+               * its presence is what tells that handler the body is
+               * "<target> :<text>" rather than the older
+               * "<flag><ref> <target> :<text>".  Needs a flag and at
+               * least one reference byte.  A segment that is present
+               * but unusable (empty, or too long for the buffer) is
+               * stored as "?", a flag no sender emits, so the handler
+               * drops the line instead of misreading its body as the
+               * older form. */
+              size_t data_len = seg_end - seg_data;
+              if (data_len >= 2 &&
+                  data_len < sizeof(con_s2s_ml(cli_connect(cptr)))) {
+                memcpy(cli_s2s_ml(cptr), seg_data, data_len);
+                cli_s2s_ml(cptr)[data_len] = '\0';
+              } else {
+                cli_s2s_ml(cptr)[0] = '?';
+                cli_s2s_ml(cptr)[1] = '\0';
               }
               break;
             }

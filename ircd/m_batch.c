@@ -2691,24 +2691,36 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 /*
  * ms_multiline - server message handler for S2S multiline batch
  *
- * P10 Format:
+ * P10 Format, tag-framed (audit 0.1): the batch reference and its flag
+ * ride in the S2S tag region as ,M<flag><batchref> (parse_server stores
+ * it in cli_s2s_ml), the start line's client-only tags as ,C, and the
+ * body is one byte longer than the client's PRIVMSG:
+ *   @A...,M+batchid[,C<tags>] [USER_NUMERIC] ML target :first_line
+ *   @A...,M.batchid [USER_NUMERIC] ML target :line   (normal continuation)
+ *   @A...,Mcbatchid [USER_NUMERIC] ML target :line   (concat continuation)
+ *   @A...,M-batchid [USER_NUMERIC] ML target :[url]  (end batch)
+ *   parv[1] = target, parv[2] = text (may be empty for end)
+ *
+ * Body-framed (older senders, and any sender whose next hop gets no
+ * S2S tag region):
  *   [USER_NUMERIC] ML +batchid target :first_line   (start batch + first line)
  *   [USER_NUMERIC] ML batchid target :line          (normal continuation)
  *   [USER_NUMERIC] ML cbatchid target :line         (concat continuation)
  *   [USER_NUMERIC] ML -batchid target :             (end batch)
  *   [USER_NUMERIC] ML +batchid @tags target :text   (start with client tags)
+ *   parv[1] = batch_id with modifier (+, c, or -)
+ *   parv[2] = target (or @client-tags on start, then target shifts to parv[3])
+ *   parv[3] = text (may be empty for end)
  *
- * parv[0] = sender prefix
- * parv[1] = batch_id with modifier (+, c, or -)
- * parv[2] = target (or @client-tags on start, then target shifts to parv[3])
- * parv[3] = text (may be empty for end)
+ * The ,M segment's presence decides the form, line by line.  Client tags
+ * come from ,C when present, else from the body form's @ parameter.
  */
 int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  char *batch_ref;
+  const char *batch_ref;
   char *target;
   char *text;
-  char *client_tags = NULL;
+  const char *client_tags = NULL;
   int is_start = 0, is_end = 0, is_concat = 0;
   struct S2SMultilineBatch *batch;
 
@@ -2736,36 +2748,62 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   if (!IsUser(sptr))
     return protocol_violation(cptr, "Non-user sending MULTILINE");
 
-  if (parc < 3)
-    return 0;
+  if (cli_s2s_ml(cptr)[0]) {
+    /* Tag-framed: flag and reference from ,M; parv[1] is the target. */
+    const char *ml = cli_s2s_ml(cptr);
 
-  batch_ref = parv[1];
+    switch (ml[0]) {
+    case '+': is_start = 1; break;
+    case '-': is_end = 1; break;
+    case 'c': is_concat = 1; break;
+    case '.': break;
+    default:
+      return 0;  /* unknown flag, or a malformed ,M (see parse_server) */
+    }
+    batch_ref = ml + 1;
 
-  /* Parse batch modifier */
-  if (batch_ref[0] == '+') {
-    is_start = 1;
-    batch_ref++;
-  } else if (batch_ref[0] == '-') {
-    is_end = 1;
-    batch_ref++;
-  } else if (batch_ref[0] == 'c') {
-    is_concat = 1;
-    batch_ref++;
+    if (parc < 2 || EmptyString(parv[1]))
+      return 0;
+    target = parv[1];
+    text = (parc >= 3 && !EmptyString(parv[2])) ? parv[2] : "";
+  } else {
+    /* Body-framed: flag and reference lead parv[1]. */
+    if (parc < 3)
+      return 0;
+
+    batch_ref = parv[1];
+
+    /* Parse batch modifier */
+    if (batch_ref[0] == '+') {
+      is_start = 1;
+      batch_ref++;
+    } else if (batch_ref[0] == '-') {
+      is_end = 1;
+      batch_ref++;
+    } else if (batch_ref[0] == 'c') {
+      is_concat = 1;
+      batch_ref++;
+    }
+
+    /* Check for client-only tags (@-prefixed param, only on start
+     * messages).  Kept for older senders, which put them here. */
+    if (is_start && parc >= 4 && parv[2][0] == '@') {
+      client_tags = parv[2] + 1;  /* skip @ prefix */
+      target = parv[3];
+      text = (parc >= 5 && !EmptyString(parv[4])) ? parv[4] : "";
+    } else {
+      target = parv[2];
+      text = (parc >= 4 && !EmptyString(parv[3])) ? parv[3] : "";
+    }
   }
 
   if (EmptyString(batch_ref))
     return 0;
 
-  /* Check for client-only tags (@-prefixed param, only on start messages) */
-  client_tags = NULL;
-  if (is_start && parc >= 4 && parv[2][0] == '@') {
-    client_tags = parv[2] + 1;  /* skip @ prefix */
-    target = parv[3];
-    text = (parc >= 5 && !EmptyString(parv[4])) ? parv[4] : "";
-  } else {
-    target = parv[2];
-    text = (parc >= 4 && !EmptyString(parv[3])) ? parv[3] : "";
-  }
+  /* Client-only tags in the ,C segment (audit 0.1) take precedence over
+   * the body form; only a start line carries them. */
+  if (is_start && cli_s2s_client_tags(cptr)[0])
+    client_tags = cli_s2s_client_tags(cptr);
 
   /* Propagate ML tokens only to multiline-capable servers.
    * Legacy servers don't understand the ML token and silently drop it.
@@ -2796,6 +2834,18 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
                       batch_ref, target, text);
       }
     }
+  }
+
+  /* A tag-framed continuation or end line restates the batch's msgid
+   * and time in its @A prefix only because version-A tags must carry
+   * one; it is not an event of its own.  Once relayed, clear them so
+   * the rest of this line's handling sees what an untagged continuation
+   * always left: on the end line, deliver_s2s_multiline_batch's
+   * fallback PRIVMSGs after the first take their tags from this link
+   * and must keep minting their own msgids, not repeat the batch's. */
+  if (cli_s2s_ml(cptr)[0] && !is_start) {
+    cli_s2s_msgid(cptr)[0] = '\0';
+    cli_s2s_time_ms(cptr) = 0;
   }
 
   if (is_start) {

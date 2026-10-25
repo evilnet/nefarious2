@@ -467,6 +467,8 @@ struct Connection
  *  id (<=S2S_SESSID_BUFSIZE-1).  Worst case: two session-id halves. */
 #define PM_PAIRKEY_BUFSIZE (2 * S2S_SESSID_BUFSIZE + 2)   /* = 82 */
   char                con_s2s_sessid[S2S_SESSID_BUFSIZE]; /**< S2S compact-tag ,S<sessid> segment from incoming message — bouncer session identity hint per redesign A.2 */
+#define S2S_ML_BUFSIZE 32  /**< ML framing: one flag byte + a multiline batch reference (senders use <=15) + NUL */
+  char                con_s2s_ml[S2S_ML_BUFSIZE]; /**< S2S compact-tag ,M<flag><batchref> segment (multiline framing, audit 0.1); empty when absent */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
@@ -695,6 +697,8 @@ struct Client {
 #define cli_s2s_client_tags(cli) con_s2s_client_tags(cli_connect(cli))
 /** Get bouncer session ID hint from compact-tag ,S segment of incoming S2S message (per redesign A.2) */
 #define cli_s2s_sessid(cli)      con_s2s_sessid(cli_connect(cli))
+/** Get multiline framing (flag + batch reference) from compact-tag ,M segment of incoming S2S message */
+#define cli_s2s_ml(cli)          con_s2s_ml(cli_connect(cli))
 /** Get per-Client session ID (UUID v7 base64 — generated at make_client, adopted by bouncer on resume). */
 #define cli_session_id(cli)      ((cli)->cli_session_id)
 /** Get S2S batch ID from server */
@@ -1026,6 +1030,8 @@ struct Client {
 #define con_s2s_client_tags(con) ((con)->con_s2s_client_tags)
 /** Get the bouncer session ID hint from compact-tag ,S segment of incoming S2S message. */
 #define con_s2s_sessid(con)      ((con)->con_s2s_sessid)
+/** Get the multiline framing (flag + batch reference) from compact-tag ,M segment of incoming S2S message. */
+#define con_s2s_ml(con)          ((con)->con_s2s_ml)
 /** Get the S2S batch ID from server. */
 #define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
 /** Get the S2S batch type from server. */
