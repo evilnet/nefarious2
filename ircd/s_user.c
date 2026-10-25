@@ -1317,18 +1317,32 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       /* Generate msgid for NICK change so clients get @msgid tag */
       {
         char nick_msgid[64] = "";
+        /* The event's ONE msgid and time, from one source.  A remote
+         * nick change reuses the tags its NICK line carried (cptr's
+         * stash), so all servers share one id -- but only while cptr's
+         * link is the one whose line is being handled.  SVSNICK passes
+         * the target user as cptr, and its stash is the target's link's
+         * last line, wherever the SVSNICK came from: another event,
+         * whose msgid and time the NICK went out and was stored under.
+         * Without such a source, mint, as for a local change. */
+        struct Client *tag_src = (!MyUser(sptr)
+                                  && sendcmdto_inbound_link()
+                                  && cli_from(cptr) == sendcmdto_inbound_link()
+                                  && cli_s2s_msgid(cptr)[0]) ? cptr : NULL;
+        uint64_t nick_ms;
+
         if (feature_bool(FEAT_MSGID)) {
-          /* Unified msgid: reuse the incoming S2S msgid for remote
-           * nick changes so all servers share one id. */
-          if (!MyUser(sptr) && cli_s2s_msgid(cptr)[0])
-            ircd_strncpy(nick_msgid, cli_s2s_msgid(cptr), sizeof(nick_msgid));
+          if (tag_src)
+            ircd_strncpy(nick_msgid, cli_s2s_msgid(tag_src), sizeof(nick_msgid));
           else
             generate_msgid(nick_msgid, sizeof(nick_msgid));
-          /* One time per event: the origin's tag time for a remote nick
-           * change, the msgid's mint time for a local one. */
-          sendcmdto_set_client_event(nick_msgid,
-                                     history_event_time_ms(MyUser(sptr) ? NULL : cptr));
         }
+        /* After any mint: the origin's tag time for a reused msgid, the
+         * mint time for a minted one.  The live NICK, the stored rows
+         * and the relay all carry it. */
+        nick_ms = history_event_time_ms(tag_src);
+        if (feature_bool(FEAT_MSGID))
+          sendcmdto_set_client_event(nick_msgid, nick_ms);
 
         /* If sender has a labeled-response label, send them a labeled NICK
          * echo first, then skip them in the broadcast to other members. */
@@ -1359,8 +1373,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
                         cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->host);
 
           /* Same event time the live NICK was tagged with (above) */
-          history_format_ms(timestamp, sizeof(timestamp),
-                            history_event_time_ms(MyUser(sptr) ? NULL : cptr));
+          history_format_ms(timestamp, sizeof(timestamp), nick_ms);
 
           for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
@@ -1377,8 +1390,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       if (nick_msgid[0]) {
         /* The same event time the rows were stored with (above), so every
          * server stores this msgid at ONE time (audit 2026-09-06 #16). */
-        sendcmdto_set_s2s_tags(history_event_time_ms(MyUser(sptr) ? NULL : cptr),
-                               nick_msgid);
+        sendcmdto_set_s2s_tags(nick_ms, nick_msgid);
         sendcmdto_want_s2s_tags(1);
       }
       }
