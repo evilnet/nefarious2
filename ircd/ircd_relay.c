@@ -1348,12 +1348,17 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
        * (per p10-compact-client-tags plan). */
       /* Locally minted: this message's own id and time ride the wire,
        * not whatever was last parsed off the destination link -- also
-       * when an alias sends as its remote primary. */
-      if (pm_msgid[0])
+       * when an alias sends as its remote primary.  A local target takes
+       * the same time on its @time (the client event; a remote target's
+       * send ignores it), cleared right after the send. */
+      if (pm_msgid[0]) {
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
         sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+      }
       sendcmdto_one_tags_with_client(from, CMD_PRIVATE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
     }
   }
 
@@ -1361,6 +1366,12 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   bounce_forward_pm_to_aliases(sptr, acptr, NULL, CMD_PRIVATE, mytext,
                                pm_msgid, history_parse_ms(pm_timestamp),
                                cli_client_tags(sptr));
+
+  /* The session echo and the sender's own echo carry the event's time
+   * too.  Armed here, apart from the forward (its local sends clear the
+   * client event), and cleared right after the echoes. */
+  if (pm_msgid[0])
+    sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing PM to other members of the sender's bouncer session */
   bounce_echo_pm_to_session(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
@@ -1406,6 +1417,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                                "%C :%s", acptr, mytext);
       }
     }
+    sendcmdto_set_client_msgid(NULL);
 
     /* Store private message in history database (if enabled) */
     if (pm_msgid[0])
@@ -1448,6 +1460,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                                "%C :%s", acptr, mytext);
       }
     }
+    sendcmdto_set_client_msgid(NULL);
   }
 #endif
 }
@@ -1560,12 +1573,16 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
        * @A...,C<client_tags> compact-tag prefix.  Locally minted: this
        * message's own id and time ride the wire, not whatever was last
        * parsed off the destination link -- also when an alias sends as
-       * its remote primary. */
-      if (pm_msgid[0])
+       * its remote primary.  A local target takes the same time on its
+       * @time (see relay_private_message). */
+      if (pm_msgid[0]) {
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
         sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+      }
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
     }
   }
 
@@ -1573,6 +1590,11 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   bounce_forward_pm_to_aliases(sptr, acptr, NULL, CMD_NOTICE, mytext,
                                pm_msgid, history_parse_ms(pm_timestamp),
                                cli_client_tags(sptr));
+
+  /* The session echo and the sender's own echo carry the event's time
+   * (see relay_private_message). */
+  if (pm_msgid[0])
+    sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing notice to other members of the sender's bouncer session */
   bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
@@ -1586,6 +1608,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
                              "%C :%s", acptr, mytext);
     }
+    sendcmdto_set_client_msgid(NULL);
 
     /* Store private notice in history database (if enabled) */
     if (pm_msgid[0])
@@ -1599,6 +1622,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
                              "%C :%s", acptr, mytext);
     }
+    sendcmdto_set_client_msgid(NULL);
   }
 #endif
 }
