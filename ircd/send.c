@@ -2171,9 +2171,17 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
  * just don't receive the emission at all, saving wire bytes and avoiding
  * the 512-byte pre-strip line limit risk.
  *
- * BX (BOUNCER_TRANSFER) is the explicit exception — it must reach legacy
- * peers (which have been patched to handle BX P numeric swaps) and stays
- * on the unconditional sendcmdto_serv_butone() path.
+ * BX (BOUNCER_TRANSFER) P is the explicit exception — only the P
+ * subcommand (in-place numeric swap / membership transfer) must reach
+ * legacy peers, which have been patched to handle it, and that emission
+ * stays on the unconditional sendcmdto_serv_butone() path (paired, where
+ * the originating emission isn't already P, through
+ * sendcmdto_legacy_serv_butone()). Every other BX subcommand (C, U, X, N,
+ * V, and the unknown-subcommand relay) is fork-only noise to a legacy
+ * peer — its m_bouncer_transfer.c processes only P and silently relays
+ * the rest (design intent #7, bouncer-architecture skill) — so those
+ * sites use this function like any other fork-only P10 token (Task 9,
+ * W1 wire hygiene).
  *
  * Implementation note: this function duplicates the body of
  * sendcmdto_serv_butone() rather than calling it through a static gate

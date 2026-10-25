@@ -1390,7 +1390,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       if (MyUser(sptr) && IsAccount(sptr)) {
         struct BouncerSession *bsess = bounce_get_session(sptr);
         if (bsess && bsess->hs_alias_count > 0) {
-          sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cptr,
+          sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, cptr,
                                 "N %s%s %s %Tu",
                                 cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
                                 nick, cli_lastnick(sptr));

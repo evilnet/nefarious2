@@ -1007,7 +1007,7 @@ int exit_client(struct Client *cptr,
     char client_full[6];
     ircd_snprintf(0, client_full, sizeof(client_full), "%s%s",
                   cli_yxx(cli_user(victim)->server), cli_yxx(victim));
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cli_from(killer),
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, cli_from(killer),
                           "X %s", client_full);
   }
 

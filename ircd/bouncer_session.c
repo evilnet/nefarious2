@@ -933,7 +933,7 @@ void bounce_visibility_membership(const char *alias_full,
     return;
 
   /* Broadcast to peers first so they apply concurrently. */
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                         "V %s %c%s", alias_full, add ? '+' : '-', channel);
 
   alias = findNUser(alias_full);
@@ -1142,7 +1142,7 @@ static void bounce_emit_session_kc_id(struct BouncerSession *session)
     return;   /* before SetLocalNumNick: the BS A after it carries it */
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(primary)->server), cli_yxx(primary));
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                         "U %s kcid=%s", full_numeric, session->hs_kc_id);
 }
 
@@ -5473,7 +5473,7 @@ static void bounce_emit_total_active(struct BouncerSession *session)
     return;
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(primary)->server), cli_yxx(primary));
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                         "U %s ta=%Tu", full_numeric, session->hs_total_active);
 }
 
@@ -5488,7 +5488,7 @@ static void bounce_emit_connect_count(struct BouncerSession *session)
     return;
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(primary)->server), cli_yxx(primary));
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                         "U %s cc=%u", full_numeric, session->hs_connect_count);
 }
 
@@ -6654,7 +6654,7 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
     }
 
     alias_modes = umode_str(demoted_alias);
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "C %s %s %s %s %s%s :%s",
                           primary_full, alias_full,
                           session->hs_account, session->hs_sessid,
@@ -7340,7 +7340,7 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
         && !feature_bool(FEAT_EXTENDED_ACCOUNTS))
       continue;
 
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "U %s %s=%s",
                           sess->hs_aliases[i].ba_numeric, field, value);
   }
@@ -7450,7 +7450,7 @@ void bounce_emit_alias_caps(struct Client *cptr)
     }
   }
 
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                         "U %s caps=%s", full_numeric, hex);
 }
 
@@ -8112,7 +8112,7 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
   default:
     Debug((DEBUG_INFO, "BX: unknown subcommand '%c' from %C", subcmd, sptr));
     /* Forward unknown subcommands for future compatibility */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "%s", parv[1]);
     return 0;
   }
@@ -8574,13 +8574,18 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
      * peers parse the modes-version and ignore the profile token;
      * new peers consume both.
      *
-     * BX C goes to all peers; modern peers process via bounce_alias_create
-     * to convert sptr in place to an alias of `primary`.  Legacy peers
-     * (evilnet/nefarious2 master with m_bouncer_transfer.c) silently drop
-     * BX C — but they already counted sptr via Count_newremoteclient when
-     * its N arrived earlier in this connection, so their UserStats.clients
-     * and nick-hash now have a stranded entry that BX C alone can't clean
-     * up.
+     * BX C goes only to IRCv3-aware peers (sendcmdto_serv_butone_v3,
+     * Task 9): modern peers process via bounce_alias_create to convert
+     * sptr in place to an alias of `primary`.  Legacy peers (evilnet/
+     * nefarious2 master with m_bouncer_transfer.c) never understood BX C
+     * in the first place — their handler processes only P and relays
+     * everything else unexamined — so sending it to them was always pure
+     * noise; before Task 9 it rode the unconditional sendcmdto_serv_butone()
+     * path anyway.  Legacy peers already counted sptr via
+     * Count_newremoteclient when its N arrived earlier in this connection,
+     * so their UserStats.clients and nick-hash have a stranded entry that
+     * only the paired BX P below (not BX C, which they'd have ignored
+     * regardless) cleans up.
      *
      * Paired BX P emission to legacy peers (see
      * .claude/para/projects/legacy-bx-p-in-place-conversion.md): the
@@ -8600,7 +8605,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
       const char *alias_profile = cli_active_profile(sptr)[0]
                                     ? cli_active_profile(sptr)
                                     : PERSISTENCE_PROFILE_DEFAULT;
-      sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+      sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                              "C %s %s %s %s %s%s %s :%s",
                              primary_full,
                              alias_full,
@@ -9205,12 +9210,12 @@ track_alias:
 forward:
   /* Forward to other servers — include modes if present */
   if (alias_modes && *alias_modes)
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "C %s %s %s %s %s :%s",
                           primary_numeric, alias_numeric, account, sessid,
                           alias_modes, chanlist);
   else
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "C %s %s %s %s :%s",
                           primary_numeric, alias_numeric, account, sessid, chanlist);
 
@@ -9419,7 +9424,7 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
   remove_client_from_list(target);
 
 forward:
-  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+  sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                         "X %s", target_numeric);
   return 0;
 }
@@ -9478,7 +9483,7 @@ static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr,
   }
 
 forward:
-  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+  sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                         "N %s %s %s", parv[2], parv[3], parv[4]);
   return 0;
 }
@@ -9629,7 +9634,7 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
     if (!is_replay)
       defer_bx_for_alias(alias_numeric, cptr, sptr, parc, parv);
     if (!is_replay)
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                             "U %s %s", parv[2], parv[3]);
     return 0;
   }
@@ -9662,7 +9667,7 @@ forward:
   /* Forward only on first arrival.  Replay skips since the original
    * arrival already broadcast — re-running here would duplicate. */
   if (!is_replay)
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "U %s %s", parv[2], parv[3]);
   return 0;
 }
@@ -10758,7 +10763,7 @@ static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr,
     if (!is_replay)
       defer_bx_for_alias(parv[2], cptr, sptr, parc, parv);
     if (!is_replay)
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                             "V %s %s", parv[2], parv[3]);
     return 0;
   }
@@ -10769,7 +10774,7 @@ static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr,
 
   /* Forward only on first arrival. */
   if (!is_replay)
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "V %s %s", parv[2], parv[3]);
   return 0;
 }
@@ -10977,7 +10982,7 @@ void bounce_note_away_state(struct Client *who, int state)
     return;
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(who)->server), cli_yxx(who));
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                         "U %s aw=%d", full_numeric, state);
 }
 
@@ -11023,7 +11028,7 @@ void bounce_record_activity(struct Client *from)
               && CurrentTime - sess->hs_aliases[i].ba_last_active_emitted
                  >= bounce_activity_quiet(cli_user(from)->account)) {
             sess->hs_aliases[i].ba_last_active_emitted = CurrentTime;
-            sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+            sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                                   "U %s la=%lu", full_numeric,
                                   (unsigned long)CurrentTime);
           }
@@ -11044,7 +11049,7 @@ void bounce_record_activity(struct Client *from)
             && CurrentTime - sess->hs_last_active_emitted
                >= bounce_activity_quiet(cli_user(from)->account)) {
           sess->hs_last_active_emitted = CurrentTime;
-          sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+          sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
                                 "U %s%s la=%lu",
                                 cli_yxx(cli_user(from)->server), cli_yxx(from),
                                 (unsigned long)CurrentTime);
