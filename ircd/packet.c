@@ -98,6 +98,11 @@ int server_dopacket(struct Client* cptr, const char* buffer, int length)
          * the line is handled: mark the link for that span and no
          * longer, so nothing after it (or a link that died in it)
          * reads the stash as a current line's. */
+        /* Clear a leftover S2S override before this line too, in case
+         * something armed one outside a parsed line (e.g. a timer or
+         * callback) with no per-line reset to follow; this never
+         * touches client_msgid_override / client_event_ms. */
+        sendcmdto_reset_s2s_overrides();
         sendcmdto_set_inbound_link(cptr);
         rc = parse_server(cptr, cli_buffer(cptr), endp);
         sendcmdto_set_inbound_link(NULL);
