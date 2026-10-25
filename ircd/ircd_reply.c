@@ -132,10 +132,7 @@ static char *reply_tags(struct Client *to, char *buf, size_t buflen)
       buf[pos] = '\0';
     }
     return buf;
-  } else if (feature_bool(FEAT_P10_MESSAGE_TAGS) &&
-             IsIRCv3Aware(cli_from(to)) &&
-             cli_from(to) == sendcmdto_inbound_link() &&
-             cli_s2s_msgid(cli_from(to))[0]) {
+  } else if (IsIRCv3Aware(cli_from(to))) {
     /* Remote recipient: echo compact tag for correlation.
      * In P10 tree topology, cli_from(to) is the server link that delivered
      * the forwarded command, and its cli_s2s_msgid/time_ms hold the
@@ -143,11 +140,14 @@ static char *reply_tags(struct Client *to, char *buf, size_t buflen)
      * handled.  A reply sent at any other time (a timer, a callback,
      * while handling another link's line) would carry whatever that link
      * sent last and correlate with the wrong command, so it goes
-     * untagged.  The next hop must also be IRCv3-aware (audit 1.5) -- a
-     * legacy peer never parses the @A... prefix, so emitting one toward
-     * it only spends bytes against its 512-byte line limit for nothing.
+     * untagged (format_s2s_tags_current returns NULL).  The tag is built
+     * from that stash alone: an S2S override armed for some other send
+     * must never replace the id this reply answers.  The next hop must
+     * also be IRCv3-aware -- a legacy peer never parses the @A... prefix,
+     * so emitting one toward it only spends bytes against its 512-byte
+     * line limit for nothing.
      */
-    return format_s2s_tags(buf, buflen, cli_from(to), NULL, 0);
+    return format_s2s_tags_current(buf, buflen, cli_from(to));
   }
 
   return NULL;

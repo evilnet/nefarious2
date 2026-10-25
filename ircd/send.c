@@ -168,8 +168,8 @@ struct Client *sendcmdto_inbound_link(void)
 /** Whether \a cptr's stash holds the tags of the line being handled:
  * \a cptr is the inbound link, or a client behind it (cli_connect of a
  * remote client is its link's connection, so their stash is the
- * link's). */
-static int s2s_stash_is_current(struct Client *cptr)
+ * link's).  The one gate for every reader of a link's stash. */
+int sendcmdto_stash_is_current(struct Client *cptr)
 {
   return cptr && s2s_inbound_link && cli_from(cptr) == s2s_inbound_link;
 }
@@ -745,7 +745,7 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
    * it holds whatever that link sent last -- another event, so reading
    * it gave, e.g., a bouncer alias's message on this server the msgid
    * of its primary's previous message on the primary's server. */
-  stash = s2s_stash_is_current(cptr);
+  stash = sendcmdto_stash_is_current(cptr);
 
   /* Sessid (,S): the current line's own hint, else the explicit
    * override.  Empty → no ,S segment.  Per redesign A.2: bouncer
@@ -799,6 +799,39 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
            has_sessid ? ",S" : "", has_sessid ? sessid_tag : "",
            has_ml ? ",M" : "", has_ml ? mlbuf : "",
            has_ctags ? ",C" : "", has_ctags ? client_tags : "");
+  return buf;
+}
+
+/** Format the compact tag region of the line being handled, from
+ * \a link's stash alone: @A<time_7><msgid_14>[,S<sessid>].
+ *
+ * For a reply that must echo the id of the line it answers (the
+ * correlation a forwarded labeled command waits for): unlike
+ * format_s2s_tags_with_client, no override is read or consumed, so an
+ * id armed for some other send can never take the place of the one the
+ * reply answers.
+ * @param[out] buf Buffer for tag string (includes trailing space).
+ * @param[in] buflen Size of buffer.
+ * @param[in] link Server link the answered line arrived on.
+ * @return Pointer to buf, or NULL if P10_MESSAGE_TAGS is off, \a link's
+ *   line is not the one being handled, or its stash holds no msgid.
+ */
+char *format_s2s_tags_current(char *buf, size_t buflen, struct Client *link)
+{
+  char time_b64[8];
+  uint64_t epoch_ms;
+  int has_sessid;
+
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS) || !sendcmdto_stash_is_current(link)
+      || !cli_s2s_msgid(link)[0])
+    return NULL;
+
+  epoch_ms = cli_s2s_time_ms(link) ? cli_s2s_time_ms(link)
+                                   : hlc_global()->physical_ms;
+  has_sessid = (cli_s2s_sessid(link)[0] != '\0');
+  inttobase64_64(time_b64, epoch_ms, 7);
+  snprintf(buf, buflen, "@A%s%s%s%s ", time_b64, cli_s2s_msgid(link),
+           has_sessid ? ",S" : "", has_sessid ? cli_s2s_sessid(link) : "");
   return buf;
 }
 

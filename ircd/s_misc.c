@@ -830,6 +830,7 @@ int exit_client(struct Client *cptr,
   struct Client* acptr = 0;
   struct DLink *dlp;
   time_t on_for;
+  int quit_armed = 0;   /* this exit armed the QUIT's S2S msgid/time */
 
   char comment1[HOSTLEN + HOSTLEN + 2];
   assert(killer);
@@ -1049,14 +1050,22 @@ int exit_client(struct Client *cptr,
 	 * gate would never admit it.  A remote victim's are its own QUIT
 	 * line's tags: its link is the inbound one while that line is
 	 * handled. */
-	if (MyConnect(victim))
+	if (MyConnect(victim)) {
 	  sendcmdto_set_s2s_tags(cli_s2s_time_ms(victim), cli_s2s_msgid(victim));
-	else
+	  quit_armed = 1;
+	} else
 	  sendcmdto_set_s2s_cptr(victim);
 	sendcmdto_one(victim, CMD_QUIT, dlp->value.cptr, ":%s", comment);
       }
     }
   }
+  /* sendcmdto_one consumes the armed msgid/time on its fast path, but
+   * not when a session-id hint sends it down the general path, and an
+   * exit from a timer (a ping-out, a hold expiry) has no per-line reset
+   * after it: clear the QUIT's arm here so it cannot stamp a later,
+   * unrelated server-bound line. */
+  if (quit_armed)
+    sendcmdto_set_s2s_tags(0, NULL);
   /* Then remove the client structures */
   if (IsServer(victim)) {
     char netsplit_batch_id[32] = "";

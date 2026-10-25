@@ -1326,8 +1326,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
          * whose msgid and time the NICK went out and was stored under.
          * Without such a source, mint, as for a local change. */
         struct Client *tag_src = (!MyUser(sptr)
-                                  && sendcmdto_inbound_link()
-                                  && cli_from(cptr) == sendcmdto_inbound_link()
+                                  && sendcmdto_stash_is_current(cptr)
                                   && cli_s2s_msgid(cptr)[0]) ? cptr : NULL;
         uint64_t nick_ms;
 

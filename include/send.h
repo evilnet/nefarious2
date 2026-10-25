@@ -124,6 +124,16 @@ extern void s2s_mint_link_event(struct Client *link);
  * (client lines, timers, callbacks). */
 extern void sendcmdto_set_inbound_link(struct Client *link);
 extern struct Client *sendcmdto_inbound_link(void);
+/* Whether cptr's S2S stash is the tags of the line being handled: cptr
+ * is the inbound link or a client behind it.  The one gate for every
+ * reader of a link's stash. */
+extern int sendcmdto_stash_is_current(struct Client *cptr);
+/* The tag region of the line being handled, from the link's stash alone
+ * (@A<time><msgid>[,S<sessid>]); no override is read or consumed.  For
+ * replies that echo the answered line's id.  NULL when tags are off, the
+ * link's line is not the current one, or its stash holds no msgid. */
+extern char *format_s2s_tags_current(char *buf, size_t buflen,
+                                     struct Client *link);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,
