@@ -436,12 +436,16 @@ int server_finish_burst(struct Client *cptr)
       if (cli_sslclifp(acptr) && !EmptyString(cli_sslclifp(acptr))) {
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_SSLCLIFP, cli_sslclifp(acptr));
-        if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(acptr) > 0)
+        /* SSLCLIEXP and WEBSOCKET are fork-only MARK types; a legacy
+         * next hop doesn't understand them, so skip them in the burst
+         * to a non-IRCv3-aware peer (wire-hygiene rule). */
+        if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(acptr) > 0 &&
+            IsIRCv3Aware(cptr))
           sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%lu",
                         cli_name(acptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(acptr));
       }
 
-      if (!EmptyString(cli_wsorigin(acptr)))
+      if (!EmptyString(cli_wsorigin(acptr)) && IsIRCv3Aware(cptr))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_WEBSOCKET, cli_wsorigin(acptr));
 

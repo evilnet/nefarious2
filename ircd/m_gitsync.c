@@ -419,6 +419,15 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return send_reply(sptr, ERR_NOSUCHSERVER, target);
       }
       if (!IsMe(acptr)) {
+        /* GITSYNC is a fork-only P10 token; a legacy next hop doesn't
+         * know it and would just drop it as noise, but the
+         * wire-hygiene rule is that a legacy peer never receives what
+         * it does not understand, so refuse the oper's request up
+         * front instead of sending it. */
+        if (!IsIRCv3Aware(cli_from(acptr)))
+          return send_reply(sptr, SND_EXPLICIT | ERR_NOSUCHSERVER,
+                             "%s :Server does not take GITSYNC over a legacy link",
+                             cli_name(acptr));
         /* Forward to remote server */
         if (subarg)
           sendcmdto_one(sptr, CMD_GITSYNC, acptr, "%C %s %s", acptr, action, subarg);
@@ -712,8 +721,10 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       acptr = find_match_server(target);
 
     if (!acptr || !IsMe(acptr)) {
-      /* Not for us, forward */
-      if (acptr) {
+      /* Not for us, forward -- unless the next hop toward it is a
+       * legacy (non-IRCv3-aware) link, in which case drop the forward:
+       * GITSYNC is a fork-only token that link doesn't understand. */
+      if (acptr && IsIRCv3Aware(cli_from(acptr))) {
         if (subarg)
           sendcmdto_one(sptr, CMD_GITSYNC, acptr, "%C %s %s", acptr, action, subarg);
         else

@@ -343,17 +343,103 @@ void client_check_privs(struct Client *client, struct Client *replyto)
   }
 }
 
+/** Return true if \a name identifies a privilege that exists only in
+ * this fork's priv table (not in upstream nefarious2's) and must never
+ * reach a legacy (non-IRCv3-aware) server link.  Currently only
+ * GITSYNC. */
+int priv_is_fork_only(const char *name)
+{
+  return name && 0 == ircd_strcmp(name, "GITSYNC");
+}
+
+/** Copy the whitespace-separated PRIVS token list \a in into \a out,
+ * dropping any token that names only fork-only privileges.
+ *
+ * Each whitespace-separated token may carry a leading '+' or '-' (as
+ * used by the PRIVS wire format to add/remove privileges) followed by
+ * either a single privilege name or a comma-separated list of names
+ * sharing that one sign.  A token made entirely of fork-only names is
+ * dropped outright; a mixed token keeps its sign and its surviving
+ * names.  \a out is always nul-terminated; it is the empty string if
+ * every token was dropped.
+ */
+void privs_strip_fork_only(const char *in, char *out, size_t outlen)
+{
+  char work[BUFSIZE];
+  char *tok, *save_tok = 0;
+  size_t pos = 0;
+
+  if (!out || outlen == 0)
+    return;
+  out[0] = '\0';
+  if (!in || !*in)
+    return;
+
+  ircd_strncpy(work, in, sizeof(work));
+
+  for (tok = ircd_strtok(&save_tok, work, " "); tok;
+       tok = ircd_strtok(&save_tok, 0, " ")) {
+    char sign = '\0';
+    char *names = tok;
+    char kept[BUFSIZE];
+    size_t klen = 0;
+    char *name, *save_name = 0;
+    size_t need;
+
+    if (*names == '+' || *names == '-') {
+      sign = *names;
+      names++;
+    }
+    if (!*names)
+      continue;
+
+    kept[0] = '\0';
+    for (name = ircd_strtok(&save_name, names, ","); name;
+         name = ircd_strtok(&save_name, 0, ",")) {
+      size_t nlen;
+
+      if (priv_is_fork_only(name))
+        continue;
+      nlen = strlen(name);
+      if (klen + (klen ? 1 : 0) + nlen + 1 > sizeof(kept))
+        break;
+      if (klen)
+        kept[klen++] = ',';
+      memcpy(kept + klen, name, nlen);
+      klen += nlen;
+      kept[klen] = '\0';
+    }
+
+    if (!klen)
+      continue; /* whole token named only fork-only privs */
+
+    need = (sign ? 1 : 0) + klen + 1; /* + trailing space */
+    if (pos + need >= outlen)
+      break;
+    if (sign)
+      out[pos++] = sign;
+    memcpy(out + pos, kept, klen);
+    pos += klen;
+    out[pos++] = ' ';
+  }
+
+  out[pos] = '\0';
+}
+
 void client_send_privs(struct Client *from, struct Client *to, struct Client *client)
 {
   int i, p;
   int mlen = NICKLEN + 5 + NICKLEN + 7;
   static char privbuf[BUFSIZE] = "";
+  int skip_fork_only = !IsIRCv3Aware(cli_from(to));
 
   memset(&privbuf, 0, BUFSIZE);
   p = 1; /* Count the victim too */
 
   for (i = 0; privtab[i].name; i++) {
     if (HasPriv(client, privtab[i].priv)) {
+      if (skip_fork_only && priv_is_fork_only(privtab[i].name))
+        continue;
       if ((p >= MAXPARA) || (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen)) {
         p = 1;
         sendcmdto_one(from, CMD_PRIVS, to, "%C %s", client, privbuf);
@@ -367,7 +453,7 @@ void client_send_privs(struct Client *from, struct Client *to, struct Client *cl
 
   if (strlen(privbuf) > 0) {
     sendcmdto_one(from, CMD_PRIVS, to, "%C %s", client, privbuf);
-  }    
+  }
 }
 
 void client_sendtoserv_privs(struct Client *client)
@@ -375,6 +461,7 @@ void client_sendtoserv_privs(struct Client *client)
   int i, p;
   int mlen = NICKLEN + 5 + NICKLEN + 7;
   static char privbuf[BUFSIZE] = "";
+  char legacybuf[BUFSIZE];
 
   memset(&privbuf, 0, BUFSIZE);
   p = 1;
@@ -383,7 +470,10 @@ void client_sendtoserv_privs(struct Client *client)
     if (HasPriv(client, privtab[i].priv)) {
       if ((p >= MAXPARA) || (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen)) {
         p = 1;
-        sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+        sendcmdto_serv_butone_v3(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+        privs_strip_fork_only(privbuf, legacybuf, sizeof(legacybuf));
+        if (legacybuf[0])
+          sendcmdto_legacy_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, legacybuf);
         memset(&privbuf, 0, BUFSIZE);
       }
       p++;
@@ -393,7 +483,10 @@ void client_sendtoserv_privs(struct Client *client)
   }
 
   if (strlen(privbuf) > 0) {
-    sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+    sendcmdto_serv_butone_v3(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+    privs_strip_fork_only(privbuf, legacybuf, sizeof(legacybuf));
+    if (legacybuf[0])
+      sendcmdto_legacy_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, legacybuf);
   }
 }
 

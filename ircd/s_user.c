@@ -1045,11 +1045,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_sslclifp(sptr) && !EmptyString(cli_sslclifp(sptr))) {
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_SSLCLIFP, cli_sslclifp(sptr));
       if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(sptr) > 0)
-        sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%lu", cli_name(cptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(sptr));
+        sendcmdto_serv_butone_v3(&me, CMD_MARK, cptr, "%s %s :%lu", cli_name(cptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(sptr));
     }
 
     if (!EmptyString(cli_wsorigin(sptr)))
-      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBSOCKET, cli_wsorigin(sptr));
+      sendcmdto_serv_butone_v3(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBSOCKET, cli_wsorigin(sptr));
 
     if (cli_version(sptr) && !EmptyString(cli_version(sptr))) {
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_CVERSION, cli_version(sptr));

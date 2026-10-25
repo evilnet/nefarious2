@@ -1752,5 +1752,14 @@ extern char *client_print_privs(struct Client *client);
 extern int client_modify_priv_by_name(struct Client *who, char *priv, int what);
 extern int clear_privs(struct Client *who);
 
+/* True for a privilege name that exists only in this fork's priv table
+ * (currently GITSYNC) and must never reach a legacy (non-IRCv3-aware)
+ * server link. */
+extern int priv_is_fork_only(const char *name);
+/* Copy the whitespace-separated PRIVS token list \a in into \a out,
+ * dropping any token (optionally '+'/'-'-prefixed, and/or a
+ * comma-separated name list) that names a fork-only privilege. */
+extern void privs_strip_fork_only(const char *in, char *out, size_t outlen);
+
 #endif /* INCLUDED_client_h */
 
