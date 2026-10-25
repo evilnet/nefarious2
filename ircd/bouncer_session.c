@@ -8574,27 +8574,21 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
      * peers parse the modes-version and ignore the profile token;
      * new peers consume both.
      *
-     * BX C goes only to IRCv3-aware peers (sendcmdto_serv_butone_v3,
-     * Task 9): modern peers process via bounce_alias_create to convert
-     * sptr in place to an alias of `primary`.  Legacy peers (evilnet/
-     * nefarious2 master with m_bouncer_transfer.c) never understood BX C
-     * in the first place — their handler processes only P and relays
-     * everything else unexamined — so sending it to them was always pure
-     * noise; before Task 9 it rode the unconditional sendcmdto_serv_butone()
-     * path anyway.  Legacy peers already counted sptr via
-     * Count_newremoteclient when its N arrived earlier in this connection,
-     * so their UserStats.clients and nick-hash have a stranded entry that
-     * only the paired BX P below (not BX C, which they'd have ignored
-     * regardless) cleans up.
+     * BX C goes only to IRCv3-aware peers (sendcmdto_serv_butone_v3):
+     * modern peers process it via bounce_alias_create, which creates their
+     * copy of sptr as an alias of `primary`.  A legacy peer (evilnet/nefarious2
+     * master with m_bouncer_transfer.c) acts only on BX P and relays
+     * everything else unexamined, so BX C is pure noise to it.  Nor does
+     * a legacy peer know sptr at all: register_user() takes this alias
+     * path and returns before its N broadcast (s_user.c), so no N for
+     * sptr ever left this server and no legacy peer counted it.
      *
      * Paired BX P emission to legacy peers (see
-     * .claude/para/projects/legacy-bx-p-in-place-conversion.md): the
-     * legacy BX P swap path finds both `alias_full` (old, the N-introduced
-     * client) and `primary_full` (new, the existing primary) on the legacy
-     * peer, transfers any channels from old to new, and exit_client's
-     * old with "Bouncer transfer".  Net: legacy peer's count decrements,
-     * nick-hash entry clears, no spurious user-visible QUIT (old and new
-     * share channels in our case).
+     * .claude/para/projects/legacy-bx-p-in-place-conversion.md): its old
+     * numeric is `alias_full`, which no legacy peer has seen (above), so
+     * the legacy handler's findNUser(old) misses and it only relays the
+     * line onward (m_bouncer_transfer.c: no old client -> relay).  On
+     * this path the pair changes no legacy state.
      *
      * Both emissions are sourced from &me — the server itself, not the
      * alias — so the alias→primary egress rewrite (invariant #10) does
@@ -8617,7 +8611,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
                              chanlist_buf);
       sendcmdto_legacy_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                              "P %s %s %s %s",
-                             alias_full,         /* old: the N-introduced numeric */
+                             alias_full,         /* old: this alias (never N-introduced) */
                              primary_full,       /* new: the existing primary */
                              session->hs_sessid,
                              cli_name(primary));

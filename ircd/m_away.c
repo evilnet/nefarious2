@@ -161,8 +161,10 @@ const char *away_text_for(struct Client *viewer, const char *away)
   return (word && *word) ? word : away;
 }
 
-/** Broadcast an away-state change to other servers: the single place
- *  that owns the wire body for CMD_AWAY toward the rest of the mesh.
+/** Broadcast an away-state change to other servers: the wire body for
+ *  CMD_AWAY toward the rest of the mesh, for local changes and relays
+ *  alike -- except a legacy sender's literal "*", which ms_away relays
+ *  verbatim itself (see below).
  *  @a away NULL or "" means present; the literal "*" means the
  *  pre-away star (draft/pre-away, "hidden" rather than invisible);
  *  anything else is a normal away message.
@@ -190,9 +192,16 @@ const char *away_text_for(struct Client *viewer, const char *away)
  *
  *  This is purely the fork-origin substitution: a caller relaying an
  *  AWAY that arrived with a literal "*" from a non-IRCv3-aware link
- *  must NOT route it through here (see the ms_away origin check) --
- *  that star is the sender's own legacy away-message text, not the
- *  pre-away token, and must cross every further hop unchanged. */
+ *  must NOT route it through here -- that star is the sender's own
+ *  legacy away-message text, not the pre-away token, and must cross
+ *  every further hop unchanged.  ms_away tells the two apart by the
+ *  link the AWAY arrived on, not by the sender's own server.  That is
+ *  right on the graph prod runs (fork servers contiguous, legacy peers
+ *  only at its edge): a legacy user's star that reaches a second fork
+ *  server through the first arrives on an aware link and is taken for
+ *  the pre-away token, which would show that server's own legacy peers
+ *  the configured word -- and no fork server behind another one has a
+ *  legacy peer there. */
 void away_send_to_servers(struct Client *from, struct Client *one,
                           const char *away)
 {

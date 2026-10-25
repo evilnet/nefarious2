@@ -99,10 +99,12 @@ extern int away_apply(struct Client *cptr, struct Client *sptr,
  * relayed as away "*"; only a client that did not negotiate draft/pre-away
  * is shown FEAT_AWAY_STAR_MSG instead, at the moment we write to it. */
 extern const char *away_text_for(struct Client *viewer, const char *away);
-/* The only place that sends CMD_AWAY to other servers: substitutes
- * FEAT_AWAY_STAR_MSG for legacy peers when away is the pre-away star.
- * NULL/"" away is "no longer away"; see ircd/m_away.c for the full
- * contract (including the never-arm-s2s_alias_source rule). */
+/* Sends CMD_AWAY to other servers, for local away changes and relays
+ * alike: substitutes FEAT_AWAY_STAR_MSG for legacy peers when away is
+ * the pre-away star.  Not the only CMD_AWAY sender: ms_away relays a
+ * legacy sender's literal "*" verbatim itself, judged by the link it
+ * arrived on.  NULL/"" away is "no longer away"; see ircd/m_away.c for
+ * the full contract (including the never-arm-s2s_alias_source rule). */
 extern void away_send_to_servers(struct Client *from, struct Client *one,
                                  const char *away);
 extern void away_notify_common(struct Client *sptr, struct Client *one,

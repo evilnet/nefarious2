@@ -2179,9 +2179,9 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
  * sendcmdto_legacy_serv_butone()). Every other BX subcommand (C, U, X, N,
  * V, and the unknown-subcommand relay) is fork-only noise to a legacy
  * peer — its m_bouncer_transfer.c processes only P and silently relays
- * the rest (design intent #7, bouncer-architecture skill) — so those
- * sites use this function like any other fork-only P10 token (Task 9,
- * W1 wire hygiene).
+ * the rest (.claude/para/areas/bouncer-design-intent.md, invariant #7:
+ * "Legacy wire vocabulary is BX P only") — so those sites use this
+ * function like any other fork-only P10 token.
  *
  * Implementation note: this function duplicates the body of
  * sendcmdto_serv_butone() rather than calling it through a static gate
@@ -2341,8 +2341,8 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
  *   - BX P (`CMD_BOUNCER_TRANSFER` subcommand 'P') — in-place numeric
  *     swap or membership transfer-and-kill via legacy m_bouncer_transfer.c.
  *   - SVSINFO (ghost realname sync).
- *   - PRIVS (oper-privilege sync, Task 7).
- *   - AWAY (the pre-away star, substituted to FEAT_AWAY_STAR_MSG; Task 8).
+ *   - PRIVS (oper-privilege sync, fork-only privileges stripped).
+ *   - AWAY (the pre-away star, substituted to FEAT_AWAY_STAR_MSG).
  * The rule for adding a new one: only a line a legacy peer's own handler
  * parses and acts on correctly belongs here, and it must never carry
  * tags — everything else (BX C / X / A / K / U / M / E, and any other
@@ -2406,9 +2406,10 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
   }
 
   /* Legacy-only downlink dispatch: skip IRCv3-aware peers entirely
-   * (they receive the corresponding BX C through the unconditional or
-   * _v3 path; this helper exists solely to feed legacy peers the BX P
-   * they can process). */
+   * (they get the fork form of the same event from the caller's paired
+   * _v3 or unconditional send).  What goes here is only the legacy form
+   * a legacy peer's own handler acts on -- BX P, SVSINFO, PRIVS, AWAY,
+   * per the header above -- and it is never tagged. */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     if (one && lp->value.cptr == cli_from(one))
       continue;
