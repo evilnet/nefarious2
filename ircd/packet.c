@@ -101,7 +101,22 @@ int server_dopacket(struct Client* cptr, const char* buffer, int length)
         return exit_dead_client(cptr, "Dead socket");
       endp = client_buffer;
     }
-    else if (endp < client_buffer + BUFSIZE)
+    /* Keep the whole line up to FULL_MSG_SIZE - 1 bytes (tags
+     * included), leaving room for the NUL this loop never writes but
+     * callers (parse_server via cli_buffer) rely on `con_buffer`
+     * holding at index FULL_MSG_SIZE - 1 at most -- `con_buffer` is
+     * sized exactly FULL_MSG_SIZE (client.h). recv_classify.c already
+     * kills a link whose tag region exceeds 8191 bytes or whose body
+     * exceeds 512 off the wire; this is just the reader no longer
+     * discarding bytes recv_classify already accepted.
+     *
+     * Residue (not fixed here): a line at both per-region caps
+     * (8191 tag + 1 space + 512 body = 8704 bytes) still loses its
+     * last 2 bytes against this 8702-byte bound -- FULL_MSG_SIZE
+     * (8703) is one byte short of that worst case. No fork sender
+     * comes near it today (outbound tag regions stay well under
+     * ~4.2 KB), so it's recorded rather than fixed. */
+    else if (endp < client_buffer + FULL_MSG_SIZE - 1)
       ++endp;                   /* There is always room for the null */
   }
   cli_count(cptr) = endp - cli_buffer(cptr);
