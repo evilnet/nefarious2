@@ -1777,7 +1777,9 @@ void bounce_prune_stale_aliases(void)
  * runs bounce_set_n_sessid_hint), so a remote primary belonging to
  * the same bouncer session has the same sessid; a non-bouncer
  * account-bearing client minted its own sessid and won't match —
- * legitimately independent presences are left alone.
+ * legitimately independent presences are left alone.  The candidate's
+ * home server must also be IRCv3-aware: a legacy home has no sessions
+ * and never runs this pass.
  *
  * Tie-break: older cli_lastnick wins the primary slot.  Equal: lex on
  * full numeric (same rule as D.2 at m_nick.c:580+).
@@ -1828,6 +1830,15 @@ void bounce_post_burst_reconcile(void)
           if (acptr == local_primary) continue;
           if (!IsUser(acptr) || !IsAccount(acptr)) continue;
           if (IsBouncerAlias(acptr) || IsBouncerHold(acptr)) continue;
+          /* A candidate homed on a legacy server is never merged in, as
+           * D.2 skips a legacy introducer (m_nick.c): a legacy home
+           * never runs the symmetric pass, so the "we win" side would
+           * wait for a demote that never comes, and "we lose" would
+           * hand the session to a client that is not in it.  Its
+           * session id proves nothing either: a legacy server sends
+           * none, and the one it carries was stamped by whichever fork
+           * server relayed its N. */
+          if (!IsIRCv3Aware(cli_user(acptr)->server)) continue;
           if (0 != ircd_strcmp(cli_account(acptr), s->hs_account)) continue;
           if (!cli_session_id(acptr)[0]) continue;
           if (0 != strcmp(cli_session_id(acptr), s->hs_sessid)) continue;
@@ -6483,6 +6494,11 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
 
   if (!acptr || !new_primary_server)
     return -1;
+  /* Never demote into a primary on a legacy server: it is not a session
+   * member (a legacy server has no sessions), and it cannot carry the
+   * session's aliases (BX C never reaches it). */
+  if (!IsIRCv3Aware(new_primary_server))
+    return -1;
   if (!IsUser(acptr) || !IsAccount(acptr))
     return -1;
   if (IsBouncerAlias(acptr) || IsBouncerHold(acptr))
@@ -10974,11 +10990,11 @@ struct BouncerSession *bounce_find_any_session(const char *account)
 
 /** Set the S2S sessid override for an outgoing N introduction.
  *
- * Looks up the client's bouncer session (if any) and stages the
- * sessid for inclusion as the ,S compact-tag segment on the next
- * S2S emit.  No-op for non-bouncer clients (no session → no override
- * → no ,S segment in tag).  Per redesign A.2: bouncer-aware peers
- * use this hint at-N-time for convergence dispatch in m_nick.
+ * Stages the client's session id for the ,S compact-tag segment of the
+ * next S2S emit: its bouncer session's hs_sessid when it is a member of
+ * one, else its own cli_session_id.  Per redesign A.2: bouncer-aware
+ * peers use this hint at-N-time for convergence dispatch in m_nick and
+ * in the post-burst reconcile.
  */
 void bounce_set_n_sessid_hint(struct Client *cptr)
 {
@@ -10987,26 +11003,30 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
   if (!cptr || !IsUser(cptr))
     return;
 
-  /* Prefer the bouncer session's hs_sessid when this user is bound to
-   * a session — either directly (bounce_attached as primary or alias)
-   * or via account-match.  The account-match lookup catches the
-   * burst-time case where a local user registered *before* a remote
-   * BS C arrived announcing their account's bouncer session: the
-   * Client's cli_session_id is its make_client mint (unrelated to the
-   * session), but the receiver-side rebind needs sessid_match against
-   * the held ghost's hs_sessid.  Without this, the rebind auth gate
-   * fell back to acc_create_match — too coarse, can rebind unrelated
-   * non-bouncer connections that happen to share an account.  See
-   * .claude/para/projects/bouncer-burst-rebind-sessid-gap.md.
+  /* Only a member of the session carries its id: the primary, the held
+   * ghost, or a connection on the session's alias roster -- exactly what
+   * bounce_get_session() finds.  A peer that receives this id treats the
+   * client as part of the session (the rebind auth gate, D.2, the
+   * post-burst reconcile), so naming a non-member here hands the session
+   * to it.
    *
-   * For non-bouncer authed clients (account exists but no session
-   * record on the network), we fall through to cli_session_id which
-   * is the locally-minted per-Client identifier — receiver won't
-   * sessid_match any existing session and won't rebind. */
+   * 8cf493c added an account fallback: a client in no session took the
+   * id of any session of its account.  It served a local user who had
+   * registered while a peer it could not reach held its account's
+   * session: the user stayed sessionless, and at the relink its burst N
+   * needed the held ghost's id for the peer's rebind, which the fallback
+   * read from the replica of that session this server still kept from
+   * before the split.  841f3ce made that case unreachable: SQUIT now
+   * destroys a replica with no local holder, so no record is left to
+   * read at the relink burst, and bounce_auto_resume discards an
+   * unattachable replica, so a login that sees one gets a session of its
+   * own.  What the fallback still reached was the harmful case: a
+   * same-account client that is NOT in the session -- an alt on a legacy
+   * server whose N we relay, or a connection that never joined -- was
+   * stamped with the session's id, and a fork peer then merged the live
+   * session into it. */
   if (IsAccount(cptr)) {
     bs = bounce_get_session(cptr);
-    if (!bs && cli_user(cptr) && cli_user(cptr)->account[0])
-      bs = bounce_find_any_session(cli_user(cptr)->account);
     if (bs && bs->hs_sessid[0]) {
       sendcmdto_set_s2s_sessid(bs->hs_sessid);
       return;

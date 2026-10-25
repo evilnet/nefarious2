@@ -1038,9 +1038,10 @@ extern void bounce_kill_session(struct BouncerSession *session,
  * bouncer-aware peers receive the session-identity hint via the
  * compact-tag ,S segment (per redesign A.2).
  *
- * No-op for clients without a bouncer session.  The override
- * auto-clears after format_s2s_tags_with_client consumes it during
- * the next sendcmdto_* call.
+ * A session member (primary, held ghost, roster alias) carries its
+ * session's hs_sessid; any other client its own cli_session_id.  The
+ * override auto-clears after format_s2s_tags_with_client consumes it
+ * during the next sendcmdto_* call.
  *
  * @param[in] cptr Client about to be N-introduced.
  */
@@ -1348,7 +1349,8 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
  *
  * @param[in] acptr Live local primary to demote.
  * @param[in] new_primary_server The introducing server (becomes session origin).
- * @return 0 on success, -1 on no matching session or non-primary input.
+ * @return 0 on success, -1 on no matching session, non-primary input,
+ *         or a new primary homed on a server that is not IRCv3-aware.
  */
 extern int bounce_demote_live_primary_to_alias(struct Client *acptr,
                                                struct Client *new_primary_server);
