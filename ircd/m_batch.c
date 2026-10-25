@@ -891,6 +891,68 @@ format_time_tag(char *buf, size_t buflen)
            tv.tv_usec / 1000);
 }
 
+/** Send one S2S multiline (ML) line toward \a server (audit 0.1).
+ *
+ * Toward a link that gets the S2S tag region (send_s2s_tags_on), the
+ * framing rides in the tags and the body is one byte longer than the
+ * client's PRIVMSG, so a client line at the 510-byte maximum crosses
+ * whole under the receiver's 512-byte tagged cap:
+ *   @A<time><msgid>,M<flag><ref>[,C<ctags>] <num> ML <target> :<text>
+ * Otherwise -- tags off, a peer that is not IRCv3-aware, or no msgid to
+ * restate -- the body form, byte for byte what was sent before:
+ *   [@A<time><msgid>] <num> ML +<ref> [@<ctags>] <target> :<text>  (start)
+ *   <num> ML [c|-]<ref> <target> :<text>                       (others)
+ *
+ * Every tag-framed line restates the batch's ONE msgid and time
+ * (\a msgid / \a time_ms): a version-A tag region must carry one, and
+ * minting a fresh id per line would break one msgid per event.  The
+ * start line arms them exactly as before (sendcmdto_set_s2s_tags); the
+ * other lines arm the same values again, consumed by the same send.
+ *
+ * @param[in] from Sender (source numeric on the wire).
+ * @param[in] server Destination link.
+ * @param[in] flag '+' start, 'c' concat, '-' end, '.' plain.
+ * @param[in] batch_ref S2S batch reference.
+ * @param[in] target Channel name or nick.
+ * @param[in] ctags Client-only tags (start line only; NULL or "" for none).
+ * @param[in] text Line text (end line: the paste URL or "").
+ * @param[in] time_ms Batch event time (epoch ms).
+ * @param[in] msgid Batch msgid, or NULL/"" when none is known.
+ */
+static void
+ml_send_line(struct Client *from, struct Client *server, char flag,
+             const char *batch_ref, const char *target, const char *ctags,
+             const char *text, uint64_t time_ms, const char *msgid)
+{
+  int has_msgid = (msgid && *msgid);
+
+  if (flag != '+')
+    ctags = NULL;  /* only a start line carries client tags */
+
+  if (has_msgid && send_s2s_tags_on(server)) {
+    sendcmdto_set_s2s_tags(time_ms, msgid);
+    sendcmdto_set_s2s_ml(flag, batch_ref);
+    sendcmdto_one_tags_with_client(from, CMD_MULTILINE, server, NULL,
+                                   ctags, "%s :%s", target, text);
+    return;
+  }
+
+  if (flag == '+') {
+    if (has_msgid)
+      sendcmdto_set_s2s_tags(time_ms, msgid);
+    if (ctags && *ctags)
+      sendcmdto_one(from, CMD_MULTILINE, server, "+%s @%s %s :%s",
+                    batch_ref, ctags, target, text);
+    else
+      sendcmdto_one(from, CMD_MULTILINE, server, "+%s %s :%s",
+                    batch_ref, target, text);
+  } else {
+    sendcmdto_one(from, CMD_MULTILINE, server, "%s%s %s :%s",
+                  flag == '-' ? "-" : (flag == 'c' ? "c" : ""),
+                  batch_ref, target, text);
+  }
+}
+
 /** Process and deliver a completed multiline batch */
 static int
 process_multiline_batch(struct Client *sptr)
@@ -1238,31 +1300,17 @@ process_multiline_batch(struct Client *sptr)
               for (lp = con_ml_messages(con); lp; lp = lp->next) {
                 int concat = lp->value.cp[0];
                 char *text = lp->value.cp + 1;
-                if (first) {
-                  const char *ctags = con_ml_client_tags(con);
-                  sendcmdto_set_s2s_tags(batch_time_ms, batch_base_msgid);
-                  if (ctags && *ctags)
-                    sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
-                                  "+%s @%s %s :%s",
-                                  fwd_batch_id, ctags, cli_name(alias), text);
-                  else
-                    sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
-                                  "+%s %s :%s",
-                                  fwd_batch_id, cli_name(alias), text);
-                  first = 0;
-                } else if (concat) {
-                  sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
-                                "c%s %s :%s",
-                                fwd_batch_id, cli_name(alias), text);
-                } else {
-                  sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
-                                "%s %s :%s",
-                                fwd_batch_id, cli_name(alias), text);
-                }
+                ml_send_line(sptr, alias_server,
+                             first ? '+' : (concat ? 'c' : '.'),
+                             fwd_batch_id, cli_name(alias),
+                             con_ml_client_tags(con), text,
+                             batch_time_ms, batch_base_msgid);
+                first = 0;
               }
-              sendcmdto_one(sptr, CMD_MULTILINE, alias_server, "-%s %s :%s",
-                            fwd_batch_id, cli_name(alias),
-                            batch_paste_url ? batch_paste_url : "");
+              ml_send_line(sptr, alias_server, '-', fwd_batch_id,
+                           cli_name(alias), NULL,
+                           batch_paste_url ? batch_paste_url : "",
+                           batch_time_ms, batch_base_msgid);
             } else {
               /* Legacy alias server: per-line PRIVMSG/NOTICE.  Receiver
                * has no multiline state — delivers each line as a regular
@@ -1443,33 +1491,24 @@ process_multiline_batch(struct Client *sptr)
                     cli_yxx(sptr), (unsigned long)CurrentTime);
 
       if (IsServer(target_server) && IsMultiline(target_server)) {
-        /* Send ML tokens to capable server.
-         * Set S2S tags on start token for unified msgid delivery. */
+        /* Send ML tokens to capable server.  Every line carries the
+         * batch's msgid (unified delivery) and, toward a tag-carrying
+         * link, its framing in the tag region (ml_send_line). */
         first = 1;
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          if (first) {
-            const char *ctags = con_ml_client_tags(con);
-            sendcmdto_set_s2s_tags(batch_time_ms, batch_base_msgid);
-            if (ctags[0])
-              sendcmdto_one(sptr, CMD_MULTILINE, target_server, "+%s @%s %s :%s",
-                            s2s_batch_id, ctags, cli_name(acptr), text);
-            else
-              sendcmdto_one(sptr, CMD_MULTILINE, target_server, "+%s %s :%s",
-                            s2s_batch_id, cli_name(acptr), text);
-            first = 0;
-          } else if (concat) {
-            sendcmdto_one(sptr, CMD_MULTILINE, target_server, "c%s %s :%s",
-                          s2s_batch_id, cli_name(acptr), text);
-          } else {
-            sendcmdto_one(sptr, CMD_MULTILINE, target_server, "%s %s :%s",
-                          s2s_batch_id, cli_name(acptr), text);
-          }
+          ml_send_line(sptr, target_server,
+                       first ? '+' : (concat ? 'c' : '.'),
+                       s2s_batch_id, cli_name(acptr),
+                       con_ml_client_tags(con), text,
+                       batch_time_ms, batch_base_msgid);
+          first = 0;
         }
-        sendcmdto_one(sptr, CMD_MULTILINE, target_server, "-%s %s :",
-                      s2s_batch_id, cli_name(acptr));
+        ml_send_line(sptr, target_server, '-', s2s_batch_id,
+                     cli_name(acptr), NULL, "",
+                     batch_time_ms, batch_base_msgid);
       } else {
         /* Send fallback PRIVMSGs to legacy server.  Wire is BOUNDED
          * by max_preview + 1 NOTICE, so this does not suppress the
@@ -1566,35 +1605,25 @@ process_multiline_batch(struct Client *sptr)
           from = sptr;  /* use alias numeric toward primary's server */
 
       if (IsMultiline(server)) {
-        /* Send ML tokens to capable servers.
-         * Set S2S tags on the start token so the receiving server can
-         * extract the batch's msgid and reuse it (unified delivery). */
+        /* Send ML tokens to capable servers.  Every line carries the
+         * batch's msgid, which the receiving server reuses (unified
+         * delivery), and, toward a tag-carrying link, its framing in
+         * the tag region (ml_send_line). */
         first = 1;
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          if (first) {
-            const char *ctags = con_ml_client_tags(con);
-            sendcmdto_set_s2s_tags(batch_time_ms, batch_base_msgid);
-            if (ctags[0])
-              sendcmdto_one(from, CMD_MULTILINE, server, "+%s @%s %s :%s",
-                            s2s_batch_id, ctags, chptr->chname, text);
-            else
-              sendcmdto_one(from, CMD_MULTILINE, server, "+%s %s :%s",
-                            s2s_batch_id, chptr->chname, text);
-            first = 0;
-          } else if (concat) {
-            sendcmdto_one(from, CMD_MULTILINE, server, "c%s %s :%s",
-                          s2s_batch_id, chptr->chname, text);
-          } else {
-            sendcmdto_one(from, CMD_MULTILINE, server, "%s %s :%s",
-                          s2s_batch_id, chptr->chname, text);
-          }
+          ml_send_line(from, server,
+                       first ? '+' : (concat ? 'c' : '.'),
+                       s2s_batch_id, chptr->chname,
+                       con_ml_client_tags(con), text,
+                       batch_time_ms, batch_base_msgid);
+          first = 0;
         }
-        sendcmdto_one(from, CMD_MULTILINE, server, "-%s %s :%s",
-                      s2s_batch_id, chptr->chname,
-                      batch_paste_url ? batch_paste_url : "");
+        ml_send_line(from, server, '-', s2s_batch_id, chptr->chname, NULL,
+                     batch_paste_url ? batch_paste_url : "",
+                     batch_time_ms, batch_base_msgid);
       } else {
         /* Send fallback PRIVMSGs to legacy servers (once per server,
          * not per user).  Wire is BOUNDED by max_preview + 1 NOTICE,
@@ -2809,30 +2838,38 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
    * Legacy servers don't understand the ML token and silently drop it.
    * Fallback PRIVMSGs for legacy servers are sent from
    * deliver_s2s_multiline_batch() when the batch completes.
-   * Set S2S tags on start token to carry the originating msgid. */
+   *
+   * Each line carries the originating server's batch msgid and time
+   * forward: the ones on this line (a start line, or a tag-framed line
+   * restating them), else -- an older sender's untagged continuation --
+   * the ones stored with the batch here.  With neither, ml_send_line
+   * keeps the body form rather than mint an id.  Toward a tag-carrying
+   * link the framing and client tags go in the tag region (audit 0.1). */
   {
     struct DLink *lp;
+    const char *fwd_msgid = NULL;
+    uint64_t fwd_time_ms = 0;
+    char flag = is_start ? '+' : (is_end ? '-' : (is_concat ? 'c' : '.'));
+
+    if (cli_s2s_msgid(cptr)[0]) {
+      fwd_msgid = cli_s2s_msgid(cptr);
+      fwd_time_ms = cli_s2s_time_ms(cptr);
+    } else if (!is_start) {
+      struct S2SMultilineBatch *known = find_s2s_multiline_batch(batch_ref);
+      if (known && known->msgid[0]) {
+        fwd_msgid = known->msgid;
+        fwd_time_ms = known->time_ms;
+      }
+    }
+
     for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
       struct Client *srv = lp->value.cptr;
       if (srv == cli_from(cptr))
         continue;  /* Don't send back to source */
       if (!IsMultiline(srv))
         continue;  /* Legacy server — handled by fallback at batch end */
-      if (is_start) {
-        /* Carry the originating server's msgid forward */
-        if (cli_s2s_msgid(cptr)[0])
-          sendcmdto_set_s2s_tags(cli_s2s_time_ms(cptr), cli_s2s_msgid(cptr));
-        if (client_tags && *client_tags)
-          sendcmdto_one(sptr, CMD_MULTILINE, srv, "+%s @%s %s :%s",
-                        batch_ref, client_tags, target, text);
-        else
-          sendcmdto_one(sptr, CMD_MULTILINE, srv, "+%s %s :%s",
-                        batch_ref, target, text);
-      } else {
-        sendcmdto_one(sptr, CMD_MULTILINE, srv, "%s%s %s :%s",
-                      is_end ? "-" : (is_concat ? "c" : ""),
-                      batch_ref, target, text);
-      }
+      ml_send_line(sptr, srv, flag, batch_ref, target, client_tags, text,
+                   fwd_time_ms, fwd_msgid);
     }
   }
 

@@ -143,6 +143,13 @@ static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
  * Auto-cleared after use. */
 static char s2s_sessid_override[S2S_SESSID_BUFSIZE] = "";
 
+/** Multiline framing (compact-tag ,M segment: flag + batch reference)
+ * for the next S2S emit that builds the tag region.  Armed by the ML
+ * senders in m_batch.c (audit 0.1), consumed by
+ * format_s2s_tags_with_client and cleared by
+ * sendcmdto_one_tags_with_client whether or not it was used. */
+static char s2s_ml_override[S2S_ML_BUFSIZE] = "";
+
 /** Override msgid for client-side channel broadcasts.
  * When non-empty, format_message_tags_ex includes msgid for clients with
  * message-tags capability. Auto-cleared after channel broadcast completes.
@@ -234,6 +241,36 @@ void sendcmdto_set_s2s_sessid(const char *sessid)
     ircd_strncpy(s2s_sessid_override, sessid, sizeof(s2s_sessid_override));
   else
     s2s_sessid_override[0] = '\0';
+}
+
+/** Arm the multiline framing segment ,M<flag><batch_ref> for the next
+ * S2S emit (audit 0.1).  \a flag is '+' (start), 'c' (concat), '-'
+ * (end) or '.' (plain).  Only meaningful right before a
+ * sendcmdto_one_tags_with_client() call toward a link for which
+ * send_s2s_tags_on() holds: that call places ,M before ,C in the tag
+ * region and clears the override either way.  A NULL or empty
+ * \a batch_ref disarms. */
+void sendcmdto_set_s2s_ml(char flag, const char *batch_ref)
+{
+  if (batch_ref && *batch_ref) {
+    s2s_ml_override[0] = flag;
+    ircd_strncpy(s2s_ml_override + 1, batch_ref, sizeof(s2s_ml_override) - 1);
+  } else
+    s2s_ml_override[0] = '\0';
+}
+
+/** Whether a line sent toward \a to through
+ * sendcmdto_one_tags_with_client() carries the S2S compact tag region:
+ * the next hop is a server link (or &me) that speaks IRCv3 S2S tags,
+ * and P10_MESSAGE_TAGS is on.  A caller that frames a line differently
+ * with and without the tag region (ML, audit 0.1) decides with this,
+ * and sendcmdto_one_tags_with_client() decides with it too, so the two
+ * can never disagree. */
+int send_s2s_tags_on(struct Client *to)
+{
+  to = cli_from(to);
+  return (IsServer(to) || IsMe(to)) && IsIRCv3Aware(to)
+         && feature_bool(FEAT_P10_MESSAGE_TAGS);
 }
 
 /** Pre-built S2S tag prefix for multi-msgid scenarios (e.g. batched CREATE/PART).
@@ -509,10 +546,12 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
 
 /** Format message tags for S2S relay including optional client-only tags.
  * Produces compact P10-native wire encoding:
- *   @A<time_b64_7><msgid_14>[,C<client_tags>]
+ *   @A<time_b64_7><msgid_14>[,S<sessid>][,M<flag><batchref>][,C<client_tags>]
  * The ,C<client_tags> segment is appended only when client_tags is non-NULL
  * and non-empty. Receivers parse it into cli_s2s_client_tags(cptr) for
- * forwarding to local recipients.
+ * forwarding to local recipients.  ,S and ,M come from their armed
+ * overrides (sendcmdto_set_s2s_sessid, sendcmdto_set_s2s_ml), ,S also
+ * from cptr.
  *
  * Sized for callers that need to accommodate up to 4094 bytes of client
  * tags (IRCv3 cap) plus the compact prefix; recommend buf ≥ 4128 bytes
@@ -534,15 +573,25 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   char time_b64[8];
   char msgidbuf[S2S_MSGID_BUFSIZE];
   char sessidbuf[S2S_SESSID_BUFSIZE];
+  char mlbuf[S2S_ML_BUFSIZE];
   uint64_t epoch_ms;
   const char *msgid_tag = NULL;
   const char *sessid_tag = NULL;
   int has_ctags = (client_tags && *client_tags);
   int has_sessid;
+  int has_ml;
 
   /* Check if P10 message tags are enabled */
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
     return NULL;
+
+  /* Multiline framing (audit 0.1): only ever the explicit override --
+   * a relay re-arms it per line, so nothing is carried over from cptr. */
+  has_ml = (s2s_ml_override[0] != '\0');
+  if (has_ml) {
+    ircd_strncpy(mlbuf, s2s_ml_override, sizeof(mlbuf));
+    s2s_ml_override[0] = '\0';  /* auto-clear after consumption */
+  }
 
   /* Sessid: prefer preserved from incoming, then explicit override.
    * Empty → no ,S segment.  Per redesign A.2: bouncer session-identity
@@ -580,24 +629,20 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
     ircd_strncpy(msgid_out, msgid_tag, msgid_out_len);
   }
 
-  /* Compact format: @A<time_7><msgid_14>[,S<sessid>][,C<client_tags>]
+  /* Compact format:
+   *   @A<time_7><msgid_14>[,S<sessid>][,M<flag><batchref>][,C<client_tags>]
    *
-   * Segments are appended in order: ,S before ,C.  ,C is always the
-   * LAST segment and must never be followed by another segment: a
-   * client-tag value may itself contain a comma, so receivers read
-   * ,C to the end of the tag region rather than stopping at the
-   * next comma (audit 0.1). Emit order otherwise is conventional
-   * for readability in raw S2S logs. */
+   * Segments are appended in order: ,S, then ,M, then ,C.  ,C is
+   * always the LAST segment and must never be followed by another
+   * segment: a client-tag value may itself contain a comma, so
+   * receivers read ,C to the end of the tag region rather than
+   * stopping at the next comma (audit 0.1). Emit order otherwise is
+   * conventional for readability in raw S2S logs. */
   inttobase64_64(time_b64, epoch_ms, 7);
-  if (has_sessid && has_ctags)
-    snprintf(buf, buflen, "@A%s%s,S%s,C%s ", time_b64, msgid_tag,
-             sessid_tag, client_tags);
-  else if (has_sessid)
-    snprintf(buf, buflen, "@A%s%s,S%s ", time_b64, msgid_tag, sessid_tag);
-  else if (has_ctags)
-    snprintf(buf, buflen, "@A%s%s,C%s ", time_b64, msgid_tag, client_tags);
-  else
-    snprintf(buf, buflen, "@A%s%s ", time_b64, msgid_tag);
+  snprintf(buf, buflen, "@A%s%s%s%s%s%s%s%s ", time_b64, msgid_tag,
+           has_sessid ? ",S" : "", has_sessid ? sessid_tag : "",
+           has_ml ? ",M" : "", has_ml ? mlbuf : "",
+           has_ctags ? ",C" : "", has_ctags ? client_tags : "");
   return buf;
 }
 
@@ -1526,7 +1571,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   struct VarData vd;
   struct MsgBuf *mb;
   char tagbuf[4608];
-  char s2s_tagbuf[4200];     /* fits @A prefix + ,C<4094-byte client_tags> */
+  char s2s_tagbuf[4256];     /* fits @A prefix + ,S + ,M + ,C<4095-byte client_tags> */
   char *tags;
   int prio;
   int has_ctags = (client_tags && *client_tags);
@@ -1552,7 +1597,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
      * cptr carries none. */
     struct Client *tag_cptr = s2s_cptr_override;
     s2s_cptr_override = NULL;
-    if (IsIRCv3Aware(to) &&
+    if (send_s2s_tags_on(to) &&
         format_s2s_tags_with_client(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr,
                                     has_ctags ? client_tags : NULL,
                                     NULL, 0)) {
@@ -1593,6 +1638,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   s2s_cptr_override = NULL;
   s2s_msgid_override[0] = '\0';
   s2s_time_override = 0;
+  s2s_ml_override[0] = '\0';
 }
 
 /** Send a (prefixed) command to a single local client with message tags,

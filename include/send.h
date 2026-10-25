@@ -89,6 +89,13 @@ extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
  * S2S emit.  Per redesign A.2: bouncer-aware peers receive sessid for at-N-time
  * convergence dispatch in m_nick.  Auto-cleared after consumption. */
 extern void sendcmdto_set_s2s_sessid(const char *sessid);
+/* Arm the multiline framing segment ,M<flag><batch_ref> for the next
+ * sendcmdto_one_tags_with_client() toward a tag-carrying link (audit 0.1).
+ * Consumed or cleared by that call. */
+extern void sendcmdto_set_s2s_ml(char flag, const char *batch_ref);
+/* Whether a send toward this link carries the S2S compact tag region
+ * (server link or &me, IRCv3-aware, P10_MESSAGE_TAGS on). */
+extern int send_s2s_tags_on(struct Client *to);
 /* Pre-built S2S tag prefix for multi-msgid (batched CREATE/PART) */
 extern void sendcmdto_set_s2s_raw_tags(const char *tags);
 
