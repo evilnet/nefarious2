@@ -691,6 +691,10 @@ static void bounce_arm_hold_timer(struct BouncerSession *session, time_t min_del
 static void bounce_emit_connect_count(struct BouncerSession *session);
 static void bounce_emit_total_active(struct BouncerSession *session);
 static void bounce_repair_realname(struct Client *ghost, const char *realname);
+static enum bounce_demote_bar demote_eligibility_for(enum bounce_demote_stage stage,
+                                                     struct Client *face,
+                                                     struct BouncerSession *session,
+                                                     struct Client *new_primary);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -1778,8 +1782,9 @@ void bounce_prune_stale_aliases(void)
  * runs bounce_set_n_sessid_hint), so a remote primary belonging to
  * the same bouncer session has the same sessid; a non-bouncer
  * account-bearing client minted its own sessid and won't match —
- * legitimately independent presences are left alone.  The candidate's
- * home server must also be IRCv3-aware: a legacy home has no sessions
+ * legitimately independent presences are left alone.  Only a candidate
+ * the demote would accept counts (bounce_demote_eligibility): above all,
+ * its home server must be IRCv3-aware, as a legacy home has no sessions
  * and never runs this pass.
  *
  * Tie-break: older cli_lastnick wins the primary slot.  Equal: lex on
@@ -1831,15 +1836,6 @@ void bounce_post_burst_reconcile(void)
           if (acptr == local_primary) continue;
           if (!IsUser(acptr) || !IsAccount(acptr)) continue;
           if (IsBouncerAlias(acptr) || IsBouncerHold(acptr)) continue;
-          /* A candidate homed on a legacy server is never merged in, as
-           * D.2 skips a legacy introducer (m_nick.c): a legacy home
-           * never runs the symmetric pass, so the "we win" side would
-           * wait for a demote that never comes, and "we lose" would
-           * hand the session to a client that is not in it.  Its
-           * session id proves nothing either: a legacy server sends
-           * none, and the one it carries was stamped by whichever fork
-           * server relayed its N. */
-          if (!IsIRCv3Aware(cli_user(acptr)->server)) continue;
           if (0 != ircd_strcmp(cli_account(acptr), s->hs_account)) continue;
           if (!cli_session_id(acptr)[0]) continue;
           if (0 != strcmp(cli_session_id(acptr), s->hs_sessid)) continue;
@@ -1848,6 +1844,19 @@ void bounce_post_burst_reconcile(void)
            * split); the peer reads our ids the same way. */
           if (bounce_rebind_kc_conflict(bounce_session_kc_id(s),
                                         cli_user(acptr)->kc_id))
+            continue;
+          /* Only a candidate our primary could be demoted into counts:
+           * the demote's own decision.  Above all, a candidate homed on
+           * a legacy server is never merged in, as D.2 skips a legacy
+           * introducer (m_nick.c): a legacy home never runs the
+           * symmetric pass, so the "we win" side would wait for a
+           * demote that never comes, and "we lose" would hand the
+           * session to a client that is not in it.  Its session id
+           * proves nothing either: a legacy server sends none, and the
+           * one it carries was stamped by whichever fork server relayed
+           * its N. */
+          if (demote_eligibility_for(BOUNCE_DEMOTE_PLAN, local_primary, s,
+                                     acptr) != BOUNCE_DEMOTE_OK)
             continue;
           if (peer_primary) {
             multiple_candidates = 1;
@@ -2474,9 +2483,8 @@ int bounce_session_transition(struct BouncerSession *session,
   case BST_DEMOTE_TO_ALIAS:
     if (params->demoted_alias && params->peer_primary) {
       if (0 == bounce_demote_live_primary_to_alias(params->demoted_alias,
-                                                    cli_user(params->peer_primary)
-                                                      ? cli_user(params->peer_primary)->server
-                                                      : NULL))
+                                                    params->peer_primary,
+                                                    session))
         rc = bounce_finish_live_primary_demote(params->demoted_alias,
                                                 params->peer_primary,
                                                 session,
@@ -6592,35 +6600,77 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
 /* Live primary → alias demotion (split-merge)                       */
 /* ---------------------------------------------------------------- */
 
-int bounce_demote_live_primary_to_alias(struct Client *acptr,
-                                        struct Client *new_primary_server)
+/** See include/bouncer_session.h. */
+enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage stage,
+                                                 struct Client *face,
+                                                 struct BouncerSession *session,
+                                                 struct Client *new_home,
+                                                 const char *new_account)
 {
-  struct BouncerSession *session;
+  struct bounce_demote_facts f;
+  const char *face_account = NULL;
+
+  memset(&f, 0, sizeof f);
+  if (face && IsUser(face) && cli_user(face) && IsAccount(face)) {
+    f.face_account_user = 1;
+    face_account = cli_account(face);
+  }
+  f.face_alias = face && IsBouncerAlias(face);
+  f.face_held  = face && IsBouncerHold(face);
+  f.face_dying = face && (IsDead(face) || HasFlag(face, FLAG_KILLED));
+  f.session_found = (session != NULL);
+  f.session_account = session && face_account
+                      && 0 == ircd_strcmp(session->hs_account, face_account);
+  if (!session)
+    f.session_slot = BOUNCE_SLOT_OTHER;   /* unread: no session refuses first */
+  else if (!session->hs_client)
+    f.session_slot = BOUNCE_SLOT_EMPTY;
+  else if (session->hs_client == face)
+    f.session_slot = BOUNCE_SLOT_FACE;
+  else
+    f.session_slot = BOUNCE_SLOT_OTHER;
+  f.new_home_known = (new_home != NULL);
+  f.new_home_aware = new_home && IsIRCv3Aware(new_home);
+  f.new_account = new_account && *new_account && face_account
+                  && 0 == ircd_strcmp(new_account, face_account);
+  return bounce_demote_check(stage, &f);
+}
+
+/** The eligibility wrapper for a new primary that exists as a Client. */
+static enum bounce_demote_bar demote_eligibility_for(enum bounce_demote_stage stage,
+                                                     struct Client *face,
+                                                     struct BouncerSession *session,
+                                                     struct Client *new_primary)
+{
+  struct Client *home = (new_primary && cli_user(new_primary))
+                        ? cli_user(new_primary)->server : NULL;
+  return bounce_demote_eligibility(stage, face, session, home,
+                                   (new_primary && IsAccount(new_primary))
+                                     ? cli_account(new_primary) : NULL);
+}
+
+int bounce_demote_live_primary_to_alias(struct Client *acptr,
+                                        struct Client *new_primary,
+                                        struct BouncerSession *session)
+{
   struct Membership *member;
   char alias_full[6];
+  struct Client *new_primary_server;
+  enum bounce_demote_bar bar;
 
-  if (!acptr || !new_primary_server)
+  /* The same decision the callers made before asking (a same-nick merge
+   * decides before the new primary's N is relayed): never into a primary
+   * homed on a legacy server, never a dying face (its own exit holds the
+   * session, an alias exit would broadcast BX X and end it), and only
+   * the session's own live primary, under the account the finish
+   * checks. */
+  bar = demote_eligibility_for(BOUNCE_DEMOTE_PLAN, acptr, session, new_primary);
+  if (bar != BOUNCE_DEMOTE_OK) {
+    Debug((DEBUG_INFO, "bounce_demote_live: not demoting %s: %s",
+           acptr ? cli_name(acptr) : "(none)", bounce_demote_bar_name(bar)));
     return -1;
-  /* Never demote into a primary on a legacy server: it is not a session
-   * member (a legacy server has no sessions), and it cannot carry the
-   * session's aliases (BX C never reaches it). */
-  if (!IsIRCv3Aware(new_primary_server))
-    return -1;
-  if (!IsUser(acptr) || !IsAccount(acptr))
-    return -1;
-  if (IsBouncerAlias(acptr) || IsBouncerHold(acptr))
-    return -1;
-  /* Refuse to demote a dying socket: alias-exit path skips hold logic
-   * and broadcasts BX X, which would destroy the session network-wide.
-   * Letting exit_client run on the still-primary Client takes the
-   * normal hold path (transition to HOLDING ghost), preserving the
-   * session for peer's view. */
-  if (IsDead(acptr) || HasFlag(acptr, FLAG_KILLED))
-    return -1;
-
-  session = bounce_get_session(acptr);
-  if (!session || session->hs_client != acptr)
-    return -1;
+  }
+  new_primary_server = cli_user(new_primary)->server;
 
   Debug((DEBUG_INFO,
          "bounce_demote_live: %s (account %s, session %s) demoting to "
@@ -6696,17 +6746,19 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
                                       struct BouncerSession *session,
                                       int legacy_done)
 {
-  if (!demoted_alias || !new_primary)
-    return -1;
-  if (!IsAccount(demoted_alias) || !IsAccount(new_primary))
-    return -1;
-  if (0 != ircd_strcmp(cli_user(demoted_alias)->account,
-                       cli_user(new_primary)->account))
-    return -1;
+  enum bounce_demote_bar bar;
 
-  if (!session || session->hs_client != NULL
-      || 0 != ircd_strcmp(session->hs_account, cli_user(demoted_alias)->account))
+  /* The demote's own decision, at its second step: the face is the alias
+   * the demote made, the slot is empty, and the new primary carries the
+   * account. */
+  bar = demote_eligibility_for(BOUNCE_DEMOTE_FINISH, demoted_alias, session,
+                               new_primary);
+  if (bar != BOUNCE_DEMOTE_OK) {
+    Debug((DEBUG_INFO, "bounce_finish_live: not finishing %s: %s",
+           demoted_alias ? cli_name(demoted_alias) : "(none)",
+           bounce_demote_bar_name(bar)));
     return -1;
+  }
 
   session->hs_client = new_primary;
   cli_user(demoted_alias)->alias_primary = new_primary;

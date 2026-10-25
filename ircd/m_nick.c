@@ -616,16 +616,46 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
          * combines demote + finish into one transition with invariant
          * assertions before/after.  set_nick_name still runs to install
          * the incoming N's Client struct, but the demote of the local
-         * client to alias-of-incoming is one funnel call. */
+         * client to alias-of-incoming is one funnel call.
+         *
+         * Legacy links know the user only as acptr's face, under the
+         * same nick.  Relaying the incoming N to them would make them
+         * collide the nick and KILL one side, and either KILL ends the
+         * whole session.  So when the demote will succeed -- decided
+         * here, before anything is sent, by the same check the demote
+         * and its finish make -- the N goes to IRCv3-aware links only,
+         * and the legacy links renumber acptr's face to the new primary
+         * in place (BX P: same nick, same channels).  When it would not
+         * succeed, acptr stays a live primary the legacy links must keep
+         * knowing, so nothing is withheld or swapped. */
         struct bounce_transition_params p;
         int rc;
         struct Client *new_primary;
+        enum bounce_demote_bar bar =
+          bounce_demote_eligibility(BOUNCE_DEMOTE_PLAN, acptr, bsess, sptr,
+                                    incoming_acct);
+        int swap_face = (bar == BOUNCE_DEMOTE_OK);
+        if (swap_face)
+          set_nick_relay_withhold_legacy();
         rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
+        clear_nick_relay_withhold_legacy();
+        if (!swap_face)
+          sendto_opmask_butone(0, SNO_OLDSNO,
+                               "Bouncer split-merge: %C cannot become an "
+                               "alias of %s on %C (account %s): %s",
+                               acptr, parv[parc - 2], cptr, incoming_acct,
+                               bounce_demote_bar_name(bar));
         new_primary = findNUser(parv[parc - 2]);
         if (new_primary) {
+          /* While acptr still has the numeric the legacy links know.
+           * Per-link sends: no S2S override is needed after them (the N
+           * relay above has consumed its own). */
+          if (swap_face)
+            bounce_legacy_face_change(acptr, bsess, cptr, parv[parc - 2], NULL);
           memset(&p, 0, sizeof p);
           p.demoted_alias = acptr;
           p.peer_primary  = new_primary;
+          p.legacy_done   = swap_face;
           if (0 == bounce_session_transition(bsess, BST_DEMOTE_TO_ALIAS, &p)) {
             sendto_opmask_butone(0, SNO_OLDSNO,
                                  "Bouncer split-merge: demoted local "

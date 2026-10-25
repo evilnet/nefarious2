@@ -20,3 +20,53 @@ int bounce_legacy_link_knows(int link_aware, int link_gated,
     return 0;
   return 1;
 }
+
+enum bounce_demote_bar bounce_demote_check(enum bounce_demote_stage stage,
+                                           const struct bounce_demote_facts *f)
+{
+  if (!f || !f->new_home_known)
+    return BOUNCE_DEMOTE_NO_NEW_HOME;
+  /* A legacy home has no sessions and never hears BX C. */
+  if (!f->new_home_aware)
+    return BOUNCE_DEMOTE_LEGACY_HOME;
+  if (!f->face_account_user)
+    return BOUNCE_DEMOTE_NOT_ACCOUNT_USER;
+  /* Before the demote the face is a live primary; after it, the alias
+   * the demote made. */
+  if (stage == BOUNCE_DEMOTE_FINISH ? !f->face_alias : f->face_alias)
+    return BOUNCE_DEMOTE_FACE_ALIAS;
+  if (f->face_held)
+    return BOUNCE_DEMOTE_FACE_HELD;
+  /* Its own exit holds the session; an alias exit would end it. */
+  if (f->face_dying)
+    return BOUNCE_DEMOTE_FACE_DYING;
+  if (!f->session_found)
+    return BOUNCE_DEMOTE_NO_SESSION;
+  if (f->session_slot != (stage == BOUNCE_DEMOTE_FINISH ? BOUNCE_SLOT_EMPTY
+                                                       : BOUNCE_SLOT_FACE))
+    return BOUNCE_DEMOTE_SESSION_SLOT;
+  /* The finish's account rules, asked at both steps. */
+  if (!f->new_account)
+    return BOUNCE_DEMOTE_NEW_ACCOUNT;
+  if (!f->session_account)
+    return BOUNCE_DEMOTE_SESSION_ACCOUNT;
+  return BOUNCE_DEMOTE_OK;
+}
+
+const char *bounce_demote_bar_name(enum bounce_demote_bar bar)
+{
+  switch (bar) {
+  case BOUNCE_DEMOTE_OK:               return "ok";
+  case BOUNCE_DEMOTE_NO_NEW_HOME:      return "no new primary";
+  case BOUNCE_DEMOTE_LEGACY_HOME:      return "legacy home";
+  case BOUNCE_DEMOTE_NOT_ACCOUNT_USER: return "not a logged-in user";
+  case BOUNCE_DEMOTE_FACE_ALIAS:       return "alias state";
+  case BOUNCE_DEMOTE_FACE_HELD:        return "held ghost";
+  case BOUNCE_DEMOTE_FACE_DYING:       return "exiting";
+  case BOUNCE_DEMOTE_NO_SESSION:       return "no session";
+  case BOUNCE_DEMOTE_SESSION_SLOT:     return "not the session's primary";
+  case BOUNCE_DEMOTE_NEW_ACCOUNT:      return "new primary's account differs";
+  case BOUNCE_DEMOTE_SESSION_ACCOUNT:  return "session's account differs";
+  }
+  return "?";
+}

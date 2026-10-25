@@ -425,6 +425,28 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
 }
 
 
+/** Set by set_nick_relay_withhold_legacy(): the next register_user()
+ * relays a remote client's N to IRCv3-aware links only.  A plain static,
+ * which no S2S override reset touches: register_user() clears it on
+ * every call, and the one caller clears it again after its
+ * set_nick_name(), so it never outlives the introduction it was armed
+ * for.  Left set, it would hide the next remote user from the legacy
+ * links, which would KILL that user at its next nick change as an
+ * unknown numeric. */
+static int nick_relay_withhold_legacy;
+
+/** See include/s_user.h. */
+void set_nick_relay_withhold_legacy(void)
+{
+  nick_relay_withhold_legacy = 1;
+}
+
+/** See include/s_user.h. */
+void clear_nick_relay_withhold_legacy(void)
+{
+  nick_relay_withhold_legacy = 0;
+}
+
 /*
  * register_user
  *
@@ -474,7 +496,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
   struct Channel*  chptr;
   struct BouncerSession* auto_session = NULL;
   int              auto_resumed = 0;
+  /* One-shot, consumed here by every call (every return path below
+   * leaves it clear); honoured only for a remote client's N relay. */
+  int              withhold_legacy = nick_relay_withhold_legacy;
 
+  nick_relay_withhold_legacy = 0;
   user->last = CurrentTime;
   parv[0] = cli_name(sptr);
   parv[1] = parv[2] = NULL;
@@ -1023,28 +1049,47 @@ int register_user(struct Client *cptr, struct Client *sptr)
    * unconditionally to all peers; cascade-prevention happens elsewhere
    * (D.2 at-N-time dispatch on the receive side handles the multi-
    * server convergence cases without needing to defer the introduction). */
-  bounce_set_n_sessid_hint(sptr);
-  /* Send full IP address to IPv6-grokking servers. */
-  sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
-                             FLAG_IPV6, FLAG_LAST_FLAG,
-                             "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
-                             cli_name(sptr), cli_hopcount(sptr) + 1,
-                             cli_lastnick(sptr),
-                             user->username, user->realhost,
-                             *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
-                             iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
-                             NumNick(sptr), cli_info(sptr));
-  bounce_set_n_sessid_hint(sptr);
-  /* Send fake IPv6 addresses to pre-IPv6 servers. */
-  sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
-                             FLAG_LAST_FLAG, FLAG_IPV6,
-                             "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
-                             cli_name(sptr), cli_hopcount(sptr) + 1,
-                             cli_lastnick(sptr),
-                             user->username, user->realhost,
-                             *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
-                             iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 0),
-                             NumNick(sptr), cli_info(sptr));
+  if (withhold_legacy && !MyConnect(sptr)) {
+    /* The relayed N goes to IRCv3-aware links only: the legacy links
+     * already hold this user under another numeric, and the caller
+     * renumbers that face to this one (BX P) instead.  An N here would
+     * make a legacy server collide the nick and KILL one side.  Every
+     * IRCv3-aware server announces IPv6, so the full-IP form is the only
+     * one needed. */
+    bounce_set_n_sessid_hint(sptr);
+    sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
+                               FLAG_IRCV3AWARE, FLAG_LAST_FLAG,
+                               "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
+                               cli_name(sptr), cli_hopcount(sptr) + 1,
+                               cli_lastnick(sptr),
+                               user->username, user->realhost,
+                               *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
+                               iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
+                               NumNick(sptr), cli_info(sptr));
+  } else {
+    bounce_set_n_sessid_hint(sptr);
+    /* Send full IP address to IPv6-grokking servers. */
+    sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
+                               FLAG_IPV6, FLAG_LAST_FLAG,
+                               "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
+                               cli_name(sptr), cli_hopcount(sptr) + 1,
+                               cli_lastnick(sptr),
+                               user->username, user->realhost,
+                               *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
+                               iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
+                               NumNick(sptr), cli_info(sptr));
+    bounce_set_n_sessid_hint(sptr);
+    /* Send fake IPv6 addresses to pre-IPv6 servers. */
+    sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
+                               FLAG_LAST_FLAG, FLAG_IPV6,
+                               "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
+                               cli_name(sptr), cli_hopcount(sptr) + 1,
+                               cli_lastnick(sptr),
+                               user->username, user->realhost,
+                               *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
+                               iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 0),
+                               NumNick(sptr), cli_info(sptr));
+  }
 
   /* Broadcast BS A for a newly created bouncer session.  Must come AFTER
    * the N token above so that receiving servers can findNUser() the

@@ -33,6 +33,9 @@
 #include "bouncer_deauth.h"
 #include "account_id.h"
 #endif
+#ifndef INCLUDED_bouncer_wire_h
+#include "bouncer_wire.h"
+#endif
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
 #endif
@@ -1347,15 +1350,43 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
  * struct exists (typically after set_nick_name's IsServer branch
  * creates it).
  *
- * @param[in] acptr Live local primary to demote.
- * @param[in] new_primary_server The new primary's HOME server,
- *            cli_user(new_primary)->server -- never the link it arrived
- *            on (becomes session origin).
- * @return 0 on success, -1 on no matching session, non-primary input,
- *         or a new primary homed on a server that is not IRCv3-aware.
+ * Runs only when bounce_demote_eligibility() says so at
+ * BOUNCE_DEMOTE_PLAN; nothing changes otherwise.
+ *
+ * @param[in] acptr       Live local primary to demote.
+ * @param[in] new_primary The primary it becomes an alias of; its HOME
+ *                        server, cli_user(new_primary)->server, becomes
+ *                        the session origin (never the link it arrived on).
+ * @param[in] session     The session acptr is the primary of (the one the
+ *                        finish installs new_primary in).
+ * @return 0 on success, -1 when the demote is not eligible.
  */
 extern int bounce_demote_live_primary_to_alias(struct Client *acptr,
-                                               struct Client *new_primary_server);
+                                               struct Client *new_primary,
+                                               struct BouncerSession *session);
+
+/** May `face` be demoted into an alias of a new primary on `session`?
+ * The one decision behind the live-primary demote: the same-nick merge
+ * (m_nick.c) asks it before relaying the new primary's N, the post-burst
+ * reconcile asks it of each co-session candidate, and the demote and its
+ * finish ask it again at their own step.  Reads the facts for the pure
+ * bounce_demote_check() (bouncer_wire.h).
+ *
+ * @param[in] stage       BOUNCE_DEMOTE_PLAN before the demote (face is
+ *                        the session's live primary), BOUNCE_DEMOTE_FINISH
+ *                        after it (face is the alias, the slot empty).
+ * @param[in] face        Our client that becomes (or became) the alias.
+ * @param[in] session     The session the demote runs on.
+ * @param[in] new_home    The new primary's HOME server (the N's source
+ *                        server before its Client exists), or NULL.
+ * @param[in] new_account The new primary's account, or NULL.
+ * @return BOUNCE_DEMOTE_OK, or why not.
+ */
+extern enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage stage,
+                                                        struct Client *face,
+                                                        struct BouncerSession *session,
+                                                        struct Client *new_home,
+                                                        const char *new_account);
 
 /** Patch up alias_primary and hs_client after the new primary is
  * created by set_nick_name; broadcast BX C so peers learn about the

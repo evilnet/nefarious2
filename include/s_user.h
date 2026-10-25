@@ -80,6 +80,14 @@ extern void         user_count_memory(size_t* count_out, size_t* bytes_out);
 extern int set_nick_name(struct Client* cptr, struct Client* sptr,
                          const char* nick, int parc, char* parv[],
                          int svsnick);
+/* One-shot: the next register_user() of a remote client relays its N to
+ * IRCv3-aware links only (legacy links learn that user some other way,
+ * e.g. a BX P renumbering a face they already hold).  Every
+ * register_user() call clears it, whatever client it registers; arm it
+ * immediately before the set_nick_name() that introduces the client and
+ * clear it again when that call returns. */
+extern void set_nick_relay_withhold_legacy(void);
+extern void clear_nick_relay_withhold_legacy(void);
 extern void send_umode_out(struct Client* cptr, struct Client* sptr,
                           struct Flags* old, int prop);
 extern int whisper(struct Client* source, const char* nick,
