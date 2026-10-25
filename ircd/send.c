@@ -2875,6 +2875,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
+  struct MsgBuf *serv_mb_legacy = NULL; /* Untagged primary numeric for non-IRCv3-aware peers */
   struct Client *service;
   struct Client *cptr;  /* Server connection for incoming S2S tags */
   struct Client *alias_from;    /* Alias source for split S2S delivery */
@@ -2923,12 +2924,23 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   /* Prepare tagged format string for building cached buffers */
   ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
 
-  /* Build buffer to send to servers - with S2S tags if enabled */
+  /* Build buffer to send to servers - with S2S tags if enabled.  Legacy
+   * (non-IRCv3-aware) peers never see the @A... prefix: they don't parse
+   * it, and it eats bytes against their 512-byte limit that a client
+   * line near the limit cannot spare (audit 1.5 -- live on prod: Fractal
+   * sends @A-tagged channel lines to the stock legacy hub, which keeps
+   * the tag and truncates the message's tail to fit). When tags are off
+   * or format_s2s_tags fails, serv_mb is already untagged and doubles as
+   * the legacy buffer, so there's nothing extra to build. */
   if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
     va_start(vd.vd_args, pattern);
     serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
     va_end(vd.vd_args);
     serv_mb = serv_mb_tags;  /* Use tagged version */
+
+    va_start(vd.vd_args, pattern);
+    serv_mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
   } else {
     va_start(vd.vd_args, pattern);
     serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
@@ -2987,8 +2999,16 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
         send_buffer(member->user, user_mb, 0);
       }
     } else {
-      /* Use alias numeric for primary's server direction to avoid fake direction */
-      if (serv_mb_alias && cli_from(member->user) == primary_dir)
+      /* Legacy (non-IRCv3-aware) peers never get a tagged buffer, nor an
+       * alias numeric -- aliases are introduced only via BX C, which
+       * legacy peers never learn (invariant #10), so a routed command
+       * sourced from the alias is an unknown source at the first legacy
+       * hop.  Check the next hop's awareness first; otherwise fall back
+       * to the existing alias-vs-primary choice. */
+      struct Client *link = cli_from(member->user);
+      if (serv_mb_legacy && !IsIRCv3Aware(link))
+        send_buffer(member->user, serv_mb_legacy, 0);
+      else if (serv_mb_alias && link == primary_dir)
         send_buffer(member->user, serv_mb_alias, 0);
       else
         send_buffer(member->user, serv_mb, 0);
@@ -2999,7 +3019,10 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       && (service = FindServer(GlobalForwards[prefix]))
       && cli_sentalong(service) != sentalong_marker) {
       cli_sentalong(service) = sentalong_marker;
-      send_buffer(service, serv_mb, 0);
+      if (serv_mb_legacy && !IsIRCv3Aware(cli_from(service)))
+        send_buffer(service, serv_mb_legacy, 0);
+      else
+        send_buffer(service, serv_mb, 0);
   }
 
   /* Clear cap route context */
@@ -3018,6 +3041,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   msgq_clean(serv_mb);
   if (serv_mb_alias)
     msgq_clean(serv_mb_alias);
+  if (serv_mb_legacy)
+    msgq_clean(serv_mb_legacy);
 }
 
 /** Send a (prefixed) command to all users on this channel, except for
@@ -3050,6 +3075,7 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   struct MsgBuf *serv_mb_v3 = NULL;     /* @A...,C<client_tags> for IRCv3-aware peers */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
   struct MsgBuf *serv_mb_alias_v3 = NULL; /* Alias numeric, IRCv3-aware variant */
+  struct MsgBuf *serv_mb_legacy = NULL; /* Untagged primary numeric for non-IRCv3-aware peers */
   struct Client *service;
   struct Client *cptr;
   struct Client *alias_from;    /* Alias source for split S2S delivery */
@@ -3101,13 +3127,20 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
    * When client_tags are present, additionally build a v3 buffer with
    * ,C<client_tags> in the compact-tag prefix; the dispatch loop picks
    * it for IRCv3-aware peers so they can forward the tags to their
-   * local recipients. Legacy peers get the existing tag-only prefix
-   * (which they strip per the legacy patch — same as today). */
+   * local recipients. Legacy peers get a separate untagged buffer
+   * (serv_mb_legacy, below) -- they don't parse the @A... prefix and
+   * it eats bytes against their 512-byte limit (audit 1.5). When tags
+   * are off or format_s2s_tags fails, serv_mb is already untagged and
+   * doubles as the legacy buffer. */
   if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
     va_start(vd.vd_args, pattern);
     serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
     va_end(vd.vd_args);
     serv_mb = serv_mb_tags;
+
+    va_start(vd.vd_args, pattern);
+    serv_mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
 
     if (has_ctags &&
         format_s2s_tags_with_client(s2s_tagbuf_v3, sizeof(s2s_tagbuf_v3),
@@ -3190,13 +3223,20 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
       }
     } else {
       /* S2S delivery. Pick buffer based on:
+       *   0. Legacy (non-IRCv3-aware) peers always get the untagged
+       *      primary-numeric buffer -- never a tagged variant, and
+       *      never an alias numeric either (invariant #10: aliases
+       *      are introduced only via BX C, which legacy peers never
+       *      learn).
        *   1. Primary-direction alias rewriting (serv_mb_alias variants)
        *   2. IRCv3-aware peers get the ,C<client_tags> variant when available
        *   3. Otherwise the standard prefix-only or no-prefix buffer
        */
       struct Client *peer_link = cli_from(member->user);
       int is_v3 = IsIRCv3Aware(peer_link);
-      if (peer_link == primary_dir) {
+      if (serv_mb_legacy && !is_v3) {
+        send_buffer(member->user, serv_mb_legacy, 0);
+      } else if (peer_link == primary_dir) {
         if (is_v3 && serv_mb_alias_v3)
           send_buffer(member->user, serv_mb_alias_v3, 0);
         else if (serv_mb_alias)
@@ -3218,7 +3258,12 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
       && (service = FindServer(GlobalForwards[prefix]))
       && cli_sentalong(service) != sentalong_marker) {
       cli_sentalong(service) = sentalong_marker;
-      if (IsIRCv3Aware(service) && serv_mb_v3)
+      /* Rule by the service's next hop (cli_from), not the service
+       * entity itself -- IsIRCv3Aware(service) tested X3 itself, which
+       * is never the thing parsing this buffer off the wire. */
+      if (serv_mb_legacy && !IsIRCv3Aware(cli_from(service)))
+        send_buffer(service, serv_mb_legacy, 0);
+      else if (IsIRCv3Aware(cli_from(service)) && serv_mb_v3)
         send_buffer(service, serv_mb_v3, 0);
       else
         send_buffer(service, serv_mb, 0);
@@ -3232,6 +3277,8 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
     msgq_clean(serv_mb_alias);
   if (serv_mb_alias_v3)
     msgq_clean(serv_mb_alias_v3);
+  if (serv_mb_legacy)
+    msgq_clean(serv_mb_legacy);
 }
 
 /** Send a (prefixed) WALL of type \a type to all users except \a one.
