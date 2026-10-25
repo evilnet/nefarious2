@@ -2315,24 +2315,42 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
  * Inverse of sendcmdto_serv_butone_v3 — the dispatch loop SKIPS peers that
  * advertise IRCv3 awareness, so only legacy peers receive the emission.
  *
- * The ONLY currently-supported wire shape through this helper is BX P
- * (`CMD_BOUNCER_TRANSFER` with subcommand 'P').  Legacy peers'
- * m_bouncer_transfer.c handler processes BX P natively (in-place numeric
- * swap or membership transfer-and-kill, depending on whether the target
- * numeric exists).  Every other BX subcommand (C, X, A, K, U, M, E) is
- * silently dropped by legacy peers — DO NOT send those through here.
+ * NEVER builds a tagged variant, even if the caller armed S2S tags for a
+ * paired sendcmdto_serv_butone_v3() / sendcmdto_serv_butone() call that
+ * shares the same emit: a legacy peer cannot parse message tags, and every
+ * other serv_butone variant already pays the @A bytes toward the 512-byte
+ * wire budget only for peers that can use them.  Every S2S override
+ * (raw tags, msgid, time, sessid, client-tags, cptr) is cleared
+ * unconditionally here, the same as the untagged branch every other
+ * serv_butone variant falls back to when no tagged variant is built —
+ * nothing here ever consumes them, so a caller sharing tags with an
+ * _v3/plain emit that runs first (e.g. away_send_to_servers()) is safe:
+ * that first call drains the overrides, and this one clears whatever,
+ * if anything, is left.
  *
- * Use site: at every BX C emission in the bouncer subsystem, also emit a
- * paired BX P through this helper so legacy peers reconcile their
+ * Supported wire shapes through this helper (every one a legacy peer's
+ * handler actually understands):
+ *   - BX P (`CMD_BOUNCER_TRANSFER` subcommand 'P') — in-place numeric
+ *     swap or membership transfer-and-kill via legacy m_bouncer_transfer.c.
+ *   - SVSINFO (ghost realname sync).
+ *   - PRIVS (oper-privilege sync, Task 7).
+ *   - AWAY (the pre-away star, substituted to FEAT_AWAY_STAR_MSG; Task 8).
+ * The rule for adding a new one: only a line a legacy peer's own handler
+ * parses and acts on correctly belongs here, and it must never carry
+ * tags — everything else (BX C / X / A / K / U / M / E, and any other
+ * fork-only token) is silently dropped by legacy peers and wastes the
+ * emission; use sendcmdto_serv_butone_v3() for those instead.
+ *
+ * Use site (BX P): at every BX C emission in the bouncer subsystem, also
+ * emit a paired BX P through this helper so legacy peers reconcile their
  * UserStats.clients count and nick-hash table for the converted client.
  * See .claude/para/projects/legacy-bx-p-in-place-conversion.md for the
  * rationale and full transition table.
  *
- * Implementation note: mirrors sendcmdto_serv_butone_v3 exactly except for
- * the inverted IsIRCv3Aware filter at the dispatch step.  The alias-source
- * egress rewrite block (s2s_alias_source / IsBouncerAlias preamble) is
- * preserved verbatim — invariant #10 from the bouncer-architecture skill
- * applies to every S2S helper that accepts arbitrary `from` clients.
+ * Implementation note: the alias-source egress rewrite block
+ * (s2s_alias_source / IsBouncerAlias preamble) is preserved verbatim —
+ * invariant #10 from the bouncer-architecture skill applies to every S2S
+ * helper that accepts arbitrary `from` clients.
  */
 void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
                                   const char *tok, struct Client *one,
@@ -2357,69 +2375,26 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
 
   vd.vd_format = pattern;
 
-  {
-    int want_tags = s2s_want_tags;
-    s2s_want_tags = 0;
+  /* Never a tagged variant: a legacy peer can't parse message tags, so
+   * this helper never stages one.  Clear every S2S override exactly like
+   * the untagged branch every other serv_butone variant falls back to
+   * when it built no tagged line -- an override left armed rides the
+   * next server-bound emit. */
+  s2s_want_tags = 0;
+  s2s_cptr_override = NULL;
+  s2s_raw_tags[0] = '\0';
+  s2s_msgid_override[0] = '\0';
+  s2s_sessid_override[0] = '\0';
+  s2s_time_override = 0;
+  s2s_client_tags_override = NULL;
 
-    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
-      if (s2s_raw_tags[0]) {
-        va_start(vd.vd_args, pattern);
-        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
-        va_end(vd.vd_args);
-        if (alias_from) {
-          va_start(vd.vd_args, pattern);
-          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
-          va_end(vd.vd_args);
-        }
-        s2s_raw_tags[0] = '\0';
-        s2s_cptr_override = NULL;
-        s2s_msgid_override[0] = '\0';
-        s2s_sessid_override[0] = '\0';
-        s2s_time_override = 0;
-        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
-      } else {
-        char s2s_tagbuf[128];
-        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
-                                : (MyConnect(from) ? NULL : cli_from(from));
-        s2s_cptr_override = NULL;
-        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
-          va_start(vd.vd_args, pattern);
-          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
-          va_end(vd.vd_args);
-          if (alias_from) {
-            va_start(vd.vd_args, pattern);
-            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
-            va_end(vd.vd_args);
-          }
-        }
-        s2s_msgid_override[0] = '\0';
-        s2s_time_override = 0;
-        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
-      }
-    } else {
-      /* No tagged variant was built, so nothing consumed the overrides.
-       * Clear them here or they ride the next server-bound emit: an
-       * ACCOUNT/AWAY relay armed by sendcmdto_set_s2s_tags() without
-       * sendcmdto_want_s2s_tags() stamped the next cross-server PRIVMSG
-       * with the auth-time msgid and timestamp (2026-09-04). */
-      s2s_cptr_override = NULL;
-      s2s_raw_tags[0] = '\0';
-      s2s_msgid_override[0] = '\0';
-      s2s_sessid_override[0] = '\0';
-      s2s_time_override = 0;
-      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
-    }
-  }
-
-  if (!mb) {
+  va_start(vd.vd_args, pattern);
+  mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+  va_end(vd.vd_args);
+  if (alias_from) {
     va_start(vd.vd_args, pattern);
-    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
     va_end(vd.vd_args);
-    if (alias_from) {
-      va_start(vd.vd_args, pattern);
-      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
-      va_end(vd.vd_args);
-    }
   }
 
   /* Legacy-only downlink dispatch: skip IRCv3-aware peers entirely

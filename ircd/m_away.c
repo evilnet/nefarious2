@@ -161,6 +161,54 @@ const char *away_text_for(struct Client *viewer, const char *away)
   return (word && *word) ? word : away;
 }
 
+/** Broadcast an away-state change to other servers: the single place
+ *  that owns the wire body for CMD_AWAY toward the rest of the mesh.
+ *  @a away NULL or "" means present; the literal "*" means the
+ *  pre-away star (draft/pre-away, "hidden" rather than invisible);
+ *  anything else is a normal away message.
+ *
+ *  An IRCv3-aware peer keeps the star verbatim -- same as a local
+ *  draft/pre-away client, it does its own per-viewer substitution
+ *  further on.  A legacy peer has no such layer, so it is given
+ *  FEAT_AWAY_STAR_MSG straight from this hop: the same word a local
+ *  non-pre-away client is shown via away_text_for().  L stores and
+ *  displays away text as-is, so the substitution has to happen here,
+ *  at the fork edge, not downstream.
+ *
+ *  The _v3 send goes first: it is the one that actually consumes any
+ *  S2S tags armed on this call (msgid/time) via the opt-in flag, and
+ *  the legacy send must never carry them -- sendcmdto_legacy_serv_butone()
+ *  builds an untagged line unconditionally.  Both sendcmdto_serv_butone_v3()
+ *  and sendcmdto_legacy_serv_butone() keep sendcmdto_serv_butone()'s
+ *  alias->primary egress rewrite (bouncer-architecture invariant #10), so
+ *  @a from may safely be a local alias.
+ *
+ *  Callers must never arm s2s_alias_source before calling this: only
+ *  the first underlying send consumes it, so a second send in the star
+ *  branch would fall back to the automatic IsBouncerAlias(from) check
+ *  instead -- fine only because AWAY never arms one.  Keep it that way.
+ *
+ *  This is purely the fork-origin substitution: a caller relaying an
+ *  AWAY that arrived with a literal "*" from a non-IRCv3-aware link
+ *  must NOT route it through here (see the ms_away origin check) --
+ *  that star is the sender's own legacy away-message text, not the
+ *  pre-away token, and must cross every further hop unchanged. */
+void away_send_to_servers(struct Client *from, struct Client *one,
+                          const char *away)
+{
+  if (EmptyString(away)) {
+    sendcmdto_serv_butone(from, CMD_AWAY, one, "");
+    return;
+  }
+  if (away[0] == '*' && away[1] == '\0') {
+    sendcmdto_serv_butone_v3(from, CMD_AWAY, one, ":*");
+    sendcmdto_legacy_serv_butone(from, CMD_AWAY, one, ":%s",
+                                 away_text_for(NULL, "*"));
+    return;
+  }
+  sendcmdto_serv_butone(from, CMD_AWAY, one, ":%s", away);
+}
+
 static int away_is_star(const char *text)
 {
   return text && text[0] == '*' && text[1] == '\0';
@@ -382,7 +430,7 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+          away_send_to_servers(sptr, cptr, NULL);
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE, "");
         } else if (new_effective == 1) {
@@ -390,20 +438,23 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
-                                eff_msg ? eff_msg : "");
+          away_send_to_servers(sptr, cptr, eff_msg ? eff_msg : "");
           away_notify_common(sptr, sptr, eff_msg);
         } else {
           /* All connections AWAY * — user is effectively away with an
-           * unspecified reason.  The wire carries the star (servers and
-           * draft/pre-away clients keep it; other clients are shown
-           * FEAT_AWAY_STAR_MSG when we write to them).  "Hidden" means
-           * these connections don't count as present for aggregation,
-           * NOT that the user becomes invisible to the network. */
+           * unspecified reason.  The wire carries the star to servers
+           * that understand it (they do their own per-viewer
+           * substitution) and FEAT_AWAY_STAR_MSG to legacy servers,
+           * which have no such layer (away_send_to_servers).  Local
+           * draft/pre-away clients keep the star, others are shown
+           * FEAT_AWAY_STAR_MSG when we write to them (away_notify_common
+           * below).  "Hidden" means these connections don't count as
+           * present for aggregation, NOT that the user becomes
+           * invisible to the network. */
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":*");
+          away_send_to_servers(sptr, cptr, "*");
           away_notify_common(sptr, sptr, "*");
         }
 
@@ -442,7 +493,7 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
         if (away_msgid[0])
           sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_want_s2s_tags(1);
-        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+        away_send_to_servers(sptr, cptr, away_message);
       }
       if (interactive)
         send_reply(sptr, RPL_NOWAWAY);
@@ -452,7 +503,7 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
       if (away_msgid[0])
         sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
         sendcmdto_want_s2s_tags(1);
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+      away_send_to_servers(sptr, cptr, NULL);
       if (interactive)
         send_reply(sptr, RPL_UNAWAY);
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
@@ -560,10 +611,22 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
       sendcmdto_want_s2s_tags(1);
 
-    if (is_away)
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
-    else
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+    if (is_away) {
+      if (is_away_star && !IsIRCv3Aware(cptr))
+        /* This hop is a legacy (non-aware) link, which has no concept
+         * of the pre-away star -- a legacy sender's AWAY "*" is just
+         * their literal away-message text, not the hidden-connection
+         * token.  Relay it verbatim to every downstream peer instead
+         * of running it through away_send_to_servers()'s
+         * substitution, which would turn what the sender actually
+         * typed into FEAT_AWAY_STAR_MSG for our own legacy peers
+         * further downstream -- a transformation only valid for a
+         * genuine fork-origin pre-away star. */
+        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+      else
+        away_send_to_servers(sptr, cptr, away_message);
+    } else
+      away_send_to_servers(sptr, cptr, NULL);
 
     /* Notify local channel members with away-notify (was missing for S2S) */
     if (away_msgid[0])

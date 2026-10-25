@@ -157,15 +157,18 @@ extern void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
 
 /* Send command to all NON-IRCv3-aware (legacy) servers except one.
  *
- * Inverse of sendcmdto_serv_butone_v3.  Use ONLY for wire shapes that
- * legacy peers can process — currently this means BX P (the legacy
- * bouncer-transfer handler at evilnet/nefarious2's m_bouncer_transfer.c).
- * It is a hard bug to send BX C / BX X / BX A / BX K / BX U / BX M / BX E
- * through this helper: legacy peers silently drop those subcommands and
- * the emission is wasted.
+ * Inverse of sendcmdto_serv_butone_v3.  Use ONLY for wire shapes a legacy
+ * peer's own handler understands — currently: BX P (CMD_BOUNCER_TRANSFER
+ * 'P', the legacy bouncer-transfer handler at evilnet/nefarious2's
+ * m_bouncer_transfer.c), SVSINFO (ghost realname sync), PRIVS (oper-priv
+ * sync), and AWAY (the pre-away star, substituted to FEAT_AWAY_STAR_MSG).
+ * It is a hard bug to send BX C / BX X / BX A / BX K / BX U / BX M / BX E,
+ * or any other fork-only token, through this helper: legacy peers
+ * silently drop what they don't recognise and the emission is wasted.
+ * Never builds a tagged line — see the definition comment in send.c.
  *
- * Intended use site: at every BX C emission, also emit a paired BX P
- * through this helper so legacy peers reconcile their nick-hash and
+ * Intended use site (BX P): at every BX C emission, also emit a paired
+ * BX P through this helper so legacy peers reconcile their nick-hash and
  * UserStats.clients count via the existing BX P swap path (see
  * .claude/para/projects/legacy-bx-p-in-place-conversion.md). */
 extern void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,

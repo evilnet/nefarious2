@@ -11269,18 +11269,18 @@ void bounce_recompute_session_away(struct BouncerSession *session)
         sendcmdto_want_s2s_tags(1);
       }
 
-      if (new_effective == 0) {
-        sendcmdto_serv_butone(broadcaster, CMD_AWAY, NULL, "");
-        if (away_msgid[0])
-          sendcmdto_set_client_msgid(away_msgid);
+      /* eff_msg is "" for new_effective == 0, so one call covers present,
+       * a normal away message, and the all-connections-AWAY-* case; the
+       * star gets FEAT_AWAY_STAR_MSG for legacy peers downstream, same as
+       * every other AWAY broadcast (away_send_to_servers). */
+      away_send_to_servers(broadcaster, NULL, eff_msg);
+      if (away_msgid[0])
+        sendcmdto_set_client_msgid(away_msgid);
+      if (new_effective == 0)
         sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
                                                CAP_AWAYNOTIFY, CAP_NONE, "");
-      } else {
-        sendcmdto_serv_butone(broadcaster, CMD_AWAY, NULL, ":%s", eff_msg);
-        if (away_msgid[0])
-          sendcmdto_set_client_msgid(away_msgid);
+      else
         away_notify_common(primary, NULL, eff_msg);
-      }
       sendcmdto_set_client_msgid(NULL);
     }
   }
