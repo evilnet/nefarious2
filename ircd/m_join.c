@@ -667,6 +667,9 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
         modebuf_mode(&mbuf, MODE_DEL | chptr->mode.mode);
         chptr->mode.mode &= MODE_BURSTADDED | MODE_WASDELJOINS;
+        /* mode.exmode (+H/+P and friends) is deliberately NOT wiped here:
+         * a pre-#114 legacy winner has no letters for the fork-only
+         * extended modes and could not have meant to clear them. */
 
         if (chptr->mode.limit) {
           modebuf_mode_uint(&mbuf, MODE_DEL | MODE_LIMIT, chptr->mode.limit);

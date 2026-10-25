@@ -373,6 +373,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		 MODEBUF_DEST_CHANNEL | MODEBUF_DEST_NOKEY);
     modebuf_mode(mbuf, MODE_DEL | chptr->mode.mode); /* wipeout modes */
     chptr->mode.mode &= MODE_BURSTADDED | MODE_WASDELJOINS;
+    /* mode.exmode (+H/+P and friends) is deliberately NOT wiped here: a
+     * pre-#114 legacy winner has no letters for the fork-only extended
+     * modes and could not have meant to clear them. */
 
     /* wipeout any limit and keys that are set */
     parse_flags |= (MODE_PARSE_SET | MODE_PARSE_WIPEOUT);
