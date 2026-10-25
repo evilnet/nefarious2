@@ -1948,7 +1948,22 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
           node_b64[1] = cli_s2s_msgid(cptr)[1];
           node_b64[2] = '\0';
           remote_hlc.node_id = (uint16_t)base64toint(node_b64);
-          hlc_global_receive(&remote_hlc);
+
+          {
+            static time_t hlc_refuse_rate;
+            uint64_t ahead = 0;
+
+            if (hlc_global_receive(&remote_hlc,
+                                    feature_int(FEAT_HLC_MAX_FORWARD_MS),
+                                    &ahead))
+              sendto_opmask_butone_ratelimited(0, SNO_NETWORK, &hlc_refuse_rate,
+                                               "Clock of %s is %llu ms ahead of ours "
+                                               "(HLC_MAX_FORWARD_MS %d); its time was "
+                                               "not adopted",
+                                               cli_name(cptr),
+                                               (unsigned long long)ahead,
+                                               feature_int(FEAT_HLC_MAX_FORWARD_MS));
+          }
         }
       }
 

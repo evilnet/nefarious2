@@ -55,7 +55,8 @@ CMOCKA_TESTPROGS = \
 	websocket_cmocka \
 	db_casefold_cmocka \
 	account_id_cmocka \
-	webhook_eventlog_cmocka
+	webhook_eventlog_cmocka \
+	crdt_hlc_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -106,6 +107,7 @@ DEP_SRC = \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
+	crdt_hlc_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -464,3 +466,10 @@ webpush_line_test.o: ../webpush_line.c ../../include/webpush_line.h
 WEBPUSH_LINE_CMOCKA_OBJS = webpush_line_cmocka.o webpush_line_test.o
 webpush_line_cmocka: $(WEBPUSH_LINE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# crdt_hlc tests - the HLC_MAX_FORWARD_MS bound on hlc_receive_bounded.
+# Links the real crdt_hlc.o (built by the top-level `make` before this
+# runs); test_stub.o supplies log_write for the overflow warning path.
+CRDT_HLC_CMOCKA_OBJS = crdt_hlc_cmocka.o test_stub.o ../crdt_hlc.o
+crdt_hlc_cmocka: $(CRDT_HLC_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CRDT_HLC_CMOCKA_OBJS) $(CMOCKA_LIBS)

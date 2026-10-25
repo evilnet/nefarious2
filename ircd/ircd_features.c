@@ -1425,6 +1425,7 @@ static struct FeatureDesc {
   F_B(MSGID, 0, 1, 0),
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
   F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
+  F_I(HLC_MAX_FORWARD_MS, 0, 60000, 0),
   F_I(AWAY_THROTTLE, 0, 0, 0),
   F_B(METADATA_BURST, 0, 1, 0),
   F_S(METADATA_DB, 0, "metadata", 0),
