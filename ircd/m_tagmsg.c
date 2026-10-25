@@ -287,13 +287,26 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * we generated for local delivery; client tags ride the ,C
        * compact-tag segment instead of the body (audit 0.1) -- a
        * large client tag used to push the body past a peer's 512-byte
-       * cap and drop the whole link. */
+       * cap and drop the whole link.
+       *
+       * sendcmdto_serv_butone_v3() reaches only IRCv3-aware peers, and
+       * toward those it builds the tag region exactly when
+       * P10_MESSAGE_TAGS is on (send_s2s_tags_on()).  With the feature
+       * off there is no ,C to carry the tags, so keep the body form
+       * "@<tags> #chan" that every receiver still reads (ms_tagmsg's
+       * parv[1][0] == '@' branch) -- a bare "TM #chan" would be
+       * dropped.  The sender cap (msgq_vmake) keeps an over-long body
+       * from costing the link; it costs only that TAGMSG. */
       if (!IsLocalChannel(chptr->chname)) {
-        sendcmdto_set_s2s_tags(tagmsg_ms, tagmsg_msgid);
-        sendcmdto_want_s2s_tags(1);
-        sendcmdto_set_s2s_client_tags(client_tags);
-        sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s",
-                              chptr->chname);
+        if (feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+          sendcmdto_set_s2s_tags(tagmsg_ms, tagmsg_msgid);
+          sendcmdto_want_s2s_tags(1);
+          sendcmdto_set_s2s_client_tags(client_tags);
+          sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s",
+                                chptr->chname);
+        } else
+          sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
+                                client_tags, chptr->chname);
       }
     }
   }
@@ -335,11 +348,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         /* Remote user: only toward an IRCv3-aware next hop (audit
          * 0.1) -- a legacy next hop has no TAGMSG handler at all, so
          * it gets nothing rather than a bare/body-tagged command.
-         * Client tags ride ,C via sendcmdto_one_tags_with_client. */
+         * Client tags ride ,C via sendcmdto_one_tags_with_client when
+         * that link gets the tag region; otherwise (P10_MESSAGE_TAGS
+         * off) the body form "@<tags> <nick>", as ml_send_line() does
+         * for multiline -- a bare "TM <nick>" would be dropped. */
         if (IsIRCv3Aware(cli_from(acptr))) {
-          sendcmdto_set_s2s_tags(dm_ms, dm_msgid);
-          sendcmdto_one_tags_with_client(sptr, CMD_TAGMSG, acptr, dm_msgid,
-                                         client_tags, "%C", acptr);
+          if (send_s2s_tags_on(acptr)) {
+            sendcmdto_set_s2s_tags(dm_ms, dm_msgid);
+            sendcmdto_one_tags_with_client(sptr, CMD_TAGMSG, acptr, dm_msgid,
+                                           client_tags, "%C", acptr);
+          } else
+            sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                          client_tags, acptr);
         }
 
         /* Echo TAGMSG back to sender if they have echo-message */
@@ -460,11 +480,16 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Propagate to other servers: client tags ride ,C instead of the
      * body (audit 0.1), and the origin's msgid/time are restated via
      * cptr rather than left for a fresh mint -- this relay used to go
-     * out untagged, losing the msgid. */
-    sendcmdto_set_s2s_cptr(cptr);
-    sendcmdto_want_s2s_tags(1);
-    sendcmdto_set_s2s_client_tags(client_tags);
-    sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s", target);
+     * out untagged, losing the msgid.  With P10_MESSAGE_TAGS off no
+     * peer gets a tag region, so the body form, as in m_tagmsg(). */
+    if (feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+      sendcmdto_set_s2s_cptr(cptr);
+      sendcmdto_want_s2s_tags(1);
+      sendcmdto_set_s2s_client_tags(client_tags);
+      sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s", target);
+    } else
+      sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
+                               client_tags, target);
 
     /* Store in history (or write-forward to STORE server).
      * Use S2S msgid if available so clients can deduplicate. */
@@ -498,12 +523,18 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     else {
       /* Remote user: only toward an IRCv3-aware next hop (audit 0.1)
        * -- a legacy next hop has no TAGMSG and gets nothing. Client
-       * tags ride ,C; restate the origin's msgid/time via cptr. */
+       * tags ride ,C; restate the origin's msgid/time via cptr.  With
+       * no tag region toward that link, the body form, as in
+       * m_tagmsg(). */
       if (IsIRCv3Aware(cli_from(acptr))) {
-        sendcmdto_set_s2s_cptr(cptr);
-        sendcmdto_one_tags_with_client(sptr, CMD_TAGMSG, acptr,
-                                       cli_s2s_msgid(cptr), client_tags,
-                                       "%C", acptr);
+        if (send_s2s_tags_on(acptr)) {
+          sendcmdto_set_s2s_cptr(cptr);
+          sendcmdto_one_tags_with_client(sptr, CMD_TAGMSG, acptr,
+                                         cli_s2s_msgid(cptr), client_tags,
+                                         "%C", acptr);
+        } else
+          sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                        client_tags, acptr);
       }
     }
 
