@@ -95,45 +95,12 @@
 #include "numnicks.h"
 #include "send.h"
 #include "handlers.h"
-#include "s_debug.h"
 #include "s_user.h"
 #include "ircd_relay.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
 #include <sys/time.h>
-
-/** Whether the body form of an S2S TAGMSG, "<num> TM @<tags> <target>"
- * -- what a link gets when no tag region is built toward it
- * (P10_MESSAGE_TAGS off) -- fits whole in the 510 bytes an untagged S2S
- * line keeps.  msgq_vmake cuts a longer line at 510, and the target is
- * the line's LAST word, so a client tag sized to put the cut inside it
- * turned "#ops-public" into "#ops" (or cut a DM target's numeric, which
- * the receiver then also tries as a nick), and ms_tagmsg, which does no
- * membership check, delivered -- and for a non-ephemeral tag stored --
- * the tags there.  A line that does not fit is not sent at all.
- * @param[in] from Source of the line (its numeric is the first word).
- * @param[in] client_tags Client-only tags the body carries.
- * @param[in] target The target text the line ends with (a channel
- *   name, or the target's numeric for a DM).
- * @return 1 if the whole line fits, 0 if the S2S copy must be dropped.
- */
-static int tagmsg_body_form_fits(struct Client *from, const char *client_tags,
-                                 const char *target)
-{
-  char num[16];
-  size_t len;
-
-  ircd_snprintf(&me, num, sizeof(num), "%C", from);
-  len = strlen(num) + 1 + strlen(TOK_TAGMSG) + 2       /* "<num> TM @" */
-        + strlen(client_tags) + 1 + strlen(target);   /* "<tags> <target>" */
-  if (len <= BUFSIZE - 2)
-    return 1;
-  Debug((DEBUG_DEBUG, "TAGMSG from %s to %s: body form is %u bytes, over "
-         "the 510-byte S2S line; S2S copy dropped", cli_name(from), target,
-         (unsigned int)len));
-  return 0;
-}
 
 /** Check if client_tags contains only ephemeral tags (+typing).
  * Returns 1 if ALL tags are ephemeral (should skip storage), 0 otherwise.
@@ -328,9 +295,9 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * off there is no ,C to carry the tags, so keep the body form
        * "@<tags> #chan" that every receiver still reads (ms_tagmsg's
        * parv[1][0] == '@' branch) -- a bare "TM #chan" would be
-       * dropped -- but only when the whole line fits: a cut line ends
-       * inside the channel name and lands in another channel
-       * (tagmsg_body_form_fits). */
+       * dropped -- but only when the whole line fits: the line is cut
+       * at 510 bytes, and a cut ending inside the channel name lands
+       * the tags in another channel (send_s2s_untagged_fits). */
       if (!IsLocalChannel(chptr->chname)) {
         if (feature_bool(FEAT_P10_MESSAGE_TAGS)) {
           sendcmdto_set_s2s_tags(tagmsg_ms, tagmsg_msgid);
@@ -338,7 +305,8 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           sendcmdto_set_s2s_client_tags(client_tags);
           sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s",
                                 chptr->chname);
-        } else if (tagmsg_body_form_fits(sptr, client_tags, chptr->chname))
+        } else if (send_s2s_untagged_fits(sptr, TOK_TAGMSG, "@%s %s",
+                                          client_tags, chptr->chname))
           sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
                                 client_tags, chptr->chname);
       }
@@ -386,20 +354,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
          * that link gets the tag region; otherwise (P10_MESSAGE_TAGS
          * off) the body form "@<tags> <numeric>", as ml_send_line()
          * does for multiline -- a bare "TM <numeric>" would be dropped
-         * -- when the whole line fits (tagmsg_body_form_fits). */
+         * -- when the whole line fits (send_s2s_untagged_fits): a cut
+         * one ends inside the target numeric, which the receiver also
+         * tries as a nick. */
         if (IsIRCv3Aware(cli_from(acptr))) {
           if (send_s2s_tags_on(acptr)) {
             sendcmdto_set_s2s_tags(dm_ms, dm_msgid);
             sendcmdto_one_tags_with_client(sptr, CMD_TAGMSG, acptr, dm_msgid,
                                            client_tags, "%C", acptr);
-          } else {
-            char tnum[16];
-
-            ircd_snprintf(&me, tnum, sizeof(tnum), "%C", acptr);
-            if (tagmsg_body_form_fits(sptr, client_tags, tnum))
-              sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
-                            client_tags, acptr);
-          }
+          } else if (send_s2s_untagged_fits(sptr, TOK_TAGMSG, "@%s %C",
+                                            client_tags, acptr))
+            sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                          client_tags, acptr);
         }
 
         /* Echo TAGMSG back to sender if they have echo-message */
@@ -528,7 +494,8 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_want_s2s_tags(1);
       sendcmdto_set_s2s_client_tags(client_tags);
       sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s", target);
-    } else if (tagmsg_body_form_fits(sptr, client_tags, target))
+    } else if (send_s2s_untagged_fits(sptr, TOK_TAGMSG, "@%s %s",
+                                      client_tags, target))
       sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
                                client_tags, target);
 
@@ -573,14 +540,10 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           sendcmdto_one_tags_with_client(sptr, CMD_TAGMSG, acptr,
                                          cli_s2s_msgid(cptr), client_tags,
                                          "%C", acptr);
-        } else {
-          char tnum[16];
-
-          ircd_snprintf(&me, tnum, sizeof(tnum), "%C", acptr);
-          if (tagmsg_body_form_fits(sptr, client_tags, tnum))
-            sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
-                          client_tags, acptr);
-        }
+        } else if (send_s2s_untagged_fits(sptr, TOK_TAGMSG, "@%s %C",
+                                          client_tags, acptr))
+          sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                        client_tags, acptr);
       }
     }
 

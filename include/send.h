@@ -96,6 +96,11 @@ extern void sendcmdto_set_s2s_ml(char flag, const char *batch_ref);
 /* Whether a send toward this link carries the S2S compact tag region
  * (server link or &me, IRCv3-aware, P10_MESSAGE_TAGS on). */
 extern int send_s2s_tags_on(struct Client *to);
+/* Whether the untagged S2S line "<from> <tok> <pattern...>" fits whole in
+ * 510 bytes; a body form with client tags ahead of its target must not
+ * be cut (TAGMSG, multiline start line). */
+extern int send_s2s_untagged_fits(struct Client *from, const char *tok,
+                                  const char *pattern, ...);
 /* Arm client-only tags (,C<client_tags>) for the next
  * sendcmdto_serv_butone_v3() call (audit 0.1).  Stores the pointer, not
  * a copy: the caller's buffer must outlive that call.  Consumed and

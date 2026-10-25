@@ -304,6 +304,41 @@ int send_s2s_tags_on(struct Client *to)
          && feature_bool(FEAT_P10_MESSAGE_TAGS);
 }
 
+/** Whether the line "<from> <tok> <pattern...>" that a send toward a
+ * server link builds (sendcmdto_one, the serv_butone family) fits whole
+ * in the 510 bytes msgq_vmake keeps of an UNTAGGED S2S line.
+ *
+ * A body form that carries client tags AHEAD of its target -- a TAGMSG
+ * ("@<tags> <target>") or a multiline start line ("+<ref> @<tags>
+ * <target> :<text>"), sent this way when no tag region is built toward
+ * that link (P10_MESSAGE_TAGS off) -- is not the same message once cut:
+ * tags long enough to push the cut past them cut the target, so
+ * "#ops-public" arrives as "#ops" and the receiver, which checks only
+ * that a channel of that name exists, delivers there.  Such a sender
+ * asks this first and sends another form (or nothing) when it says no.
+ * The length is measured on the real line:  pattern and its arguments
+ * are formatted exactly as the send would format them (numerics, since
+ * the destination is a server).
+ * @return 1 if the whole line fits, 0 if a send would cut it. */
+int send_s2s_untagged_fits(struct Client *from, const char *tok,
+                           const char *pattern, ...)
+{
+  struct VarData vd;
+  char scratch[BUFSIZE];
+  int len;
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  len = ircd_snprintf(&me, scratch, sizeof(scratch), "%C %s %v", from, tok,
+                      &vd);
+  va_end(vd.vd_args);
+  if (len <= BUFSIZE - 2)
+    return 1;
+  Debug((DEBUG_DEBUG, "untagged S2S %s line from %s is %d bytes, over the "
+         "510-byte cut", tok, cli_name(from), len));
+  return 0;
+}
+
 /** Pre-built S2S tag prefix for multi-msgid scenarios (e.g. batched CREATE/PART).
  * When non-empty, sendcmdto_serv_butone uses this directly instead of calling
  * format_s2s_tags(). Must include the trailing space. Auto-cleared after use.

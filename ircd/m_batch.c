@@ -902,6 +902,8 @@ format_time_tag(char *buf, size_t buflen)
  * restate -- the body form, byte for byte what was sent before:
  *   [@A<time><msgid>] <num> ML +<ref> [@<ctags>] <target> :<text>  (start)
  *   <num> ML [c|-]<ref> <target> :<text>                       (others)
+ * except that a start line whose client tags would push the 510-byte
+ * cut into its target goes without them (send_s2s_untagged_fits).
  *
  * Every tag-framed line restates the batch's ONE msgid and time
  * (\a msgid / \a time_ms): a version-A tag region must carry one, and
@@ -940,7 +942,16 @@ ml_send_line(struct Client *from, struct Client *server, char flag,
   if (flag == '+') {
     if (has_msgid)
       sendcmdto_set_s2s_tags(time_ms, msgid);
-    if (ctags && *ctags)
+    /* This line has no tag region, so it is cut at 510 bytes, and the
+     * client tags come AHEAD of the target: tags long enough to push
+     * the cut past them would cut the target, and the receiver
+     * (ms_multiline, which checks only that the channel exists) would
+     * build the batch for whatever channel the cut names.  Never cut
+     * the target: when the whole line does not fit, send it without
+     * the client tags -- the message crosses, only its tags are lost. */
+    if (ctags && *ctags
+        && send_s2s_untagged_fits(from, TOK_MULTILINE, "+%s @%s %s :%s",
+                                  batch_ref, ctags, target, text))
       sendcmdto_one(from, CMD_MULTILINE, server, "+%s @%s %s :%s",
                     batch_ref, ctags, target, text);
     else
