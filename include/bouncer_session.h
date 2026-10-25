@@ -1359,14 +1359,22 @@ extern int bounce_demote_live_primary_to_alias(struct Client *acptr,
 
 /** Patch up alias_primary and hs_client after the new primary is
  * created by set_nick_name; broadcast BX C so peers learn about the
- * newly-aliased local connection.
+ * newly-aliased local connection, and retract the demoted face from the
+ * legacy links that know it (bounce_legacy_face_change).
  *
  * @param[in] demoted_alias The freshly-demoted local client.
  * @param[in] new_primary   The remote primary client that replaces it.
+ * @param[in] session       The session the demote ran on (its hs_client
+ *                          is NULL until this call installs new_primary).
+ * @param[in] legacy_done   1 when the caller already swapped the demoted
+ *                          face to new_primary toward the legacy links
+ *                          (BX P): no Q is sent then.
  * @return 0 on success, -1 on mismatch.
  */
 extern int bounce_finish_live_primary_demote(struct Client *demoted_alias,
-                                             struct Client *new_primary);
+                                             struct Client *new_primary,
+                                             struct BouncerSession *session,
+                                             int legacy_done);
 
 /* bounce_resolve_pending_demotes retired in Phase 5 along with BX R. */
 
@@ -1445,6 +1453,32 @@ extern void bounce_session_clear_legacy_face(struct BouncerSession *session,
  * unannounced numerics. */
 extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
 
+/** Tell every direct legacy link that knows `face` (bounce_legacy_link_knows,
+ * bouncer_wire.h) that it changed, except toward `except_link`.
+ *
+ * new_numeric != NULL: a swap, "BX P <face> <new_numeric> <sessid|*> <nick>"
+ * from us; the link renumbers its user in place, and the session records
+ * new_numeric as its face toward that link.
+ * new_numeric == NULL: a retraction, "Q :<reason>" from `face`; every
+ * record of the face is cleared.
+ *
+ * Call it while `face` still has the numeric the links know.  Sent per
+ * link (sendcmdto_one), never through a serv_butone sender: those rewrite
+ * an alias source to its primary for a legacy next hop.
+ *
+ * @param[in] face        The client legacy links know by N.
+ * @param[in] sess        The session whose records say which face each
+ *                        link holds (NULL: none recorded).
+ * @param[in] except_link A link to skip (the line's own direction), or NULL.
+ * @param[in] new_numeric Full YYXXX to swap the face to, or NULL to retract.
+ * @param[in] reason      QUIT reason for a retraction.
+ */
+extern void bounce_legacy_face_change(struct Client *face,
+                                      struct BouncerSession *sess,
+                                      struct Client *except_link,
+                                      const char *new_numeric,
+                                      const char *reason);
+
 /** Null any session's hs_client that points at this dying client, across
  * the full tokenHash.  exit_one_client's primary BOUNCER_ACTIVE / HOLDING
  * cleanup is gated on bsess->hs_client == bcptr; if a session's view of
@@ -1497,6 +1531,9 @@ struct bounce_transition_params {
   struct Client *peer_primary;
   /** DESTROY: free-text reason for logs and Q broadcasts. */
   const char *reason;
+  /** DEMOTE: 1 when the caller already swapped the demoted face to
+   * peer_primary toward the legacy links (no retraction Q then). */
+  int legacy_done;
 };
 
 /** Apply a single state transition to a session.

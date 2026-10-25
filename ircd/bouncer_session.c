@@ -26,6 +26,7 @@
 
 #include "bouncer_session.h"
 #include "bouncer_converge.h"
+#include "bouncer_wire.h"
 #include "bouncer_rebind_auth.h"
 #include "account_id.h"
 #include "exit_reason.h"
@@ -2477,7 +2478,9 @@ int bounce_session_transition(struct BouncerSession *session,
                                                       ? cli_user(params->peer_primary)->server
                                                       : NULL))
         rc = bounce_finish_live_primary_demote(params->demoted_alias,
-                                                params->peer_primary);
+                                                params->peer_primary,
+                                                session,
+                                                params->legacy_done);
     }
     break;
   case BST_REBIND_TO_REMOTE:
@@ -2744,6 +2747,95 @@ void bounce_clear_legacy_faces_for_peer(const char *peer_yxx)
         }
       }
     }
+  }
+}
+
+/** Record `face_yxx` as the session's face toward `peer_yxx`, replacing
+ * the entry for that peer in place when there is one.
+ * bounce_session_record_legacy_intro keeps an existing entry (the burst
+ * records only a first introduction); a BX P swap changes the face the
+ * peer holds, so the entry must change with it. */
+static void bounce_session_set_legacy_face(struct BouncerSession *session,
+                                           const char *peer_yxx,
+                                           const char *face_yxx)
+{
+  int i;
+  if (!session || !peer_yxx || !*peer_yxx || !face_yxx || !*face_yxx)
+    return;
+  for (i = 0; i < session->hs_legacy_intro_count; i++) {
+    if (0 == strcmp(session->hs_legacy_intros[i].bli_peer, peer_yxx)) {
+      ircd_strncpy(session->hs_legacy_intros[i].bli_face, face_yxx,
+                   sizeof(session->hs_legacy_intros[i].bli_face));
+      return;
+    }
+  }
+  bounce_session_record_legacy_intro(session, peer_yxx, face_yxx);
+}
+
+/** See include/bouncer_session.h. */
+void bounce_legacy_face_change(struct Client *face, struct BouncerSession *sess,
+                               struct Client *except_link,
+                               const char *new_numeric, const char *reason)
+{
+  struct DLink *dlp;
+  char face_full[6];
+
+  if (!face || !IsUser(face) || !cli_user(face) || !cli_user(face)->server
+      || !cli_serv(&me))
+    return;
+  if (new_numeric && strlen(new_numeric) != 5)
+    return;
+  ircd_snprintf(0, face_full, sizeof(face_full), "%s%s",
+                cli_yxx(cli_user(face)->server), cli_yxx(face));
+  if (new_numeric && 0 == strcmp(new_numeric, face_full))
+    return;                     /* nothing changes for any link */
+
+  /* One line per link, never a serv_butone sender: those rewrite an
+   * alias source to its primary for a legacy next hop, and a caller may
+   * already have made the face an alias (finish-demote), so the Q would
+   * leave the link as a QUIT of the surviving user.  sendcmdto_one adds
+   * no tags toward a legacy link and consumes no S2S override. */
+  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    struct Client *peer = dlp->value.cptr;
+
+    if (!peer || !IsServer(peer) || peer == except_link)
+      continue;
+    if (!bounce_legacy_link_knows(IsIRCv3Aware(peer), IsBurstGated(peer),
+                                  !MyConnect(face) && cli_from(face) == peer,
+                                  bounce_session_legacy_face_for(sess, cli_yxx(peer)),
+                                  face_full))
+      continue;
+
+    if (new_numeric) {
+      /* The link renumbers its user in place (the stock BX P handler's
+       * numeric swap); it now holds new_numeric as the session's face. */
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, peer, "P %s %s %s %s",
+                    face_full, new_numeric,
+                    (sess && sess->hs_sessid[0]) ? sess->hs_sessid : "*",
+                    cli_name(face));
+      bounce_session_set_legacy_face(sess, cli_yxx(peer), new_numeric);
+      Debug((DEBUG_INFO, "Bouncer: legacy face %s -> %s toward %s (BX P)",
+             face_full, new_numeric, cli_name(peer)));
+    } else {
+      sendcmdto_one(face, CMD_QUIT, peer, ":%s",
+                    (reason && *reason) ? reason : "Bouncer session moved");
+      Debug((DEBUG_INFO, "Bouncer: legacy face %s (%s) retracted toward %s",
+             face_full, cli_name(face), cli_name(peer)));
+    }
+  }
+
+  /* No link holds the old face any more: drop every record of it, in
+   * this session and in any other of the account (a record names the
+   * session the burst found at the time).  A swap's new entries carry
+   * new_numeric and stay. */
+  if (sess)
+    bounce_session_clear_legacy_face(sess, face_full);
+  if (IsAccount(face)) {
+    struct AccountSessions *as = bounce_find_by_account(cli_account(face));
+    struct BouncerSession *s;
+    for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+      if (s != sess)
+        bounce_session_clear_legacy_face(s, face_full);
   }
 }
 
@@ -6585,10 +6677,10 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
 }
 
 int bounce_finish_live_primary_demote(struct Client *demoted_alias,
-                                      struct Client *new_primary)
+                                      struct Client *new_primary,
+                                      struct BouncerSession *session,
+                                      int legacy_done)
 {
-  struct BouncerSession *session;
-
   if (!demoted_alias || !new_primary)
     return -1;
   if (!IsAccount(demoted_alias) || !IsAccount(new_primary))
@@ -6597,8 +6689,8 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
                        cli_user(new_primary)->account))
     return -1;
 
-  session = bounce_find_any_session(cli_user(demoted_alias)->account);
-  if (!session || session->hs_client != NULL)
+  if (!session || session->hs_client != NULL
+      || 0 != ircd_strcmp(session->hs_account, cli_user(demoted_alias)->account))
     return -1;
 
   session->hs_client = new_primary;
@@ -6688,43 +6780,32 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
      * drop it.  Without further signal they'd retain the demoted client
      * as a regular primary — and when the winner side's primary N
      * arrives via mesh forwarding, legacy's m_nick fires same-user@host
-     * collision rules and one or both sides die.  Send Q for the
-     * demoted client over LEGACY links only ("Promoted to alias" reason
-     * — legacy interprets as a normal QUIT, removes from its view).
+     * collision rules and one or both sides die.  Retract the demoted
+     * face from the legacy links that know it ("Promoted to alias"
+     * reason — legacy interprets as a normal QUIT, removes from its
+     * view).  bounce_legacy_face_change skips aware links, links still
+     * under the burst gate (their N hasn't been emitted yet; when the
+     * gate releases the IsBouncerAlias filter on the N loop skips this
+     * client) and links the session showed another face, and clears
+     * the records of this face so a later emit (a relay-path N, the
+     * next burst) may introduce a fresh one.
      *
-     * Skip legacy peers still under the burst gate — their N hasn't
-     * been emitted yet (server_estab gated their server_finish_burst),
-     * so a retraction Q would be for a phantom they never saw.  When
-     * the gate releases later, the IsBouncerAlias filter on the N loop
-     * skips this client correctly.
+     * Nothing here introduces the new primary to these peers: the
+     * pending-canon tick that once did was removed with the frontier
+     * introducer (6523611, then deleted as dead code), so until a relay
+     * or a burst does, a legacy peer may hold no face for the session --
+     * an open gap (deferred-items register).
      *
      * The local Client struct stays alive on this server (it's now an
      * alias and continues to handle the user's connection).  Q here is
-     * purely a peer-state retraction, not a destroy. */
-    {
-      struct DLink *dlp;
-      char demoted_face[6];
-      ircd_snprintf(0, demoted_face, sizeof(demoted_face), "%s%s",
-                    cli_yxx(&me), cli_yxx(demoted_alias));
-      for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
-        if (IsIRCv3Aware(dlp->value.cptr))
-          continue;
-        if (IsBurstGated(dlp->value.cptr))
-          continue;
-        sendcmdto_one(demoted_alias, CMD_QUIT, dlp->value.cptr,
-                      ":Promoted to alias of %s", cli_name(new_primary));
-      }
-      /* Clear the legacy-face record(s) for this demoted face: the Q
-       * just retracted it from legacy peers' view, so a later emit (a
-       * relay-path N, the next burst) is authorized to introduce a fresh
-       * face.  Without this clear, the recorded BjAAA face stays in
-       * hs_legacy_intros forever and future emits skip.  Nothing here
-       * introduces the new primary to these peers: the pending-canon
-       * tick that once did was removed with the frontier introducer
-       * (6523611, then deleted as dead code), so until a relay or a
-       * burst does, a legacy peer may hold no face for the session --
-       * an open gap (deferred-items register). */
-      bounce_session_clear_legacy_face(session, demoted_face);
+     * purely a peer-state retraction, not a destroy.  legacy_done: the
+     * caller already swapped this face to the new primary (BX P), so
+     * the legacy links hold the session's face and get nothing more. */
+    if (!legacy_done) {
+      char reason[NICKLEN + 32];
+      ircd_snprintf(0, reason, sizeof(reason), "Promoted to alias of %s",
+                    cli_name(new_primary));
+      bounce_legacy_face_change(demoted_alias, session, NULL, NULL, reason);
     }
   }
 
@@ -9456,6 +9537,15 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
   }
 
   was_alias = IsBouncerAlias(target);
+
+  /* A held ghost (or any N-introduced client) goes silently here and on
+   * every aware link, but a legacy link learned it by N and gets no BX
+   * X: the forward below is aware-only, and a legacy server would drop
+   * it anyway.  Retract the face toward the legacy links that know it,
+   * while it still has its numeric.  An alias was never N-introduced. */
+  if (!was_alias)
+    bounce_legacy_face_change(target, bounce_get_session(target), cptr, NULL,
+                              "Bouncer session moved");
 
   /* F-DS1: on the alias's OWNING server, BX X targets our OWN local
    * alias (MyConnect, real socket) — not a remote stub.  The bare

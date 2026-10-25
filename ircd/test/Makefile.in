@@ -48,6 +48,7 @@ CMOCKA_TESTPROGS = \
 	webpush_keyring_cmocka \
 	webpush_attention_cmocka \
 	bouncer_converge_cmocka \
+	bouncer_wire_cmocka \
 	bouncer_rebind_auth_cmocka \
 	exit_reason_cmocka \
 	bouncer_deauth_cmocka \
@@ -89,6 +90,7 @@ DEP_SRC = \
 	webpush_keyring_cmocka.c \
 	webpush_attention_cmocka.c \
 	bouncer_converge_cmocka.c \
+	bouncer_wire_cmocka.c \
 	bouncer_rebind_auth_cmocka.c \
 	exit_reason_cmocka.c \
 	bouncer_deauth_cmocka.c \
@@ -426,6 +428,14 @@ bouncer_converge_test.o: ../bouncer_converge.c ../../include/bouncer_converge.h
 BOUNCER_CONVERGE_CMOCKA_OBJS = bouncer_converge_cmocka.o bouncer_converge_test.o
 bouncer_converge_cmocka: $(BOUNCER_CONVERGE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_CONVERGE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# bouncer_wire tests - the module is pure (no ircd deps)
+bouncer_wire_test.o: ../bouncer_wire.c ../../include/bouncer_wire.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_wire.c
+
+BOUNCER_WIRE_CMOCKA_OBJS = bouncer_wire_cmocka.o bouncer_wire_test.o
+bouncer_wire_cmocka: $(BOUNCER_WIRE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(BOUNCER_WIRE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # bouncer_deauth tests - the module is pure (no ircd deps)
 bouncer_deauth_test.o: ../bouncer_deauth.c ../../include/bouncer_deauth.h
