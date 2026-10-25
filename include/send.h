@@ -117,6 +117,13 @@ extern void sendcmdto_reset_s2s_overrides(void);
 /* Mint a fresh msgid into a link's S2S stash for an event that arrived
  * from it with none, and stamp the stash with the msgid's mint time. */
 extern void s2s_mint_link_event(struct Client *link);
+/* The server link whose line is being handled: packet.c sets it right
+ * before parse_server() and NULL right after.  A link's S2S stash is
+ * read for an outgoing tag region only while it is this link's line
+ * (format_s2s_tags_with_client); NULL outside server-line handling
+ * (client lines, timers, callbacks). */
+extern void sendcmdto_set_inbound_link(struct Client *link);
+extern struct Client *sendcmdto_inbound_link(void);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,

@@ -134,15 +134,18 @@ static char *reply_tags(struct Client *to, char *buf, size_t buflen)
     return buf;
   } else if (feature_bool(FEAT_P10_MESSAGE_TAGS) &&
              IsIRCv3Aware(cli_from(to)) &&
+             cli_from(to) == sendcmdto_inbound_link() &&
              cli_s2s_msgid(cli_from(to))[0]) {
     /* Remote recipient: echo compact tag for correlation.
      * In P10 tree topology, cli_from(to) is the server link that delivered
-     * the forwarded command. cli_s2s_msgid/time_ms holds the correlation
-     * msgid. Single-threaded guarantee means these are valid for the
-     * entire handler execution.  The next hop must also be IRCv3-aware
-     * (audit 1.5) -- a legacy peer never parses the @A... prefix, so
-     * emitting one toward it only spends bytes against its 512-byte
-     * line limit for nothing.
+     * the forwarded command, and its cli_s2s_msgid/time_ms hold the
+     * correlation msgid -- but only while that command's line is being
+     * handled.  A reply sent at any other time (a timer, a callback,
+     * while handling another link's line) would carry whatever that link
+     * sent last and correlate with the wrong command, so it goes
+     * untagged.  The next hop must also be IRCv3-aware (audit 1.5) -- a
+     * legacy peer never parses the @A... prefix, so emitting one toward
+     * it only spends bytes against its 512-byte line limit for nothing.
      */
     return format_s2s_tags(buf, buflen, cli_from(to), NULL, 0);
   }

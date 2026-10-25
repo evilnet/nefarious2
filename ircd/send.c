@@ -143,6 +143,37 @@ static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
  * Auto-cleared after use. */
 static char s2s_sessid_override[S2S_SESSID_BUFSIZE] = "";
 
+/** The server link whose line is being handled right now, or NULL.
+ *
+ * A link's S2S stash (cli_s2s_msgid / cli_s2s_time_ms / cli_s2s_sessid
+ * of the link) is cleared only when the NEXT line from that link is
+ * parsed, so outside its own line it holds whatever that link sent
+ * last: another event's msgid, time and session hint.  packet.c sets
+ * this right before parse_server() and clears it right after, so the
+ * stash is consulted only while it is the current line's own tags.
+ * NULL outside server-line handling: client lines, timers, callbacks.
+ * Only ever compared, never dereferenced. */
+static struct Client *s2s_inbound_link = NULL;
+
+void sendcmdto_set_inbound_link(struct Client *link)
+{
+  s2s_inbound_link = link;
+}
+
+struct Client *sendcmdto_inbound_link(void)
+{
+  return s2s_inbound_link;
+}
+
+/** Whether \a cptr's stash holds the tags of the line being handled:
+ * \a cptr is the inbound link, or a client behind it (cli_connect of a
+ * remote client is its link's connection, so their stash is the
+ * link's). */
+static int s2s_stash_is_current(struct Client *cptr)
+{
+  return cptr && s2s_inbound_link && cli_from(cptr) == s2s_inbound_link;
+}
+
 /** Multiline framing (compact-tag ,M segment: flag + batch reference)
  * for the next S2S emit that builds the tag region.  Armed by the ML
  * senders in m_batch.c (audit 0.1), consumed by
@@ -635,8 +666,9 @@ char *generate_msgid(char *buf, size_t buflen)
 
 /** Format message tags for S2S (server-to-server) relay.
  * Produces compact P10-native wire encoding: @A<time_b64_7><msgid_14>
- * If the message came from another server with tags, preserve them.
- * Otherwise, generate new time and msgid.
+ * The msgid and time are an armed override's, else -- while \a cptr's
+ * link's own line is being handled -- the ones that line arrived with,
+ * else freshly minted (see format_s2s_tags_with_client).
  * @param[out] buf Buffer for tag string (includes trailing space).
  * @param[in] buflen Size of buffer.
  * @param[in] cptr Server connection the message came from (for incoming tags).
@@ -658,7 +690,13 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
  * and non-empty. Receivers parse it into cli_s2s_client_tags(cptr) for
  * forwarding to local recipients.  ,S and ,M come from their armed
  * overrides (sendcmdto_set_s2s_sessid, sendcmdto_set_s2s_ml), ,S also
- * from cptr.
+ * from cptr's stash.
+ *
+ * Precedence for the msgid and time (one source for both): an armed
+ * override (s2s_msgid_override with s2s_time_override); else the stash
+ * of \a cptr, but only while \a cptr's link is the one whose line is
+ * being handled (sendcmdto_inbound_link()); else a fresh mint.  The ,S
+ * hint follows the same gate: the stash, else the sessid override.
  *
  * Sized for callers that need to accommodate up to 4094 bytes of client
  * tags (IRCv3 cap) plus the compact prefix; recommend buf ≥ 4128 bytes
@@ -666,7 +704,8 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
  *
  * @param[out] buf Buffer for tag string (includes trailing space).
  * @param[in] buflen Size of buffer.
- * @param[in] cptr Server connection the message came from (for incoming tags).
+ * @param[in] cptr Server connection the message came from, or a client
+ *   behind it (for incoming tags); may be NULL.
  * @param[in] client_tags Optional client-only tags string ("+key=value;...").
  * @param[out] msgid_out Optional: buffer to store the msgid used.
  * @param[in] msgid_out_len Size of msgid_out buffer.
@@ -687,6 +726,7 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   int has_ctags = (client_tags && *client_tags);
   int has_sessid;
   int has_ml;
+  int stash;
 
   /* Check if P10 message tags are enabled */
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
@@ -700,10 +740,17 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
     s2s_ml_override[0] = '\0';  /* auto-clear after consumption */
   }
 
-  /* Sessid: prefer preserved from incoming, then explicit override.
-   * Empty → no ,S segment.  Per redesign A.2: bouncer session-identity
-   * hint for at-N-time recognition in m_nick. */
-  if (cptr && cli_s2s_sessid(cptr)[0]) {
+  /* cptr's stash counts only while its link's line is being handled:
+   * then it is the tags of the line this send relays.  Any other time
+   * it holds whatever that link sent last -- another event, so reading
+   * it gave, e.g., a bouncer alias's message on this server the msgid
+   * of its primary's previous message on the primary's server. */
+  stash = s2s_stash_is_current(cptr);
+
+  /* Sessid (,S): the current line's own hint, else the explicit
+   * override.  Empty → no ,S segment.  Per redesign A.2: bouncer
+   * session-identity hint for at-N-time recognition in m_nick. */
+  if (stash && cli_s2s_sessid(cptr)[0]) {
     sessid_tag = cli_s2s_sessid(cptr);
   } else if (s2s_sessid_override[0]) {
     ircd_strncpy(sessidbuf, s2s_sessid_override, sizeof(sessidbuf));
@@ -712,23 +759,25 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   }
   has_sessid = (sessid_tag && *sessid_tag);
 
-  /* Msgid FIRST: generate before time so HLC is advanced when we read physical_ms.
-   * Use preserved from incoming, override from caller, or generate new. */
-  if (cptr && cli_s2s_msgid(cptr)[0])
-    msgid_tag = cli_s2s_msgid(cptr);
-  else if (s2s_msgid_override[0])
+  /* Msgid and time, always from ONE source:
+   *  1. an armed override -- this event's own id, minted here or
+   *     restated by the caller; a local mint wins over any stash;
+   *  2. the stash, under the gate above;
+   *  3. a fresh mint, msgid FIRST so the HLC has advanced when its
+   *     physical time is read.
+   * A source without a time takes the HLC's physical time. */
+  if (s2s_msgid_override[0]) {
     msgid_tag = s2s_msgid_override;
-  else {
+    epoch_ms = s2s_time_override;
+  } else if (stash && cli_s2s_msgid(cptr)[0]) {
+    msgid_tag = cli_s2s_msgid(cptr);
+    epoch_ms = cli_s2s_time_ms(cptr);
+  } else {
     generate_msgid(msgidbuf, sizeof(msgidbuf));
     msgid_tag = msgidbuf;
+    epoch_ms = hlc_global()->physical_ms;
   }
-
-  /* Time: use preserved epoch_ms from incoming, override, or read from HLC (now advanced) */
-  if (cptr && cli_s2s_time_ms(cptr))
-    epoch_ms = cli_s2s_time_ms(cptr);
-  else if (s2s_time_override)
-    epoch_ms = s2s_time_override;
-  else
+  if (!epoch_ms)
     epoch_ms = hlc_global()->physical_ms;
 
   /* Store msgid for caller if requested (for echo-message) */
@@ -1698,10 +1747,11 @@ void sendcmdto_one_tags_with_client(struct Client *from,
      * link made format_s2s_tags_with_client read cli_s2s_msgid(to) -- the
      * last msgid PARSED off that link -- so a local PM sent right after a
      * services round-trip reused that message's id (2026-09-04).  For a
-     * relayed message the origin link rides in s2s_cptr_override; for a
-     * locally-minted one the caller armed s2s_msgid_override/time with
-     * this message's own id (ext_msgid), which format consumes when the
-     * cptr carries none. */
+     * relayed message the origin link rides in s2s_cptr_override, and
+     * format reads its stash only while that link's line is being
+     * handled; for a locally-minted one the caller armed
+     * s2s_msgid_override/time with this message's own id (ext_msgid),
+     * which format takes ahead of any stash. */
     struct Client *tag_cptr = s2s_cptr_override;
     s2s_cptr_override = NULL;
     if (send_s2s_tags_on(to) &&

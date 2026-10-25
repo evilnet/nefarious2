@@ -93,7 +93,14 @@ int server_dopacket(struct Client* cptr, const char* buffer, int length)
       update_messages_received(cptr);
 
       {
-        int rc = parse_server(cptr, cli_buffer(cptr), endp);
+        int rc;
+        /* This link's S2S stash is the current line's tags only while
+         * the line is handled: mark the link for that span and no
+         * longer, so nothing after it (or a link that died in it)
+         * reads the stash as a current line's. */
+        sendcmdto_set_inbound_link(cptr);
+        rc = parse_server(cptr, cli_buffer(cptr), endp);
+        sendcmdto_set_inbound_link(NULL);
         /* The line's event is over: no S2S tag override it armed may
          * stamp a later, unrelated line (audit 0.4b). */
         sendcmdto_reset_s2s_overrides();

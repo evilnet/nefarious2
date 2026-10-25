@@ -1040,8 +1040,19 @@ int exit_client(struct Client *cptr,
 	 *
 	 * FLAG_BOUNCER_INTERNAL_DESTROY also suppresses Q here — same
 	 * effect as FLAG_KILLED for Q-suppression purposes, but without
-	 * the network-KILL session-destroy semantics (invariant #12). */
-	sendcmdto_set_s2s_cptr(victim);
+	 * the network-KILL session-destroy semantics (invariant #12).
+	 *
+	 * The QUIT carries its own msgid and time to every downlink.  A
+	 * local victim's are its exit pre-stamp above, armed per downlink
+	 * as the event's override (each send consumes it): a local
+	 * client's stash is no link's, so the tag source's inbound-link
+	 * gate would never admit it.  A remote victim's are its own QUIT
+	 * line's tags: its link is the inbound one while that line is
+	 * handled. */
+	if (MyConnect(victim))
+	  sendcmdto_set_s2s_tags(cli_s2s_time_ms(victim), cli_s2s_msgid(victim));
+	else
+	  sendcmdto_set_s2s_cptr(victim);
 	sendcmdto_one(victim, CMD_QUIT, dlp->value.cptr, ":%s", comment);
       }
     }
