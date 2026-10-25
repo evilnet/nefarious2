@@ -847,16 +847,23 @@ extern void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *pr
 /** Send post-join replies (TOPIC/MARKREAD/NAMES) to local aliases after JOIN echo. */
 extern void bounce_send_alias_join_replies(struct Channel *chptr, struct Client *who);
 
-/** Forward a PM/NOTICE to all aliases of the target bouncer primary.
- * @param[in] from    Client that sent the message.
- * @param[in] target  Target client (primary).
- * @param[in] cmd     Long command name (MSG_PRIVATE or MSG_NOTICE).
- * @param[in] tok     Short command token (TOK_PRIVATE or TOK_NOTICE).
- * @param[in] text    Message text.
+/** Forward a PM/NOTICE to all aliases of the target bouncer primary,
+ * under the message's own msgid and time; each alias gets one copy
+ * network-wide (see bouncer_session.c).
+ * @param[in] from        Client that sent the message.
+ * @param[in] target      Target client (primary).
+ * @param[in] inbound     Server link the message arrived on, NULL if local.
+ * @param[in] cmd         Long command name (MSG_PRIVATE or MSG_NOTICE).
+ * @param[in] tok         Short command token (TOK_PRIVATE or TOK_NOTICE).
+ * @param[in] text        Message text.
+ * @param[in] msgid       The message's msgid (NULL or empty if none).
+ * @param[in] event_ms    The message's time, in epoch milliseconds.
+ * @param[in] client_tags The sender's client-only tags, or NULL.
  */
 extern void bounce_forward_pm_to_aliases(struct Client *from,
-    struct Client *target, const char *cmd, const char *tok,
-    const char *text, const char *msgid);
+    struct Client *target, struct Client *inbound,
+    const char *cmd, const char *tok, const char *text,
+    const char *msgid, uint64_t event_ms, const char *client_tags);
 
 /** Remove an alias from its session replica's hs_aliases[].
  * Safe to call even if the alias is not found (no-op).
