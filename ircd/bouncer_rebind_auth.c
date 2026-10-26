@@ -9,17 +9,15 @@
 enum BounceRebindAuth
 bounce_rebind_auth(int origin_match, int sessid_match, int acc_ts_match)
 {
-  /* Sessid first: per redesign A.2/C.2 it is the canonical session
-   * identity and hs_origin is historical-only metadata, so where both
-   * hold the sessid is what actually established trust. */
-  /* acc_ts_match is accepted and ignored: retired 2026-09, see the header.
-   * The parameter stays so callers and old log lines keep their shape. */
+  /* The session id alone: per redesign A.2/C.2 it is the canonical
+   * session identity.  origin_match and acc_ts_match are accepted and
+   * ignored -- both retired, see the header.  The parameters stay so
+   * callers and old log lines keep their shape. */
+  (void)origin_match;
   (void)acc_ts_match;
 
   if (sessid_match)
     return BRA_SESSID;
-  if (origin_match)
-    return BRA_ORIGIN;
   return BRA_NONE;
 }
 

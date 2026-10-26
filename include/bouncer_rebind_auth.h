@@ -9,14 +9,20 @@
 /** Which signal authorized a ghost rebind, in descending strength. */
 enum BounceRebindAuth {
   BRA_NONE = 0,   /**< no signal; the rebind must be refused */
-  BRA_ORIGIN,     /**< introducing server matches the session's recorded origin */
+  BRA_ORIGIN,     /**< retired 2026-10; never returned.  The introducing
+                       server matched the session's recorded origin, which
+                       goes stale (a ghost rebind keeps it, a merge or a
+                       BS C yield moves it) and so let a client of another
+                       session, or of none, take our held ghost's place. */
   BRA_SESSID,     /**< introducing message carried a matching ,S sessid tag */
   BRA_ACC_TS      /**< retired 2026-09; never returned. Kept so log lines
                        written before the retirement remain interpretable. */
 };
 
-/** Decide which signal authorizes this rebind, strongest first.
- * Returns BRA_NONE when none apply. */
+/** Decide which signal authorizes this rebind: the incoming line's session
+ * id matching our session's (BRA_SESSID), else nothing (BRA_NONE).
+ * @a origin_match and @a acc_ts_match are read by no one (both arms are
+ * retired); they are kept for the callers' log lines. */
 extern enum BounceRebindAuth bounce_rebind_auth(int origin_match,
                                                 int sessid_match,
                                                 int acc_ts_match);

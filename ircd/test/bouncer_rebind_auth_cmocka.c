@@ -1,8 +1,9 @@
 /* cmocka suite for bounce_rebind_auth (include/bouncer_rebind_auth.h).
  *
- * The rebind gate authorizes on any of three independent signals. Real
- * rebinds occur about four times per five months in production, so the
- * decision is pinned here rather than observed in the field.
+ * The rebind gate authorizes on the session id alone; the origin and
+ * account-TS arms are retired.  Real rebinds occur about four times per
+ * five months in production, so the decision is pinned here rather than
+ * observed in the field.
  */
 #include <stdarg.h>
 #include <stddef.h>
@@ -18,10 +19,16 @@ static void test_no_signal_refuses(void **state)
   assert_int_equal(bounce_rebind_auth(0, 0, 0), BRA_NONE);
 }
 
-static void test_origin_alone_authorizes(void **state)
+static void test_origin_alone_no_longer_authorizes(void **state)
 {
   (void)state;
-  assert_int_equal(bounce_rebind_auth(1, 0, 0), BRA_ORIGIN);
+  /* Retired 2026-10. The origin a session record notes goes stale: a ghost
+   * rebind keeps it, a merge points it at the server merged into, a BS C
+   * yield at the peer that announced the session.  A line whose session id
+   * does not match ours says the incoming client is in another session, or
+   * in none; matching on the origin then handed our held session to a
+   * client that is not in it. */
+  assert_int_equal(bounce_rebind_auth(1, 0, 0), BRA_NONE);
 }
 
 static void test_sessid_alone_authorizes(void **state)
@@ -53,10 +60,9 @@ static void test_sessid_supersedes_origin(void **state)
 static void test_stronger_signal_wins_over_acc_ts(void **state)
 {
   (void)state;
-  /* acc_ts is the weakest signal and must never be reported when a
-   * stronger one is present -- otherwise the log undercounts the real
-   * gates and overcounts the one we are trying to retire. */
-  assert_int_equal(bounce_rebind_auth(1, 0, 1), BRA_ORIGIN);
+  /* acc_ts is never reported: the session id authorizes alone, and the
+   * retired origin arm does not come back beside the retired acc_ts one. */
+  assert_int_equal(bounce_rebind_auth(1, 0, 1), BRA_NONE);
   assert_int_equal(bounce_rebind_auth(0, 1, 1), BRA_SESSID);
 }
 
@@ -157,7 +163,7 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_no_signal_refuses),
-    cmocka_unit_test(test_origin_alone_authorizes),
+    cmocka_unit_test(test_origin_alone_no_longer_authorizes),
     cmocka_unit_test(test_sessid_alone_authorizes),
     cmocka_unit_test(test_acc_ts_alone_no_longer_authorizes),
     cmocka_unit_test(test_sessid_supersedes_origin),

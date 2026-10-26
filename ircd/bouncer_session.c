@@ -7023,18 +7023,24 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     return -1;
   }
 
-  /* Authorization gate: rebind is allowed if either
-   *   (a) introducing server matches the session's recorded hs_origin
-   *       (legacy path; legacy peers do not carry the ,S sessid hint),
-   *       OR
-   *   (b) the introducing message carries a ,S<sessid> compact tag whose
-   *       value matches this session's hs_sessid.  Sessid is a UUIDv7 —
-   *       only servers that genuinely hold (or replicate) the session
-   *       know it, so the match is non-spoofable across BX-aware peers.
+  /* Authorization gate: rebind is allowed only when the introducing
+   * message carries a ,S<sessid> compact tag whose value matches this
+   * session's hs_sessid.  Sessid is a UUIDv7 — only servers that genuinely
+   * hold (or replicate) the session know it, and they stamp it only on a
+   * member's N, so the match is non-spoofable across BX-aware peers.
    *
-   * Without (a)+(b), any peer reintroducing a user via N during burst —
-   * even a peer that doesn't run bouncer at all — could hijack the ghost
-   * as soon as the +r account matched.
+   * Without it, any peer reintroducing a user via N during burst — even a
+   * peer that doesn't run bouncer at all — could hijack the ghost as soon
+   * as the +r account matched.
+   *
+   * There used to be an origin arm: the introducing server matching the
+   * session's recorded hs_origin.  It is retired too: that origin goes
+   * stale (a ghost rebind keeps it, a merge or a BS C yield moves it to
+   * the peer), and a line whose session id is not ours says the client is
+   * in another session or in none, so matching on the origin handed our
+   * held session to a client that is not in it.  A meeting with a client
+   * in no session is the collision rules' to decide, as it is on the
+   * verdict path.
    *
    * There used to be a third arm: the incoming account timestamp matching
    * the ghost's acc_create.  It is retired (bouncer_rebind_auth.c).  It was
@@ -7042,12 +7048,11 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
    * sessid hint (8cf493c) proved itself, and it is too coarse to authorize
    * anything: it matches any connection that shares the account, and the
    * same account is stamped with different timestamps depending on how
-   * the user logged in.  It is still computed so the refusal below can
-   * log it.
+   * the user logged in.  It and the origin match are still computed so
+   * the refusal below can log them.
    *
    * Per redesign A.2/C.2: sessid is the canonical session identity;
-   * hs_origin is historical-only metadata.  Sessid-match supersedes
-   * origin-match where present. */
+   * hs_origin is historical-only metadata. */
   {
     struct Client *link = cli_from(server) ? cli_from(server) : server;
     const char *wire_sessid = cli_s2s_sessid(link);

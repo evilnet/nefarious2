@@ -503,9 +503,9 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           memcpy(incoming_acct_buf, a, alen);
           incoming_acct_buf[alen] = '\0';
           incoming_acct = incoming_acct_buf;
-          /* +r value is "account[:ts]"; capture the TS so the bouncer
-           * rebind auth gate can use it as a per-account identity
-           * signal when neither origin nor sessid match. */
+          /* +r value is "account[:ts]"; capture the TS for the bouncer
+           * rebind gate's refusal log (it no longer authorizes; only the
+           * session id does). */
           if (colon) {
             const char *idp = strchr(colon + 1, ':');
             incoming_acc_ts = (time_t)strtoll(colon + 1, NULL, 10);
