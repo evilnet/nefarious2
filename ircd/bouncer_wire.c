@@ -168,3 +168,22 @@ int bounce_squit_prepares(int has_primary, int primary_local,
     return !primary_local && primary_behind;
   return origin_behind;
 }
+
+enum bounce_hold_expiry bounce_hold_expiry_action(int has_primary,
+                                                  int primary_ours_held,
+                                                  int alias_count)
+{
+  if (has_primary && !primary_ours_held)
+    return BOUNCE_HOLD_KEEP;
+  if (alias_count > 0)
+    return BOUNCE_HOLD_PROMOTE;
+  return has_primary ? BOUNCE_HOLD_END : BOUNCE_HOLD_DROP;
+}
+
+int bounce_same_session_yields(int ours_holding, int ours_live,
+                               int theirs_active, int their_primary,
+                               int kc_conflict)
+{
+  return ours_holding && !ours_live && theirs_active && their_primary
+         && !kc_conflict;
+}

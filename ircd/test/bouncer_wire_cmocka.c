@@ -607,6 +607,55 @@ static void squit_goes_by_the_origin_without_a_primary(void **s)
     }
 }
 
+/* bounce_hold_expiry_action(has_primary, primary_ours_held, alias_count) */
+
+static void hold_expiry_ends_only_our_held_ghost(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_hold_expiry_action(1, 1, 0), BOUNCE_HOLD_END);
+  assert_int_equal(bounce_hold_expiry_action(1, 1, 2), BOUNCE_HOLD_PROMOTE);
+}
+
+static void hold_expiry_never_acts_on_another_holders_primary(void **s)
+{
+  int n;
+  (void)s;
+  /* A client of another server, or a live one: no BS X, no promote. */
+  for (n = 0; n < 3; n++)
+    assert_int_equal(bounce_hold_expiry_action(1, 0, n), BOUNCE_HOLD_KEEP);
+}
+
+static void hold_expiry_without_a_primary(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_hold_expiry_action(0, 0, 1), BOUNCE_HOLD_PROMOTE);
+  assert_int_equal(bounce_hold_expiry_action(0, 0, 0), BOUNCE_HOLD_DROP);
+}
+
+/* bounce_same_session_yields(ours_holding, ours_live, theirs_active,
+ *                            their_primary, kc_conflict) */
+
+static void held_copy_yields_to_a_visible_live_copy(void **s)
+{
+  (void)s;
+  assert_true(bounce_same_session_yields(1, 0, 1, 1, 0));
+}
+
+static void held_copy_keeps_otherwise(void **s)
+{
+  int h, l, a, p, k;
+  (void)s;
+  for (h = 0; h < 2; h++)
+  for (l = 0; l < 2; l++)
+  for (a = 0; a < 2; a++)
+  for (p = 0; p < 2; p++)
+  for (k = 0; k < 2; k++) {
+    if (h && !l && a && p && !k)
+      continue;
+    assert_false(bounce_same_session_yields(h, l, a, p, k));
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -616,6 +665,11 @@ int main(void)
     cmocka_unit_test(squit_readies_a_session_whose_primary_left),
     cmocka_unit_test(squit_leaves_a_session_whose_primary_stays),
     cmocka_unit_test(squit_goes_by_the_origin_without_a_primary),
+    cmocka_unit_test(hold_expiry_ends_only_our_held_ghost),
+    cmocka_unit_test(hold_expiry_never_acts_on_another_holders_primary),
+    cmocka_unit_test(hold_expiry_without_a_primary),
+    cmocka_unit_test(held_copy_yields_to_a_visible_live_copy),
+    cmocka_unit_test(held_copy_keeps_otherwise),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),

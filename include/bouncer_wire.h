@@ -310,4 +310,59 @@ extern int bounce_server_at_or_behind(const void *srv, const void *departing,
 extern int bounce_squit_prepares(int has_primary, int primary_local,
                                  int primary_behind, int origin_behind);
 
+/** What a session's hold timer does when the hold has run out. */
+enum bounce_hold_expiry {
+  BOUNCE_HOLD_END,      /**< our held ghost, no alias: the session ends
+                         *   everywhere (BS X), the ghost leaves */
+  BOUNCE_HOLD_PROMOTE,  /**< a live alias takes the primary's place */
+  BOUNCE_HOLD_KEEP,     /**< the primary is not a ghost we hold (a client
+                         *   of another server, or live): its holder
+                         *   decides, nothing ends here */
+  BOUNCE_HOLD_DROP      /**< no primary and no alias: our record goes,
+                         *   nothing is sent */
+};
+
+/** The hold timer's action, from what the session is when it fires.
+ *
+ * Only the holder ends a session: a server ends one (BS X) only when the
+ * primary is a ghost it holds.  A session whose primary is a client of
+ * another server, or a live one, has moved since the timer was armed:
+ * ending it from here would end it under that primary (a peer destroys
+ * its record on BS X), and promoting an alias here would make a second
+ * primary.
+ *
+ * @param[in] has_primary       Nonzero if the session has a primary.
+ * @param[in] primary_ours_held Nonzero if it is a held ghost of ours.
+ * @param[in] alias_count       Aliases on the session's roster.
+ */
+extern enum bounce_hold_expiry bounce_hold_expiry_action(int has_primary,
+                                                         int primary_ours_held,
+                                                         int alias_count);
+
+/** Does our held copy of a session yield to a peer's live copy of it?
+ *
+ * One session (one id) can be held here while the peer has it live: a
+ * restart restored our ghost, or our primary's socket dropped during a
+ * split while the peer promoted an alias.  The live copy wins (user,
+ * 2026-10-24), whichever server either record names as the session's
+ * origin: our ghost leaves and our record follows the peer's primary.
+ * It yields only to a primary we can see -- one the peer introduced to us
+ * under the session's id -- so a primary refused at N time (a same-nick
+ * meeting this server kept) never takes the session from our ghost
+ * afterwards; and never across Keycloak users.
+ *
+ * @param[in] ours_holding     Nonzero if our record is HOLDING and we hold
+ *                             something of it here (its ghost, or an alias).
+ * @param[in] ours_live        Nonzero if its primary is a live client of
+ *                             ours (a record that only says HOLDING).
+ * @param[in] theirs_active    Nonzero if the peer announces it active.
+ * @param[in] their_primary    Nonzero if the peer's primary of it is known
+ *                             here.
+ * @param[in] kc_conflict      Nonzero if the Keycloak ids differ.
+ * @return 1 when ours yields, else 0.
+ */
+extern int bounce_same_session_yields(int ours_holding, int ours_live,
+                                      int theirs_active, int their_primary,
+                                      int kc_conflict);
+
 #endif /* INCLUDED_bouncer_wire_h */

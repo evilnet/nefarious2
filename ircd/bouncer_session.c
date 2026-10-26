@@ -695,6 +695,8 @@ static enum bounce_demote_bar demote_eligibility_for(enum bounce_demote_stage st
                                                      struct Client *face,
                                                      struct BouncerSession *session,
                                                      struct Client *new_primary);
+static void bounce_announce_alias(struct BouncerSession *session,
+                                  struct Client *alias, struct Client *primary);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -747,6 +749,39 @@ static void bounce_hold_expire(struct Event *ev)
    * Note: hs_client stores the ghost during HOLDING state.
    */
   ghost = session->hs_client;
+
+  /* Only the holder ends a session.  A primary that is not a ghost we
+   * hold -- a client of another server (a peer's announcement installed
+   * it over ours while the timer still ran), or a live one -- means the
+   * session moved since this timer was armed: a BS X from here would make
+   * every peer destroy its record under that primary, and a promote would
+   * make a second primary.  Its holder runs the session's lifetime. */
+  switch (bounce_hold_expiry_action(ghost != NULL,
+                                    ghost && MyConnect(ghost) && IsBouncerHold(ghost),
+                                    session->hs_alias_count)) {
+  case BOUNCE_HOLD_KEEP:
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: hold of %s's session %s ran out, but its primary %s "
+              "is %s%s: not ending it here", session->hs_account,
+              session->hs_sessid, cli_name(ghost),
+              MyConnect(ghost) ? "live here" : "on ",
+              MyConnect(ghost) ? ""
+                : (bounce_primary_server(session)
+                     ? cli_name(bounce_primary_server(session)) : "?"));
+    return;
+  case BOUNCE_HOLD_DROP:
+    /* No primary anywhere we know of and nothing to promote: our record
+     * goes.  No BS X -- a primary we do not know of may still hold the
+     * session elsewhere; a peer's record of a ghost we held went with the
+     * ghost's own exit. */
+    Debug((DEBUG_INFO, "Bouncer: hold of session %s ran out with no "
+           "primary and no alias; dropping our record", session->hs_sessid));
+    session->hs_state = BOUNCE_DESTROYING;
+    return;
+  case BOUNCE_HOLD_PROMOTE:
+  case BOUNCE_HOLD_END:
+    break;
+  }
 
   if (session->hs_alias_count > 0) {
     /* Aliases exist — promote instead of destroy.
@@ -4676,91 +4711,102 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
     /* Reconcile against an existing local session for the same token.
      *
-     * Original goal: stale local-origin HOLDING vs remote ACTIVE — leaf
-     * restored a ghost from MDBX while hub already had the session live.
-     * Without reconcile, leaf would keep its stale ghost and every
-     * reconnect would revive it instead of attaching as alias to hub's
-     * active session.
+     * One session, held here and live on the peer: a restart restored
+     * our ghost from MDBX while the peer had the session live, or our
+     * primary's socket dropped during a split while the peer promoted an
+     * alias of it, and the user's nick there moved on (a same-nick
+     * meeting is decided at N time).  The live copy wins (user,
+     * 2026-10-24), whichever server either record names as the session's
+     * origin -- that only says where it was created or last moved.  Our
+     * ghost leaves, and our record follows the peer's primary, which the
+     * burst introduced before this BS C: our aliases become its aliases.
+     * Without the yield both faces stay up, and our hold expiry ends the
+     * session under the live user.
      *
-     * Authorization gate: only yield to BS C from a peer whose origin
-     * matches the existing session's recorded origin.  Without this,
-     * any peer that obtained the token (legitimately or not) can claim
-     * to be the new authority and force-destroy our ghost — same
-     * hijack shape as f6f05e5's rebind fix.  In a single-bouncer-server
-     * topology this branch should never fire at all (only one server
-     * has the token); the gate makes that explicit.
+     * It yields only to a primary we can see under this session's id, so
+     * a primary this server refused at N time (a same-nick meeting it
+     * kept) never takes the session from our ghost afterwards; never to a
+     * different Keycloak user (kept apart, user 2026-10-23); and never
+     * with a live primary of ours (bounce_same_session_yields()).
      *
      * Same-state replicas (both holding or both active) are simple
      * dedup: keep what we have. */
     {
       struct BouncerSession *existing = bounce_find_by_token(token);
       if (existing) {
-        /* Per redesign C.2: "do we hold this locally?" is a runtime
-         * question — session_has_local_holder reads actual Client
-         * presence rather than the historical hs_origin attribute. */
-        int existing_local = session_has_local_holder(existing);
-        if (existing_local && existing->hs_state == BOUNCE_HOLDING
-            && !is_holding) {
-          /* Only the session's recorded origin may claim ownership.
-           * For a local-origin HOLDING session, the recorded origin is
-           * us — so any incoming BS C "active" claim from a peer is
-           * unauthorized.  Skip the destructive reconcile.  If a real
-           * migration is needed it must go through the BS T transfer
-           * handshake, which is auditable and explicit. */
-          if (0 != strcmp(existing->hs_origin, cli_yxx(sptr))) {
-            log_write(LS_USER, L_WARNING, 0,
-                      "Bouncer reconcile: refusing to yield local HOLDING "
-                      "session %s to %s — origin mismatch (origin=%s, "
-                      "introducing=%s); use BS T for legitimate migration",
-                      sessid, cli_name(sptr), existing->hs_origin,
-                      cli_yxx(sptr));
-            return 0;
+        struct Client *ours = existing->hs_client;
+        struct Client *peer = bounce_peer_session_primary(cptr, account, sessid);
+        int ours_live = ours && MyConnect(ours) && !IsBouncerHold(ours);
+        int kc_conflict = peer && bounce_rebind_kc_conflict(
+                                    bounce_session_kc_id(existing),
+                                    cli_user(peer)->kc_id);
+
+        if (existing->hs_state == BOUNCE_HOLDING && !is_holding
+            && session_has_local_holder(existing)
+            && !bounce_same_session_yields(1, ours_live, 1, peer != NULL,
+                                           kc_conflict)) {
+          log_write(LS_USER, L_INFO, 0,
+                    "Bouncer reconcile: not yielding held session %s to %s: %s",
+                    sessid, cli_name(sptr),
+                    ours_live ? "its primary is live here"
+                    : kc_conflict ? "Keycloak ids differ"
+                    : "its live primary is not known here");
+        }
+        if (bounce_same_session_yields(existing->hs_state == BOUNCE_HOLDING
+                                         && session_has_local_holder(existing),
+                                       ours_live, !is_holding, peer != NULL,
+                                       kc_conflict)) {
+          struct Client *ghost = (ours && MyConnect(ours) && IsBouncerHold(ours))
+                                 ? ours : NULL;
+          int i;
+
+          log_write(LS_USER, L_INFO, 0,
+                    "Bouncer reconcile: held session %s of %s yields to %s's "
+                    "live primary %s%s%s", sessid, account, cli_name(sptr),
+                    cli_name(peer), ghost ? "; ghost " : "",
+                    ghost ? cli_name(ghost) : "");
+          if (t_active(&existing->hs_hold_timer))
+            timer_del(&existing->hs_hold_timer);
+          existing->hs_state = BOUNCE_ACTIVE;
+          existing->hs_disconnect_time = 0;
+          existing->hs_last_active = CurrentTime;
+          existing->hs_restore_pending = 0;
+          existing->hs_client = NULL;
+          bounce_hs_client_assign_checked(existing, peer, "BS C");
+          ircd_strncpy(existing->hs_origin, cli_yxx(cli_user(peer)->server),
+                       sizeof(existing->hs_origin));
+          ircd_strncpy(existing->hs_ghost_numeric, cli_yxx(peer),
+                       sizeof(existing->hs_ghost_numeric));
+          /* The persisted record was of our ghost. */
+          bounce_db_del(existing->hs_sessid);
+
+          /* Our session's live connections follow the peer's primary, and
+           * the aware links learn ours as its aliases (a held session's
+           * aliases are not in our burst). */
+          for (i = 0; i < existing->hs_alias_count; i++) {
+            struct Client *alias = findNUser(existing->hs_aliases[i].ba_numeric);
+            if (!alias || !IsBouncerAlias(alias) || !cli_user(alias))
+              continue;
+            cli_user(alias)->alias_primary = peer;
+            if (MyConnect(alias))
+              bounce_announce_alias(existing, alias, peer);
           }
-          /* A different Keycloak user behind the peer's copy: kept
-           * apart, our ghost not dropped for it (user, 2026-10-23). */
-          {
-            struct Client *peer = bounce_peer_session_primary(cptr, account, sessid);
-            if (peer && bounce_rebind_kc_conflict(bounce_session_kc_id(existing),
-                                                  cli_user(peer)->kc_id)) {
-              log_write(LS_USER, L_INFO, 0,
-                        "Bouncer reconcile: not yielding session %s to %s: "
-                        "Keycloak ids differ (%s, %s)", sessid, cli_name(sptr),
-                        bounce_session_kc_id(existing), cli_user(peer)->kc_id);
-              return 0;
-            }
-          }
-          {
-            struct Client *ghost = existing->hs_client;
-            log_write(LS_USER, L_INFO, 0,
-                      "Bouncer reconcile: dropping stale local HOLDING ghost "
-                      "for session %s — remote %s is ACTIVE",
-                      sessid, cli_name(sptr));
-            /* Repoint origin to authoritative server, transition to ACTIVE,
-             * and drop hs_client (the ghost) so we become a remote replica. */
-            ircd_strncpy(existing->hs_origin, cli_yxx(sptr),
-                         sizeof(existing->hs_origin));
-            existing->hs_origin[sizeof(existing->hs_origin) - 1] = '\0';  /* redundant: strlcpy already terminates */
-            existing->hs_state = BOUNCE_ACTIVE;
-            existing->hs_disconnect_time = 0;
-            existing->hs_client = NULL;
-            if (t_active(&existing->hs_hold_timer))
-              timer_del(&existing->hs_hold_timer);
-            /* Drop the persisted record — we're no longer the origin. */
-            bounce_db_del(existing->hs_sessid);
-            /* Exit the ghost so it doesn't linger as a phantom user.
-             *
-             * Burst-order invariant (see project_bx_r_yield_burst_order):
-             * server_estab emits BS C reconciles before the N loop, but
-             * by the time we (loser) process the peer's authoritative
-             * BS C, our own N for the ghost has already shipped over the
-             * same link.  The peer therefore HAS the ghost as a Client
-             * struct.  Letting exit_client broadcast Q normally cleans
-             * up the peer's phantom — suppressing it (formerly via
-             * FLAG_KILLED) leaves a stale ghost client visible in NAMES
-             * and propagating to subsequently linked servers. */
-            if (ghost)
-              exit_client(cptr, ghost, &me, "Bouncer session moved");
-          }
+
+          /* The ghost leaves as a held ghost does: BX X toward the aware
+           * links, a Q toward the legacy ones, which know the peer's
+           * primary by its own N.
+           *
+           * Burst-order invariant (see project_bx_r_yield_burst_order):
+           * by the time we process the peer's BS C, our own N for the
+           * ghost has already shipped over the same link, so the peer
+           * has it as a Client; the exit's normal Q/BX X cleans that up
+           * (suppressing it, formerly via FLAG_KILLED, left a stale ghost
+           * in NAMES). */
+          if (ghost)
+            exit_client(cptr, ghost, &me, "Bouncer session moved");
+          /* A restored ghost held burst gates; the release runs after this
+           * line. */
+          bounce_schedule_gate_release();
         }
         return 0;
       }
@@ -5220,7 +5266,19 @@ bsc_forward:
     /* BS X <account> <sessid> — destroy session */
     unmirrored_clear(account, sessid);
     session = bounce_find_by_token_sessid(account, sessid);
-    if (session) {
+    if (session && session->hs_client && MyConnect(session->hs_client)
+        && IsUser(session->hs_client) && !IsBouncerHold(session->hs_client)
+        && !IsBouncerAlias(session->hs_client)
+        && !HasFlag(session->hs_client, FLAG_KILLED)) {
+      /* Our copy of the session has a live primary here: the live copy
+       * wins (user, 2026-10-24).  The sender ended its own copy -- a held
+       * ghost's hold ran out, or a client of a session that shares this
+       * id lost a nick collision -- and that ends nothing of ours. */
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: %s ended %s's session %s, whose primary %s is live "
+                "here: kept", cli_name(sptr), account, sessid,
+                cli_name(session->hs_client));
+    } else if (session) {
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
              session->hs_sessid, sptr));
       bounce_destroy(session);
