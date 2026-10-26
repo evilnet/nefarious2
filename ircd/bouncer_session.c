@@ -4598,6 +4598,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
           bounce_find_by_account(account);
       if (as_existing && as_existing->as_sessions) {
         struct BouncerSession *local = as_existing->as_sessions;
+        enum bounce_session_outcome outcome;
         /* If sessid already matches some local session, normal
          * single-session-per-account path handles it (we don't get
          * here since bounce_find_by_token would have caught it). */
@@ -4634,10 +4635,31 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
          * session is built below.  When the peer's is the holding one
          * and ours is active, ours simply wins; the peer applies the
          * same rule to our BS C and retires its own.  Only equal states
-         * fall through to the sessid-age rename/skip below. */
-        if (local->hs_state == BOUNCE_HOLDING && !is_holding) {
-          struct Client *ghost = local->hs_client;
-          if (session_has_local_holder(local)) {
+         * fall through to the sessid-age rename/skip below.
+         *
+         * Ours is retired only when nothing of it is live: a held ghost
+         * whose session still has a live alias (or a live primary under
+         * a holding record) is held only in name, and retiring it would
+         * exit those devices (bounce_kill_session exits every alias).
+         * It is read with the predicate the same-nick verdict reads, on
+         * this session, the one the retire would end.  Such a session is
+         * kept apart: it keeps its id and the peer's is not mirrored
+         * here, as the peer, reading our announced "holding", keeps its
+         * own and skips ours (bounce_session_converge).  Taking the
+         * peer's id instead would make our record the one the peer's
+         * BS A and BS D for its own primary resolve to here. */
+        {
+          int local_live =
+            (local->hs_client && MyConnect(local->hs_client))
+              ? !bounce_session_held(local, local->hs_client)
+              : bounce_session_has_live_alias(local);
+          outcome = bounce_session_converge(local->hs_state == BOUNCE_HOLDING,
+                                            session_has_local_holder(local),
+                                            local_live, local->hs_sessid,
+                                            is_holding, sessid);
+
+          if (outcome == BSO_RETIRE) {
+            struct Client *ghost = local->hs_client;
             log_write(LS_USER, L_INFO, 0,
                       "Bouncer reconcile: retiring held session %s for %s "
                       "-- %s announces live session %s",
@@ -4645,23 +4667,32 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
             bounce_kill_session(local, "Bouncer session moved");
             if (ghost)
               exit_client(cptr, ghost, &me, "Bouncer session moved");
-          } else {
+            goto bsc_create;
+          }
+          if (outcome == BSO_DROP_REPLICA) {
             Debug((DEBUG_INFO, "BS C: dropping clientless holding replica "
                    "%s for %s -- %s announces live session %s",
                    local->hs_sessid, account, cli_name(sptr), sessid));
             bounce_destroy(local);
+            goto bsc_create;
           }
-          goto bsc_create;
-        }
-        if (local->hs_state == BOUNCE_ACTIVE && is_holding) {
-          Debug((DEBUG_INFO, "BS C: local live session %s for %s wins over "
-                 "peer's holding %s; skipping replica",
-                 local->hs_sessid, account, sessid));
-          goto bsc_forward;
+          if (local->hs_state == BOUNCE_HOLDING && !is_holding) {
+            log_write(LS_USER, L_INFO, 0,
+                      "Bouncer reconcile: not retiring held session %s for "
+                      "%s -- it still has a live connection here; kept apart "
+                      "from %s's live session %s", local->hs_sessid, account,
+                      cli_name(sptr), sessid);
+            goto bsc_forward;
+          }
+          if (local->hs_state == BOUNCE_ACTIVE && is_holding) {
+            Debug((DEBUG_INFO, "BS C: local live session %s for %s wins over "
+                   "peer's holding %s; skipping replica",
+                   local->hs_sessid, account, sessid));
+            goto bsc_forward;
+          }
         }
 
-        if (bounce_converge_peer_wins(local->hs_state == BOUNCE_HOLDING,
-                                      local->hs_sessid, is_holding, sessid)) {
+        if (outcome == BSO_RENAME) {
           /* Peer's sessid is lex-lower (older UUID v7) — peer wins.
            * Rename our local session to peer's sessid so future BX C
            * / BS A by-sessid lookups resolve to our state. */

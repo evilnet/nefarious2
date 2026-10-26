@@ -31,6 +31,56 @@
 extern int bounce_converge_peer_wins(int local_holding, const char *local_sessid,
                                      int peer_holding, const char *peer_sessid);
 
+/** What BS C's convergence does with our session when a peer announces
+ * another session of the same account (session ids differ). */
+enum bounce_session_outcome {
+  BSO_KEEP,          /**< ours stays under its id; the peer's copy is not
+                      *   mirrored here (the peer takes our id, or keeps
+                      *   its own and skips ours) */
+  BSO_RENAME,        /**< ours stays, every connection with it, and takes
+                      *   the peer's session id */
+  BSO_RETIRE,        /**< ours ends (bounce_kill_session, its held ghost
+                      *   leaves with a Q); the peer's copy is mirrored */
+  BSO_DROP_REPLICA   /**< our clientless replica is dropped (nothing here
+                      *   exits); the peer's copy is mirrored */
+};
+
+/** BS C's convergence of two sessions of one account.
+ *
+ * The states are the announced ones ("holding" or "active", which is
+ * hs_state on both ends), so both servers compute from the same facts:
+ * a live session beats a holding one; between equal states the older
+ * (lexicographically lower) id wins (bounce_converge_peer_wins).  The
+ * session that loses takes the winner's id, except a holding one beaten
+ * by a live one, which ends: retired when it is held here, dropped when
+ * it is a replica of another server's session.
+ *
+ * A holding session still with a live connection here (a live alias, or
+ * a live primary under a holding record) is never retired: ending it
+ * would exit that device.  Nor is it merged: it keeps its id and the
+ * peer's copy is not mirrored here, while the peer, reading our
+ * announced "holding", keeps its own id and skips ours.  The two stay
+ * apart, each server holding only its own, as sessions of different
+ * Keycloak users are kept apart; a later convergence (another link
+ * burst, once ours is live or gone) merges them.
+ *
+ * @param[in] local_holding  1 if our record is HOLDING (we announce
+ *                           "holding"), 0 if ACTIVE.
+ * @param[in] local_holder   1 if a connection of our session is on this
+ *                           server (its primary or held ghost, or an
+ *                           alias), 0 for a replica.
+ * @param[in] local_live     1 if a connection of our session is live (a
+ *                           held ghost with no live alias is not).
+ * @param[in] local_sessid   Our session id.
+ * @param[in] peer_holding   1 if the peer announced "holding".
+ * @param[in] peer_sessid    The peer's session id.
+ * @return What to do with ours.
+ */
+extern enum bounce_session_outcome
+bounce_session_converge(int local_holding, int local_holder, int local_live,
+                        const char *local_sessid, int peer_holding,
+                        const char *peer_sessid);
+
 /** One side of a same-nick meeting of two clients of one account: ours,
  * or the one an incoming N introduces. */
 struct bounce_nick_side {

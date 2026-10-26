@@ -67,6 +67,105 @@ static void test_null_ids_do_not_crash(void **state)
   assert_int_equal(bounce_converge_peer_wins(0, NULL, 0, NULL), 0);
 }
 
+/* ---- BS C: a peer announces another session of the account ---- */
+
+/* Today's rule, for a session with nothing live: a live session beats a
+ * holding one (ours retired when held here, dropped when a replica);
+ * between equal states the older id wins and the loser takes it. */
+static void test_session_converge_as_today(void **state)
+{
+  static const char *ids[2] = { OLDER, NEWER };
+  int lh, holder, ph, li;
+  (void)state;
+  for (lh = 0; lh < 2; lh++)
+  for (holder = 0; holder < 2; holder++)
+  for (ph = 0; ph < 2; ph++)
+  for (li = 0; li < 2; li++) {
+    const char *ours = ids[li], *theirs = ids[!li];
+    enum bounce_session_outcome want;
+    if (lh && !ph)
+      want = holder ? BSO_RETIRE : BSO_DROP_REPLICA;
+    else if (!lh && ph)
+      want = BSO_KEEP;
+    else
+      want = bounce_converge_peer_wins(lh, ours, ph, theirs) ? BSO_RENAME
+                                                             : BSO_KEEP;
+    assert_int_equal(bounce_session_converge(lh, holder, 0, ours, ph, theirs),
+                     want);
+  }
+}
+
+/* A holding session of ours with a live connection (a live alias of a
+ * held ghost) is never retired for a peer's live session: retiring it
+ * would exit that device.  It is kept apart instead: ours keeps its id
+ * and the peer's copy is not mirrored, as the peer, reading our
+ * "holding", keeps its own and skips ours. */
+static void test_session_converge_never_retires_a_live_session(void **state)
+{
+  static const char *ids[2] = { OLDER, NEWER };
+  int lh, ph, li;
+  (void)state;
+  assert_int_equal(bounce_session_converge(1, 1, 1, OLDER, 0, NEWER), BSO_KEEP);
+  assert_int_equal(bounce_session_converge(1, 1, 1, NEWER, 0, OLDER), BSO_KEEP);
+  for (lh = 0; lh < 2; lh++)
+  for (ph = 0; ph < 2; ph++)
+  for (li = 0; li < 2; li++)
+    assert_int_not_equal(bounce_session_converge(lh, 1, 1, ids[li], ph,
+                                                 ids[!li]), BSO_RETIRE);
+  /* A replica's connections are not here: dropping our record of it
+   * exits nothing, as today. */
+  assert_int_equal(bounce_session_converge(1, 0, 1, OLDER, 0, NEWER),
+                   BSO_DROP_REPLICA);
+  /* Otherwise the guard changes nothing: an active session of ours is
+   * read as before, live or not. */
+  for (ph = 0; ph < 2; ph++)
+  for (li = 0; li < 2; li++)
+    assert_int_equal(bounce_session_converge(0, 1, 1, ids[li], ph, ids[!li]),
+                     bounce_session_converge(0, 1, 0, ids[li], ph, ids[!li]));
+}
+
+/* The id a server keeps for the account after the meeting: its own when
+ * it keeps, the peer's otherwise (it takes it, or mirrors the peer's
+ * session after ending its own). */
+static const char *session_id_after(enum bounce_session_outcome o,
+                                    const char *own, const char *peer)
+{
+  return o == BSO_KEEP ? own : peer;
+}
+
+/* Both servers compute from the announced states, so they agree in
+ * every pairing: one keeps its id and the other takes it (or ends and
+ * mirrors it) -- except a holding session with a live connection against
+ * a live one, where both keep their own and neither mirrors the other
+ * (the peer reads our "holding" and skips ours; we keep ours). */
+static void test_session_converge_both_ends_agree(void **state)
+{
+  static const char *ids[2] = { OLDER, NEWER };
+  int ah, al, bh, bl, ai;
+  (void)state;
+  for (ah = 0; ah < 2; ah++)
+  for (al = 0; al < 2; al++)
+  for (bh = 0; bh < 2; bh++)
+  for (bl = 0; bl < 2; bl++)
+  for (ai = 0; ai < 2; ai++) {
+    const char *a_id = ids[ai], *b_id = ids[!ai];
+    enum bounce_session_outcome a = bounce_session_converge(ah, 1, al, a_id,
+                                                            bh, b_id);
+    enum bounce_session_outcome b = bounce_session_converge(bh, 1, bl, b_id,
+                                                            ah, a_id);
+    if ((ah && al && !bh) || (bh && bl && !ah)) {
+      /* Kept apart: each keeps its own, neither mirrors the other. */
+      assert_int_equal(a, BSO_KEEP);
+      assert_int_equal(b, BSO_KEEP);
+      continue;
+    }
+    assert_string_equal(session_id_after(a, a_id, b_id),
+                        session_id_after(b, b_id, a_id));
+    /* Exactly one side changes: the other keeps. */
+    assert_int_equal(a == BSO_KEEP, b != BSO_KEEP);
+  }
+}
+
 /* ---- bounce_nick_verdict: a same-nick meeting of one account ---- */
 
 #define NA "ACAAA"   /* the lower full numeric */
@@ -905,6 +1004,9 @@ int main(void)
     cmocka_unit_test(test_identical_id_keeps_ours),
     cmocka_unit_test(test_both_sides_agree),
     cmocka_unit_test(test_null_ids_do_not_crash),
+    cmocka_unit_test(test_session_converge_as_today),
+    cmocka_unit_test(test_session_converge_never_retires_a_live_session),
+    cmocka_unit_test(test_session_converge_both_ends_agree),
     cmocka_unit_test(test_held_vs_known_live_retires_whatever_the_age),
     cmocka_unit_test(test_held_vs_known_live_same_session_drops_the_ghost),
     cmocka_unit_test(test_live_vs_known_held_keeps),

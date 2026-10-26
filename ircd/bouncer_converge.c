@@ -33,6 +33,27 @@ int bounce_converge_peer_wins(int local_holding, const char *local_sessid,
   return strcmp(peer_sessid, local_sessid) < 0;
 }
 
+enum bounce_session_outcome
+bounce_session_converge(int local_holding, int local_holder, int local_live,
+                        const char *local_sessid, int peer_holding,
+                        const char *peer_sessid)
+{
+  /* A live session beats a holding one: ours ends.  A replica of
+   * another server's session is only our record of it: dropping it exits
+   * nothing.  A session held here that still has a live connection is
+   * not ended -- that would exit the device -- and not merged either:
+   * kept apart, as the peer keeps its own and skips ours. */
+  if (local_holding && !peer_holding) {
+    if (!local_holder)
+      return BSO_DROP_REPLICA;
+    return local_live ? BSO_KEEP : BSO_RETIRE;
+  }
+  if (!local_holding && peer_holding)
+    return BSO_KEEP;
+  return bounce_converge_peer_wins(local_holding, local_sessid, peer_holding,
+                                   peer_sessid) ? BSO_RENAME : BSO_KEEP;
+}
+
 static const char *or_empty(const char *s)
 {
   return s ? s : "";
