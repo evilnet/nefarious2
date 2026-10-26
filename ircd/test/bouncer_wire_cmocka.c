@@ -797,6 +797,21 @@ static void bsd_of_another_keycloak_user_only_passes_on(void **s)
     assert_int_equal(bounce_bsd_action(1, sl), BOUNCE_BSD_FORWARD);
 }
 
+/* bounce_bsd_reannounces(action, slot_live): our primary is announced
+ * again only over our own live primary. */
+static void bsd_reannounces_only_over_a_live_slot(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_NOTE, 1), 1);
+  /* Our held ghost holds the slot: neither copy is live. */
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_NOTE, 0), 0);
+  /* The record followed the sender, or the line was another user's. */
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_APPLY, 0), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_APPLY, 1), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_FORWARD, 0), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_FORWARD, 1), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -824,6 +839,7 @@ int main(void)
     cmocka_unit_test(bsd_applies_to_a_slot_not_ours),
     cmocka_unit_test(bsd_never_rewrites_a_slot_of_ours),
     cmocka_unit_test(bsd_of_another_keycloak_user_only_passes_on),
+    cmocka_unit_test(bsd_reannounces_only_over_a_live_slot),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),

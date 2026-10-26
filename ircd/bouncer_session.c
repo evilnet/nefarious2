@@ -699,6 +699,7 @@ static void bounce_announce_alias(struct BouncerSession *session,
                                   struct Client *alias, struct Client *primary);
 static void unmirrored_clear(const char *account, const char *sessid);
 static void bounce_send_bsc(struct BouncerSession *s, struct Client *link);
+static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *link);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -4579,6 +4580,19 @@ static void bounce_send_bsc(struct BouncerSession *s, struct Client *link)
                sizeof(s->hs_announced_sessid));
 }
 
+/** Announce our live primary of session @a s on the link @a link, outside
+ * a burst: its BS A, as an attach sends it.  A held copy the peer has of
+ * the session yields to it (bounce_bsa_yields()). */
+static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *link)
+{
+  struct Client *p = s->hs_client;
+
+  if (p && MyConnect(p) && IsUser(p) && !IsBouncerAlias(p) && !IsBouncerHold(p))
+    sendcmdto_one(&me, CMD_BOUNCER_SESSION, link, "A %s %s %s %lu 0",
+                  s->hs_account, s->hs_sessid, cli_yxx(p),
+                  (unsigned long)s->hs_last_active);
+}
+
 /** Send all local sessions as BS C messages during server BURST. */
 void bounce_burst(struct Client *cptr)
 {
@@ -5494,23 +5508,6 @@ bsc_forward:
       if (bsa != BOUNCE_BSA_IGNORE)
         ircd_strncpy(session->hs_ghost_numeric, parv[4],
                      sizeof(session->hs_ghost_numeric));
-      else if (cand_alias)
-        /* A burst's per-alias line: its roster entry only, below. */
-        Debug((DEBUG_INFO, "BS A: %s names alias %s for session %s: its "
-               "roster entry only", cli_name(sptr), full_numeric,
-               session->hs_sessid));
-      else
-        log_write(LS_USER, L_INFO, 0, "BS A: %s names %s for %s's session %s: "
-                  "not installed, %s%s", cli_name(sptr),
-                  resolved ? cli_name(primary) : full_numeric,
-                  session->hs_account, session->hs_sessid,
-                  cand_roster ? "it is on our alias roster"
-                  : cand_ours ? "it is a client of ours"
-                  : slot_ours ? (IsBouncerHold(slot)
-                                 ? "our held ghost holds the primary slot: "
-                                 : "our live primary holds the primary slot: ")
-                  : "the account or Keycloak check refused it",
-                  (!cand_roster && !cand_ours && slot_ours) ? cli_name(slot) : "");
 
       /* Outside a burst the line says a member attached to the sender's
        * copy: it is live there.  While ours is only held here -- our held
@@ -5532,6 +5529,26 @@ bsc_forward:
             && bounce_held_copy_yields(session, primary, cptr, sptr, "BS A"))
           bsa = BOUNCE_BSA_INSTALL;
       }
+
+      /* A line that changed nothing of ours says why (a yield above logs
+       * its own line instead). */
+      if (bsa == BOUNCE_BSA_IGNORE && cand_alias)
+        /* A burst's per-alias line: its roster entry only, below. */
+        Debug((DEBUG_INFO, "BS A: %s names alias %s for session %s: its "
+               "roster entry only", cli_name(sptr), full_numeric,
+               session->hs_sessid));
+      else if (bsa == BOUNCE_BSA_IGNORE)
+        log_write(LS_USER, L_INFO, 0, "BS A: %s names %s for %s's session %s: "
+                  "not installed, %s%s", cli_name(sptr),
+                  resolved ? cli_name(primary) : full_numeric,
+                  session->hs_account, session->hs_sessid,
+                  cand_roster ? "it is on our alias roster"
+                  : cand_ours ? "it is a client of ours"
+                  : slot_ours ? (IsBouncerHold(slot)
+                                 ? "our held ghost holds the primary slot: "
+                                 : "our live primary holds the primary slot: ")
+                  : "the account or Keycloak check refused it",
+                  (!cand_roster && !cand_ours && slot_ours) ? cli_name(slot) : "");
     }
 
     /* Outside a burst the sender announces that a client attached: its
@@ -5670,6 +5687,17 @@ bsc_forward:
                   resolved ? cli_name(ghost) : full_numeric,
                   IsBouncerHold(slot) ? "held ghost" : "live primary",
                   cli_name(slot));
+        /* Our copy is live and the sender's just went held: the live copy
+         * wins, but this line says nothing of ours, so the sender's held
+         * ghost would keep its nick until its hold ran out.  Our
+         * primary's BS A, outside a burst, makes that held copy yield to
+         * it (bounce_bsa_yields). */
+        if (bounce_bsd_reannounces(BOUNCE_BSD_NOTE, !IsBouncerHold(slot))) {
+          log_write(LS_USER, L_INFO, 0, "BS D: our live primary %s of %s's "
+                    "session %s: announcing it to %s", cli_name(slot),
+                    session->hs_account, session->hs_sessid, cli_name(cptr));
+          bounce_send_primary_bsa(session, cptr);
+        }
         goto bsd_forward;
       case BOUNCE_BSD_APPLY:
         break;

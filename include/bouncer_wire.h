@@ -472,4 +472,20 @@ enum bounce_bsd_action {
  */
 extern enum bounce_bsd_action bounce_bsd_action(int kc_conflict, int slot_ours);
 
+/** After a BS D that left our record as it was (BOUNCE_BSD_NOTE), do we
+ * announce our primary to the sender's link again?
+ *
+ * Only over our own LIVE primary: the sender's copy of the session just
+ * went held while ours is live, and the live copy wins -- but a BS D says
+ * nothing of ours, so the sender's held ghost would keep the nick until
+ * its hold ran out.  Our primary's BS A, sent outside a burst, is what
+ * makes a held copy yield (bounce_bsa_yields()).  Over our own held ghost
+ * neither copy is live: nothing.
+ *
+ * @param[in] action    What the BS D did (bounce_bsd_action()).
+ * @param[in] slot_live Our record's primary is our own live client (not a
+ *                      held ghost, not an alias).
+ */
+extern int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live);
+
 #endif /* INCLUDED_bouncer_wire_h */

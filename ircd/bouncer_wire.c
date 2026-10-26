@@ -222,3 +222,10 @@ enum bounce_bsd_action bounce_bsd_action(int kc_conflict, int slot_ours)
     return BOUNCE_BSD_FORWARD;
   return slot_ours ? BOUNCE_BSD_NOTE : BOUNCE_BSD_APPLY;
 }
+
+int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live)
+{
+  /* The sender's copy went held while ours is live: the live copy wins,
+   * and a held copy yields to a BS A sent outside a burst. */
+  return action == BOUNCE_BSD_NOTE && slot_live;
+}
