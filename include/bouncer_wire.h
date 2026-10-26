@@ -422,4 +422,54 @@ extern enum bounce_bsa_action bounce_bsa_action(int resolved, int cand_alias,
                                                 int cand_on_roster,
                                                 int cand_ours, int slot_ours);
 
+/** Does a BS A our held copy of a session ignored make that copy yield?
+ *
+ * Outside a burst a BS A announces that a connection attached to the
+ * sender's copy of the session: a revive of its held ghost, or a login
+ * reclaiming it.  When our own held ghost holds the slot, the line
+ * changes nothing (bounce_bsa_action), yet the session is now live
+ * there and only held here: the live copy wins, as at BS C
+ * (bounce_same_session_yields), and our copy yields to the client the
+ * line names -- only to a live member of the session we can see.
+ *
+ * @param[in] in_burst        Nonzero if the sender is still bursting.
+ * @param[in] slot_ours_held  Nonzero if the slot holds our held ghost.
+ * @param[in] cand_member     Nonzero if the named client resolves, is
+ *                            neither an alias nor on our roster nor ours,
+ *                            is behind the link the line came over, and
+ *                            carries this session's id.
+ * @param[in] ours_holding    Nonzero if our record is HOLDING and we hold
+ *                            something of it here.
+ * @param[in] kc_conflict     Nonzero if the Keycloak ids differ.
+ * @return 1 when our copy yields, else 0.
+ */
+extern int bounce_bsa_yields(int in_burst, int slot_ours_held,
+                             int cand_member, int ours_holding,
+                             int kc_conflict);
+
+/** What a BS D (the sender's primary of a session went held) does to our
+ * record of that session. */
+enum bounce_bsd_action {
+  BOUNCE_BSD_APPLY,    /**< our record follows: HOLDING, the sender's ghost
+                        *   in the slot, its numeric, time and channels */
+  BOUNCE_BSD_NOTE,     /**< our own client holds the slot: nothing of our
+                        *   record changes; the sender holds its copy */
+  BOUNCE_BSD_FORWARD   /**< a session of another Keycloak user: nothing
+                        *   here, the line is only passed on */
+};
+
+/** What a BS D does, from the same facts BS A reads.
+ *
+ * A session of another Keycloak user that shares the id is kept apart:
+ * nothing of ours changes.  A slot our own live primary or held ghost
+ * holds is ours to decide: the line announces the sender's copy only,
+ * and our record, its state, numeric, disconnect time and channels stay.
+ *
+ * @param[in] kc_conflict Nonzero if the named ghost's Keycloak id is not
+ *                        the session's.
+ * @param[in] slot_ours   Nonzero if our record's primary is a user of
+ *                        ours (live, or a held ghost), not an alias.
+ */
+extern enum bounce_bsd_action bounce_bsd_action(int kc_conflict, int slot_ours);
+
 #endif /* INCLUDED_bouncer_wire_h */

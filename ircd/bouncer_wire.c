@@ -206,3 +206,19 @@ enum bounce_bsa_action bounce_bsa_action(int resolved, int cand_alias,
     return BOUNCE_BSA_IGNORE;
   return resolved ? BOUNCE_BSA_INSTALL : BOUNCE_BSA_NUMERIC;
 }
+
+int bounce_bsa_yields(int in_burst, int slot_ours_held, int cand_member,
+                      int ours_holding, int kc_conflict)
+{
+  /* The live copy wins, as at BS C: our held ghost holds the slot, the
+   * peer's member attached outside its burst. */
+  return !in_burst && slot_ours_held && cand_member
+         && bounce_same_session_yields(ours_holding, 0, 1, 1, kc_conflict);
+}
+
+enum bounce_bsd_action bounce_bsd_action(int kc_conflict, int slot_ours)
+{
+  if (kc_conflict)
+    return BOUNCE_BSD_FORWARD;
+  return slot_ours ? BOUNCE_BSD_NOTE : BOUNCE_BSD_APPLY;
+}

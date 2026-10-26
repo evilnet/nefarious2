@@ -748,6 +748,55 @@ static void bsa_every_input(void **s)
   }
 }
 
+/* bounce_bsa_yields(in_burst, slot_ours_held, cand_member, ours_holding,
+ *                   kc_conflict) */
+
+static void bsa_attach_elsewhere_makes_our_held_copy_yield(void **s)
+{
+  (void)s;
+  assert_true(bounce_bsa_yields(0, 1, 1, 1, 0));
+}
+
+static void bsa_yield_needs_every_fact(void **s)
+{
+  int b, h, m, o, k;
+  (void)s;
+  for (b = 0; b < 2; b++)
+  for (h = 0; h < 2; h++)
+  for (m = 0; m < 2; m++)
+  for (o = 0; o < 2; o++)
+  for (k = 0; k < 2; k++) {
+    if (!b && h && m && o && !k)
+      continue;
+    /* A burst line (the peer's copy, announced), a slot that is not our
+     * held ghost, a client that is not a visible member, a record not
+     * held here, another Keycloak user: no yield. */
+    assert_false(bounce_bsa_yields(b, h, m, o, k));
+  }
+}
+
+/* bounce_bsd_action(kc_conflict, slot_ours) */
+
+static void bsd_applies_to_a_slot_not_ours(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bsd_action(0, 0), BOUNCE_BSD_APPLY);
+}
+
+static void bsd_never_rewrites_a_slot_of_ours(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bsd_action(0, 1), BOUNCE_BSD_NOTE);
+}
+
+static void bsd_of_another_keycloak_user_only_passes_on(void **s)
+{
+  int sl;
+  (void)s;
+  for (sl = 0; sl < 2; sl++)
+    assert_int_equal(bounce_bsd_action(1, sl), BOUNCE_BSD_FORWARD);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -770,6 +819,11 @@ int main(void)
     cmocka_unit_test(bsa_never_installs_a_client_of_ours),
     cmocka_unit_test(bsa_keeps_the_numeric_of_a_client_not_known_here),
     cmocka_unit_test(bsa_every_input),
+    cmocka_unit_test(bsa_attach_elsewhere_makes_our_held_copy_yield),
+    cmocka_unit_test(bsa_yield_needs_every_fact),
+    cmocka_unit_test(bsd_applies_to_a_slot_not_ours),
+    cmocka_unit_test(bsd_never_rewrites_a_slot_of_ours),
+    cmocka_unit_test(bsd_of_another_keycloak_user_only_passes_on),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),
