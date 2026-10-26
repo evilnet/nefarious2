@@ -1391,6 +1391,16 @@ extern enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage
                                                         const char *new_account,
                                                         const char *new_kc_id);
 
+/** Is `cptr` held, as a same-nick verdict (bounce_nick_verdict) reads
+ * it: a held ghost whose session has no live alias left?  A held ghost
+ * with a live alias counts as live: a verdict that ends a held session
+ * runs bounce_kill_session(), which exits every alias it finds.
+ *
+ * @param[in] cptr Our client.
+ * @return 1 if held with no live alias, else 0.
+ */
+extern int bounce_nick_side_held(struct Client *cptr);
+
 /** Patch up alias_primary and hs_client after the new primary is
  * created by set_nick_name; broadcast BX C so peers learn about the
  * newly-aliased local connection, and retract the demoted face from the

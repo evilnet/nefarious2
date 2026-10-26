@@ -102,6 +102,7 @@
 #include "send.h"
 #include "s_auth.h"
 #include "bouncer_session.h"
+#include "bouncer_converge.h"
 #include "bouncer_rebind_auth.h"
 #include "shun.h"
 #include "sys.h"
@@ -550,17 +551,21 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    *
    * Per redesign D.1 + D.2: convergence runs at-N-time, deterministic.
    * Both sides see the same incoming N (parv[3] = lastnick TS of the
-   * peer's primary) and compute the same answer locally:
+   * peer's primary) and compute the same answer locally with
+   * bounce_nick_verdict (bouncer_converge.h), the verdict the post-burst
+   * reconcile also uses.  For two live session primaries:
    *
-   *   1. Older cli_firsttime wins (stability — established connection
-   *      stays primary).  Lower lastnick TS = older.
-   *   2. Equal: lex on numeric (deterministic on both sides — the
-   *      symmetric numeric pair compares the same way from either end).
+   *   1. Older nick timestamp wins (stability — the established
+   *      connection stays primary).  Lower lastnick TS = older.
+   *   2. Equal: lex on the full numeric (deterministic on both sides —
+   *      the symmetric numeric pair compares the same way from either
+   *      end).
    *
    * Loser side flips its primary to alias of the winner.  Winner side
    * refuses the incoming N (set_nick_name not called → no propagation).
    * No coordination protocol — same inputs + same algorithm → same
-   * answer on both sides.
+   * answer on both sides.  Only a client of ours merges: a remote acptr
+   * is its own server's to decide.
    *
    * Legacy peer gate: the symmetric-demote contract only holds if the
    * introducing peer also runs D.2.  Against a legacy peer (pre-IRCv3-
@@ -572,6 +577,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * entirely and fall through to classic nick-collision semantics
    * (TS-based, both sides KILL the loser). */
   if (IsServer(sptr) && incoming_acct && IsIRCv3Aware(sptr)
+      && MyConnect(acptr)
       && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr)
       && IsAccount(acptr) && IsUser(acptr)
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
@@ -583,45 +589,58 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       bsess ? bounce_demote_eligibility(BOUNCE_DEMOTE_PLAN, acptr, bsess,
                                         sptr, incoming_acct, incoming_kc_id)
             : BOUNCE_DEMOTE_NO_SESSION;
+    struct bounce_nick_side ours, theirs;
+    char our_full[6];
+    enum bounce_nick_verdict verdict;
+
     /* Sessions of different Keycloak users (the account was recreated
      * while the network was split) are never merged (user, 2026-10-23):
      * the classic collision rules below decide.  Both sides compare the
-     * same two ids, so both skip the merge. */
-    if (bar == BOUNCE_DEMOTE_KC_CONFLICT) {
+     * same two ids, so both skip the merge.  The verdict is told so and
+     * answers classic; the eligibility check is where the ids are read. */
+    if (bar == BOUNCE_DEMOTE_KC_CONFLICT)
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "Bouncer split-merge: not merging %s on %C into %C "
                            "(account %s): Keycloak ids differ",
                            parv[parc - 2], cptr, acptr, incoming_acct);
-      bsess = NULL;
-    }
-    if (bsess && bsess->hs_client == acptr) {
-      /* Compare cli_lastnick to the wire's lastnick (parv[3]), not
-       * cli_firsttime — those are different fields and using
-       * cli_firsttime on one side while the wire carries lastnick
-       * on the other gives an asymmetric comparison (each side ends
-       * up "we lose" against the peer's persisted-old lastnick).
-       * cli_lastnick is the field both sides advertise to each other
-       * via the N introduction, so the comparison is like-for-like. */
-      time_t our_first   = cli_lastnick(acptr);
-      time_t their_first = (time_t)atoi(parv[3]);
-      int we_lose;
 
-      if (our_first > their_first) {
-        we_lose = 1;
-      } else if (our_first < their_first) {
-        we_lose = 0;
-      } else {
-        /* Equal — lex on numeric.  parv[parc-2] is the incoming numeric;
-         * cli_yxx returns this server's prefix-relative numeric for our
-         * primary, so concatenate with our server's prefix to form the
-         * full YYXXX both sides compare. */
-        char our_full[6];
-        ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
-                      cli_yxx(&me), cli_yxx(acptr));
-        we_lose = (strcmp(our_full, parv[parc - 2]) > 0);
-      }
+    /* Our side.  A held ghost never gets here (the rebind above handles
+     * it).  The nick timestamps compared are cli_lastnick and the wire's
+     * lastnick (parv[3]), never cli_firsttime: cli_lastnick is the field
+     * both sides advertise to each other in the N, so the comparison is
+     * like-for-like.  The full numeric is our client's home prefix (ours,
+     * acptr being local) plus its own. */
+    ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
+                  cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
+    memset(&ours, 0, sizeof ours);
+    ours.held        = 0;
+    ours.state_known = 1;
+    ours.lastnick    = cli_lastnick(acptr);
+    ours.sessid      = bsess ? bsess->hs_sessid : cli_session_id(acptr);
+    ours.numeric     = our_full;
+    /* The incoming side.  No N announces a hold state.  Nor can we tell
+     * a login in no session from a member of a session the peer made
+     * while split: every N carries a session id (a login in no session
+     * carries its own), and the peer's burst sends its sessions after
+     * all its users. */
+    memset(&theirs, 0, sizeof theirs);
+    theirs.state_known = 0;
+    theirs.non_member  = 0;
+    theirs.lastnick    = (time_t)atoi(parv[3]);
+    theirs.sessid      = sendcmdto_stash_is_current(cptr)
+                         ? cli_s2s_sessid(cptr) : NULL;
+    theirs.numeric     = parv[parc - 2];
+    verdict = bounce_nick_verdict(&ours, &theirs,
+                                  bsess && bsess->hs_client == acptr,
+                                  bar == BOUNCE_DEMOTE_KC_CONFLICT,
+                                  IsBurstGated(cptr));
 
-      switch (bounce_merge_choose(we_lose, bar)) {
+    /* Keep or demote: the merge, if our primary can become an alias.
+     * Classic (no session with acptr as its primary, a Keycloak-id
+     * veto): no merge.  Retire and drop end a held ghost of ours, which
+     * never gets here. */
+    if (verdict == BNV_KEEP_LOCAL || verdict == BNV_DEMOTE_LOCAL) {
+      switch (bounce_merge_choose(verdict == BNV_DEMOTE_LOCAL, bar)) {
       case BOUNCE_MERGE_SWAP: {
         /* We lose and our primary can become the incoming one's alias.
          * Through the state-transition funnel (Phase 7): one call
@@ -669,7 +688,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                              "%s on %C — local %C wins (account %s, "
                              "D.2 tiebreaker, our_first=%ld their=%ld)",
                              parv[parc - 2], cptr, acptr, incoming_acct,
-                             (long)our_first, (long)their_first);
+                             (long)ours.lastnick, (long)theirs.lastnick);
         return 0;
       case BOUNCE_MERGE_CLASSIC:
         /* We lose but our primary cannot become an alias (it is on its

@@ -1765,6 +1765,23 @@ void bounce_prune_stale_aliases(void)
   }
 }
 
+/** See include/bouncer_session.h. */
+int bounce_nick_side_held(struct Client *cptr)
+{
+  struct BouncerSession *s;
+  int i;
+
+  if (!cptr || !IsBouncerHold(cptr))
+    return 0;
+  /* The aliases bounce_kill_session would exit: those it finds. */
+  s = bounce_get_session(cptr);
+  if (s)
+    for (i = 0; i < s->hs_alias_count; i++)
+      if (findNUser(s->hs_aliases[i].ba_numeric))
+        return 0;
+  return 1;
+}
+
 /** Post-burst reconcile: detect multi-primary-same-session states and
  * merge them by demoting the newer primary to an alias of the older.
  *
@@ -1787,8 +1804,9 @@ void bounce_prune_stale_aliases(void)
  * its home server must be IRCv3-aware, as a legacy home has no sessions
  * and never runs this pass.
  *
- * Tie-break: older cli_lastnick wins the primary slot.  Equal: lex on
- * full numeric (same rule as D.2 at m_nick.c:580+).
+ * Who keeps the primary slot: bounce_nick_verdict(), the verdict the
+ * same-nick merge in m_nick.c reaches at N time (for two live session
+ * primaries, the older cli_lastnick, then the lower full numeric).
  */
 void bounce_post_burst_reconcile(void)
 {
@@ -1872,27 +1890,40 @@ void bounce_post_burst_reconcile(void)
         if (!peer_primary)
           continue;
 
-        /* Older lastnick wins primary slot.  Equal: lex on full numeric. */
+        /* Who keeps the primary slot: the verdict both ends compute from
+         * the same facts.  Nobody announces the candidate's hold state;
+         * it carries our session id, so it is no outsider; a different
+         * Keycloak user never passed the candidate test above; and this
+         * pass runs after a burst, never for a gated link.  A held ghost
+         * of ours never gets here (the candidate test refuses a held
+         * face), and the verdict would leave it alone too: classic. */
         {
-          time_t our_t = cli_lastnick(local_primary);
-          time_t their_t = cli_lastnick(peer_primary);
-          int we_lose;
+          struct bounce_nick_side ours, theirs;
+          char our_full[6], their_full[6];
 
-          if (our_t > their_t) {
-            we_lose = 1;
-          } else if (our_t < their_t) {
-            we_lose = 0;
-          } else {
-            char our_full[6], their_full[6];
-            ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
-                          cli_yxx(&me), cli_yxx(local_primary));
-            ircd_snprintf(0, their_full, sizeof(their_full), "%s%s",
-                          cli_yxx(cli_user(peer_primary)->server),
-                          cli_yxx(peer_primary));
-            we_lose = (strcmp(our_full, their_full) > 0);
-          }
+          ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
+                        cli_yxx(cli_user(local_primary)->server),
+                        cli_yxx(local_primary));
+          ircd_snprintf(0, their_full, sizeof(their_full), "%s%s",
+                        cli_yxx(cli_user(peer_primary)->server),
+                        cli_yxx(peer_primary));
+          memset(&ours, 0, sizeof ours);
+          ours.held        = bounce_nick_side_held(local_primary);
+          ours.state_known = 1;
+          ours.lastnick    = cli_lastnick(local_primary);
+          ours.sessid      = s->hs_sessid;
+          ours.numeric     = our_full;
+          memset(&theirs, 0, sizeof theirs);
+          theirs.state_known = 0;
+          theirs.non_member  = 0;
+          theirs.lastnick    = cli_lastnick(peer_primary);
+          theirs.sessid      = cli_session_id(peer_primary);
+          theirs.numeric     = their_full;
 
-          if (we_lose) {
+          if (bounce_nick_verdict(&ours, &theirs,
+                                  s->hs_client == local_primary,
+                                  0 /* kc_conflict */,
+                                  0 /* link_gated */) == BNV_DEMOTE_LOCAL) {
             struct bounce_transition_params p;
             memset(&p, 0, sizeof p);
             p.demoted_alias = local_primary;
@@ -1908,8 +1939,8 @@ void bounce_post_burst_reconcile(void)
              * moved or its hs_client changed.  Refresh next_s defensively. */
             next_s = s->hs_anext;
           }
-          /* Otherwise: we win.  Peer reaches the symmetric verdict and
-           * demotes on its end.  No local action. */
+          /* Otherwise we keep (the peer reaches the symmetric verdict and
+           * demotes on its end) or nothing merges.  No local action. */
         }
       }
     }
