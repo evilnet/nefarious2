@@ -969,8 +969,10 @@ int exit_client(struct Client *cptr,
      * channel members referencing unannounced numerics. */
     bounce_clear_legacy_faces_for_peer(cli_yxx(victim));
     /* And the session ids BS C left unmirrored that the departing
-     * servers announced: their next burst announces them again. */
+     * servers announced: their next burst announces them again.  Nor do
+     * their clients carry, any more, the id a session of ours beat. */
     bounce_unmirrored_clear_for_server(victim);
+    bounce_peer_sessid_clear_for_server(victim);
 
     /* Prepare alias promotions: mark sessions whose primary leaves with
      * the departing server and that have surviving aliases. Sets

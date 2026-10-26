@@ -1387,6 +1387,117 @@ static void test_action_null_inputs(void **state)
   assert_int_equal(bounce_nick_action(BNV_RETIRE_LOCAL, &in, NULL), BNA_CLASSIC);
 }
 
+/* ---- A peer's BS C: which record it is compared with ---------------- */
+
+static void test_bsc_compare_order(void **state)
+{
+  int same, fol, held;
+  (void)state;
+  for (same = 0; same < 2; same++)
+    for (fol = 0; fol < 2; fol++)
+      for (held = 0; held < 2; held++) {
+        enum bounce_bsc_compare want =
+          same ? BOUNCE_BSC_SAME_ID
+          : fol ? BOUNCE_BSC_FOLLOWED
+          : held ? BOUNCE_BSC_HELD_HERE : BOUNCE_BSC_FIRST;
+        assert_int_equal(bounce_bsc_compare_with(same, fol, held), want);
+      }
+}
+
+/* ---- A record that follows the announced session's primary ---------- */
+
+static void test_follow_takes_the_peer_id_when_not_announced(void **state)
+{
+  int oh, ph;
+  (void)state;
+  /* The peer never saw our id: ours takes the peer's, whatever the ages. */
+  for (oh = 0; oh < 2; oh++)
+    for (ph = 0; ph < 2; ph++) {
+      assert_int_equal(bounce_follow_keeps_id(0, oh, OLDER, ph, NEWER), 0);
+      assert_int_equal(bounce_follow_keeps_id(0, oh, NEWER, ph, OLDER), 0);
+    }
+}
+
+static void test_follow_keeps_ours_only_when_the_peer_renames(void **state)
+{
+  (void)state;
+  /* Equal states: the older id stays on both ends. */
+  assert_int_equal(bounce_follow_keeps_id(1, 0, OLDER, 0, NEWER), 1);
+  assert_int_equal(bounce_follow_keeps_id(1, 0, NEWER, 0, OLDER), 0);
+  assert_int_equal(bounce_follow_keeps_id(1, 1, OLDER, 1, NEWER), 1);
+  assert_int_equal(bounce_follow_keeps_id(1, 1, NEWER, 1, OLDER), 0);
+  /* Our held copy announced, the peer's live: the peer keeps (its live
+   * session beats a holding one), ours takes its id -- the yield case. */
+  assert_int_equal(bounce_follow_keeps_id(1, 1, OLDER, 0, NEWER), 0);
+  /* We announced live and the peer holding with a live device (the merge
+   * into a held ghost that has a live alias): the peer keeps its session
+   * apart, under its id; ours takes it. */
+  assert_int_equal(bounce_follow_keeps_id(1, 0, OLDER, 1, NEWER), 0);
+  assert_int_equal(bounce_follow_keeps_id(1, 0, NEWER, 1, OLDER), 0);
+}
+
+/* Both ends end with one id: ours by bounce_follow_keeps_id(), the peer's
+ * by its own BS C rule on our announcement (its record live). */
+static void test_follow_and_the_peer_agree(void **state)
+{
+  const char *ids[2] = { OLDER, NEWER };
+  int oh, ph, o;
+  (void)state;
+  for (oh = 0; oh < 2; oh++)
+    for (ph = 0; ph < 2; ph++)
+      for (o = 0; o < 2; o++) {
+        const char *ours = ids[o], *theirs = ids[1 - o];
+        const char *ours_end =
+          bounce_follow_keeps_id(1, oh, ours, ph, theirs) ? ours : theirs;
+        const char *peer_end =
+          bounce_session_converge(ph, 1, 1, theirs, oh, ours) == BSO_RENAME
+            ? ours : theirs;
+        assert_string_equal(ours_end, peer_end);
+      }
+}
+
+/* ---- A fresh session's BS C that ours beats ------------------------- */
+
+static void test_bsc_reannounce_only_for_a_fresh_session_ours_beats(void **state)
+{
+  int ib, lh, ph, out;
+  (void)state;
+  for (ib = 0; ib < 2; ib++)
+    for (lh = 0; lh < 2; lh++)
+      for (ph = 0; ph < 2; ph++)
+        for (out = BSO_KEEP; out <= BSO_DROP_REPLICA; out++) {
+          int want = !ib && !lh && !ph && out == BSO_KEEP;
+          assert_int_equal(bounce_bsc_reannounces(ib, lh, ph,
+                                                  (enum bounce_session_outcome)out),
+                           want);
+        }
+}
+
+/* ---- The yield's id ------------------------------------------------- */
+
+static void test_yield_id_rules(void **state)
+{
+  int ib, oe, kc;
+  (void)state;
+  /* The same id: nothing changes, whatever else holds. */
+  for (ib = 0; ib < 2; ib++)
+    for (oe = 0; oe < 2; oe++)
+      for (kc = 0; kc < 2; kc++)
+        assert_int_equal(bounce_yield_id(1, ib, oe, kc), BOUNCE_YIELD_KEEP_ID);
+  /* A record of the incoming id is here: ours joins it, never a record
+   * of another Keycloak user. */
+  for (ib = 0; ib < 2; ib++) {
+    assert_int_equal(bounce_yield_id(0, ib, 1, 0), BOUNCE_YIELD_MERGE);
+    assert_int_equal(bounce_yield_id(0, ib, 1, 1), BOUNCE_YIELD_KEEP_ID);
+  }
+  /* In a burst the incoming session's BS C decides; outside one ours
+   * takes the incoming id now. */
+  assert_int_equal(bounce_yield_id(0, 1, 0, 0), BOUNCE_YIELD_KEEP_ID);
+  assert_int_equal(bounce_yield_id(0, 1, 0, 1), BOUNCE_YIELD_KEEP_ID);
+  assert_int_equal(bounce_yield_id(0, 0, 0, 0), BOUNCE_YIELD_TAKE_ID);
+  assert_int_equal(bounce_yield_id(0, 0, 0, 1), BOUNCE_YIELD_TAKE_ID);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1433,6 +1544,12 @@ int main(void)
     cmocka_unit_test(test_composed_actions_complement_dlh_a),
     cmocka_unit_test(test_names),
     cmocka_unit_test(test_action_null_inputs),
+    cmocka_unit_test(test_bsc_compare_order),
+    cmocka_unit_test(test_follow_takes_the_peer_id_when_not_announced),
+    cmocka_unit_test(test_follow_keeps_ours_only_when_the_peer_renames),
+    cmocka_unit_test(test_follow_and_the_peer_agree),
+    cmocka_unit_test(test_bsc_reannounce_only_for_a_fresh_session_ours_beats),
+    cmocka_unit_test(test_yield_id_rules),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

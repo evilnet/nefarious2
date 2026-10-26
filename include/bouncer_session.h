@@ -654,6 +654,26 @@ struct BouncerSession {
   char hs_peer_holding[3];
   unsigned long hs_peer_holding_serial;
 
+  /** Memory only: the id another server (hs_peer_sessid_server, its YY)
+   * announced this session under when ours beat it at BS C (the older id
+   * of two of one account), and that server is to take ours.  Its clients
+   * keep the id their N carried on our side: a client of that server
+   * under this id is in the session too (the post-burst reconcile, the
+   * yield at BS A).  "" when none; cleared when our record takes another
+   * id, and at a split by that server. */
+  char hs_peer_sessid[BOUNCER_SESSID_LEN];
+  char hs_peer_sessid_server[3];
+
+  /** Memory only: what we last announced of this session (BS C) on one
+   * link: that link's serial (struct Server link_serial), the state
+   * ("holding" or not) and the id.  A record that follows the primary of
+   * a session the peer then announces under another id ends with the id
+   * the peer ends with, which it decides from what we announced
+   * (bounce_follow_keeps_id).  One link at a time: the latest burst. */
+  unsigned long hs_announced_serial;
+  int hs_announced_holding;
+  char hs_announced_sessid[BOUNCER_SESSID_LEN];
+
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
                                            nothing claims must stop gating bursts. */
@@ -1706,6 +1726,12 @@ extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
  * and also go at BS X for the id, or when the id is mirrored or becomes
  * ours. */
 extern void bounce_unmirrored_clear_for_server(struct Client *victim);
+
+/** Forget, in every session, the id a server announced it under before
+ * taking ours (hs_peer_sessid) when that server is @a victim or behind
+ * it: its clients leave with the split.  Called beside
+ * bounce_unmirrored_clear_for_server(). */
+extern void bounce_peer_sessid_clear_for_server(struct Client *victim);
 
 /** Tell every direct legacy link that may know `face`
  * (bounce_legacy_link_knows, bouncer_wire.h: not IRCv3-aware, not

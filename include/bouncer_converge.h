@@ -89,6 +89,118 @@ bounce_session_converge(int local_holding, int local_holder, int local_live,
                         const char *local_sessid, int peer_holding,
                         const char *peer_sessid);
 
+/** Which of our account's records a peer's BS C for another session id
+ * is compared with (the record the outcome acts on). */
+enum bounce_bsc_compare {
+  BOUNCE_BSC_SAME_ID,    /**< a record of ours already carries the id (it
+                          *   took it before): nothing to converge */
+  BOUNCE_BSC_FOLLOWED,   /**< the record whose primary is the announced
+                          *   session's primary: a merge at N time made our
+                          *   connections that session's
+                          *   (bounce_follow_keeps_id) */
+  BOUNCE_BSC_HELD_HERE,  /**< the first record whose session is held here
+                          *   (a primary, held ghost or alias of ours) */
+  BOUNCE_BSC_FIRST       /**< else the account's first record (a replica) */
+};
+
+/** The record a BS C is compared with, in order: a record that already
+ * carries the announced id; the one that follows the announced session's
+ * primary; the first one held here; the first.
+ *
+ * Comparing with the account's first record, whatever it is, compared a
+ * peer's session with another one of ours once an account had two (a
+ * session kept apart, a replica beside our own).
+ *
+ * @param[in] same_id   A record of the account carries the announced id.
+ * @param[in] followed  A record's primary is the announced session's
+ *                      primary (introduced from the announcing side under
+ *                      that id).
+ * @param[in] held_here A record is held here.
+ */
+extern enum bounce_bsc_compare bounce_bsc_compare_with(int same_id, int followed,
+                                                       int held_here);
+
+/** Our record follows the primary of the session a peer just announced
+ * under another id: a merge at N time made our connections that
+ * session's (our live primary lost a same-nick merge and is its alias, or
+ * our held ghost yielded to it).  One session, so one id: the one the
+ * peer ends with.  The peer compares what we announced on its link with
+ * its own record (bounce_session_converge(), its record live: its primary
+ * is the one we follow) and renames into our id only for equal states
+ * with ours the older; in every other case it keeps its id, and ours
+ * takes it.  When we have not announced the record on this link (our
+ * burst is still gated), the peer has not seen our id: ours takes the
+ * peer's, and our announcement, when it goes, carries the one id.
+ *
+ * @param[in] announced    We announced this record on the peer's link, in
+ *                         its current establishment, under the id it has.
+ * @param[in] ours_holding The state we announced: 1 "holding".
+ * @param[in] our_id       The id we announced.
+ * @param[in] peer_holding The state the peer announced: 1 "holding".
+ * @param[in] peer_id      The id the peer announced.
+ * @return 1 when our record keeps its id (the peer takes it), 0 when our
+ *         record takes @a peer_id.
+ */
+extern int bounce_follow_keeps_id(int announced, int ours_holding,
+                                  const char *our_id, int peer_holding,
+                                  const char *peer_id);
+
+/** Does a peer's BS C that our session beat by age make us announce ours
+ * to that link again?
+ *
+ * In a link burst each side reads the other's announcement, and the side
+ * that loses renames into the older id.  Outside a burst the BS C is a
+ * session the peer just made (a login there that found no session of the
+ * account: the two had been kept apart, and the peer's has ended).  The
+ * peer read our announcement at the link burst, long before, against the
+ * session it then had: it never compares its new one with ours, and keeps
+ * its new id while we keep ours -- two ids for one account's session, and
+ * its aliases filed into ours by the account.  So we announce ours again
+ * on that link, and the peer's new session takes our id.
+ *
+ * @param[in] in_burst      The BS C is part of the sender's link burst.
+ * @param[in] local_holding Our record is HOLDING.
+ * @param[in] peer_holding  The peer announced "holding".
+ * @param[in] outcome       bounce_session_converge()'s outcome for ours.
+ * @return 1 when ours (active, beating an active one by age) is
+ *         announced again toward the sender's link.
+ */
+extern int bounce_bsc_reannounces(int in_burst, int local_holding,
+                                  int peer_holding,
+                                  enum bounce_session_outcome outcome);
+
+/** What the id of our held session does when its held ghost yields to an
+ * incoming live primary of another session id (the N-time merge). */
+enum bounce_yield_id {
+  BOUNCE_YIELD_KEEP_ID,  /**< ours keeps its id for now */
+  BOUNCE_YIELD_TAKE_ID,  /**< ours takes the incoming session's id */
+  BOUNCE_YIELD_MERGE     /**< a record of the incoming session's id is here
+                          *   already: ours joins it and ends */
+};
+
+/** The yield's id rule.
+ *
+ *  - The same id: nothing to do.
+ *  - A record of the incoming id here already: ours joins it -- unless it
+ *    belongs to another Keycloak user than ours (sessions of different
+ *    users are never merged), then ours keeps its id.
+ *  - The incoming primary came in its server's link burst: ours keeps its
+ *    id for now.  That burst announces the incoming session (BS C) after
+ *    its users, and then our record, which follows the incoming primary,
+ *    ends with the id the peer ends with (bounce_follow_keeps_id()).
+ *    Taking the incoming id here could swap the ids: our own burst
+ *    announced ours, and the peer may rename into it.
+ *  - Otherwise no announcement follows: ours takes the incoming id.
+ *
+ * @param[in] same_id           The ids are equal.
+ * @param[in] in_burst          The incoming primary's server is bursting.
+ * @param[in] other_exists      A record of the incoming id is here.
+ * @param[in] other_kc_conflict That record's Keycloak id is not ours.
+ */
+extern enum bounce_yield_id bounce_yield_id(int same_id, int in_burst,
+                                            int other_exists,
+                                            int other_kc_conflict);
+
 /** One side of a same-nick meeting of two clients of one account: ours,
  * or the one an incoming N introduces. */
 struct bounce_nick_side {

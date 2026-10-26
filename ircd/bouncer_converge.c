@@ -270,3 +270,43 @@ const char *bounce_nick_action_name(enum bounce_nick_action a)
   }
   return "?";
 }
+
+enum bounce_bsc_compare bounce_bsc_compare_with(int same_id, int followed,
+                                                int held_here)
+{
+  if (same_id)
+    return BOUNCE_BSC_SAME_ID;
+  if (followed)
+    return BOUNCE_BSC_FOLLOWED;
+  return held_here ? BOUNCE_BSC_HELD_HERE : BOUNCE_BSC_FIRST;
+}
+
+int bounce_follow_keeps_id(int announced, int ours_holding, const char *our_id,
+                           int peer_holding, const char *peer_id)
+{
+  /* The peer has not seen our id: it keeps its own. */
+  if (!announced)
+    return 0;
+  /* What the peer does with our announcement: its record is the one
+   * whose primary we follow, live or with a live device. */
+  return bounce_session_converge(peer_holding, 1, 1, peer_id, ours_holding,
+                                 our_id) == BSO_RENAME;
+}
+
+int bounce_bsc_reannounces(int in_burst, int local_holding, int peer_holding,
+                           enum bounce_session_outcome outcome)
+{
+  /* Ours and the peer's both live, ours the older: the peer is to take
+   * ours, which it read only against the session it had then. */
+  return !in_burst && !local_holding && !peer_holding && outcome == BSO_KEEP;
+}
+
+enum bounce_yield_id bounce_yield_id(int same_id, int in_burst,
+                                     int other_exists, int other_kc_conflict)
+{
+  if (same_id)
+    return BOUNCE_YIELD_KEEP_ID;
+  if (other_exists)
+    return other_kc_conflict ? BOUNCE_YIELD_KEEP_ID : BOUNCE_YIELD_MERGE;
+  return in_burst ? BOUNCE_YIELD_KEEP_ID : BOUNCE_YIELD_TAKE_ID;
+}
