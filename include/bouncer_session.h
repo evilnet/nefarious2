@@ -642,6 +642,18 @@ struct BouncerSession {
   time_t hs_snomask_ts;
   char hs_snomask_origin[3];
 
+  /** Memory only: the server (YY) whose BS C last announced this session
+   * "holding" while our record of it stayed as it was, and the serial of
+   * the link that BS C came over (struct Server link_serial); "" when
+   * none.  Cleared when that server announces the session otherwise (BS C
+   * "active", an attach's BS A, its BS X); a later establishment of the
+   * link has another serial.  The post-burst reconcile reads that
+   * server's client under this session's id as its held copy, which
+   * yields to a live one (BS C), so it never demotes a live primary of
+   * ours into it. */
+  char hs_peer_holding[3];
+  unsigned long hs_peer_holding_serial;
+
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
                                            nothing claims must stop gating bursts. */

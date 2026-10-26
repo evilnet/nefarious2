@@ -384,4 +384,42 @@ extern int bounce_same_session_yields(int ours_holding, int ours_live,
 extern int bounce_bsx_keeps(int has_primary, int primary_ours,
                             int primary_killed);
 
+/** What a BS A line does to our record of the session it names. */
+enum bounce_bsa_action {
+  BOUNCE_BSA_INSTALL,  /**< the client it names is the session's primary:
+                        *   it takes the primary slot, its numeric is kept */
+  BOUNCE_BSA_NUMERIC,  /**< the client it names is not known here and the
+                        *   slot is not ours: only its numeric is kept (a
+                        *   holder that restarted renumbered its ghost) */
+  BOUNCE_BSA_IGNORE    /**< the slot and the kept numeric stay as they are */
+};
+
+/** What a BS A does to the primary slot (hs_client) of our record.
+ *
+ * A BS A names one connection of the session by its sender's numeric:
+ * the sender's primary or held ghost, or -- in a link burst -- each of
+ * the sender's own aliases, for their activity.  It never puts in the
+ * slot:
+ *  - an alias, or a client our record lists on its alias roster: the
+ *    line is that connection's own, and updates only its roster entry;
+ *  - a client of ours: the sender cannot speak for it;
+ *  - anything at all while the slot holds a client of ours, our live
+ *    primary or our held ghost: only we decide what our own client is
+ *    (the yield at BS C, the same-nick decisions, the post-burst
+ *    reconcile), and a peer's burst announces its copy of the session,
+ *    not ours.
+ * When it puts nothing in, it also leaves the numeric our record keeps
+ * alone.
+ *
+ * @param[in] resolved       Nonzero if the named numeric is a user here.
+ * @param[in] cand_alias     Nonzero if that user is a bouncer alias.
+ * @param[in] cand_on_roster Nonzero if our record lists it as an alias.
+ * @param[in] cand_ours      Nonzero if it is a client of ours.
+ * @param[in] slot_ours      Nonzero if our record's primary is a user of
+ *                           ours (live, or a held ghost), not an alias.
+ */
+extern enum bounce_bsa_action bounce_bsa_action(int resolved, int cand_alias,
+                                                int cand_on_roster,
+                                                int cand_ours, int slot_ours);
+
 #endif /* INCLUDED_bouncer_wire_h */

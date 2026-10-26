@@ -775,6 +775,10 @@ static void bounce_hold_expire(struct Event *ev)
       session->hs_state = BOUNCE_ACTIVE;
       session->hs_disconnect_time = 0;
       session->hs_last_active = CurrentTime;
+      /* Its attached stretch runs from now: its next hold accrues it
+       * (bounce_accrue_active). */
+      if (!session->hs_attach_time)
+        session->hs_attach_time = CurrentTime;
     }
     return;
   case BOUNCE_HOLD_DROP:
@@ -1888,6 +1892,42 @@ static int session_roster_has(struct BouncerSession *s, struct Client *c)
   return 0;
 }
 
+/** Note that @a server announced @a s "holding" in a BS C that came over
+ * @a link (struct BouncerSession hs_peer_holding). */
+static void bounce_peer_holding_note(struct BouncerSession *s,
+                                     struct Client *server, struct Client *link)
+{
+  if (!s || !server || !link || !cli_serv(link))
+    return;
+  ircd_strncpy(s->hs_peer_holding, cli_yxx(server), sizeof(s->hs_peer_holding));
+  s->hs_peer_holding_serial = cli_serv(link)->link_serial;
+}
+
+/** @a server announced @a s otherwise than holding: forget its "holding". */
+static void bounce_peer_holding_clear(struct BouncerSession *s,
+                                      struct Client *server)
+{
+  if (s && server && s->hs_peer_holding[0]
+      && 0 == strcmp(s->hs_peer_holding, cli_yxx(server)))
+    s->hs_peer_holding[0] = '\0';
+}
+
+/** Is @a c, a client of another server, that server's held copy of @a s:
+ * did its server announce the session "holding", over the link @a c is
+ * behind as it is established now? */
+static int bounce_peer_holds(struct BouncerSession *s, struct Client *c)
+{
+  struct Client *link;
+
+  if (!s || !c || !s->hs_peer_holding[0] || MyConnect(c) || !cli_user(c)
+      || !cli_user(c)->server)
+    return 0;
+  link = cli_from(c);
+  return 0 == strcmp(s->hs_peer_holding, cli_yxx(cli_user(c)->server))
+         && link && cli_serv(link)
+         && cli_serv(link)->link_serial == s->hs_peer_holding_serial;
+}
+
 /** See include/bouncer_session.h. */
 struct BouncerSession *bounce_session_of_primary(struct Client *c)
 {
@@ -2059,16 +2099,27 @@ void bounce_post_burst_reconcile(void)
           continue;
 
         /* Who keeps the primary slot: the verdict both ends compute from
-         * the same facts.  Nobody announces the candidate's hold state;
-         * it carries our session id, so it is no outsider; a different
-         * Keycloak user never passed the candidate test above; and this
-         * pass runs after a burst, never for a gated link.  A held ghost
-         * of ours never gets here (the candidate test refuses a held
-         * face), and the verdict would leave it alone too: classic.
-         * Ours is read held from s, the session the demote acts on. */
+         * the same facts.  The candidate carries our session id, so it is
+         * no outsider; a different Keycloak user never passed the
+         * candidate test above; and this pass runs after a burst, never
+         * for a gated link.  A held ghost of ours never gets here (the
+         * candidate test refuses a held face), and the verdict would
+         * leave it alone too: classic.  Ours is read held from s, the
+         * session the demote acts on.
+         *
+         * The candidate is held when its server announced this session
+         * "holding" (BS C): its copy of the session yields to ours there,
+         * our live primary taking its place, so ours is never demoted
+         * into it -- live beats held.  That is what a held ghost with a
+         * live alias is too: it carries a "p" hold mark (read live at a
+         * same-nick meeting), yet the yield ends it.  A hold flag is our
+         * own and a remote client never shows one.  Otherwise its state is
+         * not known here. */
         {
           struct bounce_nick_side ours, theirs;
           char our_full[6], their_full[6];
+          int peer_holds = bounce_peer_holds(s, peer_primary);
+          enum bounce_nick_verdict verdict;
 
           ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
                         cli_yxx(cli_user(local_primary)->server),
@@ -2083,16 +2134,25 @@ void bounce_post_burst_reconcile(void)
           ours.sessid      = s->hs_sessid;
           ours.numeric     = our_full;
           memset(&theirs, 0, sizeof theirs);
-          theirs.state_known = 0;
+          theirs.state_known = peer_holds;
+          theirs.held        = peer_holds;
           theirs.non_member  = 0;
           theirs.lastnick    = cli_lastnick(peer_primary);
           theirs.sessid      = cli_session_id(peer_primary);
           theirs.numeric     = their_full;
 
-          if (bounce_nick_verdict(&ours, &theirs,
-                                  s->hs_client == local_primary,
-                                  0 /* kc_conflict */,
-                                  0 /* link_gated */) == BNV_DEMOTE_LOCAL) {
+          verdict = bounce_nick_verdict(&ours, &theirs,
+                                        s->hs_client == local_primary,
+                                        0 /* kc_conflict */,
+                                        0 /* link_gated */);
+          if (peer_holds)
+            log_write(LS_USER, L_INFO, 0,
+                      "Bouncer post-burst reconcile: %s (ours, %s) and %s "
+                      "of %s, which holds %s's session %s: %s",
+                      our_full, ours.held ? "held" : "live", their_full,
+                      cli_name(cli_user(peer_primary)->server), s->hs_account,
+                      s->hs_sessid, bounce_nick_verdict_name(verdict));
+          if (verdict == BNV_DEMOTE_LOCAL) {
             struct bounce_transition_params p;
             memset(&p, 0, sizeof p);
             p.demoted_alias = local_primary;
@@ -2109,7 +2169,8 @@ void bounce_post_burst_reconcile(void)
             next_s = s->hs_anext;
           }
           /* Otherwise we keep (the peer reaches the symmetric verdict and
-           * demotes on its end) or nothing merges.  No local action. */
+           * demotes on its end, or its held copy yields at BS C) or
+           * nothing merges.  No local action. */
         }
       }
     }
@@ -4454,8 +4515,15 @@ void bounce_burst(struct Client *cptr)
        * activity for D.2 tiebreaking.  Primary doesn't track per-conn
        * caps separately (caps live on session-level umode flags); pass
        * 0.  Receiver parses last_active into hs_last_active when the
-       * numeric matches the primary (not in hs_aliases roster). */
-      if (s->hs_client)
+       * numeric matches the primary (not in hs_aliases roster).
+       *
+       * Only for a primary of ours.  The line carries the 3-character
+       * numeric, which the receiver reads as one of ours (we are the
+       * sender): a primary of another server -- our record follows a
+       * peer's live primary after our held copy yielded to it, or mirrors
+       * a third server's session -- would be read as whichever client of
+       * ours has that numeric.  Its own server announces it to its links. */
+      if (s->hs_client && MyConnect(s->hs_client))
         sendcmdto_one(&me, CMD_BOUNCER_SESSION,
                       cptr,
                       "A %s %s %s %lu 0",
@@ -4789,6 +4857,13 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
         int kc_conflict = peer && bounce_rebind_kc_conflict(
                                     bounce_session_kc_id(existing),
                                     cli_user(peer)->kc_id);
+
+        /* The peer's copy, as the post-burst reconcile reads it: held
+         * there, or not (bounce_peer_holds). */
+        if (is_holding)
+          bounce_peer_holding_note(existing, sptr, cptr);
+        else
+          bounce_peer_holding_clear(existing, sptr);
 
         if (existing->hs_state == BOUNCE_HOLDING && !is_holding
             && session_has_local_holder(existing)
@@ -5132,6 +5207,10 @@ bsc_forward:
 
   case 'A': /* Attach */
   {
+    /* What the line does to our record: no numeric (an old form) means
+     * a primary attached, as it always has. */
+    enum bounce_bsa_action bsa = BOUNCE_BSA_NUMERIC;
+
     session = bounce_find_by_token_sessid(account, sessid);
     if (!session)
       return 0;
@@ -5157,24 +5236,37 @@ bsc_forward:
      * Same handler at the alias-roster lookup below already uses
      * cli_yxx(sptr); this site should match.
      *
-     * Always update hs_ghost_numeric to the new XXX too — after a
+     * Update hs_ghost_numeric to the new XXX too (unless the line
+     * changes nothing of ours, below) — after a
      * managing-server restart the ghost gets a freshly-assigned
      * numeric, and the persisted hs_ghost_numeric on this side is
      * stale.  bounce_auto_resume's fallback path (when hs_client
      * happens to be NULL) reads hs_ghost_numeric to do its own
      * findNUser; without this refresh, that lookup would resolve to
      * the old (now-recycled or non-existent) numeric and reattach
-     * fails, forcing /bouncer reset. */
+     * fails, forcing /bouncer reset.
+     *
+     * What the line may change is bounce_bsa_action()'s: never an alias
+     * or a client our record lists as one in the slot (a burst sends a
+     * BS A per alias of the sender, for its activity: those update only
+     * their roster entry below), never a client of ours, and nothing at
+     * all while our own live primary or held ghost holds the slot -- a
+     * peer's burst announces its copy of the session, and only we decide
+     * what our client is (BS C's yield, the same-nick decisions, the
+     * post-burst reconcile).  Then the numeric we keep stays too. */
     if (parc >= 5 && parv[4][0]) {
       char full_numeric[6];
       struct Client *primary;
+      struct Client *slot = session->hs_client;
+      int resolved, slot_ours;
       ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                     cli_yxx(sptr), parv[4]);
       primary = findNUser(full_numeric);
+      resolved = primary && IsUser(primary);
       /* A primary of another Keycloak user is a session kept apart after
        * a split that shares this sessid: none of its BS A applies here
        * (user, 2026-10-23). */
-      if (primary && IsUser(primary) && cli_user(primary)
+      if (resolved && cli_user(primary)
           && bounce_rebind_kc_conflict(session->hs_kc_id, cli_user(primary)->kc_id)) {
         log_write(LS_USER, L_INFO, 0, "BS A: session %s of %s belongs to Keycloak "
                   "id %s, %s's attach carries %s: not applied", session->hs_sessid,
@@ -5182,12 +5274,35 @@ bsc_forward:
                   cli_user(primary)->kc_id);
         goto bsa_forward;
       }
-      if (primary && IsUser(primary))
-        bounce_hs_client_assign_checked(session, primary, "BS A");
-      ircd_strncpy(session->hs_ghost_numeric, parv[4],
-                   sizeof(session->hs_ghost_numeric));
-      session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
+      slot_ours = slot && MyConnect(slot) && IsUser(slot) && !IsBouncerAlias(slot);
+      bsa = bounce_bsa_action(resolved, resolved && IsBouncerAlias(primary),
+                              resolved && session_roster_has(session, primary),
+                              resolved && MyConnect(primary), slot_ours);
+      /* An install the account or Keycloak check refuses changes nothing
+       * either. */
+      if (bsa == BOUNCE_BSA_INSTALL
+          && !bounce_hs_client_assign_checked(session, primary, "BS A"))
+        bsa = BOUNCE_BSA_IGNORE;
+      if (bsa != BOUNCE_BSA_IGNORE)
+        ircd_strncpy(session->hs_ghost_numeric, parv[4],
+                     sizeof(session->hs_ghost_numeric));
+      else if (slot_ours && !(resolved && IsBouncerAlias(primary)))
+        log_write(LS_USER, L_INFO, 0, "BS A: %s names %s for %s's session %s; "
+                  "our %s %s holds its primary slot: not installed",
+                  cli_name(sptr), resolved ? cli_name(primary) : full_numeric,
+                  session->hs_account, session->hs_sessid,
+                  IsBouncerHold(slot) ? "held ghost" : "live primary",
+                  cli_name(slot));
+      else
+        Debug((DEBUG_INFO, "BS A: %s names %s for session %s: not installed "
+               "(an alias, on our roster, ours, or refused)",
+               cli_name(sptr), full_numeric, session->hs_sessid));
     }
+
+    /* Outside a burst the sender announces that a client attached: its
+     * copy of the session is live there now, whatever ours is. */
+    if (!IsBurstOrBurstAck(sptr))
+      bounce_peer_holding_clear(session, sptr);
 
     /* Per redesign C.3 + B.1 + B.6: extended BS A carries per-conn
      * last_active + caps after the numeric.  Find the matching alias
@@ -5213,9 +5328,12 @@ bsc_forward:
           break;
         }
       }
-      if (!matched_alias) {
+      if (!matched_alias && bsa != BOUNCE_BSA_IGNORE) {
         /* Not in alias roster — primary attach.  Caps for primary not
-         * separately tracked (they're on the Client's umode flags). */
+         * separately tracked (they're on the Client's umode flags).  A
+         * line that changed nothing of ours (an alias's, or one naming
+         * the peer's copy while our client holds the slot) is not our
+         * primary's activity. */
         session->hs_last_active = la;
       }
     }
@@ -5223,8 +5341,10 @@ bsc_forward:
     /* During burst, BS A just associates the session with its ghost
      * numeric — the session keeps its burst state (HOLDING stays
      * HOLDING).  Outside burst, BS A means a real client attached —
-     * transition to ACTIVE and cancel the hold timer. */
-    if (!IsBurstOrBurstAck(sptr)) {
+     * transition to ACTIVE and cancel the hold timer.  Not while our own
+     * client holds the slot: a held ghost of ours keeps its timer (its
+     * hold ends our copy), a live one is active already. */
+    if (!IsBurstOrBurstAck(sptr) && bsa != BOUNCE_BSA_IGNORE) {
       /* Cancel hold timer */
       if (t_active(&session->hs_hold_timer))
         timer_del(&session->hs_hold_timer);
@@ -5350,6 +5470,7 @@ bsc_forward:
                   "Bouncer: %s ended %s's session %s, whose primary %s is %s "
                   "here: kept", cli_name(sptr), account, sessid,
                   cli_name(primary), IsBouncerHold(primary) ? "held" : "live");
+        bounce_peer_holding_clear(session, sptr);
         break;
       }
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
@@ -7458,16 +7579,19 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
    * UI updates.  No need to broadcast NICK to channel members — the
    * BX C above is the network-side identity update; channel members
    * on this server see the alias as a CHFL_ALIAS membership which is
-   * already filtered out of /NAMES rendering. */
+   * already filtered out of /NAMES rendering.
+   *
+   * The echo goes first, while the alias still carries its old nick: its
+   * source is the alias's own prefix, and a client takes a NICK as its
+   * own rename only when that prefix is its current nick
+   * (":old_nick!user@host NICK new_nick"). */
   if (MyConnect(demoted_alias)
       && 0 != ircd_strcmp(cli_name(demoted_alias), cli_name(new_primary))) {
     char old_nick[NICKLEN + 1];
     ircd_strncpy(old_nick, cli_name(demoted_alias), NICKLEN + 1);
-    ircd_strncpy(cli_name(demoted_alias), cli_name(new_primary), NICKLEN + 1);
-    /* :old_nick!user@host NICK new_nick — local client expects this
-     * shape from a self-rename. */
     sendcmdto_one(demoted_alias, CMD_NICK, demoted_alias, "%s",
-                  cli_name(demoted_alias));
+                  cli_name(new_primary));
+    ircd_strncpy(cli_name(demoted_alias), cli_name(new_primary), NICKLEN + 1);
     Debug((DEBUG_INFO,
            "bounce_finish_live: renamed local alias %s -> %s "
            "(primary on %s)",

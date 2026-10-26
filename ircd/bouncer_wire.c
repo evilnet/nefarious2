@@ -192,3 +192,17 @@ int bounce_bsx_keeps(int has_primary, int primary_ours, int primary_killed)
 {
   return has_primary && primary_ours && !primary_killed;
 }
+
+enum bounce_bsa_action bounce_bsa_action(int resolved, int cand_alias,
+                                         int cand_on_roster, int cand_ours,
+                                         int slot_ours)
+{
+  /* A connection the line names for its own sake (an alias's activity),
+   * or one the sender cannot speak for. */
+  if (resolved && (cand_alias || cand_on_roster || cand_ours))
+    return BOUNCE_BSA_IGNORE;
+  /* Our own client holds the slot: we decide what it is. */
+  if (slot_ours)
+    return BOUNCE_BSA_IGNORE;
+  return resolved ? BOUNCE_BSA_INSTALL : BOUNCE_BSA_NUMERIC;
+}

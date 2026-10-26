@@ -679,6 +679,75 @@ static void bsx_ends_a_record_held_elsewhere(void **s)
   assert_false(bounce_bsx_keeps(1, 1, 1));
 }
 
+/* bounce_bsa_action(resolved, cand_alias, cand_on_roster, cand_ours,
+ *                   slot_ours) */
+
+static void bsa_installs_the_senders_primary(void **s)
+{
+  (void)s;
+  /* A user of the sender, in no roster, while the slot is not ours. */
+  assert_int_equal(bounce_bsa_action(1, 0, 0, 0, 0), BOUNCE_BSA_INSTALL);
+}
+
+static void bsa_never_installs_an_alias_or_a_roster_member(void **s)
+{
+  int r, o, sl;
+  (void)s;
+  for (r = 0; r < 2; r++)
+    for (o = 0; o < 2; o++)
+      for (sl = 0; sl < 2; sl++) {
+        /* A per-alias line of a burst names an alias replica. */
+        assert_int_equal(bounce_bsa_action(1, 1, r, o, sl), BOUNCE_BSA_IGNORE);
+        /* A client our record lists as an alias. */
+        assert_int_equal(bounce_bsa_action(1, 0, 1, o, sl), BOUNCE_BSA_IGNORE);
+      }
+}
+
+static void bsa_never_replaces_our_primary_or_held_ghost(void **s)
+{
+  (void)s;
+  /* Our live primary or our held ghost holds the slot: neither a client
+   * the line resolves to nor one it does not changes it, and the kept
+   * numeric stays too. */
+  assert_int_equal(bounce_bsa_action(1, 0, 0, 0, 1), BOUNCE_BSA_IGNORE);
+  assert_int_equal(bounce_bsa_action(0, 0, 0, 0, 1), BOUNCE_BSA_IGNORE);
+}
+
+static void bsa_never_installs_a_client_of_ours(void **s)
+{
+  int sl;
+  (void)s;
+  for (sl = 0; sl < 2; sl++)
+    assert_int_equal(bounce_bsa_action(1, 0, 0, 1, sl), BOUNCE_BSA_IGNORE);
+}
+
+static void bsa_keeps_the_numeric_of_a_client_not_known_here(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bsa_action(0, 0, 0, 0, 0), BOUNCE_BSA_NUMERIC);
+}
+
+static void bsa_every_input(void **s)
+{
+  int r, a, ro, o, sl;
+  (void)s;
+  for (r = 0; r < 2; r++)
+  for (a = 0; a < 2; a++)
+  for (ro = 0; ro < 2; ro++)
+  for (o = 0; o < 2; o++)
+  for (sl = 0; sl < 2; sl++) {
+    enum bounce_bsa_action act;
+    /* The candidate's facts mean nothing when it did not resolve. */
+    if (!r && (a || ro || o))
+      continue;
+    act = bounce_bsa_action(r, a, ro, o, sl);
+    if (sl || a || ro || o)
+      assert_int_equal(act, BOUNCE_BSA_IGNORE);
+    else
+      assert_int_equal(act, r ? BOUNCE_BSA_INSTALL : BOUNCE_BSA_NUMERIC);
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -695,6 +764,12 @@ int main(void)
     cmocka_unit_test(held_copy_keeps_otherwise),
     cmocka_unit_test(bsx_keeps_a_record_we_hold),
     cmocka_unit_test(bsx_ends_a_record_held_elsewhere),
+    cmocka_unit_test(bsa_installs_the_senders_primary),
+    cmocka_unit_test(bsa_never_installs_an_alias_or_a_roster_member),
+    cmocka_unit_test(bsa_never_replaces_our_primary_or_held_ghost),
+    cmocka_unit_test(bsa_never_installs_a_client_of_ours),
+    cmocka_unit_test(bsa_keeps_the_numeric_of_a_client_not_known_here),
+    cmocka_unit_test(bsa_every_input),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),
