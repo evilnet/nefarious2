@@ -6501,6 +6501,16 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
          cli_name(ghost), cli_user(ghost)->account, new_numeric,
          cli_name(server)));
 
+  /* Tell legacy links that may still know the ghost's old numeric that
+   * it swapped to new_numeric, while ghost still carries the numeric
+   * they know (the helper reads cli_user(ghost)->server/cli_yxx(ghost)
+   * to build it) and before hRemClient/RemoveYXXClient below release
+   * it.  This is the only thing the rebind sends: no QUIT, no JOIN,
+   * nothing else goes out anywhere — it is wire-invisible save for
+   * this one BX P.  A legacy link (L) and X3 behind it swap the
+   * numeric in place; no collision, no KILL on the user's next line. */
+  bounce_legacy_face_change(ghost, session, NULL, new_numeric, NULL);
+
   /* Cancel hold timer — session transitions back to ACTIVE. */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
