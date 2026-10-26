@@ -397,25 +397,26 @@ static int bouncer_status(struct Client *sptr)
                 HighestFd);
   send_note(sptr, "BOUNCER", "STATUS", "localarray", buf);
 
-  /* Audit: UserStats.local_clients should equal (LocalClientArray users) +
-   * (locally-managed holding ghosts).  Held ghosts have no fd so they
-   * are absent from LocalClientArray but still counted in local_clients
-   * until the session is destroyed, which is by design.
+  /* Audit: UserStats.local_clients should equal (LocalClientArray
+   * users) exactly -- live sockets only.  Held ghosts have no fd
+   * (absent from LocalClientArray) AND, since 996ca335, are not
+   * counted in local_clients either: bounce_hold_client decrements
+   * it when the socket closes and bounce_create_ghost never bumps
+   * it for a boot-spawned ghost, both setting FLAG_NO_LC_DECREMENT.
+   * RPL_LUSERME ("I have N clients") is a live-socket count, not a
+   * network-identity count, so holding ghosts stay out of it.
    *
    * drift > 0 means UserStats.local_clients is inflated relative to
-   * the sum of in-list users + holding ghosts → leak.
+   * the in-list users → leak (e.g. the ghost rebind that used to
+   * steal a decrement meant for some other local socket).
    * drift < 0 would mean it's deflated → over-decrement somewhere. */
-  drift = (long)UserStats.local_clients
-        - (long)(la_users + c.local_primary_holding);
+  drift = (long)UserStats.local_clients - (long)la_users;
 
   ircd_snprintf(0, buf, sizeof(buf),
                 "audit local_clients_drift=%ld "
                 "(expected=%u local_clients=%u; "
-                "expected = la_users[%u] + local_holding[%u])",
-                drift,
-                la_users + c.local_primary_holding,
-                UserStats.local_clients,
-                la_users, c.local_primary_holding);
+                "expected = la_users[%u])",
+                drift, la_users, UserStats.local_clients, la_users);
   send_note(sptr, "BOUNCER", "STATUS", "audit", buf);
 
   return 0;

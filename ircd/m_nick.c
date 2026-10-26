@@ -513,8 +513,12 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* Bouncer ghost rebind: incoming primary takes the place of our
-   * held ghost (no kill, no S2S broadcast).  Only when acptr is a
-   * BouncerHold ghost on this server.  See bouncer/m_nick.c history. */
+   * held ghost (no kill, no normal N-forward -- this N resolves
+   * locally instead of being relayed onward).  A legacy link that
+   * may know the ghost's face still hears about it, with one BX P
+   * each (bounce_legacy_face_change, inside the rebind).  Only when
+   * acptr is a BouncerHold ghost on this server.  See
+   * bouncer/m_nick.c history. */
   if (IsServer(sptr) && IsBouncerHold(acptr) && parc > 7
       && cli_user(acptr) && cli_user(acptr)->account[0]
       && incoming_acct

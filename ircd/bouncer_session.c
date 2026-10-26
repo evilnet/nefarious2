@@ -6392,8 +6392,12 @@ void bounce_free_temp_client(struct Client *temp)
  *
  * Reuse the ghost's Client struct: re-key its hash entry, switch its
  * server/numeric/Connection ownership, and clear hold flags. Channel
- * memberships are untouched — no QUIT, no JOIN echo. Wire-level
- * invisible to peers (only local state mutates).
+ * memberships are untouched — no QUIT, no JOIN echo. Wire-invisible
+ * to IRCv3-aware peers (only local state mutates); a legacy link that
+ * may know the ghost's face by N is told of the renumbering with one
+ * BX P each (bounce_legacy_face_change), since it has no other way to
+ * learn it — the normal N-forward never reaches it either (the N that
+ * triggered this rebind resolves locally instead of being relayed).
  */
 int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                           struct Client *server,
@@ -6506,9 +6510,11 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
    * they know (the helper reads cli_user(ghost)->server/cli_yxx(ghost)
    * to build it) and before hRemClient/RemoveYXXClient below release
    * it.  This is the only thing the rebind sends: no QUIT, no JOIN,
-   * nothing else goes out anywhere — it is wire-invisible save for
-   * this one BX P.  A legacy link (L) and X3 behind it swap the
-   * numeric in place; no collision, no KILL on the user's next line. */
+   * nothing else goes out anywhere — one BX P per legacy link that
+   * may know the face (none when there is no such link), and nothing
+   * toward an IRCv3-aware peer.  A legacy link (L) and X3 behind it
+   * swap the numeric in place; no collision, no KILL on the user's
+   * next line. */
   bounce_legacy_face_change(ghost, session, NULL, new_numeric, NULL);
 
   /* Cancel hold timer — session transitions back to ACTIVE. */
@@ -6519,12 +6525,39 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
   hRemClient(ghost);
   RemoveYXXClient(&me, cli_yxx(ghost));
 
-  /* Counter rebalance: ghost was local in bounce_create_ghost
-   * (++local_clients, ++clients). It now becomes remote: undo the
-   * local_clients increment, leave clients alone (still 1 client),
-   * and credit the introducing server's per-server count. */
-  if (UserStats.local_clients > 0)
-    --UserStats.local_clients;
+  /* Counter rebalance: the ghost is leaving the local domain to
+   * represent a remote primary.
+   *
+   * local_clients: untouched.  Since 996ca335 a held ghost never
+   * holds a count here in the first place -- bounce_hold_client
+   * already decremented it when the live primary's socket closed
+   * (or bounce_create_ghost never bumped it for a boot-spawned
+   * ghost), setting FLAG_NO_LC_DECREMENT either way.  Decrementing
+   * it again here was the bug (pre-existing since 996ca335/5ab703df,
+   * reachable the moment a second fork server lets a rebind happen
+   * at all): it stole a count from some unrelated live local socket
+   * every rebind, eventually driving local_clients negative -- an
+   * unsigned wrap LUSERS showed as local_clients == 4294967295.
+   * Clear the flag: the ghost is no longer local, so it is no
+   * longer exempt from a *future* local disconnect's decrement if
+   * it is ever rebound back onto a socket here.
+   *
+   * local_announced_clients: release it (guarded).  The ghost was
+   * counted here as a locally N-announced client (by
+   * bounce_create_ghost, or by the original register_user before
+   * bounce_hold_client left it alone) and it no longer is one --
+   * Count_remoteclientquits, the macro that will eventually end
+   * this client now that it is remote, never touches this counter,
+   * so leaving it alone here leaks one count per rebind (RPL_CURRENT_LOCAL,
+   * 265, reads one too high from here on).
+   *
+   * clients / announced_clients: untouched -- the user is still one
+   * registered, N-announced identity on the network, just behind a
+   * different link now.  Credit the introducing server's per-link
+   * count instead, same as any other remote client's home link. */
+  ClearNoLcDecrement(ghost);
+  if (UserStats.local_announced_clients > 0)
+    --UserStats.local_announced_clients;
   ++(cli_serv(server)->clients);
 
   /* Free the ghost's own Connection. The ghost now shares the server's
