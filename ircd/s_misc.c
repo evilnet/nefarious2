@@ -964,6 +964,9 @@ int exit_client(struct Client *cptr,
      * legacy_n_intro skips the emit and the peer's burst arrives with
      * channel members referencing unannounced numerics. */
     bounce_clear_legacy_faces_for_peer(cli_yxx(victim));
+    /* And the session ids BS C left unmirrored that the departing
+     * servers announced: their next burst announces them again. */
+    bounce_unmirrored_clear_for_server(victim);
 
     /* Prepare alias promotions: mark sessions where the managing server
      * is departing and surviving aliases exist. Sets hs_promoting to

@@ -61,8 +61,11 @@ enum bounce_session_outcome {
  * peer's copy is not mirrored here, while the peer, reading our
  * announced "holding", keeps its own id and skips ours.  The two stay
  * apart, each server holding only its own, as sessions of different
- * Keycloak users are kept apart; a later convergence (another link
- * burst, once ours is live or gone) merges them.
+ * Keycloak users are kept apart, and an alias of either is never filed
+ * into the other (bounce_alias_filing, bouncer_wire.h).  Nothing merges
+ * them while both stay as they are: they meet again only at a later
+ * link burst, where the rules above may rename one into the other's
+ * id, with whatever a rename of a session held here brings.
  *
  * @param[in] local_holding  1 if our record is HOLDING (we announce
  *                           "holding"), 0 if ACTIVE.
@@ -91,10 +94,14 @@ struct bounce_nick_side {
   int state_known;       /**< incoming side: its hold state is known
                           *   (every server on its path announces it);
                           *   ours always is */
-  int non_member;        /**< incoming side: known to be a live login in
-                          *   no session of the account (for ours,
-                          *   local_is_session_primary says it); 0 when
-                          *   it is a member or nobody knows */
+  int non_member;        /**< incoming side: known to be live and not
+                          *   the primary of one session of the account
+                          *   (its home server stamped the outsider mark:
+                          *   in no session, only on a session's alias
+                          *   roster, or named as primary by two
+                          *   sessions); for ours, local_is_session_primary
+                          *   says it.  0 when it is a session's primary
+                          *   or held ghost, or nobody knows */
   time_t lastnick;       /**< its nick timestamp */
   const char *sessid;    /**< its session id; NULL reads as "" */
   const char *numeric;   /**< its full YYXXX numeric; NULL reads as "" */

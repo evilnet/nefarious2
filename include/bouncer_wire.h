@@ -156,8 +156,11 @@ extern enum bounce_merge_choice bounce_merge_choose(int we_lose,
  * mark it received or sends none. */
 #define BOUNCE_HOLD_MARK_HELD     'h'  /**< a held ghost with no live alias */
 #define BOUNCE_HOLD_MARK_PRIMARY  'p'  /**< live, its session's primary */
-#define BOUNCE_HOLD_MARK_OUTSIDER 'n'  /**< live, not a session's primary
-                                        *   (in no session) */
+#define BOUNCE_HOLD_MARK_OUTSIDER 'n'  /**< live, and not the primary of
+                                        *   one session: in no session,
+                                        *   only on a session's alias
+                                        *   roster, or named as primary
+                                        *   by two sessions */
 
 /** The mark a home server stamps on its own client's N.
  *
@@ -165,10 +168,13 @@ extern enum bounce_merge_choice bounce_merge_choose(int we_lose,
  * client on its own server, so the server receiving the N decides from
  * the facts the home server would decide from:
  *  - held:    bounce_nick_side_held() -- a held ghost whose session has
- *             no live alias (a held ghost with one counts as live);
+ *             no live alias (a held ghost with one counts as live; one
+ *             two sessions name is not held);
  *  - primary: the client is the hs_client of the session the session-id
- *             hint names (the verdict's local_is_session_primary).
- * A held ghost is its session's hs_client too: held wins.
+ *             hint names (the verdict's local_is_session_primary); 0 for
+ *             a client only on a roster or named by two sessions.
+ * Both come from one bounce_nick_side_lookup() call.  A held ghost is
+ * its session's hs_client too: held wins.
  *
  * @param[in] held    Nonzero if the client is held (see above).
  * @param[in] primary Nonzero if it is its session's primary.
@@ -202,5 +208,36 @@ extern int bounce_hold_mark_valid(char mark);
 extern int bounce_hold_marks_trusted_path(int hops, int hops_with_h,
                                           int reached_us, int sent_h,
                                           int tags_on);
+
+/** Which of our sessions a BX C files its alias into. */
+enum bounce_alias_filing {
+  BOUNCE_FILE_EXACT,    /**< the session of the id the BX C names */
+  BOUNCE_FILE_PRIMARY,  /**< the session whose primary (hs_client) is the
+                         *   primary the BX C names */
+  BOUNCE_FILE_ACCOUNT,  /**< our session of the account: the BX C was sent
+                         *   before its server took our id in a rename */
+  BOUNCE_FILE_NONE      /**< none: the alias is tracked in no session */
+};
+
+/** Where a BX C's alias is filed, from what the lookups found.
+ *
+ * The id the BX C names first; else the session whose primary is the
+ * BX C's primary (it follows a merge that left the ids apart); else our
+ * session of the account, which covers a BX C sent before its server
+ * took our id -- but never for an id BS C left unmirrored here: that
+ * session was kept apart from ours (or loses to ours and is about to
+ * end), and an alias of it is not one of ours.  A session of another
+ * Keycloak user is refused by the caller, whichever is chosen.
+ *
+ * @param[in] exact      Nonzero if a session of the named id exists here.
+ * @param[in] by_primary Nonzero if a session here has the named primary
+ *                       as its hs_client.
+ * @param[in] by_account Nonzero if the account has a session here that
+ *                       the fallback may use (same Keycloak user).
+ * @param[in] unmirrored Nonzero if BS C left the named id unmirrored here.
+ */
+extern enum bounce_alias_filing bounce_alias_filing(int exact, int by_primary,
+                                                    int by_account,
+                                                    int unmirrored);
 
 #endif /* INCLUDED_bouncer_wire_h */

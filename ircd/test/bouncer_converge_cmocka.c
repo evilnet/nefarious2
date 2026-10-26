@@ -387,7 +387,9 @@ static void test_dlh_option_a_live_wins_PENDING(void **state)
   print_message("PENDING: a live login in no session against a held ghost "
                 "of its account is an open decision; these are option (a)'s "
                 "answers (the live login wins, the held session ends). "
-                "Enable when (a) is decided; delete if (b) is.\n");
+                "Enable when (a) is decided; delete if (b) is.  Its "
+                "gated-unknown equal-id case is a further open "
+                "sub-decision (see below).\n");
   skip();
   assert_int_equal(V(known(1, 100, OLDER, NA), outsider(50, NB), 1, 0),
                    BNV_RETIRE_LOCAL);
@@ -406,6 +408,12 @@ static void test_dlh_option_a_live_wins_PENDING(void **state)
   /* An unknown client while our burst to its link is gated. */
   assert_int_equal(V(known(1, 100, OLDER, NA), unknown(50, NEWER, NB), 1, 1),
                    BNV_RETIRE_LOCAL);
+  /* OPEN sub-decision of the same question, not settled by deciding (a):
+   * an unknown client carrying our session id may be a member of our
+   * session (DROP is right, RETIRE would end its session) or a login in
+   * no session with a stale id (RETIRE is right, DROP would hand it our
+   * session).  Without a mark neither answer is safe for both; this
+   * asserts what the rules below the switch give today (DROP). */
   assert_int_equal(V(known(1, 100, OLDER, NA), unknown(50, OLDER, NB), 1, 1),
                    BNV_DROP_LOCAL_GHOST);
 }

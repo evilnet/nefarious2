@@ -444,6 +444,41 @@ static void trust_path_direct_link_is_mutual(void **s)
   assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 1, 1, 1), 1);
 }
 
+/* bounce_alias_filing(): where a BX C's alias is filed. */
+
+static void alias_filing_prefers_the_named_id(void **s)
+{
+  int p, a, u;
+  (void)s;
+  for (p = 0; p < 2; p++)
+  for (a = 0; a < 2; a++)
+  for (u = 0; u < 2; u++)
+    assert_int_equal(bounce_alias_filing(1, p, a, u), BOUNCE_FILE_EXACT);
+}
+
+static void alias_filing_then_the_primarys_session(void **s)
+{
+  int a, u;
+  (void)s;
+  /* The primary the BX C names is the hs_client of a session here:
+   * that session, whatever the account fallback or the mark say. */
+  for (a = 0; a < 2; a++)
+  for (u = 0; u < 2; u++)
+    assert_int_equal(bounce_alias_filing(0, 1, a, u), BOUNCE_FILE_PRIMARY);
+}
+
+static void alias_filing_account_only_for_a_mirrored_id(void **s)
+{
+  (void)s;
+  /* A BX C sent before its server took our id: the account's session. */
+  assert_int_equal(bounce_alias_filing(0, 0, 1, 0), BOUNCE_FILE_ACCOUNT);
+  /* An id BS C kept apart (or skipped as the loser): never ours. */
+  assert_int_equal(bounce_alias_filing(0, 0, 1, 1), BOUNCE_FILE_NONE);
+  /* Nothing to file into. */
+  assert_int_equal(bounce_alias_filing(0, 0, 0, 0), BOUNCE_FILE_NONE);
+  assert_int_equal(bounce_alias_filing(0, 0, 0, 1), BOUNCE_FILE_NONE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -453,6 +488,9 @@ int main(void)
     cmocka_unit_test(trust_path_direct_link),
     cmocka_unit_test(trust_path_multi_hop),
     cmocka_unit_test(trust_path_direct_link_is_mutual),
+    cmocka_unit_test(alias_filing_prefers_the_named_id),
+    cmocka_unit_test(alias_filing_then_the_primarys_session),
+    cmocka_unit_test(alias_filing_account_only_for_a_mirrored_id),
     cmocka_unit_test(aware_link_never_knows),
     cmocka_unit_test(gated_link_knows_nothing),
     cmocka_unit_test(own_direction_excluded),

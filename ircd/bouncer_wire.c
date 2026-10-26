@@ -112,3 +112,15 @@ int bounce_hold_marks_trusted_path(int hops, int hops_with_h, int reached_us,
     return 0;
   return hops_with_h == hops;
 }
+
+enum bounce_alias_filing bounce_alias_filing(int exact, int by_primary,
+                                             int by_account, int unmirrored)
+{
+  if (exact)
+    return BOUNCE_FILE_EXACT;
+  if (by_primary)
+    return BOUNCE_FILE_PRIMARY;
+  /* The account's session stands in for an id only while that id may
+   * still become ours by a rename -- never for one BS C kept out. */
+  return by_account && !unmirrored ? BOUNCE_FILE_ACCOUNT : BOUNCE_FILE_NONE;
+}

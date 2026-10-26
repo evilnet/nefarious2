@@ -1414,7 +1414,11 @@ extern enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage
 
 /** The session a same-nick decision about our client @a c acts on: the
  * session whose hs_client is @a c (its primary, or its held ghost),
- * else one that lists @a c on its alias roster.  Unlike
+ * else the first session that lists @a c on its alias roster.  A caller
+ * that acts on the session as @a c's own (ends it, drops its ghost,
+ * files into it as the primary's) does so only when the result's
+ * hs_client is @a c: a roster match is the listing session, not @a c's.
+ * Unlike
  * bounce_get_session(), a session that names @a c as its primary wins
  * over one met earlier that only lists it on its roster.  When two
  * sessions both name @a c as their primary (a split that converged
@@ -1432,6 +1436,22 @@ extern enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage
  * @return The session, or NULL (none, or two claim @a c).
  */
 extern struct BouncerSession *bounce_session_of_primary(struct Client *c);
+
+/** bounce_session_of_primary() and the facts the verdict reads about @a
+ * c, from that one lookup: @a held as bounce_nick_side_held() reads it,
+ * and @a primary = the result's hs_client is @a c (the verdict's
+ * local_is_session_primary).  A client two sessions name as their
+ * primary gives NULL, held 0, primary 0.  The hold mark on @a c's N is
+ * stamped from the same call.
+ *
+ * @param[in]  c       Our client.
+ * @param[out] held    Set to the held fact; may be NULL.
+ * @param[out] primary Set to the primary fact; may be NULL.
+ * @return The session, or NULL.
+ */
+extern struct BouncerSession *bounce_nick_side_lookup(struct Client *c,
+                                                      int *held,
+                                                      int *primary);
 
 /** Does @a s have a live connection on its alias roster: an entry that
  * resolves to a client (findNUser), as bounce_kill_session() would find
@@ -1556,6 +1576,14 @@ extern void bounce_session_clear_legacy_face(struct BouncerSession *session,
  * introduction, and the burst goes out with channel members referencing
  * unannounced numerics. */
 extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
+
+/** Forget the session ids BS C left unmirrored here (kept apart from
+ * ours, or holding losers of ours) that @a victim or a server behind it
+ * announced.  Called from the SQUIT path before the downlinks exit; their
+ * next burst announces those sessions again.  The marks are memory only
+ * and also go at BS X for the id, or when the id is mirrored or becomes
+ * ours. */
+extern void bounce_unmirrored_clear_for_server(struct Client *victim);
 
 /** Tell every direct legacy link that may know `face`
  * (bounce_legacy_link_knows, bouncer_wire.h: not IRCv3-aware, not

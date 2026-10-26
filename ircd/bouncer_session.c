@@ -1767,6 +1767,9 @@ void bounce_prune_stale_aliases(void)
 
 /** The session @a c is the primary of, as bounce_session_of_primary()
  * finds it, and whether more than one session claims @a c as its primary.
+ * Without an hs_client match it returns the FIRST session listing @a c on
+ * its alias roster: a caller acts on the result as @a c's own session
+ * only when its hs_client is @a c.
  *
  * @param[in]  c          The client.
  * @param[out] ambiguous  Set to 1 when two or more sessions name @a c as
@@ -1860,11 +1863,25 @@ static int nick_side_held_in(struct BouncerSession *s, int ambiguous,
 }
 
 /** See include/bouncer_session.h. */
-int bounce_nick_side_held(struct Client *cptr)
+struct BouncerSession *bounce_nick_side_lookup(struct Client *c, int *held,
+                                               int *primary)
 {
   int ambiguous;
-  struct BouncerSession *s = session_of_primary(cptr, &ambiguous);
-  return nick_side_held_in(s, ambiguous, cptr);
+  struct BouncerSession *s = session_of_primary(c, &ambiguous);
+
+  if (held)
+    *held = nick_side_held_in(s, ambiguous, c);
+  if (primary)
+    *primary = s && s->hs_client == c;
+  return s;
+}
+
+/** See include/bouncer_session.h. */
+int bounce_nick_side_held(struct Client *cptr)
+{
+  int held;
+  bounce_nick_side_lookup(cptr, &held, NULL);
+  return held;
 }
 
 /** Post-burst reconcile: detect multi-primary-same-session states and
@@ -2867,6 +2884,97 @@ void bounce_clear_legacy_faces_for_peer(const char *peer_yxx)
           j++;
         }
       }
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Session ids BS C left unmirrored                                   */
+/* ---------------------------------------------------------------- */
+
+/** Another server's session that BS C saw and did not mirror here: kept
+ * apart from ours (ours is held with a live connection), or a holding
+ * one that loses to our live one and is about to end on its server.
+ * Memory only.  BX C's account fallback never files an alias of such a
+ * session into ours (bounce_alias_filing): it is not one of ours, and
+ * nothing will rename either into the other's id. */
+struct BounceUnmirrored {
+  struct BounceUnmirrored *bu_next;
+  char bu_account[ACCOUNTLEN + 1];
+  char bu_sessid[BOUNCER_SESSID_LEN];
+  char bu_origin[3];             /**< YY of the server that announced it */
+};
+static struct BounceUnmirrored *unmirrored_list;
+
+static struct BounceUnmirrored **unmirrored_find(const char *account,
+                                                 const char *sessid)
+{
+  struct BounceUnmirrored **pp;
+
+  if (!account || !sessid)
+    return NULL;
+  for (pp = &unmirrored_list; *pp; pp = &(*pp)->bu_next)
+    if (0 == strcmp((*pp)->bu_sessid, sessid)
+        && 0 == ircd_strcmp((*pp)->bu_account, account))
+      return pp;
+  return NULL;
+}
+
+/** Record that BS C left @a sessid of @a account (announced by @a origin)
+ * unmirrored here. */
+static void unmirrored_mark(const char *account, const char *sessid,
+                            struct Client *origin)
+{
+  struct BounceUnmirrored *bu;
+
+  if (!account || !sessid || !*sessid || unmirrored_find(account, sessid))
+    return;
+  bu = (struct BounceUnmirrored *)MyCalloc(1, sizeof(*bu));
+  ircd_strncpy(bu->bu_account, account, sizeof(bu->bu_account));
+  ircd_strncpy(bu->bu_sessid, sessid, sizeof(bu->bu_sessid));
+  ircd_strncpy(bu->bu_origin, origin ? cli_yxx(origin) : "",
+               sizeof(bu->bu_origin));
+  bu->bu_next = unmirrored_list;
+  unmirrored_list = bu;
+}
+
+/** Forget the mark for @a sessid of @a account: the session ended (BS X),
+ * or it is now mirrored or ours. */
+static void unmirrored_clear(const char *account, const char *sessid)
+{
+  struct BounceUnmirrored **pp = unmirrored_find(account, sessid);
+
+  if (pp) {
+    struct BounceUnmirrored *bu = *pp;
+    *pp = bu->bu_next;
+    MyFree(bu);
+  }
+}
+
+static int unmirrored_marked(const char *account, const char *sessid)
+{
+  return unmirrored_find(account, sessid) != NULL;
+}
+
+/** See include/bouncer_session.h. */
+void bounce_unmirrored_clear_for_server(struct Client *victim)
+{
+  struct BounceUnmirrored **pp = &unmirrored_list;
+
+  while (*pp) {
+    struct BounceUnmirrored *bu = *pp;
+    struct Client *s = bu->bu_origin[0] ? FindNServer(bu->bu_origin) : NULL;
+    int gone = (s == NULL);
+
+    /* The announcing server is the departing one, or behind it. */
+    for (; s && !gone && IsServer(s); s = cli_serv(s)->up)
+      if (s == victim)
+        gone = 1;
+    if (gone) {
+      *pp = bu->bu_next;
+      MyFree(bu);
+    } else {
+      pp = &bu->bu_next;
     }
   }
 }
@@ -4647,7 +4755,10 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
          * here, as the peer, reading our announced "holding", keeps its
          * own and skips ours (bounce_session_converge).  Taking the
          * peer's id instead would make our record the one the peer's
-         * BS A and BS D for its own primary resolve to here. */
+         * BS A and BS D for its own primary resolve to here.  The peer's
+         * id is marked unmirrored, so BX C never files its aliases into
+         * ours.  Nothing merges the two while they stay as they are;
+         * they meet again only at a later link burst, by these rules. */
         {
           int local_live =
             (local->hs_client && MyConnect(local->hs_client))
@@ -4682,12 +4793,16 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                       "%s -- it still has a live connection here; kept apart "
                       "from %s's live session %s", local->hs_sessid, account,
                       cli_name(sptr), sessid);
+            unmirrored_mark(account, sessid, sptr);
             goto bsc_forward;
           }
           if (local->hs_state == BOUNCE_ACTIVE && is_holding) {
             Debug((DEBUG_INFO, "BS C: local live session %s for %s wins over "
                    "peer's holding %s; skipping replica",
                    local->hs_sessid, account, sessid));
+            /* Not mirrored, and never renamed into: an alias of it is
+             * not ours (its server ends it, or keeps it apart). */
+            unmirrored_mark(account, sessid, sptr);
             goto bsc_forward;
           }
         }
@@ -4704,6 +4819,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
           ircd_strncpy(local->hs_sessid, sessid,
                        sizeof(local->hs_sessid));
           local->hs_sessid[sizeof(local->hs_sessid) - 1] = '\0';  /* redundant: strlcpy already terminates */
+          unmirrored_clear(account, sessid);
           /* Keep cli_session_id of the bound primary in sync with the
            * renamed bouncer sessid — they must agree post-convergence.
            * Aliases are tracked in hs_aliases[] which records numerics
@@ -4743,6 +4859,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
     /* Create session from remote data */
   bsc_create:
+    unmirrored_clear(account, sessid);
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
     ircd_strncpy(session->hs_account, account, ACCOUNTLEN + 1);
     ircd_strncpy(session->hs_sessid, sessid, BOUNCER_SESSID_LEN);
@@ -5025,6 +5142,7 @@ bsc_forward:
   case 'X': /* Destroy session */
   {
     /* BS X <account> <sessid> — destroy session */
+    unmirrored_clear(account, sessid);
     session = bounce_find_by_token_sessid(account, sessid);
     if (session) {
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
@@ -9473,39 +9591,78 @@ track_alias:
   if (alias_modes && *alias_modes)
     user_apply_umode_str(alias, alias_modes);
 
-  /* Track alias in session replica.
+  /* Track alias in session replica: the session of the id the BX C
+   * names; else the session whose primary the BX C names (a merge can
+   * leave the two servers' ids apart); else our session of the account.
    *
-   * Cross-sessid race: peer's BX C may arrive with peer's *original*
-   * sessid (emitted before peer received our BS C and renamed to our
-   * lex-lower sessid).  Exact sessid match would miss the local
-   * session in that window.  Fall back to account-based lookup —
-   * BX C carries the account, and a single account has one local
-   * session post-convergence (cross-sessid rename converges sessid
-   * across the BX-aware ring), so account match is unambiguous here. */
+   * The account fallback covers the cross-sessid race: peer's BX C may
+   * arrive with peer's *original* sessid (emitted before peer received
+   * our BS C and renamed to our lex-lower sessid), and an account has
+   * one local session once that rename has converged.  It never stands
+   * in for an id BS C left unmirrored here (kept apart from ours, or a
+   * holding loser of ours): that id is never renamed into ours, so an
+   * alias of it is another session's, not ours (bounce_alias_filing). */
   session = bounce_find_by_token_sessid(account, sessid);
-  if (!session) {
-    struct AccountSessions *as = bounce_find_by_account(account);
-    /* ... unless that session belongs to another Keycloak user than this
-     * alias's primary: sessions kept apart after a split leave two per
-     * account (user, 2026-10-23), and the alias is then tracked in
-     * neither rather than in the wrong one. */
-    if (as && as->as_sessions && primary && cli_user(primary)
-        && bounce_rebind_kc_conflict(bounce_session_kc_id(as->as_sessions),
-                                     cli_user(primary)->kc_id)) {
-      log_write(LS_USER, L_INFO, 0,
-                "BX C: sessid %s not found; account fallback session %s "
-                "belongs to another Keycloak id: alias %s not tracked",
-                sessid, as->as_sessions->hs_sessid, alias_numeric);
-    } else if (as && as->as_sessions) {
+  {
+    struct BouncerSession *of_primary = NULL;
+    struct AccountSessions *as = NULL;
+    int by_account = 0;
+    int unmirrored = 0;
+
+    if (!session) {
+      /* The session the primary is the primary of; one that only lists
+       * it on its roster is not its session. */
+      of_primary = primary ? bounce_session_of_primary(primary) : NULL;
+      if (of_primary && (of_primary->hs_client != primary
+                         || 0 != ircd_strcmp(of_primary->hs_account, account)))
+        of_primary = NULL;
+      as = bounce_find_by_account(account);
+      unmirrored = unmirrored_marked(account, sessid);
+      /* ... nor a session of another Keycloak user than this alias's
+       * primary: sessions kept apart after a split leave two per
+       * account (user, 2026-10-23), and the alias is then tracked in
+       * neither rather than in the wrong one. */
+      if (!of_primary && !unmirrored && as && as->as_sessions && primary
+          && cli_user(primary)
+          && bounce_rebind_kc_conflict(bounce_session_kc_id(as->as_sessions),
+                                       cli_user(primary)->kc_id)) {
+        log_write(LS_USER, L_INFO, 0,
+                  "BX C: sessid %s not found; account fallback session %s "
+                  "belongs to another Keycloak id: alias %s not tracked",
+                  sessid, as->as_sessions->hs_sessid, alias_numeric);
+      } else if (as && as->as_sessions) {
+        by_account = 1;
+      }
+    }
+    switch (bounce_alias_filing(session != NULL, of_primary != NULL,
+                                by_account, unmirrored)) {
+    case BOUNCE_FILE_EXACT:
+      break;
+    case BOUNCE_FILE_PRIMARY:
+      session = of_primary;
+      Debug((DEBUG_INFO, "BX C: sessid %s not found, using session %s of "
+             "primary %s for alias %s", sessid, session->hs_sessid,
+             primary_numeric, alias_numeric));
+      break;
+    case BOUNCE_FILE_ACCOUNT:
       session = as->as_sessions;
       Debug((DEBUG_INFO,
              "BX C: sessid %s not found, using account-fallback "
              "session %s for alias %s",
              sessid, session->hs_sessid, alias_numeric));
+      break;
+    case BOUNCE_FILE_NONE:
+      if (unmirrored && by_account)
+        log_write(LS_USER, L_INFO, 0,
+                  "BX C: session %s of %s is kept apart from ours here: "
+                  "alias %s not tracked", sessid, account, alias_numeric);
+      session = NULL;
+      break;
     }
   }
-  /* Exact match too: a session kept apart after a split can share the
-   * sessid of another Keycloak user's (user, 2026-10-23). */
+  /* Whichever was chosen, never a session of another Keycloak user: one
+   * kept apart after a split can share the sessid of another Keycloak
+   * user's (user, 2026-10-23). */
   if (session && primary && cli_user(primary)
       && bounce_rebind_kc_conflict(bounce_session_kc_id(session),
                                    cli_user(primary)->kc_id)) {
@@ -11345,11 +11502,11 @@ struct BouncerSession *bounce_find_any_session(const char *account)
  * (register_user), or sends none.
  *
  * The mark is made of the predicates the same-nick verdict reads for
- * this client here, from the one session object the hint looked up
- * (bounce_session_of_primary(): the session the client is the primary or
- * held ghost of, else one that lists it on its alias roster; none when
- * two sessions name it as their primary), so a peer decides from the
- * facts we would:
+ * this client here, from the one bounce_nick_side_lookup() call the hint
+ * makes (bounce_session_of_primary(): the session the client is the
+ * primary or held ghost of, else one that lists it on its alias roster;
+ * none when two sessions name it as their primary), so a peer decides
+ * from the facts we would:
  *  - held: a held ghost whose session has no live alias (a held ghost
  *    with one counts as live); a client two sessions name is not held;
  *  - primary: the client is @a bs's hs_client (the verdict's
@@ -11364,18 +11521,15 @@ struct BouncerSession *bounce_find_any_session(const char *account)
  * A client two sessions name as their primary gets n beside its own id,
  * which may equal one of theirs (an attach copies the session's id).
  *
- * @param[in] cptr      Our client.
- * @param[in] bs        The session the hint looked up, or NULL.
- * @param[in] ambiguous Nonzero if two sessions name @a cptr as primary.
+ * @param[in] cptr    Our client.
+ * @param[in] held    bounce_nick_side_lookup()'s held fact for it.
+ * @param[in] primary Its primary fact, from the same call.
  */
-static void bounce_stage_hold_mark(struct Client *cptr,
-                                   struct BouncerSession *bs, int ambiguous)
+static void bounce_stage_hold_mark(struct Client *cptr, int held, int primary)
 {
   if (!MyConnect(cptr) || !IsAccount(cptr))
     return;
-  sendcmdto_set_s2s_held(bounce_hold_stamp(nick_side_held_in(bs, ambiguous,
-                                                             cptr),
-                                           bs && bs->hs_client == cptr));
+  sendcmdto_set_s2s_held(bounce_hold_stamp(held, primary));
 }
 
 /** Set the S2S sessid override for an outgoing N introduction.
@@ -11390,7 +11544,7 @@ static void bounce_stage_hold_mark(struct Client *cptr,
 void bounce_set_n_sessid_hint(struct Client *cptr)
 {
   struct BouncerSession *bs;
-  int ambiguous;
+  int held = 0, primary = 0;
 
   if (!cptr || !IsUser(cptr))
     return;
@@ -11428,12 +11582,11 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * stamped with the session's id, and a fork peer then merged the live
    * session into it. */
   bs = NULL;
-  ambiguous = 0;
   if (IsAccount(cptr)) {
-    bs = session_of_primary(cptr, &ambiguous);
+    bs = bounce_nick_side_lookup(cptr, &held, &primary);
     if (bs && bs->hs_sessid[0]) {
       sendcmdto_set_s2s_sessid(bs->hs_sessid);
-      bounce_stage_hold_mark(cptr, bs, ambiguous);
+      bounce_stage_hold_mark(cptr, held, primary);
       return;
     }
   }
@@ -11448,7 +11601,7 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * carry a sessid, letting our minted value propagate downstream. */
   if (cli_session_id(cptr)[0]) {
     sendcmdto_set_s2s_sessid(cli_session_id(cptr));
-    bounce_stage_hold_mark(cptr, bs, ambiguous);
+    bounce_stage_hold_mark(cptr, held, primary);
   }
 }
 
