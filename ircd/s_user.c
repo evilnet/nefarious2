@@ -2610,11 +2610,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           /* Destroy bouncer session if local client has one */
           if (MyUser(acptr)) {
             struct BouncerSession *session = bounce_get_session(acptr);
-            if (session) {
-              session->hs_client = NULL;
-              bounce_broadcast(session, 'X', NULL);
-              bounce_destroy(session);
-            }
+            if (session)
+              bounce_end_session_keep_clients(session, acptr);
           }
         }
         break;

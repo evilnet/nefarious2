@@ -1029,6 +1029,20 @@ extern time_t bounce_hold_remaining(struct BouncerSession *session);
  */
 extern void bounce_destroy(struct BouncerSession *session);
 
+/** End @a session everywhere (BS X, then bounce_destroy()) while its
+ * connections carry on outside it: hold turned off (MODE -b, BOUNCER SET
+ * HOLD off, PERSISTENCE SET OFF / DETACH) or BOUNCER DISCONNECT.  A local
+ * primary, and @a caller, that carry on take a session id of their own:
+ * the ended session's id would make the session-id hint stamp it on
+ * their N, and a peer would take a client in no session for a member
+ * (its rebind and its post-burst merge match on that id).
+ *
+ * @param[in] session The session to end; freed here.
+ * @param[in] caller  The connection that asked, or NULL.
+ */
+extern void bounce_end_session_keep_clients(struct BouncerSession *session,
+                                            struct Client *caller);
+
 /** Force-destroy a session because its primary was network-KILLed
  * (invariant #12: KILL ends the whole session).  Exits every alias
  * with the provided comment, broadcasts BX X for peer cleanup, then

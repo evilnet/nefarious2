@@ -2374,6 +2374,47 @@ void bounce_destroy(struct BouncerSession *session)
   MyFree(session);
 }
 
+/** A local connection of an ended session that carries on: its own
+ * session id from now on, unless it already has one. */
+static void bounce_give_own_sessid(struct Client *c, const char *ended)
+{
+  if (!c || !MyUser(c) || IsBouncerAlias(c) || !ended[0]
+      || 0 != strcmp(cli_session_id(c), ended))
+    return;
+  presence_purge_session(cli_session_id(c));
+  generate_sessid(cli_session_id(c));
+  Debug((DEBUG_INFO, "Bouncer: %s left session %s; its own id is %s",
+         cli_name(c), ended, cli_session_id(c)));
+}
+
+/** See include/bouncer_session.h. */
+void bounce_end_session_keep_clients(struct BouncerSession *session,
+                                     struct Client *caller)
+{
+  struct Client *primary;
+  char ended[BOUNCER_SESSID_LEN];
+
+  if (!session)
+    return;
+  primary = session->hs_client;
+  ircd_strncpy(ended, session->hs_sessid, sizeof(ended));
+
+  /* Detach the primary before the destroy so exit_one_client does not
+   * operate on a destroyed session later. */
+  session->hs_client = NULL;
+  bounce_broadcast(session, 'X', NULL);
+  bounce_destroy(session);
+
+  /* The id stays with the ended session: kept, it is stamped on the next
+   * N of a client in no session (the hint's fallback is the client's own
+   * id), which a peer reads as membership.  PM history keyed by the old
+   * id still names the account's holder of the nick; presence of a
+   * logged-in client is kept by account. */
+  bounce_give_own_sessid(primary, ended);
+  if (caller != primary)
+    bounce_give_own_sessid(caller, ended);
+}
+
 /** Force-destroy a session due to a network KILL (invariant #12).
  *
  * Terminates every alias of the session, broadcasts BX X to clear

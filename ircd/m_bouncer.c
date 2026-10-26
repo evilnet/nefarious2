@@ -452,8 +452,7 @@ static int bouncer_disconnect(struct Client *sptr, const char *sessid)
 
   for (s = as->as_sessions; s; s = s->hs_anext) {
     if (0 == strcmp(s->hs_sessid, sessid)) {
-      bounce_broadcast(s, 'X', NULL);
-      bounce_destroy(s);
+      bounce_end_session_keep_clients(s, sptr);
       send_note(sptr, "BOUNCER", "SESSION_DISCONNECTED", sessid,
                 "Session disconnected");
       return 0;
@@ -774,13 +773,8 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
        * continues as a normal non-bounced IRC client. */
       {
         struct BouncerSession *session = bounce_get_session(sptr);
-        if (session) {
-          /* Detach primary before destroy so exit_one_client doesn't
-           * try to clean up a destroyed session later. */
-          session->hs_client = NULL;
-          bounce_broadcast(session, 'X', NULL);
-          bounce_destroy(session);
-        }
+        if (session)
+          bounce_end_session_keep_clients(session, sptr);
       }
 
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
