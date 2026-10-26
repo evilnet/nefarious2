@@ -394,33 +394,20 @@ int server_finish_burst(struct Client *cptr)
       char *s = umode_str(acptr);
       char held_mark;
 
-      /* Legacy-face suppression: if cptr is a non-IRCv3-aware peer and
-       * acptr is bouncer-bound to a session that has already had a face
-       * introduced toward cptr (typically by an earlier walk-step on a
-       * different session connection, or by an inbound burst that's
-       * already been forwarded here), skip the entire user introduction
-       * block.  Per design: legacy peers see exactly one N per bouncer
-       * session — BX-aware side may juggle primary/alias state
-       * internally without disturbing legacy's view.  The recorded
-       * face's local Client struct stays alive (becomes IsBouncerAlias
-       * on demote) and routing back to legacy resolves through it.
+      /* A legacy peer gets every user of the walk, as it gets every N we
+       * relay: aliases are not users of the walk (above), so a session
+       * shows one face unless it has two primaries for the moment (two
+       * copies of it met after a split and are not merged yet).  Then the
+       * legacy peer holds both faces, as a relay would have given it,
+       * and the merge retracts the one it converts (a QUIT); the survivor
+       * stays known to it.  Holding back all but the first face of a
+       * session here left the legacy peer with no face at all once the
+       * merge retracted that first one, and its channel members unknown.
        *
-       * Scope this to the acptr's own session, not all sessions for the
-       * account.  An account-bearing but non-bouncer-bound client (no
-       * cli_session_id, or session opt-out via draft/persistence/hold=0) is a
-       * legitimately independent presence and must get its own N to
-       * legacy peers — even if some bouncer client happens to share
-       * the account.  Future multi-session-per-account work falls out
-       * of session-keying for free; nothing changes here. */
+       * The first face sent to the peer is noted for the session (CHECK
+       * shows it; a later swap or retraction of that face updates it). */
       if (!IsIRCv3Aware(cptr) && IsAccount(acptr)) {
         struct BouncerSession *bs = bounce_get_session(acptr);
-        if (bs && bounce_session_legacy_face_for(bs, cli_yxx(cptr))) {
-          Debug((DEBUG_INFO,
-                 "Bouncer: burst-suppressing N for %s to legacy %s "
-                 "— session %s already has a face there",
-                 cli_name(acptr), cli_name(cptr), bs->hs_sessid));
-          continue;
-        }
         if (bs) {
           char face_buf[6];
           ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",

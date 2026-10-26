@@ -719,22 +719,12 @@ struct BouncerSession {
   int hs_histcount;
   struct BounceConnHistory hs_history[BOUNCER_MAX_CONN_HISTORY];
 
-  /* Legacy-face suppression table.  Per design: legacy peers (non-IRCv3-
-   * aware) must see exactly one N introduction per bouncer session.  Once
-   * a face has been emitted toward a given legacy peer, subsequent N
-   * emits for any client of the same session toward that peer are
-   * suppressed at the wire layer.  BX-aware peers can demote/promote
-   * primary/alias state internally without disturbing the legacy view —
-   * the local Client struct of the recorded face stays alive (becomes
-   * IsBouncerAlias on demote) and routing back toward legacy uses that
-   * alias's numeric.
-   *
-   * If the recorded face exits, the corresponding entry is cleared so
-   * the next legacy emit re-introduces a fresh face (presumably a
-   * different session connection that's still alive).  If two N's
-   * leak through (race or pre-existing legacy state from before
-   * tracking was added), the recovery path is to emit Q to legacy for
-   * one of them — there is no other option once two faces are visible. */
+  /* Legacy-face records: the first face (client) of this session our
+   * burst introduced to each legacy (non-IRCv3-aware) peer.  Shown by
+   * CHECK -b; a BX P swap of that face toward the peer records the new
+   * numeric, and a retraction of it, or the peer's split, drops the
+   * record.  The burst holds back no client: a legacy peer learns every
+   * face of ours, as it learns every N we relay. */
   struct {
     char bli_peer[NICKLEN + 1];         /**< legacy peer's server numeric */
     char bli_face[6];                   /**< full YYXXX of introduced client */
@@ -1679,14 +1669,14 @@ extern void bounce_remove_pending_registration(struct Client *cli);
 extern int bounce_is_pending_registration(const struct Client *cli);
 
 /* ---------------------------------------------------------------- */
-/* Legacy-face suppression                                           */
+/* Legacy-face records                                               */
 /* ---------------------------------------------------------------- */
 
 /** Look up the recorded legacy face (full YYXXX) for a session toward a
- * legacy peer.  Returns NULL if no face has been recorded yet for this
- * (session, peer) pair — meaning the next emit toward that peer is
- * authorized to introduce a fresh N.  Caller passes peer_yxx as the
- * legacy peer server's two-character numeric (cli_yxx(peer)). */
+ * legacy peer: the first face our burst introduced to it.  Returns NULL
+ * if none is recorded for this (session, peer) pair.  Caller passes
+ * peer_yxx as the legacy peer server's two-character numeric
+ * (cli_yxx(peer)). */
 extern const char *bounce_session_legacy_face_for(
     struct BouncerSession *session, const char *peer_yxx);
 
@@ -1711,12 +1701,9 @@ extern void bounce_session_clear_legacy_face(struct BouncerSession *session,
 
 /** Clear all legacy_face entries (across every session) keyed by a
  * departing peer's two-character server numeric.  Called from the SQUIT
- * path so that when the peer reconnects — even reusing the same numeric —
- * we re-emit a fresh N to it instead of suppressing under a stale face
- * record from the prior link.  Without this, restart-on-the-same-numeric
- * leaves the local side believing the peer has already seen the
- * introduction, and the burst goes out with channel members referencing
- * unannounced numerics. */
+ * path: a record names a face of the link that left, which a later link
+ * of the same peer (even reusing the same numeric) has not been told
+ * of. */
 extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
 
 /** Forget the session ids BS C left unmirrored here (kept apart from

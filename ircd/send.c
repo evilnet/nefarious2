@@ -2380,15 +2380,15 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
  *
  * BX (BOUNCER_TRANSFER) P is the explicit exception — only the P
  * subcommand (in-place numeric swap / membership transfer) must reach
- * legacy peers, which have been patched to handle it, and that emission
- * stays on the unconditional sendcmdto_serv_butone() path (paired, where
- * the originating emission isn't already P, through
- * sendcmdto_legacy_serv_butone()). Every other BX subcommand (C, U, X, N,
- * V, and the unknown-subcommand relay) is fork-only noise to a legacy
- * peer — its m_bouncer_transfer.c processes only P and silently relays
- * the rest (.claude/para/areas/bouncer-design-intent.md, invariant #7:
- * "Legacy wire vocabulary is BX P only") — so those sites use this
- * function like any other fork-only P10 token.
+ * legacy peers, which have been patched to handle it, and those emissions
+ * go on the unconditional sendcmdto_serv_butone() path (a promote) or
+ * per legacy link (bounce_legacy_face_change(), which renumbers or
+ * retracts a face a legacy link knows). Every other BX subcommand (C, U,
+ * X, N, V, and the unknown-subcommand relay) is fork-only noise to a
+ * legacy peer — its m_bouncer_transfer.c processes only P and silently
+ * relays the rest (bouncer design intent, invariant #7: "Legacy wire
+ * vocabulary is BX P only") — so those sites use this function like any
+ * other fork-only P10 token.
  *
  * Implementation note: this function duplicates the body of
  * sendcmdto_serv_butone() rather than calling it through a static gate
@@ -2558,11 +2558,12 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
  * fork-only token) is silently dropped by legacy peers and wastes the
  * emission; use sendcmdto_serv_butone_v3() for those instead.
  *
- * Use site (BX P): at every BX C emission in the bouncer subsystem, also
- * emit a paired BX P through this helper so legacy peers reconcile their
- * UserStats.clients count and nick-hash table for the converted client.
- * See .claude/para/projects/legacy-bx-p-in-place-conversion.md for the
- * rationale and full transition table.
+ * No BX C emission is paired with a BX P any more: an alias introduced by
+ * BX C alone was never known to a legacy peer (the pair only ever relayed
+ * through it), and a client a legacy peer knew by its N and a BX C then
+ * converts leaves it with a QUIT (bounce_legacy_face_change()) -- a BX P
+ * naming two numerics it knows made it drop the face without telling the
+ * services behind it.
  *
  * Implementation note: the alias-source egress rewrite block
  * (s2s_alias_source / IsBouncerAlias preamble) is preserved verbatim —

@@ -202,11 +202,7 @@ extern void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
  * or any other fork-only token, through this helper: legacy peers
  * silently drop what they don't recognise and the emission is wasted.
  * Never builds a tagged line — see the definition comment in send.c.
- *
- * Intended use site (BX P): at every BX C emission, also emit a paired
- * BX P through this helper so legacy peers reconcile their nick-hash and
- * UserStats.clients count via the existing BX P swap path (see
- * .claude/para/projects/legacy-bx-p-in-place-conversion.md). */
+ * A BX C emission is not paired with a BX P (see send.c). */
 extern void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
 				         const char *tok, struct Client *one,
 				         const char *pattern, ...);

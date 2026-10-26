@@ -3109,7 +3109,7 @@ void bounce_legacy_burst_gate_callback(struct Event *ev)
 
 
 /* ---------------------------------------------------------------- */
-/* Legacy-face suppression                                           */
+/* Legacy-face records                                               */
 /* ---------------------------------------------------------------- */
 
 const char *bounce_session_legacy_face_for(struct BouncerSession *session,
@@ -3386,8 +3386,7 @@ void bounce_legacy_face_change(struct Client *face, struct BouncerSession *sess,
 
   /* No link holds the old face any more: drop every record of it, in
    * this session and in any other of the account (a record names the
-   * session the burst found at the time), so the burst suppression they
-   * serve never waits on a face that is gone.  A swap's replaced entries
+   * session the burst found at the time).  A swap's replaced entries
    * carry new_numeric and stay. */
   if (sess)
     bounce_session_clear_legacy_face(sess, face_full);
@@ -7900,11 +7899,12 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
      * this client), and clears the records of this face so a later emit
      * (a relay-path N, the next burst) may introduce a fresh one.
      *
-     * Nothing here introduces the new primary to these peers: the
-     * pending-canon tick that once did was removed with the frontier
-     * introducer (6523611, then deleted as dead code), so until a relay
-     * or a burst does, a legacy peer may hold no face for the session --
-     * an open gap (deferred-items register).
+     * A legacy link already knows the new primary: it learned every
+     * client of ours and every one we relayed by its N (the burst toward
+     * it suppresses none), and the only N we withhold from it -- the
+     * incoming primary of a lost same-nick merge, or the one a held ghost
+     * yields to -- reaches it as a renumbering of the face it holds
+     * (BX P).  So retracting the demoted face leaves it with the survivor.
      *
      * The local Client struct stays alive on this server (it's now an
      * alias and continues to handle the user's connection).  Q here is
@@ -10048,17 +10048,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
      * path and returns before its N broadcast (s_user.c), so no N for
      * sptr ever left this server and no legacy peer counted it.
      *
-     * Paired BX P emission to legacy peers (see
-     * .claude/para/projects/legacy-bx-p-in-place-conversion.md): its old
-     * numeric is `alias_full`, which no legacy peer has seen (above), so
-     * the legacy handler's findNUser(old) misses and it only relays the
-     * line onward (m_bouncer_transfer.c: no old client -> relay).  On
-     * this path the pair changes no legacy state.
+     * So nothing goes to the legacy links: there is no face of theirs to
+     * change.
      *
-     * Both emissions are sourced from &me — the server itself, not the
+     * The emission is sourced from &me — the server itself, not the
      * alias — so the alias→primary egress rewrite (invariant #10) does
-     * not apply here.  IsIRCv3Aware predicate inside the helpers selects
-     * the right peer set. */
+     * not apply here. */
     {
       char *alias_modes = umode_str(sptr);
       const char *alias_profile = cli_active_profile(sptr)[0]
@@ -10074,12 +10069,6 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
                              alias_modes,
                              alias_profile,
                              chanlist_buf);
-      sendcmdto_legacy_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                             "P %s %s %s %s",
-                             alias_full,         /* old: this alias (never N-introduced) */
-                             primary_full,       /* new: the existing primary */
-                             session->hs_sessid,
-                             cli_name(primary));
     }
   } /* end YYXXX numeric scope */
 
@@ -10315,41 +10304,24 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       Debug((DEBUG_INFO, "BX C: alias %s already exists as alias", alias_numeric));
       goto forward;
     }
-    /* Existing non-alias client — convert to alias in place.
-     * This happens when BX C arrives for a client that was introduced
-     * via N token (e.g., local alias setup already done, or burst ordering).
+    /* Existing non-alias client -- convert it to an alias in place.
      *
-     * The burst-side N filter at s_serv.c (`IsUser(acptr) &&
-     * !IsBouncerAlias(acptr)` in server_finish_burst) structurally
-     * prevents this in steady-state burst, so this branch should
-     * effectively never fire in normal operation.  When it DOES
-     * fire it indicates either (a) a race window between SetUser
-     * and SetBouncerAlias in register_user that happened to align
-     * with a server link, (b) a SQUIT + rejoin path that
-     * re-introduces an alias through a non-standard sequence, or
-     * (c) a regression in the burst filter.
+     * The client was introduced by N, as a primary of its server, and its
+     * server now announces it as an alias of `primary`: two live primaries
+     * of one session met after a split under different nicks, and the
+     * post-burst reconcile demoted the newer one on its own server (a
+     * same-nick meeting is decided before the keeper accepts the other's
+     * N, so the alias it makes is new here).  The everyday flows never
+     * reach this branch: an alias is introduced by BX C alone, and the
+     * burst sends no N for one.
      *
-     * Canary snotice below surfaces every occurrence to opers
-     * subscribed to SNO_NETWORK so we can investigate when prod-test
-     * (or any deployment) hits this path.
-     *
-     * KNOWN OPEN ISSUE if the canary does fire: this conversion is
-     * silent on the wire — no QUIT, NICK, or PART is emitted to
-     * common channels.  Any channel member that saw the
-     * pre-conversion N is left with the alias's old nick stuck in
-     * their channel-state cache, and the eventual silent
-     * IsBouncerAlias destroy in s_misc.c never cleans it up.
-     * Mitigation sketch: sendcmdto_common_channels_butone(alias,
-     * CMD_QUIT, "Session converging") here before hRemClient.  Not
-     * implemented pending evidence of real-world occurrence.  See
-     * `.claude/para/projects/legacy-bx-p-in-place-conversion.md`
-     * (Open questions — "Client-side ghost on in-place conversion"). */
-    sendto_opmask_butone(0, SNO_NETWORK,
-        "BX C convert-in-place fired: alias_numeric=%s old_nick=%s "
-        "primary_numeric=%s primary_nick=%s — investigate path that "
-        "introduced N for the alias (see bouncer_session.c comment "
-        "block above this notice)",
-        alias_numeric, cli_name(alias), primary_numeric, cli_name(primary));
+     * The legacy links know the client by its N, under its own nick.  It
+     * leaves them as a QUIT ("Promoted to alias of <primary>"), sent while
+     * it still has the numeric they know: they hold the primary's own
+     * face, which they learned when it was introduced.  A BX P naming both
+     * numerics would have them drop the face without telling anything
+     * behind them (X3 kept a phantom of it).  Local users who share a
+     * channel with the old nick are told by the QUIT below. */
     Debug((DEBUG_INFO, "BX C: converting existing client %s (%s) to alias of %s",
            alias_numeric, cli_name(alias), cli_name(primary)));
     user = cli_user(alias);
@@ -10360,7 +10332,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
      * its entire identity; without this a malformed/hostile BX C
      * hijacks an unrelated user's Client slot.  Aliases are
      * account-anchored, so a legitimate convert target always has the
-     * matching account set; a mismatch is drop-worthy + canaried. */
+     * matching account set; a mismatch is drop-worthy and reported. */
     if (!IsAccount(alias) || 0 != ircd_strcmp(user->account, account)) {
       sendto_opmask_butone(0, SNO_NETWORK,
           "BX C convert-in-place REFUSED (account mismatch): alias=%s "
@@ -10369,16 +10341,22 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
           IsAccount(alias) ? user->account : "*", account, primary_numeric);
       goto forward;
     }
-    /* Client-visible cleanup for the convert-in-place ghost: this client was
-     * N-introduced with its OWN nick (burst-ordering — its N arrived before the
-     * BX C revealing it is an alias of `primary`), and is about to be SILENTLY
-     * relabeled to the primary's nick + absorbed as a hidden alias.  The
-     * conversion emits no QUIT/NICK on the wire, so local clients sharing a
-     * channel with this nick would keep it cached forever (a ghost).  Emit a QUIT
-     * for the old nick to its common channels FIRST so observers clean it up.
-     * Local-only (sendcmdto_common_channels_butone targets local clients), so
-     * each server does this for its own clients when it processes the BX C — no
-     * upstream/peer dependency.  Skip when the nick is unchanged (no delta). */
+    {
+      char reason[NICKLEN + 32];
+      ircd_snprintf(0, reason, sizeof(reason), "Promoted to alias of %s",
+                    cli_name(primary));
+      bounce_legacy_face_change(alias, bounce_find_by_token_sessid(account, sessid),
+                                cptr, NULL, reason);
+    }
+    /* Client-visible cleanup: this client was N-introduced with its OWN
+     * nick and is about to be relabeled to the primary's nick and absorbed
+     * as a hidden alias.  Local clients sharing a channel with the old nick
+     * would keep it cached forever (a ghost): emit a QUIT for the old nick
+     * to its common channels FIRST so they clean it up.  Local-only
+     * (sendcmdto_common_channels_butone targets local clients), so each
+     * aware server does this for its own clients when it processes the
+     * BX C; the legacy links had their QUIT above.  Skip when the nick is
+     * unchanged (no delta). */
     if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
       sendcmdto_common_channels_butone(alias, CMD_QUIT, NULL, ":Session converging");
     {
@@ -10717,26 +10695,9 @@ forward:
                           "C %s %s %s %s :%s",
                           primary_numeric, alias_numeric, account, sessid, chanlist);
 
-  /* Paired BX P emission to legacy peers downstream of us — without
-   * this, a legacy peer two hops out (legacy ← modern relay ← we)
-   * would never see BX P at all, leaving its UserStats.clients +
-   * nick-hash stranded.  Only emit when `primary` is non-NULL: the
-   * goto-forward paths at the top of this function (primary not
-   * found, alias_server not found) reach this label without a known
-   * primary, in which case we can't construct a meaningful BX P.
-   *
-   * Legacy peers that don't have the alias's numeric as a previously
-   * N-introduced user hit the `if (!old_client) goto relay;` branch
-   * in their handler — no harm done, the BX P just relays through
-   * unchanged.  See
-   * .claude/para/projects/legacy-bx-p-in-place-conversion.md. */
-  if (primary && IsUser(primary))
-    sendcmdto_legacy_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                          "P %s %s %s %s",
-                          alias_numeric,    /* old: the N-introduced numeric */
-                          primary_numeric,  /* new: the existing primary */
-                          sessid,
-                          cli_name(primary));
+  /* Nothing goes to the legacy links here.  An alias they never knew
+   * (introduced by BX C alone) changes nothing of theirs; a client they
+   * knew by its N, converted in place above, left them with a QUIT. */
 
   /* Session move: if the primary is a local HOLDING ghost, promote the
    * alias to primary BEFORE exiting the ghost.  This ensures the ghost's
