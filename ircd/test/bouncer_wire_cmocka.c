@@ -387,12 +387,72 @@ static void hold_mark_valid_only_for_the_three_letters(void **s)
   assert_true(bounce_hold_mark_valid(bounce_hold_stamp(1, 1)));
 }
 
+/* bounce_hold_marks_trusted_path(): the trust rule the server's walk
+ * from a client's home toward us feeds. */
+
+static void trust_path_direct_link(void **s)
+{
+  (void)s;
+  /* home = our direct link: one hop. */
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 1, 1, 1), 1);
+  /* It must announce H, and so must our SERVER line to it. */
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 0, 1, 1, 1), 0);
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 1, 0, 1), 0);
+  /* We send marks only while the tags are on. */
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 1, 1, 0), 0);
+  /* A walk that never reached our link (home is us, or the chain is
+   * broken) trusts nothing. */
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 0, 1, 1), 0);
+  assert_int_equal(bounce_hold_marks_trusted_path(0, 0, 1, 1, 1), 0);
+}
+
+static void trust_path_multi_hop(void **s)
+{
+  (void)s;
+  /* home - hub - our link: every hop announces H. */
+  assert_int_equal(bounce_hold_marks_trusted_path(3, 3, 1, 1, 1), 1);
+  /* One hop without H (an older server relays no mark) is enough to
+   * leave the client's state unknown. */
+  assert_int_equal(bounce_hold_marks_trusted_path(3, 2, 1, 1, 1), 0);
+  assert_int_equal(bounce_hold_marks_trusted_path(3, 0, 1, 1, 1), 0);
+  assert_int_equal(bounce_hold_marks_trusted_path(3, 3, 1, 0, 1), 0);
+  assert_int_equal(bounce_hold_marks_trusted_path(3, 3, 1, 1, 0), 0);
+}
+
+/* Over a direct link the two ends trust each other's marks or neither
+ * does, as long as each still has the tags as it had them when it sent
+ * its SERVER line: X announced H iff its tags were on, and the far end
+ * reads X's H from that line.  A runtime switch of the tags breaks it
+ * (registered). */
+static void trust_path_direct_link_is_mutual(void **s)
+{
+  int x_tags, y_tags, x_now, y_now;
+  (void)s;
+  for (x_tags = 0; x_tags < 2; x_tags++)
+  for (y_tags = 0; y_tags < 2; y_tags++)
+  for (x_now = 0; x_now < 2; x_now++)
+  for (y_now = 0; y_now < 2; y_now++) {
+    /* X's view of Y's marks: Y announced H (y_tags), X announced H
+     * (x_tags), X's tags now. */
+    int x_trusts = bounce_hold_marks_trusted_path(1, y_tags, 1, x_tags, x_now);
+    int y_trusts = bounce_hold_marks_trusted_path(1, x_tags, 1, y_tags, y_now);
+    if (x_now == x_tags && y_now == y_tags)
+      assert_int_equal(x_trusts, y_trusts);
+  }
+  /* The residual: X switched its tags off after linking. */
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 1, 1, 0), 0);
+  assert_int_equal(bounce_hold_marks_trusted_path(1, 1, 1, 1, 1), 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),
+    cmocka_unit_test(trust_path_direct_link),
+    cmocka_unit_test(trust_path_multi_hop),
+    cmocka_unit_test(trust_path_direct_link_is_mutual),
     cmocka_unit_test(aware_link_never_knows),
     cmocka_unit_test(gated_link_knows_nothing),
     cmocka_unit_test(own_direction_excluded),

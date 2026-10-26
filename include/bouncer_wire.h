@@ -180,4 +180,27 @@ extern char bounce_hold_stamp(int held, int primary);
  * anything else on the wire reads as no mark. */
 extern int bounce_hold_mark_valid(char mark);
 
+/** May the hold marks of a client's N be trusted, given what the walk
+ * from the client's home server toward us found?
+ *
+ * Trusted when we send marks ourselves (P10_MESSAGE_TAGS on), the walk
+ * reached our own link, every server on it (home and our direct link
+ * included) announced SERVER flag H, and our SERVER line to that link
+ * announced H: the far end judges our marks by that announcement, so we
+ * trust its marks only if it trusts ours.  For a direct link this is the
+ * same fact on both ends; through more hops, and across a runtime switch
+ * of the tags, the two ends can differ (registered).
+ *
+ * @param[in] hops        Servers on the path, home to our link inclusive.
+ * @param[in] hops_with_h How many of them announced SERVER flag H.
+ * @param[in] reached_us  Nonzero if the walk ended at our link.
+ * @param[in] sent_h      Nonzero if our SERVER line to that link
+ *                        announced H.
+ * @param[in] tags_on     Nonzero if P10_MESSAGE_TAGS is on.
+ * @return 1 if trusted, else 0.
+ */
+extern int bounce_hold_marks_trusted_path(int hops, int hops_with_h,
+                                          int reached_us, int sent_h,
+                                          int tags_on);
+
 #endif /* INCLUDED_bouncer_wire_h */

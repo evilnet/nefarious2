@@ -1042,8 +1042,11 @@ extern void bounce_kill_session(struct BouncerSession *session,
  * compact-tag ,S segment (per redesign A.2).
  *
  * A session member (primary, held ghost, roster alias) carries its
- * session's hs_sessid; any other client its own cli_session_id.  The
- * override auto-clears after format_s2s_tags_with_client consumes it
+ * session's hs_sessid; any other client its own cli_session_id, as does
+ * a client two sessions name as their primary.  The session is the one
+ * bounce_session_of_primary() finds, and for a client of ours with an
+ * account the hold mark (,H) is stamped beside it from the same lookup.
+ * The override auto-clears after format_s2s_tags_with_client consumes it
  * during the next sendcmdto_* call.
  *
  * @param[in] cptr Client about to be N-introduced.
@@ -1056,7 +1059,9 @@ extern void bounce_set_n_sessid_hint(struct Client *cptr);
  * path arrives on announced it (the announcement the far end judges us
  * by), and we still send marks (P10_MESSAGE_TAGS on).  Both ends of the
  * path are included, so two servers trust each other's marks or neither
- * does: a path is the same both ways.  A server that does not stamp
+ * does: exact for a direct link; multi-hop and runtime-toggle residuals
+ * are registered.  The rule itself is bounce_hold_marks_trusted_path()
+ * (bouncer_wire.h); this walks the path for it.  A server that does not stamp
  * marks, or does not relay them, leaves the state of the clients behind
  * it unknown (bounce_nick_side_from_mark, bouncer_converge.h).
  *
@@ -1407,10 +1412,49 @@ extern enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage
                                                         const char *new_account,
                                                         const char *new_kc_id);
 
+/** The session a same-nick decision about our client @a c acts on: the
+ * session whose hs_client is @a c (its primary, or its held ghost),
+ * else one that lists @a c on its alias roster.  Unlike
+ * bounce_get_session(), a session that names @a c as its primary wins
+ * over one met earlier that only lists it on its roster.  When two
+ * sessions both name @a c as their primary (a split that converged
+ * across session ids can leave that), neither is the one: NULL, logged
+ * (Debug).
+ *
+ * The verdict's facts about @a c (bounce_nick_side_held(), and
+ * local_is_session_primary = the result's hs_client is @a c), the hold
+ * mark and session id its N carries (bounce_set_n_sessid_hint) and the
+ * session a retire or a ghost drop then acts on all come from this one
+ * lookup.  Pass the result on to the action; do not look the session up
+ * again another way.
+ *
+ * @param[in] c The client.
+ * @return The session, or NULL (none, or two claim @a c).
+ */
+extern struct BouncerSession *bounce_session_of_primary(struct Client *c);
+
+/** Does @a s have a live connection on its alias roster: an entry that
+ * resolves to a client (findNUser), as bounce_kill_session() would find
+ * and exit it?  NULL has none. */
+extern int bounce_session_has_live_alias(struct BouncerSession *s);
+
+/** Is @a c held, read from the session object @a s an action would use:
+ * a held ghost whose session has no live alias left?  A held ghost with
+ * a live alias counts as live: ending its session (bounce_kill_session)
+ * would exit every alias it finds.  With @a s NULL (a ghost no session
+ * names) there is no roster: held.
+ *
+ * @param[in] s The session; NULL for none.
+ * @param[in] c The client.
+ * @return 1 if held with no live alias, else 0.
+ */
+extern int bounce_session_held(struct BouncerSession *s, struct Client *c);
+
 /** Is `cptr` held, as a same-nick verdict (bounce_nick_verdict) reads
- * it: a held ghost whose session has no live alias left?  A held ghost
- * with a live alias counts as live: a verdict that ends a held session
- * runs bounce_kill_session(), which exits every alias it finds.
+ * it?  bounce_session_held() on bounce_session_of_primary(cptr); a
+ * client two sessions name as their primary is not held (there is no
+ * one session to end).  The hold mark its N carries is stamped from
+ * this, so a peer reads the fact we would.
  *
  * @param[in] cptr Our client.
  * @return 1 if held with no live alias, else 0.

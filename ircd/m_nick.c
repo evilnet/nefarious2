@@ -589,7 +589,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr)
       && IsAccount(acptr) && IsUser(acptr)
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
-    struct BouncerSession *bsess = bounce_get_session(acptr);
+    /* The one session object this decision reads and acts on: the
+     * session acptr is the primary of (the one its hold mark and session
+     * id were stamped from); none when two sessions name it. */
+    struct BouncerSession *bsess = bounce_session_of_primary(acptr);
     /* Can our primary become an alias of the incoming one?  Decided once,
      * here, before anything is sent: the demote and its finish make the
      * same check at their own step, so a "yes" here means they run. */
@@ -597,6 +600,14 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       bsess ? bounce_demote_eligibility(BOUNCE_DEMOTE_PLAN, acptr, bsess,
                                         sptr, incoming_acct, incoming_kc_id)
             : BOUNCE_DEMOTE_NO_SESSION;
+    /* Different Keycloak users, for the verdict: our session's id, else
+     * acptr's own when it is in no session -- the check a held ghost's
+     * server makes against the same introduction, so both sides read the
+     * same two ids.  For a session primary it is the eligibility bar's
+     * own check. */
+    int kc_conflict =
+      bounce_side_kc_conflict(bsess ? bounce_session_kc_id(bsess) : NULL,
+                              cli_user(acptr)->kc_id, incoming_kc_id);
     struct bounce_nick_side ours, theirs;
     char our_full[6];
     enum bounce_nick_verdict verdict;
@@ -640,8 +651,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     theirs.numeric     = parv[parc - 2];
     verdict = bounce_nick_verdict(&ours, &theirs,
                                   bsess && bsess->hs_client == acptr,
-                                  bar == BOUNCE_DEMOTE_KC_CONFLICT,
-                                  IsBurstGated(cptr));
+                                  kc_conflict, IsBurstGated(cptr));
 
     /* Keep or demote: the merge, if our primary can become an alias.
      * Classic (no session with acptr as its primary, a Keycloak-id

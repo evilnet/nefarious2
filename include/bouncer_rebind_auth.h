@@ -29,6 +29,23 @@ extern enum BounceRebindAuth bounce_rebind_auth(int origin_match,
 extern int bounce_rebind_kc_conflict(const char *ghost_id,
                                      const char *incoming_id);
 
+/** Do our client and an incoming introduction of its account carry
+ * Keycloak ids that differ, for a same-nick verdict?  Our id is our
+ * client's session's (@a session_id) when it has one, else the client's
+ * own (@a client_id): a client in no session is checked as a held ghost
+ * is (bounce_rebind_kc_conflict), so both sides of a meeting read the
+ * same two ids whether or not ours has a session.  A missing id never
+ * conflicts.
+ *
+ * @param[in] session_id Our client's session's id; NULL or "" if it has
+ *                       no session or the session knows none.
+ * @param[in] client_id  Our client's own id; NULL or "" if none.
+ * @param[in] incoming_id The incoming introduction's id.
+ */
+extern int bounce_side_kc_conflict(const char *session_id,
+                                   const char *client_id,
+                                   const char *incoming_id);
+
 /** What a login does with an existing session of its account, by their
  * Keycloak ids (user, 2026-10-23: a new id never attaches to an old
  * session, and an old session is never tied to a new id). */

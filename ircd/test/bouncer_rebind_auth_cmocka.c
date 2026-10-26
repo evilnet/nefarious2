@@ -129,6 +129,30 @@ static void test_kc_join_conflict_refuses_while_in_use(void **state)
                    BKJ_REFUSE);
 }
 
+/* A same-nick verdict's Keycloak check: our side's id is its session's
+ * when it has one, else the client's own, so a client in no session is
+ * checked like a held ghost (whose own id the rebind reads). */
+#define KC_A "a6p7gJ2tEdGAtADAT9QwyA"
+#define KC_B "AAAAAAAAAAAAAAAAAAAAAA"
+static void test_side_kc_conflict_reads_the_session_else_the_client(void **state)
+{
+  (void)state;
+  /* In a session: the session's id. */
+  assert_true(bounce_side_kc_conflict(KC_A, "", KC_B));
+  assert_true(bounce_side_kc_conflict(KC_A, KC_A, KC_B));
+  assert_false(bounce_side_kc_conflict(KC_A, KC_B, KC_A));
+  /* In no session (or a session that knows no id): the client's own. */
+  assert_true(bounce_side_kc_conflict(NULL, KC_A, KC_B));
+  assert_true(bounce_side_kc_conflict("", KC_A, KC_B));
+  assert_false(bounce_side_kc_conflict(NULL, KC_A, KC_A));
+  /* A missing id never conflicts. */
+  assert_false(bounce_side_kc_conflict(NULL, NULL, KC_B));
+  assert_false(bounce_side_kc_conflict("", "", KC_B));
+  assert_false(bounce_side_kc_conflict(KC_A, KC_A, ""));
+  assert_false(bounce_side_kc_conflict(NULL, KC_A, NULL));
+  assert_false(bounce_side_kc_conflict(NULL, NULL, NULL));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -145,6 +169,7 @@ int main(void)
     cmocka_unit_test(test_kc_join_same_or_missing_id_joins),
     cmocka_unit_test(test_kc_join_conflict_ends_an_unused_leftover),
     cmocka_unit_test(test_kc_join_conflict_refuses_while_in_use),
+    cmocka_unit_test(test_side_kc_conflict_reads_the_session_else_the_client),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

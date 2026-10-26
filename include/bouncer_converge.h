@@ -62,6 +62,13 @@ enum bounce_nick_verdict {
                           *   alias */
 };
 
+/** Does a live login meet a held ghost of its account by the live login
+ * winning (the held session ending)?  Not decided: 0 keeps the classic
+ * rules for it, as they have always decided it.  This constant and the
+ * one branch of bounce_nick_verdict_ex() that reads it are the whole
+ * switch; 1 answers as if that branch were deleted. */
+#define BOUNCE_LIVE_LOGIN_WINS 0
+
 /** What happens when an incoming N names the nick one of our clients
  * holds, both clients of one account.
  *
@@ -72,19 +79,29 @@ enum bounce_nick_verdict {
  *
  *  1. Different Keycloak users: classic (sessions of different ids are
  *     never merged).
- *  2. A live login known to be in no session meets a held ghost, either
- *     way round: classic, as it has always been.  Whether the live login
- *     should win instead (the held session ending) is not decided; this
- *     is the one place that answers it.
+ *  2. The open case (BOUNCE_LIVE_LOGIN_WINS), the one switch: classic,
+ *     as it has always been, when
+ *     - a live login known to be in no session meets a held ghost,
+ *       either way round; or
+ *     - our held ghost meets a client whose state is unknown while our
+ *       burst to its link is still gated: it may be a login in no
+ *       session as well.
+ *     Whether the live login should win instead (the held session
+ *     ending) is not decided; with the switch off, the rules below
+ *     answer both cases that way.
  *  3. Ours held:
- *     - the incoming one known live: ours ends;
+ *     - the incoming one known to be in no session: ours ends, as
+ *       BNV_RETIRE_LOCAL whatever session id it carries (a login in no
+ *       session carries its own id, or a stale one; never ours);
+ *     - known live otherwise: ours ends;
  *     - known held: the lower session id keeps (strcmp); equal ids, the
  *       lower numeric keeps; the other ends;
  *     - state unknown: ours ends when our burst to the link is still
  *       gated (the peer never saw our ghost), else classic.
- *     Ending is BNV_RETIRE_LOCAL when the session ids differ and
- *     BNV_DROP_LOCAL_GHOST when they are equal: the incoming client is
- *     in our session, so only the ghost goes.
+ *     Ending (other than for a login in no session) is BNV_RETIRE_LOCAL
+ *     when the session ids differ and BNV_DROP_LOCAL_GHOST when they are
+ *     equal: the incoming client is in our session, so only the ghost
+ *     goes.
  *  4. Ours live:
  *     - the incoming one known held: ours keeps;
  *     - ours not its session's primary, or the incoming one known to be
@@ -111,12 +128,30 @@ bounce_nick_verdict(const struct bounce_nick_side *local,
                     int local_is_session_primary, int kc_conflict,
                     int link_gated);
 
+/** bounce_nick_verdict() with the open case answered by @a
+ * live_login_wins instead of BOUNCE_LIVE_LOGIN_WINS.  The server calls
+ * bounce_nick_verdict(); this form lets the unit tests check both
+ * answers against the one implementation.
+ *
+ * @param[in] live_login_wins Nonzero answers rule 2's cases by the rules
+ *                     below it (the live login wins), 0 by the classic
+ *                     rules.
+ */
+extern enum bounce_nick_verdict
+bounce_nick_verdict_ex(const struct bounce_nick_side *local,
+                       const struct bounce_nick_side *incoming,
+                       int local_is_session_primary, int kc_conflict,
+                       int link_gated, int live_login_wins);
+
 /** Set the incoming side's hold state from the hold mark its N carried
  * (bouncer_wire.h: BOUNCE_HOLD_MARK_*).
  *
  * The state is known only when the mark can be trusted -- every server
  * on the path from the client's home server to us, both ends included,
- * announces SERVER flag H -- AND the N carries a valid mark.  Then:
+ * announces SERVER flag H (bounce_hold_marks_trusted; two servers then
+ * trust each other's marks or neither does, exact for a direct link;
+ * multi-hop and runtime-toggle residuals are registered) -- AND the N
+ * carries a valid mark.  Then:
  * held mark -> held; primary mark -> a live session member; outsider
  * mark -> live, in no session (non_member).  Otherwise the state is
  * unknown (state_known, held and non_member all 0), as for an N from a

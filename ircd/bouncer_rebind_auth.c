@@ -43,6 +43,18 @@ bounce_rebind_kc_conflict(const char *ghost_id, const char *incoming_id)
   return strcmp(ghost_id, incoming_id) != 0;
 }
 
+int
+bounce_side_kc_conflict(const char *session_id, const char *client_id,
+                        const char *incoming_id)
+{
+  /* The session's id speaks for it (a session is bound to one Keycloak
+   * user); a client in no session, or in one that knows no id yet,
+   * speaks for itself. */
+  if (session_id && *session_id)
+    return bounce_rebind_kc_conflict(session_id, incoming_id);
+  return bounce_rebind_kc_conflict(client_id, incoming_id);
+}
+
 enum BounceKcJoin
 bounce_kc_join(const char *session_id, const char *login_id, int session_unused)
 {

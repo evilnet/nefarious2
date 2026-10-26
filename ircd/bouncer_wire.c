@@ -100,3 +100,15 @@ int bounce_hold_mark_valid(char mark)
   return mark == BOUNCE_HOLD_MARK_HELD || mark == BOUNCE_HOLD_MARK_PRIMARY
          || mark == BOUNCE_HOLD_MARK_OUTSIDER;
 }
+
+int bounce_hold_marks_trusted_path(int hops, int hops_with_h, int reached_us,
+                                   int sent_h, int tags_on)
+{
+  /* We send marks only while the tags are on; a peer judges ours by the
+   * H our SERVER line announced, so we trust its marks only when it can
+   * trust ours; and every server between its home and us must relay
+   * them. */
+  if (!tags_on || !reached_us || !sent_h || hops <= 0)
+    return 0;
+  return hops_with_h == hops;
+}

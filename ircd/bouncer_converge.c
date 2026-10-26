@@ -53,7 +53,18 @@ enum bounce_nick_verdict bounce_nick_verdict(const struct bounce_nick_side *loca
                                              int local_is_session_primary,
                                              int kc_conflict, int link_gated)
 {
-  int in_live, in_held, c;
+  return bounce_nick_verdict_ex(local, incoming, local_is_session_primary,
+                                kc_conflict, link_gated,
+                                BOUNCE_LIVE_LOGIN_WINS);
+}
+
+enum bounce_nick_verdict bounce_nick_verdict_ex(const struct bounce_nick_side *local,
+                                                const struct bounce_nick_side *incoming,
+                                                int local_is_session_primary,
+                                                int kc_conflict, int link_gated,
+                                                int live_login_wins)
+{
+  int in_live, in_held, in_unknown, c;
 
   if (!local || !incoming)
     return BNV_CLASSIC;
@@ -65,17 +76,27 @@ enum bounce_nick_verdict bounce_nick_verdict(const struct bounce_nick_side *loca
   in_live = incoming->non_member
             || (incoming->state_known && !incoming->held);
   in_held = !incoming->non_member && incoming->state_known && incoming->held;
+  in_unknown = !in_live && !in_held;
 
-  /* A live login in no session meets a held ghost, either way round.
-   * Whether the live login should win (the held session ending) is not
-   * decided; until it is, the classic rules decide, as they always have.
-   * This is the only place that answers it: without it, the rules below
-   * would let the live login win. */
-  if ((local->held && incoming->non_member)
-      || (!local->held && !local_is_session_primary && in_held))
+  /* A live login in no session meets a held ghost, either way round --
+   * and our held ghost meets a client nobody announced while our burst
+   * to its link is gated, which may be such a login too.  Whether the
+   * live login should win (the held session ending) is not decided;
+   * until it is, the classic rules decide, as they always have.  This is
+   * the only place that answers it: without it, the rules below let the
+   * live login win in all three. */
+  if (!live_login_wins
+      && ((local->held && (incoming->non_member || (in_unknown && link_gated)))
+          || (!local->held && !local_is_session_primary && in_held)))
     return BNV_CLASSIC;
 
   if (local->held) {
+    /* A login in no session is never in our session, whatever id it
+     * carries (its own, or a stale one: a client that turned its hold
+     * off with -b keeps the id of the session that ended): ending only
+     * the ghost would hand our session to it. */
+    if (incoming->non_member)
+      return BNV_RETIRE_LOCAL;
     if (in_live)
       return local_ends(local, incoming);
     if (!in_held)

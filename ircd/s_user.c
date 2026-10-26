@@ -476,7 +476,10 @@ void clear_nick_relay_withhold_legacy(void)
  * so the mark is armed here, beside the session id the hint armed --
  * read from the line's own link, and only while that line is the one
  * being handled.  Further away, the relay reads the link's ,S and ,H
- * itself and this copy, the same mark, goes unused.
+ * itself and this copy, the same mark, goes unused.  A mark that came
+ * without a session id is not passed on: it describes the client beside
+ * the id its home server sent, and the id armed here would be another
+ * (the hint's), so the pair would say something the home never said.
  *
  * @param[in] cptr The link the N arrived on.
  * @param[in] sptr The client it introduced.
@@ -485,7 +488,7 @@ static void relay_hold_mark(struct Client *cptr, struct Client *sptr)
 {
   if (MyConnect(sptr) || !sendcmdto_stash_is_current(cptr))
     return;
-  if (cli_s2s_held(cptr))
+  if (cli_s2s_held(cptr) && cli_s2s_sessid(cptr)[0])
     sendcmdto_set_s2s_held(cli_s2s_held(cptr));
 }
 

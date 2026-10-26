@@ -1765,21 +1765,106 @@ void bounce_prune_stale_aliases(void)
   }
 }
 
-/** See include/bouncer_session.h. */
-int bounce_nick_side_held(struct Client *cptr)
+/** The session @a c is the primary of, as bounce_session_of_primary()
+ * finds it, and whether more than one session claims @a c as its primary.
+ *
+ * @param[in]  c          The client.
+ * @param[out] ambiguous  Set to 1 when two or more sessions name @a c as
+ *                        their hs_client (the result is then NULL), else 0.
+ * @return The session, or NULL.
+ */
+static struct BouncerSession *session_of_primary(struct Client *c,
+                                                 int *ambiguous)
 {
-  struct BouncerSession *s;
+  struct AccountSessions *as;
+  struct BouncerSession *s, *primary_of = NULL, *roster_of = NULL;
+  int claims = 0;
+  char full[6];
+
+  *ambiguous = 0;
+  if (!c || !IsAccount(c) || !cli_user(c))
+    return NULL;
+  as = bounce_find_by_account(cli_account(c));
+  if (!as)
+    return NULL;
+  full[0] = '\0';
+  if (cli_user(c)->server)
+    ircd_snprintf(0, full, sizeof(full), "%s%s",
+                  cli_yxx(cli_user(c)->server), cli_yxx(c));
+
+  for (s = as->as_sessions; s; s = s->hs_anext) {
+    int i;
+    if (s->hs_client == c) {
+      if (!primary_of)
+        primary_of = s;
+      claims++;
+      continue;
+    }
+    if (roster_of || !full[0])
+      continue;
+    for (i = 0; i < s->hs_alias_count; i++)
+      if (0 == strcmp(s->hs_aliases[i].ba_numeric, full)) {
+        roster_of = s;
+        break;
+      }
+  }
+
+  if (claims > 1) {
+    Debug((DEBUG_INFO, "bounce_session_of_primary: %d sessions of %s name "
+           "%s (%s) as their primary; none chosen", claims, cli_account(c),
+           cli_name(c), full));
+    *ambiguous = 1;
+    return NULL;
+  }
+  return primary_of ? primary_of : roster_of;
+}
+
+/** See include/bouncer_session.h. */
+struct BouncerSession *bounce_session_of_primary(struct Client *c)
+{
+  int ambiguous;
+  return session_of_primary(c, &ambiguous);
+}
+
+/** See include/bouncer_session.h. */
+int bounce_session_has_live_alias(struct BouncerSession *s)
+{
   int i;
 
-  if (!cptr || !IsBouncerHold(cptr))
-    return 0;
   /* The aliases bounce_kill_session would exit: those it finds. */
-  s = bounce_get_session(cptr);
   if (s)
     for (i = 0; i < s->hs_alias_count; i++)
       if (findNUser(s->hs_aliases[i].ba_numeric))
-        return 0;
-  return 1;
+        return 1;
+  return 0;
+}
+
+/** See include/bouncer_session.h. */
+int bounce_session_held(struct BouncerSession *s, struct Client *c)
+{
+  return c && IsBouncerHold(c) && !bounce_session_has_live_alias(s);
+}
+
+/** Held as the verdict and the hold mark read it, from the object @a s
+ * a lookup returned and whether that lookup was ambiguous. */
+static int nick_side_held_in(struct BouncerSession *s, int ambiguous,
+                             struct Client *c)
+{
+  /* Two sessions name the client as their primary: no one session to
+   * end, so it is not read as held (nor, having no one session, as a
+   * primary): every verdict then leaves it to the classic rules or
+   * keeps it, and never ends or demotes a session for it. */
+  if (ambiguous)
+    return 0;
+  return bounce_session_held(s, c);
+}
+
+/** See include/bouncer_session.h. */
+int bounce_nick_side_held(struct Client *cptr)
+{
+  int ambiguous;
+  struct BouncerSession *s = session_of_primary(cptr, &ambiguous);
+  return nick_side_held_in(s, ambiguous, cptr);
 }
 
 /** Post-burst reconcile: detect multi-primary-same-session states and
@@ -1896,7 +1981,8 @@ void bounce_post_burst_reconcile(void)
          * Keycloak user never passed the candidate test above; and this
          * pass runs after a burst, never for a gated link.  A held ghost
          * of ours never gets here (the candidate test refuses a held
-         * face), and the verdict would leave it alone too: classic. */
+         * face), and the verdict would leave it alone too: classic.
+         * Ours is read held from s, the session the demote acts on. */
         {
           struct bounce_nick_side ours, theirs;
           char our_full[6], their_full[6];
@@ -1908,7 +1994,7 @@ void bounce_post_burst_reconcile(void)
                         cli_yxx(cli_user(peer_primary)->server),
                         cli_yxx(peer_primary));
           memset(&ours, 0, sizeof ours);
-          ours.held        = bounce_nick_side_held(local_primary);
+          ours.held        = bounce_session_held(s, local_primary);
           ours.state_known = 1;
           ours.lastnick    = cli_lastnick(local_primary);
           ours.sessid      = s->hs_sessid;
@@ -11228,31 +11314,36 @@ struct BouncerSession *bounce_find_any_session(const char *account)
  * (register_user), or sends none.
  *
  * The mark is made of the predicates the same-nick verdict reads for
- * this client here, so a peer decides from the facts we would:
- *  - held: bounce_nick_side_held(), a held ghost whose session has no
- *    live alias.  It reads the session bounce_get_session() finds -- the
- *    one this client is the hs_client of, the session the hint names.
- *    bounce_find_best_held(account), the session a rebind acts on, is
- *    that same session unless the account has another HOLDING session;
- *    the rebind then refuses this ghost, unless that other session
- *    claims the ghost as its hs_client too (two sessions naming one
- *    ghost, left by a split that converged across session ids).  The
- *    verdict reads held through bounce_nick_side_held() as well, so a
- *    change to its predicate reaches the mark with it.
- *  - primary: @a bs is the session the hint looked up, and the client
- *    is its hs_client (the verdict's local_is_session_primary).
+ * this client here, from the one session object the hint looked up
+ * (bounce_session_of_primary(): the session the client is the primary or
+ * held ghost of, else one that lists it on its alias roster; none when
+ * two sessions name it as their primary), so a peer decides from the
+ * facts we would:
+ *  - held: a held ghost whose session has no live alias (a held ghost
+ *    with one counts as live); a client two sessions name is not held;
+ *  - primary: the client is @a bs's hs_client (the verdict's
+ *    local_is_session_primary).
  * So the ,S beside a held or primary mark is the session's id, and the
- * ,S beside an outsider mark is the client's own id -- except for a
- * member of a session's alias roster that is not its primary (never
- * N-introduced: aliases come by BX C) and a held ghost no session
- * claims, which keep the verdict's reading of them.
+ * ,S beside an outsider mark is the client's own id, except:
+ *  - a held ghost no session names: h beside its own id;
+ *  - a client a session lists only on its alias roster: n beside that
+ *    session's id (an alias comes by BX C, never by N, so only a stale
+ *    roster entry puts an N-introduced client there);
+ *  - a session with an empty id: h or p beside the client's own id.
+ * A client two sessions name as their primary gets n beside its own id,
+ * which may equal one of theirs (an attach copies the session's id).
+ *
+ * @param[in] cptr      Our client.
+ * @param[in] bs        The session the hint looked up, or NULL.
+ * @param[in] ambiguous Nonzero if two sessions name @a cptr as primary.
  */
 static void bounce_stage_hold_mark(struct Client *cptr,
-                                   struct BouncerSession *bs)
+                                   struct BouncerSession *bs, int ambiguous)
 {
   if (!MyConnect(cptr) || !IsAccount(cptr))
     return;
-  sendcmdto_set_s2s_held(bounce_hold_stamp(bounce_nick_side_held(cptr),
+  sendcmdto_set_s2s_held(bounce_hold_stamp(nick_side_held_in(bs, ambiguous,
+                                                             cptr),
                                            bs && bs->hs_client == cptr));
 }
 
@@ -11268,13 +11359,17 @@ static void bounce_stage_hold_mark(struct Client *cptr,
 void bounce_set_n_sessid_hint(struct Client *cptr)
 {
   struct BouncerSession *bs;
+  int ambiguous;
 
   if (!cptr || !IsUser(cptr))
     return;
 
   /* Only a member of the session carries its id: the primary, the held
-   * ghost, or a connection on the session's alias roster -- exactly what
-   * bounce_get_session() finds.  A peer that receives this id treats the
+   * ghost, or a connection on the session's alias roster -- what
+   * bounce_session_of_primary() finds, the session the same-nick verdict
+   * acts on, so the id and the hold mark come from one lookup.  A client
+   * two sessions name as their primary carries its own id: neither is
+   * the one.  A peer that receives this id treats the
    * client as part of the session: the ghost-rebind auth gate reads it
    * off the wire, and the receiver adopts it as the client's
    * cli_session_id, which the post-burst reconcile and PM history's
@@ -11302,11 +11397,12 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * stamped with the session's id, and a fork peer then merged the live
    * session into it. */
   bs = NULL;
+  ambiguous = 0;
   if (IsAccount(cptr)) {
-    bs = bounce_get_session(cptr);
+    bs = session_of_primary(cptr, &ambiguous);
     if (bs && bs->hs_sessid[0]) {
       sendcmdto_set_s2s_sessid(bs->hs_sessid);
-      bounce_stage_hold_mark(cptr, bs);
+      bounce_stage_hold_mark(cptr, bs, ambiguous);
       return;
     }
   }
@@ -11321,7 +11417,7 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * carry a sessid, letting our minted value propagate downstream. */
   if (cli_session_id(cptr)[0]) {
     sendcmdto_set_s2s_sessid(cli_session_id(cptr));
-    bounce_stage_hold_mark(cptr, bs);
+    bounce_stage_hold_mark(cptr, bs, ambiguous);
   }
 }
 
@@ -11329,18 +11425,23 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
 int bounce_hold_marks_trusted(struct Client *home)
 {
   struct Client *s;
+  int hops = 0, hops_with_h = 0, reached_us = 0, sent_h = 0;
 
-  /* We send marks only while the tags are on. */
-  if (!home || !feature_bool(FEAT_P10_MESSAGE_TAGS))
+  if (!home)
     return 0;
-  for (s = home; s && IsServer(s); s = cli_serv(s)->up) {
-    if (!IsHoldMark(s))
-      return 0;
-    /* Our own link: the far end judges us by the H we announced on it. */
-    if (IsMe(cli_serv(s)->up))
-      return IsHoldMarkSent(s);
+  /* Walk from the client's home toward us, to our direct link. */
+  for (s = home; s && IsServer(s) && !IsMe(s); s = cli_serv(s)->up) {
+    hops++;
+    if (IsHoldMark(s))
+      hops_with_h++;
+    if (cli_serv(s)->up && IsMe(cli_serv(s)->up)) {
+      reached_us = 1;
+      sent_h = IsHoldMarkSent(s);
+      break;
+    }
   }
-  return 0;
+  return bounce_hold_marks_trusted_path(hops, hops_with_h, reached_us, sent_h,
+                                        feature_bool(FEAT_P10_MESSAGE_TAGS));
 }
 
 /** Purge per-Client ephemeral session-scoped state on exit.
