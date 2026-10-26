@@ -225,6 +225,32 @@ static void finish_needs_the_demoted_alias(void **s)
   assert_int_equal(bounce_demote_check(BOUNCE_DEMOTE_FINISH, &f), BOUNCE_DEMOTE_FACE_ALIAS);
 }
 
+static void session_of_another_keycloak_user(struct bounce_demote_facts *f) { f->kc_id_conflict = 1; }
+
+static void finish_refuses_another_keycloak_user(void **s)
+{
+  (void)s;
+  finish_guard(session_of_another_keycloak_user, BOUNCE_DEMOTE_KC_CONFLICT);
+}
+
+static void another_keycloak_user_is_refused_first(void **s)
+{
+  /* Sessions of different Keycloak users are never merged.  The bar is
+   * the Keycloak one whatever else fails, so the same-nick merge vetoes
+   * exactly when the ids differ, as it did before it asked the
+   * predicate. */
+  struct bounce_demote_facts f = plan_ok();
+  (void)s;
+  f.kc_id_conflict = 1;
+  assert_int_equal(bounce_demote_check(BOUNCE_DEMOTE_PLAN, &f), BOUNCE_DEMOTE_KC_CONFLICT);
+  f.face_dying = 1;
+  f.new_home_aware = 0;
+  f.session_slot = BOUNCE_SLOT_OTHER;
+  assert_int_equal(bounce_demote_check(BOUNCE_DEMOTE_PLAN, &f), BOUNCE_DEMOTE_KC_CONFLICT);
+  f.new_home_known = 0;
+  assert_int_equal(bounce_demote_check(BOUNCE_DEMOTE_PLAN, &f), BOUNCE_DEMOTE_KC_CONFLICT);
+}
+
 static void a_plan_yes_carries_through_the_finish(void **s)
 {
   /* For every combination of the facts the demote itself does not
@@ -234,7 +260,7 @@ static void a_plan_yes_carries_through_the_finish(void **s)
    * the demote runs. */
   unsigned int bits;
   (void)s;
-  for (bits = 0; bits < (1u << 9); bits++) {
+  for (bits = 0; bits < (1u << 10); bits++) {
     struct bounce_demote_facts plan, fin;
     memset(&plan, 0, sizeof plan);
     plan.face_account_user = !!(bits & 1);
@@ -246,6 +272,7 @@ static void a_plan_yes_carries_through_the_finish(void **s)
     plan.new_home_known    = !!(bits & 64);
     plan.new_home_aware    = !!(bits & 128);
     plan.new_account       = !!(bits & 256);
+    plan.kc_id_conflict    = !!(bits & 512);
     plan.session_slot      = BOUNCE_SLOT_FACE;
     if (bounce_demote_check(BOUNCE_DEMOTE_PLAN, &plan) != BOUNCE_DEMOTE_OK)
       continue;
@@ -262,9 +289,61 @@ static void every_bar_has_a_name(void **s)
   (void)s;
   assert_string_equal(bounce_demote_bar_name(BOUNCE_DEMOTE_OK), "ok");
   assert_string_equal(bounce_demote_bar_name(BOUNCE_DEMOTE_LEGACY_HOME), "legacy home");
-  for (b = BOUNCE_DEMOTE_OK; b <= BOUNCE_DEMOTE_SESSION_ACCOUNT; b++)
+  assert_string_equal(bounce_demote_bar_name(BOUNCE_DEMOTE_KC_CONFLICT), "Keycloak ids differ");
+  for (b = BOUNCE_DEMOTE_OK; b <= BOUNCE_DEMOTE_KC_CONFLICT; b++)
     assert_string_not_equal(bounce_demote_bar_name((enum bounce_demote_bar)b), "?");
   assert_string_equal(bounce_demote_bar_name((enum bounce_demote_bar)99), "?");
+}
+
+/* bounce_merge_choose(we_lose, bar) */
+
+static void merge_winner_refuses_whatever_its_own_demote_could_do(void **s)
+{
+  /* The winner never demotes, so its own eligibility is no input: it
+   * refuses the N and the peer demotes -- except for another Keycloak
+   * user, below. */
+  int b;
+  (void)s;
+  for (b = BOUNCE_DEMOTE_OK; b <= BOUNCE_DEMOTE_KC_CONFLICT; b++) {
+    if (b == BOUNCE_DEMOTE_KC_CONFLICT)
+      continue;
+    assert_int_equal(bounce_merge_choose(0, (enum bounce_demote_bar)b), BOUNCE_MERGE_REFUSE);
+  }
+}
+
+static void merge_loser_swaps_only_when_its_demote_can_run(void **s)
+{
+  /* Every bar that stops the demote sends the loser to the classic
+   * collision rules: its primary stays live under the nick, so the N is
+   * never installed beside it and the legacy face is never swapped. */
+  int b;
+  (void)s;
+  assert_int_equal(bounce_merge_choose(1, BOUNCE_DEMOTE_OK), BOUNCE_MERGE_SWAP);
+  for (b = BOUNCE_DEMOTE_OK + 1; b <= BOUNCE_DEMOTE_KC_CONFLICT; b++)
+    assert_int_equal(bounce_merge_choose(1, (enum bounce_demote_bar)b), BOUNCE_MERGE_CLASSIC);
+}
+
+static void merge_of_another_keycloak_user_is_classic_on_both_sides(void **s)
+{
+  /* Different Keycloak users are never merged: both sides read the same
+   * two ids, so both fall to the classic rules, winner and loser alike. */
+  (void)s;
+  assert_int_equal(bounce_merge_choose(0, BOUNCE_DEMOTE_KC_CONFLICT), BOUNCE_MERGE_CLASSIC);
+  assert_int_equal(bounce_merge_choose(1, BOUNCE_DEMOTE_KC_CONFLICT), BOUNCE_MERGE_CLASSIC);
+}
+
+static void merge_loser_with_a_dying_primary_is_classic(void **s)
+{
+  /* The ineligible case the bed cannot stage (a socket dying between its
+   * read error and its exit): classic, never a swap. */
+  struct bounce_demote_facts f = plan_ok();
+  (void)s;
+  f.face_dying = 1;
+  assert_int_equal(bounce_merge_choose(1, bounce_demote_check(BOUNCE_DEMOTE_PLAN, &f)),
+                   BOUNCE_MERGE_CLASSIC);
+  f = plan_ok();
+  assert_int_equal(bounce_merge_choose(1, bounce_demote_check(BOUNCE_DEMOTE_PLAN, &f)),
+                   BOUNCE_MERGE_SWAP);
 }
 
 int main(void)
@@ -288,8 +367,14 @@ int main(void)
     cmocka_unit_test(finish_needs_the_session_on_the_account),
     cmocka_unit_test(finish_needs_the_slot_empty),
     cmocka_unit_test(finish_needs_the_demoted_alias),
+    cmocka_unit_test(finish_refuses_another_keycloak_user),
+    cmocka_unit_test(another_keycloak_user_is_refused_first),
     cmocka_unit_test(a_plan_yes_carries_through_the_finish),
     cmocka_unit_test(every_bar_has_a_name),
+    cmocka_unit_test(merge_winner_refuses_whatever_its_own_demote_could_do),
+    cmocka_unit_test(merge_loser_swaps_only_when_its_demote_can_run),
+    cmocka_unit_test(merge_of_another_keycloak_user_is_classic_on_both_sides),
+    cmocka_unit_test(merge_loser_with_a_dying_primary_is_classic),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

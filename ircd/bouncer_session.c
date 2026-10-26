@@ -1839,22 +1839,18 @@ void bounce_post_burst_reconcile(void)
           if (0 != ircd_strcmp(cli_account(acptr), s->hs_account)) continue;
           if (!cli_session_id(acptr)[0]) continue;
           if (0 != strcmp(cli_session_id(acptr), s->hs_sessid)) continue;
-          /* A different Keycloak user is never merged in (user,
-           * 2026-10-23: sessions of different ids stay apart after a
-           * split); the peer reads our ids the same way. */
-          if (bounce_rebind_kc_conflict(bounce_session_kc_id(s),
-                                        cli_user(acptr)->kc_id))
-            continue;
           /* Only a candidate our primary could be demoted into counts:
-           * the demote's own decision.  Above all, a candidate homed on
-           * a legacy server is never merged in, as D.2 skips a legacy
-           * introducer (m_nick.c): a legacy home never runs the
-           * symmetric pass, so the "we win" side would wait for a
-           * demote that never comes, and "we lose" would hand the
-           * session to a client that is not in it.  Its session id
-           * proves nothing either: a legacy server sends none, and the
-           * one it carries was stamped by whichever fork server relayed
-           * its N. */
+           * the demote's own decision.  A different Keycloak user is
+           * never merged in (user, 2026-10-23: sessions of different ids
+           * stay apart after a split; the peer reads our ids the same
+           * way).  And a candidate homed on a legacy server is never
+           * merged in, as D.2 skips a legacy introducer (m_nick.c): a
+           * legacy home never runs the symmetric pass, so the "we win"
+           * side would wait for a demote that never comes, and "we lose"
+           * would hand the session to a client that is not in it.  Its
+           * session id proves nothing either: a legacy server sends
+           * none, and the one it carries was stamped by whichever fork
+           * server relayed its N. */
           if (demote_eligibility_for(BOUNCE_DEMOTE_PLAN, local_primary, s,
                                      acptr) != BOUNCE_DEMOTE_OK)
             continue;
@@ -6605,7 +6601,8 @@ enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage stage,
                                                  struct Client *face,
                                                  struct BouncerSession *session,
                                                  struct Client *new_home,
-                                                 const char *new_account)
+                                                 const char *new_account,
+                                                 const char *new_kc_id)
 {
   struct bounce_demote_facts f;
   const char *face_account = NULL;
@@ -6633,6 +6630,10 @@ enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage stage,
   f.new_home_aware = new_home && IsIRCv3Aware(new_home);
   f.new_account = new_account && *new_account && face_account
                   && 0 == ircd_strcmp(new_account, face_account);
+  /* A missing id on either side never vetoes. */
+  f.kc_id_conflict = session
+                     && bounce_rebind_kc_conflict(bounce_session_kc_id(session),
+                                                  new_kc_id);
   return bounce_demote_check(stage, &f);
 }
 
@@ -6646,7 +6647,9 @@ static enum bounce_demote_bar demote_eligibility_for(enum bounce_demote_stage st
                         ? cli_user(new_primary)->server : NULL;
   return bounce_demote_eligibility(stage, face, session, home,
                                    (new_primary && IsAccount(new_primary))
-                                     ? cli_account(new_primary) : NULL);
+                                     ? cli_account(new_primary) : NULL,
+                                   (new_primary && cli_user(new_primary))
+                                     ? cli_user(new_primary)->kc_id : NULL);
 }
 
 int bounce_demote_live_primary_to_alias(struct Client *acptr,

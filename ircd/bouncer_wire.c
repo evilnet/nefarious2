@@ -24,7 +24,12 @@ int bounce_legacy_link_knows(int link_aware, int link_gated,
 enum bounce_demote_bar bounce_demote_check(enum bounce_demote_stage stage,
                                            const struct bounce_demote_facts *f)
 {
-  if (!f || !f->new_home_known)
+  if (!f)
+    return BOUNCE_DEMOTE_NO_NEW_HOME;
+  /* Different Keycloak users are never merged, whatever else holds. */
+  if (f->kc_id_conflict)
+    return BOUNCE_DEMOTE_KC_CONFLICT;
+  if (!f->new_home_known)
     return BOUNCE_DEMOTE_NO_NEW_HOME;
   /* A legacy home has no sessions and never hears BX C. */
   if (!f->new_home_aware)
@@ -67,6 +72,18 @@ const char *bounce_demote_bar_name(enum bounce_demote_bar bar)
   case BOUNCE_DEMOTE_SESSION_SLOT:     return "not the session's primary";
   case BOUNCE_DEMOTE_NEW_ACCOUNT:      return "new primary's account differs";
   case BOUNCE_DEMOTE_SESSION_ACCOUNT:  return "session's account differs";
+  case BOUNCE_DEMOTE_KC_CONFLICT:      return "Keycloak ids differ";
   }
   return "?";
+}
+
+enum bounce_merge_choice bounce_merge_choose(int we_lose,
+                                             enum bounce_demote_bar bar)
+{
+  /* Both sides read the same two ids: neither merges. */
+  if (bar == BOUNCE_DEMOTE_KC_CONFLICT)
+    return BOUNCE_MERGE_CLASSIC;
+  if (!we_lose)
+    return BOUNCE_MERGE_REFUSE;
+  return bar == BOUNCE_DEMOTE_OK ? BOUNCE_MERGE_SWAP : BOUNCE_MERGE_CLASSIC;
 }

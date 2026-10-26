@@ -572,12 +572,18 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       && IsAccount(acptr) && IsUser(acptr)
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
     struct BouncerSession *bsess = bounce_get_session(acptr);
+    /* Can our primary become an alias of the incoming one?  Decided once,
+     * here, before anything is sent: the demote and its finish make the
+     * same check at their own step, so a "yes" here means they run. */
+    enum bounce_demote_bar bar =
+      bsess ? bounce_demote_eligibility(BOUNCE_DEMOTE_PLAN, acptr, bsess,
+                                        sptr, incoming_acct, incoming_kc_id)
+            : BOUNCE_DEMOTE_NO_SESSION;
     /* Sessions of different Keycloak users (the account was recreated
      * while the network was split) are never merged (user, 2026-10-23):
      * the classic collision rules below decide.  Both sides compare the
      * same two ids, so both skip the merge. */
-    if (bsess && bounce_rebind_kc_conflict(bounce_session_kc_id(bsess),
-                                           incoming_kc_id)) {
+    if (bar == BOUNCE_DEMOTE_KC_CONFLICT) {
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "Bouncer split-merge: not merging %s on %C into %C "
                            "(account %s): Keycloak ids differ",
@@ -611,51 +617,36 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         we_lose = (strcmp(our_full, parv[parc - 2]) > 0);
       }
 
-      if (we_lose) {
-        /* Through the state-transition funnel (Phase 7): single call
+      switch (bounce_merge_choose(we_lose, bar)) {
+      case BOUNCE_MERGE_SWAP: {
+        /* We lose and our primary can become the incoming one's alias.
+         * Through the state-transition funnel (Phase 7): one call
          * combines demote + finish into one transition with invariant
-         * assertions before/after.  set_nick_name still runs to install
-         * the incoming N's Client struct, but the demote of the local
-         * client to alias-of-incoming is one funnel call.
+         * assertions before/after.  set_nick_name runs first to install
+         * the incoming N's Client struct.
          *
          * Legacy links know the user only as acptr's face, under the
          * same nick.  Relaying the incoming N to them would make them
          * collide the nick and KILL one side, and either KILL ends the
-         * whole session.  So when the demote will succeed -- decided
-         * here, before anything is sent, by the same check the demote
-         * and its finish make -- the N goes to IRCv3-aware links only,
-         * and the legacy links renumber acptr's face to the new primary
-         * in place (BX P: same nick, same channels).  When it would not
-         * succeed, acptr stays a live primary the legacy links must keep
-         * knowing, so nothing is withheld or swapped. */
+         * whole session.  So the N goes to IRCv3-aware links only, and
+         * the legacy links renumber acptr's face to the new primary in
+         * place (BX P: same nick, same channels). */
         struct bounce_transition_params p;
         int rc;
         struct Client *new_primary;
-        enum bounce_demote_bar bar =
-          bounce_demote_eligibility(BOUNCE_DEMOTE_PLAN, acptr, bsess, sptr,
-                                    incoming_acct);
-        int swap_face = (bar == BOUNCE_DEMOTE_OK);
-        if (swap_face)
-          set_nick_relay_withhold_legacy();
+        set_nick_relay_withhold_legacy();
         rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
         clear_nick_relay_withhold_legacy();
-        if (!swap_face)
-          sendto_opmask_butone(0, SNO_OLDSNO,
-                               "Bouncer split-merge: %C cannot become an "
-                               "alias of %s on %C (account %s): %s",
-                               acptr, parv[parc - 2], cptr, incoming_acct,
-                               bounce_demote_bar_name(bar));
         new_primary = findNUser(parv[parc - 2]);
         if (new_primary) {
           /* While acptr still has the numeric the legacy links know.
            * Per-link sends: no S2S override is needed after them (the N
            * relay above has consumed its own). */
-          if (swap_face)
-            bounce_legacy_face_change(acptr, bsess, cptr, parv[parc - 2], NULL);
+          bounce_legacy_face_change(acptr, bsess, cptr, parv[parc - 2], NULL);
           memset(&p, 0, sizeof p);
           p.demoted_alias = acptr;
           p.peer_primary  = new_primary;
-          p.legacy_done   = swap_face;
+          p.legacy_done   = 1;
           if (0 == bounce_session_transition(bsess, BST_DEMOTE_TO_ALIAS, &p)) {
             sendto_opmask_butone(0, SNO_OLDSNO,
                                  "Bouncer split-merge: demoted local "
@@ -665,7 +656,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           }
         }
         return rc;
-      } else {
+      }
+      case BOUNCE_MERGE_REFUSE:
         /* We win — refuse incoming silently.  Peer will reach the
          * symmetric verdict and demote on their side. */
         sendto_opmask_butone(0, SNO_OLDSNO,
@@ -675,10 +667,24 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                              parv[parc - 2], cptr, acptr, incoming_acct,
                              (long)our_first, (long)their_first);
         return 0;
+      case BOUNCE_MERGE_CLASSIC:
+        /* We lose but our primary cannot become an alias (it is on its
+         * way out, say): it stays a live primary under this nick, so the
+         * incoming N is not installed beside it.  The classic rules
+         * below decide, as for a Keycloak-id veto. */
+        sendto_opmask_butone(0, SNO_OLDSNO,
+                             "Bouncer split-merge: %C cannot become an "
+                             "alias of %s on %C (account %s): %s; classic "
+                             "collision rules decide",
+                             acptr, parv[parc - 2], cptr, incoming_acct,
+                             bounce_demote_bar_name(bar));
+        break;
       }
     }
-    /* No session match or demote failed: fall through to standard
-     * collision logic. */
+    /* No merge: no session with acptr as its primary, a Keycloak-id veto,
+     * or a lost merge whose demote cannot run.  The standard collision
+     * logic below decides: for one account the older nick wins (the
+     * same-account override), and an equal nick TS loses both. */
   }
   /*
    * If the older one is "non-person", the new entry is just
@@ -839,9 +845,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* Same-account override: both clients are authenticated and the
      * incoming N carries the same account as our local acptr.  We only
-     * reach this point when D.2 was skipped (source is a legacy peer
-     * with no symmetric alias-attach support), so the natural answer
-     * "alias them together" isn't available.  Default classic rule for
+     * reach this point when D.2 did not merge them (a legacy source with
+     * no symmetric alias-attach support, Keycloak ids that differ, or a
+     * lost merge whose demote cannot run), so the natural answer "alias
+     * them together" isn't available.  Default classic rule for
      * !differ (same user@host) kills the older as a reconnect ghost —
      * but here both are legitimate live sessions, and killing the
      * older invites the loser's bouncer to auto-reconnect with a fresh

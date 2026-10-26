@@ -1380,13 +1380,16 @@ extern int bounce_demote_live_primary_to_alias(struct Client *acptr,
  * @param[in] new_home    The new primary's HOME server (the N's source
  *                        server before its Client exists), or NULL.
  * @param[in] new_account The new primary's account, or NULL.
+ * @param[in] new_kc_id   The new primary's Keycloak id ("" or NULL: none);
+ *                        one that differs from the session's refuses.
  * @return BOUNCE_DEMOTE_OK, or why not.
  */
 extern enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage stage,
                                                         struct Client *face,
                                                         struct BouncerSession *session,
                                                         struct Client *new_home,
-                                                        const char *new_account);
+                                                        const char *new_account,
+                                                        const char *new_kc_id);
 
 /** Patch up alias_primary and hs_client after the new primary is
  * created by set_nick_name; broadcast BX C so peers learn about the

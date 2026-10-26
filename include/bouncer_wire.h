@@ -2,8 +2,9 @@
  * IRC - Internet Relay Chat, include/bouncer_wire.h
  *
  * Pure wire decisions for the bouncer: which direct server link may hold
- * a given client "face", and whether a live primary may be demoted into
- * an alias of a new primary.  No ircd dependencies, so the cmocka suite
+ * a given client "face", whether a live primary may be demoted into an
+ * alias of a new primary, and which way a same-nick merge goes.  No ircd
+ * dependencies, so the cmocka suite
  * (ircd/test/bouncer_wire_cmocka.c) compiles it standalone; the callers
  * in bouncer_session.c read the link and client state and pass it in.
  */
@@ -73,6 +74,8 @@ struct bounce_demote_facts {
   int new_home_known;      /**< its home server is known */
   int new_home_aware;      /**< that home server is IRCv3-aware */
   int new_account;         /**< it carries the face's account */
+  int kc_id_conflict;      /**< it and the session carry different Keycloak
+                            *   ids (a missing id is no conflict) */
 };
 
 /** Why a demote cannot run (BOUNCE_DEMOTE_OK: it can). */
@@ -87,12 +90,16 @@ enum bounce_demote_bar {
   BOUNCE_DEMOTE_NO_SESSION,       /**< no session */
   BOUNCE_DEMOTE_SESSION_SLOT,     /**< plan: face not the primary; finish: slot taken */
   BOUNCE_DEMOTE_NEW_ACCOUNT,      /**< the new primary has no account, or another */
-  BOUNCE_DEMOTE_SESSION_ACCOUNT   /**< the session is another account's */
+  BOUNCE_DEMOTE_SESSION_ACCOUNT,  /**< the session is another account's */
+  BOUNCE_DEMOTE_KC_CONFLICT       /**< another Keycloak user (never merged) */
 };
 
 /** May a live primary be demoted into an alias of a new primary?
  *
- * A legacy home is refused: a legacy server has no sessions (the new
+ * A different Keycloak user under the same account name (the account was
+ * recreated) is refused before anything else: sessions of different ids
+ * are never merged, and both sides of a merge read the same two ids.  A
+ * legacy home is refused: a legacy server has no sessions (the new
  * primary is not a session member) and BX C never reaches it, so it
  * could not carry the session's aliases.  A dying face is refused: an
  * alias exit broadcasts BX X and would end the session everywhere,
@@ -111,5 +118,31 @@ bounce_demote_check(enum bounce_demote_stage stage,
 
 /** A short name for a bar, for logs ("ok", "legacy home", ...). */
 extern const char *bounce_demote_bar_name(enum bounce_demote_bar bar);
+
+/** What a same-nick merge of two live primaries of one account does on
+ * the side that receives the other primary's N. */
+enum bounce_merge_choice {
+  BOUNCE_MERGE_REFUSE,  /**< ours wins: refuse the N, the peer demotes */
+  BOUNCE_MERGE_SWAP,    /**< ours loses and can be demoted: install the
+                         *   incoming primary for IRCv3-aware links only,
+                         *   swap the legacy face to it (BX P), demote */
+  BOUNCE_MERGE_CLASSIC  /**< no merge: the classic nick-collision rules */
+};
+
+/** The merge's branch, from who wins and the demote's eligibility.
+ *
+ * Different Keycloak users are never merged, whichever side would win:
+ * classic collision on both sides.  Otherwise the winner refuses the N.
+ * The loser merges only when its demote can run (BOUNCE_DEMOTE_PLAN
+ * said OK); a demote that cannot run leaves its primary live under the
+ * nick the incoming N claims, so the classic rules decide (for one
+ * account, the older nick wins).
+ *
+ * @param[in] we_lose Nonzero if our primary is the newer one.
+ * @param[in] bar     bounce_demote_check(BOUNCE_DEMOTE_PLAN, ...) for our
+ *                    primary and the incoming one.
+ */
+extern enum bounce_merge_choice bounce_merge_choose(int we_lose,
+                                                    enum bounce_demote_bar bar);
 
 #endif /* INCLUDED_bouncer_wire_h */
