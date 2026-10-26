@@ -1004,6 +1004,389 @@ static void test_mixed_version_table(void **state)
   }
 }
 
+/* ---- our side from our own stamp, and the action a verdict maps to ---- */
+
+static void test_stamp_reads_back_as_the_peer_reads_it(void **state)
+{
+  int held, prim;
+  (void)state;
+  /* The snapshot we decide from is the mark the peer read: for every
+   * stamp, our side's held fact equals the peer's, and our primary fact
+   * is "member" exactly when the peer reads no outsider. */
+  for (held = 0; held < 2; held++)
+    for (prim = 0; prim < 2; prim++) {
+      char stamp = bounce_hold_stamp(held, prim);
+      struct bounce_nick_side ours, peer;
+      int primary = -1;
+      memset(&ours, 0, sizeof ours);
+      memset(&peer, 0, sizeof peer);
+      assert_int_equal(bounce_nick_side_from_stamp(&ours, &primary, stamp), 1);
+      bounce_nick_side_from_mark(&peer, 1, stamp);
+      assert_int_equal(ours.state_known, 1);
+      assert_int_equal(ours.non_member, 0);
+      assert_int_equal(ours.held, peer.held);
+      assert_int_equal(ours.held, held);
+      assert_int_equal(primary, !peer.non_member);
+      assert_int_equal(primary, held || prim);
+    }
+  /* No valid stamp: nothing is written, the caller reads its client now. */
+  {
+    struct bounce_nick_side ours;
+    int primary = 7;
+    memset(&ours, 0, sizeof ours);
+    ours.held = 1;
+    assert_int_equal(bounce_nick_side_from_stamp(&ours, &primary, 0), 0);
+    assert_int_equal(bounce_nick_side_from_stamp(&ours, &primary, 'x'), 0);
+    assert_int_equal(ours.held, 1);
+    assert_int_equal(primary, 7);
+    assert_int_equal(bounce_nick_side_from_stamp(NULL, NULL, 'h'), 0);
+  }
+}
+
+/* Our client now: a held ghost that is its session's primary, no alias. */
+static struct bounce_nick_now now_held(void)
+{
+  struct bounce_nick_now n;
+  memset(&n, 0, sizeof n);
+  n.held_ghost = 1;
+  n.has_session = 1;
+  n.is_primary = 1;
+  n.yield_ok = 1;
+  n.demote_bar = BOUNCE_DEMOTE_FACE_HELD;
+  return n;
+}
+
+/* A live session primary whose demote can run. */
+static struct bounce_nick_now now_live(void)
+{
+  struct bounce_nick_now n;
+  memset(&n, 0, sizeof n);
+  n.has_session = 1;
+  n.is_primary = 1;
+  n.yield_ok = 1;
+  n.demote_bar = BOUNCE_DEMOTE_OK;
+  return n;
+}
+
+static enum bounce_nick_action A(enum bounce_nick_verdict v,
+                                 struct bounce_nick_side incoming,
+                                 struct bounce_nick_now now)
+{
+  return bounce_nick_action(v, &incoming, &now);
+}
+
+static void test_action_classic_and_keep(void **state)
+{
+  struct bounce_nick_now live = now_live(), held = now_held(), kc = now_live();
+  (void)state;
+  kc.demote_bar = BOUNCE_DEMOTE_KC_CONFLICT;
+  assert_int_equal(A(BNV_CLASSIC, known(0, 1, OLDER, NB), live), BNA_CLASSIC);
+  assert_int_equal(A(BNV_CLASSIC, known(1, 1, OLDER, NB), held), BNA_CLASSIC);
+  assert_int_equal(A(BNV_KEEP_LOCAL, known(1, 1, OLDER, NB), live), BNA_REFUSE);
+  assert_int_equal(A(BNV_KEEP_LOCAL, known(1, 1, OLDER, NB), held), BNA_REFUSE);
+  assert_int_equal(A(BNV_KEEP_LOCAL, known(0, 1, OLDER, NB), held), BNA_REFUSE);
+  /* A live primary keeps through the merge's own choice: a Keycloak-id
+   * conflict is classic on both sides. */
+  assert_int_equal(A(BNV_KEEP_LOCAL, known(0, 1, OLDER, NB), kc), BNA_CLASSIC);
+}
+
+static void test_action_retire_by_what_ours_is_now(void **state)
+{
+  struct bounce_nick_now n;
+  (void)state;
+  n = now_held();
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(0, 1, NEWER, NB), n), BNA_RETIRE);
+  /* A ghost no session names: it just exits. */
+  n.has_session = 0;
+  n.is_primary = 0;
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(0, 1, NEWER, NB), n), BNA_RETIRE);
+  /* A session that only lists it on its roster is not its to end. */
+  n = now_held();
+  n.is_primary = 0;
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(0, 1, NEWER, NB), n), BNA_CLASSIC);
+  /* Its session has a live alias now: never ended; it yields to a live
+   * session primary instead, else classic. */
+  n = now_held();
+  n.live_alias = 1;
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(0, 1, NEWER, NB), n), BNA_YIELD);
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(1, 1, NEWER, NB), n), BNA_CLASSIC);
+  assert_int_equal(A(BNV_RETIRE_LOCAL, outsider(1, NB), n), BNA_CLASSIC);
+  n.yield_ok = 0;
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(0, 1, NEWER, NB), n), BNA_CLASSIC);
+  /* Not a held ghost now (cannot happen within a burst): classic. */
+  assert_int_equal(A(BNV_RETIRE_LOCAL, known(0, 1, NEWER, NB), now_live()), BNA_CLASSIC);
+}
+
+static void test_action_drop_by_incoming_state(void **state)
+{
+  struct bounce_nick_now n = now_held();
+  (void)state;
+  /* Our session's own ghost: by the incoming client's state. */
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, known(1, 1, OLDER, NA), n), BNA_REBIND_HELD);
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, known(0, 1, OLDER, NA), n), BNA_REBIND_LIVE);
+  /* No drop for an unknown state or a login in no session. */
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, unknown(1, OLDER, NA), n), BNA_CLASSIC);
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, outsider(1, NA), n), BNA_CLASSIC);
+  /* Never a rebind without the session: a ghost no session names just
+   * exits (the yield the peer's keep expects); one the session only
+   * lists on its roster is not its to give. */
+  n.has_session = 0;
+  n.is_primary = 0;
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, known(1, 1, OLDER, NA), n), BNA_RETIRE);
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, known(0, 1, OLDER, NA), n), BNA_RETIRE);
+  n = now_held();
+  n.is_primary = 0;
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, known(0, 1, OLDER, NA), n), BNA_CLASSIC);
+  /* Not a held ghost now: classic. */
+  assert_int_equal(A(BNV_DROP_LOCAL_GHOST, known(0, 1, OLDER, NA), now_live()), BNA_CLASSIC);
+}
+
+static void test_action_never_demotes_a_held_ghost(void **state)
+{
+  struct bounce_nick_now n = now_held();
+  (void)state;
+  /* A held ghost whose session still has a live alias reads as live: the
+   * verdict can demote it; it yields instead. */
+  n.live_alias = 1;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, known(0, 1, NEWER, NB), n), BNA_YIELD);
+  /* Stamped live, held since (its socket died): yields too. */
+  n.live_alias = 0;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, known(0, 1, NEWER, NB), n), BNA_YIELD);
+  /* Not into an unknown incoming state; not when it may not yield; not
+   * when it is not its session's primary. */
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, unknown(1, NEWER, NB), n), BNA_CLASSIC);
+  n.yield_ok = 0;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, known(0, 1, NEWER, NB), n), BNA_CLASSIC);
+  n = now_held();
+  n.is_primary = 0;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, known(0, 1, NEWER, NB), n), BNA_CLASSIC);
+}
+
+static void test_action_live_primary_demote_is_the_merge(void **state)
+{
+  struct bounce_nick_now n = now_live();
+  (void)state;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, known(0, 1, NEWER, NB), n), BNA_SWAP);
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, unknown(1, NEWER, NB), n), BNA_SWAP);
+  n.demote_bar = BOUNCE_DEMOTE_FACE_DYING;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, known(0, 1, NEWER, NB), n), BNA_CLASSIC);
+  n.demote_bar = BOUNCE_DEMOTE_LEGACY_HOME;
+  assert_int_equal(A(BNV_DEMOTE_LOCAL, unknown(1, NEWER, NB), n), BNA_CLASSIC);
+}
+
+static int action_yields(enum bounce_nick_action a)
+{
+  return a == BNA_RETIRE || a == BNA_REBIND_LIVE || a == BNA_REBIND_HELD
+         || a == BNA_SWAP || a == BNA_YIELD;
+}
+
+static void test_action_never_ends_a_live_device(void **state)
+{
+  static const enum bounce_nick_verdict vs[] = {
+    BNV_CLASSIC, BNV_KEEP_LOCAL, BNV_RETIRE_LOCAL, BNV_DROP_LOCAL_GHOST,
+    BNV_DEMOTE_LOCAL
+  };
+  struct bounce_nick_side ins[5];
+  unsigned int v, i, bits;
+  (void)state;
+  ins[0] = known(1, 1, OLDER, NB);
+  ins[1] = known(0, 1, OLDER, NB);
+  ins[2] = unknown(1, OLDER, NB);
+  ins[3] = outsider(1, NB);
+  ins[4] = known(0, 1, NEWER, NB);
+  for (v = 0; v < sizeof vs / sizeof vs[0]; v++)
+    for (i = 0; i < 5; i++)
+      for (bits = 0; bits < 32; bits++) {
+        struct bounce_nick_now n;
+        enum bounce_nick_action a;
+        memset(&n, 0, sizeof n);
+        n.held_ghost  = !!(bits & 1);
+        n.has_session = !!(bits & 2);
+        n.is_primary  = n.has_session && (bits & 4);
+        n.live_alias  = n.has_session && (bits & 8);
+        n.yield_ok    = !!(bits & 16);
+        n.demote_bar  = n.held_ghost ? BOUNCE_DEMOTE_FACE_HELD : BOUNCE_DEMOTE_OK;
+        a = bounce_nick_action(vs[v], &ins[i], &n);
+        /* Ending a session with a live device exits that device. */
+        if (n.live_alias)
+          assert_int_not_equal(a, BNA_RETIRE);
+        /* A client with no socket is never demoted. */
+        if (n.held_ghost)
+          assert_int_not_equal(a, BNA_SWAP);
+        /* A live client is never retired, rebound or yielded. */
+        if (!n.held_ghost)
+          assert_true(a == BNA_CLASSIC || a == BNA_REFUSE || a == BNA_SWAP);
+        /* Rebinds and yields act on our session: never without one. */
+        if (a == BNA_REBIND_LIVE || a == BNA_REBIND_HELD || a == BNA_YIELD)
+          assert_true(n.has_session && n.is_primary);
+        /* Rebinds are drops: same session, a known incoming state. */
+        if (a == BNA_REBIND_LIVE || a == BNA_REBIND_HELD) {
+          assert_int_equal(vs[v], BNV_DROP_LOCAL_GHOST);
+          assert_true(ins[i].state_known && !ins[i].non_member);
+        }
+        /* Only keep refuses. */
+        assert_int_equal(a == BNA_REFUSE, vs[v] == BNV_KEEP_LOCAL && a != BNA_CLASSIC);
+        /* A yield follows only a yielding verdict. */
+        if (action_yields(a))
+          assert_true(vs[v] == BNV_RETIRE_LOCAL || vs[v] == BNV_DROP_LOCAL_GHOST
+                      || vs[v] == BNV_DEMOTE_LOCAL);
+      }
+}
+
+/* A client as its home server holds it now, and the stamp its N carried. */
+enum now_kind {
+  N_HELD,             /* a held ghost, its session's primary, no alias */
+  N_ORPHAN,           /* a held ghost no session names */
+  N_LIVE,             /* a live session primary */
+  N_HELD_LIVE_ALIAS,  /* a held ghost whose session has a live alias (p) */
+  N_STAMPED_LIVE,     /* stamped live, its socket died since (held now) */
+  N_OUTSIDER          /* a live login in no session */
+};
+
+struct now_side {
+  enum now_kind kind;
+  time_t lastnick;
+  const char *sessid;
+  const char *numeric;
+};
+
+static const char *now_kind_name(enum now_kind k)
+{
+  static const char *names[] = { "held", "orphan", "live", "held+alias",
+                                 "stamped-live", "outsider" };
+  return names[k];
+}
+
+static char now_stamp(enum now_kind k)
+{
+  switch (k) {
+  case N_HELD: case N_ORPHAN: return BOUNCE_HOLD_MARK_HELD;
+  case N_OUTSIDER:            return BOUNCE_HOLD_MARK_OUTSIDER;
+  default:                    return BOUNCE_HOLD_MARK_PRIMARY;
+  }
+}
+
+static struct bounce_nick_now now_of(enum now_kind k)
+{
+  struct bounce_nick_now n;
+  memset(&n, 0, sizeof n);
+  switch (k) {
+  case N_HELD:            n = now_held(); break;
+  case N_ORPHAN:          n = now_held(); n.has_session = 0; n.is_primary = 0; break;
+  case N_LIVE:            n = now_live(); break;
+  case N_HELD_LIVE_ALIAS: n = now_held(); n.live_alias = 1; break;
+  case N_STAMPED_LIVE:    n = now_held(); break;
+  case N_OUTSIDER:        n.demote_bar = BOUNCE_DEMOTE_NO_SESSION; break;
+  }
+  return n;
+}
+
+/* One server's action on the other's N: our side from our own stamp, the
+ * incoming side from theirs, the verdict, then the action on what our
+ * client is now. */
+static enum bounce_nick_action composed_action(const struct now_side *ours,
+                                               const struct now_side *theirs,
+                                               int dlh_a)
+{
+  struct bounce_nick_side l, i;
+  struct bounce_nick_now n = now_of(ours->kind);
+  int primary = 0;
+  memset(&l, 0, sizeof l);
+  l.lastnick = ours->lastnick;
+  l.sessid = ours->sessid;
+  l.numeric = ours->numeric;
+  bounce_nick_side_from_stamp(&l, &primary, now_stamp(ours->kind));
+  memset(&i, 0, sizeof i);
+  i.lastnick = theirs->lastnick;
+  i.sessid = theirs->sessid;
+  i.numeric = theirs->numeric;
+  bounce_nick_side_from_mark(&i, 1, now_stamp(theirs->kind));
+  return bounce_nick_action(bounce_nick_verdict_ex(&l, &i, primary, 0, 0, dlh_a),
+                            &i, &n);
+}
+
+static int composed_action_asymmetries(int dlh_a)
+{
+  static const char *ids[2] = { OLDER, NEWER };
+  static const char *nums[2] = { NA, NB };
+  static const time_t ts[2] = { 100, 200 };
+  struct now_side sides[6 * 8];
+  int k, s, n, t, c = 0, a, b, bad = 0;
+  for (k = 0; k < 6; k++)
+    for (s = 0; s < 2; s++)
+      for (n = 0; n < 2; n++)
+        for (t = 0; t < 2; t++) {
+          sides[c].kind = (enum now_kind)k;
+          sides[c].sessid = ids[s];
+          sides[c].numeric = nums[n];
+          sides[c].lastnick = ts[t];
+          c++;
+        }
+  for (a = 0; a < c; a++)
+    for (b = 0; b < c; b++) {
+      enum bounce_nick_action ab, ba;
+      if (!strcmp(sides[a].numeric, sides[b].numeric))
+        continue;
+      ab = composed_action(&sides[a], &sides[b], dlh_a);
+      ba = composed_action(&sides[b], &sides[a], dlh_a);
+      if ((ab == BNA_REFUSE) != action_yields(ba)
+          || (ab == BNA_CLASSIC) != (ba == BNA_CLASSIC)) {
+        bad++;
+        print_message("asymmetric action (D-LH %s): %s %s %s ts%ld -> %s, "
+                      "%s %s %s ts%ld -> %s\n", dlh_a ? "a" : "b",
+                      now_kind_name(sides[a].kind), sides[a].sessid,
+                      sides[a].numeric, (long)sides[a].lastnick,
+                      bounce_nick_action_name(ab),
+                      now_kind_name(sides[b].kind), sides[b].sessid,
+                      sides[b].numeric, (long)sides[b].lastnick,
+                      bounce_nick_action_name(ba));
+      }
+    }
+  return bad;
+}
+
+static void test_composed_actions_complement_dlh_b(void **state)
+{
+  (void)state;
+  /* For every pair of clients two servers can hold, including a held
+   * ghost with a live alias, one stamped live that is held now and an
+   * orphan ghost: one side refuses exactly when the other yields, and
+   * both are classic together. */
+  assert_int_equal(composed_action_asymmetries(0), 0);
+}
+
+static void test_composed_actions_complement_dlh_a(void **state)
+{
+  (void)state;
+  assert_int_equal(composed_action_asymmetries(1), 0);
+}
+
+static void test_names(void **state)
+{
+  (void)state;
+  assert_string_equal(bounce_nick_verdict_name(BNV_CLASSIC), "classic");
+  assert_string_equal(bounce_nick_verdict_name(BNV_KEEP_LOCAL), "keep");
+  assert_string_equal(bounce_nick_verdict_name(BNV_RETIRE_LOCAL), "retire");
+  assert_string_equal(bounce_nick_verdict_name(BNV_DROP_LOCAL_GHOST), "drop");
+  assert_string_equal(bounce_nick_verdict_name(BNV_DEMOTE_LOCAL), "demote");
+  assert_string_equal(bounce_nick_action_name(BNA_CLASSIC), "classic");
+  assert_string_equal(bounce_nick_action_name(BNA_REFUSE), "refuse");
+  assert_string_equal(bounce_nick_action_name(BNA_RETIRE), "retire");
+  assert_string_equal(bounce_nick_action_name(BNA_REBIND_LIVE), "rebind as live");
+  assert_string_equal(bounce_nick_action_name(BNA_REBIND_HELD), "rebind as held");
+  assert_string_equal(bounce_nick_action_name(BNA_SWAP), "swap");
+  assert_string_equal(bounce_nick_action_name(BNA_YIELD), "yield");
+}
+
+static void test_action_null_inputs(void **state)
+{
+  struct bounce_nick_side in = known(0, 1, OLDER, NB);
+  struct bounce_nick_now n = now_held();
+  (void)state;
+  assert_int_equal(bounce_nick_action(BNV_RETIRE_LOCAL, NULL, &n), BNA_CLASSIC);
+  assert_int_equal(bounce_nick_action(BNV_RETIRE_LOCAL, &in, NULL), BNA_CLASSIC);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1039,6 +1422,17 @@ int main(void)
     cmocka_unit_test(test_composed_dlh_b_outsider_meets_held_classic),
     cmocka_unit_test(test_composed_dlh_a_outsider_with_an_equal_id_never_drops),
     cmocka_unit_test(test_mixed_version_table),
+    cmocka_unit_test(test_stamp_reads_back_as_the_peer_reads_it),
+    cmocka_unit_test(test_action_classic_and_keep),
+    cmocka_unit_test(test_action_retire_by_what_ours_is_now),
+    cmocka_unit_test(test_action_drop_by_incoming_state),
+    cmocka_unit_test(test_action_never_demotes_a_held_ghost),
+    cmocka_unit_test(test_action_live_primary_demote_is_the_merge),
+    cmocka_unit_test(test_action_never_ends_a_live_device),
+    cmocka_unit_test(test_composed_actions_complement_dlh_b),
+    cmocka_unit_test(test_composed_actions_complement_dlh_a),
+    cmocka_unit_test(test_names),
+    cmocka_unit_test(test_action_null_inputs),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

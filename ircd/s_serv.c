@@ -347,6 +347,14 @@ int server_finish_burst(struct Client *cptr)
 {
   struct Client *acptr;
   struct SLink *lp;
+  /* The burst can run while another link's line is handled (a gate
+   * released at a peer's EB, an attach or a revive).  None of its lines
+   * is that line's: while it runs no link's stash is the current line's,
+   * so the tags a burst line carries are its own (the hint below), never
+   * the handled line's msgid, time, session id or hold mark. */
+  struct Client *inbound = sendcmdto_inbound_link();
+
+  sendcmdto_set_inbound_link(NULL);
 
   for (acptr = &me; acptr; acptr = cli_prev(acptr))
   {
@@ -377,6 +385,7 @@ int server_finish_burst(struct Client *cptr)
     {
       char xxx_buf[25];
       char *s = umode_str(acptr);
+      char held_mark;
 
       /* Legacy-face suppression: if cptr is a non-IRCv3-aware peer and
        * acptr is bouncer-bound to a session that has already had a face
@@ -420,25 +429,18 @@ int server_finish_burst(struct Client *cptr)
        *
        * The hint is cleared right after the send, not left to
        * format_s2s_tags_with_client, which consumes it only when it
-       * uses it.  For an acptr two or more hops away the tag source is
-       * the link toward it, and while that link's line is being
-       * handled (this burst can run inside a peer's EB line, through
-       * bounce_release_idle_gates) format prefers the link's own ,S,
-       * if it has one, and leaves the hint armed.  And the burst also
-       * runs from the burst-gate timer and from callbacks, where no
-       * per-line reset follows.  A leftover hint would ride the next
-       * tagged line (a later burst line, the EB, any timer send) with
-       * this user's sessid.
+       * uses it.  The burst runs from the burst-gate timer and from
+       * callbacks, where no per-line reset follows: a leftover hint would
+       * ride the next tagged line (a later burst line, the EB, any timer
+       * send) with this user's sessid.  (No link's stash competes with
+       * it here: the burst runs with no inbound line, above.)
        *
        * The hint also stages the hold mark (,H) of a user of ours: one
        * computation, so ",S names a session" and the mark agree.  It
        * stages none for a user of another server: only its home server
-       * stamps one, and what it stamped then is not known now.  (A mark
-       * in the link's stash rides only beside that line's own ,S, under
-       * the precedence above.)  The mark is cleared with the hint, for
-       * the same reasons. */
-      if (IsIRCv3Aware(cptr))
-        bounce_set_n_sessid_hint(acptr);
+       * stamps one, and what it stamped then is not known now.  The mark
+       * is cleared with the hint, for the same reasons. */
+      held_mark = IsIRCv3Aware(cptr) ? bounce_set_n_sessid_hint(acptr) : 0;
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
 		    "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
 		    cli_name(acptr), cli_hopcount(acptr) + 1, cli_lastnick(acptr),
@@ -448,6 +450,12 @@ int server_finish_burst(struct Client *cptr)
 		    NumNick(acptr), cli_info(acptr));
       sendcmdto_set_s2s_sessid(NULL);
       sendcmdto_set_s2s_held(0);
+      /* The mark this link's server will decide from, should one of its
+       * own clients meet ours on this nick before its burst ends: kept
+       * so we decide from the same snapshot (a socket that dies, or an
+       * alias that leaves, in the meantime changes nothing). */
+      if (held_mark && bounce_hold_marks_trusted(cptr))
+        bounce_note_burst_stamp(acptr, cptr, held_mark);
 
       if (cli_user(acptr) && !EmptyString(cli_user(acptr)->swhois))
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,
@@ -568,6 +576,7 @@ int server_finish_burst(struct Client *cptr)
    * The trailing EA here is the correction that lands after peer's
    * BURST_ACK is set, clearing the ! marker in /MAP and /STATS u. */
   sendcmdto_one(&me, CMD_END_OF_BURST_ACK, cptr, "");
+  sendcmdto_set_inbound_link(inbound);
   return 0;
 }
 

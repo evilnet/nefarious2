@@ -482,6 +482,8 @@ struct Connection
 #define S2S_ML_BUFSIZE 32  /**< ML framing: one flag byte + a multiline batch reference (senders use <=15) + NUL */
   char                con_s2s_ml[S2S_ML_BUFSIZE]; /**< S2S compact-tag ,M<flag><batchref> segment (multiline framing, audit 0.1); empty when absent */
   char                con_s2s_held;  /**< S2S compact-tag ,H<x> segment: the bouncer hold mark of the N's client (BOUNCE_HOLD_MARK_*), 0 when absent or invalid */
+  struct Client*      con_burst_stamp_link; /**< Local client: the server link our last burst N for it went to with a hold mark (compared only, never dereferenced) */
+  char                con_burst_stamp; /**< Local client: the hold mark (BOUNCE_HOLD_MARK_*) that N carried, 0 when none */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
@@ -714,6 +716,10 @@ struct Client {
 #define cli_s2s_ml(cli)          con_s2s_ml(cli_connect(cli))
 /** Get the bouncer hold mark from compact-tag ,H segment of incoming S2S message (0 = none) */
 #define cli_s2s_held(cli)        con_s2s_held(cli_connect(cli))
+/** Get the link our last burst N for a local client carried a hold mark to */
+#define cli_burst_stamp_link(cli) con_burst_stamp_link(cli_connect(cli))
+/** Get the hold mark that burst N carried (0 = none) */
+#define cli_burst_stamp(cli)     con_burst_stamp(cli_connect(cli))
 /** Get per-Client session ID (UUID v7 base64 — generated at make_client, adopted by bouncer on resume). */
 #define cli_session_id(cli)      ((cli)->cli_session_id)
 /** Get S2S batch ID from server */
@@ -1049,6 +1055,10 @@ struct Client {
 #define con_s2s_ml(con)          ((con)->con_s2s_ml)
 /** Get the bouncer hold mark from compact-tag ,H segment of incoming S2S message. */
 #define con_s2s_held(con)        ((con)->con_s2s_held)
+/** Get the link our last burst N for this local client carried a hold mark to. */
+#define con_burst_stamp_link(con) ((con)->con_burst_stamp_link)
+/** Get the hold mark that burst N carried. */
+#define con_burst_stamp(con)     ((con)->con_burst_stamp)
 /** Get the S2S batch ID from server. */
 #define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
 /** Get the S2S batch type from server. */

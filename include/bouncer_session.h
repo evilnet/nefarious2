@@ -817,6 +817,12 @@ extern int bounce_convergence_pending(struct Client *exclude_peer);
  * over, rather than running the 1-second timer fallback to expiry. */
 extern void bounce_release_idle_gates(void);
 
+/** Run bounce_release_idle_gates() at the next timer run, not now.  For a
+ * convergence that completes while a server line is handled (a same-nick
+ * decision in m_nick): a released gate runs server_finish_burst, whose N
+ * lines must not read the line's tags.  Idempotent until it runs. */
+extern void bounce_schedule_gate_release(void);
+
 /** Does a link that can carry a BS C (an IRCv3-aware link) have unread
  * inbound bytes (kernel recvbuf or parsed-but-unprocessed dbuf)?  Returns
  * the first such link, or NULL.  Used by bounce_auto_resume to avoid
@@ -1037,6 +1043,24 @@ extern void bounce_destroy(struct BouncerSession *session);
 extern void bounce_kill_session(struct BouncerSession *session,
                                 const char *comment);
 
+/** Retire a held session of ours: end it (bounce_kill_session: its
+ * aliases, BS X toward the aware links) and then exit its ghost (BX X
+ * toward the aware links, a Q toward the legacy ones).  The caller makes
+ * sure nothing of it is live (bounce_session_held): its aliases would be
+ * exited.  BS C's convergence and a same-nick meeting at N time both
+ * retire through here.
+ *
+ * @param[in] s      The session; NULL for a ghost no session names (only
+ *                   the ghost exits).  Freed on return.
+ * @param[in] ghost  The held ghost; NULL takes s's primary slot.
+ * @param[in] link   The link being handled (exit_client's cptr).
+ * @param[in] reason The exit reason; NULL or empty: "Bouncer session moved".
+ */
+extern void bounce_retire_held_session(struct BouncerSession *s,
+                                       struct Client *ghost,
+                                       struct Client *link,
+                                       const char *reason);
+
 /** Set the S2S sessid override for an outgoing N introduction so that
  * bouncer-aware peers receive the session-identity hint via the
  * compact-tag ,S segment (per redesign A.2).
@@ -1050,8 +1074,10 @@ extern void bounce_kill_session(struct BouncerSession *session,
  * during the next sendcmdto_* call.
  *
  * @param[in] cptr Client about to be N-introduced.
+ * @return The hold mark staged beside the id (BOUNCE_HOLD_MARK_*), or 0
+ *         when none is (not our client, no account, no id).
  */
-extern void bounce_set_n_sessid_hint(struct Client *cptr);
+extern char bounce_set_n_sessid_hint(struct Client *cptr);
 
 /** May the hold mark (compact-tag ,H) on an N introduced by @a home be
  * trusted?  Yes when every server on the path from @a home to us
@@ -1070,6 +1096,18 @@ extern void bounce_set_n_sessid_hint(struct Client *cptr);
  * @return 1 if trusted, else 0.
  */
 extern int bounce_hold_marks_trusted(struct Client *home);
+
+/** Record that our burst N for our client @a c went to @a link carrying
+ * hold mark @a mark (a link that trusts our marks). */
+extern void bounce_note_burst_stamp(struct Client *c, struct Client *link,
+                                    char mark);
+
+/** The hold mark our burst N for our client @a c carried to @a link,
+ * while that link is still bursting to us and was not gated: the facts
+ * its server reads about @a c for a same-nick verdict on the N it sends
+ * us.  0 when not known (no such N, another link's, a gated link, the
+ * link's burst over): the caller reads @a c as it is now. */
+extern char bounce_burst_stamp_for(struct Client *c, struct Client *link);
 
 /** Generate a UUID v7 session ID and write its 22-char base64 form
  * (followed by nul) to @a buf.  Exposed so list.c can mint a per-Client
@@ -1356,6 +1394,59 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                                  const char *info,
                                                  time_t incoming_acc_ts,
                                                  const char *incoming_kc_id);
+
+/** A held ghost of ours gives its place to a client of the same session
+ * another server introduces (a same-nick verdict's drop), reusing the
+ * ghost's Client as the rebind does (no QUIT, no JOIN; one BX P per
+ * legacy link that may know the face; the counters move to the
+ * introducing server's domain).
+ *
+ * @param[in] session        The session the decision read; its primary
+ *                           slot must be @a ghost.
+ * @param[in] ghost          Our held ghost (MyConnect).
+ * @param[in] server         The introducing server.
+ * @param[in] new_numeric    The introduced client's full YYXXX.
+ * @param[in] incoming_kc_id The Keycloak id the N carries ("" if none).
+ * @param[in] incoming_held  1: the introduced client is the session's
+ *                           held ghost there; our record becomes a held
+ *                           replica of it (no hold timer here).  0: it is
+ *                           the session's live primary; the session goes
+ *                           active.
+ * @return 0 on success, -1 when the facts do not hold (nothing changed).
+ */
+extern int bounce_drop_held_ghost(struct BouncerSession *session,
+                                  struct Client *ghost, struct Client *server,
+                                  const char *new_numeric, time_t new_lastnick,
+                                  const char *username, const char *host,
+                                  const struct irc_in_addr *new_ip,
+                                  const char *info, const char *incoming_kc_id,
+                                  int incoming_held);
+
+/** A held ghost of ours whose session the incoming live primary takes
+ * over (a same-nick verdict that yields for a held ghost: it has no
+ * socket to keep as an alias).  The caller installed @a new_primary from
+ * the incoming N, withheld from the legacy links.  Here: the legacy links
+ * swap the ghost's face to it (BX P); the session takes the incoming
+ * primary's session id (or, when we already have a record of that
+ * session, its connections join that record and ours ends with BS X);
+ * its primary slot is @a new_primary and it is active; each live alias
+ * follows @a new_primary and a local one is announced by BX C; the ghost
+ * leaves without a Q (BX X toward the aware links).
+ *
+ * @param[in] session         The session the decision read; its primary
+ *                            slot must be @a ghost.
+ * @param[in] ghost           Our held ghost.
+ * @param[in] new_primary     The incoming primary, installed.
+ * @param[in] link            The link the N came on.
+ * @param[in] incoming_sessid The session id the N carried (,S); NULL or
+ *                            empty keeps ours.
+ * @return 0 on success, -1 when the facts do not hold (nothing changed).
+ */
+extern int bounce_yield_held_ghost(struct BouncerSession *session,
+                                   struct Client *ghost,
+                                   struct Client *new_primary,
+                                   struct Client *link,
+                                   const char *incoming_sessid);
 
 /** Demote a live local primary into an alias of an incoming remote
  * primary.  Used by m_nick during net-rejoin to merge two

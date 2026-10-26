@@ -157,3 +157,116 @@ void bounce_nick_side_from_mark(struct bounce_nick_side *side, int trusted,
   side->held = side->state_known && mark == BOUNCE_HOLD_MARK_HELD;
   side->non_member = side->state_known && mark == BOUNCE_HOLD_MARK_OUTSIDER;
 }
+
+int bounce_nick_side_from_stamp(struct bounce_nick_side *side, int *primary,
+                                char stamp)
+{
+  if (!side || !bounce_hold_mark_valid(stamp))
+    return 0;
+  side->state_known = 1;
+  side->non_member = 0;
+  side->held = stamp == BOUNCE_HOLD_MARK_HELD;
+  /* A held ghost holds its session's primary slot as well. */
+  if (primary)
+    *primary = stamp != BOUNCE_HOLD_MARK_OUTSIDER;
+  return 1;
+}
+
+/* The incoming client is a live member of a session (its primary): what
+ * a held ghost's live connections can follow. */
+static int incoming_live_member(const struct bounce_nick_side *in)
+{
+  return in->state_known && !in->held && !in->non_member;
+}
+
+/* Our held ghost yields to the incoming live primary, its session's live
+ * connections following, when it may. */
+static enum bounce_nick_action held_yields(const struct bounce_nick_side *in,
+                                           const struct bounce_nick_now *now)
+{
+  return now->has_session && now->is_primary && now->yield_ok
+         && incoming_live_member(in) ? BNA_YIELD : BNA_CLASSIC;
+}
+
+enum bounce_nick_action
+bounce_nick_action(enum bounce_nick_verdict verdict,
+                   const struct bounce_nick_side *incoming,
+                   const struct bounce_nick_now *now)
+{
+  if (!incoming || !now)
+    return BNA_CLASSIC;
+
+  switch (verdict) {
+  case BNV_CLASSIC:
+    return BNA_CLASSIC;
+
+  case BNV_KEEP_LOCAL:
+    if (!now->held_ghost)
+      return bounce_merge_choose(0, now->demote_bar) == BOUNCE_MERGE_REFUSE
+             ? BNA_REFUSE : BNA_CLASSIC;
+    return BNA_REFUSE;
+
+  case BNV_RETIRE_LOCAL:
+    /* The verdict read a held ghost; a live client is not retired. */
+    if (!now->held_ghost)
+      return BNA_CLASSIC;
+    /* Only the session's own ghost ends the session.  A ghost no session
+     * names just exits. */
+    if (now->has_session && !now->is_primary)
+      return BNA_CLASSIC;
+    /* Ending a session with a live alias would exit that device. */
+    if (now->live_alias)
+      return held_yields(incoming, now);
+    return BNA_RETIRE;
+
+  case BNV_DROP_LOCAL_GHOST:
+    if (!now->held_ghost)
+      return BNA_CLASSIC;
+    /* Only a client whose state is known, and never a login in no
+     * session, takes our ghost's place. */
+    if (!incoming->state_known || incoming->non_member)
+      return BNA_CLASSIC;
+    /* Never a rebind without the session: a ghost no session names
+     * leaves, as a retire of it does; one the session only lists on its
+     * roster is not its to give. */
+    if (!now->has_session)
+      return BNA_RETIRE;
+    if (!now->is_primary)
+      return BNA_CLASSIC;
+    return incoming->held ? BNA_REBIND_HELD : BNA_REBIND_LIVE;
+
+  case BNV_DEMOTE_LOCAL:
+    /* A held ghost has no socket to keep as an alias: it yields. */
+    if (now->held_ghost)
+      return held_yields(incoming, now);
+    return bounce_merge_choose(1, now->demote_bar) == BOUNCE_MERGE_SWAP
+           ? BNA_SWAP : BNA_CLASSIC;
+  }
+  return BNA_CLASSIC;
+}
+
+const char *bounce_nick_verdict_name(enum bounce_nick_verdict v)
+{
+  switch (v) {
+  case BNV_CLASSIC:          return "classic";
+  case BNV_KEEP_LOCAL:       return "keep";
+  case BNV_RETIRE_LOCAL:     return "retire";
+  case BNV_DROP_LOCAL_GHOST: return "drop";
+  case BNV_DEMOTE_LOCAL:     return "demote";
+  }
+  return "?";
+}
+
+const char *bounce_nick_action_name(enum bounce_nick_action a)
+{
+  switch (a) {
+  case BNA_CLASSIC:     return "classic";
+  case BNA_REFUSE:      return "refuse";
+  case BNA_RETIRE:      return "retire";
+  case BNA_REBIND_LIVE: return "rebind as live";
+  case BNA_REBIND_HELD: return "rebind as held";
+  case BNA_SWAP:        return "swap";
+  case BNA_YIELD:       return "yield";
+  }
+  return "?";
+}

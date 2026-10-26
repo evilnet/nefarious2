@@ -434,8 +434,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
   /* The hold mark an introduction carries (,H) and whether the path from
-   * its home server can be trusted to carry one.  Logged only: nothing
-   * below decides on it. */
+   * its home server can be trusted to carry one; a same-nick meeting of
+   * one account below decides on it. */
   if (IsServer(sptr) && sendcmdto_stash_is_current(cptr) && cli_s2s_held(cptr))
     Debug((DEBUG_INFO, "N %s (%s) from %s: hold mark %c, %s", nick,
            parv[parc - 2], cli_name(sptr), cli_s2s_held(cptr),
@@ -521,16 +521,36 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  /* The incoming client's side of a meeting of two clients of one
+   * account: its hold mark (,H) and session id (,S), read only from the
+   * line being handled, and the mark's state only when every server from
+   * its home to us announces SERVER flag H (bounce_hold_marks_trusted;
+   * else the state is unknown, as before the mark existed). */
+  struct bounce_nick_side theirs;
+  memset(&theirs, 0, sizeof theirs);
+  if (IsServer(sptr) && incoming_acct) {
+    int stash = sendcmdto_stash_is_current(cptr);
+    bounce_nick_side_from_mark(&theirs, bounce_hold_marks_trusted(sptr),
+                               stash ? cli_s2s_held(cptr) : 0);
+    theirs.lastnick = lastnick;
+    theirs.sessid   = stash ? cli_s2s_sessid(cptr) : NULL;
+    theirs.numeric  = parv[parc - 2];
+  }
+
   /* Bouncer ghost rebind: incoming primary takes the place of our
    * held ghost (no kill, no normal N-forward -- this N resolves
    * locally instead of being relayed onward).  A legacy link that
    * may know the ghost's face still hears about it, with one BX P
    * each (bounce_legacy_face_change, inside the rebind).  Only when
-   * acptr is a BouncerHold ghost on this server.  See
-   * bouncer/m_nick.c history. */
+   * acptr is a BouncerHold ghost on this server, and only when the
+   * incoming client's state is unknown: a known state is decided by the
+   * verdict below, which both servers compute (a held or outside
+   * incoming client never takes our ghost's place, and one of our
+   * session takes it only as the verdict's drop).  See bouncer/m_nick.c
+   * history. */
   if (IsServer(sptr) && IsBouncerHold(acptr) && parc > 7
       && cli_user(acptr) && cli_user(acptr)->account[0]
-      && incoming_acct
+      && incoming_acct && !theirs.state_known
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
     struct irc_in_addr ip;
     int rebind_rc;
@@ -553,78 +573,75 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * was the BX R-winner short-circuit, retired in Phase 5.) */
   }
 
-  /* Live-primary split-merge: acptr is a live local primary (not a
-   * hold ghost), peer is introducing a different primary for the
-   * same account.
+  /* Same-nick convergence of two clients of one account (redesign D.1,
+   * D.2): a client of ours -- live, or a held ghost -- and the one an
+   * IRCv3-aware peer introduces.  Both servers see the same pair of N
+   * lines and compute bounce_nick_verdict (bouncer_converge.h) from the
+   * same facts, so one keeps exactly when the other yields; the
+   * post-burst reconcile uses the same verdict.  No coordination
+   * protocol.  Only a client of ours is decided here: a remote acptr is
+   * its own server's to decide.
    *
-   * Per redesign D.1 + D.2: convergence runs at-N-time, deterministic.
-   * Both sides see the same incoming N (parv[3] = lastnick TS of the
-   * peer's primary) and compute the same answer locally with
-   * bounce_nick_verdict (bouncer_converge.h), the verdict the post-burst
-   * reconcile also uses.  For two live session primaries:
+   * Our side is the snapshot our own N to this link carried (its hold
+   * mark), while the link's burst lasts: the peer decides from that, so
+   * we do too, even if our client changed since (a socket that died, an
+   * alias that left).  Otherwise our client as it is now.  The incoming
+   * side is its mark (unknown without one).  Then the action is mapped
+   * onto our client as it is now (bounce_nick_action): it never ends a
+   * live device and never demotes a client with no socket.
    *
-   *   1. Older nick timestamp wins (stability — the established
-   *      connection stays primary).  Lower lastnick TS = older.
-   *   2. Equal: lex on the full numeric (deterministic on both sides —
-   *      the symmetric numeric pair compares the same way from either
-   *      end).
+   *  - keep: the incoming N is refused silently; the peer yields.
+   *  - retire: our held session ends -- its ghost leaves with a Q toward
+   *    the legacy links (BX X toward the aware ones) -- before the
+   *    incoming N is accepted and relayed (to the legacy links too).
+   *  - drop: our session's ghost becomes the incoming client of the same
+   *    session, its Client reused (no QUIT, no JOIN; one BX P per legacy
+   *    link): its live primary (the session goes active) or its held
+   *    ghost there (our record becomes a held replica).
+   *  - demote: our live primary becomes the incoming one's alias (the
+   *    merge below); our held ghost, which has no socket to keep, yields
+   *    instead: it leaves, and its session's live connections follow the
+   *    incoming primary under its session id.
+   *  - classic: the collision rules below.
    *
-   * Loser side flips its primary to alias of the winner.  Winner side
-   * refuses the incoming N (set_nick_name not called → no propagation).
-   * No coordination protocol — same inputs + same algorithm → same
-   * answer on both sides.  Only a client of ours merges: a remote acptr
-   * is its own server's to decide.
-   *
-   * Legacy peer gate: the symmetric-demote contract only holds if the
-   * introducing peer also runs D.2.  Against a legacy peer (pre-IRCv3-
-   * aware build, no `v` SERVER flag), our "we win" branch returns 0
-   * silently, but the peer has no equivalent code to demote its primary
-   * on its end — so the same-account collision sits unresolved, each
-   * side keeping a primary the other doesn't know about, until the next
-   * link bounce or oper KILL.  When sptr is a legacy server, skip D.2
-   * entirely and fall through to classic nick-collision semantics
-   * (TS-based, both sides KILL the loser). */
+   * Legacy peer gate: the symmetric contract only holds if the
+   * introducing peer also runs this.  Against a legacy peer (no `v`
+   * SERVER flag) our "we win" would refuse silently while the peer has
+   * no equivalent code -- so skip it and let the classic rules decide
+   * (TS-based, both sides KILL the loser).  A held ghost of ours meeting
+   * a client nobody announced keeps today's rules too (the rebind above,
+   * then classic): the verdict reads it as it always did. */
   if (IsServer(sptr) && incoming_acct && IsIRCv3Aware(sptr)
-      && MyConnect(acptr)
-      && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr)
-      && IsAccount(acptr) && IsUser(acptr)
+      && MyConnect(acptr) && IsUser(acptr)
+      && !IsBouncerAlias(acptr) && IsAccount(acptr)
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
+    int held_now = 0, primary_now = 0, ours_primary = 0, snapshot;
     /* The one session object this decision reads and acts on: the
-     * session acptr is the primary of (the one its hold mark and session
-     * id were stamped from); none when two sessions name it. */
-    struct BouncerSession *bsess = bounce_session_of_primary(acptr);
-    /* Can our primary become an alias of the incoming one?  Decided once,
-     * here, before anything is sent: the demote and its finish make the
-     * same check at their own step, so a "yes" here means they run. */
+     * session acptr is the primary or held ghost of (the one its hold
+     * mark and session id were stamped from); none when two sessions
+     * name it. */
+    struct BouncerSession *bsess =
+      bounce_nick_side_lookup(acptr, &held_now, &primary_now);
+    /* Can our live primary become an alias of the incoming one?  Decided
+     * once, here, before anything is sent: the demote and its finish make
+     * the same check at their own step, so a "yes" here means they run. */
     enum bounce_demote_bar bar =
       bsess ? bounce_demote_eligibility(BOUNCE_DEMOTE_PLAN, acptr, bsess,
                                         sptr, incoming_acct, incoming_kc_id)
             : BOUNCE_DEMOTE_NO_SESSION;
     /* Different Keycloak users, for the verdict: our session's id, else
-     * acptr's own when it is in no session -- the check a held ghost's
-     * server makes against the same introduction, so both sides read the
-     * same two ids.  For a session primary it is the eligibility bar's
-     * own check. */
+     * acptr's own when it is in no session -- the check the peer makes
+     * against our N, so both sides read the same two ids. */
     int kc_conflict =
       bounce_side_kc_conflict(bsess ? bounce_session_kc_id(bsess) : NULL,
                               cli_user(acptr)->kc_id, incoming_kc_id);
-    struct bounce_nick_side ours, theirs;
+    struct bounce_nick_side ours;
+    struct bounce_nick_now now;
     char our_full[6];
     enum bounce_nick_verdict verdict;
+    enum bounce_nick_action action;
 
-    /* Sessions of different Keycloak users (the account was recreated
-     * while the network was split) are never merged (user, 2026-10-23):
-     * the classic collision rules below decide.  Both sides compare the
-     * same two ids, so both skip the merge.  The verdict is told so and
-     * answers classic; the eligibility check is where the ids are read. */
-    if (bar == BOUNCE_DEMOTE_KC_CONFLICT)
-      sendto_opmask_butone(0, SNO_OLDSNO,
-                           "Bouncer split-merge: not merging %s on %C into %C "
-                           "(account %s): Keycloak ids differ",
-                           parv[parc - 2], cptr, acptr, incoming_acct);
-
-    /* Our side.  A held ghost never gets here (the rebind above handles
-     * it).  The nick timestamps compared are cli_lastnick and the wire's
+    /* The nick timestamps compared are cli_lastnick and the wire's
      * lastnick (parv[3]), never cli_firsttime: cli_lastnick is the field
      * both sides advertise to each other in the N, so the comparison is
      * like-for-like.  The full numeric is our client's home prefix (ours,
@@ -632,34 +649,78 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
                   cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
     memset(&ours, 0, sizeof ours);
-    ours.held        = 0;
     ours.state_known = 1;
     ours.lastnick    = cli_lastnick(acptr);
     ours.sessid      = bsess ? bsess->hs_sessid : cli_session_id(acptr);
     ours.numeric     = our_full;
-    /* The incoming side.  No N announces a hold state.  Nor can we tell
-     * a login in no session from a member of a session the peer made
-     * while split: every N carries a session id (a login in no session
-     * carries its own), and the peer's burst sends its sessions after
-     * all its users. */
-    memset(&theirs, 0, sizeof theirs);
-    theirs.state_known = 0;
-    theirs.non_member  = 0;
-    theirs.lastnick    = (time_t)atoi(parv[3]);
-    theirs.sessid      = sendcmdto_stash_is_current(cptr)
-                         ? cli_s2s_sessid(cptr) : NULL;
-    theirs.numeric     = parv[parc - 2];
-    verdict = bounce_nick_verdict(&ours, &theirs,
-                                  bsess && bsess->hs_client == acptr,
-                                  kc_conflict, IsBurstGated(cptr));
+    snapshot = bounce_nick_side_from_stamp(&ours, &ours_primary,
+                                           bounce_burst_stamp_for(acptr, cptr));
+    if (!snapshot) {
+      ours.held    = held_now;
+      ours_primary = primary_now;
+    }
 
-    /* Keep or demote: the merge, if our primary can become an alias.
-     * Classic (no session with acptr as its primary, a Keycloak-id
-     * veto): no merge.  Retire and drop end a held ghost of ours, which
-     * never gets here. */
-    if (verdict == BNV_KEEP_LOCAL || verdict == BNV_DEMOTE_LOCAL) {
-      switch (bounce_merge_choose(verdict == BNV_DEMOTE_LOCAL, bar)) {
-      case BOUNCE_MERGE_SWAP: {
+    if (!IsBouncerHold(acptr) || theirs.state_known || ours.held) {
+      verdict = bounce_nick_verdict(&ours, &theirs, ours_primary,
+                                    kc_conflict, IsBurstGated(cptr));
+
+      memset(&now, 0, sizeof now);
+      now.held_ghost  = IsBouncerHold(acptr);
+      now.has_session = bsess != NULL;
+      now.is_primary  = primary_now;
+      now.live_alias  = bounce_session_has_live_alias(bsess);
+      now.yield_ok    = !HasFlag(acptr, FLAG_KILLED);
+      now.demote_bar  = bar;
+      action = bounce_nick_action(verdict, &theirs, &now);
+
+      /* One line per decision: the verdict, what it does here, both
+       * numerics and the account. */
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Bouncer same-nick: %s (ours, %s%s) meets %s (%s) "
+                           "from %C, account %s: %s, %s%s",
+                           our_full,
+                           ours.held ? "held" : ours_primary ? "primary"
+                                                             : "outside",
+                           snapshot ? " as stamped" : "",
+                           parv[parc - 2],
+                           !theirs.state_known ? "unknown"
+                             : theirs.held ? "held"
+                             : theirs.non_member ? "outside" : "primary",
+                           cptr, incoming_acct,
+                           bounce_nick_verdict_name(verdict),
+                           bounce_nick_action_name(action),
+                           kc_conflict ? " (Keycloak ids differ)" : "");
+
+      switch (action) {
+      case BNA_REFUSE:
+        /* We keep: refuse the incoming N.  The peer reaches the
+         * complementary verdict and yields on its side. */
+        return 0;
+
+      case BNA_RETIRE:
+        /* Our held session ends, and its ghost leaves first: a legacy
+         * link hears its Q before it hears the incoming N, which
+         * set_nick_name relays.  A gate this restored session held up is
+         * released after this line, never inside it. */
+        bounce_retire_held_session(bsess, acptr, cptr,
+                                   "Bouncer session moved");
+        bounce_schedule_gate_release();
+        return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+
+      case BNA_REBIND_LIVE:
+      case BNA_REBIND_HELD: {
+        struct irc_in_addr ip;
+        base64toip(parv[parc - 3], &ip);
+        if (0 == bounce_drop_held_ghost(bsess, acptr, sptr, parv[parc - 2],
+                                        lastnick, parv[4], parv[5], &ip,
+                                        parv[parc - 1], incoming_kc_id,
+                                        action == BNA_REBIND_HELD))
+          return 0;
+        /* The facts did not hold after all: the classic rules decide. */
+        break;
+      }
+
+      case BNA_SWAP: {
         /* We lose and our primary can become the incoming one's alias.
          * Through the state-transition funnel (Phase 7): one call
          * combines demote + finish into one transition with invariant
@@ -688,44 +749,41 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           p.demoted_alias = acptr;
           p.peer_primary  = new_primary;
           p.legacy_done   = 1;
-          if (0 == bounce_session_transition(bsess, BST_DEMOTE_TO_ALIAS, &p)) {
-            sendto_opmask_butone(0, SNO_OLDSNO,
-                                 "Bouncer split-merge: demoted local "
-                                 "primary %C to alias of %s on %C "
-                                 "(account %s, D.2 tiebreaker)",
-                                 acptr, parv[parc - 2], cptr, incoming_acct);
-          }
+          bounce_session_transition(bsess, BST_DEMOTE_TO_ALIAS, &p);
         }
         return rc;
       }
-      case BOUNCE_MERGE_REFUSE:
-        /* We win — refuse incoming silently.  Peer will reach the
-         * symmetric verdict and demote on their side. */
-        sendto_opmask_butone(0, SNO_OLDSNO,
-                             "Bouncer split-merge: refusing incoming "
-                             "%s on %C — local %C wins (account %s, "
-                             "D.2 tiebreaker, our_first=%ld their=%ld)",
-                             parv[parc - 2], cptr, acptr, incoming_acct,
-                             (long)ours.lastnick, (long)theirs.lastnick);
-        return 0;
-      case BOUNCE_MERGE_CLASSIC:
-        /* We lose but our primary cannot become an alias (it is on its
-         * way out, say): it stays a live primary under this nick, so the
-         * incoming N is not installed beside it.  The classic rules
-         * below decide, as for a Keycloak-id veto. */
-        sendto_opmask_butone(0, SNO_OLDSNO,
-                             "Bouncer split-merge: %C cannot become an "
-                             "alias of %s on %C (account %s): %s; classic "
-                             "collision rules decide",
-                             acptr, parv[parc - 2], cptr, incoming_acct,
-                             bounce_demote_bar_name(bar));
+
+      case BNA_YIELD: {
+        /* Our held ghost gives the session to the incoming primary.  As
+         * for the merge: the incoming N is installed for the IRCv3-aware
+         * links only, and the legacy links renumber the ghost's face to
+         * it (inside the yield).  The session id is copied off the line
+         * first: it is the link's stash. */
+        int rc;
+        struct Client *new_primary;
+        char their_sessid[S2S_SESSID_BUFSIZE];
+        ircd_strncpy(their_sessid, theirs.sessid ? theirs.sessid : "",
+                     sizeof(their_sessid));
+        set_nick_relay_withhold_legacy();
+        rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
+        clear_nick_relay_withhold_legacy();
+        new_primary = findNUser(parv[parc - 2]);
+        if (new_primary)
+          bounce_yield_held_ghost(bsess, acptr, new_primary, cptr,
+                                  their_sessid);
+        return rc;
+      }
+
+      case BNA_CLASSIC:
         break;
       }
     }
-    /* No merge: no session with acptr as its primary, a Keycloak-id veto,
-     * or a lost merge whose demote cannot run.  The standard collision
-     * logic below decides: for one account the older nick wins (the
-     * same-account override), and an equal nick TS loses both. */
+    /* No merge: a meeting the verdict leaves to the classic rules, a
+     * Keycloak-id veto, or a yield that cannot run.  The standard
+     * collision logic below decides: for one account the older nick
+     * wins (the same-account override), and an equal nick TS loses
+     * both. */
   }
   /*
    * If the older one is "non-person", the new entry is just
