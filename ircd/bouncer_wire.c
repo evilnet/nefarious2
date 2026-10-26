@@ -187,3 +187,8 @@ int bounce_same_session_yields(int ours_holding, int ours_live,
   return ours_holding && !ours_live && theirs_active && their_primary
          && !kc_conflict;
 }
+
+int bounce_bsx_keeps(int has_primary, int primary_ours, int primary_killed)
+{
+  return has_primary && primary_ours && !primary_killed;
+}

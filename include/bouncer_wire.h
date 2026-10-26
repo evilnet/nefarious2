@@ -365,4 +365,23 @@ extern int bounce_same_session_yields(int ours_holding, int ours_live,
                                       int theirs_active, int their_primary,
                                       int kc_conflict);
 
+/** Does a BS X naming one of our records leave it in place?
+ *
+ * Only the server holding a session ends it.  A record whose primary is a
+ * client of ours -- live, or a held ghost -- is held here: the BS X ends
+ * the sender's own copy (its held copy's hold ran out, a client of a
+ * session sharing the id lost a collision, a member there ended it) and
+ * nothing of ours.  Our KILL path, our hold timer and our own users' commands
+ * end it.  A primary being killed is on its way out: its exit ends the
+ * session anyway.
+ *
+ * @param[in] has_primary    Nonzero if the record has a primary (hs_client).
+ * @param[in] primary_ours   Nonzero if it is a user of ours (a live client
+ *                           or a held ghost, not an alias).
+ * @param[in] primary_killed Nonzero if it carries FLAG_KILLED.
+ * @return 1 to keep the record (and not relay the BS X), else 0.
+ */
+extern int bounce_bsx_keeps(int has_primary, int primary_ours,
+                            int primary_killed);
+
 #endif /* INCLUDED_bouncer_wire_h */

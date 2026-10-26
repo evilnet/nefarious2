@@ -768,6 +768,14 @@ static void bounce_hold_expire(struct Event *ev)
               MyConnect(ghost) ? ""
                 : (bounce_primary_server(session)
                      ? cli_name(bounce_primary_server(session)) : "?"));
+    /* A live primary of ours under a record that says HOLDING: the record
+     * is what is wrong.  It is active again, so the primary's next
+     * disconnect holds it (only an active session's primary is held). */
+    if (MyConnect(ghost) && IsUser(ghost) && !IsBouncerAlias(ghost)) {
+      session->hs_state = BOUNCE_ACTIVE;
+      session->hs_disconnect_time = 0;
+      session->hs_last_active = CurrentTime;
+    }
     return;
   case BOUNCE_HOLD_DROP:
     /* No primary anywhere we know of and nothing to promote: our record
@@ -4801,6 +4809,15 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                                  ? ours : NULL;
           int i;
 
+          /* The primary slot takes the peer's primary first (account and
+           * Keycloak checked): a refused install yields nothing. */
+          if (!bounce_hs_client_assign_checked(existing, peer, "BS C")) {
+            log_write(LS_USER, L_INFO, 0,
+                      "Bouncer reconcile: not yielding held session %s to %s: "
+                      "its primary %s could not be installed", sessid,
+                      cli_name(sptr), cli_name(peer));
+            return 0;
+          }
           log_write(LS_USER, L_INFO, 0,
                     "Bouncer reconcile: held session %s of %s yields to %s's "
                     "live primary %s%s%s", sessid, account, cli_name(sptr),
@@ -4812,8 +4829,6 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
           existing->hs_disconnect_time = 0;
           existing->hs_last_active = CurrentTime;
           existing->hs_restore_pending = 0;
-          existing->hs_client = NULL;
-          bounce_hs_client_assign_checked(existing, peer, "BS C");
           ircd_strncpy(existing->hs_origin, cli_yxx(cli_user(peer)->server),
                        sizeof(existing->hs_origin));
           ircd_strncpy(existing->hs_ghost_numeric, cli_yxx(peer),
@@ -4823,14 +4838,25 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
           /* Our session's live connections follow the peer's primary, and
            * the aware links learn ours as its aliases (a held session's
-           * aliases are not in our burst). */
+           * aliases are not in our burst).  An alias carries its primary's
+           * nick, and the peer's primary has another one (a same-nick
+           * meeting is decided at N time): a local alias takes it, and its
+           * own socket is told (":old!user@host NICK new") before the
+           * rename. */
           for (i = 0; i < existing->hs_alias_count; i++) {
             struct Client *alias = findNUser(existing->hs_aliases[i].ba_numeric);
             if (!alias || !IsBouncerAlias(alias) || !cli_user(alias))
               continue;
             cli_user(alias)->alias_primary = peer;
-            if (MyConnect(alias))
-              bounce_announce_alias(existing, alias, peer);
+            if (!MyConnect(alias))
+              continue;
+            if (0 != ircd_strcmp(cli_name(alias), cli_name(peer))) {
+              sendcmdto_one(alias, CMD_NICK, alias, "%s", cli_name(peer));
+              Debug((DEBUG_INFO, "Bouncer reconcile: alias %s renamed to %s "
+                     "with its new primary", cli_name(alias), cli_name(peer)));
+              ircd_strncpy(cli_name(alias), cli_name(peer), NICKLEN + 1);
+            }
+            bounce_announce_alias(existing, alias, peer);
           }
 
           /* The ghost leaves as a held ghost does: BX X toward the aware
@@ -5307,19 +5333,25 @@ bsc_forward:
     /* BS X <account> <sessid> — destroy session */
     unmirrored_clear(account, sessid);
     session = bounce_find_by_token_sessid(account, sessid);
-    if (session && session->hs_client && MyConnect(session->hs_client)
-        && IsUser(session->hs_client) && !IsBouncerHold(session->hs_client)
-        && !IsBouncerAlias(session->hs_client)
-        && !HasFlag(session->hs_client, FLAG_KILLED)) {
-      /* Our copy of the session has a live primary here: the live copy
-       * wins (user, 2026-10-24).  The sender ended its own copy -- a held
-       * ghost's hold ran out, or a client of a session that shares this
-       * id lost a nick collision -- and that ends nothing of ours. */
-      log_write(LS_USER, L_INFO, 0,
-                "Bouncer: %s ended %s's session %s, whose primary %s is live "
-                "here: kept", cli_name(sptr), account, sessid,
-                cli_name(session->hs_client));
-    } else if (session) {
+    if (session) {
+      struct Client *primary = session->hs_client;
+
+      if (bounce_bsx_keeps(primary != NULL,
+                           primary && MyConnect(primary) && IsUser(primary)
+                             && !IsBouncerAlias(primary),
+                           primary && HasFlag(primary, FLAG_KILLED))) {
+        /* We hold the session: its primary is ours, live or a held ghost.
+         * The sender ended its own copy -- a held copy's hold ran out, a
+         * client of a session sharing this id lost a nick collision, a
+         * member there ended it -- and that ends nothing of ours; our
+         * KILL path, our hold timer and our own users end it.  Not relayed
+         * either: no server behind us is told to end what we hold. */
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: %s ended %s's session %s, whose primary %s is %s "
+                  "here: kept", cli_name(sptr), account, sessid,
+                  cli_name(primary), IsBouncerHold(primary) ? "held" : "live");
+        break;
+      }
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
              session->hs_sessid, sptr));
       bounce_destroy(session);
@@ -7108,12 +7140,11 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
 
     if (rebind_auth == BRA_NONE) {
       Debug((DEBUG_INFO,
-             "bounce_rebind: refusing — session %s origin %s != introducing "
-             "server %s, no sessid-tag match (wire ,S='%s'); account TS "
-             "incoming=%ld ghost=%ld not consulted (account %s); peer is "
-             "not the canonical primary",
-             session->hs_sessid, session->hs_origin, cli_yxx(server),
-             wire_sessid ? wire_sessid : "",
+             "bounce_rebind: refusing — session %s: the introduction from %s "
+             "carries no matching session id (wire ,S='%s'); origin %s and "
+             "account TS incoming=%ld ghost=%ld not consulted (account %s)",
+             session->hs_sessid, cli_yxx(server),
+             wire_sessid ? wire_sessid : "", session->hs_origin,
              (long)incoming_acc_ts, (long)cli_user(ghost)->acc_create,
              cli_user(ghost)->account));
       return -1;

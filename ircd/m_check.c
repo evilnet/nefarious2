@@ -704,6 +704,12 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
          const char *home_name = home ? cli_name(home) : session->hs_origin;
          int home_local = home ? IsMe(home)
                                : (0 == strcmp(session->hs_origin, cli_yxx(&me)));
+         /* Where the session's primary is (the target itself may be an
+          * alias of it on another server). */
+         const char *primary_server_name =
+            home ? cli_name(home)
+                 : (cli_user(acptr) && cli_user(acptr)->server
+                      ? cli_name(cli_user(acptr)->server) : "?");
 
          /* Determine state string */
          if (session->hs_state == BOUNCE_ACTIVE) {
@@ -753,7 +759,7 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: 0 (holding)");
             } else if (has_remote_primary && aliases == 0) {
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: primary on %s",
-                             cli_name(cli_user(acptr)->server));
+                             primary_server_name);
             } else if (has_primary && aliases == 0) {
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: 1 (primary only)");
             } else {
@@ -763,7 +769,7 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "1 primary");
                else if (has_remote_primary) {
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "primary on %s",
-                                     cli_name(cli_user(acptr)->server));
+                                     primary_server_name);
                } else
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "no primary");
                if (aliases > 0)
@@ -926,7 +932,7 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
                           cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
             send_reply(sptr, RPL_DATASTR, outbuf);
             ircd_snprintf(0, outbuf, sizeof(outbuf), "          Server:: %s",
-                          cli_name(cli_user(acptr)->server));
+                          primary_server_name);
             send_reply(sptr, RPL_DATASTR, outbuf);
             ircd_snprintf(0, outbuf, sizeof(outbuf), "              IP:: %s",
                           ircd_ntoa(&cli_ip(acptr)));

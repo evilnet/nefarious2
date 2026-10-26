@@ -656,6 +656,29 @@ static void held_copy_keeps_otherwise(void **s)
   }
 }
 
+/* bounce_bsx_keeps(has_primary, primary_ours, primary_killed) */
+
+static void bsx_keeps_a_record_we_hold(void **s)
+{
+  (void)s;
+  /* Our live primary, or our held ghost: we hold the session. */
+  assert_true(bounce_bsx_keeps(1, 1, 0));
+}
+
+static void bsx_ends_a_record_held_elsewhere(void **s)
+{
+  int k;
+  (void)s;
+  for (k = 0; k < 2; k++) {
+    /* A primary of another server, or none at all. */
+    assert_false(bounce_bsx_keeps(1, 0, k));
+    assert_false(bounce_bsx_keeps(0, 0, k));
+    assert_false(bounce_bsx_keeps(0, 1, k));
+  }
+  /* Ours, but killed: its exit ends the session anyway. */
+  assert_false(bounce_bsx_keeps(1, 1, 1));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -670,6 +693,8 @@ int main(void)
     cmocka_unit_test(hold_expiry_without_a_primary),
     cmocka_unit_test(held_copy_yields_to_a_visible_live_copy),
     cmocka_unit_test(held_copy_keeps_otherwise),
+    cmocka_unit_test(bsx_keeps_a_record_we_hold),
+    cmocka_unit_test(bsx_ends_a_record_held_elsewhere),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),
