@@ -138,3 +138,33 @@ bounce_promote_session(int exact, int by_old_primary, int ambiguous,
     return BOUNCE_PROMOTE_PRIMARY;
   return BOUNCE_PROMOTE_NONE;
 }
+
+int bounce_server_at_or_behind(const void *srv, const void *departing,
+                               const void *(*up)(const void *))
+{
+  int hops;
+
+  if (!srv || !departing || !up)
+    return 0;
+  for (hops = 0; srv && hops < BOUNCE_MAX_SERVER_DEPTH; hops++) {
+    const void *next;
+
+    if (srv == departing)
+      return 1;
+    next = up(srv);
+    if (next == srv)
+      return 0;     /* the root: our own server */
+    srv = next;
+  }
+  return 0;
+}
+
+int bounce_squit_prepares(int has_primary, int primary_local,
+                          int primary_behind, int origin_behind)
+{
+  /* Where the primary is, when there is one; the recorded origin only
+   * for a session that has none. */
+  if (has_primary)
+    return !primary_local && primary_behind;
+  return origin_behind;
+}

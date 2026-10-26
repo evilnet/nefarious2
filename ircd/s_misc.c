@@ -972,9 +972,10 @@ int exit_client(struct Client *cptr,
      * servers announced: their next burst announces them again. */
     bounce_unmirrored_clear_for_server(victim);
 
-    /* Prepare alias promotions: mark sessions where the managing server
-     * is departing and surviving aliases exist. Sets hs_promoting to
-     * suppress bounce_sync_alias_part() during exit_downlinks(). */
+    /* Prepare alias promotions: mark sessions whose primary leaves with
+     * the departing server and that have surviving aliases. Sets
+     * hs_promoting to suppress bounce_sync_alias_part() during
+     * exit_downlinks(). */
     bounce_prepare_squit_promotions(victim);
 
     /* Execute promotions BEFORE the SQUIT broadcast loop below.

@@ -577,7 +577,10 @@ struct BouncerSession {
                                        *   Authoritative replacement for
                                        *   "is this session local?" queries
                                        *   is session_has_local_holder()
-                                       *   (Phase 3). */
+                                       *   (Phase 3); "where is it held"
+                                       *   is bounce_primary_server().  A
+                                       *   split reads the origin only for
+                                       *   a session with no primary. */
   char hs_ghost_numeric[6];           /**< Ghost client numeric during HOLDING */
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
@@ -951,8 +954,10 @@ extern void bounce_echo_pm_to_session(struct Client *sender,
     const char *text, const char *msgid);
 
 /** Prepare bouncer sessions for SQUIT promotion.
- * Called BEFORE exit_downlinks(). Marks sessions needing promotion,
- * removes departing server's alias entries from session replicas.
+ * Called BEFORE exit_downlinks(). Marks the sessions whose primary is a
+ * client of the departing server or of a server behind it (by origin
+ * only for a session with no primary), and removes their roster entries
+ * for aliases behind it.
  * @param[in] server The departing server.
  */
 extern void bounce_prepare_squit_promotions(struct Client *server);
@@ -1801,6 +1806,13 @@ extern int bounce_session_assert_invariant(
  * sync responsibility?" decisions.
  */
 extern int session_has_local_holder(struct BouncerSession *session);
+
+/** The server the session's primary (hs_client, live or a held ghost) is
+ * a client of; NULL when the session has none.  This, not `hs_origin`,
+ * is where the session is held: the origin a record noted goes stale (a
+ * ghost rebind keeps it, a merge points it at the server merged into).
+ */
+extern struct Client *bounce_primary_server(struct BouncerSession *session);
 
 /** Are there any locally-held bouncer sessions on this server?
  *

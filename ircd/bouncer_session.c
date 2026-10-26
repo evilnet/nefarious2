@@ -1349,12 +1349,15 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
      * Connection; so this branch fires only when the session has no
      * local Client* at all (hs_client NULL or its MyConnect is false). */
     if (!session->hs_client || !MyConnect(session->hs_client)) {
-      struct Client *managing_server = FindNServer(session->hs_origin);
+      struct Client *managing_server;
       /* Resolve ghost from numeric if hs_client is NULL (e.g., BS D
        * arrived before ghost numeric was resolvable) — see
        * bounce_resolve_hs_client_from_ghost for the composition-risk
        * audit note. */
       bounce_resolve_hs_client_from_ghost(session, "HELD resume");
+      /* The server holding the session is its primary's: the origin the
+       * record noted goes stale (a rebind keeps it, a merge moves it). */
+      managing_server = bounce_primary_server(session);
       if (managing_server && session->hs_client
           && session->hs_alias_count < bounce_max_aliases()) {
         *out_session = session;
@@ -1466,7 +1469,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
      * Client locality — primary is "remote" iff hs_client lives on
      * another server (or is NULL). */
     if (!session->hs_client || !MyConnect(session->hs_client)) {
-      struct Client *managing_server = FindNServer(session->hs_origin);
+      struct Client *managing_server;
       /* Same recovery the HELD branch does.  Without it an ACTIVE session
        * whose hs_client went NULL (primary's server SQUIT+relink, collision
        * kill, or a refused BS A install) fell straight through to the
@@ -1474,6 +1477,10 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * session that still has one elsewhere — the identical failure shape as
        * the pre-e9b3b34 attach bug, reached by a different route. */
       bounce_resolve_hs_client_from_ghost(session, "ACTIVE resume");
+      /* Where the primary is, as in the HELD branch.  A stale origin
+       * naming a server no longer linked sent a session with a live
+       * remote primary down the local-alias path below. */
+      managing_server = bounce_primary_server(session);
       if (managing_server && session->hs_client
           && session->hs_alias_count < bounce_max_aliases()) {
         *out_session = session;
@@ -2443,6 +2450,16 @@ void bounce_snapshot_channels(struct BouncerSession *session,
 /* ---------------------------------------------------------------- */
 /* MDBX persistence (FEAT_BOUNCER_PERSIST)                            */
 /* ---------------------------------------------------------------- */
+
+/** See include/bouncer_session.h. */
+struct Client *bounce_primary_server(struct BouncerSession *session)
+{
+  struct Client *primary = session ? session->hs_client : NULL;
+
+  if (!primary || !IsUser(primary) || !cli_user(primary))
+    return NULL;
+  return cli_user(primary)->server;
+}
 
 /* is_local_session / bounce_session_is_local retired in Phase 5.  Per
  * redesign C.2 hs_origin is historical-only metadata; behavior gates
@@ -5725,13 +5742,39 @@ void bounce_schedule_cross_server_promote(struct BouncerSession *session)
             (void *)session, TT_RELATIVE, 0);
 }
 
+/** The uplink of server @a srv (bounce_server_at_or_behind()'s walk). */
+static const void *server_uplink(const void *srv)
+{
+  struct Client *s = (struct Client *)srv;
+
+  return (s && cli_serv(s)) ? (const void *)cli_serv(s)->up : NULL;
+}
+
+/** Is @a srv the server @a departing, or a server behind it?  Both are
+ * server Clients; NULL is behind nothing. */
+static int bounce_server_behind(const struct Client *srv,
+                                const struct Client *departing)
+{
+  return bounce_server_at_or_behind(srv, departing, server_uplink);
+}
+
 /** Prepare bouncer sessions for SQUIT promotion.
  * Called from exit_client() BEFORE exit_downlinks().
  *
- * For each session whose managing server (hs_origin) matches the departing
- * server: remove co-located alias entries, and if any aliases survive on
- * other servers, set hs_promoting to suppress bounce_sync_alias_part()
- * during the subsequent exit_downlinks() pass.
+ * A session is readied when its primary leaves with the split: a client
+ * of the departing server or of a server behind it.  Where the primary
+ * is decides, not the origin the record noted -- that one goes stale
+ * (a ghost rebind keeps it, a merge points it at the server merged
+ * into), and deciding by it left an alias here without a primary when
+ * the primary had moved to the departing server, and ended a record
+ * whose primary is our own live client or held ghost.  Only a session
+ * with no primary at all (a replica whose primary never resolved) still
+ * goes by its origin (bounce_squit_prepares()).
+ *
+ * A readied session drops the roster entries of aliases behind the
+ * departing server; if any alias survives, hs_promoting suppresses
+ * bounce_sync_alias_part() during the exit_downlinks() pass and
+ * bounce_execute_squit_promotions() promotes one.
  *
  * @param[in] server The departing server.
  */
@@ -5743,15 +5786,22 @@ void bounce_prepare_squit_promotions(struct Client *server)
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (session = tokenHash[i]; session; session = next) {
+      struct Client *primary = session->hs_client;
+
       next = session->hs_tnext;   /* the no-alias branch may destroy `session` */
-      /* Only sessions managed by the departing server */
-      if (0 != ircd_strcmp(session->hs_origin, departed_yxx))
+      if (!bounce_squit_prepares(primary != NULL,
+                                 primary && MyConnect(primary),
+                                 bounce_server_behind(bounce_primary_server(session),
+                                                      server),
+                                 bounce_server_behind(FindNServer(session->hs_origin),
+                                                      server)))
         continue;
 
-      /* Remove alias entries hosted on the departing server */
+      /* Remove the alias entries behind the departing server */
       j = 0;
       while (j < session->hs_alias_count) {
-        if (0 == ircd_strcmp(session->hs_aliases[j].ba_server, departed_yxx)) {
+        if (bounce_server_behind(FindNServer(session->hs_aliases[j].ba_server),
+                                 server)) {
           /* Shift remaining entries down */
           if (j < session->hs_alias_count - 1)
             memmove(&session->hs_aliases[j], &session->hs_aliases[j + 1],
@@ -5792,7 +5842,8 @@ void bounce_prepare_squit_promotions(struct Client *server)
         Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has no "
                "surviving aliases", session->hs_account, session->hs_sessid));
         /* A replica with nothing local behind it is now unreachable
-         * state: no holder here, and its origin just left.  Keeping it
+         * state: no holder here, and its primary (or, for one that never
+         * had a primary here, its origin) just left.  Keeping it
          * made it immortal -- the next link burst re-exported it as
          * "holding", the peer seeded a fresh replica from ours, and the
          * pair kept each other alive across restarts while blocking
@@ -5801,8 +5852,8 @@ void bounce_prepare_squit_promotions(struct Client *server)
          * is needed; if the departed server still holds the session it
          * announces it again on relink and we build a fresh replica. */
         if (!session_has_local_holder(session)) {
-          Debug((DEBUG_INFO, "bounce_prepare_squit: dropping clientless "
-                 "replica %s/%s of departed %s", session->hs_account,
+          Debug((DEBUG_INFO, "bounce_prepare_squit: dropping replica "
+                 "%s/%s: its primary left with %s", session->hs_account,
                  session->hs_sessid, departed_yxx));
           bounce_destroy(session);
         }
@@ -6832,10 +6883,9 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
     ClearMemberHolding(member);
 
   if (!keep_held) {
-    /* Update session state. The session's hs_origin (the authoritative
-     * server for this session) is left as-is — hub may or may not have
-     * taken ownership via the prior auto-resume, and that bookkeeping is
-     * not affected by the leaf-side representation rebind. */
+    /* Update session state.  The session's hs_origin is left as-is: it
+     * is historical, and nothing that decides reads it while the session
+     * has a primary (a split goes by where the primary is). */
     session->hs_state = BOUNCE_ACTIVE;
     session->hs_client = ghost;
     session->hs_last_active = CurrentTime;
@@ -9095,6 +9145,10 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       /* The promoted connection is ours: its attached stretch starts now
        * and accrues when this server holds the session. */
       bsess->hs_attach_time = MyConnect(new_client) ? CurrentTime : 0;
+      /* The session is held where its new primary is (BS T says the same,
+       * but only to a record of the id it names). */
+      ircd_strncpy(bsess->hs_origin, cli_yxx(cli_user(new_client)->server),
+                   sizeof(bsess->hs_origin));
       /* Update remaining aliases' alias_primary */
       for (k = 0; k < bsess->hs_alias_count; k++) {
         struct Client *sibling = findNUser(bsess->hs_aliases[k].ba_numeric);
@@ -11853,11 +11907,11 @@ char bounce_set_n_sessid_hint(struct Client *cptr)
    * before the split.  841f3ce made that case rare: SQUIT now destroys a
    * replica of the departed server with no local holder, and
    * bounce_auto_resume discards an unattachable replica, so a login that
-   * sees one gets a session of its own.  It can still happen: SQUIT
-   * matches replicas by hs_origin, which can be stale, and a replica
+   * sees one gets a session of its own.  It can still happen: a replica
    * whose primary never resolved (no hs_client, only hs_ghost_numeric)
-   * is neither discarded nor cleaned up when the ghost exits, so a login
-   * beside it registers sessionless.  Without the fallback that login
+   * goes at a split only by the origin it recorded, which can be stale,
+   * and is neither discarded nor cleaned up when the ghost exits, so a
+   * login beside it registers sessionless.  Without the fallback that login
    * meets the peer's held ghost as a non-member: classic collision.
    * What the fallback mostly reached was the harmful case: a
    * same-account client that is NOT in the session -- an alt on a legacy

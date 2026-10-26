@@ -627,14 +627,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
 
       /* Try 2: Local relay-only ACTIVE ghost (no local socket, remote
-       * aliases only). When a user reconnects to the managing server,
-       * they should become the primary instead of another alias. */
+       * aliases only). When a user reconnects to the server holding it,
+       * they should become the primary instead of another alias.  The
+       * primary being ours (MyUser) is what makes this server the one: the
+       * origin the record noted goes stale. */
       if (!revive_target) {
         struct BouncerSession *active = bounce_find_any_session(cli_account(sptr));
         if (active && active->hs_state == BOUNCE_ACTIVE
             && active->hs_client && MyUser(active->hs_client)
-            && cli_fd(active->hs_client) == -1
-            && 0 == strcmp(active->hs_origin, cli_yxx(&me))) {
+            && cli_fd(active->hs_client) == -1) {
           time_t idle = cli_user(active->hs_client)
                       ? cli_user(active->hs_client)->last : 0;
           saved_since_time = (idle > 0) ? idle : active->hs_last_active;

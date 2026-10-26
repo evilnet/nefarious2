@@ -508,9 +508,114 @@ static void promote_session_by_the_old_primary_needs_both_keys(void **s)
   assert_int_equal(bounce_promote_session(0, 0, 0, 0), BOUNCE_PROMOTE_NONE);
 }
 
+/* bounce_server_at_or_behind(): a server tree, walked toward its root. */
+
+struct fake_server {
+  const struct fake_server *up;
+};
+
+static const void *fake_up(const void *srv)
+{
+  return srv ? ((const struct fake_server *)srv)->up : NULL;
+}
+
+/* me -- leaf -- leaf3            (leaf3 is behind the leaf)
+ *    \- slot -- x3
+ * me is its own uplink, as &me is. */
+static struct fake_server me_srv, leaf_srv, leaf3_srv, slot_srv, x3_srv;
+
+static void fake_tree(void)
+{
+  me_srv.up = &me_srv;
+  leaf_srv.up = &me_srv;
+  leaf3_srv.up = &leaf_srv;
+  slot_srv.up = &me_srv;
+  x3_srv.up = &slot_srv;
+}
+
+static void behind_the_departing_server_or_it(void **s)
+{
+  (void)s;
+  fake_tree();
+  assert_true(bounce_server_at_or_behind(&leaf_srv, &leaf_srv, fake_up));
+  assert_true(bounce_server_at_or_behind(&leaf3_srv, &leaf_srv, fake_up));
+  assert_true(bounce_server_at_or_behind(&x3_srv, &slot_srv, fake_up));
+}
+
+static void not_behind_it(void **s)
+{
+  (void)s;
+  fake_tree();
+  /* Our own server, a sibling link and a server behind the sibling stay. */
+  assert_false(bounce_server_at_or_behind(&me_srv, &leaf_srv, fake_up));
+  assert_false(bounce_server_at_or_behind(&slot_srv, &leaf_srv, fake_up));
+  assert_false(bounce_server_at_or_behind(&x3_srv, &leaf_srv, fake_up));
+  /* The departing server's uplink is not behind it. */
+  assert_false(bounce_server_at_or_behind(&leaf_srv, &leaf3_srv, fake_up));
+}
+
+static void behind_walk_null_and_broken_trees(void **s)
+{
+  static struct fake_server loop_a, loop_b, orphan;
+  (void)s;
+  fake_tree();
+  assert_false(bounce_server_at_or_behind(NULL, &leaf_srv, fake_up));
+  assert_false(bounce_server_at_or_behind(&leaf_srv, NULL, fake_up));
+  assert_false(bounce_server_at_or_behind(&leaf_srv, &leaf_srv, NULL));
+  /* A server with no uplink ends the walk. */
+  orphan.up = NULL;
+  assert_false(bounce_server_at_or_behind(&orphan, &leaf_srv, fake_up));
+  /* A cycle that never reaches the departing server ends too. */
+  loop_a.up = &loop_b;
+  loop_b.up = &loop_a;
+  assert_false(bounce_server_at_or_behind(&loop_a, &leaf_srv, fake_up));
+}
+
+/* bounce_squit_prepares(has_primary, primary_local, primary_behind,
+ *                       origin_behind) */
+
+static void squit_readies_a_session_whose_primary_left(void **s)
+{
+  int o;
+  (void)s;
+  /* Whatever the record says of its origin. */
+  for (o = 0; o < 2; o++)
+    assert_true(bounce_squit_prepares(1, 0, 1, o));
+}
+
+static void squit_leaves_a_session_whose_primary_stays(void **s)
+{
+  int b, o;
+  (void)s;
+  for (o = 0; o < 2; o++) {
+    /* A primary of another server that stays linked. */
+    assert_false(bounce_squit_prepares(1, 0, 0, o));
+    /* Our own primary, live or held, whatever the origin says. */
+    for (b = 0; b < 2; b++)
+      assert_false(bounce_squit_prepares(1, 1, b, o));
+  }
+}
+
+static void squit_goes_by_the_origin_without_a_primary(void **s)
+{
+  int l, b;
+  (void)s;
+  for (l = 0; l < 2; l++)
+    for (b = 0; b < 2; b++) {
+      assert_true(bounce_squit_prepares(0, l, b, 1));
+      assert_false(bounce_squit_prepares(0, l, b, 0));
+    }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(behind_the_departing_server_or_it),
+    cmocka_unit_test(not_behind_it),
+    cmocka_unit_test(behind_walk_null_and_broken_trees),
+    cmocka_unit_test(squit_readies_a_session_whose_primary_left),
+    cmocka_unit_test(squit_leaves_a_session_whose_primary_stays),
+    cmocka_unit_test(squit_goes_by_the_origin_without_a_primary),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),

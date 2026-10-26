@@ -269,4 +269,45 @@ extern enum bounce_promote_session
 bounce_promote_session(int exact, int by_old_primary, int ambiguous,
                        int new_on_roster);
 
+/** Deepest server tree a walk toward the root follows (P10 numbers at
+ * most 4096 servers); a longer walk is a broken tree and answers "no". */
+#define BOUNCE_MAX_SERVER_DEPTH 4096
+
+/** Is @a srv the server @a departing, or a server behind it?
+ *
+ * Walks from @a srv toward the root of our server tree, one uplink at a
+ * time (@a up), until it meets @a departing (yes) or the root, whose
+ * uplink is itself or NULL (no).  The callers pass server Clients and
+ * their cli_serv()->up; the walk only compares the pointers.
+ *
+ * @param[in] srv       Where to start (a client's server).
+ * @param[in] departing The server leaving the network.
+ * @param[in] up        The uplink of a server.
+ * @return 1 when @a srv is at or behind @a departing, else 0.
+ */
+extern int bounce_server_at_or_behind(const void *srv, const void *departing,
+                                      const void *(*up)(const void *));
+
+/** Does a split ready a session for promotion, by where its primary is?
+ *
+ * A session whose primary is a client of another server is readied when
+ * that server is the departing one or behind it: its primary leaves with
+ * the split, and a surviving alias takes its place.  A session whose
+ * primary is ours (live, or a held ghost) is never readied: the split
+ * took nothing of it but aliases, and those leave by their own exits.  A
+ * session with no primary at all (a replica BS C made whose primary
+ * never resolved) has only the origin it recorded to go by.
+ *
+ * @param[in] has_primary    Nonzero if the session has a primary (hs_client).
+ * @param[in] primary_local  Nonzero if that primary is our client.
+ * @param[in] primary_behind Nonzero if its server is at or behind the
+ *                           departing server.
+ * @param[in] origin_behind  Nonzero if the server the session recorded
+ *                           as its origin is at or behind the departing
+ *                           server (read only when there is no primary).
+ * @return 1 to ready the session, else 0.
+ */
+extern int bounce_squit_prepares(int has_primary, int primary_local,
+                                 int primary_behind, int origin_behind);
+
 #endif /* INCLUDED_bouncer_wire_h */
