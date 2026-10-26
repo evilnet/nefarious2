@@ -969,8 +969,11 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
           *   BouncerPrimary:: <numeric> <nick> <lastnick> <sessid> <server> <locality>
           *   BouncerAlias:: <idx> <numeric> <nick> <lastnick> <sessid> <server> <locality> <primary_numeric>
           *   BouncerFace:: <idx> <peer_yxx> <face_numeric>
+          *   BouncerSession:: <sessid> <ACTIVE|HOLDING> <hs_client_numeric>
           * locality is "local" or "remote".  primary_numeric is the alias's
-          * cli_alias_primary numeric, or "-" if unresolved.
+          * cli_alias_primary numeric, or "-" if unresolved.  BouncerPrimary
+          * describes the CHECK target; BouncerSession the session record's
+          * own primary slot (hs_client), "-" when empty.
           */
          if (flags & CHECK_BOUNCER) {
             int ai;
@@ -988,6 +991,20 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
                           prim_svr_name,
                           prim_loc);
             send_reply(sptr, RPL_DATASTR, outbuf);
+
+            {
+               char slot_num[12] = "-";
+               struct Client *slot = session->hs_client;
+               if (slot && cli_user(slot) && cli_user(slot)->server)
+                  ircd_snprintf(0, slot_num, sizeof(slot_num), "%s%s",
+                                cli_yxx(cli_user(slot)->server), cli_yxx(slot));
+               ircd_snprintf(0, outbuf, sizeof(outbuf),
+                             "BouncerSession:: %s %s %s", session->hs_sessid,
+                             session->hs_state == BOUNCE_ACTIVE ? "ACTIVE"
+                                                                : "HOLDING",
+                             slot_num);
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
 
             for (ai = 0; ai < session->hs_alias_count; ai++) {
                struct BounceAlias *ba = &session->hs_aliases[ai];

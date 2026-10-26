@@ -674,22 +674,33 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       action = bounce_nick_action(verdict, &theirs, &now);
 
       /* One line per decision: the verdict, what it does here, both
-       * numerics and the account. */
-      sendto_opmask_butone(0, SNO_OLDSNO,
-                           "Bouncer same-nick: %s (ours, %s%s) meets %s (%s) "
-                           "from %C, account %s: %s, %s%s",
-                           our_full,
-                           ours.held ? "held" : ours_primary ? "primary"
-                                                             : "outside",
-                           snapshot ? " as stamped" : "",
-                           parv[parc - 2],
-                           !theirs.state_known ? "unknown"
-                             : theirs.held ? "held"
-                             : theirs.non_member ? "outside" : "primary",
-                           cptr, incoming_acct,
-                           bounce_nick_verdict_name(verdict),
-                           bounce_nick_action_name(action),
-                           kc_conflict ? " (Keycloak ids differ)" : "");
+       * numerics and the account -- to opers, and to the user log, the
+       * record that stays. */
+      {
+        const char *ours_kind = ours.held ? "held"
+                                : ours_primary ? "primary" : "outside";
+        const char *theirs_kind = !theirs.state_known ? "unknown"
+                                  : theirs.held ? "held"
+                                  : theirs.non_member ? "outside" : "primary";
+        sendto_opmask_butone(0, SNO_OLDSNO,
+                             "Bouncer same-nick: %s (ours, %s%s) meets %s (%s) "
+                             "from %C, account %s: %s, %s%s",
+                             our_full, ours_kind,
+                             snapshot ? " as stamped" : "",
+                             parv[parc - 2], theirs_kind,
+                             cptr, incoming_acct,
+                             bounce_nick_verdict_name(verdict),
+                             bounce_nick_action_name(action),
+                             kc_conflict ? " (Keycloak ids differ)" : "");
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer same-nick: %s (ours, %s%s) meets %s (%s) from %s, "
+                  "account %s: %s, %s%s",
+                  our_full, ours_kind, snapshot ? " as stamped" : "",
+                  parv[parc - 2], theirs_kind, cli_name(cptr), incoming_acct,
+                  bounce_nick_verdict_name(verdict),
+                  bounce_nick_action_name(action),
+                  kc_conflict ? " (Keycloak ids differ)" : "");
+      }
 
       switch (action) {
       case BNA_REFUSE:
@@ -702,6 +713,11 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
          * link hears its Q before it hears the incoming N, which
          * set_nick_name relays.  A gate this restored session held up is
          * released after this line, never inside it. */
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer retire: held session %s of %s ends, ghost %s "
+                  "leaves for %s from %s",
+                  bsess ? bsess->hs_sessid : "(none)", incoming_acct, our_full,
+                  parv[parc - 2], cli_name(cptr));
         bounce_retire_held_session(bsess, acptr, cptr,
                                    "Bouncer session moved");
         bounce_schedule_gate_release();

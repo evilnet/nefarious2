@@ -163,6 +163,13 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   cli_handler(cptr) = SERVER_HANDLER;
   Count_unknownbecomesserver(UserStats);
   SetBurst(cptr);
+  /* This link's incarnation: a record keyed by the link's Client pointer
+   * (which the Client freelist hands out again) also names the serial, so
+   * it never reads as the next link's. */
+  {
+    static unsigned long link_serials;
+    cli_serv(cptr)->link_serial = ++link_serials;
+  }
 
 /*    nextping = CurrentTime; */
 

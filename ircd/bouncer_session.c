@@ -1822,6 +1822,22 @@ static struct BouncerSession *session_of_primary(struct Client *c,
   return primary_of ? primary_of : roster_of;
 }
 
+/** Does @a s list @a c on its alias roster (by its full numeric)? */
+static int session_roster_has(struct BouncerSession *s, struct Client *c)
+{
+  char full[6];
+  int i;
+
+  if (!s || !c || !cli_user(c) || !cli_user(c)->server)
+    return 0;
+  ircd_snprintf(0, full, sizeof(full), "%s%s",
+                cli_yxx(cli_user(c)->server), cli_yxx(c));
+  for (i = 0; i < s->hs_alias_count; i++)
+    if (0 == strcmp(s->hs_aliases[i].ba_numeric, full))
+      return 1;
+  return 0;
+}
+
 /** See include/bouncer_session.h. */
 struct BouncerSession *bounce_session_of_primary(struct Client *c)
 {
@@ -2352,7 +2368,9 @@ void bounce_kill_session(struct BouncerSession *session, const char *comment)
   if (session->hs_alias_count > 0) {
     for (i = session->hs_alias_count - 1; i >= 0; i--) {
       struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
-      if (alias)
+      /* Only aliases, and never the primary: the caller exits it, and a
+       * roster entry naming it would exit it twice. */
+      if (alias && alias != session->hs_client && IsBouncerAlias(alias))
         exit_client(alias, alias, &me,
                     comment && *comment ? (char *)comment : "Session killed");
     }
@@ -7010,7 +7028,7 @@ int bounce_drop_held_ghost(struct BouncerSession *session, struct Client *ghost,
   session->hs_restore_pending = 0;
   bounce_schedule_gate_release();
 
-  log_write(LS_USER, L_TRACE, 0,
+  log_write(LS_USER, L_INFO, 0,
             "Bouncer drop: ghost %s became %s on %s, the session's %s "
             "(session %s)", cli_name(ghost), new_numeric, cli_name(server),
             incoming_held ? "held ghost there" : "live primary",
@@ -7331,12 +7349,6 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
   ircd_snprintf(0, new_full, sizeof(new_full), "%s%s",
                 cli_yxx(cli_user(new_primary)->server), cli_yxx(new_primary));
 
-  /* The legacy links know the session by the ghost's face, and the
-   * incoming N was withheld from them: they renumber the face to the new
-   * primary in place (BX P), sent while the ghost still has the numeric
-   * they know. */
-  bounce_legacy_face_change(ghost, session, link, new_full, NULL);
-
   /* The session takes the incoming primary's session id: the two are one
    * session from here on, under the id the peer keeps. */
   if (incoming_sessid && *incoming_sessid
@@ -7366,6 +7378,12 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
     }
     unmirrored_clear(target->hs_account, incoming_sessid);
   }
+
+  /* The legacy links know the session by the ghost's face, and the
+   * incoming N was withheld from them: they renumber the face to the new
+   * primary in place (BX P, naming the session's id now), sent while the
+   * ghost still has the numeric they know. */
+  bounce_legacy_face_change(ghost, target, link, new_full, NULL);
 
   /* The primary slot is the incoming primary's: the session is live
    * again, held by its server; no hold timer runs here. */
@@ -7399,7 +7417,7 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
       bounce_announce_alias(target, alias, new_primary);
   }
 
-  log_write(LS_USER, L_TRACE, 0,
+  log_write(LS_USER, L_INFO, 0,
             "Bouncer yield: held ghost %s left; session %s follows %s on %s",
             cli_name(ghost), target->hs_sessid, new_full,
             cli_name(cli_user(new_primary)->server));
@@ -9028,10 +9046,40 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
   }
 
   /* C2: Update session via string-based lookup (reliable even when
-   * hs_client is NULL, e.g. during SQUIT). */
+   * hs_client is NULL, e.g. during SQUIT).  When the id misses -- a merge
+   * left our record of the session under another id than the promoting
+   * server's -- the record whose primary is the old client and which lists
+   * the new one as its alias is that session too (bouncer_wire.h,
+   * bounce_promote_session). */
   {
-    struct BouncerSession *bsess = bounce_find_by_token_sessid(
+    struct BouncerSession *exact = bounce_find_by_token_sessid(
         cli_account(old_client), sessid);
+    struct BouncerSession *by_old = NULL;
+    struct BouncerSession *bsess = NULL;
+    int ambiguous = 0, on_roster = 0;
+
+    if (!exact) {
+      by_old = session_of_primary(old_client, &ambiguous);
+      if (by_old && by_old->hs_client != old_client)
+        by_old = NULL;    /* a roster match: not the old primary's session */
+      on_roster = by_old && session_roster_has(by_old, new_client);
+    }
+    switch (bounce_promote_session(exact != NULL, by_old != NULL || ambiguous,
+                                   ambiguous, on_roster)) {
+    case BOUNCE_PROMOTE_EXACT:
+      bsess = exact;
+      break;
+    case BOUNCE_PROMOTE_PRIMARY:
+      bsess = by_old;
+      log_write(LS_USER, L_INFO, 0,
+                "BX P: session %s not here; promoting %s to primary of our "
+                "record %s of %s, whose primary was %s",
+                sessid, new_numeric, by_old->hs_sessid, by_old->hs_account,
+                old_numeric);
+      break;
+    case BOUNCE_PROMOTE_NONE:
+      break;
+    }
     /* Through the checked install: never a primary of another account or
      * Keycloak user (a session kept apart after a split can share this
      * sessid). */
@@ -9053,15 +9101,19 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
         if (sibling && IsBouncerAlias(sibling))
           cli_user(sibling)->alias_primary = new_client;
       }
-      /* Remove promoted alias from hs_aliases[] */
-      for (k = 0; k < bsess->hs_alias_count; k++) {
+      /* The promoted client is the primary now and never an alias of its
+       * own session as well: every roster entry naming it goes (a session
+       * ending exits each roster entry it finds, and would exit its
+       * primary twice). */
+      for (k = 0; k < bsess->hs_alias_count; ) {
         if (findNUser(bsess->hs_aliases[k].ba_numeric) == new_client) {
           if (k < bsess->hs_alias_count - 1)
             memmove(&bsess->hs_aliases[k], &bsess->hs_aliases[k + 1],
                     (bsess->hs_alias_count - 1 - k)
                       * sizeof(struct BounceAlias));
           bsess->hs_alias_count--;
-          break;
+        } else {
+          k++;
         }
       }
     }
@@ -11865,6 +11917,8 @@ void bounce_note_burst_stamp(struct Client *c, struct Client *link, char mark)
   if (!c || !link || !MyConnect(c) || !cli_connect(c))
     return;
   con_burst_stamp_link(cli_connect(c)) = link;
+  con_burst_stamp_serial(cli_connect(c)) =
+    cli_serv(link) ? cli_serv(link)->link_serial : 0;
   con_burst_stamp(cli_connect(c)) = mark;
 }
 
@@ -11873,7 +11927,10 @@ char bounce_burst_stamp_for(struct Client *c, struct Client *link)
 {
   if (!c || !link || !MyConnect(c) || !cli_connect(c))
     return 0;
-  if (cli_burst_stamp_link(c) != link)
+  /* The link, and this establishment of it: a Client pointer is reused
+   * by a later link. */
+  if (cli_burst_stamp_link(c) != link || !cli_serv(link)
+      || cli_burst_stamp_serial(c) != cli_serv(link)->link_serial)
     return 0;
   /* Our burst to the link went out (it is not gated: a gated link has had
    * no N from us this time, and the record is an older link's), and the

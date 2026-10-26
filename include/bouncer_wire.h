@@ -240,4 +240,33 @@ extern enum bounce_alias_filing bounce_alias_filing(int exact, int by_primary,
                                                     int by_account,
                                                     int unmirrored);
 
+/** Which of our sessions a BX P (a promote: <old primary> <new primary>
+ * <session id>) updates. */
+enum bounce_promote_session {
+  BOUNCE_PROMOTE_EXACT,    /**< the session of the id the BX P names */
+  BOUNCE_PROMOTE_PRIMARY,  /**< the session whose primary is the old one
+                            *   and which lists the new one as its alias */
+  BOUNCE_PROMOTE_NONE      /**< none: no session here is updated */
+};
+
+/** Where a BX P's promote lands, from what the lookups found.
+ *
+ * The id the BX P names first.  Else -- a merge left the two servers'
+ * records of one session under two ids -- our session whose primary
+ * (hs_client) is the BX P's old primary, but only when exactly one
+ * session claims that primary and it lists the new primary on its alias
+ * roster: the promote is then of our record's own alias.  A BX P whose
+ * new primary is on no roster here (a swap of a face) updates nothing.
+ *
+ * @param[in] exact          Nonzero if a session of the named id exists.
+ * @param[in] by_old_primary Nonzero if a session here has the old primary
+ *                           as its hs_client.
+ * @param[in] ambiguous      Nonzero if two or more sessions do.
+ * @param[in] new_on_roster  Nonzero if that session lists the new primary
+ *                           on its alias roster.
+ */
+extern enum bounce_promote_session
+bounce_promote_session(int exact, int by_old_primary, int ambiguous,
+                       int new_on_roster);
+
 #endif /* INCLUDED_bouncer_wire_h */

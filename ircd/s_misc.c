@@ -655,7 +655,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
             int i;
             for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
               struct Client *alias = findNUser(bsess->hs_aliases[i].ba_numeric);
-              if (alias)
+              /* Only aliases, and never the client being exited here: a
+               * roster entry that names it would exit it twice. */
+              if (alias && alias != bcptr && IsBouncerAlias(alias))
                 exit_client(alias, alias, &me,
                             comment && *comment ? comment : "Session killed");
             }
@@ -691,7 +693,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
             int i;
             for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
               struct Client *alias = findNUser(bsess->hs_aliases[i].ba_numeric);
-              if (alias)
+              /* Only aliases, and never the client being exited here: a
+               * roster entry that names it would exit it twice. */
+              if (alias && alias != bcptr && IsBouncerAlias(alias))
                 exit_client(alias, alias, &me,
                             comment && *comment ? comment : "Session killed");
             }

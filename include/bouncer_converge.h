@@ -276,8 +276,11 @@ struct bounce_nick_now {
   int is_primary;      /**< that session's primary slot is our client */
   int live_alias;      /**< that session has a live alias */
   int yield_ok;        /**< a held ghost may hand its session to the
-                        *   incoming primary: that primary's home is
-                        *   IRCv3-aware and ours is not being killed */
+                        *   incoming primary: ours is not being killed.
+                        *   (That primary's home is IRCv3-aware already:
+                        *   a known state comes only over a trusted path,
+                        *   and the decision runs only for an aware
+                        *   introducer.) */
   enum bounce_demote_bar demote_bar; /**< a live primary's demote
                         *   eligibility (BOUNCE_DEMOTE_PLAN) */
 };

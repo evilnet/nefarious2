@@ -479,6 +479,35 @@ static void alias_filing_account_only_for_a_mirrored_id(void **s)
   assert_int_equal(bounce_alias_filing(0, 0, 0, 1), BOUNCE_FILE_NONE);
 }
 
+/* bounce_promote_session(): which record a BX P updates. */
+
+static void promote_session_prefers_the_named_id(void **s)
+{
+  int p, a, r;
+  (void)s;
+  for (p = 0; p < 2; p++)
+  for (a = 0; a < 2; a++)
+  for (r = 0; r < 2; r++)
+    assert_int_equal(bounce_promote_session(1, p, a, r), BOUNCE_PROMOTE_EXACT);
+}
+
+static void promote_session_by_the_old_primary_needs_both_keys(void **s)
+{
+  (void)s;
+  /* The old primary's one session, listing the new primary as its alias:
+   * a record of the same session under another id. */
+  assert_int_equal(bounce_promote_session(0, 1, 0, 1), BOUNCE_PROMOTE_PRIMARY);
+  /* The new primary on no roster here: a face swap, not our record's
+   * promote. */
+  assert_int_equal(bounce_promote_session(0, 1, 0, 0), BOUNCE_PROMOTE_NONE);
+  /* Two sessions claim the old primary: no one record to update. */
+  assert_int_equal(bounce_promote_session(0, 1, 1, 1), BOUNCE_PROMOTE_NONE);
+  assert_int_equal(bounce_promote_session(0, 1, 1, 0), BOUNCE_PROMOTE_NONE);
+  /* No session has the old primary. */
+  assert_int_equal(bounce_promote_session(0, 0, 0, 1), BOUNCE_PROMOTE_NONE);
+  assert_int_equal(bounce_promote_session(0, 0, 0, 0), BOUNCE_PROMOTE_NONE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -491,6 +520,8 @@ int main(void)
     cmocka_unit_test(alias_filing_prefers_the_named_id),
     cmocka_unit_test(alias_filing_then_the_primarys_session),
     cmocka_unit_test(alias_filing_account_only_for_a_mirrored_id),
+    cmocka_unit_test(promote_session_prefers_the_named_id),
+    cmocka_unit_test(promote_session_by_the_old_primary_needs_both_keys),
     cmocka_unit_test(aware_link_never_knows),
     cmocka_unit_test(gated_link_knows_nothing),
     cmocka_unit_test(own_direction_excluded),

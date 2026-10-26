@@ -124,3 +124,17 @@ enum bounce_alias_filing bounce_alias_filing(int exact, int by_primary,
    * still become ours by a rename -- never for one BS C kept out. */
   return by_account && !unmirrored ? BOUNCE_FILE_ACCOUNT : BOUNCE_FILE_NONE;
 }
+
+enum bounce_promote_session
+bounce_promote_session(int exact, int by_old_primary, int ambiguous,
+                       int new_on_roster)
+{
+  if (exact)
+    return BOUNCE_PROMOTE_EXACT;
+  /* Both keys: the old primary's one session, and the new primary on its
+   * roster.  Narrower than an alias's filing: a promote changes who the
+   * session's primary is. */
+  if (by_old_primary && !ambiguous && new_on_roster)
+    return BOUNCE_PROMOTE_PRIMARY;
+  return BOUNCE_PROMOTE_NONE;
+}

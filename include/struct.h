@@ -68,6 +68,9 @@ struct Server {
 
   unsigned int ml_max_bytes;    /**< Remote server's MULTILINE_MAX_BYTES (0 = unknown/legacy) */
   unsigned int ml_max_lines;    /**< Remote server's MULTILINE_MAX_LINES (0 = unknown/legacy) */
+  unsigned long link_serial;    /**< Direct link: which establishment of a link
+                                     this is (server_estab), never reused; 0
+                                     for a server behind another */
 };
 
 /** Describes a user on the network. */
