@@ -111,4 +111,22 @@ bounce_nick_verdict(const struct bounce_nick_side *local,
                     int local_is_session_primary, int kc_conflict,
                     int link_gated);
 
+/** Set the incoming side's hold state from the hold mark its N carried
+ * (bouncer_wire.h: BOUNCE_HOLD_MARK_*).
+ *
+ * The state is known only when the mark can be trusted -- every server
+ * on the path from the client's home server to us, both ends included,
+ * announces SERVER flag H -- AND the N carries a valid mark.  Then:
+ * held mark -> held; primary mark -> a live session member; outsider
+ * mark -> live, in no session (non_member).  Otherwise the state is
+ * unknown (state_known, held and non_member all 0), as for an N from a
+ * server that stamps no mark.  Only those three fields are written.
+ *
+ * @param[out] side    The incoming side; NULL is ignored.
+ * @param[in] trusted  Nonzero if every server on the path announces H.
+ * @param[in] mark     The N's mark, or 0 when it carried none.
+ */
+extern void bounce_nick_side_from_mark(struct bounce_nick_side *side,
+                                       int trusted, char mark);
+
 #endif /* INCLUDED_bouncer_converge_h */

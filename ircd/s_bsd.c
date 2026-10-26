@@ -729,14 +729,19 @@ static int completed_connection(struct Client* cptr)
   ClearPingSent(cptr);
 
   /* Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions,
-   * F=BX F (reconcile-end) handshake supported.
+   * F=BX F (reconcile-end) handshake supported, H=bouncer hold mark (,H)
+   * stamped and relayed (only while P10_MESSAGE_TAGS is on: the mark
+   * rides the compact tags).
    * Legacy peers ignore unknown flag chars. */
-  sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%svF :%s",
+  sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%svF%s :%s",
                 cli_name(&me), cli_serv(&me)->timestamp, newts,
 		MAJOR_PROTOCOL, NumServCap(&me),
 		feature_bool(FEAT_HUB) ? "h" : "",
                 feature_bool(FEAT_OPLEVELS) ? "o" : "",
+                feature_bool(FEAT_P10_MESSAGE_TAGS) ? "H" : "",
                 cli_info(&me));
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS))
+    SetHoldMarkSent(cptr);
 
   return (IsDead(cptr)) ? 0 : 1;
 }

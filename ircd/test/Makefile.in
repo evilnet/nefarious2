@@ -422,10 +422,13 @@ webpush_attention_cmocka: $(WEBPUSH_ATTENTION_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_ATTENTION_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # bouncer_converge tests - the module is pure (no ircd deps)
-bouncer_converge_test.o: ../bouncer_converge.c ../../include/bouncer_converge.h
+# The suite also links bouncer_wire (the hold-mark stamp it composes with).
+bouncer_converge_test.o: ../bouncer_converge.c ../../include/bouncer_converge.h \
+		../../include/bouncer_wire.h
 	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_converge.c
 
-BOUNCER_CONVERGE_CMOCKA_OBJS = bouncer_converge_cmocka.o bouncer_converge_test.o
+BOUNCER_CONVERGE_CMOCKA_OBJS = bouncer_converge_cmocka.o bouncer_converge_test.o \
+	bouncer_wire_test.o
 bouncer_converge_cmocka: $(BOUNCER_CONVERGE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_CONVERGE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 

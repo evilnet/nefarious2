@@ -89,6 +89,12 @@ extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
  * S2S emit.  Per redesign A.2: bouncer-aware peers receive sessid for at-N-time
  * convergence dispatch in m_nick.  Auto-cleared after consumption. */
 extern void sendcmdto_set_s2s_sessid(const char *sessid);
+/* Arm the bouncer hold mark (,H<mark> segment, BOUNCE_HOLD_MARK_*) for the
+ * next S2S emit.  It travels only with the session id armed by
+ * sendcmdto_set_s2s_sessid(): arm the session id first (arming a session
+ * id disarms the mark), and a mark armed without one is dropped.  0
+ * disarms.  Consumed and cleared with the session id. */
+extern void sendcmdto_set_s2s_held(char mark);
 /* Arm the multiline framing segment ,M<flag><batch_ref> for the next
  * sendcmdto_one_tags_with_client() toward a tag-carrying link (audit 0.1).
  * Consumed or cleared by that call. */

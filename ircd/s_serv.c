@@ -130,21 +130,29 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   inpath = cli_name(cptr);
 
   if (IsUnknown(cptr)) {
+    int holdmark = feature_bool(FEAT_P10_MESSAGE_TAGS);
+
     if (aconf->passwd[0])
       sendrawto_one(cptr, MSG_PASS " :%s", aconf->passwd);
     /*
      *  Pass my info to the new server.
      *  Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions,
-     *               F=BX F (reconcile-end) handshake supported.
+     *               F=BX F (reconcile-end) handshake supported,
+     *               H=bouncer hold mark (,H) stamped and relayed -- only
+     *                 while P10_MESSAGE_TAGS is on, as the mark rides the
+     *                 compact tags.
      *  Legacy peers ignore unknown flag chars (set_server_flags has no
      *  default in its switch).
      */
-    sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%svF :%s",
+    sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%svF%s :%s",
 		  cli_name(&me), cli_serv(&me)->timestamp,
 		  cli_serv(cptr)->timestamp, MAJOR_PROTOCOL, NumServCap(&me),
 		  feature_bool(FEAT_HUB) ? "h" : "",
                   feature_bool(FEAT_OPLEVELS) ? "o" : "",
+                  holdmark ? "H" : "",
 		  *(cli_info(&me)) ? cli_info(&me) : "IRCers United");
+    if (holdmark)
+      SetHoldMarkSent(cptr);
   }
 
   det_confs_butmask(cptr, CONF_SERVER | CONF_UWORLD);
@@ -196,13 +204,14 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     if (!match(cli_name(&me), cli_name(cptr)))
       continue;
     sendcmdto_one(&me, CMD_SERVER, acptr,
-		  "%s 2 0 %Tu J%02u %s%s +%s%s%s%s%s%s%s :%s", cli_name(cptr),
+		  "%s 2 0 %Tu J%02u %s%s +%s%s%s%s%s%s%s%s :%s", cli_name(cptr),
 		  cli_serv(cptr)->timestamp, Protocol(cptr), NumServCap(cptr),
 		  IsHub(cptr) ? "h" : "", IsService(cptr) ? "s" : "",
 		  IsIPv6(cptr) ? "6" : "", IsOpLevels(cptr) ? "o" : "",
 		  IsIRCv3Aware(cptr) ? "v" : "",
 		  IsRenameCapable(cptr) ? "r" : "",
 		  IsBxfAware(cptr) ? "F" : "",
+		  IsHoldMark(cptr) ? "H" : "",
                   cli_info(cptr));
   }
 
@@ -275,7 +284,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       if (0 == match(cli_name(&me), cli_name(acptr)))
         continue;
       sendcmdto_one(cli_serv(acptr)->up, CMD_SERVER, cptr,
-		    "%s %d 0 %Tu %s%u %s%s +%s%s%s%s%s%s%s :%s", cli_name(acptr),
+		    "%s %d 0 %Tu %s%u %s%s +%s%s%s%s%s%s%s%s :%s", cli_name(acptr),
 		    cli_hopcount(acptr) + 1, cli_serv(acptr)->timestamp,
 		    protocol_str, Protocol(acptr), NumServCap(acptr),
 		    IsHub(acptr) ? "h" : "", IsService(acptr) ? "s" : "",
@@ -283,6 +292,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 		    IsIRCv3Aware(acptr) ? "v" : "",
 		    IsRenameCapable(acptr) ? "r" : "",
 		    IsBxfAware(acptr) ? "F" : "",
+		    IsHoldMark(acptr) ? "H" : "",
                     cli_info(acptr));
     }
   }
@@ -418,7 +428,15 @@ int server_finish_burst(struct Client *cptr)
        * runs from the burst-gate timer and from callbacks, where no
        * per-line reset follows.  A leftover hint would ride the next
        * tagged line (a later burst line, the EB, any timer send) with
-       * this user's sessid. */
+       * this user's sessid.
+       *
+       * The hint also stages the hold mark (,H) of a user of ours: one
+       * computation, so ",S names a session" and the mark agree.  It
+       * stages none for a user of another server: only its home server
+       * stamps one, and what it stamped then is not known now.  (A mark
+       * in the link's stash rides only beside that line's own ,S, under
+       * the precedence above.)  The mark is cleared with the hint, for
+       * the same reasons. */
       if (IsIRCv3Aware(cptr))
         bounce_set_n_sessid_hint(acptr);
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
@@ -429,6 +447,7 @@ int server_finish_burst(struct Client *cptr)
 		    iptobase64(xxx_buf, &cli_ip(acptr), sizeof(xxx_buf), IsIPv6(cptr)),
 		    NumNick(acptr), cli_info(acptr));
       sendcmdto_set_s2s_sessid(NULL);
+      sendcmdto_set_s2s_held(0);
 
       if (cli_user(acptr) && !EmptyString(cli_user(acptr)->swhois))
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,

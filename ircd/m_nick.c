@@ -433,6 +433,14 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
     return 0;
   }
+  /* The hold mark an introduction carries (,H) and whether the path from
+   * its home server can be trusted to carry one.  Logged only: nothing
+   * below decides on it. */
+  if (IsServer(sptr) && sendcmdto_stash_is_current(cptr) && cli_s2s_held(cptr))
+    Debug((DEBUG_INFO, "N %s (%s) from %s: hold mark %c, %s", nick,
+           parv[parc - 2], cli_name(sptr), cli_s2s_held(cptr),
+           bounce_hold_marks_trusted(sptr) ? "trusted" : "untrusted"));
+
   /* Check against nick name collisions. */
   if ((acptr = SeekClient(nick)) == NULL)
     /* No collisions, all clear... */

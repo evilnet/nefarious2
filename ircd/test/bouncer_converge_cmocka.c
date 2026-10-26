@@ -7,6 +7,7 @@
 #include <cmocka.h>
 
 #include "../../include/bouncer_converge.h"
+#include "../../include/bouncer_wire.h"
 
 #define OLDER "AaCcFXwvcGOUX/PyoTpM1Q"   /* lexicographically lower = older UUID v7 */
 #define NEWER "AaCrYZ3QcGOHqRsexudEHQ"
@@ -414,6 +415,317 @@ static void test_verdict_null_inputs_do_not_crash(void **state)
   assert_int_equal(bounce_nick_verdict(&l, &i, 1, 0, 0), BNV_KEEP_LOCAL);
 }
 
+/* ---- the hold mark on the wire: one side's stamp, the other's input ---- */
+
+static void test_mark_fills_the_incoming_side(void **state)
+{
+  static const char marks[] = { 'h', 'p', 'n', '\0', 'x', 'H' };
+  int t, m;
+  (void)state;
+  for (t = 0; t < 2; t++)
+    for (m = 0; m < (int)sizeof marks; m++) {
+      struct bounce_nick_side s = known(1, 123, OLDER, NB);
+      int valid = marks[m] == 'h' || marks[m] == 'p' || marks[m] == 'n';
+      s.non_member = 1;   /* overwritten either way */
+      bounce_nick_side_from_mark(&s, t, marks[m]);
+      /* Known only when every server on the path announces flag H AND
+       * the N carries a mark. */
+      assert_int_equal(s.state_known, t && valid);
+      assert_int_equal(s.held, t && marks[m] == 'h');
+      assert_int_equal(s.non_member, t && marks[m] == 'n');
+      /* The rest of the side is the N's own, untouched. */
+      assert_int_equal(s.lastnick, 123);
+      assert_string_equal(s.sessid, OLDER);
+      assert_string_equal(s.numeric, NB);
+    }
+  /* NULL does not crash. */
+  bounce_nick_side_from_mark(NULL, 1, 'h');
+}
+
+/* A client as its home server sees it: a held ghost (its session's
+ * hs_client, no live alias), a live session primary, or a live login
+ * that is not its session's primary (in no session). */
+enum kind { K_HELD, K_PRIMARY, K_OUTSIDER };
+
+struct wire_side {
+  enum kind kind;
+  time_t lastnick;
+  const char *sessid;
+  const char *numeric;
+};
+
+static const char *kind_name(enum kind k)
+{
+  return k == K_HELD ? "held" : k == K_PRIMARY ? "primary" : "outsider";
+}
+
+/* What the home server feeds its own verdict about this client. */
+static struct bounce_nick_side as_ours(const struct wire_side *w, int *primary)
+{
+  struct bounce_nick_side s = known(w->kind == K_HELD, w->lastnick, w->sessid,
+                                    w->numeric);
+  /* bsess && bsess->hs_client == client: a held ghost is its session's
+   * hs_client too. */
+  *primary = w->kind != K_OUTSIDER;
+  return s;
+}
+
+/* What the other server makes of this client's N: the home server's
+ * stamp, read through the trust of the path. */
+static struct bounce_nick_side as_theirs(const struct wire_side *w, int trusted)
+{
+  struct bounce_nick_side s;
+  char mark = bounce_hold_stamp(w->kind == K_HELD, w->kind != K_OUTSIDER);
+  memset(&s, 0, sizeof s);
+  s.lastnick = w->lastnick;
+  s.sessid = w->sessid;
+  s.numeric = w->numeric;
+  bounce_nick_side_from_mark(&s, trusted, mark);
+  return s;
+}
+
+/* The verdict with the D-LH branch deleted: option (a), the live login
+ * wins against a held ghost.  The real function is fed inputs that reach
+ * the rules below that branch the same way: our held ghost reads the
+ * login as a known live client (the held rules read only its liveness
+ * and session id); our live login reads as a session primary (the live
+ * rules keep against a known held ghost before they read membership). */
+static enum bounce_nick_verdict verdict_dlh_a(struct bounce_nick_side l,
+                                              struct bounce_nick_side i,
+                                              int primary, int link_gated)
+{
+  int in_held = !i.non_member && i.state_known && i.held;
+  if (l.held && i.non_member) {
+    i.non_member = 0;
+    i.state_known = 1;
+    i.held = 0;
+  } else if (!l.held && !primary && in_held)
+    primary = 1;
+  return bounce_nick_verdict(&l, &i, primary, 0, link_gated);
+}
+
+static enum bounce_nick_verdict composed(const struct wire_side *ours,
+                                         const struct wire_side *theirs,
+                                         int trusted, int dlh_a)
+{
+  int primary;
+  struct bounce_nick_side l = as_ours(ours, &primary);
+  struct bounce_nick_side i = as_theirs(theirs, trusted);
+  return dlh_a ? verdict_dlh_a(l, i, primary, 0)
+               : bounce_nick_verdict(&l, &i, primary, 0, 0);
+}
+
+static const char *vname(enum bounce_nick_verdict v)
+{
+  switch (v) {
+  case BNV_CLASSIC:          return "CLASSIC";
+  case BNV_KEEP_LOCAL:       return "KEEP";
+  case BNV_RETIRE_LOCAL:     return "RETIRE";
+  case BNV_DROP_LOCAL_GHOST: return "DROP";
+  case BNV_DEMOTE_LOCAL:     return "DEMOTE";
+  }
+  return "?";
+}
+
+/* Every side of {held, primary, outsider} x {session A, B} x {numeric
+ * NA, NB} x {nick ts 100, 200}; returns how many. */
+static int all_sides(struct wire_side *out)
+{
+  static const char *ids[2] = { OLDER, NEWER };
+  static const char *nums[2] = { NA, NB };
+  static const time_t ts[2] = { 100, 200 };
+  int k, s, n, t, c = 0;
+  for (k = 0; k < 3; k++)
+    for (s = 0; s < 2; s++)
+      for (n = 0; n < 2; n++)
+        for (t = 0; t < 2; t++) {
+          out[c].kind = (enum kind)k;
+          out[c].sessid = ids[s];
+          out[c].numeric = nums[n];
+          out[c].lastnick = ts[t];
+          c++;
+        }
+  return c;
+}
+
+/* Each side stamps its own client; each verdict reads the other's stamp.
+ * For every pair of clients two servers can hold (distinct numerics: a
+ * numeric names its home server), one side keeps exactly when the other
+ * yields, and both fall back to the classic rules together. */
+static int composed_asymmetries(int dlh_a, int report)
+{
+  struct wire_side sides[24];
+  int n = all_sides(sides), a, b, bad = 0;
+  for (a = 0; a < n; a++)
+    for (b = 0; b < n; b++) {
+      enum bounce_nick_verdict ab, ba;
+      if (!strcmp(sides[a].numeric, sides[b].numeric))
+        continue;
+      ab = composed(&sides[a], &sides[b], 1, dlh_a);
+      ba = composed(&sides[b], &sides[a], 1, dlh_a);
+      if ((ab == BNV_KEEP_LOCAL) != yields(ba)
+          || (ab == BNV_CLASSIC) != (ba == BNV_CLASSIC)) {
+        bad++;
+        if (report)
+          print_message("asymmetric (D-LH %s): %s %s %s ts%ld -> %s, "
+                        "%s %s %s ts%ld -> %s\n", dlh_a ? "a" : "b",
+                        kind_name(sides[a].kind), sides[a].sessid,
+                        sides[a].numeric, (long)sides[a].lastnick, vname(ab),
+                        kind_name(sides[b].kind), sides[b].sessid,
+                        sides[b].numeric, (long)sides[b].lastnick, vname(ba));
+      }
+    }
+  return bad;
+}
+
+static void test_composed_stamps_are_antisymmetric_dlh_b(void **state)
+{
+  (void)state;
+  /* Today's D-LH setting: a login in no session against a held ghost is
+   * classic. */
+  assert_int_equal(composed_asymmetries(0, 1), 0);
+}
+
+static void test_composed_stamps_are_antisymmetric_dlh_a(void **state)
+{
+  (void)state;
+  /* The other D-LH outcome: the live login wins. */
+  assert_int_equal(composed_asymmetries(1, 1), 0);
+}
+
+static void test_composed_session_ends_only_for_another_session(void **state)
+{
+  struct wire_side sides[24];
+  int n = all_sides(sides), a, b, d;
+  (void)state;
+  for (d = 0; d < 2; d++)
+    for (a = 0; a < n; a++)
+      for (b = 0; b < n; b++) {
+        enum bounce_nick_verdict v;
+        if (!strcmp(sides[a].numeric, sides[b].numeric))
+          continue;
+        v = composed(&sides[a], &sides[b], 1, d);
+        if (v == BNV_RETIRE_LOCAL)
+          assert_int_not_equal(strcmp(sides[a].sessid, sides[b].sessid), 0);
+        if (v == BNV_DROP_LOCAL_GHOST)
+          assert_int_equal(strcmp(sides[a].sessid, sides[b].sessid), 0);
+        /* Only our held ghost ever ends; only a live session primary of
+         * ours is ever demoted. */
+        if (v == BNV_RETIRE_LOCAL || v == BNV_DROP_LOCAL_GHOST)
+          assert_int_equal(sides[a].kind, K_HELD);
+        if (v == BNV_DEMOTE_LOCAL)
+          assert_int_equal(sides[a].kind, K_PRIMARY);
+        /* A login in no session is never merged into, nor demoted. */
+        if (sides[a].kind == K_OUTSIDER || sides[b].kind == K_OUTSIDER)
+          assert_int_not_equal(v, BNV_DEMOTE_LOCAL);
+      }
+}
+
+static void test_composed_dlh_b_outsider_meets_held_classic(void **state)
+{
+  struct wire_side held = { K_HELD, 100, OLDER, NA };
+  struct wire_side out_same = { K_OUTSIDER, 200, OLDER, NB };  /* a stale equal id */
+  struct wire_side out_other = { K_OUTSIDER, 50, NEWER, NB };
+  (void)state;
+  assert_int_equal(composed(&held, &out_same, 1, 0), BNV_CLASSIC);
+  assert_int_equal(composed(&out_same, &held, 1, 0), BNV_CLASSIC);
+  assert_int_equal(composed(&held, &out_other, 1, 0), BNV_CLASSIC);
+  assert_int_equal(composed(&out_other, &held, 1, 0), BNV_CLASSIC);
+}
+
+static void test_composed_dlh_a_outsider_with_an_equal_id_never_drops_PENDING(void **state)
+{
+  struct wire_side held = { K_HELD, 100, OLDER, NA };
+  struct wire_side out_same = { K_OUTSIDER, 200, OLDER, NB };
+  (void)state;
+  print_message("PENDING: with the D-LH branch deleted (option (a)) a held "
+                "ghost DROPs (silent rebind) for a login in no session that "
+                "carries an equal, stale session id; the verdict must never "
+                "DROP for an outsider.  Enable when the verdict handles it.\n");
+  skip();
+  assert_int_not_equal(composed(&held, &out_same, 1, 1), BNV_DROP_LOCAL_GHOST);
+}
+
+/* Mixed versions: an N without a trusted mark reads as unknown.  Clients
+ * a (session OLDER, numeric NA, nick ts 100) and b (NEWER, NB, ts 200).
+ * The trust is the path's, and a path is the same both ways, so in
+ * practice both sides read the other as unknown (both_unknown); the
+ * one-sided columns show what a one-sided trust would do.  A row is
+ * asymmetric when one side keeps and the other does not yield, or only
+ * one side runs the classic rules.  No gated links. */
+struct mixed_row {
+  enum kind a, b;
+  /* Both unknown: a's verdict on b, b's verdict on a. */
+  enum bounce_nick_verdict both_ab, both_ba;
+  int both_symmetric;
+  /* a reads b as unknown, b reads a's mark. */
+  enum bounce_nick_verdict one_ab, one_ba;
+  int one_symmetric;
+};
+
+static void test_mixed_version_table(void **state)
+{
+  static const struct mixed_row rows[] = {
+    /* held vs held: classic both ways; one-sided, b's held ghost (the
+     * newer session) retires while a runs the classic rules. */
+    { K_HELD, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL, 0 },
+    /* held vs live primary: the held side runs the classic rules, the
+     * primary merges by nick age -- today's 0.3a failure (the newer
+     * live primary demotes into the held ghost; the hub's classic
+     * rules kill it). */
+    { K_HELD, K_PRIMARY, BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
+      BNV_CLASSIC, BNV_KEEP_LOCAL, 0 },
+    { K_HELD, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1 },
+    { K_PRIMARY, K_HELD, BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
+      BNV_KEEP_LOCAL, BNV_RETIRE_LOCAL, 1 },
+    { K_PRIMARY, K_PRIMARY, BNV_KEEP_LOCAL, BNV_DEMOTE_LOCAL, 1,
+      BNV_KEEP_LOCAL, BNV_DEMOTE_LOCAL, 1 },
+    /* live primary vs a login in no session: the primary would merge
+     * into it by nick age while the login runs the classic rules (the
+     * D.2-into-a-non-member row). */
+    { K_PRIMARY, K_OUTSIDER, BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
+      BNV_KEEP_LOCAL, BNV_CLASSIC, 0 },
+    { K_OUTSIDER, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1 },
+    { K_OUTSIDER, K_PRIMARY, BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
+      BNV_CLASSIC, BNV_CLASSIC, 1 },
+    { K_OUTSIDER, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1 },
+  };
+  int r;
+  (void)state;
+  for (r = 0; r < (int)(sizeof rows / sizeof rows[0]); r++) {
+    struct wire_side a = { rows[r].a, 100, OLDER, NA };
+    struct wire_side b = { rows[r].b, 200, NEWER, NB };
+    enum bounce_nick_verdict ab, ba;
+    int sym;
+
+    ab = composed(&a, &b, 0, 0);
+    ba = composed(&b, &a, 0, 0);
+    sym = (ab == BNV_KEEP_LOCAL) == yields(ba)
+          && (ab == BNV_CLASSIC) == (ba == BNV_CLASSIC);
+    print_message("mixed both-unknown %s vs %s: %s / %s%s\n",
+                  kind_name(rows[r].a), kind_name(rows[r].b), vname(ab),
+                  vname(ba), sym ? "" : "  ASYMMETRIC");
+    assert_int_equal(ab, rows[r].both_ab);
+    assert_int_equal(ba, rows[r].both_ba);
+    assert_int_equal(sym, rows[r].both_symmetric);
+
+    ab = composed(&a, &b, 0, 0);
+    ba = composed(&b, &a, 1, 0);
+    sym = (ab == BNV_KEEP_LOCAL) == yields(ba)
+          && (ab == BNV_CLASSIC) == (ba == BNV_CLASSIC);
+    print_message("mixed one-sided %s vs %s: %s / %s%s\n",
+                  kind_name(rows[r].a), kind_name(rows[r].b), vname(ab),
+                  vname(ba), sym ? "" : "  ASYMMETRIC");
+    assert_int_equal(ab, rows[r].one_ab);
+    assert_int_equal(ba, rows[r].one_ba);
+    assert_int_equal(sym, rows[r].one_symmetric);
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -436,6 +748,13 @@ int main(void)
     cmocka_unit_test(test_antisymmetric),
     cmocka_unit_test(test_matches_bs_c_convergence),
     cmocka_unit_test(test_verdict_null_inputs_do_not_crash),
+    cmocka_unit_test(test_mark_fills_the_incoming_side),
+    cmocka_unit_test(test_composed_stamps_are_antisymmetric_dlh_b),
+    cmocka_unit_test(test_composed_stamps_are_antisymmetric_dlh_a),
+    cmocka_unit_test(test_composed_session_ends_only_for_another_session),
+    cmocka_unit_test(test_composed_dlh_b_outsider_meets_held_classic),
+    cmocka_unit_test(test_composed_dlh_a_outsider_with_an_equal_id_never_drops_PENDING),
+    cmocka_unit_test(test_mixed_version_table),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

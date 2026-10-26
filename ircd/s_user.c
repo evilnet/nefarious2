@@ -468,6 +468,27 @@ void clear_nick_relay_withhold_legacy(void)
  *    this is not fair. It should actually request another
  *    nick from local user or kill him/her...
  */
+/** Arm, for the N relayed for another server's client, the hold mark
+ * (,H) that client's N arrived with.  A server never stamps a mark for a
+ * client it is not the home of: it passes on what came, or nothing.
+ * When the client's server is the link itself, the relay's tag source
+ * is no link (send.c reads a link's tags only for a client behind it),
+ * so the mark is armed here, beside the session id the hint armed --
+ * read from the line's own link, and only while that line is the one
+ * being handled.  Further away, the relay reads the link's ,S and ,H
+ * itself and this copy, the same mark, goes unused.
+ *
+ * @param[in] cptr The link the N arrived on.
+ * @param[in] sptr The client it introduced.
+ */
+static void relay_hold_mark(struct Client *cptr, struct Client *sptr)
+{
+  if (MyConnect(sptr) || !sendcmdto_stash_is_current(cptr))
+    return;
+  if (cli_s2s_held(cptr))
+    sendcmdto_set_s2s_held(cli_s2s_held(cptr));
+}
+
 /** Finish registering a user who has sent both NICK and USER.
  * For local connections, possibly check IAuth; make sure there is a
  * matching Client config block; clean the username field; check
@@ -1030,7 +1051,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
    * N's ,S compact-tag segment so BX-aware peers can use it for at-N-time
    * convergence dispatch.  Set before each broadcast because the
    * override auto-clears after consumption.  No-op for non-bouncer
-   * users.
+   * users.  The hold mark (,H) rides beside it: the hint stamps one for
+   * a user of ours with an account, relay_hold_mark() copies the one a
+   * relayed N arrived with; both after the hint, which disarms any
+   * earlier mark.
    *
    * The frontier-introducer defer-to-legacy mechanism (skip_legacy_canon
    * + pending_canon_register) was REMOVED 2026-05-08: it broke fresh
@@ -1057,6 +1081,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * IRCv3-aware server announces IPv6, so the full-IP form is the only
      * one needed. */
     bounce_set_n_sessid_hint(sptr);
+    relay_hold_mark(cptr, sptr);
     sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
                                FLAG_IRCV3AWARE, FLAG_LAST_FLAG,
                                "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
@@ -1068,6 +1093,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
                                NumNick(sptr), cli_info(sptr));
   } else {
     bounce_set_n_sessid_hint(sptr);
+    relay_hold_mark(cptr, sptr);
     /* Send full IP address to IPv6-grokking servers. */
     sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
                                FLAG_IPV6, FLAG_LAST_FLAG,
@@ -1079,6 +1105,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
                                iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
                                NumNick(sptr), cli_info(sptr));
     bounce_set_n_sessid_hint(sptr);
+    relay_hold_mark(cptr, sptr);
     /* Send fake IPv6 addresses to pre-IPv6 servers. */
     sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
                                FLAG_LAST_FLAG, FLAG_IPV6,

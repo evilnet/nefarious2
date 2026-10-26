@@ -87,3 +87,16 @@ enum bounce_merge_choice bounce_merge_choose(int we_lose,
     return BOUNCE_MERGE_REFUSE;
   return bar == BOUNCE_DEMOTE_OK ? BOUNCE_MERGE_SWAP : BOUNCE_MERGE_CLASSIC;
 }
+
+char bounce_hold_stamp(int held, int primary)
+{
+  if (held)
+    return BOUNCE_HOLD_MARK_HELD;
+  return primary ? BOUNCE_HOLD_MARK_PRIMARY : BOUNCE_HOLD_MARK_OUTSIDER;
+}
+
+int bounce_hold_mark_valid(char mark)
+{
+  return mark == BOUNCE_HOLD_MARK_HELD || mark == BOUNCE_HOLD_MARK_PRIMARY
+         || mark == BOUNCE_HOLD_MARK_OUTSIDER;
+}

@@ -143,6 +143,13 @@ static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
  * Auto-cleared after use. */
 static char s2s_sessid_override[S2S_SESSID_BUFSIZE] = "";
 
+/** Override bouncer hold mark (compact-tag ,H segment) for the next S2S
+ * emit: BOUNCE_HOLD_MARK_* or 0.  The companion of s2s_sessid_override:
+ * armed only beside an armed session id, disarmed whenever a session id
+ * is armed, and consumed or cleared everywhere the session id is, so the
+ * mark always describes the client the ,S beside it names. */
+static char s2s_held_override = '\0';
+
 /** The server link whose line is being handled right now, or NULL.
  *
  * A link's S2S stash (cli_s2s_msgid / cli_s2s_time_ms / cli_s2s_sessid
@@ -291,6 +298,17 @@ void sendcmdto_set_s2s_sessid(const char *sessid)
     ircd_strncpy(s2s_sessid_override, sessid, sizeof(s2s_sessid_override));
   else
     s2s_sessid_override[0] = '\0';
+  /* A mark armed for another session id never rides this one. */
+  s2s_held_override = '\0';
+}
+
+/** Set the bouncer hold mark (,H) for the next S2S emit, beside the
+ * session id armed by sendcmdto_set_s2s_sessid().  Without an armed
+ * session id there is nothing for the mark to describe: it is dropped.
+ * The format emits ,H only beside ,S. */
+void sendcmdto_set_s2s_held(char mark)
+{
+  s2s_held_override = s2s_sessid_override[0] ? mark : '\0';
 }
 
 /** Arm the multiline framing segment ,M<flag><batch_ref> for the next
@@ -416,6 +434,7 @@ void sendcmdto_reset_s2s_overrides(void)
   s2s_msgid_override[0] = '\0';
   s2s_time_override = 0;
   s2s_sessid_override[0] = '\0';
+  s2s_held_override = '\0';
   s2s_ml_override[0] = '\0';
   s2s_client_tags_override = NULL;
   s2s_raw_tags[0] = '\0';
@@ -685,18 +704,20 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
 
 /** Format message tags for S2S relay including optional client-only tags.
  * Produces compact P10-native wire encoding:
- *   @A<time_b64_7><msgid_14>[,S<sessid>][,M<flag><batchref>][,C<client_tags>]
+ *   @A<time_b64_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,C<client_tags>]
  * The ,C<client_tags> segment is appended only when client_tags is non-NULL
  * and non-empty. Receivers parse it into cli_s2s_client_tags(cptr) for
- * forwarding to local recipients.  ,S and ,M come from their armed
- * overrides (sendcmdto_set_s2s_sessid, sendcmdto_set_s2s_ml), ,S also
- * from cptr's stash.
+ * forwarding to local recipients.  ,S, ,H and ,M come from their armed
+ * overrides (sendcmdto_set_s2s_sessid, sendcmdto_set_s2s_held,
+ * sendcmdto_set_s2s_ml), ,S and ,H also from cptr's stash.
  *
  * Precedence for the msgid and time (one source for both): an armed
  * override (s2s_msgid_override with s2s_time_override); else the stash
  * of \a cptr, but only while \a cptr's link is the one whose line is
  * being handled (sendcmdto_inbound_link()); else a fresh mint.  The ,S
- * hint follows the same gate: the stash, else the sessid override.
+ * hint follows the same gate: the stash, else the sessid override.  The
+ * ,H hold mark comes from the same source as the ,S beside it, and only
+ * with one: the mark describes the client that ,S names.
  *
  * Sized for callers that need to accommodate up to 4094 bytes of client
  * tags (IRCv3 cap) plus the compact prefix; recommend buf ≥ 4128 bytes
@@ -720,6 +741,8 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   char msgidbuf[S2S_MSGID_BUFSIZE];
   char sessidbuf[S2S_SESSID_BUFSIZE];
   char mlbuf[S2S_ML_BUFSIZE];
+  char heldbuf[2] = "";
+  char held = '\0';
   uint64_t epoch_ms;
   const char *msgid_tag = NULL;
   const char *sessid_tag = NULL;
@@ -749,15 +772,26 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
 
   /* Sessid (,S): the current line's own hint, else the explicit
    * override.  Empty → no ,S segment.  Per redesign A.2: bouncer
-   * session-identity hint for at-N-time recognition in m_nick. */
+   * session-identity hint for at-N-time recognition in m_nick.
+   *
+   * Hold mark (,H): taken with the ,S, from the same source -- the
+   * current line's own mark (a relay copies what the N arrived with,
+   * or nothing), else the override the home server's stamp armed
+   * beside the sessid override.  Never with a ,S from another source,
+   * never without a ,S. */
   if (stash && cli_s2s_sessid(cptr)[0]) {
     sessid_tag = cli_s2s_sessid(cptr);
+    held = cli_s2s_held(cptr);
   } else if (s2s_sessid_override[0]) {
     ircd_strncpy(sessidbuf, s2s_sessid_override, sizeof(sessidbuf));
     sessid_tag = sessidbuf;
+    held = s2s_held_override;
     s2s_sessid_override[0] = '\0';  /* auto-clear after consumption */
+    s2s_held_override = '\0';
   }
   has_sessid = (sessid_tag && *sessid_tag);
+  if (!has_sessid || !bounce_hold_mark_valid(held))
+    held = '\0';
 
   /* Msgid and time, always from ONE source:
    *  1. an armed override -- this event's own id, minted here or
@@ -786,17 +820,21 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   }
 
   /* Compact format:
-   *   @A<time_7><msgid_14>[,S<sessid>][,M<flag><batchref>][,C<client_tags>]
+   *   @A<time_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,C<client_tags>]
    *
-   * Segments are appended in order: ,S, then ,M, then ,C.  ,C is
-   * always the LAST segment and must never be followed by another
+   * Segments are appended in order: ,S, then ,H, then ,M, then ,C.  ,C
+   * is always the LAST segment and must never be followed by another
    * segment: a client-tag value may itself contain a comma, so
    * receivers read ,C to the end of the tag region rather than
    * stopping at the next comma (audit 0.1). Emit order otherwise is
-   * conventional for readability in raw S2S logs. */
+   * conventional for readability in raw S2S logs.  A receiver that
+   * does not know ,H skips it like any unknown segment. */
+  heldbuf[0] = held;
+  heldbuf[1] = '\0';
   inttobase64_64(time_b64, epoch_ms, 7);
-  snprintf(buf, buflen, "@A%s%s%s%s%s%s%s%s ", time_b64, msgid_tag,
+  snprintf(buf, buflen, "@A%s%s%s%s%s%s%s%s%s%s ", time_b64, msgid_tag,
            has_sessid ? ",S" : "", has_sessid ? sessid_tag : "",
+           held ? ",H" : "", heldbuf,
            has_ml ? ",M" : "", has_ml ? mlbuf : "",
            has_ctags ? ",C" : "", has_ctags ? client_tags : "");
   return buf;
@@ -1579,7 +1617,12 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
    * the prefix bytes against the 512-byte wire budget — they'd strip
    * the @-prefixed tags but the bytes still count, risking content
    * truncation on long messages.  Same gating discipline as 350769a
-   * applied to the v3-only S2S tokens. */
+   * applied to the v3-only S2S tokens.
+   *
+   * A hold mark (s2s_held_override) needs no term of its own: it is
+   * armed only beside a session id and emitted only with one, so the
+   * sessid term covers it, and the else branch clears it with the
+   * sessid. */
   if ((IsServer(to) || IsMe(to)) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
       IsIRCv3Aware(to) &&
       (s2s_msgid_override[0] || s2s_sessid_override[0] ||
@@ -1613,6 +1656,7 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
     s2s_cptr_override = NULL;  /* Clear even if not used */
     s2s_msgid_override[0] = '\0';  /* Clear even if not used */
     s2s_sessid_override[0] = '\0';  /* Clear even if not used */
+    s2s_held_override = '\0';
     s2s_time_override = 0;
     /* A line to a client inside the labeled-response batch its command
      * opened is part of that response: tag it the way send_reply() tags
@@ -2045,6 +2089,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         s2s_cptr_override = NULL;
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
+        s2s_held_override = '\0';
         s2s_time_override = 0;
         s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
@@ -2074,6 +2119,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       s2s_raw_tags[0] = '\0';
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
+      s2s_held_override = '\0';
       s2s_time_override = 0;
       s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
@@ -2218,6 +2264,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         s2s_cptr_override = NULL;
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
+        s2s_held_override = '\0';
         s2s_time_override = 0;
         s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
@@ -2253,6 +2300,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
       s2s_raw_tags[0] = '\0';
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
+      s2s_held_override = '\0';
       s2s_time_override = 0;
       s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
@@ -2390,6 +2438,7 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
         s2s_cptr_override = NULL;
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
+        s2s_held_override = '\0';
         s2s_time_override = 0;
         s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
@@ -2442,6 +2491,7 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
       s2s_raw_tags[0] = '\0';
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
+      s2s_held_override = '\0';
       s2s_time_override = 0;
       s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
@@ -2552,6 +2602,7 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
   s2s_raw_tags[0] = '\0';
   s2s_msgid_override[0] = '\0';
   s2s_sessid_override[0] = '\0';
+  s2s_held_override = '\0';
   s2s_time_override = 0;
   s2s_client_tags_override = NULL;
 

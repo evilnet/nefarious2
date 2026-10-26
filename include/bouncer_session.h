@@ -1050,6 +1050,22 @@ extern void bounce_kill_session(struct BouncerSession *session,
  */
 extern void bounce_set_n_sessid_hint(struct Client *cptr);
 
+/** May the hold mark (compact-tag ,H) on an N introduced by @a home be
+ * trusted?  Yes when every server on the path from @a home to us
+ * announces SERVER flag H, and so do we: our SERVER line to the link the
+ * path arrives on announced it (the announcement the far end judges us
+ * by), and we still send marks (P10_MESSAGE_TAGS on).  Both ends of the
+ * path are included, so two servers trust each other's marks or neither
+ * does: a path is the same both ways.  A server that does not stamp
+ * marks, or does not relay them, leaves the state of the clients behind
+ * it unknown (bounce_nick_side_from_mark, bouncer_converge.h).
+ *
+ * @param[in] home The N's source server (the client's home); never &me,
+ *                 whose clients' N are not incoming (0).
+ * @return 1 if trusted, else 0.
+ */
+extern int bounce_hold_marks_trusted(struct Client *home);
+
 /** Generate a UUID v7 session ID and write its 22-char base64 form
  * (followed by nul) to @a buf.  Exposed so list.c can mint a per-Client
  * session ID at make_client time; bouncer-session adoption reuses the

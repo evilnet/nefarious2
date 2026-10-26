@@ -3,7 +3,8 @@
  *
  * Pure wire decisions for the bouncer: which direct server link may hold
  * a given client "face", whether a live primary may be demoted into an
- * alias of a new primary, and which way a same-nick merge goes.  No ircd
+ * alias of a new primary, which way a same-nick merge goes, and the hold
+ * mark a home server stamps on its client's N.  No ircd
  * dependencies, so the cmocka suite
  * (ircd/test/bouncer_wire_cmocka.c) compiles it standalone; the callers
  * in bouncer_session.c read the link and client state and pass it in.
@@ -144,5 +145,39 @@ enum bounce_merge_choice {
  */
 extern enum bounce_merge_choice bounce_merge_choose(int we_lose,
                                                     enum bounce_demote_bar bar);
+
+/* The hold mark: the compact-tag ,H<x> segment a client's home server
+ * puts on the client's N, after its ,S session id.  It tells the server
+ * receiving the N what a same-nick verdict (bouncer_converge.h) needs to
+ * know about the client and cannot learn any other way before the burst
+ * ends: is it a held ghost, a live session primary, or a live login that
+ * is not its session's primary.  Only servers that announce SERVER flag
+ * H stamp and relay it; a server relaying someone else's N copies the
+ * mark it received or sends none. */
+#define BOUNCE_HOLD_MARK_HELD     'h'  /**< a held ghost with no live alias */
+#define BOUNCE_HOLD_MARK_PRIMARY  'p'  /**< live, its session's primary */
+#define BOUNCE_HOLD_MARK_OUTSIDER 'n'  /**< live, not a session's primary
+                                        *   (in no session) */
+
+/** The mark a home server stamps on its own client's N.
+ *
+ * The inputs are the predicates the same-nick verdict reads for the
+ * client on its own server, so the server receiving the N decides from
+ * the facts the home server would decide from:
+ *  - held:    bounce_nick_side_held() -- a held ghost whose session has
+ *             no live alias (a held ghost with one counts as live);
+ *  - primary: the client is the hs_client of the session the session-id
+ *             hint names (the verdict's local_is_session_primary).
+ * A held ghost is its session's hs_client too: held wins.
+ *
+ * @param[in] held    Nonzero if the client is held (see above).
+ * @param[in] primary Nonzero if it is its session's primary.
+ * @return BOUNCE_HOLD_MARK_HELD, _PRIMARY or _OUTSIDER.
+ */
+extern char bounce_hold_stamp(int held, int primary);
+
+/** Is @a mark one of the three hold marks?  A receiver keeps only these;
+ * anything else on the wire reads as no mark. */
+extern int bounce_hold_mark_valid(char mark);
 
 #endif /* INCLUDED_bouncer_wire_h */

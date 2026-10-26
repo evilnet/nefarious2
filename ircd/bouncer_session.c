@@ -11221,13 +11221,49 @@ struct BouncerSession *bounce_find_any_session(const char *account)
   return as->as_sessions; /* Return first session, regardless of state */
 }
 
+/** Stage the hold mark (,H) of our own client's N beside the session id
+ * the hint has just armed.  Only the client's home server stamps a mark,
+ * and only on an N that carries an account: a server relaying another
+ * server's client copies the mark that client's N arrived with
+ * (register_user), or sends none.
+ *
+ * The mark is made of the predicates the same-nick verdict reads for
+ * this client here, so a peer decides from the facts we would:
+ *  - held: bounce_nick_side_held(), a held ghost whose session has no
+ *    live alias.  It reads the session bounce_get_session() finds -- the
+ *    one this client is the hs_client of, the session the hint names.
+ *    bounce_find_best_held(account), the session a rebind acts on, is
+ *    that same session unless the account has another HOLDING session;
+ *    the rebind then refuses this ghost, unless that other session
+ *    claims the ghost as its hs_client too (two sessions naming one
+ *    ghost, left by a split that converged across session ids).  The
+ *    verdict reads held through bounce_nick_side_held() as well, so a
+ *    change to its predicate reaches the mark with it.
+ *  - primary: @a bs is the session the hint looked up, and the client
+ *    is its hs_client (the verdict's local_is_session_primary).
+ * So the ,S beside a held or primary mark is the session's id, and the
+ * ,S beside an outsider mark is the client's own id -- except for a
+ * member of a session's alias roster that is not its primary (never
+ * N-introduced: aliases come by BX C) and a held ghost no session
+ * claims, which keep the verdict's reading of them.
+ */
+static void bounce_stage_hold_mark(struct Client *cptr,
+                                   struct BouncerSession *bs)
+{
+  if (!MyConnect(cptr) || !IsAccount(cptr))
+    return;
+  sendcmdto_set_s2s_held(bounce_hold_stamp(bounce_nick_side_held(cptr),
+                                           bs && bs->hs_client == cptr));
+}
+
 /** Set the S2S sessid override for an outgoing N introduction.
  *
  * Stages the client's session id for the ,S compact-tag segment of the
  * next S2S emit: its bouncer session's hs_sessid when it is a member of
  * one, else its own cli_session_id.  Per redesign A.2: bouncer-aware
  * peers use this hint at-N-time for convergence dispatch in m_nick and
- * in the post-burst reconcile.
+ * in the post-burst reconcile.  For a client of ours with an account it
+ * also stages the hold mark (,H) beside it: one lookup for both.
  */
 void bounce_set_n_sessid_hint(struct Client *cptr)
 {
@@ -11265,10 +11301,12 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * server whose N we relay, or a connection that never joined -- was
    * stamped with the session's id, and a fork peer then merged the live
    * session into it. */
+  bs = NULL;
   if (IsAccount(cptr)) {
     bs = bounce_get_session(cptr);
     if (bs && bs->hs_sessid[0]) {
       sendcmdto_set_s2s_sessid(bs->hs_sessid);
+      bounce_stage_hold_mark(cptr, bs);
       return;
     }
   }
@@ -11281,8 +11319,28 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
    * format_s2s_tags_with_client prefers cli_s2s_sessid over this
    * override — so this fallback only fires when the upstream didn't
    * carry a sessid, letting our minted value propagate downstream. */
-  if (cli_session_id(cptr)[0])
+  if (cli_session_id(cptr)[0]) {
     sendcmdto_set_s2s_sessid(cli_session_id(cptr));
+    bounce_stage_hold_mark(cptr, bs);
+  }
+}
+
+/** See include/bouncer_session.h. */
+int bounce_hold_marks_trusted(struct Client *home)
+{
+  struct Client *s;
+
+  /* We send marks only while the tags are on. */
+  if (!home || !feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return 0;
+  for (s = home; s && IsServer(s); s = cli_serv(s)->up) {
+    if (!IsHoldMark(s))
+      return 0;
+    /* Our own link: the far end judges us by the H we announced on it. */
+    if (IsMe(cli_serv(s)->up))
+      return IsHoldMarkSent(s);
+  }
+  return 0;
 }
 
 /** Purge per-Client ephemeral session-scoped state on exit.

@@ -1785,6 +1785,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_client_tags(cptr)[0] = '\0';
   cli_s2s_sessid(cptr)[0] = '\0';
   cli_s2s_ml(cptr)[0] = '\0';
+  cli_s2s_held(cptr) = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1837,6 +1838,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
            * tagend. Marker is a single ASCII char identifying the
            * segment type:
            *   S — bouncer session-identity hint
+           *   H — bouncer hold mark of the N's client (one of h, p, n)
            *   M — multiline framing, <flag><batchref> (ML lines only)
            *   C — client-only tags (literal IRCv3 client-tag string)
            * Unknown markers are silently skipped (forward-compatible
@@ -1895,6 +1897,17 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
                 memcpy(cli_s2s_sessid(cptr), seg_data, data_len);
                 cli_s2s_sessid(cptr)[data_len] = '\0';
               }
+              break;
+            }
+            case 'H': {
+              /* Bouncer hold mark: what the N's client is on its home
+               * server -- a held ghost, a live session primary, or a
+               * live login that is not a session's primary -- for the
+               * same-nick verdict.  Exactly one of the three letters;
+               * anything else reads as no mark. */
+              size_t data_len = seg_end - seg_data;
+              if (data_len == 1 && bounce_hold_mark_valid(seg_data[0]))
+                cli_s2s_held(cptr) = seg_data[0];
               break;
             }
             case 'M': {

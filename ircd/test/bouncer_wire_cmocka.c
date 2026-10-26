@@ -346,9 +346,53 @@ static void merge_loser_with_a_dying_primary_is_classic(void **s)
                    BOUNCE_MERGE_SWAP);
 }
 
+/* bounce_hold_stamp(held, primary): the ,H mark a home server puts on its
+ * own client's N.  held = bounce_nick_side_held(), primary = the client is
+ * its session's hs_client: the facts the receiving side's verdict reads. */
+
+static void hold_stamp_covers_every_input(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_hold_stamp(0, 0), BOUNCE_HOLD_MARK_OUTSIDER);
+  assert_int_equal(bounce_hold_stamp(0, 1), BOUNCE_HOLD_MARK_PRIMARY);
+  assert_int_equal(bounce_hold_stamp(1, 0), BOUNCE_HOLD_MARK_HELD);
+  /* A held ghost is its session's hs_client: held wins. */
+  assert_int_equal(bounce_hold_stamp(1, 1), BOUNCE_HOLD_MARK_HELD);
+  /* Any nonzero value is "yes". */
+  assert_int_equal(bounce_hold_stamp(7, 0), BOUNCE_HOLD_MARK_HELD);
+  assert_int_equal(bounce_hold_stamp(0, -1), BOUNCE_HOLD_MARK_PRIMARY);
+}
+
+static void hold_mark_letters_are_the_wire_letters(void **s)
+{
+  (void)s;
+  /* The bytes on the wire: ,Hh ,Hp ,Hn. */
+  assert_int_equal(BOUNCE_HOLD_MARK_HELD, 'h');
+  assert_int_equal(BOUNCE_HOLD_MARK_PRIMARY, 'p');
+  assert_int_equal(BOUNCE_HOLD_MARK_OUTSIDER, 'n');
+}
+
+static void hold_mark_valid_only_for_the_three_letters(void **s)
+{
+  int c;
+  (void)s;
+  for (c = -128; c < 128; c++) {
+    int want = (c == 'h' || c == 'p' || c == 'n');
+    assert_int_equal(bounce_hold_mark_valid((char)c), want);
+  }
+  /* Every stamp is a valid mark. */
+  assert_true(bounce_hold_mark_valid(bounce_hold_stamp(0, 0)));
+  assert_true(bounce_hold_mark_valid(bounce_hold_stamp(0, 1)));
+  assert_true(bounce_hold_mark_valid(bounce_hold_stamp(1, 0)));
+  assert_true(bounce_hold_mark_valid(bounce_hold_stamp(1, 1)));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(hold_stamp_covers_every_input),
+    cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
+    cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),
     cmocka_unit_test(aware_link_never_knows),
     cmocka_unit_test(gated_link_knows_nothing),
     cmocka_unit_test(own_direction_excluded),

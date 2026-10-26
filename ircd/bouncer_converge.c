@@ -10,6 +10,7 @@
  * it is compiled standalone for the cmocka suite.
  */
 #include "bouncer_converge.h"
+#include "bouncer_wire.h"
 
 #include <string.h>
 
@@ -102,4 +103,15 @@ enum bounce_nick_verdict bounce_nick_verdict(const struct bounce_nick_side *loca
                                                 : BNV_DEMOTE_LOCAL;
   return strcmp(or_empty(local->numeric), or_empty(incoming->numeric)) <= 0
          ? BNV_KEEP_LOCAL : BNV_DEMOTE_LOCAL;
+}
+
+void bounce_nick_side_from_mark(struct bounce_nick_side *side, int trusted,
+                                char mark)
+{
+  if (!side)
+    return;
+  /* Unknown unless the mark is trusted and present. */
+  side->state_known = trusted && bounce_hold_mark_valid(mark);
+  side->held = side->state_known && mark == BOUNCE_HOLD_MARK_HELD;
+  side->non_member = side->state_known && mark == BOUNCE_HOLD_MARK_OUTSIDER;
 }
