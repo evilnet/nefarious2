@@ -125,6 +125,18 @@ enum bounce_alias_filing bounce_alias_filing(int exact, int by_primary,
   return by_account && !unmirrored ? BOUNCE_FILE_ACCOUNT : BOUNCE_FILE_NONE;
 }
 
+enum bounce_bxc_known bounce_bxc_known_alias(int behind_link, int same_primary,
+                                             int filed_as_named, int same_nick,
+                                             int same_sessid)
+{
+  /* Only the alias's own server speaks for it, over its own link. */
+  if (!behind_link)
+    return BOUNCE_BXC_KNOWN_IGNORE;
+  if (same_primary && filed_as_named && same_nick && same_sessid)
+    return BOUNCE_BXC_KNOWN_KEEP;
+  return BOUNCE_BXC_KNOWN_REFILE;
+}
+
 enum bounce_promote_session
 bounce_promote_session(int exact, int by_old_primary, int ambiguous,
                        int new_on_roster)

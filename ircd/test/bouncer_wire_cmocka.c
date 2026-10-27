@@ -822,6 +822,43 @@ static void bsd_reannounces_only_toward_a_hold_mark_link(void **s)
       assert_int_equal(bounce_bsd_reannounces((enum bounce_bsd_action)a, l, 0), 0);
 }
 
+/* bounce_bxc_known_alias(behind_link, same_primary, filed_as_named,
+ *                        same_nick, same_sessid) */
+static void known_alias_of_another_direction_is_not_the_lines(void **s)
+{
+  int p, f, n, i;
+  (void)s;
+  /* A connection of ours, or one behind another link: its own server
+   * speaks for it, not this line. */
+  for (p = 0; p < 2; p++)
+  for (f = 0; f < 2; f++)
+  for (n = 0; n < 2; n++)
+  for (i = 0; i < 2; i++)
+    assert_int_equal(bounce_bxc_known_alias(0, p, f, n, i), BOUNCE_BXC_KNOWN_IGNORE);
+}
+
+static void known_alias_as_announced_is_kept(void **s)
+{
+  (void)s;
+  /* Announced again as it is here (a link burst after the announcement
+   * we had): nothing changes. */
+  assert_int_equal(bounce_bxc_known_alias(1, 1, 1, 1, 1), BOUNCE_BXC_KNOWN_KEEP);
+}
+
+static void known_alias_follows_the_line(void **s)
+{
+  int p, f, n, i;
+  (void)s;
+  /* Another primary, another record (or one where none was), a nick or a
+   * session id of before: it follows the line, whichever differs. */
+  for (p = 0; p < 2; p++)
+  for (f = 0; f < 2; f++)
+  for (n = 0; n < 2; n++)
+  for (i = 0; i < 2; i++)
+    if (!(p && f && n && i))
+      assert_int_equal(bounce_bxc_known_alias(1, p, f, n, i), BOUNCE_BXC_KNOWN_REFILE);
+}
+
 /* bounce_bxp_session_action(slot_ours, slot_held, old_is_slot,
  *                           new_is_slot, ours_holding, kc_conflict) */
 static void bxp_applies_to_a_slot_not_ours(void **s)
@@ -927,6 +964,9 @@ int main(void)
     cmocka_unit_test(bxp_never_repoints_our_live_primary),
     cmocka_unit_test(bxp_over_our_held_ghost_yields),
     cmocka_unit_test(bxp_naming_our_slot_as_new_never_yields),
+    cmocka_unit_test(known_alias_of_another_direction_is_not_the_lines),
+    cmocka_unit_test(known_alias_as_announced_is_kept),
+    cmocka_unit_test(known_alias_follows_the_line),
     cmocka_unit_test(bxp_yields_only_to_another_client),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),

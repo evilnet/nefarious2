@@ -240,6 +240,39 @@ extern enum bounce_alias_filing bounce_alias_filing(int exact, int by_primary,
                                                     int by_account,
                                                     int unmirrored);
 
+/** What a BX C does with an alias this server knows already. */
+enum bounce_bxc_known {
+  BOUNCE_BXC_KNOWN_IGNORE,  /**< not the line's to change: a connection of
+                             *   ours, or one behind another link */
+  BOUNCE_BXC_KNOWN_KEEP,    /**< already as the line says: nothing changes */
+  BOUNCE_BXC_KNOWN_REFILE   /**< it follows the line: its primary, its
+                             *   record, its nick and its session id */
+};
+
+/** A BX C for an alias we know already: its server announces it again (a
+ * link burst after an announcement we had, a session announced again), or
+ * under another primary or session (its held copy yielded to another
+ * server's live one, its session took another id).  Only the alias's own
+ * server speaks for it, over the link it is behind.  The line then says
+ * what the alias is now, as a BX C for a new one does: whose alias, filed
+ * in which record (bounce_alias_filing()), under which nick (its
+ * primary's: the line carries none) and which session id.
+ *
+ * @param[in] behind_link    The alias is behind the link the line came
+ *                           over.
+ * @param[in] same_primary   Its primary here is the one the line names.
+ * @param[in] filed_as_named Our rosters list it where the filing order
+ *                           puts it: in the record chosen and in no other,
+ *                           or in none when the order chooses none.
+ * @param[in] same_nick      It carries the named primary's nick.
+ * @param[in] same_sessid    It carries the line's session id.
+ */
+extern enum bounce_bxc_known bounce_bxc_known_alias(int behind_link,
+                                                    int same_primary,
+                                                    int filed_as_named,
+                                                    int same_nick,
+                                                    int same_sessid);
+
 /** Which of our sessions a BX P (a promote: <old primary> <new primary>
  * <session id>) updates. */
 enum bounce_promote_session {

@@ -10422,6 +10422,138 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 /* BX C: Create alias                                                */
 /* ---------------------------------------------------------------- */
 
+/** The record a BX C files its alias in, by bounce_alias_filing()'s order;
+ * NULL for none.  Never a record of another Keycloak user than the alias's
+ * primary.
+ *
+ * @param[in] account       The account the BX C names.
+ * @param[in] sessid        The session id it names.
+ * @param[in] primary       The primary it names.
+ * @param[in] alias_numeric The alias it announces (for the log). */
+static struct BouncerSession *bxc_filing_record(const char *account,
+                                                const char *sessid,
+                                                struct Client *primary,
+                                                const char *alias_numeric)
+{
+  struct BouncerSession *session;
+
+  /* The session of the id the BX C
+   * names; else the session whose primary the BX C names (a merge can
+   * leave the two servers' ids apart); else our session of the account.
+   *
+   * The account fallback covers the cross-sessid race: peer's BX C may
+   * arrive with peer's *original* sessid (emitted before peer received
+   * our BS C and renamed to our lex-lower sessid), and an account has
+   * one local session once that rename has converged.  It never stands
+   * in for an id BS C left unmirrored here (kept apart from ours, or a
+   * holding loser of ours): that id is never renamed into ours, so an
+   * alias of it is another session's, not ours (bounce_alias_filing). */
+  session = bounce_find_by_token_sessid(account, sessid);
+  {
+    struct BouncerSession *of_primary = NULL;
+    struct AccountSessions *as = NULL;
+    int by_account = 0;
+    int unmirrored = 0;
+
+    if (!session) {
+      /* The session the primary is the primary of; one that only lists
+       * it on its roster is not its session. */
+      of_primary = primary ? bounce_session_of_primary(primary) : NULL;
+      if (of_primary && (of_primary->hs_client != primary
+                         || 0 != ircd_strcmp(of_primary->hs_account, account)))
+        of_primary = NULL;
+      as = bounce_find_by_account(account);
+      unmirrored = unmirrored_marked(account, sessid);
+      /* ... nor a session of another Keycloak user than this alias's
+       * primary: sessions kept apart after a split leave two per
+       * account (user, 2026-10-23), and the alias is then tracked in
+       * neither rather than in the wrong one. */
+      if (!of_primary && !unmirrored && as && as->as_sessions && primary
+          && cli_user(primary)
+          && bounce_rebind_kc_conflict(bounce_session_kc_id(as->as_sessions),
+                                       cli_user(primary)->kc_id)) {
+        log_write(LS_USER, L_INFO, 0,
+                  "BX C: sessid %s not found; account fallback session %s "
+                  "belongs to another Keycloak id: alias %s not tracked",
+                  sessid, as->as_sessions->hs_sessid, alias_numeric);
+      } else if (as && as->as_sessions) {
+        by_account = 1;
+      }
+    }
+    switch (bounce_alias_filing(session != NULL, of_primary != NULL,
+                                by_account, unmirrored)) {
+    case BOUNCE_FILE_EXACT:
+      break;
+    case BOUNCE_FILE_PRIMARY:
+      session = of_primary;
+      Debug((DEBUG_INFO, "BX C: sessid %s not found, using session %s of "
+             "primary %s for alias %s", sessid, session->hs_sessid,
+             cli_name(primary), alias_numeric));
+      break;
+    case BOUNCE_FILE_ACCOUNT:
+      session = as->as_sessions;
+      Debug((DEBUG_INFO,
+             "BX C: sessid %s not found, using account-fallback "
+             "session %s for alias %s",
+             sessid, session->hs_sessid, alias_numeric));
+      break;
+    case BOUNCE_FILE_NONE:
+      if (unmirrored && by_account)
+        log_write(LS_USER, L_INFO, 0,
+                  "BX C: session %s of %s is kept apart from ours here: "
+                  "alias %s not tracked", sessid, account, alias_numeric);
+      session = NULL;
+      break;
+    }
+  }
+  /* Whichever was chosen, never a session of another Keycloak user: one
+   * kept apart after a split can share the sessid of another Keycloak
+   * user's (user, 2026-10-23). */
+  if (session && primary && cli_user(primary)
+      && bounce_rebind_kc_conflict(bounce_session_kc_id(session),
+                                   cli_user(primary)->kc_id)) {
+    log_write(LS_USER, L_INFO, 0, "BX C: session %s belongs to Keycloak id %s, "
+              "alias %s's primary carries %s: alias not tracked",
+              session->hs_sessid, bounce_session_kc_id(session), alias_numeric,
+              cli_user(primary)->kc_id);
+    session = NULL;
+  }
+  return session;
+}
+
+/** File the alias @a alias_numeric on @a session's roster, with the
+ * persistence profile its BX C carries, and persist the roster. */
+static void session_roster_add(struct BouncerSession *session,
+                               const char *alias_numeric,
+                               const char *alias_profile)
+{
+  if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+    struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
+    ircd_strncpy(ba->ba_numeric, alias_numeric, sizeof(ba->ba_numeric));
+    ircd_strncpy(ba->ba_server, alias_numeric, sizeof(ba->ba_server));
+    ba->ba_last_active = CurrentTime;
+    ba->ba_caps = 0;
+    ba->ba_caps_known = 0;
+    ba->ba_away = 0;
+    ba->ba_away_known = 0;
+    /* M4b: record the alias's active draft/persistence profile,
+     * received as the positional field after modes.  Old peers
+     * don't send this; default to empty (= "default" at the
+     * reconciler).  Treat literal "default" verbatim — same as
+     * empty for resolution purposes but more readable in logs. */
+    if (alias_profile && *alias_profile
+        && ircd_strcmp(alias_profile, PERSISTENCE_PROFILE_DEFAULT) != 0)
+      ircd_strncpy(ba->ba_active_profile, alias_profile,
+                   sizeof(ba->ba_active_profile));
+    else
+      ba->ba_active_profile[0] = '\0';
+    /* Persist the updated roster (per redesign B.2 + 1b lifecycle
+     * hook) so alias presence survives restart and feeds peers'
+     * deterministic-dedup convergence on next link establishment. */
+    bounce_db_put(session);
+  }
+}
+
 /** Handle BX C (Create Alias).
  *
  * Wire format: <server> BX C <primary_numeric> <alias_numeric> <account> <sessid> :<channels>
@@ -10448,6 +10580,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   char *chan_copy;
   char *chan_name;
   char *chan_tok;
+  int refiled = 0;
 
   if (parc < 7)
     return protocol_violation(sptr, "BX C requires 5 parameters");
@@ -10506,11 +10639,88 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
          alias_numeric, primary_numeric, account,
          chanlist ? chanlist : "?",
          alias ? cli_name(alias) : "NULL"));
+  if (alias && alias == primary) {
+    Debug((DEBUG_INFO, "BX C: %s names %s as an alias of itself",
+           cli_name(sptr), alias_numeric));
+    goto forward;
+  }
   if (alias) {
     if (IsBouncerAlias(alias)) {
-      /* Already an alias — duplicate BX C, skip creation */
-      Debug((DEBUG_INFO, "BX C: alias %s already exists as alias", alias_numeric));
-      goto forward;
+      /* An alias we know already.  Its server announces it again -- a
+       * link burst names every live alias of a session, held or active --
+       * or names another primary or session for it: its held copy yielded
+       * to another server's live primary, or its session took another id.
+       * The line says what the alias is now, as for a new one: whose alias,
+       * filed in which record, under which nick (its primary's: BX C
+       * carries none, and a replica left with the old one shows another
+       * face than its server's) and which session id.  Only its own server
+       * speaks for it (bounce_bxc_known_alias). */
+      struct BouncerSession *target;
+      struct AccountSessions *as;
+      struct BouncerSession *s;
+      struct bounce_counts was;
+      int in_target = 0, elsewhere = 0;
+
+      if (!IsAccount(alias) || !cli_user(alias)
+          || 0 != ircd_strcmp(cli_user(alias)->account, account)) {
+        log_write(LS_USER, L_INFO, 0, "BX C: %s names alias %s (%s) under "
+                  "account %s, which it is not logged in to: not re-filed",
+                  cli_name(sptr), alias_numeric, cli_name(alias), account);
+        goto forward;
+      }
+      target = bxc_filing_record(account, sessid, primary, alias_numeric);
+      as = bounce_find_by_account(account);
+      for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext) {
+        if (!session_roster_has(s, alias))
+          continue;
+        if (s == target)
+          in_target = 1;
+        else
+          elsewhere = 1;
+      }
+      switch (bounce_bxc_known_alias(cli_from(alias) == cptr,
+                                     cli_alias_primary(alias) == primary,
+                                     target ? (in_target && !elsewhere) : !elsewhere,
+                                     0 == ircd_strcmp(cli_name(alias), cli_name(primary)),
+                                     0 == strcmp(cli_session_id(alias), sessid))) {
+      case BOUNCE_BXC_KNOWN_IGNORE:
+        Debug((DEBUG_INFO, "BX C: alias %s is not behind %s: not re-filed",
+               alias_numeric, cli_name(cptr)));
+        goto forward;
+      case BOUNCE_BXC_KNOWN_KEEP:
+        Debug((DEBUG_INFO, "BX C: alias %s already filed as announced",
+               alias_numeric));
+        goto forward;
+      case BOUNCE_BXC_KNOWN_REFILE:
+        break;
+      }
+      /* What it holds, before anything changes: a remote alias holds no
+       * count, and stays one. */
+      count_held(alias, &was);
+      /* Out of every record but the one the line files it in. */
+      for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+        if (s != target)
+          session_roster_drop(s, alias, 0);
+      log_write(LS_USER, L_INFO, 0, "BX C: %s re-files alias %s (%s, alias of "
+                "%s) as an alias of %s (%s) in %s",
+                cli_name(sptr), alias_numeric, cli_name(alias),
+                cli_alias_primary(alias) ? cli_name(cli_alias_primary(alias)) : "none",
+                primary_numeric, cli_name(primary),
+                target ? target->hs_sessid : "no record of ours");
+      cli_user(alias)->alias_primary = primary;
+      /* Not ours (it is behind the line's link): no socket to tell of the
+       * nick, and an alias is in no nick hash. */
+      if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
+        ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
+      cli_lastnick(alias) = cli_lastnick(primary);
+      if (0 != strcmp(cli_session_id(alias), sessid)) {
+        presence_purge_session(cli_session_id(alias));
+        ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
+      }
+      bounce_count_converted(alias, &was, cli_user(alias)->server, "BX C re-file");
+      session = target;
+      refiled = 1;
+      goto track_alias;
     }
     /* Existing non-alias client -- convert it to an alias in place.
      *
@@ -10684,112 +10894,12 @@ track_alias:
   if (alias_modes && *alias_modes)
     user_apply_umode_str(alias, alias_modes);
 
-  /* Track alias in session replica: the session of the id the BX C
-   * names; else the session whose primary the BX C names (a merge can
-   * leave the two servers' ids apart); else our session of the account.
-   *
-   * The account fallback covers the cross-sessid race: peer's BX C may
-   * arrive with peer's *original* sessid (emitted before peer received
-   * our BS C and renamed to our lex-lower sessid), and an account has
-   * one local session once that rename has converged.  It never stands
-   * in for an id BS C left unmirrored here (kept apart from ours, or a
-   * holding loser of ours): that id is never renamed into ours, so an
-   * alias of it is another session's, not ours (bounce_alias_filing). */
-  session = bounce_find_by_token_sessid(account, sessid);
-  {
-    struct BouncerSession *of_primary = NULL;
-    struct AccountSessions *as = NULL;
-    int by_account = 0;
-    int unmirrored = 0;
-
-    if (!session) {
-      /* The session the primary is the primary of; one that only lists
-       * it on its roster is not its session. */
-      of_primary = primary ? bounce_session_of_primary(primary) : NULL;
-      if (of_primary && (of_primary->hs_client != primary
-                         || 0 != ircd_strcmp(of_primary->hs_account, account)))
-        of_primary = NULL;
-      as = bounce_find_by_account(account);
-      unmirrored = unmirrored_marked(account, sessid);
-      /* ... nor a session of another Keycloak user than this alias's
-       * primary: sessions kept apart after a split leave two per
-       * account (user, 2026-10-23), and the alias is then tracked in
-       * neither rather than in the wrong one. */
-      if (!of_primary && !unmirrored && as && as->as_sessions && primary
-          && cli_user(primary)
-          && bounce_rebind_kc_conflict(bounce_session_kc_id(as->as_sessions),
-                                       cli_user(primary)->kc_id)) {
-        log_write(LS_USER, L_INFO, 0,
-                  "BX C: sessid %s not found; account fallback session %s "
-                  "belongs to another Keycloak id: alias %s not tracked",
-                  sessid, as->as_sessions->hs_sessid, alias_numeric);
-      } else if (as && as->as_sessions) {
-        by_account = 1;
-      }
-    }
-    switch (bounce_alias_filing(session != NULL, of_primary != NULL,
-                                by_account, unmirrored)) {
-    case BOUNCE_FILE_EXACT:
-      break;
-    case BOUNCE_FILE_PRIMARY:
-      session = of_primary;
-      Debug((DEBUG_INFO, "BX C: sessid %s not found, using session %s of "
-             "primary %s for alias %s", sessid, session->hs_sessid,
-             primary_numeric, alias_numeric));
-      break;
-    case BOUNCE_FILE_ACCOUNT:
-      session = as->as_sessions;
-      Debug((DEBUG_INFO,
-             "BX C: sessid %s not found, using account-fallback "
-             "session %s for alias %s",
-             sessid, session->hs_sessid, alias_numeric));
-      break;
-    case BOUNCE_FILE_NONE:
-      if (unmirrored && by_account)
-        log_write(LS_USER, L_INFO, 0,
-                  "BX C: session %s of %s is kept apart from ours here: "
-                  "alias %s not tracked", sessid, account, alias_numeric);
-      session = NULL;
-      break;
-    }
-  }
-  /* Whichever was chosen, never a session of another Keycloak user: one
-   * kept apart after a split can share the sessid of another Keycloak
-   * user's (user, 2026-10-23). */
-  if (session && primary && cli_user(primary)
-      && bounce_rebind_kc_conflict(bounce_session_kc_id(session),
-                                   cli_user(primary)->kc_id)) {
-    log_write(LS_USER, L_INFO, 0, "BX C: session %s belongs to Keycloak id %s, "
-              "alias %s's primary carries %s: alias not tracked",
-              session->hs_sessid, bounce_session_kc_id(session), alias_numeric,
-              cli_user(primary)->kc_id);
-    session = NULL;
-  }
-  if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
-    struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
-    ircd_strncpy(ba->ba_numeric, alias_numeric, sizeof(ba->ba_numeric));
-    ircd_strncpy(ba->ba_server, alias_numeric, sizeof(ba->ba_server));
-    ba->ba_last_active = CurrentTime;
-    ba->ba_caps = 0;
-    ba->ba_caps_known = 0;
-    ba->ba_away = 0;
-    ba->ba_away_known = 0;
-    /* M4b: record the alias's active draft/persistence profile,
-     * received as the positional field after modes.  Old peers
-     * don't send this; default to empty (= "default" at the
-     * reconciler).  Treat literal "default" verbatim — same as
-     * empty for resolution purposes but more readable in logs. */
-    if (alias_profile && *alias_profile
-        && ircd_strcmp(alias_profile, PERSISTENCE_PROFILE_DEFAULT) != 0)
-      ircd_strncpy(ba->ba_active_profile, alias_profile,
-                   sizeof(ba->ba_active_profile));
-    else
-      ba->ba_active_profile[0] = '\0';
-    /* Persist the updated roster (per redesign B.2 + 1b lifecycle
-     * hook) so alias presence survives restart and feeds peers'
-     * deterministic-dedup convergence on next link establishment. */
-    bounce_db_put(session);
-  }
+  /* Track the alias in its session's record (a re-filed alias has its
+   * record chosen above), once. */
+  if (!refiled)
+    session = bxc_filing_record(account, sessid, primary, alias_numeric);
+  if (session && !session_roster_has(session, alias))
+    session_roster_add(session, alias_numeric, alias_profile);
 
   /* Add alias to each of the primary's channels with CHFL_ALIAS */
   if (chanlist && *chanlist) {
@@ -10820,6 +10930,9 @@ track_alias:
                primary_numeric, cli_name(primary), chan_name));
         continue;
       }
+      /* A known alias (announced again) is in it already. */
+      if (find_member_link(chptr, alias))
+        continue;
       /* Skip +Z channels for non-TLS aliases */
       if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
         Debug((DEBUG_INFO, "BX C: skipping +Z channel %s (alias not SSL)", chan_name));
