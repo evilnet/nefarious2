@@ -1967,7 +1967,8 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
   if (!old || !new_primary || old == new_primary)
     return;
   for (c = GlobalClientList; c; c = cli_next(c))
-    if (IsBouncerAlias(c) && cli_user(c) && cli_user(c)->alias_primary == old)
+    if (c != new_primary && IsBouncerAlias(c) && cli_user(c)
+        && cli_user(c)->alias_primary == old)
       cli_user(c)->alias_primary = new_primary;
 }
 
@@ -9855,6 +9856,14 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
+  /* Every alias that followed the old client follows the new one, filed
+   * on a record's roster or not (the record's own loop below re-points one
+   * roster; an alias of the old client can be filed in none, or in
+   * another), before the old client leaves a channel -- which parts its
+   * aliases from it (the swap below, or the exit) -- and exits, which
+   * would leave them with no primary. */
+  bounce_repoint_aliases(old_client, new_client);
+
   if (IsBouncerAlias(new_client)) {
     /* Alias path: new_client is already in channels with CHFL_ALIAS.
      * Copy mode flags from old's memberships, clear CHFL_ALIAS. */
@@ -9898,11 +9907,16 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     userstats_count_sync(new_client);
   } else {
     /* Swap path: new_client has no channel memberships.
-     * Transfer memberships from old to new (legacy/sequential). */
+     * Transfer memberships from old to new (legacy/sequential).  A
+     * channel the new client is in already keeps its one membership: it
+     * can be a member when the line names a client of ours (our held
+     * ghost, which the record then keeps) or one already in its own
+     * channels. */
     for (member = cli_user(old_client)->channel; member; member = next_member) {
       next_member = member->next_channel;
       unsigned int modes = member->status & ~CHFL_HOLDING;
-      add_user_to_channel(member->channel, new_client, modes, OpLevel(member));
+      if (!find_member_link(member->channel, new_client))
+        add_user_to_channel(member->channel, new_client, modes, OpLevel(member));
       remove_user_from_channel(old_client, member->channel);
     }
     /* Nick should already match — don't propagate a desync from the wire. */
@@ -10031,13 +10045,6 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       bounce_recompute_session_away(bsess);
     }
   }
-
-  /* Every alias that followed the old client follows the new one, filed
-   * on this record's roster or not (the roster above is one record's; an
-   * alias of the old client can be filed in none, or in another), before
-   * the old client leaves its channels -- which parts its aliases -- and
-   * exits, which would leave them with no primary. */
-  bounce_repoint_aliases(old_client, new_client);
 
   /* C3: Remove old_client from channels silently, then exit with
    * FLAG_BOUNCER_INTERNAL_DESTROY to suppress S2S QUIT propagation —
