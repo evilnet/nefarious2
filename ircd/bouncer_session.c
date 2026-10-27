@@ -8471,7 +8471,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   /* --- Step 0: Complete IPcheck connect ---
    * The alias keeps its own real socket IP (not overwritten from primary),
    * so IPcheck_connect_succeeded() can find the registry entry normally.
-   * IPcheck_disconnect() is called in the alias exit path. */
+   * IPcheck_disconnect() is called in the alias exit path.
+   * The login gives back the attempt the accept charged first
+   * (IPcheck_login_refund), so the notice reports the refunded count. */
+  if (IsSASLComplete(sptr) && IsAccount(sptr) && IsIPChecked(sptr))
+    IPcheck_login_refund(sptr, cli_user(sptr)->account);
   if (IsIPChecked(sptr))
     IPcheck_connect_succeeded(sptr);
 
