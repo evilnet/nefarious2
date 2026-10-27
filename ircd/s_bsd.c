@@ -2013,9 +2013,10 @@ void client_sock_callback(struct Event* ev)
      * bouncer's disconnect rule as a QUIT does (bounce_promote_or_hold).
      * A live device of the session takes over: one on this server at
      * once (its state here is the truth, so the BX P cannot cross its own
-     * BX X), one on another server after a hold, at the next tick, once a
-     * BX X already on its way has landed.  With no device the session
-     * holds, or with hold off ends.  Cooperative roaming (user alive on
+     * BX X), one on another server after a hold, at the next tick: a BX X
+     * for it this server has already read is seen first, one still on the
+     * wire can cross the BX P (narrowed, not closed).  With no device the
+     * session holds, or with hold off ends.  Cooperative roaming (user alive on
      * both ends) uses the BX C session move instead. */
     {
       /* The exit's own comment ("Read error: ..."): a hold keeps it, and

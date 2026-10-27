@@ -703,10 +703,11 @@ struct BouncerSession {
   struct Timer hs_promote_timer;      /**< 0-tick deferred-promote timer
                                        *   (cross-server clean-QUIT path)
                                        *   — fires at next event-loop
-                                       *   iteration so in-flight BX X
-                                       *   for the chosen winner has a
-                                       *   chance to settle before we
-                                       *   emit BX P.  See
+                                       *   iteration, so a BX X for the
+                                       *   chosen winner already read in
+                                       *   this one is seen before we emit
+                                       *   BX P (one still on the wire can
+                                       *   cross it).  See
                                        *   bounce_schedule_cross_server_promote.
                                        */
   unsigned char hs_hold_brief;        /**< Set by the hold that a primary's
@@ -1031,8 +1032,13 @@ extern int bounce_promote_alias(struct BouncerSession *session,
  * device of the session is on a remote server: we don't promote inline
  * (would race a concurrent BX X from the alias's home server), but we
  * don't want to wait for hold-expire either.  A 0-tick `TT_RELATIVE`
- * timer fires after the current tick's I/O is dispatched, giving any
- * already-queued BX X for the chosen winner a chance to land first.
+ * timer fires after the current tick's I/O is dispatched, so a BX X
+ * for the chosen winner that this server has already read lands first.
+ * One still on the wire is not waited for: it can cross the BX P within
+ * about two one-way link latencies (a device dropping together with its
+ * primary).  The cross is narrowed, not closed; both ends log it (a BX P
+ * naming a device the receiver no longer knows; a BX X removing a
+ * session primary that is not an alias).
  * The timer callback re-evaluates the alias list and either runs
  * `bounce_promote_alias(session, 0)` (any alias of the session's own
  * copy, including remote) or leaves the session HOLDING for the regular
@@ -1054,7 +1060,8 @@ extern void bounce_schedule_cross_server_promote(struct BouncerSession *session)
  * A live device of the session's own copy takes over first: one on this
  * server at once (bounce_promote_alias(session, 1)), else one elsewhere
  * after a hold and a promote at the next tick
- * (bounce_schedule_cross_server_promote()) -- with the hold preference
+ * (bounce_schedule_cross_server_promote(), which does not close a cross
+ * with that device's own BX X still on the wire) -- with the hold preference
  * off as well, when that hold is brief and ends the session if no device
  * is left at the tick.  With no device, the preference decides: hold, or
  * exit.  The hold's other guards (not KILLed, still logged in, the

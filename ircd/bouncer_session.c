@@ -6453,9 +6453,9 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
  *
  * Fires from the 0-tick timer armed by
  * `bounce_schedule_cross_server_promote`.  Re-evaluates the alias
- * list (which may have shifted in the intervening tick — concurrent
- * BX X messages have had a chance to land) and promotes any-server
- * winner.  If the session has revived (state == ACTIVE) between
+ * list (a BX X read in the intervening tick has removed its alias;
+ * one still on the wire has not, and can cross the BX P sent here) and
+ * promotes any-server winner.  If the session has revived (state == ACTIVE) between
  * schedule and fire, this is a no-op.  If no alias remains alive,
  * the session stays HOLDING and the regular hold-expire path will
  * eventually destroy or promote it -- at once for a brief hold (the
@@ -6506,9 +6506,8 @@ static void bounce_finish_cross_server_promote(struct Event *ev)
     return;
   }
 
-  /* Now safe to promote.  Pick any alias — by this tick, in-flight
-   * BX X for any pre-selected winner has had its chance to land and
-   * the alias_count reflects current truth. */
+  /* Promote.  Pick any alias: a BX X for one that was read by this tick
+   * has removed it; one still on the wire can still cross this BX P. */
   promoted = bounce_promote_alias(session, 0 /* any */);
   if (promoted == 0) {
     /* Promote succeeded.  Exit ghost cleanly — same pattern as
@@ -6835,7 +6834,8 @@ const char *bounce_last_hold_reason(struct Client *cptr)
 /** Hold @a cptr, the primary of @a session, as its ghost.  @a brief: the
  * hold is taken only for a live device on another server to take over at
  * the next tick (the session's hold preference is off) -- it has no time
- * of its own (bounce_hold_remaining()) and is not persisted. */
+ * of its own (bounce_hold_remaining()), and the hold does not persist it
+ * (a roster change within its tick can: bounce_alias_untrack). */
 static int bounce_hold_session(struct Client *cptr,
                                struct BouncerSession *session,
                                const char *comment, int brief)
@@ -6983,8 +6983,9 @@ int bounce_promote_or_hold(struct Client *cptr, const char *reason)
   case BOUNCE_DISCONNECT_HOLD_PROMOTE:
   case BOUNCE_DISCONNECT_BRIEF_PROMOTE:
     /* Held first; a device on another server is promoted at the next
-     * tick, once a line already on its way (that device's own exit) has
-     * landed.  With hold off the hold lasts no longer than that. */
+     * tick, after a BX X for it that this server has already read (that
+     * device's own exit).  One still on the wire can cross the BX P: not
+     * closed.  With hold off the hold lasts no longer than that. */
     if (bounce_hold_session(cptr, session, reason,
                             act == BOUNCE_DISCONNECT_BRIEF_PROMOTE) != 0)
       return -1;
@@ -9937,6 +9938,15 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
   if (!old_client || !new_client) {
     Debug((DEBUG_INFO, "BX P: client not found - old=%s new=%s",
            old_numeric, new_numeric));
+    /* A new face we no longer know: its own exit (BX X) crossed this
+     * promote on the wire, so the old face it replaces stays here as it
+     * was -- a primary nothing will move.  Not repaired; logged. */
+    if (!new_client)
+      log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
+                "%s (%s, session %s), which is not known here; the old "
+                "face is %s: forwarded only", cli_name(sptr), new_numeric,
+                old_numeric, nick, sessid,
+                old_client ? "kept" : "not known either");
     /* Forward anyway for other servers */
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "P %s %s %s %s", old_numeric, new_numeric, sessid, nick);
@@ -11330,6 +11340,22 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
   }
 
   was_alias = IsBouncerAlias(target);
+
+  /* A BX X removing the primary of one of our records, not an alias: the
+   * device's own exit that crossed a promote making it the primary (its
+   * server sent the BX X before it heard the BX P).  The record is left
+   * with no primary.  Not repaired; logged. */
+  if (!was_alias) {
+    struct BouncerSession *ps = bounce_get_session(target);
+
+    if (ps && ps->hs_client == target)
+      log_write(LS_USER, L_INFO, 0, "BX X: %s removes %s (%s), the primary "
+                "of %s's session %s here (%s), which is not an alias: the "
+                "record is left with no primary", cli_name(sptr),
+                target_numeric, cli_name(target), ps->hs_account,
+                ps->hs_sessid, ps->hs_state == BOUNCE_HOLDING ? "holding"
+                : "active");
+  }
 
   /* A held ghost (or any N-introduced client) goes silently here and on
    * every aware link, but a legacy link learned it by N and gets no BX

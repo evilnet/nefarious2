@@ -624,8 +624,10 @@ struct bounce_disconnect_facts {
 /** The disconnect rule.  A live device of the session takes over before
  * anything is held: one on this server at once (its state here is the
  * truth, so the promote cannot cross that device's own exit), one on
- * another server at the next tick, after a hold that lets a line already
- * on its way (that device's own exit) land first.  The hold preference
+ * another server after a hold, at the next tick.  The tick only lets a
+ * BX X for that device that this server has already read land first; one
+ * still on the wire can cross the BX P (the cross is narrowed, not
+ * closed).  The hold preference
  * decides only when no device is left: hold, or exit.  So a session with
  * hold off still moves to a live device rather than leaving it without a
  * primary; its hold lasts until the next tick.  Every other guard is the
