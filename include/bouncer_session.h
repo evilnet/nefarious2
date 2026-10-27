@@ -1397,8 +1397,10 @@ extern void bounce_broadcast(struct BouncerSession *session, char subcmd,
  * Hold mode API (Phase 2)
  */
 
-/** Transition a client to bouncer HOLDING state.
- * Called when a disconnection is detected for a client with an active session.
+/** Transition a client to bouncer HOLDING state: the hold alone, when the
+ * hold preference is on.  No disconnect calls it -- every one goes through
+ * bounce_promote_or_hold(), which promotes a live device first and holds
+ * through the same body.
  * - Sets client FLAG_BOUNCER_HOLD
  * - Closes the socket but keeps client structure alive
  * - Marks channel memberships as CHFL_HOLDING

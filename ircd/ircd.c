@@ -736,48 +736,16 @@ static void check_pings(struct Event* ev) {
                              "No response from %s, closing link",
                              cli_name(cptr));
 
-      /* Try alias promotion first — if aliases exist, promote one.
-       * On successful promote the user is now represented by the
-       * promoted alias's numeric; this exit is bouncer-internal
-       * cleanup, not a real disconnect.  SetBouncerInternalDestroy
-       * gates s_misc.c's per-channel and per-server QUIT broadcasts
-       * so peers / channel members don't see "user has quit (Session
-       * transferred)" for what is, end-to-end, an in-place numeric
-       * swap (BX P handles the wire-level swap on bouncer-aware peers
-       * — including the production upstream).
-       *
-       * MUST gate on cptr being the actual primary (bsess->hs_client
-       * == cptr).  bounce_get_session() returns the same session for
-       * the primary AND any of its aliases (alias→primary follow), so
-       * without this guard a timing-out ALIAS would trigger
-       * bounce_promote_alias on the session, which picks the oldest
-       * alias and overwrites hs_client with it.  The original primary
-       * (still alive) is then silently displaced — no exit, no
-       * detach — leaving it session-disjoint while alive: the
-       * "ibutsu / ibutsu_ orphan" symptom.  When cptr is an alias,
-       * fall through to normal exit_client which handles alias
-       * untrack + remove without touching hs_client. */
-      if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)
-          && !IsBouncerAlias(cptr)) {
-        struct BouncerSession *bsess = bounce_get_session(cptr);
-        if (bsess && bsess->hs_client == cptr
-            && bsess->hs_alias_count > 0) {
-          if (bounce_promote_alias(bsess, 0) == 0) {
-            SetBouncerInternalDestroy(cptr);
-            exit_client_msg(cptr, cptr, &me, "Session transferred");
-            continue;
-          }
-        }
-      }
-
-      /* Check if client should enter bouncer HOLD mode instead of exiting */
-      if (IsUser(cptr) && bounce_should_hold(cptr)) {
-        if (bounce_hold_client(cptr, "Ping timeout") == 0) {
-          /* Successfully entered hold - don't exit_client */
-          continue;
-        }
-        /* If hold failed, fall through to normal exit */
-      }
+      /* A session primary that pinged out goes through the disconnect
+       * rule a QUIT and a dead socket do (bounce_promote_or_hold): a live
+       * device of its own copy takes over (one here at once, one on
+       * another server at the next tick), else the session holds or,
+       * with hold off, ends.  An alias exits plainly.  After a promote
+       * here the old primary's channels are already left, so the exit
+       * below shows no QUIT in them. */
+      if (IsUser(cptr) && !IsBouncerAlias(cptr)
+          && bounce_promote_or_hold(cptr, "Ping timeout") == 0)
+        continue; /* held */
 
       exit_client_msg(cptr, cptr, &me, "Ping timeout");
       continue;
