@@ -559,17 +559,24 @@ void IPcheck_connect_fail(const struct Client *cptr, int disconnect)
  * client loses its socket at every app switch -- is not throttled for it.
  * At most IPCHECK_SASL_REFUND refunds per account every
  * IPCHECK_SASL_REFUND_PERIOD seconds (ipcheck_refund.c); 0 is off.
- * Only attempts is lowered, never below one, and never last_connect or
- * connected: the window stays, the chain just does not grow.
+ * Only attempts is lowered, and never last_connect or connected: the
+ * window stays, the chain just does not grow.  A connection the chain
+ * already counts as its first (attempts at 1 -- a return after a gap,
+ * the usual case) has nothing to give back, and spends none of the
+ * account's refunds; at 0 (a remote burst reset the entry) neither.
  * @param[in] cptr Client that registered with a SASL login.
  * @param[in] account The account it logged in to.
  */
 void IPcheck_login_refund(struct Client *cptr, const char *account)
 {
   int limit = feature_int(FEAT_IPCHECK_SASL_REFUND);
+  struct IPRegistryEntry *entry;
 
   assert(0 != cptr);
   if (limit <= 0 || !IsIPChecked(cptr) || !account || !*account)
+    return;
+  entry = ip_registry_find(&cli_ip(cptr));
+  if (!entry || entry->attempts <= 1)
     return;
   if (!ipcheck_refund_take(account, CurrentTime, limit,
                            feature_int(FEAT_IPCHECK_SASL_REFUND_PERIOD))) {
@@ -579,7 +586,7 @@ void IPcheck_login_refund(struct Client *cptr, const char *account)
   }
   Debug((DEBUG_DNS, "IPcheck refunding the connection from %s to %s.",
          ircd_ntoa(&cli_ip(cptr)), account));
-  ip_registry_connect_fail(&cli_ip(cptr), 0);
+  --entry->attempts;
 }
 
 /** Handle a client that has successfully connected.

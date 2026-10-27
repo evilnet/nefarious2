@@ -61,11 +61,12 @@ static int refund_same(const char *stored, const char *account)
   return 1;
 }
 
-/* FNV-1a over the folded bytes. */
+/* FNV-1a over the folded bytes, as many as refund_same() compares. */
 static unsigned int refund_hash(const char *account)
 {
   unsigned int h = 2166136261u;
-  for (; *account; ++account) {
+  int i;
+  for (i = 0; i < ACCOUNTLEN && *account; ++i, ++account) {
     h ^= (unsigned int)refund_lc((unsigned char)*account);
     h *= 16777619u;
   }

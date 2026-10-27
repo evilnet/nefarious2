@@ -22,9 +22,10 @@
 /* Test-and-count in one call: non-zero when `account` may draw one more
  * refund in its current window (the refund is then counted), zero when
  * its cap is reached (nothing is recorded).  The window is `period`
- * seconds from the account's first counted refund.  limit <= 0 or
- * period <= 0 grants nothing.  Account names are compared ASCII
- * case-insensitively. */
+ * seconds from the account's first counted refund -- a fixed window, so
+ * up to 2 * limit refunds can fall within `period` across its edge.
+ * limit <= 0 or period <= 0 grants nothing.  Account names are compared
+ * ASCII case-insensitively, over their first ACCOUNTLEN bytes. */
 extern int ipcheck_refund_take(const char *account, time_t now, int limit,
                                int period);
 /* Full reset (tests). */

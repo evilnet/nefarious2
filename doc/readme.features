@@ -871,13 +871,15 @@ IPCHECK_SASL_REFUND
 The number of times per IPCHECK_SASL_REFUND_PERIOD seconds that one
 account may have a connection attempt given back.  When a connection logs
 in with SASL and registers, the attempt IPcheck charged its address at the
-accept is refunded (attempts goes down by one, never below one; the
-window itself is not moved), so an account holder whose device reconnects
-often -- a web client on a phone loses its socket at every app switch,
-and every return is a new connection -- is not throttled for it.  A
-failed or missing login earns nothing, and the check when a connection
-arrives is unchanged, so a client without credentials still gets
-IPCHECK_CLONE_LIMIT connections and then a refusal before any TLS.  The
+accept is refunded (attempts goes down by one; the window itself is not
+moved), so an account holder whose device reconnects often -- a web
+client on a phone loses its socket at every app switch, and every return
+is a new connection -- is not throttled for it.  A connection the address
+already counts as its first (a return after a quiet gap) has nothing to
+give back and spends none of the account's refunds.  A failed or missing
+login earns nothing, and the check when a connection arrives is
+unchanged: an address without credentials is still refused at its
+IPCHECK_CLONE_LIMIT-th connection within the window, before any TLS.  The
 counts are kept in memory only.  0 disables refunds.
 
 IPCHECK_SASL_REFUND_PERIOD
