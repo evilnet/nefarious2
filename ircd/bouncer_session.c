@@ -4752,10 +4752,13 @@ static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *lin
  * the receiver reads its BS A as an alias's only once it knows the alias.
  *
  * In a burst a locally hosted alias's BS A follows (its activity and caps
- * for the receiver's roster).  Outside a burst none does: a BS A there
- * says a client attached to the sender's copy, which the receiver reads
- * as that copy going live.  An alias behind @a link is the link's own,
- * and not announced back to it. */
+ * for the receiver's roster), only toward a link that announces the hold
+ * mark: a fork server without the BS A install guard takes the alias
+ * named there as the record's primary, and keeps that pointer after the
+ * alias leaves.  Outside a burst none does: a BS A there says a client
+ * attached to the sender's copy, which the receiver reads as that copy
+ * going live.  An alias behind @a link is the link's own, and not
+ * announced back to it. */
 static void bounce_announce_aliases_to(struct BouncerSession *s,
                                        struct Client *link, int burst)
 {
@@ -4859,8 +4862,10 @@ static void bounce_announce_aliases_to(struct BouncerSession *s,
      * its alias-roster ba_last_active + ba_caps for D.2
      * tiebreaking and BX M dispatch.  Only emit for locally-
      * hosted aliases — remote-hosted aliases will be bursted by
-     * their home server's BS A.  Only in a burst (above). */
-    if (burst && 0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))) {
+     * their home server's BS A.  Only in a burst, toward a link with the
+     * install guard (above). */
+    if (burst && IsHoldMark(link)
+        && 0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))) {
       /* ba_numeric is YYXXX; BS A carries the XXX suffix.  The
        * receiver constructs full = sptr's YY + XXX which is
        * correct since sender == alias's home. */
