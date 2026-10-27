@@ -671,20 +671,23 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
           }
           bounce_broadcast(bsess, 'X', NULL);
           bounce_destroy(bsess);
-        } else if (bsess->hs_alias_count > 0) {
-          /* Ghost exited via clean path (hold expiry, internal cleanup)
-           * while aliases exist.  Promote before we lose the ghost
-           * reference — promote needs hs_client to remove ghost from
-           * channels silently. */
-          bounce_promote_alias(bsess, 0);
-          /* hs_client now points to the promoted alias, not the ghost.
-           * exit_one_client continues: ghost has no channels → no QUIT. */
+        } else if (bounce_session_has_live_alias(bsess)
+                   && bounce_promote_alias(bsess, 0) == 0) {
+          /* Ghost exited via a clean path while a live device of its own
+           * copy remains: promoted before we lose the ghost reference --
+           * promote needs hs_client to remove the ghost from channels
+           * silently.  hs_client now points to the promoted alias, not
+           * the ghost; exit_one_client continues: the ghost has no
+           * channels, so no QUIT. */
         } else {
-          /* No aliases — ghost is the only thing keeping the session
-           * alive.  Destroy to prevent dangling pointers. */
+          /* Nothing of its own copy took over -- no alias, or only
+           * another copy's devices, which follow their own primary (the
+           * hold expiry ends such a copy the same way).  The ghost was
+           * the only thing keeping the session: end it everywhere, or the
+           * record would stay HOLDING with no primary and no timer. */
           Debug((DEBUG_INFO, "Bouncer: destroy@exit-holding-no-aliases sess=%s "
-                 "client=%s",
-                 bsess->hs_sessid, cli_name(bcptr)));
+                 "client=%s aliases=%d",
+                 bsess->hs_sessid, cli_name(bcptr), bsess->hs_alias_count));
           bsess->hs_client = NULL;
           bounce_broadcast(bsess, 'X', NULL);
           bounce_destroy(bsess);

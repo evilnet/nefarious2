@@ -870,6 +870,115 @@ static void hold_expiry_counts_only_own_aliases(void **s)
   assert_int_equal(bounce_hold_expiry_action(1, 1, own), BOUNCE_HOLD_PROMOTE);
 }
 
+/* bounce_disconnect_action(facts) */
+
+/** Facts of a disconnect that every guard lets through. */
+static struct bounce_disconnect_facts disconnect_ok(int wants_hold, int own,
+                                                    int tried)
+{
+  struct bounce_disconnect_facts f;
+  memset(&f, 0, sizeof(f));
+  f.logged_in = 1;
+  f.bouncer_on = 1;
+  f.local_user = 1;
+  f.active_primary = 1;
+  f.wants_hold = wants_hold;
+  f.own_aliases = own;
+  f.local_tried = tried;
+  return f;
+}
+
+static void disconnect_without_facts_exits(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_disconnect_action(NULL), BOUNCE_DISCONNECT_EXIT);
+}
+
+static void disconnect_guards_keep_nothing(void **s)
+{
+  int g, h, own, t;
+  (void)s;
+  /* Each of the hold's own guards, failing alone, keeps nothing --
+   * neither a promote nor a hold -- whatever the preference and the
+   * devices: a KILL ends the whole session; a logged-out client, a
+   * bouncer that is off, a client not ours or not its ACTIVE session's
+   * primary have no session to keep. */
+  for (g = 0; g < 5; g++)
+    for (h = 0; h < 2; h++)
+      for (own = 0; own < 3; own++)
+        for (t = 0; t < 2; t++) {
+          struct bounce_disconnect_facts f = disconnect_ok(h, own, t);
+          switch (g) {
+          case 0: f.killed = 1; break;
+          case 1: f.logged_in = 0; break;
+          case 2: f.bouncer_on = 0; break;
+          case 3: f.local_user = 0; break;
+          case 4: f.active_primary = 0; break;
+          }
+          assert_int_equal(bounce_disconnect_action(&f), BOUNCE_DISCONNECT_EXIT);
+        }
+}
+
+static void disconnect_tries_a_device_here_first(void **s)
+{
+  int h, own;
+  (void)s;
+  /* A live device of the session's own copy: one on this server is
+   * tried first, whatever the preference (a hold-off QUIT promotes as a
+   * hold-on one does). */
+  for (h = 0; h < 2; h++)
+    for (own = 1; own < 4; own++) {
+      struct bounce_disconnect_facts f = disconnect_ok(h, own, 0);
+      assert_int_equal(bounce_disconnect_action(&f), BOUNCE_DISCONNECT_PROMOTE_LOCAL);
+    }
+}
+
+static void disconnect_then_a_device_elsewhere(void **s)
+{
+  int own;
+  (void)s;
+  /* No device here, one elsewhere: held, and promoted at the next tick.
+   * Hold on: if none is left then, the session stays held.  Hold off:
+   * the hold lasts until then, and with none left the session ends. */
+  for (own = 1; own < 4; own++) {
+    struct bounce_disconnect_facts on = disconnect_ok(1, own, 1);
+    struct bounce_disconnect_facts off = disconnect_ok(0, own, 1);
+    assert_int_equal(bounce_disconnect_action(&on), BOUNCE_DISCONNECT_HOLD_PROMOTE);
+    assert_int_equal(bounce_disconnect_action(&off), BOUNCE_DISCONNECT_BRIEF_PROMOTE);
+  }
+}
+
+static void disconnect_with_no_device_follows_the_preference(void **s)
+{
+  int t;
+  (void)s;
+  /* No live device of the session's own copy (another copy's devices are
+   * not counted): only now does the preference decide -- hold, or exit. */
+  for (t = 0; t < 2; t++) {
+    struct bounce_disconnect_facts on = disconnect_ok(1, 0, t);
+    struct bounce_disconnect_facts off = disconnect_ok(0, 0, t);
+    assert_int_equal(bounce_disconnect_action(&on), BOUNCE_DISCONNECT_HOLD);
+    assert_int_equal(bounce_disconnect_action(&off), BOUNCE_DISCONNECT_EXIT);
+  }
+}
+
+static void disconnect_never_leaves_a_device_behind(void **s)
+{
+  int h, own, t;
+  (void)s;
+  /* With a live device of its own copy a session is never simply held
+   * (its device would be left with a held ghost for a primary) nor
+   * exited (its device would be left with none). */
+  for (h = 0; h < 2; h++)
+    for (own = 1; own < 3; own++)
+      for (t = 0; t < 2; t++) {
+        struct bounce_disconnect_facts f = disconnect_ok(h, own, t);
+        enum bounce_disconnect a = bounce_disconnect_action(&f);
+        assert_int_not_equal(a, BOUNCE_DISCONNECT_EXIT);
+        assert_int_not_equal(a, BOUNCE_DISCONNECT_HOLD);
+      }
+}
+
 /* bounce_bxc_known_alias(behind_link, same_primary, filed_as_named,
  *                        same_nick, same_sessid) */
 static void known_alias_of_another_direction_is_not_the_lines(void **s)
@@ -1017,6 +1126,12 @@ int main(void)
     cmocka_unit_test(another_copys_device_is_not_ours),
     cmocka_unit_test(alias_of_no_known_primary_is_ours),
     cmocka_unit_test(hold_expiry_counts_only_own_aliases),
+    cmocka_unit_test(disconnect_without_facts_exits),
+    cmocka_unit_test(disconnect_guards_keep_nothing),
+    cmocka_unit_test(disconnect_tries_a_device_here_first),
+    cmocka_unit_test(disconnect_then_a_device_elsewhere),
+    cmocka_unit_test(disconnect_with_no_device_follows_the_preference),
+    cmocka_unit_test(disconnect_never_leaves_a_device_behind),
     cmocka_unit_test(known_alias_as_announced_is_kept),
     cmocka_unit_test(known_alias_follows_the_line),
     cmocka_unit_test(bxp_yields_only_to_another_client),

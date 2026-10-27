@@ -807,43 +807,49 @@ static void bounce_hold_expire(struct Event *ev)
      * Session continues under the promoted alias's server.  Another
      * copy's devices on the roster are not ours to promote
      * (bounce_promote_alias): with only those, our copy ends below. */
-    int promoted;
     Debug((DEBUG_INFO, "Bouncer: hold expired with %d aliases, promoting for %s",
            session->hs_alias_count, session->hs_account));
-    promoted = bounce_promote_alias(session, 0);
-    /* Exit ghost.  FLAG_BOUNCER_INTERNAL_DESTROY is set ONLY when promote
-     * actually broadcast BX P — that's the wire event legacy uses (numeric
-     * swap) and IRCv3-aware peers use (membership transfer) to retire
-     * the old numeric.  When promote fails (no usable winner alias,
-     * etc.), no BX P went out, so we MUST allow exit_client's normal
-     * Q broadcast to fire so peers (legacy and IRCv3-aware alike) can
-     * clean up the held-ghost phantom.
-     *
-     * Use the bouncer-internal-destroy flag rather than FLAG_KILLED:
-     * this is internal cleanup, not a network KILL, and per invariant
-     * #12 a network KILL would end the entire session — which is not
-     * what we want here (we're doing a successful promote-and-retire). */
-    if (ghost && IsBouncerHold(ghost)) {
-      ClearBouncerHold(ghost);
-      if (promoted == 0)
+    if (bounce_promote_alias(session, 0) == 0) {
+      /* Exit the ghost.  FLAG_BOUNCER_INTERNAL_DESTROY: the BX P that
+       * went out is the wire event legacy uses (numeric swap) and
+       * IRCv3-aware peers use (membership transfer) to retire the old
+       * numeric.  Not FLAG_KILLED: this is internal cleanup, not a
+       * network KILL, which would end the entire session (#12). */
+      if (ghost && IsBouncerHold(ghost)) {
+        ClearBouncerHold(ghost);
         SetBouncerInternalDestroy(ghost);
-      exit_client(ghost, ghost, &me,
-                  promoted == 0 ? "Session transferred" : "Session expired");
+        exit_client(ghost, ghost, &me, "Session transferred");
+      }
+      return;
     }
-  } else {
-    /* No alias of our own copy — session truly expired here.  A peer
-     * holding another copy keeps its record (it holds its own primary;
-     * the BS X guard), and another copy's device stays connected.
-     * Mark DESTROYING and null hs_client so exit_client's cleanup path
-     * in exit_one_client (s_misc.c) won't try to destroy it again.
-     * The actual free is deferred to the ET_DESTROY handler above. */
-    bounce_broadcast(session, 'X', NULL);
-    session->hs_state = BOUNCE_DESTROYING;
-    session->hs_client = NULL;
-    if (ghost && IsBouncerHold(ghost)) {
-      ClearBouncerHold(ghost);
-      exit_client(ghost, ghost, &me, "Session expired");
+    /* No device could take over after all: as with none -- our copy ends
+     * (END), or with no primary our record goes (DROP).  A bare exit of
+     * the ghost would leave the record HOLDING with no primary and no
+     * timer, and every peer's record of it with it. */
+    if (bounce_hold_expiry_action(ghost != NULL,
+                                  ghost && MyConnect(ghost) && IsBouncerHold(ghost),
+                                  0) == BOUNCE_HOLD_DROP) {
+      session->hs_state = BOUNCE_DESTROYING;
+      return;
     }
+  }
+
+  /* No alias of our own copy — session truly expired here.  A peer
+   * holding another copy keeps its record (it holds its own primary;
+   * the BS X guard), and another copy's device stays connected.
+   * Mark DESTROYING and null hs_client so exit_client's cleanup path
+   * in exit_one_client (s_misc.c) won't try to destroy it again.
+   * The actual free is deferred to the ET_DESTROY handler above. */
+  bounce_broadcast(session, 'X', NULL);
+  session->hs_state = BOUNCE_DESTROYING;
+  session->hs_client = NULL;
+  if (ghost && IsBouncerHold(ghost)) {
+    ClearBouncerHold(ghost);
+    /* A brief hold (hold off; no device was left to take over) is the
+     * disconnect itself: its reason is the quit's. */
+    exit_client(ghost, ghost, &me,
+                session->hs_hold_brief && session->hs_hold_reason[0]
+                  ? session->hs_hold_reason : "Session expired");
   }
 }
 
@@ -2555,6 +2561,10 @@ time_t bounce_hold_remaining(struct BouncerSession *session)
   time_t deadline;
 
   if (session->hs_state != BOUNCE_HOLDING || session->hs_disconnect_time <= 0)
+    return 0;
+  /* A hold taken only for a device elsewhere to take over (the hold
+   * preference is off) lasts no longer than that takes. */
+  if (session->hs_hold_brief)
     return 0;
   deadline = session->hs_disconnect_time + bounce_compute_hold_time(session);
   return deadline > CurrentTime ? deadline - CurrentTime : 0;
@@ -4786,9 +4796,11 @@ static void bounce_announce_aliases_to(struct BouncerSession *s,
     alias = findNUser(s->hs_aliases[a].ba_numeric);
     if (!alias || !IsBouncerAlias(alias) || cli_from(alias) == link)
       continue;
-    /* Only an alias of the primary the line names: another copy's device
-     * on our roster is its own holder's to announce, under its primary. */
-    if (cli_alias_primary(alias) != s->hs_client)
+    /* Only an alias of our own copy: another copy's device on our roster
+     * is its own holder's to announce, under its primary.  One whose
+     * primary is gone or is itself an alias is still ours (a promote
+     * takes it), and goes under the primary the line names. */
+    if (!session_alias_is_own(s, alias))
       continue;
 
     /* Build the alias's joined-channel list so the receiver
@@ -5936,6 +5948,7 @@ bsc_forward:
       bounce_peer_holding_note(session, sptr, cptr);
 
       session->hs_state = BOUNCE_HOLDING;
+      session->hs_hold_brief = 0;
       session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
       session->hs_disconnect_time = disc_time;
       ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
@@ -6445,7 +6458,10 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
  * winner.  If the session has revived (state == ACTIVE) between
  * schedule and fire, this is a no-op.  If no alias remains alive,
  * the session stays HOLDING and the regular hold-expire path will
- * eventually destroy or promote it.
+ * eventually destroy or promote it -- at once for a brief hold (the
+ * hold preference is off: bounce_hold_remaining() is 0), whose expiry
+ * then ends the session.  Never ended from here: this timer lives in the
+ * session, which must outlive its callback.
  */
 static void bounce_finish_cross_server_promote(struct Event *ev)
 {
@@ -6506,8 +6522,9 @@ static void bounce_finish_cross_server_promote(struct Event *ev)
   } else {
     Debug((DEBUG_INFO,
            "Bouncer: deferred-promote — no eligible alias for session %s; "
-           "leaving HOLDING (hold-expire will handle)",
-           session->hs_sessid));
+           "leaving HOLDING (hold-expire will handle%s)",
+           session->hs_sessid,
+           session->hs_hold_brief ? ", at once: a brief hold" : ""));
   }
 }
 
@@ -6683,29 +6700,17 @@ void bounce_execute_squit_promotions(struct Client *server)
 /* Hold mode                                                         */
 /* ---------------------------------------------------------------- */
 
-/** Check if a client should enter bouncer hold mode on disconnect.
- * Returns the session if:
- * - Bouncer feature is enabled
- * - Client has an account
- * - Client has an active session attached
- * - Hold is enabled (per-session, account, or default)
- */
-struct BouncerSession *bounce_should_hold(struct Client *cptr)
+/** The ACTIVE session whose primary is @a cptr, a logged-in client, with
+ * its hold preference in *wants_hold; NULL when there is none. */
+static struct BouncerSession *active_session_of_primary(struct Client *cptr,
+                                                        int *wants_hold)
 {
   struct AccountSessions *as;
   struct BouncerSession *s;
   int class_bouncer = 0;
   struct ConnectionClass *cls;
 
-  /* Forced exits: never hold a /KILL'd user */
-  if (HasFlag(cptr, FLAG_KILLED))
-    return NULL;
-  if (!bounce_enabled_for(cptr))
-    return NULL;
-  if (!IsAccount(cptr))
-    return NULL;
-  if (!MyUser(cptr))
-    return NULL;  /* Only local clients can enter hold on this server */
+  *wants_hold = 0;
 
   /* Check if client's connection class forces bouncer behavior */
   cls = get_client_class_conf(cptr);
@@ -6720,31 +6725,65 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
   for (s = as->as_sessions; s; s = s->hs_anext) {
     if (s->hs_client == cptr && s->hs_state == BOUNCE_ACTIVE) {
       /* Check hold preference: session override > user mode/metadata > default */
-      int should_hold;
       if (s->hs_hold_override >= 0) {
-        should_hold = s->hs_hold_override;
+        *wants_hold = s->hs_hold_override;
       } else if (IsBncHoldPref(cptr)) {
         /* User has +b mode set (synced with $draft/persistence/hold metadata) */
-        should_hold = 1;
+        *wants_hold = 1;
       } else {
         /* Check persistent metadata — cli_metadata may not be populated
          * after a restart; metadata_account_get reads from mdbx. */
         char hold_val[64];
         if (metadata_account_get(cli_account(cptr), "draft/persistence/hold", hold_val) == 0) {
-          should_hold = (hold_val[0] != '0');
+          *wants_hold = (hold_val[0] != '0');
         } else {
           /* Bouncer class defaults to hold; normal class follows feature flag */
-          should_hold = class_bouncer || feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+          *wants_hold = class_bouncer || feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
         }
       }
-
-      if (should_hold)
-        return s;
-      break;  /* Found client's session but hold disabled */
+      return s;
     }
   }
 
   return NULL;
+}
+
+/** What a disconnect of @a cptr decides from (bounce_disconnect_action()),
+ * filled in @a f; the session it would keep, or NULL.  The guards come
+ * first: a session is looked up only for a client every guard lets
+ * through. */
+static struct BouncerSession *disconnect_facts(struct Client *cptr,
+                                               struct bounce_disconnect_facts *f)
+{
+  struct BouncerSession *s = NULL;
+
+  memset(f, 0, sizeof(*f));
+  /* Forced exits: never hold (or promote for) a /KILL'd user */
+  f->killed = HasFlag(cptr, FLAG_KILLED) ? 1 : 0;
+  f->bouncer_on = bounce_enabled_for(cptr);
+  f->logged_in = IsAccount(cptr) ? 1 : 0;
+  /* Only local clients can enter hold on this server */
+  f->local_user = MyUser(cptr) ? 1 : 0;
+  if (!f->killed && f->bouncer_on && f->logged_in && f->local_user)
+    s = active_session_of_primary(cptr, &f->wants_hold);
+  f->active_primary = s != NULL;
+  f->own_aliases = session_own_alias_count(s);
+  return s;
+}
+
+/** Check if a client should enter bouncer hold mode on disconnect.
+ * Returns the session if:
+ * - Bouncer feature is enabled
+ * - Client has an account
+ * - Client has an active session attached
+ * - Hold is enabled (per-session, account, or default)
+ */
+struct BouncerSession *bounce_should_hold(struct Client *cptr)
+{
+  struct bounce_disconnect_facts f;
+  struct BouncerSession *s = disconnect_facts(cptr, &f);
+
+  return (s && f.wants_hold) ? s : NULL;
 }
 
 /** Tell the peers a session's active time (BX U ta=): a replica learns it
@@ -6793,14 +6832,15 @@ const char *bounce_last_hold_reason(struct Client *cptr)
   return session->hs_hold_reason;
 }
 
-int bounce_hold_client(struct Client *cptr, const char *comment)
+/** Hold @a cptr, the primary of @a session, as its ghost.  @a brief: the
+ * hold is taken only for a live device on another server to take over at
+ * the next tick (the session's hold preference is off) -- it has no time
+ * of its own (bounce_hold_remaining()) and is not persisted. */
+static int bounce_hold_session(struct Client *cptr,
+                               struct BouncerSession *session,
+                               const char *comment, int brief)
 {
-  struct BouncerSession *session;
   struct Membership *member;
-
-  session = bounce_should_hold(cptr);
-  if (!session)
-    return -1;
 
   /* Mark client as a ghost */
   SetBouncerHold(cptr);
@@ -6823,6 +6863,7 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    * Save ghost numeric for cross-server transfer.
    */
   session->hs_state = BOUNCE_HOLDING;
+  session->hs_hold_brief = brief ? 1 : 0;
   session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
   session->hs_disconnect_time = CurrentTime;
   /* Record WHY -- holds suppress QUIT and never reach the connexit
@@ -6830,9 +6871,10 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    * to the user at resume (replay_send_summary) and shown in /CHECK. */
   ircd_strncpy(session->hs_hold_reason, comment ? comment : "unknown",
                sizeof(session->hs_hold_reason) - 1);
-  log_write(LS_USER, L_INFO, 0, "Bouncer hold for %s (%s): %s",
-            session->hs_account, cli_name(cptr),
-            comment ? comment : "unknown");
+  log_write(LS_USER, L_INFO, 0, "Bouncer %shold for %s (%s): %s%s",
+            brief ? "brief " : "", session->hs_account, cli_name(cptr),
+            comment ? comment : "unknown",
+            brief ? " (until a live device on another server takes over)" : "");
   ircd_strncpy(session->hs_ghost_numeric, cli_yxx(cptr), sizeof(session->hs_ghost_numeric));
   session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
   /* hs_client still points to cptr (now a ghost) */
@@ -6897,10 +6939,64 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   /* Record disconnect event in connection history */
   bounce_history_disconnect(session, cli_sock_ip(cptr));
 
-  /* Persist with full ghost identity + channels */
-  bounce_db_put(session);
+  /* Persist with full ghost identity + channels -- not a brief hold: a
+   * restart would restore it as a full one, against the preference. */
+  if (!brief)
+    bounce_db_put(session);
 
   return 0;
+}
+
+int bounce_hold_client(struct Client *cptr, const char *comment)
+{
+  struct BouncerSession *session = bounce_should_hold(cptr);
+
+  if (!session)
+    return -1;
+  return bounce_hold_session(cptr, session, comment, 0);
+}
+
+/** See include/bouncer_session.h. */
+int bounce_promote_or_hold(struct Client *cptr, const char *reason)
+{
+  struct bounce_disconnect_facts f;
+  struct BouncerSession *session = disconnect_facts(cptr, &f);
+  enum bounce_disconnect act = bounce_disconnect_action(&f);
+
+  if (act == BOUNCE_DISCONNECT_PROMOTE_LOCAL) {
+    /* A device here takes over now; its state here is the truth, so the
+     * BX P cannot cross that device's own BX X. */
+    if (bounce_promote_alias(session, 1) == 0) {
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s (%s) left (%s); its device "
+                "%s%s here took over session %s", cli_name(cptr),
+                session->hs_account, reason ? reason : "unknown",
+                cli_yxx(&me), session->hs_client ? cli_yxx(session->hs_client) : "?",
+                session->hs_sessid);
+      return 1;
+    }
+    f.local_tried = 1;
+    f.own_aliases = session_own_alias_count(session);
+    act = bounce_disconnect_action(&f);
+  }
+
+  switch (act) {
+  case BOUNCE_DISCONNECT_HOLD_PROMOTE:
+  case BOUNCE_DISCONNECT_BRIEF_PROMOTE:
+    /* Held first; a device on another server is promoted at the next
+     * tick, once a line already on its way (that device's own exit) has
+     * landed.  With hold off the hold lasts no longer than that. */
+    if (bounce_hold_session(cptr, session, reason,
+                            act == BOUNCE_DISCONNECT_BRIEF_PROMOTE) != 0)
+      return -1;
+    bounce_schedule_cross_server_promote(session);
+    return 0;
+  case BOUNCE_DISCONNECT_HOLD:
+    return bounce_hold_session(cptr, session, reason, 0) == 0 ? 0 : -1;
+  case BOUNCE_DISCONNECT_PROMOTE_LOCAL:  /* asked again with local_tried */
+  case BOUNCE_DISCONNECT_EXIT:
+    break;
+  }
+  return -1;
 }
 
 /** Revive a ghost client by transplanting a socket from a temp client.
@@ -11122,14 +11218,18 @@ forward:
    * session-move. */
   if (session && session->hs_state == BOUNCE_HOLDING
       && primary && MyConnect(primary) && IsBouncerHold(primary)) {
-    int promoted;
     Debug((DEBUG_INFO, "BX C: session move — promoting alias, retiring ghost %s",
            cli_name(primary)));
-    promoted = bounce_promote_alias(session, 0);
-    if (promoted == 0)
+    if (bounce_promote_alias(session, 0) == 0) {
       SetBouncerInternalDestroy(primary);
-    exit_client(primary, primary, &me,
-                promoted == 0 ? "Session transferred" : "Session expired");
+      exit_client(primary, primary, &me, "Session transferred");
+    } else {
+      /* Nothing took over: the ghost stays held, and its hold's end
+       * promotes or ends the session (an exit here would leave the
+       * record with no primary and no timer). */
+      Debug((DEBUG_INFO, "BX C: session move found no alias to promote; "
+             "ghost %s stays held", cli_name(primary)));
+    }
   }
 
   /* Drain any BX subcommands that were deferred waiting for this

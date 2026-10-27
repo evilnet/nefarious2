@@ -585,4 +585,59 @@ extern enum bounce_bxp_session_action
 bounce_bxp_session_action(int slot_ours, int slot_held, int old_is_slot,
                           int new_is_slot, int ours_holding, int kc_conflict);
 
+/** What a session primary's disconnect does.  One rule for every way a
+ * primary goes: a QUIT, a socket that died (EOF, a read or write error, a
+ * sendQ overflow) and a WebSocket close. */
+enum bounce_disconnect {
+  BOUNCE_DISCONNECT_EXIT,          /**< nothing of the session to keep: the
+                                    *   client exits as it would in none */
+  BOUNCE_DISCONNECT_PROMOTE_LOCAL, /**< try a live device of the session on
+                                    *   this server: it takes the primary's
+                                    *   place now, and the client exits */
+  BOUNCE_DISCONNECT_HOLD_PROMOTE,  /**< held, and a live device on another
+                                    *   server is promoted at the next tick;
+                                    *   with none left then, still held */
+  BOUNCE_DISCONNECT_BRIEF_PROMOTE, /**< held only until a live device on
+                                    *   another server is promoted at the
+                                    *   next tick; with none left then, the
+                                    *   session ends */
+  BOUNCE_DISCONNECT_HOLD           /**< held for the session's hold */
+};
+
+/** What bounce_disconnect_action() decides from. */
+struct bounce_disconnect_facts {
+  int killed;          /**< the client was KILLed: the KILL ends the whole
+                        *   session, devices included */
+  int logged_in;       /**< the client is still logged in: a session
+                        *   outlives no logout */
+  int bouncer_on;      /**< the bouncer is on for the client's class or for
+                        *   the network */
+  int local_user;      /**< the client is a registered user of ours */
+  int active_primary;  /**< it is the primary of an ACTIVE session */
+  int wants_hold;      /**< that session's hold preference */
+  int own_aliases;     /**< live devices of the session's own copy on its
+                        *   roster (bounce_alias_is_own()) */
+  int local_tried;     /**< a promote of one of them on this server was
+                        *   tried and found none */
+};
+
+/** The disconnect rule.  A live device of the session takes over before
+ * anything is held: one on this server at once (its state here is the
+ * truth, so the promote cannot cross that device's own exit), one on
+ * another server at the next tick, after a hold that lets a line already
+ * on its way (that device's own exit) land first.  The hold preference
+ * decides only when no device is left: hold, or exit.  So a session with
+ * hold off still moves to a live device rather than leaving it without a
+ * primary; its hold lasts until the next tick.  Every other guard is the
+ * hold's own and stands for a promote too: a KILLed client, a client no
+ * longer logged in, a bouncer that is off, a client not ours or not the
+ * primary of an ACTIVE session keep nothing.
+ *
+ * @param[in] f The facts (NULL: EXIT).
+ * @return The action.  After a PROMOTE_LOCAL that found no device here,
+ *         ask again with local_tried set and own_aliases counted again.
+ */
+extern enum bounce_disconnect
+bounce_disconnect_action(const struct bounce_disconnect_facts *f);
+
 #endif /* INCLUDED_bouncer_wire_h */

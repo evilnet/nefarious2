@@ -709,6 +709,17 @@ struct BouncerSession {
                                        *   emit BX P.  See
                                        *   bounce_schedule_cross_server_promote.
                                        */
+  unsigned char hs_hold_brief;        /**< Set by the hold that a primary's
+                                       *   disconnect took only so that a
+                                       *   live device on another server
+                                       *   could take over at the next tick
+                                       *   (its hold preference is off): the
+                                       *   hold has no time left
+                                       *   (bounce_hold_remaining()), so with
+                                       *   no device left its expiry ends
+                                       *   the session at once.  Set or
+                                       *   cleared wherever a session goes
+                                       *   HOLDING; read only while it is. */
 
   /* Session-level aggregate counters (lifetime totals from dead connections) */
   uint64_t     hs_agg_sendB;         /**< Lifetime bytes sent (dead connections) */
@@ -1003,29 +1014,30 @@ extern void bounce_execute_squit_promotions(struct Client *server);
  * @param[in] local_only  When non-zero, only promote if a local-server
  *                        alias is available.  Returns -1 without
  *                        broadcasting BX P if every alias is on a
- *                        remote server.  Used by the immediate-promote
- *                        path in m_quit.c — for the cross-server case
- *                        (only remote alias), we defer to the existing
- *                        hold-then-expire path so we don't broadcast
- *                        BX P that could race a concurrent BX X from
- *                        the alias's home server.
- * @return 0 on success, -1 if no eligible alias (caller falls through
- *         to bounce_hold_client).
+ *                        remote server.  Used by the immediate promote
+ *                        of bounce_promote_or_hold() — for the
+ *                        cross-server case (only remote aliases) it
+ *                        holds and promotes at the next tick instead,
+ *                        so we don't broadcast a BX P that could race a
+ *                        concurrent BX X from the alias's home server.
+ * @return 0 on success, -1 if no eligible alias (the caller holds, or
+ *         ends the session).
  */
 extern int bounce_promote_alias(struct BouncerSession *session,
                                 int local_only);
 
 /** Schedule a cross-server alias promotion for the next event-loop
- * tick.  Used by m_quit.c after bounce_hold_client when every alias
- * is on a remote server: we don't promote inline (would race a
- * concurrent BX X from the alias's home server), but we don't want
- * to wait for hold-expire either.  A 0-tick `TT_RELATIVE` timer
- * fires after the current tick's I/O is dispatched, giving any
+ * tick.  Used by bounce_promote_or_hold() after the hold when every live
+ * device of the session is on a remote server: we don't promote inline
+ * (would race a concurrent BX X from the alias's home server), but we
+ * don't want to wait for hold-expire either.  A 0-tick `TT_RELATIVE`
+ * timer fires after the current tick's I/O is dispatched, giving any
  * already-queued BX X for the chosen winner a chance to land first.
  * The timer callback re-evaluates the alias list and either runs
- * `bounce_promote_alias(session, 0)` (any alias, including remote)
- * or leaves the session HOLDING for the regular hold-expire path if
- * no live alias remains.
+ * `bounce_promote_alias(session, 0)` (any alias of the session's own
+ * copy, including remote) or leaves the session HOLDING for the regular
+ * hold-expire path if no live alias remains (a brief hold, taken with
+ * the hold preference off, expires at once and ends the session).
  *
  * Idempotent: a second call before the timer fires is a no-op.
  *
@@ -1033,6 +1045,31 @@ extern int bounce_promote_alias(struct BouncerSession *session,
  *                    one (remote) alias entry.
  */
 extern void bounce_schedule_cross_server_promote(struct BouncerSession *session);
+
+/** What a session primary's disconnect does: one path for a QUIT, a
+ * socket that died (EOF, a read or write error, a sendQ overflow) and a
+ * WebSocket close.  Asked before the client exits; the rule is
+ * bounce_disconnect_action().
+ *
+ * A live device of the session's own copy takes over first: one on this
+ * server at once (bounce_promote_alias(session, 1)), else one elsewhere
+ * after a hold and a promote at the next tick
+ * (bounce_schedule_cross_server_promote()) -- with the hold preference
+ * off as well, when that hold is brief and ends the session if no device
+ * is left at the tick.  With no device, the preference decides: hold, or
+ * exit.  The hold's other guards (not KILLed, still logged in, the
+ * bouncer on, a local user, the primary of an ACTIVE session) stand for
+ * the promote too.
+ *
+ * @param[in] cptr   The departing client.
+ * @param[in] reason Why it went (kept as the hold reason, never put in the
+ *                   realname).
+ * @return 1 when a device here took over: the caller exits @a cptr
+ *         normally (its channels are already left, BX P and BS T sent);
+ *         0 when @a cptr is held (the caller keeps it); -1 when the
+ *         caller exits it as it would without a session.
+ */
+extern int bounce_promote_or_hold(struct Client *cptr, const char *reason);
 
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.
@@ -1373,7 +1410,10 @@ extern void bounce_broadcast(struct BouncerSession *session, char subcmd,
  */
 extern int bounce_hold_client(struct Client *cptr, const char *comment);
 
-/** Check if a client has an active bouncer session and should enter hold.
+/** Check if a client has an active bouncer session and should enter hold:
+ * the session it is the ACTIVE primary of, when every guard of a hold
+ * holds and its hold preference is on.  A disconnect asks
+ * bounce_promote_or_hold() instead, which promotes a live device first.
  * @param[in] cptr Client to check.
  * @return Session pointer if should hold, NULL if should exit normally.
  */

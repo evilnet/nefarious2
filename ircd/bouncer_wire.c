@@ -268,3 +268,20 @@ bounce_bxp_session_action(int slot_ours, int slot_held, int old_is_slot,
     return BOUNCE_BXP_YIELD;
   return BOUNCE_BXP_KEEP;
 }
+
+enum bounce_disconnect
+bounce_disconnect_action(const struct bounce_disconnect_facts *f)
+{
+  /* The hold's own guards stand for a promote too. */
+  if (!f || f->killed || !f->logged_in || !f->bouncer_on || !f->local_user
+      || !f->active_primary)
+    return BOUNCE_DISCONNECT_EXIT;
+  /* A live device takes over, whatever the preference: here at once,
+   * elsewhere at the next tick. */
+  if (f->own_aliases > 0)
+    return !f->local_tried ? BOUNCE_DISCONNECT_PROMOTE_LOCAL
+         : f->wants_hold ? BOUNCE_DISCONNECT_HOLD_PROMOTE
+         : BOUNCE_DISCONNECT_BRIEF_PROMOTE;
+  /* Nothing to promote: the preference decides. */
+  return f->wants_hold ? BOUNCE_DISCONNECT_HOLD : BOUNCE_DISCONNECT_EXIT;
+}

@@ -118,47 +118,24 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsBouncerAlias(sptr))
     return exit_client(cptr, sptr, sptr, "Quit");
 
-  /* Fix #25: Check if client should enter bouncer HOLD mode instead of
-   * quitting.  Clients routinely send QUIT on disconnect — the whole
-   * purpose of hold is to survive that and keep channels alive.
+  /* A session primary: the bouncer decides first (bounce_promote_or_hold).
+   * A live device of the session takes over -- one on this server at
+   * once, one elsewhere at the next tick, whatever the hold preference --
+   * else the session holds or, with hold off, ends.  Clients send QUIT
+   * on their way out all the time; holding is what keeps the session and
+   * its channels across that.
    *
-   * Immediate-promote (design intent: clean primary QUIT with alias
-   * remaining → BX P numeric swap, NO HOLDING transition).  We only
-   * promote inline if the chosen alias is on THIS server — same-server
-   * alias state is synchronously authoritative, so the BX P broadcast
-   * can't race a concurrent BX X from the alias's home server (we ARE
-   * that server).  When every alias is on a remote server, fall
-   * through to bounce_hold_client; the existing hold-expire path
-   * still promotes, just with the safety of network-settled state.
-   * (Cross-server immediate-promote without a race window is a v2.)
-   *
-   * On successful inline promote: the session continues under the new
-   * primary, the old primary's channels are silently stripped by
-   * bounce_promote_alias, and we fall through to normal exit_client
-   * which produces no visible QUIT to channels (none left to send to).
-   * Peers see BX P + BS T then the primary's clean Q. */
-  if (IsUser(sptr) && bounce_should_hold(sptr)) {
+   * After a promote here the session goes on under the device; the old
+   * primary's channels are already left (bounce_promote_alias), so the
+   * exit below shows no QUIT in them.  Peers see BX P + BS T, then the
+   * primary's Q. */
+  if (IsUser(sptr)) {
     const char *comment = (parc > 1 && !BadPtr(parv[parc - 1]))
                           ? parv[parc - 1] : "Quit";
-    struct BouncerSession *bsess = bounce_get_session(sptr);
-    int promoted = -1;
-    if (bsess && bsess->hs_client == sptr && bsess->hs_alias_count > 0)
-      promoted = bounce_promote_alias(bsess, 1 /* local_only */);
-    if (promoted == 0) {
-      /* Inline local promote succeeded; fall through to exit_client.
-       * Channels already stripped, BX P + BS T already broadcast. */
-    } else if (bounce_hold_client(sptr, comment) == 0) {
-      /* Entered HOLDING.  If a remote alias is available, schedule a
-       * 0-tick deferred promote — any concurrent BX X for the chosen
-       * winner has a chance to land during the intervening tick, and
-       * the timer's re-evaluation picks a still-live alias.  See
-       * bounce_schedule_cross_server_promote and Layer 2 of
-       * .claude/plans/alias-promote-race-fix.md. */
-      if (bsess && bsess->hs_alias_count > 0)
-        bounce_schedule_cross_server_promote(bsess);
-      return 0; /* Held (will promote at next tick or hold-expire) */
-    }
-    /* If hold failed too, fall through to normal quit */
+    if (bounce_promote_or_hold(sptr, comment) == 0)
+      return 0; /* Held (a device elsewhere takes over at the next tick,
+                 * or the hold runs its course) */
+    /* Promoted here, or nothing to keep: the normal quit below. */
   }
 
   if (cli_user(sptr)) {

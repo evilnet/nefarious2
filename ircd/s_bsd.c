@@ -755,10 +755,12 @@ static const char *dead_reason(struct Client *cptr, const char *dflt)
          ? cli_exit_reason(cptr) : dflt;
 }
 
-/** Exit a client whose socket died -- or hold it, when it is the primary
- * of a bouncer session that holds: the decision client_sock_callback()
- * makes for an EOF or a read error.  A write error or a sendQ overflow is
- * a dropped connection too (user decision 2026-10-21); the parse loops and
+/** Exit a client whose socket died -- or let the bouncer keep its
+ * session, when it is a session primary: the decision
+ * client_sock_callback() makes for an EOF or a read error.  A write error
+ * or a sendQ overflow is a dropped connection too (user decision
+ * 2026-10-21): a live device of the session takes over, as after a QUIT,
+ * else the session holds (bounce_promote_or_hold()).  The parse loops and
  * check_pings() exited it outright, and a session with no other
  * connection ended with it.
  * @param[in] cptr Local client marked dead.
@@ -772,7 +774,9 @@ int exit_dead_client(struct Client *cptr, const char *dflt)
   if (IsUser(cptr) && !IsBouncerAlias(cptr)) {
     if (IsBouncerHold(cptr))
       return 0;
-    if (bounce_should_hold(cptr) && bounce_hold_client(cptr, msg) == 0)
+    /* Held: 0.  A device here took over (1), or nothing to keep: the
+     * client exits; after a promote its channels are already left. */
+    if (bounce_promote_or_hold(cptr, msg) == 0)
       return 0;
   }
   return exit_client(cptr, cptr, &me, (char *)msg);
@@ -1430,19 +1434,16 @@ ssl_read_again:
         if (opcode >= WS_OPCODE_CLOSE) {
           if (!websocket_handle_control(cptr, opcode, ws_payload, ws_len)) {
             /* Close frame received.  A WS CLOSE is transport teardown --
-             * the WebSocket-layer FIN -- so route it through the bouncer
-             * hold gate exactly like the dead-link path below (~1746)
-             * does for a TCP drop.  Every other disconnect entry point
-             * (dead-link, QUIT, ping timeout) consults the gate; without
-             * this, a clean WS close destroyed a persistent session an
-             * unclean drop would have kept.  Mirrors the dead-link
-             * shape deliberately: no immediate-promote shortcut here
-             * (see that site's comment for the promote/BX X race). */
-            if (IsUser(cptr) && bounce_should_hold(cptr)) {
-              if (bounce_hold_client(cptr, "WebSocket closed") == 0)
-                return CPTR_KILLED; /* held: ghost owns the socket now */
-              /* hold failed -> fall through to normal exit */
-            }
+             * the WebSocket-layer FIN -- so it goes through the bouncer's
+             * disconnect rule exactly like the dead-link path below does
+             * for a TCP drop, and a QUIT does: a live device of the
+             * session takes over, else the session holds or (hold off)
+             * ends.  Without this, a clean WS close destroyed a
+             * persistent session an unclean drop would have kept. */
+            if (IsUser(cptr) && !IsBouncerAlias(cptr)
+                && bounce_promote_or_hold(cptr, "WebSocket closed") == 0)
+              return CPTR_KILLED; /* held: ghost owns the socket now */
+            /* Promoted here (channels already left), or nothing to keep */
             return exit_client(cptr, cptr, &me, "WebSocket closed");
           }
         }
@@ -1980,6 +1981,22 @@ void client_sock_callback(struct Event* ev)
     if (!msg)
       msg = "Unknown error";
 
+    /* Re-entrancy guard.  Nefarious's event model is synchronous
+     * (event_add == event_execute).  If we got here via an ET_ERROR
+     * synthesised from inside engine_set_events on epoll_ctl failure —
+     * which can happen when send_buffer → update_write → socket_events
+     * tries to MOD a dead fd — then the outer frame is already inside
+     * exit_client (FLAG_CLOSING is set there).  A recursive
+     * exit_client_msg here would run remove_client_from_list, zero
+     * cli_connect, and return into the outer send_buffer mid-line,
+     * which then NULL-derefs at `++cli_sendM(to)`.  Let the outer
+     * frame finish the teardown; we've already marked DEADSOCKET.
+     * First, before the bouncer is asked: the client is already on its
+     * way out, and its exit decided what happens to its session (a
+     * promote or hold here would act on a client being exited). */
+    if (HasFlag(cptr, FLAG_CLOSING))
+      return;
+
     /* Bouncer alias: skip hold logic — just clean up.
      * exit_client_msg() → exit_client() sends BX X to other servers. */
     if (IsUser(cptr) && IsBouncerAlias(cptr)) {
@@ -1992,38 +2009,17 @@ void client_sock_callback(struct Event* ev)
     if (IsUser(cptr) && IsBouncerHold(cptr))
       return;
 
-    /* Check if client should enter bouncer HOLD mode instead of exiting.
-     *
-     * No immediate-promote shortcut here: a primary disconnect with
-     * aliases attached must hold first, even when promote *looks* viable.
-     * Otherwise the alias's server may concurrently be tearing down the
-     * same alias (BX X) — promote and BX X cross on the wire and both
-     * sides converge to a session pointing at a destroyed numeric, with
-     * channel state lost.  Promotion runs only from bounce_hold_expire,
-     * after the network has settled and hs_alias_count reflects reality.
-     * Cooperative roaming (user alive on both ends) uses BX C session
-     * move instead — that path doesn't touch this disconnect handler. */
-    if (IsUser(cptr) && bounce_should_hold(cptr)) {
-      /* Transition to ghost/hold state - suppresses QUIT, keeps channels */
-      if (bounce_hold_client(cptr, msg) == 0) {
-        /* Successfully entered hold - don't exit_client */
-        return;
-      }
-      /* If hold failed, fall through to normal exit */
-    }
-
-    /* Re-entrancy guard.  Nefarious's event model is synchronous
-     * (event_add == event_execute).  If we got here via an ET_ERROR
-     * synthesised from inside engine_set_events on epoll_ctl failure —
-     * which can happen when send_buffer → update_write → socket_events
-     * tries to MOD a dead fd — then the outer frame is already inside
-     * exit_client (FLAG_CLOSING set at s_misc.c:768).  A recursive
-     * exit_client_msg here would run remove_client_from_list, zero
-     * cli_connect, and return into the outer send_buffer mid-line,
-     * which then NULL-derefs at `++cli_sendM(to)`.  Let the outer
-     * frame finish the teardown; we've already marked DEADSOCKET. */
-    if (HasFlag(cptr, FLAG_CLOSING))
-      return;
+    /* A session primary: an EOF or a read error goes through the
+     * bouncer's disconnect rule as a QUIT does (bounce_promote_or_hold).
+     * A live device of the session takes over: one on this server at
+     * once (its state here is the truth, so the BX P cannot cross its own
+     * BX X), one on another server after a hold, at the next tick, once a
+     * BX X already on its way has landed.  With no device the session
+     * holds, or with hold off ends.  Cooperative roaming (user alive on
+     * both ends) uses the BX C session move instead. */
+    if (IsUser(cptr) && bounce_promote_or_hold(cptr, msg) == 0)
+      return; /* held: the ghost keeps its channels, no QUIT */
+    /* Promoted here (channels already left), or nothing to keep */
 
     exit_client_msg(cptr, cptr, &me, fmt, msg);
   }
