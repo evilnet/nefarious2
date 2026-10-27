@@ -114,6 +114,7 @@ IRCD_SRC = \
 	gitsync.c \
 	hash.c \
 	history.c \
+	ipcheck_refund.c \
 	redact_index.c \
 	chathistory_ephemeral.c \
 	chathistory_presence.c \
@@ -551,7 +552,10 @@ IPcheck.o: IPcheck.c ../config.h ../include/IPcheck.h ../include/client.h \
   ../include/ircd.h ../include/match.h ../include/msg.h \
   ../include/ircd_alloc.h ../include/ircd_events.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_string.h \
-  ../include/s_debug.h ../include/s_user.h ../include/send.h
+  ../include/s_debug.h ../include/s_user.h ../include/send.h \
+  ../include/ipcheck_refund.h
+ipcheck_refund.o: ipcheck_refund.c ../config.h ../include/ipcheck_refund.h \
+  ../include/ircd_defs.h
 channel.o: channel.c ../config.h ../include/channel.h ../include/class.h \
   ../include/client.h ../include/destruct_event.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_alloc.h ../include/ircd_chattr.h \

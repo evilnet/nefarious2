@@ -24,6 +24,7 @@
 
 #include "IPcheck.h"
 #include "client.h"
+#include "ipcheck_refund.h"
 #include "ircd.h"
 #include "match.h"
 #include "msg.h"
@@ -293,6 +294,22 @@ int ip_registry_check_local(const struct irc_in_addr *addr, time_t* next_target_
   if (CONNECTED_SINCE(entry->last_connect) > IPCHECK_CLONE_PERIOD)
     entry->attempts = 0;
 
+  /* With IPCHECK_COUNT_REFUSALS off a refused connection leaves no trace:
+   * neither attempts nor last_connect moves, so the address gets back in
+   * IPCHECK_CLONE_PERIOD after its last accepted connection instead of
+   * after its last retry (register_throttle.c does the same).  Decided
+   * here, before the counting below, which is otherwise unchanged. */
+  if (!feature_bool(FEAT_IPCHECK_COUNT_REFUSALS)
+      && entry->attempts + 1 >= IPCHECK_CLONE_LIMIT
+      && (CurrentTime - cli_since(&me)) > IPCHECK_CLONE_DELAY) {
+#ifndef NOTHROTTLE
+    assert(entry->connected > 0);
+    --entry->connected;
+    Debug((DEBUG_DNS, "IPcheck refusing local connection from %s: too fast (not counted).", ircd_ntoa(&entry->addr)));
+    return 0;
+#endif
+  }
+
   free_targets = ip_registry_update_free_targets(entry);
   entry->last_connect = NOW;
 
@@ -534,6 +551,42 @@ void IPcheck_connect_fail(const struct Client *cptr, int disconnect)
 {
   assert(IsIPChecked(cptr));
   ip_registry_connect_fail(&cli_ip(cptr), disconnect);
+}
+
+/** Give a client that has just logged in and registered back the
+ * attempt ip_registry_check_local() charged its address at the accept,
+ * so an account holder whose device reconnects often -- a phone's web
+ * client loses its socket at every app switch -- is not throttled for it.
+ * At most IPCHECK_SASL_REFUND refunds per account every
+ * IPCHECK_SASL_REFUND_PERIOD seconds (ipcheck_refund.c); 0 is off.
+ * Only attempts is lowered, and never last_connect or connected: the
+ * window stays, the chain just does not grow.  A connection the chain
+ * already counts as its first (attempts at 1 -- a return after a gap,
+ * the usual case) has nothing to give back, and spends none of the
+ * account's refunds; at 0 (a remote burst reset the entry) neither.
+ * @param[in] cptr Client that registered with a SASL login.
+ * @param[in] account The account it logged in to.
+ */
+void IPcheck_login_refund(struct Client *cptr, const char *account)
+{
+  int limit = feature_int(FEAT_IPCHECK_SASL_REFUND);
+  struct IPRegistryEntry *entry;
+
+  assert(0 != cptr);
+  if (limit <= 0 || !IsIPChecked(cptr) || !account || !*account)
+    return;
+  entry = ip_registry_find(&cli_ip(cptr));
+  if (!entry || entry->attempts <= 1)
+    return;
+  if (!ipcheck_refund_take(account, CurrentTime, limit,
+                           feature_int(FEAT_IPCHECK_SASL_REFUND_PERIOD))) {
+    Debug((DEBUG_DNS, "IPcheck not refunding %s: account %s at its cap.",
+           ircd_ntoa(&cli_ip(cptr)), account));
+    return;
+  }
+  Debug((DEBUG_DNS, "IPcheck refunding the connection from %s to %s.",
+         ircd_ntoa(&cli_ip(cptr)), account));
+  --entry->attempts;
 }
 
 /** Handle a client that has successfully connected.
