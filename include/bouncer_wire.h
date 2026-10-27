@@ -364,13 +364,41 @@ enum bounce_hold_expiry {
  * its record on BS X), and promoting an alias here would make a second
  * primary.
  *
+ * Only the session's own live devices count (bounce_alias_is_own()): a
+ * ghost whose roster lists only another copy's devices ends its own copy.
+ *
  * @param[in] has_primary       Nonzero if the session has a primary.
  * @param[in] primary_ours_held Nonzero if it is a held ghost of ours.
- * @param[in] alias_count       Aliases on the session's roster.
+ * @param[in] alias_count       The session's own live aliases on its
+ *                              roster.
  */
 extern enum bounce_hold_expiry bounce_hold_expiry_action(int has_primary,
                                                          int primary_ours_held,
                                                          int alias_count);
+
+/** Is an alias on a record's roster a device of that record's own copy of
+ * the session -- one a promote may make its primary, and one that keeps
+ * its held ghost from reading as held?
+ *
+ * Two servers can each hold a copy of one session (both held after a
+ * split, under two nicks), and a burst files the other copy's live device
+ * on our record's roster by the session id.  That device follows the
+ * other copy's primary: a user, not an alias, that is not our record's
+ * primary.  Promoting it would make our server decide for the other copy
+ * (its holder does), and move the session onto that device under our
+ * nick.  Every other alias is the record's own: one that follows our
+ * primary, one whose primary is unknown or itself an alias, and every
+ * alias of a record with no primary (a promote at a split).
+ *
+ * @param[in] has_slot             The record has a primary (hs_client).
+ * @param[in] primary_set          The alias has a primary (alias_primary).
+ * @param[in] primary_is_slot      That primary is the record's.
+ * @param[in] primary_is_user      That primary is a user that is not an
+ *                                 alias.
+ * @return 1 if the alias is the record's own, else 0.
+ */
+extern int bounce_alias_is_own(int has_slot, int primary_set,
+                               int primary_is_slot, int primary_is_user);
 
 /** Does our held copy of a session yield to a peer's live copy of it?
  *

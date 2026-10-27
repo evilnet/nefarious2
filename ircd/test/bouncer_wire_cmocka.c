@@ -822,6 +822,54 @@ static void bsd_reannounces_only_toward_a_hold_mark_link(void **s)
       assert_int_equal(bounce_bsd_reannounces((enum bounce_bsd_action)a, l, 0), 0);
 }
 
+/* bounce_alias_is_own(has_slot, primary_set, primary_is_slot,
+ *                     primary_is_user) */
+static void own_alias_follows_our_primary(void **s)
+{
+  (void)s;
+  assert_true(bounce_alias_is_own(1, 1, 1, 1));
+  assert_true(bounce_alias_is_own(1, 1, 1, 0));
+}
+
+static void another_copys_device_is_not_ours(void **s)
+{
+  (void)s;
+  /* It follows a user that is not our primary: another copy's primary. */
+  assert_false(bounce_alias_is_own(1, 1, 0, 1));
+}
+
+static void alias_of_no_known_primary_is_ours(void **s)
+{
+  int a, b, c;
+  (void)s;
+  /* A record with no primary (a promote at a split): every alias. */
+  for (a = 0; a < 2; a++)
+  for (b = 0; b < 2; b++)
+  for (c = 0; c < 2; c++)
+    assert_true(bounce_alias_is_own(0, a, b, c));
+  /* No primary of its own, or one that is itself an alias. */
+  assert_true(bounce_alias_is_own(1, 0, 0, 0));
+  assert_true(bounce_alias_is_own(1, 1, 0, 0));
+}
+
+static void hold_expiry_counts_only_own_aliases(void **s)
+{
+  /* A roster of devices, each (primary_set, primary_is_slot,
+   * primary_is_user), of a record whose primary is our held ghost. */
+  static const int foreign_only[][3] = { { 1, 0, 1 }, { 1, 0, 1 } };
+  static const int mixed[][3] = { { 1, 0, 1 }, { 1, 1, 1 } };
+  int i, own;
+  (void)s;
+  for (own = 0, i = 0; i < 2; i++)
+    own += bounce_alias_is_own(1, foreign_only[i][0], foreign_only[i][1], foreign_only[i][2]);
+  /* Only another copy's devices: our copy ends (BS X), nothing promoted. */
+  assert_int_equal(bounce_hold_expiry_action(1, 1, own), BOUNCE_HOLD_END);
+  for (own = 0, i = 0; i < 2; i++)
+    own += bounce_alias_is_own(1, mixed[i][0], mixed[i][1], mixed[i][2]);
+  assert_int_equal(own, 1);
+  assert_int_equal(bounce_hold_expiry_action(1, 1, own), BOUNCE_HOLD_PROMOTE);
+}
+
 /* bounce_bxc_known_alias(behind_link, same_primary, filed_as_named,
  *                        same_nick, same_sessid) */
 static void known_alias_of_another_direction_is_not_the_lines(void **s)
@@ -965,6 +1013,10 @@ int main(void)
     cmocka_unit_test(bxp_over_our_held_ghost_yields),
     cmocka_unit_test(bxp_naming_our_slot_as_new_never_yields),
     cmocka_unit_test(known_alias_of_another_direction_is_not_the_lines),
+    cmocka_unit_test(own_alias_follows_our_primary),
+    cmocka_unit_test(another_copys_device_is_not_ours),
+    cmocka_unit_test(alias_of_no_known_primary_is_ours),
+    cmocka_unit_test(hold_expiry_counts_only_own_aliases),
     cmocka_unit_test(known_alias_as_announced_is_kept),
     cmocka_unit_test(known_alias_follows_the_line),
     cmocka_unit_test(bxp_yields_only_to_another_client),

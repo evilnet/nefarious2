@@ -1586,16 +1586,19 @@ extern struct BouncerSession *bounce_nick_side_lookup(struct Client *c,
                                                       int *held,
                                                       int *primary);
 
-/** Does @a s have a live connection on its alias roster: an entry that
- * resolves to a client (findNUser), as bounce_kill_session() would find
- * and exit it?  NULL has none. */
+/** Does @a s have a live device of its own copy on its alias roster: an
+ * entry that resolves to an alias following the session's primary (or of
+ * a record with no primary), not another copy's device filed here by the
+ * session id (bounce_alias_is_own())?  The hold mark, the same-nick
+ * verdict and BS C's retire branch read one answer.  NULL has none. */
 extern int bounce_session_has_live_alias(struct BouncerSession *s);
 
 /** Is @a c held, read from the session object @a s an action would use:
- * a held ghost whose session has no live alias left?  A held ghost with
- * a live alias counts as live: ending its session (bounce_kill_session)
- * would exit every alias it finds.  With @a s NULL (a ghost no session
- * names) there is no roster: held.
+ * a held ghost whose session has no live alias of its own copy left
+ * (bounce_session_has_live_alias())?  A held ghost with one counts as
+ * live: ending its session (bounce_kill_session) would exit it.  Another
+ * copy's device filed on the roster does not keep it live.  With @a s NULL
+ * (a ghost no session names) there is no roster: held.
  *
  * @param[in] s The session; NULL for none.
  * @param[in] c The client.

@@ -701,11 +701,13 @@ static void bounce_announce_alias(struct BouncerSession *session,
 static void unmirrored_clear(const char *account, const char *sessid);
 static void bounce_send_bsc(struct BouncerSession *s, struct Client *link);
 static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *link);
+static int session_own_alias_count(struct BouncerSession *s);
 
 static void bounce_hold_expire(struct Event *ev)
 {
   struct BouncerSession *session;
   struct Client *ghost;
+  enum bounce_hold_expiry action;
 
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
@@ -760,9 +762,9 @@ static void bounce_hold_expire(struct Event *ev)
    * session moved since this timer was armed: a BS X from here would make
    * every peer destroy its record under that primary, and a promote would
    * make a second primary.  Its holder runs the session's lifetime. */
-  switch (bounce_hold_expiry_action(ghost != NULL,
-                                    ghost && MyConnect(ghost) && IsBouncerHold(ghost),
-                                    session->hs_alias_count)) {
+  switch ((action = bounce_hold_expiry_action(ghost != NULL,
+                                              ghost && MyConnect(ghost) && IsBouncerHold(ghost),
+                                              session_own_alias_count(session)))) {
   case BOUNCE_HOLD_KEEP:
     log_write(LS_USER, L_INFO, 0,
               "Bouncer: hold of %s's session %s ran out, but its primary %s "
@@ -799,10 +801,12 @@ static void bounce_hold_expire(struct Event *ev)
     break;
   }
 
-  if (session->hs_alias_count > 0) {
-    /* Aliases exist — promote instead of destroy.
+  if (action == BOUNCE_HOLD_PROMOTE) {
+    /* Aliases of our own copy exist — promote instead of destroy.
      * Promote removes ghost from channels (silent), sends BX P + BS T.
-     * Session continues under the promoted alias's server. */
+     * Session continues under the promoted alias's server.  Another
+     * copy's devices on the roster are not ours to promote
+     * (bounce_promote_alias): with only those, our copy ends below. */
     int promoted;
     Debug((DEBUG_INFO, "Bouncer: hold expired with %d aliases, promoting for %s",
            session->hs_alias_count, session->hs_account));
@@ -827,7 +831,9 @@ static void bounce_hold_expire(struct Event *ev)
                   promoted == 0 ? "Session transferred" : "Session expired");
     }
   } else {
-    /* No aliases — session truly expired.
+    /* No alias of our own copy — session truly expired here.  A peer
+     * holding another copy keeps its record (it holds its own primary;
+     * the BS X guard), and another copy's device stays connected.
      * Mark DESTROYING and null hs_client so exit_client's cleanup path
      * in exit_one_client (s_misc.c) won't try to destroy it again.
      * The actual free is deferred to the ET_DESTROY handler above. */
@@ -2095,17 +2101,39 @@ struct BouncerSession *bounce_session_of_primary(struct Client *c)
   return session_of_primary(c, &ambiguous);
 }
 
+/** Is @a alias, an alias on @a s's roster, a device of @a s's own copy of
+ * the session (bounce_alias_is_own())?  Another copy's device -- one that
+ * follows a user other than our primary, filed here by the session id --
+ * is not: it follows its own copy's primary and holder. */
+static int session_alias_is_own(struct BouncerSession *s, struct Client *alias)
+{
+  struct Client *p = cli_user(alias) ? cli_user(alias)->alias_primary : NULL;
+
+  return bounce_alias_is_own(s->hs_client != NULL, p != NULL,
+                             p == s->hs_client,
+                             p && IsUser(p) && !IsBouncerAlias(p));
+}
+
+/** The live aliases on @a s's roster that are its own copy's
+ * (session_alias_is_own()); 0 for NULL. */
+static int session_own_alias_count(struct BouncerSession *s)
+{
+  int i, n = 0;
+
+  if (!s)
+    return 0;
+  for (i = 0; i < s->hs_alias_count; i++) {
+    struct Client *a = findNUser(s->hs_aliases[i].ba_numeric);
+    if (a && IsBouncerAlias(a) && session_alias_is_own(s, a))
+      n++;
+  }
+  return n;
+}
+
 /** See include/bouncer_session.h. */
 int bounce_session_has_live_alias(struct BouncerSession *s)
 {
-  int i;
-
-  /* The aliases bounce_kill_session would exit: those it finds. */
-  if (s)
-    for (i = 0; i < s->hs_alias_count; i++)
-      if (findNUser(s->hs_aliases[i].ba_numeric))
-        return 1;
-  return 0;
+  return session_own_alias_count(s) > 0;
 }
 
 /** See include/bouncer_session.h. */
@@ -4754,6 +4782,10 @@ static void bounce_announce_aliases_to(struct BouncerSession *s,
     alias = findNUser(s->hs_aliases[a].ba_numeric);
     if (!alias || !IsBouncerAlias(alias) || cli_from(alias) == link)
       continue;
+    /* Only an alias of the primary the line names: another copy's device
+     * on our roster is its own holder's to announce, under its primary. */
+    if (cli_alias_primary(alias) != s->hs_client)
+      continue;
 
     /* Build the alias's joined-channel list so the receiver
      * can re-add the alias to the same channels with
@@ -6203,6 +6235,11 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
       continue;
     if (local_only
         && 0 != ircd_strcmp(session->hs_aliases[j].ba_server, me_yxx))
+      continue;
+    /* Never another copy's device: it follows that copy's primary, whose
+     * holder decides for it.  Made our primary, it would carry the
+     * session under our nick into channels it is not in as a member. */
+    if (!session_alias_is_own(session, candidate))
       continue;
     activity = session->hs_aliases[j].ba_last_active;
     if (MyConnect(candidate) && cli_user(candidate)

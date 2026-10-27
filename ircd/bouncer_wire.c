@@ -192,6 +192,13 @@ enum bounce_hold_expiry bounce_hold_expiry_action(int has_primary,
   return has_primary ? BOUNCE_HOLD_END : BOUNCE_HOLD_DROP;
 }
 
+int bounce_alias_is_own(int has_slot, int primary_set, int primary_is_slot,
+                        int primary_is_user)
+{
+  /* Another copy's device: it follows a user who is not our primary. */
+  return !(has_slot && primary_set && !primary_is_slot && primary_is_user);
+}
+
 int bounce_same_session_yields(int ours_holding, int ours_live,
                                int theirs_active, int their_primary,
                                int kc_conflict)
