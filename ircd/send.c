@@ -121,24 +121,6 @@ void sendcmdto_set_alias_source(struct Client *alias)
   s2s_alias_source = alias;
 }
 
-/** Frontier introducer gate (per design intent #135 + #254).
- *
- * When set, the next sendcmdto_serv_butone / sendcmdto_flag_serv_butone
- * call skips peers that are neither IRCv3-aware nor services — i.e.,
- * the legacy-user peers.  Used by register_user for fresh
- * bouncer-account users so the BX-aware ring sees the introduction
- * and can converge via D.2 at-N-time, while legacy peers don't see
- * it until canonical-primary status is confirmed (via
- * bounce_pending_canon_emit_now from the periodic tick).
- *
- * Auto-clears after one consumed broadcast. */
-static int s2s_skip_legacy_canon = 0;
-
-void sendcmdto_set_skip_legacy_canon(void)
-{
-  s2s_skip_legacy_canon = 1;
-}
-
 /** Override batch ID for forwarded label responses.
  * When non-empty, format_message_tags_for_ex() uses this instead of
  * cli_batch_id(to). Takes priority over use_batch. Auto-cleared after use.
@@ -160,6 +142,63 @@ static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
  * dispatch m_nick's convergence rules at-N-time (per redesign A.2).
  * Auto-cleared after use. */
 static char s2s_sessid_override[S2S_SESSID_BUFSIZE] = "";
+
+/** The server link whose line is being handled right now, or NULL.
+ *
+ * A link's S2S stash (cli_s2s_msgid / cli_s2s_time_ms / cli_s2s_sessid
+ * of the link) is cleared only when the NEXT line from that link is
+ * parsed, so outside its own line it holds whatever that link sent
+ * last: another event's msgid, time and session hint.  packet.c sets
+ * this right before parse_server() and clears it right after, so the
+ * stash is consulted only while it is the current line's own tags.
+ * NULL outside server-line handling: client lines, timers, callbacks.
+ * Only ever compared, never dereferenced. */
+static struct Client *s2s_inbound_link = NULL;
+
+void sendcmdto_set_inbound_link(struct Client *link)
+{
+  s2s_inbound_link = link;
+}
+
+struct Client *sendcmdto_inbound_link(void)
+{
+  return s2s_inbound_link;
+}
+
+/** Whether \a cptr's stash holds the tags of the line being handled:
+ * \a cptr is the inbound link, or a client behind it (cli_connect of a
+ * remote client is its link's connection, so their stash is the
+ * link's).  The one gate for every reader of a link's stash. */
+int sendcmdto_stash_is_current(struct Client *cptr)
+{
+  return cptr && s2s_inbound_link && cli_from(cptr) == s2s_inbound_link;
+}
+
+/** Multiline framing (compact-tag ,M segment: flag + batch reference)
+ * for the next S2S emit that builds the tag region.  Armed by the ML
+ * senders in m_batch.c (audit 0.1), consumed by
+ * format_s2s_tags_with_client and cleared by
+ * sendcmdto_one_tags_with_client whether or not it was used. */
+static char s2s_ml_override[S2S_ML_BUFSIZE] = "";
+
+/** Client-only tags (compact-tag ,C segment) for the next S2S emit
+ * through sendcmdto_serv_butone_v3() (audit 0.1): a channel TAGMSG
+ * with a large client tag used to ride the message body, which could
+ * push an S2S line past the receiving peer's 512-byte cap and drop
+ * the whole link. format_s2s_tags_with_client() already takes
+ * client_tags as a direct parameter (used by
+ * sendcmdto_one_tags_with_client for the DM path); this override
+ * exists only to carry that value through sendcmdto_serv_butone_v3()'s
+ * cmd/pattern/varargs forwarding, which has no slot for it.
+ *
+ * Unlike the other overrides, this stores the pointer itself, not a
+ * copy: the caller's buffer (cli_client_tags(sptr) or
+ * cli_s2s_client_tags(cptr)) must stay valid until the consuming call
+ * runs, which is true for every current site (set immediately before
+ * that call). Consumed and cleared by sendcmdto_serv_butone_v3();
+ * cleared unconsumed by every other serv_butone variant, since
+ * legacy/v1 peers have no ,C slot to put it in. */
+static const char *s2s_client_tags_override = NULL;
 
 /** Override msgid for client-side channel broadcasts.
  * When non-empty, format_message_tags_ex includes msgid for clients with
@@ -254,6 +293,83 @@ void sendcmdto_set_s2s_sessid(const char *sessid)
     s2s_sessid_override[0] = '\0';
 }
 
+/** Arm the multiline framing segment ,M<flag><batch_ref> for the next
+ * S2S emit (audit 0.1).  \a flag is '+' (start), 'c' (concat), '-'
+ * (end) or '.' (plain).  Only meaningful right before a
+ * sendcmdto_one_tags_with_client() call toward a link for which
+ * send_s2s_tags_on() holds: that call places ,M before ,C in the tag
+ * region and clears the override either way.  A NULL or empty
+ * \a batch_ref disarms. */
+void sendcmdto_set_s2s_ml(char flag, const char *batch_ref)
+{
+  if (batch_ref && *batch_ref) {
+    s2s_ml_override[0] = flag;
+    ircd_strncpy(s2s_ml_override + 1, batch_ref, sizeof(s2s_ml_override) - 1);
+  } else
+    s2s_ml_override[0] = '\0';
+}
+
+/** Arm client-only tags (,C<client_tags>) for the next
+ * sendcmdto_serv_butone_v3() call (audit 0.1).  Stores \a client_tags
+ * itself rather than a copy: the caller's buffer must stay valid until
+ * that call runs.  sendcmdto_serv_butone_v3() reads it, passes it
+ * through to format_s2s_tags_with_client(), and clears it whether or
+ * not it built a tagged variant; every other serv_butone variant
+ * clears it unconsumed. A NULL or empty \a client_tags disarms. */
+void sendcmdto_set_s2s_client_tags(const char *client_tags)
+{
+  s2s_client_tags_override = (client_tags && *client_tags) ? client_tags : NULL;
+}
+
+/** Whether a line sent toward \a to through
+ * sendcmdto_one_tags_with_client() carries the S2S compact tag region:
+ * the next hop is a server link (or &me) that speaks IRCv3 S2S tags,
+ * and P10_MESSAGE_TAGS is on.  A caller that frames a line differently
+ * with and without the tag region (ML, audit 0.1) decides with this,
+ * and sendcmdto_one_tags_with_client() decides with it too, so the two
+ * can never disagree. */
+int send_s2s_tags_on(struct Client *to)
+{
+  to = cli_from(to);
+  return (IsServer(to) || IsMe(to)) && IsIRCv3Aware(to)
+         && feature_bool(FEAT_P10_MESSAGE_TAGS);
+}
+
+/** Whether the line "<from> <tok> <pattern...>" that a send toward a
+ * server link builds (sendcmdto_one, the serv_butone family) fits whole
+ * in the 510 bytes msgq_vmake keeps of an UNTAGGED S2S line.
+ *
+ * A body form that carries client tags AHEAD of its target -- a TAGMSG
+ * ("@<tags> <target>") or a multiline start line ("+<ref> @<tags>
+ * <target> :<text>"), sent this way when no tag region is built toward
+ * that link (P10_MESSAGE_TAGS off) -- is not the same message once cut:
+ * tags long enough to push the cut past them cut the target, so
+ * "#ops-public" arrives as "#ops" and the receiver, which checks only
+ * that a channel of that name exists, delivers there.  Such a sender
+ * asks this first and sends another form (or nothing) when it says no.
+ * The length is measured on the real line:  pattern and its arguments
+ * are formatted exactly as the send would format them (numerics, since
+ * the destination is a server).
+ * @return 1 if the whole line fits, 0 if a send would cut it. */
+int send_s2s_untagged_fits(struct Client *from, const char *tok,
+                           const char *pattern, ...)
+{
+  struct VarData vd;
+  char scratch[BUFSIZE];
+  int len;
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  len = ircd_snprintf(&me, scratch, sizeof(scratch), "%C %s %v", from, tok,
+                      &vd);
+  va_end(vd.vd_args);
+  if (len <= BUFSIZE - 2)
+    return 1;
+  Debug((DEBUG_DEBUG, "untagged S2S %s line from %s is %d bytes, over the "
+         "510-byte cut", tok, cli_name(from), len));
+  return 0;
+}
+
 /** Pre-built S2S tag prefix for multi-msgid scenarios (e.g. batched CREATE/PART).
  * When non-empty, sendcmdto_serv_butone uses this directly instead of calling
  * format_s2s_tags(). Must include the trailing space. Auto-cleared after use.
@@ -277,6 +393,47 @@ static int s2s_want_tags = 0;
 void sendcmdto_want_s2s_tags(int want)
 {
   s2s_want_tags = want;
+}
+
+/** End of the event: clear every S2S override (audit 0.4b).
+ *
+ * Each override is armed for one event's send(s) and consumed there,
+ * but not every path consumes all of them -- a handler that arms and
+ * then returns early (m_nick's alias source before a 433), a sender
+ * that reads an override without clearing it, a tags-off or legacy
+ * branch.  Whatever survives would stamp the next, unrelated
+ * server-bound line with this event's msgid and time (a QUIT relay, a
+ * forwarded command, even a PING), source it from an alias, or tag it
+ * with another event's ,S/,M/,C.  packet.c calls this after every
+ * parsed line, so no override outlives the line that armed it.
+ *
+ * The client-facing overrides (client msgid/time, the forwarded batch
+ * id) are left alone: their senders clear them. */
+void sendcmdto_reset_s2s_overrides(void)
+{
+  s2s_cptr_override = NULL;
+  s2s_alias_source = NULL;
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
+  s2s_sessid_override[0] = '\0';
+  s2s_ml_override[0] = '\0';
+  s2s_client_tags_override = NULL;
+  s2s_raw_tags[0] = '\0';
+  s2s_want_tags = 0;
+}
+
+/** Mint a fresh msgid into \a link's S2S stash for an event that
+ * arrived from it with none (a legacy peer, or tags off), and stamp the
+ * stash with that msgid's mint time.  The stash is what delivery,
+ * storage and the onward relay read (cli_s2s_msgid/cli_s2s_time_ms of
+ * the link), so they share one msgid and one time; a stash holding a
+ * msgid but no time made the relay take its time from wherever it
+ * could (audit 0.4b).  parse_server() clears the stash per line. */
+void s2s_mint_link_event(struct Client *link)
+{
+  generate_msgid(cli_s2s_msgid(link), S2S_MSGID_BUFSIZE);
+  /* Minting advanced the HLC: its physical time is the mint time. */
+  cli_s2s_time_ms(link) = hlc_global()->physical_ms;
 }
 
 
@@ -509,8 +666,9 @@ char *generate_msgid(char *buf, size_t buflen)
 
 /** Format message tags for S2S (server-to-server) relay.
  * Produces compact P10-native wire encoding: @A<time_b64_7><msgid_14>
- * If the message came from another server with tags, preserve them.
- * Otherwise, generate new time and msgid.
+ * The msgid and time are an armed override's, else -- while \a cptr's
+ * link's own line is being handled -- the ones that line arrived with,
+ * else freshly minted (see format_s2s_tags_with_client).
  * @param[out] buf Buffer for tag string (includes trailing space).
  * @param[in] buflen Size of buffer.
  * @param[in] cptr Server connection the message came from (for incoming tags).
@@ -527,10 +685,18 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
 
 /** Format message tags for S2S relay including optional client-only tags.
  * Produces compact P10-native wire encoding:
- *   @A<time_b64_7><msgid_14>[,C<client_tags>]
+ *   @A<time_b64_7><msgid_14>[,S<sessid>][,M<flag><batchref>][,C<client_tags>]
  * The ,C<client_tags> segment is appended only when client_tags is non-NULL
  * and non-empty. Receivers parse it into cli_s2s_client_tags(cptr) for
- * forwarding to local recipients.
+ * forwarding to local recipients.  ,S and ,M come from their armed
+ * overrides (sendcmdto_set_s2s_sessid, sendcmdto_set_s2s_ml), ,S also
+ * from cptr's stash.
+ *
+ * Precedence for the msgid and time (one source for both): an armed
+ * override (s2s_msgid_override with s2s_time_override); else the stash
+ * of \a cptr, but only while \a cptr's link is the one whose line is
+ * being handled (sendcmdto_inbound_link()); else a fresh mint.  The ,S
+ * hint follows the same gate: the stash, else the sessid override.
  *
  * Sized for callers that need to accommodate up to 4094 bytes of client
  * tags (IRCv3 cap) plus the compact prefix; recommend buf ≥ 4128 bytes
@@ -538,7 +704,8 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
  *
  * @param[out] buf Buffer for tag string (includes trailing space).
  * @param[in] buflen Size of buffer.
- * @param[in] cptr Server connection the message came from (for incoming tags).
+ * @param[in] cptr Server connection the message came from, or a client
+ *   behind it (for incoming tags); may be NULL.
  * @param[in] client_tags Optional client-only tags string ("+key=value;...").
  * @param[out] msgid_out Optional: buffer to store the msgid used.
  * @param[in] msgid_out_len Size of msgid_out buffer.
@@ -552,20 +719,38 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   char time_b64[8];
   char msgidbuf[S2S_MSGID_BUFSIZE];
   char sessidbuf[S2S_SESSID_BUFSIZE];
+  char mlbuf[S2S_ML_BUFSIZE];
   uint64_t epoch_ms;
   const char *msgid_tag = NULL;
   const char *sessid_tag = NULL;
   int has_ctags = (client_tags && *client_tags);
   int has_sessid;
+  int has_ml;
+  int stash;
 
   /* Check if P10 message tags are enabled */
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
     return NULL;
 
-  /* Sessid: prefer preserved from incoming, then explicit override.
-   * Empty → no ,S segment.  Per redesign A.2: bouncer session-identity
-   * hint for at-N-time recognition in m_nick. */
-  if (cptr && cli_s2s_sessid(cptr)[0]) {
+  /* Multiline framing (audit 0.1): only ever the explicit override --
+   * a relay re-arms it per line, so nothing is carried over from cptr. */
+  has_ml = (s2s_ml_override[0] != '\0');
+  if (has_ml) {
+    ircd_strncpy(mlbuf, s2s_ml_override, sizeof(mlbuf));
+    s2s_ml_override[0] = '\0';  /* auto-clear after consumption */
+  }
+
+  /* cptr's stash counts only while its link's line is being handled:
+   * then it is the tags of the line this send relays.  Any other time
+   * it holds whatever that link sent last -- another event, so reading
+   * it gave, e.g., a bouncer alias's message on this server the msgid
+   * of its primary's previous message on the primary's server. */
+  stash = sendcmdto_stash_is_current(cptr);
+
+  /* Sessid (,S): the current line's own hint, else the explicit
+   * override.  Empty → no ,S segment.  Per redesign A.2: bouncer
+   * session-identity hint for at-N-time recognition in m_nick. */
+  if (stash && cli_s2s_sessid(cptr)[0]) {
     sessid_tag = cli_s2s_sessid(cptr);
   } else if (s2s_sessid_override[0]) {
     ircd_strncpy(sessidbuf, s2s_sessid_override, sizeof(sessidbuf));
@@ -574,23 +759,25 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   }
   has_sessid = (sessid_tag && *sessid_tag);
 
-  /* Msgid FIRST: generate before time so HLC is advanced when we read physical_ms.
-   * Use preserved from incoming, override from caller, or generate new. */
-  if (cptr && cli_s2s_msgid(cptr)[0])
-    msgid_tag = cli_s2s_msgid(cptr);
-  else if (s2s_msgid_override[0])
+  /* Msgid and time, always from ONE source:
+   *  1. an armed override -- this event's own id, minted here or
+   *     restated by the caller; a local mint wins over any stash;
+   *  2. the stash, under the gate above;
+   *  3. a fresh mint, msgid FIRST so the HLC has advanced when its
+   *     physical time is read.
+   * A source without a time takes the HLC's physical time. */
+  if (s2s_msgid_override[0]) {
     msgid_tag = s2s_msgid_override;
-  else {
+    epoch_ms = s2s_time_override;
+  } else if (stash && cli_s2s_msgid(cptr)[0]) {
+    msgid_tag = cli_s2s_msgid(cptr);
+    epoch_ms = cli_s2s_time_ms(cptr);
+  } else {
     generate_msgid(msgidbuf, sizeof(msgidbuf));
     msgid_tag = msgidbuf;
+    epoch_ms = hlc_global()->physical_ms;
   }
-
-  /* Time: use preserved epoch_ms from incoming, override, or read from HLC (now advanced) */
-  if (cptr && cli_s2s_time_ms(cptr))
-    epoch_ms = cli_s2s_time_ms(cptr);
-  else if (s2s_time_override)
-    epoch_ms = s2s_time_override;
-  else
+  if (!epoch_ms)
     epoch_ms = hlc_global()->physical_ms;
 
   /* Store msgid for caller if requested (for echo-message) */
@@ -598,21 +785,53 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
     ircd_strncpy(msgid_out, msgid_tag, msgid_out_len);
   }
 
-  /* Compact format: @A<time_7><msgid_14>[,S<sessid>][,C<client_tags>]
+  /* Compact format:
+   *   @A<time_7><msgid_14>[,S<sessid>][,M<flag><batchref>][,C<client_tags>]
    *
-   * Segments are appended in order: ,S before ,C.  Receiver parses
-   * any number of segments in any order; emit order is conventional
-   * for readability in raw S2S logs. */
+   * Segments are appended in order: ,S, then ,M, then ,C.  ,C is
+   * always the LAST segment and must never be followed by another
+   * segment: a client-tag value may itself contain a comma, so
+   * receivers read ,C to the end of the tag region rather than
+   * stopping at the next comma (audit 0.1). Emit order otherwise is
+   * conventional for readability in raw S2S logs. */
   inttobase64_64(time_b64, epoch_ms, 7);
-  if (has_sessid && has_ctags)
-    snprintf(buf, buflen, "@A%s%s,S%s,C%s ", time_b64, msgid_tag,
-             sessid_tag, client_tags);
-  else if (has_sessid)
-    snprintf(buf, buflen, "@A%s%s,S%s ", time_b64, msgid_tag, sessid_tag);
-  else if (has_ctags)
-    snprintf(buf, buflen, "@A%s%s,C%s ", time_b64, msgid_tag, client_tags);
-  else
-    snprintf(buf, buflen, "@A%s%s ", time_b64, msgid_tag);
+  snprintf(buf, buflen, "@A%s%s%s%s%s%s%s%s ", time_b64, msgid_tag,
+           has_sessid ? ",S" : "", has_sessid ? sessid_tag : "",
+           has_ml ? ",M" : "", has_ml ? mlbuf : "",
+           has_ctags ? ",C" : "", has_ctags ? client_tags : "");
+  return buf;
+}
+
+/** Format the compact tag region of the line being handled, from
+ * \a link's stash alone: @A<time_7><msgid_14>[,S<sessid>].
+ *
+ * For a reply that must echo the id of the line it answers (the
+ * correlation a forwarded labeled command waits for): unlike
+ * format_s2s_tags_with_client, no override is read or consumed, so an
+ * id armed for some other send can never take the place of the one the
+ * reply answers.
+ * @param[out] buf Buffer for tag string (includes trailing space).
+ * @param[in] buflen Size of buffer.
+ * @param[in] link Server link the answered line arrived on.
+ * @return Pointer to buf, or NULL if P10_MESSAGE_TAGS is off, \a link's
+ *   line is not the one being handled, or its stash holds no msgid.
+ */
+char *format_s2s_tags_current(char *buf, size_t buflen, struct Client *link)
+{
+  char time_b64[8];
+  uint64_t epoch_ms;
+  int has_sessid;
+
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS) || !sendcmdto_stash_is_current(link)
+      || !cli_s2s_msgid(link)[0])
+    return NULL;
+
+  epoch_ms = cli_s2s_time_ms(link) ? cli_s2s_time_ms(link)
+                                   : hlc_global()->physical_ms;
+  has_sessid = (cli_s2s_sessid(link)[0] != '\0');
+  inttobase64_64(time_b64, epoch_ms, 7);
+  snprintf(buf, buflen, "@A%s%s%s%s ", time_b64, cli_s2s_msgid(link),
+           has_sessid ? ",S" : "", has_sessid ? cli_s2s_sessid(link) : "");
   return buf;
 }
 
@@ -1050,13 +1269,15 @@ static void dead_link(struct Client *to, char *notice)
   client_drop_sendq(cli_connect(to));
 
   /*
-   * Keep a copy of the last comment, for later use...
+   * Keep the reason for the exit message (exit_dead_client, the socket
+   * callbacks).  Never in cli_info: that is the user's realname, which a
+   * held session keeps, persists and replays.
    */
-  ircd_strncpy(cli_info(to), notice, REALLEN + 1);
+  ircd_strncpy(cli_exit_reason(to), notice, EXITREASONLEN + 1);
 
   if (!IsUser(to) && !IsUnknown(to) && !HasFlag(to, FLAG_CLOSING))
-    sendto_opmask_butone(0, SNO_OLDSNO, "%s for %s", cli_info(to), cli_name(to));
-  Debug((DEBUG_ERROR, cli_info(to)));
+    sendto_opmask_butone(0, SNO_OLDSNO, "%s for %s", cli_exit_reason(to), cli_name(to));
+  Debug((DEBUG_ERROR, "%s", cli_exit_reason(to)));
 }
 
 /** Test whether we can send to a client.
@@ -1142,6 +1363,29 @@ void send_queued(struct Client *to)
   if (IsBlocked(to) || !can_send(to))
     return;                     /* Don't bother */
 
+  /* An out-of-band WebSocket frame (keepalive PING, PONG) can be left
+   * pending with NOTHING queued behind it; the loop below would then
+   * never reach deliver_it and the frame would wait for the next line.
+   * Complete it now that the socket is writable. */
+  if (IsWebSocket(to) && con_ws_txrem(cli_connect(to))
+      && 0 == MsgQLength(&(cli_sendQ(to)))) {
+    unsigned int wrote = 0;
+
+    if (!ws_flush_txrem(to, &wrote)) {
+      if (IsDead(to)) {
+        char tmp[512];
+        sprintf(tmp,"Write error: %s", ((cli_sslerror(to)) ? (cli_sslerror(to)) :
+                ((strerror(cli_error(to))) ? (strerror(cli_error(to))) : "Unknown error")) );
+        dead_link(to, tmp);
+      }
+      else
+        update_write(to);
+      return;
+    }
+    cli_sendB(to) += wrote;
+    cli_sendB(&me) += wrote;
+  }
+
   while (MsgQLength(&(cli_sendQ(to))) > 0) {
     unsigned int len;
 
@@ -1208,6 +1452,20 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
 
   if (!can_send(to))
     return;
+
+  /* A blocked TLS socket has a record OpenSSL still holds pending, and
+   * the retry must present that same record first.  msgq_mapiov maps the
+   * priority queue ahead of the normal queue, so a priority line queued
+   * now (the ping check's PING, a WALLOPS, a services line under
+   * FLUSH_ULINE_IMMEDIATE) would reach SSL_write before the pending
+   * record: SSL_ERROR_SSL "bad write retry", and the connection is killed
+   * with "Write error: Internal OpenSSL error or protocol error".  It
+   * cannot be flushed early anyway while the socket is blocked, so queue
+   * it in order. */
+#ifdef USE_SSL
+  if (prio && IsBlocked(to) && cli_socket(to).ssl)
+    prio = 0;
+#endif
 
   if (MsgQLength(&(cli_sendQ(to))) > get_sendq(to)) {
     if (IsServer(to))
@@ -1307,6 +1565,8 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   struct MsgBuf *mb;
   struct Client *cptr;
   char s2s_tagbuf[128];
+  char tagbuf[512];
+  char *tags;
   int prio;
 
   to = cli_from(to);
@@ -1354,8 +1614,22 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
     s2s_msgid_override[0] = '\0';  /* Clear even if not used */
     s2s_sessid_override[0] = '\0';  /* Clear even if not used */
     s2s_time_override = 0;
-    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
-                   &vd);
+    /* A line to a client inside the labeled-response batch its command
+     * opened is part of that response: tag it the way send_reply() tags
+     * the numerics around it (@batch, @time).  Untagged, it sits outside
+     * the batch and a client collecting the response by batch id drops it
+     * (the STATS help list, STATS w, VERSION's library notices).  Only the
+     * synchronous batch labeled_batch_start() opened -- an async LIST
+     * keeps cli_batch_id set across event-loop turns, and unrelated lines
+     * must not join it. */
+    tags = (MyConnect(to) && cli_labeled_batch(to))
+         ? format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, NULL)
+         : NULL;
+    if (tags)
+      mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
+    else
+      mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+                     &vd);
   }
 
   va_end(vd.vd_args);
@@ -1486,7 +1760,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   struct VarData vd;
   struct MsgBuf *mb;
   char tagbuf[4608];
-  char s2s_tagbuf[4200];     /* fits @A prefix + ,C<4094-byte client_tags> */
+  char s2s_tagbuf[4256];     /* fits @A prefix + ,S + ,M + ,C<4095-byte client_tags> */
   char *tags;
   int prio;
   int has_ctags = (client_tags && *client_tags);
@@ -1506,13 +1780,14 @@ void sendcmdto_one_tags_with_client(struct Client *from,
      * link made format_s2s_tags_with_client read cli_s2s_msgid(to) -- the
      * last msgid PARSED off that link -- so a local PM sent right after a
      * services round-trip reused that message's id (2026-09-04).  For a
-     * relayed message the origin link rides in s2s_cptr_override; for a
-     * locally-minted one the caller armed s2s_msgid_override/time with
-     * this message's own id (ext_msgid), which format consumes when the
-     * cptr carries none. */
+     * relayed message the origin link rides in s2s_cptr_override, and
+     * format reads its stash only while that link's line is being
+     * handled; for a locally-minted one the caller armed
+     * s2s_msgid_override/time with this message's own id (ext_msgid),
+     * which format takes ahead of any stash. */
     struct Client *tag_cptr = s2s_cptr_override;
     s2s_cptr_override = NULL;
-    if (IsIRCv3Aware(to) &&
+    if (send_s2s_tags_on(to) &&
         format_s2s_tags_with_client(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr,
                                     has_ctags ? client_tags : NULL,
                                     NULL, 0)) {
@@ -1553,6 +1828,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   s2s_cptr_override = NULL;
   s2s_msgid_override[0] = '\0';
   s2s_time_override = 0;
+  s2s_ml_override[0] = '\0';
 }
 
 /** Send a (prefixed) command to a single local client with message tags,
@@ -1770,6 +2046,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
         char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
@@ -1790,6 +2067,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         /* Clear overrides consumed by format_s2s_tags */
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       }
     } else {
       s2s_cptr_override = NULL;
@@ -1797,6 +2075,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
 
     /* Untagged variants for legacy peers — also serve as the only
@@ -1843,15 +2122,6 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
        * (collision-kill on the gate-held peer). */
       if (IsBurstGated(lp->value.cptr))
         continue;
-      /* Frontier-introducer gate: when caller staged
-       * s2s_skip_legacy_canon, skip non-IRCv3-aware non-services peers
-       * for this broadcast.  The deferred legacy emission is handled
-       * later by bounce_pending_canon_emit_now from the periodic tick. */
-      if (s2s_skip_legacy_canon
-          && !IsIRCv3Aware(lp->value.cptr)
-          && !IsService(lp->value.cptr))
-        continue;
-
       if (mb_legacy && !IsIRCv3Aware(lp->value.cptr)) {
         send_mb = mb_legacy;
         send_mb_alias = mb_alias_legacy;
@@ -1865,7 +2135,6 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       else
         send_buffer(lp->value.cptr, send_mb, 0);
     }
-    s2s_skip_legacy_canon = 0;  /* auto-clear after consumption */
 
     if (mb_legacy)
       msgq_clean(mb_legacy);
@@ -1950,6 +2219,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
         char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
@@ -1971,6 +2241,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         /* Clear overrides consumed by format_s2s_tags */
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       }
     } else {
       /* No tagged variant was built, so nothing consumed the overrides.
@@ -1983,6 +2254,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
 
     /* Untagged variants for legacy peers — also serve as the only
@@ -2058,9 +2330,17 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
  * just don't receive the emission at all, saving wire bytes and avoiding
  * the 512-byte pre-strip line limit risk.
  *
- * BX (BOUNCER_TRANSFER) is the explicit exception — it must reach legacy
- * peers (which have been patched to handle BX P numeric swaps) and stays
- * on the unconditional sendcmdto_serv_butone() path.
+ * BX (BOUNCER_TRANSFER) P is the explicit exception — only the P
+ * subcommand (in-place numeric swap / membership transfer) must reach
+ * legacy peers, which have been patched to handle it, and that emission
+ * stays on the unconditional sendcmdto_serv_butone() path (paired, where
+ * the originating emission isn't already P, through
+ * sendcmdto_legacy_serv_butone()). Every other BX subcommand (C, U, X, N,
+ * V, and the unknown-subcommand relay) is fork-only noise to a legacy
+ * peer — its m_bouncer_transfer.c processes only P and silently relays
+ * the rest (.claude/para/areas/bouncer-design-intent.md, invariant #7:
+ * "Legacy wire vocabulary is BX P only") — so those sites use this
+ * function like any other fork-only P10 token.
  *
  * Implementation note: this function duplicates the body of
  * sendcmdto_serv_butone() rather than calling it through a static gate
@@ -2111,19 +2391,42 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
       } else {
-        char s2s_tagbuf[128];
         struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
                                 : (MyConnect(from) ? NULL : cli_from(from));
         s2s_cptr_override = NULL;
-        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
-          va_start(vd.vd_args, pattern);
-          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
-          va_end(vd.vd_args);
-          if (alias_from) {
+        if (s2s_client_tags_override) {
+          /* Client-only tags ride ,C instead of the message body
+           * (audit 0.1): a channel TAGMSG with a large client tag no
+           * longer risks the receiver's 512-byte S2S cap. Sized for
+           * the IRCv3 4094-byte client-tag maximum plus the compact
+           * prefix (,S/,M included). */
+          char s2s_tagbuf_ctags[4200];
+          const char *ctags = s2s_client_tags_override;
+          s2s_client_tags_override = NULL;  /* consumed */
+          if (format_s2s_tags_with_client(s2s_tagbuf_ctags, sizeof(s2s_tagbuf_ctags),
+                                          tag_cptr, ctags, NULL, 0)) {
             va_start(vd.vd_args, pattern);
-            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+            mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_ctags, from, tok, &vd);
             va_end(vd.vd_args);
+            if (alias_from) {
+              va_start(vd.vd_args, pattern);
+              mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_ctags, alias_from, tok, &vd);
+              va_end(vd.vd_args);
+            }
+          }
+        } else {
+          char s2s_tagbuf[128];
+          if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+            va_start(vd.vd_args, pattern);
+            mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+            va_end(vd.vd_args);
+            if (alias_from) {
+              va_start(vd.vd_args, pattern);
+              mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+              va_end(vd.vd_args);
+            }
           }
         }
         s2s_msgid_override[0] = '\0';
@@ -2140,6 +2443,7 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
       s2s_msgid_override[0] = '\0';
       s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
     }
   }
 
@@ -2178,24 +2482,42 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
  * Inverse of sendcmdto_serv_butone_v3 — the dispatch loop SKIPS peers that
  * advertise IRCv3 awareness, so only legacy peers receive the emission.
  *
- * The ONLY currently-supported wire shape through this helper is BX P
- * (`CMD_BOUNCER_TRANSFER` with subcommand 'P').  Legacy peers'
- * m_bouncer_transfer.c handler processes BX P natively (in-place numeric
- * swap or membership transfer-and-kill, depending on whether the target
- * numeric exists).  Every other BX subcommand (C, X, A, K, U, M, E) is
- * silently dropped by legacy peers — DO NOT send those through here.
+ * NEVER builds a tagged variant, even if the caller armed S2S tags for a
+ * paired sendcmdto_serv_butone_v3() / sendcmdto_serv_butone() call that
+ * shares the same emit: a legacy peer cannot parse message tags, and every
+ * other serv_butone variant already pays the @A bytes toward the 512-byte
+ * wire budget only for peers that can use them.  Every S2S override
+ * (raw tags, msgid, time, sessid, client-tags, cptr) is cleared
+ * unconditionally here, the same as the untagged branch every other
+ * serv_butone variant falls back to when no tagged variant is built —
+ * nothing here ever consumes them, so a caller sharing tags with an
+ * _v3/plain emit that runs first (e.g. away_send_to_servers()) is safe:
+ * that first call drains the overrides, and this one clears whatever,
+ * if anything, is left.
  *
- * Use site: at every BX C emission in the bouncer subsystem, also emit a
- * paired BX P through this helper so legacy peers reconcile their
+ * Supported wire shapes through this helper (every one a legacy peer's
+ * handler actually understands):
+ *   - BX P (`CMD_BOUNCER_TRANSFER` subcommand 'P') — in-place numeric
+ *     swap or membership transfer-and-kill via legacy m_bouncer_transfer.c.
+ *   - SVSINFO (ghost realname sync).
+ *   - PRIVS (oper-privilege sync, fork-only privileges stripped).
+ *   - AWAY (the pre-away star, substituted to FEAT_AWAY_STAR_MSG).
+ * The rule for adding a new one: only a line a legacy peer's own handler
+ * parses and acts on correctly belongs here, and it must never carry
+ * tags — everything else (BX C / X / A / K / U / M / E, and any other
+ * fork-only token) is silently dropped by legacy peers and wastes the
+ * emission; use sendcmdto_serv_butone_v3() for those instead.
+ *
+ * Use site (BX P): at every BX C emission in the bouncer subsystem, also
+ * emit a paired BX P through this helper so legacy peers reconcile their
  * UserStats.clients count and nick-hash table for the converted client.
  * See .claude/para/projects/legacy-bx-p-in-place-conversion.md for the
  * rationale and full transition table.
  *
- * Implementation note: mirrors sendcmdto_serv_butone_v3 exactly except for
- * the inverted IsIRCv3Aware filter at the dispatch step.  The alias-source
- * egress rewrite block (s2s_alias_source / IsBouncerAlias preamble) is
- * preserved verbatim — invariant #10 from the bouncer-architecture skill
- * applies to every S2S helper that accepts arbitrary `from` clients.
+ * Implementation note: the alias-source egress rewrite block
+ * (s2s_alias_source / IsBouncerAlias preamble) is preserved verbatim —
+ * invariant #10 from the bouncer-architecture skill applies to every S2S
+ * helper that accepts arbitrary `from` clients.
  */
 void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
                                   const char *tok, struct Client *one,
@@ -2220,72 +2542,33 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
 
   vd.vd_format = pattern;
 
-  {
-    int want_tags = s2s_want_tags;
-    s2s_want_tags = 0;
+  /* Never a tagged variant: a legacy peer can't parse message tags, so
+   * this helper never stages one.  Clear every S2S override exactly like
+   * the untagged branch every other serv_butone variant falls back to
+   * when it built no tagged line -- an override left armed rides the
+   * next server-bound emit. */
+  s2s_want_tags = 0;
+  s2s_cptr_override = NULL;
+  s2s_raw_tags[0] = '\0';
+  s2s_msgid_override[0] = '\0';
+  s2s_sessid_override[0] = '\0';
+  s2s_time_override = 0;
+  s2s_client_tags_override = NULL;
 
-    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
-      if (s2s_raw_tags[0]) {
-        va_start(vd.vd_args, pattern);
-        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
-        va_end(vd.vd_args);
-        if (alias_from) {
-          va_start(vd.vd_args, pattern);
-          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
-          va_end(vd.vd_args);
-        }
-        s2s_raw_tags[0] = '\0';
-        s2s_cptr_override = NULL;
-        s2s_msgid_override[0] = '\0';
-        s2s_sessid_override[0] = '\0';
-        s2s_time_override = 0;
-      } else {
-        char s2s_tagbuf[128];
-        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
-                                : (MyConnect(from) ? NULL : cli_from(from));
-        s2s_cptr_override = NULL;
-        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
-          va_start(vd.vd_args, pattern);
-          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
-          va_end(vd.vd_args);
-          if (alias_from) {
-            va_start(vd.vd_args, pattern);
-            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
-            va_end(vd.vd_args);
-          }
-        }
-        s2s_msgid_override[0] = '\0';
-        s2s_time_override = 0;
-      }
-    } else {
-      /* No tagged variant was built, so nothing consumed the overrides.
-       * Clear them here or they ride the next server-bound emit: an
-       * ACCOUNT/AWAY relay armed by sendcmdto_set_s2s_tags() without
-       * sendcmdto_want_s2s_tags() stamped the next cross-server PRIVMSG
-       * with the auth-time msgid and timestamp (2026-09-04). */
-      s2s_cptr_override = NULL;
-      s2s_raw_tags[0] = '\0';
-      s2s_msgid_override[0] = '\0';
-      s2s_sessid_override[0] = '\0';
-      s2s_time_override = 0;
-    }
-  }
-
-  if (!mb) {
+  va_start(vd.vd_args, pattern);
+  mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+  va_end(vd.vd_args);
+  if (alias_from) {
     va_start(vd.vd_args, pattern);
-    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
     va_end(vd.vd_args);
-    if (alias_from) {
-      va_start(vd.vd_args, pattern);
-      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
-      va_end(vd.vd_args);
-    }
   }
 
   /* Legacy-only downlink dispatch: skip IRCv3-aware peers entirely
-   * (they receive the corresponding BX C through the unconditional or
-   * _v3 path; this helper exists solely to feed legacy peers the BX P
-   * they can process). */
+   * (they get the fork form of the same event from the caller's paired
+   * _v3 or unconditional send).  What goes here is only the legacy form
+   * a legacy peer's own handler acts on -- BX P, SVSINFO, PRIVS, AWAY,
+   * per the header above -- and it is never tagged. */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     if (one && lp->value.cptr == cli_from(one))
       continue;
@@ -2848,6 +3131,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
+  struct MsgBuf *serv_mb_legacy = NULL; /* Untagged primary numeric for non-IRCv3-aware peers */
   struct Client *service;
   struct Client *cptr;  /* Server connection for incoming S2S tags */
   struct Client *alias_from;    /* Alias source for split S2S delivery */
@@ -2896,17 +3180,35 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   /* Prepare tagged format string for building cached buffers */
   ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
 
-  /* Build buffer to send to servers - with S2S tags if enabled */
+  /* Build buffer to send to servers - with S2S tags if enabled.  Legacy
+   * (non-IRCv3-aware) peers never see the @A... prefix: they don't parse
+   * it, and it eats bytes against their 512-byte limit that a client
+   * line near the limit cannot spare (audit 1.5 -- live on prod: Fractal
+   * sends @A-tagged channel lines to the stock legacy hub, which keeps
+   * the tag and truncates the message's tail to fit). When tags are off
+   * or format_s2s_tags fails, serv_mb is already untagged and doubles as
+   * the legacy buffer, so there's nothing extra to build. */
   if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
     va_start(vd.vd_args, pattern);
     serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
     va_end(vd.vd_args);
     serv_mb = serv_mb_tags;  /* Use tagged version */
+
+    va_start(vd.vd_args, pattern);
+    serv_mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
   } else {
     va_start(vd.vd_args, pattern);
     serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
     va_end(vd.vd_args);
   }
+  /* The msgid/time override was armed for this message alone (audit
+   * 0.4b): consume it now that the prefix is built (or tags are off),
+   * as the serv_butone family does.  Left armed, it stamped the next
+   * server-bound line -- a QUIT relay, a forwarded command -- with this
+   * message's msgid and time. */
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
 
   /* Build alias S2S buffer for the primary's server direction */
   if (alias_from) {
@@ -2960,8 +3262,16 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
         send_buffer(member->user, user_mb, 0);
       }
     } else {
-      /* Use alias numeric for primary's server direction to avoid fake direction */
-      if (serv_mb_alias && cli_from(member->user) == primary_dir)
+      /* Legacy (non-IRCv3-aware) peers never get a tagged buffer, nor an
+       * alias numeric -- aliases are introduced only via BX C, which
+       * legacy peers never learn (invariant #10), so a routed command
+       * sourced from the alias is an unknown source at the first legacy
+       * hop.  Check the next hop's awareness first; otherwise fall back
+       * to the existing alias-vs-primary choice. */
+      struct Client *link = cli_from(member->user);
+      if (serv_mb_legacy && !IsIRCv3Aware(link))
+        send_buffer(member->user, serv_mb_legacy, 0);
+      else if (serv_mb_alias && link == primary_dir)
         send_buffer(member->user, serv_mb_alias, 0);
       else
         send_buffer(member->user, serv_mb, 0);
@@ -2972,7 +3282,10 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       && (service = FindServer(GlobalForwards[prefix]))
       && cli_sentalong(service) != sentalong_marker) {
       cli_sentalong(service) = sentalong_marker;
-      send_buffer(service, serv_mb, 0);
+      if (serv_mb_legacy && !IsIRCv3Aware(cli_from(service)))
+        send_buffer(service, serv_mb_legacy, 0);
+      else
+        send_buffer(service, serv_mb, 0);
   }
 
   /* Clear cap route context */
@@ -2991,6 +3304,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   msgq_clean(serv_mb);
   if (serv_mb_alias)
     msgq_clean(serv_mb_alias);
+  if (serv_mb_legacy)
+    msgq_clean(serv_mb_legacy);
 }
 
 /** Send a (prefixed) command to all users on this channel, except for
@@ -3023,6 +3338,7 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   struct MsgBuf *serv_mb_v3 = NULL;     /* @A...,C<client_tags> for IRCv3-aware peers */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
   struct MsgBuf *serv_mb_alias_v3 = NULL; /* Alias numeric, IRCv3-aware variant */
+  struct MsgBuf *serv_mb_legacy = NULL; /* Untagged primary numeric for non-IRCv3-aware peers */
   struct Client *service;
   struct Client *cptr;
   struct Client *alias_from;    /* Alias source for split S2S delivery */
@@ -3074,26 +3390,65 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
    * When client_tags are present, additionally build a v3 buffer with
    * ,C<client_tags> in the compact-tag prefix; the dispatch loop picks
    * it for IRCv3-aware peers so they can forward the tags to their
-   * local recipients. Legacy peers get the existing tag-only prefix
-   * (which they strip per the legacy patch — same as today). */
-  if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
-    va_start(vd.vd_args, pattern);
-    serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
-    va_end(vd.vd_args);
-    serv_mb = serv_mb_tags;
+   * local recipients. Legacy peers get a separate untagged buffer
+   * (serv_mb_legacy, below) -- they don't parse the @A... prefix and
+   * it eats bytes against their 512-byte limit (audit 1.5). When tags
+   * are off or format_s2s_tags fails, serv_mb is already untagged and
+   * doubles as the legacy buffer.
+   *
+   * The tag region is formatted ONCE (audit 0.4b).  Two format calls
+   * minted two msgids when neither an override nor the link's stash
+   * supplied one -- the ,C copy and the plain copy of one message went
+   * out under different ids -- and the first call consumed the ,S
+   * hint, so only the plain copy carried it.  With client tags, the
+   * ,C prefix is built and the plain prefix is that string cut before
+   * its ,C segment: the time and msgid are base64 and the ,S and ,M
+   * data hold no comma, so the first ",C" after them starts the client
+   * tags. */
+  {
+    int has_prefix = 0;
 
-    if (has_ctags &&
-        format_s2s_tags_with_client(s2s_tagbuf_v3, sizeof(s2s_tagbuf_v3),
-                                    cptr, client_tags, NULL, 0)) {
+    if (has_ctags) {
+      if (format_s2s_tags_with_client(s2s_tagbuf_v3, sizeof(s2s_tagbuf_v3),
+                                      cptr, client_tags, NULL, 0)) {
+        const char *head = s2s_tagbuf_v3 + 2;   /* past "@A" */
+        const char *cseg = strstr(head + strcspn(head, ", "), ",C");
+        size_t plen = cseg ? (size_t)(cseg - s2s_tagbuf_v3) : 0;
+
+        if (cseg && plen + 2 <= sizeof(s2s_tagbuf)) {
+          memcpy(s2s_tagbuf, s2s_tagbuf_v3, plen);
+          s2s_tagbuf[plen] = ' ';
+          s2s_tagbuf[plen + 1] = '\0';
+          has_prefix = 1;
+        }
+      }
+    } else if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0))
+      has_prefix = 1;
+
+    if (has_prefix) {
       va_start(vd.vd_args, pattern);
-      serv_mb_v3 = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_v3, from, tok, &vd);
+      serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+      va_end(vd.vd_args);
+      serv_mb = serv_mb_tags;
+
+      va_start(vd.vd_args, pattern);
+      serv_mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
+      va_end(vd.vd_args);
+
+      if (has_ctags) {
+        va_start(vd.vd_args, pattern);
+        serv_mb_v3 = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_v3, from, tok, &vd);
+        va_end(vd.vd_args);
+      }
+    } else {
+      va_start(vd.vd_args, pattern);
+      serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
       va_end(vd.vd_args);
     }
-  } else {
-    va_start(vd.vd_args, pattern);
-    serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-    va_end(vd.vd_args);
   }
+  /* Consumed: armed for this message alone (see sendcmdto_channel_butone). */
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
 
   /* Build alias S2S buffer for the primary's server direction */
   if (alias_from) {
@@ -3163,13 +3518,20 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
       }
     } else {
       /* S2S delivery. Pick buffer based on:
+       *   0. Legacy (non-IRCv3-aware) peers always get the untagged
+       *      primary-numeric buffer -- never a tagged variant, and
+       *      never an alias numeric either (invariant #10: aliases
+       *      are introduced only via BX C, which legacy peers never
+       *      learn).
        *   1. Primary-direction alias rewriting (serv_mb_alias variants)
        *   2. IRCv3-aware peers get the ,C<client_tags> variant when available
        *   3. Otherwise the standard prefix-only or no-prefix buffer
        */
       struct Client *peer_link = cli_from(member->user);
       int is_v3 = IsIRCv3Aware(peer_link);
-      if (peer_link == primary_dir) {
+      if (serv_mb_legacy && !is_v3) {
+        send_buffer(member->user, serv_mb_legacy, 0);
+      } else if (peer_link == primary_dir) {
         if (is_v3 && serv_mb_alias_v3)
           send_buffer(member->user, serv_mb_alias_v3, 0);
         else if (serv_mb_alias)
@@ -3191,7 +3553,12 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
       && (service = FindServer(GlobalForwards[prefix]))
       && cli_sentalong(service) != sentalong_marker) {
       cli_sentalong(service) = sentalong_marker;
-      if (IsIRCv3Aware(service) && serv_mb_v3)
+      /* Rule by the service's next hop (cli_from), not the service
+       * entity itself -- IsIRCv3Aware(service) tested X3 itself, which
+       * is never the thing parsing this buffer off the wire. */
+      if (serv_mb_legacy && !IsIRCv3Aware(cli_from(service)))
+        send_buffer(service, serv_mb_legacy, 0);
+      else if (IsIRCv3Aware(cli_from(service)) && serv_mb_v3)
         send_buffer(service, serv_mb_v3, 0);
       else
         send_buffer(service, serv_mb, 0);
@@ -3205,6 +3572,8 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
     msgq_clean(serv_mb_alias);
   if (serv_mb_alias_v3)
     msgq_clean(serv_mb_alias_v3);
+  if (serv_mb_legacy)
+    msgq_clean(serv_mb_legacy);
 }
 
 /** Send a (prefixed) WALL of type \a type to all users except \a one.

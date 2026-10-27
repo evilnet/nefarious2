@@ -326,6 +326,63 @@ static void ssl_handshake_events(struct Client *cptr)
 }
 #endif /* USE_SSL */
 
+/** Complete a WebSocket frame left pending on the wire.
+ * Writes the remainder of con_ws_txrem from where the last attempt
+ * stopped.  OpenSSL is retried from the stash, which is the very buffer
+ * the frame was first offered from (ws_send_raw writes from its heap
+ * copy), as the retry-same-buffer rule requires.
+ * @param[in] cptr WebSocket client with a pending frame.
+ * @param[in,out] wrote_out Incremented by the bytes written here when
+ * the frame completes; when it does not, the bytes are accounted to
+ * sendB here and *wrote_out is reset to 0.
+ * @return 1 when the frame is complete (the stash is freed), 0 when it
+ * is still pending (FLAG_BLOCKED set) or the socket died
+ * (FLAG_DEADSOCKET set).
+ */
+int ws_flush_txrem(struct Client *cptr, unsigned int *wrote_out)
+{
+  struct Connection *wcon = cli_connect(cptr);
+  unsigned int remlen = (unsigned)(con_ws_txrem_len(wcon) - con_ws_txrem_pos(wcon));
+  unsigned int wrote = 0;
+  IOResult r = IO_BLOCKED;
+
+  assert(0 != con_ws_txrem(wcon));
+#ifdef USE_SSL
+  if (cli_socket(cptr).ssl) {
+    int sr = SSL_write(cli_socket(cptr).ssl,
+                       con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
+    if (sr > 0) { wrote = (unsigned)sr; r = IO_SUCCESS; }
+    else {
+      int se = SSL_get_error(cli_socket(cptr).ssl, sr);
+      r = (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ)
+            ? IO_BLOCKED : IO_FAILURE;
+    }
+  } else
+#endif
+    r = os_send_nonb(cli_fd(cptr), con_ws_txrem(wcon) + con_ws_txrem_pos(wcon),
+                     remlen, &wrote);
+  if (wrote) {
+    *wrote_out += wrote;
+    con_ws_txrem_pos(wcon) += (int)wrote;
+  }
+  if (con_ws_txrem_pos(wcon) >= con_ws_txrem_len(wcon)) {
+    MyFree(con_ws_txrem(wcon));
+    con_ws_txrem(wcon) = NULL;
+    con_ws_txrem_len(wcon) = con_ws_txrem_pos(wcon) = 0;
+    return 1;
+  }
+  cli_sendB(cptr) += *wrote_out;
+  cli_sendB(&me)  += *wrote_out;
+  *wrote_out = 0;
+  if (r == IO_FAILURE) {
+    cli_error(cptr) = errno;
+    SetFlag(cptr, FLAG_DEADSOCKET);
+    return 0;
+  }
+  SetFlag(cptr, FLAG_BLOCKED);
+  return 0;
+}
+
 /** Attempt to send a sequence of bytes to the connection.
  * As a side effect, updates \a cptr's FLAG_BLOCKED setting
  * and sendB/sendK fields.
@@ -375,48 +432,14 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
     unsigned int consumed = 0;  /* input bytes whose frames were FULLY written */
     struct Connection *wcon = cli_connect(cptr);
 
-    /* A previous flush left a partially-written frame on the wire
-     * (plaintext short write).  Its line was already consumed from the
-     * queue, so the REST of that exact frame must go out before any new
-     * frame -- resending from the frame start would corrupt the stream. */
-    if (con_ws_txrem(wcon)) {
-      unsigned int remlen = (unsigned)(con_ws_txrem_len(wcon) - con_ws_txrem_pos(wcon));
-      unsigned int wrote = 0;
-      IOResult r = IO_BLOCKED;
-#ifdef USE_SSL
-      if (cli_socket(cptr).ssl) {
-        int sr = SSL_write(cli_socket(cptr).ssl,
-                           con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
-        if (sr > 0) { wrote = (unsigned)sr; r = IO_SUCCESS; }
-        else {
-          int se = SSL_get_error(cli_socket(cptr).ssl, sr);
-          r = (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ)
-                ? IO_BLOCKED : IO_FAILURE;
-        }
-      } else
-#endif
-        r = os_send_nonb(cli_fd(cptr), con_ws_txrem(wcon) + con_ws_txrem_pos(wcon),
-                         remlen, &wrote);
-      if (wrote) {
-        total_ws_written += wrote;
-        con_ws_txrem_pos(wcon) += (int)wrote;
-      }
-      if (con_ws_txrem_pos(wcon) >= con_ws_txrem_len(wcon)) {
-        MyFree(con_ws_txrem(wcon));
-        con_ws_txrem(wcon) = NULL;
-        con_ws_txrem_len(wcon) = con_ws_txrem_pos(wcon) = 0;
-      } else {
-        cli_sendB(cptr) += total_ws_written;
-        cli_sendB(&me)  += total_ws_written;
-        if (r == IO_FAILURE) {
-          cli_error(cptr) = errno;
-          SetFlag(cptr, FLAG_DEADSOCKET);
-          return 0;
-        }
-        SetFlag(cptr, FLAG_BLOCKED);
-        return 0;  /* remainder still pending; nothing new consumed */
-      }
-    }
+    /* A previous flush left a frame pending on the wire: a plaintext
+     * short write, or an out-of-band frame (keepalive PING, PONG) that
+     * went want-write inside OpenSSL.  Its bytes precede everything still
+     * queued, so the REST of that exact frame must go out before any new
+     * frame -- resending from the frame start would corrupt the stream,
+     * and a different frame is OpenSSL's "bad write retry". */
+    if (con_ws_txrem(wcon) && !ws_flush_txrem(cptr, &total_ws_written))
+      return 0;  /* still pending (or dead); nothing new consumed */
 
     /* Get data from message queue as iovecs */
     iovcnt = msgq_mapiov(buf, iov, IOV_MAX, &bytes_count);
@@ -716,6 +739,38 @@ static int completed_connection(struct Client* cptr)
                 cli_info(&me));
 
   return (IsDead(cptr)) ? 0 : 1;
+}
+
+/** Why @a cptr's socket died, as dead_link() recorded it, or @a dflt.
+ * (These read cli_info -- the realname -- when nothing was recorded, so a
+ * socket error could quit a user with their own realname.) */
+static const char *dead_reason(struct Client *cptr, const char *dflt)
+{
+  return (cptr && cli_connect(cptr) && cli_exit_reason(cptr)[0])
+         ? cli_exit_reason(cptr) : dflt;
+}
+
+/** Exit a client whose socket died -- or hold it, when it is the primary
+ * of a bouncer session that holds: the decision client_sock_callback()
+ * makes for an EOF or a read error.  A write error or a sendQ overflow is
+ * a dropped connection too (user decision 2026-10-21); the parse loops and
+ * check_pings() exited it outright, and a session with no other
+ * connection ended with it.
+ * @param[in] cptr Local client marked dead.
+ * @param[in] dflt Exit message when dead_link() recorded none.
+ * @return CPTR_KILLED when the client is gone, 0 when it is held.
+ */
+int exit_dead_client(struct Client *cptr, const char *dflt)
+{
+  const char *msg = dead_reason(cptr, dflt);
+
+  if (IsUser(cptr) && !IsBouncerAlias(cptr)) {
+    if (IsBouncerHold(cptr))
+      return 0;
+    if (bounce_should_hold(cptr) && bounce_hold_client(cptr, msg) == 0)
+      return 0;
+  }
+  return exit_client(cptr, cptr, &me, (char *)msg);
 }
 
 /** Close the physical connection.  Side effects: MyConnect(cptr)
@@ -1068,10 +1123,14 @@ void update_write(struct Client* cptr)
   /* If there are messages that need to be sent along, or if the client
    * is in the middle of a /list, then we need to tell the engine that
    * we're interested in writable events--otherwise, we need to drop
-   * that interest.
+   * that interest.  A WebSocket frame left pending on the wire (an
+   * out-of-band PING or PONG that went want-write, with nothing queued
+   * behind it) counts: without the event, send_queued never completes it
+   * and it waits for the next line.
    */
   socket_events(&(cli_socket(cptr)),
-		((MsgQLength(&cli_sendQ(cptr)) || cli_listing(cptr) || cli_replay(cptr)) ?
+		((MsgQLength(&cli_sendQ(cptr)) || cli_listing(cptr) || cli_replay(cptr)
+		  || (IsWebSocket(cptr) && con_ws_txrem(cli_connect(cptr)))) ?
 		 SOCK_ACTION_ADD : SOCK_ACTION_DEL) | SOCK_EVENT_WRITABLE);
 }
 
@@ -1720,7 +1779,7 @@ void client_sock_callback(struct Event* ev)
   struct Client* cptr;
   struct Connection* con;
   char *fmt = "%s";
-  char *fallback = 0;
+  const char *fallback = 0;
 
   assert(0 != ev_socket(ev));
 
@@ -1781,11 +1840,11 @@ void client_sock_callback(struct Event* ev)
 
   case ET_CONNECT: /* socket connection completed */
     if (!completed_connection(cptr) || IsDead(cptr))
-      fallback = cli_info(cptr);
+      fallback = dead_reason(cptr, "Connection failed");
     break;
 
   case ET_ERROR: /* an error occurred */
-    fallback = cli_info(cptr);
+    fallback = dead_reason(cptr, "Socket error");
     cli_error(cptr) = ev_data(ev);
     /* If the OS told us we have a bad file descriptor, we should
      * record that for future reference.
@@ -1850,7 +1909,7 @@ void client_sock_callback(struct Event* ev)
     }
     if (s_state(&(con_socket(con))) == SS_CONNECTING || IsSSLNeedConnect(cptr)) {
       if (!completed_connection(cptr)) {
-        fallback = cli_info(cptr);
+        fallback = dead_reason(cptr, "Connection failed");
         break;
       }
       if (IsSSLNeedConnect(cptr))
@@ -1890,7 +1949,7 @@ void client_sock_callback(struct Event* ev)
       }
       if (s_state(&(con_socket(con))) == SS_CONNECTING || IsSSLNeedConnect(cptr)) {
         if (!completed_connection(cptr)) {
-          fallback = cli_info(cptr);
+          fallback = dead_reason(cptr, "Connection failed");
           break;
         }
         if (IsSSLNeedConnect(cptr))

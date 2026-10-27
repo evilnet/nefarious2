@@ -77,8 +77,6 @@ struct SASLSession {
   char              *scram_salt_b64;           /**< Base64 salt from KC */
   int                scram_iterations;         /**< Iteration count from KC */
 
-  /* Account creation timestamp from Keycloak (epoch secs, 0 = unknown) */
-  time_t             acc_created_at;
   /* Keycloak user id of the verified identity, compact ("" = not in hand) */
   char               kc_id[ACCOUNT_ID_LEN + 1];
 };
@@ -119,7 +117,8 @@ extern void sasl_session_free(struct Client *sptr);
  *  AC broadcast, hidden host, bouncer alias update, auth_sasl_done.
  */
 extern void sasl_complete_login(struct Client *sptr, const char *account,
-                                time_t acc_create, const char *kc_id);
+                                time_t acc_create, const char *kc_id,
+                                int id_live);
 
 /** Get the local SASL mechanism list string for CAP advertisement.
  *  @return Comma-separated mechanism string, or NULL if none.

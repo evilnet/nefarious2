@@ -93,10 +93,20 @@ extern int set_user_mode(struct Client *cptr, struct Client *sptr,
 extern void do_oper(struct Client* cptr, struct Client* sptr,
                     struct ConfItem* aconf, int flags);
 extern int user_set_away(struct User *user, char *message);
+extern int away_apply(struct Client *cptr, struct Client *sptr,
+                      char *away_message, int interactive);
 /* draft/pre-away: a user whose every connection said AWAY * is stored and
  * relayed as away "*"; only a client that did not negotiate draft/pre-away
  * is shown FEAT_AWAY_STAR_MSG instead, at the moment we write to it. */
 extern const char *away_text_for(struct Client *viewer, const char *away);
+/* Sends CMD_AWAY to other servers, for local away changes and relays
+ * alike: substitutes FEAT_AWAY_STAR_MSG for legacy peers when away is
+ * the pre-away star.  Not the only CMD_AWAY sender: ms_away relays a
+ * legacy sender's literal "*" verbatim itself, judged by the link it
+ * arrived on.  NULL/"" away is "no longer away"; see ircd/m_away.c for
+ * the full contract (including the never-arm-s2s_alias_source rule). */
+extern void away_send_to_servers(struct Client *from, struct Client *one,
+                                 const char *away);
 extern void away_notify_common(struct Client *sptr, struct Client *one,
                                const char *text);
 extern void away_notify_channel(struct Client *sptr, struct Channel *chptr,
@@ -115,6 +125,7 @@ extern char *umode_str(struct Client *cptr);
 extern void user_apply_umode_str(struct Client *cptr, const char *modes);
 extern void send_umode(struct Client *cptr, struct Client *sptr,
                        struct Flags *old, int sendset);
+extern void send_umode_signon(struct Client *sptr);
 extern void set_snomask(struct Client *, unsigned int, int);
 extern int is_snomask(char *);
 extern int check_target_limit(struct Client *sptr, void *target, const char *name,
@@ -144,5 +155,6 @@ extern void send_isupport_update(void);
 void do_names(struct Client* sptr, struct Channel* chptr, int filter);
 
 extern int abort_sasl(struct Client* cptr, int timeout);
+extern void sasl_resume_registration_later(struct Client *cptr);
 
 #endif /* INCLUDED_s_user_h */

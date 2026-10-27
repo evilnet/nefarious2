@@ -856,11 +856,12 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
     client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
   }
 
-  /* Unified msgid: if no incoming S2S msgid, generate one now so
-   * format_s2s_tags() (relay) and storage both use the same value.
-   * Handles messages from legacy servers without P10_MESSAGE_TAGS. */
+  /* Unified msgid: if no incoming S2S msgid, mint one (with its mint
+   * time) into the link's stash now so format_s2s_tags() (relay) and
+   * storage both use the same msgid and time.  Handles messages from
+   * legacy servers without P10_MESSAGE_TAGS. */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
-    generate_msgid(cli_s2s_msgid(one), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(one);
 
   /* Alias source rewriting: use primary's P10 numeric for S2S.
    * The alias numeric (from BX C) is only known to BX-aware servers.
@@ -951,7 +952,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
   /* Unified msgid (see server_relay_channel_message) */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
-    generate_msgid(cli_s2s_msgid(one), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(one);
 
   /* Alias source rewriting (see server_relay_channel_message) */
   if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
@@ -1340,25 +1341,37 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                                 "%C :%s", acptr, mytext);
       sendcmdto_set_client_msgid(NULL);
     } else {
-      if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
-        sendcmdto_set_s2s_cptr(cli_from(sptr));
       /* Use tag-aware send so recipient gets server-time/msgid per caps.
        * For S2S delivery to IRCV3AWARE peers, sendcmdto_one_tags_with_client
        * also adds the @A...,C<client_tags> compact-tag prefix so the
        * remote server can forward client-only tags to its local recipient
        * (per p10-compact-client-tags plan). */
       /* Locally minted: this message's own id and time ride the wire,
-       * not whatever was last parsed off the destination link. */
-      if (from == sptr && pm_msgid[0])
+       * not whatever was last parsed off the destination link -- also
+       * when an alias sends as its remote primary.  A local target takes
+       * the same time on its @time (the client event; a remote target's
+       * send ignores it), cleared right after the send. */
+      if (pm_msgid[0]) {
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
         sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+      }
       sendcmdto_one_tags_with_client(from, CMD_PRIVATE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
     }
   }
 
   /* Forward PM to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
+  bounce_forward_pm_to_aliases(sptr, acptr, NULL, CMD_PRIVATE, mytext,
+                               pm_msgid, history_parse_ms(pm_timestamp),
+                               cli_client_tags(sptr));
+
+  /* The session echo and the sender's own echo carry the event's time
+   * too.  Armed here, apart from the forward (its local sends clear the
+   * client event), and cleared right after the echoes. */
+  if (pm_msgid[0])
+    sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing PM to other members of the sender's bouncer session */
   bounce_echo_pm_to_session(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
@@ -1404,6 +1417,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                                "%C :%s", acptr, mytext);
       }
     }
+    sendcmdto_set_client_msgid(NULL);
 
     /* Store private message in history database (if enabled) */
     if (pm_msgid[0])
@@ -1446,6 +1460,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                                "%C :%s", acptr, mytext);
       }
     }
+    sendcmdto_set_client_msgid(NULL);
   }
 #endif
 }
@@ -1554,22 +1569,32 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
                                 "%C :%s", acptr, mytext);
       sendcmdto_set_client_msgid(NULL);
     } else {
-      if (from != sptr)
-        sendcmdto_set_s2s_cptr(cli_from(sptr));
       /* Tag-aware send; for S2S to IRCV3AWARE peers also includes
        * @A...,C<client_tags> compact-tag prefix.  Locally minted: this
        * message's own id and time ride the wire, not whatever was last
-       * parsed off the destination link. */
-      if (from == sptr && pm_msgid[0])
+       * parsed off the destination link -- also when an alias sends as
+       * its remote primary.  A local target takes the same time on its
+       * @time (see relay_private_message). */
+      if (pm_msgid[0]) {
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
         sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+      }
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
     }
   }
 
   /* Forward notice to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
+  bounce_forward_pm_to_aliases(sptr, acptr, NULL, CMD_NOTICE, mytext,
+                               pm_msgid, history_parse_ms(pm_timestamp),
+                               cli_client_tags(sptr));
+
+  /* The session echo and the sender's own echo carry the event's time
+   * (see relay_private_message). */
+  if (pm_msgid[0])
+    sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing notice to other members of the sender's bouncer session */
   bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
@@ -1583,6 +1608,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
                              "%C :%s", acptr, mytext);
     }
+    sendcmdto_set_client_msgid(NULL);
 
     /* Store private notice in history database (if enabled) */
     if (pm_msgid[0])
@@ -1596,6 +1622,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
                              "%C :%s", acptr, mytext);
     }
+    sendcmdto_set_client_msgid(NULL);
   }
 #endif
 }
@@ -1651,7 +1678,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   /* Unified msgid: pre-populate before pm_msgid generation and relay */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
       && !cli_s2s_msgid(cli_from(sptr))[0])
-    generate_msgid(cli_s2s_msgid(cli_from(sptr)), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(cli_from(sptr));
 
   /* Generate shared msgid + timestamp for alias forwarding and history.
    * Prefer S2S msgid for federation dedup — sptr is never reassigned
@@ -1692,18 +1719,29 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       sendcmdto_one_client_tags(send_from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, text);
-    } else {
-      if (send_from != sptr)  /* Alias was rewritten — preserve S2S tags */
-        sendcmdto_set_s2s_cptr(cli_from(sptr));
+    } else if (MyConnect(acptr)) {
       sendcmdto_one_tags_ext(send_from, CMD_PRIVATE, acptr, pm_msgid,
                              "%C :%s", acptr, text);
+    } else {
+      /* Onward relay: the event's own msgid and time ride the wire (an
+       * aware next hop takes them from the tag region, a legacy one gets
+       * the bare line), else the next server mints its own.  With msgids
+       * off, the inbound line's own tags are relayed. */
+      sendcmdto_set_s2s_cptr(cli_from(sptr));
+      if (pm_msgid[0])
+        sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+      sendcmdto_one_tags_with_client(send_from, CMD_PRIVATE, acptr,
+                                     pm_msgid, client_tags,
+                                     "%C :%s", acptr, text);
     }
 
     sendcmdto_set_client_msgid(NULL);
   }
 
   /* Forward PM to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(from, acptr, CMD_PRIVATE, text, pm_msgid);
+  bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_PRIVATE, text,
+                               pm_msgid, history_parse_ms(pm_timestamp),
+                               client_tags);
 
 #ifdef USE_ROCKSDB
   /* Store server-relayed private message in history database (if enabled) */
@@ -1761,7 +1799,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   /* Unified msgid: pre-populate before pm_msgid generation and relay */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
       && !cli_s2s_msgid(cli_from(sptr))[0])
-    generate_msgid(cli_s2s_msgid(cli_from(sptr)), S2S_MSGID_BUFSIZE);
+    s2s_mint_link_event(cli_from(sptr));
 
   /* Generate shared msgid + timestamp (prefer S2S msgid for federation dedup) */
   pm_msgid[0] = '\0';
@@ -1815,11 +1853,18 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
       if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
         sendcmdto_one_client_tags(send_from, MSG_NOTICE, acptr, client_tags,
                                   "%C :%s", acptr, text);
-      } else {
-        if (send_from != sptr)
-          sendcmdto_set_s2s_cptr(cli_from(sptr));
+      } else if (MyConnect(acptr)) {
         sendcmdto_one_tags_ext(send_from, CMD_NOTICE, acptr, pm_msgid,
                                "%C :%s", acptr, text);
+      } else {
+        /* Onward relay under the event's own msgid and time (see
+         * server_relay_private_message). */
+        sendcmdto_set_s2s_cptr(cli_from(sptr));
+        if (pm_msgid[0])
+          sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+        sendcmdto_one_tags_with_client(send_from, CMD_NOTICE, acptr,
+                                       pm_msgid, client_tags,
+                                       "%C :%s", acptr, text);
       }
     }
 
@@ -1827,7 +1872,9 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   }
 
   /* Forward notice to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(from, acptr, CMD_NOTICE, text, pm_msgid);
+  bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_NOTICE, text,
+                               pm_msgid, history_parse_ms(pm_timestamp),
+                               client_tags);
 
 #ifdef USE_ROCKSDB
   /* Store server-relayed private notice in history database (if enabled) */

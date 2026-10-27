@@ -529,6 +529,75 @@ int ircd_utf8_clamp(char* s, size_t maxbytes)
   return 1;
 }
 
+/** Compute the length to keep \a line at or under \a body_max body
+ * bytes, never splitting a UTF-8 sequence.  Pure function: it only
+ * measures, it does not write to \a line.
+ *
+ * If \a line starts with '@' (an S2S tag region), the body is
+ * everything after the first space; a tagged line with no space has
+ * no body to measure, so the whole line is kept.  Otherwise the body
+ * is the whole line.  When the body is already within \a body_max,
+ * \a len is returned unchanged; otherwise, when the cut would split a
+ * UTF-8 sequence, it is moved back to that sequence's lead byte so the
+ * sequence is dropped whole.  The back-off is at most three bytes (a
+ * sequence is at most four) and needs a lead byte whose sequence the
+ * cut really splits; text that is not UTF-8 (a Latin-1 / cp1252 run of
+ * 0x80-0xBF bytes) keeps the byte-exact cut instead of losing more.
+ *
+ * @param[in] line     Line to measure (tag region + body, or just a
+ *                      body); may be NULL.
+ * @param[in] len       Length of \a line in bytes.
+ * @param[in] body_max  Maximum number of body bytes to keep.
+ * @return The length (<= \a len) that keeps the body at or under
+ *         \a body_max bytes.
+ */
+size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
+{
+  size_t head = 0;
+  size_t cut;
+
+  if (!line || len == 0)
+    return len;
+
+  if (line[0] == '@') {
+    const char* sp = memchr(line, ' ', len);
+    if (!sp)
+      return len; /* no space after the tag region: nothing to measure */
+    head = (size_t)(sp - line) + 1;
+  }
+
+  if (len - head <= body_max)
+    return len;
+
+  cut = head + body_max;
+  /* The byte at the cut index is the first one dropped.  If it is a
+   * continuation byte (10xxxxxx), walk back over at most three of them
+   * to the lead byte (11xxxxxx) of the sequence they belong to, and cut
+   * there when that sequence runs past the cut.  Anything else -- a
+   * fourth continuation byte, ASCII before the run, or a lead whose
+   * sequence already ended -- means the bytes are not UTF-8 here, and
+   * the byte-exact cut stands. */
+  {
+    size_t back = cut;
+    int steps = 0;
+    unsigned char lead;
+    size_t seqlen;
+
+    while (steps < 3 && back > head
+           && ((unsigned char)line[back] & 0xC0) == 0x80) {
+      --back;
+      ++steps;
+    }
+    lead = (unsigned char)line[back];
+    if (steps > 0 && (lead & 0xC0) == 0xC0) {
+      seqlen = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : 2;
+      if (back + seqlen > cut)
+        cut = back;
+    }
+  }
+  return cut;
+}
+
 /** Case-insensitive word-boundary search for \a nick in \a text, using
  * the IRC nickname character class as the boundary definition: a match
  * counts only when the characters on both sides of it are not nickname

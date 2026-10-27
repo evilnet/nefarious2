@@ -38,6 +38,7 @@
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
 #include "ircd_features.h"
+#include "fakelag.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -1667,7 +1668,7 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
      * .claude/para/projects/multiline-cooldown.md.
      */
     if (!cli_ml_batch_id(cptr)[0])
-      cli_since(cptr) += lag;
+      cli_since(cptr) += fakelag_charge(&cli_lagcredit(cptr), lag);
   }
   /*
    * Allow only 1 msg per 2 seconds
@@ -1783,6 +1784,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_multi_msgid(cptr)[0] = '\0';
   cli_s2s_client_tags(cptr)[0] = '\0';
   cli_s2s_sessid(cptr)[0] = '\0';
+  cli_s2s_ml(cptr)[0] = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1834,9 +1836,20 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
            * ',<marker><data>' where data runs until the next ',' or
            * tagend. Marker is a single ASCII char identifying the
            * segment type:
+           *   S — bouncer session-identity hint
+           *   M — multiline framing, <flag><batchref> (ML lines only)
            *   C — client-only tags (literal IRCv3 client-tag string)
            * Unknown markers are silently skipped (forward-compatible
-           * for future segments). */
+           * for future segments).
+           *
+           * ,C is always the LAST segment and its data runs to
+           * tagend, full stop. Client-tag values are arbitrary
+           * IRCv3 tag-value strings and may themselves contain
+           * commas, so there is no safe inner delimiter for it —
+           * unlike every other segment, we must not look for a
+           * terminating comma inside ,C's data. A sender never
+           * emits anything after ,C (see format_s2s_tags_with_client
+           * in send.c); walking stops as soon as ,C is seen. */
           while (seg_start && seg_start < tagend) {
             char marker;
             char *seg_data;
@@ -1847,16 +1860,21 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
               break;
             marker = seg_start[1];
             seg_data = seg_start + 2;
-            seg_end = memchr(seg_data, ',', tagend - seg_data);
-            if (!seg_end)
+            if (marker == 'C')
               seg_end = tagend;
+            else {
+              seg_end = memchr(seg_data, ',', tagend - seg_data);
+              if (!seg_end)
+                seg_end = tagend;
+            }
 
             switch (marker) {
             case 'C': {
               /* Client-only tags segment: literal IRCv3 client-tag
                * string, copy verbatim into per-Connection buffer for
                * ms_privmsg/ms_notice/ms_tagmsg to forward to local
-               * recipients. */
+               * recipients. Terminal segment — runs to tagend (see
+               * comment above the loop). */
               size_t data_len = seg_end - seg_data;
               if (data_len > 0 &&
                   data_len < sizeof(con_s2s_client_tags(cli_connect(cptr)))) {
@@ -1879,12 +1897,42 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
               }
               break;
             }
+            case 'M': {
+              /* Multiline framing (audit 0.1): one flag byte ('+'
+               * start, 'c' concat, '-' end, '.' plain) followed by the
+               * batch reference.  Carrying it here instead of in the
+               * ML body keeps that body one byte longer than the
+               * client's PRIVMSG, so a client line at the maximum
+               * crosses the link whole.  ms_multiline reads it, and
+               * its presence is what tells that handler the body is
+               * "<target> :<text>" rather than the older
+               * "<flag><ref> <target> :<text>".  Needs a flag and at
+               * least one reference byte.  A segment that is present
+               * but unusable (empty, or too long for the buffer) is
+               * stored as "?", a flag no sender emits, so the handler
+               * drops the line instead of misreading its body as the
+               * older form. */
+              size_t data_len = seg_end - seg_data;
+              if (data_len >= 2 &&
+                  data_len < sizeof(con_s2s_ml(cli_connect(cptr)))) {
+                memcpy(cli_s2s_ml(cptr), seg_data, data_len);
+                cli_s2s_ml(cptr)[data_len] = '\0';
+              } else {
+                cli_s2s_ml(cptr)[0] = '?';
+                cli_s2s_ml(cptr)[1] = '\0';
+              }
+              break;
+            }
             default:
               /* Unknown segment marker — skip silently */
               break;
             }
 
-            seg_start = (seg_end < tagend) ? seg_end : NULL;
+            /* ,C is terminal: stop walking regardless of its
+             * (always tagend) seg_end. Every other segment continues
+             * to whatever follows, if anything remains. */
+            seg_start = (marker == 'C') ? NULL :
+                        (seg_end < tagend) ? seg_end : NULL;
           }
         }
 
@@ -1900,7 +1948,27 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
           node_b64[1] = cli_s2s_msgid(cptr)[1];
           node_b64[2] = '\0';
           remote_hlc.node_id = (uint16_t)base64toint(node_b64);
-          hlc_global_receive(&remote_hlc);
+
+          {
+            static time_t hlc_refuse_rate;
+            uint64_t ahead = 0;
+            int hlc_max_forward = feature_int(FEAT_HLC_MAX_FORWARD_MS);
+
+            /* A negative config value has no sane bounded meaning; treat
+             * it as unbounded (0) rather than widening it to uint64_t,
+             * where it would sign-extend to a huge max_forward_ms. */
+            if (hlc_global_receive(&remote_hlc,
+                                    (hlc_max_forward < 0) ? 0 :
+                                      (uint64_t)hlc_max_forward,
+                                    &ahead))
+              sendto_opmask_butone_ratelimited(0, SNO_NETWORK, &hlc_refuse_rate,
+                                               "Clock of %s is %llu ms ahead of ours "
+                                               "(HLC_MAX_FORWARD_MS %d); its time was "
+                                               "not adopted",
+                                               cli_name(cptr),
+                                               (unsigned long long)ahead,
+                                               hlc_max_forward);
+          }
         }
       }
 

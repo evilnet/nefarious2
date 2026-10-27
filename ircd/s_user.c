@@ -30,6 +30,7 @@
 #include "s_user.h"
 #include "webpush.h"
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "history.h"
 #include "capab.h"
 #include "IPcheck.h"
@@ -553,6 +554,41 @@ int register_user(struct Client *cptr, struct Client *sptr)
         }
       }
 
+      /* A different Keycloak user under this account name (the account
+       * was deleted and recreated): the held session is not this
+       * login's (user decision 2026-10-21).  A held session with no
+       * other connection ends -- its user is gone -- and this connection
+       * registers fresh; one with aliases elsewhere is not revived, and
+       * bounce_auto_resume() below refuses the login rather than attach
+       * it to that session (user, 2026-10-23).  A ghost without an id
+       * adopts the login's (bounce_revive). */
+      if (revive_target && revive_target->hs_client
+          && bounce_rebind_kc_conflict(bounce_session_kc_id(revive_target),
+                                       cli_user(sptr)->kc_id)) {
+        struct Client *stale = revive_target->hs_client;
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: not reviving %s for %s: the session belongs to Keycloak "
+                  "id %s, the login %s%s", cli_name(stale), cli_account(sptr),
+                  bounce_session_kc_id(revive_target), cli_user(sptr)->kc_id,
+                  (revive_target->hs_state == BOUNCE_HOLDING
+                   && revive_target->hs_alias_count == 0
+                   && cli_saslkcidlive(sptr))
+                    ? "; ending the stale session" : "");
+        /* Ended only by a login Keycloak itself just confirmed (user,
+         * 2026-10-23): a deleted user's cached login or still-valid token
+         * must not end the current owner's session. */
+        if (revive_target->hs_state == BOUNCE_HOLDING
+            && revive_target->hs_alias_count == 0 && IsBouncerHold(stale)
+            && cli_saslkcidlive(sptr)) {
+          bounce_kill_session(revive_target,
+                              "Session ended: its Keycloak account was replaced");
+          ClearBouncerHold(stale);
+          exit_client(stale, stale, &me,
+                      "Session ended: its Keycloak account was replaced");
+        }
+        revive_target = NULL;
+      }
+
       if (revive_target && bounce_revive(revive_target, sptr) == 0) {
         /* Success! Ghost is now alive with our socket.
          * sptr is now a husk with fd=-1. Free it silently. */
@@ -606,15 +642,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Post-registration fakelag credit: modern clients burst init
          * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
          * the default ~10s cli_since headroom covers only ~5 of them.
-         * Start the client in surplus -- every command is still CHARGED
-         * (credit, not exemption), the one-shot grace just raises the
-         * initial burst budget; recvq byte caps still bound the wire.
+         * A credit the first charges absorb (fakelag_charge()) -- every
+         * command is still CHARGED (credit, not exemption), the one-shot
+         * grace just raises the initial burst budget; recvq byte caps still
+         * bound the wire.  Not a clock set below now: read_packet() floors
+         * the clock to the last read time and would erase that.
    * Authenticated clients only: an anonymous connection (the
    * drive-by/WS-flood surface) keeps the classic ~5-command burst. */
         {
           int grace = feature_int(FEAT_POSTREG_GRACE);
           if (grace > 0 && IsAccount(ghost))
-            cli_since(ghost) = CurrentTime - grace;
+            cli_lagcredit(ghost) = grace;
         }
 
         /* IRCv3 draft/metadata-2: mirror the normal-path self-metadata
@@ -627,6 +665,20 @@ int register_user(struct Client *cptr, struct Client *sptr)
         if (ircd_strcmp(original_nick, cli_name(ghost)) != 0) {
           sendcmdto_one(ghost, CMD_NICK, ghost, "%s", cli_name(ghost));
         }
+
+        /* The new socket takes over the ghost's user modes (+o, +x,
+         * +s ...); tell it what they are, as registration would. */
+        send_umode_signon(ghost);
+
+        /* The reviving socket's pre-registration AWAY (draft/pre-away),
+         * carried over by bounce_revive(); applied here as the fresh
+         * path does after the MOTD.  Through away_apply() so the
+         * session re-aggregates and the channels get away-notify. */
+        if (con_pre_away(cli_connect(ghost)))
+          away_apply(ghost, ghost,
+                     con_pre_away(cli_connect(ghost)) == 2
+                       ? (char *)"*" : con_pre_away_msg(cli_connect(ghost)),
+                     0);
 
         /* Replay channel state */
         bounce_send_channel_state(ghost);
@@ -681,6 +733,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * max reached, or TLS policy mismatch).  Proceeding with a normal
      * NICK N introduction would collide with the primary on upstream
      * servers (same user@host kill).  Reject the duplicate. */
+    /* A session of this account belongs to a different Keycloak user and
+     * is still in use: never joined (bounce_auto_resume), and this login
+     * cannot register beside it.  Nothing was introduced, so no QUIT. */
+    if (auto_resumed == BOUNCE_RESUME_REJECT_KC_CONFLICT) {
+      ++ServerStats->is_ref;
+      SetFlag(sptr, FLAG_KILLED);
+      return exit_client(cptr, sptr, &me,
+                         "This account's session belongs to its previous "
+                         "Keycloak user; ask an operator");
+    }
+
     if (auto_resumed == BOUNCE_RESUME_REJECT_DUPLICATE) {
       ++ServerStats->is_ref;
       /* See note above: no numeric, no prior introduction → no QUIT. */
@@ -804,15 +867,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
     /* Post-registration fakelag credit: modern clients burst init
      * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
      * the default ~10s cli_since headroom covers only ~5 of them.
-     * Start the client in surplus -- every command is still CHARGED
-     * (credit, not exemption), the one-shot grace just raises the
-     * initial burst budget; recvq byte caps still bound the wire.
+     * A credit the first charges absorb (fakelag_charge()) -- every
+     * command is still CHARGED (credit, not exemption), the one-shot
+     * grace just raises the initial burst budget; recvq byte caps still
+     * bound the wire.  Not a clock set below now: read_packet() floors
+     * the clock to the last read time and would erase that.
    * Authenticated clients only: an anonymous connection (the
    * drive-by/WS-flood surface) keeps the classic ~5-command burst. */
     {
       int grace = feature_int(FEAT_POSTREG_GRACE);
       if (grace > 0 && IsAccount(sptr))
-        cli_since(sptr) = CurrentTime - grace;
+        cli_lagcredit(sptr) = grace;
     }
 
     /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
@@ -832,37 +897,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
-
-    /* Apply pre-away state if set (IRCv3 draft/pre-away) */
-    {
-      int pre_away_type = con_pre_away(cli_connect(sptr));
-      if (pre_away_type) {
-        if (pre_away_type == 2) {
-          /* AWAY * - away with an unspecified reason, stored as the star
-           * (shown to non-pre-away clients as FEAT_AWAY_STAR_MSG at
-           * emission, see away_text_for). */
-          if (!user->away) {
-            user->away = (char*) MyMalloc(2);
-            user->away[0] = '*';
-            user->away[1] = '\0';
-          }
-          /* Don't broadcast AWAY * to servers - it's a hidden connection */
-        } else {
-          /* Normal away with message */
-          unsigned int len = strlen(con_pre_away_msg(cli_connect(sptr)));
-          if (user->away)
-            MyFree(user->away);
-          user->away = (char*) MyMalloc(len + 1);
-          strcpy(user->away, con_pre_away_msg(cli_connect(sptr)));
-          /* Broadcast to servers */
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", user->away);
-        }
-        /* Clear pre-away state */
-        con_pre_away(cli_connect(sptr)) = 0;
-        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-
-      }
-    }
 
     /* Replay channel state and chathistory after session resume. */
     if (auto_resumed && auto_session) {
@@ -980,12 +1014,25 @@ int register_user(struct Client *cptr, struct Client *sptr)
   if (auto_session && auto_session->hs_client == sptr)
     bounce_broadcast(auto_session, 'A', cli_yxx(sptr));
 
+  /* Apply a pre-registration AWAY (IRCv3 draft/pre-away) the way a live
+   * AWAY is applied: own state, session aggregation and replication,
+   * network broadcast.  Here, after the N and BS A above: the AWAY and
+   * BX U aw= it sends name the user and its session, and a peer that has
+   * not had the introduction drops them as from an unknown numeric.
+   * con_pre_away stays set -- it IS this connection's own state, and the
+   * aggregation reads it.  No numerics: the pre-registration AWAY got
+   * none either. */
+  if (MyUser(sptr) && con_pre_away(cli_connect(sptr)))
+    away_apply(sptr, sptr,
+               con_pre_away(cli_connect(sptr)) == 2
+                 ? (char *)"*" : con_pre_away_msg(cli_connect(sptr)),
+               0);
+
   clear_privs(sptr);
 
   /* Send user mode to client */
   if (MyUser(sptr))
   {
-    static struct Flags flags; /* automatically initialized to zeros */
     struct SLink *lp;
 
     if (cli_webirc(sptr) && !EmptyString(cli_webirc(sptr)))
@@ -998,11 +1045,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_sslclifp(sptr) && !EmptyString(cli_sslclifp(sptr))) {
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_SSLCLIFP, cli_sslclifp(sptr));
       if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(sptr) > 0)
-        sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%lu", cli_name(cptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(sptr));
+        sendcmdto_serv_butone_v3(&me, CMD_MARK, cptr, "%s %s :%lu", cli_name(cptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(sptr));
     }
 
     if (!EmptyString(cli_wsorigin(sptr)))
-      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBSOCKET, cli_wsorigin(sptr));
+      sendcmdto_serv_butone_v3(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBSOCKET, cli_wsorigin(sptr));
 
     if (cli_version(sptr) && !EmptyString(cli_version(sptr))) {
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_CVERSION, cli_version(sptr));
@@ -1034,34 +1081,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
                       cli_continentcode(sptr), cli_countryname(sptr));
     }
 
-    /* To avoid sending +r to the client due to auth-on-connect, set
-     * the "old" FLAG_ACCOUNT bit to match the client's value.
-     */
-    if (IsAccount(cptr))
-      FlagSet(&flags, FLAG_ACCOUNT);
-    else
-      FlagClr(&flags, FLAG_ACCOUNT);
-    if (IsCloakHost(cptr))
-      FlagSet(&flags, FLAG_CLOAKHOST);
-    else
-      FlagClr(&flags, FLAG_CLOAKHOST);
-    if (IsCloakIP(cptr))
-      FlagSet(&flags, FLAG_CLOAKIP);
-    else
-      FlagClr(&flags, FLAG_CLOAKIP);
-    if (IsFakeHost(cptr))
-      FlagSet(&flags, FLAG_FAKEHOST);
-    else
-      FlagClr(&flags, FLAG_FAKEHOST);
-    if (IsSetHost(cptr))
-      FlagSet(&flags, FLAG_SETHOST);
-    else
-      FlagClr(&flags, FLAG_SETHOST);
     client_set_privs(sptr, NULL);
-    send_umode(cptr, sptr, &flags, ALL_UMODES);
-    if ((cli_snomask(sptr) != feature_int(FEAT_SNOMASK_DEFAULT)) &&
-        HasFlag(sptr, FLAG_SERVNOTICE))
-      send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
+    send_umode_signon(sptr);
 
     if ((connclass = get_client_class_conf(sptr)) != NULL)
     {
@@ -1296,18 +1317,31 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       /* Generate msgid for NICK change so clients get @msgid tag */
       {
         char nick_msgid[64] = "";
+        /* The event's ONE msgid and time, from one source.  A remote
+         * nick change reuses the tags its NICK line carried (cptr's
+         * stash), so all servers share one id -- but only while cptr's
+         * link is the one whose line is being handled.  SVSNICK passes
+         * the target user as cptr, and its stash is the target's link's
+         * last line, wherever the SVSNICK came from: another event,
+         * whose msgid and time the NICK went out and was stored under.
+         * Without such a source, mint, as for a local change. */
+        struct Client *tag_src = (!MyUser(sptr)
+                                  && sendcmdto_stash_is_current(cptr)
+                                  && cli_s2s_msgid(cptr)[0]) ? cptr : NULL;
+        uint64_t nick_ms;
+
         if (feature_bool(FEAT_MSGID)) {
-          /* Unified msgid: reuse the incoming S2S msgid for remote
-           * nick changes so all servers share one id. */
-          if (!MyUser(sptr) && cli_s2s_msgid(cptr)[0])
-            ircd_strncpy(nick_msgid, cli_s2s_msgid(cptr), sizeof(nick_msgid));
+          if (tag_src)
+            ircd_strncpy(nick_msgid, cli_s2s_msgid(tag_src), sizeof(nick_msgid));
           else
             generate_msgid(nick_msgid, sizeof(nick_msgid));
-          /* One time per event: the origin's tag time for a remote nick
-           * change, the msgid's mint time for a local one. */
-          sendcmdto_set_client_event(nick_msgid,
-                                     history_event_time_ms(MyUser(sptr) ? NULL : cptr));
         }
+        /* After any mint: the origin's tag time for a reused msgid, the
+         * mint time for a minted one.  The live NICK, the stored rows
+         * and the relay all carry it. */
+        nick_ms = history_event_time_ms(tag_src);
+        if (feature_bool(FEAT_MSGID))
+          sendcmdto_set_client_event(nick_msgid, nick_ms);
 
         /* If sender has a labeled-response label, send them a labeled NICK
          * echo first, then skip them in the broadcast to other members. */
@@ -1338,8 +1372,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
                         cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->host);
 
           /* Same event time the live NICK was tagged with (above) */
-          history_format_ms(timestamp, sizeof(timestamp),
-                            history_event_time_ms(MyUser(sptr) ? NULL : cptr));
+          history_format_ms(timestamp, sizeof(timestamp), nick_ms);
 
           for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
@@ -1356,8 +1389,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       if (nick_msgid[0]) {
         /* The same event time the rows were stored with (above), so every
          * server stores this msgid at ONE time (audit 2026-09-06 #16). */
-        sendcmdto_set_s2s_tags(history_event_time_ms(MyUser(sptr) ? NULL : cptr),
-                               nick_msgid);
+        sendcmdto_set_s2s_tags(nick_ms, nick_msgid);
         sendcmdto_want_s2s_tags(1);
       }
       }
@@ -1369,7 +1401,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       if (MyUser(sptr) && IsAccount(sptr)) {
         struct BouncerSession *bsess = bounce_get_session(sptr);
         if (bsess && bsess->hs_alias_count > 0) {
-          sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cptr,
+          sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, cptr,
                                 "N %s%s %s %Tu",
                                 cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
                                 nick, cli_lastnick(sptr));
@@ -1698,7 +1730,7 @@ void send_user_info(struct Client* sptr, char* names, int rpl, InfoFormatter fmt
     if (5 == ++arg_count)
       break;
   }
-  send_buffer(sptr, mb, 0);
+  send_reply_buffer(sptr, mb);
   msgq_clean(mb);
 }
 
@@ -2061,6 +2093,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   char* fakehost = NULL;
   char* sethost = NULL;
   struct Client *acptr = NULL;
+  struct Client *snoc = NULL;
+  int sno_touched = 0;
 
   if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
@@ -2122,9 +2156,21 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
             int mwhat = MODE_ADD;
             unsigned int mi;
             for (pp = &parv[2]; *pp && pp < &parv[parc]; pp++) {
+              char **mode_arg = pp;  /* last parameter this mode string used */
               for (mm = *pp; *mm; mm++) {
                 if (*mm == '+') { mwhat = MODE_ADD; continue; }
                 if (*mm == '-') { mwhat = MODE_DEL; continue; }
+                /* The modes that take an argument consume the next
+                 * parameter, as the parse below does: an account, a
+                 * cloaked host or a sethost is not a string of mode
+                 * letters (the 'o' in a host set +o on the replica, and
+                 * the sync handed it to the local aliases). */
+                if (mode_arg + 1 < &parv[parc] && *(mode_arg + 1)
+                    && ((*mm == 's' && is_snomask(*(mode_arg + 1)))
+                        || (mwhat == MODE_ADD
+                            && (*mm == 'r' || *mm == 'C' || *mm == 'c'
+                                || *mm == 'f' || *mm == 'h'))))
+                  mode_arg++;
                 for (mi = 0; mi < USERMODELIST_SIZE; mi++) {
                   if (userModeList[mi].c == *mm) {
                     if (mwhat == MODE_ADD)
@@ -2135,8 +2181,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
                   }
                 }
               }
+              pp = mode_arg;
             }
-            bounce_sync_session_umodes(acptr);
+            bounce_sync_session_umodes(acptr, NULL, NULL);
           }
         }
 
@@ -2150,6 +2197,17 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
     }
   }
+
+  /* The connection whose server notice mask this command reads and sets:
+   * the target when it is ours, else the asking alias when its primary is
+   * on another server.  A mask lives where its connection is (a remote
+   * Client's cli_snomask is its uplink link's Connection field); the
+   * session's other servers hear of it by BX K. */
+  if (MyConnect(acptr))
+    snoc = acptr;
+  else if (MyConnect(sptr) && sptr != acptr && cli_user(sptr)
+           && cli_user(sptr)->alias_primary == acptr)
+    snoc = sptr;
 
   if (parc < 3)
   {
@@ -2174,12 +2232,24 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
      * reply to the primary's socket and the alias never saw its own
      * umode query response. */
     send_reply(sptr, RPL_UMODEIS, buf);
-    if (HasFlag(acptr, FLAG_SERVNOTICE) && MyConnect(sptr)
-        && cli_snomask(acptr) !=
-        (unsigned int)(IsOper(acptr) ? feature_int(FEAT_SNOMASK_OPERDEFAULT) :
+    if (snoc && HasFlag(snoc, FLAG_SERVNOTICE) && MyConnect(sptr)
+        && cli_snomask(snoc) !=
+        (unsigned int)(IsOper(snoc) ? feature_int(FEAT_SNOMASK_OPERDEFAULT) :
          feature_int(FEAT_SNOMASK_DEFAULT)))
-      send_reply(sptr, RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
+      send_reply(sptr, RPL_SNOMASK, cli_snomask(snoc), cli_snomask(snoc));
     return 0;
+  }
+
+  /* For an alias of a remote primary, the primary's +s here is a
+   * replica's (P10 never carries it): take the alias's own before setflags
+   * is, or the echo of this command (send_umode against setflags) shows a
+   * change of +s that did not happen and misses one that did. */
+  if (snoc && snoc != acptr)
+  {
+    if (HasFlag(snoc, FLAG_SERVNOTICE))
+      SetServNotice(acptr);
+    else
+      ClearServNotice(acptr);
   }
 
   /*
@@ -2188,8 +2258,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    */
   setflags = cli_flags(acptr);
 
-  if (MyConnect(acptr))
-    tmpmask = cli_snomask(acptr);
+  if (snoc)
+    tmpmask = cli_snomask(snoc);
 
   /*
    * parse mode change string(s)
@@ -2204,6 +2274,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         what = MODE_DEL;
         break;
       case 's':
+        sno_touched = 1;
         if (*(p + 1) && is_snomask(*(p + 1))) {
           snomask_given = 1;
           tmpmask = umode_make_snomask(tmpmask, *++p, what);
@@ -2234,12 +2305,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClrFlag(acptr, FLAG_ADMIN);
           ClrFlag(acptr, FLAG_OPERED_LOCAL);
           ClrFlag(acptr, FLAG_OPERED_REMOTE);
-          if (MyConnect(acptr))
+          if (snoc)
           {
-            tmpmask = cli_snomask(acptr) & ~SNO_OPER;
-            if (MyUser(acptr))
-              cli_handler(acptr) = CLIENT_HANDLER;
+            tmpmask = cli_snomask(snoc) & ~SNO_OPER;
+            sno_touched = 1;
           }
+          if (MyUser(acptr))
+            cli_handler(acptr) = CLIENT_HANDLER;
           /* Clear the session-level oper grant.  Mirrors the do_oper
            * grant-set: state survives across primary changes, so we
            * must explicitly clear it on /DEOPER so a subsequent
@@ -2270,12 +2342,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClrFlag(acptr, FLAG_LOCOP);
           ClrFlag(acptr, FLAG_OPERED_LOCAL);
           ClrFlag(acptr, FLAG_OPERED_REMOTE);
-          if (MyConnect(acptr))
+          if (snoc)
           {
-            tmpmask = cli_snomask(acptr) & ~SNO_OPER;
-            if (MyUser(acptr))
-              cli_handler(acptr) = CLIENT_HANDLER;
+            tmpmask = cli_snomask(snoc) & ~SNO_OPER;
+            sno_touched = 1;
           }
+          if (MyUser(acptr))
+            cli_handler(acptr) = CLIENT_HANDLER;
           _oper_sess = bounce_get_session(acptr);
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
@@ -2580,11 +2653,41 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     {
       if (tmpmask != cli_snomask(acptr))
 	set_snomask(acptr, tmpmask, SNO_SET);
+      /* The answer goes to whoever asked: an alias's MODE <nick> acts on
+       * its primary (the _alias_of_target carve-out above), and the 008
+       * landed on the primary's socket while the alias that asked got
+       * none (field report 2026-10-21).  A server or services change
+       * still tells the user it changed. */
       if (cli_snomask(acptr) && snomask_given)
-	send_reply(acptr, RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
+	send_reply((sptr != acptr && cli_user(sptr)
+	            && cli_user(sptr)->alias_primary == acptr) ? sptr : acptr,
+	           RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
     }
     else
       set_snomask(acptr, 0, SNO_SET);
+  }
+  else if (snoc && sno_touched)
+  {
+    /* A local alias of a primary on another server: the mask is this
+     * connection's own.  Only what the command touched (+s/-s, a mask,
+     * a -o strip) changes it -- the primary's flags here are a replica,
+     * and +s never travels in P10. */
+    if (tmpmask && feature_bool(FEAT_HIS_SNOTICES_OPER_ONLY)
+        && !IsAnOper(acptr) && !HasFlag(snoc, FLAG_SERVNOTICE))
+      tmpmask = 0;
+    if (tmpmask)
+    {
+      SetServNotice(snoc);
+      if (tmpmask != cli_snomask(snoc))
+        set_snomask(snoc, tmpmask, SNO_SET);
+      if (cli_snomask(snoc) && snomask_given)
+        send_reply(sptr, RPL_SNOMASK, cli_snomask(snoc), cli_snomask(snoc));
+    }
+    else
+    {
+      ClearServNotice(snoc);
+      set_snomask(snoc, 0, SNO_SET);
+    }
   }
   /*
    * Compare new flags with old flags and send string which
@@ -2744,7 +2847,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
   /* Sync user mode flags to all aliases of this primary.
    * Must be after mode application so aliases reflect the new state. */
-  bounce_sync_session_umodes(acptr);
+  bounce_sync_session_umodes(acptr, &setflags,
+                             MyUser(cptr) ? cptr : (force ? acptr : NULL));
+  /* An alias whose primary is remote holds the mask itself: the mask (and
+   * only the mask -- its other flags, FLAG_SSL among them, are its own)
+   * goes from it to the primary's server and the other members by BX K;
+   * the sync from a remote acptr leaves the mask alone. */
+  if (snoc && snoc != acptr)
+    bounce_sync_session_snomask(snoc);
 
   return 0;
 }
@@ -2952,6 +3062,47 @@ void send_umode(struct Client *cptr, struct Client *sptr, struct Flags *old,
     *m = '\0';
   if (*umodeBuf && cptr && *(cli_name(sptr)))
     sendcmdto_one(sptr, CMD_MODE, cptr, "%s %s", cli_name(sptr), umodeBuf);
+}
+
+/** Tell a newly signed-on connection the user modes it holds, and its
+ * server notice mask when that is not the default for what it is.  The
+ * end of registration does this; a bouncer revive or alias attach must
+ * too, since the connection takes over modes it never set itself (a
+ * services auto-oper's +o, +x, +s ...) and has no other way to learn
+ * them short of asking.
+ * @param[in] sptr Local user to tell.
+ */
+void send_umode_signon(struct Client *sptr)
+{
+  struct Flags flags;
+  unsigned int snodefault;
+
+  memset(&flags, 0, sizeof(flags));
+
+  /* To avoid sending +r to the client due to auth-on-connect, set
+   * the "old" FLAG_ACCOUNT bit to match the client's value.  The
+   * host-hiding flags are never shown to the client either.
+   */
+  if (IsAccount(sptr))
+    FlagSet(&flags, FLAG_ACCOUNT);
+  if (IsCloakHost(sptr))
+    FlagSet(&flags, FLAG_CLOAKHOST);
+  if (IsCloakIP(sptr))
+    FlagSet(&flags, FLAG_CLOAKIP);
+  if (IsFakeHost(sptr))
+    FlagSet(&flags, FLAG_FAKEHOST);
+  if (IsSetHost(sptr))
+    FlagSet(&flags, FLAG_SETHOST);
+  send_umode(sptr, sptr, &flags, ALL_UMODES);
+
+  /* As the reply to MODE <nick> does: the mask is news only when it is
+   * not what +s alone implies.  A zero mask is not announced: an alias
+   * of a remote primary has none until BX K brings it. */
+  snodefault = IsAnOper(sptr) ? feature_int(FEAT_SNOMASK_OPERDEFAULT)
+                              : feature_int(FEAT_SNOMASK_DEFAULT);
+  if (HasFlag(sptr, FLAG_SERVNOTICE) && cli_snomask(sptr) &&
+      cli_snomask(sptr) != snodefault)
+    send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
 }
 
 /**

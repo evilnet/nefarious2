@@ -2872,8 +2872,12 @@ static void complete_targets_fed(struct FedRequest *req)
   filter_targets_window(&merged, ctx->ts1, ctx->ts2);
 
   /* Send to client with access filtering and limit enforcement */
+  /* Complete only if nothing was cut: a storage server that timed out
+   * or capped its rows (fed_truncated) leaves targets unlisted, and the
+   * end tag would tell the client it may skip them. */
   send_targets_batch(client, merged, req->limit, req->label,
-                     ctx->local_count + ctx->fed_count < req->limit);
+                     ctx->local_count + ctx->fed_count < req->limit
+                     && !req->fed_truncated);
 
   history_free_targets(merged);
 }
@@ -2958,11 +2962,18 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   {
     struct HistoryTarget *sorted = merge_targets(targets, NULL);
     int fetch_limit = limit * 3;
+    /* Complete only when the network was exhausted.  If the local walk
+     * filled the page, federation was skipped, but other storage servers
+     * may hold targets that belong on it: say nothing, and let the client
+     * page on.  Without federation (or nobody to ask) local is all. */
+    int fed_skipped = feature_bool(FEAT_CHATHISTORY_FEDERATION)
+                      && count >= limit
+                      && count_storage_servers(NULL, 0) > 0;
     if (fetch_limit > 500)
       fetch_limit = 500;
     filter_targets_window(&sorted, ts1, ts2);
     send_targets_batch(sptr, sorted, limit, cli_label(sptr),
-                       count < fetch_limit && !slot_miss);
+                       count < fetch_limit && !slot_miss && !fed_skipped);
     history_free_targets(sorted);
   }
   history_free_targets(targets);

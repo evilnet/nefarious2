@@ -364,6 +364,11 @@ struct ForwardedLabel {
   enum ForwardedLabelState fl_state;       /**< Current state */
 };
 
+/** Longest exit reason kept for a dying socket (con_exit_reason): room
+ * for "Write error: " and a full OpenSSL reason, which the realname's
+ * REALLEN cut short ("... protocol er"). */
+#define EXITREASONLEN 127
+
 /** Represents a local connection.
  * This contains a lot of stuff irrelevant to server connections, but
  * those are so rare as to not be worth special-casing.
@@ -384,6 +389,9 @@ struct Connection
   time_t              con_nextaway;  /**< Next time an AWAY change is allowed */
   time_t              con_lasttime;  /**< Last time data read from socket */
   time_t              con_since;     /**< Last time we accepted a command */
+  int                 con_lagcredit; /**< Fake-lag seconds still to be
+                                        absorbed before con_since is
+                                        charged (post-registration grace) */
   struct MsgQ         con_sendQ;     /**< Outgoing message queue */
   struct DBuf         con_recvQ;     /**< Incoming data yet to be parsed */
   unsigned int        con_sendM;     /**< Stats: protocol messages sent */
@@ -420,11 +428,16 @@ struct Connection
                                         error that caused this clients
                                         socket to close. */
   char*               con_sslerror;  /**< SSL Error. */
+  /** Why the socket died (dead_link): read where the exit message is
+   * built.  dead_link() used to write it into the realname, which a held
+   * session then kept, persisted and replayed as the user's name. */
+  char                con_exit_reason[EXITREASONLEN + 1];
 
   struct Socket       con_socket;    /**< socket descriptor for
                                       client */
   struct Timer        con_proc;      /**< process latent messages from
                                       client */
+  struct Timer        con_sasltimeout; /**< timeout timer for SASL */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) — for bouncer
                                         sessions this becomes the union of all
@@ -454,6 +467,8 @@ struct Connection
  *  id (<=S2S_SESSID_BUFSIZE-1).  Worst case: two session-id halves. */
 #define PM_PAIRKEY_BUFSIZE (2 * S2S_SESSID_BUFSIZE + 2)   /* = 82 */
   char                con_s2s_sessid[S2S_SESSID_BUFSIZE]; /**< S2S compact-tag ,S<sessid> segment from incoming message — bouncer session identity hint per redesign A.2 */
+#define S2S_ML_BUFSIZE 32  /**< ML framing: one flag byte + a multiline batch reference (senders use <=15) + NUL */
+  char                con_s2s_ml[S2S_ML_BUFSIZE]; /**< S2S compact-tag ,M<flag><batchref> segment (multiline framing, audit 0.1); empty when absent */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
@@ -571,9 +586,11 @@ struct Client {
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
   char cli_saslkcid[ACCOUNT_ID_LEN + 1]; /**< SASL authenticated Keycloak user id, compact; "" = none */
+  unsigned char cli_saslkcidlive; /**< 1 when Keycloak itself confirmed that id during this login
+                                   *   (a grant, a user lookup, introspection) -- not a cached answer
+                                   *   or a token checked locally, which a deleted user can still hold */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
-  struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
   struct SASLSession* cli_saslsession; /**< Local SASL session state (NULL if not using local path) */
 
   /* IRCv3 draft/account-registration */
@@ -631,6 +648,8 @@ struct Client {
 #define cli_lasttime(cli)	con_lasttime(cli_connect(cli))
 /** Get time we last parsed something from the client. */
 #define cli_since(cli)		con_since(cli_connect(cli))
+/** Get the client's unspent fake-lag credit. */
+#define cli_lagcredit(cli)	con_lagcredit(cli_connect(cli))
 /** Get time client was created. */
 #define cli_firsttime(cli)	((cli)->cli_firsttime)
 /** Get time client last changed nickname. */
@@ -678,6 +697,8 @@ struct Client {
 #define cli_s2s_client_tags(cli) con_s2s_client_tags(cli_connect(cli))
 /** Get bouncer session ID hint from compact-tag ,S segment of incoming S2S message (per redesign A.2) */
 #define cli_s2s_sessid(cli)      con_s2s_sessid(cli_connect(cli))
+/** Get multiline framing (flag + batch reference) from compact-tag ,M segment of incoming S2S message */
+#define cli_s2s_ml(cli)          con_s2s_ml(cli_connect(cli))
 /** Get per-Client session ID (UUID v7 base64 — generated at make_client, adopted by bouncer on resume). */
 #define cli_session_id(cli)      ((cli)->cli_session_id)
 /** Get S2S batch ID from server */
@@ -783,12 +804,13 @@ struct Client {
 #define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
 /** Get SASL authenticated Keycloak user id (compact). */
 #define cli_saslkcid(cli)       ((cli)->cli_saslkcid)
+#define cli_saslkcidlive(cli)   ((cli)->cli_saslkcidlive)
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 /** Get SASL start timestamp. */
 #define cli_saslstart(cli)      ((cli)->cli_saslstart)
 /** Get Timer for SASL timeout. */
-#define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
+#define cli_sasltimeout(cli)     con_sasltimeout(cli_connect(cli))
 /** Get local SASL session (may be NULL). */
 #define cli_saslsession(cli)     ((cli)->cli_saslsession)
 /** Get the REGISTER in-flight cookie (nonzero => a chain is outstanding). */
@@ -814,6 +836,8 @@ struct Client {
 #define cli_error(cli)		con_error(cli_connect(cli))
 /** Get last SSL error string. */
 #define cli_sslerror(cli)       con_sslerror(cli_connect(cli))
+/** Get why a client's socket died ("" while it has not). */
+#define cli_exit_reason(cli)    con_exit_reason(cli_connect(cli))
 /** Get server notice mask for the client. */
 #define cli_snomask(cli)	con_snomask(cli_connect(cli))
 /** Get next time a nick change is allowed for the client. */
@@ -901,6 +925,8 @@ struct Client {
 #define con_error(con)		((con)->con_error)
 /** Get last SSL error string. */
 #define con_sslerror(con)       ((con)->con_sslerror)
+/** Get why a connection's socket died ("" while it has not). */
+#define con_exit_reason(con)    ((con)->con_exit_reason)
 /** Get sentalong marker for connection. */
 #define con_sentalong(con)      ((con)->con_sentalong)
 /** Get server notice mask for connection. */
@@ -915,6 +941,8 @@ struct Client {
 #define con_lasttime(con)       ((con)->con_lasttime)
 /** Get last time we accepted a command from the connection. */
 #define con_since(con)          ((con)->con_since)
+/** Get the connection's unspent fake-lag credit. */
+#define con_lagcredit(con)      ((con)->con_lagcredit)
 /** Get SendQ for connection. */
 #define con_sendQ(con)		((con)->con_sendQ)
 /** Get RecvQ for connection. */
@@ -969,6 +997,8 @@ struct Client {
 #define con_socket(con)		((con)->con_socket)
 /** Get the Timer for processing more data from the connection. */
 #define con_proc(con)		((con)->con_proc)
+/** Get the SASL timeout timer for the connection. */
+#define con_sasltimeout(con)	((con)->con_sasltimeout)
 /** Get the peer's capabilities for the connection. */
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection (union for bouncer sessions). */
@@ -1000,6 +1030,8 @@ struct Client {
 #define con_s2s_client_tags(con) ((con)->con_s2s_client_tags)
 /** Get the bouncer session ID hint from compact-tag ,S segment of incoming S2S message. */
 #define con_s2s_sessid(con)      ((con)->con_s2s_sessid)
+/** Get the multiline framing (flag + batch reference) from compact-tag ,M segment of incoming S2S message. */
+#define con_s2s_ml(con)          ((con)->con_s2s_ml)
 /** Get the S2S batch ID from server. */
 #define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
 /** Get the S2S batch type from server. */
@@ -1625,6 +1657,7 @@ struct Client {
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */
 #define FREEFLAG_TIMER	0x0002	/**< timer needs to be freed */
+#define FREEFLAG_SASLTIMER	0x0004	/**< SASL timer needs to be freed */
 
 /* server notice stuff */
 
@@ -1718,6 +1751,15 @@ extern char *client_print_privs(struct Client *client);
 
 extern int client_modify_priv_by_name(struct Client *who, char *priv, int what);
 extern int clear_privs(struct Client *who);
+
+/* True for a privilege name that exists only in this fork's priv table
+ * (currently GITSYNC) and must never reach a legacy (non-IRCv3-aware)
+ * server link. */
+extern int priv_is_fork_only(const char *name);
+/* Copy the whitespace-separated PRIVS token list \a in into \a out,
+ * dropping any token (optionally '+'/'-'-prefixed, and/or a
+ * comma-separated name list) that names a fork-only privilege. */
+extern void privs_strip_fork_only(const char *in, char *out, size_t outlen);
 
 #endif /* INCLUDED_client_h */
 

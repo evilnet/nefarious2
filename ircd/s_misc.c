@@ -600,11 +600,6 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * freed Client.  Idempotent; no-op if not queued. */
     bounce_remove_pending_registration(bcptr);
   }
-  /* Frontier-introducer cleanup: dying primary mustn't leave a stale
-   * pending-canon entry that would later try to emit N to legacy peers
-   * for a freed Client*.  Idempotent. */
-  bounce_pending_canon_unregister(bcptr);
-
   /* Legacy-face cleanup: if this Client was recorded as a session's
    * legacy face on any peer, clear that entry so the next emit re-
    * introduces a live face.  Walk all sessions for the account; for
@@ -835,6 +830,7 @@ int exit_client(struct Client *cptr,
   struct Client* acptr = 0;
   struct DLink *dlp;
   time_t on_for;
+  int quit_armed = 0;   /* this exit armed the QUIT's S2S msgid/time */
 
   char comment1[HOSTLEN + HOSTLEN + 2];
   assert(killer);
@@ -1012,7 +1008,7 @@ int exit_client(struct Client *cptr,
     char client_full[6];
     ircd_snprintf(0, client_full, sizeof(client_full), "%s%s",
                   cli_yxx(cli_user(victim)->server), cli_yxx(victim));
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cli_from(killer),
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, cli_from(killer),
                           "X %s", client_full);
   }
 
@@ -1045,12 +1041,31 @@ int exit_client(struct Client *cptr,
 	 *
 	 * FLAG_BOUNCER_INTERNAL_DESTROY also suppresses Q here — same
 	 * effect as FLAG_KILLED for Q-suppression purposes, but without
-	 * the network-KILL session-destroy semantics (invariant #12). */
-	sendcmdto_set_s2s_cptr(victim);
+	 * the network-KILL session-destroy semantics (invariant #12).
+	 *
+	 * The QUIT carries its own msgid and time to every downlink.  A
+	 * local victim's are its exit pre-stamp above, armed per downlink
+	 * as the event's override (each send consumes it): a local
+	 * client's stash is no link's, so the tag source's inbound-link
+	 * gate would never admit it.  A remote victim's are its own QUIT
+	 * line's tags: its link is the inbound one while that line is
+	 * handled. */
+	if (MyConnect(victim)) {
+	  sendcmdto_set_s2s_tags(cli_s2s_time_ms(victim), cli_s2s_msgid(victim));
+	  quit_armed = 1;
+	} else
+	  sendcmdto_set_s2s_cptr(victim);
 	sendcmdto_one(victim, CMD_QUIT, dlp->value.cptr, ":%s", comment);
       }
     }
   }
+  /* sendcmdto_one consumes the armed msgid/time on its fast path, but
+   * not when a session-id hint sends it down the general path, and an
+   * exit from a timer (a ping-out, a hold expiry) has no per-line reset
+   * after it: clear the QUIT's arm here so it cannot stamp a later,
+   * unrelated server-bound line. */
+  if (quit_armed)
+    sendcmdto_set_s2s_tags(0, NULL);
   /* Then remove the client structures */
   if (IsServer(victim)) {
     char netsplit_batch_id[32] = "";

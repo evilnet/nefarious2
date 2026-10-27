@@ -24,6 +24,7 @@
 
 #include "msgq.h"
 #include "capab.h"
+#include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_defs.h"
@@ -31,6 +32,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
+#include "ircd_string.h"
 #include "numeric.h"
 #include "send.h"
 #include "s_debug.h"
@@ -335,6 +337,7 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
   static char fmt_scratch[FULL_MSG_SIZE];
   struct MsgBuf *mb;
   int len, alloc_size;
+  int s2s = dest && (IsServer(dest) || IsMe(dest));
 
   assert(0 != format);
 
@@ -343,13 +346,29 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
 
   /* IRC RFC 1459: messages must fit in 512 bytes including \r\n.
    * Tagged messages (starting with @) can use up to FULL_MSG_SIZE.
-   * Non-tagged messages are truncated to BUFSIZE-2 (510) before \r\n. */
-  if (fmt_scratch[0] == '@') {
+   * A non-tagged message to a client is truncated to BUFSIZE-2 (510)
+   * before \r\n.  A line for another server (or &me, which stands in
+   * for one on the sending side) only gets the scratch-buffer safety
+   * cap here: its body cut is ircd_line_body_clamp()'s, below. */
+  if (fmt_scratch[0] == '@' || s2s) {
     if (len > (int)sizeof(fmt_scratch) - 3)
       len = (int)sizeof(fmt_scratch) - 3;
   } else {
     if (len > BUFSIZE - 2)
       len = BUFSIZE - 2;
+  }
+
+  /* S2S wire hygiene (audit 0.1): every line bound for another server
+   * keeps its body within the receiving server's cap -- 512 for a
+   * tagged line (recv_classify.c's msg_cap = BUFSIZE), 510 for an
+   * untagged one (what a legacy peer needs, same as before) -- and is
+   * cut at a UTF-8 boundary, so neither a legacy peer nor a downstream
+   * re-send gets a split multi-byte sequence.  This is the only body
+   * cut on these lines: an earlier byte-exact 510 cut would leave this
+   * one nothing to do. */
+  if (s2s) {
+    size_t body_max = (fmt_scratch[0] == '@') ? BUFSIZE : BUFSIZE - 2;
+    len = (int)ircd_line_body_clamp(fmt_scratch, (size_t)len, body_max);
   }
 
   /* Allocate at least BUFSIZE to preserve slack for msgq_append() */

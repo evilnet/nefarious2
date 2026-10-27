@@ -61,9 +61,11 @@ extern struct irc_sockaddr VirtualHost_dns_v6;
  * Proto types
  */
 extern unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf);
+extern int ws_flush_txrem(struct Client *cptr, unsigned int *wrote_out);
 extern int connect_server(struct ConfItem* aconf, struct Client* by);
 extern int  net_close_unregistered_connections(struct Client* source);
 extern void close_connection(struct Client *cptr);
+extern int exit_dead_client(struct Client *cptr, const char *dflt);
 #ifdef USE_SSL
 extern void add_connection(struct Listener* listener, int fd, void *ssl);
 #else

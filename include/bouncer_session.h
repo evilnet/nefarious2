@@ -31,6 +31,7 @@
 #endif
 #ifndef INCLUDED_bouncer_deauth_h
 #include "bouncer_deauth.h"
+#include "account_id.h"
 #endif
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
@@ -105,7 +106,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 10
+#define BOUNCER_DB_VERSION 12
 
 /** Persisted alias roster entry (v8+).  Records "this session has an
  * alias on server YY with numeric NNN, last active at T, with caps C."
@@ -186,6 +187,141 @@ struct BounceSessionRecord {
   /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
    * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
    * keyed on bsr_oper_name (looked up in the local O:line config). */
+  char     bsr_oper_name[NICKLEN + 1];
+  int64_t  bsr_oper_granted_at;
+  /* Server notice mask (v11+): the session's own, which the oper grant
+   * gives back after a restart instead of the O:line default.  Zero
+   * bsr_snomask_known (every pre-v11 record) means none was recorded. */
+  uint32_t bsr_snomask;
+  uint32_t bsr_snomask_known;
+  /* The primary's Keycloak id, compact (v12+); "" = none known.  Without
+   * it a restored ghost carried no id until it revived, and its restore
+   * burst introduced it without one. */
+  char     bsr_kc_id[ACCOUNT_ID_LEN + 1];
+};
+
+/** Frozen v11 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=11.  v12
+ * only appends bsr_kc_id, so a v11 record is a prefix of a v12 one
+ * (bounce_db_restore checks that at compile time). */
+struct BounceSessionRecord_v11 {
+  uint32_t bsr_version;
+  /* Session identity */
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];        /**< Historical: server numeric that created this.
+                                            *   NOT used for authorization or behavior. */
+  int32_t  bsr_hold_override;
+  /* Timestamps */
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;                /**< Primary's last-active (per-connection split) */
+  int64_t  bsr_last_msg_time;              /**< Last PRIVMSG time (user idle) */
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  /* Ghost client identity */
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];          /**< Displayed/hidden host */
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  /* Last connection metadata (historical, reconciled on revive) */
+  struct irc_in_addr bsr_ip;                /**< Last connection IP (binary) */
+  char     bsr_sock_ip[SOCKIPLEN + 1];      /**< Last connection IP (string) */
+  char     bsr_sockhost[HOSTLEN + 1];       /**< Last resolved hostname */
+  uint16_t bsr_listener_port;               /**< Server listener port */
+  /* Session-level aggregate counters (lifetime totals from dead connections) */
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  /* Connection history (unique hosts, most recent first) */
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[10]; /* frozen: v11 history size */
+  /* Channel memberships */
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;       /**< Original JOIN time (seconds) */
+    int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
+    char     join_msgid[16];    /**< Original JOIN msgid */
+  } bsr_channels[50]; /* frozen: v11 channel count */
+  /* Alias roster (per-alias activity + caps, v8+) */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[16]; /* frozen: v11 alias count */
+  /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
+   * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
+   * keyed on bsr_oper_name (looked up in the local O:line config). */
+  char     bsr_oper_name[NICKLEN + 1];
+  int64_t  bsr_oper_granted_at;
+  /* Server notice mask (v11+): the session's own, which the oper grant
+   * gives back after a restart instead of the O:line default.  Zero
+   * bsr_snomask_known (every pre-v11 record) means none was recorded. */
+  uint32_t bsr_snomask;
+  uint32_t bsr_snomask_known;
+};
+
+/** Frozen v10 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=10.  v11
+ * only appends the snomask fields, so a v10 record is a prefix of a v11
+ * one (bounce_db_restore checks that at compile time). */
+struct BounceSessionRecord_v10 {
+  uint32_t bsr_version;
+  /* Session identity */
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];
+  int32_t  bsr_hold_override;
+  /* Timestamps */
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;
+  int64_t  bsr_last_msg_time;
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  /* Ghost client identity */
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  /* Last connection metadata */
+  struct irc_in_addr bsr_ip;
+  char     bsr_sock_ip[SOCKIPLEN + 1];
+  char     bsr_sockhost[HOSTLEN + 1];
+  uint16_t bsr_listener_port;
+  /* Session-level aggregate counters */
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  /* Connection history */
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[10]; /* frozen: v10 BOUNCER_MAX_CONN_HISTORY */
+  /* Channel memberships */
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;
+    int32_t  join_tv_usec;
+    char     join_msgid[16];
+  } bsr_channels[50]; /* frozen: v10 BOUNCER_MAX_CHANNELS */
+  /* Alias roster */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[16]; /* frozen: v10 BOUNCER_MAX_ALIASES */
+  /* Session-anchored oper grant */
   char     bsr_oper_name[NICKLEN + 1];
   int64_t  bsr_oper_granted_at;
 };
@@ -418,6 +554,12 @@ struct BouncerSession {
   struct BouncerSession **hs_aprev_p; /**< Prev pointer for O(1) removal */
 
   char hs_account[ACCOUNTLEN + 1];    /**< Owning account name */
+  /** The Keycloak user the session belongs to, compact; "" = none known
+   * (a session begun by an X3 login, a record from before the id was
+   * kept).  Set at create and when a session without one adopts a
+   * login's (the transition), persisted (bsr_kc_id), replicated by
+   * BX U kcid=.  Never changed to a different id (user, 2026-10-23). */
+  char hs_kc_id[ACCOUNT_ID_LEN + 1];
   char hs_sessid[BOUNCER_SESSID_LEN]; /**< Session ID — 22-char base64 of UUID v7 raw bytes (no padding) */
   char hs_token[BOUNCER_TOKEN_LEN+1]; /**< Session token (base64) */
   char hs_name[BOUNCER_NAME_LEN];     /**< User-assigned name */
@@ -476,6 +618,23 @@ struct BouncerSession {
    * the session is not opered. */
   char hs_oper_name[NICKLEN + 1];
   time_t hs_oper_granted_at;
+  /* The session's server notice mask.  close_connection() zeroes a
+   * held socket's mask but leaves its modes, +s included, so
+   * bounce_hold_client() keeps it here for the revive to give back;
+   * persisted, it is what the oper grant restores after a restart in
+   * place of the O:line default.  hs_snomask_known is 0 until one was
+   * recorded (a session restored from a pre-v11 record). */
+  unsigned int hs_snomask;
+  int hs_snomask_known;
+  /* The order of the mask's changes across servers (not persisted): a
+   * Lamport stamp -- this server's clock, but past the last stamp seen --
+   * taken at every change made here, and the server that made it.  BX K
+   * carries both; a receiver keeps the later change, the lower server
+   * numeric on a tie, so two servers changing it at once (an /OPER on an
+   * alias and the O:line mask the primary's server derives for the +o it
+   * relays) settle on the same mask. */
+  time_t hs_snomask_ts;
+  char hs_snomask_origin[3];
 
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
@@ -498,6 +657,9 @@ struct BouncerSession {
   unsigned int hs_attach_count;       /**< Number of times resumed from HOLDING */
   unsigned int hs_connect_count;      /**< Total connections (resumes + alias attaches) */
   time_t hs_total_active;             /**< Cumulative active time (seconds) */
+  time_t hs_attach_time;              /**< When the primary last got a live
+                                         socket (0 = none); the stretch
+                                         hs_total_active accrues at hold */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
   struct Timer hs_promote_timer;      /**< 0-tick deferred-promote timer
                                        *   (cross-server clean-QUIT path)
@@ -685,16 +847,24 @@ extern void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *pr
 /** Send post-join replies (TOPIC/MARKREAD/NAMES) to local aliases after JOIN echo. */
 extern void bounce_send_alias_join_replies(struct Channel *chptr, struct Client *who);
 
-/** Forward a PM/NOTICE to all aliases of the target bouncer primary.
- * @param[in] from    Client that sent the message.
- * @param[in] target  Target client (primary).
- * @param[in] cmd     Long command name (MSG_PRIVATE or MSG_NOTICE).
- * @param[in] tok     Short command token (TOK_PRIVATE or TOK_NOTICE).
- * @param[in] text    Message text.
+/** Forward a PM/NOTICE to all aliases of the target bouncer primary,
+ * under the message's own msgid and time; each alias gets one copy
+ * network-wide (see bouncer_session.c).
+ * @param[in] from        The original sender, never rewritten to its
+ *                        session primary.
+ * @param[in] target      Target client (primary).
+ * @param[in] inbound     Server link the message arrived on, NULL if local.
+ * @param[in] cmd         Long command name (MSG_PRIVATE or MSG_NOTICE).
+ * @param[in] tok         Short command token (TOK_PRIVATE or TOK_NOTICE).
+ * @param[in] text        Message text.
+ * @param[in] msgid       The message's msgid (NULL or empty if none).
+ * @param[in] event_ms    The message's time, in epoch milliseconds.
+ * @param[in] client_tags The sender's client-only tags, or NULL.
  */
 extern void bounce_forward_pm_to_aliases(struct Client *from,
-    struct Client *target, const char *cmd, const char *tok,
-    const char *text, const char *msgid);
+    struct Client *target, struct Client *inbound,
+    const char *cmd, const char *tok, const char *text,
+    const char *msgid, uint64_t event_ms, const char *client_tags);
 
 /** Remove an alias from its session replica's hs_aliases[].
  * Safe to call even if the alias is not found (no-op).
@@ -743,7 +913,19 @@ extern void bounce_emit_alias_update(struct Client *primary,
  * Call after mode changes on the primary so aliases stay in sync.
  * @param[in] primary The primary client whose modes changed.
  */
-extern void bounce_sync_session_umodes(struct Client *source);
+struct Flags;
+/** Copy @a source's user modes (and privileges, snomask) to the other
+ * members of its session and tell each local one what changed for it.
+ * @param[in] source        The member whose modes changed.
+ * @param[in] source_before Its flags before the change, to tell it too
+ *                          when it is not @a told; NULL not to.
+ * @param[in] told          The connection the change was already echoed
+ *                          to (set_user_mode's cptr), or NULL. */
+extern void bounce_sync_session_umodes(struct Client *source,
+                                       const struct Flags *source_before,
+                                       struct Client *told);
+extern void bounce_sync_session_snomask(struct Client *source);
+extern void bounce_sync_alias_identity(struct Client *primary);
 
 /** Echo an outgoing PM/NOTICE to all other members of the sender's session.
  * @param[in] sender  Client that sent the PM (primary or alias).
@@ -824,7 +1006,7 @@ extern int bounce_attach(struct BouncerSession *session, struct Client *cptr);
  * @param[in] session Session to detach.
  * @return 0 on success.
  */
-extern int bounce_detach(struct BouncerSession *session);
+extern time_t bounce_hold_remaining(struct BouncerSession *session);
 
 /** Destroy a session entirely.
  * @param[in] session Session to destroy.
@@ -1145,7 +1327,8 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                                  const char *host,
                                                  const struct irc_in_addr *new_ip,
                                                  const char *info,
-                                                 time_t incoming_acc_ts);
+                                                 time_t incoming_acc_ts,
+                                                 const char *incoming_kc_id);
 
 /** Demote a live local primary into an alias of an incoming remote
  * primary.  Used by m_nick during net-rejoin to merge two
@@ -1213,21 +1396,6 @@ extern void bounce_remove_pending_registration(struct Client *cli);
  * still-Unknown deferred client. */
 extern int bounce_is_pending_registration(const struct Client *cli);
 
-/** Frontier introducer (per design intent #135 + #254): defer N
- * emission to legacy peers for fresh bouncer-account users until
- * BX-aware-ring convergence has had time to demote any loser side.
- * Caller (register_user) sets sendcmdto_set_skip_legacy_canon before
- * the N broadcast (BX-aware peers get it now), then registers the
- * client here.  After BOUNCE_PENDING_CANON_SECS the periodic tick
- * emits N to legacy peers if the client is still primary (i.e., didn't
- * become IsBouncerAlias during convergence). */
-extern void bounce_pending_canon_register(struct Client *cli);
-/** Cleanup hook (exit_one_client / m_nick demote-to-alias). */
-extern void bounce_pending_canon_unregister(struct Client *cli);
-/** Walk the pending-canon list and emit / drop entries; called from
- * the 1-second bounce_legacy_burst_gate_tick. */
-extern void bounce_pending_canon_tick(void);
-
 /* ---------------------------------------------------------------- */
 /* Legacy-face suppression                                           */
 /* ---------------------------------------------------------------- */
@@ -1287,13 +1455,6 @@ extern void bounce_null_hs_client_pointing_at(struct Client *cli);
 extern int bounce_hs_client_assign_checked(struct BouncerSession *session,
                                            struct Client *candidate,
                                            const char *site_label);
-
-/** Emit N to all directly-connected legacy peers that don't yet have a
- * face for this client's session, recording each successful emit.
- * No-op if the client is an alias or has no associated session.  Used
- * by the pending-canon ticker (frontier-introducer post-defer release)
- * and by direct emit paths that want per-peer face suppression. */
-extern void bounce_emit_legacy_n_intro(struct Client *cli);
 
 /* bounce_session_is_local retired in Phase 5; use session_has_local_holder
  * for the runtime "do we hold this locally?" check. */
@@ -1453,6 +1614,21 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * Caller (register_user) should bounce_defer_registration and let the
  * drain-on-BS-C path retry the auto_resume once peer data is processed. */
 #define BOUNCE_RESUME_DEFER_PEER_INBOUND 7
+/** A session of this account belongs to a different Keycloak user and is
+ * still in use: the login is refused, never attached to it (caller
+ * register_user exits the client). */
+#define BOUNCE_RESUME_REJECT_KC_CONFLICT 8
+/** The Keycloak id a session belongs to, as this server knows it (its
+ * primary's or held ghost's, else an alias's); "" when none is known. */
+extern const char *bounce_session_kc_id(struct BouncerSession *session);
+/** A session that has no Keycloak id adopts @a id (the transition): the
+ * session, every member here that carries none, and the network
+ * (BX U kcid=).  A session that has one is never changed. */
+extern void bounce_session_adopt_kc_id(struct BouncerSession *session,
+                                       const char *id);
+/** Does a session of @a account belong to a Keycloak id other than
+ * @a kc_id?  (A missing id on either side never conflicts.) */
+extern int bounce_account_kc_conflict(const char *account, const char *kc_id);
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);

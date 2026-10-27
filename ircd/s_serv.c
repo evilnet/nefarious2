@@ -322,12 +322,16 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 /** Send the deferred-able tail of the burst: N tokens for users,
  * BS for bouncer sessions, channel BURST modes, EB.
  *
- * For IRCv3-aware peers this runs from the BX F handler after both
- * sides' reconcile is complete; for legacy peers it runs inline at the
- * end of server_estab.  Either way, by the time we reach this point any
- * active-vs-active demote has flipped its loser to alias state, so the
- * IsBouncerAlias filter on the N loop (and on bounce_burst's session
- * iteration) keeps duplicate racing-nick N's off the wire.
+ * For any peer, IRCv3-aware or legacy: it runs inline at the end of
+ * server_estab (the peer's SERVER line) unless bouncer convergence is
+ * in flight, in which case server_estab gates the peer and this runs at
+ * release instead -- from bounce_release_idle_gates at a
+ * convergence-completion site (a peer's EB, an attach or revive) or
+ * from the 1-second bounce_legacy_burst_gate_tick fallback.  Either
+ * way, by the time we reach this point any active-vs-active demote has
+ * flipped its loser to alias state, so the IsBouncerAlias filter on the
+ * N loop (and on bounce_burst's session iteration) keeps duplicate
+ * racing-nick N's off the wire.
  */
 int server_finish_burst(struct Client *cptr)
 {
@@ -401,11 +405,20 @@ int server_finish_burst(struct Client *cptr)
 
       /* Per redesign A.2: stage the bouncer session-id hint for the
        * outgoing N's ,S compact-tag segment, so bouncer-aware peers
-       * can dispatch at-N-time convergence in m_nick.  Gated on
-       * IsIRCv3Aware because the override is a one-shot global cleared
-       * by format_s2s_tags_with_client — legacy peers don't reach that
-       * codepath, so the override would persist into a subsequent
-       * unrelated IRCv3-aware emit with a stale sessid. */
+       * can dispatch at-N-time convergence in m_nick.  Only toward an
+       * IRCv3-aware peer (a legacy one gets no tag region).
+       *
+       * The hint is cleared right after the send, not left to
+       * format_s2s_tags_with_client, which consumes it only when it
+       * uses it.  For an acptr two or more hops away the tag source is
+       * the link toward it, and while that link's line is being
+       * handled (this burst can run inside a peer's EB line, through
+       * bounce_release_idle_gates) format prefers the link's own ,S,
+       * if it has one, and leaves the hint armed.  And the burst also
+       * runs from the burst-gate timer and from callbacks, where no
+       * per-line reset follows.  A leftover hint would ride the next
+       * tagged line (a later burst line, the EB, any timer send) with
+       * this user's sessid. */
       if (IsIRCv3Aware(cptr))
         bounce_set_n_sessid_hint(acptr);
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
@@ -415,6 +428,7 @@ int server_finish_burst(struct Client *cptr)
 		    *s ? "+" : "", s, *s ? " " : "",
 		    iptobase64(xxx_buf, &cli_ip(acptr), sizeof(xxx_buf), IsIPv6(cptr)),
 		    NumNick(acptr), cli_info(acptr));
+      sendcmdto_set_s2s_sessid(NULL);
 
       if (cli_user(acptr) && !EmptyString(cli_user(acptr)->swhois))
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,
@@ -436,12 +450,16 @@ int server_finish_burst(struct Client *cptr)
       if (cli_sslclifp(acptr) && !EmptyString(cli_sslclifp(acptr))) {
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_SSLCLIFP, cli_sslclifp(acptr));
-        if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(acptr) > 0)
+        /* SSLCLIEXP and WEBSOCKET are fork-only MARK types; a legacy
+         * next hop doesn't understand them, so skip them in the burst
+         * to a non-IRCv3-aware peer (wire-hygiene rule). */
+        if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(acptr) > 0 &&
+            IsIRCv3Aware(cptr))
           sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%lu",
                         cli_name(acptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(acptr));
       }
 
-      if (!EmptyString(cli_wsorigin(acptr)))
+      if (!EmptyString(cli_wsorigin(acptr)) && IsIRCv3Aware(cptr))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_WEBSOCKET, cli_wsorigin(acptr));
 

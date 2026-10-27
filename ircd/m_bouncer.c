@@ -43,6 +43,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
@@ -146,6 +147,15 @@ static int bouncer_resume(struct Client *sptr, const char *token)
     return 0;
   }
 
+  /* A session belongs to one Keycloak user: a login under another id never
+   * attaches to it, token or not (user, 2026-10-23). */
+  if (bounce_rebind_kc_conflict(bounce_session_kc_id(session),
+                                cli_user(sptr)->kc_id)) {
+    send_fail(sptr, "BOUNCER", "INVALID_TOKEN", NULL,
+              "Session belongs to a different Keycloak user");
+    return 0;
+  }
+
   /* Compute replay "since" time from the ghost's idle time — messages
    * arriving after the user's last activity may not have been read.
    * Fall back to disconnect time if idle time is unavailable. */
@@ -209,11 +219,7 @@ static void bouncer_listsessions_emit(struct Client *sptr,
   }
 
   if (s->hs_state == BOUNCE_HOLDING && s->hs_disconnect_time) {
-    time_t hold_time = bounce_compute_hold_time_ext(s);
-    time_t remaining = hold_time -
-                       (CurrentTime - s->hs_disconnect_time);
-    if (remaining < 0)
-      remaining = 0;
+    time_t remaining = bounce_hold_remaining(s); /* what the timer uses */
     ircd_snprintf(0, p, rem, "%s %s %s %ldm connects:%u aliases:%d",
                   s->hs_sessid,
                   s->hs_name[0] ? s->hs_name : "*",
@@ -1009,11 +1015,7 @@ static int bouncer_info(struct Client *sptr)
       char info[512];
 
       if (s->hs_state == BOUNCE_HOLDING && s->hs_disconnect_time) {
-        time_t hold_time = bounce_compute_hold_time_ext(s);
-        time_t remaining = hold_time -
-                           (CurrentTime - s->hs_disconnect_time);
-        if (remaining < 0)
-          remaining = 0;
+        time_t remaining = bounce_hold_remaining(s); /* what the timer uses */
         ircd_snprintf(0, info, sizeof(info),
                       "state=%s hold=%s(%s) connects=%u "
                       "hold_time=%ldm session=%s",

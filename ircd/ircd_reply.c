@@ -80,6 +80,79 @@ int need_more_params(struct Client* cptr, const char* cmd)
   return 0;
 }
 
+/** Build the message-tag prefix a numeric reply to \a to carries.
+ * @param[in] to Client the reply is for.
+ * @param[out] buf Buffer for the prefix, trailing space included.
+ * @param[in] buflen Size of \a buf.
+ * @return \a buf, or NULL when the reply carries no tags.
+ */
+static char *reply_tags(struct Client *to, char *buf, size_t buflen)
+{
+  /* Check if we need message tags for this client */
+  if (MyConnect(to)) {
+    int pos = 0;
+    int need_batch = feature_bool(FEAT_CAP_batch) &&
+                     CapRecipientHas(to, CAP_BATCH) && cli_batch_id(to)[0];
+    int need_label = !need_batch && feature_bool(FEAT_CAP_labeled_response) &&
+                     CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0];
+    int need_time = feature_bool(FEAT_CAP_server_time) &&
+                    CapRecipientHas(to, CAP_SERVERTIME);
+
+    if (!need_batch && !need_label && !need_time)
+      return NULL;
+
+    buf[0] = '@';
+    pos = 1;
+
+    /* Use @batch when in a batch, otherwise @label */
+    if (need_batch) {
+      pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+    } else if (need_label) {
+      pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+      /* Mark that we've sent a labeled response (for ACK mechanism) */
+      cli_label_responded(to) = 1;
+    }
+
+    if (need_time) {
+      struct timeval tv;
+      struct tm tm;
+      if (pos > 1 && pos < (int)buflen - 1)
+        buf[pos++] = ';';
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      pos += snprintf(buf + pos, buflen - pos,
+                      "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec,
+                      tv.tv_usec / 1000);
+    }
+
+    if (pos < (int)buflen - 1) {
+      buf[pos++] = ' ';
+      buf[pos] = '\0';
+    }
+    return buf;
+  } else if (IsIRCv3Aware(cli_from(to))) {
+    /* Remote recipient: echo compact tag for correlation.
+     * In P10 tree topology, cli_from(to) is the server link that delivered
+     * the forwarded command, and its cli_s2s_msgid/time_ms hold the
+     * correlation msgid -- but only while that command's line is being
+     * handled.  A reply sent at any other time (a timer, a callback,
+     * while handling another link's line) would carry whatever that link
+     * sent last and correlate with the wrong command, so it goes
+     * untagged (format_s2s_tags_current returns NULL).  The tag is built
+     * from that stash alone: an S2S override armed for some other send
+     * must never replace the id this reply answers.  The next hop must
+     * also be IRCv3-aware -- a legacy peer never parses the @A... prefix,
+     * so emitting one toward it only spends bytes against its 512-byte
+     * line limit for nothing.
+     */
+    return format_s2s_tags_current(buf, buflen, cli_from(to));
+  }
+
+  return NULL;
+}
+
 /** Send a generic reply to a user.
  * @param[in] to Client that wants a reply.
  * @param[in] reply Numeric of message to send.
@@ -91,7 +164,7 @@ int send_reply(struct Client *to, int reply, ...)
   struct MsgBuf *mb;
   const struct Numeric *num;
   char tagbuf[256];
-  int use_tags = 0;
+  char *tags;
 
   assert(0 != to);
   assert(0 != reply);
@@ -107,70 +180,10 @@ int send_reply(struct Client *to, int reply, ...)
 
   assert(0 != vd.vd_format);
 
-  /* Check if we need message tags for this client */
-  if (MyConnect(to)) {
-    int pos = 0;
-    int need_batch = feature_bool(FEAT_CAP_batch) &&
-                     CapRecipientHas(to, CAP_BATCH) && cli_batch_id(to)[0];
-    int need_label = !need_batch && feature_bool(FEAT_CAP_labeled_response) &&
-                     CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0];
-    int need_time = feature_bool(FEAT_CAP_server_time) &&
-                    CapRecipientHas(to, CAP_SERVERTIME);
-
-    if (need_batch || need_label || need_time) {
-      tagbuf[0] = '@';
-      pos = 1;
-
-      /* Use @batch when in a batch, otherwise @label */
-      if (need_batch) {
-        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "batch=%s", cli_batch_id(to));
-      } else if (need_label) {
-        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
-        /* Mark that we've sent a labeled response (for ACK mechanism) */
-        cli_label_responded(to) = 1;
-      }
-
-      if (need_time) {
-        struct timeval tv;
-        struct tm tm;
-        if (pos > 1 && pos < (int)sizeof(tagbuf) - 1)
-          tagbuf[pos++] = ';';
-        gettimeofday(&tv, NULL);
-        gmtime_r(&tv.tv_sec, &tm);
-        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
-                        "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                        tm.tm_hour, tm.tm_min, tm.tm_sec,
-                        tv.tv_usec / 1000);
-      }
-
-      if (pos < (int)sizeof(tagbuf) - 1) {
-        tagbuf[pos++] = ' ';
-        tagbuf[pos] = '\0';
-      }
-      use_tags = 1;
-    }
-  } else if (feature_bool(FEAT_P10_MESSAGE_TAGS) &&
-             cli_s2s_msgid(cli_from(to))[0]) {
-    /* Remote recipient: echo compact tag for correlation.
-     * In P10 tree topology, cli_from(to) is the server link that delivered
-     * the forwarded command. cli_s2s_msgid/time_ms holds the correlation
-     * msgid. Single-threaded guarantee means these are valid for the
-     * entire handler execution.
-     */
-    char s2s_tagbuf[128];
-    if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cli_from(to), NULL, 0)) {
-      mb = msgq_make(cli_from(to), "%s%:#C %s %C %v", s2s_tagbuf, &me, num->str, to, &vd);
-      va_end(vd.vd_args);
-      send_buffer(to, mb, 0);
-      msgq_clean(mb);
-      return 0;
-    }
-  }
-
   /* build buffer with or without tags */
-  if (use_tags)
-    mb = msgq_make(cli_from(to), "%s%:#C %s %C %v", tagbuf, &me, num->str, to, &vd);
+  tags = reply_tags(to, tagbuf, sizeof(tagbuf));
+  if (tags)
+    mb = msgq_make(cli_from(to), "%s%:#C %s %C %v", tags, &me, num->str, to, &vd);
   else
     mb = msgq_make(cli_from(to), "%:#C %s %C %v", &me, num->str, to, &vd);
 
@@ -181,6 +194,29 @@ int send_reply(struct Client *to, int reply, ...)
   msgq_clean(mb);
 
   return 0; /* convenience return */
+}
+
+/** Send a numeric reply assembled by hand (msgq_make() of rpl_str(),
+ * then msgq_append()) with the tags send_reply() would give it.
+ * Sent bare, a labeled command's reply carries no label, and the
+ * labeled-response ACK that follows tells the client there was none.
+ * @param[in] to Client that wants a reply.
+ * @param[in] mb The reply, untagged; the caller still owns it.
+ */
+void send_reply_buffer(struct Client *to, struct MsgBuf *mb)
+{
+  struct MsgBuf *tmb;
+  char tagbuf[256];
+
+  assert(0 != to);
+  assert(0 != mb);
+
+  if (reply_tags(to, tagbuf, sizeof(tagbuf))
+      && (tmb = msgq_prepend_tags(tagbuf, mb))) {
+    send_buffer(to, tmb, 0);
+    msgq_clean(tmb);
+  } else
+    send_buffer(to, mb, 0);
 }
 
 

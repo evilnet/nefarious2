@@ -23,12 +23,14 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "random.h"
 #include "send.h"
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_debug.h"
@@ -290,7 +292,6 @@ struct poscache_entry {
   char                  username[ACCOUNTLEN + 1];
   char                  account[ACCOUNTLEN + 1];
   time_t                timestamp;
-  time_t                created_at;   /**< Account creation time (epoch), 0 = unknown */
   char                  kc_id[ACCOUNT_ID_LEN + 1]; /**< Keycloak user id, compact; "" = unknown */
 };
 
@@ -298,7 +299,7 @@ static struct poscache_entry *poscache_table[AUTHCACHE_BUCKETS];
 
 /** Insert or update a positive cache entry. */
 static void poscache_insert(const char *username, const char *account,
-                            uint64_t hash, time_t created_at, const char *kc_id)
+                            uint64_t hash, const char *kc_id)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -307,7 +308,6 @@ static void poscache_insert(const char *username, const char *account,
   for (e = poscache_table[bucket]; e; e = e->next) {
     if (e->hash == hash) {
       e->timestamp = CurrentTime;
-      e->created_at = created_at;
       ircd_strncpy(e->kc_id, kc_id ? kc_id : "", sizeof(e->kc_id));
       ircd_strncpy(e->account, account, sizeof(e->account));
       return;
@@ -320,7 +320,6 @@ static void poscache_insert(const char *username, const char *account,
   ircd_strncpy(e->username, username, sizeof(e->username));
   ircd_strncpy(e->account, account, sizeof(e->account));
   e->timestamp = CurrentTime;
-  e->created_at = created_at;
   ircd_strncpy(e->kc_id, kc_id ? kc_id : "", sizeof(e->kc_id));
   e->next = poscache_table[bucket];
   poscache_table[bucket] = e;
@@ -329,11 +328,11 @@ static void poscache_insert(const char *username, const char *account,
 
 /** Check if credentials are in the positive cache.
  *  @param[out] account     Filled with cached account name on hit.
- *  @param[out] created_at  Filled with cached creation timestamp on hit.
+ *  @param[out] kc_id       Filled with the cached Keycloak id on hit.
  *  @return 1 if cached (recent success), 0 if not.
  */
 static int poscache_check(uint64_t hash, char *account, size_t account_size,
-                          time_t *created_at, char *kc_id, size_t kc_id_size)
+                          char *kc_id, size_t kc_id_size)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -346,8 +345,6 @@ static int poscache_check(uint64_t hash, char *account, size_t account_size,
     if (e->hash == hash) {
       if (CurrentTime - e->timestamp <= ttl) {
         ircd_strncpy(account, e->account, account_size);
-        if (created_at)
-          *created_at = e->created_at;
         if (kc_id)
           ircd_strncpy(kc_id, e->kc_id, kc_id_size);
         cache_stats.pos_hits++;
@@ -624,6 +621,44 @@ void sasl_session_free(struct Client *sptr)
   cli_saslsession(sptr) = NULL;
 }
 
+#ifdef USE_LIBKC
+/** A Keycloak login that yields no id (no ID token in the grant reply --
+ * the client lacks the openid scope -- or a sub that is not a UUID) logs
+ * in fail-open: the account works, but the webhook and X3 can reach it by
+ * name only.  Said at WARNING, at most once a minute with the count of the
+ * ones in between, since a misconfigured client does it for every login. */
+static void sasl_warn_no_id(const char *authcid, int had_id_token)
+{
+  static time_t last;
+  static unsigned int quiet;
+
+  if (last && CurrentTime - last < 60) {
+    quiet++;
+    return;
+  }
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "SASL PLAIN: no Keycloak id for %s (%s); logged in without one "
+            "(%u more since the last notice)", authcid,
+            had_id_token ? "the ID token's sub is not a UUID"
+                         : "no ID token in the grant reply: client scope openid?",
+            quiet);
+  last = CurrentTime;
+  quiet = 0;
+}
+
+/** The id to announce: the verified user's own, and only when the login
+ * identity IS the verified user.  An impersonated login (authzid granted
+ * by FEAT_SASL_TRUSTED_AUTHZID) carries none: the id in hand belongs to
+ * the verifier, not to the account being logged into.  Keycloak logins
+ * only (every caller is in the USE_LIBKC block below). */
+static const char *sasl_id_for(const char *login_as, const char *verified,
+                               const char *verified_id)
+{
+  return (verified_id && verified_id[0] && 0 == ircd_strcmp(login_as, verified))
+         ? verified_id : NULL;
+}
+#endif /* USE_LIBKC */
+
 /* ---- sasl_complete_login: shared between local and P10 paths ---- */
 
 /** Complete a successful SASL login.
@@ -640,20 +675,46 @@ void sasl_session_free(struct Client *sptr)
  *   7. auth_sasl_done to unblock registration
  *   8. Clean up SASL session state and timer
  */
-/** The id to announce: the verified user's own, and only when the login
- * identity IS the verified user.  An impersonated login (authzid granted
- * by FEAT_SASL_TRUSTED_AUTHZID) carries none: the id in hand belongs to
- * the verifier, not to the account being logged into. */
-static const char *sasl_id_for(const char *login_as, const char *verified,
-                               const char *verified_id)
+/** The Keycloak id a logged-in connection belongs to: its bouncer
+ * session's when it has one (a primary or an alias), else its own. */
+static const char *sasl_conn_kc_id(struct Client *sptr)
 {
-  return (verified_id && verified_id[0] && 0 == ircd_strcmp(login_as, verified))
-         ? verified_id : NULL;
+  struct BouncerSession *session = bounce_get_session(sptr);
+  const char *id = session ? bounce_session_kc_id(session) : "";
+
+  return id[0] ? id : cli_user(sptr)->kc_id;
 }
 
 void sasl_complete_login(struct Client *sptr, const char *account,
-                         time_t acc_create, const char *kc_id)
+                         time_t acc_create, const char *kc_id, int id_live)
 {
+  /* 0. A connection logged in to this account under one Keycloak id proves
+   * the same name under another: the account was deleted and recreated,
+   * and this connection -- with the bouncer session it belongs to -- is
+   * the previous user's.  It is never tied to the new id (user,
+   * 2026-10-23): the login fails before anything is announced, and the
+   * connection keeps what it had. */
+  if (IsRegistered(sptr) && cli_user(sptr) && IsAccount(sptr)
+      && 0 == ircd_strcmp(cli_user(sptr)->account, account)
+      && kc_id && account_id_valid(kc_id)
+      && bounce_rebind_kc_conflict(sasl_conn_kc_id(sptr), kc_id)) {
+    log_write(LS_USER, L_INFO, 0,
+              "SASL: %C proved account %s with Keycloak id %s; the connection "
+              "belongs to %s: login refused", sptr, account, kc_id,
+              sasl_conn_kc_id(sptr));
+    send_reply(sptr, ERR_SASLFAIL,
+               ": this connection belongs to the account's previous Keycloak user");
+    if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
+      cli_saslagentref(cli_saslagent(sptr))--;
+    cli_saslagent(sptr) = NULL;
+    cli_saslcookie(sptr) = 0;
+    cli_saslstart(sptr) = 0;
+    if (t_active(&cli_sasltimeout(sptr)))
+      timer_del(&cli_sasltimeout(sptr));
+    sasl_session_free(sptr);
+    return;
+  }
+
   /* 1. Set account name */
   ircd_strncpy(cli_saslaccount(sptr), account, ACCOUNTLEN + 1);
 
@@ -681,6 +742,10 @@ void sasl_complete_login(struct Client *sptr, const char *account,
   ircd_strncpy(cli_saslkcid(sptr),
                (kc_id && account_id_valid(kc_id)) ? kc_id : "",
                sizeof(cli_saslkcid(sptr)));
+  /* Confirmed by Keycloak in this login, not answered from a cache or a
+   * locally checked token: only such a login may end the previous
+   * user's leftover bouncer session (user, 2026-10-23). */
+  cli_saslkcidlive(sptr) = (cli_saslkcid(sptr)[0] && id_live) ? 1 : 0;
   Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
          kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
@@ -727,12 +792,14 @@ void sasl_complete_login(struct Client *sptr, const char *account,
         presence_anchor_transfer(sptr, presence_old_acct, 0,
                                  cli_user(sptr)->account, 0);
 
-      bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
-
       /* X3's stamp on the relay path, 0 for a local login (step 4 above);
-       * a re-authentication drops whatever the previous account carried. */
+       * a re-authentication drops whatever the previous account carried.
+       * Before the aliases are told: they take the primary's ts and id
+       * with the name (bounce_apply_alias_field). */
       cli_user(sptr)->acc_create = cli_saslacccreate(sptr);
       ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr), sizeof(cli_user(sptr)->kc_id));
+
+      bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 
       /* Notify channel members with account-notify capability */
       sendcmdto_common_channels_capab_butone(sptr, CMD_ACCOUNT, sptr,
@@ -771,6 +838,21 @@ void sasl_complete_login(struct Client *sptr, const char *account,
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(sptr))
         hide_hostmask(sptr);
+    } else if (!sasl_conn_kc_id(sptr)[0]
+               && account_id_valid(cli_saslkcid(sptr))) {
+      /* The same account name proved again, with a Keycloak id this
+       * connection did not carry (it logged in through X3, or its session
+       * was restored from a record older than the id): it adopts it, and
+       * its aliases here with it -- the transition, as a revive adopts.  A
+       * DIFFERENT id never gets here (step 0).  The network learns it from
+       * the next burst -- an unmodified hop drops a same-name AC, so an
+       * announcement waits for the hops (deferred-items). */
+      ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr),
+                   sizeof(cli_user(sptr)->kc_id));
+      if (bounce_get_session(sptr))   /* the session, its members, the network */
+        bounce_session_adopt_kc_id(bounce_get_session(sptr), cli_saslkcid(sptr));
+      else
+        bounce_sync_alias_identity(sptr);
     }
   }
 
@@ -844,10 +926,12 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
       account_id_from_uuid(sub, kcid);
     Debug((DEBUG_DEBUG, "SASL PLAIN: ID token %s, sub \"%s\", compact id \"%s\" for %s",
            token && token->id_token ? "present" : "absent", sub, kcid, session->authcid));
+    if (!kcid[0])
+      sasl_warn_no_id(session->authcid, token && token->id_token);
 
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, session->authcid, session->cred_hash,
-                      0, kcid);
+                      kcid);
       negcache_remove(session->cred_hash);
     }
 
@@ -856,7 +940,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
               login_as, acptr);
     sasl_complete_login(acptr, login_as,
                         0,
-                        sasl_id_for(login_as, session->authcid, kcid));
+                        sasl_id_for(login_as, session->authcid, kcid), 1);  /* the grant */
   } else {
     if (result == KC_UNVERIFIED) {
       /* Account exists and Keycloak is healthy — the account has a pending
@@ -989,15 +1073,19 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
     {
       char cached_account[ACCOUNTLEN + 1];
       char cached_kcid[ACCOUNT_ID_LEN + 1] = "";
-      time_t cached_created_at = 0;
       if (poscache_check(cred_hash, cached_account, sizeof(cached_account),
-                         &cached_created_at, cached_kcid, sizeof(cached_kcid))) {
+                         cached_kcid, sizeof(cached_kcid))
+          && !bounce_account_kc_conflict(cached_account, cached_kcid)) {
+        /* (A session of this account belonging to another Keycloak id:
+         * no cached answer -- the grant below asks Keycloak, and only a
+         * login it confirms may end that session; user, 2026-10-23.) */
         const char *login_as = sasl_resolve_login_identity(session, cached_account);
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
         sasl_complete_login(sptr, login_as, 0,
-                            sasl_id_for(login_as, cached_account, cached_kcid));
+                            sasl_id_for(login_as, cached_account, cached_kcid),
+                            0);  /* a cached answer */
         return 0;
       }
     }
@@ -1061,7 +1149,8 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
         account_id_from_uuid(users[0].id, kcid);
       sasl_complete_login(acptr, users[0].username,
                           0,
-                          kcid[0] ? kcid : NULL);   /* no authzid on this path */
+                          kcid[0] ? kcid : NULL,    /* no authzid on this path */
+                          1);                       /* the user search */
     }
   } else if (count > 1) {
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -1263,7 +1352,8 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
              info->sub ? info->sub : "", kcid));
       sasl_complete_login(acptr, login_as,
                           0,
-                          sasl_id_for(login_as, info->username, kcid));
+                          sasl_id_for(login_as, info->username, kcid),
+                          1);  /* introspection */
     }
   } else {
     /* Connectivity errors should degrade health; invalid/inactive tokens should not */
@@ -1374,12 +1464,26 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
         account_id_from_uuid(info->sub, kcid);   /* the client's own token; none without "sub" */
       Debug((DEBUG_DEBUG, "SASL OAUTHBEARER: local sub \"%s\", compact id \"%s\"",
              info->sub ? info->sub : "", kcid));
+      /* A session of this account belonging to another Keycloak id: the
+       * local check is not enough -- a deleted user's token still passes
+       * it.  Keycloak decides by introspection below, and only a login it
+       * confirms may end that session (user, 2026-10-23). */
+      if (bounce_account_kc_conflict(login_as,
+                                     sasl_id_for(login_as, info->username, kcid))) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "SASL OAUTHBEARER: %s has a session of another Keycloak id; "
+                  "introspecting %C's token", login_as, sptr);
+        kc_jwt_token_info_free(info);
+        info = NULL;
+        goto oauth_introspect;
+      }
       log_write(LS_SYSTEM, L_INFO, 0,
                 "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
                 login_as, sptr);
       MyFree(token_nul);
       sasl_complete_login(sptr, login_as, 0,
-                          sasl_id_for(login_as, info->username, kcid));
+                          sasl_id_for(login_as, info->username, kcid),
+                          0);  /* a token checked locally */
       kc_jwt_token_info_free(info);
       return 0;
     }
@@ -1390,6 +1494,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
     info = NULL;
   }
 
+ oauth_introspect:
   /* A verdict the local check is sure of -- not a JWT at all, a bad
    * signature, expired -- is final: asking Keycloak to introspect the
    * same bytes can only say the same, at the cost of a round trip per
@@ -1579,7 +1684,6 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
   MyFree(session->scram_salt_b64);          /* free prior before re-dup (F-SW3) */
   DupString(session->scram_salt_b64, user->scram_salt);
   session->scram_iterations = user->scram_iterations;
-  session->acc_created_at = user->created_at;
   session->kc_id[0] = '\0';
   if (user->id)
     account_id_from_uuid(user->id, session->kc_id);
@@ -1863,7 +1967,8 @@ static int sasl_scram_complete(struct Client *sptr)
             login_as, sptr);
   sasl_complete_login(sptr, login_as,
                       0,
-                      sasl_id_for(login_as, session->authcid, session->kc_id));
+                      sasl_id_for(login_as, session->authcid, session->kc_id),
+                      1);  /* the credentials were read from Keycloak */
   return 0;
 }
 
@@ -1911,7 +2016,6 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
   MyFree(session->scram_client_first_bare); /* free prior before re-dup (F-SW3) */
   DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
   /* (Reusing scram_client_first_bare to store ecdsa_pubkey — it's just a string slot) */
-  session->acc_created_at = user->created_at;
   session->kc_id[0] = '\0';
   if (user->id)
     account_id_from_uuid(user->id, session->kc_id);
@@ -2041,7 +2145,8 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
               login_as, sptr);
     sasl_complete_login(sptr, login_as,
                         0,
-                        sasl_id_for(login_as, session->authcid, session->kc_id));
+                        sasl_id_for(login_as, session->authcid, session->kc_id),
+                        1);  /* the key was read from Keycloak */
     return 0;
   }
 
@@ -2178,9 +2283,11 @@ int sasl_start(struct Client *sptr, const char *mechanism)
     sendrawto_one(sptr, MSG_AUTHENTICATE " +");
 
     /* Start timeout timer */
-    if (!t_active(&cli_sasltimeout(sptr)))
-      timer_add(timer_init(&cli_sasltimeout(sptr)), sasl_local_timeout_cb, (void *)sptr,
+    if (!t_active(&cli_sasltimeout(sptr))) {
+      cli_freeflag(sptr) |= FREEFLAG_SASLTIMER;
+      timer_add(&cli_sasltimeout(sptr), sasl_local_timeout_cb, cli_connect(sptr),
                 TT_RELATIVE, feature_int(FEAT_SASL_TIMEOUT));
+    }
 
     return 0;
   }
@@ -2200,8 +2307,7 @@ int sasl_continue(struct Client *sptr, const char *data)
    * with dummy data or "*".  Either way, we send ERR_SASLFAIL and clean up. */
   if (session->state == SASL_STATE_FAILED) {
     send_reply(sptr, ERR_SASLFAIL, "");
-    sasl_abort_local(sptr);
-    return 0;
+    return sasl_abort_local(sptr);
   }
 
   /* Only accept data in states that expect client messages.
@@ -2243,8 +2349,7 @@ int sasl_continue(struct Client *sptr, const char *data)
       size_t new_alloc = session->data_len + chunk_len + 1;
       if (new_alloc > SASL_DATA_MAX) {
         send_reply(sptr, ERR_SASLTOOLONG);
-        sasl_abort_local(sptr);
-        return 0;
+        return sasl_abort_local(sptr);
       }
       session->accumulated_data = (char *)MyRealloc(session->accumulated_data, new_alloc);
       session->data_alloc = new_alloc;
@@ -2272,8 +2377,7 @@ dispatch:
       if (!sasl_base64_decode(session->accumulated_data, decoded,
                               sizeof(decoded) - 1, &decoded_len)) {
         send_reply(sptr, ERR_SASLFAIL, ": base64 decode failed");
-        sasl_abort_local(sptr);
-        return 0;
+        return sasl_abort_local(sptr);
       }
     }
     /* Null-terminate — SCRAM handlers use strstr/strlen on decoded text */
@@ -2284,43 +2388,37 @@ dispatch:
       case SASL_MECH_PLAIN:
         rc = sasl_handle_plain(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_EXTERNAL:
         rc = sasl_handle_external(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_OAUTHBEARER:
         rc = sasl_handle_oauthbearer(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_SCRAM_SHA256:
         rc = sasl_handle_scram(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_ECDSA:
         rc = sasl_handle_ecdsa(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
 #endif
       default:
         send_reply(sptr, ERR_SASLFAIL, ": unsupported mechanism");
-        sasl_abort_local(sptr);
-        return 0;
+        return sasl_abort_local(sptr);
     }
   }
 
@@ -2343,25 +2441,41 @@ int sasl_abort_local(struct Client *sptr)
   cli_saslstart(sptr) = 0;
   sasl_session_free(sptr);
 
-  /* Unblock registration */
+  /* Unblock registration.  The result is whether sptr survived it
+   * (CPTR_KILLED when registration exits the client); a handler that
+   * returns this to the parser must not touch sptr afterwards. */
   if (cli_auth(sptr))
-    auth_sasl_done(cli_auth(sptr));
+    return auth_sasl_done(cli_auth(sptr));
 
   return 0;
 }
 
 /* ---- Timeout callback for local SASL ---- */
 
+/* The timer lives in the client's Connection and keeps it allocated
+ * (FREEFLAG_SASLTIMER) until ET_DESTROY, like con_proc: the abort
+ * below resumes registration, which may exit the client, and
+ * timer_run() still touches the timer after the callback returns. */
 static void sasl_local_timeout_cb(struct Event *ev)
 {
   struct Client *cptr;
+  struct Connection *con;
 
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
+  assert(ET_DESTROY == ev_type(ev) || ET_EXPIRE == ev_type(ev));
 
-  if (ev_type(ev) == ET_EXPIRE) {
-    cptr = (struct Client *)t_data(ev_timer(ev));
+  con = (struct Connection *)t_data(ev_timer(ev));
+  cptr = con_client(con);
 
+  assert(0 == cptr || con == cli_connect(cptr));
+
+  if (ev_type(ev) == ET_DESTROY) {
+    con_freeflag(con) &= ~FREEFLAG_SASLTIMER;
+
+    if (!con_freeflag(con) && !cptr)
+      free_connection(con); /* client is being destroyed */
+  } else if (cptr) {
     if (cli_saslsession(cptr)) {
       /* Local SASL timeout */
       log_write(LS_SYSTEM, L_INFO, 0,

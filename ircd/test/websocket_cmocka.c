@@ -56,6 +56,13 @@ const char *feature_str(enum Feature feat)
   return "";  /* FEAT_WEBSOCKET_ORIGIN: allow all origins */
 }
 
+/* ws_send_raw() arms writable interest when an out-of-band frame goes
+ * pending inside OpenSSL; the harness has no event loop. */
+void update_write(struct Client* cptr)
+{
+  (void)cptr;
+}
+
 int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
                   const char *format, ...)
 {

@@ -221,6 +221,14 @@ int ms_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    */
   {
     int rc;
+    /* A legacy peer's QUIT line carries no tags of its own, so the
+     * link's stash is still whatever its last line left there, or
+     * empty.  Mint once into that same stash before arming it: the
+     * onward relay reads the stash while this line is current, and
+     * arming below hands the identical id and time to the local
+     * broadcast and rows, so all three agree. */
+    if (feature_bool(FEAT_P10_MESSAGE_TAGS) && !cli_s2s_msgid(cptr)[0])
+      s2s_mint_link_event(cptr);
     /* This QUIT line's own tags (the link stash holds exactly this line
      * now) -- so exit_client stamps the quitter's rows with them and not
      * with whatever the link carried last on a KILL/collision/SQUIT. */

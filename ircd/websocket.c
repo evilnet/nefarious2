@@ -738,21 +738,66 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
 {
   /* Never interleave with a pending blocked TLS write or a stashed
    * partial frame: OpenSSL requires the retry SSL_write to present the
-   * SAME buffer (else SSL_ERROR_SSL "bad write retry" kills the
-   * connection), and a plaintext partial frame must be completed before
-   * any new bytes.  All callers are best-effort: WS PING responses are
-   * re-askable and close/keepalive frames are optional. */
+   * same record (a different one is SSL_ERROR_SSL "bad write retry" and
+   * the connection is killed), and a plaintext partial frame must be
+   * completed before any new bytes.  All callers are best-effort: WS
+   * PING responses are re-askable and close/keepalive frames are
+   * optional. */
   if (IsBlocked(cptr) || con_ws_txrem(cli_connect(cptr)))
     return 0;
 #ifdef USE_SSL
   if (cli_socket(cptr).ssl) {
-    int result = SSL_write(cli_socket(cptr).ssl, data, len);
-    return (result > 0) ? 1 : 0;
+    /* Written from a heap copy that becomes the stash on want-write, so
+     * the retry presents the same bytes at the same address.  Returning
+     * silently on want-write left OpenSSL holding this frame as ITS
+     * pending record: the keepalive PING (or a PONG to a client PING)
+     * went pending while the peer had stopped acknowledging -- a phone
+     * asleep, its small socket buffer full and the IRC queue empty --
+     * and the next data line was the kill. */
+    struct Connection *wcon = cli_connect(cptr);
+    char *copy = (char *)MyMalloc(len);
+    int result;
+
+    memcpy(copy, data, len);
+    result = SSL_write(cli_socket(cptr).ssl, copy, len);
+    if (result > 0) {
+      MyFree(copy);
+      return 1;
+    }
+    {
+      int se = SSL_get_error(cli_socket(cptr).ssl, result);
+      if (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ) {
+        con_ws_txrem(wcon) = copy;
+        con_ws_txrem_len(wcon) = len;
+        con_ws_txrem_pos(wcon) = 0;
+        SetFlag(cptr, FLAG_BLOCKED);
+        update_write(cptr);
+      } else
+        MyFree(copy);
+      return 0;
+    }
   }
 #endif
   {
-    unsigned int bytes_sent;
-    return (os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent) == IO_SUCCESS) ? 1 : 0;
+    unsigned int bytes_sent = 0;
+    IOResult r = os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent);
+    if (r == IO_SUCCESS && bytes_sent >= (unsigned)len)
+      return 1;
+    if (r == IO_FAILURE)
+      return 0;
+    /* A short (or blocked) plaintext write: the bytes already on the
+     * wire are the head of this frame, so the rest must follow before
+     * any other frame. */
+    {
+      struct Connection *wcon = cli_connect(cptr);
+      con_ws_txrem(wcon) = (char *)MyMalloc(len);
+      memcpy(con_ws_txrem(wcon), data, len);
+      con_ws_txrem_len(wcon) = len;
+      con_ws_txrem_pos(wcon) = (int)bytes_sent;
+      SetFlag(cptr, FLAG_BLOCKED);
+      update_write(cptr);
+    }
+    return 0;
   }
 }
 

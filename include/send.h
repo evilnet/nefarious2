@@ -89,14 +89,51 @@ extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
  * S2S emit.  Per redesign A.2: bouncer-aware peers receive sessid for at-N-time
  * convergence dispatch in m_nick.  Auto-cleared after consumption. */
 extern void sendcmdto_set_s2s_sessid(const char *sessid);
-/** Set the frontier-introducer gate for the next S2S broadcast: the
- * call after this skips non-IRCv3-aware non-services peers.  Used by
- * register_user for fresh bouncer-account users so the BX-aware ring
- * sees the introduction and converges via D.2 at-N-time before
- * legacy peers see anything.  Auto-clears after use. */
-extern void sendcmdto_set_skip_legacy_canon(void);
+/* Arm the multiline framing segment ,M<flag><batch_ref> for the next
+ * sendcmdto_one_tags_with_client() toward a tag-carrying link (audit 0.1).
+ * Consumed or cleared by that call. */
+extern void sendcmdto_set_s2s_ml(char flag, const char *batch_ref);
+/* Whether a send toward this link carries the S2S compact tag region
+ * (server link or &me, IRCv3-aware, P10_MESSAGE_TAGS on). */
+extern int send_s2s_tags_on(struct Client *to);
+/* Whether the untagged S2S line "<from> <tok> <pattern...>" fits whole in
+ * 510 bytes; a body form with client tags ahead of its target must not
+ * be cut (TAGMSG, multiline start line). */
+extern int send_s2s_untagged_fits(struct Client *from, const char *tok,
+                                  const char *pattern, ...);
+/* Arm client-only tags (,C<client_tags>) for the next
+ * sendcmdto_serv_butone_v3() call (audit 0.1).  Stores the pointer, not
+ * a copy: the caller's buffer must outlive that call.  Consumed and
+ * cleared by sendcmdto_serv_butone_v3(); cleared unconsumed by every
+ * other serv_butone variant, since legacy/v1 peers have no ,C slot. */
+extern void sendcmdto_set_s2s_client_tags(const char *client_tags);
 /* Pre-built S2S tag prefix for multi-msgid (batched CREATE/PART) */
 extern void sendcmdto_set_s2s_raw_tags(const char *tags);
+/* Clear every S2S override (cptr, msgid, time, sessid, ,M, ,C, raw tags,
+ * want-tags, alias source) -- the end of the event that armed them.
+ * packet.c calls it after each parsed line.  Client-facing overrides
+ * (client msgid/time, forwarded batch id) are untouched. */
+extern void sendcmdto_reset_s2s_overrides(void);
+/* Mint a fresh msgid into a link's S2S stash for an event that arrived
+ * from it with none, and stamp the stash with the msgid's mint time. */
+extern void s2s_mint_link_event(struct Client *link);
+/* The server link whose line is being handled: packet.c sets it right
+ * before parse_server() and NULL right after.  A link's S2S stash is
+ * read for an outgoing tag region only while it is this link's line
+ * (format_s2s_tags_with_client); NULL outside server-line handling
+ * (client lines, timers, callbacks). */
+extern void sendcmdto_set_inbound_link(struct Client *link);
+extern struct Client *sendcmdto_inbound_link(void);
+/* Whether cptr's S2S stash is the tags of the line being handled: cptr
+ * is the inbound link or a client behind it.  The one gate for every
+ * reader of a link's stash. */
+extern int sendcmdto_stash_is_current(struct Client *cptr);
+/* The tag region of the line being handled, from the link's stash alone
+ * (@A<time><msgid>[,S<sessid>]); no override is read or consumed.  For
+ * replies that echo the answered line's id.  NULL when tags are off, the
+ * link's line is not the current one, or its stash holds no msgid. */
+extern char *format_s2s_tags_current(char *buf, size_t buflen,
+                                     struct Client *link);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,
@@ -150,15 +187,18 @@ extern void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
 
 /* Send command to all NON-IRCv3-aware (legacy) servers except one.
  *
- * Inverse of sendcmdto_serv_butone_v3.  Use ONLY for wire shapes that
- * legacy peers can process — currently this means BX P (the legacy
- * bouncer-transfer handler at evilnet/nefarious2's m_bouncer_transfer.c).
- * It is a hard bug to send BX C / BX X / BX A / BX K / BX U / BX M / BX E
- * through this helper: legacy peers silently drop those subcommands and
- * the emission is wasted.
+ * Inverse of sendcmdto_serv_butone_v3.  Use ONLY for wire shapes a legacy
+ * peer's own handler understands — currently: BX P (CMD_BOUNCER_TRANSFER
+ * 'P', the legacy bouncer-transfer handler at evilnet/nefarious2's
+ * m_bouncer_transfer.c), SVSINFO (ghost realname sync), PRIVS (oper-priv
+ * sync), and AWAY (the pre-away star, substituted to FEAT_AWAY_STAR_MSG).
+ * It is a hard bug to send BX C / BX X / BX A / BX K / BX U / BX M / BX E,
+ * or any other fork-only token, through this helper: legacy peers
+ * silently drop what they don't recognise and the emission is wasted.
+ * Never builds a tagged line — see the definition comment in send.c.
  *
- * Intended use site: at every BX C emission, also emit a paired BX P
- * through this helper so legacy peers reconcile their nick-hash and
+ * Intended use site (BX P): at every BX C emission, also emit a paired
+ * BX P through this helper so legacy peers reconcile their nick-hash and
  * UserStats.clients count via the existing BX P swap path (see
  * .claude/para/projects/legacy-bx-p-in-place-conversion.md). */
 extern void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,

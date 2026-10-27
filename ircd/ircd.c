@@ -650,7 +650,7 @@ static void check_pings(struct Event* ev) {
 
     /* Remove dead clients. */
     if (IsDead(cptr)) {
-      exit_client(cptr, cptr, &me, cli_info(cptr));
+      exit_dead_client(cptr, "Dead socket");   /* or holds it */
       continue;
     }
 

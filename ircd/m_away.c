@@ -161,6 +161,63 @@ const char *away_text_for(struct Client *viewer, const char *away)
   return (word && *word) ? word : away;
 }
 
+/** Broadcast an away-state change to other servers: the wire body for
+ *  CMD_AWAY toward the rest of the mesh, for local changes and relays
+ *  alike -- except a legacy sender's literal "*", which ms_away relays
+ *  verbatim itself (see below).
+ *  @a away NULL or "" means present; the literal "*" means the
+ *  pre-away star (draft/pre-away, "hidden" rather than invisible);
+ *  anything else is a normal away message.
+ *
+ *  An IRCv3-aware peer keeps the star verbatim -- same as a local
+ *  draft/pre-away client, it does its own per-viewer substitution
+ *  further on.  A legacy peer has no such layer, so it is given
+ *  FEAT_AWAY_STAR_MSG straight from this hop: the same word a local
+ *  non-pre-away client is shown via away_text_for().  L stores and
+ *  displays away text as-is, so the substitution has to happen here,
+ *  at the fork edge, not downstream.
+ *
+ *  The _v3 send goes first: it is the one that actually consumes any
+ *  S2S tags armed on this call (msgid/time) via the opt-in flag, and
+ *  the legacy send must never carry them -- sendcmdto_legacy_serv_butone()
+ *  builds an untagged line unconditionally.  Both sendcmdto_serv_butone_v3()
+ *  and sendcmdto_legacy_serv_butone() keep sendcmdto_serv_butone()'s
+ *  alias->primary egress rewrite (bouncer-architecture invariant #10), so
+ *  @a from may safely be a local alias.
+ *
+ *  Callers must never arm s2s_alias_source before calling this: only
+ *  the first underlying send consumes it, so a second send in the star
+ *  branch would fall back to the automatic IsBouncerAlias(from) check
+ *  instead -- fine only because AWAY never arms one.  Keep it that way.
+ *
+ *  This is purely the fork-origin substitution: a caller relaying an
+ *  AWAY that arrived with a literal "*" from a non-IRCv3-aware link
+ *  must NOT route it through here -- that star is the sender's own
+ *  legacy away-message text, not the pre-away token, and must cross
+ *  every further hop unchanged.  ms_away tells the two apart by the
+ *  link the AWAY arrived on, not by the sender's own server.  That is
+ *  right on the graph prod runs (fork servers contiguous, legacy peers
+ *  only at its edge): a legacy user's star that reaches a second fork
+ *  server through the first arrives on an aware link and is taken for
+ *  the pre-away token, which would show that server's own legacy peers
+ *  the configured word -- and no fork server behind another one has a
+ *  legacy peer there. */
+void away_send_to_servers(struct Client *from, struct Client *one,
+                          const char *away)
+{
+  if (EmptyString(away)) {
+    sendcmdto_serv_butone(from, CMD_AWAY, one, "");
+    return;
+  }
+  if (away[0] == '*' && away[1] == '\0') {
+    sendcmdto_serv_butone_v3(from, CMD_AWAY, one, ":*");
+    sendcmdto_legacy_serv_butone(from, CMD_AWAY, one, ":%s",
+                                 away_text_for(NULL, "*"));
+    return;
+  }
+  sendcmdto_serv_butone(from, CMD_AWAY, one, ":%s", away);
+}
+
 static int away_is_star(const char *text)
 {
   return text && text[0] == '*' && text[1] == '\0';
@@ -208,19 +265,27 @@ void away_notify_channel(struct Client *sptr, struct Channel *chptr,
 
 
 /*
- * m_away - generic message handler
- * - Added 14 Dec 1988 by jto.
- *
- * parv[0] = sender prefix
- * parv[1] = away message
- *
  * FEAT_AWAY_THROTTLE: Minimum seconds between AWAY changes (0 = disabled).
  * Prevents scripts that reset away message every few seconds from
- * generating excessive network traffic.
+ * generating excessive network traffic.  Applied in away_apply() for a
+ * client's own AWAY only.
  */
-int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+/** Apply an away state to a local user as the AWAY command would:
+ * per-connection own state, session aggregation and replication
+ * (bounce_note_away_state), the network broadcast and away-notify.
+ * @param[in] cptr Connection the change came in on (== sptr).
+ * @param[in] sptr User whose state changes.
+ * @param[in] away_message New message; empty or NULL = present; "*" =
+ *   away-star (draft/pre-away).
+ * @param[in] interactive Non-zero for a client's own AWAY: the throttle
+ *   applies and RPL_NOWAWAY/RPL_UNAWAY are sent.  Zero when registration
+ *   applies a pre-registration AWAY (draft/pre-away), which got no
+ *   numerics then and gets none now.
+ * @return Zero.
+ */
+int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
+               int interactive)
 {
-  char* away_message = parv[1];
   int was_away = cli_user(sptr)->away != 0;
   int is_away;
   int is_away_star = 0;
@@ -259,7 +324,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Not in the session path: its effective-state change detection
    * already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
-  if (throttle > 0 && !bsess) {
+  if (interactive && throttle > 0 && !bsess) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
       return 0;
@@ -275,30 +340,34 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * emission (away_text_for / away_notify_common). */
   }
 
+  /* Update the connection's OWN away state, on every path: a session
+   * aggregates from it and the replicas read it (BX U aw=), and a
+   * connection that joins a session later brings it along.  Stored in
+   * con_pre_away/con_pre_away_msg so it survives effective-state
+   * updates to cli_user->away. */
+  if (is_away_star) {
+    con_pre_away(cli_connect(sptr)) = 2;
+    con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+  } else if (!EmptyString(away_message)) {
+    con_pre_away(cli_connect(sptr)) = 1;
+    ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
+  } else {
+    con_pre_away(cli_connect(sptr)) = 0;
+    con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+  }
+
   if (bsess) {
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];
     int is_away = !EmptyString(away_message);
 
-    /* Update per-connection away state.
-     * Store both the state and the message in con_pre_away/con_pre_away_msg
-     * so they survive effective-state updates to cli_user->away. */
-    if (is_away_star) {
-      con_pre_away(cli_connect(sptr)) = 2;
-      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-    } else if (is_away) {
-      con_pre_away(cli_connect(sptr)) = 1;
-      ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
-    } else {
-      con_pre_away(cli_connect(sptr)) = 0;
-      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-    }
-
     /* Send the appropriate reply to the user */
     if (is_away || is_away_star) {
-      send_reply(sptr, RPL_NOWAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_NOWAWAY);
     } else {
-      send_reply(sptr, RPL_UNAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_UNAWAY);
     }
     /* Other servers judge attention (webpush) and aggregate away from
      * each connection's OWN state; the effective state broadcast below
@@ -370,7 +439,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+          away_send_to_servers(sptr, cptr, NULL);
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE, "");
         } else if (new_effective == 1) {
@@ -378,20 +447,23 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
-                                eff_msg ? eff_msg : "");
+          away_send_to_servers(sptr, cptr, eff_msg ? eff_msg : "");
           away_notify_common(sptr, sptr, eff_msg);
         } else {
           /* All connections AWAY * — user is effectively away with an
-           * unspecified reason.  The wire carries the star (servers and
-           * draft/pre-away clients keep it; other clients are shown
-           * FEAT_AWAY_STAR_MSG when we write to them).  "Hidden" means
-           * these connections don't count as present for aggregation,
-           * NOT that the user becomes invisible to the network. */
+           * unspecified reason.  The wire carries the star to servers
+           * that understand it (they do their own per-viewer
+           * substitution) and FEAT_AWAY_STAR_MSG to legacy servers,
+           * which have no such layer (away_send_to_servers).  Local
+           * draft/pre-away clients keep the star, others are shown
+           * FEAT_AWAY_STAR_MSG when we write to them (away_notify_common
+           * below).  "Hidden" means these connections don't count as
+           * present for aggregation, NOT that the user becomes
+           * invisible to the network. */
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":*");
+          away_send_to_servers(sptr, cptr, "*");
           away_notify_common(sptr, sptr, "*");
         }
 
@@ -430,23 +502,40 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         if (away_msgid[0])
           sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_want_s2s_tags(1);
-        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+        away_send_to_servers(sptr, cptr, away_message);
       }
-      send_reply(sptr, RPL_NOWAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_NOWAWAY);
       away_notify_common(sptr, sptr, away_message);
     }
     else {
       if (away_msgid[0])
         sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
         sendcmdto_want_s2s_tags(1);
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
-      send_reply(sptr, RPL_UNAWAY);
+      away_send_to_servers(sptr, cptr, NULL);
+      if (interactive)
+        send_reply(sptr, RPL_UNAWAY);
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
     }
 
     sendcmdto_set_client_msgid(NULL);
   }
   return 0;
+}
+
+/*
+ * m_away - generic message handler
+ * - Added 14 Dec 1988 by jto.
+ *
+ * parv[0] = sender prefix
+ * parv[1] = away message
+ */
+int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+{
+  assert(0 != cptr);
+  assert(cptr == sptr);
+
+  return away_apply(cptr, sptr, parv[1], 1);
 }
 
 /*
@@ -531,10 +620,22 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
       sendcmdto_want_s2s_tags(1);
 
-    if (is_away)
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
-    else
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+    if (is_away) {
+      if (is_away_star && !IsIRCv3Aware(cptr))
+        /* This hop is a legacy (non-aware) link, which has no concept
+         * of the pre-away star -- a legacy sender's AWAY "*" is just
+         * their literal away-message text, not the hidden-connection
+         * token.  Relay it verbatim to every downstream peer instead
+         * of running it through away_send_to_servers()'s
+         * substitution, which would turn what the sender actually
+         * typed into FEAT_AWAY_STAR_MSG for our own legacy peers
+         * further downstream -- a transformation only valid for a
+         * genuine fork-origin pre-away star. */
+        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+      else
+        away_send_to_servers(sptr, cptr, away_message);
+    } else
+      away_send_to_servers(sptr, cptr, NULL);
 
     /* Notify local channel members with away-notify (was missing for S2S) */
     if (away_msgid[0])

@@ -673,16 +673,30 @@ void ssl_add_connection(struct Listener *listener, int fd)
   add_connection(listener, fd, ssl);
 }
 
+/** Report the first queued OpenSSL error in @a ebuf and empty the queue
+ * (the rest is detail, for DEBUGMODE), so the next caller does not report
+ * a stale one.  ERR_error_string() wants a 256-byte buffer: the bounded
+ * form is used.
+ * @return 1 if an error was queued. */
+static int ssl_take_error(char *ebuf, size_t len)
+{
+  unsigned long err = ERR_get_error();
+  unsigned long more;
+
+  if (err)
+    ERR_error_string_n(err, ebuf, len);
+  while ((more = ERR_get_error()))
+    Debug((DEBUG_ERROR, "  Error Queue: %lu -- %s", more,
+           ERR_error_string(more, NULL)));
+  return err != 0;
+}
+
 void ssl_doerror(struct Client *cptr)
 {
-  unsigned long err = 0;
   char ebuf[120];
 
-  memset(&ebuf, 0, 120);
-  err = ERR_get_error();
-  if (err)
-    ERR_error_string(err, (char *)&ebuf);
-  else
+  memset(&ebuf, 0, sizeof(ebuf));
+  if (!ssl_take_error(ebuf, sizeof(ebuf)))
     snprintf(ebuf, sizeof(ebuf), "no OpenSSL error queued (errno: %s)",
              strerror(errno));
 
@@ -691,12 +705,12 @@ void ssl_doerror(struct Client *cptr)
 
 void ssl_doerror_anon(void)
 {
-  unsigned long err = 0;
   char ebuf[120];
 
-  memset(&ebuf, 0, 120);
-  err = ERR_get_error();
-  ERR_error_string(err, (char *)&ebuf);
+  memset(&ebuf, 0, sizeof(ebuf));
+  if (!ssl_take_error(ebuf, sizeof(ebuf)))
+    snprintf(ebuf, sizeof(ebuf), "no OpenSSL error queued (errno: %s)",
+             strerror(errno));
 
   sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for unknown client: %s", ebuf);
 }
@@ -820,11 +834,10 @@ IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf
       return retval;
     case SSL_ERROR_SSL:
       {
-          int errorValue;
+          /* ssl_doerror() reports the queued reason (and empties the
+           * queue); draining it here first left prod opers with "no
+           * OpenSSL error queued" for every such write failure. */
           Debug((DEBUG_ERROR, "SSL_write returned SSL_ERROR_SSL, errno %d, retval %d, res %d, ssl error code %d", errno, retval, res, ssl_err));
-          while((errorValue = ERR_get_error())) {
-            Debug((DEBUG_ERROR, "  Error Queue: %d -- %s", errorValue, ERR_error_string(errorValue, NULL)));
-          }
           cli_sslerror(cptr) = ssl_error_str(ssl_err, errno);
           cli_error(cptr) = errno;
           ssl_doerror(cptr);
@@ -1141,7 +1154,7 @@ void sslfail(char *txt)
   if (!err) {
     Debug((DEBUG_DEBUG, "%s: poof", txt));
   } else {
-    ERR_error_string(err, string);
+    ERR_error_string_n(err, string, sizeof(string)); /* wants 256 bytes unbounded */
     Debug((DEBUG_FATAL, "%s: %s", txt, string));
   }
 }
