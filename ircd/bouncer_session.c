@@ -1896,6 +1896,25 @@ static int session_roster_has(struct BouncerSession *s, struct Client *c)
   return 0;
 }
 
+/** Drop every entry of @a s's alias roster that names @a c. */
+static void session_roster_drop(struct BouncerSession *s, struct Client *c)
+{
+  int k;
+
+  if (!s || !c)
+    return;
+  for (k = 0; k < s->hs_alias_count; ) {
+    if (findNUser(s->hs_aliases[k].ba_numeric) == c) {
+      if (k < s->hs_alias_count - 1)
+        memmove(&s->hs_aliases[k], &s->hs_aliases[k + 1],
+                (s->hs_alias_count - 1 - k) * sizeof(struct BounceAlias));
+      s->hs_alias_count--;
+    } else {
+      k++;
+    }
+  }
+}
+
 /** Note that @a server announced @a s "holding" in a BS C that came over
  * @a link (struct BouncerSession hs_peer_holding). */
 static void bounce_peer_holding_note(struct BouncerSession *s,
@@ -5907,10 +5926,13 @@ bsc_forward:
         for (s2 = as_ours->as_sessions; s2; s2 = s2->hs_anext) {
           if (!session_has_local_holder(s2))
             continue;
-          log_write(LS_USER, L_INFO, 0,
-                    "BS X: %s ended %s's session %s, kept apart from ours %s: "
-                    "announcing ours to %s again", cli_name(sptr), account,
-                    sessid, s2->hs_sessid, cli_name(cptr));
+          /* A Debug line: the common case is a peer's holding session
+           * that lost to our live one at a link burst and ended there,
+           * after the peer had mirrored ours already, so the line
+           * changes nothing on it. */
+          Debug((DEBUG_INFO, "BS X: %s ended %s's session %s, kept apart "
+                 "from ours %s: announcing ours to %s again", cli_name(sptr),
+                 account, sessid, s2->hs_sessid, cli_name(cptr)));
           bounce_announce_session_to(s2, cptr, 0);
         }
       }
@@ -9819,6 +9841,11 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       int kc_conflict = cli_user(new_client)
                         && bounce_rebind_kc_conflict(bounce_session_kc_id(bsess),
                                                      cli_user(new_client)->kc_id);
+      /* The promoted client is a primary here now, never an alias of this
+       * session as well, whichever client the record keeps in its slot:
+       * every roster entry naming it goes (a session ending exits each
+       * roster entry it finds, and would exit a primary twice). */
+      session_roster_drop(bsess, new_client);
       switch (bounce_bxp_session_action(slot_ours, slot_ours && IsBouncerHold(slot),
                                         slot == old_client,
                                         bsess->hs_state == BOUNCE_HOLDING
@@ -9865,21 +9892,6 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
         struct Client *sibling = findNUser(bsess->hs_aliases[k].ba_numeric);
         if (sibling && IsBouncerAlias(sibling))
           cli_user(sibling)->alias_primary = new_client;
-      }
-      /* The promoted client is the primary now and never an alias of its
-       * own session as well: every roster entry naming it goes (a session
-       * ending exits each roster entry it finds, and would exit its
-       * primary twice). */
-      for (k = 0; k < bsess->hs_alias_count; ) {
-        if (findNUser(bsess->hs_aliases[k].ba_numeric) == new_client) {
-          if (k < bsess->hs_alias_count - 1)
-            memmove(&bsess->hs_aliases[k], &bsess->hs_aliases[k + 1],
-                    (bsess->hs_alias_count - 1 - k)
-                      * sizeof(struct BounceAlias));
-          bsess->hs_alias_count--;
-        } else {
-          k++;
-        }
       }
     }
   }
