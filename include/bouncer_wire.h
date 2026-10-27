@@ -480,13 +480,17 @@ extern enum bounce_bsd_action bounce_bsd_action(int kc_conflict, int slot_ours);
  * nothing of ours, so the sender's held ghost would keep the nick until
  * its hold ran out.  Our primary's BS A, sent outside a burst, is what
  * makes a held copy yield (bounce_bsa_yields()).  Over our own held ghost
- * neither copy is live: nothing.
+ * neither copy is live: nothing.  Only toward a link that announces the
+ * hold mark: a build without the BS A install guard would install our
+ * primary over its held ghost instead of yielding it.
  *
- * @param[in] action    What the BS D did (bounce_bsd_action()).
- * @param[in] slot_live Our record's primary is our own live client (not a
- *                      held ghost, not an alias).
+ * @param[in] action         What the BS D did (bounce_bsd_action()).
+ * @param[in] slot_live      Our record's primary is our own live client
+ *                           (not a held ghost, not an alias).
+ * @param[in] link_hold_mark The link announced the hold mark (H).
  */
-extern int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live);
+extern int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live,
+                                  int link_hold_mark);
 
 /** What a BX P (a promote, or a face swap, on another server) does to our
  * record of the session it names. */

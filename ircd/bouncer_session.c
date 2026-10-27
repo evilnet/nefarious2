@@ -5737,8 +5737,11 @@ bsc_forward:
          * wins, but this line says nothing of ours, so the sender's held
          * ghost would keep its nick until its hold ran out.  Our
          * primary's BS A, outside a burst, makes that held copy yield to
-         * it (bounce_bsa_yields). */
-        if (bounce_bsd_reannounces(BOUNCE_BSD_NOTE, !IsBouncerHold(slot))) {
+         * it (bounce_bsa_yields).  Only toward a link with the hold mark:
+         * a build without the BS A install guard would install our
+         * primary over its held ghost instead. */
+        if (bounce_bsd_reannounces(BOUNCE_BSD_NOTE, !IsBouncerHold(slot),
+                                   IsHoldMark(cptr))) {
           log_write(LS_USER, L_INFO, 0, "BS D: our live primary %s of %s's "
                     "session %s: announcing it to %s", cli_name(slot),
                     session->hs_account, session->hs_sessid, cli_name(cptr));

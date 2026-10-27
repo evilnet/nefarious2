@@ -797,19 +797,29 @@ static void bsd_of_another_keycloak_user_only_passes_on(void **s)
     assert_int_equal(bounce_bsd_action(1, sl), BOUNCE_BSD_FORWARD);
 }
 
-/* bounce_bsd_reannounces(action, slot_live): our primary is announced
- * again only over our own live primary. */
+/* bounce_bsd_reannounces(action, slot_live, link_hold_mark): our primary
+ * is announced again only over our own live primary, toward a link with
+ * the hold mark. */
 static void bsd_reannounces_only_over_a_live_slot(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_NOTE, 1), 1);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_NOTE, 1, 1), 1);
   /* Our held ghost holds the slot: neither copy is live. */
-  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_NOTE, 0), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_NOTE, 0, 1), 0);
   /* The record followed the sender, or the line was another user's. */
-  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_APPLY, 0), 0);
-  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_APPLY, 1), 0);
-  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_FORWARD, 0), 0);
-  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_FORWARD, 1), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_APPLY, 0, 1), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_APPLY, 1, 1), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_FORWARD, 0, 1), 0);
+  assert_int_equal(bounce_bsd_reannounces(BOUNCE_BSD_FORWARD, 1, 1), 0);
+}
+
+static void bsd_reannounces_only_toward_a_hold_mark_link(void **s)
+{
+  int a, l;
+  (void)s;
+  for (a = BOUNCE_BSD_APPLY; a <= BOUNCE_BSD_FORWARD; a++)
+    for (l = 0; l < 2; l++)
+      assert_int_equal(bounce_bsd_reannounces((enum bounce_bsd_action)a, l, 0), 0);
 }
 
 /* bounce_bxp_session_action(slot_ours, slot_held, old_is_slot,
@@ -881,6 +891,7 @@ int main(void)
     cmocka_unit_test(bsd_never_rewrites_a_slot_of_ours),
     cmocka_unit_test(bsd_of_another_keycloak_user_only_passes_on),
     cmocka_unit_test(bsd_reannounces_only_over_a_live_slot),
+    cmocka_unit_test(bsd_reannounces_only_toward_a_hold_mark_link),
     cmocka_unit_test(bxp_applies_to_a_slot_not_ours),
     cmocka_unit_test(bxp_renumbers_our_own_face),
     cmocka_unit_test(bxp_never_repoints_our_live_primary),
