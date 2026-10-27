@@ -27,6 +27,7 @@
 #include "bouncer_session.h"
 #include "bouncer_converge.h"
 #include "bouncer_wire.h"
+#include "bouncer_count.h"
 #include "bouncer_rebind_auth.h"
 #include "account_id.h"
 #include "exit_reason.h"
@@ -3742,6 +3743,94 @@ void bounce_db_shutdown(void)
   log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: shutdown — persisted %d sessions", count);
 }
 
+/* ---------------------------------------------------------------- */
+/* Client counters across a conversion                               */
+/* ---------------------------------------------------------------- */
+
+/* A user holds a fixed set of the core client counters -- UserStats.clients,
+ * local_clients, local_announced_clients, announced_clients and its
+ * server's count -- and its exit releases exactly that set, by the facts it
+ * reads then: Count_clientdisconnects for a client of ours,
+ * Count_remoteclientquits for another server's non-alias, nothing for
+ * another server's alias (bouncer_count.h).  The bouncer changes those
+ * facts in place: a primary's socket drops and it is held, a login revives
+ * the ghost, a live primary is demoted to an alias, an alias is promoted, a
+ * client another server introduced is converted into an alias, a held ghost
+ * becomes another server's client.  Every such conversion snapshots what
+ * the client held before (count_held) and moves the difference once the
+ * client is what it is now (bounce_count_converted): each count is taken
+ * once, moved with the client, and released once, by whichever path ends
+ * it. */
+
+/** What @a c holds in the core client counters now: what its exit would
+ * release. */
+static void count_held(struct Client *c, struct bounce_counts *out)
+{
+  bounce_count_held(MyConnect(c), IsBouncerAlias(c), !IsNoLcDecrement(c),
+                    out);
+}
+
+static void count_dec(unsigned int *ctr, const char *what, struct Client *c,
+                      const char *site)
+{
+  if (*ctr > 0)
+    --*ctr;
+  else
+    log_write(LS_USER, L_WARNING, 0, "Bouncer counters: %s is already 0 "
+              "when %s gives a count up (%s)", what, cli_name(c), site);
+}
+
+static void count_move(unsigned int *ctr, unsigned int *max, int delta,
+                       const char *what, struct Client *c, const char *site)
+{
+  if (delta < 0) {
+    count_dec(ctr, what, c, site);
+  } else if (delta > 0) {
+    ++*ctr;
+    if (*ctr > *max) {
+      *max = *ctr;
+      save_tunefile();
+    }
+  }
+}
+
+/** A conversion changed @a c in place: before it, @a c held @a was, with
+ * @a was_server its server then; it holds what its state says now, with
+ * its server now.  Moves the difference.  The server's own count (&me's)
+ * is never kept: MAP, STATS and CHECK read local_clients for it.
+ * @param[in] c          The converted client.
+ * @param[in] was        count_held(c) before the conversion.
+ * @param[in] was_server Its server before the conversion.
+ * @param[in] site       Short label for the log line of a count already 0.
+ */
+static void bounce_count_converted(struct Client *c,
+                                   const struct bounce_counts *was,
+                                   struct Client *was_server,
+                                   const char *site)
+{
+  struct bounce_counts now, d;
+  struct Client *server = cli_user(c) ? cli_user(c)->server : NULL;
+
+  count_held(c, &now);
+  bounce_count_delta(was, &now, &d);
+  count_move(&UserStats.clients, &UserStats.clients_max, d.clients,
+             "clients", c, site);
+  count_move(&UserStats.local_clients, &UserStats.local_clients_max,
+             d.local_clients, "local_clients", c, site);
+  count_move(&UserStats.local_announced_clients,
+             &UserStats.local_announced_clients_max, d.local_announced,
+             "local_announced_clients", c, site);
+  count_move(&UserStats.announced_clients, &UserStats.announced_clients_max,
+             d.announced, "announced_clients", c, site);
+  /* Its server's count: given up on the server it had, taken on the one it
+   * has (the same server unless it moved). */
+  if (was->server_clients && was_server && was_server != &me
+      && cli_serv(was_server))
+    count_dec(&cli_serv(was_server)->clients, "its server's count", c, site);
+  if (now.server_clients && server && server != &me && cli_serv(server))
+    ++cli_serv(server)->clients;
+}
+
 /** Create a ghost client from a persisted session record.
  * The ghost has no socket (fd=-1), is registered in global structures,
  * and is flagged as BOUNCER_HOLD.
@@ -3831,57 +3920,19 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
     metadata_load_account(ghost, user->account);
   SetHiddenHost(ghost);
   SetBouncerHold(ghost);
-  /* Mark ghost as not-counted-in-local_clients (no socket, no
-   * register_user bump fired).  Cleared by bounce_revive when a
-   * socket attaches; if the ghost is destroyed without revive,
-   * Count_clientdisconnects sees this flag and skips the lc
-   * decrement, avoiding underflow. */
+  /* No socket: its local_clients count is settled (never taken).  Cleared
+   * by bounce_revive when a socket attaches. */
   SetNoLcDecrement(ghost);
 
   /* Set creation timestamp to original time (wins nick collisions: older wins) */
   cli_lastnick(ghost) = (time_t)rec->bsr_created;
 
-  /* Account the ghost as a local client. The intent (per BOUNCER STATUS audit
-   * comment in m_bouncer.c) is that holding ghosts are counted in
-   * UserStats.local_clients until the session is destroyed. The original
-   * primary's disconnect already ran Count_clientdisconnects when its socket
-   * closed; without the matching ++ here we under-count by 1 per ghost.
-   *
-   * unknowns is NOT touched: the ghost was never a STAT_UNKNOWN TCP
-   * connection on this server (it's spawned synthetically).
-   *
-   * local_clients is NOT bumped — the ghost has no TCP socket.
-   * RPL_LUSERME ("I have X clients") tracks live sockets only;
-   * ghosts should not appear there.  FLAG_NO_LC_DECREMENT set
-   * above ensures the destroy path doesn't try to decrement a
-   * counter we never bumped.  When the ghost is later revived,
-   * bounce_revive bumps local_clients as the socket attaches.
-   *
-   * clients IS bumped — it counts all registered users (network
-   * identity tally), and the ghost is a real registered user with
-   * a numeric and an identity, just not a live socket on this
-   * server.  Matches Count_unknownbecomesclient's bump shape.
-   *
-   * Held ghosts remain N-visible on the network (no Q was emitted
-   * at the original primary's socket-drop — that's the point of
-   * BOUNCE_HOLDING).  So announced counters track them the same
-   * as live primaries.  Count_clientdisconnects in the ghost-exit
-   * path decrements them (gated on !IsBouncerAlias — a ghost is
-   * IsBouncerHold, not IsBouncerAlias, so the gate passes). */
-  ++UserStats.clients;
-  ++UserStats.local_announced_clients;
-  ++UserStats.announced_clients;
-  if (UserStats.clients > UserStats.clients_max) {
-    UserStats.clients_max = UserStats.clients;
-    save_tunefile();
-  }
-  if (UserStats.local_announced_clients > UserStats.local_announced_clients_max) {
-    UserStats.local_announced_clients_max = UserStats.local_announced_clients;
-    save_tunefile();
-  }
-  if (UserStats.announced_clients > UserStats.announced_clients_max) {
-    UserStats.announced_clients_max = UserStats.announced_clients;
-    save_tunefile();
+  /* The ghost is a held ghost of ours from here on: a registered user the
+   * network knows by N (its hold kept it announced), with no live socket.
+   * unknowns is not touched: it was never a connection here. */
+  {
+    static const struct bounce_counts none = { 0, 0, 0, 0, 0 };
+    bounce_count_converted(ghost, &none, &me, "restore");
   }
 
   /* Register in global structures */
@@ -6122,7 +6173,16 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
    * Do NOT set IsBouncerHold: the promoted alias is a live connection,
    * not a ghost.  bounce_should_hold() needs to be able to create a
    * ghost if the promoted alias later disconnects. */
-  ClearBouncerAlias(alias);
+  {
+    struct bounce_counts was;
+
+    count_held(alias, &was);
+    ClearBouncerAlias(alias);
+    /* A primary now, announced: an alias of ours was counted as a socket
+     * and a registered user only, an alias another server introduced by
+     * BX C nowhere (it is that server's user now, in its count). */
+    bounce_count_converted(alias, &was, cli_user(alias)->server, "promote");
+  }
   cli_user(alias)->alias_primary = NULL;
 
   /* Preserve cli_lastnick across the promote.  Earlier this site reset
@@ -6145,54 +6205,6 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   /* Add to nick hash (aliases aren't in nick hash) */
   hAddClient(alias);
 
-  /* Add promoted alias to UserStats.
-   *
-   * Local aliases (MyUser true) were already counted in UserStats.clients
-   * and UserStats.local_clients at register_user (s_user.c:415,
-   * Count_unknownbecomesclient).  The alias-setup branch returns at
-   * s_user.c:555 before the inv_clients / opers bumps later in
-   * register_user, so those counters were NOT picked up at register
-   * time and DO need to be incremented here.
-   *
-   * Remote aliases (created via BX C in bounce_alias_create) bypass all
-   * UserStats accounting on this server, so all of clients,
-   * local_clients-equivalent (n/a — they're remote), inv_clients and
-   * opers need to be picked up here.
-   *
-   * The cli_serv(...->server)->clients counter is per-server; for &me
-   * it's unused (m_check.c reads UserStats.local_clients instead) but
-   * for remote servers it's the canonical count, so always bump.  */
-  if (!MyUser(alias)) {
-    ++UserStats.clients;
-    if (UserStats.clients > UserStats.clients_max) {
-      UserStats.clients_max = UserStats.clients;
-      save_tunefile();
-    }
-  }
-  ++(cli_serv(cli_user(alias)->server)->clients);
-  /* UserStats.local_clients: local aliases already counted at register;
-   * remote aliases are not local.  Either way, do not bump here. */
-  /* Announced counters: the promoted alias is becoming a primary, so
-   * it's now N-visible to the network (BX P is emitted to peers; on
-   * legacy peers this is the in-place numeric swap).
-   *
-   *  - Remote alias (!MyUser): announced_clients was never bumped for
-   *    this client (BX C arrived without bumping); now bump it.
-   *  - Local alias (MyUser): announced_clients/local_announced_clients
-   *    were bumped at register_user but then decremented by
-   *    bounce_setup_local_alias when SetBouncerAlias ran.  Re-bump
-   *    here to restore the slot the promotion just earned back. */
-  ++UserStats.announced_clients;
-  if (MyUser(alias))
-    ++UserStats.local_announced_clients;
-  if (UserStats.announced_clients > UserStats.announced_clients_max) {
-    UserStats.announced_clients_max = UserStats.announced_clients;
-    save_tunefile();
-  }
-  if (UserStats.local_announced_clients > UserStats.local_announced_clients_max) {
-    UserStats.local_announced_clients_max = UserStats.local_announced_clients;
-    save_tunefile();
-  }
   /* opers / inv_clients: ClearBouncerAlias above made @a alias a real primary,
    * so reconcile its counting.  Flag-keyed + idempotent: a LOCAL alias was
    * already counted when created (no-op here); a REMOTE alias was never counted
@@ -6713,20 +6725,18 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    */
   close_connection(cptr);
 
-  /* Socket-side counter adjustment: the TCP connection just died.
-   * RPL_LUSERME ("I have X clients") reflects live sockets only,
-   * so drop local_clients now.  Announced and clients counters
-   * stay — the user is still N-visible to peers as a held ghost
-   * (no Q was emitted, that's the whole point of BOUNCE_HOLDING).
-   * On revive, bounce_revive bumps local_clients back up.
-   *
-   * Set FLAG_NO_LC_DECREMENT so Count_clientdisconnects at eventual
-   * destroy (whether via the IsBouncerHold branch or via the
-   * normal IsUser branch after ClearBouncerHold) skips the lc
-   * decrement — we've already done it here. */
-  if (UserStats.local_clients > 0)
-    --UserStats.local_clients;
-  SetNoLcDecrement(cptr);
+  /* The socket is gone: a held ghost of ours from here on.  It gives up
+   * its local_clients count now (RPL_LUSERME counts live sockets), and
+   * FLAG_NO_LC_DECREMENT says so to its exit and to a revive; it stays a
+   * registered user the network knows by N (no Q was sent: that is what
+   * holding means). */
+  {
+    struct bounce_counts was;
+
+    count_held(cptr, &was);
+    SetNoLcDecrement(cptr);
+    bounce_count_converted(cptr, &was, &me, "hold");
+  }
 
   /* Log the hold */
   log_write(LS_USER, L_TRACE, 0, "Bouncer HOLD: %s (%s@%s) session %s - %s",
@@ -7207,24 +7217,17 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   }
   ClrFlag(ghost, FLAG_DEADSOCKET);
 
-  /* Socket-side counter accounting: the ghost just gained a live
-   * TCP socket via the Step 6-7 transplant.  RPL_LUSERME tracks
-   * live sockets only, so bump local_clients.
-   *
-   * Clear FLAG_NO_LC_DECREMENT so the eventual destroy macro fires
-   * the lc decrement normally (we just bumped lc; future destroy
-   * must rebalance).
-   *
-   * Pair: bounce_free_temp_client calls Count_clientdisconnects
-   * which decrements temp's lc bump (temp's FLAG_NO_LC_DECREMENT
-   * is unset — it was a regular client that registered normally,
-   * so the macro fires the decrement).  Net across temp+ghost:
-   * one socket, one count. */
-  ++UserStats.local_clients;
-  ClearNoLcDecrement(ghost);
-  if (UserStats.local_clients > UserStats.local_clients_max) {
-    UserStats.local_clients_max = UserStats.local_clients;
-    save_tunefile();
+  /* The ghost has a live socket again (the Step 6-7 transplant): a live
+   * user of ours, counted in local_clients, and its exit releases that
+   * count.  The temp client releases its own registration counts in
+   * bounce_free_temp_client (Count_clientdisconnects): one socket, one
+   * count. */
+  {
+    struct bounce_counts was;
+
+    count_held(ghost, &was);
+    ClearNoLcDecrement(ghost);
+    bounce_count_converted(ghost, &was, &me, "revive");
   }
 
   /* Step 13: Update session state (hs_state already set to ACTIVE earlier) */
@@ -7412,7 +7415,12 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
 {
   struct Membership *member;
   struct Connection *old_con;
+  struct bounce_counts was;
   int i;
+
+  /* What the ghost holds as a held ghost of ours, before it becomes a
+   * client of the introducing server. */
+  count_held(ghost, &was);
 
   /* Tell legacy links that may still know the ghost's old numeric that
    * it swapped to new_numeric, while ghost still carries the numeric
@@ -7434,41 +7442,6 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
   /* Drop ghost from nick hash and release its local numeric. */
   hRemClient(ghost);
   RemoveYXXClient(&me, cli_yxx(ghost));
-
-  /* Counter rebalance: the ghost is leaving the local domain to
-   * represent a client of the introducing server.
-   *
-   * local_clients: untouched.  Since 996ca335 a held ghost never
-   * holds a count here in the first place -- bounce_hold_client
-   * already decremented it when the live primary's socket closed
-   * (or bounce_create_ghost never bumped it for a boot-spawned
-   * ghost), setting FLAG_NO_LC_DECREMENT either way.  Decrementing
-   * it again here was the bug (pre-existing since 996ca335/5ab703df,
-   * reachable the moment a second fork server lets a rebind happen
-   * at all): it stole a count from some unrelated live local socket
-   * every rebind, eventually driving local_clients negative -- an
-   * unsigned wrap LUSERS showed as local_clients == 4294967295.
-   * Clearing the flag is tidying only: the client is remote from
-   * here on, and a remote client is never rebound back onto a socket
-   * here, so no later local decrement can read it.
-   *
-   * local_announced_clients: release it (guarded).  The ghost was
-   * counted here as a locally N-announced client (by
-   * bounce_create_ghost, or by the original register_user before
-   * bounce_hold_client left it alone) and it no longer is one --
-   * Count_remoteclientquits, the macro that will eventually end
-   * this client now that it is remote, never touches this counter,
-   * so leaving it alone here leaks one count per rebind (RPL_CURRENT_LOCAL,
-   * 265, reads one too high from here on).
-   *
-   * clients / announced_clients: untouched -- the user is still one
-   * registered, N-announced identity on the network, just behind a
-   * different link now.  Credit the introducing server's per-link
-   * count instead, same as any other remote client's home link. */
-  ClearNoLcDecrement(ghost);
-  if (UserStats.local_announced_clients > 0)
-    --UserStats.local_announced_clients;
-  ++(cli_serv(server)->clients);
 
   /* Free the ghost's own Connection. The ghost now shares the server's
    * Connection so cli_from(ghost) routes outgoing messages through the
@@ -7493,6 +7466,16 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
 
   /* Update identity from the N introduction. */
   cli_user(ghost)->server = server;
+
+  /* The ghost is the introducing server's client now: a registered user
+   * the network knows by N, in that server's count, and no longer one of
+   * ours (its local_announced_clients count goes; it gave its socket's
+   * count up when it was held, or never took one as a restored ghost --
+   * FLAG_NO_LC_DECREMENT, cleared here as a remote client never reads
+   * it).  Count_remoteclientquits releases the rest when it ends. */
+  ClearNoLcDecrement(ghost);
+  bounce_count_converted(ghost, &was, &me, "rebind");
+
   ircd_strncpy(cli_username(ghost), username, USERLEN + 1);
   ircd_strncpy(cli_user(ghost)->username, username, USERLEN + 1);
   ircd_strncpy(cli_user(ghost)->host, host, HOSTLEN + 1);
@@ -7888,7 +7871,17 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
   /* Promote the Client to alias: flag, NULL alias_primary (caller
    * patches via bounce_finish_live_primary_demote), drop from nick
    * hash (aliases share their primary's nick and aren't hashed). */
-  SetBouncerAlias(acptr);
+  {
+    struct bounce_counts was;
+
+    count_held(acptr, &was);
+    SetBouncerAlias(acptr);
+    /* An alias of ours from here on, whether or not the finish takes the
+     * session: still a socket and a registered user, no longer announced
+     * (the new primary is the session's announced user).  Its exit, as an
+     * alias, releases the rest. */
+    bounce_count_converted(acptr, &was, &me, "demote");
+  }
   cli_user(acptr)->alias_primary = NULL;
   hRemClient(acptr);
 
@@ -9742,7 +9735,18 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
         ++(cli_user(new_client))->joined;
       }
     }
-    ClearBouncerAlias(new_client);
+    {
+      struct bounce_counts was;
+
+      count_held(new_client, &was);
+      ClearBouncerAlias(new_client);
+      /* A primary now, announced: the alias of ours a peer promotes is our
+       * live user (announced again); an alias another server introduced by
+       * BX C is that server's user (it gets the counts that server's N
+       * would have given it).  old_client's exit below releases its own. */
+      bounce_count_converted(new_client, &was, cli_user(new_client)->server,
+                             "BX P");
+    }
     cli_user(new_client)->alias_primary = NULL;
     /* C1: Add promoted alias to nick hash (aliases aren't in nick hash) */
     hAddClient(new_client);
@@ -9752,23 +9756,6 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
      * alias's home leaf (already counted) is a no-op.  old_client is exited below
      * (count released by userstats_count_clear in exit_one_client). */
     userstats_count_sync(new_client);
-    /* UserStats.clients (NOT flag-keyed — the core Count_* counter): a REMOTE alias
-     * was never counted in clients (BX C bypasses UserStats accounting), but it just
-     * became a real nick-hash primary, so pick it up here — mirror of
-     * bounce_promote_alias's originating-side ++.  Without this, old_client's exit
-     * below (--clients) runs with no matching ++ on this node, so clients drifts -1
-     * per cross-node promote and eventually UNDERFLOWS to UINT_MAX.  MyConnect (the
-     * alias's home leaf) already counted it at register, so skip there. */
-    if (!MyConnect(new_client)) {
-      ++UserStats.clients;
-      if (UserStats.clients > UserStats.clients_max) {
-        UserStats.clients_max = UserStats.clients;
-        save_tunefile();
-      }
-      if (cli_user(new_client)->server && cli_user(new_client)->server != &me
-          && cli_serv(cli_user(new_client)->server))
-        ++(cli_serv(cli_user(new_client)->server)->clients);
-    }
   } else {
     /* Swap path: new_client has no channel memberships.
      * Transfer memberships from old to new (legacy/sequential). */
@@ -9945,6 +9932,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   struct User *user;
   struct Membership *member;
   struct BounceAlias *ba;
+  struct bounce_counts was_counted;
   char chanlist_buf[512];
   size_t chanlist_len = 0;
   char *parv[2] = { NULL, NULL };
@@ -10042,6 +10030,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   ircd_strncpy(cli_session_id(sptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
 
   /* --- Step 3: Set alias flags --- */
+  count_held(sptr, &was_counted);
   SetBouncerAlias(sptr);
   SetUser(sptr);
   SetAccount(sptr);
@@ -10051,22 +10040,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   cli_lastnick(sptr) = cli_lastnick(primary);
   cli_handler(sptr) = CLIENT_HANDLER;
 
-  /* Announced-count adjustment: the client just transitioned from
-   * primary (counted at register_user via Count_unknownbecomesclient)
-   * to alias (which is BX-C'd, not N'd).  Peer servers receiving the
-   * BX C broadcast from Step 8 below do their own conversion-decrement
-   * in bounce_alias_create's "convert existing N-counted client to
-   * alias" branch.  Locally we mirror that decrement here.
-   *
-   * No legacy-wire emission is added yet — see
-   * .claude/para/projects/rpl-localusers-announced-count.md for the
-   * deferred Q-to-legacy work (legacy peers still see the original N
-   * and will stay drifted until that lands or the upstream BX P
-   * handler is extended to handle in-place conversion gracefully). */
-  if (UserStats.local_announced_clients > 0)
-    --UserStats.local_announced_clients;
-  if (UserStats.announced_clients > 0)
-    --UserStats.announced_clients;
+  /* It registered as a live user of ours (Count_unknownbecomesclient)
+   * and is an alias from here on: still a socket and a registered user,
+   * no longer announced -- the network learns it by BX C, never by N. */
+  bounce_count_converted(sptr, &was_counted, &me, "alias setup");
 
   /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
   bounce_copy_umodes(primary, sptr);
@@ -10515,12 +10492,12 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
       sendcmdto_common_channels_butone(alias, CMD_QUIT, NULL, ":Session converging");
     {
-      /* Stash original server pointer BEFORE conversion overwrites
-       * anything — needed for the per-peer decrement below.  The
-       * conversion block in this function doesn't currently rewrite
-       * user->server, but keep this defensive in case that changes. */
+      /* What it holds as the user its server introduced by N, and that
+       * server, before the conversion overwrites anything. */
       struct Client *original_server = user->server;
+      struct bounce_counts was;
 
+      count_held(alias, &was);
       hRemClient(alias);
       ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
       ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
@@ -10546,27 +10523,11 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
       bounce_copy_umodes(primary, alias);
 
-      /* Announced-count + per-peer reconcile: this Client was previously
-       * N-counted on this server (via Count_newremoteclient if remote,
-       * or Count_unknownbecomesclient if local — the local case happens
-       * for the alias-host server seeing its own emitted BX C echo
-       * back, though typically that goes through the "already alias"
-       * branch above).
-       *
-       * The conversion removes the client from N-announce semantics —
-       * peers no longer should count this numeric as a network user
-       * (it's now an alias).  Mirror what Count_remoteclientquits
-       * would do, minus the channel-state side effects (the alias
-       * keeps its channel memberships, just under the primary's
-       * identity). */
-      if (UserStats.announced_clients > 0)
-        --UserStats.announced_clients;
-      if (MyConnect(alias) && UserStats.local_announced_clients > 0)
-        --UserStats.local_announced_clients;
-      if (original_server && original_server != &me
-          && cli_serv(original_server)
-          && cli_serv(original_server)->clients > 0)
-        --(cli_serv(original_server)->clients);
+      /* An alias another server introduced is counted nowhere here (a BX C
+       * for a new one counts nothing either): the user its N counted --
+       * a registered user, announced, in its server's count -- gives every
+       * count up, and its exit as an alias releases nothing more. */
+      bounce_count_converted(alias, &was, original_server, "convert");
     }
     goto track_alias;
   }
@@ -11002,13 +10963,23 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
    * Mirror the canonical local-alias teardown (the exit_one_client
    * IsBouncerAlias branch in s_misc.c): release accounting, then
    * close_connection() to clear the array slot, shut the socket and
-   * queue the Connection free.  Every gate is a no-op for a genuinely
-   * remote target (userstats_count_clear is flag-keyed), so the remote
-   * BX X path is unchanged. */
+   * queue the Connection free.
+   *
+   * The counts are released as exit_one_client releases them: the
+   * client of ours by Count_clientdisconnects; another server's client
+   * that is not an alias -- a held ghost, which its server introduced by
+   * N like any user of its own -- by Count_remoteclientquits; another
+   * server's alias holds none (BX C counted nothing, and a client
+   * converted into one gave its counts up then).  Without the remote
+   * branch a held ghost a peer ends this way stays counted here, in
+   * clients, announced_clients and its server's MAP line.
+   * userstats_count_clear is flag-keyed: a no-op for an uncounted alias. */
   if (MyConnect(target)) {
     if (IsIPChecked(target))
       IPcheck_disconnect(target);
     Count_clientdisconnects(target, UserStats);
+  } else if (!was_alias) {
+    Count_remoteclientquits(UserStats, target);
   }
   userstats_count_clear(target);
   if (MyUser(target))

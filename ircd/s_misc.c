@@ -346,7 +346,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * bounce_setup_local_alias re-purposed it), so its slot in
      * UserStats.local_clients/clients must be released here.  Remote aliases
      * (created via BX C in bounce_alias_create) bypass Count_newremoteclient
-     * entirely, so they have nothing to decrement. */
+     * entirely, and a client converted into one in place gave its counts up
+     * then, so they have nothing to decrement. */
     if (IsBouncerAlias(bcptr)) {
       /* Network KILL on an alias ends the entire session per design
        * intent invariant #12.  Propagate the KILL to the primary (if

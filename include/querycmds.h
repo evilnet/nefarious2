@@ -96,12 +96,12 @@ extern void userstats_count_clear(struct Client *cptr);
 
 /** Count a remote user quit.
  *
- * Decrements clients (sockets) unconditionally.  announced_clients
- * decrements only if cptr is NOT a bouncer alias — aliases were
- * never counted in announced_clients (they came via BX C, not N).
- * The BX-X exit path for aliases reuses this macro for the
- * non-announced sides; gating the announced decrement on
- * !IsBouncerAlias prevents underflow. */
+ * Releases what Count_newremoteclient took: one registered user, one
+ * in its server's count, one announced user.  Another server's alias
+ * holds no count -- BX C counts nothing, and a client converted into
+ * one in place gave its counts up then -- so no exit path calls this
+ * for one; the !IsBouncerAlias gate on the announced decrement keeps
+ * one that ever reached it from underflowing. */
 #define Count_remoteclientquits(UserStats,cptr)                \
   do { \
     --UserStats.clients; \
@@ -194,8 +194,8 @@ void count_unknowns_underflow(const char *file, int line, const char *what);
  * ARE counted there from their creation through destroy.
  *
  * Announced counters decrement only if cptr is NOT a bouncer alias
- * — aliases got their announced bump at register_user but had it
- * removed by bounce_setup_local_alias when they were converted.
+ * — aliases got their announced bump at register_user but gave it up
+ * when they became one (bounce_setup_local_alias, a demote).
  * Held ghosts (IsBouncerHold) ARE still announced and need the
  * decrement on destroy. */
 #define Count_clientdisconnects(cptr, UserStats) \
