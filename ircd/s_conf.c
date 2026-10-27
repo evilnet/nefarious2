@@ -44,6 +44,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
+#include "bouncer_session.h"
 #include "ircd_string.h"
 #include "list.h"
 #include "listener.h"
@@ -1459,6 +1460,11 @@ int rehash(struct Client *cptr, int sig)
                              "K-line active for %s%s"),
                              IsUnknown(acptr) ? "Unregistered Client ":"",
                              get_client_name(acptr, SHOW_IP));
+        /* Enforcement ends the bouncer session the connection carries,
+         * as a KILL does. */
+        bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_BAN,
+                           found_g == -2 ? "G-lined" :
+                           (found_g == -3 ? "Z-lined" : "K-lined"));
         if (exit_client(cptr, acptr, &me, found_g == -2 ? "G-lined" :
             (found_g == -3 ? "Z-lined" : "K-lined")) == CPTR_KILLED)
           ret = CPTR_KILLED;

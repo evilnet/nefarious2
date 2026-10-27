@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "zline.h"
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "ircd.h"
@@ -190,12 +191,19 @@ do_zline(struct Client *cptr, struct Client *sptr, struct Zline *zline)
       sendto_opmask_butone_global(&me, SNO_GLINE, "Z-line active for %s",
                            get_client_name(acptr, SHOW_IP));
 
-      /* and get rid of him */
-      if ((tval = exit_client_msg(cptr, acptr, &me, "Z-lined%s%s%s",
-          (!feature_bool(FEAT_HIS_ZLINE_REASON) ? " (" : ""),
-          (!feature_bool(FEAT_HIS_ZLINE_REASON) ? zline->zl_reason : ""),
-          (!feature_bool(FEAT_HIS_ZLINE_REASON) ? ")" : ""))))
-        retval = tval; /* retain killed status */
+      /* and get rid of him -- and of the bouncer session his connection
+       * carries: enforcement ends it, as a KILL does */
+      {
+        char reason[BUFSIZE];
+
+        ircd_snprintf(0, reason, sizeof(reason), "Z-lined%s%s%s",
+            (!feature_bool(FEAT_HIS_ZLINE_REASON) ? " (" : ""),
+            (!feature_bool(FEAT_HIS_ZLINE_REASON) ? zline->zl_reason : ""),
+            (!feature_bool(FEAT_HIS_ZLINE_REASON) ? ")" : ""));
+        bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_BAN, reason);
+        if ((tval = exit_client(cptr, acptr, &me, reason)))
+          retval = tval; /* retain killed status */
+      }
     }
   }
   return retval;

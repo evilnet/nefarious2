@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -89,6 +90,7 @@
 #include "ircd_log.h"
 #include "ircd_relay.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "mark.h"
 #include "match.h"
@@ -147,7 +149,16 @@ int mr_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                "K-line active for %s%s",
                                IsUnknown(sptr) ? "Unregistered Client ":"",
                                get_client_name(sptr, SHOW_IP));
-          return exit_client_msg(cptr, sptr, &me, "Banned Client: %s", cli_version(sptr));
+          {
+            char reason[BUFSIZE];
+
+            /* Enforcement ends the bouncer session the connection
+             * carries, as a KILL does. */
+            ircd_snprintf(0, reason, sizeof(reason), "Banned Client: %s",
+                          cli_version(sptr));
+            bounce_forced_exit(cptr, sptr, BOUNCE_FORCED_BAN, reason);
+            return exit_client(cptr, sptr, &me, reason);
+          }
         }
       }
       return 0;
@@ -258,7 +269,16 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                "K-line active for %s%s",
                                IsUnknown(sptr) ? "Unregistered Client ":"",
                                get_client_name(sptr, SHOW_IP));
-          return exit_client_msg(cptr, sptr, &me, "Banned Client: %s", cli_version(sptr));
+          {
+            char reason[BUFSIZE];
+
+            /* Enforcement ends the bouncer session the connection
+             * carries, as a KILL does. */
+            ircd_snprintf(0, reason, sizeof(reason), "Banned Client: %s",
+                          cli_version(sptr));
+            bounce_forced_exit(cptr, sptr, BOUNCE_FORCED_BAN, reason);
+            return exit_client(cptr, sptr, &me, reason);
+          }
         }
       }
       return 0;

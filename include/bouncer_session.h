@@ -1078,6 +1078,38 @@ extern void bounce_schedule_cross_server_promote(struct BouncerSession *session)
  */
 extern int bounce_promote_or_hold(struct Client *cptr, const char *reason);
 
+/** Before a forced exit of @a victim, a client of ours: act for the
+ * session it carries (bounce_forced_exit_action(); user, 2026-10-27:
+ * bans end the session, faults promote).
+ *
+ *  - A fault (a flood, a WebSocket error, a full buffer) on a session
+ *    primary goes through the disconnect rule (bounce_promote_or_hold()):
+ *    another device takes over, else the session holds or ends by its
+ *    preference.
+ *  - Enforcement (a G-, K- or Z-line, a banned client version, a quit
+ *    services forced) ends the whole session first, the way a KILL does
+ *    (bounce_kill_session(): every device, everywhere, then BS X); the
+ *    caller's exit then sends the usual QUIT -- no FLAG_KILLED, which
+ *    would suppress it.  On a device whose primary is ours, the primary
+ *    exits too, with the same reason.  A primary on another server is
+ *    that server's to exit (a remote exit splits the network), so there
+ *    only the device goes.
+ *
+ * @a cptr, the connection being handled, is never exited here: a device
+ * of the ended session that is @a cptr is left to the orphan sweep.
+ *
+ * @param[in] cptr    The connection being handled (exit_client()'s cptr).
+ * @param[in] victim  The client being forced off.
+ * @param[in] why     Why.
+ * @param[in] comment The exit comment (the hold reason of a held fault).
+ * @return 1 when @a victim was held (its socket is closed; the caller
+ *         must not exit it: CPTR_KILLED when it is @a cptr), else 0: the
+ *         caller exits it as usual.
+ */
+extern int bounce_forced_exit(struct Client *cptr, struct Client *victim,
+                              enum bounce_forced_exit why,
+                              const char *comment);
+
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.
  * @param[in] cptr Client to attach.

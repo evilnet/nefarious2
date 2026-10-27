@@ -24,6 +24,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "client.h"
 #include "handlers.h"
 #include "ircd.h"
@@ -63,10 +64,15 @@ int ms_svsquit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
 
-  if (parc > 1 && !BadPtr(parv[parc - 1]))
-    return exit_client_msg(acptr, acptr, acptr, "%s", parv[parc - 1]);
-  else
-    return exit_client(acptr, acptr, acptr, "Quit");
+  /* A quit services force is enforcement: it ends the bouncer session the
+   * connection carries, as a KILL does. */
+  {
+    const char *why = (parc > 1 && !BadPtr(parv[parc - 1])) ? parv[parc - 1]
+                                                             : "Quit";
+
+    bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_SERVICES, why);
+    return exit_client(acptr, acptr, acptr, why);
+  }
 
   return 0;
 }

@@ -1185,6 +1185,96 @@ static void retire_ends_only_its_own_copy(void **s)
   assert_false(bounce_session_end_exits(BOUNCE_END_RETIRE, 0));
 }
 
+/* bounce_forced_exit_punitive(why), bounce_forced_exit_action(why,
+ * is_alias, session_primary, primary_ours) */
+
+static void bans_and_services_are_punitive(void **s)
+{
+  (void)s;
+  assert_true(bounce_forced_exit_punitive(BOUNCE_FORCED_BAN));
+  assert_true(bounce_forced_exit_punitive(BOUNCE_FORCED_SERVICES));
+}
+
+static void connection_faults_are_not(void **s)
+{
+  (void)s;
+  assert_false(bounce_forced_exit_punitive(BOUNCE_FORCED_FLOOD));
+  assert_false(bounce_forced_exit_punitive(BOUNCE_FORCED_WEBSOCKET));
+  assert_false(bounce_forced_exit_punitive(BOUNCE_FORCED_BUFFER));
+}
+
+static void a_fault_on_a_primary_goes_through_the_disconnect_rule(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 0, 1, 0),
+                   BOUNCE_FORCED_DISCONNECT);
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_WEBSOCKET, 0, 1, 0),
+                   BOUNCE_FORCED_DISCONNECT);
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BUFFER, 0, 1, 0),
+                   BOUNCE_FORCED_DISCONNECT);
+}
+
+static void a_ban_on_a_primary_ends_the_session(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 0, 1, 0),
+                   BOUNCE_FORCED_END_SESSION);
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 0, 1, 0),
+                   BOUNCE_FORCED_END_SESSION);
+}
+
+static void a_ban_on_a_device_ends_the_session_through_our_primary(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 1),
+                   BOUNCE_FORCED_END_BY_PRIMARY);
+  /* A primary on another server is that server's to exit. */
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 0),
+                   BOUNCE_FORCED_PLAIN);
+}
+
+static void a_fault_on_a_device_is_its_own_exit(void **s)
+{
+  int po;
+  (void)s;
+  for (po = 0; po < 2; po++) {
+    assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 1, 0, po),
+                     BOUNCE_FORCED_PLAIN);
+    assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BUFFER, 1, 0, po),
+                     BOUNCE_FORCED_PLAIN);
+  }
+}
+
+static void a_forced_exit_in_no_session_is_plain(void **s)
+{
+  (void)s;
+  /* A ban on a client in no session: nothing to end.  A fault: the
+   * disconnect rule finds nothing either (it exits). */
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 0, 0, 0),
+                   BOUNCE_FORCED_PLAIN);
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 0, 0, 0),
+                   BOUNCE_FORCED_PLAIN);
+}
+
+static void a_ban_never_promotes_a_fault_never_ends(void **s)
+{
+  int w, a, p, o;
+  (void)s;
+  for (w = BOUNCE_FORCED_FLOOD; w <= BOUNCE_FORCED_SERVICES; w++)
+  for (a = 0; a < 2; a++)
+  for (p = 0; p < 2; p++)
+  for (o = 0; o < 2; o++) {
+    enum bounce_forced_action act =
+      bounce_forced_exit_action((enum bounce_forced_exit)w, a, p, o);
+    if (bounce_forced_exit_punitive((enum bounce_forced_exit)w))
+      assert_int_not_equal(act, BOUNCE_FORCED_DISCONNECT);
+    else {
+      assert_int_not_equal(act, BOUNCE_FORCED_END_SESSION);
+      assert_int_not_equal(act, BOUNCE_FORCED_END_BY_PRIMARY);
+    }
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1197,6 +1287,14 @@ int main(void)
     cmocka_unit_test(bsx_ends_a_device_only_on_every_fact),
     cmocka_unit_test(kill_ends_every_device),
     cmocka_unit_test(retire_ends_only_its_own_copy),
+    cmocka_unit_test(bans_and_services_are_punitive),
+    cmocka_unit_test(connection_faults_are_not),
+    cmocka_unit_test(a_fault_on_a_primary_goes_through_the_disconnect_rule),
+    cmocka_unit_test(a_ban_on_a_primary_ends_the_session),
+    cmocka_unit_test(a_ban_on_a_device_ends_the_session_through_our_primary),
+    cmocka_unit_test(a_fault_on_a_device_is_its_own_exit),
+    cmocka_unit_test(a_forced_exit_in_no_session_is_plain),
+    cmocka_unit_test(a_ban_never_promotes_a_fault_never_ends),
     cmocka_unit_test(behind_the_departing_server_or_it),
     cmocka_unit_test(not_behind_it),
     cmocka_unit_test(behind_walk_null_and_broken_trees),

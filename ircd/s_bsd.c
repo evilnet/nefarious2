@@ -1143,6 +1143,20 @@ void update_write(struct Client* cptr)
 		 SOCK_ACTION_ADD : SOCK_ACTION_DEL) | SOCK_EVENT_WRITABLE);
 }
 
+/** A connection fault forces @a cptr off: a flood, a WebSocket frame,
+ * size, fragment or UTF-8 error, a receive buffer that took no more
+ * data.  A fault is not an oper's verdict (user, 2026-10-27: bans end the
+ * session, faults promote): a session primary's other device takes over,
+ * or the session holds, as for a dead socket (bounce_forced_exit()).
+ * @return CPTR_KILLED, as exit_client() returns it for cptr itself. */
+static int exit_client_fault(struct Client *cptr, enum bounce_forced_exit why,
+                             const char *comment)
+{
+  if (bounce_forced_exit(cptr, cptr, why, comment))
+    return CPTR_KILLED; /* held: the ghost keeps the client, not the socket */
+  return exit_client(cptr, cptr, &me, comment);
+}
+
 /** Read a 'packet' of data from a connection and process it.  Read in
  * 8k chunks to give a better performance rating (for server
  * connections).  Do some tricky stuff for client connections to make
@@ -1198,7 +1212,7 @@ ssl_read_again:
     if (ssl_pending(&cli_socket(cptr)) > 0) {
       /* Buffer current data and read more */
       if (dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
-        return exit_client(cptr, cptr, &me, "dbuf_put fail");
+        return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
       length = 0;
       goto ssl_read_again;
     }
@@ -1276,7 +1290,7 @@ ssl_read_again:
         /* Flush any previously buffered bytes into recvQ */
         if (buffered > 0) {
           if (dbuf_put(&(cli_recvQ(cptr)), client_buffer, buffered) == 0)
-            return exit_client(cptr, cptr, &me, "dbuf_put fail");
+            return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
           cli_count(cptr) = 0;
         }
         /* readbuf falls through to normal dbuf_put below */
@@ -1391,7 +1405,7 @@ ssl_read_again:
              * a frame the decoder accepts (WS_MAX_FRAME covers the largest
              * header plus WS_MAX_PAYLOAD), so treat it as a protocol error
              * rather than spin. */
-            return exit_client(cptr, cptr, &me, "WebSocket frame error");
+            return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket frame error");
           }
           if (copy_len > src_len)
             copy_len = src_len;
@@ -1403,11 +1417,11 @@ ssl_read_again:
         } else if (consumed == WS_DECODE_TOOBIG) {
           /* Over WS_MAX_PAYLOAD: tell the client why before dropping it */
           websocket_send_close(cptr, 1009, "Message too big");
-          return exit_client(cptr, cptr, &me, "WebSocket message too big");
+          return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket message too big");
         } else if (consumed < 0) {
           /* Frame error */
           Debug((DEBUG_DEBUG, "WebSocket: Frame error (consumed=%d)", consumed));
-          return exit_client(cptr, cptr, &me, "WebSocket frame error");
+          return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket frame error");
         }
 
         Debug((DEBUG_DEBUG, "WebSocket frame payload: '%.50s'", ws_payload));
@@ -1426,7 +1440,7 @@ ssl_read_again:
           cli_ws_ctl_since(cptr) += WS_CONTROL_FLOOD_CHARGE;
           if (cli_ws_ctl_since(cptr) - CurrentTime > WS_CONTROL_FLOOD_CEIL) {
             websocket_send_close(cptr, 1008, "Excess Flood");
-            return exit_client(cptr, cptr, &me, "Excess Flood");
+            return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood");
           }
         }
 
@@ -1455,7 +1469,7 @@ ssl_read_again:
             cli_ws_frag_len(cptr) += ws_len;
           } else {
             /* Fragment too large */
-            return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
+            return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket fragment overflow");
           }
           if (is_fin) {
             /* Fragment complete - deliver reassembled message */
@@ -1466,14 +1480,14 @@ ssl_read_again:
               if (cli_ws_frag_opcode(cptr) == WS_OPCODE_TEXT) {
                 frag_data[frag_len] = '\0';
                 if (!string_is_valid_utf8(frag_data))
-                  return exit_client(cptr, cptr, &me, "WebSocket text frame: invalid UTF-8");
+                  return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket text frame: invalid UTF-8");
               }
               /* Add line ending if needed */
               if (frag_len < 16384 - 1 && frag_data[frag_len - 1] != '\n') {
                 frag_data[frag_len++] = '\n';
               }
               if (dbuf_put(&(cli_recvQ(cptr)), frag_data, frag_len) == 0)
-                return exit_client(cptr, cptr, &me, "dbuf_put fail");
+                return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
             }
             cli_ws_frag_len(cptr) = 0;
             cli_ws_frag_opcode(cptr) = 0;
@@ -1499,7 +1513,7 @@ ssl_read_again:
               memcpy(cli_ws_frag_buf(cptr), ws_payload, ws_len);
               cli_ws_frag_len(cptr) = ws_len;
             } else {
-              return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
+              return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket fragment overflow");
             }
           } else {
             /* Complete frame - deliver immediately */
@@ -1522,12 +1536,12 @@ ssl_read_again:
               {
                 int classify = recv_classify(cptr, (const char *)ws_payload, ws_len);
                 if (classify == RECV_CLASSIFY_TAG_OVERRUN)
-                  return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+                  return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: tag region too large");
                 if (classify == RECV_CLASSIFY_MSG_OVERRUN)
-                  return exit_client(cptr, cptr, &me, "Excess Flood: message region too large");
+                  return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: message region too large");
               }
               if (dbuf_put(&(cli_recvQ(cptr)), ws_payload, ws_len) == 0)
-                return exit_client(cptr, cptr, &me, "dbuf_put fail");
+                return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
             }
           }
         }
@@ -1551,11 +1565,11 @@ ssl_read_again:
     if (length > 0) {
       int classify = recv_classify(cptr, readbuf, length);
       if (classify == RECV_CLASSIFY_TAG_OVERRUN)
-        return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+        return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: tag region too large");
       if (classify == RECV_CLASSIFY_MSG_OVERRUN)
-        return exit_client(cptr, cptr, &me, "Excess Flood: message region too large");
+        return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: message region too large");
       if (dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
-        return exit_client(cptr, cptr, &me, "dbuf_put fail");
+        return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
     }
 
     /*
@@ -1573,7 +1587,7 @@ ssl_read_again:
      */
     {
       if (DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) + FULL_MSG_SIZE)
-        return exit_client(cptr, cptr, &me, "Excess Flood");
+        return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood");
     }
 
     while (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) && 

@@ -714,4 +714,52 @@ enum bounce_session_end {
  */
 extern int bounce_session_end_exits(enum bounce_session_end how, int own);
 
+/** Why a connection is forced off. */
+enum bounce_forced_exit {
+  BOUNCE_FORCED_FLOOD,      /**< Excess Flood, in any of its forms */
+  BOUNCE_FORCED_WEBSOCKET,  /**< a WebSocket frame, size, fragment or
+                             *   UTF-8 error */
+  BOUNCE_FORCED_BUFFER,     /**< the receive buffer took no more data */
+  BOUNCE_FORCED_BAN,        /**< a G-, K- or Z-line, a banned client
+                             *   version */
+  BOUNCE_FORCED_SERVICES    /**< a quit services forced (SVSQUIT) */
+};
+
+/** Is a forced exit punitive (an oper's or services' enforcement) rather
+ * than a fault of the connection? */
+extern int bounce_forced_exit_punitive(enum bounce_forced_exit why);
+
+/** What a forced exit does to the session its victim carries. */
+enum bounce_forced_action {
+  BOUNCE_FORCED_PLAIN,       /**< nothing of a session to act on: the
+                              *   victim exits as it would in none */
+  BOUNCE_FORCED_DISCONNECT,  /**< a fault: the disconnect rule
+                              *   (bounce_disconnect_action()) -- another
+                              *   device takes over, else hold or exit */
+  BOUNCE_FORCED_END_SESSION, /**< enforcement on the session's primary:
+                              *   the whole session ends first (every
+                              *   device, everywhere), then its exit
+                              *   sends the usual QUIT */
+  BOUNCE_FORCED_END_BY_PRIMARY /**< enforcement on a device whose primary
+                              *   is ours: the session ends first and its
+                              *   primary exits with the same reason */
+};
+
+/** Bans end the session; faults promote (user, 2026-10-27).  Enforcement
+ * on any connection of a session ends the whole session like a KILL
+ * (#12) -- but a primary on another server is that server's to exit, so
+ * enforcement on a device here whose primary is elsewhere ends that
+ * device only.  A fault on a primary goes through the disconnect rule; a
+ * device's exit is always its own.
+ *
+ * @param[in] why             Why the victim is forced off.
+ * @param[in] is_alias        The victim is an alias.
+ * @param[in] session_primary The victim is the primary of a session.
+ * @param[in] primary_ours    The victim is an alias whose session primary
+ *                            is a user of ours.
+ */
+extern enum bounce_forced_action
+bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
+                          int session_primary, int primary_ours);
+
 #endif /* INCLUDED_bouncer_wire_h */

@@ -7217,6 +7217,63 @@ int bounce_promote_or_hold(struct Client *cptr, const char *reason)
   return -1;
 }
 
+/** See include/bouncer_session.h. */
+int bounce_forced_exit(struct Client *cptr, struct Client *victim,
+                       enum bounce_forced_exit why, const char *comment)
+{
+  struct BouncerSession *s = NULL;
+  struct Client *primary = NULL;
+  int is_alias, session_primary = 0, primary_ours = 0;
+
+  if (!victim || !IsUser(victim) || !cli_user(victim) || !MyConnect(victim))
+    return 0;
+  is_alias = IsBouncerAlias(victim) ? 1 : 0;
+  if (is_alias) {
+    primary = cli_alias_primary(victim);
+    if (primary && MyConnect(primary) && IsUser(primary)
+        && !IsBouncerAlias(primary) && !HasFlag(primary, FLAG_CLOSING)
+        && (s = bounce_get_session(primary)) && s->hs_client == primary)
+      primary_ours = 1;
+  } else if (IsAccount(victim)) {
+    s = bounce_get_session(victim);
+    session_primary = s && s->hs_client == victim;
+  }
+
+  switch (bounce_forced_exit_action(why, is_alias, session_primary,
+                                    primary_ours)) {
+  case BOUNCE_FORCED_DISCONNECT:
+    return bounce_promote_or_hold(victim, comment) == 0;
+  case BOUNCE_FORCED_END_SESSION:
+  case BOUNCE_FORCED_END_BY_PRIMARY:
+    log_write(LS_USER, L_INFO, 0, "Bouncer: %s (%s) is forced off (%s): "
+              "%s's session %s ends with it", cli_name(victim),
+              is_alias ? "a device" : "the primary", comment ? comment : "",
+              s->hs_account, s->hs_sessid);
+    /* The device being forced off is the caller's to exit, and so is the
+     * connection being handled: off the roster, a session end exits
+     * neither (the latter, left with no primary, goes by the orphan
+     * sweep). */
+    if (is_alias)
+      bounce_alias_untrack(victim);
+    if (cptr && cptr != victim && MyConnect(cptr) && IsBouncerAlias(cptr)
+        && cli_alias_primary(cptr) == s->hs_client)
+      bounce_alias_untrack(cptr);
+    bounce_kill_session(s, comment);
+    if (primary_ours) {
+      if (primary != cptr)
+        exit_client(primary, primary, &me, comment ? comment : "Session killed");
+      else
+        log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session ended; its "
+                  "primary %s is the connection that asked, and carries on",
+                  cli_account(victim), cli_name(primary));
+    }
+    return 0;
+  case BOUNCE_FORCED_PLAIN:
+    break;
+  }
+  return 0;
+}
+
 /** Revive a ghost client by transplanting a socket from a temp client.
  *
  * Instead of creating a new client and transferring channels from ghost,

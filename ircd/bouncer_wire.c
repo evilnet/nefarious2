@@ -311,3 +311,22 @@ int bounce_session_end_exits(enum bounce_session_end how, int own)
   /* A KILL ends the whole session; a retire, only our own copy. */
   return how == BOUNCE_END_KILL || own;
 }
+
+int bounce_forced_exit_punitive(enum bounce_forced_exit why)
+{
+  return why == BOUNCE_FORCED_BAN || why == BOUNCE_FORCED_SERVICES;
+}
+
+enum bounce_forced_action
+bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
+                          int session_primary, int primary_ours)
+{
+  if (!bounce_forced_exit_punitive(why))
+    /* A fault: a primary goes through the disconnect rule; a device's
+     * exit is its own. */
+    return is_alias ? BOUNCE_FORCED_PLAIN : BOUNCE_FORCED_DISCONNECT;
+  if (is_alias)
+    /* A primary on another server is that server's to exit. */
+    return primary_ours ? BOUNCE_FORCED_END_BY_PRIMARY : BOUNCE_FORCED_PLAIN;
+  return session_primary ? BOUNCE_FORCED_END_SESSION : BOUNCE_FORCED_PLAIN;
+}
