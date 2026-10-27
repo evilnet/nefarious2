@@ -97,11 +97,12 @@ extern void userstats_count_clear(struct Client *cptr);
 /** Count a remote user quit.
  *
  * Releases what Count_newremoteclient took: one registered user, one
- * in its server's count, one announced user.  Another server's alias
- * holds no count -- BX C counts nothing, and a client converted into
- * one in place gave its counts up then -- so no exit path calls this
- * for one; the !IsBouncerAlias gate on the announced decrement keeps
- * one that ever reached it from underflowing. */
+ * in its server's count, one announced user.  A remote alias must never
+ * reach this macro: it holds no count (BX C counts nothing, and a client
+ * converted into one in place gave its counts up then), and every exit
+ * path skips it.  The !IsBouncerAlias gate covers only the announced
+ * decrement; clients and the server's count would still be
+ * decremented. */
 #define Count_remoteclientquits(UserStats,cptr)                \
   do { \
     --UserStats.clients; \

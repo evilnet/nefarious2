@@ -431,10 +431,16 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (bsess && bsess->hs_client == bcptr)
           bounce_kill_session(bsess, comment);
       }
+      /* Its counts, as the normal branch releases them: a held ghost is a
+       * client of ours (the hold flag is ours alone, and a rebind to
+       * another server's client clears it), but another server's client
+       * that ever carried the flag holds what its N counted. */
       if (MyConnect(bcptr)) {
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
+      } else if (!IsBouncerAlias(bcptr)) {
+        Count_remoteclientquits(UserStats, bcptr);
       }
       /* Release the held ghost's oper/inv count (flag-keyed). */
       userstats_count_clear(bcptr);

@@ -1915,6 +1915,19 @@ static void session_roster_drop(struct BouncerSession *s, struct Client *c)
   }
 }
 
+/** Drop @a c from the alias roster of every session of its account. */
+static void session_roster_drop_account(struct Client *c)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  if (!c || !IsAccount(c) || !cli_user(c))
+    return;
+  as = bounce_find_by_account(cli_user(c)->account);
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    session_roster_drop(s, c);
+}
+
 /** Note that @a server announced @a s "holding" in a BS C that came over
  * @a link (struct BouncerSession hs_peer_holding). */
 static void bounce_peer_holding_note(struct BouncerSession *s,
@@ -9894,6 +9907,10 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
           cli_user(sibling)->alias_primary = new_client;
       }
     }
+    /* Nor is it an alias in any other record of its account, the record
+     * the BX P names or none of them (no record found here, a record kept
+     * apart): every roster entry naming it goes. */
+    session_roster_drop_account(new_client);
   }
 
   /* C3: Remove old_client from channels silently, then exit with

@@ -44,6 +44,7 @@
 
 #include "bouncer_session.h"
 #include "bouncer_rebind_auth.h"
+#include "bouncer_count.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
@@ -343,6 +344,79 @@ static void bouncer_status_walker(struct BouncerSession *s, void *data)
  * UserStats and the LocalClientArray walk so drift is visible at a
  * glance.  Use in tandem with BOUNCER LISTSESSIONS * for audits.
  */
+/** Recount the core client counters from the users this server knows.
+ *
+ * Every registered user holds what its exit will release
+ * (bounce_count_held(): one registered user, a live local socket, a local
+ * announced user, an announced user, one in its server's count), so the
+ * counters must equal those sets summed over the users.  Reports each
+ * counter's drift (counter minus recount; 0 when every count was taken
+ * and given up once), and a line for each server whose count is off.
+ * The server counts cost one pass over the users per server: an oper
+ * command, run by hand.
+ */
+static void bouncer_status_recount(struct Client *sptr)
+{
+  struct Client *acptr;
+  struct Client *srv;
+  struct bounce_counts held;
+  unsigned long r_clients = 0, r_local = 0, r_local_ann = 0, r_ann = 0;
+  unsigned long servers_drift = 0;
+  unsigned int servers_off = 0;
+  char buf[400];
+
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!IsUser(acptr))
+      continue;
+    bounce_count_held(MyConnect(acptr), IsBouncerAlias(acptr),
+                      !IsNoLcDecrement(acptr), &held);
+    r_clients += held.clients;
+    r_local += held.local_clients;
+    r_local_ann += held.local_announced;
+    r_ann += held.announced;
+  }
+
+  for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
+    unsigned long n = 0;
+    long d;
+
+    if (!IsServer(srv) || srv == &me || !cli_serv(srv))
+      continue;
+    for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+      if (!IsUser(acptr) || !cli_user(acptr) || cli_user(acptr)->server != srv)
+        continue;
+      bounce_count_held(MyConnect(acptr), IsBouncerAlias(acptr),
+                        !IsNoLcDecrement(acptr), &held);
+      n += held.server_clients;
+    }
+    d = (long)cli_serv(srv)->clients - (long)n;
+    if (d) {
+      servers_off++;
+      servers_drift += (unsigned long)(d < 0 ? -d : d);
+      ircd_snprintf(0, buf, sizeof(buf),
+                    "recount server %s clients=%u recount=%lu drift=%ld",
+                    cli_name(srv), cli_serv(srv)->clients, n, d);
+      send_note(sptr, "BOUNCER", "STATUS", "recount", buf);
+    }
+  }
+
+  ircd_snprintf(0, buf, sizeof(buf),
+                "recount clients_drift=%ld local_clients_drift=%ld "
+                "local_announced_drift=%ld announced_drift=%ld "
+                "servers_drift=%lu servers_off=%u "
+                "(clients=%u/%lu local_clients=%u/%lu "
+                "local_announced=%u/%lu announced=%u/%lu)",
+                (long)UserStats.clients - (long)r_clients,
+                (long)UserStats.local_clients - (long)r_local,
+                (long)UserStats.local_announced_clients - (long)r_local_ann,
+                (long)UserStats.announced_clients - (long)r_ann,
+                servers_drift, servers_off,
+                UserStats.clients, r_clients, UserStats.local_clients, r_local,
+                UserStats.local_announced_clients, r_local_ann,
+                UserStats.announced_clients, r_ann);
+  send_note(sptr, "BOUNCER", "STATUS", "recount", buf);
+}
+
 static int bouncer_status(struct Client *sptr)
 {
   struct BouncerStatusCounts c;
@@ -419,6 +493,7 @@ static int bouncer_status(struct Client *sptr)
                 drift, la_users, UserStats.local_clients, la_users);
   send_note(sptr, "BOUNCER", "STATUS", "audit", buf);
 
+  bouncer_status_recount(sptr);
   return 0;
 }
 
