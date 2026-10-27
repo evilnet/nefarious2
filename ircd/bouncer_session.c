@@ -4713,10 +4713,140 @@ static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *lin
                   (unsigned long)s->hs_last_active);
 }
 
+/** Announce the live aliases of session @a s on the link @a link: a BX C
+ * per alias, naming the session's primary -- a live one, or a held ghost:
+ * a held session's live devices are as real as an active one's, and a
+ * server that never hears of them drops their lines and, once the ghost's
+ * hold ends and one of them is promoted, KILLs it at its first NICK as an
+ * unknown numeric (which ends the session).  The primary is introduced
+ * already (a burst sends every N first; outside a burst it is a user the
+ * link knows).  Each BX C comes before anything else naming the alias:
+ * the receiver reads its BS A as an alias's only once it knows the alias.
+ *
+ * In a burst a locally hosted alias's BS A follows (its activity and caps
+ * for the receiver's roster).  Outside a burst none does: a BS A there
+ * says a client attached to the sender's copy, which the receiver reads
+ * as that copy going live.  An alias behind @a link is the link's own,
+ * and not announced back to it. */
+static void bounce_announce_aliases_to(struct BouncerSession *s,
+                                       struct Client *link, int burst)
+{
+  char primary_full[6];
+  int a;
+
+  /* Requires s->hs_client so we can compose the full primary YYXXX
+   * numeric for the BX C.  A session being destroyed has none to
+   * announce. */
+  if ((s->hs_state != BOUNCE_ACTIVE && s->hs_state != BOUNCE_HOLDING)
+      || !s->hs_client || !IsUser(s->hs_client) || !cli_user(s->hs_client)
+      || !cli_user(s->hs_client)->server || s->hs_alias_count <= 0)
+    return;
+  ircd_snprintf(0, primary_full, sizeof(primary_full), "%s%s",
+                cli_yxx(cli_user(s->hs_client)->server),
+                cli_yxx(s->hs_client));
+  for (a = 0; a < s->hs_alias_count; a++) {
+    struct Client *alias;
+    struct Membership *memb;
+    char alias_chans[512];
+    size_t chans_len = 0;
+    const char *alias_modes;
+
+    alias = findNUser(s->hs_aliases[a].ba_numeric);
+    if (!alias || !IsBouncerAlias(alias) || cli_from(alias) == link)
+      continue;
+
+    /* Build the alias's joined-channel list so the receiver
+     * can re-add the alias to the same channels with
+     * CHFL_ALIAS.  Walk cli_user(alias)->channel directly
+     * (not the primary's channels) — aliases can diverge
+     * from the primary over time via KICK or PART. */
+    alias_chans[0] = '\0';
+    for (memb = cli_user(alias)->channel; memb;
+         memb = memb->next_channel) {
+      if (IsZombie(memb) || IsDelayedJoin(memb))
+        continue;
+      if (chans_len > 0)
+        str_appendf(alias_chans, sizeof(alias_chans), &chans_len, " ");
+      /* Per redesign F.2: ride-along JOIN msgid as
+       * "<chan>@<msgid>" so receivers replicate single-msgid
+       * invariant on alias rejoin during burst. */
+      if (memb->join_msgid[0])
+        str_appendf(alias_chans, sizeof(alias_chans), &chans_len,
+                    "%s@%s", memb->channel->chname, memb->join_msgid);
+      else
+        str_appendf(alias_chans, sizeof(alias_chans), &chans_len,
+                    "%s", memb->channel->chname);
+    }
+
+    alias_modes = umode_str(alias);
+    {
+      const char *alias_profile =
+        s->hs_aliases[a].ba_active_profile[0]
+          ? s->hs_aliases[a].ba_active_profile
+          : PERSISTENCE_PROFILE_DEFAULT;
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link,
+                    "C %s %s %s %s %s%s %s :%s",
+                    primary_full,
+                    s->hs_aliases[a].ba_numeric,
+                    s->hs_account,
+                    s->hs_sessid,
+                    *alias_modes ? "+" : "+",
+                    alias_modes,
+                    alias_profile,
+                    alias_chans);
+    }
+
+    /* Emit current caps for aliases hosted locally — peers
+     * receive BX C without caps via the standard burst path,
+     * so without this they fall back to IsMultiline proxy and
+     * may pick the wrong dispatch (BX M vs BX E) for routing.
+     * Only authoritative for locally-hosted aliases; ba_caps
+     * for remote-hosted aliases is replicated state and could
+     * be stale. */
+    if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
+        && s->hs_aliases[a].ba_caps_known) {
+      char hex[12];
+      ircd_snprintf(0, hex, sizeof(hex), "%x",
+                    s->hs_aliases[a].ba_caps);
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link,
+                    "U %s caps=%s",
+                    s->hs_aliases[a].ba_numeric, hex);
+    }
+    /* And its own away state (AWAY * in particular), which the
+     * peer's attention rule must not read off the mirror. */
+    if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
+        && MyConnect(alias) && cli_connect(alias)
+        && con_pre_away(cli_connect(alias)) != 0)
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link,
+                    "U %s aw=%d",
+                    s->hs_aliases[a].ba_numeric,
+                    con_pre_away(cli_connect(alias)));
+
+    /* Per redesign C.3 + B.1 + B.6: emit BS A per alias to carry
+     * per-alias last_active + caps so the receiver can populate
+     * its alias-roster ba_last_active + ba_caps for D.2
+     * tiebreaking and BX M dispatch.  Only emit for locally-
+     * hosted aliases — remote-hosted aliases will be bursted by
+     * their home server's BS A.  Only in a burst (above). */
+    if (burst && 0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))) {
+      /* ba_numeric is YYXXX; BS A carries the XXX suffix.  The
+       * receiver constructs full = sptr's YY + XXX which is
+       * correct since sender == alias's home. */
+      sendcmdto_one(&me, CMD_BOUNCER_SESSION, link,
+                    "A %s %s %s %lu %x",
+                    s->hs_account, s->hs_sessid,
+                    s->hs_aliases[a].ba_numeric + 2,
+                    (unsigned long)s->hs_aliases[a].ba_last_active,
+                    s->hs_aliases[a].ba_caps);
+    }
+  }
+}
+
 /** Announce our session @a s on the link @a link as a link burst does: its
  * BS C, the counts and the oper grant replicas keep, its primary's BS A
- * when the primary (live or a held ghost) is ours, and its Keycloak id.
- * The aliases' BX C lines are the burst's own (bounce_burst()).
+ * when the primary (live or a held ghost) is ours, its Keycloak id, and
+ * its live aliases (bounce_announce_aliases_to()), held session or
+ * active.
  *
  * Outside a burst (@a burst 0) a BS A says a client attached, and its
  * receiver makes its record active: for a held ghost of ours the line is
@@ -4793,6 +4923,17 @@ static void bounce_announce_session_to(struct BouncerSession *s,
     sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s kcid=%s",
                   cli_yxx(cli_user(s->hs_client)->server),
                   cli_yxx(s->hs_client), s->hs_kc_id);
+
+  /* Burst existing aliases via BX C so the new server learns about
+   * alias Client identities before the channel BURST references
+   * them as members.  Aliases are filtered out of the NICK burst
+   * in s_serv.c (see `!IsBouncerAlias(acptr)` check) because
+   * aliases are introduced via BX C, not N token.  Without this
+   * pass, a server connecting after aliases were auto-created
+   * receives channel BURST entries referring to numerics it was
+   * never introduced to — the receiver logs the alias as
+   * unresolvable and drops JOIN/MODE events for it. */
+  bounce_announce_aliases_to(s, link, burst);
 }
 
 /** Send all local sessions as BS C messages during server BURST. */
@@ -4809,128 +4950,9 @@ void bounce_burst(struct Client *cptr)
   /* No gate check — sessions may exist via CRFLAG_BOUNCER class even when
    * the global bouncer feature is off.  Empty hash = no-op loop. */
 
-  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
-    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
       bounce_announce_session_to(s, cptr, 1);
-
-      /* Burst existing aliases via BX C so the new server learns about
-       * alias Client identities before the channel BURST references
-       * them as members.  Aliases are filtered out of the NICK burst
-       * in s_serv.c (see `!IsBouncerAlias(acptr)` check) because
-       * aliases are introduced via BX C, not N token.  Without this
-       * pass, a server connecting after aliases were auto-created
-       * receives channel BURST entries referring to numerics it was
-       * never introduced to — the receiver logs the alias as
-       * unresolvable and drops JOIN/MODE events for it.  Only ACTIVE
-       * sessions have aliases worth bursting; HOLDING sessions have
-       * at most a ghost primary and no aliases.  Requires s->hs_client
-       * so we can compose the full primary YYXXX numeric for the BX C. */
-      if (s->hs_state == BOUNCE_ACTIVE && s->hs_client
-          && s->hs_alias_count > 0) {
-        char primary_full[6];
-        int a;
-        ircd_snprintf(0, primary_full, sizeof(primary_full), "%s%s",
-                      cli_yxx(cli_user(s->hs_client)->server),
-                      cli_yxx(s->hs_client));
-        for (a = 0; a < s->hs_alias_count; a++) {
-          struct Client *alias;
-          struct Membership *memb;
-          char alias_chans[512];
-          size_t chans_len = 0;
-          const char *alias_modes;
-
-          alias = findNUser(s->hs_aliases[a].ba_numeric);
-          if (!alias || !IsBouncerAlias(alias))
-            continue;
-
-          /* Build the alias's joined-channel list so the receiver
-           * can re-add the alias to the same channels with
-           * CHFL_ALIAS.  Walk cli_user(alias)->channel directly
-           * (not the primary's channels) — aliases can diverge
-           * from the primary over time via KICK or PART. */
-          alias_chans[0] = '\0';
-          for (memb = cli_user(alias)->channel; memb;
-               memb = memb->next_channel) {
-            if (IsZombie(memb) || IsDelayedJoin(memb))
-              continue;
-            if (chans_len > 0)
-              str_appendf(alias_chans, sizeof(alias_chans), &chans_len, " ");
-            /* Per redesign F.2: ride-along JOIN msgid as
-             * "<chan>@<msgid>" so receivers replicate single-msgid
-             * invariant on alias rejoin during burst. */
-            if (memb->join_msgid[0])
-              str_appendf(alias_chans, sizeof(alias_chans), &chans_len,
-                          "%s@%s", memb->channel->chname, memb->join_msgid);
-            else
-              str_appendf(alias_chans, sizeof(alias_chans), &chans_len,
-                          "%s", memb->channel->chname);
-          }
-
-          alias_modes = umode_str(alias);
-          {
-            const char *alias_profile =
-              s->hs_aliases[a].ba_active_profile[0]
-                ? s->hs_aliases[a].ba_active_profile
-                : PERSISTENCE_PROFILE_DEFAULT;
-            sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
-                          "C %s %s %s %s %s%s %s :%s",
-                          primary_full,
-                          s->hs_aliases[a].ba_numeric,
-                          s->hs_account,
-                          s->hs_sessid,
-                          *alias_modes ? "+" : "+",
-                          alias_modes,
-                          alias_profile,
-                          alias_chans);
-          }
-
-          /* Emit current caps for aliases hosted locally — peers
-           * receive BX C without caps via the standard burst path,
-           * so without this they fall back to IsMultiline proxy and
-           * may pick the wrong dispatch (BX M vs BX E) for routing.
-           * Only authoritative for locally-hosted aliases; ba_caps
-           * for remote-hosted aliases is replicated state and could
-           * be stale. */
-          if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
-              && s->hs_aliases[a].ba_caps_known) {
-            char hex[12];
-            ircd_snprintf(0, hex, sizeof(hex), "%x",
-                          s->hs_aliases[a].ba_caps);
-            sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
-                          "U %s caps=%s",
-                          s->hs_aliases[a].ba_numeric, hex);
-          }
-          /* And its own away state (AWAY * in particular), which the
-           * peer's attention rule must not read off the mirror. */
-          if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
-              && alias && MyConnect(alias) && cli_connect(alias)
-              && con_pre_away(cli_connect(alias)) != 0)
-            sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
-                          "U %s aw=%d",
-                          s->hs_aliases[a].ba_numeric,
-                          con_pre_away(cli_connect(alias)));
-
-          /* Per redesign C.3 + B.1 + B.6: emit BS A per alias to carry
-           * per-alias last_active + caps so the receiver can populate
-           * its alias-roster ba_last_active + ba_caps for D.2
-           * tiebreaking and BX M dispatch.  Only emit for locally-
-           * hosted aliases — remote-hosted aliases will be bursted by
-           * their home server's BS A. */
-          if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))) {
-            /* ba_numeric is YYXXX; BS A carries the XXX suffix.  The
-             * receiver constructs full = sptr's YY + XXX which is
-             * correct since sender == alias's home. */
-            sendcmdto_one(&me, CMD_BOUNCER_SESSION, cptr,
-                          "A %s %s %s %lu %x",
-                          s->hs_account, s->hs_sessid,
-                          s->hs_aliases[a].ba_numeric + 2,
-                          (unsigned long)s->hs_aliases[a].ba_last_active,
-                          s->hs_aliases[a].ba_caps);
-          }
-        }
-      }
-    }
-  }
 }
 
 /** Broadcast a session state change to all other servers. */
@@ -5039,8 +5061,8 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
  * checked): a refused install yields nothing.  Then our record is
  * active, follows the peer's primary (origin, numeric), and is no longer
  * persisted; our session's live connections follow the peer's primary,
- * and the aware links learn ours as its aliases (a held session's aliases
- * are not in our burst).  An alias carries its primary's nick, and the
+ * and the aware links learn ours as its aliases (a link that knew them as
+ * the ghost's re-files them).  An alias carries its primary's nick, and the
  * peer's primary may have another one: a local alias takes it, its own
  * socket told first (":old!user@host NICK new").  Last our ghost leaves
  * as a held ghost does: BX X toward the aware links, a Q toward the
@@ -5962,8 +5984,12 @@ bsc_forward:
      * so its next login of the account would make a session of its own
      * beside ours again.  Announced again on that link, ours is mirrored
      * there and the login attaches to it as an alias: one session, one
-     * primary (bounce_bsx_reannounces).  Only toward a link that
-     * announces the hold mark. */
+     * primary (bounce_bsx_reannounces).  The announcement carries our
+     * live aliases as the burst does: the peer knows them (each was
+     * announced when it attached) but filed them nowhere while it kept
+     * our session apart, and its new record of ours must list them (its
+     * live count, its away, a later promote's re-pointing).  Only toward a
+     * link that announces the hold mark. */
     if (was_apart && !session) {
       struct AccountSessions *as_ours = bounce_find_by_account(account);
       struct BouncerSession *s2;
@@ -8206,8 +8232,8 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
   bounce_db_del(target->hs_sessid);
 
   /* Its live connections follow the incoming primary, and the aware
-   * links learn ours as its aliases (a held session's aliases are not in
-   * our burst, so the peer never heard of them). */
+   * links learn ours as its aliases (a peer that knew them from our burst
+   * as the ghost's re-files them). */
   for (i = 0; i < target->hs_alias_count; i++) {
     struct Client *alias = findNUser(target->hs_aliases[i].ba_numeric);
     if (!alias || !IsBouncerAlias(alias) || !cli_user(alias))
