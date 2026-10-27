@@ -338,12 +338,6 @@ static void bouncer_status_walker(struct BouncerSession *s, void *data)
   c->total_aliases += s->hs_alias_count;
 }
 
-/** Handle BOUNCER STATUS - server-wide bouncer accounting.
- *
- * Oper-only.  Compares walker-derived session/alias counts against
- * UserStats and the LocalClientArray walk so drift is visible at a
- * glance.  Use in tandem with BOUNCER LISTSESSIONS * for audits.
- */
 /** Recount the core client counters from the users this server knows.
  *
  * Every registered user holds what its exit will release
@@ -417,6 +411,12 @@ static void bouncer_status_recount(struct Client *sptr)
   send_note(sptr, "BOUNCER", "STATUS", "recount", buf);
 }
 
+/** Handle BOUNCER STATUS - server-wide bouncer accounting.
+ *
+ * Oper-only.  Compares walker-derived session/alias counts against
+ * UserStats and the LocalClientArray walk so drift is visible at a
+ * glance.  Use in tandem with BOUNCER LISTSESSIONS * for audits.
+ */
 static int bouncer_status(struct Client *sptr)
 {
   struct BouncerStatusCounts c;
