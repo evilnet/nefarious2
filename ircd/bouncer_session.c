@@ -5068,9 +5068,22 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
      * with a live primary of ours (bounce_same_session_yields()).
      *
      * Same-state replicas (both holding or both active) are simple
-     * dedup: keep what we have. */
+     * dedup: keep what we have.
+     *
+     * A record of ours with the same id under another token is the same
+     * session too: two copies that met with two ids converged on one at
+     * an earlier burst (the rename keeps each record's own token), and
+     * every later burst announces each under the one id.  It goes through
+     * the same rules -- else a held copy of ours never yields to the
+     * peer's live one there, and the post-burst reconcile, not told the
+     * peer's copy is held, demotes our live primary into it. */
     {
       struct BouncerSession *existing = bounce_find_by_token(token);
+      int same_id = 0;
+      if (!existing) {
+        existing = bounce_find_by_token_sessid(account, sessid);
+        same_id = existing != NULL;
+      }
       if (existing) {
         struct Client *ours = existing->hs_client;
         struct Client *peer = bounce_peer_session_primary(cptr, account, sessid);
@@ -5102,6 +5115,10 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                                        ours_live, !is_holding, peer != NULL,
                                        kc_conflict))
           bounce_held_copy_yields(existing, peer, cptr, sptr, "BS C");
+        /* A copy announced under its own token goes on, as it always has
+         * (a server behind us may not have it). */
+        if (same_id)
+          goto bsc_forward;
         return 0;
       }
     }
