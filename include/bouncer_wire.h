@@ -488,4 +488,32 @@ extern enum bounce_bsd_action bounce_bsd_action(int kc_conflict, int slot_ours);
  */
 extern int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live);
 
+/** What a BX P (a promote, or a face swap, on another server) does to our
+ * record of the session it names. */
+enum bounce_bxp_session_action {
+  BOUNCE_BXP_APPLY,   /**< the record follows: the new client is its primary */
+  BOUNCE_BXP_KEEP,    /**< our own live primary holds the slot: unchanged */
+  BOUNCE_BXP_YIELD    /**< our own held ghost holds the slot: our held copy
+                       *   yields to the sender's live one */
+};
+
+/** The BX P receiver's rule for our record, as at BS A and BS D: a record
+ * whose primary slot holds our own client (live or a held ghost) is ours
+ * to decide.  A BX P whose old client IS that slot renumbers it (a swap of
+ * our face): applied.  Any other BX P names another server's copy of the
+ * session: over our live primary nothing changes; over our held ghost the
+ * live copy wins (bounce_same_session_yields()), as at BS A.
+ *
+ * @param[in] slot_ours      Our record's primary is a user of ours (live
+ *                           or a held ghost), not an alias.
+ * @param[in] slot_held      That user is a held ghost.
+ * @param[in] old_is_slot    The BX P's old client is that user.
+ * @param[in] ours_holding   Our record is HOLDING and held here.
+ * @param[in] kc_conflict    The new client's Keycloak id is not the
+ *                           session's.
+ */
+extern enum bounce_bxp_session_action
+bounce_bxp_session_action(int slot_ours, int slot_held, int old_is_slot,
+                          int ours_holding, int kc_conflict);
+
 #endif /* INCLUDED_bouncer_wire_h */

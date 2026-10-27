@@ -293,12 +293,16 @@ int bounce_follow_keeps_id(int announced, int ours_holding, const char *our_id,
                                  our_id) == BSO_RENAME;
 }
 
-int bounce_bsc_reannounces(int in_burst, int local_holding, int peer_holding,
-                           enum bounce_session_outcome outcome)
+int bounce_bsc_fresh_apart(int in_burst, int local_holding, int peer_holding)
 {
-  /* Ours and the peer's both live, ours the older: the peer is to take
-   * ours, which it read only against the session it had then. */
-  return !in_burst && !local_holding && !peer_holding && outcome == BSO_KEEP;
+  /* Two live copies met outside a burst: no rename, no reconcile until
+   * the next link burst. */
+  return !in_burst && !local_holding && !peer_holding;
+}
+
+int bounce_bsx_reannounces(int was_apart, int ours_held_here, int link_hold_mark)
+{
+  return was_apart && ours_held_here && link_hold_mark;
 }
 
 enum bounce_yield_id bounce_yield_id(int same_id, int in_burst,

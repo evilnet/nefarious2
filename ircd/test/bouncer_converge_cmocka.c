@@ -1456,21 +1456,28 @@ static void test_follow_and_the_peer_agree(void **state)
       }
 }
 
-/* ---- A fresh session's BS C that ours beats ------------------------- */
+/* ---- A peer's BS C outside a burst ---------------------------------- */
 
-static void test_bsc_reannounce_only_for_a_fresh_session_ours_beats(void **state)
+static void test_bsc_fresh_apart_only_outside_a_burst_both_live(void **state)
 {
-  int ib, lh, ph, out;
+  int ib, lh, ph;
   (void)state;
   for (ib = 0; ib < 2; ib++)
     for (lh = 0; lh < 2; lh++)
       for (ph = 0; ph < 2; ph++)
-        for (out = BSO_KEEP; out <= BSO_DROP_REPLICA; out++) {
-          int want = !ib && !lh && !ph && out == BSO_KEEP;
-          assert_int_equal(bounce_bsc_reannounces(ib, lh, ph,
-                                                  (enum bounce_session_outcome)out),
-                           want);
-        }
+        assert_int_equal(bounce_bsc_fresh_apart(ib, lh, ph), !ib && !lh && !ph);
+}
+
+/* ---- A BS X for an id we kept apart --------------------------------- */
+
+static void test_bsx_reannounce_needs_every_fact(void **state)
+{
+  int a, h, m;
+  (void)state;
+  for (a = 0; a < 2; a++)
+    for (h = 0; h < 2; h++)
+      for (m = 0; m < 2; m++)
+        assert_int_equal(bounce_bsx_reannounces(a, h, m), a && h && m);
 }
 
 /* ---- The yield's id ------------------------------------------------- */
@@ -1548,7 +1555,8 @@ int main(void)
     cmocka_unit_test(test_follow_takes_the_peer_id_when_not_announced),
     cmocka_unit_test(test_follow_keeps_ours_only_when_the_peer_renames),
     cmocka_unit_test(test_follow_and_the_peer_agree),
-    cmocka_unit_test(test_bsc_reannounce_only_for_a_fresh_session_ours_beats),
+    cmocka_unit_test(test_bsc_fresh_apart_only_outside_a_burst_both_live),
+    cmocka_unit_test(test_bsx_reannounce_needs_every_fact),
     cmocka_unit_test(test_yield_id_rules),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

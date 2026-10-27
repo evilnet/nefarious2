@@ -145,29 +145,44 @@ extern int bounce_follow_keeps_id(int announced, int ours_holding,
                                   const char *our_id, int peer_holding,
                                   const char *peer_id);
 
-/** Does a peer's BS C that our session beat by age make us announce ours
- * to that link again?
+/** Does a peer's BS C outside a burst stay apart from our session?
  *
- * In a link burst each side reads the other's announcement, and the side
- * that loses renames into the older id.  Outside a burst the BS C is a
- * session the peer just made (a login there that found no session of the
- * account: the two had been kept apart, and the peer's has ended).  The
- * peer read our announcement at the link burst, long before, against the
- * session it then had: it never compares its new one with ours, and keeps
- * its new id while we keep ours -- two ids for one account's session, and
- * its aliases filed into ours by the account.  So we announce ours again
- * on that link, and the peer's new session takes our id.
+ * In a link burst each side reads the other's announcement after the
+ * other's users, renames by the same rule, and the post-burst reconcile
+ * then merges two live primaries under the one id.  Outside a burst the
+ * BS C is a session the peer just made (a login there that found none of
+ * ours, or a connection in no session turning +b) while ours is live:
+ * renaming either into the other's id would put two live primaries under
+ * one id with no reconcile to merge them, and the keyed lines (BX P, a
+ * promote) would then move one server's record onto the other's primary.
+ * So the two stay apart (unmirrored) until the next link burst, which
+ * merges them by the rules above.
  *
  * @param[in] in_burst      The BS C is part of the sender's link burst.
  * @param[in] local_holding Our record is HOLDING.
  * @param[in] peer_holding  The peer announced "holding".
- * @param[in] outcome       bounce_session_converge()'s outcome for ours.
- * @return 1 when ours (active, beating an active one by age) is
- *         announced again toward the sender's link.
+ * @return 1 when the two stay apart: outside a burst, both live.
  */
-extern int bounce_bsc_reannounces(int in_burst, int local_holding,
-                                  int peer_holding,
-                                  enum bounce_session_outcome outcome);
+extern int bounce_bsc_fresh_apart(int in_burst, int local_holding,
+                                  int peer_holding);
+
+/** After a BS X for a session id we kept apart from ours, do we announce
+ * ours to that link again?
+ *
+ * The peer's session that was kept apart from ours has ended.  The peer
+ * has no copy of ours (it skipped our announcement while its own stood),
+ * so the next login there would make a session of its own beside ours.
+ * Announced again, ours is mirrored there and a login attaches to it as
+ * an alias: one session, one primary.  Only toward a link that announces
+ * the hold mark (the build that reads such an announcement as this one
+ * does).
+ *
+ * @param[in] was_apart       The id was marked unmirrored here.
+ * @param[in] ours_held_here  We hold a session of the account here.
+ * @param[in] link_hold_mark  The link announced the hold mark (H).
+ */
+extern int bounce_bsx_reannounces(int was_apart, int ours_held_here,
+                                  int link_hold_mark);
 
 /** What the id of our held session does when its held ghost yields to an
  * incoming live primary of another session id (the N-time merge). */

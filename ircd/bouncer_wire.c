@@ -229,3 +229,18 @@ int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live)
    * and a held copy yields to a BS A sent outside a burst. */
   return action == BOUNCE_BSD_NOTE && slot_live;
 }
+
+enum bounce_bxp_session_action
+bounce_bxp_session_action(int slot_ours, int slot_held, int old_is_slot,
+                          int ours_holding, int kc_conflict)
+{
+  /* A slot that is not ours follows the sender, and a swap of our own
+   * face renumbers it. */
+  if (!slot_ours || old_is_slot)
+    return BOUNCE_BXP_APPLY;
+  /* Another server's copy: our held ghost yields to its live one, as at
+   * BS A; our live primary stays. */
+  if (slot_held && bounce_same_session_yields(ours_holding, 0, 1, 1, kc_conflict))
+    return BOUNCE_BXP_YIELD;
+  return BOUNCE_BXP_KEEP;
+}

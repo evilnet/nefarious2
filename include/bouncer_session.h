@@ -655,8 +655,9 @@ struct BouncerSession {
   unsigned long hs_peer_holding_serial;
 
   /** Memory only: the id another server (hs_peer_sessid_server, its YY)
-   * announced this session under when ours beat it at BS C (the older id
-   * of two of one account), and that server is to take ours.  Its clients
+   * announced this session under when ours beat it at BS C in a link
+   * burst (the lower id of two of one account), and that server is to
+   * take ours.  Its clients
    * keep the id their N carried on our side: a client of that server
    * under this id is in the session too (the post-burst reconcile, the
    * yield at BS A).  "" when none; cleared when our record takes another
