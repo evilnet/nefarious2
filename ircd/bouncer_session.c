@@ -2098,7 +2098,7 @@ int bounce_nick_side_held(struct Client *cptr)
  * the same bouncer session has the same sessid; a non-bouncer
  * account-bearing client minted its own sessid and won't match —
  * legitimately independent presences are left alone.  Two sessions of
- * one account made on either side of a split converge on the older id at
+ * one account made on either side of a split converge on the lower id at
  * BS C, after their primaries' N: the side whose id won still sees the
  * other side's primary under the id that side had, which it noted
  * (hs_peer_sessid), and that matches too -- else only the side that took
@@ -5147,8 +5147,9 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     /* Cross-sessid convergence: if we have an existing local session
      * for this account with a DIFFERENT sessid, don't create a
      * duplicate.  Instead, deterministically pick a winning sessid
-     * (UUID v7 lex-lower wins — the older creation timestamp) and
-     * rename our local session to that sessid if peer's wins.
+     * (the lower by strcmp -- on the base64 form, so not always the older
+     * UUID v7; both ends compare the same strings) and rename our local
+     * session to that sessid if peer's wins.
      * Both sides see the same sessids, both compute the same winner,
      * both end up agreeing on a single sessid for the logical session.
      *
@@ -5355,7 +5356,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
         }
 
         if (outcome == BSO_RENAME) {
-          /* Peer's sessid is lex-lower (older UUID v7) — peer wins.
+          /* Peer's sessid is the lower (strcmp) — peer wins.
            * Rename our local session to peer's sessid so future BX C
            * / BS A by-sessid lookups resolve to our state; every
            * connection the record names takes it too (they must agree
@@ -10465,6 +10466,17 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
      * numerics would have them drop the face without telling anything
      * behind them (X3 kept a phantom of it).  Local users who share a
      * channel with the old nick are told by the QUIT below. */
+    /* Only a client of the line's own direction: its server is the one
+     * that demoted it and announces it, and that server is behind the
+     * link the BX C came over.  A client of ours, or of another
+     * direction, is not this BX C's to convert. */
+    if (cli_from(alias) != cptr) {
+      log_write(LS_USER, L_INFO, 0, "BX C: %s names %s (%s) as an alias of %s, "
+                "but that client is not behind %s: not converted",
+                cli_name(sptr), alias_numeric, cli_name(alias), cli_name(primary),
+                cli_name(cptr));
+      goto forward;
+    }
     Debug((DEBUG_INFO, "BX C: converting existing client %s (%s) to alias of %s",
            alias_numeric, cli_name(alias), cli_name(primary)));
     user = cli_user(alias);

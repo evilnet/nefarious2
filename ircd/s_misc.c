@@ -962,11 +962,9 @@ int exit_client(struct Client *cptr,
     sendto_opmask_butone(0, SNO_NETWORK, "Net break: %C %C (%s)",
 			 cli_serv(victim)->up, victim, comment);
 
-    /* Clear legacy_face records keyed by the departing peer's YXX.
-     * Without this, a peer that reconnects on the same numeric is treated
-     * as having already received our N introductions — bounce_emit_
-     * legacy_n_intro skips the emit and the peer's burst arrives with
-     * channel members referencing unannounced numerics. */
+    /* Clear legacy_face records keyed by the departing peer's YXX: they
+     * name faces of the link that left (CHECK shows them; no emit reads
+     * them). */
     bounce_clear_legacy_faces_for_peer(cli_yxx(victim));
     /* And the session ids BS C left unmirrored that the departing
      * servers announced: their next burst announces them again.  Nor do

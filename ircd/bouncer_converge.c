@@ -28,8 +28,9 @@ int bounce_converge_peer_wins(int local_holding, const char *local_sessid,
   if (local_holding && !peer_holding)
     return 1;
 
-  /* Same state: the older session id (lexicographically lower UUID v7)
-   * wins; identical ids are the same session, ours stays. */
+  /* Same state: the lower session id (strcmp of the base64 form, the same
+   * answer on both ends) wins; identical ids are the same session, ours
+   * stays. */
   return strcmp(peer_sessid, local_sessid) < 0;
 }
 
@@ -124,7 +125,7 @@ enum bounce_nick_verdict bounce_nick_verdict_ex(const struct bounce_nick_side *l
       /* State unknown.  A peer we have not burst to never saw our ghost;
        * any other one may have, and decides by the classic rules. */
       return link_gated ? local_ends(local, incoming) : BNV_CLASSIC;
-    /* Two held ghosts: the older session keeps; one session held on both
+    /* Two held ghosts: the lower session id keeps; one session held on both
      * sides keeps the lower numeric's ghost. */
     c = strcmp(or_empty(local->sessid), or_empty(incoming->sessid));
     if (!c)

@@ -21,8 +21,9 @@
  * A session with a live primary (active) beats one that is merely held
  * or is a clientless replica (holding), whatever their ages: "an account
  * has one bouncer identity" and the live one is it.  Between equals the
- * lexicographically lower session id (the older UUID v7) wins, the
- * historical tie-break.
+ * lexicographically lower session id wins, the historical tie-break: the
+ * strcmp of the base64 form, which both ends compute alike (it is not
+ * always the older UUID v7: base64 digits sort before letters in ASCII).
  *
  * @param[in] local_holding  1 if our record is HOLDING, 0 if ACTIVE.
  * @param[in] local_sessid   Our session id.
@@ -52,8 +53,8 @@ enum bounce_session_outcome {
  *
  * The states are the announced ones ("holding" or "active", which is
  * hs_state on both ends), so both servers compute from the same facts:
- * a live session beats a holding one; between equal states the older
- * (lexicographically lower) id wins (bounce_converge_peer_wins).  The
+ * a live session beats a holding one; between equal states the lower
+ * id (strcmp) wins (bounce_converge_peer_wins).  The
  * session that loses takes the winner's id, except a holding one beaten
  * by a live one, which ends: retired when it is held here, dropped when
  * it is a replica of another server's session.
@@ -127,7 +128,7 @@ extern enum bounce_bsc_compare bounce_bsc_compare_with(int same_id, int followed
  * peer ends with.  The peer compares what we announced on its link with
  * its own record (bounce_session_converge(), its record live: its primary
  * is the one we follow) and renames into our id only for equal states
- * with ours the older; in every other case it keeps its id, and ours
+ * with ours the lower; in every other case it keeps its id, and ours
  * takes it.  When we have not announced the record on this link (our
  * burst is still gated), the peer has not seen our id: ours takes the
  * peer's, and our announcement, when it goes, carries the one id.
@@ -300,7 +301,7 @@ enum bounce_nick_verdict {
  *
  * Held against live and held against held agree with BS C's session
  * convergence (bounce_converge_peer_wins): live beats held, and between
- * two held sessions the older id wins.
+ * two held sessions the lower id wins.
  *
  * @param[in] local    Our client; NULL gives BNV_CLASSIC.
  * @param[in] incoming The client the N introduces; NULL gives BNV_CLASSIC.

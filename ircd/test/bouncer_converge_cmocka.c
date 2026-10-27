@@ -1436,24 +1436,62 @@ static void test_follow_keeps_ours_only_when_the_peer_renames(void **state)
   assert_int_equal(bounce_follow_keeps_id(1, 0, NEWER, 1, OLDER), 0);
 }
 
-/* Both ends end with one id: ours by bounce_follow_keeps_id(), the peer's
- * by its own BS C rule on our announcement (its record live). */
+/* The peer's own BS C handler reading what we announced, modelled from the
+ * peer's inputs, not from bounce_follow_keeps_id()'s:
+ *  - its pick among its records: it has no record of our id and none that
+ *    follows our primary (ours went into its session at N time: an alias
+ *    there, or never introduced), and its own record is held there; a
+ *    replica of another session may come first in its list, which the
+ *    pick passes over;
+ *  - that record's liveness: its primary is live, or a held ghost with a
+ *    live alias -- the only copies an N-time merge follows;
+ *  - the outcome on that record.
+ * Returns the id the peer ends with, or NULL when its session would end. */
+static const char *peer_end_id(int peer_holding, const char *peer_id,
+                               int ours_holding, const char *our_id,
+                               int replica_first)
+{
+  enum bounce_bsc_compare pick =
+    bounce_bsc_compare_with(0 /* no record of our id */,
+                            0 /* nothing of its follows our primary */,
+                            1 /* its own record is held there */);
+  (void)replica_first;   /* FIRST would be the replica: never chosen */
+  assert_int_equal(pick, BOUNCE_BSC_HELD_HERE);
+  switch (bounce_session_converge(peer_holding, 1 /* held there */,
+                                  1 /* live, or held with a live alias */,
+                                  peer_id, ours_holding, our_id)) {
+  case BSO_RENAME:
+    return our_id;
+  case BSO_KEEP:
+    return peer_id;
+  default:
+    return NULL;
+  }
+}
+
+/* Both ends end with one id, and it is the one a hand table gives: the
+ * lower id when the two announced the same state, else the peer's (a live
+ * copy beats a holding one and a holding one with a live device is kept
+ * apart; either way the peer keeps its id and ours, which follows it,
+ * takes it). */
 static void test_follow_and_the_peer_agree(void **state)
 {
   const char *ids[2] = { OLDER, NEWER };
-  int oh, ph, o;
+  int oh, ph, o, rf;
   (void)state;
   for (oh = 0; oh < 2; oh++)
     for (ph = 0; ph < 2; ph++)
-      for (o = 0; o < 2; o++) {
-        const char *ours = ids[o], *theirs = ids[1 - o];
-        const char *ours_end =
-          bounce_follow_keeps_id(1, oh, ours, ph, theirs) ? ours : theirs;
-        const char *peer_end =
-          bounce_session_converge(ph, 1, 1, theirs, oh, ours) == BSO_RENAME
-            ? ours : theirs;
-        assert_string_equal(ours_end, peer_end);
-      }
+      for (o = 0; o < 2; o++)
+        for (rf = 0; rf < 2; rf++) {
+          const char *ours = ids[o], *theirs = ids[1 - o];
+          const char *want = (oh == ph && strcmp(ours, theirs) < 0) ? ours : theirs;
+          const char *ours_end =
+            bounce_follow_keeps_id(1, oh, ours, ph, theirs) ? ours : theirs;
+          const char *peer_end = peer_end_id(ph, theirs, oh, ours, rf);
+          assert_non_null(peer_end);
+          assert_string_equal(ours_end, want);
+          assert_string_equal(peer_end, want);
+        }
 }
 
 /* ---- A peer's BS C outside a burst ---------------------------------- */
