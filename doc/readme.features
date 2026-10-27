@@ -853,6 +853,40 @@ they will never get throttled.  This is so after a restart users on a
 multiuser box can all connect to a server simultaniously without being
 considered an attack.
 
+IPCHECK_COUNT_REFUSALS
+ * Type: boolean
+ * Default: TRUE
+
+Whether a connection the throttle refuses counts as a connection attempt
+and renews the IPCHECK_CLONE_PERIOD window, as it always has.  Set to
+FALSE, a refusal leaves no trace, so a client that keeps retrying gets
+back in IPCHECK_CLONE_PERIOD seconds after its last accepted connection
+rather than after its last retry.  The check when a connection arrives is
+otherwise unchanged.
+
+IPCHECK_SASL_REFUND
+ * Type: integer
+ * Default: 0
+
+The number of times per IPCHECK_SASL_REFUND_PERIOD seconds that one
+account may have a connection attempt given back.  When a connection logs
+in with SASL and registers, the attempt IPcheck charged its address at the
+accept is refunded (attempts goes down by one, never below one; the
+window itself is not moved), so an account holder whose device reconnects
+often -- a web client on a phone loses its socket at every app switch,
+and every return is a new connection -- is not throttled for it.  A
+failed or missing login earns nothing, and the check when a connection
+arrives is unchanged, so a client without credentials still gets
+IPCHECK_CLONE_LIMIT connections and then a refusal before any TLS.  The
+counts are kept in memory only.  0 disables refunds.
+
+IPCHECK_SASL_REFUND_PERIOD
+ * Type: integer
+ * Default: 600
+
+The length in seconds of the window IPCHECK_SASL_REFUND counts refunds
+in, per account, from that account's first refund in it.
+
 SOCKSENDBUF
  * Type: integer
  * Default: 61440
