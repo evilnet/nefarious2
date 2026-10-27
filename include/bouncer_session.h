@@ -1129,12 +1129,14 @@ extern void bounce_end_session_keep_clients(struct BouncerSession *session,
 extern void bounce_kill_session(struct BouncerSession *session,
                                 const char *comment);
 
-/** Retire a held session of ours: end it (bounce_kill_session: its
- * aliases, BS X toward the aware links) and then exit its ghost (BX X
- * toward the aware links, a Q toward the legacy ones).  The caller makes
- * sure nothing of it is live (bounce_session_held): its aliases would be
- * exited.  BS C's convergence and a same-nick meeting at N time both
- * retire through here.
+/** Retire a held session of ours: end it (its own copy's aliases, BS X
+ * toward the aware links) and then exit its ghost (BX X toward the aware
+ * links, a Q toward the legacy ones).  Unlike a KILL, a retire never
+ * exits another copy's device on the roster (bounce_session_end_exits()):
+ * that device follows its own copy's primary, which carries on.  The
+ * caller makes sure nothing of our copy is live (bounce_session_held):
+ * its aliases would be exited.  BS C's convergence and a same-nick
+ * meeting at N time both retire through here.
  *
  * @param[in] s      The session; NULL for a ghost no session names (only
  *                   the ghost exits).  Freed on return.

@@ -2714,24 +2714,30 @@ void bounce_end_session_keep_clients(struct BouncerSession *session,
  * @param comment KILL reason to propagate as the exit message for
  *                aliases; defaults to "Session killed" when NULL.
  */
-void bounce_kill_session(struct BouncerSession *session, const char *comment)
+static void bounce_end_session(struct BouncerSession *session,
+                               enum bounce_session_end how,
+                               const char *comment)
 {
   int i;
 
   assert(0 != session);
 
-  Debug((DEBUG_INFO, "Bouncer: kill-destroy session %s for %s (aliases=%d)",
+  Debug((DEBUG_INFO, "Bouncer: %s-destroy session %s for %s (aliases=%d)",
+         how == BOUNCE_END_KILL ? "kill" : "retire",
          session->hs_sessid, session->hs_account, session->hs_alias_count));
 
-  /* Exit every alias.  Iterate top-down so the array compaction
-   * inside bounce_remove_alias (driven by exit_client → exit_one_client
-   * → bouncer cleanup) doesn't shift entries we haven't visited yet. */
+  /* Exit the devices the end takes (bounce_session_end_exits(): a KILL,
+   * every one; a retire, our own copy's).  Iterate top-down so the
+   * array compaction inside bounce_remove_alias (driven by exit_client →
+   * exit_one_client → bouncer cleanup) doesn't shift entries we haven't
+   * visited yet. */
   if (session->hs_alias_count > 0) {
     for (i = session->hs_alias_count - 1; i >= 0; i--) {
       struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
       /* Only aliases, and never the primary: the caller exits it, and a
        * roster entry naming it would exit it twice. */
-      if (alias && alias != session->hs_client && IsBouncerAlias(alias))
+      if (alias && alias != session->hs_client && IsBouncerAlias(alias)
+          && bounce_session_end_exits(how, session_alias_is_own(session, alias)))
         exit_client(alias, alias, &me,
                     comment && *comment ? (char *)comment : "Session killed");
     }
@@ -2748,6 +2754,11 @@ void bounce_kill_session(struct BouncerSession *session, const char *comment)
   bounce_destroy(session);
 }
 
+void bounce_kill_session(struct BouncerSession *session, const char *comment)
+{
+  bounce_end_session(session, BOUNCE_END_KILL, comment);
+}
+
 /** See include/bouncer_session.h. */
 void bounce_retire_held_session(struct BouncerSession *s, struct Client *ghost,
                                 struct Client *link, const char *reason)
@@ -2756,13 +2767,16 @@ void bounce_retire_held_session(struct BouncerSession *s, struct Client *ghost,
 
   if (!ghost && s)
     ghost = s->hs_client;
-  /* The session first: its aliases (none live, or the caller would not
-   * retire it), then BS X toward the aware links.  The ghost leaves
-   * after, with BX X toward the aware links and a Q toward the legacy
-   * ones (exit_client), so a caller that then accepts an incoming N
-   * relays it to a legacy link only after that link heard the Q. */
+  /* The session first: its own copy's devices (none live, or the caller
+   * would not retire it), then BS X toward the aware links.  Another
+   * copy's device on the roster stays: it follows that copy's primary,
+   * which carries on (a KILL would take it; a retire is no KILL).  The
+   * ghost leaves after, with BX X toward the aware links and a Q toward
+   * the legacy ones (exit_client), so a caller that then accepts an
+   * incoming N relays it to a legacy link only after that link heard
+   * the Q. */
   if (s)
-    bounce_kill_session(s, why);
+    bounce_end_session(s, BOUNCE_END_RETIRE, why);
   if (ghost)
     exit_client(link, ghost, &me, why);
 }
@@ -9137,7 +9151,9 @@ int bounce_account_deauth_apply(struct Client *acptr)
       int i;
       for (i = sess->hs_alias_count - 1; i >= 0; i--) {
         struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
-        if (alias)
+        /* Only aliases, and never the ghost: the caller exits it, and a
+         * roster entry naming it would exit it twice. */
+        if (alias && alias != acptr && IsBouncerAlias(alias))
           exit_client(alias, alias, &me, "Account deauthorized");
       }
     }

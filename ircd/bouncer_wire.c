@@ -305,3 +305,9 @@ int bounce_bsx_ends_device(int sender_holds, int own, int follows_sender,
 {
   return sender_holds && own && follows_sender && same_id && !kc_conflict;
 }
+
+int bounce_session_end_exits(enum bounce_session_end how, int own)
+{
+  /* A KILL ends the whole session; a retire, only our own copy. */
+  return how == BOUNCE_END_KILL || own;
+}

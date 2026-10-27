@@ -1169,6 +1169,22 @@ static void bsx_ends_a_device_only_on_every_fact(void **s)
     }
 }
 
+/* bounce_session_end_exits(how, own) */
+
+static void kill_ends_every_device(void **s)
+{
+  (void)s;
+  assert_true(bounce_session_end_exits(BOUNCE_END_KILL, 1));
+  assert_true(bounce_session_end_exits(BOUNCE_END_KILL, 0));
+}
+
+static void retire_ends_only_its_own_copy(void **s)
+{
+  (void)s;
+  assert_true(bounce_session_end_exits(BOUNCE_END_RETIRE, 1));
+  assert_false(bounce_session_end_exits(BOUNCE_END_RETIRE, 0));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1179,6 +1195,8 @@ int main(void)
     cmocka_unit_test(orphan_never_follows_another_keycloak_user),
     cmocka_unit_test(bsx_ends_the_holders_device),
     cmocka_unit_test(bsx_ends_a_device_only_on_every_fact),
+    cmocka_unit_test(kill_ends_every_device),
+    cmocka_unit_test(retire_ends_only_its_own_copy),
     cmocka_unit_test(behind_the_departing_server_or_it),
     cmocka_unit_test(not_behind_it),
     cmocka_unit_test(behind_walk_null_and_broken_trees),

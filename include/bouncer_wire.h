@@ -697,4 +697,21 @@ extern int bounce_bsx_ends_device(int sender_holds, int own,
                                   int follows_sender, int same_id,
                                   int kc_conflict);
 
+/** How a session is ended for the devices on its roster. */
+enum bounce_session_end {
+  BOUNCE_END_KILL,    /**< a KILL or other enforcement: the whole session */
+  BOUNCE_END_RETIRE   /**< our held copy gives way to another copy */
+};
+
+/** Does ending a session exit a device on its roster?  A KILL ends the
+ * whole session: every device, another copy's included (#12).  A retire
+ * ends our own copy only: another copy's device follows that copy's
+ * primary, which carries on.
+ *
+ * @param[in] how The kind of end.
+ * @param[in] own The device is the record's own copy's
+ *                (bounce_alias_is_own()).
+ */
+extern int bounce_session_end_exits(enum bounce_session_end how, int own);
+
 #endif /* INCLUDED_bouncer_wire_h */
