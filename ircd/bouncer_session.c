@@ -10743,6 +10743,18 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
                   cli_name(sptr), alias_numeric, cli_name(alias), account);
         goto forward;
       }
+      /* Nor under a primary of another Keycloak user: an alias never
+       * follows another user's session (a missing id never vetoes). */
+      if (cli_user(primary)
+          && bounce_rebind_kc_conflict(cli_user(alias)->kc_id,
+                                       cli_user(primary)->kc_id)) {
+        log_write(LS_USER, L_INFO, 0, "BX C: %s names alias %s (%s, Keycloak "
+                  "id %s) as an alias of %s, which carries %s: not re-filed",
+                  cli_name(sptr), alias_numeric, cli_name(alias),
+                  cli_user(alias)->kc_id, cli_name(primary),
+                  cli_user(primary)->kc_id);
+        goto forward;
+      }
       target = bxc_filing_record(account, sessid, primary, alias_numeric);
       as = bounce_find_by_account(account);
       for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext) {
