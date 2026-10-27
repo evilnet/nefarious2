@@ -330,3 +330,22 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
     return primary_ours ? BOUNCE_FORCED_END_BY_PRIMARY : BOUNCE_FORCED_PLAIN;
   return session_primary ? BOUNCE_FORCED_END_SESSION : BOUNCE_FORCED_PLAIN;
 }
+
+enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
+                                                     int own_devices)
+{
+  if (!handed_to_it)
+    return BOUNCE_CROSSED_LEAVE;
+  return own_devices > 0 ? BOUNCE_CROSSED_PROMOTE : BOUNCE_CROSSED_END;
+}
+
+enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known, int new_known,
+                                                  int old_from_line,
+                                                  int new_filed)
+{
+  if (old_known && !new_known && old_from_line)
+    return BOUNCE_BXP_RETIRE_OLD;
+  if (!old_known && new_known && new_filed)
+    return BOUNCE_BXP_PROMOTE_NEW;
+  return BOUNCE_BXP_FORWARD;
+}

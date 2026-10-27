@@ -1275,6 +1275,66 @@ static void a_ban_never_promotes_a_fault_never_ends(void **s)
   }
 }
 
+/* bounce_crossed_bxx_action(handed_to_it, own_devices) */
+
+static void crossed_promote_another_device_takes_over(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_bxx_action(1, 1), BOUNCE_CROSSED_PROMOTE);
+  assert_int_equal(bounce_crossed_bxx_action(1, 3), BOUNCE_CROSSED_PROMOTE);
+}
+
+static void crossed_promote_with_no_device_left_ends(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_bxx_action(1, 0), BOUNCE_CROSSED_END);
+}
+
+static void crossed_promote_is_only_the_promoters(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_bxx_action(0, 0), BOUNCE_CROSSED_LEAVE);
+  assert_int_equal(bounce_crossed_bxx_action(0, 2), BOUNCE_CROSSED_LEAVE);
+}
+
+/* bounce_bxp_unknown_action(old_known, new_known, old_from_line,
+ *                           new_filed) */
+
+static void bxp_to_a_departed_device_retires_the_old_face(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bxp_unknown_action(1, 0, 1, 0),
+                   BOUNCE_BXP_RETIRE_OLD);
+}
+
+static void bxp_retires_only_the_lines_own_face(void **s)
+{
+  (void)s;
+  /* A client of ours, an alias, or one of another direction is not the
+   * face the sender replaced. */
+  assert_int_equal(bounce_bxp_unknown_action(1, 0, 0, 0), BOUNCE_BXP_FORWARD);
+  assert_int_equal(bounce_bxp_unknown_action(0, 0, 0, 0), BOUNCE_BXP_FORWARD);
+  assert_int_equal(bounce_bxp_unknown_action(0, 0, 1, 1), BOUNCE_BXP_FORWARD);
+}
+
+static void bxp_from_a_departed_face_promotes_the_new_device(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bxp_unknown_action(0, 1, 0, 1),
+                   BOUNCE_BXP_PROMOTE_NEW);
+  /* Not filed under the line's session: not ours to promote. */
+  assert_int_equal(bounce_bxp_unknown_action(0, 1, 0, 0), BOUNCE_BXP_FORWARD);
+}
+
+static void bxp_with_both_clients_known_is_the_usual_path(void **s)
+{
+  int f, n;
+  (void)s;
+  for (f = 0; f < 2; f++)
+  for (n = 0; n < 2; n++)
+    assert_int_equal(bounce_bxp_unknown_action(1, 1, f, n), BOUNCE_BXP_FORWARD);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1295,6 +1355,13 @@ int main(void)
     cmocka_unit_test(a_fault_on_a_device_is_its_own_exit),
     cmocka_unit_test(a_forced_exit_in_no_session_is_plain),
     cmocka_unit_test(a_ban_never_promotes_a_fault_never_ends),
+    cmocka_unit_test(crossed_promote_another_device_takes_over),
+    cmocka_unit_test(crossed_promote_with_no_device_left_ends),
+    cmocka_unit_test(crossed_promote_is_only_the_promoters),
+    cmocka_unit_test(bxp_to_a_departed_device_retires_the_old_face),
+    cmocka_unit_test(bxp_retires_only_the_lines_own_face),
+    cmocka_unit_test(bxp_from_a_departed_face_promotes_the_new_device),
+    cmocka_unit_test(bxp_with_both_clients_known_is_the_usual_path),
     cmocka_unit_test(behind_the_departing_server_or_it),
     cmocka_unit_test(not_behind_it),
     cmocka_unit_test(behind_walk_null_and_broken_trees),

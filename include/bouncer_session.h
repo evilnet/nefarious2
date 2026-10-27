@@ -675,6 +675,18 @@ struct BouncerSession {
   int hs_announced_holding;
   char hs_announced_sessid[BOUNCER_SESSID_LEN];
 
+  /** Memory only: the device (full YYXXX) a promote of ours last handed
+   * this session to, on another server; "" when none.  A BX X for that
+   * client while it is our primary is its own exit crossing our BX P:
+   * this server decides then (bounce_crossed_bxx_action()). */
+  char hs_handoff[6];
+  /** Memory only: the face (full YYXXX) our legacy links hold for this
+   * session after a BX P whose new client had already left here, which
+   * we passed on to them (they renumbered the old face); "" when none.
+   * The holder's next BX P renumbers it again; if the session ends
+   * instead, that face is retracted toward them (a QUIT from it). */
+  char hs_crossed_face[6];
+
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
                                            nothing claims must stop gating bursts. */

@@ -762,4 +762,56 @@ extern enum bounce_forced_action
 bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
                           int session_primary, int primary_ours);
 
+/** What a holder does with a BX X that removes its session's primary. */
+enum bounce_crossed_action {
+  BOUNCE_CROSSED_LEAVE,    /**< not a promote of ours: the record is left
+                            *   with no primary, for its holder */
+  BOUNCE_CROSSED_PROMOTE,  /**< another device of the session takes over */
+  BOUNCE_CROSSED_END       /**< the session ends (BS X); the user loses it */
+};
+
+/** A BX X can remove the primary of our record: the device a promote of
+ * ours made the primary, whose own exit (sent while it was an alias
+ * there) crossed our BX P.  Clean up and accept the loss (user,
+ * 2026-10-27): another device of the session's own copy takes over, else
+ * the session ends.  Only the server whose promote handed the session to
+ * that device decides; any other leaves its record to that server.
+ *
+ * @param[in] handed_to_it  Our own promote made the removed client the
+ *                          session's primary.
+ * @param[in] own_devices   Live devices of the session's own copy left.
+ */
+extern enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
+                                                            int own_devices);
+
+/** What a BX P naming a client this server does not know does here. */
+enum bounce_bxp_unknown {
+  BOUNCE_BXP_FORWARD,     /**< nothing here: the line is only passed on */
+  BOUNCE_BXP_RETIRE_OLD,  /**< the new face already left here (its exit
+                           *   crossed the promote): the old face goes,
+                           *   silently -- no phantom of it stays */
+  BOUNCE_BXP_PROMOTE_NEW  /**< the old face already left here: the new one,
+                           *   a device of the session here, takes over */
+};
+
+/** The two ends of a promote that crossed a device's exit.  A BX P whose
+ * new client is gone here while its old one is a user the line's own
+ * direction introduced: that user is the face the sender has replaced,
+ * and no Q will follow it (the sender exits it silently), so it goes
+ * here too, silently.  A BX P whose old client is gone here while its
+ * new one is an alias filed under the line's session id: the face the
+ * sender replaced has already gone here, and the new one takes over.
+ *
+ * @param[in] old_known      The old client resolves here.
+ * @param[in] new_known      The new client resolves here.
+ * @param[in] old_from_line  The old client is a user, not an alias, not
+ *                           ours, introduced by the line's direction.
+ * @param[in] new_filed      The new client is an alias on a record of the
+ *                           line's session id.
+ */
+extern enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known,
+                                                         int new_known,
+                                                         int old_from_line,
+                                                         int new_filed);
+
 #endif /* INCLUDED_bouncer_wire_h */
