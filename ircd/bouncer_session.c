@@ -702,6 +702,9 @@ static void unmirrored_clear(const char *account, const char *sessid);
 static void bounce_send_bsc(struct BouncerSession *s, struct Client *link);
 static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *link);
 static int session_own_alias_count(struct BouncerSession *s);
+static void session_roster_add(struct BouncerSession *session,
+                               const char *alias_numeric,
+                               const char *alias_profile);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -3509,10 +3512,157 @@ void bounce_legacy_face_change(struct Client *face, struct BouncerSession *sess,
   }
 }
 
+/* ---------------------------------------------------------------- */
+/* Orphan sweep: an alias of ours left without a primary             */
+/* ---------------------------------------------------------------- */
+
+/** The orphan sweep's timer (bounce_orphan_alias_sweep()).  An alias of
+ * ours that lost its primary with no session end reaching it gets at
+ * least ORPHAN_GRACE seconds -- the time for a session end or a promote
+ * already on its way (a BS X, a BX P) to reach it -- and the sweep waits
+ * for the latest orphan's grace, but never more than ORPHAN_WAIT_MAX
+ * seconds past the first one.  Timers have one-second granularity: a
+ * grace of 2 is at least one full second. */
+static struct Timer orphan_sweep_timer;
+static time_t orphan_first;   /**< when the oldest unswept orphan was made */
+static time_t orphan_due;     /**< the latest orphan's grace ends */
+#define ORPHAN_GRACE     2
+#define ORPHAN_WAIT_MAX  10
+
+/** The record of @a alias's session: the one that lists it, else the one
+ * of its session id; NULL when none. */
+static struct BouncerSession *orphan_record(struct Client *alias)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  if (!IsAccount(alias) || !cli_user(alias))
+    return NULL;
+  as = bounce_find_by_account(cli_account(alias));
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    if (session_roster_has(s, alias))
+      return s;
+  if (cli_session_id(alias)[0])
+    return bounce_find_by_token_sessid(cli_account(alias),
+                                       cli_session_id(alias));
+  return NULL;
+}
+
+/** A primary @a s's devices can follow: a user, not an alias, not being
+ * killed or torn down.  A held ghost counts: its session holds, and a
+ * live device of it is the one its holder promotes. */
+static int session_primary_followable(struct BouncerSession *s)
+{
+  struct Client *p = s ? s->hs_client : NULL;
+
+  return p && IsUser(p) && cli_user(p) && cli_user(p)->server
+         && !IsBouncerAlias(p) && !HasFlag(p, FLAG_KILLED)
+         && !(MyConnect(p) && HasFlag(p, FLAG_CLOSING));
+}
+
+/** An alias of ours with no primary follows @a s's primary again: it
+ * takes the primary's nick (with the NICK echo its socket needs), is
+ * back in the primary's channels (an exit of the old primary parted it
+ * silently; its socket was never told, so it was never told it left
+ * them), is filed on the record, and is announced again (BX C), so the
+ * other servers file it under that primary.  Our own held ghost with a
+ * live device of its own copy is promoted at the next tick, as a
+ * disconnect would have done. */
+static void orphan_follow(struct BouncerSession *s, struct Client *alias)
+{
+  struct Client *p = s->hs_client;
+  struct Membership *member;
+  char full[6];
+
+  cli_user(alias)->alias_primary = p;
+  if (0 != ircd_strcmp(cli_name(alias), cli_name(p))) {
+    sendcmdto_one(alias, CMD_NICK, alias, "%s", cli_name(p));
+    ircd_strncpy(cli_name(alias), cli_name(p), NICKLEN + 1);
+  }
+  for (member = cli_user(p)->channel; member; member = member->next_channel) {
+    struct Channel *chptr = member->channel;
+    struct Membership *amemb;
+
+    if (IsZombie(member) || IsDelayedJoin(member)
+        || find_member_link(chptr, alias))
+      continue;
+    if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias))
+      continue;
+    add_user_to_channel(chptr, alias, CHFL_ALIAS
+                        | (member->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)),
+                        OpLevel(member));
+    amemb = find_member_link(chptr, alias);
+    if (amemb && member->join_msgid[0]) {
+      memcpy(amemb->join_msgid, member->join_msgid, sizeof(amemb->join_msgid));
+      amemb->join_tv = member->join_tv;
+    }
+  }
+  if (!session_roster_has(s, alias)) {
+    ircd_snprintf(0, full, sizeof(full), "%s%s", cli_yxx(&me), cli_yxx(alias));
+    session_roster_add(s, full, NULL);
+  }
+  bounce_announce_alias(s, alias, p);
+  if (s->hs_state == BOUNCE_HOLDING && MyConnect(p) && IsBouncerHold(p))
+    bounce_schedule_cross_server_promote(s);
+}
+
+/** The orphan sweep (the backstop): every alias of ours whose primary
+ * went without a session end reaching it either follows its session's
+ * primary again or leaves -- never stays connected with no primary,
+ * where no WHOIS, channel or KILL of its nick could see it. */
+static void bounce_orphan_alias_sweep(struct Event *ev)
+{
+  int i;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  if (CurrentTime < orphan_due && CurrentTime - orphan_first < ORPHAN_WAIT_MAX) {
+    /* Inside the callback: timer_chg() re-queues it once we return. */
+    timer_chg(&orphan_sweep_timer, TT_RELATIVE, orphan_due - CurrentTime);
+    return;
+  }
+  orphan_first = 0;
+  /* By slot: an alias's exit frees only its own slot (its exit is its
+   * own; nothing cascades from it). */
+  for (i = 0; i <= HighestFd; i++) {
+    struct Client *a = LocalClientArray[i];
+    struct BouncerSession *s;
+
+    if (!a || !IsUser(a) || !IsBouncerAlias(a) || !cli_user(a)
+        || cli_user(a)->alias_primary || HasFlag(a, FLAG_CLOSING))
+      continue;
+    s = orphan_record(a);
+    switch (bounce_orphan_alias_action(MyConnect(a), 0, s != NULL,
+                                       session_primary_followable(s),
+                                       s && bounce_rebind_kc_conflict(
+                                              bounce_session_kc_id(s),
+                                              cli_user(a)->kc_id))) {
+    case BOUNCE_ORPHAN_REPOINT:
+      log_write(LS_USER, L_INFO, 0, "Bouncer: alias %s%s (%s) had no "
+                "primary; it follows %s, the primary of %s's session %s",
+                cli_yxx(&me), cli_yxx(a), cli_name(a),
+                cli_name(s->hs_client), s->hs_account, s->hs_sessid);
+      orphan_follow(s, a);
+      break;
+    case BOUNCE_ORPHAN_EXIT:
+      log_write(LS_USER, L_INFO, 0, "Bouncer: alias %s%s (%s) of %s had no "
+                "primary and its session %s none: it leaves",
+                cli_yxx(&me), cli_yxx(a), cli_name(a),
+                IsAccount(a) ? cli_account(a) : "*",
+                s ? s->hs_sessid : (cli_session_id(a)[0] ? cli_session_id(a) : "-"));
+      exit_client(a, a, &me, "Bouncer session ended");
+      break;
+    case BOUNCE_ORPHAN_KEEP:
+      break;
+    }
+  }
+}
+
 /** See include/bouncer_session.h. */
 void bounce_null_alias_primary_pointing_at(struct Client *gone)
 {
   struct Client *cptr;
+  int orphaned_here = 0;
 
   if (!gone)
     return;
@@ -3520,9 +3670,23 @@ void bounce_null_alias_primary_pointing_at(struct Client *gone)
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!IsBouncerAlias(cptr) || !cli_user(cptr))
       continue;
-    if (cli_user(cptr)->alias_primary == gone)
+    if (cli_user(cptr)->alias_primary == gone) {
       cli_user(cptr)->alias_primary = NULL;
+      if (MyConnect(cptr))
+        orphaned_here = 1;
+    }
   }
+  /* A device of ours left without a primary: the sweep decides for it
+   * after its grace, once any session end or promote now on its way (a
+   * BS X, a BX P) has had the time to reach it. */
+  if (!orphaned_here)
+    return;
+  if (!orphan_first)
+    orphan_first = CurrentTime;
+  orphan_due = CurrentTime + ORPHAN_GRACE;
+  if (!t_active(&orphan_sweep_timer))
+    timer_add(timer_init(&orphan_sweep_timer), bounce_orphan_alias_sweep,
+              NULL, TT_RELATIVE, ORPHAN_GRACE);
 }
 
 void bounce_null_hs_client_pointing_at(struct Client *cli)
@@ -5190,6 +5354,44 @@ static int bounce_held_copy_yields(struct BouncerSession *s,
   return 1;
 }
 
+/** A BS X from @a sender ends our record @a s of the session @a sessid
+ * (its destroy branch: no primary of ours holds it).  The holder decided,
+ * and the session's devices here end with it: a device has no nick of
+ * its own, and left behind it would be connected but invisible.  Only
+ * the session the holder ended (bounce_bsx_ends_device()): a device of
+ * our record's own copy -- on its roster, or following its primary --
+ * under that id, of its Keycloak user, following the sender's face. */
+static void bounce_bsx_end_devices(struct BouncerSession *s,
+                                   struct Client *sender, const char *sessid)
+{
+  struct Client *primary = s->hs_client;
+  int sender_holds = !primary
+                     || (cli_user(primary) && cli_user(primary)->server == sender);
+  int i;
+
+  for (i = 0; i <= HighestFd; i++) {
+    struct Client *a = LocalClientArray[i];
+    struct Client *ap;
+
+    if (!a || !IsUser(a) || !IsBouncerAlias(a) || !cli_user(a)
+        || HasFlag(a, FLAG_CLOSING))
+      continue;
+    ap = cli_user(a)->alias_primary;
+    if (!session_roster_has(s, a) && !(primary && ap == primary))
+      continue;
+    if (!bounce_bsx_ends_device(sender_holds, session_alias_is_own(s, a),
+                                !ap || (cli_user(ap) && cli_user(ap)->server == sender),
+                                0 == strcmp(cli_session_id(a), sessid),
+                                bounce_rebind_kc_conflict(bounce_session_kc_id(s),
+                                                          cli_user(a)->kc_id)))
+      continue;
+    log_write(LS_USER, L_INFO, 0, "Bouncer: %s ended %s's session %s; its "
+              "device %s%s (%s) here ends with it", cli_name(sender),
+              s->hs_account, sessid, cli_yxx(&me), cli_yxx(a), cli_name(a));
+    exit_client(a, a, &me, "Bouncer session ended");
+  }
+}
+
 /** Handle incoming BS P10 message from another server.
  *
  * Subcommands:
@@ -6021,6 +6223,7 @@ bsc_forward:
       }
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
              session->hs_sessid, sptr));
+      bounce_bsx_end_devices(session, sptr, sessid);
       bounce_destroy(session);
     }
 
@@ -11397,8 +11600,19 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
   userstats_count_clear(target);
   if (MyUser(target))
     del_list_watch(target);
-  if (MyConnect(target))
+  if (MyConnect(target)) {
+    /* A device of ours whose session ended elsewhere: its socket is told
+     * why before it closes, as exit_client() tells every local client.
+     * BX X carries no reason; the session's end is the one there is. */
+    if ((IsUser(target) || IsUserPort(target)) && !IsDead(target)
+        && cli_fd(target) >= 0) {
+      if (IsWebSocket(target))
+        websocket_send_close(target, 1000, "Bouncer session ended");
+      sendrawto_one(target, MSG_ERROR " :Closing Link: %s by %s (%s)",
+                    cli_name(target), cli_name(&his), "Bouncer session ended");
+    }
     close_connection(target);
+  }
 
   Debug((DEBUG_INFO, "BX X: destroying %s %s (%s)%s%s",
          was_alias ? "alias" : "client",

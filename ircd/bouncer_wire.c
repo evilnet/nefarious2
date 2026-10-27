@@ -285,3 +285,23 @@ bounce_disconnect_action(const struct bounce_disconnect_facts *f)
   /* Nothing to promote: the preference decides. */
   return f->wants_hold ? BOUNCE_DISCONNECT_HOLD : BOUNCE_DISCONNECT_EXIT;
 }
+
+
+enum bounce_orphan_action
+bounce_orphan_alias_action(int local, int has_primary, int filed,
+                           int primary_live, int kc_conflict)
+{
+  /* Another server's alias is that server's; one that follows a primary
+   * is no orphan. */
+  if (!local || has_primary)
+    return BOUNCE_ORPHAN_KEEP;
+  if (filed && primary_live && !kc_conflict)
+    return BOUNCE_ORPHAN_REPOINT;
+  return BOUNCE_ORPHAN_EXIT;
+}
+
+int bounce_bsx_ends_device(int sender_holds, int own, int follows_sender,
+                           int same_id, int kc_conflict)
+{
+  return sender_holds && own && follows_sender && same_id && !kc_conflict;
+}

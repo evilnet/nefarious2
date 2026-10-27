@@ -1087,9 +1087,98 @@ static void bxp_yields_only_to_another_client(void **s)
     }
 }
 
+/* bounce_orphan_alias_action(local, has_primary, filed, primary_live,
+ *                            kc_conflict) */
+
+static void orphan_sweep_never_touches_a_remote_alias(void **s)
+{
+  int p, f, l, kc;
+  (void)s;
+  /* Another server's alias is that server's: exiting a remote client
+   * here splits the network. */
+  for (p = 0; p < 2; p++)
+  for (f = 0; f < 2; f++)
+  for (l = 0; l < 2; l++)
+  for (kc = 0; kc < 2; kc++)
+    assert_int_equal(bounce_orphan_alias_action(0, p, f, l, kc),
+                     BOUNCE_ORPHAN_KEEP);
+}
+
+static void alias_following_a_primary_is_no_orphan(void **s)
+{
+  int f, l, kc;
+  (void)s;
+  /* Filed nowhere, or in a record with no primary: it still follows a
+   * live primary, and is no orphan. */
+  for (f = 0; f < 2; f++)
+  for (l = 0; l < 2; l++)
+  for (kc = 0; kc < 2; kc++)
+    assert_int_equal(bounce_orphan_alias_action(1, 1, f, l, kc),
+                     BOUNCE_ORPHAN_KEEP);
+}
+
+static void orphan_follows_its_records_primary(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_orphan_alias_action(1, 0, 1, 1, 0),
+                   BOUNCE_ORPHAN_REPOINT);
+}
+
+static void orphan_with_no_primary_anywhere_leaves(void **s)
+{
+  (void)s;
+  /* No record, or one with no primary: nothing it could follow. */
+  assert_int_equal(bounce_orphan_alias_action(1, 0, 0, 0, 0),
+                   BOUNCE_ORPHAN_EXIT);
+  assert_int_equal(bounce_orphan_alias_action(1, 0, 0, 1, 0),
+                   BOUNCE_ORPHAN_EXIT);
+  assert_int_equal(bounce_orphan_alias_action(1, 0, 1, 0, 0),
+                   BOUNCE_ORPHAN_EXIT);
+}
+
+static void orphan_never_follows_another_keycloak_user(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_orphan_alias_action(1, 0, 1, 1, 1),
+                   BOUNCE_ORPHAN_EXIT);
+}
+
+/* bounce_bsx_ends_device(sender_holds, own, follows_sender, same_id,
+ *                        kc_conflict) */
+
+static void bsx_ends_the_holders_device(void **s)
+{
+  (void)s;
+  assert_true(bounce_bsx_ends_device(1, 1, 1, 1, 0));
+}
+
+static void bsx_ends_a_device_only_on_every_fact(void **s)
+{
+  int h, o, f, id, kc;
+  (void)s;
+  /* Not when another server holds the record's primary, not another
+   * copy's device, not one following someone else, not one of another
+   * session id, not another Keycloak user's. */
+  for (h = 0; h < 2; h++)
+  for (o = 0; o < 2; o++)
+  for (f = 0; f < 2; f++)
+  for (id = 0; id < 2; id++)
+  for (kc = 0; kc < 2; kc++)
+    if (bounce_bsx_ends_device(h, o, f, id, kc)) {
+      assert_true(h && o && f && id && !kc);
+    }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(orphan_sweep_never_touches_a_remote_alias),
+    cmocka_unit_test(alias_following_a_primary_is_no_orphan),
+    cmocka_unit_test(orphan_follows_its_records_primary),
+    cmocka_unit_test(orphan_with_no_primary_anywhere_leaves),
+    cmocka_unit_test(orphan_never_follows_another_keycloak_user),
+    cmocka_unit_test(bsx_ends_the_holders_device),
+    cmocka_unit_test(bsx_ends_a_device_only_on_every_fact),
     cmocka_unit_test(behind_the_departing_server_or_it),
     cmocka_unit_test(not_behind_it),
     cmocka_unit_test(behind_walk_null_and_broken_trees),

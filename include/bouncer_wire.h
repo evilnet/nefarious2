@@ -642,4 +642,59 @@ struct bounce_disconnect_facts {
 extern enum bounce_disconnect
 bounce_disconnect_action(const struct bounce_disconnect_facts *f);
 
+/** What the orphan sweep does with an alias that has lost its primary. */
+enum bounce_orphan_action {
+  BOUNCE_ORPHAN_KEEP,     /**< not ours to act on, or not an orphan */
+  BOUNCE_ORPHAN_REPOINT,  /**< it follows its session's primary again */
+  BOUNCE_ORPHAN_EXIT      /**< its session has no primary: it leaves
+                           *   ("Bouncer session ended") */
+};
+
+/** The orphan sweep's rule: a backstop for an alias whose primary went
+ * with no session end reaching it (an exit that took no device with it,
+ * a split whose promote found none).  An alias has no nick of its own on
+ * the network: left without a primary it is connected but invisible.
+ *
+ * Only an alias of ours is acted on: another server's alias is that
+ * server's (exiting a remote client here splits the network).  An alias
+ * that still follows a primary is no orphan, whether or not a record
+ * files it.  An orphan its session's record still has a primary for
+ * follows that primary again; any other orphan leaves.
+ *
+ * @param[in] local         The alias is a client of ours.
+ * @param[in] has_primary   It still follows a primary.
+ * @param[in] filed         A record of its session was found (the one
+ *                          that lists it, else the one of its id).
+ * @param[in] primary_live  That record has a primary: a user, not an
+ *                          alias, not being killed.
+ * @param[in] kc_conflict   That record is another Keycloak user's.
+ */
+extern enum bounce_orphan_action
+bounce_orphan_alias_action(int local, int has_primary, int filed,
+                           int primary_live, int kc_conflict);
+
+/** Does a BS X that ends our record of a session end a device of ours
+ * with it?
+ *
+ * The session's holder decided: every device of the session ends with it
+ * (a device has no nick of its own; left behind it would be connected
+ * but invisible).  Only a device of the session the holder ended: one of
+ * our record's own copy, under the BS X's session id, of the session's
+ * Keycloak user, following the sender's face (or no face), on a record
+ * whose primary is the sender's (or that has none).
+ *
+ * @param[in] sender_holds   Our record's primary is a client of the
+ *                           BS X's sender, or the record has none.
+ * @param[in] own            The device is our record's own copy's
+ *                           (bounce_alias_is_own()).
+ * @param[in] follows_sender The device follows no primary, or a client
+ *                           of the sender.
+ * @param[in] same_id        The device carries the BS X's session id.
+ * @param[in] kc_conflict    The device's Keycloak id is not the
+ *                           session's.
+ */
+extern int bounce_bsx_ends_device(int sender_holds, int own,
+                                  int follows_sender, int same_id,
+                                  int kc_conflict);
+
 #endif /* INCLUDED_bouncer_wire_h */
