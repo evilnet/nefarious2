@@ -2017,11 +2017,17 @@ void client_sock_callback(struct Event* ev)
      * BX X already on its way has landed.  With no device the session
      * holds, or with hold off ends.  Cooperative roaming (user alive on
      * both ends) uses the BX C session move instead. */
-    if (IsUser(cptr) && bounce_promote_or_hold(cptr, msg) == 0)
-      return; /* held: the ghost keeps its channels, no QUIT */
-    /* Promoted here (channels already left), or nothing to keep */
+    {
+      /* The exit's own comment ("Read error: ..."): a hold keeps it, and
+       * a hold that ends with nothing to take over leaves with it. */
+      char reason[1024];
 
-    exit_client_msg(cptr, cptr, &me, fmt, msg);
+      ircd_snprintf(0, reason, sizeof(reason), fmt, msg);
+      if (IsUser(cptr) && bounce_promote_or_hold(cptr, reason) == 0)
+        return; /* held: the ghost keeps its channels, no QUIT */
+      /* Promoted here (channels already left), or nothing to keep */
+      exit_client(cptr, cptr, &me, reason);
+    }
   }
 }
 
