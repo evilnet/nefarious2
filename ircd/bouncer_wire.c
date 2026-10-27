@@ -233,12 +233,16 @@ int bounce_bsd_reannounces(enum bounce_bsd_action action, int slot_live,
 
 enum bounce_bxp_session_action
 bounce_bxp_session_action(int slot_ours, int slot_held, int old_is_slot,
-                          int ours_holding, int kc_conflict)
+                          int new_is_slot, int ours_holding, int kc_conflict)
 {
   /* A slot that is not ours follows the sender, and a swap of our own
    * face renumbers it. */
   if (!slot_ours || old_is_slot)
     return BOUNCE_BXP_APPLY;
+  /* The line names our own client as the face: the record holds it
+   * already (a held ghost stays held; a yield would exit it). */
+  if (new_is_slot)
+    return BOUNCE_BXP_KEEP;
   /* Another server's copy: our held ghost yields to its live one, as at
    * BS A; our live primary stays. */
   if (slot_held && bounce_same_session_yields(ours_holding, 0, 1, 1, kc_conflict))

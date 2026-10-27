@@ -823,7 +823,7 @@ static void bsd_reannounces_only_toward_a_hold_mark_link(void **s)
 }
 
 /* bounce_bxp_session_action(slot_ours, slot_held, old_is_slot,
- *                           ours_holding, kc_conflict) */
+ *                           new_is_slot, ours_holding, kc_conflict) */
 static void bxp_applies_to_a_slot_not_ours(void **s)
 {
   int h, o, oh, kc;
@@ -832,7 +832,7 @@ static void bxp_applies_to_a_slot_not_ours(void **s)
     for (o = 0; o < 2; o++)
       for (oh = 0; oh < 2; oh++)
         for (kc = 0; kc < 2; kc++)
-          assert_int_equal(bounce_bxp_session_action(0, h, o, oh, kc), BOUNCE_BXP_APPLY);
+          assert_int_equal(bounce_bxp_session_action(0, h, o, 0, oh, kc), BOUNCE_BXP_APPLY);
 }
 
 static void bxp_renumbers_our_own_face(void **s)
@@ -842,7 +842,7 @@ static void bxp_renumbers_our_own_face(void **s)
   for (h = 0; h < 2; h++)
     for (oh = 0; oh < 2; oh++)
       for (kc = 0; kc < 2; kc++)
-        assert_int_equal(bounce_bxp_session_action(1, h, 1, oh, kc), BOUNCE_BXP_APPLY);
+        assert_int_equal(bounce_bxp_session_action(1, h, 1, 0, oh, kc), BOUNCE_BXP_APPLY);
 }
 
 static void bxp_never_repoints_our_live_primary(void **s)
@@ -851,16 +851,46 @@ static void bxp_never_repoints_our_live_primary(void **s)
   (void)s;
   for (oh = 0; oh < 2; oh++)
     for (kc = 0; kc < 2; kc++)
-      assert_int_equal(bounce_bxp_session_action(1, 0, 0, oh, kc), BOUNCE_BXP_KEEP);
+      assert_int_equal(bounce_bxp_session_action(1, 0, 0, 0, oh, kc), BOUNCE_BXP_KEEP);
 }
 
 static void bxp_over_our_held_ghost_yields(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_bxp_session_action(1, 1, 0, 1, 0), BOUNCE_BXP_YIELD);
+  assert_int_equal(bounce_bxp_session_action(1, 1, 0, 0, 1, 0), BOUNCE_BXP_YIELD);
   /* Another Keycloak user, or a record not held here: nothing changes. */
-  assert_int_equal(bounce_bxp_session_action(1, 1, 0, 1, 1), BOUNCE_BXP_KEEP);
-  assert_int_equal(bounce_bxp_session_action(1, 1, 0, 0, 0), BOUNCE_BXP_KEEP);
+  assert_int_equal(bounce_bxp_session_action(1, 1, 0, 0, 1, 1), BOUNCE_BXP_KEEP);
+  assert_int_equal(bounce_bxp_session_action(1, 1, 0, 0, 0, 0), BOUNCE_BXP_KEEP);
+}
+
+static void bxp_naming_our_slot_as_new_never_yields(void **s)
+{
+  int h, oh, kc;
+  (void)s;
+  /* A swap whose new face is our own client in the slot (live or a held
+   * ghost): the record holds it already.  A yield would exit the client
+   * the line names. */
+  for (h = 0; h < 2; h++)
+    for (oh = 0; oh < 2; oh++)
+      for (kc = 0; kc < 2; kc++)
+        assert_int_equal(bounce_bxp_session_action(1, h, 0, 1, oh, kc), BOUNCE_BXP_KEEP);
+}
+
+static void bxp_yields_only_to_another_client(void **s)
+{
+  int so, h, o, n, oh, kc;
+  (void)s;
+  /* Every input: a yield needs our held ghost in the slot and a BX P that
+   * names neither it as the old face nor it as the new one. */
+  for (so = 0; so < 2; so++)
+  for (h = 0; h < 2; h++)
+  for (o = 0; o < 2; o++)
+  for (n = 0; n < 2; n++)
+  for (oh = 0; oh < 2; oh++)
+  for (kc = 0; kc < 2; kc++)
+    if (bounce_bxp_session_action(so, h, o, n, oh, kc) == BOUNCE_BXP_YIELD) {
+      assert_true(so && h && !o && !n && oh && !kc);
+    }
 }
 
 int main(void)
@@ -896,6 +926,8 @@ int main(void)
     cmocka_unit_test(bxp_renumbers_our_own_face),
     cmocka_unit_test(bxp_never_repoints_our_live_primary),
     cmocka_unit_test(bxp_over_our_held_ghost_yields),
+    cmocka_unit_test(bxp_naming_our_slot_as_new_never_yields),
+    cmocka_unit_test(bxp_yields_only_to_another_client),
     cmocka_unit_test(hold_stamp_covers_every_input),
     cmocka_unit_test(hold_mark_letters_are_the_wire_letters),
     cmocka_unit_test(hold_mark_valid_only_for_the_three_letters),

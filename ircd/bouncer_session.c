@@ -1896,27 +1896,47 @@ static int session_roster_has(struct BouncerSession *s, struct Client *c)
   return 0;
 }
 
-/** Drop every entry of @a s's alias roster that names @a c. */
-static void session_roster_drop(struct BouncerSession *s, struct Client *c)
+/** Drop every entry of @a s's alias roster that names @a c.
+ *
+ * A roster that shrank is persisted again (a record we hold; the store
+ * keeps the roster a restart expects), as an alias's exit does
+ * (bounce_alias_untrack()).  Its away is aggregated again without @a c,
+ * unless @a c stays a member of @a s as its primary (@a into_slot): then
+ * the session's members are the same connections, and nothing changed.
+ *
+ * @return 1 if an entry was dropped, else 0. */
+static int session_roster_drop(struct BouncerSession *s, struct Client *c,
+                               int into_slot)
 {
   int k;
+  int dropped = 0;
 
   if (!s || !c)
-    return;
+    return 0;
   for (k = 0; k < s->hs_alias_count; ) {
     if (findNUser(s->hs_aliases[k].ba_numeric) == c) {
       if (k < s->hs_alias_count - 1)
         memmove(&s->hs_aliases[k], &s->hs_aliases[k + 1],
                 (s->hs_alias_count - 1 - k) * sizeof(struct BounceAlias));
       s->hs_alias_count--;
+      dropped = 1;
     } else {
       k++;
     }
   }
+  if (dropped) {
+    bounce_db_put(s);
+    if (!into_slot)
+      bounce_recompute_session_away(s);
+  }
+  return dropped;
 }
 
-/** Drop @a c from the alias roster of every session of its account. */
-static void session_roster_drop_account(struct Client *c)
+/** Drop @a c from the alias roster of every session of its account (see
+ * session_roster_drop()); @a into is the record whose primary @a c
+ * becomes, if any. */
+static void session_roster_drop_account(struct Client *c,
+                                        struct BouncerSession *into)
 {
   struct AccountSessions *as;
   struct BouncerSession *s;
@@ -1925,7 +1945,24 @@ static void session_roster_drop_account(struct Client *c)
     return;
   as = bounce_find_by_account(cli_user(c)->account);
   for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
-    session_roster_drop(s, c);
+    session_roster_drop(s, c, s == into);
+}
+
+/** Every alias whose primary is @a old follows @a new_primary: the
+ * client a BX P names in @a old's place.  Whatever record files the alias
+ * (or none: an alias of a session kept apart here), @a old is about to
+ * leave, and an alias left pointing at it would be left with no primary
+ * at all -- its channel memberships parted with @a old's, its lines
+ * attributed to nobody. */
+static void bounce_repoint_aliases(struct Client *old, struct Client *new_primary)
+{
+  struct Client *c;
+
+  if (!old || !new_primary || old == new_primary)
+    return;
+  for (c = GlobalClientList; c; c = cli_next(c))
+    if (IsBouncerAlias(c) && cli_user(c) && cli_user(c)->alias_primary == old)
+      cli_user(c)->alias_primary = new_primary;
 }
 
 /** Note that @a server announced @a s "holding" in a BS C that came over
@@ -9842,11 +9879,19 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     case BOUNCE_PROMOTE_NONE:
       break;
     }
+    /* The promoted client is a primary now, never an alias as well, in the
+     * record the BX P names or in any other of its account (a record kept
+     * apart, or none found for the id): every roster entry naming it goes
+     * (a session ending exits each roster entry it finds, and would exit a
+     * primary twice).  Before the record is decided: a yield below exits a
+     * client, and nothing after it reads the roster for this one. */
+    session_roster_drop_account(new_client, bsess);
     /* A record whose primary slot holds our own client is ours to decide,
      * as at BS A and BS D (bounce_bxp_session_action): a BX P naming that
-     * client as the old one renumbers it, and any other names another
-     * server's copy of the session -- our live primary stays, and our
-     * held ghost yields to the sender's live copy. */
+     * client as the old one renumbers it, one naming it as the new one
+     * changes nothing (the record holds it already), and any other names
+     * another server's copy of the session -- our live primary stays, and
+     * our held ghost yields to the sender's live copy. */
     if (bsess) {
       struct Client *slot = bsess->hs_client;
       int slot_ours = slot && MyConnect(slot) && IsUser(slot)
@@ -9854,25 +9899,31 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       int kc_conflict = cli_user(new_client)
                         && bounce_rebind_kc_conflict(bounce_session_kc_id(bsess),
                                                      cli_user(new_client)->kc_id);
-      /* The promoted client is a primary here now, never an alias of this
-       * session as well, whichever client the record keeps in its slot:
-       * every roster entry naming it goes (a session ending exits each
-       * roster entry it finds, and would exit a primary twice). */
-      session_roster_drop(bsess, new_client);
       switch (bounce_bxp_session_action(slot_ours, slot_ours && IsBouncerHold(slot),
-                                        slot == old_client,
+                                        slot == old_client, slot == new_client,
                                         bsess->hs_state == BOUNCE_HOLDING
                                           && session_has_local_holder(bsess),
                                         kc_conflict)) {
       case BOUNCE_BXP_APPLY:
         break;
       case BOUNCE_BXP_KEEP:
-        log_write(LS_USER, L_INFO, 0,
-                  "BX P: %s promotes %s in %s's session %s; our %s %s holds "
-                  "its primary slot: not changed", cli_name(sptr),
-                  cli_name(new_client), bsess->hs_account, bsess->hs_sessid,
-                  IsBouncerHold(slot) ? "held ghost" : "live primary",
-                  cli_name(slot));
+        if (slot == new_client)
+          log_write(LS_USER, L_INFO, 0,
+                    "BX P: %s names our %s %s as the new face of %s's session "
+                    "%s: our record holds it already", cli_name(sptr),
+                    IsBouncerHold(slot) ? "held ghost" : "live primary",
+                    cli_name(slot), bsess->hs_account, bsess->hs_sessid);
+        else {
+          log_write(LS_USER, L_INFO, 0,
+                    "BX P: %s promotes %s in %s's session %s; our %s %s holds "
+                    "its primary slot: not changed", cli_name(sptr),
+                    cli_name(new_client), bsess->hs_account, bsess->hs_sessid,
+                    IsBouncerHold(slot) ? "held ghost" : "live primary",
+                    cli_name(slot));
+          /* The promoted client left our record's roster above, and is
+           * no member of it now. */
+          bounce_recompute_session_away(bsess);
+        }
         bsess = NULL;
         break;
       case BOUNCE_BXP_YIELD:
@@ -9906,12 +9957,19 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
         if (sibling && IsBouncerAlias(sibling))
           cli_user(sibling)->alias_primary = new_client;
       }
+    } else if (bsess) {
+      /* Refused: the promoted client left the record's roster above and
+       * is no member of it. */
+      bounce_recompute_session_away(bsess);
     }
-    /* Nor is it an alias in any other record of its account, the record
-     * the BX P names or none of them (no record found here, a record kept
-     * apart): every roster entry naming it goes. */
-    session_roster_drop_account(new_client);
   }
+
+  /* Every alias that followed the old client follows the new one, filed
+   * on this record's roster or not (the roster above is one record's; an
+   * alias of the old client can be filed in none, or in another), before
+   * the old client leaves its channels -- which parts its aliases -- and
+   * exits, which would leave them with no primary. */
+  bounce_repoint_aliases(old_client, new_client);
 
   /* C3: Remove old_client from channels silently, then exit with
    * FLAG_BOUNCER_INTERNAL_DESTROY to suppress S2S QUIT propagation —
