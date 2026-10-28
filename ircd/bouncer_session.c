@@ -5492,8 +5492,10 @@ static void crossed_primary_leaves(struct BouncerSession *s, struct Client *link
   /* The order is load-bearing: no record may name p as its primary when
    * its FLAG_KILLED exit runs, or exit_one_client() takes the exit for a
    * KILL of that session and tears the whole session down (every device,
-   * everywhere). */
+   * everywhere).  Every record that names it lets go of it first -- this
+   * one, and any other (two records can name one client). */
   s->hs_client = NULL;
+  bounce_null_hs_client_pointing_at(p);
   assert(!record_names_primary(p));
   SetFlag(p, FLAG_KILLED);
   exit_client(link, p, killer, reason);
@@ -11974,9 +11976,12 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
         ps->hs_client = NULL;
         bounce_broadcast(ps, 'X', NULL);
         bounce_destroy(ps);
-        /* The order is load-bearing: the record is gone before the
-         * FLAG_KILLED exit below, or exit_one_client() would take it for a
-         * KILL of the session and tear the whole session down. */
+        /* The order is load-bearing: no record may name the device as
+         * its primary when the FLAG_KILLED exit below runs, or
+         * exit_one_client() would take it for a KILL of that session and
+         * tear the whole session down.  This record is gone; any other
+         * that names it lets go of it first. */
+        bounce_null_hs_client_pointing_at(target);
         assert(!record_names_primary(target));
         /* The device leaves visibly: our users see the user quit (one
          * msgid for the QUIT and its history row), WATCH and MONITOR see
