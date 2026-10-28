@@ -388,9 +388,9 @@ int bounce_end_asker_applies(enum bounce_end_route route)
 }
 
 int bounce_member_end_resolve_admits(int alias, int on_roster, int ours,
-                                     int mirror)
+                                     int held_ghost)
 {
-  return !alias && !on_roster && !(ours && mirror);
+  return !alias && !on_roster && (!ours || held_ghost);
 }
 
 int bounce_end_refused(enum bounce_member_end how, int enforced)

@@ -1204,9 +1204,11 @@ extern enum bounce_end_route bounce_member_end(struct BouncerSession *session,
                                                const char *reason);
 
 /** Where a member's end of @a session would be decided
- * (bounce_end_route()), without acting on it: the caller of
+ * (bounce_end_route()), without ending anything: the caller of
  * bounce_member_end() asks first, to know whether the end's side effects
- * are its own to apply. */
+ * are its own to apply.  It may install the record's primary, as the end
+ * itself would: a record that knows it only by an announced ghost numeric
+ * has it resolved first. */
 extern enum bounce_end_route bounce_member_end_route(struct BouncerSession *session);
 
 /** Force-destroy a session because its primary was network-KILLed

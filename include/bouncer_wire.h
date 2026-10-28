@@ -818,16 +818,18 @@ extern unsigned int bounce_end_side_effects(enum bounce_member_end how);
 /** May a member's end install, as the primary of a record that knows it
  * only by an announced ghost numeric, the client that numeric resolves to?
  * Never an alias or a client the record lists as one (the facts a BS A
- * install checks, bounce_bsa_action()), and never a client of ours when
- * the numeric names another server's ghost.
+ * install checks, bounce_bsa_action()); a client of ours only when it is
+ * this session's own held ghost.  Decided from the client itself, not from
+ * the numeric's server prefix: the prefix is what resolved it.
  *
- * @param[in] alias     The candidate is an alias.
- * @param[in] on_roster The record's roster lists the candidate.
- * @param[in] ours      The candidate is a client of ours.
- * @param[in] mirror    The ghost numeric is another server's.
+ * @param[in] alias      The candidate is an alias.
+ * @param[in] on_roster  The record's roster lists the candidate.
+ * @param[in] ours       The candidate is a client of ours.
+ * @param[in] held_ghost The candidate is a held ghost of ours in this
+ *                       session (by its session id).
  */
 extern int bounce_member_end_resolve_admits(int alias, int on_roster, int ours,
-                                            int mirror);
+                                            int held_ghost);
 
 /** Does the server that ends a session refuse @a how, as the local
  * command would?  PERSISTENCE DETACH is refused while the session is held

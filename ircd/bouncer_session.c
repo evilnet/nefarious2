@@ -5703,8 +5703,8 @@ static const char *member_end_name(enum bounce_member_end how)
  * that announced the session holding (hs_peer_holding), else the recorded
  * origin; a full YYXXX is taken as it is.  Only a client that can be the
  * primary is installed (bounce_member_end_resolve_admits(): no alias, no
- * roster member, nothing of ours for another server's ghost), through the
- * account- and Keycloak-checked install. */
+ * roster member, nothing of ours but this session's own held ghost),
+ * through the account- and Keycloak-checked install. */
 static void member_end_resolve(struct BouncerSession *s)
 {
   const char *yy;
@@ -5726,7 +5726,8 @@ static void member_end_resolve(struct BouncerSession *s)
   if (!bounce_member_end_resolve_admits(IsBouncerAlias(c),
                                         session_roster_has(s, c),
                                         MyConnect(c) ? 1 : 0,
-                                        0 != strncmp(full, cli_yxx(&me), 2))) {
+                                        MyConnect(c) && IsBouncerHold(c)
+                                          && bounce_in_session_by_id(s, c))) {
     Debug((DEBUG_INFO, "Bouncer: %s's session %s: the announced ghost %s is "
            "no primary to install", s->hs_account, s->hs_sessid, full));
     return;
