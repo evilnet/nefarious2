@@ -5721,8 +5721,10 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
   const char *why = (reason && *reason) ? reason : "Bouncer session ended";
   const char *device_why = how == BOUNCE_MEMBER_END_RESET
                            ? why : "Bouncer session ended";
+  const char *ghost_why = why;
   char ended[BOUNCER_SESSID_LEN];
   char account[ACCOUNTLEN + 1];
+  char hold_reason[sizeof(s->hs_hold_reason)];
   struct Client *primary;
   int has, ours, held, i;
 
@@ -5731,6 +5733,15 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
   held = ours && IsBouncerHold(primary);
   ircd_strncpy(ended, s->hs_sessid, sizeof(ended));
   ircd_strncpy(account, s->hs_account, sizeof(account));
+  /* A primary held only for the moment a device takes over (a brief hold,
+   * or a promote already scheduled) is the user's disconnect itself: if
+   * the session ends meanwhile, its quit is that disconnect's, as at the
+   * hold's own end.  A RESET-kind end keeps its own reason. */
+  if (held && how != BOUNCE_MEMBER_END_RESET && s->hs_hold_reason[0]
+      && (s->hs_hold_brief || t_active(&s->hs_promote_timer))) {
+    ircd_strncpy(hold_reason, s->hs_hold_reason, sizeof(hold_reason));
+    ghost_why = hold_reason;
+  }
 
   /* The connection being handled is its own command's to exit (a RESET
    * exits its caller last) or the orphan sweep's: off the roster, a
@@ -5803,7 +5814,7 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
     /* A held ghost leaves as a user does, with its QUIT. */
     if (held)
       ClearBouncerHold(primary);
-    exit_client(primary, primary, &me, why);
+    exit_client(primary, primary, &me, held ? ghost_why : why);
     break;
   case BOUNCE_END_PRIMARY_REMOTE:
     if (has && how == BOUNCE_MEMBER_END_RESET)
