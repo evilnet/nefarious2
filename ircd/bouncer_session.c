@@ -1163,9 +1163,12 @@ int bounce_session_has_plaintext(struct Client *cptr)
  * Composition risk (audit site): the numeric is built from hs_origin +
  * hs_ghost_numeric, and hs_origin can diverge from where the ghost actually
  * lives after a cross-server rebind — the hazard hard-invariant 3 warns about
- * for BS-token handlers.  This is NOT a BS-token handler (no live sender
- * exists at registration time), and the two fields stay aligned for the cases
- * that reach here: HOLDING-on-this-server has hs_origin == cli_yxx(&me) by
+ * for BS-token handlers.  Its callers are auto-resume's (registration, no
+ * live sender), never a BS-token handler: a member's end, which is also
+ * decided in the BS E handler, resolves through member_end_resolve(), which
+ * prefers the server that announced the hold and refuses an alias or a
+ * roster member.  The two fields stay aligned for the cases that reach
+ * here: HOLDING-on-this-server has hs_origin == cli_yxx(&me) by
  * construction, HOLDING/ACTIVE-as-replica is created with hs_origin == the
  * BS C sender's prefix, matching its hs_ghost_numeric source.  A mis-composed
  * numeric therefore either fails to resolve (safe) or resolves to a client of
@@ -1176,7 +1179,7 @@ int bounce_session_has_plaintext(struct Client *cptr)
  *
  * If you change how BS A / BS D / BS C store ghost_numeric, or add a path
  * that mutates hs_origin without updating hs_ghost_numeric, audit this
- * function and BOTH of its callers.
+ * function, its three callers and member_end_resolve().
  *
  * @param[in,out] session Session whose hs_client may be recovered.
  * @param[in] site_label Short tag for the refusal log line.
@@ -5693,6 +5696,44 @@ static const char *member_end_name(enum bounce_member_end how)
   return "disconnect";
 }
 
+/** A record of @a s that knows its primary only by the ghost numeric its
+ * holder announced (BS D before the ghost resolved here) has it resolved,
+ * so a member's end goes to that holder rather than reading the record as
+ * held by nobody.  The numeric is the announcing server's: the server
+ * that announced the session holding (hs_peer_holding), else the recorded
+ * origin; a full YYXXX is taken as it is.  Only a client that can be the
+ * primary is installed (bounce_member_end_resolve_admits(): no alias, no
+ * roster member, nothing of ours for another server's ghost), through the
+ * account- and Keycloak-checked install. */
+static void member_end_resolve(struct BouncerSession *s)
+{
+  const char *yy;
+  char full[6];
+  struct Client *c;
+
+  if (!s || s->hs_client || !s->hs_ghost_numeric[0])
+    return;
+  if (strlen(s->hs_ghost_numeric) == 5)
+    ircd_strncpy(full, s->hs_ghost_numeric, sizeof(full));
+  else {
+    yy = (s->hs_peer_holding[0] && FindNServer(s->hs_peer_holding))
+         ? s->hs_peer_holding : s->hs_origin;
+    ircd_snprintf(0, full, sizeof(full), "%s%s", yy, s->hs_ghost_numeric);
+  }
+  c = findNUser(full);
+  if (!c || !IsUser(c) || !cli_user(c))
+    return;
+  if (!bounce_member_end_resolve_admits(IsBouncerAlias(c),
+                                        session_roster_has(s, c),
+                                        MyConnect(c) ? 1 : 0,
+                                        0 != strncmp(full, cli_yxx(&me), 2))) {
+    Debug((DEBUG_INFO, "Bouncer: %s's session %s: the announced ghost %s is "
+           "no primary to install", s->hs_account, s->hs_sessid, full));
+    return;
+  }
+  bounce_hs_client_assign_checked(s, c, "member end");
+}
+
 /** Facts about @a s's primary for a member's end: there is one (a user on
  * a server we know), and whether it is ours (live or a held ghost).  A
  * mirror whose primary is known only by its ghost numeric (an announced
@@ -5703,8 +5744,7 @@ static void member_end_primary(struct BouncerSession *s, int *has, int *ours)
 {
   struct Client *p;
 
-  if (s)
-    bounce_resolve_hs_client_from_ghost(s, "member end");
+  member_end_resolve(s);
   p = s ? s->hs_client : NULL;
   *has = p && IsUser(p) && cli_user(p) && cli_user(p)->server;
   *ours = *has && MyConnect(p) && !IsBouncerAlias(p);
@@ -6830,13 +6870,15 @@ bsc_forward:
   {
     /* BS E <account> <sessid> <D|O|T|R> :<reason>  (bounce_member_end()) */
     struct Client *primary;
-    int how, has, ours;
+    int how, has = 0, ours = 0;
 
     if (parc < 6)
       break;
     how = bounce_member_end_parse(parv[4]);
     session = bounce_find_by_token_sessid(account, sessid);
-    member_end_primary(session, &has, &ours);
+    /* Nothing of the record is touched for a kind we do not know. */
+    if (how >= 0 && session)
+      member_end_primary(session, &has, &ours);
     primary = has ? session->hs_client : NULL;
     switch (bounce_bse_action(how >= 0, session != NULL, has, ours,
                               primary && cli_from(primary) == cptr,

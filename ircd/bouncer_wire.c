@@ -387,6 +387,12 @@ int bounce_end_asker_applies(enum bounce_end_route route)
   return route != BOUNCE_ROUTE_CARRY;
 }
 
+int bounce_member_end_resolve_admits(int alias, int on_roster, int ours,
+                                     int mirror)
+{
+  return !alias && !on_roster && !(ours && mirror);
+}
+
 int bounce_end_refused(enum bounce_member_end how, int enforced)
 {
   return how == BOUNCE_MEMBER_END_DETACH && enforced;

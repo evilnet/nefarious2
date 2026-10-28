@@ -1487,6 +1487,30 @@ static void a_carried_end_has_its_side_effects_at_the_holder(void **s)
   assert_true(bounce_end_asker_applies(BOUNCE_ROUTE_OWN_COPY));
 }
 
+/* bounce_member_end_resolve_admits(alias, on_roster, ours, mirror) */
+
+static void a_resolved_ghost_is_admitted(void **s)
+{
+  (void)s;
+  assert_true(bounce_member_end_resolve_admits(0, 0, 0, 1));
+  /* Our own ghost, under our own numeric. */
+  assert_true(bounce_member_end_resolve_admits(0, 0, 1, 0));
+}
+
+static void a_resolve_never_installs_a_device_or_ours_for_a_mirror(void **s)
+{
+  int r, o, m;
+  (void)s;
+  for (r = 0; r < 2; r++)
+  for (o = 0; o < 2; o++)
+  for (m = 0; m < 2; m++)
+    assert_false(bounce_member_end_resolve_admits(1, r, o, m));
+  for (o = 0; o < 2; o++)
+  for (m = 0; m < 2; m++)
+    assert_false(bounce_member_end_resolve_admits(0, 1, o, m));
+  assert_false(bounce_member_end_resolve_admits(0, 0, 1, 1));
+}
+
 /* bounce_end_takes_device(filed, same_id, kc_conflict) */
 
 static void an_end_takes_a_device_of_the_session(void **s)
@@ -1710,6 +1734,8 @@ int main(void)
     cmocka_unit_test(only_a_detach_is_ever_refused),
     cmocka_unit_test(each_end_has_its_commands_side_effects),
     cmocka_unit_test(a_carried_end_has_its_side_effects_at_the_holder),
+    cmocka_unit_test(a_resolved_ghost_is_admitted),
+    cmocka_unit_test(a_resolve_never_installs_a_device_or_ours_for_a_mirror),
     cmocka_unit_test(an_end_takes_a_device_of_the_session),
     cmocka_unit_test(an_end_leaves_a_device_it_cannot_tie_to_the_session),
     cmocka_unit_test(a_kept_session_is_announced_again_to_a_hold_mark_link),
