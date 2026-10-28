@@ -1779,6 +1779,10 @@ extern int bounce_nick_side_held(struct Client *cptr);
  * newly-aliased local connection, and retract the demoted face from the
  * legacy links that know it (bounce_legacy_face_change).
  *
+ * The demoted client takes the new primary's face (the alias core: nick,
+ * user@host, realname, nick timestamp, user modes; its socket told; W3
+ * 12c-2a).
+ *
  * @param[in] demoted_alias The freshly-demoted local client.
  * @param[in] new_primary   The remote primary client that replaces it.
  * @param[in] session       The session the demote ran on (its hs_client

@@ -2028,6 +2028,110 @@ enum bounce_repoint_mode {
                             *   re-filed and announced */
 };
 
+/** Whom the alias core tells of the face it gives (bounce_alias_take_face()). */
+enum bounce_face_how {
+  BOUNCE_FACE_REGISTERING, /**< a client being set up as an alias at its
+                            *   registration: it learns its nick and modes
+                            *   from the welcome that follows */
+  BOUNCE_FACE_LIVE         /**< a live connection of ours (a demote, a
+                            *   re-point): its socket is told each change */
+};
+
+/** The alias core (W3 12c-2a): @a x, a connection of ours, takes the face
+ * of @a p, its new primary -- every alias carries its primary's face, so
+ * the network sees one user whichever connection speaks.  Used by the
+ * alias setup at registration, the demote and a re-point; the join of a
+ * live client (W3 12c-2b) will use it too.
+ *
+ * In order: the nick (a live socket is told first, by the nick it has:
+ * #2); P's user@host (a live socket with chghost told first, under the
+ * user@host it has); P's realname, account, Keycloak id and account
+ * timestamp, cloak and fake host; P's nick timestamp; P as its primary;
+ * then P's user modes, privileges and server notice mask, through the
+ * session sync (#9 counts, #13 snomask, #14 privileges), a live socket
+ * told its own mode change.  X keeps its own real host and IP: they are
+ * its connection's, for oper WHOIS, G-line matching and a later promote.
+ *
+ * Not here: the session id, the filing, the channels and the BX C -- each
+ * caller has its own (the setup joins P's channels, the demote keeps X's
+ * and a swap hands them to P, the join's channels are U1's).  No count
+ * moves here but the session sync's own (#9).
+ *
+ * @param[in] x   The connection that takes the face (ours, not hashed).
+ * @param[in] p   Its new primary.
+ * @param[in] how Whether @a x is still registering or live. */
+static void bounce_alias_take_face(struct Client *x, struct Client *p,
+                                   enum bounce_face_how how)
+{
+  struct User *user = cli_user(x);
+  struct User *puser = cli_user(p);
+  int live = how == BOUNCE_FACE_LIVE && MyConnect(x) && IsUser(x);
+  int face_changed;
+  struct Flags before;
+  unsigned int before_mask;
+
+  if (!user || !puser)
+    return;
+  before = cli_flags(x);
+  before_mask = cli_snomask(x);
+
+  /* The nick: its socket hears the rename first, from the prefix it knows
+   * (":old!user@host NICK new"). */
+  if (0 != strcmp(cli_name(x), cli_name(p))) {
+    if (live)
+      sendcmdto_one(x, CMD_NICK, x, "%s", cli_name(p));
+    ircd_strncpy(cli_name(x), cli_name(p), NICKLEN + 1);
+  }
+
+  /* The user@host others see: a socket with chghost hears the change
+   * first, under the user@host it has; bans are matched afresh. */
+  face_changed = 0 != strcmp(user->username, puser->username)
+                 || 0 != strcmp(user->host, puser->host);
+  if (live && face_changed) {
+    struct Membership *m;
+
+    if (feature_bool(FEAT_CAP_chghost) && CapActive(x, CAP_CHGHOST))
+      sendcmdto_one(x, CMD_CHGHOST, x, "%s %s", puser->username, puser->host);
+    for (m = user->channel; m; m = m->next_channel) {
+      ClearBanValid(m);
+      ClearBanValidNick(m);
+      ClearBanValidQuiet(m);
+      ClearExceptValid(m);
+      ClearExceptValidNick(m);
+      ClearExceptValidQuiet(m);
+    }
+  }
+  /* The shown user@host; not the real host, which is X's own
+   * connection's. */
+  ircd_strncpy(user->username, puser->username, USERLEN + 1);
+  ircd_strncpy(user->host, puser->host, HOSTLEN + 1);
+  ircd_strncpy(cli_info(x), cli_info(p), REALLEN + 1);
+  ircd_strncpy(user->account, puser->account, ACCOUNTLEN + 1);
+  user->acc_create = puser->acc_create;
+  ircd_strncpy(user->kc_id, puser->kc_id, sizeof(user->kc_id));
+  /* The cloaked and fake hosts (what others are shown); not the IP, which
+   * is X's own socket's (IPcheck, ban matching, logging). */
+  ircd_strncpy(user->cloakip, puser->cloakip, HOSTLEN + 1);
+  ircd_strncpy(user->cloakhost, puser->cloakhost, HOSTLEN + 1);
+  ircd_strncpy(user->fakehost, puser->fakehost, HOSTLEN + 1);
+  if (IsHiddenHost(p))
+    SetHiddenHost(x);
+  cli_lastnick(x) = cli_lastnick(p);
+  user->alias_primary = p;
+
+  if (!live)
+    return;
+  /* P's modes, privileges and mask (#9, #13, #14), through the session
+   * sync, which tells every other member its own change; X is told here,
+   * once, with the +x above in the same line. */
+  bounce_sync_session_umodes(p, NULL, x);
+  if (!IsDead(x)) {
+    send_umode(x, x, &before, ALL_UMODES);
+    if (cli_snomask(x) && cli_snomask(x) != before_mask)
+      send_reply(x, RPL_SNOMASK, cli_snomask(x), cli_snomask(x));
+  }
+}
+
 /** File our alias @a c in @a record and in no other record of the
  * account.  An entry another record kept for it moves (its profile,
  * activity and caps with it); else it gets a new one. */
@@ -2075,12 +2179,15 @@ static void bounce_repoint_file(struct BouncerSession *record, struct Client *c)
  * learn of it; or, when @a old leaves, it has no primary at all.
  *
  * Every alias taken follows @a new_primary.  With BOUNCE_REPOINT_ANNOUNCE
- * (@a record required) our own aliases also take its nick, their socket
- * told first by the nick they had (#2); take @a record's id and filing
- * (in it, in no other record); and are announced -- BX C, then their caps
- * and their own away state (BX U), which a receiver's re-file starts
- * afresh.  Another server's alias takes the nick in our view only; its
- * server speaks for it.  No count moves: an alias stays an alias. */
+ * (@a record required) our own aliases also take @a record's id and
+ * filing (in it, in no other record); take its face through the alias
+ * core (bounce_alias_take_face(): its nick, their socket told first by
+ * the nick they had (#2), user@host, realname, nick timestamp, the
+ * session's modes); and are announced -- BX C, then their caps and their
+ * own away state (BX U), which a receiver's re-file starts afresh.
+ * Another server's alias takes the nick in our view only; its server
+ * speaks for it.  No count moves but the mode sync's own (#9): an alias
+ * stays an alias. */
 static void bounce_repoint_aliases(struct Client *old, struct Client *new_primary,
                                    struct BouncerSession *record,
                                    enum bounce_repoint_mode mode)
@@ -2124,17 +2231,18 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
         ircd_strncpy(cli_name(c), cli_name(new_primary), NICKLEN + 1);
       continue;
     }
-    if (0 != ircd_strcmp(cli_name(c), cli_name(new_primary))) {
-      Debug((DEBUG_INFO, "Bouncer: alias %s follows %s, renamed with it",
-             cli_name(c), cli_name(new_primary)));
-      sendcmdto_one(c, CMD_NICK, c, "%s", cli_name(new_primary));
-      ircd_strncpy(cli_name(c), cli_name(new_primary), NICKLEN + 1);
-    }
     if (0 != strcmp(cli_session_id(c), record->hs_sessid)) {
       presence_purge_session(cli_session_id(c));
       ircd_strncpy(cli_session_id(c), record->hs_sessid, S2S_SESSID_BUFSIZE);
     }
     bounce_repoint_file(record, c);
+    /* It takes the new primary's face (the alias core, W3 12c-2a): its
+     * nick, the socket told first (#2), user@host (CHGHOST), realname,
+     * nick timestamp and the session's modes -- what the BX C receivers
+     * copy from the new primary. */
+    Debug((DEBUG_INFO, "Bouncer: alias %s follows %s, takes its face",
+           cli_name(c), cli_name(new_primary)));
+    bounce_alias_take_face(c, new_primary, BOUNCE_FACE_LIVE);
     bounce_announce_alias(record, c, new_primary);
     bounce_emit_alias_caps(c);
     if (cli_connect(c) && con_pre_away(cli_connect(c)) != 0)
@@ -9250,7 +9358,6 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
   ircd_strncpy(session->hs_ghost_numeric, cli_yxx(new_primary),
                sizeof(session->hs_ghost_numeric));
   bounce_peer_holding_clear(session, cli_user(new_primary)->server);
-  cli_user(demoted_alias)->alias_primary = new_primary;
   /* The demoted connection is a connection of this session: it carries
    * the session's id, which the alias filing, the reconcile and history's
    * same-session lookups key on. */
@@ -9261,40 +9368,18 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
   }
   bounce_emit_total_active(session);
 
-  /* Adopt the primary's nick.  Aliases share the primary's nick for
-   * outgoing message attribution and identity-routing.  Without this:
-   *   - demoted_alias's cli_name stays at the old (now-stale) nick
-   *   - hRemClient (in bounce_demote_live_primary_to_alias) left the
-   *     old nick unhashed → /WHOIS <old_nick> on this server returns
-   *     no-such-nick, even though the user is still connected
-   *   - any PRIVMSG the user sends goes out attributed to the old nick,
-   *     which exists on no other server's view (the network now sees
-   *     them as the primary's nick)
+  /* The demoted connection takes the new primary's face (the alias core,
+   * W3 12c-2a): its nick (its socket told first, by the nick it has: #2),
+   * user@host (told by CHGHOST when it has the cap), realname, nick
+   * timestamp and the primary itself, then the session's modes (told its
+   * change).  The BX C receivers copy the same face from new_primary, so
+   * our view and theirs agree; it keeps its own real host and IP.
    *
-   * Same pattern as bounce_setup_local_alias which renames at attach
-   * time.  Send the NICK echo to the local fd so the user's client
-   * UI updates.  No need to broadcast NICK to channel members — the
-   * BX C above is the network-side identity update; channel members
-   * on this server see the alias as a CHFL_ALIAS membership which is
-   * already filtered out of /NAMES rendering.
-   *
-   * The echo goes first, while the alias still carries its old nick: its
-   * source is the alias's own prefix, and a client takes a NICK as its
-   * own rename only when that prefix is its current nick
-   * (":old_nick!user@host NICK new_nick"). */
-  if (MyConnect(demoted_alias)
-      && 0 != ircd_strcmp(cli_name(demoted_alias), cli_name(new_primary))) {
-    char old_nick[NICKLEN + 1];
-    ircd_strncpy(old_nick, cli_name(demoted_alias), NICKLEN + 1);
-    sendcmdto_one(demoted_alias, CMD_NICK, demoted_alias, "%s",
-                  cli_name(new_primary));
-    ircd_strncpy(cli_name(demoted_alias), cli_name(new_primary), NICKLEN + 1);
-    Debug((DEBUG_INFO,
-           "bounce_finish_live: renamed local alias %s -> %s "
-           "(primary on %s)",
-           old_nick, cli_name(demoted_alias),
-           cli_name(cli_user(new_primary)->server)));
-  }
+   * Hashing: hRemClient (in the demote) left the old nick unhashed, and an
+   * alias is never hashed; its lines go out as the new primary's.  No NICK
+   * goes to the channels: the BX C below is the network's identity update,
+   * and an alias membership is not shown in NAMES. */
+  bounce_alias_take_face(demoted_alias, new_primary, BOUNCE_FACE_LIVE);
 
   /* Broadcast BX C so other peers learn about the newly-aliased
    * local connection — they'll create a remote-alias replica with
@@ -11457,24 +11542,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * in the nick hash — FindUser() should return the primary, not the alias. */
   hRemClient(sptr);
 
-  /* --- Step 2: Overwrite identity from primary ---
-   * Same pattern as bounce_alias_create() for remote aliases. */
-  ircd_strncpy(cli_name(sptr), cli_name(primary), NICKLEN + 1);
-  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
-  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN + 1);
-  /* Do NOT overwrite realhost — the alias has its own real connection host,
-   * needed for oper WHOIS, gline matching, and stays correct on promotion. */
-  ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN + 1);
-  ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN + 1);
-  user->acc_create = cli_user(primary)->acc_create;
-  ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
-
-  /* Copy cloaked/fake host (controls what other users see).
-   * Do NOT overwrite cli_ip — the alias has its own real socket IP,
-   * needed for IPcheck, ban matching, and logging. */
-  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
-  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
-  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
+  /* --- Step 2: Take the primary's face (the alias core) ---
+   * Its nick, user@host, realname, account, cloak and fake host, nick
+   * timestamp, and the primary as its own; it keeps its real host and IP.
+   * Still registering: its welcome below tells it its nick, and Step 3 its
+   * modes. */
+  bounce_alias_take_face(sptr, primary, BOUNCE_FACE_REGISTERING);
 
   /* Inherit the session's sessid so this alias's cli_session_id agrees
    * with the primary's and with the bouncer session record.  Supersedes
@@ -11487,10 +11560,6 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   SetBouncerAlias(sptr);
   SetUser(sptr);
   SetAccount(sptr);
-  if (IsHiddenHost(primary))
-    SetHiddenHost(sptr);
-  user->alias_primary = primary;
-  cli_lastnick(sptr) = cli_lastnick(primary);
   cli_handler(sptr) = CLIENT_HANDLER;
 
   /* It registered as a live user of ours (Count_unknownbecomesclient)
@@ -12091,6 +12160,28 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
         ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
       cli_lastnick(alias) = cli_lastnick(primary);
+      /* ... and the rest of its new primary's face, as a new alias's
+       * replica takes it below: its server gave the alias that face (the
+       * alias core, W3 12c-2a), and a replica left with the old primary's
+       * user@host and realname shows another face than its server's. */
+      ircd_strncpy(cli_user(alias)->username, cli_user(primary)->username,
+                   USERLEN + 1);
+      ircd_strncpy(cli_user(alias)->host, cli_user(primary)->host, HOSTLEN + 1);
+      ircd_strncpy(cli_user(alias)->realhost, cli_user(primary)->realhost,
+                   HOSTLEN + 1);
+      ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
+      cli_user(alias)->acc_create = cli_user(primary)->acc_create;
+      ircd_strncpy(cli_user(alias)->kc_id, cli_user(primary)->kc_id,
+                   sizeof(cli_user(alias)->kc_id));
+      memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
+      ircd_strncpy(cli_user(alias)->cloakip, cli_user(primary)->cloakip,
+                   HOSTLEN + 1);
+      ircd_strncpy(cli_user(alias)->cloakhost, cli_user(primary)->cloakhost,
+                   HOSTLEN + 1);
+      ircd_strncpy(cli_user(alias)->fakehost, cli_user(primary)->fakehost,
+                   HOSTLEN + 1);
+      if (IsHiddenHost(primary))
+        SetHiddenHost(alias);
       if (0 != strcmp(cli_session_id(alias), sessid)) {
         presence_purge_session(cli_session_id(alias));
         ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
