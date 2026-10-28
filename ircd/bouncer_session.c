@@ -739,6 +739,20 @@ static void crossed_note_clear(struct BouncerSession *s)
   s->hs_crossed_at = 0;
 }
 
+/** Does any record name @a c as its primary?  Checked before a FLAG_KILLED
+ * exit of a client no session may still anchor (see its callers). */
+static int record_names_primary(struct Client *c)
+{
+  struct BouncerSession *s;
+  int i;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
+      if (s->hs_client == c)
+        return 1;
+  return 0;
+}
+
 static void bounce_hold_expire(struct Event *ev)
 {
   struct BouncerSession *session;
@@ -5475,7 +5489,12 @@ static void crossed_primary_leaves(struct BouncerSession *s, struct Client *link
             "%s%s (%s), kept here since its promote crossed its device's "
             "exit, leaves", s->hs_account, s->hs_sessid,
             cli_yxx(cli_user(p)->server), cli_yxx(p), cli_name(p));
+  /* The order is load-bearing: no record may name p as its primary when
+   * its FLAG_KILLED exit runs, or exit_one_client() takes the exit for a
+   * KILL of that session and tears the whole session down (every device,
+   * everywhere). */
   s->hs_client = NULL;
+  assert(!record_names_primary(p));
   SetFlag(p, FLAG_KILLED);
   exit_client(link, p, killer, reason);
 }
@@ -11955,6 +11974,10 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
         ps->hs_client = NULL;
         bounce_broadcast(ps, 'X', NULL);
         bounce_destroy(ps);
+        /* The order is load-bearing: the record is gone before the
+         * FLAG_KILLED exit below, or exit_one_client() would take it for a
+         * KILL of the session and tear the whole session down. */
+        assert(!record_names_primary(target));
         /* The device leaves visibly: our users see the user quit (one
          * msgid for the QUIT and its history row), WATCH and MONITOR see
          * it go, and the legacy links that know its face get its QUIT.

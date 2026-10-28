@@ -137,8 +137,12 @@ static int do_kill(struct Client* cptr, struct Client* sptr,
 
     /*
      * Set FLAG_KILLED. This prevents exit_one_client from sending
-     * the unnecessary QUIT for this. (This flag should never be
-     * set in any other place)
+     * the unnecessary QUIT for this.  Other exits set it too, each for
+     * a client the network already knows is gone (a nick collision's
+     * KILL, a bouncer session's end on the client's own server); the
+     * flag also makes exit_one_client end the bouncer session of a
+     * primary it removes, so a caller that only means "no QUIT" must
+     * first make sure no session names the client as its primary.
      */
     SetFlag(victim, FLAG_KILLED);
   }
