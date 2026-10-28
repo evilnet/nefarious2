@@ -1139,4 +1139,32 @@ extern enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
                                                     int same_account,
                                                     int kc_conflict, int ours);
 
+/** Does the survivor of a D.2 swap take this membership of the face the
+ * swap demoted (W3 12c-2a)?
+ *
+ * A swap renumbers the face the legacy links hold to the survivor (BX P),
+ * so they hold the survivor as a member of every channel the face was in,
+ * with the face's status.  The face's own server converts each such
+ * membership into the survivor's, and the face stays an alias member of
+ * it, as every device of the session is of its primary's channels: the
+ * channel's members there saw the same nick before and after.
+ *
+ * Taken: a membership the face held as the session's primary.  Not taken:
+ * one of a demote that is no swap (the reconcile's, whose face leaves the
+ * legacy links by a Q: nothing there holds the survivor in its channels);
+ * one the face held only as an alias member (a membership no server has as
+ * the session's); a zombie (a kick in progress); a local channel (a client
+ * of another server is never in one); and a channel the survivor is in
+ * already (its own membership stands).
+ *
+ * @param[in] swap             The demote is a D.2 swap (the legacy links
+ *                             renumbered the face to the survivor).
+ * @param[in] face_alias       The face held it as an alias member.
+ * @param[in] zombie           It is a zombie membership.
+ * @param[in] local_channel    The channel is a local (&) one.
+ * @param[in] survivor_member  The survivor is a member of the channel.
+ */
+extern int bounce_swap_takes_membership(int swap, int face_alias, int zombie,
+                                        int local_channel, int survivor_member);
+
 #endif /* INCLUDED_bouncer_wire_h */

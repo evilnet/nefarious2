@@ -1661,6 +1661,14 @@ extern int bounce_yield_held_ghost(struct BouncerSession *session,
  * struct exists (typically after set_nick_name's IsServer branch
  * creates it).
  *
+ * On a D.2 swap (@a swap) the legacy links have renumbered acptr's face
+ * to new_primary (BX P) and hold it in acptr's channels with acptr's
+ * status: each membership acptr held as the primary becomes
+ * new_primary's here too, with that status, and acptr stays its alias
+ * member (bounce_swap_takes_membership()).  Nothing is shown to the
+ * channels: their members saw the same nick before and after.  The finish
+ * tells the other servers (W3 12c-2a).
+ *
  * Runs only when bounce_demote_eligibility() says so at
  * BOUNCE_DEMOTE_PLAN; nothing changes otherwise.
  *
@@ -1670,11 +1678,15 @@ extern int bounce_yield_held_ghost(struct BouncerSession *session,
  *                        the session origin (never the link it arrived on).
  * @param[in] session     The session acptr is the primary of (the one the
  *                        finish installs new_primary in).
+ * @param[in] swap        1 on a D.2 swap (the legacy links renumbered
+ *                        acptr's face to new_primary), 0 for a demote that
+ *                        retracts the face (the post-burst reconcile).
  * @return 0 on success, -1 when the demote is not eligible.
  */
 extern int bounce_demote_live_primary_to_alias(struct Client *acptr,
                                                struct Client *new_primary,
-                                               struct BouncerSession *session);
+                                               struct BouncerSession *session,
+                                               int swap);
 
 /** May `face` be demoted into an alias of a new primary on `session`?
  * The one decision behind the live-primary demote: the same-nick merge
@@ -1780,8 +1792,13 @@ extern int bounce_nick_side_held(struct Client *cptr);
  * legacy links that know it (bounce_legacy_face_change).
  *
  * The demoted client takes the new primary's face (the alias core: nick,
- * user@host, realname, nick timestamp, user modes; its socket told; W3
- * 12c-2a).
+ * user@host, realname, nick timestamp, user modes; its socket told).  On
+ * a D.2 swap (@a legacy_done) the IRCv3-aware links learn the channels
+ * the demote handed new_primary as a device's JOIN tells them (a J from
+ * the demoted client toward new_primary's server, from new_primary
+ * elsewhere), the demoted client's channel status as a server MODE, and
+ * the demoted client's alias membership as BX V -- between its BX C and
+ * its devices' (W3 12c-2a).
  *
  * @param[in] demoted_alias The freshly-demoted local client.
  * @param[in] new_primary   The remote primary client that replaces it.

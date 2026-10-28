@@ -518,3 +518,14 @@ enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
     return BOUNCE_REPOINT_SKIP;
   return ours ? BOUNCE_REPOINT_OWN : BOUNCE_REPOINT_REMOTE;
 }
+
+int bounce_swap_takes_membership(int swap, int face_alias, int zombie,
+                                 int local_channel, int survivor_member)
+{
+  /* Only a swap's legacy links hold the survivor where the face was. */
+  if (!swap)
+    return 0;
+  /* A membership the face held as the session's primary, in a channel a
+   * client of another server can be in, that the survivor is not in. */
+  return !face_alias && !zombie && !local_channel && !survivor_member;
+}

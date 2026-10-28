@@ -3333,9 +3333,12 @@ int bounce_session_transition(struct BouncerSession *session,
     break;
   case BST_DEMOTE_TO_ALIAS:
     if (params->demoted_alias && params->peer_primary) {
+      /* legacy_done: a D.2 swap, whose legacy links renumbered the face
+       * (BX P) and hold the new primary in its channels. */
       if (0 == bounce_demote_live_primary_to_alias(params->demoted_alias,
                                                     params->peer_primary,
-                                                    session))
+                                                    session,
+                                                    params->legacy_done))
         rc = bounce_finish_live_primary_demote(params->demoted_alias,
                                                 params->peer_primary,
                                                 session,
@@ -9161,6 +9164,98 @@ static void bounce_announce_alias(struct BouncerSession *session,
                            chanlist_buf);
 }
 
+/** Tell the IRCv3-aware links the channels a D.2 swap handed @a primary
+ * (W3 12c-2a): the memberships the demote made from those of @a alias,
+ * the demoted connection, which follows @a primary now and stays an alias
+ * member of each.  Sent after the alias's BX C, so every receiver knows
+ * it.
+ *
+ * Each channel goes out as a device's own JOIN does (m_join's alias
+ * rewrite; one msgid): a J from the alias toward the primary's server --
+ * the only server that may say what its own client joins -- which joins
+ * its client, shows the JOIN to its channel members and to the primary's
+ * socket (topic, NAMES), and relays it on; and a J from the primary
+ * toward every other aware link.  Then the alias's status there (op,
+ * halfop, voice) as a server MODE, and its alias membership as BX V.
+ *
+ * Nothing goes to the legacy links: the swap renumbered the face they
+ * held to the primary (BX P), so they hold it in these channels with this
+ * status already.  In the other direction -- the face this server demotes
+ * is one a legacy link never knew, its channels made on this side of a
+ * split -- the primary's own server relays the J to its legacy links like
+ * any join of its client, and the MODE with it. */
+static void bounce_swap_announce_channels(struct Client *alias,
+                                          struct Client *primary)
+{
+  struct Membership *am;
+  char alias_full[6];
+  /* The swap runs inside the line that introduced the primary: none of
+   * these lines is that line's relay, so they carry their own tags, never
+   * its msgid, time, session id or hold mark (as a burst run inside
+   * another link's line does, server_finish_burst()). */
+  struct Client *inbound = sendcmdto_inbound_link();
+
+  sendcmdto_set_inbound_link(NULL);
+  ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s", cli_yxx(&me),
+                cli_yxx(alias));
+  for (am = cli_user(alias)->channel; am; am = am->next_channel) {
+    struct Channel *chptr = am->channel;
+    struct Membership *pm = find_member_link(chptr, primary);
+    char letters[4];
+    char args[3 * 6 + 3];
+    size_t len = 0;
+    int nl = 0;
+    int i;
+
+    /* Only a membership the demote handed over: the primary's real one,
+     * made from the alias's with its JOIN's msgid and time.  (The primary
+     * came in with the line that swapped; it is in no other channel.) */
+    if (!pm || IsMemberAlias(pm) || !IsMemberAlias(am) || IsZombie(am)
+        || pm->join_tv.tv_sec != am->join_tv.tv_sec
+        || pm->join_tv.tv_usec != am->join_tv.tv_usec
+        || 0 != strcmp(pm->join_msgid, am->join_msgid))
+      continue;
+
+    if (feature_bool(FEAT_MSGID)) {
+      char msgid[64];
+      generate_msgid(msgid, sizeof(msgid));
+      sendcmdto_set_s2s_tags(history_event_time_ms(NULL), msgid);
+      sendcmdto_want_s2s_tags(1);
+    }
+    sendcmdto_serv_butone_v3(alias, CMD_JOIN, NULL, "%H %Tu", chptr,
+                             chptr->creationtime);
+
+    if (pm->status & CHFL_CHANOP)
+      letters[nl++] = 'o';
+    if (pm->status & CHFL_HALFOP)
+      letters[nl++] = 'h';
+    if (pm->status & CHFL_VOICE)
+      letters[nl++] = 'v';
+    letters[nl] = '\0';
+    if (nl) {
+      args[0] = '\0';
+      for (i = 0; i < nl; i++)
+        str_appendf(args, sizeof(args), &len, "%s%s%s", i ? " " : "",
+                    cli_yxx(cli_user(primary)->server), cli_yxx(primary));
+      if (feature_bool(FEAT_MSGID)) {
+        char msgid[64];
+        generate_msgid(msgid, sizeof(msgid));
+        sendcmdto_set_s2s_tags(history_event_time_ms(NULL), msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
+      sendcmdto_serv_butone_v3(&me, CMD_MODE, NULL, "%H +%s %s %Tu", chptr,
+                               letters, args, chptr->creationtime);
+    }
+
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL, "V %s +%s",
+                             alias_full, chptr->chname);
+    Debug((DEBUG_INFO, "Bouncer swap: %s takes %s's membership of %s%s%s",
+           cli_name(primary), alias_full, chptr->chname, nl ? " +" : "",
+           letters));
+  }
+  sendcmdto_set_inbound_link(inbound);
+}
+
 /** See include/bouncer_session.h. */
 enum bounce_demote_bar bounce_demote_eligibility(enum bounce_demote_stage stage,
                                                  struct Client *face,
@@ -9219,7 +9314,8 @@ static enum bounce_demote_bar demote_eligibility_for(enum bounce_demote_stage st
 
 int bounce_demote_live_primary_to_alias(struct Client *acptr,
                                         struct Client *new_primary,
-                                        struct BouncerSession *session)
+                                        struct BouncerSession *session,
+                                        int swap)
 {
   struct Membership *member;
   char alias_full[6];
@@ -9252,10 +9348,35 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
    * promotion path.  Missing the joined decrement leaves stale state
    * that crashes free_user's `0 == user->joined` assertion when the
    * client eventually exits, since remove_member_from_channel skips
-   * the joined decrement for alias members on the way out. */
+   * the joined decrement for alias members on the way out.
+   *
+   * On a D.2 swap the membership becomes new_primary's as well, with
+   * acptr's status and its JOIN's msgid and time (W3 12c-2a): the legacy
+   * links renumbered acptr's face to new_primary in place and hold it
+   * there, and the channel's members here saw the same nick throughout,
+   * so nothing is shown.  Each count moves once: the flip gives the
+   * channel's user count up, new_primary's membership takes it again. */
   for (member = cli_user(acptr)->channel; member;
        member = member->next_channel) {
     struct Channel *chptr = member->channel;
+    int takes = bounce_swap_takes_membership(swap, IsMemberAlias(member),
+                                             IsZombie(member),
+                                             IsLocalChannel(chptr->chname),
+                                             find_member_link(chptr, new_primary)
+                                               != NULL);
+    if (takes) {
+      struct Membership *nm;
+
+      add_user_to_channel(chptr, new_primary,
+                          member->status & (CHFL_CHANOP | CHFL_HALFOP
+                                            | CHFL_VOICE | CHFL_DELAYED),
+                          OpLevel(member));
+      nm = find_member_link(chptr, new_primary);
+      if (nm) {
+        memcpy(nm->join_msgid, member->join_msgid, sizeof(nm->join_msgid));
+        nm->join_tv = member->join_tv;
+      }
+    }
     if (!IsMemberAlias(member)) {
       member->status |= CHFL_ALIAS;
       if (chptr->users > 0)
@@ -9386,6 +9507,11 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
    * primary pointing at new_primary, channel memberships reflecting
    * the demoted_alias's channel list. */
   bounce_announce_alias(session, demoted_alias, new_primary);
+  /* A swap handed the demoted client's channels to new_primary (the
+   * demote): the aware links learn them now, before the devices' BX C,
+   * whose channel lists then file each device beside its primary. */
+  if (legacy_done)
+    bounce_swap_announce_channels(demoted_alias, new_primary);
   /* Every other device of the demoted client moves with it (T12-2), each
    * announced after the demoted client's BX C.  Nothing goes toward the
    * legacy links for them: they never knew an alias. */
