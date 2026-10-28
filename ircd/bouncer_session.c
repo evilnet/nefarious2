@@ -9276,7 +9276,11 @@ static void bounce_swap_kick(struct Channel *chptr, struct Client *face,
  * burst-gated, as the netjoin's memberless BURST at the channel's TS
  * (per link: apass/upass only where oplevels are taken).  A receiver that
  * holds the channel at that TS merges them -- no notice -- and relays
- * what it changed; one that holds them already changes nothing. */
+ * what it changed; one that holds them already changes nothing.  A
+ * channel with no mode goes in the zannel form ("B #chan <ts>"), which
+ * still makes the channel exist where it did not, so the JOIN after it
+ * never makes it afresh with the receiver's own default modes (fix round
+ * 2). */
 static void bounce_swap_burst_modes(struct Channel *chptr)
 {
   struct DLink *dl;
@@ -9291,9 +9295,10 @@ static void bounce_swap_burst_modes(struct Channel *chptr)
     *modebuf = *parabuf = '\0';
     channel_modes(link, modebuf, parabuf, sizeof(parabuf), chptr, 0);
     if (!modebuf[1])
-      continue;
-    sendcmdto_one(&me, CMD_BURST, link, "%H %Tu %s%s%s", chptr,
-                  chptr->creationtime, modebuf, *parabuf ? " " : "", parabuf);
+      sendcmdto_one(&me, CMD_BURST, link, "%H %Tu", chptr, chptr->creationtime);
+    else
+      sendcmdto_one(&me, CMD_BURST, link, "%H %Tu %s%s%s", chptr,
+                    chptr->creationtime, modebuf, *parabuf ? " " : "", parabuf);
   }
 }
 
