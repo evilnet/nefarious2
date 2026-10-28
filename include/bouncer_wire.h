@@ -1107,10 +1107,14 @@ enum bounce_repoint_take {
  * knows, its nick goes stale, and the other servers never learn it.
  *
  * Taken: an alias that follows the outgoing client, filed on any record
- * or none; and an alias on the record's roster that follows nobody.  Not
- * taken: anything that is not an alias, the new primary itself, and an
- * alias that follows another client (another copy's device, filed here by
- * the session id, follows its own copy's primary).
+ * or none; and an alias filed in the record the new primary takes that
+ * follows nobody -- filed by its numeric on the roster AND in the record
+ * by its session id (a roster numeric can be stale, and reused by another
+ * session's client).  Not taken: anything that is not an alias, the new
+ * primary itself, an alias that follows another client (another copy's
+ * device, filed here by the session id, follows its own copy's primary),
+ * and, however it was found, a client of another account or of another
+ * Keycloak user than the record's (#16; a missing id is no conflict).
  *
  * @param[in] alias        The client is a bouncer alias.
  * @param[in] is_new       It is the new primary.
@@ -1118,12 +1122,21 @@ enum bounce_repoint_take {
  *                         for an outgoing client the caller does not
  *                         know).
  * @param[in] follows_none It has no primary.
- * @param[in] on_roster    The record the new primary takes lists it.
+ * @param[in] on_roster    The record the new primary takes lists its
+ *                         numeric.
+ * @param[in] same_id      It carries that record's session id
+ *                         (bounce_in_session_by_id()).
+ * @param[in] same_account It is logged in to the record's account (the new
+ *                         primary's, when there is no record).
+ * @param[in] kc_conflict  It carries another Keycloak id than the record
+ *                         (the new primary, when there is no record).
  * @param[in] ours         It is a connection of this server.
  */
 extern enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
                                                     int follows_old,
                                                     int follows_none,
-                                                    int on_roster, int ours);
+                                                    int on_roster, int same_id,
+                                                    int same_account,
+                                                    int kc_conflict, int ours);
 
 #endif /* INCLUDED_bouncer_wire_h */

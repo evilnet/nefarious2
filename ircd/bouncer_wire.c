@@ -503,12 +503,18 @@ int bounce_crossed_replace_retracts(int noted, int new_is_kept)
 
 enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
                                              int follows_old, int follows_none,
-                                             int on_roster, int ours)
+                                             int on_roster, int same_id,
+                                             int same_account, int kc_conflict,
+                                             int ours)
 {
+  /* Never the new primary, which follows nobody from now on, and never a
+   * client of another account or Keycloak user, however it was found. */
+  if (!alias || is_new || !same_account || kc_conflict)
+    return BOUNCE_REPOINT_SKIP;
   /* A device of the outgoing client: one that follows it, filed anywhere,
-   * or one of the record's that follows nobody.  Never the new primary,
-   * which follows nobody from now on. */
-  if (!alias || is_new || !(follows_old || (follows_none && on_roster)))
+   * or one filed in the record -- by numeric and by id -- that follows
+   * nobody. */
+  if (!(follows_old || (follows_none && on_roster && same_id)))
     return BOUNCE_REPOINT_SKIP;
   return ours ? BOUNCE_REPOINT_OWN : BOUNCE_REPOINT_REMOTE;
 }

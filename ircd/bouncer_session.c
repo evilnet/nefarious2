@@ -2016,6 +2016,8 @@ static void session_roster_drop_account(struct Client *c,
     session_roster_drop(s, c, s == into);
 }
 
+static int bounce_in_session_by_id(struct BouncerSession *s, struct Client *c);
+
 /** How bounce_repoint_aliases() tells the network of a re-point. */
 enum bounce_repoint_mode {
   BOUNCE_REPOINT_ONLY,     /**< our view only: every server applies the
@@ -2064,11 +2066,13 @@ static void bounce_repoint_file(struct BouncerSession *record, struct Client *c)
 /** Every device of @a old follows @a new_primary when @a old stops being
  * the primary of @a record's session (T12-2): a demote, a held copy's or a
  * held ghost's yield, a BX P.  Which aliases: bounce_repoint_take() -- one
- * that follows @a old, filed anywhere or nowhere, and one on @a record's
- * roster that follows nobody.  Left behind, a device is an alias of an
- * alias: its lines toward a legacy link go out under a numeric the link no
- * longer knows, its nick goes stale, and the other servers never learn of
- * it; or, when @a old leaves, it has no primary at all.
+ * that follows @a old, filed anywhere or nowhere, and one filed in
+ * @a record (on its roster and by its session id) that follows nobody;
+ * never a client of another account or Keycloak user than @a record's
+ * (the new primary's, with no record).  Left behind, a device is an alias
+ * of an alias: its lines toward a legacy link go out under a numeric the
+ * link no longer knows, its nick goes stale, and the other servers never
+ * learn of it; or, when @a old leaves, it has no primary at all.
  *
  * Every alias taken follows @a new_primary.  With BOUNCE_REPOINT_ANNOUNCE
  * (@a record required) our own aliases also take its nick, their socket
@@ -2082,12 +2086,19 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
                                    enum bounce_repoint_mode mode)
 {
   struct Client *c;
+  const char *account;
+  const char *kc_id;
 
   if (!new_primary || old == new_primary || !IsUser(new_primary)
       || !cli_user(new_primary))
     return;
   if (mode == BOUNCE_REPOINT_ANNOUNCE && !record)
     mode = BOUNCE_REPOINT_ONLY;
+  /* Whose devices these are (#16): the record's account and Keycloak
+   * user; with no record, the new primary's. */
+  account = record ? record->hs_account
+                   : (IsAccount(new_primary) ? cli_account(new_primary) : NULL);
+  kc_id = record ? bounce_session_kc_id(record) : cli_user(new_primary)->kc_id;
   for (c = GlobalClientList; c; c = cli_next(c)) {
     struct Client *p;
     int alias = IsBouncerAlias(c) && IsUser(c) && cli_user(c);
@@ -2097,6 +2108,11 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
     take = bounce_repoint_take(alias, c == new_primary, old && p == old,
                                alias && !p,
                                alias && record && session_roster_has(record, c),
+                               alias && record && bounce_in_session_by_id(record, c),
+                               alias && account && IsAccount(c)
+                                 && 0 == ircd_strcmp(cli_account(c), account),
+                               alias && bounce_rebind_kc_conflict(kc_id,
+                                                                  cli_user(c)->kc_id),
                                MyConnect(c));
     if (take == BOUNCE_REPOINT_SKIP)
       continue;

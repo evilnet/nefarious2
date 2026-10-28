@@ -1720,83 +1720,139 @@ static void install_retracts_nothing_otherwise(void **s)
   assert_false(bounce_crossed_replace_retracts(0, 1));
 }
 
-/* bounce_repoint_take(alias, is_new, follows_old, follows_none, on_roster, ours) */
+/* bounce_repoint_take(alias, is_new, follows_old, follows_none, on_roster,
+ *                     same_id, same_account, kc_conflict, ours) */
+
+/* A client of the record's account and Keycloak user (the identity facts
+ * a re-point takes for granted only once they are checked). */
+#define RT(a, n, o, f, r, i, m) bounce_repoint_take(a, n, o, f, r, i, 1, 0, m)
 
 static void repoint_takes_an_alias_of_the_outgoing_client(void **s)
 {
-  int roster;
+  int roster, id;
   (void)s;
   /* A device of the outgoing client moves with it, filed on the record's
    * roster or not (a device filed nowhere, or in another record, is still
    * the outgoing client's). */
-  for (roster = 0; roster < 2; roster++) {
-    assert_int_equal(bounce_repoint_take(1, 0, 1, 0, roster, 1), BOUNCE_REPOINT_OWN);
-    assert_int_equal(bounce_repoint_take(1, 0, 1, 0, roster, 0), BOUNCE_REPOINT_REMOTE);
-  }
+  for (roster = 0; roster < 2; roster++)
+    for (id = 0; id < 2; id++) {
+      assert_int_equal(RT(1, 0, 1, 0, roster, id, 1), BOUNCE_REPOINT_OWN);
+      assert_int_equal(RT(1, 0, 1, 0, roster, id, 0), BOUNCE_REPOINT_REMOTE);
+    }
 }
 
 static void repoint_takes_a_roster_alias_that_follows_nobody(void **s)
 {
   (void)s;
   /* The record's own device left with no primary (its primary left, a
-   * split) follows the record's new primary. */
-  assert_int_equal(bounce_repoint_take(1, 0, 0, 1, 1, 1), BOUNCE_REPOINT_OWN);
-  assert_int_equal(bounce_repoint_take(1, 0, 0, 1, 1, 0), BOUNCE_REPOINT_REMOTE);
+   * split) follows the record's new primary: filed in it by its numeric
+   * and its session id. */
+  assert_int_equal(RT(1, 0, 0, 1, 1, 1, 1), BOUNCE_REPOINT_OWN);
+  assert_int_equal(RT(1, 0, 0, 1, 1, 1, 0), BOUNCE_REPOINT_REMOTE);
 }
 
 static void repoint_leaves_a_primaryless_alias_of_no_roster(void **s)
 {
+  int id;
   (void)s;
   /* An alias with no primary that the record does not list is no device of
    * this session's that the re-point can tell (the orphan sweep's). */
-  assert_int_equal(bounce_repoint_take(1, 0, 0, 1, 0, 1), BOUNCE_REPOINT_SKIP);
-  assert_int_equal(bounce_repoint_take(1, 0, 0, 1, 0, 0), BOUNCE_REPOINT_SKIP);
+  for (id = 0; id < 2; id++) {
+    assert_int_equal(RT(1, 0, 0, 1, 0, id, 1), BOUNCE_REPOINT_SKIP);
+    assert_int_equal(RT(1, 0, 0, 1, 0, id, 0), BOUNCE_REPOINT_SKIP);
+  }
+}
+
+static void repoint_leaves_a_roster_numeric_of_another_session(void **s)
+{
+  int ours;
+  (void)s;
+  /* A primaryless alias whose numeric the roster lists but which carries
+   * another session's id: a stale roster entry whose numeric a client of
+   * another session took.  Not filed in this record. */
+  for (ours = 0; ours < 2; ours++)
+    assert_int_equal(RT(1, 0, 0, 1, 1, 0, ours), BOUNCE_REPOINT_SKIP);
 }
 
 static void repoint_leaves_another_copys_device(void **s)
 {
-  int roster, ours;
+  int roster, id, ours;
   (void)s;
   /* A device that follows another client -- another copy's, filed here by
    * the session id -- follows its own copy's primary. */
   for (roster = 0; roster < 2; roster++)
-    for (ours = 0; ours < 2; ours++)
-      assert_int_equal(bounce_repoint_take(1, 0, 0, 0, roster, ours), BOUNCE_REPOINT_SKIP);
+    for (id = 0; id < 2; id++)
+      for (ours = 0; ours < 2; ours++)
+        assert_int_equal(RT(1, 0, 0, 0, roster, id, ours), BOUNCE_REPOINT_SKIP);
+}
+
+static void repoint_never_takes_another_account_or_keycloak_user(void **s)
+{
+  int o, f, r, i, m;
+  (void)s;
+  /* However the client was found -- following the outgoing client, or by
+   * the roster with no primary -- a client of another account, or one
+   * carrying another Keycloak id, is never taken (#16). */
+  for (o = 0; o < 2; o++)
+    for (f = 0; f < 2; f++)
+      for (r = 0; r < 2; r++)
+        for (i = 0; i < 2; i++)
+          for (m = 0; m < 2; m++) {
+            assert_int_equal(bounce_repoint_take(1, 0, o, f, r, i, 0, 0, m),
+                             BOUNCE_REPOINT_SKIP);
+            assert_int_equal(bounce_repoint_take(1, 0, o, f, r, i, 1, 1, m),
+                             BOUNCE_REPOINT_SKIP);
+            assert_int_equal(bounce_repoint_take(1, 0, o, f, r, i, 0, 1, m),
+                             BOUNCE_REPOINT_SKIP);
+          }
 }
 
 static void repoint_never_takes_a_user_or_the_new_primary(void **s)
 {
-  int o, n, r, m;
+  int o, f, r, i, a, k, m;
   (void)s;
   for (o = 0; o < 2; o++)
-    for (n = 0; n < 2; n++)
+    for (f = 0; f < 2; f++)
       for (r = 0; r < 2; r++)
-        for (m = 0; m < 2; m++) {
-          /* Not an alias: a primary, a held ghost, a user in no session. */
-          assert_int_equal(bounce_repoint_take(0, 0, o, n, r, m), BOUNCE_REPOINT_SKIP);
-          assert_int_equal(bounce_repoint_take(0, 1, o, n, r, m), BOUNCE_REPOINT_SKIP);
-          /* The new primary: promoted from an alias of the outgoing client
-           * (a BX P naming an alias), it follows nobody from now on. */
-          assert_int_equal(bounce_repoint_take(1, 1, o, n, r, m), BOUNCE_REPOINT_SKIP);
-        }
+        for (i = 0; i < 2; i++)
+          for (a = 0; a < 2; a++)
+            for (k = 0; k < 2; k++)
+              for (m = 0; m < 2; m++) {
+                /* Not an alias: a primary, a held ghost, a user in no
+                 * session. */
+                assert_int_equal(bounce_repoint_take(0, 0, o, f, r, i, a, k, m),
+                                 BOUNCE_REPOINT_SKIP);
+                assert_int_equal(bounce_repoint_take(0, 1, o, f, r, i, a, k, m),
+                                 BOUNCE_REPOINT_SKIP);
+                /* The new primary: promoted from an alias of the outgoing
+                 * client (a BX P naming an alias), it follows nobody from
+                 * now on. */
+                assert_int_equal(bounce_repoint_take(1, 1, o, f, r, i, a, k, m),
+                                 BOUNCE_REPOINT_SKIP);
+              }
 }
 
 static void repoint_selection_matrix(void **s)
 {
-  int a, n, o, f, r, m;
+  int a, n, o, f, r, i, c, k, m;
   (void)s;
   for (a = 0; a < 2; a++)
-    for (n = 0; n < 2; n++)
-      for (o = 0; o < 2; o++)
-        for (f = 0; f < 2; f++)
-          for (r = 0; r < 2; r++)
-            for (m = 0; m < 2; m++) {
-              enum bounce_repoint_take want = BOUNCE_REPOINT_SKIP;
-              if (a && !n && (o || (f && r)))
-                want = m ? BOUNCE_REPOINT_OWN : BOUNCE_REPOINT_REMOTE;
-              assert_int_equal(bounce_repoint_take(a, n, o, f, r, m), want);
-            }
+  for (n = 0; n < 2; n++)
+  for (o = 0; o < 2; o++)
+  for (f = 0; f < 2; f++)
+  for (r = 0; r < 2; r++)
+  for (i = 0; i < 2; i++)
+  for (c = 0; c < 2; c++)
+  for (k = 0; k < 2; k++)
+  for (m = 0; m < 2; m++) {
+    enum bounce_repoint_take want = BOUNCE_REPOINT_SKIP;
+    if (a && !n && c && !k && (o || (f && r && i)))
+      want = m ? BOUNCE_REPOINT_OWN : BOUNCE_REPOINT_REMOTE;
+    assert_int_equal(bounce_repoint_take(a, n, o, f, r, i, c, k, m), want);
+  }
 }
+
+#undef RT
 
 int main(void)
 {
@@ -1804,7 +1860,9 @@ int main(void)
     cmocka_unit_test(repoint_takes_an_alias_of_the_outgoing_client),
     cmocka_unit_test(repoint_takes_a_roster_alias_that_follows_nobody),
     cmocka_unit_test(repoint_leaves_a_primaryless_alias_of_no_roster),
+    cmocka_unit_test(repoint_leaves_a_roster_numeric_of_another_session),
     cmocka_unit_test(repoint_leaves_another_copys_device),
+    cmocka_unit_test(repoint_never_takes_another_account_or_keycloak_user),
     cmocka_unit_test(repoint_never_takes_a_user_or_the_new_primary),
     cmocka_unit_test(repoint_selection_matrix),
     cmocka_unit_test(orphan_sweep_never_touches_a_remote_alias),
