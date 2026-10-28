@@ -772,24 +772,48 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
                           int primary_remote);
 
 /** How a member's end of a session ends it.  On the wire (BS E) a letter:
- * bounce_member_end_letter(), bounce_member_end_parse(). */
+ * bounce_member_end_letter(), bounce_member_end_parse().  The kinds differ
+ * in what the end does besides ending the session (its side effects,
+ * bounce_end_side_effects()) and in whether the holder may refuse it. */
 enum bounce_member_end {
-  BOUNCE_MEMBER_END_DISCONNECT, /**< BOUNCER DISCONNECT, hold off, MODE -b,
-                                 *   PERSISTENCE SET OFF: the session and
-                                 *   every device of it end; a live primary
-                                 *   carries on outside it ('D') */
-  BOUNCE_MEMBER_END_RESET,      /**< BOUNCER RESET, ORESET, a ban: the
-                                 *   session and every connection of it
-                                 *   end, the primary too ('R') */
-  BOUNCE_MEMBER_END_DETACH      /**< PERSISTENCE DETACH: as a DISCONNECT,
-                                 *   but refused while a connection on a
-                                 *   class that enforces persistence holds
-                                 *   the session (bounce_end_refused();
+  BOUNCE_MEMBER_END_DISCONNECT, /**< BOUNCER DISCONNECT (a member's or an
+                                 *   oper's): the session and every device
+                                 *   of it end; a live primary carries on
+                                 *   outside it; no preference is written
+                                 *   ('D') */
+  BOUNCE_MEMBER_END_HOLD_OFF,   /**< BOUNCER SET HOLD off, PERSISTENCE SET
+                                 *   OFF, MODE -b: as a DISCONNECT, and the
+                                 *   account's hold preference goes to 0
+                                 *   ('O') */
+  BOUNCE_MEMBER_END_DETACH,     /**< PERSISTENCE DETACH: as a HOLD_OFF, and
+                                 *   the account's webpush subscriptions are
+                                 *   forgotten; refused while a connection
+                                 *   on a class that enforces persistence
+                                 *   holds the session (bounce_end_refused();
                                  *   'T') */
+  BOUNCE_MEMBER_END_RESET       /**< BOUNCER RESET, ORESET, a ban: the
+                                 *   session and every connection of it
+                                 *   end, the primary too; no preference is
+                                 *   written ('R') */
 };
 
-/** The wire letter of @a how ('D', 'R' or 'T'). */
+/** The wire letter of @a how ('D', 'O', 'T' or 'R'). */
 extern char bounce_member_end_letter(enum bounce_member_end how);
+
+/** What an end does besides ending the session (bounce_end_side_effects()). */
+#define BOUNCE_END_FX_HOLD_OFF        0x1 /**< the hold preference goes to 0 */
+#define BOUNCE_END_FX_WEBPUSH_FORGET  0x2 /**< the account's webpush
+                                           *   subscriptions are forgotten */
+
+/** The side effects of @a how, as the local command applies them.  The
+ * server that ends the session applies them; a server that carries the end
+ * to the holder applies none (bounce_end_asker_applies()), so a refused or
+ * lost end leaves the preference as it was.
+ *
+ * @param[in] how The kind of end.
+ * @return A mask of BOUNCE_END_FX_*.
+ */
+extern unsigned int bounce_end_side_effects(enum bounce_member_end how);
 
 /** Does the server that ends a session refuse @a how, as the local
  * command would?  PERSISTENCE DETACH is refused while the session is held
@@ -847,6 +871,14 @@ enum bounce_end_route {
 extern enum bounce_end_route bounce_end_route(int has_primary,
                                               int primary_ours,
                                               int route_reads_carry);
+
+/** Does the server a member's end was issued on apply its side effects
+ * itself?  Not when the end is carried to the holder, which applies them
+ * when it accepts the end.
+ *
+ * @param[in] route Where the end is decided (bounce_end_route()).
+ */
+extern int bounce_end_asker_applies(enum bounce_end_route route);
 
 /** What a member's end does here with a BS E, a member's end carried. */
 enum bounce_bse_action {

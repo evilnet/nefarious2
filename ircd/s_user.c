@@ -2605,19 +2605,26 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
               bounce_broadcast(session, 'C', NULL);
           }
         } else {
-          ClearBncHoldPref(acptr);
-          metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-          /* End the session: its holder does (here, or a device of ours
-           * whose primary is on another server sends the end there); the
-           * primary carries on outside it, every device of it goes. */
+          struct BouncerSession *session = NULL;
+
+          /* The session to end: ours, or the one a device of ours of a
+           * primary on another server is in. */
           if (MyUser(acptr)
               || (MyConnect(sptr) && IsBouncerAlias(sptr)
-                  && cli_alias_primary(sptr) == acptr)) {
-            struct BouncerSession *session = bounce_get_session(acptr);
-            if (session)
-              bounce_member_end(session, sptr, cptr,
-                                BOUNCE_MEMBER_END_DISCONNECT, NULL);
-          }
+                  && cli_alias_primary(sptr) == acptr))
+            session = bounce_get_session(acptr);
+          ClearBncHoldPref(acptr);
+          /* The preference, unless the end goes to the session's holder on
+           * another server, which writes it (to every server) when it
+           * accepts the end. */
+          if (!session || bounce_end_asker_applies(bounce_member_end_route(session)))
+            metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+          /* End the session: its holder does (here, or the end goes
+           * there); the primary carries on outside it, every device of it
+           * goes. */
+          if (session)
+            bounce_member_end(session, sptr, cptr, BOUNCE_MEMBER_END_HOLD_OFF,
+                              NULL);
         }
         break;
       case 'y':

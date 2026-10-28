@@ -5681,10 +5681,12 @@ static int bounce_route_reads_carry(struct Client *home)
 static const char *member_end_name(enum bounce_member_end how)
 {
   switch (how) {
-  case BOUNCE_MEMBER_END_RESET:
-    return "reset";
+  case BOUNCE_MEMBER_END_HOLD_OFF:
+    return "hold off";
   case BOUNCE_MEMBER_END_DETACH:
     return "detach";
+  case BOUNCE_MEMBER_END_RESET:
+    return "reset";
   case BOUNCE_MEMBER_END_DISCONNECT:
     break;
   }
@@ -5829,6 +5831,47 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
     bounce_give_own_sessid(caller, ended);
 }
 
+/** The side effects of a member's end @a how of @a s that this server, its
+ * holder, has accepted from the server the end was issued on (which
+ * applied none, bounce_end_asker_applies()): the hold preference to 0 the
+ * way BOUNCER SET HOLD off writes it -- on the primary, and to every
+ * server by METADATA addressed by the primary's nick (by the account when
+ * the record has no primary) -- and, for a DETACH, the account's webpush
+ * subscriptions forgotten.  Before the session ends, so the METADATA
+ * names a client every server still knows. */
+static void bounce_end_apply_side_effects(struct BouncerSession *s,
+                                          enum bounce_member_end how)
+{
+  unsigned int fx = bounce_end_side_effects(how);
+  struct Client *p = s->hs_client;
+
+  if (fx & BOUNCE_END_FX_HOLD_OFF) {
+    if (p && IsUser(p) && IsAccount(p)) {
+      metadata_set_client(p, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                               cli_name(p), "draft/persistence/hold");
+    } else {
+      struct Client *c;
+      int fd, online = 0;
+
+      for (fd = HighestFd; fd >= 0; --fd)
+        if ((c = LocalClientArray[fd]) && IsUser(c) && IsAccount(c)
+            && 0 == ircd_strcmp(cli_account(c), s->hs_account)) {
+          metadata_set_client(c, "draft/persistence/hold", "0",
+                              METADATA_VIS_PRIVATE);
+          online = 1;
+        }
+      if (!online && metadata_lmdb_is_available())
+        metadata_account_set_permanent(s->hs_account, "draft/persistence/hold",
+                                       "0", METADATA_VIS_PRIVATE);
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
+                               s->hs_account, "draft/persistence/hold");
+    }
+  }
+  if (fx & BOUNCE_END_FX_WEBPUSH_FORGET)
+    webpush_forget_account(s->hs_account);
+}
+
 /** A member's end of @a s goes to its holder, the server of its primary
  * @a primary (bounce_end_route()): nothing changes here until the holder
  * ends the session (its BS X ends the session's devices here). */
@@ -5845,6 +5888,18 @@ static void bounce_end_carry(struct BouncerSession *s, struct Client *primary,
   sendcmdto_one(&me, CMD_BOUNCER_SESSION, primary, "E %s %s %c :%s",
                 s->hs_account, s->hs_sessid, bounce_member_end_letter(how),
                 why);
+}
+
+/** See include/bouncer_session.h. */
+enum bounce_end_route bounce_member_end_route(struct BouncerSession *s)
+{
+  int has, ours;
+
+  if (!s)
+    return BOUNCE_ROUTE_HERE;
+  member_end_primary(s, &has, &ours);
+  return bounce_end_route(has, ours, has && !ours
+                          && bounce_route_reads_carry(cli_user(s->hs_client)->server));
 }
 
 /** See include/bouncer_session.h. */
@@ -5876,7 +5931,7 @@ enum bounce_end_route bounce_member_end(struct BouncerSession *s,
  *   BS A <account> <sessid> <client-numeric>
  *   BS D <account> <sessid> <disconnect-time> :<channels>
  *   BS X <account> <sessid>
- *   BS E <account> <sessid> <D|R|T> :<reason>  (a member's end, carried to
+ *   BS E <account> <sessid> <D|O|T|R> :<reason>  (a member's end, carried to
  *        the session's holder; fork-only, toward links with flag H)
  *   BS U <account> <sessid> <field>=<value>
  *   BS O <account> <sessid> [<granted_at> <opername>]  (oper grant set/clear)
@@ -6773,7 +6828,7 @@ bsc_forward:
 
   case 'E': /* A member's end of the session, carried to its holder */
   {
-    /* BS E <account> <sessid> <D|R|T> :<reason>  (bounce_member_end()) */
+    /* BS E <account> <sessid> <D|O|T|R> :<reason>  (bounce_member_end()) */
     struct Client *primary;
     int how, has, ours;
 
@@ -6800,6 +6855,9 @@ bsc_forward:
       log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
                 "%s (%s): it ends here", cli_name(sptr), account, sessid,
                 member_end_name((enum bounce_member_end)how));
+      /* The asking server applied none of the end's side effects: they
+       * are the holder's to apply, once it accepts the end. */
+      bounce_end_apply_side_effects(session, (enum bounce_member_end)how);
       bounce_end_here(session, NULL, cptr, (enum bounce_member_end)how,
                       parv[5]);
       break;
@@ -6809,7 +6867,8 @@ bsc_forward:
       break;
     case BOUNCE_BSE_DROP:
       log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
-                "%s (%s): %s", cli_name(sptr), account, sessid, parv[4],
+                "%s (%s): %s", cli_name(sptr), account, sessid,
+                how < 0 ? parv[4] : member_end_name((enum bounce_member_end)how),
                 how < 0 ? "an end this server does not know; dropped"
                 : !session ? "no record of it here; dropped"
                 : "its primary is not reached that way from here; dropped");

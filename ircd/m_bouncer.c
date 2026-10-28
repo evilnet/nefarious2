@@ -806,22 +806,24 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
                   "Hold mode enabled");
       }
     } else if (0 == ircd_strcmp(parv[3], "off")) {
-      metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-      /* Propagate "off" to peers — see comment in the "on" branch
-       * above.  Without this, peers retain a stale "1" preference. */
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                            cli_name(sptr), "draft/persistence/hold");
+      struct BouncerSession *session = bounce_get_session(sptr);
+
+      /* The preference, unless the end goes to the session's holder on
+       * another server, which writes it when it accepts the end. */
+      if (!session || bounce_end_asker_applies(bounce_member_end_route(session))) {
+        metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+        /* Propagate "off" to peers — see comment in the "on" branch
+         * above.  Without this, peers retain a stale "1" preference. */
+        sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                              cli_name(sptr), "draft/persistence/hold");
+      }
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.
        * Its holder ends the session (here, or the end goes there): every
        * device of it is disconnected, and the primary continues as a
        * normal non-bounced IRC client. */
-      {
-        struct BouncerSession *session = bounce_get_session(sptr);
-        if (session)
-          bounce_member_end(session, sptr, sptr,
-                            BOUNCE_MEMBER_END_DISCONNECT, NULL);
-      }
+      if (session)
+        bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
 
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
                 "Hold mode disabled");

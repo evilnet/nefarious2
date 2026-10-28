@@ -286,18 +286,19 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   }
 
   if (0 == ircd_strcmp(arg, "OFF")) {
-    metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                             cli_name(sptr), "draft/persistence/hold");
+    struct BouncerSession *session = bounce_get_session(sptr);
 
-    {
-      /* Its holder ends the session (here, or the end goes there); the
-       * primary carries on outside it, every device of it goes. */
-      struct BouncerSession *session = bounce_get_session(sptr);
-      if (session)
-        bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_DISCONNECT,
-                          NULL);
+    /* The preference, unless the end goes to the session's holder on
+     * another server, which writes it when it accepts the end. */
+    if (!session || bounce_end_asker_applies(bounce_member_end_route(session))) {
+      metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                               cli_name(sptr), "draft/persistence/hold");
     }
+    /* Its holder ends the session (here, or the end goes there); the
+     * primary carries on outside it, every device of it goes. */
+    if (session)
+      bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
     send_persistence_reply(sptr, "SET", "OFF");
     persistence_send_status(sptr);
     return 0;
@@ -854,17 +855,22 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Force logout also closes the account's webpush subscriptions: the
-   * browser keeps its own subscription object, but the server forgets
-   * every endpoint, so no push can fire for this account until a device
-   * re-registers (which happens automatically on the next login). */
-  webpush_forget_account(cli_user(sptr)->account);
+  /* The side effects are ours to apply unless the end goes to the
+   * session's holder on another server, which applies them when it
+   * accepts the end (and writes nothing when it refuses it). */
+  if (bounce_end_asker_applies(bounce_member_end_route(session))) {
+    /* Force logout also closes the account's webpush subscriptions: the
+     * browser keeps its own subscription object, but the server forgets
+     * every endpoint, so no push can fire for this account until a device
+     * re-registers (which happens automatically on the next login). */
+    webpush_forget_account(cli_user(sptr)->account);
 
-  /* Mirror PERSISTENCE SET OFF's tear-down: clear account-global hold
-   * preference, broadcast to peers, then destroy the session. */
-  metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-  sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                           cli_name(sptr), "draft/persistence/hold");
+    /* Mirror PERSISTENCE SET OFF's tear-down: clear account-global hold
+     * preference, broadcast to peers, then destroy the session. */
+    metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                             cli_name(sptr), "draft/persistence/hold");
+  }
 
   /* Its holder ends the session (here, or the end goes there), and
    * refuses as above when a connection there on a class that enforces

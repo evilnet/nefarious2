@@ -339,10 +339,12 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
 char bounce_member_end_letter(enum bounce_member_end how)
 {
   switch (how) {
-  case BOUNCE_MEMBER_END_RESET:
-    return 'R';
+  case BOUNCE_MEMBER_END_HOLD_OFF:
+    return 'O';
   case BOUNCE_MEMBER_END_DETACH:
     return 'T';
+  case BOUNCE_MEMBER_END_RESET:
+    return 'R';
   case BOUNCE_MEMBER_END_DISCONNECT:
     break;
   }
@@ -356,12 +358,33 @@ int bounce_member_end_parse(const char *letter)
   switch (letter[0]) {
   case 'D':
     return BOUNCE_MEMBER_END_DISCONNECT;
-  case 'R':
-    return BOUNCE_MEMBER_END_RESET;
+  case 'O':
+    return BOUNCE_MEMBER_END_HOLD_OFF;
   case 'T':
     return BOUNCE_MEMBER_END_DETACH;
+  case 'R':
+    return BOUNCE_MEMBER_END_RESET;
   }
   return -1;
+}
+
+unsigned int bounce_end_side_effects(enum bounce_member_end how)
+{
+  switch (how) {
+  case BOUNCE_MEMBER_END_HOLD_OFF:
+    return BOUNCE_END_FX_HOLD_OFF;
+  case BOUNCE_MEMBER_END_DETACH:
+    return BOUNCE_END_FX_HOLD_OFF | BOUNCE_END_FX_WEBPUSH_FORGET;
+  case BOUNCE_MEMBER_END_DISCONNECT:
+  case BOUNCE_MEMBER_END_RESET:
+    break;
+  }
+  return 0;
+}
+
+int bounce_end_asker_applies(enum bounce_end_route route)
+{
+  return route != BOUNCE_ROUTE_CARRY;
 }
 
 int bounce_end_refused(enum bounce_member_end how, int enforced)

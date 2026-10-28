@@ -1155,13 +1155,20 @@ extern time_t bounce_hold_remaining(struct BouncerSession *session);
  */
 extern void bounce_destroy(struct BouncerSession *session);
 
-/** A member (or an oper) ends @a session: the hold turned off (MODE -b,
- * BOUNCER SET HOLD off, PERSISTENCE SET OFF) or BOUNCER
- * DISCONNECT, which leave a live primary connected outside the session;
- * BOUNCER RESET, ORESET or a ban, which take every connection;
- * PERSISTENCE DETACH, as a DISCONNECT, which the holder refuses while a
- * connection there on a class that enforces persistence holds the
- * session (bounce_end_refused()).
+/** A member (or an oper) ends @a session (enum bounce_member_end):
+ * BOUNCER DISCONNECT, which leaves a live primary connected outside the
+ * session; the hold turned off (BOUNCER SET HOLD off, PERSISTENCE SET OFF,
+ * MODE -b), which also writes the hold preference 0; PERSISTENCE DETACH,
+ * which also forgets the account's webpush subscriptions and which the
+ * holder refuses while a connection there on a class that enforces
+ * persistence holds the session (bounce_end_refused()); BOUNCER RESET,
+ * ORESET or a ban, which take every connection.
+ *
+ * The side effects (bounce_end_side_effects()) are the caller's to apply,
+ * before this call, only when bounce_member_end_route() says the end is
+ * not carried (bounce_end_asker_applies()); a carried end's are applied
+ * by the holder when it accepts it, so a refused or lost end writes
+ * nothing.
  *
  * Only the holder ends a session (bounce_end_route()).  When the
  * session's primary is ours, or there is none, it ends here: the record
@@ -1195,6 +1202,12 @@ extern enum bounce_end_route bounce_member_end(struct BouncerSession *session,
                                                struct Client *cptr,
                                                enum bounce_member_end how,
                                                const char *reason);
+
+/** Where a member's end of @a session would be decided
+ * (bounce_end_route()), without acting on it: the caller of
+ * bounce_member_end() asks first, to know whether the end's side effects
+ * are its own to apply. */
+extern enum bounce_end_route bounce_member_end_route(struct BouncerSession *session);
 
 /** Force-destroy a session because its primary was network-KILLed
  * (invariant #12: KILL ends the whole session).  Exits every alias
