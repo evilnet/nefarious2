@@ -1682,9 +1682,12 @@ extern int bounce_yield_held_ghost(struct BouncerSession *session,
  * to new_primary (BX P) and hold it in acptr's channels with acptr's
  * status: each membership acptr held as the primary becomes
  * new_primary's here too, with that status, and acptr stays its alias
- * member (bounce_swap_takes_membership()); the channel goes on @a
- * taken.  Nothing is shown to the channels: their members saw the same
- * nick before and after.  The finish tells the other servers (W3 12c-2a).
+ * member; the channel goes on @a taken.  Nothing is shown to the
+ * channels: their members saw the same nick before and after.  A channel
+ * whose admission modes new_primary does not meet (+Z, +O, +a) is left
+ * instead: acptr leaves it everywhere by a Net Rider KICK
+ * (bounce_swap_membership()).  The finish tells the other servers (W3
+ * 12c-2a).
  *
  * Runs only when bounce_demote_eligibility() says so at
  * BOUNCE_DEMOTE_PLAN; nothing changes otherwise.

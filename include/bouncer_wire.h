@@ -1139,32 +1139,61 @@ extern enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
                                                     int same_account,
                                                     int kc_conflict, int ours);
 
-/** Does the survivor of a D.2 swap take this membership of the face the
- * swap demoted (W3 12c-2a)?
+/** What a D.2 swap does with one membership of the face it demoted
+ * (W3 12c-2a). */
+enum bounce_swap_member {
+  BOUNCE_SWAP_SKIP,  /**< nothing: the face's membership stays as it is
+                      *   (an alias member of it, as every device is of
+                      *   its primary's channels) */
+  BOUNCE_SWAP_TAKE,  /**< the survivor takes it, with the face's status */
+  BOUNCE_SWAP_KICK   /**< the survivor may not be in the channel: the face
+                      *   leaves it everywhere (the netjoin's Net Rider
+                      *   KICK) */
+};
+
+/** The facts a swap reads about one membership of the face (each 0 or 1). */
+struct bounce_swap_facts {
+  int swap;              /**< the demote is a D.2 swap: the legacy links
+                          *   renumbered the face to the survivor (BX P) */
+  int face_alias;        /**< the face holds it as an alias member */
+  int zombie;            /**< it is a zombie membership (a kick under way) */
+  int local_channel;     /**< the channel is a local (&) one */
+  int survivor_member;   /**< the survivor is in the channel already */
+  int ssl_only;          /**< the channel is +Z */
+  int plaintext;         /**< the survivor, or a device of its session this
+                          *   server knows, is not on TLS (m_join's +Z rule) */
+  int oper_only;         /**< the channel is +O */
+  int survivor_oper;     /**< the survivor is an IRC operator */
+  int admin_only;        /**< the channel is +a */
+  int survivor_admin;    /**< the survivor is an IRC administrator */
+};
+
+/** What a D.2 swap does with one membership of the face it demoted
+ * (W3 12c-2a, fix round 1).
  *
  * A swap renumbers the face the legacy links hold to the survivor (BX P),
  * so they hold the survivor as a member of every channel the face was in,
- * with the face's status.  The face's own server converts each such
- * membership into the survivor's, and the face stays an alias member of
- * it, as every device of the session is of its primary's channels: the
- * channel's members there saw the same nick before and after.
+ * with the face's status, and the channel's members on the face's server
+ * saw the same nick before and after.  The face's server converts each
+ * such membership into the survivor's (TAKE) and the face stays an alias
+ * member of it.
  *
- * Taken: a membership the face held as the session's primary.  Not taken:
- * one of a demote that is no swap (the reconcile's, whose face leaves the
- * legacy links by a Q: nothing there holds the survivor in its channels);
- * one the face held only as an alias member (a membership no server has as
- * the session's); a zombie (a kick in progress); a local channel (a client
- * of another server is never in one); and a channel the survivor is in
- * already (its own membership stands).
+ * Unless the survivor may not be in the channel by the channel's
+ * admission modes -- +Z while the survivor or a device of its session is
+ * plaintext, +O for a non-oper, +a for a non-admin, m_join's rules: then
+ * the face leaves the channel (KICK), on its server and on the legacy
+ * links that hold it there, the one outcome every server agrees on.
  *
- * @param[in] swap             The demote is a D.2 swap (the legacy links
- *                             renumbered the face to the survivor).
- * @param[in] face_alias       The face held it as an alias member.
- * @param[in] zombie           It is a zombie membership.
- * @param[in] local_channel    The channel is a local (&) one.
- * @param[in] survivor_member  The survivor is a member of the channel.
+ * Nothing (SKIP) for: a demote that is no swap (the reconcile's, whose
+ * face leaves the legacy links by a Q: nobody holds the survivor in its
+ * channels); a membership the face held only as an alias member (no
+ * server has it as the session's); a zombie (a kick in progress); a local
+ * channel (a client of another server is never in one); and a channel the
+ * survivor is in already (its own membership stands).
+ *
+ * @param[in] f The facts; NULL is SKIP.
  */
-extern int bounce_swap_takes_membership(int swap, int face_alias, int zombie,
-                                        int local_channel, int survivor_member);
+extern enum bounce_swap_member
+bounce_swap_membership(const struct bounce_swap_facts *f);
 
 #endif /* INCLUDED_bouncer_wire_h */

@@ -1852,56 +1852,129 @@ static void repoint_selection_matrix(void **s)
   }
 }
 
-/* bounce_swap_takes_membership(swap, face_alias, zombie, local_channel,
- *                              survivor_member) */
+/* bounce_swap_membership(facts) */
+
+/* A swap's membership: the face held it as the primary, in a global
+ * channel the survivor is not in, with no admission mode set. */
+static struct bounce_swap_facts swap_member(void)
+{
+  struct bounce_swap_facts f;
+  memset(&f, 0, sizeof f);
+  f.swap = 1;
+  return f;
+}
 
 static void swap_survivor_takes_the_faces_channel(void **s)
 {
+  struct bounce_swap_facts f = swap_member();
   (void)s;
   /* The legacy links renumbered the face to the survivor, which they now
    * hold in the face's channel: the face's server holds the same. */
-  assert_true(bounce_swap_takes_membership(1, 0, 0, 0, 0));
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_TAKE);
 }
 
 static void reconcile_demote_converts_nothing(void **s)
 {
-  int a, z, l, m;
+  int bits;
   (void)s;
   /* A demote that is no swap (the reconcile's) retracts the face from the
-   * legacy links with a Q: nobody holds the survivor in its channels. */
-  for (a = 0; a < 2; a++)
-    for (z = 0; z < 2; z++)
-      for (l = 0; l < 2; l++)
-        for (m = 0; m < 2; m++)
-          assert_false(bounce_swap_takes_membership(0, a, z, l, m));
+   * legacy links with a Q: nobody holds the survivor in its channels, and
+   * nothing is kicked either, whatever the channel's modes. */
+  for (bits = 0; bits < 1024; bits++) {
+    struct bounce_swap_facts f;
+    memset(&f, 0, sizeof f);
+    f.face_alias = bits & 1;       f.zombie = (bits >> 1) & 1;
+    f.local_channel = (bits >> 2) & 1; f.survivor_member = (bits >> 3) & 1;
+    f.ssl_only = (bits >> 4) & 1;  f.plaintext = (bits >> 5) & 1;
+    f.oper_only = (bits >> 6) & 1; f.survivor_oper = (bits >> 7) & 1;
+    f.admin_only = (bits >> 8) & 1; f.survivor_admin = (bits >> 9) & 1;
+    assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
+  }
+  assert_int_equal(bounce_swap_membership(NULL), BOUNCE_SWAP_SKIP);
 }
 
 static void swap_skips_what_no_server_holds_as_the_sessions(void **s)
 {
+  struct bounce_swap_facts f;
   (void)s;
   /* An alias membership of the face (a primary promoted with alias-only
-   * channels), a zombie, a local channel. */
-  assert_false(bounce_swap_takes_membership(1, 1, 0, 0, 0));
-  assert_false(bounce_swap_takes_membership(1, 0, 1, 0, 0));
-  assert_false(bounce_swap_takes_membership(1, 0, 0, 1, 0));
+   * channels), a zombie, a local channel -- even one the survivor could
+   * not join: nothing holds it as the session's, nothing is kicked. */
+  f = swap_member(); f.face_alias = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
+  f.ssl_only = 1; f.plaintext = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
+  f = swap_member(); f.zombie = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
+  f = swap_member(); f.local_channel = 1; f.oper_only = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
 }
 
 static void swap_keeps_the_survivors_own_membership(void **s)
 {
+  struct bounce_swap_facts f = swap_member();
   (void)s;
-  /* The survivor in the channel already keeps the membership it has. */
-  assert_false(bounce_swap_takes_membership(1, 0, 0, 0, 1));
+  /* The survivor in the channel already keeps the membership it has (its
+   * own server admitted it). */
+  f.survivor_member = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
+  f.ssl_only = 1; f.plaintext = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_SKIP);
+}
+
+static void swap_kicks_from_a_tls_only_channel_a_plaintext_session(void **s)
+{
+  struct bounce_swap_facts f = swap_member();
+  (void)s;
+  /* +Z: m_join refuses a plaintext survivor, or one whose session has a
+   * plaintext device; the face leaves the channel. */
+  f.ssl_only = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_TAKE);
+  f.plaintext = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_KICK);
+  f.ssl_only = 0;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_TAKE);
+}
+
+static void swap_kicks_from_an_oper_or_admin_channel_a_survivor_without_it(void **s)
+{
+  struct bounce_swap_facts f = swap_member();
+  (void)s;
+  f.oper_only = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_KICK);
+  f.survivor_oper = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_TAKE);
+  f = swap_member(); f.admin_only = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_KICK);
+  f.survivor_admin = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_TAKE);
+  /* An oper who is no admin is still refused +a. */
+  f = swap_member(); f.admin_only = 1; f.survivor_oper = 1;
+  assert_int_equal(bounce_swap_membership(&f), BOUNCE_SWAP_KICK);
 }
 
 static void swap_membership_matrix(void **s)
 {
   int bits;
   (void)s;
-  for (bits = 0; bits < 32; bits++) {
-    int w = bits & 1, a = (bits >> 1) & 1, z = (bits >> 2) & 1;
-    int l = (bits >> 3) & 1, m = (bits >> 4) & 1;
-    assert_int_equal(!!bounce_swap_takes_membership(w, a, z, l, m),
-                     w && !a && !z && !l && !m);
+  for (bits = 0; bits < 2048; bits++) {
+    struct bounce_swap_facts f;
+    enum bounce_swap_member want;
+    int refused;
+    memset(&f, 0, sizeof f);
+    f.swap = bits & 1;             f.face_alias = (bits >> 1) & 1;
+    f.zombie = (bits >> 2) & 1;    f.local_channel = (bits >> 3) & 1;
+    f.survivor_member = (bits >> 4) & 1;
+    f.ssl_only = (bits >> 5) & 1;  f.plaintext = (bits >> 6) & 1;
+    f.oper_only = (bits >> 7) & 1; f.survivor_oper = (bits >> 8) & 1;
+    f.admin_only = (bits >> 9) & 1; f.survivor_admin = (bits >> 10) & 1;
+    refused = (f.ssl_only && f.plaintext) || (f.oper_only && !f.survivor_oper)
+              || (f.admin_only && !f.survivor_admin);
+    if (!f.swap || f.face_alias || f.zombie || f.local_channel || f.survivor_member)
+      want = BOUNCE_SWAP_SKIP;
+    else
+      want = refused ? BOUNCE_SWAP_KICK : BOUNCE_SWAP_TAKE;
+    assert_int_equal(bounce_swap_membership(&f), want);
   }
 }
 
@@ -1914,6 +1987,8 @@ int main(void)
     cmocka_unit_test(reconcile_demote_converts_nothing),
     cmocka_unit_test(swap_skips_what_no_server_holds_as_the_sessions),
     cmocka_unit_test(swap_keeps_the_survivors_own_membership),
+    cmocka_unit_test(swap_kicks_from_a_tls_only_channel_a_plaintext_session),
+    cmocka_unit_test(swap_kicks_from_an_oper_or_admin_channel_a_survivor_without_it),
     cmocka_unit_test(swap_membership_matrix),
     cmocka_unit_test(repoint_takes_an_alias_of_the_outgoing_client),
     cmocka_unit_test(repoint_takes_a_roster_alias_that_follows_nobody),

@@ -9209,6 +9209,69 @@ static void bounce_announce_alias(struct BouncerSession *session,
                            chanlist_buf);
 }
 
+/** Is the survivor of a swap plaintext for m_join's +Z rule, as this
+ * server knows the session at the swap: the survivor itself, the face
+ * being demoted, or a device of the session's record here not on TLS. */
+static int swap_session_plaintext(struct BouncerSession *s, struct Client *face,
+                                  struct Client *survivor)
+{
+  int i;
+
+  if (!IsSSL(survivor) || !IsSSL(face))
+    return 1;
+  for (i = 0; s && i < s->hs_alias_count; i++) {
+    struct Client *a = findNUser(s->hs_aliases[i].ba_numeric);
+    if (a && IsBouncerAlias(a) && !IsSSL(a))
+      return 1;
+  }
+  return 0;
+}
+
+/** A swap's survivor may not be in @a chptr by its admission modes
+ * (bounce_swap_membership() KICK): @a face, the face being demoted, leaves
+ * it everywhere it is held, as the netjoin's Net Rider KICK makes a member
+ * leave a channel it may not ride into (W3 12c-2a fix round 1).
+ *
+ * - Here: the channel's members are told (from the hidden server, as a
+ *   netjoin tells them), and the face and its devices leave it.
+ * - The legacy links hold the face there under the survivor's numeric
+ *   (the swap's BX P): a KICK of the survivor, as its own server's -- the
+ *   server a netjoin's KICK comes from -- toward every link but the
+ *   survivor's (its server never held it there), so a receiver removes
+ *   the member at once instead of keeping a zombie for an acknowledgement
+ *   no server would send, and logs no HACK. */
+static void bounce_swap_kick(struct Channel *chptr, struct Client *face,
+                             struct Client *survivor)
+{
+  char msgid[64] = "";
+  uint64_t ms = 0;
+  /* Inside the line that introduced the survivor: none of these lines is
+   * its relay (as bounce_swap_announce_channels()). */
+  struct Client *inbound = sendcmdto_inbound_link();
+
+  sendcmdto_set_inbound_link(NULL);
+  if (feature_bool(FEAT_MSGID)) {
+    generate_msgid(msgid, sizeof(msgid));
+    ms = history_event_time_ms(NULL);
+    sendcmdto_set_s2s_tags(ms, msgid);
+    sendcmdto_want_s2s_tags(1);
+  }
+  sendcmdto_serv_butone(cli_user(survivor)->server, CMD_KICK, survivor,
+                        "%H %C :Net Rider", chptr, survivor);
+  if (msgid[0])
+    sendcmdto_set_client_event(msgid, ms);
+  sendcmdto_channel_butserv_butone(&his, CMD_KICK, chptr, NULL, 0,
+                                   "%H %C :Net Rider", chptr, face);
+  sendcmdto_set_client_msgid(NULL);
+  log_write(LS_USER, L_INFO, 0, "Bouncer swap: %s may not be in %s (its "
+            "admission modes): %s leaves it (Net Rider)", cli_name(survivor),
+            chptr->chname, cli_name(face));
+  /* The face, still the primary here, and with it its alias members
+   * (bounce_sync_alias_part); counts move as for any part. */
+  remove_user_from_channel(face, chptr);
+  sendcmdto_set_inbound_link(inbound);
+}
+
 /** The modes of @a chptr toward every IRCv3-aware link that is not
  * burst-gated, as the netjoin's memberless BURST at the channel's TS
  * (per link: apass/upass only where oplevels are taken).  A receiver that
@@ -9441,17 +9504,33 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
    * hold it there, and the channel's members here saw the same nick
    * throughout, so nothing is shown.  Each count moves once: the flip
    * gives the channel's user count up, new_primary's membership takes it
-   * again.  The channel goes on @a taken, for the finish to announce
-   * (bounce_swap_takes_membership()). */
+   * again.  The channel goes on @a taken, for the finish to announce.  A
+   * channel whose admission modes new_primary does not meet (+Z, +O, +a)
+   * is left instead: acptr leaves it everywhere by a Net Rider KICK
+   * (bounce_swap_membership(); fix round 1). */
   for (member = cli_user(acptr)->channel; member; member = next_member) {
     struct Channel *chptr = member->channel;
+    struct bounce_swap_facts f;
 
     next_member = member->next_channel;
-    if (bounce_swap_takes_membership(taken != NULL, IsMemberAlias(member),
-                                     IsZombie(member),
-                                     IsLocalChannel(chptr->chname),
-                                     find_member_link(chptr, new_primary)
-                                       != NULL)) {
+    memset(&f, 0, sizeof f);
+    f.swap = taken != NULL;
+    f.face_alias = IsMemberAlias(member);
+    f.zombie = IsZombie(member);
+    f.local_channel = IsLocalChannel(chptr->chname);
+    f.survivor_member = find_member_link(chptr, new_primary) != NULL;
+    f.ssl_only = (chptr->mode.exmode & EXMODE_SSLONLY) != 0;
+    f.plaintext = f.ssl_only && swap_session_plaintext(session, acptr,
+                                                       new_primary);
+    f.oper_only = (chptr->mode.exmode & EXMODE_OPERONLY) != 0;
+    f.survivor_oper = IsAnOper(new_primary) ? 1 : 0;
+    f.admin_only = (chptr->mode.exmode & EXMODE_ADMINONLY) != 0;
+    f.survivor_admin = IsAdmin(new_primary) ? 1 : 0;
+    switch (bounce_swap_membership(&f)) {
+    case BOUNCE_SWAP_KICK:
+      bounce_swap_kick(chptr, acptr, new_primary);
+      continue;    /* acptr is no member of it any more */
+    case BOUNCE_SWAP_TAKE: {
       struct Membership *nm;
       struct SLink *lp;
 
@@ -9468,6 +9547,10 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
       lp->value.chptr = chptr;
       lp->next = *taken;
       *taken = lp;
+      break;
+    }
+    case BOUNCE_SWAP_SKIP:
+      break;
     }
     if (!IsMemberAlias(member)) {
       member->status |= CHFL_ALIAS;
