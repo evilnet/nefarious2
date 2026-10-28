@@ -5748,6 +5748,13 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
     if (!a || a == primary || !IsUser(a) || !IsBouncerAlias(a) || !cli_user(a)
         || HasFlag(a, FLAG_CLOSING) || cli_user(a)->alias_primary != primary)
       continue;
+    /* Only a device of this session (bounce_end_takes_device()): filed on
+     * its roster or carrying its id, and of its Keycloak user. */
+    if (!bounce_end_takes_device(session_roster_has(s, a),
+                                 0 == strcmp(cli_session_id(a), ended),
+                                 bounce_rebind_kc_conflict(bounce_session_kc_id(s),
+                                                           cli_user(a)->kc_id)))
+      continue;
     if (a == cptr) {
       /* The connection being handled is never exited under its own
        * command: with no primary, the orphan sweep ends it once the

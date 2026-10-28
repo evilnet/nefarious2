@@ -1455,6 +1455,26 @@ static void only_a_detach_is_ever_refused(void **s)
   }
 }
 
+/* bounce_end_takes_device(filed, same_id, kc_conflict) */
+
+static void an_end_takes_a_device_of_the_session(void **s)
+{
+  (void)s;
+  assert_true(bounce_end_takes_device(1, 1, 0));
+  assert_true(bounce_end_takes_device(1, 0, 0));
+  assert_true(bounce_end_takes_device(0, 1, 0));
+}
+
+static void an_end_leaves_a_device_it_cannot_tie_to_the_session(void **s)
+{
+  int f, i;
+  (void)s;
+  assert_false(bounce_end_takes_device(0, 0, 0));
+  for (f = 0; f < 2; f++)
+  for (i = 0; i < 2; i++)
+    assert_false(bounce_end_takes_device(f, i, 1));
+}
+
 /* bounce_bsx_keep_reannounces(kept, link_hold_mark) */
 
 static void a_kept_session_is_announced_again_to_a_hold_mark_link(void **s)
@@ -1656,6 +1676,8 @@ int main(void)
     cmocka_unit_test(a_remote_primary_is_never_exited_here),
     cmocka_unit_test(a_detach_of_an_enforced_session_is_refused),
     cmocka_unit_test(only_a_detach_is_ever_refused),
+    cmocka_unit_test(an_end_takes_a_device_of_the_session),
+    cmocka_unit_test(an_end_leaves_a_device_it_cannot_tie_to_the_session),
     cmocka_unit_test(a_kept_session_is_announced_again_to_a_hold_mark_link),
     cmocka_unit_test(a_ban_never_promotes_a_fault_never_ends),
     cmocka_unit_test(crossed_promote_another_device_takes_over),

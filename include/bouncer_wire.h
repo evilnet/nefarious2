@@ -801,6 +801,17 @@ extern char bounce_member_end_letter(enum bounce_member_end how);
  */
 extern int bounce_end_refused(enum bounce_member_end how, int enforced);
 
+/** Does a session's end on this server take a device of ours that follows
+ * the session's primary?  Only one of this session: filed on its roster,
+ * or carrying its id, and of its Keycloak user (as a BS X's receiver
+ * judges a device, bounce_bsx_ends_device()).
+ *
+ * @param[in] filed       The record's roster lists the device.
+ * @param[in] same_id     The device carries the session's id.
+ * @param[in] kc_conflict The device's Keycloak id is not the session's.
+ */
+extern int bounce_end_takes_device(int filed, int same_id, int kc_conflict);
+
 /** The member end a wire letter names, or -1 for one this server does not
  * know (a newer peer's: the line is dropped, never guessed at). */
 extern int bounce_member_end_parse(const char *letter);

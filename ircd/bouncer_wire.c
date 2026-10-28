@@ -369,6 +369,11 @@ int bounce_end_refused(enum bounce_member_end how, int enforced)
   return how == BOUNCE_MEMBER_END_DETACH && enforced;
 }
 
+int bounce_end_takes_device(int filed, int same_id, int kc_conflict)
+{
+  return (filed || same_id) && !kc_conflict;
+}
+
 enum bounce_end_route bounce_end_route(int has_primary, int primary_ours,
                                        int route_reads_carry)
 {
