@@ -2016,22 +2016,114 @@ static void session_roster_drop_account(struct Client *c,
     session_roster_drop(s, c, s == into);
 }
 
-/** Every alias whose primary is @a old follows @a new_primary: the
- * client a BX P names in @a old's place.  Whatever record files the alias
- * (or none: an alias of a session kept apart here), @a old is about to
- * leave, and an alias left pointing at it would be left with no primary
- * at all -- its channel memberships parted with @a old's, its lines
- * attributed to nobody. */
-static void bounce_repoint_aliases(struct Client *old, struct Client *new_primary)
+/** How bounce_repoint_aliases() tells the network of a re-point. */
+enum bounce_repoint_mode {
+  BOUNCE_REPOINT_ONLY,     /**< our view only: every server applies the
+                            *   line that made the change itself (BX P) */
+  BOUNCE_REPOINT_ANNOUNCE  /**< a decision only this server makes (a
+                            *   demote, a held copy's or a held ghost's
+                            *   yield): our own aliases are renamed,
+                            *   re-filed and announced */
+};
+
+/** File our alias @a c in @a record and in no other record of the
+ * account.  An entry another record kept for it moves (its profile,
+ * activity and caps with it); else it gets a new one. */
+static void bounce_repoint_file(struct BouncerSession *record, struct Client *c)
+{
+  struct AccountSessions *as = bounce_find_by_account(record->hs_account);
+  struct BouncerSession *s;
+  int i;
+
+  if (!session_roster_has(record, c)) {
+    struct BounceAlias *from = NULL;
+    char full[6];
+
+    ircd_snprintf(0, full, sizeof(full), "%s%s", cli_yxx(&me), cli_yxx(c));
+    for (s = as ? as->as_sessions : NULL; s && !from; s = s->hs_anext)
+      for (i = 0; s != record && i < s->hs_alias_count; i++)
+        if (0 == strcmp(s->hs_aliases[i].ba_numeric, full)) {
+          from = &s->hs_aliases[i];
+          break;
+        }
+    if (record->hs_alias_count >= BOUNCER_MAX_ALIASES)
+      log_write(LS_USER, L_WARNING, 0, "Bouncer: session %s of %s is full; "
+                "its alias %s (%s) is not filed", record->hs_sessid,
+                record->hs_account, full, cli_name(c));
+    else if (from) {
+      record->hs_aliases[record->hs_alias_count++] = *from;
+      bounce_db_put(record);
+    } else
+      session_roster_add(record, full, NULL);
+  }
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    if (s != record)
+      session_roster_drop(s, c, 0);
+}
+
+/** Every device of @a old follows @a new_primary when @a old stops being
+ * the primary of @a record's session (T12-2): a demote, a held copy's or a
+ * held ghost's yield, a BX P.  Which aliases: bounce_repoint_take() -- one
+ * that follows @a old, filed anywhere or nowhere, and one on @a record's
+ * roster that follows nobody.  Left behind, a device is an alias of an
+ * alias: its lines toward a legacy link go out under a numeric the link no
+ * longer knows, its nick goes stale, and the other servers never learn of
+ * it; or, when @a old leaves, it has no primary at all.
+ *
+ * Every alias taken follows @a new_primary.  With BOUNCE_REPOINT_ANNOUNCE
+ * (@a record required) our own aliases also take its nick, their socket
+ * told first by the nick they had (#2); take @a record's id and filing
+ * (in it, in no other record); and are announced -- BX C, then their caps
+ * and their own away state (BX U), which a receiver's re-file starts
+ * afresh.  Another server's alias takes the nick in our view only; its
+ * server speaks for it.  No count moves: an alias stays an alias. */
+static void bounce_repoint_aliases(struct Client *old, struct Client *new_primary,
+                                   struct BouncerSession *record,
+                                   enum bounce_repoint_mode mode)
 {
   struct Client *c;
 
-  if (!old || !new_primary || old == new_primary)
+  if (!new_primary || old == new_primary || !IsUser(new_primary)
+      || !cli_user(new_primary))
     return;
-  for (c = GlobalClientList; c; c = cli_next(c))
-    if (c != new_primary && IsBouncerAlias(c) && cli_user(c)
-        && cli_user(c)->alias_primary == old)
-      cli_user(c)->alias_primary = new_primary;
+  if (mode == BOUNCE_REPOINT_ANNOUNCE && !record)
+    mode = BOUNCE_REPOINT_ONLY;
+  for (c = GlobalClientList; c; c = cli_next(c)) {
+    struct Client *p;
+    int alias = IsBouncerAlias(c) && IsUser(c) && cli_user(c);
+    enum bounce_repoint_take take;
+
+    p = alias ? cli_user(c)->alias_primary : NULL;
+    take = bounce_repoint_take(alias, c == new_primary, old && p == old,
+                               alias && !p,
+                               alias && record && session_roster_has(record, c),
+                               MyConnect(c));
+    if (take == BOUNCE_REPOINT_SKIP)
+      continue;
+    cli_user(c)->alias_primary = new_primary;
+    if (mode != BOUNCE_REPOINT_ANNOUNCE)
+      continue;
+    if (take == BOUNCE_REPOINT_REMOTE) {
+      if (0 != ircd_strcmp(cli_name(c), cli_name(new_primary)))
+        ircd_strncpy(cli_name(c), cli_name(new_primary), NICKLEN + 1);
+      continue;
+    }
+    if (0 != ircd_strcmp(cli_name(c), cli_name(new_primary))) {
+      Debug((DEBUG_INFO, "Bouncer: alias %s follows %s, renamed with it",
+             cli_name(c), cli_name(new_primary)));
+      sendcmdto_one(c, CMD_NICK, c, "%s", cli_name(new_primary));
+      ircd_strncpy(cli_name(c), cli_name(new_primary), NICKLEN + 1);
+    }
+    if (0 != strcmp(cli_session_id(c), record->hs_sessid)) {
+      presence_purge_session(cli_session_id(c));
+      ircd_strncpy(cli_session_id(c), record->hs_sessid, S2S_SESSID_BUFSIZE);
+    }
+    bounce_repoint_file(record, c);
+    bounce_announce_alias(record, c, new_primary);
+    bounce_emit_alias_caps(c);
+    if (cli_connect(c) && con_pre_away(cli_connect(c)) != 0)
+      bounce_note_away_state(c, con_pre_away(cli_connect(c)));
+  }
 }
 
 /** Note that @a server announced @a s "holding" in a BS C that came over
@@ -5416,7 +5508,6 @@ static int bounce_held_copy_yields(struct BouncerSession *s,
   struct Client *ours = s->hs_client;
   struct Client *ghost = (ours && MyConnect(ours) && IsBouncerHold(ours))
                          ? ours : NULL;
-  int i;
 
   if (!bounce_hs_client_assign_checked(s, peer, site)) {
     log_write(LS_USER, L_INFO, 0,
@@ -5445,21 +5536,10 @@ static int bounce_held_copy_yields(struct BouncerSession *s,
   /* The persisted record was of our ghost. */
   bounce_db_del(s->hs_sessid);
 
-  for (i = 0; i < s->hs_alias_count; i++) {
-    struct Client *alias = findNUser(s->hs_aliases[i].ba_numeric);
-    if (!alias || !IsBouncerAlias(alias) || !cli_user(alias))
-      continue;
-    cli_user(alias)->alias_primary = peer;
-    if (!MyConnect(alias))
-      continue;
-    if (0 != ircd_strcmp(cli_name(alias), cli_name(peer))) {
-      sendcmdto_one(alias, CMD_NICK, alias, "%s", cli_name(peer));
-      Debug((DEBUG_INFO, "Bouncer reconcile: alias %s renamed to %s "
-             "with its new primary", cli_name(alias), cli_name(peer)));
-      ircd_strncpy(cli_name(alias), cli_name(peer), NICKLEN + 1);
-    }
-    bounce_announce_alias(s, alias, peer);
-  }
+  /* Every device of our copy follows the peer's primary (T12-2): renamed
+   * with it, filed and announced; before the ghost's exit, so its BX X
+   * follows their BX C. */
+  bounce_repoint_aliases(ours, peer, s, BOUNCE_REPOINT_ANNOUNCE);
 
   if (ghost)
     exit_client(cptr, ghost, &me, "Bouncer session moved");
@@ -9205,6 +9285,11 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
    * primary pointing at new_primary, channel memberships reflecting
    * the demoted_alias's channel list. */
   bounce_announce_alias(session, demoted_alias, new_primary);
+  /* Every other device of the demoted client moves with it (T12-2), each
+   * announced after the demoted client's BX C.  Nothing goes toward the
+   * legacy links for them: they never knew an alias. */
+  bounce_repoint_aliases(demoted_alias, new_primary, session,
+                         BOUNCE_REPOINT_ANNOUNCE);
   {
     /* Legacy peers: present the demote as a QUIT for the old primary.
      *
@@ -9371,22 +9456,12 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
                sizeof(target->hs_ghost_numeric));
   bounce_db_del(target->hs_sessid);
 
-  /* Its live connections follow the incoming primary, and the aware
-   * links learn ours as its aliases (a peer that knew them from our burst
-   * as the ghost's re-files them). */
-  for (i = 0; installed && i < target->hs_alias_count; i++) {
-    struct Client *alias = findNUser(target->hs_aliases[i].ba_numeric);
-    if (!alias || !IsBouncerAlias(alias) || !cli_user(alias))
-      continue;
-    cli_user(alias)->alias_primary = new_primary;
-    if (0 != strcmp(cli_session_id(alias), target->hs_sessid)) {
-      presence_purge_session(cli_session_id(alias));
-      ircd_strncpy(cli_session_id(alias), target->hs_sessid,
-                   S2S_SESSID_BUFSIZE);
-    }
-    if (MyConnect(alias))
-      bounce_announce_alias(target, alias, new_primary);
-  }
+  /* Every device of the ghost follows the incoming primary (T12-2): ours
+   * take its nick and the record's id and filing, and the aware links
+   * learn them as its aliases (a peer that knew them from our burst as the
+   * ghost's re-files them). */
+  if (installed)
+    bounce_repoint_aliases(ghost, new_primary, target, BOUNCE_REPOINT_ANNOUNCE);
 
   /* A merge's record of ours ends now, after its devices' BX C (12a fix-1
    * carry): the very record, if the account still lists it. */
@@ -11062,7 +11137,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
    * another), before the old client leaves a channel -- which parts its
    * aliases from it (the swap below, or the exit) -- and exits, which
    * would leave them with no primary. */
-  bounce_repoint_aliases(old_client, new_client);
+  bounce_repoint_aliases(old_client, new_client, NULL, BOUNCE_REPOINT_ONLY);
 
   if (IsBouncerAlias(new_client)) {
     /* Alias path: new_client is already in channels with CHFL_ALIAS.

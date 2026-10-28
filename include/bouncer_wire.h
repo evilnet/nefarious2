@@ -1087,4 +1087,43 @@ bounce_crossed_backstop_action(int noted, int slot_is_kept, long age,
  */
 extern int bounce_crossed_replace_retracts(int noted, int new_is_kept);
 
+/** What a re-point of the outgoing client's devices does with a client
+ * (bounce_repoint_aliases()). */
+enum bounce_repoint_take {
+  BOUNCE_REPOINT_SKIP,    /**< not a device of the outgoing client */
+  BOUNCE_REPOINT_OWN,     /**< an alias of ours: it follows the new primary,
+                           *   takes its nick (its socket told first), the
+                           *   record's id and filing, and is announced */
+  BOUNCE_REPOINT_REMOTE   /**< another server's alias: it follows the new
+                           *   primary in our view only (its own server
+                           *   speaks for it) */
+};
+
+/** Which clients follow a new primary when the client they followed stops
+ * being the session's primary (a demote, a held copy's yield, a held
+ * ghost's yield, a BX P): every device of the outgoing client moves with
+ * it (T12-2).  Left behind, a device would be an alias of an alias: its
+ * lines toward a legacy link go out under a numeric the link no longer
+ * knows, its nick goes stale, and the other servers never learn it.
+ *
+ * Taken: an alias that follows the outgoing client, filed on any record
+ * or none; and an alias on the record's roster that follows nobody.  Not
+ * taken: anything that is not an alias, the new primary itself, and an
+ * alias that follows another client (another copy's device, filed here by
+ * the session id, follows its own copy's primary).
+ *
+ * @param[in] alias        The client is a bouncer alias.
+ * @param[in] is_new       It is the new primary.
+ * @param[in] follows_old  Its primary is the outgoing client (never true
+ *                         for an outgoing client the caller does not
+ *                         know).
+ * @param[in] follows_none It has no primary.
+ * @param[in] on_roster    The record the new primary takes lists it.
+ * @param[in] ours         It is a connection of this server.
+ */
+extern enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
+                                                    int follows_old,
+                                                    int follows_none,
+                                                    int on_roster, int ours);
+
 #endif /* INCLUDED_bouncer_wire_h */

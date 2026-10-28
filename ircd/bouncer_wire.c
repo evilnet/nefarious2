@@ -500,3 +500,15 @@ int bounce_crossed_replace_retracts(int noted, int new_is_kept)
 {
   return noted && !new_is_kept;
 }
+
+enum bounce_repoint_take bounce_repoint_take(int alias, int is_new,
+                                             int follows_old, int follows_none,
+                                             int on_roster, int ours)
+{
+  /* A device of the outgoing client: one that follows it, filed anywhere,
+   * or one of the record's that follows nobody.  Never the new primary,
+   * which follows nobody from now on. */
+  if (!alias || is_new || !(follows_old || (follows_none && on_roster)))
+    return BOUNCE_REPOINT_SKIP;
+  return ours ? BOUNCE_REPOINT_OWN : BOUNCE_REPOINT_REMOTE;
+}
