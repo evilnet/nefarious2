@@ -2209,7 +2209,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   struct Client *acptr = NULL;
   struct Client *snoc = NULL;
   int sno_touched = 0;
-  /* A -b's session end, run at the end of this function (see there). */
+  /* What a -b does, after the mode loop (a +b later in the same command
+   * cancels all of it: the final state wins).  The hold preference: written
+   * here (hold_off), and told to every server (hold_off_tell).  The session
+   * end, run at the end of this function (see there). */
+  int hold_off = 0;
+  int hold_off_tell = 0;
   char end_account[ACCOUNTLEN + 1] = "";
   char end_sessid[BOUNCER_SESSID_LEN] = "";
 
@@ -2599,6 +2604,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         break;
       case 'b':
         if (what == MODE_ADD) {
+          /* A -b earlier in this command does not stand: as for any mode
+           * string, the final state wins (ruling W3-T12b-f4b).  No
+           * preference write or end of its goes ahead. */
+          hold_off = hold_off_tell = 0;
+          end_account[0] = end_sessid[0] = '\0';
           SetBncHoldPref(acptr);
           metadata_set_client(acptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
           /* Auto-create bouncer session if local client doesn't have one */
@@ -2609,27 +2619,34 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           }
         } else {
           struct BouncerSession *session = NULL;
+          /* The command comes from a device of ours whose primary, the
+           * target, is on another server. */
+          int asker_device = MyConnect(sptr) && IsBouncerAlias(sptr)
+                             && cli_alias_primary(sptr) == acptr;
 
           /* The session to end: ours, or the one a device of ours of a
            * primary on another server is in. */
-          if (MyUser(acptr)
-              || (MyConnect(sptr) && IsBouncerAlias(sptr)
-                  && cli_alias_primary(sptr) == acptr))
+          if (MyUser(acptr) || asker_device)
             session = bounce_get_session(acptr);
           ClearBncHoldPref(acptr);
           /* The preference, unless the end goes to the session's holder on
            * another server, which writes it (to every server) when it
-           * accepts the end. */
-          if (!session || bounce_end_asker_applies(bounce_member_end_route(session))) {
-            metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-            /* A primary on another server never sees this mode change
-             * (its server drops the M line, sourced from its own client,
-             * as a fake direction): tell every server the preference, as
-             * BOUNCER SET HOLD off does. */
-            if (!MyUser(acptr))
-              sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                                       cli_name(acptr), "draft/persistence/hold");
-          }
+           * accepts the end.  Written after the mode loop (a +b later in
+           * this command cancels it), before the mode line goes out. */
+          hold_off = !session
+                     || bounce_end_asker_applies(bounce_member_end_route(session));
+          /* A primary on another server never sees this mode change (its
+           * server drops the M line, sourced from its own client, as a
+           * fake direction): the server of the device that asked tells
+           * every server the preference, as BOUNCER SET HOLD off does.
+           * Only that server (ruling W3-T12b-f4a): a server that receives
+           * a remote user's -b by its M line changes its own copy and
+           * tells nobody -- a hold 0 sent from there reaches the user's
+           * server after the user's own next +b and turns it off again --
+           * and nothing goes out for a client that is not a user yet (a
+           * -b in USER, an iauth or class mode). */
+          hold_off_tell = hold_off && asker_device && !MyUser(acptr)
+                          && IsUser(acptr);
           /* End the session: its holder does (here, or the end goes
            * there); the primary carries on outside it, every device of it
            * goes.  Run last (below): the end can exit the mode's target. */
@@ -2824,6 +2841,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       set_snomask(snoc, 0, SNO_SET);
     }
   }
+  /* A -b that stands (no +b after it in this command): the hold
+   * preference, before the mode line goes out and before the end. */
+  if (hold_off) {
+    metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+    if (hold_off_tell)
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                               cli_name(acptr), "draft/persistence/hold");
+  }
+
   /*
    * Compare new flags with old flags and send string which
    * will cause servers to update correctly.
