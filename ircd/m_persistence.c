@@ -225,6 +225,16 @@ void persistence_send_status(struct Client *to)
                 persistence_state_keyword(to));
 }
 
+/** Send the STATUS of a hold turned off: client-setting OFF, effective
+ * OFF -- what a PERSISTENCE SET OFF or DETACH carried to the session's
+ * holder on another server leads to once it is applied there. */
+static void persistence_send_status_off(struct Client *to)
+{
+  if (!to || !MyConnect(to))
+    return;
+  sendrawto_one(to, ":%s PERSISTENCE STATUS OFF OFF", cli_name(&me));
+}
+
 /** Handle STATUS / GET subcommand.  Both report the effective state. */
 static int persistence_cmd_status(struct Client *sptr)
 {
@@ -287,10 +297,12 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
 
   if (0 == ircd_strcmp(arg, "OFF")) {
     struct BouncerSession *session = bounce_get_session(sptr);
+    int carried = session
+                  && !bounce_end_asker_applies(bounce_member_end_route(session));
 
     /* The preference, unless the end goes to the session's holder on
      * another server, which writes it when it accepts the end. */
-    if (!session || bounce_end_asker_applies(bounce_member_end_route(session))) {
+    if (!carried) {
       metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
                                cli_name(sptr), "draft/persistence/hold");
@@ -300,7 +312,12 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
     if (session)
       bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
     send_persistence_reply(sptr, "SET", "OFF");
-    persistence_send_status(sptr);
+    /* A carried end is the holder's to apply: nothing here is OFF yet, so
+     * the status is the outcome the reply promises. */
+    if (carried)
+      persistence_send_status_off(sptr);
+    else
+      persistence_send_status(sptr);
     return 0;
   }
 
@@ -834,6 +851,7 @@ static int persistence_cmd_profile(struct Client *sptr, int parc, char *parv[])
 static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
 {
   struct BouncerSession *session;
+  int carried;
 
   if (!IsAccount(sptr)) {
     send_fail(sptr, "PERSISTENCE", "ACCOUNT_REQUIRED", "DETACH",
@@ -858,7 +876,8 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
   /* The side effects are ours to apply unless the end goes to the
    * session's holder on another server, which applies them when it
    * accepts the end (and writes nothing when it refuses it). */
-  if (bounce_end_asker_applies(bounce_member_end_route(session))) {
+  carried = !bounce_end_asker_applies(bounce_member_end_route(session));
+  if (!carried) {
     /* Force logout also closes the account's webpush subscriptions: the
      * browser keeps its own subscription object, but the server forgets
      * every endpoint, so no push can fire for this account until a device
@@ -879,8 +898,13 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
   bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_DETACH, NULL);
 
   send_persistence_reply(sptr, "DETACH", "OK");
-  /* STATUS now resolves to OFF (no session, hold=0). */
-  persistence_send_status(sptr);
+  /* Ended here, STATUS now resolves to OFF (no session, hold=0).  Carried
+   * to the holder, nothing here is OFF yet: the status is the outcome the
+   * reply promises. */
+  if (carried)
+    persistence_send_status_off(sptr);
+  else
+    persistence_send_status(sptr);
   return 0;
 }
 
