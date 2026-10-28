@@ -1812,6 +1812,24 @@ struct AccountSessions *bounce_find_by_account(const char *account)
   return NULL;
 }
 
+/** See include/bouncer_session.h. */
+struct BouncerSession *bounce_session_listed(const char *account,
+                                             const struct BouncerSession *saved,
+                                             const char *sessid)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  if (!saved || !sessid || !*sessid)
+    return NULL;
+  as = bounce_find_by_account(account);
+  /* Compared, never read through: the record may be gone. */
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    if (s == saved && 0 == strcmp(s->hs_sessid, sessid))
+      return s;
+  return NULL;
+}
+
 /** Walk every session known to this server and invoke a callback.
  *
  * Iteration order: account hash bucket, then per-account list.  The
@@ -7205,8 +7223,20 @@ bsc_forward:
     new_origin = parv[4];
     session = bounce_find_by_token_sessid(account, sessid);
     if (session) {
+      struct Client *p = session->hs_client;
+
       ircd_strncpy(session->hs_origin, new_origin,
                     sizeof(session->hs_origin));
+      /* The numeric that goes with the origin: the new primary's, which
+       * the BX P before this line installed -- a member's end and the
+       * auto-resume resolve the primary from the pair when the slot is
+       * empty.  Its server's copy is live. */
+      if (p && IsUser(p) && cli_user(p) && cli_user(p)->server
+          && 0 == strcmp(cli_yxx(cli_user(p)->server), new_origin)) {
+        ircd_strncpy(session->hs_ghost_numeric, cli_yxx(p),
+                     sizeof(session->hs_ghost_numeric));
+        bounce_peer_holding_clear(session, cli_user(p)->server);
+      }
       Debug((DEBUG_INFO, "BS T: session %s/%s ownership transferred to %s",
              account, sessid, new_origin));
     }
@@ -7481,6 +7511,11 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
     session->hs_disconnect_time = 0;
     ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
                   sizeof(session->hs_origin));
+    /* ... under the numeric the promoted connection has there, the pair
+     * the BX P and BS T receivers keep too (W3 12c-2a). */
+    ircd_strncpy(session->hs_ghost_numeric, cli_yxx(alias),
+                 sizeof(session->hs_ghost_numeric));
+    bounce_peer_holding_clear(session, cli_user(alias)->server);
     /* Session moved to a different server — delete stale MDBX record.
      * Without this, both servers persist the session and both restore
      * a ghost on restart, causing a nick collision on link. */
@@ -9693,12 +9728,9 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
   /* A merge's record of ours ends now, after its devices' BX C (12a fix-1
    * carry): the very record, if the account still lists it. */
   if (merged_sessid[0]) {
-    struct AccountSessions *mas = bounce_find_by_account(merged_account);
-    struct BouncerSession *m;
+    struct BouncerSession *m = bounce_session_listed(merged_account, merged,
+                                                     merged_sessid);
 
-    for (m = mas ? mas->as_sessions : NULL; m; m = m->hs_anext)
-      if (m == merged && 0 == strcmp(m->hs_sessid, merged_sessid))
-        break;
     if (m) {
       log_write(LS_USER, L_INFO, 0, "Bouncer yield: session %s of %s merged "
                 "into %s; it ends", merged_sessid, merged_account,
@@ -11520,7 +11552,6 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
      * Keycloak user (a session kept apart after a split can share this
      * sessid). */
     if (bsess && bounce_hs_client_assign_checked(bsess, new_client, "BX P")) {
-      int k;
       /* Point session to new primary.
        * Transition to ACTIVE — the promoted alias is a live connection.
        * Without this, the session stays HOLDING on remote replicas and
@@ -11532,15 +11563,22 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
        * and accrues when this server holds the session. */
       bsess->hs_attach_time = MyConnect(new_client) ? CurrentTime : 0;
       /* The session is held where its new primary is (BS T says the same,
-       * but only to a record of the id it names). */
+       * but only to a record of the id it names), under the numeric it has
+       * there: the pair a member's end resolves the primary from, should
+       * the slot be emptied (bounce_resolve_hs_client_from_ghost(),
+       * member_end_resolve()).  Its server's copy is live. */
       ircd_strncpy(bsess->hs_origin, cli_yxx(cli_user(new_client)->server),
                    sizeof(bsess->hs_origin));
-      /* Update remaining aliases' alias_primary */
-      for (k = 0; k < bsess->hs_alias_count; k++) {
-        struct Client *sibling = findNUser(bsess->hs_aliases[k].ba_numeric);
-        if (sibling && IsBouncerAlias(sibling))
-          cli_user(sibling)->alias_primary = new_client;
-      }
+      ircd_strncpy(bsess->hs_ghost_numeric, cli_yxx(new_client),
+                   sizeof(bsess->hs_ghost_numeric));
+      bounce_peer_holding_clear(bsess, cli_user(new_client)->server);
+      /* The record's own devices with no primary follow the new one too:
+       * filed in it by numeric and by id, of its account and Keycloak user,
+       * through the re-point's selection (the old client's followed above;
+       * another copy's device, filed here by the id, follows its own copy's
+       * primary and is left alone).  Our view only: every server applies
+       * this BX P itself. */
+      bounce_repoint_aliases(NULL, new_client, bsess, BOUNCE_REPOINT_ONLY);
     } else if (bsess) {
       /* Refused: the promoted client left the record's roster above and
        * is no member of it. */

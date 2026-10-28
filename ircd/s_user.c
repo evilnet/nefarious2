@@ -3036,12 +3036,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * the first record of that id may be another; the walk compares the
    * saved record with each listed one and never reads through it. */
   if (end_sessid[0]) {
-    struct AccountSessions *eas = bounce_find_by_account(end_account);
-    struct BouncerSession *es;
+    struct BouncerSession *es = bounce_session_listed(end_account, end_session,
+                                                      end_sessid);
 
-    for (es = eas ? eas->as_sessions : NULL; es; es = es->hs_anext)
-      if (es == end_session && 0 == strcmp(es->hs_sessid, end_sessid))
-        break;
     if (es)
       bounce_member_end(es, sptr, cptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
   }

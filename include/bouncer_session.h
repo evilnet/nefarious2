@@ -809,6 +809,22 @@ extern struct BouncerSession *bounce_find_by_token(const char *token);
  */
 extern struct AccountSessions *bounce_find_by_account(const char *account);
 
+/** The record @a saved, found by identity: when @a account still lists
+ * that very record under the id @a sessid, the record; else NULL.  For a
+ * caller that saved a record before something that can end it (an exit,
+ * a session end) and acts on it after: it compares @a saved with each
+ * listed record and never reads through it, and two records of one
+ * account can share an id (a session kept apart after a split), so a
+ * lookup by id alone could find the other.
+ *
+ * @param[in] account The record's account, saved with it.
+ * @param[in] saved   The record as saved (never dereferenced).
+ * @param[in] sessid  Its id, saved with it.
+ * @return The record, or NULL when it is gone. */
+extern struct BouncerSession *bounce_session_listed(const char *account,
+                                                    const struct BouncerSession *saved,
+                                                    const char *sessid);
+
 /** M4b reconciler: test whether any profile across the account
  * (active or HOLD-sticky inactive) effectively wants `channel`.
  * Returns 0 immediately when the account is not held — under the
