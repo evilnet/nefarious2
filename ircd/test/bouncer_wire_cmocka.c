@@ -1275,64 +1275,83 @@ static void a_ban_never_promotes_a_fault_never_ends(void **s)
   }
 }
 
-/* bounce_crossed_bxx_action(handed_to_it, own_devices) */
+/* bounce_crossed_bxx_action(handed_to_it, active, own_devices) */
 
 static void crossed_promote_another_device_takes_over(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_crossed_bxx_action(1, 1), BOUNCE_CROSSED_PROMOTE);
-  assert_int_equal(bounce_crossed_bxx_action(1, 3), BOUNCE_CROSSED_PROMOTE);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 1), BOUNCE_CROSSED_PROMOTE);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 3), BOUNCE_CROSSED_PROMOTE);
 }
 
 static void crossed_promote_with_no_device_left_ends(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_crossed_bxx_action(1, 0), BOUNCE_CROSSED_END);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 0), BOUNCE_CROSSED_END);
 }
 
 static void crossed_promote_is_only_the_promoters(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_crossed_bxx_action(0, 0), BOUNCE_CROSSED_LEAVE);
-  assert_int_equal(bounce_crossed_bxx_action(0, 2), BOUNCE_CROSSED_LEAVE);
+  assert_int_equal(bounce_crossed_bxx_action(0, 1, 0), BOUNCE_CROSSED_LEAVE);
+  assert_int_equal(bounce_crossed_bxx_action(0, 1, 2), BOUNCE_CROSSED_LEAVE);
 }
 
-/* bounce_bxp_unknown_action(old_known, new_known, old_from_line,
- *                           new_filed) */
-
-static void bxp_to_a_departed_device_retires_the_old_face(void **s)
+static void crossed_promote_needs_an_active_record(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_bxp_unknown_action(1, 0, 1, 0),
-                   BOUNCE_BXP_RETIRE_OLD);
+  /* A hand-off noted earlier, on a record that went held since: not the
+   * promote whose BX X this is. */
+  assert_int_equal(bounce_crossed_bxx_action(1, 0, 0), BOUNCE_CROSSED_LEAVE);
+  assert_int_equal(bounce_crossed_bxx_action(1, 0, 2), BOUNCE_CROSSED_LEAVE);
 }
 
-static void bxp_retires_only_the_lines_own_face(void **s)
+/* bounce_bxp_unknown_action(old_known, new_known, old_is_lines_primary,
+ *                           new_numeric_ok, old_is_crossed_face) */
+
+static void bxp_to_a_departed_device_keeps_the_old_face(void **s)
 {
   (void)s;
-  /* A client of ours, an alias, or one of another direction is not the
-   * face the sender replaced. */
-  assert_int_equal(bounce_bxp_unknown_action(1, 0, 0, 0), BOUNCE_BXP_FORWARD);
-  assert_int_equal(bounce_bxp_unknown_action(0, 0, 0, 0), BOUNCE_BXP_FORWARD);
-  assert_int_equal(bounce_bxp_unknown_action(0, 0, 1, 1), BOUNCE_BXP_FORWARD);
+  assert_int_equal(bounce_bxp_unknown_action(1, 0, 1, 1, 0), BOUNCE_BXP_HOLD_OLD);
 }
 
-static void bxp_from_a_departed_face_promotes_the_new_device(void **s)
+static void bxp_keeps_only_the_lines_own_recorded_face(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_bxp_unknown_action(0, 1, 0, 1),
-                   BOUNCE_BXP_PROMOTE_NEW);
-  /* Not filed under the line's session: not ours to promote. */
-  assert_int_equal(bounce_bxp_unknown_action(0, 1, 0, 0), BOUNCE_BXP_FORWARD);
+  /* A client of ours, an alias, one of another direction or one that is
+   * no record's primary is not the face the sender replaced; a malformed
+   * new numeric is never noted. */
+  assert_int_equal(bounce_bxp_unknown_action(1, 0, 0, 1, 0), BOUNCE_BXP_FORWARD);
+  assert_int_equal(bounce_bxp_unknown_action(1, 0, 1, 0, 0), BOUNCE_BXP_FORWARD);
+  assert_int_equal(bounce_bxp_unknown_action(0, 0, 0, 1, 0), BOUNCE_BXP_FORWARD);
+}
+
+static void bxp_from_a_crossed_face_follows_the_kept_primary(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bxp_unknown_action(0, 1, 0, 1, 1), BOUNCE_BXP_FOLLOW_CROSSED);
+  /* An old face that is no crossed face of ours: never a promote with no
+   * old client to swap from. */
+  assert_int_equal(bounce_bxp_unknown_action(0, 1, 0, 1, 0), BOUNCE_BXP_FORWARD);
+}
+
+static void bxp_double_cross_renumbers_the_noted_face(void **s)
+{
+  (void)s;
+  /* The new face left too: the legacy links renumber again, the note
+   * follows them. */
+  assert_int_equal(bounce_bxp_unknown_action(0, 0, 0, 1, 1), BOUNCE_BXP_RENUMBER_CROSSED);
+  assert_int_equal(bounce_bxp_unknown_action(0, 0, 0, 0, 1), BOUNCE_BXP_FORWARD);
 }
 
 static void bxp_with_both_clients_known_is_the_usual_path(void **s)
 {
-  int f, n;
+  int f, n, c;
   (void)s;
   for (f = 0; f < 2; f++)
   for (n = 0; n < 2; n++)
-    assert_int_equal(bounce_bxp_unknown_action(1, 1, f, n), BOUNCE_BXP_FORWARD);
+  for (c = 0; c < 2; c++)
+    assert_int_equal(bounce_bxp_unknown_action(1, 1, f, n, c), BOUNCE_BXP_FORWARD);
 }
 
 int main(void)
@@ -1358,9 +1377,11 @@ int main(void)
     cmocka_unit_test(crossed_promote_another_device_takes_over),
     cmocka_unit_test(crossed_promote_with_no_device_left_ends),
     cmocka_unit_test(crossed_promote_is_only_the_promoters),
-    cmocka_unit_test(bxp_to_a_departed_device_retires_the_old_face),
-    cmocka_unit_test(bxp_retires_only_the_lines_own_face),
-    cmocka_unit_test(bxp_from_a_departed_face_promotes_the_new_device),
+    cmocka_unit_test(crossed_promote_needs_an_active_record),
+    cmocka_unit_test(bxp_to_a_departed_device_keeps_the_old_face),
+    cmocka_unit_test(bxp_keeps_only_the_lines_own_recorded_face),
+    cmocka_unit_test(bxp_from_a_crossed_face_follows_the_kept_primary),
+    cmocka_unit_test(bxp_double_cross_renumbers_the_noted_face),
     cmocka_unit_test(bxp_with_both_clients_known_is_the_usual_path),
     cmocka_unit_test(behind_the_departing_server_or_it),
     cmocka_unit_test(not_behind_it),

@@ -332,20 +332,26 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
 }
 
 enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
+                                                     int active,
                                                      int own_devices)
 {
-  if (!handed_to_it)
+  if (!handed_to_it || !active)
     return BOUNCE_CROSSED_LEAVE;
   return own_devices > 0 ? BOUNCE_CROSSED_PROMOTE : BOUNCE_CROSSED_END;
 }
 
 enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known, int new_known,
-                                                  int old_from_line,
-                                                  int new_filed)
+                                                  int old_is_lines_primary,
+                                                  int new_numeric_ok,
+                                                  int old_is_crossed_face)
 {
-  if (old_known && !new_known && old_from_line)
-    return BOUNCE_BXP_RETIRE_OLD;
-  if (!old_known && new_known && new_filed)
-    return BOUNCE_BXP_PROMOTE_NEW;
+  if (old_known && !new_known && old_is_lines_primary && new_numeric_ok)
+    return BOUNCE_BXP_HOLD_OLD;
+  if (!old_known && old_is_crossed_face) {
+    if (new_known)
+      return BOUNCE_BXP_FOLLOW_CROSSED;
+    if (new_numeric_ok)
+      return BOUNCE_BXP_RENUMBER_CROSSED;
+  }
   return BOUNCE_BXP_FORWARD;
 }

@@ -705,6 +705,10 @@ static int session_own_alias_count(struct BouncerSession *s);
 static void session_roster_add(struct BouncerSession *session,
                                const char *alias_numeric,
                                const char *alias_profile);
+static void bounce_retract_crossed_face(struct BouncerSession *s,
+                                        const char *reason);
+static void bounce_bsx_end_devices(struct BouncerSession *s,
+                                   struct Client *sender, const char *sessid);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -2633,6 +2637,10 @@ void bounce_destroy(struct BouncerSession *session)
 {
   assert(0 != session);
 
+  /* Whatever ends the record: a face our legacy links were renumbered to
+   * by a crossed promote leaves them with it. */
+  bounce_retract_crossed_face(session, "Bouncer session ended");
+
   /* Cancel timers if active */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
@@ -3721,8 +3729,12 @@ void bounce_null_hs_client_pointing_at(struct Client *cli)
     home = cli_yxx(cli_user(cli)->server);
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (s = tokenHash[i]; s; s = s->hs_tnext) {
-      if (s->hs_client == cli)
+      if (s->hs_client == cli) {
+        /* A primary kept for a crossed promote that leaves by another way
+         * (a split): the face our legacy links hold for it goes too. */
+        bounce_retract_crossed_face(s, "Bouncer session ended");
         s->hs_client = NULL;
+      }
       if (home && s->hs_peer_holding[0]
           && 0 == strcmp(s->hs_peer_holding, home)
           && bounce_in_session_by_id(s, cli))
@@ -3785,6 +3797,9 @@ int bounce_hs_client_assign_checked(struct BouncerSession *session,
     return 0;
   }
   session->hs_client = candidate;
+  /* A primary installed by another path is not the device a promote of
+   * ours handed the session to. */
+  session->hs_handoff[0] = '\0';
   return 1;
 }
 
@@ -5394,6 +5409,99 @@ static void bounce_retract_crossed_face(struct BouncerSession *s,
   s->hs_crossed_face[0] = '\0';
 }
 
+/** The primary a record of ours kept for a crossed promote leaves
+ * (hs_crossed_face): the holder ended the session (BS X), or never
+ * decided (the backstop).  Its own server let it go already, silently,
+ * so it leaves here as a session end does -- our users see it quit (one
+ * msgid for the QUIT and its history row), WATCH and MONITOR see it go
+ * -- with no QUIT toward the network (FLAG_KILLED, as for a client a KILL
+ * from elsewhere removes); our legacy links lose the face they hold for
+ * it (bounce_retract_crossed_face()). */
+static void crossed_primary_leaves(struct BouncerSession *s, struct Client *link,
+                                   struct Client *killer, const char *reason)
+{
+  struct Client *p = s->hs_client;
+
+  bounce_retract_crossed_face(s, reason);
+  if (!p || !IsUser(p) || MyConnect(p) || IsBouncerAlias(p))
+    return;
+  log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s ended; its primary "
+            "%s%s (%s), kept here since its promote crossed its device's "
+            "exit, leaves", s->hs_account, s->hs_sessid,
+            cli_yxx(cli_user(p)->server), cli_yxx(p), cli_name(p));
+  s->hs_client = NULL;
+  SetFlag(p, FLAG_KILLED);
+  exit_client(link, p, killer, reason);
+}
+
+/** The record of ours whose noted crossed face is @a face; NULL if none. */
+static struct BouncerSession *crossed_record_for(const char *face)
+{
+  struct BouncerSession *s;
+  int i;
+
+  if (!face || strlen(face) != 5)
+    return NULL;
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
+      if (s->hs_crossed_face[0] && 0 == strcmp(s->hs_crossed_face, face))
+        return s;
+  return NULL;
+}
+
+/** The backstop for a crossed promote whose holder never decides (an
+ * older build, or a lost line): after ORPHAN_WAIT_MAX the record ends
+ * here -- its devices here, its kept primary, its noted face -- as the
+ * holder's BS X would have ended it.  No BS X: this server does not hold
+ * the session. */
+static struct Timer crossed_timer;
+
+static void bounce_crossed_backstop(struct Event *ev)
+{
+  struct BouncerSession *s, *next;
+  time_t wait = 0;
+  int i;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (s = tokenHash[i]; s; s = next) {
+      next = s->hs_tnext;
+      if (!s->hs_crossed_face[0])
+        continue;
+      if (CurrentTime - s->hs_crossed_at < ORPHAN_WAIT_MAX) {
+        time_t left = ORPHAN_WAIT_MAX - (CurrentTime - s->hs_crossed_at);
+        if (!wait || left < wait)
+          wait = left;
+        continue;
+      }
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s: its holder "
+                "did not decide within %d s of a crossed promote; it ends "
+                "here", s->hs_account, s->hs_sessid, ORPHAN_WAIT_MAX);
+      if (s->hs_client && cli_user(s->hs_client)) {
+        struct Client *p = s->hs_client;
+        bounce_bsx_end_devices(s, cli_user(p)->server, s->hs_sessid);
+        crossed_primary_leaves(s, cli_from(p), &me, "Bouncer session ended");
+      }
+      bounce_destroy(s);
+    }
+  }
+  /* Inside the callback: timer_chg() re-queues it once we return. */
+  if (wait)
+    timer_chg(&crossed_timer, TT_RELATIVE, wait);
+}
+
+/** Note the face @a face our legacy links now hold for @a s's kept
+ * primary, and arm the backstop. */
+static void crossed_note(struct BouncerSession *s, const char *face)
+{
+  ircd_strncpy(s->hs_crossed_face, face, sizeof(s->hs_crossed_face));
+  s->hs_crossed_at = CurrentTime;
+  if (!t_active(&crossed_timer))
+    timer_add(timer_init(&crossed_timer), bounce_crossed_backstop, NULL,
+              TT_RELATIVE, ORPHAN_WAIT_MAX);
+}
+
 /** A BS X from @a sender ends our record @a s of the session @a sessid
  * (its destroy branch: no primary of ours holds it).  The holder decided,
  * and the session's devices here end with it: a device has no nick of
@@ -6191,6 +6299,7 @@ bsc_forward:
 
       session->hs_state = BOUNCE_HOLDING;
       session->hs_hold_brief = 0;
+      session->hs_handoff[0] = '\0';
       session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
       session->hs_disconnect_time = disc_time;
       ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
@@ -6264,7 +6373,9 @@ bsc_forward:
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
              session->hs_sessid, sptr));
       bounce_bsx_end_devices(session, sptr, sessid);
-      bounce_retract_crossed_face(session, "Bouncer session ended");
+      /* A primary kept for a crossed promote leaves with the session. */
+      if (session->hs_crossed_face[0])
+        crossed_primary_leaves(session, cptr, sptr, "Bouncer session ended");
       bounce_destroy(session);
     }
 
@@ -10213,80 +10324,6 @@ static struct Client *bx_find_user_strict(const char *numeric)
 /* BX P: Promote/transfer — dual-mode handler                       */
 /* ---------------------------------------------------------------- */
 
-/** The old face of a BX P left here before the line came
- * (bounce_bxp_unknown_action(): BOUNCE_BXP_PROMOTE_NEW): @a new_client,
- * an alias of the session filed in @a s under the line's id, becomes its
- * primary, as the promote whose old face crossed would have made it --
- * a primary's memberships with the modes the record keeps, the face's
- * nick, the record's slot, its siblings following it. */
-static void bxp_promote_without_old(struct BouncerSession *s,
-                                    struct Client *new_client,
-                                    const char *nick)
-{
-  struct Membership *member;
-  int k;
-
-  for (member = cli_user(new_client)->channel; member;
-       member = member->next_channel) {
-    struct Channel *chptr = member->channel;
-
-    if (!IsMemberAlias(member))
-      continue;
-    member->status &= ~CHFL_ALIAS;
-    for (k = 0; k < s->hs_chancount; k++) {
-      if (0 == ircd_strcmp(s->hs_channels[k].name, chptr->chname)) {
-        member->status |= s->hs_channels[k].modes;
-        break;
-      }
-    }
-    if (chptr->aliases > 0)
-      --chptr->aliases;
-    ++chptr->users;
-    ++(cli_user(new_client))->joined;
-    if (!IsSSL(new_client) && !IsChannelService(new_client))
-      ++chptr->nonsslusers;
-    if (IsAccount(new_client))
-      ++chptr->authusers;
-  }
-  {
-    struct bounce_counts was;
-
-    count_held(new_client, &was);
-    ClearBouncerAlias(new_client);
-    bounce_count_converted(new_client, &was, cli_user(new_client)->server,
-                           "BX P");
-  }
-  cli_user(new_client)->alias_primary = NULL;
-  /* The face's nick, as the line names it (lockstep keeps the two equal;
-   * a nick another client holds here is not taken). */
-  if (0 != ircd_strcmp(cli_name(new_client), nick) && !FindClient(nick)) {
-    if (MyConnect(new_client))
-      sendcmdto_one(new_client, CMD_NICK, new_client, "%s", nick);
-    ircd_strncpy(cli_name(new_client), nick, NICKLEN + 1);
-  }
-  hAddClient(new_client);
-  userstats_count_sync(new_client);
-
-  session_roster_drop_account(new_client, s);
-  if (bounce_hs_client_assign_checked(s, new_client, "BX P")) {
-    if (t_active(&s->hs_hold_timer))
-      timer_del(&s->hs_hold_timer);
-    s->hs_state = BOUNCE_ACTIVE;
-    s->hs_last_active = CurrentTime;
-    s->hs_disconnect_time = 0;
-    s->hs_attach_time = MyConnect(new_client) ? CurrentTime : 0;
-    ircd_strncpy(s->hs_origin, cli_yxx(cli_user(new_client)->server),
-                 sizeof(s->hs_origin));
-    for (k = 0; k < s->hs_alias_count; k++) {
-      struct Client *sibling = findNUser(s->hs_aliases[k].ba_numeric);
-      if (sibling && IsBouncerAlias(sibling) && cli_user(sibling))
-        cli_user(sibling)->alias_primary = new_client;
-    }
-  }
-  s->hs_crossed_face[0] = '\0';
-  bounce_recompute_session_away(s);
-}
-
 /** Handle BX P (Promote/Transfer).
  *
  * Dual-mode:
@@ -10321,67 +10358,73 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
   new_client = bx_find_user_strict(new_numeric);
 
   if (!old_client || !new_client) {
-    struct BouncerSession *ns = NULL;
-    int old_from_line = old_client && IsUser(old_client) && cli_user(old_client)
-                        && !IsBouncerAlias(old_client) && !MyConnect(old_client)
-                        && cli_from(old_client) == cptr;
+    struct BouncerSession *os = NULL;
+    struct BouncerSession *cs = NULL;
 
     Debug((DEBUG_INFO, "BX P: client not found - old=%s new=%s",
            old_numeric, new_numeric));
-    if (!old_client && new_client && IsBouncerAlias(new_client)
-        && IsAccount(new_client)) {
-      ns = bounce_find_by_token_sessid(cli_account(new_client), sessid);
-      if (ns && !session_roster_has(ns, new_client))
-        ns = NULL;
-    }
-    /* The two ends of a promote that crossed a device's exit (user,
-     * 2026-10-27: clean up and accept the loss). */
-    switch (bounce_bxp_unknown_action(old_client != NULL, new_client != NULL,
-                                      old_from_line, ns != NULL)) {
-    case BOUNCE_BXP_RETIRE_OLD:
-    {
-      /* The new face already left here: its own exit (BX X) crossed this
-       * promote.  The old face is the one the sender replaced, and the
-       * sender exits it silently (no Q follows), so it goes here too,
-       * silently: no phantom of it stays.  Our record of the session
-       * keeps no primary until the holder decides (another device, or
-       * the end).  Our legacy links renumber it (the line is passed on
-       * to them below), so the holder's next BX P renumbers it again,
-       * and the session's end retracts it (hs_crossed_face). */
-      struct BouncerSession *os = bounce_find_by_token_sessid(
-          IsAccount(old_client) ? cli_account(old_client) : "", sessid);
-
+    /* The old face is a user the line's direction introduced, the primary
+     * of a record of ours: of the line's id, else the one it is primary
+     * of. */
+    if (old_client && IsUser(old_client) && cli_user(old_client)
+        && !IsBouncerAlias(old_client) && !MyConnect(old_client)
+        && cli_from(old_client) == cptr) {
+      os = bounce_find_by_token_sessid(IsAccount(old_client)
+                                         ? cli_account(old_client) : "", sessid);
       if (!os || os->hs_client != old_client)
         os = bounce_session_of_primary(old_client);
       if (os && os->hs_client != old_client)
         os = NULL;
-      log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
-                "%s (%s, session %s), which already left here: %s is retired "
-                "here, silently", cli_name(sptr), new_numeric, old_numeric,
-                nick, sessid, old_numeric);
-      if (os) {
-        os->hs_client = NULL;
-        ircd_strncpy(os->hs_crossed_face, new_numeric,
-                     sizeof(os->hs_crossed_face));
-      }
-      /* Its devices here keep their memberships: they are nulled before
-       * it leaves its channels, which would part them, and the orphan
-       * sweep gives the holder's decision time to arrive. */
-      bounce_null_alias_primary_pointing_at(old_client);
-      remove_user_from_all_channels(old_client);
-      SetBouncerInternalDestroy(old_client);
-      exit_client(cptr, old_client, &me, "Bouncer session moved");
-      break;
     }
-    case BOUNCE_BXP_PROMOTE_NEW:
-      /* The old face already left here (the promote that crossed its
-       * exit was decided by the holder): the device the line names takes
-       * over. */
-      log_write(LS_USER, L_INFO, 0, "BX P: %s names %s (%s) as the new face "
-                "of %s, which already left here: %s takes over %s's session "
-                "%s", cli_name(sptr), new_numeric, nick, old_numeric,
-                new_numeric, ns->hs_account, ns->hs_sessid);
-      bxp_promote_without_old(ns, new_client, nick);
+    if (!old_client)
+      cs = crossed_record_for(old_numeric);
+    /* The device's server's side of a promote that crossed its device's
+     * exit (user, 2026-10-27: clean up and accept the loss). */
+    switch (bounce_bxp_unknown_action(old_client != NULL, new_client != NULL,
+                                      os != NULL, strlen(new_numeric) == 5,
+                                      cs != NULL)) {
+    case BOUNCE_BXP_HOLD_OLD:
+      /* The new face already left here: its own exit (BX X) crossed this
+       * promote.  The old face, which the sender let go silently, stays
+       * until the session's holder decides: another device takes over (a
+       * BX P from the face noted here), or the session ends (BS X, which
+       * takes it with it).  Our legacy links renumber it to the new face
+       * (the line is passed on to them below): the note follows that
+       * face. */
+      log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
+                "%s (%s, session %s), which already left here: %s stays "
+                "until the session's holder decides", cli_name(sptr),
+                new_numeric, old_numeric, nick, sessid, old_numeric);
+      crossed_note(os, new_numeric);
+      break;
+    case BOUNCE_BXP_RENUMBER_CROSSED:
+      /* The new face left too: our legacy links renumber again. */
+      log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
+                "%s, the face our legacy links hold for %s's session %s; "
+                "it already left here too: the kept primary waits on",
+                cli_name(sptr), new_numeric, old_numeric, cs->hs_account,
+                cs->hs_sessid);
+      ircd_strncpy(cs->hs_crossed_face, new_numeric,
+                   sizeof(cs->hs_crossed_face));
+      break;
+    case BOUNCE_BXP_FOLLOW_CROSSED:
+      if (cs->hs_client && IsUser(cs->hs_client) && IsAccount(cs->hs_client)
+          && cs->hs_client != new_client) {
+        /* The holder decided: the device this line names takes over from
+         * the primary kept here, through the path every BX P takes (with
+         * its record guards); the line goes on as it came, and our legacy
+         * links renumber the face they hold. */
+        log_write(LS_USER, L_INFO, 0, "BX P: %s names %s, the face our "
+                  "legacy links hold for %s's session %s, as the old face: "
+                  "%s%s (%s), kept here since the crossed promote, hands the "
+                  "session to %s", cli_name(sptr), old_numeric,
+                  cs->hs_account, cs->hs_sessid,
+                  cli_yxx(cli_user(cs->hs_client)->server),
+                  cli_yxx(cs->hs_client), cli_name(cs->hs_client),
+                  new_numeric);
+        old_client = cs->hs_client;
+        cs->hs_crossed_face[0] = '\0';
+      }
       break;
     case BOUNCE_BXP_FORWARD:
       if (!new_client)
@@ -10392,10 +10435,12 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
                   old_client ? "kept" : "not known either");
       break;
     }
-    /* Forward anyway for other servers */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                          "P %s %s %s %s", old_numeric, new_numeric, sessid, nick);
-    return 0;
+    if (!old_client || !new_client) {
+      /* Forward anyway for other servers */
+      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                            "P %s %s %s %s", old_numeric, new_numeric, sessid, nick);
+      return 0;
+    }
   }
 
   /* SQUIT path: when old_primary was NULL, originating server sends
@@ -11793,14 +11838,16 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
    * promote made it the primary decides (user, 2026-10-27: clean up and
    * accept the loss): another device of the session's own copy takes
    * over -- now, while the face legacy links hold is still here to be
-   * renumbered -- else the session ends.  Any other server leaves its
-   * record to that one. */
+   * renumbered -- else the session ends, and the device leaves here as
+   * a session's end does.  Any other server leaves its record to that
+   * one. */
   if (!was_alias) {
     struct BouncerSession *ps = bounce_get_session(target);
 
     if (ps && ps->hs_client == target) {
       switch (bounce_crossed_bxx_action(
                 ps->hs_handoff[0] && 0 == strcmp(ps->hs_handoff, target_numeric),
+                ps->hs_state == BOUNCE_ACTIVE,
                 session_own_alias_count(ps))) {
       case BOUNCE_CROSSED_PROMOTE:
         if (bounce_promote_alias(ps, 0) == 0) {
@@ -11826,7 +11873,17 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
         ps->hs_client = NULL;
         bounce_broadcast(ps, 'X', NULL);
         bounce_destroy(ps);
-        break;
+        /* The device leaves visibly: our users see the user quit (one
+         * msgid for the QUIT and its history row), WATCH and MONITOR see
+         * it go, and the legacy links that know its face get its QUIT.
+         * Its own server let it go already: no QUIT toward the network
+         * (FLAG_KILLED, as for a client a KILL from elsewhere removes).
+         * The exit releases its counts; the teardown below is skipped. */
+        bounce_legacy_face_change(target, NULL, cptr, NULL,
+                                  "Bouncer session ended");
+        SetFlag(target, FLAG_KILLED);
+        exit_client(cptr, target, sptr, "Bouncer session ended");
+        goto forward;
       case BOUNCE_CROSSED_LEAVE:
         log_write(LS_USER, L_INFO, 0, "BX X: %s removes %s (%s), the primary "
                   "of %s's session %s here (%s), which is not an alias: the "

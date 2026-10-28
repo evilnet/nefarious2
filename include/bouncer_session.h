@@ -678,14 +678,22 @@ struct BouncerSession {
   /** Memory only: the device (full YYXXX) a promote of ours last handed
    * this session to, on another server; "" when none.  A BX X for that
    * client while it is our primary is its own exit crossing our BX P:
-   * this server decides then (bounce_crossed_bxx_action()). */
+   * this server decides then (bounce_crossed_bxx_action()).  Cleared
+   * whenever another path installs a primary, and when the record goes
+   * held. */
   char hs_handoff[6];
-  /** Memory only: the face (full YYXXX) our legacy links hold for this
-   * session after a BX P whose new client had already left here, which
-   * we passed on to them (they renumbered the old face); "" when none.
-   * The holder's next BX P renumbers it again; if the session ends
-   * instead, that face is retracted toward them (a QUIT from it). */
+  /** Memory only, on the device's server: a BX P named as the session's
+   * new face a device that had already left here (its exit crossed the
+   * promote).  The old face, the primary, is kept until the holder
+   * decides, and this is the face (full YYXXX) the line renumbered our
+   * legacy links to; "" when none.  A later BX P from it moves the kept
+   * primary to the device that takes over (and our legacy links with
+   * it); the session's end, or the kept primary's leaving by another
+   * way, retracts it toward them (a QUIT from it). */
   char hs_crossed_face[6];
+  /** When hs_crossed_face was noted: a holder that never decides (an
+   * older build) lets the record end here after ORPHAN_WAIT_MAX. */
+  time_t hs_crossed_at;
 
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
