@@ -740,27 +740,36 @@ enum bounce_forced_action {
                               *   the whole session ends first (every
                               *   device, everywhere), then its exit
                               *   sends the usual QUIT */
-  BOUNCE_FORCED_END_BY_PRIMARY /**< enforcement on a device whose primary
+  BOUNCE_FORCED_END_BY_PRIMARY, /**< enforcement on a device whose primary
                               *   is ours: the session ends first and its
                               *   primary exits with the same reason */
+  BOUNCE_FORCED_END_BY_HOLDER /**< enforcement on a device whose primary is
+                              *   another server's: the device exits here,
+                              *   and the end goes to that server, which
+                              *   ends the whole session
+                              *   (bounce_end_route()) */
 };
 
 /** Bans end the session; faults promote (user, 2026-10-27).  Enforcement
  * on any connection of a session ends the whole session like a KILL
- * (#12) -- but a primary on another server is that server's to exit, so
- * enforcement on a device here whose primary is elsewhere ends that
- * device only.  A fault on a primary goes through the disconnect rule; a
- * device's exit is always its own.
+ * (#12).  A primary on another server is that server's to exit: a ban on
+ * a device here whose primary is elsewhere exits the device, and the end
+ * goes to the primary's server (user, 2026-10-27: a ban on a device ends
+ * the whole session).  A fault on a primary goes through the disconnect
+ * rule; a device's exit is always its own.
  *
  * @param[in] why             Why the victim is forced off.
  * @param[in] is_alias        The victim is an alias.
  * @param[in] session_primary The victim is the primary of a session.
  * @param[in] primary_ours    The victim is an alias whose session primary
  *                            is a user of ours.
+ * @param[in] primary_remote  The victim is an alias whose session primary
+ *                            is a user of another server.
  */
 extern enum bounce_forced_action
 bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
-                          int session_primary, int primary_ours);
+                          int session_primary, int primary_ours,
+                          int primary_remote);
 
 /** How a member's end of a session ends it.  On the wire (BS E) a letter:
  * bounce_member_end_letter(), bounce_member_end_parse(). */

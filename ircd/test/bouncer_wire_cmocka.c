@@ -1206,30 +1206,46 @@ static void connection_faults_are_not(void **s)
 static void a_fault_on_a_primary_goes_through_the_disconnect_rule(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 0, 1, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 0, 1, 0, 0),
                    BOUNCE_FORCED_DISCONNECT);
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_WEBSOCKET, 0, 1, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_WEBSOCKET, 0, 1, 0, 0),
                    BOUNCE_FORCED_DISCONNECT);
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BUFFER, 0, 1, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BUFFER, 0, 1, 0, 0),
                    BOUNCE_FORCED_DISCONNECT);
 }
 
 static void a_ban_on_a_primary_ends_the_session(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 0, 1, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 0, 1, 0, 0),
                    BOUNCE_FORCED_END_SESSION);
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 0, 1, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 0, 1, 0, 0),
                    BOUNCE_FORCED_END_SESSION);
 }
 
 static void a_ban_on_a_device_ends_the_session_through_our_primary(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 1),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 1, 0),
                    BOUNCE_FORCED_END_BY_PRIMARY);
-  /* A primary on another server is that server's to exit. */
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 0),
+  /* A device of no session (no primary of any server): its own exit. */
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 0, 0),
+                   BOUNCE_FORCED_PLAIN);
+}
+
+static void a_ban_on_a_device_of_a_remote_primary_goes_to_its_holder(void **s)
+{
+  (void)s;
+  /* The primary is another server's to exit: the end goes there, and
+   * the whole session ends (user, 2026-10-27). */
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 1, 0, 0, 1),
+                   BOUNCE_FORCED_END_BY_HOLDER);
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 1, 0, 0, 1),
+                   BOUNCE_FORCED_END_BY_HOLDER);
+  /* A fault on such a device is its own exit. */
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 1, 0, 0, 1),
+                   BOUNCE_FORCED_PLAIN);
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_WEBSOCKET, 1, 0, 0, 1),
                    BOUNCE_FORCED_PLAIN);
 }
 
@@ -1238,9 +1254,9 @@ static void a_fault_on_a_device_is_its_own_exit(void **s)
   int po;
   (void)s;
   for (po = 0; po < 2; po++) {
-    assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 1, 0, po),
+    assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_FLOOD, 1, 0, po, 0),
                      BOUNCE_FORCED_PLAIN);
-    assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BUFFER, 1, 0, po),
+    assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BUFFER, 1, 0, po, 0),
                      BOUNCE_FORCED_PLAIN);
   }
 }
@@ -1250,27 +1266,29 @@ static void a_forced_exit_in_no_session_is_plain(void **s)
   (void)s;
   /* A ban on a client in no session: nothing to end.  A fault: the
    * disconnect rule finds nothing either (it exits). */
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 0, 0, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_BAN, 0, 0, 0, 0),
                    BOUNCE_FORCED_PLAIN);
-  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 0, 0, 0),
+  assert_int_equal(bounce_forced_exit_action(BOUNCE_FORCED_SERVICES, 0, 0, 0, 0),
                    BOUNCE_FORCED_PLAIN);
 }
 
 static void a_ban_never_promotes_a_fault_never_ends(void **s)
 {
-  int w, a, p, o;
+  int w, a, p, o, r;
   (void)s;
   for (w = BOUNCE_FORCED_FLOOD; w <= BOUNCE_FORCED_SERVICES; w++)
   for (a = 0; a < 2; a++)
   for (p = 0; p < 2; p++)
-  for (o = 0; o < 2; o++) {
+  for (o = 0; o < 2; o++)
+  for (r = 0; r < 2; r++) {
     enum bounce_forced_action act =
-      bounce_forced_exit_action((enum bounce_forced_exit)w, a, p, o);
+      bounce_forced_exit_action((enum bounce_forced_exit)w, a, p, o, r);
     if (bounce_forced_exit_punitive((enum bounce_forced_exit)w))
       assert_int_not_equal(act, BOUNCE_FORCED_DISCONNECT);
     else {
       assert_int_not_equal(act, BOUNCE_FORCED_END_SESSION);
       assert_int_not_equal(act, BOUNCE_FORCED_END_BY_PRIMARY);
+      assert_int_not_equal(act, BOUNCE_FORCED_END_BY_HOLDER);
     }
   }
 }
@@ -1581,6 +1599,7 @@ int main(void)
     cmocka_unit_test(a_ban_on_a_device_ends_the_session_through_our_primary),
     cmocka_unit_test(a_fault_on_a_device_is_its_own_exit),
     cmocka_unit_test(a_forced_exit_in_no_session_is_plain),
+    cmocka_unit_test(a_ban_on_a_device_of_a_remote_primary_goes_to_its_holder),
     cmocka_unit_test(member_end_letters_round_trip),
     cmocka_unit_test(an_unknown_member_end_letter_is_refused),
     cmocka_unit_test(a_member_end_goes_to_the_holder),

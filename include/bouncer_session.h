@@ -1116,8 +1116,11 @@ extern int bounce_promote_or_hold(struct Client *cptr, const char *reason);
  *    caller's exit then sends the usual QUIT -- no FLAG_KILLED, which
  *    would suppress it.  On a device whose primary is ours, the primary
  *    exits too, with the same reason.  A primary on another server is
- *    that server's to exit (a remote exit splits the network), so there
- *    only the device goes.
+ *    that server's to exit (a remote exit splits the network): the
+ *    device goes here, and the end goes to the primary's server as a
+ *    RESET-kind member end with the ban's reason (bounce_member_end()),
+ *    which ends the whole session there.  Toward a server that would
+ *    drop that line, only the device goes.
  *
  * @a cptr, the connection being handled, is never exited here: a device
  * of the ended session that is @a cptr is left to the orphan sweep.

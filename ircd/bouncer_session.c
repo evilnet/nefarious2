@@ -7662,24 +7662,49 @@ int bounce_forced_exit(struct Client *cptr, struct Client *victim,
 {
   struct BouncerSession *s = NULL;
   struct Client *primary = NULL;
-  int is_alias, session_primary = 0, primary_ours = 0;
+  int is_alias, session_primary = 0, primary_ours = 0, primary_remote = 0;
 
   if (!victim || !IsUser(victim) || !cli_user(victim) || !MyConnect(victim))
     return 0;
   is_alias = IsBouncerAlias(victim) ? 1 : 0;
   if (is_alias) {
     primary = cli_alias_primary(victim);
-    if (primary && MyConnect(primary) && IsUser(primary)
-        && !IsBouncerAlias(primary) && !HasFlag(primary, FLAG_CLOSING)
-        && (s = bounce_get_session(primary)) && s->hs_client == primary)
-      primary_ours = 1;
+    if (primary && IsUser(primary) && cli_user(primary)
+        && cli_user(primary)->server && !IsBouncerAlias(primary)
+        && !HasFlag(primary, FLAG_CLOSING)
+        && (s = bounce_get_session(primary)) && s->hs_client == primary) {
+      if (MyConnect(primary))
+        primary_ours = 1;
+      else
+        primary_remote = 1;
+    }
   } else if (IsAccount(victim)) {
     s = bounce_get_session(victim);
     session_primary = s && s->hs_client == victim;
   }
 
   switch (bounce_forced_exit_action(why, is_alias, session_primary,
-                                    primary_ours)) {
+                                    primary_ours, primary_remote)) {
+  case BOUNCE_FORCED_END_BY_HOLDER:
+    /* The primary is its own server's to exit: the end goes there, which
+     * ends the whole session (every device, everywhere, its primary with
+     * this reason).  The device goes here, by the caller's exit.  Toward a
+     * server that would drop the line, only the device goes. */
+    if (bounce_end_route(1, 0, bounce_route_reads_carry(cli_user(primary)->server))
+        == BOUNCE_ROUTE_CARRY) {
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s (a device) is forced off "
+                "(%s): %s's session %s ends on its holder %s", cli_name(victim),
+                comment ? comment : "", s->hs_account, s->hs_sessid,
+                cli_name(cli_user(primary)->server));
+      bounce_end_carry(s, primary, victim, BOUNCE_MEMBER_END_RESET,
+                       comment && *comment ? comment : "Session killed");
+    } else
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s (a device) is forced off "
+                "(%s); %s's session %s is held on %s, which this end does "
+                "not reach: the device goes alone", cli_name(victim),
+                comment ? comment : "", s->hs_account, s->hs_sessid,
+                cli_name(cli_user(primary)->server));
+    return 0;
   case BOUNCE_FORCED_DISCONNECT:
     return bounce_promote_or_hold(victim, comment) == 0;
   case BOUNCE_FORCED_END_SESSION:
