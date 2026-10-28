@@ -433,9 +433,13 @@ enum bounce_end_primary bounce_end_primary(enum bounce_member_end how,
 {
   if (!primary_ours)
     return BOUNCE_END_PRIMARY_REMOTE;
+  /* A held ghost leaves even when it is the handled connection: it has no
+   * connection to carry on with. */
+  if (held)
+    return BOUNCE_END_PRIMARY_EXITS;
   if (handled)
     return BOUNCE_END_PRIMARY_ASKED;
-  if (held || how == BOUNCE_MEMBER_END_RESET)
+  if (how == BOUNCE_MEMBER_END_RESET)
     return BOUNCE_END_PRIMARY_EXITS;
   return BOUNCE_END_PRIMARY_STAYS;
 }

@@ -1317,6 +1317,10 @@ static void an_unknown_member_end_letter_is_refused(void **s)
   assert_int_equal(bounce_member_end_parse("DR"), -1);
   assert_int_equal(bounce_member_end_parse("TD"), -1);
   assert_int_equal(bounce_member_end_parse("d"), -1);
+  assert_int_equal(bounce_member_end_parse("o"), -1);
+  assert_int_equal(bounce_member_end_parse("t"), -1);
+  assert_int_equal(bounce_member_end_parse("r"), -1);
+  assert_int_equal(bounce_member_end_parse("OD"), -1);
   assert_int_equal(bounce_member_end_parse(""), -1);
   assert_int_equal(bounce_member_end_parse(NULL), -1);
 }
@@ -1431,6 +1435,19 @@ static void the_asking_connection_is_never_exited_under_its_command(void **s)
                    BOUNCE_END_PRIMARY_ASKED);
   assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DETACH, 1, 0, 1),
                    BOUNCE_END_PRIMARY_ASKED);
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_HOLD_OFF, 1, 0, 1),
+                   BOUNCE_END_PRIMARY_ASKED);
+}
+
+static void a_held_ghost_leaves_even_as_the_handled_connection(void **s)
+{
+  int k;
+  (void)s;
+  /* SVSMODE -b names the ghost itself: it still has no connection to
+   * carry on with (its caller runs the end after it is done with it). */
+  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_RESET; k++)
+    assert_int_equal(bounce_end_primary((enum bounce_member_end)k, 1, 1, 1),
+                     BOUNCE_END_PRIMARY_EXITS);
 }
 
 static void a_remote_primary_is_never_exited_here(void **s)
@@ -1731,6 +1748,7 @@ int main(void)
     cmocka_unit_test(a_reset_takes_the_primary),
     cmocka_unit_test(a_held_ghost_leaves_with_any_end),
     cmocka_unit_test(the_asking_connection_is_never_exited_under_its_command),
+    cmocka_unit_test(a_held_ghost_leaves_even_as_the_handled_connection),
     cmocka_unit_test(a_remote_primary_is_never_exited_here),
     cmocka_unit_test(a_detach_of_an_enforced_session_is_refused),
     cmocka_unit_test(only_a_detach_is_ever_refused),

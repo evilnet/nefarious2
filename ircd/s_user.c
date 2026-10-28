@@ -2209,6 +2209,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   struct Client *acptr = NULL;
   struct Client *snoc = NULL;
   int sno_touched = 0;
+  /* A -b's session end, run at the end of this function (see there). */
+  char end_account[ACCOUNTLEN + 1] = "";
+  char end_sessid[BOUNCER_SESSID_LEN] = "";
 
   if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
@@ -2629,10 +2632,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           }
           /* End the session: its holder does (here, or the end goes
            * there); the primary carries on outside it, every device of it
-           * goes. */
-          if (session)
-            bounce_member_end(session, sptr, cptr, BOUNCE_MEMBER_END_HOLD_OFF,
-                              NULL);
+           * goes.  Run last (below): the end can exit the mode's target. */
+          if (session) {
+            ircd_strncpy(end_account, session->hs_account, sizeof(end_account));
+            ircd_strncpy(end_sessid, session->hs_sessid, sizeof(end_sessid));
+          }
         }
         break;
       case 'y':
@@ -2986,6 +2990,20 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * the sync from a remote acptr leaves the mask alone. */
   if (snoc && snoc != acptr)
     bounce_sync_session_snomask(snoc);
+
+  /* A -b ends its session last: the end can exit the mode's target (a
+   * held ghost leaves with its session), and nothing above may touch the
+   * target after that.  The session is looked up again by its id. */
+  if (end_sessid[0]) {
+    struct AccountSessions *eas = bounce_find_by_account(end_account);
+    struct BouncerSession *es;
+
+    for (es = eas ? eas->as_sessions : NULL; es; es = es->hs_anext)
+      if (0 == strcmp(es->hs_sessid, end_sessid))
+        break;
+    if (es)
+      bounce_member_end(es, sptr, cptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
+  }
 
   return 0;
 }

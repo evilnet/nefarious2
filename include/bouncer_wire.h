@@ -943,7 +943,9 @@ enum bounce_end_primary {
 /** A DISCONNECT leaves the live primary connected, outside the session; a
  * RESET takes it.  A held ghost has no connection to carry on with: it
  * leaves either way (left, it would hold the nick with no session and no
- * timer to end it).
+ * timer to end it) -- even when it is the connection a command is
+ * handled for (services' SVSMODE -b names the ghost itself), so such a
+ * caller runs the end after it is done with the ghost.
  *
  * @param[in] how          The kind of end.
  * @param[in] primary_ours The record's primary is a client of ours.
