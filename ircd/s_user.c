@@ -2212,9 +2212,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   /* What a -b does, after the mode loop (a +b later in the same command
    * cancels all of it: the final state wins).  The hold preference: written
    * here (hold_off), and told to every server (hold_off_tell).  The session
-   * end, run at the end of this function (see there). */
+   * end, run at the end of this function (see there): the record by its
+   * identity (end_session, compared, never read) and its account and id. */
   int hold_off = 0;
   int hold_off_tell = 0;
+  struct BouncerSession *end_session = NULL;
   char end_account[ACCOUNTLEN + 1] = "";
   char end_sessid[BOUNCER_SESSID_LEN] = "";
 
@@ -2608,6 +2610,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * string, the final state wins (ruling W3-T12b-f4b).  No
            * preference write or end of its goes ahead. */
           hold_off = hold_off_tell = 0;
+          end_session = NULL;
           end_account[0] = end_sessid[0] = '\0';
           SetBncHoldPref(acptr);
           metadata_set_client(acptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
@@ -2651,6 +2654,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * there); the primary carries on outside it, every device of it
            * goes.  Run last (below): the end can exit the mode's target. */
           if (session) {
+            end_session = session;
             ircd_strncpy(end_account, session->hs_account, sizeof(end_account));
             ircd_strncpy(end_sessid, session->hs_sessid, sizeof(end_sessid));
           }
@@ -3019,13 +3023,17 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
   /* A -b ends its session last: the end can exit the mode's target (a
    * held ghost leaves with its session), and nothing above may touch the
-   * target after that.  The session is looked up again by its id. */
+   * target after that.  The session is the very record the -b named,
+   * if its account still lists it (ruling W3-T12b-f4c): two records of
+   * one account can share an id (a session kept apart after a split), so
+   * the first record of that id may be another; the walk compares the
+   * saved record with each listed one and never reads through it. */
   if (end_sessid[0]) {
     struct AccountSessions *eas = bounce_find_by_account(end_account);
     struct BouncerSession *es;
 
     for (es = eas ? eas->as_sessions : NULL; es; es = es->hs_anext)
-      if (0 == strcmp(es->hs_sessid, end_sessid))
+      if (es == end_session && 0 == strcmp(es->hs_sessid, end_sessid))
         break;
     if (es)
       bounce_member_end(es, sptr, cptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
