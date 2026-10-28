@@ -880,6 +880,16 @@ extern enum bounce_end_primary bounce_end_primary(enum bounce_member_end how,
                                                   int primary_ours, int held,
                                                   int handled);
 
+/** Does a BS X we keep (bounce_bsx_keeps()) announce our copy to the link
+ * it came from?  The sender's copy has ended: a login there before the
+ * next link burst would otherwise start a session of its own beside ours.
+ * Only toward a link that announces the hold mark.
+ *
+ * @param[in] kept           We keep our record (we hold the session).
+ * @param[in] link_hold_mark The link announced flag H.
+ */
+extern int bounce_bsx_keep_reannounces(int kept, int link_hold_mark);
+
 /** What a holder does with a BX X that removes its session's primary. */
 enum bounce_crossed_action {
   BOUNCE_CROSSED_LEAVE,    /**< not a promote of ours: the record is left

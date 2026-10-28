@@ -1426,6 +1426,17 @@ static void a_remote_primary_is_never_exited_here(void **s)
                      BOUNCE_END_PRIMARY_REMOTE);
 }
 
+/* bounce_bsx_keep_reannounces(kept, link_hold_mark) */
+
+static void a_kept_session_is_announced_again_to_a_hold_mark_link(void **s)
+{
+  (void)s;
+  assert_true(bounce_bsx_keep_reannounces(1, 1));
+  assert_false(bounce_bsx_keep_reannounces(1, 0));
+  assert_false(bounce_bsx_keep_reannounces(0, 1));
+  assert_false(bounce_bsx_keep_reannounces(0, 0));
+}
+
 /* bounce_crossed_bxx_action(handed_to_it, active, own_devices) */
 
 static void crossed_promote_another_device_takes_over(void **s)
@@ -1614,6 +1625,7 @@ int main(void)
     cmocka_unit_test(a_held_ghost_leaves_with_any_end),
     cmocka_unit_test(the_asking_connection_is_never_exited_under_its_command),
     cmocka_unit_test(a_remote_primary_is_never_exited_here),
+    cmocka_unit_test(a_kept_session_is_announced_again_to_a_hold_mark_link),
     cmocka_unit_test(a_ban_never_promotes_a_fault_never_ends),
     cmocka_unit_test(crossed_promote_another_device_takes_over),
     cmocka_unit_test(crossed_promote_with_no_device_left_ends),

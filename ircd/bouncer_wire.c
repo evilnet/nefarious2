@@ -391,6 +391,11 @@ enum bounce_end_primary bounce_end_primary(enum bounce_member_end how,
   return BOUNCE_END_PRIMARY_STAYS;
 }
 
+int bounce_bsx_keep_reannounces(int kept, int link_hold_mark)
+{
+  return kept && link_hold_mark;
+}
+
 enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
                                                      int active,
                                                      int own_devices)

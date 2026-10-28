@@ -2119,6 +2119,54 @@ void bounce_peer_sessid_clear_for_server(struct Client *victim)
         s->hs_peer_sessid[0] = '\0';
 }
 
+/** The server @a server ended its session under @a sessid (BS X): a
+ * record of @a account's that noted @a sessid as the id @a server
+ * announced it under (hs_peer_sessid) drops the note, so a client of
+ * that server carrying the ended id is no member of it any more. */
+static void bounce_peer_sessid_clear_for_id(const char *account,
+                                            const char *sessid,
+                                            struct Client *server)
+{
+  struct AccountSessions *as = bounce_find_by_account(account);
+  struct BouncerSession *s;
+
+  if (!sessid || !*sessid || !server)
+    return;
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    if (s->hs_peer_sessid[0] && 0 == strcmp(s->hs_peer_sessid, sessid)
+        && 0 == strcmp(s->hs_peer_sessid_server, cli_yxx(server))) {
+      Debug((DEBUG_INFO, "Bouncer: %s ended %s's session %s, noted for our "
+             "%s: the note is dropped", cli_name(server), account, sessid,
+             s->hs_sessid));
+      s->hs_peer_sessid[0] = '\0';
+    }
+}
+
+/** @a account's session @a sessid has ended (BS X) and we keep no record
+ * of it: a client of another server that still carries the id -- an
+ * ex-member carrying on outside the session, which its own server gave
+ * an id of its own (bounce_give_own_sessid()) -- carries none here
+ * either, so nothing here takes it for a member of that id (a later
+ * record's reconcile, the session-id hint of a relayed N).  Its next N
+ * brings whatever it carries then. */
+static void bounce_forget_ended_id(const char *account, const char *sessid)
+{
+  struct Client *c;
+
+  if (!account || !sessid || !*sessid
+      || bounce_find_by_token_sessid(account, sessid))
+    return;
+  for (c = GlobalClientList; c; c = cli_next(c)) {
+    if (MyConnect(c) || !IsUser(c) || IsBouncerAlias(c) || !IsAccount(c)
+        || 0 != strcmp(cli_session_id(c), sessid)
+        || 0 != ircd_strcmp(cli_account(c), account))
+      continue;
+    Debug((DEBUG_INFO, "Bouncer: %s's session %s ended; %s no longer "
+           "carries its id here", account, sessid, cli_name(c)));
+    cli_session_id(c)[0] = '\0';
+  }
+}
+
 /** Our record @a s takes the session id @a sessid: the id it is persisted
  * under, the mark that left @a sessid unmirrored, and the id every
  * connection the record names carries (its primary and its aliases). */
@@ -6594,6 +6642,10 @@ bsc_forward:
     int was_apart = unmirrored_marked(account, sessid);
 
     unmirrored_clear(account, sessid);
+    /* The sender's session under this id has ended: a record of ours that
+     * noted it as the id the sender announced ours under no longer takes a
+     * client of the sender's under it for a member. */
+    bounce_peer_sessid_clear_for_id(account, sessid, sptr);
     session = bounce_find_by_token_sessid(account, sessid);
     if (session) {
       struct Client *primary = session->hs_client;
@@ -6614,6 +6666,15 @@ bsc_forward:
                   "here: kept", cli_name(sptr), account, sessid,
                   cli_name(primary), IsBouncerHold(primary) ? "held" : "live");
         bounce_peer_holding_clear(session, sptr);
+        /* The sender's link has no copy of ours now (it kept its own while
+         * it stood under this id): a login there before the next link
+         * burst would start a session of its own beside ours.  Announced
+         * again, ours is mirrored there and such a login attaches to it. */
+        if (bounce_bsx_keep_reannounces(1, IsHoldMark(cptr))) {
+          log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s is "
+                    "announced to %s again", account, sessid, cli_name(cptr));
+          bounce_announce_session_to(session, cptr, 0);
+        }
         break;
       }
       Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
@@ -6624,6 +6685,10 @@ bsc_forward:
         crossed_primary_leaves(session, cptr, sptr, "Bouncer session ended");
       bounce_destroy(session);
     }
+    /* The id is ended here: another server's client that still carries it
+     * -- an ex-member carrying on outside the session, which its own
+     * server gave an id of its own -- is in no session of it. */
+    bounce_forget_ended_id(account, sessid);
 
     /* Forward */
     sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
