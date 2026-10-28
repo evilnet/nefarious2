@@ -2617,8 +2617,16 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           /* The preference, unless the end goes to the session's holder on
            * another server, which writes it (to every server) when it
            * accepts the end. */
-          if (!session || bounce_end_asker_applies(bounce_member_end_route(session)))
+          if (!session || bounce_end_asker_applies(bounce_member_end_route(session))) {
             metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
+            /* A primary on another server never sees this mode change
+             * (its server drops the M line, sourced from its own client,
+             * as a fake direction): tell every server the preference, as
+             * BOUNCER SET HOLD off does. */
+            if (!MyUser(acptr))
+              sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                                       cli_name(acptr), "draft/persistence/hold");
+          }
           /* End the session: its holder does (here, or the end goes
            * there); the primary carries on outside it, every device of it
            * goes. */
