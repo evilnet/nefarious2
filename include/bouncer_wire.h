@@ -775,16 +775,31 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
  * bounce_member_end_letter(), bounce_member_end_parse(). */
 enum bounce_member_end {
   BOUNCE_MEMBER_END_DISCONNECT, /**< BOUNCER DISCONNECT, hold off, MODE -b,
-                                 *   PERSISTENCE OFF / DETACH: the session
-                                 *   and every device of it end; a live
-                                 *   primary carries on outside it ('D') */
-  BOUNCE_MEMBER_END_RESET       /**< BOUNCER RESET, ORESET, a ban: the
+                                 *   PERSISTENCE SET OFF: the session and
+                                 *   every device of it end; a live primary
+                                 *   carries on outside it ('D') */
+  BOUNCE_MEMBER_END_RESET,      /**< BOUNCER RESET, ORESET, a ban: the
                                  *   session and every connection of it
                                  *   end, the primary too ('R') */
+  BOUNCE_MEMBER_END_DETACH      /**< PERSISTENCE DETACH: as a DISCONNECT,
+                                 *   but refused while a connection on a
+                                 *   class that enforces persistence holds
+                                 *   the session (bounce_end_refused();
+                                 *   'T') */
 };
 
-/** The wire letter of @a how ('D' or 'R'). */
+/** The wire letter of @a how ('D', 'R' or 'T'). */
 extern char bounce_member_end_letter(enum bounce_member_end how);
+
+/** Does the server that ends a session refuse @a how, as the local
+ * command would?  PERSISTENCE DETACH is refused while the session is held
+ * open by a connection on a class that enforces persistence (hs_enforced,
+ * which each server knows of its own connections only); no other end is.
+ *
+ * @param[in] how      The kind of end.
+ * @param[in] enforced The record here is enforced (hs_enforced).
+ */
+extern int bounce_end_refused(enum bounce_member_end how, int enforced);
 
 /** The member end a wire letter names, or -1 for one this server does not
  * know (a newer peer's: the line is dropped, never guessed at). */

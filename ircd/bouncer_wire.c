@@ -338,7 +338,15 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
 
 char bounce_member_end_letter(enum bounce_member_end how)
 {
-  return how == BOUNCE_MEMBER_END_RESET ? 'R' : 'D';
+  switch (how) {
+  case BOUNCE_MEMBER_END_RESET:
+    return 'R';
+  case BOUNCE_MEMBER_END_DETACH:
+    return 'T';
+  case BOUNCE_MEMBER_END_DISCONNECT:
+    break;
+  }
+  return 'D';
 }
 
 int bounce_member_end_parse(const char *letter)
@@ -350,8 +358,15 @@ int bounce_member_end_parse(const char *letter)
     return BOUNCE_MEMBER_END_DISCONNECT;
   case 'R':
     return BOUNCE_MEMBER_END_RESET;
+  case 'T':
+    return BOUNCE_MEMBER_END_DETACH;
   }
   return -1;
+}
+
+int bounce_end_refused(enum bounce_member_end how, int enforced)
+{
+  return how == BOUNCE_MEMBER_END_DETACH && enforced;
 }
 
 enum bounce_end_route bounce_end_route(int has_primary, int primary_ours,

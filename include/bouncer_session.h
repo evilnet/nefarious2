@@ -1156,9 +1156,12 @@ extern time_t bounce_hold_remaining(struct BouncerSession *session);
 extern void bounce_destroy(struct BouncerSession *session);
 
 /** A member (or an oper) ends @a session: the hold turned off (MODE -b,
- * BOUNCER SET HOLD off, PERSISTENCE SET OFF / DETACH) or BOUNCER
+ * BOUNCER SET HOLD off, PERSISTENCE SET OFF) or BOUNCER
  * DISCONNECT, which leave a live primary connected outside the session;
- * BOUNCER RESET, ORESET or a ban, which take every connection.
+ * BOUNCER RESET, ORESET or a ban, which take every connection;
+ * PERSISTENCE DETACH, as a DISCONNECT, which the holder refuses while a
+ * connection there on a class that enforces persistence holds the
+ * session (bounce_end_refused()).
  *
  * Only the holder ends a session (bounce_end_route()).  When the
  * session's primary is ours, or there is none, it ends here: the record

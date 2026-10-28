@@ -5677,6 +5677,20 @@ static int bounce_route_reads_carry(struct Client *home)
   return 0;
 }
 
+/** The name of a member end, for log lines. */
+static const char *member_end_name(enum bounce_member_end how)
+{
+  switch (how) {
+  case BOUNCE_MEMBER_END_RESET:
+    return "reset";
+  case BOUNCE_MEMBER_END_DETACH:
+    return "detach";
+  case BOUNCE_MEMBER_END_DISCONNECT:
+    break;
+  }
+  return "disconnect";
+}
+
 /** Facts about @a s's primary for a member's end: there is one (a user on
  * a server we know), and whether it is ours (live or a held ghost). */
 static void member_end_primary(struct BouncerSession *s, int *has, int *ours)
@@ -5801,8 +5815,7 @@ static void bounce_end_carry(struct BouncerSession *s, struct Client *primary,
 
   log_write(LS_USER, L_INFO, 0, "Bouncer: %s ends %s's session %s (%s); its "
             "holder %s decides", caller ? cli_name(caller) : cli_name(&me),
-            s->hs_account, s->hs_sessid,
-            how == BOUNCE_MEMBER_END_RESET ? "reset" : "disconnect",
+            s->hs_account, s->hs_sessid, member_end_name(how),
             cli_name(cli_user(primary)->server));
   sendcmdto_one(&me, CMD_BOUNCER_SESSION, primary, "E %s %s %c :%s",
                 s->hs_account, s->hs_sessid, bounce_member_end_letter(how),
@@ -5838,7 +5851,7 @@ enum bounce_end_route bounce_member_end(struct BouncerSession *s,
  *   BS A <account> <sessid> <client-numeric>
  *   BS D <account> <sessid> <disconnect-time> :<channels>
  *   BS X <account> <sessid>
- *   BS E <account> <sessid> <D|R> :<reason>  (a member's end, carried to
+ *   BS E <account> <sessid> <D|R|T> :<reason>  (a member's end, carried to
  *        the session's holder; fork-only, toward links with flag H)
  *   BS U <account> <sessid> <field>=<value>
  *   BS O <account> <sessid> [<granted_at> <opername>]  (oper grant set/clear)
@@ -6735,7 +6748,7 @@ bsc_forward:
 
   case 'E': /* A member's end of the session, carried to its holder */
   {
-    /* BS E <account> <sessid> <D|R> :<reason>  (bounce_member_end()) */
+    /* BS E <account> <sessid> <D|R|T> :<reason>  (bounce_member_end()) */
     struct Client *primary;
     int how, has, ours;
 
@@ -6750,9 +6763,18 @@ bsc_forward:
                               primary && !ours
                                 && bounce_route_reads_carry(cli_user(primary)->server))) {
     case BOUNCE_BSE_END:
+      if (bounce_end_refused((enum bounce_member_end)how, session->hs_enforced)) {
+        /* As the command would be refused here: a connection on a class
+         * that enforces persistence holds the session open. */
+        log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
+                  "%s (%s): refused, a connection here on a class that "
+                  "enforces persistence holds it", cli_name(sptr), account,
+                  sessid, member_end_name((enum bounce_member_end)how));
+        break;
+      }
       log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
                 "%s (%s): it ends here", cli_name(sptr), account, sessid,
-                how == BOUNCE_MEMBER_END_RESET ? "reset" : "disconnect");
+                member_end_name((enum bounce_member_end)how));
       bounce_end_here(session, NULL, cptr, (enum bounce_member_end)how,
                       parv[5]);
       break;

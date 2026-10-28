@@ -866,10 +866,11 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
   sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
                            cli_name(sptr), "draft/persistence/hold");
 
-  /* Its holder ends the session (here, or the end goes there); the
-   * primary carries on outside it, every device of it goes (matches the
-   * SET OFF path). */
-  bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_DISCONNECT, NULL);
+  /* Its holder ends the session (here, or the end goes there), and
+   * refuses as above when a connection there on a class that enforces
+   * persistence holds it; the primary carries on outside it, every device
+   * of it goes (matches the SET OFF path). */
+  bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_DETACH, NULL);
 
   send_persistence_reply(sptr, "DETACH", "OK");
   /* STATUS now resolves to OFF (no session, hold=0). */

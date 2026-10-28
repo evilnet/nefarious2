@@ -1300,8 +1300,10 @@ static void member_end_letters_round_trip(void **s)
   (void)s;
   assert_int_equal(bounce_member_end_letter(BOUNCE_MEMBER_END_DISCONNECT), 'D');
   assert_int_equal(bounce_member_end_letter(BOUNCE_MEMBER_END_RESET), 'R');
+  assert_int_equal(bounce_member_end_letter(BOUNCE_MEMBER_END_DETACH), 'T');
   assert_int_equal(bounce_member_end_parse("D"), BOUNCE_MEMBER_END_DISCONNECT);
   assert_int_equal(bounce_member_end_parse("R"), BOUNCE_MEMBER_END_RESET);
+  assert_int_equal(bounce_member_end_parse("T"), BOUNCE_MEMBER_END_DETACH);
 }
 
 static void an_unknown_member_end_letter_is_refused(void **s)
@@ -1309,6 +1311,8 @@ static void an_unknown_member_end_letter_is_refused(void **s)
   (void)s;
   assert_int_equal(bounce_member_end_parse("K"), -1);
   assert_int_equal(bounce_member_end_parse("DR"), -1);
+  assert_int_equal(bounce_member_end_parse("TD"), -1);
+  assert_int_equal(bounce_member_end_parse("d"), -1);
   assert_int_equal(bounce_member_end_parse(""), -1);
   assert_int_equal(bounce_member_end_parse(NULL), -1);
 }
@@ -1388,6 +1392,8 @@ static void a_disconnect_keeps_the_live_primary(void **s)
   (void)s;
   assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DISCONNECT, 1, 0, 0),
                    BOUNCE_END_PRIMARY_STAYS);
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DETACH, 1, 0, 0),
+                   BOUNCE_END_PRIMARY_STAYS);
 }
 
 static void a_reset_takes_the_primary(void **s)
@@ -1404,6 +1410,8 @@ static void a_held_ghost_leaves_with_any_end(void **s)
   (void)s;
   assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DISCONNECT, 1, 1, 0),
                    BOUNCE_END_PRIMARY_EXITS);
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DETACH, 1, 1, 0),
+                   BOUNCE_END_PRIMARY_EXITS);
 }
 
 static void the_asking_connection_is_never_exited_under_its_command(void **s)
@@ -1413,17 +1421,38 @@ static void the_asking_connection_is_never_exited_under_its_command(void **s)
                    BOUNCE_END_PRIMARY_ASKED);
   assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_RESET, 1, 0, 1),
                    BOUNCE_END_PRIMARY_ASKED);
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DETACH, 1, 0, 1),
+                   BOUNCE_END_PRIMARY_ASKED);
 }
 
 static void a_remote_primary_is_never_exited_here(void **s)
 {
   int k, h, c;
   (void)s;
-  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_RESET; k++)
+  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_DETACH; k++)
   for (h = 0; h < 2; h++)
   for (c = 0; c < 2; c++)
     assert_int_equal(bounce_end_primary((enum bounce_member_end)k, 0, h, c),
                      BOUNCE_END_PRIMARY_REMOTE);
+}
+
+/* bounce_end_refused(how, enforced) */
+
+static void a_detach_of_an_enforced_session_is_refused(void **s)
+{
+  (void)s;
+  assert_true(bounce_end_refused(BOUNCE_MEMBER_END_DETACH, 1));
+  assert_false(bounce_end_refused(BOUNCE_MEMBER_END_DETACH, 0));
+}
+
+static void only_a_detach_is_ever_refused(void **s)
+{
+  int e;
+  (void)s;
+  for (e = 0; e < 2; e++) {
+    assert_false(bounce_end_refused(BOUNCE_MEMBER_END_DISCONNECT, e));
+    assert_false(bounce_end_refused(BOUNCE_MEMBER_END_RESET, e));
+  }
 }
 
 /* bounce_bsx_keep_reannounces(kept, link_hold_mark) */
@@ -1625,6 +1654,8 @@ int main(void)
     cmocka_unit_test(a_held_ghost_leaves_with_any_end),
     cmocka_unit_test(the_asking_connection_is_never_exited_under_its_command),
     cmocka_unit_test(a_remote_primary_is_never_exited_here),
+    cmocka_unit_test(a_detach_of_an_enforced_session_is_refused),
+    cmocka_unit_test(only_a_detach_is_ever_refused),
     cmocka_unit_test(a_kept_session_is_announced_again_to_a_hold_mark_link),
     cmocka_unit_test(a_ban_never_promotes_a_fault_never_ends),
     cmocka_unit_test(crossed_promote_another_device_takes_over),
