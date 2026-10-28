@@ -1513,6 +1513,11 @@ static void a_resolved_ghost_is_admitted(void **s)
   assert_true(bounce_member_end_resolve_admits(0, 0, 0, 0));
   /* Our own held ghost of this session. */
   assert_true(bounce_member_end_resolve_admits(0, 0, 1, 1));
+  /* A held ghost that is not ours: the call site cannot produce it (it
+   * reads held_ghost as MyConnect && IsBouncerHold && in the session, so
+   * held_ghost implies ours); the rule admits it as it admits any client
+   * of another server. */
+  assert_true(bounce_member_end_resolve_admits(0, 0, 0, 1));
 }
 
 static void a_resolve_never_installs_a_device_or_another_client_of_ours(void **s)

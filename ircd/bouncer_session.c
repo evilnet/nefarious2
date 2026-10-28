@@ -1166,8 +1166,11 @@ int bounce_session_has_plaintext(struct Client *cptr)
  * for BS-token handlers.  Its callers are auto-resume's (registration, no
  * live sender), never a BS-token handler: a member's end, which is also
  * decided in the BS E handler, resolves through member_end_resolve(), which
- * prefers the server that announced the hold and refuses an alias or a
- * roster member.  The two fields stay aligned for the cases that reach
+ * prefers the server that announced the hold and admits only a client that
+ * can be the primary (bounce_member_end_resolve_admits()): never an alias
+ * or a roster member, and a client of ours only as the session's own held
+ * ghost.  This resolve admits any client of the account and Keycloak id
+ * the numeric names (registered: auto-resume's ghost resolve exposure).  The two fields stay aligned for the cases that reach
  * here: HOLDING-on-this-server has hs_origin == cli_yxx(&me) by
  * construction, HOLDING/ACTIVE-as-replica is created with hs_origin == the
  * BS C sender's prefix, matching its hs_ghost_numeric source.  A mis-composed
@@ -5756,7 +5759,9 @@ static void member_end_primary(struct BouncerSession *s, int *has, int *ours)
  * ends).  The record and every copy of it go (BS X: their servers end
  * the session's devices there), every device of ours that follows its
  * primary goes with it, and the primary as bounce_end_primary() says.
- * @a cptr is never exited here (see bounce_member_end()). */
+ * A live @a cptr is never exited here; a held ghost named as @a cptr
+ * leaves with the session, so its caller runs the end once it is done
+ * with it (see bounce_member_end()). */
 static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
                             struct Client *cptr, enum bounce_member_end how,
                             const char *reason)

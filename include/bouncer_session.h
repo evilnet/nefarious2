@@ -1179,10 +1179,15 @@ extern void bounce_destroy(struct BouncerSession *session);
  * server (BS E) and nothing changes here until it decides; a server on
  * the way that would drop the line gets our copy's end instead (BS X).
  *
- * The connection being handled (@a cptr) is never exited here: a device
- * of the session that asked is left with no primary, for the orphan
- * sweep (or for its own command, as RESET exits its caller last); a
- * primary that asked carries on.  A local primary and @a caller that
+ * A live connection being handled (@a cptr) is never exited here: a
+ * device of the session that asked is left with no primary, for the
+ * orphan sweep (or for its own command, as RESET exits its caller last);
+ * a primary that asked carries on.  A held ghost named as @a cptr is not
+ * spared: it has no connection to carry on with and leaves with its
+ * session (bounce_end_primary(); services' SVSMODE -b names the ghost
+ * itself), so a caller that still uses @a cptr runs the end only once it
+ * is done with it (set_user_mode() runs a -b's end last).  A local
+ * primary and @a caller that
  * carry on take a session id of their own, as does a device left for the
  * sweep: the ended session's id would make the session-id hint stamp it
  * on their N, and a peer would take a client in no session for a member
