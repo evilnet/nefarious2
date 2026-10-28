@@ -9096,7 +9096,9 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
    * primary's server keeps its own (sent once the new primary is
    * adopted, bounce_adopt_new_primary). */
   bounce_accrue_active(session);
-  session->hs_client = NULL;
+  /* The slot is emptied, and filled by the finish, through the checked
+   * install, as every write of a record's primary is. */
+  bounce_hs_client_assign_checked(session, NULL, "demote");
 
   if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
     struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
@@ -9134,7 +9136,24 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
     return -1;
   }
 
-  session->hs_client = new_primary;
+  /* Through the checked install: the eligibility above read the same
+   * account and Keycloak facts, so it never refuses here; it retracts a
+   * crossed promote's noted face and drops a promote's handoff. */
+  if (!bounce_hs_client_assign_checked(session, new_primary, "demote")) {
+    log_write(LS_USER, L_WARNING, 0, "Bouncer demote: session %s of %s "
+              "refused %s as its primary after the demote's own checks "
+              "passed; %s is left to the orphan sweep", session->hs_sessid,
+              session->hs_account, cli_name(new_primary),
+              cli_name(demoted_alias));
+    return -1;
+  }
+  /* The record now mirrors the new primary's server (the demote set the
+   * origin): the numeric it knows the primary by, and that server's copy,
+   * which is live, stay in step with it -- a member's end resolves the
+   * primary from them if the slot is ever emptied. */
+  ircd_strncpy(session->hs_ghost_numeric, cli_yxx(new_primary),
+               sizeof(session->hs_ghost_numeric));
+  bounce_peer_holding_clear(session, cli_user(new_primary)->server);
   cli_user(demoted_alias)->alias_primary = new_primary;
   /* The demoted connection is a connection of this session: it carries
    * the session's id, which the alias filing, the reconcile and history's
@@ -9221,6 +9240,8 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
       bounce_legacy_face_change(demoted_alias, session, NULL, NULL, reason);
     }
   }
+  /* The session's members changed roles: its away is theirs again. */
+  bounce_recompute_session_away(session);
 
   return 0;
 }
@@ -9231,8 +9252,14 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
                             const char *incoming_sessid)
 {
   struct BouncerSession *target = session;
+  /* A merge's record of ours, ended only after its devices are announced
+   * in the record they join (below): kept by identity, with its account
+   * and id. */
+  struct BouncerSession *merged = NULL;
+  char merged_account[ACCOUNTLEN + 1] = "";
+  char merged_sessid[BOUNCER_SESSID_LEN] = "";
   char new_full[6];
-  int i;
+  int i, installed;
 
   if (!session || !ghost || !new_primary || session->hs_client != ghost
       || !IsUser(new_primary) || !cli_user(new_primary)
@@ -9289,9 +9316,13 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
                     session->hs_aliases[i].ba_numeric, session->hs_sessid);
       }
       session->hs_alias_count = 0;
-      session->hs_client = NULL;
-      bounce_broadcast(session, 'X', NULL);
-      bounce_destroy(session);
+      bounce_hs_client_assign_checked(session, NULL, "yield");
+      /* Ours ends (BS X, destroy) once its devices are announced in the
+       * record they join (below): a peer then re-files them before the
+       * BS X of the merged-away id reaches it. */
+      merged = session;
+      ircd_strncpy(merged_account, session->hs_account, sizeof(merged_account));
+      ircd_strncpy(merged_sessid, session->hs_sessid, sizeof(merged_sessid));
       target = other;
       unmirrored_clear(target->hs_account, incoming_sessid);
       break;
@@ -9318,12 +9349,19 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
    * ghost still has the numeric they know. */
   bounce_legacy_face_change(ghost, target, link, new_full, NULL);
 
-  /* The primary slot is the incoming primary's: the session is live
+  /* The primary slot is the incoming primary's, through the checked
+   * install (the same-nick verdict vetoed another Keycloak user and
+   * another account already, so it does not refuse): the session is live
    * again, held by its server; no hold timer runs here. */
+  installed = bounce_hs_client_assign_checked(target, new_primary, "yield");
+  if (!installed)
+    log_write(LS_USER, L_WARNING, 0, "Bouncer yield: session %s of %s "
+              "refused %s as its primary after the same-nick verdict; the "
+              "devices of %s are left to the orphan sweep", target->hs_sessid,
+              target->hs_account, new_full, cli_name(ghost));
   if (t_active(&target->hs_hold_timer))
     timer_del(&target->hs_hold_timer);
   target->hs_state = BOUNCE_ACTIVE;
-  target->hs_client = new_primary;
   target->hs_disconnect_time = 0;
   target->hs_last_active = CurrentTime;
   target->hs_restore_pending = 0;
@@ -9336,7 +9374,7 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
   /* Its live connections follow the incoming primary, and the aware
    * links learn ours as its aliases (a peer that knew them from our burst
    * as the ghost's re-files them). */
-  for (i = 0; i < target->hs_alias_count; i++) {
+  for (i = 0; installed && i < target->hs_alias_count; i++) {
     struct Client *alias = findNUser(target->hs_aliases[i].ba_numeric);
     if (!alias || !IsBouncerAlias(alias) || !cli_user(alias))
       continue;
@@ -9348,6 +9386,24 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
     }
     if (MyConnect(alias))
       bounce_announce_alias(target, alias, new_primary);
+  }
+
+  /* A merge's record of ours ends now, after its devices' BX C (12a fix-1
+   * carry): the very record, if the account still lists it. */
+  if (merged_sessid[0]) {
+    struct AccountSessions *mas = bounce_find_by_account(merged_account);
+    struct BouncerSession *m;
+
+    for (m = mas ? mas->as_sessions : NULL; m; m = m->hs_anext)
+      if (m == merged && 0 == strcmp(m->hs_sessid, merged_sessid))
+        break;
+    if (m) {
+      log_write(LS_USER, L_INFO, 0, "Bouncer yield: session %s of %s merged "
+                "into %s; it ends", merged_sessid, merged_account,
+                target->hs_sessid);
+      bounce_broadcast(m, 'X', NULL);
+      bounce_destroy(m);
+    }
   }
 
   log_write(LS_USER, L_INFO, 0,
