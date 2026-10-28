@@ -2703,45 +2703,23 @@ void bounce_destroy(struct BouncerSession *session)
   MyFree(session);
 }
 
-/** A local connection of an ended session that carries on: its own
- * session id from now on, unless it already has one. */
+/** A local connection of an ended session that is still connected (a
+ * primary or a caller that carries on, a device left for the orphan
+ * sweep): its own session id from now on, unless it already has one.
+ * Kept, the ended id is stamped on the next N of a client in no session
+ * (the hint's fallback is the client's own id), which a peer reads as
+ * membership, and it files a device by id into any record of it.  PM
+ * history keyed by the old id still names the account's holder of the
+ * nick; presence of a logged-in client is kept by account. */
 static void bounce_give_own_sessid(struct Client *c, const char *ended)
 {
-  if (!c || !MyUser(c) || IsBouncerAlias(c) || !ended[0]
+  if (!c || !MyUser(c) || !ended[0]
       || 0 != strcmp(cli_session_id(c), ended))
     return;
   presence_purge_session(cli_session_id(c));
   generate_sessid(cli_session_id(c));
   Debug((DEBUG_INFO, "Bouncer: %s left session %s; its own id is %s",
          cli_name(c), ended, cli_session_id(c)));
-}
-
-/** See include/bouncer_session.h. */
-void bounce_end_session_keep_clients(struct BouncerSession *session,
-                                     struct Client *caller)
-{
-  struct Client *primary;
-  char ended[BOUNCER_SESSID_LEN];
-
-  if (!session)
-    return;
-  primary = session->hs_client;
-  ircd_strncpy(ended, session->hs_sessid, sizeof(ended));
-
-  /* Detach the primary before the destroy so exit_one_client does not
-   * operate on a destroyed session later. */
-  session->hs_client = NULL;
-  bounce_broadcast(session, 'X', NULL);
-  bounce_destroy(session);
-
-  /* The id stays with the ended session: kept, it is stamped on the next
-   * N of a client in no session (the hint's fallback is the client's own
-   * id), which a peer reads as membership.  PM history keyed by the old
-   * id still names the account's holder of the nick; presence of a
-   * logged-in client is kept by account. */
-  bounce_give_own_sessid(primary, ended);
-  if (caller != primary)
-    bounce_give_own_sessid(caller, ended);
 }
 
 /** Force-destroy a session due to a network KILL (invariant #12).
@@ -3723,6 +3701,19 @@ static void bounce_orphan_alias_sweep(struct Event *ev)
   }
 }
 
+/** A device of ours was left without a primary: the sweep decides for it
+ * after its grace, once any session end or promote now on its way (a
+ * BS X, a BX P) has had the time to reach it. */
+static void orphan_arm(void)
+{
+  if (!orphan_first)
+    orphan_first = CurrentTime;
+  orphan_due = CurrentTime + ORPHAN_GRACE;
+  if (!t_active(&orphan_sweep_timer))
+    timer_add(timer_init(&orphan_sweep_timer), bounce_orphan_alias_sweep,
+              NULL, TT_RELATIVE, ORPHAN_GRACE);
+}
+
 /** See include/bouncer_session.h. */
 void bounce_null_alias_primary_pointing_at(struct Client *gone)
 {
@@ -3741,17 +3732,8 @@ void bounce_null_alias_primary_pointing_at(struct Client *gone)
         orphaned_here = 1;
     }
   }
-  /* A device of ours left without a primary: the sweep decides for it
-   * after its grace, once any session end or promote now on its way (a
-   * BS X, a BX P) has had the time to reach it. */
-  if (!orphaned_here)
-    return;
-  if (!orphan_first)
-    orphan_first = CurrentTime;
-  orphan_due = CurrentTime + ORPHAN_GRACE;
-  if (!t_active(&orphan_sweep_timer))
-    timer_add(timer_init(&orphan_sweep_timer), bounce_orphan_alias_sweep,
-              NULL, TT_RELATIVE, ORPHAN_GRACE);
+  if (orphaned_here)
+    orphan_arm();
 }
 
 void bounce_null_hs_client_pointing_at(struct Client *cli)
@@ -5631,6 +5613,176 @@ static void bounce_bsx_end_devices(struct BouncerSession *s,
   }
 }
 
+/** Does every server from @a home up to our own link read a carried
+ * member end (BS E)?  Each must have announced the hold mark (flag H). */
+static int bounce_route_reads_carry(struct Client *home)
+{
+  struct Client *s;
+  int hops = 0;
+
+  for (s = home; s && IsServer(s) && !IsMe(s); s = cli_serv(s)->up) {
+    if (!IsHoldMark(s) || ++hops > BOUNCE_MAX_SERVER_DEPTH)
+      return 0;
+    if (cli_serv(s)->up && IsMe(cli_serv(s)->up))
+      return 1;
+  }
+  return 0;
+}
+
+/** Facts about @a s's primary for a member's end: there is one (a user on
+ * a server we know), and whether it is ours (live or a held ghost). */
+static void member_end_primary(struct BouncerSession *s, int *has, int *ours)
+{
+  struct Client *p = s ? s->hs_client : NULL;
+
+  *has = p && IsUser(p) && cli_user(p) && cli_user(p)->server;
+  *ours = *has && MyConnect(p) && !IsBouncerAlias(p);
+}
+
+/** A member's end of @a s, decided here (bounce_end_route(): we hold the
+ * session, nobody does, or its holder would drop the carry and our copy
+ * ends).  The record and every copy of it go (BS X: their servers end
+ * the session's devices there), every device of ours that follows its
+ * primary goes with it, and the primary as bounce_end_primary() says.
+ * @a cptr is never exited here (see bounce_member_end()). */
+static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
+                            struct Client *cptr, enum bounce_member_end how,
+                            const char *reason)
+{
+  const char *why = (reason && *reason) ? reason : "Bouncer session ended";
+  const char *device_why = how == BOUNCE_MEMBER_END_RESET
+                           ? why : "Bouncer session ended";
+  char ended[BOUNCER_SESSID_LEN];
+  char account[ACCOUNTLEN + 1];
+  struct Client *primary;
+  int has, ours, held, i;
+
+  primary = s->hs_client;
+  member_end_primary(s, &has, &ours);
+  held = ours && IsBouncerHold(primary);
+  ircd_strncpy(ended, s->hs_sessid, sizeof(ended));
+  ircd_strncpy(account, s->hs_account, sizeof(account));
+
+  /* The connection being handled is its own command's to exit (a RESET
+   * exits its caller last) or the orphan sweep's: off the roster, a
+   * KILL-class end of the session does not exit it. */
+  if (how == BOUNCE_MEMBER_END_RESET && cptr && cptr != primary
+      && MyConnect(cptr) && IsBouncerAlias(cptr) && session_roster_has(s, cptr))
+    bounce_alias_untrack(cptr);
+
+  /* Every device of ours that follows the primary, filed on the roster or
+   * not: a device has no nick of its own and cannot carry on outside a
+   * session.  Each exit takes it off the record. */
+  for (i = 0; primary && i <= HighestFd; i++) {
+    struct Client *a = LocalClientArray[i];
+
+    if (!a || a == primary || !IsUser(a) || !IsBouncerAlias(a) || !cli_user(a)
+        || HasFlag(a, FLAG_CLOSING) || cli_user(a)->alias_primary != primary)
+      continue;
+    if (a == cptr) {
+      /* The connection being handled is never exited under its own
+       * command: with no primary, the orphan sweep ends it once the
+       * command is done (unless the command exits it first). */
+      bounce_alias_untrack(a);
+      cli_user(a)->alias_primary = NULL;
+      bounce_give_own_sessid(a, ended);
+      orphan_arm();
+      continue;
+    }
+    log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s ends here (%s); "
+              "its device %s%s (%s) ends with it", account, ended, why,
+              cli_yxx(&me), cli_yxx(a), cli_name(a));
+    exit_client(a, a, &me, device_why);
+  }
+
+  /* A primary kept here for a crossed promote leaves with the session (its
+   * own server let it go already); a stale note's face is retracted. */
+  if (s->hs_crossed_face[0]) {
+    crossed_primary_leaves(s, primary ? cli_from(primary) : NULL, &me, why);
+    if (s->hs_client != primary)
+      primary = NULL, has = ours = held = 0;
+  }
+
+  if (how == BOUNCE_MEMBER_END_RESET)
+    /* Every device left on the roster, everywhere; BS X; the record. */
+    bounce_kill_session(s, why);
+  else {
+    /* The primary is let go first so no exit below operates on the
+     * record; BS X; the record (bounce_destroy() retracts a noted face). */
+    s->hs_client = NULL;
+    bounce_broadcast(s, 'X', NULL);
+    bounce_destroy(s);
+  }
+  s = NULL;
+
+  switch (bounce_end_primary(how, ours, held, primary && primary == cptr)) {
+  case BOUNCE_END_PRIMARY_STAYS:
+  case BOUNCE_END_PRIMARY_ASKED:
+    bounce_give_own_sessid(primary, ended);
+    break;
+  case BOUNCE_END_PRIMARY_EXITS:
+    log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s ends here (%s); "
+              "its %sprimary %s leaves with it", account, ended, why,
+              held ? "held " : "", cli_name(primary));
+    /* A held ghost leaves as a user does, with its QUIT. */
+    if (held)
+      ClearBouncerHold(primary);
+    exit_client(primary, primary, &me, why);
+    break;
+  case BOUNCE_END_PRIMARY_REMOTE:
+    if (has && how == BOUNCE_MEMBER_END_RESET)
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s ends here "
+                "(%s); its primary %s is %s's to exit", account, ended, why,
+                cli_name(primary), cli_name(cli_user(primary)->server));
+    break;
+  }
+  /* The connection that asked, carrying on outside the session (a device
+   * of it was left for the sweep above). */
+  if (caller && caller == cptr && caller != primary && !IsBouncerAlias(caller))
+    bounce_give_own_sessid(caller, ended);
+}
+
+/** A member's end of @a s goes to its holder, the server of its primary
+ * @a primary (bounce_end_route()): nothing changes here until the holder
+ * ends the session (its BS X ends the session's devices here). */
+static void bounce_end_carry(struct BouncerSession *s, struct Client *primary,
+                             struct Client *caller, enum bounce_member_end how,
+                             const char *reason)
+{
+  const char *why = (reason && *reason) ? reason : "Bouncer session ended";
+
+  log_write(LS_USER, L_INFO, 0, "Bouncer: %s ends %s's session %s (%s); its "
+            "holder %s decides", caller ? cli_name(caller) : cli_name(&me),
+            s->hs_account, s->hs_sessid,
+            how == BOUNCE_MEMBER_END_RESET ? "reset" : "disconnect",
+            cli_name(cli_user(primary)->server));
+  sendcmdto_one(&me, CMD_BOUNCER_SESSION, primary, "E %s %s %c :%s",
+                s->hs_account, s->hs_sessid, bounce_member_end_letter(how),
+                why);
+}
+
+/** See include/bouncer_session.h. */
+enum bounce_end_route bounce_member_end(struct BouncerSession *s,
+                                        struct Client *caller,
+                                        struct Client *cptr,
+                                        enum bounce_member_end how,
+                                        const char *reason)
+{
+  enum bounce_end_route route;
+  int has, ours;
+
+  if (!s)
+    return BOUNCE_ROUTE_HERE;
+  member_end_primary(s, &has, &ours);
+  route = bounce_end_route(has, ours, has && !ours
+                           && bounce_route_reads_carry(cli_user(s->hs_client)->server));
+  if (route == BOUNCE_ROUTE_CARRY)
+    bounce_end_carry(s, s->hs_client, caller, how, reason);
+  else
+    bounce_end_here(s, caller, cptr, how, reason);
+  return route;
+}
+
 /** Handle incoming BS P10 message from another server.
  *
  * Subcommands:
@@ -5638,6 +5790,8 @@ static void bounce_bsx_end_devices(struct BouncerSession *s,
  *   BS A <account> <sessid> <client-numeric>
  *   BS D <account> <sessid> <disconnect-time> :<channels>
  *   BS X <account> <sessid>
+ *   BS E <account> <sessid> <D|R> :<reason>  (a member's end, carried to
+ *        the session's holder; fork-only, toward links with flag H)
  *   BS U <account> <sessid> <field>=<value>
  *   BS O <account> <sessid> [<granted_at> <opername>]  (oper grant set/clear)
  *   BS T <account> <sessid> <new-origin>  (session ownership transfer)
@@ -6450,10 +6604,11 @@ bsc_forward:
                            primary && HasFlag(primary, FLAG_KILLED))) {
         /* We hold the session: its primary is ours, live or a held ghost.
          * The sender ended its own copy -- a held copy's hold ran out, a
-         * client of a session sharing this id lost a nick collision, a
-         * member there ended it -- and that ends nothing of ours; our
-         * KILL path, our hold timer and our own users end it.  Not relayed
-         * either: no server behind us is told to end what we hold. */
+         * client of a session sharing this id lost a nick collision, an
+         * older server's member end -- and that ends nothing of ours; our
+         * KILL path, our hold timer and our users end it (a member's end
+         * from another server comes to us as BS E).  Not relayed either:
+         * no server behind us is told to end what we hold. */
         log_write(LS_USER, L_INFO, 0,
                   "Bouncer: %s ended %s's session %s, whose primary %s is %s "
                   "here: kept", cli_name(sptr), account, sessid,
@@ -6509,6 +6664,44 @@ bsc_forward:
           bounce_announce_session_to(s2, cptr, 0);
         }
       }
+    }
+    break;
+  }
+
+  case 'E': /* A member's end of the session, carried to its holder */
+  {
+    /* BS E <account> <sessid> <D|R> :<reason>  (bounce_member_end()) */
+    struct Client *primary;
+    int how, has, ours;
+
+    if (parc < 6)
+      break;
+    how = bounce_member_end_parse(parv[4]);
+    session = bounce_find_by_token_sessid(account, sessid);
+    member_end_primary(session, &has, &ours);
+    primary = has ? session->hs_client : NULL;
+    switch (bounce_bse_action(how >= 0, session != NULL, has, ours,
+                              primary && cli_from(primary) == cptr,
+                              primary && !ours
+                                && bounce_route_reads_carry(cli_user(primary)->server))) {
+    case BOUNCE_BSE_END:
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
+                "%s (%s): it ends here", cli_name(sptr), account, sessid,
+                how == BOUNCE_MEMBER_END_RESET ? "reset" : "disconnect");
+      bounce_end_here(session, NULL, cptr, (enum bounce_member_end)how,
+                      parv[5]);
+      break;
+    case BOUNCE_BSE_FORWARD:
+      sendcmdto_one(sptr, CMD_BOUNCER_SESSION, primary, "E %s %s %s :%s",
+                    account, sessid, parv[4], parv[5]);
+      break;
+    case BOUNCE_BSE_DROP:
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
+                "%s (%s): %s", cli_name(sptr), account, sessid, parv[4],
+                how < 0 ? "an end this server does not know; dropped"
+                : !session ? "no record of it here; dropped"
+                : "its primary is not reached that way from here; dropped");
+      break;
     }
     break;
   }

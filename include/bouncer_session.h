@@ -1152,19 +1152,43 @@ extern time_t bounce_hold_remaining(struct BouncerSession *session);
  */
 extern void bounce_destroy(struct BouncerSession *session);
 
-/** End @a session everywhere (BS X, then bounce_destroy()) while its
- * connections carry on outside it: hold turned off (MODE -b, BOUNCER SET
- * HOLD off, PERSISTENCE SET OFF / DETACH) or BOUNCER DISCONNECT.  A local
- * primary, and @a caller, that carry on take a session id of their own:
- * the ended session's id would make the session-id hint stamp it on
- * their N, and a peer would take a client in no session for a member
+/** A member (or an oper) ends @a session: the hold turned off (MODE -b,
+ * BOUNCER SET HOLD off, PERSISTENCE SET OFF / DETACH) or BOUNCER
+ * DISCONNECT, which leave a live primary connected outside the session;
+ * BOUNCER RESET, ORESET or a ban, which take every connection.
+ *
+ * Only the holder ends a session (bounce_end_route()).  When the
+ * session's primary is ours, or there is none, it ends here: the record
+ * and every copy of it (BS X, whose receivers end the session's devices
+ * there), every device of ours that follows the primary (a device cannot
+ * carry on outside a session), and the primary as bounce_end_primary()
+ * says.  When the primary is another server's, the end goes to that
+ * server (BS E) and nothing changes here until it decides; a server on
+ * the way that would drop the line gets our copy's end instead (BS X).
+ *
+ * The connection being handled (@a cptr) is never exited here: a device
+ * of the session that asked is left with no primary, for the orphan
+ * sweep (or for its own command, as RESET exits its caller last); a
+ * primary that asked carries on.  A local primary and @a caller that
+ * carry on take a session id of their own, as does a device left for the
+ * sweep: the ended session's id would make the session-id hint stamp it
+ * on their N, and a peer would take a client in no session for a member
  * (its rebind and its post-burst merge match on that id).
  *
- * @param[in] session The session to end; freed here.
- * @param[in] caller  The connection that asked, or NULL.
+ * @param[in] session The session to end; freed here unless the end is
+ *                    carried to its holder.
+ * @param[in] caller  The client that asked, or NULL.
+ * @param[in] cptr    The connection being handled, or NULL.
+ * @param[in] how     The kind of end.
+ * @param[in] reason  Why (the quit of what a RESET-kind end exits), or
+ *                    NULL for "Bouncer session ended".
+ * @return Where the end was decided.
  */
-extern void bounce_end_session_keep_clients(struct BouncerSession *session,
-                                            struct Client *caller);
+extern enum bounce_end_route bounce_member_end(struct BouncerSession *session,
+                                               struct Client *caller,
+                                               struct Client *cptr,
+                                               enum bounce_member_end how,
+                                               const char *reason);
 
 /** Force-destroy a session because its primary was network-KILLed
  * (invariant #12: KILL ends the whole session).  Exits every alias

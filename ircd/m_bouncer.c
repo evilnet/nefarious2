@@ -527,7 +527,9 @@ static int bouncer_disconnect(struct Client *sptr, const char *sessid)
 
   for (s = as->as_sessions; s; s = s->hs_anext) {
     if (0 == strcmp(s->hs_sessid, sessid)) {
-      bounce_end_session_keep_clients(s, sptr);
+      /* Its holder ends it (here, or the end goes there); the asking
+       * connection carries on, unless it is a device of it. */
+      bounce_member_end(s, sptr, sptr, BOUNCE_MEMBER_END_DISCONNECT, NULL);
       send_note(sptr, "BOUNCER", "SESSION_DISCONNECTED", sessid,
                 "Session disconnected");
       return 0;
@@ -562,10 +564,6 @@ static int bouncer_reset(struct Client *cptr, struct Client *sptr,
 {
   struct AccountSessions *as;
   struct BouncerSession *s = NULL;
-  struct Client *primary;
-  struct Client *aliases[BOUNCER_MAX_ALIASES];
-  int alias_count = 0;
-  int i;
 
   if (!IsAccount(sptr)) {
     send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", NULL,
@@ -594,32 +592,15 @@ static int bouncer_reset(struct Client *cptr, struct Client *sptr,
   if (!s)
     goto notfound;
 
-  /* Snapshot all live connections before destroying the session — once
-   * bounce_destroy runs, hs_aliases[] is gone. */
-  primary = s->hs_client;
-  for (i = 0; i < s->hs_alias_count && alias_count < BOUNCER_MAX_ALIASES; i++) {
-    struct Client *al = findNUser(s->hs_aliases[i].ba_numeric);
-    if (al && IsBouncerAlias(al))
-      aliases[alias_count++] = al;
-  }
-
   send_note(sptr, "BOUNCER", "SESSION_RESET", s->hs_sessid,
             "Session reset; all attached connections terminating");
 
-  /* Destroy session record first so exit paths don't try to re-hold
-   * the primary or untrack against a vanishing session. */
-  bounce_broadcast(s, 'X', NULL);
-  bounce_destroy(s);
-
-  /* Exit aliases (skip caller — exited last). */
-  for (i = 0; i < alias_count; i++) {
-    if (aliases[i] != sptr)
-      exit_client(cptr, aliases[i], &me, "Bouncer session reset");
-  }
-
-  /* Exit primary (skip caller). */
-  if (primary && primary != sptr)
-    exit_client(cptr, primary, &me, "Bouncer session reset");
+  /* Its holder ends it and every connection of it: here when its primary
+   * is ours (or there is none), else the end goes to the primary's server
+   * -- a remote client is never exited here (that splits the network).
+   * The caller is not exited there. */
+  bounce_member_end(s, sptr, cptr, BOUNCE_MEMBER_END_RESET,
+                    "Bouncer session reset");
 
   /* Caller last. Returns CPTR_KILLED iff cptr == sptr. */
   return exit_client(cptr, sptr, &me, "Bouncer session reset");
@@ -639,10 +620,9 @@ notfound:
  * target's account name (and optionally a specific sessid when the
  * target account has multiple sessions).
  *
- * Same destructive semantics as RESET, but the oper invoking the
- * command is not the one being reset, so we don't need the "exit
- * caller last" ordering trick — just exit every targeted connection
- * directly.
+ * Same destructive semantics as RESET.  The oper invoking the command
+ * is usually not one of the session's connections; when it is (its own
+ * account), it is exited last, as RESET's caller is.
  *
  * Without sessid: targets the first session on the account (matches
  * RESET's "default" behaviour for the user's own session).  With
@@ -656,10 +636,7 @@ static int bouncer_oreset(struct Client *cptr, struct Client *sptr,
 {
   struct AccountSessions *as;
   struct BouncerSession *s = NULL;
-  struct Client *primary;
-  struct Client *aliases[BOUNCER_MAX_ALIASES];
-  int alias_count = 0;
-  int i;
+  int member;
 
   if (!account || !*account) {
     send_fail(sptr, "BOUNCER", "NEED_PARAM", "ORESET",
@@ -682,13 +659,9 @@ static int bouncer_oreset(struct Client *cptr, struct Client *sptr,
   if (!s)
     goto notfound;
 
-  /* Snapshot live connections before destroying the session record. */
-  primary = s->hs_client;
-  for (i = 0; i < s->hs_alias_count && alias_count < BOUNCER_MAX_ALIASES; i++) {
-    struct Client *al = findNUser(s->hs_aliases[i].ba_numeric);
-    if (al && IsBouncerAlias(al))
-      aliases[alias_count++] = al;
-  }
+  /* An oper resetting a session of its own account is one of its
+   * connections: it goes last, as RESET's caller does. */
+  member = (bounce_get_session(sptr) == s);
 
   /* Audit trail: emit a server notice so other opers can see who did
    * what.  Match the format used by other oper actions (KILL/GLINE). */
@@ -700,18 +673,14 @@ static int bouncer_oreset(struct Client *cptr, struct Client *sptr,
   send_note(sptr, "BOUNCER", "SESSION_RESET", s->hs_sessid,
             "Session reset by oper");
 
-  /* Destroy session record first so exit paths don't try to re-hold
-   * the primary or untrack against a vanishing session. */
-  bounce_broadcast(s, 'X', NULL);
-  bounce_destroy(s);
+  /* Its holder ends it and every connection of it: here when its primary
+   * is ours (or there is none), else the end goes to the primary's server
+   * -- a remote client is never exited here (that splits the network). */
+  bounce_member_end(s, sptr, cptr, BOUNCE_MEMBER_END_RESET,
+                    "Bouncer session reset by oper");
 
-  /* Exit all attached connections.  None of them is the caller (oper
-   * is on a different account), so plain order is fine. */
-  for (i = 0; i < alias_count; i++)
-    exit_client(cptr, aliases[i], &me, "Bouncer session reset by oper");
-  if (primary)
-    exit_client(cptr, primary, &me, "Bouncer session reset by oper");
-
+  if (member)
+    return exit_client(cptr, sptr, &me, "Bouncer session reset by oper");
   return 0;
 
 notfound:
@@ -844,12 +813,14 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
                             cli_name(sptr), "draft/persistence/hold");
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.
-       * Destroy the session (disconnects all aliases) so the primary
-       * continues as a normal non-bounced IRC client. */
+       * Its holder ends the session (here, or the end goes there): every
+       * device of it is disconnected, and the primary continues as a
+       * normal non-bounced IRC client. */
       {
         struct BouncerSession *session = bounce_get_session(sptr);
         if (session)
-          bounce_end_session_keep_clients(session, sptr);
+          bounce_member_end(session, sptr, sptr,
+                            BOUNCE_MEMBER_END_DISCONNECT, NULL);
       }
 
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,

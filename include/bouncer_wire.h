@@ -762,6 +762,115 @@ extern enum bounce_forced_action
 bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
                           int session_primary, int primary_ours);
 
+/** How a member's end of a session ends it.  On the wire (BS E) a letter:
+ * bounce_member_end_letter(), bounce_member_end_parse(). */
+enum bounce_member_end {
+  BOUNCE_MEMBER_END_DISCONNECT, /**< BOUNCER DISCONNECT, hold off, MODE -b,
+                                 *   PERSISTENCE OFF / DETACH: the session
+                                 *   and every device of it end; a live
+                                 *   primary carries on outside it ('D') */
+  BOUNCE_MEMBER_END_RESET       /**< BOUNCER RESET, ORESET, a ban: the
+                                 *   session and every connection of it
+                                 *   end, the primary too ('R') */
+};
+
+/** The wire letter of @a how ('D' or 'R'). */
+extern char bounce_member_end_letter(enum bounce_member_end how);
+
+/** The member end a wire letter names, or -1 for one this server does not
+ * know (a newer peer's: the line is dropped, never guessed at). */
+extern int bounce_member_end_parse(const char *letter);
+
+/** Where a member's end of a session is decided. */
+enum bounce_end_route {
+  BOUNCE_ROUTE_HERE,     /**< we hold the session (its primary is ours, live
+                          *   or held), or nobody does (no primary): it ends
+                          *   here */
+  BOUNCE_ROUTE_CARRY,    /**< its primary is another server's, reached
+                          *   through servers that read the carry: the end
+                          *   goes there (BS E), and that server decides */
+  BOUNCE_ROUTE_OWN_COPY  /**< its primary is another server's, behind one
+                          *   that does not read the carry (an older fork
+                          *   server): our copy ends, and our BS X tells
+                          *   the holder, as before */
+};
+
+/** Only the holder ends a session (design intent #11).  A member's end
+ * issued where the session's primary is not -- on a device's server, or
+ * by an oper there -- is the holder's to carry out: it goes to the
+ * primary's server, which ends the session there and tells every server
+ * (BS X).  Toward a server that would drop the carry the end stays what
+ * it was: our own copy ends.
+ *
+ * @param[in] has_primary       The record has a primary (a user).
+ * @param[in] primary_ours      That primary is a client of ours (live, or
+ *                              a held ghost).
+ * @param[in] route_reads_carry Every server from the primary's up to us
+ *                              announced the hold mark (flag H): it reads
+ *                              BS E.
+ */
+extern enum bounce_end_route bounce_end_route(int has_primary,
+                                              int primary_ours,
+                                              int route_reads_carry);
+
+/** What a member's end does here with a BS E, a member's end carried. */
+enum bounce_bse_action {
+  BOUNCE_BSE_END,      /**< we hold the session (or nobody does): it ends
+                        *   here */
+  BOUNCE_BSE_FORWARD,  /**< its primary is further on, behind servers that
+                        *   read the line: passed on toward it */
+  BOUNCE_BSE_DROP      /**< no record of it here, a kind this server does
+                        *   not know, or its primary is back toward the
+                        *   sender or behind a server that would drop the
+                        *   line */
+};
+
+/** The holder's side of bounce_end_route(): a BS E that reaches the
+ * server holding the session ends it there; one that reaches a server on
+ * the way is passed on toward the primary, never back.
+ *
+ * @param[in] known_kind        The line's end letter is one we know.
+ * @param[in] found             We have a record of the session.
+ * @param[in] has_primary       The record has a primary (a user).
+ * @param[in] primary_ours      That primary is a client of ours.
+ * @param[in] toward_sender     That primary is behind the link the line
+ *                              came from.
+ * @param[in] route_reads_carry Every server from the primary's up to us
+ *                              reads BS E.
+ */
+extern enum bounce_bse_action bounce_bse_action(int known_kind, int found,
+                                                int has_primary,
+                                                int primary_ours,
+                                                int toward_sender,
+                                                int route_reads_carry);
+
+/** What a member's end does to the session's primary on the server that
+ * ends it. */
+enum bounce_end_primary {
+  BOUNCE_END_PRIMARY_STAYS,   /**< it carries on, outside the session */
+  BOUNCE_END_PRIMARY_EXITS,   /**< it leaves with the session */
+  BOUNCE_END_PRIMARY_ASKED,   /**< it is the connection being handled: not
+                               *   exited under its own command (a RESET
+                               *   exits its caller last) */
+  BOUNCE_END_PRIMARY_REMOTE   /**< another server's (or none): never exited
+                               *   here -- an exit of a remote client
+                               *   splits the network */
+};
+
+/** A DISCONNECT leaves the live primary connected, outside the session; a
+ * RESET takes it.  A held ghost has no connection to carry on with: it
+ * leaves either way (left, it would hold the nick with no session and no
+ * timer to end it).
+ *
+ * @param[in] how          The kind of end.
+ * @param[in] primary_ours The record's primary is a client of ours.
+ * @param[in] held         It is a held ghost.
+ * @param[in] handled      It is the connection whose command this is.
+ */
+extern enum bounce_end_primary bounce_end_primary(enum bounce_member_end how,
+                                                  int primary_ours, int held,
+                                                  int handled);
+
 /** What a holder does with a BX X that removes its session's primary. */
 enum bounce_crossed_action {
   BOUNCE_CROSSED_LEAVE,    /**< not a promote of ours: the record is left

@@ -331,6 +331,61 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
   return session_primary ? BOUNCE_FORCED_END_SESSION : BOUNCE_FORCED_PLAIN;
 }
 
+char bounce_member_end_letter(enum bounce_member_end how)
+{
+  return how == BOUNCE_MEMBER_END_RESET ? 'R' : 'D';
+}
+
+int bounce_member_end_parse(const char *letter)
+{
+  if (!letter || !letter[0] || letter[1])
+    return -1;
+  switch (letter[0]) {
+  case 'D':
+    return BOUNCE_MEMBER_END_DISCONNECT;
+  case 'R':
+    return BOUNCE_MEMBER_END_RESET;
+  }
+  return -1;
+}
+
+enum bounce_end_route bounce_end_route(int has_primary, int primary_ours,
+                                       int route_reads_carry)
+{
+  /* We hold it, or nobody does. */
+  if (!has_primary || primary_ours)
+    return BOUNCE_ROUTE_HERE;
+  return route_reads_carry ? BOUNCE_ROUTE_CARRY : BOUNCE_ROUTE_OWN_COPY;
+}
+
+enum bounce_bse_action bounce_bse_action(int known_kind, int found,
+                                         int has_primary, int primary_ours,
+                                         int toward_sender,
+                                         int route_reads_carry)
+{
+  if (!known_kind || !found)
+    return BOUNCE_BSE_DROP;
+  if (!has_primary || primary_ours)
+    return BOUNCE_BSE_END;
+  /* Never back toward the sender (two records each naming the other's
+   * client), never toward a server that would drop it. */
+  return !toward_sender && route_reads_carry ? BOUNCE_BSE_FORWARD
+                                             : BOUNCE_BSE_DROP;
+}
+
+enum bounce_end_primary bounce_end_primary(enum bounce_member_end how,
+                                           int primary_ours, int held,
+                                           int handled)
+{
+  if (!primary_ours)
+    return BOUNCE_END_PRIMARY_REMOTE;
+  if (handled)
+    return BOUNCE_END_PRIMARY_ASKED;
+  if (held || how == BOUNCE_MEMBER_END_RESET)
+    return BOUNCE_END_PRIMARY_EXITS;
+  return BOUNCE_END_PRIMARY_STAYS;
+}
+
 enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
                                                      int active,
                                                      int own_devices)

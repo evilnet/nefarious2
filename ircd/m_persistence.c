@@ -291,9 +291,12 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
                              cli_name(sptr), "draft/persistence/hold");
 
     {
+      /* Its holder ends the session (here, or the end goes there); the
+       * primary carries on outside it, every device of it goes. */
       struct BouncerSession *session = bounce_get_session(sptr);
       if (session)
-        bounce_end_session_keep_clients(session, sptr);
+        bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_DISCONNECT,
+                          NULL);
     }
     send_persistence_reply(sptr, "SET", "OFF");
     persistence_send_status(sptr);
@@ -863,9 +866,10 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
   sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
                            cli_name(sptr), "draft/persistence/hold");
 
-  /* Ends the session; our connection carries on outside it (matches
-   * the SET OFF path). */
-  bounce_end_session_keep_clients(session, sptr);
+  /* Its holder ends the session (here, or the end goes there); the
+   * primary carries on outside it, every device of it goes (matches the
+   * SET OFF path). */
+  bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_DISCONNECT, NULL);
 
   send_persistence_reply(sptr, "DETACH", "OK");
   /* STATUS now resolves to OFF (no session, hold=0). */

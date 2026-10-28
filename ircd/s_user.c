@@ -2607,11 +2607,16 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         } else {
           ClearBncHoldPref(acptr);
           metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-          /* Destroy bouncer session if local client has one */
-          if (MyUser(acptr)) {
+          /* End the session: its holder does (here, or a device of ours
+           * whose primary is on another server sends the end there); the
+           * primary carries on outside it, every device of it goes. */
+          if (MyUser(acptr)
+              || (MyConnect(sptr) && IsBouncerAlias(sptr)
+                  && cli_alias_primary(sptr) == acptr)) {
             struct BouncerSession *session = bounce_get_session(acptr);
             if (session)
-              bounce_end_session_keep_clients(session, acptr);
+              bounce_member_end(session, sptr, cptr,
+                                BOUNCE_MEMBER_END_DISCONNECT, NULL);
           }
         }
         break;

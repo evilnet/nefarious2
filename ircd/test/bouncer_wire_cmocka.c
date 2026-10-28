@@ -1275,6 +1275,139 @@ static void a_ban_never_promotes_a_fault_never_ends(void **s)
   }
 }
 
+/* bounce_member_end_letter(how), bounce_member_end_parse(letter) */
+
+static void member_end_letters_round_trip(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_member_end_letter(BOUNCE_MEMBER_END_DISCONNECT), 'D');
+  assert_int_equal(bounce_member_end_letter(BOUNCE_MEMBER_END_RESET), 'R');
+  assert_int_equal(bounce_member_end_parse("D"), BOUNCE_MEMBER_END_DISCONNECT);
+  assert_int_equal(bounce_member_end_parse("R"), BOUNCE_MEMBER_END_RESET);
+}
+
+static void an_unknown_member_end_letter_is_refused(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_member_end_parse("K"), -1);
+  assert_int_equal(bounce_member_end_parse("DR"), -1);
+  assert_int_equal(bounce_member_end_parse(""), -1);
+  assert_int_equal(bounce_member_end_parse(NULL), -1);
+}
+
+/* bounce_end_route(has_primary, primary_ours, route_reads_carry) */
+
+static void a_member_end_goes_to_the_holder(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_end_route(1, 0, 1), BOUNCE_ROUTE_CARRY);
+}
+
+static void the_holder_ends_it_here(void **s)
+{
+  int r;
+  (void)s;
+  for (r = 0; r < 2; r++) {
+    assert_int_equal(bounce_end_route(1, 1, r), BOUNCE_ROUTE_HERE);
+    /* No primary anywhere we know of: nobody holds it. */
+    assert_int_equal(bounce_end_route(0, 0, r), BOUNCE_ROUTE_HERE);
+  }
+}
+
+static void an_older_holder_gets_our_copys_end(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_end_route(1, 0, 0), BOUNCE_ROUTE_OWN_COPY);
+}
+
+/* bounce_bse_action(known_kind, found, has_primary, primary_ours,
+ * toward_sender, route_reads_carry) */
+
+static void bse_on_the_holder_ends_it(void **s)
+{
+  int t, r;
+  (void)s;
+  for (t = 0; t < 2; t++)
+  for (r = 0; r < 2; r++) {
+    assert_int_equal(bounce_bse_action(1, 1, 1, 1, t, r), BOUNCE_BSE_END);
+    assert_int_equal(bounce_bse_action(1, 1, 0, 0, t, r), BOUNCE_BSE_END);
+  }
+}
+
+static void bse_on_the_way_is_passed_on(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 1), BOUNCE_BSE_FORWARD);
+}
+
+static void bse_never_goes_back_or_to_a_server_that_drops_it(void **s)
+{
+  int r;
+  (void)s;
+  for (r = 0; r < 2; r++)
+    assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, r), BOUNCE_BSE_DROP);
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 0), BOUNCE_BSE_DROP);
+}
+
+static void bse_with_no_record_or_an_unknown_kind_is_dropped(void **s)
+{
+  int f, h, o, t, r;
+  (void)s;
+  for (h = 0; h < 2; h++)
+  for (o = 0; o < 2; o++)
+  for (t = 0; t < 2; t++)
+  for (r = 0; r < 2; r++) {
+    assert_int_equal(bounce_bse_action(1, 0, h, o, t, r), BOUNCE_BSE_DROP);
+    for (f = 0; f < 2; f++)
+      assert_int_equal(bounce_bse_action(0, f, h, o, t, r), BOUNCE_BSE_DROP);
+  }
+}
+
+/* bounce_end_primary(how, primary_ours, held, handled) */
+
+static void a_disconnect_keeps_the_live_primary(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DISCONNECT, 1, 0, 0),
+                   BOUNCE_END_PRIMARY_STAYS);
+}
+
+static void a_reset_takes_the_primary(void **s)
+{
+  int h;
+  (void)s;
+  for (h = 0; h < 2; h++)
+    assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_RESET, 1, h, 0),
+                     BOUNCE_END_PRIMARY_EXITS);
+}
+
+static void a_held_ghost_leaves_with_any_end(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DISCONNECT, 1, 1, 0),
+                   BOUNCE_END_PRIMARY_EXITS);
+}
+
+static void the_asking_connection_is_never_exited_under_its_command(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_DISCONNECT, 1, 0, 1),
+                   BOUNCE_END_PRIMARY_ASKED);
+  assert_int_equal(bounce_end_primary(BOUNCE_MEMBER_END_RESET, 1, 0, 1),
+                   BOUNCE_END_PRIMARY_ASKED);
+}
+
+static void a_remote_primary_is_never_exited_here(void **s)
+{
+  int k, h, c;
+  (void)s;
+  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_RESET; k++)
+  for (h = 0; h < 2; h++)
+  for (c = 0; c < 2; c++)
+    assert_int_equal(bounce_end_primary((enum bounce_member_end)k, 0, h, c),
+                     BOUNCE_END_PRIMARY_REMOTE);
+}
+
 /* bounce_crossed_bxx_action(handed_to_it, active, own_devices) */
 
 static void crossed_promote_another_device_takes_over(void **s)
@@ -1448,6 +1581,20 @@ int main(void)
     cmocka_unit_test(a_ban_on_a_device_ends_the_session_through_our_primary),
     cmocka_unit_test(a_fault_on_a_device_is_its_own_exit),
     cmocka_unit_test(a_forced_exit_in_no_session_is_plain),
+    cmocka_unit_test(member_end_letters_round_trip),
+    cmocka_unit_test(an_unknown_member_end_letter_is_refused),
+    cmocka_unit_test(a_member_end_goes_to_the_holder),
+    cmocka_unit_test(the_holder_ends_it_here),
+    cmocka_unit_test(an_older_holder_gets_our_copys_end),
+    cmocka_unit_test(bse_on_the_holder_ends_it),
+    cmocka_unit_test(bse_on_the_way_is_passed_on),
+    cmocka_unit_test(bse_never_goes_back_or_to_a_server_that_drops_it),
+    cmocka_unit_test(bse_with_no_record_or_an_unknown_kind_is_dropped),
+    cmocka_unit_test(a_disconnect_keeps_the_live_primary),
+    cmocka_unit_test(a_reset_takes_the_primary),
+    cmocka_unit_test(a_held_ghost_leaves_with_any_end),
+    cmocka_unit_test(the_asking_connection_is_never_exited_under_its_command),
+    cmocka_unit_test(a_remote_primary_is_never_exited_here),
     cmocka_unit_test(a_ban_never_promotes_a_fault_never_ends),
     cmocka_unit_test(crossed_promote_another_device_takes_over),
     cmocka_unit_test(crossed_promote_with_no_device_left_ends),
