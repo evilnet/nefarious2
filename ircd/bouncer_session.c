@@ -7402,12 +7402,17 @@ int bounce_forced_exit(struct Client *cptr, struct Client *victim,
     if (is_alias)
       bounce_alias_untrack(victim);
     if (cptr && cptr != victim && MyConnect(cptr) && IsBouncerAlias(cptr)
-        && cli_alias_primary(cptr) == s->hs_client)
+        && session_roster_has(s, cptr))
       bounce_alias_untrack(cptr);
     bounce_kill_session(s, comment);
     if (primary_ours) {
-      if (primary != cptr)
+      if (primary != cptr) {
+        /* A held ghost leaves as a user does, with its QUIT, not as a
+         * ghost's silent BX X. */
+        if (IsBouncerHold(primary))
+          ClearBouncerHold(primary);
         exit_client(primary, primary, &me, comment ? comment : "Session killed");
+      }
       else
         log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session ended; its "
                   "primary %s is the connection that asked, and carries on",
