@@ -5477,7 +5477,10 @@ static void crossed_primary_leaves(struct BouncerSession *s, struct Client *link
   case BOUNCE_NOTE_NONE:
     return;
   case BOUNCE_NOTE_STALE:
-    crossed_note_clear(s);
+    /* No path that replaces the slot leaves the note behind (a promote
+     * renumbers the face, an install retracts it): nothing stands behind
+     * the face our legacy links hold.  Retracted, then dropped. */
+    bounce_retract_crossed_face(s, reason);
     return;
   case BOUNCE_NOTE_KEPT:
     break;
@@ -5542,11 +5545,14 @@ static void bounce_crossed_backstop(struct Event *ev)
         continue;
       case BOUNCE_BACKSTOP_DROP:
         /* Another client holds the slot now (a split's promote, a
-         * relink): the note is not about it; nothing ends. */
+         * relink): the note is not about it; nothing ends.  The face our
+         * legacy links hold for the kept primary has nothing behind it
+         * (every path that replaces the slot handles a note it finds):
+         * retracted, then dropped. */
         Debug((DEBUG_INFO, "Bouncer: crossed-promote note of %s's session "
                "%s dropped: its primary is no longer the kept one",
                s->hs_account, s->hs_sessid));
-        crossed_note_clear(s);
+        bounce_retract_crossed_face(s, "Bouncer session ended");
         continue;
       case BOUNCE_BACKSTOP_WAIT:
       {
@@ -10508,8 +10514,10 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       break;
     case BOUNCE_BXP_FOLLOW_CROSSED:
       if (crossed_state(cs) != BOUNCE_NOTE_KEPT) {
-        /* Another client holds the slot now: the note is stale. */
-        crossed_note_clear(cs);
+        /* Another client holds the slot now: the note is stale, and the
+         * face our legacy links hold for the kept primary has nothing
+         * behind it.  Retracted, then dropped. */
+        bounce_retract_crossed_face(cs, "Bouncer session ended");
         break;
       }
       if (IsAccount(cs->hs_client) && cs->hs_client != new_client) {
