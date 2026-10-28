@@ -2617,8 +2617,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           /* Auto-create bouncer session if local client doesn't have one */
           if (MyUser(acptr) && IsAccount(acptr) && !bounce_get_session(acptr)) {
             struct BouncerSession *session = NULL;
-            if (bounce_create(acptr, &session) == 0 && session)
+            if (bounce_create(acptr, &session) == 0 && session) {
               bounce_broadcast(session, 'C', NULL);
+              /* And its primary, as BOUNCER SET HOLD on and PERSISTENCE
+               * SET ON announce theirs: BS C alone leaves the other
+               * servers' copy with no primary, and a login there then
+               * takes that copy over as a second live primary of the
+               * session (auto-resume's orphan reclaim). */
+              bounce_broadcast(session, 'A', cli_yxx(acptr));
+            }
           }
         } else {
           struct BouncerSession *session = NULL;
