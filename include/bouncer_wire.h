@@ -830,4 +830,57 @@ extern enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known,
                                                          int new_numeric_ok,
                                                          int old_is_crossed_face);
 
+/** Where a record's crossed-promote note stands (hs_crossed_face, with
+ * the kept primary's numeric). */
+enum bounce_crossed_note {
+  BOUNCE_NOTE_NONE,   /**< no note */
+  BOUNCE_NOTE_KEPT,   /**< noted, and the record's primary is still the
+                       *   primary it kept for the holder */
+  BOUNCE_NOTE_STALE   /**< noted, but something else holds the primary
+                       *   slot now: the note is dropped, nothing acted on */
+};
+
+/** A crossed-promote note acts only on the primary it was taken for: the
+ * holder's end, the backstop and the kept primary's exit never touch a
+ * client another path installed meanwhile (a split's promote, a relink's
+ * BS A), which may be the session's own live primary.
+ *
+ * @param[in] noted        The record carries a note.
+ * @param[in] slot_is_kept Its primary is the client the note kept.
+ */
+extern enum bounce_crossed_note bounce_crossed_note_state(int noted,
+                                                          int slot_is_kept);
+
+/** What the crossed-promote backstop does with a record. */
+enum bounce_crossed_backstop {
+  BOUNCE_BACKSTOP_NONE,  /**< no note */
+  BOUNCE_BACKSTOP_WAIT,  /**< the holder may still decide */
+  BOUNCE_BACKSTOP_END,   /**< the holder never decided: the copy ends here */
+  BOUNCE_BACKSTOP_DROP   /**< the slot holds another client now: drop the
+                          *   note, end nothing */
+};
+
+/** The backstop's rule, on top of bounce_crossed_note_state(): a note on
+ * the kept primary waits @a wait_max for the holder, then the copy ends
+ * here; a stale note is dropped at once, whatever its age.
+ *
+ * @param[in] noted        The record carries a note.
+ * @param[in] slot_is_kept Its primary is the client the note kept.
+ * @param[in] age          Seconds since the note was taken.
+ * @param[in] wait_max     How long the holder gets.
+ */
+extern enum bounce_crossed_backstop
+bounce_crossed_backstop_action(int noted, int slot_is_kept, long age,
+                               long wait_max);
+
+/** Does installing a primary in a record's slot retract its noted face
+ * first?  Our legacy links hold the noted face for the kept primary; a
+ * different client in the slot (not by a promote of ours, which
+ * renumbers that face) leaves them a face nothing stands behind.
+ *
+ * @param[in] noted       The record carries a note.
+ * @param[in] new_is_kept The client being installed is the kept primary.
+ */
+extern int bounce_crossed_replace_retracts(int noted, int new_is_kept);
+
 #endif /* INCLUDED_bouncer_wire_h */

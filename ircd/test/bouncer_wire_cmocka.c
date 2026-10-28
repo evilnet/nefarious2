@@ -1354,6 +1354,81 @@ static void bxp_with_both_clients_known_is_the_usual_path(void **s)
     assert_int_equal(bounce_bxp_unknown_action(1, 1, f, n, c), BOUNCE_BXP_FORWARD);
 }
 
+/* bounce_crossed_note_state(noted, slot_is_kept) */
+
+static void crossed_note_absent_is_none(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_note_state(0, 0), BOUNCE_NOTE_NONE);
+  assert_int_equal(bounce_crossed_note_state(0, 1), BOUNCE_NOTE_NONE);
+}
+
+static void crossed_note_on_the_kept_primary_acts(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_note_state(1, 1), BOUNCE_NOTE_KEPT);
+}
+
+static void crossed_note_on_a_replaced_slot_is_stale(void **s)
+{
+  (void)s;
+  /* A split's promote or a relink's install put another client in the
+   * slot: the note must not act on it. */
+  assert_int_equal(bounce_crossed_note_state(1, 0), BOUNCE_NOTE_STALE);
+}
+
+/* bounce_crossed_backstop_action(noted, slot_is_kept, age, wait_max) */
+
+static void backstop_without_a_note_does_nothing(void **s)
+{
+  long age;
+  (void)s;
+  for (age = 0; age < 40; age += 5) {
+    assert_int_equal(bounce_crossed_backstop_action(0, 0, age, 10), BOUNCE_BACKSTOP_NONE);
+    assert_int_equal(bounce_crossed_backstop_action(0, 1, age, 10), BOUNCE_BACKSTOP_NONE);
+  }
+}
+
+static void backstop_waits_for_the_holder(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_backstop_action(1, 1, 0, 10), BOUNCE_BACKSTOP_WAIT);
+  assert_int_equal(bounce_crossed_backstop_action(1, 1, 9, 10), BOUNCE_BACKSTOP_WAIT);
+}
+
+static void backstop_ends_the_kept_copy_after_the_wait(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_backstop_action(1, 1, 10, 10), BOUNCE_BACKSTOP_END);
+  assert_int_equal(bounce_crossed_backstop_action(1, 1, 300, 10), BOUNCE_BACKSTOP_END);
+}
+
+static void backstop_never_ends_a_replaced_slot(void **s)
+{
+  long age;
+  (void)s;
+  /* The session's live primary since a split's promote: dropped, at any
+   * age, never ended. */
+  for (age = 0; age < 40; age += 5)
+    assert_int_equal(bounce_crossed_backstop_action(1, 0, age, 10), BOUNCE_BACKSTOP_DROP);
+}
+
+/* bounce_crossed_replace_retracts(noted, new_is_kept) */
+
+static void install_of_another_client_retracts_the_noted_face(void **s)
+{
+  (void)s;
+  assert_true(bounce_crossed_replace_retracts(1, 0));
+}
+
+static void install_retracts_nothing_otherwise(void **s)
+{
+  (void)s;
+  assert_false(bounce_crossed_replace_retracts(1, 1));
+  assert_false(bounce_crossed_replace_retracts(0, 0));
+  assert_false(bounce_crossed_replace_retracts(0, 1));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1383,6 +1458,15 @@ int main(void)
     cmocka_unit_test(bxp_from_a_crossed_face_follows_the_kept_primary),
     cmocka_unit_test(bxp_double_cross_renumbers_the_noted_face),
     cmocka_unit_test(bxp_with_both_clients_known_is_the_usual_path),
+    cmocka_unit_test(crossed_note_absent_is_none),
+    cmocka_unit_test(crossed_note_on_the_kept_primary_acts),
+    cmocka_unit_test(crossed_note_on_a_replaced_slot_is_stale),
+    cmocka_unit_test(backstop_without_a_note_does_nothing),
+    cmocka_unit_test(backstop_waits_for_the_holder),
+    cmocka_unit_test(backstop_ends_the_kept_copy_after_the_wait),
+    cmocka_unit_test(backstop_never_ends_a_replaced_slot),
+    cmocka_unit_test(install_of_another_client_retracts_the_noted_face),
+    cmocka_unit_test(install_retracts_nothing_otherwise),
     cmocka_unit_test(behind_the_departing_server_or_it),
     cmocka_unit_test(not_behind_it),
     cmocka_unit_test(behind_walk_null_and_broken_trees),

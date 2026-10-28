@@ -710,6 +710,35 @@ static void bounce_retract_crossed_face(struct BouncerSession *s,
 static void bounce_bsx_end_devices(struct BouncerSession *s,
                                    struct Client *sender, const char *sessid);
 
+/** Is @a c the primary @a s's crossed-promote note kept (hs_crossed_kept)? */
+static int crossed_is_kept(struct BouncerSession *s, struct Client *c)
+{
+  char full[6];
+
+  if (!s || !s->hs_crossed_kept[0] || !c || !IsUser(c) || !cli_user(c)
+      || !cli_user(c)->server)
+    return 0;
+  ircd_snprintf(0, full, sizeof(full), "%s%s", cli_yxx(cli_user(c)->server),
+                cli_yxx(c));
+  return 0 == strcmp(full, s->hs_crossed_kept);
+}
+
+/** Where @a s's crossed-promote note stands: none, on the kept primary,
+ * or stale (another client holds the slot now). */
+static enum bounce_crossed_note crossed_state(struct BouncerSession *s)
+{
+  return bounce_crossed_note_state(s && s->hs_crossed_face[0],
+                                   crossed_is_kept(s, s ? s->hs_client : NULL));
+}
+
+/** Drop @a s's crossed-promote note (nothing is sent). */
+static void crossed_note_clear(struct BouncerSession *s)
+{
+  s->hs_crossed_face[0] = '\0';
+  s->hs_crossed_kept[0] = '\0';
+  s->hs_crossed_at = 0;
+}
+
 static void bounce_hold_expire(struct Event *ev)
 {
   struct BouncerSession *session;
@@ -3796,6 +3825,12 @@ int bounce_hs_client_assign_checked(struct BouncerSession *session,
               session->hs_kc_id, cli_name(candidate), cli_user(candidate)->kc_id);
     return 0;
   }
+  /* Our legacy links hold a crossed promote's noted face for the kept
+   * primary: another client in the slot leaves them a face nothing stands
+   * behind -- retracted first. */
+  if (bounce_crossed_replace_retracts(session->hs_crossed_face[0] != '\0',
+                                      crossed_is_kept(session, candidate)))
+    bounce_retract_crossed_face(session, "Bouncer session ended");
   session->hs_client = candidate;
   /* A primary installed by another path is not the device a promote of
    * ours handed the session to. */
@@ -5406,7 +5441,7 @@ static void bounce_retract_crossed_face(struct BouncerSession *s,
            "toward %s at its end", s->hs_crossed_face, s->hs_account,
            s->hs_sessid, cli_name(peer)));
   }
-  s->hs_crossed_face[0] = '\0';
+  crossed_note_clear(s);
 }
 
 /** The primary a record of ours kept for a crossed promote leaves
@@ -5422,6 +5457,17 @@ static void crossed_primary_leaves(struct BouncerSession *s, struct Client *link
 {
   struct Client *p = s->hs_client;
 
+  /* Only the primary the note kept: a client another path put in the slot
+   * since (a split's promote, a relink's install) is not this exit's. */
+  switch (crossed_state(s)) {
+  case BOUNCE_NOTE_NONE:
+    return;
+  case BOUNCE_NOTE_STALE:
+    crossed_note_clear(s);
+    return;
+  case BOUNCE_NOTE_KEPT:
+    break;
+  }
   bounce_retract_crossed_face(s, reason);
   if (!p || !IsUser(p) || MyConnect(p) || IsBouncerAlias(p))
     return;
@@ -5467,13 +5513,29 @@ static void bounce_crossed_backstop(struct Event *ev)
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (s = tokenHash[i]; s; s = next) {
       next = s->hs_tnext;
-      if (!s->hs_crossed_face[0])
+      switch (bounce_crossed_backstop_action(s->hs_crossed_face[0] != '\0',
+                                             crossed_is_kept(s, s->hs_client),
+                                             (long)(CurrentTime - s->hs_crossed_at),
+                                             ORPHAN_WAIT_MAX)) {
+      case BOUNCE_BACKSTOP_NONE:
         continue;
-      if (CurrentTime - s->hs_crossed_at < ORPHAN_WAIT_MAX) {
+      case BOUNCE_BACKSTOP_DROP:
+        /* Another client holds the slot now (a split's promote, a
+         * relink): the note is not about it; nothing ends. */
+        Debug((DEBUG_INFO, "Bouncer: crossed-promote note of %s's session "
+               "%s dropped: its primary is no longer the kept one",
+               s->hs_account, s->hs_sessid));
+        crossed_note_clear(s);
+        continue;
+      case BOUNCE_BACKSTOP_WAIT:
+      {
         time_t left = ORPHAN_WAIT_MAX - (CurrentTime - s->hs_crossed_at);
         if (!wait || left < wait)
           wait = left;
         continue;
+      }
+      case BOUNCE_BACKSTOP_END:
+        break;
       }
       log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s: its holder "
                 "did not decide within %d s of a crossed promote; it ends "
@@ -5493,9 +5555,11 @@ static void bounce_crossed_backstop(struct Event *ev)
 
 /** Note the face @a face our legacy links now hold for @a s's kept
  * primary, and arm the backstop. */
-static void crossed_note(struct BouncerSession *s, const char *face)
+static void crossed_note(struct BouncerSession *s, const char *face,
+                         const char *kept)
 {
   ircd_strncpy(s->hs_crossed_face, face, sizeof(s->hs_crossed_face));
+  ircd_strncpy(s->hs_crossed_kept, kept, sizeof(s->hs_crossed_kept));
   s->hs_crossed_at = CurrentTime;
   if (!t_active(&crossed_timer))
     timer_add(timer_init(&crossed_timer), bounce_crossed_backstop, NULL,
@@ -6644,6 +6708,15 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   alias = findNUser(winner_numeric);
   if (!alias || !IsBouncerAlias(alias))
     return -1;
+
+  /* A primary kept for a crossed promote (a split takes it away before
+   * its holder decided): our legacy links hold the noted face for it, not
+   * its own numeric.  The BX P renumbers that face to the winner, and the
+   * note is done. */
+  if (old_primary && crossed_state(session) == BOUNCE_NOTE_KEPT) {
+    ircd_strncpy(old_numeric, session->hs_crossed_face, sizeof(old_numeric));
+    crossed_note_clear(session);
+  }
 
   Debug((DEBUG_INFO, "bounce_promote_alias: promoting alias %s (server %s) "
          "for session %s/%s",
@@ -10400,7 +10473,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
                 "%s (%s, session %s), which already left here: %s stays "
                 "until the session's holder decides", cli_name(sptr),
                 new_numeric, old_numeric, nick, sessid, old_numeric);
-      crossed_note(os, new_numeric);
+      crossed_note(os, new_numeric, old_numeric);
       break;
     case BOUNCE_BXP_RENUMBER_CROSSED:
       /* The new face left too: our legacy links renumber again. */
@@ -10413,8 +10486,12 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
                    sizeof(cs->hs_crossed_face));
       break;
     case BOUNCE_BXP_FOLLOW_CROSSED:
-      if (cs->hs_client && IsUser(cs->hs_client) && IsAccount(cs->hs_client)
-          && cs->hs_client != new_client) {
+      if (crossed_state(cs) != BOUNCE_NOTE_KEPT) {
+        /* Another client holds the slot now: the note is stale. */
+        crossed_note_clear(cs);
+        break;
+      }
+      if (IsAccount(cs->hs_client) && cs->hs_client != new_client) {
         /* The holder decided: the device this line names takes over from
          * the primary kept here, through the path every BX P takes (with
          * its record guards); the line goes on as it came, and our legacy
@@ -10428,7 +10505,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
                   cli_yxx(cs->hs_client), cli_name(cs->hs_client),
                   new_numeric);
         old_client = cs->hs_client;
-        cs->hs_crossed_face[0] = '\0';
+        crossed_note_clear(cs);
       }
       break;
     case BOUNCE_BXP_FORWARD:

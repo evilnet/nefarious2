@@ -691,6 +691,10 @@ struct BouncerSession {
    * it); the session's end, or the kept primary's leaving by another
    * way, retracts it toward them (a QUIT from it). */
   char hs_crossed_face[6];
+  /** The kept primary's own numeric (full YYXXX), noted with
+   * hs_crossed_face: the note acts only while that client is still the
+   * record's primary (bounce_crossed_note_state()). */
+  char hs_crossed_kept[6];
   /** When hs_crossed_face was noted: a holder that never decides (an
    * older build) lets the record end here after ORPHAN_WAIT_MAX. */
   time_t hs_crossed_at;

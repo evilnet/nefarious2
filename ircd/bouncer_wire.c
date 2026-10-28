@@ -355,3 +355,30 @@ enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known, int new_known,
   }
   return BOUNCE_BXP_FORWARD;
 }
+
+enum bounce_crossed_note bounce_crossed_note_state(int noted, int slot_is_kept)
+{
+  if (!noted)
+    return BOUNCE_NOTE_NONE;
+  return slot_is_kept ? BOUNCE_NOTE_KEPT : BOUNCE_NOTE_STALE;
+}
+
+enum bounce_crossed_backstop
+bounce_crossed_backstop_action(int noted, int slot_is_kept, long age,
+                               long wait_max)
+{
+  switch (bounce_crossed_note_state(noted, slot_is_kept)) {
+  case BOUNCE_NOTE_NONE:
+    return BOUNCE_BACKSTOP_NONE;
+  case BOUNCE_NOTE_STALE:
+    return BOUNCE_BACKSTOP_DROP;
+  case BOUNCE_NOTE_KEPT:
+    break;
+  }
+  return age < wait_max ? BOUNCE_BACKSTOP_WAIT : BOUNCE_BACKSTOP_END;
+}
+
+int bounce_crossed_replace_retracts(int noted, int new_is_kept)
+{
+  return noted && !new_is_kept;
+}
