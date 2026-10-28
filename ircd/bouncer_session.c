@@ -5692,11 +5692,18 @@ static const char *member_end_name(enum bounce_member_end how)
 }
 
 /** Facts about @a s's primary for a member's end: there is one (a user on
- * a server we know), and whether it is ours (live or a held ghost). */
+ * a server we know), and whether it is ours (live or a held ghost).  A
+ * mirror whose primary is known only by its ghost numeric (an announced
+ * held copy whose ghost was not resolved yet) has it resolved first, as
+ * an attach does: unresolved, the record would read as held by nobody
+ * and end here. */
 static void member_end_primary(struct BouncerSession *s, int *has, int *ours)
 {
-  struct Client *p = s ? s->hs_client : NULL;
+  struct Client *p;
 
+  if (s)
+    bounce_resolve_hs_client_from_ghost(s, "member end");
+  p = s ? s->hs_client : NULL;
   *has = p && IsUser(p) && cli_user(p) && cli_user(p)->server;
   *ours = *has && MyConnect(p) && !IsBouncerAlias(p);
 }
@@ -5719,8 +5726,8 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
   struct Client *primary;
   int has, ours, held, i;
 
-  primary = s->hs_client;
   member_end_primary(s, &has, &ours);
+  primary = s->hs_client;
   held = ours && IsBouncerHold(primary);
   ircd_strncpy(ended, s->hs_sessid, sizeof(ended));
   ircd_strncpy(account, s->hs_account, sizeof(account));
