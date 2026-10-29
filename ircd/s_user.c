@@ -495,8 +495,9 @@ static void relay_hold_mark(struct Client *cptr, struct Client *sptr)
 /** Put a local client whose registration the bouncer defers back to the
  * unregistered connection it was before register_user()'s prologue
  * (W3 12c-2b fix 2, N3): uncounted as a client and counted as unknown, its
- * old status and command table, no oper or invisible count.  The user modes
- * the prologue set stay; the drain's register_user() sets the same again.
+ * old status and command table, no oper or invisible count, no server
+ * notice mask.  The other user modes the prologue set stay; the drain's
+ * register_user() sets the same again.
  * The wait from its first defer is the server's, not the client's: it gets
  * a full CONNECTTIMEOUT for it (check_pings()), as iauth's extra wait does
  * (check_auth_finished()); a re-defer by the drain keeps that clock, so the
@@ -516,6 +517,10 @@ static void register_user_unwind(struct Client *sptr, short status,
   cli_status(sptr) = status;
   cli_handler(sptr) = handler;
   userstats_count_sync(sptr);   /* no user: no oper or invisible count */
+  /* Off the server-notice lists: an unknown client's exit never unlinks a
+   * snomask (fix round 3, I-3).  The drain's prologue sets +s again. */
+  ClearServNotice(sptr);
+  set_snomask(sptr, 0, SNO_SET);
   if (first)
     cli_firsttime(sptr) = CurrentTime;
 }
