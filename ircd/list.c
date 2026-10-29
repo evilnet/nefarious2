@@ -46,6 +46,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "struct.h"
+#include "uping.h"
 #include "whowas.h"
 #include "metadata.h"
 #include "bouncer_session.h"
@@ -596,6 +597,12 @@ void remove_client_from_list(struct Client *cptr)
     add_history(cptr, 0);
     off_history(cptr);
   }
+  /* A UPING in flight keeps the client's pointer (uping.c): it ends here,
+   * unreported, whichever exit branch ran -- the alias and held-ghost
+   * branches of exit_one_client() return before the normal branch's
+   * uping_cancel() (W3 12c-2b fix 2, N5).  Idempotent. */
+  if (IsUPing(cptr))
+    uping_cancel(cptr, 0);
   if (cli_user(cptr)) {
     /* Its INVITEs, SILENCE list and MARKs go here, where every exit ends:
      * the alias and held-ghost branches of exit_one_client() return before
