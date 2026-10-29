@@ -693,6 +693,11 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   unsigned short   prot;
   time_t           timestamp;
 
+  /* Only a server can introduce a server behind it. */
+  if (!IsServer(sptr))
+    return exit_client_msg(cptr, cptr, &me, "SERVER from non-server %s",
+                           cli_name(sptr));
+
   if (parc < 8)
   {
     return need_more_params(sptr, "SERVER");
