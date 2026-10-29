@@ -10310,11 +10310,16 @@ void bounce_hold_on_fail(struct Client *to, const char *command,
   if (!to || !MyConnect(to))
     return;
   /* Registration's reject text for the same refusal (U2), without the
-   * disconnect. */
+   * disconnect -- except where a hold-on refuses more cases than the
+   * registration rejects (fix round 2, N6). */
   switch (plan) {
   case BOUNCE_HOLD_REFUSE_KC:
+    /* Three cases, one text: the previous Keycloak user's session (the
+     * registration's REJECT_KC_CONFLICT, whose own text names that user), a
+     * session whose primary is of another identity (FOREIGN), and a client
+     * already in a session of another account (N4). */
     code = "SESSION_CONFLICT";
-    text = "This account's session belongs to its previous Keycloak user; "
+    text = "The session and this connection belong to different identities; "
            "ask an operator";
     break;
   case BOUNCE_HOLD_REFUSE_FULL:
@@ -10327,10 +10332,11 @@ void bounce_hold_on_fail(struct Client *to, const char *command,
            "with TLS to join it";
     break;
   case BOUNCE_HOLD_REFUSE_UNREACHABLE:
-    /* Not a passing state: no "try again" (fix round 1, item 4). */
+    /* Not a passing state: no "try again" (fix round 1, item 4), and no
+     * promise either: a reconnect registers in no session when a held
+     * session was passed over or an alias holds the slot (N6). */
     code = "SESSION_UNREACHABLE";
-    text = "The account's session cannot be joined from here; reconnect "
-           "to attach";
+    text = "The account's session cannot be joined from here";
     break;
   default:
     code = "TRY_AGAIN";
