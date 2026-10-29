@@ -567,6 +567,15 @@ void remove_client_from_list(struct Client *cptr)
    * codebase routes through remove_client_from_list or free_client. */
   bounce_null_hs_client_pointing_at(cptr);
   bounce_null_alias_primary_pointing_at(cptr);
+  /* Same reason, for the bouncer's queue of deferred registrations
+   * (register_user()'s DEFER_PEER_INBOUND after SetUser, the auth-time
+   * defer before it): the queue keeps the client's pointer, and the next
+   * drain (any end of burst, any BS C) would run register_user() on
+   * whatever client the freed memory becomes -- a second registration of
+   * a live client, which the hub did not survive on the bed.  Only the
+   * unregistered branch of exit_one_client() used to remove it.
+   * Idempotent: a no-op for a client not queued. */
+  bounce_remove_pending_registration(cptr);
 
   /* Only try remove cptr from the list if it IS in the list.
    * cli_next(cptr) cannot be NULL here, as &me is always the end

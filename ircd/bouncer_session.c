@@ -10629,6 +10629,11 @@ int bounce_defer_registration(struct Client *cli)
   return 0;
 }
 
+/** Take every entry for @a cli off the queue (remove_client_from_list()
+ * calls this for every client it frees).  Every one, not the first:
+ * bounce_defer_registration() does not look for an existing entry, so
+ * nothing keeps a client from being queued twice, and an entry left
+ * behind would point at freed memory. */
 void bounce_remove_pending_registration(struct Client *cli)
 {
   struct PendingRegistration **pp = &pending_registrations;
@@ -10637,7 +10642,7 @@ void bounce_remove_pending_registration(struct Client *cli)
       struct PendingRegistration *gone = *pp;
       *pp = gone->next;
       MyFree(gone);
-      return;
+      continue;
     }
     pp = &(*pp)->next;
   }

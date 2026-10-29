@@ -325,15 +325,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     chathistory_fed_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {
-    /* A client whose registration register_user() deferred (the bouncer's
-     * DEFER_PEER_INBOUND, after SetUser) leaves the pending queue here:
-     * the queue keeps its pointer, and the drain would register whatever
-     * client the freed memory becomes -- a second N for a registered
-     * client, which the legacy links collide (W3 12c-2b fix round 1; the
-     * IsUnknown branch below did this for an auth-time defer only).
-     * Idempotent: a no-op for a client not queued. */
-    if (MyConnect(bcptr))
-      bounce_remove_pending_registration(bcptr);
+    /* (A client whose registration was deferred leaves the pending queue
+     * in remove_client_from_list(), where every exit ends.) */
     /* Purge per-Client ephemeral session-scoped state before the rest
      * of the teardown sequence — cli_session_id is still valid here,
      * which lets future subsystems (chathistory PM ring, read-marker
@@ -604,10 +597,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   }
   else if (IsUnknown(bcptr) || IsConnecting(bcptr) || IsHandshake(bcptr)) {
     Count_unknowndisconnects(UserStats);
-    /* If this client was deferred awaiting EOB-drain (SASL completed
-     * mid-burst), remove from the queue so the drain doesn't deref a
-     * freed Client.  Idempotent; no-op if not queued. */
-    bounce_remove_pending_registration(bcptr);
+    /* (A client deferred awaiting the EOB drain leaves the pending queue
+     * in remove_client_from_list().) */
   }
   /* Legacy-face cleanup: if this Client was recorded as a session's
    * legacy face on any peer, clear that entry so the next emit re-
