@@ -9774,9 +9774,12 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
   bounce_peer_holding_clear(session, cli_user(new_primary)->server);
   /* The demoted connection is a connection of this session: it carries
    * the session's id, which the alias filing, the reconcile and history's
-   * same-session lookups key on. */
+   * same-session lookups key on.  What the old id keyed goes with it: its
+   * presence and its ephemeral read markers (fix round 2, N8, as the
+   * join's departure does: exit_face_departs()). */
   if (0 != strcmp(cli_session_id(demoted_alias), session->hs_sessid)) {
     presence_purge_session(cli_session_id(demoted_alias));
+    readmarker_ephemeral_purge(cli_session_id(demoted_alias));
     ircd_strncpy(cli_session_id(demoted_alias), session->hs_sessid,
                  S2S_SESSID_BUFSIZE);
   }
