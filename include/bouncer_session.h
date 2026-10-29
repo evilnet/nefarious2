@@ -1918,9 +1918,11 @@ extern int bounce_defer_registration(struct Client *cli);
 extern void bounce_drain_pending_registrations(void);
 
 /** Remove a client from the pending-registration queue, every entry of
- * it.  remove_client_from_list() calls it for every client it frees, so a
- * client never outlives its queue entry, whatever exit path it took.
- * Idempotent; no-op if not queued. */
+ * it, including the entries a running drain has taken off the queue and not
+ * reached yet (a registration the drain runs can free another queued
+ * client).  remove_client_from_list() calls it for every client it frees,
+ * so a client never outlives its queue entry, whatever exit path it took
+ * and whenever.  Idempotent; no-op if not queued. */
 extern void bounce_remove_pending_registration(struct Client *cli);
 
 /** Returns nonzero if the given client is currently waiting in the

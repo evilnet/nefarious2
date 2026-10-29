@@ -14608,6 +14608,12 @@ struct PendingRegistration {
   struct PendingRegistration *next;
 };
 static struct PendingRegistration *pending_registrations = NULL;
+/** The entries a running drain has taken off pending_registrations and not
+ * reached yet.  Kept where bounce_remove_pending_registration() sees them:
+ * a registration the drain runs can free another queued client (a nick
+ * collision, a session reset), whose entry must not outlive it (hotfix
+ * review Minor 1). */
+static struct PendingRegistration *draining_registrations = NULL;
 
 int bounce_burst_in_progress(void)
 {
@@ -14686,14 +14692,11 @@ int bounce_defer_registration(struct Client *cli)
   return 0;
 }
 
-/** Take every entry for @a cli off the queue (remove_client_from_list()
- * calls this for every client it frees).  Every one, not the first:
- * bounce_defer_registration() does not look for an existing entry, so
- * nothing keeps a client from being queued twice, and an entry left
- * behind would point at freed memory. */
-void bounce_remove_pending_registration(struct Client *cli)
+/** Take every entry for @a cli off @a list. */
+static void pending_list_scrub(struct PendingRegistration **list,
+                               struct Client *cli)
 {
-  struct PendingRegistration **pp = &pending_registrations;
+  struct PendingRegistration **pp = list;
   while (*pp) {
     if ((*pp)->client == cli) {
       struct PendingRegistration *gone = *pp;
@@ -14705,6 +14708,18 @@ void bounce_remove_pending_registration(struct Client *cli)
   }
 }
 
+/** Take every entry for @a cli off the queue, and off the part of it a
+ * running drain has not reached yet (remove_client_from_list() calls this
+ * for every client it frees).  Every one, not the first:
+ * bounce_defer_registration() does not look for an existing entry, so
+ * nothing keeps a client from being queued twice, and an entry left
+ * behind would point at freed memory. */
+void bounce_remove_pending_registration(struct Client *cli)
+{
+  pending_list_scrub(&pending_registrations, cli);
+  pending_list_scrub(&draining_registrations, cli);
+}
+
 int bounce_is_pending_registration(const struct Client *cli)
 {
   const struct PendingRegistration *p;
@@ -14714,16 +14729,34 @@ int bounce_is_pending_registration(const struct Client *cli)
     if (p->client == cli)
       return 1;
   }
+  for (p = draining_registrations; p; p = p->next) {
+    if (p->client == cli)
+      return 1;
+  }
   return 0;
 }
 
 void bounce_drain_pending_registrations(void)
 {
-  struct PendingRegistration *list = pending_registrations;
+  static int running;
+  struct PendingRegistration *list;
+
+  /* A drain a registration below would set off (none does today) leaves
+   * the queue to the next trigger: the running walk owns
+   * draining_registrations. */
+  if (running)
+    return;
+  running = 1;
+  draining_registrations = pending_registrations;
   pending_registrations = NULL;
-  while (list) {
-    struct PendingRegistration *next = list->next;
+  /* One entry at a time off the shared list: a registration below that
+   * frees another queued client scrubs that client's entry from it
+   * (bounce_remove_pending_registration()), and a registration deferred
+   * again goes onto pending_registrations, not into this walk. */
+  while ((list = draining_registrations)) {
     struct Client *cli = list->client;
+    draining_registrations = list->next;
+    MyFree(list);
     /* Skip clients that died waiting (KILL, timeout, SQUIT-via-burst
      * etc.).  ALSO skip clients that haven't received NICK yet — the
      * s_auth.c:725 defer fires the moment SASL completes during a
@@ -14748,9 +14781,8 @@ void bounce_drain_pending_registrations(void)
                 (cli && cli_name(cli)[0] == '\0') ? "no NICK yet"
                                                   : "no longer eligible");
     }
-    MyFree(list);
-    list = next;
   }
+  running = 0;
 }
 /* ---------------------------------------------------------------- */
 /* BX K: Sync snomask to alias                                       */
