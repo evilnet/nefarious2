@@ -9,6 +9,8 @@
  *   - websocket_handshake_feed() accumulating upgrade requests of 600
  *     and 2000 bytes across 512-byte reads, handing back bytes that
  *     follow the request, and rejecting a request over WS_HANDSHAKE_MAX.
+ *   - parse_ws_handshake()'s Sec-WebSocket-Protocol scan, which spun
+ *     forever on a header whose last token is unsupported ("chat").
  *
  * websocket.c is included directly (like ircd_cloaking_cmocka.c) with
  * stubs for feature_str(), ircd_snprintf() and os_send_nonb().
@@ -20,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <cmocka.h>
 
 #include "../websocket.c"
@@ -461,6 +464,104 @@ static void test_handshake_invalid_request(void **state)
   assert_false(IsWebSocket(&cli));
 }
 
+/* ========== parse_ws_handshake() Sec-WebSocket-Protocol ========== */
+
+/* Run parse_ws_handshake() on a valid upgrade request carrying the given
+ * extra header lines (each ending in "\r\n") and return the subprotocol
+ * it chose.  The alarm turns a scan that never ends into a failed test
+ * (the process dies on SIGALRM) instead of a hung run. */
+static int parse_subproto(const char *extra)
+{
+  static char req[2048];
+  char key[64], origin[256];
+  int subproto = -1, valid, len;
+
+  len = snprintf(req, sizeof(req),
+                 "GET / HTTP/1.1\r\n"
+                 "Host: localhost\r\n"
+                 "Upgrade: websocket\r\n"
+                 "Connection: Upgrade\r\n"
+                 "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                 "Sec-WebSocket-Version: 13\r\n"
+                 "%s"
+                 "\r\n", extra);
+  assert_true(len > 0 && len < (int)sizeof(req));
+  alarm(5);
+  valid = parse_ws_handshake(req, len, key, &subproto, origin);
+  alarm(0);
+  assert_int_equal(valid, 1);
+  return subproto;
+}
+
+/* A header whose last token is unsupported used to spin forever: the
+ * token scan stopped at '\r', which the delimiter skip did not step
+ * over, so the scan pointer never moved again. */
+static void test_subproto_unsupported_only(void **state)
+{
+  (void)state;
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: chat\r\n"),
+                   WS_SUBPROTO_NONE);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: foo, bar\r\n"),
+                   WS_SUBPROTO_NONE);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: chat  \r\n"),
+                   WS_SUBPROTO_NONE);
+}
+
+static void test_subproto_empty_value(void **state)
+{
+  (void)state;
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol:\r\n"),
+                   WS_SUBPROTO_NONE);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: \r\n"),
+                   WS_SUBPROTO_NONE);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: , ,\r\n"),
+                   WS_SUBPROTO_NONE);
+}
+
+/* First supported token wins, wherever it sits in the list. */
+static void test_subproto_first_supported_wins(void **state)
+{
+  (void)state;
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: text.ircv3.net\r\n"),
+                   WS_SUBPROTO_TEXT);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: chat, binary.ircv3.net\r\n"),
+                   WS_SUBPROTO_BINARY);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: text.ircv3.net, chat\r\n"),
+                   WS_SUBPROTO_TEXT);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: binary.ircv3.net,text.ircv3.net\r\n"),
+                   WS_SUBPROTO_BINARY);
+}
+
+/* Matching stays on token boundaries. */
+static void test_subproto_token_boundaries(void **state)
+{
+  (void)state;
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: notext.ircv3.net\r\n"),
+                   WS_SUBPROTO_NONE);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: text.ircv3.netx\r\n"),
+                   WS_SUBPROTO_NONE);
+  /* A stray '\r' inside the line is part of a token, not its end. */
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: a\rb\r\n"),
+                   WS_SUBPROTO_NONE);
+}
+
+/* Several header lines: an unsupported-only line does not stop a later
+ * line from choosing, an earlier choice is never overridden, and the
+ * scan never reads a token off the next header line. */
+static void test_subproto_multiple_headers(void **state)
+{
+  (void)state;
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: chat\r\n"
+                                  "Sec-WebSocket-Protocol: binary.ircv3.net\r\n"),
+                   WS_SUBPROTO_BINARY);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: text.ircv3.net\r\n"
+                                  "Sec-WebSocket-Protocol: binary.ircv3.net\r\n"),
+                   WS_SUBPROTO_TEXT);
+  assert_int_equal(parse_subproto("Sec-WebSocket-Protocol: chat\r\n"
+                                  "X-Other: text.ircv3.net\r\n"),
+                   WS_SUBPROTO_NONE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -478,6 +579,11 @@ int main(void)
     cmocka_unit_test(test_handshake_too_large),
     cmocka_unit_test(test_handshake_invalid_request),
     cmocka_unit_test(test_control_close_signals_teardown),
+    cmocka_unit_test(test_subproto_unsupported_only),
+    cmocka_unit_test(test_subproto_empty_value),
+    cmocka_unit_test(test_subproto_first_supported_wins),
+    cmocka_unit_test(test_subproto_token_boundaries),
+    cmocka_unit_test(test_subproto_multiple_headers),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
