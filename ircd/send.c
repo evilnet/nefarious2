@@ -1667,9 +1667,15 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* Generate msgid for PRIVMSG and NOTICE if feature enabled */
-  if (feature_bool(FEAT_MSGID) &&
-      (cmd == CMD_PRIVATE || cmd == CMD_NOTICE)) {
+  /* The event's msgid when the caller armed one (the JOIN/PART/NICK
+   * echoes: the same id the other members got and history stored), else
+   * a fresh one for PRIVMSG and NOTICE.  CMD_* expands to "MSG, TOK", so
+   * compare the long name, and by content: identical literals in
+   * different files need not share an address. */
+  if (client_msgid_override[0])
+    msgid = client_msgid_override;
+  else if (feature_bool(FEAT_MSGID) &&
+           (!strcmp(cmd, MSG_PRIVATE) || !strcmp(cmd, MSG_NOTICE))) {
     msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
   }
 
