@@ -134,7 +134,7 @@ static char *jwt_with_payload(const char *json)
         else if (*p == '=') { *p = '\0'; break; }
     }
     (void)n;
-    tok = malloc(strlen(b64) + 8);
+    tok = malloc(strlen("e30.") + strlen(b64) + strlen(".sig") + 1);
     sprintf(tok, "e30.%s.sig", b64);                                 /* "e30" = {} */
     free(b64);
     return tok;
