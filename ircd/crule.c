@@ -738,6 +738,9 @@ static int crule_parsearglist(CRuleNodePtr argrootp, int *next_tokp, const char*
 #endif
         if (currarg[0] != '\0')
         {
+          /* arg[] holds CR_MAXARGS; more is a mismatch, not an overflow. */
+          if (argrootp->numargs >= CR_MAXARGS)
+            return (CR_ARGMISMAT);
           DupString(argelemp, currarg);
           argrootp->arg[argrootp->numargs++] = (void *)argelemp;
         }
