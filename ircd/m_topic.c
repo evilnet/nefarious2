@@ -145,7 +145,8 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
        ircd_strncpy((char *)&nick, nicktok, NICKLEN + 1);
    } else {
      memset(chptr->topic_nick, 0, NICKLEN + USERLEN + HOSTLEN + 3);
-     if (feature_bool(FEAT_HOST_IN_TOPIC)) {
+     /* A server (or &his) has no user@host to show. */
+     if (feature_bool(FEAT_HOST_IN_TOPIC) && cli_user(from)) {
        ircd_snprintf(0, chptr->topic_nick, NICKLEN + USERLEN + HOSTLEN + 3, "%s!%s@%s",
                      cli_name(from), cli_user(from)->username, cli_user(from)->host);
      } else {
