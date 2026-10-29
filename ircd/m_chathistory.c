@@ -5414,6 +5414,11 @@ static void complete_redact_fed(struct FedRequest *req)
     sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone_v3(sptr, CMD_REDACT, sptr, "%s %s :%s",
                           req->target, ctx->msgid, reason ? reason : "");
+
+    /* Disarm: this runs from a federation callback, outside any
+     * per-line reset, so a left-armed msgid tags the next unrelated
+     * client send with this REDACT's id (as m_redact.c does). */
+    sendcmdto_set_client_msgid(NULL);
   }
 }
 
