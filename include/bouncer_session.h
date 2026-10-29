@@ -1916,8 +1916,25 @@ extern int bounce_defer_registration(struct Client *cli);
 
 /** Drain queued post-burst registrations.  Called from
  * ms_end_of_burst after ClearBurst, gated on no remaining peer
- * having FLAG_BURST. */
+ * having FLAG_BURST; from a BS C; from bounce_link_input_read(); and at
+ * the timer run bounce_schedule_registration_drain() asks for. */
 extern void bounce_drain_pending_registrations(void);
+
+/** A server link's input, as far as one read of it went, has been read and
+ * parsed (read_packet(), after server_dopacket()).  When registrations are
+ * deferred and nothing holds them back any more -- no link bursting, no
+ * link that can carry a BS C with unread input -- they are drained here
+ * (W3 12c-2b fix 2, register row 412): a login deferred on a link's unread
+ * bytes is registered once those bytes are read, not at the next end of
+ * burst.  Called outside any line's handling: no S2S override or line tag
+ * is armed. */
+extern void bounce_link_input_read(struct Client *link);
+
+/** Drain the deferred registrations at the next timer run, if nothing holds
+ * them back then: for a deferral no link read will release (its link is
+ * gone; a client queued again outside any link's read).  Idempotent until
+ * it runs. */
+extern void bounce_schedule_registration_drain(void);
 
 /** Remove a client from the pending-registration queue, every entry of
  * it, including the entries a running drain has taken off the queue and not

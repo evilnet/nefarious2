@@ -14602,7 +14602,14 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
  * peer's N for this account (if any) has been processed, the local
  * session table reflects reality, and bounce_auto_resume can find the
  * correct alias target instead of falling through to standalone-primary
- * creation. */
+ * creation.
+ *
+ * The steady-state defer (register_user()'s DEFER_PEER_INBOUND: a link
+ * that can carry a BS C has unread bytes) waits for those bytes instead:
+ * the drain runs once a read of the link leaves nothing unread
+ * (bounce_link_input_read()), at an end of burst, at a BS C, or at the
+ * timer run a link's exit asks for.  Both leave the client an unregistered
+ * connection until the drain (W3 12c-2b fix 2). */
 struct PendingRegistration {
   struct Client            *client;
   struct PendingRegistration *next;
@@ -14674,6 +14681,54 @@ struct Client *bounce_peer_has_inbound_data(void)
   return NULL;
 }
 
+/** Is the queue waiting on nothing the defer waited for: no link bursting
+ * (the auth-time defer), no link that can carry a BS C with unread input
+ * (the steady-state one)?  Then a drain registers every queued client, or
+ * defers it again on a fresh reason. */
+static int pending_registrations_released(void)
+{
+  return !bounce_burst_in_progress() && !bounce_peer_has_inbound_data();
+}
+
+/** See include/bouncer_session.h. */
+void bounce_link_input_read(struct Client *link)
+{
+  if (!pending_registrations || !link || !IsServer(link)
+      || !IsIRCv3Aware(link))
+    return;
+  if (!pending_registrations_released())
+    return;
+  log_write(LS_USER, L_INFO, 0,
+            "Bouncer: the link to %s has no unread bytes left: draining the "
+            "deferred registrations", cli_name(link));
+  bounce_drain_pending_registrations();
+}
+
+/** The scheduled drain: bounce_drain_pending_registrations() at the next
+ * timer run, when the queue waits on nothing then. */
+static struct Timer registration_drain_timer;
+
+static void bounce_registration_drain_cb(struct Event *ev)
+{
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  if (pending_registrations && pending_registrations_released()) {
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: no link holds the deferred registrations back any "
+              "more: draining them");
+    bounce_drain_pending_registrations();
+  }
+}
+
+/** See include/bouncer_session.h. */
+void bounce_schedule_registration_drain(void)
+{
+  if (t_active(&registration_drain_timer))
+    return;
+  timer_add(timer_init(&registration_drain_timer),
+            bounce_registration_drain_cb, NULL, TT_RELATIVE, 0);
+}
+
 int bounce_defer_registration(struct Client *cli)
 {
   struct PendingRegistration *p;
@@ -14686,9 +14741,9 @@ int bounce_defer_registration(struct Client *cli)
   p->next = pending_registrations;
   pending_registrations = p;
   log_write(LS_USER, L_INFO, 0,
-            "Bouncer: registration of %s (fd %d) deferred until the next end "
-            "of burst or BS C", cli_name(cli)[0] ? cli_name(cli) : "*",
-            cli_fd(cli));
+            "Bouncer: registration of %s (fd %d) deferred until no link holds "
+            "it back (an end of burst, a BS C, the link's unread bytes read)",
+            cli_name(cli)[0] ? cli_name(cli) : "*", cli_fd(cli));
   return 0;
 }
 
@@ -14718,6 +14773,11 @@ void bounce_remove_pending_registration(struct Client *cli)
 {
   pending_list_scrub(&pending_registrations, cli);
   pending_list_scrub(&draining_registrations, cli);
+  /* A link gone: a login deferred on its unread bytes waits for no more of
+   * them, and no read of it will set off the drain any more
+   * (bounce_link_input_read()).  Checked again at the next timer run. */
+  if (pending_registrations && IsServer(cli))
+    bounce_schedule_registration_drain();
 }
 
 int bounce_is_pending_registration(const struct Client *cli)

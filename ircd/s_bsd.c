@@ -1235,6 +1235,10 @@ ssl_read_again:
     if (result > 0 && cli_socket(cptr).ssl && ssl_pending(&cli_socket(cptr)) > 0)
       goto ssl_read_again;
 #endif
+    /* This read of the link is parsed: a registration deferred on its
+     * unread bytes may go ahead now (W3 12c-2b fix 2, row 412). */
+    if (result > 0)
+      bounce_link_input_read(cptr);
     return result;
   }
   else if (length > 0 && (IsHandshake(cptr) || IsConnecting(cptr))) {

@@ -1656,8 +1656,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
      * completed); a peer's N took its nick meanwhile (m_nick.c).  With a
      * nick again, it waits for the drain once more.  W3 12c-2b fix 2. */
     if (!cli_auth(sptr)) {
-      if (!bounce_is_pending_registration(sptr))
-        bounce_defer_registration(sptr);
+      if (!bounce_is_pending_registration(sptr)
+          && bounce_defer_registration(sptr) == 0)
+        bounce_schedule_registration_drain();
       return 0;
     }
     return auth_set_nick(cli_auth(sptr), nick);
