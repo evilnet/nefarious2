@@ -135,6 +135,46 @@ static void test_huge_max_remote_behind_unchanged(void **state)
   assert_int_equal(4, r.logical);
 }
 
+/* Logical overflow carries into physical time; it never wraps to 0 at
+ * the same physical_ms, which minted an older stamp and, with the msgid's
+ * 12-bit counter (65536 % 4096 == 0), a duplicate msgid. */
+static void test_local_overflow_carries(void **state)
+{
+  struct HLC local = { UINT64_C(1) << 50, UINT16_MAX, 1 };
+  struct HLC old = local;
+  struct HLC r;
+  (void)state;
+
+  /* The wall clock (now) is far behind physical_ms: the clock is pinned. */
+  r = hlc_local_event(&local);
+
+  assert_true(hlc_compare(&r, &old) > 0);
+  assert_true(r.physical_ms == old.physical_ms + 1);
+  assert_int_equal(0, r.logical);
+}
+
+static void test_receive_overflow_carries(void **state)
+{
+  struct HLC local = { 5000, 3, 1 };
+  struct HLC remote = { 9000, UINT16_MAX, 2 };
+  struct HLC same = { 9001, UINT16_MAX, 2 };
+  int rej = -1;
+  struct HLC r;
+  (void)state;
+
+  /* Remote ahead with a full counter: the result is after the remote. */
+  r = hlc_receive_bounded(&local, &remote, 1000, 0, &rej);
+  assert_int_equal(0, rej);
+  assert_true(hlc_compare(&r, &remote) > 0);
+  assert_true(r.physical_ms == 9001);
+  assert_int_equal(0, r.logical);
+
+  /* Same physical time, max logical saturated: still after both. */
+  r = hlc_receive_bounded(&local, &same, 1000, 0, &rej);
+  assert_true(r.physical_ms == 9002);
+  assert_int_equal(0, r.logical);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -146,6 +186,8 @@ int main(void)
     cmocka_unit_test(test_remote_behind_unchanged),
     cmocka_unit_test(test_huge_max_still_adopts),
     cmocka_unit_test(test_huge_max_remote_behind_unchanged),
+    cmocka_unit_test(test_local_overflow_carries),
+    cmocka_unit_test(test_receive_overflow_carries),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
