@@ -2295,7 +2295,7 @@ static void hold_on_never_ends_another_keycloak_users_session(void **s)
     BOUNCE_CHOOSE_NONE, BOUNCE_CHOOSE_HELD_LOCAL, BOUNCE_CHOOSE_HELD_REMOTE,
     BOUNCE_CHOOSE_ACTIVE_REMOTE, BOUNCE_CHOOSE_ACTIVE_ALIAS,
     BOUNCE_CHOOSE_ORPHAN, BOUNCE_CHOOSE_FULL, BOUNCE_CHOOSE_TLS,
-    BOUNCE_CHOOSE_UNREACHABLE
+    BOUNCE_CHOOSE_UNREACHABLE, BOUNCE_CHOOSE_FOREIGN
   };
   struct bounce_choose_row r[2];
   struct bounce_hold_on_facts f;
@@ -2411,6 +2411,61 @@ static void device_tells_the_holder_when_plus_b_stands(void **s)
   assert_false(bounce_hold_on_tells(1, 0, 0, 1));   /* not a user yet */
 }
 
+static void choose_never_joins_a_primary_of_another_identity(void **s)
+{
+  /* W3-T12c-2b-f1b: the primary of the session the login would go into
+   * is not the session's identity (another account: an OAUTHBEARER
+   * re-auth under the session; or another Keycloak id than the login's).
+   * Whatever the row's state, the answer is FOREIGN on that row. */
+  struct bounce_choose_row r[1];
+  struct bounce_choice c;
+  struct bounce_choose_row (*mk[])(void) = { live_ours, live_remote };
+  unsigned int i;
+  (void)s;
+  for (i = 0; i < 2; i++) {
+    r[0] = mk[i]();
+    r[0].primary_other = 1;
+    bounce_choose(r, 1, 0, &c);
+    assert_int_equal(c.kind, BOUNCE_CHOOSE_FOREIGN);
+    assert_int_equal(c.index, 0);
+    r[0].full = r[0].devices = 1;          /* not FULL either */
+    bounce_choose(r, 1, 1, &c);
+    assert_int_equal(c.kind, BOUNCE_CHOOSE_FOREIGN);
+  }
+  r[0] = held_ours(4);
+  r[0].primary_other = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FOREIGN);   /* never a revive */
+  r[0] = held_remote(4);
+  r[0].primary_other = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FOREIGN);
+  r[0].full = r[0].devices = 1;                      /* passed over: still */
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FOREIGN);
+  /* The same identity: as before. */
+  r[0] = live_ours();
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ACTIVE_ALIAS);
+}
+
+static void plan_refuses_a_primary_of_another_identity(void **s)
+{
+  struct bounce_hold_on_facts f = join_facts(BOUNCE_CHOOSE_FOREIGN);
+  (void)s;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
+  /* An alias in the slot is no user: it cannot be joined from here. */
+  f.primary_user = 0;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_UNREACHABLE);
+  /* A member is still a member; a burst still defers. */
+  f = join_facts(BOUNCE_CHOOSE_FOREIGN);
+  f.member = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_NOOP);
+  f = join_facts(BOUNCE_CHOOSE_FOREIGN);
+  f.burst = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+}
+
 static void registration_routes(void **s)
 {
   struct bounce_choice c;
@@ -2436,6 +2491,9 @@ static void registration_routes(void **s)
   assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_REJECT_DUPLICATE);
   c.kind = BOUNCE_CHOOSE_UNREACHABLE;
   assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_PLAIN);
+  /* Never an alias of (or a revive into) another identity (W3-T12c-2b-f1b). */
+  c.kind = BOUNCE_CHOOSE_FOREIGN;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_PLAIN);
   assert_int_equal(bounce_resume_route(NULL), BOUNCE_ROUTE_PLAIN);
 }
 
@@ -2459,6 +2517,7 @@ static struct bounce_choose_row grid_row(unsigned int v)
   r.local_holder = r.primary_ours || ((v >> 5) & 1);
   r.devices = (v >> 6) & 1;
   r.full = r.devices && ((v >> 7) & 1);
+  r.primary_other = r.primary && ((v >> 8) & 1);
   r.disconnect_time = (long)((v >> 1) % 5);
   return r;
 }
@@ -2472,7 +2531,7 @@ static void registration_and_hold_on_agree(void **s)
    * Keycloak user's session is +b's; a create is a create; and +b never
    * makes a second session where the registration would not. */
   unsigned int a, b, tls;
-  unsigned int grid = 3 * 256;
+  unsigned int grid = 3 * 512;
   (void)s;
   for (a = 0; a < grid; a++)
     for (b = 0; b < grid; b += 7)
@@ -2526,9 +2585,26 @@ static void registration_and_hold_on_agree(void **s)
         case BOUNCE_ROUTE_PLAIN:
           assert_true(plan == BOUNCE_HOLD_REFUSE_UNREACHABLE
                       || plan == BOUNCE_HOLD_REFUSE_FULL
-                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
+                      || ((f.choice.end_stale
+                           || f.choice.kind == BOUNCE_CHOOSE_FOREIGN)
+                          && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         }
+        /* Never a join, a revive or an alias into a primary of another
+         * identity, on either path (W3-T12c-2b-f1b). */
+        if (f.choice.index >= 0 && r[f.choice.index].primary
+            && r[f.choice.index].primary_other) {
+          /* (The Keycloak gate may refuse that row first: a refusal on
+           * both paths as well.) */
+          assert_true(f.choice.kind == BOUNCE_CHOOSE_FOREIGN
+                      || f.choice.kind == BOUNCE_CHOOSE_KC_REFUSE);
+          assert_true(route == BOUNCE_ROUTE_PLAIN
+                      || route == BOUNCE_ROUTE_REJECT_KC);
+          assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
+        }
+        /* Never another Keycloak user's session ended by a hold-on. */
+        if (f.choice.end_stale)
+          assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
         /* The same session, whenever +b joins one. */
         if (plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_JOIN_PROMOTE) {
           assert_true(route == BOUNCE_ROUTE_REVIVE
@@ -2567,6 +2643,8 @@ int main(void)
     cmocka_unit_test(tail_final_letter_wins),
     cmocka_unit_test(device_tells_the_holder_when_plus_b_stands),
     cmocka_unit_test(registration_routes),
+    cmocka_unit_test(choose_never_joins_a_primary_of_another_identity),
+    cmocka_unit_test(plan_refuses_a_primary_of_another_identity),
     cmocka_unit_test(registration_and_hold_on_agree),
     cmocka_unit_test(swap_survivor_takes_the_faces_channel),
     cmocka_unit_test(reconcile_demote_converts_nothing),

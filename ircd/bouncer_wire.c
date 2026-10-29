@@ -599,7 +599,9 @@ static void choose_live(const struct bounce_choose_row *rows, int n,
     return;
   }
   *index = i;
-  if (!r->primary_ours && r->primary_server && r->primary && !r->full)
+  if (r->primary && r->primary_other)
+    *kind = BOUNCE_CHOOSE_FOREIGN;
+  else if (!r->primary_ours && r->primary_server && r->primary && !r->full)
     *kind = BOUNCE_CHOOSE_ACTIVE_REMOTE;
   else if (!r->primary)
     *kind = BOUNCE_CHOOSE_ORPHAN;
@@ -649,6 +651,12 @@ void bounce_choose(const struct bounce_choose_row *rows, int n,
     if (best < 0)
       break;
     r = &rows[best];
+    /* Never a revive into, or an alias of, another identity (f1b). */
+    if (r->primary && r->primary_other) {
+      out->kind = BOUNCE_CHOOSE_FOREIGN;
+      out->index = best;
+      break;
+    }
     if (r->primary_ours) {
       out->kind = BOUNCE_CHOOSE_HELD_LOCAL;
       out->index = best;
@@ -693,6 +701,7 @@ enum bounce_resume_route bounce_resume_route(const struct bounce_choice *c)
   case BOUNCE_CHOOSE_FULL:
   case BOUNCE_CHOOSE_TLS:           return BOUNCE_ROUTE_REJECT_DUPLICATE;
   case BOUNCE_CHOOSE_UNREACHABLE:   break;
+  case BOUNCE_CHOOSE_FOREIGN:       break;   /* never another identity */
   }
   return BOUNCE_ROUTE_PLAIN;
 }
@@ -724,6 +733,11 @@ bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
   case BOUNCE_CHOOSE_UNREACHABLE:
     return f->choice.held_full ? BOUNCE_HOLD_REFUSE_FULL
                                : BOUNCE_HOLD_REFUSE_UNREACHABLE;
+  case BOUNCE_CHOOSE_FOREIGN:
+    /* Another identity's primary (W3-T12c-2b-f1b); an alias in the slot
+     * is no user to join at all. */
+    return f->primary_user ? BOUNCE_HOLD_REFUSE_KC
+                           : BOUNCE_HOLD_REFUSE_UNREACHABLE;
   case BOUNCE_CHOOSE_HELD_LOCAL:
   case BOUNCE_CHOOSE_HELD_REMOTE:
   case BOUNCE_CHOOSE_ACTIVE_REMOTE:

@@ -845,6 +845,15 @@ enum bounce_hold_on_done {
   BOUNCE_HOLD_ON_REFUSED   /**< refused only when acting (logged) */
 };
 
+/** Is @a session's primary the session's identity for a login of
+ * Keycloak id @a kc_id: a user of the session's account, not an alias, of
+ * that Keycloak id (a missing id never conflicts)?  0 with no primary.
+ * The chooser reads it for every session (ruling W3-T12c-2b-f1b), and
+ * register_user()'s revive tries check it: never a revive into, an alias
+ * of or a join into another identity. */
+extern int bounce_session_primary_is_identity(struct BouncerSession *session,
+                                              const char *kc_id);
+
 /** Turn hold on for @a cptr (W3 12c-2b): plan again and act -- the client
  * joins the account's session (its old face quits once everywhere, it
  * leaves its own channels (U1), it becomes a device of the session's

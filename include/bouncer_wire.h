@@ -1221,6 +1221,12 @@ struct bounce_choose_row {
   int devices;           /**< it lists devices (an alias roster) */
   int full;              /**< its roster is at the alias limit */
   long disconnect_time;  /**< when its primary last dropped (held) */
+  int primary_other;     /**< that primary is not the session's identity
+                          *   for this login: not a user of the session's
+                          *   account, or another Keycloak id than the
+                          *   login's (its account changed under the
+                          *   session, e.g. an OAUTHBEARER re-auth;
+                          *   ruling W3-T12c-2b-f1b) */
 };
 
 /** What the chooser found for a login of the account (bounce_choose()). */
@@ -1242,8 +1248,11 @@ enum bounce_choose_kind {
   BOUNCE_CHOOSE_TLS,           /**< a live session with a primary and room,
                                 *   for a plaintext login while
                                 *   BOUNCER_REQUIRE_TLS is set (index) */
-  BOUNCE_CHOOSE_UNREACHABLE    /**< sessions are left, none can be joined
+  BOUNCE_CHOOSE_UNREACHABLE,   /**< sessions are left, none can be joined
                                 *   by these rules */
+  BOUNCE_CHOOSE_FOREIGN        /**< the session it would go into has a
+                                *   primary of another identity
+                                *   (primary_other): never joined (index) */
 };
 
 /** The most sessions of one account the chooser reads (one bit each in
@@ -1289,6 +1298,11 @@ struct bounce_choice {
  *     under BOUNCER_REQUIRE_TLS; a primary and no room (FULL).
  *  4. No session left: NONE.  Sessions left, none of the above:
  *     UNREACHABLE.
+ * Wherever the session taken (2. or 3.) has a primary of another identity
+ * than the session and the login (primary_other), the answer is FOREIGN on
+ * it instead: a registration then goes on in no session, a hold-on is
+ * refused -- never a revive, an alias or a join into another identity
+ * (ruling W3-T12c-2b-f1b).
  *
  * @param[in]  rows        The account's sessions, in list order.
  * @param[in]  n           How many (at most BOUNCE_CHOOSE_MAX_ROWS are
@@ -1388,7 +1402,9 @@ struct bounce_hold_on_facts {
  * session -- the only authority for it is the registration's Keycloak
  * check, which may be stale by now (ruling W3-T12c-2b-a); its callers read
  * the sessions with no session ending (bounce_kc_join()'s session_unused
- * 0), so the chooser refuses there itself.  NONE is CREATE; FULL and
+ * 0), so the chooser refuses there itself.  FOREIGN (a primary of
+ * another identity, W3-T12c-2b-f1b) refuses REFUSE_KC too, or
+ * REFUSE_UNREACHABLE for an alias in the slot.  NONE is CREATE; FULL and
  * TLS refuse; ORPHAN, and UNREACHABLE unless the held session it passed
  * over had no room (REFUSE_FULL), are REFUSE_UNREACHABLE: the session
  * cannot be joined from here while it stays so -- not a "try again" (fix

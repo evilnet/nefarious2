@@ -677,6 +677,23 @@ int register_user(struct Client *cptr, struct Client *sptr)
         }
         revive_target = NULL;
       }
+      /* Never a revive into another identity (ruling W3-T12c-2b-f1b): a
+       * session whose primary's account changed under it (an OAUTHBEARER
+       * re-auth) is listed under this account with a primary of another;
+       * the chooser in bounce_auto_resume() below lets this login register
+       * in no session then. */
+      if (revive_target && revive_target->hs_client
+          && !bounce_session_primary_is_identity(revive_target,
+                                                 cli_user(sptr)->kc_id)) {
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: not reviving %s for %s: session %s's primary is "
+                  "not that identity (account %s)",
+                  cli_name(revive_target->hs_client), cli_account(sptr),
+                  revive_target->hs_sessid,
+                  IsAccount(revive_target->hs_client)
+                    ? cli_account(revive_target->hs_client) : "*");
+        revive_target = NULL;
+      }
 
       if (revive_target && bounce_revive(revive_target, sptr) == 0) {
         /* Success! Ghost is now alive with our socket.

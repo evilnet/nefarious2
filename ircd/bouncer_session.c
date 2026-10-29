@@ -1220,6 +1220,16 @@ static int bounce_member_of_account(struct BouncerSession *session,
          && cli_user(c)->alias_primary == session->hs_client;
 }
 
+/** See include/bouncer_session.h. */
+int bounce_session_primary_is_identity(struct BouncerSession *session,
+                                       const char *kc_id)
+{
+  struct Client *p = session ? session->hs_client : NULL;
+
+  return p && bounce_member_of_account(session, p, 0)
+         && !bounce_rebind_kc_conflict(cli_user(p)->kc_id, kc_id);
+}
+
 const char *bounce_session_kc_id(struct BouncerSession *session)
 {
   int i;
@@ -1381,6 +1391,14 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
     r->devices = s->hs_alias_count > 0;
     r->full = s->hs_alias_count >= bounce_max_aliases();
     r->disconnect_time = (long)s->hs_disconnect_time;
+    /* The primary is the session's identity for this login (ruling
+     * W3-T12c-2b-f1b): a user of the session's account, not an alias, and
+     * of the login's Keycloak id (a missing id never conflicts).  An
+     * account change under the session (an OAUTHBEARER re-auth of its
+     * primary) leaves it listed here with a primary of another identity:
+     * never joined, revived or aliased into. */
+    r->primary_other = p && !bounce_session_primary_is_identity(s,
+                              cli_user(cptr) ? cli_user(cptr)->kc_id : NULL);
     sessions[n++] = s;
   }
   return n;
@@ -1669,6 +1687,19 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
 
     case BOUNCE_CHOOSE_NONE:
       break;
+
+    case BOUNCE_CHOOSE_FOREIGN:
+      /* The session's primary is not the session's identity (its account
+       * changed under it, or another Keycloak id): never an alias of
+       * another identity (ruling W3-T12c-2b-f1b).  The login registers
+       * on its own, in no session. */
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: %s for %s registers in no session: session %s's "
+                "primary %s is not that identity (account %s)",
+                cli_name(cptr), account, session->hs_sessid,
+                cli_name(session->hs_client),
+                IsAccount(session->hs_client) ? cli_account(session->hs_client) : "*");
+      return 0;
 
     default:
       /* Sessions are left and none of them can take this login: it
