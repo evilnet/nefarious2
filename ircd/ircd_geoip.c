@@ -53,9 +53,10 @@ MMDB_s mmdb;
 int mmdb_loaded = 0;
 #endif /* USE_MMDB */
 
-const char geoip_continent_code[7][3] = {"--", "AF", "AS", "EU", "NA", "OC", "SA"};
-const char *geoip_continent_name[7] = {"N/A", "Africa", "Asia", "Europe",
+const char geoip_continent_code[8][3] = {"--", "AF", "AN", "AS", "EU", "NA", "OC", "SA"};
+const char *geoip_continent_name[8] = {"N/A", "Africa", "Antarctica", "Asia", "Europe",
                                        "North America", "Oceania", "South America"};
+#define GEOIP_CONTINENTS (sizeof(geoip_continent_code) / sizeof(geoip_continent_code[0]))
 
 /** Find continent name by 2 letter code.
  * @param[in] cc 2 letter continent code
@@ -63,14 +64,16 @@ const char *geoip_continent_name[7] = {"N/A", "Africa", "Asia", "Europe",
  */
 const char* geoip_continent_name_by_code(const char* cc)
 {
-  int i = 0;
+  unsigned int i;
 
-  for (i=0; i<7; i++) {
+  /* An unknown code (a MARK from a peer or IAuth carries any string) is
+   * "N/A": it used to index one past the table. */
+  for (i = 0; i < GEOIP_CONTINENTS; i++) {
     if (strncasecmp(cc, (char *)&geoip_continent_code[i], 2) == 0)
-      break;
+      return geoip_continent_name[i];
   }
 
-  return geoip_continent_name[i];
+  return geoip_continent_name[0];
 }
 
 /** Initialize GeoIP global states.
