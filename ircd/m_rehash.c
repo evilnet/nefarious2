@@ -166,6 +166,9 @@ int ms_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   int flag = 0;
 
+  if (!IsUser(sptr))
+    return protocol_violation(sptr, "REHASH from non-user %s", cli_name(sptr));
+
   if ((parc > 2) && (hunt_server_cmd(sptr, CMD_REHASH, cptr, 1, "%s %C", 2, parc, parv) != HUNTED_ISME))
     return 0;
 
