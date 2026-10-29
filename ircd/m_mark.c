@@ -109,6 +109,9 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!IsServer(sptr))
     return protocol_violation(sptr, "MARK from non-server %s", cli_name(sptr));
 
+  if (parc < 3)
+    return protocol_violation(sptr, "MARK received too few parameters (%u)", parc);
+
   if (!strcmp(parv[2], MARK_WEBIRC)) {
     if(parc < 4)
       return protocol_violation(sptr, "MARK webirc received too few parameters (%u)", parc);
