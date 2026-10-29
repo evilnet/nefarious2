@@ -1927,10 +1927,6 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
    * pending-restore session can release its gate now. */
   bounce_release_idle_gates();
 
-  /* Cancel hold timer if running */
-  if (t_active(&session->hs_hold_timer))
-    timer_del(&session->hs_hold_timer);
-
   ghost = session->hs_client;
 
 #ifdef USE_SSL
@@ -1947,6 +1943,14 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
     }
   }
 #endif
+
+  /* Cancel the hold timer (and a pending deferred promote, as revive
+   * does) only now: a refused attach above must leave the session held
+   * with its timer, or the ghost keeps the nick with nothing to end it. */
+  if (t_active(&session->hs_hold_timer))
+    timer_del(&session->hs_hold_timer);
+  if (t_active(&session->hs_promote_timer))
+    timer_del(&session->hs_promote_timer);
 
   /* Same-server resume: ghost exists locally, transfer channel memberships */
   if (ghost && IsBouncerHold(ghost) && MyUser(ghost)) {
@@ -1969,6 +1973,12 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
      * the ghost's QUIT here, remote servers retain the ghost under its
      * old numeric and the incoming NICK N for cptr collides with it on
      * same nick/user@host. */
+    /* The session is cptr's before the ghost exits: exit_one_client's
+     * bouncer cleanup acts on a session still HOLDING with the ghost as
+     * its client -- it destroyed (freed) this session, or with aliases
+     * promoted one, under us. */
+    session->hs_state = BOUNCE_ACTIVE;
+    session->hs_client = cptr;
     ClearBouncerHold(ghost);
     exit_client(ghost, ghost, &me, "Session resumed");
   }
@@ -5621,6 +5631,21 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   return 0;
 }
 
+/** Undo bounce_revive()'s early state flip after a failed transplant:
+ * the ghost has no socket again, so the session is held again, with its
+ * hold timer (through the one arming path) and any deferred promote the
+ * revive cancelled. */
+static void bounce_revive_undo(struct BouncerSession *session,
+                               int was_holding, int promote_was_armed)
+{
+  if (!was_holding)
+    return;
+  session->hs_state = BOUNCE_HOLDING;
+  bounce_arm_hold_timer(session, 1);
+  if (promote_was_armed)
+    bounce_schedule_cross_server_promote(session);
+}
+
 /** Revive a ghost client by transplanting a socket from a temp client.
  *
  * Instead of creating a new client and transferring channels from ghost,
@@ -5640,7 +5665,11 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
  * @param[in] session The HOLDING or ACTIVE relay-only session.
  * @param[in] temp The temporary client whose socket will be transplanted.
  *                 This client will be freed (locally, no network messages).
- * @return 0 on success, -1 on error.
+ * @return 0 on success; -1 when refused before anything changed (the
+ *         caller continues with \a temp); -2 when the socket transplant
+ *         failed after \a temp's socket was taken: the session is held
+ *         again and \a temp is a husk the caller must free
+ *         (bounce_free_temp_client), never register.
  */
 int bounce_revive(struct BouncerSession *session, struct Client *temp)
 {
@@ -5650,6 +5679,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   struct Membership *member;
   int fd;
   int was_holding;
+  int promote_was_armed = 0;
 
   if (!session)
     return -1;
@@ -5716,6 +5746,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
          cli_name(ghost), cli_name(temp), cli_fd(temp)));
 
   if (was_holding) {
+    promote_was_armed = t_active(&session->hs_promote_timer);
     /* Mark session as ACTIVE before canceling timer.
      * This prevents a race where an already-queued ET_EXPIRE event
      * (processed after timer_del but before we reach the state update
@@ -5821,7 +5852,8 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       close(fd);
       s_fd(&con_socket(ghost_con)) = -1;
       LocalClientArray[fd] = 0;
-      return -1;
+      bounce_revive_undo(session, was_holding, promote_was_armed);
+      return -2;
     }
     /* CRITICAL: Restore FREEFLAG_SOCKET on the connection.  A previous stale
      * ET_DESTROY may have cleared it.  Without this flag, free_client will go
@@ -5839,7 +5871,8 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       close(fd);
       s_fd(&con_socket(ghost_con)) = -1;
       LocalClientArray[fd] = 0;
-      return -1;
+      bounce_revive_undo(session, was_holding, promote_was_armed);
+      return -2;
     }
   }
 
