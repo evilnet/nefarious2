@@ -122,11 +122,12 @@ netride_modes(int parc, char **parv, const char *curr_key)
       result |= MODE_INVITEONLY;
       break;
     case 'k':
-      if (strcmp(curr_key, *++parv))
+      if (--parc > 0 && strcmp(curr_key, *++parv))
         result |= MODE_KEY;
       break;
     case 'l':
-      ++parv;
+      if (--parc > 0)
+        ++parv;
       break;
     case 'r':
       result |= MODE_REGONLY;
