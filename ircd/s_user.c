@@ -805,6 +805,24 @@ int register_user(struct Client *cptr, struct Client *sptr)
       /* defer failed (OOM?) — fall through to create as best-effort */
     }
 
+    /* A same-account login whose nick collided with its session's
+     * holder was given that nick without the hash (check_auth_finished:
+     * revive or alias was to take it over).  When both were refused (a
+     * ghost in +Z channels and a plaintext login), registering it would
+     * introduce a second client under the holder's nick.  Nothing was
+     * introduced yet, so no QUIT. */
+    {
+      struct Client *holder = FindClient(cli_name(sptr));
+      if (*(cli_name(sptr)) && holder && holder != sptr) {
+        ++ServerStats->is_ref;
+        send_reply(sptr, ERR_NICKNAMEINUSE, cli_name(sptr));
+        SetFlag(sptr, FLAG_KILLED);
+        return exit_client(cptr, sptr, &me,
+                           "Nickname is held by your session, which could "
+                           "not be resumed on this connection");
+      }
+    }
+
     SetLocalNumNick(sptr);
 
     /* cli_name must be set by NICK before registration proceeds.
