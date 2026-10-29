@@ -2265,8 +2265,6 @@ static void plan_follows_the_chooser(void **s)
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
   f = join_facts(BOUNCE_CHOOSE_NONE);
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_CREATE);
-  f.choice.end_stale = 1;
-  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_END_STALE_CREATE);
   f = join_facts(BOUNCE_CHOOSE_FULL);
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_FULL);
   f = join_facts(BOUNCE_CHOOSE_TLS);
@@ -2285,9 +2283,40 @@ static void plan_follows_the_chooser(void **s)
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
   f = join_facts(BOUNCE_CHOOSE_ACTIVE_ALIAS);
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
-  /* A join after the leftovers end is still a join. */
-  f.choice.end_stale = 1;
-  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
+}
+
+static void hold_on_never_ends_another_keycloak_users_session(void **s)
+{
+  /* Ruling W3-T12c-2b-a: an answer that would end the previous Keycloak
+   * user's leftover first is a Keycloak refusal for a hold turned on
+   * after registration, whatever the chooser found after it. */
+  static const enum bounce_choose_kind kinds[] = {
+    BOUNCE_CHOOSE_NONE, BOUNCE_CHOOSE_HELD_LOCAL, BOUNCE_CHOOSE_HELD_REMOTE,
+    BOUNCE_CHOOSE_ACTIVE_REMOTE, BOUNCE_CHOOSE_ACTIVE_ALIAS,
+    BOUNCE_CHOOSE_ORPHAN, BOUNCE_CHOOSE_FULL, BOUNCE_CHOOSE_TLS,
+    BOUNCE_CHOOSE_UNREACHABLE
+  };
+  struct bounce_choose_row r[2];
+  struct bounce_hold_on_facts f;
+  unsigned int i;
+  (void)s;
+  for (i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
+    f = join_facts(kinds[i]);
+    f.choice.end_stale = 1UL << 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
+  }
+  /* And the reading a hold-on makes (no session may end: kc_join's
+   * session_unused 0) gives the chooser no leftover to end -- another
+   * user's held session with nothing connected is a refusal there. */
+  r[0] = held_ours(5);
+  r[0].kc = BKJ_REFUSE;     /* bounce_kc_join(other id, login id, 0) */
+  r[1] = live_ours();
+  memset(&f, 0, sizeof f);
+  bounce_choose(r, 2, 0, &f.choice);
+  assert_int_equal(f.choice.kind, BOUNCE_CHOOSE_KC_REFUSE);
+  assert_int_equal(f.choice.end_stale, 0);
+  f.primary_user = f.primary_home_aware = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
 }
 
 static void plan_checks_the_primary_it_joins(void **s)
@@ -2326,7 +2355,7 @@ static void plan_classes_and_names(void **s)
     int refused = p == BOUNCE_HOLD_REFUSE_KC || p == BOUNCE_HOLD_REFUSE_FULL
                   || p == BOUNCE_HOLD_REFUSE_TLS || p == BOUNCE_HOLD_DEFER;
     int acts = p == BOUNCE_HOLD_JOIN || p == BOUNCE_HOLD_JOIN_PROMOTE
-               || p == BOUNCE_HOLD_CREATE || p == BOUNCE_HOLD_END_STALE_CREATE;
+               || p == BOUNCE_HOLD_CREATE;
     enum bounce_hold_on_plan q;
     assert_int_equal(bounce_hold_on_refused(p), refused);
     assert_int_equal(bounce_hold_on_acts(p), acts);
@@ -2461,30 +2490,42 @@ static void registration_and_hold_on_agree(void **s)
         case BOUNCE_ROUTE_REVIVE:
           assert_true(plan == BOUNCE_HOLD_JOIN_PROMOTE
                       || plan == BOUNCE_HOLD_REFUSE_FULL
-                      || plan == BOUNCE_HOLD_REFUSE_TLS);
+                      || plan == BOUNCE_HOLD_REFUSE_TLS
+                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         case BOUNCE_ROUTE_ALIAS_REMOTE:
-          assert_true(plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_REFUSE_TLS);
+          assert_true(plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_REFUSE_TLS
+                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         case BOUNCE_ROUTE_ALIAS_LOCAL:
-          assert_int_equal(plan, BOUNCE_HOLD_JOIN);
+          assert_true(plan == BOUNCE_HOLD_JOIN
+                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         case BOUNCE_ROUTE_REJECT_KC:
           assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
           break;
         case BOUNCE_ROUTE_CREATE:
-          assert_true(plan == BOUNCE_HOLD_CREATE
-                      || plan == BOUNCE_HOLD_END_STALE_CREATE);
+          /* A registration ends the previous Keycloak user's leftover and
+           * makes a session; a hold-on refuses (W3-T12c-2b-a). */
+          if (f.choice.end_stale)
+            assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
+          else
+            assert_int_equal(plan, BOUNCE_HOLD_CREATE);
           break;
         case BOUNCE_ROUTE_REJECT_DUPLICATE:
           assert_true(plan == BOUNCE_HOLD_REFUSE_FULL
-                      || plan == BOUNCE_HOLD_REFUSE_TLS);
+                      || plan == BOUNCE_HOLD_REFUSE_TLS
+                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         case BOUNCE_ROUTE_RECLAIM:
         case BOUNCE_ROUTE_PLAIN:
-          assert_true(plan == BOUNCE_HOLD_DEFER || plan == BOUNCE_HOLD_REFUSE_FULL);
+          assert_true(plan == BOUNCE_HOLD_DEFER || plan == BOUNCE_HOLD_REFUSE_FULL
+                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         }
+        /* Never another Keycloak user's session ended by a hold-on. */
+        if (f.choice.end_stale)
+          assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
         /* The same session, whenever +b joins one. */
         if (plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_JOIN_PROMOTE) {
           assert_true(route == BOUNCE_ROUTE_REVIVE
@@ -2492,10 +2533,11 @@ static void registration_and_hold_on_agree(void **s)
                       || route == BOUNCE_ROUTE_ALIAS_LOCAL);
           assert_true(f.choice.index == 0 || f.choice.index == 1);
         }
-        /* A create only when no session is left after the ends. */
-        if (plan == BOUNCE_HOLD_CREATE || plan == BOUNCE_HOLD_END_STALE_CREATE) {
-          unsigned long gone = f.choice.end_stale | f.choice.discard;
-          assert_true((gone & 3UL) == 3UL);
+        /* A create only when no session is left after the drops (a
+         * hold-on ends none). */
+        if (plan == BOUNCE_HOLD_CREATE) {
+          assert_int_equal(f.choice.end_stale, 0);
+          assert_true((f.choice.discard & 3UL) == 3UL);
         }
       }
 }
@@ -2517,6 +2559,7 @@ int main(void)
     cmocka_unit_test(plan_waits_out_a_burst),
     cmocka_unit_test(plan_follows_the_chooser),
     cmocka_unit_test(plan_checks_the_primary_it_joins),
+    cmocka_unit_test(hold_on_never_ends_another_keycloak_users_session),
     cmocka_unit_test(plan_classes_and_names),
     cmocka_unit_test(tail_final_letter_wins),
     cmocka_unit_test(device_tells_the_holder_when_plus_b_stands),

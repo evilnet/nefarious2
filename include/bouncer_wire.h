@@ -1342,10 +1342,10 @@ enum bounce_hold_on_plan {
   BOUNCE_HOLD_JOIN_PROMOTE,     /**< join, then take the slot of our own
                                  *   held ghost (the promote) */
   BOUNCE_HOLD_CREATE,           /**< the account has no session: make one */
-  BOUNCE_HOLD_END_STALE_CREATE, /**< end the previous Keycloak user's
-                                 *   leftover, then make one */
-  BOUNCE_HOLD_REFUSE_KC,        /**< the session belongs to another
-                                 *   Keycloak user */
+  BOUNCE_HOLD_REFUSE_KC,        /**< a session of the account belongs to
+                                 *   another Keycloak user, in use or held
+                                 *   with nothing connected (never ended
+                                 *   by a hold-on: ruling W3-T12c-2b-a) */
   BOUNCE_HOLD_REFUSE_FULL,      /**< the session has no room */
   BOUNCE_HOLD_REFUSE_TLS,       /**< the session wants TLS; the client is
                                  *   plaintext */
@@ -1377,10 +1377,15 @@ struct bounce_hold_on_facts {
  *
  * A member: NOOP.  Mid-burst: DEFER (no hold or membership transition
  * between a client's burst N and the end of that link's burst, R14(g)).
- * Then by the chooser: KC_REFUSE is REFUSE_KC; NONE is CREATE (after the
- * stale leftovers end: END_STALE_CREATE); FULL and TLS refuse; ORPHAN
- * defers; UNREACHABLE refuses FULL when the held session it passed over
- * had no room, else defers.  A session to join: DEFER when its primary
+ * Then by the chooser: KC_REFUSE is REFUSE_KC, and so is any answer that
+ * would end the previous Keycloak user's leftover first (end_stale): a
+ * hold turned on after registration never ends another Keycloak user's
+ * session -- the only authority for it is the registration's Keycloak
+ * check, which may be stale by now (ruling W3-T12c-2b-a); its callers read
+ * the sessions with no session ending (bounce_kc_join()'s session_unused
+ * 0), so the chooser refuses there itself.  NONE is CREATE; FULL and TLS
+ * refuse; ORPHAN defers; UNREACHABLE refuses FULL when the held session it
+ * passed over had no room, else defers.  A session to join: DEFER when its primary
  * is no user, is dying or is homed on a legacy server; REFUSE_FULL with
  * no room; REFUSE_TLS for a plaintext client under REQUIRE_TLS; else
  * JOIN, or JOIN_PROMOTE when the primary is our own held ghost.

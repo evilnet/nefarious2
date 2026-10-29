@@ -1330,19 +1330,23 @@ void bounce_session_adopt_kc_id(struct BouncerSession *session, const char *id)
  * is resolved first from the ghost numeric it records -- the slot is read
  * first, the (origin, ghost numeric) pair only when it is empty -- and the
  * Keycloak gate (bounce_kc_join()) reads the session's id after that step.
- * A session may end only for a login Keycloak itself confirmed
- * (cli_saslkcidlive), held here with nothing connected.
+ * A session of another Keycloak user may end only for a registering login
+ * Keycloak itself confirmed (cli_saslkcidlive), held here with nothing
+ * connected: never for a hold turned on later, whose Keycloak check is the
+ * registration's and may be stale (ruling W3-T12c-2b-a, @a may_end 0).
  *
  * @param[in]  cptr     The login (a registering client, or a live one).
  * @param[in]  account  Its account.
  * @param[out] sessions The sessions, row for row.
  * @param[out] rows     The rows.
  * @param[in]  site     Label for a refused resolve's log line.
+ * @param[in]  may_end  A registration (1): the previous user's leftover
+ *                      may end; a hold-on (0): it is refused instead.
  * @return How many rows were filled (at most BOUNCE_CHOOSE_MAX_ROWS). */
 static int bounce_choose_read(struct Client *cptr, const char *account,
                               struct BouncerSession **sessions,
                               struct bounce_choose_row *rows,
-                              const char *site)
+                              const char *site, int may_end)
 {
   struct AccountSessions *as = bounce_find_by_account(account);
   struct BouncerSession *s;
@@ -1361,7 +1365,7 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
     if (!s->hs_client || !MyConnect(s->hs_client))
       bounce_resolve_hs_client_from_ghost(s, site);
     p = s->hs_client;
-    unused = s->hs_state == BOUNCE_HOLDING && s->hs_alias_count == 0
+    unused = may_end && s->hs_state == BOUNCE_HOLDING && s->hs_alias_count == 0
              && p && MyConnect(p) && IsBouncerHold(p) && cli_saslkcidlive(cptr);
     r = &rows[n];
     memset(r, 0, sizeof(*r));
@@ -1466,7 +1470,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
     tls_refused = feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl;
 #endif
   rechoose:
-    n = bounce_choose_read(cptr, account, sessions, rows, "Keycloak-id check");
+    n = bounce_choose_read(cptr, account, sessions, rows, "Keycloak-id check", 1);
     bounce_choose(rows, n, tls_refused, &ch);
 
     /* Ended only by a login Keycloak itself just confirmed (the row's
@@ -10036,7 +10040,7 @@ static enum bounce_hold_on_plan hold_on_read(struct Client *cptr,
 #ifdef USE_SSL
     f.tls_refused = feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl;
 #endif
-    n = bounce_choose_read(cptr, cli_account(cptr), sessions, rows, "hold on");
+    n = bounce_choose_read(cptr, cli_account(cptr), sessions, rows, "hold on", 0);
     bounce_choose(rows, n, f.tls_refused, &f.choice);
     if (f.choice.index >= 0) {
       struct BouncerSession *s = sessions[f.choice.index];
@@ -10165,27 +10169,10 @@ enum bounce_hold_on_done bounce_hold_on(struct Client *cptr, int tell_status,
     plan = hold_on_read(cptr, &target, &ch, sessions, &n);
     if (!bounce_hold_on_acts(plan) || rounds >= BOUNCE_CHOOSE_MAX_ROWS)
       break;
-    /* The previous Keycloak user's leftover ends first (the chooser's
-     * END_STALE; a login Keycloak itself confirmed), as a registration ends
-     * it; then the list is read again. */
-    for (i = 0; i < n && !changed; i++) {
-      struct BouncerSession *st = sessions[i];
-      struct Client *stale = st->hs_client;
-
-      if (!(ch.end_stale & (1UL << i)))
-        continue;
-      log_write(LS_USER, L_INFO, 0,
-                "Bouncer: ending %s's session %s: it carries Keycloak id %s, "
-                "%s (turning hold on) %s", st->hs_account, st->hs_sessid,
-                bounce_session_kc_id(st), cli_name(cptr), cli_user(cptr)->kc_id);
-      bounce_kill_session(st, "Session ended: its Keycloak account was replaced");
-      ClearBouncerHold(stale);
-      exit_client(stale, stale, &me,
-                  "Session ended: its Keycloak account was replaced");
-      changed = 1;
-    }
     /* A replica nothing reachable holds is dropped, as a registration
-     * drops it. */
+     * drops it, and the sessions are read again.  (Another Keycloak user's
+     * session is never ended here: the reader asked for no end, ruling
+     * W3-T12c-2b-a, and the planner refuses one.) */
     for (i = 0; i < n && !changed; i++) {
       if (!(ch.discard & (1UL << i)))
         continue;
@@ -10210,7 +10197,6 @@ enum bounce_hold_on_done bounce_hold_on(struct Client *cptr, int tell_status,
       *out = target;
     return BOUNCE_HOLD_ON_JOINED;
   case BOUNCE_HOLD_CREATE:
-  case BOUNCE_HOLD_END_STALE_CREATE:
     /* BS C, then BS A: the other servers' copy names its primary (W3
      * 12c-1: BS C alone left a copy a later login there took over). */
     if (bounce_create(cptr, &session) == 0 && session) {

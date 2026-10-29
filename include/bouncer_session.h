@@ -844,12 +844,13 @@ enum bounce_hold_on_done {
   BOUNCE_HOLD_ON_FAILED    /**< a create was planned and failed */
 };
 
-/** Turn hold on for @a cptr (W3 12c-2b): plan again and act -- the
- * previous Keycloak user's leftover ends first, then the client joins the
- * account's session (its old face quits once everywhere, it leaves its
- * own channels (U1), it becomes a device of the session's primary, and
- * takes our own held ghost's slot at the next tick), or a session is made
- * when the account has none.  The hold preference is the caller's.
+/** Turn hold on for @a cptr (W3 12c-2b): plan again and act -- the client
+ * joins the account's session (its old face quits once everywhere, it
+ * leaves its own channels (U1), it becomes a device of the session's
+ * primary, and takes our own held ghost's slot at the next tick), or a
+ * session is made when the account has none.  Another Keycloak user's
+ * session is never ended here (ruling W3-T12c-2b-a): it refuses.  The
+ * hold preference is the caller's.
  *
  * @param[in]  cptr        The client (ours, in no session to act).
  * @param[in]  tell_status A join tells the socket its persistence STATUS

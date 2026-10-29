@@ -707,11 +707,14 @@ bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
   /* R14(g): no hold or membership transition while a link is mid-burst. */
   if (f->burst)
     return BOUNCE_HOLD_DEFER;
+  /* Never the end of another Keycloak user's session (W3-T12c-2b-a). */
+  if (f->choice.end_stale)
+    return BOUNCE_HOLD_REFUSE_KC;
   switch (f->choice.kind) {
   case BOUNCE_CHOOSE_KC_REFUSE:
     return BOUNCE_HOLD_REFUSE_KC;
   case BOUNCE_CHOOSE_NONE:
-    return f->choice.end_stale ? BOUNCE_HOLD_END_STALE_CREATE : BOUNCE_HOLD_CREATE;
+    return BOUNCE_HOLD_CREATE;
   case BOUNCE_CHOOSE_FULL:
     return BOUNCE_HOLD_REFUSE_FULL;
   case BOUNCE_CHOOSE_TLS:
@@ -746,7 +749,7 @@ int bounce_hold_on_refused(enum bounce_hold_on_plan plan)
 int bounce_hold_on_acts(enum bounce_hold_on_plan plan)
 {
   return plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_JOIN_PROMOTE
-         || plan == BOUNCE_HOLD_CREATE || plan == BOUNCE_HOLD_END_STALE_CREATE;
+         || plan == BOUNCE_HOLD_CREATE;
 }
 
 const char *bounce_hold_on_plan_name(enum bounce_hold_on_plan plan)
@@ -756,7 +759,6 @@ const char *bounce_hold_on_plan_name(enum bounce_hold_on_plan plan)
   case BOUNCE_HOLD_JOIN:             return "join";
   case BOUNCE_HOLD_JOIN_PROMOTE:     return "join+promote";
   case BOUNCE_HOLD_CREATE:           return "create";
-  case BOUNCE_HOLD_END_STALE_CREATE: return "end-stale+create";
   case BOUNCE_HOLD_REFUSE_KC:        return "refuse-keycloak";
   case BOUNCE_HOLD_REFUSE_FULL:      return "refuse-full";
   case BOUNCE_HOLD_REFUSE_TLS:       return "refuse-tls";
