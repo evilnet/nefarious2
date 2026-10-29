@@ -1349,9 +1349,14 @@ enum bounce_hold_on_plan {
   BOUNCE_HOLD_REFUSE_FULL,      /**< the session has no room */
   BOUNCE_HOLD_REFUSE_TLS,       /**< the session wants TLS; the client is
                                  *   plaintext */
-  BOUNCE_HOLD_DEFER             /**< not now: a server link is mid-burst
+  BOUNCE_HOLD_DEFER,            /**< not now: a server link is mid-burst
                                  *   (R14(g)), or the session's primary is
-                                 *   dying or cannot be found; try again */
+                                 *   dying; try again */
+  BOUNCE_HOLD_REFUSE_UNREACHABLE /**< the session cannot be joined from here
+                                 *   while it stays as it is: no primary to
+                                 *   be found, a primary homed on a legacy
+                                 *   server or that is an alias, a held
+                                 *   session passed over (fix round 1) */
 };
 
 /** The facts the hold-on planner reads (bounce_hold_on_plan()). */
@@ -1383,12 +1388,15 @@ struct bounce_hold_on_facts {
  * session -- the only authority for it is the registration's Keycloak
  * check, which may be stale by now (ruling W3-T12c-2b-a); its callers read
  * the sessions with no session ending (bounce_kc_join()'s session_unused
- * 0), so the chooser refuses there itself.  NONE is CREATE; FULL and TLS
- * refuse; ORPHAN defers; UNREACHABLE refuses FULL when the held session it
- * passed over had no room, else defers.  A session to join: DEFER when its primary
- * is no user, is dying or is homed on a legacy server; REFUSE_FULL with
- * no room; REFUSE_TLS for a plaintext client under REQUIRE_TLS; else
- * JOIN, or JOIN_PROMOTE when the primary is our own held ghost.
+ * 0), so the chooser refuses there itself.  NONE is CREATE; FULL and
+ * TLS refuse; ORPHAN, and UNREACHABLE unless the held session it passed
+ * over had no room (REFUSE_FULL), are REFUSE_UNREACHABLE: the session
+ * cannot be joined from here while it stays so -- not a "try again" (fix
+ * round 1, item 4).  A session to join: REFUSE_UNREACHABLE when its
+ * primary is no user or is homed on a legacy server; DEFER when it is
+ * dying; REFUSE_FULL with no room; REFUSE_TLS for a plaintext client under
+ * REQUIRE_TLS; else JOIN, or JOIN_PROMOTE when the primary is our own held
+ * ghost.
  *
  * A refusal changes nothing: the hold stays off and nothing goes on the
  * wire (user decision U2).

@@ -720,17 +720,22 @@ bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
   case BOUNCE_CHOOSE_TLS:
     return BOUNCE_HOLD_REFUSE_TLS;
   case BOUNCE_CHOOSE_ORPHAN:
-    return BOUNCE_HOLD_DEFER;
+    return BOUNCE_HOLD_REFUSE_UNREACHABLE;
   case BOUNCE_CHOOSE_UNREACHABLE:
-    return f->choice.held_full ? BOUNCE_HOLD_REFUSE_FULL : BOUNCE_HOLD_DEFER;
+    return f->choice.held_full ? BOUNCE_HOLD_REFUSE_FULL
+                               : BOUNCE_HOLD_REFUSE_UNREACHABLE;
   case BOUNCE_CHOOSE_HELD_LOCAL:
   case BOUNCE_CHOOSE_HELD_REMOTE:
   case BOUNCE_CHOOSE_ACTIVE_REMOTE:
   case BOUNCE_CHOOSE_ACTIVE_ALIAS:
     break;
   }
-  /* A session to join: its primary must be one a device can follow. */
-  if (!f->primary_user || f->primary_dying || !f->primary_home_aware)
+  /* A session to join: its primary must be one a device can follow.  An
+   * alias in the slot, or a legacy home, stays so (fix round 1, item 4: a
+   * refusal that does not say "try again"); a dying primary is passing. */
+  if (!f->primary_user || !f->primary_home_aware)
+    return BOUNCE_HOLD_REFUSE_UNREACHABLE;
+  if (f->primary_dying)
     return BOUNCE_HOLD_DEFER;
   if (f->full)
     return BOUNCE_HOLD_REFUSE_FULL;
@@ -743,7 +748,8 @@ bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
 int bounce_hold_on_refused(enum bounce_hold_on_plan plan)
 {
   return plan == BOUNCE_HOLD_REFUSE_KC || plan == BOUNCE_HOLD_REFUSE_FULL
-         || plan == BOUNCE_HOLD_REFUSE_TLS || plan == BOUNCE_HOLD_DEFER;
+         || plan == BOUNCE_HOLD_REFUSE_TLS || plan == BOUNCE_HOLD_DEFER
+         || plan == BOUNCE_HOLD_REFUSE_UNREACHABLE;
 }
 
 int bounce_hold_on_acts(enum bounce_hold_on_plan plan)
@@ -763,6 +769,7 @@ const char *bounce_hold_on_plan_name(enum bounce_hold_on_plan plan)
   case BOUNCE_HOLD_REFUSE_FULL:      return "refuse-full";
   case BOUNCE_HOLD_REFUSE_TLS:       return "refuse-tls";
   case BOUNCE_HOLD_DEFER:            return "defer";
+  case BOUNCE_HOLD_REFUSE_UNREACHABLE: return "refuse-unreachable";
   }
   return "unknown";
 }

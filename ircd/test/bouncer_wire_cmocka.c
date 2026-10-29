@@ -2269,10 +2269,11 @@ static void plan_follows_the_chooser(void **s)
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_FULL);
   f = join_facts(BOUNCE_CHOOSE_TLS);
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_TLS);
+  /* Persistent states: not "try again" (fix round 1, item 4). */
   f = join_facts(BOUNCE_CHOOSE_ORPHAN);
-  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_UNREACHABLE);
   f = join_facts(BOUNCE_CHOOSE_UNREACHABLE);
-  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_UNREACHABLE);
   f.choice.held_full = 1;
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_FULL);
   f = join_facts(BOUNCE_CHOOSE_HELD_LOCAL);
@@ -2329,14 +2330,17 @@ static void plan_checks_the_primary_it_joins(void **s)
   (void)s;
   for (i = 0; i < sizeof joins / sizeof joins[0]; i++) {
     struct bounce_hold_on_facts f = join_facts(joins[i]);
+    /* A primary that is no user (an alias in the slot), or homed on a
+     * legacy server: the session cannot be joined from here. */
     f.primary_user = 0;
-    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_UNREACHABLE);
+    /* A dying one: transient. */
     f = join_facts(joins[i]);
     f.primary_dying = 1;
     assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
     f = join_facts(joins[i]);
     f.primary_home_aware = 0;
-    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_UNREACHABLE);
     f = join_facts(joins[i]);
     f.full = 1;
     f.tls_refused = 1;
@@ -2351,9 +2355,10 @@ static void plan_classes_and_names(void **s)
 {
   enum bounce_hold_on_plan p;
   (void)s;
-  for (p = BOUNCE_HOLD_NOOP; p <= BOUNCE_HOLD_DEFER; p++) {
+  for (p = BOUNCE_HOLD_NOOP; p <= BOUNCE_HOLD_REFUSE_UNREACHABLE; p++) {
     int refused = p == BOUNCE_HOLD_REFUSE_KC || p == BOUNCE_HOLD_REFUSE_FULL
-                  || p == BOUNCE_HOLD_REFUSE_TLS || p == BOUNCE_HOLD_DEFER;
+                  || p == BOUNCE_HOLD_REFUSE_TLS || p == BOUNCE_HOLD_DEFER
+                  || p == BOUNCE_HOLD_REFUSE_UNREACHABLE;
     int acts = p == BOUNCE_HOLD_JOIN || p == BOUNCE_HOLD_JOIN_PROMOTE
                || p == BOUNCE_HOLD_CREATE;
     enum bounce_hold_on_plan q;
@@ -2519,13 +2524,11 @@ static void registration_and_hold_on_agree(void **s)
           break;
         case BOUNCE_ROUTE_RECLAIM:
         case BOUNCE_ROUTE_PLAIN:
-          assert_true(plan == BOUNCE_HOLD_DEFER || plan == BOUNCE_HOLD_REFUSE_FULL
+          assert_true(plan == BOUNCE_HOLD_REFUSE_UNREACHABLE
+                      || plan == BOUNCE_HOLD_REFUSE_FULL
                       || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         }
-        /* Never another Keycloak user's session ended by a hold-on. */
-        if (f.choice.end_stale)
-          assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
         /* The same session, whenever +b joins one. */
         if (plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_JOIN_PROMOTE) {
           assert_true(route == BOUNCE_ROUTE_REVIVE

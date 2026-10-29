@@ -807,6 +807,7 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
                     "Hold mode enabled (session limit reached)");
           break;
         case BOUNCE_HOLD_ON_NOTHING:
+        case BOUNCE_HOLD_ON_REFUSED:   /* found only when acting: logged */
           send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
                     "Hold mode enabled");
           break;

@@ -10204,6 +10204,15 @@ enum bounce_hold_on_done bounce_hold_on(struct Client *cptr, int tell_status,
   log_write(LS_USER, L_INFO, 0, "Bouncer: %s turns hold on: %s%s%s",
             cli_name(cptr), bounce_hold_on_plan_name(plan),
             target ? " session " : "", target ? target->hs_sessid : "");
+  /* Planned before (in the mode loop, or by the command just now) and
+   * refused only when acting: the caller has set the preference already
+   * (review M10).  Logged; the client keeps its +b and no session. */
+  if (bounce_hold_on_refused(plan)) {
+    log_write(LS_USER, L_WARNING, 0, "Bouncer: %s's hold-on was refused only "
+              "when acting (%s): its +b and preference stand with no session",
+              cli_name(cptr), bounce_hold_on_plan_name(plan));
+    return BOUNCE_HOLD_ON_REFUSED;
+  }
   switch (plan) {
   case BOUNCE_HOLD_JOIN:
   case BOUNCE_HOLD_JOIN_PROMOTE:
@@ -10251,14 +10260,28 @@ void bounce_hold_on_fail(struct Client *to, const char *command,
     break;
   case BOUNCE_HOLD_REFUSE_TLS:
     code = "TLS_REQUIRED";
-    text = "Account already has an active session on this network";
+    text = "The account's session requires a TLS connection; reconnect "
+           "with TLS to join it";
+    break;
+  case BOUNCE_HOLD_REFUSE_UNREACHABLE:
+    /* Not a passing state: no "try again" (fix round 1, item 4). */
+    code = "SESSION_UNREACHABLE";
+    text = "The account's session cannot be joined from here; reconnect "
+           "to attach";
     break;
   default:
     code = "TRY_AGAIN";
     text = "The account's session is changing; try again";
     break;
   }
-  send_fail(to, command, code, context, text);
+  /* PERSISTENCE SET follows the spec on its own subcommand (ruling
+   * W3-T12c-2b-f1a): a SET that leaves the effective setting unchanged
+   * MUST NOT FAIL; the STATUS it MUST send is its caller's, this WARN says
+   * why. */
+  if (0 == strcmp(command, "PERSISTENCE"))
+    send_warn(to, command, code, context, text);
+  else
+    send_fail(to, command, code, context, text);
 }
 
 /* ---------------------------------------------------------------- */

@@ -284,8 +284,16 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
      * preference stays as it was and nothing goes on the wire (U2). */
     enum bounce_hold_on_plan plan = bounce_hold_on_plan_for(sptr);
 
+    /* A refusal leaves the settings as they were.  Until the spec and our
+     * extension of it are separated, this subcommand follows the spec
+     * (ruling W3-T12c-2b-f1a): a SET that does not change the effective
+     * setting MUST NOT FAIL and MUST send STATUS -- the unchanged one --
+     * with a WARN saying why.  The client setting is not stored (user
+     * decision U2: nothing set, nothing on the wire), and the SET is not
+     * acknowledged: deviations recorded in the persistence plan. */
     if (bounce_hold_on_refused(plan)) {
       bounce_hold_on_fail(sptr, "PERSISTENCE", plan, "SET");
+      persistence_send_status(sptr);
       return 0;
     }
     metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);

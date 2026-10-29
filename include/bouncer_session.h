@@ -838,10 +838,11 @@ extern enum bounce_hold_on_plan bounce_hold_on_plan_for(struct Client *cptr);
 
 /** What bounce_hold_on() did. */
 enum bounce_hold_on_done {
-  BOUNCE_HOLD_ON_NOTHING,  /**< no session change (a member, a refusal) */
+  BOUNCE_HOLD_ON_NOTHING,  /**< no session change (a member) */
   BOUNCE_HOLD_ON_CREATED,  /**< a session was made (BS C, BS A) */
   BOUNCE_HOLD_ON_JOINED,   /**< the client joined the account's session */
-  BOUNCE_HOLD_ON_FAILED    /**< a create was planned and failed */
+  BOUNCE_HOLD_ON_FAILED,   /**< a create was planned and failed */
+  BOUNCE_HOLD_ON_REFUSED   /**< refused only when acting (logged) */
 };
 
 /** Turn hold on for @a cptr (W3 12c-2b): plan again and act -- the client
@@ -863,7 +864,10 @@ extern enum bounce_hold_on_done bounce_hold_on(struct Client *cptr,
 
 /** Answer a hold turned on that @a plan refuses: FAIL @a command with
  * registration's reject text for the same refusal, without the
- * disconnect (U2); TRY_AGAIN for a deferral. */
+ * disconnect (U2); a TLS-specific text for TLS; TRY_AGAIN for a deferral,
+ * SESSION_UNREACHABLE for a state that does not pass by itself.  For
+ * PERSISTENCE it is a WARN, never a FAIL (ruling W3-T12c-2b-f1a: the
+ * caller then sends the unchanged STATUS). */
 extern void bounce_hold_on_fail(struct Client *to, const char *command,
                                 enum bounce_hold_on_plan plan,
                                 const char *context);
