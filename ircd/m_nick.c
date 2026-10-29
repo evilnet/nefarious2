@@ -377,6 +377,27 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return need_more_params(sptr, "NICK");
   }
 
+  if (IsServer(sptr))
+  {
+    struct irc_in_addr ip;
+
+    /* SetRemoteNumNick() and findNUser() index client_list[] from the
+     * numnick, and the collision paths below decode the IP into a stack
+     * irc_in_addr: refuse a malformed one before anything uses it. */
+    if (!ValidUserNumNick(parv[parc - 2]))
+      return protocol_violation(cptr, "Malformed numnick %s for %s",
+                                parv[parc - 2], parv[1]);
+    if (base64toip(parv[parc - 3], &ip))
+    {
+      protocol_violation(cptr, "Malformed IP %s for %s (%s)",
+                         parv[parc - 3], parv[1], parv[parc - 2]);
+      ++ServerStats->is_kill;
+      sendcmdto_one(&me, CMD_KILL, cptr, "%s :%s (Malformed IP)",
+                    parv[parc - 2], cli_name(&me));
+      return 0;
+    }
+  }
+
   ircd_strncpy(nick, parv[1], NICKLEN + 1);
   nick[NICKLEN] = '\0';
 

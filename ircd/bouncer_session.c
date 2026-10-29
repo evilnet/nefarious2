@@ -8889,8 +8889,10 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
 
   /* F-BW2: both numerics must be well-formed 5-char P10 user numerics
    * before we resolve or byte-index them (the svr_yy extraction below
-   * reads alias_numeric[1] directly). */
-  if (strlen(primary_numeric) != 5 || strlen(alias_numeric) != 5) {
+   * reads alias_numeric[1] directly, and SetRemoteNumNick indexes
+   * client_list[] from alias_numeric). */
+  if (strlen(primary_numeric) != 5 || strlen(alias_numeric) != 5
+      || !ValidUserNumNick(alias_numeric)) {
     Debug((DEBUG_INFO, "BX C: malformed numeric primary=%s alias=%s",
            primary_numeric, alias_numeric));
     goto forward;
