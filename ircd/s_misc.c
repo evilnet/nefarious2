@@ -68,6 +68,7 @@
 #include "history.h"
 #include "chathistory_presence.h"
 #include "sasl_auth.h"
+#include "session_markread.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <fcntl.h>
@@ -317,7 +318,13 @@ static void store_quit_events(struct Client *sptr, const char *comment,
  * W3-P2), and the Q must leave as @a c's own.
  *
  * Nothing else of exit_one_client's runs: no channel removal (the caller
- * does it, with the presence time this returns), no count, no flag.
+ * does it, with the presence time this returns), no count, no flag.  The
+ * face's ephemeral read markers go with its session id (the connection
+ * takes the session's id next).
+ *
+ * Kept in step with exit_one_client()'s QUIT emission (its "if
+ * (!IsBouncerInternalDestroy(bcptr))" block) and exit_client()'s Q loop:
+ * a change to what a QUIT carries there belongs here too.
  */
 int64_t exit_face_departs(struct Client *c, const char *comment)
 {
@@ -347,6 +354,8 @@ int64_t exit_face_departs(struct Client *c, const char *comment)
 #endif
 
   check_status_watch(c, RPL_LOGOFF);
+  if (cli_session_id(c)[0])
+    readmarker_ephemeral_purge(cli_session_id(c));
 
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
     struct Client *link = dlp->value.cptr;
@@ -588,6 +597,11 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * channel members reaches legacy peers anyway. */
     int64_t quit_time = 0;   /* presence stamp for the removals below */
     uint64_t quit_ms_for_rows = 0;
+    /* The QUIT of a face that leaves while its connection stays (a live
+     * client joining a bouncer session) is exit_face_departs() above: the
+     * same parts (channel QUIT, HISTORY_QUIT rows, presence time, WATCH
+     * logoff, the Q toward the links) under one msgid.  A change to what a
+     * QUIT carries here belongs there too. */
     if (!IsBouncerInternalDestroy(bcptr)) {
       char quit_msgid[64] = "";
       if (feature_bool(FEAT_MSGID)) {
