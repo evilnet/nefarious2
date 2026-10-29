@@ -342,9 +342,17 @@ static int setup_crypt(void **state)
 
 static int teardown_crypt(void **state)
 {
+    crypt_mechs_t *node, *next;
     (void)state;
-    /* Note: In production code we'd free all mechanisms, but for tests
-     * we just leave them allocated - they're small and short-lived */
+    /* setup runs per test: free what it registered, or LeakSanitizer
+     * fails the suite. */
+    for (node = crypt_mechs_root->next; node; node = next) {
+        next = node->next;
+        MyFree(node->mech);
+        MyFree(node);
+    }
+    MyFree(crypt_mechs_root);
+    crypt_mechs_root = NULL;
     return 0;
 }
 
