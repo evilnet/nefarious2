@@ -585,6 +585,10 @@ int ms_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int             found = 0;
   int		  total = 0;
 
+  /* do_whois() replies to and describes the asker as a user. */
+  if (!IsUser(sptr))
+    return protocol_violation(sptr, "WHOIS from non-user %s", cli_name(sptr));
+
   if (parc < 2)
   {
     send_reply(sptr, ERR_NONICKNAMEGIVEN);
