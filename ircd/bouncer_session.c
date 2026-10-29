@@ -14653,6 +14653,9 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
 struct PendingRegistration {
   struct Client            *client;
   struct PendingRegistration *next;
+  /** The nick a peer's N took from it while it waited (m_nick.c), for the
+   * drain to resolve; "" otherwise (W3 12c-2b fix round 3, I-2). */
+  char                      nick[NICKLEN + 1];
 };
 static struct PendingRegistration *pending_registrations = NULL;
 /** The entries a running drain has taken off pending_registrations and not
@@ -14820,6 +14823,7 @@ int bounce_defer_registration(struct Client *cli)
   if (!p)
     return -1;
   p->client = cli;
+  p->nick[0] = '\0';
   p->next = pending_registrations;
   pending_registrations = p;
   log_write(LS_USER, L_INFO, 0,
@@ -14860,6 +14864,59 @@ void bounce_remove_pending_registration(struct Client *cli)
    * (bounce_link_input_read()).  Checked again at the next timer run. */
   if (pending_registrations && IsServer(cli))
     bounce_schedule_registration_drain();
+}
+
+/** See include/bouncer_session.h. */
+void bounce_pending_registration_nick_taken(struct Client *cli)
+{
+  struct PendingRegistration *p;
+
+  if (!cli || !cli_name(cli)[0])
+    return;
+  for (p = pending_registrations; p; p = p->next)
+    if (p->client == cli)
+      ircd_strncpy(p->nick, cli_name(cli), sizeof(p->nick));
+  for (p = draining_registrations; p; p = p->next)
+    if (p->client == cli)
+      ircd_strncpy(p->nick, cli_name(cli), sizeof(p->nick));
+}
+
+/** A queued client whose nick a peer's N took while it waited (I-2): the
+ * resolution check_auth_finished() makes for a nick deferred during
+ * authentication.  The holder is a session primary of the client's own
+ * account and Keycloak identity (#16): the client takes the nick unhashed
+ * and the registration's alias path gives it the primary's face.  The nick
+ * is free again: it takes it.  Else ERR_NICKNAMEINUSE, and its next NICK
+ * queues it again (set_nick_name()).
+ * @return Non-zero when the client has a nick to register under. */
+static int pending_nick_resolve(struct Client *cli, const char *nick)
+{
+  struct Client *holder = FindClient(nick);
+
+  if (!holder) {
+    strcpy(cli_name(cli), nick);
+    hAddClient(cli);
+    return 1;
+  }
+  if (holder != cli && IsUser(holder) && IsAccount(cli) && IsAccount(holder)
+      && cli_user(holder) && cli_user(cli)
+      && 0 == ircd_strcmp(cli_account(holder), cli_account(cli))
+      && (IsBouncerHold(holder) || bounce_get_session(holder)
+          || bounce_has_sessions(cli_account(cli)))
+      && !bounce_rebind_kc_conflict(cli_user(holder)->kc_id,
+                                    cli_user(cli)->kc_id)) {
+    strcpy(cli_name(cli), nick);   /* the holder owns the hash entry */
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: the deferred registration of %s (%s) takes its nick "
+              "back from its session's primary %s: it attaches to it",
+              nick, cli_account(cli), cli_name(holder));
+    return 1;
+  }
+  log_write(LS_USER, L_INFO, 0,
+            "Bouncer: the deferred registration's nick %s is %s's now: "
+            "433, the client waits for a new NICK", nick, cli_name(holder));
+  send_reply(cli, ERR_NICKNAMEINUSE, nick);
+  return 0;
 }
 
 int bounce_is_pending_registration(const struct Client *cli)
@@ -14907,8 +14964,15 @@ void bounce_drain_pending_registrations(void)
    * again goes onto pending_registrations, not into this walk. */
   while ((list = draining_registrations)) {
     struct Client *cli = list->client;
+    char taken[NICKLEN + 1];
     draining_registrations = list->next;
+    ircd_strncpy(taken, list->nick, sizeof(taken));
     MyFree(list);
+    /* Its nick went to a peer's N while it waited (I-2). */
+    if (cli && !IsDead(cli) && cli_fd(cli) >= 0 && !HasFlag(cli, FLAG_KILLED)
+        && IsUnknown(cli) && cli_name(cli)[0] == '\0' && taken[0]
+        && !pending_nick_resolve(cli, taken))
+      continue;
     /* Skip clients that died waiting (KILL, timeout, SQUIT-via-burst
      * etc.).  ALSO skip clients that haven't received NICK yet — the
      * s_auth.c:725 defer fires the moment SASL completes during a

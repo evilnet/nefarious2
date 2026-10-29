@@ -1965,6 +1965,15 @@ extern void bounce_schedule_registration_drain_in(int seconds);
  * and whenever.  Idempotent; no-op if not queued. */
 extern void bounce_remove_pending_registration(struct Client *cli);
 
+/** A peer's N is taking the nick of @a cli, a client waiting in the
+ * pending-registration queue (m_nick.c, before it clears the client's
+ * name): its entry keeps the nick, and the drain resolves it as
+ * check_auth_finished() resolves a nick deferred during authentication --
+ * the nick of a session primary of the client's own account and Keycloak
+ * identity is taken back for the alias attach, a free one taken, any
+ * other answered ERR_NICKNAMEINUSE (W3 12c-2b fix round 3, I-2). */
+extern void bounce_pending_registration_nick_taken(struct Client *cli);
+
 /** Returns nonzero if the given client is currently waiting in the
  * pending-registration queue (SASL completed during burst, register_user
  * deferred until burst settles).  m_nick uses this to extend the

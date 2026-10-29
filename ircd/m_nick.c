@@ -840,6 +840,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                            "(nick %s)",
                            parv[parc - 2], cptr, acptr, nick);
       if (cli_name(acptr)[0]) {
+        /* Its queue entry keeps the nick: the drain resolves it, as
+         * check_auth_finished() resolves a deferred nick (W3 12c-2b fix
+         * round 3, I-2). */
+        bounce_pending_registration_nick_taken(acptr);
         hRemClient(acptr);
         cli_name(acptr)[0] = '\0';
       }
