@@ -1246,11 +1246,11 @@ extern void bounce_destroy(struct BouncerSession *session);
  * session (bounce_end_primary(); services' SVSMODE -b names the ghost
  * itself), so a caller that still uses @a cptr runs the end only once it
  * is done with it (set_user_mode() runs a -b's end last).  A local
- * primary and @a caller that
- * carry on take a session id of their own, as does a device left for the
- * sweep: the ended session's id would make the session-id hint stamp it
- * on their N, and a peer would take a client in no session for a member
- * (its rebind and its post-burst merge match on that id).
+ * primary and @a caller that carry on take a session id of their own, as
+ * does a device left for the sweep: the ended session's id would make the
+ * session-id hint stamp it on their N, and a peer would take a client in
+ * no session for a member (its rebind and its post-burst merge match on
+ * that id).
  *
  * @param[in] session The session to end; freed here unless the end is
  *                    carried to its holder.

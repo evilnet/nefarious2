@@ -1157,8 +1157,9 @@ int bounce_session_has_plaintext(struct Client *cptr)
  * can be the primary (bounce_member_end_resolve_admits()): never an alias
  * or a roster member, and a client of ours only as the session's own held
  * ghost.  This resolve admits any client of the account and Keycloak id
- * the numeric names (registered: auto-resume's ghost resolve exposure).  The two fields stay aligned for the cases that reach
- * here: HOLDING-on-this-server has hs_origin == cli_yxx(&me) by
+ * the numeric names (registered: auto-resume's ghost resolve exposure).
+ * The two fields stay aligned for the cases that reach here:
+ * HOLDING-on-this-server has hs_origin == cli_yxx(&me) by
  * construction, HOLDING/ACTIVE-as-replica is created with hs_origin == the
  * BS C sender's prefix, matching its hs_ghost_numeric source.  A mis-composed
  * numeric therefore either fails to resolve (safe) or resolves to a client of
