@@ -2138,9 +2138,15 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
    */
   s = strchr(ch, ' ');          /* s -> End of the command code */
   len = (s) ? (s - ch) : 0;
-  if (len == 3 && IsDigit(*ch))
+  if (len == 3 && IsDigit(*ch) && IsDigit(*(ch + 1)) && IsDigit(*(ch + 2)))
   {
     numeric = (*ch - '0') * 100 + (*(ch + 1) - '0') * 10 + (*(ch + 2) - '0');
+    /* 000 is no numeric, and the dispatch below takes numeric == 0 for
+     * a command with mptr set: drop it as an unknown command. */
+    if (numeric == 0) {
+      ServerStats->is_unco++;
+      return (-1);
+    }
     paramcount = 2; /* destination, and the rest of it */
     ServerStats->is_num++;
     mptr = NULL;                /* Init. to avoid stupid compiler warning :/ */
