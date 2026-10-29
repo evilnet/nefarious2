@@ -4199,6 +4199,29 @@ mode_parse_ban(struct ParseState *state, int *flag_p)
   apply_ban(&state->chptr->banlist, newban, 0);
 }
 
+/** Undo what mode_parse_ban() / mode_parse_except() did to \a list
+ * when mode_parse() returns without processing it: unlink the temporary
+ * entries (they live in the ParseState on mode_parse()'s stack) and
+ * clear the marks they left on the real ones.  apply_ban() and
+ * apply_except() only link BAN_ADD entries, at the tail, and the real
+ * entries had BAN_ADD cleared before the first one, so the temporaries
+ * are the tail from the first BAN_ADD entry on.
+ * @param[in,out] list Channel ban or ban exception list.
+ */
+static void
+mode_discard_bans(struct Ban **list)
+{
+  struct Ban *ban;
+
+  for (; (ban = *list); list = &ban->next) {
+    if (ban->flags & BAN_ADD) {
+      *list = 0;
+      break;
+    }
+    ban->flags &= ~(BAN_DEL | BAN_OVERLAPPED);
+  }
+}
+
 /*
  * This is the bottom half of the ban processor
  */
@@ -5273,6 +5296,10 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
             state.mbuf->mb_rem = 0;
             state.mbuf->mb_exrem = 0;
             state.mbuf->mb_count = 0;
+            if (state.done & DONE_BANCLEAN)
+              mode_discard_bans(&state.chptr->banlist);
+            if (state.done & DONE_EXCEPTCLEAN)
+              mode_discard_bans(&state.chptr->exceptlist);
             return state.args_used;
           } else {
             /* Server is desynced; bounce the mode and deop the source
@@ -5302,8 +5329,13 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
    */
   if (!state.mbuf ||
       ((state.flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER))
-       && !(state.flags & MODE_PARSE_ISHALFOP)))
+       && !(state.flags & MODE_PARSE_ISHALFOP))) {
+    if (state.done & DONE_BANCLEAN)
+      mode_discard_bans(&state.chptr->banlist);
+    if (state.done & DONE_EXCEPTCLEAN)
+      mode_discard_bans(&state.chptr->exceptlist);
     return state.args_used; /* tell our parent how many args we gobbled */
+  }
 
   t_mode = state.chptr->mode.mode;
   t_exmode = state.chptr->mode.exmode;
