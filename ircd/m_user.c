@@ -126,6 +126,11 @@ int m_user(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (parc < 5)
     return need_more_params(sptr, "USER");
 
+  /* Unregistered with no auth request: a registration the bouncer
+   * deferred, whose USER was taken already (W3 12c-2b fix 2). */
+  if (!cli_auth(cptr))
+    return send_reply(sptr, ERR_ALREADYREGISTRED);
+
   /* 
    * Copy parameters into better documenting variables
    *

@@ -213,6 +213,13 @@ void count_unknowns_underflow(const char *file, int line, const char *what);
         && match(feature_str(FEAT_DOMAINNAME), cli_sockhost(cptr)) == 0) \
       --current_load.local_count; \
   } while(0)
+/** Undo Count_unknownbecomesclient() for a local client that goes back to
+ * an unregistered connection before it was announced: a registration the
+ * bouncer defers (register_user()'s DEFER_PEER_INBOUND).  Its exit as an
+ * unknown, or its registration at the drain, counts it again.  The maxima
+ * stay where they are. */
+#define Count_clientbecomesunknown(cptr, UserStats) \
+  do { Count_clientdisconnects(cptr, UserStats); Count_newunknown(UserStats); } while (0)
 /** Update counters when a local server disconnects. */
 #define Count_serverdisconnects(UserStats)              do { --UserStats.local_servers; --UserStats.servers; } while(0)
 /** Update counters when an unknown client disconnects. */

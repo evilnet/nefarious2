@@ -492,6 +492,31 @@ static void relay_hold_mark(struct Client *cptr, struct Client *sptr)
     sendcmdto_set_s2s_held(cli_s2s_held(cptr));
 }
 
+/** Put a local client whose registration the bouncer defers back to the
+ * unregistered connection it was before register_user()'s prologue
+ * (W3 12c-2b fix 2, N3): uncounted as a client and counted as unknown, its
+ * old status and command table, no oper or invisible count.  The user modes
+ * the prologue set stay; the drain's register_user() sets the same again.
+ * The wait from here is the server's, not the client's: it gets a full
+ * CONNECTTIMEOUT for it (check_pings()), as iauth's extra wait does
+ * (check_auth_finished()); a drain that never comes ends in "Registration
+ * Timeout", the auth-time defer's bound too.
+ *
+ * @param[in] sptr       The client (ours, not yet given a numeric).
+ * @param[in] status     Its status before the prologue.
+ * @param[in] handler    Its command table before the prologue.
+ */
+static void register_user_unwind(struct Client *sptr, short status,
+                                 HandlerType handler)
+{
+  assert(MyConnect(sptr) && IsUser(sptr));
+  Count_clientbecomesunknown(sptr, UserStats);
+  cli_status(sptr) = status;
+  cli_handler(sptr) = handler;
+  userstats_count_sync(sptr);   /* no user: no oper or invisible count */
+  cli_firsttime(sptr) = CurrentTime;
+}
+
 /** Finish registering a user who has sent both NICK and USER.
  * For local connections, possibly check IAuth; make sure there is a
  * matching Client config block; clean the username field; check
@@ -551,6 +576,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
   if (MyConnect(sptr))
   {
+    /* What the prologue below changes, for a registration the bouncer
+     * defers to put back (register_user_unwind()). */
+    short pre_status = cli_status(sptr);
+    HandlerType pre_handler = cli_handler(sptr);
+
     assert(cptr == sptr);
 
     /* Pre-flight: require-sasl reject must happen BEFORE
@@ -860,11 +890,19 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     /* Steady-state BS C race guard: peer has inbound bytes that may
      * carry a BS C for this account.  Defer registration; the drain
-     * triggered by BS C processing (or EB) will retry auto_resume
-     * once the peer data has been consumed.  See
-     * project_bsc_n_ordering_race memory for full discussion. */
+     * (bounce_drain_pending_registrations()) runs register_user() again
+     * once the peer data has been read.  See project_bsc_n_ordering_race
+     * memory for full discussion.
+     *
+     * Until then the client is the unregistered connection it was before
+     * the prologue above (W3 12c-2b fix 2, N3): counted as unknown, the
+     * unregistered command table (no JOIN, no PRIVMSG), no numeric, nothing
+     * on the wire -- a QUIT of a client with no numeric went out sourced
+     * from this server alone, which a peer reads as a server's QUIT.  The
+     * drain runs register_user() from the top, prologue and all, once. */
     if (auto_resumed == BOUNCE_RESUME_DEFER_PEER_INBOUND) {
       if (bounce_defer_registration(sptr) == 0) {
+        register_user_unwind(sptr, pre_status, pre_handler);
         sendrawto_one(sptr,
                       "NOTICE * :*** Bouncer: waiting for peer session "
                       "announcement to settle before registering");
@@ -1614,6 +1652,14 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
            (void*)sptr, cli_fd(sptr), nick));
     strcpy(cli_name(sptr), nick);
     hAddClient(sptr);
+    /* A registration the bouncer deferred has no auth request left (it
+     * completed); a peer's N took its nick meanwhile (m_nick.c).  With a
+     * nick again, it waits for the drain once more.  W3 12c-2b fix 2. */
+    if (!cli_auth(sptr)) {
+      if (!bounce_is_pending_registration(sptr))
+        bounce_defer_registration(sptr);
+      return 0;
+    }
     return auth_set_nick(cli_auth(sptr), nick);
   }
   return 0;

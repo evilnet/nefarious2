@@ -1903,13 +1903,15 @@ extern int bounce_finish_live_primary_demote(struct Client *demoted_alias,
  * the same account. */
 extern int bounce_burst_in_progress(void);
 
-/** Defer a client's register_user call until burst completes.  The
- * caller (s_auth's check_auth_finished, after auth_set_username) MUST
- * skip register_user when this returns DB_OK.  The client stays in
- * unknown state with auth complete; on the EOB drain
- * (bounce_drain_pending_registrations) register_user is invoked.
- * Returns 0 on success, -1 on alloc failure (caller should fall
- * through to immediate register_user). */
+/** Defer a client's register_user call: until burst completes (s_auth's
+ * check_auth_finished, after auth_set_username), or until a link's unread
+ * bytes are read (register_user's DEFER_PEER_INBOUND, which puts the client
+ * back to the unregistered connection it was first: W3 12c-2b fix 2, N3).
+ * The caller MUST skip register_user when this returns 0.  The client
+ * stays an unregistered connection with its auth complete (no auth request
+ * left) until the drain (bounce_drain_pending_registrations) invokes
+ * register_user.  Returns 0 on success, -1 on alloc failure (caller should
+ * fall through to immediate register_user). */
 extern int bounce_defer_registration(struct Client *cli);
 
 /** Drain queued post-burst registrations.  Called from

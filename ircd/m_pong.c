@@ -164,7 +164,10 @@ int mr_pong(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(!IsRegistered(sptr));
 
   ClearPingSent(cptr);
-  return (parc > 1) ? auth_set_pong(cli_auth(sptr), strtoul(parv[parc - 1], NULL, 10)) : 0;
+  /* No auth request: a registration the bouncer deferred (its auth is
+   * done; W3 12c-2b fix 2). */
+  return (parc > 1 && cli_auth(sptr))
+         ? auth_set_pong(cli_auth(sptr), strtoul(parv[parc - 1], NULL, 10)) : 0;
 }
 
 /*

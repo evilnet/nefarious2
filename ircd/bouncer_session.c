@@ -14767,8 +14767,12 @@ void bounce_drain_pending_registrations(void)
      * once NICK arrives (m_nick.c → register_user), so dropping the
      * deferred entry is the right move — natural NICK processing may
      * re-defer if burst is still in progress. */
+    /* And never a client that is registered already: a queued client is
+     * an unregistered connection until its registration here (both
+     * defers; W3 12c-2b fix 2, N3), and register_user()'s prologue must
+     * not run twice on one. */
     if (cli && !IsDead(cli) && cli_fd(cli) >= 0
-        && !HasFlag(cli, FLAG_KILLED)
+        && !HasFlag(cli, FLAG_KILLED) && IsUnknown(cli)
         && cli_name(cli)[0] != '\0') {
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: draining the deferred registration of %s (fd %d)",
