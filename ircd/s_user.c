@@ -497,24 +497,27 @@ static void relay_hold_mark(struct Client *cptr, struct Client *sptr)
  * (W3 12c-2b fix 2, N3): uncounted as a client and counted as unknown, its
  * old status and command table, no oper or invisible count.  The user modes
  * the prologue set stay; the drain's register_user() sets the same again.
- * The wait from here is the server's, not the client's: it gets a full
- * CONNECTTIMEOUT for it (check_pings()), as iauth's extra wait does
- * (check_auth_finished()); a drain that never comes ends in "Registration
- * Timeout", the auth-time defer's bound too.
+ * The wait from its first defer is the server's, not the client's: it gets
+ * a full CONNECTTIMEOUT for it (check_pings()), as iauth's extra wait does
+ * (check_auth_finished()); a re-defer by the drain keeps that clock, so the
+ * wait stays bounded (fix round 3, I-1).  A drain that never comes ends in
+ * "Registration Timeout", the auth-time defer's bound too.
  *
  * @param[in] sptr       The client (ours, not yet given a numeric).
  * @param[in] status     Its status before the prologue.
  * @param[in] handler    Its command table before the prologue.
+ * @param[in] first      Its first defer (else the drain deferred it again).
  */
 static void register_user_unwind(struct Client *sptr, short status,
-                                 HandlerType handler)
+                                 HandlerType handler, int first)
 {
   assert(MyConnect(sptr) && IsUser(sptr));
   Count_clientbecomesunknown(sptr, UserStats);
   cli_status(sptr) = status;
   cli_handler(sptr) = handler;
   userstats_count_sync(sptr);   /* no user: no oper or invisible count */
-  cli_firsttime(sptr) = CurrentTime;
+  if (first)
+    cli_firsttime(sptr) = CurrentTime;
 }
 
 /** Finish registering a user who has sent both NICK and USER.
@@ -901,11 +904,16 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * from this server alone, which a peer reads as a server's QUIT.  The
      * drain runs register_user() from the top, prologue and all, once. */
     if (auto_resumed == BOUNCE_RESUME_DEFER_PEER_INBOUND) {
+      /* Deferred again by the drain that retried it: no second notice,
+       * and the registration timeout it waits under stays as it was (fix
+       * round 3, I-1: the bound is from the first defer). */
+      int again = bounce_is_draining_registration(sptr);
       if (bounce_defer_registration(sptr) == 0) {
-        register_user_unwind(sptr, pre_status, pre_handler);
-        sendrawto_one(sptr,
-                      "NOTICE * :*** Bouncer: waiting for peer session "
-                      "announcement to settle before registering");
+        register_user_unwind(sptr, pre_status, pre_handler, !again);
+        if (!again)
+          sendrawto_one(sptr,
+                        "NOTICE * :*** Bouncer: waiting for peer session "
+                        "announcement to settle before registering");
         return 0;
       }
       /* defer failed (OOM?) — fall through to create as best-effort */

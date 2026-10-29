@@ -6787,13 +6787,13 @@ bsc_forward:
                             channels ? channels : "");
     }
     /* A new session just landed (or an existing one was renamed via
-     * cross-sessid).  If any pending registrations were deferred at
-     * bounce_auto_resume waiting for exactly this signal (steady-state
-     * BS C race guard, BOUNCE_RESUME_DEFER_PEER_INBOUND), retry them
-     * now — bounce_auto_resume's second pass will find the session
-     * and take the alias-attach path instead of creating a parallel
-     * primary. */
-    bounce_drain_pending_registrations();
+     * cross-sessid).  Registrations deferred waiting for exactly this
+     * (the steady-state BS C race guard, DEFER_PEER_INBOUND) are retried
+     * at the end of this read of the link (bounce_link_input_read()), not
+     * here: this read may still hold the session's N and BS A, and a
+     * drain inside this line would find the fresh replica with no primary
+     * yet -- ORPHAN, reclaimed by the login, two live primaries under one
+     * id (W3 12c-2b fix round 3, I-1). */
     break;
   }
 
@@ -14613,11 +14613,13 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
  * creation.
  *
  * The steady-state defer (register_user()'s DEFER_PEER_INBOUND: a link
- * that can carry a BS C has unread bytes) waits for those bytes instead:
- * the drain runs once a read of the link leaves nothing unread
- * (bounce_link_input_read()), at an end of burst, at a BS C, or at the
- * timer run a link's exit asks for.  Both leave the client an unregistered
- * connection until the drain (W3 12c-2b fix 2). */
+ * that can carry a BS C has unread bytes) waits for those bytes instead.
+ * Both drain at the end of a server link's read, never inside a line
+ * (bounce_link_input_read(): an end of burst or a BS C in that read is
+ * acted on once the rest of the read -- the session's N and BS A -- is
+ * parsed; W3 12c-2b fix round 3, I-1), or at the timer run a link's exit
+ * asks for.  Both leave the client an unregistered connection until the
+ * drain (W3 12c-2b fix 2). */
 struct PendingRegistration {
   struct Client            *client;
   struct PendingRegistration *next;
@@ -14724,14 +14726,18 @@ static int pending_registrations_released(void)
 /** See include/bouncer_session.h. */
 void bounce_link_input_read(struct Client *link)
 {
-  if (!pending_registrations || !link || !IsServer(link)
-      || !IsIRCv3Aware(link))
+  if (!pending_registrations || !link || !IsServer(link))
     return;
   if (!pending_registrations_released())
     return;
-  log_write(LS_USER, L_INFO, 0,
-            "Bouncer: the link to %s has no unread bytes left: draining the "
-            "deferred registrations", cli_name(link));
+  if (IsIRCv3Aware(link))
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: the link to %s has no unread bytes left: draining the "
+              "deferred registrations", cli_name(link));
+  else
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: after a read of the link to %s nothing holds the "
+              "deferred registrations back: draining them", cli_name(link));
   bounce_drain_pending_registrations();
 }
 
@@ -14827,6 +14833,16 @@ int bounce_is_pending_registration(const struct Client *cli)
   return 0;
 }
 
+/** The client whose deferred registration the running drain is doing now
+ * (register_user() asks: a defer of it is a re-defer). */
+static struct Client *drain_current;
+
+/** See include/bouncer_session.h. */
+int bounce_is_draining_registration(const struct Client *cli)
+{
+  return cli && cli == drain_current;
+}
+
 void bounce_drain_pending_registrations(void)
 {
   static int running;
@@ -14868,7 +14884,9 @@ void bounce_drain_pending_registrations(void)
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: draining the deferred registration of %s (fd %d)",
                 cli_name(cli), cli_fd(cli));
+      drain_current = cli;
       register_user(cli, cli);
+      drain_current = NULL;
     } else {
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: dropping the deferred registration of %s (%s)",

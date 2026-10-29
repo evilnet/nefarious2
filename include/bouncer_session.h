@@ -1914,11 +1914,17 @@ extern int bounce_burst_in_progress(void);
  * fall through to immediate register_user). */
 extern int bounce_defer_registration(struct Client *cli);
 
-/** Drain queued post-burst registrations.  Called from
- * ms_end_of_burst after ClearBurst, gated on no remaining peer
- * having FLAG_BURST; from a BS C; from bounce_link_input_read(); and at
- * the timer run bounce_schedule_registration_drain() asks for. */
+/** Drain queued deferred registrations.  Called from
+ * bounce_link_input_read() and at the timer run
+ * bounce_schedule_registration_drain() asks for -- never inside a line (an
+ * end of burst or a BS C only makes the end-of-read check find the queue
+ * released; W3 12c-2b fix round 3, I-1). */
 extern void bounce_drain_pending_registrations(void);
+
+/** Is @a cli the client whose deferred registration the running drain is
+ * doing now?  register_user() asks: a defer then is a re-defer, which sends
+ * no second notice and keeps the registration timeout it runs under. */
+extern int bounce_is_draining_registration(const struct Client *cli);
 
 /** A server link's input, as far as one read of it went, has been read and
  * parsed (read_packet(), after server_dopacket()).  When registrations are
@@ -1926,8 +1932,10 @@ extern void bounce_drain_pending_registrations(void);
  * link that can carry a BS C with unread input -- they are drained here
  * (W3 12c-2b fix 2, register row 412): a login deferred on a link's unread
  * bytes is registered once those bytes are read, not at the next end of
- * burst.  Called outside any line's handling: no S2S override or line tag
- * is armed. */
+ * burst.  Any server link, legacy ones too: the auth-time defer waits on
+ * every link's burst, and a legacy link's end of burst releases it here
+ * (fix round 3, I-1).  Called outside any line's handling: no S2S override
+ * or line tag is armed. */
 extern void bounce_link_input_read(struct Client *link);
 
 /** Drain the deferred registrations at the next timer run, if nothing holds

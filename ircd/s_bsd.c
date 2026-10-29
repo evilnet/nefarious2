@@ -1253,6 +1253,10 @@ ssl_read_again:
     if (result > 0 && cli_socket(cptr).ssl && ssl_pending(&cli_socket(cptr)) > 0)
       goto ssl_read_again;
 #endif
+    /* A link that registered in this read may have sent its whole burst,
+     * end of burst included, in it (fix round 3, I-1). */
+    if (result > 0 && IsServer(cptr))
+      bounce_link_input_read(cptr);
     return result;
   }
   else
