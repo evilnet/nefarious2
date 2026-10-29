@@ -962,8 +962,10 @@ int history_store_message(const char *msgid, const char *timestamp,
 
   size_t content_len = content ? strlen(content) : 0;
   size_t tags_len = client_tags ? strlen(client_tags) : 0;
-  /* 2x the escapable fields (content, tags): worst-case every byte escapes. */
-  size_t bufsize = 2 * content_len + 2 * tags_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
+  /* 2x the escapable fields (content, tags, sender, account): worst-case
+   * every byte escapes. */
+  size_t bufsize = 2 * content_len + 2 * tags_len
+      + 2 * (HISTORY_SENDER_LEN + ACCOUNTLEN) + 32;
   if (bufsize < HISTORY_VALUE_BUFSIZE)
     bufsize = HISTORY_VALUE_BUFSIZE;
 
@@ -1851,8 +1853,8 @@ int history_find_last_join(const char *channel, const char *nick,
         continue;
       }
 
-      /* Value format: type|sender|account|content
-       * HISTORY_JOIN = 2, so we need "2|nick!..." */
+      /* Value format: type|sender|account|content, sender escaped
+       * (history_record.c).  HISTORY_JOIN = 2, so we need "2|nick!..." */
       pipe1 = memchr(val, '|', vlen);
       if (!pipe1) {
         rc = db_iter_prev(it);
@@ -1873,9 +1875,14 @@ int history_find_last_join(const char *channel, const char *nick,
       }
 
       {
-        const char *sender = pipe1 + 1;
-        size_t sender_len = pipe2 - sender;
-        if (sender_len > nick_len && sender[nick_len] == '!' &&
+        /* Unescape before comparing: a '|' in the nick is stored escaped.
+         * Escaping the nick instead would not do: ircd_strncmp folds '|'
+         * with backslash, and a client now named foo\x must still find
+         * its JOIN stored as foo|x. */
+        char sender[HISTORY_SENDER_LEN];
+        int sender_len = history_unescape_header(sender, sizeof(sender),
+                                                 pipe1 + 1, pipe2 - (pipe1 + 1));
+        if (sender_len > (int)nick_len && sender[nick_len] == '!' &&
             ircd_strncmp(sender, nick, nick_len) == 0) {
           /* Found it — extract msgid and timestamp from the key */
           char tmp_target[CHANNELLEN + 1];

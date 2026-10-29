@@ -20,6 +20,8 @@
  * @brief Chathistory record codec (ircd/history_record.c).
  *
  * Stored value: type|sender|account|[\x05ot\x05][\x06tags\x06][\x07inc\x07]content
+ * with sender and account escaped so a '|' in either cannot shift the
+ * fields (history_unescape_header reads them back).
  * history_deserialize_record and the CH W forward encode/split are
  * declared in history.h with the rest of the history API.  Pure: no
  * database, client or channel dependencies, so ircd/test links it.
@@ -36,5 +38,7 @@ extern int history_serialize_record(char *buf, int bufsize,
                                     const char *original_target, time_t incarnation);
 extern char *history_escape_field(char *dst, size_t dstsize, const char *src);
 extern void history_unescape_field(char *s);
+extern int history_unescape_header(char *dst, size_t dstsize,
+                                   const char *src, size_t len);
 
 #endif /* INCLUDED_history_record_h */

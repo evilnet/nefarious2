@@ -416,6 +416,132 @@ static void test_sentinel_escape_of_escape_byte(void **state)
   assert_string_equal(esc, "a\004b");
 }
 
+/* ========== '|' in the header fields (parsers fuzz F14) ========== */
+
+/* Store a full record through the real codec and read it back. */
+static void record_roundtrip(const char *sender, const char *account,
+                             const char *content, struct HistoryMessage *msg)
+{
+  char buf[HISTORY_VALUE_BUFSIZE];
+  int len;
+
+  len = history_serialize_record(buf, sizeof(buf), HISTORY_PRIVMSG, sender,
+                                 account, content, NULL, NULL, 0);
+  assert_true(len > 0 && len < (int)sizeof(buf));
+  memset(msg, 0, sizeof(*msg));
+  assert_int_equal(0, history_deserialize_record(buf, (size_t)len, msg));
+}
+
+static void test_record_pipe_nick_roundtrip(void **state)
+{
+  struct HistoryMessage msg;
+  (void)state;
+  /* '|' is a nick character ({|}~ are lowercase letters in ircd_chattr). */
+  record_roundtrip("foo|away!user@host.example", "foo", "back soon", &msg);
+  assert_string_equal(msg.sender, "foo|away!user@host.example");
+  assert_string_equal(msg.account, "foo");
+  assert_string_equal(msg.content, "back soon");
+}
+
+static void test_record_pipe_nick_account_spoof(void **state)
+{
+  struct HistoryMessage msg;
+  (void)state;
+  /* The F14 reproducer: nick "a|admin|b" logged in as "realacct".  The
+   * record must not replay as sender "a" with account=admin. */
+  record_roundtrip("a|admin|b!user@host", "realacct", "spoof?", &msg);
+  assert_string_equal(msg.sender, "a|admin|b!user@host");
+  assert_string_equal(msg.account, "realacct");
+  assert_string_equal(msg.content, "spoof?");
+}
+
+static void test_record_pipe_in_account(void **state)
+{
+  struct HistoryMessage msg;
+  (void)state;
+  record_roundtrip("nick!user@host", "a|b", "text", &msg);
+  assert_string_equal(msg.sender, "nick!user@host");
+  assert_string_equal(msg.account, "a|b");
+  assert_string_equal(msg.content, "text");
+}
+
+static void test_record_longest_pipe_sender(void **state)
+{
+  char sender[HISTORY_SENDER_LEN];
+  char *p = sender;
+  struct HistoryMessage msg;
+  (void)state;
+  /* A NICKLEN nick of all '|' plus the longest user and host: the
+   * longest legal sender, which escapes to more than HISTORY_SENDER_LEN
+   * bytes on disk and must still decode. */
+  memset(p, '|', NICKLEN); p += NICKLEN;
+  *p++ = '!';
+  memset(p, 'u', USERLEN); p += USERLEN;
+  *p++ = '@';
+  memset(p, 'h', HOSTLEN); p += HOSTLEN;
+  *p = '\0';
+  assert_int_equal(strlen(sender), HISTORY_SENDER_LEN - 1);
+  record_roundtrip(sender, "acct", "x", &msg);
+  assert_string_equal(msg.sender, sender);
+  assert_string_equal(msg.account, "acct");
+  assert_string_equal(msg.content, "x");
+}
+
+static void test_record_ordinary_bytes_unchanged(void **state)
+{
+  char buf[HISTORY_VALUE_BUFSIZE];
+  int len;
+  (void)state;
+  /* A sender without '|' serializes exactly as before, and '|' in the
+   * content (the last field) stays raw. */
+  len = history_serialize_record(buf, sizeof(buf), HISTORY_PRIVMSG,
+                                 "nick!user@host", "acct", "a|b|c",
+                                 NULL, NULL, 0);
+  assert_int_equal(len, (int)strlen("0|nick!user@host|acct|a|b|c"));
+  assert_string_equal(buf, "0|nick!user@host|acct|a|b|c");
+}
+
+static void test_unescape_header_span(void **state)
+{
+  static const char stored[] = "2|a\004<b!u@h|acct|";
+  char out[16];
+  (void)state;
+  /* The JOIN-row scan decodes the raw sender span between the first two
+   * '|' with this; the escaped '|' comes back. */
+  assert_int_equal(7, history_unescape_header(out, sizeof(out), stored + 2, 8));
+  assert_string_equal(out, "a|b!u@h");
+  /* Legacy span, no escapes: copied unchanged. */
+  assert_int_equal(5, history_unescape_header(out, sizeof(out), "n!u@h", 5));
+  assert_string_equal(out, "n!u@h");
+  /* Too long for dst after unescaping: refused, not truncated. */
+  assert_int_equal(-1, history_unescape_header(out, 5, "n!u@h", 5));
+  assert_int_equal(4, history_unescape_header(out, 5, "a\004<b!", 5));
+  assert_string_equal(out, "a|b!");
+}
+
+static void test_record_legacy_decode(void **state)
+{
+  static const char plain[] = "0|nick!user@host|acct|hello|world";
+  static const char pipe_nick[] = "1|a|admin|b!user@host|realacct|spoof?";
+  struct HistoryMessage msg;
+  (void)state;
+  /* Records written before '|' was escaped decode as they always did. */
+  memset(&msg, 0, sizeof(msg));
+  assert_int_equal(0, history_deserialize_record(plain, strlen(plain), &msg));
+  assert_int_equal(msg.type, HISTORY_PRIVMSG);
+  assert_string_equal(msg.sender, "nick!user@host");
+  assert_string_equal(msg.account, "acct");
+  assert_string_equal(msg.content, "hello|world");
+  /* A legacy row from a '|' nick was split wrongly when it was written;
+   * nothing in it marks where the nick ended, so it reads back exactly
+   * as it did before. */
+  memset(&msg, 0, sizeof(msg));
+  assert_int_equal(0, history_deserialize_record(pipe_nick, strlen(pipe_nick), &msg));
+  assert_int_equal(msg.type, HISTORY_NOTICE);
+  assert_string_equal(msg.sender, "a");
+  assert_string_equal(msg.account, "admin");
+  assert_string_equal(msg.content, "b!user@host|realacct|spoof?");
+}
 
 /* Mirror of ml_content_resolve's multiline-identification predicate
  * (ircd/ml_content.c): TYPE-keyed, with an EXACT-3-byte legacy fallback.
@@ -875,6 +1001,13 @@ int main(void)
         cmocka_unit_test(test_sentinel_escape_roundtrip),
         cmocka_unit_test(test_sentinel_escape_neutralizes_injection),
         cmocka_unit_test(test_sentinel_escape_of_escape_byte),
+        cmocka_unit_test(test_record_pipe_nick_roundtrip),
+        cmocka_unit_test(test_record_pipe_nick_account_spoof),
+        cmocka_unit_test(test_record_pipe_in_account),
+        cmocka_unit_test(test_record_longest_pipe_sender),
+        cmocka_unit_test(test_record_ordinary_bytes_unchanged),
+        cmocka_unit_test(test_unescape_header_span),
+        cmocka_unit_test(test_record_legacy_decode),
         cmocka_unit_test(test_forward_encode_split_roundtrip),
         cmocka_unit_test(test_forward_encode_blocks_injection),
         cmocka_unit_test(test_stamp_newer_orders_by_time),

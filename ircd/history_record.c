@@ -38,7 +38,8 @@
 #endif
 
 /** Serialize a message to a buffer.
- * Format: type|sender|account|content
+ * Format: type|sender|account|content (sender and account escaped by
+ * history_escape_header, so a '|' in either cannot shift the fields)
  * @param[out] buf Output buffer.
  * @param[in] bufsize Size of output buffer.
  * @param[in] type Message type.
@@ -74,11 +75,27 @@ static int history_field_needs_escape(unsigned char c)
   return c == HIST_ESC || c == 0x05 || c == 0x06 || c == 0x07;
 }
 
-/** Escape VALUE-field bytes that would otherwise read as structural
- * sentinels.  Writes at most \a dstsize-1 bytes + NUL; returns dst.
- * A field that would overflow the escaped buffer is truncated at a
- * whole escape-sequence boundary (never a dangling \x04). */
-char *history_escape_field(char *dst, size_t dstsize, const char *src)
+/* The header fields (sender, account) are '|'-delimited, and '|' is a
+ * legal nick character (table_gen.c makes {|}~ lowercase letters).
+ * Unescaped, nick "a|admin|b" shifted the fields: replay read sender "a"
+ * and account=admin, with the real header glued onto the text (parsers
+ * fuzz F14).  So the header fields escape '|' too, through the same \x04
+ * scheme ('|' ^ 0x40 = '<').  No format marker is needed: nick, user,
+ * host and account names carry no control bytes, so a legacy header
+ * field holds no \x04 and unescapes to itself.  Value fields leave '|'
+ * raw: content is the last field, and the CH W forward payload stays
+ * byte-identical across mixed-version links. */
+static int history_header_needs_escape(unsigned char c)
+{
+  return c == '|' || history_field_needs_escape(c);
+}
+
+/** Escape the bytes of \a src that \a needs_escape selects.  Writes at
+ * most \a dstsize-1 bytes + NUL; returns dst.  A field that would
+ * overflow the escaped buffer is truncated at a whole escape-sequence
+ * boundary (never a dangling \x04). */
+static char *history_escape_bytes(char *dst, size_t dstsize, const char *src,
+                                  int (*needs_escape)(unsigned char))
 {
   size_t o = 0;
   const unsigned char *p;
@@ -86,7 +103,7 @@ char *history_escape_field(char *dst, size_t dstsize, const char *src)
   if (dstsize == 0)
     return dst;
   for (p = (const unsigned char *)(src ? src : ""); *p; ++p) {
-    if (history_field_needs_escape(*p)) {
+    if (needs_escape(*p)) {
       if (o + 2 >= dstsize)
         break;
       dst[o++] = HIST_ESC;
@@ -99,6 +116,44 @@ char *history_escape_field(char *dst, size_t dstsize, const char *src)
   }
   dst[o] = '\0';
   return dst;
+}
+
+/** Escape VALUE-field bytes that would otherwise read as structural
+ * sentinels.  Writes at most \a dstsize-1 bytes + NUL; returns dst. */
+char *history_escape_field(char *dst, size_t dstsize, const char *src)
+{
+  return history_escape_bytes(dst, dstsize, src, history_field_needs_escape);
+}
+
+/** Escape a header field (sender, account): the value-field set plus
+ * the '|' delimiter.  Writes at most \a dstsize-1 bytes + NUL. */
+static char *history_escape_header(char *dst, size_t dstsize, const char *src)
+{
+  return history_escape_bytes(dst, dstsize, src, history_header_needs_escape);
+}
+
+/** Copy the stored header field \a src[0..len) into \a dst, unescaping
+ * it.  Legacy fields (no \x04) copy through unchanged.
+ * @return Unescaped length, or -1 if it does not fit in \a dstsize. */
+int history_unescape_header(char *dst, size_t dstsize,
+                            const char *src, size_t len)
+{
+  size_t i = 0, o = 0;
+
+  if (dstsize == 0)
+    return -1;
+  while (i < len) {
+    if (o + 1 >= dstsize)
+      return -1;
+    if (src[i] == HIST_ESC && i + 1 < len) {
+      dst[o++] = (char)((unsigned char)src[i + 1] ^ 0x40);
+      i += 2;
+    } else {
+      dst[o++] = src[i++];
+    }
+  }
+  dst[o] = '\0';
+  return (int)o;
 }
 
 /** Reverse history_escape_field in place. */
@@ -213,7 +268,11 @@ int history_serialize_record(char *buf, int bufsize,
   char ot_esc[(CHANNELLEN + 1) * 2 + 1];
   char ct_esc[512 * 2 + 1];
   char content_esc[HISTORY_CONTENT_LEN * 2 + 1];
+  char sender_esc[HISTORY_SENDER_LEN * 2 + 1];
+  char account_esc[(ACCOUNTLEN + 1) * 2 + 1];
 
+  history_escape_header(sender_esc, sizeof(sender_esc), sender);
+  history_escape_header(account_esc, sizeof(account_esc), account);
   history_escape_field(content_esc, sizeof(content_esc), content ? content : "");
   if (original_target && original_target[0]) {
     ot_open = "\x05";
@@ -237,8 +296,8 @@ int history_serialize_record(char *buf, int bufsize,
 
   return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s%s%s%s%s%s%s%s",
                        (int)type,
-                       sender ? sender : "",
-                       account ? account : "",
+                       sender_esc,
+                       account_esc,
                        ot_open, ot_esc, ot_close,
                        ct_open, ct_esc, ct_close,
                        inc_sec,
@@ -305,20 +364,21 @@ static int deserialize_message(const char *data, int datalen,
   msg->type = (enum HistoryMessageType)type;
   p = field + 1;
 
-  /* Parse sender */
+  /* Parse sender (escaped: the stored field may be longer than the
+   * sender it decodes to, so the bound applies after unescaping) */
   field = memchr(p, '|', end - p);
   if (!field || field >= end) goto deser_cleanup;
-  if ((size_t)(field - p) >= sizeof(msg->sender)) goto deser_cleanup;
-  memcpy(msg->sender, p, field - p);
-  msg->sender[field - p] = '\0';
+  if (history_unescape_header(msg->sender, sizeof(msg->sender),
+                              p, field - p) < 0)
+    goto deser_cleanup;
   p = field + 1;
 
-  /* Parse account */
+  /* Parse account (escaped likewise) */
   field = memchr(p, '|', end - p);
   if (!field || field >= end) goto deser_cleanup;
-  if ((size_t)(field - p) >= sizeof(msg->account)) goto deser_cleanup;
-  memcpy(msg->account, p, field - p);
-  msg->account[field - p] = '\0';
+  if (history_unescape_header(msg->account, sizeof(msg->account),
+                              p, field - p) < 0)
+    goto deser_cleanup;
   p = field + 1;
 
   /* Parse content (rest of string), extracting optional sentinel-bracketed
