@@ -1075,7 +1075,7 @@ int bounce_has_sessions(const char *account)
 }
 
 /** Find the best HOLDING session for an account.
- * Selection priority:
+ * Selection priority (bounce_choose_best_held(), the chooser's own step):
  *   1. HOLDING sessions only
  *   2. Same-server preference (local ghost avoids cross-server transfer)
  *   3. Most recent disconnect_time as tiebreaker
@@ -1083,34 +1083,21 @@ int bounce_has_sessions(const char *account)
 struct BouncerSession *bounce_find_best_held(const char *account)
 {
   struct AccountSessions *as = bounce_find_by_account(account);
+  struct BouncerSession *sessions[BOUNCE_CHOOSE_MAX_ROWS];
+  struct bounce_choose_row rows[BOUNCE_CHOOSE_MAX_ROWS];
   struct BouncerSession *sess;
-  struct BouncerSession *best = NULL;
+  int n = 0, best;
 
-  if (!as)
-    return NULL;
-
-  for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
-    if (sess->hs_state != BOUNCE_HOLDING)
-      continue;
-
-    if (!best) {
-      best = sess;
-      continue;
-    }
-
-    /* Prefer local ghost (same server) to avoid cross-server transfer */
-    if (sess->hs_client && MyUser(sess->hs_client) &&
-        !(best->hs_client && MyUser(best->hs_client))) {
-      best = sess;
-      continue;
-    }
-
-    /* Among same locality, prefer most recently disconnected */
-    if (sess->hs_disconnect_time > best->hs_disconnect_time)
-      best = sess;
+  for (sess = as ? as->as_sessions : NULL; sess && n < BOUNCE_CHOOSE_MAX_ROWS;
+       sess = sess->hs_anext) {
+    memset(&rows[n], 0, sizeof(rows[n]));
+    rows[n].held = sess->hs_state == BOUNCE_HOLDING;
+    rows[n].primary_ours = sess->hs_client && MyUser(sess->hs_client);
+    rows[n].disconnect_time = (long)sess->hs_disconnect_time;
+    sessions[n++] = sess;
   }
-
-  return best;
+  best = bounce_choose_best_held(rows, n, 0);
+  return best >= 0 ? sessions[best] : NULL;
 }
 
 /** Check if a bouncer session has any non-TLS connection.
@@ -1337,6 +1324,63 @@ void bounce_session_adopt_kc_id(struct BouncerSession *session, const char *id)
   bounce_emit_session_kc_id(session);
 }
 
+/** Read every session of @a account as the chooser reads it
+ * (bounce_choose(), bouncer_wire.h) for a login of @a cptr, in the
+ * account's list order.  The primary of a session whose slot is not ours
+ * is resolved first from the ghost numeric it records -- the slot is read
+ * first, the (origin, ghost numeric) pair only when it is empty -- and the
+ * Keycloak gate (bounce_kc_join()) reads the session's id after that step.
+ * A session may end only for a login Keycloak itself confirmed
+ * (cli_saslkcidlive), held here with nothing connected.
+ *
+ * @param[in]  cptr     The login (a registering client, or a live one).
+ * @param[in]  account  Its account.
+ * @param[out] sessions The sessions, row for row.
+ * @param[out] rows     The rows.
+ * @param[in]  site     Label for a refused resolve's log line.
+ * @return How many rows were filled (at most BOUNCE_CHOOSE_MAX_ROWS). */
+static int bounce_choose_read(struct Client *cptr, const char *account,
+                              struct BouncerSession **sessions,
+                              struct bounce_choose_row *rows,
+                              const char *site)
+{
+  struct AccountSessions *as = bounce_find_by_account(account);
+  struct BouncerSession *s;
+  int n = 0;
+
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext) {
+    struct bounce_choose_row *r;
+    struct Client *p;
+    int unused;
+
+    if (n >= BOUNCE_CHOOSE_MAX_ROWS) {
+      log_write(LS_USER, L_WARNING, 0, "Bouncer: %s has more than %d sessions "
+                "here; the rest are not read", account, BOUNCE_CHOOSE_MAX_ROWS);
+      break;
+    }
+    if (!s->hs_client || !MyConnect(s->hs_client))
+      bounce_resolve_hs_client_from_ghost(s, site);
+    p = s->hs_client;
+    unused = s->hs_state == BOUNCE_HOLDING && s->hs_alias_count == 0
+             && p && MyConnect(p) && IsBouncerHold(p) && cli_saslkcidlive(cptr);
+    r = &rows[n];
+    memset(r, 0, sizeof(*r));
+    r->kc = bounce_kc_join(bounce_session_kc_id(s),
+                           cli_user(cptr) ? cli_user(cptr)->kc_id : NULL, unused);
+    r->held = s->hs_state == BOUNCE_HOLDING;
+    r->primary = p != NULL;
+    r->primary_ours = p && MyUser(p);
+    r->primary_server = bounce_primary_server(s) != NULL;
+    r->ghost_numeric = s->hs_ghost_numeric[0] != '\0';
+    r->local_holder = session_has_local_holder(s);
+    r->devices = s->hs_alias_count > 0;
+    r->full = s->hs_alias_count >= bounce_max_aliases();
+    r->disconnect_time = (long)s->hs_disconnect_time;
+    sessions[n++] = s;
+  }
+  return n;
+}
+
 /** SASL-triggered automatic resume.
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
@@ -1401,221 +1445,184 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                  and no session exists for this account. */
   }
 
-  /* A session belongs to one Keycloak user (user, 2026-10-23: a new id
-   * never attaches to an old session).  Before any path below attaches
-   * this login -- a held revive, a remote or local alias, an orphan
-   * reclaim -- every session of the account is checked: the previous
-   * user's leftover, held here with nothing connected, ends (as
-   * register_user's revive check ends it); one still in use refuses the
-   * login -- registering beside it would collide, as REJECT_DUPLICATE
-   * notes. */
+  /* Which session this login goes into: the shared chooser
+   * (bounce_choose(), W3 12c-2b design B), which a hold turned on (+b,
+   * BOUNCER SET HOLD on, PERSISTENCE SET ON) reads too, so the two always
+   * agree.  Its order: the Keycloak gate over every session (a session
+   * belongs to one Keycloak user, user 2026-10-23: the previous user's
+   * leftover held here with nothing connected ends; one still in use
+   * refuses the login -- registering beside it would collide, as
+   * REJECT_DUPLICATE notes); the best held session; else the first live
+   * session; a replica nothing reachable holds is dropped.  Each end and
+   * drop changes the list: the sessions are read again after it. */
   {
-    struct AccountSessions *as;
-    struct BouncerSession *s;
+    struct BouncerSession *sessions[BOUNCE_CHOOSE_MAX_ROWS];
+    struct bounce_choose_row rows[BOUNCE_CHOOSE_MAX_ROWS];
+    struct bounce_choice ch;
+    enum bounce_choose_kind kind;
+    int n, i, idx, tls_refused = 0;
 
-  recheck_kc:
-    as = bounce_find_by_account(account);
-    for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext) {
-      struct Client *stale;
-      int unused;
+#ifdef USE_SSL
+    tls_refused = feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl;
+#endif
+  rechoose:
+    n = bounce_choose_read(cptr, account, sessions, rows, "Keycloak-id check");
+    bounce_choose(rows, n, tls_refused, &ch);
 
-      /* The branches below fill in a remote session's primary from its
-       * ghost before attaching; read the id after the same step. */
-      if (!s->hs_client || !MyConnect(s->hs_client))
-        bounce_resolve_hs_client_from_ghost(s, "Keycloak-id check");
-      stale = s->hs_client;
-      /* Ended only by a login Keycloak itself just confirmed: a deleted
-       * user's cached login or still-valid token never ends the current
-       * owner's session (user, 2026-10-23). */
-      unused = s->hs_state == BOUNCE_HOLDING && s->hs_alias_count == 0
-               && stale && MyConnect(stale) && IsBouncerHold(stale)
-               && cli_saslkcidlive(cptr);
+    /* Ended only by a login Keycloak itself just confirmed (the row's
+     * BKJ_END_STALE): a deleted user's cached login or still-valid token
+     * never ends the current owner's session (user, 2026-10-23). */
+    for (i = 0; i < n && ch.end_stale; i++) {
+      struct BouncerSession *s = sessions[i];
+      struct Client *stale = s->hs_client;
 
-      switch (bounce_kc_join(bounce_session_kc_id(s), cli_user(cptr)->kc_id,
-                             unused)) {
-      case BKJ_JOIN:
-        break;
-      case BKJ_END_STALE:
-        log_write(LS_USER, L_INFO, 0,
-                  "Bouncer: ending %s's session %s: it carries Keycloak id %s, "
-                  "the login %s", account, s->hs_sessid, bounce_session_kc_id(s),
-                  cli_user(cptr)->kc_id);
-        bounce_kill_session(s, "Session ended: its Keycloak account was replaced");
-        ClearBouncerHold(stale);
-        exit_client(stale, stale, &me,
-                    "Session ended: its Keycloak account was replaced");
-        goto recheck_kc;   /* the session list changed */
-      case BKJ_REFUSE:
-        log_write(LS_USER, L_INFO, 0,
-                  "Bouncer: refusing %s for %s: session %s carries Keycloak id "
-                  "%s, the login %s", cli_name(cptr), account, s->hs_sessid,
-                  bounce_session_kc_id(s), cli_user(cptr)->kc_id);
-        *out_session = s;
-        return BOUNCE_RESUME_REJECT_KC_CONFLICT;
-      }
+      if (!(ch.end_stale & (1UL << i)))
+        continue;
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: ending %s's session %s: it carries Keycloak id %s, "
+                "the login %s", account, s->hs_sessid, bounce_session_kc_id(s),
+                cli_user(cptr)->kc_id);
+      bounce_kill_session(s, "Session ended: its Keycloak account was replaced");
+      ClearBouncerHold(stale);
+      exit_client(stale, stale, &me,
+                  "Session ended: its Keycloak account was replaced");
+      goto rechoose;   /* the session list changed */
     }
-  }
+    /* Nothing anywhere we can reach holds this record: no local holder,
+     * no client, no ghost numeric to resolve.  It is garbage (a replica
+     * that outlived its holder), and leaving it would block this login
+     * twice over -- no alias path, and the create gate below counts it as
+     * the account's session.  Drop it and look again; a peer that really
+     * holds the session re-announces it and convergence sorts the two out
+     * by state. */
+    for (i = 0; i < n && ch.discard; i++) {
+      if (!(ch.discard & (1UL << i)))
+        continue;
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: discarding unattachable replica %s for %s",
+                sessions[i]->hs_sessid, account);
+      bounce_destroy(sessions[i]);
+      goto rechoose;
+    }
 
-  /* Try to find a held session to resume */
- retry_resume:
-  session = bounce_find_best_held(account);
-  if (session) {
-    /* Per redesign C.2: hs_origin is historical-only.  The runtime
-     * "is the primary on a remote server?" question is answered by
-     * checking whether hs_client (the held ghost or live primary) is
-     * locally connected.  A held ghost made by bounce_create_ghost()
-     * has MyConnect()==TRUE because make_client(NULL,...) allocates a
-     * Connection; so this branch fires only when the session has no
-     * local Client* at all (hs_client NULL or its MyConnect is false). */
-    if (!session->hs_client || !MyConnect(session->hs_client)) {
-      struct Client *managing_server;
-      /* Resolve ghost from numeric if hs_client is NULL (e.g., BS D
-       * arrived before ghost numeric was resolvable) — see
-       * bounce_resolve_hs_client_from_ghost for the composition-risk
-       * audit note. */
-      bounce_resolve_hs_client_from_ghost(session, "HELD resume");
+    kind = ch.kind;
+    idx = ch.index;
+    session = idx >= 0 ? sessions[idx] : NULL;
+    switch (kind) {
+    case BOUNCE_CHOOSE_KC_REFUSE:
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: refusing %s for %s: session %s carries Keycloak id "
+                "%s, the login %s", cli_name(cptr), account, session->hs_sessid,
+                bounce_session_kc_id(session), cli_user(cptr)->kc_id);
+      *out_session = session;
+      return BOUNCE_RESUME_REJECT_KC_CONFLICT;
+
+    case BOUNCE_CHOOSE_HELD_REMOTE:
       /* The server holding the session is its primary's: the origin the
        * record noted goes stale (a rebind keeps it, a merge moves it). */
-      managing_server = bounce_primary_server(session);
-      if (managing_server && session->hs_client
-          && session->hs_alias_count < bounce_max_aliases()) {
-        *out_session = session;
-        log_write(LS_USER, L_INFO, 0,
-                  "Bouncer: HELD alias_remote path for %s session %s (primary on %s)",
-                  account, session->hs_sessid, cli_name(managing_server));
-        return BOUNCE_RESUME_ALIAS_REMOTE;
-      }
-      log_write(LS_USER, L_INFO, 0,
-                "Bouncer: HELD remote alias unavailable for %s session %s "
-                "(managing_server=%p hs_client=%p alias_count=%u)",
-                account, session->hs_sessid, (void*)managing_server,
-                (void*)session->hs_client, session->hs_alias_count);
-      /* Nothing anywhere we can reach holds this record: no local
-       * holder, no client, no ghost numeric to resolve.  It is garbage
-       * (a replica that outlived its holder), and leaving it would
-       * block this login twice over -- no alias path, and the create
-       * gate below counts it as the account's session.  Drop it and
-       * look again; a peer that really holds the session re-announces
-       * it and convergence sorts the two out by state. */
-      if (!session_has_local_holder(session) && !session->hs_client
-          && !session->hs_ghost_numeric[0]
-          && session->hs_alias_count == 0) {
-        log_write(LS_USER, L_INFO, 0,
-                  "Bouncer: discarding unattachable replica %s for %s",
-                  session->hs_sessid, account);
-        bounce_destroy(session);
-        goto retry_resume;
-      }
-      /* Alias not possible — fall through to try other sessions */
-    } else {
-    /* Local session — proceed with normal resume */
-    char original_nick[NICKLEN + 1];
-
-    /* Save original nick in case we need to swap */
-    ircd_strncpy(original_nick, cli_name(cptr), NICKLEN + 1);
-
-    /* If the ghost has a different nick, swap to it before network introduction */
-    if (session->hs_client &&
-        ircd_strcmp(cli_name(cptr), cli_name(session->hs_client)) != 0) {
-      /* Adopt ghost's nick — must update hash table BEFORE changing cli_name,
-       * since hChangeClient uses the current cli_name to remove from the
-       * old hash bucket.  Without this, the client stays in the hash table
-       * under its original nick while cli_name holds the ghost's nick,
-       * causing hRemClient to fail when the ghost is later exit'd. */
-      hChangeClient(cptr, cli_name(session->hs_client));
-      ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN + 1);
-    }
-
-    /* Adopt ghost's nick timestamp so we win nick collisions.
-     *
-     * Note: This code path is only used for cross-server resume (ghost on
-     * remote server) or when socket transplant fails. For local ghosts,
-     * register_user() uses bounce_revive() for seamless socket transplant.
-     *
-     * With same user@host, older timestamp wins — without this, the ghost
-     * (with original session timestamp) beats the new client (with fresh
-     * connection timestamp), causing the new client to be killed and
-     * channel memberships to be lost.
-     *
-     * Use ghost's timestamp if available, otherwise use session creation time
-     * (for cross-server resume where ghost is on a remote server). */
-    if (session->hs_client) {
-      cli_lastnick(cptr) = cli_lastnick(session->hs_client);
-    } else {
-      cli_lastnick(cptr) = session->hs_created;
-    }
-
-    /* Compute the replay "since" time from the ghost's idle time.
-     * Messages arriving after the user's last activity may not have been
-     * read, even if they were delivered to the connected client.
-     * Fall back to disconnect time if idle time is unavailable. */
-    if (out_since_time) {
-      time_t idle = 0;
-      if (session->hs_client && cli_user(session->hs_client))
-        idle = cli_user(session->hs_client)->last;
-      *out_since_time = (idle > 0) ? idle : session->hs_disconnect_time;
-    }
-
-    /* Attach to the session — transfers channels, exits ghost */
-    if (bounce_attach(session, cptr) == 0) {
-      /* Notify client of nick change if it happened */
-      if (ircd_strcmp(original_nick, cli_name(cptr)) != 0) {
-        sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
-      }
-
-      bounce_broadcast(session, 'A', cli_yxx(cptr));
       *out_session = session;
-      return 1;
-    }
-    } /* end else (local session) */
-  }
-
-  /* Check for ACTIVE session — either orphaned (reclaim as primary) or
-   * with an existing primary (attach as alias connection).
-   * An orphaned session is ACTIVE but has no primary (hs_client == NULL).
-   * This can happen after server restart or when primary exits before
-   * aliases and the session persists.  These sessions count toward the
-   * per-account limit, so we must reclaim them rather than creating new ones. */
-  session = bounce_find_any_session(account);
-  if (session && session->hs_state == BOUNCE_ACTIVE) {
-    log_write(LS_USER, L_INFO, 0,
-              "Bouncer: ACTIVE session %s found for %s "
-              "(origin=%s me=%s hs_client=%p alias_count=%u)",
-              session->hs_sessid, account, session->hs_origin,
-              cli_yxx(&me), (void*)session->hs_client,
-              session->hs_alias_count);
-    /* Per redesign C.2: hs_origin is historical-only.  Use runtime
-     * Client locality — primary is "remote" iff hs_client lives on
-     * another server (or is NULL). */
-    if (!session->hs_client || !MyConnect(session->hs_client)) {
-      struct Client *managing_server;
-      /* Same recovery the HELD branch does.  Without it an ACTIVE session
-       * whose hs_client went NULL (primary's server SQUIT+relink, collision
-       * kill, or a refused BS A install) fell straight through to the
-       * orphan-reclaim below and made this connection a SECOND primary for a
-       * session that still has one elsewhere — the identical failure shape as
-       * the pre-e9b3b34 attach bug, reached by a different route. */
-      bounce_resolve_hs_client_from_ghost(session, "ACTIVE resume");
-      /* Where the primary is, as in the HELD branch.  A stale origin
-       * naming a server no longer linked sent a session with a live
-       * remote primary down the local-alias path below. */
-      managing_server = bounce_primary_server(session);
-      if (managing_server && session->hs_client
-          && session->hs_alias_count < bounce_max_aliases()) {
-        *out_session = session;
-        log_write(LS_USER, L_INFO, 0,
-                  "Bouncer: ACTIVE alias_remote path for %s session %s (primary on %s)",
-                  account, session->hs_sessid, cli_name(managing_server));
-        return BOUNCE_RESUME_ALIAS_REMOTE;
-      }
       log_write(LS_USER, L_INFO, 0,
-                "Bouncer: ACTIVE remote alias unavailable for %s "
-                "(managing_server=%p hs_client=%p alias_count=%u)",
-                account, (void*)managing_server,
-                (void*)session->hs_client, session->hs_alias_count);
+                "Bouncer: HELD alias_remote path for %s session %s (primary on %s)",
+                account, session->hs_sessid,
+                cli_name(bounce_primary_server(session)));
+      return BOUNCE_RESUME_ALIAS_REMOTE;
+
+    case BOUNCE_CHOOSE_HELD_LOCAL: {
+      /* Local session — proceed with normal resume */
+      char original_nick[NICKLEN + 1];
+
+      /* Save original nick in case we need to swap */
+      ircd_strncpy(original_nick, cli_name(cptr), NICKLEN + 1);
+
+      /* If the ghost has a different nick, swap to it before network introduction */
+      if (session->hs_client &&
+          ircd_strcmp(cli_name(cptr), cli_name(session->hs_client)) != 0) {
+        /* Adopt ghost's nick — must update hash table BEFORE changing cli_name,
+         * since hChangeClient uses the current cli_name to remove from the
+         * old hash bucket.  Without this, the client stays in the hash table
+         * under its original nick while cli_name holds the ghost's nick,
+         * causing hRemClient to fail when the ghost is later exit'd. */
+        hChangeClient(cptr, cli_name(session->hs_client));
+        ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN + 1);
+      }
+
+      /* Adopt ghost's nick timestamp so we win nick collisions.
+       *
+       * Note: This code path is only used for cross-server resume (ghost on
+       * remote server) or when socket transplant fails. For local ghosts,
+       * register_user() uses bounce_revive() for seamless socket transplant.
+       *
+       * With same user@host, older timestamp wins — without this, the ghost
+       * (with original session timestamp) beats the new client (with fresh
+       * connection timestamp), causing the new client to be killed and
+       * channel memberships to be lost.
+       *
+       * Use ghost's timestamp if available, otherwise use session creation time
+       * (for cross-server resume where ghost is on a remote server). */
+      if (session->hs_client) {
+        cli_lastnick(cptr) = cli_lastnick(session->hs_client);
+      } else {
+        cli_lastnick(cptr) = session->hs_created;
+      }
+
+      /* Compute the replay "since" time from the ghost's idle time.
+       * Messages arriving after the user's last activity may not have been
+       * read, even if they were delivered to the connected client.
+       * Fall back to disconnect time if idle time is unavailable. */
+      if (out_since_time) {
+        time_t idle = 0;
+        if (session->hs_client && cli_user(session->hs_client))
+          idle = cli_user(session->hs_client)->last;
+        *out_since_time = (idle > 0) ? idle : session->hs_disconnect_time;
+      }
+
+      /* Attach to the session — transfers channels, exits ghost */
+      if (bounce_attach(session, cptr) == 0) {
+        /* Notify client of nick change if it happened */
+        if (ircd_strcmp(original_nick, cli_name(cptr)) != 0) {
+          sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
+        }
+
+        bounce_broadcast(session, 'A', cli_yxx(cptr));
+        *out_session = session;
+        return 1;
+      }
+      /* The revive failed: the live-session check decides. */
+      kind = ch.active_kind;
+      idx = ch.active_index;
+      session = idx >= 0 ? sessions[idx] : NULL;
+      break;
     }
-    if (!session->hs_client) {
-      /* Orphaned ACTIVE session — reclaim as primary */
+    default:
+      break;
+    }
+
+    /* The live-session check: the first session of the account.  Per
+     * redesign C.2 hs_origin is historical-only: the primary is "remote"
+     * iff hs_client lives on another server (or is NULL); the chooser read
+     * the slot first, and resolved an empty one from its ghost numeric. */
+    if (session && session->hs_state == BOUNCE_ACTIVE)
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: ACTIVE session %s found for %s "
+                "(origin=%s me=%s hs_client=%p alias_count=%u)",
+                session->hs_sessid, account, session->hs_origin,
+                cli_yxx(&me), (void*)session->hs_client,
+                session->hs_alias_count);
+    switch (kind) {
+    case BOUNCE_CHOOSE_ACTIVE_REMOTE:
+      *out_session = session;
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: ACTIVE alias_remote path for %s session %s (primary on %s)",
+                account, session->hs_sessid,
+                cli_name(bounce_primary_server(session)));
+      return BOUNCE_RESUME_ALIAS_REMOTE;
+
+    case BOUNCE_CHOOSE_ORPHAN:
+      /* Orphaned ACTIVE session -- reclaim as primary.  An orphaned
+       * session is ACTIVE but has no primary (hs_client == NULL): after a
+       * server restart, or when the primary exits before its aliases and
+       * the session persists.  It counts toward the per-account limit, so
+       * it is reclaimed rather than a new one made. */
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: reclaiming orphaned ACTIVE session %s for %s",
                 session->hs_sessid, cli_name(cptr));
@@ -1627,30 +1634,26 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: orphan reclaim (bounce_attach) FAILED for %s session %s",
                 account, session->hs_sessid);
-    } else {
-      /* ACTIVE session with primary — attach as alias connection */
-      if (session->hs_alias_count < bounce_max_aliases()) {
-#ifdef USE_SSL
-        /* Respect BOUNCER_REQUIRE_TLS for aliases too */
-        if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
-          log_write(LS_USER, L_INFO, 0,
-                    "Bouncer: skipping alias for plaintext client of %s (REQUIRE_TLS)",
-                    account);
-        } else
-#endif
-        {
-          log_write(LS_USER, L_INFO, 0,
-                    "Bouncer: ACTIVE alias_local path for %s session %s",
-                    account, session->hs_sessid);
-          *out_session = session;
-          return BOUNCE_RESUME_ALIAS_LOCAL;
-        }
-      }
+      return 0;
+
+    case BOUNCE_CHOOSE_ACTIVE_ALIAS:
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: ACTIVE alias_local path for %s session %s",
+                account, session->hs_sessid);
+      *out_session = session;
+      return BOUNCE_RESUME_ALIAS_LOCAL;
+
+    case BOUNCE_CHOOSE_TLS:
+    case BOUNCE_CHOOSE_FULL:
       /* ACTIVE session with live primary but no alias slot available
        * (max reached, or TLS policy).  Letting this connection proceed
        * to register_user's NICK N broadcast would collide with the
        * primary (same user@host) on any upstream hub that already has
        * the primary.  Reject instead. */
+      if (kind == BOUNCE_CHOOSE_TLS)
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: skipping alias for plaintext client of %s (REQUIRE_TLS)",
+                  account);
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: REJECT_DUPLICATE for %s session %s "
                 "(alias_count=%u)",
@@ -1658,13 +1661,19 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                 session->hs_alias_count);
       *out_session = session;
       return BOUNCE_RESUME_REJECT_DUPLICATE;
+
+    case BOUNCE_CHOOSE_NONE:
+      break;
+
+    default:
+      /* Sessions are left and none of them can take this login: it
+       * registers on its own. */
+      return 0;
     }
   }
 
-  /* No held session — auto-create only if account has NO sessions at all.
-   * If sessions already exist (all ACTIVE), this is just a second connection
-   * to the same account — don't create a duplicate session. */
-  if (bounce_count(account) == 0) {
+  /* No session left: auto-create one. */
+  {
     /* Steady-state BS C race guard: if a link that can carry a BS C (an
      * IRCv3-aware one; see bounce_peer_has_inbound_data) has unread
      * inbound bytes, the in-flight data might carry a BS C announcing the

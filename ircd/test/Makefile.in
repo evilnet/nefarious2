@@ -435,7 +435,8 @@ bouncer_converge_cmocka: $(BOUNCER_CONVERGE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_CONVERGE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # bouncer_wire tests - the module is pure (no ircd deps)
-bouncer_wire_test.o: ../bouncer_wire.c ../../include/bouncer_wire.h
+bouncer_wire_test.o: ../bouncer_wire.c ../../include/bouncer_wire.h \
+		../../include/bouncer_rebind_auth.h
 	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_wire.c
 
 BOUNCER_WIRE_CMOCKA_OBJS = bouncer_wire_cmocka.o bouncer_wire_test.o

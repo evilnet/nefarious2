@@ -1980,9 +1980,293 @@ static void swap_membership_matrix(void **s)
 
 #undef RT
 
+/* ---------------------------------------------------------------- */
+/* W3 12c-2b: the chooser a registration and a hold turned on share  */
+/* ---------------------------------------------------------------- */
+
+/* A live session whose primary is ours, with room. */
+static struct bounce_choose_row live_ours(void)
+{
+  struct bounce_choose_row r;
+  memset(&r, 0, sizeof r);
+  r.kc = BKJ_JOIN;
+  r.primary = r.primary_ours = r.primary_server = 1;
+  r.ghost_numeric = r.local_holder = 1;
+  return r;
+}
+
+/* A live session whose primary is on another server, with room. */
+static struct bounce_choose_row live_remote(void)
+{
+  struct bounce_choose_row r;
+  memset(&r, 0, sizeof r);
+  r.kc = BKJ_JOIN;
+  r.primary = r.primary_server = r.ghost_numeric = 1;
+  return r;
+}
+
+/* A session held by our own ghost. */
+static struct bounce_choose_row held_ours(long t)
+{
+  struct bounce_choose_row r = live_ours();
+  r.held = 1;
+  r.disconnect_time = t;
+  return r;
+}
+
+/* A session held on another server, its primary found, with room. */
+static struct bounce_choose_row held_remote(long t)
+{
+  struct bounce_choose_row r = live_remote();
+  r.held = 1;
+  r.disconnect_time = t;
+  return r;
+}
+
+/* A held replica nothing reachable holds. */
+static struct bounce_choose_row held_garbage(long t)
+{
+  struct bounce_choose_row r;
+  memset(&r, 0, sizeof r);
+  r.kc = BKJ_JOIN;
+  r.held = 1;
+  r.disconnect_time = t;
+  return r;
+}
+
+static void choose_no_session_is_none(void **s)
+{
+  struct bounce_choice c;
+  (void)s;
+  bounce_choose(NULL, 0, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_NONE);
+  assert_int_equal(c.index, -1);
+  assert_int_equal(c.end_stale, 0);
+  assert_int_equal(c.discard, 0);
+}
+
+static void choose_another_keycloak_user_in_use_refuses(void **s)
+{
+  struct bounce_choose_row r[3];
+  struct bounce_choice c;
+  (void)s;
+  /* The previous user's leftover first, then a session of another id in
+   * use, then one the login could join: the refusal wins, and the
+   * leftover before it is still ended (a registration ends it). */
+  r[0] = held_ours(5);
+  r[0].kc = BKJ_END_STALE;
+  r[1] = live_remote();
+  r[1].kc = BKJ_REFUSE;
+  r[2] = live_ours();
+  bounce_choose(r, 3, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_KC_REFUSE);
+  assert_int_equal(c.index, 1);
+  assert_int_equal(c.end_stale, 1UL << 0);
+}
+
+static void choose_ends_the_leftover_then_reads_the_rest(void **s)
+{
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = held_ours(9);
+  r[0].kc = BKJ_END_STALE;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_NONE);
+  assert_int_equal(c.end_stale, 1UL << 0);
+  /* With a session of the login's own id after it, that one is joined. */
+  r[1] = live_ours();
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ACTIVE_ALIAS);
+  assert_int_equal(c.index, 1);
+  assert_int_equal(c.end_stale, 1UL << 0);
+}
+
+static void choose_our_held_ghost(void **s)
+{
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  /* Another server's held session first, ours second: ours is taken. */
+  r[0] = held_remote(10);
+  r[1] = held_ours(5);
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_LOCAL);
+  assert_int_equal(c.index, 1);
+}
+
+static void choose_best_held_keeps_its_order(void **s)
+{
+  struct bounce_choose_row r[2];
+  (void)s;
+  /* bounce_find_best_held()'s order, which the registration has always
+   * used: ours first in the list, a later remote one that dropped more
+   * recently replaces it. */
+  r[0] = held_ours(5);
+  r[1] = held_remote(10);
+  assert_int_equal(bounce_choose_best_held(r, 2, 0), 1);
+  r[1].disconnect_time = 4;
+  assert_int_equal(bounce_choose_best_held(r, 2, 0), 0);
+  /* Skipped rows and live rows are no candidates. */
+  assert_int_equal(bounce_choose_best_held(r, 2, 1UL << 0), 1);
+  r[1].held = 0;
+  assert_int_equal(bounce_choose_best_held(r, 2, 1UL << 0), -1);
+  assert_int_equal(bounce_choose_best_held(r, 0, 0), -1);
+}
+
+static void choose_held_on_another_server(void **s)
+{
+  struct bounce_choose_row r[1];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = held_remote(3);
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_REMOTE);
+  assert_int_equal(c.index, 0);
+  /* A plaintext login under REQUIRE_TLS: the registration's remote paths
+   * never read the TLS rule (the planner does). */
+  bounce_choose(r, 1, 1, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_REMOTE);
+}
+
+static void choose_passes_over_a_full_held_session(void **s)
+{
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = held_remote(3);
+  r[0].full = r[0].devices = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_UNREACHABLE);
+  assert_int_equal(c.index, -1);
+  assert_true(c.held_full);
+  /* The first session left is what the live-session check reads: held,
+   * so nothing is found even with a live session after it. */
+  r[1] = live_ours();
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_UNREACHABLE);
+  /* A held session whose primary cannot be found is passed over too, and
+   * not for want of room. */
+  r[0] = held_remote(3);
+  r[0].primary = r[0].primary_server = 0;
+  r[0].devices = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_UNREACHABLE);
+  assert_false(c.held_full);
+}
+
+static void choose_drops_garbage_and_looks_again(void **s)
+{
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = held_garbage(10);
+  r[1] = held_remote(5);
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_REMOTE);
+  assert_int_equal(c.index, 1);
+  assert_int_equal(c.discard, 1UL << 0);
+  /* Garbage alone: nothing is left, so the account has no session. */
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_NONE);
+  assert_int_equal(c.discard, 1UL << 0);
+  /* Not garbage: a holder here, a ghost numeric, or devices. */
+  r[0].local_holder = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_UNREACHABLE);
+  assert_int_equal(c.discard, 0);
+}
+
+static void choose_live_sessions(void **s)
+{
+  struct bounce_choose_row r[1];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = live_remote();
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ACTIVE_REMOTE);
+  r[0] = live_ours();
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ACTIVE_ALIAS);
+  assert_int_equal(c.index, 0);
+  bounce_choose(r, 1, 1, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_TLS);
+  r[0].full = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FULL);
+  /* Full wins over TLS, as the registration checked them. */
+  bounce_choose(r, 1, 1, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FULL);
+  /* A remote primary with no room is no remote attach: full. */
+  r[0] = live_remote();
+  r[0].full = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FULL);
+  /* No primary found at all. */
+  r[0] = live_remote();
+  r[0].primary = r[0].primary_server = 0;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ORPHAN);
+  assert_int_equal(c.index, 0);
+}
+
+static void choose_keeps_the_live_verdict_for_a_failed_revive(void **s)
+{
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = live_ours();
+  r[1] = held_ours(4);
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_LOCAL);
+  assert_int_equal(c.index, 1);
+  assert_int_equal(c.active_kind, BOUNCE_CHOOSE_ACTIVE_ALIAS);
+  assert_int_equal(c.active_index, 0);
+}
+
+static void registration_routes(void **s)
+{
+  struct bounce_choice c;
+  (void)s;
+  memset(&c, 0, sizeof c);
+  c.kind = BOUNCE_CHOOSE_NONE;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_CREATE);
+  c.kind = BOUNCE_CHOOSE_KC_REFUSE;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_REJECT_KC);
+  c.kind = BOUNCE_CHOOSE_HELD_LOCAL;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_REVIVE);
+  c.kind = BOUNCE_CHOOSE_HELD_REMOTE;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_ALIAS_REMOTE);
+  c.kind = BOUNCE_CHOOSE_ACTIVE_REMOTE;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_ALIAS_REMOTE);
+  c.kind = BOUNCE_CHOOSE_ACTIVE_ALIAS;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_ALIAS_LOCAL);
+  c.kind = BOUNCE_CHOOSE_ORPHAN;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_RECLAIM);
+  c.kind = BOUNCE_CHOOSE_FULL;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_REJECT_DUPLICATE);
+  c.kind = BOUNCE_CHOOSE_TLS;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_REJECT_DUPLICATE);
+  c.kind = BOUNCE_CHOOSE_UNREACHABLE;
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_PLAIN);
+  assert_int_equal(bounce_resume_route(NULL), BOUNCE_ROUTE_PLAIN);
+}
+
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(choose_no_session_is_none),
+    cmocka_unit_test(choose_another_keycloak_user_in_use_refuses),
+    cmocka_unit_test(choose_ends_the_leftover_then_reads_the_rest),
+    cmocka_unit_test(choose_our_held_ghost),
+    cmocka_unit_test(choose_best_held_keeps_its_order),
+    cmocka_unit_test(choose_held_on_another_server),
+    cmocka_unit_test(choose_passes_over_a_full_held_session),
+    cmocka_unit_test(choose_drops_garbage_and_looks_again),
+    cmocka_unit_test(choose_live_sessions),
+    cmocka_unit_test(choose_keeps_the_live_verdict_for_a_failed_revive),
+    cmocka_unit_test(registration_routes),
     cmocka_unit_test(swap_survivor_takes_the_faces_channel),
     cmocka_unit_test(reconcile_demote_converts_nothing),
     cmocka_unit_test(swap_skips_what_no_server_holds_as_the_sessions),

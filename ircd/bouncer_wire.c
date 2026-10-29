@@ -536,3 +536,162 @@ bounce_swap_membership(const struct bounce_swap_facts *f)
     return BOUNCE_SWAP_KICK;
   return BOUNCE_SWAP_TAKE;
 }
+
+/* ---------------------------------------------------------------- */
+/* W3 12c-2b: the chooser                                           */
+/* ---------------------------------------------------------------- */
+
+int bounce_choose_best_held(const struct bounce_choose_row *rows, int n,
+                            unsigned long skip)
+{
+  int i, best = -1;
+
+  if (!rows)
+    return -1;
+  if (n > BOUNCE_CHOOSE_MAX_ROWS)
+    n = BOUNCE_CHOOSE_MAX_ROWS;
+  for (i = 0; i < n; i++) {
+    if (!rows[i].held || (skip & (1UL << i)))
+      continue;
+    if (best < 0) {
+      best = i;
+      continue;
+    }
+    /* Ours first: a local ghost avoids a cross-server transfer. */
+    if (rows[i].primary_ours && !rows[best].primary_ours) {
+      best = i;
+      continue;
+    }
+    /* Then the most recent disconnect (bounce_find_best_held()'s test,
+     * which reads no locality here). */
+    if (rows[i].disconnect_time > rows[best].disconnect_time)
+      best = i;
+  }
+  return best;
+}
+
+/** A held replica nothing reachable holds: no holder here, no primary,
+ * no ghost numeric, no devices. */
+static int choose_garbage(const struct bounce_choose_row *r)
+{
+  return !r->local_holder && !r->primary && !r->ghost_numeric && !r->devices;
+}
+
+/** The live-session check: the first session left in list order. */
+static void choose_live(const struct bounce_choose_row *rows, int n,
+                        unsigned long gone, int tls_refused,
+                        enum bounce_choose_kind *kind, int *index)
+{
+  const struct bounce_choose_row *r;
+  int i;
+
+  *index = -1;
+  for (i = 0; i < n && (gone & (1UL << i)); i++)
+    ;
+  if (i >= n) {
+    *kind = BOUNCE_CHOOSE_NONE;
+    return;
+  }
+  r = &rows[i];
+  if (r->held) {
+    *kind = BOUNCE_CHOOSE_UNREACHABLE;
+    return;
+  }
+  *index = i;
+  if (!r->primary_ours && r->primary_server && r->primary && !r->full)
+    *kind = BOUNCE_CHOOSE_ACTIVE_REMOTE;
+  else if (!r->primary)
+    *kind = BOUNCE_CHOOSE_ORPHAN;
+  else if (r->full)
+    *kind = BOUNCE_CHOOSE_FULL;
+  else if (tls_refused)
+    *kind = BOUNCE_CHOOSE_TLS;
+  else
+    *kind = BOUNCE_CHOOSE_ACTIVE_ALIAS;
+}
+
+void bounce_choose(const struct bounce_choose_row *rows, int n,
+                   int tls_refused, struct bounce_choice *out)
+{
+  unsigned long gone;
+  int i;
+
+  out->kind = BOUNCE_CHOOSE_NONE;
+  out->index = -1;
+  out->end_stale = 0;
+  out->discard = 0;
+  out->held_full = 0;
+  out->active_kind = BOUNCE_CHOOSE_NONE;
+  out->active_index = -1;
+  if (!rows || n <= 0)
+    return;
+  if (n > BOUNCE_CHOOSE_MAX_ROWS)
+    n = BOUNCE_CHOOSE_MAX_ROWS;
+
+  /* 1. The Keycloak gate over every session, in order (#16). */
+  for (i = 0; i < n; i++) {
+    if (rows[i].kc == BKJ_END_STALE)
+      out->end_stale |= 1UL << i;
+    else if (rows[i].kc == BKJ_REFUSE) {
+      out->kind = BOUNCE_CHOOSE_KC_REFUSE;
+      out->index = i;
+      return;
+    }
+  }
+  gone = out->end_stale;
+
+  /* 2. The best held session; garbage is dropped and the next taken. */
+  for (;;) {
+    const struct bounce_choose_row *r;
+    int best = bounce_choose_best_held(rows, n, gone);
+
+    if (best < 0)
+      break;
+    r = &rows[best];
+    if (r->primary_ours) {
+      out->kind = BOUNCE_CHOOSE_HELD_LOCAL;
+      out->index = best;
+      break;
+    }
+    if (r->primary_server && r->primary && !r->full) {
+      out->kind = BOUNCE_CHOOSE_HELD_REMOTE;
+      out->index = best;
+      break;
+    }
+    if (choose_garbage(r)) {
+      out->discard |= 1UL << best;
+      gone |= 1UL << best;
+      continue;
+    }
+    /* Passed over: the live-session check decides. */
+    out->held_full = r->primary && r->full;
+    break;
+  }
+
+  /* 3. The live-session check (also what a failed revive falls back to). */
+  choose_live(rows, n, gone, tls_refused, &out->active_kind,
+              &out->active_index);
+  if (out->index < 0) {
+    out->kind = out->active_kind;
+    out->index = out->active_index;
+  }
+}
+
+enum bounce_resume_route bounce_resume_route(const struct bounce_choice *c)
+{
+  if (!c)
+    return BOUNCE_ROUTE_PLAIN;
+  switch (c->kind) {
+  case BOUNCE_CHOOSE_NONE:          return BOUNCE_ROUTE_CREATE;
+  case BOUNCE_CHOOSE_KC_REFUSE:     return BOUNCE_ROUTE_REJECT_KC;
+  case BOUNCE_CHOOSE_HELD_LOCAL:    return BOUNCE_ROUTE_REVIVE;
+  case BOUNCE_CHOOSE_HELD_REMOTE:   return BOUNCE_ROUTE_ALIAS_REMOTE;
+  case BOUNCE_CHOOSE_ACTIVE_REMOTE: return BOUNCE_ROUTE_ALIAS_REMOTE;
+  case BOUNCE_CHOOSE_ACTIVE_ALIAS:  return BOUNCE_ROUTE_ALIAS_LOCAL;
+  case BOUNCE_CHOOSE_ORPHAN:        return BOUNCE_ROUTE_RECLAIM;
+  case BOUNCE_CHOOSE_FULL:
+  case BOUNCE_CHOOSE_TLS:           return BOUNCE_ROUTE_REJECT_DUPLICATE;
+  case BOUNCE_CHOOSE_UNREACHABLE:   break;
+  }
+  return BOUNCE_ROUTE_PLAIN;
+}

@@ -12,6 +12,8 @@
 #ifndef INCLUDED_bouncer_wire_h
 #define INCLUDED_bouncer_wire_h
 
+#include "bouncer_rebind_auth.h"   /* enum BounceKcJoin (pure) */
+
 /** May a direct server link know a face as a user it learned by N from
  * us?
  *
@@ -1195,5 +1197,140 @@ struct bounce_swap_facts {
  */
 extern enum bounce_swap_member
 bounce_swap_membership(const struct bounce_swap_facts *f);
+
+/* ---------------------------------------------------------------- */
+/* Which session a client of the account goes into (W3 12c-2b)      */
+/* ---------------------------------------------------------------- */
+
+/** One session of the account, as the chooser reads it
+ * (bounce_choose()).  Each flag is 0 or 1; the caller fills a row per
+ * session of the account, in the account's list order, after it has
+ * resolved the primary of every session whose slot is empty from the
+ * ghost numeric it records. */
+struct bounce_choose_row {
+  enum BounceKcJoin kc;  /**< bounce_kc_join() for this login and session */
+  int held;              /**< the session is HOLDING (else ACTIVE) */
+  int primary;           /**< its primary slot holds a client */
+  int primary_ours;      /**< that client is a connection of this server
+                          *   (a live primary, or a held ghost) */
+  int primary_server;    /**< that client is a user whose server is known
+                          *   (bounce_primary_server()) */
+  int ghost_numeric;     /**< the record keeps a ghost numeric */
+  int local_holder;      /**< this server holds it (a client of ours is in
+                          *   it: session_has_local_holder()) */
+  int devices;           /**< it lists devices (an alias roster) */
+  int full;              /**< its roster is at the alias limit */
+  long disconnect_time;  /**< when its primary last dropped (held) */
+};
+
+/** What the chooser found for a login of the account (bounce_choose()). */
+enum bounce_choose_kind {
+  BOUNCE_CHOOSE_NONE,          /**< the account has no session left */
+  BOUNCE_CHOOSE_KC_REFUSE,     /**< a session of another Keycloak user is
+                                *   in use (index) */
+  BOUNCE_CHOOSE_HELD_LOCAL,    /**< our own held ghost's session (index) */
+  BOUNCE_CHOOSE_HELD_REMOTE,   /**< a session held on another server, with
+                                *   room for a device (index) */
+  BOUNCE_CHOOSE_ACTIVE_REMOTE, /**< a live session whose primary is on
+                                *   another server, with room (index) */
+  BOUNCE_CHOOSE_ACTIVE_ALIAS,  /**< a live session with a primary and room:
+                                *   attach as its alias (index) */
+  BOUNCE_CHOOSE_ORPHAN,        /**< a live session with no primary to be
+                                *   found (index) */
+  BOUNCE_CHOOSE_FULL,          /**< a live session with a primary and no
+                                *   room (index) */
+  BOUNCE_CHOOSE_TLS,           /**< a live session with a primary and room,
+                                *   for a plaintext login while
+                                *   BOUNCER_REQUIRE_TLS is set (index) */
+  BOUNCE_CHOOSE_UNREACHABLE    /**< sessions are left, none can be joined
+                                *   by these rules */
+};
+
+/** The most sessions of one account the chooser reads (one bit each in
+ * struct bounce_choice's masks). */
+#define BOUNCE_CHOOSE_MAX_ROWS 32
+
+/** The chooser's answer (bounce_choose()). */
+struct bounce_choice {
+  enum bounce_choose_kind kind;  /**< what was found */
+  int index;                     /**< its row, or -1 */
+  unsigned long end_stale;       /**< rows to end first: the previous
+                                  *   Keycloak user's leftovers (a bit
+                                  *   each) */
+  unsigned long discard;         /**< rows to drop first: replicas nothing
+                                  *   reachable holds (a bit each) */
+  int held_full;                 /**< a held session on another server was
+                                  *   passed over for want of room */
+  enum bounce_choose_kind active_kind; /**< the live-session verdict alone:
+                                        *   what a held revive that fails
+                                        *   falls back to */
+  int active_index;              /**< its row, or -1 */
+};
+
+/** Which session a login of the account goes into, in the order a fresh
+ * registration has always used (bounce_auto_resume()): the one rule the
+ * registration and a hold turned on (+b) share, so the two always agree
+ * (W3 12c-2b, design B).
+ *
+ *  1. The Keycloak gate over every session, in order (#16): a session of
+ *     another Keycloak user still in use refuses the login (KC_REFUSE);
+ *     the previous user's leftover held here with nothing connected is
+ *     ended first (end_stale) and is no candidate.
+ *  2. The best held session (bounce_find_best_held()'s order: ours
+ *     first, then the latest disconnect): our own held ghost's
+ *     (HELD_LOCAL); another server's with a primary found and room for a
+ *     device (HELD_REMOTE).  One nothing reachable holds -- no holder
+ *     here, no primary, no ghost numeric, no devices -- is garbage: it is
+ *     dropped (discard) and the next best one is taken.  Any other is
+ *     passed over (held_full when it had no room).
+ *  3. Otherwise the first live session left in list order: a primary on
+ *     another server with room (ACTIVE_REMOTE); no primary (ORPHAN); a
+ *     primary and room (ACTIVE_ALIAS), or TLS for a plaintext login
+ *     under BOUNCER_REQUIRE_TLS; a primary and no room (FULL).
+ *  4. No session left: NONE.  Sessions left, none of the above:
+ *     UNREACHABLE.
+ *
+ * @param[in]  rows        The account's sessions, in list order.
+ * @param[in]  n           How many (at most BOUNCE_CHOOSE_MAX_ROWS are
+ *                         read).
+ * @param[in]  tls_refused The login is plaintext while
+ *                         BOUNCER_REQUIRE_TLS is set.
+ * @param[out] out         The answer.
+ */
+extern void bounce_choose(const struct bounce_choose_row *rows, int n,
+                          int tls_refused, struct bounce_choice *out);
+
+/** The best held session among @a rows (bounce_find_best_held(), which
+ * calls this): the first held row not in @a skip, replaced by a later one
+ * whose primary is ours while the best one's is not, else by a later one
+ * that dropped more recently.  The order of the rows matters (a later
+ * remote row that dropped more recently replaces an earlier ours), as it
+ * always has.
+ *
+ * @param[in] rows The account's sessions, in list order.
+ * @param[in] n    How many (at most BOUNCE_CHOOSE_MAX_ROWS are read).
+ * @param[in] skip Rows not to consider, a bit each.
+ * @return The row, or -1 when no held row is left. */
+extern int bounce_choose_best_held(const struct bounce_choose_row *rows, int n,
+                                   unsigned long skip);
+
+/** What a fresh registration does with the chooser's answer
+ * (bounce_auto_resume()). */
+enum bounce_resume_route {
+  BOUNCE_ROUTE_CREATE,           /**< no session: make one */
+  BOUNCE_ROUTE_PLAIN,            /**< register as a client in no session */
+  BOUNCE_ROUTE_REVIVE,           /**< our own held ghost: take it over */
+  BOUNCE_ROUTE_ALIAS_REMOTE,     /**< attach as a device of a primary on
+                                  *   another server */
+  BOUNCE_ROUTE_ALIAS_LOCAL,      /**< attach as a device */
+  BOUNCE_ROUTE_RECLAIM,          /**< a live session with no primary:
+                                  *   become its primary */
+  BOUNCE_ROUTE_REJECT_KC,        /**< refuse: another Keycloak user's */
+  BOUNCE_ROUTE_REJECT_DUPLICATE  /**< refuse: no room, or TLS */
+};
+
+/** The registration's route for a chooser answer (NULL is PLAIN). */
+extern enum bounce_resume_route
+bounce_resume_route(const struct bounce_choice *c);
 
 #endif /* INCLUDED_bouncer_wire_h */
