@@ -1,10 +1,10 @@
 /* history_cmocka.c - CMocka unit tests for history serialization functions
  *
- * Tests the pure functions from history.c without requiring LMDB:
+ * Links the real record codec (history_record.c) -- serialize,
+ * deserialize, sentinel escaping, CH W forward encode/split -- and tests
+ * copies of the other pure helpers, without a database:
  * - build_key() - Key construction
  * - parse_key() - Key parsing
- * - serialize_message() - Message serialization
- * - deserialize_message() - Message deserialization
  * - parse_reference() - Reference string parsing (from m_chathistory.c)
  */
 
@@ -23,53 +23,15 @@
 #include "ircd_chattr.h"
 #include "history_stamp.h"
 
+/* The real record codec: ../history_record.o */
+#include "history.h"
+#include "history_record.h"
+
 /* Define constants from history.c */
 #define KEY_SEP '\0'
-/* HISTORY_VALUE_BUFSIZE now defined in history.h */
-
-#define HISTORY_MSGID_LEN 64
-#define HISTORY_TIMESTAMP_LEN 32
-#define HISTORY_SENDER_LEN (NICKLEN + USERLEN + HOSTLEN + 3)
-#define HISTORY_CONTENT_LEN 4096
-
-/* Message types from history.h */
-enum HistoryMessageType {
-    HISTORY_PRIVMSG = 0,
-    HISTORY_NOTICE  = 1,
-    HISTORY_JOIN    = 2,
-    HISTORY_PART    = 3,
-    HISTORY_QUIT    = 4,
-    HISTORY_KICK    = 5,
-    HISTORY_MODE    = 6,
-    HISTORY_TOPIC   = 7,
-    HISTORY_TAGMSG  = 8,
-    HISTORY_GAP     = 9,
-    HISTORY_NICK    = 10,
-    HISTORY_REDACT  = 11,
-    HISTORY_MULTILINE = 12
-};
-
-/* Reference types from history.h */
-enum HistoryRefType {
-    HISTORY_REF_TIMESTAMP = 0,
-    HISTORY_REF_MSGID     = 1,
-    HISTORY_REF_NONE      = 2
-};
-
-/* HistoryMessage structure from history.h */
-struct HistoryMessage {
-    char msgid[HISTORY_MSGID_LEN];
-    char timestamp[HISTORY_TIMESTAMP_LEN];
-    char target[CHANNELLEN + 1];
-    char sender[HISTORY_SENDER_LEN];
-    char account[ACCOUNTLEN + 1];
-    enum HistoryMessageType type;
-    char content[HISTORY_CONTENT_LEN];
-    struct HistoryMessage *next;
-};
-
-/* Stub for ircd_snprintf - use regular snprintf */
-#define ircd_snprintf(client, buf, size, fmt, ...) snprintf(buf, size, fmt, ##__VA_ARGS__)
+/* The parse_key copy's own timestamp bound: its tests use ISO timestamps,
+ * longer than history.h's HISTORY_TIMESTAMP_LEN (unix seconds.millis). */
+#define KEY_TIMESTAMP_LEN 32
 
 /* ========== Inlined functions from history.c ========== */
 
@@ -130,7 +92,7 @@ static int parse_key(const char *key, int keylen,
     sep2 = memchr(p, KEY_SEP, end - p);
     if (sep2) {
         if (timestamp) {
-            if ((size_t)(sep2 - p) >= HISTORY_TIMESTAMP_LEN) return -1;
+            if ((size_t)(sep2 - p) >= KEY_TIMESTAMP_LEN) return -1;
             memcpy(timestamp, p, sep2 - p);
             timestamp[sep2 - p] = '\0';
         }
@@ -144,7 +106,7 @@ static int parse_key(const char *key, int keylen,
     } else {
         /* No msgid in key */
         if (timestamp) {
-            if ((size_t)(end - p) >= HISTORY_TIMESTAMP_LEN) return -1;
+            if ((size_t)(end - p) >= KEY_TIMESTAMP_LEN) return -1;
             memcpy(timestamp, p, end - p);
             timestamp[end - p] = '\0';
         }
@@ -155,58 +117,21 @@ static int parse_key(const char *key, int keylen,
     return 0;
 }
 
+/* serialize/deserialize run the real codec (../history_record.o); these
+ * wrappers keep the older tests' call shape. */
 static int serialize_message(char *buf, int bufsize,
                              enum HistoryMessageType type,
                              const char *sender, const char *account,
                              const char *content)
 {
-    return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s",
-                         (int)type,
-                         sender ? sender : "",
-                         account ? account : "",
-                         content ? content : "");
+    return history_serialize_record(buf, bufsize, type, sender, account,
+                                    content, NULL, NULL, 0);
 }
 
 static int deserialize_message(const char *data, int datalen,
                                struct HistoryMessage *msg)
 {
-    const char *p, *end;
-    char *field;
-    int type;
-
-    p = data;
-    end = data + datalen;
-
-    /* Parse type */
-    field = strchr(p, '|');
-    if (!field || field >= end) return -1;
-    type = atoi(p);
-    if (type < 0 || type > HISTORY_MULTILINE) return -1;
-    msg->type = (enum HistoryMessageType)type;
-    p = field + 1;
-
-    /* Parse sender */
-    field = strchr(p, '|');
-    if (!field || field >= end) return -1;
-    if ((size_t)(field - p) >= sizeof(msg->sender)) return -1;
-    memcpy(msg->sender, p, field - p);
-    msg->sender[field - p] = '\0';
-    p = field + 1;
-
-    /* Parse account */
-    field = strchr(p, '|');
-    if (!field || field >= end) return -1;
-    if ((size_t)(field - p) >= sizeof(msg->account)) return -1;
-    memcpy(msg->account, p, field - p);
-    msg->account[field - p] = '\0';
-    p = field + 1;
-
-    /* Parse content - rest of string */
-    if ((size_t)(end - p) >= sizeof(msg->content)) return -1;
-    memcpy(msg->content, p, end - p);
-    msg->content[end - p] = '\0';
-
-    return 0;
+    return history_deserialize_record(data, (size_t)datalen, msg);
 }
 
 /* parse_reference from m_chathistory.c */
@@ -443,76 +368,8 @@ static void test_parse_key_roundtrip(void **state)
     }
 }
 
-/* ========== #103 sentinel-escape helpers (copied verbatim from
- * ircd/history.c -- pure logic, no deps, gated here) ========== */
+/* ========== #103 sentinel-escape helpers (../history_record.o) ========== */
 #define HIST_ESC 0x04
-static int history_field_needs_escape(unsigned char c)
-{
-  return c == HIST_ESC || c == 0x05 || c == 0x06;
-}
-static char *history_escape_field(char *dst, size_t dstsize, const char *src)
-{
-  size_t o = 0;
-  const unsigned char *p;
-  if (dstsize == 0)
-    return dst;
-  for (p = (const unsigned char *)(src ? src : ""); *p; ++p) {
-    if (history_field_needs_escape(*p)) {
-      if (o + 2 >= dstsize) break;
-      dst[o++] = HIST_ESC;
-      dst[o++] = (char)(*p ^ 0x40);
-    } else {
-      if (o + 1 >= dstsize) break;
-      dst[o++] = (char)*p;
-    }
-  }
-  dst[o] = '\0';
-  return dst;
-}
-static void history_unescape_field(char *str)
-{
-  char *r = str, *w = str;
-  while (*r) {
-    if (*r == HIST_ESC && r[1]) { *w++ = (char)((unsigned char)r[1] ^ 0x40); r += 2; }
-    else { *w++ = *r++; }
-  }
-  *w = '\0';
-}
-static char *history_forward_encode(char *dst, size_t dstsize,
-                                    const char *client_tags, const char *text)
-{
-  size_t used = 0;
-  if (dstsize == 0)
-    return dst;
-  dst[0] = '\0';
-  if (client_tags && client_tags[0]) {
-    if (dstsize < 3)
-      return dst;
-    dst[used++] = '\x06';
-    history_escape_field(dst + used, dstsize - used - 1, client_tags);
-    used += strlen(dst + used);
-    dst[used++] = '\x06';
-    dst[used] = '\0';
-  }
-  history_escape_field(dst + used, dstsize - used, text ? text : "");
-  return dst;
-}
-static char *history_forward_split(char *content, char **tags_out)
-{
-  char *text = content;
-  *tags_out = NULL;
-  if (content[0] == '\x06') {
-    char *close = strchr(content + 1, '\x06');
-    if (close) {
-      *close = '\0';
-      *tags_out = content + 1;
-      history_unescape_field(*tags_out);
-      text = close + 1;
-    }
-  }
-  history_unescape_field(text);
-  return text;
-}
 
 static void test_sentinel_escape_roundtrip(void **state)
 {
@@ -558,6 +415,7 @@ static void test_sentinel_escape_of_escape_byte(void **state)
   history_unescape_field(esc);
   assert_string_equal(esc, "a\004b");
 }
+
 
 /* Mirror of ml_content_resolve's multiline-identification predicate
  * (ircd/ml_content.c): TYPE-keyed, with an EXACT-3-byte legacy fallback.

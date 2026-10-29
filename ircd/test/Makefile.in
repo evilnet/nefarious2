@@ -193,10 +193,11 @@ CRULE_CMOCKA_OBJS = crule_cmocka.o test_stub.o ../ircd_string.o
 crule_cmocka: $(CRULE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CRULE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-# history tests - serialization functions (no LMDB required)
-HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o ../redact_index.o
+# history tests - links the REAL record codec (history_record.o: serialize,
+# deserialize, sentinel escaping, CH W forward encode/split); no database.
+HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../history_record.o ../ircd_snprintf.o ../ircd_alloc.o ../ircd_compress.o ../ircd_string.o ../redact_index.o
 history_cmocka: $(HISTORY_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
 
 # chathistory_presence tests - links the REAL chathistory_presence.o (built
 # by the top-level `make` before this runs, same as ../ircd_string.o et al)
