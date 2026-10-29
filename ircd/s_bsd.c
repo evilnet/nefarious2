@@ -1134,6 +1134,58 @@ void update_write(struct Client* cptr)
 		 SOCK_ACTION_ADD : SOCK_ACTION_DEL) | SOCK_EVENT_WRITABLE);
 }
 
+/** Queue one complete WebSocket message on a client's recvQ.  Both the
+ * single-frame and the reassembled-fragment paths come through here, so
+ * neither can skip the per-class recv caps.
+ * @param cptr Client the message came from.
+ * @param buf Message bytes; must have room for one byte past @a len.
+ * @param len Message length.
+ * @return 1 to carry on, or exit_client()'s result.
+ */
+static int ws_deliver(struct Client *cptr, char *buf, int len)
+{
+  int classify;
+
+  if (len <= 0)
+    return 1;
+  /* WebSocket IRC: messages don't require \r\n, add \n for parser */
+  if (buf[len - 1] != '\n')
+    buf[len++] = '\n';
+  classify = recv_classify(cptr, buf, len);
+  if (classify == RECV_CLASSIFY_TAG_OVERRUN)
+    return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+  if (classify == RECV_CLASSIFY_MSG_OVERRUN)
+    return exit_client(cptr, cptr, &me, "Excess Flood: message region too large");
+  if (dbuf_put(&(cli_recvQ(cptr)), buf, len) == 0)
+    return exit_client(cptr, cptr, &me, "dbuf_put fail");
+  return 1;
+}
+
+/** Hand one data frame of a fragmented message to the reassembly
+ * buffer, and queue the message once its final frame arrives.
+ * @return 1 to carry on, or exit_client()'s result.
+ */
+static int ws_frag_feed(struct Client *cptr, int opcode, int is_fin,
+                        const char *payload, int len)
+{
+  char *msg;
+  int msg_len;
+
+  switch (websocket_frag_feed(cptr, opcode, is_fin, payload, len,
+                              &msg, &msg_len)) {
+  case WS_FRAG_MORE:
+    return 1;
+  case WS_FRAG_DONE:
+    return ws_deliver(cptr, msg, msg_len);
+  case WS_FRAG_ORPHAN:
+    return exit_client(cptr, cptr, &me, "WebSocket continuation without a message");
+  case WS_FRAG_BADUTF8:
+    return exit_client(cptr, cptr, &me, "WebSocket text frame: invalid UTF-8");
+  default:
+    return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
+  }
+}
+
 /** Read a 'packet' of data from a connection and process it.  Read in
  * 8k chunks to give a better performance rating (for server
  * connections).  Do some tricky stuff for client connections to make
@@ -1336,7 +1388,7 @@ ssl_read_again:
        * than stack: 16 KB is too much stack, and read_packet() is not
        * reentrant anyway (readbuf is static too). */
       static char ws_payload[WS_MAX_PAYLOAD + 2];
-      int ws_len = 0, opcode = 0, consumed, is_fin = 0;
+      int ws_len = 0, opcode = 0, consumed, is_fin = 0, ret;
       unsigned char *ws_data;
       int ws_remaining;
       int copy_len;
@@ -1443,35 +1495,8 @@ ssl_read_again:
         }
         /* Handle continuation frame (part of fragmented message) */
         else if (opcode == WS_OPCODE_CONTINUATION) {
-          /* Append to fragment buffer */
-          if (cli_ws_frag_len(cptr) + ws_len <= 16384) {
-            memcpy(cli_ws_frag_buf(cptr) + cli_ws_frag_len(cptr), ws_payload, ws_len);
-            cli_ws_frag_len(cptr) += ws_len;
-          } else {
-            /* Fragment too large */
-            return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
-          }
-          if (is_fin) {
-            /* Fragment complete - deliver reassembled message */
-            char *frag_data = cli_ws_frag_buf(cptr);
-            int frag_len = cli_ws_frag_len(cptr);
-            if (frag_len > 0) {
-              /* RFC 6455 Section 8.1: text frames must be valid UTF-8 */
-              if (cli_ws_frag_opcode(cptr) == WS_OPCODE_TEXT) {
-                frag_data[frag_len] = '\0';
-                if (!string_is_valid_utf8(frag_data))
-                  return exit_client(cptr, cptr, &me, "WebSocket text frame: invalid UTF-8");
-              }
-              /* Add line ending if needed */
-              if (frag_len < 16384 - 1 && frag_data[frag_len - 1] != '\n') {
-                frag_data[frag_len++] = '\n';
-              }
-              if (dbuf_put(&(cli_recvQ(cptr)), frag_data, frag_len) == 0)
-                return exit_client(cptr, cptr, &me, "dbuf_put fail");
-            }
-            cli_ws_frag_len(cptr) = 0;
-            cli_ws_frag_opcode(cptr) = 0;
-          }
+          if ((ret = ws_frag_feed(cptr, opcode, is_fin, ws_payload, ws_len)) != 1)
+            return ret;
         }
         /* Handle data frames (TEXT or BINARY) */
         else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
@@ -1487,14 +1512,9 @@ ssl_read_again:
                    opcode, IsWSText(cptr)));
           }
           if (!is_fin) {
-            /* First fragment - save to fragment buffer */
-            cli_ws_frag_opcode(cptr) = opcode;
-            if (ws_len <= 16384) {
-              memcpy(cli_ws_frag_buf(cptr), ws_payload, ws_len);
-              cli_ws_frag_len(cptr) = ws_len;
-            } else {
-              return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
-            }
+            /* First fragment - start the reassembly buffer */
+            if ((ret = ws_frag_feed(cptr, opcode, is_fin, ws_payload, ws_len)) != 1)
+              return ret;
           } else {
             /* Complete frame - deliver immediately */
             if (ws_len > 0) {
@@ -1508,20 +1528,8 @@ ssl_read_again:
                     ws_len = new_len;
                 }
               }
-              /* WebSocket IRC: messages don't require \r\n, add \n for parser */
-              if (ws_len < (int)sizeof(ws_payload) - 1 &&
-                  ws_payload[ws_len - 1] != '\n') {
-                ws_payload[ws_len++] = '\n';
-              }
-              {
-                int classify = recv_classify(cptr, (const char *)ws_payload, ws_len);
-                if (classify == RECV_CLASSIFY_TAG_OVERRUN)
-                  return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
-                if (classify == RECV_CLASSIFY_MSG_OVERRUN)
-                  return exit_client(cptr, cptr, &me, "Excess Flood: message region too large");
-              }
-              if (dbuf_put(&(cli_recvQ(cptr)), ws_payload, ws_len) == 0)
-                return exit_client(cptr, cptr, &me, "dbuf_put fail");
+              if ((ret = ws_deliver(cptr, ws_payload, ws_len)) != 1)
+                return ret;
             }
           }
         }

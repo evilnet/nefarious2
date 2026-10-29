@@ -916,3 +916,41 @@ int websocket_handle_control(struct Client *cptr, int opcode,
       return 1;
   }
 }
+
+int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
+                        const char *payload, int len,
+                        char **msg, int *msg_len)
+{
+  char *buf = cli_ws_frag_buf(cptr);
+
+  if (opcode == WS_OPCODE_CONTINUATION) {
+    /* RFC 6455 §5.4: a continuation only continues a started message */
+    if (cli_ws_frag_opcode(cptr) == 0)
+      return WS_FRAG_ORPHAN;
+  } else {
+    cli_ws_frag_opcode(cptr) = opcode;
+    cli_ws_frag_len(cptr) = 0;
+  }
+
+  if (len > WS_MAX_PAYLOAD - cli_ws_frag_len(cptr))
+    return WS_FRAG_OVERFLOW;
+  memcpy(buf + cli_ws_frag_len(cptr), payload, len);
+  cli_ws_frag_len(cptr) += len;
+
+  if (!is_fin)
+    return WS_FRAG_MORE;
+
+  *msg = buf;
+  *msg_len = cli_ws_frag_len(cptr);
+  /* con_ws_frag_buf has room past WS_MAX_PAYLOAD for this NUL and
+   * the line ending the caller may add. */
+  buf[*msg_len] = '\0';
+  opcode = cli_ws_frag_opcode(cptr);
+  cli_ws_frag_len(cptr) = 0;
+  cli_ws_frag_opcode(cptr) = 0;
+
+  /* RFC 6455 Section 8.1: text frames must be valid UTF-8 */
+  if (opcode == WS_OPCODE_TEXT && !string_is_valid_utf8(buf))
+    return WS_FRAG_BADUTF8;
+  return WS_FRAG_DONE;
+}

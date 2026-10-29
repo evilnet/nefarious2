@@ -9,6 +9,9 @@
  *   - websocket_handshake_feed() accumulating upgrade requests of 600
  *     and 2000 bytes across 512-byte reads, handing back bytes that
  *     follow the request, and rejecting a request over WS_HANDSHAKE_MAX.
+ *   - websocket_frag_feed() reassembling fragmented messages: a message
+ *     of exactly WS_MAX_PAYLOAD (whose NUL used to land past the buffer),
+ *     overflow, a continuation with no message started, and UTF-8.
  *
  * websocket.c is included directly (like ircd_cloaking_cmocka.c) with
  * stubs for feature_str(), ircd_snprintf() and os_send_nonb().
@@ -461,6 +464,156 @@ static void test_handshake_invalid_request(void **state)
   assert_false(IsWebSocket(&cli));
 }
 
+/* ========== websocket_frag_feed() fragment reassembly ========== */
+
+static char frag_src[WS_MAX_PAYLOAD + 1];
+
+static void fill_src(void)
+{
+  int i;
+  for (i = 0; i < (int)sizeof(frag_src); i++)
+    frag_src[i] = 'a' + (i % 26);
+}
+
+/* Fragments are joined byte for byte, and the state resets after FIN. */
+static void test_frag_reassembles(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "PRIV", 4,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
+                                       "MSG #c", 6, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       " :hi", 4, &msg, &msg_len),
+                   WS_FRAG_DONE);
+  assert_int_equal(msg_len, 14);
+  assert_memory_equal(msg, "PRIVMSG #c :hi", 15);  /* includes the NUL */
+  assert_int_equal(con.con_ws_frag_len, 0);
+  assert_int_equal(con.con_ws_frag_opcode, 0);
+}
+
+/* A message of exactly WS_MAX_PAYLOAD bytes is accepted, and the NUL
+ * after it plus the '\n' the caller adds both land inside the buffer.
+ * Before, the buffer was exactly WS_MAX_PAYLOAD bytes and the NUL went
+ * one past its end. */
+static void test_frag_max_payload_fits(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  fill_src();
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, frag_src,
+                                       WS_MAX_PAYLOAD - 100, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       frag_src + WS_MAX_PAYLOAD - 100, 100,
+                                       &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(msg_len, WS_MAX_PAYLOAD);
+  assert_memory_equal(msg, frag_src, WS_MAX_PAYLOAD);
+  assert_int_equal(msg[msg_len], '\0');
+  assert_true(msg + msg_len + 1 < con.con_ws_frag_buf + sizeof(con.con_ws_frag_buf));
+}
+
+/* The old out-of-bounds path exactly: a full first fragment, then an
+ * empty final continuation. */
+static void test_frag_full_then_empty_fin(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  fill_src();
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, frag_src,
+                                       WS_MAX_PAYLOAD, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "", 0, &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(msg_len, WS_MAX_PAYLOAD);
+  assert_int_equal(msg[msg_len], '\0');
+}
+
+static void test_frag_overflow(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  fill_src();
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, frag_src,
+                                       WS_MAX_PAYLOAD, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "x", 1, &msg, &msg_len),
+                   WS_FRAG_OVERFLOW);
+}
+
+/* RFC 6455 §5.4: a CONTINUATION with no message started is refused,
+ * both on a fresh connection and after a message has completed. */
+static void test_frag_orphan_continuation(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "QUIT", 4, &msg, &msg_len),
+                   WS_FRAG_ORPHAN);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "a", 1,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "b", 1, &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "c", 1, &msg, &msg_len),
+                   WS_FRAG_ORPHAN);
+}
+
+/* A reassembled TEXT message must be UTF-8; BINARY carries any bytes. */
+static void test_frag_text_utf8(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "ok \xC3", 4,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "\xA9", 1, &msg, &msg_len),
+                   WS_FRAG_DONE);  /* U+00E9 split across frames */
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "bad \xFF", 5,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "", 0, &msg, &msg_len),
+                   WS_FRAG_BADUTF8);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, "bad \xFF", 5,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "", 0, &msg, &msg_len),
+                   WS_FRAG_DONE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -478,6 +631,12 @@ int main(void)
     cmocka_unit_test(test_handshake_too_large),
     cmocka_unit_test(test_handshake_invalid_request),
     cmocka_unit_test(test_control_close_signals_teardown),
+    cmocka_unit_test(test_frag_reassembles),
+    cmocka_unit_test(test_frag_max_payload_fits),
+    cmocka_unit_test(test_frag_full_then_empty_fin),
+    cmocka_unit_test(test_frag_overflow),
+    cmocka_unit_test(test_frag_orphan_continuation),
+    cmocka_unit_test(test_frag_text_utf8),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

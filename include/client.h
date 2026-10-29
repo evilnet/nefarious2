@@ -507,7 +507,7 @@ struct Connection
   /* WebSocket state for RFC 6455 compliance */
   unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */
-  char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
+  char                con_ws_frag_buf[WS_MAX_PAYLOAD + 2]; /**< Fragment reassembly buffer (+ NUL and line ending) */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
   int                 con_ws_frag_opcode; /**< Opcode of first fragment */
   time_t              con_ws_ctl_since;   /**< Control-frame meter: debt clock (same shape as con_since, own budget) */
