@@ -325,6 +325,15 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     chathistory_fed_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {
+    /* A client whose registration register_user() deferred (the bouncer's
+     * DEFER_PEER_INBOUND, after SetUser) leaves the pending queue here:
+     * the queue keeps its pointer, and the drain would register whatever
+     * client the freed memory becomes -- a second N for a registered
+     * client, which the legacy links collide (W3 12c-2b fix round 1; the
+     * IsUnknown branch below did this for an auth-time defer only).
+     * Idempotent: a no-op for a client not queued. */
+    if (MyConnect(bcptr))
+      bounce_remove_pending_registration(bcptr);
     /* Purge per-Client ephemeral session-scoped state before the rest
      * of the teardown sequence — cli_session_id is still valid here,
      * which lets future subsystems (chathistory PM ring, read-marker
