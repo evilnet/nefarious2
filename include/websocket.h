@@ -123,6 +123,30 @@ extern int websocket_encode_frame(const char *data, int data_len,
 extern int websocket_handle_control(struct Client *cptr, int opcode,
                                     const char *payload, int payload_len);
 
+/** websocket_frag_feed() return values. */
+#define WS_FRAG_MORE      0    /**< Fragment buffered, message not complete */
+#define WS_FRAG_DONE      1    /**< Message complete in *msg / *msg_len */
+#define WS_FRAG_OVERFLOW (-1)  /**< Message would exceed WS_MAX_PAYLOAD */
+#define WS_FRAG_ORPHAN   (-2)  /**< CONTINUATION with no message started */
+#define WS_FRAG_BADUTF8  (-3)  /**< Reassembled TEXT message is not UTF-8 */
+
+/** Add one data frame of a fragmented message to the client's
+ * reassembly buffer.  Called for a non-FIN TEXT/BINARY frame (starts a
+ * message) and for every CONTINUATION frame.
+ * @param[in] cptr Client connection.
+ * @param[in] opcode Frame opcode.
+ * @param[in] is_fin 1 if this frame ends the message.
+ * @param[in] payload Frame payload.
+ * @param[in] len Payload length.
+ * @param[out] msg On WS_FRAG_DONE, the reassembled message (NUL-terminated,
+ *   in the client's buffer, with room for one more byte after the NUL).
+ * @param[out] msg_len On WS_FRAG_DONE, its length.
+ * @return One of the WS_FRAG_* values.
+ */
+extern int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
+                               const char *payload, int len,
+                               char **msg, int *msg_len);
+
 /** Send a WebSocket Close frame with a status code (best effort).
  * @param[in] cptr Client connection.
  * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big).
