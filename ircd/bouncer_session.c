@@ -112,6 +112,7 @@
 
 /** Token hash table - for O(1) RESUME lookups. */
 static struct BouncerSession *tokenHash[BOUNCE_TOKEN_HASHSIZE];
+static struct Client *link_with_unread(int aware);
 
 /** Account hash table - for per-account enumeration. */
 static struct AccountSessions *accountHash[BOUNCE_ACCOUNT_HASHSIZE];
@@ -1729,6 +1730,13 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                   cli_name(cptr), account, cli_name(link));
         return BOUNCE_RESUME_DEFER_PEER_INBOUND;
       }
+      /* Said when it matters (fix round 2, hotfix review Minor 3): the
+       * one decision the legacy links' unread bytes no longer change. */
+      if ((link = link_with_unread(0)))
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: registering %s (%s) at once: the link to %s has "
+                  "unread bytes, but no BS C comes over a legacy link",
+                  cli_name(cptr), account, cli_name(link));
     }
     max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
     if (max_sessions > 0) {
@@ -14661,35 +14669,47 @@ int bounce_burst_in_progress(void)
  * (prod F1 today) kept such a login waiting -- "waiting for peer session
  * announcement", no 001 -- until the next netjoin's end of burst.
  */
-struct Client *bounce_peer_has_inbound_data(void)
+static int link_has_unread(struct Client *peer)
+{
+  int avail;
+
+  if (cli_fd(peer) < 0)
+    return 0;
+  if (DBufLength(&cli_recvQ(peer)) > 0)
+    return 1;
+  /* The start of a line read already, its rest still to come. */
+  if (cli_count(peer) > 0)
+    return 1;
+#ifdef USE_SSL
+  /* Bytes OpenSSL has decrypted and holds: the kernel no longer has them,
+   * so FIONREAD cannot see them (a TLS link, as F2's to F1). */
+  if (cli_socket(peer).ssl && ssl_pending(&cli_socket(peer)) > 0)
+    return 1;
+#endif
+  return ioctl(cli_fd(peer), FIONREAD, &avail) == 0 && avail > 0;
+}
+
+/** The first link of ours, IRCv3-aware or legacy as @a aware asks, with
+ * unread input; NULL when none. */
+static struct Client *link_with_unread(int aware)
 {
   struct DLink *dlp;
 
   if (!cli_serv(&me))
     return NULL;
-
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
     struct Client *peer = dlp->value.cptr;
-    int avail;
-    if (!peer || !IsServer(peer) || !IsIRCv3Aware(peer))
+    if (!peer || !IsServer(peer) || !IsIRCv3Aware(peer) != !aware)
       continue;
-    if (cli_fd(peer) < 0)
-      continue;
-    if (DBufLength(&cli_recvQ(peer)) > 0)
-      return peer;
-    /* The start of a line read already, its rest still to come. */
-    if (cli_count(peer) > 0)
-      return peer;
-#ifdef USE_SSL
-    /* Bytes OpenSSL has decrypted and holds: the kernel no longer has
-     * them, so FIONREAD cannot see them (a TLS link, as F2's to F1). */
-    if (cli_socket(peer).ssl && ssl_pending(&cli_socket(peer)) > 0)
-      return peer;
-#endif
-    if (ioctl(cli_fd(peer), FIONREAD, &avail) == 0 && avail > 0)
+    if (link_has_unread(peer))
       return peer;
   }
   return NULL;
+}
+
+struct Client *bounce_peer_has_inbound_data(void)
+{
+  return link_with_unread(1);
 }
 
 /** Is the queue waiting on nothing the defer waited for: no link bursting
