@@ -814,12 +814,14 @@ extern int bounce_convergence_pending(struct Client *exclude_peer);
  * over, rather than running the 1-second timer fallback to expiry. */
 extern void bounce_release_idle_gates(void);
 
-/** Does any peer's socket have unread inbound bytes (kernel recvbuf
- * or parsed-but-unprocessed dbuf)?  Used by bounce_auto_resume to
- * avoid creating a parallel primary when peer might be in the middle
- * of broadcasting BS C for the very session this account is about to
- * attach to (steady-state BS C race). */
-extern int bounce_peer_has_inbound_data(void);
+/** Does a link that can carry a BS C (an IRCv3-aware link) have unread
+ * inbound bytes (kernel recvbuf or parsed-but-unprocessed dbuf)?  Returns
+ * the first such link, or NULL.  Used by bounce_auto_resume to avoid
+ * creating a parallel primary when peer might be in the middle of
+ * broadcasting BS C for the very session this account is about to attach
+ * to (steady-state BS C race).  A legacy link never counts: no BS C comes
+ * over it. */
+extern struct Client *bounce_peer_has_inbound_data(void);
 
 extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
                                             void *),

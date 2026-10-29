@@ -1534,20 +1534,25 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
    * If sessions already exist (all ACTIVE), this is just a second connection
    * to the same account — don't create a duplicate session. */
   if (bounce_count(account) == 0) {
-    /* Steady-state BS C race guard: if any peer has unread inbound
-     * bytes, the in-flight data might carry a BS C announcing the
+    /* Steady-state BS C race guard: if a link that can carry a BS C (an
+     * IRCv3-aware one; see bounce_peer_has_inbound_data) has unread
+     * inbound bytes, the in-flight data might carry a BS C announcing the
      * very session for this account.  Creating a fresh local session
      * now would race ahead and produce a parallel primary, which
      * downstream resolves via classic-collision kills.  Defer the
      * decision; bounce_drain_pending_registrations re-runs us once
      * the peer data has been processed (the BS C handler triggers
      * the drain). */
-    if (bounce_peer_has_inbound_data()) {
-      Debug((DEBUG_INFO,
-             "bounce_auto_resume: peer has inbound bytes, deferring "
-             "new-session decision for %s (avoid steady-state BS C race)",
-             account));
-      return BOUNCE_RESUME_DEFER_PEER_INBOUND;
+    {
+      struct Client *link = bounce_peer_has_inbound_data();
+      if (link) {
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: deferring the registration of %s (%s): the account "
+                  "has no session yet, and the link to %s has unread bytes "
+                  "that may carry its BS C",
+                  cli_name(cptr), account, cli_name(link));
+        return BOUNCE_RESUME_DEFER_PEER_INBOUND;
+      }
     }
     max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
     if (max_sessions > 0) {
@@ -10573,8 +10578,9 @@ int bounce_burst_in_progress(void)
   return 0;
 }
 
-/** Does any peer's socket have unread inbound bytes (kernel recvbuf
- * or parsed-but-unprocessed dbuf)?
+/** Does a link that can carry a BS C have unread inbound bytes (kernel
+ * recvbuf or parsed-but-unprocessed dbuf)?  Returns the first such link,
+ * or NULL.
  *
  * Used to detect the steady-state BS C race: peer X creates a fresh
  * bouncer session, broadcasts BS C; meanwhile a second SASL'd client
@@ -10590,27 +10596,34 @@ int bounce_burst_in_progress(void)
  * Strategy: FIONREAD for the kernel recvbuf + DBufLength for any
  * already-parsed-but-not-yet-dispatched bytes.  Cheap (one ioctl per
  * peer) and avoids reentrant read_packet calls.
+ *
+ * Only an IRCv3-aware (fork) link counts.  A BS C goes to aware links
+ * only (sendcmdto_serv_butone_v3, bounce_burst), so none ever arrives over
+ * a legacy link, and a legacy link's unread bytes are no reason to hold a
+ * login: before this they did, and a server whose links are all legacy
+ * (prod F1 today) kept such a login waiting -- "waiting for peer session
+ * announcement", no 001 -- until the next netjoin's end of burst.
  */
-int bounce_peer_has_inbound_data(void)
+struct Client *bounce_peer_has_inbound_data(void)
 {
   struct DLink *dlp;
 
   if (!cli_serv(&me))
-    return 0;
+    return NULL;
 
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
     struct Client *peer = dlp->value.cptr;
     int avail;
-    if (!peer || !IsServer(peer))
+    if (!peer || !IsServer(peer) || !IsIRCv3Aware(peer))
       continue;
     if (cli_fd(peer) < 0)
       continue;
     if (DBufLength(&cli_recvQ(peer)) > 0)
-      return 1;
+      return peer;
     if (ioctl(cli_fd(peer), FIONREAD, &avail) == 0 && avail > 0)
-      return 1;
+      return peer;
   }
-  return 0;
+  return NULL;
 }
 
 int bounce_defer_registration(struct Client *cli)
@@ -10624,8 +10637,10 @@ int bounce_defer_registration(struct Client *cli)
   p->client = cli;
   p->next = pending_registrations;
   pending_registrations = p;
-  Debug((DEBUG_INFO, "Bouncer: deferring registration for %s until burst settles",
-         cli_name(cli)));
+  log_write(LS_USER, L_INFO, 0,
+            "Bouncer: registration of %s (fd %d) deferred until the next end "
+            "of burst or BS C", cli_name(cli)[0] ? cli_name(cli) : "*",
+            cli_fd(cli));
   return 0;
 }
 
@@ -10680,14 +10695,16 @@ void bounce_drain_pending_registrations(void)
     if (cli && !IsDead(cli) && cli_fd(cli) >= 0
         && !HasFlag(cli, FLAG_KILLED)
         && cli_name(cli)[0] != '\0') {
-      Debug((DEBUG_INFO, "Bouncer: draining deferred registration for %s",
-             cli_name(cli)));
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: draining the deferred registration of %s (fd %d)",
+                cli_name(cli), cli_fd(cli));
       register_user(cli, cli);
     } else {
-      Debug((DEBUG_INFO, "Bouncer: dropping deferred registration for %s "
-             "(client no longer eligible%s)",
-             cli && cli_name(cli)[0] ? cli_name(cli) : "?",
-             (cli && cli_name(cli)[0] == '\0') ? " — NICK not set yet" : ""));
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: dropping the deferred registration of %s (%s)",
+                cli && cli_name(cli)[0] ? cli_name(cli) : "*",
+                (cli && cli_name(cli)[0] == '\0') ? "no NICK yet"
+                                                  : "no longer eligible");
     }
     MyFree(list);
     list = next;
