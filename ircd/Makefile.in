@@ -224,6 +224,7 @@ IRCD_SRC = \
 	bouncer_rebind_auth.c \
 	exit_reason.c \
 	bouncer_deauth.c \
+	bouncer_record.c \
 	webpush_line.c \
 	metadata.c \
 	m_rehash.c \

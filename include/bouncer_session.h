@@ -203,7 +203,7 @@ struct BounceSessionRecord {
 /** Frozen v11 layout for migration reads.  Do not modify — must mirror
  * the on-disk layout produced by code with BOUNCER_DB_VERSION=11.  v12
  * only appends bsr_kc_id, so a v11 record is a prefix of a v12 one
- * (bounce_db_restore checks that at compile time). */
+ * (bouncer_record.c checks that at compile time). */
 struct BounceSessionRecord_v11 {
   uint32_t bsr_version;
   /* Session identity */
@@ -270,7 +270,7 @@ struct BounceSessionRecord_v11 {
 /** Frozen v10 layout for migration reads.  Do not modify — must mirror
  * the on-disk layout produced by code with BOUNCER_DB_VERSION=10.  v11
  * only appends the snomask fields, so a v10 record is a prefix of a v11
- * one (bounce_db_restore checks that at compile time). */
+ * one (bouncer_record.c checks that at compile time). */
 struct BounceSessionRecord_v10 {
   uint32_t bsr_version;
   /* Session identity */
@@ -327,10 +327,11 @@ struct BounceSessionRecord_v10 {
 };
 
 /** Frozen v9 layout for migration reads.  Do not modify — must mirror
- * the on-disk layout produced by code with BOUNCER_DB_VERSION=9 (when
- * BOUNCER_MAX_ALIASES was 4).  Used exclusively by the v9→v10 migration
- * path in bounce_db_restore; v10 only grows the alias array to the
- * current BOUNCER_MAX_ALIASES. */
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=9 (5a1ce208
+ * up to 4ad2cd8a, when BOUNCER_MAX_ALIASES was 4, BOUNCER_MAX_CHANNELS
+ * 50 and BOUNCER_MAX_CONN_HISTORY 10: 14360 bytes on LP64).  Used
+ * exclusively by the v9 migration in bounce_record_decode; v10 only grows
+ * the alias array to 16. */
 struct BounceSessionRecord_v9 {
   uint32_t bsr_version;
   /* Session identity */
@@ -369,7 +370,7 @@ struct BounceSessionRecord_v9 {
   uint32_t bsr_agg_receiveM;
   /* Connection history (unique hosts, most recent first) */
   uint16_t bsr_histcount;
-  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
+  struct BounceConnHistory bsr_history[10]; /* frozen: v9 BOUNCER_MAX_CONN_HISTORY */
   /* Channel memberships */
   uint16_t bsr_chancount;
   struct {
@@ -378,10 +379,10 @@ struct BounceSessionRecord_v9 {
     int64_t  join_tv_sec;       /**< Original JOIN time (seconds) */
     int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
     char     join_msgid[16];    /**< Original JOIN msgid */
-  } bsr_channels[BOUNCER_MAX_CHANNELS];
+  } bsr_channels[50]; /* frozen: v9 BOUNCER_MAX_CHANNELS */
   /* Alias roster (per-alias activity + caps, v8+) */
   uint16_t bsr_aliascount;
-  struct BounceSessionAliasRecord bsr_aliases[4]; /* frozen: v9 array size */
+  struct BounceSessionAliasRecord bsr_aliases[4]; /* frozen: v9 BOUNCER_MAX_ALIASES */
   /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
    * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
    * keyed on bsr_oper_name (looked up in the local O:line config). */
@@ -390,10 +391,13 @@ struct BounceSessionRecord_v9 {
 };
 
 /** Frozen v8 layout for migration reads.  Do not modify — must mirror
- * the on-disk layout produced by code with BOUNCER_DB_VERSION=8.  Used
- * exclusively by the v8→v9 migration path in bounce_db_restore (adds
- * the oper-grant fields, zero-initialised — pre-v9 sessions weren't
- * opered as far as we know). */
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=8 (fa81e2fc
+ * up to 5a1ce208, when BOUNCER_MAX_ALIASES was 4, BOUNCER_MAX_CHANNELS
+ * 50 and BOUNCER_MAX_CONN_HISTORY 10: 14320 bytes on LP64).  Until the
+ * alias array was frozen here it followed BOUNCER_MAX_ALIASES to 16, and
+ * every real v8 record failed the size check.  Used exclusively by the
+ * v8 migration in bounce_record_decode (the oper-grant fields stay zero —
+ * pre-v9 sessions weren't opered as far as we know). */
 struct BounceSessionRecord_v8 {
   uint32_t bsr_version;
   char     bsr_account[ACCOUNTLEN + 1];
@@ -425,7 +429,7 @@ struct BounceSessionRecord_v8 {
   uint32_t bsr_agg_sendM;
   uint32_t bsr_agg_receiveM;
   uint16_t bsr_histcount;
-  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
+  struct BounceConnHistory bsr_history[10]; /* frozen: v8 BOUNCER_MAX_CONN_HISTORY */
   uint16_t bsr_chancount;
   struct {
     char     name[CHANNELLEN + 1];
@@ -433,14 +437,16 @@ struct BounceSessionRecord_v8 {
     int64_t  join_tv_sec;
     int32_t  join_tv_usec;
     char     join_msgid[16];
-  } bsr_channels[BOUNCER_MAX_CHANNELS];
+  } bsr_channels[50]; /* frozen: v8 BOUNCER_MAX_CHANNELS */
   uint16_t bsr_aliascount;
-  struct BounceSessionAliasRecord bsr_aliases[BOUNCER_MAX_ALIASES];
+  struct BounceSessionAliasRecord bsr_aliases[4]; /* frozen: v8 BOUNCER_MAX_ALIASES */
 };
 
 /** Frozen v7 layout for migration reads.  Do not modify — must mirror
- * the on-disk layout produced by code with BOUNCER_DB_VERSION=7.  Used
- * exclusively by the v7→v8 migration path in bounce_db_restore. */
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=7 (063d2c2b
+ * up to fa81e2fc, when BOUNCER_MAX_CHANNELS was 50 and
+ * BOUNCER_MAX_CONN_HISTORY 10: 14192 bytes on LP64).  Used exclusively by
+ * the v7 migration in bounce_record_decode. */
 struct BounceSessionRecord_v7 {
   uint32_t bsr_version;
   char     bsr_account[ACCOUNTLEN + 1];
@@ -472,7 +478,7 @@ struct BounceSessionRecord_v7 {
   uint32_t bsr_agg_sendM;
   uint32_t bsr_agg_receiveM;
   uint16_t bsr_histcount;
-  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
+  struct BounceConnHistory bsr_history[10]; /* frozen: v7 BOUNCER_MAX_CONN_HISTORY */
   uint16_t bsr_chancount;
   struct {
     char     name[CHANNELLEN + 1];
@@ -480,7 +486,7 @@ struct BounceSessionRecord_v7 {
     int64_t  join_tv_sec;
     int32_t  join_tv_usec;
     char     join_msgid[16];
-  } bsr_channels[BOUNCER_MAX_CHANNELS];
+  } bsr_channels[50]; /* frozen: v7 BOUNCER_MAX_CHANNELS */
 };
 
 /** Channel membership preserved in a held session. */

@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "bouncer_record.h"
 #include "bouncer_converge.h"
 #include "bouncer_rebind_auth.h"
 #include "account_id.h"
@@ -3263,6 +3264,7 @@ int bounce_db_restore(void)
   int expired = 0;
   int migrated_v7 = 0;
   int migrated = 0;   /* v8..v11 records read through a frozen layout */
+  int rejected = 0;   /* wrong size for their version, or unknown version */
   time_t max_hold;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
@@ -3311,224 +3313,43 @@ int bounce_db_restore(void)
     time_t remaining;
     uint32_t version;
 
-    /* Records start with a uint32 version field at offset 0 in every
-     * schema version.  Read it without struct overlay to dispatch on
-     * version regardless of total record size. */
-    if (vlen < sizeof(uint32_t))
-      continue;
-    memcpy(&version, vbuf, sizeof(version));
-
-    if (version == BOUNCER_DB_VERSION) {
-      /* v12: current schema, parse directly from on-disk bytes. */
-      if (vlen != sizeof(struct BounceSessionRecord))
-        continue;
-      rec = (struct BounceSessionRecord *)vbuf;
-    } else if (version == 11) {
-      /* v11: v12 without the trailing bsr_kc_id, which stays empty (the
-       * revive adopts the login's id). */
-      (void)sizeof(char[(sizeof(struct BounceSessionRecord_v11)
-                         == offsetof(struct BounceSessionRecord, bsr_kc_id))
-                        ? 1 : -1]);
-      if (vlen != sizeof(struct BounceSessionRecord_v11))
-        continue;
-      memset(&rec_buf, 0, sizeof(rec_buf));
-      memcpy(&rec_buf, vbuf, sizeof(struct BounceSessionRecord_v11));
-      rec_buf.bsr_version = BOUNCER_DB_VERSION;
-      rec = &rec_buf;
+    switch (bounce_record_decode(vbuf, vlen, &rec_buf, &version)) {
+    case BOUNCE_REC_CURRENT:
+      break;
+    case BOUNCE_REC_MIGRATED:
       migrated++;
       log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v11 record (account=%s) → v%d",
-                rec->bsr_account, BOUNCER_DB_VERSION);
-    } else if (version == 10) {
-      /* v10: v12 without the trailing snomask and id fields, which stay zero
-       * (no mask recorded: the oper grant falls back to the O:line's). */
-      /* Compile-time check: a v10 record is a prefix of a v11 one. */
-      (void)sizeof(char[(sizeof(struct BounceSessionRecord_v10)
-                         == offsetof(struct BounceSessionRecord, bsr_snomask))
-                        ? 1 : -1]);
-      if (vlen != sizeof(struct BounceSessionRecord_v10))
-        continue;
-      memset(&rec_buf, 0, sizeof(rec_buf));
-      memcpy(&rec_buf, vbuf, sizeof(struct BounceSessionRecord_v10));
-      rec_buf.bsr_version = BOUNCER_DB_VERSION;
-      rec = &rec_buf;
-      migrated++;
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v10 record (account=%s) → v%d",
-                rec->bsr_account, BOUNCER_DB_VERSION);
-    } else if (version == 9) {
-      /* v9: identical to v10 except bsr_aliases[] was sized 4.  Read
-       * with the frozen v9 struct and copy field-by-field; the alias
-       * roster copies up to the old array size, the rest of the
-       * (larger) v10 array stays zero. */
-      const struct BounceSessionRecord_v9 *v9;
-      unsigned int ai;
-      if (vlen != sizeof(struct BounceSessionRecord_v9))
-        continue;
-      v9 = (const struct BounceSessionRecord_v9 *)vbuf;
-      memset(&rec_buf, 0, sizeof(rec_buf));
-      rec_buf.bsr_version = BOUNCER_DB_VERSION;
-      ircd_strncpy(rec_buf.bsr_account, v9->bsr_account, ACCOUNTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_sessid, v9->bsr_sessid, BOUNCER_SESSID_LEN);
-      ircd_strncpy(rec_buf.bsr_token, v9->bsr_token, BOUNCER_TOKEN_LEN + 1);
-      ircd_strncpy(rec_buf.bsr_name, v9->bsr_name, BOUNCER_NAME_LEN);
-      ircd_strncpy(rec_buf.bsr_origin, v9->bsr_origin, NICKLEN + 1);
-      rec_buf.bsr_hold_override = v9->bsr_hold_override;
-      rec_buf.bsr_created = v9->bsr_created;
-      rec_buf.bsr_disconnect_time = v9->bsr_disconnect_time;
-      rec_buf.bsr_last_active = v9->bsr_last_active;
-      rec_buf.bsr_last_msg_time = v9->bsr_last_msg_time;
-      rec_buf.bsr_total_active = v9->bsr_total_active;
-      rec_buf.bsr_attach_count = v9->bsr_attach_count;
-      rec_buf.bsr_connect_count = v9->bsr_connect_count;
-      ircd_strncpy(rec_buf.bsr_nick, v9->bsr_nick, NICKLEN + 1);
-      ircd_strncpy(rec_buf.bsr_username, v9->bsr_username, USERLEN + 1);
-      ircd_strncpy(rec_buf.bsr_realhost, v9->bsr_realhost, HOSTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_host, v9->bsr_host, HOSTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_realname, v9->bsr_realname, REALLEN + 1);
-      ircd_strncpy(rec_buf.bsr_account_name, v9->bsr_account_name,
-                   ACCOUNTLEN + 1);
-      rec_buf.bsr_acc_create = v9->bsr_acc_create;
-      memcpy(&rec_buf.bsr_ip, &v9->bsr_ip, sizeof(rec_buf.bsr_ip));
-      ircd_strncpy(rec_buf.bsr_sock_ip, v9->bsr_sock_ip, SOCKIPLEN + 1);
-      ircd_strncpy(rec_buf.bsr_sockhost, v9->bsr_sockhost, HOSTLEN + 1);
-      rec_buf.bsr_listener_port = v9->bsr_listener_port;
-      rec_buf.bsr_agg_sendB = v9->bsr_agg_sendB;
-      rec_buf.bsr_agg_receiveB = v9->bsr_agg_receiveB;
-      rec_buf.bsr_agg_sendM = v9->bsr_agg_sendM;
-      rec_buf.bsr_agg_receiveM = v9->bsr_agg_receiveM;
-      rec_buf.bsr_histcount = v9->bsr_histcount;
-      memcpy(rec_buf.bsr_history, v9->bsr_history, sizeof(rec_buf.bsr_history));
-      rec_buf.bsr_chancount = v9->bsr_chancount;
-      memcpy(rec_buf.bsr_channels, v9->bsr_channels,
-             sizeof(rec_buf.bsr_channels));
-      rec_buf.bsr_aliascount = v9->bsr_aliascount;
-      if (rec_buf.bsr_aliascount > 4)
-        rec_buf.bsr_aliascount = 4;
-      for (ai = 0; ai < rec_buf.bsr_aliascount; ai++)
-        rec_buf.bsr_aliases[ai] = v9->bsr_aliases[ai];
-      ircd_strncpy(rec_buf.bsr_oper_name, v9->bsr_oper_name, NICKLEN + 1);
-      rec_buf.bsr_oper_granted_at = v9->bsr_oper_granted_at;
-      rec = &rec_buf;
-      migrated++;
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v9 record (account=%s) → v%d",
-                rec->bsr_account, BOUNCER_DB_VERSION);
-    } else if (version == 8) {
-      /* v8: legacy schema.  Read with the frozen v8 struct, then build
-       * a v9 record in-place; v9 only adds oper-grant fields (left
-       * zero — pre-v9 sessions weren't opered as far as we know). */
-      const struct BounceSessionRecord_v8 *v8;
-      if (vlen != sizeof(struct BounceSessionRecord_v8))
-        continue;
-      v8 = (const struct BounceSessionRecord_v8 *)vbuf;
-      memset(&rec_buf, 0, sizeof(rec_buf));
-      /* All v8 fields appear in v9 with the same names/types — copy
-       * field-by-field rather than a struct-overlay memcpy because the
-       * outer struct's layout has the oper fields appended after
-       * bsr_aliases. */
-      rec_buf.bsr_version = BOUNCER_DB_VERSION;
-      ircd_strncpy(rec_buf.bsr_account, v8->bsr_account, ACCOUNTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_sessid, v8->bsr_sessid, BOUNCER_SESSID_LEN);
-      ircd_strncpy(rec_buf.bsr_token, v8->bsr_token, BOUNCER_TOKEN_LEN + 1);
-      ircd_strncpy(rec_buf.bsr_name, v8->bsr_name, BOUNCER_NAME_LEN);
-      ircd_strncpy(rec_buf.bsr_origin, v8->bsr_origin, NICKLEN + 1);
-      rec_buf.bsr_hold_override = v8->bsr_hold_override;
-      rec_buf.bsr_created = v8->bsr_created;
-      rec_buf.bsr_disconnect_time = v8->bsr_disconnect_time;
-      rec_buf.bsr_last_active = v8->bsr_last_active;
-      rec_buf.bsr_last_msg_time = v8->bsr_last_msg_time;
-      rec_buf.bsr_total_active = v8->bsr_total_active;
-      rec_buf.bsr_attach_count = v8->bsr_attach_count;
-      rec_buf.bsr_connect_count = v8->bsr_connect_count;
-      ircd_strncpy(rec_buf.bsr_nick, v8->bsr_nick, NICKLEN + 1);
-      ircd_strncpy(rec_buf.bsr_username, v8->bsr_username, USERLEN + 1);
-      ircd_strncpy(rec_buf.bsr_realhost, v8->bsr_realhost, HOSTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_host, v8->bsr_host, HOSTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_realname, v8->bsr_realname, REALLEN + 1);
-      ircd_strncpy(rec_buf.bsr_account_name, v8->bsr_account_name,
-                   ACCOUNTLEN + 1);
-      rec_buf.bsr_acc_create = v8->bsr_acc_create;
-      memcpy(&rec_buf.bsr_ip, &v8->bsr_ip, sizeof(rec_buf.bsr_ip));
-      ircd_strncpy(rec_buf.bsr_sock_ip, v8->bsr_sock_ip, SOCKIPLEN + 1);
-      ircd_strncpy(rec_buf.bsr_sockhost, v8->bsr_sockhost, HOSTLEN + 1);
-      rec_buf.bsr_listener_port = v8->bsr_listener_port;
-      rec_buf.bsr_agg_sendB = v8->bsr_agg_sendB;
-      rec_buf.bsr_agg_receiveB = v8->bsr_agg_receiveB;
-      rec_buf.bsr_agg_sendM = v8->bsr_agg_sendM;
-      rec_buf.bsr_agg_receiveM = v8->bsr_agg_receiveM;
-      rec_buf.bsr_histcount = v8->bsr_histcount;
-      memcpy(rec_buf.bsr_history, v8->bsr_history, sizeof(rec_buf.bsr_history));
-      rec_buf.bsr_chancount = v8->bsr_chancount;
-      memcpy(rec_buf.bsr_channels, v8->bsr_channels,
-             sizeof(rec_buf.bsr_channels));
-      rec_buf.bsr_aliascount = v8->bsr_aliascount;
-      memcpy(rec_buf.bsr_aliases, v8->bsr_aliases,
-             sizeof(rec_buf.bsr_aliases));
-      /* bsr_oper_name + bsr_oper_granted_at left zero — pre-v9 sessions
-       * had no session-level oper grant. */
-      rec = &rec_buf;
-      migrated++;
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v8 record (account=%s) → current",
-                rec->bsr_account);
-    } else if (version == 7) {
-      /* v7: legacy schema.  Read with the frozen v7 struct, then
-       * construct a v8 record in-place by copying matching fields and
-       * minting a UUID v7 for the new sessid format (per redesign
-       * A.1).  New v8-only fields (alias roster) default to empty —
-       * peers' BS A bursts repopulate them on next link. */
-      const struct BounceSessionRecord_v7 *v7;
-      if (vlen != sizeof(struct BounceSessionRecord_v7))
-        continue;
-      v7 = (const struct BounceSessionRecord_v7 *)vbuf;
-      memset(&rec_buf, 0, sizeof(rec_buf));
-      rec_buf.bsr_version = BOUNCER_DB_VERSION;
-      ircd_strncpy(rec_buf.bsr_account, v7->bsr_account, ACCOUNTLEN + 1);
+                "bouncer_persist: migrated v%u record (account=%s) → v%d",
+                version, rec_buf.bsr_account, BOUNCER_DB_VERSION);
+      break;
+    case BOUNCE_REC_MIGRATED_V7:
       /* Mint a fresh UUID v7 for the v7→v8 sessid migration (per G.1). */
       generate_sessid(rec_buf.bsr_sessid);
-      ircd_strncpy(rec_buf.bsr_token, v7->bsr_token, BOUNCER_TOKEN_LEN + 1);
-      ircd_strncpy(rec_buf.bsr_name, v7->bsr_name, BOUNCER_NAME_LEN);
-      ircd_strncpy(rec_buf.bsr_origin, v7->bsr_origin, NICKLEN + 1);
-      rec_buf.bsr_hold_override = v7->bsr_hold_override;
-      rec_buf.bsr_created = v7->bsr_created;
-      rec_buf.bsr_disconnect_time = v7->bsr_disconnect_time;
-      rec_buf.bsr_last_active = v7->bsr_last_active;
-      rec_buf.bsr_last_msg_time = v7->bsr_last_msg_time;
-      rec_buf.bsr_total_active = v7->bsr_total_active;
-      rec_buf.bsr_attach_count = v7->bsr_attach_count;
-      rec_buf.bsr_connect_count = v7->bsr_connect_count;
-      ircd_strncpy(rec_buf.bsr_nick, v7->bsr_nick, NICKLEN + 1);
-      ircd_strncpy(rec_buf.bsr_username, v7->bsr_username, USERLEN + 1);
-      ircd_strncpy(rec_buf.bsr_realhost, v7->bsr_realhost, HOSTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_host, v7->bsr_host, HOSTLEN + 1);
-      ircd_strncpy(rec_buf.bsr_realname, v7->bsr_realname, REALLEN + 1);
-      ircd_strncpy(rec_buf.bsr_account_name, v7->bsr_account_name,
-                   ACCOUNTLEN + 1);
-      rec_buf.bsr_acc_create = v7->bsr_acc_create;
-      memcpy(&rec_buf.bsr_ip, &v7->bsr_ip, sizeof(rec_buf.bsr_ip));
-      ircd_strncpy(rec_buf.bsr_sock_ip, v7->bsr_sock_ip, SOCKIPLEN + 1);
-      ircd_strncpy(rec_buf.bsr_sockhost, v7->bsr_sockhost, HOSTLEN + 1);
-      rec_buf.bsr_listener_port = v7->bsr_listener_port;
-      rec_buf.bsr_agg_sendB = v7->bsr_agg_sendB;
-      rec_buf.bsr_agg_receiveB = v7->bsr_agg_receiveB;
-      rec_buf.bsr_agg_sendM = v7->bsr_agg_sendM;
-      rec_buf.bsr_agg_receiveM = v7->bsr_agg_receiveM;
-      rec_buf.bsr_histcount = v7->bsr_histcount;
-      memcpy(rec_buf.bsr_history, v7->bsr_history, sizeof(rec_buf.bsr_history));
-      rec_buf.bsr_chancount = v7->bsr_chancount;
-      memcpy(rec_buf.bsr_channels, v7->bsr_channels,
-             sizeof(rec_buf.bsr_channels));
-      /* bsr_aliascount + bsr_aliases[] left zeroed — peers refill. */
-      rec = &rec_buf;
       migrated_v7++;
       log_write(LS_SYSTEM, L_INFO, 0,
                 "bouncer_persist: migrated v7 record (account=%s) → "
                 "v%d sessid=%s",
-                rec->bsr_account, BOUNCER_DB_VERSION, rec->bsr_sessid);
-    } else {
-      continue; /* unknown version, skip */
+                rec_buf.bsr_account, BOUNCER_DB_VERSION, rec_buf.bsr_sessid);
+      break;
+    case BOUNCE_REC_BAD_SIZE:
+      /* A known version whose length is not that version's size: the
+       * frozen layout and what the version's build wrote disagree, or the
+       * record is torn.  Not restored, and the eviction pass below deletes
+       * it whenever that pass runs, so say so. */
+      rejected++;
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "bouncer_persist: skipping v%u record of %zu bytes "
+                "(v%u records are %zu)", version, vlen, version,
+                bounce_record_size(version));
+      continue;
+    case BOUNCE_REC_UNKNOWN:
+      rejected++;
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "bouncer_persist: skipping record of %zu bytes with "
+                "unknown version %u", vlen, version);
+      continue;
     }
+    rec = &rec_buf;
 
     /* Check expiry */
     elapsed = CurrentTime - (time_t)rec->bsr_disconnect_time;
@@ -3734,7 +3555,9 @@ int bounce_db_restore(void)
             if (CurrentTime - (time_t)r->bsr_disconnect_time > max_hold)
               should_delete = 1;
           } else {
-            /* Unknown version or wrong size — evict. */
+            /* Unknown version or wrong size — evict.  v8..v11 records
+             * also land here; they were migrated and are re-put below.
+             * The restore loop logged each one it skipped. */
             should_delete = 1;
           }
         }
@@ -3772,7 +3595,8 @@ int bounce_db_restore(void)
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "bouncer_persist: restored %d sessions (%d migrated from v7, "
-            "%d from v8-v11)", restored, migrated_v7, migrated);
+            "%d from v8-v11, %d unreadable)", restored, migrated_v7, migrated,
+            rejected);
   return restored;
 }
 

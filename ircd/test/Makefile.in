@@ -51,6 +51,7 @@ CMOCKA_TESTPROGS = \
 	bouncer_rebind_auth_cmocka \
 	exit_reason_cmocka \
 	bouncer_deauth_cmocka \
+	bouncer_record_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka \
@@ -92,6 +93,7 @@ DEP_SRC = \
 	bouncer_rebind_auth_cmocka.c \
 	exit_reason_cmocka.c \
 	bouncer_deauth_cmocka.c \
+	bouncer_record_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
 	kc_url_cmocka.c \
@@ -434,6 +436,14 @@ bouncer_deauth_test.o: ../bouncer_deauth.c ../../include/bouncer_deauth.h
 BOUNCER_DEAUTH_CMOCKA_OBJS = bouncer_deauth_cmocka.o bouncer_deauth_test.o
 bouncer_deauth_cmocka: $(BOUNCER_DEAUTH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_DEAUTH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# bouncer_record tests - the record decoder calls nothing in the ircd
+bouncer_record_test.o: ../bouncer_record.c ../../include/bouncer_record.h ../../include/bouncer_session.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_record.c
+
+BOUNCER_RECORD_CMOCKA_OBJS = bouncer_record_cmocka.o bouncer_record_test.o
+bouncer_record_cmocka: $(BOUNCER_RECORD_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(BOUNCER_RECORD_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_eventlog tests - the applied-events log is pure (no ircd deps, no jansson)
 webhook_eventlog_test.o: ../webhook_eventlog.c ../../include/webhook_eventlog.h
