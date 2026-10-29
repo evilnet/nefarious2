@@ -1227,6 +1227,10 @@ struct bounce_choose_row {
                           *   login's (its account changed under the
                           *   session, e.g. an OAUTHBEARER re-auth;
                           *   ruling W3-T12c-2b-f1b) */
+  int announced;         /**< a peer's BS C made this live record a moment
+                          *   ago and no BS A has named its primary yet:
+                          *   the primary's N and BS A are on their way
+                          *   (W3 12c-2b fix round 3, I-1) */
 };
 
 /** What the chooser found for a login of the account (bounce_choose()). */
@@ -1250,9 +1254,13 @@ enum bounce_choose_kind {
                                 *   BOUNCER_REQUIRE_TLS is set (index) */
   BOUNCE_CHOOSE_UNREACHABLE,   /**< sessions are left, none can be joined
                                 *   by these rules */
-  BOUNCE_CHOOSE_FOREIGN        /**< the session it would go into has a
+  BOUNCE_CHOOSE_FOREIGN,       /**< the session it would go into has a
                                 *   primary of another identity
                                 *   (primary_other): never joined (index) */
+  BOUNCE_CHOOSE_WAIT           /**< a live session a peer has just announced
+                                *   (announced) whose primary is not named
+                                *   yet: wait for it, never reclaim it as an
+                                *   orphan (index) */
 };
 
 /** The most sessions of one account the chooser reads (one bit each in
@@ -1340,7 +1348,9 @@ enum bounce_resume_route {
   BOUNCE_ROUTE_RECLAIM,          /**< a live session with no primary:
                                   *   become its primary */
   BOUNCE_ROUTE_REJECT_KC,        /**< refuse: another Keycloak user's */
-  BOUNCE_ROUTE_REJECT_DUPLICATE  /**< refuse: no room, or TLS */
+  BOUNCE_ROUTE_REJECT_DUPLICATE, /**< refuse: no room, or TLS */
+  BOUNCE_ROUTE_DEFER             /**< wait: the session's primary is on its
+                                  *   way (the login is deferred again) */
 };
 
 /** The registration's route for a chooser answer (NULL is PLAIN). */

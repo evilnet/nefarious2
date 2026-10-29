@@ -1355,6 +1355,12 @@ void bounce_session_adopt_kc_id(struct BouncerSession *session, const char *id)
  * @param[in]  may_end  A registration (1): the previous user's leftover
  *                      may end; a hold-on (0): it is refused instead.
  * @return How many rows were filled (at most BOUNCE_CHOOSE_MAX_ROWS). */
+/** How long a live record a peer's BS C just made waits for the BS A that
+ * names its primary before it reads as an orphan (seconds).  The peer
+ * sends BS C, N and BS A back to back from one registration; this only
+ * bounds a BS A that never comes (W3 12c-2b fix round 3, I-1). */
+#define BOUNCE_ANNOUNCED_WAIT 5
+
 static int bounce_choose_read(struct Client *cptr, const char *account,
                               struct BouncerSession **sessions,
                               struct bounce_choose_row *rows,
@@ -1400,6 +1406,10 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
      * never joined, revived or aliased into. */
     r->primary_other = p && !bounce_session_primary_is_identity(s,
                               cli_user(cptr) ? cli_user(cptr)->kc_id : NULL);
+    /* A peer's BS C made it a moment ago and its BS A, naming the
+     * primary, has not come yet (I-1): the chooser waits for it. */
+    r->announced = !p && s->hs_state == BOUNCE_ACTIVE && s->hs_announced
+                   && CurrentTime - s->hs_announced < BOUNCE_ANNOUNCED_WAIT;
     sessions[n++] = s;
   }
   return n;
@@ -1640,6 +1650,21 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                 account, session->hs_sessid,
                 cli_name(bounce_primary_server(session)));
       return BOUNCE_RESUME_ALIAS_REMOTE;
+
+    case BOUNCE_CHOOSE_WAIT:
+      /* A peer announced this session a moment ago and has not named its
+       * primary yet: its N and BS A are on their way (a read that ended
+       * between them).  Reclaiming it now would put a second live primary
+       * under its id; the login waits for the BS A, at most
+       * BOUNCE_ANNOUNCED_WAIT seconds (W3 12c-2b fix round 3, I-1). */
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: deferring the registration of %s (%s): session %s "
+                "was announced by %s a moment ago and its primary is not "
+                "named yet", cli_name(cptr), account, session->hs_sessid,
+                session->hs_origin);
+      bounce_schedule_registration_drain_in(
+        (int)(session->hs_announced + BOUNCE_ANNOUNCED_WAIT - CurrentTime));
+      return BOUNCE_RESUME_DEFER_PEER_INBOUND;
 
     case BOUNCE_CHOOSE_ORPHAN:
       /* Orphaned ACTIVE session -- reclaim as primary.  An orphaned
@@ -6732,6 +6757,8 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     session->hs_attach_count = attach_count;
     session->hs_total_active = total_active;
 
+    /* Live: its primary's BS A follows (I-1: the chooser waits for it). */
+    session->hs_announced = is_holding ? 0 : CurrentTime;
     if (is_holding) {
       session->hs_state = BOUNCE_HOLDING;
       session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
@@ -6806,6 +6833,9 @@ bsc_forward:
     session = bounce_find_by_token_sessid(account, sessid);
     if (!session)
       return 0;
+    /* The announcing peer has named the primary: no longer "on its way"
+     * (I-1).  Logins waiting for it are drained at the end of this read. */
+    session->hs_announced = 0;
     slot = session->hs_client;
     slot_ours = slot && MyConnect(slot) && IsUser(slot) && !IsBouncerAlias(slot);
     /* What the line does to our record.  An old form names no client: a
@@ -14764,6 +14794,21 @@ void bounce_schedule_registration_drain(void)
     return;
   timer_add(timer_init(&registration_drain_timer),
             bounce_registration_drain_cb, NULL, TT_RELATIVE, 0);
+}
+
+/** The drain a login waiting for an announced primary asks for, when its
+ * wait ends (I-1): nothing else may come to set one off if the BS A never
+ * does. */
+static struct Timer registration_wait_timer;
+
+/** See include/bouncer_session.h. */
+void bounce_schedule_registration_drain_in(int seconds)
+{
+  if (t_active(&registration_wait_timer))
+    return;   /* every wait is the same length: the armed one ends first */
+  timer_add(timer_init(&registration_wait_timer),
+            bounce_registration_drain_cb, NULL, TT_RELATIVE,
+            seconds > 0 ? seconds : 0);
 }
 
 int bounce_defer_registration(struct Client *cli)

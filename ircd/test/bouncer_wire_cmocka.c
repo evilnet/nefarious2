@@ -2211,6 +2211,41 @@ static void choose_live_sessions(void **s)
   assert_int_equal(c.index, 0);
 }
 
+static void choose_waits_for_an_announced_primary(void **s)
+{
+  /* A live record a peer's BS C made a moment ago, with no BS A yet: its
+   * primary is on its way (fix round 3, I-1).  Never an orphan to reclaim:
+   * wait. */
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = live_remote();
+  r[0].primary = r[0].primary_server = 0;
+  r[0].announced = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_WAIT);
+  assert_int_equal(c.index, 0);
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_DEFER);
+  /* Not announced (or no longer): an orphan, as before. */
+  r[0].announced = 0;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ORPHAN);
+  /* Once BS A names the primary the mark no longer matters. */
+  r[0] = live_remote();
+  r[0].announced = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ACTIVE_REMOTE);
+  /* Our own held ghost still goes first. */
+  r[0] = live_remote();
+  r[0].primary = r[0].primary_server = 0;
+  r[0].announced = 1;
+  r[1] = held_ours(4);
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_LOCAL);
+  assert_int_equal(c.index, 1);
+  assert_int_equal(c.active_kind, BOUNCE_CHOOSE_WAIT);
+}
+
 static void choose_keeps_the_live_verdict_for_a_failed_revive(void **s)
 {
   struct bounce_choose_row r[2];
@@ -2234,6 +2269,16 @@ static struct bounce_hold_on_facts join_facts(enum bounce_choose_kind kind)
   f.choice.active_index = -1;
   f.primary_user = f.primary_home_aware = 1;
   return f;
+}
+
+static void plan_waits_for_an_announced_primary(void **s)
+{
+  /* A hold-on in that moment is a passing state: DEFER (TRY_AGAIN). */
+  struct bounce_hold_on_facts f = join_facts(BOUNCE_CHOOSE_WAIT);
+  (void)s;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  f.primary_user = f.primary_home_aware = 0;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
 }
 
 static void plan_member_is_noop(void **s)
@@ -2552,6 +2597,7 @@ static struct bounce_choose_row grid_row(unsigned int v)
   r.devices = (v >> 6) & 1;
   r.full = r.devices && ((v >> 7) & 1);
   r.primary_other = r.primary && ((v >> 8) & 1);
+  r.announced = (v >> 9) & 1;
   r.disconnect_time = (long)((v >> 1) % 5);
   return r;
 }
@@ -2565,7 +2611,7 @@ static void registration_and_hold_on_agree(void **s)
    * Keycloak user's session is +b's; a create is a create; and +b never
    * makes a second session where the registration would not. */
   unsigned int a, b, tls;
-  unsigned int grid = 3 * 512;
+  unsigned int grid = 3 * 1024;
   (void)s;
   for (a = 0; a < grid; a++)
     for (b = 0; b < grid; b += 7)
@@ -2613,6 +2659,13 @@ static void registration_and_hold_on_agree(void **s)
         case BOUNCE_ROUTE_REJECT_DUPLICATE:
           assert_true(plan == BOUNCE_HOLD_REFUSE_FULL
                       || plan == BOUNCE_HOLD_REFUSE_TLS
+                      || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
+          break;
+        case BOUNCE_ROUTE_DEFER:
+          /* Both wait for an announced primary (fix round 3, I-1); a
+           * hold-on that would end another Keycloak user's leftover first
+           * refuses, as everywhere. */
+          assert_true(plan == BOUNCE_HOLD_DEFER
                       || (f.choice.end_stale && plan == BOUNCE_HOLD_REFUSE_KC));
           break;
         case BOUNCE_ROUTE_RECLAIM:
@@ -2668,6 +2721,8 @@ int main(void)
     cmocka_unit_test(choose_drops_garbage_and_looks_again),
     cmocka_unit_test(choose_live_sessions),
     cmocka_unit_test(choose_keeps_the_live_verdict_for_a_failed_revive),
+    cmocka_unit_test(choose_waits_for_an_announced_primary),
+    cmocka_unit_test(plan_waits_for_an_announced_primary),
     cmocka_unit_test(plan_member_is_noop),
     cmocka_unit_test(plan_waits_out_a_burst),
     cmocka_unit_test(plan_follows_the_chooser),

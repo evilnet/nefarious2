@@ -583,6 +583,14 @@ struct BouncerSession {
                                        *   split reads the origin only for
                                        *   a session with no primary. */
   char hs_ghost_numeric[6];           /**< Ghost client numeric during HOLDING */
+  time_t hs_announced;                /**< When a peer's BS C made this live
+                                       *   record, until a BS A names its
+                                       *   primary (0 otherwise): for
+                                       *   BOUNCE_ANNOUNCED_WAIT seconds the
+                                       *   chooser waits for that primary
+                                       *   rather than reclaim the record as
+                                       *   an orphan (W3 12c-2b fix round 3,
+                                       *   I-1). */
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
   char hs_hold_reason[128];           /**< Why the last hold happened (the
@@ -1943,6 +1951,11 @@ extern void bounce_link_input_read(struct Client *link);
  * gone; a client queued again outside any link's read).  Idempotent until
  * it runs. */
 extern void bounce_schedule_registration_drain(void);
+
+/** As bounce_schedule_registration_drain(), @a seconds from now: when a
+ * login waits for a peer's announced primary (the chooser's WAIT), the end
+ * of that wait (W3 12c-2b fix round 3, I-1). */
+extern void bounce_schedule_registration_drain_in(int seconds);
 
 /** Remove a client from the pending-registration queue, every entry of
  * it, including the entries a running drain has taken off the queue and not

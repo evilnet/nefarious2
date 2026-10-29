@@ -604,7 +604,10 @@ static void choose_live(const struct bounce_choose_row *rows, int n,
   else if (!r->primary_ours && r->primary_server && r->primary && !r->full)
     *kind = BOUNCE_CHOOSE_ACTIVE_REMOTE;
   else if (!r->primary)
-    *kind = BOUNCE_CHOOSE_ORPHAN;
+    /* A record a peer has just announced has no primary only until that
+     * peer's N and BS A arrive (fix round 3, I-1): reclaiming it would
+     * make a second live primary under its id. */
+    *kind = r->announced ? BOUNCE_CHOOSE_WAIT : BOUNCE_CHOOSE_ORPHAN;
   else if (r->full)
     *kind = BOUNCE_CHOOSE_FULL;
   else if (tls_refused)
@@ -702,6 +705,7 @@ enum bounce_resume_route bounce_resume_route(const struct bounce_choice *c)
   case BOUNCE_CHOOSE_TLS:           return BOUNCE_ROUTE_REJECT_DUPLICATE;
   case BOUNCE_CHOOSE_UNREACHABLE:   break;
   case BOUNCE_CHOOSE_FOREIGN:       break;   /* never another identity */
+  case BOUNCE_CHOOSE_WAIT:          return BOUNCE_ROUTE_DEFER;
   }
   return BOUNCE_ROUTE_PLAIN;
 }
@@ -734,6 +738,9 @@ bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
     return BOUNCE_HOLD_REFUSE_TLS;
   case BOUNCE_CHOOSE_ORPHAN:
     return BOUNCE_HOLD_REFUSE_UNREACHABLE;
+  case BOUNCE_CHOOSE_WAIT:
+    /* A peer's primary on its way: a passing state (fix round 3, I-1). */
+    return BOUNCE_HOLD_DEFER;
   case BOUNCE_CHOOSE_UNREACHABLE:
     return f->choice.held_full ? BOUNCE_HOLD_REFUSE_FULL
                                : BOUNCE_HOLD_REFUSE_UNREACHABLE;
