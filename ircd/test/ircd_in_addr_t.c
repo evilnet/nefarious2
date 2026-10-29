@@ -66,6 +66,7 @@ test_address(struct address_test *addr)
     struct irc_in_addr parsed;
     unsigned int ii, len, val;
     char unparsed[64], base64_v4[64], base64_v6[64];
+    int ret;
 
     /* Convert expected address to network order. */
     for (ii = 0; ii < 8; ++ii)
@@ -93,10 +94,12 @@ test_address(struct address_test *addr)
     assert(!!val == addr->is_loopback);
     /* Check base64-to-IP conversion. */
     if (addr->is_ipv4) {
-        base64toip(addr->base64_v4, &parsed);
+        ret = base64toip(addr->base64_v4, &parsed);
+        assert(ret == 0);
         assert(!memcmp(parsed.in6_16+6, addr->expected.in6_16+6, 4));
     } else {
-        base64toip(addr->base64_v6, &parsed);
+        ret = base64toip(addr->base64_v6, &parsed);
+        assert(ret == 0);
         assert(!memcmp(&parsed, &addr->expected, sizeof(parsed)));
     }
     /* Tests completed. */
@@ -193,10 +196,12 @@ test_b64ip(struct b64ip_test *test)
 {
     struct irc_in_addr parsed;
     unsigned int ii;
+    int ret;
 
     for (ii = 0; ii < 8; ++ii)
         test->expected.in6_16[ii] = htons(test->expected.in6_16[ii]);
-    base64toip(test->base64, &parsed);
+    ret = base64toip(test->base64, &parsed);
+    assert(ret == 0);
     assert(!memcmp(&parsed, &test->expected, sizeof(parsed)));
     printf("Passed: %s (%s)\n", test->base64, ircd_ntoa(&parsed));
 }
@@ -219,9 +224,9 @@ static const char *test_bad_b64ips[] = {
     0
 };
 
-/** Check that a malformed IP field decodes to the all-zero address,
- * reading nothing past its terminator and writing nothing past the
- * irc_in_addr.
+/** Check that a malformed IP field is rejected and decodes to the
+ * all-zero address, reading nothing past its terminator and writing
+ * nothing past the irc_in_addr.
  * @param[in] bad Malformed field.
  */
 static void
@@ -233,18 +238,53 @@ test_bad_b64ip(const char *bad)
     } out;
     char input[128];
     unsigned int ii;
+    int ret;
 
     /* Pad past the terminator with non-zero digits, so a decoder that
      * reads beyond it decodes something other than zero. */
     memset(input, 'B', sizeof(input));
     memcpy(input, bad, strlen(bad) + 1);
     memset(&out, 0xA5, sizeof(out));
-    base64toip(input, &out.addr);
+    ret = base64toip(input, &out.addr);
+    assert(ret == -1);
     for (ii = 0; ii < 8; ++ii)
         assert(out.addr.in6_16[ii] == 0);
     for (ii = 0; ii < sizeof(out.guard); ++ii)
         assert(out.guard[ii] == 0xA5);
-    printf("Passed: \"%s\" (malformed)\n", bad);
+    printf("Passed: \"%s\" (rejected)\n", bad);
+}
+
+/** Structure to describe a test for user numnick validation. */
+struct numnick_test {
+    const char *numnick; /**< Numnick a peer sends. */
+    unsigned int is_valid : 1; /**< Is it a well-formed user numnick? */
+};
+
+/** Array of user numnicks to test with. */
+static struct numnick_test test_user_numnicks[] = {
+    { "ABAAA", 1 },
+    { "B]A", 1 },
+    { "z09[]", 1 },
+    { "", 0 },
+    { "A", 0 },
+    { "AB", 0 },
+    { "ABAA", 0 },
+    { "ABAAAA", 0 },
+    { "AB AA", 0 },
+    { "AB:AA", 0 },
+    { "A_A", 0 },
+    { 0 }
+};
+
+/** Check ValidUserNumNick() on a single numnick.
+ * @param[in] test Numnick and whether it is well-formed.
+ */
+static void
+test_user_numnick(struct numnick_test *test)
+{
+    assert(!!ValidUserNumNick(test->numnick) == test->is_valid);
+    printf("Passed: \"%s\" (%s)\n", test->numnick,
+           test->is_valid ? "valid" : "invalid");
 }
 
 /** Check that an empty numnick decodes to 0 without reading past its
@@ -315,6 +355,8 @@ main(int argc, char *argv[])
     for (ii = 0; test_bad_b64ips[ii]; ++ii)
         test_bad_b64ip(test_bad_b64ips[ii]);
     test_b64_empty();
+    for (ii = 0; test_user_numnicks[ii].numnick; ++ii)
+        test_user_numnick(&test_user_numnicks[ii]);
     test_short_numnicks();
 
     return 0;

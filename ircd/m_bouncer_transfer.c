@@ -117,7 +117,14 @@ int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
        * new one so messages from the promoted alias route correctly.
        * old_client keeps its nick, channels, and all state — only
        * the internal numeric changes. */
-      struct Client *new_server = FindNServer(parv[3]);
+      struct Client *new_server;
+
+      /* SetRemoteNumNick() below files old_client under this numeric,
+       * so it must be a well-formed user numnick. */
+      if (!ValidUserNumNick(parv[3]))
+        goto relay;
+
+      new_server = FindNServer(parv[3]);
       if (!new_server || !IsServer(new_server))
         goto relay;
 
