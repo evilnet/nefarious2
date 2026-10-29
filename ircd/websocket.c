@@ -183,17 +183,19 @@ static int parse_ws_handshake(const char *buffer, int length,
       /* Token-boundary scan (a hypothetical "notext.ircv3.net" must
        * not match); first supported token wins, and a preference
        * already chosen from an earlier header line is never
-       * overridden, so multi-header requests keep client order. */
+       * overridden, so multi-header requests keep client order.
+       * The line is not NUL-terminated at its "\r\n", so every step is
+       * bounded by end; each pass consumes at least one byte. */
       const char *p = line + 23;
-      while (*p && *subproto == WS_SUBPROTO_NONE) {
+      while (p < end && *subproto == WS_SUBPROTO_NONE) {
         const char *e;
         size_t n;
-        while (*p == ' ' || *p == '\t' || *p == ',')
+        while (p < end && (*p == ' ' || *p == '\t' || *p == ','))
           p++;
-        if (!*p)
+        if (p >= end)
           break;
         e = p;
-        while (*e && *e != ',' && *e != ' ' && *e != '\t' && *e != '\r')
+        while (e < end && *e != ',' && *e != ' ' && *e != '\t')
           e++;
         n = (size_t)(e - p);
         if (n == 14 && 0 == strncasecmp(p, "text.ircv3.net", 14))
