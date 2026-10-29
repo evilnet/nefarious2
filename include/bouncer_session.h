@@ -1285,7 +1285,9 @@ extern struct BouncerSession *bounce_should_hold(struct Client *cptr);
  * @param[in] session Session to revive (must be HOLDING with local ghost).
  * @param[in] temp Temp client whose socket will be transplanted.
  *                 Socket is stolen; call bounce_free_temp_client() after.
- * @return 0 on success, -1 on error.
+ * @return 0 on success; -1 when refused before anything changed; -2 when
+ *         the transplant failed after temp's socket was taken (temp is a
+ *         husk: free it with bounce_free_temp_client, never register it).
  */
 extern int bounce_revive(struct BouncerSession *session, struct Client *temp);
 

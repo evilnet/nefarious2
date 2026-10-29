@@ -564,6 +564,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     time_t saved_since_time = 0;
     if (IsAccount(sptr) && bounce_enabled_for(sptr)) {
       struct BouncerSession *revive_target = NULL;
+      int revive_rc;
 
       /* Try 1: Local HOLDING ghost — highest priority */
       revive_target = bounce_find_best_held(cli_account(sptr));
@@ -627,7 +628,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
         revive_target = NULL;
       }
 
-      if (revive_target && bounce_revive(revive_target, sptr) == 0) {
+      revive_rc = revive_target ? bounce_revive(revive_target, sptr) : -1;
+      if (revive_rc == -2) {
+        /* The transplant failed after sptr's socket was taken: sptr is a
+         * husk and the session is held again.  Free it like the success
+         * path does; registering it would hand the session a dead client. */
+        bounce_free_temp_client(sptr);
+        return CPTR_KILLED;
+      }
+      if (revive_rc == 0) {
         /* Success! Ghost is now alive with our socket.
          * sptr is now a husk with fd=-1. Free it silently. */
         struct Client *ghost = revive_target->hs_client;
