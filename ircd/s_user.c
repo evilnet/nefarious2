@@ -143,6 +143,44 @@ void free_user(struct User* user)
   }
 }
 
+/** Free what a user holds besides its channels: its pending INVITEs, its
+ * SILENCE list and its MARKs.
+ *
+ * remove_client_from_list() calls this for every client with a User, just
+ * before free_user(), so no exit path leaves them behind.  The normal
+ * branch of exit_one_client() frees them itself (this then finds the lists
+ * empty); its bouncer branches (an alias, a held ghost) return before that.
+ * A held ghost keeps its live face's INVITEs and, being MyConnect, is
+ * invited while it is held: its KILL, a collision or an X3 GHOST then
+ * failed free_user()'s assert(0 == user->invited) and aborted the server
+ * (without asserts, the channel's invite list kept the freed client and
+ * destruct_channel() read it).
+ *
+ * Call it after the client has left its channels.  An INVITE's channel is
+ * still valid then: destruct_channel() deletes a channel's invites before
+ * it frees the channel.  Local frees only; nothing is sent.
+ *
+ * @param[in] cptr Client whose lists are freed.
+ */
+void free_user_lists(struct Client *cptr)
+{
+  struct SLink *lp;
+  struct Ban *bp;
+
+  assert(0 != cptr);
+  assert(0 != cli_user(cptr));
+
+  while ((lp = cli_user(cptr)->invited))
+    del_invite(cptr, lp->value.chptr);
+
+  while ((bp = cli_user(cptr)->silence)) {
+    cli_user(cptr)->silence = bp->next;
+    free_ban(bp);
+  }
+
+  del_marks(cptr);
+}
+
 /** Find number of User structs allocated and memory used by them.
  * @param[out] count_out Receives number of User structs allocated.
  * @param[out] bytes_out Receives number of bytes used by User structs.

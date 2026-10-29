@@ -589,6 +589,11 @@ void remove_client_from_list(struct Client *cptr)
     off_history(cptr);
   }
   if (cli_user(cptr)) {
+    /* Its INVITEs, SILENCE list and MARKs go here, where every exit ends:
+     * the alias and held-ghost branches of exit_one_client() return before
+     * the normal branch frees them, and free_user() asserts no INVITE is
+     * left.  The client has left its channels by now. */
+    free_user_lists(cptr);
     free_user(cli_user(cptr));
     cli_user(cptr) = 0;
   }
