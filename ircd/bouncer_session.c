@@ -10107,8 +10107,22 @@ static void bounce_live_join(struct BouncerSession *s, struct Client *j,
   ircd_snprintf(0, reason, sizeof(reason), "Attached to %s's session",
                 cli_name(p));
 
-  /* 1. The old face leaves (ruling W3-P2: as a plain user). */
+  /* 1. The old face leaves (ruling W3-P2: as a plain user).  Its pending
+   * INVITEs and its SILENCE list are the face's and go with it: an alias
+   * keeps none (exit_one_client's alias branch, as the normal one, frees
+   * them; free_user asserts no invite is left -- fix round 1, C1). */
   quit_time = exit_face_departs(j, reason);
+  {
+    struct SLink *lp;
+    struct Ban *bp;
+
+    while ((lp = cli_user(j)->invited))
+      del_invite(j, lp->value.chptr);
+    while ((bp = cli_user(j)->silence)) {
+      cli_user(j)->silence = bp->next;
+      free_ban(bp);
+    }
+  }
 
   /* 2. Its own channels (U1). */
   for (m = cli_user(j)->channel; m; m = m->next_channel)

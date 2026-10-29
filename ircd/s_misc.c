@@ -461,6 +461,17 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         del_list_watch(bcptr);
       bounce_alias_untrack(bcptr);
       remove_user_from_all_channels(bcptr);
+      /* What a user holds besides its channels, freed as the normal branch
+       * below frees it: a client that became an alias while it held an
+       * INVITE (a live client joining a session, a demoted primary, a
+       * client converted in place) still has it, and free_user() asserts
+       * none is left (W3 12c-2b fix round 1, C1). */
+      while ((lp = cli_user(bcptr)->invited))
+        del_invite(bcptr, lp->value.chptr);
+      while ((bp = cli_user(bcptr)->silence)) {
+        cli_user(bcptr)->silence = bp->next;
+        free_ban(bp);
+      }
       RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));
       remove_client_from_list(bcptr);
       return;
