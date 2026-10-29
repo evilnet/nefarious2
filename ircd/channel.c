@@ -2867,8 +2867,10 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                      " %s%s:%d",
                                      NumNick(MB_CLIENT(mbuf, i)),
                                      MB_OPLEVEL(mbuf, i));
-          *strptro_i += ircd_snprintf(0, strptro+ *strptro_i, BUFSIZE - *strptro_i,
-                                     " %s%s", NumNick(MB_CLIENT(mbuf, i)));
+          /* A bounced deop carries the oplevel too, in remstr only. */
+          if (strptro)
+            *strptro_i += ircd_snprintf(0, strptro+ *strptro_i, BUFSIZE - *strptro_i,
+                                       " %s%s", NumNick(MB_CLIENT(mbuf, i)));
 
       /* deal with other modes that take clients */
       } else if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE)) {
@@ -4580,9 +4582,12 @@ mode_parse_client(struct ParseState *state, int *flag_p)
     /* find client we're manipulating */
     acptr = find_chasing(state->sptr, t_str, NULL);
   } else {
-    if (t_str[5] == ':') {
-      t_str[5] = '\0';
-      oplevel = atoi(t_str + 6);
+    colon = strchr(t_str, ':');
+    if (colon != NULL) {
+      *colon++ = '\0';
+      /* As for local users, only an op carries an oplevel. */
+      if (*flag_p == CHFL_CHANOP && state->dir == MODE_ADD)
+        oplevel = atoi(colon);
     }
     acptr = findNUser(t_str);
   }
