@@ -10038,6 +10038,22 @@ static int bounce_links_mid_burst(void)
   return 0;
 }
 
+/** A session the record holds @a c in by itself -- its primary slot, or
+ * its alias roster -- whatever the account it is listed under; NULL when
+ * none.  By the client, not by its account: an OAUTHBEARER re-auth changes
+ * a member's account and leaves it where it is (fix round 2, N4). */
+static struct BouncerSession *session_holding_client(struct Client *c)
+{
+  struct BouncerSession *s;
+  int i;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
+      if (s->hs_client == c || session_roster_has(s, c))
+        return s;
+  return NULL;
+}
+
 /** The facts for @a cptr, and the plan (bounce_hold_on_plan()).  The one
  * change it makes is the chooser's: a session primary resolved from its
  * ghost numeric (bounce_choose_read()).
@@ -10066,8 +10082,24 @@ static enum bounce_hold_on_plan hold_on_read(struct Client *cptr,
       || !bounce_enabled_for(cptr))
     return BOUNCE_HOLD_NOOP;
 
-  f.member = IsBouncerAlias(cptr) || bounce_get_session(cptr) != NULL;
-  if (!f.member) {
+  /* A member by its account, as before; one the record holds by itself in
+   * a session of another account is no joiner either, and is refused
+   * (N4): its +b would otherwise make or join a session of its new account
+   * while it stays the old one's primary or device. */
+  if (bounce_get_session(cptr))
+    f.member = 1;
+  else {
+    struct BouncerSession *held = session_holding_client(cptr);
+    if (held && 0 != ircd_strcmp(held->hs_account, cli_account(cptr))) {
+      f.foreign_member = 1;
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: %s (%s) turns hold on while session %s of %s holds "
+                "it: refused", cli_name(cptr), cli_account(cptr),
+                held->hs_sessid, held->hs_account);
+    } else
+      f.member = held != NULL || IsBouncerAlias(cptr);
+  }
+  if (!f.member && !f.foreign_member) {
     f.burst = bounce_links_mid_burst();
 #ifdef USE_SSL
     f.tls_refused = feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl;

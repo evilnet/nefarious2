@@ -1376,6 +1376,10 @@ enum bounce_hold_on_plan {
 /** The facts the hold-on planner reads (bounce_hold_on_plan()). */
 struct bounce_hold_on_facts {
   int member;                /**< the client is in a session already */
+  int foreign_member;        /**< it is some session's primary or device by
+                              *   itself -- the record holds it -- but that
+                              *   session is not its account's (its account
+                              *   changed under it: an OAUTHBEARER re-auth) */
   int burst;                 /**< a server link of ours is mid-burst */
   struct bounce_choice choice; /**< the chooser's answer for the client */
   int primary_user;          /**< the chosen session's primary is a user,
@@ -1394,8 +1398,12 @@ struct bounce_hold_on_facts {
  * account has none (user decision 2026-10-27: "they're only supposed to
  * get the one").
  *
- * A member: NOOP.  Mid-burst: DEFER (no hold or membership transition
- * between a client's burst N and the end of that link's burst, R14(g)).
+ * A client the record holds as some session's primary or device by itself
+ * while that session is not its account's (its account changed under it):
+ * REFUSE_KC, before anything else -- never a joiner, never a second session
+ * (fix round 2, N4).  A member: NOOP.  Mid-burst: DEFER (no hold or
+ * membership transition between a client's burst N and the end of that
+ * link's burst, R14(g)).
  * Then by the chooser: KC_REFUSE is REFUSE_KC, and so is any answer that
  * would end the previous Keycloak user's leftover first (end_stale): a
  * hold turned on after registration never ends another Keycloak user's

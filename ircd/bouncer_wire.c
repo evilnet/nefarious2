@@ -711,6 +711,10 @@ bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
 {
   if (!f)
     return BOUNCE_HOLD_DEFER;
+  /* Already some session's primary or device, of another account than its
+   * own (fix round 2, N4): never a joiner, and never a second session. */
+  if (f->foreign_member)
+    return BOUNCE_HOLD_REFUSE_KC;
   if (f->member)
     return BOUNCE_HOLD_NOOP;
   /* R14(g): no hold or membership transition while a link is mid-burst. */

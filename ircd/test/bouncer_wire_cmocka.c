@@ -2466,6 +2466,40 @@ static void plan_refuses_a_primary_of_another_identity(void **s)
   assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
 }
 
+static void plan_refuses_a_member_of_another_identitys_session(void **s)
+{
+  /* A client the record holds as a session's primary or device by itself,
+   * of another account than its own now (fix round 2, N4: an OAUTHBEARER
+   * re-auth): never a joiner, whatever the chooser read for its new
+   * account -- refused as another identity's, mid-burst too (the refusal
+   * is not a passing state). */
+  static const enum bounce_choose_kind kinds[] = {
+    BOUNCE_CHOOSE_NONE, BOUNCE_CHOOSE_KC_REFUSE, BOUNCE_CHOOSE_HELD_LOCAL,
+    BOUNCE_CHOOSE_HELD_REMOTE, BOUNCE_CHOOSE_ACTIVE_REMOTE,
+    BOUNCE_CHOOSE_ACTIVE_ALIAS, BOUNCE_CHOOSE_ORPHAN, BOUNCE_CHOOSE_FULL,
+    BOUNCE_CHOOSE_TLS, BOUNCE_CHOOSE_UNREACHABLE, BOUNCE_CHOOSE_FOREIGN
+  };
+  size_t i;
+  (void)s;
+  for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    struct bounce_hold_on_facts f = join_facts(kinds[i]);
+    f.foreign_member = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
+    f.burst = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
+    f.burst = 0;
+    f.primary_dying = 1;
+    f.full = f.tls_refused = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
+  }
+  /* A member of its own account's session is still a member. */
+  {
+    struct bounce_hold_on_facts f = join_facts(BOUNCE_CHOOSE_NONE);
+    f.member = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_NOOP);
+  }
+}
+
 static void registration_routes(void **s)
 {
   struct bounce_choice c;
@@ -2645,6 +2679,7 @@ int main(void)
     cmocka_unit_test(registration_routes),
     cmocka_unit_test(choose_never_joins_a_primary_of_another_identity),
     cmocka_unit_test(plan_refuses_a_primary_of_another_identity),
+    cmocka_unit_test(plan_refuses_a_member_of_another_identitys_session),
     cmocka_unit_test(registration_and_hold_on_agree),
     cmocka_unit_test(swap_survivor_takes_the_faces_channel),
     cmocka_unit_test(reconcile_demote_converts_nothing),
