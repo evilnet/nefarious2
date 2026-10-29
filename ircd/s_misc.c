@@ -297,6 +297,73 @@ static void store_quit_events(struct Client *sptr, const char *comment,
 }
 #endif /* USE_ROCKSDB */
 
+/** See include/s_misc.h.
+ *
+ * Factored from exit_client() and exit_one_client() for a client that
+ * stays connected (W3 12c-2b, design D.1): a live user of ours joining a
+ * bouncer session leaves the network under the face it had, once, before
+ * it becomes a device of the session's primary.  One msgid and one event
+ * time cover every part of it:
+ *  - the QUIT to the members of its channels (not to @a c itself, which
+ *    stays: its own socket is told by its caller);
+ *  - the HISTORY_QUIT rows of those channels;
+ *  - the WATCH/MONITOR logoff of its nick;
+ *  - a Q from it toward every server link -- the IRCv3-aware links carry
+ *    the tags, a legacy link gets the plain line -- except a link whose
+ *    burst is still gated: we have sent it no N for @a c, and the burst it
+ *    gets at the release carries what @a c is then.
+ * It is still a plain user here: a line toward a server link from one of
+ * our aliases is rewritten to its primary for a legacy link (ruling
+ * W3-P2), and the Q must leave as @a c's own.
+ *
+ * Nothing else of exit_one_client's runs: no channel removal (the caller
+ * does it, with the presence time this returns), no count, no flag.
+ */
+int64_t exit_face_departs(struct Client *c, const char *comment)
+{
+  struct DLink *dlp;
+  char msgid[64] = "";
+  uint64_t ms = 0;
+  int64_t quit_time = 0;
+
+  if (!c || !MyUser(c) || !cli_user(c) || !cli_serv(&me))
+    return 0;
+  if (!comment)
+    comment = "";
+
+  if (feature_bool(FEAT_MSGID) || feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    generate_msgid(msgid, sizeof(msgid));
+    ms = history_event_time_ms(NULL);
+    quit_time = presence_event_time(msgid, ms);
+  }
+
+  if (msgid[0] && feature_bool(FEAT_MSGID))
+    sendcmdto_set_client_event(msgid, ms);
+  sendcmdto_common_channels_butone(c, CMD_QUIT, c, ":%s", comment);
+  sendcmdto_set_client_msgid(NULL);
+
+#ifdef USE_ROCKSDB
+  store_quit_events(c, comment, msgid[0] ? msgid : NULL, ms);
+#endif
+
+  check_status_watch(c, RPL_LOGOFF);
+
+  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    struct Client *link = dlp->value.cptr;
+
+    if (!link || !IsServer(link) || IsBurstGated(link))
+      continue;
+    /* Armed per link: a send toward a legacy link consumes the override
+     * without a tag region (as exit_client() arms its QUIT). */
+    if (msgid[0])
+      sendcmdto_set_s2s_tags(ms, msgid);
+    sendcmdto_one(c, CMD_QUIT, link, ":%s", comment);
+  }
+  if (msgid[0])
+    sendcmdto_set_s2s_tags(0, NULL);
+  return quit_time;
+}
+
 /**
  * Exit one client, local or remote. Assuming for local client that
  * all dependents already have been removed, and socket is closed.

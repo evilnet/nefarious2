@@ -537,8 +537,9 @@ bounce_swap_membership(const struct bounce_swap_facts *f)
   return BOUNCE_SWAP_TAKE;
 }
 
+
 /* ---------------------------------------------------------------- */
-/* W3 12c-2b: the chooser                                           */
+/* W3 12c-2b: the chooser and the hold-on planner                    */
 /* ---------------------------------------------------------------- */
 
 int bounce_choose_best_held(const struct bounce_choose_row *rows, int n,
@@ -694,4 +695,90 @@ enum bounce_resume_route bounce_resume_route(const struct bounce_choice *c)
   case BOUNCE_CHOOSE_UNREACHABLE:   break;
   }
   return BOUNCE_ROUTE_PLAIN;
+}
+
+enum bounce_hold_on_plan
+bounce_hold_on_plan(const struct bounce_hold_on_facts *f)
+{
+  if (!f)
+    return BOUNCE_HOLD_DEFER;
+  if (f->member)
+    return BOUNCE_HOLD_NOOP;
+  /* R14(g): no hold or membership transition while a link is mid-burst. */
+  if (f->burst)
+    return BOUNCE_HOLD_DEFER;
+  switch (f->choice.kind) {
+  case BOUNCE_CHOOSE_KC_REFUSE:
+    return BOUNCE_HOLD_REFUSE_KC;
+  case BOUNCE_CHOOSE_NONE:
+    return f->choice.end_stale ? BOUNCE_HOLD_END_STALE_CREATE : BOUNCE_HOLD_CREATE;
+  case BOUNCE_CHOOSE_FULL:
+    return BOUNCE_HOLD_REFUSE_FULL;
+  case BOUNCE_CHOOSE_TLS:
+    return BOUNCE_HOLD_REFUSE_TLS;
+  case BOUNCE_CHOOSE_ORPHAN:
+    return BOUNCE_HOLD_DEFER;
+  case BOUNCE_CHOOSE_UNREACHABLE:
+    return f->choice.held_full ? BOUNCE_HOLD_REFUSE_FULL : BOUNCE_HOLD_DEFER;
+  case BOUNCE_CHOOSE_HELD_LOCAL:
+  case BOUNCE_CHOOSE_HELD_REMOTE:
+  case BOUNCE_CHOOSE_ACTIVE_REMOTE:
+  case BOUNCE_CHOOSE_ACTIVE_ALIAS:
+    break;
+  }
+  /* A session to join: its primary must be one a device can follow. */
+  if (!f->primary_user || f->primary_dying || !f->primary_home_aware)
+    return BOUNCE_HOLD_DEFER;
+  if (f->full)
+    return BOUNCE_HOLD_REFUSE_FULL;
+  if (f->tls_refused)
+    return BOUNCE_HOLD_REFUSE_TLS;
+  return f->choice.kind == BOUNCE_CHOOSE_HELD_LOCAL ? BOUNCE_HOLD_JOIN_PROMOTE
+                                                    : BOUNCE_HOLD_JOIN;
+}
+
+int bounce_hold_on_refused(enum bounce_hold_on_plan plan)
+{
+  return plan == BOUNCE_HOLD_REFUSE_KC || plan == BOUNCE_HOLD_REFUSE_FULL
+         || plan == BOUNCE_HOLD_REFUSE_TLS || plan == BOUNCE_HOLD_DEFER;
+}
+
+int bounce_hold_on_acts(enum bounce_hold_on_plan plan)
+{
+  return plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_JOIN_PROMOTE
+         || plan == BOUNCE_HOLD_CREATE || plan == BOUNCE_HOLD_END_STALE_CREATE;
+}
+
+const char *bounce_hold_on_plan_name(enum bounce_hold_on_plan plan)
+{
+  switch (plan) {
+  case BOUNCE_HOLD_NOOP:             return "noop";
+  case BOUNCE_HOLD_JOIN:             return "join";
+  case BOUNCE_HOLD_JOIN_PROMOTE:     return "join+promote";
+  case BOUNCE_HOLD_CREATE:           return "create";
+  case BOUNCE_HOLD_END_STALE_CREATE: return "end-stale+create";
+  case BOUNCE_HOLD_REFUSE_KC:        return "refuse-keycloak";
+  case BOUNCE_HOLD_REFUSE_FULL:      return "refuse-full";
+  case BOUNCE_HOLD_REFUSE_TLS:       return "refuse-tls";
+  case BOUNCE_HOLD_DEFER:            return "defer";
+  }
+  return "unknown";
+}
+
+enum bounce_hold_tail bounce_hold_tail_step(enum bounce_hold_tail now,
+                                            int on, int acts, int refused)
+{
+  if (on) {
+    /* A refused +b is not set: what was pending stands. */
+    if (refused)
+      return now;
+    return acts ? BOUNCE_HOLD_TAIL_ON : BOUNCE_HOLD_TAIL_NONE;
+  }
+  return acts ? BOUNCE_HOLD_TAIL_END : BOUNCE_HOLD_TAIL_NONE;
+}
+
+int bounce_hold_on_tells(int asker_device, int target_ours, int target_user,
+                         int stands)
+{
+  return asker_device && !target_ours && target_user && stands;
 }

@@ -1333,4 +1333,115 @@ enum bounce_resume_route {
 extern enum bounce_resume_route
 bounce_resume_route(const struct bounce_choice *c);
 
+/** What turning hold on does for a client of ours (W3 12c-2b, design A):
+ * MODE +b, BOUNCER SET HOLD on and PERSISTENCE SET ON alike. */
+enum bounce_hold_on_plan {
+  BOUNCE_HOLD_NOOP,             /**< already a member of a session */
+  BOUNCE_HOLD_JOIN,             /**< join the account's session as a
+                                 *   device of its primary */
+  BOUNCE_HOLD_JOIN_PROMOTE,     /**< join, then take the slot of our own
+                                 *   held ghost (the promote) */
+  BOUNCE_HOLD_CREATE,           /**< the account has no session: make one */
+  BOUNCE_HOLD_END_STALE_CREATE, /**< end the previous Keycloak user's
+                                 *   leftover, then make one */
+  BOUNCE_HOLD_REFUSE_KC,        /**< the session belongs to another
+                                 *   Keycloak user */
+  BOUNCE_HOLD_REFUSE_FULL,      /**< the session has no room */
+  BOUNCE_HOLD_REFUSE_TLS,       /**< the session wants TLS; the client is
+                                 *   plaintext */
+  BOUNCE_HOLD_DEFER             /**< not now: a server link is mid-burst
+                                 *   (R14(g)), or the session's primary is
+                                 *   dying or cannot be found; try again */
+};
+
+/** The facts the hold-on planner reads (bounce_hold_on_plan()). */
+struct bounce_hold_on_facts {
+  int member;                /**< the client is in a session already */
+  int burst;                 /**< a server link of ours is mid-burst */
+  struct bounce_choice choice; /**< the chooser's answer for the client */
+  int primary_user;          /**< the chosen session's primary is a user,
+                              *   not an alias */
+  int primary_dying;         /**< it is being killed or torn down */
+  int primary_home_aware;    /**< it is ours, or homed on an IRCv3-aware
+                              *   server (a legacy home never hears BX C) */
+  int full;                  /**< the chosen session has no room */
+  int tls_refused;           /**< BOUNCER_REQUIRE_TLS and a plaintext
+                              *   client */
+};
+
+/** What turning hold on does for a client of ours that is in no session
+ * (W3 12c-2b): it joins the account's one session -- the chooser's, the
+ * same one a fresh login would attach to -- and makes one only when the
+ * account has none (user decision 2026-10-27: "they're only supposed to
+ * get the one").
+ *
+ * A member: NOOP.  Mid-burst: DEFER (no hold or membership transition
+ * between a client's burst N and the end of that link's burst, R14(g)).
+ * Then by the chooser: KC_REFUSE is REFUSE_KC; NONE is CREATE (after the
+ * stale leftovers end: END_STALE_CREATE); FULL and TLS refuse; ORPHAN
+ * defers; UNREACHABLE refuses FULL when the held session it passed over
+ * had no room, else defers.  A session to join: DEFER when its primary
+ * is no user, is dying or is homed on a legacy server; REFUSE_FULL with
+ * no room; REFUSE_TLS for a plaintext client under REQUIRE_TLS; else
+ * JOIN, or JOIN_PROMOTE when the primary is our own held ghost.
+ *
+ * A refusal changes nothing: the hold stays off and nothing goes on the
+ * wire (user decision U2).
+ *
+ * @param[in] f The facts; NULL is DEFER.
+ */
+extern enum bounce_hold_on_plan
+bounce_hold_on_plan(const struct bounce_hold_on_facts *f);
+
+/** Is @a plan a refusal (the hold is not turned on)? */
+extern int bounce_hold_on_refused(enum bounce_hold_on_plan plan);
+
+/** Does @a plan change the client's session (a join or a create)? */
+extern int bounce_hold_on_acts(enum bounce_hold_on_plan plan);
+
+/** Stable name for logs and tests. Never NULL. */
+extern const char *bounce_hold_on_plan_name(enum bounce_hold_on_plan plan);
+
+/** What a MODE command's hold letters leave for its tail to do, once the
+ * mode loop is done: the final state wins, as for any mode string
+ * (ruling W3-T12b-f4b, carry M1). */
+enum bounce_hold_tail {
+  BOUNCE_HOLD_TAIL_NONE,  /**< nothing */
+  BOUNCE_HOLD_TAIL_END,   /**< end the session the -b named */
+  BOUNCE_HOLD_TAIL_ON     /**< run the +b's join or create */
+};
+
+/** The tail's pending action after one more hold letter.  A later letter
+ * cancels an earlier one: a +b cancels a pending end, a -b a pending join
+ * or create, so the tail runs at most one of the two.
+ *
+ * @param[in] now       The pending action so far.
+ * @param[in] on        The letter is +b (else -b).
+ * @param[in] acts      For +b: its plan joins or creates
+ *                      (bounce_hold_on_acts()); for -b: it names a
+ *                      session to end.
+ * @param[in] refused   For +b: its plan refuses (the +b is not set, so it
+ *                      cancels nothing).
+ * @return The pending action now. */
+extern enum bounce_hold_tail bounce_hold_tail_step(enum bounce_hold_tail now,
+                                                   int on, int acts,
+                                                   int refused);
+
+/** Does the server of a device tell the other servers the hold
+ * preference its +b turned on?  Only the asking device's server, only for
+ * a primary on another server (whose own server drops the mode line as a
+ * fake direction), only for a registered user, and only when a +b stands
+ * at the end of the command (a later -b cancels it): the gate of a -b's
+ * hold 0 (ruling W3-T12b-f4a), for hold 1.  The replica's +b here is not
+ * read: the holder's preference can change without it (an account-wide
+ * METADATA write).
+ *
+ * @param[in] asker_device The command came from a device of ours whose
+ *                         primary is the target.
+ * @param[in] target_ours  The target is a user of ours.
+ * @param[in] target_user  The target is a registered user.
+ * @param[in] stands       The command's last hold letter is +b. */
+extern int bounce_hold_on_tells(int asker_device, int target_ours,
+                                int target_user, int stands);
+
 #endif /* INCLUDED_bouncer_wire_h */

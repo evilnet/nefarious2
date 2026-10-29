@@ -279,17 +279,23 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   arg = parv[2];
 
   if (0 == ircd_strcmp(arg, "ON")) {
+    /* Turning hold on joins the account's session, or makes one when it
+     * has none (W3 12c-2b, user decision U3).  A refusal sets nothing: the
+     * preference stays as it was and nothing goes on the wire (U2). */
+    enum bounce_hold_on_plan plan = bounce_hold_on_plan_for(sptr);
+
+    if (bounce_hold_on_refused(plan)) {
+      bounce_hold_on_fail(sptr, "PERSISTENCE", plan, "SET");
+      return 0;
+    }
     metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
     sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
                              cli_name(sptr), "draft/persistence/hold");
 
-    if (!bounce_get_session(sptr)) {
-      struct BouncerSession *session = NULL;
-      if (bounce_create(sptr, &session) == 0 && session) {
-        bounce_broadcast(session, 'C', NULL);
-        bounce_broadcast(session, 'A', cli_yxx(sptr));
-      }
-    }
+    /* A client in no session joins or makes one (BS C, then BS A); this
+     * reply sends the STATUS itself, after the SET line. */
+    if (!bounce_get_session(sptr))
+      bounce_hold_on(sptr, 0, NULL);
     send_persistence_reply(sptr, "SET", "ON");
     persistence_send_status(sptr);
     return 0;

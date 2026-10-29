@@ -1981,7 +1981,8 @@ static void swap_membership_matrix(void **s)
 #undef RT
 
 /* ---------------------------------------------------------------- */
-/* W3 12c-2b: the chooser a registration and a hold turned on share  */
+/* W3 12c-2b: the chooser, the hold-on planner, the tail's cancel     */
+/* rules, and the parity of registration and +b                       */
 /* ---------------------------------------------------------------- */
 
 /* A live session whose primary is ours, with room. */
@@ -2224,6 +2225,158 @@ static void choose_keeps_the_live_verdict_for_a_failed_revive(void **s)
   assert_int_equal(c.active_index, 0);
 }
 
+static struct bounce_hold_on_facts join_facts(enum bounce_choose_kind kind)
+{
+  struct bounce_hold_on_facts f;
+  memset(&f, 0, sizeof f);
+  f.choice.kind = kind;
+  f.choice.index = 0;
+  f.choice.active_index = -1;
+  f.primary_user = f.primary_home_aware = 1;
+  return f;
+}
+
+static void plan_member_is_noop(void **s)
+{
+  struct bounce_hold_on_facts f = join_facts(BOUNCE_CHOOSE_KC_REFUSE);
+  (void)s;
+  f.member = 1;
+  f.burst = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_NOOP);
+}
+
+static void plan_waits_out_a_burst(void **s)
+{
+  struct bounce_hold_on_facts f = join_facts(BOUNCE_CHOOSE_ACTIVE_ALIAS);
+  (void)s;
+  f.burst = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  f = join_facts(BOUNCE_CHOOSE_NONE);
+  f.burst = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  assert_int_equal(bounce_hold_on_plan(NULL), BOUNCE_HOLD_DEFER);
+}
+
+static void plan_follows_the_chooser(void **s)
+{
+  struct bounce_hold_on_facts f;
+  (void)s;
+  f = join_facts(BOUNCE_CHOOSE_KC_REFUSE);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_KC);
+  f = join_facts(BOUNCE_CHOOSE_NONE);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_CREATE);
+  f.choice.end_stale = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_END_STALE_CREATE);
+  f = join_facts(BOUNCE_CHOOSE_FULL);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_FULL);
+  f = join_facts(BOUNCE_CHOOSE_TLS);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_TLS);
+  f = join_facts(BOUNCE_CHOOSE_ORPHAN);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  f = join_facts(BOUNCE_CHOOSE_UNREACHABLE);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  f.choice.held_full = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_FULL);
+  f = join_facts(BOUNCE_CHOOSE_HELD_LOCAL);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN_PROMOTE);
+  f = join_facts(BOUNCE_CHOOSE_HELD_REMOTE);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
+  f = join_facts(BOUNCE_CHOOSE_ACTIVE_REMOTE);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
+  f = join_facts(BOUNCE_CHOOSE_ACTIVE_ALIAS);
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
+  /* A join after the leftovers end is still a join. */
+  f.choice.end_stale = 1;
+  assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_JOIN);
+}
+
+static void plan_checks_the_primary_it_joins(void **s)
+{
+  static const enum bounce_choose_kind joins[] = {
+    BOUNCE_CHOOSE_HELD_LOCAL, BOUNCE_CHOOSE_HELD_REMOTE,
+    BOUNCE_CHOOSE_ACTIVE_REMOTE, BOUNCE_CHOOSE_ACTIVE_ALIAS
+  };
+  unsigned int i;
+  (void)s;
+  for (i = 0; i < sizeof joins / sizeof joins[0]; i++) {
+    struct bounce_hold_on_facts f = join_facts(joins[i]);
+    f.primary_user = 0;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+    f = join_facts(joins[i]);
+    f.primary_dying = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+    f = join_facts(joins[i]);
+    f.primary_home_aware = 0;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+    f = join_facts(joins[i]);
+    f.full = 1;
+    f.tls_refused = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_FULL);
+    f = join_facts(joins[i]);
+    f.tls_refused = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_REFUSE_TLS);
+  }
+}
+
+static void plan_classes_and_names(void **s)
+{
+  enum bounce_hold_on_plan p;
+  (void)s;
+  for (p = BOUNCE_HOLD_NOOP; p <= BOUNCE_HOLD_DEFER; p++) {
+    int refused = p == BOUNCE_HOLD_REFUSE_KC || p == BOUNCE_HOLD_REFUSE_FULL
+                  || p == BOUNCE_HOLD_REFUSE_TLS || p == BOUNCE_HOLD_DEFER;
+    int acts = p == BOUNCE_HOLD_JOIN || p == BOUNCE_HOLD_JOIN_PROMOTE
+               || p == BOUNCE_HOLD_CREATE || p == BOUNCE_HOLD_END_STALE_CREATE;
+    enum bounce_hold_on_plan q;
+    assert_int_equal(bounce_hold_on_refused(p), refused);
+    assert_int_equal(bounce_hold_on_acts(p), acts);
+    assert_non_null(bounce_hold_on_plan_name(p));
+    assert_string_not_equal(bounce_hold_on_plan_name(p), "?");
+    for (q = BOUNCE_HOLD_NOOP; q < p; q++)
+      assert_string_not_equal(bounce_hold_on_plan_name(p),
+                              bounce_hold_on_plan_name(q));
+  }
+}
+
+static void tail_final_letter_wins(void **s)
+{
+  enum bounce_hold_tail t;
+  (void)s;
+  /* +b with work, then -b with a session to end (none here: the +b's
+   * session is not made yet) -> nothing; with one -> the end. */
+  t = bounce_hold_tail_step(BOUNCE_HOLD_TAIL_NONE, 1, 1, 0);
+  assert_int_equal(t, BOUNCE_HOLD_TAIL_ON);
+  assert_int_equal(bounce_hold_tail_step(t, 0, 0, 0), BOUNCE_HOLD_TAIL_NONE);
+  assert_int_equal(bounce_hold_tail_step(t, 0, 1, 0), BOUNCE_HOLD_TAIL_END);
+  /* -b with a session, then +b: the end is cancelled; the +b runs its
+   * work, or nothing (a member's +b). */
+  t = bounce_hold_tail_step(BOUNCE_HOLD_TAIL_NONE, 0, 1, 0);
+  assert_int_equal(t, BOUNCE_HOLD_TAIL_END);
+  assert_int_equal(bounce_hold_tail_step(t, 1, 0, 0), BOUNCE_HOLD_TAIL_NONE);
+  assert_int_equal(bounce_hold_tail_step(t, 1, 1, 0), BOUNCE_HOLD_TAIL_ON);
+  /* A refused +b is not set: it cancels nothing. */
+  assert_int_equal(bounce_hold_tail_step(t, 1, 0, 1), BOUNCE_HOLD_TAIL_END);
+  assert_int_equal(bounce_hold_tail_step(BOUNCE_HOLD_TAIL_ON, 1, 0, 1),
+                   BOUNCE_HOLD_TAIL_ON);
+  /* +b+b is one +b. */
+  t = bounce_hold_tail_step(BOUNCE_HOLD_TAIL_NONE, 1, 1, 0);
+  assert_int_equal(bounce_hold_tail_step(t, 1, 1, 0), BOUNCE_HOLD_TAIL_ON);
+  /* -b alone with nothing to end. */
+  assert_int_equal(bounce_hold_tail_step(BOUNCE_HOLD_TAIL_NONE, 0, 0, 0),
+                   BOUNCE_HOLD_TAIL_NONE);
+}
+
+static void device_tells_the_holder_when_plus_b_stands(void **s)
+{
+  (void)s;
+  /* bounce_hold_on_tells(asker_device, target_ours, target_user, stands) */
+  assert_true(bounce_hold_on_tells(1, 0, 1, 1));
+  assert_false(bounce_hold_on_tells(1, 0, 1, 0));   /* +b-b: the -b stands */
+  assert_false(bounce_hold_on_tells(0, 0, 1, 1));   /* not a device's */
+  assert_false(bounce_hold_on_tells(1, 1, 1, 1));   /* the primary is ours */
+  assert_false(bounce_hold_on_tells(1, 0, 0, 1));   /* not a user yet */
+}
+
 static void registration_routes(void **s)
 {
   struct bounce_choice c;
@@ -2252,6 +2405,100 @@ static void registration_routes(void **s)
   assert_int_equal(bounce_resume_route(NULL), BOUNCE_ROUTE_PLAIN);
 }
 
+/* One row out of a small grid: every state a session of the account can
+ * be in, as the chooser reads it. */
+static struct bounce_choose_row grid_row(unsigned int v)
+{
+  struct bounce_choose_row r;
+  memset(&r, 0, sizeof r);
+  switch (v % 3) {
+  case 0: r.kc = BKJ_JOIN; break;
+  case 1: r.kc = BKJ_END_STALE; break;
+  default: r.kc = BKJ_REFUSE; break;
+  }
+  v /= 3;
+  r.held = v & 1;
+  r.primary = (v >> 1) & 1;
+  r.primary_ours = r.primary && ((v >> 2) & 1);
+  r.primary_server = r.primary && !((v >> 3) & 1);
+  r.ghost_numeric = (v >> 4) & 1;
+  r.local_holder = r.primary_ours || ((v >> 5) & 1);
+  r.devices = (v >> 6) & 1;
+  r.full = r.devices && ((v >> 7) & 1);
+  r.disconnect_time = (long)((v >> 1) % 5);
+  return r;
+}
+
+static void registration_and_hold_on_agree(void **s)
+{
+  /* Every pair of sessions from the grid, both TLS answers: wherever the
+   * registration would attach a login, +b joins the same session (or
+   * refuses it for the TLS rule it reads more widely, or for room the
+   * revive does not need); the registration's refusal of another
+   * Keycloak user's session is +b's; a create is a create; and +b never
+   * makes a second session where the registration would not. */
+  unsigned int a, b, tls;
+  unsigned int grid = 3 * 256;
+  (void)s;
+  for (a = 0; a < grid; a++)
+    for (b = 0; b < grid; b += 7)
+      for (tls = 0; tls < 2; tls++) {
+        struct bounce_choose_row r[2];
+        struct bounce_hold_on_facts f;
+        enum bounce_resume_route route;
+        enum bounce_hold_on_plan plan;
+
+        r[0] = grid_row(a);
+        r[1] = grid_row(b);
+        memset(&f, 0, sizeof f);
+        bounce_choose(r, 2, (int)tls, &f.choice);
+        route = bounce_resume_route(&f.choice);
+        f.primary_user = f.primary_home_aware = 1;
+        f.tls_refused = (int)tls;
+        f.full = f.choice.index >= 0 && r[f.choice.index].full;
+        plan = bounce_hold_on_plan(&f);
+        switch (route) {
+        case BOUNCE_ROUTE_REVIVE:
+          assert_true(plan == BOUNCE_HOLD_JOIN_PROMOTE
+                      || plan == BOUNCE_HOLD_REFUSE_FULL
+                      || plan == BOUNCE_HOLD_REFUSE_TLS);
+          break;
+        case BOUNCE_ROUTE_ALIAS_REMOTE:
+          assert_true(plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_REFUSE_TLS);
+          break;
+        case BOUNCE_ROUTE_ALIAS_LOCAL:
+          assert_int_equal(plan, BOUNCE_HOLD_JOIN);
+          break;
+        case BOUNCE_ROUTE_REJECT_KC:
+          assert_int_equal(plan, BOUNCE_HOLD_REFUSE_KC);
+          break;
+        case BOUNCE_ROUTE_CREATE:
+          assert_true(plan == BOUNCE_HOLD_CREATE
+                      || plan == BOUNCE_HOLD_END_STALE_CREATE);
+          break;
+        case BOUNCE_ROUTE_REJECT_DUPLICATE:
+          assert_true(plan == BOUNCE_HOLD_REFUSE_FULL
+                      || plan == BOUNCE_HOLD_REFUSE_TLS);
+          break;
+        case BOUNCE_ROUTE_RECLAIM:
+        case BOUNCE_ROUTE_PLAIN:
+          assert_true(plan == BOUNCE_HOLD_DEFER || plan == BOUNCE_HOLD_REFUSE_FULL);
+          break;
+        }
+        /* The same session, whenever +b joins one. */
+        if (plan == BOUNCE_HOLD_JOIN || plan == BOUNCE_HOLD_JOIN_PROMOTE) {
+          assert_true(route == BOUNCE_ROUTE_REVIVE
+                      || route == BOUNCE_ROUTE_ALIAS_REMOTE
+                      || route == BOUNCE_ROUTE_ALIAS_LOCAL);
+          assert_true(f.choice.index == 0 || f.choice.index == 1);
+        }
+        /* A create only when no session is left after the ends. */
+        if (plan == BOUNCE_HOLD_CREATE || plan == BOUNCE_HOLD_END_STALE_CREATE) {
+          unsigned long gone = f.choice.end_stale | f.choice.discard;
+          assert_true((gone & 3UL) == 3UL);
+        }
+      }
+}
 
 int main(void)
 {
@@ -2266,7 +2513,15 @@ int main(void)
     cmocka_unit_test(choose_drops_garbage_and_looks_again),
     cmocka_unit_test(choose_live_sessions),
     cmocka_unit_test(choose_keeps_the_live_verdict_for_a_failed_revive),
+    cmocka_unit_test(plan_member_is_noop),
+    cmocka_unit_test(plan_waits_out_a_burst),
+    cmocka_unit_test(plan_follows_the_chooser),
+    cmocka_unit_test(plan_checks_the_primary_it_joins),
+    cmocka_unit_test(plan_classes_and_names),
+    cmocka_unit_test(tail_final_letter_wins),
+    cmocka_unit_test(device_tells_the_holder_when_plus_b_stands),
     cmocka_unit_test(registration_routes),
+    cmocka_unit_test(registration_and_hold_on_agree),
     cmocka_unit_test(swap_survivor_takes_the_faces_channel),
     cmocka_unit_test(reconcile_demote_converts_nothing),
     cmocka_unit_test(swap_skips_what_no_server_holds_as_the_sessions),

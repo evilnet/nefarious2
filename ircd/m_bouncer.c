@@ -761,6 +761,16 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
   if (0 == ircd_strcmp(parv[2], "HOLD")) {
     /* Account-wide hold preference - stored in metadata */
     if (0 == ircd_strcmp(parv[3], "on")) {
+      /* Turning hold on joins the account's session, or makes one when it
+       * has none (W3 12c-2b, user decision U3: all three hold-on paths).
+       * A refusal sets nothing: the preference stays as it was and
+       * nothing goes on the wire (U2). */
+      enum bounce_hold_on_plan plan = bounce_hold_on_plan_for(sptr);
+
+      if (bounce_hold_on_refused(plan)) {
+        bounce_hold_on_fail(sptr, "BOUNCER", plan, "SET");
+        return 0;
+      }
       metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
       /* Propagate to peers — metadata_set_client only handles local
        * memory + LMDB persistence; the S2S broadcast happens in
@@ -770,36 +780,36 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
        * attaches at the "no preference + DEFAULT_HOLD off" early
        * return.  Visibility "P" mirrors the wire format
        * m_metadata.c::metadata_cmd_set uses for PRIVATE metadata —
-       * target is the client's nick, key is draft/persistence/hold. */
+       * target is the client's nick, key is draft/persistence/hold.
+       * Sent before a join: it names the client by the nick it has now. */
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
                             cli_name(sptr), "draft/persistence/hold");
 
-      /* Auto-create session if this client doesn't own one — turning hold on
-       * should be sufficient to get bouncer behavior without needing TOKEN.
-       * Use bounce_get_session(sptr) instead of bounce_has_sessions() so that
-       * stale sessions (whose primaries haven't been cleaned up yet) don't
-       * prevent this client from getting its own session. */
+      /* A client in no session joins the account's session, or makes one
+       * (bounce_hold_on(): BS C then BS A -- a peer receiving BS C alone
+       * has session->hs_client = NULL and cannot route a later local SASL
+       * connection through bounce_setup_local_alias).  A member's session
+       * stands. */
       if (!bounce_get_session(sptr)) {
         struct BouncerSession *session = NULL;
-        if (bounce_create(sptr, &session) == 0 && session) {
-          bounce_broadcast(session, 'C', NULL);
-          /* BS A is what makes peer servers resolve hs_client to the
-           * primary's Client struct on their side — without it, a peer
-           * receiving BS C has session->hs_client = NULL and cannot
-           * route a subsequent local SASL connection through
-           * bounce_setup_local_alias (it falls back to creating a
-           * parallel primary or treating the connection as a regular
-           * user).  register_user's BS A emit site at s_user.c only
-           * fires when register_user itself created the session — for
-           * sessions created here (post-registration via BOUNCER SET
-           * HOLD on), we must emit BS A explicitly. */
-          bounce_broadcast(session, 'A', cli_yxx(sptr));
 
+        switch (bounce_hold_on(sptr, 1, &session)) {
+        case BOUNCE_HOLD_ON_CREATED:
           send_note(sptr, "BOUNCER", "SESSION_CREATED", session->hs_sessid,
                     "Hold mode enabled, session created");
-        } else {
+          break;
+        case BOUNCE_HOLD_ON_JOINED:
+          send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
+                    "Hold mode enabled, attached to the account's session");
+          break;
+        case BOUNCE_HOLD_ON_FAILED:
           send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
                     "Hold mode enabled (session limit reached)");
+          break;
+        case BOUNCE_HOLD_ON_NOTHING:
+          send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
+                    "Hold mode enabled");
+          break;
         }
       } else {
         send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,

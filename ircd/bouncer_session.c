@@ -2072,12 +2072,15 @@ enum bounce_face_how {
  *
  * In order: the nick (a live socket is told first, by the nick it has:
  * #2); P's user@host (a live socket with chghost told first, under the
- * user@host it has); P's realname, account, Keycloak id and account
- * timestamp, cloak and fake host; P's nick timestamp; P as its primary;
- * then P's user modes, privileges and server notice mask, through the
- * session sync (#9 counts, #13 snomask, #14 privileges), a live socket
- * told its own mode change.  X keeps its own real host and IP: they are
- * its connection's, for oper WHOIS, G-line matching and a later promote.
+ * user@host it has); P's realname (a live socket with setname told by
+ * SETNAME, W3 12c-2b), account, Keycloak id and account timestamp, cloak
+ * and fake host; P's +x (a live X takes it either way: the face it shows
+ * is P's, hidden or not; a registering X only gains it, its own cloaking
+ * follows); P's nick timestamp; P as its primary; then P's user modes,
+ * privileges and server notice mask, through the session sync (#9 counts,
+ * #13 snomask, #14 privileges), a live socket told its own mode change
+ * (the +x with it).  X keeps its own real host and IP: they are its
+ * connection's, for oper WHOIS, G-line matching and a later promote.
  *
  * Not here: the session id, the filing, the channels and the BX C -- each
  * caller has its own (the setup joins P's channels, the demote keeps X's
@@ -2132,6 +2135,11 @@ static void bounce_alias_take_face(struct Client *x, struct Client *p,
    * connection's. */
   ircd_strncpy(user->username, puser->username, USERLEN + 1);
   ircd_strncpy(user->host, puser->host, HOSTLEN + 1);
+  /* The realname: a socket with setname hears the change, under the face
+   * it has now (W3 12c-2b; row 379(2)). */
+  if (live && 0 != strcmp(cli_info(x), cli_info(p))
+      && CapOwnHas(x, CAP_SETNAME))
+    sendcmdto_one(x, CMD_SETNAME, x, ":%s", cli_info(p));
   ircd_strncpy(cli_info(x), cli_info(p), REALLEN + 1);
   ircd_strncpy(user->account, puser->account, ACCOUNTLEN + 1);
   user->acc_create = puser->acc_create;
@@ -2143,6 +2151,8 @@ static void bounce_alias_take_face(struct Client *x, struct Client *p,
   ircd_strncpy(user->fakehost, puser->fakehost, HOSTLEN + 1);
   if (IsHiddenHost(p))
     SetHiddenHost(x);
+  else if (live)
+    ClearHiddenHost(x);
   cli_lastnick(x) = cli_lastnick(p);
   user->alias_primary = p;
 
@@ -2192,6 +2202,71 @@ static void bounce_repoint_file(struct BouncerSession *record, struct Client *c)
   for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
     if (s != record)
       session_roster_drop(s, c, 0);
+}
+
+/** Our alias @a c takes its primary @a p's channels: an alias member of
+ * every channel @a p is in, with @a p's status and the JOIN's msgid and
+ * time, as a device attaching at registration is (bounce_setup_local_alias
+ * Step 7).  A +Z channel is skipped for a plaintext @a c, which is told why
+ * (m_join's rule; 12c-2a carry 5).  Nothing is shown to the channels: an
+ * alias membership is not in NAMES; the BX C that follows lists them. */
+static void bounce_alias_take_channels(struct Client *c, struct Client *p)
+{
+  struct Membership *member;
+
+  for (member = cli_user(p)->channel; member; member = member->next_channel) {
+    struct Channel *chptr = member->channel;
+    struct Membership *amemb;
+
+    if (IsZombie(member) || IsDelayedJoin(member) || find_member_link(chptr, c))
+      continue;
+    if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(c)) {
+      sendcmdto_one(&me, CMD_NOTICE, c,
+        "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
+        "but your connection is plaintext. Reconnect with TLS to join.",
+        c, chptr->chname);
+      continue;
+    }
+    add_user_to_channel(chptr, c, CHFL_ALIAS
+                        | (member->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)),
+                        OpLevel(member));
+    amemb = find_member_link(chptr, c);
+    if (amemb && member->join_msgid[0]) {
+      memcpy(amemb->join_msgid, member->join_msgid, sizeof(amemb->join_msgid));
+      amemb->join_tv = member->join_tv;
+    }
+  }
+}
+
+/** Our live connection @a c enters @a record as a device of @a p, its
+ * primary, in the one order the re-point (bounce_repoint_aliases()) and the
+ * join of a live client (W3 12c-2b) share (12c-2a carry 1):
+ *  1. the record's session id;
+ *  2. its filing in @a record, and in no other record of the account --
+ *     before the core, whose session sync finds the members through the
+ *     record's roster (an opered joiner is stripped there, #14);
+ *  3. the alias core (bounce_alias_take_face(), live): P's face, its
+ *     socket told first (#2), the session's modes;
+ *  4. with @a take_channels, P's channels (a joiner has none of its own
+ *     left; a re-pointed alias keeps the ones it has);
+ *  5. the BX C (its channel list), then its caps and its own away state
+ *     (BX U), which a receiver's re-file starts afresh. */
+static void bounce_alias_enter_record(struct BouncerSession *record,
+                                      struct Client *c, struct Client *p,
+                                      int take_channels)
+{
+  if (0 != strcmp(cli_session_id(c), record->hs_sessid)) {
+    presence_purge_session(cli_session_id(c));
+    ircd_strncpy(cli_session_id(c), record->hs_sessid, S2S_SESSID_BUFSIZE);
+  }
+  bounce_repoint_file(record, c);
+  bounce_alias_take_face(c, p, BOUNCE_FACE_LIVE);
+  if (take_channels)
+    bounce_alias_take_channels(c, p);
+  bounce_announce_alias(record, c, p);
+  bounce_emit_alias_caps(c);
+  if (cli_connect(c) && con_pre_away(cli_connect(c)) != 0)
+    bounce_note_away_state(c, con_pre_away(cli_connect(c)));
 }
 
 /** Every device of @a old follows @a new_primary when @a old stops being
@@ -2258,22 +2333,14 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
         ircd_strncpy(cli_name(c), cli_name(new_primary), NICKLEN + 1);
       continue;
     }
-    if (0 != strcmp(cli_session_id(c), record->hs_sessid)) {
-      presence_purge_session(cli_session_id(c));
-      ircd_strncpy(cli_session_id(c), record->hs_sessid, S2S_SESSID_BUFSIZE);
-    }
-    bounce_repoint_file(record, c);
-    /* It takes the new primary's face (the alias core, W3 12c-2a): its
-     * nick, the socket told first (#2), user@host (CHGHOST), realname,
-     * nick timestamp and the session's modes -- what the BX C receivers
-     * copy from the new primary. */
+    /* It takes the record's id and filing and the new primary's face (the
+     * alias core: its nick, the socket told first (#2), user@host
+     * (CHGHOST), realname, nick timestamp and the session's modes -- what
+     * the BX C receivers copy from the new primary), and is announced: the
+     * order the join shares (bounce_alias_enter_record()). */
     Debug((DEBUG_INFO, "Bouncer: alias %s follows %s, takes its face",
            cli_name(c), cli_name(new_primary)));
-    bounce_alias_take_face(c, new_primary, BOUNCE_FACE_LIVE);
-    bounce_announce_alias(record, c, new_primary);
-    bounce_emit_alias_caps(c);
-    if (cli_connect(c) && con_pre_away(cli_connect(c)) != 0)
-      bounce_note_away_state(c, con_pre_away(cli_connect(c)));
+    bounce_alias_enter_record(record, c, new_primary, 0);
   }
 }
 
@@ -9911,6 +9978,286 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
    * line being handled. */
   bounce_schedule_gate_release();
   return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* Hold turned on: the client joins the account's session (W3 12c-2b) */
+/* ---------------------------------------------------------------- */
+
+/** Is a server link of ours mid-burst (R14(g): no hold or membership
+ * transition between a client's burst N and the end of that link's
+ * burst)?  Either direction: the link is bursting to us, or our burst
+ * waits for its acknowledgement. */
+static int bounce_links_mid_burst(void)
+{
+  struct DLink *dlp;
+
+  if (!cli_serv(&me))
+    return 0;
+  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    struct Client *link = dlp->value.cptr;
+    if (link && IsServer(link) && IsBurstOrBurstAck(link))
+      return 1;
+  }
+  return 0;
+}
+
+/** The facts for @a cptr, and the plan (bounce_hold_on_plan()).  The one
+ * change it makes is the chooser's: a session primary resolved from its
+ * ghost numeric (bounce_choose_read()).
+ *
+ * @param[in]  cptr   The client turning hold on (ours).
+ * @param[out] target The session to join, else NULL.
+ * @param[out] choice The chooser's answer (NULL: not wanted). */
+static enum bounce_hold_on_plan hold_on_read(struct Client *cptr,
+                                             struct BouncerSession **target,
+                                             struct bounce_choice *choice,
+                                             struct BouncerSession **sessions,
+                                             int *nsessions)
+{
+  struct bounce_choose_row rows[BOUNCE_CHOOSE_MAX_ROWS];
+  struct bounce_hold_on_facts f;
+  int n = 0;
+
+  *target = NULL;
+  *nsessions = 0;
+  memset(&f, 0, sizeof(f));
+  f.choice.kind = BOUNCE_CHOOSE_NONE;
+  f.choice.index = f.choice.active_index = -1;
+  /* Not a client of ours that can be in a session: nothing to do but the
+   * preference, as before (a bouncer off for it, no account). */
+  if (!cptr || !MyUser(cptr) || !IsAccount(cptr) || !cli_user(cptr)
+      || !bounce_enabled_for(cptr))
+    return BOUNCE_HOLD_NOOP;
+
+  f.member = IsBouncerAlias(cptr) || bounce_get_session(cptr) != NULL;
+  if (!f.member) {
+    f.burst = bounce_links_mid_burst();
+#ifdef USE_SSL
+    f.tls_refused = feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl;
+#endif
+    n = bounce_choose_read(cptr, cli_account(cptr), sessions, rows, "hold on");
+    bounce_choose(rows, n, f.tls_refused, &f.choice);
+    if (f.choice.index >= 0) {
+      struct BouncerSession *s = sessions[f.choice.index];
+      struct Client *p = s->hs_client;
+
+      f.primary_user = p && IsUser(p) && !IsBouncerAlias(p) && cli_user(p)
+                       && cli_user(p)->server;
+      f.primary_dying = p && (HasFlag(p, FLAG_KILLED)
+                              || (MyConnect(p) && HasFlag(p, FLAG_CLOSING)));
+      f.primary_home_aware = f.primary_user
+                             && IsIRCv3Aware(cli_user(p)->server);
+      f.full = rows[f.choice.index].full;
+      *target = s;
+    }
+  }
+  if (choice)
+    *choice = f.choice;
+  *nsessions = n;
+  return bounce_hold_on_plan(&f);
+}
+
+/** See include/bouncer_session.h. */
+enum bounce_hold_on_plan bounce_hold_on_plan_for(struct Client *cptr)
+{
+  struct BouncerSession *sessions[BOUNCE_CHOOSE_MAX_ROWS];
+  struct BouncerSession *target;
+  int n;
+
+  return hold_on_read(cptr, &target, NULL, sessions, &n);
+}
+
+/** @a j, a live client of ours in no session, joins @a s as a device of its
+ * primary (W3 12c-2b, design D; user decisions U1-U3).  In order:
+ *  1. its old face leaves once, while it is still a plain user: one QUIT,
+ *     one msgid (exit_face_departs());
+ *  2. it leaves its own channels (U1): its socket is told PART for each,
+ *     and it is removed from them, at the departure's presence time;
+ *  3. it is converted into an alias of ours (the 8c counter rule:
+ *     count_held, SetBouncerAlias, bounce_count_converted, hRemClient);
+ *  4. it enters the record in the order the re-point shares
+ *     (bounce_alias_enter_record(): id, filing, the core, P's channels,
+ *     BX C, caps, away); the session's away is aggregated again;
+ *  5. its socket is told the session's channels, the attach NOTE and its
+ *     persistence state (the core already sent the NICK echo, CHGHOST and
+ *     SETNAME: no second CHGHOST);
+ *  6. when the primary is our own held ghost, the promote at the next tick
+ *     hands it the slot (BX P ghost -> it, BS T), as a device that attached
+ *     to a held session would be promoted (orphan_follow()).
+ * No hs_client write here: the slot changes only by the promote. */
+static void bounce_live_join(struct BouncerSession *s, struct Client *j,
+                             int tell_status)
+{
+  struct Client *p = s->hs_client;
+  struct Membership *m;
+  struct bounce_counts was;
+  char reason[NICKLEN + 32];
+  char old_nick[NICKLEN + 1];
+  int64_t quit_time;
+  int promote = s->hs_state == BOUNCE_HOLDING && MyConnect(p)
+                && IsBouncerHold(p);
+
+  ircd_strncpy(old_nick, cli_name(j), sizeof(old_nick));
+  ircd_snprintf(0, reason, sizeof(reason), "Attached to %s's session",
+                cli_name(p));
+
+  /* 1. The old face leaves (ruling W3-P2: as a plain user). */
+  quit_time = exit_face_departs(j, reason);
+
+  /* 2. Its own channels (U1). */
+  for (m = cli_user(j)->channel; m; m = m->next_channel)
+    if (!IsZombie(m))
+      sendcmdto_one(j, CMD_PART, j, "%H :%s", m->channel, reason);
+  presence_set_event_time(quit_time);
+  remove_user_from_all_channels(j);
+  presence_set_event_time(0);
+
+  /* 3. An alias of ours from here on: still a socket and a registered
+   * user, no longer announced (the network learns it by BX C). */
+  count_held(j, &was);
+  SetBouncerAlias(j);
+  bounce_count_converted(j, &was, &me, "join");
+  hRemClient(j);
+
+  /* 4. Into the record. */
+  bounce_alias_enter_record(s, j, p, 1);
+  bounce_recompute_session_away(s);
+  {
+    struct ConnectionClass *cls = get_client_class_conf(j);
+    if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+      s->hs_enforced = 1;
+  }
+  bounce_db_put(s);
+
+  /* 5. Its socket. */
+  bounce_send_channel_state(j);
+  sendrawto_one(j, ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s "
+                "as alias on %s", cli_name(&me), s->hs_sessid, cli_name(&me));
+  if (tell_status && CapActive(j, CAP_DRAFT_PERSISTENCE) && IsAccount(j))
+    persistence_send_status(j);
+
+  log_write(LS_USER, L_INFO, 0, "Bouncer: %s (%s%s) joined %s's session %s "
+            "as a device of %s%s", old_nick, cli_yxx(&me), cli_yxx(j),
+            s->hs_account, s->hs_sessid, cli_name(p),
+            promote ? " (our held ghost: promoted at the next tick)" : "");
+
+  /* 6. Our own held ghost hands it the slot. */
+  if (promote)
+    bounce_schedule_cross_server_promote(s);
+}
+
+/** See include/bouncer_session.h. */
+enum bounce_hold_on_done bounce_hold_on(struct Client *cptr, int tell_status,
+                                        struct BouncerSession **out)
+{
+  struct BouncerSession *sessions[BOUNCE_CHOOSE_MAX_ROWS];
+  struct BouncerSession *target, *session = NULL;
+  struct bounce_choice ch;
+  enum bounce_hold_on_plan plan;
+  int n, i, rounds;
+
+  if (out)
+    *out = NULL;
+  for (rounds = 0; ; rounds++) {
+    int changed = 0;
+
+    plan = hold_on_read(cptr, &target, &ch, sessions, &n);
+    if (!bounce_hold_on_acts(plan) || rounds >= BOUNCE_CHOOSE_MAX_ROWS)
+      break;
+    /* The previous Keycloak user's leftover ends first (the chooser's
+     * END_STALE; a login Keycloak itself confirmed), as a registration ends
+     * it; then the list is read again. */
+    for (i = 0; i < n && !changed; i++) {
+      struct BouncerSession *st = sessions[i];
+      struct Client *stale = st->hs_client;
+
+      if (!(ch.end_stale & (1UL << i)))
+        continue;
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: ending %s's session %s: it carries Keycloak id %s, "
+                "%s (turning hold on) %s", st->hs_account, st->hs_sessid,
+                bounce_session_kc_id(st), cli_name(cptr), cli_user(cptr)->kc_id);
+      bounce_kill_session(st, "Session ended: its Keycloak account was replaced");
+      ClearBouncerHold(stale);
+      exit_client(stale, stale, &me,
+                  "Session ended: its Keycloak account was replaced");
+      changed = 1;
+    }
+    /* A replica nothing reachable holds is dropped, as a registration
+     * drops it. */
+    for (i = 0; i < n && !changed; i++) {
+      if (!(ch.discard & (1UL << i)))
+        continue;
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: discarding unattachable replica %s for %s",
+                sessions[i]->hs_sessid, cli_account(cptr));
+      bounce_destroy(sessions[i]);
+      changed = 1;
+    }
+    if (!changed)
+      break;
+  }
+
+  log_write(LS_USER, L_INFO, 0, "Bouncer: %s turns hold on: %s%s%s",
+            cli_name(cptr), bounce_hold_on_plan_name(plan),
+            target ? " session " : "", target ? target->hs_sessid : "");
+  switch (plan) {
+  case BOUNCE_HOLD_JOIN:
+  case BOUNCE_HOLD_JOIN_PROMOTE:
+    bounce_live_join(target, cptr, tell_status);
+    if (out)
+      *out = target;
+    return BOUNCE_HOLD_ON_JOINED;
+  case BOUNCE_HOLD_CREATE:
+  case BOUNCE_HOLD_END_STALE_CREATE:
+    /* BS C, then BS A: the other servers' copy names its primary (W3
+     * 12c-1: BS C alone left a copy a later login there took over). */
+    if (bounce_create(cptr, &session) == 0 && session) {
+      bounce_broadcast(session, 'C', NULL);
+      bounce_broadcast(session, 'A', cli_yxx(cptr));
+      if (out)
+        *out = session;
+      return BOUNCE_HOLD_ON_CREATED;
+    }
+    return BOUNCE_HOLD_ON_FAILED;
+  default:
+    break;
+  }
+  return BOUNCE_HOLD_ON_NOTHING;
+}
+
+/** See include/bouncer_session.h. */
+void bounce_hold_on_fail(struct Client *to, const char *command,
+                         enum bounce_hold_on_plan plan, const char *context)
+{
+  const char *code;
+  const char *text;
+
+  if (!to || !MyConnect(to))
+    return;
+  /* Registration's reject text for the same refusal (U2), without the
+   * disconnect. */
+  switch (plan) {
+  case BOUNCE_HOLD_REFUSE_KC:
+    code = "SESSION_CONFLICT";
+    text = "This account's session belongs to its previous Keycloak user; "
+           "ask an operator";
+    break;
+  case BOUNCE_HOLD_REFUSE_FULL:
+    code = "SESSION_FULL";
+    text = "Account already has an active session on this network";
+    break;
+  case BOUNCE_HOLD_REFUSE_TLS:
+    code = "TLS_REQUIRED";
+    text = "Account already has an active session on this network";
+    break;
+  default:
+    code = "TRY_AGAIN";
+    text = "The account's session is changing; try again";
+    break;
+  }
+  send_fail(to, command, code, context, text);
 }
 
 /* ---------------------------------------------------------------- */

@@ -2219,6 +2219,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   struct BouncerSession *end_session = NULL;
   char end_account[ACCOUNTLEN + 1] = "";
   char end_sessid[BOUNCER_SESSID_LEN] = "";
+  /* What the command's hold letters leave for the end of this function
+   * (bounce_hold_tail_step(): the last letter wins, ruling W3-T12b-f4b and
+   * 12b M1): the -b's end above, or the +b's join or create (W3 12c-2b),
+   * never both.  hold_on_tell: a +b of a device of ours toward a primary on
+   * another server stands, and its server tells the other servers the
+   * preference (bounce_hold_on_tells()). */
+  enum bounce_hold_tail hold_tail = BOUNCE_HOLD_TAIL_NONE;
+  int hold_on_tell = 0;
 
   if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
@@ -2606,27 +2614,42 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         break;
       case 'b':
         if (what == MODE_ADD) {
+          /* The command comes from a device of ours whose primary, the
+           * target, is on another server. */
+          int asker_device = MyConnect(sptr) && IsBouncerAlias(sptr)
+                             && cli_alias_primary(sptr) == acptr;
+          enum bounce_hold_on_plan plan = BOUNCE_HOLD_NOOP;
+
+          /* Turning hold on for a client of ours joins the account's
+           * session, or makes one when it has none (W3 12c-2b, user
+           * decisions U1-U3).  Planned here, run at the end of this
+           * function, after the mode line and the session sync (joining
+           * mid-loop would send this command's mode line from an alias).
+           * A refusal sets nothing: no +b, no preference, nothing on the
+           * wire (U2); an earlier -b in this command then stands. */
+          if (MyUser(acptr)) {
+            plan = bounce_hold_on_plan_for(acptr);
+            if (bounce_hold_on_refused(plan)) {
+              /* Whoever asked: a user of ours (an oper's SVSMODE too), else
+               * the target (a server's mode, services). */
+              bounce_hold_on_fail(MyUser(sptr) ? sptr : acptr, "MODE", plan,
+                                  cli_name(acptr));
+              hold_tail = bounce_hold_tail_step(hold_tail, 1, 0, 1);
+              break;
+            }
+          }
           /* A -b earlier in this command does not stand: as for any mode
            * string, the final state wins (ruling W3-T12b-f4b).  No
            * preference write or end of its goes ahead. */
+          hold_tail = bounce_hold_tail_step(hold_tail, 1,
+                                            bounce_hold_on_acts(plan), 0);
           hold_off = hold_off_tell = 0;
           end_session = NULL;
           end_account[0] = end_sessid[0] = '\0';
+          hold_on_tell = bounce_hold_on_tells(asker_device, MyUser(acptr),
+                                              IsUser(acptr), 1);
           SetBncHoldPref(acptr);
           metadata_set_client(acptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
-          /* Auto-create bouncer session if local client doesn't have one */
-          if (MyUser(acptr) && IsAccount(acptr) && !bounce_get_session(acptr)) {
-            struct BouncerSession *session = NULL;
-            if (bounce_create(acptr, &session) == 0 && session) {
-              bounce_broadcast(session, 'C', NULL);
-              /* And its primary, as BOUNCER SET HOLD on and PERSISTENCE
-               * SET ON announce theirs: BS C alone leaves the other
-               * servers' copy with no primary, and a login there then
-               * takes that copy over as a second live primary of the
-               * session (auto-resume's orphan reclaim). */
-              bounce_broadcast(session, 'A', cli_yxx(acptr));
-            }
-          }
         } else {
           struct BouncerSession *session = NULL;
           /* The command comes from a device of ours whose primary, the
@@ -2639,6 +2662,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (MyUser(acptr) || asker_device)
             session = bounce_get_session(acptr);
           ClearBncHoldPref(acptr);
+          /* A +b earlier in this command does not stand: its join or
+           * create is cancelled, and its device's preference is not told
+           * (12b M1: the last letter wins). */
+          hold_tail = bounce_hold_tail_step(hold_tail, 0, session != NULL, 0);
+          hold_on_tell = 0;
           /* The preference, unless the end goes to the session's holder on
            * another server, which writes it (to every server) when it
            * accepts the end.  Written after the mode loop (a +b later in
@@ -2660,6 +2688,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           /* End the session: its holder does (here, or the end goes
            * there); the primary carries on outside it, every device of it
            * goes.  Run last (below): the end can exit the mode's target. */
+          end_session = NULL;
+          end_account[0] = end_sessid[0] = '\0';
           if (session) {
             end_session = session;
             ircd_strncpy(end_account, session->hs_account, sizeof(end_account));
@@ -2860,6 +2890,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
                                cli_name(acptr), "draft/persistence/hold");
   }
+  /* A +b of a device of ours that stands, toward a primary on another
+   * server: its holder never sees the mode line (a fake direction there),
+   * so the device's server tells every server the preference, as for a -b
+   * (the f4a gate, for hold 1). */
+  if (hold_on_tell)
+    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
+                             cli_name(acptr), "draft/persistence/hold");
 
   /*
    * Compare new flags with old flags and send string which
@@ -3035,13 +3072,19 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * one account can share an id (a session kept apart after a split), so
    * the first record of that id may be another; the walk compares the
    * saved record with each listed one and never reads through it. */
-  if (end_sessid[0]) {
+  if (hold_tail == BOUNCE_HOLD_TAIL_END && end_sessid[0]) {
     struct BouncerSession *es = bounce_session_listed(end_account, end_session,
                                                       end_sessid);
 
     if (es)
       bounce_member_end(es, sptr, cptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
   }
+  /* A +b that stands joins the account's session, or makes one (W3
+   * 12c-2b): last, after the mode line and the session sync, as the target
+   * of this command is still the plain user that sent it.  The tail runs
+   * at most one of this and the end above. */
+  else if (hold_tail == BOUNCE_HOLD_TAIL_ON && MyUser(acptr))
+    bounce_hold_on(acptr, 1, NULL);
 
   return 0;
 }

@@ -826,6 +826,47 @@ extern struct BouncerSession *bounce_session_listed(const char *account,
                                                     const struct BouncerSession *saved,
                                                     const char *sessid);
 
+/** What turning hold on would do for @a cptr, a client of ours (MODE +b,
+ * BOUNCER SET HOLD on, PERSISTENCE SET ON; W3 12c-2b, design A): the
+ * planner (bounce_hold_on_plan()) over the facts read here, the session
+ * chosen as a fresh login of the account would choose it
+ * (bounce_choose()).  It changes nothing but a session primary resolved
+ * from its ghost numeric, as the chooser resolves it.  A refusal
+ * (bounce_hold_on_refused()) leaves the hold off: its callers answer with
+ * bounce_hold_on_fail() and set nothing (user decision U2). */
+extern enum bounce_hold_on_plan bounce_hold_on_plan_for(struct Client *cptr);
+
+/** What bounce_hold_on() did. */
+enum bounce_hold_on_done {
+  BOUNCE_HOLD_ON_NOTHING,  /**< no session change (a member, a refusal) */
+  BOUNCE_HOLD_ON_CREATED,  /**< a session was made (BS C, BS A) */
+  BOUNCE_HOLD_ON_JOINED,   /**< the client joined the account's session */
+  BOUNCE_HOLD_ON_FAILED    /**< a create was planned and failed */
+};
+
+/** Turn hold on for @a cptr (W3 12c-2b): plan again and act -- the
+ * previous Keycloak user's leftover ends first, then the client joins the
+ * account's session (its old face quits once everywhere, it leaves its
+ * own channels (U1), it becomes a device of the session's primary, and
+ * takes our own held ghost's slot at the next tick), or a session is made
+ * when the account has none.  The hold preference is the caller's.
+ *
+ * @param[in]  cptr        The client (ours, in no session to act).
+ * @param[in]  tell_status A join tells the socket its persistence STATUS
+ *                         (a caller that sends its own passes 0).
+ * @param[out] out         The session joined or made, or NULL.
+ * @return What was done. */
+extern enum bounce_hold_on_done bounce_hold_on(struct Client *cptr,
+                                               int tell_status,
+                                               struct BouncerSession **out);
+
+/** Answer a hold turned on that @a plan refuses: FAIL @a command with
+ * registration's reject text for the same refusal, without the
+ * disconnect (U2); TRY_AGAIN for a deferral. */
+extern void bounce_hold_on_fail(struct Client *to, const char *command,
+                                enum bounce_hold_on_plan plan,
+                                const char *context);
+
 /** M4b reconciler: test whether any profile across the account
  * (active or HOLD-sticky inactive) effectively wants `channel`.
  * Returns 0 immediately when the account is not held — under the
