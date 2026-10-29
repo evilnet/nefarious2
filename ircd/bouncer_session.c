@@ -10082,7 +10082,10 @@ static int bounce_links_mid_burst(void)
 /** A session the record holds @a c in by itself -- its primary slot, or
  * its alias roster -- whatever the account it is listed under; NULL when
  * none.  By the client, not by its account: an OAUTHBEARER re-auth changes
- * a member's account and leaves it where it is (fix round 2, N4). */
+ * a member's account and leaves it where it is (fix round 2, N4).  A
+ * roster entry counts only for an alias: a stale entry whose numeric a
+ * plain user now carries (the numeric reused) is not that user's session
+ * (fix round 3, I-5). */
 static struct BouncerSession *session_holding_client(struct Client *c)
 {
   struct BouncerSession *s;
@@ -10090,7 +10093,8 @@ static struct BouncerSession *session_holding_client(struct Client *c)
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
     for (s = tokenHash[i]; s; s = s->hs_tnext)
-      if (s->hs_client == c || session_roster_has(s, c))
+      if (s->hs_client == c
+          || (IsBouncerAlias(c) && session_roster_has(s, c)))
         return s;
   return NULL;
 }
