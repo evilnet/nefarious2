@@ -14649,7 +14649,9 @@ int bounce_burst_in_progress(void)
  * unprocessed.
  *
  * Strategy: FIONREAD for the kernel recvbuf + DBufLength for any
- * already-parsed-but-not-yet-dispatched bytes.  Cheap (one ioctl per
+ * already-parsed-but-not-yet-dispatched bytes, the partial line the last
+ * read left (cli_count), and on a TLS link the bytes OpenSSL holds
+ * decrypted (SSL_pending: FIONREAD misses them).  Cheap (one ioctl per
  * peer) and avoids reentrant read_packet calls.
  *
  * Only an IRCv3-aware (fork) link counts.  A BS C goes to aware links
@@ -14675,6 +14677,15 @@ struct Client *bounce_peer_has_inbound_data(void)
       continue;
     if (DBufLength(&cli_recvQ(peer)) > 0)
       return peer;
+    /* The start of a line read already, its rest still to come. */
+    if (cli_count(peer) > 0)
+      return peer;
+#ifdef USE_SSL
+    /* Bytes OpenSSL has decrypted and holds: the kernel no longer has
+     * them, so FIONREAD cannot see them (a TLS link, as F2's to F1). */
+    if (cli_socket(peer).ssl && ssl_pending(&cli_socket(peer)) > 0)
+      return peer;
+#endif
     if (ioctl(cli_fd(peer), FIONREAD, &avail) == 0 && avail > 0)
       return peer;
   }
