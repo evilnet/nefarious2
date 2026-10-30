@@ -12923,6 +12923,76 @@ static void session_roster_add(struct BouncerSession *session,
  * The alias is NOT added to the nick hash — FindUser() returns the primary.
  * The alias is added to each of the primary's channels with CHFL_ALIAS.
  */
+/** Does @a chanlist, a BX C channel list ("<chan>" or "<chan>@<msgid>"
+ * tokens, space-separated), name the channel @a chname? */
+static int bxc_list_has(const char *chanlist, const char *chname)
+{
+  size_t n = strlen(chname);
+  const char *p = chanlist;
+
+  while (p && *p) {
+    const char *e;
+
+    while (*p == ' ')
+      p++;
+    for (e = p; *e && *e != ' ' && *e != '@'; e++)
+      ;
+    if ((size_t)(e - p) == n && 0 == ircd_strncmp(p, chname, n))
+      return 1;
+    while (*e && *e != ' ')
+      e++;
+    p = e;
+  }
+  return 0;
+}
+
+/** The BX C naming @a alias, another server's client, an alias of
+ * @a primary carries @a chanlist, that server's own list of the alias's
+ * channels: authoritative (W3 12c-3, ruling W3-T12c-3-a: every server
+ * agrees with what the legacy links hold).  A membership of @a alias here
+ * stays when the list names its channel, or when @a primary is in the
+ * channel here -- a list the line length cut short never drops a channel
+ * the session holds -- as an alias membership: a real one, a face
+ * converted in place, becomes one with its status, its counts moving once,
+ * as the demote moves them.  Every other membership goes: the session is
+ * not in that channel (a face converted in place told the members here by
+ * its QUIT before this; an alias membership is shown to nobody). */
+static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
+                                   const char *chanlist)
+{
+  struct Membership *m;
+  struct Membership *next;
+
+  for (m = cli_user(alias)->channel; m; m = next) {
+    struct Channel *chptr = m->channel;
+
+    next = m->next_channel;
+    if ((chanlist && bxc_list_has(chanlist, chptr->chname))
+        || find_member_link(chptr, primary)) {
+      if (!IsMemberAlias(m)) {
+        m->status |= CHFL_ALIAS;
+        if (chptr->users > 0)
+          --chptr->users;
+        ++chptr->aliases;
+        if (cli_user(alias)->joined > 0)
+          --(cli_user(alias)->joined);
+        if (!IsSSL(alias) && !IsChannelService(alias)) {
+          if (chptr->nonsslusers > 0)
+            --chptr->nonsslusers;
+        }
+        if (IsAccount(alias) && chptr->authusers > 0)
+          --chptr->authusers;
+      }
+      continue;
+    }
+    log_write(LS_USER, L_INFO, 0, "BX C: %s%s (%s) is not in %s on its server, "
+              "and its primary %s is not in it here: it leaves it",
+              cli_yxx(cli_user(alias)->server), cli_yxx(alias), cli_name(alias),
+              chptr->chname, cli_name(primary));
+    remove_user_from_channel(alias, chptr);
+  }
+}
+
 static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
                                int parc, char *parv[])
 {
@@ -12941,6 +13011,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   char *chan_copy;
   char *chan_name;
   char *chan_tok;
+  char convert_reason[NICKLEN + 32];
   int refiled = 0;
 
   if (parc < 7)
@@ -13113,6 +13184,8 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
         ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
       }
       bounce_count_converted(alias, &was, cli_user(alias)->server, "BX C re-file");
+      /* Its channels as its server lists them (W3 12c-3). */
+      bxc_apply_channel_list(alias, primary, chanlist);
       session = target;
       refiled = 1;
       goto track_alias;
@@ -13165,24 +13238,40 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
           IsAccount(alias) ? user->account : "*", account, primary_numeric);
       goto forward;
     }
-    {
-      char reason[NICKLEN + 32];
-      ircd_snprintf(0, reason, sizeof(reason), "Promoted to alias of %s",
-                    cli_name(primary));
-      bounce_legacy_face_change(alias, bounce_find_by_token_sessid(account, sessid),
-                                cptr, NULL, reason);
-    }
+    ircd_snprintf(0, convert_reason, sizeof(convert_reason),
+                  "Promoted to alias of %s", cli_name(primary));
+    bounce_legacy_face_change(alias, bounce_find_by_token_sessid(account, sessid),
+                              cptr, NULL, convert_reason);
     /* Client-visible cleanup: this client was N-introduced with its OWN
      * nick and is about to be relabeled to the primary's nick and absorbed
      * as a hidden alias.  Local clients sharing a channel with the old nick
      * would keep it cached forever (a ghost): emit a QUIT for the old nick
-     * to its common channels FIRST so they clean it up.  Local-only
+     * to its common channels FIRST so they clean it up, with the legacy
+     * links' text (W3 12c-3, ruling W3-T12c-3-a: the face leaves once, as
+     * the legacy links see it; it was "Session converging", row 371(3)),
+     * one msgid, and a WATCH/MONITOR logoff.  Local-only
      * (sendcmdto_common_channels_butone targets local clients), so each
      * aware server does this for its own clients when it processes the
      * BX C; the legacy links had their QUIT above.  Skip when the nick is
      * unchanged (no delta). */
-    if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
-      sendcmdto_common_channels_butone(alias, CMD_QUIT, NULL, ":Session converging");
+    if (0 != ircd_strcmp(cli_name(alias), cli_name(primary))) {
+      char msgid[64] = "";
+
+      if (feature_bool(FEAT_MSGID)) {
+        generate_msgid(msgid, sizeof(msgid));
+        sendcmdto_set_client_event(msgid, history_event_time_ms(NULL));
+      }
+      sendcmdto_common_channels_butone(alias, CMD_QUIT, NULL, ":%s",
+                                       convert_reason);
+      sendcmdto_set_client_msgid(NULL);
+      check_status_watch(alias, RPL_LOGOFF);
+    }
+    /* Its memberships as its server announces them (ruling
+     * W3-T12c-3-a): the session's channels become alias memberships, the
+     * rest -- a channel only this face was in, which the session is not
+     * in -- go.  Before the identity changes below: its counts move with
+     * the flags it joined under. */
+    bxc_apply_channel_list(alias, primary, chanlist);
     {
       /* What it holds as the user its server introduced by N, and that
        * server, before the conversion overwrites anything. */
