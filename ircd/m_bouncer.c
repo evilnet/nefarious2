@@ -157,6 +157,20 @@ static int bouncer_resume(struct Client *sptr, const char *token)
     return 0;
   }
 
+  /* Our held ghost is in channels (ruling W3-T11-f1c): the attach would
+   * move its memberships to this client here only -- the other servers
+   * and the legacy links would never learn of them, and the network would
+   * disagree about who is in those channels.  Refused before anything
+   * changes.  A login by SASL revives the ghost in place instead (its
+   * numeric, its channels everywhere).  A session held on another server
+   * is the attach's refusal (SESSION_REMOTE). */
+  if (session->hs_state == BOUNCE_HOLDING && session->hs_client
+      && MyUser(session->hs_client) && cli_user(session->hs_client)->channel) {
+    send_fail(sptr, "BOUNCER", "SESSION_HAS_CHANNELS", session->hs_sessid,
+              "Session is held in channels; reconnect with SASL to attach");
+    return 0;
+  }
+
   /* Compute replay "since" time from the ghost's idle time — messages
    * arriving after the user's last activity may not have been read.
    * Fall back to disconnect time if idle time is unavailable. */
