@@ -1087,9 +1087,12 @@ void bounce_visibility_membership(const char *alias_full,
   if (!alias_full || !channel || !*alias_full || !*channel)
     return;
 
-  /* Broadcast to peers first so they apply concurrently. */
-  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "V %s %c%s", alias_full, add ? '+' : '-', channel);
+  /* Broadcast to peers first so they apply concurrently.  Not for a local
+   * (&) channel: it is ours alone, and a peer's channel of that name is
+   * another channel (W3 12c-3 fix 2, I-1). */
+  if (!IsLocalChannel(channel))
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
+                          "V %s %c%s", alias_full, add ? '+' : '-', channel);
 
   alias = findNUser(alias_full);
   chptr = FindChannel(channel);
@@ -10692,6 +10695,12 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
             && !find_member_link(chptr, alias)))
         continue;
 
+      /* A local (&) channel is this server's alone: another server's device
+       * is never filed in it (W3 12c-3 fix 2, I-1).  A device of ours keeps
+       * its primary's local channels. */
+      if (!MyConnect(alias) && IsLocalChannel(chptr->chname))
+        continue;
+
       /* M4b filter: when held, only add aliases whose effective
        * profile wants this channel.  This is what makes per-profile
        * channel-list divergence actually divergent at the membership
@@ -13126,11 +13135,15 @@ static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
  * (bounce_setup_local_alias() at the attach, bounce_sync_alias_join() at
  * each later JOIN of the primary), with the same exception: a +Z channel
  * for a plaintext device (FLAG_SSL is a global user mode, carried in the
- * BX C's modes).  A BX C's channel list is cut at the line's length
- * (about a dozen channels, the most recent joins first), so the list
- * cannot be the source: a channel past the cut whose only members on the
- * device's side are the session's routed nothing toward the device's
- * server, and the device missed its traffic.  Each membership is added
+ * BX C's modes) -- and a local (&) channel, which exists here alone (W3
+ * 12c-3 fix 2, I-1: filed there, the device drew every member's line in it
+ * to its own server, which answered 403, and a session move made it a real
+ * member of a channel its server does not have).  A BX C's channel list is
+ * cut at the line's length (about a dozen channels, the most recent joins
+ * first), so the list cannot be the source: a channel past the cut whose
+ * only members on the device's side are the session's routed nothing
+ * toward the device's server, and the device missed its traffic.  Each
+ * membership is added
  * as bounce_sync_alias_join() adds one -- the primary's status and op
  * level, its JOIN msgid and time, an alias membership (no user count
  * moves, #9) -- and goes nowhere on the wire (#10).  Run after the list's
@@ -13150,6 +13163,10 @@ static int bxc_mirror_primary_channels(struct Client *alias,
     struct Membership *amem;
 
     if (IsZombie(pm) || find_member_link(chptr, alias))
+      continue;
+    /* A local (&) channel is this server's alone: the device's server has
+     * no such channel (W3 12c-3 fix 2, I-1). */
+    if (IsLocalChannel(chptr->chname))
       continue;
     if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias))
       continue;
@@ -13592,6 +13609,10 @@ track_alias:
       }
       /* A known alias (announced again) is in it already. */
       if (find_member_link(chptr, alias))
+        continue;
+      /* Another server's device is never in a local (&) channel of ours
+       * (W3 12c-3 fix 2, I-1): a list naming one names the sender's own. */
+      if (!MyConnect(alias) && IsLocalChannel(chptr->chname))
         continue;
       /* Skip +Z channels for non-TLS aliases */
       if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
@@ -15705,7 +15726,10 @@ static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr,
   }
 
   chptr = FindChannel(signed_chan + 1);
-  if (chptr)
+  /* Another server's device is never filed in a local (&) channel of ours:
+   * the sender's channel of that name is another channel (W3 12c-3 fix 2,
+   * I-1; an older sender still sends it). */
+  if (chptr && !(add && !MyConnect(alias) && IsLocalChannel(chptr->chname)))
     bounce_visibility_apply_local(alias, chptr, add);
 
   /* Forward only on first arrival. */
