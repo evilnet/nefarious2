@@ -9290,6 +9290,20 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
   hRemClient(ghost);
   RemoveYXXClient(&me, cli_yxx(ghost));
 
+  /* The ghost's connection count on its IP goes now, as an exit of ours
+   * releases it (exit_one_client: IPcheck_disconnect while MyConnect).  A
+   * held ghost still holds the +1 its socket took (the hold does not
+   * release it; a revive moves it to the new IP, bounce_revive step 6a),
+   * and after this it is another server's client, whose exit releases
+   * nothing here.  Clearing the flag alone left the IP one connection
+   * higher per rebind, until the Client block's per-IP limit refused it
+   * (W3 final fix wave; pre-existing).  While the ghost still has its own
+   * Connection (the registry copies its targets) and its old IP. */
+  if (IsIPChecked(ghost)) {
+    IPcheck_disconnect(ghost);
+    ClearIPChecked(ghost);
+  }
+
   /* Free the ghost's own Connection. The ghost now shares the server's
    * Connection so cli_from(ghost) routes outgoing messages through the
    * server link, like any other remote client. */
@@ -9306,10 +9320,8 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
   }
   cli_connect(ghost) = cli_connect(server);
 
-  /* Local-only flags no longer apply. */
+  /* Local-only flags no longer apply (its IP count went above). */
   ClrFlag(ghost, FLAG_DEADSOCKET);
-  if (IsIPChecked(ghost))
-    ClearIPChecked(ghost);
 
   /* Update identity from the N introduction. */
   cli_user(ghost)->server = server;
