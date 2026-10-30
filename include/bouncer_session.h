@@ -1237,15 +1237,26 @@ extern int bounce_forced_exit(struct Client *cptr, struct Client *victim,
                               enum bounce_forced_exit why,
                               const char *comment);
 
-/** Attach a client to an existing session (resume).
+/** Attach a client to an existing session (resume): @a cptr becomes the
+ * session's live primary; a held ghost of ours gives it its channels and
+ * leaves (only after the record names @a cptr, so the ghost's exit ends
+ * nothing: W3 Task 11, register row 346).  Every refusal changes nothing.
  * @param[in] session Session to attach to.
  * @param[in] cptr Client to attach.
+ * @param[in] announce Non-zero when @a cptr is already on the network (a
+ *            BOUNCER RESUME): the attach's BS A goes out here, before a
+ *            held ghost leaves, so no other server reads that ghost's QUIT
+ *            while its copy still names it.  Zero for a registering client
+ *            (its N is not out yet): the caller announces it.
  * @return 0 on success; -2 when the session is held on another server
  *         (bounce_held_elsewhere(); never for an ACTIVE record, so never
  *         for the registration's orphan reclaim, nor for our own held
- *         ghost), nothing changed; -1 on any other refusal.
+ *         ghost); -1 on any other refusal (already attached, a plaintext
+ *         client and a ghost in a +Z channel, the account or Keycloak
+ *         check).
  */
-extern int bounce_attach(struct BouncerSession *session, struct Client *cptr);
+extern int bounce_attach(struct BouncerSession *session, struct Client *cptr,
+                         int announce);
 
 /** Whether @a session is held on another server: HOLDING here while its
  * ghost is not ours -- a client of another server, or a numeric the holder

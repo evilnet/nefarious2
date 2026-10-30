@@ -1668,7 +1668,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       }
 
       /* Attach to the session — transfers channels, exits ghost */
-      if (bounce_attach(session, cptr) == 0) {
+      if (bounce_attach(session, cptr, 0) == 0) {
         /* Notify client of nick change if it happened */
         if (ircd_strcmp(original_nick, cli_name(cptr)) != 0) {
           sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
@@ -1736,7 +1736,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: reclaiming orphaned ACTIVE session %s for %s",
                 session->hs_sessid, cli_name(cptr));
-      if (bounce_attach(session, cptr) == 0) {
+      if (bounce_attach(session, cptr, 0) == 0) {
         bounce_broadcast(session, 'A', cli_yxx(cptr));
         *out_session = session;
         return 1;
@@ -2953,23 +2953,31 @@ const char *bounce_held_elsewhere(struct BouncerSession *session)
   return server ? cli_name(server) : "another server";
 }
 
-/** Attach a client to an existing session (resume).
+/** Attach a client to an existing session (resume).  See
+ * include/bouncer_session.h.
  *
- * For same-server resume: if a ghost exists locally, transfer its channel
- * memberships to the new client and destroy the ghost.
+ * Every refusal comes before anything changes.  A session held on another
+ * server is refused (-2, W3 Task 11): only its holder can hand it over, and
+ * a login there is how a client attaches to it.  The broadcast this used to
+ * send instead (bounce_initiate_transfer(): a BX P with 3-character
+ * numerics, the record taken over here as ACTIVE while the holder kept its
+ * held ghost -- two primaries under one id) is gone.
  *
- * A session held on another server is refused (-2, W3 Task 11) before
- * anything changes: only its holder can hand it over, and a login there is
- * how a client attaches to it.  The broadcast this used to send instead
- * (bounce_initiate_transfer(): a BX P with 3-character numerics, the
- * record taken over here as ACTIVE while the holder kept its held ghost --
- * two primaries under one id) is gone.
+ * Same-server resume: our held ghost gives the client its channel
+ * memberships and leaves -- after the record names the client (register
+ * row 346): an exit that found the record still naming the ghost ended it
+ * (an empty roster, or one of another copy's devices only) and freed it,
+ * and the attach and its caller then wrote to freed memory.  The record
+ * moves through bounce_hs_client_assign_checked() (the hs_client-write
+ * rule), which drops the hand-off as every install does (W3 12c-4 fix 1).
  */
-int bounce_attach(struct BouncerSession *session, struct Client *cptr)
+int bounce_attach(struct BouncerSession *session, struct Client *cptr,
+                  int announce)
 {
   struct Client *ghost;
   struct Membership *member;
   struct Membership *next_member;
+  int local_ghost;
 
   assert(0 != session);
   assert(0 != cptr);
@@ -2985,19 +2993,8 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   if (bounce_held_elsewhere(session))
     return -2;
 
-  /* Active client attach — clear restore-pending so any incoming
-   * BX R sees us as firm. */
-  session->hs_restore_pending = 0;
-
-  /* Convergence-completion event: any peer that was waiting on a
-   * pending-restore session can release its gate now. */
-  bounce_release_idle_gates();
-
-  /* Cancel hold timer if running */
-  if (t_active(&session->hs_hold_timer))
-    timer_del(&session->hs_hold_timer);
-
   ghost = session->hs_client;
+  local_ghost = ghost && ghost != cptr && IsBouncerHold(ghost) && MyUser(ghost);
 
 #ifdef USE_SSL
   /* Gate: Refuse attach if ghost is in +Z channels and new client is plaintext.
@@ -3014,9 +3011,24 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   }
 #endif
 
-  /* Same-server resume: ghost exists locally, transfer channel memberships */
-  if (ghost && IsBouncerHold(ghost) && MyUser(ghost)) {
-    /* Transfer each channel membership from ghost to new client */
+  /* The record names the client first (register row 346).  A refused
+   * install (another account or Keycloak user) changes nothing. */
+  if (!bounce_hs_client_assign_checked(session, cptr, "attach"))
+    return -1;
+  session->hs_state = BOUNCE_ACTIVE;
+
+  /* Active client attach — clear restore-pending so any incoming
+   * BX R sees us as firm. */
+  session->hs_restore_pending = 0;
+
+  /* Cancel hold timer if running (its destroy event sees an ACTIVE
+   * record and leaves it). */
+  if (t_active(&session->hs_hold_timer))
+    timer_del(&session->hs_hold_timer);
+
+  /* Same-server resume: our held ghost's channel memberships go to the
+   * client. */
+  if (local_ghost) {
     for (member = cli_user(ghost)->channel; member; member = next_member) {
       next_member = member->next_channel;
 
@@ -3028,22 +3040,9 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
       /* Remove ghost from channel (silently - no PART message) */
       remove_user_from_channel(ghost, member->channel);
     }
-
-    /* Clean up the ghost client - it no longer has channels.
-     * Let QUIT propagate to remote servers.  cptr is about to be
-     * introduced by register_user() with a new numeric; if we suppress
-     * the ghost's QUIT here, remote servers retain the ghost under its
-     * old numeric and the incoming NICK N for cptr collides with it on
-     * same nick/user@host. */
-    ClearBouncerHold(ghost);
-    exit_client(ghost, ghost, &me, "Session resumed");
   }
 
-  session->hs_state = BOUNCE_ACTIVE;
-  session->hs_client = cptr;
-  /* Not the device a promote of ours handed the session to (W3 12c-4
-   * fix 1: every install drops the hand-off). */
-  handoff_set(session, NULL);
+  session->hs_disconnect_time = 0;
   /* Session-identity continuity follows the bouncer session, not the
    * underlying socket: the freshly-minted cli_session_id from
    * make_client is superseded by the bouncer's durable sessid. */
@@ -3053,8 +3052,6 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
   session->hs_attach_time = CurrentTime;
-  session->hs_disconnect_time = 0;
-  bounce_emit_connect_count(session);
   /* The session's Keycloak id: adopted from this login when it had none
    * (the transition), else given to this connection when it carries none.
    * A different one never attaches (bounce_auto_resume's gate). */
@@ -3074,6 +3071,30 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   /* Membership changed (HOLDING ghost replaced by live primary) — refresh
    * effective away so any prior auto-away or stale aggregate clears. */
   bounce_recompute_session_away(session);
+
+  /* A client already on the network (a BOUNCER RESUME): every server
+   * re-points its copy to it now, before our ghost's QUIT -- a copy still
+   * naming the ghost would end itself on that QUIT (and send BS X back).
+   * A registering client's caller announces it once its N is due. */
+  if (announce)
+    bounce_broadcast(session, 'A', cli_yxx(cptr));
+  bounce_emit_connect_count(session);
+
+  /* The ghost leaves.  The record names the client, so its exit ends
+   * nothing.  Let QUIT propagate to remote servers: a registering client
+   * is about to be introduced by register_user() with a new numeric (and,
+   * on the revive fallback, the ghost's nick); if we suppress the ghost's
+   * QUIT here, remote servers retain the ghost under its old numeric and
+   * the incoming NICK N collides with it on same nick/user@host. */
+  if (local_ghost) {
+    ClearBouncerHold(ghost);
+    exit_client(ghost, ghost, &me, "Session resumed");
+  }
+
+  /* Convergence-completion event: any peer that was waiting on a
+   * pending-restore session can release its gate now, with the session's
+   * final state in its burst. */
+  bounce_release_idle_gates();
 
   return 0;
 }

@@ -167,8 +167,9 @@ static int bouncer_resume(struct Client *sptr, const char *token)
     since_time = (idle > 0) ? idle : session->hs_disconnect_time;
   }
 
-  /* Attach client to session */
-  ret = bounce_attach(session, sptr);
+  /* Attach client to session.  It is on the network already: the attach
+   * announces it (BS A) before a held ghost of ours leaves. */
+  ret = bounce_attach(session, sptr, 1);
   if (ret == -2) {
     /* Held on another server (W3 Task 11): only its holder can hand the
      * session over, and a login there is how a client attaches to it.
@@ -187,9 +188,6 @@ static int bouncer_resume(struct Client *sptr, const char *token)
               "Session is already in use");
     return 0;
   }
-
-  /* Broadcast attach to all servers */
-  bounce_broadcast(session, 'A', cli_yxx(sptr));
 
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
