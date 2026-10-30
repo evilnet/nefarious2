@@ -464,6 +464,18 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
           continue;
       }
 
+      /* A device of another server's primary cannot join a local (&)
+       * channel of ours: the JOIN is its primary's, and our local channel
+       * does not exist on the primary's server -- it answers 403 for it, as
+       * we do here, to the device that asked (W3 Task 11 fix 1, ruling
+       * W3-T11-f1a).  Joined, a client of another server would sit in a
+       * channel only we have: every member's line in it routed there and
+       * answered 403. */
+      if (alias_source && !MyConnect(sptr) && IsLocalChannel(name)) {
+        send_reply(alias_source, ERR_NOSUCHCHANNEL, name);
+        continue;
+      }
+
       if (cli_user(sptr)->joined >= get_client_maxchans(sptr)
           && !HasPriv(sptr, PRIV_CHAN_LIMIT)) {
         send_reply(sptr, ERR_TOOMANYCHANNELS, name);
