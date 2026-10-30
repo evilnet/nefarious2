@@ -3368,6 +3368,13 @@ void bounce_kill_session(struct BouncerSession *session, const char *comment)
   bounce_end_session(session, BOUNCE_END_KILL, comment);
 }
 
+/** @a c when it is a held ghost of ours (a socket we may exit), else
+ * NULL: a retire exits nothing of another server's (B-2). */
+static struct Client *retire_ghost_ours(struct Client *c)
+{
+  return (c && MyConnect(c) && IsBouncerHold(c)) ? c : NULL;
+}
+
 /** See include/bouncer_session.h. */
 void bounce_retire_held_session(struct BouncerSession *s, struct Client *ghost,
                                 struct Client *link, const char *reason)
@@ -3376,6 +3383,12 @@ void bounce_retire_held_session(struct BouncerSession *s, struct Client *ghost,
 
   if (!ghost && s)
     ghost = s->hs_client;
+  /* Only a held ghost of ours leaves here.  A record we hold by a device
+   * entry of ours (session_has_local_holder()) can name another server's
+   * held ghost in its slot: exit_client() of that remote client here
+   * would split the network (B-2).  Its holder ends it; our BS X below
+   * ends nothing of its copy (W3 final fix wave, M-1). */
+  ghost = retire_ghost_ours(ghost);
   /* The session first: its own copy's devices (none live, or the caller
    * would not retire it), then BS X toward the aware links.  Another
    * copy's device on the roster stays: it follows that copy's primary,
@@ -6829,8 +6842,9 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                       "Bouncer reconcile: retiring held session %s for %s "
                       "-- %s announces live session %s",
                       local->hs_sessid, account, cli_name(sptr), sessid);
-            bounce_retire_held_session(local, local->hs_client, cptr,
-                                       "Bouncer session moved");
+            /* Its ghost only when it is a held ghost of ours (M-1, B-2). */
+            bounce_retire_held_session(local, retire_ghost_ours(local->hs_client),
+                                       cptr, "Bouncer session moved");
             goto bsc_create;
           }
           if (outcome == BSO_DROP_REPLICA) {

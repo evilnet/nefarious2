@@ -1378,7 +1378,10 @@ extern void bounce_kill_session(struct BouncerSession *session,
  *
  * @param[in] s      The session; NULL for a ghost no session names (only
  *                   the ghost exits).  Freed on return.
- * @param[in] ghost  The held ghost; NULL takes s's primary slot.
+ * @param[in] ghost  The held ghost; NULL takes s's primary slot.  Only a
+ *                   held ghost of ours (MyConnect, IsBouncerHold) is
+ *                   exited: another server's client in the slot is its
+ *                   holder's to end (B-2).
  * @param[in] link   The link being handled (exit_client's cptr).
  * @param[in] reason The exit reason; NULL or empty: "Bouncer session moved".
  */
