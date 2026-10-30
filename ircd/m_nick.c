@@ -316,8 +316,12 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* A login whose registration the bouncer deferred (its auth is done,
      * it waits for the drain): not a dormant nick to override.  The local
      * NICK is refused (W3 12c-2b fix round 3, I-4). */
-    if (bounce_is_pending_registration(acptr))
+    if (bounce_is_pending_registration(acptr)) {
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: a local NICK %s onto a deferred login's nick is "
+                "refused (433); the login keeps it", nick);
       return send_reply(cptr, ERR_NICKNAMEINUSE, nick);
+    }
     ServerStats->is_ref++;
     if (!find_except_conf(acptr, EFLAG_IPCHECK))
       IPcheck_connect_fail(acptr, 0);
