@@ -1336,6 +1336,12 @@ void bounce_session_adopt_kc_id(struct BouncerSession *session, const char *id)
   bounce_emit_session_kc_id(session);
 }
 
+/** How long a live record a peer's BS C just made waits for the BS A that
+ * names its primary before it reads as an orphan (seconds).  The peer
+ * sends BS C, N and BS A back to back from one registration; this only
+ * bounds a BS A that never comes (W3 12c-2b fix round 3, I-1). */
+#define BOUNCE_ANNOUNCED_WAIT 5
+
 /** Read every session of @a account as the chooser reads it
  * (bounce_choose(), bouncer_wire.h) for a login of @a cptr, in the
  * account's list order.  The primary of a session whose slot is not ours
@@ -1355,12 +1361,6 @@ void bounce_session_adopt_kc_id(struct BouncerSession *session, const char *id)
  * @param[in]  may_end  A registration (1): the previous user's leftover
  *                      may end; a hold-on (0): it is refused instead.
  * @return How many rows were filled (at most BOUNCE_CHOOSE_MAX_ROWS). */
-/** How long a live record a peer's BS C just made waits for the BS A that
- * names its primary before it reads as an orphan (seconds).  The peer
- * sends BS C, N and BS A back to back from one registration; this only
- * bounds a BS A that never comes (W3 12c-2b fix round 3, I-1). */
-#define BOUNCE_ANNOUNCED_WAIT 5
-
 static int bounce_choose_read(struct Client *cptr, const char *account,
                               struct BouncerSession **sessions,
                               struct bounce_choose_row *rows,
@@ -1409,6 +1409,7 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
     /* A peer's BS C made it a moment ago and its BS A, naming the
      * primary, has not come yet (I-1): the chooser waits for it. */
     r->announced = !p && s->hs_state == BOUNCE_ACTIVE && s->hs_announced
+                   && CurrentTime >= s->hs_announced
                    && CurrentTime - s->hs_announced < BOUNCE_ANNOUNCED_WAIT;
     sessions[n++] = s;
   }
@@ -10085,7 +10086,8 @@ static int bounce_links_mid_burst(void)
  * a member's account and leaves it where it is (fix round 2, N4).  A
  * roster entry counts only for an alias: a stale entry whose numeric a
  * plain user now carries (the numeric reused) is not that user's session
- * (fix round 3, I-5). */
+ * (fix round 3, I-5), nor is an entry of an alias that follows another
+ * primary (W3 12c-2b carry, nit). */
 static struct BouncerSession *session_holding_client(struct Client *c)
 {
   struct BouncerSession *s;
@@ -10094,7 +10096,8 @@ static struct BouncerSession *session_holding_client(struct Client *c)
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
     for (s = tokenHash[i]; s; s = s->hs_tnext)
       if (s->hs_client == c
-          || (IsBouncerAlias(c) && session_roster_has(s, c)))
+          || (IsBouncerAlias(c) && cli_alias_primary(c) == s->hs_client
+              && session_roster_has(s, c)))
         return s;
   return NULL;
 }
