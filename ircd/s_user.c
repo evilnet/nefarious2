@@ -953,6 +953,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
                   IsAccount(sptr) ? cli_account(sptr) : "*", nick,
                   owner ? cli_name(owner) : "*");
         register_user_unwind(sptr, pre_status, pre_handler, 0);
+        /* Never a hash entry left under a name it no longer has: the
+         * routes here hold the nick unhashed (another client owns the
+         * entry), but the clear must not depend on that (W3 final fix
+         * wave). */
+        if (FindClient(cli_name(sptr)) == sptr)
+          hRemClient(sptr);
         cli_name(sptr)[0] = '\0';
         send_reply(sptr, ERR_NICKNAMEINUSE, nick);
         return 0;
