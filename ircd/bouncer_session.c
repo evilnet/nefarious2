@@ -10660,12 +10660,16 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
           continue;
       }
 
-      /* Skip +Z channels for non-TLS aliases */
+      /* Skip +Z channels for non-TLS aliases.  The socket is told by its
+       * own server, which runs this for its alias at the same JOIN: the
+       * replica of another server's alias here is skipped silently (a
+       * notice routed to it reached the device twice). */
       if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
-        sendcmdto_one(&me, CMD_NOTICE, alias,
-          "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
-          "but your connection is plaintext. Reconnect with TLS to join.",
-          alias, chptr->chname);
+        if (MyConnect(alias))
+          sendcmdto_one(&me, CMD_NOTICE, alias,
+            "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
+            "but your connection is plaintext. Reconnect with TLS to join.",
+            alias, chptr->chname);
         continue;
       }
 
@@ -13075,6 +13079,53 @@ static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
   }
 }
 
+/** Ruling W3-T12c-3-e (W3 12c-3 fix 1, item 6): another server's alias
+ * @a alias of @a primary is a member, as an alias, of every channel its
+ * primary is a member of here -- the same rule its own server applies
+ * (bounce_setup_local_alias() at the attach, bounce_sync_alias_join() at
+ * each later JOIN of the primary), with the same exception: a +Z channel
+ * for a plaintext device (FLAG_SSL is a global user mode, carried in the
+ * BX C's modes).  A BX C's channel list is cut at the line's length
+ * (about a dozen channels, the most recent joins first), so the list
+ * cannot be the source: a channel past the cut whose only members on the
+ * device's side are the session's routed nothing toward the device's
+ * server, and the device missed its traffic.  Each membership is added
+ * as bounce_sync_alias_join() adds one -- the primary's status and op
+ * level, its JOIN msgid and time, an alias membership (no user count
+ * moves, #9) -- and goes nowhere on the wire (#10).  Run after the list's
+ * own pass, which stamps the msgid the line carries.
+ * @return The memberships added. */
+static int bxc_mirror_primary_channels(struct Client *alias,
+                                       struct Client *primary)
+{
+  struct Membership *pm;
+  int added = 0;
+
+  if (!alias || !primary || !cli_user(alias) || !cli_user(primary)
+      || MyConnect(alias))
+    return 0;
+  for (pm = cli_user(primary)->channel; pm; pm = pm->next_channel) {
+    struct Channel *chptr = pm->channel;
+    struct Membership *amem;
+
+    if (IsZombie(pm) || find_member_link(chptr, alias))
+      continue;
+    if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias))
+      continue;
+    add_user_to_channel(chptr, alias,
+                        CHFL_ALIAS | (pm->status & (CHFL_CHANOP | CHFL_HALFOP
+                                                    | CHFL_VOICE)),
+                        OpLevel(pm));
+    amem = find_member_link(chptr, alias);
+    if (amem && pm->join_msgid[0]) {
+      memcpy(amem->join_msgid, pm->join_msgid, sizeof(amem->join_msgid));
+      amem->join_tv = pm->join_tv;
+    }
+    added++;
+  }
+  return added;
+}
+
 static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
                                int parc, char *parv[])
 {
@@ -13541,6 +13592,19 @@ track_alias:
     MyFree(chan_copy);
   } else {
     Debug((DEBUG_INFO, "BX C: empty chanlist for alias %s", alias_numeric));
+  }
+
+  /* ... and every other channel its primary is in here: the list may be
+   * cut (ruling W3-T12c-3-e).  A new alias, a re-filed one and a face
+   * converted in place alike. */
+  {
+    int mirrored = bxc_mirror_primary_channels(alias, primary);
+
+    if (mirrored)
+      log_write(LS_USER, L_INFO, 0, "BX C: alias %s (%s) of %s is also filed "
+                "in %d channel%s of its primary here that the line does not "
+                "list", alias_numeric, cli_name(alias), cli_name(primary),
+                mirrored, mirrored == 1 ? "" : "s");
   }
 
   /* The primary is ours: the alias's server learns the session's server
