@@ -14810,15 +14810,51 @@ void bounce_schedule_registration_drain(void)
  * wait ends (I-1): nothing else may come to set one off if the BS A never
  * does. */
 static struct Timer registration_wait_timer;
+/** Set while registration_wait_timer's own expiry runs the drain. */
+static int registration_wait_running;
+/** The shortest wait a login asked for while that drain ran (-1: none). */
+static int registration_wait_rearm = -1;
 
-/** See include/bouncer_session.h. */
+/** registration_wait_timer's expiry: the drain, then the re-arm a login
+ * waiting for another announced primary asked for meanwhile.  Inside the
+ * callback the timer is still active, so bounce_schedule_registration_drain_in()
+ * only notes the wait; timer_chg() from here re-queues the timer once the
+ * callback returns (the timer code's GEN_READD).  W3 12c-2b carry, Minor 2:
+ * the re-arm used to be dropped, and the later login waited for the next
+ * read of a server link or its registration timeout. */
+static void bounce_registration_wait_cb(struct Event *ev)
+{
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  registration_wait_running = 1;
+  registration_wait_rearm = -1;
+  bounce_registration_drain_cb(ev);
+  registration_wait_running = 0;
+  if (registration_wait_rearm >= 0)
+    timer_chg(&registration_wait_timer, TT_RELATIVE,
+              registration_wait_rearm > 0 ? registration_wait_rearm : 1);
+  registration_wait_rearm = -1;
+}
+
+/** See include/bouncer_session.h.  One timer for every wait: the armed
+ * one is kept when it ends first, else moved to the shorter wait. */
 void bounce_schedule_registration_drain_in(int seconds)
 {
-  if (t_active(&registration_wait_timer))
-    return;   /* every wait is the same length: the armed one ends first */
+  if (seconds < 0)
+    seconds = 0;
+  if (registration_wait_running) {
+    if (registration_wait_rearm < 0 || seconds < registration_wait_rearm)
+      registration_wait_rearm = seconds;
+    return;
+  }
+  if (t_active(&registration_wait_timer)) {
+    if (CurrentTime + seconds < t_expire(&registration_wait_timer))
+      timer_chg(&registration_wait_timer, TT_RELATIVE,
+                seconds > 0 ? seconds : 1);
+    return;
+  }
   timer_add(timer_init(&registration_wait_timer),
-            bounce_registration_drain_cb, NULL, TT_RELATIVE,
-            seconds > 0 ? seconds : 0);
+            bounce_registration_wait_cb, NULL, TT_RELATIVE, seconds);
 }
 
 int bounce_defer_registration(struct Client *cli)
