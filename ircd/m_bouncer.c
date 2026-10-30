@@ -169,6 +169,19 @@ static int bouncer_resume(struct Client *sptr, const char *token)
 
   /* Attach client to session */
   ret = bounce_attach(session, sptr);
+  if (ret == -2) {
+    /* Held on another server (W3 Task 11): only its holder can hand the
+     * session over, and a login there is how a client attaches to it.
+     * Nothing changed anywhere. */
+    const char *holder = bounce_held_elsewhere(session);
+    char text[BUFSIZE];
+
+    ircd_snprintf(0, text, sizeof(text),
+                  "Session is held on %s; reconnect with SASL to attach",
+                  holder ? holder : "another server");
+    send_fail(sptr, "BOUNCER", "SESSION_REMOTE", session->hs_sessid, text);
+    return 0;
+  }
   if (ret < 0) {
     send_fail(sptr, "BOUNCER", "INVALID_TOKEN", NULL,
               "Session is already in use");

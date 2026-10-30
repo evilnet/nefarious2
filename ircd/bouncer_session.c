@@ -2927,13 +2927,43 @@ void bounce_post_burst_reconcile(void)
   }
 }
 
+/** See include/bouncer_session.h. */
+const char *bounce_held_elsewhere(struct BouncerSession *session)
+{
+  struct Client *ghost;
+  struct Client *server;
+
+  if (!session || session->hs_state != BOUNCE_HOLDING)
+    return NULL;
+  ghost = session->hs_client;
+  if (ghost) {
+    if (MyConnect(ghost))
+      return NULL;    /* our own held ghost */
+    server = (IsUser(ghost) && cli_user(ghost)) ? cli_user(ghost)->server : NULL;
+    return server ? cli_name(server) : "another server";
+  }
+  /* Not resolved here: the numeric the holder announced (BS D, BS A) is
+   * composed with the record's origin (bounce_resolve_hs_client_from_ghost()),
+   * so the origin names the holder.  A numeric of our own with no ghost
+   * behind it is no other server's hold. */
+  if (!session->hs_ghost_numeric[0]
+      || 0 == strcmp(session->hs_origin, cli_yxx(&me)))
+    return NULL;
+  server = FindNServer(session->hs_origin);
+  return server ? cli_name(server) : "another server";
+}
+
 /** Attach a client to an existing session (resume).
  *
  * For same-server resume: if a ghost exists locally, transfer its channel
  * memberships to the new client and destroy the ghost.
  *
- * For cross-server resume: the ghost is on another server, so initiate
- * a P10 BT (Bouncer Transfer) to migrate channels across servers.
+ * A session held on another server is refused (-2, W3 Task 11) before
+ * anything changes: only its holder can hand it over, and a login there is
+ * how a client attaches to it.  The broadcast this used to send instead
+ * (bounce_initiate_transfer(): a BX P with 3-character numerics, the
+ * record taken over here as ACTIVE while the holder kept its held ghost --
+ * two primaries under one id) is gone.
  */
 int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 {
@@ -2946,6 +2976,14 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 
   if (session->hs_state == BOUNCE_ACTIVE && session->hs_client)
     return -1; /* Already attached */
+
+  /* Held on another server (R9: the only -2; an ACTIVE record -- the
+   * registration's orphan reclaim -- and our own held ghost -- the
+   * registration's revive fallback -- never reach it).  Nothing changes:
+   * no client exits (#6, #12), no line goes out, the holder's hold runs
+   * on there. */
+  if (bounce_held_elsewhere(session))
+    return -2;
 
   /* Active client attach — clear restore-pending so any incoming
    * BX R sees us as firm. */
@@ -2999,14 +3037,6 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
      * same nick/user@host. */
     ClearBouncerHold(ghost);
     exit_client(ghost, ghost, &me, "Session resumed");
-  }
-  /* Cross-server resume: ghost is on another server, initiate transfer */
-  else if (session->hs_state == BOUNCE_HOLDING &&
-           session->hs_ghost_numeric[0] != '\0') {
-    /* Broadcast BT to have all servers transfer the ghost's channels */
-    bounce_initiate_transfer(session, cptr, session->hs_ghost_numeric);
-    /* bounce_initiate_transfer updates session state, so return early */
-    return 0;
   }
 
   session->hs_state = BOUNCE_ACTIVE;
@@ -15662,32 +15692,6 @@ static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr,
     sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "V %s %s", parv[2], parv[3]);
   return 0;
-}
-
-/** Initiate a cross-server bouncer transfer.
- * Called when BOUNCER RESUME is received and the ghost is on another server.
- * Broadcasts BX P to network to transfer the ghost's channels to the new client.
- */
-void bounce_initiate_transfer(struct BouncerSession *session,
-                              struct Client *new_client,
-                              const char *old_numeric)
-{
-  /* Broadcast the transfer request (BX P subcommand) */
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "P %s %s %s %s",
-                        old_numeric, cli_yxx(new_client),
-                        session->hs_sessid, cli_name(new_client));
-
-  /* Update session state */
-  session->hs_state = BOUNCE_ACTIVE;
-  session->hs_client = new_client;
-  handoff_set(session, NULL);   /* every install drops the hand-off */
-  session->hs_last_active = CurrentTime;
-  session->hs_disconnect_time = 0;
-
-  /* Cancel hold timer */
-  if (t_active(&session->hs_hold_timer))
-    timer_del(&session->hs_hold_timer);
 }
 
 /** Find the bouncer session for a client. */

@@ -1240,9 +1240,22 @@ extern int bounce_forced_exit(struct Client *cptr, struct Client *victim,
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.
  * @param[in] cptr Client to attach.
- * @return 0 on success, -1 on error.
+ * @return 0 on success; -2 when the session is held on another server
+ *         (bounce_held_elsewhere(); never for an ACTIVE record, so never
+ *         for the registration's orphan reclaim, nor for our own held
+ *         ghost), nothing changed; -1 on any other refusal.
  */
 extern int bounce_attach(struct BouncerSession *session, struct Client *cptr);
+
+/** Whether @a session is held on another server: HOLDING here while its
+ * ghost is not ours -- a client of another server, or a numeric the holder
+ * announced that names another server.  Only that server can hand the
+ * session over (a login there, by SASL).
+ * @param[in] session The session.
+ * @return The holder's server name (or "another server" when its server is
+ *         not known here), or NULL when the session is not held elsewhere.
+ */
+extern const char *bounce_held_elsewhere(struct BouncerSession *session);
 
 /** Detach a client from its session (disconnect, entering HOLDING).
  * @param[in] session Session to detach.
@@ -1589,16 +1602,6 @@ extern int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
  */
 extern int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
                             int parc, char *parv[]);
-
-/** Initiate a cross-server bouncer transfer.
- * Broadcasts BT to network to transfer ghost channels to new client.
- * @param[in] session The bouncer session.
- * @param[in] new_client The new client that is resuming.
- * @param[in] old_numeric The numeric of the ghost client to transfer from.
- */
-extern void bounce_initiate_transfer(struct BouncerSession *session,
-                                     struct Client *new_client,
-                                     const char *old_numeric);
 
 /** Broadcast a session state change to all other servers.
  * @param[in] session The session that changed.
