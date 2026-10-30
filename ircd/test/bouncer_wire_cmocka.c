@@ -1780,6 +1780,25 @@ static void bxp_double_cross_renumbers_the_noted_face(void **s)
   assert_int_equal(bounce_bxp_unknown_action(0, 0, 0, 0, 1), BOUNCE_BXP_FORWARD);
 }
 
+static void bxp_with_a_short_numeric_is_never_forwarded(void **s)
+{
+  (void)s;
+  /* Two full YYXXX numerics go on. */
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", "ACAAC"), 1);
+  /* An older fork peer's oper RESUME: three-character numerics, which a
+   * stock server reads as a server and a client (lens-1 M2). */
+  assert_int_equal(bounce_bxp_forwardable("AAB", "AAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", "AAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("AAB", "ACAAC"), 0);
+  /* Too long, empty, absent. */
+  assert_int_equal(bounce_bxp_forwardable("BjAABx", "ACAAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", "ACAACx"), 0);
+  assert_int_equal(bounce_bxp_forwardable("", "ACAAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", ""), 0);
+  assert_int_equal(bounce_bxp_forwardable(NULL, "ACAAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", NULL), 0);
+}
+
 static void bxp_with_both_clients_known_is_the_usual_path(void **s)
 {
   int f, n, c;
@@ -3005,6 +3024,7 @@ int main(void)
     cmocka_unit_test(bxp_keeps_only_the_lines_own_recorded_face),
     cmocka_unit_test(bxp_from_a_crossed_face_follows_the_kept_primary),
     cmocka_unit_test(bxp_double_cross_renumbers_the_noted_face),
+    cmocka_unit_test(bxp_with_a_short_numeric_is_never_forwarded),
     cmocka_unit_test(bxp_with_both_clients_known_is_the_usual_path),
     cmocka_unit_test(crossed_note_absent_is_none),
     cmocka_unit_test(crossed_note_on_the_kept_primary_acts),

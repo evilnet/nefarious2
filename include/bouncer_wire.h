@@ -1085,6 +1085,21 @@ extern enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known,
                                                          int new_numeric_ok,
                                                          int old_is_crossed_face);
 
+/** May a BX P that names a client this server does not know be passed
+ * on?  Only when both numerics are full five-character YYXXX ones.  A
+ * stock server reads a shorter one as a one-character server and a
+ * two-character client: an older fork peer's oper RESUME sent a BX P of
+ * three-character numerics, and a stock receiver could renumber an
+ * unrelated user.  Such a line is dropped here, never forwarded (W3 final
+ * fix wave, lens-1 M2).
+ *
+ * @param[in] old_numeric The line's old numeric (NULL: not forwardable).
+ * @param[in] new_numeric The line's new numeric (NULL: not forwardable).
+ * @return 1 when both are five characters long, else 0.
+ */
+extern int bounce_bxp_forwardable(const char *old_numeric,
+                                  const char *new_numeric);
+
 /** Where a record's crossed-promote note stands (hs_crossed_face, with
  * the kept primary's numeric). */
 enum bounce_crossed_note {

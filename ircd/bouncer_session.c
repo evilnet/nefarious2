@@ -12409,6 +12409,18 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       }
       break;
     case BOUNCE_BXP_FORWARD:
+      /* Never passed on with a numeric that is not a full YYXXX: a stock
+       * server reads a shorter one as a server and a client and may
+       * renumber an unrelated user (an older fork peer's oper RESUME sent
+       * three-character ones).  Dropped here (W3 final fix wave, lens-1
+       * M2; receiver-only). */
+      if (!bounce_bxp_forwardable(old_numeric, new_numeric)) {
+        log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
+                  "%s (%s, session %s): not five-character numerics; dropped, "
+                  "not forwarded", cli_name(sptr), new_numeric, old_numeric,
+                  nick, sessid);
+        return 0;
+      }
       if (!new_client)
         log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
                   "%s (%s, session %s), which is not known here; the old "

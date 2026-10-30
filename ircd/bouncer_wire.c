@@ -11,6 +11,8 @@
  */
 #include "bouncer_wire.h"
 
+#include <string.h>
+
 int bounce_legacy_link_knows(int link_aware, int link_gated,
                              int face_behind_link)
 {
@@ -496,6 +498,12 @@ enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known, int new_known,
       return BOUNCE_BXP_RENUMBER_CROSSED;
   }
   return BOUNCE_BXP_FORWARD;
+}
+
+int bounce_bxp_forwardable(const char *old_numeric, const char *new_numeric)
+{
+  return old_numeric && new_numeric
+         && strlen(old_numeric) == 5 && strlen(new_numeric) == 5;
 }
 
 enum bounce_crossed_note bounce_crossed_note_state(int noted, int slot_is_kept)
