@@ -1268,6 +1268,14 @@ extern int bounce_attach(struct BouncerSession *session, struct Client *cptr,
  */
 extern const char *bounce_held_elsewhere(struct BouncerSession *session);
 
+/** Whether @a c already belongs to a session here: it is an alias, or a
+ * record names it as its primary or lists it on its roster.  A BOUNCER
+ * RESUME from such a client is refused (W3 Task 11 fix 1, M-2).
+ * @param[in] c The client.
+ * @return Non-zero when it belongs to one.
+ */
+extern int bounce_client_in_session(struct Client *c);
+
 /** Detach a client from its session (disconnect, entering HOLDING).
  * @param[in] session Session to detach.
  * @return 0 on success.

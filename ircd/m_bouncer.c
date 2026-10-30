@@ -157,6 +157,16 @@ static int bouncer_resume(struct Client *sptr, const char *token)
     return 0;
   }
 
+  /* A connection that already belongs to a session -- an alias, or a
+   * client a record names as its primary or lists on its roster -- is
+   * never made another session's primary (W3 Task 11 fix 1, M-2).
+   * Refused before anything changes. */
+  if (bounce_client_in_session(sptr)) {
+    send_fail(sptr, "BOUNCER", "SESSION_CONFLICT", session->hs_sessid,
+              "This connection already belongs to a session");
+    return 0;
+  }
+
   /* Our held ghost is in channels (ruling W3-T11-f1c): the attach would
    * move its memberships to this client here only -- the other servers
    * and the legacy links would never learn of them, and the network would

@@ -2128,6 +2128,23 @@ static int session_roster_has(struct BouncerSession *s, struct Client *c)
   return 0;
 }
 
+/** See include/bouncer_session.h. */
+int bounce_client_in_session(struct Client *c)
+{
+  struct BouncerSession *s;
+  int i;
+
+  if (!c)
+    return 0;
+  if (IsBouncerAlias(c))
+    return 1;
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
+      if (s->hs_client == c || session_roster_has(s, c))
+        return 1;
+  return 0;
+}
+
 /** Drop every entry of @a s's alias roster that names @a c.
  *
  * A roster that shrank is persisted again (a record we hold; the store
