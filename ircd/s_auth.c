@@ -767,6 +767,13 @@ static int check_auth_finished(struct AuthRequest *auth)
       if (IsAccount(auth->client) && bounce_enabled_for(auth->client)
           && bounce_burst_in_progress()
           && bounce_defer_registration(auth->client) == 0) {
+        /* The wait from here is the server's, not the client's: a full
+         * CONNECTTIMEOUT for it, as register_user()'s own defer gives
+         * (register_user_unwind()); a re-defer by the drain keeps this
+         * clock, so the wait stays bounded.  Without it a login that
+         * spent most of its window in CAP/SASL met "Registration Timeout"
+         * part-way through a long netburst (W3 12c-2b carry, Minor 4). */
+        cli_firsttime(auth->client) = CurrentTime;
         sendrawto_one(auth->client,
                       "NOTICE * :*** Bouncer: SASL complete, waiting "
                       "for burst convergence before registration "
