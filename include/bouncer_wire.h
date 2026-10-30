@@ -904,15 +904,24 @@ enum bounce_bse_action {
                         *   here */
   BOUNCE_BSE_FORWARD,  /**< its primary is further on, behind servers that
                         *   read the line: passed on toward it */
-  BOUNCE_BSE_DROP      /**< no record of it here, a kind this server does
+  BOUNCE_BSE_DROP,     /**< no record of it here, a kind this server does
                         *   not know, or its primary is back toward the
-                        *   sender or behind a server that would drop the
-                        *   line */
+                        *   sender (and no promote of ours handed it there)
+                        *   or behind a server that would drop the line */
+  BOUNCE_BSE_RETURN    /**< our own promote just handed the session to a
+                        *   device behind the sender, which now holds it:
+                        *   the line goes back there once (W3 12c-4) */
 };
 
 /** The holder's side of bounce_end_route(): a BS E that reaches the
  * server holding the session ends it there; one that reaches a server on
- * the way is passed on toward the primary, never back.
+ * the way is passed on toward the primary, never back -- except once, by
+ * the server whose own promote moved the session while the line was on
+ * its way: that promote handed it to a device behind the sender (the BX P
+ * is queued on that link ahead of this line), so the line goes back to
+ * the device's server, the holder now, which decides (12b M2, W3 12c-4).
+ * A second return would need a real promote back across the link in
+ * between: the returns are bounded by real events, with no hop count.
  *
  * @param[in] known_kind        The line's end letter is one we know.
  * @param[in] found             We have a record of the session.
@@ -922,12 +931,33 @@ enum bounce_bse_action {
  *                              came from.
  * @param[in] route_reads_carry Every server from the primary's up to us
  *                              reads BS E.
+ * @param[in] active            The record is ACTIVE.
+ * @param[in] handed_to_primary The primary is the device a promote of ours
+ *                              handed the session to (hs_handoff names it).
+ * @param[in] link_gated        The link the line came from is burst-gated
+ *                              (our BX P to it may not have gone yet).
  */
 extern enum bounce_bse_action bounce_bse_action(int known_kind, int found,
                                                 int has_primary,
                                                 int primary_ours,
                                                 int toward_sender,
-                                                int route_reads_carry);
+                                                int route_reads_carry,
+                                                int active,
+                                                int handed_to_primary,
+                                                int link_gated);
+
+/** A member's end this server returned to the device its promote handed
+ * the session to is noted (memory only) for the crossed path: if that
+ * device's own exit crosses the promote, the noted end is what this
+ * server applies (BOUNCE_CROSSED_END_NOTED).  Is @a incoming noted over
+ * what is noted already?  A RESET-kind end (a reset, a ban) overrides any
+ * other kind and no other kind overrides it; of two other ends the later
+ * is kept.
+ *
+ * @param[in] noted    The kind noted (enum bounce_member_end), -1 if none.
+ * @param[in] incoming The kind of the end being returned.
+ */
+extern int bounce_end_note_replaces(int noted, int incoming);
 
 /** What a member's end does to the session's primary on the server that
  * ends it. */
@@ -973,8 +1003,11 @@ enum bounce_crossed_action {
   BOUNCE_CROSSED_LEAVE,    /**< not a promote of ours: the record is left
                             *   with no primary, for its holder */
   BOUNCE_CROSSED_PROMOTE,  /**< another device of the session takes over */
-  BOUNCE_CROSSED_END       /**< the session ends (BS X); the user loses it,
+  BOUNCE_CROSSED_END,      /**< the session ends (BS X); the user loses it,
                             *   and every server's users see it quit */
+  BOUNCE_CROSSED_END_NOTED /**< the session ends by the end this server
+                            *   returned to that device (W3 12c-4): its
+                            *   kind, its reason, its side effects */
 };
 
 /** A BX X can remove the primary of our record: the device a promote of
@@ -986,15 +1019,24 @@ enum bounce_crossed_action {
  * session that promote made; any other server leaves its record to that
  * one.
  *
+ * A member's end that this server returned to that device (the device's
+ * server asked for it just before the exit) and noted takes precedence,
+ * whether or not devices are left: a ban on a device ends the whole
+ * session (user, 2026-10-27), and so does an end followed by a quit.
+ *
  * @param[in] handed_to_it  Our own promote made the removed client the
  *                          session's primary.
  * @param[in] active        The record is ACTIVE (a held record is not the
  *                          promote's any more).
  * @param[in] own_devices   Live devices of the session's own copy left.
+ * @param[in] noted         An end returned to that device is noted, and
+ *                          this server does not refuse it
+ *                          (bounce_end_refused()).
  */
 extern enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
                                                             int active,
-                                                            int own_devices);
+                                                            int own_devices,
+                                                            int noted);
 
 /** What a BX P naming a client this server does not know does here. */
 enum bounce_bxp_unknown {

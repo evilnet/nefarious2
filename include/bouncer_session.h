@@ -694,6 +694,18 @@ struct BouncerSession {
    * whenever another path installs a primary, and when the record goes
    * held. */
   char hs_handoff[6];
+  /** Memory only: a member's end (BS E) that reached us after a promote of
+   * ours had handed the session to the device behind its sender, which we
+   * returned to that device's server (bounce_bse_action(): RETURN), noted
+   * for the crossed path: if that device's own exit (BX X) crosses the
+   * promote, the session ends here by this end -- its kind, its reason,
+   * its side effects (BOUNCE_CROSSED_END_NOTED).  It belongs to the
+   * hand-off it was noted under: every write of hs_handoff drops it
+   * (handoff_set()), and so does the record's destroy.  A RESET-kind end
+   * overrides any other (bounce_end_note_replaces()). */
+  int hs_end_noted;
+  enum bounce_member_end hs_end_note_how;
+  char hs_end_note_reason[TOPICLEN + 1];
   /** Memory only, on the device's server: a BX P named as the session's
    * new face a device that had already left here (its exit crossed the
    * promote).  The old face, the primary, is kept until the holder

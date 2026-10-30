@@ -415,16 +415,27 @@ enum bounce_end_route bounce_end_route(int has_primary, int primary_ours,
 enum bounce_bse_action bounce_bse_action(int known_kind, int found,
                                          int has_primary, int primary_ours,
                                          int toward_sender,
-                                         int route_reads_carry)
+                                         int route_reads_carry,
+                                         int active, int handed_to_primary,
+                                         int link_gated)
 {
   if (!known_kind || !found)
     return BOUNCE_BSE_DROP;
   if (!has_primary || primary_ours)
     return BOUNCE_BSE_END;
-  /* Never back toward the sender (two records each naming the other's
-   * client), never toward a server that would drop it. */
-  return !toward_sender && route_reads_carry ? BOUNCE_BSE_FORWARD
-                                             : BOUNCE_BSE_DROP;
+  /* Never toward a server that would drop it. */
+  if (!route_reads_carry)
+    return BOUNCE_BSE_DROP;
+  if (!toward_sender)
+    return BOUNCE_BSE_FORWARD;
+  /* Back toward the sender only when our own promote handed the session
+   * to the device there that is now its primary: that BX P is queued on
+   * the link ahead of this line (not while the link is gated, whose BX P
+   * may not have gone), so the sender reads that it holds the session
+   * first.  Never otherwise: two records that each name the other's
+   * client would pass the line back and forth. */
+  return active && handed_to_primary && !link_gated ? BOUNCE_BSE_RETURN
+                                                    : BOUNCE_BSE_DROP;
 }
 
 enum bounce_end_primary bounce_end_primary(enum bounce_member_end how,
@@ -449,12 +460,22 @@ int bounce_bsx_keep_reannounces(int kept, int link_hold_mark)
   return kept && link_hold_mark;
 }
 
+int bounce_end_note_replaces(int noted, int incoming)
+{
+  return incoming == BOUNCE_MEMBER_END_RESET
+         || noted != BOUNCE_MEMBER_END_RESET;
+}
+
 enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,
                                                      int active,
-                                                     int own_devices)
+                                                     int own_devices,
+                                                     int noted)
 {
   if (!handed_to_it || !active)
     return BOUNCE_CROSSED_LEAVE;
+  /* The end the device's server asked for just before the exit. */
+  if (noted)
+    return BOUNCE_CROSSED_END_NOTED;
   return own_devices > 0 ? BOUNCE_CROSSED_PROMOTE : BOUNCE_CROSSED_END;
 }
 

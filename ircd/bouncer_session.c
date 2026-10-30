@@ -741,6 +741,41 @@ static void crossed_note_clear(struct BouncerSession *s)
   s->hs_crossed_at = 0;
 }
 
+/** Drop the end @a s noted for the crossed path (hs_end_noted). */
+static void end_note_clear(struct BouncerSession *s)
+{
+  s->hs_end_noted = 0;
+  s->hs_end_note_how = BOUNCE_MEMBER_END_DISCONNECT;
+  s->hs_end_note_reason[0] = '\0';
+}
+
+/** Write @a s's hand-off: the device (full YYXXX) a promote of ours handed
+ * it to, or NULL for none.  The end noted for the crossed path belongs to
+ * the hand-off it was noted under, so every write drops it. */
+static void handoff_set(struct BouncerSession *s, const char *numeric)
+{
+  if (numeric)
+    ircd_strncpy(s->hs_handoff, numeric, sizeof(s->hs_handoff));
+  else
+    s->hs_handoff[0] = '\0';
+  end_note_clear(s);
+}
+
+/** Note @a how (with @a reason) as the end we returned to the device our
+ * promote handed @a s to, unless what is noted already stays
+ * (bounce_end_note_replaces(): a RESET-kind end overrides any other). */
+static void end_note_record(struct BouncerSession *s, enum bounce_member_end how,
+                            const char *reason)
+{
+  if (!bounce_end_note_replaces(s->hs_end_noted ? (int)s->hs_end_note_how : -1,
+                                (int)how))
+    return;
+  s->hs_end_noted = 1;
+  s->hs_end_note_how = how;
+  ircd_strncpy(s->hs_end_note_reason, reason ? reason : "",
+               sizeof(s->hs_end_note_reason));
+}
+
 /** Does any record name @a c as its primary?  Checked before a FLAG_KILLED
  * exit of a client no session may still anchor (see its callers). */
 static int record_names_primary(struct Client *c)
@@ -3146,6 +3181,8 @@ void bounce_destroy(struct BouncerSession *session)
   /* Whatever ends the record: a face our legacy links were renumbered to
    * by a crossed promote leaves them with it. */
   bounce_retract_crossed_face(session, "Bouncer session ended");
+  /* An end noted for the crossed path goes with the record. */
+  end_note_clear(session);
 
   /* Cancel timers if active */
   if (t_active(&session->hs_hold_timer))
@@ -4306,7 +4343,7 @@ int bounce_hs_client_assign_checked(struct BouncerSession *session,
   session->hs_client = candidate;
   /* A primary installed by another path is not the device a promote of
    * ours handed the session to. */
-  session->hs_handoff[0] = '\0';
+  handoff_set(session, NULL);
   return 1;
 }
 
@@ -6292,14 +6329,17 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
  * applied none, bounce_end_asker_applies()): the hold preference to 0 the
  * way BOUNCER SET HOLD off writes it -- on the primary, and to every
  * server by METADATA addressed by the primary's nick (by the account when
- * the record has no primary) -- and, for a DETACH, the account's webpush
- * subscriptions forgotten.  Before the session ends, so the METADATA
- * names a client every server still knows. */
+ * the record has no primary, or with @a by_account: a primary that is
+ * leaving, whose nick the other servers may not know by the time the line
+ * reaches them) -- and, for a DETACH, the account's webpush subscriptions
+ * forgotten.  Before the session ends, so the METADATA names a client
+ * every server still knows. */
 static void bounce_end_apply_side_effects(struct BouncerSession *s,
-                                          enum bounce_member_end how)
+                                          enum bounce_member_end how,
+                                          int by_account)
 {
   unsigned int fx = bounce_end_side_effects(how);
-  struct Client *p = s->hs_client;
+  struct Client *p = by_account ? NULL : s->hs_client;
 
   if (fx & BOUNCE_END_FX_HOLD_OFF) {
     if (p && IsUser(p) && IsAccount(p)) {
@@ -7160,7 +7200,7 @@ bsc_forward:
 
       session->hs_state = BOUNCE_HOLDING;
       session->hs_hold_brief = 0;
-      session->hs_handoff[0] = '\0';
+      handoff_set(session, NULL);
       session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
       session->hs_disconnect_time = disc_time;
       ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
@@ -7305,7 +7345,7 @@ bsc_forward:
   {
     /* BS E <account> <sessid> <D|O|T|R> :<reason>  (bounce_member_end()) */
     struct Client *primary;
-    int how, has = 0, ours = 0;
+    int how, has = 0, ours = 0, handed = 0;
 
     if (parc < 6)
       break;
@@ -7315,10 +7355,21 @@ bsc_forward:
     if (how >= 0 && session)
       member_end_primary(session, &has, &ours);
     primary = has ? session->hs_client : NULL;
+    /* Is the primary the device a promote of ours handed the session to
+     * (hs_handoff, set only with that promote's BX P)? */
+    if (primary && !ours && session->hs_handoff[0]) {
+      char full[6];
+
+      ircd_snprintf(0, full, sizeof(full), "%s%s",
+                    cli_yxx(cli_user(primary)->server), cli_yxx(primary));
+      handed = 0 == strcmp(session->hs_handoff, full);
+    }
     switch (bounce_bse_action(how >= 0, session != NULL, has, ours,
                               primary && cli_from(primary) == cptr,
                               primary && !ours
-                                && bounce_route_reads_carry(cli_user(primary)->server))) {
+                                && bounce_route_reads_carry(cli_user(primary)->server),
+                              session && session->hs_state == BOUNCE_ACTIVE,
+                              handed, IsBurstGated(cptr))) {
     case BOUNCE_BSE_END:
       if (bounce_end_refused((enum bounce_member_end)how, session->hs_enforced)) {
         /* As the command would be refused here: a connection on a class
@@ -7334,12 +7385,31 @@ bsc_forward:
                 member_end_name((enum bounce_member_end)how));
       /* The asking server applied none of the end's side effects: they
        * are the holder's to apply, once it accepts the end. */
-      bounce_end_apply_side_effects(session, (enum bounce_member_end)how);
+      bounce_end_apply_side_effects(session, (enum bounce_member_end)how, 0);
       bounce_end_here(session, NULL, cptr, (enum bounce_member_end)how,
                       parv[5]);
       break;
     case BOUNCE_BSE_FORWARD:
       sendcmdto_one(sptr, CMD_BOUNCER_SESSION, primary, "E %s %s %s :%s",
+                    account, sessid, parv[4], parv[5]);
+      break;
+    case BOUNCE_BSE_RETURN:
+      /* Our own promote handed the session to this device, behind the
+       * sender, while the line was on its way (12b M2): the device's
+       * server holds it now.  Our BX P is queued on that link ahead of
+       * this line, so that server reads that it holds the session first,
+       * and decides (#11).  The line goes back once, as it came, from us
+       * (a prefix not from the arriving link is dropped as a fake
+       * direction); nothing changes here, and hs_handoff stays: a BX X of
+       * the device crossing the promote is still ours to decide, by this
+       * end, noted for that path. */
+      log_write(LS_USER, L_INFO, 0, "Bouncer: %s asks to end %s's session "
+                "%s (%s): our promote handed it to %s (%s) there, its "
+                "holder now; returned to it", cli_name(sptr), account,
+                sessid, member_end_name((enum bounce_member_end)how),
+                session->hs_handoff, cli_name(primary));
+      end_note_record(session, (enum bounce_member_end)how, parv[5]);
+      sendcmdto_one(&me, CMD_BOUNCER_SESSION, primary, "E %s %s %s :%s",
                     account, sessid, parv[4], parv[5]);
       break;
     case BOUNCE_BSE_DROP:
@@ -7703,12 +7773,10 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
     session->hs_attach_time = MyConnect(alias) ? CurrentTime : 0;
     /* A device on another server takes over by our BX P: its own exit,
      * sent while it was still an alias there, can cross the BX P
-     * (bounce_crossed_bxx_action()).  This server decides then. */
-    if (!MyConnect(alias))
-      ircd_strncpy(session->hs_handoff, winner_numeric,
-                   sizeof(session->hs_handoff));
-    else
-      session->hs_handoff[0] = '\0';
+     * (bounce_crossed_bxx_action()).  This server decides then.  A
+     * member's end its server sent before it read the BX P is returned to
+     * it (bounce_bse_action()). */
+    handoff_set(session, MyConnect(alias) ? NULL : winner_numeric);
     session->hs_client = alias;
     session->hs_state = BOUNCE_ACTIVE;
     session->hs_last_active = CurrentTime;
@@ -13646,10 +13714,63 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
     struct BouncerSession *ps = bounce_get_session(target);
 
     if (ps && ps->hs_client == target) {
-      switch (bounce_crossed_bxx_action(
-                ps->hs_handoff[0] && 0 == strcmp(ps->hs_handoff, target_numeric),
-                ps->hs_state == BOUNCE_ACTIVE,
-                session_own_alias_count(ps))) {
+      int handed = ps->hs_handoff[0] && 0 == strcmp(ps->hs_handoff, target_numeric);
+      int active = ps->hs_state == BOUNCE_ACTIVE;
+      /* The end we returned to that device (its server asked for it just
+       * before the exit), noted for this path: it ends the session, by
+       * its kind and reason (W3 12c-4).  A DETACH is refused here as our
+       * own command would be, and today's decision stands. */
+      int noted = ps->hs_end_noted;
+
+      if (handed && active && noted
+          && bounce_end_refused(ps->hs_end_note_how, ps->hs_enforced)) {
+        log_write(LS_USER, L_INFO, 0, "BX X: %s removes %s (%s), the device "
+                  "our promote made the primary of %s's session %s: the end "
+                  "it asked for (%s), returned to it, is refused here, a "
+                  "connection here on a class that enforces persistence "
+                  "holds it", cli_name(sptr), target_numeric,
+                  cli_name(target), ps->hs_account, ps->hs_sessid,
+                  member_end_name(ps->hs_end_note_how));
+        noted = 0;
+      }
+      switch (bounce_crossed_bxx_action(handed, active,
+                                        session_own_alias_count(ps), noted)) {
+      case BOUNCE_CROSSED_END_NOTED:
+      {
+        enum bounce_member_end how = ps->hs_end_note_how;
+        char reason[sizeof(ps->hs_end_note_reason)];
+        const char *why;
+
+        ircd_strncpy(reason, ps->hs_end_note_reason, sizeof(reason));
+        why = how == BOUNCE_MEMBER_END_RESET && reason[0]
+              ? reason : "Bouncer session ended";
+        log_write(LS_USER, L_INFO, 0, "BX X: %s removes %s (%s), the device "
+                  "our promote made the primary of %s's session %s: its exit "
+                  "crossed the promote; the end it asked for (%s), returned "
+                  "to it, ends the session", cli_name(sptr), target_numeric,
+                  cli_name(target), ps->hs_account, ps->hs_sessid,
+                  member_end_name(how));
+        /* Its side effects, which the device's server left to the holder:
+         * addressed by the account, as the primary is leaving. */
+        bounce_end_apply_side_effects(ps, how, 1);
+        /* The session ends by that end: every device of ours that follows
+         * the primary goes with it (a reset: every device, everywhere,
+         * bounce_kill_session()), BS X, the record.  The primary is
+         * another server's (REMOTE): never exited there; its own server
+         * let it go already, and it leaves below. */
+        bounce_end_here(ps, NULL, cptr, how, reason);
+        ps = NULL;
+        /* Then as the crossed END below: no record may name the device as
+         * its primary when its FLAG_KILLED exit runs; our users and the
+         * legacy links that know its face see it quit, with the reset's
+         * (the ban's) reason. */
+        bounce_null_hs_client_pointing_at(target);
+        assert(!record_names_primary(target));
+        bounce_legacy_face_change(target, NULL, cptr, NULL, why);
+        SetFlag(target, FLAG_KILLED);
+        exit_client(cptr, target, sptr, why);
+        goto forward;
+      }
       case BOUNCE_CROSSED_PROMOTE:
         if (bounce_promote_alias(ps, 0) == 0) {
           log_write(LS_USER, L_INFO, 0, "BX X: %s removes %s (%s), the "

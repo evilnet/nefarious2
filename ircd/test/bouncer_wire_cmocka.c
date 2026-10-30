@@ -1351,46 +1351,135 @@ static void an_older_holder_gets_our_copys_end(void **s)
 }
 
 /* bounce_bse_action(known_kind, found, has_primary, primary_ours,
- * toward_sender, route_reads_carry) */
+ * toward_sender, route_reads_carry, active, handed_to_primary,
+ * link_gated) */
 
 static void bse_on_the_holder_ends_it(void **s)
 {
-  int t, r;
+  int t, r, a, h, g;
   (void)s;
   for (t = 0; t < 2; t++)
-  for (r = 0; r < 2; r++) {
-    assert_int_equal(bounce_bse_action(1, 1, 1, 1, t, r), BOUNCE_BSE_END);
-    assert_int_equal(bounce_bse_action(1, 1, 0, 0, t, r), BOUNCE_BSE_END);
+  for (r = 0; r < 2; r++)
+  for (a = 0; a < 2; a++)
+  for (h = 0; h < 2; h++)
+  for (g = 0; g < 2; g++) {
+    assert_int_equal(bounce_bse_action(1, 1, 1, 1, t, r, a, h, g), BOUNCE_BSE_END);
+    assert_int_equal(bounce_bse_action(1, 1, 0, 0, t, r, a, h, g), BOUNCE_BSE_END);
   }
 }
 
 static void bse_on_the_way_is_passed_on(void **s)
 {
+  int a, h, g;
   (void)s;
-  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 1), BOUNCE_BSE_FORWARD);
+  for (a = 0; a < 2; a++)
+  for (h = 0; h < 2; h++)
+  for (g = 0; g < 2; g++)
+    assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 1, a, h, g), BOUNCE_BSE_FORWARD);
 }
 
 static void bse_never_goes_back_or_to_a_server_that_drops_it(void **s)
 {
-  int r;
+  int r, a, h, g;
   (void)s;
+  /* Back toward the sender, unless our own promote just handed the
+   * session to a device there (the return, below). */
   for (r = 0; r < 2; r++)
-    assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, r), BOUNCE_BSE_DROP);
-  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 0), BOUNCE_BSE_DROP);
+  for (a = 0; a < 2; a++)
+  for (h = 0; h < 2; h++)
+  for (g = 0; g < 2; g++)
+    if (!(r && a && h && !g))
+      assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, r, a, h, g), BOUNCE_BSE_DROP);
+  /* Toward a server that would drop it, either way. */
+  for (a = 0; a < 2; a++)
+  for (h = 0; h < 2; h++)
+  for (g = 0; g < 2; g++)
+    assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 0, a, h, g), BOUNCE_BSE_DROP);
 }
 
 static void bse_with_no_record_or_an_unknown_kind_is_dropped(void **s)
 {
-  int f, h, o, t, r;
+  int f, h, o, t, r, a, d, g;
   (void)s;
   for (h = 0; h < 2; h++)
   for (o = 0; o < 2; o++)
   for (t = 0; t < 2; t++)
-  for (r = 0; r < 2; r++) {
-    assert_int_equal(bounce_bse_action(1, 0, h, o, t, r), BOUNCE_BSE_DROP);
+  for (r = 0; r < 2; r++)
+  for (a = 0; a < 2; a++)
+  for (d = 0; d < 2; d++)
+  for (g = 0; g < 2; g++) {
+    assert_int_equal(bounce_bse_action(1, 0, h, o, t, r, a, d, g), BOUNCE_BSE_DROP);
     for (f = 0; f < 2; f++)
-      assert_int_equal(bounce_bse_action(0, f, h, o, t, r), BOUNCE_BSE_DROP);
+      assert_int_equal(bounce_bse_action(0, f, h, o, t, r, a, d, g), BOUNCE_BSE_DROP);
   }
+}
+
+/* W3 12c-4 (12b M2): the holder whose own promote handed the session to a
+ * device behind the sender returns the end once, toward that device. */
+static void bse_returned_to_the_device_our_promote_handed_it_to(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, 1, 1, 1, 0), BOUNCE_BSE_RETURN);
+}
+
+static void bse_return_only_on_the_full_conjunction(void **s)
+{
+  int k, f, h, o, t, r, a, d, g;
+  (void)s;
+  for (k = 0; k < 2; k++)
+  for (f = 0; f < 2; f++)
+  for (h = 0; h < 2; h++)
+  for (o = 0; o < 2; o++)
+  for (t = 0; t < 2; t++)
+  for (r = 0; r < 2; r++)
+  for (a = 0; a < 2; a++)
+  for (d = 0; d < 2; d++)
+  for (g = 0; g < 2; g++) {
+    int want = k && f && h && !o && t && r && a && d && !g;
+    if (want)
+      assert_int_equal(bounce_bse_action(k, f, h, o, t, r, a, d, g), BOUNCE_BSE_RETURN);
+    else
+      assert_int_not_equal(bounce_bse_action(k, f, h, o, t, r, a, d, g), BOUNCE_BSE_RETURN);
+  }
+}
+
+static void bse_never_returned_for_an_unknown_kind_no_record_our_primary_or_not_toward_the_sender(void **s)
+{
+  (void)s;
+  /* An unknown kind, a missing record: dropped. */
+  assert_int_equal(bounce_bse_action(0, 1, 1, 0, 1, 1, 1, 1, 0), BOUNCE_BSE_DROP);
+  assert_int_equal(bounce_bse_action(1, 0, 1, 0, 1, 1, 1, 1, 0), BOUNCE_BSE_DROP);
+  /* Our own primary: it ends here. */
+  assert_int_equal(bounce_bse_action(1, 1, 1, 1, 1, 1, 1, 1, 0), BOUNCE_BSE_END);
+  /* Not toward the sender: passed on as before, never returned. */
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 0, 1, 1, 1, 0), BOUNCE_BSE_FORWARD);
+  /* No hand-off of ours (a server that refused the BX P, or whose device
+   * is gone), a held record, a route that drops it, a gated link. */
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, 1, 1, 0, 0), BOUNCE_BSE_DROP);
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, 1, 0, 1, 0), BOUNCE_BSE_DROP);
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, 0, 1, 1, 0), BOUNCE_BSE_DROP);
+  assert_int_equal(bounce_bse_action(1, 1, 1, 0, 1, 1, 1, 1, 1), BOUNCE_BSE_DROP);
+}
+
+/* bounce_end_note_replaces(noted, incoming) */
+
+static void end_note_r_overrides(void **s)
+{
+  int k;
+  (void)s;
+  /* Nothing noted: any end is noted. */
+  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_RESET; k++)
+    assert_true(bounce_end_note_replaces(-1, k));
+  /* A RESET-kind end replaces any other kind, and no other kind replaces
+   * it. */
+  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_RESET; k++) {
+    assert_true(bounce_end_note_replaces(k, BOUNCE_MEMBER_END_RESET));
+    if (k != BOUNCE_MEMBER_END_RESET)
+      assert_false(bounce_end_note_replaces(BOUNCE_MEMBER_END_RESET, k));
+  }
+  /* Two ends of the other kinds: the later is kept. */
+  assert_true(bounce_end_note_replaces(BOUNCE_MEMBER_END_HOLD_OFF, BOUNCE_MEMBER_END_DETACH));
+  assert_true(bounce_end_note_replaces(BOUNCE_MEMBER_END_DETACH, BOUNCE_MEMBER_END_DISCONNECT));
 }
 
 /* bounce_end_primary(how, primary_ours, held, handled) */
@@ -1566,35 +1655,51 @@ static void a_kept_session_is_announced_again_to_a_hold_mark_link(void **s)
   assert_false(bounce_bsx_keep_reannounces(0, 0));
 }
 
-/* bounce_crossed_bxx_action(handed_to_it, active, own_devices) */
+/* bounce_crossed_bxx_action(handed_to_it, active, own_devices, noted) */
 
 static void crossed_promote_another_device_takes_over(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_crossed_bxx_action(1, 1, 1), BOUNCE_CROSSED_PROMOTE);
-  assert_int_equal(bounce_crossed_bxx_action(1, 1, 3), BOUNCE_CROSSED_PROMOTE);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 1, 0), BOUNCE_CROSSED_PROMOTE);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 3, 0), BOUNCE_CROSSED_PROMOTE);
 }
 
 static void crossed_promote_with_no_device_left_ends(void **s)
 {
   (void)s;
-  assert_int_equal(bounce_crossed_bxx_action(1, 1, 0), BOUNCE_CROSSED_END);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 0, 0), BOUNCE_CROSSED_END);
 }
 
 static void crossed_promote_is_only_the_promoters(void **s)
 {
+  int n;
   (void)s;
-  assert_int_equal(bounce_crossed_bxx_action(0, 1, 0), BOUNCE_CROSSED_LEAVE);
-  assert_int_equal(bounce_crossed_bxx_action(0, 1, 2), BOUNCE_CROSSED_LEAVE);
+  for (n = 0; n < 2; n++) {
+    assert_int_equal(bounce_crossed_bxx_action(0, 1, 0, n), BOUNCE_CROSSED_LEAVE);
+    assert_int_equal(bounce_crossed_bxx_action(0, 1, 2, n), BOUNCE_CROSSED_LEAVE);
+  }
 }
 
 static void crossed_promote_needs_an_active_record(void **s)
 {
+  int n;
   (void)s;
   /* A hand-off noted earlier, on a record that went held since: not the
    * promote whose BX X this is. */
-  assert_int_equal(bounce_crossed_bxx_action(1, 0, 0), BOUNCE_CROSSED_LEAVE);
-  assert_int_equal(bounce_crossed_bxx_action(1, 0, 2), BOUNCE_CROSSED_LEAVE);
+  for (n = 0; n < 2; n++) {
+    assert_int_equal(bounce_crossed_bxx_action(1, 0, 0, n), BOUNCE_CROSSED_LEAVE);
+    assert_int_equal(bounce_crossed_bxx_action(1, 0, 2, n), BOUNCE_CROSSED_LEAVE);
+  }
+}
+
+/* W3 12c-4: an end returned to the device the promote handed the session
+ * to, noted here, ends the session whether or not devices are left. */
+static void crossed_promote_noted_end_takes_precedence(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 0, 1), BOUNCE_CROSSED_END_NOTED);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 1, 1), BOUNCE_CROSSED_END_NOTED);
+  assert_int_equal(bounce_crossed_bxx_action(1, 1, 3, 1), BOUNCE_CROSSED_END_NOTED);
 }
 
 /* bounce_bxp_unknown_action(old_known, new_known, old_is_lines_primary,
@@ -2777,6 +2882,10 @@ int main(void)
     cmocka_unit_test(bse_on_the_way_is_passed_on),
     cmocka_unit_test(bse_never_goes_back_or_to_a_server_that_drops_it),
     cmocka_unit_test(bse_with_no_record_or_an_unknown_kind_is_dropped),
+    cmocka_unit_test(bse_returned_to_the_device_our_promote_handed_it_to),
+    cmocka_unit_test(bse_return_only_on_the_full_conjunction),
+    cmocka_unit_test(bse_never_returned_for_an_unknown_kind_no_record_our_primary_or_not_toward_the_sender),
+    cmocka_unit_test(end_note_r_overrides),
     cmocka_unit_test(a_disconnect_keeps_the_live_primary),
     cmocka_unit_test(a_reset_takes_the_primary),
     cmocka_unit_test(a_held_ghost_leaves_with_any_end),
@@ -2797,6 +2906,7 @@ int main(void)
     cmocka_unit_test(crossed_promote_with_no_device_left_ends),
     cmocka_unit_test(crossed_promote_is_only_the_promoters),
     cmocka_unit_test(crossed_promote_needs_an_active_record),
+    cmocka_unit_test(crossed_promote_noted_end_takes_precedence),
     cmocka_unit_test(bxp_to_a_departed_device_keeps_the_old_face),
     cmocka_unit_test(bxp_keeps_only_the_lines_own_recorded_face),
     cmocka_unit_test(bxp_from_a_crossed_face_follows_the_kept_primary),
