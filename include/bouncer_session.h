@@ -583,14 +583,17 @@ struct BouncerSession {
                                        *   split reads the origin only for
                                        *   a session with no primary. */
   char hs_ghost_numeric[6];           /**< Ghost client numeric during HOLDING */
-  time_t hs_announced;                /**< When a peer's BS C made this live
-                                       *   record, until a BS A names its
-                                       *   primary (0 otherwise): for
+  time_t hs_announced;                /**< When a peer's live BS C for a
+                                       *   fresh session made this record --
+                                       *   outside a burst, and not the BS X
+                                       *   re-announce of an id kept apart
+                                       *   -- until a BS A names its primary
+                                       *   (0 otherwise): for
                                        *   BOUNCE_ANNOUNCED_WAIT seconds the
                                        *   chooser waits for that primary
                                        *   rather than reclaim the record as
                                        *   an orphan (W3 12c-2b fix round 3,
-                                       *   I-1). */
+                                       *   I-1; carry Minor 3). */
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
   char hs_hold_reason[128];           /**< Why the last hold happened (the

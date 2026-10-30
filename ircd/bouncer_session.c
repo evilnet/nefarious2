@@ -6392,6 +6392,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     time_t total_active = 0;
     time_t hold_time;
     int is_holding;
+    int reannounced = 0;
 
     if (parc < 7)
       return 0;
@@ -6741,6 +6742,10 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
     /* Create session from remote data */
   bsc_create:
+    /* An id we kept apart: this BS C is its holder announcing it to us
+     * again now that ours ended (the BS X re-announce), not a fresh
+     * session (W3 12c-2b carry, Minor 3). */
+    reannounced = unmirrored_marked(account, sessid);
     unmirrored_clear(account, sessid);
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
     ircd_strncpy(session->hs_account, account, ACCOUNTLEN + 1);
@@ -6758,8 +6763,17 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     session->hs_attach_count = attach_count;
     session->hs_total_active = total_active;
 
-    /* Live: its primary's BS A follows (I-1: the chooser waits for it). */
-    session->hs_announced = is_holding ? 0 : CurrentTime;
+    /* A fresh session a peer made just now, outside a burst: its primary's
+     * BS A follows (I-1: the chooser waits for it).  Not a burst's BS C
+     * (a link's burst announces its records with their BS A, and a login
+     * here waits for the end of that burst anyway), nor the BS X
+     * re-announce of an id we kept apart, whose BS A (or, held, BS D)
+     * follows in the same send (bounce_announce_session_to()).  The BS X
+     * keep branch's re-announce of a copy whose id we shared reads like a
+     * fresh BS C on the wire; its BS A follows in the same send too, and
+     * clears the mark in the same read.  (W3 12c-2b carry, Minor 3.) */
+    session->hs_announced = (!is_holding && !IsBurstOrBurstAck(sptr)
+                             && !reannounced) ? CurrentTime : 0;
     if (is_holding) {
       session->hs_state = BOUNCE_HOLDING;
       session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
