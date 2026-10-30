@@ -13024,9 +13024,14 @@ static int bxc_list_has(const char *chanlist, const char *chname)
  * converted in place, becomes one with its status, its counts moving once,
  * as the demote moves them.  Every other membership goes: the session is
  * not in that channel (a face converted in place told the members here by
- * its QUIT before this; an alias membership is shown to nobody). */
+ * its QUIT before this; an alias membership is shown to nobody).  A face
+ * converted in place can have devices of ours (they follow it, carrying
+ * its nick): they leave such a channel with it (bounce_sync_alias_part()),
+ * each socket told by PART under the nick it has, with @a reason, as the
+ * demoting server tells its own (demote_face_leaves(); W3 12c-3 fix 1,
+ * M-2). */
 static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
-                                   const char *chanlist)
+                                   const char *chanlist, const char *reason)
 {
   struct Membership *m;
   struct Membership *next;
@@ -13057,6 +13062,15 @@ static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
               "and its primary %s is not in it here: it leaves it",
               cli_yxx(cli_user(alias)->server), cli_yxx(alias), cli_name(alias),
               chptr->chname, cli_name(primary));
+    {
+      struct Membership *dm;
+
+      for (dm = chptr->members; dm; dm = dm->next_member)
+        if (MyConnect(dm->user) && !IsZombie(dm) && IsBouncerAlias(dm->user)
+            && cli_alias_primary(dm->user) == alias)
+          sendcmdto_one(dm->user, CMD_PART, dm->user, "%H :%s", chptr,
+                        reason && *reason ? reason : "Bouncer session converging");
+    }
     remove_user_from_channel(alias, chptr);
   }
 }
@@ -13252,8 +13266,9 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
         ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
       }
       bounce_count_converted(alias, &was, cli_user(alias)->server, "BX C re-file");
-      /* Its channels as its server lists them (W3 12c-3). */
-      bxc_apply_channel_list(alias, primary, chanlist);
+      /* Its channels as its server lists them (W3 12c-3).  An alias has no
+       * devices of its own to tell. */
+      bxc_apply_channel_list(alias, primary, chanlist, NULL);
       session = target;
       refiled = 1;
       goto track_alias;
@@ -13317,11 +13332,12 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
      * to its common channels FIRST so they clean it up, with the legacy
      * links' text (W3 12c-3, ruling W3-T12c-3-a: the face leaves once, as
      * the legacy links see it; it was "Session converging", row 371(3)),
-     * one msgid, and a WATCH/MONITOR logoff.  Local-only
-     * (sendcmdto_common_channels_butone targets local clients), so each
-     * aware server does this for its own clients when it processes the
-     * BX C; the legacy links had their QUIT above.  Skip when the nick is
-     * unchanged (no delta). */
+     * one msgid, and a WATCH/MONITOR logoff.  Local-only (it targets
+     * local clients), so each aware server does this for its own clients
+     * when it processes the BX C; the legacy links had their QUIT above.
+     * Not to the face's own devices here, which carry its nick and go on
+     * as the session's (W3 12c-3 fix 1, M-2: they heard their own nick
+     * quit).  Skip when the nick is unchanged (no delta). */
     if (0 != ircd_strcmp(cli_name(alias), cli_name(primary))) {
       char msgid[64] = "";
 
@@ -13329,17 +13345,17 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
         generate_msgid(msgid, sizeof(msgid));
         sendcmdto_set_client_event(msgid, history_event_time_ms(NULL));
       }
-      sendcmdto_common_channels_butone(alias, CMD_QUIT, NULL, ":%s",
-                                       convert_reason);
+      sendcmdto_common_channels_but_session(alias, CMD_QUIT, ":%s",
+                                            convert_reason);
       sendcmdto_set_client_msgid(NULL);
       check_status_watch(alias, RPL_LOGOFF);
     }
     /* Its memberships as its server announces them (ruling
      * W3-T12c-3-a): the session's channels become alias memberships, the
      * rest -- a channel only this face was in, which the session is not
-     * in -- go.  Before the identity changes below: its counts move with
-     * the flags it joined under. */
-    bxc_apply_channel_list(alias, primary, chanlist);
+     * in -- go, its devices here told by PART.  Before the identity
+     * changes below: its counts move with the flags it joined under. */
+    bxc_apply_channel_list(alias, primary, chanlist, convert_reason);
     {
       /* What it holds as the user its server introduced by N, and that
        * server, before the conversion overwrites anything. */
