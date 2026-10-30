@@ -710,6 +710,7 @@ static void bounce_retract_crossed_face(struct BouncerSession *s,
                                         const char *reason);
 static void bounce_bsx_end_devices(struct BouncerSession *s,
                                    struct Client *sender, const char *sessid);
+static void bounce_note_registration_wait(struct BouncerSession *s);
 
 /** Is @a c the primary @a s's crossed-promote note kept (hs_crossed_kept)? */
 static int crossed_is_kept(struct BouncerSession *s, struct Client *c)
@@ -1443,6 +1444,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
     *out_since_time = 0;
 
   *out_session = NULL;
+  /* Only this run's WAIT is filed with the defer that follows it. */
+  bounce_note_registration_wait(NULL);
 
   /* Check if client's connection class forces bouncer behavior */
   cls = get_client_class_conf(cptr);
@@ -1665,6 +1668,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                 session->hs_origin);
       bounce_schedule_registration_drain_in(
         (int)(session->hs_announced + BOUNCE_ANNOUNCED_WAIT - CurrentTime));
+      /* The queue entry the defer makes waits on this record (Minor 5). */
+      bounce_note_registration_wait(session);
       return BOUNCE_RESUME_DEFER_PEER_INBOUND;
 
     case BOUNCE_CHOOSE_ORPHAN:
@@ -14677,7 +14682,34 @@ struct PendingRegistration {
   /** The nick a peer's N took from it while it waited (m_nick.c), for the
    * drain to resolve; "" otherwise (W3 12c-2b fix round 3, I-2). */
   char                      nick[NICKLEN + 1];
+  /** Deferred by the chooser's WAIT (I-1): the record it waits on and the
+   * end of that wait.  Until then the drain leaves the entry queued while
+   * the record is still unnamed (W3 12c-2b carry, Minor 5). */
+  char                      wait_account[ACCOUNTLEN + 1];
+  char                      wait_sessid[BOUNCER_SESSID_LEN];
+  time_t                    wait_until;
 };
+/** The WAIT bounce_auto_resume() just answered, for the defer that follows
+ * it to file on the queue entry (bounce_defer_registration() takes it). */
+static struct {
+  char   account[ACCOUNTLEN + 1];
+  char   sessid[BOUNCER_SESSID_LEN];
+  time_t until;
+} registration_wait_next;
+
+/** Note the WAIT on @a s that bounce_auto_resume() answers, for the defer
+ * that follows (NULL: forget any note left). */
+static void bounce_note_registration_wait(struct BouncerSession *s)
+{
+  memset(&registration_wait_next, 0, sizeof(registration_wait_next));
+  if (!s)
+    return;
+  ircd_strncpy(registration_wait_next.account, s->hs_account,
+               sizeof(registration_wait_next.account));
+  ircd_strncpy(registration_wait_next.sessid, s->hs_sessid,
+               sizeof(registration_wait_next.sessid));
+  registration_wait_next.until = s->hs_announced + BOUNCE_ANNOUNCED_WAIT;
+}
 static struct PendingRegistration *pending_registrations = NULL;
 /** The entries a running drain has taken off pending_registrations and not
  * reached yet.  Kept where bounce_remove_pending_registration() sees them:
@@ -14881,6 +14913,13 @@ int bounce_defer_registration(struct Client *cli)
     return -1;
   p->client = cli;
   p->nick[0] = '\0';
+  /* The WAIT the registration just answered, if any (taken once). */
+  ircd_strncpy(p->wait_account, registration_wait_next.account,
+               sizeof(p->wait_account));
+  ircd_strncpy(p->wait_sessid, registration_wait_next.sessid,
+               sizeof(p->wait_sessid));
+  p->wait_until = registration_wait_next.until;
+  memset(&registration_wait_next, 0, sizeof(registration_wait_next));
   p->next = pending_registrations;
   pending_registrations = p;
   log_write(LS_USER, L_INFO, 0,
@@ -15023,6 +15062,21 @@ void bounce_drain_pending_registrations(void)
     struct Client *cli = list->client;
     char taken[NICKLEN + 1];
     draining_registrations = list->next;
+    /* Deferred by the chooser's WAIT: while the record it waits on is
+     * still unnamed and the wait has not ended, a run of register_user()
+     * would only meet the same WAIT (its prologue, the chooser and the
+     * unwind for nothing, at every released read of any link).  Left
+     * queued: the BS A that names the primary is read and drains it, or
+     * the wait timer does (W3 12c-2b carry, Minor 5). */
+    if (list->wait_until && CurrentTime < list->wait_until) {
+      struct BouncerSession *ws =
+        bounce_find_by_token_sessid(list->wait_account, list->wait_sessid);
+      if (ws && !ws->hs_client && ws->hs_announced) {
+        list->next = pending_registrations;
+        pending_registrations = list;
+        continue;
+      }
+    }
     ircd_strncpy(taken, list->nick, sizeof(taken));
     MyFree(list);
     /* Its nick went to a peer's N while it waited (I-2). */
