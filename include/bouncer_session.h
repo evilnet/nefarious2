@@ -1769,6 +1769,29 @@ extern int bounce_yield_held_ghost(struct BouncerSession *session,
                                    struct Client *link,
                                    const char *incoming_sessid);
 
+/** A same-nick swap (D.2, BNA_SWAP) makes our live primary an alias of
+ * @a new_primary, under our record @a session: one session from here on,
+ * under one id, as the yield's (bounce_yield_id()).  Outside a burst our
+ * record takes the incoming primary's session id now (bounce_session_take_id:
+ * the record, its unmirrored mark, every connection it names), so the
+ * swap's BX C, a member's carried end (BS E) and either server's end of the
+ * session name the same record on both servers.  Two fresh sessions of one
+ * account made within one link round trip on two servers stay apart (BS C
+ * outside a burst), then meet here by their nick: without this the merged
+ * session kept two ids, one per server (W3 final fix wave, I-1).  Inside a
+ * burst the id is the burst's BS C's to decide (BOUNCE_BSC_FOLLOWED).  Call
+ * it after @a new_primary is installed and before the demote, while
+ * @a incoming_sessid is a copy of the N's ,S (the link's stash goes stale).
+ *
+ * @param[in] session         The record the swap acts on (our primary's).
+ * @param[in] new_primary     The incoming primary, installed.
+ * @param[in] incoming_sessid The session id the N carried (,S); NULL or
+ *                            empty changes nothing.
+ */
+extern void bounce_swap_take_id(struct BouncerSession *session,
+                                struct Client *new_primary,
+                                const char *incoming_sessid);
+
 /** Demote a live local primary into an alias of an incoming remote
  * primary.  Used by m_nick during net-rejoin to merge two
  * post-split-promote primaries gracefully without disconnecting the

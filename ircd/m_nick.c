@@ -757,15 +757,24 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
          * collide the nick and KILL one side, and either KILL ends the
          * whole session.  So the N goes to IRCv3-aware links only, and
          * the legacy links renumber acptr's face to the new primary in
-         * place (BX P: same nick, same channels). */
+         * place (BX P: same nick, same channels).
+         *
+         * One session from here on, under one id, as for the yield: our
+         * record takes the incoming id outside a burst (I-1), before the
+         * BX P and the demote name it.  The id is copied off the line
+         * first: it is the link's stash. */
         struct bounce_transition_params p;
         int rc;
         struct Client *new_primary;
+        char their_sessid[S2S_SESSID_BUFSIZE];
+        ircd_strncpy(their_sessid, theirs.sessid ? theirs.sessid : "",
+                     sizeof(their_sessid));
         set_nick_relay_withhold_legacy();
         rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
         clear_nick_relay_withhold_legacy();
         new_primary = findNUser(parv[parc - 2]);
         if (new_primary) {
+          bounce_swap_take_id(bsess, new_primary, their_sessid);
           /* While acptr still has the numeric the legacy links know.
            * Per-link sends: no S2S override is needed after them (the N
            * relay above has consumed its own). */

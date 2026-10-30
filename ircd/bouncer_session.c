@@ -10164,6 +10164,59 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
 }
 
 /** See include/bouncer_session.h. */
+void bounce_swap_take_id(struct BouncerSession *session,
+                         struct Client *new_primary,
+                         const char *incoming_sessid)
+{
+  struct BouncerSession *other;
+  int same;
+
+  if (!session || !new_primary || !IsUser(new_primary) || !cli_user(new_primary)
+      || !cli_user(new_primary)->server || !incoming_sessid || !*incoming_sessid)
+    return;
+  same = 0 == strcmp(incoming_sessid, session->hs_sessid);
+  other = same ? NULL : bounce_find_by_token_sessid(session->hs_account,
+                                                    incoming_sessid);
+  if (other == session)
+    other = NULL;
+  /* The yield's rule (bounce_yield_id()); the swap already vetoed another
+   * Keycloak user (#16), so no conflict is read here. */
+  switch (bounce_yield_id(same,
+                          IsBurstOrBurstAck(cli_user(new_primary)->server),
+                          other != NULL, 0)) {
+  case BOUNCE_YIELD_TAKE_ID: {
+    char old_id[BOUNCER_SESSID_LEN];
+
+    ircd_strncpy(old_id, session->hs_sessid, sizeof(old_id));
+    log_write(LS_USER, L_INFO, 0, "Bouncer swap: our record %s of %s takes "
+              "the session id %s of its new primary %s on %s", old_id,
+              session->hs_account, incoming_sessid, cli_name(new_primary),
+              cli_name(cli_user(new_primary)->server));
+    bounce_session_take_id(session, incoming_sessid);
+    /* What the old id keyed goes with it, as the finish drops it from the
+     * demoted connection when the ids differ (fix round 2, N8): take_id
+     * purged its presence; its ephemeral read markers too. */
+    readmarker_ephemeral_purge(old_id);
+    break;
+  }
+  case BOUNCE_YIELD_MERGE:
+    /* Two live records of one account and one Keycloak user here is what
+     * BS C never builds (it converges or keeps the peer's apart, never
+     * mirrors it beside a live one of ours): not reached.  Ours keeps its
+     * id rather than share it with that record. */
+    log_write(LS_USER, L_WARNING, 0, "Bouncer swap: our record %s of %s keeps "
+              "its id: a record %s of its new primary %s's session id is here "
+              "too", session->hs_sessid, session->hs_account, other->hs_sessid,
+              cli_name(new_primary));
+    break;
+  case BOUNCE_YIELD_KEEP_ID:
+    /* The same id, or a burst: the burst's BS C decides the id for the
+     * record that follows the new primary (BOUNCE_BSC_FOLLOWED). */
+    break;
+  }
+}
+
+/** See include/bouncer_session.h. */
 int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost,
                             struct Client *new_primary, struct Client *link,
                             const char *incoming_sessid)
