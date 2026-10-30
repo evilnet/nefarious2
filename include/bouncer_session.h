@@ -2258,6 +2258,17 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * still in use: the login is refused, never attached to it (caller
  * register_user exits the client). */
 #define BOUNCE_RESUME_REJECT_KC_CONFLICT 8
+/** The login's nick is another client's in the nick hash (a deferred nick
+ * resolved for an alias attach: check_auth_finished(), the drain's
+ * pending-nick resolution) and the route chosen is not that alias: the
+ * caller (register_user) answers ERR_NICKNAMEINUSE and lets the client
+ * wait for a new NICK, before the route changes anything (W3 12c-2b
+ * carry, Minor 1). */
+#define BOUNCE_RESUME_NICK_HELD 9
+/** Is @a cptr's nick another client's in the nick hash (it holds it
+ * unhashed)?  A registration's route other than the alias attach must not
+ * go on under it (W3 12c-2b carry, Minor 1). */
+extern int bounce_login_nick_held_elsewhere(struct Client *cptr);
 /** The Keycloak id a session belongs to, as this server knows it (its
  * primary's or held ghost's, else an alias's); "" when none is known. */
 extern const char *bounce_session_kc_id(struct BouncerSession *session);

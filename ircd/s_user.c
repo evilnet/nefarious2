@@ -924,6 +924,41 @@ int register_user(struct Client *cptr, struct Client *sptr)
       /* defer failed (OOM?) — fall through to create as best-effort */
     }
 
+    /* The nick this registration goes out under must be its own in the
+     * nick hash.  A deferred nick resolved for an alias attach
+     * (check_auth_finished(), the drain's pending-nick resolution) is set
+     * unhashed: its holder, a session primary of the same account, owns
+     * the hash entry, and only the alias route above registers under it.
+     * Any other route -- a hold opt-out, FOREIGN, a revive that fell back,
+     * and the orphan reclaim or create bounce_auto_resume() stops before
+     * changing anything (BOUNCE_RESUME_NICK_HELD) -- would introduce a
+     * second user of that nick, which the holder's servers answer with a
+     * nick-collision KILL.  A free nick is taken; a held one is refused:
+     * ERR_NICKNAMEINUSE, the client goes back to the unregistered
+     * connection it was, and its next NICK queues it again
+     * (set_nick_name()).  W3 12c-2b carry, Minor 1. */
+    if (auto_resumed == BOUNCE_RESUME_NICK_HELD
+        || (*(cli_name(sptr)) && FindClient(cli_name(sptr)) != sptr)) {
+      struct Client *owner = FindClient(cli_name(sptr));
+
+      if (auto_resumed != BOUNCE_RESUME_NICK_HELD && !owner)
+        hAddClient(sptr);
+      else {
+        char nick[NICKLEN + 1];
+
+        ircd_strncpy(nick, cli_name(sptr), sizeof(nick));
+        log_write(LS_USER, L_INFO, 0,
+                  "register_user: %s (%s) cannot register under %s, which %s "
+                  "holds: 433, it waits for a new NICK", nick,
+                  IsAccount(sptr) ? cli_account(sptr) : "*", nick,
+                  owner ? cli_name(owner) : "*");
+        register_user_unwind(sptr, pre_status, pre_handler, 0);
+        cli_name(sptr)[0] = '\0';
+        send_reply(sptr, ERR_NICKNAMEINUSE, nick);
+        return 0;
+      }
+    }
+
     SetLocalNumNick(sptr);
 
     /* cli_name must be set by NICK before registration proceeds.

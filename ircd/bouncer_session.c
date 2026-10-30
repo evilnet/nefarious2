@@ -1417,6 +1417,24 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
   return n;
 }
 
+/** See include/bouncer_session.h. */
+int bounce_login_nick_held_elsewhere(struct Client *cptr)
+{
+  struct Client *owner;
+
+  if (!cptr || !cli_name(cptr)[0])
+    return 0;
+  owner = FindClient(cli_name(cptr));
+  if (!owner || owner == cptr)
+    return 0;
+  log_write(LS_USER, L_INFO, 0,
+            "Bouncer: %s (%s) holds its nick unhashed: %s has it, and this "
+            "registration does not attach to it as its alias",
+            cli_name(cptr), IsAccount(cptr) ? cli_account(cptr) : "*",
+            cli_name(owner));
+  return 1;
+}
+
 /** SASL-triggered automatic resume.
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
@@ -1678,6 +1696,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * server restart, or when the primary exits before its aliases and
        * the session persists.  It counts toward the per-account limit, so
        * it is reclaimed rather than a new one made. */
+      if (bounce_login_nick_held_elsewhere(cptr))
+        return BOUNCE_RESUME_NICK_HELD;
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: reclaiming orphaned ACTIVE session %s for %s",
                 session->hs_sessid, cli_name(cptr));
@@ -1770,6 +1790,10 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                   cli_name(cptr), account, cli_name(link));
     }
     max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
+    /* Not under a nick another client holds: the create would anchor a
+     * session on a registration that is answered 433 instead. */
+    if (max_sessions > 0 && bounce_login_nick_held_elsewhere(cptr))
+      return BOUNCE_RESUME_NICK_HELD;
     if (max_sessions > 0) {
       if (bounce_create(cptr, &session) == 0) {
         bounce_broadcast(session, 'C', NULL);
