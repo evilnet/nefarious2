@@ -2391,6 +2391,55 @@ static void choose_waits_for_an_announced_primary(void **s)
   assert_int_equal(c.active_kind, BOUNCE_CHOOSE_WAIT);
 }
 
+static void choose_waits_for_a_crossed_promote(void **s)
+{
+  /* A live record whose primary is kept here for a promote that crossed
+   * its device's exit (HOLD_OLD): that primary's own server let it go, and
+   * the holder decides who takes over.  A login now never becomes an alias
+   * of it: it waits, as for an announced record (W3 final fix wave, M-2). */
+  struct bounce_choose_row r[2];
+  struct bounce_choice c;
+  (void)s;
+  r[0] = live_remote();
+  r[0].crossed = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_WAIT);
+  assert_int_equal(c.index, 0);
+  assert_int_equal(bounce_resume_route(&c), BOUNCE_ROUTE_DEFER);
+  /* Whatever room or TLS the row reads. */
+  r[0].full = 1;
+  bounce_choose(r, 1, 1, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_WAIT);
+  /* A kept primary of another identity is refused at once, as before:
+   * never joined either way (W3-T12c-2b-f1b). */
+  r[0] = live_ours();
+  r[0].crossed = 1;
+  r[0].primary_other = 1;
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_FOREIGN);
+  /* Once the holder decided (the note is gone): the live rules again. */
+  r[0] = live_remote();
+  bounce_choose(r, 1, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_ACTIVE_REMOTE);
+  /* Our own held ghost still goes first; the live verdict is the wait. */
+  r[0] = live_remote();
+  r[0].crossed = 1;
+  r[1] = held_ours(4);
+  bounce_choose(r, 2, 0, &c);
+  assert_int_equal(c.kind, BOUNCE_CHOOSE_HELD_LOCAL);
+  assert_int_equal(c.active_kind, BOUNCE_CHOOSE_WAIT);
+  /* A hold-on in that moment is a passing state too. */
+  {
+    struct bounce_hold_on_facts f;
+    memset(&f, 0, sizeof f);
+    r[0] = live_remote();
+    r[0].crossed = 1;
+    bounce_choose(r, 1, 0, &f.choice);
+    f.primary_user = f.primary_home_aware = 1;
+    assert_int_equal(bounce_hold_on_plan(&f), BOUNCE_HOLD_DEFER);
+  }
+}
+
 static void choose_keeps_the_live_verdict_for_a_failed_revive(void **s)
 {
   struct bounce_choose_row r[2];
@@ -2743,6 +2792,7 @@ static struct bounce_choose_row grid_row(unsigned int v)
   r.full = r.devices && ((v >> 7) & 1);
   r.primary_other = r.primary && ((v >> 8) & 1);
   r.announced = (v >> 9) & 1;
+  r.crossed = (v >> 10) & 1;
   r.disconnect_time = (long)((v >> 1) % 5);
   return r;
 }
@@ -2756,7 +2806,7 @@ static void registration_and_hold_on_agree(void **s)
    * Keycloak user's session is +b's; a create is a create; and +b never
    * makes a second session where the registration would not. */
   unsigned int a, b, tls;
-  unsigned int grid = 3 * 1024;
+  unsigned int grid = 3 * 2048;
   (void)s;
   for (a = 0; a < grid; a++)
     for (b = 0; b < grid; b += 7)
@@ -2867,6 +2917,7 @@ int main(void)
     cmocka_unit_test(choose_live_sessions),
     cmocka_unit_test(choose_keeps_the_live_verdict_for_a_failed_revive),
     cmocka_unit_test(choose_waits_for_an_announced_primary),
+    cmocka_unit_test(choose_waits_for_a_crossed_promote),
     cmocka_unit_test(plan_waits_for_an_announced_primary),
     cmocka_unit_test(plan_member_is_noop),
     cmocka_unit_test(plan_waits_out_a_burst),

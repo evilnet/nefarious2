@@ -711,6 +711,8 @@ static void bounce_retract_crossed_face(struct BouncerSession *s,
 static void bounce_bsx_end_devices(struct BouncerSession *s,
                                    struct Client *sender, const char *sessid);
 static void bounce_note_registration_wait(struct BouncerSession *s);
+static time_t session_wait_until(struct BouncerSession *s);
+static int session_still_waits(struct BouncerSession *s);
 
 /** Is @a c the primary @a s's crossed-promote note kept (hs_crossed_kept)? */
 static int crossed_is_kept(struct BouncerSession *s, struct Client *c)
@@ -1456,6 +1458,10 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
     r->announced = !p && s->hs_state == BOUNCE_ACTIVE && s->hs_announced
                    && CurrentTime >= s->hs_announced
                    && CurrentTime - s->hs_announced < BOUNCE_ANNOUNCED_WAIT;
+    /* Its primary is kept for a promote that crossed its device's exit
+     * (HOLD_OLD): its own server let it go, and the holder decides who
+     * takes over.  The chooser waits for that (M-2). */
+    r->crossed = crossed_state(s) == BOUNCE_NOTE_KEPT;
     sessions[n++] = s;
   }
   return n;
@@ -1722,14 +1728,27 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * primary yet: its N and BS A are on their way (a read that ended
        * between them).  Reclaiming it now would put a second live primary
        * under its id; the login waits for the BS A, at most
-       * BOUNCE_ANNOUNCED_WAIT seconds (W3 12c-2b fix round 3, I-1). */
-      log_write(LS_USER, L_INFO, 0,
-                "Bouncer: deferring the registration of %s (%s): session %s "
-                "was announced by %s a moment ago and its primary is not "
-                "named yet", cli_name(cptr), account, session->hs_sessid,
-                session->hs_origin);
+       * BOUNCE_ANNOUNCED_WAIT seconds (W3 12c-2b fix round 3, I-1).
+       * Or its primary is kept here for a promote that crossed its
+       * device's exit: that primary's own server let it go, and an alias
+       * of it would follow a client nobody holds.  The login waits for
+       * the holder's decision (its BX P or BS X, read off a link, drains
+       * it), at most until the backstop has run (W3 final fix wave,
+       * M-2). */
+      if (crossed_state(session) == BOUNCE_NOTE_KEPT)
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: deferring the registration of %s (%s): session %s "
+                  "keeps its primary %s for a promote that crossed its "
+                  "device's exit; its holder decides", cli_name(cptr),
+                  account, session->hs_sessid, session->hs_crossed_kept);
+      else
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: deferring the registration of %s (%s): session %s "
+                  "was announced by %s a moment ago and its primary is not "
+                  "named yet", cli_name(cptr), account, session->hs_sessid,
+                  session->hs_origin);
       bounce_schedule_registration_drain_in(
-        (int)(session->hs_announced + BOUNCE_ANNOUNCED_WAIT - CurrentTime));
+        (int)(session_wait_until(session) - CurrentTime));
       /* The queue entry the defer makes waits on this record (Minor 5). */
       bounce_note_registration_wait(session);
       return BOUNCE_RESUME_DEFER_PEER_INBOUND;
@@ -6167,6 +6186,25 @@ static void crossed_note(struct BouncerSession *s, const char *face,
   if (!t_active(&crossed_timer))
     timer_add(timer_init(&crossed_timer), bounce_crossed_backstop, NULL,
               TT_RELATIVE, ORPHAN_WAIT_MAX);
+}
+
+/** When a login the chooser told to wait on @a s (BOUNCE_CHOOSE_WAIT)
+ * stops waiting: for a primary kept for a crossed promote, once the
+ * backstop has run (the holder decides before it: M-2); else at the end
+ * of a fresh announcement's wait for its BS A (I-1). */
+static time_t session_wait_until(struct BouncerSession *s)
+{
+  if (crossed_state(s) == BOUNCE_NOTE_KEPT)
+    return s->hs_crossed_at + ORPHAN_WAIT_MAX + 1;
+  return s->hs_announced + BOUNCE_ANNOUNCED_WAIT;
+}
+
+/** Does a login still wait on @a s?  Its announced primary is not named
+ * yet, or its primary is still the one kept for a crossed promote. */
+static int session_still_waits(struct BouncerSession *s)
+{
+  return s && ((!s->hs_client && s->hs_announced)
+               || crossed_state(s) == BOUNCE_NOTE_KEPT);
 }
 
 /** A BS X from @a sender ends our record @a s of the session @a sessid
@@ -15233,9 +15271,10 @@ struct PendingRegistration {
   /** The nick a peer's N took from it while it waited (m_nick.c), for the
    * drain to resolve; "" otherwise (W3 12c-2b fix round 3, I-2). */
   char                      nick[NICKLEN + 1];
-  /** Deferred by the chooser's WAIT (I-1): the record it waits on and the
-   * end of that wait.  Until then the drain leaves the entry queued while
-   * the record is still unnamed (W3 12c-2b carry, Minor 5). */
+  /** Deferred by the chooser's WAIT (I-1, M-2): the record it waits on and
+   * the end of that wait.  Until then the drain leaves the entry queued
+   * while the record is still unnamed, or still keeps its primary for a
+   * crossed promote (session_still_waits(); W3 12c-2b carry, Minor 5). */
   char                      wait_account[ACCOUNTLEN + 1];
   char                      wait_sessid[BOUNCER_SESSID_LEN];
   time_t                    wait_until;
@@ -15259,7 +15298,7 @@ static void bounce_note_registration_wait(struct BouncerSession *s)
                sizeof(registration_wait_next.account));
   ircd_strncpy(registration_wait_next.sessid, s->hs_sessid,
                sizeof(registration_wait_next.sessid));
-  registration_wait_next.until = s->hs_announced + BOUNCE_ANNOUNCED_WAIT;
+  registration_wait_next.until = session_wait_until(s);
 }
 static struct PendingRegistration *pending_registrations = NULL;
 /** The entries a running drain has taken off pending_registrations and not
@@ -15614,24 +15653,24 @@ void bounce_drain_pending_registrations(void)
     char taken[NICKLEN + 1];
     draining_registrations = list->next;
     /* Deferred by the chooser's WAIT: while the record it waits on is
-     * still unnamed and the wait has not ended, a run of register_user()
-     * would only meet the same WAIT (its prologue, the chooser and the
-     * unwind for nothing, at every released read of any link).  Left
-     * queued: the BS A that names the primary is read and drains it, or
-     * the wait timer does (W3 12c-2b carry, Minor 5) -- asked for here
-     * for this entry's own wait end: the drain that met it can be the
-     * wait timer's, for an earlier wait, and nothing else may come (W3
-     * 12c-3 fix 1, I-1).  Inside that timer's callback the wait is noted
-     * and the timer re-armed (timer_chg); outside it, the armed timer is
-     * kept when it ends first, else moved. */
+     * still unnamed (or still keeps its primary for a crossed promote:
+     * M-2) and the wait has not ended, a run of register_user() would
+     * only meet the same WAIT (its prologue, the chooser and the unwind
+     * for nothing, at every released read of any link).  Left queued:
+     * the BS A that names the primary (the holder's BX P or BS X) is read
+     * and drains it, or the wait timer does (W3 12c-2b carry, Minor 5) --
+     * asked for here for this entry's own wait end: the drain that met
+     * it can be the wait timer's, for an earlier wait, and nothing else
+     * may come (W3 12c-3 fix 1, I-1).  Inside that timer's callback the
+     * wait is noted and the timer re-armed (timer_chg); outside it, the
+     * armed timer is kept when it ends first, else moved. */
     if (list->wait_until && CurrentTime < list->wait_until) {
       struct BouncerSession *ws =
         bounce_find_by_token_sessid(list->wait_account, list->wait_sessid);
       int rearm = 0;
 
       if (bounce_wait_entry_stays((long)list->wait_until, (long)CurrentTime,
-                                  ws && !ws->hs_client && ws->hs_announced,
-                                  &rearm)) {
+                                  session_still_waits(ws), &rearm)) {
         list->next = pending_registrations;
         pending_registrations = list;
         bounce_schedule_registration_drain_in(rearm);

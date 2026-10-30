@@ -625,6 +625,13 @@ static void choose_live(const struct bounce_choose_row *rows, int n,
   *index = i;
   if (r->primary && r->primary_other)
     *kind = BOUNCE_CHOOSE_FOREIGN;
+  else if (r->crossed)
+    /* Its primary is kept here only until the holder decides who takes
+     * over from a promote that crossed its device's exit: that primary's
+     * own server has let it go.  An alias of it would follow a client
+     * nobody holds (W3 final fix wave, M-2): wait, as for an announced
+     * record; the holder's BX P or BS X, or the backstop, ends the wait. */
+    *kind = BOUNCE_CHOOSE_WAIT;
   else if (!r->primary_ours && r->primary_server && r->primary && !r->full)
     *kind = BOUNCE_CHOOSE_ACTIVE_REMOTE;
   else if (!r->primary)

@@ -1280,6 +1280,13 @@ struct bounce_choose_row {
                           *   ago and no BS A has named its primary yet:
                           *   the primary's N and BS A are on their way
                           *   (W3 12c-2b fix round 3, I-1) */
+  int crossed;           /**< its primary is kept here for a promote that
+                          *   crossed its device's exit (hs_crossed_face, on
+                          *   the kept primary): that primary's own server
+                          *   has let it go, and the session's holder
+                          *   decides who takes over (a BX P, or BS X; the
+                          *   backstop otherwise) within ORPHAN_WAIT_MAX
+                          *   (W3 final fix wave, M-2) */
 };
 
 /** What the chooser found for a login of the account (bounce_choose()). */
@@ -1309,7 +1316,10 @@ enum bounce_choose_kind {
   BOUNCE_CHOOSE_WAIT           /**< a live session a peer has just announced
                                 *   (announced) whose primary is not named
                                 *   yet: wait for it, never reclaim it as an
-                                *   orphan (index) */
+                                *   orphan; or one whose primary is kept
+                                *   for a crossed promote (crossed): wait
+                                *   for the holder's decision, never an
+                                *   alias of it (index) */
 };
 
 /** The most sessions of one account the chooser reads (one bit each in
@@ -1349,10 +1359,12 @@ struct bounce_choice {
  *     here, no primary, no ghost numeric, no devices -- is garbage: it is
  *     dropped (discard) and the next best one is taken.  Any other is
  *     passed over (held_full when it had no room).
- *  3. Otherwise the first live session left in list order: a primary on
- *     another server with room (ACTIVE_REMOTE); no primary (ORPHAN); a
- *     primary and room (ACTIVE_ALIAS), or TLS for a plaintext login
- *     under BOUNCER_REQUIRE_TLS; a primary and no room (FULL).
+ *  3. Otherwise the first live session left in list order: a primary
+ *     kept for a crossed promote (WAIT, M-2); a primary on another server
+ *     with room (ACTIVE_REMOTE); no primary (ORPHAN, or WAIT while a
+ *     peer's announcement of it is fresh); a primary and room
+ *     (ACTIVE_ALIAS), or TLS for a plaintext login under
+ *     BOUNCER_REQUIRE_TLS; a primary and no room (FULL).
  *  4. No session left: NONE.  Sessions left, none of the above:
  *     UNREACHABLE.
  * Wherever the session taken (2. or 3.) has a primary of another identity
