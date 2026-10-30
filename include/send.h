@@ -231,6 +231,15 @@ extern void sendcmdto_common_channels_butone(struct Client *from,
 					     struct Client *one,
 					     const char *pattern, ...);
 
+/* Send command to the local members of every channel @a from is on, except
+ * @a from and its own bouncer aliases: its devices share its nick, so a
+ * line from that nick -- the QUIT of a face leaving the network while its
+ * connection carries on as a device (W3 12c-3) -- is not theirs to see. */
+extern void sendcmdto_common_channels_but_session(struct Client *from,
+                                                  const char *cmd,
+                                                  const char *tok,
+                                                  const char *pattern, ...);
+
 /* Send command to all channels user is on with or without a specified capability */
 extern void sendcmdto_common_channels_capab_butone(struct Client *from,
                                              const char *cmd,

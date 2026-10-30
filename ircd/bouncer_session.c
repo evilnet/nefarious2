@@ -9658,6 +9658,59 @@ static enum bounce_demote_bar demote_eligibility_for(enum bounce_demote_stage st
                                      ? cli_user(new_primary)->kc_id : NULL);
 }
 
+/** A reconcile demote's face, @a face (ours, still a plain user under its
+ * own nick), leaves the network once, as the legacy links see it (the
+ * finish's Q, @a reason): the members of its channels here are told by a
+ * QUIT under its old prefix -- its own devices excepted, they carry its
+ * nick and go on as the session's -- with one msgid, and its WATCH/MONITOR
+ * watchers by a logoff (W3 12c-3, ruling W3-T12c-3-a, as U1's joiner's
+ * face leaves: exit_face_departs(), whose server Q this does not send:
+ * the aware links learn the demote by its BX C).  Its socket is not told:
+ * it carries on.
+ * @return The presence time of the departure (0 with no msgid). */
+static int64_t demote_face_departs(struct Client *face, const char *reason)
+{
+  char msgid[64] = "";
+  uint64_t ms = 0;
+  int64_t quit_time = 0;
+
+  if (feature_bool(FEAT_MSGID) || feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    generate_msgid(msgid, sizeof(msgid));
+    ms = history_event_time_ms(NULL);
+    quit_time = presence_event_time(msgid, ms);
+  }
+  if (msgid[0] && feature_bool(FEAT_MSGID))
+    sendcmdto_set_client_event(msgid, ms);
+  sendcmdto_common_channels_but_session(face, CMD_QUIT, ":%s", reason);
+  sendcmdto_set_client_msgid(NULL);
+  check_status_watch(face, RPL_LOGOFF);
+  return quit_time;
+}
+
+/** A reconcile demote's face @a face (ours) and its devices here leave
+ * @a chptr, a channel its new primary @a new_primary is not in: the
+ * session is not in it (the legacy links had the face's QUIT and hold no
+ * member of the session there).  Each socket is told by PART, under the
+ * face it has, as U1's joiner's is; the members of the channel were told
+ * by the face's QUIT (demote_face_departs()).  Counts move as for any
+ * part. */
+static void demote_face_leaves(struct Client *face, struct Channel *chptr,
+                               struct Client *new_primary, const char *reason)
+{
+  struct Membership *m;
+
+  for (m = chptr->members; m; m = m->next_member)
+    if (MyConnect(m->user) && !IsZombie(m)
+        && (m->user == face
+            || (IsBouncerAlias(m->user) && cli_alias_primary(m->user) == face)))
+      sendcmdto_one(m->user, CMD_PART, m->user, "%H :%s", chptr, reason);
+  log_write(LS_USER, L_INFO, 0, "Bouncer demote: %s leaves %s, which its new "
+            "primary %s is not in: the session is not in it", cli_name(face),
+            chptr->chname, cli_name(new_primary));
+  /* The face's devices here go with it (bounce_sync_alias_part()). */
+  remove_user_from_channel(face, chptr);
+}
+
 int bounce_demote_live_primary_to_alias(struct Client *acptr,
                                         struct Client *new_primary,
                                         struct BouncerSession *session,
@@ -9666,6 +9719,8 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
   struct Membership *member;
   struct Membership *next_member;
   char alias_full[6];
+  char reason[NICKLEN + 32];
+  int64_t quit_time = 0;
   struct Client *new_primary_server;
   enum bounce_demote_bar bar;
 
@@ -9707,11 +9762,31 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
    * channel whose admission modes new_primary does not meet (+Z, +O, +a)
    * is left instead: acptr leaves it everywhere by a Net Rider KICK
    * (bounce_swap_membership(); fix round 1). */
+  /* A reconcile demote (no swap; W3 12c-3, ruling W3-T12c-3-a): the face
+   * leaves the network once, as its legacy links see it, and the session
+   * keeps only the channels its new primary is in -- the face and its
+   * devices leave the rest (demote_face_departs(), demote_face_leaves()).
+   * A swap's legacy links renumbered the face to the new primary (BX P),
+   * who takes its channels below instead. */
+  if (!taken) {
+    ircd_snprintf(0, reason, sizeof(reason), "Promoted to alias of %s",
+                  cli_name(new_primary));
+    /* (Under one nick there is no face to see leave.) */
+    if (0 != ircd_strcmp(cli_name(acptr), cli_name(new_primary)))
+      quit_time = demote_face_departs(acptr, reason);
+  }
   for (member = cli_user(acptr)->channel; member; member = next_member) {
     struct Channel *chptr = member->channel;
     struct bounce_swap_facts f;
 
     next_member = member->next_channel;
+    if (!taken && !IsMemberAlias(member)
+        && !find_member_link(chptr, new_primary)) {
+      presence_set_event_time(quit_time);
+      demote_face_leaves(acptr, chptr, new_primary, reason);
+      presence_set_event_time(0);
+      continue;     /* acptr is no member of it any more */
+    }
     memset(&f, 0, sizeof f);
     f.swap = taken != NULL;
     f.face_alias = IsMemberAlias(member);

@@ -2661,16 +2661,14 @@ bump_sentalong(struct Client *one)
     cli_sentalong(one) = sentalong_marker;
 }
 
-/** Send a (prefixed) command to all channels that \a from is on.
- * @param[in] from Client originating the command.
- * @param[in] cmd Long name of command.
- * @param[in] tok Short name of command.
- * @param[in] one Client direction to skip (or NULL).
- * @param[in] pattern Format string for command arguments.
- */
-void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
-				      const char *tok, struct Client *one,
-				      const char *pattern, ...)
+/** The body of sendcmdto_common_channels_butone() and
+ * sendcmdto_common_channels_but_session(): @a from's line to the local
+ * members of its channels, each once, except @a one (a client direction,
+ * or NULL) and, with @a skip_devices, @a from's own bouncer aliases.
+ * @a pattern's arguments come as @a ap, copied for each buffer built. */
+static void
+common_channels_vsend(struct Client *from, const char *cmd, struct Client *one,
+                      int skip_devices, const char *pattern, va_list ap)
 {
   struct VarData vd;
   struct MsgBuf *mb;
@@ -2688,7 +2686,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 
-  va_start(vd.vd_args, pattern);
+  va_copy(vd.vd_args, ap);
 
   /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
@@ -2711,6 +2709,8 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 	 member = member->next_member)
       if (MyConnect(member->user)
           && member->user != one
+          && !(skip_devices && IsBouncerAlias(member->user)
+               && cli_alias_primary(member->user) == from)
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
 	flags = get_client_tag_flags(member->user, from, 1);
@@ -2718,7 +2718,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 	  /* Build cached message buffer for this flag combination if needed */
 	  if (!mb_cache[flags]) {
 	    if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
-	      va_start(vd.vd_args, pattern);
+	      va_copy(vd.vd_args, ap);
 	      mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
 	      va_end(vd.vd_args);
 	    }
@@ -2749,6 +2749,37 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
+}
+
+/** Send a (prefixed) command to all channels that \a from is on.
+ * @param[in] from Client originating the command.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
+				      const char *tok, struct Client *one,
+				      const char *pattern, ...)
+{
+  va_list ap;
+
+  va_start(ap, pattern);
+  common_channels_vsend(from, cmd, one, 0, pattern, ap);
+  va_end(ap);
+}
+
+/** See include/send.h. */
+void sendcmdto_common_channels_but_session(struct Client *from,
+                                           const char *cmd, const char *tok,
+                                           const char *pattern, ...)
+{
+  va_list ap;
+
+  (void)tok;
+  va_start(ap, pattern);
+  common_channels_vsend(from, cmd, from, 1, pattern, ap);
+  va_end(ap);
 }
 
 /** Send a (prefixed) command to all channels that \a from is on.
