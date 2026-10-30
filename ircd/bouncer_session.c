@@ -1210,7 +1210,13 @@ int bounce_session_has_plaintext(struct Client *cptr)
  *
  * If you change how BS A / BS D / BS C store ghost_numeric, or add a path
  * that mutates hs_origin without updating hs_ghost_numeric, audit this
- * function, its three callers and member_end_resolve().
+ * function, its three callers, member_end_resolve() and
+ * bounce_held_elsewhere() (W3 Task 11: it reads the pair to name the
+ * holder of a record whose ghost is not resolved here, and refuses a
+ * RESUME by it.  Its split edge: after the holder's link goes, a replica
+ * not yet dropped keeps the pair; FindNServer() then finds no server and
+ * the RESUME is refused naming "another server" -- still a refusal, never
+ * a takeover).
  *
  * @param[in,out] session Session whose hs_client may be recovered.
  * @param[in] site_label Short tag for the refusal log line.
