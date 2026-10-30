@@ -13071,8 +13071,10 @@ static void session_roster_add(struct BouncerSession *session,
  * Since ruling W3-T12c-3-f the rule is the mirror invariant alone (W3
  * 12c-3 fix 1, item 6 keep rule): a membership of @a alias here stays when
  * @a primary is in the channel here, as an alias membership -- a real one,
- * a face converted in place, becomes one with its status, its counts
- * moving once, as the demote moves them.  The line's channel list no
+ * a face converted in place, becomes one, its counts moving once, as the
+ * demote moves them -- with its primary's op, halfop, voice and op level
+ * here (W3 12c-3 fix 2, N-1: a re-file under another primary used to keep
+ * the old one's).  The line's channel list no
  * longer decides: it is cut at the line's length (bxc_mirror_primary_
  * channels() adds what it leaves out), and a channel it lists that the
  * primary is not in here is one the primary left while the line was on
@@ -13093,9 +13095,17 @@ static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
 
   for (m = cli_user(alias)->channel; m; m = next) {
     struct Channel *chptr = m->channel;
+    struct Membership *pm;
 
     next = m->next_channel;
-    if (find_member_link(chptr, primary)) {
+    if ((pm = find_member_link(chptr, primary))) {
+      /* Its op, halfop, voice and op level are its primary's here, as every
+       * alias membership's (bounce_sync_alias_chanmodes()): re-filed under
+       * another primary, or a face converted in place, it does not keep
+       * its old ones (W3 12c-3 fix 2, N-1). */
+      m->status = (m->status & ~(CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE))
+                  | (pm->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+      SetOpLevel(m, OpLevel(pm));
       if (!IsMemberAlias(m)) {
         m->status |= CHFL_ALIAS;
         if (chptr->users > 0)
