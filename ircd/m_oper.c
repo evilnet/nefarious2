@@ -182,6 +182,28 @@ static void oper_password_verified(int result, void *arg)
   MyFree(ctx);
 }
 
+/** Copy @a modes into @a buf (of @a size) without any 'b'.  b is the
+ * bouncer hold (+b joins or makes the account's session, -b ends it): a
+ * mode string applied by do_oper() would run that in the middle of the
+ * OPER, on a client that may just have become an alias.  A hold is the
+ * user's own choice, never an Operator block's (W3 final fix wave).
+ * @return 1 when a 'b' was left out. */
+static int oper_umode_without_b(char *buf, size_t size, const char *modes)
+{
+  size_t n = 0;
+  int dropped = 0;
+
+  for (; *modes && n + 1 < size; modes++) {
+    if (*modes == 'b') {
+      dropped = 1;
+      continue;
+    }
+    buf[n++] = *modes;
+  }
+  buf[n] = '\0';
+  return dropped;
+}
+
 void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, int flags)
 {
   struct Flags old_mode = cli_flags(sptr);
@@ -192,6 +214,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
   char*        ajoinchan;
   char*        ajoinnotice;
   unsigned int snomask = 0;
+  char         umode_buf[BUFSIZE];
 
   parv[0] = cli_name(sptr);
   parv[1] = NULL;
@@ -249,6 +272,14 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
   }
 
   modes = ConfUmode(aconf);
+  if (modes && oper_umode_without_b(umode_buf, sizeof(umode_buf), modes)) {
+    log_write(LS_OPER, L_WARNING, 0, "OPER (%s) by (%#C): the umode \"%s\" "
+              "of its class %s has b, which is not applied (a bouncer hold "
+              "is the user's own)", aconf->name, sptr, modes,
+              aconf->conn_class ? aconf->conn_class->cc_name : "*");
+    /* Nothing left but signs: no mode change to apply. */
+    modes = umode_buf[strspn(umode_buf, "+-")] ? umode_buf : NULL;
+  }
   if (modes) {
     if (MyUser(sptr)) {
       char *umodev[] = { NULL, NULL, NULL, NULL };
