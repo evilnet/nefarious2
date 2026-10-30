@@ -253,10 +253,11 @@ enum bounce_nick_verdict {
 };
 
 /** Does a live login meet a held ghost of its account by the live login
- * winning (the held session ending)?  Not decided: 0 keeps the classic
- * rules for it, as they have always decided it.  This constant and the
- * one branch of bounce_nick_verdict_ex() that reads it are the whole
- * switch; 1 answers as if that branch were deleted. */
+ * winning (the held session ending)?  Decided 2026-10-27 (user, D-LH):
+ * (b), the classic rules, "which should favor the ghost in most cases" --
+ * 0, as they have always decided it.  This constant and the one branch of
+ * bounce_nick_verdict_ex() that reads it are the whole switch; 1 would
+ * answer as if that branch were deleted. */
 #define BOUNCE_LIVE_LOGIN_WINS 0
 
 /** What happens when an incoming N names the nick one of our clients
@@ -269,7 +270,7 @@ enum bounce_nick_verdict {
  *
  *  1. Different Keycloak users: classic (sessions of different ids are
  *     never merged).
- *  2. The open case (BOUNCE_LIVE_LOGIN_WINS), the one switch: classic,
+ *  2. The D-LH case (BOUNCE_LIVE_LOGIN_WINS), the one switch: classic,
  *     as it has always been, when
  *     - a live login known to be in no session meets a held ghost,
  *       either way round; or
@@ -277,8 +278,8 @@ enum bounce_nick_verdict {
  *       burst to its link is still gated: it may be a login in no
  *       session as well.
  *     Whether the live login should win instead (the held session
- *     ending) is not decided; with the switch off, the rules below
- *     answer both cases that way.
+ *     ending) was decided 2026-10-27 (user): no, (b) classic; with the
+ *     switch on, the rules below would answer both cases that way.
  *  3. Ours held:
  *     - the incoming one known to be in no session: ours ends, as
  *       BNV_RETIRE_LOCAL whatever session id it carries (a login in no
@@ -318,7 +319,7 @@ bounce_nick_verdict(const struct bounce_nick_side *local,
                     int local_is_session_primary, int kc_conflict,
                     int link_gated);
 
-/** bounce_nick_verdict() with the open case answered by @a
+/** bounce_nick_verdict() with the D-LH case answered by @a
  * live_login_wins instead of BOUNCE_LIVE_LOGIN_WINS.  The server calls
  * bounce_nick_verdict(); this form lets the unit tests check both
  * answers against the one implementation.

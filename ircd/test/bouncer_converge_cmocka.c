@@ -256,7 +256,7 @@ static void test_live_vs_known_held_keeps(void **state)
                    BNV_KEEP_LOCAL);
   assert_int_equal(V(known(0, 50, OLDER, NA), known(1, 100, OLDER, NB), 1, 0),
                    BNV_KEEP_LOCAL);
-  /* Ours not in a session: the open case, see the D-LH tests below. */
+  /* Ours not in a session: the D-LH case, see the D-LH tests below. */
 }
 
 static void test_held_vs_held_older_sessid_keeps(void **state)
@@ -825,8 +825,8 @@ static int composed_asymmetries(int dlh_a, int report)
 static void test_composed_stamps_are_antisymmetric_dlh_b(void **state)
 {
   (void)state;
-  /* Today's D-LH setting: a login in no session against a held ghost is
-   * classic. */
+  /* The D-LH setting (decided (b), 2026-10-27): a login in no session
+   * against a held ghost is classic. */
   assert_int_equal(composed_asymmetries(0, 1), 0);
 }
 

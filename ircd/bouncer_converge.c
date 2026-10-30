@@ -103,10 +103,10 @@ enum bounce_nick_verdict bounce_nick_verdict_ex(const struct bounce_nick_side *l
   /* A live login in no session meets a held ghost, either way round --
    * and our held ghost meets a client nobody announced while our burst
    * to its link is gated, which may be such a login too.  Whether the
-   * live login should win (the held session ending) is not decided;
-   * until it is, the classic rules decide, as they always have.  This is
-   * the only place that answers it: without it, the rules below let the
-   * live login win in all three. */
+   * live login should win (the held session ending) was decided
+   * 2026-10-27 (user, D-LH): no, the classic rules decide, as they always
+   * have.  This is the only place that answers it: without it, the rules
+   * below let the live login win in all three. */
   if (!live_login_wins
       && ((local->held && (incoming->non_member || (in_unknown && link_gated)))
           || (!local->held && !local_is_session_primary && in_held)))
