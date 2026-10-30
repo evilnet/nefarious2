@@ -837,3 +837,13 @@ int bounce_hold_on_tells(int asker_device, int target_ours, int target_user,
 {
   return asker_device && !target_ours && target_user && stands;
 }
+
+int bounce_wait_entry_stays(long wait_until, long now, int waiting,
+                            int *rearm_in)
+{
+  if (!wait_until || now >= wait_until || !waiting)
+    return 0;
+  if (rearm_in)
+    *rearm_in = (int)(wait_until - now);
+  return 1;
+}

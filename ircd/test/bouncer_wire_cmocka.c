@@ -1482,6 +1482,44 @@ static void end_note_r_overrides(void **s)
   assert_true(bounce_end_note_replaces(BOUNCE_MEMBER_END_DETACH, BOUNCE_MEMBER_END_DISCONNECT));
 }
 
+/* bounce_wait_entry_stays(wait_until, now, waiting, &rearm_in) -- W3 12c-3
+ * fix 1, I-1: a queued login the chooser's WAIT deferred, met by a drain. */
+
+static void wait_entry_stays_while_its_record_is_unnamed(void **s)
+{
+  int rearm = -1;
+  (void)s;
+  assert_true(bounce_wait_entry_stays(110, 100, 1, &rearm));
+  /* A drain for its own wait's end is asked for: nothing else may come. */
+  assert_int_equal(rearm, 10);
+}
+
+static void wait_entry_with_a_later_end_gets_its_own_drain(void **s)
+{
+  int ra = -1, rb = -1;
+  (void)s;
+  /* Two logins waiting on two records, ending at tA < tB: the drain at tA
+   * (the wait timer's own) finds B still waiting and asks for tB. */
+  assert_true(bounce_wait_entry_stays(105, 100, 1, &ra));
+  assert_true(bounce_wait_entry_stays(108, 105, 1, &rb));
+  assert_int_equal(ra, 5);
+  assert_int_equal(rb, 3);
+}
+
+static void wait_entry_goes_when_its_wait_ends_or_its_record_is_named(void **s)
+{
+  int rearm = -1;
+  (void)s;
+  /* The wait has ended: registered (the chooser decides again). */
+  assert_false(bounce_wait_entry_stays(100, 100, 1, &rearm));
+  assert_false(bounce_wait_entry_stays(100, 101, 1, &rearm));
+  /* The record is named, gone, or no longer announced. */
+  assert_false(bounce_wait_entry_stays(110, 100, 0, &rearm));
+  /* Not a WAIT deferral at all. */
+  assert_false(bounce_wait_entry_stays(0, 100, 1, &rearm));
+  assert_false(bounce_wait_entry_stays(0, 100, 0, &rearm));
+}
+
 /* bounce_end_primary(how, primary_ours, held, handled) */
 
 static void a_disconnect_keeps_the_live_primary(void **s)
@@ -2886,6 +2924,9 @@ int main(void)
     cmocka_unit_test(bse_return_only_on_the_full_conjunction),
     cmocka_unit_test(bse_never_returned_for_an_unknown_kind_no_record_our_primary_or_not_toward_the_sender),
     cmocka_unit_test(end_note_r_overrides),
+    cmocka_unit_test(wait_entry_stays_while_its_record_is_unnamed),
+    cmocka_unit_test(wait_entry_with_a_later_end_gets_its_own_drain),
+    cmocka_unit_test(wait_entry_goes_when_its_wait_ends_or_its_record_is_named),
     cmocka_unit_test(a_disconnect_keeps_the_live_primary),
     cmocka_unit_test(a_reset_takes_the_primary),
     cmocka_unit_test(a_held_ghost_leaves_with_any_end),

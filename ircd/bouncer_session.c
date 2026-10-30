@@ -15376,13 +15376,23 @@ void bounce_drain_pending_registrations(void)
      * would only meet the same WAIT (its prologue, the chooser and the
      * unwind for nothing, at every released read of any link).  Left
      * queued: the BS A that names the primary is read and drains it, or
-     * the wait timer does (W3 12c-2b carry, Minor 5). */
+     * the wait timer does (W3 12c-2b carry, Minor 5) -- asked for here
+     * for this entry's own wait end: the drain that met it can be the
+     * wait timer's, for an earlier wait, and nothing else may come (W3
+     * 12c-3 fix 1, I-1).  Inside that timer's callback the wait is noted
+     * and the timer re-armed (timer_chg); outside it, the armed timer is
+     * kept when it ends first, else moved. */
     if (list->wait_until && CurrentTime < list->wait_until) {
       struct BouncerSession *ws =
         bounce_find_by_token_sessid(list->wait_account, list->wait_sessid);
-      if (ws && !ws->hs_client && ws->hs_announced) {
+      int rearm = 0;
+
+      if (bounce_wait_entry_stays((long)list->wait_until, (long)CurrentTime,
+                                  ws && !ws->hs_client && ws->hs_announced,
+                                  &rearm)) {
         list->next = pending_registrations;
         pending_registrations = list;
+        bounce_schedule_registration_drain_in(rearm);
         continue;
       }
     }

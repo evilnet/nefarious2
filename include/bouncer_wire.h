@@ -1533,4 +1533,23 @@ extern enum bounce_hold_tail bounce_hold_tail_step(enum bounce_hold_tail now,
 extern int bounce_hold_on_tells(int asker_device, int target_ours,
                                 int target_user, int stands);
 
+/** A login the chooser's WAIT deferred (BOUNCE_CHOOSE_WAIT), met on the
+ * queue by a drain: does its entry stay queued?  While its wait has not
+ * ended and the record it waits on is still announced with no primary
+ * named, a run of register_user() would only meet the same WAIT (W3 12c-2b
+ * carry, Minor 5).  It then needs a drain of its own when its wait ends:
+ * nothing else may come to set one off (its BS A may never come), and the
+ * drain that met it may be the wait timer's own, for an earlier wait (W3
+ * 12c-3 fix 1, I-1).
+ *
+ * @param[in]  wait_until When its wait ends (0: not a WAIT deferral).
+ * @param[in]  now        The time now.
+ * @param[in]  waiting    The record it waits on is still there, announced,
+ *                        with no primary named.
+ * @param[out] rearm_in   When it stays: the seconds until its wait ends.
+ * @return 1 when it stays queued.
+ */
+extern int bounce_wait_entry_stays(long wait_until, long now, int waiting,
+                                   int *rearm_in);
+
 #endif /* INCLUDED_bouncer_wire_h */
