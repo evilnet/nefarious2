@@ -1472,14 +1472,16 @@ static void end_note_r_overrides(void **s)
     assert_true(bounce_end_note_replaces(-1, k));
   /* A RESET-kind end replaces any other kind, and no other kind replaces
    * it. */
-  for (k = BOUNCE_MEMBER_END_DISCONNECT; k <= BOUNCE_MEMBER_END_RESET; k++) {
+  for (k = BOUNCE_MEMBER_END_DISCONNECT; k < BOUNCE_MEMBER_END_RESET; k++) {
     assert_true(bounce_end_note_replaces(k, BOUNCE_MEMBER_END_RESET));
-    if (k != BOUNCE_MEMBER_END_RESET)
-      assert_false(bounce_end_note_replaces(BOUNCE_MEMBER_END_RESET, k));
+    assert_false(bounce_end_note_replaces(BOUNCE_MEMBER_END_RESET, k));
   }
-  /* Two ends of the other kinds: the later is kept. */
-  assert_true(bounce_end_note_replaces(BOUNCE_MEMBER_END_HOLD_OFF, BOUNCE_MEMBER_END_DETACH));
-  assert_true(bounce_end_note_replaces(BOUNCE_MEMBER_END_DETACH, BOUNCE_MEMBER_END_DISCONNECT));
+  /* Otherwise the first end is kept, as on the success path (the first
+   * end to arrive ends the session; the next finds no record): two ends
+   * of the other kinds, or two resets (W3 12c-4 fix 1). */
+  assert_false(bounce_end_note_replaces(BOUNCE_MEMBER_END_HOLD_OFF, BOUNCE_MEMBER_END_DETACH));
+  assert_false(bounce_end_note_replaces(BOUNCE_MEMBER_END_DETACH, BOUNCE_MEMBER_END_DISCONNECT));
+  assert_false(bounce_end_note_replaces(BOUNCE_MEMBER_END_RESET, BOUNCE_MEMBER_END_RESET));
 }
 
 /* bounce_wait_entry_stays(wait_until, now, waiting, &rearm_in) -- W3 12c-3

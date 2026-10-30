@@ -462,8 +462,11 @@ int bounce_bsx_keep_reannounces(int kept, int link_hold_mark)
 
 int bounce_end_note_replaces(int noted, int incoming)
 {
-  return incoming == BOUNCE_MEMBER_END_RESET
-         || noted != BOUNCE_MEMBER_END_RESET;
+  /* The first end is kept, as on the success path; only a RESET-kind end
+   * overrides a noted end of another kind. */
+  return noted < 0
+         || (incoming == BOUNCE_MEMBER_END_RESET
+             && noted != BOUNCE_MEMBER_END_RESET);
 }
 
 enum bounce_crossed_action bounce_crossed_bxx_action(int handed_to_it,

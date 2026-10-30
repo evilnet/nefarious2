@@ -3011,6 +3011,9 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = cptr;
+  /* Not the device a promote of ours handed the session to (W3 12c-4
+   * fix 1: every install drops the hand-off). */
+  handoff_set(session, NULL);
   /* Session-identity continuity follows the bouncer session, not the
    * underlying socket: the freshly-minted cli_session_id from
    * make_client is superseded by the bouncer's durable sessid. */
@@ -8946,6 +8949,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
 
   /* Step 13: Update session state (hs_state already set to ACTIVE earlier) */
   session->hs_client = ghost;
+  handoff_set(session, NULL);   /* every install drops the hand-off */
   session->hs_attach_count++;
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
@@ -9218,6 +9222,7 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
      * has a primary (a split goes by where the primary is). */
     session->hs_state = BOUNCE_ACTIVE;
     session->hs_client = ghost;
+    handoff_set(session, NULL);   /* every install drops the hand-off */
     session->hs_last_active = CurrentTime;
     session->hs_disconnect_time = 0;
   } else {
@@ -9228,6 +9233,7 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
      * numeric and origin that server's, and no hold timer here (the
      * holder runs it and ends the session with BS X). */
     session->hs_client = ghost;
+    handoff_set(session, NULL);   /* every install drops the hand-off */
     ircd_strncpy(session->hs_origin, cli_yxx(server),
                  sizeof(session->hs_origin));
     ircd_strncpy(session->hs_ghost_numeric, new_numeric + 2,
@@ -12162,6 +12168,10 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
                 "until the session's holder decides", cli_name(sptr),
                 new_numeric, old_numeric, nick, sessid, old_numeric);
       crossed_note(os, new_numeric, old_numeric);
+      /* Another server's promote supersedes any of ours: a hand-off we
+       * noted (and an end noted with it) no longer names the session's
+       * last move (W3 12c-4 fix 1). */
+      handoff_set(os, NULL);
       break;
     case BOUNCE_BXP_RENUMBER_CROSSED:
       /* The new face left too: our legacy links renumber again. */
@@ -15691,6 +15701,7 @@ void bounce_initiate_transfer(struct BouncerSession *session,
   /* Update session state */
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = new_client;
+  handoff_set(session, NULL);   /* every install drops the hand-off */
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
 

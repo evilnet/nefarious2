@@ -690,9 +690,14 @@ struct BouncerSession {
   /** Memory only: the device (full YYXXX) a promote of ours last handed
    * this session to, on another server; "" when none.  A BX X for that
    * client while it is our primary is its own exit crossing our BX P:
-   * this server decides then (bounce_crossed_bxx_action()).  Cleared
-   * whenever another path installs a primary, and when the record goes
-   * held. */
+   * this server decides then (bounce_crossed_bxx_action()); a member's end
+   * that crossed the promote is returned to it (bounce_bse_action()).
+   * Written only by handoff_set(): set by that promote; cleared by every
+   * other install of a primary (the checked install, an attach, a revive,
+   * a ghost rebind, a transfer), by another server's BS D (it holds the
+   * session) and by a BX P whose new face already left here (HOLD_OLD).
+   * NOT cleared when our own primary goes held (bounce_hold_session()):
+   * both readers require an ACTIVE record (W3 12c-4 fix 1). */
   char hs_handoff[6];
   /** Memory only: a member's end (BS E) that reached us after a promote of
    * ours had handed the session to the device behind its sender, which we

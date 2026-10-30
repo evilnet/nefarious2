@@ -920,8 +920,14 @@ enum bounce_bse_action {
  * its way: that promote handed it to a device behind the sender (the BX P
  * is queued on that link ahead of this line), so the line goes back to
  * the device's server, the holder now, which decides (12b M2, W3 12c-4).
- * A second return would need a real promote back across the link in
- * between: the returns are bounded by real events, with no hop count.
+ * The bound needs no hop count, only that a stale hand-off never stands:
+ * every path by which another server's promote or hold supersedes ours
+ * drops our hand-off -- its BX P installs through the checked install, its
+ * BS D (it holds the session) and a BX P whose new face already left here
+ * (HOLD_OLD) clear it, as does every local install (W3 12c-4 fix 1) -- so
+ * a return needs a promote of ours toward the sender that is still the
+ * session's last move, and a second return a real promote back across the
+ * link in between.
  *
  * @param[in] known_kind        The line's end letter is one we know.
  * @param[in] found             We have a record of the session.
@@ -950,9 +956,10 @@ extern enum bounce_bse_action bounce_bse_action(int known_kind, int found,
  * the session to is noted (memory only) for the crossed path: if that
  * device's own exit crosses the promote, the noted end is what this
  * server applies (BOUNCE_CROSSED_END_NOTED).  Is @a incoming noted over
- * what is noted already?  A RESET-kind end (a reset, a ban) overrides any
- * other kind and no other kind overrides it; of two other ends the later
- * is kept.
+ * what is noted already?  A RESET-kind end (a reset, a ban) overrides a
+ * noted end of any other kind; otherwise the first end noted is kept, as
+ * on the success path, where the first end to arrive ends the session
+ * and the next finds no record (W3 12c-4 fix 1).
  *
  * @param[in] noted    The kind noted (enum bounce_member_end), -1 if none.
  * @param[in] incoming The kind of the end being returned.
