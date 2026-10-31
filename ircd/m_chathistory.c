@@ -6877,7 +6877,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     int has_more = 0;
     int is_continuation = 0;
 
-    if (parc < 4)
+    /* The shortest form is the final continuation, "B <reqid> <msgid>
+     * :<b64>" (parc 5).  A 4-param line has no data: the continuation
+     * branch below would take the NULL parv[4] as its base64 and
+     * strlen() it.  Drop it here, before the forward, so it never
+     * reaches the request's origin either. */
+    if (parc < 5)
       return 0;
 
     reqid = parv[2];
@@ -7215,7 +7220,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     int has_more = 0;
     int is_continuation = 0;
 
-    if (parc < 4)
+    /* The shortest form is the final continuation, "WB <target> <msgid>
+     * :<b64>" (parc 5).  A 4-param line has no data: the continuation
+     * branch below would take the NULL parv[4] as its base64 and
+     * strlen() it. */
+    if (parc < 5)
       return 0;
 
     target = parv[2];
