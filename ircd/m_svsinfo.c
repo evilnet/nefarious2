@@ -48,7 +48,9 @@ int ms_svsinfo(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client *acptr;
 
-  if (parc < 2)
+  /* The info line is parv[2]: a line without it ("SI <numeric>") must
+   * stop here, or the copy below reads a NULL parv[2]. */
+  if (parc < 3)
     return need_more_params(sptr, "SVSINFO");
 
   if (!(acptr = findNUser(parv[1])))
