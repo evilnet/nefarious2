@@ -782,6 +782,11 @@ multiline_add_message(struct Client *sptr, const char *target,
   int len;
   char *msgcopy;
 
+  /* PRIVMSG/NOTICE pass NULL when the line has no text parameter; it is
+   * an empty line, and it was copied with strcpy(.., NULL) below. */
+  if (!text)
+    text = "";
+
   if (!con_ml_batch_id(con)[0])
     return 0;  /* No active batch */
 
