@@ -5,9 +5,13 @@
  *   "Logical Physical Clocks and Consistent Snapshots in Globally
  *    Distributed Databases"
  *
- * The logical counter uses uint16_t (max 65535). Overflow wraps to 0
- * with a log warning. In practice, 65k+ events within a single
- * millisecond is unrealistic for IRC.
+ * The logical counter uses uint16_t (max 65535).  It is not bounded by
+ * events per wall-clock millisecond: while the clock is pinned ahead of
+ * the wall clock (a peer that read ahead, an NTP step back) every event
+ * increments it.  On overflow the step carries into physical_ms instead
+ * of wrapping: a wrap at the same physical_ms would mint a stamp older
+ * than the previous one and, since 65536 is a multiple of the msgid's
+ * 12-bit counter, an exact duplicate msgid (formal/cbmc/crdt_hlc).
  */
 
 #include "config.h"
@@ -18,6 +22,23 @@
 
 /** Global HLC state for this server. */
 static struct HLC global_hlc;
+
+/** Step @a h to the next stamp at or after (pt, logical): logical + 1,
+ * or on overflow the next millisecond with logical 0. */
+static void hlc_step(struct HLC *h, uint64_t pt, uint16_t logical)
+{
+  if (logical == UINT16_MAX) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "HLC logical counter overflow (node %u, pt %llu) — carrying "
+              "into physical time", (unsigned)h->node_id,
+              (unsigned long long)pt);
+    h->physical_ms = pt + 1;
+    h->logical = 0;
+  } else {
+    h->physical_ms = pt;
+    h->logical = logical + 1;
+  }
+}
 
 uint64_t hlc_wall_clock_ms(void)
 {
@@ -34,15 +55,7 @@ struct HLC hlc_local_event(struct HLC *local)
     local->physical_ms = now;
     local->logical = 0;
   } else {
-    if (local->logical == UINT16_MAX) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "HLC logical counter overflow (node %u, pt %llu) — wrapping to 0",
-                (unsigned)local->node_id,
-                (unsigned long long)local->physical_ms);
-      local->logical = 0;
-    } else {
-      local->logical++;
-    }
+    hlc_step(local, local->physical_ms, local->logical);
   }
 
   return *local;
@@ -70,15 +83,7 @@ struct HLC hlc_receive_bounded(struct HLC *local, const struct HLC *remote,
       local->physical_ms = now;
       local->logical = 0;
     } else {
-      if (local->logical == UINT16_MAX) {
-        log_write(LS_SYSTEM, L_WARNING, 0,
-                  "HLC logical counter overflow (node %u, pt %llu) — wrapping to 0",
-                  (unsigned)local->node_id,
-                  (unsigned long long)local->physical_ms);
-        local->logical = 0;
-      } else {
-        local->logical++;
-      }
+      hlc_step(local, local->physical_ms, local->logical);
     }
 
     return *local;
@@ -95,36 +100,13 @@ struct HLC hlc_receive_bounded(struct HLC *local, const struct HLC *remote,
     /* Same physical time — take max logical + 1 */
     uint16_t max_l = (local->logical > remote->logical)
                      ? local->logical : remote->logical;
-    if (max_l == UINT16_MAX) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "HLC logical counter overflow on receive (node %u) — wrapping to 0",
-                (unsigned)local->node_id);
-      local->logical = 0;
-    } else {
-      local->logical = max_l + 1;
-    }
-    /* physical_ms stays the same */
+    hlc_step(local, local->physical_ms, max_l);
   } else if (local->physical_ms > remote->physical_ms) {
     /* Local is ahead — just increment local logical */
-    if (local->logical == UINT16_MAX) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "HLC logical counter overflow on receive (node %u) — wrapping to 0",
-                (unsigned)local->node_id);
-      local->logical = 0;
-    } else {
-      local->logical++;
-    }
+    hlc_step(local, local->physical_ms, local->logical);
   } else {
     /* Remote is ahead — adopt remote's time, increment its logical */
-    local->physical_ms = remote->physical_ms;
-    if (remote->logical == UINT16_MAX) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "HLC logical counter overflow on receive (node %u) — wrapping to 0",
-                (unsigned)local->node_id);
-      local->logical = 0;
-    } else {
-      local->logical = remote->logical + 1;
-    }
+    hlc_step(local, remote->physical_ms, remote->logical);
   }
 
   return *local;
