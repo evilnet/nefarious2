@@ -5722,8 +5722,18 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 
   /* figure out if channel name will cause buffer to be overflowed */
   len = chan ? strlen(chan->chname) + 1 : 2;
-  if (jbuf->jb_strlen + len > BUFSIZE)
+  if (jbuf->jb_strlen + len > BUFSIZE) {
+    /* This channel's msgid is already in slot jb_count (minted or
+     * pre-populated above), but the flush sends the slots before it and
+     * empties them all, and this channel becomes slot 0 of the next
+     * batch: carry its msgid there, or the next batch relays it under
+     * no msgid (before the flush emptied the slots: under the first
+     * flushed channel's). */
+    char cur_msgid[sizeof(jbuf->jb_msgids[0])];
+    memcpy(cur_msgid, jbuf->jb_msgids[jbuf->jb_count], sizeof(cur_msgid));
     joinbuf_flush(jbuf);
+    memcpy(jbuf->jb_msgids[0], cur_msgid, sizeof(cur_msgid));
+  }
 
   /* add channel to list of channels to send and update counts */
   jbuf->jb_channels[jbuf->jb_count++] = chan;
@@ -5828,6 +5838,13 @@ joinbuf_flush(struct JoinBuf *jbuf)
 			  jbuf->jb_comment);
     break;
   }
+
+  /* The slots belong to the batch just sent.  joinbuf_join takes a
+   * non-empty slot as a pre-populated msgid, so a slot left filled here
+   * gave the next batch's channels the msgids of this batch's (a local
+   * JOIN or PART of more than MAXJOINARGS channels echoed and stored
+   * channel 16 under channel 1's msgid). */
+  memset(jbuf->jb_msgids, 0, sizeof(jbuf->jb_msgids));
 
   return 0;
 }
