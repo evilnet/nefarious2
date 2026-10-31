@@ -321,6 +321,10 @@ cleanup:
   OSSL_PARAM_free(params);
   EVP_PKEY_CTX_free(pctx);
   EVP_PKEY_free(pkey);
+  /* A refused key leaves its reasons on the thread's OpenSSL error queue,
+   * where a TLS connection's next SSL_get_error() would read them as its
+   * own (ssl_clear_errors() in ssl.c): leave nothing behind. */
+  ERR_clear_error();
   return ret;
 }
 
@@ -746,6 +750,8 @@ cleanup:
   EVP_CIPHER_CTX_free(cipher_ctx);
   OSSL_PARAM_BLD_free(bld);
   OSSL_PARAM_free(params);
+  /* The subscriber's key is the client's: see wp_pkey_from_priv(). */
+  ERR_clear_error();
 
   return ret;
 }
@@ -890,6 +896,7 @@ cleanup:
     OPENSSL_free(der_sig);
   ECDSA_SIG_free(ecdsa_sig);
   OPENSSL_cleanse(raw_sig, sizeof(raw_sig));
+  ERR_clear_error();  /* see wp_pkey_from_priv() */
   return ret;
 }
 

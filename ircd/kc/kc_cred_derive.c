@@ -7,6 +7,7 @@
 #include <kc/kc_base64.h>
 #include <jansson.h>
 #include <openssl/crypto.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -54,6 +55,10 @@ done:
     OPENSSL_cleanse(client_key, sizeof(client_key));
     OPENSSL_cleanse(stored_key, sizeof(stored_key));
     OPENSSL_cleanse(server_key, sizeof(server_key));
+    /* A failure's reasons would stay on the thread's OpenSSL error queue,
+     * where a TLS connection's next SSL_get_error() reads them as its
+     * own: leave nothing. */
+    ERR_clear_error();
     return rc;
 }
 
@@ -103,5 +108,6 @@ done:
      * dk_b64 briefly holds the same secret in text form). */
     OPENSSL_cleanse(dk, sizeof(dk));
     OPENSSL_cleanse(dk_b64, sizeof(dk_b64));
+    ERR_clear_error();  /* as in scram_sha256_derive() */
     return rc;
 }

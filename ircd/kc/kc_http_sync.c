@@ -15,6 +15,7 @@
 #include <kc/kc_keycloak.h>  /* for KC_ERROR */
 
 #include <curl/curl.h>
+#include <openssl/err.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -333,6 +334,10 @@ kc_http_sync_perform(struct kc_http_sync_opts opts,
     }
 
     curl_easy_cleanup(curl);
+    /* libcurl's TLS leaves OpenSSL errors on this thread's queue (a
+     * closed or refused connection), where a TLS connection's next
+     * SSL_get_error() would read them as its own: leave nothing. */
+    ERR_clear_error();
 
     return result;
 }

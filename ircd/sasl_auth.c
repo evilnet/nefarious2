@@ -38,6 +38,7 @@
 #include "s_user.h"
 #include "metadata.h"
 
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/pem.h>
@@ -2128,6 +2129,10 @@ cleanup:
     EVP_PKEY_free(pkey);
   if (bio)
     BIO_free(bio);
+  /* A bad key or signature (the client's) leaves its reasons on the
+   * thread's OpenSSL error queue, where a TLS connection's next
+   * SSL_get_error() would read them as its own (ssl_clear_errors()). */
+  ERR_clear_error();
 
   return rc;
 }

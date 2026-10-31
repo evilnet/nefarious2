@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/params.h>
@@ -179,6 +180,10 @@ static int do_pbkdf2(const char *password, const unsigned char *salt,
 cleanup:
   if (ctx) EVP_KDF_CTX_free(ctx);
   if (kdf) EVP_KDF_free(kdf);
+  /* A failure's reasons would stay on the thread's OpenSSL error queue,
+   * where a TLS connection's next SSL_get_error() reads them as its own
+   * (ssl_clear_errors() in ssl.c): leave nothing behind. */
+  ERR_clear_error();
   return ret;
 }
 

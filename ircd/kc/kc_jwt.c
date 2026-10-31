@@ -223,6 +223,10 @@ cleanup:
     if (e_bin) free(e_bin);
     if (n) BN_free(n);
     if (e) BN_free(e);
+    /* A key OpenSSL refused leaves its reasons on the thread's error
+     * queue, where a TLS connection's next SSL_get_error() would read
+     * them as its own: leave nothing behind. */
+    ERR_clear_error();
     return pkey;
 }
 
@@ -405,6 +409,10 @@ jwt_verify_signature(const char *token, EVP_PKEY *pkey)
 
     EVP_MD_CTX_free(ctx);
     free(sig);
+    /* A bad signature (any client can send one) leaves rsa errors on the
+     * thread's queue ("data too large for modulus", "RSA lib"); see
+     * jwks_parse_rsa_key(). */
+    ERR_clear_error();
     return result;
 }
 

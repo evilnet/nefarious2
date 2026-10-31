@@ -385,6 +385,7 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
     resp_len = build_ws_forbidden_response(response);
     if (cli_socket(cptr).ssl) {
       SSL_write(cli_socket(cptr).ssl, response, resp_len);
+      ssl_clear_errors("after SSL_write");  /* unchecked: leave nothing */
     } else {
       unsigned int bytes_sent;
       os_send_nonb(cli_fd(cptr), response, resp_len, &bytes_sent);
@@ -407,6 +408,8 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
   /* Use SSL_write for SSL connections, os_send_nonb for plain */
   if (cli_socket(cptr).ssl) {
     int send_result = SSL_write(cli_socket(cptr).ssl, response, resp_len);
+    /* Its failure is not read through SSL_get_error(): leave nothing. */
+    ssl_clear_errors("after SSL_write");
     if (send_result <= 0) {
       Debug((DEBUG_DEBUG, "WebSocket: Failed to send handshake response to %s (SSL_write returned %d)",
              cli_sockhost(cptr), send_result));
@@ -759,6 +762,7 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
     int result;
 
     memcpy(copy, data, len);
+    ssl_clear_errors("before SSL_write");
     result = SSL_write(cli_socket(cptr).ssl, copy, len);
     if (result > 0) {
       MyFree(copy);

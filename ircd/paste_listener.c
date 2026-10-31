@@ -959,6 +959,8 @@ static void paste_conn_free(struct paste_conn *conn)
     SSL_shutdown(conn->ssl);
     SSL_free(conn->ssl);
     conn->ssl = NULL;
+    /* A failed handshake's shutdown and its own failure stay queued. */
+    ssl_clear_errors("after SSL_shutdown");
   }
 
   /* Close fd */
@@ -1012,6 +1014,7 @@ static void paste_drain_read(struct paste_conn *conn)
   int rc;
 
   for (;;) {
+    ssl_clear_errors("before SSL_read");
     rc = SSL_read(conn->ssl,
                   conn->request + conn->request_len,
                   sizeof(conn->request) - conn->request_len - 1);
@@ -1068,6 +1071,7 @@ static void paste_conn_callback(struct Event *ev)
     case ET_READ:
       if (conn->state == PASTE_CONN_SSL_ACCEPT) {
         /* Complete SSL handshake */
+        ssl_clear_errors("before SSL_accept");
         rc = SSL_accept(conn->ssl);
         if (rc == 1) {
           /* Handshake complete — the same TCP segment may have carried
@@ -1095,6 +1099,7 @@ static void paste_conn_callback(struct Event *ev)
     case ET_WRITE:
       if (conn->state == PASTE_CONN_SSL_ACCEPT) {
         /* Continue SSL handshake */
+        ssl_clear_errors("before SSL_accept");
         rc = SSL_accept(conn->ssl);
         if (rc == 1) {
           conn->state = PASTE_CONN_READING;
@@ -1112,6 +1117,7 @@ static void paste_conn_callback(struct Event *ev)
         }
       } else if (conn->state == PASTE_CONN_WRITING) {
         /* Write response */
+        ssl_clear_errors("before SSL_write");
         rc = SSL_write(conn->ssl,
                        conn->response + conn->response_sent,
                        conn->response_len - conn->response_sent);

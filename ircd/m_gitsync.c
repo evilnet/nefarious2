@@ -46,6 +46,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/evp.h>
@@ -313,6 +314,11 @@ cleanup:
     EVP_PKEY_free(pkey);
   if (bio)
     BIO_free(bio);
+  /* The first PEM_read_X509() fails on a key-first file and its reasons
+   * stay on the thread's OpenSSL error queue, where a TLS connection's
+   * next SSL_get_error() would read them as its own (ssl_clear_errors()
+   * in ssl.c): leave nothing behind. */
+  ERR_clear_error();
 
   return result;
 }

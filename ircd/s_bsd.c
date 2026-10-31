@@ -349,8 +349,11 @@ int ws_flush_txrem(struct Client *cptr, unsigned int *wrote_out)
   assert(0 != con_ws_txrem(wcon));
 #ifdef USE_SSL
   if (cli_socket(cptr).ssl) {
-    int sr = SSL_write(cli_socket(cptr).ssl,
-                       con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
+    int sr;
+
+    ssl_clear_errors("before SSL_write");
+    sr = SSL_write(cli_socket(cptr).ssl,
+                   con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
     if (sr > 0) { wrote = (unsigned)sr; r = IO_SUCCESS; }
     else {
       int se = SSL_get_error(cli_socket(cptr).ssl, sr);
@@ -523,7 +526,10 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
 
 #ifdef USE_SSL
           if (cli_socket(cptr).ssl) {
-            int send_result = SSL_write(cli_socket(cptr).ssl, ws_frame, frame_len);
+            int send_result;
+
+            ssl_clear_errors("before SSL_write");
+            send_result = SSL_write(cli_socket(cptr).ssl, ws_frame, frame_len);
             if (send_result > 0) {
               result = IO_SUCCESS;
               total_ws_written += send_result;

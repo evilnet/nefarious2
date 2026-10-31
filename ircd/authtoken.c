@@ -57,6 +57,7 @@
 
 #ifdef USE_SSL
 #include <openssl/rand.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ec.h>
 #include <openssl/bn.h>
@@ -370,6 +371,10 @@ out:
   OSSL_PARAM_free(params);
   EVP_PKEY_CTX_free(pctx);
   EVP_PKEY_free(pkey);
+  /* A refused key leaves its reasons on the thread's OpenSSL error queue,
+   * where a TLS connection's next SSL_get_error() would read them as its
+   * own (ssl_clear_errors() in ssl.c): leave nothing behind. */
+  ERR_clear_error();
   return ok;
 #else
   (void)s;
@@ -754,6 +759,7 @@ out:
   EVP_MD_CTX_free(md);
   if (der) MyFree(der);
   ECDSA_SIG_free(sig);
+  ERR_clear_error();  /* see slot_key_load() */
   return ok;
 #else
   (void)s; (void)t; (void)user; (void)out; (void)outsz;
@@ -811,6 +817,9 @@ out:
   EVP_MD_CTX_free(md);
   if (der) OPENSSL_free(der);
   ECDSA_SIG_free(sig);
+  /* A forged token's bad signature leaves "provider signature failure"
+   * queued: see slot_key_load(). */
+  ERR_clear_error();
   return ok;
 #else
   (void)s; (void)jwt; (void)jti; (void)jtisz;

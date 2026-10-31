@@ -45,6 +45,7 @@
 #endif
 
 #include <git2.h>
+#include <openssl/err.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1207,8 +1208,8 @@ gitsync_restart_timer(void)
   gitsync_start_timer();
 }
 
-enum GitsyncStatus
-gitsync_trigger(struct Client *sptr, int force)
+static enum GitsyncStatus
+gitsync_run(struct Client *sptr, int force)
 {
   const char *repo_url;
   const char *branch;
@@ -1385,6 +1386,22 @@ gitsync_trigger(struct Client *sptr, int force)
   }
 
   gitsync_stats.last_status = status;
+  return status;
+}
+
+enum GitsyncStatus
+gitsync_trigger(struct Client *sptr, int force)
+{
+  enum GitsyncStatus status = gitsync_run(sptr, force);
+
+  /* libssh2 runs on OpenSSL's libcrypto and leaves errors on this
+   * thread's queue: it reads an OpenSSH-format key through OpenSSL's PEM
+   * decoder first, which fails ("DECODER routines::unsupported").  A TLS
+   * link's next would-block write then read it as its own SSL_ERROR_SSL
+   * and the link dropped; the periodic sync shares its timer second with
+   * the chathistory purge, whose stall makes that backlog
+   * (ssl_clear_errors() in ssl.c).  Leave nothing behind. */
+  ERR_clear_error();
   return status;
 }
 

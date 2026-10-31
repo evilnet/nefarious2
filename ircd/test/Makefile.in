@@ -275,10 +275,11 @@ kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
 # engine.  The event layer is a fake in the test with the kernel's fd
 # semantics (lowest free number on open, epoll registrations keyed by the
 # number and dropped on close), so an engine call made with a number libkc
-# already gave back is observable.  No libkc objects are linked.
+# already gave back is observable.  No libkc objects are linked; libcrypto
+# is, for the OpenSSL error-queue drain after each call into libkc.
 IRCD_KC_ADAPTER_CMOCKA_OBJS = ircd_kc_adapter_cmocka.o test_stub.o ../ircd_kc_adapter.o
 ircd_kc_adapter_cmocka: $(IRCD_KC_ADAPTER_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) $(IRCD_KC_ADAPTER_CMOCKA_OBJS) $(CMOCKA_LIBS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_KC_ADAPTER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 # websocket tests - frame decoding and handshake accumulation (#98, #99).
 # Includes websocket.c directly with stubs; needs OpenSSL for the accept key.
 WEBSOCKET_CMOCKA_OBJS = websocket_cmocka.o test_stub.o ../ircd_alloc.o ../ircd_string.o

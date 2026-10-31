@@ -50,6 +50,8 @@
 #include <kc/kc_event.h>
 #include <kc/kc_log.h>
 
+#include <openssl/err.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,6 +148,11 @@ kc_socket_event_cb(struct Event *ev)
            ev_type(ev) == ET_EOF ? "EOF" : "ERROR"));
     ctx->kc_callback(ctx->fd, kc_events, ctx->kc_data);
     /* ctx may be removed now; it stays valid until this event ends */
+    /* libcurl's TLS (Keycloak over https, web push deliveries) and the
+     * webhook's signature check leave OpenSSL errors queued on this
+     * thread; a TLS link's next would-block write must not read one as
+     * its own (ssl_clear_errors() in ssl.c). */
+    ERR_clear_error();
 }
 
 /* Map KC_EVENT flags to Nefarious SOCK_EVENT flags */
@@ -283,6 +290,7 @@ kc_timer_event_cb(struct Event *ev)
             Debug((DEBUG_INFO, "kc_adapter: timer_expire"));
             ctx->active = 0;
             ctx->kc_callback(ctx->kc_data);
+            ERR_clear_error();  /* as in kc_socket_event_cb */
         }
         break;
     case ET_DESTROY:

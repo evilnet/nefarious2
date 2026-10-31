@@ -63,6 +63,12 @@ void update_write(struct Client* cptr)
   (void)cptr;
 }
 
+/* ssl.c: the OpenSSL error queue is emptied around the TLS writes. */
+void ssl_clear_errors(const char *where)
+{
+  (void)where;
+}
+
 int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
                   const char *format, ...)
 {
