@@ -42,6 +42,7 @@ CMOCKA_TESTPROGS = \
 	chathistory_presence_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
+	ipcheck_refund_cmocka \
 	fakelag_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
@@ -85,6 +86,7 @@ DEP_SRC = \
 	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
+	ipcheck_refund_cmocka.c \
 	fakelag_cmocka.c \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
@@ -226,6 +228,16 @@ register_throttle_test.o: ../register_throttle.c ../../include/register_throttle
 REGISTER_THROTTLE_CMOCKA_OBJS = register_throttle_cmocka.o register_throttle_test.o
 register_throttle_cmocka: $(REGISTER_THROTTLE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(REGISTER_THROTTLE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ipcheck_refund tests - the module is recompiled with a 1-bucket, 2-slot
+# table so eviction is reachable with arbitrary account names.
+# No test_stub.o: the module is pure by design (no log_write, no ircd deps).
+ipcheck_refund_test.o: ../ipcheck_refund.c ../../include/ipcheck_refund.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -DIPCHECK_REFUND_TABLE_BITS=0 -DIPCHECK_REFUND_BUCKET_DEPTH=2 -c -o $@ ../ipcheck_refund.c
+
+IPCHECK_REFUND_CMOCKA_OBJS = ipcheck_refund_cmocka.o ipcheck_refund_test.o
+ipcheck_refund_cmocka: $(IPCHECK_REFUND_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IPCHECK_REFUND_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # fake-lag credit: header-only (include/fakelag.h)
 FAKELAG_CMOCKA_OBJS = fakelag_cmocka.o

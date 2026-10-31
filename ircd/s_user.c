@@ -742,6 +742,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Save temp client's nick in case ghost has different nick */
         ircd_strncpy(original_nick, cli_name(sptr), NICKLEN + 1);
 
+        /* The login gives back the connection attempt the accept charged
+         * (IPcheck_login_refund).  The attempt sits on the ghost's entry
+         * now (bounce_revive step 6a moved the IP and the flag); the
+         * SASL flag is still the temp's, so this goes before it is freed. */
+        if (IsSASLComplete(sptr) && IsIPChecked(ghost))
+          IPcheck_login_refund(ghost, cli_user(ghost)->account);
+
         /* Free the temp client (no network messages) */
         bounce_free_temp_client(sptr);
 
@@ -1093,6 +1100,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
                            cli_sock_ip(sptr), get_client_class(sptr),
                            cli_info(sptr), NumNick(cptr) /* two %s's */);
 
+    /* A SASL login gives back the connection attempt the accept charged
+     * (IPcheck_login_refund: capped per account, off by default), before
+     * the IPcheck notice below reports the count. */
+    if (IsSASLComplete(sptr) && IsAccount(sptr) && IsIPChecked(sptr))
+      IPcheck_login_refund(sptr, cli_user(sptr)->account);
     if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
 
