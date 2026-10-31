@@ -321,7 +321,6 @@ void send_cap_notify(const char *capname, int available, const char *value)
   }
 }
 
-typedef int (*bqcmp)(const void *, const void *);
 
 static struct capabilities {
   enum Capab cap;
@@ -442,15 +441,20 @@ void cap_set_value(enum Capab cap, const char *value)
     }
 }
 
+/* qsort/bsearch comparators take const void *: calling one through a
+ * pointer of another type is undefined (clang -fsanitize=function). */
 static int
-capab_sort(const struct capabilities *cap1, const struct capabilities *cap2)
+capab_sort(const void *a, const void *b)
 {
+  const struct capabilities *cap1 = a, *cap2 = b;
   return ircd_strcmp(cap1->name, cap2->name);
 }
 
 static int
-capab_search(const char *key, const struct capabilities *cap)
+capab_search(const void *key_, const void *cap_)
 {
+  const char *key = key_;
+  const struct capabilities *cap = cap_;
   const char *rb = cap->name;
   while (ToLower(*key) == ToLower(*rb)) /* walk equivalent part of strings */
     if (!*key++) /* hit the end, all right... */
@@ -476,7 +480,7 @@ find_cap(const char **caplist_p, int *neg_p)
 
   if (!inited) { /* First, let's sort the array... */
     qsort(capab_list, CAPAB_LIST_LEN, sizeof(struct capabilities),
-          (bqcmp)capab_sort);
+          capab_sort);
     inited++; /* remember that we've done this step... */
   }
 
@@ -495,7 +499,7 @@ find_cap(const char **caplist_p, int *neg_p)
     if (!(cap = (struct capabilities *)bsearch(caplist, capab_list,
                  CAPAB_LIST_LEN,
                  sizeof(struct capabilities),
-                 (bqcmp)capab_search))) {
+                 capab_search))) {
       /* Couldn't find the capability; advance to first whitespace character */
       while (*caplist && !IsSpace(*caplist))
         caplist++;
@@ -841,9 +845,9 @@ static struct subcmd {
 };
 
 static int
-subcmd_search(const char *cmd, const struct subcmd *elem)
+subcmd_search(const void *cmd, const void *elem)
 {
-  return ircd_strcmp(cmd, elem->cmd);
+  return ircd_strcmp(cmd, ((const struct subcmd *)elem)->cmd);
 }
 
 /** Handle a capability request or response from a client.
@@ -869,7 +873,7 @@ m_cap(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!(cmd = (struct subcmd *)bsearch(subcmd, cmdlist,
       sizeof(cmdlist) / sizeof(struct subcmd),
       sizeof(struct subcmd),
-      (bqcmp)subcmd_search)))
+      subcmd_search)))
     return send_reply(sptr, ERR_UNKNOWNCAPCMD, subcmd);
 
   /* then execute it... */
