@@ -182,10 +182,18 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   if (doall) {
     for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+      /* Count each client against the local link it is reached through.
+       * A client with no socket has no such link: a held bouncer ghost
+       * is local (cli_from is itself) with fd -1, which indexed
+       * link_u[-1].  The listing below reads only the fds of
+       * LocalClientArray, so skipping it loses nothing. */
+      int fd = cli_fd(cli_from(acptr));
+      if (fd < 0 || fd >= MAXCONNECTIONS)
+        continue;
       if (IsUser(acptr))
-        link_u[cli_fd(cli_from(acptr))]++;
+        link_u[fd]++;
       else if (IsServer(acptr))
-        link_s[cli_fd(cli_from(acptr))]++;
+        link_s[fd]++;
     }
   }
 
