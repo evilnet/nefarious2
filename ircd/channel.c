@@ -4580,7 +4580,7 @@ mode_parse_client(struct ParseState *state, int *flag_p)
     /* find client we're manipulating */
     acptr = find_chasing(state->sptr, t_str, NULL);
   } else {
-    if (t_str[5] == ':') {
+    if (strlen(t_str) > 5 && t_str[5] == ':') {
       t_str[5] = '\0';
       oplevel = atoi(t_str + 6);
     }

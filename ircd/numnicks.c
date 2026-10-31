@@ -129,13 +129,23 @@ static const unsigned int convert2n[] = {
 
 /* *INDENT-ON* */
 
+/** Test whether a character is in the numnick base64 alphabet.
+ * @param[in] c Character to test.
+ * @return Non-zero if \a c is one of A-Z, a-z, 0-9, [ or ].
+ */
+static int IsNumNickChar(char c)
+{
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+      || (c >= '0' && c <= '9') || c == '[' || c == ']';
+}
+
 /** Convert a string to its value as a numnick.
  * @param[in] s Numnick string to decode.
- * @return %Numeric nickname value.
+ * @return %Numeric nickname value (0 for an empty string).
  */
 unsigned int base64toint(const char* s)
 {
-  unsigned int i = convert2n[(unsigned char) *s++];
+  unsigned int i = 0;
   while (*s) {
     i <<= NUMNICKLOG;
     i += convert2n[(unsigned char) *s++];
@@ -165,7 +175,7 @@ const char* inttobase64(char* buf, unsigned int v, unsigned int count)
  */
 uint64_t base64toint_64(const char* s)
 {
-  uint64_t i = convert2n[(unsigned char) *s++];
+  uint64_t i = 0;
   while (*s) {
     i <<= NUMNICKLOG;
     i += convert2n[(unsigned char) *s++];
@@ -213,6 +223,8 @@ struct Client* FindNServer(const char* numeric)
 {
   unsigned int len = strlen(numeric);
 
+  if (len == 0)
+    return 0;
   if (len < 3) {
     Debug((DEBUG_DEBUG, "FindNServer: %s(%d)", numeric, base64toint(numeric)));
     return server_list[base64toint(numeric)];
@@ -240,12 +252,34 @@ struct Client* findNUser(const char* yxx)
       return cli_serv(server)->client_list[base64toint(yxx + 2) & cli_serv(server)->nn_mask];
     }
   }
-  else if (0 != (server = FindNServer(yxx))) {
+  /* Only 3 (Y + XX) or 5 (YY + XXX) characters name a user; anything
+   * shorter would decode the client part from past the terminator. */
+  else if (3 == strlen(yxx) && 0 != (server = FindNServer(yxx))) {
     Debug((DEBUG_DEBUG, "findNUser: %s(%d)",
            yxx, base64toint(yxx + 1) & cli_serv(server)->nn_mask));
     return cli_serv(server)->client_list[base64toint(yxx + 1) & cli_serv(server)->nn_mask];
   }
   return 0;
+}
+
+/** Test whether a string is a well-formed user numnick.
+ * A user numnick is 3 (Y + XX) or 5 (YY + XXX) characters of the
+ * numnick base64 alphabet.  SetRemoteNumNick() and findNUser() rely
+ * on this; check it on every numnick a peer introduces.
+ * @param[in] yxx Candidate numnick.
+ * @return Non-zero if \a yxx is well-formed.
+ */
+int ValidUserNumNick(const char* yxx)
+{
+  size_t len = strlen(yxx);
+  size_t i;
+
+  if (len != 3 && len != 5)
+    return 0;
+  for (i = 0; i < len; i++)
+    if (!IsNumNickChar(yxx[i]))
+      return 0;
+  return 1;
 }
 
 /** Remove a client from a server's user array.
@@ -360,6 +394,7 @@ void SetRemoteNumNick(struct Client* acptr, const char *yxx)
   struct Client** acptrp;
   struct Client*  server = cli_user(acptr)->server;
 
+  assert(ValidUserNumNick(yxx));
   if (5 == strlen(yxx)) {
     strcpy(cli_yxx(acptr), yxx + 2);
   }
@@ -527,14 +562,26 @@ const char* iptobase64(char* buf, const struct irc_in_addr* addr, unsigned int c
 }
 
 /** Decode an IP address from base64.
+ * Accepts exactly what iptobase64() produces: six characters for IPv4,
+ * or 3-character groups for IPv6 with at most one '_' standing for the
+ * longest run of zero groups.  Anything else is rejected, and \a addr
+ * is left all-zero.
  * @param[in] input Input buffer to decode.
  * @param[out] addr IP address structure to populate.
+ * @return Zero on success, -1 if \a input is malformed.
  */
-void base64toip(const char* input, struct irc_in_addr* addr)
+int base64toip(const char* input, struct irc_in_addr* addr)
 {
+  size_t len = strlen(input);
+  size_t i;
+
   memset(addr, 0, sizeof(*addr));
-  if (strlen(input) == 6) {
-    unsigned int in = base64toint(input);
+  if (len == 6) {
+    unsigned int in;
+    for (i = 0; i < len; i++)
+      if (!IsNumNickChar(input[i]))
+        return -1;
+    in = base64toint(input);
     /* An all-zero address should stay that way. */
     if (in) {
       addr->in6_16[5] = htons(65535);
@@ -542,12 +589,28 @@ void base64toip(const char* input, struct irc_in_addr* addr)
       addr->in6_16[7] = htons(in & 65535);
     }
   } else {
-    unsigned int pos = 0;
-    do {
+    const char *gap = NULL;
+    unsigned int groups, pos = 0;
+
+    /* Validate before writing anything: the decode below then fills at
+     * most 8 groups and never reads past the terminator. */
+    for (i = 0; i < len; i++) {
+      if (input[i] == '_') {
+        if (gap || (i % 3) != 0)
+          return -1;
+        gap = input + i;
+      } else if (!IsNumNickChar(input[i]))
+        return -1;
+    }
+    if ((len - (gap ? 1 : 0)) % 3 != 0)
+      return -1;
+    groups = (len - (gap ? 1 : 0)) / 3;
+    if (gap ? groups > 7 : groups != 8)
+      return -1;
+
+    while (*input) {
       if (*input == '_') {
-        unsigned int left;
-        for (left = (25 - strlen(input)) / 3 - pos; left; left--)
-          addr->in6_16[pos++] = 0;
+        pos += 8 - groups;              /* already zero from memset() */
         input++;
       } else {
         unsigned short accum = convert2n[(unsigned char)*input++];
@@ -555,6 +618,7 @@ void base64toip(const char* input, struct irc_in_addr* addr)
         accum = (accum << NUMNICKLOG) | convert2n[(unsigned char)*input++];
         addr->in6_16[pos++] = ntohs(accum);
       }
-    } while (pos < 8);
+    }
   }
+  return 0;
 }

@@ -13,7 +13,9 @@
 #include <netinet/in.h>
 
 #include "numnicks.h"
+#include "client.h"
 #include "res.h"
+#include "struct.h"
 
 
 /* ========== base64toint ========== */
@@ -209,21 +211,140 @@ static void test_ip_base64_roundtrip(void **state)
     assert_int_equal(original.in6_16[7], decoded.in6_16[7]);
 }
 
+/* IPv6 addresses round-trip through the '_' zero-run encoding. */
+static void test_ip_base64_roundtrip_ipv6(void **state)
+{
+    (void)state;
+    static const unsigned short addrs[][8] = {
+        { 0, 0, 0, 0, 0, 0, 0, 0 },                     /* :: */
+        { 0, 0, 0, 0, 0, 0, 0, 1 },                     /* ::1 */
+        { 0xfe80, 0, 0, 0, 0, 0, 0, 0 },                /* fe80:: */
+        { 0x2001, 0xdb8, 0, 0, 0, 0, 0, 1 },            /* 2001:db8::1 */
+        { 1, 0, 2, 0, 0, 3, 4, 5 },                     /* two zero runs */
+        { 1, 2, 3, 4, 5, 6, 7, 8 },                     /* no zeros */
+        { 0xffff, 0xffff, 0xffff, 0xffff,
+          0xffff, 0xffff, 0xffff, 0xfffe },
+    };
+    size_t i, j;
 
-/* ========== Edge cases ========== */
+    for (i = 0; i < sizeof(addrs) / sizeof(addrs[0]); i++) {
+        struct irc_in_addr original, decoded;
+        char buf[32];
 
-/* Test empty string handling.
- * Note: base64toint() is designed for parsing server numerics from the P10
- * protocol, where empty strings should never occur in practice. The function
- * behavior on empty input is undefined - it may return garbage or -1 depending
- * on how the convert[] table handles the NUL character. We just verify it
- * doesn't crash, as this is an edge case that shouldn't occur in normal use. */
-static void test_base64_empty_string(void **state)
+        for (j = 0; j < 8; j++)
+            original.in6_16[j] = htons(addrs[i][j]);
+        iptobase64(buf, &original, sizeof(buf), 1);
+        assert_int_equal(0, base64toip(buf, &decoded));
+        assert_memory_equal(&original, &decoded, sizeof(original));
+    }
+}
+
+/* Malformed IP fields are rejected without writing outside the
+ * irc_in_addr.  The first case is the fuzzer's reproducer: more than
+ * 25 characters with a '_' made the zero-fill count wrap. */
+static void test_base64toip_rejects_malformed(void **state)
+{
+    (void)state;
+    static const char *bad[] = {
+        "____________________________",           /* 28 x '_' */
+        "__",                                     /* two zero runs */
+        "AAA_AAA_AAA",                            /* two zero runs */
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_",  /* too many groups */
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",   /* 12 groups */
+        "AAAAAAAAAAAAAAAAAAAAA",                  /* 7 groups, no '_' */
+        "A_AA",                                   /* '_' inside a group */
+        "AAA_A",                                  /* partial group */
+        "AAA",                                    /* short, reads past NUL */
+        "AAAA",
+        "",
+        "AAAA!A",                                 /* not base64 */
+        "_AAAAA",                                 /* 6 chars is IPv4 */
+    };
+    struct {
+        struct irc_in_addr addr;
+        unsigned char guard[64];
+    } out;
+    unsigned char zero[sizeof(out.addr)];
+    size_t i;
+
+    memset(zero, 0, sizeof(zero));
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        memset(&out, 0xA5, sizeof(out));
+        assert_int_equal(-1, base64toip(bad[i], &out.addr));
+        assert_memory_equal(zero, &out.addr, sizeof(out.addr));
+        for (size_t g = 0; g < sizeof(out.guard); g++)
+            assert_int_equal(0xA5, out.guard[g]);
+    }
+}
+
+static void test_valid_user_numnick(void **state)
 {
     (void)state;
 
-    /* Just verify empty string doesn't crash - result is undefined */
-    (void)base64toint("");
+    assert_true(ValidUserNumNick("ABAAA"));
+    assert_true(ValidUserNumNick("B]A"));
+    assert_true(ValidUserNumNick("z09[]"));
+
+    assert_false(ValidUserNumNick(""));
+    assert_false(ValidUserNumNick("A"));
+    assert_false(ValidUserNumNick("AB"));
+    assert_false(ValidUserNumNick("ABAA"));
+    assert_false(ValidUserNumNick("ABAAAA"));
+    assert_false(ValidUserNumNick("AB AA"));
+    assert_false(ValidUserNumNick("AB:AA"));
+    assert_false(ValidUserNumNick("A_A"));
+}
+
+/* findNUser()/FindNServer() only resolve numnicks of a length that can
+ * name them.  Before, findNUser("A") resolved server "A" and then the
+ * client part "" to slot 0: the slot SetRemoteNumNick() filled for a
+ * 1-character numeric and RemoveYXXClient() never cleared. */
+static void test_find_rejects_short_numnicks(void **state)
+{
+    (void)state;
+    static struct Client server, user;
+    static struct Server serv;
+    static struct Client *clients[64];
+    /* trailing NULs: a decoder that runs past the terminator sees 0s */
+    const char empty[] = { '\0', '\0', '\0', '\0' };
+    const char one[] = { 'A', '\0', '\0', '\0', '\0' };
+
+    memset(&server, 0, sizeof(server));
+    memset(&serv, 0, sizeof(serv));
+    memset(clients, 0, sizeof(clients));
+    cli_serv(&server) = &serv;
+    serv.client_list = clients;
+    serv.nn_mask = 63;
+    SetYXXServerName(&server, 0);                /* "AA" */
+    clients[0] = &user;
+
+    assert_ptr_equal(&server, FindNServer("AA"));
+    assert_ptr_equal(&server, FindNServer("A"));
+    assert_ptr_equal(&user, findNUser("AAAAA"));
+    assert_ptr_equal(&user, findNUser("AAA"));
+
+    assert_null(FindNServer(empty));
+    assert_null(findNUser(empty));
+    assert_null(findNUser(one));
+    assert_null(findNUser("AA"));
+    assert_null(findNUser("AAAA"));
+
+    ClearServerYXX(&server);
+}
+
+
+/* ========== Edge cases ========== */
+
+/* An empty string decodes to 0 without reading past its terminator.
+ * A peer can send one (an empty BURST member, an empty MODE -o
+ * parameter), so the bytes after the NUL must not be consumed. */
+static void test_base64_empty_string(void **state)
+{
+    (void)state;
+    const char buf[] = { '\0', 'v', 'v', 'v', 'v', '\0' };
+
+    assert_int_equal(0, base64toint(buf));
+    assert_int_equal(0, base64toint_64(buf));
 }
 
 static void test_base64_max_values(void **state)
@@ -263,6 +384,12 @@ int main(void)
         cmocka_unit_test(test_iptobase64_ipv4),
         cmocka_unit_test(test_iptobase64_ipv6),
         cmocka_unit_test(test_ip_base64_roundtrip),
+        cmocka_unit_test(test_ip_base64_roundtrip_ipv6),
+        cmocka_unit_test(test_base64toip_rejects_malformed),
+
+        /* Numnick validation and lookup */
+        cmocka_unit_test(test_valid_user_numnick),
+        cmocka_unit_test(test_find_rejects_short_numnicks),
 
         /* Edge cases */
         cmocka_unit_test(test_base64_empty_string),

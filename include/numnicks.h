@@ -85,13 +85,14 @@ extern int            markMatchexServer(const char* cmask, int minlen);
 extern struct Client* find_match_server(char* mask);
 extern struct Client* findNUser(const char* yxx);
 extern struct Client* FindNServer(const char* numeric);
+extern int            ValidUserNumNick(const char* yxx);
 
 extern unsigned int   base64toint(const char* str);
 extern const char*    inttobase64(char* buf, unsigned int v, unsigned int count);
 extern uint64_t       base64toint_64(const char* str);
 extern const char*    inttobase64_64(char* buf, uint64_t v, unsigned int count);
 extern const char* iptobase64(char* buf, const struct irc_in_addr* addr, unsigned int count, int v6_ok);
-extern void base64toip(const char* s, struct irc_in_addr* addr);
+extern int  base64toip(const char* s, struct irc_in_addr* addr);
 
 #endif /* INCLUDED_numnicks_h */
 
