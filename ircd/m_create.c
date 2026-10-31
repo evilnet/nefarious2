@@ -248,11 +248,16 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!badop) {
       /* Set (or correct) our copy of the TS */
       chptr->creationtime = chanTS;
-      /* Pre-populate per-channel msgid from incoming S2S tag (positional) */
-      if (incoming_msgids[chan_idx][0])
+      /* Pre-populate per-channel msgid from incoming S2S tag (positional).
+       * The tag has MAXJOINARGS slots: a channel past them, or one whose
+       * slot is empty, mints its own -- clear the joinbuf slot so it
+       * does not reuse what an earlier channel left there. */
+      if (chan_idx < MAXJOINARGS && incoming_msgids[chan_idx][0])
         ircd_strncpy(create.jb_msgids[create.jb_count],
                       incoming_msgids[chan_idx],
                       sizeof(create.jb_msgids[0]));
+      else
+        create.jb_msgids[create.jb_count][0] = '\0';
       joinbuf_join(&create, chptr, CHFL_CHANOP);
     }
   }

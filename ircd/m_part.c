@@ -385,11 +385,16 @@ int ms_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (IsDelayedJoin(member))
       flags |= CHFL_DELAYED;
 
-    /* Pre-populate per-channel msgid from incoming S2S tag (positional) */
-    if (incoming_msgids[chan_idx][0])
+    /* Pre-populate per-channel msgid from incoming S2S tag (positional).
+     * The tag has MAXJOINARGS slots: a channel past them, or one whose
+     * slot is empty, mints its own -- clear the joinbuf slot so it does
+     * not reuse what an earlier channel left there. */
+    if (chan_idx < MAXJOINARGS && incoming_msgids[chan_idx][0])
       ircd_strncpy(parts.jb_msgids[parts.jb_count],
                     incoming_msgids[chan_idx],
                     sizeof(parts.jb_msgids[0]));
+    else
+      parts.jb_msgids[parts.jb_count][0] = '\0';
 
     /* part user from channel */
     joinbuf_join(&parts, chptr, flags);

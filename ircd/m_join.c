@@ -722,10 +722,16 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       }
     }
 
-    /* Pre-populate this channel's msgid from the incoming S2S tag */
+    /* Pre-populate this channel's msgid from the incoming S2S tag.  A
+     * channel past its MAXJOINARGS slots, or one whose slot is empty,
+     * mints its own: a JOIN joinbuf never flushes, so every channel
+     * uses slot 0, and without the clear it reused the msgid the
+     * previous channel left there. */
     if (chan_idx < MAXJOINARGS && incoming_msgids[chan_idx][0])
       ircd_strncpy(join.jb_msgids[join.jb_count], incoming_msgids[chan_idx],
                     sizeof(join.jb_msgids[0]));
+    else
+      join.jb_msgids[join.jb_count][0] = '\0';
 
     joinbuf_join(&join, chptr, flags);
   }
