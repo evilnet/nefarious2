@@ -1515,9 +1515,14 @@ static int ms_metadata_session(struct Client *cptr, struct Client *sptr,
    * nick form uses): without this, any linked server could set an
    * unauthenticated local user's metadata just by naming its session
    * id -- there is no account to anchor the write, so identity-by-Client
-   * is the whole guard. */
+   * is the whole guard.  L_WARNING, not L_DEBUG (fix round 2): this is
+   * the same class of event -- a spoofed-ownership write -- as the
+   * nick-form guard a few blocks below, which logs at L_WARNING; a
+   * downgrade here would make the exact attack this guard exists to
+   * stop invisible at production log levels while its nick-form twin
+   * stays visible. */
   if (!md_sender_owns_client(sptr, only)) {
-    log_write(LS_SYSTEM, L_DEBUG, 0,
+    log_write(LS_SYSTEM, L_WARNING, 0,
               "ms_metadata: session target !%s/%s from %C is not %s's "
               "server - dropped, not relayed",
               sessid, key, sptr, cli_name(only));
@@ -1573,6 +1578,31 @@ static int ms_metadata_pull(struct Client *cptr, struct Client *sptr,
 
   if (!MyConnect(cptr) || sptr != cptr || !IsServer(sptr))
     return 0;
+
+  /* The 16-accounts-per-request cap (the wire table's "MD ? ... <acct>
+   * [,<acct>...]", <=16) is also a plan-mandated bound to log on a hit.
+   * md_pull_parse folds "more than 16 names" into the same generic -1 as
+   * every other malformed field (bad seq, bad scope, a too-long name),
+   * so it alone can't tell us which one happened; count commas here --
+   * cheaply, without re-validating anything md_pull_parse already owns
+   * -- so only this specific, named cap gets its own L_WARNING instead
+   * of every malformed pull doing so. */
+  if (parc >= 5 && parv[4]) {
+    const char *p = parv[4];
+    int names = 1;
+
+    for (; *p; p++) {
+      if (*p == ',')
+        names++;
+    }
+    if (names > 16) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "ms_metadata: pull request from %C names %d accounts, "
+                "over the 16-account cap - dropped",
+                sptr, names);
+      return 0;
+    }
+  }
 
   n = md_pull_parse(parc, parv, &seq, &scope, accounts,
                     (int)(sizeof(accounts) / sizeof(accounts[0])));

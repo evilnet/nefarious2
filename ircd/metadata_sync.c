@@ -13,6 +13,7 @@
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_log.h"
 #include "ircd_string.h"
 #include "metadata.h"
 #include "metadata_lww.h"
@@ -168,8 +169,16 @@ static int mdsync_row_cb(const char *key, const struct md_version *v, void *arg)
 {
   struct mdsync_row_arg *a = (struct mdsync_row_arg *)arg;
 
-  if (a->sent >= MDSYNC_MAX_ROWS)
+  if (a->sent >= MDSYNC_MAX_ROWS) {
+    /* The walk stops the instant this fires (metadata_account_foreach_version
+     * returns as soon as a callback returns nonzero), so this is reached
+     * at most once per account per pull -- never once per truncated row. */
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "mdsync_answer_pull: row cap (%d) reached for account %s "
+              "pulled by %C - reply truncated",
+              MDSYNC_MAX_ROWS, a->account, a->link);
     return 1;   /* stop: the row cap for this account is already full */
+  }
 
   metadata_emit_versioned(&me, a->link, NULL, a->account, key, v);
   a->sent++;
@@ -185,7 +194,12 @@ struct mdsync_marker {
 };
 
 struct mdsync_marker_arg {
+  struct Client *link;
+  const char *account;
   int count;
+  int capped;   /**< 1 once the cap-hit L_WARNING has been logged for
+                 *   this account's walk -- logged once, not once per
+                 *   evicted/discarded marker. */
   struct mdsync_marker markers[MDSYNC_MAX_MARKERS];
 };
 
@@ -207,6 +221,18 @@ static int mdsync_marker_cb(const char *target, const char *ts, void *arg)
       i--;
     }
   } else {
+    /* Every marker from here on is either discarded or evicts the
+     * current oldest kept one -- either way the account has more
+     * markers than MDSYNC_MAX_MARKERS and the reply is truncated.
+     * Logged once per account per pull (the first time this branch is
+     * reached), not once per such marker. */
+    if (!a->capped) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "mdsync_answer_pull: marker cap (%d) reached for account "
+                "%s pulled by %C - reply truncated to the newest",
+                MDSYNC_MAX_MARKERS, a->account, a->link);
+      a->capped = 1;
+    }
     if (strcmp(ts, a->markers[0].ts) <= 0)
       return 0;   /* not newer than the smallest kept -- discard */
     i = 0;
@@ -254,7 +280,10 @@ void mdsync_answer_pull(struct Client *link, unsigned long seq, char scope,
 
       if (!ma)
         continue;
+      ma->link = link;
+      ma->account = accounts[i];
       ma->count = 0;
+      ma->capped = 0;
 
       metadata_readmarker_foreach(accounts[i], mdsync_marker_cb, ma);
 
