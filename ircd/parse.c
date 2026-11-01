@@ -1965,22 +1965,16 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
           {
             static time_t hlc_refuse_rate;
             uint64_t ahead = 0;
-            int hlc_max_forward = feature_int(FEAT_HLC_MAX_FORWARD_MS);
+            uint64_t hlc_max_forward = hlc_max_forward_ms();
 
-            /* A negative config value has no sane bounded meaning; treat
-             * it as unbounded (0) rather than widening it to uint64_t,
-             * where it would sign-extend to a huge max_forward_ms. */
-            if (hlc_global_receive(&remote_hlc,
-                                    (hlc_max_forward < 0) ? 0 :
-                                      (uint64_t)hlc_max_forward,
-                                    &ahead))
+            if (hlc_global_receive(&remote_hlc, hlc_max_forward, &ahead))
               sendto_opmask_butone_ratelimited(0, SNO_NETWORK, &hlc_refuse_rate,
                                                "Clock of %s is %llu ms ahead of ours "
-                                               "(HLC_MAX_FORWARD_MS %d); its time was "
+                                               "(HLC_MAX_FORWARD_MS %llu); its time was "
                                                "not adopted",
                                                cli_name(cptr),
                                                (unsigned long long)ahead,
-                                               hlc_max_forward);
+                                               (unsigned long long)hlc_max_forward);
           }
         }
       }

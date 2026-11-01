@@ -13,6 +13,18 @@
 
 #include "../../include/crdt_hlc.h"
 
+/* Stub for feature_int: only hlc_max_forward_ms() (W4) calls this from
+ * crdt_hlc.c, reading FEAT_HLC_MAX_FORWARD_MS.  This suite tests
+ * hlc_receive_bounded directly (passing max_forward_ms explicitly), so
+ * the stub's value is never actually read by a test here -- it exists
+ * only so crdt_hlc.o links standalone, matching the dbuf_cmocka.c
+ * precedent for a module that gained a feature_int() call. */
+int feature_int(int feat)
+{
+  (void)feat;
+  return 60000;  /* matches ircd_features.c's F_I(HLC_MAX_FORWARD_MS) default */
+}
+
 static void test_within_bound_adopts(void **state)
 {
   struct HLC local = { 1000, 0, 1 };

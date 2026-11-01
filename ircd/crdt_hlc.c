@@ -12,6 +12,7 @@
 
 #include "config.h"
 #include "crdt_hlc.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 
 #include <sys/time.h>
@@ -175,4 +176,14 @@ int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
     *ahead_ms = remote->physical_ms - now;
 
   return rejected;
+}
+
+uint64_t hlc_max_forward_ms(void)
+{
+  int configured = feature_int(FEAT_HLC_MAX_FORWARD_MS);
+
+  /* A negative config value has no sane bounded meaning; treat it as
+   * unbounded (0) rather than widening it to uint64_t, where it would
+   * sign-extend to a huge max_forward_ms. */
+  return (configured < 0) ? 0 : (uint64_t)configured;
 }

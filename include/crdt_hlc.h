@@ -90,4 +90,14 @@ struct HLC hlc_global_event(void);
 int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
                         uint64_t *ahead_ms);
 
+/** @brief Read FEAT_HLC_MAX_FORWARD_MS, normalised for hlc_global_receive /
+ *  md_stamp_ahead: a negative configured value has no sane bounded
+ *  meaning and is treated as 0 (unbounded) rather than sign-extended
+ *  into a huge uint64_t.  The one place this normalisation happens;
+ *  every caller that needs the forward-skew slack (parse.c's inbound
+ *  HLC tag receive, metadata_sync.c's stamped-row receive) reads it
+ *  from here instead of re-deriving it.
+ */
+uint64_t hlc_max_forward_ms(void);
+
 #endif /* INCLUDED_crdt_hlc_h */

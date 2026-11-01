@@ -36,6 +36,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "crdt_hlc.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -45,6 +46,8 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "metadata_lww.h"
+#include "metadata_sync.h"
 #include "msg.h"
 #include "numeric.h"
 #include "s_bsd.h"
@@ -747,25 +750,29 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    /* If the account has online connections, update via metadata_set_client
-     * which handles both in-memory and LMDB persistence.  Otherwise write a
-     * PERMANENT row for the offline case (metadata_account_set_permanent,
-     * not the TTL metadata_account_set) so it no longer silently decays
-     * after the ~4h TTL purge sweep.
+    /* W4: stamp the write and apply it to EVERY client of the account
+     * (local and remote, via metadata_account_apply_memory), not only
+     * this server's online ones.  metadata_account_put_versioned
+     * writes the value row (or tombstone) and its clock row in one
+     * batch, closing the era-2 §A4 NODE-LOCAL limitation, whose live
+     * consequence was a peer retaining a stale draft/persistence/hold
+     * row after pool cleanup ran through an oper on one server only
+     * (Gap B, bouncer-promotion scope) -- the store write itself now
+     * reaches every server's replica of the account via the stamp, not
+     * only the broadcast below.
      *
-     * The write also broadcasts in the account-target wire form
-     * ("MD *account key [vis] [:value]") so every peer updates its own
-     * store and any locally-online clients on the account — closing the
-     * era-2 §A4 NODE-LOCAL limitation, whose live consequence was a peer
-     * retaining a stale draft/persistence/hold row after pool cleanup ran
-     * through an oper on one server only (Gap B, bouncer-promotion scope).
-     * ms_metadata's account-form branch consumes it; an older peer
-     * FindUser()s the literal "*account", gets NULL, and drops it
-     * harmlessly. */
+     * The write also broadcasts in the (unstamped, pre-existing)
+     * account-target wire form ("MD *account key [vis] [:value]") so
+     * an older peer still converges the same way it always has.
+     * ms_metadata's account-form branch consumes it; an older fork
+     * (pre-W4) FindUser()s the literal "*account", gets NULL, and
+     * drops it harmlessly. */
     {
       struct Client *acptr;
       struct Client *first_online = NULL;
-      int fd, found_online = 0;
+      int fd;
+      struct md_stamp st;
+      int rc;
 
       for (fd = HighestFd; fd >= 0; --fd) {
         if (!(acptr = LocalClientArray[fd]))
@@ -812,30 +819,18 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
         }
       }
 
-      for (fd = HighestFd; fd >= 0; --fd) {
-        if (!(acptr = LocalClientArray[fd]))
-          continue;
-        if (!IsAccount(acptr))
-          continue;
-        if (ircd_strcmp(cli_account(acptr), account_name) == 0) {
-          metadata_set_client(acptr, key, value, visibility);
-          found_online = 1;
-        }
+      st = metadata_stamp_now();
+      rc = metadata_account_put_versioned(account_name, key, value, visibility, &st);
+      if (rc < 0) {
+        send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
+                  "Failed to set account metadata");
+        return 0;
       }
-
-      if (!found_online) {
-        int rc = metadata_account_set_permanent(account_name, key, value, visibility);
-        if (rc < 0) {
-          send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
-                    "Failed to set account metadata");
-          return 0;
-        }
-      }
+      metadata_account_apply_memory(account_name, key, value, visibility);
 
       /* Relay in the account-target form (see the branch comment above).
-       * Broadcast for the online-local case too: metadata_set_client never
-       * emits S2S itself, so before this the *account write was node-local
-       * in BOTH branches. */
+       * Broadcast unconditionally: metadata_account_apply_memory never
+       * emits S2S itself, so this is still the only emission. */
       if (value)
         sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "*%s %s %s :%s",
                                  account_name, key,
@@ -1427,6 +1422,94 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * @param[in] parc Number of arguments.
  * @param[in] parv Argument vector.
  */
+/** MD =account: the W4 stamped account-metadata row (classify,
+ * md_wire_key_valid, md_stamp_parse, the forward-clock-skew refusal,
+ * chunk reassembly on the LINK's state, the limits rule every other
+ * MD form obeys, then metadata_account_merge).  On take: apply memory
+ * to every client of the account, then relay onward (unless this is
+ * the last of several chunk pieces still pending).
+ * @param[in] cptr The direct link this line arrived on (chunk identity
+ *            and relay "butone" are both scoped to it).
+ * @param[in] sptr Attributed origin of the row (relay "src").
+ * @param[in] target parv[1], already known to classify as "=account".
+ */
+static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
+                               int parc, char *parv[], const char *target)
+{
+  const char *account_name = target + 1;
+  const char *stamp_text;
+  const char *wire_key;
+  const char *flags_tok;
+  const char *piece;
+  struct md_stamp st;
+  int vis = METADATA_VIS_PUBLIC;
+  int tombstone = 0;
+  int more = 0;
+  struct md_chunk *chunk;
+  int chunk_rc;
+  struct md_version in;
+  int merge_rc;
+
+  if (parc < 5)
+    return 0;
+
+  stamp_text = parv[2];
+  wire_key = parv[3];
+  flags_tok = parv[4];
+  piece = (parc >= 6) ? parv[5] : "";
+
+  if (!md_wire_key_valid(wire_key))
+    return 0;
+
+  if (md_stamp_parse(stamp_text, &st) < 0)
+    return 0;
+
+  if (md_stamp_ahead(&st, hlc_wall_clock_ms(), hlc_max_forward_ms())) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_metadata: stamped row for %s/%s from %C reads too far "
+              "ahead of our clock — dropped, not relayed",
+              account_name, wire_key, sptr);
+    return 0;
+  }
+
+  if (md_flags_parse(flags_tok, &vis, &tombstone, &more) < 0)
+    return 0;
+
+  chunk = mdsync_link_chunk(cptr);
+  if (!chunk)
+    return 0;
+
+  chunk_rc = md_chunk_feed(chunk, account_name, stamp_text, wire_key, vis, more, piece);
+  if (chunk_rc != MD_CHUNK_DONE)
+    return 0;   /* PENDING (wait for more pieces) or ERROR: nothing to merge yet */
+
+  /* The current limits rule every other MD form obeys (Task 5 changes
+   * it for this form specifically; today it is the same first-hop
+   * flood stop the unstamped "*account" branch uses). */
+  if (!tombstone
+      && metadata_check_limits(NULL, NULL, 0, wire_key, chunk->value) != METADATA_LIMIT_OK) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_metadata: stamped-row limit exceeded for %s/%s from %C "
+              "— dropped, not relayed", account_name, wire_key, sptr);
+    return 0;
+  }
+
+  in.st = st;
+  in.tombstone = tombstone;
+  in.vis = vis;
+  in.value = tombstone ? NULL : chunk->value;
+  in.vlen = tombstone ? 0 : chunk->len;
+
+  merge_rc = metadata_account_merge(account_name, wire_key, &in);
+  if (merge_rc != 1)
+    return 0;   /* kept the local version (0), or a store error (-1): no relay */
+
+  metadata_account_apply_memory(account_name, wire_key,
+                                tombstone ? NULL : chunk->value, vis);
+  metadata_emit_versioned(sptr, NULL, cptr, account_name, wire_key, &in);
+  return 0;
+}
+
 int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *target;
@@ -1436,11 +1519,30 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   int is_channel = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
+  enum md_target_kind kind;
+
+  if (parc < 2)
+    return 0;
+
+  target = parv[1];
+  kind = md_target_classify(target);
+
+  /* "=account": an entirely different parv layout (stamp, key, flags,
+   * piece) from every other MD form below -- handled start to finish
+   * before any of the legacy target/key/value parsing runs. */
+  if (kind == MD_T_ACCOUNT_STAMPED)
+    return ms_metadata_stamped(cptr, sptr, parc, parv, target);
+
+  /* "!sessid" and "?"/"." (pull request/end) are Task 4.  An
+   * unclassifiable target (bare sigil, empty, trailing garbage after
+   * "?"/".") is simply dropped. */
+  if (kind == MD_T_SESSION || kind == MD_T_PULL || kind == MD_T_PULL_END
+      || kind == MD_T_INVALID)
+    return 0;
 
   if (parc < 3)
     return 0;
 
-  target = parv[1];
   key = parv[2];
 
   /* Parse visibility and value.
@@ -1465,15 +1567,17 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     return 0;
 
   /* Account-target form ("*account"): an oper's account write relayed from
-   * mo_metadata's account branch.  There is no FindUser-resolvable target;
-   * apply to any locally-online clients on the account, else persist a
-   * PERMANENT store row directly, then relay the form onward.  Bare "*"
+   * mo_metadata's account branch (or a fork peer's own relay of one).
+   * There is no FindUser-resolvable target.  W4: stamp the write and
+   * apply it to every client of the account (local and remote, via
+   * metadata_account_apply_memory) instead of only this server's
+   * online ones, then relay the form onward unchanged.  Bare "*"
    * never appears S2S (mo_metadata expands it to a nick before emit), so
    * target[1] != '\0' is unambiguous. */
   if (target[0] == '*' && target[1] != '\0') {
     const char *account_name = target + 1;
-    struct Client *acptr;
-    int fd, found_online = 0;
+    struct md_stamp st;
+    int rc;
 
     /* Same first-hop flood stop as the nick form below: UTF-8 + length
      * only (no client context; the origin already enforced key counts). */
@@ -1485,18 +1589,16 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       return 0;
     }
 
-    for (fd = HighestFd; fd >= 0; --fd) {
-      if (!(acptr = LocalClientArray[fd]))
-        continue;
-      if (!IsAccount(acptr))
-        continue;
-      if (ircd_strcmp(cli_account(acptr), account_name) == 0) {
-        metadata_set_client(acptr, key, value, visibility);
-        found_online = 1;
-      }
+    /* Apply to memory regardless of storage availability (mirrors
+     * metadata_set_client's own local-client resilience); the store
+     * write itself is a no-op (metadata_write_versioned's own guard)
+     * when storage isn't available. */
+    if (metadata_lmdb_is_available()) {
+      st = metadata_stamp_now();
+      rc = metadata_account_put_versioned(account_name, key, value, visibility, &st);
+      (void)rc;
     }
-    if (!found_online && metadata_lmdb_is_available())
-      metadata_account_set_permanent(account_name, key, value, visibility);
+    metadata_account_apply_memory(account_name, key, value, visibility);
 
     if (value)
       sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
@@ -1519,6 +1621,22 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     target_client = FindUser(target);
     if (!target_client)
       return 0;
+
+    /* Nick-target origin guard: a server may only apply/relay a write
+     * to a nick-addressed target that is actually BEHIND it (its own
+     * user, or this server relaying for its own locally-connected
+     * user), or the write is the target applying to itself, or the
+     * acting principal is an oper (who may legitimately act on behalf
+     * of any user).  Otherwise a server could claim to set metadata on
+     * a user it does not own -- drop and do not relay. */
+    if (!(cli_user(target_client) && cli_user(target_client)->server == sptr)
+        && target_client != sptr
+        && !(IsUser(sptr) && IsOper(sptr))) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "ms_metadata: %s/%s from %C is not %s's server - dropped",
+                target, key, sptr, cli_name(target_client));
+      return 0;
+    }
   }
 
   /* Enforce the same limits every other write path obeys.  On violation

@@ -36,6 +36,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "crdt_hlc.h"
 #include "db_casefold.h"
 #include "hash.h"
 #include "ircd.h"
@@ -48,6 +49,7 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "metadata_lww.h"
 #include "msg.h"
 #include "numeric.h"
 #include "s_debug.h"
@@ -78,6 +80,21 @@ static char presence_value[AWAYLEN + 1];
  * lives inside that block, can free the transient list it fetches. */
 static void free_entry_list(struct MetadataEntry *head);
 
+/** Mint a fresh HLC stamp for a local account-store write.  No storage
+ * dependency (hlc_global_event() is pure clock state) -- defined
+ * unconditionally rather than inside the USE_ROCKSDB block, matching
+ * every other non-DB-touching helper below it. */
+struct md_stamp metadata_stamp_now(void)
+{
+  struct HLC h = hlc_global_event();
+  struct md_stamp st;
+
+  st.ms = h.physical_ms;
+  st.logical = h.logical;
+  st.node = h.node_id;
+  return st;
+}
+
 #ifdef USE_ROCKSDB
 #include "db_cursor.h"
 #include "db_env.h"
@@ -92,6 +109,12 @@ static struct db_env *metadata_db_env = NULL;
 static struct db_cf  *metadata_cf = NULL;
 static struct db_cf  *readmarkers_cf = NULL;
 static struct db_cf  *bouncer_cf = NULL;
+static struct db_cf  *metadata_clock_cf = NULL; /**< W4: HLC stamp per
+                                                      account-metadata row
+                                                      ("L<stamp>"/"D<stamp>",
+                                                      md_clock_encode),
+                                                      same "account\0key"
+                                                      keying as metadata_cf */
 
 /** Flag indicating if storage is available */
 static int metadata_lmdb_available = 0;
@@ -258,7 +281,7 @@ int metadata_lmdb_init(const char *dbpath)
               "metadata: random-access I/O hint enabled");
   }
 
-  rc = db_env_open(dbpath, &env_opts, /*max_cfs=*/3, &metadata_db_env);
+  rc = db_env_open(dbpath, &env_opts, /*max_cfs=*/4, &metadata_db_env);
   if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "metadata: db_env_open(%s) failed: %s", dbpath, db_strerror(rc));
@@ -296,16 +319,33 @@ int metadata_lmdb_init(const char *dbpath)
     metadata_db_env = NULL;
     return -1;
   }
+  rc = db_cf_open(metadata_db_env, "metadata_clock", &cf_opts, &metadata_clock_cf);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: db_cf_open(metadata_clock): %s", db_strerror(rc));
+    db_cf_close(metadata_db_env, bouncer_cf);
+    db_cf_close(metadata_db_env, readmarkers_cf);
+    db_cf_close(metadata_db_env, metadata_cf);
+    db_env_close(metadata_db_env);
+    bouncer_cf = NULL;
+    readmarkers_cf = NULL;
+    metadata_cf = NULL;
+    metadata_db_env = NULL;
+    return -1;
+  }
 
   /* Rows written before the key builders folded names are moved to
    * folded keys once, before anything reads them (db_casefold.h).
    * bouncer_sessions is keyed by opaque session ids and the presence CF
    * (opened later by presence_init) already folds its channel half and
-   * only ever sees canonical account names, so neither is rewritten. */
+   * only ever sees canonical account names, so neither is rewritten.
+   * metadata_clock shares metadata's "account\0key" keying exactly, so
+   * it folds the same way. */
   {
     struct db_casefold_cf cfs[] = {
-      { metadata_cf,    "metadata",    DB_CASEFOLD_ALL },   /* target\0key */
-      { readmarkers_cf, "readmarkers", DB_CASEFOLD_ALL },   /* account\0target */
+      { metadata_cf,       "metadata",       DB_CASEFOLD_ALL },   /* target\0key */
+      { readmarkers_cf,    "readmarkers",    DB_CASEFOLD_ALL },   /* account\0target */
+      { metadata_clock_cf, "metadata_clock", DB_CASEFOLD_ALL },   /* account\0key */
     };
     if (db_casefold_migrate(metadata_db_env, "metadata", cfs,
                             sizeof(cfs) / sizeof(cfs[0])) != 0)
@@ -343,6 +383,7 @@ struct db_cf *metadata_get_bouncer_cf(void)
 void metadata_lmdb_shutdown(void)
 {
   if (metadata_db_env) {
+    db_cf_close(metadata_db_env, metadata_clock_cf);
     db_cf_close(metadata_db_env, bouncer_cf);
     db_cf_close(metadata_db_env, readmarkers_cf);
     db_cf_close(metadata_db_env, metadata_cf);
@@ -351,6 +392,7 @@ void metadata_lmdb_shutdown(void)
     metadata_cf = NULL;
     readmarkers_cf = NULL;
     bouncer_cf = NULL;
+    metadata_clock_cf = NULL;
     metadata_lmdb_available = 0;
   }
 }
@@ -489,12 +531,18 @@ int metadata_account_get(const char *account, const char *key, char *value)
  * @param[in] visibility METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
  * @return 0 on success, -1 on error.
  */
-/** Internal helper for metadata_account_set with explicit timestamp.
- * Pass timestamp=0 for permanent values (no TTL expiry).
+/** Shared writer backing metadata_account_set_ts and
+ * metadata_account_put_versioned: writes the value row (or deletes it)
+ * AND the clock row (metadata_clock_cf, md_clock_encode(@a st,
+ * tombstone = @a value==NULL)) in one write batch, so a row and its
+ * stamp never land separately.  Every delete leaves a tombstone --
+ * there is no path here that deletes the value row without also
+ * recording a "D" clock row for it.
  *
- * Store-row encoding (innermost->outermost): [vis prefix][raw value] ->
- * encode_ttl_value -> zstd.  The vis prefix is the ONLY encode site — no
- * other caller anywhere may pre-prefix a value with "P:"/"*:".
+ * Store-row encoding for the VALUE row (innermost->outermost): [vis
+ * prefix][raw value] -> encode_ttl_value -> zstd.  The vis prefix is
+ * the ONLY encode site — no other caller anywhere may pre-prefix a
+ * value with "P:"/"*:".
  *   - server-managed keys (metadata_key_is_server_managed) are exempt:
  *     always stored bare, regardless of @a visibility.
  *   - non-exempt permanent rows (timestamp==0) are ALWAYS prefixed: "P:"
@@ -506,9 +554,9 @@ int metadata_account_get(const char *account, const char *key, char *value)
  * same buffer also feeds the CRDT doc mirror at this chokepoint, so the doc
  * value carries visibility — no doc on this branch.)
  */
-static int metadata_account_set_ts(const char *account, const char *key,
-                                    const char *value, time_t timestamp,
-                                    int visibility)
+static int metadata_write_versioned(const char *account, const char *key,
+                                     const char *value, time_t timestamp,
+                                     int visibility, const struct md_stamp *st)
 {
   struct db_writebatch *wb;
   /* @a account: account name (<=ACCOUNTLEN) or, since B1, a channel name
@@ -517,9 +565,11 @@ static int metadata_account_set_ts(const char *account, const char *key,
   char keybuf[CHANNELLEN + METADATA_KEY_LEN + 2];
   char prefixed[METADATA_VALUE_LEN + 8]; /* room for the 2-byte P:/ *: prefix */
   char encoded[METADATA_VALUE_LEN + 32]; /* Extra space for TTL prefix */
+  char clockbuf[MD_STAMP_BUFSIZE + 1];
   const char *stored_value;
   int keylen;
   int encoded_len;
+  int clocklen;
   int rc;
 #ifdef USE_ZSTD
   unsigned char compressed[METADATA_VALUE_LEN + 64];
@@ -528,11 +578,15 @@ static int metadata_account_set_ts(const char *account, const char *key,
   const void *vbuf = NULL;
   size_t       vlen = 0;
 
-  if (!metadata_lmdb_available || !account || !key)
+  if (!metadata_lmdb_available || !account || !key || !st)
     return -1;
 
   keylen = build_lmdb_key(keybuf, sizeof(keybuf), account, key);
   if (keylen < 0)
+    return -1;
+
+  clocklen = md_clock_encode(clockbuf, sizeof(clockbuf), st, value == NULL);
+  if (clocklen < 0)
     return -1;
 
   wb = db_writebatch_new(metadata_db_env);
@@ -584,9 +638,31 @@ static int metadata_account_set_ts(const char *account, const char *key,
     return -1;
   }
 
+  rc = db_writebatch_put(wb, metadata_clock_cf, keybuf, (size_t)keylen,
+                         clockbuf, (size_t)clocklen);
+  if (rc != DB_OK) {
+    db_writebatch_destroy(wb);
+    return -1;
+  }
+
   rc = db_writebatch_commit(wb, /*sync_durably=*/0);
   db_writebatch_destroy(wb);
   return (rc == DB_OK) ? 0 : -1;
+}
+
+/** Internal helper for metadata_account_set with explicit timestamp.
+ * Pass timestamp=0 for permanent values (no TTL expiry).  Stamp-now
+ * plus metadata_write_versioned: every existing writer (SET and
+ * SET_PERMANENT, so every direct and oper-account write) is stamped,
+ * and every delete through this path leaves a tombstone.
+ */
+static int metadata_account_set_ts(const char *account, const char *key,
+                                    const char *value, time_t timestamp,
+                                    int visibility)
+{
+  struct md_stamp st = metadata_stamp_now();
+
+  return metadata_write_versioned(account, key, value, timestamp, visibility, &st);
 }
 
 /** Set account metadata in LMDB with TTL timestamp (CurrentTime).
@@ -604,6 +680,265 @@ int metadata_account_set(const char *account, const char *key, const char *value
 int metadata_account_set_permanent(const char *account, const char *key, const char *value, int visibility)
 {
   return metadata_account_set_ts(account, key, value, 0, visibility);
+}
+
+/** Write (or tombstone) one stamped account-metadata row under an
+ * EXPLICIT, caller-supplied stamp -- the W4 cross-server merge path
+ * (metadata_account_merge persists the incoming row's own stamp, never
+ * a freshly minted one) and the oper/receiver "*account" write path
+ * (stamped at receipt).  Always a PERMANENT value row (timestamp 0):
+ * an LWW-synced row's freshness is governed by its stamp, not a TTL
+ * sweep.
+ */
+int metadata_account_put_versioned(const char *account, const char *key,
+                                   const char *value, int vis,
+                                   const struct md_stamp *st)
+{
+  return metadata_write_versioned(account, key, value, /*timestamp=*/0, vis, st);
+}
+
+/** Look up a key's clock row only (metadata_clock_cf): the stamp and
+ * tombstone bit, with no value decode.  Internal to
+ * metadata_account_get_version/merge/foreach_version.
+ * @return 0 (found), 1 (absent), -1 (error).
+ */
+static int metadata_clock_get(const char *account, const char *key,
+                              struct md_stamp *st, int *tombstone)
+{
+  char keybuf[CHANNELLEN + METADATA_KEY_LEN + 2];
+  struct db_val val = { NULL, 0 };
+  int keylen;
+  int rc;
+
+  if (!metadata_lmdb_available || !account || !key || !st || !tombstone)
+    return -1;
+
+  keylen = build_lmdb_key(keybuf, sizeof(keybuf), account, key);
+  if (keylen < 0)
+    return -1;
+
+  rc = db_get(metadata_db_env, metadata_clock_cf, keybuf, (size_t)keylen,
+             /*snap=*/NULL, &val);
+  if (rc == DB_NOTFOUND)
+    return 1;
+  if (rc != DB_OK)
+    return -1;
+
+  rc = md_clock_decode((const char *)val.base, val.len, st, tombstone);
+  db_val_free(&val);
+  return (rc == 0) ? 0 : -1;
+}
+
+/** Read one account-metadata row's current version: the clock row,
+ * plus (for a live row) the decoded value.  A live row with no clock
+ * entry (written before this feature existed) reads with stamp 0.0.0.
+ * @return 0 (found — live row or tombstone), 1 (absent), -1 (error).
+ */
+int metadata_account_get_version(const char *account, const char *key,
+                                 struct md_version *out,
+                                 char *valbuf, size_t vlen)
+{
+  struct md_stamp st = { 0, 0, 0 };  /* stays zero when clock_rc == 1 (never stamped) */
+  int tombstone = 0;
+  int clock_rc;
+  int vis = METADATA_VIS_PUBLIC;
+  int get_rc;
+
+  if (!account || !key || !out || !valbuf || !vlen)
+    return -1;
+
+  clock_rc = metadata_clock_get(account, key, &st, &tombstone);
+  if (clock_rc < 0)
+    return -1;
+
+  if (clock_rc == 0 && tombstone) {
+    out->st = st;
+    out->tombstone = 1;
+    out->vis = METADATA_VIS_PUBLIC;
+    out->value = NULL;
+    out->vlen = 0;
+    return 0;
+  }
+
+  /* clock_rc == 1 (no clock row -- never stamped: legacy/pre-feature
+   * row, stamp defaults to 0.0.0) or clock_rc == 0 && !tombstone (a
+   * normal live, stamped row) both fall through to the value read. */
+  get_rc = metadata_account_get_vis(account, key, valbuf, vlen, &vis);
+  if (get_rc == 1)
+    return 1;   /* no clock row AND no value row: truly absent */
+  if (get_rc < 0)
+    return -1;
+
+  out->st = st;
+  out->tombstone = 0;
+  out->vis = vis;
+  out->value = valbuf;
+  out->vlen = strlen(valbuf);
+  return 0;
+}
+
+/** Merge an incoming stamped version against the stored one by the
+ * pure LWW rule (md_lww_take).  On take: folds the incoming stamp into
+ * this server's global HLC and persists the incoming row under its OWN
+ * stamp.
+ * @return 1 (taken), 0 (kept the local version), -1 (error).
+ */
+int metadata_account_merge(const char *account, const char *key,
+                           const struct md_version *in)
+{
+  struct md_version local;
+  char valbuf[METADATA_VALUE_LEN];
+  int local_rc;
+  struct HLC remote_hlc;
+  int put_rc;
+
+  if (!account || !key || !in)
+    return -1;
+
+  local_rc = metadata_account_get_version(account, key, &local, valbuf, sizeof(valbuf));
+  if (local_rc < 0)
+    return -1;
+
+  if (!md_lww_take(local_rc == 1 ? NULL : &local, in))
+    return 0;
+
+  remote_hlc.physical_ms = in->st.ms;
+  remote_hlc.logical = in->st.logical;
+  remote_hlc.node_id = in->st.node;
+  hlc_global_receive(&remote_hlc, hlc_max_forward_ms(), NULL);
+
+  put_rc = metadata_account_put_versioned(account, key,
+                                          in->tombstone ? NULL : in->value,
+                                          in->vis, &in->st);
+  return (put_rc == 0) ? 1 : -1;
+}
+
+/** Visit every live row and every tombstone stored for @a account.
+ * Pass 1 walks metadata_cf (the value rows: every live row, whether
+ * stamped or not); pass 2 walks metadata_clock_cf for tombstones
+ * (which, having no value row, pass 1 never sees).  Unlike
+ * metadata_account_list, a key of any length is visited.
+ * @return the number of rows visited, or -1 on error.
+ */
+int metadata_account_foreach_version(const char *account,
+                     int (*cb)(const char *key, const struct md_version *v, void *arg),
+                     void *arg)
+{
+  struct db_iter *it;
+  char prefix[CHANNELLEN + 2];
+  int prefixlen;
+  int rc;
+  int visited = 0;
+
+  if (!metadata_lmdb_available || !account || !cb)
+    return -1;
+
+  prefixlen = strlen(account);
+  if (prefixlen > CHANNELLEN)
+    return -1;
+  db_casefold_bytes(prefix, account, prefixlen);
+  prefix[prefixlen++] = KEY_SEP;
+
+  /* Pass 1: every live value row, stamped or not. */
+  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+  if (!it)
+    return -1;
+
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen;
+    const void *kbuf = db_iter_key(it, &klen);
+    char keybuf[160]; /* draft/persistence/... keys run up to 127 bytes */
+    size_t kpartlen;
+    struct md_version v;
+    char valbuf[METADATA_VALUE_LEN];
+    int vis = METADATA_VIS_PUBLIC;
+    struct md_stamp st;
+    struct md_stamp unstamped = { 0, 0, 0 };
+    int tombstone = 0;
+    int clock_rc;
+    int get_rc;
+
+    if (klen < (size_t)prefixlen || memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
+      break;
+
+    kpartlen = klen - (size_t)prefixlen;
+    if (kpartlen >= sizeof(keybuf))
+      continue;   /* defensive only: the wire codec caps keys at 127 bytes */
+    memcpy(keybuf, (const char *)kbuf + prefixlen, kpartlen);
+    keybuf[kpartlen] = '\0';
+
+    get_rc = metadata_account_get_vis(account, keybuf, valbuf, sizeof(valbuf), &vis);
+    if (get_rc != 0)
+      continue;   /* expired TTL row or decode error -- nothing to visit */
+
+    clock_rc = metadata_clock_get(account, keybuf, &st, &tombstone);
+    /* clock_rc == 0 && !tombstone: a normal stamped live row.  Anything
+     * else (no clock row -- legacy/unstamped; or a tombstone clock row
+     * somehow paired with a live value row -- an anomaly atomic writes
+     * should prevent) defaults to the unstamped 0.0.0 stamp rather than
+     * trusting a reading that doesn't agree with the value row. */
+    v.st = (clock_rc == 0 && !tombstone) ? st : unstamped;
+    v.tombstone = 0;
+    v.vis = vis;
+    v.value = valbuf;
+    v.vlen = strlen(valbuf);
+
+    visited++;
+    if (cb(keybuf, &v, arg) != 0) {
+      db_iter_close(it);
+      return visited;
+    }
+  }
+  db_iter_close(it);
+
+  /* Pass 2: tombstones (clock rows with no value row to find in pass 1). */
+  it = db_iter_open(metadata_db_env, metadata_clock_cf, /*snap=*/NULL);
+  if (!it)
+    return visited;
+
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, cvlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *cvbuf = db_iter_value(it, &cvlen);
+    char keybuf[160];
+    size_t kpartlen;
+    struct md_stamp st;
+    int tombstone = 0;
+    struct md_version v;
+
+    if (klen < (size_t)prefixlen || memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
+      break;
+
+    kpartlen = klen - (size_t)prefixlen;
+    if (kpartlen >= sizeof(keybuf))
+      continue;
+    memcpy(keybuf, (const char *)kbuf + prefixlen, kpartlen);
+    keybuf[kpartlen] = '\0';
+
+    if (md_clock_decode((const char *)cvbuf, cvlen, &st, &tombstone) != 0)
+      continue;
+    if (!tombstone)
+      continue;   /* a live clock row was already visited in pass 1 */
+
+    v.st = st;
+    v.tombstone = 1;
+    v.vis = METADATA_VIS_PUBLIC;
+    v.value = NULL;
+    v.vlen = 0;
+
+    visited++;
+    if (cb(keybuf, &v, arg) != 0) {
+      db_iter_close(it);
+      return visited;
+    }
+  }
+  db_iter_close(it);
+
+  return visited;
 }
 
 /*
@@ -791,9 +1126,17 @@ struct MetadataEntry *metadata_account_list(const char *account)
     if (!entry)
       break;
 
+    /* A 64+ byte key (draft/persistence/... profile keys run up to 127
+     * bytes on the wire, metadata_lww.h's md_wire_key_valid) cannot fit
+     * this fixed METADATA_KEY_LEN buffer.  Skip it with `continue`, not
+     * `break`: this walk is ordered by key bytes, not by length, so a
+     * long key can sort before a short one and a `break` here would
+     * silently hide every row after it (W4 review focus #2). Callers
+     * needing every row regardless of key length use
+     * metadata_account_foreach_version instead. */
     if (klen - prefixlen >= METADATA_KEY_LEN) {
       MyFree(entry);
-      break;
+      continue;
     }
     memcpy(entry->key, (const char *)kbuf + prefixlen, klen - prefixlen);
     entry->key[klen - prefixlen] = '\0';
@@ -863,6 +1206,9 @@ int metadata_account_clear(const char *account)
   char prefix[CHANNELLEN + 2];
   int prefixlen;
   int rc;
+  struct md_stamp st;
+  char clockbuf[MD_STAMP_BUFSIZE + 1];
+  int clocklen;
 
   if (!metadata_lmdb_available || !account)
     return -1;
@@ -874,6 +1220,15 @@ int metadata_account_clear(const char *account)
     return -1;
   db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
   prefix[prefixlen++] = KEY_SEP;
+
+  /* One stamp, reused for every key this clear deletes: they all
+   * become tombstones in the same logical event (W4: a CLEAR during a
+   * split must stay cleared after relink -- a later merge needs a
+   * clock row to win over a stale re-sync of the deleted value). */
+  st = metadata_stamp_now();
+  clocklen = md_clock_encode(clockbuf, sizeof(clockbuf), &st, /*tombstone=*/1);
+  if (clocklen < 0)
+    return -1;
 
   /* Two-pass: iterate to collect matching keys, then delete via a
    * single writebatch.  Mirrors the libmdbx cursor_del-during-scan
@@ -895,6 +1250,10 @@ int metadata_account_clear(const char *account)
         memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
       break;
     db_writebatch_del(wb, metadata_cf, kbuf, klen);
+    /* Same key, metadata_clock_cf: a tombstone for every key this
+     * batch deletes, so a later merge from a stale peer sees a clock
+     * row to compare against instead of silently resurrecting the row. */
+    db_writebatch_put(wb, metadata_clock_cf, kbuf, klen, clockbuf, (size_t)clocklen);
   }
   db_iter_close(it);
 
@@ -1010,15 +1369,80 @@ void metadata_channel_load(struct Channel *chptr)
   free_entry_list(list);
 }
 
+/** Delete metadata_clock_cf tombstones ("D" rows) older than
+ * FEAT_METADATA_TOMBSTONE_TTL: a tombstone's job is to beat a stale
+ * re-sync of the value it replaced, and that job is done once no peer
+ * can plausibly still be offering the old value.  A tombstone's value
+ * row is already gone (metadata_write_versioned / metadata_account_clear
+ * never leave one behind), so this only ever deletes from
+ * metadata_clock_cf.
+ * @return Number of tombstones purged, or -1 on error.
+ */
+static int metadata_account_purge_old_tombstones(void)
+{
+  struct db_iter *it;
+  struct db_writebatch *wb;
+  int tombstone_ttl;
+  int purged = 0;
+  int rc;
+
+  tombstone_ttl = feature_int(FEAT_METADATA_TOMBSTONE_TTL);
+  if (tombstone_ttl <= 0)
+    return 0; /* disabled: tombstones live forever */
+
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
+    return -1;
+  it = db_iter_open(metadata_db_env, metadata_clock_cf, /*snap=*/NULL);
+  if (!it) {
+    db_writebatch_destroy(wb);
+    return -1;
+  }
+
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
+    struct md_stamp st;
+    int tombstone = 0;
+
+    if (md_clock_decode((const char *)vbuf, vlen, &st, &tombstone) != 0)
+      continue;
+    if (!tombstone)
+      continue;
+
+    if ((time_t)(st.ms / 1000) + tombstone_ttl < CurrentTime) {
+      db_writebatch_del(wb, metadata_clock_cf, kbuf, klen);
+      purged++;
+    }
+  }
+  db_iter_close(it);
+
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: tombstone purge commit failed: %s", db_strerror(rc));
+    return -1;
+  }
+  if (purged > 0)
+    log_write(LS_SYSTEM, L_INFO, 0, "metadata: purged %d expired tombstones", purged);
+  return purged;
+}
+
 /** Purge expired metadata entries from LMDB.
- * Called periodically to enforce METADATA_CACHE_TTL.
+ * Called periodically to enforce METADATA_CACHE_TTL (and, since W4,
+ * METADATA_TOMBSTONE_TTL).
  * LEGACY-AGER ONLY as of era-2 (P0-P2; writer survey 2026-07-25): no live
  * code path mints new TTL-stamped rows — every reachable non-NULL write is
  * metadata_account_set_permanent (ts=0). This sweep exists solely to
  * physically reclaim pre-era-2 rows (old last_present, the retired remote
  * channel cache) that read-time expiry only masks. Do NOT add a TTL writer
  * on the assumption this machinery is load-bearing for current data.
- * @return Number of entries purged, or -1 on error.
+ * @return Number of entries purged (value-row TTL expiry plus old
+ *         tombstones), or -1 on error.
  */
 int metadata_account_purge_expired(void)
 {
@@ -1026,6 +1450,7 @@ int metadata_account_purge_expired(void)
   struct db_writebatch *wb;
   int ttl;
   int purged = 0;
+  int tomb_purged;
   int rc;
 #ifdef USE_ZSTD
   unsigned char decompressed[METADATA_VALUE_LEN + 64];
@@ -1038,62 +1463,66 @@ int metadata_account_purge_expired(void)
     return -1;
 
   ttl = feature_int(FEAT_METADATA_CACHE_TTL);
-  if (ttl <= 0)
-    return 0; /* TTL disabled, nothing to purge */
+  if (ttl > 0) {
+    wb = db_writebatch_new(metadata_db_env);
+    if (!wb)
+      return -1;
+    it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+    if (!it) {
+      db_writebatch_destroy(wb);
+      return -1;
+    }
 
-  wb = db_writebatch_new(metadata_db_env);
-  if (!wb)
-    return -1;
-  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
-  if (!it) {
-    db_writebatch_destroy(wb);
-    return -1;
-  }
-
-  for (rc = db_iter_seek_first(it);
-       rc == DB_OK && db_iter_valid(it);
-       rc = db_iter_next(it)) {
-    size_t klen, vlen;
-    const void *kbuf = db_iter_key(it, &klen);
-    const void *vbuf = db_iter_value(it, &vlen);
-    int decode_rc;
-    int expired = 0;
+    for (rc = db_iter_seek_first(it);
+         rc == DB_OK && db_iter_valid(it);
+         rc = db_iter_next(it)) {
+      size_t klen, vlen;
+      const void *kbuf = db_iter_key(it, &klen);
+      const void *vbuf = db_iter_value(it, &vlen);
+      int decode_rc;
+      int expired = 0;
 
 #ifdef USE_ZSTD
-    if (is_compressed((const unsigned char *)vbuf, vlen)) {
-      if (decompress_data((const unsigned char *)vbuf, vlen,
-                          decompressed, sizeof(decompressed), &decompressed_len) >= 0) {
-        decode_rc = decode_ttl_value(decompressed, decompressed_len, decoded,
+      if (is_compressed((const unsigned char *)vbuf, vlen)) {
+        if (decompress_data((const unsigned char *)vbuf, vlen,
+                            decompressed, sizeof(decompressed), &decompressed_len) >= 0) {
+          decode_rc = decode_ttl_value(decompressed, decompressed_len, decoded,
+                                       sizeof(decoded), &timestamp);
+          if (decode_rc >= 0 && is_value_expired(timestamp, ttl))
+            expired = 1;
+        }
+      } else
+#endif
+      {
+        decode_rc = decode_ttl_value(vbuf, vlen, decoded,
                                      sizeof(decoded), &timestamp);
         if (decode_rc >= 0 && is_value_expired(timestamp, ttl))
           expired = 1;
       }
-    } else
-#endif
-    {
-      decode_rc = decode_ttl_value(vbuf, vlen, decoded,
-                                   sizeof(decoded), &timestamp);
-      if (decode_rc >= 0 && is_value_expired(timestamp, ttl))
-        expired = 1;
-    }
 
-    if (expired) {
-      db_writebatch_del(wb, metadata_cf, kbuf, klen);
-      purged++;
+      if (expired) {
+        db_writebatch_del(wb, metadata_cf, kbuf, klen);
+        purged++;
+      }
     }
-  }
-  db_iter_close(it);
+    db_iter_close(it);
 
-  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
-  db_writebatch_destroy(wb);
-  if (rc != DB_OK) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "metadata: purge commit failed: %s", db_strerror(rc));
-    return -1;
+    rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+    db_writebatch_destroy(wb);
+    if (rc != DB_OK) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "metadata: purge commit failed: %s", db_strerror(rc));
+      return -1;
+    }
+    if (purged > 0)
+      log_write(LS_SYSTEM, L_INFO, 0, "metadata: purged %d expired cache entries", purged);
   }
-  if (purged > 0)
-    log_write(LS_SYSTEM, L_INFO, 0, "metadata: purged %d expired cache entries", purged);
-  return purged;
+
+  tomb_purged = metadata_account_purge_old_tombstones();
+  if (tomb_purged < 0)
+    return (purged > 0) ? purged : -1;
+
+  return purged + tomb_purged;
 }
 
 #else /* !defined(USE_ROCKSDB) — no backend available */
@@ -1111,6 +1540,10 @@ int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
 int metadata_account_purge_expired(void) { return -1; }
 int metadata_account_foreach_key(void (*cb)(const void *key, size_t klen, void *arg), void *arg) { (void)cb; (void)arg; return -1; }
+int metadata_account_put_versioned(const char *account, const char *key, const char *value, int vis, const struct md_stamp *st) { (void)account; (void)key; (void)value; (void)vis; (void)st; return -1; }
+int metadata_account_get_version(const char *account, const char *key, struct md_version *out, char *valbuf, size_t vlen) { (void)account; (void)key; (void)out; (void)valbuf; (void)vlen; return -1; }
+int metadata_account_merge(const char *account, const char *key, const struct md_version *in) { (void)account; (void)key; (void)in; return -1; }
+int metadata_account_foreach_version(const char *account, int (*cb)(const char *key, const struct md_version *v, void *arg), void *arg) { (void)account; (void)cb; (void)arg; return -1; }
 void metadata_channel_load(struct Channel *chptr) { (void)chptr; }
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
@@ -1452,25 +1885,23 @@ static const struct {
   { NULL, 0, 0 }
 };
 
-/** Set metadata for a client.
- * For logged-in users, also persists to LMDB.
- * @param[in] cptr Client to set metadata on.
+/** The memory+flags half of metadata_set_client: updates @a cptr's
+ * in-memory MetadataEntry list and its mode-sync flags
+ * (metadata_mode_sync[]) for one key change.  No store write, no doc
+ * mirror -- callers that also need to persist do that themselves.
+ * Factored out so metadata_account_apply_memory (W4: apply an
+ * account-store change to every client logged into the account, local
+ * or remote) can reuse exactly this per-client logic instead of
+ * duplicating it.
+ * @param[in] cptr Client whose in-memory cache (and mode flags) change.
  * @param[in] key Key name.
- * @param[in] value Value to set (NULL to delete).
- * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
- * @return 0 on success, -1 on error.
+ * @param[in] value Value to set, or NULL to delete.
+ * @param[in] visibility Visibility level for a set; ignored for a delete.
  */
-int metadata_set_client(struct Client *cptr, const char *key, const char *value, int visibility)
+static void metadata_apply_client_memory(struct Client *cptr, const char *key,
+                                         const char *value, int visibility)
 {
   struct MetadataEntry *entry, *prev = NULL;
-  const char *account = NULL;
-
-  if (!cptr || !key)
-    return -1;
-
-  /* Check if user is logged in */
-  if (cli_user(cptr) && cli_user(cptr)->account[0])
-    account = cli_user(cptr)->account;
 
   /* Find existing entry in memory */
   for (entry = cli_metadata(cptr); entry; prev = entry, entry = entry->next) {
@@ -1482,28 +1913,22 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
     /* Set or update */
     if (entry) {
       /* Update existing */
+      char *newval = (char *)MyMalloc(strlen(value) + 1);
+      if (!newval)
+        return;
+      strcpy(newval, value);
       if (entry->value)
         MyFree(entry->value);
-      entry->value = (char *)MyMalloc(strlen(value) + 1);
-      if (!entry->value)
-        return -1;
-      strcpy(entry->value, value);
+      entry->value = newval;
       entry->visibility = visibility;
     } else {
       /* Create new */
       entry = create_entry(key, value);
       if (!entry)
-        return -1;
+        return;
       entry->visibility = visibility;
       entry->next = cli_metadata(cptr);
       cli_metadata(cptr) = entry;
-    }
-
-    /* Persist to LMDB for logged-in users — store permanently (no TTL).
-     * Values set via metadata_set_client are user preferences, not cache
-     * entries, and should not expire after METADATA_CACHE_TTL. */
-    if (account && metadata_lmdb_is_available()) {
-      metadata_account_set_permanent(account, key, value, visibility);
     }
   } else {
     /* Delete */
@@ -1513,11 +1938,6 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
       else
         cli_metadata(cptr) = entry->next;
       metadata_free_entry(entry);
-    }
-
-    /* Delete from LMDB for logged-in users (visibility ignored — no value to encode) */
-    if (account && metadata_lmdb_is_available()) {
-      metadata_account_set(account, key, NULL, visibility);
     }
   }
 
@@ -1544,8 +1964,107 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
       }
     }
   }
+}
+
+/** Set metadata for a client.
+ * For logged-in users, also persists to LMDB.
+ * @param[in] cptr Client to set metadata on.
+ * @param[in] key Key name.
+ * @param[in] value Value to set (NULL to delete).
+ * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
+ * @return 0 on success, -1 on error.
+ */
+int metadata_set_client(struct Client *cptr, const char *key, const char *value, int visibility)
+{
+  const char *account = NULL;
+
+  if (!cptr || !key)
+    return -1;
+
+  /* Check if user is logged in */
+  if (cli_user(cptr) && cli_user(cptr)->account[0])
+    account = cli_user(cptr)->account;
+
+  metadata_apply_client_memory(cptr, key, value, visibility);
+
+  if (value) {
+    /* Persist to LMDB for logged-in users — store permanently (no TTL).
+     * Values set via metadata_set_client are user preferences, not cache
+     * entries, and should not expire after METADATA_CACHE_TTL. */
+    if (account && metadata_lmdb_is_available()) {
+      metadata_account_set_permanent(account, key, value, visibility);
+    }
+  } else {
+    /* Delete from LMDB for logged-in users (visibility ignored — no value to encode) */
+    if (account && metadata_lmdb_is_available()) {
+      metadata_account_set(account, key, NULL, visibility);
+    }
+  }
 
   return 0;
+}
+
+/** W4: apply an account-store change to every IsUser client logged into
+ * @a account, local or remote -- the in-memory + mode-flags half (see
+ * metadata_apply_client_memory) for each.  No store write: callers that
+ * need the store write call metadata_account_put_versioned /
+ * metadata_account_merge separately.
+ *
+ * Notification: PRIVATE delivers to every session of the account
+ * regardless of which nick resolves it (metadata_notify_subscribers'
+ * own account-wide PRIVATE scoping), so one call -- using any one
+ * non-alias nick found during the walk -- reaches every recipient.
+ * PUBLIC scoping is per-nick (who shares a channel with THAT nick), so
+ * every distinct non-alias nick gets its own notify call.  A bouncer
+ * alias is skipped for notify purposes either way: it shares its
+ * primary's nick (and the primary nick already covers it), and an
+ * alias nick is not in the nick hash (metadata_notify_subscribers'
+ * FindUser(target) would come up empty for it).
+ */
+void metadata_account_apply_memory(const char *account, const char *key,
+                                   const char *value, int vis)
+{
+  struct Client *cptr;
+  int private_notified = 0;
+  const char *notified_nicks[64];
+  int notified_count = 0;
+
+  if (!account || !key)
+    return;
+  if (strlen(key) >= METADATA_KEY_LEN)
+    return;   /* can't fit the in-memory key buffer */
+
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    if (!IsUser(cptr) || !cli_user(cptr) || !cli_user(cptr)->account[0])
+      continue;
+    if (ircd_strcmp(cli_user(cptr)->account, account) != 0)
+      continue;
+
+    metadata_apply_client_memory(cptr, key, value, vis);
+
+    if (IsBouncerAlias(cptr))
+      continue;
+
+    if (vis == METADATA_VIS_PRIVATE) {
+      if (!private_notified) {
+        metadata_notify_subscribers(cli_name(cptr), key, value, vis);
+        private_notified = 1;
+      }
+    } else {
+      int i, already = 0;
+      for (i = 0; i < notified_count; i++) {
+        if (ircd_strcmp(notified_nicks[i], cli_name(cptr)) == 0) {
+          already = 1;
+          break;
+        }
+      }
+      if (!already) {
+        metadata_notify_subscribers(cli_name(cptr), key, value, vis);
+        if (notified_count < (int)(sizeof(notified_nicks) / sizeof(notified_nicks[0])))
+          notified_nicks[notified_count++] = cli_name(cptr);
+      }
+    }
+  }
 }
 
 /** List all metadata for a client.

@@ -49,6 +49,7 @@
 #include "uping.h"
 #include "whowas.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "bouncer_session.h"
 #include "sessid_index.h"
 
@@ -736,6 +737,7 @@ void remove_client_from_list(struct Client *cptr)
     if (cli_serv(cptr)->client_list)
       MyFree(cli_serv(cptr)->client_list);
     MyFree(cli_serv(cptr)->last_error_msg);
+    mdsync_link_free(cptr);  /* W4: free this link's struct MdSyncLink, if any */
     MyFree(cli_serv(cptr));
     --servs.inuse;
     --servs.alloc;

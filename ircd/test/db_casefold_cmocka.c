@@ -538,6 +538,30 @@ static void migrate_keeps_existing_folded_row_on_collision(void **state)
   env_free(env);
 }
 
+static void migrate_metadata_clock_cf(void **state)
+{
+  /* W4: the metadata_clock column family shares metadata's exact
+   * "account\0key" keying, so it folds the same way -- mirrors
+   * migrate_moves_unfolded_rows with the new CF name. */
+  struct db_env *env = env_new();
+  struct db_cf *clock = cf_of(env, "metadata_clock");
+  struct db_casefold_cf cfs[] = { { NULL, "metadata_clock", DB_CASEFOLD_ALL } };
+  (void)state;
+  cfs[0].cf = clock;
+
+  seed(clock, B("Bob\0avatar"), "L1729781234567.0.1");
+  seed(clock, B("bob\0color"), "D1729781234999.2.1");
+
+  assert_int_equal(db_casefold_migrate(env, "t", cfs, 1), 0);
+
+  assert_int_equal(clock->n, 2);
+  assert_row(clock, B("bob\0avatar"), "L1729781234567.0.1");
+  assert_row(clock, B("bob\0color"), "D1729781234999.2.1");
+  assert_no_row(clock, B("Bob\0avatar"));
+
+  env_free(env);
+}
+
 static void migrate_folds_only_masked_components(void **state)
 {
   struct db_env *env = env_new();
@@ -675,6 +699,7 @@ int main(void)
     cmocka_unit_test(fold_key_rejects_small_buffer),
     cmocka_unit_test(migrate_moves_unfolded_rows),
     cmocka_unit_test(migrate_keeps_existing_folded_row_on_collision),
+    cmocka_unit_test(migrate_metadata_clock_cf),
     cmocka_unit_test(migrate_folds_only_masked_components),
     cmocka_unit_test(migrate_runs_once_per_env),
     cmocka_unit_test(migrate_handles_more_rows_than_one_batch),
