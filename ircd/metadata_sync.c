@@ -2,9 +2,11 @@
  * IRC - Internet Relay Chat, ircd/metadata_sync.c
  *
  * Per-link state and wire emission for the W4 stamped account-metadata
- * sync protocol (MD =account / !sessid / ? / .).  This task (Task 3)
- * implements the chunk-reassembly accessor/destructor and the emitter;
- * the SESSION/PULL/PULL_END receivers are Task 4.
+ * sync protocol (MD =account / !sessid / ? / .): the per-link
+ * chunk-reassembly state (accessor and destructor), the stamped-row
+ * emitter, the pull-reply responder and the per-link over-limit notice.
+ * The receivers themselves live in m_metadata.c (ms_metadata and its
+ * per-form handlers).
  */
 #include "config.h"
 
@@ -85,8 +87,8 @@ static void mdsync_send_line(struct Client *src, struct Client *one,
                              const char *flags, const char *piece)
 {
   if (one) {
-    /* This task (Task 4, the pull reply to cptr) is this single-target
-     * path's first caller.  A pull request is itself only ever accepted
+    /* The pull reply to cptr (mdsync_answer_pull) is this single-target
+     * path's caller.  A pull request is itself only ever accepted
      * from a direct, already-identified-as-server link (ms_metadata_pull),
      * but that link need not be IRCv3-aware (a confused/hostile sender
      * could still forge the request) -- never send it one of these new

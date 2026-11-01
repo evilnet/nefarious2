@@ -847,9 +847,10 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
      * The write also broadcasts in the (unstamped, pre-existing)
      * account-target wire form ("MD *account key [vis] [:value]") so
      * an older peer still converges the same way it always has.
-     * ms_metadata's account-form branch consumes it; an older fork
-     * (pre-W4) FindUser()s the literal "*account", gets NULL, and
-     * drops it harmlessly. */
+     * ms_metadata's account-form branch consumes it here; an older fork
+     * (pre-W4, e.g. 7fd92ba3) APPLIES it too -- to its own online
+     * clients of the account, else straight to its store -- and relays
+     * it onward (the wire table's "*account" row).  It is not dropped. */
     {
       struct Client *acptr;
       struct Client *first_online = NULL;
