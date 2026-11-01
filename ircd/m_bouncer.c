@@ -814,11 +814,15 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
        * their bounce_auto_resume rejects subsequent cross-server alias
        * attaches at the "no preference + DEFAULT_HOLD off" early
        * return.  Visibility "P" mirrors the wire format
-       * m_metadata.c::metadata_cmd_set uses for PRIVATE metadata —
-       * target is the client's nick, key is draft/persistence/hold.
-       * Sent before a join: it names the client by the nick it has now. */
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
-                            cli_name(sptr), "draft/persistence/hold");
+       * m_metadata.c::metadata_cmd_set uses for PRIVATE metadata.
+       * The target is the ACCOUNT ("*account"), not sptr's nick: the
+       * preference is account-wide, and sptr may be a device whose
+       * primary (which its nick names on every other server) lives on
+       * another server, where ms_metadata's nick-target origin guard
+       * would drop a nick-form line from us.  Every fork receiver
+       * applies the account form to the account's clients and store. */
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :1",
+                            cli_account(sptr), "draft/persistence/hold");
 
       /* A client in no session joins the account's session, or makes one
        * (bounce_hold_on(): BS C then BS A -- a peer receiving BS C alone
@@ -860,8 +864,8 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
         metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
         /* Propagate "off" to peers — see comment in the "on" branch
          * above.  Without this, peers retain a stale "1" preference. */
-        sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                              cli_name(sptr), "draft/persistence/hold");
+        sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
+                              cli_account(sptr), "draft/persistence/hold");
       }
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.

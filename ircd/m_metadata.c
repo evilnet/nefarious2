@@ -185,11 +185,24 @@ static int shares_channel(struct Client *a, struct Client *b)
  * the rule reads identically everywhere it applies (originally the
  * nick-form-only guard in ms_metadata; Task 4 reuses it for the session
  * form instead of writing a second version).
+ *
+ * A bouncer device (alias) of @a target_client also qualifies: an alias
+ * carries its primary's nick, another server's alias is not in the nick
+ * hash, so a nick-addressed write from a device resolves to its primary
+ * here, and send.c keeps the device's own numeric toward the primary's
+ * server (its alias->primary rewrite skips that direction).  The test is
+ * the alias pointer, which only BX C sets (never the nick), so a nick
+ * collision cannot pass it; and the parser has already checked that
+ * @a sptr is behind the link the line came in on (its fake-direction
+ * check), exactly as it has for @a target_client == @a sptr, so a server
+ * cannot speak for a device it does not host.
  */
 static int md_sender_owns_client(struct Client *sptr, struct Client *target_client)
 {
   return (cli_user(target_client) && cli_user(target_client)->server == sptr)
          || target_client == sptr
+         || (IsUser(sptr) && IsBouncerAlias(sptr)
+             && cli_alias_primary(sptr) == target_client)
          || (IsUser(sptr) && IsOper(sptr));
 }
 
