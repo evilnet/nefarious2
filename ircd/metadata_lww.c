@@ -108,6 +108,11 @@ int md_stamp_parse(const char *text, struct md_stamp *out)
 
   if (!text || !out)
     return -1;
+  /* A text that does not fit MD_STAMP_BUFSIZE (only a 20-digit ms with
+   * long 16-bit fields gets there) could not be formatted back, kept as
+   * a chunk identity or clock-encoded: refuse it here, once. */
+  if (strlen(text) >= MD_STAMP_BUFSIZE)
+    return -1;
 
   dot1 = strchr(text, '.');
   if (!dot1)
@@ -429,16 +434,41 @@ int md_flags_parse(const char *tok, int *vis, int *tombstone, int *more)
 /* Chunk reassembly                                                     */
 /* ------------------------------------------------------------------ */
 
-/** Whether @a c's pending accumulation (if any) was filed under the
- * same (account, stamp, key, vis) as this feed call. */
-static int md_chunk_identity_matches(const struct md_chunk *c,
-                                      const char *account, const char *stamp,
-                                      const char *key, int vis)
+/** Whether @a s (NULL taken as "") fits a buffer of @a size bytes with
+ * its NUL. */
+static int md_fits(const char *s, size_t size)
 {
-  return c->vis == vis &&
-         0 == strcmp(c->account, account ? account : "") &&
-         0 == strcmp(c->stamp, stamp ? stamp : "") &&
-         0 == strcmp(c->key, key ? key : "");
+  return strlen(s ? s : "") < size;
+}
+
+/** Whether (@a account, @a stamp, @a key) names the same row as the
+ * identity fields @a a / @a s / @a k (vis is not part of a row's
+ * identity: see md_chunk_feed). */
+static int md_row_eq(const char *a, const char *s, const char *k,
+                     const char *account, const char *stamp, const char *key)
+{
+  return 0 == strcmp(a, account ? account : "") &&
+         0 == strcmp(s, stamp ? stamp : "") &&
+         0 == strcmp(k, key ? key : "");
+}
+
+/** Discard the rest of row (@a account, @a stamp, @a key): its later
+ * pieces, up to and including its more=0 one, are swallowed. */
+static void md_chunk_poison(struct md_chunk *c, const char *account,
+                            const char *stamp, const char *key)
+{
+  md_bounded_copy(c->poison_account, sizeof(c->poison_account), account);
+  md_bounded_copy(c->poison_stamp, sizeof(c->poison_stamp), stamp);
+  md_bounded_copy(c->poison_key, sizeof(c->poison_key), key);
+  c->poisoned = 1;
+}
+
+/** Forget the pending value, if any. */
+static void md_chunk_reset(struct md_chunk *c)
+{
+  c->active = 0;
+  c->len = 0;
+  c->value[0] = '\0';
 }
 
 int md_chunk_feed(struct md_chunk *c, const char *account, const char *stamp,
@@ -451,10 +481,38 @@ int md_chunk_feed(struct md_chunk *c, const char *account, const char *stamp,
 
   c->dropped = 0;
 
-  if (c->active && !md_chunk_identity_matches(c, account, stamp, key, vis)) {
-    c->active = 0;
-    c->len = 0;
-    c->dropped = 1;
+  /* Never truncate an identity field: a cut name could match another
+   * row's (final review M2).  Refused before anything changes. */
+  if (!md_fits(account, sizeof(c->account)) ||
+      !md_fits(stamp, sizeof(c->stamp)) ||
+      !md_fits(key, sizeof(c->key)))
+    return MD_CHUNK_ERROR;
+
+  /* The rest of a row already given up on (final review M1): swallow
+   * it, so no tail of it is ever handed back as the whole value. */
+  if (c->poisoned && md_row_eq(c->poison_account, c->poison_stamp,
+                               c->poison_key, account, stamp, key)) {
+    if (!more)
+      c->poisoned = 0;
+    return MD_CHUNK_ERROR;
+  }
+
+  if (c->active) {
+    if (md_row_eq(c->account, c->stamp, c->key, account, stamp, key)) {
+      if (c->vis != vis) {
+        /* The same row arriving inconsistent: none of it is trusted. */
+        md_chunk_reset(c);
+        if (more)
+          md_chunk_poison(c, account, stamp, key);
+        return MD_CHUNK_ERROR;
+      }
+    } else {
+      /* Another row's line interrupted this one: drop what we have and
+       * the rest of it, then start the new row fresh. */
+      md_chunk_poison(c, c->account, c->stamp, c->key);
+      md_chunk_reset(c);
+      c->dropped = 1;
+    }
   }
 
   if (!c->active) {
@@ -468,9 +526,9 @@ int md_chunk_feed(struct md_chunk *c, const char *account, const char *stamp,
 
   plen = strlen(piece);
   if (c->len + plen >= sizeof(c->value)) {
-    c->active = 0;
-    c->len = 0;
-    c->value[0] = '\0';
+    md_chunk_reset(c);
+    if (more)
+      md_chunk_poison(c, account, stamp, key);
     return MD_CHUNK_ERROR;
   }
 
@@ -483,6 +541,20 @@ int md_chunk_feed(struct md_chunk *c, const char *account, const char *stamp,
 
   c->active = 0;
   return MD_CHUNK_DONE;
+}
+
+void md_chunk_abandon(struct md_chunk *c, const char *account,
+                      const char *stamp, const char *key)
+{
+  if (!c)
+    return;
+  if (!md_fits(account, sizeof(c->account)) ||
+      !md_fits(stamp, sizeof(c->stamp)) ||
+      !md_fits(key, sizeof(c->key)))
+    return;
+  if (c->active && md_row_eq(c->account, c->stamp, c->key, account, stamp, key))
+    md_chunk_reset(c);
+  md_chunk_poison(c, account, stamp, key);
 }
 
 /* ------------------------------------------------------------------ */

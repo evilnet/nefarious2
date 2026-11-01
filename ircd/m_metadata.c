@@ -1705,12 +1705,43 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   flags_tok = parv[4];
   piece = (parc >= 6) ? parv[5] : "";
 
+  /* Every refusal before md_chunk_feed must be the same for every piece
+   * of one row, or a refused head would leave the rest to be merged as
+   * the whole value (final review M1).  The account name, stamp text and
+   * key are identical on every piece of a row (they are its identity),
+   * so these checks are; the flags token is not (`*+` vs `*`), so its
+   * refusal discards the rest of the row (md_chunk_abandon below); and
+   * the clock-skew refusal, which reads a moving clock, waits until the
+   * row is whole. */
+
+  /* An account name never exceeds ACCOUNTLEN: refuse a longer one rather
+   * than let the chunk identity (or a store row) carry a cut name that
+   * is not an account (final review M2). */
+  if (!account_name[0] || strlen(account_name) > ACCOUNTLEN)
+    return 0;
+
   if (!md_wire_key_valid(wire_key))
     return 0;
 
+  /* md_stamp_parse also refuses a stamp text too long for
+   * MD_STAMP_BUFSIZE (M2). */
   if (md_stamp_parse(stamp_text, &st) < 0)
     return 0;
 
+  chunk = mdsync_link_chunk(cptr);
+  if (!chunk)
+    return 0;
+
+  if (md_flags_parse(flags_tok, &vis, &tombstone, &more) < 0) {
+    md_chunk_abandon(chunk, account_name, stamp_text, wire_key);
+    return 0;
+  }
+
+  chunk_rc = md_chunk_feed(chunk, account_name, stamp_text, wire_key, vis, more, piece);
+  if (chunk_rc != MD_CHUNK_DONE)
+    return 0;   /* PENDING (wait for more pieces) or ERROR: nothing to merge */
+
+  /* Checked once, on the whole row, against one reading of the clock. */
   if (md_stamp_ahead(&st, hlc_wall_clock_ms(), hlc_max_forward_ms())) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "ms_metadata: stamped row for %s/%s from %C reads too far "
@@ -1718,17 +1749,6 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
               account_name, wire_key, sptr);
     return 0;
   }
-
-  if (md_flags_parse(flags_tok, &vis, &tombstone, &more) < 0)
-    return 0;
-
-  chunk = mdsync_link_chunk(cptr);
-  if (!chunk)
-    return 0;
-
-  chunk_rc = md_chunk_feed(chunk, account_name, stamp_text, wire_key, vis, more, piece);
-  if (chunk_rc != MD_CHUNK_DONE)
-    return 0;   /* PENDING (wait for more pieces) or ERROR: nothing to merge yet */
 
   in.st = st;
   in.tombstone = tombstone;

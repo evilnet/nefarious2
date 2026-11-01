@@ -356,6 +356,190 @@ static void test_chunk_overflow(void **state)
   assert_int_equal(c.active, 0);
 }
 
+/* Final push-1 review M1(a): after an overflow, the rest of that row's
+ * pieces must not assemble a tail that the final piece then hands back
+ * as the whole value. The row stays poisoned until its own more=0
+ * piece; the next row (even one with the same identity) is clean. */
+static void test_chunk_overflow_discards_rest_of_row(void **state)
+{
+  struct md_chunk c;
+  char piece[1024];
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+  memset(piece, 'z', sizeof(piece));
+  piece[sizeof(piece) - 1] = '\0'; /* 1023 'z' bytes */
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, piece));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "x"));
+  /* The rest of the overflowed row: swallowed, never a fresh start. */
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "tail1"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "tail2"));
+  assert_int_equal(c.active, 0);
+  /* Its more=0 piece ended the poison: the next row is taken. */
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "whole"));
+  assert_string_equal(c.value, "whole");
+}
+
+/* An overflow on the row's own final piece leaves nothing to discard. */
+static void test_chunk_overflow_on_final_piece_no_poison(void **state)
+{
+  struct md_chunk c;
+  char piece[1024];
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+  memset(piece, 'z', sizeof(piece));
+  piece[sizeof(piece) - 1] = '\0';
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, piece));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "x"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "v"));
+  assert_string_equal(c.value, "v");
+}
+
+/* M1(b), an orphaned row: a row whose accumulation another row's line
+ * interrupted. Its later pieces are discarded, not merged as a tail. */
+static void test_chunk_mismatch_discards_rest_of_abandoned_row(void **state)
+{
+  struct md_chunk c;
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "head"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k2", 0, 0, "other"));
+  assert_int_equal(c.dropped, 1);
+  assert_string_equal(c.value, "other");
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "mid"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "end"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "whole"));
+  assert_string_equal(c.value, "whole");
+}
+
+/* A piece of the pending row that disagrees on visibility is the same
+ * row (account, stamp, key) arriving inconsistent: the whole row goes. */
+static void test_chunk_vis_flip_discards_row(void **state)
+{
+  struct md_chunk c;
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "aaa"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 1, 1, "bbb"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "cc"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "v"));
+  assert_string_equal(c.value, "v");
+}
+
+/* md_chunk_abandon: a caller-side refusal of one piece (e.g. a bad
+ * flags token) discards the pending row it belongs to and the rest of
+ * that row -- whether a value was pending or not. */
+static void test_chunk_abandon_discards_row(void **state)
+{
+  struct md_chunk c;
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "aaa"));
+  md_chunk_abandon(&c, "acct", "7.0.1", "k1");
+  assert_int_equal(c.active, 0);
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "cc"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "v"));
+
+  /* A refused head: nothing pending yet, the rest still goes. */
+  md_chunk_abandon(&c, "acct", "8.0.1", "k2");
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "8.0.1", "k2", 0, 1, "p2"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "8.0.1", "k2", 0, 0, "p3"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "8.0.1", "k2", 0, 0, "w"));
+  assert_string_equal(c.value, "w");
+
+  /* Abandoning another row leaves a pending one alone. */
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "9.0.1", "k3", 0, 1, "aa"));
+  md_chunk_abandon(&c, "acct", "9.0.1", "zz");
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "9.0.1", "k3", 0, 0, "bb"));
+  assert_string_equal(c.value, "aabb");
+}
+
+/* M2: an identity field that does not fit its buffer (an account over
+ * ACCOUNTLEN, a stamp text over MD_STAMP_BUFSIZE - 1) is refused, never
+ * truncated into a name that could match another row's, and the
+ * pending row is left alone. */
+static void test_chunk_rejects_oversize_identity(void **state)
+{
+  struct md_chunk c;
+  char longkey[200];
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+  memset(longkey, 'k', sizeof(longkey));
+  longkey[sizeof(longkey) - 1] = '\0';
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "aaa"));
+  /* 16 chars: one over ACCOUNTLEN; would truncate to "acct567890123456"'s
+   * first 15 and could pass for that account's row. */
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct567890123456", "7.0.1", "k1", 0, 0, "x"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "12345678901234567890.65535.65535", "k1", 0, 0, "x"));
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", longkey, 0, 0, "x"));
+  assert_int_equal(c.active, 1);
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "b"));
+  assert_string_equal(c.value, "aaab");
+  /* Exactly 15 is a valid account. */
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct56789012345", "7.0.1", "k1", 0, 0, "y"));
+}
+
+/* M2: a stamp text of MD_STAMP_BUFSIZE (32) characters or more -- a
+ * 20-digit ms with both 16-bit fields at five digits -- cannot be
+ * formatted back, kept as a chunk identity or clock-encoded into the
+ * buffers sized from MD_STAMP_BUFSIZE, so it is malformed. 31 is fine. */
+static void test_stamp_parse_rejects_over_bufsize(void **state)
+{
+  struct md_stamp s;
+  char buf[MD_STAMP_BUFSIZE];
+  char clk[MD_STAMP_BUFSIZE + 1];
+
+  (void)state;
+
+  assert_int_equal(-1, md_stamp_parse("12345678901234567890.65535.65535", &s));
+  assert_int_equal(-1, md_stamp_parse("00000000000000000001.00000.00000", &s));
+  assert_int_equal(0, md_stamp_parse("1234567890123456789.65535.65535", &s));
+  assert_true(md_stamp_format(buf, sizeof(buf), &s) == 31);
+  assert_true(md_clock_encode(clk, sizeof(clk), &s, 0) == 32);
+}
+
 static void test_pull_parse_ok(void **state)
 {
   char cmd[] = "MD", tgt[] = "?", seqs[] = "7", scope_s[] = "A";
@@ -490,6 +674,13 @@ int main(void)
     cmocka_unit_test(test_chunk_single_line),
     cmocka_unit_test(test_chunk_mismatch_restarts),
     cmocka_unit_test(test_chunk_overflow),
+    cmocka_unit_test(test_chunk_overflow_discards_rest_of_row),
+    cmocka_unit_test(test_chunk_overflow_on_final_piece_no_poison),
+    cmocka_unit_test(test_chunk_mismatch_discards_rest_of_abandoned_row),
+    cmocka_unit_test(test_chunk_vis_flip_discards_row),
+    cmocka_unit_test(test_chunk_abandon_discards_row),
+    cmocka_unit_test(test_chunk_rejects_oversize_identity),
+    cmocka_unit_test(test_stamp_parse_rejects_over_bufsize),
     cmocka_unit_test(test_pull_parse_ok),
     cmocka_unit_test(test_pull_parse_rejects),
     cmocka_unit_test(test_pull_parse_empty_scope_no_oob),

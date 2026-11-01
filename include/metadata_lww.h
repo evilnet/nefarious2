@@ -49,18 +49,21 @@ struct md_stamp {
   uint16_t node;
 };
 
-/** Buffer big enough for md_stamp_format()'s longest realistic output
- * plus the NUL.  (The theoretical worst case -- a 20-digit ms and two
- * 5-digit fields -- needs a byte more; callers with stamps anywhere near
- * UINT64_MAX milliseconds are not a real scenario this wire format
- * serves.) */
+/** Buffer big enough for the longest stamp text md_stamp_parse()
+ * accepts (MD_STAMP_BUFSIZE - 1 = 31 characters) plus the NUL, and so
+ * for md_stamp_format() of any stamp it returned.  The theoretical worst
+ * case -- a 20-digit ms and two 5-digit fields, 32 characters -- is
+ * refused by md_stamp_parse() rather than truncated downstream (chunk
+ * identity, clock row); a stamp anywhere near UINT64_MAX milliseconds
+ * is not a real scenario this wire format serves. */
 #define MD_STAMP_BUFSIZE 32
 
 /** Parse the decimal stamp text "<ms>.<logical>.<node>" in @a text into
  * @a out. Rejects anything that is not exactly three all-digit fields
  * (no sign, no leading '+', no trailing garbage) separated by exactly
- * two '.' characters, or where the second or third field does not fit
- * in a uint16_t.
+ * two '.' characters, where the second or third field does not fit
+ * in a uint16_t, or whose text is MD_STAMP_BUFSIZE characters or longer
+ * (it would not fit the buffers sized from MD_STAMP_BUFSIZE).
  * @return 0 on success, -1 if malformed.
  */
 extern int md_stamp_parse(const char *text, struct md_stamp *out);
@@ -196,26 +199,59 @@ struct md_chunk {
                   *   the start of every feed call. */
   size_t len;    /**< Bytes accumulated in @a value so far. */
   char value[1024];
+  /** 1 while the rest of one row is being discarded (an overflow, an
+   * abandoned accumulation, an inconsistent or refused piece): every
+   * further piece of the row named by @a poison_account /
+   * @a poison_stamp / @a poison_key is swallowed, up to and including
+   * its more=0 piece, so no tail of it is ever handed back as the whole
+   * value. */
+  int poisoned;
+  char poison_account[16];
+  char poison_key[128];
+  char poison_stamp[MD_STAMP_BUFSIZE];
 };
 
 enum { MD_CHUNK_ERROR = -1, MD_CHUNK_PENDING = 0, MD_CHUNK_DONE = 1 };
 
 /** Feed one wire line's piece into @a c's reassembly state.
  *
- * If nothing is pending, or @a account/@a stamp/@a key/@a vis differ
- * from what IS pending, any pending value is discarded (@a c->dropped
- * is set to 1) and accumulation restarts fresh from @a piece. Otherwise
- * @a piece is appended to the pending value. Accumulating past 1023
- * bytes total resets @a c (as if nothing had ever been fed) and returns
- * MD_CHUNK_ERROR.
+ * A row is identified by (account, stamp, key); every piece of it must
+ * also agree on @a vis.  Rules, in order:
+ *  - An identity field that does not fit its buffer (@a account over 15
+ *    bytes, i.e. ACCOUNTLEN; @a stamp of MD_STAMP_BUFSIZE bytes or more;
+ *    @a key of 128 or more) is refused: MD_CHUNK_ERROR, state untouched.
+ *    It is never truncated into a name that could match another row.
+ *  - A piece of the poisoned row (see struct md_chunk) is swallowed:
+ *    MD_CHUNK_ERROR; its more=0 piece also ends the poison.
+ *  - A piece of the pending row that disagrees on @a vis: the pending
+ *    value and the rest of the row are discarded (poisoned, unless this
+ *    piece is the row's more=0 one), MD_CHUNK_ERROR.
+ *  - A piece of a different row while one is pending: the pending value
+ *    is discarded (@a c->dropped is set to 1) and the rest of THAT row
+ *    poisoned; accumulation restarts fresh from @a piece.
+ *  - Otherwise @a piece starts or extends the pending value.
+ *    Accumulating past 1023 bytes total discards the value and returns
+ *    MD_CHUNK_ERROR; when @a more is set the rest of the row is
+ *    poisoned too, so its remaining pieces never assemble a tail.
  *
  * @return MD_CHUNK_PENDING if @a more is set (wait for the next line),
  * MD_CHUNK_DONE if this completes the value (@a c->value/@a c->len hold
- * it), or MD_CHUNK_ERROR on overflow.
+ * it), or MD_CHUNK_ERROR when nothing is to be merged from this piece.
  */
 extern int md_chunk_feed(struct md_chunk *c, const char *account,
                           const char *stamp, const char *key, int vis,
                           int more, const char *piece);
+
+/** A caller refused one piece of row (@a account, @a stamp, @a key)
+ * without feeding it (e.g. a malformed flags token, whose `+` it cannot
+ * read): discard that row's pending value if it is the one pending, and
+ * poison the rest of the row, so the pieces after the refused one are
+ * never merged as the whole value.  A different row's pending value is
+ * left alone.  An identity that does not fit (see md_chunk_feed) is
+ * ignored: md_chunk_feed refuses every piece of such a row anyway.
+ */
+extern void md_chunk_abandon(struct md_chunk *c, const char *account,
+                              const char *stamp, const char *key);
 
 /** Parse an MD PULL request's trailing parameters: parv[2] a decimal
  * sequence number, parv[3] exactly "A" or "R" (the pull scope), and
