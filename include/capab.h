@@ -45,6 +45,8 @@ enum Capab {
   _CAP(AWAYNOTIFY, 0, "away-notify", 0),
   _CAP(ACCNOTIFY, 0, "account-notify", 0),
   _CAP(SASL, 0, "sasl", 0),
+  _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", 0),
+  _CAP(EVILNET_RELOCATE, 0, "evilnet/channel-relocate", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif
