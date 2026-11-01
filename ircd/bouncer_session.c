@@ -6477,9 +6477,16 @@ static void bounce_end_apply_side_effects(struct BouncerSession *s,
 
   if (fx & BOUNCE_END_FX_HOLD_OFF) {
     if (p && IsUser(p) && IsAccount(p)) {
+      /* p (s->hs_client) may be a REMOTE primary -- this function is the
+       * holder's side, and the holder is not necessarily the primary's
+       * home server.  The nick-target origin guard in ms_metadata now
+       * drops a nick-form MD at every peer unless it comes from that
+       * nick's own server, so this must go as the account form (whose
+       * receiver already applies to every client of the account,
+       * including the primary wherever it actually lives), not p's nick. */
       metadata_set_client(p, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                               cli_name(p), "draft/persistence/hold");
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
+                               cli_account(p), "draft/persistence/hold");
     } else {
       struct Client *c;
       int fd, online = 0;

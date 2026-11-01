@@ -3013,20 +3013,28 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
   }
   /* A -b that stands (no +b after it in this command): the hold
-   * preference, before the mode line goes out and before the end. */
+   * preference, before the mode line goes out and before the end.
+   * hold_off_tell is only set when !MyUser(acptr) (the f4a gate above):
+   * acptr is a REMOTE primary here, so this must be the account form --
+   * the nick-target origin guard in ms_metadata now drops a nick-form MD
+   * at every peer unless it comes from that nick's own server, including
+   * the primary's true home server, which is exactly who needs to see
+   * this. */
   if (hold_off) {
     metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
     if (hold_off_tell)
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                               cli_name(acptr), "draft/persistence/hold");
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
+                               cli_account(acptr), "draft/persistence/hold");
   }
   /* A +b of a device of ours that stands, toward a primary on another
    * server: its holder never sees the mode line (a fake direction there),
    * so the device's server tells every server the preference, as for a -b
-   * (the f4a gate, for hold 1). */
+   * (the f4a gate, for hold 1).  hold_on_tell (bounce_hold_on_tells) is
+   * only true when the target is not ours either -- same account-form
+   * requirement as hold_off_tell above. */
   if (hold_on_tell)
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
-                             cli_name(acptr), "draft/persistence/hold");
+    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :1",
+                             cli_account(acptr), "draft/persistence/hold");
 
   /*
    * Compare new flags with old flags and send string which
