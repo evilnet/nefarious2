@@ -12755,7 +12755,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * so IPcheck_connect_succeeded() can find the registry entry normally.
    * IPcheck_disconnect() is called in the alias exit path.
    * The login gives back the attempt the accept charged first
-   * (IPcheck_login_refund), so the notice reports the refunded count. */
+   * (IPcheck_login_refund), so the notice reports the refunded count.
+   * Nothing below can fail: SetLocalNumNick() above is the one step that
+   * can, and it has run.  A failure return added after this point must
+   * come before the refund, or a connection that never registers keeps it. */
   if (IsSASLComplete(sptr) && IsAccount(sptr) && IsIPChecked(sptr))
     IPcheck_login_refund(sptr, cli_user(sptr)->account);
   if (IsIPChecked(sptr))

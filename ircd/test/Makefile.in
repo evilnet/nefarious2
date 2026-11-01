@@ -230,7 +230,7 @@ register_throttle_cmocka: $(REGISTER_THROTTLE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(REGISTER_THROTTLE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # ipcheck_refund tests - the module is recompiled with a 1-bucket, 2-slot
-# table so eviction is reachable with arbitrary account names.
+# table so a full bucket is reachable with arbitrary account names.
 # No test_stub.o: the module is pure by design (no log_write, no ircd deps).
 ipcheck_refund_test.o: ../ipcheck_refund.c ../../include/ipcheck_refund.h
 	${CC} ${CFLAGS} ${CPPFLAGS} -DIPCHECK_REFUND_TABLE_BITS=0 -DIPCHECK_REFUND_BUCKET_DEPTH=2 -c -o $@ ../ipcheck_refund.c

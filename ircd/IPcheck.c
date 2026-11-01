@@ -560,10 +560,13 @@ void IPcheck_connect_fail(const struct Client *cptr, int disconnect)
  * At most IPCHECK_SASL_REFUND refunds per account every
  * IPCHECK_SASL_REFUND_PERIOD seconds (ipcheck_refund.c); 0 is off.
  * Only attempts is lowered, and never last_connect or connected: the
- * window stays, the chain just does not grow.  A connection the chain
- * already counts as its first (attempts at 1 -- a return after a gap,
- * the usual case) has nothing to give back, and spends none of the
- * account's refunds; at 0 (a remote burst reset the entry) neither.
+ * window stays, the chain just does not grow.  The count is the
+ * address's, not the connection's, so the room a refund frees is there
+ * for every later connection from that address, anonymous ones included.
+ * A connection the chain already counts as its first (attempts at 1 -- a
+ * return after a gap, the usual case) has nothing to give back, and spends
+ * none of the account's refunds; the guard also keeps the decrement from
+ * wrapping should attempts ever be 0 here.
  * @param[in] cptr Client that registered with a SASL login.
  * @param[in] account The account it logged in to.
  */

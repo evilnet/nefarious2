@@ -1,6 +1,6 @@
 /* ipcheck_refund_cmocka.c - unit tests for ircd/ipcheck_refund.c.
- * Compiled against a 1-bucket, 2-slot table (see test/Makefile.in) so the
- * eviction paths are reachable with arbitrary account names. */
+ * Compiled against a 1-bucket, 2-slot table (see test/Makefile.in) so a
+ * full bucket is reachable with arbitrary account names. */
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
@@ -68,23 +68,38 @@ static void test_disabled(void **state)
   assert_false(ipcheck_refund_take(NULL, T0, 3, 600));
 }
 
-/* a full bucket evicts the account whose window opened earliest, which
- * then gets a fresh window; the others keep theirs */
-static void test_eviction_grants_fresh_window(void **state)
+/* a full bucket fails closed: a newcomer gets no refund, and the accounts
+ * already in it keep their windows */
+static void test_full_bucket_fails_closed(void **state)
 {
   (void)state;
   assert_true(ipcheck_refund_take("alice", T0,      1, 600));
   assert_true(ipcheck_refund_take("bob",   T0 + 10, 1, 600));
-  /* alice and bob are both exhausted */
-  assert_false(ipcheck_refund_take("alice", T0 + 20, 1, 600));
-  assert_false(ipcheck_refund_take("bob",   T0 + 20, 1, 600));
-  /* carol needs a slot: alice (the oldest window) goes */
-  assert_true(ipcheck_refund_take("carol", T0 + 30, 1, 600));
+  /* carol finds both slots holding live windows */
+  assert_false(ipcheck_refund_take("carol", T0 + 30, 1, 600));
+  assert_false(ipcheck_refund_take("carol", T0 + 31, 5, 600));
+  /* alice and bob are still exhausted: nobody was evicted */
+  assert_false(ipcheck_refund_take("alice", T0 + 40, 1, 600));
   assert_false(ipcheck_refund_take("bob",   T0 + 40, 1, 600));
-  assert_true(ipcheck_refund_take("alice", T0 + 40, 1, 600));
+  /* once a window is over its slot is free again */
+  assert_true(ipcheck_refund_take("carol", T0 + 600, 1, 600));
 }
 
-/* an expired entry is reused before a live one is evicted */
+/* the review's bypass: accounts that share a bucket, taken in turn inside
+ * one window, never draw more than their caps together */
+static void test_rotation_keeps_the_cap(void **state)
+{
+  static const char *const names[] = {"acct0", "acct1", "acct2", "acct3", "acct4"};
+  int round, k, granted = 0;
+  (void)state;
+  for (round = 0; round < 100; ++round)
+    for (k = 0; k < 5; ++k)
+      granted += ipcheck_refund_take(names[k], T0 + round, 10, 600);
+  /* two slots, a cap of 10 each */
+  assert_int_equal(granted, 20);
+}
+
+/* an expired entry is reused, so a newcomer gets in once a window ends */
 static void test_expired_reused_first(void **state)
 {
   (void)state;
@@ -123,7 +138,8 @@ int main(void)
     cmocka_unit_test_setup(test_accounts_independent, setup),
     cmocka_unit_test_setup(test_case_insensitive, setup),
     cmocka_unit_test_setup(test_disabled, setup),
-    cmocka_unit_test_setup(test_eviction_grants_fresh_window, setup),
+    cmocka_unit_test_setup(test_full_bucket_fails_closed, setup),
+    cmocka_unit_test_setup(test_rotation_keeps_the_cap, setup),
     cmocka_unit_test_setup(test_expired_reused_first, setup),
     cmocka_unit_test_setup(test_long_name, setup),
     cmocka_unit_test_setup(test_clear, setup),

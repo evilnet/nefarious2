@@ -5,10 +5,16 @@
  * `limit` refunds fit in it; `period` seconds after it opened the next
  * refund opens a new one.  A refused refund records nothing.
  *
- * Storage is a fixed-size open hash with per-bucket eviction of the
- * entry whose window opened earliest: memory never grows with the
- * number of accounts, and evicting a live entry merely grants that
- * account a fresh window -- never a crash.  Expiry is lazy (on contact).
+ * Storage is a fixed-size open hash: memory never grows with the number
+ * of accounts.  An account with no live window takes a free or expired
+ * slot in its bucket; when every slot holds another account's live window
+ * it gets no refund at all (fail closed).  Evicting a live window would
+ * hand the evicted account a fresh budget, and since the hash is public a
+ * handful of colliding accounts could rotate through one bucket and never
+ * reach their cap -- while a refund lowers the whole address's count,
+ * anonymous connections included.  A full bucket costs its newcomer
+ * nothing but the refund: stock IPcheck behaviour.  Expiry is lazy (on
+ * contact).
  *
  * The module is deliberately pure -- the caller supplies now and the
  * limits -- so ircd/test/ipcheck_refund_cmocka.c gates it in the build.
@@ -21,9 +27,9 @@
 #include <string.h>
 
 /* Overridable so the CMocka build can shrink the table to force
- * collisions and eviction (see test/Makefile.in). */
+ * collisions and a full bucket (see test/Makefile.in). */
 #ifndef IPCHECK_REFUND_TABLE_BITS
-#define IPCHECK_REFUND_TABLE_BITS 6
+#define IPCHECK_REFUND_TABLE_BITS 10
 #endif
 #ifndef IPCHECK_REFUND_BUCKET_DEPTH
 #define IPCHECK_REFUND_BUCKET_DEPTH 4
@@ -76,7 +82,7 @@ static unsigned int refund_hash(const char *account)
 int ipcheck_refund_take(const char *account, time_t now, int limit,
                         int period)
 {
-  struct ipcheck_refund_entry *bucket, *match = 0, *reusable = 0, *oldest = 0;
+  struct ipcheck_refund_entry *bucket, *match = 0, *reusable = 0;
   int i;
 
   if (limit <= 0 || period <= 0 || !account || !*account)
@@ -90,8 +96,6 @@ int ipcheck_refund_take(const char *account, time_t now, int limit,
         match = e;
         break;
       }
-      if (!oldest || e->start < oldest->start)
-        oldest = e;
     } else if (!reusable) {
       reusable = e;              /* free or expired: reuse first */
     }
@@ -104,16 +108,17 @@ int ipcheck_refund_take(const char *account, time_t now, int limit,
     return 1;
   }
 
-  /* No live window for this account: open one.  oldest is null only when
-   * the bucket is empty, in which case reusable is set; e is never null. */
-  {
-    struct ipcheck_refund_entry *e = reusable ? reusable : oldest;
-    strncpy(e->account, account, ACCOUNTLEN);
-    e->account[ACCOUNTLEN] = '\0';
-    e->start = now;
-    e->count = 1;
-    e->in_use = 1;
-  }
+  /* No live window for this account: open one in a free or expired slot.
+   * Every slot holds another account's live window: fail closed (see the
+   * top of the file) -- no refund, and nothing recorded. */
+  if (!reusable)
+    return 0;
+
+  strncpy(reusable->account, account, ACCOUNTLEN);
+  reusable->account[ACCOUNTLEN] = '\0';
+  reusable->start = now;
+  reusable->count = 1;
+  reusable->in_use = 1;
   return 1;
 }
 

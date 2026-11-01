@@ -879,8 +879,19 @@ already counts as its first (a return after a quiet gap) has nothing to
 give back and spends none of the account's refunds.  A failed or missing
 login earns nothing, and the check when a connection arrives is
 unchanged: an address without credentials is still refused at its
-IPCHECK_CLONE_LIMIT-th connection within the window, before any TLS.  The
-counts are kept in memory only.  0 disables refunds.
+IPCHECK_CLONE_LIMIT-th connection within the window, before any TLS.
+
+Weigh this before enabling it: the count a refund lowers is the address's,
+not the connection's.  The room it frees is there for every connection
+from that address, anonymous ones included, so each refund lets one more
+connection of any kind in before the address reaches IPCHECK_CLONE_LIMIT.
+Someone holding several accounts can free up to this many times the
+number of accounts per period for their address.
+
+The counts are kept in memory only, in a fixed table of 4096 accounts
+hashed into buckets of four.  An account whose bucket is full of other
+accounts' live windows gets no refund until one of them ends; it is
+throttled exactly as without this feature.  0 disables refunds.
 
 IPCHECK_SASL_REFUND_PERIOD
  * Type: integer
