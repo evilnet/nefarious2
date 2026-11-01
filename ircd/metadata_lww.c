@@ -24,8 +24,16 @@
 /** Parse exactly @a len decimal digit bytes at @a s into @a out,
  * rejecting a zero-length field, a non-digit byte anywhere, or a value
  * that would exceed @a max. @a len is capped at 20 internally (enough
- * for any uint64_t) purely to bound the loop; the @a max check does the
- * real rejection work field-by-field as each digit is folded in. */
+ * for any uint64_t) purely to bound the loop.
+ *
+ * The overflow check happens BEFORE each multiply-add
+ * (`v > (max - d) / 10`), not after (`v > max`): when @a max is itself
+ * UINT64_MAX (as the ms field below uses), a post-hoc `v > max` check
+ * can never fire no matter how far @a v has wrapped, since nothing is
+ * ever greater than the type's own maximum. Checking first means every
+ * field -- including one with the full 64-bit range -- correctly
+ * rejects a value that would overflow rather than silently wrapping.
+ */
 static int md_parse_uint_field(const char *s, size_t len, uint64_t max,
                                 uint64_t *out)
 {
@@ -37,12 +45,14 @@ static int md_parse_uint_field(const char *s, size_t len, uint64_t max,
 
   for (i = 0; i < len; i++) {
     unsigned char c = (unsigned char)s[i];
+    uint64_t d;
 
     if (c < '0' || c > '9')
       return -1;
-    v = v * 10 + (uint64_t)(c - '0');
-    if (v > max)
+    d = (uint64_t)(c - '0');
+    if (v > (max - d) / 10)
       return -1;
+    v = v * 10 + d;
   }
 
   *out = v;
@@ -303,10 +313,15 @@ int md_wire_key_valid(const char *key)
   if (len >= MD_PERSISTENCE_PREFIX_LEN &&
       md_prefix_eq_ci(key, MD_PERSISTENCE_PREFIX, MD_PERSISTENCE_PREFIX_LEN)) {
     /* draft/persistence/... key: 1-127 bytes total, 0x21-0x7e, no
-     * leading ':'. */
+     * leading ':'. The no-leading-':' rule is satisfied by
+     * construction here, not by an explicit check: reaching this
+     * branch already required key[0] to case-insensitively match the
+     * prefix's 'd'/'D', so key[0] can never be ':'. (A key that
+     * somehow began with ':' would never have matched
+     * md_prefix_eq_ci() above and would instead fall through to the
+     * ordinary-key rule below, where ':' is not in the allowed
+     * character set either.) */
     if (len > 127)
-      return 0;
-    if (key[0] == ':')
       return 0;
     for (i = 0; i < len; i++) {
       unsigned char c = (unsigned char)key[i];
@@ -478,32 +493,35 @@ int md_pull_parse(int parc, char *parv[], unsigned long *seq, char *scope,
                    char *accounts[], int max)
 {
   const char *seqtext;
-  size_t seqlen, i;
-  unsigned long s;
+  size_t seqlen;
+  uint64_t useq;
   char *p, *start;
   int count = 0;
 
   if (!parv || parc < 5 || !seq || !scope || !accounts)
     return -1;
 
-  /* parv[2]: decimal sequence number, the whole field. */
+  /* parv[2]: decimal sequence number, the whole field. Reuses the same
+   * overflow-guarded field parser the stamp fields use, rather than a
+   * second hand-rolled (and unguarded) accumulation loop. */
   seqtext = parv[2];
   if (!seqtext)
     return -1;
   seqlen = strlen(seqtext);
-  if (seqlen == 0 || seqlen > 20)
+  if (0 != md_parse_uint_field(seqtext, seqlen, (uint64_t)~(uint64_t)0,
+                                &useq))
     return -1;
 
-  s = 0;
-  for (i = 0; i < seqlen; i++) {
-    if (seqtext[i] < '0' || seqtext[i] > '9')
-      return -1;
-    s = s * 10 + (unsigned long)(seqtext[i] - '0');
-  }
-
-  /* parv[3]: scope, exactly "A" or "R". */
-  if (!parv[3] || parv[3][1] != '\0' ||
-      (parv[3][0] != 'A' && parv[3][0] != 'R'))
+  /* parv[3]: scope, exactly "A" or "R". Check for an empty token
+   * (parv[3][0] == '\0') BEFORE ever indexing [1] -- a 1-byte buffer
+   * holding just the NUL is a realistic malformed/partial PULL
+   * request, and indexing [1] first (as the old form of this check
+   * did, via short-circuit ordering that read [1] before confirming
+   * [0] wasn't already the terminator) is a one-byte out-of-bounds
+   * read on exactly that input. */
+  if (!parv[3] || parv[3][0] == '\0')
+    return -1;
+  if ((parv[3][0] != 'A' && parv[3][0] != 'R') || parv[3][1] != '\0')
     return -1;
 
   /* parv[4]: 1-16 non-empty names of <= 15 bytes, comma-separated,
@@ -531,7 +549,7 @@ int md_pull_parse(int parc, char *parv[], unsigned long *seq, char *scope,
     }
   }
 
-  *seq = s;
+  *seq = (unsigned long)useq;
   *scope = parv[3][0];
   return count;
 }

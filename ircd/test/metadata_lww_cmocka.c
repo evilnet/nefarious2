@@ -41,6 +41,26 @@ static void test_stamp_parse_rejects(void **state)
     assert_int_equal(-1, md_stamp_parse(bad[i], &s));
 }
 
+/* Review fix round 1, Important #2: md_stamp_parse's ms field used to
+ * be checked with a post-hoc "v > max" guard where max == UINT64_MAX,
+ * which can never fire no matter how far v has wrapped. A 20-digit ms
+ * field over UINT64_MAX silently wrapped and was accepted instead of
+ * rejected. */
+static void test_stamp_parse_ms_overflow_rejected(void **state)
+{
+  struct md_stamp s;
+
+  (void)state;
+
+  /* Comfortably over UINT64_MAX (20 nines). */
+  assert_int_equal(-1, md_stamp_parse("99999999999999999999.0.0", &s));
+  /* Exactly UINT64_MAX + 1. */
+  assert_int_equal(-1, md_stamp_parse("18446744073709551616.0.0", &s));
+  /* Exactly UINT64_MAX is still a valid ms value and must be accepted. */
+  assert_int_equal(0, md_stamp_parse("18446744073709551615.0.0", &s));
+  assert_true(s.ms == 18446744073709551615ULL);
+}
+
 static void test_stamp_cmp_order(void **state)
 {
   struct md_stamp a = { 5, 0, 9 };
@@ -409,11 +429,50 @@ static void test_pull_parse_rejects(void **state)
   }
 }
 
+/* Review fix round 1, Critical #1: an empty scope token used to be read
+ * at parv[3][1] before confirming parv[3][0] wasn't already the
+ * terminating NUL -- a one-byte out-of-bounds read on exactly this
+ * input (reproduced with ASan against the pre-fix code). scope_s is
+ * sized to exactly one byte (just the NUL), matching the ASan repro,
+ * so any OOB read here is as directly exercised as a stack-allocated
+ * C string can make it. */
+static void test_pull_parse_empty_scope_no_oob(void **state)
+{
+  char *accounts[16];
+  unsigned long seq;
+  char scope;
+  char cmd[] = "MD", tgt[] = "?", seqs[] = "7", scope_s[] = "", names[] = "acct1";
+  char *parv[5] = { cmd, tgt, seqs, scope_s, names };
+
+  (void)state;
+
+  assert_int_equal(-1, md_pull_parse(5, parv, &seq, &scope, accounts, 16));
+}
+
+/* Review fix round 1, Important #3: parv[2]'s sequence number was
+ * parsed by a second, unguarded hand-rolled loop (not
+ * md_parse_uint_field), so a 20-digit seq silently wrapped instead of
+ * being rejected. */
+static void test_pull_parse_seq_overflow_rejected(void **state)
+{
+  char *accounts[16];
+  unsigned long seq;
+  char scope;
+  char cmd[] = "MD", tgt[] = "?";
+  char seqs[] = "99999999999999999999", scope_s[] = "A", names[] = "acct1";
+  char *parv[5] = { cmd, tgt, seqs, scope_s, names };
+
+  (void)state;
+
+  assert_int_equal(-1, md_pull_parse(5, parv, &seq, &scope, accounts, 16));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_stamp_roundtrip),
     cmocka_unit_test(test_stamp_parse_rejects),
+    cmocka_unit_test(test_stamp_parse_ms_overflow_rejected),
     cmocka_unit_test(test_stamp_cmp_order),
     cmocka_unit_test(test_stamp_ahead_boundary),
     cmocka_unit_test(test_take_when_absent),
@@ -433,6 +492,8 @@ int main(void)
     cmocka_unit_test(test_chunk_overflow),
     cmocka_unit_test(test_pull_parse_ok),
     cmocka_unit_test(test_pull_parse_rejects),
+    cmocka_unit_test(test_pull_parse_empty_scope_no_oob),
+    cmocka_unit_test(test_pull_parse_seq_overflow_rejected),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
