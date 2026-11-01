@@ -796,6 +796,12 @@ static struct FeatureDesc {
   F_B(CAP_away_notify, 0, 1, 0),
   F_B(CAP_account_notify, 0, 1, 0),
   F_B(CAP_sasl, 0, 1, 0),
+  F_B(CAP_draft_channel_rename, 0, 0, 0),
+  /* Off by default: only a services build that disambiguates RENAME
+   * requests from account-stamp notifications on the AC 'R' subcommand
+   * (see the protocol-history comment in m_rename.c) should have this
+   * enabled. */
+  F_B(RENAME_SERVICES, 0, 0, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

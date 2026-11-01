@@ -1089,3 +1089,34 @@ void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mo
   msgq_clean(mb);
 }
 
+
+/**
+ * Send a FAIL reply to a local client (IRCv3 standard-replies).
+ * Minimal tag-free port of the fork's send_standard_reply(): emits the
+ * bare FAIL line with no label/server-time tag decoration (upstream has
+ * no message-tag machinery).  The wire format matches the fork's untagged
+ * branch exactly so clients see identical strings on both.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general failure).
+ * @param[in] code Machine-readable error code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable error message.
+ */
+void send_fail(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  struct MsgBuf *mb;
+
+  if (!MyConnect(to))
+    return;
+
+  /* Send FAIL as an actual IRC command per IRCv3 standard-replies;
+   * legacy clients simply ignore unknown commands. */
+  if (context && *context)
+    mb = msgq_make(to, "%:#C FAIL %s %s %s :%s", &me, command, code, context, description);
+  else
+    mb = msgq_make(to, "%:#C FAIL %s %s :%s", &me, command, code, description);
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}

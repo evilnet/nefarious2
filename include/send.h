@@ -157,4 +157,8 @@ extern void sendto_mode_butone(struct Client *one, struct Client *from, const ch
 extern void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
                            const char *pattern, va_list vl);
 
+/* IRCv3 standard-replies FAIL line (tag-free minimal form) */
+extern void send_fail(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
+
 #endif /* INCLUDED_send_h */
