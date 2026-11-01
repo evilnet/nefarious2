@@ -174,6 +174,25 @@ static int shares_channel(struct Client *a, struct Client *b)
   return 0;
 }
 
+/** Whether @a sptr may apply/relay a write that identifies its target by
+ * Client (nick form, session form): true when @a target_client is
+ * actually BEHIND @a sptr (its own user, or @a sptr is this server
+ * relaying for its own locally-connected user), or the write is
+ * @a target_client applying to itself, or @a sptr is an acting oper (who
+ * may legitimately act on behalf of any user).  Otherwise a server could
+ * claim to set metadata on a user it does not own.  Shared by every
+ * ms_metadata branch that addresses a specific Client by identity, so
+ * the rule reads identically everywhere it applies (originally the
+ * nick-form-only guard in ms_metadata; Task 4 reuses it for the session
+ * form instead of writing a second version).
+ */
+static int md_sender_owns_client(struct Client *sptr, struct Client *target_client)
+{
+  return (cli_user(target_client) && cli_user(target_client)->server == sptr)
+         || target_client == sptr
+         || (IsUser(sptr) && IsOper(sptr));
+}
+
 /** Notify all clients subscribed to a metadata key about a change.
  * PUBLIC: subscribed viewers sharing a channel with / being the target user
  * (or any member, for a channel target).  PRIVATE: only the target's own
@@ -1492,6 +1511,31 @@ static int ms_metadata_session(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
+  /* Session-target origin guard (md_sender_owns_client, same rule the
+   * nick form uses): without this, any linked server could set an
+   * unauthenticated local user's metadata just by naming its session
+   * id -- there is no account to anchor the write, so identity-by-Client
+   * is the whole guard. */
+  if (!md_sender_owns_client(sptr, only)) {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "ms_metadata: session target !%s/%s from %C is not %s's "
+              "server - dropped, not relayed",
+              sessid, key, sptr, cli_name(only));
+    return 0;
+  }
+
+  /* Enforce the same limits every other write path obeys (today's rule;
+   * Task 5 changes it to relay-unapplied for every form, this one
+   * included). */
+  if (value
+      && metadata_check_limits(only, NULL, 0, key, value) != METADATA_LIMIT_OK) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_metadata: session limit exceeded for !%s/%s from %s "
+              "- dropped, not relayed",
+              sessid, key, cli_name(sptr));
+    return 0;
+  }
+
   /* metadata_set_client is memory-only here: `only` carries no account,
    * so its own IsAccount guard never takes the LMDB-persist branch. */
   metadata_set_client(only, key, value, visibility);
@@ -1743,16 +1787,14 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     if (!target_client)
       return 0;
 
-    /* Nick-target origin guard: a server may only apply/relay a write
-     * to a nick-addressed target that is actually BEHIND it (its own
-     * user, or this server relaying for its own locally-connected
-     * user), or the write is the target applying to itself, or the
-     * acting principal is an oper (who may legitimately act on behalf
-     * of any user).  Otherwise a server could claim to set metadata on
-     * a user it does not own -- drop and do not relay. */
-    if (!(cli_user(target_client) && cli_user(target_client)->server == sptr)
-        && target_client != sptr
-        && !(IsUser(sptr) && IsOper(sptr))) {
+    /* Nick-target origin guard (md_sender_owns_client): a server may only
+     * apply/relay a write to a nick-addressed target that is actually
+     * BEHIND it (its own user, or this server relaying for its own
+     * locally-connected user), or the write is the target applying to
+     * itself, or the acting principal is an oper (who may legitimately
+     * act on behalf of any user).  Otherwise a server could claim to set
+     * metadata on a user it does not own -- drop and do not relay. */
+    if (!md_sender_owns_client(sptr, target_client)) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "ms_metadata: %s/%s from %C is not %s's server - dropped",
                 target, key, sptr, cli_name(target_client));
