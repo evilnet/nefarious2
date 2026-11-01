@@ -58,4 +58,21 @@ extern void metadata_emit_versioned(struct Client *src, struct Client *one,
                                     const char *account, const char *key,
                                     const struct md_version *v);
 
+/** Answer a hop-local "MD ?" pull request from @a link: for each of the
+ * @a n account names in @a accounts, send every stored version (live row
+ * or tombstone, up to 128) via metadata_emit_versioned(&me, link, NULL,
+ * ...); when @a scope is 'A', also send up to 256 of that account's
+ * newest-by-timestamp read markers as "MR account target ts" (the
+ * channel's canonical spelling when the target names a live channel).
+ * Finishes with "MD . seq" regardless of scope or whether anything else
+ * was sent. A no-op when @a link is not IRCv3-aware.
+ * @param[in] link The server that asked (every line goes only to it).
+ * @param[in] seq The request's sequence number, echoed back in "MD .".
+ * @param[in] scope 'A' (rows + markers) or 'R' (rows only).
+ * @param[in] accounts Account names to answer for.
+ * @param[in] n Number of entries in @a accounts.
+ */
+extern void mdsync_answer_pull(struct Client *link, unsigned long seq,
+                               char scope, char *accounts[], int n);
+
 #endif /* INCLUDED_metadata_sync_h */

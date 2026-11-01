@@ -1072,6 +1072,75 @@ int metadata_readmarker_set(const char *account, const char *target, const char 
   return (rc == DB_OK) ? 0 : -1;
 }
 
+/** Visit every read marker stored for @a account: its target name and
+ * timestamp string. Used by the W4 pull responder (scope `A`) to find
+ * the newest markers to send -- this walks ALL of them (in key, i.e.
+ * target-name, order) and leaves picking the newest to the caller, the
+ * same "iterate everything, caller bounds/selects" shape as
+ * metadata_account_foreach_version.
+ * @param[in] account Account name.
+ * @param[in] cb Called once per marker; a nonzero return stops the walk.
+ * @param[in] arg Opaque pointer passed through to @a cb.
+ * @return the number of markers visited, or -1 on error.
+ */
+int metadata_readmarker_foreach(const char *account,
+                                int (*cb)(const char *target, const char *ts, void *arg),
+                                void *arg)
+{
+  struct db_iter *it;
+  char prefix[ACCOUNTLEN + 2];
+  int prefixlen;
+  int rc;
+  int visited = 0;
+
+  if (!metadata_lmdb_available || !account || !cb)
+    return -1;
+
+  prefixlen = strlen(account);
+  if (prefixlen > ACCOUNTLEN)
+    return -1;
+  db_casefold_bytes(prefix, account, prefixlen);
+  prefix[prefixlen++] = KEY_SEP;
+
+  it = db_iter_open(metadata_db_env, readmarkers_cf, /*snap=*/NULL);
+  if (!it)
+    return -1;
+
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
+    char targetbuf[CHANNELLEN + 1];
+    char tsbuf[32];
+    size_t tpartlen;
+
+    if (klen < (size_t)prefixlen || memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
+      break;
+
+    tpartlen = klen - (size_t)prefixlen;
+    if (tpartlen >= sizeof(targetbuf))
+      continue;   /* defensive only: targets are channel/nick names */
+    memcpy(targetbuf, (const char *)kbuf + prefixlen, tpartlen);
+    targetbuf[tpartlen] = '\0';
+
+    if (vlen >= sizeof(tsbuf))
+      continue;   /* defensive only: metadata_readmarker_get enforces this bound on write */
+    memcpy(tsbuf, vbuf, vlen);
+    tsbuf[vlen] = '\0';
+
+    visited++;
+    if (cb(targetbuf, tsbuf, arg) != 0) {
+      db_iter_close(it);
+      return visited;
+    }
+  }
+  db_iter_close(it);
+
+  return visited;
+}
+
 /** List all metadata for an account from LMDB.
  * Caller must free the returned list with metadata entries.
  * @param[in] account Account name.
@@ -1547,6 +1616,7 @@ int metadata_account_foreach_version(const char *account, int (*cb)(const char *
 void metadata_channel_load(struct Channel *chptr) { (void)chptr; }
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
+int metadata_readmarker_foreach(const char *account, int (*cb)(const char *target, const char *ts, void *arg), void *arg) { (void)account; (void)cb; (void)arg; return -1; }
 int metadata_sync(void) { return -1; }
 
 #endif /* USE_ROCKSDB */

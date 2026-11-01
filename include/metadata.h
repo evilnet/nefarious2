@@ -148,6 +148,18 @@ extern int metadata_readmarker_get(const char *account, const char *target, char
  */
 extern int metadata_readmarker_set(const char *account, const char *target, const char *timestamp);
 
+/** Visit every read marker stored for an account: its target name and
+ * timestamp string, in key (target-name) order -- it does not sort or
+ * bound by timestamp itself; a caller wanting the newest N decides that.
+ * @param[in] account Account name.
+ * @param[in] cb Called once per marker; a nonzero return stops the walk.
+ * @param[in] arg Opaque pointer passed through to @a cb.
+ * @return the number of markers visited, or -1 on error.
+ */
+extern int metadata_readmarker_foreach(const char *account,
+                       int (*cb)(const char *target, const char *ts, void *arg),
+                       void *arg);
+
 /** Clear all metadata for an account in LMDB.
  * @param[in] account Account name.
  * @return 0 on success, -1 on error.

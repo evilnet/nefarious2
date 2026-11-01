@@ -45,6 +45,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "metadata.h"
 #include "metadata_lww.h"
 #include "metadata_sync.h"
@@ -1422,6 +1423,122 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * @param[in] parc Number of arguments.
  * @param[in] parv Argument vector.
  */
+/** MD !sessid: an unauthenticated local client's ephemeral key, addressed
+ * by session id since there is no account to address it by (W4 wire
+ * table). A session id can legitimately or transiently name more than
+ * one client (bouncer primary + aliases, kept-apart sessions, a
+ * hard-mode double restore -- see client_find_by_session_id); apply
+ * only when it currently names EXACTLY ONE IsUser client with no
+ * account. An authenticated match is never written from a session
+ * target -- that is what the account (`=`/`*`) forms are for.
+ * @param[in] cptr The direct link this line arrived on (relay "butone").
+ * @param[in] sptr Attributed origin of the write (relay "src").
+ * @param[in] target parv[1], already known to classify as "!sessid".
+ */
+static int ms_metadata_session(struct Client *cptr, struct Client *sptr,
+                               int parc, char *parv[], const char *target)
+{
+  const char *sessid = target + 1;
+  const char *key;
+  const char *value = NULL;
+  int visibility = METADATA_VIS_PUBLIC;
+  /* Realistic fan-out for one session id is small (a bouncer primary
+   * plus its aliases, a kept-apart pair, at most a handful more -- see
+   * list.c's client_find_by_session_id comment); this scan cap is
+   * generous against that, independent of that function's own
+   * (likewise generous) internal scratch cap. */
+  enum { MD_SESSION_SCAN_MAX = 32 };
+  struct Client *matches[MD_SESSION_SCAN_MAX];
+  struct Client *only = NULL;
+  size_t total, filled, i, qualified;
+
+  if (parc < 3)
+    return 0;
+
+  key = parv[2];
+
+  /* Same visibility/value parse as the nick/channel form below. */
+  if (parc >= 4) {
+    if ((parv[3][0] == '*' && parv[3][1] == '\0') ||
+        (parv[3][0] == 'P' && parv[3][1] == '\0')) {
+      visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
+      if (parc >= 5)
+        value = parv[4];
+    } else {
+      value = parv[3];
+    }
+  }
+
+  if (!is_valid_key(key))
+    return 0;
+
+  total = client_find_by_session_id(sessid, matches, MD_SESSION_SCAN_MAX);
+  filled = (total < (size_t)MD_SESSION_SCAN_MAX) ? total : (size_t)MD_SESSION_SCAN_MAX;
+  qualified = 0;
+  for (i = 0; i < filled; i++) {
+    if (IsAccount(matches[i]))
+      continue;
+    qualified++;
+    only = matches[i];
+  }
+  /* total > filled means more raw IsUser matches exist than this scan
+   * inspected -- already >= 2 matches, so this can never be "exactly
+   * one" no matter how the unscanned remainder would have filtered. */
+  if (total > (size_t)MD_SESSION_SCAN_MAX || qualified != 1) {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "ms_metadata: session target !%s/%s from %C matched %zu "
+              "client(s), %zu unauthenticated - dropped, not relayed",
+              sessid, key, sptr, total, qualified);
+    return 0;
+  }
+
+  /* metadata_set_client is memory-only here: `only` carries no account,
+   * so its own IsAccount guard never takes the LMDB-persist branch. */
+  metadata_set_client(only, key, value, visibility);
+  metadata_notify_subscribers(cli_name(only), key, value, visibility);
+
+  /* Relay the line verbatim -- still "!sessid", never rewritten to a
+   * nick -- to every other IRCv3-aware server. */
+  if (value)
+    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
+                             target, key,
+                             visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                             value);
+  else
+    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s",
+                             target, key);
+
+  return 0;
+}
+
+/** MD ?: a hop-local pull request, never relayed. Accepted only from a
+ * direct server link -- the wire table's other new forms could in
+ * theory arrive relayed by an intermediate (still-)IRCv3-aware hop that
+ * merely forwards what it does not understand, but a pull reply is
+ * meaningful only to the asking link itself, so this guards against a
+ * confused or hostile indirect sender forging the request.
+ * @param[in] cptr The link asking (must equal @a sptr).
+ */
+static int ms_metadata_pull(struct Client *cptr, struct Client *sptr,
+                            int parc, char *parv[])
+{
+  unsigned long seq;
+  char scope;
+  char *accounts[16];
+  int n;
+
+  if (!MyConnect(cptr) || sptr != cptr || !IsServer(sptr))
+    return 0;
+
+  n = md_pull_parse(parc, parv, &seq, &scope, accounts,
+                    (int)(sizeof(accounts) / sizeof(accounts[0])));
+  if (n < 0)
+    return 0;
+
+  mdsync_answer_pull(cptr, seq, scope, accounts, n);
+  return 0;
+}
+
 /** MD =account: the W4 stamped account-metadata row (classify,
  * md_wire_key_valid, md_stamp_parse, the forward-clock-skew refusal,
  * chunk reassembly on the LINK's state, the limits rule every other
@@ -1533,11 +1650,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   if (kind == MD_T_ACCOUNT_STAMPED)
     return ms_metadata_stamped(cptr, sptr, parc, parv, target);
 
-  /* "!sessid" and "?"/"." (pull request/end) are Task 4.  An
-   * unclassifiable target (bare sigil, empty, trailing garbage after
-   * "?"/".") is simply dropped. */
-  if (kind == MD_T_SESSION || kind == MD_T_PULL || kind == MD_T_PULL_END
-      || kind == MD_T_INVALID)
+  if (kind == MD_T_SESSION)
+    return ms_metadata_session(cptr, sptr, parc, parv, target);
+
+  if (kind == MD_T_PULL)
+    return ms_metadata_pull(cptr, sptr, parc, parv);
+
+  /* "." (pull end) is Task 10.  An unclassifiable target (bare sigil,
+   * empty, trailing garbage after "?"/".") is simply dropped. */
+  if (kind == MD_T_PULL_END || kind == MD_T_INVALID)
     return 0;
 
   if (parc < 3)
