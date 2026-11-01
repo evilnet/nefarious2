@@ -43,6 +43,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
 #include "chathistory_presence.h"
@@ -247,10 +248,27 @@ static void register_complete_success(struct Client *acptr, const char *account)
        * an already-registered client outside the register_user chokepoint
        * (that ran at initial registration) -- load metadata here. */
       metadata_load_account(acptr, cli_user(acptr)->account);
+
+      /* The create response carries no Keycloak id or X3-style timestamp;
+       * a later SASL login adopts one (sasl_auth.c's step 4b).  From here,
+       * mirror SASL step 7's order: acc_create/kc_id, the alias update,
+       * the account-notify tell, the AC broadcast, then hide_hostmask. */
+      cli_user(acptr)->acc_create = 0;
+      cli_user(acptr)->kc_id[0] = '\0';
+
+      bounce_emit_alias_update(acptr, "account", account);
+
       sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
       sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
                                              CAP_ACCNOTIFY, CAP_NONE,
                                              "%s", account);
+
+      sasl_broadcast_account(acptr, 'R');
+
+      if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+           (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
+          IsHiddenHost(acptr))
+        hide_hostmask(acptr);
     }
   } else {
     ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);

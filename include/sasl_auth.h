@@ -120,6 +120,14 @@ extern void sasl_complete_login(struct Client *sptr, const char *account,
                                 time_t acc_create, const char *kc_id,
                                 int id_live);
 
+/** Broadcast an ACCOUNT (AC) message to other servers for a client whose
+ *  account just changed.  Holds the four FEAT_EXTENDED_ACCOUNTS x ts/id
+ *  variants; shared by SASL step 7 and REGISTER's post-registration path.
+ *  @param[in] cptr Client whose account just changed.
+ *  @param[in] type 'R' (register/first login) or 'M' (modify).
+ */
+extern void sasl_broadcast_account(struct Client *cptr, char type);
+
 /** Get the local SASL mechanism list string for CAP advertisement.
  *  @return Comma-separated mechanism string, or NULL if none.
  */

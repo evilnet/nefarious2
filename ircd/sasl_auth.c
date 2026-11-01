@@ -660,6 +660,43 @@ static const char *sasl_id_for(const char *login_as, const char *verified,
 }
 #endif /* USE_LIBKC */
 
+/** Broadcast an ACCOUNT (AC) message to other servers for a client whose
+ * account just changed.  Holds the four FEAT_EXTENDED_ACCOUNTS x ts/id
+ * variants, unchanged from SASL step 7; shared with REGISTER's
+ * post-registration path (register_complete_success(), m_register.c).
+ *
+ * @param[in] cptr Client whose account just changed.
+ * @param[in] type 'R' (register/first login) or 'M' (modify).
+ */
+void sasl_broadcast_account(struct Client *cptr, char type)
+{
+  if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
+    if (cli_user(cptr)->kc_id[0]) {
+      /* Fifth parameter: the Keycloak user id.  The timestamp keeps its
+       * place (0 when unknown) so the id is always the fifth. */
+      sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu %s",
+                            cptr, type, cli_user(cptr)->account,
+                            cli_user(cptr)->acc_create, cli_user(cptr)->kc_id);
+    } else if (cli_user(cptr)->acc_create) {
+      sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
+                            cptr, type, cli_user(cptr)->account,
+                            cli_user(cptr)->acc_create);
+    } else {
+      sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s",
+                            cptr, type, cli_user(cptr)->account);
+    }
+  } else {
+    if (cli_user(cptr)->acc_create) {
+      sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s %Tu",
+                            cptr, cli_user(cptr)->account,
+                            cli_user(cptr)->acc_create);
+    } else {
+      sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s",
+                            cptr, cli_user(cptr)->account);
+    }
+  }
+}
+
 /* ---- sasl_complete_login: shared between local and P10 paths ---- */
 
 /** Complete a successful SASL login.
@@ -808,31 +845,7 @@ void sasl_complete_login(struct Client *sptr, const char *account,
                                               "%s", cli_user(sptr)->account);
 
       /* Propagate to other servers */
-      if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
-        if (cli_user(sptr)->kc_id[0]) {
-          /* Fifth parameter: the Keycloak user id.  The timestamp keeps its
-           * place (0 when unknown) so the id is always the fifth. */
-          sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu %s",
-                                sptr, type, cli_user(sptr)->account,
-                                cli_user(sptr)->acc_create, cli_user(sptr)->kc_id);
-        } else if (cli_user(sptr)->acc_create) {
-          sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
-                                sptr, type, cli_user(sptr)->account,
-                                cli_user(sptr)->acc_create);
-        } else {
-          sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s",
-                                sptr, type, cli_user(sptr)->account);
-        }
-      } else {
-        if (cli_user(sptr)->acc_create) {
-          sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s %Tu",
-                                sptr, cli_user(sptr)->account,
-                                cli_user(sptr)->acc_create);
-        } else {
-          sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s",
-                                sptr, cli_user(sptr)->account);
-        }
-      }
+      sasl_broadcast_account(sptr, type);
 
       /* Apply hidden host if applicable */
       if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
