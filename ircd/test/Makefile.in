@@ -55,6 +55,7 @@ CMOCKA_TESTPROGS = \
 	exit_reason_cmocka \
 	bouncer_deauth_cmocka \
 	sessid_index_cmocka \
+	metadata_lww_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka \
@@ -100,6 +101,7 @@ DEP_SRC = \
 	exit_reason_cmocka.c \
 	bouncer_deauth_cmocka.c \
 	sessid_index_cmocka.c \
+	metadata_lww_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
 	kc_url_cmocka.c \
@@ -481,6 +483,14 @@ sessid_index_test.o: ../sessid_index.c ../../include/sessid_index.h
 SESSID_INDEX_CMOCKA_OBJS = sessid_index_cmocka.o sessid_index_test.o
 sessid_index_cmocka: $(SESSID_INDEX_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(SESSID_INDEX_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# metadata_lww tests - the module is pure (no ircd deps)
+metadata_lww_test.o: ../metadata_lww.c ../../include/metadata_lww.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../metadata_lww.c
+
+METADATA_LWW_CMOCKA_OBJS = metadata_lww_cmocka.o metadata_lww_test.o
+metadata_lww_cmocka: $(METADATA_LWW_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(METADATA_LWW_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_eventlog tests - the applied-events log is pure (no ircd deps, no jansson)
 webhook_eventlog_test.o: ../webhook_eventlog.c ../../include/webhook_eventlog.h

@@ -230,6 +230,7 @@ IRCD_SRC = \
 	bouncer_deauth.c \
 	webpush_line.c \
 	metadata.c \
+	metadata_lww.c \
 	m_rehash.c \
 	m_remove.c \
 	m_reset.c \
