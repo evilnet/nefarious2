@@ -142,6 +142,7 @@ IRCD_SRC = \
 	lex.yy.c \
 	list.c \
 	listener.c \
+	sessid_index.c \
 	m_account.c \
 	m_admin.c \
 	m_asll.c \

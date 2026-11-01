@@ -62,4 +62,12 @@ extern struct ConfItem *make_conf(int type);
 extern void free_conf(struct ConfItem *aconf);
 extern void send_listinfo(struct Client *cptr, char *name);
 
+/** The one writer of Client::cli_session_id (list.c); see sessid_index.h
+ * for the index this keeps in step. */
+extern void client_set_session_id(struct Client *cptr, const char *sessid);
+/** Count/fill the IsUser clients currently carrying a session id
+ * (list.c); see sessid_index.h -- one id can name several clients. */
+extern size_t client_find_by_session_id(const char *sessid,
+                                         struct Client **out, size_t max);
+
 #endif /* INCLUDED_list_h */

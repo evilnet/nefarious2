@@ -54,6 +54,7 @@ CMOCKA_TESTPROGS = \
 	bouncer_rebind_auth_cmocka \
 	exit_reason_cmocka \
 	bouncer_deauth_cmocka \
+	sessid_index_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka \
@@ -98,6 +99,7 @@ DEP_SRC = \
 	bouncer_rebind_auth_cmocka.c \
 	exit_reason_cmocka.c \
 	bouncer_deauth_cmocka.c \
+	sessid_index_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
 	kc_url_cmocka.c \
@@ -471,6 +473,14 @@ bouncer_deauth_test.o: ../bouncer_deauth.c ../../include/bouncer_deauth.h
 BOUNCER_DEAUTH_CMOCKA_OBJS = bouncer_deauth_cmocka.o bouncer_deauth_test.o
 bouncer_deauth_cmocka: $(BOUNCER_DEAUTH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_DEAUTH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# sessid_index tests - the module is pure (no ircd deps)
+sessid_index_test.o: ../sessid_index.c ../../include/sessid_index.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../sessid_index.c
+
+SESSID_INDEX_CMOCKA_OBJS = sessid_index_cmocka.o sessid_index_test.o
+sessid_index_cmocka: $(SESSID_INDEX_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SESSID_INDEX_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_eventlog tests - the applied-events log is pure (no ircd deps, no jansson)
 webhook_eventlog_test.o: ../webhook_eventlog.c ../../include/webhook_eventlog.h

@@ -420,15 +420,13 @@ static void generate_token(char *buf)
  * comment on generate_sessid() for the threat model. */
 static int sessid_in_use_locally(const char *sessid)
 {
-  struct Client *acptr;
-
-  /* Active clients on this server's view of the network. */
-  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (!IsUser(acptr) || !cli_session_id(acptr)[0])
-      continue;
-    if (0 == strcmp(cli_session_id(acptr), sessid))
-      return 1;
-  }
+  /* Active clients on this server's view of the network -- indexed by
+   * session id (sessid_index.h) instead of a GlobalClientList walk.
+   * A plain count (not sessid_index_find with max 0, which would count
+   * every owner regardless of kind) via client_find_by_session_id,
+   * which filters to IsUser the same way the walk it replaces did. */
+  if (client_find_by_session_id(sessid, NULL, 0) > 0)
+    return 1;
 
   /* Persisted bouncer sessions (HOLDING records keyed by sessid).
    * Catches the rare case of minting a value that collides with an
@@ -1906,7 +1904,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   else {
     generate_sessid(session->hs_sessid);
     presence_purge_session(cli_session_id(cptr));
-    ircd_strncpy(cli_session_id(cptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
+    client_set_session_id(cptr, session->hs_sessid);
   }
   generate_token(session->hs_token);
   session->hs_name[0] = '\0';
@@ -2436,7 +2434,7 @@ static void bounce_alias_enter_record(struct BouncerSession *record,
 {
   if (0 != strcmp(cli_session_id(c), record->hs_sessid)) {
     presence_purge_session(cli_session_id(c));
-    ircd_strncpy(cli_session_id(c), record->hs_sessid, S2S_SESSID_BUFSIZE);
+    client_set_session_id(c, record->hs_sessid);
   }
   bounce_repoint_file(record, c);
   bounce_alias_take_face(c, p, BOUNCE_FACE_LIVE);
@@ -2658,7 +2656,7 @@ static void bounce_forget_ended_id(const char *account, const char *sessid)
       continue;
     Debug((DEBUG_INFO, "Bouncer: %s's session %s ended; %s no longer "
            "carries its id here", account, sessid, cli_name(c)));
-    cli_session_id(c)[0] = '\0';
+    client_set_session_id(c, "");
   }
 }
 
@@ -2680,13 +2678,13 @@ static void bounce_session_take_id(struct BouncerSession *s, const char *sessid)
   c = s->hs_client;
   if (c && IsUser(c) && 0 != strcmp(cli_session_id(c), sessid)) {
     presence_purge_session(cli_session_id(c));
-    ircd_strncpy(cli_session_id(c), sessid, S2S_SESSID_BUFSIZE);
+    client_set_session_id(c, sessid);
   }
   for (ai = 0; ai < s->hs_alias_count; ai++) {
     c = findNUser(s->hs_aliases[ai].ba_numeric);
     if (c && IsUser(c) && 0 != strcmp(cli_session_id(c), sessid)) {
       presence_purge_session(cli_session_id(c));
-      ircd_strncpy(cli_session_id(c), sessid, S2S_SESSID_BUFSIZE);
+      client_set_session_id(c, sessid);
     }
   }
   /* Re-persisted under the new id if we still hold it here. */
@@ -3092,7 +3090,7 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr,
    * underlying socket: the freshly-minted cli_session_id from
    * make_client is superseded by the bouncer's durable sessid. */
   presence_purge_session(cli_session_id(cptr));
-  ircd_strncpy(cli_session_id(cptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
+  client_set_session_id(cptr, session->hs_sessid);
   session->hs_attach_count++;
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
@@ -3316,7 +3314,11 @@ static void bounce_give_own_sessid(struct Client *c, const char *ended)
       || 0 != strcmp(cli_session_id(c), ended))
     return;
   presence_purge_session(cli_session_id(c));
-  generate_sessid(cli_session_id(c));
+  {
+    char sessid_buf[S2S_SESSID_BUFSIZE];
+    generate_sessid(sessid_buf);
+    client_set_session_id(c, sessid_buf);
+  }
   Debug((DEBUG_INFO, "Bouncer: %s left session %s; its own id is %s",
          cli_name(c), ended, cli_session_id(c)));
 }
@@ -5262,8 +5264,9 @@ int bounce_db_restore(void)
      * fresh-minted sessid and never observe the persisted one — every
      * downstream code path keyed on cli_session_id <=> hs_sessid
      * agreement (post-burst reconcile, alias attribution, etc.) then
-     * silently misses. */
-    ircd_strncpy(cli_session_id(ghost), session->hs_sessid, S2S_SESSID_BUFSIZE);
+     * silently misses.  A freshly made_client ghost has nothing
+     * anchored on its just-minted id yet, so no purge here. */
+    client_set_session_id(ghost, session->hs_sessid);
     ircd_strncpy(session->hs_ghost_numeric, cli_yxx(ghost),
                  sizeof(session->hs_ghost_numeric));
     session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
@@ -9141,8 +9144,10 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * bound to — same hazard as bounce_attach's sync at line 1486 (per
    * the contract in list.c:240-246: "on resume, overwrites it with
    * the bouncer's stored sessid so session-id continuity follows the
-   * bouncer session, not the underlying socket"). */
-  ircd_strncpy(cli_session_id(ghost), session->hs_sessid, S2S_SESSID_BUFSIZE);
+   * bouncer session, not the underlying socket").  Same as
+   * bounce_create_ghost's sync above: nothing anchored on the
+   * freshly-minted id yet, so no purge. */
+  client_set_session_id(ghost, session->hs_sessid);
 
   /* Session is live again — remove persisted state (only HOLDING sessions persist) */
   if (was_holding)
@@ -10152,8 +10157,7 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
   if (0 != strcmp(cli_session_id(demoted_alias), session->hs_sessid)) {
     presence_purge_session(cli_session_id(demoted_alias));
     readmarker_ephemeral_purge(cli_session_id(demoted_alias));
-    ircd_strncpy(cli_session_id(demoted_alias), session->hs_sessid,
-                 S2S_SESSID_BUFSIZE);
+    client_set_session_id(demoted_alias, session->hs_sessid);
   }
   bounce_emit_total_active(session);
 
@@ -12780,7 +12784,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * with the primary's and with the bouncer session record.  Supersedes
    * the freshly-minted value from make_client. */
   presence_purge_session(cli_session_id(sptr));
-  ircd_strncpy(cli_session_id(sptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
+  client_set_session_id(sptr, session->hs_sessid);
 
   /* --- Step 3: Set alias flags --- */
   count_held(sptr, &was_counted);
@@ -13543,7 +13547,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
         SetHiddenHost(alias);
       if (0 != strcmp(cli_session_id(alias), sessid)) {
         presence_purge_session(cli_session_id(alias));
-        ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
+        client_set_session_id(alias, sessid);
       }
       bounce_count_converted(alias, &was, cli_user(alias)->server, "BX C re-file");
       /* Its channels are its primary's here (W3 12c-3; ruling
@@ -13660,7 +13664,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       /* Inherit the session's sessid so this alias's cli_session_id
        * agrees with the primary's and with the bouncer session record. */
       presence_purge_session(cli_session_id(alias));
-      ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
+      client_set_session_id(alias, sessid);
       SetBouncerAlias(alias);
       if (IsHiddenHost(primary))
         SetHiddenHost(alias);
@@ -13710,7 +13714,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
    * make_client), so cli_session_id was not minted at allocation — we
    * populate it explicitly from the BX C-announced sessid here. */
   presence_purge_session(cli_session_id(alias));
-  ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
+  client_set_session_id(alias, sessid);
 
   /* Register in P10 numeric space — NOT in nick hash */
   SetRemoteNumNick(alias, alias_numeric);

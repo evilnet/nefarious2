@@ -29,6 +29,9 @@
 #ifndef INCLUDED_account_id_h
 #include "account_id.h"      /* ACCOUNT_ID_LEN */
 #endif
+#ifndef INCLUDED_sessid_index_h
+#include "sessid_index.h"    /* struct SessidLink */
+#endif
 #ifndef INCLUDED_dbuf_h
 #include "dbuf.h"
 #endif
@@ -625,8 +628,19 @@ struct Client {
    * all clients in a future phase).  Empty string if not yet generated.
    * Used as the presence anchor for ephemeral METADATA / READ_MARKER /
    * CHATHISTORY (PM) and as the source of truth for the wire-emitted
-   * ,S<sessid> compact tag on outgoing N introductions. */
+   * ,S<sessid> compact tag on outgoing N introductions.
+   *
+   * The ONLY writer is client_set_session_id() (list.c) -- it keeps
+   * this field and cli_sesslink below (the session-id -> Client index)
+   * in agreement.  Never write cli_session_id directly. */
   char                  cli_session_id[S2S_SESSID_BUFSIZE];
+
+  /** This Client's filing in the session-id -> Client index
+   * (sessid_index.h), keyed by cli_session_id.  One id can name
+   * several Clients at once (a bouncer primary and its aliases; two
+   * kept-apart sessions that briefly share an id), so a lookup is a
+   * multi-match the caller interprets, not a single answer. */
+  struct SessidLink     cli_sesslink;
 
   /* Phase C: in-memory PM ring for ephemeral↔ephemeral conversations.
    * NULL until first insert; freed in ephemeral_purge_session.  Defined
@@ -725,6 +739,8 @@ struct Client {
 #define cli_burst_stamp_serial(cli) con_burst_stamp_serial(cli_connect(cli))
 /** Get per-Client session ID (UUID v7 base64 — generated at make_client, adopted by bouncer on resume). */
 #define cli_session_id(cli)      ((cli)->cli_session_id)
+/** Get this Client's session-id index filing (sessid_index.h). */
+#define cli_sesslink(cli)         ((cli)->cli_sesslink)
 /** Get S2S batch ID from server */
 #define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
 /** Get S2S batch type from server */
