@@ -28,7 +28,14 @@
  * "chunk <=300 value bytes per line" bound). */
 #define MDSYNC_CHUNK_BYTES 300
 
-struct md_chunk *mdsync_link_chunk(struct Client *link)
+/** Lazily allocate and return cli_serv(@a link)->mdsync, or NULL if
+ * @a link has no Server block.  Shared by mdsync_link_chunk() (the
+ * chunk-reassembly state) and mdsync_limit_notice() (the per-link
+ * over-limit notice throttle, Task 5) -- both hang their state off the
+ * same per-link struct, allocated on whichever one touches it first.
+ * @param[in] link The server Client whose per-link state is wanted.
+ */
+static struct MdSyncLink *mdsync_link_state(struct Client *link)
 {
   struct Server *serv;
 
@@ -45,7 +52,14 @@ struct md_chunk *mdsync_link_chunk(struct Client *link)
     memset(serv->mdsync, 0, sizeof(struct MdSyncLink));
   }
 
-  return &serv->mdsync->chunk;
+  return serv->mdsync;
+}
+
+struct md_chunk *mdsync_link_chunk(struct Client *link)
+{
+  struct MdSyncLink *st = mdsync_link_state(link);
+
+  return st ? &st->chunk : NULL;
 }
 
 void mdsync_link_free(struct Client *server)
@@ -147,6 +161,41 @@ void metadata_emit_versioned(struct Client *src, struct Client *one,
 
     sent += chunklen;
   }
+}
+
+/** Minimum gap between SNO_NETWORK notices for the same link's
+ * over-limit MD writes (W4 plan 1.8: "at most once per link per
+ * 600 s"). */
+#define MDSYNC_LIMIT_NOTICE_INTERVAL_S 600
+
+void mdsync_limit_notice(struct Client *link, const char *target,
+                         const char *key, const char *why)
+{
+  struct MdSyncLink *st;
+
+  if (!link || !target || !key || !why)
+    return;
+
+  /* Logged on every hit, independent of the oper-notice throttle below:
+   * this is the line that lets a sysadmin reconstruct exactly which
+   * target/key pairs were relayed-unapplied even between two throttled
+   * notices. */
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "ms_metadata: %s/%s from %C exceeds this server's METADATA "
+            "limits (%s) - relayed, not applied", target, key, link, why);
+
+  st = mdsync_link_state(link);
+  if (!st)
+    return;
+  if ((CurrentTime - st->limit_notice_last) < MDSYNC_LIMIT_NOTICE_INTERVAL_S)
+    return;
+  st->limit_notice_last = CurrentTime;
+
+  sendto_opmask_butone(0, SNO_NETWORK,
+                       "METADATA from %C exceeds this server's METADATA "
+                       "limits (%s); METADATA_MAX_KEYS / "
+                       "METADATA_MAX_VALUE_BYTES differ between servers",
+                       link, why);
 }
 
 /** Largest number of rows (live + tombstone) a pull reply sends for one

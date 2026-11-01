@@ -689,6 +689,56 @@ static int metadata_check_limits(struct Client *target_client,
   return METADATA_LIMIT_OK;
 }
 
+/** Check metadata_check_limits() (UTF-8 + length) plus @a account_name's
+ * persisted key count against FEAT_METADATA_MAX_KEYS, for a write that
+ * has no live local Client to check the key budget against directly --
+ * the offline-account oper write (this file's "*account" SET branch)
+ * and the inbound W4 stamped-account row (ms_metadata_stamped) both
+ * need this.  Updates to an existing key are always allowed at cap,
+ * same as the live-Client path metadata_check_limits() already
+ * implements via metadata_count_client(). */
+static int metadata_check_account_limits(const char *account_name,
+                                         const char *key, const char *value)
+{
+  int limit_rc = metadata_check_limits(NULL, NULL, 0, key, value);
+
+  if (limit_rc == METADATA_LIMIT_OK && !metadata_key_is_server_managed(key)) {
+    char scratch[METADATA_VALUE_LEN];
+    int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+
+    if (max_keys < 0)
+      max_keys = 0;
+    if (metadata_account_get(account_name, key, scratch) != 0
+        && metadata_account_count_keys(account_name) >= max_keys)
+      limit_rc = METADATA_LIMIT_KEYS;
+  }
+  return limit_rc;
+}
+
+/** Render a metadata_check_limits()/metadata_check_account_limits()
+ * failure code as the oper-facing reason mdsync_limit_notice() logs and
+ * notices (W4 plan 1.8's three wire-table strings, the last two with
+ * the live limit substituted in). */
+static const char *metadata_limit_why(int limit_rc)
+{
+  static char buf[64];
+
+  switch (limit_rc) {
+  case METADATA_LIMIT_UTF8:
+    return "value is not UTF-8";
+  case METADATA_LIMIT_VALUE:
+    ircd_snprintf(0, buf, sizeof(buf), "value over METADATA_MAX_VALUE_BYTES %d",
+                  feature_int(FEAT_METADATA_MAX_VALUE_BYTES));
+    return buf;
+  case METADATA_LIMIT_KEYS:
+    ircd_snprintf(0, buf, sizeof(buf), "key count at METADATA_MAX_KEYS %d",
+                  feature_int(FEAT_METADATA_MAX_KEYS));
+    return buf;
+  default:
+    return "over this server's METADATA limits";
+  }
+}
+
 /** Handle SET subcommand.
  * METADATA SET <target> <key> [<visibility>] [<value>]
  * If no value, deletes the key.
@@ -809,23 +859,10 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
        * online account, check against the live client; for an offline
        * account, check value constraints plus the persisted-row count. */
       if (value) {
-        int limit_rc;
-        if (first_online) {
-          limit_rc = metadata_check_limits(first_online, NULL, 0, key, value);
-        } else {
-          limit_rc = metadata_check_limits(NULL, NULL, 0, key, value);  /* UTF-8 + length only */
-          if (limit_rc == METADATA_LIMIT_OK
-              && !metadata_key_is_server_managed(key)) {
-            char scratch[METADATA_VALUE_LEN];
-            int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
-            if (max_keys < 0)
-              max_keys = 0;
-            /* Updates to an existing key are always allowed at cap. */
-            if (metadata_account_get(account_name, key, scratch) != 0
-                && metadata_account_count_keys(account_name) >= max_keys)
-              limit_rc = METADATA_LIMIT_KEYS;
-          }
-        }
+        int limit_rc = first_online
+          ? metadata_check_limits(first_online, NULL, 0, key, value)
+          : metadata_check_account_limits(account_name, key, value);
+
         switch (limit_rc) {
         case METADATA_LIMIT_UTF8:
           send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is not valid UTF-8");
@@ -1529,25 +1566,31 @@ static int ms_metadata_session(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
-  /* Enforce the same limits every other write path obeys (today's rule;
-   * Task 5 changes it to relay-unapplied for every form, this one
-   * included). */
-  if (value
-      && metadata_check_limits(only, NULL, 0, key, value) != METADATA_LIMIT_OK) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "ms_metadata: session limit exceeded for !%s/%s from %s "
-              "- dropped, not relayed",
-              sessid, key, cli_name(sptr));
-    return 0;
+  /* Enforce the same limits every other write path obeys.  Task 5 (W4
+   * plan 1.8): on a violation, skip apply/notify and tell opers once
+   * per link (mdsync_limit_notice), but still relay unchanged -- the
+   * same rule every MD form now follows.  Only the origin guard above
+   * still drops without relaying; an over-limit check never does. */
+  {
+    int limit_rc = METADATA_LIMIT_OK;
+
+    if (value)
+      limit_rc = metadata_check_limits(only, NULL, 0, key, value);
+
+    if (limit_rc != METADATA_LIMIT_OK) {
+      mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
+    } else {
+      /* metadata_set_client is memory-only here: `only` carries no
+       * account, so its own IsAccount guard never takes the
+       * LMDB-persist branch. */
+      metadata_set_client(only, key, value, visibility);
+      metadata_notify_subscribers(cli_name(only), key, value, visibility);
+    }
   }
 
-  /* metadata_set_client is memory-only here: `only` carries no account,
-   * so its own IsAccount guard never takes the LMDB-persist branch. */
-  metadata_set_client(only, key, value, visibility);
-  metadata_notify_subscribers(cli_name(only), key, value, visibility);
-
   /* Relay the line verbatim -- still "!sessid", never rewritten to a
-   * nick -- to every other IRCv3-aware server. */
+   * nick -- to every other IRCv3-aware server, whether or not this
+   * server applied it locally. */
   if (value)
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
                              target, key,
@@ -1674,22 +1717,28 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   if (chunk_rc != MD_CHUNK_DONE)
     return 0;   /* PENDING (wait for more pieces) or ERROR: nothing to merge yet */
 
-  /* The current limits rule every other MD form obeys (Task 5 changes
-   * it for this form specifically; today it is the same first-hop
-   * flood stop the unstamped "*account" branch uses). */
-  if (!tombstone
-      && metadata_check_limits(NULL, NULL, 0, wire_key, chunk->value) != METADATA_LIMIT_OK) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "ms_metadata: stamped-row limit exceeded for %s/%s from %C "
-              "— dropped, not relayed", account_name, wire_key, sptr);
-    return 0;
-  }
-
   in.st = st;
   in.tombstone = tombstone;
   in.vis = vis;
   in.value = tombstone ? NULL : chunk->value;
   in.vlen = tombstone ? 0 : chunk->len;
+
+  /* Apply this server's full limits (value bytes + key count, via
+   * metadata_check_account_limits -- Task 5, W4 plan 1.8, extends what
+   * used to be a UTF-8/length-only first-hop flood stop here).  On a
+   * violation, skip merge/apply/store and tell opers once per link
+   * (mdsync_limit_notice), but still relay the incoming version onward
+   * through metadata_emit_versioned unchanged -- an over-limit check
+   * must never suppress the relay. */
+  if (!tombstone) {
+    int limit_rc = metadata_check_account_limits(account_name, wire_key, chunk->value);
+
+    if (limit_rc != METADATA_LIMIT_OK) {
+      mdsync_limit_notice(cptr, target, wire_key, metadata_limit_why(limit_rc));
+      metadata_emit_versioned(sptr, NULL, cptr, account_name, wire_key, &in);
+      return 0;
+    }
+  }
 
   merge_rc = metadata_account_merge(account_name, wire_key, &in);
   if (merge_rc != 1)
@@ -1773,27 +1822,31 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     const char *account_name = target + 1;
     struct md_stamp st;
     int rc;
+    int limit_rc = METADATA_LIMIT_OK;
 
     /* Same first-hop flood stop as the nick form below: UTF-8 + length
-     * only (no client context; the origin already enforced key counts). */
-    if (value
-        && metadata_check_limits(NULL, NULL, 0, key, value) != METADATA_LIMIT_OK) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "ms_metadata: account-form limit exceeded for %s/%s from %s "
-                "— dropped, not relayed", target, key, cli_name(sptr));
-      return 0;
-    }
+     * only (no client context; the origin already enforced key counts).
+     * Task 5 (W4 plan 1.8): on a violation, skip apply/store and tell
+     * opers once per link (mdsync_limit_notice), but still relay
+     * unchanged below -- an over-limit check must never suppress the
+     * relay. */
+    if (value)
+      limit_rc = metadata_check_limits(NULL, NULL, 0, key, value);
 
-    /* Apply to memory regardless of storage availability (mirrors
-     * metadata_set_client's own local-client resilience); the store
-     * write itself is a no-op (metadata_write_versioned's own guard)
-     * when storage isn't available. */
-    if (metadata_lmdb_is_available()) {
-      st = metadata_stamp_now();
-      rc = metadata_account_put_versioned(account_name, key, value, visibility, &st);
-      (void)rc;
+    if (limit_rc != METADATA_LIMIT_OK) {
+      mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
+    } else {
+      /* Apply to memory regardless of storage availability (mirrors
+       * metadata_set_client's own local-client resilience); the store
+       * write itself is a no-op (metadata_write_versioned's own guard)
+       * when storage isn't available. */
+      if (metadata_lmdb_is_available()) {
+        st = metadata_stamp_now();
+        rc = metadata_account_put_versioned(account_name, key, value, visibility, &st);
+        (void)rc;
+      }
+      metadata_account_apply_memory(account_name, key, value, visibility);
     }
-    metadata_account_apply_memory(account_name, key, value, visibility);
 
     if (value)
       sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
@@ -1832,42 +1885,51 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     }
   }
 
-  /* Enforce the same limits every other write path obeys.  On violation
-   * nothing happens: no apply, no cache, no notify, no relay.  This
-   * stops the flood at the first hop; caps are uniform across the
-   * network so a compliant origin never triggers this. */
-  if (value
-      && metadata_check_limits(target_client, target_channel, is_channel,
-                               key, value) != METADATA_LIMIT_OK) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "ms_metadata: limit exceeded for %s/%s from %s — dropped, not relayed",
-              target, key, cli_name(sptr));
-    return 0;
+  /* Enforce the same limits every other write path obeys.  Task 5 (W4
+   * plan 1.8): on a violation, skip apply/cache/notify and tell opers
+   * once per link (mdsync_limit_notice), but still relay unchanged --
+   * caps are a feature, not a protocol invariant, so a compliant
+   * origin can legitimately trip a stricter downstream server's limits;
+   * dropping the relay there would silently diverge that server's view
+   * from the rest of the mesh instead of just not applying locally. */
+  {
+    int limit_rc = METADATA_LIMIT_OK;
+
+    if (value)
+      limit_rc = metadata_check_limits(target_client, target_channel, is_channel,
+                                       key, value);
+
+    if (limit_rc != METADATA_LIMIT_OK) {
+      mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
+    } else {
+      /* Apply the change with visibility */
+      if (is_channel) {
+        metadata_set_channel(target_channel, key, value, visibility);
+      } else if (target_client) {
+        metadata_set_client(target_client, key, value, visibility);
+      }
+
+      /* B5: no separate LMDB cache step here.  metadata_set_client()
+       * above already persists PERMANENTLY for authed users
+       * (metadata_account_set_permanent); for a +R channel
+       * metadata_set_channel() does the same (B1, gated on
+       * MODE_REGISTERED).  An unregistered channel is memory+relay
+       * only by design (spec §C3) -- this block used to TTL-cache its
+       * rows under the plain channel name via metadata_account_set(),
+       * the era-1 "remote TTL channel cache" B5 retires: nothing ever
+       * reloaded those rows (metadata_channel_load only hydrates on
+       * +R), so they were pure store debris that the read-only GET
+       * channel fallback below could still resurrect into memory. The
+       * store now keeps no row at all for an unregistered channel. */
+
+      /* Notify local subscribers (vis-aware -- see
+       * metadata_notify_subscribers). */
+      metadata_notify_subscribers(target, key, value, visibility);
+    }
   }
 
-  /* Apply the change with visibility */
-  if (is_channel) {
-    metadata_set_channel(target_channel, key, value, visibility);
-  } else if (target_client) {
-    metadata_set_client(target_client, key, value, visibility);
-  }
-
-  /* B5: no separate LMDB cache step here.  metadata_set_client() above
-   * already persists PERMANENTLY for authed users
-   * (metadata_account_set_permanent); for a +R channel
-   * metadata_set_channel() does the same (B1, gated on MODE_REGISTERED).
-   * An unregistered channel is memory+relay only by design (spec §C3) —
-   * this block used to TTL-cache its rows under the plain channel name
-   * via metadata_account_set(), the era-1 "remote TTL channel cache" B5
-   * retires: nothing ever reloaded those rows (metadata_channel_load only
-   * hydrates on +R), so they were pure store debris that the read-only
-   * GET channel fallback below could still resurrect into memory. The
-   * store now keeps no row at all for an unregistered channel. */
-
-  /* Notify local subscribers (vis-aware — see metadata_notify_subscribers). */
-  metadata_notify_subscribers(target, key, value, visibility);
-
-  /* Propagate to other servers */
+  /* Propagate to other servers regardless of whether this server
+   * applied the change locally (see the comment above). */
   if (value) {
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
                           target, key,

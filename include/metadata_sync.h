@@ -25,6 +25,9 @@ struct Client;
  */
 struct MdSyncLink {
   struct md_chunk chunk;  /**< reassembly state for a `+`-continued row */
+  time_t limit_notice_last;  /**< CurrentTime of the last SNO_NETWORK
+                               *   over-limit notice sent for this link
+                               *   (0 = none yet); Task 5, W4 plan 1.8. */
 };
 
 /** Return this link's chunk-reassembly state, lazily allocating
@@ -74,5 +77,26 @@ extern void metadata_emit_versioned(struct Client *src, struct Client *one,
  */
 extern void mdsync_answer_pull(struct Client *link, unsigned long seq,
                                char scope, char *accounts[], int n);
+
+/** Notice an MD write that exceeded this server's own METADATA limits
+ * (FEAT_METADATA_MAX_KEYS / FEAT_METADATA_MAX_VALUE_BYTES) on receipt
+ * from a server link -- relayed unapplied rather than enforced
+ * sender-side (W4 plan 1.8: "every form" of the MD wire table obeys
+ * this same rule).  Always logs L_WARNING; throttles the oper-visible
+ * SNO_NETWORK notice to once per @a link per
+ * MDSYNC_LIMIT_NOTICE_INTERVAL_S (600) seconds, via state hung off the
+ * same per-link struct mdsync_link_chunk() lazily allocates.
+ * @param[in] link The server link the offending MD line arrived on
+ *            (the direct connection, i.e. cptr at the call site).
+ * @param[in] target The MD target token as it appeared on the wire
+ *            (a nick, #channel, *account, !sessid or =account).
+ * @param[in] key The metadata key.
+ * @param[in] why One of "value is not UTF-8", "value over
+ *            METADATA_MAX_VALUE_BYTES %d" or "key count at
+ *            METADATA_MAX_KEYS %d", the latter two already formatted
+ *            with the live limit by the caller.
+ */
+extern void mdsync_limit_notice(struct Client *link, const char *target,
+                                const char *key, const char *why);
 
 #endif /* INCLUDED_metadata_sync_h */
