@@ -666,3 +666,37 @@ int md_pull_parse(int parc, char *parv[], unsigned long *seq, char *scope,
   *scope = parv[3][0];
   return count;
 }
+
+/* ------------------------------------------------------------------ */
+/* Bounded top-N-by-stamp selection (fix round 1)                      */
+/* ------------------------------------------------------------------ */
+
+int md_topn_place(const struct md_stamp *kept, int count, int cap,
+                  const struct md_stamp *incoming)
+{
+  int i;
+
+  if (!kept || !incoming || cap <= 0 || count < 0 || count > cap)
+    return -1;
+
+  if (count < cap) {
+    /* Room to spare: find incoming's place among the ascending kept
+     * stamps (linear scan from the newest end -- cap is small, at
+     * most a couple hundred, so this is not performance-sensitive). */
+    i = count;
+    while (i > 0 && md_stamp_cmp(&kept[i - 1], incoming) > 0)
+      i--;
+    return i;
+  }
+
+  /* Full: discard unless incoming is strictly newer than the current
+   * minimum (kept[0]) -- a tie is not an improvement, so it is
+   * discarded too, same as every other non-improving candidate. */
+  if (md_stamp_cmp(incoming, &kept[0]) <= 0)
+    return -1;
+
+  i = 0;
+  while (i + 1 < cap && md_stamp_cmp(&kept[i + 1], incoming) < 0)
+    i++;
+  return i;
+}

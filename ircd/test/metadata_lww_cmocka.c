@@ -751,6 +751,150 @@ static void test_pull_parse_seq_overflow_rejected(void **state)
   assert_int_equal(-1, md_pull_parse(5, parv, &seq, &scope, accounts, 16));
 }
 
+/* ------------------------------------------------------------------ */
+/* md_topn_place (fix round 1, 2026-11-02)                             */
+/* ------------------------------------------------------------------ */
+
+/* A tiny driver that applies md_topn_place the way
+ * mdsync_row_select_cb (ircd/metadata_sync.c) will: insert-or-discard,
+ * shifting the caller's own array by the returned index. The real
+ * caller also shifts a parallel payload array (key/value/vis/tombstone)
+ * in lockstep; these pure tests only need the stamps themselves. */
+static void topn_apply(struct md_stamp *kept, int *count, int cap,
+                        const struct md_stamp *incoming)
+{
+  int idx = md_topn_place(kept, *count, cap, incoming);
+  int i;
+
+  if (idx < 0)
+    return;
+
+  if (*count < cap) {
+    for (i = *count; i > idx; i--)
+      kept[i] = kept[i - 1];
+    (*count)++;
+  } else {
+    for (i = 0; i < idx; i++)
+      kept[i] = kept[i + 1];
+  }
+  kept[idx] = *incoming;
+}
+
+static void test_topn_fewer_than_cap(void **state)
+{
+  struct md_stamp kept[8];
+  int count = 0;
+  struct md_stamp s1 = { 5, 0, 0 }, s2 = { 3, 0, 0 }, s3 = { 9, 0, 0 };
+
+  (void)state;
+
+  topn_apply(kept, &count, 8, &s1);
+  topn_apply(kept, &count, 8, &s2);
+  topn_apply(kept, &count, 8, &s3);
+
+  assert_int_equal(3, count);
+  assert_true(kept[0].ms == 3);
+  assert_true(kept[1].ms == 5);
+  assert_true(kept[2].ms == 9);
+}
+
+static void test_topn_exactly_cap(void **state)
+{
+  struct md_stamp kept[4];
+  int count = 0;
+  int i;
+
+  (void)state;
+
+  /* Inserted newest-first (10,9,8,7): no eviction should ever trigger
+   * since count never exceeds cap, and the kept array must still end
+   * up ascending. */
+  for (i = 0; i < 4; i++) {
+    struct md_stamp s;
+    s.ms = (uint64_t)(10 - i);
+    s.logical = 0;
+    s.node = 0;
+    topn_apply(kept, &count, 4, &s);
+  }
+
+  assert_int_equal(4, count);
+  assert_true(kept[0].ms == 7);
+  assert_true(kept[1].ms == 8);
+  assert_true(kept[2].ms == 9);
+  assert_true(kept[3].ms == 10);
+}
+
+/* The exact shape of the row-cap bug (fix round 1): a raw key-order
+ * walk can deliver the truly newest row LAST, long after the cap is
+ * already full of older ones. md_topn_place must still let it evict
+ * the current oldest kept row instead of being discarded outright. */
+static void test_topn_more_than_cap_newest_last(void **state)
+{
+  struct md_stamp kept[3];
+  int count = 0;
+  struct md_stamp s1 = { 1, 0, 0 }, s2 = { 2, 0, 0 }, s3 = { 3, 0, 0 };
+  struct md_stamp newest = { 100, 0, 0 };
+
+  (void)state;
+
+  topn_apply(kept, &count, 3, &s1);
+  topn_apply(kept, &count, 3, &s2);
+  topn_apply(kept, &count, 3, &s3);
+  assert_int_equal(3, count);
+
+  topn_apply(kept, &count, 3, &newest);
+
+  assert_int_equal(3, count);
+  assert_true(kept[0].ms == 2);
+  assert_true(kept[1].ms == 3);
+  assert_true(kept[2].ms == 100);
+}
+
+static void test_topn_ties(void **state)
+{
+  struct md_stamp kept[2];
+  int count = 0;
+  struct md_stamp a = { 5, 0, 0 }, b = { 5, 0, 0 }, c = { 5, 0, 0 };
+
+  (void)state;
+
+  topn_apply(kept, &count, 2, &a);
+  topn_apply(kept, &count, 2, &b);
+  assert_int_equal(2, count);
+
+  /* Full, and c ties the current minimum (kept[0], stamp 5) exactly --
+   * not strictly newer, so discarded outright; the kept array is left
+   * untouched. */
+  assert_int_equal(-1, md_topn_place(kept, count, 2, &c));
+  assert_true(kept[0].ms == 5 && kept[1].ms == 5);
+}
+
+/* A row with no clock entry at all defaults to stamp 0.0.0 -- the
+ * controller ruling's "counts as oldest" rule. */
+static void test_topn_unstamped_is_oldest(void **state)
+{
+  struct md_stamp kept[2];
+  int count = 0;
+  struct md_stamp unstamped = { 0, 0, 0 };
+  struct md_stamp real = { 1, 0, 0 };
+  struct md_stamp newer = { 2, 0, 0 };
+
+  (void)state;
+
+  topn_apply(kept, &count, 2, &unstamped);
+  topn_apply(kept, &count, 2, &real);
+  assert_int_equal(2, count);
+  assert_true(kept[0].ms == 0);
+  assert_true(kept[1].ms == 1);
+
+  /* Cap full; a newer row must evict the unstamped one, not the real
+   * one -- 0.0.0 is the oldest, so it's the one at kept[0]. */
+  topn_apply(kept, &count, 2, &newer);
+  assert_int_equal(2, count);
+  assert_true(kept[0].ms == 1);
+  assert_true(kept[1].ms == 2);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -788,6 +932,11 @@ int main(void)
     cmocka_unit_test(test_pull_parse_rejects),
     cmocka_unit_test(test_pull_parse_empty_scope_no_oob),
     cmocka_unit_test(test_pull_parse_seq_overflow_rejected),
+    cmocka_unit_test(test_topn_fewer_than_cap),
+    cmocka_unit_test(test_topn_exactly_cap),
+    cmocka_unit_test(test_topn_more_than_cap_newest_last),
+    cmocka_unit_test(test_topn_ties),
+    cmocka_unit_test(test_topn_unstamped_is_oldest),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

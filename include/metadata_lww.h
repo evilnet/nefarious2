@@ -293,4 +293,41 @@ extern void md_chunk_abandon(struct md_chunk *c, const char *account,
 extern int md_pull_parse(int parc, char *parv[], unsigned long *seq,
                           char *scope, char *accounts[], int max);
 
+/** Bounded top-N-by-stamp selection (fix round 1, 2026-11-02): where a
+ * new row's stamp belongs among the up to @a cap rows a caller is
+ * keeping, newest first out of however many a full account walk visits
+ * -- the same "keep the newest, evict the oldest" shape
+ * mdsync_marker_cb (ircd/metadata_sync.c) already uses for read
+ * markers, generalized to compare by struct md_stamp (md_stamp_cmp)
+ * instead of a timestamp string, and factored out here, pure, so it is
+ * cmocka-testable on its own.
+ *
+ * This function touches no memory of its own: @a kept is read-only,
+ * ascending by stamp (index 0 = oldest), length @a count. It decides
+ * only WHERE @a incoming's stamp would land; the caller -- which alone
+ * knows the shape of the payload (key, value, visibility, tombstone
+ * flag) riding alongside each stamp -- performs the identical shift on
+ * ITS OWN parallel array using the returned index, then writes the new
+ * payload there (and, when @a count < @a cap, increments it):
+ *
+ *   - @a count < @a cap (room to spare): returns the insertion index
+ *     in [0, count] among the ascending kept stamps; the caller shifts
+ *     kept[idx..count-1] up by one to open the slot.
+ *   - @a count == @a cap and @a incoming is not newer than kept[0] (the
+ *     current oldest/smallest, ties included): returns -1 -- discard,
+ *     the caller's array is left untouched.
+ *   - @a count == @a cap and @a incoming IS newer than kept[0]: returns
+ *     the index in [0, cap) incoming's payload belongs at once the
+ *     caller has shifted kept[0..idx-1] down by one (evicting the old
+ *     kept[0]).
+ *
+ * @param[in] kept Ascending-by-stamp array of the rows currently held.
+ * @param[in] count Number of entries in @a kept (0 <= count <= cap).
+ * @param[in] cap Capacity of the caller's array (> 0).
+ * @param[in] incoming The candidate row's stamp.
+ * @return an insertion index as described above, or -1 to discard.
+ */
+extern int md_topn_place(const struct md_stamp *kept, int count, int cap,
+                         const struct md_stamp *incoming);
+
 #endif /* INCLUDED_metadata_lww_h */

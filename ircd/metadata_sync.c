@@ -308,36 +308,162 @@ void mdsync_limit_notice(struct Client *link, const char *target,
  * account (W4 plan bound: "MDSYNC_MAX_ROWS"). */
 #define MDSYNC_MAX_ROWS 128
 
+/** Largest number of rows (live + tombstone) a pull reply's row walk
+ * VISITS for one account, before stopping outright (fix round 1
+ * follow-up, security review 2026-11-02): row_select_cb's own "never
+ * stop early" rule (needed to find the true newest MDSYNC_MAX_ROWS
+ * regardless of raw key order) made the walk unbounded -- an account
+ * can carry an unlimited number of tombstones (SET then DELETE many
+ * distinct key names within METADATA_TOMBSTONE_TTL, no per-account
+ * tombstone cap exists), each one a full O(rows) scan step on the main
+ * loop, so a user could stall a pull of their own account arbitrarily.
+ * 32x MDSYNC_MAX_ROWS: generous enough that a reply is essentially
+ * never actually visit-capped in practice (an account would need to
+ * carry 32x its own row-reply budget in distinct historical keys/
+ * tombstones), while still bounding the walk to a fixed, small multiple
+ * of the existing reply-size bound rather than the account's unbounded
+ * tombstone count. */
+#define MDSYNC_MAX_VISIT (32 * MDSYNC_MAX_ROWS)
+
 /** Largest number of read markers a pull reply sends for one account --
  * the newest by timestamp (W4 plan bound: "MDSYNC_MAX_MARKERS"). */
 #define MDSYNC_MAX_MARKERS 256
 
-/** metadata_account_foreach_version callback: emit each row to the
- * pulling link until MDSYNC_MAX_ROWS is reached, then stop the walk. */
-struct mdsync_row_arg {
-  struct Client *link;
-  const char *account;
-  int sent;
+/** One candidate row held during a pull reply's bounded top-N-by-stamp
+ * selection (fix round 1, 2026-11-02): metadata_account_foreach_version's
+ * own key/value buffers are reused by the very next row before this
+ * row's callback returns, so a row kept as a candidate must own a COPY
+ * of its key and value, not a pointer into those buffers. Sized from
+ * metadata.c's own per-row key buffer (160 bytes -- "draft/persistence/..."
+ * keys run up to 127) and METADATA_VALUE_LEN for the value. */
+struct mdsync_row_candidate {
+  char key[160];
+  struct md_stamp st;
+  int tombstone;
+  int vis;
+  size_t vlen;
+  char value[METADATA_VALUE_LEN];
 };
 
-static int mdsync_row_cb(const char *key, const struct md_version *v, void *arg)
-{
-  struct mdsync_row_arg *a = (struct mdsync_row_arg *)arg;
+/** metadata_account_foreach_version callback: keep the MDSYNC_MAX_ROWS
+ * newest-by-stamp rows seen so far (live or tombstone), via
+ * md_topn_place -- the pure insertion-position decision -- plus the
+ * caller-owned shift and payload copy md_topn_place's own contract asks
+ * for. Mirrors mdsync_marker_cb's "ascending kept array, evict the
+ * oldest" shape, generalized from a timestamp string to a struct
+ * md_stamp. Unlike the old row_cb, this does not stop at MDSYNC_MAX_ROWS:
+ * metadata.c's own walk is raw LMDB key order, not stamp order, so the
+ * single newest row can arrive anywhere, including dead last (the
+ * row-cap bug this replaces: a key that sorted after the 128th by raw
+ * key order was never sent by any pull, ever, ranking-review 2026-11-02)
+ * -- it DOES still stop, at the separate, much larger MDSYNC_MAX_VISIT
+ * (security review 2026-11-02, same day): an account's tombstone count
+ * has no cap of its own, so visiting every row unconditionally would
+ * make the walk an unbounded, user-triggerable main-loop scan.
+ *
+ * Memory: bounded at exactly MDSYNC_MAX_ROWS candidates
+ * (~1192 bytes each -- 160 + stamp + 2 ints + size_t + 1024 -- about
+ * 153KB total for the full cap), never grown past that regardless of
+ * how many rows the account actually has; heap-allocated by the caller
+ * (mdsync_answer_pull), same reasoning as the pre-existing marker
+ * struct's own heap allocation just below. The walk itself is bounded
+ * separately, at MDSYNC_MAX_VISIT rows visited (see mdsync_row_select_cb) --
+ * an account's tombstone count has no cap of its own, so "never stop
+ * early" alone would make the walk unbounded. */
+struct mdsync_row_select {
+  struct Client *link;
+  const char *account;
+  int count;             /**< number of candidates held, 0..MDSYNC_MAX_ROWS */
+  int visited;           /**< rows visited so far this walk, 0..MDSYNC_MAX_VISIT */
+  int capped;            /**< 1 once the row-cap L_WARNING has been logged
+                           *   for this account's walk -- logged once. */
+  int visit_capped;      /**< 1 once the visit-cap L_WARNING has been
+                           *   logged -- logged once, distinct from capped. */
+  struct md_stamp stamps[MDSYNC_MAX_ROWS];  /**< mirrors rows[], same
+                           *   order/shifts, for md_topn_place's own
+                           *   read-only view */
+  struct mdsync_row_candidate rows[MDSYNC_MAX_ROWS];
+};
 
-  if (a->sent >= MDSYNC_MAX_ROWS) {
-    /* The walk stops the instant this fires (metadata_account_foreach_version
-     * returns as soon as a callback returns nonzero), so this is reached
-     * at most once per account per pull -- never once per truncated row. */
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "mdsync_answer_pull: row cap (%d) reached for account %s "
-              "pulled by %C - reply truncated",
-              MDSYNC_MAX_ROWS, a->account, a->link);
-    return 1;   /* stop: the row cap for this account is already full */
+static int mdsync_row_select_cb(const char *key, const struct md_version *v, void *arg)
+{
+  struct mdsync_row_select *a = (struct mdsync_row_select *)arg;
+  int idx, i;
+  size_t vlen;
+
+  /* Hard visit cap (fix round 1 follow-up, security review
+   * 2026-11-02): checked and counted BEFORE anything else, so it
+   * bounds the walk regardless of how many of the visited rows are
+   * actually kept -- an unbounded number of tombstones (no per-account
+   * cap exists) would otherwise make this a user-triggerable
+   * unbounded main-loop scan via "never stop early" below. Stopping
+   * the walk here still keeps whatever MDSYNC_MAX_ROWS newest rows
+   * were found among the MDSYNC_MAX_VISIT visited -- a smaller,
+   * bounded reply, not a correctness regression on top of the
+   * (already bounded-reply) row cap. */
+  a->visited++;
+  if (a->visited > MDSYNC_MAX_VISIT) {
+    if (!a->visit_capped) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "mdsync_answer_pull: visit cap (%d) reached for account %s "
+                "pulled by %C - row walk stopped early",
+                MDSYNC_MAX_VISIT, a->account, a->link);
+      a->visit_capped = 1;
+    }
+    return 1;   /* stop the walk outright */
   }
 
-  metadata_emit_versioned(&me, a->link, NULL, a->account, key, v);
-  a->sent++;
-  return 0;
+  if (a->count >= MDSYNC_MAX_ROWS && !a->capped) {
+    /* Reached the first time a row arrives once the cap is already
+     * full, whether or not THIS particular row ends up kept -- from
+     * here on the account has more rows than MDSYNC_MAX_ROWS and the
+     * reply is truncated to the newest, logged once per account per
+     * pull, not once per such row. */
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "mdsync_answer_pull: row cap (%d) reached for account %s "
+              "pulled by %C - reply truncated to the newest",
+              MDSYNC_MAX_ROWS, a->account, a->link);
+    a->capped = 1;
+  }
+
+  if (strlen(key) >= sizeof(a->rows[0].key))
+    return 0;   /* defensive only: metadata.c's own keybuf is smaller */
+
+  idx = md_topn_place(a->stamps, a->count, MDSYNC_MAX_ROWS, &v->st);
+  if (idx < 0)
+    return 0;   /* not newer than anything kept -- discard */
+
+  if (a->count < MDSYNC_MAX_ROWS) {
+    for (i = a->count; i > idx; i--) {
+      a->stamps[i] = a->stamps[i - 1];
+      a->rows[i] = a->rows[i - 1];
+    }
+    a->count++;
+  } else {
+    for (i = 0; i < idx; i++) {
+      a->stamps[i] = a->stamps[i + 1];
+      a->rows[i] = a->rows[i + 1];
+    }
+  }
+
+  vlen = v->vlen;
+  if (vlen >= sizeof(a->rows[idx].value))
+    vlen = sizeof(a->rows[idx].value) - 1;   /* defensive; v->vlen is
+                                               * already <= METADATA_VALUE_LEN */
+
+  a->stamps[idx] = v->st;
+  ircd_strncpy(a->rows[idx].key, key, sizeof(a->rows[idx].key));
+  a->rows[idx].st = v->st;
+  a->rows[idx].tombstone = v->tombstone;
+  a->rows[idx].vis = v->vis;
+  a->rows[idx].vlen = vlen;
+  if (vlen)
+    memcpy(a->rows[idx].value, v->value, vlen);
+  a->rows[idx].value[vlen] = '\0';
+
+  return 0;   /* keep walking (bounded by MDSYNC_MAX_VISIT above) --
+               * every visited row must be considered to find the true
+               * newest MDSYNC_MAX_ROWS among them */
 }
 
 /** One kept read-marker candidate.  mdsync_marker_arg::markers is kept in
@@ -418,12 +544,42 @@ void mdsync_answer_pull(struct Client *link, unsigned long seq, char scope,
     return;
 
   for (i = 0; i < n; i++) {
-    struct mdsync_row_arg rows;
+    /* Heap-allocated: ~153KB (MDSYNC_MAX_ROWS * sizeof(struct
+     * mdsync_row_candidate), plus the parallel stamps[] array) is
+     * well past what belongs on the stack once per account in this
+     * loop -- same reasoning as the marker struct just below, bigger
+     * only because a row's value (up to METADATA_VALUE_LEN) dwarfs a
+     * marker's fixed-width timestamp. */
+    struct mdsync_row_select *rows =
+      (struct mdsync_row_select *)MyMalloc(sizeof(struct mdsync_row_select));
+    int j;
 
-    rows.link = link;
-    rows.account = accounts[i];
-    rows.sent = 0;
-    metadata_account_foreach_version(accounts[i], mdsync_row_cb, &rows);
+    if (rows) {
+      rows->link = link;
+      rows->account = accounts[i];
+      rows->count = 0;
+      rows->visited = 0;
+      rows->capped = 0;
+      rows->visit_capped = 0;
+      metadata_account_foreach_version(accounts[i], mdsync_row_select_cb, rows);
+
+      /* Emission order is free (each row merges independently on the
+       * receiver, metadata_lww.c's md_lww_take) -- ascending by stamp
+       * (oldest-of-the-selected-set first), the array's own order,
+       * needs no extra sort pass. */
+      for (j = 0; j < rows->count; j++) {
+        struct md_version ev;
+
+        ev.st = rows->rows[j].st;
+        ev.tombstone = rows->rows[j].tombstone;
+        ev.vis = rows->rows[j].vis;
+        ev.value = rows->rows[j].tombstone ? NULL : rows->rows[j].value;
+        ev.vlen = rows->rows[j].vlen;
+        metadata_emit_versioned(&me, link, NULL, accounts[i],
+                                rows->rows[j].key, &ev);
+      }
+      MyFree(rows);
+    }
 
     if (scope == 'A') {
       /* Heap-allocated: ~59KB (MDSYNC_MAX_MARKERS * sizeof(struct
