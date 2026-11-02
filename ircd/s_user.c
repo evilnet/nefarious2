@@ -2315,6 +2315,15 @@ void umode_sync_apply(struct Client *cptr, int flag, int on)
     return;
   if ((HasFlag(cptr, (enum Flag)flag) ? 1 : 0) == (on ? 1 : 0))
     return;   /* already so: nothing to tell (the mirror may have set it) */
+  /* The rule set_user_mode applies to a +p (FLAG_NOCHAN) of this user:
+   * without PRIV_HIDE_CHANNELS, and unless DERESTRICT_HIDECHANS opens it
+   * to everyone, the mode is not this connection's to take -- from the
+   * account's row (another connection's +p, a METADATA SET of
+   * umode.nochan, or a row an earlier build stored for a refused +p) no
+   * more than from its own MODE (fix round 3, N2). */
+  if (on && flag == FLAG_NOCHAN && !feature_bool(FEAT_DERESTRICT_HIDECHANS)
+      && !HasPriv(cptr, PRIV_HIDE_CHANNELS))
+    return;
 
   before = cli_flags(cptr);
   if (on)
@@ -2372,6 +2381,65 @@ static void umode_md_note(struct umode_md *t, int *n, struct Client *acptr,
     t[*n].value = value;
     t[*n].vis = vis;
     (*n)++;
+  }
+}
+
+/** Each mode-synced key's flag and the values set_user_mode notes for it
+ * (the letters' own: on = the flag set, off = the flag cleared). */
+static const struct {
+  const char *key;
+  int flag;
+  const char *on;
+  int on_vis;
+  const char *off;
+} umode_md_keys[] = {
+  { "umode.invisible",        FLAG_INVISIBLE,        "1", METADATA_VIS_PRIVATE, NULL },
+  { "umode.nochan",           FLAG_NOCHAN,           "1", METADATA_VIS_PRIVATE, NULL },
+  { "umode.commonchansonly",  FLAG_COMMONCHANSONLY,  "1", METADATA_VIS_PRIVATE, NULL },
+  { "umode.accountonly",      FLAG_ACCOUNTONLY,      "1", METADATA_VIS_PUBLIC,  NULL },
+  { "umode.privdeaf",         FLAG_PRIVDEAF,         "1", METADATA_VIS_PUBLIC,  NULL },
+  { "chathistory.nostorage",  FLAG_NOSTORAGE,        "1", METADATA_VIS_PUBLIC,  NULL },
+  { "chathistory.pm",         FLAG_PM_OPTOUT,        "0", METADATA_VIS_PUBLIC,  NULL },
+  { "draft/persistence/hold", FLAG_BNC_HOLDPREF,     "1", METADATA_VIS_PRIVATE, "0" },
+  { NULL, 0, NULL, 0, NULL }
+};
+
+/** After the mode loop and the rules that take back modes the user may
+ * not hold (a +p without PRIV_HIDE_CHANNELS, ...): every noted key's
+ * value is what @a acptr's FINAL flag says, not the letter's -- a refused
+ * +p must not be written as umode.nochan=1 (fix round 3, N2).  When the
+ * rules took the letter back and the flag is where it was before the
+ * command (@a before), the command changed nothing for that key and the
+ * note is dropped: nothing is written, as for a refused +b (U2) -- a
+ * write of "off" would take the mode from the account's other, privileged
+ * connections.  The memory entry follows the value. */
+static void umode_md_finalize(struct umode_md *t, int *n, struct Client *acptr,
+                              const struct Flags *before)
+{
+  int i, k;
+
+  for (i = 0; i < *n; i++) {
+    const char *want;
+
+    for (k = 0; umode_md_keys[k].key; k++)
+      if (0 == strcmp(umode_md_keys[k].key, t[i].key))
+        break;
+    if (!umode_md_keys[k].key)
+      continue;
+    want = HasFlag(acptr, (enum Flag)umode_md_keys[k].flag)
+           ? umode_md_keys[k].on : umode_md_keys[k].off;
+    if ((!want && !t[i].value)
+        || (want && t[i].value && 0 == strcmp(want, t[i].value)))
+      continue;   /* the letter's value stands */
+    t[i].value = want;
+    if (want)
+      t[i].vis = umode_md_keys[k].on_vis;
+    metadata_client_memory_set(acptr, t[i].key, t[i].value, t[i].vis);
+    if ((FlagHas(before, (enum Flag)umode_md_keys[k].flag) ? 1 : 0)
+        == (HasFlag(acptr, (enum Flag)umode_md_keys[k].flag) ? 1 : 0)) {
+      t[i] = t[--(*n)];   /* taken back: no change to write */
+      i--;
+    }
   }
 }
 
@@ -3127,20 +3195,6 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       set_snomask(snoc, 0, SNO_SET);
     }
   }
-  /* A -b that stands (no +b after it in this command): the hold
-   * preference, before the mode line goes out and before the end.  Then
-   * every mode-synced key this command changed is written to the
-   * account's store by its one writer (umode_md_write: the user's server,
-   * the asking device's server, or the fork server that got the M line
-   * from a legacy hop) as a stamped row every fork server merges; every
-   * other server has changed memory only.  The writer's account-wide
-   * apply also sets the hold preference (+b) on every connection of the
-   * account (user-accepted, 2026-11-01). */
-  if (hold_off)
-    umode_md_note(umd, &umd_n, acptr, "draft/persistence/hold", "0",
-                  METADATA_VIS_PRIVATE);
-  umode_md_write(umd, umd_n, cptr, acptr, asker_device);
-
   /*
    * Compare new flags with old flags and send string which
    * will cause servers to update correctly.
@@ -3307,6 +3361,27 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * the sync from a remote acptr leaves the mask alone. */
   if (snoc && snoc != acptr)
     bounce_sync_session_snomask(snoc);
+
+  /* A -b that stands (no +b after it in this command): the hold
+   * preference.  Then every mode-synced key this command changed is
+   * written to the account's store by its one writer (umode_md_write: the
+   * user's server, the asking device's server, or the fork server that got
+   * the M line from a legacy hop) as a stamped row every fork server
+   * merges; every other server has changed memory only.  Each value is the
+   * target's FINAL flag, after the rules above took back what the user may
+   * not hold (umode_md_finalize, N2).  Here -- after this command's own M
+   * line went out (send_umode_out above), before the end below -- so every
+   * server sees the user's M line before the account's row: an older fork
+   * server applies a row to every client of the account, and a row first
+   * would leave the M line showing no change there, never relayed to its
+   * legacy links (fix round 3, N3).  The writer's account-wide apply also
+   * changes the account's other connections here, each told (fix round
+   * 2). */
+  if (hold_off)
+    umode_md_note(umd, &umd_n, acptr, "draft/persistence/hold", "0",
+                  METADATA_VIS_PRIVATE);
+  umode_md_finalize(umd, &umd_n, acptr, &setflags);
+  umode_md_write(umd, umd_n, cptr, acptr, asker_device);
 
   /* A -b ends its session last: the end can exit the mode's target (a
    * held ghost leaves with its session), and nothing above may touch the

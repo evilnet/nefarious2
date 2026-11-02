@@ -2161,12 +2161,30 @@ void metadata_account_apply_memory(const char *account, const char *key,
        * changed the way a self MODE looks (umode_sync_apply).  Connections
        * of the account on a legacy server are out of reach: nobody here
        * can tell them. */
-      if (!MyConnect(cptr))
-        continue;
-      metadata_apply_entry_list(cptr, key, value, vis);
-      if (!IsBouncerAlias(cptr))
-        umode_sync_apply(cptr, metadata_mode_sync[ms].flag,
-                         metadata_mode_sync_want(ms, value));
+      if (MyConnect(cptr)) {
+        int want = metadata_mode_sync_want(ms, value);
+
+        metadata_apply_entry_list(cptr, key, value, vis);
+        if (!IsBouncerAlias(cptr))
+          umode_sync_apply(cptr, metadata_mode_sync[ms].flag, want);
+        else if (!bounce_umode_flag_synced(metadata_mode_sync[ms].flag)) {
+          /* A flag the session mirror does not carry (+y
+           * FLAG_PM_OPTOUT, +b FLAG_BNC_HOLDPREF -- umode_sync_flags[]):
+           * the device would keep a stale one (BOUNCER INFO/SETTINGS
+           * read it; a promoted device holds on it).  Set it here,
+           * silently: a device is told its modes by its primary's
+           * announce, never by the row (fix round 3, M-a). */
+          if (want)
+            SetFlag(cptr, metadata_mode_sync[ms].flag);
+          else
+            ClrFlag(cptr, metadata_mode_sync[ms].flag);
+        }
+      }
+      /* A remote copy: no list or flag change here (its server's M line
+       * makes it), but this server's subscribers are still told below --
+       * through it, a PRIVATE key reaches every local session of the
+       * account, a device of a remote primary included (fix round 3, N1;
+       * the M line's own path, metadata_client_memory_set, tells nobody). */
     } else
       metadata_apply_client_memory(cptr, key, value, vis);
 

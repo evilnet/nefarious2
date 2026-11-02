@@ -1082,6 +1082,15 @@ extern void bounce_emit_alias_caps(struct Client *cptr);
 extern void bounce_emit_alias_update(struct Client *primary,
     const char *field, const char *value);
 
+/** Whether the session mode mirror (bounce_sync_session_umodes /
+ * bounce_copy_umodes) carries mode flag @a flag (an enum Flag) from a
+ * session's source to its other members (umode_sync_flags[]).  A
+ * mode-synced account row (metadata_account_apply_memory) sets a flag the
+ * mirror does not carry on a session device itself, silently.
+ * @return 1 if mirrored, 0 if not.
+ */
+extern int bounce_umode_flag_synced(int flag);
+
 /** Synchronize user mode flags from a primary to all its aliases.
  * Call after mode changes on the primary so aliases stay in sync.
  * @param[in] primary The primary client whose modes changed.

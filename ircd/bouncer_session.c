@@ -11640,6 +11640,16 @@ static const int umode_sync_flags[] = {
   -1
 };
 
+int bounce_umode_flag_synced(int flag)
+{
+  int i;
+
+  for (i = 0; umode_sync_flags[i] >= 0; i++)
+    if (umode_sync_flags[i] == flag)
+      return 1;
+  return 0;
+}
+
 /** Copy user mode flags from one client to another.
  * Only copies the flags listed in umode_sync_flags[].
  *
