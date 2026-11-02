@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <setjmp.h>
+#include <stdio.h>
 #include <string.h>
 #include <cmocka.h>
 
@@ -430,6 +431,74 @@ static void test_chunk_mismatch_discards_rest_of_abandoned_row(void **state)
   assert_string_equal(c.value, "whole");
 }
 
+/* W4 push-1 fix-wave N3(a): nested interruptions.  X is interrupted by
+ * Y, Y by Z: each interrupted row keeps its own poison, so X's tail is
+ * swallowed rather than merged as X's whole value (one poison slot let
+ * Y's poison overwrite X's), and Z's pending value survives the
+ * swallowed tails. */
+static void test_chunk_nested_interrupts_discard_each_row(void **state)
+{
+  struct md_chunk c;
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "kx", 0, 1, "xh"));
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "ky", 0, 1, "yh"));
+  assert_int_equal(c.dropped, 1);
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "7.0.1", "kz", 0, 1, "zh"));
+  assert_int_equal(c.dropped, 1);
+  /* X's tail: swallowed, not handed back as X's whole value. */
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "kx", 0, 0, "xt"));
+  /* Y's tail: swallowed too. */
+  assert_int_equal(MD_CHUNK_ERROR,
+                   md_chunk_feed(&c, "acct", "7.0.1", "ky", 0, 0, "yt"));
+  /* Z was never interrupted: it completes whole. */
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "kz", 0, 0, "zt"));
+  assert_string_equal(c.value, "zhzt");
+  /* The tails ended both poisons: fresh deliveries of X and Y are taken. */
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "kx", 0, 0, "xw"));
+  assert_string_equal(c.value, "xw");
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", "ky", 0, 0, "yw"));
+  assert_string_equal(c.value, "yw");
+}
+
+/* N3(a), at the slot count: MD_CHUNK_POISON_SLOTS rows interrupted in a
+ * chain each keep their poison; every one of their tails is swallowed. */
+static void test_chunk_poison_slots_hold_a_chain(void **state)
+{
+  struct md_chunk c;
+  char key[8];
+  int i;
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+
+  /* Rows k0..kN, each head interrupting the one before: k0..k(N-1) are
+   * poisoned, kN is pending. */
+  for (i = 0; i <= MD_CHUNK_POISON_SLOTS; i++) {
+    snprintf(key, sizeof(key), "k%d", i);
+    assert_int_equal(MD_CHUNK_PENDING,
+                     md_chunk_feed(&c, "acct", "7.0.1", key, 0, 1, "h"));
+  }
+  for (i = 0; i < MD_CHUNK_POISON_SLOTS; i++) {
+    snprintf(key, sizeof(key), "k%d", i);
+    assert_int_equal(MD_CHUNK_ERROR,
+                     md_chunk_feed(&c, "acct", "7.0.1", key, 0, 0, "t"));
+  }
+  snprintf(key, sizeof(key), "k%d", MD_CHUNK_POISON_SLOTS);
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "7.0.1", key, 0, 0, "t"));
+  assert_string_equal(c.value, "ht");
+}
+
 /* A piece of the pending row that disagrees on visibility is the same
  * row (account, stamp, key) arriving inconsistent: the whole row goes. */
 static void test_chunk_vis_flip_discards_row(void **state)
@@ -451,8 +520,9 @@ static void test_chunk_vis_flip_discards_row(void **state)
 }
 
 /* md_chunk_abandon: a caller-side refusal of one piece (e.g. a bad
- * flags token) discards the pending row it belongs to and the rest of
- * that row -- whether a value was pending or not. */
+ * flags token) that says more pieces follow (more=1) discards the
+ * pending row it belongs to and the rest of that row -- whether a value
+ * was pending or not. */
 static void test_chunk_abandon_discards_row(void **state)
 {
   struct md_chunk c;
@@ -462,7 +532,7 @@ static void test_chunk_abandon_discards_row(void **state)
 
   assert_int_equal(MD_CHUNK_PENDING,
                    md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "aaa"));
-  md_chunk_abandon(&c, "acct", "7.0.1", "k1");
+  md_chunk_abandon(&c, "acct", "7.0.1", "k1", 1);
   assert_int_equal(c.active, 0);
   assert_int_equal(MD_CHUNK_ERROR,
                    md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "cc"));
@@ -470,7 +540,7 @@ static void test_chunk_abandon_discards_row(void **state)
                    md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "v"));
 
   /* A refused head: nothing pending yet, the rest still goes. */
-  md_chunk_abandon(&c, "acct", "8.0.1", "k2");
+  md_chunk_abandon(&c, "acct", "8.0.1", "k2", 1);
   assert_int_equal(MD_CHUNK_ERROR,
                    md_chunk_feed(&c, "acct", "8.0.1", "k2", 0, 1, "p2"));
   assert_int_equal(MD_CHUNK_ERROR,
@@ -482,10 +552,40 @@ static void test_chunk_abandon_discards_row(void **state)
   /* Abandoning another row leaves a pending one alone. */
   assert_int_equal(MD_CHUNK_PENDING,
                    md_chunk_feed(&c, "acct", "9.0.1", "k3", 0, 1, "aa"));
-  md_chunk_abandon(&c, "acct", "9.0.1", "zz");
+  md_chunk_abandon(&c, "acct", "9.0.1", "zz", 1);
   assert_int_equal(MD_CHUNK_DONE,
                    md_chunk_feed(&c, "acct", "9.0.1", "k3", 0, 0, "bb"));
   assert_string_equal(c.value, "aabb");
+}
+
+/* W4 push-1 fix-wave N3(b): a refused piece that is its row's final
+ * (or only) one (more=0) leaves nothing to discard after it.  The
+ * pending value of that row goes, but the row is not poisoned: the next
+ * delivery of the same (account, stamp, key) -- a re-send, a pull
+ * reply -- is taken, not swallowed once. */
+static void test_chunk_abandon_final_piece_no_poison(void **state)
+{
+  struct md_chunk c;
+
+  (void)state;
+  memset(&c, 0, sizeof(c));
+
+  /* A refused only piece. */
+  md_chunk_abandon(&c, "acct", "10.0.1", "k4", 0);
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "10.0.1", "k4", 0, 0, "v"));
+  assert_string_equal(c.value, "v");
+
+  /* A refused final piece of a pending row: the head is dropped (never
+   * completed into "aa" + the next delivery), and the next delivery of
+   * the row is taken whole. */
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, "acct", "11.0.1", "k5", 0, 1, "aa"));
+  md_chunk_abandon(&c, "acct", "11.0.1", "k5", 0);
+  assert_int_equal(c.active, 0);
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, "acct", "11.0.1", "k5", 0, 0, "w"));
+  assert_string_equal(c.value, "w");
 }
 
 /* M2: an identity field that does not fit its buffer (an account over
@@ -677,8 +777,11 @@ int main(void)
     cmocka_unit_test(test_chunk_overflow_discards_rest_of_row),
     cmocka_unit_test(test_chunk_overflow_on_final_piece_no_poison),
     cmocka_unit_test(test_chunk_mismatch_discards_rest_of_abandoned_row),
+    cmocka_unit_test(test_chunk_nested_interrupts_discard_each_row),
+    cmocka_unit_test(test_chunk_poison_slots_hold_a_chain),
     cmocka_unit_test(test_chunk_vis_flip_discards_row),
     cmocka_unit_test(test_chunk_abandon_discards_row),
+    cmocka_unit_test(test_chunk_abandon_final_piece_no_poison),
     cmocka_unit_test(test_chunk_rejects_oversize_identity),
     cmocka_unit_test(test_stamp_parse_rejects_over_bufsize),
     cmocka_unit_test(test_pull_parse_ok),

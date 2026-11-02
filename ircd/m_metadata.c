@@ -1698,12 +1698,17 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   struct md_version in;
   int merge_rc;
 
-  if (parc < 5)
+  /* Without a key nothing names a row: there is no chunk state to
+   * touch.  A line that names one but has no flags token is refused
+   * below, after the identity checks, through md_chunk_abandon (W4
+   * push-1 fix-wave N3(c)): returning here left a refused head's tail to
+   * be merged as the whole value. */
+  if (parc < 4)
     return 0;
 
   stamp_text = parv[2];
   wire_key = parv[3];
-  flags_tok = parv[4];
+  flags_tok = (parc >= 5) ? parv[4] : NULL;
   piece = (parc >= 6) ? parv[5] : "";
 
   /* Every refusal before md_chunk_feed must be the same for every piece
@@ -1733,8 +1738,20 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   if (!chunk)
     return 0;
 
-  if (md_flags_parse(flags_tok, &vis, &tombstone, &more) < 0) {
-    md_chunk_abandon(chunk, account_name, stamp_text, wire_key);
+  if (!flags_tok || md_flags_parse(flags_tok, &vis, &tombstone, &more) < 0) {
+    /* Whether pieces of the row follow this refused one.  Only a
+     * one-character token that is not `+` says plainly that none do (a
+     * flag with no continuation mark): then this was the row's last
+     * piece, nothing follows to discard, and a poison would swallow the
+     * row's next delivery instead (N3(b)).  Anything else may be a head
+     * whose tail follows, and is treated as one so the tail is never
+     * merged as the whole value: no flags token at all (N3(c)), an empty
+     * one, or a longer one -- which may carry the `+`, or be the value
+     * sitting where a missing flags token belongs ("=a s k :head"). */
+    int follows = !flags_tok || !flags_tok[0] || flags_tok[1]
+                  || flags_tok[0] == '+';
+
+    md_chunk_abandon(chunk, account_name, stamp_text, wire_key, follows);
     return 0;
   }
 

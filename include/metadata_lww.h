@@ -182,6 +182,22 @@ extern enum md_target_kind md_target_classify(const char *parv1);
 extern int md_flags_parse(const char *tok, int *vis, int *tombstone,
                            int *more);
 
+/** How many interrupted rows one link's chunk state remembers to
+ * discard at once (struct md_chunk's poison slots).  A compliant sender
+ * never interleaves two rows' pieces on one link, so only a
+ * non-compliant one ever fills more than one; past this many live
+ * poisons a slot is reused in turn and that row's poison is forgotten. */
+#define MD_CHUNK_POISON_SLOTS 4
+
+/** One row whose remaining pieces are being discarded (see struct
+ * md_chunk). */
+struct md_chunk_poison {
+  int used;
+  char account[16];
+  char key[128];
+  char stamp[MD_STAMP_BUFSIZE];
+};
+
 /** Chunk-reassembly state for one stamped-account row's value, across
  * one or more wire lines joined by the `+` continuation flag. Each
  * field here except @a value/@a len/@a active/@a dropped identifies
@@ -199,16 +215,16 @@ struct md_chunk {
                   *   the start of every feed call. */
   size_t len;    /**< Bytes accumulated in @a value so far. */
   char value[1024];
-  /** 1 while the rest of one row is being discarded (an overflow, an
-   * abandoned accumulation, an inconsistent or refused piece): every
-   * further piece of the row named by @a poison_account /
-   * @a poison_stamp / @a poison_key is swallowed, up to and including
-   * its more=0 piece, so no tail of it is ever handed back as the whole
-   * value. */
-  int poisoned;
-  char poison_account[16];
-  char poison_key[128];
-  char poison_stamp[MD_STAMP_BUFSIZE];
+  /** Rows whose rest is being discarded (an overflow, an abandoned
+   * accumulation, an inconsistent or refused piece): every further piece
+   * of a row named in a used slot is swallowed, up to and including its
+   * more=0 piece (which frees the slot), so no tail of it is ever handed
+   * back as the whole value.  One slot per row, so a row interrupted
+   * while another row's poison is live keeps its own (W4 push-1 fix-wave
+   * N3(a)); when every slot is in use they are reused in turn (@a
+   * poison_next). */
+  struct md_chunk_poison poison[MD_CHUNK_POISON_SLOTS];
+  int poison_next;   /**< slot reused when every slot is in use */
 };
 
 enum { MD_CHUNK_ERROR = -1, MD_CHUNK_PENDING = 0, MD_CHUNK_DONE = 1 };
@@ -221,8 +237,9 @@ enum { MD_CHUNK_ERROR = -1, MD_CHUNK_PENDING = 0, MD_CHUNK_DONE = 1 };
  *    bytes, i.e. ACCOUNTLEN; @a stamp of MD_STAMP_BUFSIZE bytes or more;
  *    @a key of 128 or more) is refused: MD_CHUNK_ERROR, state untouched.
  *    It is never truncated into a name that could match another row.
- *  - A piece of the poisoned row (see struct md_chunk) is swallowed:
- *    MD_CHUNK_ERROR; its more=0 piece also ends the poison.
+ *  - A piece of a poisoned row (see struct md_chunk) is swallowed:
+ *    MD_CHUNK_ERROR, and the pending row (if another) is left alone;
+ *    its more=0 piece also ends that row's poison.
  *  - A piece of the pending row that disagrees on @a vis: the pending
  *    value and the rest of the row are discarded (poisoned, unless this
  *    piece is the row's more=0 one), MD_CHUNK_ERROR.
@@ -243,15 +260,20 @@ extern int md_chunk_feed(struct md_chunk *c, const char *account,
                           int more, const char *piece);
 
 /** A caller refused one piece of row (@a account, @a stamp, @a key)
- * without feeding it (e.g. a malformed flags token, whose `+` it cannot
- * read): discard that row's pending value if it is the one pending, and
- * poison the rest of the row, so the pieces after the refused one are
- * never merged as the whole value.  A different row's pending value is
- * left alone.  An identity that does not fit (see md_chunk_feed) is
- * ignored: md_chunk_feed refuses every piece of such a row anyway.
+ * without feeding it (e.g. a malformed or missing flags token):
+ * discard that row's pending value if it is the one pending and, when
+ * @a more says pieces of the row follow the refused one, poison the
+ * rest of the row, so they are never merged as the whole value.  When
+ * @a more is 0 the refused piece was the row's last (or only) one:
+ * nothing follows to discard, and poisoning would swallow the next
+ * delivery of the same row instead (W4 push-1 fix-wave N3(b)).  The
+ * caller decides @a more from what it can read of the line (see
+ * ms_metadata_stamped).  A different row's pending value is left alone.
+ * An identity that does not fit (see md_chunk_feed) is ignored:
+ * md_chunk_feed refuses every piece of such a row anyway.
  */
 extern void md_chunk_abandon(struct md_chunk *c, const char *account,
-                              const char *stamp, const char *key);
+                              const char *stamp, const char *key, int more);
 
 /** Parse an MD PULL request's trailing parameters: parv[2] a decimal
  * sequence number, parv[3] exactly "A" or "R" (the pull scope), and

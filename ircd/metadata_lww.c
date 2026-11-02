@@ -452,15 +452,49 @@ static int md_row_eq(const char *a, const char *s, const char *k,
          0 == strcmp(k, key ? key : "");
 }
 
+/** The poison slot naming row (@a account, @a stamp, @a key), or NULL. */
+static struct md_chunk_poison *md_chunk_poison_find(struct md_chunk *c,
+                                                    const char *account,
+                                                    const char *stamp,
+                                                    const char *key)
+{
+  int i;
+
+  for (i = 0; i < MD_CHUNK_POISON_SLOTS; i++)
+    if (c->poison[i].used &&
+        md_row_eq(c->poison[i].account, c->poison[i].stamp, c->poison[i].key,
+                  account, stamp, key))
+      return &c->poison[i];
+  return NULL;
+}
+
 /** Discard the rest of row (@a account, @a stamp, @a key): its later
- * pieces, up to and including its more=0 one, are swallowed. */
+ * pieces, up to and including its more=0 one, are swallowed.  Each row
+ * takes its own slot (a free one, else the slots in turn), so poisoning
+ * one row never forgets another's while a slot is free (N3(a)). */
 static void md_chunk_poison(struct md_chunk *c, const char *account,
                             const char *stamp, const char *key)
 {
-  md_bounded_copy(c->poison_account, sizeof(c->poison_account), account);
-  md_bounded_copy(c->poison_stamp, sizeof(c->poison_stamp), stamp);
-  md_bounded_copy(c->poison_key, sizeof(c->poison_key), key);
-  c->poisoned = 1;
+  struct md_chunk_poison *p = md_chunk_poison_find(c, account, stamp, key);
+  int i;
+
+  if (!p) {
+    for (i = 0; i < MD_CHUNK_POISON_SLOTS; i++)
+      if (!c->poison[i].used) {
+        p = &c->poison[i];
+        break;
+      }
+  }
+  if (!p) {
+    if (c->poison_next < 0 || c->poison_next >= MD_CHUNK_POISON_SLOTS)
+      c->poison_next = 0;
+    p = &c->poison[c->poison_next];
+    c->poison_next = (c->poison_next + 1) % MD_CHUNK_POISON_SLOTS;
+  }
+  md_bounded_copy(p->account, sizeof(p->account), account);
+  md_bounded_copy(p->stamp, sizeof(p->stamp), stamp);
+  md_bounded_copy(p->key, sizeof(p->key), key);
+  p->used = 1;
 }
 
 /** Forget the pending value, if any. */
@@ -490,11 +524,14 @@ int md_chunk_feed(struct md_chunk *c, const char *account, const char *stamp,
 
   /* The rest of a row already given up on (final review M1): swallow
    * it, so no tail of it is ever handed back as the whole value. */
-  if (c->poisoned && md_row_eq(c->poison_account, c->poison_stamp,
-                               c->poison_key, account, stamp, key)) {
-    if (!more)
-      c->poisoned = 0;
-    return MD_CHUNK_ERROR;
+  {
+    struct md_chunk_poison *p = md_chunk_poison_find(c, account, stamp, key);
+
+    if (p) {
+      if (!more)
+        p->used = 0;
+      return MD_CHUNK_ERROR;
+    }
   }
 
   if (c->active) {
@@ -544,7 +581,7 @@ int md_chunk_feed(struct md_chunk *c, const char *account, const char *stamp,
 }
 
 void md_chunk_abandon(struct md_chunk *c, const char *account,
-                      const char *stamp, const char *key)
+                      const char *stamp, const char *key, int more)
 {
   if (!c)
     return;
@@ -554,7 +591,11 @@ void md_chunk_abandon(struct md_chunk *c, const char *account,
     return;
   if (c->active && md_row_eq(c->account, c->stamp, c->key, account, stamp, key))
     md_chunk_reset(c);
-  md_chunk_poison(c, account, stamp, key);
+  /* Only when pieces follow: a refused last (or only) piece leaves
+   * nothing to discard, and a poison would swallow the row's next
+   * delivery instead (N3(b)). */
+  if (more)
+    md_chunk_poison(c, account, stamp, key);
 }
 
 /* ------------------------------------------------------------------ */
