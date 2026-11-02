@@ -419,6 +419,13 @@ static int mdsync_row_select_cb(const char *key, const struct md_version *v, voi
     return 1;   /* stop the walk outright */
   }
 
+  /* An internal key (last_present: this server's own observation, a TTL
+   * row; a key the wire validator refuses) stays here: never sent, and
+   * it takes no place among the newest MDSYNC_MAX_ROWS (push-2 final
+   * fix wave, M-2). */
+  if (!md_key_replicable(key))
+    return 0;
+
   if (a->count >= MDSYNC_MAX_ROWS && !a->capped) {
     /* Reached the first time a row arrives once the cap is already
      * full, whether or not THIS particular row ends up kept -- from

@@ -735,3 +735,19 @@ int md_topn_insert(struct md_stamp *kept, int *slot, int *count,
   return ps;
 }
 
+/* ------------------------------------------------------------------ */
+/* Replicated keys (push-2 final fix wave, M-2)                        */
+/* ------------------------------------------------------------------ */
+
+#define MD_KEY_LAST_PRESENT "last_present"
+
+int md_key_replicable(const char *key)
+{
+  if (!md_wire_key_valid(key))
+    return 0;
+  if (strlen(key) == sizeof(MD_KEY_LAST_PRESENT) - 1
+      && md_prefix_eq_ci(key, MD_KEY_LAST_PRESENT,
+                         sizeof(MD_KEY_LAST_PRESENT) - 1))
+    return 0;
+  return 1;
+}

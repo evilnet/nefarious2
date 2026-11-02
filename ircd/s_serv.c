@@ -556,6 +556,12 @@ int server_finish_burst(struct Client *cptr)
             struct md_version v;
             char valbuf[METADATA_VALUE_LEN];
 
+            /* An internal key (last_present, loaded into memory with the
+             * account's rows; a key the wire validator refuses) is this
+             * server's own: never a stamped row on the wire (push-2
+             * final fix wave, M-2). */
+            if (!md_key_replicable(entry->key))
+              continue;
             if (!metadata_lmdb_is_available()
                 || metadata_account_get_version(account, entry->key, &v,
                                                 valbuf, sizeof(valbuf)) != 0) {

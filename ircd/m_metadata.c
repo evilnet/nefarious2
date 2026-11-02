@@ -1060,10 +1060,13 @@ static void md_clear_key_free(struct md_clear_key *head)
 }
 
 /** metadata_account_foreach_version callback for a user CLEAR's store
- * residue: every live row that is not draft/persistence/. */
+ * residue: every live row that is not draft/persistence/ and not an
+ * internal key (md_key_replicable: last_present, a key the wire
+ * validator refuses -- push-2 final fix wave, M-2). */
 static int md_clear_residue_cb(const char *key, const struct md_version *v, void *arg)
 {
-  if (!v->tombstone && !metadata_key_is_server_managed(key))
+  if (!v->tombstone && !metadata_key_is_server_managed(key)
+      && md_key_replicable(key))
     md_clear_key_push((struct md_clear_key **)arg, key, v->vis);
   return 0;
 }
@@ -1087,9 +1090,15 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
   struct md_clear_key *keys = NULL, *k;
   struct MetadataEntry *entry;
 
-  /* Copied out first: every delete below edits this list. */
+  /* Copied out first: every delete below edits this list.  For an
+   * account, not an internal key: last_present sits in the list
+   * (metadata_load_account loads every live row) but is this server's
+   * own observation, and a delete of it would go out as a tombstone
+   * every peer merges (push-2 final fix wave, M-2 / Task 8 M1). */
   for (entry = metadata_list_client(target_client); entry; entry = entry->next)
-    if (!metadata_key_is_server_managed(entry->key))
+    if (!metadata_key_is_server_managed(entry->key)
+        && (!cli_user(target_client)->account[0]
+            || md_key_replicable(entry->key)))
       md_clear_key_push(&keys, entry->key, entry->visibility);
 
   send_batch_start(sptr, "metadata");

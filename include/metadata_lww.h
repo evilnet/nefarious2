@@ -354,4 +354,15 @@ extern int md_topn_place(const struct md_stamp *kept, int count, int cap,
 extern int md_topn_insert(struct md_stamp *kept, int *slot, int *count,
                           int cap, const struct md_stamp *incoming);
 
+/** Does an account-store row with key @a key travel between servers
+ * (pull replies, burst rows) and belong to a user's METADATA CLEAR?
+ * (push-2 final fix wave, M-2.)  Not the internal keys:
+ *   - "last_present" (any case): each server's own observation of when
+ *     the account was last present, a TTL row account_conn.c writes and
+ *     reads locally;
+ *   - any key the wire validator refuses (md_wire_key_valid).
+ * @return 1 if @a key is replicated, 0 if it stays on this server.
+ */
+extern int md_key_replicable(const char *key);
+
 #endif /* INCLUDED_metadata_lww_h */

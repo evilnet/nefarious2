@@ -1039,6 +1039,39 @@ static void test_topn_insert_rejects_bad_args(void **state)
   assert_int_equal(-1, md_topn_insert(kept, slot, &count, 2, &s));
 }
 
+/* ------------------------------------------------------------------ */
+/* md_key_replicable (push-2 final fix wave, M-2)                      */
+/* ------------------------------------------------------------------ */
+
+static void test_key_replicable(void **state)
+{
+  char longkey[65];
+  size_t i;
+
+  (void)state;
+
+  /* The user's own keys and the mode-synced / persistence keys travel. */
+  assert_int_equal(1, md_key_replicable("pronouns"));
+  assert_int_equal(1, md_key_replicable("umode.invisible"));
+  assert_int_equal(1, md_key_replicable("draft/persistence/hold"));
+  assert_int_equal(1, md_key_replicable("draft/persistence/profile/x/auto-replay"));
+  /* last_present is this server's own observation (a TTL row): never
+   * replicated or cleared, in any case. */
+  assert_int_equal(0, md_key_replicable("last_present"));
+  assert_int_equal(0, md_key_replicable("LAST_PRESENT"));
+  assert_int_equal(1, md_key_replicable("last_present2"));
+  assert_int_equal(1, md_key_replicable("last_presen"));
+  /* A key the wire validator refuses never goes out either. */
+  assert_int_equal(0, md_key_replicable(NULL));
+  assert_int_equal(0, md_key_replicable(""));
+  assert_int_equal(0, md_key_replicable("1abc"));
+  assert_int_equal(0, md_key_replicable("has space"));
+  for (i = 0; i < 64; i++)
+    longkey[i] = 'a';
+  longkey[64] = '\0';
+  assert_int_equal(0, md_key_replicable(longkey));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1085,6 +1118,7 @@ int main(void)
     cmocka_unit_test(test_topn_insert_evicts_into_oldest_slot),
     cmocka_unit_test(test_topn_insert_ascending_walk),
     cmocka_unit_test(test_topn_insert_rejects_bad_args),
+    cmocka_unit_test(test_key_replicable),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
