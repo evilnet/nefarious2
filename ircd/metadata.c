@@ -1955,21 +1955,34 @@ static const struct {
   { NULL, 0, 0 }
 };
 
-/** The memory+flags half of metadata_set_client: updates @a cptr's
- * in-memory MetadataEntry list and its mode-sync flags
- * (metadata_mode_sync[]) for one key change.  No store write, no doc
- * mirror -- callers that also need to persist do that themselves.
- * Factored out so metadata_account_apply_memory (W4: apply an
- * account-store change to every client logged into the account, local
- * or remote) can reuse exactly this per-client logic instead of
- * duplicating it.
- * @param[in] cptr Client whose in-memory cache (and mode flags) change.
- * @param[in] key Key name.
- * @param[in] value Value to set, or NULL to delete.
- * @param[in] visibility Visibility level for a set; ignored for a delete.
- */
-static void metadata_apply_client_memory(struct Client *cptr, const char *key,
-                                         const char *value, int visibility)
+/** The metadata_mode_sync[] row for @a key, or -1 when the key is not
+ * mode-synced. */
+static int metadata_mode_sync_index(const char *key)
+{
+  int i;
+
+  for (i = 0; metadata_mode_sync[i].key; i++)
+    if (ircd_strcmp(key, metadata_mode_sync[i].key) == 0)
+      return i;
+  return -1;
+}
+
+/** Whether mode-sync row @a i's flag is on for @a value. */
+static int metadata_mode_sync_want(int i, const char *value)
+{
+  if (metadata_mode_sync[i].invert)
+    /* Inverted: value "0" or empty = set flag; NULL or truthy = clear flag.
+     * For chathistory.pm: "0" = opted out (flag set), deleted = not opted
+     * out (flag clear). */
+    return value && (value[0] == '\0' || value[0] == '0');
+  /* Normal: value present & truthy = set flag; NULL/empty/"0" = clear flag */
+  return value && value[0] != '\0' && value[0] != '0';
+}
+
+/** The in-memory list half of metadata_apply_client_memory: @a cptr's
+ * MetadataEntry for @a key set, updated or deleted; no flag. */
+static void metadata_apply_entry_list(struct Client *cptr, const char *key,
+                                      const char *value, int visibility)
 {
   struct MetadataEntry *entry, *prev = NULL;
 
@@ -2011,28 +2024,34 @@ static void metadata_apply_client_memory(struct Client *cptr, const char *key,
     }
   }
 
+}
+
+/** The memory+flags half of metadata_set_client: updates @a cptr's
+ * in-memory MetadataEntry list and sets its mode-sync flag
+ * (metadata_mode_sync[]) silently -- no echo, no M line, no count -- for
+ * one key change.  No store write.  For paths that echo and count
+ * themselves (set_user_mode's own letters, metadata_client_memory_set) or
+ * write a client that has no account (metadata_set_client).  An account
+ * row's mode-synced key is applied by metadata_account_apply_memory
+ * instead, through umode_sync_apply.
+ * @param[in] cptr Client whose in-memory cache (and mode flags) change.
+ * @param[in] key Key name.
+ * @param[in] value Value to set, or NULL to delete.
+ * @param[in] visibility Visibility level for a set; ignored for a delete.
+ */
+static void metadata_apply_client_memory(struct Client *cptr, const char *key,
+                                         const char *value, int visibility)
+{
+  int i;
+
+  metadata_apply_entry_list(cptr, key, value, visibility);
+
   /* Sync metadata keys with user mode flags */
-  if (IsUser(cptr)) {
-    int i;
-    for (i = 0; metadata_mode_sync[i].key; i++) {
-      if (ircd_strcmp(key, metadata_mode_sync[i].key) == 0) {
-        if (metadata_mode_sync[i].invert) {
-          /* Inverted: value "0" or empty = set flag; NULL or truthy = clear flag.
-           * For chathistory.pm: "0" = opted out (flag set), deleted = not opted out (flag clear). */
-          if (value && (value[0] == '\0' || value[0] == '0'))
-            SetFlag(cptr, metadata_mode_sync[i].flag);
-          else
-            ClrFlag(cptr, metadata_mode_sync[i].flag);
-        } else {
-          /* Normal: value present & truthy = set flag; NULL/empty/"0" = clear flag */
-          if (value && value[0] != '\0' && value[0] != '0')
-            SetFlag(cptr, metadata_mode_sync[i].flag);
-          else
-            ClrFlag(cptr, metadata_mode_sync[i].flag);
-        }
-        break;
-      }
-    }
+  if (IsUser(cptr) && (i = metadata_mode_sync_index(key)) >= 0) {
+    if (metadata_mode_sync_want(i, value))
+      SetFlag(cptr, metadata_mode_sync[i].flag);
+    else
+      ClrFlag(cptr, metadata_mode_sync[i].flag);
   }
 }
 
@@ -2088,6 +2107,14 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
  * need the store write call metadata_account_put_versioned /
  * metadata_account_merge separately.
  *
+ * A mode-synced key (metadata_mode_sync[]) is the exception (fix round 2,
+ * account-wide and echoed): only this server's own connections of the
+ * account are touched; each one whose mode differs is changed the way a
+ * self MODE looks (umode_sync_apply: flag, counts, echo, M line, session
+ * mirror); a device (alias) takes the list entry only and follows its
+ * primary through the session mirror; a remote copy is left to its
+ * server's M line.
+ *
  * Notification: PRIVATE delivers to every session of the account
  * regardless of which nick resolves it (metadata_notify_subscribers'
  * own account-wide PRIVATE scoping), so one call -- using any one
@@ -2102,23 +2129,46 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
 void metadata_account_apply_memory(const char *account, const char *key,
                                    const char *value, int vis)
 {
-  struct Client *cptr;
+  struct Client *cptr, *next;
   int private_notified = 0;
   const char *notified_nicks[64];
   int notified_count = 0;
+  int ms;
 
   if (!account || !key)
     return;
   if (strlen(key) >= METADATA_KEY_LEN)
     return;   /* can't fit the in-memory key buffer */
 
-  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+  ms = metadata_mode_sync_index(key);
+
+  for (cptr = GlobalClientList; cptr; cptr = next) {
+    next = cli_next(cptr);
     if (!IsUser(cptr) || !cli_user(cptr) || !cli_user(cptr)->account[0])
       continue;
     if (ircd_strcmp(cli_user(cptr)->account, account) != 0)
       continue;
 
-    metadata_apply_client_memory(cptr, key, value, vis);
+    if (ms >= 0) {
+      /* A mode-synced key (W4 Task 8 fix round 2, user decision
+       * 2026-11-01: account-wide and echoed).  Our own connections only:
+       * a remote copy changes by its server's M line, never by the row.
+       * A device (alias) takes the list entry; its mode follows its
+       * primary through the session mode mirror -- the primary's here
+       * (umode_sync_apply's mirror call) or another server's (that
+       * server's M line, set_user_mode's mirror call), each telling the
+       * device once.  Any other connection of ours whose mode differs is
+       * changed the way a self MODE looks (umode_sync_apply).  Connections
+       * of the account on a legacy server are out of reach: nobody here
+       * can tell them. */
+      if (!MyConnect(cptr))
+        continue;
+      metadata_apply_entry_list(cptr, key, value, vis);
+      if (!IsBouncerAlias(cptr))
+        umode_sync_apply(cptr, metadata_mode_sync[ms].flag,
+                         metadata_mode_sync_want(ms, value));
+    } else
+      metadata_apply_client_memory(cptr, key, value, vis);
 
     if (IsBouncerAlias(cptr))
       continue;

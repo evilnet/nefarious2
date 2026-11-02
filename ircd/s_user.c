@@ -2304,6 +2304,38 @@ void userstats_count_clear(struct Client *cptr)
   }
 }
 
+void umode_sync_apply(struct Client *cptr, int flag, int on)
+{
+  struct Flags before;
+
+  /* Our own connections only: a remote copy changes by its server's M
+   * line, never by the account row.  A device (alias) follows its
+   * primary through the session mode mirror, never by the row. */
+  if (!cptr || !MyUser(cptr) || IsBouncerAlias(cptr))
+    return;
+  if ((HasFlag(cptr, (enum Flag)flag) ? 1 : 0) == (on ? 1 : 0))
+    return;   /* already so: nothing to tell (the mirror may have set it) */
+
+  before = cli_flags(cptr);
+  if (on)
+    SetFlag(cptr, (enum Flag)flag);
+  else
+    ClrFlag(cptr, (enum Flag)flag);
+  /* The counts follow the flag, as after any mode change (+i/-i). */
+  userstats_count_sync(cptr);
+  /* An M line to every server, as a self MODE sends: the other servers'
+   * copies (and legacy peers) learn the mode from it.  A fork server that
+   * gets it over an IRCv3-aware link changes memory only and writes no
+   * row (umode_md_write). */
+  send_umode_out(NULL, cptr, &before, 0);
+  /* Told as its own mode change, unless no one is on the socket. */
+  if (!IsBouncerHold(cptr) && !IsDead(cptr))
+    send_umode(cptr, cptr, &before, ALL_UMODES);
+  /* Its session's devices here follow it through the existing mirror,
+   * each told its own change once; this connection was told above. */
+  bounce_sync_session_umodes(cptr, NULL, cptr);
+}
+
 /** One mode-synced metadata key a MODE command changed (umode.*,
  * chathistory.*, draft/persistence/hold): its final value in this
  * command.  The values are string literals. */

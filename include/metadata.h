@@ -520,8 +520,11 @@ extern int metadata_account_foreach_version(const char *account,
 /** Apply an account-store change to every IsUser client logged into
  * @a account, local or remote: updates the in-memory MetadataEntry list
  * (metadata_apply_client_memory's per-client half) and the mode-sync
- * flag table (metadata_mode_sync[]) for each.  Touches memory only — no
- * store write.  Keys of METADATA_KEY_LEN or longer are skipped (they
+ * flag table (metadata_mode_sync[]) for each.  A mode-synced key touches
+ * only this server's own connections: each non-device connection whose
+ * mode differs is changed as a self MODE (umode_sync_apply: echo, counts,
+ * M line, session mirror); remote copies change by their servers' M
+ * lines.  No store write.  Keys of METADATA_KEY_LEN or longer are skipped (they
  * cannot fit the in-memory key buffer).  Notifies local
  * draft/metadata-2 subscribers once for a PRIVATE key (any one session
  * of the account resolves every session, per metadata_notify_subscribers'
