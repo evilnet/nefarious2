@@ -1058,13 +1058,27 @@ static void md_clear_key_free(struct md_clear_key *head)
   }
 }
 
+/** metadata_account_foreach_version callback for a user CLEAR's store
+ * residue: every live row that is not draft/persistence/. */
+static int md_clear_residue_cb(const char *key, const struct md_version *v, void *arg)
+{
+  if (!v->tombstone && !metadata_key_is_server_managed(key))
+    md_clear_key_push((struct md_clear_key **)arg, key, v->vis);
+  return 0;
+}
+
 /** METADATA CLEAR on a user: delete each of its keys the way SET deletes
  * one (metadata_client_write: by account, else by session id), so every
  * server and -- for an account -- every client of it loses the key, and
- * subscribers are told; then metadata_clear_client for the store's
- * residue (rows no client here holds in memory).  The requester gets a
- * `metadata` batch with one RPL_KEYNOTSET per key it held in memory
- * (#605), before the deletes.
+ * subscribers are told.  draft/persistence/ keys are not the user's to
+ * clear (SET refuses them too): the hold and replay preferences and the
+ * profiles stay, here and on every other server (user-accepted fix,
+ * 2026-11-01; this used to wipe them through metadata_clear_client's
+ * whole-account store wipe).  For an account, the store's rows that no
+ * client here holds in memory (an offline SET, a key this client never
+ * loaded) are deleted too, as stamped tombstones every peer merges.
+ * The requester gets a `metadata` batch with one RPL_KEYNOTSET per key
+ * it held in memory (#605), before the deletes.
  */
 static void metadata_clear_user(struct Client *sptr, const char *display_target,
                                 struct Client *target_client)
@@ -1074,7 +1088,8 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
 
   /* Copied out first: every delete below edits this list. */
   for (entry = metadata_list_client(target_client); entry; entry = entry->next)
-    md_clear_key_push(&keys, entry->key, entry->visibility);
+    if (!metadata_key_is_server_managed(entry->key))
+      md_clear_key_push(&keys, entry->key, entry->visibility);
 
   send_batch_start(sptr, "metadata");
   for (k = keys; k; k = k->next)
@@ -1085,7 +1100,15 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
     metadata_client_write(sptr, target_client, k->key, NULL, k->vis);
   md_clear_key_free(keys);
 
-  metadata_clear_client(target_client);
+  if (cli_user(target_client)->account[0] && metadata_lmdb_is_available()) {
+    const char *account = cli_user(target_client)->account;
+
+    keys = NULL;
+    metadata_account_foreach_version(account, md_clear_residue_cb, &keys);
+    for (k = keys; k; k = k->next)
+      metadata_account_write(sptr, account, k->key, NULL, k->vis);
+    md_clear_key_free(keys);
+  }
 }
 
 /** Handle CLEAR subcommand.
