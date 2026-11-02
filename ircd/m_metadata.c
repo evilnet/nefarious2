@@ -58,6 +58,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <limits.h>
 
 /* Forward declarations */
 static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[]);
@@ -1721,6 +1722,61 @@ static int ms_metadata_pull(struct Client *cptr, struct Client *sptr,
   return 0;
 }
 
+/** MD .: the hop-local end marker closing a pull reply
+ * (mdsync_answer_pull's own closing line), consumed by Task 10's EOB
+ * queue to release its next batch.  Accepted only from a direct server
+ * link, same rule and reasoning as "MD ?" (ms_metadata_pull): a reply
+ * this close is meaningful only to the link whose request it closes,
+ * never to some indirect hop merely forwarding it on.
+ *
+ * The sequence number is parsed here, by hand, rather than through
+ * md_pull_parse (which expects the very different "? seq scope
+ * accounts" layout): a malformed or out-of-range field is dropped at
+ * L_DEBUG, not L_WARNING -- mdsync_on_pull_end treats a seq that
+ * simply does not match this link's one outstanding request exactly
+ * the same way, so a bad field here is no more a sign of real trouble
+ * than that case is.
+ * @param[in] cptr The link whose reply this closes (must equal @a sptr).
+ */
+static int ms_metadata_pull_end(struct Client *cptr, struct Client *sptr,
+                                int parc, char *parv[])
+{
+  const char *p;
+  unsigned long seq = 0;
+
+  if (!MyConnect(cptr) || sptr != cptr || !IsServer(sptr))
+    return 0;
+
+  if (parc < 3 || !parv[2] || !parv[2][0]) {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "ms_metadata: pull-end from %C with no sequence number - "
+              "ignored", sptr);
+    return 0;
+  }
+
+  for (p = parv[2]; *p; p++) {
+    unsigned long d;
+
+    if (*p < '0' || *p > '9') {
+      log_write(LS_SYSTEM, L_DEBUG, 0,
+                "ms_metadata: pull-end from %C has a malformed sequence "
+                "number '%s' - ignored", sptr, parv[2]);
+      return 0;
+    }
+    d = (unsigned long)(*p - '0');
+    if (seq > (ULONG_MAX - d) / 10) {
+      log_write(LS_SYSTEM, L_DEBUG, 0,
+                "ms_metadata: pull-end from %C has an out-of-range "
+                "sequence number '%s' - ignored", sptr, parv[2]);
+      return 0;
+    }
+    seq = seq * 10 + d;
+  }
+
+  mdsync_on_pull_end(cptr, seq);
+  return 0;
+}
+
 /** MD =account: the W4 stamped account-metadata row (classify,
  * md_wire_key_valid, md_stamp_parse, the forward-clock-skew refusal,
  * chunk reassembly on the LINK's state, the limits rule every other
@@ -1881,9 +1937,12 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   if (kind == MD_T_PULL)
     return ms_metadata_pull(cptr, sptr, parc, parv);
 
-  /* "." (pull end) is Task 10.  An unclassifiable target (bare sigil,
-   * empty, trailing garbage after "?"/".") is simply dropped. */
-  if (kind == MD_T_PULL_END || kind == MD_T_INVALID)
+  if (kind == MD_T_PULL_END)
+    return ms_metadata_pull_end(cptr, sptr, parc, parv);
+
+  /* An unclassifiable target (bare sigil, empty, trailing garbage
+   * after "?"/".") is simply dropped. */
+  if (kind == MD_T_INVALID)
     return 0;
 
   if (parc < 3)

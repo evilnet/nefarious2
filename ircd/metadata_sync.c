@@ -77,6 +77,9 @@ void mdsync_link_free(struct Client *server)
   if (!serv || !serv->mdsync)
     return;
 
+  /* Task 10: the EOB re-pull queue dies with the link -- nothing left
+   * to drain it once this server's Client goes away. */
+  MyFree(serv->mdsync->eob_queue);
   MyFree(serv->mdsync);
   serv->mdsync = NULL;
 }
@@ -593,6 +596,47 @@ static int mdsync_pull_recent(const char *account, char scope)
   return (r->scope == 'A') || (r->scope == scope);
 }
 
+/** Send one "MD ? <seq> <scope> <acct>[,<acct>...]" pull request to
+ * @a link: up to 16 comma-joined account names.  Shared by
+ * mdsync_on_attach (a single account, seq 0 -- unqueued, no reply
+ * tracked) and Task 10's EOB queue (mdsync_eob_send_next, up to 16
+ * accounts per batch, seq = that link's own outstanding request
+ * number).  A no-op on a link that is not IRCv3-aware, matching every
+ * other new MD form's guard (metadata_emit_versioned, mdsync_answer_pull):
+ * an older fork peer would otherwise see a wire form it cannot parse.
+ * @param[in] link The directly-connected server to ask.
+ * @param[in] seq The request's sequence number (0 = unqueued).
+ * @param[in] scope 'A' (rows + markers) or 'R' (rows only).
+ * @param[in] accounts Account names to ask about.
+ * @param[in] n Number of entries in @a accounts (1-16).
+ */
+static void mdsync_send_pull(struct Client *link, unsigned long seq,
+                             char scope, const char * const *accounts, int n)
+{
+  char joined[16 * (ACCOUNTLEN + 1)];
+  size_t len = 0;
+  int i;
+
+  if (!link || !IsIRCv3Aware(link) || !accounts || n <= 0)
+    return;
+
+  for (i = 0; i < n; i++) {
+    size_t alen = strlen(accounts[i]);
+    size_t sep = (i > 0) ? 1 : 0;
+
+    if (len + sep + alen >= sizeof(joined))
+      break;   /* unreachable in practice: callers cap at 16 names of
+                * at most ACCOUNTLEN bytes each */
+    if (sep)
+      joined[len++] = ',';
+    memcpy(joined + len, accounts[i], alen);
+    len += alen;
+  }
+  joined[len] = '\0';
+
+  sendcmdto_one(&me, CMD_METADATA, link, "? %lu %c %s", seq, scope, joined);
+}
+
 void mdsync_on_attach(struct Client *cptr, const char *account)
 {
   char scope;
@@ -626,13 +670,280 @@ void mdsync_on_attach(struct Client *cptr, const char *account)
    * the second, useful one within MDSYNC_PULL_INTERVAL. */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     struct Client *link = lp->value.cptr;
+    const char *one[1];
 
     if (!IsIRCv3Aware(link) || IsBurst(link))
       continue;
-    sendcmdto_one(&me, CMD_METADATA, link, "? 0 %c %s", scope, account);
+    one[0] = account;
+    mdsync_send_pull(link, 0, scope, one, 1);
     sent = 1;
   }
 
   if (sent)
     mdsync_note_pulled(account, scope);
+}
+
+/* ------------------------------------------------------------------ */
+/* Task 10: end-of-burst re-pull queue                                 */
+/* ------------------------------------------------------------------ */
+
+/** Transient dedup table used only while building one link's EOB
+ * re-pull queue (mdsync_link_eob): maps a casefolded account name to
+ * the scope ('A' or 'R') it will be queued at, so a LATER local match
+ * can upgrade an earlier remote-only entry from 'R' to 'A' via a
+ * direct lookup instead of a linear search over everything already
+ * appended.  Sized and probed the same way as mdsync_pull_table above
+ * (same mdsync_pull_hash); on the same impossibly-unlikely "every slot
+ * full of other accounts" overflow, the account being inserted is
+ * simply skipped (logged at L_WARNING) rather than clearing a table
+ * that is only alive for the one mdsync_link_eob() call that built it. */
+#define MDSYNC_EOB_DEDUP_SIZE MDSYNC_PULL_TABLE_SIZE
+
+struct mdsync_eob_dedup {
+  char account[ACCOUNTLEN + 1];
+  char scope;
+  unsigned char used;
+};
+
+/** Find @a key's slot in @a table, creating one if @a key is not
+ * already present.  Open addressing, no deletions (the table lives
+ * only for the duration of one mdsync_link_eob() call).
+ * @return the slot, or NULL if every slot is used by some OTHER key.
+ */
+static struct mdsync_eob_dedup *mdsync_eob_dedup_slot(
+    struct mdsync_eob_dedup *table, const char *key)
+{
+  unsigned int h = mdsync_pull_hash(key) % MDSYNC_EOB_DEDUP_SIZE;
+  unsigned int i;
+
+  for (i = 0; i < MDSYNC_EOB_DEDUP_SIZE; i++) {
+    struct mdsync_eob_dedup *slot =
+      &table[(h + i) % MDSYNC_EOB_DEDUP_SIZE];
+
+    if (!slot->used || 0 == strcmp(slot->account, key))
+      return slot;
+  }
+  return NULL;
+}
+
+/** Send @a link's next EOB batch (<=16 accounts, one scope), or --
+ * once its queue is exhausted -- log the completion line and free it.
+ * Called once by mdsync_link_eob() to start a sweep, and once more by
+ * mdsync_on_pull_end() for every "MD . seq" that closes the previous
+ * batch (W4 plan Task 10: "one outstanding request; the next batch
+ * goes out only on MD . <outstanding seq>").  A batch never mixes
+ * scope -- the wire form carries exactly one scope token -- so it
+ * stops either at 16 entries or at the point (if any) where the
+ * queued scope changes, even though the two scope blocks are built
+ * contiguously by mdsync_link_eob().
+ * @param[in] link The link being asked (unchanged across the sweep).
+ * @param[in] st @a link's per-link state, already allocated by the
+ *            caller (mdsync_link_state(link)).
+ */
+static void mdsync_eob_send_next(struct Client *link, struct MdSyncLink *st)
+{
+  const char *batch[16];
+  char scope;
+  int n = 0;
+  unsigned int i;
+
+  if (st->eob_queue_next >= st->eob_queue_count) {
+    /* Reached only once a real sweep's queue (always built with at
+     * least one entry -- mdsync_link_eob never starts one with zero)
+     * has fully drained, so eob_queue_count here is never 0. */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "metadata sync with %C: %u accounts in %u requests",
+              link, st->eob_queue_count, st->eob_requests_sent);
+    MyFree(st->eob_queue);
+    st->eob_queue = NULL;
+    st->eob_queue_count = 0;
+    st->eob_queue_next = 0;
+    st->eob_outstanding_seq = 0;
+    return;
+  }
+
+  scope = st->eob_queue[st->eob_queue_next].scope;
+  for (i = st->eob_queue_next;
+       i < st->eob_queue_count && n < 16 && st->eob_queue[i].scope == scope;
+       i++)
+    batch[n++] = st->eob_queue[i].account;
+
+  st->eob_seq_next++;
+  if (st->eob_seq_next == 0)   /* wrapped past ULONG_MAX: 0 means "unqueued" */
+    st->eob_seq_next = 1;
+  st->eob_outstanding_seq = st->eob_seq_next;
+
+  mdsync_send_pull(link, st->eob_outstanding_seq, scope, batch, n);
+  st->eob_requests_sent++;
+  st->eob_queue_next += (unsigned int)n;
+}
+
+void mdsync_link_eob(struct Client *link)
+{
+  struct MdSyncLink *st;
+  struct mdsync_eob_dedup *dedup;
+  struct Client *acptr;
+  unsigned int a_count, r_count, total, idx;
+  int i;
+
+  if (!link || !IsIRCv3Aware(link))
+    return;
+  if (!metadata_lmdb_is_available())
+    return;
+
+  dedup = (struct mdsync_eob_dedup *)MyMalloc(MDSYNC_EOB_DEDUP_SIZE *
+                                              sizeof(*dedup));
+  if (!dedup)
+    return;
+  memset(dedup, 0, MDSYNC_EOB_DEDUP_SIZE * sizeof(*dedup));
+
+  /* Every attached account on the whole network, not just the ones
+   * this link introduced: a relink can follow a split during which
+   * THIS link's view went stale regardless of which "side" an account
+   * is nominally on (W4 plan Task 10). */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    char key[ACCOUNTLEN + 1];
+    struct mdsync_eob_dedup *slot;
+    char scope;
+    const char *account;
+
+    if (!IsUser(acptr) || !IsAccount(acptr))
+      continue;
+    account = cli_user(acptr)->account;
+    if (!account[0])
+      continue;
+
+    mdsync_pull_key(key, account);
+    /* A held ghost is still MyConnect (bouncer hold/revive keeps the
+     * local Client around) -- counts as local here exactly as
+     * mdsync_on_attach's own scope rule does. */
+    scope = MyConnect(acptr) ? 'A' : 'R';
+
+    slot = mdsync_eob_dedup_slot(dedup, key);
+    if (!slot) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "mdsync_link_eob: dedup table full building the EOB "
+                "re-pull queue for %C - account %s skipped",
+                link, key);
+      continue;
+    }
+    if (!slot->used) {
+      slot->used = 1;
+      ircd_strncpy(slot->account, key, sizeof(slot->account));
+      slot->scope = scope;
+    } else if (scope == 'A' && slot->scope == 'R') {
+      /* A local client of this account exists too -- 'A' always wins
+       * over an earlier 'R' seen from some other client of the same
+       * account, independent of which one this walk reached first. */
+      slot->scope = 'A';
+    }
+  }
+
+  a_count = 0;
+  r_count = 0;
+  for (idx = 0; idx < MDSYNC_EOB_DEDUP_SIZE; idx++) {
+    if (!dedup[idx].used)
+      continue;
+    if (dedup[idx].scope == 'A')
+      a_count++;
+    else
+      r_count++;
+  }
+  total = a_count + r_count;
+
+  if (total == 0) {
+    MyFree(dedup);
+    return;
+  }
+
+  st = mdsync_link_state(link);
+  if (!st) {
+    MyFree(dedup);
+    return;
+  }
+
+  /* A fresh queue replaces anything left over from an earlier sweep.
+   * Should never still be non-NULL here -- a queue always drains to
+   * NULL (mdsync_eob_send_next) long before this same link could end
+   * another burst -- but freed defensively rather than assumed. */
+  MyFree(st->eob_queue);
+
+  st->eob_queue =
+    (struct MdSyncEobEntry *)MyMalloc(total * sizeof(struct MdSyncEobEntry));
+  if (!st->eob_queue) {
+    MyFree(dedup);
+    return;
+  }
+
+  /* 'A' entries first, then 'R' (W4 plan Task 10 rule) -- two passes
+   * over the dedup table rather than one, since open addressing gives
+   * no insertion order to rely on. */
+  idx = 0;
+  for (i = 0; i < (int)MDSYNC_EOB_DEDUP_SIZE; i++) {
+    if (dedup[i].used && dedup[i].scope == 'A') {
+      ircd_strncpy(st->eob_queue[idx].account, dedup[i].account,
+                  sizeof(st->eob_queue[idx].account));
+      st->eob_queue[idx].scope = 'A';
+      idx++;
+    }
+  }
+  for (i = 0; i < (int)MDSYNC_EOB_DEDUP_SIZE; i++) {
+    if (dedup[i].used && dedup[i].scope == 'R') {
+      ircd_strncpy(st->eob_queue[idx].account, dedup[i].account,
+                  sizeof(st->eob_queue[idx].account));
+      st->eob_queue[idx].scope = 'R';
+      idx++;
+    }
+  }
+
+  MyFree(dedup);
+
+  /* eob_seq_next is deliberately NOT reset here: it only ever counts
+   * up for this link's whole lifetime, so a stray "MD ." reply left
+   * over from an abandoned earlier sweep (this link bursting twice in
+   * one session, however unlikely) can never alias onto THIS sweep's
+   * first request -- mdsync_on_pull_end's exact-match check already
+   * ignores a non-matching seq, but only a counter that never repeats
+   * keeps that guarantee even across two sweeps on the same link. */
+  st->eob_queue_count = total;
+  st->eob_queue_next = 0;
+  st->eob_requests_sent = 0;
+  st->eob_outstanding_seq = 0;
+
+  /* Each queued account is noted pulled right away -- not only once
+   * its batch actually sends -- so a near-simultaneous attach pull
+   * (mdsync_on_attach) sees it as already covered and does not fire a
+   * second, redundant ask while this sweep is still working through
+   * its own queue (W4 plan Task 10). */
+  for (i = 0; i < (int)total; i++)
+    mdsync_note_pulled(st->eob_queue[i].account, st->eob_queue[i].scope);
+
+  mdsync_eob_send_next(link, st);
+}
+
+void mdsync_on_pull_end(struct Client *link, unsigned long seq)
+{
+  struct Server *serv;
+  struct MdSyncLink *st;
+
+  if (!link)
+    return;
+
+  serv = cli_serv(link);
+  /* Read-only lookup -- never mdsync_link_state(), which would
+   * allocate a struct MdSyncLink for a link that has none because it
+   * never got an EOB sweep (a peer not yet past its own burst, or one
+   * with nothing to ask). */
+  st = serv ? serv->mdsync : NULL;
+
+  if (!st || !st->eob_outstanding_seq || seq != st->eob_outstanding_seq) {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "mdsync_on_pull_end: stray or stale seq %lu from %C "
+              "(outstanding %lu) - ignored",
+              seq, link, st ? st->eob_outstanding_seq : 0UL);
+    return;
+  }
+
+  st->eob_outstanding_seq = 0;
+  mdsync_eob_send_next(link, st);
 }

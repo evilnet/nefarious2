@@ -12,22 +12,50 @@
 #ifndef INCLUDED_metadata_lww_h
 #include "metadata_lww.h"
 #endif
+#ifndef INCLUDED_ircd_defs_h
+#include "ircd_defs.h"          /* ACCOUNTLEN */
+#endif
 
 struct Client;
 
+/** One account queued in a link's EOB re-pull sweep (Task 10): its
+ * folded name (the same casefold every store key and the attach-pull
+ * dedup table use) and the scope ('A' or 'R') it will be asked at.
+ */
+struct MdSyncEobEntry {
+  char account[ACCOUNTLEN + 1];
+  char scope;
+};
+
 /** Per-link state for the stamped account-metadata sync protocol,
- * hung off cli_serv(link)->mdsync.  This task (W4 Task 3) only needs
- * the chunk-reassembly state for a `+`-continued "=account" row.
- * Task 10 adds this link's pull-queue fields (outstanding sequence
- * number, queued accounts awaiting a reply, etc.) to this SAME struct
- * -- keep it a real struct, not an opaque buffer, so that addition is
- * a field, not a redesign.
+ * hung off cli_serv(link)->mdsync.  Task 3 only needed the
+ * chunk-reassembly state for a `+`-continued "=account" row; Task 10
+ * adds this link's EOB re-pull queue to the SAME struct -- kept a real
+ * struct, not an opaque buffer, so that addition is a field, not a
+ * redesign.
  */
 struct MdSyncLink {
   struct md_chunk chunk;  /**< reassembly state for a `+`-continued row */
   time_t limit_notice_last;  /**< CurrentTime of the last SNO_NETWORK
                                *   over-limit notice sent for this link
                                *   (0 = none yet); Task 5, W4 plan 1.8. */
+
+  /** Task 10: this link's end-of-burst re-pull queue.  Built once by
+   * mdsync_link_eob() (every attached account on the whole network,
+   * 'A'-scope entries first, then 'R'-scope), drained in <=16-account
+   * batches by mdsync_eob_send_next(), one batch in flight at a time.
+   * NULL when no sweep is in progress (also its state right after
+   * mdsync_link_free() -- the queue dies with the link). */
+  struct MdSyncEobEntry *eob_queue;
+  unsigned int eob_queue_count;    /**< total entries in eob_queue */
+  unsigned int eob_queue_next;     /**< index of the next entry to send */
+  unsigned long eob_seq_next;      /**< next sequence number to hand out,
+                                      *   incremented before use; never 0
+                                      *   (0 means "unqueued", mdsync_on_attach) */
+  unsigned long eob_outstanding_seq; /**< the one in-flight request's
+                                        *   sequence number, 0 = none */
+  unsigned int eob_requests_sent;  /**< "MD ?" batches sent so far this
+                                      *   sweep, for the completion log line */
 };
 
 /** Return this link's chunk-reassembly state, lazily allocating
@@ -178,5 +206,41 @@ extern void mdsync_on_attach(struct Client *cptr, const char *account);
  * @param[in] scope 'A' (rows + markers) or 'R' (rows only).
  */
 extern void mdsync_note_pulled(const char *account, char scope);
+
+/** Re-pull every attached account from @a link at the end of its
+ * burst to us (ms_end_of_burst's MyConnect(sptr) branch): a relink can
+ * follow a split during which THIS link, not the account's own side,
+ * missed writes, so every account attached anywhere on the network is
+ * asked of it, not just the ones it introduced.  Walks GlobalClientList
+ * for IsUser && IsAccount clients, dedupes by folded account name, and
+ * scopes each one 'A' if any client of it is local (MyConnect; a held
+ * ghost counts) or 'R' otherwise.  Queues every one of them regardless
+ * of mdsync_on_attach's 60s window (another peer's pull may have
+ * already satisfied it; this relinking link still needs asking), 'A'
+ * entries first, then 'R', and immediately calls mdsync_note_pulled on
+ * each so a near-simultaneous attach pull does not also ask for it.
+ * Sends the first <=16-account "MD ? <seq> <scope> ..." batch itself;
+ * mdsync_on_pull_end sends the rest, one batch in flight at a time.  A
+ * no-op when @a link is not IRCv3-aware, storage is unavailable, or no
+ * account is attached anywhere.  The queue is freed with the link
+ * (mdsync_link_free) if it never finishes draining.
+ * @param[in] link The directly-connected server that just finished its
+ *            burst to us.
+ */
+extern void mdsync_link_eob(struct Client *link);
+
+/** Handle "MD . <seq>" from @a link: if @a seq matches @a link's one
+ * outstanding EOB re-pull request (mdsync_link_eob /
+ * mdsync_on_pull_end's own previous call), clear it and send the
+ * queue's next batch, if any remain, logging the L_INFO completion
+ * line once the queue is empty.  A @a seq that does not match the
+ * outstanding one (including when @a link has no queue at all, e.g.
+ * it never ran Task 9/10 or has nothing to ask) is a stray or stale
+ * reply and is ignored, logged at L_DEBUG only -- never a sign of a
+ * real desync, since this link's own queue is unaffected either way.
+ * @param[in] link The link whose pull-end this is.
+ * @param[in] seq The sequence number it echoed back.
+ */
+extern void mdsync_on_pull_end(struct Client *link, unsigned long seq);
 
 #endif /* INCLUDED_metadata_sync_h */
