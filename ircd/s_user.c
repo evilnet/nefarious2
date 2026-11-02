@@ -2399,13 +2399,15 @@ static void umode_md_note(struct umode_md *t, int *n, struct Client *acptr,
 
 /** Each mode-synced key's flag and the values set_user_mode notes for it
  * (the letters' own: on = the flag set, off = the flag cleared). */
-static const struct {
+struct umode_md_key {
   const char *key;
   int flag;
   const char *on;
   int on_vis;
   const char *off;
-} umode_md_keys[] = {
+};
+
+static const struct umode_md_key umode_md_keys[] = {
   { "umode.invisible",        FLAG_INVISIBLE,        "1", METADATA_VIS_PRIVATE, NULL },
   { "umode.nochan",           FLAG_NOCHAN,           "1", METADATA_VIS_PRIVATE, NULL },
   { "umode.commonchansonly",  FLAG_COMMONCHANSONLY,  "1", METADATA_VIS_PRIVATE, NULL },
@@ -2417,15 +2419,56 @@ static const struct {
   { NULL, 0, NULL, 0, NULL }
 };
 
+/** For umode_md_finalize's M-d drop: does the hold preference's stored
+ * row differ from @a value (the note), for a key whose flag did not
+ * move?  Only the hold key can (its row has a third state, none = the
+ * network default, that the flag cannot show); every other key's flag
+ * is its whole state, so an unmoved flag never differs.  Read from the
+ * account's store; no account (or no store): nothing to write anyway. */
+static int umode_md_row_differs(struct Client *acptr,
+                                const struct umode_md_key *kr,
+                                const char *value)
+{
+  struct md_version v;
+  char valbuf[METADATA_VALUE_LEN];
+  const char *stored;
+
+  if (kr->flag != FLAG_BNC_HOLDPREF)
+    return 0;
+  if (!IsUser(acptr) || !cli_user(acptr)->account[0]
+      || !metadata_lmdb_is_available())
+    return 0;
+  if (metadata_account_get_version(cli_user(acptr)->account, kr->key, &v,
+                                   valbuf, sizeof(valbuf)) != 0
+      || v.tombstone)
+    stored = NULL;
+  else
+    stored = v.value;
+  if (!stored || !value)
+    return stored != value;
+  return 0 != strcmp(stored, value);
+}
+
 /** After the mode loop and the rules that take back modes the user may
  * not hold (a +p without PRIV_HIDE_CHANNELS, ...): every noted key's
  * value is what @a acptr's FINAL flag says, not the letter's -- a refused
- * +p must not be written as umode.nochan=1 (fix round 3, N2).  When the
- * rules took the letter back and the flag is where it was before the
- * command (@a before), the command changed nothing for that key and the
- * note is dropped: nothing is written, as for a refused +b (U2) -- a
- * write of "off" would take the mode from the account's other, privileged
- * connections.  The memory entry follows the value. */
+ * +p must not be written as umode.nochan=1 (fix round 3, N2).  The memory
+ * entry follows the value.
+ *
+ * A key whose flag is where it was before the command (@a before) is
+ * dropped: the command changed nothing for it, and nothing is written
+ * (push-2 final fix wave, M-d).  That covers a letter the rules took
+ * back (as for a refused +b, U2 -- a write of "off" would take the mode
+ * from the account's other, privileged connections), a letter that
+ * re-asserts the flag (a client's auto MODE +i at connect, when the
+ * connection already has the account's +i: a fresh row would stamp the
+ * account's +i anew and could undo a -i another connection made), and a
+ * +x-x pair.  The hold preference is the one exception: its flag shows
+ * only on/off, but the account's row has three states (1, 0, none = the
+ * default), so a -b on a connection already -b is still the user's
+ * opt-out ("0") when the row is not "0" yet -- under
+ * BOUNCER_DEFAULT_HOLD, without it the next login would make a session
+ * again.  It is dropped only when the row already says what it notes. */
 static void umode_md_finalize(struct umode_md *t, int *n, struct Client *acptr,
                               const struct Flags *before)
 {
@@ -2441,16 +2484,18 @@ static void umode_md_finalize(struct umode_md *t, int *n, struct Client *acptr,
       continue;
     want = HasFlag(acptr, (enum Flag)umode_md_keys[k].flag)
            ? umode_md_keys[k].on : umode_md_keys[k].off;
-    if ((!want && !t[i].value)
-        || (want && t[i].value && 0 == strcmp(want, t[i].value)))
-      continue;   /* the letter's value stands */
-    t[i].value = want;
-    if (want)
-      t[i].vis = umode_md_keys[k].on_vis;
-    metadata_client_memory_set(acptr, t[i].key, t[i].value, t[i].vis);
+    if (!((!want && !t[i].value)
+          || (want && t[i].value && 0 == strcmp(want, t[i].value)))) {
+      /* The rules changed the letter's value: the final flag's stands. */
+      t[i].value = want;
+      if (want)
+        t[i].vis = umode_md_keys[k].on_vis;
+      metadata_client_memory_set(acptr, t[i].key, t[i].value, t[i].vis);
+    }
     if ((FlagHas(before, (enum Flag)umode_md_keys[k].flag) ? 1 : 0)
-        == (HasFlag(acptr, (enum Flag)umode_md_keys[k].flag) ? 1 : 0)) {
-      t[i] = t[--(*n)];   /* taken back: no change to write */
+        == (HasFlag(acptr, (enum Flag)umode_md_keys[k].flag) ? 1 : 0)
+        && !umode_md_row_differs(acptr, &umode_md_keys[k], t[i].value)) {
+      t[i] = t[--(*n)];   /* the flag did not move: nothing to write */
       i--;
     }
   }
