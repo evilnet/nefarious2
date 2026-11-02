@@ -146,4 +146,37 @@ extern void mdsync_answer_pull(struct Client *link, unsigned long seq,
 extern void mdsync_limit_notice(struct Client *link, const char *target,
                                 const char *key, const char *why);
 
+/** Pull an account's rows (and, for a local attach, its read markers)
+ * from every other direct fork peer, called at the end of
+ * metadata_load_account() -- i.e. at every point an account attaches to
+ * a client, local or remote (register_user, SVSMODE/server MODE +r,
+ * post-reg REGISTER, S2S ACCOUNT R/M/legacy-AC, the pre-reg LOC reply,
+ * SASL reauth, and bouncer ghost restore at startup).
+ *
+ * A no-op when storage is unavailable.  Scope is 'A' (rows + markers)
+ * when @a cptr is a local client (MyConnect), else 'R' (rows only) --
+ * markers are only useful to notify a client THIS server owns.  Skips a
+ * remote @a cptr still mid-burst from this server's point of view
+ * (Task 10's EOB queue re-pulls it once the burst ends instead).  Skips
+ * when @a account was already pulled within MDSYNC_PULL_INTERVAL at a
+ * scope that covers this one (mdsync_note_pulled's table).  Otherwise
+ * sends "MD ? 0 <scope> <account>" (seq 0: unqueued, Task 10's EOB queue
+ * numbers its own requests) to every directly-connected IRCv3-aware
+ * server link not itself mid-burst.  Replies come back through the
+ * existing "=account" row receiver and ms_markread.
+ * @param[in] cptr The client that just attached @a account.
+ * @param[in] account Account name.
+ */
+extern void mdsync_on_attach(struct Client *cptr, const char *account);
+
+/** Record that @a account was just pulled at @a scope, for
+ * mdsync_on_attach's dedup table (and Task 10's EOB re-pull, which
+ * shares it).  Keyed by @a account casefolded the way every store key
+ * is; the table holds MDSYNC_PULL_TABLE_SIZE accounts and is cleared
+ * whole, not evicted one at a time, when a new account finds it full.
+ * @param[in] account Account name.
+ * @param[in] scope 'A' (rows + markers) or 'R' (rows only).
+ */
+extern void mdsync_note_pulled(const char *account, char scope);
+
 #endif /* INCLUDED_metadata_sync_h */

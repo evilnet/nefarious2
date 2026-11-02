@@ -50,6 +50,7 @@
 #include "ircd_string.h"
 #include "metadata.h"
 #include "metadata_lww.h"
+#include "metadata_sync.h"
 #include "msg.h"
 #include "numeric.h"
 #include "s_debug.h"
@@ -2369,6 +2370,13 @@ void metadata_load_account(struct Client *cptr, const char *account)
   /* Load from LMDB */
   list = metadata_account_list(account);
   cli_metadata(cptr) = list;
+
+  /* W4 Task 9: every caller of this function is a point an account
+   * attaches to a client -- pull its rows (and, for a local attach, its
+   * read markers) from the other fork peers, in case this server missed
+   * an update made while split off.  Self-guarded (storage, the 60s
+   * dedup table, a mid-burst remote attach); see mdsync_on_attach. */
+  mdsync_on_attach(cptr, account);
 }
 
 /** Free all metadata for a client (called on disconnect).

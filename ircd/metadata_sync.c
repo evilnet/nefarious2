@@ -12,12 +12,14 @@
 
 #include "channel.h"
 #include "client.h"
+#include "db_casefold.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "metadata.h"
 #include "metadata_lww.h"
 #include "metadata_sync.h"
@@ -449,4 +451,188 @@ void mdsync_answer_pull(struct Client *link, unsigned long seq, char scope,
   }
 
   sendcmdto_one(&me, CMD_METADATA, link, ". %lu", seq);
+}
+
+/** Minimum gap between two attach-triggered pulls for the SAME account
+ * (W4 plan Bounds: "MDSYNC_PULL_INTERVAL"). */
+#define MDSYNC_PULL_INTERVAL 60
+
+/** Size of the attach-pull dedup table (W4 plan Bounds: "a 4096-entry
+ * table; a full table is cleared").  Open-addressed, no per-entry
+ * deletion: a full table (every slot holds some other account, within
+ * or outside the window) is wiped and the new entry starts a fresh
+ * table, rather than evicting one account to make room for another. */
+#define MDSYNC_PULL_TABLE_SIZE 4096
+
+/** One account's most recent attach pull: the scope it was pulled at
+ * ('A' or 'R') and when.  An empty account[0] marks a free slot. */
+struct mdsync_pull_record {
+  char   account[ACCOUNTLEN + 1];
+  char   scope;
+  time_t at;
+};
+
+static struct mdsync_pull_record mdsync_pull_table[MDSYNC_PULL_TABLE_SIZE];
+static unsigned int mdsync_pull_table_used;
+
+/** FNV-1a over @a key's bytes, same construction as mdsync_marker_cb's
+ * neighbours elsewhere in this file use for their own small hashes. */
+static unsigned int mdsync_pull_hash(const char *key)
+{
+  unsigned int h = 2166136261u;
+  const unsigned char *p;
+
+  for (p = (const unsigned char *)key; *p; p++) {
+    h ^= *p;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+/** Find @a key's slot (already casefolded, NUL-terminated) without
+ * creating one.  Open addressing with no deletions means the first free
+ * slot probed is proof no match follows it -- the walk can stop there
+ * instead of scanning the whole table.
+ * @return the slot, or NULL if @a key is not present.
+ */
+static struct mdsync_pull_record *mdsync_pull_find(const char *key)
+{
+  unsigned int h = mdsync_pull_hash(key) % MDSYNC_PULL_TABLE_SIZE;
+  unsigned int i;
+
+  for (i = 0; i < MDSYNC_PULL_TABLE_SIZE; i++) {
+    struct mdsync_pull_record *r =
+      &mdsync_pull_table[(h + i) % MDSYNC_PULL_TABLE_SIZE];
+
+    if (!r->account[0])
+      return NULL;
+    if (0 == strcmp(r->account, key))
+      return r;
+  }
+  return NULL;   /* every slot full, none matched -- treated as absent */
+}
+
+/** Find @a key's slot, creating one (clearing the whole table first if
+ * it is completely full of other accounts).
+ */
+static struct mdsync_pull_record *mdsync_pull_slot(const char *key)
+{
+  struct mdsync_pull_record *r = mdsync_pull_find(key);
+  unsigned int h, i;
+
+  if (r)
+    return r;
+
+  if (mdsync_pull_table_used >= MDSYNC_PULL_TABLE_SIZE) {
+    memset(mdsync_pull_table, 0, sizeof(mdsync_pull_table));
+    mdsync_pull_table_used = 0;
+  }
+
+  h = mdsync_pull_hash(key) % MDSYNC_PULL_TABLE_SIZE;
+  for (i = 0; i < MDSYNC_PULL_TABLE_SIZE; i++) {
+    struct mdsync_pull_record *slot =
+      &mdsync_pull_table[(h + i) % MDSYNC_PULL_TABLE_SIZE];
+
+    if (!slot->account[0]) {
+      mdsync_pull_table_used++;
+      return slot;
+    }
+  }
+  return NULL;   /* unreachable: mdsync_pull_table_used < SIZE guarantees
+                  * a free slot exists */
+}
+
+/** Casefold @a account (db_casefold_bytes, the same fold every store key
+ * uses) into @a out, truncated to ACCOUNTLEN like every other account
+ * buffer in this file.
+ */
+static void mdsync_pull_key(char *out, const char *account)
+{
+  size_t len = strlen(account);
+
+  if (len > ACCOUNTLEN)
+    len = ACCOUNTLEN;
+  db_casefold_bytes(out, account, len);
+  out[len] = '\0';
+}
+
+void mdsync_note_pulled(const char *account, char scope)
+{
+  char key[ACCOUNTLEN + 1];
+  struct mdsync_pull_record *r;
+
+  if (!account || !account[0])
+    return;
+
+  mdsync_pull_key(key, account);
+  r = mdsync_pull_slot(key);
+  if (!r)
+    return;
+
+  if (!r->account[0])
+    ircd_strncpy(r->account, key, sizeof(r->account));
+  r->scope = scope;
+  r->at = CurrentTime;
+}
+
+/** Whether @a account was already pulled, within MDSYNC_PULL_INTERVAL,
+ * at a scope that covers @a scope -- 'A' (rows + markers) covers both
+ * 'A' and 'R' (rows only); 'R' covers only another 'R'.
+ */
+static int mdsync_pull_recent(const char *account, char scope)
+{
+  char key[ACCOUNTLEN + 1];
+  struct mdsync_pull_record *r;
+
+  mdsync_pull_key(key, account);
+  r = mdsync_pull_find(key);
+  if (!r)
+    return 0;
+  if ((CurrentTime - r->at) >= MDSYNC_PULL_INTERVAL)
+    return 0;
+  return (r->scope == 'A') || (r->scope == scope);
+}
+
+void mdsync_on_attach(struct Client *cptr, const char *account)
+{
+  char scope;
+  struct DLink *lp;
+  int sent = 0;
+
+  if (!cptr || !account || !account[0])
+    return;
+  if (!metadata_lmdb_is_available())
+    return;
+
+  scope = MyConnect(cptr) ? 'A' : 'R';
+
+  /* A remote client still mid-burst from our point of view: its own
+   * server has not finished telling us about it yet, so a pull now
+   * would race the burst rather than fill a real gap.  Task 10's EOB
+   * queue re-pulls every account this link introduced once its burst
+   * ends; this attach is simply skipped here. */
+  if (!MyConnect(cptr) && cli_from(cptr) && IsBurst(cli_from(cptr)))
+    return;
+
+  if (mdsync_pull_recent(account, scope))
+    return;
+
+  /* Noted only once something actually went out below -- an attach with
+   * no eligible link (split off, or every link mid-burst) accomplishes
+   * nothing, and must not consume the dedup window a LATER attach of the
+   * same account could use once a link is actually there to ask.  Two
+   * local attaches of one account (e.g. the hub during a split, then
+   * again once it heals) must not have the first, link-less one block
+   * the second, useful one within MDSYNC_PULL_INTERVAL. */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *link = lp->value.cptr;
+
+    if (!IsIRCv3Aware(link) || IsBurst(link))
+      continue;
+    sendcmdto_one(&me, CMD_METADATA, link, "? 0 %c %s", scope, account);
+    sent = 1;
+  }
+
+  if (sent)
+    mdsync_note_pulled(account, scope);
 }

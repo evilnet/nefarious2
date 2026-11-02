@@ -492,6 +492,7 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   const char *account;
   const char *target;
   const char *timestamp;
+  int rc;
 
   /* Format: MR <account> <target> <timestamp> */
   if (parc < 4)
@@ -501,21 +502,38 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   target = parv[2];
   timestamp = parv[3];
 
-  /* Store locally in metadata LMDB */
-  if (metadata_lmdb_is_available()) {
-    metadata_readmarker_set(account, target, timestamp);
+  /* metadata_readmarker_set's own return already carries the LWW
+   * decision: 0 taken (newer), 1 kept (this timestamp was not newer than
+   * what's already stored), -1 error.  With no storage configured, this
+   * server has no older value to lose by it, so it behaves as "taken" --
+   * the same no-store fallback every other W4 writer uses (memory and
+   * peers still get it). W4 Task 9 (1.7 fix): a pull reply can deliver a
+   * marker older than one this server already has (e.g. set locally
+   * during a split the sender missed) -- rc == 1 must notify no one and
+   * relay nothing, or the stale value reaches clients even though the
+   * store correctly kept the newer one. */
+  rc = metadata_lmdb_is_available() ? metadata_readmarker_set(account, target, timestamp) : 0;
+
+  if (rc == 0) {
+    /* Taken: notify local clients, this server's push subscriptions, and
+     * relay to other v3 peers (not back to where it came from). */
+    notify_local_clients(account, target, timestamp);
+    webpush_notify_read(account, target, timestamp);
+    sendcmdto_serv_butone_v3(sptr, CMD_MARKREAD, cptr, "%s %s %s",
+                          account, target, timestamp);
+  } else if (rc < 0) {
+    /* Storage error: nothing applied here, but still relay so the rest
+     * of the network is not held back by this server's own fault, and
+     * log it (mirrors mdsync_limit_notice's "relayed, not applied"). */
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_markread: storage error for %s/%s from %C - relayed, "
+              "not applied here", account, target, cptr);
+    sendcmdto_serv_butone_v3(sptr, CMD_MARKREAD, cptr, "%s %s %s",
+                          account, target, timestamp);
   }
-
-  /* Notify local clients with this account */
-  notify_local_clients(account, target, timestamp);
-
-  /* And this server's push subscriptions for the account: a read on
-   * another server must close notifications here too. */
-  webpush_notify_read(account, target, timestamp);
-
-  /* Propagate to other servers */
-  sendcmdto_serv_butone_v3(sptr, CMD_MARKREAD, cptr, "%s %s %s",
-                        account, target, timestamp);
+  /* rc == 1: not newer than what's already stored here -- nothing to
+   * notify or relay; the value this server (and the rest of the network,
+   * from here) already has is the right one. */
 
   return 0;
 }
