@@ -447,6 +447,21 @@ extern void metadata_notify_subscribers(const char *target, const char *key,
  * @param[in] value Value to set, or NULL to delete.
  * @param[in] visibility METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
  */
+/** Give one of our connections the account's stored modes (push-2 final
+ * fix wave, I-1): for each mode-synced key (metadata_mode_sync[]:
+ * umode.*, chathistory.*, draft/persistence/hold) the account has a row
+ * for, the flag follows the row -- a live row by its value, a tombstone
+ * as off; a key with no row leaves the flag as it is.  The +p rule
+ * (PRIV_HIDE_CHANNELS / DERESTRICT_HIDECHANS) applies.  Not for a device
+ * (bouncer alias) or a remote copy.
+ * @param[in] cptr Our connection, a user with an account.
+ * @param[in] live 0 at registration, before the N (flags and list set
+ *            silently: the N carries them); 1 for a login after
+ *            registration (each change through umode_sync_apply: echo,
+ *            counts, M line, session mirror).
+ */
+extern void metadata_mode_sync_restore(struct Client *cptr, int live);
+
 extern void metadata_client_memory_set(struct Client *cptr, const char *key,
                                        const char *value, int visibility);
 

@@ -269,6 +269,11 @@ static void register_complete_success(struct Client *acptr, const char *account)
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(acptr))
         hide_hostmask(acptr);
+
+      /* The account's modes, echoed with their M lines, after the AC
+       * above (push-2 final fix wave, I-1).  A new account has none
+       * unless it was written to before (a name reused). */
+      metadata_mode_sync_restore(acptr, 1);
     }
   } else {
     ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);

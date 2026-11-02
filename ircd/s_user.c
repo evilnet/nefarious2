@@ -973,6 +973,19 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
     }
 
+    /* The account's modes (push-2 final fix wave, I-1): every
+     * mode-synced key the account has a row for (umode.*, chathistory.*,
+     * the hold preference) sets this connection's flag, over the class
+     * default modes above, before the N below carries them -- so the
+     * connection starts as the account's other connections are, and
+     * nobody else is told anything (each of them already has the mode).
+     * Only here, on the route that introduces the connection by N: a
+     * revive took the ghost's own modes and an alias (a device) follows
+     * its primary through the session mode mirror, and both returned
+     * above.  Counted by the userstats_count_sync after this block. */
+    if (IsAccount(sptr))
+      metadata_mode_sync_restore(sptr, 0);
+
     SetLocalNumNick(sptr);
 
     /* cli_name must be set by NICK before registration proceeds.
@@ -2548,6 +2561,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   struct umode_md umd[UMODE_MD_MAX];
   int umd_n = 0;
   int asker_device = 0;
+  /* This command logged a registered user in (+r): the account's modes
+   * follow, after the write (metadata_mode_sync_restore). */
+  int account_login = 0;
 
   if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
@@ -3231,8 +3247,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
        * run AFTER the strncpy above: cli_user(acptr)->account is the
        * ts-trimmed value, while the raw `account` variable used above
        * still carries "name:ts". */
-      if (IsRegistered(acptr))
+      if (IsRegistered(acptr)) {
         metadata_load_account(acptr, cli_user(acptr)->account);
+        account_login = 1;
+      }
       /* Fork chathistory gate: the authusers counter (born c07b9d9) never
        * learned about this upstream-era account attach.  A live client
        * gaining an account here must be counted, or its eventual PART
@@ -3382,6 +3400,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
                   METADATA_VIS_PRIVATE);
   umode_md_finalize(umd, &umd_n, acptr, &setflags);
   umode_md_write(umd, umd_n, cptr, acptr, asker_device);
+  /* A login by this command (an SVSMODE/OPMODE +r of a registered user):
+   * our connection takes the account's modes, each change echoed with
+   * its M line (push-2 final fix wave, I-1) -- after this command's own
+   * M line and rows, so a letter of this command, already written, is
+   * what the account's row says. */
+  if (account_login)
+    metadata_mode_sync_restore(acptr, 1);
 
   /* A -b ends its session last: the end can exit the mode's target (a
    * held ghost leaves with its session), and nothing above may touch the

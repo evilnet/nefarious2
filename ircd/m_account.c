@@ -333,6 +333,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(acptr))
         hide_hostmask(acptr);
+      /* A login of our connection (services' AUTH, after registration):
+       * it takes the account's modes, each change echoed with its M
+       * line, after the AC above (push-2 final fix wave, I-1).  A no-op
+       * for a remote user and after a logout (no account). */
+      metadata_mode_sync_restore(acptr, 1);
       return 0;
     } else if (type == 'C' || type == 'H' || type == 'S') {
       /* LOC requests, forward them and ignore them */
@@ -516,6 +521,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                           cli_user(acptr)->acc_create ? "%C %s %Tu" : "%C %s",
                           acptr, cli_user(acptr)->account,
                           cli_user(acptr)->acc_create);
+    /* Our connection's login: the account's modes (push-2 final fix
+     * wave, I-1), as the extended form above. */
+    metadata_mode_sync_restore(acptr, 1);
   }
 
   return 0;

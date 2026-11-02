@@ -2064,6 +2064,62 @@ void metadata_client_memory_set(struct Client *cptr, const char *key,
   metadata_apply_client_memory(cptr, key, value, visibility);
 }
 
+void metadata_mode_sync_restore(struct Client *cptr, int live)
+{
+  const char *account;
+  int i;
+
+  /* Our own connection with an account; never a device (alias): a device
+   * follows its primary through the session mode mirror. */
+  if (!cptr || !MyConnect(cptr) || !IsUser(cptr) || !cli_user(cptr)
+      || IsBouncerAlias(cptr) || !cli_user(cptr)->account[0]
+      || !metadata_lmdb_is_available())
+    return;
+  account = cli_user(cptr)->account;
+
+  for (i = 0; metadata_mode_sync[i].key; i++) {
+    struct md_version v;
+    char valbuf[METADATA_VALUE_LEN];
+    const char *value;
+    int want;
+
+    /* No row: the account never set this mode, and the connection keeps
+     * what it has (its class default).  A tombstone is a row: the mode
+     * was turned off (a -i, a METADATA SET with no value, a CLEAR). */
+    if (metadata_account_get_version(account, metadata_mode_sync[i].key, &v,
+                                     valbuf, sizeof(valbuf)) != 0)
+      continue;
+    value = v.tombstone ? NULL : v.value;
+    want = metadata_mode_sync_want(i, value);
+
+    if (live) {
+      /* A login after registration: the connection is on the network,
+       * so it is changed the way a self MODE looks (echo, counts, M line,
+       * session mirror; the +p rule), and only where it differs. */
+      umode_sync_apply(cptr, metadata_mode_sync[i].flag, want);
+      continue;
+    }
+
+    /* Registration, before the N: set silently -- the N carries the
+     * flags, send_umode_signon tells the client, and register_user's
+     * userstats_count_sync counts them.  The list entry follows the row
+     * (the class default modes noted their own values over the loaded
+     * list). */
+    metadata_apply_entry_list(cptr, metadata_mode_sync[i].key, value, v.vis);
+    /* set_user_mode's +p rule: without PRIV_HIDE_CHANNELS, and unless
+     * DERESTRICT_HIDECHANS opens it to everyone, +p is not this
+     * connection's to take (fix round 3, N2). */
+    if (want && metadata_mode_sync[i].flag == FLAG_NOCHAN
+        && !feature_bool(FEAT_DERESTRICT_HIDECHANS)
+        && !HasPriv(cptr, PRIV_HIDE_CHANNELS))
+      continue;
+    if (want)
+      SetFlag(cptr, metadata_mode_sync[i].flag);
+    else
+      ClrFlag(cptr, metadata_mode_sync[i].flag);
+  }
+}
+
 /** Set metadata for a client.
  * For logged-in users, also persists to LMDB.
  * @param[in] cptr Client to set metadata on.

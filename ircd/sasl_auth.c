@@ -852,6 +852,11 @@ void sasl_complete_login(struct Client *sptr, const char *account,
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(sptr))
         hide_hostmask(sptr);
+
+      /* The account's modes: each one this connection lacks is set and
+       * echoed, with its M line, after the AC above (push-2 final fix
+       * wave, I-1). */
+      metadata_mode_sync_restore(sptr, 1);
     } else if (!sasl_conn_kc_id(sptr)[0]
                && account_id_valid(cli_saslkcid(sptr))) {
       /* The same account name proved again, with a Keycloak id this
