@@ -2036,6 +2036,14 @@ static void metadata_apply_client_memory(struct Client *cptr, const char *key,
   }
 }
 
+void metadata_client_memory_set(struct Client *cptr, const char *key,
+                                const char *value, int visibility)
+{
+  if (!cptr || !key)
+    return;
+  metadata_apply_client_memory(cptr, key, value, visibility);
+}
+
 /** Set metadata for a client.
  * For logged-in users, also persists to LMDB.
  * @param[in] cptr Client to set metadata on.

@@ -436,6 +436,20 @@ extern void metadata_send_join_notifications(struct Client *joiner, struct Chann
 extern void metadata_notify_subscribers(const char *target, const char *key,
                                         const char *value, int visibility);
 
+/** Change one key of @a cptr's in-memory metadata and its mode-sync flag
+ * (metadata_mode_sync[]) only: no store row, no notification, nothing
+ * sent.  For a server that learns a user's mode-synced key from another
+ * fork server's M line: that user's own server is the one writer of the
+ * account's row (set_user_mode), and the stamped row it sends is what
+ * this server stores.
+ * @param[in] cptr Client whose memory changes.
+ * @param[in] key Key name.
+ * @param[in] value Value to set, or NULL to delete.
+ * @param[in] visibility METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
+ */
+extern void metadata_client_memory_set(struct Client *cptr, const char *key,
+                                       const char *value, int visibility);
+
 /* ========== W4: stamped account store (cross-fork-server sync) ========== */
 
 /** Mint a fresh HLC stamp for a local account-store write.

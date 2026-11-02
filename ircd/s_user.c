@@ -2304,6 +2304,91 @@ void userstats_count_clear(struct Client *cptr)
   }
 }
 
+/** One mode-synced metadata key a MODE command changed (umode.*,
+ * chathistory.*, draft/persistence/hold): its final value in this
+ * command.  The values are string literals. */
+struct umode_md {
+  const char *key;
+  const char *value;   /**< NULL: deleted */
+  int vis;
+};
+
+/** At most one entry per mode-synced key (metadata_mode_sync[], eight). */
+#define UMODE_MD_MAX 8
+
+/** A mode letter changed a mode-synced key: change @a acptr's memory and
+ * mode-sync flag now (no store row, nothing sent), and note the key's
+ * final value in this command -- a later letter for the same key
+ * replaces it (the last letter wins, ruling W3-T12b-f4b / 12b M1).
+ * Whether the account's stored row is written is decided after the loop
+ * (umode_md_write): one server writes it, every other server that sees
+ * the mode by its M line keeps it in memory only. */
+static void umode_md_note(struct umode_md *t, int *n, struct Client *acptr,
+                          const char *key, const char *value, int vis)
+{
+  int i;
+
+  metadata_client_memory_set(acptr, key, value, vis);
+  for (i = 0; i < *n; i++)
+    if (0 == strcmp(t[i].key, key)) {
+      t[i].value = value;
+      t[i].vis = vis;
+      return;
+    }
+  if (*n < UMODE_MD_MAX) {
+    t[*n].key = key;
+    t[*n].value = value;
+    t[*n].vis = vis;
+    (*n)++;
+  }
+}
+
+/** Forget a noted key: a later letter in the same command took back the
+ * write (a -b after a +b: the -b decides the hold preference itself). */
+static void umode_md_drop(struct umode_md *t, int *n, const char *key)
+{
+  int i;
+
+  for (i = 0; i < *n; i++)
+    if (0 == strcmp(t[i].key, key)) {
+      t[i] = t[--(*n)];
+      return;
+    }
+}
+
+/** After the mode loop: write the account's row of every noted key, once,
+ * on the one server that writes it (W4 Task 8 fix round 1, I1: single
+ * writer per mode event).  The writer is
+ *  - the user's own server (MyUser);
+ *  - the server of a device of ours that asked for its primary on another
+ *    server (that server never sees the M line: a fake direction there --
+ *    the f4a gate's hold tells, now for every mode-synced key);
+ *  - a fork server that received the M line from a link that is not
+ *    IRCv3-aware (the user is behind a legacy hop: no fork server is its
+ *    home).
+ * A server that received the M line from an IRCv3-aware link has already
+ * changed memory and writes nothing: the writer's stamped row
+ * (metadata_account_write, "MD =account") reaches it, and its own stamp
+ * on the same key -- minted later, never sent -- would beat the writer's
+ * row for the user's next command and keep the older value for good.
+ * A user with no account has no row: memory only, as before.
+ */
+static void umode_md_write(const struct umode_md *t, int n,
+                           struct Client *cptr, struct Client *acptr,
+                           int asker_device)
+{
+  int i;
+
+  if (!n || !IsUser(acptr) || !cli_user(acptr)->account[0])
+    return;
+  if (!(MyUser(acptr) || asker_device
+        || (IsServer(cptr) && !IsIRCv3Aware(cptr))))
+    return;
+  for (i = 0; i < n; i++)
+    metadata_account_write(&me, cli_user(acptr)->account, t[i].key,
+                           t[i].value, t[i].vis);
+}
+
 /** Set a user's mode.  This function checks that \a cptr is trying to
  * set his own mode, prevents local users from setting inappropriate
  * modes through this function, and applies any other side effects of
@@ -2341,23 +2426,28 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   struct Client *snoc = NULL;
   int sno_touched = 0;
   /* What a -b does, after the mode loop (a +b later in the same command
-   * cancels all of it: the final state wins).  The hold preference: written
-   * here (hold_off), and told to every server (hold_off_tell).  The session
-   * end, run at the end of this function (see there): the record by its
-   * identity (end_session, compared, never read) and its account and id. */
+   * cancels all of it: the final state wins).  The hold preference to 0
+   * (hold_off), noted with the command's other mode-synced keys and
+   * written by their one writer (umode_md_write).  The session end, run
+   * at the end of this function (see there): the record by its identity
+   * (end_session, compared, never read) and its account and id. */
   int hold_off = 0;
-  int hold_off_tell = 0;
   struct BouncerSession *end_session = NULL;
   char end_account[ACCOUNTLEN + 1] = "";
   char end_sessid[BOUNCER_SESSID_LEN] = "";
   /* What the command's hold letters leave for the end of this function
    * (bounce_hold_tail_step(): the last letter wins, ruling W3-T12b-f4b and
    * 12b M1): the -b's end above, or the +b's join or create (W3 12c-2b),
-   * never both.  hold_on_tell: a +b of a device of ours toward a primary on
-   * another server stands, and its server tells the other servers the
-   * preference (bounce_hold_on_tells()). */
+   * never both.  (A +b of a device of ours toward a primary on another
+   * server: its server writes the preference, umode_md_write.) */
   enum bounce_hold_tail hold_tail = BOUNCE_HOLD_TAIL_NONE;
-  int hold_on_tell = 0;
+  /* The mode-synced keys this command changed (umode_md_note), written to
+   * the account's store by one server only, after the loop
+   * (umode_md_write).  asker_device: the command comes from a device of
+   * ours whose primary, the target, is on another server. */
+  struct umode_md umd[UMODE_MD_MAX];
+  int umd_n = 0;
+  int asker_device = 0;
 
   if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
@@ -2471,6 +2561,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   else if (MyConnect(sptr) && sptr != acptr && cli_user(sptr)
            && cli_user(sptr)->alias_primary == acptr)
     snoc = sptr;
+  asker_device = MyConnect(sptr) && IsBouncerAlias(sptr)
+                 && cli_alias_primary(sptr) == acptr;
 
   if (parc < 3)
   {
@@ -2626,10 +2718,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'i':
         if (what == MODE_ADD) {
           SetInvisible(acptr);
-          metadata_set_client(acptr, "umode.invisible", "1", METADATA_VIS_PRIVATE);
+          umode_md_note(umd, &umd_n, acptr, "umode.invisible", "1", METADATA_VIS_PRIVATE);
         } else {
           ClearInvisible(acptr);
-          metadata_set_client(acptr, "umode.invisible", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "umode.invisible", NULL, 0);
         }
         break;
       case 'd':
@@ -2671,28 +2763,28 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'p':
         if (what == MODE_ADD) {
           SetNoChan(acptr);
-          metadata_set_client(acptr, "umode.nochan", "1", METADATA_VIS_PRIVATE);
+          umode_md_note(umd, &umd_n, acptr, "umode.nochan", "1", METADATA_VIS_PRIVATE);
         } else {
           ClearNoChan(acptr);
-          metadata_set_client(acptr, "umode.nochan", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "umode.nochan", NULL, 0);
         }
         break;
       case 'q':
         if (what == MODE_ADD) {
           SetCommonChansOnly(acptr);
-          metadata_set_client(acptr, "umode.commonchansonly", "1", METADATA_VIS_PRIVATE);
+          umode_md_note(umd, &umd_n, acptr, "umode.commonchansonly", "1", METADATA_VIS_PRIVATE);
         } else {
           ClearCommonChansOnly(acptr);
-          metadata_set_client(acptr, "umode.commonchansonly", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "umode.commonchansonly", NULL, 0);
         }
         break;
       case 'R':
         if (what == MODE_ADD) {
           SetAccountOnly(acptr);
-          metadata_set_client(acptr, "umode.accountonly", "1", METADATA_VIS_PUBLIC);
+          umode_md_note(umd, &umd_n, acptr, "umode.accountonly", "1", METADATA_VIS_PUBLIC);
         } else {
           ClearAccountOnly(acptr);
-          metadata_set_client(acptr, "umode.accountonly", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "umode.accountonly", NULL, 0);
         }
         break;
       case 'B':
@@ -2704,10 +2796,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'D':
         if (what == MODE_ADD) {
           SetPrivDeaf(acptr);
-          metadata_set_client(acptr, "umode.privdeaf", "1", METADATA_VIS_PUBLIC);
+          umode_md_note(umd, &umd_n, acptr, "umode.privdeaf", "1", METADATA_VIS_PUBLIC);
         } else {
           ClearPrivDeaf(acptr);
-          metadata_set_client(acptr, "umode.privdeaf", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "umode.privdeaf", NULL, 0);
         }
         break;
       case 'a':
@@ -2737,18 +2829,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'Y':
         if (what == MODE_ADD) {
           SetNoStorage(acptr);
-          metadata_set_client(acptr, "chathistory.nostorage", "1", METADATA_VIS_PUBLIC);
+          umode_md_note(umd, &umd_n, acptr, "chathistory.nostorage", "1", METADATA_VIS_PUBLIC);
         } else {
           ClearNoStorage(acptr);
-          metadata_set_client(acptr, "chathistory.nostorage", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "chathistory.nostorage", NULL, 0);
         }
         break;
       case 'b':
         if (what == MODE_ADD) {
-          /* The command comes from a device of ours whose primary, the
-           * target, is on another server. */
-          int asker_device = MyConnect(sptr) && IsBouncerAlias(sptr)
-                             && cli_alias_primary(sptr) == acptr;
           enum bounce_hold_on_plan plan = BOUNCE_HOLD_NOOP;
 
           /* Turning hold on for a client of ours joins the account's
@@ -2774,19 +2862,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * preference write or end of its goes ahead. */
           hold_tail = bounce_hold_tail_step(hold_tail, 1,
                                             bounce_hold_on_acts(plan), 0);
-          hold_off = hold_off_tell = 0;
+          hold_off = 0;
           end_session = NULL;
           end_account[0] = end_sessid[0] = '\0';
-          hold_on_tell = bounce_hold_on_tells(asker_device, MyUser(acptr),
-                                              IsUser(acptr), 1);
           SetBncHoldPref(acptr);
-          metadata_set_client(acptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
+          umode_md_note(umd, &umd_n, acptr, "draft/persistence/hold", "1",
+                        METADATA_VIS_PRIVATE);
         } else {
           struct BouncerSession *session = NULL;
-          /* The command comes from a device of ours whose primary, the
-           * target, is on another server. */
-          int asker_device = MyConnect(sptr) && IsBouncerAlias(sptr)
-                             && cli_alias_primary(sptr) == acptr;
 
           /* The session to end: ours, or the one a device of ours of a
            * primary on another server is in. */
@@ -2797,7 +2880,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * create is cancelled, and its device's preference is not told
            * (12b M1: the last letter wins). */
           hold_tail = bounce_hold_tail_step(hold_tail, 0, session != NULL, 0);
-          hold_on_tell = 0;
+          umode_md_drop(umd, &umd_n, "draft/persistence/hold");
           /* The preference, unless the end goes to the session's holder on
            * another server, which writes it (to every server) when it
            * accepts the end.  Written after the mode loop (a +b later in
@@ -2806,16 +2889,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
                      || bounce_end_asker_applies(bounce_member_end_route(session));
           /* A primary on another server never sees this mode change (its
            * server drops the M line, sourced from its own client, as a
-           * fake direction): the server of the device that asked tells
-           * every server the preference, as BOUNCER SET HOLD off does.
-           * Only that server (ruling W3-T12b-f4a): a server that receives
-           * a remote user's -b by its M line changes its own copy and
-           * tells nobody -- a hold 0 sent from there reaches the user's
-           * server after the user's own next +b and turns it off again --
-           * and nothing goes out for a client that is not a user yet (a
-           * -b in USER, an iauth or class mode). */
-          hold_off_tell = hold_off && asker_device && !MyUser(acptr)
-                          && IsUser(acptr);
+           * fake direction): the server of the device that asked writes
+           * the preference for every server, as BOUNCER SET HOLD off
+           * does (umode_md_write's device case).  Only that server, or
+           * the user's own (ruling W3-T12b-f4a): a server that receives a
+           * remote user's -b by its M line changes its own copy in memory
+           * and tells nobody -- a hold 0 sent from there reaches the
+           * user's server after the user's own next +b and turns it off
+           * again -- and nothing goes out for a client that is not a user
+           * yet (a -b in USER, an iauth or class mode). */
           /* End the session: its holder does (here, or the end goes
            * there); the primary carries on outside it, every device of it
            * goes.  Run last (below): the end can exit the mode's target. */
@@ -2831,10 +2913,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'y':
         if (what == MODE_ADD) {
           SetPMOptout(acptr);
-          metadata_set_client(acptr, "chathistory.pm", "0", METADATA_VIS_PUBLIC);
+          umode_md_note(umd, &umd_n, acptr, "chathistory.pm", "0", METADATA_VIS_PUBLIC);
         } else {
           ClearPMOptout(acptr);
-          metadata_set_client(acptr, "chathistory.pm", NULL, 0);
+          umode_md_note(umd, &umd_n, acptr, "chathistory.pm", NULL, 0);
         }
         break;
       case 'x':
@@ -3014,37 +3096,18 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
   }
   /* A -b that stands (no +b after it in this command): the hold
-   * preference, before the mode line goes out and before the end.
-   * hold_off_tell is only set when !MyUser(acptr) (the f4a gate above):
-   * acptr is a REMOTE primary here, so the tell must name the account --
-   * the nick-target origin guard in ms_metadata drops a nick-form MD at
-   * every peer unless it comes from that nick's own server, including
-   * the primary's true home server, which is exactly who needs to see
-   * this.  The tell is one stamped account write
-   * (metadata_account_write): the store, every client of the account
-   * here -- the asking device among them, and any other connection of
-   * the account, whose +b the preference also clears (account-wide,
-   * user-accepted 2026-11-01) -- and every fork peer by "MD =account".
-   * Without the tell, only the target's own copy here changes (the
-   * f4a gate: a server that receives a remote user's -b by its M line
-   * tells nobody). */
-  if (hold_off) {
-    if (hold_off_tell)
-      metadata_account_write(&me, cli_account(acptr), "draft/persistence/hold",
-                             "0", METADATA_VIS_PRIVATE);
-    else
-      metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-  }
-  /* A +b of a device of ours that stands, toward a primary on another
-   * server: its holder never sees the mode line (a fake direction there),
-   * so the device's server tells every server the preference, as for a -b
-   * (the f4a gate, for hold 1).  hold_on_tell (bounce_hold_on_tells) is
-   * only true when the target is not ours either -- the same account-
-   * addressed stamped write as hold_off_tell above, which also sets the
-   * preference (+b) on every other client of the account here. */
-  if (hold_on_tell)
-    metadata_account_write(&me, cli_account(acptr), "draft/persistence/hold",
-                           "1", METADATA_VIS_PRIVATE);
+   * preference, before the mode line goes out and before the end.  Then
+   * every mode-synced key this command changed is written to the
+   * account's store by its one writer (umode_md_write: the user's server,
+   * the asking device's server, or the fork server that got the M line
+   * from a legacy hop) as a stamped row every fork server merges; every
+   * other server has changed memory only.  The writer's account-wide
+   * apply also sets the hold preference (+b) on every connection of the
+   * account (user-accepted, 2026-11-01). */
+  if (hold_off)
+    umode_md_note(umd, &umd_n, acptr, "draft/persistence/hold", "0",
+                  METADATA_VIS_PRIVATE);
+  umode_md_write(umd, umd_n, cptr, acptr, asker_device);
 
   /*
    * Compare new flags with old flags and send string which
