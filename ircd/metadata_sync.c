@@ -347,11 +347,11 @@ struct mdsync_row_candidate {
 
 /** metadata_account_foreach_version callback: keep the MDSYNC_MAX_ROWS
  * newest-by-stamp rows seen so far (live or tombstone), via
- * md_topn_place -- the pure insertion-position decision -- plus the
- * caller-owned shift and payload copy md_topn_place's own contract asks
- * for. Mirrors mdsync_marker_cb's "ascending kept array, evict the
- * oldest" shape, generalized from a timestamp string to a struct
- * md_stamp. Unlike the old row_cb, this does not stop at MDSYNC_MAX_ROWS:
+ * md_topn_insert -- md_topn_place's pure insertion-position decision
+ * plus the shift, done on the stamps and a small index array only.
+ * Mirrors mdsync_marker_cb's "ascending kept array, evict the oldest"
+ * shape, generalized from a timestamp string to a struct md_stamp.
+ * Unlike the old row_cb, this does not stop at MDSYNC_MAX_ROWS:
  * metadata.c's own walk is raw LMDB key order, not stamp order, so the
  * single newest row can arrive anywhere, including dead last (the
  * row-cap bug this replaces: a key that sorted after the 128th by raw
@@ -366,10 +366,13 @@ struct mdsync_row_candidate {
  * 153KB total for the full cap), never grown past that regardless of
  * how many rows the account actually has; heap-allocated by the caller
  * (mdsync_answer_pull), same reasoning as the pre-existing marker
- * struct's own heap allocation just below. The walk itself is bounded
- * separately, at MDSYNC_MAX_VISIT rows visited (see mdsync_row_select_cb) --
- * an account's tombstone count has no cap of its own, so "never stop
- * early" alone would make the walk unbounded. */
+ * struct's own heap allocation just below.  The candidates sit in a
+ * pool and never move once written (push-2 final fix wave, M-4): an
+ * insert shifts the 16-byte stamps and the int slot[] index, not the
+ * ~1.2KB rows -- an account whose stamps ascend in key order used to
+ * cost ~127 whole-row shifts per visited row, ~600MB of memmove per
+ * pull at the visit cap. The walk itself is bounded separately, at
+ * MDSYNC_MAX_VISIT rows visited (see mdsync_row_select_cb). */
 struct mdsync_row_select {
   struct Client *link;
   const char *account;
@@ -379,16 +382,19 @@ struct mdsync_row_select {
                            *   for this account's walk -- logged once. */
   int visit_capped;      /**< 1 once the visit-cap L_WARNING has been
                            *   logged -- logged once, distinct from capped. */
-  struct md_stamp stamps[MDSYNC_MAX_ROWS];  /**< mirrors rows[], same
-                           *   order/shifts, for md_topn_place's own
-                           *   read-only view */
-  struct mdsync_row_candidate rows[MDSYNC_MAX_ROWS];
+  struct md_stamp stamps[MDSYNC_MAX_ROWS];  /**< ascending by stamp:
+                           *   the held rows' stamps, by ordered position */
+  int slot[MDSYNC_MAX_ROWS];  /**< the pool slot (rows[]) of the row at
+                           *   each ordered position */
+  struct mdsync_row_candidate rows[MDSYNC_MAX_ROWS];  /**< the pool: a
+                           *   row is written once, into the slot
+                           *   md_topn_insert hands out, and never moved */
 };
 
 static int mdsync_row_select_cb(const char *key, const struct md_version *v, void *arg)
 {
   struct mdsync_row_select *a = (struct mdsync_row_select *)arg;
-  int idx, i;
+  int ps;
   size_t vlen;
 
   /* Hard visit cap (fix round 1 follow-up, security review
@@ -429,37 +435,23 @@ static int mdsync_row_select_cb(const char *key, const struct md_version *v, voi
   if (strlen(key) >= sizeof(a->rows[0].key))
     return 0;   /* defensive only: metadata.c's own keybuf is smaller */
 
-  idx = md_topn_place(a->stamps, a->count, MDSYNC_MAX_ROWS, &v->st);
-  if (idx < 0)
+  ps = md_topn_insert(a->stamps, a->slot, &a->count, MDSYNC_MAX_ROWS, &v->st);
+  if (ps < 0)
     return 0;   /* not newer than anything kept -- discard */
 
-  if (a->count < MDSYNC_MAX_ROWS) {
-    for (i = a->count; i > idx; i--) {
-      a->stamps[i] = a->stamps[i - 1];
-      a->rows[i] = a->rows[i - 1];
-    }
-    a->count++;
-  } else {
-    for (i = 0; i < idx; i++) {
-      a->stamps[i] = a->stamps[i + 1];
-      a->rows[i] = a->rows[i + 1];
-    }
-  }
-
   vlen = v->vlen;
-  if (vlen >= sizeof(a->rows[idx].value))
-    vlen = sizeof(a->rows[idx].value) - 1;   /* defensive; v->vlen is
-                                               * already <= METADATA_VALUE_LEN */
+  if (vlen >= sizeof(a->rows[ps].value))
+    vlen = sizeof(a->rows[ps].value) - 1;   /* defensive; v->vlen is
+                                              * already <= METADATA_VALUE_LEN */
 
-  a->stamps[idx] = v->st;
-  ircd_strncpy(a->rows[idx].key, key, sizeof(a->rows[idx].key));
-  a->rows[idx].st = v->st;
-  a->rows[idx].tombstone = v->tombstone;
-  a->rows[idx].vis = v->vis;
-  a->rows[idx].vlen = vlen;
+  ircd_strncpy(a->rows[ps].key, key, sizeof(a->rows[ps].key));
+  a->rows[ps].st = v->st;
+  a->rows[ps].tombstone = v->tombstone;
+  a->rows[ps].vis = v->vis;
+  a->rows[ps].vlen = vlen;
   if (vlen)
-    memcpy(a->rows[idx].value, v->value, vlen);
-  a->rows[idx].value[vlen] = '\0';
+    memcpy(a->rows[ps].value, v->value, vlen);
+  a->rows[ps].value[vlen] = '\0';
 
   return 0;   /* keep walking (bounded by MDSYNC_MAX_VISIT above) --
                * every visited row must be considered to find the true
@@ -565,18 +557,18 @@ void mdsync_answer_pull(struct Client *link, unsigned long seq, char scope,
 
       /* Emission order is free (each row merges independently on the
        * receiver, metadata_lww.c's md_lww_take) -- ascending by stamp
-       * (oldest-of-the-selected-set first), the array's own order,
-       * needs no extra sort pass. */
+       * (oldest-of-the-selected-set first), the slot[] index's own
+       * order, needs no extra sort pass. */
       for (j = 0; j < rows->count; j++) {
+        const struct mdsync_row_candidate *rc = &rows->rows[rows->slot[j]];
         struct md_version ev;
 
-        ev.st = rows->rows[j].st;
-        ev.tombstone = rows->rows[j].tombstone;
-        ev.vis = rows->rows[j].vis;
-        ev.value = rows->rows[j].tombstone ? NULL : rows->rows[j].value;
-        ev.vlen = rows->rows[j].vlen;
-        metadata_emit_versioned(&me, link, NULL, accounts[i],
-                                rows->rows[j].key, &ev);
+        ev.st = rc->st;
+        ev.tombstone = rc->tombstone;
+        ev.vis = rc->vis;
+        ev.value = rc->tombstone ? NULL : rc->value;
+        ev.vlen = rc->vlen;
+        metadata_emit_versioned(&me, link, NULL, accounts[i], rc->key, &ev);
       }
       MyFree(rows);
     }

@@ -700,3 +700,38 @@ int md_topn_place(const struct md_stamp *kept, int count, int cap,
     i++;
   return i;
 }
+
+int md_topn_insert(struct md_stamp *kept, int *slot, int *count,
+                   int cap, const struct md_stamp *incoming)
+{
+  int idx, ps, i;
+
+  if (!kept || !slot || !count || !incoming || cap <= 0
+      || *count < 0 || *count > cap)
+    return -1;
+
+  idx = md_topn_place(kept, *count, cap, incoming);
+  if (idx < 0)
+    return -1;
+
+  if (*count < cap) {
+    /* The slots in use are 0..count-1: the next one is free. */
+    ps = *count;
+    for (i = *count; i > idx; i--) {
+      kept[i] = kept[i - 1];
+      slot[i] = slot[i - 1];
+    }
+    (*count)++;
+  } else {
+    /* The oldest row goes; its pool slot takes the new one. */
+    ps = slot[0];
+    for (i = 0; i < idx; i++) {
+      kept[i] = kept[i + 1];
+      slot[i] = slot[i + 1];
+    }
+  }
+  kept[idx] = *incoming;
+  slot[idx] = ps;
+  return ps;
+}
+

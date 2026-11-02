@@ -895,6 +895,150 @@ static void test_topn_unstamped_is_oldest(void **state)
   assert_true(kept[1].ms == 2);
 }
 
+/* ------------------------------------------------------------------ */
+/* md_topn_insert (push-2 final fix wave, M-4)                         */
+/* ------------------------------------------------------------------ */
+
+/* The caller's payload pool, as mdsync_row_select_cb keeps it: one
+ * entry per pool slot, written once when md_topn_insert hands that slot
+ * out and never moved after.  Here the payload is the stamp's ms, so a
+ * test can check that slot[] still names the right payload for each
+ * ordered position. */
+static void topn_insert_apply(struct md_stamp *kept, int *slot, int *count,
+                              int cap, uint64_t *pool,
+                              const struct md_stamp *incoming)
+{
+  int ps = md_topn_insert(kept, slot, count, cap, incoming);
+
+  if (ps >= 0)
+    pool[ps] = incoming->ms;
+}
+
+/* Every ordered position's payload is its stamp, and the slots used are
+ * a permutation of 0..count-1 (no slot handed out twice, none lost). */
+static void topn_insert_check(const struct md_stamp *kept, const int *slot,
+                              int count, const uint64_t *pool)
+{
+  int seen[64] = { 0 };
+  int i;
+
+  for (i = 0; i < count; i++) {
+    assert_true(slot[i] >= 0 && slot[i] < count);
+    assert_int_equal(0, seen[slot[i]]);
+    seen[slot[i]] = 1;
+    assert_true(pool[slot[i]] == kept[i].ms);
+    if (i > 0)
+      assert_true(md_stamp_cmp(&kept[i - 1], &kept[i]) <= 0);
+  }
+}
+
+static void test_topn_insert_fill(void **state)
+{
+  struct md_stamp kept[8];
+  int slot[8];
+  uint64_t pool[8];
+  int count = 0;
+  struct md_stamp s1 = { 5, 0, 0 }, s2 = { 3, 0, 0 }, s3 = { 9, 0, 0 };
+
+  (void)state;
+
+  topn_insert_apply(kept, slot, &count, 8, pool, &s1);
+  topn_insert_apply(kept, slot, &count, 8, pool, &s2);
+  topn_insert_apply(kept, slot, &count, 8, pool, &s3);
+
+  assert_int_equal(3, count);
+  assert_true(kept[0].ms == 3 && kept[1].ms == 5 && kept[2].ms == 9);
+  /* Below the cap a row takes the next unused slot: 5 -> 0, 3 -> 1,
+   * 9 -> 2, whatever its ordered position. */
+  assert_int_equal(1, slot[0]);
+  assert_int_equal(0, slot[1]);
+  assert_int_equal(2, slot[2]);
+  topn_insert_check(kept, slot, count, pool);
+}
+
+/* Full: the newest-last shape of the row-cap bug.  The evicted row's
+ * slot is the one handed back, and nothing else moves in the pool. */
+static void test_topn_insert_evicts_into_oldest_slot(void **state)
+{
+  struct md_stamp kept[3];
+  int slot[3];
+  uint64_t pool[3];
+  int count = 0;
+  struct md_stamp s1 = { 1, 0, 0 }, s2 = { 2, 0, 0 }, s3 = { 3, 0, 0 };
+  struct md_stamp mid = { 2, 5, 0 }, newest = { 100, 0, 0 }, old = { 0, 1, 0 };
+  int oldest_slot;
+
+  (void)state;
+
+  topn_insert_apply(kept, slot, &count, 3, pool, &s3);
+  topn_insert_apply(kept, slot, &count, 3, pool, &s1);
+  topn_insert_apply(kept, slot, &count, 3, pool, &s2);
+  assert_int_equal(3, count);
+  topn_insert_check(kept, slot, count, pool);
+
+  oldest_slot = slot[0];
+  assert_int_equal(oldest_slot, md_topn_insert(kept, slot, &count, 3, &newest));
+  pool[oldest_slot] = newest.ms;
+  assert_int_equal(3, count);
+  assert_true(kept[0].ms == 2 && kept[1].ms == 3 && kept[2].ms == 100);
+  topn_insert_check(kept, slot, count, pool);
+
+  /* A row landing in the middle evicts the oldest too. */
+  topn_insert_apply(kept, slot, &count, 3, pool, &mid);
+  assert_true(kept[0].ms == 2 && kept[0].logical == 5);
+  assert_true(kept[1].ms == 3 && kept[2].ms == 100);
+  topn_insert_check(kept, slot, count, pool);
+
+  /* Not newer than the oldest kept: discarded, nothing changes. */
+  assert_int_equal(-1, md_topn_insert(kept, slot, &count, 3, &old));
+  assert_int_equal(3, count);
+  topn_insert_check(kept, slot, count, pool);
+}
+
+/* A long ascending walk (the worst case for the old whole-row shift):
+ * the newest cap rows survive, every pool slot stays in use once. */
+static void test_topn_insert_ascending_walk(void **state)
+{
+  struct md_stamp kept[16];
+  int slot[16];
+  uint64_t pool[16];
+  int count = 0;
+  int i;
+
+  (void)state;
+
+  for (i = 1; i <= 200; i++) {
+    struct md_stamp s;
+
+    s.ms = (uint64_t)i;
+    s.logical = 0;
+    s.node = 0;
+    topn_insert_apply(kept, slot, &count, 16, pool, &s);
+  }
+  assert_int_equal(16, count);
+  for (i = 0; i < 16; i++)
+    assert_true(kept[i].ms == (uint64_t)(185 + i));
+  topn_insert_check(kept, slot, count, pool);
+}
+
+static void test_topn_insert_rejects_bad_args(void **state)
+{
+  struct md_stamp kept[2];
+  int slot[2];
+  int count = 0;
+  struct md_stamp s = { 1, 0, 0 };
+
+  (void)state;
+
+  assert_int_equal(-1, md_topn_insert(NULL, slot, &count, 2, &s));
+  assert_int_equal(-1, md_topn_insert(kept, NULL, &count, 2, &s));
+  assert_int_equal(-1, md_topn_insert(kept, slot, NULL, 2, &s));
+  assert_int_equal(-1, md_topn_insert(kept, slot, &count, 0, &s));
+  assert_int_equal(-1, md_topn_insert(kept, slot, &count, 2, NULL));
+  count = 3;
+  assert_int_equal(-1, md_topn_insert(kept, slot, &count, 2, &s));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -937,6 +1081,10 @@ int main(void)
     cmocka_unit_test(test_topn_more_than_cap_newest_last),
     cmocka_unit_test(test_topn_ties),
     cmocka_unit_test(test_topn_unstamped_is_oldest),
+    cmocka_unit_test(test_topn_insert_fill),
+    cmocka_unit_test(test_topn_insert_evicts_into_oldest_slot),
+    cmocka_unit_test(test_topn_insert_ascending_walk),
+    cmocka_unit_test(test_topn_insert_rejects_bad_args),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

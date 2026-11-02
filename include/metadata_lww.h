@@ -330,4 +330,28 @@ extern int md_pull_parse(int parc, char *parv[], unsigned long *seq,
 extern int md_topn_place(const struct md_stamp *kept, int count, int cap,
                          const struct md_stamp *incoming);
 
+/** md_topn_place plus the bookkeeping, over an index array instead of
+ * the payloads (push-2 final fix wave, M-4): the caller keeps its
+ * payloads (key, value, visibility, tombstone) in a pool of @a cap
+ * slots that never move, and @a slot[i] names the pool slot of the row
+ * at ordered position i.  This shifts only @a kept (the stamps) and
+ * @a slot, never a payload, and returns the pool slot the caller writes
+ * @a incoming's payload into:
+ *
+ *   - below the cap, the next unused slot (*@a count before the call;
+ *     the slots in use are always 0..count-1), and *@a count grows;
+ *   - at the cap, the slot of the row it evicts (the oldest, kept[0]);
+ *   - -1 when @a incoming is not newer than the oldest kept row (ties
+ *     included), or on a bad argument: nothing changes.
+ *
+ * @param[in,out] kept Ascending-by-stamp stamps of the rows held.
+ * @param[in,out] slot Pool slot of each held row, by ordered position.
+ * @param[in,out] count Number of rows held (0 <= *count <= cap).
+ * @param[in] cap Capacity of @a kept, @a slot and the caller's pool.
+ * @param[in] incoming The candidate row's stamp.
+ * @return the pool slot to fill, or -1 to discard.
+ */
+extern int md_topn_insert(struct md_stamp *kept, int *slot, int *count,
+                          int cap, const struct md_stamp *incoming);
+
 #endif /* INCLUDED_metadata_lww_h */
