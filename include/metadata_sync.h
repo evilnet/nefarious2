@@ -49,7 +49,8 @@ extern void mdsync_link_free(struct Client *server);
  * live value into <=300-byte `+`-continued pieces; a tombstone is a
  * single line with flags token "D" and no value.
  * @param[in] src Client to attribute the emission to (the P10 prefix).
- * @param[in] one If non-NULL, send only to this one link/client.
+ * @param[in] one If non-NULL, send only to this one link -- nothing at
+ *            all when it is not IRCv3-aware.
  * @param[in] butone If @a one is NULL, send to every IRCv3-aware server
  *            except this one (NULL sends to all of them).
  * @param[in] account Account name.
@@ -60,6 +61,52 @@ extern void metadata_emit_versioned(struct Client *src, struct Client *one,
                                     struct Client *butone,
                                     const char *account, const char *key,
                                     const struct md_version *v);
+
+/** Write one account-store row as this server's own event: mint a stamp,
+ * store the row (or its tombstone), apply it to every client logged
+ * into @a account (local or remote, metadata_account_apply_memory:
+ * memory, mode-sync flags, subscriber notifications), and send it as a
+ * stamped "MD =account" row to every IRCv3-aware server.  When the
+ * store refuses the write nothing is applied or sent.  With no store
+ * configured, memory and peers still get it.
+ * @param[in] src Client to attribute the emission to (&me, or the user
+ *            that asked).
+ * @param[in] account Account name (non-empty).
+ * @param[in] key Metadata key (a draft/persistence/... key of any length
+ *            up to 127 bytes; memory skips one of METADATA_KEY_LEN or
+ *            longer).
+ * @param[in] value New value, or NULL to delete (tombstone).
+ * @param[in] vis METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
+ * @return 0 on success, -1 when nothing was applied.
+ */
+extern int metadata_account_write(struct Client *src, const char *account,
+                                  const char *key, const char *value, int vis);
+
+/** Whether a user's metadata goes to other servers by its session id
+ * ("MD !<sessid>"): it has no account, it has a session id, and
+ * P10_MESSAGE_TAGS is on -- the only way every peer holds the same
+ * session id for it (its N's ,S compact tag).  Otherwise, with no
+ * account, the nick form.
+ * @param[in] target The user.
+ * @return Nonzero when "!sessid" addresses @a target.
+ */
+extern int metadata_session_addressable(struct Client *target);
+
+/** Write one key of a user's metadata, addressed the W4 way: by account
+ * (metadata_account_write) when @a target is logged in; otherwise
+ * @a target's own memory, its subscribers, and "MD !<sessid>" to every
+ * IRCv3-aware server -- or, with P10_MESSAGE_TAGS off (no session id
+ * crosses then), the nick form, which receivers accept only from the
+ * target's own server, the target, an alias of it or an oper.
+ * @param[in] src Client to attribute the emission to.
+ * @param[in] target The user whose metadata changes.
+ * @param[in] key Metadata key.
+ * @param[in] value New value, or NULL to delete.
+ * @param[in] vis METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
+ * @return 0 on success, -1 when nothing was applied.
+ */
+extern int metadata_client_write(struct Client *src, struct Client *target,
+                                 const char *key, const char *value, int vis);
 
 /** Answer a hop-local "MD ?" pull request from @a link: for each of the
  * @a n account names in @a accounts, send every stored version (live row

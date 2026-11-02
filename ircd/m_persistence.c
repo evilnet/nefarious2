@@ -45,6 +45,7 @@
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "webpush.h"
 #include "msg.h"
 #include "numeric.h"
@@ -251,10 +252,11 @@ static int persistence_cmd_status(struct Client *sptr)
  * `PERSISTENCE SET ON|OFF|DEFAULT`
  *
  * ON / OFF: write `draft/persistence/hold` metadata via the same path as
- * `BOUNCER SET HOLD on/off` in m_bouncer.c (metadata_set_client +
- * explicit S2S broadcast in the account form, "MD *<account>": the
- * caller may be a device whose primary is on another server, which a
- * nick-form line from us could not reach -- see m_bouncer.c).  ON
+ * `BOUNCER SET HOLD on/off` in m_bouncer.c (metadata_account_write: the
+ * account's stamped row, applied to every client of it and sent to every
+ * fork peer as "MD =<account>"; the caller may be a device whose primary
+ * is on another server, which a nick-form line from us could not reach
+ * -- see m_bouncer.c).  ON
  * also auto-creates a session if the client doesn't already own one;
  * OFF tears the session down.
  *
@@ -299,9 +301,8 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
       persistence_send_status(sptr);
       return 0;
     }
-    metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :1",
-                             cli_account(sptr), "draft/persistence/hold");
+    metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
+                           "1", METADATA_VIS_PRIVATE);
 
     /* A client in no session joins or makes one (BS C, then BS A); this
      * reply sends the STATUS itself, after the SET line. */
@@ -320,9 +321,8 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
     /* The preference, unless the end goes to the session's holder on
      * another server, which writes it when it accepts the end. */
     if (!carried) {
-      metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                               cli_account(sptr), "draft/persistence/hold");
+      metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
+                             "0", METADATA_VIS_PRIVATE);
     }
     /* Its holder ends the session (here, or the end goes there); the
      * primary carries on outside it, every device of it goes. */
@@ -339,9 +339,8 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   }
 
   if (0 == ircd_strcmp(arg, "DEFAULT")) {
-    metadata_set_client(sptr, "draft/persistence/hold", NULL, METADATA_VIS_PRIVATE);
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s",
-                             cli_account(sptr), "draft/persistence/hold");
+    metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
+                           NULL, METADATA_VIS_PRIVATE);
     send_persistence_reply(sptr, "SET", "DEFAULT");
     persistence_send_status(sptr);
     return 0;
@@ -732,20 +731,17 @@ static int persistence_cmd_replay(struct Client *sptr, int parc, char *parv[])
     }
     arg = parv[3];
     if (0 == ircd_strcmp(arg, "ON")) {
-      metadata_set_client(sptr, "draft/persistence/auto-replay", "1",
-                          METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :1",
-                               cli_account(sptr), "draft/persistence/auto-replay");
+      metadata_account_write(&me, cli_account(sptr),
+                             "draft/persistence/auto-replay", "1",
+                             METADATA_VIS_PRIVATE);
     } else if (0 == ircd_strcmp(arg, "OFF")) {
-      metadata_set_client(sptr, "draft/persistence/auto-replay", "0",
-                          METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                               cli_account(sptr), "draft/persistence/auto-replay");
+      metadata_account_write(&me, cli_account(sptr),
+                             "draft/persistence/auto-replay", "0",
+                             METADATA_VIS_PRIVATE);
     } else if (0 == ircd_strcmp(arg, "DEFAULT")) {
-      metadata_set_client(sptr, "draft/persistence/auto-replay", NULL,
-                          METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s",
-                               cli_account(sptr), "draft/persistence/auto-replay");
+      metadata_account_write(&me, cli_account(sptr),
+                             "draft/persistence/auto-replay", NULL,
+                             METADATA_VIS_PRIVATE);
     } else {
       send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
                     "REPLAY SET argument must be ON, OFF, or DEFAULT",
@@ -903,9 +899,8 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
 
     /* Mirror PERSISTENCE SET OFF's tear-down: clear account-global hold
      * preference, broadcast to peers, then destroy the session. */
-    metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                             cli_account(sptr), "draft/persistence/hold");
+    metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
+                           "0", METADATA_VIS_PRIVATE);
   }
 
   /* Its holder ends the session (here, or the end goes there), and

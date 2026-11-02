@@ -62,6 +62,7 @@
 #include "m_batch.h"
 #include "match.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "msg.h"
 #include "persistence_profile.h"
 #include "numeric.h"
@@ -6461,13 +6462,11 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
 /** The side effects of a member's end @a how of @a s that this server, its
  * holder, has accepted from the server the end was issued on (which
  * applied none, bounce_end_asker_applies()): the hold preference to 0 the
- * way BOUNCER SET HOLD off writes it -- on the primary, and to every
- * server by METADATA addressed by the primary's nick (by the account when
- * the record has no primary, or with @a by_account: a primary that is
- * leaving, whose nick the other servers may not know by the time the line
- * reaches them) -- and, for a DETACH, the account's webpush subscriptions
- * forgotten.  Before the session ends, so the METADATA names a client
- * every server still knows. */
+ * way BOUNCER SET HOLD off writes it -- the account's stamped row, every
+ * client of the account, and every server by "MD =account" (the primary's
+ * account, or the record's when it has no primary, or with @a by_account:
+ * a primary that is leaving) -- and, for a DETACH, the account's webpush
+ * subscriptions forgotten.  Before the session ends. */
 static void bounce_end_apply_side_effects(struct BouncerSession *s,
                                           enum bounce_member_end how,
                                           int by_account)
@@ -6476,34 +6475,22 @@ static void bounce_end_apply_side_effects(struct BouncerSession *s,
   struct Client *p = by_account ? NULL : s->hs_client;
 
   if (fx & BOUNCE_END_FX_HOLD_OFF) {
-    if (p && IsUser(p) && IsAccount(p)) {
-      /* p (s->hs_client) may be a REMOTE primary -- this function is the
-       * holder's side, and the holder is not necessarily the primary's
-       * home server.  The nick-target origin guard in ms_metadata now
-       * drops a nick-form MD at every peer unless it comes from that
-       * nick's own server, so this must go as the account form (whose
-       * receiver already applies to every client of the account,
-       * including the primary wherever it actually lives), not p's nick. */
-      metadata_set_client(p, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                               cli_account(p), "draft/persistence/hold");
-    } else {
-      struct Client *c;
-      int fd, online = 0;
+    /* One stamped account write (metadata_account_write): the store,
+     * every client of the account here (local or remote, the primary
+     * among them), and every fork peer by "MD =account", which applies
+     * it to every client of the account there -- the primary wherever it
+     * actually lives.  p (s->hs_client) may be a REMOTE primary -- this
+     * function is the holder's side, and the holder is not necessarily
+     * the primary's home server -- so never p's nick: the nick-target
+     * origin guard in ms_metadata drops a nick-form MD at every peer
+     * unless it comes from that nick's own server.  The account is the
+     * primary's when it has one, else the record's (no primary, or one
+     * that is leaving: @a by_account). */
+    const char *account = (p && IsUser(p) && IsAccount(p) && cli_account(p)[0])
+                          ? cli_account(p) : s->hs_account;
 
-      for (fd = HighestFd; fd >= 0; --fd)
-        if ((c = LocalClientArray[fd]) && IsUser(c) && IsAccount(c)
-            && 0 == ircd_strcmp(cli_account(c), s->hs_account)) {
-          metadata_set_client(c, "draft/persistence/hold", "0",
-                              METADATA_VIS_PRIVATE);
-          online = 1;
-        }
-      if (!online && metadata_lmdb_is_available())
-        metadata_account_set_permanent(s->hs_account, "draft/persistence/hold",
-                                       "0", METADATA_VIS_PRIVATE);
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                               s->hs_account, "draft/persistence/hold");
-    }
+    metadata_account_write(&me, account, "draft/persistence/hold", "0",
+                           METADATA_VIS_PRIVATE);
   }
   if (fx & BOUNCE_END_FX_WEBPUSH_FORGET)
     webpush_forget_account(s->hs_account);

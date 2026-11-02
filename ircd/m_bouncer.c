@@ -53,6 +53,7 @@
 #include "history.h"
 #include "ircd.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -806,23 +807,18 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
         bounce_hold_on_fail(sptr, "BOUNCER", plan, "SET");
         return 0;
       }
-      metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
-      /* Propagate to peers — metadata_set_client only handles local
-       * memory + LMDB persistence; the S2S broadcast happens in
-       * m_metadata.c's user-facing path which we bypass here.  Without
-       * this, peer servers don't see the user's hold preference and
+      /* The preference is account-wide: one stamped account write
+       * (metadata_account_write) -- the store, every client of the
+       * account here and there, and every fork peer by "MD =account".
+       * Without the peers, they don't see the user's hold preference and
        * their bounce_auto_resume rejects subsequent cross-server alias
        * attaches at the "no preference + DEFAULT_HOLD off" early
-       * return.  Visibility "P" mirrors the wire format
-       * m_metadata.c::metadata_cmd_set uses for PRIVATE metadata.
-       * The target is the ACCOUNT ("*account"), not sptr's nick: the
-       * preference is account-wide, and sptr may be a device whose
-       * primary (which its nick names on every other server) lives on
-       * another server, where ms_metadata's nick-target origin guard
-       * would drop a nick-form line from us.  Every fork receiver
-       * applies the account form to the account's clients and store. */
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :1",
-                            cli_account(sptr), "draft/persistence/hold");
+       * return.  Never sptr's nick: sptr may be a device whose primary
+       * (which its nick names on every other server) lives on another
+       * server, where ms_metadata's nick-target origin guard would drop
+       * a nick-form line from us. */
+      metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
+                             "1", METADATA_VIS_PRIVATE);
 
       /* A client in no session joins the account's session, or makes one
        * (bounce_hold_on(): BS C then BS A -- a peer receiving BS C alone
@@ -861,11 +857,10 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
       /* The preference, unless the end goes to the session's holder on
        * another server, which writes it when it accepts the end. */
       if (!session || bounce_end_asker_applies(bounce_member_end_route(session))) {
-        metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
-        /* Propagate "off" to peers — see comment in the "on" branch
-         * above.  Without this, peers retain a stale "1" preference. */
-        sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                              cli_account(sptr), "draft/persistence/hold");
+        /* "off" the same way -- see the "on" branch above.  Without the
+         * peers, they retain a stale "1" preference. */
+        metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
+                               "0", METADATA_VIS_PRIVATE);
       }
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.

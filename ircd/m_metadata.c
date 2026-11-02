@@ -833,30 +833,21 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    /* W4: stamp the write and apply it to EVERY client of the account
-     * (local and remote, via metadata_account_apply_memory), not only
-     * this server's online ones.  metadata_account_put_versioned
-     * writes the value row (or tombstone) and its clock row in one
-     * batch, closing the era-2 §A4 NODE-LOCAL limitation, whose live
+    /* W4: one stamped account write (metadata_account_write): the row
+     * (or tombstone) and its clock row in one batch, applied to EVERY
+     * client of the account (local and remote), and sent to every fork
+     * peer as the stamped "MD =account" row, which they merge by the
+     * stamp.  This closes the era-2 §A4 NODE-LOCAL limitation, whose live
      * consequence was a peer retaining a stale draft/persistence/hold
      * row after pool cleanup ran through an oper on one server only
-     * (Gap B, bouncer-promotion scope) -- the store write itself now
-     * reaches every server's replica of the account via the stamp, not
-     * only the broadcast below.
-     *
-     * The write also broadcasts in the (unstamped, pre-existing)
-     * account-target wire form ("MD *account key [vis] [:value]") so
-     * an older peer still converges the same way it always has.
-     * ms_metadata's account-form branch consumes it here; an older fork
-     * (pre-W4, e.g. 7fd92ba3) APPLIES it too -- to its own online
-     * clients of the account, else straight to its store -- and relays
-     * it onward (the wire table's "*account" row).  It is not dropped. */
+     * (Gap B, bouncer-promotion scope).  Task 8 moved this from the
+     * unstamped "*account" form (which each receiver stamped itself) to
+     * "=account": a fork peer must run W4 push 1 to take it -- an older
+     * one drops it (RECEIVER-FIRST). */
     {
       struct Client *acptr;
       struct Client *first_online = NULL;
       int fd;
-      struct md_stamp st;
-      int rc;
 
       for (fd = HighestFd; fd >= 0; --fd) {
         if (!(acptr = LocalClientArray[fd]))
@@ -890,26 +881,11 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
         }
       }
 
-      st = metadata_stamp_now();
-      rc = metadata_account_put_versioned(account_name, key, value, visibility, &st);
-      if (rc < 0) {
+      if (metadata_account_write(sptr, account_name, key, value, visibility) < 0) {
         send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
                   "Failed to set account metadata");
         return 0;
       }
-      metadata_account_apply_memory(account_name, key, value, visibility);
-
-      /* Relay in the account-target form (see the branch comment above).
-       * Broadcast unconditionally: metadata_account_apply_memory never
-       * emits S2S itself, so this is still the only emission. */
-      if (value)
-        sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "*%s %s %s :%s",
-                                 account_name, key,
-                                 visibility == METADATA_VIS_PRIVATE ? "P" : "*",
-                                 value);
-      else
-        sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "*%s %s",
-                                 account_name, key);
     }
 
     send_keyvalue(sptr, target, key, value,
@@ -957,12 +933,23 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Perform the set/delete */
-  if (is_channel) {
-    rc = metadata_set_channel(target_channel, key, value, visibility);
-  } else {
-    rc = metadata_set_client(target_client, key, value, visibility);
+  /* A user's key: one write addressed by its account, else its session
+   * (metadata_client_write: memory, store, subscribers and every fork
+   * peer -- for an account, every client of it, here and there).  W4
+   * Task 8: never by nick unless no session id crosses (tags off). */
+  if (!is_channel) {
+    if (metadata_client_write(sptr, target_client, key, value, visibility) < 0) {
+      send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
+                "Failed to set metadata");
+      return 0;
+    }
+    send_keyvalue(sptr, target, key, value,
+                  visibility == METADATA_VIS_PRIVATE ? "private" : "*");
+    return 0;
   }
+
+  /* Perform the set/delete */
+  rc = metadata_set_channel(target_channel, key, value, visibility);
 
   if (rc < 0) {
     send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
@@ -974,32 +961,21 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   send_keyvalue(sptr, target, key, value,
                 visibility == METADATA_VIS_PRIVATE ? "private" : "*");
 
-  /* Expand "*" to client's nick.  Used for both local subscriber
-   * notifications and the S2S broadcast — `*` is meaningful only in
-   * the client→server direction (means "the sender's self") and has
-   * no defined meaning in server→server traffic.  If we forwarded the
-   * literal `*` peers would FindUser("*") → NULL and silently drop
-   * the metadata, producing the bug where cross-server self-metadata
-   * was unreachable. */
-  const char *wire_target = (target[0] == '*' && !target[1]
-                             && !is_channel && target_client)
-                             ? cli_name(target_client) : target;
-
-  /* Notify local subscribers.  Vis-aware (Task 5, §A6): public reaches
-   * subscribed viewers under the existing channel-share/self scoping;
-   * private reaches only the target's own subscribed sessions — see
-   * metadata_notify_subscribers. */
-  metadata_notify_subscribers(wire_target, key, value, visibility);
+  /* Channel target from here on (a user's key returned above).  Notify
+   * local subscribers.  Vis-aware (Task 5, §A6): public reaches
+   * subscribed members; private reaches nobody (a channel has no
+   * session owner) -- see metadata_notify_subscribers. */
+  metadata_notify_subscribers(target, key, value, visibility);
 
   /* Propagate to other servers with visibility */
   if (value) {
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s %s :%s",
-                          wire_target, key,
+                          target, key,
                           visibility == METADATA_VIS_PRIVATE ? "P" : "*",
                           value);
   } else {
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
-                          wire_target, key);
+                          target, key);
   }
 
   return 0;
@@ -1052,6 +1028,66 @@ static int metadata_cmd_list(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
+/** One key a user CLEAR deletes (its name and visibility, copied out of
+ * the list or the store walk before the deletes change either). */
+struct md_clear_key {
+  struct md_clear_key *next;
+  int vis;
+  char key[1];   /* allocated to fit */
+};
+
+static void md_clear_key_push(struct md_clear_key **head, const char *key, int vis)
+{
+  size_t len = strlen(key);
+  struct md_clear_key *k = (struct md_clear_key *)MyMalloc(sizeof(*k) + len);
+
+  if (!k)
+    return;
+  memcpy(k->key, key, len + 1);
+  k->vis = vis;
+  k->next = *head;
+  *head = k;
+}
+
+static void md_clear_key_free(struct md_clear_key *head)
+{
+  while (head) {
+    struct md_clear_key *next = head->next;
+    MyFree(head);
+    head = next;
+  }
+}
+
+/** METADATA CLEAR on a user: delete each of its keys the way SET deletes
+ * one (metadata_client_write: by account, else by session id), so every
+ * server and -- for an account -- every client of it loses the key, and
+ * subscribers are told; then metadata_clear_client for the store's
+ * residue (rows no client here holds in memory).  The requester gets a
+ * `metadata` batch with one RPL_KEYNOTSET per key it held in memory
+ * (#605), before the deletes.
+ */
+static void metadata_clear_user(struct Client *sptr, const char *display_target,
+                                struct Client *target_client)
+{
+  struct md_clear_key *keys = NULL, *k;
+  struct MetadataEntry *entry;
+
+  /* Copied out first: every delete below edits this list. */
+  for (entry = metadata_list_client(target_client); entry; entry = entry->next)
+    md_clear_key_push(&keys, entry->key, entry->visibility);
+
+  send_batch_start(sptr, "metadata");
+  for (k = keys; k; k = k->next)
+    send_reply(sptr, RPL_KEYNOTSET, display_target, k->key);
+  send_batch_end(sptr);
+
+  for (k = keys; k; k = k->next)
+    metadata_client_write(sptr, target_client, k->key, NULL, k->vis);
+  md_clear_key_free(keys);
+
+  metadata_clear_client(target_client);
+}
+
 /** Handle CLEAR subcommand.
  * METADATA CLEAR <target>
  */
@@ -1085,7 +1121,15 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Broadcast a per-key unset for every key we are about to clear, BEFORE
+  if (!is_channel) {
+    metadata_clear_user(sptr, (target[0] == '*' && !target[1])
+                              ? cli_name(target_client) : target,
+                        target_client);
+    return 0;
+  }
+
+  /* Channel target from here on (a user's CLEAR returned above).
+   * Broadcast a per-key unset for every key we are about to clear, BEFORE
    * clearing (the clear frees the list we enumerate). CLEAR previously
    * emitted NOTHING to other servers: the SET path broadcasts and populates
    * the target's in-memory metadata on EVERY server, but no layer ever
@@ -1093,9 +1137,8 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
    * values until the user quit (clocktest M8 finding, 2026-07-24). The
    * value-less "MD <target> <key>" form is the existing unset wire format;
    * ms_metadata applies it under the doc-mirror suspend guard and relays it
-   * onward. For USER targets metadata_set_client(NULL) clears both memory
-   * and the store row (so the restored GET store-promotion has nothing to
-   * re-animate). For CHANNEL targets, metadata_set_channel(NULL) on each
+   * onward. (A USER target's CLEAR is metadata_clear_user's, above.)
+   * For CHANNEL targets, metadata_set_channel(NULL) on each
    * RELAY deletes that relay's own +R store row too (the +R persist leg,
    * mint self-skipped under the suspend guard) — only the ORIGIN was left
    * out: metadata_clear_channel() below is memory-only and is never routed
@@ -1105,20 +1148,12 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
    * "cleared" values back into every store within ~30s — mesh-wide
    * resurrection for any +R channel CLEAR. Closed below (Metadata P2 final
    * review finding).
-   * Enumeration source is the in-memory list, so a key that is in the store
-   * but was never hydrated into this origin's memory is not broadcast — a
-   * narrow residual (offline SET + a no-load_account attach); the common
-   * in-session SET/CLEAR path is fully covered. Bounded by the key budget. */
+   * Enumeration source is the in-memory list. Bounded by the key budget. */
   {
-    const char *wire_target = (target[0] == '*' && !target[1]
-                               && !is_channel && target_client)
-                               ? cli_name(target_client) : target;
-    struct MetadataEntry *entry = is_channel
-                                    ? metadata_list_channel(target_channel)
-                                    : metadata_list_client(target_client);
+    struct MetadataEntry *entry = metadata_list_channel(target_channel);
     for (; entry; entry = entry->next)
       sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
-                               wire_target, entry->key);
+                               target, entry->key);
   }
 
   /* #605: the requester gets a `metadata` batch with one RPL_KEYNOTSET
@@ -1126,19 +1161,14 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
    * "send empty keyvalue?" question below).  Enumerate BEFORE the wipe,
    * same source as the S2S loop above. */
   {
-    const char *display_target = (target[0] == '*' && !target[1]
-                                  && !is_channel && target_client)
-                                  ? cli_name(target_client) : target;
-    struct MetadataEntry *entry = is_channel
-                                    ? metadata_list_channel(target_channel)
-                                    : metadata_list_client(target_client);
+    struct MetadataEntry *entry = metadata_list_channel(target_channel);
     send_batch_start(sptr, "metadata");
     for (; entry; entry = entry->next)
-      send_reply(sptr, RPL_KEYNOTSET, display_target, entry->key);
+      send_reply(sptr, RPL_KEYNOTSET, target, entry->key);
     send_batch_end(sptr);
   }
 
-  if (is_channel) {
+  {
     metadata_clear_channel(target_channel);
 
     /* Close the resurrection gap the comment above describes: wipe the
@@ -1171,8 +1201,6 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
     if ((target_channel->mode.mode & MODE_REGISTERED) &&
         metadata_lmdb_is_available())
       metadata_account_clear(target_channel->chname);
-  } else {
-    metadata_clear_client(target_client);
   }
 
   return 0;

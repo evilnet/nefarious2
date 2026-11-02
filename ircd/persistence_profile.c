@@ -22,11 +22,13 @@
 
 #include "client.h"
 #include "ircd_alloc.h"
+#include "ircd.h"
 #include "ircd_chattr.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "persistence_profile.h"
 #include "struct.h"
 
@@ -200,6 +202,25 @@ static int parent_chain_would_cycle(const char *account,
   return 1; /* depth limit exceeded — treat as cycle */
 }
 
+/** Write (or delete, @a value NULL) one stored profile key as this
+ * server's own event (metadata_account_write): the stamped row, the
+ * account's clients, and every fork peer by "MD =account" -- so a
+ * profile made, edited, renamed or deleted on one server is the same
+ * profile on the others (W4 Task 8).  Stored without TTL -- profiles
+ * are preferences, not cache entries.  All profile keys live under
+ * draft/persistence/profile/, which is server-managed
+ * (metadata_key_is_server_managed) and therefore always stored bare
+ * regardless of the visibility argument -- PRIVATE here is documentary,
+ * matching the conceptual privacy of profile config, and keeps the
+ * notification of a client subscribed to the key on its own sessions.
+ */
+static int profile_write(const char *account, const char *full_key,
+                         const char *value)
+{
+  return metadata_account_write(&me, account, full_key, value,
+                                METADATA_VIS_PRIVATE);
+}
+
 int persistence_profile_set(const char *account, const char *profile,
                              const char *key, const char *value)
 {
@@ -227,15 +248,7 @@ int persistence_profile_set(const char *account, const char *profile,
   if (build_profile_key(full_key, sizeof(full_key), profile, key) < 0)
     return -1;
 
-  /* metadata_account_set_permanent stores without TTL — profiles are
-   * preferences, not cache entries.  The same call handles delete when
-   * value is NULL.  All profile keys live under draft/persistence/profile/,
-   * which is server-managed (metadata_key_is_server_managed) and therefore
-   * always stored bare regardless of the visibility argument — PRIVATE here
-   * is documentary, matching the conceptual privacy of profile config. */
-  if (value)
-    return metadata_account_set_permanent(account, full_key, value, METADATA_VIS_PRIVATE);
-  return metadata_account_set(account, full_key, NULL, METADATA_VIS_PUBLIC);
+  return profile_write(account, full_key, value);
 }
 
 int persistence_profile_create(const char *account, const char *name,
@@ -320,7 +333,7 @@ int persistence_profile_delete(const char *account, const char *name)
   list = metadata_account_list(account);
   for (e = list; e; e = e->next) {
     if (e->key && strncmp(e->key, prefix, prefix_len) == 0) {
-      if (metadata_account_set(account, e->key, NULL, METADATA_VIS_PUBLIC) < 0) {
+      if (profile_write(account, e->key, NULL) < 0) {
         rc = -1;
         /* keep going — best-effort cleanup */
       }
@@ -378,7 +391,7 @@ int persistence_profile_rename(const char *account,
       rc = -1;
       continue;
     }
-    if (metadata_account_set_permanent(account, new_key, e->value, METADATA_VIS_PRIVATE) < 0)
+    if (profile_write(account, new_key, e->value) < 0)
       rc = -1;
   }
 
@@ -398,7 +411,7 @@ int persistence_profile_rename(const char *account,
       if (strcmp(k + klen - parent_suffix_len, "/" PROFILE_PARENT_KEY) != 0)
         continue;
       if (profile_name_eq(e->value, old_name)) {
-        if (metadata_account_set_permanent(account, k, new_name, METADATA_VIS_PRIVATE) < 0)
+        if (profile_write(account, k, new_name) < 0)
           rc = -1;
       }
     }
@@ -407,7 +420,7 @@ int persistence_profile_rename(const char *account,
   /* Phase 3: delete old_name's keys. */
   for (e = list; e; e = e->next) {
     if (e->key && strncmp(e->key, old_prefix, old_prefix_len) == 0) {
-      if (metadata_account_set(account, e->key, NULL, METADATA_VIS_PUBLIC) < 0)
+      if (profile_write(account, e->key, NULL) < 0)
         rc = -1;
     }
   }

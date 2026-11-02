@@ -15,6 +15,7 @@
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_string.h"
 #include "metadata.h"
@@ -87,12 +88,8 @@ static void mdsync_send_line(struct Client *src, struct Client *one,
                              const char *flags, const char *piece)
 {
   if (one) {
-    /* The pull reply to cptr (mdsync_answer_pull) is this single-target
-     * path's caller.  A pull request is itself only ever accepted
-     * from a direct, already-identified-as-server link (ms_metadata_pull),
-     * but that link need not be IRCv3-aware (a confused/hostile sender
-     * could still forge the request) -- never send it one of these new
-     * forms, which an older/non-aware peer cannot parse. */
+    /* metadata_emit_versioned has already refused a @a one that is not
+     * IRCv3-aware; checked again here so this helper is safe alone. */
     if (!IsIRCv3Aware(one))
       return;
     if (piece)
@@ -121,6 +118,17 @@ void metadata_emit_versioned(struct Client *src, struct Client *one,
   size_t sent, total;
 
   if (!src || !account || !key || !v)
+    return;
+
+  /* A single link that is not IRCv3-aware never gets this form, which
+   * an older or non-aware peer cannot parse (the wire table's "=account"
+   * row).  Its callers: the pull reply to cptr (mdsync_answer_pull: a
+   * pull is only accepted from a direct link, but that link need not be
+   * IRCv3-aware -- a confused or hostile sender could still forge the
+   * request) and the link burst (s_serv.c, which is itself gated on the
+   * link being IRCv3-aware).  The broadcast form goes through
+   * sendcmdto_serv_butone_v3, which skips non-aware links itself. */
+  if (one && !IsIRCv3Aware(one))
     return;
 
   if (md_stamp_format(stamp_text, sizeof(stamp_text), &v->st) < 0)
@@ -163,6 +171,97 @@ void metadata_emit_versioned(struct Client *src, struct Client *one,
 
     sent += chunklen;
   }
+}
+
+int metadata_account_write(struct Client *src, const char *account,
+                           const char *key, const char *value, int vis)
+{
+  struct md_stamp st;
+  struct md_version v;
+
+  if (!src || !account || !account[0] || !key)
+    return -1;
+
+  st = metadata_stamp_now();
+
+  /* Store first, and nothing else when the store refuses the write: a
+   * row peers keep under a stamp this server never stored would be
+   * undone here by the next pull.  With no store at all (storage not
+   * configured), memory and peers still get it, as metadata_set_client
+   * plus the account-form broadcast used to. */
+  if (metadata_lmdb_is_available()
+      && metadata_account_put_versioned(account, key, value, vis, &st) < 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "metadata_account_write: store refused %s/%s - not applied, "
+              "not sent", account, key);
+    return -1;
+  }
+
+  metadata_account_apply_memory(account, key, value, vis);
+
+  v.st = st;
+  v.tombstone = (value == NULL);
+  v.vis = vis;
+  v.value = value;
+  v.vlen = value ? strlen(value) : 0;
+  metadata_emit_versioned(src, NULL, NULL, account, key, &v);
+  return 0;
+}
+
+int metadata_session_addressable(struct Client *target)
+{
+  /* Every server that learned this client with message tags on took the
+   * session id its N carried (the ,S compact-tag segment; make_client
+   * adopts it, and every N relay re-stages it: bounce_set_n_sessid_hint).
+   * With P10_MESSAGE_TAGS off no N of ours carries one
+   * (format_s2s_tags_with_client returns NULL, and the send path adds no
+   * tag region), so each peer minted its own and a "!sessid" would name
+   * nobody there.  A client with the account flag but an empty account
+   * name is skipped by the session-form receiver (it refuses IsAccount
+   * matches). */
+  return feature_bool(FEAT_P10_MESSAGE_TAGS) && target && cli_user(target)
+         && !cli_user(target)->account[0] && !IsAccount(target)
+         && cli_session_id(target)[0];
+}
+
+int metadata_client_write(struct Client *src, struct Client *target,
+                          const char *key, const char *value, int vis)
+{
+  const char *vis_tok = (vis == METADATA_VIS_PRIVATE) ? "P" : "*";
+
+  if (!src || !target || !key || !cli_user(target))
+    return -1;
+
+  if (cli_user(target)->account[0])
+    return metadata_account_write(src, cli_user(target)->account, key,
+                                  value, vis);
+
+  /* No account: this client's own memory (metadata_set_client writes
+   * no store row without one) and its subscribers. */
+  if (metadata_set_client(target, key, value, vis) < 0)
+    return -1;
+  metadata_notify_subscribers(cli_name(target), key, value, vis);
+
+  /* Addressed by session id (metadata_session_addressable), else the
+   * nick form -- which the receiver accepts only from the target's own
+   * server, the target itself, an alias of it or an oper
+   * (md_sender_owns_client), so @a src must be one of those. */
+  if (metadata_session_addressable(target)) {
+    if (value)
+      sendcmdto_serv_butone_v3(src, CMD_METADATA, NULL, "!%s %s %s :%s",
+                               cli_session_id(target), key, vis_tok, value);
+    else
+      sendcmdto_serv_butone_v3(src, CMD_METADATA, NULL, "!%s %s",
+                               cli_session_id(target), key);
+  } else {
+    if (value)
+      sendcmdto_serv_butone_v3(src, CMD_METADATA, NULL, "%s %s %s :%s",
+                               cli_name(target), key, vis_tok, value);
+    else
+      sendcmdto_serv_butone_v3(src, CMD_METADATA, NULL, "%s %s",
+                               cli_name(target), key);
+  }
+  return 0;
 }
 
 /** Minimum gap between SNO_NETWORK notices for the same link's

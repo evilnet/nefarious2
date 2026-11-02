@@ -54,6 +54,7 @@
 #include "mark.h"
 #include "match.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "motd.h"
 #include "msg.h"
 #include "msgq.h"
@@ -3015,26 +3016,35 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   /* A -b that stands (no +b after it in this command): the hold
    * preference, before the mode line goes out and before the end.
    * hold_off_tell is only set when !MyUser(acptr) (the f4a gate above):
-   * acptr is a REMOTE primary here, so this must be the account form --
-   * the nick-target origin guard in ms_metadata now drops a nick-form MD
-   * at every peer unless it comes from that nick's own server, including
+   * acptr is a REMOTE primary here, so the tell must name the account --
+   * the nick-target origin guard in ms_metadata drops a nick-form MD at
+   * every peer unless it comes from that nick's own server, including
    * the primary's true home server, which is exactly who needs to see
-   * this. */
+   * this.  The tell is one stamped account write
+   * (metadata_account_write): the store, every client of the account
+   * here -- the asking device among them, and any other connection of
+   * the account, whose +b the preference also clears (account-wide,
+   * user-accepted 2026-11-01) -- and every fork peer by "MD =account".
+   * Without the tell, only the target's own copy here changes (the
+   * f4a gate: a server that receives a remote user's -b by its M line
+   * tells nobody). */
   if (hold_off) {
-    metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
     if (hold_off_tell)
-      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :0",
-                               cli_account(acptr), "draft/persistence/hold");
+      metadata_account_write(&me, cli_account(acptr), "draft/persistence/hold",
+                             "0", METADATA_VIS_PRIVATE);
+    else
+      metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
   }
   /* A +b of a device of ours that stands, toward a primary on another
    * server: its holder never sees the mode line (a fake direction there),
    * so the device's server tells every server the preference, as for a -b
    * (the f4a gate, for hold 1).  hold_on_tell (bounce_hold_on_tells) is
-   * only true when the target is not ours either -- same account-form
-   * requirement as hold_off_tell above. */
+   * only true when the target is not ours either -- the same account-
+   * addressed stamped write as hold_off_tell above, which also sets the
+   * preference (+b) on every other client of the account here. */
   if (hold_on_tell)
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "*%s %s P :1",
-                             cli_account(acptr), "draft/persistence/hold");
+    metadata_account_write(&me, cli_account(acptr), "draft/persistence/hold",
+                           "1", METADATA_VIS_PRIVATE);
 
   /*
    * Compare new flags with old flags and send string which
