@@ -118,6 +118,13 @@ static struct IPRegistryEntry* ip_registry_find(const struct irc_in_addr *ip)
 {
   struct irc_in_addr canon;
   struct IPRegistryEntry* entry;
+
+  /* An invalid address (a WEBIRC gateway or IAuth spoofing 0::0) has no
+   * entry: ip_registry_check_remote() makes none for it, and its upper
+   * 64 bits -- all zero, all the registry matches an IPv6 key on -- would
+   * otherwise find the loopback's. */
+  if (!irc_in_addr_valid(ip))
+    return 0;
   ip_registry_canonicalize(&canon, ip);
   entry = hashTable[ip_registry_hash(&canon)];
   for ( ; entry; entry = entry->next) {
@@ -280,9 +287,9 @@ int ip_registry_check_local(const struct irc_in_addr *addr, time_t* next_target_
     Debug((DEBUG_DNS, "IPcheck added new registry for local connection from %s.", ircd_ntoa(&entry->addr)));
     return 1;
   }
-  /* Note that this also counts server connects.
-   * It is hard and not interesting, to change that.
-   * Refuse connection if it would overflow the counter.
+  /* Only client connections reach this: add_connection() skips IPcheck
+   * for a server listener, and outgoing server links never call it.
+   * Refuse the connection if it would overflow the counter.
    */
   if (0 == ++entry->connected)
   {
@@ -365,8 +372,13 @@ int ip_registry_check_remote(struct Client* cptr, int is_burst)
     Debug((DEBUG_DNS, "IPcheck added new registry for remote connection from %s.", ircd_ntoa(&entry->addr)));
     return 1;
   }
-  /* Avoid overflowing the connection counter. */
+  /* Avoid overflowing the connection counter: undo the increment, as the
+   * local check does, and leave the client uncounted -- otherwise the
+   * counter stays wrapped at 0 and the client's exit releases a count it
+   * never held (assert(entry->connected > 0) in ip_registry_disconnect). */
   if (0 == ++entry->connected) {
+    entry->connected--;
+    ClearIPChecked(cptr);
     Debug((DEBUG_DNS, "IPcheck refusing remote connection from %s: counter overflow.", ircd_ntoa(&entry->addr)));
     return 0;
   }
@@ -417,8 +429,16 @@ void ip_registry_connect_succeeded(struct Client *cptr)
 {
   const char*             tr    = "";
   unsigned int free_targets     = STARTTARGETS;
-  struct IPRegistryEntry* entry = ip_registry_find(&cli_ip(cptr));
+  struct IPRegistryEntry* entry;
 
+  /* An invalid address (a WEBIRC gateway or IAuth spoofing ::) is marked
+   * counted by ip_registry_check_remote() without a registry entry, as
+   * ip_registry_disconnect() already knows: nothing to copy or report. */
+  if (!irc_in_addr_valid(&cli_ip(cptr))) {
+    Debug((DEBUG_DNS, "IPcheck noting connection success from invalid %s.", ircd_ntoa(&cli_ip(cptr))));
+    return;
+  }
+  entry = ip_registry_find(&cli_ip(cptr));
   assert(entry);
   if (entry->target) {
     memcpy(cli_targets(cptr), entry->target->targets, MAXTARGETS);
