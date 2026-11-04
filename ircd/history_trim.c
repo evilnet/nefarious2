@@ -696,7 +696,9 @@ static int hint_flush(int i)
   struct htrim_hint *h = &g.hint[i];
   struct db_cf *cf = hint_cf(i);
   struct db_cf_stats cs;
+  uint64_t t0;
   char *end;
+  int ok;
 
   if (!h->n)
     return 0;
@@ -724,12 +726,16 @@ static int hint_flush(int i)
   g.hint_defer[i] = 0;
   memset(&cs, 0, sizeof cs);
   db_cf_stats(g.st.env, cf, &cs);
+  t0 = g.clock();
+  ok = db_flush_cf(g.st.env, cf, 0) == DB_OK
+       && db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) == DB_OK;
   log_write(LS_SYSTEM, L_INFO, 0,
             "history: trim: compaction hint on %s: %llu keys deleted since the "
-            "last hint, %zu deletes in its memtables; flushing", hint_names[i],
-            (unsigned long long)h->n, cs.mem_deletes + cs.imm_deletes);
-  if (db_flush_cf(g.st.env, cf, 0) != DB_OK
-      || db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) != DB_OK)
+            "last hint, %zu deletes in its memtables; flush + hint %llu us on "
+            "the main thread", hint_names[i], (unsigned long long)h->n,
+            cs.mem_deletes + cs.imm_deletes,
+            (unsigned long long)elapsed_since(t0, g.clock()));
+  if (!ok)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "history_trim: compaction hint failed (kept for the next): %s",
               last_err());
