@@ -21,6 +21,8 @@
  */
 #include "config.h"
 
+#include "IPcheck.h"
+
 #include "class.h"
 #include "client.h"
 #include "gline.h"
@@ -755,6 +757,9 @@ struct StatDesc statsinfo[] = {
   { ' ', "dnsbl", STAT_FLAG_OPERONLY, FEAT_LAST_F,
     dnsbl_report_stats, 0,
     "DNSBL statistics and configuration." },
+  { ' ', "ipcheck", STAT_FLAG_OPERONLY | STAT_FLAG_VARPARAM, FEAT_LAST_F,
+    IPcheck_report, 0,
+    "IPcheck connection throttle: the rule, totals, an address's entry." },
 #ifdef USE_LIBGIT2
   { ' ', "gitsync", STAT_FLAG_OPERONLY, FEAT_LAST_F,
     gitsync_report_stats, 0,

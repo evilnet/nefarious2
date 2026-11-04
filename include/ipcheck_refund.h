@@ -31,5 +31,10 @@ extern int ipcheck_refund_take(const char *account, time_t now, int limit,
                                int period);
 /* Full reset (tests). */
 extern void ipcheck_refund_clear(void);
+/* How many accounts hold a live window (opened less than `period` seconds
+ * before `now`), and how many the table can hold (STATS ipcheck: a full
+ * bucket refuses refunds without a word, so this is where it shows). */
+extern int ipcheck_refund_live(time_t now, int period);
+extern int ipcheck_refund_capacity(void);
 
 #endif /* INCLUDED_ipcheck_refund_h */

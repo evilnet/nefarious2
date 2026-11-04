@@ -32,6 +32,9 @@
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_reply.h"
+#include "ircd_snprintf.h"
+#include "numeric.h"
 #include "ircd_string.h"    /* ircd_ntoa */
 #include "s_debug.h"        /* Debug */
 #include "s_user.h"         /* TARGET_DELAY */
@@ -646,3 +649,239 @@ unsigned short IPcheck_nr(struct Client *cptr)
   assert(0 != cptr);
   return ip_registry_count(&cli_ip(cptr));
 }
+
+/** Fill \a info from \a entry, as the next local connection would read it.
+ * The verdict repeats ip_registry_check_local()'s arithmetic without
+ * changing anything, over the age as CONNECTED_SINCE() reads it, so it
+ * says what that check would do; the age shown is modulo 65536.
+ * @param[in] entry Registry entry.
+ * @param[out] info Its description.
+ */
+static void ip_registry_describe(const struct IPRegistryEntry *entry,
+                                 struct IPcheckInfo *info)
+{
+  int since = CONNECTED_SINCE(entry->last_connect);
+  int period = IPCHECK_CLONE_PERIOD;
+  int limit = IPCHECK_CLONE_LIMIT;
+  /* The chain the check would count this connection into, plus one for
+   * it: compared with the limit in int when refusals are not counted,
+   * and in the entry's unsigned char -- saturating at 255 -- when they
+   * are, as the check does. */
+  int after = ((since > period) ? 0 : entry->attempts) + 1;
+
+  if (after > 255 && feature_bool(FEAT_IPCHECK_COUNT_REFUSALS))
+    after = 255;
+  memset(info, 0, sizeof(*info));
+  memcpy(&info->key, &entry->addr, sizeof(info->key));
+  info->connected = entry->connected;
+  info->attempts = entry->attempts;
+  info->since = (unsigned int)since & 0xffff;
+  info->has_targets = (0 != entry->target);
+  info->free_targets = entry->target ? entry->target->count : STARTTARGETS;
+  if (0xffff == entry->connected)
+    info->would_refuse = IPCHECK_REFUSE_OVERFLOW;
+#ifndef NOTHROTTLE
+  else if (after >= limit && (CurrentTime - cli_since(&me)) > IPCHECK_CLONE_DELAY) {
+    if (1 >= limit)               /* even a fresh chain is refused */
+      info->would_refuse = IPCHECK_REFUSE_LIMIT;
+    else {
+      info->would_refuse = IPCHECK_REFUSE_WINDOW;
+      info->retry_in = (unsigned int)period - (unsigned int)since + 1;
+    }
+  }
+#endif
+}
+
+/** Look up what the registry holds for an address.
+ * @param[in] addr Address, as a client would connect from it.
+ * @param[out] info Filled in when there is an entry.
+ * @return Non-zero if the registry has an entry for \a addr.
+ */
+int IPcheck_lookup(const struct irc_in_addr *addr, struct IPcheckInfo *info)
+{
+  struct IPRegistryEntry *entry = ip_registry_find(addr);
+
+  if (!entry)
+    return 0;
+  ip_registry_describe(entry, info);
+  return 1;
+}
+
+/** Call \a fn for every registry entry.
+ * @param[in] fn Callback, given each entry's description.
+ * @param[in] data Passed through to \a fn.
+ * @return Number of entries.
+ */
+static unsigned int ip_registry_walk(void (*fn)(const struct IPcheckInfo *info, void *data),
+                                     void *data)
+{
+  struct IPRegistryEntry *entry;
+  struct IPcheckInfo info;
+  unsigned int count = 0;
+  int i;
+
+  for (i = 0; i < IP_REGISTRY_TABLE_SIZE; ++i)
+    for (entry = hashTable[i]; entry; entry = entry->next) {
+      ++count;
+      ip_registry_describe(entry, &info);
+      fn(&info, data);
+    }
+  return count;
+}
+
+/** Write a registry key as the range it covers: an IPv4 address keys its
+ * /32 (stored as 2002::/16 6to4), an IPv6 one its /64.
+ * @param[in] key Key in canonical form (IPcheckInfo::key).
+ * @param[out] buf Receives the text.
+ * @param[in] len Size of \a buf.
+ */
+static void ip_registry_key_string(const struct irc_in_addr *key, char *buf, size_t len)
+{
+  struct irc_in_addr shown;
+
+  memset(&shown, 0, sizeof(shown));
+  if (key->in6_16[0] == htons(0x2002)) {
+    shown.in6_16[5] = 0xffff;
+    shown.in6_16[6] = key->in6_16[1];
+    shown.in6_16[7] = key->in6_16[2];
+    ircd_snprintf(0, buf, len, "%s/32", ircd_ntoa(&shown));
+  } else {
+    memcpy(&shown, key, sizeof(shown));
+    shown.in6_16[4] = shown.in6_16[5] = shown.in6_16[6] = shown.in6_16[7] = 0;
+    ircd_snprintf(0, buf, len, "%s/64", ircd_ntoa(&shown));
+  }
+}
+
+/** One address's line in STATS ipcheck. */
+static void ipcheck_report_entry(struct Client *to, const struct IPcheckInfo *info)
+{
+  char key[SOCKIPLEN + 8];
+  char next[64];
+
+  ip_registry_key_string(&info->key, key, sizeof(key));
+  switch (info->would_refuse) {
+  case IPCHECK_REFUSE_WINDOW:
+    ircd_snprintf(0, next, sizeof(next), "refused for %u s", info->retry_in);
+    break;
+  case IPCHECK_REFUSE_OVERFLOW:
+    ircd_snprintf(0, next, sizeof(next), "refused until one leaves");
+    break;
+  case IPCHECK_REFUSE_LIMIT:
+    ircd_snprintf(0, next, sizeof(next), "refused at any gap (IPCHECK_CLONE_LIMIT %d)",
+                  IPCHECK_CLONE_LIMIT);
+    break;
+  default:
+    ircd_snprintf(0, next, sizeof(next), "accepted");
+    break;
+  }
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "I :%s: on %u, attempts %u, last connect or drop %u s ago, "
+             "free targets %u/%u%s, next connection %s",
+             key, info->connected, info->attempts, info->since,
+             info->free_targets, STARTTARGETS,
+             info->has_targets ? "" : " (none kept)", next);
+}
+
+/** How many entries STATS ipcheck lists without an address. */
+#define IPCHECK_REPORT_TOP 10
+
+/** Totals and the busiest entries, gathered by ip_registry_walk(). */
+struct ipcheck_report_state {
+  unsigned int connected;
+  unsigned int refusing;
+  unsigned int top_count;
+  struct IPcheckInfo top[IPCHECK_REPORT_TOP];
+};
+
+/** Whether \a a ranks above \a b: more connections, then more attempts. */
+static int ipcheck_ranks_above(const struct IPcheckInfo *a, const struct IPcheckInfo *b)
+{
+  if (a->connected != b->connected)
+    return a->connected > b->connected;
+  return a->attempts > b->attempts;
+}
+
+static void ipcheck_report_gather(const struct IPcheckInfo *info, void *data)
+{
+  struct ipcheck_report_state *st = data;
+  unsigned int i;
+
+  st->connected += info->connected;
+  if (info->would_refuse)
+    ++st->refusing;
+  for (i = st->top_count; i > 0 && ipcheck_ranks_above(info, &st->top[i - 1]); --i)
+    if (i < IPCHECK_REPORT_TOP)
+      st->top[i] = st->top[i - 1];
+  if (i < IPCHECK_REPORT_TOP) {
+    st->top[i] = *info;
+    if (st->top_count < IPCHECK_REPORT_TOP)
+      ++st->top_count;
+  }
+}
+
+/** STATS ipcheck [address]: what the connection throttle knows.
+ * Without an address, the rule in force, the totals, the SASL refund
+ * table's occupancy and the busiest entries; with one, that address's
+ * entry and what its next connection would meet.
+ * @param[in] to Client requesting the statistics.
+ * @param[in] sd Stats descriptor (ignored).
+ * @param[in] param Address to look up, or NULL.
+ */
+void IPcheck_report(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  struct ipcheck_report_state st;
+  struct IPcheckInfo info;
+  struct irc_in_addr addr, canon;
+  unsigned int entries, i;
+  int refund = feature_int(FEAT_IPCHECK_SASL_REFUND);
+  int refund_period = feature_int(FEAT_IPCHECK_SASL_REFUND_PERIOD);
+  int in_grace = (CurrentTime - cli_since(&me)) <= IPCHECK_CLONE_DELAY;
+  char key[SOCKIPLEN + 8];
+
+  (void)sd;
+  if (param && *param) {
+    /* An address, not a mask (ipmask_parse refuses /bits without pbits)
+     * and not a wildcard: `*` parses as ::, which no entry can hold. */
+    if (!ipmask_parse(param, &addr, NULL) || !irc_in_addr_valid(&addr)) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "I :IPcheck: \"%s\" is not an address", param);
+      return;
+    }
+    if (IPcheck_lookup(&addr, &info))
+      ipcheck_report_entry(to, &info);
+    else {
+      ip_registry_canonicalize(&canon, &addr);
+      ip_registry_key_string(&canon, key, sizeof(key));
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "I :%s: no entry, the next connection starts a new count", key);
+    }
+    return;
+  }
+
+  memset(&st, 0, sizeof(st));
+  entries = ip_registry_walk(ipcheck_report_gather, &st);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "I :IPcheck: entries %u, connections counted %u, refusing the "
+             "next connection %u", entries, st.connected, st.refusing);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "I :IPcheck: a connection that would be number %d in a chain of "
+             "gaps up to %d s is refused (IPCHECK_CLONE_LIMIT, "
+             "IPCHECK_CLONE_PERIOD); refusals %s; boot grace "
+             "(IPCHECK_CLONE_DELAY %d s) %s",
+             IPCHECK_CLONE_LIMIT, IPCHECK_CLONE_PERIOD,
+             feature_bool(FEAT_IPCHECK_COUNT_REFUSALS) ? "counted" : "not counted",
+             IPCHECK_CLONE_DELAY, in_grace ? "running" : "over");
+  if (refund > 0 && refund_period > 0)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "I :IPcheck: SASL refunds %d per account per %d s; %d of %d "
+               "accounts hold a window (a full bucket refunds nothing)",
+               refund, refund_period,
+               ipcheck_refund_live(CurrentTime, refund_period),
+               ipcheck_refund_capacity());
+  else
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "I :IPcheck: SASL refunds off (IPCHECK_SASL_REFUND 0)");
+  for (i = 0; i < st.top_count; ++i)
+    ipcheck_report_entry(to, &st.top[i]);
+}
+

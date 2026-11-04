@@ -250,7 +250,8 @@ ipcheck_test.o: ../IPcheck.c ../../include/IPcheck.h mock_assert.h
 	${CC} ${CFLAGS} ${CPPFLAGS} -include ${srcdir}/mock_assert.h -c -o $@ ../IPcheck.c
 
 IPCHECK_CMOCKA_OBJS = ipcheck_cmocka.o ipcheck_test.o \
-	../ipcheck_refund.o ../ircd_alloc.o ../ircd_string.o ../match.o
+	../ipcheck_refund.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o \
+	../match.o
 ipcheck_cmocka: $(IPCHECK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IPCHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
