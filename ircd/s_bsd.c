@@ -545,6 +545,27 @@ int net_close_unregistered_connections(struct Client* source)
   return count;
 }
 
+/** Give up on a client add_connection() made but never registered:
+ * release its IPcheck charge and free the Client and its Connection.  The
+ * client is on no list yet, so free_client() deallocates it at once; its
+ * fd must already be closed (cli_fd -1) and its socket, if it had one,
+ * deleted.
+ * @param[in] new_client Client to discard.
+ * @param[in] refund Give the attempt back as well as the live count: the
+ *   failure was not the client's doing.  Otherwise the attempt stays, as
+ *   it does when the same client fails in the read path a moment later.
+ */
+static void add_connection_drop(struct Client* new_client, int refund)
+{
+  if (IsIPChecked(new_client)) {
+    if (refund)
+      IPcheck_connect_fail(new_client, 1);
+    else
+      IPcheck_disconnect(new_client);
+  }
+  free_client(new_client);
+}
+
 /** Creates a client which has just connected to us on the given fd.
  * The sockhost field is initialized with the ip# of the host.
  * The client is not added to the linked list of clients, it is
@@ -651,8 +672,6 @@ void add_connection(struct Listener* listener, int fd) {
 /* Begin Zline */
   if (!feature_bool(FEAT_DISABLE_ZLINES) && (azline = zline_lookup(new_client, 0))) {
     ircd_snprintf(0, zreason, sizeof(zreason), "ERROR :Z-lined (%s)", azline->zl_reason);
-    if (IsIPChecked(new_client))
-      IPcheck_connect_fail(new_client, 1);
 #ifdef USE_SSL
     ssl_murder(ssl, fd, zreason);
 #else
@@ -660,6 +679,7 @@ void add_connection(struct Listener* listener, int fd) {
     close(fd);
 #endif
     cli_fd(new_client) = -1;
+    add_connection_drop(new_client, 1);
     return;
   }
 /* End Zline */
@@ -667,8 +687,6 @@ void add_connection(struct Listener* listener, int fd) {
 /* Begin Gline */
   if (!feature_bool(FEAT_DISABLE_GLINES) && (agline = gline_lookup(new_client, 0))) {
     ircd_snprintf(0, greason, sizeof(greason), "ERROR :G-lined (%s)", agline->gl_reason);
-    if (IsIPChecked(new_client))
-      IPcheck_connect_fail(new_client, 1);
 #ifdef USE_SSL
     ssl_murder(ssl, fd, greason);
 #else
@@ -676,6 +694,7 @@ void add_connection(struct Listener* listener, int fd) {
     close(fd);
 #endif
     cli_fd(new_client) = -1;
+    add_connection_drop(new_client, 1);
     return;
   }
 /* End Gline */
@@ -703,10 +722,20 @@ void add_connection(struct Listener* listener, int fd) {
     cli_socket(new_client).ssl = ssl;
     SetSSLNeedAccept(new_client);
     if (!ssl_accept(new_client)) {
+      /* The handshake failed on bytes that were already waiting (a
+       * plaintext client on a TLS port, or a peer already gone), and
+       * ssl_accept() freed the SSL.  socket_del()'s ET_DESTROY runs at
+       * once (the socket is not in a callback) and, the Connection still
+       * naming its Client, frees nothing; ssl_murder() then writes the
+       * ERROR and closes the fd, and add_connection_drop() frees the
+       * Client and its Connection.  The live count is released and the
+       * attempt stays, as it does when the same bytes arrive a moment
+       * later and the read path exits the client. */
       socket_del(&(cli_socket(new_client)));
       cli_socket(new_client).ssl = NULL;
       ssl_murder(NULL, fd, sslerr_message);
       cli_fd(new_client) = -1;
+      add_connection_drop(new_client, 0);
       return;
     }
     /* The ClientHello may already have been waiting, in which case the
