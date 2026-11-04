@@ -114,6 +114,7 @@ IRCD_SRC = \
 	gitsync.c \
 	hash.c \
 	history.c \
+	history_trim_codec.c \
 	history_record.c \
 	ipcheck_refund.c \
 	redact_index.c \
@@ -634,6 +635,8 @@ hash.o: hash.c ../config.h ../include/hash.h ../include/client.h \
 history.o: history.c ../config.h ../include/history.h ../include/ircd_alloc.h \
   ../include/ircd_log.h ../include/ircd_snprintf.h ../include/ircd_string.h \
   ../include/s_debug.h
+history_trim_codec.o: history_trim_codec.c ../config.h \
+  ../include/history_trim_codec.h ../include/db_casefold.h ../include/res.h
 ircd.o: ircd.c ../config.h ../include/ircd.h ../include/IPcheck.h \
   ../include/class.h ../include/client.h ../include/crule.h \
   ../include/destruct_event.h ../include/hash.h ../include/ircd_alloc.h \

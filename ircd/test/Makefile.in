@@ -39,6 +39,7 @@ CMOCKA_TESTPROGS = \
 	ircd_crypt_cmocka \
 	crule_cmocka \
 	history_cmocka \
+	history_trim_codec_cmocka \
 	chathistory_presence_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
@@ -88,6 +89,7 @@ DEP_SRC = \
 	ircd_crypt_cmocka.c \
 	crule_cmocka.c \
 	history_cmocka.c \
+	history_trim_codec_cmocka.c \
 	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
@@ -213,6 +215,17 @@ crule_cmocka: $(CRULE_CMOCKA_OBJS)
 HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../history_record.o ../ircd_snprintf.o ../ircd_alloc.o ../ircd_compress.o ../ircd_string.o ../redact_index.o
 history_cmocka: $(HISTORY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
+
+# history_trim_codec tests - the pure key/record/owner-key codec for the
+# chathistory trim project's by_time/by_owner indexes.  Links the real
+# ../history_trim_codec.o plus ../db_casefold.o for db_casefold_bytes
+# (fold helper) and ../ircd_string.o for the casemapping table db_casefold.o
+# uses; fake_db.o satisfies only db_casefold.o's storage symbols (db_get,
+# db_iter_*, db_writebatch_*, ...) that db_casefold_migrate references --
+# no RocksDB, and this suite never calls that path.
+HISTORY_TRIM_CODEC_CMOCKA_OBJS = history_trim_codec_cmocka.o test_stub.o ../history_trim_codec.o ../db_casefold.o ../ircd_string.o fake_db.o
+history_trim_codec_cmocka: $(HISTORY_TRIM_CODEC_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_TRIM_CODEC_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # chathistory_presence tests - links the REAL chathistory_presence.o (built
 # by the top-level `make` before this runs, same as ../ircd_string.o et al)
