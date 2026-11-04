@@ -13,6 +13,7 @@
 #include <setjmp.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <cmocka.h>
 #include <netinet/in.h>
 
@@ -369,6 +370,387 @@ static void test_reply_child_key(void **state)
   assert_memory_equal(b, "#chan\0" "PARENT1\0" "1700000000.123\0" "M1", 31);
 }
 
+/* ---- Task 3: owner accounting table, the fair-eviction planner,
+ * effective coverage days. ---- */
+
+static void test_acct_add_sub(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  (void)state;
+
+  htc_acct_add(a, "a:x", 100);
+  assert_int_equal(htc_acct_owner(a, "a:x"), 100u);
+  assert_int_equal(htc_acct_total(a), 100u);
+  assert_int_equal(htc_acct_count(a), 1u);
+
+  htc_acct_add(a, "a:x", -40);
+  assert_int_equal(htc_acct_owner(a, "a:x"), 60u);
+  assert_int_equal(htc_acct_total(a), 60u);
+  assert_int_equal(htc_acct_count(a), 1u);
+
+  htc_acct_add(a, "a:x", -60);
+  assert_int_equal(htc_acct_owner(a, "a:x"), 0u);
+  assert_int_equal(htc_acct_total(a), 0u);
+  assert_int_equal(htc_acct_count(a), 0u);
+
+  htc_acct_free(a);
+}
+
+static void test_acct_clamps(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  (void)state;
+
+  htc_acct_add(a, "a:y", -10);
+  assert_int_equal(htc_acct_count(a), 0u);
+  assert_int_equal(htc_acct_total(a), 0u);
+
+  htc_acct_free(a);
+}
+
+static void test_acct_top(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_owner_total top[2];
+  size_t n;
+  (void)state;
+
+  htc_acct_add(a, "a:p", 10);
+  htc_acct_add(a, "a:q", 50);
+  htc_acct_add(a, "a:r", 30);
+
+  n = htc_acct_top(a, top, 2);
+  assert_int_equal((int)n, 2);
+  assert_string_equal(top[0].owner, "a:q");
+  assert_int_equal(top[0].bytes, 50u);
+  assert_string_equal(top[1].owner, "a:r");
+  assert_int_equal(top[1].bytes, 30u);
+
+  htc_acct_free(a);
+}
+
+static void test_acct_many(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  char owner[16];
+  unsigned i;
+  (void)state;
+
+  for (i = 0; i < 10000; i++) {
+    snprintf(owner, sizeof(owner), "i:%08x", i);
+    htc_acct_add(a, owner, 3);
+  }
+
+  assert_int_equal((int)htc_acct_count(a), 10000);
+  assert_int_equal(htc_acct_total(a), 30000u);
+
+  htc_acct_free(a);
+}
+
+/* Default planner params for the tests below: cap 1000, high 85,
+ * low 75, quota on, share 10% (share == 100). Tests that need a
+ * different knob copy this and override just that field. */
+static struct htc_plan_params htc_test_default_params(void)
+{
+  struct htc_plan_params p;
+  p.cap = 1000;
+  p.high_pct = 85;
+  p.low_pct = 75;
+  p.quota_on = 1;
+  p.share_pct = 10;
+  p.draining = 0;
+  return p;
+}
+
+static void test_plan_at_high_inactive(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, HTC_OWNER_NONE, 850);
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 0);
+  assert_int_equal((int)plan.nsteps, 0);
+  assert_int_equal(plan.oldest, 0u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_above_high(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, HTC_OWNER_NONE, 851);
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal(plan.target, 750u);
+  assert_int_equal((int)plan.nsteps, 0);
+  assert_int_equal(plan.oldest, 101u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_draining(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  p.draining = 1;
+
+  htc_acct_add(a, HTC_OWNER_NONE, 800);
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal(plan.oldest, 50u);
+
+  htc_acct_add(a, HTC_OWNER_NONE, -50); /* total now 750 */
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 0);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_share_first(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, "a:f", 300);
+  htc_acct_add(a, "a:q", 50);
+  htc_acct_add(a, HTC_OWNER_NONE, 501);
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal(plan.share, 100u);
+  assert_int_equal((int)plan.nsteps, 1);
+  assert_string_equal(plan.steps[0].owner, "a:f");
+  assert_int_equal(plan.steps[0].trim, 200u);
+  assert_int_equal(plan.oldest, 0u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_steps_then_none(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  /* a:f sits exactly at the share -- not strictly over it. */
+  htc_acct_add(a, "a:f", 100);
+  htc_acct_add(a, "a:q", 90);
+  htc_acct_add(a, HTC_OWNER_NONE, 670);
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal((int)plan.nsteps, 0);
+  assert_int_equal(plan.truncated, 0);
+  assert_int_equal(plan.oldest, 110u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_dash_exempt(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, HTC_OWNER_NONE, 900);
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal((int)plan.nsteps, 0);
+  assert_int_equal(plan.oldest, 150u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_largest_first(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, "a:a", 300);
+  htc_acct_add(a, "a:b", 500);
+  htc_acct_add(a, "a:c", 200);
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal((int)plan.nsteps, 3);
+  assert_string_equal(plan.steps[0].owner, "a:b");
+  assert_int_equal(plan.steps[0].trim, 400u);
+  assert_string_equal(plan.steps[1].owner, "a:a");
+  assert_int_equal(plan.steps[1].trim, 200u);
+  assert_string_equal(plan.steps[2].owner, "a:c");
+  assert_int_equal(plan.steps[2].trim, 100u);
+  assert_int_equal(plan.oldest, 0u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_ip_and_server(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, "i:c0000201", 200);
+  htc_acct_add(a, "s:leaf", 150);
+  htc_acct_add(a, HTC_OWNER_NONE, 520);
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal((int)plan.nsteps, 2);
+  assert_string_equal(plan.steps[0].owner, "i:c0000201");
+  assert_int_equal(plan.steps[0].trim, 100u);
+  assert_string_equal(plan.steps[1].owner, "s:leaf");
+  assert_int_equal(plan.steps[1].trim, 50u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_quota_off(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  p.quota_on = 0;
+
+  htc_acct_add(a, "a:f", 300);
+  htc_acct_add(a, HTC_OWNER_NONE, 560);
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal((int)plan.nsteps, 0);
+  assert_int_equal(plan.share, 0u);
+  assert_int_equal(plan.oldest, 110u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_bad_pct(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, "a:f", 300);
+  htc_acct_add(a, HTC_OWNER_NONE, 560);
+
+  p.share_pct = 0;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal((int)plan.nsteps, 0);
+
+  p.share_pct = 100;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal((int)plan.nsteps, 0);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_truncated_blocks_oldest(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  char owner[16];
+  int i;
+  (void)state;
+
+  for (i = 0; i < 40; i++) {
+    snprintf(owner, sizeof(owner), "a:o%02d", i);
+    htc_acct_add(a, owner, 120);
+  }
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 1);
+  assert_int_equal((int)plan.nsteps, HTC_PLAN_MAX_STEPS);
+  assert_int_equal(plan.truncated, 1);
+  assert_int_equal(plan.oldest, 0u);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_zero_cap(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  p.cap = 0;
+  htc_acct_add(a, HTC_OWNER_NONE, 5000);
+
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.active, 0);
+
+  htc_acct_free(a);
+}
+
+static void test_plan_sanitize(void **state)
+{
+  struct htc_acct *a = htc_acct_new();
+  struct htc_plan_params p = htc_test_default_params();
+  struct htc_plan plan;
+  (void)state;
+
+  htc_acct_add(a, HTC_OWNER_NONE, 900);
+
+  p.high_pct = 80;
+  p.low_pct = 90;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.target, 700u);
+
+  p.high_pct = 0;
+  p.low_pct = 0;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.target, 750u);
+
+  htc_acct_free(a);
+}
+
+static void test_owner_share_hook(void **state)
+{
+  struct htc_plan_params p = htc_test_default_params();
+  (void)state;
+
+  /* Documents the Amendment-A hook: today it ignores the owner and
+   * always returns the plan's flat share (cap * share_pct / 100). */
+  assert_int_equal(htc_owner_share(&p, "a:bob"), 100u);
+  assert_int_equal(htc_owner_share(&p, "s:leaf"), 100u);
+  assert_int_equal(htc_owner_share(&p, HTC_OWNER_NONE), 100u);
+}
+
+static void test_effective_days(void **state)
+{
+  const uint64_t now = 1700000000000ULL;
+  (void)state;
+
+  assert_int_equal(htc_effective_days(7, 0, now), 7);
+  assert_int_equal(htc_effective_days(7, now - 216000000ULL, now), 2);
+  assert_int_equal(htc_effective_days(7, now - 1800000ULL, now), 1);
+  assert_int_equal(htc_effective_days(7, now - 777600000ULL, now), 7);
+  assert_int_equal(htc_effective_days(0, now - 276480000ULL, now), 3);
+  assert_int_equal(htc_effective_days(7, now + 5000ULL, now), 1);
+  assert_int_equal(htc_effective_days(0, 0, now), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -393,6 +775,25 @@ int main(void)
     cmocka_unit_test(test_row_bytes),
     cmocka_unit_test(test_msgid_key),
     cmocka_unit_test(test_reply_child_key),
+    cmocka_unit_test(test_acct_add_sub),
+    cmocka_unit_test(test_acct_clamps),
+    cmocka_unit_test(test_acct_top),
+    cmocka_unit_test(test_acct_many),
+    cmocka_unit_test(test_plan_at_high_inactive),
+    cmocka_unit_test(test_plan_above_high),
+    cmocka_unit_test(test_plan_draining),
+    cmocka_unit_test(test_plan_share_first),
+    cmocka_unit_test(test_plan_steps_then_none),
+    cmocka_unit_test(test_plan_dash_exempt),
+    cmocka_unit_test(test_plan_largest_first),
+    cmocka_unit_test(test_plan_ip_and_server),
+    cmocka_unit_test(test_plan_quota_off),
+    cmocka_unit_test(test_plan_bad_pct),
+    cmocka_unit_test(test_plan_truncated_blocks_oldest),
+    cmocka_unit_test(test_plan_zero_cap),
+    cmocka_unit_test(test_plan_sanitize),
+    cmocka_unit_test(test_owner_share_hook),
+    cmocka_unit_test(test_effective_days),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

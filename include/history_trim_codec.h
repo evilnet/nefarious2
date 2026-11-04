@@ -164,4 +164,114 @@ int htc_size_parse(const void *v, size_t vlen, uint32_t *bytes);
 uint32_t htc_row_bytes(size_t msg_klen, size_t msg_vlen, size_t ml_vlen,
                         size_t bt_klen, size_t owner_len);
 
+/* ---------------------------------------------------------------------
+ * Owner accounting table: owner -> bytes, plus a running global total.
+ * Opaque; create with htc_acct_new(), always release with
+ * htc_acct_free(). A chained hash on the owner string, grown (bucket
+ * array doubled, every entry rehashed in place) whenever an insert
+ * would push the load factor above 1 (count == nbuckets).
+ * ------------------------------------------------------------------- */
+struct htc_acct;
+
+/** One entry of htc_acct_top()'s output: an owner and its current
+ * byte total. */
+struct htc_owner_total {
+  char     owner[HTC_OWNER_MAX];
+  uint64_t bytes;
+};
+
+struct htc_acct *htc_acct_new(void);
+void htc_acct_free(struct htc_acct *a);
+
+/** Drop every owner and reset the global total to 0 (keeps the table
+ * itself, so a reused htc_acct need not be freed/re-created). */
+void htc_acct_clear(struct htc_acct *a);
+
+/** Add (or, with a negative @a delta, subtract from) @a owner's byte
+ * total and the global total together. Clamps at 0: a delta that
+ * would drive an owner negative leaves it at 0 instead, and an owner
+ * at 0 is dropped from the table (so htc_acct_count/htc_acct_top never
+ * see it again). A negative delta against an owner not currently in
+ * the table is a no-op -- there is nothing to clamp. */
+void htc_acct_add(struct htc_acct *a, const char *owner, int64_t delta);
+
+/** @return @a owner's current byte total, or 0 if it has none. */
+uint64_t htc_acct_owner(const struct htc_acct *a, const char *owner);
+
+/** @return the global total across every owner (the figure
+ * htc_acct_add has been maintaining incrementally, not a re-sum). */
+uint64_t htc_acct_total(const struct htc_acct *a);
+
+/** @return the number of owners currently holding a nonzero total. */
+size_t htc_acct_count(const struct htc_acct *a);
+
+/** Fill @a out with the @a n owners holding the largest totals, largest
+ * first, ties broken by owner ascending.
+ * @return the number written (min(@a n, htc_acct_count(@a a))). */
+size_t htc_acct_top(const struct htc_acct *a, struct htc_owner_total *out,
+                     size_t n);
+
+/* ---------------------------------------------------------------------
+ * The fair-eviction planner.
+ * ------------------------------------------------------------------- */
+#define HTC_PLAN_MAX_STEPS 32
+
+/** Planner inputs: the live cap/watermark/quota config for one pass. */
+struct htc_plan_params {
+  uint64_t cap;
+  int      high_pct;
+  int      low_pct;
+  int      quota_on;
+  int      share_pct;
+  int      draining;
+};
+
+/** One eviction step: trim @a owner down by @a trim bytes. */
+struct htc_plan_step {
+  char     owner[HTC_OWNER_MAX];
+  uint64_t trim;
+};
+
+/** The planner's output for one pass. @a active false means there is
+ * nothing to do (@a nsteps 0, @a oldest 0). @a truncated true means
+ * more owners were over their share than @a steps could hold -- the
+ * caller must NOT fall back to evicting oldest-overall in that case
+ * (that would delete compliant owners' rows while over-share owners
+ * remain untouched), which is why @a oldest is forced to 0 whenever
+ * @a truncated is set, even if @a nsteps also came out 0. */
+struct htc_plan {
+  int                  active;
+  int                  truncated;
+  uint64_t             target;
+  uint64_t             share;
+  size_t               nsteps;
+  struct htc_plan_step steps[HTC_PLAN_MAX_STEPS];
+  uint64_t             oldest;
+};
+
+/** The share @a owner is held to while evicting under @a p. Returns
+ * @a p's flat per-owner share (cap * share_pct / 100) for every owner
+ * today, ignoring @a owner entirely -- this is the one hook a future
+ * per-owner exemption/override would change; htc_plan_eviction never
+ * computes a share any other way. */
+uint64_t htc_owner_share(const struct htc_plan_params *p, const char *owner);
+
+/** Plan one eviction pass against @a a's current totals under @a p.
+ * See the module comment above htc_plan_eviction() in
+ * history_trim_codec.c for the exact algorithm (watermark sanitizing,
+ * the active decision, the quota step, the oldest-overall fallback). */
+void htc_plan_eviction(const struct htc_acct *a,
+                        const struct htc_plan_params *p,
+                        struct htc_plan *out);
+
+/* ---------------------------------------------------------------------
+ * Effective coverage days.
+ * ------------------------------------------------------------------- */
+
+/** The retention window CHATHISTORY's coverage should actually claim:
+ * @a configured_days as configured, but never more than how far back
+ * @a floor_ms (the oldest row actually retained; 0 if unknown) really
+ * reaches from @a now_ms, and never less than 1. */
+int htc_effective_days(int configured_days, uint64_t floor_ms, uint64_t now_ms);
+
 #endif /* INCLUDED_history_trim_codec_h */

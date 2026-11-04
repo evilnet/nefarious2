@@ -556,3 +556,400 @@ uint32_t htc_row_bytes(size_t msg_klen, size_t msg_vlen, size_t ml_vlen,
 
   return (sum > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)sum;
 }
+
+/* ---------------------------------------------------------------------
+ * Owner accounting table.
+ *
+ * A chained hash on the owner string. Growth doubles the bucket array
+ * and rehashes every entry in place whenever an insert would push the
+ * load factor past 1 (count == nbuckets); collisions within a bucket
+ * are resolved by a linear scan of its chain (owner strings are short
+ * and this table is never the hot path -- the trim engine touches it
+ * once per stored/deleted row and once per planner pass).
+ * ------------------------------------------------------------------- */
+
+#define HTC_ACCT_INITIAL_BUCKETS 16
+
+struct htc_acct_entry {
+  struct htc_acct_entry *next;
+  uint64_t                bytes;
+  char                    owner[HTC_OWNER_MAX];
+};
+
+struct htc_acct {
+  struct htc_acct_entry **buckets;
+  size_t                   nbuckets;
+  size_t                   count;
+  uint64_t                 total;
+};
+
+/* FNV-1a over the owner string -- fast, good-enough distribution for
+ * the short "a:"/"i:"/"s:"/"-" keys htc_owner_key produces. */
+static uint64_t htc_hash_owner(const char *s)
+{
+  uint64_t h = 14695981039346656037ULL;
+  while (*s) {
+    h ^= (uint64_t)(unsigned char)*s++;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+/* Bounded owner copy: truncates rather than overruns a HTC_OWNER_MAX
+ * destination. Owner strings here are always built by htc_owner_key,
+ * which already bounds them to HTC_OWNER_MAX -- this is a second line
+ * of defense, not expected to ever actually truncate. */
+static void htc_owner_copy(char *dst, const char *src)
+{
+  size_t n = strlen(src);
+  if (n >= HTC_OWNER_MAX)
+    n = HTC_OWNER_MAX - 1;
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+struct htc_acct *htc_acct_new(void)
+{
+  struct htc_acct *a = (struct htc_acct *)malloc(sizeof(*a));
+  if (!a)
+    return NULL;
+
+  a->nbuckets = HTC_ACCT_INITIAL_BUCKETS;
+  a->buckets = (struct htc_acct_entry **)calloc(a->nbuckets, sizeof(*a->buckets));
+  if (!a->buckets) {
+    free(a);
+    return NULL;
+  }
+  a->count = 0;
+  a->total = 0;
+  return a;
+}
+
+void htc_acct_clear(struct htc_acct *a)
+{
+  size_t i;
+
+  if (!a)
+    return;
+
+  for (i = 0; i < a->nbuckets; i++) {
+    struct htc_acct_entry *e = a->buckets[i];
+    while (e) {
+      struct htc_acct_entry *next = e->next;
+      free(e);
+      e = next;
+    }
+    a->buckets[i] = NULL;
+  }
+  a->count = 0;
+  a->total = 0;
+}
+
+void htc_acct_free(struct htc_acct *a)
+{
+  if (!a)
+    return;
+  htc_acct_clear(a);
+  free(a->buckets);
+  free(a);
+}
+
+/* Doubles the bucket array and rehashes every entry in place. A failed
+ * allocation leaves the table exactly as it was -- over its target
+ * load factor, but still correct -- so there is nothing to undo. */
+static void htc_acct_grow(struct htc_acct *a)
+{
+  size_t newn = a->nbuckets * 2;
+  struct htc_acct_entry **newb =
+    (struct htc_acct_entry **)calloc(newn, sizeof(*newb));
+  size_t i;
+
+  if (!newb)
+    return;
+
+  for (i = 0; i < a->nbuckets; i++) {
+    struct htc_acct_entry *e = a->buckets[i];
+    while (e) {
+      struct htc_acct_entry *next = e->next;
+      size_t idx = (size_t)(htc_hash_owner(e->owner) % newn);
+      e->next = newb[idx];
+      newb[idx] = e;
+      e = next;
+    }
+  }
+
+  free(a->buckets);
+  a->buckets = newb;
+  a->nbuckets = newn;
+}
+
+void htc_acct_add(struct htc_acct *a, const char *owner, int64_t delta)
+{
+  size_t idx;
+  struct htc_acct_entry *e, *prev;
+  uint64_t old_bytes, new_bytes;
+
+  if (!a || !owner)
+    return;
+
+  idx = (size_t)(htc_hash_owner(owner) % a->nbuckets);
+  prev = NULL;
+  for (e = a->buckets[idx]; e; e = e->next) {
+    if (strcmp(e->owner, owner) == 0)
+      break;
+    prev = e;
+  }
+
+  if (!e) {
+    /* No existing entry: a non-positive delta has nothing to clamp --
+     * stay absent rather than materialize a 0-byte owner. */
+    if (delta <= 0)
+      return;
+
+    if (a->count >= a->nbuckets) {
+      htc_acct_grow(a);
+      idx = (size_t)(htc_hash_owner(owner) % a->nbuckets);
+    }
+
+    e = (struct htc_acct_entry *)malloc(sizeof(*e));
+    if (!e)
+      return;
+    htc_owner_copy(e->owner, owner);
+    e->bytes = (uint64_t)delta;
+    e->next = a->buckets[idx];
+    a->buckets[idx] = e;
+    a->count++;
+    a->total += e->bytes;
+    return;
+  }
+
+  old_bytes = e->bytes;
+  if (delta >= 0) {
+    new_bytes = old_bytes + (uint64_t)delta;
+  } else {
+    uint64_t dec = (uint64_t)(-delta);
+    new_bytes = (dec >= old_bytes) ? 0 : old_bytes - dec;
+  }
+
+  a->total = a->total - old_bytes + new_bytes;
+
+  if (new_bytes == 0) {
+    if (prev)
+      prev->next = e->next;
+    else
+      a->buckets[idx] = e->next;
+    free(e);
+    a->count--;
+  } else {
+    e->bytes = new_bytes;
+  }
+}
+
+uint64_t htc_acct_owner(const struct htc_acct *a, const char *owner)
+{
+  size_t idx;
+  const struct htc_acct_entry *e;
+
+  if (!a || !owner)
+    return 0;
+
+  idx = (size_t)(htc_hash_owner(owner) % a->nbuckets);
+  for (e = a->buckets[idx]; e; e = e->next) {
+    if (strcmp(e->owner, owner) == 0)
+      return e->bytes;
+  }
+  return 0;
+}
+
+uint64_t htc_acct_total(const struct htc_acct *a)
+{
+  return a ? a->total : 0;
+}
+
+size_t htc_acct_count(const struct htc_acct *a)
+{
+  return a ? a->count : 0;
+}
+
+/* Largest first, ties broken by owner ascending -- the comparator for
+ * both htc_acct_top and the planner's over-share candidate list, which
+ * reuses the same struct htc_owner_total/ordering. */
+static int htc_owner_total_cmp(const void *pa, const void *pb)
+{
+  const struct htc_owner_total *oa = (const struct htc_owner_total *)pa;
+  const struct htc_owner_total *ob = (const struct htc_owner_total *)pb;
+
+  if (oa->bytes != ob->bytes)
+    return (oa->bytes > ob->bytes) ? -1 : 1;
+  return strcmp(oa->owner, ob->owner);
+}
+
+size_t htc_acct_top(const struct htc_acct *a, struct htc_owner_total *out,
+                     size_t n)
+{
+  struct htc_owner_total *all;
+  size_t i, b, copy;
+
+  if (!a || !out || n == 0 || a->count == 0)
+    return 0;
+
+  all = (struct htc_owner_total *)malloc(sizeof(*all) * a->count);
+  if (!all)
+    return 0;
+
+  i = 0;
+  for (b = 0; b < a->nbuckets; b++) {
+    const struct htc_acct_entry *e;
+    for (e = a->buckets[b]; e; e = e->next) {
+      htc_owner_copy(all[i].owner, e->owner);
+      all[i].bytes = e->bytes;
+      i++;
+    }
+  }
+
+  qsort(all, i, sizeof(*all), htc_owner_total_cmp);
+
+  copy = (n < i) ? n : i;
+  memcpy(out, all, copy * sizeof(*out));
+  free(all);
+  return copy;
+}
+
+/* ---------------------------------------------------------------------
+ * The fair-eviction planner. The order below IS the decision (Task 3
+ * brief) -- implemented exactly, not re-derived:
+ *
+ *   sanitize: high<=0 -> 85; low<=0 -> 75; low>=high -> low = high-10
+ *   target = cap*low/100 (always set); total = htc_acct_total;
+ *            cap==0 -> inactive
+ *   active = draining ? total>target : total > cap*high/100;
+ *            inactive -> nsteps 0, oldest 0
+ *   if quota_on && 1<=share_pct<=99:
+ *     share = cap*share_pct/100 (via htc_owner_share -- Amendment A)
+ *     over = owners != "-" with bytes > share, sorted by bytes desc,
+ *            owner asc
+ *     steps = first HTC_PLAN_MAX_STEPS of over, trim = bytes - share;
+ *     truncated = (|over| > HTC_PLAN_MAX_STEPS)
+ *   oldest = (nsteps==0 && !truncated && total>target) ? total-target : 0
+ * ------------------------------------------------------------------- */
+
+uint64_t htc_owner_share(const struct htc_plan_params *p, const char *owner)
+{
+  (void)owner; /* No per-owner override exists yet -- this is the one
+                * hook a future exemption/override would change
+                * (Task 3 brief, Amendment A). Every owner gets the
+                * plan's flat share today. */
+  if (!p)
+    return 0;
+  return ((uint64_t)p->cap * (uint64_t)(unsigned)p->share_pct) / 100ULL;
+}
+
+void htc_plan_eviction(const struct htc_acct *a,
+                        const struct htc_plan_params *p,
+                        struct htc_plan *out)
+{
+  int high, low;
+  uint64_t cap, target, total;
+
+  if (!out)
+    return;
+  memset(out, 0, sizeof(*out));
+
+  if (!a || !p)
+    return;
+
+  high = p->high_pct;
+  low  = p->low_pct;
+  if (high <= 0)
+    high = 85;
+  if (low <= 0)
+    low = 75;
+  if (low >= high)
+    low = high - 10;
+
+  cap = p->cap;
+  target = cap * (uint64_t)low / 100;
+  out->target = target;
+
+  total = htc_acct_total(a);
+
+  if (cap == 0) {
+    out->active = 0;
+    return;
+  }
+
+  out->active = p->draining ? (total > target)
+                             : (total > (cap * (uint64_t)high / 100));
+
+  if (!out->active)
+    return;
+
+  if (p->quota_on && p->share_pct >= 1 && p->share_pct <= 99) {
+    struct htc_owner_total *cand = NULL;
+    size_t ncand = 0;
+
+    out->share = htc_owner_share(p, HTC_OWNER_NONE);
+
+    if (a->count > 0)
+      cand = (struct htc_owner_total *)malloc(sizeof(*cand) * a->count);
+
+    if (cand) {
+      size_t b, i;
+
+      for (b = 0; b < a->nbuckets; b++) {
+        const struct htc_acct_entry *e;
+        for (e = a->buckets[b]; e; e = e->next) {
+          uint64_t share_i;
+
+          if (strcmp(e->owner, HTC_OWNER_NONE) == 0)
+            continue;
+
+          share_i = htc_owner_share(p, e->owner);
+          if (e->bytes > share_i) {
+            htc_owner_copy(cand[ncand].owner, e->owner);
+            cand[ncand].bytes = e->bytes - share_i;
+            ncand++;
+          }
+        }
+      }
+
+      qsort(cand, ncand, sizeof(*cand), htc_owner_total_cmp);
+
+      out->truncated = (ncand > (size_t)HTC_PLAN_MAX_STEPS) ? 1 : 0;
+      out->nsteps = (ncand < (size_t)HTC_PLAN_MAX_STEPS)
+                  ? ncand : (size_t)HTC_PLAN_MAX_STEPS;
+
+      for (i = 0; i < out->nsteps; i++) {
+        htc_owner_copy(out->steps[i].owner, cand[i].owner);
+        out->steps[i].trim = cand[i].bytes;
+      }
+
+      free(cand);
+    }
+  }
+
+  out->oldest = (out->nsteps == 0 && !out->truncated && total > target)
+              ? (total - target) : 0;
+}
+
+/* ---------------------------------------------------------------------
+ * Effective coverage days.
+ * ------------------------------------------------------------------- */
+
+int htc_effective_days(int configured_days, uint64_t floor_ms, uint64_t now_ms)
+{
+  uint64_t d;
+
+  if (floor_ms == 0)
+    return configured_days;
+
+  d = (floor_ms >= now_ms) ? 0 : (now_ms - floor_ms) / 86400000ULL;
+
+  if (configured_days > 0 && d >= (uint64_t)configured_days)
+    return configured_days;
+
+  if (d < 1)
+    return 1;
+
+  return (int)d;
+}
