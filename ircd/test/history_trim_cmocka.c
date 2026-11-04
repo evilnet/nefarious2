@@ -51,9 +51,15 @@ static int  emptied_calls;
 static int  emptied_count;
 static char emptied_names[MAX_EMPTIED][HTC_TARGET_MAX];
 
+/** A slow cleanup: the clock jumps this far inside the next emptied
+ * callback (inside the commit's measured span), once. */
+static uint64_t emptied_jump_us;
+
 static void on_emptied(const char **targets, int count)
 {
   int i;
+  fake_us += emptied_jump_us;
+  emptied_jump_us = 0;
   emptied_calls++;
   emptied_count = count;
   for (i = 0; i < count && i < MAX_EMPTIED; i++)
@@ -117,6 +123,7 @@ static int setup(void **state)
   step_us = 0;
   emptied_calls = 0;
   emptied_count = 0;
+  emptied_jump_us = 0;
   memset(emptied_names, 0, sizeof emptied_names);
   assert_int_equal(0, htrim_init(&st, parse_cb, fake_clock, on_emptied));
   return 0;
@@ -1149,8 +1156,17 @@ static void test_run_slice_error_recorded(void **state)
   assert_int_equal(HTRIM_PH_ACCTSCAN, htrim_stats()->last_phase);
   assert_int_equal(300, htrim_stats()->last_slice_us);
   assert_int_equal(300, htrim_stats()->max_slice_us);
+  assert_non_null(strstr(htrim_last_error(), "scan slice failed"));
   assert_int_equal(0, htrim_run_slice(&p));          /* the next one recovers */
   assert_int_equal(1, htrim_acct_loaded());
+
+  /* Every -1 says why, the early ones too. */
+  htrim_shutdown();
+  assert_int_equal(-1, htrim_run_slice(&p));
+  assert_non_null(strstr(htrim_last_error(), "not started"));
+  assert_int_equal(0, htrim_init(&st, parse_cb, fake_clock, on_emptied));
+  assert_int_equal(-1, htrim_run_slice(NULL));
+  assert_non_null(strstr(htrim_last_error(), "without parameters"));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1956,9 +1972,9 @@ static void test_ageout_single_target_one_emptiness_check(void **state)
   assert_false(targets_has("#big"));
 }
 
-/* A pass start reopens the walk from the first key: a row stored with a
- * time older than where the last pass (or the current one) stopped -- a
- * late CH W, a lagged relay -- goes at the next pass. */
+/* A pass start goes back for a row stored with a time older than where
+ * the last pass (or the current one) stopped -- a late CH W, a lagged
+ * relay: it goes at the next pass. */
 static void test_ageout_pass_start_catches_late_row(void **state)
 {
   struct htrim_params p = bf_params(0);
@@ -2064,6 +2080,7 @@ static void test_ageout_pass_start_resumes_past_drained_head(void **state)
   htrim_pass_start(&p);
   assert_int_equal(0, htrim_run_slice(&p));
   assert_bt_lower(cut, sizeof cut);
+  assert_int_equal(0, htrim_stats()->oldest_seen_ms);   /* a walk that read nothing */
 
   /* A retention rise moves the cutoff back; the resume point does not
    * follow it backwards (the keys between are gone too). */
@@ -2160,6 +2177,275 @@ static void test_ageout_redact_takes_its_index_row(void **state)
   assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
 }
 
+/* ------------------------------------------------------------------ */
+/* The slice's whole cost (Task 7 fix round)                           */
+/* ------------------------------------------------------------------ */
+
+/* The budget covers what a slice pays after staging too: a slow commit +
+ * cleanup (here a 39 ms jump inside the emptied callback, 40 ms in all
+ * for 10 rows) teaches the phase a per-row cost, and the next slice stops
+ * staging as soon as elapsed + cost x rows reaches the budget. */
+static void test_slice_budget_learns_commit_cost(void **state)
+{
+  struct htrim_params p = bf_params(10);
+  char ts[32], te[32], mid[16];
+  uint64_t d;
+  int i;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#e", ts_ago(te, sizeof te, 8, 200), "E0", "a:bob", NULL);
+  seed_targets("#e", te);                 /* emptied by the first slice */
+  for (i = 0; i < 30; i++) {
+    snprintf(mid, sizeof mid, "B%02d", i);
+    seed_plain("#big", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+
+  step_us = 1000;                      /* 1 ms per clock read; 10 ms slices */
+  emptied_jump_us = 39000;
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);   /* cost 0 yet */
+  assert_int_equal(1, emptied_calls);
+  assert_true(htrim_stats()->last_slice_us >= 50000);   /* the cleanup is in the slice */
+
+  /* cost = 40000 us / 10 rows = 4 ms a row: 1 ms + 4 ms per row, 10 ms. */
+  d = htrim_stats()->deleted[HTRIM_PATH_AGEOUT];
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT] - d);
+
+  /* That commit cost 1 ms for 2 rows: the EWMA (1/4) eases to 3.125 ms. */
+  d = htrim_stats()->deleted[HTRIM_PATH_AGEOUT];
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(3, htrim_stats()->deleted[HTRIM_PATH_AGEOUT] - d);
+
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(31, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+}
+
+/* However slow the last commit, a slice stages at least one row: the
+ * walk always moves. */
+static void test_slice_budget_at_least_one_row(void **state)
+{
+  struct htrim_params p = bf_params(10);
+  char ts[32], te[32], mid[16];
+  uint64_t d;
+  int i;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#e", ts_ago(te, sizeof te, 8, 200), "E0", "a:bob", NULL);
+  seed_targets("#e", te);
+  for (i = 0; i < 20; i++) {
+    snprintf(mid, sizeof mid, "B%02d", i);
+    seed_plain("#big", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+
+  step_us = 1000;
+  emptied_jump_us = 10000000ULL;       /* a 10 s commit */
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  for (i = 0; i < 3; i++) {
+    d = htrim_stats()->deleted[HTRIM_PATH_AGEOUT];
+    assert_int_equal(1, htrim_run_slice(&p));
+    assert_int_equal(1, htrim_stats()->deleted[HTRIM_PATH_AGEOUT] - d);
+  }
+}
+
+/** @a n targets "#c00".., one past-retention row each, stamped with it:
+ * each one's delete empties it, and its check needs a seek. */
+static void seed_emptiable_targets(int n)
+{
+  char ts[32], t[16], mid[16];
+  int i;
+  for (i = 0; i < n; i++) {
+    snprintf(t, sizeof t, "#c%02d", i);
+    snprintf(mid, sizeof mid, "C%02d", i);
+    seed_plain(t, ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+    seed_targets(t, ts);
+  }
+}
+
+/* A budgeted slice does at most 16 emptiness seeks; the rest of its
+ * touched targets carry over, oldest first, and are checked by the next
+ * slices -- a cleanup-only slice when no phase has work -- each once. */
+static void test_cleanup_carries_past_16_checks(void **state)
+{
+  struct htrim_params p = bf_params(15);
+  unsigned int lasts;
+  (void)state;
+
+  ageout_ready();
+  seed_emptiable_targets(40);
+  assert_int_equal(40, fake_db_rows(st.targets));
+  lasts = fake_db_seek_lasts(st.messages);
+
+  htrim_pass_start(&p);                /* step_us 0: one slice takes all 40 */
+  assert_int_equal(1, htrim_run_slice(&p));        /* 24 checks still due */
+  assert_int_equal(HTRIM_PH_AGEOUT, htrim_stats()->last_phase);
+  assert_int_equal(40, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(0, htrim_ageout_pending());
+  assert_int_equal(lasts + 16, fake_db_seek_lasts(st.messages));
+  assert_int_equal(1, emptied_calls);
+  assert_int_equal(16, emptied_count);
+  assert_string_equal("#c00", emptied_names[0]);
+  assert_string_equal("#c15", emptied_names[15]);
+  assert_int_equal(24, fake_db_rows(st.targets));
+
+  assert_int_equal(1, htrim_run_slice(&p));        /* a cleanup-only slice */
+  assert_int_equal(HTRIM_PH_CLEANUP, htrim_stats()->last_phase);
+  assert_int_equal(lasts + 32, fake_db_seek_lasts(st.messages));
+  assert_int_equal(2, emptied_calls);
+  assert_int_equal(16, emptied_count);
+  assert_string_equal("#c16", emptied_names[0]);
+  assert_string_equal("#c31", emptied_names[15]);
+
+  assert_int_equal(0, htrim_run_slice(&p));        /* the last 8: idle after */
+  assert_int_equal(lasts + 40, fake_db_seek_lasts(st.messages));
+  assert_int_equal(3, emptied_calls);
+  assert_int_equal(8, emptied_count);
+  assert_string_equal("#c32", emptied_names[0]);
+  assert_string_equal("#c39", emptied_names[7]);
+  assert_int_equal(0, fake_db_rows(st.targets));
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(lasts + 40, fake_db_seek_lasts(st.messages));
+}
+
+/* Carried checks go before a later slice's own: no target waits behind
+ * newer ones for ever (names sorting first do not jump the queue). */
+static void test_cleanup_carry_goes_first(void **state)
+{
+  struct htrim_params p = bf_params(40);
+  char ts[32], t[16], mid[16];
+  int i;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 40; i++) {            /* oldest: the first slice's 40 rows */
+    snprintf(t, sizeof t, "#m%02d", i);
+    snprintf(mid, sizeof mid, "M%02d", i);
+    seed_plain(t, ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+    seed_targets(t, ts);
+  }
+  for (i = 0; i < 20; i++) {            /* newer, and sorting before "#m" */
+    snprintf(t, sizeof t, "#a%02d", i);
+    snprintf(mid, sizeof mid, "A%02d", i);
+    seed_plain(t, ts_ago(ts, sizeof ts, 8, 50 - i), mid, "a:bob", NULL);
+    seed_targets(t, ts);
+  }
+
+  step_us = 1000;                      /* 40 rows a slice */
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(40, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_string_equal("#m00", emptied_names[0]);   /* #m16..#m39 carried */
+
+  assert_int_equal(1, htrim_run_slice(&p));        /* the 20 "#a" rows */
+  assert_int_equal(60, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(16, emptied_count);
+  assert_string_equal("#m16", emptied_names[0]);
+  assert_string_equal("#m31", emptied_names[15]);
+
+  assert_int_equal(1, htrim_run_slice(&p));        /* cleanup only */
+  assert_int_equal(16, emptied_count);
+  assert_string_equal("#m32", emptied_names[0]);
+  assert_string_equal("#a00", emptied_names[8]);
+
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(12, emptied_count);
+  assert_string_equal("#a08", emptied_names[0]);
+  assert_int_equal(0, fake_db_rows(st.targets));
+}
+
+/* A carried target touched again is checked once, with the newer of its
+ * deleted times, and reported once. */
+static void test_cleanup_carry_merges_a_retouched_target(void **state)
+{
+  struct htrim_params p = bf_params(21);
+  char t1[32], t2[32];
+  unsigned int lasts;
+  int i, zz = 0;
+  (void)state;
+
+  ageout_ready();
+  seed_emptiable_targets(20);
+  /* "#zz": a row the stamp counts (t1) and a newer one it does not (t2,
+   * as a JOIN) -- each delete of them needs a seek. */
+  seed_plain("#zz", ts_ago(t1, sizeof t1, 8, 50), "Z1", "a:bob", NULL);
+  seed_plain("#zz", ts_ago(t2, sizeof t2, 8, 40), "Z2", "a:bob", NULL);
+  seed_targets("#zz", t1);
+  lasts = fake_db_seek_lasts(st.messages);
+
+  step_us = 1000;                      /* 21 rows in the first slice: all but Z2 */
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(21, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(lasts + 16, fake_db_seek_lasts(st.messages));   /* #c16..#c19, #zz carried */
+  assert_int_equal(16, emptied_count);
+
+  assert_int_equal(0, htrim_run_slice(&p));        /* Z2, and the carried five */
+  assert_int_equal(22, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(lasts + 21, fake_db_seek_lasts(st.messages));
+  assert_int_equal(5, emptied_count);
+  for (i = 0; i < emptied_count; i++)
+    zz += strcmp(emptied_names[i], "#zz") == 0;
+  assert_int_equal(1, zz);
+  assert_int_equal(0, fake_db_rows(st.targets));
+}
+
+/* The carry is in memory only: a restart drops it, and those targets'
+ * keys stay until the targets sweep (Task 8) finds them empty. */
+static void test_cleanup_carry_dropped_on_restart(void **state)
+{
+  struct htrim_params p = bf_params(15);
+  (void)state;
+
+  ageout_ready();
+  seed_emptiable_targets(20);
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(16, emptied_count);
+  assert_int_equal(4, fake_db_rows(st.targets));
+
+  reboot();
+  run_until_idle(&p);                  /* the accounting scan, nothing else */
+  assert_int_equal(1, emptied_calls);
+  assert_int_equal(4, fake_db_rows(st.targets));
+}
+
+/* A caller's own slice that names its phase is recorded like the
+ * engine's (the burst-loss prune: last and max slice); one without a
+ * phase is not. */
+static void test_caller_slice_recorded_with_phase(void **state)
+{
+  struct htrim_slice *s;
+  (void)state;
+
+  seed_plain("#t", "100.000", "M1", "a:bob", NULL);
+  seed_plain("#t", "200.000", "M2", "a:bob", NULL);
+
+  step_us = 700;
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#t", "100.000", "M1", 1);
+  assert_int_equal(1, htrim_slice_commit(s));
+  assert_int_equal(HTRIM_PH_NONE, htrim_stats()->last_phase);
+  assert_int_equal(0, htrim_stats()->max_slice_us);
+
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  htrim_slice_set_phase(s, HTRIM_PH_INCARNATION);
+  stage_del(s, HTRIM_PATH_INCARNATION, "#t", "200.000", "M2", 1);
+  assert_int_equal(1, htrim_slice_commit(s));
+  assert_int_equal(HTRIM_PH_INCARNATION, htrim_stats()->last_phase);
+  assert_int_equal(700, htrim_stats()->last_slice_us);   /* unbudgeted: begin + commit */
+  assert_int_equal(700, htrim_stats()->max_slice_us);
+  assert_int_equal(HTRIM_PH_INCARNATION, htrim_stats()->max_phase);
+  assert_string_equal("incarnation", htrim_phase_name(HTRIM_PH_INCARNATION));
+  assert_string_equal("cleanup", htrim_phase_name(HTRIM_PH_CLEANUP));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -2204,6 +2490,13 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_ageout_redact_takes_its_index_row, setup, teardown),
     cmocka_unit_test_setup_teardown(test_ageout_pass_start_resumes_past_drained_head, setup, teardown),
     cmocka_unit_test_setup_teardown(test_ageout_backfill_row_behind_walk_is_late, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_slice_budget_learns_commit_cost, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_slice_budget_at_least_one_row, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_carries_past_16_checks, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_carry_goes_first, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_carry_merges_a_retouched_target, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_carry_dropped_on_restart, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_caller_slice_recorded_with_phase, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

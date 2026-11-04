@@ -119,13 +119,18 @@ enum htrim_path {
   HTRIM_PATH_COUNT
 };
 
-/** The phase one htrim_run_slice call ran. */
+/** The phase one htrim_run_slice call ran.  The first four take turns;
+ * CLEANUP runs only when none of them has work but carried emptiness
+ * checks remain; INCARNATION names the burst-loss prune's unbudgeted
+ * slice (history.c, htrim_slice_set_phase), never picked by the engine. */
 enum htrim_phase {
   HTRIM_PH_NONE,
   HTRIM_PH_AGEOUT,
   HTRIM_PH_BACKFILL,
   HTRIM_PH_ACCTSCAN,
-  HTRIM_PH_EVICT
+  HTRIM_PH_EVICT,
+  HTRIM_PH_CLEANUP,
+  HTRIM_PH_INCARNATION
 };
 
 /** The live configuration for one slice. */
@@ -183,7 +188,11 @@ int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
                       const struct htc_rec *rec,
                       char *bo_key, size_t bo_size, size_t *bo_klen);
 
-/** Account a row htrim_stage_index indexed, once its batch committed. */
+/** Account a row htrim_stage_index indexed, once its batch committed.
+ * Age-out depends on it: a row indexed behind the age-out walk's resume
+ * point is found only through here (and the backfill's own note), so
+ * every committed by_time put -- every store path, every retry -- must
+ * reach it, or the row outlives retention until a restart. */
 void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
                        uint32_t bytes);
 
@@ -225,8 +234,21 @@ void htrim_stamp_alive(uint64_t now_ms);
 struct htrim_slice *htrim_slice_begin(unsigned int budget_ms);
 
 /** Whether the slice's budget is spent: one clock read per call (none for
- * an unbudgeted slice); expired when now - start >= budget_ms * 1000. */
+ * an unbudgeted slice).  Expired when
+ *   now - start + cost(phase) * staged >= budget_ms * 1000
+ * where staged is the rows the slice has staged (deletes, backfill index
+ * rows) and cost(phase) what the commit and the cleanup of that phase's
+ * last budgeted slices cost per staged row (an EWMA, alpha 1/4, seeded by
+ * the first sample; 0 for a slice without a phase).  Checked after each
+ * row, so a slice always stages at least one. */
 int htrim_slice_expired(struct htrim_slice *s);
+
+/** Name the phase @a s runs for: htrim_run_slice does it for its own
+ * slices; a caller's unbudgeted slice (the burst-loss prune) passes
+ * HTRIM_PH_INCARNATION so its commit is recorded in htrim_stats (last /
+ * max slice).  A slice without a phase is neither recorded nor
+ * measured. */
+void htrim_slice_set_phase(struct htrim_slice *s, enum htrim_phase ph);
 
 /** THE delete: stage the removal of one stored row and every index row
  * that names it -- its messages row (key from rec->ts verbatim), both
@@ -254,7 +276,12 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
                      const struct htc_rec *rec, int counted);
 
 /** Commit @a s's batch; only on success apply its deltas and counters and
- * clean up the targets it touched.  Reads the clock once.  Frees @a s.
+ * clean up the targets it touched.  Reads the clock once (twice for a
+ * budgeted slice with a phase that staged rows: it measures the commit
+ * and the cleanup).  A slice with a phase is recorded in htrim_stats,
+ * committed or not.  The cleanup of a budgeted slice does at most 16
+ * emptiness seeks and carries the rest of its touched targets to the next
+ * committed slice (in memory: a restart drops them).  Frees @a s.
  * @return the rows deleted, or -1 (nothing applied). */
 int htrim_slice_commit(struct htrim_slice *s);
 

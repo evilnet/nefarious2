@@ -63,6 +63,11 @@
 #define HTRIM_REPLY_KEY_MAX (HTC_TARGET_MAX + HTC_MSGID_MAX + HTC_TS_MAX + HTC_MSGID_MAX + 3)
 /** Largest msgid_index key: msgid \0 fold(target). */
 #define HTRIM_MSGID_KEY_MAX (HTC_MSGID_MAX + 1 + HTC_TARGET_MAX)
+/** Emptiness checks (a messages-CF seek each) one budgeted slice's
+ * cleanup does; the rest carry over to the next slice. */
+#define HTRIM_CLEANUP_CHECKS 16
+/** Phase slots (every enum htrim_phase value). */
+#define HTRIM_PH_SLOTS ((int)HTRIM_PH_INCARNATION + 1)
 /** Unindexable keys a walk names in the log (then only counts). */
 #define HTRIM_BF_LOG_KEYS 5
 /** A logged key's printable form, quotes excluded. */
@@ -85,6 +90,7 @@ struct htrim_slice {
   struct db_writebatch *wb;
   uint64_t              start_us;
   uint64_t              budget_us;   /* 0 = no budget */
+  enum htrim_phase      phase;       /* NONE: a caller's own slice, not recorded */
   int                   broken;      /* a staging op failed: never commit */
   int                   rows;
   uint64_t              counts[HTRIM_PATH_COUNT];
@@ -149,6 +155,19 @@ static struct {
   size_t             ao_late_len, ao_late_cap;     /* ao_lower since; 0 = none */
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
+
+  /* What a committed budgeted slice paid after its staging -- the batch
+   * commit and the touched-target cleanup -- per row it staged, in ns, an
+   * EWMA (alpha 1/4, seeded by the first sample) per phase: the budget
+   * check charges it ahead for every row staged so far. */
+  uint64_t           cost_ns[HTRIM_PH_SLOTS];
+
+  /* Touched targets whose emptiness check a budgeted slice's cleanup had
+   * no room for (HTRIM_CLEANUP_CHECKS), oldest first; the next committed
+   * slice checks them before its own.  In memory only: a restart drops
+   * them (the targets sweep at boot reaps what they would have). */
+  struct htrim_touch *carry;
+  size_t             ncarry, cap_carry;
   enum htrim_phase   last_run;
   uint64_t           last_elapsed_us; /* of the last committed/failed slice */
   int                tsweep_wanted;   /* a targets cleanup could not finish */
@@ -286,6 +305,8 @@ static const char *key_preview(char *buf, size_t size, const void *key, size_t k
   return buf;
 }
 
+static void record_slice(enum htrim_phase ph);
+
 /** THE accounting rule: every store/delete delta goes through here. */
 static void acct_apply(const char *owner, const void *bo_key, size_t bo_klen,
                        int64_t delta)
@@ -347,6 +368,7 @@ void htrim_shutdown(void)
   MyFree(g.bf_cursor);
   MyFree(g.ao_lower);
   MyFree(g.ao_late);
+  MyFree(g.carry);
   memset(&g, 0, sizeof g);
 }
 
@@ -537,13 +559,30 @@ struct htrim_slice *htrim_slice_begin(unsigned int budget_ms)
   return s;
 }
 
+/** Rows a slice has staged: deletes and (backfill) index rows. */
+static size_t slice_staged(const struct htrim_slice *s)
+{
+  return (size_t)s->rows + s->bf_indexed;
+}
+
 int htrim_slice_expired(struct htrim_slice *s)
 {
+  uint64_t ahead;
+
   if (!s || !g.inited)
     return 1;
   if (!s->budget_us)
     return 0;
-  return elapsed_since(s->start_us, g.clock()) >= s->budget_us;
+  /* What the commit and the cleanup will cost for the rows staged so far
+   * is spent from this budget too. */
+  ahead = g.cost_ns[s->phase] * (uint64_t)slice_staged(s) / 1000u;
+  return elapsed_since(s->start_us, g.clock()) + ahead >= s->budget_us;
+}
+
+void htrim_slice_set_phase(struct htrim_slice *s, enum htrim_phase ph)
+{
+  if (s && (int)ph >= 0 && (int)ph < HTRIM_PH_SLOTS)
+    s->phase = ph;
 }
 
 void htrim_slice_abort(struct htrim_slice *s)
@@ -774,13 +813,14 @@ static int touch_cmp(const void *a, const void *b)
  * db_api_cmocka's test_bounded_iter_seek_last).  A truly empty target pays
  * one walk over its tombstones, once. */
 static int target_emptied(const char *target, const char *newest,
-                          char *tkey, size_t tsize, size_t *tklen)
+                          char *tkey, size_t tsize, size_t *tklen, int *seeked)
 {
   char upper[HTC_MSG_KEY_MAX];
   struct db_val cur = { NULL, 0 };
   struct db_iter *it;
   int kl, newer, rc;
 
+  *seeked = 0;
   kl = htc_msg_key(tkey, tsize, target, NULL, NULL);   /* fold(t) \0 */
   if (kl < 2)
     return 0;
@@ -798,6 +838,7 @@ static int target_emptied(const char *target, const char *newest,
 
   memcpy(upper, tkey, (size_t)kl);
   upper[kl - 1] = '\x01';                              /* [fold(t) 0x00, fold(t) 0x01) */
+  *seeked = 1;
   it = db_iter_open_bounded(g.st.env, g.st.messages, NULL, tkey, (size_t)kl,
                             upper, (size_t)kl);
   if (!it)
@@ -818,39 +859,102 @@ static void tsweep_want(const char *what, const char *target)
             what, target ? " " : "", target ? target : "", last_err());
 }
 
+/** Keep @a t for the next slice's cleanup. */
+static void carry_push(const struct htrim_touch *t)
+{
+  if (g.ncarry == g.cap_carry) {
+    g.cap_carry = g.cap_carry ? g.cap_carry * 2 : 32;
+    g.carry = (struct htrim_touch *)MyRealloc(g.carry, g.cap_carry * sizeof *g.carry);
+  }
+  g.carry[g.ncarry++] = *t;
+}
+
+/** Work-list order for deduplication: by target, then by position (the
+ * entry's address in the list), so a group's first entry is its oldest. */
+static int cand_cmp(const void *a, const void *b)
+{
+  const struct htrim_touch *x = *(const struct htrim_touch *const *)a;
+  const struct htrim_touch *y = *(const struct htrim_touch *const *)b;
+  int c = strcmp(x->target, y->target);
+  if (c)
+    return c;
+  return (x > y) - (x < y);
+}
+
 /** After a committed slice: drop the targets key of every touched target
  * left without rows (one second batch), then tell the emptied callback.
- * Runs on the main loop (never from htrim_init), so it may log. */
+ * Runs on the main loop (never from htrim_init), so it may log.
+ *
+ * The work list is the carried targets (oldest first) and then this
+ * slice's, by name; each target once, with the newest deleted ts of all
+ * its entries.  A budgeted slice does at most HTRIM_CLEANUP_CHECKS
+ * emptiness seeks (a target its stamp clears costs one get, no seek);
+ * the targets after that carry over, still in order, so every touched
+ * target is checked within a few slices -- exactly, since a row stored
+ * in between makes it non-empty and the check finds it.  An unbudgeted
+ * slice checks everything. */
 static void cleanup_touched(struct htrim_slice *s)
 {
   struct db_writebatch *wb = NULL;
+  struct htrim_touch *w, **byname;
+  unsigned char *dead;
   const char **names;
-  size_t i, j, n = 0;
+  size_t nw, i, j, n = 0, seeks = 0;
+  size_t limit = s->budget_us ? HTRIM_CLEANUP_CHECKS : (size_t)-1;
+  int stop = 0;
 
-  if (!s->ntouch)
+  nw = g.ncarry + s->ntouch;
+  if (!nw)
     return;
-  qsort(s->touch, s->ntouch, sizeof *s->touch, touch_cmp);
-  names = (const char **)MyMalloc(s->ntouch * sizeof *names);
+  if (s->ntouch)
+    qsort(s->touch, s->ntouch, sizeof *s->touch, touch_cmp);
+  w = (struct htrim_touch *)MyMalloc(nw * sizeof *w);
+  if (g.ncarry)
+    memcpy(w, g.carry, g.ncarry * sizeof *w);
+  if (s->ntouch)
+    memcpy(w + g.ncarry, s->touch, s->ntouch * sizeof *w);
+  g.ncarry = 0;                                 /* refilled below */
 
-  for (i = 0; i < s->ntouch; i = j) {
-    struct htrim_touch *t = &s->touch[i];
+  byname = (struct htrim_touch **)MyMalloc(nw * sizeof *byname);
+  dead = (unsigned char *)MyCalloc(nw, 1);
+  for (i = 0; i < nw; i++)
+    byname[i] = &w[i];
+  qsort(byname, nw, sizeof *byname, cand_cmp);
+  for (i = 0; i < nw; i = j) {
+    struct htrim_touch *lead = byname[i];
+    for (j = i + 1; j < nw && strcmp(byname[j]->target, lead->target) == 0; j++) {
+      if (history_stamp_newer(byname[j]->ts, strlen(byname[j]->ts),
+                              lead->ts, strlen(lead->ts)))
+        memcpy(lead->ts, byname[j]->ts, sizeof lead->ts);
+      dead[byname[j] - w] = 1;
+    }
+  }
+  MyFree(byname);
+
+  names = (const char **)MyMalloc(nw * sizeof *names);
+  for (i = 0; i < nw; i++) {
+    struct htrim_touch *t = &w[i];
     char tkey[HTC_MSG_KEY_MAX];
     size_t tklen = 0;
-    int rc;
+    int rc, seeked;
 
-    for (j = i + 1; j < s->ntouch && strcmp(s->touch[j].target, t->target) == 0; j++)
-      if (history_stamp_newer(s->touch[j].ts, strlen(s->touch[j].ts),
-                              t->ts, strlen(t->ts)))
-        memcpy(t->ts, s->touch[j].ts, sizeof t->ts);
-
-    rc = target_emptied(t->target, t->ts, tkey, sizeof tkey, &tklen);
+    if (dead[i])
+      continue;
+    if (stop || seeks >= limit) {
+      carry_push(t);
+      continue;
+    }
+    rc = target_emptied(t->target, t->ts, tkey, sizeof tkey, &tklen, &seeked);
+    seeks += (size_t)seeked;
     if (rc < 0)
       tsweep_want("emptiness check failed for", t->target);
     if (rc <= 0)
       continue;
     if (!wb && !(wb = db_writebatch_new(g.st.env))) {
       tsweep_want("no batch", NULL);
-      break;
+      stop = 1;                                 /* the rest wait a slice */
+      carry_push(t);
+      continue;
     }
     if (db_writebatch_del(wb, g.st.targets, tkey, tklen) == DB_OK)
       names[n++] = t->target;
@@ -870,6 +974,8 @@ static void cleanup_touched(struct htrim_slice *s)
     db_writebatch_destroy(wb);
   }
   MyFree(names);
+  MyFree(dead);
+  MyFree(w);
 }
 
 /** A committed backfill step: move the in-memory cursor to the one the
@@ -932,9 +1038,25 @@ static void ageout_apply(struct htrim_slice *s)
     g.ao_pending = 0;
 }
 
+/** Fold one committed slice's after-staging cost into the EWMA. */
+static void cost_learn(enum htrim_phase ph, uint64_t us, size_t staged)
+{
+  uint64_t sample = us * 1000u / (uint64_t)staged;
+  uint64_t *c = &g.cost_ns[ph];
+
+  if (!*c)
+    *c = sample;
+  else if (sample >= *c)
+    *c += (sample - *c) / 4;
+  else
+    *c -= (*c - sample) / 4;
+}
+
 int htrim_slice_commit(struct htrim_slice *s)
 {
-  int rows;
+  uint64_t t0 = 0, now;
+  size_t staged;
+  int rows, measure;
   size_t i;
 
   if (!s)
@@ -943,10 +1065,18 @@ int htrim_slice_commit(struct htrim_slice *s)
     slice_free(s);
     return -1;
   }
+  /* A budgeted slice of a phase measures what it pays after staging (one
+   * more clock read) for the next slices' budget checks. */
+  staged = slice_staged(s);
+  measure = s->budget_us && s->phase != HTRIM_PH_NONE && staged > 0;
+  if (measure)
+    t0 = g.clock();
   if (s->broken
       || (db_writebatch_count(s->wb) > 0
           && db_writebatch_commit(s->wb, /*sync_durably=*/0) != DB_OK)) {
     g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
+    if (s->phase != HTRIM_PH_NONE)
+      record_slice(s->phase);
     slice_free(s);
     return -1;
   }
@@ -963,7 +1093,12 @@ int htrim_slice_commit(struct htrim_slice *s)
     backfill_apply(s);
   cleanup_touched(s);
 
-  g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
+  now = g.clock();
+  g.last_elapsed_us = elapsed_since(s->start_us, now);
+  if (measure)
+    cost_learn(s->phase, elapsed_since(t0, now), staged);
+  if (s->phase != HTRIM_PH_NONE)
+    record_slice(s->phase);
   rows = s->rows;
   slice_free(s);
   return rows;
@@ -1054,6 +1189,8 @@ static int phase_ageout(struct htrim_slice *s, const struct htrim_params *p)
   db_iter_close(it);
   if (rc != DB_OK && rc != DB_NOTFOUND)
     return -1;
+  if (first)
+    g.stats.oldest_seen_ms = 0;                 /* nothing past the cutoff */
   if (rc == DB_NOTFOUND)
     s->ao_finished = 1;
   return 0;
@@ -1312,6 +1449,8 @@ const char *htrim_phase_name(enum htrim_phase ph)
   case HTRIM_PH_BACKFILL: return "backfill";
   case HTRIM_PH_ACCTSCAN: return "scan";
   case HTRIM_PH_EVICT:    return "evict";
+  case HTRIM_PH_CLEANUP:  return "cleanup";
+  case HTRIM_PH_INCARNATION: return "incarnation";
   case HTRIM_PH_NONE:
   default:                return "none";
   }
@@ -1359,7 +1498,9 @@ static enum htrim_phase pick_phase(const struct htrim_params *p)
     if (phase_has_work(ph, p))
       return ph;
   }
-  return HTRIM_PH_NONE;
+  /* Carried emptiness checks ride on every committed slice; with no
+   * phase left to run, a slice of their own finishes them. */
+  return g.ncarry ? HTRIM_PH_CLEANUP : HTRIM_PH_NONE;
 }
 
 static void record_slice(enum htrim_phase ph)
@@ -1377,17 +1518,24 @@ int htrim_run_slice(const struct htrim_params *p)
   struct htrim_slice *s;
   enum htrim_phase ph;
 
-  if (!g.inited || !p)
+  /* A failure is described for the caller, which logs it once per
+   * streak of failed slices (it retries each second, a few times). */
+  if (!g.inited || !p) {
+    snprintf(g.last_error, sizeof g.last_error, "%s",
+             g.inited ? "slice without parameters" : "trim engine not started");
     return -1;
+  }
   ph = pick_phase(p);
   if (ph == HTRIM_PH_NONE)
     return 0;
   s = htrim_slice_begin(p->slice_ms);
-  if (!s)
+  if (!s) {
+    snprintf(g.last_error, sizeof g.last_error, "%s slice not opened: %s",
+             htrim_phase_name(ph), last_err());
     return -1;
+  }
+  htrim_slice_set_phase(s, ph);  /* the commit records the slice */
 
-  /* A failure is described for the caller, which logs it once per
-   * streak of failed slices (it retries each second, a few times). */
   g.last_run = ph;            /* a failing phase still yields its turn */
   if (run_phase(ph, s, p) < 0) {
     g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
@@ -1398,12 +1546,10 @@ int htrim_run_slice(const struct htrim_params *p)
     return -1;
   }
   if (htrim_slice_commit(s) < 0) {
-    record_slice(ph);
     snprintf(g.last_error, sizeof g.last_error, "%s slice commit failed: %s",
              htrim_phase_name(ph), last_err());
     return -1;
   }
-  record_slice(ph);
 
   return pick_phase(p) != HTRIM_PH_NONE;
 }
