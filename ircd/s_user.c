@@ -489,26 +489,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
     else if (HasFlag(acptr, FLAG_TS8))
       SetFlag(sptr, FLAG_TS8);
 
-    /*
-     * Check to see if this user is being propagated
-     * as part of a net.burst, or is using protocol 9.
-     * FIXME: This can be sped up - its stupid to check it for
-     * every NICK message in a burst again  --Run.
-     */
-    for (; acptr != &me; acptr = cli_serv(acptr)->up)
-    {
-      if (IsBurst(acptr) || Protocol(acptr) < 10)
-        break;
-    }
-    if (IsIPChecked(sptr) && !IPcheck_remote_connect(sptr, (acptr != &me)))
-    {
-      /*
-       * We ran out of bits to count this
-       */
-      sendcmdto_one(&me, CMD_KILL, sptr, "%C :%s (Too many connections from your host -- Ghost)",
-                    sptr, cli_name(&me));
-      return exit_client(cptr, sptr, &me,"Too many connections from your host -- throttled");
-    }
+    /* Remote users are not counted in IPcheck: the registry is per
+     * server.  (A check here used to read IsIPChecked(sptr) &&
+     * !IPcheck_remote_connect(sptr, is_burst), but nothing sets that flag
+     * on a remote client before this point and IPcheck_remote_connect()
+     * asserts it is clear, so it never ran -- not since 57aad727 made it
+     * test the flag instead of an except lookup.  The burst walk that fed
+     * it its is_burst went with it.) */
     SetUser(sptr);
   }
 

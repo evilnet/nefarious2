@@ -259,7 +259,13 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    */
   if (IsUnknown(acptr) && MyConnect(acptr)) {
     ServerStats->is_ref++;
-    if (!find_except_conf(acptr, EFLAG_IPCHECK))
+    /* Whether the accept counted it is IsIPChecked(), not an except
+     * looked up now: the block may have gone or come in a REHASH, and
+     * find_except_conf() matches the user name and the resolved host
+     * where the accept matched the address alone.  IPcheck_connect_fail()
+     * asserts the flag (57aad727 made the same change in the exit and
+     * registration paths). */
+    if (IsIPChecked(acptr))
       IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
@@ -411,7 +417,13 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsUnknown(acptr) && MyConnect(acptr))
   {
     ServerStats->is_ref++;
-    if (!find_except_conf(acptr, EFLAG_IPCHECK))
+    /* Whether the accept counted it is IsIPChecked(), not an except
+     * looked up now: the block may have gone or come in a REHASH, and
+     * find_except_conf() matches the user name and the resolved host
+     * where the accept matched the address alone.  IPcheck_connect_fail()
+     * asserts the flag (57aad727 made the same change in the exit and
+     * registration paths). */
+    if (IsIPChecked(acptr))
       IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
