@@ -229,10 +229,15 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                  && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
         /* Authenticated owner: account match, no time window */
         can_redact = 1;
-      } else if (!msg->account[0] && !cli_user(sptr)->account[0]) {
+      } else if (!msg->account[0] && !cli_user(sptr)->account[0]
+                 && !msg->header_repaired) {
         /* Unauthenticated sender mask fallback: both message and user must
          * be unauthenticated, and nick!user@host must match exactly.
-         * This only works within the same session (nick changes break it). */
+         * This only works within the same session (nick changes break it).
+         * Not for a row whose '|'-shifted header was repaired on read: its
+         * account is empty because none could be trusted, not because the
+         * sender was unauthenticated, so the mask proves nothing; it takes
+         * the window and chanop path below like anyone else's row. */
         char current_mask[HISTORY_SENDER_LEN];
         ircd_snprintf(0, current_mask, sizeof(current_mask), "%s!%s@%s",
                       cli_name(sptr), cli_user(sptr)->username,

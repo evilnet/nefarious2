@@ -150,6 +150,13 @@ struct HistoryMessage {
    * A channel recreated on the losing side of a split is a different
    * incarnation and its rows are not the surviving channel's history. */
   time_t incarnation;
+  /** Non-zero when the stored header was found shifted by a '|' an older
+   * binary left raw in the nick or username (history_split_header):
+   * the sender was re-split, or kept as read, and the account is empty
+   * because none could be trusted.  An empty account here is NOT proof
+   * the sender was unauthenticated, so nothing may stand the sender
+   * mask in for it (m_redact's mask fallback skips such rows). */
+  int header_repaired;
 };
 
 /** Target info for CHATHISTORY TARGETS query. */

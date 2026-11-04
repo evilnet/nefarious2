@@ -21,7 +21,9 @@
  *
  * Stored value: type|sender|account|[\x05ot\x05][\x06tags\x06][\x07inc\x07]content
  * with sender and account escaped so a '|' in either cannot shift the
- * fields (history_unescape_header reads them back).
+ * fields.  history_split_header reads them back, and re-splits a legacy
+ * (unescaped) row that a '|' in the nick or username shifted; every
+ * decode goes through it.
  * history_deserialize_record and the CH W forward encode/split are
  * declared in history.h with the rest of the history API.  Pure: no
  * database, client or channel dependencies, so ircd/test links it.
@@ -40,5 +42,9 @@ extern char *history_escape_field(char *dst, size_t dstsize, const char *src);
 extern void history_unescape_field(char *s);
 extern int history_unescape_header(char *dst, size_t dstsize,
                                    const char *src, size_t len);
+extern int history_split_header(const char *hdr, size_t len,
+                                char *sender, size_t sender_size,
+                                char *account, size_t account_size,
+                                int *shifted);
 
 #endif /* INCLUDED_history_record_h */

@@ -28,6 +28,7 @@
 #include "history.h"
 #include "history_record.h"
 #include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_compress.h"
 #include "ircd_snprintf.h"
 
@@ -304,6 +305,190 @@ int history_serialize_record(char *buf, int bufsize,
                        content_esc);
 }
 
+/* Legacy rows a '|' shifted (read-side repair).
+ *
+ * Rows written before the header escape store the sender and account
+ * raw, so a '|' in the sender moved every later field: nick a|admin|b
+ * stored "1|a|admin|b!u@h||spoof?", which splits as sender "a",
+ * account "admin" -- an account spoof in every replay.  The stored
+ * bytes stay as they are; the reader repairs what it can.
+ *
+ * Every store path writes the sender as nick!user@host (users,
+ * services, the multiline batch, the CH W forward and the REDACT
+ * catch-up, both of which carry a sender some server built that way)
+ * or as a server name (a server's MODE, KICK, TOPIC or message; the
+ * fallback when the source has no user struct).  A row whose naive
+ * sender is neither form was shifted: a nick fragment ("a", or ""
+ * for a nick that starts with '|') has no '!', and a username with
+ * '|' (IsUserChar takes {|}~ too) leaves "nick!user-fragment" with no
+ * '@'.  Such a row is re-split where the true sender must end.  Nick
+ * and user characters (NTL_IRCNK, NTL_IRCUI in table_gen.c) include
+ * neither '!' nor '@', so the first '!' closes the nick and the first
+ * '@' after it closes the user, whatever '|' either holds; the first
+ * '|' after that '@' closes the host.  The re-split stands only when it
+ * reads as a real nick!user@host -- the nick and user in their own
+ * character sets, a '|' in one of them (the byte that shifted the row),
+ * a host with none -- with an account field after it.  Otherwise the
+ * row keeps its naive split.
+ *
+ * Either way a shifted row returns NO account.  The re-split trusts that
+ * the host holds no '|', but IsHostChar takes {|}~, so a resolved,
+ * WEBIRC, SETHOST or services-assigned host can carry one: nick a|b with
+ * host x|admin would put "admin" in the re-split account slot.  So the
+ * re-split restores the sender and the content and never reads the
+ * account field, and the naive split's account is a piece of the
+ * sender.  An old row from a legitimate '|' nick replays without its
+ * account tag: missing, never spoofed (review ruling, 2026-11-04).  A
+ * '|' in the host of a row that also needed the re-split can then only
+ * cut the host short and show the rest as text.
+ *
+ * Out of reach: a '|' in the HOST of a row whose nick and username
+ * hold none.  Its naive sender nick!user@host-fragment is
+ * indistinguishable from a real one, so it reads as before.
+ *
+ * Only rows with no escape in their header are legacy: the escaping
+ * writer never leaves a raw '|' in a header field, so its rows split
+ * exactly.  An escaping row with no '|' in its header is byte-identical
+ * to a legacy one and splits exactly either way. */
+
+/** Is \a s[0..n) a user sender, nick!user@host with all three parts
+ * present? */
+static int hist_is_user_mask(const char *s, size_t n)
+{
+  const char *bang = memchr(s, '!', n);
+  const char *at;
+
+  if (!bang || bang == s)
+    return 0;
+  at = memchr(bang + 1, '@', n - (bang + 1 - s));
+  return at && at > bang + 1 && at + 1 < s + n;
+}
+
+/** Is \a s[0..n) a server name (a '.', no '!' or '@')? */
+static int hist_is_server_name(const char *s, size_t n)
+{
+  return n > 0 && memchr(s, '.', n) && !memchr(s, '!', n)
+      && !memchr(s, '@', n);
+}
+
+/** Re-split a shifted legacy header.  On success sets *s_end to the
+ * '|' that closes the true sender and *a_end to the '|' that closes the
+ * account field, and returns 1; returns 0 when the re-split is not a
+ * safe nick!user@host followed by an account field.  The account
+ * field's bytes are never read: the caller returns no account. */
+static int hist_resplit_legacy(const char *hdr, const char *end,
+                               const char **s_end, const char **a_end)
+{
+  const char *bang, *at, *bar, *bar2, *p;
+  int has_bar = 0;
+
+  /* The nick: closed by the first '!' (no nick character is '!');
+   * nick characters, no leading digit or '-'. */
+  bang = memchr(hdr, '!', end - hdr);
+  if (!bang || bang == hdr || bang - hdr > NICKLEN)
+    return 0;
+  if (IsDigit(hdr[0]) || hdr[0] == '-')
+    return 0;
+  for (p = hdr; p < bang; ++p) {
+    if (!IsNickChar(*p))
+      return 0;
+    if (*p == '|')
+      has_bar = 1;
+  }
+
+  /* The user: closed by the first '@' after the '!' (no user character
+   * is '@'); user characters, '|' among them. */
+  at = memchr(bang + 1, '@', end - (bang + 1));
+  if (!at || at == bang + 1 || at - (bang + 1) > USERLEN)
+    return 0;
+  for (p = bang + 1; p < at; ++p) {
+    if (!IsUserChar(*p))
+      return 0;
+    if (*p == '|')
+      has_bar = 1;
+  }
+
+  /* No '|' in the nick or the user: not a row a '|' shifted. */
+  if (!has_bar)
+    return 0;
+
+  /* The host: closed by the first '|' after the '@'; host characters or
+   * ':' (an IPv6 address). */
+  bar = memchr(at + 1, '|', end - (at + 1));
+  if (!bar || bar == at + 1 || bar - (at + 1) > HOSTLEN)
+    return 0;
+  for (p = at + 1; p < bar; ++p)
+    if (!IsHostChar(*p) && *p != ':')
+      return 0;
+
+  /* The account field closes at the next '|'; the content follows. */
+  bar2 = memchr(bar + 1, '|', end - (bar + 1));
+  if (!bar2)
+    return 0;
+
+  *s_end = bar;
+  *a_end = bar2;
+  return 1;
+}
+
+/** Split the header fields of a stored record: \a hdr points just past
+ * the type field's '|', \a len bytes to the end of the value.  Writes
+ * the sender and account, unescaped and bounded by their buffers, and
+ * repairs a legacy row a '|' shifted (see above: sender and content
+ * restored, account always empty).
+ * @param[out] shifted If not NULL, set to 1 when the row was found
+ * shifted (re-split, or kept as read without its account), else 0.
+ * @return Offset of the content field within \a hdr, or -1 when the
+ * fields are missing or do not fit. */
+int history_split_header(const char *hdr, size_t len,
+                         char *sender, size_t sender_size,
+                         char *account, size_t account_size,
+                         int *shifted)
+{
+  const char *end = hdr + len;
+  const char *s_end, *a_end;
+  size_t s_len, a_len;
+
+  if (shifted)
+    *shifted = 0;
+
+  s_end = memchr(hdr, '|', len);
+  if (!s_end)
+    return -1;
+  a_end = memchr(s_end + 1, '|', end - (s_end + 1));
+  if (!a_end)
+    return -1;
+  s_len = s_end - hdr;
+  a_len = a_end - (s_end + 1);
+
+  /* A legacy header (no escape in either field) whose sender is no
+   * legitimate form was shifted. */
+  if (!memchr(hdr, HIST_ESC, s_len) && !memchr(s_end + 1, HIST_ESC, a_len)
+      && !hist_is_user_mask(hdr, s_len) && !hist_is_server_name(hdr, s_len)) {
+    const char *rs_end, *ra_end;
+
+    if (account_size == 0)
+      return -1;
+    account[0] = '\0';   /* a shifted row never yields an account */
+    if (shifted)
+      *shifted = 1;
+    if (hist_resplit_legacy(hdr, end, &rs_end, &ra_end)) {
+      if (history_unescape_header(sender, sender_size, hdr, rs_end - hdr) < 0)
+        return -1;
+      return (int)(ra_end + 1 - hdr);
+    }
+    /* Not safely re-splittable: keep the naive split. */
+    if (history_unescape_header(sender, sender_size, hdr, s_len) < 0)
+      return -1;
+    return (int)(a_end + 1 - hdr);
+  }
+
+  if (history_unescape_header(sender, sender_size, hdr, s_len) < 0
+      || history_unescape_header(account, account_size, s_end + 1, a_len) < 0)
+    return -1;
+  return (int)(a_end + 1 - hdr);
+}
+
 /** Deserialize a message from a buffer.
  * @param[in] data Serialized data (possibly compressed).
  * @param[in] datalen Length of data.
@@ -364,22 +549,16 @@ static int deserialize_message(const char *data, int datalen,
   msg->type = (enum HistoryMessageType)type;
   p = field + 1;
 
-  /* Parse sender (escaped: the stored field may be longer than the
-   * sender it decodes to, so the bound applies after unescaping) */
-  field = memchr(p, '|', end - p);
-  if (!field || field >= end) goto deser_cleanup;
-  if (history_unescape_header(msg->sender, sizeof(msg->sender),
-                              p, field - p) < 0)
-    goto deser_cleanup;
-  p = field + 1;
-
-  /* Parse account (escaped likewise) */
-  field = memchr(p, '|', end - p);
-  if (!field || field >= end) goto deser_cleanup;
-  if (history_unescape_header(msg->account, sizeof(msg->account),
-                              p, field - p) < 0)
-    goto deser_cleanup;
-  p = field + 1;
+  /* Parse sender and account (escaped: a stored field may be longer
+   * than the value it decodes to, so the bounds apply after unescaping) */
+  {
+    int off = history_split_header(p, end - p,
+                                   msg->sender, sizeof(msg->sender),
+                                   msg->account, sizeof(msg->account),
+                                   &msg->header_repaired);
+    if (off < 0) goto deser_cleanup;
+    p += off;
+  }
 
   /* Parse content (rest of string), extracting optional sentinel-bracketed
    * fields that may appear in this order at the very start of the field:

@@ -1834,7 +1834,7 @@ int history_find_last_join(const char *channel, const char *nick,
       const void *kbase = db_iter_key(it, &klen);
       const void *vbase = db_iter_value(it, &vlen);
       const char *val;
-      const char *pipe1, *pipe2;
+      const char *pipe1;
       int type;
 
       /* Check if still in channel's range */
@@ -1868,21 +1868,24 @@ int history_find_last_join(const char *channel, const char *nick,
       }
 
       /* Check sender: starts with "nick!" */
-      pipe2 = memchr(pipe1 + 1, '|', vlen - (pipe1 + 1 - val));
-      if (!pipe2) {
-        rc = db_iter_prev(it);
-        continue;
-      }
-
       {
-        /* Unescape before comparing: a '|' in the nick is stored escaped.
+        /* Decode the header as deserialize_message does (unescaped, and
+         * a legacy row a '|' nick shifted is re-split) before comparing.
          * Escaping the nick instead would not do: ircd_strncmp folds '|'
          * with backslash, and a client now named foo\x must still find
          * its JOIN stored as foo|x. */
         char sender[HISTORY_SENDER_LEN];
-        int sender_len = history_unescape_header(sender, sizeof(sender),
-                                                 pipe1 + 1, pipe2 - (pipe1 + 1));
-        if (sender_len > (int)nick_len && sender[nick_len] == '!' &&
+        char account[ACCOUNTLEN + 1];
+        size_t sender_len;
+
+        if (history_split_header(pipe1 + 1, vlen - (pipe1 + 1 - val),
+                                 sender, sizeof(sender),
+                                 account, sizeof(account), NULL) < 0) {
+          rc = db_iter_prev(it);
+          continue;
+        }
+        sender_len = strlen(sender);
+        if (sender_len > nick_len && sender[nick_len] == '!' &&
             ircd_strncmp(sender, nick, nick_len) == 0) {
           /* Found it — extract msgid and timestamp from the key */
           char tmp_target[CHANNELLEN + 1];
