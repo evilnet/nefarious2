@@ -741,10 +741,25 @@ static void ip_registry_key_string(const struct irc_in_addr *key, char *buf, siz
 
   memset(&shown, 0, sizeof(shown));
   if (key->in6_16[0] == htons(0x2002)) {
-    shown.in6_16[5] = 0xffff;
-    shown.in6_16[6] = key->in6_16[1];
-    shown.in6_16[7] = key->in6_16[2];
-    ircd_snprintf(0, buf, len, "%s/32", ircd_ntoa(&shown));
+    /* The registry keys a 2002::/16 address on its first 48 bits, the
+     * IPv4 address it embeds: an IPv4 client's own key, or a real 6to4
+     * client's, which keeps the bits behind them and is shown as the
+     * /48 it is matched on rather than as an IPv4 address it is not. */
+    int i, six_to_four = 0;
+    for (i = 3; i < 8; ++i)
+      if (key->in6_16[i])
+        six_to_four = 1;
+    if (six_to_four) {
+      shown.in6_16[0] = key->in6_16[0];
+      shown.in6_16[1] = key->in6_16[1];
+      shown.in6_16[2] = key->in6_16[2];
+      ircd_snprintf(0, buf, len, "%s/48", ircd_ntoa(&shown));
+    } else {
+      shown.in6_16[5] = 0xffff;
+      shown.in6_16[6] = key->in6_16[1];
+      shown.in6_16[7] = key->in6_16[2];
+      ircd_snprintf(0, buf, len, "%s/32", ircd_ntoa(&shown));
+    }
   } else {
     memcpy(&shown, key, sizeof(shown));
     shown.in6_16[4] = shown.in6_16[5] = shown.in6_16[6] = shown.in6_16[7] = 0;
@@ -840,9 +855,11 @@ void IPcheck_report(struct Client *to, const struct StatDesc *sd, char *param)
 
   (void)sd;
   if (param && *param) {
-    /* An address, not a mask (ipmask_parse refuses /bits without pbits)
-     * and not a wildcard: `*` parses as ::, which no entry can hold. */
-    if (!ipmask_parse(param, &addr, NULL) || !irc_in_addr_valid(&addr)) {
+    /* One address.  A mask or a wildcard names no one entry, and
+     * ipmask_parse() would not refuse them all: it takes "192.0.*" as
+     * 192.0.0.0 and "*" as ::, and only /bits fails without pbits. */
+    if (strpbrk(param, "*?/") || !ipmask_parse(param, &addr, NULL)
+        || !irc_in_addr_valid(&addr)) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "I :IPcheck: \"%s\" is not an address", param);
       return;
@@ -884,4 +901,3 @@ void IPcheck_report(struct Client *to, const struct StatDesc *sd, char *param)
   for (i = 0; i < st.top_count; ++i)
     ipcheck_report_entry(to, &st.top[i]);
 }
-
