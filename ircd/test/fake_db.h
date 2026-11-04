@@ -57,6 +57,16 @@ extern unsigned int fake_db_iter_opens(const struct db_cf *cf);
 extern unsigned int fake_db_seek_firsts(const struct db_cf *cf);
 extern unsigned int fake_db_seek_lasts(const struct db_cf *cf);
 
+/** Number of db_flush_cf calls made on @a cf since it was opened. */
+extern unsigned int fake_db_flush_calls(const struct db_cf *cf);
+
+/** Tombstones in @a cf: rows deleted and not yet compacted away (a
+ * delete leaves one in place, as on RocksDB; iterators step over them). */
+extern size_t fake_db_tombstones(const struct db_cf *cf);
+
+/** The fake's compaction: drop every tombstone in @a cf. */
+extern void fake_db_drop_tombstones(struct db_cf *cf);
+
 /** Number of db_suggest_compact calls made on @a cf since it was
  * opened. */
 extern unsigned int fake_db_suggest_calls(const struct db_cf *cf);
@@ -77,7 +87,7 @@ extern int fake_db_last_suggest(const struct db_cf *cf,
 extern void fake_db_last_iter_lower(const struct db_cf *cf,
                                     const void **lower, size_t *llen);
 
-/** Current row count of @a cf. */
+/** Current (live) row count of @a cf. */
 extern size_t fake_db_rows(const struct db_cf *cf);
 
 #endif /* INCLUDED_fake_db_h */

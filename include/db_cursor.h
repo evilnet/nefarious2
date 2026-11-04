@@ -80,6 +80,21 @@ extern struct db_iter *db_iter_open_bounded(struct db_env *env,
                                             const void *lower, size_t llen,
                                             const void *upper, size_t ulen);
 
+/** db_iter_open_bounded, plus a cap on the deleted (or otherwise hidden)
+ * entries one positioning call -- seek, seek_first, seek_last, next, prev
+ * -- may step over: past @a max_skip, that call returns DB_INCOMPLETE and
+ * leaves the iterator unpositioned, so a check over a range that holds a
+ * long run of tombstones costs at most @a max_skip steps instead of the
+ * whole run.  0 = no cap (db_iter_open_bounded).  RocksDB:
+ * ReadOptions::max_skippable_internal_keys (its count includes the
+ * hidden versions a tombstone shadows). */
+extern struct db_iter *db_iter_open_bounded_limited(struct db_env *env,
+                                                    struct db_cf *cf,
+                                                    struct db_snapshot *snap,
+                                                    const void *lower, size_t llen,
+                                                    const void *upper, size_t ulen,
+                                                    unsigned long long max_skip);
+
 /** Close an iterator and release its resources.  Safe on NULL. */
 extern void db_iter_close(struct db_iter *it);
 

@@ -7,6 +7,13 @@
  * db_txn.h surface plus db_delete_range/db_suggest_compact, so it can
  * be linked against the SAME test source as the real RocksDB backend
  * (db_api_cmocka.c) without the fake drifting from what RocksDB does.
+ *
+ * A delete leaves a tombstone, as RocksDB does: the row stays in its
+ * place in the sorted array, marked dead, until fake_db_drop_tombstones
+ * (the fake's compaction).  Lookups and iterators skip dead rows; an
+ * iterator opened with db_iter_open_bounded_limited counts the ones one
+ * positioning call steps over and returns DB_INCOMPLETE past its cap
+ * (RocksDB's max_skippable_internal_keys).
  */
 #include "config.h"
 
@@ -29,6 +36,7 @@ struct row {
   size_t kl;
   char  *v;
   size_t vl;
+  int    dead;   /* a tombstone: deleted, not yet compacted away */
 };
 
 #define FAKE_MAX_CFS 16
@@ -43,6 +51,7 @@ struct db_cf {
   unsigned int seek_firsts;
   unsigned int seek_lasts;
   unsigned int suggest_calls;
+  unsigned int flush_calls;
   int          has_last_suggest;
   char        *last_start;   /* NULL if the call's start was NULL */
   size_t       last_slen;
@@ -72,6 +81,7 @@ struct db_iter {
   size_t      n;
   size_t      pos;
   int         positioned;
+  unsigned long long max_skip;   /* 0 = no cap on dead rows stepped over */
 };
 
 struct op {
@@ -134,7 +144,7 @@ static struct row *cf_find(const struct db_cf *cf, const char *k, size_t kl)
 {
   int found;
   size_t i = cf_lower_bound(cf, k, kl, &found);
-  return found ? &cf->rows[i] : NULL;
+  return found && !cf->rows[i].dead ? &cf->rows[i] : NULL;
 }
 
 static void cf_put(struct db_cf *cf, const char *k, size_t kl,
@@ -142,10 +152,11 @@ static void cf_put(struct db_cf *cf, const char *k, size_t kl,
 {
   int found;
   size_t i = cf_lower_bound(cf, k, kl, &found);
-  if (found) {
+  if (found) {                  /* a live row, or a tombstone it covers */
     free(cf->rows[i].v);
     cf->rows[i].v = dup_bytes(v, vl);
     cf->rows[i].vl = vl;
+    cf->rows[i].dead = 0;
     return;
   }
   if (cf->n == cf->cap) {
@@ -157,19 +168,30 @@ static void cf_put(struct db_cf *cf, const char *k, size_t kl,
   cf->rows[i].kl = kl;
   cf->rows[i].v = dup_bytes(v, vl);
   cf->rows[i].vl = vl;
+  cf->rows[i].dead = 0;
   cf->n++;
 }
 
+static void row_kill(struct row *r)
+{
+  free(r->v);
+  r->v = NULL;
+  r->vl = 0;
+  r->dead = 1;
+}
+
+/* A delete leaves a tombstone where the key sorts, whether or not a row
+ * was there (as RocksDB writes one). */
 static void cf_del(struct db_cf *cf, const char *k, size_t kl)
 {
   int found;
   size_t i = cf_lower_bound(cf, k, kl, &found);
-  if (!found)
+  if (found) {
+    row_kill(&cf->rows[i]);
     return;
-  free(cf->rows[i].k);
-  free(cf->rows[i].v);
-  memmove(&cf->rows[i], &cf->rows[i + 1], (cf->n - i - 1) * sizeof(*cf->rows));
-  cf->n--;
+  }
+  cf_put(cf, k, kl, "", 0);
+  row_kill(&cf->rows[i]);
 }
 
 /* Delete every row in [start,end) (lo/hi are cf_lower_bound indices,
@@ -177,14 +199,9 @@ static void cf_del(struct db_cf *cf, const char *k, size_t kl)
 static void cf_del_range(struct db_cf *cf, size_t lo, size_t hi)
 {
   size_t i;
-  if (hi <= lo)
-    return;
-  for (i = lo; i < hi; i++) {
-    free(cf->rows[i].k);
-    free(cf->rows[i].v);
-  }
-  memmove(&cf->rows[lo], &cf->rows[hi], (cf->n - hi) * sizeof(*cf->rows));
-  cf->n -= (hi - lo);
+  for (i = lo; i < hi; i++)
+    if (!cf->rows[i].dead)
+      row_kill(&cf->rows[i]);
 }
 
 /* -------------------------------------------------------------------- */
@@ -265,6 +282,36 @@ unsigned int fake_db_suggest_calls(const struct db_cf *cf)
   return cf ? cf->suggest_calls : 0;
 }
 
+unsigned int fake_db_flush_calls(const struct db_cf *cf)
+{
+  return cf ? cf->flush_calls : 0;
+}
+
+size_t fake_db_tombstones(const struct db_cf *cf)
+{
+  size_t i, n = 0;
+  if (!cf)
+    return 0;
+  for (i = 0; i < cf->n; i++)
+    n += cf->rows[i].dead != 0;
+  return n;
+}
+
+void fake_db_drop_tombstones(struct db_cf *cf)
+{
+  size_t i, o = 0;
+  if (!cf)
+    return;
+  for (i = 0; i < cf->n; i++) {
+    if (cf->rows[i].dead) {
+      free(cf->rows[i].k);
+      free(cf->rows[i].v);
+    } else
+      cf->rows[o++] = cf->rows[i];
+  }
+  cf->n = o;
+}
+
 int fake_db_last_suggest(const struct db_cf *cf,
                          const void **start, size_t *slen,
                          const void **end, size_t *elen)
@@ -286,7 +333,7 @@ void fake_db_last_iter_lower(const struct db_cf *cf, const void **lower, size_t 
 
 size_t fake_db_rows(const struct db_cf *cf)
 {
-  return cf ? cf->n : 0;
+  return cf ? cf->n - fake_db_tombstones(cf) : 0;
 }
 
 /* -------------------------------------------------------------------- */
@@ -334,6 +381,29 @@ int db_env_stats(struct db_env *env, struct db_env_stats *out)
   (void)env;
   (void)out;
   return DB_ERR_OTHER;
+}
+
+/* approx_keys = live rows; mem_deletes = tombstones (the fake has no
+ * flush: they stay until fake_db_drop_tombstones). */
+int db_cf_stats(struct db_env *env, struct db_cf *cf, struct db_cf_stats *out)
+{
+  (void)env;
+  if (!cf || !out)
+    return DB_ERR_OTHER;
+  memset(out, 0, sizeof *out);
+  out->approx_keys = fake_db_rows(cf);
+  out->mem_deletes = fake_db_tombstones(cf);
+  return DB_OK;
+}
+
+int db_flush_cf(struct db_env *env, struct db_cf *cf, int wait)
+{
+  (void)env;
+  (void)wait;
+  if (!cf)
+    return DB_ERR_OTHER;
+  cf->flush_calls++;
+  return DB_OK;
 }
 
 int db_cf_open(struct db_env *env, const char *name,
@@ -427,8 +497,45 @@ static struct db_iter *iter_from_range(struct db_cf *cf, size_t lo, size_t hi)
     it->snap[i].kl = r->kl;
     it->snap[i].v = dup_bytes(r->v, r->vl);
     it->snap[i].vl = r->vl;
+    it->snap[i].dead = r->dead;
   }
   return it;
+}
+
+/** From it->pos, step forward over tombstones to a live row. */
+static int iter_settle_fwd(struct db_iter *it)
+{
+  unsigned long long skipped = 0;
+  while (it->pos < it->n && it->snap[it->pos].dead) {
+    it->pos++;
+    if (it->max_skip && ++skipped > it->max_skip) {
+      it->positioned = 0;
+      return DB_INCOMPLETE;
+    }
+  }
+  it->positioned = (it->pos < it->n);
+  return it->positioned ? DB_OK : DB_NOTFOUND;
+}
+
+/** The live row at or before index @a from - 1, stepping back over
+ * tombstones (@a from = one past the first candidate). */
+static int iter_settle_back(struct db_iter *it, size_t from)
+{
+  unsigned long long skipped = 0;
+  while (from > 0 && it->snap[from - 1].dead) {
+    from--;
+    if (it->max_skip && ++skipped > it->max_skip) {
+      it->positioned = 0;
+      return DB_INCOMPLETE;
+    }
+  }
+  if (from == 0) {
+    it->positioned = 0;
+    return DB_NOTFOUND;
+  }
+  it->pos = from - 1;
+  it->positioned = 1;
+  return DB_OK;
 }
 
 struct db_iter *db_iter_open(struct db_env *env, struct db_cf *cf,
@@ -452,6 +559,15 @@ struct db_iter *db_iter_open_bounded(struct db_env *env, struct db_cf *cf,
                                      const void *lower, size_t llen,
                                      const void *upper, size_t ulen)
 {
+  return db_iter_open_bounded_limited(env, cf, snap, lower, llen, upper, ulen, 0);
+}
+
+struct db_iter *db_iter_open_bounded_limited(struct db_env *env, struct db_cf *cf,
+                                             struct db_snapshot *snap,
+                                             const void *lower, size_t llen,
+                                             const void *upper, size_t ulen,
+                                             unsigned long long max_skip)
+{
   struct db_iter *it;
   size_t lo, hi;
   int found;
@@ -465,6 +581,7 @@ struct db_iter *db_iter_open_bounded(struct db_env *env, struct db_cf *cf,
   lo = (lower && llen) ? cf_lower_bound(cf, (const char *)lower, llen, &found) : 0;
   hi = (upper && ulen) ? cf_lower_bound(cf, (const char *)upper, ulen, &found) : cf->n;
   it = iter_from_range(cf, lo, hi);
+  it->max_skip = max_skip;
   cf->iter_opens++;
   free(cf->iter_lower);
   cf->iter_lower = (lower && llen) ? dup_bytes(lower, llen) : NULL;
@@ -506,8 +623,7 @@ int db_iter_seek(struct db_iter *it, const void *key, size_t klen)
       hi = mid;
   }
   it->pos = lo;
-  it->positioned = (it->pos < it->n);
-  return it->positioned ? DB_OK : DB_NOTFOUND;
+  return iter_settle_fwd(it);
 }
 
 int db_iter_seek_first(struct db_iter *it)
@@ -517,8 +633,7 @@ int db_iter_seek_first(struct db_iter *it)
   if (it->cf)
     it->cf->seek_firsts++;
   it->pos = 0;
-  it->positioned = (it->n > 0);
-  return it->positioned ? DB_OK : DB_NOTFOUND;
+  return iter_settle_fwd(it);
 }
 
 int db_iter_seek_last(struct db_iter *it)
@@ -527,13 +642,7 @@ int db_iter_seek_last(struct db_iter *it)
     return DB_ERR_OTHER;
   if (it->cf)
     it->cf->seek_lasts++;
-  if (it->n == 0) {
-    it->positioned = 0;
-    return DB_NOTFOUND;
-  }
-  it->pos = it->n - 1;
-  it->positioned = 1;
-  return DB_OK;
+  return iter_settle_back(it, it->n);
 }
 
 int db_iter_next(struct db_iter *it)
@@ -542,8 +651,7 @@ int db_iter_next(struct db_iter *it)
     return DB_ERR_OTHER;
   if (it->pos < it->n)
     it->pos++;
-  it->positioned = (it->pos < it->n);
-  return it->positioned ? DB_OK : DB_NOTFOUND;
+  return iter_settle_fwd(it);
 }
 
 int db_iter_prev(struct db_iter *it)
@@ -554,9 +662,7 @@ int db_iter_prev(struct db_iter *it)
     it->positioned = 0;
     return DB_NOTFOUND;
   }
-  it->pos--;
-  it->positioned = 1;
-  return DB_OK;
+  return iter_settle_back(it, it->pos);
 }
 
 int db_iter_valid(const struct db_iter *it)

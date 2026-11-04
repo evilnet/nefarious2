@@ -117,6 +117,12 @@ extern int db_delete_range(struct db_env *env, struct db_cf *cf,
                            const void *start, size_t slen,
                            const void *end, size_t elen);
 
+/** Flush @a cf's memtable to an SST file; @a wait 0 returns at once (the
+ * flush runs in the background).  A compaction hint marks SST files only,
+ * so the tombstones still in a memtable need this first.  RocksDB:
+ * rocksdb_flush_cf.  Returns DB_OK or DB_ERR_*. */
+extern int db_flush_cf(struct db_env *env, struct db_cf *cf, int wait);
+
 /** Hint the backend to background-compact [@a start, @a end) in @a cf.
  * NULL for either bound means an open end on that side (NULL for both
  * hints "the whole CF", same as db_env_compact's cf-only form).
@@ -144,6 +150,8 @@ struct db_cf_stats {
   size_t   on_disk_bytes;
   size_t   approx_keys;
   unsigned int depth;            /**< libmdbx B-tree depth; RocksDB: max LSM level */
+  size_t   mem_deletes;          /**< RocksDB: deletes in the active memtable */
+  size_t   imm_deletes;          /**< RocksDB: deletes in immutable memtables */
 };
 extern int db_cf_stats(struct db_env *env, struct db_cf *cf,
                        struct db_cf_stats *out);

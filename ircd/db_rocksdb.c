@@ -545,6 +545,25 @@ int db_delete_range(struct db_env *env, struct db_cf *cf,
   return DB_OK;
 }
 
+int db_flush_cf(struct db_env *env, struct db_cf *cf, int wait)
+{
+  rocksdb_flushoptions_t *fopts;
+  char *err = NULL;
+  if (!env || !env->db || !cf)
+    return DB_ERR_OTHER;
+  fopts = rocksdb_flushoptions_create();
+  rocksdb_flushoptions_set_wait(fopts, wait ? 1 : 0);
+  rocksdb_flush_cf(env->db, fopts, cf->handle, &err);
+  rocksdb_flushoptions_destroy(fopts);
+  if (err) {
+    int rc = translate_errptr(err);
+    env_record_error(env, "flush_cf", err);
+    rocksdb_free(err);
+    return rc;
+  }
+  return DB_OK;
+}
+
 int db_suggest_compact(struct db_env *env, struct db_cf *cf,
                        const void *start, size_t slen,
                        const void *end, size_t elen)
@@ -625,6 +644,10 @@ int db_cf_stats(struct db_env *env, struct db_cf *cf, struct db_cf_stats *out)
   /* depth maps to LSM levels */
   v = rocksdb_property_value_cf(env->db, cf->handle, "rocksdb.num-files-at-level0");
   if (v) { out->depth = (unsigned int)strtoul(v, NULL, 10); rocksdb_free(v); }
+  v = rocksdb_property_value_cf(env->db, cf->handle, "rocksdb.num-deletes-active-mem-table");
+  if (v) { out->mem_deletes = (size_t)strtoull(v, NULL, 10); rocksdb_free(v); }
+  v = rocksdb_property_value_cf(env->db, cf->handle, "rocksdb.num-deletes-imm-mem-tables");
+  if (v) { out->imm_deletes = (size_t)strtoull(v, NULL, 10); rocksdb_free(v); }
   return DB_OK;
 }
 
@@ -904,6 +927,16 @@ struct db_iter *db_iter_open_bounded(struct db_env *env,
                                      const void *lower, size_t llen,
                                      const void *upper, size_t ulen)
 {
+  return db_iter_open_bounded_limited(env, cf, snap, lower, llen, upper, ulen, 0);
+}
+
+struct db_iter *db_iter_open_bounded_limited(struct db_env *env,
+                                             struct db_cf *cf,
+                                             struct db_snapshot *snap,
+                                             const void *lower, size_t llen,
+                                             const void *upper, size_t ulen,
+                                             unsigned long long max_skip)
+{
   struct db_iter *it;
   if (!env || !env->db || !cf)
     return NULL;
@@ -944,6 +977,8 @@ struct db_iter *db_iter_open_bounded(struct db_env *env,
     rocksdb_readoptions_set_iterate_lower_bound(it->ropts, it->lower, it->llen);
   if (it->upper)
     rocksdb_readoptions_set_iterate_upper_bound(it->ropts, it->upper, it->ulen);
+  if (max_skip)
+    rocksdb_readoptions_set_max_skippable_internal_keys(it->ropts, (uint64_t)max_skip);
 
   it->iter = rocksdb_create_iterator_cf(env->db, it->ropts, cf->handle);
   if (!it->iter) {
@@ -977,10 +1012,13 @@ static int iter_observe(struct db_iter *it)
   it->positioned = rocksdb_iter_valid(it->iter);
   rocksdb_iter_get_error(it->iter, &err);
   if (err) {
+    /* Status::Incomplete ("Result incomplete: Too many internal keys
+     * skipped") is max_skippable_internal_keys reached, not a failure. */
+    int incomplete = strstr(err, "ncomplete") != NULL;
     env_record_error(it->env, "iter", err);
     rocksdb_free(err);
     it->positioned = 0;
-    return DB_ERR_OTHER;
+    return incomplete ? DB_INCOMPLETE : DB_ERR_OTHER;
   }
   return it->positioned ? DB_OK : DB_NOTFOUND;
 }

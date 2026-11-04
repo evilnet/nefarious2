@@ -445,6 +445,73 @@ static void test_bounded_iter_prefix_lookups(void **state)
   assert_int_equal(db_iter_seek(it, B("alice:bob\0" "250")), DB_NOTFOUND);
 }
 
+/* A limited iterator (Task 8 fix round, I3): a positioning call that
+ * would step over more deleted entries than its cap returns
+ * DB_INCOMPLETE -- neither found nor not found -- instead of walking the
+ * whole run; within the cap, or past a live row, it behaves as
+ * db_iter_open_bounded.  (RocksDB's count also takes the hidden versions
+ * a tombstone shadows, so the caps here leave a wide margin.) */
+static void test_bounded_iter_skip_limit(void **state)
+{
+  struct db_writebatch *wb;
+  char k[16];
+  int i;
+  (void)state;
+
+  put(B("#s\0x"));
+  put(B("#u\0x"));
+  for (i = 0; i < 200; i++) {
+    snprintf(k, sizeof k, "#t%c%04d", 0, i);
+    put(k, 7);
+  }
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  for (i = 0; i < 200; i++) {
+    snprintf(k, sizeof k, "#t%c%04d", 0, i);
+    assert_int_equal(db_writebatch_del(wb, cf, k, 7), DB_OK);
+  }
+  assert_int_equal(db_writebatch_commit(wb, 0), DB_OK);
+  db_writebatch_destroy(wb);
+
+  it = db_iter_open_bounded_limited(env, cf, NULL, B("#t\0"), B("#t\x01"), 50);
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_INCOMPLETE);
+  assert_false(db_iter_valid(it));
+  db_iter_close(it);
+  it = db_iter_open_bounded_limited(env, cf, NULL, B("#t\0"), B("#t\x01"), 100000);
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_NOTFOUND);
+  db_iter_close(it);
+  it = db_iter_open_bounded(env, cf, NULL, B("#t\0"), B("#t\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_NOTFOUND);
+  db_iter_close(it);
+
+  /* A live row at the tail: seek_last lands on it at once; from the head
+   * the run is in the way. */
+  put(B("#t\0" "9999"));
+  it = db_iter_open_bounded_limited(env, cf, NULL, B("#t\0"), B("#t\x01"), 50);
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("#t\0" "9999"));
+  assert_int_equal(db_iter_seek_first(it), DB_INCOMPLETE);
+  assert_false(db_iter_valid(it));
+  db_iter_close(it);
+  it = NULL;
+}
+
+/* db_flush_cf: a non-waiting flush returns at once with DB_OK. */
+static void test_flush_cf_returns(void **state)
+{
+  (void)state;
+  put(B("a"));
+  assert_int_equal(db_flush_cf(env, cf, 0), DB_OK);
+  assert_int_equal(db_flush_cf(env, cf, 1), DB_OK);
+#ifndef DB_API_REAL
+  assert_int_equal(2, fake_db_flush_calls(cf));
+#endif
+}
+
 /* ------------------------------------------------------------------ */
 /* Real-backend-only: snapshot isolation through a bounded iterator    */
 /* ------------------------------------------------------------------ */
@@ -547,6 +614,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_suggest_compact_returns, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_bounded_iter_seek_last, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_bounded_iter_prefix_lookups, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_bounded_iter_skip_limit, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_flush_cf_returns, test_setup, test_teardown),
 #ifdef DB_API_REAL
     cmocka_unit_test_setup_teardown(test_bounded_iter_snapshot, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_deletion_heavy_cfs_open, test_setup, test_teardown),

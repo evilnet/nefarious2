@@ -49,6 +49,10 @@ extern void db_val_free(struct db_val *v);
 enum {
   DB_OK         = 0,
   DB_NOTFOUND   = 1,   /**< key not present (db_get, iterator seek) */
+  DB_INCOMPLETE = 2,   /**< a limited iterator (db_iter_open_bounded_limited)
+                            stepped over more deleted entries in one
+                            positioning call than it may: neither found
+                            nor not found; the iterator is unpositioned */
   DB_ERR_IO     = -1,  /**< disk error, file open failure, etc. */
   DB_ERR_MEMORY = -2,  /**< allocation failure */
   DB_ERR_CORRUPT= -3,  /**< on-disk corruption / checksum mismatch */
