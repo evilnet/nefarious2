@@ -162,30 +162,34 @@ static int bt_of(char *buf, size_t size, const char *target, const char *ts,
   return n;
 }
 
-/** Write what the store path writes for one row, then index it through
- * htrim_stage_index in the same batch, commit, and htrim_note_stored. */
-static void seed_row(const char *target, const char *ts, const char *msgid,
-                     const char *owner, unsigned char flags,
-                     const char *reply_parent, const char *redact_parent,
-                     size_t ml_len, struct htc_rec *rec_out)
+/** The test value (parse_cb's format), padded with 'x' to 80 bytes. */
+static void test_value(char val[81], const char *account, unsigned char flags,
+                       const char *reply_parent, const char *redact_parent)
 {
-  struct db_writebatch *wb = db_writebatch_new(env);
-  char mk[HTC_MSG_KEY_MAX], ik[HTC_MSG_KEY_MAX], rk[HTC_MSG_KEY_MAX];
-  char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX];
-  char val[81];
-  struct htc_rec rec;
-  size_t bolen = 0;
-  int mkl, ikl, btl, n;
-
-  assert_non_null(wb);
-  mkl = htc_msg_key(mk, sizeof mk, target, ts, msgid);
-  assert_true(mkl > 0);
-  n = snprintf(val, sizeof val, "%s|%u|%s|%s|", owner, (unsigned)flags,
-               reply_parent, redact_parent);
+  int n = snprintf(val, 81, "%s|%u|%s|%s|", account, (unsigned)flags,
+                   reply_parent, redact_parent);
   assert_true(n > 0 && n < 80);
   memset(val + n, 'x', 80 - (size_t)n);
   val[80] = '\0';
-  assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, mk, (size_t)mkl, val, 80));
+}
+
+/** Stage what the store path writes for one row except its by_time and
+ * by_owner rows: the messages row (@a val, @a vlen bytes), both msgid-index
+ * forms, its reply_index entries, its redact_index row (HTC_F_REDACT), its
+ * multiline content (@a ml_len bytes) and a paste row (HTC_F_ML).
+ * @return the messages key length. */
+static int stage_message_rows(struct db_writebatch *wb, const char *target,
+                              const char *ts, const char *msgid,
+                              const char *val, size_t vlen, unsigned char flags,
+                              const char *reply_parent, const char *redact_parent,
+                              size_t ml_len)
+{
+  char mk[HTC_MSG_KEY_MAX], ik[HTC_MSG_KEY_MAX], rk[HTC_MSG_KEY_MAX];
+  int mkl, ikl, n;
+
+  mkl = htc_msg_key(mk, sizeof mk, target, ts, msgid);
+  assert_true(mkl > 0);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, mk, (size_t)mkl, val, vlen));
 
   ikl = htc_msgid_key(ik, sizeof ik, msgid, target);
   assert_true(ikl > 0);
@@ -219,6 +223,27 @@ static void seed_row(const char *target, const char *ts, const char *msgid,
     assert_int_equal(DB_OK, db_writebatch_put(wb, st.ml_paste, paste, strlen(paste),
                                               msgid, strlen(msgid)));
   }
+  return mkl;
+}
+
+/** Write what the store path writes for one row, then index it through
+ * htrim_stage_index in the same batch, commit, and htrim_note_stored. */
+static void seed_row(const char *target, const char *ts, const char *msgid,
+                     const char *owner, unsigned char flags,
+                     const char *reply_parent, const char *redact_parent,
+                     size_t ml_len, struct htc_rec *rec_out)
+{
+  struct db_writebatch *wb = db_writebatch_new(env);
+  char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX];
+  char val[81];
+  struct htc_rec rec;
+  size_t bolen = 0;
+  int mkl, btl;
+
+  assert_non_null(wb);
+  test_value(val, owner, flags, reply_parent, redact_parent);
+  mkl = stage_message_rows(wb, target, ts, msgid, val, 80, flags,
+                           reply_parent, redact_parent, ml_len);
 
   btl = bt_of(bt, sizeof bt, target, ts, msgid);
   memset(&rec, 0, sizeof rec);
@@ -244,6 +269,73 @@ static void seed_plain(const char *target, const char *ts, const char *msgid,
                        const char *owner, struct htc_rec *rec_out)
 {
   seed_row(target, ts, msgid, owner, 0, "", "", 0, rec_out);
+}
+
+/** A row stored before by_time existed (or by an older binary): what the
+ * store path writes, value @a val (@a vlen bytes), without its by_time and
+ * by_owner rows.  @return the size the backfill must charge it, owned by
+ * @a owner_len bytes of owner key. */
+static uint32_t seed_legacy_raw(const char *target, const char *ts, const char *msgid,
+                                const char *val, size_t vlen, unsigned char flags,
+                                const char *reply_parent, const char *redact_parent,
+                                size_t ml_len, size_t owner_len)
+{
+  struct db_writebatch *wb = db_writebatch_new(env);
+  char bt[HTC_BT_KEY_MAX];
+  int mkl, btl;
+
+  assert_non_null(wb);
+  mkl = stage_message_rows(wb, target, ts, msgid, val, vlen, flags,
+                           reply_parent, redact_parent, ml_len);
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  btl = bt_of(bt, sizeof bt, target, ts, msgid);
+  return htc_row_bytes((size_t)mkl, vlen, (flags & HTC_F_ML) ? ml_len : 0,
+                       (size_t)btl, owner_len);
+}
+
+/** seed_row's rows minus by_time/by_owner, for @a account ("" = none):
+ * the backfill owns it as "a:" + fold(account), or "-". */
+static uint32_t seed_legacy_row(const char *target, const char *ts, const char *msgid,
+                                const char *account, unsigned char flags,
+                                const char *reply_parent, const char *redact_parent,
+                                size_t ml_len)
+{
+  char val[81];
+  test_value(val, account, flags, reply_parent, redact_parent);
+  return seed_legacy_raw(target, ts, msgid, val, 80, flags, reply_parent,
+                         redact_parent, ml_len,
+                         account[0] ? 2 + strlen(account) : 1);
+}
+
+static void put_meta(const char *key, const char *val)
+{
+  struct db_writebatch *wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.meta, key, strlen(key), val, strlen(val)));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+}
+
+/** @return 1 when meta row @a key holds exactly @a val, 0 when it holds
+ * something else, -1 when there is no such row. */
+static int meta_is(const char *key, const char *val)
+{
+  struct db_val v = { NULL, 0 };
+  int same;
+  if (db_get(env, st.meta, key, strlen(key), NULL, &v) != DB_OK)
+    return -1;
+  same = v.len == strlen(val) && memcmp(v.base, val, v.len) == 0;
+  db_val_free(&v);
+  return same;
+}
+
+/** The marker a finished backfill leaves, for the tests of the other
+ * phases (a pending backfill would take slices from them).  Call before
+ * the engine starts (then reboot()). */
+static void seed_backfill_done(void)
+{
+  put_meta(HTRIM_META_BACKFILL_DONE, "done");
 }
 
 static void seed_targets(const char *target, const char *stamp)
@@ -308,6 +400,36 @@ static void load_acct(void)
   for (i = 0; i < 1000 && !htrim_acct_loaded(); i++)
     assert_true(htrim_run_slice(&p) >= 0);
   assert_int_equal(1, htrim_acct_loaded());
+}
+
+/** The backfill tests' clock and retention: now 1700000000000 ms, 7 days. */
+#define BF_NOW_S 1700000000ULL
+static struct htrim_params bf_params(unsigned int slice_ms)
+{
+  struct htrim_params p = params(slice_ms);
+  p.now_ms = BF_NOW_S * 1000ULL;
+  p.retention_days = 7;
+  return p;
+}
+
+/** A stored timestamp @a days days (plus @a secs seconds) before now. */
+static const char *ts_ago(char *buf, size_t size, int days, int secs)
+{
+  snprintf(buf, size, "%llu.000",
+           (unsigned long long)(BF_NOW_S - (uint64_t)days * 86400u - (uint64_t)secs));
+  return buf;
+}
+
+/** Accounting loaded, the backfill still to run over the rows seeded
+ * next.  load_acct() on the empty store also finishes the (empty)
+ * backfill, so it is reopened the way a downgrade window reopens it: a
+ * row newer than the (never stamped) alive time. */
+static void load_acct_backfill_pending(void)
+{
+  load_acct();
+  assert_int_equal(1, htrim_backfill_done());
+  htrim_check_index_gap(1, 0);
+  assert_int_equal(0, htrim_backfill_done());
 }
 
 static int run_until_idle(const struct htrim_params *p)
@@ -441,6 +563,7 @@ static void test_acct_scan_concurrent_store_and_delete(void **state)
   }
   /* a:b19's second boot row: sorts right after M19, the scan's 20th key. */
   seed_plain("#t", "3000.000", "S2", "a:b19", NULL);
+  seed_backfill_done();              /* every slice below is a scan slice */
   reboot();
 
   /* A store before the scan has started: the scan will read it. */
@@ -988,6 +1111,8 @@ static void test_run_slice_scan_then_idle(void **state)
   int i;
   (void)state;
 
+  seed_backfill_done();              /* the scan is the only phase with work */
+  reboot();
   step_us = 250;
   assert_int_equal(0, htrim_acct_loaded());
   assert_int_equal(0, htrim_run_slice(&p));
@@ -1009,6 +1134,8 @@ static void test_run_slice_error_recorded(void **state)
   struct htrim_params p = params(15);
   (void)state;
 
+  seed_backfill_done();              /* the failing slice is the scan's */
+  reboot();
   step_us = 300;
   fake_db_fail_next_iter_open(env);
   assert_int_equal(-1, htrim_run_slice(&p));
@@ -1018,6 +1145,319 @@ static void test_run_slice_error_recorded(void **state)
   assert_int_equal(300, htrim_stats()->max_slice_us);
   assert_int_equal(0, htrim_run_slice(&p));          /* the next one recovers */
   assert_int_equal(1, htrim_acct_loaded());
+}
+
+/* ------------------------------------------------------------------ */
+/* The backfill (Task 6)                                               */
+/* ------------------------------------------------------------------ */
+
+static void test_backfill_indexes_in_retention(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htc_rec r;
+  char t1[32], t2[32];
+  uint32_t b1, b2;
+  (void)state;
+
+  load_acct_backfill_pending();
+  b1 = seed_legacy_row("#t", ts_ago(t1, sizeof t1, 1, 0), "L1", "Bob", 0, "", "", 0);
+  b2 = seed_legacy_row("#u", ts_ago(t2, sizeof t2, 2, 0), "L2", "", 0, "", "", 0);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(2, htrim_backfill_rows());
+  assert_int_equal(2, fake_db_rows(st.by_time));
+  assert_int_equal(2, fake_db_rows(st.by_owner));
+  get_rec("#t", t1, "L1", &r);
+  assert_string_equal("a:bob", r.owner);
+  assert_string_equal(t1, r.ts);
+  assert_int_equal(b1, r.bytes);
+  get_rec("#u", t2, "L2", &r);
+  assert_string_equal("-", r.owner);
+  assert_int_equal(b2, r.bytes);
+  assert_int_equal(b1, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_int_equal(b2, htc_acct_owner(htrim_acct(), "-"));
+  assert_int_equal((uint64_t)b1 + b2, htc_acct_total(htrim_acct()));
+  assert_acct_matches_cf();
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_BACKFILL]);
+  assert_int_equal(2, fake_db_rows(st.messages));
+}
+
+/* A row past retention that was never indexed is deleted in full by the
+ * backfill (age-out walks by_time and would never see it), uncounted:
+ * it was never in the totals.  A row exactly at the cutoff stays. */
+static void test_backfill_ages_out_old_uncounted(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char tk[32], told[32], tcut[32];
+  uint64_t before;
+  uint32_t bcut;
+  (void)state;
+
+  load_acct_backfill_pending();
+  /* An indexed row of the same owner: an uncounted delete leaves it be. */
+  seed_plain("#k", ts_ago(tk, sizeof tk, 1, 0), "K1", "a:bob", NULL);
+  before = htc_acct_total(htrim_acct());
+  assert_true(before > 0);
+  seed_legacy_row("#t", ts_ago(told, sizeof told, 8, 0), "OLD", "Bob",
+                  HTC_F_REDACT | HTC_F_ML, "P0", "P1", 300);
+  bcut = seed_legacy_row("#c", ts_ago(tcut, sizeof tcut, 7, 0), "CUT", "Cy", 0, "", "", 0);
+  assert_int_equal(3, fake_db_rows(st.messages));
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, htrim_stats()->deleted[HTRIM_PATH_BACKFILL]);
+  /* Every row of OLD is gone; K1's and CUT's stay. */
+  assert_int_equal(2, fake_db_rows(st.messages));
+  assert_int_equal(4, fake_db_rows(st.msgid));
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, fake_db_rows(st.redact));
+  assert_int_equal(0, fake_db_rows(st.ml_content));
+  assert_int_equal(0, fake_db_rows(st.ml_paste));
+  assert_int_equal(2, fake_db_rows(st.by_time));
+  assert_int_equal(2, fake_db_rows(st.by_owner));
+  assert_int_equal(before, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_int_equal(bcut, htc_acct_owner(htrim_acct(), "a:cy"));
+  assert_int_equal(before + bcut, htc_acct_total(htrim_acct()));
+  assert_acct_matches_cf();
+}
+
+/* Review Focus 3: a row the store path already indexed (and counted) is
+ * skipped, never indexed or counted a second time. */
+static void test_backfill_skips_indexed(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htc_rec rec, got;
+  char ti[32], tl[32];
+  uint64_t total, bob;
+  uint32_t bl;
+  (void)state;
+
+  load_acct_backfill_pending();
+  /* The indexed row's value names "a:bob" as its account: were it parsed
+   * again it would land under a third owner, "a:a:bob". */
+  seed_plain("#t", ts_ago(ti, sizeof ti, 1, 10), "I1", "a:bob", &rec);
+  total = htc_acct_total(htrim_acct());
+  bob = htc_acct_owner(htrim_acct(), "a:bob");
+  assert_int_equal(rec.bytes, bob);
+  bl = seed_legacy_row("#t", ts_ago(tl, sizeof tl, 1, 0), "L1", "Bob", 0, "", "", 0);
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(2, htrim_backfill_rows());          /* both walked */
+  assert_int_equal(total + bl, htc_acct_total(htrim_acct()));
+  assert_int_equal(bob + bl, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_int_equal(0, htc_acct_owner(htrim_acct(), "a:a:bob"));
+  assert_int_equal(2, fake_db_rows(st.by_time));
+  assert_int_equal(2, fake_db_rows(st.by_owner));
+  get_rec("#t", ti, "I1", &got);
+  assert_int_equal(rec.bytes, got.bytes);
+  assert_string_equal("a:bob", got.owner);
+  assert_acct_matches_cf();
+}
+
+/* Review Focus 3: a restart mid-backfill resumes at the persisted cursor:
+ * no row is skipped, none is walked twice. */
+static void test_backfill_resumes_after_restart(void **state)
+{
+  struct htrim_params p = bf_params(10);
+  char ts[32], mid[16];
+  size_t first;
+  int i;
+  (void)state;
+
+  load_acct_backfill_pending();
+  for (i = 0; i < 50; i++) {
+    snprintf(mid, sizeof mid, "R%02d", i);
+    seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 100 - i), mid, "Bob", 0, "", "", 0);
+  }
+
+  step_us = 1000;                      /* 1 ms per clock read; 10 ms slices */
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(HTRIM_PH_BACKFILL, htrim_stats()->last_phase);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(HTRIM_PH_BACKFILL, htrim_stats()->last_phase);
+  first = htrim_backfill_rows();
+  assert_true(first > 0 && first < 50);
+  assert_int_equal(first, fake_db_rows(st.by_time));
+  assert_int_equal(0, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));   /* a cursor row */
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+
+  htrim_shutdown();
+  assert_int_equal(0, htrim_init(&st, parse_cb, fake_clock, on_emptied));
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(0, htrim_backfill_rows());
+
+  step_us = 0;
+  p = bf_params(0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(50 - first, htrim_backfill_rows());   /* from the cursor on */
+  assert_int_equal(50, fake_db_rows(st.by_time));
+  assert_int_equal(50, fake_db_rows(st.by_owner));
+  assert_int_equal(1, htrim_acct_loaded());
+  assert_acct_matches_cf();
+  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
+}
+
+static void test_backfill_done_skips_next_boot(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32];
+  unsigned int opens;
+  (void)state;
+
+  seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 0), "L1", "Bob", 0, "", "", 0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+
+  reboot();
+  assert_int_equal(1, htrim_backfill_done());
+  opens = fake_db_iter_opens(st.messages);
+  assert_true(htrim_run_slice(&p) >= 0);
+  assert_int_equal(HTRIM_PH_ACCTSCAN, htrim_stats()->last_phase);
+  run_until_idle(&p);
+  assert_int_equal(opens, fake_db_iter_opens(st.messages));
+  assert_int_equal(0, htrim_backfill_rows());
+}
+
+/* A multiline row's size counts its ml_content blob, as the store path's. */
+static void test_backfill_ml_counts_blob(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htc_rec r;
+  char ts[32], bt[HTC_BT_KEY_MAX], mk[HTC_MSG_KEY_MAX];
+  uint32_t b;
+  int btl, mkl;
+  (void)state;
+
+  load_acct_backfill_pending();
+  b = seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 0), "ML1", "Bob", HTC_F_ML, "", "", 300);
+  run_until_idle(&p);
+  get_rec("#t", ts, "ML1", &r);
+  assert_int_equal(b, r.bytes);
+  assert_true(r.flags & HTC_F_ML);
+  btl = bt_of(bt, sizeof bt, "#t", ts, "ML1");
+  mkl = htc_msg_key(mk, sizeof mk, "#t", ts, "ML1");
+  assert_int_equal(300, r.bytes - htc_row_bytes((size_t)mkl, 80, 0, (size_t)btl, 5));
+  assert_int_equal(b, htc_acct_owner(htrim_acct(), "a:bob"));
+}
+
+/* A value the parse callback cannot read is still indexed: owner "-",
+ * no flags, no parents.  A key the engine cannot rebuild byte for byte
+ * (here an unfolded target) is left alone: indexing it would let age-out
+ * drop its index rows while THE delete missed the message row. */
+static void test_backfill_parse_failure(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct db_writebatch *wb;
+  struct htc_rec r;
+  char ts[32], uk[64];
+  uint32_t b;
+  int ukl;
+  (void)state;
+
+  load_acct_backfill_pending();
+  b = seed_legacy_raw("#t", ts_ago(ts, sizeof ts, 1, 0), "PF", "garbage", 7, 0, "", "", 0, 1);
+  ukl = snprintf(uk, sizeof uk, "#U%c%s%cUF", '\0', ts, '\0');
+  assert_true(ukl > 0);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, uk, (size_t)ukl, "Bob|0|||x", 9));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(2, htrim_backfill_rows());
+  assert_int_equal(1, fake_db_rows(st.by_time));
+  assert_int_equal(2, fake_db_rows(st.messages));
+  assert_true(key_exists(st.messages, uk, (size_t)ukl));
+  get_rec("#t", ts, "PF", &r);
+  assert_string_equal("-", r.owner);
+  assert_int_equal(0, r.flags);
+  assert_string_equal("", r.reply_parent);
+  assert_string_equal("", r.redact_parent);
+  assert_int_equal(b, r.bytes);
+  assert_int_equal(b, htc_acct_owner(htrim_acct(), "-"));
+  assert_int_equal(b, htc_acct_total(htrim_acct()));
+}
+
+/* Review Focus 3: rows an older binary wrote after the backfill finished
+ * (a downgrade window) are newer than the last alive stamp plus the slack:
+ * the done marker goes and the backfill runs again. */
+static void test_index_gap_reruns_backfill(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32];
+  (void)state;
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+
+  htrim_stamp_alive(1000);
+  assert_int_equal(1, meta_is(HTRIM_META_ALIVE, "1000"));
+  htrim_check_index_gap(1000 + 600000, 600000);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  htrim_check_index_gap(1000 + 600001, 600000);
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
+
+  /* Persisted: a restart before the re-run still runs it. */
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  /* The alive stamp survives the restart. */
+  htrim_check_index_gap(1000 + 600001, 600000);    /* not done: nothing to do */
+  seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 0), "G1", "Bob", 0, "", "", 0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, fake_db_rows(st.by_time));
+  reboot();
+  htrim_check_index_gap(1000 + 600000, 600000);    /* the persisted alive is 1000 */
+  assert_int_equal(1, htrim_backfill_done());
+}
+
+/* Both phases pending: consecutive slices take turns (round-robin), not
+ * one phase running to exhaustion first. */
+static void test_run_slice_rotation(void **state)
+{
+  struct htrim_params p = bf_params(5);
+  enum htrim_phase ph1, ph2;
+  char ts[32], mid[16];
+  int i;
+  (void)state;
+
+  for (i = 0; i < 30; i++) {
+    snprintf(mid, sizeof mid, "I%02d", i);
+    seed_plain("#i", ts_ago(ts, sizeof ts, 1, 100 - i), mid, "a:ann", NULL);
+    snprintf(mid, sizeof mid, "L%02d", i);
+    seed_legacy_row("#l", ts_ago(ts, sizeof ts, 1, 100 - i), mid, "Bob", 0, "", "", 0);
+  }
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(0, htrim_acct_loaded());
+
+  step_us = 1000;                      /* 1 ms per clock read; 5 ms slices */
+  assert_int_equal(1, htrim_run_slice(&p));
+  ph1 = htrim_stats()->last_phase;
+  assert_int_equal(1, htrim_run_slice(&p));
+  ph2 = htrim_stats()->last_phase;
+  assert_true(ph1 == HTRIM_PH_BACKFILL || ph1 == HTRIM_PH_ACCTSCAN);
+  assert_true(ph2 == HTRIM_PH_BACKFILL || ph2 == HTRIM_PH_ACCTSCAN);
+  assert_true(ph1 != ph2);
+  assert_int_equal(0, htrim_backfill_done());        /* neither ran out of work */
+  assert_int_equal(0, htrim_acct_loaded());
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, htrim_acct_loaded());
+  assert_int_equal(60, fake_db_rows(st.by_time));
+  assert_acct_matches_cf();
 }
 
 int main(void)
@@ -1042,6 +1482,15 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_delete_malformed_advances, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delete_poisoned_slice, setup, teardown),
     cmocka_unit_test_setup_teardown(test_run_slice_error_recorded, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_indexes_in_retention, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_ages_out_old_uncounted, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_skips_indexed, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_resumes_after_restart, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_done_skips_next_boot, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_ml_counts_blob, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_parse_failure, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_reruns_backfill, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_run_slice_rotation, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

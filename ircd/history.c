@@ -125,6 +125,8 @@ static int history_emergency_evict(void);
 static int history_cleanup_empty_targets(void);
 static uint64_t history_trim_clock(void);
 static void history_trim_emptied(const char **targets, int count);
+static int history_trim_parse(const void *val, size_t vlen,
+                              struct htrim_row_info *out);
 
 /** Build a lookup key from target and timestamp: fold(target) \0 ts \0
  * msgid.  The codec owns the encoding (history_trim_codec.h): the trim
@@ -651,8 +653,9 @@ int history_init(const char *dbpath)
     }
     if (db_cf_open(history_db_env, "default", NULL, &st.meta) != DB_OK)
       st.meta = NULL;
-    /* Task 6 supplies the parse callback (the backfill decodes rows). */
-    if (htrim_init(&st, NULL, history_trim_clock, history_trim_emptied) != 0) {
+    /* The parse callback decodes rows for the backfill. */
+    if (htrim_init(&st, history_trim_parse, history_trim_clock,
+                   history_trim_emptied) != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "history: trim engine init failed; history unavailable");
       ml_content_shutdown(history_db_env);
@@ -689,6 +692,7 @@ void history_shutdown(void)
   if (t_active(&history_trim_timer))
     timer_del(&history_trim_timer);
   history_trim_pass_pending = 0;
+  htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
   htrim_shutdown();
 
   presence_shutdown();
@@ -790,9 +794,12 @@ void history_trim_tick(int pass_start)
   struct htrim_params p;
   int mb;
 
-  (void)pass_start;   /* the age-out pass start arrives with Task 7 */
   if (!history_available)
     return;
+  /* The alive stamp the next start's index-gap check reads (the age-out
+   * pass start arrives with Task 7). */
+  if (pass_start)
+    htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
 
   memset(&p, 0, sizeof p);
   p.now_ms         = (uint64_t)time(NULL) * 1000ULL;
@@ -823,9 +830,19 @@ void history_trim_kick(void)
 
 void history_trim_start(uint64_t newest_row_ms)
 {
-  (void)newest_row_ms;   /* the index-gap check arrives with Task 6 */
+  int interval;
+
   if (!history_available)
     return;
+  /* Rows newer than the last alive stamp plus two maintenance intervals
+   * (a crash can leave a whole interval of rows after the last stamp)
+   * were stored while this binary was not running: the backfill runs
+   * again.  Then this start is itself a stamp. */
+  interval = feature_int(FEAT_CHATHISTORY_MAINTENANCE_INTERVAL);
+  if (interval < 60)
+    interval = 60;
+  htrim_check_index_gap(newest_row_ms, 2000ULL * (uint64_t)interval);
+  htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
   /* A never-armed (or long-expired) timer: a fresh generator. */
   if (!t_onqueue(&history_trim_timer) && !t_active(&history_trim_timer))
     timer_init(&history_trim_timer);
@@ -1115,6 +1132,42 @@ static void history_trim_row_stored(const struct history_trim_row *tr)
 {
   if (tr->stage)
     htrim_note_stored(tr->rec.owner, tr->bo_key, tr->bo_klen, tr->rec.bytes);
+}
+
+/** The trim engine's parse callback (the backfill): decode a messages
+ * value with history_deserialize_record -- a legacy row a '|' shifted
+ * comes back repaired, its account empty -- and take what the store path
+ * takes: the account, the reply parent, a REDACT's parent (its content's
+ * first word, as history_store_message reads it), and the multiline flag
+ * by ml_content_resolve's rule (a HISTORY_MULTILINE row, or a legacy
+ * PRIVMSG whose whole content is the 3-byte sentinel).
+ * @return 0, or -1 (the backfill indexes the row as owner "-"). */
+static int history_trim_parse(const void *val, size_t vlen,
+                              struct htrim_row_info *out)
+{
+  struct HistoryMessage m;
+
+  memset(&m, 0, sizeof m);
+  if (!val || history_deserialize_record(val, vlen, &m) != 0)
+    return -1;
+  memset(out, 0, sizeof *out);
+  ircd_strncpy(out->account, m.account, sizeof out->account);
+  if (!extract_reply_tag(m.client_tags, out->reply_parent, sizeof out->reply_parent))
+    out->reply_parent[0] = '\0';
+  if (m.type == HISTORY_REDACT) {
+    const char *space = strchr(m.content, ' ');
+    size_t len = space ? (size_t)(space - m.content) : strlen(m.content);
+    out->flags |= HTC_F_REDACT;
+    if (len > 0 && len < sizeof out->redact_parent) {
+      memcpy(out->redact_parent, m.content, len);
+      out->redact_parent[len] = '\0';
+    }
+  }
+  if (m.type == HISTORY_MULTILINE
+      || (m.type == HISTORY_PRIVMSG && m.content[0] == '\x1E'
+          && m.content[1] == 'm' && m.content[2] == 'l' && m.content[3] == '\0'))
+    out->flags |= HTC_F_ML;
+  return 0;
 }
 
 const char *history_owner_of(char *buf, size_t size, struct Client *sptr)
@@ -4124,9 +4177,15 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Retention: %d days",
              feature_int(FEAT_CHATHISTORY_RETENTION));
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  Trim: accounting %s",
-             htrim_acct_loaded() ? "loaded" : "scanning");
+  if (htrim_backfill_done())
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Trim: backfill done, accounting %s",
+               htrim_acct_loaded() ? "loaded" : "scanning");
+  else
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Trim: backfill running (%zu rows), accounting %s",
+               htrim_backfill_rows(),
+               htrim_acct_loaded() ? "loaded" : "scanning");
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Watermarks: high=%d%% low=%d%%",
              feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK),

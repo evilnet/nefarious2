@@ -23,6 +23,13 @@
  * has been counted by the scan and the delta must land; a key after it
  * will be read (store) or is gone before the scan gets there (delete) and
  * the delta must not land.
+ *
+ * The backfill keeps its position as the last messages key it processed
+ * (bf_cursor), persisted under HTRIM_META_BACKFILL_CURSOR in the same
+ * batch as the index rows and deletes of the rows up to it: a commit moves
+ * the stored and the in-memory cursor together, a failed one neither.  Its
+ * index rows count through the accounting rule like a store's (positive
+ * pending deltas), so a backfill racing the boot scan counts each row once.
  */
 #include "config.h"
 
@@ -37,6 +44,7 @@
 #include "ircd_alloc.h"
 #include "ircd_log.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,6 +80,13 @@ struct htrim_slice {
   size_t                npend, cap_pend;
   struct htrim_touch   *touch;
   size_t                ntouch, cap_touch;
+
+  /* A backfill step, applied at commit. */
+  int                   bf_step;     /* this slice walked messages rows */
+  int                   bf_finished; /* ... to the end of the CF */
+  char                 *bf_cursor;   /* the last messages key it processed */
+  size_t                bf_cursor_len, bf_cursor_cap;
+  size_t                bf_rows, bf_indexed, bf_aged, bf_unindexed;
 };
 
 static struct {
@@ -86,6 +101,13 @@ static struct {
   int                scan_started;
   char              *cursor;          /* last by_owner key the scan read */
   size_t             cursor_len, cursor_cap;
+
+  /* The backfill (persisted in st.meta; in memory only without it). */
+  int                bf_done;
+  char              *bf_cursor;       /* last messages key processed */
+  size_t             bf_cursor_len, bf_cursor_cap;
+  size_t             bf_rows, bf_indexed, bf_aged, bf_unindexed;  /* since htrim_init */
+  uint64_t           alive_ms;        /* the last alive stamp, 0 = none */
 
   enum htrim_phase   last_run;
   uint64_t           last_elapsed_us; /* of the last committed/failed slice */
@@ -117,16 +139,70 @@ static uint64_t elapsed_since(uint64_t start, uint64_t now)
   return now >= start ? now - start : 0;
 }
 
-static void cursor_set(const void *k, size_t kl)
+/** Copy @a kl bytes of @a k into the growable buffer *@a buf. */
+static void bytes_set(char **buf, size_t *len, size_t *cap,
+                      const void *k, size_t kl)
 {
-  if (kl > g.cursor_cap) {
-    g.cursor_cap = kl;
-    g.cursor = (char *)MyRealloc(g.cursor, g.cursor_cap);
+  if (kl > *cap) {
+    *cap = kl;
+    *buf = (char *)MyRealloc(*buf, *cap);
   }
   if (kl)
-    memcpy(g.cursor, k, kl);
-  g.cursor_len = kl;
+    memcpy(*buf, k, kl);
+  *len = kl;
+}
+
+static void cursor_set(const void *k, size_t kl)
+{
+  bytes_set(&g.cursor, &g.cursor_len, &g.cursor_cap, k, kl);
   g.scan_started = 1;
+}
+
+static void bf_cursor_clear(void)
+{
+  MyFree(g.bf_cursor);
+  g.bf_cursor_len = g.bf_cursor_cap = 0;
+}
+
+/** Read meta row @a key into @a out (a NUL-terminated copy, at most
+ * @a size - 1 bytes).  @return its length, or -1: no meta CF, no row, a
+ * read error, or a value that does not fit. */
+static int meta_read(const char *key, char *out, size_t size)
+{
+  struct db_val v = { NULL, 0 };
+  int n = -1;
+
+  if (!g.st.meta
+      || db_get(g.st.env, g.st.meta, key, strlen(key), NULL, &v) != DB_OK)
+    return -1;
+  if (v.len < size) {
+    if (v.len)
+      memcpy(out, v.base, v.len);
+    out[v.len] = '\0';
+    n = (int)v.len;
+  }
+  db_val_free(&v);
+  return n;
+}
+
+/** Load the backfill's state and the alive stamp from the meta rows.  A
+ * cursor row means an unfinished walk, whatever the done marker says (a
+ * re-run whose marker delete did not commit still resumes). */
+static void meta_load(void)
+{
+  char buf[HTC_MSG_KEY_MAX + 1];
+  int n;
+
+  n = meta_read(HTRIM_META_BACKFILL_CURSOR, buf, sizeof buf);
+  if (n > 0)
+    bytes_set(&g.bf_cursor, &g.bf_cursor_len, &g.bf_cursor_cap, buf, (size_t)n);
+  else
+    g.bf_done = meta_read(HTRIM_META_BACKFILL_DONE, buf, sizeof buf) == 4
+                && memcmp(buf, "done", 4) == 0;
+
+  n = meta_read(HTRIM_META_ALIVE, buf, sizeof buf);
+  if (n > 0 && n < 21 && strspn(buf, "0123456789") == (size_t)n)
+    g.alive_ms = strtoull(buf, NULL, 10);
 }
 
 /** THE accounting rule: every store/delete delta goes through here. */
@@ -165,8 +241,9 @@ int htrim_init(const struct htrim_store *st, htrim_parse_fn parse,
   g.emptied = emptied;
   g.last_run = HTRIM_PH_NONE;
   g.stats.last_phase = HTRIM_PH_NONE;
-  /* The engine's meta rows (st->meta) hold no state the core needs yet:
-   * the boot accounting scan always starts from the first by_owner key. */
+  /* The boot accounting scan always starts from the first by_owner key;
+   * the backfill resumes where the meta rows say it stopped. */
+  meta_load();
   g.inited = 1;
   return 0;
 }
@@ -175,6 +252,7 @@ void htrim_shutdown(void)
 {
   htc_acct_free(g.acct);
   MyFree(g.cursor);
+  MyFree(g.bf_cursor);
   memset(&g, 0, sizeof g);
 }
 
@@ -182,33 +260,46 @@ void htrim_shutdown(void)
 /* The store path                                                      */
 /* ------------------------------------------------------------------ */
 
+/** Stage the by_time row @a bt (@a btl bytes) and the by_owner row of
+ * @a rec on @a wb; the by_owner key goes to @a bo_key, its length to
+ * *@a bo_klen.  @return 0; -1 the record or the by_owner key does not fit
+ * (nothing staged); -2 a put failed (do not commit @a wb). */
+static int stage_index(struct db_writebatch *wb, const char *bt, size_t btl,
+                       const struct htc_rec *rec,
+                       char *bo_key, size_t bo_size, size_t *bo_klen)
+{
+  char rv[HTC_REC_MAX];
+  unsigned char sz[4];
+  int rvl, bol;
+
+  rvl = htc_rec_pack(rv, sizeof rv, rec);
+  if (rvl < 0)
+    return -1;
+  bol = htc_bo_key(bo_key, bo_size, rec->owner, bt, btl);
+  if (bol < 0)
+    return -1;
+  htc_size_pack(sz, rec->bytes);
+  if (db_writebatch_put(wb, g.st.by_time, bt, btl, rv, (size_t)rvl) != DB_OK
+      || db_writebatch_put(wb, g.st.by_owner, bo_key, (size_t)bol, sz, sizeof sz) != DB_OK)
+    return -2;
+  *bo_klen = (size_t)bol;
+  return 0;
+}
+
 int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
                       const char *target, const char *msgid,
                       const struct htc_rec *rec,
                       char *bo_key, size_t bo_size, size_t *bo_klen)
 {
   char bt[HTC_BT_KEY_MAX];
-  char rv[HTC_REC_MAX];
-  unsigned char sz[4];
-  int btl, rvl, bol;
+  int btl;
 
   if (!g.inited || !wb || !target || !msgid || !rec || !bo_key || !bo_klen)
     return -1;
   btl = htc_bt_key(bt, sizeof bt, ms, target, msgid);
   if (btl < 0)
     return -1;
-  rvl = htc_rec_pack(rv, sizeof rv, rec);
-  if (rvl < 0)
-    return -1;
-  bol = htc_bo_key(bo_key, bo_size, rec->owner, bt, (size_t)btl);
-  if (bol < 0)
-    return -1;
-  htc_size_pack(sz, rec->bytes);
-  if (db_writebatch_put(wb, g.st.by_time, bt, (size_t)btl, rv, (size_t)rvl) != DB_OK
-      || db_writebatch_put(wb, g.st.by_owner, bo_key, (size_t)bol, sz, sizeof sz) != DB_OK)
-    return -1;
-  *bo_klen = (size_t)bol;
-  return 0;
+  return stage_index(wb, bt, (size_t)btl, rec, bo_key, bo_size, bo_klen) == 0 ? 0 : -1;
 }
 
 void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
@@ -222,6 +313,75 @@ void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
 int htrim_acct_loaded(void)
 {
   return g.acct_loaded;
+}
+
+int htrim_backfill_done(void)
+{
+  return g.bf_done;
+}
+
+size_t htrim_backfill_rows(void)
+{
+  return g.bf_rows;
+}
+
+void htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms)
+{
+  struct db_writebatch *wb;
+  uint64_t limit;
+
+  if (!g.inited || !g.bf_done)
+    return;
+  limit = g.alive_ms + slack_ms;
+  if (limit < g.alive_ms)
+    limit = UINT64_MAX;
+  if (newest_row_ms <= limit)
+    return;
+
+  /* Re-run this start whatever the batch below does: until a backfill
+   * slice commits its first cursor row, a failed marker delete would only
+   * make the next start skip the walk. */
+  g.bf_done = 0;
+  bf_cursor_clear();
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "history: trim index gap: newest row %llu ms is past the last alive "
+            "stamp %llu ms + %llu ms; re-running the backfill",
+            (unsigned long long)newest_row_ms, (unsigned long long)g.alive_ms,
+            (unsigned long long)slack_ms);
+  if (!g.st.meta)
+    return;
+  wb = db_writebatch_new(g.st.env);
+  if (!wb
+      || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_DONE,
+                           strlen(HTRIM_META_BACKFILL_DONE)) != DB_OK
+      || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_CURSOR,
+                           strlen(HTRIM_META_BACKFILL_CURSOR)) != DB_OK
+      || db_writebatch_commit(wb, 0) != DB_OK)
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history_trim: cannot clear the backfill marker: %s", last_err());
+  db_writebatch_destroy(wb);
+}
+
+void htrim_stamp_alive(uint64_t now_ms)
+{
+  struct db_writebatch *wb;
+  char buf[24];
+  int n;
+
+  if (!g.inited)
+    return;
+  g.alive_ms = now_ms;
+  if (!g.st.meta)
+    return;
+  n = snprintf(buf, sizeof buf, "%llu", (unsigned long long)now_ms);
+  wb = db_writebatch_new(g.st.env);
+  if (!wb
+      || db_writebatch_put(wb, g.st.meta, HTRIM_META_ALIVE, strlen(HTRIM_META_ALIVE),
+                           buf, (size_t)n) != DB_OK
+      || db_writebatch_commit(wb, 0) != DB_OK)
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history_trim: cannot stamp alive: %s", last_err());
+  db_writebatch_destroy(wb);
 }
 
 const struct htc_acct *htrim_acct(void)
@@ -241,6 +401,7 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->keys);
   MyFree(s->pend);
   MyFree(s->touch);
+  MyFree(s->bf_cursor);
   MyFree(s);
 }
 
@@ -596,6 +757,30 @@ static void cleanup_touched(struct htrim_slice *s)
   MyFree(names);
 }
 
+/** A committed backfill step: move the in-memory cursor to the one the
+ * batch stored, or finish. */
+static void backfill_apply(struct htrim_slice *s)
+{
+  g.bf_rows += s->bf_rows;
+  g.bf_indexed += s->bf_indexed;
+  g.bf_aged += s->bf_aged;
+  g.bf_unindexed += s->bf_unindexed;
+  if (s->bf_finished) {
+    g.bf_done = 1;
+    bf_cursor_clear();
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: trim backfill complete: %zu rows indexed, %zu aged out",
+              g.bf_indexed, g.bf_aged);
+    if (g.bf_unindexed)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: trim backfill: %zu rows have a key the trim index "
+                "cannot hold; the trimmer never removes them", g.bf_unindexed);
+  } else if (s->bf_cursor_len) {
+    bytes_set(&g.bf_cursor, &g.bf_cursor_len, &g.bf_cursor_cap,
+              s->bf_cursor, s->bf_cursor_len);
+  }
+}
+
 int htrim_slice_commit(struct htrim_slice *s)
 {
   int rows;
@@ -621,6 +806,8 @@ int htrim_slice_commit(struct htrim_slice *s)
   }
   for (i = 0; i < HTRIM_PATH_COUNT; i++)
     g.stats.deleted[i] += s->counts[i];
+  if (s->bf_step)
+    backfill_apply(s);
   cleanup_touched(s);
 
   g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
@@ -682,14 +869,170 @@ static int phase_acctscan(struct htrim_slice *s)
   return 0;
 }
 
+/** One messages row of the backfill walk (key @a k, value @a v).
+ * @return 0 (indexed, aged out, skipped or left as unindexable), or -1:
+ * a read failed or the slice is poisoned -- abort the slice. */
+static int backfill_row(struct htrim_slice *s, const void *k, size_t kl,
+                        const void *v, size_t vl, uint64_t cutoff_ms)
+{
+  char target[HTC_TARGET_MAX], ts[HTC_TS_MAX], msgid[HTC_MSGID_MAX];
+  char mk[HTC_MSG_KEY_MAX], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX];
+  struct htrim_row_info info;
+  struct htc_rec rec;
+  size_t ml = 0, bol = 0;
+  uint64_t ms;
+  int mkl, btl, rc;
+
+  /* A key the engine cannot rebuild byte for byte is one THE delete could
+   * never remove: index it and age-out would drop its index rows while
+   * the message row stayed.  Left alone and counted. */
+  if (htc_msg_key_parse(k, kl, target, sizeof target, ts, sizeof ts,
+                        msgid, sizeof msgid) != 0 || !target[0] || !ts[0]
+      || (mkl = htc_msg_key(mk, sizeof mk, target, ts, msgid)) < 0
+      || (size_t)mkl != kl || memcmp(mk, k, kl) != 0) {
+    s->bf_unindexed++;
+    return 0;
+  }
+  ms = htc_parse_ms(ts);
+  btl = htc_bt_key(bt, sizeof bt, ms, target, msgid);
+  if (btl < 0) {
+    s->bf_unindexed++;
+    return 0;
+  }
+
+  /* Indexed (and counted) at store time: age-out owns it. */
+  rc = db_exists(g.st.env, g.st.by_time, bt, (size_t)btl, NULL);
+  if (rc == DB_OK)
+    return 0;
+  if (rc != DB_NOTFOUND)
+    return -1;
+
+  memset(&info, 0, sizeof info);
+  if (!g.parse || g.parse(v, vl, &info) != 0)
+    memset(&info, 0, sizeof info);
+  info.account[sizeof info.account - 1] = '\0';
+  info.reply_parent[sizeof info.reply_parent - 1] = '\0';
+  info.redact_parent[sizeof info.redact_parent - 1] = '\0';
+
+  memset(&rec, 0, sizeof rec);
+  rec.flags = info.flags & (HTC_F_REDACT | HTC_F_ML);
+  memcpy(rec.ts, ts, strlen(ts) + 1);
+  if (htc_owner_key(rec.owner, sizeof rec.owner, info.account, NULL, NULL) < 0)
+    memcpy(rec.owner, HTC_OWNER_NONE, sizeof HTC_OWNER_NONE);
+  memcpy(rec.reply_parent, info.reply_parent, strlen(info.reply_parent) + 1);
+  memcpy(rec.redact_parent, info.redact_parent, strlen(info.redact_parent) + 1);
+
+  /* Past retention and never counted: THE delete, uncounted. */
+  if (cutoff_ms && ms < cutoff_ms) {
+    if (htrim_delete_row(s, HTRIM_PATH_BACKFILL, bt, (size_t)btl, &rec, 0) != 0)
+      return -1;
+    s->bf_aged++;
+    return 0;
+  }
+
+  if ((rec.flags & HTC_F_ML) && g.st.ml_content && msgid[0]) {
+    struct db_val mv = { NULL, 0 };
+    rc = db_get(g.st.env, g.st.ml_content, msgid, strlen(msgid), NULL, &mv);
+    if (rc == DB_OK)
+      ml = mv.len;
+    else if (rc != DB_NOTFOUND)
+      return -1;
+    db_val_free(&mv);
+  }
+  rec.bytes = htc_row_bytes(kl, vl, ml, (size_t)btl, strlen(rec.owner));
+  rc = stage_index(s->wb, bt, (size_t)btl, &rec, bo, sizeof bo, &bol);
+  if (rc == -1) {
+    s->bf_unindexed++;
+    return 0;
+  }
+  if (rc < 0) {
+    s->broken = 1;
+    return -1;
+  }
+  if (rec.bytes)
+    slice_add_delta(s, bo, bol, (int64_t)rec.bytes);
+  s->bf_indexed++;
+  return 0;
+}
+
+/** The backfill: walk messages from the successor of the cursor, index
+ * (or age out) every row the store path did not index, stop when the
+ * budget is spent.  The cursor (or, at the end, the done marker) goes in
+ * this slice's batch. */
+static int phase_backfill(struct htrim_slice *s, const struct htrim_params *p)
+{
+  struct db_iter *it;
+  char *lower = NULL;
+  size_t llen = 0;
+  uint64_t cutoff = 0;
+  int rc;
+
+  if (p->retention_days > 0) {
+    uint64_t span = (uint64_t)p->retention_days * 86400ULL * 1000ULL;
+    cutoff = p->now_ms > span ? p->now_ms - span : 0;
+  }
+  if (g.bf_cursor_len) {
+    llen = g.bf_cursor_len + 1;
+    lower = (char *)MyMalloc(llen);
+    memcpy(lower, g.bf_cursor, g.bf_cursor_len);
+    lower[g.bf_cursor_len] = '\0';             /* cursor ‖ 0x00 */
+  }
+  it = db_iter_open_bounded(g.st.env, g.st.messages, NULL, lower, llen, NULL, 0);
+  MyFree(lower);                                /* the iterator owns its copy */
+  if (!it)
+    return -1;
+
+  s->bf_step = 1;
+  rc = db_iter_seek_first(it);
+  while (rc == DB_OK) {
+    size_t kl, vl;
+    const void *k = db_iter_key(it, &kl);
+    const void *v = db_iter_value(it, &vl);
+
+    if (backfill_row(s, k, kl, v, vl, cutoff) < 0) {
+      db_iter_close(it);
+      return -1;
+    }
+    bytes_set(&s->bf_cursor, &s->bf_cursor_len, &s->bf_cursor_cap, k, kl);
+    s->bf_rows++;
+    rc = db_iter_next(it);
+    if (rc == DB_OK && htrim_slice_expired(s))
+      break;
+  }
+  db_iter_close(it);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    return -1;
+
+  if (rc == DB_NOTFOUND)
+    s->bf_finished = 1;
+  if (!g.st.meta)
+    return 0;
+  if (s->bf_finished) {
+    if (db_writebatch_put(s->wb, g.st.meta, HTRIM_META_BACKFILL_DONE,
+                          strlen(HTRIM_META_BACKFILL_DONE), "done", 4) != DB_OK
+        || db_writebatch_del(s->wb, g.st.meta, HTRIM_META_BACKFILL_CURSOR,
+                             strlen(HTRIM_META_BACKFILL_CURSOR)) != DB_OK) {
+      s->broken = 1;
+      return -1;
+    }
+  } else if (db_writebatch_put(s->wb, g.st.meta, HTRIM_META_BACKFILL_CURSOR,
+                               strlen(HTRIM_META_BACKFILL_CURSOR),
+                               s->bf_cursor, s->bf_cursor_len) != DB_OK) {
+    s->broken = 1;
+    return -1;
+  }
+  return 0;
+}
+
 static int phase_has_work(enum htrim_phase ph, const struct htrim_params *p)
 {
   (void)p;
   switch (ph) {
   case HTRIM_PH_ACCTSCAN:
     return !g.acct_loaded;
-  case HTRIM_PH_AGEOUT:     /* age-out over by_time */
   case HTRIM_PH_BACKFILL:   /* indexing rows stored before by_time existed */
+    return !g.bf_done;
+  case HTRIM_PH_AGEOUT:     /* age-out over by_time */
   case HTRIM_PH_EVICT:      /* the cap */
   default:
     return 0;
@@ -699,10 +1042,11 @@ static int phase_has_work(enum htrim_phase ph, const struct htrim_params *p)
 static int run_phase(enum htrim_phase ph, struct htrim_slice *s,
                      const struct htrim_params *p)
 {
-  (void)p;
   switch (ph) {
   case HTRIM_PH_ACCTSCAN:
     return phase_acctscan(s);
+  case HTRIM_PH_BACKFILL:
+    return phase_backfill(s, p);
   default:
     return 0;
   }

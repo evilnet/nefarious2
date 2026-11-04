@@ -26,6 +26,20 @@
  * The scan walks by_owner from the successor of its cursor (cursor ‖ 0x00)
  * with a bounded iterator, adds each entry's be32 size, and sets the
  * cursor to the last key it read; an exhausted iterator sets acct_loaded.
+ *
+ * Backfill.  Rows stored before by_time existed -- or by an older binary
+ * while this one was down -- have no index rows, so age-out never sees
+ * them and the totals never count them.  The backfill phase walks the
+ * messages CF in sliced steps from the successor of a cursor persisted in
+ * the meta CF (the last messages key processed, put in the same batch as
+ * the index rows it covers, so a restart neither skips nor re-walks a
+ * row).  Per row: a by_time row that already exists means the store path
+ * indexed and counted it -- skipped; a row past retention is deleted in
+ * full, uncounted (it was never counted); any other row is indexed and
+ * counted through the accounting rule.  An exhausted walk puts the done
+ * marker and deletes the cursor; a boot whose newest stored row is past
+ * the last alive stamp plus a slack (a downgrade window) deletes both, and
+ * the walk runs again.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -45,6 +59,11 @@
 struct db_env;
 struct db_cf;
 struct db_writebatch;
+
+/** The engine's meta rows (st->meta, the env's default CF). */
+#define HTRIM_META_BACKFILL_DONE   "schema/trim-backfill"          /* value "done" */
+#define HTRIM_META_BACKFILL_CURSOR "schema/trim-backfill-cursor"   /* value: the last messages key processed */
+#define HTRIM_META_ALIVE           "trim/alive-ms"                 /* decimal epoch ms */
 
 /** The history env's column families the engine reads and writes.
  * @a meta is the env's default CF (the engine's own marker rows). */
@@ -115,12 +134,15 @@ struct htrim_stats {
 
 struct htrim_slice;
 
-/** Start the engine over @a st (copied).  Reads the engine's meta rows;
- * logs nothing (history_init runs on a worker thread).  @a st's env,
- * messages, msgid, targets, reply, by_time and by_owner and @a clock are
- * required; redact, ml_content, ml_paste and meta may be NULL (rows in a
- * missing CF are then never written, so never deleted), as may @a parse
- * and @a emptied.  Calling it again restarts the engine (shutdown first).
+/** Start the engine over @a st (copied).  Reads the engine's meta rows
+ * (the backfill's done marker and cursor, the alive stamp); logs nothing
+ * (history_init runs on a worker thread).  @a st's env, messages, msgid,
+ * targets, reply, by_time and by_owner and @a clock are required; redact,
+ * ml_content, ml_paste and meta may be NULL (rows in a missing CF are then
+ * never written, so never deleted; without meta the backfill keeps its
+ * state in memory and runs on every start), as may @a parse (the backfill
+ * then reads every row as unparseable) and @a emptied.  Calling it again
+ * restarts the engine (shutdown first).
  * @return 0, or -1 on a missing handle/callback or an allocation failure. */
 int htrim_init(const struct htrim_store *st, htrim_parse_fn parse,
                htrim_clock_fn clock, htrim_emptied_fn emptied);
@@ -152,6 +174,25 @@ int htrim_acct_loaded(void);
 
 /** The owner totals (complete only once htrim_acct_loaded()). */
 const struct htc_acct *htrim_acct(void);
+
+/** @return non-zero once every messages row is indexed (the done marker:
+ * HTRIM_PH_BACKFILL has work until then). */
+int htrim_backfill_done(void);
+
+/** @return the messages rows the backfill walked since htrim_init. */
+size_t htrim_backfill_rows(void);
+
+/** The downgrade check, once at start (main thread; may log): when the
+ * backfill is done but @a newest_row_ms is past the last alive stamp plus
+ * @a slack_ms, rows were stored while this binary was not running (an
+ * older binary wrote them unindexed) -- delete the done marker and the
+ * cursor, and the backfill runs again (its skip rule keeps the rows
+ * already indexed as they are). */
+void htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms);
+
+/** Persist @a now_ms as the alive stamp (one small batch): call at each
+ * pass start and at shutdown. */
+void htrim_stamp_alive(uint64_t now_ms);
 
 /** Open a slice with a budget of @a budget_ms (0 = no budget).
  * Reads the clock once.  @return NULL on allocation failure. */
