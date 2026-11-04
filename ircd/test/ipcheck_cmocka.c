@@ -195,6 +195,34 @@ static void test_connect_fail_floor(void **state)
   assert_int_equal(notice_ca, 2);    /* the given-back attempt left 1, not 0 */
 }
 
+/* --- the 16-bit clock -------------------------------------------------- */
+
+/* An address active just before the 16-bit clock wraps is judged by its
+ * real age afterwards.  CONNECTED_SINCE() used to subtract in int, so
+ * after the wrap the age read negative -- "recent" -- until the clock came
+ * round again: with refusals not counted (nothing moves last_connect) an
+ * address one connection short of its limit was refused for hours, and
+ * for good while its clients stayed connected; with them counted, it cost
+ * one spurious refusal. */
+static void wrap_chain(int refusals_counted, const char *ip)
+{
+  count_refusals = refusals_counted;
+  /* forward to the next moment the 16-bit clock reads 65500 */
+  CurrentTime += (65500 - (CurrentTime & 0xffff)) & 0xffff;
+  assert_true(local_connect(ip));
+  assert_true(local_connect(ip));
+  assert_true(local_connect(ip));
+  CurrentTime += clone_period + 60;         /* past the window, and the wrap */
+  assert_true(local_connect(ip));
+}
+
+static void test_age_across_clock_wrap(void **state)
+{
+  (void)state;
+  wrap_chain(0, "192.0.2.60");
+  wrap_chain(1, "192.0.2.61");
+}
+
 /* --- the remote check ------------------------------------------------- */
 
 /* A remote check that would overflow the 16-bit live count refuses the
@@ -472,6 +500,7 @@ int main(void)
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup(test_local_throttle, setup),
     cmocka_unit_test_setup(test_connect_fail_floor, setup),
+    cmocka_unit_test_setup(test_age_across_clock_wrap, setup),
     cmocka_unit_test_setup(test_remote_overflow_keeps_count, setup),
     cmocka_unit_test_setup(test_invalid_address_registers, setup),
     cmocka_unit_test_setup(test_invalid_address_touches_no_entry, setup),
