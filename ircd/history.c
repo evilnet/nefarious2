@@ -114,6 +114,10 @@ static history_channels_removed_cb channel_removed_callback = NULL;
 /** Key separator character */
 #define KEY_SEP '\0'
 
+/** Room for any key prefix history.c bounds an iterator to (a target, a
+ * reply parent, a msgid). */
+#define HISTORY_PREFIX_MAX (CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8)
+
 /** Message type names for serialization */
 static const char *history_type_names[] = {
   "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
@@ -127,6 +131,39 @@ static uint64_t history_trim_clock(void);
 static void history_trim_emptied(const char **targets, int count);
 static int history_trim_parse(const void *val, size_t vlen,
                               struct htrim_row_info *out);
+
+/** An iterator over exactly the keys that start with @a prefix
+ * (@a plen bytes): lower bound @a prefix, upper bound its successor (the
+ * last byte plus one, trailing 0xff bytes dropped first).
+ *
+ * Every lookup that seeks inside one target's, parent's or msgid's range
+ * goes through here.  On an unbounded iterator a seek that finds nothing
+ * at or after its key lands on the next LIVE key, and RocksDB walks every
+ * tombstone in between -- after retention age-out, a whole dead run of
+ * one server's or one target's rows (the bed, 2026-11-04: a CH W dedup
+ * miss walked ~40k msgid_index tombstones, three minutes on the main
+ * loop).  With bounds a forward step stops at the upper bound and a
+ * backward one at the lower, deleted entries included, so a miss costs
+ * at most the range's own tombstones.  Seeks keep their meaning inside
+ * the range; a seek below it lands on its first key.
+ * @return the iterator, or NULL (no successor, an over-long prefix, or
+ * the open failed). */
+static struct db_iter *history_prefix_iter(struct db_cf *cf,
+                                           struct db_snapshot *snap,
+                                           const void *prefix, size_t plen)
+{
+  const unsigned char *p = (const unsigned char *)prefix;
+  char upper[HISTORY_PREFIX_MAX];
+  size_t n = plen;
+
+  while (n > 0 && p[n - 1] == 0xff)
+    n--;
+  if (n == 0 || n > sizeof upper)
+    return NULL;
+  memcpy(upper, prefix, n);
+  upper[n - 1] = (char)(p[n - 1] + 1);
+  return db_iter_open_bounded(history_db_env, cf, snap, prefix, plen, upper, n);
+}
 
 /** Build a lookup key from target and timestamp: fold(target) \0 ts \0
  * msgid.  The codec owns the encoding (history_trim_codec.h): the trim
@@ -336,7 +373,7 @@ static void reply_index_del_children(struct db_writebatch *wb,
   if (plen < 0)
     return;
 
-  it = db_iter_open(history_db_env, history_cf_reply, NULL);
+  it = history_prefix_iter(history_cf_reply, NULL, prefix, (size_t)plen);
   if (!it)
     return;
 
@@ -738,8 +775,10 @@ static uint64_t history_trim_clock(void)
 }
 
 /** Targets a trim slice emptied: tell the network (CH A -), as the old
- * empty-target cleanup did.  Called after the slice's commit, from the
- * slice timer -- never from inside a store. */
+ * empty-target cleanup did.  Called after a slice's commit: from the
+ * slice timer, and from the burst-loss prune (history_purge_incarnation,
+ * inside the burst's channel wipeout -- as the old prune's cleanup was)
+ * -- never from inside a store. */
 static void history_trim_emptied(const char **targets, int count)
 {
   if (channel_removed_callback && count > 0)
@@ -807,8 +846,8 @@ void history_trim_tick(int pass_start)
   p.slice_ms       = trim_slice_ms();
 
   /* A pass start: the alive stamp the next start's index-gap check reads,
-   * and age-out walks from the first by_time key again (a row stored
-   * since the last pass with an older time is seen). */
+   * and an age-out pass -- resuming where the walk stopped, or back at the
+   * oldest row indexed behind it since (a late store, a backfill). */
   if (pass_start) {
     htrim_stamp_alive(p.now_ms);
     htrim_pass_start(&p);
@@ -973,12 +1012,17 @@ static int msgid_index_resolve(const char *msgid, const char *target,
   } else {
     /* No target: first new-scheme row wins (any channel resolves the
      * shared timestamp -- multi-channel events stamp all rows from one
-     * gettimeofday). */
-    struct db_iter *it = db_iter_open(history_db_env, history_cf_msgid, snap);
+     * gettimeofday).  The iterator holds exactly [msgid\0, msgid\x01):
+     * a miss must not walk on into the next msgid's range (an aged-out
+     * server's msgids sit in long contiguous dead runs). */
+    struct db_iter *it = NULL;
+    if (mlen + 1 < sizeof(keybuf)) {
+      memcpy(keybuf, msgid, mlen);
+      keybuf[mlen] = '\0';
+      it = history_prefix_iter(history_cf_msgid, snap, keybuf, mlen + 1);
+    }
     if (it) {
-      if (mlen + 1 < sizeof(keybuf)) {
-        memcpy(keybuf, msgid, mlen);
-        keybuf[mlen] = '\0';
+      {
         if (db_iter_seek(it, keybuf, mlen + 1) == DB_OK
             && db_iter_valid(it)) {
           size_t klen2, vlen2;
@@ -1765,7 +1809,14 @@ static int history_query_internal(const char *target,
   if (!snap)
     return -1;
 
-  it = db_iter_open(history_db_env, history_cf_messages, snap);
+  /* Bounded to the target's own keys (history_prefix_iter): LATEST and
+   * BEFORE-from-now seek past the target's last row, and an unbounded
+   * seek landed on the next target, walking every tombstone of that
+   * target's aged-out head -- then the step back walked them again.  The
+   * range checks below still hold; a seek past the range is DB_NOTFOUND
+   * and falls back to the range's last key, as the CF's end did. */
+  it = history_prefix_iter(history_cf_messages, snap, target_prefix,
+                           (size_t)target_prefix_len);
   if (!it) {
     db_snapshot_destroy(snap);
     return -1;
@@ -2139,7 +2190,11 @@ int history_find_last_join(const char *channel, const char *nick,
   if (keylen < 0)
     return 0;
 
-  it = db_iter_open(history_db_env, history_cf_messages, NULL);
+  /* The channel's own keys only (history_prefix_iter): the far-future
+   * seek finds nothing in range and falls back to its last key, instead
+   * of walking the next channel's aged-out head and back. */
+  it = history_prefix_iter(history_cf_messages, NULL, target_prefix,
+                           (size_t)target_prefix_len);
   if (!it)
     return 0;
 
@@ -2433,7 +2488,8 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
   s = htrim_slice_begin(0);
   if (!s)
     return -1;
-  it = db_iter_open(history_db_env, history_cf_messages, NULL);
+  htrim_slice_set_phase(s, HTRIM_PH_INCARNATION);
+  it = history_prefix_iter(history_cf_messages, NULL, prefix, (size_t)prefixlen);
   if (!it) {
     htrim_slice_abort(s);
     return -1;
@@ -2621,7 +2677,10 @@ int history_query_between(const char *target,
   if (!snap)
     return -1;
 
-  it = db_iter_open(history_db_env, history_cf_messages, snap);
+  /* The target's own keys only (history_prefix_iter): a window past
+   * the target's last row never walks on into the next target. */
+  it = history_prefix_iter(history_cf_messages, snap, target_prefix,
+                           (size_t)target_prefix_len);
   if (!it) {
     db_snapshot_destroy(snap);
     return -1;
@@ -2946,18 +3005,22 @@ int history_channel_has_messages(const char *target)
   if (prefix_len < 0)
     return -1;
 
-  it = db_iter_open(history_db_env, history_cf_messages, NULL);
+  /* Any key in the target's range.  Seek the LAST one: a target's head
+   * is where age-out leaves its tombstones, its tail is live (the trim
+   * engine's emptiness check does the same). */
+  it = history_prefix_iter(history_cf_messages, NULL, prefix, (size_t)prefix_len);
   if (!it)
     return -1;
 
-  rc = db_iter_seek(it, prefix, prefix_len);
+  rc = db_iter_seek_last(it);
   if (rc == DB_OK && db_iter_valid(it)) {
     size_t klen;
     const void *kbase = db_iter_key(it, &klen);
     if (klen >= (size_t)prefix_len &&
         memcmp(kbase, prefix, prefix_len) == 0)
       result = 1;
-  }
+  } else if (rc != DB_NOTFOUND)
+    result = -1;
 
   db_iter_close(it);
   return result;
@@ -3361,18 +3424,17 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
   if (!history_available || !messages)
     return 0;
 
-  /* Pin a snapshot so the reply-index walk and main-DBI gets see the
+  /* Pin a snapshot so the reply-index walks and main-DBI gets see the
    * same point-in-time view. */
   snap = db_snapshot_new(history_db_env);
   if (!snap)
     return 0;
 
-  ri_it = db_iter_open(history_db_env, history_cf_reply, snap);
-  if (!ri_it) {
-    db_snapshot_destroy(snap);
-    return 0;
-  }
-
+  /* One iterator per message, bounded to exactly that message's
+   * children (history_prefix_iter): most messages have none, and an
+   * unbounded seek for a childless parent walked on through whatever
+   * came next -- the dead run of another server's aged-out children in
+   * this target, or the next target's. */
   for (msg = messages; msg; msg = msg->next) {
     char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
     int plen;
@@ -3388,8 +3450,11 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
     plen = build_reply_index_prefix(prefix, sizeof(prefix), target, msg->msgid);
     if (plen < 0)
       continue;
+    ri_it = history_prefix_iter(history_cf_reply, snap, prefix, (size_t)plen);
+    if (!ri_it)
+      continue;
 
-    rc = db_iter_seek(ri_it, prefix, plen);
+    rc = db_iter_seek_first(ri_it);
     while (rc == DB_OK && db_iter_valid(ri_it)) {
       size_t klen;
       const void *kbase = db_iter_key(ri_it, &klen);
@@ -3487,9 +3552,9 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
 next_child:
       rc = db_iter_next(ri_it);
     }
+    db_iter_close(ri_it);
   }
 
-  db_iter_close(ri_it);
   db_snapshot_destroy(snap);
   return added;
 }
@@ -3540,13 +3605,15 @@ int history_message_is_redacted(const char *target, const char *msgid)
   snap = db_snapshot_new(history_db_env);
   if (!snap)
     return -1;
-  ri_it = db_iter_open(history_db_env, history_cf_reply, snap);
+  /* Exactly this message's children (history_prefix_iter): an unredacted,
+   * childless message must not walk on into its neighbours' ranges. */
+  ri_it = history_prefix_iter(history_cf_reply, snap, prefix, (size_t)plen);
   if (!ri_it) {
     db_snapshot_destroy(snap);
     return -1;
   }
 
-  for (rc = db_iter_seek(ri_it, prefix, plen);
+  for (rc = db_iter_seek_first(ri_it);
        rc == DB_OK && db_iter_valid(ri_it) && !redacted;
        rc = db_iter_next(ri_it)) {
     size_t klen;

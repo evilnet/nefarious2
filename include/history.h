@@ -258,11 +258,12 @@ extern void history_trim_start(uint64_t newest_row_ms);
 /** One trim slice under the live features; re-arms the 1 s slice timer
  * while work remains (and after a failed slice, up to 5 in a row).
  * @a pass_start marks the start of a pass: the alive stamp, and age-out
- * opens a pass from the first row (htrim_pass_start). */
+ * opens a pass where its walk stopped, or back at the oldest row indexed
+ * behind that point since (htrim_pass_start). */
 extern void history_trim_tick(int pass_start);
 
 /** Make the next 1 s tick a pass start (a retention change: age-out
- * walks under the new cutoff from the first row). */
+ * walks on under the new cutoff). */
 extern void history_trim_kick(void);
 
 /** CHATHISTORY_TRIM_SLICE_MS changed: the longest slice so far was

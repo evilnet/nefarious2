@@ -750,8 +750,8 @@ feature_notify_chathistory_retention(void)
   if (!cli_serv(&me))
     return;
 
-  /* Age-out under the new cutoff: a pass from the first row at the next
-   * trim tick (a shorter retention drains in slices, never in one go). */
+  /* Age-out under the new cutoff: a pass at the next trim tick (a
+   * shorter retention drains in slices, never in one go). */
   history_trim_kick();
 
   /* Send CH A R <retention> to all peer servers */

@@ -366,6 +366,41 @@ static void test_bounded_iter_seek_last(void **state)
   assert_false(db_iter_valid(it));
 }
 
+/* The shapes history.c's prefix-bounded lookups rely on (Task 7 fix
+ * round): a msgid miss in [m\0, m\x01) is DB_NOTFOUND, never the next
+ * msgid's row; a LATEST-style seek past a target's last row is
+ * DB_NOTFOUND and seek_last falls back to that row; the walk back stops
+ * at the target's first row, never reaching the previous target. */
+static void test_bounded_iter_prefix_lookups(void **state)
+{
+  (void)state;
+  put(B("m0\0" "#x"));
+  put(B("m2\0" "#y"));
+  it = db_iter_open_bounded(env, cf, NULL, B("m1\0"), B("m1\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek(it, B("m1\0")), DB_NOTFOUND);
+  assert_false(db_iter_valid(it));
+  db_iter_close(it);
+
+  put(B("#a\0" "100"));
+  put(B("#b\0" "100"));
+  put(B("#b\0" "200"));
+  put(B("#c\0" "100"));
+  it = db_iter_open_bounded(env, cf, NULL, B("#b\0"), B("#b\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek(it, B("#b\0" "999")), DB_NOTFOUND);
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("#b\0" "200"));
+  assert_int_equal(db_iter_prev(it), DB_OK);
+  assert_key(it, B("#b\0" "100"));
+  assert_int_equal(db_iter_prev(it), DB_NOTFOUND);
+  assert_false(db_iter_valid(it));
+  /* A seek inside the range still lands on the first row at or after it. */
+  assert_int_equal(db_iter_seek(it, B("#b\0" "150")), DB_OK);
+  assert_key(it, B("#b\0" "200"));
+  assert_int_equal(db_iter_next(it), DB_NOTFOUND);
+}
+
 /* ------------------------------------------------------------------ */
 /* Real-backend-only: snapshot isolation through a bounded iterator    */
 /* ------------------------------------------------------------------ */
@@ -408,6 +443,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_delete_range_whole_text_cf, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_suggest_compact_returns, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_bounded_iter_seek_last, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_bounded_iter_prefix_lookups, test_setup, test_teardown),
 #ifdef DB_API_REAL
     cmocka_unit_test_setup_teardown(test_bounded_iter_snapshot, test_setup, test_teardown),
 #endif
