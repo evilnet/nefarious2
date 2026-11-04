@@ -120,6 +120,21 @@ static void test_long_name(void **state)
   assert_false(ipcheck_refund_take(name, T0 + 1, 1, 600));
 }
 
+/* STATS ipcheck's occupancy: accounts holding a live window, of the table's
+ * capacity (2 in this build); an ended window no longer counts */
+static void test_live_and_capacity(void **state)
+{
+  (void)state;
+  assert_int_equal(ipcheck_refund_capacity(), 2);
+  assert_int_equal(ipcheck_refund_live(T0, 600), 0);
+  assert_true(ipcheck_refund_take("alice", T0,      1, 600));
+  assert_true(ipcheck_refund_take("bob",   T0 + 10, 1, 600));
+  assert_int_equal(ipcheck_refund_live(T0 + 20, 600), 2);
+  assert_int_equal(ipcheck_refund_live(T0 + 605, 600), 1);  /* alice's ended */
+  assert_int_equal(ipcheck_refund_live(T0 + 700, 600), 0);
+  assert_int_equal(ipcheck_refund_live(T0, 0), 0);
+}
+
 /* clear forgets everything */
 static void test_clear(void **state)
 {
@@ -142,6 +157,7 @@ int main(void)
     cmocka_unit_test_setup(test_rotation_keeps_the_cap, setup),
     cmocka_unit_test_setup(test_expired_reused_first, setup),
     cmocka_unit_test_setup(test_long_name, setup),
+    cmocka_unit_test_setup(test_live_and_capacity, setup),
     cmocka_unit_test_setup(test_clear, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

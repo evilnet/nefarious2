@@ -126,3 +126,21 @@ void ipcheck_refund_clear(void)
 {
   memset(refund_table, 0, sizeof(refund_table));
 }
+
+int ipcheck_refund_live(time_t now, int period)
+{
+  int i, j, live = 0;
+
+  if (period <= 0)
+    return 0;
+  for (i = 0; i < IPCHECK_REFUND_TABLE_SIZE; ++i)
+    for (j = 0; j < IPCHECK_REFUND_BUCKET_DEPTH; ++j)
+      if (refund_table[i][j].in_use && now - refund_table[i][j].start < period)
+        ++live;
+  return live;
+}
+
+int ipcheck_refund_capacity(void)
+{
+  return IPCHECK_REFUND_TABLE_SIZE * IPCHECK_REFUND_BUCKET_DEPTH;
+}

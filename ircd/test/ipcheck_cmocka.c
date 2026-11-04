@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <string.h>
+#include <stdio.h>
 #include <cmocka.h>
 
 #include "config.h"
@@ -18,7 +19,9 @@
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_reply.h"
 #include "ircd_string.h"
+#include "numeric.h"
 #include "res.h"
 
 /* --- stubs ----------------------------------------------------------- */
@@ -89,6 +92,27 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   ++notices;
 }
 
+/* STATS ipcheck's lines: send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+ * pattern, ...), which uses only standard conversions. */
+#define MAX_REPLIES 32
+static char replies[MAX_REPLIES][512];
+static int nreplies;
+
+int send_reply(struct Client *to, int reply, ...)
+{
+  va_list vl;
+  const char *pattern;
+  (void)to;
+  assert_true(reply & SND_EXPLICIT);
+  assert_int_equal(reply & ~SND_EXPLICIT, RPL_STATSDEBUG);
+  va_start(vl, reply);
+  pattern = va_arg(vl, const char *);
+  if (nreplies < MAX_REPLIES)
+    vsnprintf(replies[nreplies++], sizeof(replies[0]), pattern, vl);
+  va_end(vl);
+  return 0;
+}
+
 /* --- helpers --------------------------------------------------------- */
 
 static struct Connection me_con;
@@ -116,6 +140,7 @@ static int setup(void **state)
   count_refusals = 1;
   refund_limit = 0;
   notices = 0;
+  nreplies = 0;
   me.cli_connect = &me_con;
   me_con.con_since = 1000;
   CurrentTime += 100000;        /* past the boot grace, and never back: an
@@ -220,6 +245,170 @@ static void test_invalid_address_registers(void **state)
   IPcheck_disconnect(&tc.cli);
 }
 
+/* --- the read-out (STATS ipcheck) ------------------------------------ */
+
+static void report(const char *param)
+{
+  struct Client to;
+  memset(&to, 0, sizeof(to));
+  nreplies = 0;
+  IPcheck_report(&to, NULL, (char *)param);
+}
+
+/* An address's line: its /32, the live count, the attempts, the age, the
+ * targets, and what the next connection would meet. */
+static void test_report_entry(void **state)
+{
+  (void)state;
+  assert_true(local_connect("192.0.2.50"));
+  assert_true(local_connect("192.0.2.50"));
+  CurrentTime += 5;
+  report("192.0.2.50");
+  assert_int_equal(nreplies, 1);
+  assert_string_equal(replies[0],
+    "I :192.0.2.50/32: on 2, attempts 2, last connect or drop 5 s ago, "
+    "free targets 10/10 (none kept), next connection accepted");
+}
+
+/* An address one connection from its limit says so, and for how long. */
+static void test_report_refusing(void **state)
+{
+  (void)state;
+  assert_true(local_connect("192.0.2.51"));
+  assert_true(local_connect("192.0.2.51"));
+  assert_true(local_connect("192.0.2.51"));
+  CurrentTime += 10;
+  report("192.0.2.51");
+  assert_int_equal(nreplies, 1);
+  assert_non_null(strstr(replies[0], "on 3, attempts 3, last connect or drop 10 s ago"));
+  assert_non_null(strstr(replies[0], "next connection refused for 31 s"));
+}
+
+/* The verdict is the check's own: whatever it says, the next connection
+ * gets, at every step of a chain and across the window's end. */
+static void test_verdict_matches_check(void **state)
+{
+  struct irc_in_addr addr;
+  struct IPcheckInfo info;
+  int step;
+  (void)state;
+  assert_true(ircd_aton(&addr, "192.0.2.52") > 0);
+  for (step = 0; step < 8; ++step) {
+    int predicted = IPcheck_lookup(&addr, &info) ? !info.would_refuse : 1;
+    assert_int_equal(local_connect("192.0.2.52"), predicted);
+    CurrentTime += (step == 4) ? clone_period + 1 : 3;
+  }
+}
+
+static void test_report_unknown_and_garbage(void **state)
+{
+  (void)state;
+  report("198.51.100.200");
+  assert_int_equal(nreplies, 1);
+  assert_string_equal(replies[0],
+    "I :198.51.100.200/32: no entry, the next connection starts a new count");
+  report("not-an-address");
+  assert_string_equal(replies[0], "I :IPcheck: \"not-an-address\" is not an address");
+  report("*");                   /* parses as ::, which no entry can hold */
+  assert_string_equal(replies[0], "I :IPcheck: \"*\" is not an address");
+  report("192.0.2.0/24");        /* a mask is not an address either */
+  assert_string_equal(replies[0], "I :IPcheck: \"192.0.2.0/24\" is not an address");
+}
+
+/* An IPv6 address shares its entry with its whole /64, and says so. */
+static void test_report_ipv6_key(void **state)
+{
+  (void)state;
+  assert_true(local_connect("2001:db8:1:2::5"));
+  report("2001:db8:1:2:ffff::9");
+  assert_int_equal(nreplies, 1);
+  assert_non_null(strstr(replies[0], "I :2001:db8:1:2::/64: on 1, attempts 1"));
+}
+
+/* Without an address: totals, the rule, the refund table, then the
+ * busiest entries, most connections first. */
+static void test_report_summary(void **state)
+{
+  int i;
+  unsigned int prev = 0xffffffff, on;
+  (void)state;
+  assert_true(local_connect("192.0.2.53"));
+  report(NULL);
+  assert_true(nreplies >= 4);
+  assert_non_null(strstr(replies[0], "I :IPcheck: "));
+  assert_non_null(strstr(replies[0], "I :IPcheck: entries "));
+  assert_non_null(strstr(replies[0], ", connections counted "));
+  assert_non_null(strstr(replies[1], "number 4 in a chain of gaps up to 40 s"));
+  assert_non_null(strstr(replies[1], "refusals counted"));
+  assert_string_equal(replies[2], "I :IPcheck: SASL refunds off (IPCHECK_SASL_REFUND 0)");
+  assert_true(nreplies - 3 <= 10);
+  for (i = 3; i < nreplies; ++i) {
+    const char *p = strstr(replies[i], ": on ");
+    assert_non_null(p);
+    assert_int_equal(sscanf(p, ": on %u,", &on), 1);
+    assert_true(on <= prev);
+    prev = on;
+  }
+}
+
+/* The verdict at the limit's edges is the check's own: a limit of 1 or
+ * less refuses every reconnect whatever the gap, and says so with no
+ * countdown (it used to count down to a refusal that would not end); a
+ * chain saturated at 255 meets a limit past that as the check meets it,
+ * which differs between the two refusal policies. */
+static void test_verdict_at_odd_limits(void **state)
+{
+  struct irc_in_addr addr;
+  struct IPcheckInfo info;
+  int i;
+  (void)state;
+
+  clone_limit = 1;
+  assert_true(local_connect("192.0.2.54"));
+  assert_true(ircd_aton(&addr, "192.0.2.54") > 0);
+  assert_true(IPcheck_lookup(&addr, &info));     /* inside the window */
+  assert_int_equal(info.would_refuse, IPCHECK_REFUSE_LIMIT);
+  CurrentTime += clone_period + 20;
+  assert_true(IPcheck_lookup(&addr, &info));     /* and after it */
+  assert_int_equal(info.would_refuse, IPCHECK_REFUSE_LIMIT);
+  assert_int_equal(info.retry_in, 0);
+  report("192.0.2.54");
+  assert_non_null(strstr(replies[0], "next connection refused at any gap (IPCHECK_CLONE_LIMIT 1)"));
+  assert_false(local_connect("192.0.2.54"));    /* and the check agrees */
+
+  clone_limit = 0;                               /* inside the window too */
+  assert_true(local_connect("192.0.2.55"));      /* a new entry is always let in */
+  assert_true(ircd_aton(&addr, "192.0.2.55") > 0);
+  assert_true(IPcheck_lookup(&addr, &info));
+  assert_int_equal(info.would_refuse, IPCHECK_REFUSE_LIMIT);
+  assert_false(local_connect("192.0.2.55"));
+
+  clone_limit = 1000;
+  for (i = 0; i < 300; ++i)
+    assert_true(local_connect("192.0.2.56"));
+  assert_true(ircd_aton(&addr, "192.0.2.56") > 0);
+  assert_true(IPcheck_lookup(&addr, &info));
+  assert_int_equal(info.attempts, 255);
+  clone_limit = 256;
+  assert_true(IPcheck_lookup(&addr, &info));     /* counted: 255 stays under 256 */
+  assert_int_equal(info.would_refuse, IPCHECK_REFUSE_NONE);
+  assert_true(local_connect("192.0.2.56"));
+  count_refusals = 0;                            /* not counted: 255 + 1 reaches it */
+  assert_true(IPcheck_lookup(&addr, &info));
+  assert_int_equal(info.would_refuse, IPCHECK_REFUSE_WINDOW);
+  assert_false(local_connect("192.0.2.56"));
+}
+
+/* With refunds on, the summary says how full the refund table is. */
+static void test_report_refunds_on(void **state)
+{
+  (void)state;
+  refund_limit = 10;
+  report(NULL);
+  assert_true(nreplies >= 3);
+  assert_non_null(strstr(replies[2], "I :IPcheck: SASL refunds 10 per account per 600 s; 0 of 4096 accounts hold a window"));
+}
+
 /* Whatever a ::-counted client does later finds no entry, the loopback's
  * least of all: `::` shares its upper 64 bits with `::1`, which is all the
  * registry matches an IPv6 key on.  IAuth re-keying it a second time, a
@@ -264,6 +453,14 @@ int main(void)
     cmocka_unit_test_setup(test_remote_overflow_keeps_count, setup),
     cmocka_unit_test_setup(test_invalid_address_registers, setup),
     cmocka_unit_test_setup(test_invalid_address_touches_no_entry, setup),
+    cmocka_unit_test_setup(test_report_entry, setup),
+    cmocka_unit_test_setup(test_report_refusing, setup),
+    cmocka_unit_test_setup(test_verdict_matches_check, setup),
+    cmocka_unit_test_setup(test_report_unknown_and_garbage, setup),
+    cmocka_unit_test_setup(test_report_ipv6_key, setup),
+    cmocka_unit_test_setup(test_report_summary, setup),
+    cmocka_unit_test_setup(test_report_refunds_on, setup),
+    cmocka_unit_test_setup(test_verdict_at_odd_limits, setup),
     cmocka_unit_test_setup(test_asserts_are_observed, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
