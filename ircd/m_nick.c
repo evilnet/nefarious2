@@ -323,7 +323,12 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return send_reply(cptr, ERR_NICKNAMEINUSE, nick);
     }
     ServerStats->is_ref++;
-    if (!find_except_conf(acptr, EFLAG_IPCHECK))
+    /* Whether the accept counted it is IsIPChecked(), not an except
+     * looked up now: the block may have gone in a REHASH (or a WEBIRC or
+     * IAuth address may match another), and IPcheck_connect_fail()
+     * asserts the flag (upstream 57aad727 fixed the same in the exit and
+     * registration paths). */
+    if (IsIPChecked(acptr))
       IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
@@ -889,7 +894,12 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return set_nick_name(cptr, sptr, nick, parc, parv, 0);
     }
     ServerStats->is_ref++;
-    if (!find_except_conf(acptr, EFLAG_IPCHECK))
+    /* Whether the accept counted it is IsIPChecked(), not an except
+     * looked up now: the block may have gone in a REHASH (or a WEBIRC or
+     * IAuth address may match another), and IPcheck_connect_fail()
+     * asserts the flag (upstream 57aad727 fixed the same in the exit and
+     * registration paths). */
+    if (IsIPChecked(acptr))
       IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
