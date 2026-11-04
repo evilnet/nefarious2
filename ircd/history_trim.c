@@ -114,6 +114,7 @@ enum htrim_hint_cf {
   HH_ML_CONTENT,
   HH_BY_TIME,
   HH_BY_OWNER,
+  HH_UNDECIDED,      /* messages: the ranges of undecided targets */
   HH_COUNT
 };
 
@@ -174,6 +175,7 @@ struct htrim_slice {
   char                 *bf_cursor;   /* the last messages key it processed */
   size_t                bf_cursor_len, bf_cursor_cap;
   size_t                bf_rows, bf_indexed, bf_aged, bf_unindexed;
+  size_t                bf_behind;   /* rows it indexed behind the age-out frontier */
   char                 *bf_min_bt;   /* the smallest by_time key it indexed */
   size_t                bf_min_bt_len, bf_min_bt_cap;
   /* Unindexable keys to name in the log once this slice commits. */
@@ -211,6 +213,7 @@ struct htrim_slice {
   char                 *ev_bt;       /* the last by_time key oldest-overall deleted */
   size_t                ev_bt_len, ev_bt_cap;
   int                   ev_exhausted; /* oldest-overall ran out of rows */
+  int                   ev_recount;   /* an owner walk from the floor ran out */
   uint64_t              floor_ms;    /* the newest ms oldest-overall deleted */
 
   /* A targets-sweep step, applied at commit. */
@@ -287,6 +290,9 @@ static struct {
    * this thread -- the bed, valgrind: 3-90 ms each). */
   struct htrim_hint  hint[HH_COUNT];
   unsigned char      hint_due[HH_COUNT];
+  unsigned char      hint_defer[HH_COUNT];  /* slices its flush waited on a busy CF */
+  uint64_t           hint_rearm[HH_COUNT];  /* after a dropped hint: the count the
+                                               cumulative trigger waits for */
   unsigned int       compact_min_rows;
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
@@ -625,6 +631,7 @@ static struct db_cf *hint_cf(int i)
   case HH_ML_CONTENT: return g.st.ml_content;
   case HH_BY_TIME:    return g.st.by_time;
   case HH_BY_OWNER:   return g.st.by_owner;
+  case HH_UNDECIDED:  return g.st.messages;
   default:            return NULL;
   }
 }
@@ -650,41 +657,88 @@ static void hint_free(struct htrim_hint *h)
 }
 
 static const char *const hint_names[HH_COUNT] = {
-  "messages", "msgid_index", "reply_index", "ml_content", "by_time", "by_owner"
+  "messages", "msgid_index", "reply_index", "ml_content", "by_time", "by_owner",
+  "messages (undecided targets)"
 };
+
+/** A flush the hints may not wait for: past this many slices on a busy
+ * CF the hint is dropped (its count kept: the next trigger hints again). */
+#define HTRIM_HINT_DEFER_MAX 60
+
+/** Whether a flush of @a cf would block the calling thread: RocksDB's
+ * FlushMemTable waits (WaitUntilFlushWouldNotStallWrites -- even with
+ * wait off, and allow_write_stall has no C setter) while one more
+ * immutable memtable would reach max_write_buffer_number (a flush of the
+ * CF already in flight) or one more L0 file would reach
+ * level0_slowdown_writes_trigger.  Read off the CF's properties and
+ * options; unknown values count as not busy. */
+static int cf_flush_would_wait(struct db_cf *cf)
+{
+  struct db_cf_stats cs;
+
+  memset(&cs, 0, sizeof cs);
+  if (db_cf_stats(g.st.env, cf, &cs) != DB_OK)
+    return 0;
+  return (cs.max_write_buffers && cs.imm_memtables + 1 >= cs.max_write_buffers)
+         || (cs.l0_slowdown_trigger && cs.l0_files + 1 >= cs.l0_slowdown_trigger);
+}
 
 /** Hint CF @a i's compaction over [smallest, largest ‖ 0x00) of what it
  * lost since its last hint, and start counting again.  A hint marks SST
- * files only, so the CF's memtable is flushed first (without waiting):
- * the tombstones still in it would otherwise sit there until it fills.
- * Returns at once (the flush and the compaction run in the background). */
-static void hint_flush(int i)
+ * files only, so the CF's memtable is flushed first, without waiting for
+ * the flush itself -- but RocksDB still blocks the call while the flush
+ * would stall writes, so a busy CF (cf_flush_would_wait) gets the
+ * suggestion alone, once, and the hint stays due for a later slice (up to
+ * HTRIM_HINT_DEFER_MAX).  A flush or suggestion that fails keeps the
+ * count, so the next trigger covers this range too. */
+static int hint_flush(int i)
 {
   struct htrim_hint *h = &g.hint[i];
   struct db_cf *cf = hint_cf(i);
   struct db_cf_stats cs;
-  uint64_t n = h->n;
   char *end;
 
   if (!h->n)
-    return;
-  h->n = 0;
-  if (!cf)
-    return;
+    return 0;
+  if (!cf) {
+    h->n = 0;
+    return 0;
+  }
+  end = (char *)MyMalloc(h->hi_len + 1);
+  memcpy(end, h->hi, h->hi_len);
+  end[h->hi_len] = '\0';
+  if (cf_flush_would_wait(cf)) {
+    if (!g.hint_defer[i]
+        && db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) != DB_OK)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history_trim: compaction hint failed: %s", last_err());
+    if (++g.hint_defer[i] < HTRIM_HINT_DEFER_MAX)
+      g.hint_due[i] = 1;                        /* the flush, a later slice */
+    else {                                      /* dropped; the count stays, and */
+      g.hint_defer[i] = 0;                      /* the trigger waits for more */
+      g.hint_rearm[i] = h->n + g.compact_min_rows;
+    }
+    MyFree(end);
+    return 0;
+  }
+  g.hint_defer[i] = 0;
   memset(&cs, 0, sizeof cs);
   db_cf_stats(g.st.env, cf, &cs);
   log_write(LS_SYSTEM, L_INFO, 0,
             "history: trim: compaction hint on %s: %llu keys deleted since the "
             "last hint, %zu deletes in its memtables; flushing", hint_names[i],
-            (unsigned long long)n, cs.mem_deletes + cs.imm_deletes);
-  end = (char *)MyMalloc(h->hi_len + 1);
-  memcpy(end, h->hi, h->hi_len);
-  end[h->hi_len] = '\0';
+            (unsigned long long)h->n, cs.mem_deletes + cs.imm_deletes);
   if (db_flush_cf(g.st.env, cf, 0) != DB_OK
       || db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) != DB_OK)
     log_write(LS_SYSTEM, L_WARNING, 0,
-              "history_trim: compaction hint failed: %s", last_err());
+              "history_trim: compaction hint failed (kept for the next): %s",
+              last_err());
+  else {
+    h->n = 0;
+    g.hint_rearm[i] = 0;
+  }
   MyFree(end);
+  return 1;
 }
 
 /** The CFs whose keys sort by time (by_time; msgid_index and ml_content
@@ -718,18 +772,20 @@ static int hints_pending(void)
   return 0;
 }
 
-/** Issue the first due hint, if any: one a slice.  @return 1 when one
- * was issued. */
+/** Issue the due hints: at most one flush a slice; a busy CF's hint
+ * (suggested alone, still due) does not hold up the others.  @return 1
+ * when any hint was due. */
 static int hint_issue_one(void)
 {
-  int i;
+  int i, any = 0;
   for (i = 0; i < HH_COUNT; i++)
     if (g.hint_due[i]) {
       g.hint_due[i] = 0;
-      hint_flush(i);
-      return 1;
+      any = 1;
+      if (hint_flush(i))
+        return 1;
     }
-  return 0;
+  return any;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1293,9 +1349,10 @@ static int target_has_rows(const void *name, size_t nlen)
 }
 
 /** A target whose emptiness check was undecided (a tombstone run past
- * HTRIM_EMPTY_SKIP_MAX): flush the messages memtable and hint its range
- * [name 0x00, name 0x01) for compaction, and have a later sweep (at the
- * next pass start) check it again.  Its key stays; nothing is reported. */
+ * HTRIM_EMPTY_SKIP_MAX): its range [name 0x00, name 0x01) is due a
+ * compaction hint (the messages memtable flushed first), and a later
+ * sweep (at the next pass start) checks it again.  Its key stays; nothing
+ * is reported. */
 static void target_undecided(const void *name, size_t nlen)
 {
   char lo[HTC_TARGET_MAX + 1], hi[HTC_TARGET_MAX + 1];
@@ -1307,11 +1364,10 @@ static void target_undecided(const void *name, size_t nlen)
   lo[nlen] = '\0';
   memcpy(hi, name, nlen);
   hi[nlen] = '\x01';
-  if (db_flush_cf(g.st.env, g.st.messages, 0) != DB_OK
-      || db_suggest_compact(g.st.env, g.st.messages, lo, nlen + 1, hi, nlen + 1) != DB_OK)
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "history_trim: compaction hint for an undecided target failed: %s",
-              last_err());
+  /* A due hint (one an engine slice, never in a caller's): the flush
+   * stays out of the cleanup and its cost. */
+  hint_add(&g.hint[HH_UNDECIDED], lo, nlen + 1, hi, nlen + 1, 1);
+  g.hint_due[HH_UNDECIDED] = 1;
 }
 
 /** Whether @a target (folded) is now empty and its targets key should go.
@@ -1512,7 +1568,13 @@ static void backfill_apply(struct htrim_slice *s)
 {
   unsigned int i;
 
+  /* Only the smallest key is noted: one row behind the frontier is kept
+   * by key, but more than one would leave the others unwalked (the pass
+   * deletes the noted one by key and resumes at the frontier) -- the next
+   * pass rewinds to the smallest instead, walking them all. */
   ageout_note_indexed(s->bf_min_bt, s->bf_min_bt_len);
+  if (s->bf_behind > 1)
+    g.late_over = 1;
   g.bf_rows += s->bf_rows;
   g.bf_indexed += s->bf_indexed;
   g.bf_aged += s->bf_aged;
@@ -1640,7 +1702,8 @@ static void hints_due(void)
   if (!g.compact_min_rows)
     return;
   for (i = 0; i < HH_COUNT; i++)
-    if (hint_time_ordered(i) && g.hint[i].n >= g.compact_min_rows)
+    if (hint_time_ordered(i) && g.hint[i].n >= g.compact_min_rows
+        && g.hint[i].n >= g.hint_rearm[i])
       g.hint_due[i] = 1;
 }
 
@@ -2009,6 +2072,8 @@ static int backfill_row(struct htrim_slice *s, const void *k, size_t kl,
   }
   if (rec.bytes)
     slice_add_delta(s, bo, bol, (int64_t)rec.bytes);
+  if (g.ao_lower_len && key_cmp(bt, (size_t)btl, g.ao_lower, g.ao_lower_len) < 0)
+    s->bf_behind++;
   if (!s->bf_min_bt_len
       || key_cmp(bt, (size_t)btl, s->bf_min_bt, s->bf_min_bt_len) < 0)
     bytes_set(&s->bf_min_bt, &s->bf_min_bt_len, &s->bf_min_bt_cap, bt, (size_t)btl);
@@ -2132,7 +2197,7 @@ static void drain_begin(uint64_t cap)
   /* The prefix-keyed CFs are hinted at a drain's end only: over what the
    * drain deleted, not over everything since the last drain. */
   for (i = 0; i < HH_COUNT; i++)
-    if (!hint_time_ordered(i))
+    if (!hint_time_ordered(i) && i != HH_UNDECIDED && !g.hint_due[i])
       g.hint[i].n = 0;
   log_write(LS_SYSTEM, L_WARNING, 0,
             "history: store at %llu of cap %llu bytes: evicting inside "
@@ -2186,7 +2251,7 @@ static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
   struct db_iter *it;
   uint64_t trimmed = 0;
   size_t ll;
-  int pl, rc;
+  int pl, rc, whole = 0;   /* whole: the walk starts at the owner's first key */
 
   pl = htc_bo_prefix(hi, sizeof hi, owner);           /* owner \0 */
   if (pl < 1)
@@ -2210,7 +2275,8 @@ static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
     if (fl && ll + fl <= sizeof lo) {
       memcpy(lo + ll, f, fl);
       ll += fl;
-    }
+    } else
+      whole = 1;
   }
   hi[pl - 1] = '\x01';
   it = db_iter_open_bounded(g.st.env, g.st.by_owner, NULL, lo, ll, hi, (size_t)pl);
@@ -2269,8 +2335,16 @@ static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
   db_iter_close(it);
   if (rc != DB_OK && rc != DB_NOTFOUND)
     return -1;
-  if (trimmed < trim)                                  /* the range ran out */
-    snprintf(s->ev_zero, sizeof s->ev_zero, "%s", owner);
+  /* The range ran out: from the owner's first key, it has no rows left
+   * (its total had drifted); from the floor (or a resumed walk), entries
+   * below the walk were not seen -- an orphan the boot scan counted --
+   * so the totals are counted again instead. */
+  if (trimmed < trim) {
+    if (whole)
+      snprintf(s->ev_zero, sizeof s->ev_zero, "%s", owner);
+    else
+      s->ev_recount = 1;
+  }
   s->ev_owner[0] = '\0';
   s->ev_bo_len = 0;
   return 0;
@@ -2381,7 +2455,7 @@ static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
     snprintf(done, sizeof done, "%s", g.ev_owner);
     if (have > share) {
       rc = evict_owner(s, g.ev_owner, have - share, 1);
-      if (rc || s->ev_zero[0])         /* one drifted owner a slice */
+      if (rc || s->ev_zero[0] || s->ev_recount)   /* one drifted owner a slice */
         return rc < 0 ? -1 : 0;
     }
   }
@@ -2398,7 +2472,7 @@ static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
     if (slice_staged(s) && htrim_slice_expired(s))
       return 0;
     rc = evict_owner(s, st->owner, st->trim, 0);
-    if (rc || s->ev_zero[0])
+    if (rc || s->ev_zero[0] || s->ev_recount)
       return rc < 0 ? -1 : 0;
   }
 
@@ -2416,7 +2490,7 @@ static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
 static void acct_recount(void)
 {
   log_write(LS_SYSTEM, L_WARNING, 0,
-            "history: eviction: the time index ran out of rows with %llu bytes "
+            "history: eviction: an index walk ran out of rows with %llu bytes "
             "still accounted; counting the owner totals again",
             (unsigned long long)htc_acct_total(g.acct));
   htc_acct_clear(g.acct);
@@ -2449,7 +2523,7 @@ static void evict_apply(struct htrim_slice *s)
   /* Out of rows -- from the live floor, below which nothing lives, or
    * from the first key -- with the total still above the target: the
    * totals are counted again (no walk from the first key). */
-  if (s->ev_exhausted)
+  if (s->ev_exhausted || s->ev_recount)
     recount = 1;
   else if (s->ev_bt_len) {
     size_t n = s->ev_bt_len + 1;

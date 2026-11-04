@@ -106,11 +106,14 @@
  * key deleted since its last hint.  The time-ordered ones (by_time,
  * msgid, ml_content) are hinted once compact_min_rows keys have gone
  * (any path); every one at a drain's end (the prefix-keyed ones over
- * what that drain deleted).  A hint flushes the CF's memtable (without
- * waiting), then calls db_suggest_compact over [smallest, largest ‖ 0x00);
- * the flush switches the memtable on the calling thread, so the engine's
- * slices issue at most one hint each (a cleanup-only slice takes the
- * rest) and a caller's slice none.
+ * what that drain deleted).  A hint flushes the CF's memtable, then calls
+ * db_suggest_compact over [smallest, largest ‖ 0x00).  The flush does not
+ * wait for the flush job, but switches the memtable on the calling
+ * thread and blocks while it would stall writes, so the engine's slices
+ * issue at most one hint each (a cleanup-only slice takes the rest), a
+ * caller's slice none, and a CF with a flush in flight or L0 near its
+ * slowdown trigger gets the suggestion alone, its flush left due for a
+ * later slice.  An undecided target's range is hinted the same way.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
