@@ -43,6 +43,7 @@ CMOCKA_TESTPROGS = \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
+	ipcheck_cmocka \
 	fakelag_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
@@ -89,6 +90,7 @@ DEP_SRC = \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
+	ipcheck_cmocka.c \
 	fakelag_cmocka.c \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
@@ -238,6 +240,19 @@ register_throttle_cmocka: $(REGISTER_THROTTLE_CMOCKA_OBJS)
 # No test_stub.o: the module is pure by design (no log_write, no ircd deps).
 ipcheck_refund_test.o: ../ipcheck_refund.c ../../include/ipcheck_refund.h
 	${CC} ${CFLAGS} ${CPPFLAGS} -DIPCHECK_REFUND_TABLE_BITS=0 -DIPCHECK_REFUND_BUCKET_DEPTH=2 -c -o $@ ../ipcheck_refund.c
+
+# IPcheck tests - the real IPcheck.c, with assert() routed to CMocka's
+# mock_assert() (mock_assert.h) so a test can see an assert fire; the ircd
+# services it calls (features, timers, the clock, the log, the registration
+# NOTICE) are stubbed in ipcheck_cmocka.c itself, test_stub.o's debug()
+# included, which would print every Debug() line.
+ipcheck_test.o: ../IPcheck.c ../../include/IPcheck.h mock_assert.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -include ${srcdir}/mock_assert.h -c -o $@ ../IPcheck.c
+
+IPCHECK_CMOCKA_OBJS = ipcheck_cmocka.o ipcheck_test.o \
+	../ipcheck_refund.o ../ircd_alloc.o ../ircd_string.o ../match.o
+ipcheck_cmocka: $(IPCHECK_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IPCHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 IPCHECK_REFUND_CMOCKA_OBJS = ipcheck_refund_cmocka.o ipcheck_refund_test.o
 ipcheck_refund_cmocka: $(IPCHECK_REFUND_CMOCKA_OBJS)
