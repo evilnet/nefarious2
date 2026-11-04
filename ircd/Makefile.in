@@ -115,6 +115,7 @@ IRCD_SRC = \
 	hash.c \
 	history.c \
 	history_trim_codec.c \
+	history_trim.c \
 	history_record.c \
 	ipcheck_refund.c \
 	redact_index.c \
@@ -637,6 +638,11 @@ history.o: history.c ../config.h ../include/history.h ../include/ircd_alloc.h \
   ../include/s_debug.h
 history_trim_codec.o: history_trim_codec.c ../config.h \
   ../include/history_trim_codec.h ../include/db_casefold.h ../include/res.h
+history_trim.o: history_trim.c ../config.h ../include/history_trim.h \
+  ../include/history_trim_codec.h ../include/history_stamp.h \
+  ../include/redact_index.h ../include/db_cursor.h ../include/db_env.h \
+  ../include/db_txn.h ../include/db_types.h ../include/ircd_alloc.h \
+  ../include/ircd_log.h
 ircd.o: ircd.c ../config.h ../include/ircd.h ../include/IPcheck.h \
   ../include/class.h ../include/client.h ../include/crule.h \
   ../include/destruct_event.h ../include/hash.h ../include/ircd_alloc.h \

@@ -40,6 +40,7 @@ CMOCKA_TESTPROGS = \
 	crule_cmocka \
 	history_cmocka \
 	history_trim_codec_cmocka \
+	history_trim_cmocka \
 	chathistory_presence_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
@@ -90,6 +91,7 @@ DEP_SRC = \
 	crule_cmocka.c \
 	history_cmocka.c \
 	history_trim_codec_cmocka.c \
+	history_trim_cmocka.c \
 	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
@@ -226,6 +228,19 @@ history_cmocka: $(HISTORY_CMOCKA_OBJS)
 HISTORY_TRIM_CODEC_CMOCKA_OBJS = history_trim_codec_cmocka.o test_stub.o ../history_trim_codec.o ../db_casefold.o ../ircd_string.o fake_db.o
 history_trim_codec_cmocka: $(HISTORY_TRIM_CODEC_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_TRIM_CODEC_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# history_trim tests - the trim engine (index staging, the sliced boot
+# accounting scan, budgeted slices, the one delete function, touched-target
+# cleanup) against the in-memory storage fake: fake_db.o is the whole db_*
+# backend here.  Links the real ../history_trim.o and its codec
+# (../history_trim_codec.o, ../redact_index.o for the redact_index key,
+# ../db_casefold.o + ../ircd_string.o for name folding, ../ircd_alloc.o
+# for MyMalloc); test_stub.o supplies log_write.  No RocksDB.
+HISTORY_TRIM_CMOCKA_OBJS = history_trim_cmocka.o test_stub.o ../history_trim.o \
+	../history_trim_codec.o ../redact_index.o ../db_casefold.o ../ircd_string.o \
+	../ircd_alloc.o fake_db.o
+history_trim_cmocka: $(HISTORY_TRIM_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_TRIM_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # chathistory_presence tests - links the REAL chathistory_presence.o (built
 # by the top-level `make` before this runs, same as ../ircd_string.o et al)
