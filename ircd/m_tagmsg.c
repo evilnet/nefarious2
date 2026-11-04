@@ -84,6 +84,7 @@
 #include "client.h"
 #include "hash.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -139,6 +140,7 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   char fallback_msgid[64];
   const char *msgid;
   char sender[HISTORY_SENDER_LEN];
+  char owner[HTC_OWNER_MAX];
   const char *account;
 
   if (!history_is_available())
@@ -184,11 +186,13 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+  /* The row's trim owner: the client whose account it carries. */
+  history_owner_of(owner, sizeof(owner), sptr);
 
   /* Store locally or forward to STORE server */
   if (feature_bool(FEAT_CHATHISTORY_STORE)) {
     history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
-                          account, HISTORY_TAGMSG, "", client_tags);
+                          account, HISTORY_TAGMSG, "", client_tags, owner);
   } else if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
     /* Bracket + sentinel-escape the tags for transparent forwarding
      * (split back out in process_write_forward). */

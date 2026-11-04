@@ -38,6 +38,7 @@
 #include "client.h"
 #include "hash.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "redact_index.h"   /* redaction catch-up query (design B) */
 /* m_redact.c (handlers.h cannot be included here -- forward_history_write prototype nit) */
 extern void redact_apply_row(struct Client *src, const char *target, const char *msgid,
@@ -3263,16 +3264,18 @@ static void append_write_chunk_data(struct WriteChunkEntry *chunk, const char *b
  * @param[in] account Sender's account or "*".
  * @param[in] type_char Type character (P, N, T).
  * @param[in] content Message content.
+ * @param[in] origin Name of the server that sent the CH W / CH WB.
  */
 static void process_write_forward(const char *target, const char *msgid,
                                   const char *timestamp, const char *sender,
                                   const char *account, char type_char,
-                                  char *content)
+                                  char *content, const char *origin)
 {
   struct Channel *chptr;
   enum HistoryMessageType type;
   int has_local_users;
   char *client_tags = NULL;
+  char owner[HTC_OWNER_MAX];
 
   /* Only process channels */
   if (!IsChannelName(target))
@@ -3377,13 +3380,21 @@ static void process_write_forward(const char *target, const char *msgid,
   /* Check if this is a new channel for Layer 1 advertisement */
   int is_new_channel = (history_has_channel(target) == 0);
 
+  /* The row's trim owner: the account the forwarder named, else the
+   * forwarding server (the sender's own IP and server are not on the
+   * wire).  An account too long for an owner key falls back the same
+   * way. */
+  if (htc_owner_key(owner, sizeof(owner), account, NULL, origin) < 0
+      && htc_owner_key(owner, sizeof(owner), NULL, NULL, origin) < 0)
+    ircd_strncpy(owner, HTC_OWNER_NONE, sizeof(owner));
+
   /* Store the message.  original_target is NULL on the federation
    * write-forward path — the federated source doesn't (yet) carry that
    * field, so replay's direction-reconstruction fallback handles PMs
    * stored via this path. */
   if (history_store_message(msgid, timestamp, target, NULL, sender,
                             (account[0] == '*') ? NULL : account,
-                            type, content, client_tags) == 0) {
+                            type, content, client_tags, owner) == 0) {
     /* Layer 1: Broadcast CH A + if this is the first message in the channel */
     if (is_new_channel) {
       broadcast_channel_advertisement(target);
@@ -7211,7 +7222,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
            target, msgid, cli_name(sptr)));
 
     process_write_forward(target, msgid, timestamp, sender, account,
-                          type_str[0], content);
+                          type_str[0], content, cli_name(sptr));
   }
   else if (strcmp(subcmd, "WB") == 0) {
     /* Write Forward (base64): WB <target> <msgid> <ts> <sender> <account> <type> [+] :<b64>
@@ -7329,7 +7340,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       if (ch_base64_decode(chunk->b64_data, chunk->b64_len, &decoded, &decoded_len)) {
         Debug((DEBUG_DEBUG, "CH WB: Decoded %zu bytes for %s", decoded_len, target));
         process_write_forward(chunk->target, chunk->msgid, chunk->timestamp,
-                              chunk->sender, chunk->account, type_char, decoded);
+                              chunk->sender, chunk->account, type_char, decoded,
+                              cli_name(sptr));
         MyFree(decoded);
       } else {
         Debug((DEBUG_DEBUG, "CH WB: Base64 decode failed for %s", target));

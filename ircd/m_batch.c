@@ -62,6 +62,7 @@
 #include "class.h"
 #include "bouncer_session.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "ml_content.h"
 #include "paste_listener.h"
 #include "webpush.h"
@@ -1751,8 +1752,12 @@ process_multiline_batch(struct Client *sptr)
      * and bypassed the PM consent gates entirely. */
     {
       char pm_pairkey[PM_PAIRKEY_BUFSIZE];
+      char owner[HTC_OWNER_MAX];
       const char *store_target = NULL;
       int dm_gap = 0;
+
+      /* The row's trim owner: the sender whose account it carries. */
+      history_owner_of(owner, sizeof(owner), sptr);
 
       if (is_channel) {
         if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr))
@@ -1793,7 +1798,7 @@ process_multiline_batch(struct Client *sptr)
         history_store_message(batch_base_msgid, timestamp, pm_pairkey,
                               cli_name(acptr), sender_mask,
                               cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                              HISTORY_GAP, "", NULL);
+                              HISTORY_GAP, "", NULL, owner);
       } else if (store_target) {
         int store_result = history_store_multiline(batch_base_msgid, timestamp,
                             store_target,
@@ -1801,7 +1806,8 @@ process_multiline_batch(struct Client *sptr)
                             sender_mask,
                             cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
                             history_content, content_len,
-                            batch_paste_secret[0] ? batch_paste_secret : NULL);
+                            batch_paste_secret[0] ? batch_paste_secret : NULL,
+                            owner);
         (void)store_result;
         log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_store_multiline returned %d for msgid=%s target=%s",
                   store_result, batch_base_msgid, store_target);
@@ -2646,8 +2652,12 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
      * and bypassed the PM consent gates entirely. */
     {
       char pm_pairkey[PM_PAIRKEY_BUFSIZE];
+      char owner[HTC_OWNER_MAX];
       const char *store_target = NULL;
       int dm_gap = 0;
+
+      /* The row's trim owner: the sender whose account it carries. */
+      history_owner_of(owner, sizeof(owner), sptr);
 
       if (is_channel) {
         if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr))
@@ -2688,7 +2698,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         history_store_message(batch_base_msgid, timestamp, pm_pairkey,
                               cli_name(acptr), sender_mask,
                               cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                              HISTORY_GAP, "", NULL);
+                              HISTORY_GAP, "", NULL, owner);
       } else if (store_target) {
         int store_result = history_store_multiline(batch_base_msgid, timestamp,
                             store_target,
@@ -2696,7 +2706,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
                             sender_mask,
                             cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
                             history_content, content_len,
-                            s2s_paste_secret[0] ? s2s_paste_secret : NULL);
+                            s2s_paste_secret[0] ? s2s_paste_secret : NULL,
+                            owner);
         (void)store_result;
       }
     }

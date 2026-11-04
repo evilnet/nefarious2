@@ -52,6 +52,7 @@
 #include "client.h"
 #include "hash.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
 #include "ircd_features.h"
@@ -173,6 +174,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
                                    const char *client_tags)
 {
   char sender[HISTORY_SENDER_LEN];
+  char owner[HTC_OWNER_MAX];
   const char *account;
   int has_local_interest;
 
@@ -242,6 +244,8 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+  /* The rows' trim owner: the sender whose account they carry. */
+  history_owner_of(owner, sizeof(owner), sptr);
 
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
@@ -266,7 +270,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
     history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
-                          account, HISTORY_GAP, "", NULL);
+                          account, HISTORY_GAP, "", NULL, owner);
     return;
   }
 
@@ -275,7 +279,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
 
   /* Store in database */
   if (history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
-                            account, type, text, client_tags) == 0) {
+                            account, type, text, client_tags, owner) == 0) {
     /* Layer 1: Broadcast CH A + if this is the first message in the channel */
     if (is_new_channel) {
       broadcast_channel_advertisement(chptr->chname);
@@ -343,6 +347,7 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
 {
   char sender[HISTORY_SENDER_LEN];
   char target[PM_PAIRKEY_BUFSIZE];  /* identity pair-key */
+  char owner[HTC_OWNER_MAX];
   const char *account;
   const char *nick1, *nick2;
 
@@ -423,20 +428,22 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+  /* The rows' trim owner: the sender whose account they carry. */
+  history_owner_of(owner, sizeof(owner), sptr);
 
   /* Check opt-out — store gap marker if either party opted out
    * (LMDB path: at least one party authed, so we have an anchor for
    * the gap marker and a queryable party who can see it). */
   if (has_pm_optout(sptr) || has_pm_optout(acptr)) {
     history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                          account, HISTORY_GAP, "", NULL);
+                          account, HISTORY_GAP, "", NULL, owner);
     return;
   }
 
   /* Check +Y no-storage — store gap marker */
   if (IsNoStorage(sptr)) {
     history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                          account, HISTORY_GAP, "", NULL);
+                          account, HISTORY_GAP, "", NULL, owner);
     return;
   }
 
@@ -491,7 +498,8 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
       pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
                            "%s%s", pos ? ";" : "", client_tags);
     history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                          account, type, text, pos ? tagbuf : client_tags);
+                          account, type, text, pos ? tagbuf : client_tags,
+                          owner);
   }
 }
 #endif /* USE_ROCKSDB */

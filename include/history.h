@@ -211,13 +211,18 @@ extern void history_shutdown(void);
  * @param[in] account Sender's account name (may be NULL).
  * @param[in] type Message type.
  * @param[in] content Message content (may be NULL for some types).
- * @return 0 on success, -1 on error.
+ * @param[in] client_tags Client-only tags to keep with the row (may be NULL).
+ * @param[in] owner The row's trim owner key (history_owner_of, or
+ *   htc_owner_key for a sender known only off the wire); NULL = "-".
+ * @return 0 on success, -1 on error (including a row the trim index
+ *   cannot hold).
  */
 extern int history_store_message(const char *msgid, const char *timestamp,
                                   const char *target, const char *original_target,
                                   const char *sender, const char *account,
                                   enum HistoryMessageType type,
-                                  const char *content, const char *client_tags);
+                                  const char *content, const char *client_tags,
+                                  const char *owner);
 
 /** Store a multiline message with content in the unified content store.
  * Content is stored separately in ml_content, and the history entry stores
@@ -230,13 +235,32 @@ extern int history_store_message(const char *msgid, const char *timestamp,
  * @param[in] content      Multiline content (\x1F-separated lines).
  * @param[in] content_len  Length of content.
  * @param[in] paste_secret Paste secret for URL access (NULL to skip).
+ * @param[in] owner The row's trim owner key (as history_store_message).
  * @return 0 on success, -1 on error.
  */
 extern int history_store_multiline(const char *msgid, const char *timestamp,
                                    const char *target, const char *original_target,
                                    const char *sender, const char *account,
                                    const char *content,
-                                   size_t content_len, const char *paste_secret);
+                                   size_t content_len, const char *paste_secret,
+                                   const char *owner);
+
+/** The trim owner key of a row @a sptr sends: "-" for NULL; a server
+ * (or this server) -> "s:<server name>"; a user -> htc_owner_key(its
+ * account, its IP, its server's name): "a:<account>", else "i:<IP
+ * bucket>", else "s:<its server>".  Never a nick or a session id.
+ * @return @a buf (always NUL-terminated; "-" if the key does not fit). */
+extern const char *history_owner_of(char *buf, size_t size, struct Client *sptr);
+
+/** Arm the trim slice timer (main thread, after history_init). */
+extern void history_trim_start(uint64_t newest_row_ms);
+
+/** One trim slice under the live features; re-arms the 1 s slice timer
+ * while work remains.  @a pass_start marks the start of a pass. */
+extern void history_trim_tick(int pass_start);
+
+/** Make the next 1 s tick a pass start. */
+extern void history_trim_kick(void);
 
 #ifdef USE_ROCKSDB
 struct db_env;

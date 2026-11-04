@@ -66,6 +66,7 @@
 #include "userload.h"
 #include "watch.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "chathistory_presence.h"
 #include "sasl_auth.h"
 #include "session_markread.h"
@@ -223,6 +224,7 @@ static void store_quit_events(struct Client *sptr, const char *comment,
   char fallback_msgid[64];
   const char *msgid;
   char sender[HISTORY_SENDER_LEN];
+  char owner[HTC_OWNER_MAX];
   const char *account;
 
   if (!history_is_available())
@@ -282,6 +284,8 @@ static void store_quit_events(struct Client *sptr, const char *comment,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+  /* The row's trim owner: the client whose account it carries. */
+  history_owner_of(owner, sizeof(owner), sptr);
 
   /* Store QUIT event for each channel the user is on.
    * Same msgid is used across all channels — it's a single event.
@@ -293,7 +297,7 @@ static void store_quit_events(struct Client *sptr, const char *comment,
 
     history_store_message(msgid, timestamp, member->channel->chname, NULL,
                           sender, account, HISTORY_QUIT,
-                          comment ? comment : "", NULL);
+                          comment ? comment : "", NULL, owner);
   }
 }
 #endif /* USE_ROCKSDB */

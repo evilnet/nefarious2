@@ -50,12 +50,15 @@ extern void ml_content_shutdown(struct db_env *env);
  * @param[in] content      Multiline content (\x1F-separated lines).
  * @param[in] content_len  Length of content.
  * @param[in] paste_secret Paste secret string (NULL if paste not enabled).
+ * @param[out] staged_len  Receives the content value's staged length
+ *                         (compressed when it compressed; 0 on error).
+ *                         May be NULL.
  * @return 0 on success, -1 on error.
  */
 extern int ml_content_store(struct db_writebatch *wb, const char *msgid,
                             const char *sender, const char *target,
                             const char *content, size_t content_len,
-                            const char *paste_secret);
+                            const char *paste_secret, size_t *staged_len);
 
 /** Retrieve multiline content by msgid.
  * Reads the env's current state (no snapshot).

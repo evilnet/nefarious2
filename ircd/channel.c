@@ -56,6 +56,7 @@
 #include "sys.h"
 #include "whowas.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -98,6 +99,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   char timestamp[32];
   char msgid[64];
   char sender[HISTORY_SENDER_LEN];
+  char owner[HTC_OWNER_MAX];
   const char *account;
   const char *use_msgid;
 
@@ -161,10 +163,12 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+  /* The row's trim owner: the client whose account it carries. */
+  history_owner_of(owner, sizeof(owner), sptr);
 
   /* Store in database */
   history_store_message(use_msgid, timestamp, chptr->chname, NULL, sender,
-                        account, type, text ? text : "", NULL);
+                        account, type, text ? text : "", NULL, owner);
 }
 #endif /* USE_ROCKSDB */
 

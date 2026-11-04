@@ -39,6 +39,7 @@
 #include "numnicks.h"
 #include "send.h"
 #include "history.h"
+#include "history_trim_codec.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h> /* for atoi() */
@@ -59,6 +60,7 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   char fallback_msgid[64];
   const char *msgid;
   char sender[HISTORY_SENDER_LEN];
+  char owner[HTC_OWNER_MAX];
   const char *account;
 
   if (!history_is_available())
@@ -103,10 +105,12 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+  /* The row's trim owner: the client whose account it carries. */
+  history_owner_of(owner, sizeof(owner), sptr);
 
   /* Store in database */
   history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
-                        account, HISTORY_TOPIC, topic ? topic : "", NULL);
+                        account, HISTORY_TOPIC, topic ? topic : "", NULL, owner);
 }
 #endif /* USE_ROCKSDB */
 

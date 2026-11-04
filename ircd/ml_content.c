@@ -126,10 +126,12 @@ static int ml_build_value(char *buf, size_t bufsize,
 int ml_content_store(struct db_writebatch *wb, const char *msgid,
                      const char *sender, const char *target,
                      const char *content, size_t content_len,
-                     const char *paste_secret)
+                     const char *paste_secret, size_t *staged_len)
 {
   int rc;
 
+  if (staged_len)
+    *staged_len = 0;
   if (!ml_available)
     return -1;
 
@@ -177,6 +179,11 @@ int ml_content_store(struct db_writebatch *wb, const char *msgid,
               "ml_content: writebatch_put(content) failed: %s", db_strerror(rc));
     goto store_done;
   }
+  /* The content value as staged (compressed when it compressed): what the
+   * row's trim accounting charges for the blob, the same figure the
+   * backfill reads back as the ml_content value's length. */
+  if (staged_len)
+    *staged_len = put_len;
 
   /* Store paste secret mapping if provided */
   if (paste_secret && paste_secret[0]) {
@@ -194,6 +201,8 @@ int ml_content_store(struct db_writebatch *wb, const char *msgid,
   }
 
 store_done:
+  if (rc != DB_OK && staged_len)
+    *staged_len = 0;
   if (valbuf != valbuf_stack) MyFree(valbuf);
 #ifdef USE_ZSTD
   if (compressed != comp_stack) MyFree(compressed);

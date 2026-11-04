@@ -36,6 +36,7 @@
 #include "handlers.h"
 #include "hash.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -321,6 +322,7 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       char timestamp[32];
       char sender[HISTORY_SENDER_LEN];
       char redact_content[512];
+      char owner[HTC_OWNER_MAX];
 
       history_format_ms(timestamp, sizeof(timestamp), time_ms);
       ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
@@ -336,7 +338,8 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       history_store_message(redact_msgid, timestamp, target, NULL, sender,
                             cli_user(sptr)->account[0] ? cli_user(sptr)->account : "",
-                            HISTORY_REDACT, redact_content, NULL);
+                            HISTORY_REDACT, redact_content, NULL,
+                            history_owner_of(owner, sizeof(owner), sptr));
 
       /* Write-forward to STORE servers if we're non-STORE.  The reason
        * is client-supplied: sentinel-escape it for the CH W payload. */
@@ -412,6 +415,7 @@ void redact_apply_row(struct Client *src, const char *target,
     char timestamp[32];
     char sender[HISTORY_SENDER_LEN];
     char redact_content[512];
+    char owner[HTC_OWNER_MAX];
 
     ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
                   (unsigned long long)(time_ms / 1000),
@@ -433,11 +437,20 @@ void redact_apply_row(struct Client *src, const char *target,
       ircd_snprintf(0, redact_content, sizeof(redact_content),
                     "%s", msgid);
 
+    /* The row's trim owner: the redacter.  A catch-up row names it only
+     * off the wire (@a account_str, its sender's server unknown here):
+     * its account, else "-"; otherwise @a src, whose account it carries. */
+    if (account_str) {
+      if (htc_owner_key(owner, sizeof(owner), account_str, NULL, NULL) < 0)
+        ircd_strncpy(owner, HTC_OWNER_NONE, sizeof(owner));
+    } else
+      history_owner_of(owner, sizeof(owner), src);
+
     history_store_message(redact_msgid, timestamp, target, NULL, sender,
                           account_str ? account_str
                           : ((cli_user(src) && cli_user(src)->account[0])
                              ? cli_user(src)->account : ""),
-                          HISTORY_REDACT, redact_content, NULL);
+                          HISTORY_REDACT, redact_content, NULL, owner);
   }
 
   /* Set msgid for live channel broadcast */

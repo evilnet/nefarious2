@@ -802,6 +802,11 @@ static void history_purge_callback(struct Event* ev)
    * This has its own internal interval check. */
   history_maintenance_tick();
 
+  /* A trim pass starts on every maintenance tick, retention or not:
+   * age-out simply has no work at retention 0 (the slice timer carries
+   * any backlog on at 1 s). */
+  history_trim_tick(1);
+
   retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
   if (retention_days <= 0)
     return; /* Retention disabled */
@@ -1279,6 +1284,7 @@ int main(int argc, char **argv) {
     struct db_init_arg web_arg  = { NULL, 0 };
     pthread_t hist_th, meta_th, web_th;
     int hist_started = 0, meta_started = 0, web_started = 0;
+    uint64_t newest_row_ms = 0;   /* 0 = no history store */
 
     if (feature_bool(FEAT_CHATHISTORY_STORE)) {
       /* Map size and zstd compression must be configured before
@@ -1319,8 +1325,13 @@ int main(int argc, char **argv) {
       if (hist_arg.rc != 0)
         log_write(LS_SYSTEM, L_WARNING, 0,
                   "Failed to initialize chathistory database, feature disabled");
-      else
+      else {
         chathistory_init_callbacks();
+        /* One read of the newest stored row serves the trimmer's start
+         * and the presence boot-close below. */
+        newest_row_ms = history_newest_activity_ms();
+        history_trim_start(newest_row_ms);
+      }
     }
     if (feature_bool(FEAT_CAP_draft_metadata_2) && meta_arg.rc != 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
@@ -1334,7 +1345,7 @@ int main(int argc, char **argv) {
      * completes.  Also runs the boot-close sweep for stale open
      * intervals.  Non-fatal: without the env, session-anchored
      * presence remains usable in-memory. */
-    presence_set_boot_alive_hint(history_newest_activity_ms());
+    presence_set_boot_alive_hint(newest_row_ms);
     if (presence_init() != 0 && feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)) {
       /* Strict presence with no account store hides every authenticated
        * user's history behind a zero record.  Fail loud and fail open. */

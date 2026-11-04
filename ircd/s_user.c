@@ -32,6 +32,7 @@
 #include "bouncer_session.h"
 #include "bouncer_rebind_auth.h"
 #include "history.h"
+#include "history_trim_codec.h"
 #include "capab.h"
 #include "IPcheck.h"
 #include "channel.h"
@@ -1614,8 +1615,12 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
           struct Membership *chan;
           char timestamp[32];
           char old_sender[HISTORY_SENDER_LEN];
+          char owner[HTC_OWNER_MAX];
           const char *account = (cli_user(sptr) && cli_user(sptr)->account[0])
                                 ? cli_user(sptr)->account : NULL;
+
+          /* The rows' trim owner: the client whose account they carry. */
+          history_owner_of(owner, sizeof(owner), sptr);
 
           ircd_snprintf(0, old_sender, sizeof(old_sender), "%s!%s@%s",
                         cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->host);
@@ -1628,7 +1633,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
               continue;
             history_store_message(nick_msgid, timestamp, chan->channel->chname,
                                   NULL, old_sender, account, HISTORY_NICK,
-                                  nick, NULL);
+                                  nick, NULL, owner);
           }
         }
 #endif
