@@ -31,16 +31,38 @@
  * index rows count through the accounting rule like a store's (positive
  * pending deltas), so a backfill racing the boot scan counts each row once.
  *
- * Age-out keeps where its walk resumes (ao_lower, in memory only): the
- * successor of the last by_time key a committed slice deleted, or the
- * cutoff bound once a walk reached it (so a pass that finds nothing to
- * delete does not walk the head either).  Every slice opens its iterator
- * there, so the tombstones the walk left behind it are never walked again -- on RocksDB a seek from the first key walks
- * every one not yet compacted away (the bed, 2026-11-04: ~3000 of them,
- * 316-433 ms in one slice).  Behind ao_lower every row is gone except
- * those indexed there since (a late store, a backfill after a retention
- * rise): the smallest such key is kept (ao_late), and a pass start sends
- * the walk back to it.  A restart begins at the first key, once.
+ * Age-out keeps where its walk resumes (ao_lower): the successor of the
+ * last by_time key a committed slice deleted, or the cutoff bound once a
+ * walk reached it (so a pass that finds nothing to delete does not walk
+ * the head either).  Every slice opens its iterator there, so the
+ * tombstones the walk left behind it are never walked again -- on RocksDB
+ * a seek from the first key walks every one not yet compacted away (the
+ * bed, 2026-11-04: ~3000 of them, 316-433 ms in one slice).  Behind
+ * ao_lower every row is gone except those indexed there since (a late
+ * store, a backfill after a retention rise): the smallest such key is
+ * kept (ao_late), and a pass start sends the walk back to it.
+ *
+ * The resume point is also persisted (HTRIM_META_AGEOUT_RESUME; its
+ * in-memory mirror is ao_saved) so a restart does not walk the head from
+ * the first key (the bed: 791 ms, nothing deleted).  The stored value is
+ * never past a live row below the cutoff: each age-out slice's batch puts
+ * its new resume point -- unless a late row is pending (ao_late), which
+ * the stored value already covers -- and a store or backfill batch that
+ * indexes a row behind the stored value puts that row's key instead.  So
+ * ao_saved <= ao_lower, and <= every row indexed behind ao_lower.
+ *
+ * Eviction (the cap) keeps, for the drain under way: the owner step in
+ * progress (ev_owner) and the last by_owner key it deleted (ev_bo), so a
+ * step that spans slices resumes past its own tombstones; and where the
+ * oldest-overall walk resumes (ev_lower; at a drain's start the age-out
+ * resume point, below which every row is gone).  A row indexed behind
+ * either sends that walk back to it.  Both are in memory: a restart
+ * starts a new drain, if the store is still over high.
+ *
+ * Compaction hints: every delete staged on a tracked column family
+ * (slice_del) widens that slice's [smallest, largest] key and count; a
+ * commit folds them into the engine's, which hints a CF once its count
+ * reaches compact_min_rows, and every CF at a drain's end.
  */
 #include "config.h"
 
@@ -67,11 +89,30 @@
  * cleanup does; the rest carry over to the next slice. */
 #define HTRIM_CLEANUP_CHECKS 16
 /** Phase slots (every enum htrim_phase value). */
-#define HTRIM_PH_SLOTS ((int)HTRIM_PH_INCARNATION + 1)
+#define HTRIM_PH_SLOTS ((int)HTRIM_PH_TSWEEP + 1)
 /** Unindexable keys a walk names in the log (then only counts). */
 #define HTRIM_BF_LOG_KEYS 5
 /** A logged key's printable form, quotes excluded. */
 #define HTRIM_KEY_PREVIEW 128
+
+/** The column families whose deletes the compaction hints track. */
+enum htrim_hint_cf {
+  HH_MESSAGES,
+  HH_MSGID,
+  HH_REPLY,
+  HH_ML_CONTENT,
+  HH_BY_TIME,
+  HH_BY_OWNER,
+  HH_COUNT
+};
+
+/** The keys deleted from one column family since its last hint (or, in a
+ * slice, by that slice): the smallest, the largest, and how many. */
+struct htrim_hint {
+  char    *lo, *hi;
+  size_t   lo_len, lo_cap, hi_len, hi_cap;
+  uint64_t n;
+};
 
 /** One pending accounting delta: a by_owner key copy in the slice's arena. */
 struct htrim_pending {
@@ -122,6 +163,41 @@ struct htrim_slice {
   char                  bf_bad[HTRIM_BF_LOG_KEYS][HTRIM_KEY_PREVIEW];
   size_t                bf_bad_klen[HTRIM_BF_LOG_KEYS];
   unsigned int          bf_nbad;
+
+  /* Where the age-out walk resumes once this slice commits (0 = as it
+   * was), and whether this batch stores it too. */
+  char                 *ao_next;
+  size_t                ao_next_len, ao_next_cap;
+  int                   ao_saved_put;
+
+  /* What the slice deleted from each tracked CF (compaction hints). */
+  struct htrim_hint     hint[HH_COUNT];
+  size_t                idx_only;    /* by_owner entries removed alone (no row) */
+
+  /* An eviction step, applied at commit. */
+  int                   ev_step;
+  uint64_t              ev_cap;      /* the cap and the low watermark in bytes */
+  uint64_t              ev_target;   /*   this slice planned under */
+  uint64_t              ev_freed;    /* bytes the slice's deletes take off */
+  char                  ev_owner[HTC_OWNER_MAX];  /* the owner step in progress
+                                                     at the end ("" = none) */
+  char                 *ev_bo;       /* ... and the last by_owner key it deleted */
+  size_t                ev_bo_len, ev_bo_cap;
+  char                  ev_zero[HTC_OWNER_MAX];   /* an owner walked to the end of
+                                                     its range: it holds 0 */
+  char                 *ev_bt;       /* the last by_time key oldest-overall deleted */
+  size_t                ev_bt_len, ev_bt_cap;
+  int                   ev_exhausted; /* oldest-overall ran out of rows: 1 from a
+                                         bound, 2 from the first key */
+  uint64_t              floor_ms;    /* the newest ms oldest-overall deleted */
+
+  /* A targets-sweep step, applied at commit. */
+  int                   ts_step;
+  int                   ts_finished; /* ... reached the end of the targets CF */
+  char                 *ts_cursor;   /* the last targets key it checked */
+  size_t                ts_cursor_len, ts_cursor_cap;
+  char                (*ts_names)[HTC_TARGET_MAX];   /* the empty targets it removes */
+  size_t                ts_n, ts_cap;
 };
 
 static struct {
@@ -153,6 +229,29 @@ static struct {
   size_t             ao_lower_len, ao_lower_cap;   /* 0 = the first key */
   char              *ao_late;         /* the smallest by_time key indexed behind */
   size_t             ao_late_len, ao_late_cap;     /* ao_lower since; 0 = none */
+  char              *ao_saved;        /* what HTRIM_META_AGEOUT_RESUME holds; */
+  size_t             ao_saved_len, ao_saved_cap;   /* 0 = none (the first key) */
+
+  /* The cap: the drain under way (in memory only). */
+  int                draining;
+  uint64_t           floor_ms;        /* the coverage floor, 0 = none */
+  char               ev_owner[HTC_OWNER_MAX];      /* the owner step in progress */
+  char              *ev_bo;           /* the last by_owner key that step deleted, */
+  size_t             ev_bo_len, ev_bo_cap;         /* 0 = from the owner's first key */
+  int                ev_lower_set;    /* 0: oldest-overall starts at the age-out point */
+  char              *ev_lower;        /* where oldest-overall resumes (inclusive), */
+  size_t             ev_lower_len, ev_lower_cap;   /* 0 = the first key */
+  uint64_t           drain_owner, drain_oldest;    /* rows this drain deleted */
+
+  /* The targets sweep. */
+  int                ts_armed;        /* a pass is due (each start, each drain's end) */
+  int                ts_running;      /* a pass is under way */
+  char              *ts_cursor;       /* the last targets key it checked */
+  size_t             ts_cursor_len, ts_cursor_cap;
+
+  /* Compaction hints: what each tracked CF lost since its last hint. */
+  struct htrim_hint  hint[HH_COUNT];
+  unsigned int       compact_min_rows;
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
 
@@ -173,6 +272,9 @@ static struct {
   int                tsweep_wanted;   /* a targets cleanup could not finish */
   struct htrim_stats stats;
 } g;
+
+/** The coverage callback: outside g, so a restart keeps it. */
+static htrim_coverage_fn coverage_cb;
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -237,6 +339,22 @@ static int meta_get(const char *key, struct db_val *v)
   return rc == DB_NOTFOUND ? 0 : -1;
 }
 
+/** A decimal meta value (at most 20 digits) as a number.
+ * @return 0, or -1 when @a v is not one. */
+static int parse_u64(const struct db_val *v, uint64_t *out)
+{
+  char buf[24];
+
+  if (!v->base || !v->len || v->len >= sizeof buf)
+    return -1;
+  memcpy(buf, v->base, v->len);
+  buf[v->len] = '\0';
+  if (strspn(buf, "0123456789") != v->len)
+    return -1;
+  *out = strtoull(buf, NULL, 10);
+  return 0;
+}
+
 /** Load the backfill's state and the alive stamp from the meta rows.
  *  - A cursor row means an unfinished walk, whatever the done marker says
  *    (a re-run whose marker delete did not commit still resumes).
@@ -249,7 +367,7 @@ static int meta_get(const char *key, struct db_val *v)
 static void meta_load(void)
 {
   struct db_val v = { NULL, 0 };
-  char buf[24];
+  uint64_t n;
   int rc;
 
   rc = meta_get(HTRIM_META_BACKFILL_CURSOR, &v);
@@ -267,11 +385,21 @@ static void meta_load(void)
     db_val_free(&v);
   }
 
-  if (meta_get(HTRIM_META_ALIVE, &v) > 0 && v.len && v.len < sizeof buf) {
-    memcpy(buf, v.base, v.len);
-    buf[v.len] = '\0';
-    if (strspn(buf, "0123456789") == v.len)
-      g.alive_ms = strtoull(buf, NULL, 10);
+  if (meta_get(HTRIM_META_ALIVE, &v) > 0 && parse_u64(&v, &n) == 0)
+    g.alive_ms = n;
+  db_val_free(&v);
+
+  /* The coverage floor (unreadable = none: the coverage claimed is then
+   * the configured one, as before any eviction). */
+  if (meta_get(HTRIM_META_FLOOR, &v) > 0 && parse_u64(&v, &n) == 0)
+    g.floor_ms = n;
+  db_val_free(&v);
+
+  /* Where age-out resumes; a missing or unreadable row (or one no by_time
+   * key bound could be) means the first key, as before it was stored. */
+  if (meta_get(HTRIM_META_AGEOUT_RESUME, &v) > 0 && v.len && v.len <= HTC_BT_KEY_MAX + 1) {
+    bytes_set(&g.ao_lower, &g.ao_lower_len, &g.ao_lower_cap, v.base, v.len);
+    bytes_set(&g.ao_saved, &g.ao_saved_len, &g.ao_saved_cap, v.base, v.len);
   }
   db_val_free(&v);
 }
@@ -320,15 +448,112 @@ static void acct_apply(const char *owner, const void *bo_key, size_t bo_klen,
   htc_acct_add(g.acct, owner, delta);
 }
 
+/** Whether a by_time key @a bt about to be indexed sorts behind the
+ * stored age-out resume point: its batch must store @a bt there instead
+ * (a restart would otherwise resume past it). */
+static int behind_saved(const void *bt, size_t btl)
+{
+  return g.st.meta && g.ao_saved_len && bt && btl
+         && key_cmp(bt, btl, g.ao_saved, g.ao_saved_len) < 0;
+}
+
 /** A by_time key was just indexed (committed): if it sorts behind where
- * the age-out walk resumes, the next pass must go back for it. */
+ * the age-out walk resumes, the next pass must go back for it (and its
+ * batch stored it as the resume point, when behind that too); if behind
+ * where the drain's oldest-overall walk resumes, that walk goes back. */
 static void ageout_note_indexed(const void *bt, size_t btl)
 {
-  if (!g.ao_lower_len || !bt || !btl
-      || key_cmp(bt, btl, g.ao_lower, g.ao_lower_len) >= 0)
+  if (!bt || !btl)
+    return;
+  if (behind_saved(bt, btl))
+    bytes_set(&g.ao_saved, &g.ao_saved_len, &g.ao_saved_cap, bt, btl);
+  if (g.ev_lower_set && g.ev_lower_len
+      && key_cmp(bt, btl, g.ev_lower, g.ev_lower_len) < 0)
+    bytes_set(&g.ev_lower, &g.ev_lower_len, &g.ev_lower_cap, bt, btl);
+  if (!g.ao_lower_len || key_cmp(bt, btl, g.ao_lower, g.ao_lower_len) >= 0)
     return;                                     /* ahead of the walk */
   if (!g.ao_late_len || key_cmp(bt, btl, g.ao_late, g.ao_late_len) < 0)
     bytes_set(&g.ao_late, &g.ao_late_len, &g.ao_late_cap, bt, btl);
+}
+
+/* ------------------------------------------------------------------ */
+/* Compaction hints                                                    */
+/* ------------------------------------------------------------------ */
+
+static int hint_slot(const struct db_cf *cf)
+{
+  if (!cf)
+    return -1;
+  if (cf == g.st.messages)   return HH_MESSAGES;
+  if (cf == g.st.msgid)      return HH_MSGID;
+  if (cf == g.st.reply)      return HH_REPLY;
+  if (cf == g.st.ml_content) return HH_ML_CONTENT;
+  if (cf == g.st.by_time)    return HH_BY_TIME;
+  if (cf == g.st.by_owner)   return HH_BY_OWNER;
+  return -1;
+}
+
+static struct db_cf *hint_cf(int i)
+{
+  switch (i) {
+  case HH_MESSAGES:   return g.st.messages;
+  case HH_MSGID:      return g.st.msgid;
+  case HH_REPLY:      return g.st.reply;
+  case HH_ML_CONTENT: return g.st.ml_content;
+  case HH_BY_TIME:    return g.st.by_time;
+  case HH_BY_OWNER:   return g.st.by_owner;
+  default:            return NULL;
+  }
+}
+
+/** Widen @a h by @a n keys whose smallest is @a lo and largest @a hi. */
+static void hint_add(struct htrim_hint *h, const void *lo, size_t lol,
+                     const void *hi, size_t hil, uint64_t n)
+{
+  if (!n)
+    return;
+  if (!h->n || key_cmp(lo, lol, h->lo, h->lo_len) < 0)
+    bytes_set(&h->lo, &h->lo_len, &h->lo_cap, lo, lol);
+  if (!h->n || key_cmp(hi, hil, h->hi, h->hi_len) > 0)
+    bytes_set(&h->hi, &h->hi_len, &h->hi_cap, hi, hil);
+  h->n += n;
+}
+
+static void hint_free(struct htrim_hint *h)
+{
+  MyFree(h->lo);
+  MyFree(h->hi);
+  memset(h, 0, sizeof *h);
+}
+
+/** Hint CF @a i's compaction over [smallest, largest ‖ 0x00) of what it
+ * lost since its last hint, and start counting again.  Returns at once
+ * (RocksDB marks the files; compaction runs in the background). */
+static void hint_flush(int i)
+{
+  struct htrim_hint *h = &g.hint[i];
+  struct db_cf *cf = hint_cf(i);
+  char *end;
+
+  if (!h->n)
+    return;
+  h->n = 0;
+  if (!cf)
+    return;
+  end = (char *)MyMalloc(h->hi_len + 1);
+  memcpy(end, h->hi, h->hi_len);
+  end[h->hi_len] = '\0';
+  if (db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) != DB_OK)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history_trim: compaction hint failed: %s", last_err());
+  MyFree(end);
+}
+
+static void hints_flush_all(void)
+{
+  int i;
+  for (i = 0; i < HH_COUNT; i++)
+    hint_flush(i);
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,18 +582,29 @@ int htrim_init(const struct htrim_store *st, htrim_parse_fn parse,
   /* The boot accounting scan always starts from the first by_owner key;
    * the backfill resumes where the meta rows say it stopped. */
   meta_load();
+  /* Once per start: the carried emptiness checks and the "cleanup could
+   * not finish" flag of the last run are gone with its memory. */
+  g.ts_armed = 1;
   g.inited = 1;
   return 0;
 }
 
 void htrim_shutdown(void)
 {
+  int i;
+
   htc_acct_free(g.acct);
   MyFree(g.cursor);
   MyFree(g.bf_cursor);
   MyFree(g.ao_lower);
   MyFree(g.ao_late);
+  MyFree(g.ao_saved);
+  MyFree(g.ev_bo);
+  MyFree(g.ev_lower);
+  MyFree(g.ts_cursor);
   MyFree(g.carry);
+  for (i = 0; i < HH_COUNT; i++)
+    hint_free(&g.hint[i]);
   memset(&g, 0, sizeof g);
 }
 
@@ -415,7 +651,16 @@ int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
   btl = htc_bt_key(bt, sizeof bt, ms, target, msgid);
   if (btl < 0)
     return -1;
-  return stage_index(wb, bt, (size_t)btl, rec, bo_key, bo_size, bo_klen) == 0 ? 0 : -1;
+  if (stage_index(wb, bt, (size_t)btl, rec, bo_key, bo_size, bo_klen) != 0)
+    return -1;
+  /* Behind the stored age-out resume point (a late row): this batch moves
+   * it back to the row, so a restart before the next pass still walks it
+   * (htrim_note_stored moves the mirror once the batch committed). */
+  if (behind_saved(bt, (size_t)btl)
+      && db_writebatch_put(wb, g.st.meta, HTRIM_META_AGEOUT_RESUME,
+                           strlen(HTRIM_META_AGEOUT_RESUME), bt, (size_t)btl) != DB_OK)
+    return -1;
+  return 0;
 }
 
 void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
@@ -429,6 +674,11 @@ void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
   acct_apply(owner, bo_key, bo_klen, (int64_t)bytes);
   if (htc_bo_split(bo_key, bo_klen, NULL, 0, &bt, &btl) == 0)
     ageout_note_indexed(bt, btl);
+  /* A row of the owner step in progress, behind where its walk resumes:
+   * the walk starts again from the owner's first key. */
+  if (g.ev_owner[0] && g.ev_bo_len && owner && strcmp(owner, g.ev_owner) == 0
+      && key_cmp(bo_key, bo_klen, g.ev_bo, g.ev_bo_len) < 0)
+    g.ev_bo_len = 0;
 }
 
 int htrim_acct_loaded(void)
@@ -530,6 +780,8 @@ const struct htc_acct *htrim_acct(void)
 
 static void slice_free(struct htrim_slice *s)
 {
+  int i;
+
   if (!s)
     return;
   db_writebatch_destroy(s->wb);
@@ -537,8 +789,15 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->pend);
   MyFree(s->touch);
   MyFree(s->ao_cursor);
+  MyFree(s->ao_next);
   MyFree(s->bf_cursor);
   MyFree(s->bf_min_bt);
+  MyFree(s->ev_bo);
+  MyFree(s->ev_bt);
+  MyFree(s->ts_cursor);
+  MyFree(s->ts_names);
+  for (i = 0; i < HH_COUNT; i++)
+    hint_free(&s->hint[i]);
   MyFree(s);
 }
 
@@ -559,10 +818,11 @@ struct htrim_slice *htrim_slice_begin(unsigned int budget_ms)
   return s;
 }
 
-/** Rows a slice has staged: deletes and (backfill) index rows. */
+/** Rows a slice has staged: deletes, (backfill) index rows, by_owner
+ * entries removed alone, and (sweep) targets keys. */
 static size_t slice_staged(const struct htrim_slice *s)
 {
-  return (size_t)s->rows + s->bf_indexed;
+  return (size_t)s->rows + s->bf_indexed + s->idx_only + s->ts_n;
 }
 
 int htrim_slice_expired(struct htrim_slice *s)
@@ -642,10 +902,15 @@ static void slice_touch(struct htrim_slice *s, const char *target, const char *t
 static int slice_del(struct htrim_slice *s, struct db_cf *cf,
                      const void *k, size_t kl)
 {
+  int h;
+
   if (db_writebatch_del(s->wb, cf, k, kl) != DB_OK) {
     s->broken = 1;
     return -1;
   }
+  h = hint_slot(cf);
+  if (h >= 0)
+    hint_add(&s->hint[h], k, kl, k, kl, 1);
   return 0;
 }
 
@@ -797,27 +1062,51 @@ static int touch_cmp(const void *a, const void *b)
                 ((const struct htrim_touch *)b)->target);
 }
 
+/** Whether the messages CF holds a row of the target whose targets key is
+ * @a name (@a nlen bytes, folded): the LAST key of [name 0x00, name 0x01),
+ * never the first -- a drain deletes from the head, so a seek from the
+ * head walks every tombstone it left so far; the tail is live.  RocksDB's
+ * SeekToLast honours iterate_upper_bound (9.10 options.h: "SeekToLast()
+ * will position the iterator at the first key smaller than
+ * iterate_upper_bound") and the lower bound ends the backward walk
+ * (pinned on both backends by db_api_cmocka's test_bounded_iter_seek_last).
+ * A name too long for a stored target reads as live (it is left alone).
+ * @return 1 rows, 0 none, -1 the check failed. */
+static int target_has_rows(const void *name, size_t nlen)
+{
+  char lo[HTC_TARGET_MAX + 1], hi[HTC_TARGET_MAX + 1];
+  struct db_iter *it;
+  int rc;
+
+  if (!nlen || nlen + 1 > sizeof lo)
+    return 1;
+  memcpy(lo, name, nlen);
+  lo[nlen] = '\0';
+  memcpy(hi, name, nlen);
+  hi[nlen] = '\x01';
+  it = db_iter_open_bounded(g.st.env, g.st.messages, NULL, lo, nlen + 1, hi, nlen + 1);
+  if (!it)
+    return -1;
+  rc = db_iter_seek_last(it);
+  db_iter_close(it);
+  if (rc == DB_NOTFOUND)
+    return 0;
+  return rc == DB_OK ? 1 : -1;
+}
+
 /** Whether @a target (folded) is now empty and its targets key should go.
  * @return 1 empty, 0 not (or no targets key), -1 the check failed.
  *
  * Skips without touching the messages CF when the targets stamp is newer
  * than the newest row deleted from it (a newer message row exists).
- * Otherwise it seeks the LAST key of [fold(t) 0x00, fold(t) 0x01), never
- * the first: the stamp counts message rows only, so a target whose newest
- * rows are JOIN/PART/QUIT/... comes here on every slice of its drain, and
- * a drain deletes from the head -- a seek from the head walks every
- * tombstone it left so far, the tail is live.  RocksDB's SeekToLast honours
- * iterate_upper_bound (9.10 options.h: "SeekToLast() will position the
- * iterator at the first key smaller than iterate_upper_bound") and the
- * lower bound ends the backward walk (pinned on both backends by
- * db_api_cmocka's test_bounded_iter_seek_last).  A truly empty target pays
- * one walk over its tombstones, once. */
+ * Otherwise it seeks the target's live tail (target_has_rows): the stamp
+ * counts message rows only, so a target whose newest rows are
+ * JOIN/PART/QUIT/... comes here on every slice of its drain.  A truly
+ * empty target pays one walk over its tombstones, once. */
 static int target_emptied(const char *target, const char *newest,
                           char *tkey, size_t tsize, size_t *tklen, int *seeked)
 {
-  char upper[HTC_MSG_KEY_MAX];
   struct db_val cur = { NULL, 0 };
-  struct db_iter *it;
   int kl, newer, rc;
 
   *seeked = 0;
@@ -836,18 +1125,15 @@ static int target_emptied(const char *target, const char *newest,
   if (newer)
     return 0;
 
-  memcpy(upper, tkey, (size_t)kl);
-  upper[kl - 1] = '\x01';                              /* [fold(t) 0x00, fold(t) 0x01) */
   *seeked = 1;
-  it = db_iter_open_bounded(g.st.env, g.st.messages, NULL, tkey, (size_t)kl,
-                            upper, (size_t)kl);
-  if (!it)
-    return -1;
-  rc = db_iter_seek_last(it);
-  db_iter_close(it);
-  if (rc == DB_NOTFOUND)
-    return 1;
-  return rc == DB_OK ? 0 : -1;
+  rc = target_has_rows(tkey, *tklen);
+  return rc < 0 ? -1 : !rc;
+}
+
+/** Arm a targets sweep pass (it runs once the accounting is loaded). */
+static void tsweep_arm(void)
+{
+  g.ts_armed = 1;
 }
 
 /** A cleanup that could not finish: its targets keys may outlive their
@@ -892,7 +1178,9 @@ static int cand_cmp(const void *a, const void *b)
  * the targets after that carry over, still in order, so every touched
  * target is checked within a few slices -- exactly, since a row stored
  * in between makes it non-empty and the check finds it.  An unbudgeted
- * slice checks everything. */
+ * slice (the burst-loss prune, inside BURST) checks its own touched
+ * targets, all of them, and leaves the carried ones to the budgeted
+ * slices: they are not its work, and could be many. */
 static void cleanup_touched(struct htrim_slice *s)
 {
   struct db_writebatch *wb = NULL;
@@ -901,19 +1189,21 @@ static void cleanup_touched(struct htrim_slice *s)
   const char **names;
   size_t nw, i, j, n = 0, seeks = 0;
   size_t limit = s->budget_us ? HTRIM_CLEANUP_CHECKS : (size_t)-1;
+  size_t ncarry = s->budget_us ? g.ncarry : 0;
   int stop = 0;
 
-  nw = g.ncarry + s->ntouch;
+  nw = ncarry + s->ntouch;
   if (!nw)
     return;
   if (s->ntouch)
     qsort(s->touch, s->ntouch, sizeof *s->touch, touch_cmp);
   w = (struct htrim_touch *)MyMalloc(nw * sizeof *w);
-  if (g.ncarry)
-    memcpy(w, g.carry, g.ncarry * sizeof *w);
+  if (ncarry)
+    memcpy(w, g.carry, ncarry * sizeof *w);
   if (s->ntouch)
-    memcpy(w + g.ncarry, s->touch, s->ntouch * sizeof *w);
-  g.ncarry = 0;                                 /* refilled below */
+    memcpy(w + ncarry, s->touch, s->ntouch * sizeof *w);
+  if (ncarry)
+    g.ncarry = 0;                               /* refilled below */
 
   byname = (struct htrim_touch **)MyMalloc(nw * sizeof *byname);
   dead = (unsigned char *)MyCalloc(nw, 1);
@@ -1012,30 +1302,84 @@ static void backfill_apply(struct htrim_slice *s)
   }
 }
 
-/** A committed age-out step: the walk resumes at the successor of the
- * last key it deleted (that key ‖ 0x00); a walk that reached the cutoff
- * closes the pass and resumes at the cutoff bound itself -- every key
- * below it is gone, so no later pass walks their tombstones again, not
- * even a pass that finds nothing to delete. */
-static void ageout_apply(struct htrim_slice *s)
+/** Where a committed age-out step leaves the walk (s->ao_next): the
+ * successor of the last key it deleted (that key ‖ 0x00); a walk that
+ * reached the cutoff resumes at the cutoff bound itself -- every key below
+ * it is gone, so no later pass walks their tombstones again, not even a
+ * pass that finds nothing to delete -- unless the resume point is past it
+ * already (a retention rise never moves it back).  The same bytes go in
+ * the slice's batch as HTRIM_META_AGEOUT_RESUME, unless a late row is
+ * pending: the stored point already covers it, and must keep doing so
+ * until the pass start that sends the walk back to it. */
+static int ageout_next(struct htrim_slice *s)
 {
   if (s->ao_finished && s->ao_bounded) {
-    if (!g.ao_lower_len
-        || key_cmp(s->ao_upper, sizeof s->ao_upper, g.ao_lower, g.ao_lower_len) > 0)
-      bytes_set(&g.ao_lower, &g.ao_lower_len, &g.ao_lower_cap,
-                s->ao_upper, sizeof s->ao_upper);
+    if (g.ao_lower_len
+        && key_cmp(s->ao_upper, sizeof s->ao_upper, g.ao_lower, g.ao_lower_len) <= 0)
+      return 0;                                 /* already there, or past it */
+    bytes_set(&s->ao_next, &s->ao_next_len, &s->ao_next_cap,
+              s->ao_upper, sizeof s->ao_upper);
   } else if (s->ao_cursor_len) {
     size_t n = s->ao_cursor_len + 1;
-    if (n > g.ao_lower_cap) {
-      g.ao_lower_cap = n;
-      g.ao_lower = (char *)MyRealloc(g.ao_lower, n);
+    if (n > s->ao_next_cap) {
+      s->ao_next_cap = n;
+      s->ao_next = (char *)MyRealloc(s->ao_next, n);
     }
-    memcpy(g.ao_lower, s->ao_cursor, s->ao_cursor_len);
-    g.ao_lower[s->ao_cursor_len] = '\0';
-    g.ao_lower_len = n;
+    memcpy(s->ao_next, s->ao_cursor, s->ao_cursor_len);
+    s->ao_next[s->ao_cursor_len] = '\0';
+    s->ao_next_len = n;
+  } else
+    return 0;
+  if (!g.st.meta || g.ao_late_len)
+    return 0;
+  if (db_writebatch_put(s->wb, g.st.meta, HTRIM_META_AGEOUT_RESUME,
+                        strlen(HTRIM_META_AGEOUT_RESUME),
+                        s->ao_next, s->ao_next_len) != DB_OK) {
+    s->broken = 1;
+    return -1;
+  }
+  s->ao_saved_put = 1;
+  return 0;
+}
+
+/** A committed age-out step: the walk resumes where ageout_next said,
+ * and so does the next start when the batch stored it. */
+static void ageout_apply(struct htrim_slice *s)
+{
+  if (s->ao_next_len) {
+    bytes_set(&g.ao_lower, &g.ao_lower_len, &g.ao_lower_cap,
+              s->ao_next, s->ao_next_len);
+    if (s->ao_saved_put)
+      bytes_set(&g.ao_saved, &g.ao_saved_len, &g.ao_saved_cap,
+                s->ao_next, s->ao_next_len);
   }
   if (s->ao_finished)
     g.ao_pending = 0;
+}
+
+static void evict_apply(struct htrim_slice *s);
+static void tsweep_apply(struct htrim_slice *s);
+
+/** A committed slice's deletes widen the engine's hint ranges; a CF that
+ * lost compact_min_rows keys since its last hint is hinted now. */
+static void hints_apply(struct htrim_slice *s)
+{
+  int i;
+
+  for (i = 0; i < HH_COUNT; i++)
+    hint_add(&g.hint[i], s->hint[i].lo, s->hint[i].lo_len,
+             s->hint[i].hi, s->hint[i].hi_len, s->hint[i].n);
+}
+
+static void hints_due(void)
+{
+  int i;
+
+  if (!g.compact_min_rows)
+    return;
+  for (i = 0; i < HH_COUNT; i++)
+    if (g.hint[i].n >= g.compact_min_rows)
+      hint_flush(i);
 }
 
 /** Fold one committed slice's after-staging cost into the EWMA. */
@@ -1087,10 +1431,16 @@ int htrim_slice_commit(struct htrim_slice *s)
   }
   for (i = 0; i < HTRIM_PATH_COUNT; i++)
     g.stats.deleted[i] += s->counts[i];
+  hints_apply(s);           /* before a drain's end hints everything */
   if (s->ao_step)
     ageout_apply(s);
   if (s->bf_step)
     backfill_apply(s);
+  if (s->ev_step)
+    evict_apply(s);
+  if (s->ts_step)
+    tsweep_apply(s);
+  hints_due();
   cleanup_touched(s);
 
   now = g.clock();
@@ -1193,7 +1543,7 @@ static int phase_ageout(struct htrim_slice *s, const struct htrim_params *p)
     g.stats.oldest_seen_ms = 0;                 /* nothing past the cutoff */
   if (rc == DB_NOTFOUND)
     s->ao_finished = 1;
-  return 0;
+  return ageout_next(s);
 }
 
 /** The boot accounting scan: walk by_owner from the successor of the
@@ -1395,6 +1745,15 @@ static int phase_backfill(struct htrim_slice *s, const struct htrim_params *p)
     s->bf_finished = 1;
   if (!g.st.meta)
     return 0;
+  /* A row indexed behind the stored age-out resume point moves it back
+   * (backfill_apply moves the mirror through ageout_note_indexed). */
+  if (behind_saved(s->bf_min_bt, s->bf_min_bt_len)
+      && db_writebatch_put(s->wb, g.st.meta, HTRIM_META_AGEOUT_RESUME,
+                           strlen(HTRIM_META_AGEOUT_RESUME),
+                           s->bf_min_bt, s->bf_min_bt_len) != DB_OK) {
+    s->broken = 1;
+    return -1;
+  }
   if (s->bf_finished) {
     if (db_writebatch_put(s->wb, g.st.meta, HTRIM_META_BACKFILL_DONE,
                           strlen(HTRIM_META_BACKFILL_DONE), "done", 4) != DB_OK
@@ -1412,6 +1771,474 @@ static int phase_backfill(struct htrim_slice *s, const struct htrim_params *p)
   return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* The cap                                                             */
+/* ------------------------------------------------------------------ */
+
+static void plan_params(const struct htrim_params *p, struct htc_plan_params *pp)
+{
+  memset(pp, 0, sizeof *pp);
+  pp->cap = p->cap_bytes;
+  pp->high_pct = p->high_pct;
+  pp->low_pct = p->low_pct;
+  pp->quota_on = p->quota_on;
+  pp->share_pct = p->share_pct;
+  pp->draining = g.draining;
+}
+
+/** cap * high% in bytes, by the planner's watermark rule. */
+static uint64_t evict_high_bytes(const struct htrim_params *p)
+{
+  int high = p->high_pct, low = p->low_pct;
+
+  htc_plan_sanitize(&high, &low);
+  return p->cap_bytes * (uint64_t)high / 100;
+}
+
+static void drain_forget(void)
+{
+  g.ev_owner[0] = '\0';
+  g.ev_bo_len = 0;
+  g.ev_lower_set = 0;
+  g.ev_lower_len = 0;
+}
+
+static void drain_begin(uint64_t cap)
+{
+  g.draining = 1;
+  drain_forget();
+  g.drain_owner = g.drain_oldest = 0;
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: store at %llu of cap %llu bytes: evicting inside "
+            "retention, over-share owners first",
+            (unsigned long long)htc_acct_total(g.acct), (unsigned long long)cap);
+}
+
+/** A drain's end: log what it took, hint compaction over every CF it
+ * deleted from, and sweep the targets it may have emptied out of order. */
+static void drain_end(uint64_t cap)
+{
+  g.draining = 0;
+  drain_forget();
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "history: eviction drain complete: %llu rows (%llu owner share, "
+            "%llu oldest overall), store %llu of cap %llu bytes",
+            (unsigned long long)(g.drain_owner + g.drain_oldest),
+            (unsigned long long)g.drain_owner, (unsigned long long)g.drain_oldest,
+            (unsigned long long)htc_acct_total(g.acct), (unsigned long long)cap);
+  hints_flush_all();
+  tsweep_arm();
+}
+
+/** Remove by_owner entry @a k alone -- it names no row this owner holds
+ * (its by_time row is gone, unreadable, or another owner's) -- with its
+ * size @a size off its owner's total, through the accounting rule. */
+static int evict_entry_only(struct htrim_slice *s, const void *k, size_t kl,
+                            uint32_t size)
+{
+  if (slice_del(s, g.st.by_owner, k, kl) < 0)
+    return -1;
+  if (size)
+    slice_add_delta(s, (const char *)k, kl, -(int64_t)size);
+  s->idx_only++;
+  return 0;
+}
+
+/** One owner step: @a owner's own oldest rows -- a by_owner walk over
+ * [owner 0x00, owner 0x01), or, resuming the step in progress, from the
+ * successor of the last key it deleted -- THE delete each (counted),
+ * until @a trim bytes are gone or the budget is spent.  An entry whose
+ * by_time row is missing, unreadable or names another owner is removed
+ * alone.  A range that runs out first leaves the owner with no rows: it
+ * holds 0 once the slice commits (its total had drifted).
+ * @return 0 the step is done, 1 the budget stopped it (still in progress),
+ *         -1 a read failed or the slice is poisoned. */
+static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
+                       int resume)
+{
+  char lo[HTC_BO_KEY_MAX + 1], hi[HTC_OWNER_MAX + 1];
+  struct db_iter *it;
+  uint64_t trimmed = 0;
+  size_t ll;
+  int pl, rc;
+
+  pl = htc_bo_prefix(hi, sizeof hi, owner);           /* owner \0 */
+  if (pl < 1)
+    return 0;
+  if (resume && g.ev_bo_len && g.ev_bo_len < sizeof lo
+      && strcmp(g.ev_owner, owner) == 0) {
+    memcpy(lo, g.ev_bo, g.ev_bo_len);
+    lo[g.ev_bo_len] = '\0';                           /* past its last delete */
+    ll = g.ev_bo_len + 1;
+  } else {
+    memcpy(lo, hi, (size_t)pl);
+    ll = (size_t)pl;
+  }
+  hi[pl - 1] = '\x01';
+  it = db_iter_open_bounded(g.st.env, g.st.by_owner, NULL, lo, ll, hi, (size_t)pl);
+  if (!it)
+    return -1;
+
+  snprintf(s->ev_owner, sizeof s->ev_owner, "%s", owner);
+  rc = db_iter_seek_first(it);
+  while (rc == DB_OK) {
+    size_t kl, vl, btl = 0;
+    const void *k = db_iter_key(it, &kl);
+    const void *v = db_iter_value(it, &vl);
+    const void *bt = NULL;
+    struct db_val tv = { NULL, 0 };
+    struct htc_rec rec;
+    uint32_t size = 0;
+    int grc, drc, parsed = 0;
+
+    if (htc_size_parse(v, vl, &size) != 0)
+      size = 0;
+    grc = htc_bo_split(k, kl, NULL, 0, &bt, &btl) == 0
+            ? db_get(g.st.env, g.st.by_time, bt, btl, NULL, &tv) : DB_NOTFOUND;
+    if (grc != DB_OK && grc != DB_NOTFOUND) {
+      db_iter_close(it);
+      return -1;
+    }
+    if (grc == DB_OK)
+      parsed = htc_rec_parse(tv.base, tv.len, &rec) == 0;
+    db_val_free(&tv);
+    if (parsed && strcmp(rec.owner, owner) == 0) {
+      drc = htrim_delete_row(s, HTRIM_PATH_OWNER, bt, btl, &rec, 1);
+      size = rec.bytes;
+    } else if (grc == DB_OK && !parsed) {
+      /* An unreadable record: the index-only delete takes its by_time
+       * key; this entry goes alone. */
+      drc = htrim_delete_row(s, HTRIM_PATH_OWNER, bt, btl, NULL, 1);
+      if (drc == 0)
+        drc = evict_entry_only(s, k, kl, size);
+    } else                       /* no by_time row, or another owner's */
+      drc = evict_entry_only(s, k, kl, size);
+    if (drc != 0) {
+      db_iter_close(it);
+      return -1;
+    }
+    trimmed += size;
+    s->ev_freed += size;
+    bytes_set(&s->ev_bo, &s->ev_bo_len, &s->ev_bo_cap, k, kl);
+    rc = db_iter_next(it);
+    if (trimmed >= trim)
+      break;
+    if (rc == DB_OK && htrim_slice_expired(s)) {
+      db_iter_close(it);
+      return 1;
+    }
+  }
+  db_iter_close(it);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    return -1;
+  if (trimmed < trim)                                  /* the range ran out */
+    snprintf(s->ev_zero, sizeof s->ev_zero, "%s", owner);
+  s->ev_owner[0] = '\0';
+  s->ev_bo_len = 0;
+  return 0;
+}
+
+/** Oldest overall: walk by_time from where this drain's walk stopped (at
+ * first: the age-out resume point, or the oldest row indexed behind it --
+ * every row below is gone), THE delete each row (counted), until @a need
+ * bytes are gone or the budget is spent; the coverage floor moves to the
+ * newest ms deleted, in the same batch.  @return 0, or -1. */
+static int evict_oldest(struct htrim_slice *s, uint64_t need)
+{
+  const char *lower;
+  size_t llen;
+  struct db_iter *it;
+  uint64_t freed = 0;
+  int rc;
+
+  if (g.ev_lower_set) {
+    lower = g.ev_lower;
+    llen = g.ev_lower_len;
+  } else {
+    lower = g.ao_lower;
+    llen = g.ao_lower_len;
+    if (g.ao_late_len && llen && key_cmp(g.ao_late, g.ao_late_len, lower, llen) < 0) {
+      lower = g.ao_late;
+      llen = g.ao_late_len;
+    }
+  }
+  it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL, llen ? lower : NULL, llen,
+                            NULL, 0);
+  if (!it)
+    return -1;
+
+  rc = db_iter_seek_first(it);
+  while (rc == DB_OK) {
+    size_t kl, vl;
+    const void *k = db_iter_key(it, &kl);
+    const void *v = db_iter_value(it, &vl);
+    struct htc_rec rec;
+    uint64_t ms;
+    int parsed = v && htc_rec_parse(v, vl, &rec) == 0;
+
+    if (htrim_delete_row(s, HTRIM_PATH_OLDEST, k, kl, parsed ? &rec : NULL, 1) != 0) {
+      db_iter_close(it);
+      return -1;
+    }
+    if (parsed) {
+      freed += rec.bytes;
+      s->ev_freed += rec.bytes;
+    }
+    ms = bt_key_ms(k, kl);
+    if (ms > s->floor_ms)
+      s->floor_ms = ms;
+    bytes_set(&s->ev_bt, &s->ev_bt_len, &s->ev_bt_cap, k, kl);
+    rc = db_iter_next(it);
+    if (freed >= need)
+      break;
+    if (rc == DB_OK && htrim_slice_expired(s))
+      break;
+  }
+  db_iter_close(it);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    return -1;
+  if (rc == DB_NOTFOUND && freed < need)
+    s->ev_exhausted = llen ? 1 : 2;
+
+  if (s->floor_ms > g.floor_ms && g.st.meta) {
+    char buf[24];
+    int n = snprintf(buf, sizeof buf, "%llu", (unsigned long long)s->floor_ms);
+    if (db_writebatch_put(s->wb, g.st.meta, HTRIM_META_FLOOR,
+                          strlen(HTRIM_META_FLOOR), buf, (size_t)n) != DB_OK) {
+      s->broken = 1;
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/** One eviction slice (see the header's "The cap"). */
+static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
+{
+  struct htc_plan_params pp;
+  struct htc_plan plan;
+  char done[HTC_OWNER_MAX] = "";
+  uint64_t total;
+  size_t i;
+  int rc;
+
+  plan_params(p, &pp);
+  htc_plan_eviction(g.acct, &pp, &plan);
+  total = htc_acct_total(g.acct);
+  if (!g.draining) {
+    if (!plan.active)
+      return 0;
+    drain_begin(p->cap_bytes);
+  } else if (!plan.active && !g.ev_owner[0]) {
+    drain_end(p->cap_bytes);             /* e.g. the cap was raised */
+    return 0;
+  }
+  s->ev_step = 1;
+  s->ev_cap = p->cap_bytes;
+  s->ev_target = plan.target;
+
+  /* 1. The step in progress first: an owner, once picked, goes down to
+   *    its share (however low the total got meanwhile). */
+  if (g.ev_owner[0]) {
+    uint64_t have = htc_acct_owner(g.acct, g.ev_owner);
+    uint64_t share = htc_owner_share(&pp, g.ev_owner);
+
+    snprintf(done, sizeof done, "%s", g.ev_owner);
+    if (have > share) {
+      rc = evict_owner(s, g.ev_owner, have - share, 1);
+      if (rc || s->ev_zero[0])         /* one drifted owner a slice */
+        return rc < 0 ? -1 : 0;
+    }
+  }
+
+  /* 2. The plan's next steps, in order, while the total is above the low
+   *    watermark. */
+  for (i = 0; i < plan.nsteps; i++) {
+    const struct htc_plan_step *st = &plan.steps[i];
+
+    if (strcmp(st->owner, done) == 0)
+      continue;
+    if (total <= s->ev_freed || total - s->ev_freed <= plan.target)
+      return 0;
+    if (slice_staged(s) && htrim_slice_expired(s))
+      return 0;
+    rc = evict_owner(s, st->owner, st->trim, 0);
+    if (rc || s->ev_zero[0])
+      return rc < 0 ? -1 : 0;
+  }
+
+  /* 3. Oldest overall: nobody over share, and the plan saw every owner --
+   *    never when it was truncated (Review Focus 4). */
+  if (!plan.nsteps && !plan.truncated && plan.oldest > 0
+      && total > s->ev_freed && total - s->ev_freed > plan.target
+      && !(slice_staged(s) && htrim_slice_expired(s)))
+    return evict_oldest(s, total - s->ev_freed - plan.target);
+  return 0;
+}
+
+/** The totals say more than the store holds (an oldest-overall walk ran
+ * out of rows): count them again from by_owner.  Eviction waits for it. */
+static void acct_recount(void)
+{
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: eviction: the time index ran out of rows with %llu bytes "
+            "still accounted; counting the owner totals again",
+            (unsigned long long)htc_acct_total(g.acct));
+  htc_acct_clear(g.acct);
+  g.acct_loaded = 0;
+  g.scan_started = 0;
+  MyFree(g.cursor);
+  g.cursor = NULL;
+  g.cursor_len = g.cursor_cap = 0;
+}
+
+/** A committed eviction step. */
+static void evict_apply(struct htrim_slice *s)
+{
+  int moved = 0, recount = 0;
+
+  snprintf(g.ev_owner, sizeof g.ev_owner, "%s", s->ev_owner);
+  if (g.ev_owner[0] && s->ev_bo_len)
+    bytes_set(&g.ev_bo, &g.ev_bo_len, &g.ev_bo_cap, s->ev_bo, s->ev_bo_len);
+  else if (!g.ev_owner[0])
+    g.ev_bo_len = 0;
+  if (s->ev_zero[0]) {
+    uint64_t left = htc_acct_owner(g.acct, s->ev_zero);
+    if (left) {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "history: eviction: owner %s has no rows left but %llu bytes "
+                "accounted; now 0", s->ev_zero, (unsigned long long)left);
+      htc_acct_add(g.acct, s->ev_zero, -(int64_t)left);
+    }
+  }
+  if (s->ev_exhausted == 2)
+    recount = 1;
+  else if (s->ev_exhausted == 1) {             /* from the first key next */
+    g.ev_lower_set = 1;
+    g.ev_lower_len = 0;
+  } else if (s->ev_bt_len) {
+    size_t n = s->ev_bt_len + 1;
+    if (n > g.ev_lower_cap) {
+      g.ev_lower_cap = n;
+      g.ev_lower = (char *)MyRealloc(g.ev_lower, n);
+    }
+    memcpy(g.ev_lower, s->ev_bt, s->ev_bt_len);
+    g.ev_lower[s->ev_bt_len] = '\0';
+    g.ev_lower_len = n;
+    g.ev_lower_set = 1;
+  }
+  g.drain_owner += s->counts[HTRIM_PATH_OWNER];
+  g.drain_oldest += s->counts[HTRIM_PATH_OLDEST];
+  if (s->floor_ms > g.floor_ms) {
+    g.floor_ms = s->floor_ms;
+    moved = 1;
+  }
+  if (recount)
+    acct_recount();
+  if (g.draining && !g.ev_owner[0]
+      && (recount || htc_acct_total(g.acct) <= s->ev_target))
+    drain_end(s->ev_cap);
+  if (moved && coverage_cb)
+    coverage_cb();
+}
+
+/* ------------------------------------------------------------------ */
+/* The targets sweep                                                   */
+/* ------------------------------------------------------------------ */
+
+static void ts_name_push(struct htrim_slice *s, const void *k, size_t kl)
+{
+  if (s->ts_n == s->ts_cap) {
+    s->ts_cap = s->ts_cap ? s->ts_cap * 2 : 16;
+    s->ts_names = (char (*)[HTC_TARGET_MAX])MyRealloc(s->ts_names,
+                                                     s->ts_cap * sizeof *s->ts_names);
+  }
+  memcpy(s->ts_names[s->ts_n], k, kl);
+  s->ts_names[s->ts_n][kl] = '\0';
+  s->ts_n++;
+}
+
+/** One sweep slice: the targets CF from the successor of the pass's
+ * cursor, one live-tail seek per key; an empty target's key is deleted
+ * in this slice's batch and reported once it commits.  Stamps are never
+ * touched.  The first slice of a pass consumes what armed it. */
+static int phase_tsweep(struct htrim_slice *s)
+{
+  struct db_iter *it;
+  char *lower = NULL;
+  size_t llen = 0;
+  int rc;
+
+  if (!g.ts_running) {
+    g.ts_running = 1;
+    g.ts_armed = 0;
+    g.tsweep_wanted = 0;
+    g.ts_cursor_len = 0;
+  }
+  if (g.ts_cursor_len) {
+    llen = g.ts_cursor_len + 1;
+    lower = (char *)MyMalloc(llen);
+    memcpy(lower, g.ts_cursor, g.ts_cursor_len);
+    lower[g.ts_cursor_len] = '\0';             /* cursor ‖ 0x00 */
+  }
+  it = db_iter_open_bounded(g.st.env, g.st.targets, NULL, lower, llen, NULL, 0);
+  MyFree(lower);                                /* the iterator owns its copy */
+  if (!it)
+    return -1;
+
+  s->ts_step = 1;
+  rc = db_iter_seek_first(it);
+  while (rc == DB_OK) {
+    size_t kl;
+    const void *k = db_iter_key(it, &kl);
+
+    if (kl < HTC_TARGET_MAX) {
+      int has = target_has_rows(k, kl);
+      if (has < 0) {
+        db_iter_close(it);
+        return -1;
+      }
+      if (!has) {
+        if (slice_del(s, g.st.targets, k, kl) < 0) {
+          db_iter_close(it);
+          return -1;
+        }
+        ts_name_push(s, k, kl);
+      }
+    }
+    bytes_set(&s->ts_cursor, &s->ts_cursor_len, &s->ts_cursor_cap, k, kl);
+    rc = db_iter_next(it);
+    if (rc == DB_OK && htrim_slice_expired(s))
+      break;
+  }
+  db_iter_close(it);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    return -1;
+  if (rc == DB_NOTFOUND)
+    s->ts_finished = 1;
+  return 0;
+}
+
+/** A committed sweep step: move the cursor (or end the pass), then report
+ * the targets it removed. */
+static void tsweep_apply(struct htrim_slice *s)
+{
+  if (s->ts_finished) {
+    g.ts_running = 0;
+    g.ts_cursor_len = 0;
+  } else if (s->ts_cursor_len)
+    bytes_set(&g.ts_cursor, &g.ts_cursor_len, &g.ts_cursor_cap,
+              s->ts_cursor, s->ts_cursor_len);
+  if (s->ts_n && g.emptied) {
+    const char **names = (const char **)MyMalloc(s->ts_n * sizeof *names);
+    size_t i;
+    for (i = 0; i < s->ts_n; i++)
+      names[i] = s->ts_names[i];
+    g.emptied(names, (int)s->ts_n);
+    MyFree(names);
+  }
+}
+
 static int phase_has_work(enum htrim_phase ph, const struct htrim_params *p)
 {
   switch (ph) {
@@ -1421,7 +2248,12 @@ static int phase_has_work(enum htrim_phase ph, const struct htrim_params *p)
     return !g.acct_loaded;
   case HTRIM_PH_BACKFILL:   /* indexing rows stored before by_time existed */
     return !g.bf_done;
-  case HTRIM_PH_EVICT:      /* the cap */
+  case HTRIM_PH_EVICT:      /* the cap: cap 0 is no cap; totals and index complete */
+    if (!p->cap_bytes || !g.acct_loaded || !g.bf_done)
+      return 0;
+    return g.draining || htc_acct_total(g.acct) > evict_high_bytes(p);
+  case HTRIM_PH_TSWEEP:
+    return g.acct_loaded && (g.ts_running || g.ts_armed || g.tsweep_wanted);
   default:
     return 0;
   }
@@ -1437,6 +2269,10 @@ static int run_phase(enum htrim_phase ph, struct htrim_slice *s,
     return phase_acctscan(s);
   case HTRIM_PH_BACKFILL:
     return phase_backfill(s, p);
+  case HTRIM_PH_EVICT:
+    return phase_evict(s, p);
+  case HTRIM_PH_TSWEEP:
+    return phase_tsweep(s);
   default:
     return 0;
   }
@@ -1449,6 +2285,7 @@ const char *htrim_phase_name(enum htrim_phase ph)
   case HTRIM_PH_BACKFILL: return "backfill";
   case HTRIM_PH_ACCTSCAN: return "scan";
   case HTRIM_PH_EVICT:    return "evict";
+  case HTRIM_PH_TSWEEP:   return "tsweep";
   case HTRIM_PH_CLEANUP:  return "cleanup";
   case HTRIM_PH_INCARNATION: return "incarnation";
   case HTRIM_PH_NONE:
@@ -1456,10 +2293,38 @@ const char *htrim_phase_name(enum htrim_phase ph)
   }
 }
 
+/** Retention covers what eviction took: forget the coverage floor once
+ * the cutoff is past it (rows at the cutoff ms are kept). */
+static void floor_clear_if_aged(const struct htrim_params *p)
+{
+  struct db_writebatch *wb;
+  uint64_t cutoff = retention_cutoff_ms(p);
+
+  if (!g.floor_ms || !cutoff || g.floor_ms >= cutoff)
+    return;
+  if (g.st.meta) {
+    wb = db_writebatch_new(g.st.env);
+    if (!wb
+        || db_writebatch_del(wb, g.st.meta, HTRIM_META_FLOOR,
+                             strlen(HTRIM_META_FLOOR)) != DB_OK
+        || db_writebatch_commit(wb, 0) != DB_OK) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "history_trim: cannot clear the coverage floor: %s", last_err());
+      db_writebatch_destroy(wb);
+      return;                                   /* the next pass start retries */
+    }
+    db_writebatch_destroy(wb);
+  }
+  g.floor_ms = 0;
+  if (coverage_cb)
+    coverage_cb();
+}
+
 void htrim_pass_start(const struct htrim_params *p)
 {
   if (!g.inited || !p)
     return;
+  g.compact_min_rows = p->compact_min_rows;
   /* Behind ao_lower every row is gone but those indexed there since: the
    * walk goes back to the oldest of them, never further. */
   if (g.ao_late_len) {
@@ -1468,6 +2333,7 @@ void htrim_pass_start(const struct htrim_params *p)
     g.ao_late_len = 0;
   }
   g.ao_pending = p->retention_days > 0;
+  floor_clear_if_aged(p);
 }
 
 int htrim_ageout_pending(void)
@@ -1482,7 +2348,8 @@ const char *htrim_last_error(void)
 
 /** Round-robin order of the phases. */
 static const enum htrim_phase phase_order[] = {
-  HTRIM_PH_AGEOUT, HTRIM_PH_BACKFILL, HTRIM_PH_ACCTSCAN, HTRIM_PH_EVICT
+  HTRIM_PH_AGEOUT, HTRIM_PH_BACKFILL, HTRIM_PH_ACCTSCAN, HTRIM_PH_EVICT,
+  HTRIM_PH_TSWEEP
 };
 #define HTRIM_NPHASES (sizeof phase_order / sizeof phase_order[0])
 
@@ -1525,6 +2392,9 @@ int htrim_run_slice(const struct htrim_params *p)
              g.inited ? "slice without parameters" : "trim engine not started");
     return -1;
   }
+  g.compact_min_rows = p->compact_min_rows;
+  if (g.draining && !p->cap_bytes)
+    drain_end(0);                               /* the cap went off mid-drain */
   ph = pick_phase(p);
   if (ph == HTRIM_PH_NONE)
     return 0;
@@ -1557,6 +2427,26 @@ int htrim_run_slice(const struct htrim_params *p)
 int htrim_tsweep_wanted(void)
 {
   return g.tsweep_wanted;
+}
+
+int htrim_tsweep_pending(void)
+{
+  return g.ts_running || g.ts_armed || g.tsweep_wanted;
+}
+
+void htrim_set_coverage_cb(htrim_coverage_fn cb)
+{
+  coverage_cb = cb;
+}
+
+uint64_t htrim_coverage_floor_ms(void)
+{
+  return g.floor_ms;
+}
+
+int htrim_draining(void)
+{
+  return g.draining;
 }
 
 void htrim_tsweep_clear(void)

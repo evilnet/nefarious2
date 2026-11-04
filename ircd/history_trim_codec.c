@@ -888,6 +888,26 @@ uint64_t htc_owner_share(const struct htc_plan_params *p, const char *owner)
   return ((uint64_t)p->cap * (uint64_t)(unsigned)p->share_pct) / 100ULL;
 }
 
+void htc_plan_sanitize(int *high_pct, int *low_pct)
+{
+  int high = *high_pct, low = *low_pct;
+
+  if (high < 1 || high > 100)
+    high = 85;
+  /* The ruling's prose says "low outside 0..100 -> 75", but the
+   * mandated kept case (high 0, low 0 -> target 750) only works if
+   * low==0 takes this reset too (high alone sanitizes to 85, and
+   * 0>=85 is false, so an unreset low==0 would leave target at 0, not
+   * 750) -- i.e. the boundary is low<=0, matching the brief's original
+   * "low<=0 -> 75" with an added upper bound. */
+  if (low <= 0 || low > 100)
+    low = 75;
+  if (low >= high)
+    low = (high > 10) ? high - 10 : 0;
+  *high_pct = high;
+  *low_pct = low;
+}
+
 void htc_plan_eviction(const struct htc_acct *a,
                         const struct htc_plan_params *p,
                         struct htc_plan *out)
@@ -904,18 +924,7 @@ void htc_plan_eviction(const struct htc_acct *a,
 
   high = p->high_pct;
   low  = p->low_pct;
-  if (high < 1 || high > 100)
-    high = 85;
-  /* The ruling's prose says "low outside 0..100 -> 75", but the
-   * mandated kept case (high 0, low 0 -> target 750) only works if
-   * low==0 takes this reset too (high alone sanitizes to 85, and
-   * 0>=85 is false, so an unreset low==0 would leave target at 0, not
-   * 750) -- i.e. the boundary is low<=0, matching the brief's original
-   * "low<=0 -> 75" with an added upper bound. */
-  if (low <= 0 || low > 100)
-    low = 75;
-  if (low >= high)
-    low = (high > 10) ? high - 10 : 0;
+  htc_plan_sanitize(&high, &low);
 
   cap = p->cap;
   target = cap * (uint64_t)low / 100;

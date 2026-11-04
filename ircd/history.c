@@ -94,6 +94,31 @@ static struct db_cf  *history_cf_by_owner = NULL;
 static struct Timer history_trim_timer;
 /** A pass starts at the next slice (history_trim_kick). */
 static int history_trim_pass_pending = 0;
+/** history_trim_start ran: the slice timer is initialised. */
+static int history_trim_started = 0;
+
+/** Hint a history CF's compaction once this many of its keys were
+ * deleted since its last hint, whatever deleted them
+ * (htrim_params.compact_min_rows): a steady age-out pass deletes about
+ * what one maintenance interval stored, so a per-pass trigger would never
+ * fire on prod, and a low-volume CF's tombstones sit behind its 64 MB
+ * memtable for days. */
+#define HISTORY_TRIM_COMPACT_MIN_ROWS 10000
+
+/** The CFs the trimmer deletes every row of in time, which RocksDB marks
+ * for compaction when an SST file holds a dense run of tombstones
+ * (db_env_opts.deletion_heavy_cfs): at least HISTORY_DELETION_TRIGGER
+ * deletes in some HISTORY_DELETION_WINDOW consecutive entries.  Age-out
+ * and eviction delete oldest first, so each CF's tombstones come in runs
+ * (the head of by_time, of each owner in by_owner, of each target in
+ * messages and reply_index; msgids are time-ordered), and a window of
+ * 4096 half full of them is such a run, not the scattered deletes of a
+ * busy target; ml_content holds multiline rows only. */
+static const char *const history_deletion_heavy_cfs[] = {
+  "messages", "msgid_index", "reply_index", "by_time", "by_owner", NULL
+};
+#define HISTORY_DELETION_WINDOW  4096
+#define HISTORY_DELETION_TRIGGER 2048
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -605,6 +630,9 @@ int history_init(const char *dbpath)
               "history: deferred-sync mode, %u second flush interval",
               env_opts.sync_period_seconds);
   }
+  env_opts.deletion_heavy_cfs = history_deletion_heavy_cfs;
+  env_opts.deletion_window    = HISTORY_DELETION_WINDOW;
+  env_opts.deletion_trigger   = HISTORY_DELETION_TRIGGER;
 
   rc = db_env_open(dbpath, &env_opts, HISTORY_MAX_DBS, &history_db_env);
   if (rc != DB_OK) {
@@ -723,6 +751,7 @@ void history_shutdown(void)
   if (t_active(&history_trim_timer))
     timer_del(&history_trim_timer);
   history_trim_pass_pending = 0;
+  history_trim_started = 0;
   htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
   htrim_shutdown();
 
@@ -844,6 +873,7 @@ void history_trim_tick(int pass_start)
   p.quota_on       = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
   p.share_pct      = feature_int(FEAT_CHATHISTORY_USER_QUOTA_PCT);
   p.slice_ms       = trim_slice_ms();
+  p.compact_min_rows = HISTORY_TRIM_COMPACT_MIN_ROWS;
 
   /* A pass start: the alive stamp the next start's index-gap check reads,
    * and an age-out pass -- resuming where the walk stopped, or back at the
@@ -916,8 +946,36 @@ void history_trim_start(uint64_t newest_row_ms)
   /* A never-armed (or long-expired) timer: a fresh generator. */
   if (!t_onqueue(&history_trim_timer) && !t_active(&history_trim_timer))
     timer_init(&history_trim_timer);
+  history_trim_started = 1;
   /* The boot accounting scan has work from the first second. */
   history_trim_arm();
+}
+
+/** HISTORY_MAP_SIZE_MB as the cap in bytes (0 = no cap), and the
+ * watermarks by the planner's rule (htc_plan_sanitize). */
+static uint64_t history_trim_cap(int *high, int *low)
+{
+  int mb = feature_int(FEAT_HISTORY_MAP_SIZE_MB);
+
+  *high = feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK);
+  *low = feature_int(FEAT_CHATHISTORY_LOW_WATERMARK);
+  htc_plan_sanitize(high, low);
+  return mb > 0 ? (uint64_t)mb << 20 : 0;
+}
+
+/** After a counted store: a store that takes the total strictly above the
+ * cap's high watermark starts the slices now, not at the next maintenance
+ * tick.  An armed timer stays as it is (history_trim_arm). */
+static void history_trim_cap_kick(void)
+{
+  int high, low;
+  uint64_t cap;
+
+  if (!history_trim_started)
+    return;
+  cap = history_trim_cap(&high, &low);
+  if (cap && htc_acct_total(htrim_acct()) > cap * (uint64_t)high / 100)
+    history_trim_arm();
 }
 
 /* ---------------------------------------------------------------- */
@@ -1202,11 +1260,14 @@ static int history_trim_row_stage(struct db_writebatch *wb,
                            tr->bo_key, sizeof tr->bo_key, &tr->bo_klen);
 }
 
-/** Count @a tr against its owner once its batch committed. */
+/** Count @a tr against its owner once its batch committed; a store over
+ * the cap's high watermark kicks the trim slices. */
 static void history_trim_row_stored(const struct history_trim_row *tr)
 {
-  if (tr->stage)
-    htrim_note_stored(tr->rec.owner, tr->bo_key, tr->bo_klen, tr->rec.bytes);
+  if (!tr->stage)
+    return;
+  htrim_note_stored(tr->rec.owner, tr->bo_key, tr->bo_klen, tr->rec.bytes);
+  history_trim_cap_kick();
 }
 
 /** What the trim record takes from a decoded row, as the store path takes
@@ -4083,9 +4144,6 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 {
   struct db_env_stats env_stats;
   struct db_cf_stats cf_stats;
-  int util;
-  enum HistoryStorageState state;
-  const char *state_name;
 
   (void)sd;
 
@@ -4121,15 +4179,6 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   if (!history_available)
     return;
 
-  util = history_db_utilization();
-  state = history_storage_state();
-  switch (state) {
-    case HISTORY_STORAGE_WARNING:  state_name = "WARNING"; break;
-    case HISTORY_STORAGE_CRITICAL: state_name = "CRITICAL"; break;
-    case HISTORY_STORAGE_SUSPENDED: state_name = "SUSPENDED"; break;
-    default: state_name = "NORMAL"; break;
-  }
-
   /* Env-wide stats — backend-agnostic via abstraction. */
   if (db_env_stats(history_db_env, &env_stats) == DB_OK) {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
@@ -4148,8 +4197,37 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                  "H :  Active readers: %u", env_stats.active_readers);
   }
 
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  State: %s (utilization %d%%)", state_name, util);
+  {
+    /* The cap: the logical size the trimmer accounts (plan note 7), its
+     * watermarks as the planner reads them, and the largest owners. */
+    const struct htc_acct *acct = htrim_acct();
+    struct htc_owner_total top[5];
+    char owners[300];
+    size_t n, i, o = 0;
+    int high, low;
+    uint64_t cap = history_trim_cap(&high, &low);
+    uint64_t total = htc_acct_total(acct);
+
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Logical size: %llu bytes of cap %llu bytes (%llu%%), "
+               "high=%d%% low=%d%%, eviction %s",
+               (unsigned long long)total, (unsigned long long)cap,
+               (unsigned long long)(cap ? total * 100 / cap : 0), high, low,
+               htrim_draining() ? "draining" : "idle");
+    owners[0] = '\0';
+    n = acct ? htc_acct_top(acct, top, sizeof top / sizeof top[0]) : 0;
+    for (i = 0; i < n; i++) {
+      int w = ircd_snprintf(0, owners + o, sizeof owners - o, " %s=%llu",
+                            top[i].owner, (unsigned long long)top[i].bytes);
+      if (w < 0 || (size_t)w >= sizeof owners - o) {
+        owners[o] = '\0';                       /* the last one did not fit */
+        break;
+      }
+      o += (size_t)w;
+    }
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Top owners:%s", o ? owners : " none");
+  }
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Retention: %d days",
              feature_int(FEAT_CHATHISTORY_RETENTION));
@@ -4195,10 +4273,6 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                (unsigned long long)tst->deleted[HTRIM_PATH_BACKFILL],
                (unsigned long long)tst->deleted[HTRIM_PATH_INCARNATION]);
   }
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  Watermarks: high=%d%% low=%d%%",
-             feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK),
-             feature_int(FEAT_CHATHISTORY_LOW_WATERMARK));
 
   if (last_eviction_time > 0) {
     char timebuf[32];

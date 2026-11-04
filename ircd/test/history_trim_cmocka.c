@@ -55,6 +55,11 @@ static char emptied_names[MAX_EMPTIED][HTC_TARGET_MAX];
  * callback (inside the commit's measured span), once. */
 static uint64_t emptied_jump_us;
 
+/** Every name the emptied callback was given, over the whole test. */
+#define MAX_EMPTIED_ALL 128
+static int  emptied_total;
+static char emptied_all[MAX_EMPTIED_ALL][HTC_TARGET_MAX];
+
 static void on_emptied(const char **targets, int count)
 {
   int i;
@@ -64,6 +69,25 @@ static void on_emptied(const char **targets, int count)
   emptied_count = count;
   for (i = 0; i < count && i < MAX_EMPTIED; i++)
     snprintf(emptied_names[i], sizeof emptied_names[i], "%s", targets[i]);
+  for (i = 0; i < count; i++, emptied_total++)
+    if (emptied_total < MAX_EMPTIED_ALL)
+      snprintf(emptied_all[emptied_total], sizeof emptied_all[0], "%s", targets[i]);
+}
+
+/** How many times the emptied callback named @a target so far. */
+static int emptied_times(const char *target)
+{
+  int i, n = 0;
+  for (i = 0; i < emptied_total && i < MAX_EMPTIED_ALL; i++)
+    n += strcmp(emptied_all[i], target) == 0;
+  return n;
+}
+
+/** The coverage callback (a commit moved or cleared the floor). */
+static int coverage_calls;
+static void on_coverage(void)
+{
+  coverage_calls++;
 }
 
 /** The test value format: account|flags|reply|redact|payload. */
@@ -125,6 +149,9 @@ static int setup(void **state)
   emptied_count = 0;
   emptied_jump_us = 0;
   memset(emptied_names, 0, sizeof emptied_names);
+  emptied_total = 0;
+  coverage_calls = 0;
+  htrim_set_coverage_cb(on_coverage);
   assert_int_equal(0, htrim_init(&st, parse_cb, fake_clock, on_emptied));
   return 0;
 }
@@ -238,11 +265,13 @@ static int stage_message_rows(struct db_writebatch *wb, const char *target,
 }
 
 /** Write what the store path writes for one row, then index it through
- * htrim_stage_index in the same batch, commit, and htrim_note_stored. */
-static void seed_row(const char *target, const char *ts, const char *msgid,
-                     const char *owner, unsigned char flags,
-                     const char *reply_parent, const char *redact_parent,
-                     size_t ml_len, struct htc_rec *rec_out)
+ * htrim_stage_index in the same batch, commit, and htrim_note_stored.
+ * @a bytes 0 charges the row-size formula's figure; anything else
+ * charges exactly that (the cap tests' fixed-size rows). */
+static void seed_row_sized(const char *target, const char *ts, const char *msgid,
+                           const char *owner, unsigned char flags,
+                           const char *reply_parent, const char *redact_parent,
+                           size_t ml_len, uint32_t bytes, struct htc_rec *rec_out)
 {
   struct db_writebatch *wb = db_writebatch_new(env);
   char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX];
@@ -263,8 +292,9 @@ static void seed_row(const char *target, const char *ts, const char *msgid,
   snprintf(rec.owner, sizeof rec.owner, "%s", owner);
   snprintf(rec.reply_parent, sizeof rec.reply_parent, "%s", reply_parent);
   snprintf(rec.redact_parent, sizeof rec.redact_parent, "%s", redact_parent);
-  rec.bytes = htc_row_bytes((size_t)mkl, 80, (flags & HTC_F_ML) ? ml_len : 0,
-                            (size_t)btl, strlen(owner));
+  rec.bytes = bytes ? bytes
+                    : htc_row_bytes((size_t)mkl, 80, (flags & HTC_F_ML) ? ml_len : 0,
+                                    (size_t)btl, strlen(owner));
   assert_int_equal(0, htrim_stage_index(wb, htc_parse_ms(ts), target, msgid, &rec,
                                         bo, sizeof bo, &bolen));
   assert_true(bolen > 0);
@@ -273,6 +303,15 @@ static void seed_row(const char *target, const char *ts, const char *msgid,
   htrim_note_stored(owner, bo, bolen, rec.bytes);
   if (rec_out)
     *rec_out = rec;
+}
+
+static void seed_row(const char *target, const char *ts, const char *msgid,
+                     const char *owner, unsigned char flags,
+                     const char *reply_parent, const char *redact_parent,
+                     size_t ml_len, struct htc_rec *rec_out)
+{
+  seed_row_sized(target, ts, msgid, owner, flags, reply_parent, redact_parent,
+                 ml_len, 0, rec_out);
 }
 
 /** Plain message row: no flags, no parents, no multiline content. */
@@ -403,7 +442,9 @@ static int del_row(enum htrim_path path, const char *target, const char *ts,
   return htrim_slice_commit(s);
 }
 
-/** Finish the boot accounting scan (so stores/deletes apply directly). */
+/** Finish the boot accounting scan (so stores/deletes apply directly),
+ * and the targets sweep every start runs once it has (Task 8) -- over
+ * the targets keys there are when this is called. */
 static void load_acct(void)
 {
   struct htrim_params p = params(0);
@@ -411,6 +452,9 @@ static void load_acct(void)
   for (i = 0; i < 1000 && !htrim_acct_loaded(); i++)
     assert_true(htrim_run_slice(&p) >= 0);
   assert_int_equal(1, htrim_acct_loaded());
+  for (i = 0; i < 1000 && htrim_tsweep_pending(); i++)
+    assert_true(htrim_run_slice(&p) >= 0);
+  assert_int_equal(0, htrim_tsweep_pending());
 }
 
 /** The backfill tests' clock and retention: now 1700000000000 ms, 7 days. */
@@ -1126,7 +1170,7 @@ static void test_run_slice_scan_then_idle(void **state)
   reboot();
   step_us = 250;
   assert_int_equal(0, htrim_acct_loaded());
-  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(1, htrim_run_slice(&p));        /* the start's targets sweep is due */
   assert_int_equal(1, htrim_acct_loaded());
   stats = htrim_stats();
   assert_int_equal(HTRIM_PH_ACCTSCAN, stats->last_phase);
@@ -1138,6 +1182,8 @@ static void test_run_slice_scan_then_idle(void **state)
   htrim_reset_max_slice();
   assert_int_equal(0, htrim_stats()->max_slice_us);
   assert_int_equal(HTRIM_PH_NONE, htrim_stats()->max_phase);
+  assert_int_equal(0, htrim_run_slice(&p));        /* the sweep (no targets), then idle */
+  assert_int_equal(HTRIM_PH_TSWEEP, htrim_stats()->last_phase);
   assert_int_equal(0, htrim_run_slice(&p));        /* still idle */
 }
 
@@ -1157,8 +1203,8 @@ static void test_run_slice_error_recorded(void **state)
   assert_int_equal(300, htrim_stats()->last_slice_us);
   assert_int_equal(300, htrim_stats()->max_slice_us);
   assert_non_null(strstr(htrim_last_error(), "scan slice failed"));
-  assert_int_equal(0, htrim_run_slice(&p));          /* the next one recovers */
-  assert_int_equal(1, htrim_acct_loaded());
+  assert_int_equal(1, htrim_run_slice(&p));          /* the next one recovers; */
+  assert_int_equal(1, htrim_acct_loaded());          /* the targets sweep is next */
 
   /* Every -1 says why, the early ones too. */
   htrim_shutdown();
@@ -2395,7 +2441,8 @@ static void test_cleanup_carry_merges_a_retouched_target(void **state)
 }
 
 /* The carry is in memory only: a restart drops it, and those targets'
- * keys stay until the targets sweep (Task 8) finds them empty. */
+ * keys stay until the targets sweep every start runs once the accounting
+ * scan has loaded (Task 8 amendment) finds them empty. */
 static void test_cleanup_carry_dropped_on_restart(void **state)
 {
   struct htrim_params p = bf_params(15);
@@ -2409,9 +2456,20 @@ static void test_cleanup_carry_dropped_on_restart(void **state)
   assert_int_equal(4, fake_db_rows(st.targets));
 
   reboot();
-  run_until_idle(&p);                  /* the accounting scan, nothing else */
-  assert_int_equal(1, emptied_calls);
+  assert_int_equal(1, htrim_tsweep_pending());
+  assert_int_equal(1, htrim_run_slice(&p));        /* the scan comes first */
+  assert_int_equal(HTRIM_PH_ACCTSCAN, htrim_stats()->last_phase);
+  assert_int_equal(1, htrim_acct_loaded());
   assert_int_equal(4, fake_db_rows(st.targets));
+  run_until_idle(&p);                  /* then the sweep, once */
+  assert_int_equal(HTRIM_PH_TSWEEP, htrim_stats()->last_phase);
+  assert_int_equal(2, emptied_calls);
+  assert_int_equal(4, emptied_count);
+  assert_string_equal("#c16", emptied_names[0]);
+  assert_string_equal("#c19", emptied_names[3]);
+  assert_int_equal(0, fake_db_rows(st.targets));
+  assert_int_equal(0, htrim_tsweep_pending());
+  assert_int_equal(0, htrim_run_slice(&p));
 }
 
 /* A caller's own slice that names its phase is recorded like the
@@ -2444,6 +2502,837 @@ static void test_caller_slice_recorded_with_phase(void **state)
   assert_int_equal(HTRIM_PH_INCARNATION, htrim_stats()->max_phase);
   assert_string_equal("incarnation", htrim_phase_name(HTRIM_PH_INCARNATION));
   assert_string_equal("cleanup", htrim_phase_name(HTRIM_PH_CLEANUP));
+}
+
+/* ------------------------------------------------------------------ */
+/* The cap (Task 8)                                                    */
+/* ------------------------------------------------------------------ */
+
+/** The cap tests' limits: cap 10000, high 85 (8500), low 75 (7500), the
+ * share step on at 10% (1000); no retention (no age-out), no hints. */
+static struct htrim_params ev_params(unsigned int slice_ms)
+{
+  struct htrim_params p = params(slice_ms);
+  p.now_ms = BF_NOW_S * 1000ULL;
+  p.retention_days = 0;
+  p.cap_bytes = 10000;
+  p.high_pct = 85;
+  p.low_pct = 75;
+  p.quota_on = 1;
+  p.share_pct = 10;
+  return p;
+}
+
+/** A row of exactly @a bytes for @a owner at @a secs (whole seconds). */
+static void seed_sized(const char *target, uint64_t secs, const char *msgid,
+                       const char *owner, uint32_t bytes)
+{
+  char ts[32];
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)secs);
+  seed_row_sized(target, ts, msgid, owner, 0, "", "", 0, bytes, NULL);
+}
+
+/** @a n rows of @a bytes for @a owner in @a target, msgids <pfx>00..,
+ * at @a secs0 + i seconds. */
+static void seed_run(const char *target, const char *pfx, const char *owner,
+                     int n, uint64_t secs0, uint32_t bytes)
+{
+  char mid[24];
+  int i;
+  for (i = 0; i < n; i++) {
+    snprintf(mid, sizeof mid, "%s%02d", pfx, i);
+    seed_sized(target, secs0 + (uint64_t)i, mid, owner, bytes);
+  }
+}
+
+/** Whether the row seed_sized wrote is there: its messages row and its
+ * by_time row agree. */
+static int row_present(const char *target, uint64_t secs, const char *msgid)
+{
+  char ts[32], mk[HTC_MSG_KEY_MAX], bt[HTC_BT_KEY_MAX];
+  int n, btl, in_bt;
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)secs);
+  n = htc_msg_key(mk, sizeof mk, target, ts, msgid);
+  btl = bt_of(bt, sizeof bt, target, ts, msgid);
+  in_bt = key_exists(st.by_time, bt, (size_t)btl);
+  assert_int_equal(in_bt, key_exists(st.messages, mk, (size_t)n));
+  return in_bt;
+}
+
+static uint64_t owner_of(const char *owner)
+{
+  return htc_acct_owner(htrim_acct(), owner);
+}
+
+static uint64_t total_now(void)
+{
+  return htc_acct_total(htrim_acct());
+}
+
+/** The cap tests' start: the backfill finished, the accounting loaded,
+ * the boot sweep done. */
+static void evict_ready(void)
+{
+  ageout_ready();
+}
+
+/* Review Focus (plan note 4): eviction waits for the backfill -- until
+ * every pre-existing row is indexed, by_time lacks the oldest rows and
+ * the owner totals are partial.  Over high the whole time, nothing is
+ * evicted while the backfill still walks; then the cap applies. */
+static void test_evict_waits_for_backfill(void **state)
+{
+  struct htrim_params p = ev_params(5);
+  int slices = 0;
+  (void)state;
+
+  load_acct_backfill_pending();
+  seed_run("#n", "N", "-", 90, 1000, 100);
+  assert_int_equal(9000, total_now());
+
+  step_us = 1000;                      /* ~5 backfill rows a 5 ms slice */
+  while (!htrim_backfill_done()) {
+    assert_true(htrim_run_slice(&p) >= 0);
+    assert_int_not_equal(HTRIM_PH_EVICT, htrim_stats()->last_phase);
+    assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+    assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+    assert_int_equal(0, htrim_draining());
+    assert_true(++slices < 1000);
+  }
+  assert_true(slices > 5);
+  assert_int_equal(9000, total_now());
+
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(7500, total_now());
+  assert_int_equal(15, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+}
+
+/* Anti-goal 1: an owner over its share loses its own oldest rows -- down
+ * to its share -- and nobody else loses anything.  The dash owner holds
+ * most of the store but is never share-trimmed. */
+static void test_evict_owner_share_first(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char mid[16];
+  int i;
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 52, 1000, 100);            /* the oldest rows */
+  seed_run("#q", "Q", "a:quiet", 5, 1500, 100);
+  seed_run("#f", "F", "a:flood", 30, 2000, 100);
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  assert_true(owner_of("a:flood") <= 1000);
+  assert_true(owner_of("a:flood") > 900);
+  for (i = 0; i < 30; i++) {
+    snprintf(mid, sizeof mid, "F%02d", i);
+    assert_int_equal(i >= 20, row_present("#f", 2000 + (uint64_t)i, mid));
+  }
+  assert_int_equal(500, owner_of("a:quiet"));
+  assert_int_equal(5200, owner_of("-"));
+  assert_int_equal(6700, total_now());
+  assert_int_equal(20, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(0, htrim_coverage_floor_ms());
+  assert_int_equal(-1, meta_is(HTRIM_META_FLOOR, ""));
+  assert_int_equal(0, coverage_calls);
+  assert_int_equal(0, htrim_draining());
+  assert_acct_matches_cf();
+}
+
+/* Nobody over share: the oldest rows go, whoever owns them, until the
+ * store is at the low watermark; the coverage floor follows them. */
+static void test_evict_oldest_after_shares(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char mid[16], want[32];
+  int i;
+  (void)state;
+
+  evict_ready();
+  for (i = 0; i < 86; i++) {
+    int q = i == 2 || i == 5 || i == 8 || i == 40 || i == 60;
+    snprintf(mid, sizeof mid, "R%02d", i);
+    seed_sized(i & 1 ? "#a" : "#b", 1000 + (uint64_t)i, mid, q ? "a:q" : "-", 100);
+  }
+  assert_int_equal(500, owner_of("a:q"));
+  assert_int_equal(8600, total_now());
+
+  run_until_idle(&p);
+  for (i = 0; i < 86; i++) {
+    snprintf(mid, sizeof mid, "R%02d", i);
+    assert_int_equal(i >= 11, row_present(i & 1 ? "#a" : "#b", 1000 + (uint64_t)i, mid));
+  }
+  assert_int_equal(200, owner_of("a:q"));
+  assert_int_equal(7500, total_now());
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  snprintf(want, sizeof want, "%llu", (unsigned long long)htc_parse_ms("1010.000"));
+  assert_int_equal(1, meta_is(HTRIM_META_FLOOR, want));
+  assert_int_equal(htc_parse_ms("1010.000"), htrim_coverage_floor_ms());
+  assert_int_equal(1, coverage_calls);
+  assert_acct_matches_cf();
+}
+
+/* Hysteresis: a drain starts strictly above high and goes on below it,
+ * slice after slice, until the store is at or below low; then a store
+ * that leaves it under high starts nothing. */
+static void test_evict_hysteresis(void **state)
+{
+  struct htrim_params p = ev_params(3);
+  int i, rc, between = 0;
+  (void)state;
+
+  evict_ready();
+  seed_run("#t", "H", "-", 85, 1000, 100);             /* 8500: not above high */
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(0, htrim_draining());
+  assert_int_equal(85, fake_db_rows(st.by_time));
+
+  seed_run("#t", "J", "-", 1, 2000, 100);              /* 8600 */
+  step_us = 1000;                      /* ~3 rows a 3 ms slice */
+  for (i = 0; i < 100; i++) {
+    rc = htrim_run_slice(&p);
+    assert_int_equal(HTRIM_PH_EVICT, htrim_stats()->last_phase);
+    if (total_now() <= 7500)
+      break;
+    assert_int_equal(1, rc);
+    assert_int_equal(1, htrim_draining());
+    if (total_now() <= 8500)
+      between = 1;
+  }
+  assert_true(between);
+  assert_true(i >= 2);
+  assert_int_equal(7500, total_now());
+  assert_int_equal(0, htrim_draining());
+
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(7500, total_now());
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+
+  seed_run("#t", "K", "-", 10, 3000, 100);             /* 8500 again */
+  run_until_idle(&p);
+  assert_int_equal(8500, total_now());
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+}
+
+/* Review Focus 4: more owners over their share than a plan can list (40
+ * at a 1% share, 32 steps) never falls through to oldest-overall -- the
+ * compliant a:quiet holds the oldest row of the store and keeps it after
+ * every slice.  Each owner the drain picks goes down to its share, in the
+ * plan's order (largest over first, ties by owner), a step started in one
+ * slice finishing in the next; no new step starts once the store is at
+ * the low watermark (12090 - 23 x 200 = 7490). */
+static void test_evict_truncated_plan_spares_compliant_owner(void **state)
+{
+  struct htrim_params p = ev_params(5);
+  char owner[16], mid[16];
+  int o, r, i, rc = 1, k;
+  (void)state;
+
+  p.share_pct = 1;                     /* share 100 */
+  evict_ready();
+  seed_sized("#q", 500, "QUIET", "a:quiet", 90);
+  for (o = 0; o < 40; o++) {
+    snprintf(owner, sizeof owner, "a:o%02d", o);
+    for (r = 0; r < 3; r++) {
+      snprintf(mid, sizeof mid, "O%02d_%d", o, r);
+      seed_sized("#o", 1000 + (uint64_t)(r * 100 + o), mid, owner, 100);
+    }
+  }
+  assert_int_equal(12090, total_now());
+
+  step_us = 1000;                      /* a few rows a 5 ms slice */
+  for (i = 0; i < 1000 && rc == 1; i++) {
+    rc = htrim_run_slice(&p);
+    assert_true(rc >= 0);
+    assert_int_equal(90, owner_of("a:quiet"));
+    assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  }
+  assert_int_equal(0, rc);
+  assert_true(i > 5);                  /* the drain took many slices */
+  assert_true(total_now() <= 7500);
+  for (k = 0; k < 40; k++) {
+    snprintf(owner, sizeof owner, "a:o%02d", k);
+    if (owner_of(owner) != 100)
+      break;
+  }
+  for (o = k; o < 40; o++) {
+    snprintf(owner, sizeof owner, "a:o%02d", o);
+    assert_int_equal(300, owner_of(owner));
+  }
+  assert_int_equal(23, k);
+  assert_int_equal(7490, total_now());
+  assert_int_equal(46, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_true(row_present("#q", 500, "QUIET"));
+  assert_acct_matches_cf();
+}
+
+/* A by_owner entry whose by_time row is gone is removed by the owner
+ * walk on its own, its size off its owner's total -- it is not a row, so
+ * the per-path counter does not count it. */
+static void test_evict_orphan_owner_entry(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16];
+  unsigned char sz[4];
+  struct db_writebatch *wb;
+  int btl, bol, i;
+  (void)state;
+
+  seed_backfill_done();
+  seed_run("#f", "F", "a:flood", 29, 2000, 100);
+  seed_run("#n", "N", "-", 56, 1000, 100);
+  btl = htc_bt_key(bt, sizeof bt, 1500000, "#f", "GONE");   /* older than a:flood's rows */
+  bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+  assert_true(btl > 0 && bol > 0);
+  htc_size_pack(sz, 100);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_owner, bo, (size_t)bol, sz, sizeof sz));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  reboot();
+  load_acct();                         /* the scan counts the orphan */
+  assert_int_equal(3000, owner_of("a:flood"));
+  assert_int_equal(8600, total_now());
+
+  run_until_idle(&p);
+  assert_false(key_exists(st.by_owner, bo, (size_t)bol));
+  assert_int_equal(1000, owner_of("a:flood"));
+  assert_int_equal(19, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  for (i = 0; i < 29; i++) {
+    snprintf(mid, sizeof mid, "F%02d", i);
+    assert_int_equal(i >= 19, row_present("#f", 2000 + (uint64_t)i, mid));
+  }
+  assert_acct_matches_cf();
+}
+
+/** Assert the last compaction hint on @a cf covered exactly
+ * [@a lo, @a hi ‖ 0x00). */
+static void assert_hint(struct db_cf *cf, const void *lo, size_t lol,
+                        const void *hi, size_t hil)
+{
+  const void *s, *e;
+  size_t sl, el;
+  assert_int_equal(DB_OK, fake_db_last_suggest(cf, &s, &sl, &e, &el));
+  assert_int_equal(lol, sl);
+  assert_memory_equal(lo, s, lol);
+  assert_int_equal(hil + 1, el);
+  assert_memory_equal(hi, e, hil);
+  assert_int_equal(0, ((const char *)e)[hil]);
+}
+
+/* A drain ends with one compaction hint per column family it deleted
+ * from, over [first deleted key, last deleted key ‖ 0x00); the cumulative
+ * trigger hints a CF once compact_min_rows keys have gone since its last
+ * hint, whatever deleted them. */
+static void test_drain_suggests_compaction(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char lo[HTC_BT_KEY_MAX], hi[HTC_BT_KEY_MAX], ts[32], mid[16];
+  uint64_t base = BF_NOW_S - 86400;    /* a day old: inside retention below */
+  int lol, hil, i;
+  (void)state;
+
+  p.quota_on = 0;
+  evict_ready();
+  seed_run("#t", "R", "-", 86, base, 100);
+  assert_int_equal(0, fake_db_suggest_calls(st.by_time));
+
+  run_until_idle(&p);
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(1, fake_db_suggest_calls(st.by_time));
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)base);
+  lol = bt_of(lo, sizeof lo, "#t", ts, "R00");
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)(base + 10));
+  hil = bt_of(hi, sizeof hi, "#t", ts, "R10");
+  assert_hint(st.by_time, lo, (size_t)lol, hi, (size_t)hil);
+  assert_int_equal(1, fake_db_suggest_calls(st.messages));
+  assert_int_equal(1, fake_db_suggest_calls(st.msgid));
+  assert_int_equal(1, fake_db_suggest_calls(st.by_owner));
+  assert_int_equal(0, fake_db_suggest_calls(st.reply));   /* nothing deleted there */
+
+  /* compact_min_rows 10: an age-out pass of 12 rows hints once more. */
+  p.cap_bytes = 0;
+  p.retention_days = 7;
+  p.compact_min_rows = 10;
+  for (i = 0; i < 12; i++) {
+    snprintf(mid, sizeof mid, "A%02d", i);
+    seed_plain("#old", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  ageout_pass(&p);
+  assert_int_equal(12, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(2, fake_db_suggest_calls(st.by_time));
+  lol = bt_of(lo, sizeof lo, "#old", ts_ago(ts, sizeof ts, 8, 100), "A00");
+  hil = bt_of(hi, sizeof hi, "#old", ts_ago(ts, sizeof ts, 8, 89), "A11");
+  assert_hint(st.by_time, lo, (size_t)lol, hi, (size_t)hil);
+}
+
+/* Task 7 review I3: a steady pass deletes far fewer rows than any
+ * one-pass trigger, so the hint counts deletes since a CF's last hint,
+ * across passes: 4 + 4 rows hint nothing, the third pass reaches 10 and
+ * the hint covers all 12; four more start the count again. */
+static void test_compaction_hint_cumulative(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char lo[HTC_BT_KEY_MAX], hi[HTC_BT_KEY_MAX], ts[32], mid[16];
+  int pass, i, lol, hil;
+  (void)state;
+
+  p.compact_min_rows = 10;
+  ageout_ready();
+  for (pass = 0; pass < 4; pass++) {
+    for (i = 0; i < 4; i++) {
+      snprintf(mid, sizeof mid, "P%d_%d", pass, i);
+      seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - pass * 10 - i), mid, "a:bob", NULL);
+    }
+    ageout_pass(&p);
+    assert_int_equal((uint64_t)(4 * (pass + 1)), htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+    assert_int_equal(pass >= 2 ? 1 : 0, fake_db_suggest_calls(st.by_time));
+    assert_int_equal(pass >= 2 ? 1 : 0, fake_db_suggest_calls(st.messages));
+  }
+  lol = bt_of(lo, sizeof lo, "#t", ts_ago(ts, sizeof ts, 8, 100), "P0_0");
+  hil = bt_of(hi, sizeof hi, "#t", ts_ago(ts, sizeof ts, 8, 77), "P2_3");
+  assert_hint(st.by_time, lo, (size_t)lol, hi, (size_t)hil);
+}
+
+/* The coverage floor goes once retention covers it: a pass start whose
+ * cutoff is past the floor deletes its meta row and tells the coverage
+ * callback; a cutoff at or before it, or no retention, keeps it. */
+static void test_floor_cleared_when_aged_past(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  uint64_t f = (BF_NOW_S - 6ULL * 86400ULL) * 1000ULL;
+  char fs[32];
+  (void)state;
+
+  snprintf(fs, sizeof fs, "%llu", (unsigned long long)f);
+  put_meta(HTRIM_META_FLOOR, fs);
+  reboot();
+  load_acct();
+  assert_int_equal(f, htrim_coverage_floor_ms());
+
+  htrim_pass_start(&p);                /* cutoff 7 days ago: before the floor */
+  assert_int_equal(f, htrim_coverage_floor_ms());
+  assert_int_equal(1, meta_is(HTRIM_META_FLOOR, fs));
+  p.retention_days = 0;
+  p.now_ms += 3ULL * 86400ULL * 1000ULL;
+  htrim_pass_start(&p);                /* no retention: nothing covers it */
+  assert_int_equal(f, htrim_coverage_floor_ms());
+  p.retention_days = 7;
+  p.now_ms = f + 7ULL * 86400ULL * 1000ULL;   /* cutoff == floor: kept */
+  htrim_pass_start(&p);
+  assert_int_equal(f, htrim_coverage_floor_ms());
+  assert_int_equal(0, coverage_calls);
+
+  p.now_ms += 1;                       /* cutoff one ms past the floor */
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_coverage_floor_ms());
+  assert_int_equal(-1, meta_is(HTRIM_META_FLOOR, fs));
+  assert_int_equal(1, coverage_calls);
+  reboot();
+  assert_int_equal(0, htrim_coverage_floor_ms());
+}
+
+/* Cap 0 is no cap: whatever the total, eviction has no work and an
+ * otherwise idle engine stays idle; a drain under way when the cap goes
+ * to 0 stops. */
+static void test_evict_cap_zero_idle(void **state)
+{
+  struct htrim_params p = ev_params(3);
+  uint64_t d;
+  int i;
+  (void)state;
+
+  p.cap_bytes = 0;
+  evict_ready();
+  seed_run("#t", "Z", "-", 90, 1000, 100);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(0, htrim_draining());
+  for (i = 0; i < HTRIM_PATH_COUNT; i++)
+    assert_int_equal(0, htrim_stats()->deleted[i]);
+
+  p.cap_bytes = 10000;                 /* 9000 > 8500 */
+  step_us = 1000;
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(1, htrim_draining());
+  d = htrim_stats()->deleted[HTRIM_PATH_OLDEST];
+  assert_true(d > 0 && d < 15);
+  p.cap_bytes = 0;
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(0, htrim_draining());
+  assert_int_equal(d, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(0, htrim_run_slice(&p));
+}
+
+/* Task 4 review ruling: the cleanup's stamp shortcut is exact for
+ * oldest-first age-out, not for eviction.  An owner trim deletes #t's
+ * newest (stamped) row while an older row of another owner stays; then
+ * oldest-overall deletes that one, which the stamp says is not the
+ * newest -- #t is empty, its targets key left.  The sweep after the drain
+ * removes it and reports it once; a live target keeps its key. */
+static void test_tsweep_removes_target_emptied_out_of_order(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  int i;
+  (void)state;
+
+  evict_ready();
+  seed_sized("#t", 100, "TOLD", "-", 100);              /* the oldest row */
+  seed_sized("#t", 500, "TNEW", "a:flood", 100);        /* a:flood's oldest */
+  seed_targets("#t", "500.000");
+  seed_run("#f", "F", "a:flood", 19, 600, 100);
+  seed_run("#n", "N", "-", 70, 1000, 100);
+  seed_targets("#n", "1069.000");
+  assert_int_equal(9100, total_now());
+
+  for (i = 0; i < 100; i++) {
+    assert_true(htrim_run_slice(&p) >= 0);
+    if (!htrim_draining())
+      break;
+  }
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_int_equal(6, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_false(row_present("#t", 100, "TOLD"));
+  assert_false(row_present("#t", 500, "TNEW"));
+  assert_true(targets_has("#t"));       /* the shortcut's leftover */
+  assert_int_equal(0, emptied_times("#t"));
+  assert_int_equal(1, htrim_tsweep_pending());
+
+  run_until_idle(&p);
+  assert_int_equal(HTRIM_PH_TSWEEP, htrim_stats()->last_phase);
+  assert_false(targets_has("#t"));
+  assert_int_equal(1, emptied_times("#t"));
+  assert_true(targets_has("#n"));
+  assert_int_equal(0, emptied_times("#n"));
+  assert_int_equal(0, htrim_tsweep_pending());
+  assert_string_equal("tsweep", htrim_phase_name(HTRIM_PH_TSWEEP));
+}
+
+/* A cleanup that could not finish arms the sweep, which then reaps the
+ * target it left. */
+static void test_tsweep_after_failed_cleanup(void **state)
+{
+  struct htrim_slice *s;
+  struct htrim_params p = params(0);
+  (void)state;
+
+  load_acct();
+  seed_plain("#t", "100.000", "T1", "a:bob", NULL);
+  seed_plain("#t", "200.000", "T2", "a:bob", NULL);
+  seed_targets("#t", "200.000");
+  fake_db_fail_commit_at(env, 2);      /* the cleanup's own batch */
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#t", "100.000", "T1", 1);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#t", "200.000", "T2", 1);
+  assert_int_equal(2, htrim_slice_commit(s));
+  assert_true(targets_has("#t"));
+  assert_int_equal(1, htrim_tsweep_wanted());
+  assert_int_equal(1, htrim_tsweep_pending());
+
+  run_until_idle(&p);
+  assert_false(targets_has("#t"));
+  assert_int_equal(1, emptied_times("#t"));
+  assert_int_equal(0, htrim_tsweep_wanted());
+  assert_int_equal(0, htrim_tsweep_pending());
+}
+
+/* Task 7 re-review M1: an unbudgeted slice (the burst-loss prune, inside
+ * BURST) checks its own touched targets only; the carried checks stay
+ * with the engine's budgeted slices. */
+static void test_cleanup_unbudgeted_slice_keeps_the_carry(void **state)
+{
+  struct htrim_params p = bf_params(15);
+  unsigned int lasts;
+  (void)state;
+
+  ageout_ready();
+  seed_emptiable_targets(56);
+  htrim_pass_start(&p);                /* step_us 0: one slice takes all 56 */
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(56, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(40, fake_db_rows(st.targets));   /* 40 carried */
+
+  seed_plain("#u0", "100.000", "U0", "a:bob", NULL);
+  seed_targets("#u0", "100.000");
+  seed_plain("#u1", "100.000", "U1", "a:bob", NULL);
+  seed_targets("#u1", "100.000");
+  lasts = fake_db_seek_lasts(st.messages);
+  {
+    struct htrim_slice *s = htrim_slice_begin(0);
+    assert_non_null(s);
+    htrim_slice_set_phase(s, HTRIM_PH_INCARNATION);
+    stage_del(s, HTRIM_PATH_INCARNATION, "#u0", "100.000", "U0", 1);
+    stage_del(s, HTRIM_PATH_INCARNATION, "#u1", "100.000", "U1", 1);
+    assert_int_equal(2, htrim_slice_commit(s));
+  }
+  assert_int_equal(lasts + 2, fake_db_seek_lasts(st.messages));
+  assert_int_equal(2, emptied_count);
+  assert_string_equal("#u0", emptied_names[0]);
+  assert_string_equal("#u1", emptied_names[1]);
+  assert_int_equal(40, fake_db_rows(st.targets));   /* still carried */
+
+  run_until_idle(&p);                  /* 16 + 16 + 8 */
+  assert_int_equal(lasts + 42, fake_db_seek_lasts(st.messages));
+  assert_int_equal(0, fake_db_rows(st.targets));
+}
+
+/** Assert meta row @a key holds exactly @a v (@a vl bytes). */
+static void assert_meta_bytes(const char *key, const void *v, size_t vl)
+{
+  struct db_val got = { NULL, 0 };
+  assert_int_equal(DB_OK, db_get(env, st.meta, key, strlen(key), NULL, &got));
+  assert_int_equal(vl, got.len);
+  assert_memory_equal(v, got.base, vl);
+  db_val_free(&got);
+}
+
+/* Task 7 fix round 2 F6: the resume point is persisted with each
+ * committed age-out slice, so the first walk after a restart starts there
+ * -- not at the first key, whose seek walks every tombstone the earlier
+ * passes left (791 ms on the bed, nothing to delete). */
+static void test_ageout_resume_persisted_across_restart(void **state)
+{
+  struct htrim_params p = bf_params(3);
+  char ts[32], last[32], mid[16];
+  char k[HTC_BT_KEY_MAX + 1];
+  unsigned char cut[8];
+  int i, kl;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 5; i++) {
+    snprintf(mid, sizeof mid, "O%d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  step_us = 1000;                      /* 3 rows a 3 ms slice */
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(3, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  kl = bt_of(k, sizeof k - 1, "#t", ts_ago(last, sizeof last, 8, 98), "O2");
+  k[kl++] = '\0';
+  assert_meta_bytes(HTRIM_META_AGEOUT_RESUME, k, (size_t)kl);
+
+  reboot();
+  step_us = 0;
+  load_acct();
+  step_us = 1000;
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(k, (size_t)kl);
+  assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  htc_be64(cut, p.now_ms - 7ULL * 86400ULL * 1000ULL);
+  assert_meta_bytes(HTRIM_META_AGEOUT_RESUME, cut, sizeof cut);
+
+  reboot();
+  step_us = 0;
+  load_acct();
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(cut, sizeof cut);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+}
+
+/* The persisted resume point never skips a row: a row indexed behind it
+ * (a late store, a backfill after a retention rise) moves it back in the
+ * same batch, so a restart before the next pass -- which drops the
+ * in-memory note of the late row -- still walks it. */
+static void test_ageout_late_row_survives_restart(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htrim_params p9 = bf_params(0);
+  char ts[32], told[32];
+  char k[HTC_BT_KEY_MAX];
+  int kl;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#t", ts_ago(ts, sizeof ts, 8, 0), "O1", "a:bob", NULL);
+  ageout_pass(&p);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+
+  /* A late store behind the walk; then a restart. */
+  seed_plain("#u", ts_ago(ts, sizeof ts, 10, 0), "LATE", "a:bob", NULL);
+  kl = bt_of(k, sizeof k, "#u", ts, "LATE");
+  assert_meta_bytes(HTRIM_META_AGEOUT_RESUME, k, (size_t)kl);
+  reboot();
+  load_acct();
+  ageout_pass(&p);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(1, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+
+  /* A backfill row behind the walk (retention 9, as after a downgrade
+   * window); then a restart before retention 7's next pass. */
+  p9.retention_days = 9;
+  htrim_check_index_gap(UINT64_MAX, 0);
+  seed_legacy_row("#l", ts_ago(told, sizeof told, 8, 43200), "L1", "Bob", 0, "", "", 0);
+  run_until_idle(&p9);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, fake_db_rows(st.by_time));
+  reboot();
+  load_acct();
+  ageout_pass(&p);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_acct_matches_cf();
+}
+
+/* An owner step that spans slices resumes past the last by_owner key it
+ * deleted -- never from the owner's first key again, whose seek walks
+ * every tombstone the step left so far. */
+static void test_evict_owner_resumes_past_its_deleted_head(void **state)
+{
+  struct htrim_params p = ev_params(3);
+  char pre[HTC_OWNER_MAX + 1], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX + 1], mid[16], ts[32];
+  const void *lo;
+  size_t ll;
+  uint64_t d;
+  int n, btl, bol;
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 56, 1000, 100);
+  seed_run("#f", "F", "a:flood", 30, 2000, 100);     /* 8600; a:flood over by 2000 */
+  step_us = 1000;
+  assert_int_equal(1, htrim_run_slice(&p));
+  n = htc_bo_prefix(pre, sizeof pre, "a:flood");
+  fake_db_last_iter_lower(st.by_owner, &lo, &ll);
+  assert_int_equal((size_t)n, ll);
+  assert_memory_equal(pre, lo, ll);                   /* a new step: the owner's first key */
+  d = htrim_stats()->deleted[HTRIM_PATH_OWNER];
+  assert_true(d > 0 && d < 20);
+
+  snprintf(mid, sizeof mid, "F%02d", (int)d - 1);
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)(2000 + d - 1));
+  btl = bt_of(bt, sizeof bt, "#f", ts, mid);
+  bol = htc_bo_key(bo, sizeof bo - 1, "a:flood", bt, (size_t)btl);
+  bo[bol++] = '\0';
+  assert_int_equal(1, htrim_run_slice(&p));
+  fake_db_last_iter_lower(st.by_owner, &lo, &ll);
+  assert_int_equal((size_t)bol, ll);
+  assert_memory_equal(bo, lo, ll);
+
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(1000, owner_of("a:flood"));
+  assert_int_equal(20, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+}
+
+/* An owner whose total says more than its by_owner entries hold (a
+ * double count) is walked to the end of its range: it then holds 0, and
+ * the drain ends instead of picking it again every slice. */
+static void test_evict_owner_drift_ends(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16], ts[32];
+  int i, btl, bol;
+  (void)state;
+
+  evict_ready();
+  seed_run("#f", "F", "a:flood", 20, 2000, 100);
+  for (i = 0; i < 20; i++) {           /* every row counted twice */
+    snprintf(mid, sizeof mid, "F%02d", i);
+    snprintf(ts, sizeof ts, "%d.000", 2000 + i);
+    btl = bt_of(bt, sizeof bt, "#f", ts, mid);
+    bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+    htrim_note_stored("a:flood", bo, (size_t)bol, 100);
+  }
+  seed_run("#n", "N", "-", 56, 1000, 100);
+  assert_int_equal(4000, owner_of("a:flood"));
+  assert_int_equal(9600, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, owner_of("a:flood"));
+  assert_int_equal(20, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_int_equal(5600, total_now());
+  assert_int_equal(0, htrim_draining());
+  assert_acct_matches_cf();
+}
+
+/* Totals that say more than the time index holds: oldest-overall runs
+ * out of rows; the totals are counted again from by_owner and the drain
+ * ends -- no slice after slice of empty walks. */
+static void test_evict_oldest_exhausted_recounts(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16];
+  int i, btl, bol;
+  (void)state;
+
+  p.quota_on = 0;
+  evict_ready();
+  seed_run("#t", "R", "-", 10, 1000, 100);
+  for (i = 0; i < 80; i++) {           /* counts with no row behind them */
+    snprintf(mid, sizeof mid, "X%02d", i);
+    btl = htc_bt_key(bt, sizeof bt, 5000000 + (uint64_t)i, "#x", mid);
+    bol = htc_bo_key(bo, sizeof bo, "-", bt, (size_t)btl);
+    htrim_note_stored("-", bo, (size_t)bol, 100);
+  }
+  assert_int_equal(9000, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(1, htrim_acct_loaded());
+  assert_int_equal(0, total_now());
+  assert_int_equal(0, htrim_draining());
+  assert_acct_matches_cf();
+}
+
+/* A drain's oldest-overall walk starts where age-out resumes -- every
+ * row below it is gone, so a seek from the first key would only walk
+ * their tombstones -- or at a row indexed behind that point since (here
+ * the oldest row of all, and the first to go); later slices resume past
+ * the last key deleted. */
+static void test_evict_oldest_starts_at_ageout_point(void **state)
+{
+  struct htrim_params pa = bf_params(0);
+  struct htrim_params p = ev_params(3);
+  char ts[32], mid[16], late[32];
+  char k[HTC_BT_KEY_MAX + 1];
+  int i, kl;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 3; i++) {
+    snprintf(mid, sizeof mid, "O%d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  ageout_pass(&pa);                    /* resumes at the 7-day cutoff now */
+  assert_int_equal(0, fake_db_rows(st.by_time));
+
+  p.quota_on = 0;
+  seed_run("#n", "N", "-", 85, BF_NOW_S - 3600, 100);
+  seed_sized("#l", BF_NOW_S - 9 * 86400, "LATE", "-", 100);   /* behind it */
+  snprintf(late, sizeof late, "%llu.000", (unsigned long long)(BF_NOW_S - 9 * 86400));
+  assert_int_equal(8600, total_now());
+
+  step_us = 1000;
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(HTRIM_PH_EVICT, htrim_stats()->last_phase);
+  kl = bt_of(k, sizeof k, "#l", late, "LATE");
+  assert_bt_lower(k, (size_t)kl);
+  assert_false(row_present("#l", BF_NOW_S - 9 * 86400, "LATE"));
+  i = (int)htrim_stats()->deleted[HTRIM_PATH_OLDEST] - 2;      /* the last N deleted */
+  assert_true(i >= 0);
+  snprintf(mid, sizeof mid, "N%02d", i);
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)(BF_NOW_S - 3600 + (uint64_t)i));
+  kl = bt_of(k, sizeof k - 1, "#n", ts, mid);
+  k[kl++] = '\0';
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_bt_lower(k, (size_t)kl);
+
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(7500, total_now());
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
 }
 
 int main(void)
@@ -2497,6 +3386,25 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_cleanup_carry_merges_a_retouched_target, setup, teardown),
     cmocka_unit_test_setup_teardown(test_cleanup_carry_dropped_on_restart, setup, teardown),
     cmocka_unit_test_setup_teardown(test_caller_slice_recorded_with_phase, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_waits_for_backfill, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_share_first, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_oldest_after_shares, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_hysteresis, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_truncated_plan_spares_compliant_owner, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_orphan_owner_entry, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_drain_suggests_compaction, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_compaction_hint_cumulative, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_floor_cleared_when_aged_past, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_cap_zero_idle, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_tsweep_removes_target_emptied_out_of_order, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_tsweep_after_failed_cleanup, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_unbudgeted_slice_keeps_the_carry, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_resume_persisted_across_restart, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_late_row_survives_restart, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_resumes_past_its_deleted_head, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_drift_ends, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_oldest_exhausted_recounts, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_oldest_starts_at_ageout_point, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

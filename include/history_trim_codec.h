@@ -264,6 +264,13 @@ struct htc_plan {
  * computes a share any other way. */
 uint64_t htc_owner_share(const struct htc_plan_params *p, const char *owner);
 
+/** The watermarks the planner uses for @a *high_pct / @a *low_pct (any
+ * SET value may be out of range), in place: high outside 1..100 -> 85,
+ * low outside 1..100 -> 75, then low >= high -> high - 10 (0 when high
+ * <= 10).  Every caller that turns the watermarks into bytes (the trim
+ * engine's "over high" check, STATS) goes through this one rule. */
+void htc_plan_sanitize(int *high_pct, int *low_pct);
+
 /** Plan one eviction pass against @a a's current totals under @a p.
  * See the module comment above htc_plan_eviction() in
  * history_trim_codec.c for the exact algorithm (watermark sanitizing,

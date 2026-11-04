@@ -44,18 +44,56 @@
  *
  * Age-out.  Retention is enforced by walking by_time -- globally ordered
  * by time -- over [resume point, be64(cutoff_ms)), oldest first, THE
- * delete for each row (counted), in budgeted slices.  The resume point (in
- * memory; the first key after a start) is the successor of the last
- * by_time key a slice stopped by its budget deleted, or the bound itself
- * once a walk reached it (every key below is gone; a retention rise never
- * moves it back); it moves only when a slice commits, so after a failed
- * commit the same rows come round again.  A pass opens at htrim_pass_start (each
+ * delete for each row (counted), in budgeted slices.  The resume point is
+ * the successor of the last by_time key a slice stopped by its budget
+ * deleted, or the bound itself once a walk reached it (every key below is
+ * gone; a retention rise never moves it back); it moves only when a slice
+ * commits, so after a failed commit the same rows come round again.  It
+ * is persisted (HTRIM_META_AGEOUT_RESUME) in each age-out slice's batch,
+ * so a restart resumes there too.  A pass opens at htrim_pass_start (each
  * maintenance tick, and a retention change) and resumes there -- never at
  * the first key again, whose seek would walk every tombstone the earlier
  * passes left -- except that a row indexed behind the resume point since
  * (a late CH W or relay, a backfill after a retention rise) sends the walk
- * back to the oldest such row.  A walk that reaches the cutoff closes the
- * pass.  Rows at the cutoff ms are kept.
+ * back to the oldest such row; such a row also moves the persisted point
+ * back, in its own batch, so a restart before the next pass still walks
+ * it.  A walk that reaches the cutoff closes the pass.  Rows at the
+ * cutoff ms are kept.
+ *
+ * The cap.  Once the backfill is done and the totals are loaded, a store
+ * whose total is strictly above cap * high% starts a drain, which runs
+ * until the total is at or below cap * low% (hysteresis; cap 0 = no cap).
+ * Each eviction slice plans afresh (htc_plan_eviction) and then:
+ *   - finishes the owner step in progress: an owner over its share, once
+ *     picked, loses its own oldest rows (a by_owner walk, resumed past
+ *     the last key the step deleted) down to its share;
+ *   - while the total is still above the low watermark, starts the
+ *     plan's next owner step (largest over-share first);
+ *   - only when nobody is over share and the plan listed every owner
+ *     (never when it was truncated: compliant owners' rows would go while
+ *     over-share owners keep theirs), deletes the oldest rows overall,
+ *     walking by_time, and moves the coverage floor (HTRIM_META_FLOOR,
+ *     the newest ms that walk deleted) in the same batch.
+ * A pass start whose cutoff is past the floor clears it: retention then
+ * covers what eviction took.  A drain's end hints compaction over every
+ * column family it deleted from and arms the targets sweep.
+ *
+ * Targets sweep.  The touched-target cleanup checks a target only when a
+ * slice deleted its newest stamped row -- exact for oldest-first age-out,
+ * but not for eviction (an owner trim can take a target's newest row and
+ * a later slice the older rest), and a failed cleanup or a restart (which
+ * drops the carried checks) can leave an emptied target's key.  The
+ * sweep walks the targets CF in budgeted slices, one bounded tail seek of
+ * [fold(t) 0x00, fold(t) 0x01) per key, deletes the keys of empty
+ * targets and reports them; it runs once per start (after the accounting
+ * scan), after every drain, and after a cleanup that could not finish.
+ * It never rewrites a stamp.
+ *
+ * Compaction hints.  Each tracked column family (messages, msgid,
+ * reply, ml_content, by_time, by_owner) keeps the smallest and largest
+ * key deleted since its last hint; once compact_min_rows keys have gone
+ * from it (any path), and at a drain's end, the engine calls
+ * db_suggest_compact over [smallest, largest ‖ 0x00).
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -80,6 +118,8 @@ struct db_writebatch;
 #define HTRIM_META_BACKFILL_DONE   "schema/trim-backfill"          /* value "done" */
 #define HTRIM_META_BACKFILL_CURSOR "schema/trim-backfill-cursor"   /* value: the last messages key processed */
 #define HTRIM_META_ALIVE           "trim/alive-ms"                 /* decimal epoch ms */
+#define HTRIM_META_FLOOR           "trim/coverage-floor"           /* decimal epoch ms */
+#define HTRIM_META_AGEOUT_RESUME   "trim/ageout-resume"            /* value: the by_time key age-out resumes at */
 
 /** The history env's column families the engine reads and writes.
  * @a meta is the env's default CF (the engine's own marker rows). */
@@ -119,10 +159,11 @@ enum htrim_path {
   HTRIM_PATH_COUNT
 };
 
-/** The phase one htrim_run_slice call ran.  The first four take turns;
- * CLEANUP runs only when none of them has work but carried emptiness
- * checks remain; INCARNATION names the burst-loss prune's unbudgeted
- * slice (history.c, htrim_slice_set_phase), never picked by the engine. */
+/** The phase one htrim_run_slice call ran.  AGEOUT, BACKFILL, ACCTSCAN,
+ * EVICT and TSWEEP take turns; CLEANUP runs only when none of them has
+ * work but carried emptiness checks remain; INCARNATION names the
+ * burst-loss prune's unbudgeted slice (history.c, htrim_slice_set_phase),
+ * never picked by the engine. */
 enum htrim_phase {
   HTRIM_PH_NONE,
   HTRIM_PH_AGEOUT,
@@ -130,7 +171,8 @@ enum htrim_phase {
   HTRIM_PH_ACCTSCAN,
   HTRIM_PH_EVICT,
   HTRIM_PH_CLEANUP,
-  HTRIM_PH_INCARNATION
+  HTRIM_PH_INCARNATION,
+  HTRIM_PH_TSWEEP
 };
 
 /** The live configuration for one slice. */
@@ -143,6 +185,9 @@ struct htrim_params {
   int          quota_on;
   int          share_pct;
   unsigned int slice_ms;         /**< budget; 0 = no budget */
+  unsigned int compact_min_rows; /**< hint a CF's compaction once this many
+                                      of its keys were deleted since its
+                                      last hint; 0 = only at a drain's end */
 };
 
 struct htrim_stats {
@@ -157,8 +202,27 @@ struct htrim_stats {
 
 struct htrim_slice;
 
+/** Called after a commit that moved or cleared the coverage floor. */
+typedef void (*htrim_coverage_fn)(void);
+
+/** Register the coverage callback (NULL = none).  It survives
+ * htrim_init / htrim_shutdown. */
+void htrim_set_coverage_cb(htrim_coverage_fn cb);
+
+/** The coverage floor: the newest ms oldest-overall eviction deleted, so
+ * rows older than it may be missing inside retention; 0 = none. */
+uint64_t htrim_coverage_floor_ms(void);
+
+/** @return non-zero while an eviction drain is under way. */
+int htrim_draining(void);
+
+/** @return non-zero while a targets sweep pass is due or under way. */
+int htrim_tsweep_pending(void);
+
 /** Start the engine over @a st (copied).  Reads the engine's meta rows
- * (the backfill's done marker and cursor, the alive stamp); logs nothing
+ * (the backfill's done marker and cursor, the alive stamp, the coverage
+ * floor, the age-out resume point -- an unreadable one means the first
+ * key) and arms this start's targets sweep; logs nothing
  * (history_init runs on a worker thread).  @a st's env, messages, msgid,
  * targets, reply, by_time and by_owner and @a clock are required; redact,
  * ml_content, ml_paste and meta may be NULL (rows in a missing CF are then
@@ -180,7 +244,8 @@ void htrim_shutdown(void);
  * first 8 bytes; @a rec is its record (rec->owner, rec->bytes the
  * by_owner key and value).  The by_owner key is copied to @a bo_key
  * (@a bo_size bytes), its length to *@a bo_klen, for htrim_note_stored
- * after the commit.
+ * after the commit.  A row behind the stored age-out resume point (a late
+ * row) also puts that point back to its by_time key, on @a wb.
  * @return 0, or -1: a key did not fit (nothing staged) or a put failed
  * (do not commit @a wb). */
 int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
@@ -192,7 +257,8 @@ int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
  * Age-out depends on it: a row indexed behind the age-out walk's resume
  * point is found only through here (and the backfill's own note), so
  * every committed by_time put -- every store path, every retry -- must
- * reach it, or the row outlives retention until a restart. */
+ * reach it, or the row outlives retention.  The drain's walks (the owner
+ * step in progress, oldest overall) go back for such a row too. */
 void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
                        uint32_t bytes);
 
@@ -281,7 +347,10 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
  * and the cleanup).  A slice with a phase is recorded in htrim_stats,
  * committed or not.  The cleanup of a budgeted slice does at most 16
  * emptiness seeks and carries the rest of its touched targets to the next
- * committed slice (in memory: a restart drops them).  Frees @a s.
+ * committed slice (in memory: a restart drops them, and the start's
+ * targets sweep reaps them); an unbudgeted slice checks its own touched
+ * targets only, the carried ones staying with the budgeted slices.
+ * Frees @a s.
  * @return the rows deleted, or -1 (nothing applied). */
 int htrim_slice_commit(struct htrim_slice *s);
 
@@ -290,8 +359,9 @@ void htrim_slice_abort(struct htrim_slice *s);
 
 /** Whether a targets cleanup could not finish (its batch failed, or an
  * emptiness check could not read a target), so targets-CF keys may have
- * outlived their rows: the targets sweep (Task 8) should run.  The flag
- * stays set until htrim_tsweep_clear. */
+ * outlived their rows: the targets sweep runs (once the accounting is
+ * loaded).  The flag stays set until a sweep pass starts, or until
+ * htrim_tsweep_clear. */
 int htrim_tsweep_wanted(void);
 void htrim_tsweep_clear(void);
 
@@ -307,8 +377,10 @@ int htrim_run_slice(const struct htrim_params *p);
  * @a p->retention_days > 0 (a pass at retention 0 is closed at once).  The
  * walk resumes where the last one stopped, or at the oldest by_time row
  * indexed behind that point since (htrim_note_stored, the backfill) --
- * every other row behind it is gone.  Call it before the pass's first
- * slice: each maintenance tick, and on a retention change. */
+ * every other row behind it is gone.  A coverage floor older than the
+ * cutoff is cleared (its meta row deleted, the coverage callback told).
+ * Call it before the pass's first slice: each maintenance tick, and on a
+ * retention change.  May log. */
 void htrim_pass_start(const struct htrim_params *p);
 
 /** @return non-zero while an age-out pass is open: rows past the
@@ -318,7 +390,8 @@ int htrim_ageout_pending(void);
 /** What the last failed htrim_run_slice ran into ("" before any). */
 const char *htrim_last_error(void);
 
-/** "ageout", "backfill", "scan", "evict" or "none". */
+/** "ageout", "backfill", "scan", "evict", "tsweep", "cleanup",
+ * "incarnation" or "none". */
 const char *htrim_phase_name(enum htrim_phase ph);
 
 const struct htrim_stats *htrim_stats(void);
