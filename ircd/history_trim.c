@@ -52,6 +52,10 @@
 #define HTRIM_REPLY_KEY_MAX (HTC_TARGET_MAX + HTC_MSGID_MAX + HTC_TS_MAX + HTC_MSGID_MAX + 3)
 /** Largest msgid_index key: msgid \0 fold(target). */
 #define HTRIM_MSGID_KEY_MAX (HTC_MSGID_MAX + 1 + HTC_TARGET_MAX)
+/** Unindexable keys a walk names in the log (then only counts). */
+#define HTRIM_BF_LOG_KEYS 5
+/** A logged key's printable form, quotes excluded. */
+#define HTRIM_KEY_PREVIEW 128
 
 /** One pending accounting delta: a by_owner key copy in the slice's arena. */
 struct htrim_pending {
@@ -87,6 +91,10 @@ struct htrim_slice {
   char                 *bf_cursor;   /* the last messages key it processed */
   size_t                bf_cursor_len, bf_cursor_cap;
   size_t                bf_rows, bf_indexed, bf_aged, bf_unindexed;
+  /* Unindexable keys to name in the log once this slice commits. */
+  char                  bf_bad[HTRIM_BF_LOG_KEYS][HTRIM_KEY_PREVIEW];
+  size_t                bf_bad_klen[HTRIM_BF_LOG_KEYS];
+  unsigned int          bf_nbad;
 };
 
 static struct {
@@ -107,6 +115,8 @@ static struct {
   char              *bf_cursor;       /* last messages key processed */
   size_t             bf_cursor_len, bf_cursor_cap;
   size_t             bf_rows, bf_indexed, bf_aged, bf_unindexed;  /* since htrim_init */
+  unsigned int       bf_bad_logged;   /* unindexable keys named this walk */
+  int                bf_unread;       /* a backfill meta row could not be read */
   uint64_t           alive_ms;        /* the last alive stamp, 0 = none */
 
   enum htrim_phase   last_run;
@@ -164,45 +174,86 @@ static void bf_cursor_clear(void)
   g.bf_cursor_len = g.bf_cursor_cap = 0;
 }
 
-/** Read meta row @a key into @a out (a NUL-terminated copy, at most
- * @a size - 1 bytes).  @return its length, or -1: no meta CF, no row, a
- * read error, or a value that does not fit. */
-static int meta_read(const char *key, char *out, size_t size)
+/** Read meta row @a key into @a v (the caller frees it).
+ * @return 1 read, 0 no such row (or no meta CF), -1 a read error. */
+static int meta_get(const char *key, struct db_val *v)
 {
-  struct db_val v = { NULL, 0 };
-  int n = -1;
+  int rc;
 
-  if (!g.st.meta
-      || db_get(g.st.env, g.st.meta, key, strlen(key), NULL, &v) != DB_OK)
-    return -1;
-  if (v.len < size) {
-    if (v.len)
-      memcpy(out, v.base, v.len);
-    out[v.len] = '\0';
-    n = (int)v.len;
-  }
-  db_val_free(&v);
-  return n;
+  if (!g.st.meta)
+    return 0;
+  rc = db_get(g.st.env, g.st.meta, key, strlen(key), NULL, v);
+  if (rc == DB_OK)
+    return 1;
+  return rc == DB_NOTFOUND ? 0 : -1;
 }
 
-/** Load the backfill's state and the alive stamp from the meta rows.  A
- * cursor row means an unfinished walk, whatever the done marker says (a
- * re-run whose marker delete did not commit still resumes). */
+/** Load the backfill's state and the alive stamp from the meta rows.
+ *  - A cursor row means an unfinished walk, whatever the done marker says
+ *    (a re-run whose marker delete did not commit still resumes).
+ *  - A row that cannot be read is not a missing row: an unreadable cursor
+ *    beside a done marker would read as "done".  Either read failing means
+ *    an unfinished walk with no usable cursor -- it runs again from the
+ *    first key (the skip rule keeps that exact) -- and bf_unread tells the
+ *    gap check the store may still hold a marker or a cursor.
+ *  - An unreadable alive stamp reads as none (0): a gap then resets. */
 static void meta_load(void)
 {
-  char buf[HTC_MSG_KEY_MAX + 1];
-  int n;
+  struct db_val v = { NULL, 0 };
+  char buf[24];
+  int rc;
 
-  n = meta_read(HTRIM_META_BACKFILL_CURSOR, buf, sizeof buf);
-  if (n > 0)
-    bytes_set(&g.bf_cursor, &g.bf_cursor_len, &g.bf_cursor_cap, buf, (size_t)n);
-  else
-    g.bf_done = meta_read(HTRIM_META_BACKFILL_DONE, buf, sizeof buf) == 4
-                && memcmp(buf, "done", 4) == 0;
+  rc = meta_get(HTRIM_META_BACKFILL_CURSOR, &v);
+  if (rc > 0 && v.len)
+    bytes_set(&g.bf_cursor, &g.bf_cursor_len, &g.bf_cursor_cap, v.base, v.len);
+  db_val_free(&v);
+  if (rc < 0)
+    g.bf_unread = 1;
+  else if (!g.bf_cursor_len) {
+    rc = meta_get(HTRIM_META_BACKFILL_DONE, &v);
+    if (rc < 0)
+      g.bf_unread = 1;
+    else
+      g.bf_done = rc > 0 && v.len == 4 && memcmp(v.base, "done", 4) == 0;
+    db_val_free(&v);
+  }
 
-  n = meta_read(HTRIM_META_ALIVE, buf, sizeof buf);
-  if (n > 0 && n < 21 && strspn(buf, "0123456789") == (size_t)n)
-    g.alive_ms = strtoull(buf, NULL, 10);
+  if (meta_get(HTRIM_META_ALIVE, &v) > 0 && v.len && v.len < sizeof buf) {
+    memcpy(buf, v.base, v.len);
+    buf[v.len] = '\0';
+    if (strspn(buf, "0123456789") == v.len)
+      g.alive_ms = strtoull(buf, NULL, 10);
+  }
+  db_val_free(&v);
+}
+
+/** Render a key for the log: printable ASCII as is, every other byte (the
+ * NUL separators too), a backslash and a quote as \xHH; "..." marks a cut. */
+static const char *key_preview(char *buf, size_t size, const void *key, size_t klen)
+{
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *k = (const unsigned char *)key;
+  size_t i, o = 0;
+
+  for (i = 0; i < klen; i++) {
+    unsigned char c = k[i];
+    int plain = c >= 0x20 && c < 0x7f && c != '\\' && c != '\'';
+    if (o + (plain ? 1 : 4) + 4 > size) {      /* room for "..." and the NUL */
+      memcpy(buf + o, "...", 3);
+      o += 3;
+      break;
+    }
+    if (plain)
+      buf[o++] = (char)c;
+    else {
+      buf[o++] = '\\';
+      buf[o++] = 'x';
+      buf[o++] = hex[c >> 4];
+      buf[o++] = hex[c & 15];
+    }
+  }
+  buf[o] = '\0';
+  return buf;
 }
 
 /** THE accounting rule: every store/delete delta goes through here. */
@@ -325,41 +376,55 @@ size_t htrim_backfill_rows(void)
   return g.bf_rows;
 }
 
-void htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms)
+int htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms)
 {
   struct db_writebatch *wb;
   uint64_t limit;
+  int was_done;
 
-  if (!g.inited || !g.bf_done)
-    return;
+  if (!g.inited)
+    return 0;
   limit = g.alive_ms + slack_ms;
   if (limit < g.alive_ms)
     limit = UINT64_MAX;
   if (newest_row_ms <= limit)
-    return;
+    return 0;
+  /* Nothing to reset: the walk never started (a first start, an
+   * unstamped store) -- it walks everything from the first key anyway. */
+  if (!g.bf_done && !g.bf_cursor_len && !g.bf_unread)
+    return 0;
 
-  /* Re-run this start whatever the batch below does: until a backfill
-   * slice commits its first cursor row, a failed marker delete would only
-   * make the next start skip the walk. */
+  /* Done or mid-walk: an older binary's rows may sort before the cursor,
+   * so the walk restarts from the first key.  Reset in memory whatever the
+   * batch below does: this start re-runs either way. */
+  was_done = g.bf_done;
   g.bf_done = 0;
+  g.bf_unread = 0;
+  g.bf_bad_logged = 0;
   bf_cursor_clear();
   log_write(LS_SYSTEM, L_INFO, 0,
             "history: trim index gap: newest row %llu ms is past the last alive "
-            "stamp %llu ms + %llu ms; re-running the backfill",
+            "stamp %llu ms + %llu ms; re-running the backfill from the first "
+            "row (it was %s)",
             (unsigned long long)newest_row_ms, (unsigned long long)g.alive_ms,
-            (unsigned long long)slack_ms);
+            (unsigned long long)slack_ms, was_done ? "done" : "unfinished");
   if (!g.st.meta)
-    return;
+    return 1;
   wb = db_writebatch_new(g.st.env);
   if (!wb
       || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_DONE,
                            strlen(HTRIM_META_BACKFILL_DONE)) != DB_OK
       || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_CURSOR,
                            strlen(HTRIM_META_BACKFILL_CURSOR)) != DB_OK
-      || db_writebatch_commit(wb, 0) != DB_OK)
+      || db_writebatch_commit(wb, 0) != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "history_trim: cannot clear the backfill marker: %s", last_err());
+              "history_trim: cannot clear the backfill marker and cursor: %s",
+              last_err());
+    db_writebatch_destroy(wb);
+    return -1;
+  }
   db_writebatch_destroy(wb);
+  return 1;
 }
 
 void htrim_stamp_alive(uint64_t now_ms)
@@ -761,10 +826,18 @@ static void cleanup_touched(struct htrim_slice *s)
  * batch stored, or finish. */
 static void backfill_apply(struct htrim_slice *s)
 {
+  unsigned int i;
+
   g.bf_rows += s->bf_rows;
   g.bf_indexed += s->bf_indexed;
   g.bf_aged += s->bf_aged;
   g.bf_unindexed += s->bf_unindexed;
+  for (i = 0; i < s->bf_nbad; i++)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: trim backfill: messages key '%s' (%zu bytes) cannot be "
+              "indexed; the trimmer never removes it", s->bf_bad[i],
+              s->bf_bad_klen[i]);
+  g.bf_bad_logged += s->bf_nbad;
   if (s->bf_finished) {
     g.bf_done = 1;
     bf_cursor_clear();
@@ -774,7 +847,8 @@ static void backfill_apply(struct htrim_slice *s)
     if (g.bf_unindexed)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "history: trim backfill: %zu rows have a key the trim index "
-                "cannot hold; the trimmer never removes them", g.bf_unindexed);
+                "cannot hold; the trimmer never removes them (the first %u "
+                "are named above)", g.bf_unindexed, g.bf_bad_logged);
   } else if (s->bf_cursor_len) {
     bytes_set(&g.bf_cursor, &g.bf_cursor_len, &g.bf_cursor_cap,
               s->bf_cursor, s->bf_cursor_len);
@@ -869,6 +943,19 @@ static int phase_acctscan(struct htrim_slice *s)
   return 0;
 }
 
+/** A messages key the backfill cannot index: counted, and among the
+ * walk's first HTRIM_BF_LOG_KEYS named in the log once the slice commits
+ * (a failed commit walks the row again, so it is not named twice). */
+static void bf_unindexable(struct htrim_slice *s, const void *k, size_t kl)
+{
+  s->bf_unindexed++;
+  if (g.bf_bad_logged + s->bf_nbad >= HTRIM_BF_LOG_KEYS)
+    return;
+  key_preview(s->bf_bad[s->bf_nbad], sizeof s->bf_bad[0], k, kl);
+  s->bf_bad_klen[s->bf_nbad] = kl;
+  s->bf_nbad++;
+}
+
 /** One messages row of the backfill walk (key @a k, value @a v).
  * @return 0 (indexed, aged out, skipped or left as unindexable), or -1:
  * a read failed or the slice is poisoned -- abort the slice. */
@@ -890,13 +977,13 @@ static int backfill_row(struct htrim_slice *s, const void *k, size_t kl,
                         msgid, sizeof msgid) != 0 || !target[0] || !ts[0]
       || (mkl = htc_msg_key(mk, sizeof mk, target, ts, msgid)) < 0
       || (size_t)mkl != kl || memcmp(mk, k, kl) != 0) {
-    s->bf_unindexed++;
+    bf_unindexable(s, k, kl);
     return 0;
   }
   ms = htc_parse_ms(ts);
   btl = htc_bt_key(bt, sizeof bt, ms, target, msgid);
   if (btl < 0) {
-    s->bf_unindexed++;
+    bf_unindexable(s, k, kl);
     return 0;
   }
 
@@ -942,7 +1029,7 @@ static int backfill_row(struct htrim_slice *s, const void *k, size_t kl,
   rec.bytes = htc_row_bytes(kl, vl, ml, (size_t)btl, strlen(rec.owner));
   rc = stage_index(s->wb, bt, (size_t)btl, &rec, bo, sizeof bo, &bol);
   if (rc == -1) {
-    s->bf_unindexed++;
+    bf_unindexable(s, k, kl);
     return 0;
   }
   if (rc < 0) {

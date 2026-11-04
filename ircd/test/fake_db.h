@@ -44,6 +44,10 @@ extern void fake_db_fail_next_batch_op(struct db_env *env);
  * NULL.  One-shot. */
 extern void fake_db_fail_next_iter_open(struct db_env *env);
 
+/** Make the @a n-th db_get from now on this env return DB_ERR_IO (1 =
+ * the next one; 0 cancels).  One-shot. */
+extern void fake_db_fail_get_at(struct db_env *env, unsigned int n);
+
 /** Number of db_iter_open + db_iter_open_bounded calls made on @a cf
  * since it was opened. */
 extern unsigned int fake_db_iter_opens(const struct db_cf *cf);

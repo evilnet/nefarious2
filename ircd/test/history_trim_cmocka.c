@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <cmocka.h>
 
 #include "db_cursor.h"
@@ -121,9 +122,12 @@ static int setup(void **state)
   return 0;
 }
 
+static void stderr_restore(void);
+
 static int teardown(void **state)
 {
   (void)state;
+  stderr_restore();                    /* a failed capture test */
   htrim_shutdown();
   fake_db_free(env);
   env = NULL;
@@ -1411,8 +1415,10 @@ static void test_index_gap_reruns_backfill(void **state)
   /* Persisted: a restart before the re-run still runs it. */
   reboot();
   assert_int_equal(0, htrim_backfill_done());
-  /* The alive stamp survives the restart. */
-  htrim_check_index_gap(1000 + 600001, 600000);    /* not done: nothing to do */
+  /* Still a gap against the persisted alive 1000, but no walk state is
+   * left to reset: nothing is reset (and nothing logged). */
+  assert_int_equal(0, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(0, htrim_backfill_done());
   seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 0), "G1", "Bob", 0, "", "", 0);
   run_until_idle(&p);
   assert_int_equal(1, htrim_backfill_done());
@@ -1420,6 +1426,218 @@ static void test_index_gap_reruns_backfill(void **state)
   reboot();
   htrim_check_index_gap(1000 + 600000, 600000);    /* the persisted alive is 1000 */
   assert_int_equal(1, htrim_backfill_done());
+}
+
+/* Review Focus 3, an unfinished walk: this binary stops with its cursor at
+ * K, an older binary stores rows (some sort before K), this binary comes
+ * back.  Resuming at K would never walk them, and the done marker plus
+ * fresh alive stamps would then hide them for good: the gap check resets
+ * the cursor too, and the walk restarts from the first key. */
+static void test_index_gap_resets_unfinished_walk(void **state)
+{
+  struct htrim_params p = bf_params(5);
+  struct htc_rec r;
+  char ts[32], told[32], mid[16];
+  int i;
+  (void)state;
+
+  load_acct_backfill_pending();
+  for (i = 0; i < 20; i++) {
+    snprintf(mid, sizeof mid, "R%02d", i);
+    seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 100 - i), mid, "Bob", 0, "", "", 0);
+  }
+  htrim_stamp_alive(1000);
+  step_us = 1000;                      /* 1 ms per clock read; 5 ms slices */
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(HTRIM_PH_BACKFILL, htrim_stats()->last_phase);
+  assert_true(fake_db_rows(st.by_time) > 0 && fake_db_rows(st.by_time) < 20);
+  assert_int_equal(0, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));   /* a cursor row */
+
+  /* The older binary's row: "#a" sorts before the cursor inside "#t". */
+  seed_legacy_row("#a", ts_ago(told, sizeof told, 0, 60), "OLDBIN", "Ann", 0, "", "", 0);
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  htrim_check_index_gap(1000 + 600001, 600000);
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+
+  step_us = 0;
+  p = bf_params(0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(21, htrim_backfill_rows());       /* from the first key */
+  assert_int_equal(21, fake_db_rows(st.by_time));
+  get_rec("#a", told, "OLDBIN", &r);
+  assert_string_equal("a:ann", r.owner);
+  assert_acct_matches_cf();
+}
+
+/* A reset the store would not take is reported: the caller then withholds
+ * this start's alive stamp, so a crash before the re-run's first slice
+ * commits leaves the gap for the next start to find again. */
+static void test_index_gap_reset_failure_reported(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  (void)state;
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  htrim_stamp_alive(1000);
+
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(0, htrim_backfill_done());           /* this start re-runs */
+  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(1, meta_is(HTRIM_META_ALIVE, "1000"));
+
+  reboot();                            /* a crash before any slice committed */
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(0, htrim_check_index_gap(1000 + 600001, 600000));   /* nothing left */
+  assert_int_equal(0, htrim_check_index_gap(1000, 600000));           /* no gap */
+}
+
+/* A meta row that cannot be read is not a missing row: an unreadable
+ * cursor beside a done marker (a re-run whose marker delete did not
+ * commit) is an unfinished walk, and so is an unreadable done marker.
+ * Either way the walk runs again from the first key. */
+static void test_meta_read_error_means_not_done(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32], ck[HTC_MSG_KEY_MAX];
+  int ckl;
+  (void)state;
+
+  seed_legacy_row("#a", ts_ago(ts, sizeof ts, 1, 0), "A1", "Ann", 0, "", "", 0);
+  seed_legacy_row("#z", ts_ago(ts, sizeof ts, 1, 0), "Z1", "Zed", 0, "", "", 0);
+  ckl = htc_msg_key(ck, sizeof ck, "#m", ts, "M1");     /* a cursor between them */
+  assert_true(ckl > 0);
+  put_meta(HTRIM_META_BACKFILL_DONE, "done");
+  {
+    struct db_writebatch *wb = db_writebatch_new(env);
+    assert_non_null(wb);
+    assert_int_equal(DB_OK, db_writebatch_put(wb, st.meta, HTRIM_META_BACKFILL_CURSOR,
+                                              strlen(HTRIM_META_BACKFILL_CURSOR), ck, (size_t)ckl));
+    assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+    db_writebatch_destroy(wb);
+  }
+
+  fake_db_fail_get_at(env, 1);         /* init's first read: the cursor */
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(2, htrim_backfill_rows());          /* "#a" too: from the first key */
+  assert_int_equal(2, fake_db_rows(st.by_time));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
+
+  /* Done, no cursor: the done marker's read (init's second) fails. */
+  fake_db_fail_get_at(env, 2);
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  reboot();
+  assert_int_equal(1, htrim_backfill_done());          /* readable again: done */
+
+  /* A gap while the walk state was unreadable: the store's marker and
+   * cursor may still be there, so the reset deletes them. */
+  put_meta(HTRIM_META_BACKFILL_CURSOR, "#m");
+  htrim_stamp_alive(1000);
+  fake_db_fail_get_at(env, 1);
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+
+  /* The same with only the done marker there, and it unreadable. */
+  put_meta(HTRIM_META_BACKFILL_DONE, "done");
+  fake_db_fail_get_at(env, 2);
+  reboot();
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+}
+
+/* The rows the round-trip guard leaves alone are never trimmed: the walk
+ * names the first five keys (non-printable bytes hex-escaped), then the
+ * count.  test_stub's log_write writes to stderr. */
+static int stderr_saved = -1;
+
+static void stderr_capture(FILE **tmp)
+{
+  *tmp = tmpfile();
+  assert_non_null(*tmp);
+  fflush(stderr);
+  stderr_saved = dup(2);
+  assert_true(stderr_saved >= 0);
+  assert_true(dup2(fileno(*tmp), 2) >= 0);
+}
+
+static void stderr_restore(void)
+{
+  if (stderr_saved < 0)
+    return;
+  fflush(stderr);
+  dup2(stderr_saved, 2);
+  close(stderr_saved);
+  stderr_saved = -1;
+}
+
+static int count_of(const char *hay, const char *needle)
+{
+  int n = 0;
+  const char *p = hay;
+  while ((p = strstr(p, needle)) != NULL) {
+    n++;
+    p += strlen(needle);
+  }
+  return n;
+}
+
+static void test_backfill_logs_first_unindexable_keys(void **state)
+{
+  struct htrim_params p = bf_params(3);   /* a few keys per slice: the limit is per walk */
+  struct db_writebatch *wb;
+  char ts[32], k[64], want[96], log[8192];
+  FILE *tmp;
+  size_t n;
+  int i, kl;
+  (void)state;
+
+  ts_ago(ts, sizeof ts, 1, 0);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  for (i = 0; i < 7; i++) {            /* unfolded targets: not rebuildable */
+    kl = snprintf(k, sizeof k, "#U%d%c%s%cU%cF", i, '\0', ts, '\0', i == 0 ? '\x01' : 'x');
+    assert_true(kl > 0);
+    assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, k, (size_t)kl, "Bob|0|||x", 9));
+  }
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+
+  stderr_capture(&tmp);
+  step_us = 1000;                      /* 1 ms per clock read; 3 ms slices */
+  run_until_idle(&p);
+  stderr_restore();
+  rewind(tmp);
+  n = fread(log, 1, sizeof log - 1, tmp);
+  log[n] = '\0';
+  fclose(tmp);
+
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_true(htrim_stats()->max_slice_us > 0);
+  assert_int_equal(5, count_of(log, "cannot be indexed"));
+  snprintf(want, sizeof want, "'#U0\\x00%s\\x00U\\x01F'", ts);
+  assert_non_null(strstr(log, want));
+  snprintf(want, sizeof want, "'#U4\\x00%s\\x00UxF'", ts);
+  assert_non_null(strstr(log, want));
+  assert_null(strstr(log, "'#U5"));
+  assert_null(strstr(log, "'#U6"));
+  assert_non_null(strstr(log, "7 rows have a key the trim index cannot hold"));
 }
 
 /* Both phases pending: consecutive slices take turns (round-robin), not
@@ -1490,6 +1708,10 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_backfill_ml_counts_blob, setup, teardown),
     cmocka_unit_test_setup_teardown(test_backfill_parse_failure, setup, teardown),
     cmocka_unit_test_setup_teardown(test_index_gap_reruns_backfill, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_resets_unfinished_walk, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_reset_failure_reported, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_meta_read_error_means_not_done, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_logs_first_unindexable_keys, setup, teardown),
     cmocka_unit_test_setup_teardown(test_run_slice_rotation, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -38,8 +38,9 @@
  * full, uncounted (it was never counted); any other row is indexed and
  * counted through the accounting rule.  An exhausted walk puts the done
  * marker and deletes the cursor; a boot whose newest stored row is past
- * the last alive stamp plus a slack (a downgrade window) deletes both, and
- * the walk runs again.
+ * the last alive stamp plus a slack (a downgrade window) deletes both --
+ * done or mid-walk -- and the walk runs again from the first key.  A meta
+ * row that cannot be read counts as an unfinished walk.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -182,13 +183,21 @@ int htrim_backfill_done(void);
 /** @return the messages rows the backfill walked since htrim_init. */
 size_t htrim_backfill_rows(void);
 
-/** The downgrade check, once at start (main thread; may log): when the
- * backfill is done but @a newest_row_ms is past the last alive stamp plus
+/** The downgrade check, once at start before any slice (main thread; may
+ * log): when @a newest_row_ms is past the last alive stamp plus
  * @a slack_ms, rows were stored while this binary was not running (an
- * older binary wrote them unindexed) -- delete the done marker and the
- * cursor, and the backfill runs again (its skip rule keeps the rows
- * already indexed as they are). */
-void htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms);
+ * older binary wrote them unindexed).  Whatever the walk's state -- done,
+ * or stopped mid-way (rows sorting before its cursor would never be
+ * walked) -- the done marker and the cursor go, in memory and in the
+ * store, and the backfill runs again from the first key (its skip rule
+ * keeps the rows already indexed as they are).
+ * @return 0: no gap, or no walk state to reset (nothing logged);
+ *         1: reset (logged);
+ *        -1: reset in memory, but the store kept its marker or cursor --
+ *            the caller must not stamp alive this start, so that a crash
+ *            before the re-run's first slice commits leaves the gap for
+ *            the next start to find. */
+int htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms);
 
 /** Persist @a now_ms as the alive stamp (one small batch): call at each
  * pass start and at shutdown. */

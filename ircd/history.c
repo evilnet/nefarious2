@@ -837,12 +837,19 @@ void history_trim_start(uint64_t newest_row_ms)
   /* Rows newer than the last alive stamp plus two maintenance intervals
    * (a crash can leave a whole interval of rows after the last stamp)
    * were stored while this binary was not running: the backfill runs
-   * again.  Then this start is itself a stamp. */
+   * again from the first row.  Then this start is itself a stamp -- unless
+   * the reset did not reach the store: a fresh stamp would then hide the
+   * gap from the next start if this one died before the re-run's first
+   * slice committed. */
   interval = feature_int(FEAT_CHATHISTORY_MAINTENANCE_INTERVAL);
   if (interval < 60)
     interval = 60;
-  htrim_check_index_gap(newest_row_ms, 2000ULL * (uint64_t)interval);
-  htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
+  if (htrim_check_index_gap(newest_row_ms, 2000ULL * (uint64_t)interval) < 0)
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: trim index-gap reset did not reach the store; no alive "
+              "stamp this start, so the next start finds the gap again");
+  else
+    htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
   /* A never-armed (or long-expired) timer: a fresh generator. */
   if (!t_onqueue(&history_trim_timer) && !t_active(&history_trim_timer))
     timer_init(&history_trim_timer);

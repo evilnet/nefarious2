@@ -56,6 +56,7 @@ struct db_env {
   unsigned int fail_commit_in;   /* the commit that many from now fails */
   int          fail_next_op;
   int          fail_next_iter;
+  unsigned int fail_get_in;      /* the db_get that many from now fails */
   char         last_error[128];
 };
 
@@ -233,6 +234,12 @@ void fake_db_fail_next_iter_open(struct db_env *env)
 {
   if (env)
     env->fail_next_iter = 1;
+}
+
+void fake_db_fail_get_at(struct db_env *env, unsigned int n)
+{
+  if (env)
+    env->fail_get_in = n;
 }
 
 unsigned int fake_db_seek_firsts(const struct db_cf *cf)
@@ -700,10 +707,11 @@ int db_get(struct db_env *env, struct db_cf *cf,
            struct db_val *out)
 {
   struct row *r;
-  (void)env;
   (void)snap;
   if (!cf || !out)
     return DB_ERR_OTHER;
+  if (env && env->fail_get_in && --env->fail_get_in == 0)
+    return DB_ERR_IO;
   r = cf_find(cf, (const char *)key, klen);
   if (!r)
     return DB_NOTFOUND;
