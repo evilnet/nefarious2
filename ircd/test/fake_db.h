@@ -70,6 +70,13 @@ extern int fake_db_last_suggest(const struct db_cf *cf,
                                 const void **start, size_t *slen,
                                 const void **end, size_t *elen);
 
+/** The lower bound of the most recent db_iter_open_bounded on @a cf
+ * (NULL/0 when that open had none, or before any).  Owned by @a cf; valid
+ * until the next bounded open on it.  On RocksDB a seek from a lower
+ * bound skips every tombstone before it; from no bound it walks them. */
+extern void fake_db_last_iter_lower(const struct db_cf *cf,
+                                    const void **lower, size_t *llen);
+
 /** Current row count of @a cf. */
 extern size_t fake_db_rows(const struct db_cf *cf);
 

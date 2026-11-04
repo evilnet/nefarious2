@@ -2001,6 +2001,109 @@ static void test_ageout_pass_start_catches_late_row(void **state)
   assert_acct_matches_cf();
 }
 
+/** Assert the most recent bounded by_time iterator opened at exactly
+ * @a k (@a kl bytes; NULL = no lower bound). */
+static void assert_bt_lower(const void *k, size_t kl)
+{
+  const void *lo;
+  size_t ll;
+  fake_db_last_iter_lower(st.by_time, &lo, &ll);
+  if (!k) {
+    assert_null(lo);
+    return;
+  }
+  assert_non_null(lo);
+  assert_int_equal(kl, ll);
+  assert_memory_equal(k, lo, kl);
+}
+
+/* The bed (valgrind, 2026-11-04): a pass start that reopened the walk at
+ * the first by_time key walked every tombstone the earlier passes left --
+ * ~3000, 316-433 ms in one slice.  A pass start resumes where the last
+ * walk stopped (rows behind it are gone), and goes back only as far as
+ * the oldest row indexed behind it since -- a late store, or a backfill
+ * after a retention rise. */
+static void test_ageout_pass_start_resumes_past_drained_head(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32], last[32], late[32], ahead[32], mid[16];
+  char k[HTC_BT_KEY_MAX + 1];
+  int i, kl;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 5; i++) {
+    snprintf(mid, sizeof mid, "O%d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  ts_ago(last, sizeof last, 8, 96);                     /* O4, the last deleted */
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(NULL, 0);                             /* the first walk: from the first key */
+  assert_int_equal(5, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+
+  /* No row behind the walk: the next pass resumes past O4. */
+  kl = bt_of(k, sizeof k - 1, "#t", last, "O4");
+  k[kl++] = '\0';                                       /* O4's key ‖ 0x00 */
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(k, (size_t)kl);
+
+  /* A row ahead of the walk (newer than O4, still past retention) is not
+   * behind it: the pass still resumes past O4, and deletes it. */
+  seed_plain("#u", ts_ago(ahead, sizeof ahead, 8, 50), "AHEAD", "a:bob", NULL);
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(k, (size_t)kl);
+  assert_int_equal(6, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+
+  /* Late stores behind the walk: the next pass starts AT the oldest. */
+  seed_plain("#u", ts_ago(ts, sizeof ts, 9, 0), "LATE1", "a:bob", NULL);
+  seed_plain("#u", ts_ago(late, sizeof late, 10, 0), "LATE0", "a:bob", NULL);
+  seed_plain("#u", ts_ago(ts, sizeof ts, 8, 200), "LATE2", "a:bob", NULL);
+  kl = bt_of(k, sizeof k, "#u", late, "LATE0");
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(k, (size_t)kl);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(9, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_acct_matches_cf();
+}
+
+/* A backfill that indexes a row behind the walk (retention went up, so a
+ * row the walk had passed is inside it again, unindexed) sends the next
+ * pass back to it once retention comes down again. */
+static void test_ageout_backfill_row_behind_walk_is_late(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htrim_params p9 = bf_params(0);
+  char ts[32], told[32];
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#t", ts_ago(ts, sizeof ts, 8, 0), "O1", "a:bob", NULL);
+  ageout_pass(&p);                                      /* the walk is past 8 days */
+  assert_int_equal(0, fake_db_rows(st.by_time));
+
+  /* Retention 9: an older binary's row at 8.5 days is inside it, and the
+   * backfill (re-run, as after a downgrade window) indexes it. */
+  p9.retention_days = 9;
+  htrim_check_index_gap(UINT64_MAX, 0);
+  assert_int_equal(0, htrim_backfill_done());
+  seed_legacy_row("#l", ts_ago(told, sizeof told, 8, 43200), "L1", "Bob", 0, "", "", 0);
+  run_until_idle(&p9);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, fake_db_rows(st.by_time));
+
+  /* Back to 7: the next pass goes back for it. */
+  ageout_pass(&p);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_acct_matches_cf();
+}
+
 /* Task 5 review M2: an aged-out REDACT row takes its redact_index row,
  * whose key the store built from htc_parse_ms(the row's own ts) and the
  * delete rebuilds from the by_time key's ms -- also for a ts that is not
@@ -2071,6 +2174,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_ageout_single_target_one_emptiness_check, setup, teardown),
     cmocka_unit_test_setup_teardown(test_ageout_pass_start_catches_late_row, setup, teardown),
     cmocka_unit_test_setup_teardown(test_ageout_redact_takes_its_index_row, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_pass_start_resumes_past_drained_head, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_backfill_row_behind_walk_is_late, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

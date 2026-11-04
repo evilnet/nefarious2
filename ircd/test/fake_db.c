@@ -48,6 +48,8 @@ struct db_cf {
   size_t       last_slen;
   char        *last_end;     /* NULL if the call's end was NULL */
   size_t       last_elen;
+  char        *iter_lower;   /* the last db_iter_open_bounded's lower bound */
+  size_t       iter_llen;    /* (NULL/0: none, or an unbounded open) */
 };
 
 struct db_env {
@@ -208,6 +210,7 @@ void fake_db_free(struct db_env *env)
     free(cf->rows);
     free(cf->last_start);
     free(cf->last_end);
+    free(cf->iter_lower);
   }
   free(env);
 }
@@ -273,6 +276,12 @@ int fake_db_last_suggest(const struct db_cf *cf,
   if (end)   *end   = cf->last_end;
   if (elen)  *elen  = cf->last_elen;
   return DB_OK;
+}
+
+void fake_db_last_iter_lower(const struct db_cf *cf, const void **lower, size_t *llen)
+{
+  if (lower) *lower = cf ? cf->iter_lower : NULL;
+  if (llen)  *llen  = cf ? cf->iter_llen : 0;
 }
 
 size_t fake_db_rows(const struct db_cf *cf)
@@ -457,6 +466,9 @@ struct db_iter *db_iter_open_bounded(struct db_env *env, struct db_cf *cf,
   hi = (upper && ulen) ? cf_lower_bound(cf, (const char *)upper, ulen, &found) : cf->n;
   it = iter_from_range(cf, lo, hi);
   cf->iter_opens++;
+  free(cf->iter_lower);
+  cf->iter_lower = (lower && llen) ? dup_bytes(lower, llen) : NULL;
+  cf->iter_llen  = cf->iter_lower ? llen : 0;
   return it;
 }
 

@@ -43,15 +43,17 @@
  * row that cannot be read counts as an unfinished walk.
  *
  * Age-out.  Retention is enforced by walking by_time -- globally ordered
- * by time -- over [cursor ‖ 0x00, be64(cutoff_ms)), oldest first, THE
- * delete for each row (counted), in budgeted slices.  The cursor is the
- * last by_time key a committed slice deleted (in memory); a failed commit
- * leaves it, so the same rows come round again.  A pass opens at
- * htrim_pass_start (each maintenance tick, and a retention change), which
- * also sends the walk back to the first key: a row stored after the walk
- * passed its time (a late CH W, a lagged relay) goes at the next pass.  A
- * walk that reaches the cutoff closes the pass.  Rows at the cutoff ms
- * are kept.
+ * by time -- over [resume point, be64(cutoff_ms)), oldest first, THE
+ * delete for each row (counted), in budgeted slices.  The resume point is
+ * the successor of the last by_time key a committed slice deleted (in
+ * memory; the first key after a start); a failed commit leaves it, so the
+ * same rows come round again.  A pass opens at htrim_pass_start (each
+ * maintenance tick, and a retention change) and resumes there -- never at
+ * the first key again, whose seek would walk every tombstone the earlier
+ * passes left -- except that a row indexed behind the resume point since
+ * (a late CH W or relay, a backfill after a retention rise) sends the walk
+ * back to the oldest such row.  A walk that reaches the cutoff closes the
+ * pass.  Rows at the cutoff ms are kept.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -271,10 +273,12 @@ void htrim_tsweep_clear(void);
  * @return 1 = work remains, 0 = idle, -1 = error. */
 int htrim_run_slice(const struct htrim_params *p);
 
-/** Open an age-out pass under @a p: the walk goes back to the first
- * by_time key, and HTRIM_PH_AGEOUT has work while @a p->retention_days
- * > 0 (a pass at retention 0 is closed at once).  Call it before the
- * pass's first slice: each maintenance tick, and on a retention change. */
+/** Open an age-out pass under @a p: HTRIM_PH_AGEOUT has work while
+ * @a p->retention_days > 0 (a pass at retention 0 is closed at once).  The
+ * walk resumes where the last one stopped, or at the oldest by_time row
+ * indexed behind that point since (htrim_note_stored, the backfill) --
+ * every other row behind it is gone.  Call it before the pass's first
+ * slice: each maintenance tick, and on a retention change. */
 void htrim_pass_start(const struct htrim_params *p);
 
 /** @return non-zero while an age-out pass is open: rows past the

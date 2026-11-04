@@ -31,11 +31,15 @@
  * index rows count through the accounting rule like a store's (positive
  * pending deltas), so a backfill racing the boot scan counts each row once.
  *
- * Age-out keeps its position as the last by_time key a committed slice
- * deleted (ao_cursor, in memory only), and its next slice opens its
- * iterator at the successor of that key: the tombstones the pass left
- * behind it are never walked again within the pass.  A pass start sends
- * the walk back to the first key.
+ * Age-out keeps where its walk resumes (ao_lower, in memory only): the
+ * successor of the last by_time key a committed slice deleted.  Every
+ * slice opens its iterator there, so the tombstones the walk left behind
+ * it are never walked again -- on RocksDB a seek from the first key walks
+ * every one not yet compacted away (the bed, 2026-11-04: ~3000 of them,
+ * 316-433 ms in one slice).  Behind ao_lower every row is gone except
+ * those indexed there since (a late store, a backfill after a retention
+ * rise): the smallest such key is kept (ao_late), and a pass start sends
+ * the walk back to it.  A restart begins at the first key, once.
  */
 #include "config.h"
 
@@ -103,6 +107,8 @@ struct htrim_slice {
   char                 *bf_cursor;   /* the last messages key it processed */
   size_t                bf_cursor_len, bf_cursor_cap;
   size_t                bf_rows, bf_indexed, bf_aged, bf_unindexed;
+  char                 *bf_min_bt;   /* the smallest by_time key it indexed */
+  size_t                bf_min_bt_len, bf_min_bt_cap;
   /* Unindexable keys to name in the log once this slice commits. */
   char                  bf_bad[HTRIM_BF_LOG_KEYS][HTRIM_KEY_PREVIEW];
   size_t                bf_bad_klen[HTRIM_BF_LOG_KEYS];
@@ -132,10 +138,12 @@ static struct {
   uint64_t           alive_ms;        /* the last alive stamp, 0 = none */
 
   /* Age-out: one pass per htrim_pass_start, in memory only (every start
-   * opens a pass at its first maintenance tick). */
+   * opens a pass at its first maintenance tick, from the first key). */
   int                ao_pending;      /* a pass is open */
-  char              *ao_cursor;       /* last by_time key a committed slice deleted */
-  size_t             ao_cursor_len, ao_cursor_cap;
+  char              *ao_lower;        /* where the walk resumes (inclusive), */
+  size_t             ao_lower_len, ao_lower_cap;   /* 0 = the first key */
+  char              *ao_late;         /* the smallest by_time key indexed behind */
+  size_t             ao_late_len, ao_late_cap;     /* ao_lower since; 0 = none */
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
   enum htrim_phase   last_run;
@@ -288,6 +296,17 @@ static void acct_apply(const char *owner, const void *bo_key, size_t bo_klen,
   htc_acct_add(g.acct, owner, delta);
 }
 
+/** A by_time key was just indexed (committed): if it sorts behind where
+ * the age-out walk resumes, the next pass must go back for it. */
+static void ageout_note_indexed(const void *bt, size_t btl)
+{
+  if (!g.ao_lower_len || !bt || !btl
+      || key_cmp(bt, btl, g.ao_lower, g.ao_lower_len) >= 0)
+    return;                                     /* ahead of the walk */
+  if (!g.ao_late_len || key_cmp(bt, btl, g.ao_late, g.ao_late_len) < 0)
+    bytes_set(&g.ao_late, &g.ao_late_len, &g.ao_late_cap, bt, btl);
+}
+
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
@@ -323,7 +342,8 @@ void htrim_shutdown(void)
   htc_acct_free(g.acct);
   MyFree(g.cursor);
   MyFree(g.bf_cursor);
-  MyFree(g.ao_cursor);
+  MyFree(g.ao_lower);
+  MyFree(g.ao_late);
   memset(&g, 0, sizeof g);
 }
 
@@ -376,9 +396,14 @@ int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
 void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
                        uint32_t bytes)
 {
+  const void *bt;
+  size_t btl;
+
   if (!g.inited || !bo_key)
     return;
   acct_apply(owner, bo_key, bo_klen, (int64_t)bytes);
+  if (htc_bo_split(bo_key, bo_klen, NULL, 0, &bt, &btl) == 0)
+    ageout_note_indexed(bt, btl);
 }
 
 int htrim_acct_loaded(void)
@@ -488,6 +513,7 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->touch);
   MyFree(s->ao_cursor);
   MyFree(s->bf_cursor);
+  MyFree(s->bf_min_bt);
   MyFree(s);
 }
 
@@ -849,6 +875,7 @@ static void backfill_apply(struct htrim_slice *s)
 {
   unsigned int i;
 
+  ageout_note_indexed(s->bf_min_bt, s->bf_min_bt_len);
   g.bf_rows += s->bf_rows;
   g.bf_indexed += s->bf_indexed;
   g.bf_aged += s->bf_aged;
@@ -876,13 +903,21 @@ static void backfill_apply(struct htrim_slice *s)
   }
 }
 
-/** A committed age-out step: the cursor moves to the last key it
- * deleted; a walk that reached the cutoff closes the pass. */
+/** A committed age-out step: the walk resumes at the successor of the
+ * last key it deleted (that key ‖ 0x00); a walk that reached the cutoff
+ * closes the pass. */
 static void ageout_apply(struct htrim_slice *s)
 {
-  if (s->ao_cursor_len)
-    bytes_set(&g.ao_cursor, &g.ao_cursor_len, &g.ao_cursor_cap,
-              s->ao_cursor, s->ao_cursor_len);
+  if (s->ao_cursor_len) {
+    size_t n = s->ao_cursor_len + 1;
+    if (n > g.ao_lower_cap) {
+      g.ao_lower_cap = n;
+      g.ao_lower = (char *)MyRealloc(g.ao_lower, n);
+    }
+    memcpy(g.ao_lower, s->ao_cursor, s->ao_cursor_len);
+    g.ao_lower[s->ao_cursor_len] = '\0';
+    g.ao_lower_len = n;
+  }
   if (s->ao_finished)
     g.ao_pending = 0;
 }
@@ -954,19 +989,17 @@ static uint64_t bt_key_ms(const void *k, size_t kl)
   return ms;
 }
 
-/** Age-out: walk by_time over [cursor ‖ 0x00 (or the first key),
- * be64(cutoff)) -- every row past retention, oldest first -- and THE
- * delete each one, counted (every by_time row was counted when it was
- * indexed), until the budget is spent.  A record that does not parse
- * still leaves the index (htrim_delete_row's index-only form), so the walk
- * never sticks on a bad head row.  The cursor moves only when this
- * slice commits; a walk that reaches the bound closes the pass. */
+/** Age-out: walk by_time over [ao_lower (or the first key), be64(cutoff))
+ * -- every row past retention, oldest first -- and THE delete each one,
+ * counted (every by_time row was counted when it was indexed), until the
+ * budget is spent.  A record that does not parse still leaves the index
+ * (htrim_delete_row's index-only form), so the walk never sticks on a bad
+ * head row.  The resume point moves only when this slice commits; a walk
+ * that reaches the bound closes the pass. */
 static int phase_ageout(struct htrim_slice *s, const struct htrim_params *p)
 {
   unsigned char upper[8];
   struct db_iter *it;
-  char *lower = NULL;
-  size_t llen = 0;
   uint64_t cutoff = retention_cutoff_ms(p);
   int rc, first = 1;
 
@@ -976,15 +1009,11 @@ static int phase_ageout(struct htrim_slice *s, const struct htrim_params *p)
     return 0;
   }
   htc_be64(upper, cutoff);
-  if (g.ao_cursor_len) {
-    llen = g.ao_cursor_len + 1;
-    lower = (char *)MyMalloc(llen);
-    memcpy(lower, g.ao_cursor, g.ao_cursor_len);
-    lower[g.ao_cursor_len] = '\0';             /* cursor ‖ 0x00 */
-  }
-  it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL, lower, llen,
+  /* The iterator copies its bounds: a walk that later moves ao_lower
+   * cannot pull them from under it. */
+  it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL,
+                            g.ao_lower_len ? g.ao_lower : NULL, g.ao_lower_len,
                             upper, sizeof upper);
-  MyFree(lower);                                /* the iterator owns its copy */
   if (!it)
     return -1;
 
@@ -1162,6 +1191,9 @@ static int backfill_row(struct htrim_slice *s, const void *k, size_t kl,
   }
   if (rec.bytes)
     slice_add_delta(s, bo, bol, (int64_t)rec.bytes);
+  if (!s->bf_min_bt_len
+      || key_cmp(bt, (size_t)btl, s->bf_min_bt, s->bf_min_bt_len) < 0)
+    bytes_set(&s->bf_min_bt, &s->bf_min_bt_len, &s->bf_min_bt_cap, bt, (size_t)btl);
   s->bf_indexed++;
   return 0;
 }
@@ -1277,7 +1309,13 @@ void htrim_pass_start(const struct htrim_params *p)
 {
   if (!g.inited || !p)
     return;
-  g.ao_cursor_len = 0;                          /* from the first key again */
+  /* Behind ao_lower every row is gone but those indexed there since: the
+   * walk goes back to the oldest of them, never further. */
+  if (g.ao_late_len) {
+    bytes_set(&g.ao_lower, &g.ao_lower_len, &g.ao_lower_cap,
+              g.ao_late, g.ao_late_len);
+    g.ao_late_len = 0;
+  }
   g.ao_pending = p->retention_days > 0;
 }
 
