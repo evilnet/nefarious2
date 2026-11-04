@@ -30,6 +30,18 @@ struct db_env_opts {
                                     (RocksDB only — libmdbx ignores) */
   int random_access;          /**< nonzero: random-access workload hint
                                     (libmdbx MDBX_NORDAHEAD; RocksDB advise_random_on_open) */
+  /** RocksDB: NULL-terminated names of the CFs whose rows are deleted as
+   * a matter of course (a trimmer deletes every row it once wrote).  Each
+   * SST file written for one of them -- flush or compaction output -- is
+   * marked for compaction when any @a deletion_window consecutive entries
+   * hold at least @a deletion_trigger tombstones (RocksDB's
+   * CompactOnDeletionCollector), so a run of tombstones is compacted
+   * down to the data it deletes instead of being walked by every seek
+   * that crosses it.  Applies when the CF is created and every time the
+   * env is opened.  NULL = none; libmdbx ignores it. */
+  const char *const *deletion_heavy_cfs;
+  size_t deletion_window;     /**< N (0 = 4096; RocksDB rounds up to 128s) */
+  size_t deletion_trigger;    /**< D (0 = half of N) */
 };
 
 /** Per-CF tuning at open time.  RocksDB uses these for column-family

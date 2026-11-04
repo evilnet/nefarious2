@@ -79,6 +79,9 @@ struct db_env {
   struct db_cf   *cfs;              /* head of CF list, includes default */
   char           *path;
   char            last_error[256];
+  /* db_env_opts.deletion_heavy_cfs, copied: CFs created later get it too. */
+  char          **del_cfs;          /* NULL-terminated, or NULL */
+  size_t          del_window, del_trigger;
 };
 
 struct db_snapshot {
@@ -220,14 +223,71 @@ static struct db_cf *env_alloc_cf(struct db_env *env, const char *name,
   return cf;
 }
 
-static rocksdb_options_t *make_cf_options(int compress)
+static int name_listed(const char *const *list, const char *name)
+{
+  if (!list || !name)
+    return 0;
+  for (; *list; list++)
+    if (strcmp(*list, name) == 0)
+      return 1;
+  return 0;
+}
+
+/** Column-family options for CF @a name: compression, and the
+ * deletion-triggered compaction marker when @a name is in @a heavy
+ * (db_env_opts.deletion_heavy_cfs; @a window / @a trigger 0 = 4096 / half). */
+static rocksdb_options_t *make_cf_options(int compress, const char *name,
+                                          const char *const *heavy,
+                                          size_t window, size_t trigger)
 {
   rocksdb_options_t *o = rocksdb_options_create();
   if (!o)
     return NULL;
   if (compress)
     rocksdb_options_set_compression(o, rocksdb_zstd_compression);
+  if (name_listed(heavy, name)) {
+    if (!window)
+      window = 4096;
+    if (!trigger || trigger > window)
+      trigger = window / 2;
+    rocksdb_options_add_compact_on_deletion_collector_factory(o, window, trigger);
+  }
   return o;
+}
+
+/** Keep a copy of @a opts' deletion-heavy CF list in @a env, for the CFs
+ * db_cf_open creates later.  A failed copy leaves those without it. */
+static void env_keep_deletion_heavy(struct db_env *env, const struct db_env_opts *opts)
+{
+  size_t n = 0, i;
+
+  if (!opts || !opts->deletion_heavy_cfs)
+    return;
+  while (opts->deletion_heavy_cfs[n])
+    n++;
+  env->del_cfs = MyCalloc(n + 1, sizeof *env->del_cfs);
+  if (!env->del_cfs)
+    return;
+  for (i = 0; i < n; i++) {
+    env->del_cfs[i] = MyMalloc(strlen(opts->deletion_heavy_cfs[i]) + 1);
+    if (!env->del_cfs[i])
+      break;
+    strcpy(env->del_cfs[i], opts->deletion_heavy_cfs[i]);
+  }
+  env->del_window = opts->deletion_window;
+  env->del_trigger = opts->deletion_trigger;
+}
+
+static void env_free_deletion_heavy(struct db_env *env)
+{
+  size_t i;
+
+  if (!env->del_cfs)
+    return;
+  for (i = 0; env->del_cfs[i]; i++)
+    MyFree(env->del_cfs[i]);
+  MyFree(env->del_cfs);
+  env->del_cfs = NULL;
 }
 
 /* -------------------------------------------------------------------- */
@@ -341,12 +401,18 @@ int db_env_open(const char *path,
     if (existing_count > 0) {
       for (i = 0; i < existing_count; i++) {
         cf_names[i] = existing_names[i];
-        cf_opts[i]  = make_cf_options(opts && opts->compress);
+        cf_opts[i]  = make_cf_options(opts && opts->compress, cf_names[i],
+                                      opts ? opts->deletion_heavy_cfs : NULL,
+                                      opts ? opts->deletion_window : 0,
+                                      opts ? opts->deletion_trigger : 0);
       }
     } else {
       /* Fresh DB: open with just "default". */
       cf_names[0] = "default";
-      cf_opts[0]  = make_cf_options(opts && opts->compress);
+      cf_opts[0]  = make_cf_options(opts && opts->compress, cf_names[0],
+                                    opts ? opts->deletion_heavy_cfs : NULL,
+                                    opts ? opts->deletion_window : 0,
+                                    opts ? opts->deletion_trigger : 0);
     }
 
     env->db = rocksdb_open_column_families(env->db_opts, path,
@@ -394,6 +460,7 @@ int db_env_open(const char *path,
     MyFree(cf_handles);
   }
 
+  env_keep_deletion_heavy(env, opts);
   *out = env;
   return DB_OK;
 }
@@ -421,6 +488,7 @@ void db_env_close(struct db_env *env)
   if (env->ropts_default) rocksdb_readoptions_destroy(env->ropts_default);
   if (env->block_cache)   rocksdb_cache_destroy(env->block_cache);
   if (env->path)          MyFree(env->path);
+  env_free_deletion_heavy(env);
   MyFree(env);
 }
 
@@ -590,7 +658,9 @@ int db_cf_open(struct db_env *env,
   /* Otherwise create.  RocksDB errors if the CF already exists; the
    * env_find_cf check above protects against that for handles we
    * already track. */
-  cf_opts = make_cf_options(opts && opts->compress);
+  cf_opts = make_cf_options(opts && opts->compress, want,
+                            (const char *const *)env->del_cfs,
+                            env->del_window, env->del_trigger);
   if (!cf_opts)
     return DB_ERR_MEMORY;
 

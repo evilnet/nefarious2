@@ -399,6 +399,50 @@ static void test_bounded_iter_prefix_lookups(void **state)
   assert_int_equal(db_iter_seek(it, B("#b\0" "150")), DB_OK);
   assert_key(it, B("#b\0" "200"));
   assert_int_equal(db_iter_next(it), DB_NOTFOUND);
+  db_iter_close(it);
+
+  /* A name that is a prefix of another -- "#a" and "#ab", the PM pairs
+   * "alice:bob" and "alice:bobby": [P\0, P\x01) holds P's rows only, as
+   * the longer name's next byte is a name byte (> 0x01).  Both ways
+   * round: the shorter name's range never reaches the longer one's rows,
+   * and a range holding none of its own is empty from either end. */
+  put(B("#ab\0" "050"));
+  put(B("#ab\0" "300"));
+  it = db_iter_open_bounded(env, cf, NULL, B("#a\0"), B("#a\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_first(it), DB_OK);
+  assert_key(it, B("#a\0" "100"));
+  assert_int_equal(db_iter_next(it), DB_NOTFOUND);
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("#a\0" "100"));
+  assert_int_equal(db_iter_seek(it, B("#a\0" "200")), DB_NOTFOUND);
+  db_iter_close(it);
+  it = db_iter_open_bounded(env, cf, NULL, B("#ab\0"), B("#ab\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_first(it), DB_OK);
+  assert_key(it, B("#ab\0" "050"));
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("#ab\0" "300"));
+  assert_int_equal(db_iter_prev(it), DB_OK);
+  assert_key(it, B("#ab\0" "050"));
+  assert_int_equal(db_iter_prev(it), DB_NOTFOUND);
+  db_iter_close(it);
+
+  put(B("alice:bobby\0" "100"));
+  it = db_iter_open_bounded(env, cf, NULL, B("alice:bob\0"), B("alice:bob\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_first(it), DB_NOTFOUND);
+  assert_int_equal(db_iter_seek_last(it), DB_NOTFOUND);
+  db_iter_close(it);
+  put(B("alice:bob\0" "200"));
+  it = db_iter_open_bounded(env, cf, NULL, B("alice:bob\0"), B("alice:bob\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("alice:bob\0" "200"));
+  assert_int_equal(db_iter_next(it), DB_NOTFOUND);
+  assert_int_equal(db_iter_seek(it, B("alice:bob\0" "150")), DB_OK);
+  assert_key(it, B("alice:bob\0" "200"));
+  assert_int_equal(db_iter_seek(it, B("alice:bob\0" "250")), DB_NOTFOUND);
 }
 
 /* ------------------------------------------------------------------ */
@@ -427,6 +471,65 @@ static void test_bounded_iter_snapshot(void **state)
 
   db_snapshot_destroy(snap);
 }
+
+/* db_env_opts.deletion_heavy_cfs (Task 8): the deletion-triggered
+ * compaction marker on a CF that already exists when the env opens, and
+ * on one db_cf_open creates; its SST files (a compaction flushes the
+ * memtable) are written and compacted with it, and the rows read back
+ * after a reopen.  An options call: no seam shows the marker itself. */
+static void test_deletion_heavy_cfs_open(void **state)
+{
+  static const char *const heavy[] = { "test", "heavy", NULL };
+  struct db_env_opts o;
+  struct db_writebatch *wb;
+  struct db_cf *h;
+  struct db_val v = { NULL, 0 };
+  char k[16];
+  int i;
+  (void)state;
+
+  memset(&o, 0, sizeof o);
+  o.deletion_heavy_cfs = heavy;
+  o.deletion_window = 128;
+  o.deletion_trigger = 64;
+  put(B("keep"));
+  db_env_close(env);                          /* reopened with the option */
+  assert_int_equal(db_env_open(g_tmpdir, &o, 8, &env), DB_OK);
+  assert_int_equal(db_cf_open(env, "test", NULL, &cf), DB_OK);
+  assert_int_equal(db_cf_open(env, "heavy", NULL, &h), DB_OK);   /* created */
+
+  for (i = 0; i < 300; i++) {
+    snprintf(k, sizeof k, "k%04d", i);
+    wb = db_writebatch_new(env);
+    assert_non_null(wb);
+    assert_int_equal(db_writebatch_put(wb, h, k, strlen(k), "v", 1), DB_OK);
+    assert_int_equal(db_writebatch_put(wb, cf, k, strlen(k), "v", 1), DB_OK);
+    assert_int_equal(db_writebatch_commit(wb, 0), DB_OK);
+    db_writebatch_destroy(wb);
+  }
+  assert_int_equal(db_env_compact(env, h), DB_OK);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  for (i = 0; i < 299; i++) {
+    snprintf(k, sizeof k, "k%04d", i);
+    assert_int_equal(db_writebatch_del(wb, h, k, strlen(k)), DB_OK);
+    assert_int_equal(db_writebatch_del(wb, cf, k, strlen(k)), DB_OK);
+  }
+  assert_int_equal(db_writebatch_commit(wb, 0), DB_OK);
+  db_writebatch_destroy(wb);
+  assert_int_equal(db_env_compact(env, h), DB_OK);
+  assert_int_equal(db_env_compact(env, cf), DB_OK);
+
+  db_env_close(env);
+  assert_int_equal(db_env_open(g_tmpdir, &o, 8, &env), DB_OK);
+  assert_int_equal(db_cf_open(env, "test", NULL, &cf), DB_OK);
+  assert_int_equal(db_cf_open(env, "heavy", NULL, &h), DB_OK);
+  assert_int_equal(db_get(env, h, B("k0299"), NULL, &v), DB_OK);
+  db_val_free(&v);
+  assert_int_equal(db_get(env, h, B("k0000"), NULL, &v), DB_NOTFOUND);
+  assert_int_equal(db_get(env, cf, B("keep"), NULL, &v), DB_OK);
+  db_val_free(&v);
+}
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -446,6 +549,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_bounded_iter_prefix_lookups, test_setup, test_teardown),
 #ifdef DB_API_REAL
     cmocka_unit_test_setup_teardown(test_bounded_iter_snapshot, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_deletion_heavy_cfs_open, test_setup, test_teardown),
 #endif
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
