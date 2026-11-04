@@ -61,13 +61,16 @@ CMOCKA_TESTPROGS = \
 	db_casefold_cmocka \
 	account_id_cmocka \
 	webhook_eventlog_cmocka \
-	crdt_hlc_cmocka
+	crdt_hlc_cmocka \
+	db_api_fake_cmocka \
+	db_api_rocksdb_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
 CURL_LIBS = -lcurl
 JANSSON_LIBS = -ljansson
 SSL_LIBS = -lssl -lcrypto
+ROCKSDB_LIBS = -lrocksdb -lstdc++ -lpthread
 
 DEP_SRC = \
 	ircd_chattr_t.c \
@@ -118,6 +121,8 @@ DEP_SRC = \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
 	crdt_hlc_cmocka.c \
+	db_api_cmocka.c \
+	fake_db.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -531,3 +536,26 @@ webpush_line_cmocka: $(WEBPUSH_LINE_CMOCKA_OBJS)
 CRDT_HLC_CMOCKA_OBJS = crdt_hlc_cmocka.o test_stub.o ../crdt_hlc.o
 crdt_hlc_cmocka: $(CRDT_HLC_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CRDT_HLC_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# db_api tests - storage API spec (bounded iterators, range delete, a
+# compaction hint), run against two backends from the SAME test source
+# (db_api_cmocka.c) so the fake cannot drift from RocksDB:
+#   db_api_fake_cmocka    - the plain compile, links the in-memory fake
+#                           (fake_db.o, ircd/test/fake_db.h); no RocksDB.
+#   db_api_rocksdb_cmocka - the -DDB_API_REAL compile (its own .o, since
+#                           the flag changes the binary), links the real
+#                           RocksDB backend (../db_rocksdb.o) against a
+#                           mkdtemp()'d env; test_stub.o supplies
+#                           log_write, and ../ircd_snprintf.o/../ircd_alloc.o/
+#                           ../ircd_string.o are the real backend's own deps.
+DB_API_FAKE_CMOCKA_OBJS = db_api_cmocka.o fake_db.o
+db_api_fake_cmocka: $(DB_API_FAKE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(DB_API_FAKE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+db_api_cmocka_real.o: ${srcdir}/db_api_cmocka.c
+	${CC} ${CFLAGS} ${CPPFLAGS} -DDB_API_REAL -c -o $@ ${srcdir}/db_api_cmocka.c
+
+DB_API_ROCKSDB_CMOCKA_OBJS = db_api_cmocka_real.o test_stub.o ../db_rocksdb.o \
+	../ircd_alloc.o ../ircd_string.o ../ircd_snprintf.o
+db_api_rocksdb_cmocka: $(DB_API_ROCKSDB_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(DB_API_ROCKSDB_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ROCKSDB_LIBS)

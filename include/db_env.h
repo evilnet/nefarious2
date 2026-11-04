@@ -95,6 +95,26 @@ extern int db_env_sync(struct db_env *env);
  *            CFs in @a env. */
 extern int db_env_compact(struct db_env *env, struct db_cf *cf);
 
+/** Delete every key in the half-open range [@a start, @a end) from
+ * @a cf in one operation, using the env's normal (non-durable) write
+ * options.  Bounds follow the same inclusive-lower/exclusive-upper
+ * convention as db_iter_open_bounded.  RocksDB: rocksdb_delete_range_cf
+ * (a single tombstone covering the range, not a per-key delete loop).
+ * Returns DB_OK or DB_ERR_*. */
+extern int db_delete_range(struct db_env *env, struct db_cf *cf,
+                           const void *start, size_t slen,
+                           const void *end, size_t elen);
+
+/** Hint the backend to background-compact [@a start, @a end) in @a cf.
+ * NULL for either bound means an open end on that side (NULL for both
+ * hints "the whole CF", same as db_env_compact's cf-only form).
+ * Returns at once -- this only marks files for background compaction,
+ * it does not wait for it to finish.  RocksDB: rocksdb_suggest_compact_range_cf.
+ * Returns DB_OK or DB_ERR_*. */
+extern int db_suggest_compact(struct db_env *env, struct db_cf *cf,
+                              const void *start, size_t slen,
+                              const void *end, size_t elen);
+
 /** Backend-agnostic stats record returned by db_env_stats.  Numbers
  * are approximate on RocksDB (estimate-num-keys is not exact) and
  * exact on libmdbx (B-tree leaf count).  Empty fields are zero. */

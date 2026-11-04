@@ -58,6 +58,28 @@ extern struct db_iter *db_iter_open(struct db_env *env,
                                     struct db_cf *cf,
                                     struct db_snapshot *snap);
 
+/** Open a new iterator on @a cf, restricted to the half-open range
+ * [@a lower, @a upper).  @a lower is inclusive, @a upper is exclusive;
+ * either may be NULL (with its length 0) for an unbounded end on that
+ * side.  The iterator keeps its own copies of both bounds -- the
+ * caller's buffers only need to live for the duration of this call
+ * (RocksDB's C readoptions otherwise keep only a pointer, which would
+ * dangle once a stack-built bound goes out of scope).
+ *
+ * db_iter_seek_first positions at @a lower (or the smallest key in
+ * the CF when @a lower is NULL).  A db_iter_seek() to a key below
+ * @a lower lands on the first key >= @a lower, same as seeking to
+ * @a lower itself; a seek at or past @a upper is DB_NOTFOUND, same as
+ * stepping off the bounded range.
+ *
+ * @a snap behaves as in db_iter_open.  Returns NULL on failure
+ * (allocation, bad CF, etc.). */
+extern struct db_iter *db_iter_open_bounded(struct db_env *env,
+                                            struct db_cf *cf,
+                                            struct db_snapshot *snap,
+                                            const void *lower, size_t llen,
+                                            const void *upper, size_t ulen);
+
 /** Close an iterator and release its resources.  Safe on NULL. */
 extern void db_iter_close(struct db_iter *it);
 

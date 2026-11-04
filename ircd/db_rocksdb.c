@@ -100,6 +100,10 @@ struct db_iter {
   rocksdb_readoptions_t *ropts;     /* may be borrowed from snapshot */
   int            owns_ropts;
   int            positioned;        /* cached rocksdb_iter_valid result */
+  char          *lower;              /* owned copy of the lower bound, or NULL */
+  size_t         llen;
+  char          *upper;              /* owned copy of the upper bound, or NULL */
+  size_t         ulen;
 };
 
 /* -------------------------------------------------------------------- */
@@ -454,6 +458,44 @@ int db_env_compact(struct db_env *env, struct db_cf *cf)
   return DB_OK;
 }
 
+int db_delete_range(struct db_env *env, struct db_cf *cf,
+                    const void *start, size_t slen,
+                    const void *end, size_t elen)
+{
+  char *err = NULL;
+  if (!env || !env->db || !cf)
+    return DB_ERR_OTHER;
+  rocksdb_delete_range_cf(env->db, env->wopts_normal, cf->handle,
+                          (const char *)start, slen,
+                          (const char *)end, elen, &err);
+  if (err) {
+    int rc = translate_errptr(err);
+    env_record_error(env, "delete_range", err);
+    rocksdb_free(err);
+    return rc;
+  }
+  return DB_OK;
+}
+
+int db_suggest_compact(struct db_env *env, struct db_cf *cf,
+                       const void *start, size_t slen,
+                       const void *end, size_t elen)
+{
+  char *err = NULL;
+  if (!env || !env->db || !cf)
+    return DB_ERR_OTHER;
+  rocksdb_suggest_compact_range_cf(env->db, cf->handle,
+                                   (const char *)start, slen,
+                                   (const char *)end, elen, &err);
+  if (err) {
+    int rc = translate_errptr(err);
+    env_record_error(env, "suggest_compact", err);
+    rocksdb_free(err);
+    return rc;
+  }
+  return DB_OK;
+}
+
 int db_env_warmup(struct db_env *env)
 {
   /* RocksDB warms the block cache on demand; nothing to do here. */
@@ -783,6 +825,67 @@ struct db_iter *db_iter_open(struct db_env *env,
   return it;
 }
 
+/* db_iter_open_bounded always builds its own readoptions (it needs
+ * somewhere to hang the lower/upper bound pointers, snapshot or not),
+ * so unlike db_iter_open it never borrows ropts from the snapshot. */
+struct db_iter *db_iter_open_bounded(struct db_env *env,
+                                     struct db_cf *cf,
+                                     struct db_snapshot *snap,
+                                     const void *lower, size_t llen,
+                                     const void *upper, size_t ulen)
+{
+  struct db_iter *it;
+  if (!env || !env->db || !cf)
+    return NULL;
+  it = MyCalloc(1, sizeof *it);
+  if (!it)
+    return NULL;
+  it->env = env;
+  it->cf  = cf;
+
+  /* Own copies: RocksDB's readoptions keep only a pointer to the
+   * bound bytes we hand it, so a bound built in a caller's stack
+   * buffer would dangle the moment this function returns. */
+  if (lower && llen) {
+    it->lower = MyMalloc(llen);
+    if (!it->lower) {
+      MyFree(it);
+      return NULL;
+    }
+    memcpy(it->lower, lower, llen);
+    it->llen = llen;
+  }
+  if (upper && ulen) {
+    it->upper = MyMalloc(ulen);
+    if (!it->upper) {
+      if (it->lower) MyFree(it->lower);
+      MyFree(it);
+      return NULL;
+    }
+    memcpy(it->upper, upper, ulen);
+    it->ulen = ulen;
+  }
+
+  it->ropts = rocksdb_readoptions_create();
+  it->owns_ropts = 1;
+  if (snap)
+    rocksdb_readoptions_set_snapshot(it->ropts, snap->snap);
+  if (it->lower)
+    rocksdb_readoptions_set_iterate_lower_bound(it->ropts, it->lower, it->llen);
+  if (it->upper)
+    rocksdb_readoptions_set_iterate_upper_bound(it->ropts, it->upper, it->ulen);
+
+  it->iter = rocksdb_create_iterator_cf(env->db, it->ropts, cf->handle);
+  if (!it->iter) {
+    rocksdb_readoptions_destroy(it->ropts);
+    if (it->lower) MyFree(it->lower);
+    if (it->upper) MyFree(it->upper);
+    MyFree(it);
+    return NULL;
+  }
+  return it;
+}
+
 void db_iter_close(struct db_iter *it)
 {
   if (!it)
@@ -791,6 +894,10 @@ void db_iter_close(struct db_iter *it)
     rocksdb_iter_destroy(it->iter);
   if (it->owns_ropts && it->ropts)
     rocksdb_readoptions_destroy(it->ropts);
+  if (it->lower)
+    MyFree(it->lower);
+  if (it->upper)
+    MyFree(it->upper);
   MyFree(it);
 }
 
