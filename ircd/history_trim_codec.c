@@ -877,6 +877,11 @@ size_t htc_acct_top(const struct htc_acct *a, struct htc_owner_total *out,
  *   oldest = (nsteps==0 && !truncated && total>target) ? total-target : 0
  * ------------------------------------------------------------------- */
 
+int htc_share_active(const struct htc_plan_params *p)
+{
+  return p && p->quota_on && p->share_pct >= 1 && p->share_pct <= 99;
+}
+
 uint64_t htc_owner_share(const struct htc_plan_params *p, const char *owner)
 {
   (void)owner; /* No per-owner override exists yet -- this is the one
@@ -943,7 +948,7 @@ void htc_plan_eviction(const struct htc_acct *a,
   if (!out->active)
     return;
 
-  if (p->quota_on && p->share_pct >= 1 && p->share_pct <= 99) {
+  if (htc_share_active(p)) {
     struct htc_owner_total *cand = NULL;
     size_t ncand = 0;
 

@@ -4263,6 +4263,51 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                htrim_phase_name(tst->last_phase),
                (unsigned long long)((tst->max_slice_us + 999) / 1000),
                htrim_phase_name(tst->max_phase));
+    /* Where the longest slice's time went: staging (the walk), the batch
+     * commit, the touched-target cleanup, and its emptiness seeks. */
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Max slice: %llu ms (%s): walk %llu us, commit %llu us, "
+               "cleanup %llu us, %u seeks",
+               (unsigned long long)((tst->max_slice_us + 999) / 1000),
+               htrim_phase_name(tst->max_phase),
+               (unsigned long long)tst->max_walk_us,
+               (unsigned long long)tst->max_commit_us,
+               (unsigned long long)tst->max_cleanup_us, tst->max_seeks);
+  }
+  if (history_available) {
+    /* Tombstones still in memtables (active + immutable), per trimmed CF:
+     * a compaction hint flushes its CF first, so these fall after one. */
+    struct db_cf *mcf[5];
+    static const char *const mname[5] = {
+      "messages", "msgid_index", "reply_index", "by_time", "by_owner"
+    };
+    char buf[200];
+    size_t o = 0, i;
+
+    mcf[0] = history_cf_messages;
+    mcf[1] = history_cf_msgid;
+    mcf[2] = history_cf_reply;
+    mcf[3] = history_cf_by_time;
+    mcf[4] = history_cf_by_owner;
+    buf[0] = '\0';
+    for (i = 0; i < 5; i++) {
+      struct db_cf_stats cs;
+      int w;
+      if (!mcf[i] || db_cf_stats(history_db_env, mcf[i], &cs) != DB_OK)
+        continue;
+      w = ircd_snprintf(0, buf + o, sizeof buf - o, " %s=%lu", mname[i],
+                        (unsigned long)(cs.mem_deletes + cs.imm_deletes));
+      if (w < 0 || (size_t)w >= sizeof buf - o) {
+        buf[o] = '\0';
+        break;
+      }
+      o += (size_t)w;
+    }
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Memtable deletes:%s", o ? buf : " unknown");
+  }
+  {
+    const struct htrim_stats *tst = htrim_stats();
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Deleted: ageout=%llu owner=%llu oldest=%llu emergency=%llu "
                "backfill=%llu incarnation=%llu",

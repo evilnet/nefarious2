@@ -257,6 +257,12 @@ struct htc_plan {
   uint64_t             oldest;
 };
 
+/** Whether @a p's share step is on: quota on and share_pct in 1..99.
+ * The planner lists owner steps only then, and an owner step already in
+ * progress may go on only then (a SET that turns the share off, or to
+ * an out-of-range percentage, ends it). */
+int htc_share_active(const struct htc_plan_params *p);
+
 /** The share @a owner is held to while evicting under @a p. Returns
  * @a p's flat per-owner share (cap * share_pct / 100) for every owner
  * today, ignoring @a owner entirely -- this is the one hook a future

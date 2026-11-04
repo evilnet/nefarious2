@@ -53,12 +53,15 @@
  * so a restart resumes there too.  A pass opens at htrim_pass_start (each
  * maintenance tick, and a retention change) and resumes there -- never at
  * the first key again, whose seek would walk every tombstone the earlier
- * passes left -- except that a row indexed behind the resume point since
- * (a late CH W or relay, a backfill after a retention rise) sends the walk
- * back to the oldest such row; such a row also moves the persisted point
- * back, in its own batch, so a restart before the next pass still walks
- * it.  A walk that reaches the cutoff closes the pass.  Rows at the
- * cutoff ms are kept.
+ * passes left.  A row indexed behind the resume point since (a late CH W
+ * or relay, a backfill after a retention rise) is kept by key (up to 64):
+ * the next pass deletes those first, oldest first, and resumes at its
+ * frontier without crossing the run between; past 64 it sends the walk
+ * back to the oldest such row instead.  Such a row also moves the
+ * persisted point back, in its own batch, and an age-out batch never
+ * stores a point past a late row still to go, so a restart before the
+ * pass that takes it still walks it.  A walk that reaches the cutoff
+ * closes the pass.  Rows at the cutoff ms are kept.
  *
  * The cap.  Once the backfill is done and the totals are loaded, a store
  * whose total is strictly above cap * high% starts a drain, which runs
@@ -66,14 +69,19 @@
  * Each eviction slice plans afresh (htc_plan_eviction) and then:
  *   - finishes the owner step in progress: an owner over its share, once
  *     picked, loses its own oldest rows (a by_owner walk, resumed past
- *     the last key the step deleted) down to its share;
+ *     the last key the step deleted) down to its share -- while the share
+ *     step stays on (htc_share_active); a new step starts at owner 0x00 ‖
+ *     the live floor, past its aged-out head;
  *   - while the total is still above the low watermark, starts the
  *     plan's next owner step (largest over-share first);
  *   - only when nobody is over share and the plan listed every owner
  *     (never when it was truncated: compliant owners' rows would go while
  *     over-share owners keep theirs), deletes the oldest rows overall,
- *     walking by_time, and moves the coverage floor (HTRIM_META_FLOOR,
- *     the newest ms that walk deleted) in the same batch.
+ *     walking by_time from the live floor (the larger of where this drain
+ *     stopped and where age-out resumes, or an older late row), and moves
+ *     the coverage floor (HTRIM_META_FLOOR, the newest ms that walk
+ *     deleted) in the same batch; a walk that runs out of rows recounts
+ *     the totals.
  * A pass start whose cutoff is past the floor clears it: retention then
  * covers what eviction took.  A drain's end hints compaction over every
  * column family it deleted from and arms the targets sweep.
@@ -87,13 +95,19 @@
  * [fold(t) 0x00, fold(t) 0x01) per key, deletes the keys of empty
  * targets and reports them; it runs once per start (after the accounting
  * scan), after every drain, and after a cleanup that could not finish.
- * It never rewrites a stamp.
+ * It never rewrites a stamp.  Every emptiness check (cleanup or sweep)
+ * steps over at most 10000 tombstones (db_iter_open_bounded_limited);
+ * past that it is undecided: the key stays, the target's range is flushed
+ * and hinted for compaction, and the sweep at the next pass start checks
+ * it again.
  *
  * Compaction hints.  Each tracked column family (messages, msgid,
  * reply, ml_content, by_time, by_owner) keeps the smallest and largest
- * key deleted since its last hint; once compact_min_rows keys have gone
- * from it (any path), and at a drain's end, the engine calls
- * db_suggest_compact over [smallest, largest ‖ 0x00).
+ * key deleted since its last hint.  The time-ordered ones (by_time,
+ * msgid, ml_content) are hinted once compact_min_rows keys have gone
+ * (any path); every one at a drain's end (the prefix-keyed ones over
+ * what that drain deleted).  A hint flushes the CF's memtable (without
+ * waiting), then calls db_suggest_compact over [smallest, largest ‖ 0x00).
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -198,6 +212,12 @@ struct htrim_stats {
   enum htrim_phase last_phase;
   uint64_t         oldest_seen_ms;              /**< ms of the first by_time key the
                                                      last age-out slice read; 0 = none yet */
+  /* The max_slice_us slice, broken down (a budgeted slice with a commit or
+   * a cleanup to pay for; any other slice is all walk): staging (the
+   * walk), the batch commit and the in-memory applies, the touched-target
+   * cleanup, and the emptiness seeks it did (cleanup + sweep). */
+  uint64_t         max_walk_us, max_commit_us, max_cleanup_us;
+  unsigned int     max_seeks;
 };
 
 struct htrim_slice;
