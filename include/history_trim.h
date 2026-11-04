@@ -107,7 +107,10 @@
  * msgid, ml_content) are hinted once compact_min_rows keys have gone
  * (any path); every one at a drain's end (the prefix-keyed ones over
  * what that drain deleted).  A hint flushes the CF's memtable (without
- * waiting), then calls db_suggest_compact over [smallest, largest ‖ 0x00).
+ * waiting), then calls db_suggest_compact over [smallest, largest ‖ 0x00);
+ * the flush switches the memtable on the calling thread, so the engine's
+ * slices issue at most one hint each (a cleanup-only slice takes the
+ * rest) and a caller's slice none.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -217,6 +220,8 @@ struct htrim_stats {
    * walk), the batch commit and the in-memory applies, the touched-target
    * cleanup, and the emptiness seeks it did (cleanup + sweep). */
   uint64_t         max_walk_us, max_commit_us, max_cleanup_us;
+  uint64_t         max_hint_us;                 /**< a compaction hint it issued
+                                                     (flush + suggest), one at most */
   unsigned int     max_seeks;
 };
 

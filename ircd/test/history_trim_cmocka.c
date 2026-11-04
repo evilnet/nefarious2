@@ -2871,7 +2871,20 @@ static void test_drain_suggests_compaction(void **state)
   seed_run("#t", "R", "-", 86, base, 100);
   assert_int_equal(0, fake_db_suggest_calls(st.by_time));
 
+  /* The drain ends with four hints due, issued one a slice (a flush
+   * switches the memtable on this thread): the slice that ended the
+   * drain issues the first, three cleanup-only slices the rest. */
+  for (i = 0; i < 100 && htrim_run_slice(&p) == 1; i++)
+    if (htrim_stats()->deleted[HTRIM_PATH_OLDEST] == 11)
+      break;
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(1, fake_db_suggest_calls(st.messages)
+                      + fake_db_suggest_calls(st.msgid)
+                      + fake_db_suggest_calls(st.by_time)
+                      + fake_db_suggest_calls(st.by_owner));
+  assert_true(htrim_stats()->max_hint_us == 0);           /* step_us 0 */
   run_until_idle(&p);
+  assert_int_equal(HTRIM_PH_CLEANUP, htrim_stats()->last_phase);
   assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
   assert_int_equal(1, fake_db_suggest_calls(st.by_time));
   snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)base);
@@ -3040,10 +3053,11 @@ static void test_tsweep_removes_target_emptied_out_of_order(void **state)
   assert_int_equal(0, emptied_times("#t"));
   assert_int_equal(1, htrim_tsweep_pending());
 
-  run_until_idle(&p);
-  assert_int_equal(HTRIM_PH_TSWEEP, htrim_stats()->last_phase);
+  run_until_idle(&p);                  /* the sweep, then one hint a slice */
   assert_false(targets_has("#t"));
   assert_int_equal(1, emptied_times("#t"));
+  assert_int_equal(1, fake_db_suggest_calls(st.by_time));
+  assert_int_equal(1, fake_db_suggest_calls(st.by_owner));
   assert_true(targets_has("#n"));
   assert_int_equal(0, emptied_times("#n"));
   assert_int_equal(0, htrim_tsweep_pending());
@@ -3678,6 +3692,39 @@ static void test_ageout_due_rows_survive_restart(void **state)
   assert_int_equal(1, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
 }
 
+/* A due compaction hint is issued by the engine's own slices only --
+ * never inside a caller's burst-loss prune (an INCARNATION slice runs
+ * inside BURST, and a hint's flush switches a memtable on this thread). */
+static void test_caller_slice_issues_no_hint(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  struct htrim_slice *s;
+  unsigned int before;
+  (void)state;
+
+  p.quota_on = 0;
+  evict_ready();
+  seed_run("#t", "R", "-", 86, 1000, 100);
+  assert_int_equal(1, htrim_run_slice(&p));          /* the whole drain */
+  assert_int_equal(11, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(0, htrim_draining());
+  seed_plain("#p", "5000.000", "P1", "a:bob", NULL);
+  before = fake_db_suggest_calls(st.messages) + fake_db_suggest_calls(st.msgid)
+           + fake_db_suggest_calls(st.by_time) + fake_db_suggest_calls(st.by_owner);
+  assert_true(before < 4);             /* hints still due */
+
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  htrim_slice_set_phase(s, HTRIM_PH_INCARNATION);
+  stage_del(s, HTRIM_PATH_INCARNATION, "#p", "5000.000", "P1", 1);
+  assert_int_equal(1, htrim_slice_commit(s));
+  assert_int_equal(before, fake_db_suggest_calls(st.messages) + fake_db_suggest_calls(st.msgid)
+                           + fake_db_suggest_calls(st.by_time) + fake_db_suggest_calls(st.by_owner));
+  run_until_idle(&p);
+  assert_int_equal(4, fake_db_suggest_calls(st.messages) + fake_db_suggest_calls(st.msgid)
+                      + fake_db_suggest_calls(st.by_time) + fake_db_suggest_calls(st.by_owner));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -3757,6 +3804,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_evict_oldest_resumes_past_ageout, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_oldest_exhausted_from_bound_recounts, setup, teardown),
     cmocka_unit_test_setup_teardown(test_ageout_due_rows_survive_restart, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_caller_slice_issues_no_hint, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -282,8 +282,11 @@ static struct {
   char              *ts_cursor;       /* the last targets key it checked */
   size_t             ts_cursor_len, ts_cursor_cap;
 
-  /* Compaction hints: what each tracked CF lost since its last hint. */
+  /* Compaction hints: what each tracked CF lost since its last hint, and
+   * the hints due (issued one a slice: a flush switches the memtable on
+   * this thread -- the bed, valgrind: 3-90 ms each). */
   struct htrim_hint  hint[HH_COUNT];
+  unsigned char      hint_due[HH_COUNT];
   unsigned int       compact_min_rows;
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
@@ -301,7 +304,7 @@ static struct {
    * rows. */
   uint64_t           clean_ns;
   /* The last slice's breakdown (record_slice copies it onto the max). */
-  uint64_t           last_walk_us, last_commit_us, last_cleanup_us;
+  uint64_t           last_walk_us, last_commit_us, last_cleanup_us, last_hint_us;
   unsigned int       last_seeks;
 
   /* Touched targets whose emptiness check a budgeted slice's cleanup had
@@ -696,11 +699,37 @@ static int hint_time_ordered(int i)
   return i == HH_BY_TIME || i == HH_MSGID || i == HH_ML_CONTENT;
 }
 
+/** Every CF with deletes since its last hint is due a hint (a drain's
+ * end). */
 static void hints_flush_all(void)
 {
   int i;
   for (i = 0; i < HH_COUNT; i++)
-    hint_flush(i);
+    if (g.hint[i].n)
+      g.hint_due[i] = 1;
+}
+
+static int hints_pending(void)
+{
+  int i;
+  for (i = 0; i < HH_COUNT; i++)
+    if (g.hint_due[i])
+      return 1;
+  return 0;
+}
+
+/** Issue the first due hint, if any: one a slice.  @return 1 when one
+ * was issued. */
+static int hint_issue_one(void)
+{
+  int i;
+  for (i = 0; i < HH_COUNT; i++)
+    if (g.hint_due[i]) {
+      g.hint_due[i] = 0;
+      hint_flush(i);
+      return 1;
+    }
+  return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1612,7 +1641,7 @@ static void hints_due(void)
     return;
   for (i = 0; i < HH_COUNT; i++)
     if (hint_time_ordered(i) && g.hint[i].n >= g.compact_min_rows)
-      hint_flush(i);
+      g.hint_due[i] = 1;
 }
 
 /** Fold @a us spent over @a n units (staged rows, examined cleanup
@@ -1683,7 +1712,17 @@ int htrim_slice_commit(struct htrim_slice *s)
   examined = cleanup_touched(s, &seeks);
 
   now = g.clock();
-  g.last_elapsed_us = elapsed_since(s->start_us, now);
+  /* At most one compaction hint a slice, from the engine's own slices
+   * only (never inside a caller's burst-loss prune); timed apart, and
+   * kept out of the cost EWMAs (a hint is a one-off). */
+  g.last_hint_us = 0;
+  if (s->phase != HTRIM_PH_NONE && s->phase != HTRIM_PH_INCARNATION
+      && hint_issue_one()) {
+    uint64_t h = g.clock();
+    g.last_hint_us = elapsed_since(now, h);
+    g.last_elapsed_us = elapsed_since(s->start_us, h);
+  } else
+    g.last_elapsed_us = elapsed_since(s->start_us, now);
   if (measure) {
     if (staged)
       cost_learn(&g.cost_ns[s->phase], elapsed_since(t0, t1), staged);
@@ -1693,8 +1732,12 @@ int htrim_slice_commit(struct htrim_slice *s)
     g.last_commit_us = elapsed_since(t0, t1);
     g.last_cleanup_us = elapsed_since(t1, now);
     g.last_seeks = seeks + s->ts_checks;
-  } else
+  } else {
+    uint64_t hint_us = g.last_hint_us;
     last_unmeasured(seeks + s->ts_checks);
+    g.last_walk_us -= hint_us;
+    g.last_hint_us = hint_us;
+  }
   if (s->phase != HTRIM_PH_NONE)
     record_slice(s->phase);
   rows = s->rows;
@@ -2703,9 +2746,10 @@ static enum htrim_phase pick_phase(const struct htrim_params *p)
     if (phase_has_work(ph, p))
       return ph;
   }
-  /* Carried emptiness checks ride on every committed slice; with no
-   * phase left to run, a slice of their own finishes them. */
-  return g.ncarry ? HTRIM_PH_CLEANUP : HTRIM_PH_NONE;
+  /* Carried emptiness checks and due compaction hints ride on every
+   * committed slice; with no phase left to run, slices of their own
+   * finish them. */
+  return g.ncarry || hints_pending() ? HTRIM_PH_CLEANUP : HTRIM_PH_NONE;
 }
 
 static void record_slice(enum htrim_phase ph)
@@ -2717,6 +2761,7 @@ static void record_slice(enum htrim_phase ph)
     g.stats.max_walk_us = g.last_walk_us;
     g.stats.max_commit_us = g.last_commit_us;
     g.stats.max_cleanup_us = g.last_cleanup_us;
+    g.stats.max_hint_us = g.last_hint_us;
     g.stats.max_seeks = g.last_seeks;
   }
   g.stats.last_phase = ph;
@@ -2726,7 +2771,7 @@ static void record_slice(enum htrim_phase ph)
 static void last_unmeasured(unsigned int seeks)
 {
   g.last_walk_us = g.last_elapsed_us;
-  g.last_commit_us = g.last_cleanup_us = 0;
+  g.last_commit_us = g.last_cleanup_us = g.last_hint_us = 0;
   g.last_seeks = seeks;
 }
 
@@ -2815,5 +2860,6 @@ void htrim_reset_max_slice(void)
   g.stats.max_slice_us = 0;
   g.stats.max_phase = HTRIM_PH_NONE;
   g.stats.max_walk_us = g.stats.max_commit_us = g.stats.max_cleanup_us = 0;
+  g.stats.max_hint_us = 0;
   g.stats.max_seeks = 0;
 }

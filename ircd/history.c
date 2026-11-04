@@ -4267,12 +4267,13 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
      * commit, the touched-target cleanup, and its emptiness seeks. */
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Max slice: %llu ms (%s): walk %llu us, commit %llu us, "
-               "cleanup %llu us, %u seeks",
+               "cleanup %llu us, hint %llu us, %u seeks",
                (unsigned long long)((tst->max_slice_us + 999) / 1000),
                htrim_phase_name(tst->max_phase),
                (unsigned long long)tst->max_walk_us,
                (unsigned long long)tst->max_commit_us,
-               (unsigned long long)tst->max_cleanup_us, tst->max_seeks);
+               (unsigned long long)tst->max_cleanup_us,
+               (unsigned long long)tst->max_hint_us, tst->max_seeks);
   }
   if (history_available) {
     /* Tombstones still in memtables (active + immutable), per trimmed CF:
