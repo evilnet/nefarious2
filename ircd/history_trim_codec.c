@@ -817,19 +817,34 @@ size_t htc_acct_top(const struct htc_acct *a, struct htc_owner_total *out,
 
 /* ---------------------------------------------------------------------
  * The fair-eviction planner. The order below IS the decision (Task 3
- * brief) -- implemented exactly, not re-derived:
+ * brief, as amended by the fix-round-1 controller ruling on FINDING 1
+ * below) -- implemented exactly, not re-derived:
  *
- *   sanitize: high<=0 -> 85; low<=0 -> 75; low>=high -> low = high-10
+ *   sanitize: high outside 1..100 -> 85; low outside 1..100 -> 75;
+ *             then low>=high -> low = (high>10 ? high-10 : 0).
+ *             (Fix round 1, FINDING 1: the brief's original rule --
+ *             low>=high -> low = high-10, with no floor -- lets low go
+ *             negative whenever high is sanitized-valid but <=10
+ *             [e.g. an oper sets HIGH_WATERMARK to 1..9; feature_set's
+ *             FEAT_INT path does strtoul with no min/max,
+ *             ircd_features.c:1601-1617]. target = cap*(uint64_t)low/100
+ *             then wraps to ~2^64 instead of landing near 0, silently
+ *             defeating the cap. The ruling floors low at 0. After
+ *             sanitizing, every threshold/target lies in [0, cap].)
  *   target = cap*low/100 (always set); total = htc_acct_total;
  *            cap==0 -> inactive
  *   active = draining ? total>target : total > cap*high/100;
  *            inactive -> nsteps 0, oldest 0
- *   if quota_on && 1<=share_pct<=99:
+ *   if quota_on && 1<=share_pct<=99 (outside 1..99 keeps the share
+ *   step off, same as quota_on false):
  *     share = cap*share_pct/100 (via htc_owner_share -- Amendment A)
  *     over = owners != "-" with bytes > share, sorted by bytes desc,
  *            owner asc
  *     steps = first HTC_PLAN_MAX_STEPS of over, trim = bytes - share;
  *     truncated = (|over| > HTC_PLAN_MAX_STEPS)
+ *     (Fix round 1, FINDING 2: if the over-share candidate scratch
+ *     array can't be allocated, truncated is also forced to 1 here --
+ *     see the anti-goal note at the allocation site below.)
  *   oldest = (nsteps==0 && !truncated && total>target) ? total-target : 0
  * ------------------------------------------------------------------- */
 
@@ -860,12 +875,18 @@ void htc_plan_eviction(const struct htc_acct *a,
 
   high = p->high_pct;
   low  = p->low_pct;
-  if (high <= 0)
+  if (high < 1 || high > 100)
     high = 85;
-  if (low <= 0)
+  /* The ruling's prose says "low outside 0..100 -> 75", but the
+   * mandated kept case (high 0, low 0 -> target 750) only works if
+   * low==0 takes this reset too (high alone sanitizes to 85, and
+   * 0>=85 is false, so an unreset low==0 would leave target at 0, not
+   * 750) -- i.e. the boundary is low<=0, matching the brief's original
+   * "low<=0 -> 75" with an added upper bound. */
+  if (low <= 0 || low > 100)
     low = 75;
   if (low >= high)
-    low = high - 10;
+    low = (high > 10) ? high - 10 : 0;
 
   cap = p->cap;
   target = cap * (uint64_t)low / 100;
@@ -890,8 +911,22 @@ void htc_plan_eviction(const struct htc_acct *a,
 
     out->share = htc_owner_share(p, HTC_OWNER_NONE);
 
-    if (a->count > 0)
+    if (a->count > 0) {
       cand = (struct htc_owner_total *)malloc(sizeof(*cand) * a->count);
+      if (!cand) {
+        /* Anti-goal (fix round 1, FINDING 2): without this scratch
+         * array we cannot tell which owners are over share, so we
+         * must NOT fall through to the oldest-overall fallback below
+         * -- that would evict compliant owners' rows while any
+         * over-share owner's rows are left untouched (the same
+         * anti-goal test_plan_truncated_blocks_oldest pins for a
+         * list that's merely too long). Mark the plan truncated
+         * (forcing oldest to 0 below) and leave nsteps at 0: the plan
+         * does nothing this slice rather than evict the wrong rows,
+         * and the next slice gets another chance. */
+        out->truncated = 1;
+      }
+    }
 
     if (cand) {
       size_t b, i;

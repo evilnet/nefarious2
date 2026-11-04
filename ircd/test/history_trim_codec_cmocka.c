@@ -722,6 +722,76 @@ static void test_plan_sanitize(void **state)
   htc_plan_eviction(a, &p, &plan);
   assert_int_equal(plan.target, 750u);
 
+  /* Fix round 1 (controller ruling, FINDING 1): the brief's unfloored
+   * "low >= high -> low = high - 10" lets low go negative whenever an
+   * oper sets HIGH_WATERMARK to 1..9 (feature_set's FEAT_INT path has
+   * no min/max -- ircd_features.c:1601-1617), and target = cap*low/100
+   * then wraps to ~2^64 under unsigned arithmetic instead of landing
+   * at a sane value near 0. The ruling floors it: low = high>10 ?
+   * high-10 : 0. */
+
+  /* high 5, low 75: low>=high (75>=5), high is NOT >10, so low floors
+   * at 0 instead of wrapping to -5 (~2^64 unsigned). This is exactly
+   * the wrap FINDING 1 reported. */
+  p.high_pct = 5;
+  p.low_pct = 75;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.target, 0u);
+
+  /* Same config, draining, total 900: with the floor in place the
+   * plan stays active (900 > target 0) and reports the full total as
+   * oldest (no owner is over share -- only the exempt '-' owner holds
+   * anything) instead of the old code's silent total>cap*high/100
+   * (900 > 1000*5/100=50) vs draining (900 > wrapped target) giving
+   * two different "active" answers for the same state, or crashing on
+   * total - target. */
+  {
+    struct htc_acct *a2 = htc_acct_new();
+    struct htc_plan_params pd = p; /* high=5, low=75 (sanitizes to 0) */
+    struct htc_plan plan2;
+
+    pd.draining = 1;
+    htc_acct_add(a2, HTC_OWNER_NONE, 900);
+    htc_plan_eviction(a2, &pd, &plan2);
+    assert_int_equal(plan2.active, 1);
+    assert_int_equal((int)plan2.nsteps, 0);
+    assert_int_equal(plan2.oldest, 900u);
+
+    htc_acct_free(a2);
+  }
+
+  /* high 150 is out of the 1..100 range -> sanitizes to 85, proven via
+   * the active decision: 851 is over cap*85/100 (850) but would NOT
+   * be over cap*150/100 (1500) if the out-of-range value leaked
+   * through unsanitized. */
+  {
+    struct htc_acct *a3 = htc_acct_new();
+    struct htc_plan_params ph = htc_test_default_params();
+    struct htc_plan plan3;
+
+    ph.high_pct = 150;
+    htc_acct_add(a3, HTC_OWNER_NONE, 851);
+    htc_plan_eviction(a3, &ph, &plan3);
+    assert_int_equal(plan3.active, 1);
+
+    htc_acct_free(a3);
+  }
+
+  /* low -3 is out of range -- same reset-to-75 path as low 0 above --
+   * then the ordinary low>=high rule applies on top (75 < 85, so low
+   * stays at the reset default here). */
+  p.high_pct = 85;
+  p.low_pct = -3;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.target, 750u);
+
+  /* high 100, low 100: both already in range, so low>=high (100>=100)
+   * fires and low = high-10 = 90. */
+  p.high_pct = 100;
+  p.low_pct = 100;
+  htc_plan_eviction(a, &p, &plan);
+  assert_int_equal(plan.target, 900u);
+
   htc_acct_free(a);
 }
 
