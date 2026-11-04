@@ -4113,10 +4113,11 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                "H :  Backlog: age-out %s, oldest indexed row %ss old",
                htrim_ageout_pending() ? "yes" : "no", age);
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Last slice: %llu ms (%s), max %llu ms",
+               "H :  Last slice: %llu ms (%s), max %llu ms (%s)",
                (unsigned long long)((tst->last_slice_us + 999) / 1000),
                htrim_phase_name(tst->last_phase),
-               (unsigned long long)((tst->max_slice_us + 999) / 1000));
+               (unsigned long long)((tst->max_slice_us + 999) / 1000),
+               htrim_phase_name(tst->max_phase));
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Deleted: ageout=%llu owner=%llu oldest=%llu emergency=%llu "
                "backfill=%llu incarnation=%llu",

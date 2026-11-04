@@ -1125,10 +1125,12 @@ static void test_run_slice_scan_then_idle(void **state)
   assert_int_equal(HTRIM_PH_ACCTSCAN, stats->last_phase);
   assert_int_equal(250, stats->last_slice_us);      /* begin -> end of cleanup */
   assert_int_equal(250, stats->max_slice_us);
+  assert_int_equal(HTRIM_PH_ACCTSCAN, stats->max_phase);
   for (i = 0; i < HTRIM_PATH_COUNT; i++)
     assert_int_equal(0, stats->deleted[i]);
   htrim_reset_max_slice();
   assert_int_equal(0, htrim_stats()->max_slice_us);
+  assert_int_equal(HTRIM_PH_NONE, htrim_stats()->max_phase);
   assert_int_equal(0, htrim_run_slice(&p));        /* still idle */
 }
 
@@ -2019,15 +2021,18 @@ static void assert_bt_lower(const void *k, size_t kl)
 
 /* The bed (valgrind, 2026-11-04): a pass start that reopened the walk at
  * the first by_time key walked every tombstone the earlier passes left --
- * ~3000, 316-433 ms in one slice.  A pass start resumes where the last
- * walk stopped (rows behind it are gone), and goes back only as far as
- * the oldest row indexed behind it since -- a late store, or a backfill
- * after a retention rise. */
+ * ~3000, 316-433 ms in one slice -- and so did every pass that found no
+ * row to delete.  A walk stopped by the budget resumes past the last key
+ * it deleted; a walk that reached the cutoff resumes AT the cutoff bound
+ * (everything below it is gone); a pass start goes back only as far as
+ * the oldest row indexed behind that point since -- a late store, or a
+ * backfill after a retention rise. */
 static void test_ageout_pass_start_resumes_past_drained_head(void **state)
 {
-  struct htrim_params p = bf_params(0);
+  struct htrim_params p = bf_params(3);
   char ts[32], last[32], late[32], ahead[32], mid[16];
   char k[HTC_BT_KEY_MAX + 1];
+  unsigned char cut[8];
   int i, kl;
   (void)state;
 
@@ -2036,25 +2041,47 @@ static void test_ageout_pass_start_resumes_past_drained_head(void **state)
     snprintf(mid, sizeof mid, "O%d", i);
     seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
   }
-  ts_ago(last, sizeof last, 8, 96);                     /* O4, the last deleted */
+  ts_ago(last, sizeof last, 8, 98);                     /* O2 */
+  step_us = 1000;                      /* 1 ms per clock read; 3 ms slices */
   htrim_pass_start(&p);
-  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(1, htrim_run_slice(&p));             /* O0..O2, stopped by the budget */
   assert_bt_lower(NULL, 0);                             /* the first walk: from the first key */
+  assert_int_equal(3, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+
+  /* The next slice resumes past O2 (O2's key ‖ 0x00). */
+  kl = bt_of(k, sizeof k - 1, "#t", last, "O2");
+  k[kl++] = '\0';
+  assert_int_equal(0, htrim_run_slice(&p));             /* O3, O4, then the cutoff */
+  assert_bt_lower(k, (size_t)kl);
   assert_int_equal(5, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
 
-  /* No row behind the walk: the next pass resumes past O4. */
-  kl = bt_of(k, sizeof k - 1, "#t", last, "O4");
-  k[kl++] = '\0';                                       /* O4's key ‖ 0x00 */
+  /* That walk reached the cutoff: the next pass resumes at its bound, and
+   * so does every pass after one that found nothing. */
+  htc_be64(cut, p.now_ms - 7ULL * 86400ULL * 1000ULL);
   htrim_pass_start(&p);
   assert_int_equal(0, htrim_run_slice(&p));
-  assert_bt_lower(k, (size_t)kl);
+  assert_bt_lower(cut, sizeof cut);
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(cut, sizeof cut);
 
-  /* A row ahead of the walk (newer than O4, still past retention) is not
-   * behind it: the pass still resumes past O4, and deletes it. */
-  seed_plain("#u", ts_ago(ahead, sizeof ahead, 8, 50), "AHEAD", "a:bob", NULL);
+  /* A retention rise moves the cutoff back; the resume point does not
+   * follow it backwards (the keys between are gone too). */
+  p.retention_days = 8;
   htrim_pass_start(&p);
   assert_int_equal(0, htrim_run_slice(&p));
-  assert_bt_lower(k, (size_t)kl);
+  p.retention_days = 7;
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(cut, sizeof cut);
+
+  /* An hour on, a row stored then (inside retention, so ahead of the walk)
+   * has aged out: the pass resumes at the old bound and deletes it. */
+  seed_plain("#u", ts_ago(ahead, sizeof ahead, 7, -1800), "AHEAD", "a:bob", NULL);
+  p.now_ms += 3600ULL * 1000ULL;
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_bt_lower(cut, sizeof cut);
   assert_int_equal(6, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
   assert_int_equal(0, fake_db_rows(st.by_time));
 
@@ -2064,6 +2091,7 @@ static void test_ageout_pass_start_resumes_past_drained_head(void **state)
   seed_plain("#u", ts_ago(ts, sizeof ts, 8, 200), "LATE2", "a:bob", NULL);
   kl = bt_of(k, sizeof k, "#u", late, "LATE0");
   htrim_pass_start(&p);
+  step_us = 0;
   assert_int_equal(0, htrim_run_slice(&p));
   assert_bt_lower(k, (size_t)kl);
   assert_int_equal(0, fake_db_rows(st.by_time));

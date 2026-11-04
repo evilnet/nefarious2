@@ -44,10 +44,12 @@
  *
  * Age-out.  Retention is enforced by walking by_time -- globally ordered
  * by time -- over [resume point, be64(cutoff_ms)), oldest first, THE
- * delete for each row (counted), in budgeted slices.  The resume point is
- * the successor of the last by_time key a committed slice deleted (in
- * memory; the first key after a start); a failed commit leaves it, so the
- * same rows come round again.  A pass opens at htrim_pass_start (each
+ * delete for each row (counted), in budgeted slices.  The resume point (in
+ * memory; the first key after a start) is the successor of the last
+ * by_time key a slice stopped by its budget deleted, or the bound itself
+ * once a walk reached it (every key below is gone; a retention rise never
+ * moves it back); it moves only when a slice commits, so after a failed
+ * commit the same rows come round again.  A pass opens at htrim_pass_start (each
  * maintenance tick, and a retention change) and resumes there -- never at
  * the first key again, whose seek would walk every tombstone the earlier
  * passes left -- except that a row indexed behind the resume point since
@@ -142,6 +144,7 @@ struct htrim_stats {
   uint64_t         deleted[HTRIM_PATH_COUNT];   /**< committed deletes per path */
   uint64_t         last_slice_us;               /**< begin to end of cleanup */
   uint64_t         max_slice_us;
+  enum htrim_phase max_phase;                   /**< the phase of the max_slice_us slice */
   enum htrim_phase last_phase;
   uint64_t         oldest_seen_ms;              /**< ms of the first by_time key the
                                                      last age-out slice read; 0 = none yet */

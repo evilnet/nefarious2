@@ -32,9 +32,10 @@
  * pending deltas), so a backfill racing the boot scan counts each row once.
  *
  * Age-out keeps where its walk resumes (ao_lower, in memory only): the
- * successor of the last by_time key a committed slice deleted.  Every
- * slice opens its iterator there, so the tombstones the walk left behind
- * it are never walked again -- on RocksDB a seek from the first key walks
+ * successor of the last by_time key a committed slice deleted, or the
+ * cutoff bound once a walk reached it (so a pass that finds nothing to
+ * delete does not walk the head either).  Every slice opens its iterator
+ * there, so the tombstones the walk left behind it are never walked again -- on RocksDB a seek from the first key walks
  * every one not yet compacted away (the bed, 2026-11-04: ~3000 of them,
  * 316-433 ms in one slice).  Behind ao_lower every row is gone except
  * those indexed there since (a late store, a backfill after a retention
@@ -98,6 +99,8 @@ struct htrim_slice {
   /* An age-out step, applied at commit. */
   int                   ao_step;     /* this slice walked by_time */
   int                   ao_finished; /* ... to the cutoff: the pass is over */
+  int                   ao_bounded;  /* ao_upper is set (retention on) */
+  unsigned char         ao_upper[8]; /* the walk's bound, be64(cutoff_ms) */
   char                 *ao_cursor;   /* the last by_time key it deleted */
   size_t                ao_cursor_len, ao_cursor_cap;
 
@@ -905,10 +908,17 @@ static void backfill_apply(struct htrim_slice *s)
 
 /** A committed age-out step: the walk resumes at the successor of the
  * last key it deleted (that key ‖ 0x00); a walk that reached the cutoff
- * closes the pass. */
+ * closes the pass and resumes at the cutoff bound itself -- every key
+ * below it is gone, so no later pass walks their tombstones again, not
+ * even a pass that finds nothing to delete. */
 static void ageout_apply(struct htrim_slice *s)
 {
-  if (s->ao_cursor_len) {
+  if (s->ao_finished && s->ao_bounded) {
+    if (!g.ao_lower_len
+        || key_cmp(s->ao_upper, sizeof s->ao_upper, g.ao_lower, g.ao_lower_len) > 0)
+      bytes_set(&g.ao_lower, &g.ao_lower_len, &g.ao_lower_cap,
+                s->ao_upper, sizeof s->ao_upper);
+  } else if (s->ao_cursor_len) {
     size_t n = s->ao_cursor_len + 1;
     if (n > g.ao_lower_cap) {
       g.ao_lower_cap = n;
@@ -1009,6 +1019,8 @@ static int phase_ageout(struct htrim_slice *s, const struct htrim_params *p)
     return 0;
   }
   htc_be64(upper, cutoff);
+  memcpy(s->ao_upper, upper, sizeof upper);
+  s->ao_bounded = 1;
   /* The iterator copies its bounds: a walk that later moves ao_lower
    * cannot pull them from under it. */
   it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL,
@@ -1353,8 +1365,10 @@ static enum htrim_phase pick_phase(const struct htrim_params *p)
 static void record_slice(enum htrim_phase ph)
 {
   g.stats.last_slice_us = g.last_elapsed_us;
-  if (g.last_elapsed_us > g.stats.max_slice_us)
+  if (g.last_elapsed_us > g.stats.max_slice_us) {
     g.stats.max_slice_us = g.last_elapsed_us;
+    g.stats.max_phase = ph;
+  }
   g.stats.last_phase = ph;
 }
 
@@ -1412,4 +1426,5 @@ const struct htrim_stats *htrim_stats(void)
 void htrim_reset_max_slice(void)
 {
   g.stats.max_slice_us = 0;
+  g.stats.max_phase = HTRIM_PH_NONE;
 }
