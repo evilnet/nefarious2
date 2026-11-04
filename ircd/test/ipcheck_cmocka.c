@@ -313,6 +313,10 @@ static void test_report_unknown_and_garbage(void **state)
   assert_string_equal(replies[0], "I :IPcheck: \"*\" is not an address");
   report("192.0.2.0/24");        /* a mask is not an address either */
   assert_string_equal(replies[0], "I :IPcheck: \"192.0.2.0/24\" is not an address");
+  report("192.0.*");             /* ipmask_parse takes this as 192.0.0.0 */
+  assert_string_equal(replies[0], "I :IPcheck: \"192.0.*\" is not an address");
+  report("2001:db8:*");          /* and this as 2001:db8:: */
+  assert_string_equal(replies[0], "I :IPcheck: \"2001:db8:*\" is not an address");
 }
 
 /* An IPv6 address shares its entry with its whole /64, and says so. */
@@ -325,23 +329,41 @@ static void test_report_ipv6_key(void **state)
   assert_non_null(strstr(replies[0], "I :2001:db8:1:2::/64: on 1, attempts 1"));
 }
 
-/* Without an address: totals, the rule, the refund table, then the
- * busiest entries, most connections first. */
+/* A real 6to4 client is keyed on the 48 bits that embed an IPv4 address,
+ * like that address's own clients, and is shown as that /48, not as an
+ * IPv4 address it is not. */
+static void test_report_6to4_key(void **state)
+{
+  (void)state;
+  assert_true(local_connect("2002:cb00:7107:9::1"));
+  report("2002:cb00:7107:9::1");
+  assert_int_equal(nreplies, 1);
+  assert_non_null(strstr(replies[0], "I :2002:cb00:7107::/48: on 1, attempts 1"));
+  report("2002:cb00:7107::");    /* its IPv4 form, 203.0.113.7, has its own key */
+  assert_non_null(strstr(replies[0], "I :203.0.113.7/32: "));
+}
+
+/* Without an address: totals, the rule, the refund table, then the ten
+ * busiest entries, most connections first -- ten of more than ten. */
 static void test_report_summary(void **state)
 {
   int i;
-  unsigned int prev = 0xffffffff, on;
+  unsigned int prev = 0xffffffff, on, entries;
+  char ip[32];
   (void)state;
-  assert_true(local_connect("192.0.2.53"));
+  for (i = 1; i <= 12; ++i) {
+    snprintf(ip, sizeof(ip), "203.0.113.%d", 100 + i);
+    assert_true(local_connect(ip));
+  }
   report(NULL);
   assert_true(nreplies >= 4);
-  assert_non_null(strstr(replies[0], "I :IPcheck: "));
-  assert_non_null(strstr(replies[0], "I :IPcheck: entries "));
+  assert_int_equal(sscanf(replies[0], "I :IPcheck: entries %u,", &entries), 1);
+  assert_true(entries >= 12);
   assert_non_null(strstr(replies[0], ", connections counted "));
   assert_non_null(strstr(replies[1], "number 4 in a chain of gaps up to 40 s"));
   assert_non_null(strstr(replies[1], "refusals counted"));
   assert_string_equal(replies[2], "I :IPcheck: SASL refunds off (IPCHECK_SASL_REFUND 0)");
-  assert_true(nreplies - 3 <= 10);
+  assert_int_equal(nreplies - 3, 10);
   for (i = 3; i < nreplies; ++i) {
     const char *p = strstr(replies[i], ": on ");
     assert_non_null(p);
@@ -458,6 +480,7 @@ int main(void)
     cmocka_unit_test_setup(test_verdict_matches_check, setup),
     cmocka_unit_test_setup(test_report_unknown_and_garbage, setup),
     cmocka_unit_test_setup(test_report_ipv6_key, setup),
+    cmocka_unit_test_setup(test_report_6to4_key, setup),
     cmocka_unit_test_setup(test_report_summary, setup),
     cmocka_unit_test_setup(test_report_refunds_on, setup),
     cmocka_unit_test_setup(test_verdict_at_odd_limits, setup),

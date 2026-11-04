@@ -854,13 +854,16 @@ multiuser box can all connect to a server simultaniously without being
 considered an attack.
 
 STATS ipcheck <server> [<address>] (any oper, local included, from any
-server) shows what the throttle knows.  Without an address: how many addresses it holds and how many
-connections it counts, the limit, period and grace in force, the SASL
-refund table's occupancy, and the ten busiest addresses.  With one: that
-address's entry -- its live count, its attempts, how long since its last
-connect or drop, its free targets -- and whether its next connection
-would be accepted or refused, and for how long.  An IPv4 address has an
-entry of its own (/32); an IPv6 address shares one with its whole /64.
+server) shows what the throttle knows.  Without an address: how many
+addresses it holds and how many connections it counts, the limit, period
+and grace in force, the SASL refund table's occupancy, and the ten
+busiest addresses.  With one: that address's entry -- its live count,
+its attempts, how long since its last connect or drop, its free targets
+-- and whether its next connection would be accepted or refused, and for
+how long.  A mask or a wildcard is refused: the read-out is of one entry.
+An IPv4 address has an entry of its own (/32); an IPv6 address shares
+one with its whole /64; a 6to4 address (2002::/16) is keyed on its /48,
+the IPv4 address it embeds.
 
 IPCHECK_COUNT_REFUSALS
  * Type: boolean
