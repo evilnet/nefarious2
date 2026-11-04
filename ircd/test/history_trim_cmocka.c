@@ -630,6 +630,126 @@ static void test_delete_paste_by_value(void **state)
   assert_int_equal(2, fake_db_rows(st.ml_paste));
 }
 
+/* A by_time row the engine cannot read must still leave the head: only
+ * the engine-owned rows (by_time, and by_owner when the record names the
+ * owner) go, it counts under its path, and the walk goes on to the next. */
+static void test_delete_malformed_advances(void **state)
+{
+  struct htrim_slice *s;
+  struct htc_rec rec, bad, good;
+  struct db_writebatch *wb;
+  struct db_iter *it;
+  char bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], rv[HTC_REC_MAX];
+  char k[HTC_MSG_KEY_MAX];
+  unsigned char sz[4];
+  int btl, bol, rvl, rc, n, seen = 0;
+  (void)state;
+
+  load_acct();
+  seed_plain("#t", "100.000", "M1", "a:bob", &good);          /* the next row */
+  seed_plain("#t", "60.000", "M3", "a:bob", &rec);            /* record goes bad */
+
+  wb = db_writebatch_new(env);
+  /* (b) a by_time key that does not parse (no target separator), with a
+   *     readable record naming its owner, and its by_owner row. */
+  memset(&bad, 0, sizeof bad);
+  bad.bytes = 77;
+  snprintf(bad.ts, sizeof bad.ts, "0.001");
+  snprintf(bad.owner, sizeof bad.owner, "a:bob");
+  htc_be64((unsigned char *)bt, 1);
+  memcpy(bt + 8, "#t", 2);
+  btl = 10;
+  rvl = htc_rec_pack(rv, sizeof rv, &bad);
+  assert_true(rvl > 0);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_time, bt, (size_t)btl, rv, (size_t)rvl));
+  bol = htc_bo_key(bo, sizeof bo, "a:bob", bt, (size_t)btl);
+  assert_true(bol > 0);
+  htc_size_pack(sz, 77);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_owner, bo, (size_t)bol, sz, 4));
+  /* (a) a well-formed key whose record does not parse. */
+  btl = bt_of(bt, sizeof bt, "#t", "50.000", "BAD2");
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_time, bt, (size_t)btl, "garbage", 7));
+  /* (c) M3's record loses its ts. */
+  btl = bt_of(bt, sizeof bt, "#t", "60.000", "M3");
+  rec.ts[0] = '\0';
+  rvl = htc_rec_pack(rv, sizeof rv, &rec);
+  assert_true(rvl > 0);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_time, bt, (size_t)btl, rv, (size_t)rvl));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  htrim_note_stored("a:bob", bo, (size_t)bol, 77);
+  assert_int_equal(4, fake_db_rows(st.by_time));
+
+  /* A head walk: every row is deleted, readable or not. */
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  it = db_iter_open(env, st.by_time, NULL);
+  assert_non_null(it);
+  for (rc = db_iter_seek_first(it); rc == DB_OK; rc = db_iter_next(it)) {
+    size_t kl, vl;
+    const void *kp = db_iter_key(it, &kl);
+    const void *vp = db_iter_value(it, &vl);
+    struct htc_rec r;
+    int parsed = htc_rec_parse(vp, vl, &r) == 0;
+    assert_int_equal(0, htrim_delete_row(s, HTRIM_PATH_AGEOUT, kp, kl,
+                                         parsed ? &r : NULL, 1));
+    seen++;
+  }
+  db_iter_close(it);
+  assert_int_equal(4, seen);
+  assert_int_equal(4, htrim_slice_commit(s));
+
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.by_owner));
+  assert_int_equal(4, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  /* The good row went whole; the unreadable record's message row is not
+   * the engine's to guess at, so it stays. */
+  n = htc_msg_key(k, sizeof k, "#t", "100.000", "M1");
+  assert_false(key_exists(st.messages, k, (size_t)n));
+  n = htc_msg_key(k, sizeof k, "#t", "60.000", "M3");
+  assert_true(key_exists(st.messages, k, (size_t)n));
+  assert_int_equal(1, fake_db_rows(st.messages));
+  assert_int_equal(2, fake_db_rows(st.msgid));               /* M3's two rows */
+  assert_acct_matches_cf();
+  assert_int_equal(0, htc_acct_total(htrim_acct()));
+  (void)good;
+}
+
+/* A failed batch op poisons the slice: -2 from then on, and a commit that
+ * applies nothing. */
+static void test_delete_poisoned_slice(void **state)
+{
+  struct htrim_slice *s;
+  uint64_t total;
+  (void)state;
+
+  load_acct();
+  seed_plain("#t", "100.000", "M1", "a:bob", NULL);
+  seed_plain("#t", "200.000", "M2", "a:bob", NULL);
+  total = htc_acct_total(htrim_acct());
+
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  fake_db_fail_next_batch_op(env);
+  {
+    char bt[HTC_BT_KEY_MAX];
+    struct htc_rec rec;
+    int btl = bt_of(bt, sizeof bt, "#t", "100.000", "M1");
+    get_rec("#t", "100.000", "M1", &rec);
+    assert_int_equal(-2, htrim_delete_row(s, HTRIM_PATH_AGEOUT, bt, (size_t)btl, &rec, 1));
+    btl = bt_of(bt, sizeof bt, "#t", "200.000", "M2");
+    get_rec("#t", "200.000", "M2", &rec);
+    assert_int_equal(-2, htrim_delete_row(s, HTRIM_PATH_AGEOUT, bt, (size_t)btl, &rec, 1));
+    /* An invalid call stays -1. */
+    assert_int_equal(-1, htrim_delete_row(s, HTRIM_PATH_COUNT, bt, (size_t)btl, &rec, 1));
+  }
+  assert_int_equal(-1, htrim_slice_commit(s));
+  assert_int_equal(2, fake_db_rows(st.messages));
+  assert_int_equal(2, fake_db_rows(st.by_time));
+  assert_int_equal(total, htc_acct_total(htrim_acct()));
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+}
+
 static void test_commit_failure_keeps_everything(void **state)
 {
   struct htrim_slice *s;
@@ -758,6 +878,73 @@ static void test_cleanup_skips_when_newest_not_deleted(void **state)
   assert_true(targets_has("#t"));
 }
 
+/* Review Focus 5, the stamp that does not help: JOIN/PART/QUIT/... rows do
+ * not bump the targets stamp, so a target whose newest rows are such rows
+ * reaches the emptiness check on every slice of its drain.  The check must
+ * seek the LIVE tail (seek_last), never the head (seek_first), which on
+ * RocksDB walks every tombstone the drain has left so far. */
+static void test_cleanup_seeks_tail_not_head(void **state)
+{
+  unsigned int firsts, lasts;
+  (void)state;
+
+  seed_plain("#t", "200.000", "T2", "a:bob", NULL);
+  seed_plain("#t", "300.000", "T3", "a:bob", NULL);
+  seed_targets("#t", "100.000");            /* older than every row */
+
+  firsts = fake_db_seek_firsts(st.messages);
+  lasts = fake_db_seek_lasts(st.messages);
+  assert_int_equal(1, del_row(HTRIM_PATH_AGEOUT, "#t", "200.000", "T2", 1));
+  assert_int_equal(firsts, fake_db_seek_firsts(st.messages));
+  assert_int_equal(lasts + 1, fake_db_seek_lasts(st.messages));
+  assert_int_equal(0, emptied_calls);
+  assert_true(targets_has("#t"));
+
+  /* The last row goes: one tail seek finds the range empty. */
+  assert_int_equal(1, del_row(HTRIM_PATH_AGEOUT, "#t", "300.000", "T3", 1));
+  assert_int_equal(firsts, fake_db_seek_firsts(st.messages));
+  assert_int_equal(lasts + 2, fake_db_seek_lasts(st.messages));
+  assert_int_equal(1, emptied_calls);
+  assert_string_equal("#t", emptied_names[0]);
+  assert_false(targets_has("#t"));
+}
+
+/* A cleanup that cannot finish leaves its targets keys for Task 8's sweep,
+ * and says so -- it never reports a target it did not remove. */
+static void test_cleanup_failure_wants_sweep(void **state)
+{
+  struct htrim_slice *s;
+  (void)state;
+
+  seed_plain("#t", "100.000", "T1", "a:bob", NULL);
+  seed_plain("#t", "200.000", "T2", "a:bob", NULL);
+  seed_targets("#t", "200.000");
+  assert_int_equal(0, htrim_tsweep_wanted());
+
+  /* The slice commits; the cleanup's own batch (the 2nd commit) fails. */
+  fake_db_fail_commit_at(env, 2);
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#t", "100.000", "T1", 1);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#t", "200.000", "T2", 1);
+  assert_int_equal(2, htrim_slice_commit(s));
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(0, emptied_calls);
+  assert_true(targets_has("#t"));
+  assert_int_equal(1, htrim_tsweep_wanted());
+  htrim_tsweep_clear();
+  assert_int_equal(0, htrim_tsweep_wanted());
+
+  /* An emptiness check that cannot read the target wants the sweep too. */
+  seed_plain("#u", "100.000", "U1", "a:bob", NULL);
+  seed_targets("#u", "100.000");
+  fake_db_fail_next_iter_open(env);
+  assert_int_equal(1, del_row(HTRIM_PATH_AGEOUT, "#u", "100.000", "U1", 1));
+  assert_int_equal(0, emptied_calls);
+  assert_true(targets_has("#u"));
+  assert_int_equal(1, htrim_tsweep_wanted());
+}
+
 static void test_cleanup_no_targets_entry(void **state)
 {
   struct htrim_slice *s;
@@ -816,6 +1003,23 @@ static void test_run_slice_scan_then_idle(void **state)
   assert_int_equal(0, htrim_run_slice(&p));        /* still idle */
 }
 
+/* A slice whose phase fails is still a slice the main loop paid for. */
+static void test_run_slice_error_recorded(void **state)
+{
+  struct htrim_params p = params(15);
+  (void)state;
+
+  step_us = 300;
+  fake_db_fail_next_iter_open(env);
+  assert_int_equal(-1, htrim_run_slice(&p));
+  assert_int_equal(0, htrim_acct_loaded());
+  assert_int_equal(HTRIM_PH_ACCTSCAN, htrim_stats()->last_phase);
+  assert_int_equal(300, htrim_stats()->last_slice_us);
+  assert_int_equal(300, htrim_stats()->max_slice_us);
+  assert_int_equal(0, htrim_run_slice(&p));          /* the next one recovers */
+  assert_int_equal(1, htrim_acct_loaded());
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -833,6 +1037,11 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_cleanup_no_targets_entry, setup, teardown),
     cmocka_unit_test_setup_teardown(test_slice_budget, setup, teardown),
     cmocka_unit_test_setup_teardown(test_run_slice_scan_then_idle, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_seeks_tail_not_head, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cleanup_failure_wants_sweep, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delete_malformed_advances, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delete_poisoned_slice, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_run_slice_error_recorded, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

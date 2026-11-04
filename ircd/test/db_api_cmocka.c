@@ -312,6 +312,60 @@ static void test_suggest_compact_returns(void **state)
   assert_int_equal(db_exists(env, cf, B("d"), NULL), DB_OK);
 }
 
+/* The trim engine's emptiness check seeks the LAST key of a target's
+ * bounded range (a drain deletes from the head, so the tail is live and
+ * the seek never walks the head's tombstones).  SeekToLast must honour
+ * both bounds: RocksDB 9.10 include/rocksdb/options.h -- "If
+ * iterate_upper_bound is not null, SeekToLast() will position the
+ * iterator at the first key smaller than iterate_upper_bound", and
+ * iterate_lower_bound "defines the smallest key at which the backward
+ * iterator can return an entry". */
+static void test_bounded_iter_seek_last(void **state)
+{
+  struct db_writebatch *wb;
+  (void)state;
+  seed_abcd();
+
+  it = db_iter_open_bounded(env, cf, NULL, B("b"), B("d"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("c"));
+  db_iter_prev(it);
+  assert_key(it, B("b"));
+  db_iter_prev(it);
+  assert_false(db_iter_valid(it));
+  db_iter_close(it);
+
+  /* Keys on both sides of the range, none inside it. */
+  it = db_iter_open_bounded(env, cf, NULL, B("bb"), B("c"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_NOTFOUND);
+  assert_false(db_iter_valid(it));
+  db_iter_close(it);
+
+  /* A target-shaped range [t\0, t\x01) between live neighbours, whose
+   * own rows were all deleted (tombstones on RocksDB). */
+  put(B("#a\0x"));
+  put(B("#b\0" "1"));
+  put(B("#b\0" "2"));
+  put(B("#c\0z"));
+  it = db_iter_open_bounded(env, cf, NULL, B("#b\0"), B("#b\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_OK);
+  assert_key(it, B("#b\0" "2"));
+  db_iter_close(it);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  assert_int_equal(db_writebatch_del(wb, cf, B("#b\0" "1")), DB_OK);
+  assert_int_equal(db_writebatch_del(wb, cf, B("#b\0" "2")), DB_OK);
+  assert_int_equal(db_writebatch_commit(wb, 0), DB_OK);
+  db_writebatch_destroy(wb);
+  it = db_iter_open_bounded(env, cf, NULL, B("#b\0"), B("#b\x01"));
+  assert_non_null(it);
+  assert_int_equal(db_iter_seek_last(it), DB_NOTFOUND);
+  assert_false(db_iter_valid(it));
+}
+
 /* ------------------------------------------------------------------ */
 /* Real-backend-only: snapshot isolation through a bounded iterator    */
 /* ------------------------------------------------------------------ */
@@ -353,6 +407,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_delete_range_half_open, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_delete_range_whole_text_cf, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_suggest_compact_returns, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_bounded_iter_seek_last, test_setup, test_teardown),
 #ifdef DB_API_REAL
     cmocka_unit_test_setup_teardown(test_bounded_iter_snapshot, test_setup, test_teardown),
 #endif

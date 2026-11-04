@@ -89,6 +89,7 @@ static struct {
 
   enum htrim_phase   last_run;
   uint64_t           last_elapsed_us; /* of the last committed/failed slice */
+  int                tsweep_wanted;   /* a targets cleanup could not finish */
   struct htrim_stats stats;
 } g;
 
@@ -365,6 +366,33 @@ static void stage_paste_deletes(struct htrim_slice *s, const char *msgid)
   db_iter_close(it);
 }
 
+/** The index-only delete for a row the engine cannot read: its by_time
+ * key, and its by_owner key when @a rec names the owner (with the delta
+ * when @a counted).  Nothing else -- the engine never guesses at a
+ * message row it cannot name.  Counts under @a path so the caller's walk
+ * over by_time advances past it. */
+static int delete_index_only(struct htrim_slice *s, enum htrim_path path,
+                             const void *bt_key, size_t bt_klen,
+                             const struct htc_rec *rec, int counted)
+{
+  char bo[HTC_BO_KEY_MAX];
+  int bol = -1;
+
+  slice_del(s, g.st.by_time, bt_key, bt_klen);
+  if (rec) {
+    bol = htc_bo_key(bo, sizeof bo, rec->owner, bt_key, bt_klen);
+    if (bol > 0)
+      slice_del(s, g.st.by_owner, bo, (size_t)bol);
+  }
+  if (s->broken)
+    return -2;
+  if (counted && rec && bol > 0 && rec->bytes)
+    slice_add_delta(s, bo, (size_t)bol, -(int64_t)rec->bytes);
+  s->counts[path]++;
+  s->rows++;
+  return 0;
+}
+
 int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
                      const void *bt_key, size_t bt_klen,
                      const struct htc_rec *rec, int counted)
@@ -378,42 +406,46 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   unsigned char xk[RDX_KEY_MAX];
   int mkl, ikl = -1, rk1l = -1, rk2l = -1, xkl = -1, bol;
 
-  if (!s || !g.inited || s->broken || !bt_key || !rec
-      || (int)path < 0 || path >= HTRIM_PATH_COUNT || !rec->ts[0])
+  if (!s || !g.inited || !bt_key || !bt_klen
+      || (int)path < 0 || path >= HTRIM_PATH_COUNT)
     return -1;
-  if (htc_bt_key_parse(bt_key, bt_klen, &ms, target, sizeof target,
-                       msgid, sizeof msgid) != 0 || !target[0])
-    return -1;
+  if (s->broken)
+    return -2;
+  if (!rec || !rec->ts[0]
+      || htc_bt_key_parse(bt_key, bt_klen, &ms, target, sizeof target,
+                          msgid, sizeof msgid) != 0 || !target[0])
+    return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
 
-  /* Build every key first: a key that does not fit stages nothing. */
+  /* Build every key first: a key that does not fit is a row the engine
+   * cannot name, and gets the index-only delete. */
   mkl = htc_msg_key(mk, sizeof mk, target, rec->ts, msgid);
   if (mkl < 0)
-    return -1;
+    return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
   if (msgid[0]) {
     ikl = htc_msgid_key(ik, sizeof ik, msgid, target);
     if (ikl < 0)
-      return -1;
+      return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
     if ((rec->flags & HTC_F_REDACT) && g.st.redact) {
       xkl = rdx_key_build(xk, sizeof xk, ms, msgid);
       if (xkl < 0)
-        return -1;
+        return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
     }
   }
   if (rec->reply_parent[0]) {
     rk1l = htc_reply_child_key(rk1, sizeof rk1, target, rec->reply_parent,
                                rec->ts, msgid);
     if (rk1l < 0)
-      return -1;
+      return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
   }
   if (rec->redact_parent[0]) {
     rk2l = htc_reply_child_key(rk2, sizeof rk2, target, rec->redact_parent,
                                rec->ts, msgid);
     if (rk2l < 0)
-      return -1;
+      return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
   }
   bol = htc_bo_key(bo, sizeof bo, rec->owner, bt_key, bt_klen);
   if (bol < 0)
-    return -1;
+    return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
 
   slice_del(s, g.st.messages, mk, (size_t)mkl);
   if (msgid[0]) {
@@ -434,7 +466,7 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   slice_del(s, g.st.by_time, bt_key, bt_klen);
   slice_del(s, g.st.by_owner, bo, (size_t)bol);
   if (s->broken)
-    return -1;
+    return -2;
 
   if (counted && rec->bytes)
     slice_add_delta(s, bo, (size_t)bol, -(int64_t)rec->bytes);
@@ -451,9 +483,20 @@ static int touch_cmp(const void *a, const void *b)
 }
 
 /** Whether @a target (folded) is now empty and its targets key should go.
+ * @return 1 empty, 0 not (or no targets key), -1 the check failed.
+ *
  * Skips without touching the messages CF when the targets stamp is newer
- * than the newest row deleted from it (a newer message row exists): a
- * prefix seek on a target mid-drain walks every head tombstone so far. */
+ * than the newest row deleted from it (a newer message row exists).
+ * Otherwise it seeks the LAST key of [fold(t) 0x00, fold(t) 0x01), never
+ * the first: the stamp counts message rows only, so a target whose newest
+ * rows are JOIN/PART/QUIT/... comes here on every slice of its drain, and
+ * a drain deletes from the head -- a seek from the head walks every
+ * tombstone it left so far, the tail is live.  RocksDB's SeekToLast honours
+ * iterate_upper_bound (9.10 options.h: "SeekToLast() will position the
+ * iterator at the first key smaller than iterate_upper_bound") and the
+ * lower bound ends the backward walk (pinned on both backends by
+ * db_api_cmocka's test_bounded_iter_seek_last).  A truly empty target pays
+ * one walk over its tombstones, once. */
 static int target_emptied(const char *target, const char *newest,
                           char *tkey, size_t tsize, size_t *tklen)
 {
@@ -466,8 +509,11 @@ static int target_emptied(const char *target, const char *newest,
   if (kl < 2)
     return 0;
   *tklen = (size_t)kl - 1;                              /* targets key: fold(t) */
-  if (db_get(g.st.env, g.st.targets, tkey, *tklen, NULL, &cur) != DB_OK)
+  rc = db_get(g.st.env, g.st.targets, tkey, *tklen, NULL, &cur);
+  if (rc == DB_NOTFOUND)
     return 0;
+  if (rc != DB_OK)
+    return -1;
   newer = cur.base && history_stamp_newer((const char *)cur.base, cur.len,
                                           newest, strlen(newest));
   db_val_free(&cur);
@@ -475,18 +521,30 @@ static int target_emptied(const char *target, const char *newest,
     return 0;
 
   memcpy(upper, tkey, (size_t)kl);
-  upper[kl - 1] = '\x01';                               /* [fold(t) 0x00, fold(t) 0x01) */
+  upper[kl - 1] = '\x01';                              /* [fold(t) 0x00, fold(t) 0x01) */
   it = db_iter_open_bounded(g.st.env, g.st.messages, NULL, tkey, (size_t)kl,
                             upper, (size_t)kl);
   if (!it)
-    return 0;
-  rc = db_iter_seek_first(it);
+    return -1;
+  rc = db_iter_seek_last(it);
   db_iter_close(it);
-  return rc == DB_NOTFOUND;
+  if (rc == DB_NOTFOUND)
+    return 1;
+  return rc == DB_OK ? 0 : -1;
+}
+
+/** A cleanup that could not finish: its targets keys may outlive their
+ * rows until the targets sweep runs. */
+static void tsweep_want(const char *what, const char *target)
+{
+  g.tsweep_wanted = 1;
+  log_write(LS_SYSTEM, L_ERROR, 0, "history_trim: targets cleanup: %s%s%s: %s",
+            what, target ? " " : "", target ? target : "", last_err());
 }
 
 /** After a committed slice: drop the targets key of every touched target
- * left without rows (one second batch), then tell the emptied callback. */
+ * left without rows (one second batch), then tell the emptied callback.
+ * Runs on the main loop (never from htrim_init), so it may log. */
 static void cleanup_touched(struct htrim_slice *s)
 {
   struct db_writebatch *wb = NULL;
@@ -502,23 +560,37 @@ static void cleanup_touched(struct htrim_slice *s)
     struct htrim_touch *t = &s->touch[i];
     char tkey[HTC_MSG_KEY_MAX];
     size_t tklen = 0;
+    int rc;
 
     for (j = i + 1; j < s->ntouch && strcmp(s->touch[j].target, t->target) == 0; j++)
       if (history_stamp_newer(s->touch[j].ts, strlen(s->touch[j].ts),
                               t->ts, strlen(t->ts)))
         memcpy(t->ts, s->touch[j].ts, sizeof t->ts);
 
-    if (!target_emptied(t->target, t->ts, tkey, sizeof tkey, &tklen))
+    rc = target_emptied(t->target, t->ts, tkey, sizeof tkey, &tklen);
+    if (rc < 0)
+      tsweep_want("emptiness check failed for", t->target);
+    if (rc <= 0)
       continue;
-    if (!wb && !(wb = db_writebatch_new(g.st.env)))
+    if (!wb && !(wb = db_writebatch_new(g.st.env))) {
+      tsweep_want("no batch", NULL);
       break;
+    }
     if (db_writebatch_del(wb, g.st.targets, tkey, tklen) == DB_OK)
       names[n++] = t->target;
+    else
+      tsweep_want("cannot stage the delete of", t->target);
   }
 
   if (wb) {
-    if (n && db_writebatch_commit(wb, 0) == DB_OK && g.emptied)
-      g.emptied(names, (int)n);
+    if (n) {
+      if (db_writebatch_commit(wb, 0) == DB_OK) {
+        if (g.emptied)
+          g.emptied(names, (int)n);
+      } else {
+        tsweep_want("commit failed", NULL);
+      }
+    }
     db_writebatch_destroy(wb);
   }
   MyFree(names);
@@ -681,7 +753,9 @@ int htrim_run_slice(const struct htrim_params *p)
 
   g.last_run = ph;            /* a failing phase still yields its turn */
   if (run_phase(ph, s, p) < 0) {
+    g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
     htrim_slice_abort(s);
+    record_slice(ph);
     log_write(LS_SYSTEM, L_ERROR, 0, "history_trim: phase %d failed: %s",
               (int)ph, last_err());
     return -1;
@@ -695,6 +769,16 @@ int htrim_run_slice(const struct htrim_params *p)
   record_slice(ph);
 
   return pick_phase(p) != HTRIM_PH_NONE;
+}
+
+int htrim_tsweep_wanted(void)
+{
+  return g.tsweep_wanted;
+}
+
+void htrim_tsweep_clear(void)
+{
+  g.tsweep_wanted = 0;
 }
 
 const struct htrim_stats *htrim_stats(void)

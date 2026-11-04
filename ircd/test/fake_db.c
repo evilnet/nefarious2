@@ -40,6 +40,8 @@ struct db_cf {
   size_t      cap;
 
   unsigned int iter_opens;
+  unsigned int seek_firsts;
+  unsigned int seek_lasts;
   unsigned int suggest_calls;
   int          has_last_suggest;
   char        *last_start;   /* NULL if the call's start was NULL */
@@ -51,7 +53,9 @@ struct db_cf {
 struct db_env {
   struct db_cf cfs[FAKE_MAX_CFS];
   size_t       ncf;
-  int          fail_next_commit;
+  unsigned int fail_commit_in;   /* the commit that many from now fails */
+  int          fail_next_op;
+  int          fail_next_iter;
   char         last_error[128];
 };
 
@@ -60,6 +64,7 @@ struct db_snapshot {
 };
 
 struct db_iter {
+  struct db_cf *cf;          /* for the seek-direction counters */
   struct row *snap;
   size_t      n;
   size_t      pos;
@@ -209,7 +214,35 @@ void fake_db_free(struct db_env *env)
 void fake_db_fail_next_commit(struct db_env *env)
 {
   if (env)
-    env->fail_next_commit = 1;
+    env->fail_commit_in = 1;
+}
+
+void fake_db_fail_commit_at(struct db_env *env, unsigned int n)
+{
+  if (env)
+    env->fail_commit_in = n;
+}
+
+void fake_db_fail_next_batch_op(struct db_env *env)
+{
+  if (env)
+    env->fail_next_op = 1;
+}
+
+void fake_db_fail_next_iter_open(struct db_env *env)
+{
+  if (env)
+    env->fail_next_iter = 1;
+}
+
+unsigned int fake_db_seek_firsts(const struct db_cf *cf)
+{
+  return cf ? cf->seek_firsts : 0;
+}
+
+unsigned int fake_db_seek_lasts(const struct db_cf *cf)
+{
+  return cf ? cf->seek_lasts : 0;
 }
 
 unsigned int fake_db_iter_opens(const struct db_cf *cf)
@@ -369,6 +402,7 @@ static struct db_iter *iter_from_range(struct db_cf *cf, size_t lo, size_t hi)
 {
   struct db_iter *it = calloc(1, sizeof(*it));
   size_t i, n = (hi > lo) ? (hi - lo) : 0;
+  it->cf = cf;
   it->n = n;
   it->snap = calloc(n ? n : 1, sizeof(*it->snap));
   for (i = 0; i < n; i++) {
@@ -385,10 +419,13 @@ struct db_iter *db_iter_open(struct db_env *env, struct db_cf *cf,
                              struct db_snapshot *snap)
 {
   struct db_iter *it;
-  (void)env;
   (void)snap;
   if (!cf)
     return NULL;
+  if (env && env->fail_next_iter) {
+    env->fail_next_iter = 0;
+    return NULL;
+  }
   it = iter_from_range(cf, 0, cf->n);
   cf->iter_opens++;
   return it;
@@ -402,10 +439,13 @@ struct db_iter *db_iter_open_bounded(struct db_env *env, struct db_cf *cf,
   struct db_iter *it;
   size_t lo, hi;
   int found;
-  (void)env;
   (void)snap;
   if (!cf)
     return NULL;
+  if (env && env->fail_next_iter) {
+    env->fail_next_iter = 0;
+    return NULL;
+  }
   lo = (lower && llen) ? cf_lower_bound(cf, (const char *)lower, llen, &found) : 0;
   hi = (upper && ulen) ? cf_lower_bound(cf, (const char *)upper, ulen, &found) : cf->n;
   it = iter_from_range(cf, lo, hi);
@@ -455,6 +495,8 @@ int db_iter_seek_first(struct db_iter *it)
 {
   if (!it)
     return DB_ERR_OTHER;
+  if (it->cf)
+    it->cf->seek_firsts++;
   it->pos = 0;
   it->positioned = (it->n > 0);
   return it->positioned ? DB_OK : DB_NOTFOUND;
@@ -464,6 +506,8 @@ int db_iter_seek_last(struct db_iter *it)
 {
   if (!it)
     return DB_ERR_OTHER;
+  if (it->cf)
+    it->cf->seek_lasts++;
   if (it->n == 0) {
     it->positioned = 0;
     return DB_NOTFOUND;
@@ -532,6 +576,16 @@ struct db_writebatch *db_writebatch_new(struct db_env *env)
   return wb;
 }
 
+/** One-shot staging failure (fake_db_fail_next_batch_op). */
+static int wb_op_fails(struct db_writebatch *wb)
+{
+  if (wb && wb->env && wb->env->fail_next_op) {
+    wb->env->fail_next_op = 0;
+    return 1;
+  }
+  return 0;
+}
+
 static struct op *wb_push(struct db_writebatch *wb)
 {
   if (wb->n == wb->cap) {
@@ -546,7 +600,10 @@ int db_writebatch_put(struct db_writebatch *wb, struct db_cf *cf,
                       const void *key, size_t klen,
                       const void *val, size_t vlen)
 {
-  struct op *o = wb_push(wb);
+  struct op *o;
+  if (wb_op_fails(wb))
+    return DB_ERR_MEMORY;
+  o = wb_push(wb);
   o->cf = cf;
   o->k = dup_bytes(key, klen);
   o->kl = klen;
@@ -567,7 +624,10 @@ int db_writebatch_put_append(struct db_writebatch *wb, struct db_cf *cf,
 int db_writebatch_del(struct db_writebatch *wb, struct db_cf *cf,
                       const void *key, size_t klen)
 {
-  struct op *o = wb_push(wb);
+  struct op *o;
+  if (wb_op_fails(wb))
+    return DB_ERR_MEMORY;
+  o = wb_push(wb);
   o->del = 1;
   o->cf = cf;
   o->k = dup_bytes(key, klen);
@@ -591,8 +651,8 @@ int db_writebatch_commit(struct db_writebatch *wb, int sync_durably)
   (void)sync_durably;
   if (!wb)
     return DB_ERR_OTHER;
-  if (wb->env && wb->env->fail_next_commit) {
-    wb->env->fail_next_commit = 0;
+  if (wb->env && wb->env->fail_commit_in
+      && --wb->env->fail_commit_in == 0) {
     snprintf(wb->env->last_error, sizeof wb->env->last_error,
              "fake_db: forced commit failure (fake_db_fail_next_commit)");
     wb_clear(wb);

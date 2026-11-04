@@ -168,8 +168,20 @@ int htrim_slice_expired(struct htrim_slice *s);
  * row, its by_time and by_owner rows -- on @a s's batch, and record its
  * accounting delta (-rec->bytes, only when @a counted), its touched
  * target and the @a path counter, all applied at commit.
- * @return 0, or -1: a malformed key/record (nothing staged), or a failed
- * batch op, which also poisons @a s (its commit then applies nothing). */
+ *
+ * A row the engine cannot read is still removed from the index, so a walk
+ * over by_time always advances: @a rec NULL (its by_time value did not
+ * parse), a by_time key without a readable target/msgid, an empty
+ * rec->ts, or a key that does not fit stage ONLY the engine-owned rows --
+ * the by_time key and, when @a rec names the owner, its by_owner key (with
+ * its delta when @a counted) -- and count under @a path.  No other row is
+ * touched: the engine does not guess at a message row it cannot name.
+ *
+ * @return 0: staged (in full, or index-only as above);
+ *         -1: an invalid call (NULL slice or key, a bad @a path, the
+ *             engine not started) -- nothing staged, @a s unchanged;
+ *         -2: @a s is poisoned (a batch op failed, now or earlier): its
+ *             commit applies nothing; abort it. */
 int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
                      const void *bt_key, size_t bt_klen,
                      const struct htc_rec *rec, int counted);
@@ -182,8 +194,16 @@ int htrim_slice_commit(struct htrim_slice *s);
 /** Discard @a s without committing anything.  Frees @a s. */
 void htrim_slice_abort(struct htrim_slice *s);
 
+/** Whether a targets cleanup could not finish (its batch failed, or an
+ * emptiness check could not read a target), so targets-CF keys may have
+ * outlived their rows: the targets sweep (Task 8) should run.  The flag
+ * stays set until htrim_tsweep_clear. */
+int htrim_tsweep_wanted(void);
+void htrim_tsweep_clear(void);
+
 /** Run one phase in one budgeted slice: round-robin from the phase after
- * the last one run, among the phases with work.
+ * the last one run, among the phases with work.  A failing phase still
+ * records its slice (one extra clock read on that path).
  * @return 1 = work remains, 0 = idle, -1 = error. */
 int htrim_run_slice(const struct htrim_params *p);
 

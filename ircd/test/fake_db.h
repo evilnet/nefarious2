@@ -31,9 +31,27 @@ extern void fake_db_free(struct db_env *env);
  * itself whether or not a batch is actually committed. */
 extern void fake_db_fail_next_commit(struct db_env *env);
 
+/** Make the @a n-th db_writebatch_commit from now on this env fail the
+ * same way (1 = the next one; 0 cancels).  One-shot. */
+extern void fake_db_fail_commit_at(struct db_env *env, unsigned int n);
+
+/** Make the NEXT staging op (db_writebatch_put / _put_append / _del) on
+ * any batch of this env return DB_ERR_MEMORY and stage nothing.
+ * One-shot. */
+extern void fake_db_fail_next_batch_op(struct db_env *env);
+
+/** Make the NEXT db_iter_open / db_iter_open_bounded on this env return
+ * NULL.  One-shot. */
+extern void fake_db_fail_next_iter_open(struct db_env *env);
+
 /** Number of db_iter_open + db_iter_open_bounded calls made on @a cf
  * since it was opened. */
 extern unsigned int fake_db_iter_opens(const struct db_cf *cf);
+
+/** Number of db_iter_seek_first / db_iter_seek_last calls made on
+ * iterators over @a cf since it was opened. */
+extern unsigned int fake_db_seek_firsts(const struct db_cf *cf);
+extern unsigned int fake_db_seek_lasts(const struct db_cf *cf);
 
 /** Number of db_suggest_compact calls made on @a cf since it was
  * opened. */
