@@ -107,6 +107,7 @@ struct db_iter {
   size_t         llen;
   char          *upper;              /* owned copy of the upper bound, or NULL */
   size_t         ulen;
+  int            limited;            /* max_skippable_internal_keys set */
 };
 
 /* -------------------------------------------------------------------- */
@@ -648,6 +649,15 @@ int db_cf_stats(struct db_env *env, struct db_cf *cf, struct db_cf_stats *out)
   if (v) { out->mem_deletes = (size_t)strtoull(v, NULL, 10); rocksdb_free(v); }
   v = rocksdb_property_value_cf(env->db, cf->handle, "rocksdb.num-deletes-imm-mem-tables");
   if (v) { out->imm_deletes = (size_t)strtoull(v, NULL, 10); rocksdb_free(v); }
+  v = rocksdb_property_value_cf(env->db, cf->handle, "rocksdb.num-immutable-mem-table");
+  if (v) { out->imm_memtables = (unsigned int)strtoul(v, NULL, 10); rocksdb_free(v); }
+  out->l0_files = out->depth;
+  if (cf->cf_opts) {
+    int n = rocksdb_options_get_max_write_buffer_number(cf->cf_opts);
+    int t = rocksdb_options_get_level0_slowdown_writes_trigger(cf->cf_opts);
+    out->max_write_buffers = n > 0 ? (unsigned int)n : 0;
+    out->l0_slowdown_trigger = t > 0 ? (unsigned int)t : 0;
+  }
   return DB_OK;
 }
 
@@ -977,8 +987,10 @@ struct db_iter *db_iter_open_bounded_limited(struct db_env *env,
     rocksdb_readoptions_set_iterate_lower_bound(it->ropts, it->lower, it->llen);
   if (it->upper)
     rocksdb_readoptions_set_iterate_upper_bound(it->ropts, it->upper, it->ulen);
-  if (max_skip)
+  if (max_skip) {
     rocksdb_readoptions_set_max_skippable_internal_keys(it->ropts, (uint64_t)max_skip);
+    it->limited = 1;
+  }
 
   it->iter = rocksdb_create_iterator_cf(env->db, it->ropts, cf->handle);
   if (!it->iter) {
@@ -1013,8 +1025,9 @@ static int iter_observe(struct db_iter *it)
   rocksdb_iter_get_error(it->iter, &err);
   if (err) {
     /* Status::Incomplete ("Result incomplete: Too many internal keys
-     * skipped") is max_skippable_internal_keys reached, not a failure. */
-    int incomplete = strstr(err, "ncomplete") != NULL;
+     * skipped") on a limited iterator is max_skippable_internal_keys
+     * reached, not a failure; anywhere else it stays an error. */
+    int incomplete = it->limited && strncmp(err, "Result incomplete", 17) == 0;
     env_record_error(it->env, "iter", err);
     rocksdb_free(err);
     it->positioned = 0;

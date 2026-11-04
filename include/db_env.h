@@ -117,10 +117,17 @@ extern int db_delete_range(struct db_env *env, struct db_cf *cf,
                            const void *start, size_t slen,
                            const void *end, size_t elen);
 
-/** Flush @a cf's memtable to an SST file; @a wait 0 returns at once (the
- * flush runs in the background).  A compaction hint marks SST files only,
- * so the tombstones still in a memtable need this first.  RocksDB:
- * rocksdb_flush_cf.  Returns DB_OK or DB_ERR_*. */
+/** Flush @a cf's memtable to an SST file; @a wait 0 does not wait for the
+ * flush itself (it runs in the background) -- but RocksDB still switches
+ * the memtable on the calling thread, and blocks the call while the
+ * flush would stall writes (FlushOptions.allow_write_stall is false and
+ * has no C setter): one more immutable memtable reaching
+ * max_write_buffer_number (a flush of @a cf already in flight), or one
+ * more L0 file reaching level0_slowdown_writes_trigger.  db_cf_stats
+ * reports both (imm_memtables, l0_files and the two options) so a caller
+ * on a latency budget can skip a flush that would wait.  A compaction hint
+ * marks SST files only, so the tombstones still in a memtable need this
+ * first.  RocksDB: rocksdb_flush_cf.  Returns DB_OK or DB_ERR_*. */
 extern int db_flush_cf(struct db_env *env, struct db_cf *cf, int wait);
 
 /** Hint the backend to background-compact [@a start, @a end) in @a cf.
@@ -152,6 +159,14 @@ struct db_cf_stats {
   unsigned int depth;            /**< libmdbx B-tree depth; RocksDB: max LSM level */
   size_t   mem_deletes;          /**< RocksDB: deletes in the active memtable */
   size_t   imm_deletes;          /**< RocksDB: deletes in immutable memtables */
+  /* What decides whether a flush of the CF would block its caller
+   * (RocksDB waits in FlushMemTable while the flush would stall writes:
+   * imm_memtables + 1 >= max_write_buffers, or l0_files + 1 >=
+   * l0_slowdown_trigger).  0 = unknown (libmdbx). */
+  unsigned int imm_memtables;    /**< rocksdb.num-immutable-mem-table */
+  unsigned int l0_files;         /**< rocksdb.num-files-at-level0 */
+  unsigned int max_write_buffers;    /**< the CF's max_write_buffer_number */
+  unsigned int l0_slowdown_trigger;  /**< its level0_slowdown_writes_trigger */
 };
 extern int db_cf_stats(struct db_env *env, struct db_cf *cf,
                        struct db_cf_stats *out);

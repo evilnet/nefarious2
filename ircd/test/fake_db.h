@@ -60,6 +60,15 @@ extern unsigned int fake_db_seek_lasts(const struct db_cf *cf);
 /** Number of db_flush_cf calls made on @a cf since it was opened. */
 extern unsigned int fake_db_flush_calls(const struct db_cf *cf);
 
+/** What db_cf_stats reports for @a cf's immutable memtables and L0
+ * files (RocksDB's max_write_buffer_number 2 and slowdown trigger 20 are
+ * reported as fixed): a flush in flight is one immutable memtable. */
+extern void fake_db_set_busy(struct db_cf *cf, unsigned int imm_memtables,
+                             unsigned int l0_files);
+
+/** Make the NEXT db_flush_cf on this env return DB_ERR_IO.  One-shot. */
+extern void fake_db_fail_next_flush(struct db_env *env);
+
 /** Tombstones in @a cf: rows deleted and not yet compacted away (a
  * delete leaves one in place, as on RocksDB; iterators step over them). */
 extern size_t fake_db_tombstones(const struct db_cf *cf);

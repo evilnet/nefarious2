@@ -52,6 +52,7 @@ struct db_cf {
   unsigned int seek_lasts;
   unsigned int suggest_calls;
   unsigned int flush_calls;
+  unsigned int busy_imm, busy_l0;   /* fake_db_set_busy */
   int          has_last_suggest;
   char        *last_start;   /* NULL if the call's start was NULL */
   size_t       last_slen;
@@ -67,6 +68,7 @@ struct db_env {
   unsigned int fail_commit_in;   /* the commit that many from now fails */
   int          fail_next_op;
   int          fail_next_iter;
+  int          fail_next_flush;
   unsigned int fail_get_in;      /* the db_get that many from now fails */
   char         last_error[128];
 };
@@ -393,17 +395,42 @@ int db_cf_stats(struct db_env *env, struct db_cf *cf, struct db_cf_stats *out)
   memset(out, 0, sizeof *out);
   out->approx_keys = fake_db_rows(cf);
   out->mem_deletes = fake_db_tombstones(cf);
+  out->imm_memtables = cf->busy_imm;
+  out->l0_files = cf->busy_l0;
+  out->depth = cf->busy_l0;
+  out->max_write_buffers = 2;          /* RocksDB's defaults */
+  out->l0_slowdown_trigger = 20;
   return DB_OK;
 }
 
 int db_flush_cf(struct db_env *env, struct db_cf *cf, int wait)
 {
-  (void)env;
   (void)wait;
   if (!cf)
     return DB_ERR_OTHER;
   cf->flush_calls++;
+  if (env && env->fail_next_flush) {
+    env->fail_next_flush = 0;
+    snprintf(env->last_error, sizeof env->last_error,
+             "fake_db: forced flush failure (fake_db_fail_next_flush)");
+    return DB_ERR_IO;
+  }
   return DB_OK;
+}
+
+void fake_db_set_busy(struct db_cf *cf, unsigned int imm_memtables,
+                      unsigned int l0_files)
+{
+  if (!cf)
+    return;
+  cf->busy_imm = imm_memtables;
+  cf->busy_l0 = l0_files;
+}
+
+void fake_db_fail_next_flush(struct db_env *env)
+{
+  if (env)
+    env->fail_next_flush = 1;
 }
 
 int db_cf_open(struct db_env *env, const char *name,
