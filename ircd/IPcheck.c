@@ -59,8 +59,9 @@ struct IPRegistryEntry {
 #define IP_REGISTRY_TABLE_SIZE 0x10000
 /** Report current time for tracking in IPRegistryEntry::last_connect. */
 #define NOW ((unsigned short)(CurrentTime & 0xffff))
-/** Time from \a x until now, in seconds. */
-#define CONNECTED_SINCE(x) (NOW - (x))
+/** Time from \a x until now, in seconds, modulo the clock's 16 bits: an
+ * age is never negative, even when the clock has wrapped since \a x. */
+#define CONNECTED_SINCE(x) ((unsigned short)(NOW - (x)))
 
 /** Macro for easy access to configured IPcheck clone limit. */
 #define IPCHECK_CLONE_LIMIT feature_int(FEAT_IPCHECK_CLONE_LIMIT)
