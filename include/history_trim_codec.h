@@ -14,7 +14,8 @@
  *   - htc_msgid_key mirrors history.c's msgid_index key
  *     ("msgid\0fold(target)").
  *   - htc_reply_child_key mirrors history.c's reply_index key
- *     ("target\0parent\0ts\0msgid").
+ *     ("target\0parent\0ts\0msgid"), htc_reply_prefix its scan prefix
+ *     ("target\0parent\0"); history.c's builders wrap both.
  *   - the redact_index key is built by rdx_key_build() (include/
  *     redact_index.h), which is already pure -- this module adds
  *     nothing for it.
@@ -113,6 +114,13 @@ int htc_msgid_key(char *buf, size_t size, const char *msgid,
 int htc_reply_child_key(char *buf, size_t size, const char *target,
                          const char *parent, const char *ts,
                          const char *msgid);
+
+/** Build the reply_index scan prefix of every child of (target,
+ * parent): fold(target) \0 parent \0 -- the head of each
+ * htc_reply_child_key for that pair, and history.c's
+ * build_reply_index_prefix. */
+int htc_reply_prefix(char *buf, size_t size, const char *target,
+                      const char *parent);
 
 /** Build the by_time key: be64(ms) ‖ fold(target) ‖ \0 ‖ msgid (no
  * trailing NUL; @a msgid NULL/"" stops after the \0). */

@@ -269,6 +269,35 @@ int htc_reply_child_key(char *buf, size_t size, const char *target,
   return (int)pos;
 }
 
+/* fold(target) \0 parent \0: the first two parts of
+ * htc_reply_child_key, separators included. */
+int htc_reply_prefix(char *buf, size_t size, const char *target,
+                      const char *parent)
+{
+  size_t pos = 0;
+  size_t tl, pl;
+
+  if (!buf || !target || !parent)
+    return -1;
+
+  tl = strlen(target);
+  pl = strlen(parent);
+
+  if (pos + tl + 1 > size)
+    return -1;
+  db_casefold_bytes(buf + pos, target, tl);
+  pos += tl;
+  buf[pos++] = '\0';
+
+  if (pos + pl + 1 > size)
+    return -1;
+  memcpy(buf + pos, parent, pl);
+  pos += pl;
+  buf[pos++] = '\0';
+
+  return (int)pos;
+}
+
 void htc_be64(unsigned char out[8], uint64_t ms)
 {
   int i;

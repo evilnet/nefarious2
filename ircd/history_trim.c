@@ -30,6 +30,12 @@
  * the stored and the in-memory cursor together, a failed one neither.  Its
  * index rows count through the accounting rule like a store's (positive
  * pending deltas), so a backfill racing the boot scan counts each row once.
+ *
+ * Age-out keeps its position as the last by_time key a committed slice
+ * deleted (ao_cursor, in memory only), and its next slice opens its
+ * iterator at the successor of that key: the tombstones the pass left
+ * behind it are never walked again within the pass.  A pass start sends
+ * the walk back to the first key.
  */
 #include "config.h"
 
@@ -85,6 +91,12 @@ struct htrim_slice {
   struct htrim_touch   *touch;
   size_t                ntouch, cap_touch;
 
+  /* An age-out step, applied at commit. */
+  int                   ao_step;     /* this slice walked by_time */
+  int                   ao_finished; /* ... to the cutoff: the pass is over */
+  char                 *ao_cursor;   /* the last by_time key it deleted */
+  size_t                ao_cursor_len, ao_cursor_cap;
+
   /* A backfill step, applied at commit. */
   int                   bf_step;     /* this slice walked messages rows */
   int                   bf_finished; /* ... to the end of the CF */
@@ -119,6 +131,13 @@ static struct {
   int                bf_unread;       /* a backfill meta row could not be read */
   uint64_t           alive_ms;        /* the last alive stamp, 0 = none */
 
+  /* Age-out: one pass per htrim_pass_start, in memory only (every start
+   * opens a pass at its first maintenance tick). */
+  int                ao_pending;      /* a pass is open */
+  char              *ao_cursor;       /* last by_time key a committed slice deleted */
+  size_t             ao_cursor_len, ao_cursor_cap;
+
+  char               last_error[192]; /* the last failed slice, for the caller's log */
   enum htrim_phase   last_run;
   uint64_t           last_elapsed_us; /* of the last committed/failed slice */
   int                tsweep_wanted;   /* a targets cleanup could not finish */
@@ -304,6 +323,7 @@ void htrim_shutdown(void)
   htc_acct_free(g.acct);
   MyFree(g.cursor);
   MyFree(g.bf_cursor);
+  MyFree(g.ao_cursor);
   memset(&g, 0, sizeof g);
 }
 
@@ -466,6 +486,7 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->keys);
   MyFree(s->pend);
   MyFree(s->touch);
+  MyFree(s->ao_cursor);
   MyFree(s->bf_cursor);
   MyFree(s);
 }
@@ -855,6 +876,17 @@ static void backfill_apply(struct htrim_slice *s)
   }
 }
 
+/** A committed age-out step: the cursor moves to the last key it
+ * deleted; a walk that reached the cutoff closes the pass. */
+static void ageout_apply(struct htrim_slice *s)
+{
+  if (s->ao_cursor_len)
+    bytes_set(&g.ao_cursor, &g.ao_cursor_len, &g.ao_cursor_cap,
+              s->ao_cursor, s->ao_cursor_len);
+  if (s->ao_finished)
+    g.ao_pending = 0;
+}
+
 int htrim_slice_commit(struct htrim_slice *s)
 {
   int rows;
@@ -880,6 +912,8 @@ int htrim_slice_commit(struct htrim_slice *s)
   }
   for (i = 0; i < HTRIM_PATH_COUNT; i++)
     g.stats.deleted[i] += s->counts[i];
+  if (s->ao_step)
+    ageout_apply(s);
   if (s->bf_step)
     backfill_apply(s);
   cleanup_touched(s);
@@ -893,6 +927,96 @@ int htrim_slice_commit(struct htrim_slice *s)
 /* ------------------------------------------------------------------ */
 /* Phases                                                              */
 /* ------------------------------------------------------------------ */
+
+/** The retention cutoff under @a p: rows strictly older (ms < cutoff) are
+ * past retention; 0 = no retention. */
+static uint64_t retention_cutoff_ms(const struct htrim_params *p)
+{
+  uint64_t span;
+
+  if (p->retention_days <= 0)
+    return 0;
+  span = (uint64_t)p->retention_days * 86400ULL * 1000ULL;
+  return p->now_ms > span ? p->now_ms - span : 0;
+}
+
+/** The ms a by_time key starts with (0 for a key too short to hold one). */
+static uint64_t bt_key_ms(const void *k, size_t kl)
+{
+  const unsigned char *b = (const unsigned char *)k;
+  uint64_t ms = 0;
+  size_t i;
+
+  if (kl < 8)
+    return 0;
+  for (i = 0; i < 8; i++)
+    ms = (ms << 8) | b[i];
+  return ms;
+}
+
+/** Age-out: walk by_time over [cursor ‖ 0x00 (or the first key),
+ * be64(cutoff)) -- every row past retention, oldest first -- and THE
+ * delete each one, counted (every by_time row was counted when it was
+ * indexed), until the budget is spent.  A record that does not parse
+ * still leaves the index (htrim_delete_row's index-only form), so the walk
+ * never sticks on a bad head row.  The cursor moves only when this
+ * slice commits; a walk that reaches the bound closes the pass. */
+static int phase_ageout(struct htrim_slice *s, const struct htrim_params *p)
+{
+  unsigned char upper[8];
+  struct db_iter *it;
+  char *lower = NULL;
+  size_t llen = 0;
+  uint64_t cutoff = retention_cutoff_ms(p);
+  int rc, first = 1;
+
+  s->ao_step = 1;
+  if (!cutoff) {                                /* retention went to 0 */
+    s->ao_finished = 1;
+    return 0;
+  }
+  htc_be64(upper, cutoff);
+  if (g.ao_cursor_len) {
+    llen = g.ao_cursor_len + 1;
+    lower = (char *)MyMalloc(llen);
+    memcpy(lower, g.ao_cursor, g.ao_cursor_len);
+    lower[g.ao_cursor_len] = '\0';             /* cursor ‖ 0x00 */
+  }
+  it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL, lower, llen,
+                            upper, sizeof upper);
+  MyFree(lower);                                /* the iterator owns its copy */
+  if (!it)
+    return -1;
+
+  rc = db_iter_seek_first(it);
+  while (rc == DB_OK) {
+    size_t kl, vl;
+    const void *k = db_iter_key(it, &kl);
+    const void *v = db_iter_value(it, &vl);
+    struct htc_rec rec;
+    int parsed;
+
+    if (first) {
+      g.stats.oldest_seen_ms = bt_key_ms(k, kl);
+      first = 0;
+    }
+    parsed = v && htc_rec_parse(v, vl, &rec) == 0;
+    if (htrim_delete_row(s, HTRIM_PATH_AGEOUT, k, kl, parsed ? &rec : NULL, 1) != 0) {
+      db_iter_close(it);
+      return -1;                                /* poisoned: abort the slice */
+    }
+    bytes_set(&s->ao_cursor, &s->ao_cursor_len, &s->ao_cursor_cap, k, kl);
+    rc = db_iter_next(it);
+    if (rc == DB_OK && htrim_slice_expired(s))
+      break;
+  }
+  db_iter_close(it);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    return -1;
+  if (rc == DB_NOTFOUND)
+    s->ao_finished = 1;
+  return 0;
+}
 
 /** The boot accounting scan: walk by_owner from the successor of the
  * cursor, add each entry's size, stop when the budget is spent; an
@@ -1051,13 +1175,9 @@ static int phase_backfill(struct htrim_slice *s, const struct htrim_params *p)
   struct db_iter *it;
   char *lower = NULL;
   size_t llen = 0;
-  uint64_t cutoff = 0;
+  uint64_t cutoff = retention_cutoff_ms(p);
   int rc;
 
-  if (p->retention_days > 0) {
-    uint64_t span = (uint64_t)p->retention_days * 86400ULL * 1000ULL;
-    cutoff = p->now_ms > span ? p->now_ms - span : 0;
-  }
   if (g.bf_cursor_len) {
     llen = g.bf_cursor_len + 1;
     lower = (char *)MyMalloc(llen);
@@ -1113,13 +1233,13 @@ static int phase_backfill(struct htrim_slice *s, const struct htrim_params *p)
 
 static int phase_has_work(enum htrim_phase ph, const struct htrim_params *p)
 {
-  (void)p;
   switch (ph) {
+  case HTRIM_PH_AGEOUT:     /* a pass is open (and retention still on) */
+    return g.ao_pending && p->retention_days > 0;
   case HTRIM_PH_ACCTSCAN:
     return !g.acct_loaded;
   case HTRIM_PH_BACKFILL:   /* indexing rows stored before by_time existed */
     return !g.bf_done;
-  case HTRIM_PH_AGEOUT:     /* age-out over by_time */
   case HTRIM_PH_EVICT:      /* the cap */
   default:
     return 0;
@@ -1130,6 +1250,8 @@ static int run_phase(enum htrim_phase ph, struct htrim_slice *s,
                      const struct htrim_params *p)
 {
   switch (ph) {
+  case HTRIM_PH_AGEOUT:
+    return phase_ageout(s, p);
   case HTRIM_PH_ACCTSCAN:
     return phase_acctscan(s);
   case HTRIM_PH_BACKFILL:
@@ -1137,6 +1259,36 @@ static int run_phase(enum htrim_phase ph, struct htrim_slice *s,
   default:
     return 0;
   }
+}
+
+const char *htrim_phase_name(enum htrim_phase ph)
+{
+  switch (ph) {
+  case HTRIM_PH_AGEOUT:   return "ageout";
+  case HTRIM_PH_BACKFILL: return "backfill";
+  case HTRIM_PH_ACCTSCAN: return "scan";
+  case HTRIM_PH_EVICT:    return "evict";
+  case HTRIM_PH_NONE:
+  default:                return "none";
+  }
+}
+
+void htrim_pass_start(const struct htrim_params *p)
+{
+  if (!g.inited || !p)
+    return;
+  g.ao_cursor_len = 0;                          /* from the first key again */
+  g.ao_pending = p->retention_days > 0;
+}
+
+int htrim_ageout_pending(void)
+{
+  return g.ao_pending;
+}
+
+const char *htrim_last_error(void)
+{
+  return g.last_error;
 }
 
 /** Round-robin order of the phases. */
@@ -1182,19 +1334,21 @@ int htrim_run_slice(const struct htrim_params *p)
   if (!s)
     return -1;
 
+  /* A failure is described for the caller, which logs it once per
+   * streak of failed slices (it retries each second, a few times). */
   g.last_run = ph;            /* a failing phase still yields its turn */
   if (run_phase(ph, s, p) < 0) {
     g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
     htrim_slice_abort(s);
     record_slice(ph);
-    log_write(LS_SYSTEM, L_ERROR, 0, "history_trim: phase %d failed: %s",
-              (int)ph, last_err());
+    snprintf(g.last_error, sizeof g.last_error, "%s slice failed: %s",
+             htrim_phase_name(ph), last_err());
     return -1;
   }
   if (htrim_slice_commit(s) < 0) {
     record_slice(ph);
-    log_write(LS_SYSTEM, L_ERROR, 0, "history_trim: slice commit failed (phase %d): %s",
-              (int)ph, last_err());
+    snprintf(g.last_error, sizeof g.last_error, "%s slice commit failed: %s",
+             htrim_phase_name(ph), last_err());
     return -1;
   }
   record_slice(ph);

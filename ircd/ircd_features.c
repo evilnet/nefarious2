@@ -750,6 +750,10 @@ feature_notify_chathistory_retention(void)
   if (!cli_serv(&me))
     return;
 
+  /* Age-out under the new cutoff: a pass from the first row at the next
+   * trim tick (a shorter retention drains in slices, never in one go). */
+  history_trim_kick();
+
   /* Send CH A R <retention> to all peer servers */
   sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A R %d", retention);
 
@@ -843,6 +847,15 @@ static void
 feature_notify_chathistory_maintenance_interval(void)
 {
   history_purge_restart_timer();
+}
+
+/** Handle FEAT_CHATHISTORY_TRIM_SLICE_MS change — the longest trim slice
+ * so far (STATS chathistory "max") was measured under the old budget.
+ */
+static void
+feature_notify_chathistory_trim_slice_ms(void)
+{
+  history_trim_slice_budget_changed();
 }
 
 /** Handle FEAT_BOUNCER_PERSIST_INTERVAL change — re-arm the dirty-persist
@@ -1396,7 +1409,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_OPS_OVERRIDE, 0, 0, 0), /* :full bypass for channel ops -- default OFF (was on by oversight; grant deliberately per network) */
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
-  F_I(CHATHISTORY_TRIM_SLICE_MS, 0, 15, 0),  /* Main-loop ms one trim slice may take (clamped 1..1000) */
+  F_I(CHATHISTORY_TRIM_SLICE_MS, 0, 15, feature_notify_chathistory_trim_slice_ms),  /* Main-loop ms one trim slice may take (clamped 1..1000) */
   F_B(CHATHISTORY_REQUIRE_AUTH, 0, 0, 0),   /* Require auth for channel history (non-+H) — default off so unauthed/ephemeral clients can use CHATHISTORY out of the box; Afternet sets this to 1 in ircd.conf */
   F_B(CHATHISTORY_STRICT_PRESENCE, 0, 0, feature_notify_strict_presence), /* Filter chathistory to caller's presence windows (strict mode) */
   F_I(CHATHISTORY_PRESENCE_MAX_INTERVALS, 0, 64, 0), /* Per-(anchor,channel) cap on retained presence intervals; oldest evicted FIFO when exceeded */

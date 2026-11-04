@@ -284,20 +284,14 @@ static int build_reply_index_key(char *buf, size_t bufsize,
 
 /* Build the prefix used to scan all children of (target, parent_msgid):
  *   target\0parent_msgid\0
+ * (htc_reply_prefix: the head of every key build_reply_index_key builds,
+ * from the same codec).
  * Returns length on success, -1 if buffer too small. */
 static int build_reply_index_prefix(char *buf, size_t bufsize,
                                     const char *target,
                                     const char *parent_msgid)
 {
-  size_t kpos = 0;
-  size_t tl = strlen(target);
-  size_t pl = strlen(parent_msgid);
-
-  if (kpos + tl + 1 > bufsize) return -1;
-  db_casefold_bytes(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
-  if (kpos + pl + 1 > bufsize) return -1;
-  memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
-  return (int)kpos;
+  return htc_reply_prefix(buf, bufsize, target, parent_msgid);
 }
 
 /* Stage a reply-index put on @a wb.  Flat-key encoding: the key embeds
@@ -789,17 +783,17 @@ static void history_trim_timer_cb(struct Event *ev)
   history_trim_tick(pass_start);
 }
 
+/** Consecutive failed slices; the 1 s retry stops after this many. */
+#define HISTORY_TRIM_RETRIES 5
+static int history_trim_fail_streak = 0;
+
 void history_trim_tick(int pass_start)
 {
   struct htrim_params p;
-  int mb;
+  int mb, rc;
 
   if (!history_available)
     return;
-  /* The alive stamp the next start's index-gap check reads (the age-out
-   * pass start arrives with Task 7). */
-  if (pass_start)
-    htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
 
   memset(&p, 0, sizeof p);
   p.now_ms         = (uint64_t)time(NULL) * 1000ULL;
@@ -812,12 +806,42 @@ void history_trim_tick(int pass_start)
   p.share_pct      = feature_int(FEAT_CHATHISTORY_USER_QUOTA_PCT);
   p.slice_ms       = trim_slice_ms();
 
+  /* A pass start: the alive stamp the next start's index-gap check reads,
+   * and age-out walks from the first by_time key again (a row stored
+   * since the last pass with an older time is seen). */
+  if (pass_start) {
+    htrim_stamp_alive(p.now_ms);
+    htrim_pass_start(&p);
+  }
+
   /* 1: work remains, run again in a second.  0: idle until the next
-   * maintenance tick.  -1: the engine logged the failure; the next
-   * maintenance tick retries (re-arming at 1 s would repeat a
-   * persistent failure, and its log line, every second). */
-  if (htrim_run_slice(&p) == 1)
+   * maintenance tick.  -1: retry in a second, up to HISTORY_TRIM_RETRIES
+   * failures in a row, then only at the maintenance ticks (a persistent
+   * failure is not repeated every second); logged once per streak. */
+  rc = htrim_run_slice(&p);
+  if (rc >= 0) {
+    if (history_trim_fail_streak > 0)
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "history: trim slices running again after %d failed",
+                history_trim_fail_streak);
+    history_trim_fail_streak = 0;
+    if (rc == 1)
+      history_trim_arm();
+    return;
+  }
+  if (history_trim_fail_streak++ == 0)
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: trim %s; retrying each second up to %d times, then "
+              "at each maintenance tick", htrim_last_error(),
+              HISTORY_TRIM_RETRIES);
+  if (history_trim_fail_streak <= HISTORY_TRIM_RETRIES)
     history_trim_arm();
+}
+
+void history_trim_slice_budget_changed(void)
+{
+  /* The longest slice so far was measured under the old budget. */
+  htrim_reset_max_slice();
 }
 
 void history_trim_kick(void)
@@ -1141,13 +1165,37 @@ static void history_trim_row_stored(const struct history_trim_row *tr)
     htrim_note_stored(tr->rec.owner, tr->bo_key, tr->bo_klen, tr->rec.bytes);
 }
 
-/** The trim engine's parse callback (the backfill): decode a messages
- * value with history_deserialize_record -- a legacy row a '|' shifted
- * comes back repaired, its account empty -- and take what the store path
- * takes: the account, the reply parent, a REDACT's parent (its content's
+/** What the trim record takes from a decoded row, as the store path takes
+ * it: the account, the reply parent, a REDACT's parent (its content's
  * first word, as history_store_message reads it), and the multiline flag
  * by ml_content_resolve's rule (a HISTORY_MULTILINE row, or a legacy
- * PRIVMSG whose whole content is the 3-byte sentinel).
+ * PRIVMSG whose whole content is the 3-byte sentinel). */
+static void history_trim_row_info(const struct HistoryMessage *m,
+                                  struct htrim_row_info *out)
+{
+  memset(out, 0, sizeof *out);
+  ircd_strncpy(out->account, m->account, sizeof out->account);
+  if (!extract_reply_tag(m->client_tags, out->reply_parent, sizeof out->reply_parent))
+    out->reply_parent[0] = '\0';
+  if (m->type == HISTORY_REDACT) {
+    const char *space = strchr(m->content, ' ');
+    size_t len = space ? (size_t)(space - m->content) : strlen(m->content);
+    out->flags |= HTC_F_REDACT;
+    if (len > 0 && len < sizeof out->redact_parent) {
+      memcpy(out->redact_parent, m->content, len);
+      out->redact_parent[len] = '\0';
+    }
+  }
+  if (m->type == HISTORY_MULTILINE
+      || (m->type == HISTORY_PRIVMSG && m->content[0] == '\x1E'
+          && m->content[1] == 'm' && m->content[2] == 'l' && m->content[3] == '\0'))
+    out->flags |= HTC_F_ML;
+}
+
+/** The trim engine's parse callback (the backfill): decode a messages
+ * value with history_deserialize_record -- a legacy row a '|' shifted
+ * comes back repaired, its account empty -- and take what
+ * history_trim_row_info takes.
  * @return 0, or -1 (the backfill indexes the row as owner "-"). */
 static int history_trim_parse(const void *val, size_t vlen,
                               struct htrim_row_info *out)
@@ -1157,23 +1205,7 @@ static int history_trim_parse(const void *val, size_t vlen,
   memset(&m, 0, sizeof m);
   if (!val || history_deserialize_record(val, vlen, &m) != 0)
     return -1;
-  memset(out, 0, sizeof *out);
-  ircd_strncpy(out->account, m.account, sizeof out->account);
-  if (!extract_reply_tag(m.client_tags, out->reply_parent, sizeof out->reply_parent))
-    out->reply_parent[0] = '\0';
-  if (m.type == HISTORY_REDACT) {
-    const char *space = strchr(m.content, ' ');
-    size_t len = space ? (size_t)(space - m.content) : strlen(m.content);
-    out->flags |= HTC_F_REDACT;
-    if (len > 0 && len < sizeof out->redact_parent) {
-      memcpy(out->redact_parent, m.content, len);
-      out->redact_parent[len] = '\0';
-    }
-  }
-  if (m.type == HISTORY_MULTILINE
-      || (m.type == HISTORY_PRIVMSG && m.content[0] == '\x1E'
-          && m.content[1] == 'm' && m.content[2] == 'l' && m.content[3] == '\0'))
-    out->flags |= HTC_F_ML;
+  history_trim_row_info(&m, out);
   return 0;
 }
 
@@ -2309,7 +2341,60 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
   return count_before + count_ref + count_after;
 }
 
-#define PURGE_QUOTA_BATCH 512
+/** Stage THE delete (htrim_delete_row) of the stored messages row @a key
+ * (@a klen bytes) -- (@a target, @a ts, @a msgid) parsed off it, @a m its
+ * decoded value -- on @a s, under @a path:
+ *   - a row the trim index holds (its by_time record parses) goes with
+ *     that record, counted: it was counted when it was indexed;
+ *   - any other row (stored by an older binary, the backfill not there
+ *     yet) with a record built from the row as the backfill builds one
+ *     (owner from its account, else "-"), uncounted: it was never counted.
+ * The record's ts is the key's own, so the delete rebuilds exactly @a key.
+ * @return 0 staged; 1 skipped -- a key the delete would not rebuild byte
+ *         for byte, or a field the record cannot hold (the row stays);
+ *         -1 a read failed or @a s is poisoned (abort @a s). */
+static int history_trim_delete_stored(struct htrim_slice *s, enum htrim_path path,
+                                      const void *key, size_t klen,
+                                      const char *target, const char *ts,
+                                      const char *msgid,
+                                      const struct HistoryMessage *m)
+{
+  char bt[HTC_BT_KEY_MAX], mk[HTC_MSG_KEY_MAX];
+  struct db_val v = { NULL, 0 };
+  struct htrim_row_info info;
+  struct htc_rec rec;
+  int btl, mkl, rc, counted = 0;
+
+  if (strlen(ts) >= sizeof rec.ts)
+    return 1;
+  mkl = htc_msg_key(mk, sizeof mk, target, ts, msgid);
+  if (mkl < 0 || (size_t)mkl != klen || memcmp(mk, key, klen) != 0)
+    return 1;
+  btl = htc_bt_key(bt, sizeof bt, htc_parse_ms(ts), target, msgid);
+  if (btl < 0)
+    return 1;
+
+  rc = db_get(history_db_env, history_cf_by_time, bt, (size_t)btl, NULL, &v);
+  if (rc == DB_OK && htc_rec_parse(v.base, v.len, &rec) == 0)
+    counted = 1;
+  db_val_free(&v);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    return -1;
+  /* A by_time row whose record does not parse is still deleted (its key
+   * is this row's); its by_owner row, under an owner the record no longer
+   * names, is left to the cap's orphan-entry step. */
+  if (!counted) {
+    history_trim_row_info(m, &info);
+    memset(&rec, 0, sizeof rec);
+    rec.flags = info.flags;
+    if (htc_owner_key(rec.owner, sizeof rec.owner, info.account, NULL, NULL) < 0)
+      ircd_strncpy(rec.owner, HTC_OWNER_NONE, sizeof rec.owner);
+    ircd_strncpy(rec.reply_parent, info.reply_parent, sizeof rec.reply_parent);
+    ircd_strncpy(rec.redact_parent, info.redact_parent, sizeof rec.redact_parent);
+  }
+  ircd_strncpy(rec.ts, ts, sizeof rec.ts);
+  return htrim_delete_row(s, path, bt, (size_t)btl, &rec, counted) == 0 ? 0 : -1;
+}
 
 /** Prune a channel incarnation that lost a burst: every row of
  * @a channel stamped with @a incarnation (the losing creationtime).
@@ -2318,19 +2403,23 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
  * on-demand), so every store holding them prunes.  Rows stamped 0
  * (pre-2026-09-08) are left alone.  The read-time incarnation filter
  * remains as belt and braces.  See docs/features/chathistory.md.
+ *
+ * Every row goes through the trim engine's one delete
+ * (history_trim_delete_stored), all of them in one unbudgeted slice: one
+ * batch, the owner totals moved only once it commits, and the channel's
+ * targets key dropped (CH A -) if that left it empty.  A row's replies
+ * and reactions are not deleted with it (no cascade): those stored in the
+ * same incarnation are pruned by this same walk, any other stays.
  * @return rows deleted, or -1. */
 int history_purge_incarnation(const char *channel, time_t incarnation)
 {
   struct db_iter *it;
-  struct db_writebatch *wb;
+  struct htrim_slice *s;
   char startbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char prefix[CHANNELLEN + 2];
   char ts[HISTORY_TIMESTAMP_LEN];
   char msg_target[CHANNELLEN + 1], msg_timestamp[HISTORY_TIMESTAMP_LEN], msg_msgid[HISTORY_MSGID_LEN];
-  int startlen, prefixlen, deleted = 0, rc;
-  int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
-  struct { char target[CHANNELLEN + 1]; char account[ACCOUNTLEN + 1]; } purge_quota[PURGE_QUOTA_BATCH];
-  int purge_quota_count = 0, qi;
+  int startlen, prefixlen, deleted, skipped = 0, rc;
 
   if (!history_available || !channel || !IsChannelName(channel) || incarnation <= 0)
     return 0;
@@ -2341,12 +2430,12 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
   if (startlen < 0 || prefixlen < 0)
     return -1;
 
-  wb = db_writebatch_new(history_db_env);
-  if (!wb)
+  s = htrim_slice_begin(0);
+  if (!s)
     return -1;
   it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it) {
-    db_writebatch_destroy(wb);
+    htrim_slice_abort(s);
     return -1;
   }
 
@@ -2359,6 +2448,7 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
     const void *kbase = db_iter_key(it, &klen);
     const void *vbase;
     struct HistoryMessage pm;
+    int drc;
 
     if (klen < (size_t)prefixlen || memcmp(kbase, prefix, prefixlen) != 0)
       break;   /* past this channel */
@@ -2371,36 +2461,33 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
     if (pm.incarnation != incarnation)
       continue;
 
-    if (msg_msgid[0]) {
-      msgid_index_del(wb, msg_msgid, msg_target);
-      ml_content_delete(wb, msg_msgid);
-      reply_index_del_children(wb, msg_target, msg_msgid);
+    drc = history_trim_delete_stored(s, HTRIM_PATH_INCARNATION, kbase, klen,
+                                     msg_target, msg_timestamp, msg_msgid, &pm);
+    if (drc < 0) {
+      db_iter_close(it);
+      htrim_slice_abort(s);
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "history_purge_incarnation: %s: cannot stage a delete: %s", channel,
+                db_env_last_error(history_db_env) ? db_env_last_error(history_db_env) : "?");
+      return -1;
     }
-    if (quota_enabled && purge_quota_count < PURGE_QUOTA_BATCH && pm.account[0]) {
-      ircd_strncpy(purge_quota[purge_quota_count].target, msg_target, sizeof(purge_quota[0].target));
-      ircd_strncpy(purge_quota[purge_quota_count].account, pm.account, sizeof(purge_quota[0].account));
-      purge_quota_count++;
-    }
-    db_writebatch_del(wb, history_cf_messages, kbase, klen);
-    deleted++;
+    if (drc > 0)
+      skipped++;
   }
   db_iter_close(it);
 
-  rc = db_writebatch_commit(wb, /*sync=*/0);
-  db_writebatch_destroy(wb);
-  if (rc != DB_OK) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history_purge_incarnation: commit failed: %s", db_strerror(rc));
+  deleted = htrim_slice_commit(s);
+  if (deleted < 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history_purge_incarnation: %s: commit failed: %s",
+              channel,
+              db_env_last_error(history_db_env) ? db_env_last_error(history_db_env) : "?");
     return -1;
   }
-  if (quota_enabled)
-    for (qi = 0; qi < purge_quota_count; qi++)
-      quota_decrement(purge_quota[qi].target, purge_quota[qi].account);
-  if (deleted > 0) {
+  if (deleted > 0 || skipped > 0)
     log_write(LS_SYSTEM, L_INFO, 0,
-              "chathistory: pruned %d row(s) of %s incarnation %lu (lost the burst)",
-              deleted, channel, (unsigned long)incarnation);
-    history_cleanup_empty_targets();
-  }
+              "chathistory: pruned %d row(s) of %s incarnation %lu (lost the burst)%s",
+              deleted, channel, (unsigned long)incarnation,
+              skipped ? "; rows with keys the trim delete cannot rebuild were left" : "");
   return deleted;
 }
 
@@ -2971,143 +3058,6 @@ int history_redact_watermark_set(uint64_t ms)
   return rc == DB_OK ? 0 : -1;
 }
 
-int history_purge_old(unsigned long max_age_seconds)
-{
-  struct db_iter *it;
-  struct db_writebatch *wb;
-  time_t cutoff_time;
-  char cutoff_ts[HISTORY_TIMESTAMP_LEN];
-  char msg_target[CHANNELLEN + 1];
-  char msg_timestamp[HISTORY_TIMESTAMP_LEN];
-  char msg_msgid[HISTORY_MSGID_LEN];
-  int deleted = 0;
-  int rc;
-
-  if (!history_available)
-    return -1;
-
-  if (max_age_seconds == 0)
-    return 0; /* Retention disabled */
-
-  int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
-  struct { char target[CHANNELLEN + 1]; char account[ACCOUNTLEN + 1]; } purge_quota[PURGE_QUOTA_BATCH];
-  int purge_quota_count = 0;
-
-  /* Calculate cutoff timestamp (Unix format) */
-  cutoff_time = time(NULL) - max_age_seconds;
-  ircd_snprintf(0, cutoff_ts, sizeof(cutoff_ts), "%lu.000",
-                (unsigned long)cutoff_time);
-
-  Debug((DEBUG_DEBUG, "history: purging messages older than %s", cutoff_ts));
-
-  wb = db_writebatch_new(history_db_env);
-  if (!wb) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge writebatch_new failed");
-    return -1;
-  }
-
-  it = db_iter_open(history_db_env, history_cf_messages, NULL);
-  if (!it) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge iter_open failed");
-    db_writebatch_destroy(wb);
-    return -1;
-  }
-
-  /* Iterate from the beginning (oldest messages first due to key structure)
-   * and stage deletes in the writebatch.  Once we cross the cutoff timestamp
-   * within a target's range we'd still need to keep scanning other targets,
-   * so a full scan is unavoidable here. */
-  for (rc = db_iter_seek_first(it);
-       rc == DB_OK && db_iter_valid(it);
-       rc = db_iter_next(it)) {
-    size_t klen;
-    const void *kbase = db_iter_key(it, &klen);
-
-    if (parse_key((void *)kbase, klen,
-                  msg_target, msg_timestamp, msg_msgid) != 0)
-      continue;
-
-    if (strcmp(msg_timestamp, cutoff_ts) >= 0)
-      continue;  /* not old enough */
-
-    /* A REDACT context row takes its catch-up index entry with it (a store
-     * that no longer holds the row has nothing to redact). */
-    if (msg_msgid[0] != '\0' && history_cf_redact) {
-      size_t vlen;
-      const void *vbase = db_iter_value(it, &vlen);
-      struct HistoryMessage peek;
-      if (vbase && history_deserialize_record((const char *)vbase, (int)vlen, &peek) == 0
-          && peek.type == HISTORY_REDACT) {
-        unsigned char rkey[RDX_KEY_MAX];
-        int rkl = rdx_key_build(rkey, sizeof rkey, history_parse_ms(msg_timestamp), msg_msgid);
-        if (rkl > 0)
-          db_writebatch_del(wb, history_cf_redact, rkey, (size_t)rkl);
-      }
-    }
-
-    /* Stage delete from msgid index and ml_content if we have a msgid */
-    if (msg_msgid[0] != '\0') {
-      msgid_index_del(wb, msg_msgid, msg_target);
-
-      ml_content_delete(wb, msg_msgid);
-
-      /* Delete reply index entries where this msgid is the parent.
-       * Orphaned child entries (referencing deleted parents) are harmless
-       * and cleaned when the child itself is purged. */
-      reply_index_del_children(wb, msg_target, msg_msgid);
-    }
-
-    /* Per-account quota: the retention purge never gave these rows'
-     * counts back, so with CHATHISTORY_USER_QUOTA on the counters only
-     * ever ratcheted up (audit 2026-09-06 L2).  Same collect-then-apply
-     * shape as history_emergency_evict (no nested txns). */
-    if (quota_enabled && purge_quota_count < PURGE_QUOTA_BATCH) {
-      size_t vlen;
-      const void *vbase = db_iter_value(it, &vlen);
-      struct HistoryMessage pm;
-      memset(&pm, 0, sizeof(pm));
-      if (vbase && history_deserialize_record((void *)vbase, vlen, &pm) == 0
-          && pm.account[0] != '\0') {
-        ircd_strncpy(purge_quota[purge_quota_count].target, msg_target,
-                     sizeof(purge_quota[0].target));
-        ircd_strncpy(purge_quota[purge_quota_count].account, pm.account,
-                     sizeof(purge_quota[0].account));
-        purge_quota_count++;
-      }
-    }
-
-    /* Stage delete of the message itself.  Borrow the key — writebatch
-     * copies, so it's safe to use the iterator's transient pointer. */
-    db_writebatch_del(wb, history_cf_messages, kbase, klen);
-    deleted++;
-  }
-
-  db_iter_close(it);
-
-  /* Commit deletes */
-  rc = db_writebatch_commit(wb, /*sync=*/0);
-  db_writebatch_destroy(wb);
-  if (rc != DB_OK) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge commit failed: %s",
-              db_strerror(rc));
-    return -1;
-  }
-  {
-    int qi;
-    for (qi = 0; qi < purge_quota_count; qi++)
-      quota_decrement(purge_quota[qi].target, purge_quota[qi].account);
-  }
-
-  if (deleted > 0) {
-    log_write(LS_SYSTEM, L_INFO, 0, "history: purged %d old messages (cutoff: %s)",
-              deleted, cutoff_ts);
-    /* Clean up empty targets and notify via callback */
-    history_cleanup_empty_targets();
-  }
-
-  return deleted;
-}
-
 /** Clean up targets_dbi entries for channels with no messages.
  * Called after eviction/purge to maintain consistency and trigger CH A - broadcasts.
  * @return Number of targets cleaned up, or -1 on error.
@@ -3392,54 +3342,6 @@ int history_lookup_message(const char *target, const char *msgid,
 
   db_snapshot_destroy(snap);
   *msg = m;
-  return 0;
-}
-
-int history_delete_message(const char *target, const char *msgid)
-{
-  struct db_writebatch *wb;
-  struct db_val val = { NULL, 0 };
-  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  char timestamp[HISTORY_TIMESTAMP_LEN];
-  int keylen;
-  int rc;
-
-  if (!history_available)
-    return -1;
-
-  (void)val;
-  /* Resolve via this target's own index row (multi-target scheme). */
-  rc = msgid_index_resolve(msgid, target, NULL, timestamp, NULL, 0);
-  if (rc == 1)
-    return 1; /* Not found */
-  if (rc != 0)
-    return -1;
-
-  /* Build key for main database: target\0timestamp\0msgid */
-  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
-  if (keylen < 0)
-    return -1;
-
-  wb = db_writebatch_new(history_db_env);
-  if (!wb)
-    return -1;
-
-  /* Stage all deletes atomically.  Only THIS target's index row (plus
-   * the shared legacy row) -- other channels' rows for a multi-channel
-   * event keep their anchors. */
-  msgid_index_del(wb, msgid, target);
-  db_writebatch_del(wb, history_cf_messages, keybuf, keylen);
-
-  ml_content_delete(wb, msgid);
-
-  /* Clean reply index entries where this msgid is the parent */
-  reply_index_del_children(wb, target, msgid);
-
-  rc = db_writebatch_commit(wb, /*sync=*/0);
-  db_writebatch_destroy(wb);
-  if (rc != DB_OK)
-    return -1;
-
   return 0;
 }
 
@@ -4193,6 +4095,38 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                "H :  Trim: backfill running (%zu rows), accounting %s",
                htrim_backfill_rows(),
                htrim_acct_loaded() ? "loaded" : "scanning");
+  {
+    /* Age-out: whether a pass is still open, and how old the first row
+     * the last age-out slice read was (the head of the time index then);
+     * slice times rounded up to whole ms. */
+    const struct htrim_stats *tst = htrim_stats();
+    uint64_t now_ms = (uint64_t)time(NULL) * 1000ULL;
+    char age[24];
+
+    if (tst->oldest_seen_ms)
+      ircd_snprintf(0, age, sizeof(age), "%llu",
+                    (unsigned long long)(now_ms > tst->oldest_seen_ms
+                                         ? (now_ms - tst->oldest_seen_ms) / 1000 : 0));
+    else
+      ircd_strncpy(age, "unknown", sizeof(age));
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Backlog: age-out %s, oldest indexed row %ss old",
+               htrim_ageout_pending() ? "yes" : "no", age);
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Last slice: %llu ms (%s), max %llu ms",
+               (unsigned long long)((tst->last_slice_us + 999) / 1000),
+               htrim_phase_name(tst->last_phase),
+               (unsigned long long)((tst->max_slice_us + 999) / 1000));
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Deleted: ageout=%llu owner=%llu oldest=%llu emergency=%llu "
+               "backfill=%llu incarnation=%llu",
+               (unsigned long long)tst->deleted[HTRIM_PATH_AGEOUT],
+               (unsigned long long)tst->deleted[HTRIM_PATH_OWNER],
+               (unsigned long long)tst->deleted[HTRIM_PATH_OLDEST],
+               (unsigned long long)tst->deleted[HTRIM_PATH_EMERGENCY],
+               (unsigned long long)tst->deleted[HTRIM_PATH_BACKFILL],
+               (unsigned long long)tst->deleted[HTRIM_PATH_INCARNATION]);
+  }
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Watermarks: high=%d%% low=%d%%",
              feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK),

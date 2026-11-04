@@ -256,11 +256,18 @@ extern const char *history_owner_of(char *buf, size_t size, struct Client *sptr)
 extern void history_trim_start(uint64_t newest_row_ms);
 
 /** One trim slice under the live features; re-arms the 1 s slice timer
- * while work remains.  @a pass_start marks the start of a pass. */
+ * while work remains (and after a failed slice, up to 5 in a row).
+ * @a pass_start marks the start of a pass: the alive stamp, and age-out
+ * opens a pass from the first row (htrim_pass_start). */
 extern void history_trim_tick(int pass_start);
 
-/** Make the next 1 s tick a pass start. */
+/** Make the next 1 s tick a pass start (a retention change: age-out
+ * walks under the new cutoff from the first row). */
 extern void history_trim_kick(void);
+
+/** CHATHISTORY_TRIM_SLICE_MS changed: the longest slice so far was
+ * measured under the old budget (STATS max goes back to 0). */
+extern void history_trim_slice_budget_changed(void);
 
 #ifdef USE_ROCKSDB
 struct db_env;
@@ -428,13 +435,6 @@ extern void history_free_messages(struct HistoryMessage *list);
  */
 extern void history_free_targets(struct HistoryTarget *list);
 
-/** Purge old messages from the database.
- * Called periodically to enforce retention policy.
- * @param[in] max_age_seconds Maximum age of messages to keep.
- * @return Number of messages deleted, or -1 on error.
- */
-extern int history_purge_old(unsigned long max_age_seconds);
-
 /** Get timestamp for a given message ID.
  * Useful for converting msgid references to timestamps.
  * @param[in] msgid Message ID to look up.
@@ -470,7 +470,7 @@ extern int history_deserialize_record(const void *data, size_t datalen,
                                       struct HistoryMessage *msg);
 
 /** Redact a message: strip content/tags but keep the entry in the database.
- * Used instead of history_delete_message() to support REDACT-as-context.
+ * A redaction keeps the row (REDACT-as-context) rather than deleting it.
  * The original message remains with empty content so it can serve as the
  * parent for a REDACT context message during chathistory replay.
  * @param[in] target Channel or nick where message was sent.
@@ -564,14 +564,6 @@ extern int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_bu
 extern int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen);
 
 /* Read Marker API moved to metadata.h (metadata_readmarker_get/set) */
-
-/** Delete a message from the history database.
- * Used by message-redaction to remove redacted messages.
- * @param[in] target Channel or nick where message was sent.
- * @param[in] msgid Message ID to delete.
- * @return 0 on success, -1 on error, 1 if not found.
- */
-extern int history_delete_message(const char *target, const char *msgid);
 
 /** Lookup a message by ID and verify sender.
  * Used by message-redaction to validate authorization.

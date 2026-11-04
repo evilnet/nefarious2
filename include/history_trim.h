@@ -41,6 +41,17 @@
  * the last alive stamp plus a slack (a downgrade window) deletes both --
  * done or mid-walk -- and the walk runs again from the first key.  A meta
  * row that cannot be read counts as an unfinished walk.
+ *
+ * Age-out.  Retention is enforced by walking by_time -- globally ordered
+ * by time -- over [cursor ‖ 0x00, be64(cutoff_ms)), oldest first, THE
+ * delete for each row (counted), in budgeted slices.  The cursor is the
+ * last by_time key a committed slice deleted (in memory); a failed commit
+ * leaves it, so the same rows come round again.  A pass opens at
+ * htrim_pass_start (each maintenance tick, and a retention change), which
+ * also sends the walk back to the first key: a row stored after the walk
+ * passed its time (a late CH W, a lagged relay) goes at the next pass.  A
+ * walk that reaches the cutoff closes the pass.  Rows at the cutoff ms
+ * are kept.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
@@ -130,7 +141,8 @@ struct htrim_stats {
   uint64_t         last_slice_us;               /**< begin to end of cleanup */
   uint64_t         max_slice_us;
   enum htrim_phase last_phase;
-  uint64_t         oldest_seen_ms;
+  uint64_t         oldest_seen_ms;              /**< ms of the first by_time key the
+                                                     last age-out slice read; 0 = none yet */
 };
 
 struct htrim_slice;
@@ -253,9 +265,27 @@ void htrim_tsweep_clear(void);
 
 /** Run one phase in one budgeted slice: round-robin from the phase after
  * the last one run, among the phases with work.  A failing phase still
- * records its slice (one extra clock read on that path).
+ * records its slice (one extra clock read on that path) and describes
+ * itself in htrim_last_error(); the engine does not log it (the caller
+ * logs once per streak of failures).
  * @return 1 = work remains, 0 = idle, -1 = error. */
 int htrim_run_slice(const struct htrim_params *p);
+
+/** Open an age-out pass under @a p: the walk goes back to the first
+ * by_time key, and HTRIM_PH_AGEOUT has work while @a p->retention_days
+ * > 0 (a pass at retention 0 is closed at once).  Call it before the
+ * pass's first slice: each maintenance tick, and on a retention change. */
+void htrim_pass_start(const struct htrim_params *p);
+
+/** @return non-zero while an age-out pass is open: rows past the
+ * cutoff may remain (STATS "Backlog: age-out yes"). */
+int htrim_ageout_pending(void);
+
+/** What the last failed htrim_run_slice ran into ("" before any). */
+const char *htrim_last_error(void);
+
+/** "ageout", "backfill", "scan", "evict" or "none". */
+const char *htrim_phase_name(enum htrim_phase ph);
 
 const struct htrim_stats *htrim_stats(void);
 

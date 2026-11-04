@@ -370,6 +370,37 @@ static void test_reply_child_key(void **state)
   assert_memory_equal(b, "#chan\0" "PARENT1\0" "1700000000.123\0" "M1", 31);
 }
 
+/* ---- Task 7 (Task 5 review M1): the children-of-a-parent scan prefix,
+ * byte-identical to the head of every child key, and to history.c's
+ * old hand-built fold(target) \0 parent \0. ---- */
+
+static void test_reply_prefix(void **state)
+{
+  char b[HTC_TARGET_MAX + HTC_MSGID_MAX + 2];
+  char c[HTC_TARGET_MAX + HTC_MSGID_MAX + HTC_TS_MAX + HTC_MSGID_MAX];
+  int n, m;
+  (void)state;
+
+  n = htc_reply_prefix(b, sizeof(b), "#Chan", "PARENT1");
+  assert_int_equal(n, 14);
+  assert_memory_equal(b, "#chan\0" "PARENT1\0", 14);
+  m = htc_reply_child_key(c, sizeof(c), "#Chan", "PARENT1", "1700000000.123", "M1");
+  assert_true(m > n);
+  assert_memory_equal(c, b, (size_t)n);
+  /* A parent that is a prefix of another is still isolated by its \0. */
+  m = htc_reply_child_key(c, sizeof(c), "#Chan", "PARENT10", "1700000000.123", "M1");
+  assert_true(memcmp(c, b, (size_t)n) != 0);
+
+  /* The buffer bounds, as the old builder: each part needs its byte of
+   * separator. */
+  assert_int_equal(htc_reply_prefix(b, 14, "#Chan", "PARENT1"), 14);
+  assert_int_equal(htc_reply_prefix(b, 13, "#Chan", "PARENT1"), -1);
+  assert_int_equal(htc_reply_prefix(b, 5, "#Chan", "PARENT1"), -1);
+  assert_int_equal(htc_reply_prefix(NULL, sizeof(b), "#Chan", "PARENT1"), -1);
+  assert_int_equal(htc_reply_prefix(b, sizeof(b), NULL, "PARENT1"), -1);
+  assert_int_equal(htc_reply_prefix(b, sizeof(b), "#Chan", NULL), -1);
+}
+
 /* ---- Task 3: owner accounting table, the fair-eviction planner,
  * effective coverage days. ---- */
 
@@ -845,6 +876,7 @@ int main(void)
     cmocka_unit_test(test_row_bytes),
     cmocka_unit_test(test_msgid_key),
     cmocka_unit_test(test_reply_child_key),
+    cmocka_unit_test(test_reply_prefix),
     cmocka_unit_test(test_acct_add_sub),
     cmocka_unit_test(test_acct_clamps),
     cmocka_unit_test(test_acct_top),

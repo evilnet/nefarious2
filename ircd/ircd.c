@@ -780,16 +780,17 @@ static void check_pings(struct Event* ev) {
   timer_add(&ping_timer, check_pings, 0, TT_ABSOLUTE, next_check);
 }
 
-/** Periodic callback to purge old history messages.
- * Runs every hour to enforce CHATHISTORY_RETENTION policy.
- * @param[in] ev Timer event (ignored).
+/** The chathistory maintenance tick (CHATHISTORY_MAINTENANCE_INTERVAL,
+ * floor 60 s): starts a trim pass -- retention age-out runs from there in
+ * budgeted slices on the trimmer's own 1 s timer (history_trim_tick) --
+ * and prunes expired presence intervals.
+ * @param[in] ev Timer event: only its expiry runs a tick (the ET_DESTROY
+ * of a timer_del, e.g. history_purge_restart_timer's, is not a tick).
  */
 static void history_purge_callback(struct Event* ev)
 {
-  int retention_days;
-  unsigned long max_age_seconds;
-
-  (void)ev; /* unused */
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
 
   /* Only run if chathistory storage is enabled */
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
@@ -807,17 +808,13 @@ static void history_purge_callback(struct Event* ev)
    * any backlog on at 1 s). */
   history_trim_tick(1);
 
-  retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
-  if (retention_days <= 0)
+  if (feature_int(FEAT_CHATHISTORY_RETENTION) <= 0)
     return; /* Retention disabled */
-
-  max_age_seconds = (unsigned long)retention_days * 24 * 60 * 60;
-  history_purge_old(max_age_seconds);
 
   /* Strict-presence chathistory: prune intervals fully older than the
    * retention horizon.  Cheap (in-memory walk + a single CF scan of a
-   * small CF) and bounded — happens once per retention pass alongside
-   * the existing chathistory purge. */
+   * small CF) and bounded — happens once per maintenance tick, as the
+   * trim pass starts. */
   presence_retention_sweep();
 }
 

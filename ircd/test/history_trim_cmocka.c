@@ -1678,6 +1678,357 @@ static void test_run_slice_rotation(void **state)
   assert_acct_matches_cf();
 }
 
+/* ------------------------------------------------------------------ */
+/* Age-out (Task 7)                                                    */
+/* ------------------------------------------------------------------ */
+
+/** The age-out tests' starting point: a finished backfill (its marker in
+ * the store before the engine starts) and a finished accounting scan, so
+ * age-out is the only phase with work. */
+static void ageout_ready(void)
+{
+  seed_backfill_done();
+  reboot();
+  load_acct();
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(0, htrim_ageout_pending());
+}
+
+/** A pass start under @a p, then slices until idle. */
+static void ageout_pass(const struct htrim_params *p)
+{
+  htrim_pass_start(p);
+  run_until_idle(p);
+  assert_int_equal(0, htrim_ageout_pending());
+}
+
+/** Whether every row the store path wrote for (target, ts, msgid) is
+ * there (@a want 1) or gone (@a want 0): its messages row, both msgid
+ * forms, its reply_index entries as a child, its redact_index row
+ * (HTC_F_REDACT), its multiline content and paste row (HTC_F_ML), its
+ * by_time row and its by_owner row. */
+static void assert_row_rows(const char *target, const char *ts, const char *msgid,
+                            const char *owner, unsigned char flags,
+                            const char *reply_parent, const char *redact_parent,
+                            int want)
+{
+  char k[HTC_MSG_KEY_MAX], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], paste[HTC_MSGID_MAX + 16];
+  unsigned char xk[RDX_KEY_MAX];
+  int n, btl;
+
+  n = htc_msg_key(k, sizeof k, target, ts, msgid);
+  assert_int_equal(want, key_exists(st.messages, k, (size_t)n));
+  n = htc_msgid_key(k, sizeof k, msgid, target);
+  assert_int_equal(want, key_exists(st.msgid, k, (size_t)n));
+  assert_int_equal(want, key_exists(st.msgid, msgid, strlen(msgid)));
+  if (reply_parent[0]) {
+    n = htc_reply_child_key(k, sizeof k, target, reply_parent, ts, msgid);
+    assert_int_equal(want, key_exists(st.reply, k, (size_t)n));
+  }
+  if (redact_parent[0]) {
+    n = htc_reply_child_key(k, sizeof k, target, redact_parent, ts, msgid);
+    assert_int_equal(want, key_exists(st.reply, k, (size_t)n));
+  }
+  if (flags & HTC_F_REDACT) {
+    n = rdx_key_build(xk, sizeof xk, htc_parse_ms(ts), msgid);
+    assert_int_equal(want, key_exists(st.redact, xk, (size_t)n));
+  }
+  if (flags & HTC_F_ML) {
+    assert_int_equal(want, key_exists(st.ml_content, msgid, strlen(msgid)));
+    snprintf(paste, sizeof paste, "%s-sekret", msgid);
+    assert_int_equal(want, key_exists(st.ml_paste, paste, strlen(paste)));
+  }
+  btl = bt_of(bt, sizeof bt, target, ts, msgid);
+  assert_int_equal(want, key_exists(st.by_time, bt, (size_t)btl));
+  n = htc_bo_key(bo, sizeof bo, owner, bt, (size_t)btl);
+  assert_int_equal(want, key_exists(st.by_owner, bo, (size_t)n));
+}
+
+/* Rows past retention go with every index row; a row inside it stays
+ * whole; the totals lose exactly the deleted rows' bytes. */
+static void test_ageout_below_cutoff_only(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htc_rec ra, rb, rk;
+  char ta[32], tb[32], tk[32];
+  uint64_t total;
+  (void)state;
+
+  ageout_ready();
+  ts_ago(ta, sizeof ta, 8, 0);
+  ts_ago(tb, sizeof tb, 8, 0);
+  ts_ago(tk, sizeof tk, 6, 0);
+  seed_row("#a", ta, "A8", "a:ann", HTC_F_REDACT | HTC_F_ML, "P0", "P1", 40, &ra);
+  seed_row("#b", tb, "B8", "a:bob", 0, "P2", "", 0, &rb);
+  seed_row("#a", tk, "A6", "a:ann", 0, "", "", 0, &rk);
+  seed_targets("#a", tk);
+  seed_targets("#b", tb);
+  total = htc_acct_total(htrim_acct());
+  assert_int_equal((uint64_t)ra.bytes + rb.bytes + rk.bytes, total);
+
+  /* Nothing runs before a pass starts. */
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(3, fake_db_rows(st.by_time));
+
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_ageout_pending());
+  run_until_idle(&p);
+  assert_int_equal(0, htrim_ageout_pending());
+  assert_int_equal(HTRIM_PH_AGEOUT, htrim_stats()->last_phase);
+
+  assert_row_rows("#a", ta, "A8", "a:ann", HTC_F_REDACT | HTC_F_ML, "P0", "P1", 0);
+  assert_row_rows("#b", tb, "B8", "a:bob", 0, "P2", "", 0);
+  assert_row_rows("#a", tk, "A6", "a:ann", 0, "", "", 1);
+  assert_int_equal(1, fake_db_rows(st.messages));
+  assert_int_equal(2, fake_db_rows(st.msgid));
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, fake_db_rows(st.redact));
+  assert_int_equal(0, fake_db_rows(st.ml_content));
+  assert_int_equal(0, fake_db_rows(st.ml_paste));
+  assert_int_equal(1, fake_db_rows(st.by_time));
+  assert_int_equal(1, fake_db_rows(st.by_owner));
+
+  assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(total - ra.bytes - rb.bytes, htc_acct_total(htrim_acct()));
+  assert_int_equal(rk.bytes, htc_acct_owner(htrim_acct(), "a:ann"));
+  assert_int_equal(0, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_acct_matches_cf();
+  /* "#b" lost its only row; "#a" keeps its newer one. */
+  assert_int_equal(1, emptied_calls);
+  assert_int_equal(1, emptied_count);
+  assert_string_equal("#b", emptied_names[0]);
+  assert_true(targets_has("#a"));
+  assert_false(targets_has("#b"));
+  /* The first key the pass read: the oldest row. */
+  assert_int_equal(htc_parse_ms(ta), htrim_stats()->oldest_seen_ms);
+
+  /* A pass at retention 0 has no work. */
+  p.retention_days = 0;
+  htrim_pass_start(&p);
+  assert_int_equal(0, htrim_ageout_pending());
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(1, fake_db_rows(st.by_time));
+}
+
+/* The cutoff ms itself is kept (as the old purge kept it); one ms older
+ * goes. */
+static void test_ageout_keeps_cutoff_ms(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  uint64_t cutoff_ms = p.now_ms - 7ULL * 86400ULL * 1000ULL;
+  char tcut[32], tolder[32];
+  (void)state;
+
+  ageout_ready();
+  snprintf(tcut, sizeof tcut, "%llu.000", (unsigned long long)(cutoff_ms / 1000));
+  snprintf(tolder, sizeof tolder, "%llu.999", (unsigned long long)(cutoff_ms / 1000 - 1));
+  assert_int_equal(cutoff_ms, htc_parse_ms(tcut));
+  assert_int_equal(cutoff_ms - 1, htc_parse_ms(tolder));
+  seed_plain("#t", tcut, "CUT", "a:bob", NULL);
+  seed_plain("#t", tolder, "OLD", "a:bob", NULL);
+
+  ageout_pass(&p);
+  assert_row_rows("#t", tcut, "CUT", "a:bob", 0, "", "", 1);
+  assert_row_rows("#t", tolder, "OLD", "a:bob", 0, "", "", 0);
+  assert_int_equal(1, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+}
+
+/* A budgeted slice deletes until its budget is spent; a slice stopped by
+ * the budget reports work only when another entry exists. */
+static void test_ageout_budget(void **state)
+{
+  struct htrim_params p = bf_params(5);
+  char ts[32], mid[16];
+  int i;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 30; i++) {
+    snprintf(mid, sizeof mid, "R%02d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  /* A row inside retention: in by_time, past the walk's upper bound. */
+  seed_plain("#t", ts_ago(ts, sizeof ts, 1, 0), "NEW", "a:bob", NULL);
+
+  step_us = 1000;                      /* 1 ms per clock read; 5 ms slices */
+  htrim_pass_start(&p);
+  for (i = 1; i <= 5; i++) {
+    assert_int_equal(1, htrim_run_slice(&p));
+    assert_int_equal(HTRIM_PH_AGEOUT, htrim_stats()->last_phase);
+    assert_int_equal((uint64_t)(5 * i), htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+    assert_int_equal(31 - 5 * i, fake_db_rows(st.by_time));
+    assert_int_equal(1, htrim_ageout_pending());
+  }
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_int_equal(30, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(1, fake_db_rows(st.by_time));
+  assert_int_equal(1, fake_db_rows(st.messages));
+  assert_int_equal(0, htrim_ageout_pending());
+  assert_int_equal(0, htrim_run_slice(&p));
+  assert_acct_matches_cf();
+}
+
+/* A slice whose commit fails deletes nothing: every row survives whole
+ * (no row loses only some of its index rows), the cursor stays, and the
+ * next slices pick the same rows up again. */
+static void test_ageout_failed_commit_is_whole_rows(void **state)
+{
+  struct htrim_params p = bf_params(3);
+  char ts[10][32], mid[16], rp[16];
+  uint64_t total_before;
+  int i;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 10; i++) {
+    snprintf(mid, sizeof mid, "W%d", i);
+    snprintf(rp, sizeof rp, "P%d", i);
+    seed_row("#t", ts_ago(ts[i], sizeof ts[i], 8, 100 - i), mid, "a:bob",
+             HTC_F_REDACT | HTC_F_ML, rp, "Q", 30, NULL);
+  }
+
+  step_us = 1000;                      /* 1 ms per clock read; 3 ms slices */
+  htrim_pass_start(&p);
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(3, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  total_before = htc_acct_total(htrim_acct());
+
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, htrim_run_slice(&p));
+  assert_int_equal(3, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(total_before, htc_acct_total(htrim_acct()));
+  assert_int_equal(1, htrim_ageout_pending());
+  for (i = 0; i < 10; i++) {
+    snprintf(mid, sizeof mid, "W%d", i);
+    snprintf(rp, sizeof rp, "P%d", i);
+    assert_row_rows("#t", ts[i], mid, "a:bob", HTC_F_REDACT | HTC_F_ML, rp, "Q", i >= 3);
+  }
+  assert_int_equal(7, fake_db_rows(st.by_time));
+
+  run_until_idle(&p);
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(0, fake_db_rows(st.msgid));
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, fake_db_rows(st.redact));
+  assert_int_equal(0, fake_db_rows(st.ml_content));
+  assert_int_equal(0, fake_db_rows(st.ml_paste));
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.by_owner));
+  assert_int_equal(0, htc_acct_total(htrim_acct()));
+}
+
+/* Review Focus 5: a long single-target drain checks the target for
+ * emptiness ONCE -- when the slice deleting its newest (stamped) row
+ * commits -- never per slice (each such check walks every head tombstone
+ * the drain has left so far). */
+static void test_ageout_single_target_one_emptiness_check(void **state)
+{
+  struct htrim_params p = bf_params(10);
+  char ts[32], newest[32], mid[16];
+  int i, slices;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i < 1000; i++) {
+    snprintf(mid, sizeof mid, "B%04d", i);
+    seed_plain("#big", ts_ago(ts, sizeof ts, 8, 1000 - i), mid, "a:bob", NULL);
+  }
+  ts_ago(newest, sizeof newest, 8, 1);                   /* row 999 */
+  seed_targets("#big", newest);
+  assert_int_equal(0, fake_db_iter_opens(st.messages));
+
+  step_us = 1000;                      /* 1 ms per clock read; 10 ms slices */
+  htrim_pass_start(&p);
+  slices = run_until_idle(&p);
+  assert_true(slices >= 100);          /* a drain over many slices */
+  assert_int_equal(1000, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(0, fake_db_rows(st.messages));
+
+  assert_int_equal(1, fake_db_iter_opens(st.messages));
+  assert_int_equal(1, fake_db_seek_lasts(st.messages));
+  assert_int_equal(0, fake_db_seek_firsts(st.messages));
+  assert_int_equal(1, emptied_calls);
+  assert_int_equal(1, emptied_count);
+  assert_string_equal("#big", emptied_names[0]);
+  assert_false(targets_has("#big"));
+}
+
+/* A pass start reopens the walk from the first key: a row stored with a
+ * time older than where the last pass (or the current one) stopped -- a
+ * late CH W, a lagged relay -- goes at the next pass. */
+static void test_ageout_pass_start_catches_late_row(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htrim_params pb = bf_params(3);
+  char ts[32], mid[16];
+  int i;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#t", ts_ago(ts, sizeof ts, 8, 300), "O1", "a:bob", NULL);
+  seed_plain("#t", ts_ago(ts, sizeof ts, 8, 200), "O2", "a:bob", NULL);
+  seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100), "O3", "a:bob", NULL);
+  ageout_pass(&p);
+  assert_int_equal(3, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+
+  /* After the pass: older than every key it deleted. */
+  seed_plain("#u", ts_ago(ts, sizeof ts, 8, 500), "LATE", "a:bob", NULL);
+  assert_int_equal(0, htrim_run_slice(&p));            /* no pass, no walk */
+  assert_int_equal(1, fake_db_rows(st.by_time));
+  ageout_pass(&p);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(4, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+
+  /* During a pass: the walk is past it; the next pass start goes back. */
+  for (i = 0; i < 10; i++) {
+    snprintf(mid, sizeof mid, "M%d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  step_us = 1000;                      /* 1 ms per clock read; 3 ms slices */
+  htrim_pass_start(&pb);
+  assert_int_equal(1, htrim_run_slice(&pb));
+  assert_int_equal(7, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  seed_plain("#u", ts_ago(ts, sizeof ts, 8, 500), "LATE2", "a:bob", NULL);
+  htrim_pass_start(&pb);
+  assert_int_equal(1, htrim_run_slice(&pb));
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(0, key_exists(st.msgid, "LATE2", 5));
+  step_us = 0;
+  run_until_idle(&p);
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(15, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_acct_matches_cf();
+}
+
+/* Task 5 review M2: an aged-out REDACT row takes its redact_index row,
+ * whose key the store built from htc_parse_ms(the row's own ts) and the
+ * delete rebuilds from the by_time key's ms -- also for a ts that is not
+ * in the canonical <sec>.<3 digits> form.  A younger REDACT row keeps
+ * its own. */
+static void test_ageout_redact_takes_its_index_row(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char t1[32], t2[32], t3[32];
+  (void)state;
+
+  ageout_ready();
+  snprintf(t1, sizeof t1, "%llu.5", (unsigned long long)(BF_NOW_S - 8ULL * 86400ULL));
+  ts_ago(t2, sizeof t2, 8, 1);
+  ts_ago(t3, sizeof t3, 1, 0);
+  seed_row("#t", t1, "RD1", "a:bob", HTC_F_REDACT, "", "P1", 0, NULL);
+  seed_row("#t", t2, "RD2", "a:bob", HTC_F_REDACT, "", "P2", 0, NULL);
+  seed_row("#t", t3, "RD3", "a:bob", HTC_F_REDACT, "", "P3", 0, NULL);
+  assert_int_equal(3, fake_db_rows(st.redact));
+
+  ageout_pass(&p);
+  assert_row_rows("#t", t1, "RD1", "a:bob", HTC_F_REDACT, "", "P1", 0);
+  assert_row_rows("#t", t2, "RD2", "a:bob", HTC_F_REDACT, "", "P2", 0);
+  assert_row_rows("#t", t3, "RD3", "a:bob", HTC_F_REDACT, "", "P3", 1);
+  assert_int_equal(1, fake_db_rows(st.redact));
+  assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1713,6 +2064,13 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_meta_read_error_means_not_done, setup, teardown),
     cmocka_unit_test_setup_teardown(test_backfill_logs_first_unindexable_keys, setup, teardown),
     cmocka_unit_test_setup_teardown(test_run_slice_rotation, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_below_cutoff_only, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_keeps_cutoff_ms, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_budget, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_failed_commit_is_whole_rows, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_single_target_one_emptiness_check, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_pass_start_catches_late_row, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_redact_takes_its_index_row, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
