@@ -985,7 +985,7 @@ struct Message msgtab[] = {
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_search, m_ignore, m_search, m_ignore },
-    "in=<target> [from=<nick>] [text=<words>] [after=<ts>] [before=<ts>] [limit=<n>] - Search message history (soju.im/search)"
+    "in=<target>[;from=<nick>][;text=<words>][;after=<ts>][;before=<ts>][;limit=<n>] - Search message history (soju.im/search)"
   },
   {
     MSG_HISTORY,
