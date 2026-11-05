@@ -70,7 +70,8 @@ CMOCKA_TESTPROGS = \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
 	db_api_rocksdb_cmocka \
-	ssl_teardown_cmocka
+	ssl_teardown_cmocka \
+	log_async_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -417,6 +418,16 @@ PASTE_LISTENER_CMOCKA_OBJS = paste_listener_cmocka.o ircd_events_test.o \
 	../engine_epoll.o ../ircd_string.o
 paste_listener_cmocka: $(PASTE_LISTENER_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(PASTE_LISTENER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# log_async tests - the async log writer never writes to a descriptor the
+# log has closed: log_close() and log_file_destroy() drain the queue first,
+# and log_async_flush() waits for the write in flight.  Links the real
+# ircd_log.o and ircd_log_async.o; the writer thread's write() is wrapped
+# (--wrap=write) behind a gate the cases open, to hold a write in flight.
+LOG_ASYNC_CMOCKA_OBJS = log_async_cmocka.o ../ircd_log.o ../ircd_log_async.o \
+	../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o
+log_async_cmocka: $(LOG_ASYNC_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=write $(LOG_ASYNC_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
 
 # ssl_teardown tests - a TLS teardown writes only to a descriptor its
 # socket still owns (ssl_abort after an ET_ERROR EBADF dropped cli_fd) and

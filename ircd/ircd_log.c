@@ -216,7 +216,10 @@ log_debug_reopen(void)
     return;
   }
 
-  /* Ok, it's a real file; close it if necessary and use log_open to open it */
+  /* Ok, it's a real file; close it if necessary and use log_open to open it.
+   * Its number -- and 2, which it is moved onto -- may have lines queued
+   * for the async writer: drain them first. */
+  log_async_flush();
   if (logInfo.dbfile->fd >= 0) {
     close(logInfo.dbfile->fd);
     logInfo.dbfile->fd = -1; /* mark that it's closed for log_open */
@@ -316,12 +319,21 @@ log_reopen(void)
   openlog(logInfo.procname, LOG_PID | LOG_NDELAY, logInfo.facility);
 }
 
-/** Close all log files. */
+/** Close all log files.
+ *
+ * The async writer (ASYNC_LOGGING) writes each queued line to the
+ * descriptor NUMBER it was queued with, so the queue is drained first:
+ * a line still queued, or being written, after the close would land in
+ * whatever file opened next and got the number (every REHASH and log
+ * rotation comes through here).  The same goes for every other close of a
+ * log descriptor below.
+ */
 void
 log_close(void)
 {
   struct LogFile *ptr;
 
+  log_async_flush();
   closelog(); /* close syslog */
 
   for (ptr = logInfo.filelist; ptr; ptr = ptr->next) {
@@ -568,8 +580,10 @@ log_file_destroy(struct LogFile *lf)
     *lf->prev_p = lf->next;
 
     lf->prev_p = 0; /* we won't use it for the free list */
-    if (lf->fd >= 0)
+    if (lf->fd >= 0) {
+      log_async_flush(); /* nothing queued for the number outlives it */
       close(lf->fd);
+    }
     lf->fd = -1;
     MyFree(lf->file); /* free the file name */
 

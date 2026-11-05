@@ -58,7 +58,8 @@ static struct {
   pthread_cond_t flushed;           /**< Signals flush complete */
 
   int running;                      /**< 1 if writer thread active */
-  int flush_requested;              /**< 1 if flush in progress */
+  int busy;                         /**< 1 while the writer is writing an
+                                     *   entry it took off the buffer */
 
   /* Statistics */
   unsigned long written;            /**< Total entries written */
@@ -97,11 +98,17 @@ static inline int buffer_empty(void)
 /**
  * Writer thread main loop.
  * Continuously drains the ring buffer to file/syslog.
+ *
+ * An entry carries its log file's descriptor NUMBER.  The writer takes it
+ * off the buffer and writes it with the mutex released, so the buffer is
+ * empty while the last entry is still being written: \a busy covers that
+ * write, and the writer signals \a flushed only when the buffer is empty
+ * and nothing is in flight -- the one state in which the log may close a
+ * descriptor (log_async_flush()).
  */
 static void *log_writer_thread(void *arg)
 {
   struct log_async_entry *entry;
-  int was_empty_before_flush;
 
   (void)arg;  /* unused */
 
@@ -109,14 +116,8 @@ static void *log_writer_thread(void *arg)
 
   while (log_async.running || !buffer_empty()) {
     /* Wait for data */
-    while (buffer_empty() && log_async.running) {
-      /* If flush requested and buffer is empty, signal completion */
-      if (log_async.flush_requested) {
-        log_async.flush_requested = 0;
-        pthread_cond_signal(&log_async.flushed);
-      }
+    while (buffer_empty() && log_async.running)
       pthread_cond_wait(&log_async.not_empty, &log_async.mutex);
-    }
 
     /* Check if we should exit */
     if (buffer_empty() && !log_async.running)
@@ -125,9 +126,10 @@ static void *log_writer_thread(void *arg)
     /* Get entry from buffer */
     entry = &log_async.entries[log_async.tail];
     log_async.tail = (log_async.tail + 1) % log_async.size;
-    was_empty_before_flush = buffer_empty();
+    log_async.busy = 1;
 
-    /* Signal that there's space now */
+    /* Signal that there's space now.  The slot just taken is not reused
+     * while it is written: the producer stops one short of the tail. */
     pthread_cond_signal(&log_async.not_full);
 
     /* Release mutex during I/O */
@@ -146,20 +148,15 @@ static void *log_writer_thread(void *arg)
 
     pthread_mutex_lock(&log_async.mutex);
     log_async.written++;
+    log_async.busy = 0;
 
-    /* Check if this completed a flush */
-    if (was_empty_before_flush && log_async.flush_requested) {
-      log_async.flush_requested = 0;
-      pthread_cond_signal(&log_async.flushed);
-    }
+    /* Everything queued is written: wake any flush. */
+    if (buffer_empty())
+      pthread_cond_broadcast(&log_async.flushed);
   }
 
-  /* Final flush check before exit */
-  if (log_async.flush_requested) {
-    log_async.flush_requested = 0;
-    pthread_cond_signal(&log_async.flushed);
-  }
-
+  /* Exiting: nothing more will be written. */
+  pthread_cond_broadcast(&log_async.flushed);
   pthread_mutex_unlock(&log_async.mutex);
   return NULL;
 }
@@ -191,7 +188,7 @@ int log_async_init(int buffer_size)
   log_async.tail = 0;
   log_async.written = 0;
   log_async.dropped = 0;
-  log_async.flush_requested = 0;
+  log_async.busy = 0;
 
   /* Initialize synchronization primitives */
   if (pthread_mutex_init(&log_async.mutex, NULL) != 0) {
@@ -338,6 +335,12 @@ int log_async_write(int fd, int syslog_priority, const char *message, int len)
 
 /**
  * Flush all pending log entries.
+ *
+ * Returns once every entry queued so far has been written, including the
+ * one the writer may be writing right now (the buffer is already empty
+ * then).  Call it before closing a descriptor the queue may name: an
+ * entry left behind would be written to whatever file the number names
+ * next.  Main thread only (the writer never logs through here).
  */
 void log_async_flush(void)
 {
@@ -345,17 +348,10 @@ void log_async_flush(void)
     return;
 
   pthread_mutex_lock(&log_async.mutex);
-
-  if (!buffer_empty()) {
-    log_async.flush_requested = 1;
+  while ((!buffer_empty() || log_async.busy) && log_async.running) {
     pthread_cond_signal(&log_async.not_empty);
-
-    /* Wait for flush to complete */
-    while (log_async.flush_requested && log_async.running) {
-      pthread_cond_wait(&log_async.flushed, &log_async.mutex);
-    }
+    pthread_cond_wait(&log_async.flushed, &log_async.mutex);
   }
-
   pthread_mutex_unlock(&log_async.mutex);
 }
 
