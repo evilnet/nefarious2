@@ -839,7 +839,9 @@ static void history_trim_warn_evict(void)
                        "Chathistory store: logical size %llu bytes is over the "
                        "high watermark (%llu of the %llu-byte cap) now that the "
                        "trim backfill is done; eviction inside retention will "
-                       "start -- SET HISTORY_MAP_SIZE_MB 0 stops it",
+                       "start -- SET HISTORY_MAP_SIZE_MB 0 stops it until a "
+                       "REHASH or restart (put it in the features block to "
+                       "keep it)",
                        (unsigned long long)total, (unsigned long long)high,
                        (unsigned long long)cap);
 }

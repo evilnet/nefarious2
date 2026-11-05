@@ -2951,7 +2951,9 @@ static void test_backfill_end_reports_cap_and_warns(void **state)
   assert_non_null(strstr(log, "the logical size 9000 bytes is over the high "
                               "watermark 8500 bytes (85% of the cap 10000 bytes)"));
   assert_non_null(strstr(log, "eviction inside retention will start"));
-  assert_non_null(strstr(log, "drain to 75%; SET HISTORY_MAP_SIZE_MB 0 stops it"));
+  assert_non_null(strstr(log, "drain to 75%; SET HISTORY_MAP_SIZE_MB 0 "
+                              "stops it until a REHASH or restart -- put it "
+                              "in the features block"));
   assert_int_equal(1, htrim_evict_warning(&total, &high, &cap));
   assert_int_equal(9000, total);
   assert_int_equal(8500, high);

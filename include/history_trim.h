@@ -362,6 +362,14 @@ size_t htrim_backfill_rows(void);
  * walk begins from the first key anyway (no walk state) only records
  * its covered stamp.
  *
+ * Limits: both sides are store-wide newest stamps, so a row that is not
+ * the newest on its side is not seen.  A peer whose clock runs D ahead
+ * leaves indexed rows up to shutdown + D, which masks a rollback shorter
+ * than about D (seconds with NTP-synced peers); rows an older binary
+ * stored only under a target whose stamp is already in the future are
+ * not seen (the max() keeps that stamp); backdated rows, event-only rows
+ * and a host clock stepping back are not seen either.
+ *
  * *@a newest_ms (may be NULL): the newest stamp of all, a future one
  * included -- the presence boot-close's hint (one walk serves both).
  * @return 0: no gap, or no walk state to reset (nothing logged);

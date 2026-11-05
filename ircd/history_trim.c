@@ -3409,7 +3409,8 @@ static void backfill_report(const struct htrim_params *p)
             "row is indexed and counted: eviction inside retention will start "
             "(owners over their share first, then the oldest rows overall, "
             "which moves the coverage floor) and drain to %d%%; SET "
-            "HISTORY_MAP_SIZE_MB 0 stops it", (unsigned long long)total,
+            "HISTORY_MAP_SIZE_MB 0 stops it until a REHASH or restart -- put "
+            "it in the features block to keep it", (unsigned long long)total,
             (unsigned long long)high_bytes, high,
             (unsigned long long)p->cap_bytes, low);
   g.ev_warn = 1;
