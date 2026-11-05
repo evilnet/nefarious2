@@ -2186,18 +2186,26 @@ static void iauth_disconnect(struct IAuth *iauth)
   if (iauth == NULL)
     return;
 
-  /* Close error socket. */
+  /* Close both sockets.  A socket_del() can respawn IAuth: when the other
+   * socket is no longer active and we are not closing, the ET_DESTROY
+   * callback calls iauth_do_spawn(), which registers this same Socket
+   * again, with the new child's descriptor, before socket_del() returns
+   * (outside the socket's own callbacks the destroy is not deferred).  So
+   * clear s_fd only if the socket still reads as deleted (GEN_DESTROY).
+   * Comparing numbers cannot tell: socketpair() reuses the number just
+   * closed. */
   if (s_fd(i_stderr(iauth)) != -1) {
     close(s_fd(i_stderr(iauth)));
     socket_del(i_stderr(iauth));
-    s_fd(i_stderr(iauth)) = -1;
+    if (i_stderr(iauth)->s_header.gh_flags & GEN_DESTROY)
+      s_fd(i_stderr(iauth)) = -1;
   }
 
-  /* Close main socket. */
   if (s_fd(i_socket(iauth)) != -1) {
     close(s_fd(i_socket(iauth)));
     socket_del(i_socket(iauth));
-    s_fd(i_socket(iauth)) = -1;
+    if (i_socket(iauth)->s_header.gh_flags & GEN_DESTROY)
+      s_fd(i_socket(iauth)) = -1;
   }
 
   /* Release any clients stuck waiting for IAuth response. */
