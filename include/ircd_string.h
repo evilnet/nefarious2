@@ -60,6 +60,7 @@ extern size_t ircd_keyvalue_line_len(size_t server_len, size_t viewer_len,
                                      size_t target_len, size_t key_len,
                                      size_t vis_len, size_t value_len);
 extern int ircd_text_mentions(const char* text, const char* nick);
+extern const char* ircd_utf8_strcasestr(const char* hay, const char* needle);
 extern char* ircd_json_escape(char* dst, size_t dstlen, const char* src);
 extern int         unique_name_vector(char* names, char token,
                                       char** vector, int size);
