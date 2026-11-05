@@ -138,7 +138,8 @@ struct paste_conn {
   char *response;
   size_t response_len;
   size_t response_sent;
-  struct Listener *listener;  /**< accepting listener (for WS promote) */
+  struct Listener *listener;  /**< accepting listener (for WS promote);
+                               *   holds a reference (ref_count) */
   struct paste_conn *next;
   struct paste_conn *prev;
 };
@@ -716,6 +717,10 @@ static int paste_request_wants_ws_upgrade(const char *req)
  * websocket_handshake_feed so the 101 goes out without waiting for a
  * fresh read event.  The husk paste_conn is MyFree'd at the socket's
  * ET_DESTROY, after this callback returns (its timer goes at once).
+ * The conn's Listener reference is stolen too: it keeps the Listener
+ * alive across add_connection(), which takes the client's own, and goes
+ * after it -- a rehash may have dropped the port, and then the last
+ * reference closes it.
  */
 static void paste_promote_to_client(struct paste_conn *conn)
 {
@@ -732,12 +737,14 @@ static void paste_promote_to_client(struct paste_conn *conn)
   /* Steal fd+SSL: paste_conn_free skips SSL_shutdown/SSL_free and
    * close() for NULL/-1, but still socket_del()s — the engine drops
    * the fd (eng_closing runs immediately) so add_connection can
-   * re-register it. */
+   * re-register it.  And the Listener reference (NULL: not released). */
   conn->ssl = NULL;
   conn->fd = -1;
+  conn->listener = NULL;
   paste_conn_free(conn);
 
   add_connection(listener, fd, ssl);
+  release_listener(listener);  /* may close it: not used after this */
   cptr = LocalClientArray[fd];
   if (!cptr)
     return;  /* throttled/z-lined: add_connection already murdered it */
@@ -991,6 +998,14 @@ static void paste_conn_free(struct paste_conn *conn)
     conn->response = NULL;
   }
 
+  /* Give up the Listener reference, as close_connection() does for a
+   * client: a port a rehash dropped is closed with the last connection on
+   * it.  A promoted conn has handed its reference over (NULL). */
+  if (conn->listener) {
+    release_listener(conn->listener);
+    conn->listener = NULL;
+  }
+
   /* Let go of the generators, and touch the conn no more: the
    * ET_DESTROY that frees it can run inside either call.
    * - The timer, when idle, is destroyed inside timer_del().  On a request
@@ -1224,7 +1239,12 @@ void paste_accept_connection(struct Listener *listener, int fd)
     close(fd);
     return;
   }
+  /* A reference on the Listener, as add_connection() takes for a client:
+   * the conn reads it (the WebSocket promote) until it closes, and a
+   * rehash that drops the port must not free it before then.  Given up in
+   * paste_conn_free(), the refused registration below included. */
   conn->listener = listener;
+  ++listener->ref_count;
 
   /* Register socket for events */
   if (!socket_add(&conn->socket, paste_conn_callback, conn,

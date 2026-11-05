@@ -24,6 +24,12 @@
  * later read of the conn through the event core trips one of the core's
  * asserts here, not only under valgrind.  Under valgrind the old timeout
  * path also shows as invalid writes in timer_run().
+ *
+ * A conn also holds a reference on the Listener that accepted it, as a
+ * client does: a rehash that drops the port frees the Listener only once
+ * nothing refers to it, and a WebSocket upgrade still reads it (the
+ * websocket flag) and hands it to add_connection().  The Listener here is
+ * on the heap and freed, poisoned, the way close_listener() frees it.
  */
 #include "config.h"
 
@@ -264,10 +270,62 @@ static void watch_free(void *p)
 /* Connections                                                         */
 /* ------------------------------------------------------------------ */
 
-static struct Listener listener;
+/* The accepting Listener, made as add_listener() makes it and closed as
+ * listener.c closes it.  A closed one is only ever compared, never read. */
+static struct Listener *listener;
+static struct Listener *closed_listener;
+static int listener_closes;
+static int bad_releases;        /* release_listener() with no reference */
+
+/** close_listener(): the Listener goes, poisoned first. */
+static void listener_close(struct Listener *l)
+{
+  listener_closes++;
+  closed_listener = l;
+  if (l == listener)
+    listener = NULL;
+  memset(l, 0xff, sizeof(*l));
+  free(l);
+}
+
+/** listener.c's release_listener(): the last reference on a port the
+ * configuration no longer has closes it. */
+void release_listener(struct Listener *l)
+{
+  if (l == closed_listener || l->ref_count <= 0) {
+    bad_releases++;
+    return;
+  }
+  if (0 == --l->ref_count && !listener_active(l))
+    listener_close(l);
+}
+
+/** A rehash whose configuration no longer has the port:
+ * mark_listeners_closing(), then close_listeners(), which closes it unless
+ * something still holds a reference. */
+static void rehash_drops_the_port(void)
+{
+  FlagClr(&listener->flags, LISTEN_ACTIVE);
+  if (0 == listener->ref_count)
+    listener_close(listener);
+}
+
 static int peer = -1;           /* the client's end of the socketpair */
 static SSL_CTX *client_ctx;
 static SSL *client;
+
+/* The WebSocket promote: the client add_connection() makes, and the
+ * request the paste conn had buffered, as the handshake feed is handed
+ * it. */
+static struct Client promoted;
+static int promoted_fd = -1;
+static SSL *promoted_ssl;
+static int refuse_promote;      /* add_connection() refuses the client */
+static int refused_promotes;
+static int promoted_on_closed;  /* add_connection() given a closed Listener */
+static char fed[PASTE_MAX_REQUEST_SIZE];
+static int fed_len = -1;
+static int fed_frees = -1;      /* conn_frees when the request was fed */
 
 /** A paste connection on a socketpair: the server's end goes to the
  * listener, as accept_connection() hands it over. */
@@ -277,7 +335,7 @@ static int paste_open(void)
 
   assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
   peer = sv[1];
-  paste_accept_connection(&listener, sv[0]);
+  paste_accept_connection(listener, sv[0]);
   assert_non_null(conn_mem);
   assert_ptr_equal(paste_conn_list, conn_mem);
   assert_int_equal(paste_conn_count, 1);
@@ -317,17 +375,23 @@ static void assert_peer_closed(void)
 }
 
 /** The conn is gone, freed once, with nothing of it left behind: no list
- * entry, and no timer that could still fire for it. */
+ * entry, no reference on its Listener (a promoted client holds its own),
+ * and no timer that could still fire for it. */
 static void assert_conn_gone(void)
 {
+  int timed_out = timeouts;
+
   assert_int_equal(conn_frees, 1);
   assert_int_equal(freed_in_use, 0);
   assert_null(paste_conn_list);
   assert_int_equal(paste_conn_count, 0);
+  assert_int_equal(bad_releases, 0);
+  if (listener)
+    assert_int_equal(listener->ref_count, promoted_fd >= 0 ? 1 : 0);
 
   CurrentTime += REQUEST_TIMEOUT;
   timer_run();
-  assert_int_equal(timeouts, 0);
+  assert_int_equal(timeouts, timed_out);
 }
 
 /** The client side of a TLS handshake, the server's side run by the
@@ -367,19 +431,21 @@ static void tls_read_all(char *buf, size_t size)
   buf[n] = '\0';
 }
 
-/* The WebSocket promote: add_connection() takes the stolen descriptor and
- * TLS session, as s_bsd.c does, and the handshake feed is handed the
- * request the paste conn had buffered. */
-static struct Client promoted;
-static int promoted_fd = -1;
-static SSL *promoted_ssl;
-static char fed[PASTE_MAX_REQUEST_SIZE];
-static int fed_len = -1;
-static int fed_frees = -1;      /* conn_frees when the request was fed */
-
+/** add_connection(): it takes the stolen descriptor and TLS session, as
+ * s_bsd.c does, and the client's own reference on the Listener -- or, when
+ * refusing (throttled, z-lined), closes both and takes nothing. */
 void add_connection(struct Listener *lptr, int fd, void *ssl)
 {
-  assert_ptr_equal(lptr, &listener);
+  if (lptr == closed_listener)
+    promoted_on_closed++;       /* the real one writes into it */
+  if (refuse_promote) {
+    SSL_free(ssl);
+    close(fd);
+    refused_promotes++;
+    return;
+  }
+  if (lptr != closed_listener)
+    ++lptr->ref_count;
   promoted_fd = fd;
   promoted_ssl = ssl;
   LocalClientArray[fd] = &promoted;
@@ -403,17 +469,23 @@ static int case_setup(void **state)
   CurrentTime = time(NULL);
   conn_mem = NULL;
   conn_frees = freed_in_use = timeouts = websocket_on = 0;
-  memset(&listener, 0, sizeof(listener));
+  listener = calloc(1, sizeof(*listener));
+  assert_non_null(listener);
+  FlagSet(&listener->flags, LISTEN_ACTIVE);
+  closed_listener = NULL;
+  listener_closes = bad_releases = 0;
   peer = -1;
   client = NULL;
   promoted_fd = fed_len = fed_frees = -1;
   promoted_ssl = NULL;
+  refuse_promote = refused_promotes = promoted_on_closed = 0;
   return 0;
 }
 
 static int case_teardown(void **state)
 {
   (void)state;
+  paste_listener_shutdown();    /* a conn a failed case left behind */
   if (client)
     SSL_free(client);
   if (peer >= 0)
@@ -424,6 +496,8 @@ static int case_teardown(void **state)
     LocalClientArray[promoted_fd] = NULL;
     close(promoted_fd);
   }
+  free(listener);
+  listener = NULL;
   return 0;
 }
 
@@ -534,7 +608,7 @@ static void refused_registration_frees_the_conn_at_once(void **state)
   fd = open("/dev/null", O_RDWR);       /* epoll refuses it: EPERM */
   assert_true(fd >= 0);
 
-  paste_accept_connection(&listener, fd);
+  paste_accept_connection(listener, fd);
   assert_int_equal(fcntl(fd, F_GETFD), -1);
   assert_int_equal(errno, EBADF);
   assert_conn_gone();
@@ -585,7 +659,7 @@ static void websocket_upgrade_replays_the_request_before_the_free(void **state)
 
   (void)state;
   websocket_on = 1;
-  FlagSet(&listener.flags, LISTEN_WEBSOCKET);
+  FlagSet(&listener->flags, LISTEN_WEBSOCKET);
   fd = paste_open();
   tls_connect();
   tls_send(upgrade);
@@ -599,6 +673,100 @@ static void websocket_upgrade_replays_the_request_before_the_free(void **state)
   assert_int_equal(fed_len, (int)sizeof(upgrade) - 1);
   assert_memory_equal(fed, upgrade, sizeof(upgrade) - 1);
   assert_true(fcntl(fd, F_GETFD) >= 0); /* the client's now, still open */
+  assert_conn_gone();
+}
+
+/* A conn holds a reference on its Listener from its accept to its close,
+ * as a client does (STATS P counts it). */
+static void conn_holds_a_reference_on_its_listener(void **state)
+{
+  (void)state;
+  paste_open();
+  assert_int_equal(listener->ref_count, 1);
+
+  CurrentTime += REQUEST_TIMEOUT;
+  timer_run();
+  assert_int_equal(listener->ref_count, 0);
+  assert_conn_gone();
+  assert_int_equal(listener_closes, 0);
+}
+
+/* A rehash that drops the port while a request is in flight: the Listener
+ * stays until the conn closes, and the conn's close then closes it. */
+static void removed_port_lasts_until_its_conn_closes(void **state)
+{
+  (void)state;
+  paste_open();
+
+  rehash_drops_the_port();
+  assert_int_equal(listener_closes, 0);
+  assert_non_null(listener);
+
+  CurrentTime += REQUEST_TIMEOUT;
+  timer_run();
+  assert_int_equal(listener_closes, 1);
+  assert_null(listener);
+  assert_conn_gone();
+}
+
+/* The port is dropped, then the conn sends a WebSocket upgrade: the
+ * promote reads the Listener and hands it to add_connection(), which takes
+ * the client's own reference.  Only then does the conn's go, so the
+ * Listener lasts until the client leaves. */
+static void websocket_upgrade_on_a_removed_port(void **state)
+{
+  static const char upgrade[] =
+    "GET / HTTP/1.1\r\nHost: paste.test\r\nUpgrade: websocket\r\n"
+    "Connection: Upgrade\r\n\r\n";
+  int fd, i;
+
+  (void)state;
+  websocket_on = 1;
+  FlagSet(&listener->flags, LISTEN_WEBSOCKET);
+  fd = paste_open();
+  tls_connect();
+
+  rehash_drops_the_port();
+  tls_send(upgrade);
+  for (i = 0; i < 10 && promoted_fd < 0 && !conn_frees; i++)
+    engine_pass();
+
+  assert_int_equal(promoted_on_closed, 0);
+  assert_int_equal(listener_closes, 0);
+  assert_int_equal(promoted_fd, fd);
+  assert_int_equal(fed_len, (int)sizeof(upgrade) - 1);
+  assert_conn_gone();           /* the client's reference alone */
+
+  release_listener(listener);   /* the client leaves */
+  assert_int_equal(listener_closes, 1);
+  assert_int_equal(bad_releases, 0);
+}
+
+/* The same, but add_connection() refuses the client: it takes no
+ * reference, so the conn's, given up after it, is the last, and closes
+ * the Listener. */
+static void refused_upgrade_on_a_removed_port_closes_it(void **state)
+{
+  static const char upgrade[] =
+    "GET / HTTP/1.1\r\nHost: paste.test\r\nUpgrade: websocket\r\n"
+    "Connection: Upgrade\r\n\r\n";
+  int i;
+
+  (void)state;
+  websocket_on = 1;
+  refuse_promote = 1;
+  FlagSet(&listener->flags, LISTEN_WEBSOCKET);
+  paste_open();
+  tls_connect();
+
+  rehash_drops_the_port();
+  tls_send(upgrade);
+  for (i = 0; i < 10 && !conn_frees; i++)
+    engine_pass();
+
+  assert_int_equal(promoted_on_closed, 0);
+  assert_int_equal(refused_promotes, 1);
+  assert_int_equal(listener_closes, 1);
   assert_conn_gone();
 }
 
@@ -625,6 +793,18 @@ int main(void)
       case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(
       websocket_upgrade_replays_the_request_before_the_free,
+      case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      conn_holds_a_reference_on_its_listener,
+      case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      removed_port_lasts_until_its_conn_closes,
+      case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      websocket_upgrade_on_a_removed_port,
+      case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      refused_upgrade_on_a_removed_port_closes_it,
       case_setup, case_teardown),
   };
 

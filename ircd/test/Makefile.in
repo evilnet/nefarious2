@@ -403,10 +403,12 @@ ircd_events_cmocka: $(IRCD_EVENTS_CMOCKA_OBJS)
 # ET_DESTROY of the two event generators inside it (its socket and its
 # request timer), never while one is still in use: a request timeout, a
 # failed handshake, a hangup, a refused registration, shutdown, a served
-# request and a WebSocket promote.  Includes ../paste_listener.c (so the
-# test sees the conn when it is freed) and links the real event core
-# (ircd_events_test.o, as above) and epoll engine; the TLS cases run a
-# real handshake over a socketpair, hence libssl.
+# request and a WebSocket promote; and it holds a reference on its Listener
+# until it closes, across a rehash that drops the port.  Includes
+# ../paste_listener.c (so the test sees the conn when it is freed) and
+# links the real event core (ircd_events_test.o, as above) and epoll
+# engine; the TLS cases run a real handshake over a socketpair, hence
+# libssl.
 paste_listener_cmocka.o: ${srcdir}/paste_listener_cmocka.c ../paste_listener.c
 	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ${srcdir}/paste_listener_cmocka.c
 
