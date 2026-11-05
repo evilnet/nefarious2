@@ -1430,6 +1430,10 @@ static void start_auth_query(struct AuthRequest* auth)
     if (IsUserPort(auth->client))
       sendheader(auth->client, REPORT_FAIL_ID);
     close(fd);
+    /* Nothing is registered (a refused socket_add() leaves the socket
+     * inactive): the teardown must neither close this number again nor
+     * socket_del() it. */
+    s_fd(&auth->socket) = -1;
     return;
   }
 
@@ -1979,6 +1983,9 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
     Debug((DEBUG_INFO, "Unable to register IAuth socket: %s", strerror(res)));
     close(s_io[1]);
     close(s_io[0]);
+    /* Refused, so not registered: iauth_disconnect() must neither close
+     * this number again nor socket_del() it. */
+    s_fd(i_socket(iauth)) = -1;
     return res;
   }
 
@@ -2014,9 +2021,11 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
     Debug((DEBUG_INFO, "Unable to register IAuth stderr: %s", strerror(res)));
     close(s_err[1]);
     close(s_err[0]);
+    s_fd(i_stderr(iauth)) = -1;   /* refused: as for i_socket above */
     socket_del(i_socket(iauth));
     close(s_io[1]);
     close(s_io[0]);
+    s_fd(i_socket(iauth)) = -1;   /* deleted and closed: not ours now */
     return res;
   }
 
@@ -2078,6 +2087,10 @@ int auth_restart(void)
   /* Need to initialize a new connection. */
   iauthnew = MyCalloc(1, sizeof(*iauthnew));
   msgq_init(i_sendQ(iauthnew));
+  /* No descriptors yet (0 is someone else's): until a spawn registers
+   * them, i_GetConnected() is false and iauth_disconnect() leaves them. */
+  s_fd(i_socket(iauthnew)) = -1;
+  s_fd(i_stderr(iauthnew)) = -1;
   /* Populate iauth's argv array. */
   iauthnew->i_argv = MyCalloc(iauth->i_argc + 1, sizeof(iauthnew->i_argv[0]));
   for (ii = 0; ii < iauth->i_argc; ++ii)
@@ -2129,6 +2142,8 @@ int auth_spawn(int argc, char *argv[])
   /* Need to initialize a new connection. */
   iauth = MyCalloc(1, sizeof(*iauth));
   msgq_init(i_sendQ(iauth));
+  s_fd(i_socket(iauth)) = -1;   /* no descriptors yet: as in auth_restart() */
+  s_fd(i_stderr(iauth)) = -1;
   /* Populate iauth's argv array. */
   iauth->i_argv = MyCalloc(argc + 1, sizeof(iauth->i_argv[0]));
   for (ii = 0; ii < argc; ++ii)

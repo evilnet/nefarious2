@@ -13,11 +13,16 @@
  * Now a failed interest or state change flags the socket in error and
  * leaves the ET_ERROR to socket_run_errors(), which every engine loop
  * calls once per pass, where no callback is on the stack.  A refused
- * registration is reported by socket_add()'s return value alone.
+ * registration is reported by socket_add()'s return value alone, and
+ * leaves the socket as it was: unlinked and inactive.  socket_del() of a
+ * socket that is not active (refused, or never added) asserts, and in a
+ * release build does nothing.
  *
  * This links the real event core and the real epoll engine.  A failure is
  * produced the way it happens in production: the file behind a registered
  * descriptor is replaced (dup2), so EPOLL_CTL_MOD on it fails with ENOENT.
+ * The event core's assert() comes here (events_assert.h), so a case can
+ * see one fire, or run past it as a release build does.
  */
 #include "config.h"
 
@@ -97,6 +102,22 @@ static int no_engine_init(int max_sockets)
   return 0;
 }
 struct Engine engine_poll = { "unused", no_engine_init, 0, 0, 0, 0, 0, 0 };
+
+/* The event core's assert() (events_assert.h).  A failed one fails the
+ * case, through mock_assert() so expect_assert_failure() can catch it --
+ * unless the case runs the core as a release build does (assert() compiled
+ * out): then it is only counted, and the code goes on past it. */
+static int release_build;       /* go on past a failed assert */
+static int assert_hits;         /* failed asserts in the event core */
+
+void events_assert(int ok, const char *expression, const char *file, int line)
+{
+  if (ok)
+    return;
+  assert_hits++;
+  if (!release_build)
+    mock_assert(0, expression, file, line);
+}
 
 /* ------------------------------------------------------------------ */
 /* Sockets under test                                                  */
@@ -273,7 +294,8 @@ static void deleted_socket_gets_no_deferred_error(void **state)
 }
 
 /* A registration the engine refuses is reported by socket_add()'s return
- * value alone: no callback, nothing left linked, nothing deferred. */
+ * value alone: no callback, nothing left linked, nothing deferred -- and
+ * the socket is not active, as it was before the call. */
 static void refused_registration_reports_by_return_value_only(void **state)
 {
   struct probe p;
@@ -292,9 +314,170 @@ static void refused_registration_reports_by_return_value_only(void **state)
   assert_int_equal(added, 0);
   assert_int_equal(p.calls, 0);
   assert_null(p.sock.s_header.gh_prev_p);   /* not left in the list */
+  assert_false(s_active(&p.sock));          /* nor read as registered */
   socket_run_errors();
   assert_int_equal(p.calls, 0);
   close(fd);
+}
+
+/* The bouncer's revive moves a connection's descriptor onto another
+ * Socket: socket_del_keepfd() drops the first registration while the fd
+ * is still open, so registering the same number for the second socket is
+ * not refused (EEXIST).  The first socket is destroyed once; the fd stays
+ * open. */
+static void transplant_moves_a_descriptor_to_another_socket(void **state)
+{
+  struct probe a, b;
+  int fd;
+
+  (void)state;
+  probe_open(&a);
+  fd = s_fd(&a.sock);
+
+  socket_del_keepfd(&a.sock);
+  assert_int_equal(a.destroyed, 1);
+  assert_int_equal(s_fd(&a.sock), -1);
+  assert_true(fcntl(fd, F_GETFD) >= 0);     /* not closed */
+
+  memset(&b, 0, sizeof(b));
+  b.peer = a.peer;
+  assert_true(socket_add(&b.sock, probe_cb, &b, SS_CONNECTED,
+                         SOCK_EVENT_READABLE, fd));
+  assert_true(s_active(&b.sock));
+  assert_int_equal(b.calls + b.destroyed, 0);
+  assert_int_equal(a.destroyed, 1);
+  probe_close(&b);
+}
+
+/* The same move, refused: the engine will not take the descriptor (here
+ * the file behind the number is one epoll refuses, EPERM; in production
+ * ENOMEM or ENOSPC).  The target socket is left as it was -- inactive,
+ * unlinked, no callback -- so the caller can hand the descriptor back,
+ * and a later attempt registers the socket afresh instead of taking it
+ * for a registered one (bounce_transplant_register() picks socket_add() or
+ * socket_reattach() by GEN_ACTIVE). */
+static void refused_transplant_leaves_the_target_inactive(void **state)
+{
+  struct probe a, b;
+  int fd, devnull, added, err, sv[2];
+
+  (void)state;
+  probe_open(&a);
+  fd = s_fd(&a.sock);
+  socket_del_keepfd(&a.sock);
+  assert_int_equal(a.destroyed, 1);
+
+  devnull = open("/dev/null", O_RDONLY);
+  assert_true(devnull >= 0);
+  assert_int_equal(dup2(devnull, fd), fd);
+  close(devnull);
+
+  memset(&b, 0, sizeof(b));
+  b.in_call = 1;
+  errno = 0;
+  added = socket_add(&b.sock, probe_cb, &b, SS_CONNECTED,
+                     SOCK_EVENT_READABLE, fd);
+  err = errno;
+  b.in_call = 0;
+
+  assert_int_equal(added, 0);
+  assert_int_equal(err, EPERM);             /* the caller can log why */
+  assert_false(s_active(&b.sock));
+  assert_null(b.sock.s_header.gh_prev_p);
+  assert_int_equal(b.calls + b.destroyed, 0);
+  assert_int_equal(a.destroyed, 1);         /* the source's, once */
+  socket_run_errors();
+  assert_int_equal(b.calls, 0);
+  close(fd);
+  close(a.peer);
+
+  /* The next attempt registers it afresh. */
+  assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+  b.peer = sv[1];
+  assert_true(socket_add(&b.sock, probe_cb, &b, SS_CONNECTED,
+                         SOCK_EVENT_READABLE, sv[0]));
+  assert_true(s_active(&b.sock));
+  assert_non_null(b.sock.s_header.gh_prev_p);
+  probe_close(&b);
+}
+
+/* What a socket_del() of an inactive socket must leave: the socket's flags
+ * as they were, no callback run, and the descriptor number's owner still
+ * registered -- an interest change on it reaches the engine and succeeds
+ * (after an EPOLL_CTL_DEL of the number it fails with ENOENT). */
+static void assert_nothing_deleted(struct probe *p, unsigned int flags,
+                                   struct probe *owner)
+{
+  assert_int_equal(p->sock.s_header.gh_flags, flags);
+  assert_int_equal(p->calls + p->destroyed, 0);
+  probe_arm_write(owner);
+  assert_false(owner->sock.s_header.gh_flags & GEN_ERROR);
+  socket_events(&owner->sock, SOCK_ACTION_DEL | SOCK_EVENT_WRITABLE);
+}
+
+/* socket_del() of a socket that is not active, as a release build runs it
+ * (it returns) and as a debug build does (the assert stops it before
+ * anything is done).  Either way nothing is deleted. */
+static void del_inactive(struct probe *p, struct probe *owner)
+{
+  unsigned int flags = p->sock.s_header.gh_flags;
+
+  assert_hits = 0;
+  release_build = 1;
+  socket_del(&p->sock);                                 /* release build */
+  release_build = 0;
+  assert_nothing_deleted(p, flags, owner);
+  assert_int_equal(assert_hits, 1);
+
+  expect_assert_failure(socket_del(&p->sock));          /* debug build */
+  assert_int_equal(assert_hits, 2);
+  assert_nothing_deleted(p, flags, owner);
+}
+
+/* The probes of the two cases below.  File-static, so a case that fails
+ * part-way leaves nothing on the event core's list pointing into a dead
+ * stack frame. */
+static struct probe inactive, owner;
+
+/* A socket the engine refused is not registered, so there is nothing to
+ * delete: no ET_DESTROY is owed, and its s_fd names a descriptor the
+ * caller has closed, which someone else may hold by now.  socket_del()
+ * must neither unregister that owner (EPOLL_CTL_DEL of the number) nor run
+ * the socket's callback. */
+static void deleting_a_refused_socket_does_nothing(void **state)
+{
+  int fd;
+
+  (void)state;
+  memset(&inactive, 0, sizeof(inactive));
+  fd = open("/dev/null", O_RDONLY);   /* epoll refuses it: EPERM */
+  assert_true(fd >= 0);
+  assert_false(socket_add(&inactive.sock, probe_cb, &inactive, SS_CONNECTED,
+                          SOCK_EVENT_READABLE, fd));
+  close(fd);                          /* as the caller does */
+
+  probe_open(&owner);                 /* the number's next owner */
+  assert_int_equal(s_fd(&owner.sock), fd);
+  assert_int_equal(s_fd(&inactive.sock), fd);
+
+  del_inactive(&inactive, &owner);
+  probe_close(&owner);
+}
+
+/* A socket never added: a zeroed struct, as a freshly allocated IAuth's
+ * or the resolver's before it opens one.  It has no callback, and its s_fd
+ * (0, or a number left from before) belongs to someone else.  socket_del()
+ * must not unregister that owner, nor run a destroy through a NULL
+ * callback. */
+static void deleting_a_socket_never_added_does_nothing(void **state)
+{
+  (void)state;
+  probe_open(&owner);
+  memset(&inactive, 0, sizeof(inactive));
+  s_fd(&inactive.sock) = s_fd(&owner.sock);
+
+  del_inactive(&inactive, &owner);
+  probe_close(&owner);
 }
 
 /* Moving a socket to a new descriptor drops the old descriptor's pending
@@ -359,6 +542,10 @@ int main(void)
     cmocka_unit_test(engine_loop_delivers_deferred_errors),
     cmocka_unit_test(deleted_socket_gets_no_deferred_error),
     cmocka_unit_test(refused_registration_reports_by_return_value_only),
+    cmocka_unit_test(transplant_moves_a_descriptor_to_another_socket),
+    cmocka_unit_test(refused_transplant_leaves_the_target_inactive),
+    cmocka_unit_test(deleting_a_refused_socket_does_nothing),
+    cmocka_unit_test(deleting_a_socket_never_added_does_nothing),
     cmocka_unit_test(reattach_starts_clean),
     cmocka_unit_test(errors_raised_while_delivering_are_delivered_too),
   };

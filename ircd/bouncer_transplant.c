@@ -30,11 +30,12 @@ int bounce_transplant_register(struct Socket *sock, EventCallBack call,
              : socket_reattach(sock, fd))
     return 1;
 
-  /* Refused: the socket as it was.  socket_add() reset the flags (with
-   * GEN_ACTIVE set) and left the error count alone, so the saved flags go
-   * back as they were.  socket_reattach() cleared GEN_ERROR and dropped an
-   * error still waiting for the loop together with its count: it is put
-   * back the same way, so the loop delivers it as it would have. */
+  /* Refused: the socket as it was.  socket_add() reset the flags (a held
+   * ghost's GEN_DESTROY with them) and left the error count alone, so the
+   * saved flags go back as they were.  socket_reattach() cleared GEN_ERROR
+   * and dropped an error still waiting for the loop together with its
+   * count: it is put back the same way, so the loop delivers it as it
+   * would have. */
   err = errno;
   sock->s_header.gh_flags = *fresh ? flags : (flags & ~GEN_ERR_PENDING);
   s_fd(sock) = old_fd;

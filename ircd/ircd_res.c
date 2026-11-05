@@ -41,10 +41,12 @@
 #include "ircd_reslib.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <errno.h>
 #include <string.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 #if (CHAR_BIT != 8)
 #error this code needs to be able to address individual octets 
@@ -173,6 +175,33 @@ res_ourserver(const struct irc_sockaddr *inp)
   return(0);
 }
 
+/** Open and register one of the resolver's UDP sockets.
+ * When the engine refuses the registration, nothing is kept: the
+ * descriptor is closed and \a sock keeps no number, so send_res_msg()
+ * skips the family (it sends only on an active socket) and the next
+ * restart_resolver() (a rehash) tries again.
+ * @param[in,out] sock Resolver socket to open.
+ * @param[in] local Local address to bind.
+ * @param[in] port_name Description for os_socket()'s error log.
+ * @param[in] family Address family.
+ */
+static void
+res_open_socket(struct Socket *sock, const struct irc_sockaddr *local,
+                const char *port_name, int family)
+{
+  int fd = os_socket(local, SOCK_DGRAM, port_name, family);
+
+  if (fd < 0)
+    return;
+  if (!socket_add(sock, res_readreply, NULL, SS_DATAGRAM,
+                  SOCK_EVENT_READABLE, fd)) {
+    log_write(LS_RESOLVER, L_ERROR, 0, "%s: cannot register: %s",
+              port_name, strerror(errno));
+    close(fd);
+    s_fd(sock) = -1;
+  }
+}
+
 /** Start (or re-start) resolver.
  * This means read resolv.conf, initialize the list of pending
  * requests, open the resolver socket and initialize its timeout.
@@ -200,22 +229,14 @@ restart_resolver(void)
 
   /* If we need an IPv4 socket, and don't have one, open it. */
   if (need_v4 && !s_active(&res_socket_v4))
-  {
-    int fd = os_socket(&VirtualHost_dns_v4, SOCK_DGRAM, "Resolver UDPv4 socket", AF_INET);
-    if (fd >= 0)
-      socket_add(&res_socket_v4, res_readreply, NULL,
-                 SS_DATAGRAM, SOCK_EVENT_READABLE, fd);
-  }
+    res_open_socket(&res_socket_v4, &VirtualHost_dns_v4,
+                    "Resolver UDPv4 socket", AF_INET);
 
 #ifdef AF_INET6
   /* If we need an IPv6 socket, and don't have one, open it. */
   if (need_v6 && !s_active(&res_socket_v6))
-  {
-    int fd = os_socket(&VirtualHost_dns_v6, SOCK_DGRAM, "Resolver UDPv6 socket", AF_INET6);
-    if (fd >= 0)
-      socket_add(&res_socket_v6, res_readreply, NULL,
-                 SS_DATAGRAM, SOCK_EVENT_READABLE, fd);
-  }
+    res_open_socket(&res_socket_v6, &VirtualHost_dns_v6,
+                    "Resolver UDPv6 socket", AF_INET6);
 #endif
 
   if (s_active(&res_socket_v4) || s_active(&res_socket_v6))
@@ -412,8 +433,12 @@ send_res_msg(const char *msg, int len, int rcount)
     max_queries = 1;
 
   for (i = 0; i < max_queries; i++) {
-    int fd = irc_in_addr_is_ipv4(&irc_nsaddr_list[i].addr) ? s_fd(&res_socket_v4) : s_fd(&res_socket_v6);
-    if (os_sendto_nonb(fd, msg, len, NULL, 0, &irc_nsaddr_list[i]) == IO_SUCCESS)
+    struct Socket *sock = irc_in_addr_is_ipv4(&irc_nsaddr_list[i].addr) ? &res_socket_v4 : &res_socket_v6;
+    /* No socket for this family (os_socket() failed, or the engine refused
+     * it): its s_fd is no descriptor of ours, so do not send on it. */
+    if (!s_active(sock))
+      continue;
+    if (os_sendto_nonb(s_fd(sock), msg, len, NULL, 0, &irc_nsaddr_list[i]) == IO_SUCCESS)
       ++sent;
   }
 

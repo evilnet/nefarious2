@@ -8588,10 +8588,12 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * held through close_connection() is inactive too (its ET_DESTROY ran).
    * bounce_transplant_register() uses socket_add for an inactive socket,
    * socket_reattach for an active one, and on a refusal leaves the
-   * ghost's socket as it was: its fd (-1) and its flags.  The event core
-   * does not: a refused socket_add() leaves GEN_ACTIVE set, and the next
-   * revive would take the socket for a registered one (socket_reattach()
-   * for a socket on no list, with no FREEFLAG_SOCKET; #138's F6-b).
+   * ghost's socket as it was: its fd (-1) and its flags.  A refused
+   * socket_add() leaves the socket inactive and unlinked itself, but with
+   * its flags reset and the refused fd in s_fd; the restore puts back
+   * what the hold left, and the next revive again takes socket_add(), not
+   * socket_reattach() of a socket on no list with no FREEFLAG_SOCKET
+   * (#138's F6-b).
    *
    * Nothing is queued in this synchronous event model: a socket's
    * ET_DESTROY runs inside socket_del*(), or as the socket's own running

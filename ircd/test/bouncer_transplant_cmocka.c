@@ -7,9 +7,10 @@
  * (bounce_transplant_register: socket_add() for a socket that is not
  * active, socket_reattach() for one that is).  Only that registration can
  * fail.  When it does, the ghost's socket must be left as it was, or the
- * next revive of the same ghost picks the wrong call (#138's F6-b): the
- * event core's refused socket_add() leaves GEN_ACTIVE set, so the ghost
- * would read as registered and go down socket_reattach().
+ * next revive of the same ghost picks the wrong call (#138's F6-b): a
+ * refused socket_add() that left GEN_ACTIVE set (the event core's did,
+ * until it learned to clear it) makes the ghost read as registered, and
+ * the next revive goes down socket_reattach().
  *
  * This links the real event core with a fake engine that keeps a table of
  * registered descriptors (a second registration of one is refused with

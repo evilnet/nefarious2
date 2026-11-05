@@ -386,8 +386,14 @@ kc_webhook_sig_cmocka: $(KC_WEBHOOK_SIG_CMOCKA_OBJS)
 # ircd_events tests - an engine error never runs a socket's callback
 # inside the socket_add/socket_events/socket_state call that caused it.
 # Links the real event core and epoll engine, and makes real epoll calls
-# fail; the few ircd symbols around them are stubbed in the test.
-IRCD_EVENTS_CMOCKA_OBJS = ircd_events_cmocka.o test_stub.o ../ircd_events.o ../engine_epoll.o
+# fail; the few ircd symbols around them are stubbed in the test.  The
+# event core is compiled with its assert() routed to the test
+# (events_assert.h), so a case can see an assert fire, or run past it as a
+# release build does.
+ircd_events_test.o: ../ircd_events.c ../../include/ircd_events.h events_assert.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -include ${srcdir}/events_assert.h -c -o $@ ../ircd_events.c
+
+IRCD_EVENTS_CMOCKA_OBJS = ircd_events_cmocka.o test_stub.o ircd_events_test.o ../engine_epoll.o
 ircd_events_cmocka: $(IRCD_EVENTS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_EVENTS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 

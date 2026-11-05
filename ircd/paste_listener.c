@@ -975,6 +975,14 @@ static void paste_conn_free(struct paste_conn *conn)
     conn->response = NULL;
   }
 
+  /* A socket the engine refused (paste_accept_connection()) was never
+   * registered and is not active: no ET_DESTROY comes for it, and
+   * socket_del() must not be asked for one. */
+  if (!s_active(&conn->socket)) {
+    MyFree(conn);
+    return;
+  }
+
   /* socket_del marks the socket GEN_DESTROY.  If gh_ref > 0 (we're
    * inside an event callback), ET_DESTROY is deferred until the
    * engine decrements gh_ref to 0.  The conn struct stays alive
