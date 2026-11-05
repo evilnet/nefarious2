@@ -7471,25 +7471,6 @@ static int search_hides(const char *target, const char *msgid, int *unread)
   return 1;
 }
 
-/** Case-insensitive substring, the ircd's case mapping. */
-static const char *search_strcasestr(const char *hay, const char *needle)
-{
-  size_t nlen = strlen(needle);
-  const char *h;
-
-  if (nlen == 0)
-    return hay;
-  for (h = hay; *h; h++) {
-    size_t i;
-    for (i = 0; i < nlen && h[i]; i++)
-      if (ToLower(h[i]) != ToLower(needle[i]))
-        break;
-    if (i == nlen)
-      return h;
-  }
-  return NULL;
-}
-
 /** Walk hook: the presence decision first (it may seek), then the
  * window floor, the row type, the selectors and last the redaction. */
 static int search_row_hook(const struct HistoryMessage *msg, int reverse,
@@ -7520,7 +7501,7 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
 
   if (sm->text) {
     const char *body = msg->dyn_content ? msg->dyn_content : msg->content;
-    if (!body || !body[0] || !search_strcasestr(body, sm->text))
+    if (!body || !body[0] || !ircd_utf8_strcasestr(body, sm->text))
       return 0;
   }
 
