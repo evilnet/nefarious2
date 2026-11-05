@@ -412,6 +412,20 @@ int db_cf_stats(struct db_env *env, struct db_cf *cf, struct db_cf_stats *out)
   return DB_OK;
 }
 
+/* The fake has one numeric property: RocksDB's background-error count,
+ * 0 (the fake never fails in the background). */
+int db_property_u64(struct db_env *env, struct db_cf *cf, const char *name,
+                    uint64_t *out)
+{
+  (void)cf;
+  if (!env || !name || !out)
+    return DB_ERR_OTHER;
+  if (strcmp(name, "rocksdb.background-errors") != 0)
+    return DB_NOTFOUND;
+  *out = 0;
+  return DB_OK;
+}
+
 int db_flush_cf(struct db_env *env, struct db_cf *cf, int wait)
 {
   (void)wait;

@@ -661,6 +661,17 @@ int db_cf_stats(struct db_env *env, struct db_cf *cf, struct db_cf_stats *out)
   return DB_OK;
 }
 
+int db_property_u64(struct db_env *env, struct db_cf *cf, const char *name,
+                    uint64_t *out)
+{
+  int rc;
+  if (!env || !env->db || !name || !out)
+    return DB_ERR_OTHER;
+  rc = cf ? rocksdb_property_int_cf(env->db, cf->handle, name, out)
+          : rocksdb_property_int(env->db, name, out);
+  return rc == 0 ? DB_OK : DB_NOTFOUND;
+}
+
 /* -------------------------------------------------------------------- */
 /* Column family lifecycle                                              */
 /* -------------------------------------------------------------------- */

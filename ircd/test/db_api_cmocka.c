@@ -512,6 +512,28 @@ static void test_flush_cf_returns(void **state)
 #endif
 }
 
+/* db_property_u64: a numeric backend property.  history.c polls
+ * "rocksdb.background-errors" each trim tick; RocksDB counts background
+ * errors on the default CF's stats, so the poll reads it with cf NULL.
+ * A healthy env reports 0 (through any CF); a property the backend does
+ * not have is DB_NOTFOUND. */
+static void test_property_u64(void **state)
+{
+  uint64_t v;
+  (void)state;
+  put(B("a"));
+
+  v = 12345;
+  assert_int_equal(db_property_u64(env, NULL, "rocksdb.background-errors", &v), DB_OK);
+  assert_int_equal(0, v);
+  v = 12345;
+  assert_int_equal(db_property_u64(env, cf, "rocksdb.background-errors", &v), DB_OK);
+  assert_int_equal(0, v);
+  assert_int_equal(db_property_u64(env, NULL, "rocksdb.no-such-property", &v), DB_NOTFOUND);
+  assert_int_not_equal(db_property_u64(env, NULL, NULL, &v), DB_OK);
+  assert_int_not_equal(db_property_u64(env, NULL, "rocksdb.background-errors", NULL), DB_OK);
+}
+
 /* ------------------------------------------------------------------ */
 /* Real-backend-only: snapshot isolation through a bounded iterator    */
 /* ------------------------------------------------------------------ */
@@ -616,6 +638,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_bounded_iter_prefix_lookups, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_bounded_iter_skip_limit, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_flush_cf_returns, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_property_u64, test_setup, test_teardown),
 #ifdef DB_API_REAL
     cmocka_unit_test_setup_teardown(test_bounded_iter_snapshot, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_deletion_heavy_cfs_open, test_setup, test_teardown),

@@ -14,6 +14,10 @@
 #ifndef INCLUDED_db_types_h
 #include "db_types.h"
 #endif
+#ifndef INCLUDED_stdint_h
+#include <stdint.h>
+#define INCLUDED_stdint_h
+#endif
 
 /** Per-env tuning hints.  Not every backend respects every field; the
  * libmdbx backend uses size_floor/size_max for mdbx_env_set_geometry,
@@ -170,6 +174,17 @@ struct db_cf_stats {
 };
 extern int db_cf_stats(struct db_env *env, struct db_cf *cf,
                        struct db_cf_stats *out);
+
+/** Read the numeric backend property @a name of @a cf into *@a out;
+ * @a cf NULL reads it on the env's default CF.  RocksDB keeps its
+ * DB-wide counters there -- "rocksdb.background-errors", the failed
+ * background flushes and compactions since the env opened (a store
+ * stuck after one fails every write), is bumped on the default CF's
+ * stats only -- so read those with @a cf NULL.  RocksDB:
+ * rocksdb_property_int / rocksdb_property_int_cf.
+ * Returns DB_OK, DB_NOTFOUND (no such numeric property), or DB_ERR_*. */
+extern int db_property_u64(struct db_env *env, struct db_cf *cf,
+                           const char *name, uint64_t *out);
 
 /** Reap stale reader-table slots after an unclean shutdown.  libmdbx-
  * specific; RocksDB no-op.  Called from history.c startup recovery. */
