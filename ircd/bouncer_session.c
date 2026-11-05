@@ -8797,6 +8797,12 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   con_ws_txrem_pos(ghost_con) = con_ws_txrem_pos(temp_con);
   con_ws_txrem(temp_con) = NULL;
   con_ws_txrem_len(temp_con) = con_ws_txrem_pos(temp_con) = 0;
+  /* So does whether a Close went out: the ghost's mark is its old
+   * socket's (the hold's farewell), and with it kept the new socket could
+   * never send its own Close (websocket_send_close() sends one per
+   * connection). */
+  con_ws_close_sent(ghost_con) = con_ws_close_sent(temp_con);
+  con_ws_close_sent(temp_con) = 0;
 
   /* Step 8: Copy CAP state from temp to ghost */
   memcpy(con_capab(ghost_con), con_capab(temp_con), sizeof(struct CapSet));

@@ -14,6 +14,16 @@
  *   - websocket_frag_feed() reassembling fragmented messages: a message
  *     of exactly WS_MAX_PAYLOAD (whose NUL used to land past the buffer),
  *     overflow, a continuation with no message started, and UTF-8.
+ *   - One Close per connection (§5.5.1): after a refusal's coded Close,
+ *     or the answer to a client's Close, the farewell Close 1000 that
+ *     exit_client() and a bouncer hold send is dropped; a plain exit
+ *     still sends its one Close.
+ *   - RFC 6455 framing refusals: a control frame without FIN is a
+ *     decode error (§5.5); websocket_frag_feed() answers a TEXT/BINARY
+ *     frame inside a fragmented message and an orphan continuation with
+ *     Close 1002 (§5.4), a reassembled TEXT message that is not UTF-8
+ *     with Close 1007 (§8.1), and a reassembly past WS_MAX_PAYLOAD with
+ *     Close 1009.
  *
  * websocket.c is included directly (like ircd_cloaking_cmocka.c) with
  * stubs for feature_str(), ircd_snprintf() and os_send_nonb().
@@ -87,9 +97,11 @@ int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
   return ret;
 }
 
-/* Capture whatever websocket_handshake() writes to the (plain) socket */
+/* Capture whatever websocket_handshake() writes to the (plain) socket:
+ * the last write in sent_buf, and how many writes there were. */
 static char sent_buf[1024];
 static int sent_len;
+static int sent_count;
 
 IOResult os_send_nonb(int fd, const char *buf, unsigned int length,
                       unsigned int *count_out)
@@ -100,6 +112,7 @@ IOResult os_send_nonb(int fd, const char *buf, unsigned int length,
   memcpy(sent_buf, buf, length);
   sent_buf[length] = '\0';
   sent_len = length;
+  sent_count++;
   *count_out = length;
   return IO_SUCCESS;
 }
@@ -113,6 +126,7 @@ static void setup_client(struct Client *cli, struct Connection *con)
   cli_connect(cli) = con;
   strcpy(cli_sockhost(cli), "test.host");
   sent_len = 0;
+  sent_count = 0;
   sent_buf[0] = '\0';
 }
 
@@ -721,6 +735,293 @@ static void test_frag_text_utf8(void **state)
                    WS_FRAG_DONE);
 }
 
+/* ========== RFC 6455 framing refusals ========== */
+
+/* As build_frame(), with the FIN bit given: 0 marks a fragment. */
+static int build_frame_fin(unsigned char *frame, int opcode, int plen, int fin)
+{
+  int len = build_frame(frame, opcode, plen);
+
+  if (!fin)
+    frame[0] &= ~WS_FIN;
+  return len;
+}
+
+/* The last write to the socket was a Close frame with status 'code'. */
+static void assert_close_sent(int code)
+{
+  assert_true(sent_len >= 4);
+  assert_int_equal((unsigned char)sent_buf[0], WS_FIN | WS_OPCODE_CLOSE);
+  assert_int_equal((unsigned char)sent_buf[1], sent_len - 2);
+  assert_int_equal(((unsigned char)sent_buf[2] << 8) | (unsigned char)sent_buf[3],
+                   code);
+}
+
+/* §5.5: control frames are never fragmented.  CLOSE, PING and PONG
+ * without FIN are a protocol error for the decoder (the caller answers
+ * Close 1002); with FIN they decode.  A data frame without FIN is still
+ * a fragment.  Before, a control frame without FIN decoded as if it
+ * were complete. */
+static void test_decode_fragmented_control_refused(void **state)
+{
+  static const int ctl[] = { WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG };
+  static const int data[] = { WS_OPCODE_TEXT, WS_OPCODE_BINARY,
+                              WS_OPCODE_CONTINUATION };
+  unsigned char frame[64];
+  char payload[WS_MAX_PAYLOAD + 2];
+  int len, plen, opcode, is_fin, i;
+  (void)state;
+
+  for (i = 0; i < 3; i++) {
+    len = build_frame_fin(frame, ctl[i], 2, 0);
+    assert_int_equal(websocket_decode_frame(frame, len, payload, sizeof(payload),
+                                            &plen, &opcode, &is_fin), -1);
+    len = build_frame_fin(frame, ctl[i], 2, 1);
+    assert_int_equal(websocket_decode_frame(frame, len, payload, sizeof(payload),
+                                            &plen, &opcode, &is_fin), len);
+    assert_int_equal(opcode, ctl[i]);
+    assert_int_equal(is_fin, 1);
+  }
+  for (i = 0; i < 3; i++) {
+    len = build_frame_fin(frame, data[i], 5, 0);
+    assert_int_equal(websocket_decode_frame(frame, len, payload, sizeof(payload),
+                                            &plen, &opcode, &is_fin), len);
+    assert_int_equal(opcode, data[i]);
+    assert_int_equal(is_fin, 0);
+    assert_int_equal(plen, 5);
+  }
+}
+
+/* §5.4: once a fragmented message has started, only its CONTINUATION
+ * frames may follow (control frames never reach websocket_frag_feed).
+ * A TEXT or BINARY frame, with FIN or without, is refused with Close
+ * 1002.  Before, one without FIN silently restarted the reassembly and
+ * one with FIN was delivered on its own past the half-built message. */
+static void test_frag_data_frame_mid_message(void **state)
+{
+  static const int data[] = { WS_OPCODE_TEXT, WS_OPCODE_BINARY };
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  int i, fin;
+  (void)state;
+
+  for (i = 0; i < 2; i++) {
+    for (fin = 0; fin <= 1; fin++) {
+      setup_client(&cli, &con);
+      assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "PRIV", 4,
+                                           &msg, &msg_len), WS_FRAG_MORE);
+      assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
+                                           "MSG", 3, &msg, &msg_len),
+                       WS_FRAG_MORE);
+      assert_int_equal(sent_len, 0);
+      assert_int_equal(websocket_frag_feed(&cli, data[i], fin, "QUIT", 4,
+                                           &msg, &msg_len),
+                       WS_FRAG_INTERLEAVED);
+      assert_close_sent(1002);
+    }
+  }
+}
+
+/* A new message after a completed one is not interleaving: it starts a
+ * fresh reassembly and no Close goes out. */
+static void test_frag_new_message_after_done(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "a", 1,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "b", 1, &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, "c", 1,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "d", 1, &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(msg_len, 2);
+  assert_memory_equal(msg, "cd", 3);
+  assert_int_equal(sent_len, 0);
+}
+
+/* A reassembly past WS_MAX_PAYLOAD is answered with Close 1009, as a
+ * single frame over the limit is (WS_DECODE_TOOBIG), whether the last
+ * fragment or one in the middle tips it over. */
+static void test_frag_overflow_sends_1009(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  fill_src();
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, frag_src,
+                                       WS_MAX_PAYLOAD, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(sent_len, 0);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "x", 1, &msg, &msg_len),
+                   WS_FRAG_OVERFLOW);
+  assert_close_sent(1009);
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, frag_src,
+                                       WS_MAX_PAYLOAD / 2, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
+                                       frag_src, WS_MAX_PAYLOAD / 2,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(sent_len, 0);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
+                                       "x", 1, &msg, &msg_len),
+                   WS_FRAG_OVERFLOW);
+  assert_close_sent(1009);
+}
+
+/* §5.4: a CONTINUATION with no message started is answered with Close
+ * 1002, on a fresh connection and after a message has completed. */
+static void test_frag_orphan_sends_1002(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "QUIT", 4, &msg, &msg_len),
+                   WS_FRAG_ORPHAN);
+  assert_close_sent(1002);
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "a", 1,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "b", 1, &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(sent_len, 0);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
+                                       "c", 1, &msg, &msg_len),
+                   WS_FRAG_ORPHAN);
+  assert_close_sent(1002);
+}
+
+/* §8.1: a reassembled TEXT message that is not UTF-8 is answered with
+ * Close 1007 (§7.4.1, data inconsistent with the message type).  BINARY
+ * carries any bytes, and valid UTF-8 split across frames is fine: no
+ * Close for either. */
+static void test_frag_badutf8_sends_1007(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "ok \xC3", 4,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "\xA9", 1, &msg, &msg_len),
+                   WS_FRAG_DONE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, "bad \xFF", 5,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "", 0, &msg, &msg_len), WS_FRAG_DONE);
+  assert_int_equal(sent_len, 0);
+
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "bad \xFF", 5,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "", 0, &msg, &msg_len),
+                   WS_FRAG_BADUTF8);
+  assert_close_sent(1007);
+}
+
+/* ========== One Close per connection (RFC 6455 §5.5.1) ========== */
+
+/* A refusal's coded Close is the only one: the farewell Close 1000 that
+ * exit_client() sends every WebSocket client on the way out (and a
+ * bouncer hold's, when the session holds) is dropped after it.  Before,
+ * the client got the coded Close and then a 1000. */
+static void test_close_once_after_refusal(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  /* A refusal websocket_frag_feed() answers itself */
+  fill_src();
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, frag_src,
+                                       WS_MAX_PAYLOAD, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "x", 1, &msg, &msg_len),
+                   WS_FRAG_OVERFLOW);
+  assert_int_equal(sent_count, 1);
+  websocket_send_close(&cli, 1000, "WebSocket fragment overflow"); /* exit_client() */
+  websocket_send_close(&cli, 1000, "held");                        /* a hold */
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(1009);
+
+  /* A refusal read_packet answers (a decode error) */
+  setup_client(&cli, &con);
+  websocket_send_close(&cli, 1002, "Protocol error");
+  websocket_send_close(&cli, 1000, "WebSocket frame error");
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(1002);
+}
+
+/* A plain exit (a QUIT, a KILL, a hold) still sends its one Close. */
+static void test_close_once_normal_exit(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  (void)state;
+
+  setup_client(&cli, &con);
+  websocket_send_close(&cli, 1000, "Quit: bye");
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(1000);
+}
+
+/* A client's Close is answered with one Close echoing its status, and
+ * the farewell exit_client() (or a hold) sends after it is dropped.
+ * Before, the client got the echo and then a 1000. */
+static void test_close_once_client_initiated(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char status[2] = { 0x03, (char)0xE9 };  /* 1001 going away */
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, status, 2), 0);
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(1001);
+  websocket_send_close(&cli, 1000, "WebSocket closed");
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(1001);
+
+  /* A Close with no status is answered with an empty one, once. */
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, NULL, 0), 0);
+  assert_int_equal(sent_count, 1);
+  assert_int_equal((unsigned char)sent_buf[0], WS_FIN | WS_OPCODE_CLOSE);
+  assert_int_equal(sent_buf[1], 0);
+  websocket_send_close(&cli, 1000, "WebSocket closed");
+  assert_int_equal(sent_count, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -749,6 +1050,15 @@ int main(void)
     cmocka_unit_test(test_frag_overflow),
     cmocka_unit_test(test_frag_orphan_continuation),
     cmocka_unit_test(test_frag_text_utf8),
+    cmocka_unit_test(test_decode_fragmented_control_refused),
+    cmocka_unit_test(test_frag_data_frame_mid_message),
+    cmocka_unit_test(test_frag_new_message_after_done),
+    cmocka_unit_test(test_frag_overflow_sends_1009),
+    cmocka_unit_test(test_frag_orphan_sends_1002),
+    cmocka_unit_test(test_frag_badutf8_sends_1007),
+    cmocka_unit_test(test_close_once_after_refusal),
+    cmocka_unit_test(test_close_once_normal_exit),
+    cmocka_unit_test(test_close_once_client_initiated),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

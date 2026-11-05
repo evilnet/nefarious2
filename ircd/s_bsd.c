@@ -1236,6 +1236,8 @@ static int ws_frag_feed(struct Client *cptr, int opcode, int is_fin,
   char *msg;
   int msg_len;
 
+  /* On a refusal websocket_frag_feed() has already sent its Close frame
+   * (1002, 1007 or 1009); what is left is to drop the connection. */
   switch (websocket_frag_feed(cptr, opcode, is_fin, payload, len,
                               &msg, &msg_len)) {
   case WS_FRAG_MORE:
@@ -1246,7 +1248,9 @@ static int ws_frag_feed(struct Client *cptr, int opcode, int is_fin,
     return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket continuation without a message");
   case WS_FRAG_BADUTF8:
     return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket text frame: invalid UTF-8");
-  default:
+  case WS_FRAG_INTERLEAVED:
+    return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket data frame inside a fragmented message");
+  default: /* WS_FRAG_OVERFLOW */
     return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket fragment overflow");
   }
 }
@@ -1507,6 +1511,7 @@ ssl_read_again:
              * a frame the decoder accepts (WS_MAX_FRAME covers the largest
              * header plus WS_MAX_PAYLOAD), so treat it as a protocol error
              * rather than spin. */
+            websocket_send_close(cptr, 1002, "Protocol error");
             return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket frame error");
           }
           if (copy_len > src_len)
@@ -1521,8 +1526,11 @@ ssl_read_again:
           websocket_send_close(cptr, 1009, "Message too big");
           return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket message too big");
         } else if (consumed < 0) {
-          /* Frame error */
+          /* A protocol error (RFC 6455: RSV bits, a reserved opcode, an
+           * unmasked frame, a control frame over 125 bytes or without
+           * FIN): Close 1002 before dropping it */
           Debug((DEBUG_DEBUG, "WebSocket: Frame error (consumed=%d)", consumed));
+          websocket_send_close(cptr, 1002, "Protocol error");
           return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket frame error");
         }
 
@@ -1581,8 +1589,10 @@ ssl_read_again:
             Debug((DEBUG_DEBUG, "WebSocket: Autodetected mode from opcode %d, text=%d",
                    opcode, IsWSText(cptr)));
           }
-          if (!is_fin) {
-            /* First fragment - start the reassembly buffer */
+          if (!is_fin || cli_ws_frag_opcode(cptr) != 0) {
+            /* A first fragment starts the reassembly buffer.  A data
+             * frame while a fragmented message is in progress goes there
+             * too, and is refused (RFC 6455 §5.4). */
             if ((ret = ws_frag_feed(cptr, opcode, is_fin, ws_payload, ws_len)) != 1)
               return ret;
           } else {

@@ -97,7 +97,8 @@ extern int websocket_handshake_feed(struct Client *cptr, const char *data,
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
  * @return Number of bytes consumed from frame, 0 if incomplete, -1 on
- *   error, WS_DECODE_TOOBIG if the payload exceeds WS_MAX_PAYLOAD.
+ *   a protocol error (the caller answers Close 1002), WS_DECODE_TOOBIG if
+ *   the payload exceeds WS_MAX_PAYLOAD (Close 1009).
  */
 extern int websocket_decode_frame(const unsigned char *frame, int frame_len,
                                   char *payload, int payload_size,
@@ -129,10 +130,17 @@ extern int websocket_handle_control(struct Client *cptr, int opcode,
 #define WS_FRAG_OVERFLOW (-1)  /**< Message would exceed WS_MAX_PAYLOAD */
 #define WS_FRAG_ORPHAN   (-2)  /**< CONTINUATION with no message started */
 #define WS_FRAG_BADUTF8  (-3)  /**< Reassembled TEXT message is not UTF-8 */
+#define WS_FRAG_INTERLEAVED (-4) /**< TEXT/BINARY frame while a message is in progress */
 
 /** Add one data frame of a fragmented message to the client's
  * reassembly buffer.  Called for a non-FIN TEXT/BINARY frame (starts a
- * message) and for every CONTINUATION frame.
+ * message), for every CONTINUATION frame, and for any TEXT/BINARY frame
+ * while a message is in progress, which it refuses (RFC 6455 §5.4).
+ * Before it returns a refusal (a negative value) it has sent the client
+ * the Close frame RFC 6455 answers it with: 1002 Protocol Error for
+ * WS_FRAG_ORPHAN and WS_FRAG_INTERLEAVED, 1007 Invalid Payload Data for
+ * WS_FRAG_BADUTF8, 1009 Message Too Big for WS_FRAG_OVERFLOW.  The
+ * caller drops the connection.
  * @param[in] cptr Client connection.
  * @param[in] opcode Frame opcode.
  * @param[in] is_fin 1 if this frame ends the message.
@@ -147,13 +155,19 @@ extern int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
                                const char *payload, int len,
                                char **msg, int *msg_len);
 
-/** Send a WebSocket Close frame with a status code (best effort).
+/** Send an empty WebSocket PING (keepalive, best effort). */
+extern void websocket_send_ping(struct Client *cptr);
+/** Arm the periodic WebSocket keepalive PING timer. */
+extern void websocket_ping_timer_init(void);
+
+/** Send a WebSocket Close frame with a status code (best effort).  One
+ * Close goes out per connection (RFC 6455 §5.5.1): the first call, or
+ * the answer to the client's own Close, sends it; any later call (such as
+ * exit_client()'s farewell after a refusal's coded Close) sends nothing.
  * @param[in] cptr Client connection.
  * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big).
  * @param[in] reason Optional short reason text (truncated to 123 bytes).
  */
-extern void websocket_send_ping(struct Client *cptr);
-extern void websocket_ping_timer_init(void);
 extern void websocket_send_close(struct Client *cptr, int code,
                                  const char *reason);
 

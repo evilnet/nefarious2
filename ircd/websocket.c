@@ -562,12 +562,14 @@ int websocket_handshake_feed(struct Client *cptr, const char *data,
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
  * @return Number of bytes consumed from frame, 0 if incomplete, -1 on
- *   error, WS_DECODE_TOOBIG if the payload exceeds WS_MAX_PAYLOAD.
+ *   a protocol error (the caller answers Close 1002), WS_DECODE_TOOBIG if
+ *   the payload exceeds WS_MAX_PAYLOAD (Close 1009).
  *
  * RFC 6455 Compliance:
  * - §5.2: RSV1-3 bits MUST be 0 unless extension negotiated (we negotiate none)
  * - §5.1: Client-to-server frames MUST be masked
  * - §5.2: Reserved opcodes (0x03-0x07, 0x0B-0x0F) MUST cause connection failure
+ * - §5.5: Control frames MUST NOT be fragmented
  * - §5.5: Control frames MUST have payload length <= 125 bytes
  */
 int websocket_decode_frame(const unsigned char *frame, int frame_len,
@@ -611,6 +613,12 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
   }
 
   is_control = (*opcode >= 0x08);
+
+  /* RFC 6455 §5.5: control frames MUST NOT be fragmented */
+  if (is_control && !fin) {
+    Debug((DEBUG_DEBUG, "WebSocket: Control frame 0x%x without FIN - protocol error", *opcode));
+    return -1;
+  }
 
   /* Parse second byte: MASK + payload length */
   masked = (frame[1] & WS_MASK) ? 1 : 0;
@@ -807,10 +815,30 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
   }
 }
 
+/** Claim the connection's one Close frame (RFC 6455 §5.5.1: after
+ * sending a Close an endpoint sends nothing more).  The first Close on a
+ * socket carries the reason the client sees: a refusal's status, or the
+ * answer to the client's own Close.  The farewell Close 1000 that
+ * exit_client() and a bouncer hold send on the way out then goes
+ * nowhere.  Claimed on the attempt: a Close ws_send_raw() could not send
+ * (a TLS write blocked) is not retried by a later one in the same exit.
+ * @param[in] cptr Client connection.
+ * @return 1 if the caller sends the Close, 0 if one has already gone. */
+static int ws_claim_close(struct Client *cptr)
+{
+  struct Connection *con = cli_connect(cptr);
+
+  if (con_ws_close_sent(con))
+    return 0;
+  con_ws_close_sent(con) = 1;
+  return 1;
+}
+
 /** Send a WebSocket Close frame (RFC 6455 §5.5.1) with a status code.
  * Best effort, no error reporting: this is used immediately before the
  * connection is dropped so the client can tell a policy close (e.g.
- * 1009 Message Too Big) apart from a network failure (1006).
+ * 1009 Message Too Big) apart from a network failure (1006).  Only the
+ * first Close on a connection is sent; later calls do nothing.
  * @param[in] cptr Client connection.
  * @param[in] code Status code.
  * @param[in] reason Optional reason text (truncated to fit a control frame).
@@ -820,6 +848,8 @@ void websocket_send_close(struct Client *cptr, int code, const char *reason)
   unsigned char frame[2 + 125];
   int rlen = reason ? (int)strlen(reason) : 0;
 
+  if (!ws_claim_close(cptr))
+    return;
   if (rlen > 123)
     rlen = 123;  /* control frame payload <= 125 incl. 2-byte code */
   frame[0] = WS_FIN | WS_OPCODE_CLOSE;
@@ -903,7 +933,10 @@ int websocket_handle_control(struct Client *cptr, int opcode,
       return 1;
 
     case WS_OPCODE_CLOSE:
-      /* Client initiated close - send close response */
+      /* Client initiated close - send close response, unless a Close of
+       * ours has already gone out (it was the answer) */
+      if (!ws_claim_close(cptr))
+        return 0;
       response[0] = WS_FIN | WS_OPCODE_CLOSE;
       if (payload_len >= 2) {
         /* Echo back the status code */
@@ -931,15 +964,25 @@ int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
 
   if (opcode == WS_OPCODE_CONTINUATION) {
     /* RFC 6455 §5.4: a continuation only continues a started message */
-    if (cli_ws_frag_opcode(cptr) == 0)
+    if (cli_ws_frag_opcode(cptr) == 0) {
+      websocket_send_close(cptr, 1002, "Continuation without a message");
       return WS_FRAG_ORPHAN;
+    }
+  } else if (cli_ws_frag_opcode(cptr) != 0) {
+    /* RFC 6455 §5.4: a message's fragments are not interleaved with
+     * another message (only control frames may come between them) */
+    websocket_send_close(cptr, 1002, "Data frame inside a fragmented message");
+    return WS_FRAG_INTERLEAVED;
   } else {
     cli_ws_frag_opcode(cptr) = opcode;
     cli_ws_frag_len(cptr) = 0;
   }
 
-  if (len > WS_MAX_PAYLOAD - cli_ws_frag_len(cptr))
+  if (len > WS_MAX_PAYLOAD - cli_ws_frag_len(cptr)) {
+    /* The same answer as a single frame over the limit */
+    websocket_send_close(cptr, 1009, "Message too big");
     return WS_FRAG_OVERFLOW;
+  }
   memcpy(buf + cli_ws_frag_len(cptr), payload, len);
   cli_ws_frag_len(cptr) += len;
 
@@ -955,8 +998,11 @@ int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
   cli_ws_frag_len(cptr) = 0;
   cli_ws_frag_opcode(cptr) = 0;
 
-  /* RFC 6455 Section 8.1: text frames must be valid UTF-8 */
-  if (opcode == WS_OPCODE_TEXT && !string_is_valid_utf8(buf))
+  /* RFC 6455 Section 8.1: text frames must be valid UTF-8; §7.4.1 names
+   * the Close status for data that does not match its type */
+  if (opcode == WS_OPCODE_TEXT && !string_is_valid_utf8(buf)) {
+    websocket_send_close(cptr, 1007, "Invalid UTF-8");
     return WS_FRAG_BADUTF8;
+  }
   return WS_FRAG_DONE;
 }

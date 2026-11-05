@@ -535,6 +535,7 @@ struct Connection
   char*               con_ws_txrem;       /**< Unsent tail of a partially-written outbound WS frame (heap, on demand; plaintext sockets) */
   int                 con_ws_txrem_len;   /**< Total bytes in con_ws_txrem */
   int                 con_ws_txrem_pos;   /**< Bytes of con_ws_txrem already written */
+  int                 con_ws_close_sent;  /**< A Close frame has gone out on this socket (RFC 6455 §5.5.1: one per connection) */
   time_t              con_burst_gate_deadline; /**< Deadline at which to force-release a
                                                   burst gate held on a non-BXF-aware (legacy)
                                                   peer.  Only meaningful while IsBurstGated().
@@ -1144,6 +1145,8 @@ struct Client {
 #define con_ws_txrem(con)	((con)->con_ws_txrem)
 #define con_ws_txrem_len(con)	((con)->con_ws_txrem_len)
 #define con_ws_txrem_pos(con)	((con)->con_ws_txrem_pos)
+/** Non-zero once a WebSocket Close frame has gone out on this socket. */
+#define con_ws_close_sent(con)	((con)->con_ws_close_sent)
 /** Get per-class recv classifier state. */
 #define con_recv_state(con)     ((con)->con_recv_state)
 /** Get tag-region byte count for the in-flight wire line. */
