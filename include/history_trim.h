@@ -84,6 +84,14 @@
  *     the coverage floor (HTRIM_META_FLOOR, the newest ms that walk
  *     deleted) in the same batch; a walk that runs out of rows recounts
  *     the totals.
+ * Two known costs of the owner step (deferred): an owner whose total
+ * holds orphan bytes O (by_owner entries below the floor whose rows are
+ * gone, which a boot scan counted) loses live rows above the floor until
+ * the trim is met, before its walk reaches the orphans -- so it ends up
+ * to O below its share; and a row the owner stores while its walk below
+ * the start is still going lies above that walk, which then runs short
+ * by the row's bytes and has the totals counted again although they were
+ * right.
  * A pass start whose cutoff is past the floor clears it: retention then
  * covers what eviction took.  A drain's end hints compaction over every
  * column family it deleted from and arms the targets sweep.

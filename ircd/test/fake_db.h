@@ -69,6 +69,10 @@ extern void fake_db_set_busy(struct db_cf *cf, unsigned int imm_memtables,
 /** Make the NEXT db_flush_cf on this env return DB_ERR_IO.  One-shot. */
 extern void fake_db_fail_next_flush(struct db_env *env);
 
+/** Make the NEXT db_suggest_compact on @a cf return DB_ERR_IO (counted
+ * in fake_db_suggest_calls, its bounds not recorded).  One-shot. */
+extern void fake_db_fail_next_suggest(struct db_cf *cf);
+
 /** Tombstones in @a cf: rows deleted and not yet compacted away (a
  * delete leaves one in place, as on RocksDB; iterators step over them). */
 extern size_t fake_db_tombstones(const struct db_cf *cf);

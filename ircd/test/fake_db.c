@@ -53,6 +53,7 @@ struct db_cf {
   unsigned int suggest_calls;
   unsigned int flush_calls;
   unsigned int busy_imm, busy_l0;   /* fake_db_set_busy */
+  int          fail_next_suggest;   /* fake_db_fail_next_suggest */
   int          has_last_suggest;
   char        *last_start;   /* NULL if the call's start was NULL */
   size_t       last_slen;
@@ -456,6 +457,12 @@ void fake_db_fail_next_flush(struct db_env *env)
     env->fail_next_flush = 1;
 }
 
+void fake_db_fail_next_suggest(struct db_cf *cf)
+{
+  if (cf)
+    cf->fail_next_suggest = 1;
+}
+
 int db_cf_open(struct db_env *env, const char *name,
                const struct db_cf_opts *opts, struct db_cf **out)
 {
@@ -512,6 +519,13 @@ int db_suggest_compact(struct db_env *env, struct db_cf *cf,
   if (!cf)
     return DB_ERR_OTHER;
   cf->suggest_calls++;
+  if (cf->fail_next_suggest) {
+    cf->fail_next_suggest = 0;
+    if (env)
+      snprintf(env->last_error, sizeof env->last_error,
+               "fake_db: forced suggest failure (fake_db_fail_next_suggest)");
+    return DB_ERR_IO;
+  }
   free(cf->last_start);
   free(cf->last_end);
   cf->last_start = NULL;

@@ -105,6 +105,9 @@
 #define HTRIM_BF_LOG_KEYS 5
 /** A logged key's printable form, quotes excluded. */
 #define HTRIM_KEY_PREVIEW 128
+/** Undecided targets' ranges hinted apart; past this many the last range
+ * widens to take the rest. */
+#define HTRIM_UND_MAX 8
 
 /** The column families whose deletes the compaction hints track. */
 enum htrim_hint_cf {
@@ -312,7 +315,7 @@ static struct {
   struct {
     char   lo[HTC_TARGET_MAX + 1], hi[HTC_TARGET_MAX + 1];
     size_t lol, hil;
-  }                  und[8];
+  }                  und[HTRIM_UND_MAX];
   size_t             nund;
   uint64_t           und_targets;           /* undecided targets they cover */
   unsigned int       compact_min_rows;
@@ -749,12 +752,10 @@ static void slot_done(int i)
   g.hint_rearm[i] = 0;
 }
 
-/** Slot @a i's hint failed, or was dropped after HTRIM_HINT_DEFER_MAX
- * busy slices: its count stays (the next hint covers this range too), a
- * drain's start keeps it, and the cumulative trigger backs off until
- * compact_min_rows more keys went or HTRIM_HINT_DEFER_MAX slices passed.
- * One WARNING a streak of failures. */
-static void slot_failed(int i, const char *what)
+/** A hint on slot @a i did not go through: one WARNING a streak of
+ * failures (slot_done ends the streak), and its count is kept -- a
+ * drain's start keeps it too. */
+static void slot_warn(int i, const char *what)
 {
   if (!g.hint_failed[i])
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -762,6 +763,16 @@ static void slot_failed(int i, const char *what)
               "(further failures not logged until one succeeds): %s",
               hint_names[i], what, last_err());
   g.hint_failed[i] = 1;
+}
+
+/** Slot @a i's hint failed, or was dropped after HTRIM_HINT_DEFER_MAX
+ * busy slices: its count stays (the next hint covers this range too), a
+ * drain's start keeps it, and the cumulative trigger backs off until
+ * compact_min_rows more keys went or HTRIM_HINT_DEFER_MAX slices passed.
+ * One WARNING a streak of failures. */
+static void slot_failed(int i, const char *what)
+{
+  slot_warn(i, what);
   g.hint_defer[i] = 0;
   g.hint_backoff[i] = HTRIM_HINT_DEFER_MAX;
   g.hint_rearm[i] = i == HH_UNDECIDED ? 0 : g.hint[i].n + g.compact_min_rows;
@@ -799,8 +810,10 @@ static int hint_flush(int i)
   if (cf_flush_would_wait(cf)) {
     for (k = 0; k < ng; k++) {
       int j = grp[k];
-      if (!g.hint_defer[j])
-        slot_suggest(j, cf);                    /* the suggestion alone, once */
+      /* The suggestion alone, once; a failure is logged as a failed flush
+       * is, and the flush stays due. */
+      if (!g.hint_defer[j] && slot_suggest(j, cf) != 0)
+        slot_warn(j, "failed (the suggestion alone: the column family is busy)");
       if (++g.hint_defer[j] < HTRIM_HINT_DEFER_MAX)
         g.hint_due[j] = 1;                      /* the flush, a later slice */
       else
@@ -885,8 +898,6 @@ static int hint_time_ordered(int i)
 {
   return i == HH_BY_TIME || i == HH_MSGID || i == HH_ML_CONTENT;
 }
-
-
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
@@ -1456,10 +1467,12 @@ static int target_has_rows(const void *name, size_t nlen)
  * HTRIM_EMPTY_SKIP_MAX): its range [name 0x00, name 0x01) is due a
  * compaction hint (the messages memtable flushed first), and a later
  * sweep (at the next pass start) checks it again.  Its key stays; nothing
- * is reported. */
+ * is reported.  A target whose range the undecided set already covers
+ * (undecided again before the hint went out) is not added twice. */
 static void target_undecided(const void *name, size_t nlen)
 {
   char lo[HTC_TARGET_MAX + 1], hi[HTC_TARGET_MAX + 1];
+  size_t k;
 
   g.ts_later = 1;
   if (!nlen || nlen + 1 > sizeof lo)
@@ -1468,11 +1481,15 @@ static void target_undecided(const void *name, size_t nlen)
   lo[nlen] = '\0';
   memcpy(hi, name, nlen);
   hi[nlen] = '\x01';
+  for (k = 0; k < g.nund; k++)
+    if (key_cmp(lo, nlen + 1, g.und[k].lo, g.und[k].lol) >= 0
+        && key_cmp(hi, nlen + 1, g.und[k].hi, g.und[k].hil) <= 0)
+      return;                                   /* in the set already */
   /* A due hint (one an engine slice, never in a caller's): the flush
    * stays out of the cleanup and its cost.  Each target's range apart --
    * one wide range over unrelated targets would mark most of the CF -- up
    * to HTRIM_UND_MAX; past that the last range widens to take it. */
-  if (g.nund < sizeof g.und / sizeof g.und[0]) {
+  if (g.nund < HTRIM_UND_MAX) {
     memcpy(g.und[g.nund].lo, lo, nlen + 1);
     g.und[g.nund].lol = nlen + 1;
     memcpy(g.und[g.nund].hi, hi, nlen + 1);
@@ -2367,15 +2384,6 @@ static int evict_entry_only(struct htrim_slice *s, const void *k, size_t kl,
   return 0;
 }
 
-/** One owner step: @a owner's own oldest rows -- a by_owner walk over
- * [owner 0x00, owner 0x01), or, resuming the step in progress, from the
- * successor of the last key it deleted -- THE delete each (counted),
- * until @a trim bytes are gone or the budget is spent.  An entry whose
- * by_time row is missing, unreadable or names another owner is removed
- * alone.  A range that runs out first leaves the owner with no rows: it
- * holds 0 once the slice commits (its total had drifted).
- * @return 0 the step is done, 1 the budget stopped it (still in progress),
- *         -1 a read failed or the slice is poisoned. */
 /** Walk @a owner's by_owner entries in [@a lo, @a hi): THE delete each
  * (counted), or the entry alone when its by_time row is missing,
  * unreadable or another owner's, adding their sizes to *@a trimmed until
@@ -2511,8 +2519,10 @@ static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
       memcpy(lo + ll, f, fl);
       ll += fl;
       bytes_set(&s->ev_start, &s->ev_start_len, &s->ev_start_cap, lo, ll);
-    } else
+    } else {
       whole = 1;
+      s->ev_start_len = 0;      /* never an earlier owner's, from this slice */
+    }
   }
 
   snprintf(s->ev_owner, sizeof s->ev_owner, "%s", owner);

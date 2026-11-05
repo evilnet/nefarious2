@@ -4379,6 +4379,161 @@ static void test_evict_drift_after_both_phases_recounts(void **state)
   assert_acct_matches_cf();
 }
 
+/* ------------------------------------------------------------------ */
+/* Task 8 round-3 minors (folded into Task 9)                          */
+/* ------------------------------------------------------------------ */
+
+/** Stop capturing stderr and return what was written (free it). */
+static char *captured_log(FILE *tmp)
+{
+  char *log;
+  long len;
+
+  fflush(stderr);
+  stderr_restore();
+  fseek(tmp, 0, SEEK_END);
+  len = ftell(tmp);
+  rewind(tmp);
+  log = (char *)calloc(1, (size_t)len + 1);
+  assert_non_null(log);
+  assert_int_equal((size_t)len, fread(log, 1, (size_t)len, tmp));
+  fclose(tmp);
+  return log;
+}
+
+/* Minor 1: a target already in the undecided set is not added again --
+ * two caller slices that each leave #aa undecided add one range, hinted
+ * once and counted once. */
+static void test_undecided_target_not_added_twice(void **state)
+{
+  struct htrim_params p = params(0);
+  struct htrim_slice *s;
+  char ts[32], late[32], mid[16], *log;
+  FILE *tmp;
+  int i;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i <= 10000; i++) {
+    snprintf(mid, sizeof mid, "a%05d", i);
+    seed_plain("#aa", ts_ago(ts, sizeof ts, 1, 30000 - i), mid, "a:bob", NULL);
+  }
+  seed_targets("#aa", ts);
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  for (i = 0; i <= 10000; i++) {
+    snprintf(mid, sizeof mid, "a%05d", i);
+    stage_del(s, HTRIM_PATH_AGEOUT, "#aa", ts_ago(ts, sizeof ts, 1, 30000 - i), mid, 1);
+  }
+  assert_int_equal(10001, htrim_slice_commit(s));    /* #aa undecided */
+  seed_plain("#aa", ts_ago(late, sizeof late, 1, 100), "late", "a:bob", NULL);
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#aa", late, "late", 1);
+  assert_int_equal(1, htrim_slice_commit(s));        /* ... and again */
+  assert_true(targets_has("#aa"));
+  assert_int_equal(0, fake_db_suggest_calls(st.messages));   /* caller slices */
+
+  stderr_capture(&tmp);
+  run_until_idle(&p);                  /* an engine slice issues the hint */
+  log = captured_log(tmp);
+  assert_int_equal(1, fake_db_suggest_calls(st.messages));
+  assert_non_null(strstr(log, "compaction hint on messages: 1 undecided target,"));
+  free(log);
+}
+
+/* Minor 2: a busy CF's lone suggestion that fails is logged -- one
+ * WARNING a streak, as a failed flush is -- the flush stays due, and the
+ * first hint that goes through ends the streak. */
+static void test_busy_hint_suggest_failure_logged(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32], mid[16], *log;
+  FILE *tmp;
+  int i;
+  (void)state;
+
+  p.compact_min_rows = 10;
+  ageout_ready();
+  for (i = 0; i < 12; i++) {
+    snprintf(mid, sizeof mid, "A%02d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - i), mid, "a:bob", NULL);
+  }
+  fake_db_set_busy(st.by_time, 1, 0);           /* a flush in flight */
+  fake_db_fail_next_suggest(st.by_time);
+  stderr_capture(&tmp);
+  htrim_pass_start(&p);
+  for (i = 0; i < 5; i++)                       /* age-out; the hints */
+    assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(1, fake_db_suggest_calls(st.by_time));   /* alone, failed */
+  assert_int_equal(0, fake_db_flush_calls(st.by_time));
+  fake_db_set_busy(st.by_time, 0, 0);
+  run_until_idle(&p);                           /* flushed, suggested */
+  log = captured_log(tmp);
+  assert_int_equal(1, fake_db_flush_calls(st.by_time));
+  assert_int_equal(2, fake_db_suggest_calls(st.by_time));
+  assert_int_equal(1, count_of(log, "compaction hint on by_time failed"));
+  assert_int_equal(1, count_of(log, "compaction hints on by_time go through again"));
+  free(log);
+}
+
+/* Minor 5: an owner step carries only its own start.  A step that starts
+ * at the owner's first key (no live floor) must not keep an earlier
+ * owner's start from the same slice: its walk below would run up to that
+ * other owner's keys and remove every entry of the owners sorting between
+ * the two alone.  Owner steps here go a:yy (resumed across slices), then
+ * a:bb (which runs out above its start and walks below it, over its
+ * orphans); a:mm sorts between them and is under its share: it keeps
+ * every row and every byte. */
+static void test_evict_owner_walks_keep_to_their_owner(void **state)
+{
+  struct htrim_params pa = bf_params(0);
+  struct htrim_params p = ev_params(3);
+  struct db_writebatch *wb;
+  char ts[32], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16];
+  unsigned char sz[4];
+  int i, btl, bol;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#old", ts_ago(ts, sizeof ts, 8, 0), "O1", "a:bob", NULL);
+  ageout_pass(&pa);                    /* a live floor: age-out's resume point */
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  htc_size_pack(sz, 100);
+  for (i = 0; i < 12; i++) {           /* a:bb's orphans below the floor */
+    snprintf(mid, sizeof mid, "G%02d", i);
+    btl = htc_bt_key(bt, sizeof bt, (BF_NOW_S - 9 * 86400ULL + (uint64_t)i) * 1000ULL, "#b", mid);
+    bol = htc_bo_key(bo, sizeof bo, "a:bb", bt, (size_t)btl);
+    assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_owner, bo, (size_t)bol, sz, sizeof sz));
+  }
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_run("#y", "Y", "a:yy", 30, BF_NOW_S - 3600, 100);   /* 3000: trim 2000 */
+  seed_run("#b", "B", "a:bb", 3, BF_NOW_S - 3000, 100);    /* + 1200: trim 500 */
+  seed_run("#m", "M", "a:mm", 5, BF_NOW_S - 2400, 100);    /* 500: under share */
+  seed_run("#n", "N", "-", 46, BF_NOW_S - 7200, 100);
+  reboot();                            /* the boot scan counts the orphans */
+  load_acct();
+  assert_int_equal(1500, owner_of("a:bb"));
+  assert_int_equal(9600, total_now());
+
+  step_us = 1000;                      /* a few entries a 3 ms slice */
+  run_until_idle(&p);
+  assert_int_equal(1000, owner_of("a:yy"));
+  assert_int_equal(1000, owner_of("a:bb"));
+  for (i = 0; i < 3; i++) {
+    snprintf(mid, sizeof mid, "B%02d", i);
+    assert_false(row_present("#b", BF_NOW_S - 3000 + (uint64_t)i, mid));
+  }
+  assert_int_equal(500, owner_of("a:mm"));
+  for (i = 0; i < 5; i++) {
+    snprintf(mid, sizeof mid, "M%02d", i);
+    assert_true(row_present("#m", BF_NOW_S - 2400 + (uint64_t)i, mid));
+  }
+  assert_acct_matches_cf();
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -4473,6 +4628,9 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_failing_hint_backs_off, setup, teardown),
     cmocka_unit_test_setup_teardown(test_undecided_hint_logs_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_drift_after_both_phases_recounts, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_undecided_target_not_added_twice, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_busy_hint_suggest_failure_logged, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_walks_keep_to_their_owner, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
