@@ -47,6 +47,32 @@ static void test_layout_sizes(void **state)
   assert_int_equal(bounce_record_size(BOUNCER_DB_VERSION + 1), 0);
 }
 
+/* test_layout_sizes (above) and bouncer_record.c's BR_CHECK pin each
+ * frozen struct's overall sizeof -- but both read that size off the same
+ * struct the test builds records with, so a field moved inside a frozen
+ * struct without changing its total size (a reordered or differently
+ * padded field, balanced by one elsewhere) would pass every existing
+ * check while still corrupting every field read after the move.  Pin a
+ * handful of field offsets as literal numbers -- independent of the
+ * struct's own sizeof -- so such a move fails here even when the total
+ * size does not.  Values measured on this tree's LP64 layout. */
+static void test_frozen_layout_offsets(void **state)
+{
+  (void)state;
+
+  /* v7 */
+  assert_int_equal(offsetof(struct BounceSessionRecord_v7, bsr_token), 36);
+
+  /* v8 */
+  assert_int_equal(offsetof(struct BounceSessionRecord_v8, bsr_channels), 2216);
+  assert_int_equal(offsetof(struct BounceSessionRecord_v8, bsr_aliascount), 14216);
+  assert_int_equal(offsetof(struct BounceSessionRecord_v8, bsr_aliases), 14224);
+  assert_int_equal(sizeof(struct BounceSessionRecord_v8), 14320);
+
+  /* v9 */
+  assert_int_equal(offsetof(struct BounceSessionRecord_v9, bsr_oper_name), 14320);
+}
+
 static void test_v8_migrates(void **state)
 {
   struct BounceSessionRecord_v8 *v8 = calloc(1, sizeof(*v8));
@@ -293,6 +319,7 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_layout_sizes),
+    cmocka_unit_test(test_frozen_layout_offsets),
     cmocka_unit_test(test_v8_migrates),
     cmocka_unit_test(test_v8_alias_count_is_clamped),
     cmocka_unit_test(test_v9_migrates),
