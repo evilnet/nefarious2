@@ -51,6 +51,7 @@ Channel, nick and account names are case-insensitive under the casemapping, but 
 - `ToLower(c)` indexes its table from `CHAR_MIN`: pass a plain `char`. `ToLower((unsigned char)c)` reads past the table for bytes above 127 (four such sites were fixed in `80c93e2`).
 - Existing stores are rewritten once at open by `db_casefold_migrate()` (marker `schema/casefold` in the env's default CF; idempotent without it, so an interrupted run resumes next start). A new name-keyed CF must be added to the `cfs[]` list in `history_init` / `metadata_lmdb_init` with its component mask, plus a case in `ircd/test/db_casefold_cmocka.c` (in-memory fake store, no RocksDB needed).
 - Left unfolded on purpose: `bouncer_sessions` (opaque ids), webpush (canonical accounts only), multiline content (msgid keys).
+- `by_time` / `by_owner` (the chathistory trim engine's time and owner indexes, 2026-11) fold the target name they embed too — `htc_bt_key`/`htc_owner_key` (`history_trim_codec.c`) call `db_casefold_bytes()` themselves — but **neither is in `history_init`'s `cfs[]` migration list**: both keys start with binary (a big-endian ms timestamp, an owner key), not a plain name prefix, so there is no unfolded legacy spelling to rewrite — every row in them has been folded from birth.
 
 ## Config File Parsing
 

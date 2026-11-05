@@ -981,6 +981,27 @@ static void history_store_failed(const char *what, const char *target,
             what, db_strerror(rc), err ? err : "no backend detail", more);
 }
 
+/** A row the trim-record limits refuse (a field too long for the by_time
+ * value or an owner key -- history_trim_row_prepare's -1): the row is not
+ * stored at all, not just unindexed.  Debug() alone is compiled out of a
+ * production build, so a legitimate refusal (an oversized field, not a
+ * bug) would otherwise be invisible there.  L_NOTICE, at most one line a
+ * minute (HISTORY_FAIL_LOG_SECS, the same rate as history_store_failed);
+ * the next one counts the refusals in between. */
+static void history_trim_refused(const char *target, const char *msgid,
+                                 const char *timestamp)
+{
+  static struct history_ratelog rl;
+  char more[64];
+
+  if (!history_ratelog_due(&rl, more, sizeof more))
+    return;
+  log_write(LS_SYSTEM, L_NOTICE, 0,
+            "history: refused to store %s in %s (ts '%s'): a field does not "
+            "fit the trim record%s",
+            msgid, target, timestamp, more);
+}
+
 /** HISTORY_MAP_SIZE_MB as the cap in bytes (0 = no cap), and the
  * watermarks by the planner's rule (htc_plan_sanitize). */
 static uint64_t history_trim_cap(int *high, int *low)
@@ -1504,6 +1525,7 @@ store_retry:
                                reply_parent, redact_parent) != 0) {
     Debug((DEBUG_DEBUG, "history: no trim index for %s/%s (ts '%s')",
            target, msgid, timestamp));
+    history_trim_refused(target, msgid, timestamp);
     rc = -1;
     goto store_cleanup;
   }
@@ -1718,6 +1740,7 @@ store_ml_retry:
                                HTC_F_ML, "", "") != 0) {
     Debug((DEBUG_DEBUG, "history: no trim index for multiline %s/%s (ts '%s')",
            target, msgid, timestamp));
+    history_trim_refused(target, msgid, timestamp);
     if (failed)
       history_store_failed(failed, target, msgid, db_rc);
     return -1;
@@ -3988,6 +4011,21 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  MsgID index: ~%lu entries",
                (unsigned long)cf_stats.approx_keys);
+  {
+    /* The trim engine's own two CFs: how many keys they hold, so an
+     * operator can see the index grow (and shrink under eviction)
+     * without cross-referencing the messages count by hand. */
+    struct db_cf_stats bt_stats, bo_stats;
+    unsigned long bt_keys = 0, bo_keys = 0;
+
+    if (db_cf_stats(history_db_env, history_cf_by_time, &bt_stats) == DB_OK)
+      bt_keys = (unsigned long)bt_stats.approx_keys;
+    if (db_cf_stats(history_db_env, history_cf_by_owner, &bo_stats) == DB_OK)
+      bo_keys = (unsigned long)bo_stats.approx_keys;
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Trim index: by_time ~%lu keys, by_owner ~%lu keys",
+               bt_keys, bo_keys);
+  }
 
 }
 
@@ -4102,6 +4140,16 @@ history_report_store_info(struct Client *to)
   if (db_cf_stats(history_db_env, history_cf_msgid, &cf_stats) == DB_OK)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "X :    msgid_index: ~%lu keys, %lu KB",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024));
+  if (db_cf_stats(history_db_env, history_cf_by_time, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    by_time: ~%lu keys, %lu KB",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024));
+  if (db_cf_stats(history_db_env, history_cf_by_owner, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    by_owner: ~%lu keys, %lu KB",
                (unsigned long)cf_stats.approx_keys,
                (unsigned long)(cf_stats.on_disk_bytes / 1024));
 }

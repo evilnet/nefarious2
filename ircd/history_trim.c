@@ -67,6 +67,48 @@
  * (slice_del) widens that slice's [smallest, largest] key and count; a
  * commit folds them into the engine's, which hints a CF once its count
  * reaches compact_min_rows, and every CF at a drain's end.
+ *
+ * Phases.  htrim_run_slice runs ONE phase per call, round-robin
+ * (phase_order[]) over HTRIM_PH_AGEOUT, HTRIM_PH_BACKFILL,
+ * HTRIM_PH_ACCTSCAN, HTRIM_PH_EVICT and HTRIM_PH_TSWEEP -- pick_phase
+ * starts just after whichever ran last and takes the first with work, so
+ * neither a big age-out backlog nor a long backfill starves the others.
+ * HTRIM_PH_CLEANUP gets a slice of its own only when every phase above is
+ * idle but emptiness checks or compaction hints are still carried from an
+ * earlier slice.  HTRIM_PH_INCARNATION (history_purge_incarnation) and
+ * HTRIM_PH_EMERGENCY (htrim_emergency, called from inside a store that
+ * found the env full) are never picked by pick_phase: each is called
+ * directly, its own slice, outside the rotation.
+ *
+ * Budget.  Every rotated phase's slice takes a millisecond budget
+ * (htrim_params.slice_ms, i.e. CHATHISTORY_TRIM_SLICE_MS: default 15,
+ * clamped 1..1000); history.c's slice timer re-arms TT_RELATIVE 1 s while
+ * htrim_run_slice reports work (ircd timers have whole-second
+ * resolution), so a backlog drains at roughly one slice's worth per
+ * second, and the next slice otherwise waits for
+ * CHATHISTORY_MAINTENANCE_INTERVAL.  The two phases called directly do
+ * not follow that budget: htrim_emergency is never unbudgeted (it forces
+ * budget_ms to at least 1) and history_purge_incarnation's one slice is
+ * deliberately UNBUDGETED (budget 0) -- it is bounded instead by one
+ * losing incarnation's rows, the same class of unbounded-main-loop-work
+ * problem this plan otherwise closes (worst case: a long-lived local
+ * incarnation losing to an older TS deletes every in-retention row of
+ * its channel in that one slice; see the deferred-items register).
+ *
+ * The one delete.  Every path above -- age-out, an owner's share,
+ * oldest-overall, emergency, the backfill's past-retention rows, a
+ * losing incarnation -- deletes each row through htrim_delete_row(),
+ * never its own code.  It stages, in the slice's single WriteBatch,
+ * every index key the codec (history_trim_codec.h) builds for that row:
+ * the messages key rebuilt from the record's stored ts (never from ms),
+ * both msgid_index forms, the ml_content and matching ml_paste rows for
+ * HTC_F_ML, a reply_index entry per non-empty reply_parent/redact_parent
+ * recorded as that row's CHILD, the redact_index row for HTC_F_REDACT,
+ * and the by_time/by_owner rows -- plus the pending accounting delta and
+ * touched-target bookkeeping described above.  A row's OWN children
+ * (replies, redactions) are never touched: no cascade.  None of it is
+ * visible to a reader until the batch commits; a failed commit leaves
+ * every row, index entry, total and counter exactly as it was.
  */
 #include "config.h"
 
