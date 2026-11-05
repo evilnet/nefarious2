@@ -873,8 +873,17 @@ void close_connection(struct Client *cptr)
      * a valid fd), and leave the socket no fd: socket_del_keepfd() sets
      * s_fd -- which is cli_fd -- to -1 before the ET_DESTROY, synchronous
      * here or deferred to the end of the running callback, so the
-     * ET_DESTROY never closes it a second time.  Then the one close. */
-    socket_del_keepfd(&(cli_socket(cptr)));
+     * ET_DESTROY never closes it a second time.  Then the one close.
+     * A socket already off the engine (GEN_DESTROY: a revive took it and
+     * the engine would not take it for the ghost, bounce_revive() -2)
+     * only gives up the fd. */
+    if (cli_socket(cptr).s_header.gh_flags & GEN_DESTROY) {
+      /* Reached only by a connection that never registered: bounce_revive()
+       * -2, whose caller puts it back to unregistered before it exits. */
+      assert(!IsRegistered(cptr));
+      s_fd(&(cli_socket(cptr))) = -1;
+    } else
+      socket_del_keepfd(&(cli_socket(cptr)));
     close(fd);
   }
   SetFlag(cptr, FLAG_DEADSOCKET);

@@ -1687,7 +1687,18 @@ extern struct BouncerSession *bounce_should_hold(struct Client *cptr);
  * @param[in] session Session to revive (must be HOLDING with local ghost).
  * @param[in] temp Temp client whose socket will be transplanted.
  *                 Socket is stolen; call bounce_free_temp_client() after.
- * @return 0 on success, -1 on error.
+ * @return 0 on success: @a temp is a husk; free it with
+ *         bounce_free_temp_client().
+ *         -1 when this is not a revive (a gate refused it): nothing was
+ *         changed or taken; @a temp may register by another route.
+ *         -2 when the event engine refused @a temp's descriptor for the
+ *         ghost: the session, the ghost and the wire are untouched, but
+ *         @a temp's socket is already off the engine for good (its fd and
+ *         TLS object are back on it).  @a temp has not registered and
+ *         cannot by any route: the caller exits it as the unregistered
+ *         connection it was (register_user_unwind(), then exit_client(),
+ *         whose close_connection() closes the fd), never as a husk --
+ *         bounce_free_temp_client() releases none of what it still holds.
  */
 extern int bounce_revive(struct BouncerSession *session, struct Client *temp);
 

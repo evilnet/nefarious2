@@ -735,7 +735,26 @@ int register_user(struct Client *cptr, struct Client *sptr)
         revive_target = NULL;
       }
 
-      if (revive_target && bounce_revive(revive_target, sptr) == 0) {
+      int revived = revive_target ? bounce_revive(revive_target, sptr) : -1;
+
+      /* The event engine would not take this connection's socket for the
+       * ghost (bounce_revive() -2): the session was left as it was, but
+       * the socket is off the engine and cannot go back on, so this
+       * connection cannot register by any route.  It closes as the
+       * unregistered connection it was before the prologue above
+       * (register_user_unwind(): no WHOWAS entry, no MONITOR offline for
+       * the nick the ghost still holds, the counts it took given back);
+       * its exit sends the ERROR line, the TLS close_notify, the FIN, and
+       * releases its IPcheck entry, confs and listener.  The reconnect
+       * revives the session. */
+      if (revived == -2) {
+        register_user_unwind(sptr, pre_status, pre_handler, 0);
+        ++ServerStats->is_ref;
+        return exit_client(cptr, sptr, &me,
+                           "Could not resume your session; please reconnect");
+      }
+
+      if (revived == 0) {
         /* Success! Ghost is now alive with our socket.
          * sptr is now a husk with fd=-1. Free it silently. */
         struct Client *ghost = revive_target->hs_client;

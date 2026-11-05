@@ -30,6 +30,7 @@
 #include "bouncer_wire.h"
 #include "bouncer_count.h"
 #include "bouncer_rebind_auth.h"
+#include "bouncer_transplant.h"
 #include "account_id.h"
 #include "exit_reason.h"
 #include "websocket.h"
@@ -8445,10 +8446,24 @@ int bounce_forced_exit(struct Client *cptr, struct Client *victim,
  *    remote aliases provide connectivity. A local client connecting
  *    to the managing server becomes the primary via socket transplant.
  *
+ * One step can fail: registering the temp's descriptor with the event
+ * engine for the ghost's socket (epoll: ENOMEM or ENOSPC).  It runs before
+ * anything else changes -- the session, its timers, the burst gates, the
+ * ghost's TLS object and the LocalClientArray slot -- so a refusal leaves
+ * all of them as they were and puts nothing on the wire (#138's F6).
+ *
  * @param[in] session The HOLDING or ACTIVE relay-only session.
  * @param[in] temp The temporary client whose socket will be transplanted.
- *                 This client will be freed (locally, no network messages).
- * @return 0 on success, -1 on error.
+ *                 The caller disposes of it (see the return values); this
+ *                 function frees nothing.
+ * @return 0 on success: the caller frees @a temp (bounce_free_temp_client).
+ *         -1 when this is not a revive (a gate refused it): nothing was
+ *         changed or taken, and @a temp may register by another route.
+ *         -2 when the engine refused the descriptor: the session is
+ *         untouched, but @a temp's socket is off the engine for good (its
+ *         descriptor and TLS object are handed back to it, for its exit to
+ *         close).  @a temp cannot register by any route; the caller exits
+ *         it.
  */
 int bounce_revive(struct BouncerSession *session, struct Client *temp)
 {
@@ -8458,18 +8473,13 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   struct Membership *member;
   int fd;
   int was_holding;
+  int fresh;            /* the ghost's socket is registered afresh */
+#ifdef USE_SSL
+  SSL *temp_ssl;
+#endif
 
   if (!session)
     return -1;
-
-  /* Active client is taking over the session — it's no longer a
-   * tentative restore.  Clear the reconcile-pending flag so any
-   * incoming BX R for this session treats us as firm. */
-  session->hs_restore_pending = 0;
-
-  /* Convergence-completion event: any peer that was waiting on a
-   * pending-restore session can release its gate now. */
-  bounce_release_idle_gates();
 
   ghost = session->hs_client;
   if (!ghost || !MyUser(ghost))
@@ -8491,6 +8501,13 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   }
 
   if (!temp || !MyConnect(temp))
+    return -1;
+  /* A connection with no fd has no socket to move (and the take below
+   * would unregister a socket already off the engine).  No route gives a
+   * revive one -- a refused take is exited at once (-2) -- and none ever
+   * may: before -2 a refused revive left its login socketless, and a
+   * deferred registration then retried it here with fd -1 (F6-d). */
+  if (cli_fd(temp) < 0)
     return -1;
 
   ghost_con = cli_connect(ghost);
@@ -8523,6 +8540,125 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   Debug((DEBUG_INFO, "Bouncer: reviving ghost %s with socket from temp %s (fd %d)",
          cli_name(ghost), cli_name(temp), cli_fd(temp)));
 
+  /* Step 1: Take the temp client's fd and SSL.
+   * Clear s_data BEFORE socket_del to prevent stale callbacks.
+   * IMPORTANT: Also save and NULL the SSL pointer BEFORE socket_del,
+   * because socket_del triggers ET_DESTROY which calls ssl_free().
+   * If we don't NULL it first, the SSL context gets freed before we
+   * can transfer it to the ghost.
+   * EQUALLY CRITICAL: use socket_del_keepfd so the engine unregisters
+   * fd (epoll_ctl DEL runs while s_fd is still valid) but ET_DESTROY's
+   * close() is skipped (s_fd is zeroed between eng_closing and the
+   * destroy event in the synchronous event model).  Clearing s_fd
+   * before socket_del (as a plain socket_del variant) breaks eng_closing,
+   * leaving the fd registered in epoll — the ghost's registration below
+   * then fails with EEXIST.
+   * From here on the temp's socket is off the engine for good: it cannot
+   * be registered again (socket_add() would reset the gh_ref its own
+   * running read callback may hold).  So a refusal below cannot fall
+   * back to registering the temp by another route (-1); it returns -2. */
+  fd = cli_fd(temp);
+  s_data(&cli_socket(temp)) = NULL;
+#ifdef USE_SSL
+  temp_ssl = con_socket(temp_con).ssl;
+  con_socket(temp_con).ssl = NULL;  /* Prevent ssl_free from freeing it */
+#endif
+  socket_del_keepfd(&cli_socket(temp));
+  cli_fd(temp) = -1;
+
+  /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.
+   * Just verify and update LocalClientArray if somehow it wasn't. */
+  if (cli_fd(ghost) >= 0) {
+    LocalClientArray[cli_fd(ghost)] = 0;
+    close(cli_fd(ghost));
+    cli_fd(ghost) = -1;
+  }
+
+  /* Step 3: Register the fd for the ghost's socket -- the one step that
+   * can fail, so it runs before anything else changes.
+   * For persisted ghosts (restored from MDBX on startup), socket_add was
+   * never called, so the socket lacks s_data/s_func/GEN_ACTIVE; a ghost
+   * held through close_connection() is inactive too (its ET_DESTROY ran).
+   * bounce_transplant_register() uses socket_add for an inactive socket,
+   * socket_reattach for an active one, and on a refusal leaves the
+   * ghost's socket as it was: its fd (-1) and its flags.  The event core
+   * does not: a refused socket_add() leaves GEN_ACTIVE set, and the next
+   * revive would take the socket for a registered one (socket_reattach()
+   * for a socket on no list, with no FREEFLAG_SOCKET; #138's F6-b).
+   *
+   * Nothing is queued in this synchronous event model: a socket's
+   * ET_DESTROY runs inside socket_del*(), or as the socket's own running
+   * callback returns.  A held ghost's socket was unregistered in
+   * close_connection(), in a callback of the ghost's own or outside any,
+   * so its ET_DESTROY has run by the time another connection's
+   * registration revives it: the socket is GEN_DESTROY and not GEN_ACTIVE,
+   * and that destroy claimed its s_data (client_sock_callback). */
+  Debug((DEBUG_INFO, "Bouncer: ghost %s socket gh_flags=0x%x GEN_ACTIVE=%d s_data=%p",
+         cli_name(ghost), cli_socket(ghost).s_header.gh_flags,
+         !!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE),
+         s_data(&cli_socket(ghost))));
+  if (!bounce_transplant_register(&cli_socket(ghost), client_sock_callback,
+                                  (void *)ghost_con, fd, &fresh)) {
+    int err = errno;
+
+    /* Refused (#138's F6).  The ghost's socket is as it was (above).  The
+     * connection goes back to the temp, fd and TLS object, for its exit
+     * to close: the ERROR line, the TLS close_notify, the FIN, the one
+     * close (close_connection(), which knows the socket is already off
+     * the engine).  LocalClientArray[fd] is still the temp's: it was never
+     * touched.  The session, its timers and the burst gates were never
+     * touched either, and nothing went on the wire: the session stays as
+     * it was for the reconnect. */
+    cli_fd(temp) = fd;
+#ifdef USE_SSL
+    con_socket(temp_con).ssl = temp_ssl;
+#endif
+    log_write(LS_USER, L_WARNING, 0,
+              "Bouncer: could not move %s's connection onto %s (session %s "
+              "of %s): the event engine refused it (%s); the session is "
+              "left as it was and the connection is closed",
+              cli_name(temp), cli_name(ghost), session->hs_sessid,
+              session->hs_account, strerror(err));
+    return -2;
+  }
+  Debug((DEBUG_INFO, "Bouncer: %s for the ghost's socket",
+         fresh ? "socket_add" : "socket_reattach"));
+
+  /* Commit: nothing below can fail. */
+
+  /* Step 4: Update LocalClientArray */
+  LocalClientArray[fd] = ghost;
+
+#ifdef USE_SSL
+  /* Free ghost's old SSL object (should be NULL from close_connection) */
+  if (con_socket(ghost_con).ssl) {
+    SSL_free(con_socket(ghost_con).ssl);
+    con_socket(ghost_con).ssl = NULL;
+  }
+  /* Transfer temp's SSL object to ghost */
+  con_socket(ghost_con).ssl = temp_ssl;
+#endif
+
+  /* CRITICAL: the Connection holds a registered socket again, so it has
+   * FREEFLAG_SOCKET: free_client() then socket_del()s the socket and leaves
+   * the Connection to the socket's ET_DESTROY, rather than deallocating it
+   * under a socket still on the engine.  The held socket's own ET_DESTROY
+   * cleared the flag, and a reattached socket cannot be counted on to
+   * still have it.  Set on every registration (it is idempotent), not only
+   * a fresh one. */
+  con_freeflag(ghost_con) |= FREEFLAG_SOCKET;
+
+  /* Active client is taking over the session — it's no longer a
+   * tentative restore.  Clear the reconcile-pending flag so any
+   * incoming BX R for this session treats us as firm. */
+  session->hs_restore_pending = 0;
+
+  /* Convergence-completion event: any peer that was waiting on a
+   * pending-restore session can release its gate now.  Before any other
+   * emit of the revive, as it always was: a released burst describes the
+   * session as held, and the attach (BX U, BS A) follows it. */
+  bounce_release_idle_gates();
+
   if (was_holding) {
     /* Mark session as ACTIVE before canceling timer.
      * This prevents a race where an already-queued ET_EXPIRE event
@@ -8538,117 +8674,6 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
      * (a new client attached), so the promote is no longer wanted. */
     if (t_active(&session->hs_promote_timer))
       timer_del(&session->hs_promote_timer);
-  }
-
-  /* Step 1: Steal the temp client's fd and SSL.
-   * Clear s_data BEFORE socket_del to prevent stale callbacks.
-   * IMPORTANT: Also save and NULL the SSL pointer BEFORE socket_del,
-   * because socket_del triggers ET_DESTROY which calls ssl_free().
-   * If we don't NULL it first, the SSL context gets freed before we
-   * can transfer it to the ghost.
-   * EQUALLY CRITICAL: use socket_del_keepfd so the engine unregisters
-   * fd (epoll_ctl DEL runs while s_fd is still valid) but ET_DESTROY's
-   * close() is skipped (s_fd is zeroed between eng_closing and the
-   * destroy event in the synchronous event model).  Clearing s_fd
-   * before socket_del (as a plain socket_del variant) breaks eng_closing,
-   * leaving the fd registered in epoll — subsequent socket_add on the
-   * ghost fails with EEXIST, revive returns -1, and register_user falls
-   * back to bounce_attach which silently kills the ghost and introduces
-   * a new NICK, colliding with the ghost that's still alive on remote
-   * servers (user@host kill from upstream hub). */
-  fd = cli_fd(temp);
-  s_data(&cli_socket(temp)) = NULL;
-#ifdef USE_SSL
-  {
-    SSL *temp_ssl = con_socket(temp_con).ssl;
-    con_socket(temp_con).ssl = NULL;  /* Prevent ssl_free from freeing it */
-    socket_del_keepfd(&cli_socket(temp));
-    cli_fd(temp) = -1;
-
-    /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.
-     * Just verify and update LocalClientArray if somehow it wasn't. */
-    if (cli_fd(ghost) >= 0) {
-      LocalClientArray[cli_fd(ghost)] = 0;
-      close(cli_fd(ghost));
-      cli_fd(ghost) = -1;
-    }
-
-    /* Free ghost's old SSL object (should be NULL from close_connection) */
-    if (con_socket(ghost_con).ssl) {
-      SSL_free(con_socket(ghost_con).ssl);
-      con_socket(ghost_con).ssl = NULL;
-    }
-    /* Transfer temp's SSL object to ghost */
-    con_socket(ghost_con).ssl = temp_ssl;
-  }
-#else
-  socket_del_keepfd(&cli_socket(temp));
-  cli_fd(temp) = -1;
-
-  /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.
-   * Just verify and update LocalClientArray if somehow it wasn't. */
-  if (cli_fd(ghost) >= 0) {
-    LocalClientArray[cli_fd(ghost)] = 0;
-    close(cli_fd(ghost));
-    cli_fd(ghost) = -1;
-  }
-#endif
-
-  /* Step 3: Transplant the fd into the ghost's Connection */
-  s_fd(&con_socket(ghost_con)) = fd;
-
-  /* Step 4: Update LocalClientArray */
-  LocalClientArray[fd] = ghost;
-
-  /* Step 5: Initialize ghost socket if not already active.
-   * For persisted ghosts (restored from MDBX on startup), socket_add was
-   * never called, so the socket lacks s_data/s_func/GEN_ACTIVE.
-   * For normal ghosts that went into holding, the socket is already
-   * initialized from when they originally connected.
-   * Use socket_add for uninitialized sockets, socket_reattach for active ones.
-   *
-   * NOTE: If GEN_DESTROY is set, there may be pending ET_DESTROY event(s)
-   * queued from previous socket_del calls (e.g., from prior revival cycles
-   * where the user disconnected and re-entered HOLD mode). These stale events
-   * are safely handled by atomic s_data claiming in client_sock_callback -
-   * the first ET_DESTROY atomically claims s_data, subsequent events see NULL
-   * and return early, preventing double-free. */
-  Debug((DEBUG_INFO, "Bouncer: ghost %s socket gh_flags=0x%x GEN_ACTIVE=%d s_data=%p",
-         cli_name(ghost), cli_socket(ghost).s_header.gh_flags,
-         !!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE),
-         s_data(&cli_socket(ghost))));
-  if (!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE)) {
-    /* Persisted or re-held ghost: socket not active, use socket_add.
-     * Note: Any pending stale ET_DESTROY events from previous socket_del
-     * calls are handled by the atomic s_data claiming in client_sock_callback. */
-    Debug((DEBUG_INFO, "Bouncer: using socket_add for uninitialized ghost socket"));
-    if (!socket_add(&cli_socket(ghost), client_sock_callback,
-                    (void *)ghost_con, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
-      Debug((DEBUG_ERROR, "Bouncer: socket_add failed during ghost revival for %s",
-             cli_name(ghost)));
-      close(fd);
-      s_fd(&con_socket(ghost_con)) = -1;
-      LocalClientArray[fd] = 0;
-      return -1;
-    }
-    /* CRITICAL: Restore FREEFLAG_SOCKET on the connection.  A previous stale
-     * ET_DESTROY may have cleared it.  Without this flag, free_client will go
-     * the immediate deallocation path and free the connection, but there could
-     * still be pending stale ET_DESTROY events that will then access freed
-     * memory.  With FREEFLAG_SOCKET set, free_client properly queues socket_del
-     * and waits for ET_DESTROY to free the connection. */
-    con_freeflag(ghost_con) |= FREEFLAG_SOCKET;
-  } else {
-    /* Normal ghost: socket was active, just reattach fd */
-    Debug((DEBUG_INFO, "Bouncer: using socket_reattach for active ghost socket"));
-    if (!socket_reattach(&cli_socket(ghost), fd)) {
-      Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during ghost revival for %s",
-             cli_name(ghost)));
-      close(fd);
-      s_fd(&con_socket(ghost_con)) = -1;
-      LocalClientArray[fd] = 0;
-      return -1;
-    }
   }
 
   /* Step 6: Reset socket interest and clear stale flags.

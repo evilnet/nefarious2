@@ -57,6 +57,7 @@ CMOCKA_TESTPROGS = \
 	bouncer_rebind_auth_cmocka \
 	exit_reason_cmocka \
 	bouncer_deauth_cmocka \
+	bouncer_transplant_cmocka \
 	sessid_index_cmocka \
 	metadata_lww_cmocka \
 	bouncer_record_cmocka \
@@ -110,6 +111,7 @@ DEP_SRC = \
 	bouncer_rebind_auth_cmocka.c \
 	exit_reason_cmocka.c \
 	bouncer_deauth_cmocka.c \
+	bouncer_transplant_cmocka.c \
 	sessid_index_cmocka.c \
 	metadata_lww_cmocka.c \
 	bouncer_record_cmocka.c \
@@ -527,6 +529,18 @@ bouncer_deauth_test.o: ../bouncer_deauth.c ../../include/bouncer_deauth.h
 BOUNCER_DEAUTH_CMOCKA_OBJS = bouncer_deauth_cmocka.o bouncer_deauth_test.o
 bouncer_deauth_cmocka: $(BOUNCER_DEAUTH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_DEAUTH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# bouncer_transplant tests - the revive's one fallible step, linked with
+# the real event core (../ircd_events.o) and a fake engine defined in the
+# test under whichever engine names the build configured.
+bouncer_transplant_test.o: ../bouncer_transplant.c \
+		../../include/bouncer_transplant.h ../../include/ircd_events.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_transplant.c
+
+BOUNCER_TRANSPLANT_CMOCKA_OBJS = bouncer_transplant_cmocka.o \
+	bouncer_transplant_test.o test_stub.o ../ircd_events.o
+bouncer_transplant_cmocka: $(BOUNCER_TRANSPLANT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(BOUNCER_TRANSPLANT_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # sessid_index tests - the module is pure (no ircd deps)
 sessid_index_test.o: ../sessid_index.c ../../include/sessid_index.h
