@@ -560,33 +560,35 @@ void ssl_clear_errors(const char *where)
 
 void ssl_abort(struct Client *cptr)
 {
+  SSL *ssl = cli_socket(cptr).ssl;
+
   Debug((DEBUG_DEBUG, "SSL: aborted"));
-  if (cli_socket(cptr).ssl) {
-    /* Same close_notify discipline as ssl_free (ssl.c:807): emit a
-     * graceful shutdown when the handshake has finished so the peer's
-     * TLS stack renders trailing ERROR/KILL records instead of
-     * reporting "unexpected eof while reading" / "transport error".
-     * On a half-handshaked SSL we instead mark the state shut so
-     * SSL_free's destruction doesn't emit an alert into the listener's
-     * CTX in an unexpected state — same hazard the comment in
-     * ssl_accept (ssl.c:480-490) warns about for the listener-CTX
-     * stale-state problem.
-     *
-     * Reachable on the re-entrancy path 271ef19c guards: ET_ERROR
-     * synthesised from engine_set_events on a dead fd lands here
-     * mid-exit_client, and the guard suppresses exit_client_msg —
-     * leaving this as the only SSL-teardown site in that frame.  The
-     * deferred ET_DESTROY → ssl_free runs later with ssl=NULL and
-     * no-ops, so close_notify must be emitted here or the peer never
-     * sees it. */
-    if (SSL_is_init_finished(cli_socket(cptr).ssl))
-      ssl_smart_shutdown(cli_socket(cptr).ssl);
-    else
-      SSL_set_shutdown(cli_socket(cptr).ssl,
-                       SSL_RECEIVED_SHUTDOWN | SSL_SENT_SHUTDOWN);
-    SSL_free(cli_socket(cptr).ssl);
-  }
-  cli_socket(cptr).ssl = NULL;
+  /* The same teardown as ssl_free(), which this ends in: a close_notify
+   * when the handshake has finished, so the peer's TLS stack renders
+   * trailing ERROR/KILL records instead of reporting "unexpected eof
+   * while reading" / "transport error"; on a half-handshaked SSL the state
+   * is marked shut instead, so SSL_free's destruction doesn't emit an
+   * alert into the listener's CTX in an unexpected state -- the hazard
+   * the comment in ssl_accept() describes.
+   *
+   * And only while the socket still owns its fd.  The ET_ERROR branch of
+   * client_sock_callback() sets cli_fd to -1 on EBADF -- someone else
+   * closed the descriptor, and its number may already name a file another
+   * thread opened -- then falls through to here.  The BIO writes to the
+   * number it cached, so the close_notify would land in that file;
+   * ssl_free() frees the session without a word once s_fd (which is
+   * cli_fd) is -1.
+   *
+   * Reachable on the re-entrancy path 271ef19c guards: ET_ERROR
+   * synthesised from engine_set_events on a dead fd lands here
+   * mid-exit_client, and the guard suppresses exit_client_msg --
+   * leaving this as the only SSL-teardown site in that frame.  The
+   * deferred ET_DESTROY -> ssl_free runs later with ssl=NULL and
+   * no-ops, so close_notify must be emitted here or the peer never
+   * sees it. */
+  if (ssl && !SSL_is_init_finished(ssl))
+    SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN | SSL_SENT_SHUTDOWN);
+  ssl_free(&(cli_socket(cptr)));
 }
 
 int ssl_accept(struct Client *cptr)

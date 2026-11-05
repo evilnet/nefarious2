@@ -69,7 +69,8 @@ CMOCKA_TESTPROGS = \
 	webhook_eventlog_cmocka \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
-	db_api_rocksdb_cmocka
+	db_api_rocksdb_cmocka \
+	ssl_teardown_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -416,6 +417,16 @@ PASTE_LISTENER_CMOCKA_OBJS = paste_listener_cmocka.o ircd_events_test.o \
 	../engine_epoll.o ../ircd_string.o
 paste_listener_cmocka: $(PASTE_LISTENER_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(PASTE_LISTENER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# ssl_teardown tests - a TLS teardown writes only to a descriptor its
+# socket still owns (ssl_abort after an ET_ERROR EBADF dropped cli_fd) and
+# never reads the peer's stream (a one-way close_notify, so a drain that
+# stopped inside a record cannot desync it).  Links the real ssl.o; the
+# sessions are real handshakes over socketpairs, hence libssl.
+SSL_TEARDOWN_CMOCKA_OBJS = ssl_teardown_cmocka.o ../ssl.o ../ircd_string.o \
+	../ircd_snprintf.o ../ircd_alloc.o
+ssl_teardown_cmocka: $(SSL_TEARDOWN_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SSL_TEARDOWN_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
