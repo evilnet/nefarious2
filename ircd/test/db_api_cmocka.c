@@ -477,6 +477,9 @@ static void test_bounded_iter_skip_limit(void **state)
   assert_non_null(it);
   assert_int_equal(db_iter_seek_last(it), DB_INCOMPLETE);
   assert_false(db_iter_valid(it));
+  /* Not a failure: the env's last error -- what the background-error
+   * alert and the store-failure lines print -- stays as it was. */
+  assert_null(db_env_last_error(env));
   db_iter_close(it);
   it = db_iter_open_bounded_limited(env, cf, NULL, B("#t\0"), B("#t\x01"), 100000);
   assert_non_null(it);

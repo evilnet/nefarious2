@@ -1037,9 +1037,12 @@ static int iter_observe(struct db_iter *it)
   if (err) {
     /* Status::Incomplete ("Result incomplete: Too many internal keys
      * skipped") on a limited iterator is max_skippable_internal_keys
-     * reached, not a failure; anywhere else it stays an error. */
+     * reached, not a failure; anywhere else it stays an error.  Only a
+     * failure becomes the env's last error: the background-error alert
+     * and the store-failure lines print that as the last write error. */
     int incomplete = it->limited && strncmp(err, "Result incomplete", 17) == 0;
-    env_record_error(it->env, "iter", err);
+    if (!incomplete)
+      env_record_error(it->env, "iter", err);
     rocksdb_free(err);
     it->positioned = 0;
     return incomplete ? DB_INCOMPLETE : DB_ERR_OTHER;
