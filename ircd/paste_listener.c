@@ -117,11 +117,20 @@ enum paste_conn_state {
   PASTE_CONN_CLOSING
 };
 
+/* A paste_conn embeds two event generators, its socket and its request
+ * timer, and the event core still touches a generator after its callback
+ * returns.  So the struct is freed only by the last of their ET_DESTROYs
+ * (paste_conn_release()), as a Connection is (FREEFLAG_SOCKET and
+ * FREEFLAG_TIMER).  These bits name the ET_DESTROYs still owed. */
+#define PASTE_FREE_SOCKET 0x01  /**< socket registered; ET_DESTROY owed */
+#define PASTE_FREE_TIMER  0x02  /**< timer added; ET_DESTROY owed */
+
 struct paste_conn {
   int fd;
   SSL *ssl;
   enum paste_conn_state state;
   int dying;              /**< set by paste_conn_free; awaiting ET_DESTROY */
+  unsigned int freeflag;  /**< PASTE_FREE_*: generators not yet destroyed */
   struct Socket socket;
   struct Timer timeout;
   char request[PASTE_MAX_REQUEST_SIZE];
@@ -148,6 +157,7 @@ static int paste_conn_count = 0;
 static void paste_conn_callback(struct Event *ev);
 static void paste_timeout_callback(struct Event *ev);
 static void paste_conn_free(struct paste_conn *conn);
+static void paste_conn_release(struct paste_conn *conn, unsigned int flag);
 static void paste_handle_request(struct paste_conn *conn);
 static int paste_send_response(struct paste_conn *conn, int status,
                                const char *content_type,
@@ -704,7 +714,8 @@ static int paste_request_wants_ws_upgrade(const char *req)
  * (via the listener's websocket flag) exactly as on a dedicated WS
  * port — then replay the already-buffered upgrade request through
  * websocket_handshake_feed so the 101 goes out without waiting for a
- * fresh read event.  The husk paste_conn is MyFree'd at ET_DESTROY.
+ * fresh read event.  The husk paste_conn is MyFree'd at the socket's
+ * ET_DESTROY, after this callback returns (its timer goes at once).
  */
 static void paste_promote_to_client(struct paste_conn *conn)
 {
@@ -713,8 +724,8 @@ static void paste_promote_to_client(struct paste_conn *conn)
   int fd = conn->fd;
   struct Client *cptr;
   int result, consumed;
-  /* conn->request stays valid until ET_DESTROY MyFrees the struct,
-   * which cannot happen before this callback frame returns. */
+  /* conn->request stays valid until the socket's ET_DESTROY frees the
+   * struct, which cannot happen before this callback frame returns. */
   const char *req = conn->request;
   int req_len = conn->request_len;
 
@@ -926,19 +937,27 @@ static struct paste_conn *paste_conn_new(int fd)
   /* Set up timeout timer */
   timer_add(timer_init(&conn->timeout), paste_timeout_callback, (void *)conn,
             TT_RELATIVE, feature_int(FEAT_PASTE_REQUEST_TIMEOUT));
+  conn->freeflag |= PASTE_FREE_TIMER;
 
   return conn;
 }
 
+/** Close a paste connection.  The struct itself goes later, with the last
+ * ET_DESTROY of its generators (paste_conn_release()); that can come
+ * inside this call, so the caller may not touch \a conn afterwards unless
+ * it is inside the socket's own callback (whose ET_DESTROY waits for it
+ * to return).
+ */
 static void paste_conn_free(struct paste_conn *conn)
 {
+  unsigned int owed;
+  int fd;
+
   if (!conn || conn->dying)
     return;
 
-  /* Mark dying — the struct must survive until ET_DESTROY because
-   * the Socket is embedded inside it.  If we MyFree(conn) now while
-   * the event engine holds a reference (gh_ref > 0), the deferred
-   * ET_DESTROY writes to freed memory → heap corruption. */
+  /* Mark dying: from here every event but ET_DESTROY is ignored, and the
+   * last ET_DESTROY frees the struct. */
   conn->dying = 1;
 
   /* Remove from list */
@@ -950,11 +969,8 @@ static void paste_conn_free(struct paste_conn *conn)
     conn->next->prev = conn->prev;
   paste_conn_count--;
 
-  /* Cancel timeout */
-  if (t_active(&conn->timeout))
-    timer_del(&conn->timeout);
-
-  /* Clean up SSL — do this before socket_del/close */
+  /* The TLS close_notify first, while the fd is still open (non-blocking,
+   * best effort), and the SSL object with it. */
   if (conn->ssl) {
     SSL_shutdown(conn->ssl);
     SSL_free(conn->ssl);
@@ -963,11 +979,11 @@ static void paste_conn_free(struct paste_conn *conn)
     ssl_clear_errors("after SSL_shutdown");
   }
 
-  /* Close fd */
-  if (conn->fd >= 0) {
-    close(conn->fd);
-    conn->fd = -1;
-  }
+  /* The fd is closed last, below, after socket_del() has unregistered it
+   * (epoll_ctl DEL on a valid fd); nothing touches its number after the
+   * close.  A promoted conn has handed it over (-1). */
+  fd = conn->fd;
+  conn->fd = -1;
 
   /* Free response buffer */
   if (conn->response) {
@@ -975,36 +991,62 @@ static void paste_conn_free(struct paste_conn *conn)
     conn->response = NULL;
   }
 
-  /* A socket the engine refused (paste_accept_connection()) was never
-   * registered and is not active: no ET_DESTROY comes for it, and
-   * socket_del() must not be asked for one. */
-  if (!s_active(&conn->socket)) {
+  /* Let go of the generators, and touch the conn no more: the
+   * ET_DESTROY that frees it can run inside either call.
+   * - The timer, when idle, is destroyed inside timer_del().  On a request
+   *   timeout we are inside its own expiry: timer_del() leaves it to
+   *   timer_run(), which writes to the timer once the callback returns and
+   *   then raises its ET_DESTROY, so the conn must live until then.
+   * - The socket is destroyed inside socket_del() when no event holds it
+   *   (a timeout, shutdown), else once the engine lets go of it, after
+   *   the callback that called us.  A socket the engine refused
+   *   (paste_accept_connection()) was never registered: no ET_DESTROY is
+   *   owed for it, and socket_del() must not be asked for one.
+   * The timer is added with the conn, so one is always owed; a conn
+   * owing none would be freed here. */
+  owed = conn->freeflag;
+  if (!owed)
     MyFree(conn);
-    return;
-  }
+  if (owed & PASTE_FREE_TIMER)
+    timer_del(&conn->timeout);
+  if (owed & PASTE_FREE_SOCKET)
+    socket_del(&conn->socket);
 
-  /* socket_del marks the socket GEN_DESTROY.  If gh_ref > 0 (we're
-   * inside an event callback), ET_DESTROY is deferred until the
-   * engine decrements gh_ref to 0.  The conn struct stays alive
-   * until then — ET_DESTROY in paste_conn_callback calls MyFree.
-   * If gh_ref == 0 (shutdown path), ET_DESTROY fires synchronously
-   * from within socket_del and MyFree happens immediately. */
-  socket_del(&conn->socket);
+  if (fd >= 0)
+    close(fd);
+}
+
+/** One of the conn's generators has had its ET_DESTROY.  Free the conn
+ * once it is dying and that was the last one owed.
+ */
+static void paste_conn_release(struct paste_conn *conn, unsigned int flag)
+{
+  conn->freeflag &= ~flag;
+  if (conn->dying && !conn->freeflag)
+    MyFree(conn);
 }
 
 static void paste_timeout_callback(struct Event *ev)
 {
-  struct paste_conn *conn;
+  struct paste_conn *conn = (struct paste_conn *)t_data(ev_timer(ev));
+
+  if (!conn)
+    return;
+
+  /* The timer is done: deleted idle by paste_conn_free(), or expired
+   * (timer_run() raises this once the expiry below has returned). */
+  if (ev_type(ev) == ET_DESTROY) {
+    paste_conn_release(conn, PASTE_FREE_TIMER);
+    return;
+  }
 
   if (ev_type(ev) != ET_EXPIRE)
     return;
 
-  conn = (struct paste_conn *)t_data(ev_timer(ev));
-  if (!conn)
-    return;
-
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "Paste connection timeout");
+  /* Still inside the timer's expiry: the timer's ET_DESTROY, after this
+   * returns, is what frees the conn. */
   paste_conn_free(conn);
 }
 
@@ -1068,12 +1110,15 @@ static void paste_conn_callback(struct Event *ev)
   if (!conn)
     return;
 
-  /* After paste_conn_free marks dying, ignore all events except ET_DESTROY */
-  if (conn->dying) {
-    if (ev_type(ev) == ET_DESTROY)
-      MyFree(conn);
+  /* The socket is done: free the conn if its timer is too. */
+  if (ev_type(ev) == ET_DESTROY) {
+    paste_conn_release(conn, PASTE_FREE_SOCKET);
     return;
   }
+
+  /* After paste_conn_free marks dying, ignore all events except ET_DESTROY */
+  if (conn->dying)
+    return;
 
   switch (ev_type(ev)) {
     case ET_READ:
@@ -1187,6 +1232,7 @@ void paste_accept_connection(struct Listener *listener, int fd)
     paste_conn_free(conn);
     return;
   }
+  conn->freeflag |= PASTE_FREE_SOCKET;
 
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "Paste listener: new connection (total: %d)", paste_conn_count);

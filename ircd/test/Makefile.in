@@ -23,8 +23,9 @@ TESTPROGS = \
 # #ifdef USE_LIBKC.  Their build rules stay defined below either way; they
 # are simply never requested.
 #
-# @EPOLL_CMOCKA_TESTPROGS@ is ircd_events_cmocka when the epoll engine is
-# built, and empty otherwise: it links ../engine_epoll.o.
+# The EPOLL_CMOCKA_TESTPROGS substitution (configure.in) is
+# ircd_events_cmocka and paste_listener_cmocka when the epoll engine is
+# built, and empty otherwise: they link ../engine_epoll.o.
 CMOCKA_TESTPROGS = \
 	@KC_CMOCKA_TESTPROGS@ \
 	@EPOLL_CMOCKA_TESTPROGS@ \
@@ -130,6 +131,7 @@ DEP_SRC = \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
+	paste_listener_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -396,6 +398,22 @@ ircd_events_test.o: ../ircd_events.c ../../include/ircd_events.h events_assert.h
 IRCD_EVENTS_CMOCKA_OBJS = ircd_events_cmocka.o test_stub.o ircd_events_test.o ../engine_epoll.o
 ircd_events_cmocka: $(IRCD_EVENTS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_EVENTS_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# paste_listener tests - a paste connection is freed only by the last
+# ET_DESTROY of the two event generators inside it (its socket and its
+# request timer), never while one is still in use: a request timeout, a
+# failed handshake, a hangup, a refused registration, shutdown, a served
+# request and a WebSocket promote.  Includes ../paste_listener.c (so the
+# test sees the conn when it is freed) and links the real event core
+# (ircd_events_test.o, as above) and epoll engine; the TLS cases run a
+# real handshake over a socketpair, hence libssl.
+paste_listener_cmocka.o: ${srcdir}/paste_listener_cmocka.c ../paste_listener.c
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ${srcdir}/paste_listener_cmocka.c
+
+PASTE_LISTENER_CMOCKA_OBJS = paste_listener_cmocka.o ircd_events_test.o \
+	../engine_epoll.o ../ircd_string.o
+paste_listener_cmocka: $(PASTE_LISTENER_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(PASTE_LISTENER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
