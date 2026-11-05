@@ -1232,10 +1232,19 @@ static int ws_deliver(struct Client *cptr, char *buf, int len)
   if (buf[len - 1] != '\n')
     buf[len++] = '\n';
   classify = recv_classify(cptr, buf, len);
-  if (classify == RECV_CLASSIFY_TAG_OVERRUN)
-    return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: tag region too large");
-  if (classify == RECV_CLASSIFY_MSG_OVERRUN)
-    return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: message region too large");
+  if (classify == RECV_CLASSIFY_TAG_OVERRUN
+      || classify == RECV_CLASSIFY_MSG_OVERRUN) {
+    const char *why = classify == RECV_CLASSIFY_TAG_OVERRUN
+                      ? "Excess Flood: tag region too large"
+                      : "Excess Flood: message region too large";
+
+    /* A line over a recv cap is a message too big to process: RFC 6455
+     * §7.4.1 gives that 1009, as a frame over WS_MAX_PAYLOAD gets, and
+     * keeps 1008 (policy) for when "there is no other more suitable
+     * status code (e.g., 1003 or 1009)".  The reason is the exit's. */
+    websocket_set_close(cptr, 1009, why);
+    return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, why);
+  }
   if (dbuf_put(&(cli_recvQ(cptr)), buf, len) == 0)
     return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
   return 1;
