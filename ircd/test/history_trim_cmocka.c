@@ -3495,12 +3495,12 @@ static void test_emptiness_undecided_past_skip_limit(void **state)
   assert_int_equal(1, fake_db_suggest_calls(st.messages));   /* hinted */
   assert_int_equal(1, fake_db_flush_calls(st.messages));
   memcpy(lo, "#big\0", 5);
-  memcpy(hi, "#big\x01\0", 6);            /* [#big\0, #big\x01 ‖ 0x00) */
+  memcpy(hi, "#big\x01", 5);              /* exactly [#big\0, #big\x01) */
   assert_int_equal(DB_OK, fake_db_last_suggest(st.messages, &s, &sl, &e, &el));
   assert_int_equal(5, sl);
   assert_memory_equal(lo, s, 5);
-  assert_int_equal(6, el);
-  assert_memory_equal(hi, e, 6);
+  assert_int_equal(5, el);
+  assert_memory_equal(hi, e, 5);
   assert_int_equal(0, htrim_tsweep_pending());        /* not this second: */
   run_until_idle(&p);
   assert_true(targets_has("#big"));
@@ -3880,17 +3880,18 @@ static void test_undecided_hint_waits_for_an_engine_slice(void **state)
 }
 
 /* M4: an owner step that starts at the live floor and runs out of
- * entries has not seen the owner's entries below the floor (orphans the
- * boot scan counted): its total is not zeroed; the step ends and the
- * totals are counted again. */
+ * entries has not seen the owner's entries below the floor: it walks
+ * below its start once (fix round 3) -- the orphan the boot scan counted
+ * goes, with its bytes -- and since the total is still short (it was
+ * double-counted), the totals are counted again rather than zeroed. */
 static void test_evict_owner_from_floor_runs_out_recounts(void **state)
 {
   struct htrim_params pa = bf_params(0);
   struct htrim_params p = ev_params(0);
-  char ts[32], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16];
+  char ts[32], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16], bo_orphan[HTC_BO_KEY_MAX];
   unsigned char sz[4];
   struct db_writebatch *wb;
-  int i, btl, bol;
+  int i, btl, bol, bol_orphan;
   (void)state;
 
   ageout_ready();
@@ -3899,6 +3900,8 @@ static void test_evict_owner_from_floor_runs_out_recounts(void **state)
   /* An orphan entry of a:flood below the floor, counted by a reboot's scan. */
   btl = htc_bt_key(bt, sizeof bt, (BF_NOW_S - 9 * 86400ULL) * 1000ULL, "#f", "GONE");
   bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+  memcpy(bo_orphan, bo, (size_t)bol);
+  bol_orphan = bol;
   htc_size_pack(sz, 600);
   wb = db_writebatch_new(env);
   assert_non_null(wb);
@@ -3924,14 +3927,16 @@ static void test_evict_owner_from_floor_runs_out_recounts(void **state)
   assert_int_equal(4600, owner_of("a:flood"));
   run_until_idle(&p);
   assert_int_equal(1, htrim_acct_loaded());     /* recounted: what by_owner holds */
-  assert_int_equal(600, owner_of("a:flood"));   /* the orphan below the floor */
+  assert_int_equal(0, owner_of("a:flood"));     /* rows and orphan gone */
+  assert_false(key_exists(st.by_owner, bo_orphan, (size_t)bol_orphan));
   assert_int_equal(0, htrim_draining());
   assert_acct_matches_cf();
 }
 
 /* M6: a hint whose flush fails keeps its count (the next trigger hints
- * the whole range).  msgid_index is the first CF hinted here: it loses 2
- * keys a row, 24 >= 10 after one pass. */
+ * the whole range), and the trigger backs off until compact_min_rows more
+ * keys have gone (or 60 slices; fix round 3).  msgid_index is the first
+ * CF hinted here: it loses 2 keys a row. */
 static void test_hint_flush_failure_keeps_the_count(void **state)
 {
   struct htrim_params p = bf_params(0);
@@ -3957,12 +3962,19 @@ static void test_hint_flush_failure_keeps_the_count(void **state)
     snprintf(mid, sizeof mid, "B%02d", i);
     seed_plain("#t", ts_ago(ts, sizeof ts, 8, 50 - i), mid, "a:bob", NULL);
   }
-  ageout_pass(&p);                              /* 32 + 4 >= 30: hinted, from A00 */
+  ageout_pass(&p);                              /* 36: backing off, no retry yet */
+  assert_int_equal(1, fake_db_flush_calls(st.msgid));
+  assert_int_equal(0, fake_db_suggest_calls(st.msgid));
+  for (i = 0; i < 13; i++) {                    /* 36 + 26 = 62: compact_min_rows more */
+    snprintf(mid, sizeof mid, "C%02d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 40 - i), mid, "a:bob", NULL);
+  }
+  ageout_pass(&p);                              /* hinted, from A00 */
   assert_int_equal(1, fake_db_suggest_calls(st.msgid));
   assert_int_equal(DB_OK, fake_db_last_suggest(st.msgid, &s, &sl, &e, &el));
   assert_int_equal(3, sl);
   assert_memory_equal("A00", s, 3);
-  assert_int_equal(by_time, fake_db_suggest_calls(st.by_time));
+  assert_int_equal(by_time + 1, fake_db_suggest_calls(st.by_time));   /* 31 >= 30 */
 }
 
 /* M6: a drain that starts while the last one's drain-end hints are still
@@ -3990,15 +4002,381 @@ static void test_drain_start_keeps_a_due_hint(void **state)
   snprintf(ts, sizeof ts, "%d.000", 1000);
   btl = bt_of(bt, sizeof bt, "#t", ts, "R00");
   lol = htc_bo_key(lo, sizeof lo, "-", bt, (size_t)btl);
-  /* by_owner's first hint covers drain 1 from its first key. */
-  assert_true(fake_db_suggest_calls(st.by_owner) <= 2);
+  /* by_owner's hint, still due when drain 2 began, kept drain 1's
+   * deletes: one hint, issued after drain 2, from drain 1's first key. */
+  assert_int_equal(1, fake_db_suggest_calls(st.by_owner));
   assert_int_equal(DB_OK, fake_db_last_suggest(st.by_owner, &s, &sl, &e, &el));
   (void)e;
   (void)el;
-  if (fake_db_suggest_calls(st.by_owner) == 1) {
-    assert_int_equal((size_t)lol, sl);
-    assert_memory_equal(lo, s, sl);
+  assert_int_equal((size_t)lol, sl);
+  assert_memory_equal(lo, s, sl);
+}
+
+/* ------------------------------------------------------------------ */
+/* Task 8 fix round 3                                                  */
+/* ------------------------------------------------------------------ */
+
+/* The re-review's probe: an owner whose orphaned by_owner bytes below the
+ * live floor exceed its share.  Its step from the floor ran out, the
+ * totals were recounted, and the next drain picked it again -- 1000
+ * recounts in 2000 slices, the cap never enforced.  The step now walks
+ * below its start once and removes the orphan with its bytes. */
+static void test_evict_orphan_below_floor_over_share(void **state)
+{
+  struct htrim_params pa = bf_params(0);
+  struct htrim_params p = ev_params(0);
+  char ts[32], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX];
+  unsigned char sz[4];
+  struct db_writebatch *wb;
+  int i, btl, bol, recounts = 0, prev = 1, rc = 1;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#old", ts_ago(ts, sizeof ts, 8, 0), "O1", "a:bob", NULL);
+  ageout_pass(&pa);
+  btl = htc_bt_key(bt, sizeof bt, (BF_NOW_S - 9 * 86400ULL) * 1000ULL, "#f", "GONE");
+  bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+  htc_size_pack(sz, 1200);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_owner, bo, (size_t)bol, sz, sizeof sz));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_run("#f", "F", "a:flood", 20, BF_NOW_S - 3600, 100);
+  seed_run("#n", "N", "-", 75, BF_NOW_S - 7200, 100);
+  reboot();
+  load_acct();
+  htrim_pass_start(&pa);
+  run_until_idle(&pa);
+  assert_int_equal(3200, owner_of("a:flood"));
+  assert_int_equal(10700, total_now());
+
+  for (i = 0; i < 2000 && rc == 1; i++) {
+    rc = htrim_run_slice(&p);
+    if (prev && !htrim_acct_loaded())
+      recounts++;
+    prev = htrim_acct_loaded();
   }
+  assert_int_equal(0, rc);
+  assert_int_equal(0, recounts);
+  assert_false(key_exists(st.by_owner, bo, (size_t)bol));
+  assert_int_equal(0, owner_of("a:flood"));
+  assert_int_equal(7500, total_now());
+  assert_int_equal(0, htrim_draining());
+  assert_acct_matches_cf();
+}
+
+/* The walk below the start, stopped by the budget, resumes there in the
+ * next slice (its iterator opens past the last orphan it removed) and
+ * finishes the step: share 1% (100), a:flood 10 rows + 12 orphans below
+ * the floor (2200) -- trim 2100: the 10 rows, then 11 orphans. */
+static void test_evict_below_floor_walk_resumes(void **state)
+{
+  struct htrim_params pa = bf_params(0);
+  struct htrim_params p = ev_params(3);
+  char ts[32], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16];
+  unsigned char sz[4];
+  struct db_writebatch *wb;
+  uint64_t floor_ms = (BF_NOW_S - 7ULL * 86400ULL) * 1000ULL;
+  int i, btl, bol, rc = 1, resumed_below = 0;
+  (void)state;
+
+  p.share_pct = 1;
+  ageout_ready();
+  seed_plain("#old", ts_ago(ts, sizeof ts, 8, 0), "O1", "a:bob", NULL);
+  ageout_pass(&pa);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  htc_size_pack(sz, 100);
+  for (i = 0; i < 12; i++) {
+    snprintf(mid, sizeof mid, "G%02d", i);
+    btl = htc_bt_key(bt, sizeof bt, (BF_NOW_S - 9 * 86400ULL + (uint64_t)i) * 1000ULL, "#f", mid);
+    bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+    assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_owner, bo, (size_t)bol, sz, sizeof sz));
+  }
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_run("#f", "F", "a:flood", 10, BF_NOW_S - 3600, 100);
+  seed_run("#n", "N", "-", 66, BF_NOW_S - 7200, 100);
+  reboot();
+  load_acct();
+  htrim_pass_start(&pa);
+  run_until_idle(&pa);
+  assert_int_equal(2200, owner_of("a:flood"));  /* 8800 > 8500 */
+
+  step_us = 1000;                               /* a few entries a 3 ms slice */
+  for (i = 0; i < 1000 && rc == 1; i++) {
+    const void *lo;
+    size_t ll;
+    rc = htrim_run_slice(&p);
+    fake_db_last_iter_lower(st.by_owner, &lo, &ll);
+    if (lo && ll > 8 + 8 && memcmp(lo, "a:flood\0", 8) == 0) {
+      const unsigned char *b8 = (const unsigned char *)lo + 8;
+      uint64_t ms = 0;
+      int j;
+      for (j = 0; j < 8; j++)
+        ms = (ms << 8) | b8[j];
+      if (ms < floor_ms) {                      /* past an orphan it removed, */
+        const void *up;
+        size_t ul;
+        unsigned char start[16];
+        memcpy(start, "a:flood\0", 8);
+        htc_be64(start + 8, floor_ms);
+        fake_db_last_iter_upper(st.by_owner, &up, &ul);
+        assert_int_equal(16, ul);               /* and still below the start */
+        assert_memory_equal(start, up, 16);
+        resumed_below = 1;
+      }
+    }
+  }
+  assert_int_equal(0, rc);
+  assert_true(resumed_below);
+  assert_int_equal(100, owner_of("a:flood"));   /* one orphan left: at its share */
+  assert_int_equal(66, fake_db_rows(st.by_time));
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(1, htrim_acct_loaded());
+  assert_acct_matches_cf();
+}
+
+/* The re-review's M6 probe: a prefix-keyed CF's drain-end hint that fails
+ * is no longer due -- the next drain's start must still keep its count
+ * (these CFs have no other trigger): drain 2's hint starts at R00. */
+static void test_failed_prefix_hint_survives_the_next_drain(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char lo[HTC_BO_KEY_MAX], bt[HTC_BT_KEY_MAX], ts[32];
+  const void *s, *e;
+  size_t sl, el;
+  int lol, btl, n = 0;
+  (void)state;
+
+  p.quota_on = 0;
+  evict_ready();
+  seed_run("#t", "R", "-", 86, 1000, 100);
+  while (fake_db_flush_calls(st.by_owner) == 0 && n < 50) {   /* every flush fails */
+    fake_db_fail_next_flush(env);
+    htrim_run_slice(&p);
+    n++;
+  }
+  assert_int_equal(1, fake_db_flush_calls(st.by_owner));
+  assert_int_equal(0, fake_db_suggest_calls(st.by_owner));
+  seed_run("#u", "S", "-", 20, 2000, 100);       /* 9500: over high again */
+  run_until_idle(&p);
+  assert_int_equal(1, fake_db_suggest_calls(st.by_owner));
+  snprintf(ts, sizeof ts, "%d.000", 1000);
+  btl = bt_of(bt, sizeof bt, "#t", ts, "R00");
+  lol = htc_bo_key(lo, sizeof lo, "-", bt, (size_t)btl);
+  assert_int_equal(DB_OK, fake_db_last_suggest(st.by_owner, &s, &sl, &e, &el));
+  assert_int_equal((size_t)lol, sl);
+  assert_memory_equal(lo, s, sl);
+}
+
+/** Two targets of one row each, both emptied in one unbudgeted slice
+ * with more than 10000 tombstones in the way ahead of them: a filler run
+ * in each target's range keeps the check from deciding. */
+static void seed_undecided_pair(const char *a, const char *b)
+{
+  char ts[32], mid[16];
+  struct htrim_slice *s;
+  int i, t;
+  const char *names[2];
+
+  names[0] = a;
+  names[1] = b;
+  for (t = 0; t < 2; t++) {
+    for (i = 0; i <= 10000; i++) {
+      snprintf(mid, sizeof mid, "%c%05d", 'a' + t, i);
+      seed_plain(names[t], ts_ago(ts, sizeof ts, 1, 30000 - i), mid, "a:bob", NULL);
+    }
+    seed_targets(names[t], ts);
+  }
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  for (t = 0; t < 2; t++)
+    for (i = 0; i <= 10000; i++) {
+      snprintf(mid, sizeof mid, "%c%05d", 'a' + t, i);
+      stage_del(s, HTRIM_PATH_AGEOUT, names[t], ts_ago(ts, sizeof ts, 1, 30000 - i), mid, 1);
+    }
+  assert_int_equal(20002, htrim_slice_commit(s));
+}
+
+/* (a) Undecided targets are hinted each over its own range -- never one
+ * range across unrelated targets (most of the CF) -- and (c) one messages
+ * flush serves both messages slots when both are due. */
+static void test_undecided_targets_hinted_apart(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  const void *s, *e;
+  size_t sl, el;
+  (void)state;
+
+  p.quota_on = 0;
+  evict_ready();
+  seed_undecided_pair("#aa", "#zz");
+  assert_true(targets_has("#aa"));
+  assert_true(targets_has("#zz"));
+  assert_int_equal(0, fake_db_suggest_calls(st.messages));     /* a caller's slice */
+
+  /* A drain due at the same time: its messages hint and the undecided
+   * ranges share one flush. */
+  seed_run("#t", "R", "-", 86, BF_NOW_S - 600, 100);
+  assert_int_equal(1, htrim_run_slice(&p));     /* the drain, and the messages hint */
+  assert_int_equal(HTRIM_PH_EVICT, htrim_stats()->last_phase);
+  assert_int_equal(0, htrim_draining());
+  assert_int_equal(1, fake_db_flush_calls(st.messages));
+  assert_int_equal(3, fake_db_suggest_calls(st.messages));     /* drain + 2 targets */
+  assert_int_equal(DB_OK, fake_db_last_suggest(st.messages, &s, &sl, &e, &el));
+  assert_int_equal(4, sl);                      /* the last: a target's own range */
+  assert_int_equal(4, el);
+  assert_true((memcmp(s, "#zz\0", 4) == 0 && memcmp(e, "#zz\x01", 4) == 0)
+              || (memcmp(s, "#aa\0", 4) == 0 && memcmp(e, "#aa\x01", 4) == 0));
+  /* The sweep the drain armed meets both still undecided: one more hint
+   * later, both ranges apart again. */
+  run_until_idle(&p);
+  assert_int_equal(2, fake_db_flush_calls(st.messages));
+  assert_int_equal(5, fake_db_suggest_calls(st.messages));
+}
+
+/* (b) A time-ordered CF whose flush keeps failing: one WARNING for the
+ * streak, and the retries back off (not one a slice); the first success
+ * ends the streak. */
+static void test_failing_hint_backs_off(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32], mid[16], *log;
+  FILE *tmp;
+  unsigned int flushes;
+  long len;
+  int i, pass;
+  (void)state;
+
+  p.compact_min_rows = 10;
+  ageout_ready();
+  stderr_capture(&tmp);
+  for (pass = 0; pass < 5; pass++) {
+    for (i = 0; i < 6; i++) {                   /* by_time: 6 a pass, >= 10 by pass 2 */
+      snprintf(mid, sizeof mid, "P%d_%d", pass, i);
+      seed_plain("#t", ts_ago(ts, sizeof ts, 8, 100 - pass * 10 - i), mid, "a:bob", NULL);
+    }
+    htrim_pass_start(&p);
+    for (i = 0; i < 20; i++) {                  /* every flush fails */
+      fake_db_fail_next_flush(env);
+      if (htrim_run_slice(&p) != 1)
+        break;
+    }
+  }
+  flushes = fake_db_flush_calls(st.by_time);
+  db_flush_cf(env, st.reply, 0);                /* use up an armed failure */
+  fflush(stderr);
+  stderr_restore();
+  fseek(tmp, 0, SEEK_END);
+  len = ftell(tmp);
+  rewind(tmp);
+  log = (char *)calloc(1, (size_t)len + 1);
+  assert_int_equal((size_t)len, fread(log, 1, (size_t)len, tmp));
+  fclose(tmp);
+  assert_true(flushes >= 1 && flushes <= 3);    /* backed off, not each pass */
+  assert_int_equal(1, count_of(log, "compaction hint on by_time failed"));
+  free(log);
+
+  for (i = 0; i < 12; i++) {                    /* compact_min_rows more: a retry */
+    snprintf(mid, sizeof mid, "Q%02d", i);
+    seed_plain("#t", ts_ago(ts, sizeof ts, 8, 40 - i), mid, "a:bob", NULL);
+  }
+  ageout_pass(&p);
+  assert_int_equal(1, fake_db_suggest_calls(st.by_time));
+}
+
+/* (d) The undecided slot's log line counts targets, not keys. */
+static void test_undecided_hint_logs_targets(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char *log;
+  FILE *tmp;
+  long len;
+  (void)state;
+
+  evict_ready();
+  stderr_capture(&tmp);
+  seed_undecided_pair("#aa", "#zz");
+  run_until_idle(&p);
+  fflush(stderr);
+  stderr_restore();
+  fseek(tmp, 0, SEEK_END);
+  len = ftell(tmp);
+  rewind(tmp);
+  log = (char *)calloc(1, (size_t)len + 1);
+  assert_int_equal((size_t)len, fread(log, 1, (size_t)len, tmp));
+  fclose(tmp);
+  assert_non_null(strstr(log, "compaction hint on messages: 2 undecided targets"));
+  free(log);
+}
+
+/* Both phases ran out short of the trim (the total drifted): the totals
+ * are counted again -- never zeroed, since a row the owner stored while
+ * the walk below its start was still going lies above the walk and was
+ * never seen (zeroing would drop its bytes). */
+static void test_evict_drift_after_both_phases_recounts(void **state)
+{
+  struct htrim_params pa = bf_params(0);
+  struct htrim_params p = ev_params(3);
+  char ts[32], bt[HTC_BT_KEY_MAX], bo[HTC_BO_KEY_MAX], mid[16], t[32];
+  unsigned char sz[4], start[16];
+  struct db_writebatch *wb;
+  uint64_t floor_ms = (BF_NOW_S - 7ULL * 86400ULL) * 1000ULL;
+  int i, btl, bol, rc = 1, stored = 0;
+  (void)state;
+
+  ageout_ready();
+  seed_plain("#old", ts_ago(ts, sizeof ts, 8, 0), "O1", "a:bob", NULL);
+  ageout_pass(&pa);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  htc_size_pack(sz, 100);
+  for (i = 0; i < 20; i++) {                    /* 20 orphans below the floor */
+    snprintf(mid, sizeof mid, "G%02d", i);
+    btl = htc_bt_key(bt, sizeof bt, (BF_NOW_S - 9 * 86400ULL + (uint64_t)i) * 1000ULL, "#f", mid);
+    bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+    assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_owner, bo, (size_t)bol, sz, sizeof sz));
+  }
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_run("#f", "F", "a:flood", 10, BF_NOW_S - 3600, 100);
+  seed_run("#n", "N", "-", 26, BF_NOW_S - 7200, 100);
+  reboot();
+  load_acct();
+  htrim_pass_start(&pa);
+  run_until_idle(&pa);
+  for (i = 0; i < 30; i++) {                    /* drift: 3000 counted twice */
+    snprintf(mid, sizeof mid, "F%02d", i % 10);
+    snprintf(t, sizeof t, "%llu.000", (unsigned long long)(BF_NOW_S - 3600 + (uint64_t)(i % 10)));
+    btl = bt_of(bt, sizeof bt, "#f", t, mid);
+    bol = htc_bo_key(bo, sizeof bo, "a:flood", bt, (size_t)btl);
+    htrim_note_stored("a:flood", bo, (size_t)bol, 100);
+  }
+  assert_int_equal(6000, owner_of("a:flood"));  /* 8600 > 8500: trim 5000 */
+
+  memcpy(start, "a:flood\0", 8);
+  htc_be64(start + 8, floor_ms);
+  step_us = 1000;                               /* a few entries a 3 ms slice */
+  for (i = 0; i < 1000 && rc == 1; i++) {
+    const void *up;
+    size_t ul;
+    rc = htrim_run_slice(&p);
+    fake_db_last_iter_upper(st.by_owner, &up, &ul);
+    if (!stored && rc == 1 && htrim_acct_loaded() && up && ul == 16
+        && memcmp(up, start, 16) == 0) {        /* the walk below the start */
+      seed_sized("#f", BF_NOW_S - 60, "NEW", "a:flood", 100);
+      stored = 1;
+    }
+  }
+  assert_int_equal(0, rc);
+  assert_true(stored);
+  assert_int_equal(1, htrim_acct_loaded());
+  assert_int_equal(100, owner_of("a:flood"));   /* the row stored meanwhile */
+  assert_true(row_present("#f", BF_NOW_S - 60, "NEW"));
+  assert_acct_matches_cf();
 }
 
 int main(void)
@@ -4088,6 +4466,13 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_evict_owner_from_floor_runs_out_recounts, setup, teardown),
     cmocka_unit_test_setup_teardown(test_hint_flush_failure_keeps_the_count, setup, teardown),
     cmocka_unit_test_setup_teardown(test_drain_start_keeps_a_due_hint, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_orphan_below_floor_over_share, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_below_floor_walk_resumes, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_failed_prefix_hint_survives_the_next_drain, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_undecided_targets_hinted_apart, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_failing_hint_backs_off, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_undecided_hint_logs_targets, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_drift_after_both_phases_recounts, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

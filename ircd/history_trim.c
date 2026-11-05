@@ -208,6 +208,11 @@ struct htrim_slice {
                                                      at the end ("" = none) */
   char                 *ev_bo;       /* ... and the last by_owner key it deleted */
   size_t                ev_bo_len, ev_bo_cap;
+  int                   ev_below;    /* ... walking below where it started */
+  char                 *ev_below_hi; /*     up to this key (exclusive) */
+  size_t                ev_below_hi_len, ev_below_hi_cap;
+  char                 *ev_start;    /* ... where it started (owner \0 ‖ floor) */
+  size_t                ev_start_len, ev_start_cap;
   char                  ev_zero[HTC_OWNER_MAX];   /* an owner walked to the end of
                                                      its range: it holds 0 */
   char                 *ev_bt;       /* the last by_time key oldest-overall deleted */
@@ -272,6 +277,11 @@ static struct {
   char               ev_owner[HTC_OWNER_MAX];      /* the owner step in progress */
   char              *ev_bo;           /* the last by_owner key that step deleted, */
   size_t             ev_bo_len, ev_bo_cap;         /* 0 = from the owner's first key */
+  int                ev_below;        /* the step walks below where it started, */
+  char              *ev_below_hi;     /* up to this key (exclusive) */
+  size_t             ev_below_hi_len, ev_below_hi_cap;
+  char              *ev_start;        /* where the step started (owner \0 ‖ floor; */
+  size_t             ev_start_len, ev_start_cap;   /* 0 = its first key) */
   int                ev_lower_set;    /* 0: oldest-overall starts at the age-out point */
   char              *ev_lower;        /* where oldest-overall resumes (inclusive), */
   size_t             ev_lower_len, ev_lower_cap;   /* 0 = the first key */
@@ -291,8 +301,20 @@ static struct {
   struct htrim_hint  hint[HH_COUNT];
   unsigned char      hint_due[HH_COUNT];
   unsigned char      hint_defer[HH_COUNT];  /* slices its flush waited on a busy CF */
-  uint64_t           hint_rearm[HH_COUNT];  /* after a dropped hint: the count the
-                                               cumulative trigger waits for */
+  uint64_t           hint_rearm[HH_COUNT];  /* after a failed or dropped hint: the
+                                               count the cumulative trigger waits
+                                               for, or ... */
+  unsigned char      hint_backoff[HH_COUNT]; /* ... these many slices */
+  unsigned char      hint_failed[HH_COUNT]; /* the last hint failed or was dropped
+                                               (its count kept; one WARNING a streak) */
+  /* Undecided targets' ranges [name 0x00, name 0x01), each apart (up to
+   * HTRIM_UND_MAX; past that the last one widens): the HH_UNDECIDED slot. */
+  struct {
+    char   lo[HTC_TARGET_MAX + 1], hi[HTC_TARGET_MAX + 1];
+    size_t lol, hil;
+  }                  und[8];
+  size_t             nund;
+  uint64_t           und_targets;           /* undecided targets they cover */
   unsigned int       compact_min_rows;
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
@@ -683,89 +705,147 @@ static int cf_flush_would_wait(struct db_cf *cf)
          || (cs.l0_slowdown_trigger && cs.l0_files + 1 >= cs.l0_slowdown_trigger);
 }
 
-/** Hint CF @a i's compaction over [smallest, largest ‖ 0x00) of what it
- * lost since its last hint, and start counting again.  A hint marks SST
- * files only, so the CF's memtable is flushed first, without waiting for
- * the flush itself -- but RocksDB still blocks the call while the flush
- * would stall writes, so a busy CF (cf_flush_would_wait) gets the
- * suggestion alone, once, and the hint stays due for a later slice (up to
- * HTRIM_HINT_DEFER_MAX).  A flush or suggestion that fails keeps the
- * count, so the next trigger covers this range too. */
-static int hint_flush(int i)
+/** Whether slot @a i has deletes (or undecided targets) to hint. */
+static int slot_pending(int i)
+{
+  return i == HH_UNDECIDED ? g.nund > 0 : g.hint[i].n > 0;
+}
+
+/** Suggest slot @a i's range(s) on @a cf: [smallest, largest ‖ 0x00) of
+ * what it lost, or each undecided target's [name 0x00, name 0x01).
+ * @return 0, or -1 when a suggestion failed. */
+static int slot_suggest(int i, struct db_cf *cf)
 {
   struct htrim_hint *h = &g.hint[i];
-  struct db_cf *cf = hint_cf(i);
-  struct db_cf_stats cs;
-  uint64_t t0;
   char *end;
-  int ok;
+  size_t k;
+  int rc = 0;
 
-  if (!h->n)
-    return 0;
-  if (!cf) {
-    h->n = 0;
-    return 0;
+  if (i == HH_UNDECIDED) {
+    for (k = 0; k < g.nund; k++)
+      if (db_suggest_compact(g.st.env, cf, g.und[k].lo, g.und[k].lol,
+                             g.und[k].hi, g.und[k].hil) != DB_OK)
+        rc = -1;
+    return rc;
   }
   end = (char *)MyMalloc(h->hi_len + 1);
   memcpy(end, h->hi, h->hi_len);
   end[h->hi_len] = '\0';
-  if (cf_flush_would_wait(cf)) {
-    if (!g.hint_defer[i]
-        && db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) != DB_OK)
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "history_trim: compaction hint failed: %s", last_err());
-    if (++g.hint_defer[i] < HTRIM_HINT_DEFER_MAX)
-      g.hint_due[i] = 1;                        /* the flush, a later slice */
-    else {                                      /* dropped; the count stays, and */
-      g.hint_defer[i] = 0;                      /* the trigger waits for more */
-      g.hint_rearm[i] = h->n + g.compact_min_rows;
-    }
-    MyFree(end);
+  if (db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) != DB_OK)
+    rc = -1;
+  MyFree(end);
+  return rc;
+}
+
+/** Slot @a i's hint went through: start counting again. */
+static void slot_done(int i)
+{
+  if (i == HH_UNDECIDED) {
+    g.nund = 0;
+    g.und_targets = 0;
+  } else
+    g.hint[i].n = 0;
+  g.hint_defer[i] = g.hint_backoff[i] = g.hint_failed[i] = 0;
+  g.hint_rearm[i] = 0;
+}
+
+/** Slot @a i's hint failed, or was dropped after HTRIM_HINT_DEFER_MAX
+ * busy slices: its count stays (the next hint covers this range too), a
+ * drain's start keeps it, and the cumulative trigger backs off until
+ * compact_min_rows more keys went or HTRIM_HINT_DEFER_MAX slices passed.
+ * One WARNING a streak of failures. */
+static void slot_failed(int i, const char *what)
+{
+  if (!g.hint_failed[i])
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history_trim: compaction hint on %s %s; kept for a later one "
+              "(further failures not logged until one succeeds): %s",
+              hint_names[i], what, last_err());
+  g.hint_failed[i] = 1;
+  g.hint_defer[i] = 0;
+  g.hint_backoff[i] = HTRIM_HINT_DEFER_MAX;
+  g.hint_rearm[i] = i == HH_UNDECIDED ? 0 : g.hint[i].n + g.compact_min_rows;
+}
+
+/** Hint the compaction of slot @a i's CF -- and, on messages, of the
+ * other messages slot when it is due too: one flush serves both.  A hint
+ * marks SST files only, so the CF's memtable is flushed first, without
+ * waiting for the flush itself -- but RocksDB still blocks the call while
+ * the flush would stall writes, so a busy CF (cf_flush_would_wait) gets
+ * the suggestion alone, once, and the hint stays due for a later slice
+ * (up to HTRIM_HINT_DEFER_MAX).
+ * @return 1 when a flush was attempted (one a slice), 0 otherwise. */
+static int hint_flush(int i)
+{
+  struct db_cf *cf = hint_cf(i);
+  struct db_cf_stats cs;
+  uint64_t t0, us;
+  int grp[2], ng = 0, k, flushed;
+
+  if (!slot_pending(i))
+    return 0;
+  if (!cf) {
+    slot_done(i);
     return 0;
   }
-  g.hint_defer[i] = 0;
+  grp[ng++] = i;
+  if (cf == g.st.messages) {
+    int o = i == HH_MESSAGES ? HH_UNDECIDED : HH_MESSAGES;
+    if (g.hint_due[o] && slot_pending(o)) {
+      g.hint_due[o] = 0;
+      grp[ng++] = o;
+    }
+  }
+  if (cf_flush_would_wait(cf)) {
+    for (k = 0; k < ng; k++) {
+      int j = grp[k];
+      if (!g.hint_defer[j])
+        slot_suggest(j, cf);                    /* the suggestion alone, once */
+      if (++g.hint_defer[j] < HTRIM_HINT_DEFER_MAX)
+        g.hint_due[j] = 1;                      /* the flush, a later slice */
+      else
+        slot_failed(j, "dropped: the column family stayed busy");
+    }
+    return 0;
+  }
   memset(&cs, 0, sizeof cs);
   db_cf_stats(g.st.env, cf, &cs);
   t0 = g.clock();
-  ok = db_flush_cf(g.st.env, cf, 0) == DB_OK
-       && db_suggest_compact(g.st.env, cf, h->lo, h->lo_len, end, h->hi_len + 1) == DB_OK;
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "history: trim: compaction hint on %s: %llu keys deleted since the "
-            "last hint, %zu deletes in its memtables; flush + hint %llu us on "
-            "the main thread", hint_names[i], (unsigned long long)h->n,
-            cs.mem_deletes + cs.imm_deletes,
-            (unsigned long long)elapsed_since(t0, g.clock()));
-  if (!ok)
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "history_trim: compaction hint failed (kept for the next): %s",
-              last_err());
-  else {
-    h->n = 0;
-    g.hint_rearm[i] = 0;
+  flushed = db_flush_cf(g.st.env, cf, 0) == DB_OK;
+  us = elapsed_since(t0, g.clock());
+  for (k = 0; k < ng; k++) {
+    int j = grp[k];
+    if (j == HH_UNDECIDED)
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "history: trim: compaction hint on messages: %llu undecided "
+                "target%s, %zu deletes in its memtables; flush %llu us on the "
+                "main thread", (unsigned long long)g.und_targets,
+                g.und_targets == 1 ? "" : "s", cs.mem_deletes + cs.imm_deletes,
+                (unsigned long long)us);
+    else
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "history: trim: compaction hint on %s: %llu keys deleted since "
+                "the last hint, %zu deletes in its memtables; flush %llu us on "
+                "the main thread", hint_names[j],
+                (unsigned long long)g.hint[j].n, cs.mem_deletes + cs.imm_deletes,
+                (unsigned long long)us);
+    if (flushed && slot_suggest(j, cf) == 0) {
+      if (g.hint_failed[j])
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "history_trim: compaction hints on %s go through again",
+                  hint_names[j]);
+      slot_done(j);
+    } else
+      slot_failed(j, flushed ? "failed" : "failed (flush)");
   }
-  MyFree(end);
   return 1;
 }
 
-/** The CFs whose keys sort by time (by_time; msgid_index and ml_content
- * by msgid, which is time-ordered): what age-out deleted is one range at
- * the head, so the cumulative trigger hints them.  The prefix-keyed CFs
- * (messages, by_owner, reply_index: per target or owner) are spread over
- * the whole keyspace -- one hint would cover all of it -- and rely on the
- * deletion collector, plus the hint at a drain's end over what the drain
- * deleted. */
-static int hint_time_ordered(int i)
-{
-  return i == HH_BY_TIME || i == HH_MSGID || i == HH_ML_CONTENT;
-}
-
-/** Every CF with deletes since its last hint is due a hint (a drain's
- * end). */
 static void hints_flush_all(void)
 {
   int i;
   for (i = 0; i < HH_COUNT; i++)
-    if (g.hint[i].n)
+    if (slot_pending(i))
       g.hint_due[i] = 1;
 }
 
@@ -793,6 +873,20 @@ static int hint_issue_one(void)
     }
   return any;
 }
+
+/** The CFs whose keys sort by time (by_time; msgid_index and ml_content
+ * by msgid, which is time-ordered): what age-out deleted is one range at
+ * the head, so the cumulative trigger hints them.  The prefix-keyed CFs
+ * (messages, by_owner, reply_index: per target or owner) are spread over
+ * the whole keyspace -- one hint would cover all of it -- and rely on the
+ * deletion collector, plus the hint at a drain's end over what the drain
+ * deleted. */
+static int hint_time_ordered(int i)
+{
+  return i == HH_BY_TIME || i == HH_MSGID || i == HH_ML_CONTENT;
+}
+
+
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
@@ -838,6 +932,8 @@ void htrim_shutdown(void)
   MyFree(g.ao_late);
   MyFree(g.ao_saved);
   MyFree(g.ev_bo);
+  MyFree(g.ev_below_hi);
+  MyFree(g.ev_start);
   MyFree(g.ev_lower);
   MyFree(g.ts_cursor);
   MyFree(g.carry);
@@ -1032,6 +1128,8 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->bf_cursor);
   MyFree(s->bf_min_bt);
   MyFree(s->ev_bo);
+  MyFree(s->ev_below_hi);
+  MyFree(s->ev_start);
   MyFree(s->ev_bt);
   MyFree(s->ts_cursor);
   MyFree(s->ts_names);
@@ -1371,8 +1469,27 @@ static void target_undecided(const void *name, size_t nlen)
   memcpy(hi, name, nlen);
   hi[nlen] = '\x01';
   /* A due hint (one an engine slice, never in a caller's): the flush
-   * stays out of the cleanup and its cost. */
-  hint_add(&g.hint[HH_UNDECIDED], lo, nlen + 1, hi, nlen + 1, 1);
+   * stays out of the cleanup and its cost.  Each target's range apart --
+   * one wide range over unrelated targets would mark most of the CF -- up
+   * to HTRIM_UND_MAX; past that the last range widens to take it. */
+  if (g.nund < sizeof g.und / sizeof g.und[0]) {
+    memcpy(g.und[g.nund].lo, lo, nlen + 1);
+    g.und[g.nund].lol = nlen + 1;
+    memcpy(g.und[g.nund].hi, hi, nlen + 1);
+    g.und[g.nund].hil = nlen + 1;
+    g.nund++;
+  } else {
+    size_t last = g.nund - 1;
+    if (key_cmp(lo, nlen + 1, g.und[last].lo, g.und[last].lol) < 0) {
+      memcpy(g.und[last].lo, lo, nlen + 1);
+      g.und[last].lol = nlen + 1;
+    }
+    if (key_cmp(hi, nlen + 1, g.und[last].hi, g.und[last].hil) > 0) {
+      memcpy(g.und[last].hi, hi, nlen + 1);
+      g.und[last].hil = nlen + 1;
+    }
+  }
+  g.und_targets++;
   g.hint_due[HH_UNDECIDED] = 1;
 }
 
@@ -1708,9 +1825,15 @@ static void hints_due(void)
   if (!g.compact_min_rows)
     return;
   for (i = 0; i < HH_COUNT; i++)
-    if (hint_time_ordered(i) && g.hint[i].n >= g.compact_min_rows
-        && g.hint[i].n >= g.hint_rearm[i])
+    if (hint_time_ordered(i) && g.hint[i].n >= g.compact_min_rows) {
+      /* After a failed or dropped hint: compact_min_rows more keys, or
+       * HTRIM_HINT_DEFER_MAX slices. */
+      if (g.hint_backoff[i] && g.hint[i].n < g.hint_rearm[i]) {
+        g.hint_backoff[i]--;
+        continue;
+      }
       g.hint_due[i] = 1;
+    }
 }
 
 /** Fold @a us spent over @a n units (staged rows, examined cleanup
@@ -2189,6 +2312,8 @@ static void drain_forget(void)
 {
   g.ev_owner[0] = '\0';
   g.ev_bo_len = 0;
+  g.ev_below = 0;
+  g.ev_start_len = 0;
   g.ev_lower_set = 0;
   g.ev_lower_len = 0;
 }
@@ -2203,7 +2328,8 @@ static void drain_begin(uint64_t cap)
   /* The prefix-keyed CFs are hinted at a drain's end only: over what the
    * drain deleted, not over everything since the last drain. */
   for (i = 0; i < HH_COUNT; i++)
-    if (!hint_time_ordered(i) && i != HH_UNDECIDED && !g.hint_due[i])
+    if (!hint_time_ordered(i) && i != HH_UNDECIDED && !g.hint_due[i]
+        && !g.hint_failed[i])
       g.hint[i].n = 0;
   log_write(LS_SYSTEM, L_WARNING, 0,
             "history: store at %llu of cap %llu bytes: evicting inside "
@@ -2250,46 +2376,22 @@ static int evict_entry_only(struct htrim_slice *s, const void *k, size_t kl,
  * holds 0 once the slice commits (its total had drifted).
  * @return 0 the step is done, 1 the budget stopped it (still in progress),
  *         -1 a read failed or the slice is poisoned. */
-static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
-                       int resume)
+/** Walk @a owner's by_owner entries in [@a lo, @a hi): THE delete each
+ * (counted), or the entry alone when its by_time row is missing,
+ * unreadable or another owner's, adding their sizes to *@a trimmed until
+ * it reaches @a trim or the budget is spent.
+ * @return 0 the range ran out, 1 @a trim reached, 2 the budget stopped
+ * it, -1 a read failed or the slice is poisoned. */
+static int owner_walk(struct htrim_slice *s, const char *owner,
+                      const char *lo, size_t ll, const char *hi, size_t hl,
+                      uint64_t trim, uint64_t *trimmed)
 {
-  char lo[HTC_BO_KEY_MAX + 1], hi[HTC_OWNER_MAX + 1];
   struct db_iter *it;
-  uint64_t trimmed = 0;
-  size_t ll;
-  int pl, rc, whole = 0;   /* whole: the walk starts at the owner's first key */
+  int rc;
 
-  pl = htc_bo_prefix(hi, sizeof hi, owner);           /* owner \0 */
-  if (pl < 1)
-    return 0;
-  if (resume && g.ev_bo_len && g.ev_bo_len < sizeof lo
-      && strcmp(g.ev_owner, owner) == 0) {
-    memcpy(lo, g.ev_bo, g.ev_bo_len);
-    lo[g.ev_bo_len] = '\0';                           /* past its last delete */
-    ll = g.ev_bo_len + 1;
-  } else {
-    /* A new step starts at owner \0 ‖ the live floor: the owner's entries
-     * below it name by_time rows age-out (or this drain) already deleted,
-     * and seeking from its first key would walk all their tombstones --
-     * the largest owner's aged-out head, by construction.  An orphan
-     * entry down there is left to the boot accounting scan. */
-    const char *f;
-    size_t fl;
-    live_floor(&f, &fl);
-    memcpy(lo, hi, (size_t)pl);
-    ll = (size_t)pl;
-    if (fl && ll + fl <= sizeof lo) {
-      memcpy(lo + ll, f, fl);
-      ll += fl;
-    } else
-      whole = 1;
-  }
-  hi[pl - 1] = '\x01';
-  it = db_iter_open_bounded(g.st.env, g.st.by_owner, NULL, lo, ll, hi, (size_t)pl);
+  it = db_iter_open_bounded(g.st.env, g.st.by_owner, NULL, lo, ll, hi, hl);
   if (!it)
     return -1;
-
-  snprintf(s->ev_owner, sizeof s->ev_owner, "%s", owner);
   rc = db_iter_seek_first(it);
   while (rc == DB_OK) {
     size_t kl, vl, btl = 0;
@@ -2327,25 +2429,126 @@ static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
       db_iter_close(it);
       return -1;
     }
-    trimmed += size;
+    *trimmed += size;
     s->ev_freed += size;
     bytes_set(&s->ev_bo, &s->ev_bo_len, &s->ev_bo_cap, k, kl);
     rc = db_iter_next(it);
-    if (trimmed >= trim)
-      break;
-    if (rc == DB_OK && htrim_slice_expired(s)) {
+    if (*trimmed >= trim) {
       db_iter_close(it);
       return 1;
     }
+    if (rc == DB_OK && htrim_slice_expired(s)) {
+      db_iter_close(it);
+      return 2;
+    }
   }
   db_iter_close(it);
-  if (rc != DB_OK && rc != DB_NOTFOUND)
+  return rc == DB_NOTFOUND ? 0 : -1;
+}
+
+/** One owner step: @a owner's own oldest rows -- a by_owner walk from
+ * owner 0x00 ‖ the live floor (or, resuming the step in progress, from
+ * the successor of the last key it deleted), THE delete each (counted),
+ * until @a trim bytes are gone or the budget is spent.  An entry whose
+ * by_time row is missing, unreadable or names another owner is removed
+ * alone.
+ *
+ * A walk from the floor that runs out first goes on below where it
+ * started, once: [owner 0x00, that start) holds the owner's aged-out
+ * head (tombstones) and any orphan entries a boot scan counted, which
+ * the per-entry check removes with their bytes -- an orphan over the
+ * share would otherwise send every drain back to this owner.  Only a
+ * walk over the whole range that still runs short of @a trim means the
+ * total drifted: from the owner's first key in one go it holds 0; else
+ * the totals are counted again.
+ * @return 0 the step is done, 1 the budget stopped it (still in progress),
+ *         -1 a read failed or the slice is poisoned. */
+static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
+                       int resume)
+{
+  char lo[HTC_BO_KEY_MAX + 1], hi[HTC_OWNER_MAX + 1], top[HTC_BO_KEY_MAX + 1];
+  uint64_t trimmed = 0;
+  size_t ll, tl;
+  int pl, rc, whole = 0, below = 0;
+
+  pl = htc_bo_prefix(hi, sizeof hi, owner);           /* owner \0 */
+  if (pl < 1)
+    return 0;
+  memcpy(top, hi, (size_t)pl);
+  top[pl - 1] = '\x01';                               /* owner \x01 */
+  tl = (size_t)pl;
+  memcpy(lo, hi, (size_t)pl);
+  ll = (size_t)pl;
+  if (resume && strcmp(g.ev_owner, owner) == 0 && g.ev_below
+      && g.ev_below_hi_len && g.ev_below_hi_len <= sizeof top) {
+    below = 1;                                        /* resuming below the start */
+    memcpy(top, g.ev_below_hi, g.ev_below_hi_len);
+    tl = g.ev_below_hi_len;
+    if (g.ev_bo_len && g.ev_bo_len < sizeof lo) {
+      memcpy(lo, g.ev_bo, g.ev_bo_len);
+      lo[g.ev_bo_len] = '\0';
+      ll = g.ev_bo_len + 1;
+    }
+  } else if (resume && g.ev_bo_len && g.ev_bo_len < sizeof lo
+             && strcmp(g.ev_owner, owner) == 0) {
+    memcpy(lo, g.ev_bo, g.ev_bo_len);
+    lo[g.ev_bo_len] = '\0';                           /* past its last delete */
+    ll = g.ev_bo_len + 1;
+    if (g.ev_start_len)
+      bytes_set(&s->ev_start, &s->ev_start_len, &s->ev_start_cap,
+                g.ev_start, g.ev_start_len);
+    else
+      whole = 1;                                      /* began at its first key */
+  } else {
+    /* A new step starts at owner \0 ‖ the live floor: the owner's entries
+     * below it name by_time rows age-out (or this drain) already deleted,
+     * and seeking from its first key would walk all their tombstones --
+     * the largest owner's aged-out head, by construction. */
+    const char *f;
+    size_t fl;
+    live_floor(&f, &fl);
+    if (fl && ll + fl <= sizeof lo) {
+      memcpy(lo + ll, f, fl);
+      ll += fl;
+      bytes_set(&s->ev_start, &s->ev_start_len, &s->ev_start_cap, lo, ll);
+    } else
+      whole = 1;
+  }
+
+  snprintf(s->ev_owner, sizeof s->ev_owner, "%s", owner);
+  rc = owner_walk(s, owner, lo, ll, top, tl, trim, &trimmed);
+  if (rc == 0 && !whole && !below) {
+    /* Ran out above the start: once, below it -- up to where the step
+     * began (not a resume point: what lies between was this step's). */
+    below = 1;
+    if (s->ev_start_len && s->ev_start_len <= sizeof top) {
+      memcpy(top, s->ev_start, s->ev_start_len);
+      tl = s->ev_start_len;
+    } else {
+      memcpy(top, lo, ll);
+      tl = ll;
+    }
+    if (slice_staged(s) && htrim_slice_expired(s))
+      rc = 3;                                         /* below, next slice */
+    else {
+      s->ev_bo_len = 0;
+      rc = owner_walk(s, owner, hi, (size_t)pl, top, tl, trim, &trimmed);
+    }
+  }
+  if (rc < 0)
     return -1;
-  /* The range ran out: from the owner's first key, it has no rows left
-   * (its total had drifted); from the floor (or a resumed walk), entries
-   * below the walk were not seen -- an orphan the boot scan counted --
-   * so the totals are counted again instead. */
-  if (trimmed < trim) {
+  if (rc == 2 || rc == 3) {                           /* still in progress */
+    if (below) {
+      s->ev_below = 1;
+      bytes_set(&s->ev_below_hi, &s->ev_below_hi_len, &s->ev_below_hi_cap, top, tl);
+      if (rc == 3)
+        s->ev_bo_len = 0;                             /* below: from owner \0 */
+    }
+    return 1;
+  }
+  /* rc 1: trimmed to the share.  rc 0: the whole range ran out short of
+   * it -- the total drifted. */
+  if (rc == 0) {
     if (whole)
       snprintf(s->ev_zero, sizeof s->ev_zero, "%s", owner);
     else
@@ -2439,6 +2642,8 @@ static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
   if (g.ev_owner[0] && !htc_share_active(&pp)) {
     g.ev_owner[0] = '\0';
     g.ev_bo_len = 0;
+    g.ev_below = 0;
+    g.ev_start_len = 0;
   }
   if (!g.draining) {
     if (!plan.active)
@@ -2513,10 +2718,20 @@ static void evict_apply(struct htrim_slice *s)
   int moved = 0, recount = 0;
 
   snprintf(g.ev_owner, sizeof g.ev_owner, "%s", s->ev_owner);
-  if (g.ev_owner[0] && s->ev_bo_len)
+  if (!g.ev_owner[0])
+    g.ev_bo_len = 0;                            /* no step in progress */
+  else if (s->ev_bo_len)
     bytes_set(&g.ev_bo, &g.ev_bo_len, &g.ev_bo_cap, s->ev_bo, s->ev_bo_len);
+  else if (s->ev_below)
+    g.ev_bo_len = 0;                            /* below: from owner \0 */
+  g.ev_below = g.ev_owner[0] && s->ev_below;
+  if (g.ev_owner[0] && s->ev_start_len)
+    bytes_set(&g.ev_start, &g.ev_start_len, &g.ev_start_cap, s->ev_start, s->ev_start_len);
   else if (!g.ev_owner[0])
-    g.ev_bo_len = 0;
+    g.ev_start_len = 0;
+  if (g.ev_below)
+    bytes_set(&g.ev_below_hi, &g.ev_below_hi_len, &g.ev_below_hi_cap,
+              s->ev_below_hi, s->ev_below_hi_len);
   if (s->ev_zero[0]) {
     uint64_t left = htc_acct_owner(g.acct, s->ev_zero);
     if (left) {

@@ -96,6 +96,10 @@ extern int fake_db_last_suggest(const struct db_cf *cf,
 extern void fake_db_last_iter_lower(const struct db_cf *cf,
                                     const void **lower, size_t *llen);
 
+/** The upper bound of that same open (NULL/0 when it had none). */
+extern void fake_db_last_iter_upper(const struct db_cf *cf,
+                                    const void **upper, size_t *ulen);
+
 /** Current (live) row count of @a cf. */
 extern size_t fake_db_rows(const struct db_cf *cf);
 

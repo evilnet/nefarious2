@@ -60,6 +60,8 @@ struct db_cf {
   size_t       last_elen;
   char        *iter_lower;   /* the last db_iter_open_bounded's lower bound */
   size_t       iter_llen;    /* (NULL/0: none, or an unbounded open) */
+  char        *iter_upper;   /* ... and its upper bound */
+  size_t       iter_ulen;
 };
 
 struct db_env {
@@ -230,6 +232,7 @@ void fake_db_free(struct db_env *env)
     free(cf->last_start);
     free(cf->last_end);
     free(cf->iter_lower);
+    free(cf->iter_upper);
   }
   free(env);
 }
@@ -325,6 +328,12 @@ int fake_db_last_suggest(const struct db_cf *cf,
   if (end)   *end   = cf->last_end;
   if (elen)  *elen  = cf->last_elen;
   return DB_OK;
+}
+
+void fake_db_last_iter_upper(const struct db_cf *cf, const void **upper, size_t *ulen)
+{
+  if (upper) *upper = cf ? cf->iter_upper : NULL;
+  if (ulen)  *ulen  = cf ? cf->iter_ulen : 0;
 }
 
 void fake_db_last_iter_lower(const struct db_cf *cf, const void **lower, size_t *llen)
@@ -613,6 +622,9 @@ struct db_iter *db_iter_open_bounded_limited(struct db_env *env, struct db_cf *c
   free(cf->iter_lower);
   cf->iter_lower = (lower && llen) ? dup_bytes(lower, llen) : NULL;
   cf->iter_llen  = cf->iter_lower ? llen : 0;
+  free(cf->iter_upper);
+  cf->iter_upper = (upper && ulen) ? dup_bytes(upper, ulen) : NULL;
+  cf->iter_ulen  = cf->iter_upper ? ulen : 0;
   return it;
 }
 
