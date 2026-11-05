@@ -174,14 +174,6 @@ enum HistoryDirection {
   HISTORY_DIR_LATEST = 3   /**< Most recent messages */
 };
 
-/** Storage state for graceful degradation. */
-enum HistoryStorageState {
-  HISTORY_STORAGE_NORMAL   = 0, /**< Normal operation (<HIGH_WATERMARK) */
-  HISTORY_STORAGE_WARNING  = 1, /**< Eviction active (HIGH-95%) */
-  HISTORY_STORAGE_CRITICAL = 2, /**< Aggressive eviction (95-99%) */
-  HISTORY_STORAGE_SUSPENDED= 3  /**< No new writes (>99%) */
-};
-
 /** Reference type for history queries. */
 enum HistoryRefType {
   HISTORY_REF_TIMESTAMP = 0,  /**< Reference by timestamp */
@@ -576,45 +568,6 @@ extern int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_b
 extern int history_lookup_message(const char *target, const char *msgid,
                                    struct HistoryMessage **msg);
 
-/** Set history database map size.
- * Must be called before history_init().
- * @param[in] size_mb Size in megabytes.
- */
-extern void history_set_map_size(size_t size_mb);
-
-/** Get history database map size.
- * @return Current map size in bytes.
- */
-extern size_t history_get_map_size(void);
-
-/** Get current database utilization.
- * @return Utilization as percentage (0-100), or -1 on error.
- */
-extern int history_db_utilization(void);
-
-/** Get current storage state.
- * @return Current storage state enum value.
- */
-extern enum HistoryStorageState history_storage_state(void);
-
-/** Evict messages until target utilization is reached.
- * @param[in] target_percent Target utilization percentage (e.g., 75).
- * @return Number of messages evicted, or -1 on error.
- */
-extern int history_evict_to_target(int target_percent);
-
-/** Periodic maintenance function.
- * Checks utilization and evicts if necessary.
- * Should be called from the main event loop.
- */
-extern void history_maintenance_tick(void);
-
-/** Get last eviction statistics.
- * @param[out] count Number of messages evicted in last run.
- * @param[out] timestamp Unix timestamp of last eviction.
- */
-extern void history_last_eviction(int *count, time_t *timestamp);
-
 /** Callback type for channel enumeration.
  * @param[in] channel Channel name.
  * @param[in] data User data pointer.
@@ -691,29 +644,6 @@ extern void history_report_gc(struct Client *to);
  * @param[in] to Client to send results to.
  */
 extern void history_report_store_info(struct Client *to);
-
-/*
- * Per-User Quota API (anti-flood protection)
- *
- * Tracks message counts per user per channel to prevent a single user
- * from dominating channel history. When a user exceeds their quota
- * percentage, warnings are logged.
- */
-
-/** Get the current message count for a user in a channel.
- * @param[in] channel Channel name.
- * @param[in] account Account name.
- * @return Message count, or 0 if not found.
- */
-extern int history_quota_get_count(const char *channel, const char *account);
-
-/** Check if a user is over their quota for a channel.
- * @param[in] channel Channel name.
- * @param[in] account Account name.
- * @param[in] channel_limit Total messages allowed in channel.
- * @return 1 if over quota, 0 if not.
- */
-extern int history_quota_check(const char *channel, const char *account, int channel_limit);
 
 /*
  * Auto-replay API (for bouncer resume)

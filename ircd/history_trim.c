@@ -57,7 +57,11 @@
  * oldest-overall walk resumes (ev_lower; at a drain's start the age-out
  * resume point, below which every row is gone).  A row indexed behind
  * either sends that walk back to it.  Both are in memory: a restart
- * starts a new drain, if the store is still over high.
+ * starts a new drain, if the store is still over high.  An emergency
+ * slice (htrim_emergency, a store that found the env full) is the same
+ * oldest-overall walk and moves ev_lower past its deletes too, drain or
+ * not, so emergencies in a row never walk each other's tombstones; a
+ * drain's start forgets it with the rest.
  *
  * Compaction hints: every delete staged on a tracked column family
  * (slice_del) widens that slice's [smallest, largest] key and count; a
@@ -100,7 +104,7 @@
  * this many the pass falls back to rewinding the walk to the oldest. */
 #define HTRIM_LATE_MAX 64
 /** Phase slots (every enum htrim_phase value). */
-#define HTRIM_PH_SLOTS ((int)HTRIM_PH_TSWEEP + 1)
+#define HTRIM_PH_SLOTS ((int)HTRIM_PH_EMERGENCY + 1)
 /** Unindexable keys a walk names in the log (then only counts). */
 #define HTRIM_BF_LOG_KEYS 5
 /** A logged key's printable form, quotes excluded. */
@@ -223,6 +227,12 @@ struct htrim_slice {
   int                   ev_exhausted; /* oldest-overall ran out of rows */
   int                   ev_recount;   /* an owner walk from the floor ran out */
   uint64_t              floor_ms;    /* the newest ms oldest-overall deleted */
+
+  /* An emergency slice (htrim_emergency), applied at commit. */
+  int                   em_step;
+  int                   defer_cleanup; /* its touched targets go to the carry:
+                                          the next engine slice checks (and
+                                          reports) them, never the caller */
 
   /* A targets-sweep step, applied at commit. */
   int                   ts_step;
@@ -1173,12 +1183,28 @@ static size_t slice_staged(const struct htrim_slice *s)
   return (size_t)s->rows + s->bf_indexed + s->idx_only + s->ts_n;
 }
 
-/** The entries @a s's cleanup will examine: the carried checks (a
- * budgeted slice takes them) and its touched targets, at most
- * HTRIM_CLEANUP_CHECKS (the rest carry over unexamined). */
+/** Whether @a s is one of the engine's own slices (htrim_run_slice's),
+ * not a caller's: the burst-loss prune (INCARNATION), an emergency
+ * inside a store (EMERGENCY), a slice without a phase.  Only the
+ * engine's slices take the carried emptiness checks and issue
+ * compaction hints. */
+static int engine_slice(const struct htrim_slice *s)
+{
+  return s->phase != HTRIM_PH_NONE && s->phase != HTRIM_PH_INCARNATION
+         && s->phase != HTRIM_PH_EMERGENCY;
+}
+
+/** The entries @a s's cleanup will examine: the carried checks (an
+ * engine slice takes them) and its touched targets, at most
+ * HTRIM_CLEANUP_CHECKS (the rest carry over unexamined); none for a
+ * slice whose cleanup is deferred. */
 static size_t cleanup_entries(const struct htrim_slice *s)
 {
-  size_t n = (s->budget_us ? g.ncarry : 0) + s->ntouch;
+  size_t n;
+
+  if (s->defer_cleanup)
+    return 0;                                   /* no cleanup in this slice */
+  n = (engine_slice(s) ? g.ncarry : 0) + s->ntouch;
   return n < HTRIM_CLEANUP_CHECKS ? n : HTRIM_CLEANUP_CHECKS;
 }
 
@@ -1596,10 +1622,12 @@ static int cand_cmp(const void *a, const void *b)
  * emptiness seeks (a target its stamp clears costs one get, no seek);
  * the targets after that carry over, still in order, so every touched
  * target is checked within a few slices -- exactly, since a row stored
- * in between makes it non-empty and the check finds it.  An unbudgeted
- * slice (the burst-loss prune, inside BURST) checks its own touched
- * targets, all of them, and leaves the carried ones to the budgeted
- * slices: they are not its work, and could be many. */
+ * in between makes it non-empty and the check finds it.  Only the
+ * engine's own slices take the carried targets: a caller's slice (the
+ * burst-loss prune, inside BURST) checks its own touched targets, all of
+ * them, and leaves the carried ones to the engine -- they are not its
+ * work, and could be many; an emergency (inside a store) checks none,
+ * its touched targets joining the carry (htrim_slice_commit). */
 static size_t cleanup_touched(struct htrim_slice *s, unsigned int *nseeks)
 {
   struct db_writebatch *wb = NULL;
@@ -1608,7 +1636,7 @@ static size_t cleanup_touched(struct htrim_slice *s, unsigned int *nseeks)
   const char **names;
   size_t nw, i, j, n = 0, seeks = 0, examined = 0, undecided = 0;
   size_t limit = s->budget_us ? HTRIM_CLEANUP_CHECKS : (size_t)-1;
-  size_t ncarry = s->budget_us ? g.ncarry : 0;
+  size_t ncarry = engine_slice(s) ? g.ncarry : 0;
   int stop = 0;
 
   *nseeks = 0;
@@ -1823,6 +1851,7 @@ static void ageout_apply(struct htrim_slice *s)
 
 static void evict_apply(struct htrim_slice *s);
 static void tsweep_apply(struct htrim_slice *s);
+static void emergency_apply(struct htrim_slice *s);
 
 /** A committed slice's deletes widen the engine's hint ranges; a CF that
  * lost compact_min_rows keys since its last hint is hinted now. */
@@ -1915,18 +1944,28 @@ int htrim_slice_commit(struct htrim_slice *s)
     evict_apply(s);
   if (s->ts_step)
     tsweep_apply(s);
+  if (s->em_step)
+    emergency_apply(s);
   hints_due();
   if (measure)
     t1 = g.clock();
-  examined = cleanup_touched(s, &seeks);
+  if (s->defer_cleanup) {
+    /* Inside a caller that must not report (a store): every target this
+     * slice touched waits for the next engine slice's cleanup. */
+    for (i = 0; i < s->ntouch; i++)
+      carry_push(&s->touch[i]);
+    examined = 0;
+    seeks = 0;
+  } else
+    examined = cleanup_touched(s, &seeks);
 
   now = g.clock();
   /* At most one compaction hint a slice, from the engine's own slices
-   * only (never inside a caller's burst-loss prune); timed apart, and
-   * kept out of the cost EWMAs (a hint is a one-off). */
+   * only (never inside a caller's: the burst-loss prune, an emergency
+   * inside a store); timed apart, and kept out of the cost EWMAs (a hint
+   * is a one-off). */
   g.last_hint_us = 0;
-  if (s->phase != HTRIM_PH_NONE && s->phase != HTRIM_PH_INCARNATION
-      && hint_issue_one()) {
+  if (engine_slice(s) && hint_issue_one()) {
     uint64_t h = g.clock();
     g.last_hint_us = elapsed_since(now, h);
     g.last_elapsed_us = elapsed_since(s->start_us, h);
@@ -2569,12 +2608,13 @@ static int evict_owner(struct htrim_slice *s, const char *owner, uint64_t trim,
   return 0;
 }
 
-/** Oldest overall: walk by_time from where this drain's walk stopped (at
- * first: the age-out resume point, or the oldest row indexed behind it --
- * every row below is gone), THE delete each row (counted), until @a need
+/** Oldest overall: walk by_time from the live floor -- where this
+ * drain's (or the last emergency's) walk stopped, at first the age-out
+ * resume point, or the oldest row indexed behind it: every row below is
+ * gone -- THE delete each row (counted) under @a path, until @a need
  * bytes are gone or the budget is spent; the coverage floor moves to the
  * newest ms deleted, in the same batch.  @return 0, or -1. */
-static int evict_oldest(struct htrim_slice *s, uint64_t need)
+static int oldest_walk(struct htrim_slice *s, enum htrim_path path, uint64_t need)
 {
   const char *lower;
   size_t llen;
@@ -2597,7 +2637,7 @@ static int evict_oldest(struct htrim_slice *s, uint64_t need)
     uint64_t ms;
     int parsed = v && htc_rec_parse(v, vl, &rec) == 0;
 
-    if (htrim_delete_row(s, HTRIM_PATH_OLDEST, k, kl, parsed ? &rec : NULL, 1) != 0) {
+    if (htrim_delete_row(s, path, k, kl, parsed ? &rec : NULL, 1) != 0) {
       db_iter_close(it);
       return -1;
     }
@@ -2702,7 +2742,7 @@ static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
   if (!plan.nsteps && !plan.truncated && plan.oldest > 0
       && total > s->ev_freed && total - s->ev_freed > plan.target
       && !(slice_staged(s) && htrim_slice_expired(s)))
-    return evict_oldest(s, total - s->ev_freed - plan.target);
+    return oldest_walk(s, HTRIM_PATH_OLDEST, total - s->ev_freed - plan.target);
   return 0;
 }
 
@@ -2780,6 +2820,67 @@ static void evict_apply(struct htrim_slice *s)
     drain_end(s->ev_cap);
   if (moved && coverage_cb)
     coverage_cb();
+}
+
+/** A committed emergency slice: the next oldest-overall walk resumes
+ * past its deletes (ev_lower: every row below is gone but the late rows
+ * live_floor reads), the coverage floor moves, and a slice that deleted
+ * rows arms the targets sweep (its cleanup went to the carry).  A walk
+ * that ran out recounts nothing: no drain is judging the totals. */
+static void emergency_apply(struct htrim_slice *s)
+{
+  if (s->ev_bt_len) {
+    size_t n = s->ev_bt_len + 1;
+    if (n > g.ev_lower_cap) {
+      g.ev_lower_cap = n;
+      g.ev_lower = (char *)MyRealloc(g.ev_lower, n);
+    }
+    memcpy(g.ev_lower, s->ev_bt, s->ev_bt_len);
+    g.ev_lower[s->ev_bt_len] = '\0';
+    g.ev_lower_len = n;
+    g.ev_lower_set = 1;
+  }
+  if (s->rows)
+    tsweep_arm();
+  if (s->floor_ms > g.floor_ms) {
+    g.floor_ms = s->floor_ms;
+    if (coverage_cb)
+      coverage_cb();
+  }
+}
+
+int htrim_emergency(unsigned int budget_ms)
+{
+  struct htrim_slice *s;
+  int rows;
+
+  if (!g.inited) {
+    snprintf(g.last_error, sizeof g.last_error, "trim engine not started");
+    return -1;
+  }
+  s = htrim_slice_begin(budget_ms ? budget_ms : 1);    /* never unbudgeted */
+  if (!s) {
+    snprintf(g.last_error, sizeof g.last_error, "emergency slice not opened: %s",
+             last_err());
+    return -1;
+  }
+  htrim_slice_set_phase(s, HTRIM_PH_EMERGENCY);
+  s->em_step = 1;
+  s->defer_cleanup = 1;
+  if (oldest_walk(s, HTRIM_PATH_EMERGENCY, UINT64_MAX) < 0) {
+    g.last_elapsed_us = elapsed_since(s->start_us, g.clock());
+    last_unmeasured(0);
+    htrim_slice_abort(s);
+    record_slice(HTRIM_PH_EMERGENCY);
+    snprintf(g.last_error, sizeof g.last_error, "emergency slice failed: %s",
+             last_err());
+    return -1;
+  }
+  rows = htrim_slice_commit(s);
+  if (rows < 0)
+    snprintf(g.last_error, sizeof g.last_error, "emergency slice commit failed: %s",
+             last_err());
+  return rows;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2938,6 +3039,7 @@ const char *htrim_phase_name(enum htrim_phase ph)
   case HTRIM_PH_TSWEEP:   return "tsweep";
   case HTRIM_PH_CLEANUP:  return "cleanup";
   case HTRIM_PH_INCARNATION: return "incarnation";
+  case HTRIM_PH_EMERGENCY: return "emergency";
   case HTRIM_PH_NONE:
   default:                return "none";
   }

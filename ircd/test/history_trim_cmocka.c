@@ -4534,6 +4534,158 @@ static void test_evict_owner_walks_keep_to_their_owner(void **state)
   assert_acct_matches_cf();
 }
 
+/* ------------------------------------------------------------------ */
+/* Emergency eviction (Task 9)                                          */
+/* ------------------------------------------------------------------ */
+
+/** Row @a i of the emergency tests: three targets in turn, the oldest in
+ * the alphabetically LAST one (the old emergency path took the first
+ * target's rows, whatever their age), at 1000 + i seconds. */
+static const char *em_target(int i)
+{
+  static const char *const names[3] = { "#a", "#b", "#c" };
+  return names[(i + 2) % 3];
+}
+
+static void em_seed(int n)
+{
+  char mid[16];
+  int i;
+  for (i = 0; i < n; i++) {
+    snprintf(mid, sizeof mid, "E%03d", i);
+    seed_sized(em_target(i), 1000 + (uint64_t)i, mid, i % 2 ? "a:bob" : "-", 100);
+  }
+}
+
+static int em_present(int i)
+{
+  char mid[16];
+  snprintf(mid, sizeof mid, "E%03d", i);
+  return row_present(em_target(i), 1000 + (uint64_t)i, mid);
+}
+
+/* One budgeted slice of the oldest rows overall, through by_time -- no
+ * plan, no gates: the backfill still to run and the totals not loaded
+ * change nothing.  The coverage floor moves like an oldest-overall
+ * walk's; the targets cleanup (and its CH A - reports) waits for the
+ * next engine slice. */
+static void test_emergency_one_slice(void **state)
+{
+  char want[32];
+  int i;
+  (void)state;
+
+  em_seed(200);
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(0, htrim_acct_loaded());
+  step_us = 1000;
+  assert_int_equal(5, htrim_emergency(5));
+  for (i = 0; i < 200; i++)
+    assert_int_equal(i >= 5, em_present(i));
+  assert_int_equal(htc_parse_ms("1004.000"), htrim_coverage_floor_ms());
+  snprintf(want, sizeof want, "%llu", (unsigned long long)htc_parse_ms("1004.000"));
+  assert_int_equal(1, meta_is(HTRIM_META_FLOOR, want));
+  assert_int_equal(1, coverage_calls);
+  assert_int_equal(5, htrim_stats()->deleted[HTRIM_PATH_EMERGENCY]);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(HTRIM_PH_EMERGENCY, htrim_stats()->last_phase);
+  assert_int_equal(0, emptied_calls);
+}
+
+static void test_emergency_empty_store(void **state)
+{
+  (void)state;
+  step_us = 1000;
+  assert_int_equal(0, htrim_emergency(5));
+  assert_int_equal(0, htrim_coverage_floor_ms());
+  assert_int_equal(-1, meta_is(HTRIM_META_FLOOR, ""));
+  assert_int_equal(0, coverage_calls);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_EMERGENCY]);
+}
+
+/* The rows go through the accounting rule like any counted delete; a
+ * second emergency resumes past the first one's deletes (it never walks
+ * their tombstones again). */
+static void test_emergency_counts_and_resumes(void **state)
+{
+  char bt[HTC_BT_KEY_MAX + 1], ts[32], mid[16];
+  const void *lo;
+  size_t ll;
+  int i, btl;
+  (void)state;
+
+  evict_ready();
+  em_seed(40);
+  assert_int_equal(4000, total_now());
+  step_us = 1000;
+  assert_int_equal(5, htrim_emergency(5));
+  assert_int_equal(3500, total_now());
+  assert_acct_matches_cf();
+
+  assert_int_equal(5, htrim_emergency(5));
+  snprintf(mid, sizeof mid, "E%03d", 4);
+  snprintf(ts, sizeof ts, "%d.000", 1004);
+  btl = bt_of(bt, sizeof bt - 1, em_target(4), ts, mid);
+  bt[btl] = '\0';                                /* E004 ‖ 0x00 */
+  fake_db_last_iter_lower(st.by_time, &lo, &ll);
+  assert_int_equal((size_t)btl + 1, ll);
+  assert_memory_equal(bt, lo, ll);
+  for (i = 0; i < 40; i++)
+    assert_int_equal(i >= 10, em_present(i));
+  assert_int_equal(3000, total_now());
+  assert_int_equal(10, htrim_stats()->deleted[HTRIM_PATH_EMERGENCY]);
+  assert_acct_matches_cf();
+}
+
+/* Amendments: the emergency arms the targets sweep, like a drain's end;
+ * the targets it emptied are reported by the next engine slice -- never
+ * from inside the store that ran out of space. */
+static void test_emergency_arms_sweep_and_defers_reports(void **state)
+{
+  struct htrim_params p = params(0);
+  (void)state;
+
+  evict_ready();
+  seed_sized("#x", 900, "X1", "a:bob", 100);
+  seed_sized("#x", 901, "X2", "a:bob", 100);
+  seed_targets("#x", "901.000");
+  em_seed(20);
+  assert_int_equal(0, htrim_tsweep_pending());
+  step_us = 1000;
+  assert_int_equal(5, htrim_emergency(5));       /* X1, X2, E000..E002 */
+  assert_false(row_present("#x", 901, "X2"));
+  assert_int_equal(0, emptied_calls);
+  assert_true(targets_has("#x"));
+  assert_int_equal(1, htrim_tsweep_pending());
+
+  step_us = 0;
+  run_until_idle(&p);
+  assert_false(targets_has("#x"));
+  assert_int_equal(1, emptied_times("#x"));
+  assert_int_equal(0, htrim_tsweep_pending());
+}
+
+/* A failed commit applies nothing: the rows, the floor, the counters and
+ * the totals stay as they were. */
+static void test_emergency_commit_failure_applies_nothing(void **state)
+{
+  int i;
+  (void)state;
+
+  evict_ready();
+  em_seed(20);
+  step_us = 1000;
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, htrim_emergency(5));
+  for (i = 0; i < 20; i++)
+    assert_true(em_present(i));
+  assert_int_equal(0, htrim_coverage_floor_ms());
+  assert_int_equal(0, coverage_calls);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_EMERGENCY]);
+  assert_int_equal(2000, total_now());
+  assert_int_equal(0, htrim_tsweep_pending());
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -4631,6 +4783,11 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_undecided_target_not_added_twice, setup, teardown),
     cmocka_unit_test_setup_teardown(test_busy_hint_suggest_failure_logged, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_owner_walks_keep_to_their_owner, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_one_slice, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_empty_store, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_counts_and_resumes, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_arms_sweep_and_defers_reports, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_commit_failure_applies_nothing, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

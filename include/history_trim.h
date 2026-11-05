@@ -96,6 +96,14 @@
  * covers what eviction took.  A drain's end hints compaction over every
  * column family it deleted from and arms the targets sweep.
  *
+ * Emergency eviction.  A store that finds the env full runs one slice of
+ * oldest-overall deletes (htrim_emergency) and retries once: the same
+ * walk from the live floor, without the plan or any gate, moving the
+ * coverage floor the same way and arming the targets sweep.  It runs
+ * inside the store, so its cleanup and the CH A - reports of the
+ * targets it emptied move to the next engine slice, and it issues no
+ * compaction hint.
+ *
  * Targets sweep.  The touched-target cleanup checks a target only when a
  * slice deleted its newest stamped row -- exact for oldest-first age-out,
  * but not for eviction (an owner trim can take a target's newest row and
@@ -195,9 +203,10 @@ enum htrim_path {
 
 /** The phase one htrim_run_slice call ran.  AGEOUT, BACKFILL, ACCTSCAN,
  * EVICT and TSWEEP take turns; CLEANUP runs only when none of them has
- * work but carried emptiness checks remain; INCARNATION names the
- * burst-loss prune's unbudgeted slice (history.c, htrim_slice_set_phase),
- * never picked by the engine. */
+ * work but carried emptiness checks remain.  INCARNATION and EMERGENCY
+ * name callers' slices, never picked by the engine: the burst-loss
+ * prune's unbudgeted slice (history.c, htrim_slice_set_phase) and
+ * htrim_emergency's. */
 enum htrim_phase {
   HTRIM_PH_NONE,
   HTRIM_PH_AGEOUT,
@@ -206,7 +215,8 @@ enum htrim_phase {
   HTRIM_PH_EVICT,
   HTRIM_PH_CLEANUP,
   HTRIM_PH_INCARNATION,
-  HTRIM_PH_TSWEEP
+  HTRIM_PH_TSWEEP,
+  HTRIM_PH_EMERGENCY
 };
 
 /** The live configuration for one slice. */
@@ -390,9 +400,11 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
  * committed or not.  The cleanup of a budgeted slice does at most 16
  * emptiness seeks and carries the rest of its touched targets to the next
  * committed slice (in memory: a restart drops them, and the start's
- * targets sweep reaps them); an unbudgeted slice checks its own touched
- * targets only, the carried ones staying with the budgeted slices.
- * Frees @a s.
+ * targets sweep reaps them).  The engine's own slices take the carried
+ * targets first; a caller's slice (no phase, or INCARNATION) checks its
+ * own touched targets only, the carried ones staying with the engine's
+ * slices; an EMERGENCY slice checks none -- its touched targets join the
+ * carry.  Frees @a s.
  * @return the rows deleted, or -1 (nothing applied). */
 int htrim_slice_commit(struct htrim_slice *s);
 
@@ -406,6 +418,27 @@ void htrim_slice_abort(struct htrim_slice *s);
  * htrim_tsweep_clear. */
 int htrim_tsweep_wanted(void);
 void htrim_tsweep_clear(void);
+
+/** Emergency eviction: a store found the env full (DB_ERR_FULL) and
+ * retries once after this.  One slice of @a budget_ms (0 counts as 1:
+ * never unbudgeted) of THE delete of the oldest rows overall, walking
+ * by_time from the live floor -- no plan and no gates: the backfill
+ * still to run, the totals not loaded yet, the cap or its watermarks
+ * change nothing (rows the backfill has not indexed yet are not seen).
+ * Committed in one batch, counted (through the accounting rule) under
+ * HTRIM_PATH_EMERGENCY; the coverage floor moves to the newest ms deleted,
+ * in the same batch, as an oldest-overall walk moves it; the next walk of
+ * the oldest rows (the next emergency, or the drain under way) resumes
+ * past these deletes.  Called inside a store, so nothing in it reports
+ * or flushes: the targets it touched go to the next engine slice's
+ * cleanup (whose emptied callback sends the CH A - reports), a compaction
+ * hint it makes due waits for an engine slice, and a slice that deleted
+ * rows arms the targets sweep, as a drain's end does.  Recorded in
+ * htrim_stats as HTRIM_PH_EMERGENCY; a failure describes itself in
+ * htrim_last_error().  Main thread.
+ * @return the rows deleted (0: nothing indexed to delete), or -1 (nothing
+ * applied). */
+int htrim_emergency(unsigned int budget_ms);
 
 /** Run one phase in one budgeted slice: round-robin from the phase after
  * the last one run, among the phases with work.  A failing phase still
@@ -433,7 +466,7 @@ int htrim_ageout_pending(void);
 const char *htrim_last_error(void);
 
 /** "ageout", "backfill", "scan", "evict", "tsweep", "cleanup",
- * "incarnation" or "none". */
+ * "incarnation", "emergency" or "none". */
 const char *htrim_phase_name(enum htrim_phase ph);
 
 const struct htrim_stats *htrim_stats(void);

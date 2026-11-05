@@ -799,10 +799,6 @@ static void history_purge_callback(struct Event* ev)
   if (!history_is_available())
     return;
 
-  /* Run storage management maintenance (eviction if needed)
-   * This has its own internal interval check. */
-  history_maintenance_tick();
-
   /* A trim pass starts on every maintenance tick, retention or not:
    * age-out simply has no work at retention 0 (the slice timer carries
    * any backlog on at 1 s). */
@@ -1284,9 +1280,8 @@ int main(int argc, char **argv) {
     uint64_t newest_row_ms = 0;   /* 0 = no history store */
 
     if (feature_bool(FEAT_CHATHISTORY_STORE)) {
-      /* Map size and zstd compression must be configured before
-       * history_init() runs. */
-      history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
+      /* zstd compression must be configured before history_init() runs
+       * (HISTORY_MAP_SIZE_MB is the trimmer's logical cap, read live). */
 #ifdef USE_ZSTD
       compress_init((size_t)feature_int(FEAT_COMPRESS_THRESHOLD),
                     feature_int(FEAT_COMPRESS_LEVEL));
