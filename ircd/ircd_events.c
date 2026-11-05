@@ -634,8 +634,13 @@ socket_add(struct Socket* sock, EventCallBack call, void* data,
   if (!(*evInfo.engine->eng_add)(sock)) { /* tell engine about it */
     /* Refused.  The caller learns it from the return value -- no event is
      * raised -- and frees its structure without socket_del(), so nothing
-     * may be left pointing at it: unlink it again. */
+     * may be left pointing at it: unlink it again.  And a refused
+     * registration leaves the socket as it was, not active: s_active()
+     * reads false, so a caller that checks it (restart_resolver())
+     * registers it afresh later, and socket_del() refuses it rather
+     * than unregister a descriptor that was never registered. */
     gen_dequeue(sock);
+    sock->s_header.gh_flags &= ~GEN_ACTIVE;
     return 0;
   }
   return 1;
@@ -711,12 +716,26 @@ socket_run_errors(void)
 }
 
 /** Deletes (or marks for deletion) a socket generator.
+ * Only a registered (active) socket can be deleted.  A socket never added,
+ * or one the engine refused (socket_add() returned zero), has nothing to
+ * delete: no registration, no list entry, no ET_DESTROY owed.  A debug
+ * build asserts; a release build logs the caller's mistake and returns
+ * without doing anything else, rather than unregister whoever holds its
+ * s_fd number by now and run a destroy callback (a NULL one for a socket
+ * never added).
  * @param[in] sock Event generator to clear.
  */
 void
 socket_del(struct Socket* sock)
 {
   assert(0 != sock);
+  assert(sock->s_header.gh_flags & GEN_ACTIVE);
+  if (!(sock->s_header.gh_flags & GEN_ACTIVE)) {
+    log_write(LS_SYSTEM, L_CRIT, 0, "socket_del: socket %p (fd %d, state %d, "
+              "flags 0x%x) is not registered; nothing deleted (a caller bug)",
+              sock, s_fd(sock), (int) s_state(sock), sock->s_header.gh_flags);
+    return;
+  }
   assert(!(sock->s_header.gh_flags & GEN_DESTROY));
   assert(0 != evInfo.engine);
   assert(0 != evInfo.engine->eng_closing);
