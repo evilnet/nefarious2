@@ -754,12 +754,12 @@ feature_notify_chathistory_retention(void)
    * shorter retention drains in slices, never in one go). */
   history_trim_kick();
 
-  /* Send CH A R <retention> to all peer servers */
-  sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A R %d", retention);
-
   log_write(LS_SYSTEM, L_INFO, 0,
-            "chathistory: retention changed to %d days, notified peers",
-            retention);
+            "chathistory: retention changed to %d days", retention);
+
+  /* Peers hear the coverage this retention gives (CH A R), when it
+   * changed: a coverage floor inside retention bounds it either way. */
+  chathistory_coverage_changed();
 
   /* Also notify clients via cap-notify */
   feature_notify_chathistory_caps();

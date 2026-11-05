@@ -262,6 +262,25 @@ extern void history_trim_kick(void);
  * measured under the old budget (STATS max goes back to 0). */
 extern void history_trim_slice_budget_changed(void);
 
+/** The retention this store really covers, in days -- what CH A S / CH A
+ * R tell peers: CHATHISTORY_RETENTION, but never further back than the
+ * coverage floor oldest-overall eviction left inside it (rows older than
+ * the floor may be gone), and then at least 1
+ * (htc_effective_days(CHATHISTORY_RETENTION, htrim_coverage_floor_ms(),
+ * now)).  Without a floor it is the configured value itself (0 =
+ * unlimited, as peers read it).  Client ISUPPORT keeps the configured
+ * value. */
+extern int history_coverage_days(void);
+
+/** Called on the main thread, outside any store, when
+ * history_coverage_days() may have changed: a trim slice moved or cleared
+ * the coverage floor, and every trim pass start (the floor ages a day).
+ * It may send to peers. */
+typedef void (*history_coverage_cb)(void);
+
+/** Register the coverage callback (NULL = none). */
+extern void history_set_coverage_callback(history_coverage_cb cb);
+
 #ifdef USE_ROCKSDB
 struct db_env;
 /** Get the history storage environment (for subsystems that share it). */

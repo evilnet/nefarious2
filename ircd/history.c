@@ -138,6 +138,9 @@ static char history_retire_err[200];
 /** Callback for channel removal notifications (for CH A - broadcasts) */
 static history_channels_removed_cb channel_removed_callback = NULL;
 
+/** Callback for coverage changes (CH A R); history_set_coverage_callback. */
+static history_coverage_cb coverage_callback = NULL;
+
 /** Maximum number of named databases.  Currently: 8 history CFs
  * (messages, msgid_index, targets, quotas, reply_index, redact_index,
  * by_time, by_owner) + 2 ml_content CFs (ml_content, ml_paste_secrets)
@@ -848,6 +851,11 @@ void history_trim_tick(int pass_start)
   if (pass_start) {
     htrim_stamp_alive(p.now_ms);
     htrim_pass_start(&p);
+    /* Coverage grows as days pass: the floor ages a whole day with no
+     * slice moving it.  The callback re-reads history_coverage_days()
+     * and tells peers only a change. */
+    if (coverage_callback)
+      coverage_callback();
   }
 
   /* 1: work remains, run again in a second.  0: idle until the next
@@ -3170,6 +3178,31 @@ void history_set_channel_removed_callback(history_channels_removed_cb cb)
   channel_removed_callback = cb;
 }
 
+/** The trim engine's coverage callback: it fires after a slice's commit
+ * that moved or cleared the floor (an emergency's, inside a store, at the
+ * next slice), never inside a store. */
+static void history_coverage_forward(void)
+{
+  if (coverage_callback)
+    coverage_callback();
+}
+
+void history_set_coverage_callback(history_coverage_cb cb)
+{
+  coverage_callback = cb;
+  htrim_set_coverage_cb(cb ? history_coverage_forward : NULL);
+}
+
+int history_coverage_days(void)
+{
+  /* htc_effective_days never claims less than 1 day once a floor is set:
+   * 0 and -1 mean "unlimited" to the peers' server_retention_covers, so a
+   * floor under a day old must not read as either. */
+  return htc_effective_days(feature_int(FEAT_CHATHISTORY_RETENTION),
+                            history_available ? htrim_coverage_floor_ms() : 0,
+                            (uint64_t)time(NULL) * 1000ULL);
+}
+
 /* ---- redaction catch-up index: scan + watermark (design B) ---------- */
 
 /* The watermark lives in the index CF under a key that sorts LAST
@@ -3834,6 +3867,23 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Retention: %d days",
              feature_int(FEAT_CHATHISTORY_RETENTION));
+  {
+    /* What CH A S / R tell peers, and the floor that bounds it. */
+    uint64_t floor_ms = htrim_coverage_floor_ms();
+    uint64_t now_ms = (uint64_t)time(NULL) * 1000ULL;
+    char floor[32];
+
+    if (floor_ms)
+      ircd_snprintf(0, floor, sizeof(floor), "%llus old",
+                    (unsigned long long)(now_ms > floor_ms
+                                         ? (now_ms - floor_ms) / 1000 : 0));
+    else
+      ircd_strncpy(floor, "none", sizeof(floor));
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Coverage: %d days advertised (configured %d, floor %s)",
+               history_coverage_days(), feature_int(FEAT_CHATHISTORY_RETENTION),
+               floor);
+  }
   if (htrim_backfill_done())
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Trim: backfill done, accounting %s",

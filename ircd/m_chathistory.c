@@ -4023,11 +4023,13 @@ void chathistory_report_ads(struct Client *to, const struct StatDesc *sd, char *
              "A :Summary: %d storage server(s) of %d advertised",
              storage_count, total_count);
 
-  /* Show our own status */
+  /* Show our own status: the configured retention, and the coverage
+   * CH A S / R advertise (less once oldest-overall eviction left a
+   * floor inside retention). */
   if (feature_bool(FEAT_CHATHISTORY_STORE)) {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "A :Local: STORE enabled, retention=%d days",
-               feature_int(FEAT_CHATHISTORY_RETENTION));
+               "A :Local: STORE enabled, retention=%d days, advertising %d days",
+               feature_int(FEAT_CHATHISTORY_RETENTION), history_coverage_days());
   } else {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "A :Local: STORE disabled (relay only)");
@@ -4191,14 +4193,48 @@ static void broadcast_channel_removal(const char **channels, int count)
   }
 }
 
+/** The coverage (days) last told to peers by CH A R, or seeded at start
+ * with what every link's CH A S will carry; -1 = not known yet. */
+static int coverage_advertised = -1;
+
+/** history_coverage_days() may have changed (the trim engine moved or
+ * cleared the coverage floor, a trim pass started, CHATHISTORY_RETENTION
+ * changed): tell every IRCv3 peer the new value with CH A R -- only when
+ * it differs from the last one told.  The engine calls this after every
+ * committed oldest-overall slice, about once a second during a drain, and
+ * at every pass start; the value changes far more rarely.  Links that
+ * come up later hear the value of the moment in their CH A S
+ * (ms_end_of_burst).  Main thread, never inside a store: it sends. */
+void chathistory_coverage_changed(void)
+{
+  int now;
+
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return;                                     /* we advertise no storage */
+  now = history_coverage_days();
+  if (now == coverage_advertised)
+    return;
+  coverage_advertised = now;
+  if (!cli_serv(&me))
+    return;                                     /* before make_server: no links */
+  sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A R %d", now);
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "chathistory: advertising %d days of coverage (retention %d)",
+            now, feature_int(FEAT_CHATHISTORY_RETENTION));
+}
+
 /** Initialize chathistory callbacks.
- * Registers the channel removal callback with the history subsystem.
- * Called after history_init() succeeds.
+ * Registers the channel removal and coverage callbacks with the history
+ * subsystem.  Called after history_init() succeeds (main thread).
  */
 void chathistory_init_callbacks(void)
 {
   history_set_channel_removed_callback(broadcast_channel_removal);
-  Debug((DEBUG_DEBUG, "chathistory: registered channel removal callback"));
+  /* The coverage peers will hear at their link's CH A S: a change from
+   * it is what CH A R reports.  (history_init has read the floor.) */
+  coverage_advertised = history_coverage_days();
+  history_set_coverage_callback(chathistory_coverage_changed);
+  Debug((DEBUG_DEBUG, "chathistory: registered channel removal and coverage callbacks"));
 }
 
 /** Check if a server's retention window covers a given timestamp.

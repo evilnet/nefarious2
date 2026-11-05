@@ -304,6 +304,7 @@ extern int has_chathistory_advertisement(struct Client*);
 extern int server_retention_days(struct Client*);
 extern int chathistory_retention_advertised(void);
 extern void chathistory_update_retention_isupport(int announce);
+extern void chathistory_coverage_changed(void);
 extern int server_retention_covers(struct Client*, time_t);
 extern void clear_server_ad(struct Client*);
 extern void chathistory_report_ads(struct Client*, const struct StatDesc*, char*);
