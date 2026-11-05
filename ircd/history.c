@@ -3678,6 +3678,7 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
   int plen;
   int rc;
   int redacted = 0;
+  int failed = 0;
 
   /* A redaction is a REDACT context row whose reply-index parent is the
    * message (history_store_message links it; history_redact_message
@@ -3707,6 +3708,7 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
     int main_keylen;
     struct db_val main_val = { NULL, 0 };
     struct HistoryMessage child;
+    int get_rc;
 
     if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
       break;
@@ -3728,18 +3730,26 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
     main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
     if (main_keylen < 0)
       continue;
-    if (db_get(history_db_env, history_cf_messages, main_keybuf, main_keylen,
-               snap, &main_val) != DB_OK)
+    get_rc = db_get(history_db_env, history_cf_messages, main_keybuf, main_keylen,
+                    snap, &main_val);
+    if (get_rc == DB_NOTFOUND)
       continue;
+    if (get_rc != DB_OK) {
+      failed = 1;
+      continue;
+    }
     memset(&child, 0, sizeof(child));
-    if (history_deserialize_record(main_val.base, main_val.len, &child) == 0
-        && child.type == HISTORY_REDACT)
+    if (history_deserialize_record(main_val.base, main_val.len, &child) != 0)
+      failed = 1;
+    else if (child.type == HISTORY_REDACT)
       redacted = 1;
     db_val_free(&main_val);
   }
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    failed = 1;
 
   db_iter_close(ri_it);
-  return redacted;
+  return redacted ? 1 : failed ? -1 : 0;
 }
 
 int history_message_is_redacted(const char *target, const char *msgid)

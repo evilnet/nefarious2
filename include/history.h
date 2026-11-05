@@ -66,8 +66,8 @@ struct HistoryRowFilter {
   /** Skip a row that has a REDACT child, read through the walk's own
    * snapshot.  For a walk whose rows reach the client without their
    * context children, so the reply-side redaction filter cannot see them
-   * (SEARCH).  One reply-index seek per row the filter would keep; a failed
-   * lookup skips the row, since it may be a deleted line. */
+   * (SEARCH).  One walk of the row's reply-index children per row the filter
+   * would keep; a failed lookup skips the row, since it may be a deleted line. */
   int skip_redacted;
   int scan_max;    /**< raw rows examined before giving up; 0 = default */
   int scanned;     /**< out: raw rows examined (kept + skipped) */

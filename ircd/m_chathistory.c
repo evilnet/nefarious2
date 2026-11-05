@@ -6100,7 +6100,7 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 static void complete_search_fed(struct FedRequest *req)
 {
   struct Client *client;
-  struct HistoryMessage *merged, *m, **all;
+  struct HistoryMessage *merged, *m, **pp, **all;
   int total = 0, k, keep;
 
   if (!req || req->response_sent)
@@ -6112,8 +6112,19 @@ static void complete_search_fed(struct FedRequest *req)
   /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
    * the union is sorted and trimmed below. */
   merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
-  for (m = merged; m; m = m->next)
-    total++;
+  /* Hide what this server knows is deleted: a REDACT can land while the
+   * responders are awaited, and a store that missed one still sends the
+   * line.  Only a definite yes: a server with no store cannot tell. */
+  for (pp = &merged; (m = *pp); ) {
+    if (history_message_is_redacted(req->target, m->msgid) == 1) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+    } else {
+      total++;
+      pp = &m->next;
+    }
+  }
   if (total == 0) {
     search_send(client, NULL, NULL, req->label[0] ? req->label : NULL);
     return;
