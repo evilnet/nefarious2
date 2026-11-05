@@ -787,10 +787,12 @@ static time_t history_bg_errors_at = 0;
  * compactions ("rocksdb.background-errors", kept on the default CF).  A
  * store whose background work failed can stay read-only, failing every
  * write until the IRCd restarts (nothing here reopens it), so a change
- * of the count is said once: one L_ERROR and one oper notice, naming the
- * last backend error recorded on the env.  A count still climbing (a
- * flush retried in the background) is said at most once a minute, the
- * latest count then. */
+ * of the count is said once: one L_ERROR and one oper notice.  RocksDB's
+ * C API does not expose the background error itself; the line names the
+ * env's last write error (the last failed foreground op the wrapper
+ * recorded), which is often that error coming back on a write, but need
+ * not be.  A count still climbing (a flush retried in the background) is
+ * said at most once a minute, the latest count then. */
 static void history_check_background_errors(void)
 {
   uint64_t n = 0;
@@ -809,12 +811,12 @@ static void history_check_background_errors(void)
   err = db_env_last_error(history_db_env);
   log_write(LS_SYSTEM, L_ERROR, 0,
             "history: the chathistory store reports %llu background error%s "
-            "(failed flushes or compactions; last backend error: %s); history "
+            "(failed flushes or compactions); last write error: %s; history "
             "writes may fail until the server restarts",
             (unsigned long long)n, n == 1 ? "" : "s", err ? err : "none recorded");
   sendto_opmask_butone(0, SNO_OLDSNO,
-                       "Chathistory store: %llu background error%s (last "
-                       "backend error: %s); history writes may fail until restart",
+                       "Chathistory store: %llu background error%s; last write "
+                       "error: %s; history writes may fail until restart",
                        (unsigned long long)n, n == 1 ? "" : "s",
                        err ? err : "none recorded");
 }
@@ -1002,7 +1004,9 @@ static void history_trim_cap_kick(void)
  * delete of the oldest rows overall (htrim_emergency), then the store
  * retries once.  The slice checks no target and reports none from inside
  * the store: the next trim slice (armed here) cleans up the targets it
- * emptied and sends their CH A -, and runs the targets sweep it armed.
+ * emptied and sends their CH A -, tells the coverage callback when the
+ * floor moved, and runs the targets sweep it armed.  Within a second of
+ * one that failed or deleted nothing the engine skips it (0: no retry).
  * Logged at most once a minute.
  * @return the rows deleted (the store retries when > 0), or -1. */
 static int history_emergency_evict(void)
@@ -1018,6 +1022,11 @@ static int history_emergency_evict(void)
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "history: storage full, and the emergency eviction failed: %s%s",
                 htrim_last_error(), more);
+    else if (n == 0)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: storage full, and the emergency eviction deleted "
+                "nothing (no indexed rows, or within a second of one that "
+                "failed or found none)%s", more);
     else
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "history: storage full: the emergency eviction deleted %d of the "

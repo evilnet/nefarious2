@@ -4309,7 +4309,7 @@ static void test_undecided_hint_logs_targets(void **state)
   log = (char *)calloc(1, (size_t)len + 1);
   assert_int_equal((size_t)len, fread(log, 1, (size_t)len, tmp));
   fclose(tmp);
-  assert_non_null(strstr(log, "compaction hint on messages: 2 undecided targets"));
+  assert_non_null(strstr(log, "compaction hint on messages: 2 undecided target ranges"));
   free(log);
 }
 
@@ -4438,7 +4438,7 @@ static void test_undecided_target_not_added_twice(void **state)
   run_until_idle(&p);                  /* an engine slice issues the hint */
   log = captured_log(tmp);
   assert_int_equal(1, fake_db_suggest_calls(st.messages));
-  assert_non_null(strstr(log, "compaction hint on messages: 1 undecided target,"));
+  assert_non_null(strstr(log, "compaction hint on messages: 1 undecided target range,"));
   free(log);
 }
 
@@ -4585,11 +4585,20 @@ static void test_emergency_one_slice(void **state)
   assert_int_equal(htc_parse_ms("1004.000"), htrim_coverage_floor_ms());
   snprintf(want, sizeof want, "%llu", (unsigned long long)htc_parse_ms("1004.000"));
   assert_int_equal(1, meta_is(HTRIM_META_FLOOR, want));
-  assert_int_equal(1, coverage_calls);
+  assert_int_equal(0, coverage_calls);          /* never inside the store */
   assert_int_equal(5, htrim_stats()->deleted[HTRIM_PATH_EMERGENCY]);
   assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
   assert_int_equal(HTRIM_PH_EMERGENCY, htrim_stats()->last_phase);
   assert_int_equal(0, emptied_calls);
+
+  /* The next engine slice tells the coverage callback, once. */
+  {
+    struct htrim_params p = params(5);
+    assert_true(htrim_run_slice(&p) >= 0);
+    assert_int_equal(1, coverage_calls);
+    assert_true(htrim_run_slice(&p) >= 0);
+    assert_int_equal(1, coverage_calls);
+  }
 }
 
 static void test_emergency_empty_store(void **state)
@@ -4684,6 +4693,87 @@ static void test_emergency_commit_failure_applies_nothing(void **state)
   assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_EMERGENCY]);
   assert_int_equal(2000, total_now());
   assert_int_equal(0, htrim_tsweep_pending());
+}
+
+/* Fix round 1, I1: an undecided hint that failed is re-armed when the
+ * same target is undecided again (the de-dup must not swallow it): the
+ * slot has no cumulative trigger, so that is its only way back. */
+static void test_undecided_hint_retried_after_failure(void **state)
+{
+  struct htrim_params p = params(0);
+  struct htrim_slice *s;
+  char ts[32], late[32], mid[16];
+  int i;
+  (void)state;
+
+  ageout_ready();
+  for (i = 0; i <= 10000; i++) {
+    snprintf(mid, sizeof mid, "a%05d", i);
+    seed_plain("#aa", ts_ago(ts, sizeof ts, 1, 30000 - i), mid, "a:bob", NULL);
+  }
+  seed_targets("#aa", ts);
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  for (i = 0; i <= 10000; i++) {
+    snprintf(mid, sizeof mid, "a%05d", i);
+    stage_del(s, HTRIM_PATH_AGEOUT, "#aa", ts_ago(ts, sizeof ts, 1, 30000 - i), mid, 1);
+  }
+  assert_int_equal(10001, htrim_slice_commit(s));    /* #aa undecided */
+  fake_db_fail_next_flush(env);
+  run_until_idle(&p);                                 /* its hint: the flush fails */
+  assert_int_equal(1, fake_db_flush_calls(st.messages));
+  assert_int_equal(0, fake_db_suggest_calls(st.messages));
+
+  seed_plain("#aa", ts_ago(late, sizeof late, 1, 100), "late", "a:bob", NULL);
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  stage_del(s, HTRIM_PATH_AGEOUT, "#aa", late, "late", 1);
+  assert_int_equal(1, htrim_slice_commit(s));        /* #aa undecided again */
+  run_until_idle(&p);                                 /* the hint goes again */
+  assert_int_equal(2, fake_db_flush_calls(st.messages));
+  assert_int_equal(1, fake_db_suggest_calls(st.messages));
+  assert_true(targets_has("#aa"));
+}
+
+/* Fix round 1, M3: within 1 s of an emergency that failed or found
+ * nothing, the next one is skipped (returns 0 at once, no walk): a store
+ * stuck failing (a NoSpace background error) would otherwise pay a whole
+ * slice on every message. */
+static void test_emergency_skips_a_second_after_nothing(void **state)
+{
+  unsigned int opens;
+  (void)state;
+
+  evict_ready();
+  step_us = 0;
+  fake_us = 10000000;
+  assert_int_equal(0, htrim_emergency(5));            /* nothing indexed */
+  em_seed(20);
+  opens = fake_db_iter_opens(st.by_time);
+  fake_us += 999000;
+  assert_int_equal(0, htrim_emergency(5));            /* skipped */
+  assert_int_equal(opens, fake_db_iter_opens(st.by_time));
+  assert_true(em_present(0));
+  fake_us += 2000;                                    /* 1.001 s after it */
+  step_us = 1000;
+  assert_int_equal(5, htrim_emergency(5));
+  assert_false(em_present(0));
+
+  step_us = 0;                                        /* a failure, the same */
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, htrim_emergency(5));
+  opens = fake_db_iter_opens(st.by_time);
+  fake_us += 500000;
+  assert_int_equal(0, htrim_emergency(5));            /* skipped */
+  assert_int_equal(opens, fake_db_iter_opens(st.by_time));
+  assert_true(em_present(5));
+  fake_us += 600000;
+  step_us = 1000;
+  assert_int_equal(5, htrim_emergency(5));
+  assert_false(em_present(5));
+  /* After one that deleted rows, the next is not skipped. */
+  assert_int_equal(5, htrim_emergency(5));
+  assert_false(em_present(10));
 }
 
 int main(void)
@@ -4788,6 +4878,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_emergency_counts_and_resumes, setup, teardown),
     cmocka_unit_test_setup_teardown(test_emergency_arms_sweep_and_defers_reports, setup, teardown),
     cmocka_unit_test_setup_teardown(test_emergency_commit_failure_applies_nothing, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_undecided_hint_retried_after_failure, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_skips_a_second_after_nothing, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

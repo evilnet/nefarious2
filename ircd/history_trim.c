@@ -300,6 +300,13 @@ static struct {
   size_t             ev_lower_len, ev_lower_cap;   /* 0 = the first key */
   uint64_t           drain_owner, drain_oldest;    /* rows this drain deleted */
 
+  /* An emergency (inside a store) moved the coverage floor: the next
+   * htrim_run_slice tells the coverage callback, never the store. */
+  int                coverage_due;
+  /* After an emergency that failed or deleted nothing: none before this
+   * clock reading (us; 0 = no wait). */
+  uint64_t           em_retry_us;
+
   /* The targets sweep. */
   int                ts_armed;        /* a pass is due (each start, each drain's end) */
   int                ts_running;      /* a pass is under way */
@@ -327,7 +334,6 @@ static struct {
     size_t lol, hil;
   }                  und[HTRIM_UND_MAX];
   size_t             nund;
-  uint64_t           und_targets;           /* undecided targets they cover */
   unsigned int       compact_min_rows;
 
   char               last_error[192]; /* the last failed slice, for the caller's log */
@@ -753,10 +759,9 @@ static int slot_suggest(int i, struct db_cf *cf)
 /** Slot @a i's hint went through: start counting again. */
 static void slot_done(int i)
 {
-  if (i == HH_UNDECIDED) {
+  if (i == HH_UNDECIDED)
     g.nund = 0;
-    g.und_targets = 0;
-  } else
+  else
     g.hint[i].n = 0;
   g.hint_defer[i] = g.hint_backoff[i] = g.hint_failed[i] = 0;
   g.hint_rearm[i] = 0;
@@ -838,13 +843,12 @@ static int hint_flush(int i)
   us = elapsed_since(t0, g.clock());
   for (k = 0; k < ng; k++) {
     int j = grp[k];
-    if (j == HH_UNDECIDED)
+    if (j == HH_UNDECIDED)    /* a range a target; past HTRIM_UND_MAX the last widens */
       log_write(LS_SYSTEM, L_INFO, 0,
-                "history: trim: compaction hint on messages: %llu undecided "
-                "target%s, %zu deletes in its memtables; flush %llu us on the "
-                "main thread", (unsigned long long)g.und_targets,
-                g.und_targets == 1 ? "" : "s", cs.mem_deletes + cs.imm_deletes,
-                (unsigned long long)us);
+                "history: trim: compaction hint on messages: %zu undecided "
+                "target range%s, %zu deletes in its memtables; flush %llu us "
+                "on the main thread", g.nund, g.nund == 1 ? "" : "s",
+                cs.mem_deletes + cs.imm_deletes, (unsigned long long)us);
     else
       log_write(LS_SYSTEM, L_INFO, 0,
                 "history: trim: compaction hint on %s: %llu keys deleted since "
@@ -1507,10 +1511,14 @@ static void target_undecided(const void *name, size_t nlen)
   lo[nlen] = '\0';
   memcpy(hi, name, nlen);
   hi[nlen] = '\x01';
+  /* In the set already: not added twice -- but due again, since a hint
+   * that failed is only re-armed by an undecided target (the slot has no
+   * cumulative trigger). */
+  g.hint_due[HH_UNDECIDED] = 1;
   for (k = 0; k < g.nund; k++)
     if (key_cmp(lo, nlen + 1, g.und[k].lo, g.und[k].lol) >= 0
         && key_cmp(hi, nlen + 1, g.und[k].hi, g.und[k].hil) <= 0)
-      return;                                   /* in the set already */
+      return;
   /* A due hint (one an engine slice, never in a caller's): the flush
    * stays out of the cleanup and its cost.  Each target's range apart --
    * one wide range over unrelated targets would mark most of the CF -- up
@@ -1532,8 +1540,6 @@ static void target_undecided(const void *name, size_t nlen)
       g.und[last].hil = nlen + 1;
     }
   }
-  g.und_targets++;
-  g.hint_due[HH_UNDECIDED] = 1;
 }
 
 /** Whether @a target (folded) is now empty and its targets key should go.
@@ -2824,9 +2830,11 @@ static void evict_apply(struct htrim_slice *s)
 
 /** A committed emergency slice: the next oldest-overall walk resumes
  * past its deletes (ev_lower: every row below is gone but the late rows
- * live_floor reads), the coverage floor moves, and a slice that deleted
- * rows arms the targets sweep (its cleanup went to the carry).  A walk
- * that ran out recounts nothing: no drain is judging the totals. */
+ * live_floor reads), the coverage floor moves -- the coverage callback
+ * waits for the next engine slice (it may broadcast, and this runs inside
+ * a store) -- and a slice that deleted rows arms the targets sweep (its
+ * cleanup went to the carry).  A walk that ran out recounts nothing: no
+ * drain is judging the totals. */
 static void emergency_apply(struct htrim_slice *s)
 {
   if (s->ev_bt_len) {
@@ -2844,10 +2852,12 @@ static void emergency_apply(struct htrim_slice *s)
     tsweep_arm();
   if (s->floor_ms > g.floor_ms) {
     g.floor_ms = s->floor_ms;
-    if (coverage_cb)
-      coverage_cb();
+    g.coverage_due = 1;
   }
 }
+
+/** The pause after an emergency that failed or deleted nothing. */
+#define HTRIM_EMERGENCY_RETRY_US 1000000u
 
 int htrim_emergency(unsigned int budget_ms)
 {
@@ -2858,10 +2868,16 @@ int htrim_emergency(unsigned int budget_ms)
     snprintf(g.last_error, sizeof g.last_error, "trim engine not started");
     return -1;
   }
+  /* The last one failed or found nothing: a store stuck failing (a
+   * background error) would otherwise pay a whole slice per message. */
+  if (g.em_retry_us && g.clock() < g.em_retry_us)
+    return 0;
+  g.em_retry_us = 0;
   s = htrim_slice_begin(budget_ms ? budget_ms : 1);    /* never unbudgeted */
   if (!s) {
     snprintf(g.last_error, sizeof g.last_error, "emergency slice not opened: %s",
              last_err());
+    g.em_retry_us = g.clock() + HTRIM_EMERGENCY_RETRY_US;
     return -1;
   }
   htrim_slice_set_phase(s, HTRIM_PH_EMERGENCY);
@@ -2874,12 +2890,15 @@ int htrim_emergency(unsigned int budget_ms)
     record_slice(HTRIM_PH_EMERGENCY);
     snprintf(g.last_error, sizeof g.last_error, "emergency slice failed: %s",
              last_err());
+    g.em_retry_us = g.clock() + HTRIM_EMERGENCY_RETRY_US;
     return -1;
   }
   rows = htrim_slice_commit(s);
   if (rows < 0)
     snprintf(g.last_error, sizeof g.last_error, "emergency slice commit failed: %s",
              last_err());
+  if (rows <= 0)
+    g.em_retry_us = g.clock() + HTRIM_EMERGENCY_RETRY_US;
   return rows;
 }
 
@@ -3195,6 +3214,12 @@ int htrim_run_slice(const struct htrim_params *p)
     return -1;
   }
   g.compact_min_rows = p->compact_min_rows;
+  /* An emergency moved the coverage floor inside a store: told here. */
+  if (g.coverage_due) {
+    g.coverage_due = 0;
+    if (coverage_cb)
+      coverage_cb();
+  }
   if (g.draining && !p->cap_bytes)
     drain_end(0);                               /* the cap went off mid-drain */
   ph = pick_phase(p);

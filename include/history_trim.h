@@ -100,9 +100,10 @@
  * oldest-overall deletes (htrim_emergency) and retries once: the same
  * walk from the live floor, without the plan or any gate, moving the
  * coverage floor the same way and arming the targets sweep.  It runs
- * inside the store, so its cleanup and the CH A - reports of the
- * targets it emptied move to the next engine slice, and it issues no
- * compaction hint.
+ * inside the store, so its cleanup, the CH A - reports of the targets it
+ * emptied and the coverage callback move to the next engine slice, and
+ * it issues no compaction hint.  After one that failed or found nothing,
+ * the next is skipped for a second.
  *
  * Targets sweep.  The touched-target cleanup checks a target only when a
  * slice deleted its newest stamped row -- exact for oldest-first age-out,
@@ -254,7 +255,9 @@ struct htrim_stats {
 
 struct htrim_slice;
 
-/** Called after a commit that moved or cleared the coverage floor. */
+/** Called after a commit that moved or cleared the coverage floor -- or,
+ * for an emergency slice (inside a store), at the start of the next
+ * htrim_run_slice. */
 typedef void (*htrim_coverage_fn)(void);
 
 /** Register the coverage callback (NULL = none).  It survives
@@ -429,15 +432,19 @@ void htrim_tsweep_clear(void);
  * HTRIM_PATH_EMERGENCY; the coverage floor moves to the newest ms deleted,
  * in the same batch, as an oldest-overall walk moves it; the next walk of
  * the oldest rows (the next emergency, or the drain under way) resumes
- * past these deletes.  Called inside a store, so nothing in it reports
- * or flushes: the targets it touched go to the next engine slice's
- * cleanup (whose emptied callback sends the CH A - reports), a compaction
- * hint it makes due waits for an engine slice, and a slice that deleted
- * rows arms the targets sweep, as a drain's end does.  Recorded in
- * htrim_stats as HTRIM_PH_EMERGENCY; a failure describes itself in
- * htrim_last_error().  Main thread.
- * @return the rows deleted (0: nothing indexed to delete), or -1 (nothing
- * applied). */
+ * past these deletes.  Called inside a store, so nothing in it reports,
+ * calls back or flushes: the targets it touched go to the next engine
+ * slice's cleanup (whose emptied callback sends the CH A - reports), the
+ * coverage callback for a floor it moved waits for the next
+ * htrim_run_slice, a compaction hint it makes due waits for an engine
+ * slice, and a slice that deleted rows arms the targets sweep, as a
+ * drain's end does.  Within 1 s (the engine's clock) of an emergency that
+ * failed or deleted nothing, it returns 0 at once without a slice: a
+ * store stuck failing would otherwise pay a whole slice on every message.
+ * Recorded in htrim_stats as HTRIM_PH_EMERGENCY; a failure describes
+ * itself in htrim_last_error().  Main thread.
+ * @return the rows deleted (0: nothing indexed to delete, or skipped as
+ * above), or -1 (nothing applied). */
 int htrim_emergency(unsigned int budget_ms);
 
 /** Run one phase in one budgeted slice: round-robin from the phase after
