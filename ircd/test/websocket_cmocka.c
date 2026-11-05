@@ -21,6 +21,9 @@
  *   - No data frame after the Close (§5.5.1): a Close is set, not sent,
  *     and websocket_close_flush() (close_connection()) sends it after the
  *     queued lines, so exit_client()'s "ERROR :Closing Link" goes first.
+ *   - The answer to a client's Close echoes a status a Close may carry
+ *     (§7.4); a forbidden or unassigned status and a 1-byte body get 1002,
+ *     a reason that is not UTF-8 gets 1007.
  *   - RFC 6455 framing refusals: a control frame without FIN is a
  *     decode error (§5.5); websocket_frag_feed() answers a TEXT/BINARY
  *     frame inside a fragmented message and an orphan continuation with
@@ -1139,6 +1142,89 @@ static void test_close_echo_marker_codes_get_1002(void **state)
   }
 }
 
+/* ========== The answer to a client's Close (RFC 6455 §5.5.1, §7.4) ========== */
+
+/* The client's Close is answered after it is flushed; return the status
+ * of that answer (it must be the one write). */
+static int close_answer(const char *payload, int len)
+{
+  struct Client cli;
+  struct Connection con;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, payload, len), 0);
+  websocket_close_flush(&cli);
+  assert_int_equal(sent_count, 1);
+  assert_int_equal((unsigned char)sent_buf[0], WS_FIN | WS_OPCODE_CLOSE);
+  if (sent_len == 2)
+    return 0;          /* an empty Close */
+  assert_true(sent_len >= 4);
+  return ((unsigned char)sent_buf[2] << 8) | (unsigned char)sent_buf[3];
+}
+
+/* A status a Close may carry on the wire is echoed: the ones RFC 6455
+ * defines and IANA registers (1000-1003, 1007-1014), and the ranges for
+ * libraries and applications (3000-4999). */
+static void test_close_echo_valid_codes(void **state)
+{
+  static const int ok[] = { 1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010,
+                            1011, 1012, 1013, 1014, 3000, 3999, 4000, 4999 };
+  char status[2];
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
+    status[0] = (char)(ok[i] >> 8);
+    status[1] = (char)(ok[i] & 0xFF);
+    assert_int_equal(close_answer(status, 2), ok[i]);
+  }
+}
+
+/* §7.4.1: 1005, 1006 and 1015 "MUST NOT be set as a status code in a
+ * Close control frame"; 1004 is reserved, 0-999 are not used, and
+ * 1016-2999 are unassigned (§7.4.2), as is anything over 4999.  A Close
+ * carrying one is a protocol error, answered with 1002.  Before, the
+ * status was echoed, so the server put a forbidden code on the wire. */
+static void test_close_echo_forbidden_codes_get_1002(void **state)
+{
+  static const int bad[] = { 0, 1, 999, 1004, 1005, 1006, 1015, 1016, 1100,
+                             2000, 2999, 5000, 65535 };
+  char status[2];
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    status[0] = (char)(bad[i] >> 8);
+    status[1] = (char)(bad[i] & 0xFF);
+    assert_int_equal(close_answer(status, 2), 1002);
+  }
+}
+
+/* §5.5.1: a Close body, if any, starts with a 2-byte status.  One byte
+ * is a protocol error (1002); before, it was answered with an empty
+ * Close as if the client had sent none.  No body at all still gets an
+ * empty Close. */
+static void test_close_echo_one_byte_body_gets_1002(void **state)
+{
+  (void)state;
+  assert_int_equal(close_answer("\x03", 1), 1002);
+  assert_int_equal(close_answer(NULL, 0), 0);
+}
+
+/* §5.5.1, §8.1: the reason after the status is UTF-8; one that is not
+ * is answered with 1007, a NUL in it no excuse.  A valid one is fine. */
+static void test_close_echo_bad_utf8_reason_gets_1007(void **state)
+{
+  (void)state;
+  assert_int_equal(close_answer("\x03\xE8" "bye \xFF", 7), 1007);
+  assert_int_equal(close_answer("\x03\xE8" "bye \xC3", 7), 1007);      /* cut sequence */
+  assert_int_equal(close_answer("\x03\xE8" "ok\0\xFF", 6), 1007);     /* past a NUL */
+  assert_int_equal(close_answer("\x03\xE9" "caf\xC3\xA9", 7), 1001);
+  assert_int_equal(close_answer("\x03\xE9" "ok\0ok", 7), 1001);
+  /* a forbidden status is a protocol error whatever the reason */
+  assert_int_equal(close_answer("\x03\xED" "bye \xFF", 7), 1002);
+}
+
 /* ========== The ERROR line before the Close (RFC 6455 §5.5.1) ========== */
 
 /* Write 'i' (in order) is a data frame carrying 'text'. */
@@ -1301,6 +1387,10 @@ int main(void)
     cmocka_unit_test(test_close_once_normal_exit),
     cmocka_unit_test(test_close_once_client_initiated),
     cmocka_unit_test(test_close_echo_marker_codes_get_1002),
+    cmocka_unit_test(test_close_echo_valid_codes),
+    cmocka_unit_test(test_close_echo_forbidden_codes_get_1002),
+    cmocka_unit_test(test_close_echo_one_byte_body_gets_1002),
+    cmocka_unit_test(test_close_echo_bad_utf8_reason_gets_1007),
     cmocka_unit_test(test_close_follows_error_on_refusal),
     cmocka_unit_test(test_close_follows_error_on_exit),
     cmocka_unit_test(test_close_follows_error_client_initiated),

@@ -125,8 +125,10 @@ extern int websocket_encode_frame(const char *data, int data_len,
                                   unsigned char *frame, int text_mode);
 
 /** Handle a WebSocket control frame.  A PING is answered at once; a
- * CLOSE sets the connection's Close to the answer (websocket_set_close())
- * and asks the caller to close the connection.
+ * CLOSE sets the connection's Close to the answer (websocket_set_close():
+ * its status echoed, or 1002 for a status no Close may carry or a 1-byte
+ * body, 1007 for a reason that is not UTF-8) and asks the caller to close
+ * the connection.
  * @param[in] cptr Client connection.
  * @param[in] opcode Frame opcode.
  * @param[in] payload Frame payload.

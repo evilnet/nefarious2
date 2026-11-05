@@ -929,6 +929,21 @@ void websocket_ping_timer_init(void)
   timer_add(timer_init(&ws_ping_timer), ws_ping_callback, 0, TT_PERIODIC, iv);
 }
 
+/** Whether a Close frame may carry \a code on the wire (RFC 6455 §7.4):
+ * a status §7.4.1 defines for an endpoint to send or IANA has registered
+ * since (1000-1003, 1007-1014), or one of the library and application
+ * ranges (3000-4999, §7.4.2).  Not 1004 (reserved), not 1005, 1006 and
+ * 1015 (never on the wire), not 0-999, 1016-2999 (unassigned) or anything
+ * over 4999.
+ * @param[in] code Status code.
+ * @return Non-zero if a Close may carry it. */
+static int ws_close_code_valid(int code)
+{
+  if (code >= 3000 && code <= 4999)
+    return 1;
+  return (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014);
+}
+
 int websocket_handle_control(struct Client *cptr, int opcode,
                              const char *payload, int payload_len)
 {
@@ -956,21 +971,26 @@ int websocket_handle_control(struct Client *cptr, int opcode,
       return 1;
 
     case WS_OPCODE_CLOSE:
-      /* Client initiated close: the answer echoes its status (an empty
-       * Close answers one without).  0 and 1005 cannot be echoed: to
-       * websocket_set_close() 0 is "no Close set" and 1005 an empty
-       * Close, and neither may be sent (§7.4.1 keeps 1005 off the wire,
-       * and 0 is no status), so a Close carrying one is a protocol error:
-       * 1002.  The answer is this connection's Close unless one of ours
+      /* Client initiated close.  The answer echoes its status (§5.5.1),
+       * and an empty Close answers one without a body.  A body too short
+       * for a status, or a status no Close may carry (§7.4; among them 0
+       * and 1005, which websocket_set_close() reads as "none" and "an
+       * empty Close"), is a protocol error: 1002, never the forbidden
+       * code echoed back.  A reason that is not UTF-8 (§5.5.1, §8.1) is
+       * 1007.  The answer is this connection's Close unless one of ours
        * is already set, and goes out when the caller closes the
        * connection. */
-      if (payload_len < 2)
+      if (payload_len == 0)
         websocket_set_close(cptr, WS_CLOSE_NO_STATUS, NULL);
       else {
-        int code = ((unsigned char)payload[0] << 8) | (unsigned char)payload[1];
+        int code = payload_len >= 2
+                   ? ((unsigned char)payload[0] << 8) | (unsigned char)payload[1]
+                   : 0;
 
-        if (code == 0 || code == WS_CLOSE_NO_STATUS)
+        if (payload_len < 2 || !ws_close_code_valid(code))
           websocket_set_close(cptr, 1002, "Invalid Close status");
+        else if (!string_is_valid_utf8_len(payload + 2, payload_len - 2))
+          websocket_set_close(cptr, 1007, "Invalid UTF-8");
         else
           websocket_set_close(cptr, code, NULL);
       }
