@@ -184,8 +184,9 @@ extern void websocket_ping_timer_init(void);
  * @param[in] cptr Client connection.
  * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big), or
  *   WS_CLOSE_NO_STATUS for a Close with an empty body.
- * @param[in] reason Optional short reason text (cut to
- *   WS_CLOSE_REASON_MAX bytes).
+ * @param[in] reason Optional short reason text: made UTF-8 (an invalid
+ *   byte becomes U+FFFD) and cut to WS_CLOSE_REASON_MAX bytes at a
+ *   character boundary.
  */
 extern void websocket_set_close(struct Client *cptr, int code,
                                 const char *reason);

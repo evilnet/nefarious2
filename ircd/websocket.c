@@ -825,24 +825,35 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
  * Close went ahead of exit_client()'s "ERROR :Closing Link", a data frame
  * after the Close (§5.5.1) that web IRC clients read the quit reason
  * from.
+ *
+ * The reason must be UTF-8 (§5.5.1), or the client fails the connection
+ * (§8.1) and reports 1006 instead of the status.  A farewell's reason is
+ * the exit comment, which for a QUIT or a KILL carries the user's text,
+ * UTF-8 or not: invalid bytes become U+FFFD.  A control frame carries at
+ * most 125 bytes (§5.5), so the reason is then cut to
+ * WS_CLOSE_REASON_MAX bytes at a character boundary.
  * @param[in] cptr Client connection.
  * @param[in] code Status code, or WS_CLOSE_NO_STATUS (an empty Close).
- * @param[in] reason Optional reason text (cut to fit a control frame).
+ * @param[in] reason Optional reason text.
  */
 void websocket_set_close(struct Client *cptr, int code, const char *reason)
 {
   struct Connection *con = cli_connect(cptr);
-  int rlen;
+  char text[BUFSIZE];
 
   if (con_ws_close_code(con))
     return;
   con_ws_close_code(con) = code;
-  rlen = (reason && code != WS_CLOSE_NO_STATUS) ? (int)strlen(reason) : 0;
-  if (rlen > WS_CLOSE_REASON_MAX)
-    rlen = WS_CLOSE_REASON_MAX;  /* control frame payload <= 125 incl. 2-byte code */
-  if (rlen > 0)
-    memcpy(con_ws_close_reason(con), reason, rlen);
-  con_ws_close_reason(con)[rlen] = '\0';
+  con_ws_close_reason(con)[0] = '\0';
+  if (code == WS_CLOSE_NO_STATUS || EmptyString(reason))
+    return;
+  /* string_sanitize_utf8() works in a BUFSIZE buffer and its result, up
+   * to well past WS_CLOSE_REASON_MAX bytes, is whole UTF-8 sequences:
+   * ircd_utf8_clamp() then cuts it at a character boundary. */
+  ircd_strncpy(text, reason, sizeof(text));
+  string_sanitize_utf8(text);
+  ircd_utf8_clamp(text, WS_CLOSE_REASON_MAX);
+  ircd_strncpy(con_ws_close_reason(con), text, sizeof(con_ws_close_reason(con)));
 }
 
 /** Flush a WebSocket connection that is being closed: the lines queued

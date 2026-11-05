@@ -24,6 +24,8 @@
  *   - The answer to a client's Close echoes a status a Close may carry
  *     (§7.4); a forbidden or unassigned status and a 1-byte body get 1002,
  *     a reason that is not UTF-8 gets 1007.
+ *   - The Close's own reason is UTF-8 (an invalid byte becomes U+FFFD)
+ *     and cut to 123 bytes at a character boundary (§5.5, §8.1).
  *   - RFC 6455 framing refusals: a control frame without FIN is a
  *     decode error (§5.5); websocket_frag_feed() answers a TEXT/BINARY
  *     frame inside a fragmented message and an orphan continuation with
@@ -1225,6 +1227,95 @@ static void test_close_echo_bad_utf8_reason_gets_1007(void **state)
   assert_int_equal(close_answer("\x03\xED" "bye \xFF", 7), 1002);
 }
 
+/* ========== The Close reason (RFC 6455 §5.5, §5.5.1, §8.1) ========== */
+
+/* Set a farewell with 'reason', flush, and check the one Close that goes
+ * out: status 1000, a reason of at most WS_CLOSE_REASON_MAX bytes that is
+ * valid UTF-8 and equals 'want'. */
+static void assert_farewell_reason(const char *reason, const char *want)
+{
+  struct Client cli;
+  struct Connection con;
+  int rlen;
+
+  setup_client(&cli, &con);
+  websocket_set_close(&cli, 1000, reason);
+  websocket_close_flush(&cli);
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(1000);
+  rlen = sent_len - 4;
+  assert_true(rlen <= WS_CLOSE_REASON_MAX);
+  assert_int_equal(1, string_is_valid_utf8_len(sent_buf + 4, rlen));
+  assert_int_equal(rlen, (int)strlen(want));
+  assert_memory_equal(sent_buf + 4, want, rlen);
+}
+
+/* Repeat 'unit' n times after 'head', into buf. */
+static const char *repeat(char *buf, const char *head, const char *unit, int n)
+{
+  strcpy(buf, head);
+  while (n-- > 0)
+    strcat(buf, unit);
+  return buf;
+}
+
+#define EURO  "\342\202\254"      /* U+20AC, 3 bytes */
+#define GRIN  "\360\237\230\200"  /* U+1F600, 4 bytes */
+#define EACUTE "\303\251"         /* U+00E9, 2 bytes */
+#define FFFD  "\357\277\275"      /* U+FFFD, 3 bytes */
+
+/* §5.5: a control frame carries at most 125 bytes, two of them the
+ * status, so a long reason is cut -- at a character boundary, at or under
+ * 123 bytes.  Cut at byte 123 regardless, a multibyte character there was
+ * split and the reason was not UTF-8, so a browser failed the connection
+ * (§8.1) and reported 1006 instead of the status. */
+static void test_close_reason_cut_at_utf8_boundary(void **state)
+{
+  static char in[1024], want[1024];
+  (void)state;
+
+  /* "x" + 40 x 3 bytes = 121; the 41st would end at 124 */
+  assert_farewell_reason(repeat(in, "x", EURO, 50), repeat(want, "x", EURO, 40));
+  /* "xy" + 30 x 4 bytes = 122; the 31st would end at 126 */
+  assert_farewell_reason(repeat(in, "xy", GRIN, 40), repeat(want, "xy", GRIN, 30));
+  /* 61 x 2 bytes = 122; the 62nd would end at 124 */
+  assert_farewell_reason(repeat(in, "", EACUTE, 62), repeat(want, "", EACUTE, 61));
+  /* exactly 123 bytes is kept whole */
+  assert_farewell_reason(repeat(in, "", EURO, 41), repeat(want, "", EURO, 41));
+  assert_farewell_reason(repeat(in, "", "z", 123), repeat(want, "", "z", 123));
+  /* ASCII over the limit is cut at 123 */
+  assert_farewell_reason(repeat(in, "", "z", 200), repeat(want, "", "z", 123));
+}
+
+/* The farewell's reason is the exit comment, which for a QUIT or a KILL
+ * carries the user's text, and that need not be UTF-8 (a BINARY frame, a
+ * plain-socket client, another server).  The Close reason must be (§5.5.1,
+ * §8.1): an invalid byte becomes U+FFFD.  Before, it went out as it came
+ * and a browser failed the connection with 1006. */
+static void test_close_reason_made_utf8(void **state)
+{
+  static char in[1024], want[1024];
+  (void)state;
+
+  assert_farewell_reason("Quit: caf\351 \377!", "Quit: caf" FFFD " " FFFD "!");
+  assert_farewell_reason("Quit: \342\202 ok", "Quit: " FFFD FFFD " ok");
+  /* ...and then cut at a boundary: "Quit: x" + 38 x U+FFFD = 121 */
+  assert_farewell_reason(repeat(in, "Quit: x", "\351", 150),
+                         repeat(want, "Quit: x", FFFD, 38));
+  /* valid text is left alone */
+  assert_farewell_reason("Quit: caf" EACUTE " \002bold\002", "Quit: caf" EACUTE " \002bold\002");
+}
+
+/* A refusal's own reason is kept too (fixed ASCII), and an empty or
+ * missing reason leaves just the status. */
+static void test_close_reason_plain(void **state)
+{
+  (void)state;
+  assert_farewell_reason("Quit", "Quit");
+  assert_farewell_reason("", "");
+  assert_farewell_reason(NULL, "");
+}
+
 /* ========== The ERROR line before the Close (RFC 6455 §5.5.1) ========== */
 
 /* Write 'i' (in order) is a data frame carrying 'text'. */
@@ -1391,6 +1482,9 @@ int main(void)
     cmocka_unit_test(test_close_echo_forbidden_codes_get_1002),
     cmocka_unit_test(test_close_echo_one_byte_body_gets_1002),
     cmocka_unit_test(test_close_echo_bad_utf8_reason_gets_1007),
+    cmocka_unit_test(test_close_reason_cut_at_utf8_boundary),
+    cmocka_unit_test(test_close_reason_made_utf8),
+    cmocka_unit_test(test_close_reason_plain),
     cmocka_unit_test(test_close_follows_error_on_refusal),
     cmocka_unit_test(test_close_follows_error_on_exit),
     cmocka_unit_test(test_close_follows_error_client_initiated),
