@@ -5970,7 +5970,9 @@ static void search_sel_unescape(char *v)
 /** The search walk shared by the local path and the S2S responder: BEFORE
  * from @a before_unix, the match hook chained behind @a base's presence
  * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
- * newest @a limit matches in @a *out, redaction placeholders dropped.
+ * newest @a limit matches in @a *out.  The hook keeps only message rows, so
+ * no REDACT row reaches redact_filter_messages here: the walk itself skips
+ * a redacted line, and it does not take a page slot.
  * @a *truncated is set when the scan budget cut the window short. */
 static int search_walk(const char *lookup_target, const char *before_unix,
                        int limit, struct SearchMatch *sm, int *budget,
@@ -5991,6 +5993,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   filter.type_mask = base ? base->type_mask : 0;
   filter.veto = base ? base->veto : NULL;
   filter.veto_ctx = base ? base->veto_ctx : NULL;
+  filter.skip_redacted = 1;
   filter.scan_max = *budget;
 
   count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
@@ -5998,9 +6001,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   *budget -= filter.scanned;
   if (truncated)
     *truncated = filter.truncated;
-  if (count < 0)
-    return -1;
-  return redact_filter_messages(out, count);
+  return count;
 }
 
 static int search_one_target(struct Client *sptr, const char *lookup_target,
@@ -7405,8 +7406,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * newest `limit` matches.  `text` is a case-insensitive substring, no
  * regular expressions (the spec's ReDoS note).  The presence hook rides
  * in front of the match so a member who was not there does not find it,
- * and the reply side runs the same redaction and presence filters as a
- * CHATHISTORY page.  There is no index: search is bounded by a scan
+ * the walk skips a redacted line (search_walk), and the reply side runs the
+ * same presence filter as a CHATHISTORY page.  There is no index: search is bounded by a scan
  * budget of SEARCH_SCAN_MAX raw rows per request, spent across the
  * channels searched when `in` is absent; a client wanting more asks
  * narrower windows.  Without `in`, the channels the requester is in are

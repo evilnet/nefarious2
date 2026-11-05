@@ -1904,6 +1904,9 @@ int history_has_msgid(const char *msgid)
  * @param[out] result Pointer to result list head.
  * @return Number of messages returned, or -1 on error.
  */
+static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
+                                  const char *msgid);
+
 /** Apply a query-time row filter to a freshly built row.
  *
  * Returns 1 when the row is kept.  Otherwise the row is freed and the
@@ -1919,14 +1922,15 @@ int history_has_msgid(const char *msgid)
 static int history_filter_row(struct HistoryRowFilter *filter,
                               struct HistoryMessage *msg, int reverse,
                               const char *target, struct db_iter *it,
-                              int *rc)
+                              struct db_snapshot *snap, int *rc)
 {
   int64_t skip_to = 0;
   int64_t row_t;
   int verdict;
   int scan_max;
 
-  if (!filter || (!filter->fn && !filter->type_mask && !filter->veto))
+  if (!filter || (!filter->fn && !filter->type_mask && !filter->veto
+                  && !filter->skip_redacted))
     return 1;
 
   filter->scanned++;
@@ -1938,6 +1942,9 @@ static int history_filter_row(struct HistoryRowFilter *filter,
     verdict = filter->fn(msg, reverse, filter->ctx, &skip_to);
   else
     verdict = 1;
+  if (verdict == 1 && filter->skip_redacted
+      && message_is_redacted_in(snap, target, msg->msgid) != 0)
+    verdict = 0;   /* a deleted line, or a failed look at one: skip, uncounted */
   if (verdict == 1)
     return 1;
 
@@ -2168,7 +2175,7 @@ static int history_query_internal(const char *target,
     /* Query-time filter (presence-aware paging): skipped rows do not
      * count toward the limit; the helper advances/seeks the iterator. */
     {
-      int keep = history_filter_row(filter, msg, reverse, target, it, &rc);
+      int keep = history_filter_row(filter, msg, reverse, target, it, snap, &rc);
       if (keep < 0)
         break;
       if (keep == 0)
@@ -2954,7 +2961,7 @@ int history_query_between(const char *target,
     /* Query-time filter (presence-aware paging); forward walk.  The
      * end-prefix check above re-runs on whatever row a seek lands on. */
     {
-      int keep = history_filter_row(filter, msg, 0, target, it, &rc);
+      int keep = history_filter_row(filter, msg, 0, target, it, snap, &rc);
       if (keep < 0)
         break;
       if (keep == 0)
@@ -3662,17 +3669,15 @@ int history_redact_message(const char *target, const char *msgid)
   return 0;
 }
 
-int history_message_is_redacted(const char *target, const char *msgid)
+/** Does @a msgid have a REDACT child in @a snap?  1 yes, 0 no, -1 could not tell. */
+static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
+                                  const char *msgid)
 {
-  struct db_snapshot *snap;
   struct db_iter *ri_it;
   char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
   int plen;
   int rc;
   int redacted = 0;
-
-  if (!history_available || !target || !msgid || !*msgid)
-    return -1;
 
   /* A redaction is a REDACT context row whose reply-index parent is the
    * message (history_store_message links it; history_redact_message
@@ -3682,16 +3687,11 @@ int history_message_is_redacted(const char *target, const char *msgid)
   if (plen < 0)
     return -1;
 
-  snap = db_snapshot_new(history_db_env);
-  if (!snap)
-    return -1;
   /* Exactly this message's children (history_prefix_iter): an unredacted,
    * childless message must not walk on into its neighbours' ranges. */
   ri_it = history_prefix_iter(history_cf_reply, snap, prefix, (size_t)plen);
-  if (!ri_it) {
-    db_snapshot_destroy(snap);
+  if (!ri_it)
     return -1;
-  }
 
   for (rc = db_iter_seek_first(ri_it);
        rc == DB_OK && db_iter_valid(ri_it) && !redacted;
@@ -3739,6 +3739,21 @@ int history_message_is_redacted(const char *target, const char *msgid)
   }
 
   db_iter_close(ri_it);
+  return redacted;
+}
+
+int history_message_is_redacted(const char *target, const char *msgid)
+{
+  struct db_snapshot *snap;
+  int redacted;
+
+  if (!history_available || !target || !msgid || !*msgid)
+    return -1;
+
+  snap = db_snapshot_new(history_db_env);
+  if (!snap)
+    return -1;
+  redacted = message_is_redacted_in(snap, target, msgid);
   db_snapshot_destroy(snap);
   return redacted;
 }

@@ -63,6 +63,12 @@ struct HistoryRowFilter {
    * typing-only TAGMSG rows that should never consume a page slot. */
   int (*veto)(const struct HistoryMessage *msg, void *veto_ctx);
   void *veto_ctx;
+  /** Skip a row that has a REDACT child, read through the walk's own
+   * snapshot.  For a walk whose rows reach the client without their
+   * context children, so the reply-side redaction filter cannot see them
+   * (SEARCH).  One reply-index seek per row the filter would keep; a failed
+   * lookup skips the row, since it may be a deleted line. */
+  int skip_redacted;
   int scan_max;    /**< raw rows examined before giving up; 0 = default */
   int scanned;     /**< out: raw rows examined (kept + skipped) */
   int truncated;   /**< out: scan_max hit -- page may be incomplete */
