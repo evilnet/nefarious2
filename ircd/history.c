@@ -640,7 +640,6 @@ void history_shutdown(void)
     timer_del(&history_trim_timer);
   history_trim_pass_pending = 0;
   history_trim_started = 0;
-  htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
   htrim_shutdown();
 
   presence_shutdown();
@@ -824,6 +823,27 @@ static void history_check_background_errors(void)
                        err ? err : "none recorded");
 }
 
+/** The trim engine's warning that a finished backfill left the logical
+ * total over the cap's high watermark (it logged it at L_WARNING): the
+ * first drain evicts inside retention -- owners over their share, then
+ * the oldest rows, moving the coverage floor peers route by -- so the
+ * operators hear it too, with how to stop it.  On a first deploy whose
+ * HISTORY_MAP_SIZE_MB was left unset (1024) that is the default. */
+static void history_trim_warn_evict(void)
+{
+  uint64_t total, high, cap;
+
+  if (!htrim_evict_warning(&total, &high, &cap))
+    return;
+  sendto_opmask_butone(0, SNO_OLDSNO,
+                       "Chathistory store: logical size %llu bytes is over the "
+                       "high watermark (%llu of the %llu-byte cap) now that the "
+                       "trim backfill is done; eviction inside retention will "
+                       "start -- SET HISTORY_MAP_SIZE_MB 0 stops it",
+                       (unsigned long long)total, (unsigned long long)high,
+                       (unsigned long long)cap);
+}
+
 void history_trim_tick(int pass_start)
 {
   struct htrim_params p;
@@ -845,11 +865,10 @@ void history_trim_tick(int pass_start)
   p.slice_ms       = trim_slice_ms();
   p.compact_min_rows = HISTORY_TRIM_COMPACT_MIN_ROWS;
 
-  /* A pass start: the alive stamp the next start's index-gap check reads,
-   * and an age-out pass -- resuming where the walk stopped, or back at the
-   * oldest row indexed behind it since (a late store, a backfill). */
+  /* A pass start: an age-out pass -- resuming where the walk stopped, or
+   * back at the oldest row indexed behind it since (a late store, a
+   * backfill). */
   if (pass_start) {
-    htrim_stamp_alive(p.now_ms);
     htrim_pass_start(&p);
     /* Coverage grows as days pass: the floor ages a whole day with no
      * slice moving it.  The callback re-reads history_coverage_days()
@@ -863,6 +882,7 @@ void history_trim_tick(int pass_start)
    * failures in a row, then only at the maintenance ticks (a persistent
    * failure is not repeated every second); logged once per streak. */
   rc = htrim_run_slice(&p);
+  history_trim_warn_evict();
   if (rc >= 0) {
     if (history_trim_fail_streak > 0)
       log_write(LS_SYSTEM, L_INFO, 0,
@@ -896,12 +916,13 @@ void history_trim_kick(void)
   history_trim_arm();
 }
 
-void history_trim_start(uint64_t newest_row_ms)
+uint64_t history_trim_start(void)
 {
+  uint64_t now_ms, newest = 0;
   int interval;
 
   if (!history_available)
-    return;
+    return 0;
   /* What history_init (a worker thread) did about the retired quota
    * counters, logged here on the main thread. */
   if (history_retire_state > 0)
@@ -913,28 +934,26 @@ void history_trim_start(uint64_t newest_row_ms)
               "history: cannot clear the retired quota counters: %s; the next "
               "start tries again", history_retire_err);
   history_retire_state = 0;
-  /* Rows newer than the last alive stamp plus two maintenance intervals
-   * (a crash can leave a whole interval of rows after the last stamp)
-   * were stored while this binary was not running: the backfill runs
-   * again from the first row.  Then this start is itself a stamp -- unless
-   * the reset did not reach the store: a fresh stamp would then hide the
-   * gap from the next start if this one died before the re-run's first
-   * slice committed. */
+  /* Rows an older binary stored while this one was not running are
+   * stamped in targets but have no by_time row: a targets stamp newer
+   * than the newest indexed row (and than what the last backfill walk
+   * covered) sends the backfill again from the first row.  Rows stamped
+   * more than two maintenance intervals ahead (a peer's clock ahead) count
+   * on neither side until wall time reaches them, so an indexed
+   * future-dated row never re-runs the walk at every start.  The walk of
+   * the targets CF also reads the newest stamp of all, for the caller. */
   interval = feature_int(FEAT_CHATHISTORY_MAINTENANCE_INTERVAL);
   if (interval < 60)
     interval = 60;
-  if (htrim_check_index_gap(newest_row_ms, 2000ULL * (uint64_t)interval) < 0)
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "history: trim index-gap reset did not reach the store; no alive "
-              "stamp this start, so the next start finds the gap again");
-  else
-    htrim_stamp_alive((uint64_t)time(NULL) * 1000ULL);
+  now_ms = (uint64_t)time(NULL) * 1000ULL;
+  htrim_check_index_gap(now_ms + 2000ULL * (uint64_t)interval, &newest);
   /* A never-armed (or long-expired) timer: a fresh generator. */
   if (!t_onqueue(&history_trim_timer) && !t_active(&history_trim_timer))
     timer_init(&history_trim_timer);
   history_trim_started = 1;
   /* The boot accounting scan has work from the first second. */
   history_trim_arm();
+  return newest;
 }
 
 /** A log line at most once a minute (HISTORY_FAIL_LOG_SECS); the next
@@ -2938,36 +2957,6 @@ int history_query_between(const char *target,
 
   *result = head;
   return count;
-}
-
-uint64_t history_newest_activity_ms(void)
-{
-  struct db_iter *it;
-  uint64_t newest = 0;
-  int rc;
-
-  if (!history_available)
-    return 0;
-  it = db_iter_open(history_db_env, history_cf_targets, NULL);
-  if (!it)
-    return 0;
-  rc = db_iter_seek_first(it);
-  while (rc == DB_OK && db_iter_valid(it)) {
-    size_t vlen;
-    const void *vbase = db_iter_value(it, &vlen);
-    char ts[HISTORY_TIMESTAMP_LEN];
-    if (vbase && vlen > 0 && vlen < sizeof(ts)) {
-      uint64_t ms;
-      memcpy(ts, vbase, vlen);
-      ts[vlen] = '\0';
-      ms = history_parse_ms(ts);
-      if (ms > newest)
-        newest = ms;
-    }
-    rc = db_iter_next(it);
-  }
-  db_iter_close(it);
-  return newest;
 }
 
 int history_query_targets(const char *timestamp1, const char *timestamp2,

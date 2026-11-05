@@ -305,7 +305,18 @@ static struct {
   size_t             bf_rows, bf_indexed, bf_aged, bf_unindexed;  /* since htrim_init */
   unsigned int       bf_bad_logged;   /* unindexable keys named this walk */
   int                bf_unread;       /* a backfill meta row could not be read */
-  uint64_t           alive_ms;        /* the last alive stamp, 0 = none */
+  uint64_t           bf_covers;       /* the newest targets stamp when the walk
+                                         under way (or the last one) started from
+                                         the first key; 0 = none known */
+  int                bf_reset_unsaved; /* the gap check's reset did not reach the
+                                         store: the next batch that indexes a row
+                                         (a store's, a backfill slice's) carries it */
+  int                bf_report;       /* the last commit finished the walk:
+                                         htrim_run_slice logs it (it has the cap) */
+  int                bf_warn_wait;    /* reported; the over-high check waits for
+                                         the accounting scan */
+  int                ev_warn;         /* the operators' warning, until taken */
+  uint64_t           ev_warn_total, ev_warn_high, ev_warn_cap;
 
   /* Age-out: one pass per htrim_pass_start, in memory only (every start
    * opens a pass at its first maintenance tick, from the first key). */
@@ -424,6 +435,9 @@ static int key_cmp(const void *a, size_t al, const void *b, size_t bl)
   return (al > bl) - (al < bl);
 }
 
+static uint64_t bt_key_ms(const void *k, size_t kl);
+static int stage_bf_reset(struct db_writebatch *wb);
+
 static const char *last_err(void)
 {
   const char *e = db_env_last_error(g.st.env);
@@ -490,7 +504,7 @@ static int parse_u64(const struct db_val *v, uint64_t *out)
   return 0;
 }
 
-/** Load the backfill's state and the alive stamp from the meta rows.
+/** Load the backfill's state and its covered stamp from the meta rows.
  *  - A cursor row means an unfinished walk, whatever the done marker says
  *    (a re-run whose marker delete did not commit still resumes).
  *  - A row that cannot be read is not a missing row: an unreadable cursor
@@ -498,7 +512,8 @@ static int parse_u64(const struct db_val *v, uint64_t *out)
  *    an unfinished walk with no usable cursor -- it runs again from the
  *    first key (the skip rule keeps that exact) -- and bf_unread tells the
  *    gap check the store may still hold a marker or a cursor.
- *  - An unreadable alive stamp reads as none (0): a gap then resets. */
+ *  - An unreadable covered stamp reads as none (0): the gap check then
+ *    compares against the index alone, which can only reset more often. */
 static void meta_load(void)
 {
   struct db_val v = { NULL, 0 };
@@ -520,8 +535,8 @@ static void meta_load(void)
     db_val_free(&v);
   }
 
-  if (meta_get(HTRIM_META_ALIVE, &v) > 0 && parse_u64(&v, &n) == 0)
-    g.alive_ms = n;
+  if (meta_get(HTRIM_META_BACKFILL_COVERS, &v) > 0 && parse_u64(&v, &n) == 0)
+    g.bf_covers = n;
   db_val_free(&v);
 
   /* The coverage floor (unreadable = none: the coverage claimed is then
@@ -1054,6 +1069,11 @@ int htrim_stage_index(struct db_writebatch *wb, uint64_t ms,
     return -1;
   if (stage_index(wb, bt, (size_t)btl, rec, bo_key, bo_size, bo_klen) != 0)
     return -1;
+  /* A gap reset the store did not take: this row would hide the gap from
+   * the next start (it is newer than the older binary's rows), so its
+   * batch carries the reset (htrim_note_stored clears the flag). */
+  if (g.bf_reset_unsaved && g.st.meta && stage_bf_reset(wb) != 0)
+    return -1;
   /* Behind the stored age-out resume point (a late row): this batch moves
    * it back to the row, so a restart before the next pass still walks it
    * (htrim_note_stored moves the mirror once the batch committed). */
@@ -1072,6 +1092,7 @@ void htrim_note_stored(const char *owner, const void *bo_key, size_t bo_klen,
 
   if (!g.inited || !bo_key)
     return;
+  g.bf_reset_unsaved = 0;          /* its batch carried the reset, if due */
   acct_apply(owner, bo_key, bo_klen, (int64_t)bytes);
   if (htc_bo_split(bo_key, bo_klen, NULL, 0, &bt, &btl) == 0)
     ageout_note_indexed(bt, btl);
@@ -1097,22 +1118,140 @@ size_t htrim_backfill_rows(void)
   return g.bf_rows;
 }
 
-int htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms)
+/** The newest targets stamp of all (*@a all) and the newest at or before
+ * @a upto_ms (*@a upto), in ms; a value that is not a stamp is skipped,
+ * as history.c's readers skip it.
+ * @return 0, or -1: the walk stopped on a read error (both cover only the
+ * keys it read). */
+static int newest_stamps(uint64_t upto_ms, uint64_t *all, uint64_t *upto)
+{
+  struct db_iter *it;
+  int rc;
+
+  *all = *upto = 0;
+  it = db_iter_open(g.st.env, g.st.targets, NULL);
+  if (!it)
+    return -1;
+  for (rc = db_iter_seek_first(it); rc == DB_OK; rc = db_iter_next(it)) {
+    size_t vl;
+    const void *v = db_iter_value(it, &vl);
+    char ts[HTC_TS_MAX];
+    uint64_t ms;
+
+    if (!v || !vl || vl >= sizeof ts)
+      continue;
+    memcpy(ts, v, vl);
+    ts[vl] = '\0';
+    ms = htc_parse_ms(ts);
+    if (ms > *all)
+      *all = ms;
+    if (ms <= upto_ms && ms > *upto)
+      *upto = ms;
+  }
+  db_iter_close(it);
+  return rc == DB_NOTFOUND ? 0 : -1;
+}
+
+/** The ms of the newest by_time key at or before @a upto_ms (0 = none):
+ * one seek_last under the bound be64(upto_ms + 1).  The tail of by_time
+ * is live (age-out and oldest-overall eviction delete from its head).
+ * @return 0, or -1 on a read error. */
+static int newest_indexed(uint64_t upto_ms, uint64_t *out)
+{
+  unsigned char upper[8];
+  struct db_iter *it;
+  int rc;
+
+  *out = 0;
+  if (upto_ms < UINT64_MAX) {
+    htc_be64(upper, upto_ms + 1);
+    it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL, NULL, 0,
+                              upper, sizeof upper);
+  } else
+    it = db_iter_open_bounded(g.st.env, g.st.by_time, NULL, NULL, 0, NULL, 0);
+  if (!it)
+    return -1;
+  rc = db_iter_seek_last(it);
+  if (rc == DB_OK) {
+    size_t kl;
+    const void *k = db_iter_key(it, &kl);
+    *out = bt_key_ms(k, kl);
+  }
+  db_iter_close(it);
+  return rc == DB_OK || rc == DB_NOTFOUND ? 0 : -1;
+}
+
+/** Stage the walk's restart on @a wb: no done marker, no cursor, and
+ * g.bf_covers as the covered stamp.  @return 0, or -1 (do not commit). */
+static int stage_bf_reset(struct db_writebatch *wb)
+{
+  char buf[24];
+  int n = snprintf(buf, sizeof buf, "%llu", (unsigned long long)g.bf_covers);
+
+  if (db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_DONE,
+                        strlen(HTRIM_META_BACKFILL_DONE)) != DB_OK
+      || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_CURSOR,
+                           strlen(HTRIM_META_BACKFILL_CURSOR)) != DB_OK
+      || db_writebatch_put(wb, g.st.meta, HTRIM_META_BACKFILL_COVERS,
+                           strlen(HTRIM_META_BACKFILL_COVERS), buf, (size_t)n) != DB_OK)
+    return -1;
+  return 0;
+}
+
+/** Commit @a covers as the covered stamp alone (a walk starting from the
+ * first key with no state to reset).  @return 0, or -1. */
+static int put_bf_covers(uint64_t covers)
 {
   struct db_writebatch *wb;
-  uint64_t limit;
-  int was_done;
+  char buf[24];
+  int n = snprintf(buf, sizeof buf, "%llu", (unsigned long long)covers);
+  int rc = -1;
 
+  wb = db_writebatch_new(g.st.env);
+  if (wb
+      && db_writebatch_put(wb, g.st.meta, HTRIM_META_BACKFILL_COVERS,
+                           strlen(HTRIM_META_BACKFILL_COVERS), buf, (size_t)n) == DB_OK
+      && db_writebatch_commit(wb, 0) == DB_OK)
+    rc = 0;
+  db_writebatch_destroy(wb);
+  return rc;
+}
+
+int htrim_check_index_gap(uint64_t upto_ms, uint64_t *newest_ms)
+{
+  struct db_writebatch *wb;
+  uint64_t all = 0, stamped = 0, indexed = 0, covered = g.bf_covers;
+  int srd, ird, was_done;
+
+  if (newest_ms)
+    *newest_ms = 0;
   if (!g.inited)
     return 0;
-  limit = g.alive_ms + slack_ms;
-  if (limit < g.alive_ms)
-    limit = UINT64_MAX;
-  if (newest_row_ms <= limit)
+  srd = newest_stamps(upto_ms, &all, &stamped);
+  if (newest_ms)
+    *newest_ms = all;
+  ird = newest_indexed(upto_ms, &indexed);
+
+  /* No walk state: the walk starts from the first key anyway, and covers
+   * every row there is now.  Recorded, so that a later start in the middle
+   * of this walk -- with legacy rows still ahead of the cursor, newer than
+   * any row indexed so far -- is not taken for a gap.  (A partial read
+   * gives a lower stamp: safe, a later start may only reset more.) */
+  if (!g.bf_done && !g.bf_cursor_len && !g.bf_unread) {
+    if (stamped > g.bf_covers) {
+      g.bf_covers = stamped;
+      if (g.st.meta && put_bf_covers(stamped) != 0)
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "history: trim backfill: cannot record the stamp it covers "
+                  "(%llu ms): %s; a restart before it finishes may walk it "
+                  "again from the first row", (unsigned long long)stamped,
+                  last_err());
+    }
     return 0;
-  /* Nothing to reset: the walk never started (a first start, an
-   * unstamped store) -- it walks everything from the first key anyway. */
-  if (!g.bf_done && !g.bf_cursor_len && !g.bf_unread)
+  }
+  /* Gap iff the newest stamp is past both the index and the walk's
+   * covered stamp. */
+  if (srd == 0 && ird == 0 && (stamped <= indexed || stamped <= covered))
     return 0;
 
   /* Done or mid-walk: an older binary's rows may sort before the cursor,
@@ -1122,52 +1261,35 @@ int htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms)
   g.bf_done = 0;
   g.bf_unread = 0;
   g.bf_bad_logged = 0;
+  g.bf_covers = stamped;
   bf_cursor_clear();
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "history: trim index gap: newest row %llu ms is past the last alive "
-            "stamp %llu ms + %llu ms; re-running the backfill from the first "
-            "row (it was %s)",
-            (unsigned long long)newest_row_ms, (unsigned long long)g.alive_ms,
-            (unsigned long long)slack_ms, was_done ? "done" : "unfinished");
+  if (srd || ird)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: trim index gap check: cannot read the newest %s (%s); "
+              "re-running the backfill from the first row to be safe (it was %s)",
+              srd ? "targets stamp" : "indexed row", last_err(),
+              was_done ? "done" : "unfinished");
+  else
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: trim index gap: the newest stamped row (%llu ms) is newer "
+              "than the newest indexed row (%llu ms) and than what the last walk "
+              "covered (%llu ms) -- rows stored while this binary was not "
+              "running; re-running the backfill from the first row (it was %s)",
+              (unsigned long long)stamped, (unsigned long long)indexed,
+              (unsigned long long)covered, was_done ? "done" : "unfinished");
   if (!g.st.meta)
     return 1;
   wb = db_writebatch_new(g.st.env);
-  if (!wb
-      || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_DONE,
-                           strlen(HTRIM_META_BACKFILL_DONE)) != DB_OK
-      || db_writebatch_del(wb, g.st.meta, HTRIM_META_BACKFILL_CURSOR,
-                           strlen(HTRIM_META_BACKFILL_CURSOR)) != DB_OK
-      || db_writebatch_commit(wb, 0) != DB_OK) {
+  if (!wb || stage_bf_reset(wb) != 0 || db_writebatch_commit(wb, 0) != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "history_trim: cannot clear the backfill marker and cursor: %s",
-              last_err());
+              "history_trim: cannot clear the backfill marker and cursor: %s; "
+              "the next store or backfill slice carries the reset", last_err());
     db_writebatch_destroy(wb);
+    g.bf_reset_unsaved = 1;
     return -1;
   }
   db_writebatch_destroy(wb);
   return 1;
-}
-
-void htrim_stamp_alive(uint64_t now_ms)
-{
-  struct db_writebatch *wb;
-  char buf[24];
-  int n;
-
-  if (!g.inited)
-    return;
-  g.alive_ms = now_ms;
-  if (!g.st.meta)
-    return;
-  n = snprintf(buf, sizeof buf, "%llu", (unsigned long long)now_ms);
-  wb = db_writebatch_new(g.st.env);
-  if (!wb
-      || db_writebatch_put(wb, g.st.meta, HTRIM_META_ALIVE, strlen(HTRIM_META_ALIVE),
-                           buf, (size_t)n) != DB_OK
-      || db_writebatch_commit(wb, 0) != DB_OK)
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "history_trim: cannot stamp alive: %s", last_err());
-  db_writebatch_destroy(wb);
 }
 
 const struct htc_acct *htrim_acct(void)
@@ -1791,6 +1913,7 @@ static void backfill_apply(struct htrim_slice *s)
   ageout_note_indexed(s->bf_min_bt, s->bf_min_bt_len);
   if (s->bf_behind > 1)
     g.late_over = 1;
+  g.bf_reset_unsaved = 0;          /* the batch carried the reset, if due */
   g.bf_rows += s->bf_rows;
   g.bf_indexed += s->bf_indexed;
   g.bf_aged += s->bf_aged;
@@ -1803,15 +1926,8 @@ static void backfill_apply(struct htrim_slice *s)
   g.bf_bad_logged += s->bf_nbad;
   if (s->bf_finished) {
     g.bf_done = 1;
+    g.bf_report = 1;                /* htrim_run_slice logs it, with the cap */
     bf_cursor_clear();
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "history: trim backfill complete: %zu rows indexed, %zu aged out",
-              g.bf_indexed, g.bf_aged);
-    if (g.bf_unindexed)
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "history: trim backfill: %zu rows have a key the trim index "
-                "cannot hold; the trimmer never removes them (the first %u "
-                "are named above)", g.bf_unindexed, g.bf_bad_logged);
   } else if (s->bf_cursor_len) {
     bytes_set(&g.bf_cursor, &g.bf_cursor_len, &g.bf_cursor_cap,
               s->bf_cursor, s->bf_cursor_len);
@@ -2338,6 +2454,13 @@ static int phase_backfill(struct htrim_slice *s, const struct htrim_params *p)
     return -1;
 
   s->bf_step = 1;
+  /* A gap reset the store did not take goes first in this batch: the
+   * cursor or done marker this slice puts lands after it. */
+  if (g.bf_reset_unsaved && g.st.meta && stage_bf_reset(s->wb) != 0) {
+    db_iter_close(it);
+    s->broken = 1;
+    return -1;
+  }
   rc = db_iter_seek_first(it);
   while (rc == DB_OK) {
     size_t kl, vl;
@@ -3243,6 +3366,72 @@ static void last_unmeasured(unsigned int seeks)
   g.last_seeks = seeks;
 }
 
+/** After a committed slice: the end of the backfill, with the logical
+ * total, the cap and its high watermark under @a p; then, once the totals
+ * are loaded too, whether that total is over the high watermark -- the
+ * first drain, which evicts inside retention, starts at the next slice.
+ * Logged from here, not from the commit: the slice's parameters carry the
+ * cap.  Once per finished walk. */
+static void backfill_report(const struct htrim_params *p)
+{
+  int high = p->high_pct, low = p->low_pct;
+  uint64_t total, high_bytes;
+
+  if (!g.bf_report && !g.bf_warn_wait)
+    return;
+  htc_plan_sanitize(&high, &low);
+  high_bytes = evict_high_bytes(p);
+  total = htc_acct_total(g.acct);
+  if (g.bf_report) {
+    g.bf_report = 0;
+    g.bf_warn_wait = 1;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: trim backfill complete: %zu rows indexed, %zu aged out; "
+              "logical size %llu bytes%s, cap %llu bytes%s, high watermark %d%% "
+              "(%llu bytes)", g.bf_indexed, g.bf_aged, (unsigned long long)total,
+              g.acct_loaded ? "" : " (partial: accounting scanning)",
+              (unsigned long long)p->cap_bytes, p->cap_bytes ? "" : " (no cap)",
+              high, (unsigned long long)high_bytes);
+    if (g.bf_unindexed)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: trim backfill: %zu rows have a key the trim index "
+                "cannot hold; the trimmer never removes them (the first %u "
+                "are named above)", g.bf_unindexed, g.bf_bad_logged);
+  }
+  if (!g.acct_loaded)
+    return;                         /* the boot scan's end checks again */
+  g.bf_warn_wait = 0;
+  if (!p->cap_bytes || total <= high_bytes)
+    return;
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: trim: the logical size %llu bytes is over the high "
+            "watermark %llu bytes (%d%% of the cap %llu bytes) now that every "
+            "row is indexed and counted: eviction inside retention will start "
+            "(owners over their share first, then the oldest rows overall, "
+            "which moves the coverage floor) and drain to %d%%; SET "
+            "HISTORY_MAP_SIZE_MB 0 stops it", (unsigned long long)total,
+            (unsigned long long)high_bytes, high,
+            (unsigned long long)p->cap_bytes, low);
+  g.ev_warn = 1;
+  g.ev_warn_total = total;
+  g.ev_warn_high = high_bytes;
+  g.ev_warn_cap = p->cap_bytes;
+}
+
+int htrim_evict_warning(uint64_t *total, uint64_t *high, uint64_t *cap)
+{
+  if (!g.ev_warn)
+    return 0;
+  g.ev_warn = 0;
+  if (total)
+    *total = g.ev_warn_total;
+  if (high)
+    *high = g.ev_warn_high;
+  if (cap)
+    *cap = g.ev_warn_cap;
+  return 1;
+}
+
 int htrim_run_slice(const struct htrim_params *p)
 {
   struct htrim_slice *s;
@@ -3290,6 +3479,7 @@ int htrim_run_slice(const struct htrim_params *p)
              htrim_phase_name(ph), last_err());
     return -1;
   }
+  backfill_report(p);
 
   return pick_phase(p) != HTRIM_PH_NONE;
 }

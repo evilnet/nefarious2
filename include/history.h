@@ -244,14 +244,22 @@ extern int history_store_multiline(const char *msgid, const char *timestamp,
  * @return @a buf (always NUL-terminated; "-" if the key does not fit). */
 extern const char *history_owner_of(char *buf, size_t size, struct Client *sptr);
 
-/** Arm the trim slice timer (main thread, after history_init). */
-extern void history_trim_start(uint64_t newest_row_ms);
+/** Start the trimmer (main thread, after history_init, before the event
+ * loop): the index-gap check (htrim_check_index_gap, with rows stamped up
+ * to two maintenance intervals ahead counted), then the slice timer.
+ * @return the newest last-activity stamp across every stored target, in
+ * epoch ms (0 when the store is empty or unavailable) -- proof of life
+ * for the presence boot-close: the server was alive when it stored that
+ * row.  The gap check's walk of the targets CF reads it. */
+extern uint64_t history_trim_start(void);
 
 /** One trim slice under the live features; re-arms the 1 s slice timer
  * while work remains (and after a failed slice, up to 5 in a row).
- * @a pass_start marks the start of a pass: the alive stamp, and age-out
- * opens a pass where its walk stopped, or back at the oldest row indexed
- * behind that point since (htrim_pass_start). */
+ * @a pass_start marks the start of a pass: age-out opens a pass where its
+ * walk stopped, or back at the oldest row indexed behind that point since
+ * (htrim_pass_start).  A slice that finished the backfill with the logical
+ * total over the cap's high watermark also warns the operators
+ * (SNO_OLDSNO): eviction inside retention starts next. */
 extern void history_trim_tick(int pass_start);
 
 /** Make the next 1 s tick a pass start (a retention change: age-out
@@ -403,11 +411,6 @@ extern int history_query_between(const char *target,
  * @param[out] result Pointer to result list head (caller must free).
  * @return Number of targets returned, or -1 on error.
  */
-/** The newest last-activity stamp across every stored target, in epoch
- * milliseconds; 0 when the store is empty or unavailable.  Proof of life
- * for crash recovery: the server was alive when it stored that row. */
-extern uint64_t history_newest_activity_ms(void);
-
 /** Per-target keep/skip hook for history_query_targets: 1 keeps the
  * target (it counts toward the limit), 0 skips it.  The walk is in key
  * order, not recency, so any filtering the caller would do afterwards

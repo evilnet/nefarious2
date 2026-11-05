@@ -37,10 +37,12 @@
  * indexed and counted it -- skipped; a row past retention is deleted in
  * full, uncounted (it was never counted); any other row is indexed and
  * counted through the accounting rule.  An exhausted walk puts the done
- * marker and deletes the cursor; a boot whose newest stored row is past
- * the last alive stamp plus a slack (a downgrade window) deletes both --
- * done or mid-walk -- and the walk runs again from the first key.  A meta
- * row that cannot be read counts as an unfinished walk.
+ * marker and deletes the cursor.  A boot that finds rows an older binary
+ * stored while this one was not running (htrim_check_index_gap: a
+ * targets stamp newer than every indexed row and than every row the last
+ * walk set out to cover) deletes both -- done or mid-walk -- and the walk
+ * runs again from the first key.  A meta row that cannot be read counts
+ * as an unfinished walk.
  *
  * Age-out.  Retention is enforced by walking by_time -- globally ordered
  * by time -- over [resume point, be64(cutoff_ms)), oldest first, THE
@@ -160,7 +162,10 @@ struct db_writebatch;
 /** The engine's meta rows (st->meta, the env's default CF). */
 #define HTRIM_META_BACKFILL_DONE   "schema/trim-backfill"          /* value "done" */
 #define HTRIM_META_BACKFILL_CURSOR "schema/trim-backfill-cursor"   /* value: the last messages key processed */
-#define HTRIM_META_ALIVE           "trim/alive-ms"                 /* decimal epoch ms */
+#define HTRIM_META_BACKFILL_COVERS "schema/trim-backfill-covers"   /* decimal epoch ms: the newest
+                                                                       targets stamp when the walk
+                                                                       under way (or the last one)
+                                                                       started from the first key */
 #define HTRIM_META_FLOOR           "trim/coverage-floor"           /* decimal epoch ms */
 #define HTRIM_META_AGEOUT_RESUME   "trim/ageout-resume"            /* value: the by_time key age-out resumes at */
 
@@ -275,7 +280,7 @@ int htrim_draining(void);
 int htrim_tsweep_pending(void);
 
 /** Start the engine over @a st (copied).  Reads the engine's meta rows
- * (the backfill's done marker and cursor, the alive stamp, the coverage
+ * (the backfill's done marker, cursor and covered stamp, the coverage
  * floor, the age-out resume point -- an unreadable one means the first
  * key) and arms this start's targets sweep; logs nothing
  * (history_init runs on a worker thread).  @a st's env, messages, msgid,
@@ -331,24 +336,42 @@ int htrim_backfill_done(void);
 size_t htrim_backfill_rows(void);
 
 /** The downgrade check, once at start before any slice (main thread; may
- * log): when @a newest_row_ms is past the last alive stamp plus
- * @a slack_ms, rows were stored while this binary was not running (an
- * older binary wrote them unindexed).  Whatever the walk's state -- done,
- * or stopped mid-way (rows sorting before its cursor would never be
- * walked) -- the done marker and the cursor go, in memory and in the
- * store, and the backfill runs again from the first key (its skip rule
- * keeps the rows already indexed as they are).
+ * log).  An older binary stores rows without their by_time rows, but
+ * stamps their targets as this one does; every row this binary stores
+ * (or the backfill indexes) gets its by_time row at its stamp's time.
+ * So, with only rows stamped at or before @a upto_ms counted on either
+ * side (the caller's now plus a slack: a row a peer stamped further
+ * ahead counts once wall time reaches it, on both sides at once):
+ *
+ *   gap  iff  newest targets stamp > max(newest by_time key,
+ *                                        the walk's covered stamp)
+ *
+ * where the covered stamp (HTRIM_META_BACKFILL_COVERS) is the newest
+ * targets stamp at the start that sent the walk from the first key: every
+ * row stamped at or before it was there for that walk, indexed or
+ * named as unindexable, so neither a walk still under way nor a row the
+ * walk cannot index looks like a gap at a later start.  One walk of the
+ * targets CF, one bounded tail seek of by_time.
+ *
+ * On a gap, whatever the walk's state -- done, or stopped mid-way (rows
+ * sorting before its cursor would never be walked) -- the done marker
+ * and the cursor go, in memory and in the store, the covered stamp
+ * becomes this start's newest, and the backfill runs again from the
+ * first key (its skip rule keeps the rows already indexed as they are).
+ * A targets or by_time read that fails counts as a gap.  A start whose
+ * walk begins from the first key anyway (no walk state) only records
+ * its covered stamp.
+ *
+ * *@a newest_ms (may be NULL): the newest stamp of all, a future one
+ * included -- the presence boot-close's hint (one walk serves both).
  * @return 0: no gap, or no walk state to reset (nothing logged);
  *         1: reset (logged);
- *        -1: reset in memory, but the store kept its marker or cursor --
- *            the caller must not stamp alive this start, so that a crash
- *            before the re-run's first slice commits leaves the gap for
- *            the next start to find. */
-int htrim_check_index_gap(uint64_t newest_row_ms, uint64_t slack_ms);
-
-/** Persist @a now_ms as the alive stamp (one small batch): call at each
- * pass start and at shutdown. */
-void htrim_stamp_alive(uint64_t now_ms);
+ *        -1: reset in memory, but the store kept its marker or cursor:
+ *            the next batch that indexes a row (a store's, a backfill
+ *            slice's) carries the reset, so that row cannot hide the gap
+ *            from the next start before the re-run's first slice
+ *            commits. */
+int htrim_check_index_gap(uint64_t upto_ms, uint64_t *newest_ms);
 
 /** Open a slice with a budget of @a budget_ms (0 = no budget).
  * Reads the clock once.  @return NULL on allocation failure. */
@@ -452,8 +475,22 @@ int htrim_emergency(unsigned int budget_ms);
  * records its slice (one extra clock read on that path) and describes
  * itself in htrim_last_error(); the engine does not log it (the caller
  * logs once per streak of failures).
+ *
+ * The backfill's end is logged here, after the commit that finished it,
+ * with the logical total, the cap and its high watermark under @a p
+ * ("(partial: accounting scanning)" while the boot scan still runs).
+ * Once the totals are loaded too, a total over the high watermark --
+ * eviction inside retention starts at the next slice -- is an L_WARNING
+ * and a warning for the operators (htrim_evict_warning); once per
+ * backfill.
  * @return 1 = work remains, 0 = idle, -1 = error. */
 int htrim_run_slice(const struct htrim_params *p);
+
+/** The operators' warning htrim_run_slice raised (a finished backfill
+ * left the logical total over the cap's high watermark): the total, the
+ * high watermark and the cap, in bytes.  Taken once.
+ * @return 1 when there was one (the outputs set), 0 otherwise. */
+int htrim_evict_warning(uint64_t *total, uint64_t *high, uint64_t *cap);
 
 /** Open an age-out pass under @a p: HTRIM_PH_AGEOUT has work while
  * @a p->retention_days > 0 (a pass at retention 0 is closed at once).  The

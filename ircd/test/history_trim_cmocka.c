@@ -408,6 +408,74 @@ static int targets_has(const char *target)
   return key_exists(st.targets, k, (size_t)n - 1);
 }
 
+static void unseed_targets(const char *target)
+{
+  struct db_writebatch *wb = db_writebatch_new(env);
+  char k[HTC_MSG_KEY_MAX];
+  int n = htc_msg_key(k, sizeof k, target, NULL, NULL);
+  assert_true(n > 1);
+  assert_int_equal(DB_OK, db_writebatch_del(wb, st.targets, k, (size_t)n - 1));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+}
+
+/** A stored timestamp for @a ms ("<sec>.<3 digits>"). */
+static const char *ms_ts(char *buf, size_t size, uint64_t ms)
+{
+  snprintf(buf, size, "%llu.%03llu", (unsigned long long)(ms / 1000),
+           (unsigned long long)(ms % 1000));
+  return buf;
+}
+
+/** The ms of the newest by_time key in the store (0 = none). */
+static uint64_t newest_bt_ms(void)
+{
+  struct db_iter *it = db_iter_open(env, st.by_time, NULL);
+  uint64_t ms = 0;
+
+  assert_non_null(it);
+  if (db_iter_seek_last(it) == DB_OK) {
+    size_t kl;
+    const void *k = db_iter_key(it, &kl);
+    assert_int_equal(0, htc_bt_key_parse(k, kl, &ms, NULL, 0, NULL, 0));
+  }
+  db_iter_close(it);
+  return ms;
+}
+
+/** The covered stamp the store holds (0 = none). */
+static uint64_t covers_ms(void)
+{
+  struct db_val v = { NULL, 0 };
+  char buf[32];
+
+  if (db_get(env, st.meta, HTRIM_META_BACKFILL_COVERS,
+             strlen(HTRIM_META_BACKFILL_COVERS), NULL, &v) != DB_OK)
+    return 0;
+  assert_true(v.len > 0 && v.len < sizeof buf);
+  memcpy(buf, v.base, v.len);
+  buf[v.len] = '\0';
+  db_val_free(&v);
+  return strtoull(buf, NULL, 10);
+}
+
+/** Reopen a finished backfill the way a downgrade window does: a targets
+ * stamp newer than every indexed row and than what the last walk covered
+ * (a row an older binary stored), found by a start's gap check.  The
+ * stamp goes again afterwards (its target has no rows). */
+static void reopen_backfill(void)
+{
+  uint64_t ms = newest_bt_ms(), c = covers_ms();
+  char ts[32];
+
+  if (c > ms)
+    ms = c;
+  seed_targets("#~reopen", ms_ts(ts, sizeof ts, ms + 1));
+  assert_int_equal(1, htrim_check_index_gap(UINT64_MAX, NULL));
+  unseed_targets("#~reopen");
+  assert_int_equal(0, htrim_backfill_done());
+}
+
 /** Read a row's by_time record back from the CF. */
 static void get_rec(const char *target, const char *ts, const char *msgid,
                     struct htc_rec *out)
@@ -477,14 +545,12 @@ static const char *ts_ago(char *buf, size_t size, int days, int secs)
 
 /** Accounting loaded, the backfill still to run over the rows seeded
  * next.  load_acct() on the empty store also finishes the (empty)
- * backfill, so it is reopened the way a downgrade window reopens it: a
- * row newer than the (never stamped) alive time. */
+ * backfill, so it is reopened the way a downgrade window reopens it. */
 static void load_acct_backfill_pending(void)
 {
   load_acct();
   assert_int_equal(1, htrim_backfill_done());
-  htrim_check_index_gap(1, 0);
-  assert_int_equal(0, htrim_backfill_done());
+  reopen_backfill();
 }
 
 static int run_until_idle(const struct htrim_params *p)
@@ -1453,50 +1519,190 @@ static void test_backfill_parse_failure(void **state)
   assert_int_equal(b, htc_acct_total(htrim_acct()));
 }
 
-/* Review Focus 3: rows an older binary wrote after the backfill finished
- * (a downgrade window) are newer than the last alive stamp plus the slack:
- * the done marker goes and the backfill runs again. */
+/** The gap tests' horizon: rows stamped up to two maintenance intervals
+ * (2 x 300 s) past now count, as history_trim_start passes it. */
+#define GAP_UPTO(p) ((p).now_ms + 600000ULL)
+
+/* Review Focus 3 / final review I-2: rows an older binary wrote after the
+ * backfill finished (a downgrade window) are stamped in targets but have
+ * no by_time row: a stamp newer than the newest indexed row sends the
+ * backfill again from the first row, persisted, and the walk then covers
+ * that stamp. */
 static void test_index_gap_reruns_backfill(void **state)
 {
   struct htrim_params p = bf_params(0);
-  char ts[32];
+  char ts[32], told[32];
   (void)state;
 
   run_until_idle(&p);
   assert_int_equal(1, htrim_backfill_done());
   assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
 
-  htrim_stamp_alive(1000);
-  assert_int_equal(1, meta_is(HTRIM_META_ALIVE, "1000"));
-  htrim_check_index_gap(1000 + 600000, 600000);
+  /* This binary's row: indexed and stamped.  No gap. */
+  seed_plain("#t", ts_ago(ts, sizeof ts, 0, 600), "N1", "a:bob", NULL);
+  seed_targets("#t", ts);
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(1, htrim_backfill_done());
-  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
-  htrim_check_index_gap(1000 + 600001, 600000);
+
+  /* An older binary's row, newer: stamped, not indexed. */
+  seed_legacy_row("#o", ts_ago(told, sizeof told, 0, 300), "O1", "Ann", 0, "", "", 0);
+  seed_targets("#o", told);
+  reboot();
+  assert_int_equal(1, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(0, htrim_backfill_done());
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
+  assert_int_equal(htc_parse_ms(told), covers_ms());
 
-  /* Persisted: a restart before the re-run still runs it. */
+  /* Persisted: a restart before the re-run still runs it, and finds no
+   * walk state to reset (nothing is reset, nothing logged). */
   reboot();
   assert_int_equal(0, htrim_backfill_done());
-  /* Still a gap against the persisted alive 1000, but no walk state is
-   * left to reset: nothing is reset (and nothing logged). */
-  assert_int_equal(0, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(0, htrim_backfill_done());
-  seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 0), "G1", "Bob", 0, "", "", 0);
   run_until_idle(&p);
   assert_int_equal(1, htrim_backfill_done());
-  assert_int_equal(1, fake_db_rows(st.by_time));
+  assert_int_equal(2, fake_db_rows(st.by_time));
   reboot();
-  htrim_check_index_gap(1000 + 600000, 600000);    /* the persisted alive is 1000 */
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  assert_int_equal(1, htrim_backfill_done());
+}
+
+/* Final review I-2: a rollback shorter than the old slack (two maintenance
+ * intervals past the last alive stamp) went unnoticed, and its rows were
+ * never indexed, aged out or counted.  Five minutes of an older binary
+ * after this one's last row: found, and the re-run indexes every row. */
+static void test_index_gap_five_minute_rollback(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32], mid[16];
+  uint64_t newest = 0;
+  int i;
+  (void)state;
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  /* This binary's last row, ten minutes ago. */
+  seed_plain("#t", ts_ago(ts, sizeof ts, 0, 600), "N1", "a:bob", NULL);
+  seed_targets("#t", ts);
+  /* The older binary, for five minutes after it. */
+  for (i = 0; i < 5; i++) {
+    snprintf(mid, sizeof mid, "O%d", i);
+    seed_legacy_row("#t", ts_ago(ts, sizeof ts, 0, 540 - 60 * i), mid, "Ann", 0, "", "", 0);
+  }
+  seed_targets("#t", ts);                      /* its newest: 5 min ago */
+  reboot();
+  assert_int_equal(1, htrim_check_index_gap(GAP_UPTO(p), &newest));
+  assert_int_equal(htc_parse_ms(ts), newest);  /* the presence hint */
+  assert_int_equal(0, htrim_backfill_done());
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(6, fake_db_rows(st.by_time));
+  assert_acct_matches_cf();
+  reboot();
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+}
+
+/* Final review Minor 1: a row a peer stamped ahead of wall time, once
+ * indexed, never re-runs the walk: past the horizon it counts on neither
+ * side, and once wall time reaches it, on both.  An older binary's
+ * future-dated row counts once wall time reaches it -- then it is a gap. */
+static void test_index_gap_future_row_not_rerun(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char tf[32], tn[32], tg[32];
+  uint64_t f = p.now_ms + 3600000ULL, g2 = p.now_ms + 7200000ULL, newest = 0;
+  (void)state;
+
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  seed_plain("#f", ms_ts(tf, sizeof tf, f), "FUT", "a:bob", NULL);   /* an hour ahead */
+  seed_targets("#f", tf);
+  seed_plain("#t", ts_ago(tn, sizeof tn, 0, 60), "N1", "a:bob", NULL);
+  seed_targets("#t", tn);
+
+  reboot();
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), &newest));
+  assert_int_equal(f, newest);                 /* the hint takes it */
+  reboot();                                    /* the next start, a minute on */
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p) + 60000, NULL));
+  reboot();                                    /* wall time past it */
+  assert_int_equal(0, htrim_check_index_gap(f + 600000, NULL));
+  assert_int_equal(1, htrim_backfill_done());
+
+  seed_legacy_row("#g", ms_ts(tg, sizeof tg, g2), "OLDFUT", "Ann", 0, "", "", 0);
+  seed_targets("#g", tg);
+  reboot();
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  assert_int_equal(1, htrim_backfill_done());
+  reboot();
+  assert_int_equal(1, htrim_check_index_gap(g2 + 600000, NULL));
+  assert_int_equal(0, htrim_backfill_done());
+}
+
+/* Healthy restarts never reset: one in the middle of the first walk with
+ * no row stored since (the legacy rows ahead of the cursor are newer than
+ * any indexed so far, but the walk covers them), and one after a walk
+ * whose newest legacy row cannot be indexed (it stays unindexed for
+ * good, but the walk covered it). */
+static void test_index_gap_healthy_restart_no_reset(void **state)
+{
+  struct htrim_params p = bf_params(10);
+  struct db_writebatch *wb;
+  char ts[32], mid[16], k[64];
+  size_t first;
+  int i, kl;
+  (void)state;
+
+  for (i = 0; i < 50; i++) {
+    snprintf(mid, sizeof mid, "R%02d", i);
+    seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 100 - i), mid, "Bob", 0, "", "", 0);
+  }
+  seed_targets("#t", ts);
+  reboot();                                    /* the first start of this binary */
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  assert_int_equal(htc_parse_ms(ts), covers_ms());
+  step_us = 1000;                              /* 1 ms per clock read; 10 ms slices */
+  assert_int_equal(1, htrim_run_slice(&p));
+  assert_int_equal(HTRIM_PH_BACKFILL, htrim_stats()->last_phase);
+  first = htrim_backfill_rows();
+  assert_true(first > 0 && first < 50);
+  assert_true(newest_bt_ms() < htc_parse_ms(ts));   /* the newest is ahead */
+
+  reboot();
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  assert_int_equal(0, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));   /* kept */
+  step_us = 0;
+  p = bf_params(0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(50 - first, htrim_backfill_rows());   /* from the cursor on */
+  assert_int_equal(50, fake_db_rows(st.by_time));
+
+  /* An unindexable legacy row (an unfolded target), newer than the rest. */
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  ts_ago(ts, sizeof ts, 0, 30);
+  kl = snprintf(k, sizeof k, "#U%c%s%cU1", '\0', ts, '\0');
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, k, (size_t)kl, "Bob|0|||x", 9));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_targets("#u", ts);
+  reboot();
+  assert_int_equal(1, htrim_check_index_gap(GAP_UPTO(p), NULL));   /* stored while down */
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(50, fake_db_rows(st.by_time));         /* it stays unindexed */
+  reboot();
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(1, htrim_backfill_done());
 }
 
 /* Review Focus 3, an unfinished walk: this binary stops with its cursor at
  * K, an older binary stores rows (some sort before K), this binary comes
- * back.  Resuming at K would never walk them, and the done marker plus
- * fresh alive stamps would then hide them for good: the gap check resets
- * the cursor too, and the walk restarts from the first key. */
+ * back.  Resuming at K would never walk them, and the done marker would
+ * then hide them for good: the gap check resets the cursor too, and the
+ * walk restarts from the first key. */
 static void test_index_gap_resets_unfinished_walk(void **state)
 {
   struct htrim_params p = bf_params(5);
@@ -1510,7 +1716,6 @@ static void test_index_gap_resets_unfinished_walk(void **state)
     snprintf(mid, sizeof mid, "R%02d", i);
     seed_legacy_row("#t", ts_ago(ts, sizeof ts, 1, 100 - i), mid, "Bob", 0, "", "", 0);
   }
-  htrim_stamp_alive(1000);
   step_us = 1000;                      /* 1 ms per clock read; 5 ms slices */
   assert_int_equal(1, htrim_run_slice(&p));
   assert_int_equal(HTRIM_PH_BACKFILL, htrim_stats()->last_phase);
@@ -1519,9 +1724,10 @@ static void test_index_gap_resets_unfinished_walk(void **state)
 
   /* The older binary's row: "#a" sorts before the cursor inside "#t". */
   seed_legacy_row("#a", ts_ago(told, sizeof told, 0, 60), "OLDBIN", "Ann", 0, "", "", 0);
+  seed_targets("#a", told);
   reboot();
   assert_int_equal(0, htrim_backfill_done());
-  htrim_check_index_gap(1000 + 600001, 600000);
+  assert_int_equal(1, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(0, htrim_backfill_done());
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
@@ -1537,31 +1743,94 @@ static void test_index_gap_resets_unfinished_walk(void **state)
   assert_acct_matches_cf();
 }
 
-/* A reset the store would not take is reported: the caller then withholds
- * this start's alive stamp, so a crash before the re-run's first slice
- * commits leaves the gap for the next start to find again. */
+/* A reset the store would not take is reported, and stays the next
+ * start's to find: a crash before anything else committed finds the gap
+ * again.  Until the reset reaches the store, the next batch that indexes
+ * a row -- which would hide the gap, being newer than the older binary's
+ * rows -- carries it: a store's, or the re-run's first slice's (after
+ * which a store's no longer does). */
 static void test_index_gap_reset_failure_reported(void **state)
 {
   struct htrim_params p = bf_params(0);
+  char ts[32], told[32];
   (void)state;
 
   run_until_idle(&p);
   assert_int_equal(1, htrim_backfill_done());
-  htrim_stamp_alive(1000);
+  seed_plain("#t", ts_ago(ts, sizeof ts, 0, 600), "N1", "a:bob", NULL);
+  seed_targets("#t", ts);
+  seed_legacy_row("#o", ts_ago(told, sizeof told, 0, 300), "O1", "Ann", 0, "", "", 0);
+  seed_targets("#o", told);
 
+  reboot();
   fake_db_fail_next_commit(env);
-  assert_int_equal(-1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(-1, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(0, htrim_backfill_done());           /* this start re-runs */
   assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
-  assert_int_equal(1, meta_is(HTRIM_META_ALIVE, "1000"));
 
-  reboot();                            /* a crash before any slice committed */
+  reboot();                            /* a crash before any batch committed */
   assert_int_equal(1, htrim_backfill_done());
-  assert_int_equal(1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(1, htrim_check_index_gap(GAP_UPTO(p), NULL));
   assert_int_equal(0, htrim_backfill_done());
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
-  assert_int_equal(0, htrim_check_index_gap(1000 + 600001, 600000));   /* nothing left */
-  assert_int_equal(0, htrim_check_index_gap(1000, 600000));           /* no gap */
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(2, fake_db_rows(st.by_time));
+
+  /* Another older binary's row; the reset fails again; then a store. */
+  seed_legacy_row("#o", ts_ago(told, sizeof told, 0, 200), "O2", "Ann", 0, "", "", 0);
+  seed_targets("#o", told);
+  reboot();
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  seed_plain("#t", ts_ago(ts, sizeof ts, 0, 100), "N2", "a:bob", NULL);
+  seed_targets("#t", ts);
+  assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(htc_parse_ms(told), covers_ms());
+  reboot();                            /* a crash before the re-run's first slice */
+  assert_int_equal(0, htrim_backfill_done());
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(4, fake_db_rows(st.by_time));        /* O2 indexed */
+
+  /* And once more, the re-run's first slice carrying it: a store after
+   * that slice leaves the walk's own state alone. */
+  seed_legacy_row("#o", ts_ago(told, sizeof told, 0, 50), "O3", "Ann", 0, "", "", 0);
+  seed_targets("#o", told);
+  reboot();
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  run_until_idle(&p);                  /* one unbudgeted slice: the whole walk */
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(htc_parse_ms(told), covers_ms());
+  seed_plain("#t", ts_ago(ts, sizeof ts, 0, 10), "N3", "a:bob", NULL);
+  assert_int_equal(1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
+  assert_int_equal(6, fake_db_rows(st.by_time));
+}
+
+/* A read that fails at the gap check counts as a gap: the walk runs again
+ * (its skip rule makes that only a cost). */
+static void test_index_gap_read_error_resets(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char ts[32];
+  (void)state;
+
+  run_until_idle(&p);
+  seed_plain("#t", ts_ago(ts, sizeof ts, 0, 600), "N1", "a:bob", NULL);
+  seed_targets("#t", ts);
+  reboot();
+  assert_int_equal(1, htrim_backfill_done());
+  fake_db_fail_next_iter_open(env);    /* the targets walk */
+  assert_int_equal(1, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  assert_int_equal(0, htrim_backfill_done());
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  reboot();
+  assert_int_equal(0, htrim_check_index_gap(GAP_UPTO(p), NULL));
+  assert_int_equal(1, htrim_backfill_done());
 }
 
 /* A meta row that cannot be read is not a missing row: an unreadable
@@ -1605,23 +1874,26 @@ static void test_meta_read_error_means_not_done(void **state)
   reboot();
   assert_int_equal(1, htrim_backfill_done());          /* readable again: done */
 
-  /* A gap while the walk state was unreadable: the store's marker and
-   * cursor may still be there, so the reset deletes them. */
+  /* A gap (an older binary's row, stamped, not indexed) while the walk
+   * state was unreadable: the store's marker and cursor may still be
+   * there, so the reset deletes them. */
   put_meta(HTRIM_META_BACKFILL_CURSOR, "#m");
-  htrim_stamp_alive(1000);
+  seed_targets("#n", ts_ago(ts, sizeof ts, 0, 60));
   fake_db_fail_get_at(env, 1);
   reboot();
   assert_int_equal(0, htrim_backfill_done());
-  assert_int_equal(1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(1, htrim_check_index_gap(UINT64_MAX, NULL));
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_CURSOR, ""));
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
 
-  /* The same with only the done marker there, and it unreadable. */
+  /* The same with only the done marker there, and it unreadable (a newer
+   * row than the reset above covered). */
   put_meta(HTRIM_META_BACKFILL_DONE, "done");
+  seed_targets("#n", ts_ago(ts, sizeof ts, 0, 30));
   fake_db_fail_get_at(env, 2);
   reboot();
   assert_int_equal(0, htrim_backfill_done());
-  assert_int_equal(1, htrim_check_index_gap(1000 + 600001, 600000));
+  assert_int_equal(1, htrim_check_index_gap(UINT64_MAX, NULL));
   assert_int_equal(-1, meta_is(HTRIM_META_BACKFILL_DONE, "done"));
 }
 
@@ -2192,7 +2464,7 @@ static void test_ageout_backfill_row_behind_walk_is_late(void **state)
   /* Retention 9: an older binary's row at 8.5 days is inside it, and the
    * backfill (re-run, as after a downgrade window) indexes it. */
   p9.retention_days = 9;
-  htrim_check_index_gap(UINT64_MAX, 0);
+  reopen_backfill();
   assert_int_equal(0, htrim_backfill_done());
   seed_legacy_row("#l", ts_ago(told, sizeof told, 8, 43200), "L1", "Bob", 0, "", "", 0);
   run_until_idle(&p9);
@@ -2633,6 +2905,129 @@ static void test_evict_waits_for_backfill(void **state)
   run_until_idle(&p);
   assert_int_equal(7500, total_now());
   assert_int_equal(15, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+}
+
+/** Run slices, stderr captured into @a log (@a size bytes), until the
+ * backfill is done; no slice of them evicts. */
+static void backfill_to_done_logged(const struct htrim_params *p, char *log, size_t size)
+{
+  FILE *tmp;
+  size_t n;
+  int i;
+
+  stderr_capture(&tmp);
+  for (i = 0; i < 1000 && !htrim_backfill_done(); i++) {
+    assert_true(htrim_run_slice(p) >= 0);
+    assert_int_not_equal(HTRIM_PH_EVICT, htrim_stats()->last_phase);
+  }
+  stderr_restore();
+  rewind(tmp);
+  n = fread(log, 1, size - 1, tmp);
+  log[n] = '\0';
+  fclose(tmp);
+  assert_int_equal(1, htrim_backfill_done());
+}
+
+/* Final review I-1: on a first deploy HISTORY_MAP_SIZE_MB turns into a
+ * real cap, and the first drain -- inside retention, moving the coverage
+ * floor -- starts the slice after the backfill ends.  The end of the
+ * backfill names the logical total, the cap and its high watermark; over
+ * it, an L_WARNING says eviction will start and how to stop it, and the
+ * operators' warning is raised once, before the first evict slice. */
+static void test_backfill_end_reports_cap_and_warns(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  uint64_t total = 0, high = 0, cap = 0;
+  char log[4096];
+  (void)state;
+
+  load_acct_backfill_pending();
+  seed_run("#n", "N", "-", 90, 1000, 100);
+  assert_int_equal(9000, total_now());
+  backfill_to_done_logged(&p, log, sizeof log);
+  assert_non_null(strstr(log, "trim backfill complete: 0 rows indexed, 0 aged out; "
+                              "logical size 9000 bytes, cap 10000 bytes, high "
+                              "watermark 85% (8500 bytes)"));
+  assert_non_null(strstr(log, "the logical size 9000 bytes is over the high "
+                              "watermark 8500 bytes (85% of the cap 10000 bytes)"));
+  assert_non_null(strstr(log, "eviction inside retention will start"));
+  assert_non_null(strstr(log, "drain to 75%; SET HISTORY_MAP_SIZE_MB 0 stops it"));
+  assert_int_equal(1, htrim_evict_warning(&total, &high, &cap));
+  assert_int_equal(9000, total);
+  assert_int_equal(8500, high);
+  assert_int_equal(10000, cap);
+  assert_int_equal(0, htrim_evict_warning(&total, &high, &cap));   /* taken once */
+  assert_int_equal(0, htrim_draining());
+
+  assert_true(htrim_run_slice(&p) >= 0);                /* then the drain */
+  assert_int_equal(HTRIM_PH_EVICT, htrim_stats()->last_phase);
+  run_until_idle(&p);
+  assert_int_equal(7500, total_now());
+  assert_int_equal(0, htrim_evict_warning(NULL, NULL, NULL));     /* once a backfill */
+}
+
+/* At or under the high watermark, or with no cap, the end of the backfill
+ * names the figures and warns nobody. */
+static void test_backfill_end_no_warning_under_high(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char log[4096];
+  (void)state;
+
+  load_acct_backfill_pending();
+  seed_run("#n", "N", "-", 90, 1000, 100);
+  p.cap_bytes = 0;
+  backfill_to_done_logged(&p, log, sizeof log);
+  assert_non_null(strstr(log, "logical size 9000 bytes, cap 0 bytes (no cap), "
+                              "high watermark 85% (0 bytes)"));
+  assert_null(strstr(log, "eviction inside retention"));
+  assert_int_equal(0, htrim_evict_warning(NULL, NULL, NULL));
+
+  reopen_backfill();
+  p.cap_bytes = 9000 * 100 / 85 + 1;                    /* high = 9000 */
+  backfill_to_done_logged(&p, log, sizeof log);
+  assert_non_null(strstr(log, "logical size 9000 bytes, cap 10589 bytes, high "
+                              "watermark 85% (9000 bytes)"));
+  assert_null(strstr(log, "eviction inside retention"));
+  assert_int_equal(0, htrim_evict_warning(NULL, NULL, NULL));
+  run_until_idle(&p);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_int_equal(0, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+}
+
+/* A backfill that ends while the boot accounting scan still runs: its
+ * line says the total is partial, and the over-high check waits for the
+ * scan's end (eviction waits for it too). */
+static void test_backfill_end_partial_waits_for_scan(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  uint64_t total = 0;
+  char log[4096];
+  FILE *tmp;
+  size_t n;
+  (void)state;
+
+  seed_run("#n", "N", "-", 90, 1000, 100);              /* the scan has them to count */
+  assert_int_equal(0, htrim_acct_loaded());
+  backfill_to_done_logged(&p, log, sizeof log);
+  assert_int_equal(0, htrim_acct_loaded());
+  assert_non_null(strstr(log, "logical size 0 bytes (partial: accounting "
+                              "scanning), cap 10000 bytes"));
+  assert_null(strstr(log, "eviction inside retention"));
+  assert_int_equal(0, htrim_evict_warning(NULL, NULL, NULL));
+
+  stderr_capture(&tmp);
+  while (!htrim_acct_loaded())
+    assert_true(htrim_run_slice(&p) >= 0);
+  stderr_restore();
+  rewind(tmp);
+  n = fread(log, 1, sizeof log - 1, tmp);
+  log[n] = '\0';
+  fclose(tmp);
+  assert_int_equal(HTRIM_PH_ACCTSCAN, htrim_stats()->last_phase);
+  assert_non_null(strstr(log, "the logical size 9000 bytes is over the high watermark"));
+  assert_int_equal(1, htrim_evict_warning(&total, NULL, NULL));
+  assert_int_equal(9000, total);
 }
 
 /* Anti-goal 1: an owner over its share loses its own oldest rows -- down
@@ -3220,7 +3615,7 @@ static void test_ageout_late_row_survives_restart(void **state)
   /* A backfill row behind the walk (retention 9, as after a downgrade
    * window); then a restart before retention 7's next pass. */
   p9.retention_days = 9;
-  htrim_check_index_gap(UINT64_MAX, 0);
+  reopen_backfill();
   seed_legacy_row("#l", ts_ago(told, sizeof told, 8, 43200), "L1", "Bob", 0, "", "", 0);
   run_until_idle(&p9);
   assert_int_equal(1, htrim_backfill_done());
@@ -3748,7 +4143,7 @@ static void test_backfill_rows_behind_walk_all_age_out(void **state)
   assert_int_equal(0, fake_db_rows(st.by_time));
 
   p9.retention_days = 9;
-  htrim_check_index_gap(UINT64_MAX, 0);
+  reopen_backfill();
   seed_legacy_row("#l", ts_ago(t1, sizeof t1, 8, 43200), "L1", "Bob", 0, "", "", 0);
   seed_legacy_row("#m", ts_ago(t2, sizeof t2, 8, 36000), "L2", "Bob", 0, "", "", 0);
   run_until_idle(&p9);
@@ -4806,6 +5201,10 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_backfill_ml_counts_blob, setup, teardown),
     cmocka_unit_test_setup_teardown(test_backfill_parse_failure, setup, teardown),
     cmocka_unit_test_setup_teardown(test_index_gap_reruns_backfill, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_five_minute_rollback, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_future_row_not_rerun, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_healthy_restart_no_reset, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_index_gap_read_error_resets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_index_gap_resets_unfinished_walk, setup, teardown),
     cmocka_unit_test_setup_teardown(test_index_gap_reset_failure_reported, setup, teardown),
     cmocka_unit_test_setup_teardown(test_meta_read_error_means_not_done, setup, teardown),
@@ -4828,6 +5227,9 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_cleanup_carry_dropped_on_restart, setup, teardown),
     cmocka_unit_test_setup_teardown(test_caller_slice_recorded_with_phase, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_waits_for_backfill, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_end_reports_cap_and_warns, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_end_no_warning_under_high, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_end_partial_waits_for_scan, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_owner_share_first, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_oldest_after_shares, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_hysteresis, setup, teardown),

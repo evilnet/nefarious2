@@ -1319,10 +1319,10 @@ int main(int argc, char **argv) {
                   "Failed to initialize chathistory database, feature disabled");
       else {
         chathistory_init_callbacks();
-        /* One read of the newest stored row serves the trimmer's start
-         * and the presence boot-close below. */
-        newest_row_ms = history_newest_activity_ms();
-        history_trim_start(newest_row_ms);
+        /* One walk of the targets CF serves the trimmer's start (its
+         * index-gap check) and the presence boot-close below (the newest
+         * stored row). */
+        newest_row_ms = history_trim_start();
       }
     }
     if (feature_bool(FEAT_CAP_draft_metadata_2) && meta_arg.rc != 0)
