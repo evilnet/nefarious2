@@ -625,13 +625,6 @@ extern int history_enumerate_channels(history_channel_callback callback, void *d
  */
 extern int history_has_channel(const char *target);
 
-/** Check if a channel has any actual messages in history_dbi.
- * More accurate than history_has_channel() after eviction/purge.
- * @param[in] target Channel name.
- * @return 1 if channel has messages, 0 if empty, -1 on error.
- */
-extern int history_channel_has_messages(const char *target);
-
 struct StatDesc;
 
 /** Report CHATHISTORY statistics for /STATS.

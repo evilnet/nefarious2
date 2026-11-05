@@ -395,26 +395,6 @@ resolve_done:
   return (msg->dyn_content != NULL) ? 0 : -1;
 }
 
-int ml_content_delete(struct db_writebatch *wb, const char *msgid)
-{
-  int rc;
-
-  if (!ml_available || !msgid || !msgid[0])
-    return 0;
-
-  rc = db_writebatch_del(wb, ml_content_cf, msgid, strlen(msgid));
-  if (rc != DB_OK)
-    return -1;
-
-  /* Note: paste_secret entries are not cleaned up here because we don't
-   * know the paste_id (msgid-secret) from just the msgid. Orphaned paste
-   * secret entries are harmless — they point to a deleted msgid, so
-   * ml_content_paste_lookup will return a msgid that fails the subsequent
-   * ml_content_get, resulting in a 404.
-   */
-  return 0;
-}
-
 const char *ml_content_paste_lookup(const char *paste_id)
 {
   static char msgid_buf[64];

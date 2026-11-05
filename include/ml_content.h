@@ -83,13 +83,6 @@ extern char *ml_content_get(const char *msgid, size_t *content_len_out,
 extern int ml_content_resolve(struct db_snapshot *snap,
                               struct HistoryMessage *msg);
 
-/** Stage a delete on the writebatch.  Harmless no-op for a missing key.
- * @param[in] wb     Active writebatch.
- * @param[in] msgid  Message ID to delete.
- * @return 0 on success, -1 on error.
- */
-extern int ml_content_delete(struct db_writebatch *wb, const char *msgid);
-
 /** Look up msgid from paste_id (for HTTP paste serving).
  * @param[in] paste_id  Paste ID (msgid-secret format).
  * @return Static buffer containing msgid, or NULL on miss.

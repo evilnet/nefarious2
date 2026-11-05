@@ -1288,19 +1288,22 @@ struct history_trim_row {
  * subtracts exactly what was added.  Keyed on by_time, not the messages
  * row: a messages row written before the index existed is not indexed
  * yet, and is indexed and counted here (the backfill then skips it).
- * @return 0, or -1: the row cannot be indexed, so it must not be stored
- * (a field that does not fit the record, or by_time unreadable). */
+ * @return 0; -1: a field does not fit the record (the row cannot be
+ * indexed, so it must not be stored); -2: by_time could not be read (the
+ * store fails: whether the row is indexed already is unknown), its db
+ * status in *@a read_rc. */
 static int history_trim_row_prepare(struct history_trim_row *tr,
                                     const char *timestamp,
                                     const char *target, const char *msgid,
                                     const char *owner, unsigned char flags,
                                     const char *reply_parent,
-                                    const char *redact_parent)
+                                    const char *redact_parent, int *read_rc)
 {
   char bt[HTC_BT_KEY_MAX];
   int btl, rc;
 
   memset(tr, 0, sizeof *tr);
+  *read_rc = DB_OK;
   if (!owner || !*owner)
     owner = HTC_OWNER_NONE;
   if (!timestamp || !target || !msgid
@@ -1326,8 +1329,10 @@ static int history_trim_row_prepare(struct history_trim_row *tr,
     tr->stage = 0;
   else if (rc == DB_NOTFOUND)
     tr->stage = 1;
-  else
-    return -1;
+  else {
+    *read_rc = rc;
+    return -2;
+  }
   return 0;
 }
 
@@ -1443,7 +1448,7 @@ int history_store_message(const char *msgid, const char *timestamp,
   struct history_trim_row trow;
   /* The storage op that failed, logged once the store gives up. */
   const char *failed = NULL;
-  int db_rc = DB_OK;
+  int db_rc = DB_OK, read_rc;
 
   size_t content_len = content ? strlen(content) : 0;
   size_t tags_len = client_tags ? strlen(client_tags) : 0;
@@ -1539,12 +1544,17 @@ int history_store_message(const char *msgid, const char *timestamp,
    * oldest overall), and a retry that kept the first check's "indexed
    * already" would put the messages row back unindexed and uncounted. */
 store_retry:
-  if (history_trim_row_prepare(&trow, timestamp, target, msgid, owner,
-                               redact_parent[0] ? HTC_F_REDACT : 0,
-                               reply_parent, redact_parent) != 0) {
+  rc = history_trim_row_prepare(&trow, timestamp, target, msgid, owner,
+                                redact_parent[0] ? HTC_F_REDACT : 0,
+                                reply_parent, redact_parent, &read_rc);
+  if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: no trim index for %s/%s (ts '%s')",
            target, msgid, timestamp));
-    history_trim_refused(target, msgid, timestamp);
+    if (rc == -2) {                   /* store_cleanup logs it */
+      failed = "by_time read";
+      db_rc = read_rc;
+    } else
+      history_trim_refused(target, msgid, timestamp);
     rc = -1;
     goto store_cleanup;
   }
@@ -1715,7 +1725,7 @@ int history_store_multiline(const char *msgid, const char *timestamp,
   struct history_trim_row trow;
   /* The storage op that failed, logged once the store gives up. */
   const char *failed = NULL;
-  int db_rc = DB_OK;
+  int db_rc = DB_OK, read_rc;
 
   char valbuf[HISTORY_VALUE_BUFSIZE];
 #ifdef USE_ZSTD
@@ -1755,11 +1765,16 @@ int history_store_multiline(const char *msgid, const char *timestamp,
    * prepare runs again on the retry after an emergency eviction, as in
    * history_store_message. */
 store_ml_retry:
-  if (history_trim_row_prepare(&trow, timestamp, target, msgid, owner,
-                               HTC_F_ML, "", "") != 0) {
+  rc = history_trim_row_prepare(&trow, timestamp, target, msgid, owner,
+                                HTC_F_ML, "", "", &read_rc);
+  if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: no trim index for multiline %s/%s (ts '%s')",
            target, msgid, timestamp));
-    history_trim_refused(target, msgid, timestamp);
+    if (rc == -2) {
+      failed = "by_time read";
+      db_rc = read_rc;
+    } else
+      history_trim_refused(target, msgid, timestamp);
     if (failed)
       history_store_failed(failed, target, msgid, db_rc);
     return -1;
@@ -3148,43 +3163,6 @@ int history_has_channel(const char *target)
   return -1;
 }
 
-int history_channel_has_messages(const char *target)
-{
-  struct db_iter *it;
-  char prefix[CHANNELLEN + 2];
-  int prefix_len;
-  int rc;
-  int result = 0;
-
-  if (!history_available || !target)
-    return -1;
-
-  /* Build prefix key: "target\0" (folded, like the rows) */
-  prefix_len = build_key(prefix, sizeof(prefix), target, NULL, NULL);
-  if (prefix_len < 0)
-    return -1;
-
-  /* Any key in the target's range.  Seek the LAST one: a target's head
-   * is where age-out leaves its tombstones, its tail is live (the trim
-   * engine's emptiness check does the same). */
-  it = history_prefix_iter(history_cf_messages, NULL, prefix, (size_t)prefix_len);
-  if (!it)
-    return -1;
-
-  rc = db_iter_seek_last(it);
-  if (rc == DB_OK && db_iter_valid(it)) {
-    size_t klen;
-    const void *kbase = db_iter_key(it, &klen);
-    if (klen >= (size_t)prefix_len &&
-        memcmp(kbase, prefix, prefix_len) == 0)
-      result = 1;
-  } else if (rc != DB_NOTFOUND)
-    result = -1;
-
-  db_iter_close(it);
-  return result;
-}
-
 void history_set_channel_removed_callback(history_channels_removed_cb cb)
 {
   channel_removed_callback = cb;
@@ -3811,9 +3789,11 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
       key[len] = '\0';
     }
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Owner %s = %llu bytes", key,
+               "H :  Owner %s = %llu bytes%s", key,
                (unsigned long long)(history_available && acct
-                                    ? htc_acct_owner(acct, key) : 0));
+                                    ? htc_acct_owner(acct, key) : 0),
+               history_available && !htrim_acct_loaded()
+               ? " (partial: accounting scanning)" : "");
     return;
   }
 
