@@ -1149,6 +1149,19 @@ int ssl_smart_shutdown(SSL *ssl)
     char i;
     int rc;
     rc = 0;
+
+    /* A teardown sends our close_notify and stops: the descriptor is shut
+     * down and closed right after, so there is nothing to wait for, and
+     * nothing of the peer's may be read.  Without SSL_RECEIVED_SHUTDOWN
+     * the first SSL_shutdown() sends the close_notify and returns 0, and
+     * the second READS, waiting for the peer's: it swallowed the next
+     * application record, or, after close_connection()'s raw drain had
+     * stopped inside a record, parsed the record's middle as a header
+     * ("wrong version number", "bad record type") -- OpenSSL 3 sends no
+     * alert after its own close_notify, but the read is still a desynced
+     * parse of the peer's bytes.  Marked received, the first call sends
+     * the close_notify and returns 1 without reading. */
+    SSL_set_shutdown(ssl, SSL_get_shutdown(ssl) | SSL_RECEIVED_SHUTDOWN);
     for(i = 0; i < 4; i++) {
         if((rc = SSL_shutdown(ssl)))
             break;

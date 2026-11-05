@@ -1,6 +1,6 @@
 /*
  * ssl_teardown_cmocka.c - a TLS teardown writes only to a descriptor its
- * socket still owns
+ * socket still owns, and never reads the peer's stream
  *
  * The SSL object's BIO caches the descriptor NUMBER it was given.  Once
  * the socket has let that number go -- closed by someone else, which an
@@ -9,6 +9,16 @@
  * opened (a RocksDB SST, a log), and an SSL_shutdown() writes its
  * close_notify into that file.  ssl_free() has refused to since 4b658482;
  * ssl_abort(), the ET_ERROR/ET_EOF teardown, did not.
+ *
+ * And a teardown is one-way.  close_connection() drains the kernel
+ * receive buffer with raw recv()s before the close_notify, so no unread
+ * input turns the close() into an RST; the drain stops wherever the bytes
+ * did, often inside a TLS record.  A bidirectional SSL_shutdown() then
+ * reads on from that point to wait for the peer's close_notify, and parses
+ * the middle of a record as a record header.  OpenSSL 3.5 keeps quiet
+ * about it (no alert follows a close_notify it sent), but the teardown
+ * should not depend on that, nor read anything at all: the descriptor is
+ * closed a moment later whatever arrives.
  *
  * This links the real ssl.o.  The connections are socketpairs and the
  * handshake is real, against a throwaway self-signed certificate.
@@ -94,7 +104,7 @@ void add_connection(struct Listener *listener, int fd, void *ssl)
 /* A TLS session over a socketpair                                     */
 /* ------------------------------------------------------------------ */
 
-static SSL_CTX *server_ctx, *client_ctx;
+static SSL_CTX *server_ctx, *client_ctx, *server_ctx12;
 
 static int sv[2] = { -1, -1 };     /* [0] the server's end, [1] the peer's */
 static SSL *server, *peer;
@@ -248,6 +258,67 @@ static void abort_with_its_fd_sends_close_notify(void **state)
 /* ssl_free(): close_connection()'s teardown                           */
 /* ------------------------------------------------------------------ */
 
+/** close_connection(): the drain took the head of a record (the rest was
+ * still in flight); then ssl_free() sends the close_notify.  It must not
+ * read on: every byte the drain left is still in the socket, and the peer
+ * got exactly one close_notify. */
+static void free_after_a_mid_record_drain_reads_nothing(SSL_CTX *sctx)
+{
+  char msg[200], head[50];
+  int before;
+
+  session_open(sctx);
+  memset(msg, 'A', sizeof(msg));
+  assert_int_equal(SSL_write(peer, msg, sizeof(msg)), (int)sizeof(msg));
+  assert_int_equal(SSL_write(peer, msg, sizeof(msg)), (int)sizeof(msg));
+
+  /* The drain stops inside the first record. */
+  assert_int_equal(recv(sv[0], head, sizeof(head), MSG_DONTWAIT),
+                   (int)sizeof(head));
+  before = pending_bytes(sv[0]);
+  assert_true(before > 0);
+
+  ssl_free(&(cli_socket(&cli)));
+
+  assert_null(cli_socket(&cli).ssl);
+  assert_int_equal(pending_bytes(sv[0]), before);
+  peer_sees_one_close_notify();
+  session_close();
+}
+
+static void free_after_a_mid_record_drain_reads_nothing_tls13(void **state)
+{
+  (void)state;
+  free_after_a_mid_record_drain_reads_nothing(server_ctx);
+}
+
+static void free_after_a_mid_record_drain_reads_nothing_tls12(void **state)
+{
+  (void)state;
+  free_after_a_mid_record_drain_reads_nothing(server_ctx12);
+}
+
+/** Nothing drained: whole records still waiting are not read either (the
+ * drain that follows takes them). */
+static void free_with_whole_records_waiting_reads_nothing(void **state)
+{
+  char msg[200];
+  int before;
+
+  (void)state;
+  session_open(server_ctx);
+  memset(msg, 'B', sizeof(msg));
+  assert_int_equal(SSL_write(peer, msg, sizeof(msg)), (int)sizeof(msg));
+  before = pending_bytes(sv[0]);
+  assert_true(before > 0);
+
+  ssl_free(&(cli_socket(&cli)));
+
+  assert_int_equal(pending_bytes(sv[0]), before);
+  peer_sees_one_close_notify();
+  session_close();
+}
+
 /** A socket that has let its descriptor go (s_fd -1) frees the session
  * silently (4b658482; pinned here beside ssl_abort()). */
 static void free_without_an_fd_writes_nothing(void **state)
@@ -308,6 +379,8 @@ static int group_setup(void **state)
     && X509_set_issuer_name(cert, name)
     && X509_sign(cert, key, EVP_sha256())
     && (server_ctx = server_ctx_new(key, cert))
+    && (server_ctx12 = server_ctx_new(key, cert))
+    && SSL_CTX_set_max_proto_version(server_ctx12, TLS1_2_VERSION)
     && (client_ctx = SSL_CTX_new(TLS_client_method()));
   X509_free(cert);
   EVP_PKEY_free(key);
@@ -321,6 +394,7 @@ static int group_teardown(void **state)
 {
   (void)state;
   SSL_CTX_free(client_ctx);
+  SSL_CTX_free(server_ctx12);
   SSL_CTX_free(server_ctx);
   return 0;
 }
@@ -330,6 +404,9 @@ int main(void)
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(abort_after_the_fd_is_gone_writes_nothing),
     cmocka_unit_test(abort_with_its_fd_sends_close_notify),
+    cmocka_unit_test(free_after_a_mid_record_drain_reads_nothing_tls13),
+    cmocka_unit_test(free_after_a_mid_record_drain_reads_nothing_tls12),
+    cmocka_unit_test(free_with_whole_records_waiting_reads_nothing),
     cmocka_unit_test(free_without_an_fd_writes_nothing),
   };
 
