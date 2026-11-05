@@ -71,7 +71,9 @@
  *     picked, loses its own oldest rows (a by_owner walk, resumed past
  *     the last key the step deleted) down to its share -- while the share
  *     step stays on (htc_share_active); a new step starts at owner 0x00 ‖
- *     the live floor, past its aged-out head;
+ *     the live floor, past its aged-out head, and when that runs out walks
+ *     below it once (orphan entries a boot scan counted go with their
+ *     bytes) -- only a whole range short of the trim recounts the totals;
  *   - while the total is still above the low watermark, starts the
  *     plan's next owner step (largest over-share first);
  *   - only when nobody is over share and the plan listed every owner
@@ -113,7 +115,11 @@
  * issue at most one hint each (a cleanup-only slice takes the rest), a
  * caller's slice none, and a CF with a flush in flight or L0 near its
  * slowdown trigger gets the suggestion alone, its flush left due for a
- * later slice.  An undecided target's range is hinted the same way.
+ * later slice.  An undecided target's range is hinted the same way, each
+ * target apart (up to 8), one messages flush serving both.  A hint that
+ * fails or is dropped keeps its count -- a drain's start keeps it too --
+ * and the cumulative trigger backs off (compact_min_rows more keys, or 60
+ * slices), one WARNING a failure streak.
  */
 #ifndef INCLUDED_history_trim_h
 #define INCLUDED_history_trim_h
