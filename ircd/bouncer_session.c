@@ -8541,8 +8541,16 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
          cli_name(ghost), cli_name(temp), cli_fd(temp)));
 
   /* Step 1: Take the temp client's fd and SSL.
-   * Clear s_data BEFORE socket_del to prevent stale callbacks.
-   * IMPORTANT: Also save and NULL the SSL pointer BEFORE socket_del,
+   * The socket keeps its data (the temp's Connection): its ET_DESTROY,
+   * run here or at the end of the temp's own running callback, is what
+   * clears FREEFLAG_SOCKET.  The Connection then goes the way any client's
+   * does: free_client() deallocates it at once when no flag is left (no
+   * proc or SASL timer pending), else the last destroy to clear its flag
+   * (the socket's, a timer's) frees it once free_client() has let go of
+   * it.  Clearing s_data first (as this did before) sent the destroy down
+   * its "already claimed" branch, FREEFLAG_SOCKET stayed set, and the
+   * temp's Connection was never freed: one leaked per revive.
+   * IMPORTANT: Save and NULL the SSL pointer BEFORE socket_del,
    * because socket_del triggers ET_DESTROY which calls ssl_free().
    * If we don't NULL it first, the SSL context gets freed before we
    * can transfer it to the ghost.
@@ -8558,7 +8566,6 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * running read callback may hold).  So a refusal below cannot fall
    * back to registering the temp by another route (-1); it returns -2. */
   fd = cli_fd(temp);
-  s_data(&cli_socket(temp)) = NULL;
 #ifdef USE_SSL
   temp_ssl = con_socket(temp_con).ssl;
   con_socket(temp_con).ssl = NULL;  /* Prevent ssl_free from freeing it */
