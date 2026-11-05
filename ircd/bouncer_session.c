@@ -8233,10 +8233,12 @@ static int bounce_hold_session(struct Client *cptr,
 
   /* WebSocket farewell (best effort): tell the client WHY before the
    * socket drops, so browsers see a labeled close instead of a bare
-   * 1006 indistinguishable from a network cut.  Dead sockets (write
-   * errors, EOF) can't be written to -- skip. */
+   * 1006 indistinguishable from a network cut -- unless a refusal or the
+   * client's own Close already set the status.  close_connection() below
+   * sends it, after what is queued.  Dead sockets (write errors, EOF)
+   * can't be written to -- skip. */
   if (IsWebSocket(cptr) && !IsDead(cptr) && cli_fd(cptr) >= 0)
-    websocket_send_close(cptr, 1000, comment ? comment : "held");
+    websocket_set_close(cptr, 1000, comment ? comment : "held");
 
   /* close_connection() below zeroes the server notice mask and leaves
    * the modes, +s included, on the ghost.  Keep the mask with the
@@ -8831,11 +8833,16 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   con_ws_txrem_pos(ghost_con) = con_ws_txrem_pos(temp_con);
   con_ws_txrem(temp_con) = NULL;
   con_ws_txrem_len(temp_con) = con_ws_txrem_pos(temp_con) = 0;
-  /* So does whether a Close went out: the ghost's mark is its old
-   * socket's (the hold's farewell), and with it kept the new socket could
-   * never send its own Close (websocket_send_close() sends one per
-   * connection). */
+  /* So does the Close: the ghost's is its old socket's (the hold's
+   * farewell, set and sent), and with it kept the new socket could never
+   * send its own (websocket_set_close() keeps the first status set, and
+   * one Close goes out per connection). */
+  con_ws_close_code(ghost_con) = con_ws_close_code(temp_con);
+  memcpy(con_ws_close_reason(ghost_con), con_ws_close_reason(temp_con),
+         sizeof(con_ws_close_reason(ghost_con)));
   con_ws_close_sent(ghost_con) = con_ws_close_sent(temp_con);
+  con_ws_close_code(temp_con) = 0;
+  con_ws_close_reason(temp_con)[0] = '\0';
   con_ws_close_sent(temp_con) = 0;
 
   /* Step 8: Copy CAP state from temp to ghost */
@@ -14054,11 +14061,12 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
   if (MyConnect(target)) {
     /* A device of ours whose session ended elsewhere: its socket is told
      * why before it closes, as exit_client() tells every local client.
-     * BX X carries no reason; the session's end is the one there is. */
+     * BX X carries no reason; the session's end is the one there is.
+     * close_connection() sends a WebSocket's Close after the ERROR. */
     if ((IsUser(target) || IsUserPort(target)) && !IsDead(target)
         && cli_fd(target) >= 0) {
       if (IsWebSocket(target))
-        websocket_send_close(target, 1000, "Bouncer session ended");
+        websocket_set_close(target, 1000, "Bouncer session ended");
       sendrawto_one(target, MSG_ERROR " :Closing Link: %s by %s (%s)",
                     cli_name(target), cli_name(&his), "Bouncer session ended");
     }

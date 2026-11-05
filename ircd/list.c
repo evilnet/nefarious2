@@ -342,6 +342,8 @@ struct Client* make_client(struct Client *from, int status)
     con_ws_frame_len(con) = 0;
     con_ws_frag_len(con) = 0;
     con_ws_frag_opcode(con) = 0;
+    con_ws_close_code(con) = 0;
+    con_ws_close_reason(con)[0] = '\0';
     con_ws_close_sent(con) = 0;
 
     cli_connect(cptr) = con; /* set the connection and other fields */

@@ -67,6 +67,16 @@ struct Client;
  * WS_HANDSHAKE_MAX without a terminating blank line. */
 #define WS_HANDSHAKE_TOOBIG (-2)
 
+/** Longest Close reason, in bytes: a control frame's payload is at most
+ * 125 bytes (RFC 6455 §5.5), two of them the status code. */
+#define WS_CLOSE_REASON_MAX 123
+
+/** websocket_set_close() status meaning "a Close with no status code":
+ * the frame goes out with an empty body.  RFC 6455 §7.4.1 reserves 1005
+ * for exactly this and forbids it on the wire, so it never collides with
+ * a status that is sent. */
+#define WS_CLOSE_NO_STATUS 1005
+
 /** Handle WebSocket handshake for a new connection.
  * @param[in] cptr Client attempting to connect.
  * @param[in] buffer Raw data received.
@@ -114,7 +124,9 @@ extern int websocket_decode_frame(const unsigned char *frame, int frame_len,
 extern int websocket_encode_frame(const char *data, int data_len,
                                   unsigned char *frame, int text_mode);
 
-/** Handle a WebSocket control frame.
+/** Handle a WebSocket control frame.  A PING is answered at once; a
+ * CLOSE sets the connection's Close to the answer (websocket_set_close())
+ * and asks the caller to close the connection.
  * @param[in] cptr Client connection.
  * @param[in] opcode Frame opcode.
  * @param[in] payload Frame payload.
@@ -136,11 +148,12 @@ extern int websocket_handle_control(struct Client *cptr, int opcode,
  * reassembly buffer.  Called for a non-FIN TEXT/BINARY frame (starts a
  * message), for every CONTINUATION frame, and for any TEXT/BINARY frame
  * while a message is in progress, which it refuses (RFC 6455 §5.4).
- * Before it returns a refusal (a negative value) it has sent the client
- * the Close frame RFC 6455 answers it with: 1002 Protocol Error for
- * WS_FRAG_ORPHAN and WS_FRAG_INTERLEAVED, 1007 Invalid Payload Data for
- * WS_FRAG_BADUTF8, 1009 Message Too Big for WS_FRAG_OVERFLOW.  The
- * caller drops the connection.
+ * Before it returns a refusal (a negative value) it has set the
+ * connection's Close (websocket_set_close()) to the status RFC 6455
+ * answers it with: 1002 Protocol Error for WS_FRAG_ORPHAN and
+ * WS_FRAG_INTERLEAVED, 1007 Invalid Payload Data for WS_FRAG_BADUTF8,
+ * 1009 Message Too Big for WS_FRAG_OVERFLOW.  The caller drops the
+ * connection, which sends it.
  * @param[in] cptr Client connection.
  * @param[in] opcode Frame opcode.
  * @param[in] is_fin 1 if this frame ends the message.
@@ -160,15 +173,30 @@ extern void websocket_send_ping(struct Client *cptr);
 /** Arm the periodic WebSocket keepalive PING timer. */
 extern void websocket_ping_timer_init(void);
 
-/** Send a WebSocket Close frame with a status code (best effort).  One
- * Close goes out per connection (RFC 6455 §5.5.1): the first call, or
- * the answer to the client's own Close, sends it; any later call (such as
- * exit_client()'s farewell after a refusal's coded Close) sends nothing.
+/** Set the Close frame a connection ends with.  One Close goes out per
+ * connection, and no data frame after it (RFC 6455 §5.5.1).  The first
+ * call decides it -- a refusal's status, the answer to the client's own
+ * Close, or else the farewell 1000 exit_client() and a bouncer hold set
+ * on the way out -- and later calls change nothing.  Nothing is sent
+ * here: websocket_close_flush() sends it when the socket is closed.
  * @param[in] cptr Client connection.
- * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big).
- * @param[in] reason Optional short reason text (truncated to 123 bytes).
+ * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big), or
+ *   WS_CLOSE_NO_STATUS for a Close with an empty body.
+ * @param[in] reason Optional short reason text (cut to
+ *   WS_CLOSE_REASON_MAX bytes).
  */
-extern void websocket_send_close(struct Client *cptr, int code,
-                                 const char *reason);
+extern void websocket_set_close(struct Client *cptr, int code,
+                                const char *reason);
+
+/** Flush a WebSocket connection that is being closed: the lines queued on
+ * it (exit_client()'s "ERROR :Closing Link" is the last), then its one
+ * Close frame, when websocket_set_close() set one and none has gone out.
+ * Web IRC clients show the quit reason from the ERROR line, and nothing
+ * may follow the Close, so the ERROR goes first.  close_connection()
+ * calls this in place of flush_connections() (best effort: a dead or
+ * blocked socket gets no Close).
+ * @param[in] cptr Client connection.
+ */
+extern void websocket_close_flush(struct Client *cptr);
 
 #endif /* INCLUDED_websocket_h */

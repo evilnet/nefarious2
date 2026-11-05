@@ -839,7 +839,13 @@ void close_connection(struct Client *cptr)
      * second close() closes that file under its owner. */
     int fd = cli_fd(cptr);
 
-    flush_connections(cptr);
+    /* A WebSocket's one Close frame goes after the queued lines -- the
+     * ERROR exit_client() queued last among them -- since nothing may
+     * follow a Close (RFC 6455 §5.5.1). */
+    if (IsWebSocket(cptr))
+      websocket_close_flush(cptr);
+    else
+      flush_connections(cptr);
     LocalClientArray[fd] = 0;
 
     /* Drain any data sitting in the recv buffer before close.  Linux's
@@ -1245,8 +1251,9 @@ static int ws_frag_feed(struct Client *cptr, int opcode, int is_fin,
   char *msg;
   int msg_len;
 
-  /* On a refusal websocket_frag_feed() has already sent its Close frame
-   * (1002, 1007 or 1009); what is left is to drop the connection. */
+  /* On a refusal websocket_frag_feed() has already set the connection's
+   * Close (1002, 1007 or 1009); what is left is to drop the connection,
+   * which sends it. */
   switch (websocket_frag_feed(cptr, opcode, is_fin, payload, len,
                               &msg, &msg_len)) {
   case WS_FRAG_MORE:
@@ -1520,7 +1527,7 @@ ssl_read_again:
              * a frame the decoder accepts (WS_MAX_FRAME covers the largest
              * header plus WS_MAX_PAYLOAD), so treat it as a protocol error
              * rather than spin. */
-            websocket_send_close(cptr, 1002, "Protocol error");
+            websocket_set_close(cptr, 1002, "Protocol error");
             return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket frame error");
           }
           if (copy_len > src_len)
@@ -1531,15 +1538,15 @@ ssl_read_again:
           src_len -= copy_len;
           continue;
         } else if (consumed == WS_DECODE_TOOBIG) {
-          /* Over WS_MAX_PAYLOAD: tell the client why before dropping it */
-          websocket_send_close(cptr, 1009, "Message too big");
+          /* Over WS_MAX_PAYLOAD: the Close tells the client why */
+          websocket_set_close(cptr, 1009, "Message too big");
           return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket message too big");
         } else if (consumed < 0) {
           /* A protocol error (RFC 6455: RSV bits, a reserved opcode, an
            * unmasked frame, a control frame over 125 bytes or without
-           * FIN): Close 1002 before dropping it */
+           * FIN): it is dropped with Close 1002 */
           Debug((DEBUG_DEBUG, "WebSocket: Frame error (consumed=%d)", consumed));
-          websocket_send_close(cptr, 1002, "Protocol error");
+          websocket_set_close(cptr, 1002, "Protocol error");
           return exit_client_fault(cptr, BOUNCE_FORCED_WEBSOCKET, "WebSocket frame error");
         }
 
@@ -1558,7 +1565,7 @@ ssl_read_again:
             cli_ws_ctl_since(cptr) = CurrentTime;
           cli_ws_ctl_since(cptr) += WS_CONTROL_FLOOD_CHARGE;
           if (cli_ws_ctl_since(cptr) - CurrentTime > WS_CONTROL_FLOOD_CEIL) {
-            websocket_send_close(cptr, 1008, "Excess Flood");
+            websocket_set_close(cptr, 1008, "Excess Flood");
             return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood");
           }
         }

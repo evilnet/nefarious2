@@ -815,51 +815,74 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
   }
 }
 
-/** Claim the connection's one Close frame (RFC 6455 §5.5.1: after
- * sending a Close an endpoint sends nothing more).  The first Close on a
- * socket carries the reason the client sees: a refusal's status, or the
- * answer to the client's own Close.  The farewell Close 1000 that
- * exit_client() and a bouncer hold send on the way out then goes
- * nowhere.  Claimed on the attempt: a Close ws_send_raw() could not send
- * (a TLS write blocked) is not retried by a later one in the same exit.
+/** Set the Close frame this connection ends with (RFC 6455 §5.5.1: one
+ * per connection, and no data frame after it).  The first call decides
+ * it: a refusal's status, or the answer to the client's own Close; the
+ * farewell 1000 that exit_client() and a bouncer hold set on the way out
+ * then changes nothing.  Nothing goes on the wire here:
+ * websocket_close_flush() sends it when close_connection() closes the
+ * socket, after the lines queued before it.  Sent at once, a refusal's
+ * Close went ahead of exit_client()'s "ERROR :Closing Link", a data frame
+ * after the Close (§5.5.1) that web IRC clients read the quit reason
+ * from.
  * @param[in] cptr Client connection.
- * @return 1 if the caller sends the Close, 0 if one has already gone. */
-static int ws_claim_close(struct Client *cptr)
+ * @param[in] code Status code, or WS_CLOSE_NO_STATUS (an empty Close).
+ * @param[in] reason Optional reason text (cut to fit a control frame).
+ */
+void websocket_set_close(struct Client *cptr, int code, const char *reason)
 {
   struct Connection *con = cli_connect(cptr);
+  int rlen;
 
-  if (con_ws_close_sent(con))
-    return 0;
-  con_ws_close_sent(con) = 1;
-  return 1;
+  if (con_ws_close_code(con))
+    return;
+  con_ws_close_code(con) = code;
+  rlen = (reason && code != WS_CLOSE_NO_STATUS) ? (int)strlen(reason) : 0;
+  if (rlen > WS_CLOSE_REASON_MAX)
+    rlen = WS_CLOSE_REASON_MAX;  /* control frame payload <= 125 incl. 2-byte code */
+  if (rlen > 0)
+    memcpy(con_ws_close_reason(con), reason, rlen);
+  con_ws_close_reason(con)[rlen] = '\0';
 }
 
-/** Send a WebSocket Close frame (RFC 6455 §5.5.1) with a status code.
- * Best effort, no error reporting: this is used immediately before the
- * connection is dropped so the client can tell a policy close (e.g.
- * 1009 Message Too Big) apart from a network failure (1006).  Only the
- * first Close on a connection is sent; later calls do nothing.
+/** Flush a WebSocket connection that is being closed: the lines queued
+ * on it, then the one Close frame websocket_set_close() set (RFC 6455
+ * §5.5.1).  Best effort, no error reporting: the client can then tell a
+ * policy close (e.g. 1009 Message Too Big) apart from a network failure
+ * (1006).  Nothing is sent on a dead socket: its Close stays unsent, and
+ * its fd is closed next.  On a live one the Close is marked sent before
+ * the write, so one that ws_send_raw() could not send (a blocked socket,
+ * a partial frame pending) is not tried again.
  * @param[in] cptr Client connection.
- * @param[in] code Status code.
- * @param[in] reason Optional reason text (truncated to fit a control frame).
  */
-void websocket_send_close(struct Client *cptr, int code, const char *reason)
+void websocket_close_flush(struct Client *cptr)
 {
-  unsigned char frame[2 + 125];
-  int rlen = reason ? (int)strlen(reason) : 0;
+  struct Connection *con = cli_connect(cptr);
+  unsigned char frame[2 + 2 + WS_CLOSE_REASON_MAX];
+  int code = con_ws_close_code(con);
+  int len;
 
-  if (!ws_claim_close(cptr))
+  /* exit_client()'s ERROR line is queued last: it goes first */
+  send_queued(cptr);
+  if (!code || con_ws_close_sent(con) || IsDead(cptr) || cli_fd(cptr) < 0)
     return;
-  if (rlen > 123)
-    rlen = 123;  /* control frame payload <= 125 incl. 2-byte code */
+  con_ws_close_sent(con) = 1;
   frame[0] = WS_FIN | WS_OPCODE_CLOSE;
-  frame[1] = (unsigned char)(2 + rlen);
-  frame[2] = (code >> 8) & 0xFF;
-  frame[3] = code & 0xFF;
-  if (rlen > 0)
-    memcpy(frame + 4, reason, rlen);
-  Debug((DEBUG_DEBUG, "WebSocket: sending Close %d (%s)", code, reason ? reason : ""));
-  ws_send_raw(cptr, frame, 4 + rlen);
+  if (code == WS_CLOSE_NO_STATUS) {
+    frame[1] = 0;
+    len = 2;
+  } else {
+    int rlen = (int)strlen(con_ws_close_reason(con));
+
+    frame[1] = (unsigned char)(2 + rlen);
+    frame[2] = (code >> 8) & 0xFF;
+    frame[3] = code & 0xFF;
+    memcpy(frame + 4, con_ws_close_reason(con), rlen);
+    len = 4 + rlen;
+  }
+  Debug((DEBUG_DEBUG, "WebSocket: sending Close %d (%s)", code,
+         con_ws_close_reason(con)));
+  ws_send_raw(cptr, frame, len);
 }
 
 /** Send an empty WS protocol-level PING (RFC 6455 5.5.2).  Browsers
@@ -933,22 +956,24 @@ int websocket_handle_control(struct Client *cptr, int opcode,
       return 1;
 
     case WS_OPCODE_CLOSE:
-      /* Client initiated close - send close response, unless a Close of
-       * ours has already gone out (it was the answer) */
-      if (!ws_claim_close(cptr))
-        return 0;
-      response[0] = WS_FIN | WS_OPCODE_CLOSE;
-      if (payload_len >= 2) {
-        /* Echo back the status code */
-        response[1] = 2;
-        response[2] = payload[0];
-        response[3] = payload[1];
-        resp_len = 4;
-      } else {
-        response[1] = 0;
-        resp_len = 2;
+      /* Client initiated close: the answer echoes its status (an empty
+       * Close answers one without).  0 and 1005 cannot be echoed: to
+       * websocket_set_close() 0 is "no Close set" and 1005 an empty
+       * Close, and neither may be sent (§7.4.1 keeps 1005 off the wire,
+       * and 0 is no status), so a Close carrying one is a protocol error:
+       * 1002.  The answer is this connection's Close unless one of ours
+       * is already set, and goes out when the caller closes the
+       * connection. */
+      if (payload_len < 2)
+        websocket_set_close(cptr, WS_CLOSE_NO_STATUS, NULL);
+      else {
+        int code = ((unsigned char)payload[0] << 8) | (unsigned char)payload[1];
+
+        if (code == 0 || code == WS_CLOSE_NO_STATUS)
+          websocket_set_close(cptr, 1002, "Invalid Close status");
+        else
+          websocket_set_close(cptr, code, NULL);
       }
-      ws_send_raw(cptr, response, resp_len);
       return 0; /* Signal to close connection */
 
     default:
@@ -965,13 +990,13 @@ int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
   if (opcode == WS_OPCODE_CONTINUATION) {
     /* RFC 6455 §5.4: a continuation only continues a started message */
     if (cli_ws_frag_opcode(cptr) == 0) {
-      websocket_send_close(cptr, 1002, "Continuation without a message");
+      websocket_set_close(cptr, 1002, "Continuation without a message");
       return WS_FRAG_ORPHAN;
     }
   } else if (cli_ws_frag_opcode(cptr) != 0) {
     /* RFC 6455 §5.4: a message's fragments are not interleaved with
      * another message (only control frames may come between them) */
-    websocket_send_close(cptr, 1002, "Data frame inside a fragmented message");
+    websocket_set_close(cptr, 1002, "Data frame inside a fragmented message");
     return WS_FRAG_INTERLEAVED;
   } else {
     cli_ws_frag_opcode(cptr) = opcode;
@@ -980,7 +1005,7 @@ int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
 
   if (len > WS_MAX_PAYLOAD - cli_ws_frag_len(cptr)) {
     /* The same answer as a single frame over the limit */
-    websocket_send_close(cptr, 1009, "Message too big");
+    websocket_set_close(cptr, 1009, "Message too big");
     return WS_FRAG_OVERFLOW;
   }
   memcpy(buf + cli_ws_frag_len(cptr), payload, len);
@@ -1001,7 +1026,7 @@ int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
   /* RFC 6455 Section 8.1: text frames must be valid UTF-8; §7.4.1 names
    * the Close status for data that does not match its type */
   if (opcode == WS_OPCODE_TEXT && !string_is_valid_utf8(buf)) {
-    websocket_send_close(cptr, 1007, "Invalid UTF-8");
+    websocket_set_close(cptr, 1007, "Invalid UTF-8");
     return WS_FRAG_BADUTF8;
   }
   return WS_FRAG_DONE;

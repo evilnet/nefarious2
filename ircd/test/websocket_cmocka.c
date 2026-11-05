@@ -16,8 +16,11 @@
  *     overflow, a continuation with no message started, and UTF-8.
  *   - One Close per connection (§5.5.1): after a refusal's coded Close,
  *     or the answer to a client's Close, the farewell Close 1000 that
- *     exit_client() and a bouncer hold send is dropped; a plain exit
+ *     exit_client() and a bouncer hold set changes nothing; a plain exit
  *     still sends its one Close.
+ *   - No data frame after the Close (§5.5.1): a Close is set, not sent,
+ *     and websocket_close_flush() (close_connection()) sends it after the
+ *     queued lines, so exit_client()'s "ERROR :Closing Link" goes first.
  *   - RFC 6455 framing refusals: a control frame without FIN is a
  *     decode error (§5.5); websocket_frag_feed() answers a TEXT/BINARY
  *     frame inside a fragmented message and an orphan continuation with
@@ -26,7 +29,8 @@
  *     Close 1009.
  *
  * websocket.c is included directly (like ircd_cloaking_cmocka.c) with
- * stubs for feature_str(), ircd_snprintf() and os_send_nonb().
+ * stubs for feature_str(), ircd_snprintf(), os_send_nonb() and
+ * send_queued().
  */
 
 #include <stdarg.h>
@@ -97,11 +101,15 @@ int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
   return ret;
 }
 
-/* Capture whatever websocket_handshake() writes to the (plain) socket:
- * the last write in sent_buf, and how many writes there were. */
+/* Capture whatever websocket.c writes to the (plain) socket: the last
+ * write in sent_buf, how many writes there were, and the first
+ * SENT_LOG_MAX writes in order in sent_log (to check what went first). */
+#define SENT_LOG_MAX 8
 static char sent_buf[1024];
 static int sent_len;
 static int sent_count;
+static unsigned char sent_log[SENT_LOG_MAX][1024];
+static int sent_log_len[SENT_LOG_MAX];
 
 IOResult os_send_nonb(int fd, const char *buf, unsigned int length,
                       unsigned int *count_out)
@@ -112,9 +120,32 @@ IOResult os_send_nonb(int fd, const char *buf, unsigned int length,
   memcpy(sent_buf, buf, length);
   sent_buf[length] = '\0';
   sent_len = length;
+  if (sent_count < SENT_LOG_MAX) {
+    memcpy(sent_log[sent_count], buf, length);
+    sent_log_len[sent_count] = length;
+  }
   sent_count++;
   *count_out = length;
   return IO_SUCCESS;
+}
+
+/* send.c: websocket_close_flush() sends the lines queued on a closing
+ * connection before its Close.  A test queues one line here (the
+ * "ERROR :Closing Link" exit_client() queues last); the stub frames it
+ * as deliver_it() does and writes it through os_send_nonb(). */
+static const char *queued_line;
+
+void send_queued(struct Client *to)
+{
+  static unsigned char frame[BUFSIZE + 16];
+  unsigned int n;
+  int len;
+
+  if (!queued_line)
+    return;
+  len = websocket_encode_frame(queued_line, (int)strlen(queued_line), frame, 1);
+  queued_line = NULL;
+  os_send_nonb(cli_fd(to), (const char *)frame, (unsigned int)len, &n);
 }
 
 /* ---- helpers ---- */
@@ -128,6 +159,8 @@ static void setup_client(struct Client *cli, struct Connection *con)
   sent_len = 0;
   sent_count = 0;
   sent_buf[0] = '\0';
+  memset(sent_log_len, 0, sizeof(sent_log_len));
+  queued_line = NULL;
 }
 
 /* Build a masked client->server frame: FIN | opcode, payload of plen 'x'
@@ -317,10 +350,12 @@ static void test_control_close_signals_teardown(void **state)
   assert_true((unsigned char)sent_buf[0] == (WS_FIN | WS_OPCODE_PONG));
   assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_PONG, NULL, 0), 1);
 
-  /* ...CLOSE signals teardown (return 0) and echoes a close response
-   * with the client's status code. */
+  /* ...CLOSE signals teardown (return 0), and the close response that
+   * goes out when the connection is flushed echoes the client's status
+   * code. */
   setup_client(&cli, &con);
   assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, status, 2), 0);
+  websocket_close_flush(&cli);
   assert_true((unsigned char)sent_buf[0] == (WS_FIN | WS_OPCODE_CLOSE));
   assert_int_equal(sent_buf[1], 2);
   assert_true((unsigned char)sent_buf[2] == 0x03 && (unsigned char)sent_buf[3] == 0xE8);
@@ -328,6 +363,7 @@ static void test_control_close_signals_teardown(void **state)
   /* Payload-less CLOSE also signals teardown. */
   setup_client(&cli, &con);
   assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, NULL, 0), 0);
+  websocket_close_flush(&cli);
   assert_true((unsigned char)sent_buf[0] == (WS_FIN | WS_OPCODE_CLOSE));
 }
 
@@ -757,6 +793,17 @@ static void assert_close_sent(int code)
                    code);
 }
 
+/* A refusal sets the connection's Close and sends nothing: the Close goes
+ * out when the closing connection is flushed (close_connection()), after
+ * the lines queued before it.  Then it is the one write, with 'code'. */
+static void assert_close_at_flush(struct Client *cli, int code)
+{
+  assert_int_equal(sent_count, 0);
+  websocket_close_flush(cli);
+  assert_int_equal(sent_count, 1);
+  assert_close_sent(code);
+}
+
 /* §5.5: control frames are never fragmented.  CLOSE, PING and PONG
  * without FIN are a protocol error for the decoder (the caller answers
  * Close 1002); with FIN they decode.  A data frame without FIN is still
@@ -819,7 +866,7 @@ static void test_frag_data_frame_mid_message(void **state)
       assert_int_equal(websocket_frag_feed(&cli, data[i], fin, "QUIT", 4,
                                            &msg, &msg_len),
                        WS_FRAG_INTERLEAVED);
-      assert_close_sent(1002);
+      assert_close_at_flush(&cli, 1002);
     }
   }
 }
@@ -868,7 +915,7 @@ static void test_frag_overflow_sends_1009(void **state)
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
                                        "x", 1, &msg, &msg_len),
                    WS_FRAG_OVERFLOW);
-  assert_close_sent(1009);
+  assert_close_at_flush(&cli, 1009);
 
   setup_client(&cli, &con);
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_BINARY, 0, frag_src,
@@ -881,7 +928,7 @@ static void test_frag_overflow_sends_1009(void **state)
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
                                        "x", 1, &msg, &msg_len),
                    WS_FRAG_OVERFLOW);
-  assert_close_sent(1009);
+  assert_close_at_flush(&cli, 1009);
 }
 
 /* §5.4: a CONTINUATION with no message started is answered with Close
@@ -898,7 +945,7 @@ static void test_frag_orphan_sends_1002(void **state)
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
                                        "QUIT", 4, &msg, &msg_len),
                    WS_FRAG_ORPHAN);
-  assert_close_sent(1002);
+  assert_close_at_flush(&cli, 1002);
 
   setup_client(&cli, &con);
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "a", 1,
@@ -909,7 +956,7 @@ static void test_frag_orphan_sends_1002(void **state)
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 0,
                                        "c", 1, &msg, &msg_len),
                    WS_FRAG_ORPHAN);
-  assert_close_sent(1002);
+  assert_close_at_flush(&cli, 1002);
 }
 
 /* §8.1: a reassembled TEXT message that is not UTF-8 is answered with
@@ -941,15 +988,16 @@ static void test_frag_badutf8_sends_1007(void **state)
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
                                        "", 0, &msg, &msg_len),
                    WS_FRAG_BADUTF8);
-  assert_close_sent(1007);
+  assert_close_at_flush(&cli, 1007);
 }
 
 /* ========== One Close per connection (RFC 6455 §5.5.1) ========== */
 
 /* A refusal's coded Close is the only one: the farewell Close 1000 that
- * exit_client() sends every WebSocket client on the way out (and a
- * bouncer hold's, when the session holds) is dropped after it.  Before,
- * the client got the coded Close and then a 1000. */
+ * exit_client() sets for every WebSocket client on the way out (and a
+ * bouncer hold's, when the session holds) does not replace it, and a
+ * second flush sends nothing.  Before, the client got the coded Close
+ * and then a 1000. */
 static void test_close_once_after_refusal(void **state)
 {
   struct Client cli;
@@ -967,18 +1015,19 @@ static void test_close_once_after_refusal(void **state)
   assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
                                        "x", 1, &msg, &msg_len),
                    WS_FRAG_OVERFLOW);
+  websocket_set_close(&cli, 1000, "WebSocket fragment overflow"); /* exit_client() */
+  websocket_set_close(&cli, 1000, "held");                        /* a hold */
+  assert_close_at_flush(&cli, 1009);
+  websocket_close_flush(&cli);
   assert_int_equal(sent_count, 1);
-  websocket_send_close(&cli, 1000, "WebSocket fragment overflow"); /* exit_client() */
-  websocket_send_close(&cli, 1000, "held");                        /* a hold */
-  assert_int_equal(sent_count, 1);
-  assert_close_sent(1009);
 
   /* A refusal read_packet answers (a decode error) */
   setup_client(&cli, &con);
-  websocket_send_close(&cli, 1002, "Protocol error");
-  websocket_send_close(&cli, 1000, "WebSocket frame error");
+  websocket_set_close(&cli, 1002, "Protocol error");
+  websocket_set_close(&cli, 1000, "WebSocket frame error");
+  assert_close_at_flush(&cli, 1002);
+  websocket_close_flush(&cli);
   assert_int_equal(sent_count, 1);
-  assert_close_sent(1002);
 }
 
 /* A plain exit (a QUIT, a KILL, a hold) still sends its one Close. */
@@ -989,14 +1038,15 @@ static void test_close_once_normal_exit(void **state)
   (void)state;
 
   setup_client(&cli, &con);
-  websocket_send_close(&cli, 1000, "Quit: bye");
+  websocket_set_close(&cli, 1000, "Quit: bye");
+  assert_close_at_flush(&cli, 1000);
+  websocket_close_flush(&cli);
   assert_int_equal(sent_count, 1);
-  assert_close_sent(1000);
 }
 
 /* A client's Close is answered with one Close echoing its status, and
- * the farewell exit_client() (or a hold) sends after it is dropped.
- * Before, the client got the echo and then a 1000. */
+ * the farewell exit_client() (or a hold) sets after it does not replace
+ * it.  Before, the client got the echo and then a 1000. */
 static void test_close_once_client_initiated(void **state)
 {
   struct Client cli;
@@ -1006,20 +1056,168 @@ static void test_close_once_client_initiated(void **state)
 
   setup_client(&cli, &con);
   assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, status, 2), 0);
+  websocket_set_close(&cli, 1000, "WebSocket closed");
+  assert_close_at_flush(&cli, 1001);
+  websocket_close_flush(&cli);
   assert_int_equal(sent_count, 1);
-  assert_close_sent(1001);
-  websocket_send_close(&cli, 1000, "WebSocket closed");
-  assert_int_equal(sent_count, 1);
-  assert_close_sent(1001);
 
   /* A Close with no status is answered with an empty one, once. */
   setup_client(&cli, &con);
   assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, NULL, 0), 0);
+  websocket_set_close(&cli, 1000, "WebSocket closed");
+  assert_int_equal(sent_count, 0);
+  websocket_close_flush(&cli);
   assert_int_equal(sent_count, 1);
   assert_int_equal((unsigned char)sent_buf[0], WS_FIN | WS_OPCODE_CLOSE);
   assert_int_equal(sent_buf[1], 0);
-  websocket_send_close(&cli, 1000, "WebSocket closed");
+  websocket_close_flush(&cli);
   assert_int_equal(sent_count, 1);
+}
+
+/* A client's Close carrying status 0 or 1005 cannot be echoed: here 0
+ * means "no Close set" and 1005 an empty Close, and neither may be sent
+ * (RFC 6455 §7.4.1 keeps 1005 off the wire; 0 is no status at all).  A
+ * Close carrying one is a protocol error, answered with 1002.  Echoed
+ * through websocket_set_close(), a 0 set nothing: the client got the
+ * farewell 1000 that follows (with no farewell, no Close at all), and a
+ * 1005 got an empty Close. */
+static void test_close_echo_marker_codes_get_1002(void **state)
+{
+  static const char *bodies[] = { "\x00\x00", "\x03\xED" };  /* 0, 1005 */
+  struct Client cli;
+  struct Connection con;
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+    setup_client(&cli, &con);
+    assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, bodies[i], 2), 0);
+    websocket_set_close(&cli, 1000, "WebSocket closed");   /* exit_client() */
+    assert_close_at_flush(&cli, 1002);
+  }
+}
+
+/* ========== The ERROR line before the Close (RFC 6455 §5.5.1) ========== */
+
+/* Write 'i' (in order) is a data frame carrying 'text'. */
+static void assert_write_is_text(int i, const char *text)
+{
+  int tlen = (int)strlen(text);
+
+  assert_true(i < sent_count && i < SENT_LOG_MAX);
+  assert_int_equal(sent_log[i][0], WS_FIN | WS_OPCODE_TEXT);
+  assert_int_equal(sent_log[i][1], tlen);
+  assert_int_equal(sent_log_len[i], 2 + tlen);
+  assert_memory_equal(sent_log[i] + 2, text, tlen);
+}
+
+/* Write 'i' (in order) is a Close frame with status 'code' and, when
+ * 'reason' is not NULL, that reason. */
+static void assert_write_is_close(int i, int code, const char *reason)
+{
+  assert_true(i < sent_count && i < SENT_LOG_MAX);
+  assert_int_equal(sent_log[i][0], WS_FIN | WS_OPCODE_CLOSE);
+  assert_true(sent_log_len[i] >= 4);
+  assert_int_equal(sent_log[i][1], sent_log_len[i] - 2);
+  assert_int_equal((sent_log[i][2] << 8) | sent_log[i][3], code);
+  if (reason) {
+    assert_int_equal(sent_log_len[i] - 4, (int)strlen(reason));
+    assert_memory_equal(sent_log[i] + 4, reason, strlen(reason));
+  }
+}
+
+#define ERROR_LINE "ERROR :Closing Link: nick by test.server (%s)"
+
+/* After sending a Close an endpoint sends no data frame (§5.5.1).
+ * exit_client() queues "ERROR :Closing Link" for every local client, and
+ * web IRC clients show the quit reason from it, so it goes first: a
+ * refusal's coded Close waits on the connection until close_connection()
+ * flushes it, after the queued lines.  Before, the Close went out at once
+ * and the ERROR text frame followed it. */
+static void test_close_follows_error_on_refusal(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  char line[200];
+  (void)state;
+
+  fill_src();
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, frag_src,
+                                       WS_MAX_PAYLOAD, &msg, &msg_len),
+                   WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "x", 1, &msg, &msg_len),
+                   WS_FRAG_OVERFLOW);
+  assert_int_equal(sent_count, 0);               /* nothing on the wire yet */
+  /* exit_client(): the farewell, then the ERROR line it queues */
+  websocket_set_close(&cli, 1000, "WebSocket fragment overflow");
+  snprintf(line, sizeof(line), ERROR_LINE, "WebSocket fragment overflow");
+  queued_line = line;
+  assert_int_equal(sent_count, 0);
+  websocket_close_flush(&cli);                   /* close_connection() */
+  assert_int_equal(sent_count, 2);
+  assert_write_is_text(0, line);
+  assert_write_is_close(1, 1009, "Message too big");
+}
+
+/* A plain exit (a QUIT): the ERROR line, then the farewell Close 1000
+ * carrying the exit reason. */
+static void test_close_follows_error_on_exit(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char line[200];
+  (void)state;
+
+  setup_client(&cli, &con);
+  websocket_set_close(&cli, 1000, "Quit: bye");
+  snprintf(line, sizeof(line), ERROR_LINE, "Quit: bye");
+  queued_line = line;
+  assert_int_equal(sent_count, 0);
+  websocket_close_flush(&cli);
+  assert_int_equal(sent_count, 2);
+  assert_write_is_text(0, line);
+  assert_write_is_close(1, 1000, "Quit: bye");
+}
+
+/* A client's Close: the answer waits for the flush too, so the ERROR
+ * line exit_client() queues goes before it and nothing follows it. */
+static void test_close_follows_error_client_initiated(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char status[2] = { 0x03, (char)0xE9 };  /* 1001 going away */
+  char line[200];
+  (void)state;
+
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, status, 2), 0);
+  assert_int_equal(sent_count, 0);
+  websocket_set_close(&cli, 1000, "WebSocket closed");
+  snprintf(line, sizeof(line), ERROR_LINE, "WebSocket closed");
+  queued_line = line;
+  websocket_close_flush(&cli);
+  assert_int_equal(sent_count, 2);
+  assert_write_is_text(0, line);
+  assert_write_is_close(1, 1001, NULL);
+}
+
+/* A socket that died (a write error, EOF) is written to no more: the
+ * flush sends no Close. */
+static void test_close_not_sent_on_dead_socket(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  (void)state;
+
+  setup_client(&cli, &con);
+  websocket_set_close(&cli, 1000, "Write error: Broken pipe");
+  SetFlag(&cli, FLAG_DEADSOCKET);
+  websocket_close_flush(&cli);
+  assert_int_equal(sent_count, 0);
 }
 
 int main(void)
@@ -1059,6 +1257,11 @@ int main(void)
     cmocka_unit_test(test_close_once_after_refusal),
     cmocka_unit_test(test_close_once_normal_exit),
     cmocka_unit_test(test_close_once_client_initiated),
+    cmocka_unit_test(test_close_echo_marker_codes_get_1002),
+    cmocka_unit_test(test_close_follows_error_on_refusal),
+    cmocka_unit_test(test_close_follows_error_on_exit),
+    cmocka_unit_test(test_close_follows_error_client_initiated),
+    cmocka_unit_test(test_close_not_sent_on_dead_socket),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
