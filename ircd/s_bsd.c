@@ -830,8 +830,17 @@ void close_connection(struct Client *cptr)
     ServerStats->is_ni++;
 
   if (-1 < cli_fd(cptr)) {
+    /* The fd is closed here, once, and nothing touches its number after
+     * that.  Everything that writes to it -- the queued lines, the TLS
+     * close_notify, the FIN -- goes first.  The number is free the moment
+     * close() returns, and the next open() in any thread (a RocksDB flush,
+     * a log file) gets it: a write after the close lands in that file (on
+     * the bed a 24-byte close_notify corrupted an SST being flushed), a
+     * second close() closes that file under its owner. */
+    int fd = cli_fd(cptr);
+
     flush_connections(cptr);
-    LocalClientArray[cli_fd(cptr)] = 0;
+    LocalClientArray[fd] = 0;
 
     /* Drain any data sitting in the recv buffer before close.  Linux's
      * close() sends RST (not FIN) when there's unread data in the kernel
@@ -842,36 +851,31 @@ void close_connection(struct Client *cptr)
      * (transport error)" with no visible KILL or ERROR rendered. */
     {
       char drainbuf[1024];
-      while (recv(cli_fd(cptr), drainbuf, sizeof(drainbuf), MSG_DONTWAIT) > 0)
+      while (recv(fd, drainbuf, sizeof(drainbuf), MSG_DONTWAIT) > 0)
         ;
     }
 
-    /* Use shutdown() instead of close() to send FIN gracefully.
-     * close() on a socket with unread data in the recv buffer sends RST,
-     * which discards pending data at the remote end's recv buffer (on Linux).
-     * shutdown(SHUT_RDWR) sends FIN and silently ACKs any incoming data,
-     * preventing RST.  The actual close(fd) is deferred to the ET_DESTROY
-     * callback via socket_del(), giving remote clients time to read any
-     * queued messages (ERROR, MONITOR 731 notifications, etc.). */
-    shutdown(cli_fd(cptr), SHUT_RDWR);
-    close(cli_fd(cptr));
-    socket_del(&(cli_socket(cptr))); /* queue Socket struct destroy */
-    cli_fd(cptr) = -1;
-    /* Why inline close() despite the surrounding "deferred close" comment
-     * block above: cli_fd is a macro for cli_connect(cptr)->con_socket.s_fd,
-     * the SAME field client_sock_callback's ET_DESTROY branch
-     * (s_bsd.c:1536) reads to decide whether to close the deferred fd.
-     * Nulling cli_fd at the end of this if-block also wipes s_fd, so
-     * ET_DESTROY's `if (s_fd >= 0) close(...)` is always false — meaning
-     * every shutdown'd fd would leak until process exit (~3 FDs/sec/worker
-     * under bare connect/QUIT churn).  Upstream nefarious-upstream
-     * (s_bsd.c:462) keeps close() inline for exactly this reason; the
-     * deferred-close refactor in fork commit b4acfe2 dropped it and
-     * regressed.  shutdown(SHUT_RDWR) still gives the graceful FIN this
-     * code path wanted; close() then relinquishes the user-space fd while
-     * the kernel finishes the TCP teardown via the standard linger /
-     * TIME_WAIT machinery — the trailing ERROR/KILL bytes already in the
-     * send buffer drain normally. */
+#ifdef USE_SSL
+    /* The TLS close_notify, after the last line and before the FIN, while
+     * the fd is still ours (non-blocking, best effort).  The SSL object
+     * goes with it: its BIO caches the fd number, and an SSL left for the
+     * socket's ET_DESTROY wrote its close_notify there after the close --
+     * into whatever had reused the number. */
+    ssl_free(&(cli_socket(cptr)));
+#endif /* USE_SSL */
+
+    /* shutdown(SHUT_RDWR) sends the FIN and silently ACKs any data still
+     * arriving, so the close() below does not turn it into an RST that
+     * would discard what the peer has not read yet. */
+    shutdown(fd, SHUT_RDWR);
+
+    /* Unregister from the engine while fd is still open (epoll_ctl DEL on
+     * a valid fd), and leave the socket no fd: socket_del_keepfd() sets
+     * s_fd -- which is cli_fd -- to -1 before the ET_DESTROY, synchronous
+     * here or deferred to the end of the running callback, so the
+     * ET_DESTROY never closes it a second time.  Then the one close. */
+    socket_del_keepfd(&(cli_socket(cptr)));
+    close(fd);
   }
   SetFlag(cptr, FLAG_DEADSOCKET);
 
@@ -1079,8 +1083,16 @@ void add_connection(struct Listener* listener, int fd) {
     cli_socket(new_client).ssl = ssl;
     SetSSLNeedAccept(new_client);
     if (!ssl_accept(new_client)) {
-      socket_del(&(cli_socket(new_client)));
+      /* ssl_accept() freed the SSL (no alert on a failed handshake).  The
+       * socket is unregistered with the fd still open and given no fd
+       * (socket_del_keepfd), so its ET_DESTROY -- synchronous here, the
+       * socket is not in a callback -- does not close it; ssl_murder()
+       * then writes the ERROR, shuts down and closes the fd, once.  A
+       * plain socket_del() closed it in the ET_DESTROY first, and the
+       * murder wrote, shut down and closed a number another thread could
+       * already have reopened. */
       cli_socket(new_client).ssl = NULL;
+      socket_del_keepfd(&(cli_socket(new_client)));
       ssl_murder(NULL, fd, sslerr_message);
       cli_fd(new_client) = -1;
       return;
@@ -1826,14 +1838,17 @@ void client_sock_callback(struct Event* ev)
     con = (struct Connection*) s_data(ev_socket(ev));
     s_data(ev_socket(ev)) = NULL;  /* Claim it - subsequent events see NULL */
     if (!con) {
-      /* Still need to close the deferred fd even if connection was already claimed */
+      /* Still need to release a socket that still owns its fd even if the
+       * connection was already claimed: the SSL first (its close_notify
+       * needs the open fd; ssl_free sends none once s_fd is -1), then the
+       * one close. */
+#ifdef USE_SSL
+      ssl_free(ev_socket(ev));
+#endif
       if (s_fd(ev_socket(ev)) >= 0) {
         close(s_fd(ev_socket(ev)));
         s_fd(ev_socket(ev)) = -1;
       }
-#ifdef USE_SSL
-      ssl_free(ev_socket(ev));
-#endif
       return;  /* Already claimed by earlier event or intentionally NULL */
     }
   } else {
@@ -1855,19 +1870,26 @@ void client_sock_callback(struct Event* ev)
   case ET_DESTROY:
     con_freeflag(con) &= ~FREEFLAG_SOCKET;
 
-    /* Deferred close: close_connection() used shutdown() instead of close()
-     * to avoid RST.  Now actually release the file descriptor. */
+#ifdef USE_SSL
+    /* Free SSL BEFORE potentially freeing the Connection, because the
+     * Socket struct is embedded inside Connection.  Reversing the order
+     * would read/write freed memory (use-after-free).  And before the
+     * close below: its close_notify goes to the fd while it is still
+     * open.  A socket close_connection() released has no fd (s_fd -1) and
+     * no SSL by now; ssl_free never writes once s_fd is -1. */
+    ssl_free(ev_socket(ev));
+#endif /* USE_SSL */
+
+    /* A socket that still owns its fd (s_fd >= 0: freed without
+     * close_connection(), e.g. a local alias's direct free) is closed
+     * here, once.  close_connection() and the bouncer revive hand the
+     * socket over with s_fd -1 (socket_del_keepfd), and closed or moved
+     * the fd themselves. */
     if (s_fd(ev_socket(ev)) >= 0) {
       close(s_fd(ev_socket(ev)));
       s_fd(ev_socket(ev)) = -1;
     }
 
-#ifdef USE_SSL
-    /* Free SSL BEFORE potentially freeing the Connection, because the
-     * Socket struct is embedded inside Connection.  Reversing the order
-     * would read/write freed memory (use-after-free). */
-    ssl_free(ev_socket(ev));
-#endif /* USE_SSL */
     if (!con_freeflag(con) && !cptr)
       free_connection(con);
     break;

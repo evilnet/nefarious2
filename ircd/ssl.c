@@ -1000,8 +1000,15 @@ void ssl_free(struct Socket *socketh)
    * trips subsequent SSL_accept calls on the same listener with
    * "Internal OpenSSL error or protocol error" — silently breaking
    * server-link reconnects after a SQUIT cascade tears down a mid-
-   * handshake session. */
-  if (SSL_is_init_finished(socketh->ssl))
+   * handshake session.
+   *
+   * Only while the socket still owns its fd (s_fd >= 0).  The SSL's BIO
+   * writes to the fd NUMBER it was given; once the socket has let the fd
+   * go (s_fd -1: closed, or handed elsewhere), that number may already
+   * belong to a file another thread opened, and the close_notify would be
+   * written into it.  close_connection() calls this before it closes the
+   * fd; later the SSL is freed without a word (SSL_free sends nothing). */
+  if (socketh->s_fd >= 0 && SSL_is_init_finished(socketh->ssl))
     ssl_smart_shutdown(socketh->ssl);
   SSL_free(socketh->ssl);
   socketh->ssl = NULL;
@@ -1145,10 +1152,11 @@ int ssl_smart_shutdown(SSL *ssl)
             break;
     }
 
-    /* A teardown routinely fails, and the failure stays queued: ssl_free
-     * runs after close_connection() closed the fd (EBADF), and a peer that
-     * closed without its close_notify gives "unexpected eof while reading".
-     * Leave nothing for the next connection's SSL_get_error(). */
+    /* A teardown routinely fails, and the failure stays queued: a peer
+     * that already reset the connection (EPIPE / ECONNRESET), the second
+     * SSL_shutdown's read on a non-blocking socket, or a peer that closed
+     * without its close_notify ("unexpected eof while reading").  Leave
+     * nothing for the next connection's SSL_get_error(). */
     ssl_clear_errors("after SSL_shutdown");
     return rc;
 }
