@@ -493,16 +493,18 @@ void db_env_close(struct db_env *env)
   MyFree(env);
 }
 
+/* A durable sync is an fsync of the WAL: every write has gone to it
+ * (write()n, not fsynced, under wopts_normal) before rocksdb_write
+ * returned, for every CF.  This used to be rocksdb_flush() -- a memtable
+ * flush of the DEFAULT CF only, waiting out any write stall, which left
+ * the other CFs' writes as unsynced as before (history_shutdown()'s "final
+ * sync" fsynced nothing on the bed). */
 int db_env_sync(struct db_env *env)
 {
   char *err = NULL;
-  rocksdb_flushoptions_t *fopts;
   if (!env || !env->db)
     return DB_ERR_OTHER;
-  fopts = rocksdb_flushoptions_create();
-  rocksdb_flushoptions_set_wait(fopts, 1);
-  rocksdb_flush(env->db, fopts, &err);
-  rocksdb_flushoptions_destroy(fopts);
+  rocksdb_flush_wal(env->db, 1, &err);
   if (err) {
     int rc = translate_errptr(err);
     env_record_error(env, "flush", err);

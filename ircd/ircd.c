@@ -424,6 +424,56 @@ int is_client_tag_denied(const char *tag, size_t tag_len)
 }
 
 /*----------------------------------------------------------------------------
+ * Shutdown: everything that owns a descriptor lets go before
+ * close_connections() closes them by number.
+ *--------------------------------------------------------------------------*/
+/** Close every store.
+ *
+ * close_connections() closes 3..MAXCONNECTIONS without asking who owns a
+ * number.  A RocksDB env still open there keeps its WAL, MANIFEST, info LOG,
+ * LOCK and SST descriptors in its own records, and its background threads
+ * (flush, compaction, the stats dump) keep using them: a flush or
+ * compaction running past the close loop writes to a number that is free,
+ * or -- after any open() in the process -- someone else's file, the
+ * corruption class of the TLS close_notify (4b658482).  The history and
+ * webpush stores were never closed here (history_shutdown() had no caller):
+ * the close loop took their descriptors, and their threads lived on until
+ * exit() or execv().
+ *
+ * rocksdb_close() cancels its env's background work and waits for what is
+ * running -- a compaction stops at its next key, a running flush finishes,
+ * bounded by the write buffer -- and closes its own files.  The shared
+ * pool threads then sit idle until exit or exec and hold no descriptor.
+ */
+static void shutdown_stores(void)
+{
+  stop_listeners();          /* refuse new connections before the slow part */
+  bounce_db_shutdown();      /* persist bouncer sessions (metadata env) */
+  history_shutdown();        /* history, multiline content, presence state:
+                              * the presence CF lives on the metadata env,
+                              * so this goes first */
+  webpush_store_shutdown();
+  metadata_shutdown();       /* metadata, read markers, bouncer sessions,
+                              * presence records */
+}
+
+/** Stop the threads that write to log and pipe descriptors, then close the
+ * logs for good.  Producers before the consumer: the crypt workers (which
+ * log, and signal the main loop through a pipe) are joined first, then the
+ * async log writer drains its queue and exits -- a worker logging after
+ * the writer stopped would lock its destroyed mutex.  log_shutdown() keeps
+ * the logs shut through close_connections() and whatever the dying event
+ * batch still runs after server_die() returns: a log line there would
+ * reopen its file on a number just closed (0, 1, 2, or one a client still
+ * holds). */
+static void shutdown_writers(void)
+{
+  thread_pool_shutdown();
+  log_async_shutdown();
+  log_shutdown();
+}
+
+/*----------------------------------------------------------------------------
  * API: server_die
  *--------------------------------------------------------------------------*/
 /** Terminate the server with a message.
@@ -433,10 +483,9 @@ void server_die(const char *message)
 {
   /* log_write will send out message to both log file and as server notice */
   log_write(LS_SYSTEM, L_CRIT, 0, "Server terminating: %s", message);
-  stop_listeners();      /* refuse new connections before the slow part */
-  bounce_db_shutdown();  /* Persist bouncer sessions before closing connections */
-  metadata_shutdown();   /* close the metadata/readmarkers RocksDB env */
+  shutdown_stores();
   flush_connections(0);
+  shutdown_writers();
   close_connections(1);
   running = 0;
 }
@@ -453,8 +502,15 @@ void server_panic(const char *message)
   log_write(LS_SYSTEM, L_CRIT, LOG_NOSNOTICE, "Server panic: %s", message);
   flush_connections(0);
   log_close();
-  close_connections(1);
-  exit(1);
+  /* No close_connections() and no exit(): the stores cannot be closed here
+   * (a store close allocates, and we are out of memory), and closing their
+   * descriptors by number under their live background threads -- or
+   * running exit()'s static destructors, which tear RocksDB down -- would
+   * hand a WAL or SST number to the next open.  _exit() leaves every
+   * descriptor to the kernel, which closes them only once the last thread
+   * is gone: nothing can reuse a number.  Every committed write is already
+   * in the WAL. */
+  _exit(1);
 }
 
 /*----------------------------------------------------------------------------
@@ -475,14 +531,9 @@ void server_restart(const char *message)
 
   sendto_opmask_butone(0, SNO_OLDSNO, "Restarting server: %s", message);
   Debug((DEBUG_NOTICE, "Restarting server..."));
-  stop_listeners();      /* refuse new connections before the slow part */
-  bounce_db_shutdown();  /* Persist bouncer sessions before closing connections */
-  metadata_shutdown();   /* close the metadata/readmarkers RocksDB env */
+  shutdown_stores();
   flush_connections(0);
-
-  log_async_shutdown();  /* Flush pending log entries before shutdown */
-  thread_pool_shutdown();
-  log_close();
+  shutdown_writers();
 
   close_connections(!(thisServer.bootopt & (BOOT_TTY | BOOT_DEBUG | BOOT_CHKCONF)));
 
@@ -490,8 +541,14 @@ void server_restart(const char *message)
 
   execv(SPATH, thisServer.argv);
 
-  /* Have to reopen since it has been closed above */
-  log_reopen();
+  /* Have to reopen since it has been closed above (keeping execv's errno
+   * for the %m below) */
+  {
+    int err = errno;
+
+    log_resume();
+    errno = err;
+  }
 
   log_write(LS_SYSTEM, L_CRIT, 0, "execv(%s,%s) failed: %m", SPATH,
 	    *thisServer.argv);

@@ -11,6 +11,14 @@
  * log_async_flush() returned as soon as the queue was empty -- which it
  * is while the writer is still writing the last line it took.
  *
+ * And at shutdown the logs stay shut.  server_die() closes them, then
+ * close_connections() closes every descriptor by number, and the rest of
+ * the dying event batch still runs: a log line there reopened its file on
+ * the lowest free number -- 0, 1, 2, then numbers clients still hold --
+ * where Debug output (fd 2) and a stale client teardown would follow it.
+ * log_shutdown() closes the logs for good; only log_resume() (a failed
+ * restart's execv) opens them again.
+ *
  * This links the real ircd_log.o and ircd_log_async.o, with the writer
  * thread's write() wrapped (-Wl,--wrap=write): a gate holds a write until
  * the test opens it, so a case can close a descriptor with a write in
@@ -226,6 +234,10 @@ static int case_teardown(void **state)
   (void)state;
   gate_open();
   log_async_shutdown();
+  log_resume();                 /* a case that failed while shut */
+  log_close();                  /* and the syslog socket log_resume()
+                                 * opened: each case starts with the same
+                                 * free descriptor numbers */
   log_set_file("SYSTEM", NULL);
   unlink(log_path);
   return 0;
@@ -347,6 +359,38 @@ static void shutdown_writes_the_queue(void **state)
   assert_int_equal(writes_completed(), 5);
 }
 
+/** After log_shutdown() nothing reopens a log -- not a log line, not a
+ * REHASH's log_reopen(); log_resume() does. */
+static void no_log_reopens_after_shutdown(void **state)
+{
+  off_t size;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "before");
+  log_async_flush();
+  size = path_size(log_path);
+  assert_true(size > 0);
+
+  log_shutdown();
+  assert_int_equal(log_fd(), -1);
+
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "while shut");
+  log_async_flush();
+  assert_int_equal(log_fd(), -1);
+  log_reopen();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "after reopen");
+  log_async_flush();
+  assert_int_equal(log_fd(), -1);
+  assert_int_equal(path_size(log_path), size);
+
+  log_resume();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "resumed");
+  log_async_flush();
+  assert_true(log_fd() >= 0);
+  assert_true(path_size(log_path) > size);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -357,6 +401,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(log_file_destroy_drains_before_it_closes,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(shutdown_writes_the_queue,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(no_log_reopens_after_shutdown,
                                     case_setup, case_teardown),
   };
 

@@ -186,7 +186,8 @@ static struct {
   int		  facility; /**< default facility */
   const char	 *procname; /**< process's name */
   struct LogFile *dbfile;   /**< debug file */
-} logInfo = { 0, 0, LOG_USER, "ircd", 0 };
+  int             shut;     /**< closed for good (log_shutdown()) */
+} logInfo = { 0, 0, LOG_USER, "ircd", 0, 0 };
 
 /** Helper routine to open a log file if needed.
  * If the log file is already open, do nothing.
@@ -195,8 +196,9 @@ static struct {
 static void
 log_open(struct LogFile *lf)
 {
-  /* only open the file if we haven't already */
-  if (lf && lf->fd < 0) {
+  /* only open the file if we haven't already, and never after
+   * log_shutdown() */
+  if (lf && lf->fd < 0 && !logInfo.shut) {
     lf->fd = open(lf->file, O_WRONLY | O_CREAT | O_APPEND,
 		  S_IRUSR | S_IWUSR);
   }
@@ -208,7 +210,7 @@ log_open(struct LogFile *lf)
 static void
 log_debug_reopen(void)
 {
-  if (!logInfo.dbfile) /* no open debugging file */
+  if (!logInfo.dbfile || logInfo.shut) /* no debugging file, or shut */
     return;
 
   if (!logInfo.dbfile->file) { /* using terminal output */
@@ -305,11 +307,14 @@ log_init(const char *process_name)
   openlog(logInfo.procname, LOG_PID | LOG_NDELAY, logInfo.facility);
 }
 
-/** Reopen log files (so admins can do things like rotate log files). */
+/** Reopen log files (so admins can do things like rotate log files).
+ * After log_shutdown() it only closes: see log_resume(). */
 void
 log_reopen(void)
 {
   log_close(); /* close everything...we reopen on demand */
+  if (logInfo.shut)
+    return;
 
 #ifdef DEBUGMODE
   log_debug_reopen(); /* reopen debugging log if necessary */
@@ -349,6 +354,35 @@ log_close(void)
 
     logInfo.dbfile->fd = -1;
   }
+}
+
+/** Close the logs for good: the process is going away.
+ *
+ * server_die() and server_restart() call this just before
+ * close_connections() closes every descriptor by number, and after
+ * server_die() the rest of the dying event batch still runs.  A log line
+ * there used to reopen its file on the lowest free number -- 0, 1 and 2
+ * first, then numbers that clients not yet torn down still hold -- and
+ * Debug output (fd 2) or such a client's teardown then wrote into the log.
+ * From here on a log line goes nowhere but to server notices: nothing is
+ * written to a log file (nor to the tty debug log's fd 2, which DIE has
+ * closed), no file is opened, syslog is not reconnected, and log_reopen()
+ * (a REHASH in the same batch) only closes.
+ */
+void
+log_shutdown(void)
+{
+  log_close();
+  logInfo.shut = 1;
+}
+
+/** Undo log_shutdown() and reopen the logs: server_restart() when its
+ * execv() failed, to log why. */
+void
+log_resume(void)
+{
+  logInfo.shut = 0;
+  log_reopen();
 }
 
 /** Write a logging entry.
@@ -425,14 +459,16 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   if (severity > desc->level)
     return;
 
-  /* figure out where all we need to log */
-  if (!(flags & LOG_NOFILELOG) && desc->file) {
+  /* figure out where all we need to log; after log_shutdown() nowhere but
+   * server notices (the tty debug log's fd 2 may be closed by now too) */
+  if (!(flags & LOG_NOFILELOG) && desc->file && !logInfo.shut) {
     log_open(desc->file);
     if (desc->file->fd >= 0) /* don't log to file if we can't open the file */
       flags |= LOG_DOFILELOG;
   }
 
-  if (!(flags & LOG_NOSYSLOG) && desc->facility >= 0)
+  /* (syslog() would reconnect the socket log_shutdown() closed) */
+  if (!(flags & LOG_NOSYSLOG) && desc->facility >= 0 && !logInfo.shut)
     flags |= LOG_DOSYSLOG; /* will syslog */
 
   if (!(flags & LOG_NOSNOTICE) && (desc->snomask != 0 || ldata->snomask != 0))

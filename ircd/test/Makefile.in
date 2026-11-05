@@ -421,7 +421,8 @@ paste_listener_cmocka: $(PASTE_LISTENER_CMOCKA_OBJS)
 
 # log_async tests - the async log writer never writes to a descriptor the
 # log has closed: log_close() and log_file_destroy() drain the queue first,
-# and log_async_flush() waits for the write in flight.  Links the real
+# and log_async_flush() waits for the write in flight; and after
+# log_shutdown() nothing reopens a log until log_resume().  Links the real
 # ircd_log.o and ircd_log_async.o; the writer thread's write() is wrapped
 # (--wrap=write) behind a gate the cases open, to hold a write in flight.
 LOG_ASYNC_CMOCKA_OBJS = log_async_cmocka.o ../ircd_log.o ../ircd_log_async.o \

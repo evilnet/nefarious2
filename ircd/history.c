@@ -630,7 +630,10 @@ void history_shutdown(void)
   if (!history_available)
     return;
 
-  /* Force sync before shutdown if NOSYNC mode was used */
+  /* NOSYNC writes reach the WAL unsynced, and closing the env does not
+   * fsync it: sync the WAL once (db_env_sync), so what was written before
+   * the stop survives a host crash right after it.  The close itself
+   * loses nothing either way -- the next open replays the WAL. */
   if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
     log_write(LS_SYSTEM, L_INFO, 0, "history: final sync before shutdown");
     db_env_sync(history_db_env);
@@ -3749,9 +3752,8 @@ int history_message_is_redacted(const char *target, const char *msgid)
  */
 /* Read marker functions removed - now in metadata.c (metadata_readmarker_get/set) */
 
-/** \brief Force sync/flush the history database to disk.
- * Backend-agnostic — db_env_sync dispatches to mdbx_env_sync_ex or
- * rocksdb_flush_wal as appropriate.
+/** \brief Force a durable sync of the history database (db_env_sync:
+ * an fsync of the RocksDB WAL).
  * \return 0 on success, -1 on error */
 int
 history_sync(void)
