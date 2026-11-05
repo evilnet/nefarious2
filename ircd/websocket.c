@@ -1024,8 +1024,10 @@ int websocket_frag_feed(struct Client *cptr, int opcode, int is_fin,
   cli_ws_frag_opcode(cptr) = 0;
 
   /* RFC 6455 Section 8.1: text frames must be valid UTF-8; §7.4.1 names
-   * the Close status for data that does not match its type */
-  if (opcode == WS_OPCODE_TEXT && !string_is_valid_utf8(buf)) {
+   * the Close status for data that does not match its type.  The whole
+   * message: a U+0000 in it is a character, and a check of the C string
+   * stopped there. */
+  if (opcode == WS_OPCODE_TEXT && !string_is_valid_utf8_len(buf, *msg_len)) {
     websocket_set_close(cptr, 1007, "Invalid UTF-8");
     return WS_FRAG_BADUTF8;
   }

@@ -1618,10 +1618,16 @@ ssl_read_again:
                * Sanitize invalid sequences to U+FFFD. */
               if (opcode == WS_OPCODE_TEXT) {
                 ws_payload[ws_len] = '\0';
-                if (!string_is_valid_utf8(ws_payload)) {
+                /* The whole payload: a U+0000 in it is a character, and
+                 * a check of the C string stopped there. */
+                if (!string_is_valid_utf8_len(ws_payload, ws_len)) {
+                  /* string_sanitize_utf8() reads the C string too: it
+                   * returns the length up to the first NUL, or -1 when
+                   * nothing before it needed a change.  What follows the
+                   * NUL it never saw, so it is not delivered (the parser
+                   * ends the line at a NUL anyway). */
                   int new_len = string_sanitize_utf8(ws_payload);
-                  if (new_len > 0)
-                    ws_len = new_len;
+                  ws_len = new_len >= 0 ? new_len : (int)strlen(ws_payload);
                 }
               }
               if ((ret = ws_deliver(cptr, ws_payload, ws_len)) != 1)

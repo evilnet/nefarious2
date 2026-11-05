@@ -761,6 +761,7 @@ static void test_utf8_invalid_sequences(void **state)
   assert_int_equal(0, string_is_valid_utf8("\300\200"));             /* overlong NUL */
   assert_int_equal(0, string_is_valid_utf8("\301\277"));             /* overlong */
   assert_int_equal(0, string_is_valid_utf8("\340\200\200"));         /* overlong 3-byte */
+  assert_int_equal(0, string_is_valid_utf8("\360\200\200\200"));     /* overlong 4-byte */
   assert_int_equal(0, string_is_valid_utf8("\355\240\200"));         /* U+D800 surrogate */
   assert_int_equal(0, string_is_valid_utf8("\342\202"));             /* truncated 3-byte */
   assert_int_equal(0, string_is_valid_utf8("\364\220\200\200"));     /* > U+10FFFF */
@@ -856,6 +857,49 @@ static void test_utf8_sanitize_truncates_at_a_sequence_boundary(void **state)
   assert_true(n < BUFSIZE);
   assert_int_equal(n, (int)strlen(buf));
   assert_int_equal(1, string_is_valid_utf8(buf));
+}
+
+/* string_is_valid_utf8_len() checks exactly 'len' bytes, a U+0000 among
+ * them: a WebSocket TEXT payload or a Close reason is counted bytes, not
+ * a C string.  Checked as a C string, everything after the NUL went
+ * unseen (RFC 6455 §8.1 asks about the whole message). */
+static void test_utf8_valid_len_runs_past_nul(void **state)
+{
+  (void)state;
+  assert_int_equal(1, string_is_valid_utf8_len("ok\0fine", 7));
+  assert_int_equal(1, string_is_valid_utf8_len("\0", 1));
+  assert_int_equal(1, string_is_valid_utf8_len("caf\303\251\0\342\202\254", 10));
+  assert_int_equal(0, string_is_valid_utf8_len("ok\0\377", 4));         /* bad byte past the NUL */
+  assert_int_equal(0, string_is_valid_utf8_len("ok\0\303", 4));         /* truncated past the NUL */
+  assert_int_equal(0, string_is_valid_utf8_len("\0\0\355\240\200", 5)); /* surrogate past NULs */
+  assert_int_equal(0, string_is_valid_utf8_len("\0\360\200\200\200", 5)); /* overlong 4-byte past a NUL */
+}
+
+/* ...and no byte past 'len': a sequence the length cuts is invalid even
+ * when the bytes after it would complete it. */
+static void test_utf8_valid_len_stops_at_len(void **state)
+{
+  (void)state;
+  assert_int_equal(1, string_is_valid_utf8_len("", 0));
+  assert_int_equal(1, string_is_valid_utf8_len("\377", 0));               /* nothing to check */
+  assert_int_equal(1, string_is_valid_utf8_len("ab\377", 2));
+  assert_int_equal(0, string_is_valid_utf8_len("\342\202\254", 2));      /* U+20AC cut short */
+  assert_int_equal(0, string_is_valid_utf8_len("\360\237\222\251", 3)); /* U+1F4A9 cut short */
+  assert_int_equal(0, string_is_valid_utf8_len("x\303\251", 2));          /* U+00E9 cut short */
+  assert_int_equal(1, string_is_valid_utf8_len("\360\237\222\251", 4));
+
+  /* On the heap with no byte to spare, a read past the end is valgrind's */
+  {
+    static const unsigned char cut[] = { 'o', 'k', 0x00, 0xF0, 0x9F, 0x92 };
+    unsigned char *heap = malloc(sizeof(cut));
+    size_t n;
+
+    assert_non_null(heap);
+    memcpy(heap, cut, sizeof(cut));
+    for (n = 0; n <= sizeof(cut); n++)
+      assert_int_equal(n <= 3, string_is_valid_utf8_len((char *)heap, n));
+    free(heap);
+  }
 }
 
 
@@ -1010,6 +1054,8 @@ int main(void)
         cmocka_unit_test(test_utf8_sanitize_keeps_formatted_line_intact),
         cmocka_unit_test(test_utf8_sanitize_returns_minus_one_past_its_window),
         cmocka_unit_test(test_utf8_sanitize_truncates_at_a_sequence_boundary),
+        cmocka_unit_test(test_utf8_valid_len_runs_past_nul),
+        cmocka_unit_test(test_utf8_valid_len_stops_at_len),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

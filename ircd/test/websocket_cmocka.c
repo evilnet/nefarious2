@@ -26,7 +26,7 @@
  *     frame inside a fragmented message and an orphan continuation with
  *     Close 1002 (§5.4), a reassembled TEXT message that is not UTF-8
  *     with Close 1007 (§8.1), and a reassembly past WS_MAX_PAYLOAD with
- *     Close 1009.
+ *     Close 1009.  The UTF-8 check covers the whole message, past a NUL.
  *
  * websocket.c is included directly (like ircd_cloaking_cmocka.c) with
  * stubs for feature_str(), ircd_snprintf(), os_send_nonb() and
@@ -991,6 +991,48 @@ static void test_frag_badutf8_sends_1007(void **state)
   assert_close_at_flush(&cli, 1007);
 }
 
+/* §8.1 asks about the whole reassembled TEXT message, and U+0000 is a
+ * character like any other: a NUL inside it ends nothing.  The check of
+ * the message as a C string stopped at the NUL, so a bad byte after one
+ * was delivered; it is answered with Close 1007 like one before it. */
+static void test_frag_text_nul_then_badutf8_sends_1007(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char *msg = NULL;
+  int msg_len = -1;
+  (void)state;
+
+  /* A NUL in valid UTF-8 is fine: the whole message is handed back */
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "PING :a\0", 8,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "\303\251", 2, &msg, &msg_len),
+                   WS_FRAG_DONE);
+  assert_int_equal(msg_len, 10);
+  assert_memory_equal(msg, "PING :a\0\303\251", 10);
+  assert_int_equal(sent_count, 0);
+
+  /* A bad byte after the NUL is refused */
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "PING :a\0", 8,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "\377", 1, &msg, &msg_len),
+                   WS_FRAG_BADUTF8);
+  assert_close_at_flush(&cli, 1007);
+
+  /* ...and so is a sequence the NUL cuts short */
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_TEXT, 0, "PING :\303", 7,
+                                       &msg, &msg_len), WS_FRAG_MORE);
+  assert_int_equal(websocket_frag_feed(&cli, WS_OPCODE_CONTINUATION, 1,
+                                       "\0", 1, &msg, &msg_len),
+                   WS_FRAG_BADUTF8);
+  assert_close_at_flush(&cli, 1007);
+}
+
 /* ========== One Close per connection (RFC 6455 §5.5.1) ========== */
 
 /* A refusal's coded Close is the only one: the farewell Close 1000 that
@@ -1254,6 +1296,7 @@ int main(void)
     cmocka_unit_test(test_frag_overflow_sends_1009),
     cmocka_unit_test(test_frag_orphan_sends_1002),
     cmocka_unit_test(test_frag_badutf8_sends_1007),
+    cmocka_unit_test(test_frag_text_nul_then_badutf8_sends_1007),
     cmocka_unit_test(test_close_once_after_refusal),
     cmocka_unit_test(test_close_once_normal_exit),
     cmocka_unit_test(test_close_once_client_initiated),

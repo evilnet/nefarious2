@@ -69,6 +69,9 @@ int string_has_wildcards(const char* str)
  * control bytes, and rejecting them here would strip them from every message.
  * A caller that wants printable-only text must check for that separately.
  *
+ * The string ends at its NUL.  For counted bytes that may hold a U+0000
+ * (a WebSocket payload), use string_is_valid_utf8_len().
+ *
  * @param str The string to check.
  * @return 1 if the string is valid UTF-8, 0 otherwise.
  */
@@ -76,13 +79,33 @@ int string_is_valid_utf8(const char * str)
 {
     assert(str != NULL);
 
+    return string_is_valid_utf8_len(str, strlen(str));
+}
 
+/**
+ * Check if \a len bytes are valid UTF-8, as string_is_valid_utf8() checks
+ * a string.  A NUL byte is U+0000, a valid one-byte sequence, and ends
+ * nothing: every byte up to \a len is checked, and none after it is read,
+ * so a sequence that \a len cuts short is invalid.
+ *
+ * @param str The bytes to check.
+ * @param len How many.
+ * @return 1 if they are valid UTF-8, 0 otherwise.
+ */
+int string_is_valid_utf8_len(const char * str, size_t len)
+{
     const unsigned char * bytes = (const unsigned char *)str;
-    while(*bytes)
+    const unsigned char * end;
+
+    assert(str != NULL || len == 0);
+    end = bytes + len;
+
+    while (bytes < end)
     {
-        if( (// ASCII: every byte 0x01-0x7F is a well-formed single-byte
-             // sequence, C0 control characters included.  0x00 cannot occur
-             // here -- it terminates the string and ends the loop above.
+        size_t left = (size_t)(end - bytes);
+
+        if( (// ASCII: every byte 0x00-0x7F is a well-formed single-byte
+             // sequence, C0 control characters (and U+0000) included.
                 bytes[0] <= 0x7F
             )
         ) {
@@ -90,7 +113,8 @@ int string_is_valid_utf8(const char * str)
             continue;
         }
 
-        if( (// non-overlong 2-byte
+        if( left >= 2 &&
+            (// non-overlong 2-byte
                 (0xC2 <= bytes[0] && bytes[0] <= 0xDF) &&
                 (0x80 <= bytes[1] && bytes[1] <= 0xBF)
             )
@@ -99,7 +123,8 @@ int string_is_valid_utf8(const char * str)
             continue;
         }
 
-        if( (// excluding overlongs
+        if( left >= 3 && (
+            (// excluding overlongs
                 bytes[0] == 0xE0 &&
                 (0xA0 <= bytes[1] && bytes[1] <= 0xBF) &&
                 (0x80 <= bytes[2] && bytes[2] <= 0xBF)
@@ -115,13 +140,14 @@ int string_is_valid_utf8(const char * str)
                 bytes[0] == 0xED &&
                 (0x80 <= bytes[1] && bytes[1] <= 0x9F) &&
                 (0x80 <= bytes[2] && bytes[2] <= 0xBF)
-            )
+            ))
         ) {
             bytes += 3;
             continue;
         }
 
-        if( (// planes 1-3
+        if( left >= 4 && (
+            (// planes 1-3
                 bytes[0] == 0xF0 &&
                 (0x90 <= bytes[1] && bytes[1] <= 0xBF) &&
                 (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
@@ -137,8 +163,8 @@ int string_is_valid_utf8(const char * str)
                 bytes[0] == 0xF4 &&
                 (0x80 <= bytes[1] && bytes[1] <= 0x8F) &&
                 (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
-           		(0x80 <= bytes[3] && bytes[3] <= 0xBF)
-            )
+                (0x80 <= bytes[3] && bytes[3] <= 0xBF)
+            ))
         ) {
             bytes += 4;
             continue;
