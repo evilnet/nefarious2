@@ -723,6 +723,15 @@ const char* ircd_utf8_strcasestr(const char* hay, const char* needle)
   if (!*needle)
     return hay;
   first = utf8_fold_next(&rest);
+  if (first < 0x80) {
+    /* An ASCII unit only ever equals an ASCII byte, and no sequence holds
+     * one, so bytes will do until one matches. */
+    for (; *hay; hay++)
+      if ((unsigned char)ToLower((unsigned char)*hay) == first
+          && utf8_folded_prefix(hay + 1, rest))
+        return hay;
+    return NULL;
+  }
   while (*hay) {
     const char *start = hay;
 

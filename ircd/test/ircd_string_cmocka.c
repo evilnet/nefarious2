@@ -1028,6 +1028,17 @@ static void test_utf8_strcasestr_folds_scripts(void **state)
   assert_finds("\xCF\x82", "\xCF\x83");                                  /* final sigma */
   assert_finds("\xD4\xB1", "\xD5\xA1");                                  /* Armenian */
   assert_finds("\xC5\xB8", "\xC3\xBF");                                  /* Y diaeresis */
+  assert_finds("\xD0\x81", "\xD1\x91");                                  /* Cyrillic Io, +80 */
+  assert_finds("\xD0\x8F", "\xD1\x9F");                                  /* Cyrillic Dzhe, +80 */
+  assert_finds("\xCE\x86", "\xCE\xAC");                                  /* Greek alpha tonos, +38 */
+  assert_finds("\xCE\x88", "\xCE\xAD");                                  /* Greek epsilon tonos, +37 */
+  assert_finds("\xCE\x8C", "\xCF\x8C");                                  /* Greek omicron tonos, +64 */
+  assert_finds("\xCE\x8E", "\xCF\x8D");                                  /* Greek upsilon tonos, +63 */
+  assert_finds("\xD3\x80", "\xD3\x8F");                                  /* Cyrillic palochka, +15 */
+  assert_finds("AAAB", "aab");                                           /* ASCII first unit retried */
+  assert_finds("\xD0\x9F x", "X");                                       /* ASCII after a sequence */
+  assert_misses("\xD0\x9F", "\x9F" "x");
+  assert_misses("CAF\xC9", "caf\xE9");                                    /* raw Latin-1 stays exact */
 }
 
 static void test_utf8_strcasestr_ignores_what_does_not_fold(void **state)
