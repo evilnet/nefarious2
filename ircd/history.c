@@ -3683,6 +3683,7 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
   int rc;
   int redacted = 0;
   int failed = 0;
+  int exhausted = 0;
 
   /* A redaction is a REDACT context row whose reply-index parent is the
    * message (history_store_message links it; history_redact_message
@@ -3718,7 +3719,7 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
       break;
     if (steps) {
       if (*steps >= max_steps) {
-        failed = 1;
+        exhausted = 1;
         break;
       }
       (*steps)++;
@@ -3760,10 +3761,13 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
     failed = 1;
 
   db_iter_close(ri_it);
-  return redacted ? 1 : failed ? -1 : 0;
+  /* A budget cut wins over a failed read: the walk may have stopped
+   * short of the REDACT child, so the caller must not keep the row. */
+  return redacted ? 1 : exhausted ? -2 : failed ? -1 : 0;
 }
 
-int history_message_is_redacted(const char *target, const char *msgid)
+int history_message_is_redacted_budget(const char *target, const char *msgid,
+                                       int *steps, int max_steps)
 {
   struct db_snapshot *snap;
   int redacted;
@@ -3774,9 +3778,14 @@ int history_message_is_redacted(const char *target, const char *msgid)
   snap = db_snapshot_new(history_db_env);
   if (!snap)
     return -1;
-  redacted = message_is_redacted_in(snap, target, msgid, NULL, 0);
+  redacted = message_is_redacted_in(snap, target, msgid, steps, max_steps);
   db_snapshot_destroy(snap);
   return redacted;
+}
+
+int history_message_is_redacted(const char *target, const char *msgid)
+{
+  return history_message_is_redacted_budget(target, msgid, NULL, 0);
 }
 
 /** Build a readmarker key from account and target.

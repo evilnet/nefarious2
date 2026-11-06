@@ -6102,6 +6102,7 @@ static void complete_search_fed(struct FedRequest *req)
   struct Client *client;
   struct HistoryMessage *merged, *m, **pp, **all;
   int total = 0, k, keep;
+  int recheck_steps = 0;
 
   if (!req || req->response_sent)
     return;
@@ -6114,9 +6115,15 @@ static void complete_search_fed(struct FedRequest *req)
   merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
   /* Hide what this server knows is deleted: a REDACT can land while the
    * responders are awaited, and a store that missed one still sends the
-   * line.  Only a definite yes: a server with no store cannot tell. */
+   * line.  A server with no store cannot tell (-1), so that keeps the row.
+   * Anyone can add children to a line, so the child reads share one budget
+   * for the whole union; a row it runs out on (-2) is dropped, which errs
+   * toward hiding, and the page may come back short. */
   for (pp = &merged; (m = *pp); ) {
-    if (history_message_is_redacted(req->target, m->msgid) == 1) {
+    int rv = history_message_is_redacted_budget(req->target, m->msgid,
+                                                &recheck_steps,
+                                                HISTORY_FILTER_SCAN_MAX);
+    if (rv == 1 || rv == -2) {
       *pp = m->next;
       m->next = NULL;
       history_free_messages(m);
