@@ -308,12 +308,14 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
    * live flag on remote primaries — BS O is for the session record.
    *
    * Use bounce_mark_dirty (not a manual hs_dirty=1) so the periodic
-   * persist timer actually arms.  Without the timer arming, the
-   * record on disk holds the pre-OPER state until either some other
-   * dirty event (JOIN/PART/KICK/MODE) triggers persist or a graceful
-   * shutdown (`/RESTART`, `/DIE`, SIGTERM) runs bounce_db_shutdown.
-   * Abrupt termination (SIGKILL, container kill, OOM) between /OPER
-   * and the next dirty event would lose the grant. */
+   * persist timer actually arms: the record is written at its next tick
+   * (BOUNCER_PERSIST_INTERVAL), else only by the next dirty event or a
+   * graceful shutdown (`/RESTART`, `/DIE`, SIGTERM: bounce_db_shutdown).
+   * An abrupt termination (SIGKILL, container kill, OOM) brings a live
+   * session back only when its record carries the restart marker -- hold
+   * on, primary here, no device on another server (bounce_record_stamp())
+   * -- and as that record has it: with the grant once this tick has
+   * written it, without it before. */
   {
     struct BouncerSession *sess = bounce_get_session(sptr);
     if (sess) {

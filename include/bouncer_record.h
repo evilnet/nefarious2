@@ -45,4 +45,68 @@ extern enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
                                                     struct BounceSessionRecord *out,
                                                     uint32_t *version);
 
+/** The bsr_disconnect_time of a record written while its session is
+ * ACTIVE, for a session an unclean exit of this server (a crash, SIGKILL,
+ * the OOM killer) must bring back held (bounce_record_stamp()).  Not a
+ * time: the restore reads it as "held from the restart"
+ * (bounce_record_restore()).  A binary from before it reads it as a
+ * disconnect one second before the epoch -- expired -- and evicts the
+ * record, as it evicted the 0 those binaries wrote for every ACTIVE
+ * record: a downgrade loses no more than it did.  On-disk format: never
+ * change the value, and never write it as a real disconnect time. */
+#define BOUNCE_REC_HELD_AT_RESTART ((int64_t)-1)
+
+/** What bounce_record_stamp() decides from: the facts a disconnect of
+ * every connection of ours at once (what an unclean exit is) reads for a
+ * session whose record is being written. */
+struct bounce_stamp_facts {
+  int active;          /**< the session is ACTIVE */
+  int primary_live;    /**< its primary is a live, registered user of
+                        *   ours (not held, not an alias) */
+  int logged_in;       /**< that primary is logged in */
+  int bouncer_on;      /**< the bouncer is on for it */
+  int wants_hold;      /**< the session's hold preference */
+  int remote_devices;  /**< live devices of the session's own copy on
+                        *   another server: that server's split promote
+                        *   carries the session when we go */
+};
+
+/** The disconnect time a session's record carries.  A real time is
+ * written as it is: a hold's, or the "now" a clean shutdown gives a live
+ * session (bounce_db_shutdown()).  With none (0, an ACTIVE session): the
+ * restart marker BOUNCE_REC_HELD_AT_RESTART when an unclean exit now
+ * should leave the session held here -- it is active, its primary is
+ * ours, live and logged in, the bouncer is on, its hold preference is on,
+ * and no device of it is on another server -- else 0 (the restore expires
+ * it).
+ * @param[in] f               The facts (NULL: none hold).
+ * @param[in] disconnect_time The session's hs_disconnect_time.
+ * @return The bsr_disconnect_time to write.
+ */
+extern int64_t bounce_record_stamp(const struct bounce_stamp_facts *f,
+                                   int64_t disconnect_time);
+
+/** What a restart does with a persisted record (bounce_record_restore()). */
+enum BounceRestoreVerdict {
+  BOUNCE_RESTORE_EXPIRED,  /**< not restored; the eviction pass deletes it */
+  BOUNCE_RESTORE_HELD      /**< restored as a held session */
+};
+
+/** The one rule the restore and its eviction pass read.  0 (a live
+ * session no unclean exit brings back, or any ACTIVE record of an older
+ * build) is expired; BOUNCE_REC_HELD_AT_RESTART is held from @a now; any
+ * other time is held from that time unless more than @a max_hold has
+ * passed since (a time before the epoch is expired).
+ * @param[in]  disconnect_time The record's bsr_disconnect_time.
+ * @param[in]  now             The current time.
+ * @param[in]  max_hold        FEAT_BOUNCER_MAX_HOLD.
+ * @param[out] held_since      When held: the session's hs_disconnect_time
+ *                             (may be NULL).
+ * @return The verdict.
+ */
+extern enum BounceRestoreVerdict bounce_record_restore(int64_t disconnect_time,
+                                                       int64_t now,
+                                                       int64_t max_hold,
+                                                       int64_t *held_since);
+
 #endif /* INCLUDED_bouncer_record_h */

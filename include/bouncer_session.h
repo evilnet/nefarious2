@@ -149,7 +149,13 @@ struct BounceSessionRecord {
   int32_t  bsr_hold_override;
   /* Timestamps */
   int64_t  bsr_created;
-  int64_t  bsr_disconnect_time;
+  int64_t  bsr_disconnect_time;            /**< A held session's disconnect;
+                                            *   for a live one 0 (expired
+                                            *   at restore) or the restart
+                                            *   marker -1, "held from the
+                                            *   restart" (bounce_record_stamp(),
+                                            *   bounce_record_restore():
+                                            *   include/bouncer_record.h) */
   int64_t  bsr_last_active;                /**< Primary's last-active (per-connection split) */
   int64_t  bsr_last_msg_time;              /**< Last PRIVMSG time (user idle) */
   int64_t  bsr_total_active;
@@ -2451,6 +2457,18 @@ extern void bounce_db_shutdown(void);
  * @param[in] cptr Client whose session to mark dirty.
  */
 extern void bounce_mark_dirty(struct Client *cptr);
+
+/** Mark @a session itself dirty (hs_dirty) and arm the persist timer,
+ * whatever its state: the next tick writes the record -- a live session's
+ * with its channels snapshotted and its unclean-exit stamp recomputed
+ * (bounce_record_stamp(), include/bouncer_record.h), a session held here
+ * (our own held ghost, not a brief hold) as it is.  Every path that makes
+ * a client of ours the primary of a live session marks it (the promote,
+ * the BX P install, revive, attach), so an unclean exit after the next
+ * tick brings the session back held.  NULL is a no-op.
+ * @param[in] session Session to mark.
+ */
+extern void bounce_session_mark_dirty(struct BouncerSession *session);
 
 /** Apply one BX U field update to a bouncer alias.
  *

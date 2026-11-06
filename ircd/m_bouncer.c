@@ -905,6 +905,9 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
                     "Value must be 'on' or 'off'");
           return 0;
         }
+        /* The override is persisted, and a live session's record stamp
+         * reads it (bounce_record_stamp()): written at the next tick. */
+        bounce_session_mark_dirty(s);
         send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", parv[3],
                   "Session preference updated");
         return 0;

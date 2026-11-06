@@ -2853,7 +2853,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
             /* bounce_mark_dirty arms the persist timer; a manual
              * hs_dirty=1 alone leaves the grant-clear unflushed
              * until either another dirty event or a graceful
-             * shutdown — abrupt termination would lose the clear. */
+             * shutdown.  Once its tick has written the record, an
+             * abrupt termination that brings the session back
+             * (bounce_record_stamp()) brings it back without the
+             * grant; within the tick, a session that comes back
+             * still carries it. */
             bounce_mark_dirty(acptr);
             bounce_broadcast(_oper_sess, 'O', NULL);
           }

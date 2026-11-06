@@ -315,6 +315,209 @@ static void test_unterminated_strings_stay_bounded(void **state)
   free(out);
 }
 
+/* ---- Crash restore: the stamp an ACTIVE record carries, and the one
+ * restore/eviction rule (user decision 2026-11-06: an ACTIVE session
+ * survives an unclean restart, restored as held). ---- */
+
+#define NOW      ((int64_t)1762400000)   /* 2025-11-06 */
+#define MAX_HOLD ((int64_t)1209600)      /* 14 days, the feature default */
+
+/* A session an unclean exit must bring back: every fact holds. */
+static struct bounce_stamp_facts restorable(void)
+{
+  struct bounce_stamp_facts f;
+
+  memset(&f, 0, sizeof(f));
+  f.active = 1;
+  f.primary_live = 1;
+  f.logged_in = 1;
+  f.bouncer_on = 1;
+  f.wants_hold = 1;
+  f.remote_devices = 0;
+  return f;
+}
+
+/* What a binary from before the marker computes at restore (the restore
+ * loop's and the eviction pass's `CurrentTime - disconnect > max_hold`). */
+static int old_binary_expires(int64_t disconnect_time, int64_t now,
+                              int64_t max_hold)
+{
+  return now - disconnect_time > max_hold;
+}
+
+static void test_marker_value_is_pinned(void **state)
+{
+  (void)state;
+  /* On-disk format: a record written by this build carries it. */
+  assert_true(BOUNCE_REC_HELD_AT_RESTART == (int64_t)-1);
+  assert_true(BOUNCE_REC_HELD_AT_RESTART != 0);
+}
+
+static void test_restore_zero_is_expired(void **state)
+{
+  int64_t since = 12345;
+
+  (void)state;
+  /* An ACTIVE record no unclean exit brings back (or any ACTIVE record an
+   * older build wrote). */
+  assert_int_equal(bounce_record_restore(0, NOW, MAX_HOLD, &since),
+                   BOUNCE_RESTORE_EXPIRED);
+  /* Even with a hold ceiling past the epoch distance. */
+  assert_int_equal(bounce_record_restore(0, NOW, NOW + 1, NULL),
+                   BOUNCE_RESTORE_EXPIRED);
+}
+
+static void test_restore_marker_is_held_from_now(void **state)
+{
+  int64_t since = 0;
+
+  (void)state;
+  assert_int_equal(bounce_record_restore(BOUNCE_REC_HELD_AT_RESTART, NOW,
+                                         MAX_HOLD, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW);
+  /* No ceiling to speak of: still held, from now. */
+  since = 0;
+  assert_int_equal(bounce_record_restore(BOUNCE_REC_HELD_AT_RESTART, NOW, 0,
+                                         &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW);
+  /* NULL out-parameter is allowed. */
+  assert_int_equal(bounce_record_restore(BOUNCE_REC_HELD_AT_RESTART, NOW,
+                                         MAX_HOLD, NULL),
+                   BOUNCE_RESTORE_HELD);
+}
+
+static void test_restore_real_time_is_todays_check(void **state)
+{
+  int64_t since = 0;
+
+  (void)state;
+  /* Held an hour ago: held, from then. */
+  assert_int_equal(bounce_record_restore(NOW - 3600, NOW, MAX_HOLD, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW - 3600);
+  /* Exactly the ceiling: still held (the check is "more than"). */
+  assert_int_equal(bounce_record_restore(NOW - MAX_HOLD, NOW, MAX_HOLD, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW - MAX_HOLD);
+  /* One second past it: expired. */
+  assert_int_equal(bounce_record_restore(NOW - MAX_HOLD - 1, NOW, MAX_HOLD,
+                                         &since),
+                   BOUNCE_RESTORE_EXPIRED);
+  /* A disconnect stamped ahead of our clock is held, as it was. */
+  assert_int_equal(bounce_record_restore(NOW + 60, NOW, MAX_HOLD, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW + 60);
+}
+
+static void test_restore_other_negatives_are_expired(void **state)
+{
+  (void)state;
+  /* A time before the epoch that is not the marker (a torn or foreign
+   * record) is expired, as the elapsed check found it -- without
+   * computing now - INT64_MIN. */
+  assert_int_equal(bounce_record_restore(-2, NOW, MAX_HOLD, NULL),
+                   BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(bounce_record_restore(INT64_MIN, NOW, MAX_HOLD, NULL),
+                   BOUNCE_RESTORE_EXPIRED);
+}
+
+static void test_marker_is_expired_for_an_old_binary(void **state)
+{
+  (void)state;
+  /* Downgrade safety: a build from before the marker evicts a marked
+   * record, as it evicted the 0 it wrote itself. */
+  assert_true(old_binary_expires(BOUNCE_REC_HELD_AT_RESTART, NOW, MAX_HOLD));
+  assert_true(old_binary_expires(0, NOW, MAX_HOLD));
+  /* And the two rules agree on every real time. */
+  assert_int_equal(old_binary_expires(NOW - 3600, NOW, MAX_HOLD),
+                   bounce_record_restore(NOW - 3600, NOW, MAX_HOLD, NULL)
+                     == BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(old_binary_expires(NOW - MAX_HOLD - 1, NOW, MAX_HOLD),
+                   bounce_record_restore(NOW - MAX_HOLD - 1, NOW, MAX_HOLD,
+                                         NULL) == BOUNCE_RESTORE_EXPIRED);
+}
+
+static void test_stamp_real_time_is_written_as_is(void **state)
+{
+  struct bounce_stamp_facts f = restorable();
+
+  (void)state;
+  /* A hold's time (the session is HOLDING). */
+  f.active = 0;
+  assert_true(bounce_record_stamp(&f, NOW - 60) == NOW - 60);
+  /* A clean shutdown's "now" for a live session. */
+  f = restorable();
+  assert_true(bounce_record_stamp(&f, NOW) == NOW);
+  assert_true(bounce_record_stamp(NULL, NOW) == NOW);
+}
+
+static void test_stamp_restorable_active_session(void **state)
+{
+  struct bounce_stamp_facts f = restorable();
+
+  (void)state;
+  assert_true(bounce_record_stamp(&f, 0) == BOUNCE_REC_HELD_AT_RESTART);
+}
+
+static void test_stamp_each_missing_fact_writes_zero(void **state)
+{
+  struct bounce_stamp_facts f;
+
+  (void)state;
+  f = restorable(); f.active = 0;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  /* The primary is another server's, held, or an alias: not ours to
+   * bring back (its holder's record is). */
+  f = restorable(); f.primary_live = 0;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  f = restorable(); f.logged_in = 0;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  f = restorable(); f.bouncer_on = 0;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  /* Hold off: a disconnect would end it. */
+  f = restorable(); f.wants_hold = 0;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  /* A device on another server: that server's split promote carries the
+   * session; a ghost here would be a second copy. */
+  f = restorable(); f.remote_devices = 1;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  f = restorable(); f.remote_devices = 3;
+  assert_true(bounce_record_stamp(&f, 0) == 0);
+  assert_true(bounce_record_stamp(NULL, 0) == 0);
+}
+
+static void test_stamp_then_restore_round_trip(void **state)
+{
+  struct bounce_stamp_facts f = restorable();
+  int64_t since = 0;
+
+  (void)state;
+  /* The defect: an ACTIVE session's record came back expired. */
+  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, 0), NOW,
+                                         MAX_HOLD, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW);
+  /* One a crash must not bring back stays expired. */
+  f.wants_hold = 0;
+  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, 0), NOW,
+                                         MAX_HOLD, NULL),
+                   BOUNCE_RESTORE_EXPIRED);
+  f = restorable();
+  f.remote_devices = 1;
+  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, 0), NOW,
+                                         MAX_HOLD, NULL),
+                   BOUNCE_RESTORE_EXPIRED);
+  /* A held one keeps its own clock. */
+  f = restorable();
+  f.active = 0;
+  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, NOW - 600),
+                                         NOW, MAX_HOLD, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW - 600);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -327,6 +530,16 @@ int main(void)
     cmocka_unit_test(test_v10_v11_and_current),
     cmocka_unit_test(test_wrong_size_and_unknown),
     cmocka_unit_test(test_unterminated_strings_stay_bounded),
+    cmocka_unit_test(test_marker_value_is_pinned),
+    cmocka_unit_test(test_restore_zero_is_expired),
+    cmocka_unit_test(test_restore_marker_is_held_from_now),
+    cmocka_unit_test(test_restore_real_time_is_todays_check),
+    cmocka_unit_test(test_restore_other_negatives_are_expired),
+    cmocka_unit_test(test_marker_is_expired_for_an_old_binary),
+    cmocka_unit_test(test_stamp_real_time_is_written_as_is),
+    cmocka_unit_test(test_stamp_restorable_active_session),
+    cmocka_unit_test(test_stamp_each_missing_fact_writes_zero),
+    cmocka_unit_test(test_stamp_then_restore_round_trip),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

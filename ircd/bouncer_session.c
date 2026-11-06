@@ -225,9 +225,15 @@ static int dirty_persist_timer_active;
 /* Forward declarations for persistence functions */
 static int bounce_db_put(struct BouncerSession *session);
 
-/** Timer callback: persist all dirty ACTIVE sessions.
- * Iterates all sessions, snapshots and persists those marked dirty,
- * then clears the dirty flag and reschedules the timer.
+/** Timer callback: persist every dirty session we hold.
+ * An ACTIVE one is written with its channels snapshotted from its live
+ * primary and its stamp recomputed (bounce_record_stamp(): what an
+ * unclean exit would restore).  One held here (our own held ghost) is
+ * written as it is: its channels are the hold's snapshot, and a change
+ * marked on it (BS O, BX K, BOUNCER SET SESSION) would otherwise wait
+ * for the next hold or shutdown.  A brief hold is never written (its hold
+ * did not persist it either).  Then clears the dirty flag and
+ * reschedules the timer.
  *
  * IMPORTANT: Use timer_chg() to reschedule, NOT timer_init() + timer_add().
  * timer_init() clears GEN_MARKED which corrupts the event system state.
@@ -260,12 +266,20 @@ static void bounce_dirty_persist_cb(struct Event *ev)
       if (!session_has_local_holder(s))
         continue;
 
-      /* Only persist ACTIVE sessions that are dirty */
-      if (s->hs_state != BOUNCE_ACTIVE || !s->hs_dirty || !s->hs_client)
+      if (!s->hs_dirty || !s->hs_client)
         continue;
 
-      /* Snapshot current channel state from live client */
-      bounce_snapshot_channels(s, s->hs_client);
+      if (s->hs_state == BOUNCE_ACTIVE) {
+        /* Snapshot current channel state from live client */
+        bounce_snapshot_channels(s, s->hs_client);
+      } else if (s->hs_state == BOUNCE_HOLDING
+                 && MyConnect(s->hs_client) && IsBouncerHold(s->hs_client)) {
+        if (s->hs_hold_brief) {
+          s->hs_dirty = 0;
+          continue;
+        }
+      } else
+        continue;
 
       /* Persist to MDBX */
       if (bounce_db_put(s) == 0) {
@@ -332,6 +346,18 @@ void bounce_dirty_persist_restart_timer(void)
   timer_chg(&dirty_persist_timer, TT_RELATIVE, interval);
 }
 
+/** See include/bouncer_session.h. */
+void bounce_session_mark_dirty(struct BouncerSession *session)
+{
+  if (!session)
+    return;
+
+  session->hs_dirty = 1;
+
+  /* Ensure the persist timer is running */
+  bounce_start_dirty_persist_timer();
+}
+
 /** Mark a bouncer session as dirty (needs periodic persist).
  * Called from channel.c on JOIN/PART/KICK and MODE changes.
  * @param[in] cptr Client whose session to mark dirty.
@@ -347,10 +373,7 @@ void bounce_mark_dirty(struct Client *cptr)
   if (!session || session->hs_state != BOUNCE_ACTIVE)
     return;
 
-  session->hs_dirty = 1;
-
-  /* Ensure the persist timer is running */
-  bounce_start_dirty_persist_timer();
+  bounce_session_mark_dirty(session);
 }
 
 /* ---------------------------------------------------------------- */
@@ -704,6 +727,8 @@ static void unmirrored_clear(const char *account, const char *sessid);
 static void bounce_send_bsc(struct BouncerSession *s, struct Client *link);
 static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *link);
 static int session_own_alias_count(struct BouncerSession *s);
+static int session_own_remote_alias_count(struct BouncerSession *s);
+static int session_hold_wanted(struct BouncerSession *s, struct Client *cptr);
 static void session_roster_add(struct BouncerSession *session,
                                const char *alias_numeric,
                                const char *alias_profile);
@@ -875,6 +900,9 @@ static void bounce_hold_expire(struct Event *ev)
        * (bounce_accrue_active). */
       if (!session->hs_attach_time)
         session->hs_attach_time = CurrentTime;
+      /* The record on disk says held: re-written live at the next tick
+       * (bounce_record_stamp()). */
+      bounce_session_mark_dirty(session);
     }
     return;
   case BOUNCE_HOLD_DROP:
@@ -2745,6 +2773,23 @@ static int session_own_alias_count(struct BouncerSession *s)
   return n;
 }
 
+/** The live aliases on @a s's roster that are its own copy's and live on
+ * another server: the devices that server's split promote would carry the
+ * session to if this server went (bounce_record_stamp()). */
+static int session_own_remote_alias_count(struct BouncerSession *s)
+{
+  int i, n = 0;
+
+  if (!s)
+    return 0;
+  for (i = 0; i < s->hs_alias_count; i++) {
+    struct Client *a = findNUser(s->hs_aliases[i].ba_numeric);
+    if (a && IsBouncerAlias(a) && !MyConnect(a) && session_alias_is_own(s, a))
+      n++;
+  }
+  return n;
+}
+
 /** See include/bouncer_session.h. */
 int bounce_session_has_live_alias(struct BouncerSession *s)
 {
@@ -3127,8 +3172,11 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr,
   /* Record connect event in connection history */
   bounce_history_connect(session, cli_sock_ip(cptr), cli_sockhost(cptr));
 
-  /* Session is live again — remove persisted state (re-persisted at next hold or shutdown) */
-  bounce_db_del(session->hs_sessid);
+  /* Session is live again: its record is re-written at the next persist
+   * tick, stamped for an unclean exit (bounce_record_stamp()).  Until
+   * then it is the hold's (or none), as before the attach (or already the
+   * live one, when the id adopt above wrote it). */
+  bounce_session_mark_dirty(session);
 
   /* Recompute session union caps for the new primary + existing aliases */
   bounce_recompute_session_caps(cptr);
@@ -4554,6 +4602,34 @@ int bounce_hs_client_assign_checked(struct BouncerSession *session,
   return 1;
 }
 
+/** The bsr_disconnect_time @a session's record carries now
+ * (bounce_record_stamp()): its own disconnect time while it has one (a
+ * hold, a clean shutdown); for a live session, the restart marker when an
+ * unclean exit of this server now should bring it back held, else 0.
+ * Every write recomputes it, and every fact it reads changes only at a
+ * write or a dirty mark: the roster writes (a device on another server
+ * comes or goes), the promote and BX P installs, revive, attach,
+ * BOUNCER SET SESSION and a hold turned on for a member (marked dirty);
+ * a hold turned off ends the session and its record. */
+static int64_t bounce_record_stamp_of(struct BouncerSession *session)
+{
+  struct bounce_stamp_facts f;
+  struct Client *p = session->hs_client;
+
+  memset(&f, 0, sizeof(f));
+  if (session->hs_state == BOUNCE_ACTIVE && session->hs_disconnect_time == 0) {
+    f.active = 1;
+    f.primary_live = p && MyUser(p) && !IsBouncerHold(p) && !IsBouncerAlias(p);
+    if (f.primary_live) {
+      f.logged_in = IsAccount(p) ? 1 : 0;
+      f.bouncer_on = bounce_enabled_for(p);
+      f.wants_hold = f.logged_in ? session_hold_wanted(session, p) : 0;
+      f.remote_devices = session_own_remote_alias_count(session);
+    }
+  }
+  return bounce_record_stamp(&f, (int64_t)session->hs_disconnect_time);
+}
+
 /** Persist a bouncer session to MDBX.
  * Only persists local sessions. Guarded by FEAT_BOUNCER_PERSIST.
  * @param[in] session Session to persist.
@@ -4591,7 +4667,7 @@ static int bounce_db_put(struct BouncerSession *session)
   ircd_strncpy(rec.bsr_origin, session->hs_origin, NICKLEN + 1);
   rec.bsr_hold_override = session->hs_hold_override;
   rec.bsr_created = (int64_t)session->hs_created;
-  rec.bsr_disconnect_time = (int64_t)session->hs_disconnect_time;
+  rec.bsr_disconnect_time = bounce_record_stamp_of(session);
   rec.bsr_last_active = (int64_t)session->hs_last_active;
   /* Persist the user's idle time (last PRIVMSG).  Prefer the live client's
    * value; fall back to the session-level copy for HOLDING ghosts. */
@@ -5045,6 +5121,7 @@ int bounce_db_restore(void)
   int migrated_v7 = 0;
   int migrated = 0;   /* v8..v11 records read through a frozen layout */
   int rejected = 0;   /* wrong size for their version, or unknown version */
+  int restarted = 0;  /* live when an unclean exit took this server down */
   time_t max_hold;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
@@ -5089,7 +5166,7 @@ int bounce_db_restore(void)
     struct BouncerSession *session;
     struct Client *ghost;
     struct AccountSessions *as;
-    time_t elapsed;
+    int64_t held_since;
     time_t remaining;
     uint32_t version;
 
@@ -5131,9 +5208,13 @@ int bounce_db_restore(void)
     }
     rec = &rec_buf;
 
-    /* Check expiry */
-    elapsed = CurrentTime - (time_t)rec->bsr_disconnect_time;
-    if (elapsed > max_hold) {
+    /* Check expiry (the eviction pass below reads the same rule): a live
+     * session's record is expired unless it carries the restart marker,
+     * which brings it back held from now -- an unclean exit left it
+     * there (bounce_record_stamp()). */
+    if (bounce_record_restore(rec->bsr_disconnect_time, (int64_t)CurrentTime,
+                              (int64_t)max_hold, &held_since)
+        == BOUNCE_RESTORE_EXPIRED) {
       expired++;
       continue;
     }
@@ -5188,7 +5269,17 @@ int bounce_db_restore(void)
     session->hs_created = (time_t)rec->bsr_created;
     session->hs_last_active = (time_t)rec->bsr_last_active;
     session->hs_last_msg_time = (time_t)rec->bsr_last_msg_time;
-    session->hs_disconnect_time = (time_t)rec->bsr_disconnect_time;
+    session->hs_disconnect_time = (time_t)held_since;
+    /* Live when this server went down: held from now, and written so at
+     * the end of the restore -- the record carries a real time from then
+     * on, so another unclean exit before anything else writes it does not
+     * start its hold again. */
+    if (rec->bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART) {
+      ircd_strncpy(session->hs_hold_reason, "Server restarted",
+                   sizeof(session->hs_hold_reason));
+      session->hs_dirty = 1;
+      restarted++;
+    }
     /* Restore ghost's idle time so auto-replay works after restart */
     if (ghost && cli_user(ghost) && session->hs_last_msg_time > 0)
       cli_user(ghost)->last = session->hs_last_msg_time;
@@ -5230,14 +5321,24 @@ int bounce_db_restore(void)
     memcpy(session->hs_history, rec->bsr_history,
            session->hs_histcount * sizeof(struct BounceConnHistory));
 
-    /* Copy channel snapshot for consistency */
+    /* Copy channel snapshot for consistency: whole, since a held
+     * session's record is written back from it (the end of this restore,
+     * the dirty timer, a roster change) -- the join time and msgid too. */
     session->hs_chancount = rec->bsr_chancount;
+    if (session->hs_chancount > BOUNCER_MAX_CHANNELS)
+      session->hs_chancount = BOUNCER_MAX_CHANNELS;
     {
       int i;
-      for (i = 0; i < rec->bsr_chancount && i < BOUNCER_MAX_CHANNELS; i++) {
+      for (i = 0; i < session->hs_chancount; i++) {
         ircd_strncpy(session->hs_channels[i].name,
-                     rec->bsr_channels[i].name, CHANNELLEN);
+                     rec->bsr_channels[i].name,
+                     sizeof(session->hs_channels[i].name));
         session->hs_channels[i].modes = rec->bsr_channels[i].modes;
+        session->hs_channels[i].join_tv_sec = rec->bsr_channels[i].join_tv_sec;
+        session->hs_channels[i].join_tv_usec = rec->bsr_channels[i].join_tv_usec;
+        memcpy(session->hs_channels[i].join_msgid,
+               rec->bsr_channels[i].join_msgid,
+               sizeof(session->hs_channels[i].join_msgid));
       }
     }
 
@@ -5292,8 +5393,10 @@ int bounce_db_restore(void)
     remaining = bounce_hold_remaining(session);
 
     restored++;
-    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored session %s (%s) ghost=%s remaining=%Tu",
-              session->hs_sessid, session->hs_account, cli_name(ghost), remaining);
+    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored session %s (%s) ghost=%s remaining=%Tu%s",
+              session->hs_sessid, session->hs_account, cli_name(ghost), remaining,
+              rec->bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART
+                ? " (live at an unclean exit: held from now)" : "");
   }
 
   db_iter_close(it);
@@ -5332,8 +5435,15 @@ int bounce_db_restore(void)
             should_delete = 1;
           } else if (version == BOUNCER_DB_VERSION
                      && vlen == sizeof(struct BounceSessionRecord)) {
-            const struct BounceSessionRecord *r = vbuf;
-            if (CurrentTime - (time_t)r->bsr_disconnect_time > max_hold)
+            int64_t disconnect_time;
+            /* The value buffer carries no alignment guarantee. */
+            memcpy(&disconnect_time,
+                   (const char *)vbuf
+                     + offsetof(struct BounceSessionRecord, bsr_disconnect_time),
+                   sizeof(disconnect_time));
+            if (bounce_record_restore(disconnect_time, (int64_t)CurrentTime,
+                                      (int64_t)max_hold, NULL)
+                == BOUNCE_RESTORE_EXPIRED)
               should_delete = 1;
           } else {
             /* Unknown version or wrong size — evict.  v8..v11 records
@@ -5361,23 +5471,32 @@ int bounce_db_restore(void)
    * Otherwise the migrated state is in-memory only: a held session is
    * never marked dirty, and the eviction pass above deletes every record
    * that is not the current version whenever anything expired -- one
-   * more restart before a revive would then lose the session. */
-  if (migrated_v7 > 0 || migrated > 0) {
+   * more restart before a revive would then lose the session.  A
+   * session the restart marker brought back (marked dirty above) is
+   * written now too, as the held session it is, with its real time. */
+  if (migrated_v7 > 0 || migrated > 0 || restarted > 0) {
     struct AccountSessions *as_iter;
     struct BouncerSession *s;
     unsigned int b;
+    int all = (migrated_v7 > 0 || migrated > 0);
     for (b = 0; b < BOUNCE_ACCOUNT_HASHSIZE; b++) {
       for (as_iter = accountHash[b]; as_iter; as_iter = as_iter->as_hnext) {
-        for (s = as_iter->as_sessions; s; s = s->hs_anext)
-          (void)bounce_db_put(s);
+        for (s = as_iter->as_sessions; s; s = s->hs_anext) {
+          if (!all && !s->hs_dirty)
+            continue;
+          if (bounce_db_put(s) == 0)
+            s->hs_dirty = 0;
+          else if (s->hs_dirty)
+            bounce_session_mark_dirty(s);  /* the dirty timer retries */
+        }
       }
     }
   }
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "bouncer_persist: restored %d sessions (%d migrated from v7, "
-            "%d from v8-v11, %d unreadable)", restored, migrated_v7, migrated,
-            rejected);
+            "%d from v8-v11, %d unreadable, %d live at an unclean exit)",
+            restored, migrated_v7, migrated, rejected, restarted);
   return restored;
 }
 
@@ -7837,6 +7956,13 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
      * a ghost on restart, causing a nick collision on link. */
     if (we_were_holding_primary && !session_has_local_holder(session))
       bounce_db_del(session->hs_sessid);
+    /* Our device is the primary now (every promote with a local winner,
+     * the crossed one at BX X included): the record is ours to write --
+     * with no hold behind it there may be none -- and the next persist
+     * tick writes it, stamped for an unclean exit (bounce_record_stamp()).
+     * After hs_state (#1). */
+    if (MyConnect(alias))
+      bounce_session_mark_dirty(session);
     /* If the session has an oper grant and the new primary isn't yet
      * opered (e.g. alias predated the grant, or grant survived a
      * primary-disconnect-and-cleanup gap), re-grant from the local
@@ -8132,6 +8258,31 @@ void bounce_execute_squit_promotions(struct Client *server)
 /* Hold mode                                                         */
 /* ---------------------------------------------------------------- */
 
+/** @a s's hold preference for its primary @a cptr, a local logged-in
+ * client: the session's override, else +b, else the account's stored
+ * preference, else the class's (a bouncer class holds) or the network
+ * default.  The one reading the disconnect and the record's stamp share. */
+static int session_hold_wanted(struct BouncerSession *s, struct Client *cptr)
+{
+  struct ConnectionClass *cls;
+  char hold_val[64];
+
+  /* Check hold preference: session override > user mode/metadata > default */
+  if (s->hs_hold_override >= 0)
+    return s->hs_hold_override;
+  /* User has +b mode set (synced with $draft/persistence/hold metadata) */
+  if (IsBncHoldPref(cptr))
+    return 1;
+  /* Check persistent metadata — cli_metadata may not be populated
+   * after a restart; metadata_account_get reads from mdbx. */
+  if (metadata_account_get(cli_account(cptr), "draft/persistence/hold", hold_val) == 0)
+    return hold_val[0] != '0';
+  /* Bouncer class defaults to hold; normal class follows feature flag */
+  cls = get_client_class_conf(cptr);
+  return (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+         || feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+}
+
 /** The ACTIVE session whose primary is @a cptr, a logged-in client, with
  * its hold preference in *wants_hold; NULL when there is none. */
 static struct BouncerSession *active_session_of_primary(struct Client *cptr,
@@ -8139,15 +8290,8 @@ static struct BouncerSession *active_session_of_primary(struct Client *cptr,
 {
   struct AccountSessions *as;
   struct BouncerSession *s;
-  int class_bouncer = 0;
-  struct ConnectionClass *cls;
 
   *wants_hold = 0;
-
-  /* Check if client's connection class forces bouncer behavior */
-  cls = get_client_class_conf(cptr);
-  if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
-    class_bouncer = 1;
 
   /* Find an ACTIVE session attached to this client */
   as = bounce_find_by_account(cli_account(cptr));
@@ -8156,23 +8300,7 @@ static struct BouncerSession *active_session_of_primary(struct Client *cptr,
 
   for (s = as->as_sessions; s; s = s->hs_anext) {
     if (s->hs_client == cptr && s->hs_state == BOUNCE_ACTIVE) {
-      /* Check hold preference: session override > user mode/metadata > default */
-      if (s->hs_hold_override >= 0) {
-        *wants_hold = s->hs_hold_override;
-      } else if (IsBncHoldPref(cptr)) {
-        /* User has +b mode set (synced with $draft/persistence/hold metadata) */
-        *wants_hold = 1;
-      } else {
-        /* Check persistent metadata — cli_metadata may not be populated
-         * after a restart; metadata_account_get reads from mdbx. */
-        char hold_val[64];
-        if (metadata_account_get(cli_account(cptr), "draft/persistence/hold", hold_val) == 0) {
-          *wants_hold = (hold_val[0] != '0');
-        } else {
-          /* Bouncer class defaults to hold; normal class follows feature flag */
-          *wants_hold = class_bouncer || feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
-        }
-      }
+      *wants_hold = session_hold_wanted(s, cptr);
       return s;
     }
   }
@@ -9104,9 +9232,11 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * freshly-minted id yet, so no purge. */
   client_set_session_id(ghost, session->hs_sessid);
 
-  /* Session is live again — remove persisted state (only HOLDING sessions persist) */
-  if (was_holding)
-    bounce_db_del(session->hs_sessid);
+  /* Session is live again: its record is re-written at the next persist
+   * tick, stamped for an unclean exit (bounce_record_stamp()).  Until
+   * then it is the hold's, which a restart restores held, as before (or
+   * already the live one, when the id adopt above wrote it). */
+  bounce_session_mark_dirty(session);
 
   /* Recompute session union caps */
   bounce_recompute_session_caps(ghost);
@@ -10690,6 +10820,9 @@ enum bounce_hold_on_done bounce_hold_on(struct Client *cptr, int tell_status,
   default:
     break;
   }
+  /* A member already: its session's hold preference may have just turned
+   * on, which its record's stamp reads (bounce_record_stamp()). */
+  bounce_session_mark_dirty(bounce_get_session(cptr));
   return BOUNCE_HOLD_ON_NOTHING;
 }
 
@@ -11961,15 +12094,13 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
     sess->hs_oper_name[0] = '\0';
     sess->hs_oper_granted_at = 0;
   }
-  /* Mark dirty AND arm the persist timer.  Without arming, an
-   * abrupt termination between this BS O receive and the next
-   * dirty event (channel JOIN/PART/etc.) would lose the cross-
-   * server grant propagation here.  bounce_mark_dirty gates on
-   * BOUNCE_ACTIVE; this code path can run for HOLDING sessions
-   * too (peer broadcasts an oper grant while our local primary is
-   * in hold), so call the timer-arm directly. */
-  sess->hs_dirty = 1;
-  bounce_start_dirty_persist_timer();
+  /* Mark the session itself dirty: bounce_mark_dirty gates on
+   * BOUNCE_ACTIVE, and this path runs for HOLDING sessions too (a peer
+   * broadcasts an oper grant while our local primary is in hold).  The
+   * next persist tick writes the grant -- a held ghost of ours as it is,
+   * a live session stamped for an unclean exit (bounce_record_stamp());
+   * an unclean exit before it restores the record without it. */
+  bounce_session_mark_dirty(sess);
 
   /* Apply to local primary, if any.  Remote primaries are handled by
    * the P10 MODE +o / -o that arrives in the same TCP stream from the
@@ -12604,6 +12735,10 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
        * primary and is left alone).  Our view only: every server applies
        * this BX P itself. */
       bounce_repoint_aliases(NULL, new_client, bsess, BOUNCE_REPOINT_ONLY);
+      /* The new primary is ours: the record is ours to write, stamped for
+       * an unclean exit at the next persist tick (bounce_record_stamp()). */
+      if (MyConnect(new_client))
+        bounce_session_mark_dirty(bsess);
     } else if (bsess) {
       /* Refused: the promoted client left the record's roster above and
        * is no member of it. */
@@ -15804,8 +15939,7 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
     /* Its mask went with its socket: the revive applies the session's. */
     sess->hs_snomask = snomask;
     sess->hs_snomask_known = 1;
-    sess->hs_dirty = 1;
-    bounce_start_dirty_persist_timer();
+    bounce_session_mark_dirty(sess);
   } else {
     bounce_put_member_snomask(target, snomask, 1);
     sess->hs_snomask = HasFlag(target, FLAG_SERVNOTICE) ? cli_snomask(target) : 0;

@@ -209,3 +209,42 @@ enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
   out->bsr_version = BOUNCER_DB_VERSION;
   return BOUNCE_REC_MIGRATED;
 }
+
+int64_t bounce_record_stamp(const struct bounce_stamp_facts *f,
+                            int64_t disconnect_time)
+{
+  /* A real time: a hold's, or a clean shutdown's "now". */
+  if (disconnect_time != 0)
+    return disconnect_time;
+  /* An unclean exit drops every connection of ours at once.  The session
+   * is held here then only if its disconnect would hold it -- an active
+   * session, its primary ours and live, logged in, the bouncer on, hold
+   * wanted -- and no device of it lives on: our local devices go with us,
+   * one on another server is promoted there by its split. */
+  if (f && f->active && f->primary_live && f->logged_in && f->bouncer_on
+      && f->wants_hold && f->remote_devices == 0)
+    return BOUNCE_REC_HELD_AT_RESTART;
+  return 0;
+}
+
+enum BounceRestoreVerdict bounce_record_restore(int64_t disconnect_time,
+                                                int64_t now, int64_t max_hold,
+                                                int64_t *held_since)
+{
+  int64_t since;
+
+  if (disconnect_time == BOUNCE_REC_HELD_AT_RESTART)
+    since = now;
+  else if (disconnect_time <= 0)
+    /* 0: a live session's record no unclean exit brings back.  Any other
+     * time before the epoch is expired by the elapsed check as well, and
+     * is not subtracted (now - INT64_MIN overflows). */
+    return BOUNCE_RESTORE_EXPIRED;
+  else
+    since = disconnect_time;
+  if (now - since > max_hold)
+    return BOUNCE_RESTORE_EXPIRED;
+  if (held_since)
+    *held_since = since;
+  return BOUNCE_RESTORE_HELD;
+}
