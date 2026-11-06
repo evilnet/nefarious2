@@ -358,6 +358,15 @@ int bounce_kill_takes_killer(int killer_device_here, int killer_is_victim,
          && victim_is_primary;
 }
 
+enum bounce_device_kill bounce_device_kill_action(int primary_ours,
+                                                  int primary_leaving)
+{
+  if (!primary_ours)
+    return BOUNCE_DEVICE_KILL_ELSEWHERE;
+  return primary_leaving ? BOUNCE_DEVICE_KILL_UNDER_WAY
+                         : BOUNCE_DEVICE_KILL_END_HERE;
+}
+
 char bounce_member_end_letter(enum bounce_member_end how)
 {
   switch (how) {

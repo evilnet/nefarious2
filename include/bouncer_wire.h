@@ -835,6 +835,39 @@ extern int bounce_kill_takes_killer(int killer_device_here,
                                     int killer_in_session,
                                     int victim_is_primary);
 
+/** What a KILL of a session's device does, here, to the session's
+ * primary.  The KILL of any device ends the whole session (#6, #12); the
+ * KILL on the wire names the device only (a server KILL by numeric). */
+enum bounce_device_kill {
+  BOUNCE_DEVICE_KILL_ELSEWHERE, /**< no primary of ours: another server's
+                                 *   (the KILL, relayed everywhere, reaches
+                                 *   that server, which ends the session
+                                 *   there; nothing of another server's is
+                                 *   exited here, B-2), or none */
+  BOUNCE_DEVICE_KILL_UNDER_WAY, /**< ours, and already leaving: KILLed
+                                 *   itself (its own KILL is on the wire and
+                                 *   its exit ends the session) or mid-exit;
+                                 *   a second exit would free it twice */
+  BOUNCE_DEVICE_KILL_END_HERE   /**< ours: the session ends here (every
+                                 *   other device, everywhere; BS X; the
+                                 *   record), then the primary leaves with
+                                 *   its QUIT toward every link.  Never
+                                 *   under FLAG_KILLED, which suppresses the
+                                 *   QUIT: no KILL named the primary, so
+                                 *   every other server would keep it (race
+                                 *   survey #8, section 3, 2026-11-06) */
+};
+
+/** What a KILL of a device does to its session's primary here.
+ *
+ * @param[in] primary_ours    The device's primary is a user of ours (live
+ *                            or a held ghost).
+ * @param[in] primary_leaving That primary is already leaving: FLAG_KILLED,
+ *                            or mid-exit (FLAG_CLOSING).
+ */
+extern enum bounce_device_kill bounce_device_kill_action(int primary_ours,
+                                                         int primary_leaving);
+
 /** How a member's end of a session ends it.  On the wire (BS E) a letter:
  * bounce_member_end_letter(), bounce_member_end_parse().  The kinds differ
  * in what the end does besides ending the session (its side effects,

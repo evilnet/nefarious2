@@ -1433,6 +1433,34 @@ static void the_killer_goes_last_only_on_every_fact(void **s)
                      d && !v && m && p);
 }
 
+/* bounce_device_kill_action(primary_ours, primary_leaving) -- race survey
+ * #8 section 3: a server KILL of a device's numeric. */
+
+static void a_killed_device_of_our_primary_ends_the_session_here(void **s)
+{
+  (void)s;
+  /* The KILL named the device only: the primary leaves with its QUIT
+   * toward every link, never silently (FLAG_KILLED). */
+  assert_int_equal(bounce_device_kill_action(1, 0), BOUNCE_DEVICE_KILL_END_HERE);
+}
+
+static void a_killed_device_of_a_remote_primary_leaves_it_to_its_server(void **s)
+{
+  (void)s;
+  /* The relayed KILL reaches the primary's server, which ends the
+   * session there; nothing of another server's is exited here (B-2). */
+  assert_int_equal(bounce_device_kill_action(0, 0), BOUNCE_DEVICE_KILL_ELSEWHERE);
+  assert_int_equal(bounce_device_kill_action(0, 1), BOUNCE_DEVICE_KILL_ELSEWHERE);
+}
+
+static void a_primary_already_leaving_is_not_exited_again(void **s)
+{
+  (void)s;
+  /* KILLed itself (its own KILL on the wire), or mid-exit: its own exit
+   * runs; a second one would free it twice. */
+  assert_int_equal(bounce_device_kill_action(1, 1), BOUNCE_DEVICE_KILL_UNDER_WAY);
+}
+
 /* bounce_member_end_letter(how), bounce_member_end_parse(letter) */
 
 static void member_end_letters_round_trip(void **s)
@@ -3134,6 +3162,9 @@ int main(void)
     cmocka_unit_test(a_kill_that_ends_no_session_takes_no_killer),
     cmocka_unit_test(a_remote_killer_is_its_own_servers),
     cmocka_unit_test(the_killer_goes_last_only_on_every_fact),
+    cmocka_unit_test(a_killed_device_of_our_primary_ends_the_session_here),
+    cmocka_unit_test(a_killed_device_of_a_remote_primary_leaves_it_to_its_server),
+    cmocka_unit_test(a_primary_already_leaving_is_not_exited_again),
     cmocka_unit_test(member_end_letters_round_trip),
     cmocka_unit_test(an_unknown_member_end_letter_is_refused),
     cmocka_unit_test(a_member_end_goes_to_the_holder),

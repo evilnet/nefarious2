@@ -1400,6 +1400,24 @@ extern void bounce_kill_session(struct BouncerSession *session,
 extern int bounce_kill_spare_killer(struct Client *killer,
                                     struct Client *victim);
 
+/** A device (alias) of a session is being exited under a KILL
+ * (FLAG_KILLED: a server KILL of its numeric): the KILL ends the whole
+ * session (#6, #12).  When the session's primary is ours and not already
+ * leaving (bounce_device_kill_action()), the device leaves every roster
+ * (F-CN2), the session ends here (bounce_kill_session(): every other
+ * device, everywhere, BS X, the record) and the primary exits with its
+ * QUIT toward every link -- never under FLAG_KILLED, which would leave it
+ * on every other server, since the KILL on the wire named the device only
+ * (race survey #8, section 3).  A primary on another server is left to
+ * the relayed KILL, which reaches its server.  Called from
+ * exit_one_client()'s alias branch, while the device is being torn down.
+ *
+ * @param[in] device  The KILLed device.
+ * @param[in] comment Its exit comment (the KILL's reason), passed on to
+ *                    the session's other members and its primary.
+ */
+extern void bounce_device_killed(struct Client *device, const char *comment);
+
 /** Retire a held session of ours: end it (its own copy's aliases, BS X
  * toward the aware links) and then exit its ghost (BX X toward the aware
  * links, a Q toward the legacy ones).  Unlike a KILL, a retire never

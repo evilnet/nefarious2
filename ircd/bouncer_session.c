@@ -3430,6 +3430,49 @@ int bounce_kill_spare_killer(struct Client *killer, struct Client *victim)
   return 1;
 }
 
+/** See include/bouncer_session.h. */
+void bounce_device_killed(struct Client *device, const char *comment)
+{
+  struct Client *primary = cli_alias_primary(device);
+  struct BouncerSession *s;
+  const char *why = (comment && *comment) ? comment : "Session killed";
+  int ours = primary && MyConnect(primary) && IsUser(primary);
+
+  switch (bounce_device_kill_action(ours, ours
+                                    && (HasFlag(primary, FLAG_KILLED)
+                                        || HasFlag(primary, FLAG_CLOSING)))) {
+  case BOUNCE_DEVICE_KILL_ELSEWHERE:
+  case BOUNCE_DEVICE_KILL_UNDER_WAY:
+    return;
+  case BOUNCE_DEVICE_KILL_END_HERE:
+    break;
+  }
+  /* F-CN2: the device leaves every roster first.  The session's end below
+   * exits each device on the roster, and the device is still in the
+   * numeric table, mid-exit: found there, it would be exited (freed)
+   * again under the exit_one_client() frame unwinding it. */
+  session_roster_drop_account(device, NULL);
+  s = bounce_get_session(primary);
+  log_write(LS_USER, L_INFO, 0, "Bouncer: a KILL of %s%s, a device of %s's "
+            "session %s, ends the session; its primary %s leaves with a QUIT",
+            cli_yxx(cli_user(device)->server), cli_yxx(device),
+            cli_account(device), s ? s->hs_sessid : "-", cli_name(primary));
+  /* Every other device, everywhere (their BX X), BS X, the record -- so
+   * the primary's exit below finds no record naming it. */
+  if (s && s->hs_client == primary)
+    bounce_kill_session(s, why);
+  /* Then the primary, with its QUIT toward every link, as a KILL decided
+   * on its own server leaves (do_kill() relays no KILL of a client of
+   * ours that a client of ours KILLs).  No FLAG_KILLED: the KILL on the
+   * wire named the device, so no server would remove the primary for it
+   * -- not the other fork server (its BS X ends the record, never another
+   * server's client), not a legacy one.  A held ghost leaves as a user
+   * does, with its QUIT, not a ghost's silent BX X. */
+  if (IsBouncerHold(primary))
+    ClearBouncerHold(primary);
+  exit_client(primary, primary, &me, why);
+}
+
 /** @a c when it is a held ghost of ours (a socket we may exit), else
  * NULL: a retire exits nothing of another server's (B-2). */
 static struct Client *retire_ghost_ours(struct Client *c)

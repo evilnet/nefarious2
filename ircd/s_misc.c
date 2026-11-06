@@ -430,36 +430,19 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * then, so they have nothing to decrement. */
     if (IsBouncerAlias(bcptr)) {
       /* Network KILL on an alias ends the entire session per design
-       * intent invariant #12.  Propagate the KILL to the primary (if
-       * local) — the primary's exit will trigger the existing
-       * ACTIVE-killed session-end logic which handles sibling aliases
-       * and session destroy.  If the primary is remote, the KILL token
-       * has already been broadcast network-wide by m_kill and will
+       * intent invariant #12.  If the primary is ours, the session ends
+       * here and the primary leaves with its QUIT toward every link
+       * (bounce_device_killed(): the device off every roster first,
+       * F-CN2; never FLAG_KILLED on the primary, whose KILL no server
+       * received -- each would keep it, race survey #8 section 3).  The
+       * alias's exit comment goes on to the primary, so its connection
+       * sees the actual KILL reason.  If the primary is remote, the KILL
+       * token has already been broadcast network-wide by m_kill and will
        * reach the primary's home server, where session-end fires
-       * locally there. */
-      if (HasFlag(bcptr, FLAG_KILLED)) {
-        struct Client *primary = cli_alias_primary(bcptr);
-        if (primary && MyConnect(primary) && IsUser(primary)
-            && !HasFlag(primary, FLAG_KILLED)) {
-          /* F-CN2: remove this alias from the session roster BEFORE
-           * exiting the primary.  The primary's KILL-cascade sibling
-           * loop (s_misc.c ~663-671) iterates hs_aliases[] and would
-           * exit_client() us again — freeing bcptr while this
-           * exit_one_client() frame is still unwinding it (UAF +
-           * double free).  After untrack the loop can't construct our
-           * numeric, so bcptr is torn down exactly once, by the code
-           * below.  The bounce_alias_untrack() call further down (~383)
-           * stays as a safe idempotent no-op. */
-          bounce_alias_untrack(bcptr);
-          SetFlag(primary, FLAG_KILLED);
-          /* Forward the alias's exit comment so the primary's local
-           * connection sees the actual KILL reason (e.g. "Killed
-           * (server (overruled by older nick))") rather than a generic
-           * "Session killed" — without it the user can't tell why. */
-          exit_client(primary, primary, &me,
-                      comment && *comment ? comment : "Session killed");
-        }
-      }
+       * locally there.  The bounce_alias_untrack() call further down
+       * stays as a safe idempotent no-op. */
+      if (HasFlag(bcptr, FLAG_KILLED))
+        bounce_device_killed(bcptr, comment);
       if (MyConnect(bcptr)) {
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
