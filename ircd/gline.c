@@ -269,7 +269,12 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
             (!feature_bool(FEAT_HIS_GLINE_REASON) ? " (" : ""),
             (!feature_bool(FEAT_HIS_GLINE_REASON) ? gline->gl_reason : ""),
             (!feature_bool(FEAT_HIS_GLINE_REASON) ? ")" : ""));
-        bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_BAN, reason);
+        /* An oper's own G-line can match the oper: once its connection,
+         * the one being handled, has gone (CPTR_KILLED), a later match is
+         * handed no connection -- bounce_forced_exit() reads the one it
+         * is given, and this one is freed. */
+        bounce_forced_exit(retval == CPTR_KILLED ? NULL : cptr, acptr,
+                           BOUNCE_FORCED_BAN, reason);
         if ((tval = exit_client(cptr, acptr, &me, reason)))
           retval = tval; /* retain killed status */
       }

@@ -1238,9 +1238,13 @@ extern int bounce_promote_or_hold(struct Client *cptr, const char *reason);
  *    drop that line, only the device goes.
  *
  * @a cptr, the connection being handled, is never exited here: a device
- * of the ended session that is @a cptr is left to the orphan sweep.
+ * of the ended session that is @a cptr is left to the orphan sweep.  It
+ * is read (MyConnect), so a ban loop that has already exited it (an
+ * oper's own G-, Z- or K-line matched it; exit_client() returned
+ * CPTR_KILLED) passes NULL for every later match.
  *
- * @param[in] cptr    The connection being handled (exit_client()'s cptr).
+ * @param[in] cptr    The connection being handled (exit_client()'s cptr),
+ *                    or NULL when it has gone.
  * @param[in] victim  The client being forced off.
  * @param[in] why     Why.
  * @param[in] comment The exit comment (the hold reason of a held fault).

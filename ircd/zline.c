@@ -200,7 +200,12 @@ do_zline(struct Client *cptr, struct Client *sptr, struct Zline *zline)
             (!feature_bool(FEAT_HIS_ZLINE_REASON) ? " (" : ""),
             (!feature_bool(FEAT_HIS_ZLINE_REASON) ? zline->zl_reason : ""),
             (!feature_bool(FEAT_HIS_ZLINE_REASON) ? ")" : ""));
-        bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_BAN, reason);
+        /* An oper's own Z-line can match the oper: once its connection,
+         * the one being handled, has gone (CPTR_KILLED), a later match is
+         * handed no connection -- bounce_forced_exit() reads the one it
+         * is given, and this one is freed. */
+        bounce_forced_exit(retval == CPTR_KILLED ? NULL : cptr, acptr,
+                           BOUNCE_FORCED_BAN, reason);
         if ((tval = exit_client(cptr, acptr, &me, reason)))
           retval = tval; /* retain killed status */
       }

@@ -1461,8 +1461,12 @@ int rehash(struct Client *cptr, int sig)
                              IsUnknown(acptr) ? "Unregistered Client ":"",
                              get_client_name(acptr, SHOW_IP));
         /* Enforcement ends the bouncer session the connection carries,
-         * as a KILL does. */
-        bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_BAN,
+         * as a KILL does.  The oper who asked for the rehash can be
+         * K-lined by it: once its connection has gone (CPTR_KILLED), a
+         * later match is handed no connection -- bounce_forced_exit()
+         * reads the one it is given, and this one is freed. */
+        bounce_forced_exit(ret == CPTR_KILLED ? NULL : cptr, acptr,
+                           BOUNCE_FORCED_BAN,
                            found_g == -2 ? "G-lined" :
                            (found_g == -3 ? "Z-lined" : "K-lined"));
         if (exit_client(cptr, acptr, &me, found_g == -2 ? "G-lined" :
