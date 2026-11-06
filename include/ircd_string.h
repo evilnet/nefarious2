@@ -39,6 +39,7 @@ extern int csv_contains_token(const char* csv, const char* token);
 extern int ircd_utf8_clamp(char* s, size_t maxbytes);
 extern size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max);
 extern int ircd_text_mentions(const char* text, const char* nick);
+extern const char* ircd_utf8_strcasestr(const char* hay, const char* needle);
 extern char* ircd_json_escape(char* dst, size_t dstlen, const char* src);
 extern int         unique_name_vector(char* names, char token,
                                       char** vector, int size);

@@ -624,6 +624,123 @@ size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
   return cut;
 }
 
+/** Upper-case ranges of the scripts folded by ircd_utf8_strcasestr, sorted.
+ * delta != 0: every code point in the range lowers by adding delta.
+ * delta == 0: upper and lower alternate, lo is upper and lo + 1 its lower. */
+static const struct {
+  unsigned short lo, hi;
+  short delta;
+} utf8_fold_ranges[] = {
+  { 0x00C0, 0x00D6, 32 }, { 0x00D8, 0x00DE, 32 },                 /* Latin-1 */
+  { 0x0100, 0x012F, 0 }, { 0x0132, 0x0137, 0 }, { 0x0139, 0x0148, 0 },
+  { 0x014A, 0x0177, 0 }, { 0x0178, 0x0178, -121 }, { 0x0179, 0x017E, 0 },
+  { 0x01A0, 0x01A5, 0 }, { 0x01AF, 0x01B0, 0 }, { 0x01CD, 0x01DC, 0 },
+  { 0x01DE, 0x01EF, 0 }, { 0x01F8, 0x021F, 0 }, { 0x0222, 0x0233, 0 },
+  { 0x0386, 0x0386, 38 }, { 0x0388, 0x038A, 37 }, { 0x038C, 0x038C, 64 },
+  { 0x038E, 0x038F, 63 }, { 0x0391, 0x03A1, 32 }, { 0x03A3, 0x03AB, 32 },
+  { 0x03C2, 0x03C2, 1 },                                          /* final sigma */
+  { 0x0400, 0x040F, 80 }, { 0x0410, 0x042F, 32 }, { 0x0460, 0x0481, 0 },
+  { 0x048A, 0x04BF, 0 }, { 0x04C0, 0x04C0, 15 }, { 0x04C1, 0x04CE, 0 },
+  { 0x04D0, 0x052F, 0 },                                          /* Cyrillic */
+  { 0x0531, 0x0556, 48 },                                         /* Armenian */
+  { 0x1E00, 0x1E95, 0 }, { 0x1EA0, 0x1EFF, 0 },                   /* Vietnamese and more */
+};
+
+/** Fold one code point through utf8_fold_ranges. */
+static unsigned int utf8_fold(unsigned int cp)
+{
+  size_t lo = 0, hi = sizeof(utf8_fold_ranges) / sizeof(utf8_fold_ranges[0]);
+
+  /* The lower-case run of the alphabets the table covers, the common case. */
+  if ((cp >= 0x03AC && cp <= 0x03C1) || (cp >= 0x0430 && cp <= 0x045F))
+    return cp;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+
+    if (cp < utf8_fold_ranges[mid].lo)
+      hi = mid;
+    else if (cp > utf8_fold_ranges[mid].hi)
+      lo = mid + 1;
+    else if (utf8_fold_ranges[mid].delta)
+      return cp + utf8_fold_ranges[mid].delta;
+    else
+      return ((cp - utf8_fold_ranges[mid].lo) & 1) ? cp : cp + 1;
+  }
+  return cp;
+}
+
+#define IS_UTF8_CONT(c) (((unsigned char)(c) & 0xC0) == 0x80)
+/** Above any code point: a byte compared as itself. */
+#define UTF8_RAW_BYTE 0x110000u
+
+/** Read one unit at *s, advance past it and return it folded: an ASCII
+ * byte by the server casemapping, a sequence that can fold as its code
+ * point, and any other byte as itself.  Only two-byte sequences and those
+ * led by 0xE1 hold anything utf8_fold_ranges names.  Every other byte,
+ * invalid ones included, compares exactly, which is safe mid-character
+ * because a valid UTF-8 needle only matches at a character boundary. */
+static unsigned int utf8_fold_next(const char **s)
+{
+  const unsigned char *p = (const unsigned char *)*s;
+
+  if (p[0] < 0x80) {
+    *s += 1;
+    return (unsigned char)ToLower(p[0]);
+  }
+  if (p[0] >= 0xC2 && p[0] <= 0xDF && IS_UTF8_CONT(p[1])) {
+    *s += 2;
+    return utf8_fold(((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu));
+  }
+  if (p[0] == 0xE1 && IS_UTF8_CONT(p[1]) && IS_UTF8_CONT(p[2])) {
+    *s += 3;
+    return utf8_fold(0x1000u | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu));
+  }
+  *s += 1;
+  return UTF8_RAW_BYTE | p[0];
+}
+
+/** Whether \a n, folded, is a prefix of \a h, folded. */
+static int utf8_folded_prefix(const char *h, const char *n)
+{
+  while (*n) {
+    if (!*h || utf8_fold_next(&h) != utf8_fold_next(&n))
+      return 0;
+  }
+  return 1;
+}
+
+/** Case-insensitive substring search for UTF-8 text.  ASCII follows the
+ * server casemapping; Latin, Greek, Cyrillic and Armenian fold one to one.
+ * @param[in] hay Text to scan.
+ * @param[in] needle Text to find; empty matches at the start.
+ * @return Start of the first match in \a hay, or NULL.
+ */
+const char* ircd_utf8_strcasestr(const char* hay, const char* needle)
+{
+  const char *rest = needle;
+  unsigned int first;
+
+  if (!*needle)
+    return hay;
+  first = utf8_fold_next(&rest);
+  if (first < 0x80) {
+    /* An ASCII unit only ever equals an ASCII byte, and no sequence holds
+     * one, so bytes will do until one matches. */
+    for (; *hay; hay++)
+      if ((unsigned char)ToLower((unsigned char)*hay) == first
+          && utf8_folded_prefix(hay + 1, rest))
+        return hay;
+    return NULL;
+  }
+  while (*hay) {
+    const char *start = hay;
+
+    if (utf8_fold_next(&hay) == first && utf8_folded_prefix(hay, rest))
+      return start;
+  }
+  return NULL;
+}
+
 /** Case-insensitive word-boundary search for \a nick in \a text, using
  * the IRC nickname character class as the boundary definition: a match
  * counts only when the characters on both sides of it are not nickname
