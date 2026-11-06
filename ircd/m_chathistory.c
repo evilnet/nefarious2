@@ -5967,6 +5967,38 @@ static void search_sel_unescape(char *v)
   *w = '\0';
 }
 
+/** Drop the hits that are redacted.  search_row_hook keeps only
+ * PRIVMSG, NOTICE and MULTILINE rows, so a hit's REDACT row is never in
+ * the list and redact_filter_messages alone finds nothing to drop: the
+ * REDACT children are attached first (as every CHATHISTORY reply path
+ * does), the redacted originals filtered, and the attached context rows
+ * then removed again -- a SEARCH reply carries only the matched rows.
+ * @return the hits kept. */
+static int search_drop_redacted(const char *lookup_target,
+                                struct HistoryMessage **head, int count)
+{
+  struct HistoryMessage **pp;
+  int kept = 0;
+
+  if (count <= 0 || !head || !*head)
+    return count;
+  history_attach_context(lookup_target, *head);
+  redact_filter_messages(head, count);
+  pp = head;
+  while (*pp) {
+    struct HistoryMessage *cur = *pp;
+    if (cur->is_context) {
+      *pp = cur->next;
+      cur->next = NULL;
+      history_free_messages(cur);
+    } else {
+      pp = &cur->next;
+      kept++;
+    }
+  }
+  return kept;
+}
+
 /** The search walk shared by the local path and the S2S responder: BEFORE
  * from @a before_unix, the match hook chained behind @a base's presence
  * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
@@ -6000,7 +6032,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
     *truncated = filter.truncated;
   if (count < 0)
     return -1;
-  return redact_filter_messages(out, count);
+  return search_drop_redacted(lookup_target, out, count);
 }
 
 static int search_one_target(struct Client *sptr, const char *lookup_target,
@@ -6061,9 +6093,12 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     generate_batch_id(batchid, sizeof(batchid), sptr);
     bid = batchid;
-    if (label)
+    if (label && *label) {
       sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
                     cli_name(&me), batchid);
+      if (label == cli_label(sptr))   /* the command's own reply */
+        cli_label_responded(sptr) = 1;
+    }
     else
       sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
   }
@@ -6082,8 +6117,11 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 
   if (bid)
     sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
-  else if (label)
+  else if (label && *label) {
     sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
+    if (label == cli_label(sptr))
+      cli_label_responded(sptr) = 1;
+  }
 }
 
 
