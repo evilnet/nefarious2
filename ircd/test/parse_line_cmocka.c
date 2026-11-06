@@ -285,6 +285,12 @@ int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
   return 0;
 }
 
+const struct HLC *hlc_global(void)
+{
+  static struct HLC h;
+  return &h;
+}
+
 void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
                                       time_t *rate, const char *pattern, ...)
 {

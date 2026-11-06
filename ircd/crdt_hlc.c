@@ -62,19 +62,23 @@ struct HLC hlc_local_event(struct HLC *local)
   return *local;
 }
 
+int hlc_peer_time_ok(uint64_t ms, uint64_t now_ms, uint64_t max_forward_ms)
+{
+  /* Compare by subtraction, never by summing now_ms + max_forward_ms:
+   * that sum can overflow uint64_t when max_forward_ms is very large
+   * (e.g. a misconfigured FEAT_HLC_MAX_FORWARD_MS sign-extended to
+   * near UINT64_MAX), which would wrap the threshold down and refuse
+   * nearly every peer reading, including ones behind us. */
+  return !(max_forward_ms > 0 && ms > now_ms && ms - now_ms > max_forward_ms);
+}
+
 struct HLC hlc_receive_bounded(struct HLC *local, const struct HLC *remote,
                                 uint64_t now_ms, uint64_t max_forward_ms,
                                 int *rejected)
 {
   uint64_t now = now_ms;
 
-  /* Compare by subtraction, never by summing now_ms + max_forward_ms:
-   * that sum can overflow uint64_t when max_forward_ms is very large
-   * (e.g. a misconfigured FEAT_HLC_MAX_FORWARD_MS sign-extended to
-   * near UINT64_MAX), which would wrap the threshold down and refuse
-   * nearly every peer reading, including ones behind us. */
-  if (max_forward_ms > 0 && remote->physical_ms > now &&
-      remote->physical_ms - now > max_forward_ms) {
+  if (!hlc_peer_time_ok(remote->physical_ms, now, max_forward_ms)) {
     if (rejected)
       *rejected = 1;
 
