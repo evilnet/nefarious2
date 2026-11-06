@@ -281,8 +281,13 @@ static void test_live_vs_live_is_d2(void **state)
 {
   int k;
   (void)state;
-  /* The same answers whether the incoming one is known live or its
-   * state is unknown (today's wire). */
+  /* A live session primary against a client known live (a trusted
+   * primary mark): the older nick keeps, the newer is demoted; equal, the
+   * lower numeric keeps.  Against one whose state is unknown (no trusted
+   * hold mark: tags off on the path, or a peer that stamps none) a
+   * differing nick timestamp is the classic collision, and an equal one
+   * -- one nick claim split in two -- merges as before (user, 2026-11-06:
+   * "Classic, but equal TS merges"). */
   for (k = 0; k < 2; k++) {
     struct bounce_nick_side old_in = k ? known(0, 100, NEWER, NB)
                                        : unknown(100, NEWER, NB);
@@ -292,9 +297,10 @@ static void test_live_vs_live_is_d2(void **state)
                                       : unknown(100, NEWER, NB);
     struct bounce_nick_side tie_a = k ? known(0, 100, NEWER, NA)
                                       : unknown(100, NEWER, NA);
-    assert_int_equal(V(known(0, 100, OLDER, NA), new_in, 1, 0), BNV_KEEP_LOCAL);
-    assert_int_equal(V(known(0, 200, OLDER, NA), old_in, 1, 0),
-                     BNV_DEMOTE_LOCAL);
+    enum bounce_nick_verdict keep = k ? BNV_KEEP_LOCAL : BNV_CLASSIC;
+    enum bounce_nick_verdict demote = k ? BNV_DEMOTE_LOCAL : BNV_CLASSIC;
+    assert_int_equal(V(known(0, 100, OLDER, NA), new_in, 1, 0), keep);
+    assert_int_equal(V(known(0, 200, OLDER, NA), old_in, 1, 0), demote);
     assert_int_equal(V(known(0, 100, OLDER, NA), tie_b, 1, 0), BNV_KEEP_LOCAL);
     assert_int_equal(V(known(0, 100, OLDER, NB), tie_a, 1, 0),
                      BNV_DEMOTE_LOCAL);
@@ -326,11 +332,14 @@ static void test_unknown_incoming(void **state)
   /* The post-burst reconcile's call: never gated. */
   assert_int_equal(V(known(1, 100, OLDER, NA), unknown(50, OLDER, NB), 1, 0),
                    BNV_CLASSIC);
-  /* Ours a live session primary: as live against live, gated or not. */
+  /* Ours a live session primary, no trusted mark: a differing nick
+   * timestamp is classic, gated or not; an equal one merges by numeric,
+   * as live against live (user, 2026-11-06: "Classic, but equal TS
+   * merges"). */
   assert_int_equal(V(known(0, 100, OLDER, NA), unknown(200, NEWER, NB), 1, 1),
-                   BNV_KEEP_LOCAL);
+                   BNV_CLASSIC);
   assert_int_equal(V(known(0, 200, OLDER, NA), unknown(100, NEWER, NB), 1, 1),
-                   BNV_DEMOTE_LOCAL);
+                   BNV_CLASSIC);
   assert_int_equal(V(known(0, 100, OLDER, NB), unknown(100, NEWER, NA), 1, 0),
                    BNV_DEMOTE_LOCAL);
 }
@@ -909,7 +918,18 @@ static void test_composed_dlh_a_outsider_with_an_equal_id_never_drops(void **sta
  * does not yield, or only one side runs the classic rules.  The gated
  * columns are a's verdict while a's burst to b's link is still gated
  * (b has not had a's N yet, so there is no b verdict to pair it with),
- * with the open case as today (classic) and answered the other way. */
+ * with the open case as today (classic) and answered the other way.
+ *
+ * At a differing nick timestamp a live primary never merges into a
+ * client whose state it does not know (user, 2026-11-06: "Classic, but
+ * equal TS merges"), so every both-unknown row is classic on both sides,
+ * and so is every unknown reading of a live primary, gated or not.  The
+ * one-sided rows the ruling leaves asymmetric (primary against held,
+ * primary against primary: the primary that reads unknown runs the
+ * classic rules while the other side, reading a trusted mark, still
+ * yields) arise only from the registered multi-hop and runtime-toggle
+ * residuals.  The equal-timestamp pass is test_mixed_version_table_equal_ts
+ * below. */
 struct mixed_row {
   enum kind a, b;
   /* Both unknown: a's verdict on b, b's verdict on a. */
@@ -923,52 +943,14 @@ struct mixed_row {
   enum bounce_nick_verdict gated_ab, gated_a_ab;
 };
 
-static void test_mixed_version_table(void **state)
+/* Check each row with a = (OLDER, NA, a_ts) and b = (NEWER, NB, b_ts). */
+static void check_mixed_rows(const struct mixed_row *rows, int n,
+                             time_t a_ts, time_t b_ts)
 {
-  static const struct mixed_row rows[] = {
-    /* held vs held: classic both ways; one-sided, b's held ghost (the
-     * newer session) retires while a runs the classic rules.  Gated: the
-     * unknown client may be a login in no session, so classic today. */
-    { K_HELD, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_RETIRE_LOCAL, 0,
-      BNV_CLASSIC, BNV_RETIRE_LOCAL },
-    /* held vs live primary: the held side runs the classic rules, the
-     * primary merges by nick age -- today's 0.3a failure (the newer
-     * live primary demotes into the held ghost; the hub's classic
-     * rules kill it). */
-    { K_HELD, K_PRIMARY, BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
-      BNV_CLASSIC, BNV_KEEP_LOCAL, 0,
-      BNV_CLASSIC, BNV_RETIRE_LOCAL },
-    { K_HELD, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_RETIRE_LOCAL },
-    { K_PRIMARY, K_HELD, BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
-      BNV_KEEP_LOCAL, BNV_RETIRE_LOCAL, 1,
-      BNV_KEEP_LOCAL, BNV_KEEP_LOCAL },
-    { K_PRIMARY, K_PRIMARY, BNV_KEEP_LOCAL, BNV_DEMOTE_LOCAL, 1,
-      BNV_KEEP_LOCAL, BNV_DEMOTE_LOCAL, 1,
-      BNV_KEEP_LOCAL, BNV_KEEP_LOCAL },
-    /* live primary vs a login in no session: the primary would merge
-     * into it by nick age while the login runs the classic rules (the
-     * D.2-into-a-non-member row). */
-    { K_PRIMARY, K_OUTSIDER, BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
-      BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
-      BNV_KEEP_LOCAL, BNV_KEEP_LOCAL },
-    { K_OUTSIDER, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_CLASSIC },
-    { K_OUTSIDER, K_PRIMARY, BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
-      BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_CLASSIC },
-    { K_OUTSIDER, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_CLASSIC, 1,
-      BNV_CLASSIC, BNV_CLASSIC },
-  };
   int r;
-  (void)state;
-  for (r = 0; r < (int)(sizeof rows / sizeof rows[0]); r++) {
-    struct wire_side a = { rows[r].a, 100, OLDER, NA };
-    struct wire_side b = { rows[r].b, 200, NEWER, NB };
+  for (r = 0; r < n; r++) {
+    struct wire_side a = { rows[r].a, a_ts, OLDER, NA };
+    struct wire_side b = { rows[r].b, b_ts, NEWER, NB };
     enum bounce_nick_verdict ab, ba;
     int sym;
 
@@ -976,7 +958,8 @@ static void test_mixed_version_table(void **state)
     ba = composed(&b, &a, 0, 0);
     sym = (ab == BNV_KEEP_LOCAL) == yields(ba)
           && (ab == BNV_CLASSIC) == (ba == BNV_CLASSIC);
-    print_message("mixed both-unknown %s vs %s: %s / %s%s\n",
+    print_message("mixed ts%ld/%ld both-unknown %s vs %s: %s / %s%s\n",
+                  (long)a_ts, (long)b_ts,
                   kind_name(rows[r].a), kind_name(rows[r].b), vname(ab),
                   vname(ba), sym ? "" : "  ASYMMETRIC");
     assert_int_equal(ab, rows[r].both_ab);
@@ -987,7 +970,8 @@ static void test_mixed_version_table(void **state)
     ba = composed(&b, &a, 1, 0);
     sym = (ab == BNV_KEEP_LOCAL) == yields(ba)
           && (ab == BNV_CLASSIC) == (ba == BNV_CLASSIC);
-    print_message("mixed one-sided %s vs %s: %s / %s%s\n",
+    print_message("mixed ts%ld/%ld one-sided %s vs %s: %s / %s%s\n",
+                  (long)a_ts, (long)b_ts,
                   kind_name(rows[r].a), kind_name(rows[r].b), vname(ab),
                   vname(ba), sym ? "" : "  ASYMMETRIC");
     assert_int_equal(ab, rows[r].one_ab);
@@ -996,12 +980,343 @@ static void test_mixed_version_table(void **state)
 
     ab = composed_g(&a, &b, 0, 0, 1);
     ba = composed_g(&a, &b, 0, 1, 1);
-    print_message("mixed gated %s vs %s: %s, live login winning %s\n",
+    print_message("mixed ts%ld/%ld gated %s vs %s: %s, live login winning %s\n",
+                  (long)a_ts, (long)b_ts,
                   kind_name(rows[r].a), kind_name(rows[r].b), vname(ab),
                   vname(ba));
     assert_int_equal(ab, rows[r].gated_ab);
     assert_int_equal(ba, rows[r].gated_a_ab);
   }
+}
+
+static void test_mixed_version_table(void **state)
+{
+  static const struct mixed_row rows[] = {
+    /* held vs held: classic both ways; one-sided, b's held ghost (the
+     * newer session) retires while a runs the classic rules.  Gated: the
+     * unknown client may be a login in no session, so classic today. */
+    { K_HELD, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL, 0,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL },
+    /* held vs live primary: classic both ways.  (The newer live primary
+     * no longer demotes into a held ghost it cannot see -- the 0.3a
+     * failure, where the hub's classic rules then killed it.) */
+    { K_HELD, K_PRIMARY, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_KEEP_LOCAL, 0,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL },
+    { K_HELD, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL },
+    /* live primary vs held: classic both ways; one-sided, the held side
+     * that reads the primary's mark still retires (the residual). */
+    { K_PRIMARY, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL, 0,
+      BNV_CLASSIC, BNV_CLASSIC },
+    /* two live primaries at differing nick timestamps: classic both ways
+     * (one of them changed nick during the split: the younger copy ends
+     * instead of swapping); one-sided, the side that reads a trusted mark
+     * still demotes (the residual). */
+    { K_PRIMARY, K_PRIMARY, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
+      BNV_CLASSIC, BNV_CLASSIC },
+    /* live primary vs a login in no session: classic both ways.  (The
+     * primary no longer merges into it by nick age while the login runs
+     * the classic rules -- the D.2-into-a-non-member row.) */
+    { K_PRIMARY, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+    { K_OUTSIDER, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+    { K_OUTSIDER, K_PRIMARY, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+    { K_OUTSIDER, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+  };
+  (void)state;
+  check_mixed_rows(rows, (int)(sizeof rows / sizeof rows[0]), 100, 200);
+}
+
+/* The same table at an equal nick timestamp (a and b both at 100): the
+ * shape of one session split in two, since a promoted device keeps the
+ * nick timestamp its primary had.  With no trusted mark a live primary
+ * merges as before, by numeric (a, NA, is the lower): the low one keeps
+ * and the high one is demoted (user, 2026-11-06: "Classic, but equal TS
+ * merges").  The equal timestamp does not prove the other client is a
+ * live primary: against a held ghost or a login in no session the
+ * primary still keeps or demotes while the other side runs the classic
+ * rules (the residue, as on the tip). */
+static void test_mixed_version_table_equal_ts(void **state)
+{
+  static const struct mixed_row rows[] = {
+    { K_HELD, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL, 0,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL },
+    /* The residue: b's primary (the high numeric) demotes into a's held
+     * ghost, which runs the classic rules. */
+    { K_HELD, K_PRIMARY, BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
+      BNV_CLASSIC, BNV_KEEP_LOCAL, 0,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL },
+    { K_HELD, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_RETIRE_LOCAL },
+    /* The residue: a's primary keeps against b's held ghost, which runs
+     * the classic rules; one-sided, the ghost reads a's mark and retires,
+     * symmetric again. */
+    { K_PRIMARY, K_HELD, BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
+      BNV_KEEP_LOCAL, BNV_RETIRE_LOCAL, 1,
+      BNV_KEEP_LOCAL, BNV_KEEP_LOCAL },
+    /* One session split in two: merged, the low numeric keeps. */
+    { K_PRIMARY, K_PRIMARY, BNV_KEEP_LOCAL, BNV_DEMOTE_LOCAL, 1,
+      BNV_KEEP_LOCAL, BNV_DEMOTE_LOCAL, 1,
+      BNV_KEEP_LOCAL, BNV_KEEP_LOCAL },
+    /* The residue: the primary keeps against a login in no session, which
+     * runs the classic rules. */
+    { K_PRIMARY, K_OUTSIDER, BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
+      BNV_KEEP_LOCAL, BNV_CLASSIC, 0,
+      BNV_KEEP_LOCAL, BNV_KEEP_LOCAL },
+    { K_OUTSIDER, K_HELD, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+    /* The residue: b's primary (the high numeric) demotes into a login in
+     * no session, which runs the classic rules. */
+    { K_OUTSIDER, K_PRIMARY, BNV_CLASSIC, BNV_DEMOTE_LOCAL, 0,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+    { K_OUTSIDER, K_OUTSIDER, BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC, 1,
+      BNV_CLASSIC, BNV_CLASSIC },
+  };
+  (void)state;
+  check_mixed_rows(rows, (int)(sizeof rows / sizeof rows[0]), 100, 100);
+}
+
+/* ---- no trusted hold mark (user, 2026-11-06: "Classic, but equal TS
+ * merges") ---- */
+
+/* Two clients of one account meet on one nick and neither server can
+ * trust the other's hold mark (P10_MESSAGE_TAGS off on the path, or a
+ * peer that stamps none; over a direct link the trust is symmetric).
+ * Neither side knows what the other's client is.  At a differing nick
+ * timestamp neither merges: both run the classic rules.  Before the
+ * ruling a live primary merged by nick age into whatever the other client
+ * was -- a login in no session or a held ghost -- while the other side ran
+ * the classic rules: a half-merge.  Every pair at a differing timestamp,
+ * every client kind, both D-LH answers (ungated: gated, D-LH (a) still
+ * ends a held ghost for an unknown client, test_mixed_version_table). */
+static void test_untrusted_marks_differing_ts_classic_on_both_sides(void **state)
+{
+  struct wire_side sides[24];
+  int n = all_sides(sides), a, b, d, asym = 0, merged = 0, pairs = 0;
+  (void)state;
+  for (d = 0; d < 2; d++)
+    for (a = 0; a < n; a++)
+      for (b = 0; b < n; b++) {
+        enum bounce_nick_verdict ab, ba;
+        if (!strcmp(sides[a].numeric, sides[b].numeric))
+          continue;
+        if (sides[a].lastnick == sides[b].lastnick)
+          continue;
+        pairs++;
+        ab = composed(&sides[a], &sides[b], 0, d);
+        ba = composed(&sides[b], &sides[a], 0, d);
+        if ((ab == BNV_KEEP_LOCAL) != yields(ba)
+            || (ab == BNV_CLASSIC) != (ba == BNV_CLASSIC))
+          asym++;
+        if (ab != BNV_CLASSIC || ba != BNV_CLASSIC) {
+          merged++;
+          print_message("untrusted differing ts (D-LH %s): %s %s %s ts%ld -> %s, "
+                        "%s %s %s ts%ld -> %s\n", d ? "a" : "b",
+                        kind_name(sides[a].kind), sides[a].sessid,
+                        sides[a].numeric, (long)sides[a].lastnick, vname(ab),
+                        kind_name(sides[b].kind), sides[b].sessid,
+                        sides[b].numeric, (long)sides[b].lastnick, vname(ba));
+        }
+      }
+  assert_true(pairs > 0);
+  assert_int_equal(asym, 0);
+  assert_int_equal(merged, 0);
+}
+
+/* What the ruling gives our side at an equal nick timestamp with no
+ * trusted mark: a live session primary of ours merges as live against
+ * live -- the lower numeric keeps, the higher is demoted -- whatever the
+ * other client really is; anything else of ours runs the classic rules. */
+static enum bounce_nick_verdict untrusted_equal_ts_expect(const struct wire_side *ours,
+                                                         const struct wire_side *theirs)
+{
+  if (ours->kind != K_PRIMARY)
+    return BNV_CLASSIC;
+  return strcmp(ours->numeric, theirs->numeric) <= 0 ? BNV_KEEP_LOCAL
+                                                     : BNV_DEMOTE_LOCAL;
+}
+
+/* At an equal nick timestamp -- one session split in two, a promoted
+ * device keeping the timestamp its primary had -- two live primaries
+ * merge as before: one keeps exactly when the other is demoted, by
+ * numeric, and nobody is disconnected.  The equal timestamp does not
+ * prove the other client is a live primary: a live primary against a
+ * held ghost or a login in no session still keeps or demotes while the
+ * other side runs the classic rules (the residue, the same as the tip's).
+ * Every other pair is classic on both sides.  Every pair at an equal
+ * timestamp, every client kind, both D-LH answers (ungated). */
+static void test_untrusted_marks_equal_ts_merges_as_before(void **state)
+{
+  struct wire_side sides[24];
+  int n = all_sides(sides), a, b, d, both = 0, residue = 0, pairs = 0;
+  (void)state;
+  for (d = 0; d < 2; d++)
+    for (a = 0; a < n; a++)
+      for (b = 0; b < n; b++) {
+        enum bounce_nick_verdict ab, ba;
+        int sym;
+        if (!strcmp(sides[a].numeric, sides[b].numeric))
+          continue;
+        if (sides[a].lastnick != sides[b].lastnick)
+          continue;
+        pairs++;
+        ab = composed(&sides[a], &sides[b], 0, d);
+        ba = composed(&sides[b], &sides[a], 0, d);
+        assert_int_equal(ab, untrusted_equal_ts_expect(&sides[a], &sides[b]));
+        assert_int_equal(ba, untrusted_equal_ts_expect(&sides[b], &sides[a]));
+        sym = (ab == BNV_KEEP_LOCAL) == yields(ba)
+              && (ab == BNV_CLASSIC) == (ba == BNV_CLASSIC);
+        if (sides[a].kind == K_PRIMARY && sides[b].kind == K_PRIMARY) {
+          /* One session split in two: a clean, symmetric merge. */
+          assert_true(sym);
+          assert_int_not_equal(ab, BNV_CLASSIC);
+          both++;
+        } else if (sides[a].kind == K_PRIMARY || sides[b].kind == K_PRIMARY) {
+          /* The residue: the primary merges, the other side is classic. */
+          assert_false(sym);
+          residue++;
+        } else {
+          assert_int_equal(ab, BNV_CLASSIC);
+          assert_int_equal(ba, BNV_CLASSIC);
+        }
+      }
+  assert_true(pairs > 0);
+  assert_true(both > 0);
+  assert_true(residue > 0);
+}
+
+/* The two shapes the analysis found, by name, in both nick-age orders:
+ * a live primary against a login in no session (the bed case: the login
+ * holds the nick with the older timestamp), and a live primary against
+ * a held ghost.  At a differing nick timestamp neither side merges, gated
+ * or not.  (At an equal one the primary still merges and the other side
+ * is classic: the residue, test_untrusted_marks_equal_ts_merges_as_before.) */
+static void test_untrusted_primary_vs_outsider_or_held_is_classic(void **state)
+{
+  static const time_t ts[2] = { 100, 200 };
+  static const enum kind others[2] = { K_OUTSIDER, K_HELD };
+  int o, t, d, g;
+  (void)state;
+  for (o = 0; o < 2; o++)
+    for (t = 0; t < 2; t++)
+      for (d = 0; d < 2; d++) {
+        struct wire_side primary = { K_PRIMARY, ts[t], OLDER, NA };
+        struct wire_side other = { others[o], ts[!t], NEWER, NB };
+        assert_int_equal(composed(&primary, &other, 0, d), BNV_CLASSIC);
+        assert_int_equal(composed(&other, &primary, 0, d), BNV_CLASSIC);
+        /* Our primary while our burst to the other's link is gated: the
+         * same. */
+        for (g = 0; g < 2; g++)
+          assert_int_equal(composed_g(&primary, &other, 0, d, g), BNV_CLASSIC);
+      }
+  /* The bed case through the plain verdict: our primary (newer) against
+   * an unannounced client holding the nick since earlier. */
+  assert_int_equal(V(known(0, 200, OLDER, NA), unknown(100, NEWER, NB), 1, 0),
+                   BNV_CLASSIC);
+  /* A trusted mark still merges as before: the outsider is classic, the
+   * held ghost loses to the live primary, a live primary is demoted. */
+  {
+    struct wire_side primary = { K_PRIMARY, 200, OLDER, NA };
+    struct wire_side out = { K_OUTSIDER, 100, NEWER, NB };
+    struct wire_side held = { K_HELD, 100, NEWER, NB };
+    struct wire_side other_primary = { K_PRIMARY, 100, NEWER, NB };
+    assert_int_equal(composed(&primary, &out, 1, 0), BNV_CLASSIC);
+    assert_int_equal(composed(&primary, &held, 1, 0), BNV_KEEP_LOCAL);
+    assert_int_equal(composed(&held, &primary, 1, 0), BNV_RETIRE_LOCAL);
+    assert_int_equal(composed(&primary, &other_primary, 1, 0), BNV_DEMOTE_LOCAL);
+    assert_int_equal(composed(&other_primary, &primary, 1, 0), BNV_KEEP_LOCAL);
+  }
+}
+
+/* The post-burst reconcile's verdict, built as bounce_post_burst_reconcile
+ * (bouncer_session.c) builds it: ours is its session's primary slot; the
+ * candidate is a live client its server introduced, proven a member of
+ * our session by its session id (ours, or the id its server announced
+ * the session under before taking ours), so its state is known -- held
+ * when its server announced the session holding (peer_holds), else a
+ * live member. */
+static enum bounce_nick_verdict reconcile_verdict(int ours_held, time_t our_ts,
+                                                  const char *our_num,
+                                                  int peer_holds,
+                                                  time_t their_ts,
+                                                  const char *their_num,
+                                                  const char *their_sessid)
+{
+  struct bounce_nick_side ours, theirs;
+  memset(&ours, 0, sizeof ours);
+  ours.held = ours_held;
+  ours.state_known = 1;
+  ours.lastnick = our_ts;
+  ours.sessid = OLDER;
+  ours.numeric = our_num;
+  memset(&theirs, 0, sizeof theirs);
+  theirs.state_known = 1;
+  theirs.held = peer_holds;
+  theirs.non_member = 0;
+  theirs.lastnick = their_ts;
+  theirs.sessid = their_sessid;
+  theirs.numeric = their_num;
+  return bounce_nick_verdict(&ours, &theirs, 1, 0, 0);
+}
+
+/* The reconcile keeps demoting exactly when it did: our live primary
+ * against a live member with the older nick (equal: the lower numeric),
+ * never against a holding one, never when ours is held. */
+static void test_reconcile_shape_still_demotes(void **state)
+{
+  static const char *nums[2] = { NA, NB };
+  static const char *ids[2] = { OLDER, NEWER };
+  static const time_t ts[3] = { 100, 150, 200 };
+  int oh, ph, ot, tt, on, i;
+  (void)state;
+  assert_int_equal(reconcile_verdict(0, 200, NA, 0, 100, NB, OLDER),
+                   BNV_DEMOTE_LOCAL);
+  assert_int_equal(reconcile_verdict(0, 100, NA, 0, 200, NB, OLDER),
+                   BNV_KEEP_LOCAL);
+  assert_int_equal(reconcile_verdict(0, 100, NB, 0, 100, NA, OLDER),
+                   BNV_DEMOTE_LOCAL);
+  assert_int_equal(reconcile_verdict(0, 100, NA, 0, 100, NB, OLDER),
+                   BNV_KEEP_LOCAL);
+  assert_int_equal(reconcile_verdict(0, 200, NA, 1, 100, NB, OLDER),
+                   BNV_KEEP_LOCAL);
+  for (oh = 0; oh < 2; oh++)
+  for (ph = 0; ph < 2; ph++)
+  for (ot = 0; ot < 3; ot++)
+  for (tt = 0; tt < 3; tt++)
+  for (on = 0; on < 2; on++)
+  for (i = 0; i < 2; i++) {
+    const char *our_num = nums[on], *their_num = nums[!on];
+    int want = !oh && !ph
+               && (ts[tt] < ts[ot]
+                   || (ts[tt] == ts[ot] && strcmp(their_num, our_num) < 0));
+    enum bounce_nick_verdict v = reconcile_verdict(oh, ts[ot], our_num, ph,
+                                                   ts[tt], their_num, ids[i]);
+    assert_int_equal(v == BNV_DEMOTE_LOCAL, want);
+  }
+  /* Its inputs before 2026-11-06 left a live candidate's state unknown;
+   * at a differing nick timestamp they now read as a meeting with no
+   * trusted mark -- classic -- and the reconcile would no longer demote
+   * into a candidate with the older nick.  It says what it proved
+   * instead: a member of our session, its state known. */
+  assert_int_equal(V(known(0, 200, OLDER, NA), unknown(100, OLDER, NB), 1, 0),
+                   BNV_CLASSIC);
 }
 
 /* ---- our side from our own stamp, and the action a verdict maps to ---- */
@@ -1578,6 +1893,11 @@ int main(void)
     cmocka_unit_test(test_composed_dlh_b_outsider_meets_held_classic),
     cmocka_unit_test(test_composed_dlh_a_outsider_with_an_equal_id_never_drops),
     cmocka_unit_test(test_mixed_version_table),
+    cmocka_unit_test(test_mixed_version_table_equal_ts),
+    cmocka_unit_test(test_untrusted_marks_differing_ts_classic_on_both_sides),
+    cmocka_unit_test(test_untrusted_marks_equal_ts_merges_as_before),
+    cmocka_unit_test(test_untrusted_primary_vs_outsider_or_held_is_classic),
+    cmocka_unit_test(test_reconcile_shape_still_demotes),
     cmocka_unit_test(test_stamp_reads_back_as_the_peer_reads_it),
     cmocka_unit_test(test_action_classic_and_keep),
     cmocka_unit_test(test_action_retire_by_what_ours_is_now),

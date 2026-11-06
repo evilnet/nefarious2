@@ -2899,18 +2899,23 @@ void bounce_post_burst_reconcile(void)
          * no outsider; a different Keycloak user never passed the
          * candidate test above; and this pass runs after a burst, never
          * for a gated link.  A held ghost of ours never gets here (the
-         * candidate test refuses a held face), and the verdict would
-         * leave it alone too: classic.  Ours is read held from s, the
-         * session the demote acts on.
+         * candidate test refuses a held face), and the verdict never
+         * demotes one anyway: only a demote acts here.  Ours is read held
+         * from s, the session the demote acts on.
          *
-         * The candidate is held when its server announced this session
-         * "holding" (BS C): its copy of the session yields to ours there,
-         * our live primary taking its place, so ours is never demoted
-         * into it -- live beats held.  That is what a held ghost with a
-         * live alias is too: it carries a "p" hold mark (read live at a
-         * same-nick meeting), yet the yield ends it.  A hold flag is our
-         * own and a remote client never shows one.  Otherwise its state is
-         * not known here. */
+         * The candidate's state is known: the candidate test proved it a
+         * member of our session by its id, which no hold mark carries
+         * (the same-nick verdict reads a live client of unknown state at a
+         * differing nick timestamp as a meeting with no trusted mark,
+         * classic: user, 2026-11-06).
+         * It is held when its server announced this session "holding"
+         * (BS C): its copy of the session yields to ours there, our live
+         * primary taking its place, so ours is never demoted into it --
+         * live beats held.  That is what a held ghost with a live alias
+         * is too: it carries a "p" hold mark (read live at a same-nick
+         * meeting), yet the yield ends it.  A hold flag is our own and a
+         * remote client never shows one.  Otherwise it is a live member:
+         * the older nick keeps the slot. */
         {
           struct bounce_nick_side ours, theirs;
           char our_full[6], their_full[6];
@@ -2930,7 +2935,7 @@ void bounce_post_burst_reconcile(void)
           ours.sessid      = s->hs_sessid;
           ours.numeric     = our_full;
           memset(&theirs, 0, sizeof theirs);
-          theirs.state_known = peer_holds;
+          theirs.state_known = 1;
           theirs.held        = peer_holds;
           theirs.non_member  = 0;
           theirs.lastnick    = cli_lastnick(peer_primary);

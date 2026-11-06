@@ -297,6 +297,14 @@ enum bounce_nick_verdict {
  *     - the incoming one known held: ours keeps;
  *     - ours not its session's primary, or the incoming one known to be
  *       in no session: classic;
+ *     - the incoming one's state unknown at a differing nick timestamp
+ *       (no trusted mark: it may be a login in no session or a held
+ *       ghost, and its server reads ours as unknown too): classic.  At an
+ *       equal one -- one nick claim split in two -- it merges as below
+ *       (user, 2026-11-06: "Classic, but equal TS merges"); the equal
+ *       timestamp does not prove it a live primary, so against a held
+ *       ghost or a login in no session ours keeps or demotes while the
+ *       other side runs the classic rules (the residue);
  *     - else the older nick timestamp keeps; equal, the lower numeric;
  *       the newer is demoted to the other's alias.
  *

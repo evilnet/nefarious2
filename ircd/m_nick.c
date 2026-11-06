@@ -637,7 +637,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    *    merge below); our held ghost, which has no socket to keep, yields
    *    instead: it leaves, and its session's live connections follow the
    *    incoming primary under its session id.
-   *  - classic: the collision rules below.
+   *  - classic: the collision rules below -- among them every meeting of
+   *    our live client with one whose state is unknown (no trusted mark:
+   *    tags off on the path, or a peer that stamps none) at a differing
+   *    nick TS, on both sides (user, 2026-11-06).
    *
    * Legacy peer gate: the symmetric contract only holds if the
    * introducing peer also runs this.  Against a legacy peer (no `v`

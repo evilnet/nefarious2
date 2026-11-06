@@ -139,6 +139,18 @@ enum bounce_nick_verdict bounce_nick_verdict_ex(const struct bounce_nick_side *l
   /* Two live clients merge only as two session primaries. */
   if (!local_is_session_primary || incoming->non_member)
     return BNV_CLASSIC;
+  /* No trusted mark (tags off on the path, a peer that stamps none): the
+   * incoming client may be a login in no session or a held ghost, and the
+   * other side reads ours as unknown too.  A differing nick timestamp is
+   * the classic collision; an equal one is one nick claim split in two --
+   * a promoted device keeps the timestamp its primary had -- and merges
+   * as before (user, 2026-11-06: "Classic, but equal TS merges").  An
+   * equal timestamp does not prove the incoming client is a live
+   * primary: against a held ghost or a login in no session ours still
+   * keeps or demotes while the other side runs the classic rules (the
+   * residue, as before). */
+  if (!incoming->state_known && local->lastnick != incoming->lastnick)
+    return BNV_CLASSIC;
   /* The established connection stays primary: the older nick timestamp,
    * then the lower numeric, which both ends compare the same way. */
   if (local->lastnick != incoming->lastnick)
