@@ -7500,8 +7500,9 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     } else if (ircd_strcmp(key, "from") == 0) {
       ircd_strncpy(sm.from, val, sizeof(sm.from));
     } else if (ircd_strcmp(key, "text") == 0) {
-      if (val[0])
-        sm.text = val;
+      /* The last text wins, an empty one too: text=a;text= searches
+       * for nothing in particular, as an unrepeated text= does. */
+      sm.text = val[0] ? val : NULL;
     } else if (ircd_strcmp(key, "after") == 0) {
       if (!val[0] || history_iso_to_unix(val, after_unix, sizeof(after_unix)) != 0) {
         send_fail(sptr, "SEARCH", "INVALID_PARAMS", "after", "Invalid timestamp");
