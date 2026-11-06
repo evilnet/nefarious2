@@ -6061,7 +6061,7 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     generate_batch_id(batchid, sizeof(batchid), sptr);
     bid = batchid;
-    if (label) {
+    if (label && *label) {
       sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s soju.im/search", label,
                     cli_name(&me), batchid);
       cli_label_responded(sptr) = 1;   /* the batch answers: no generic ACK */
@@ -6083,7 +6083,7 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 
   if (bid)
     sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
-  else if (label) {
+  else if (label && *label) {
     sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
     cli_label_responded(sptr) = 1;
   }
