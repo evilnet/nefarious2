@@ -3375,6 +3375,14 @@ static void process_write_forward(const char *target, const char *msgid,
     memcpy(target_msgid, content, len);
     target_msgid[len] = '\0';
     history_redact_message(target, target_msgid);
+    /* One REDACT row per message, as redact_apply_row keeps it: a second
+     * redaction (a fresh redact msgid for a message this store already
+     * holds as redacted) is not stored again. */
+    if (history_message_is_redacted(target, target_msgid) == 1) {
+      Debug((DEBUG_DEBUG, "CH W: %s in %s is redacted already, ignoring REDACT %s",
+             target_msgid, target, msgid));
+      return;
+    }
   }
 
   /* Check if this is a new channel for Layer 1 advertisement */
