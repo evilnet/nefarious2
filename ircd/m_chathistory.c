@@ -7422,9 +7422,6 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * rows are not merged (2026-09-20).
  * ==================================================================== */
 
-/** Attributes one SEARCH may carry (soju's form packs them in one parameter). */
-#define SEARCH_ATTR_MAX MAXPARA
-
 /** Handle SEARCH (soju.im/search).  parv[1] is soju's `;`-joined attribute
  * list, tag-escaped; two or more parameters are our older form, one
  * `key=value` each, the last one trailing so it may carry spaces. */
@@ -7438,8 +7435,8 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   const char *pm_other = NULL;
   int limit = 0, max_limit;
   int budget = SEARCH_SCAN_MAX;
-  char *sel[SEARCH_ATTR_MAX];
-  int nsel = 0, tagform = 0;
+  char *cur, *next;
+  int tagform;
   int i;
 
   if (!CapActive(sptr, CAP_SOJU_SEARCH))
@@ -7459,36 +7456,30 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * older form spreads them over parameters, unescaped, the last one
    * trailing so a text may hold spaces; it is still read when there is
    * more than one parameter. */
-  if (parc == 2) {
-    char *p = parv[1], *semi;
+  tagform = (parc == 2);
+  next = parc > 1 ? parv[1] : NULL;
+  for (i = 1; (cur = next); ) {
+    char *eq;
+    const char *key, *val;
 
-    for (;;) {
-      if ((semi = strchr(p, ';')))
+    if (tagform) {
+      char *semi = strchr(cur, ';');
+
+      next = NULL;
+      if (semi) {
         *semi = '\0';
-      if (*p) {
-        if (nsel == SEARCH_ATTR_MAX) {
-          send_fail(sptr, "SEARCH", "INVALID_PARAMS", "*", "Too many attributes");
-          return 0;
-        }
-        sel[nsel++] = p;
+        next = semi + 1;
       }
-      if (!semi)
-        break;
-      p = semi + 1;
+      if (!*cur)
+        continue;   /* ";;" or a trailing ';' */
+    } else {
+      next = ++i < parc ? parv[i] : NULL;
     }
-    tagform = 1;
-  } else {
-    for (i = 1; i < parc && nsel < SEARCH_ATTR_MAX; i++)
-      sel[nsel++] = parv[i];
-  }
 
-  for (i = 0; i < nsel; i++) {
-    char *eq = strchr(sel[i], '=');
-    const char *key = sel[i];
-    const char *val;
-
-    if (eq == sel[i] || (!eq && !tagform)) {
-      send_fail(sptr, "SEARCH", "INVALID_PARAMS", sel[i], "Selectors are key=value");
+    eq = strchr(cur, '=');
+    key = cur;
+    if (eq == cur || (!eq && !tagform)) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", cur, "Selectors are key=value");
       return 0;
     }
     if (eq) {
@@ -7496,6 +7487,12 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       val = tagform ? ircd_tag_value_unescape(eq + 1) : eq + 1;
     } else {
       val = "";   /* a tag with no value */
+    }
+    /* An escaped CR or LF must not reach the CH Q selectors, which go
+     * to the storage servers raw. */
+    if (strpbrk(val, "\r\n")) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", key, "Line breaks are not allowed");
+      return 0;
     }
 
     if (ircd_strcmp(key, "in") == 0) {
