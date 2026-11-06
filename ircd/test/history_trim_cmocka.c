@@ -3498,6 +3498,145 @@ static void test_evict_cascade_unreadable_cross_owner_once(void **state)
   assert_int_equal(1000, owner_of("a:bob"));
 }
 
+/* A multiline original goes with its REDACT row: its ml_content and paste
+ * rows too, and its bytes come off its owner once. */
+static void test_evict_redact_takes_multiline_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_row_sized("#c", "1000.000", "ORIG", "a:bob", HTC_F_ML, "", "", 40, 100, NULL);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  assert_int_equal(1, fake_db_rows(st.ml_content));
+  assert_int_equal(1, fake_db_rows(st.ml_paste));
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, fake_db_rows(st.ml_content));
+  assert_int_equal(0, fake_db_rows(st.ml_paste));
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_acct_matches_cf();
+}
+
+/* An original that is itself a reply: the cascade removes its own
+ * reply_index entry under its parent, as well as the REDACT row's link. */
+static void test_evict_redact_takes_reply_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_row_sized("#c", "1000.000", "ORIG", "a:bob", 0, "P0", "", 0, 100, NULL);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  assert_int_equal(2, fake_db_rows(st.reply));
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_acct_matches_cf();
+}
+
+/* Two REDACT rows for one original, both taken in one owner step: the
+ * original is deleted and subtracted once. */
+static void test_evict_two_redacts_one_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "R1", "a:mod", "ORIG", 100);
+  seed_redact("#c", 1002, "R2", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 29, 2000, 100);
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1001, "R1"));
+  assert_int_equal(0, row_present("#c", 1002, "R2"));
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, redact_link("#c", "ORIG", 1001, "R1"));
+  assert_int_equal(0, redact_link("#c", "ORIG", 1002, "R2"));
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_true(owner_of("a:mod") <= 1000);
+  assert_acct_matches_cf();
+}
+
+/* A REDACT row names its original by msgid within its own target: a row
+ * with the same msgid in another target is not the one it redacts. */
+static void test_evict_redact_scoped_to_target(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  seed_sized("#d", 3000, "ORIG", "a:carol", 100);
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(1, row_present("#d", 3000, "ORIG"));
+  assert_int_equal(100, owner_of("a:carol"));
+  assert_acct_matches_cf();
+}
+
+/* The emergency path is a walk like any other: a REDACT row it takes takes
+ * its original, even a newer one the walk has not reached. */
+static void test_emergency_redact_takes_original(void **state)
+{
+  (void)state;
+
+  seed_redact("#c", 900, "RDX", "a:mod", "ORIG", 100);
+  seed_sized("#c", 5000, "ORIG", "a:bob", 100);
+  seed_run("#n", "N", "-", 10, 1000, 100);
+  step_us = 1000;
+  assert_true(htrim_emergency(1) >= 1);
+  assert_int_equal(0, row_present("#c", 900, "RDX"));
+  assert_int_equal(0, row_present("#c", 5000, "ORIG"));
+  assert_int_equal(1, row_present("#n", 1000, "N00"));
+}
+
+/* A read the cascade needs fails (the original's msgid_index lookup): the
+ * slice is poisoned, and its commit applies nothing -- the REDACT row is
+ * not deleted without its original. */
+static void test_cascade_read_failure_poisons_slice(void **state)
+{
+  char bt[HTC_BT_KEY_MAX];
+  struct htc_rec rec;
+  struct htrim_slice *s;
+  uint64_t total;
+  int btl;
+  (void)state;
+
+  load_acct();
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  total = total_now();
+
+  get_rec("#c", "1001.000", "RDX", &rec);
+  btl = bt_of(bt, sizeof bt, "#c", "1001.000", "RDX");
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  fake_db_fail_get_at(env, 1);          /* parent_ts's msgid_index read */
+  assert_int_equal(-2, htrim_delete_row(s, HTRIM_PATH_AGEOUT, bt, (size_t)btl, &rec, 1));
+  assert_int_equal(-1, htrim_slice_commit(s));
+  assert_int_equal(1, row_present("#c", 1001, "RDX"));
+  assert_int_equal(1, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(total, total_now());
+  assert_acct_matches_cf();
+}
+
 /* Nobody over share: the oldest rows go, whoever owns them, until the
  * store is at the low watermark; the coverage floor follows them. */
 static void test_evict_oldest_after_shares(void **state)
@@ -5680,6 +5819,12 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_backfill_skips_original_cascaded_same_slice, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_cascade_counts_toward_later_owner, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_cascade_unreadable_cross_owner_once, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_takes_multiline_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_takes_reply_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_two_redacts_one_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_scoped_to_target, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_emergency_redact_takes_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cascade_read_failure_poisons_slice, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_oldest_after_shares, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_hysteresis, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_truncated_plan_spares_compliant_owner, setup, teardown),
