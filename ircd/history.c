@@ -1905,7 +1905,7 @@ int history_has_msgid(const char *msgid)
  * @return Number of messages returned, or -1 on error.
  */
 static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
-                                  const char *msgid);
+                                  const char *msgid, int *steps, int max_steps);
 
 /** Apply a query-time row filter to a freshly built row.
  *
@@ -1933,6 +1933,7 @@ static int history_filter_row(struct HistoryRowFilter *filter,
                   && !filter->skip_redacted))
     return 1;
 
+  scan_max = filter->scan_max > 0 ? filter->scan_max : HISTORY_FILTER_SCAN_MAX;
   filter->scanned++;
   if (filter->type_mask && !(filter->type_mask & (1u << msg->type)))
     verdict = 0;   /* type the requester cannot receive: skip, uncounted */
@@ -1943,7 +1944,8 @@ static int history_filter_row(struct HistoryRowFilter *filter,
   else
     verdict = 1;
   if (verdict == 1 && filter->skip_redacted
-      && message_is_redacted_in(snap, target, msg->msgid) != 0)
+      && message_is_redacted_in(snap, target, msg->msgid, &filter->scanned,
+                                scan_max) != 0)
     verdict = 0;   /* a deleted line, or a failed look at one: skip, uncounted */
   if (verdict == 1)
     return 1;
@@ -1955,7 +1957,6 @@ static int history_filter_row(struct HistoryRowFilter *filter,
   if (verdict < 0)
     return -1;
 
-  scan_max = filter->scan_max > 0 ? filter->scan_max : HISTORY_FILTER_SCAN_MAX;
   if (filter->scanned >= scan_max) {
     filter->truncated = 1;
     return -1;
@@ -3669,9 +3670,12 @@ int history_redact_message(const char *target, const char *msgid)
   return 0;
 }
 
-/** Does @a msgid have a REDACT child in @a snap?  1 yes, 0 no, -1 could not tell. */
+/** Does @a msgid have a REDACT child in @a snap?  1 yes, 0 no, -1 could not
+ * tell.  With @a steps set, each child read counts against it, and a walk
+ * that reaches @a max_steps stops and could not tell: anyone can add
+ * children to a line, so the budget of a scan must cover them. */
 static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
-                                  const char *msgid)
+                                  const char *msgid, int *steps, int max_steps)
 {
   struct db_iter *ri_it;
   char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
@@ -3712,6 +3716,13 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
 
     if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
       break;
+    if (steps) {
+      if (*steps >= max_steps) {
+        failed = 1;
+        break;
+      }
+      (*steps)++;
+    }
 
     /* After the prefix: timestamp\0child_msgid */
     child_part = (const char *)kbase + plen;
@@ -3763,7 +3774,7 @@ int history_message_is_redacted(const char *target, const char *msgid)
   snap = db_snapshot_new(history_db_env);
   if (!snap)
     return -1;
-  redacted = message_is_redacted_in(snap, target, msgid);
+  redacted = message_is_redacted_in(snap, target, msgid, NULL, 0);
   db_snapshot_destroy(snap);
   return redacted;
 }
