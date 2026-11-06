@@ -427,6 +427,15 @@ void htrim_slice_set_phase(struct htrim_slice *s, enum htrim_phase ph);
  * accounting delta (-rec->bytes, only when @a counted), its touched
  * target and the @a path counter, all applied at commit.
  *
+ * A REDACT row (HTC_F_REDACT with a redact parent) takes the original it
+ * redacts with it, under the same @a path and in the same batch, whenever
+ * that original is still stored in the same target: an original left
+ * behind would replay the redacted text.  Not for HTRIM_PATH_INCARNATION
+ * (the losing side's REDACT row must not destroy the winner's rows), and
+ * not when the original is itself a REDACT row.  A row reached twice in
+ * one slice (by its walk and by a REDACT row's delete) is staged and
+ * counted once.
+ *
  * A row the engine cannot read is still removed from the index, so a walk
  * over by_time always advances: @a rec NULL (its by_time value did not
  * parse), a by_time key without a readable target/msgid, an empty
@@ -438,8 +447,9 @@ void htrim_slice_set_phase(struct htrim_slice *s, enum htrim_phase ph);
  * @return 0: staged (in full, or index-only as above);
  *         -1: an invalid call (NULL slice or key, a bad @a path, the
  *             engine not started) -- nothing staged, @a s unchanged;
- *         -2: @a s is poisoned (a batch op failed, now or earlier): its
- *             commit applies nothing; abort it. */
+ *         -2: @a s is poisoned (a batch op failed, now or earlier, or a
+ *             read the REDACT cascade needed to find or size the
+ *             original failed): its commit applies nothing; abort it. */
 int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
                      const void *bt_key, size_t bt_klen,
                      const struct htc_rec *rec, int counted);
