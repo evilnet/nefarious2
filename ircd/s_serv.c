@@ -114,6 +114,18 @@ int a_kills_b_too(struct Client *a, struct Client *b)
   return (a == b ? 1 : 0);
 }
 
+/** Send every network ban we hold (G-lines, shuns, jupes, Z-lines) to a
+ * directly linked server, each with its lastmod.
+ * @param cptr The link.
+ */
+static void server_ban_burst(struct Client *cptr)
+{
+  gline_burst(cptr);
+  shun_burst(cptr);
+  jupe_burst(cptr);
+  zline_burst(cptr);
+}
+
 /** Handle a connection that has sent a valid PASS and SERVER.
  * @param cptr New peer server.
  * @param aconf Connect block for \a cptr.
@@ -225,12 +237,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 
   /* Send these as early as possible so that glined users/zlined users/juped servers can
    * be removed from the network while the remote server is still chewing
-   * our burst.
+   * our burst.  A gated link gets them again at release
+   * (server_release_burst_gate()).
    */
-  gline_burst(cptr);
-  shun_burst(cptr);
-  jupe_burst(cptr);
-  zline_burst(cptr);
+  server_ban_burst(cptr);
 
   /* Burst webpush subscriptions to newly linked server.  Gate on
    * IsIRCv3Aware like ML below — legacy peers (X3) error on unknown
@@ -343,9 +353,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
  * For any peer, IRCv3-aware or legacy: it runs inline at the end of
  * server_estab (the peer's SERVER line) unless bouncer convergence is
  * in flight, in which case server_estab gates the peer and this runs at
- * release instead -- from bounce_release_idle_gates at a
- * convergence-completion site (a peer's EB, an attach or revive) or
- * from the 1-second bounce_legacy_burst_gate_tick fallback.  Either
+ * release instead (server_release_burst_gate()) -- from
+ * bounce_release_idle_gates at a convergence-completion site (a peer's
+ * EB, an attach or revive) or from the 1-second
+ * bounce_legacy_burst_gate_tick fallback.  Either
  * way, by the time we reach this point any active-vs-active demote has
  * flipped its loser to alias state, so the IsBouncerAlias filter on the
  * N loop (and on bounce_burst's session iteration) keeps duplicate
@@ -614,5 +625,41 @@ int server_finish_burst(struct Client *cptr)
   sendcmdto_one(&me, CMD_END_OF_BURST_ACK, cptr, "");
   sendcmdto_set_inbound_link(inbound);
   return 0;
+}
+
+/** Release a link's burst gate: send the ban bursts again, then the
+ * deferred tail of the burst (server_finish_burst()).
+ *
+ * While the link was gated, every ban change (GL, SU, JU, ZL) relayed
+ * through the serv_butone senders was held back from it: an oper's
+ * carries the oper's numeric, which the link does not know yet, and a
+ * stock server drops a ban line from an unknown prefix
+ * (bounce_burst_gate_passes()).  The burst tail carries no ban, so the
+ * ban bursts go again here, ahead of it as in server_estab.  A ban the
+ * link already has comes with the same lastmod and is a no-op there;
+ * one it has newer is left alone while we are still bursting to it
+ * (IsBurstOrBurstAck on its side until our EB, which ends the tail).
+ * A ban removed with REMOVE while the link was gated is not in our
+ * lists any more and cannot be carried this way.
+ *
+ * The two release paths call this: bounce_release_idle_gates (the wait
+ * is over) and bounce_legacy_burst_gate_tick (the deadline passed).
+ * @param cptr The gated link.
+ * @return Zero.
+ */
+int server_release_burst_gate(struct Client *cptr)
+{
+  /* As in server_finish_burst: the release can run while another link's
+   * line is handled, and none of these lines is that line's. */
+  struct Client *inbound = sendcmdto_inbound_link();
+
+  cli_burst_gate_deadline(cptr) = 0;
+  ClearBurstGated(cptr);
+
+  sendcmdto_set_inbound_link(NULL);
+  server_ban_burst(cptr);
+  sendcmdto_set_inbound_link(inbound);
+
+  return server_finish_burst(cptr);
 }
 

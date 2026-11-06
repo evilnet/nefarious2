@@ -3787,9 +3787,9 @@ int bounce_convergence_pending(struct Client *exclude_peer)
  * as a fallback for stalled-convergence cases.
  *
  * For each gated peer, re-check bounce_convergence_pending — if it
- * now returns 0, clear the gate and run server_finish_burst.  Safe
- * iteration via cached `next`; server_finish_burst doesn't add/remove
- * down-list entries.
+ * now returns 0, release it (server_release_burst_gate: the ban bursts
+ * again, then server_finish_burst).  Safe iteration via cached `next`;
+ * the release doesn't add/remove down-list entries.
  */
 void bounce_release_idle_gates(void)
 {
@@ -3815,9 +3815,7 @@ void bounce_release_idle_gates(void)
            "(deadline was %lds away)",
            cli_name(peer),
            (long)(cli_burst_gate_deadline(peer) - CurrentTime)));
-    cli_burst_gate_deadline(peer) = 0;
-    ClearBurstGated(peer);
-    server_finish_burst(peer);
+    server_release_burst_gate(peer);
   }
 }
 
@@ -3879,9 +3877,7 @@ void bounce_legacy_burst_gate_tick(void)
     Debug((DEBUG_INFO,
            "Bouncer: burst gate expired for %s — releasing",
            cli_name(peer)));
-    cli_burst_gate_deadline(peer) = 0;
-    ClearBurstGated(peer);
-    server_finish_burst(peer);
+    server_release_burst_gate(peer);
   }
 }
 

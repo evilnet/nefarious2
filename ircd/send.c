@@ -25,6 +25,7 @@
 
 #include "send.h"
 #include "bouncer_session.h"
+#include "bouncer_wire.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
@@ -2171,8 +2172,11 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
        * (server_finish_burst) will introduce this client to them as
        * part of its N loop.  Without this skip, in-flight relays from
        * other links during the gate window double-introduce users
-       * (collision-kill on the gate-held peer). */
-      if (IsBurstGated(lp->value.cptr))
+       * (collision-kill on the gate-held peer).  A KILL, a SQUIT and
+       * another server's EB/EA still go: each acts on what the peer
+       * already has, and the burst never re-sends it
+       * (bounce_burst_gate_passes()). */
+      if (IsBurstGated(lp->value.cptr) && !bounce_burst_gate_passes(tok))
         continue;
       if (mb_legacy && !IsIRCv3Aware(lp->value.cptr)) {
         send_mb = mb_legacy;
@@ -2344,9 +2348,10 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
       if (one && lp->value.cptr == cli_from(one))
         continue;
       /* Burst-gate skip: peer is holding our burst; bulk server_finish_burst
-       * at gate release provides the consistent state snapshot.  See
+       * at gate release provides the consistent state snapshot.  A KILL,
+       * a SQUIT and another server's EB/EA still go.  See
        * sendcmdto_flag_serv_butone for the full rationale. */
-      if (IsBurstGated(lp->value.cptr))
+      if (IsBurstGated(lp->value.cptr) && !bounce_burst_gate_passes(tok))
         continue;
 
       /* Pick tagged or legacy variant per-peer. */

@@ -41,6 +41,42 @@
 extern int bounce_legacy_link_knows(int link_aware, int link_gated,
                                     int face_behind_link);
 
+/** May a line go out to a link whose burst is still gated?
+ *
+ * While a link's burst is gated (bouncer convergence in flight,
+ * server_estab), the two plain serv_butone senders
+ * (sendcmdto_serv_butone, sendcmdto_flag_serv_butone) hold back every
+ * line toward it but these: the burst at release carries the state the
+ * others change, and the link cannot attribute a line from a client it
+ * has not been introduced to.  (The IRCv3-only and legacy-only senders
+ * send a gated link nothing.)
+ *
+ * What passes acts on what the gated link already has, and the burst
+ * never re-sends it:
+ *  - KILL (D): the link's own users; a KILL of one of our users is
+ *    nothing to it (it has never heard of the user).  A stock server
+ *    takes a KILL even from a prefix it does not know yet (an oper of
+ *    ours).
+ *  - SQUIT (SQ): our servers, which went out before the gate.
+ *  - END_OF_BURST (EB), its ACK (EA): another server's, relayed.  No
+ *    SERVER line is ever gated, so the link knows the server; the burst
+ *    tail carries only our own EB and EA.  Held, the server stayed
+ *    "bursting" on the link and on everything behind it until it split
+ *    (X3 skips its users' automode, DNSBL, sockcheck and OpServ checks);
+ *    and the EB of the burst that held the gate is relayed just before
+ *    that gate releases (ms_end_of_burst), so it was always lost.
+ *
+ * Ban changes (GL, ZL, SU, JU) stay held: an oper's carries the oper's
+ * numeric, which a stock server drops while it does not know it.  The
+ * ban bursts are sent again when the gate releases instead
+ * (server_release_burst_gate()); one the link already has is a no-op
+ * there (same lastmod).
+ *
+ * @param[in] tok The P10 token of the line (TOK_*), as the sender has it.
+ * @return 1 if the line goes to a gated link, else 0.
+ */
+extern int bounce_burst_gate_passes(const char *tok);
+
 /** Where a live primary's demote into an alias of a new primary stands.
  *
  * The demote runs in two steps on one session: the demote proper (the

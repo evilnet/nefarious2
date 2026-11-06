@@ -23,6 +23,7 @@ extern int exit_new_server(struct Client* cptr, struct Client* sptr,
 extern int a_kills_b_too(struct Client *a, struct Client *b);
 extern int server_estab(struct Client *cptr, struct ConfItem *aconf);
 extern int server_finish_burst(struct Client *cptr);
+extern int server_release_burst_gate(struct Client *cptr);
 
 
 #endif /* INCLUDED_s_serv_h */

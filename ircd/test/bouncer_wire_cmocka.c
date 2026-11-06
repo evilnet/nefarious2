@@ -6,6 +6,7 @@
 #include <cmocka.h>
 
 #include "../../include/bouncer_wire.h"
+#include "../../include/msg.h"   /* TOK_*: the spellings the senders pass */
 
 /* bounce_legacy_link_knows(link_aware, link_gated, face_behind_link) */
 
@@ -51,6 +52,87 @@ static void only_a_plain_legacy_link_knows(void **s)
       for (behind = 0; behind < 2; behind++)
         assert_int_equal(bounce_legacy_link_knows(aware, gated, behind),
                          !aware && !gated && !behind);
+}
+
+/* bounce_burst_gate_passes(tok) */
+
+static void burst_gate_passes_kill_and_squit(void **s)
+{
+  (void)s;
+  /* A KILL or a SQUIT acts on a client or a server the gated link already
+   * has (our servers went out before the gate; its own users are its
+   * own), and the burst at release never re-sends it.  A stock server
+   * takes a KILL even from a prefix it does not know yet (our oper). */
+  assert_int_equal(bounce_burst_gate_passes(TOK_KILL), 1);
+  assert_int_equal(bounce_burst_gate_passes(TOK_SQUIT), 1);
+  assert_int_equal(bounce_burst_gate_passes("D"), 1);
+  assert_int_equal(bounce_burst_gate_passes("SQ"), 1);
+}
+
+static void burst_gate_passes_end_of_burst(void **s)
+{
+  (void)s;
+  /* Another server's EB and EA, relayed: they act on a server record the
+   * gated link already has (no SERVER line is ever gated), and nothing
+   * re-sends them -- the burst at release carries only our own EB and
+   * EA.  Held, the server stays "bursting" on the link and on everything
+   * behind it (X3 skips its users' checks) until it splits; and the EB
+   * of the burst that held the gate is relayed just before that gate
+   * releases (ms_end_of_burst), so it was always lost. */
+  assert_int_equal(bounce_burst_gate_passes(TOK_END_OF_BURST), 1);
+  assert_int_equal(bounce_burst_gate_passes(TOK_END_OF_BURST_ACK), 1);
+  assert_int_equal(bounce_burst_gate_passes("EB"), 1);
+  assert_int_equal(bounce_burst_gate_passes("EA"), 1);
+}
+
+static void burst_gate_holds_ban_changes(void **s)
+{
+  (void)s;
+  /* An oper's G-line, Z-line, shun or jupe carries the oper's numeric,
+   * which the gated link does not know yet: a stock server drops it.
+   * The ban bursts are sent again when the gate releases instead. */
+  assert_int_equal(bounce_burst_gate_passes(TOK_GLINE), 0);
+  assert_int_equal(bounce_burst_gate_passes(TOK_ZLINE), 0);
+  assert_int_equal(bounce_burst_gate_passes(TOK_SHUN), 0);
+  assert_int_equal(bounce_burst_gate_passes(TOK_JUPE), 0);
+}
+
+static void burst_gate_holds_what_the_burst_carries(void **s)
+{
+  static const char *const held[] = {
+    TOK_NICK, TOK_PRIVATE, TOK_NOTICE, TOK_JOIN, TOK_CREATE, TOK_PART,
+    TOK_MODE, TOK_BURST, TOK_KICK, TOK_QUIT, TOK_BOUNCER_TRANSFER,
+    TOK_BOUNCER_SESSION, TOK_ACCOUNT
+  };
+  size_t i;
+  (void)s;
+  /* The burst at release re-sends the state these change, or the link
+   * cannot attribute them yet (a client it has not been introduced to). */
+  for (i = 0; i < sizeof(held) / sizeof(held[0]); i++)
+    assert_int_equal(bounce_burst_gate_passes(held[i]), 0);
+}
+
+static void burst_gate_matches_whole_tokens_only(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_burst_gate_passes(NULL), 0);
+  assert_int_equal(bounce_burst_gate_passes(""), 0);
+  /* Tokens are case-sensitive and whole. */
+  assert_int_equal(bounce_burst_gate_passes("d"), 0);
+  assert_int_equal(bounce_burst_gate_passes("sq"), 0);
+  assert_int_equal(bounce_burst_gate_passes(TOK_DESTRUCT), 0);  /* DE */
+  assert_int_equal(bounce_burst_gate_passes(TOK_DESYNCH), 0);   /* DS */
+  assert_int_equal(bounce_burst_gate_passes(TOK_SERVER), 0);    /* S */
+  assert_int_equal(bounce_burst_gate_passes("SQX"), 0);
+  assert_int_equal(bounce_burst_gate_passes("D "), 0);
+  assert_int_equal(bounce_burst_gate_passes(TOK_NAMES), 0);     /* E */
+  assert_int_equal(bounce_burst_gate_passes("EBX"), 0);
+  assert_int_equal(bounce_burst_gate_passes("eb"), 0);
+  /* The senders pass tokens, never the long names. */
+  assert_int_equal(bounce_burst_gate_passes(MSG_KILL), 0);
+  assert_int_equal(bounce_burst_gate_passes(MSG_SQUIT), 0);
+  assert_int_equal(bounce_burst_gate_passes(MSG_END_OF_BURST), 0);
+  assert_int_equal(bounce_burst_gate_passes(MSG_END_OF_BURST_ACK), 0);
 }
 
 /* bounce_demote_check(stage, facts) */
@@ -2925,6 +3007,11 @@ static void registration_and_hold_on_agree(void **s)
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(burst_gate_passes_kill_and_squit),
+    cmocka_unit_test(burst_gate_passes_end_of_burst),
+    cmocka_unit_test(burst_gate_holds_ban_changes),
+    cmocka_unit_test(burst_gate_holds_what_the_burst_carries),
+    cmocka_unit_test(burst_gate_matches_whole_tokens_only),
     cmocka_unit_test(choose_no_session_is_none),
     cmocka_unit_test(choose_another_keycloak_user_in_use_refuses),
     cmocka_unit_test(choose_ends_the_leftover_then_reads_the_rest),

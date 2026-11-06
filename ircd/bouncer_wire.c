@@ -23,6 +23,17 @@ int bounce_legacy_link_knows(int link_aware, int link_gated,
   return 1;
 }
 
+int bounce_burst_gate_passes(const char *tok)
+{
+  /* TOK_KILL, TOK_SQUIT, TOK_END_OF_BURST and TOK_END_OF_BURST_ACK
+   * (msg.h; this file takes no ircd header, the cmocka suite checks the
+   * spellings against msg.h). */
+  if (!tok)
+    return 0;
+  return !strcmp(tok, "D") || !strcmp(tok, "SQ")
+         || !strcmp(tok, "EB") || !strcmp(tok, "EA");
+}
+
 enum bounce_demote_bar bounce_demote_check(enum bounce_demote_stage stage,
                                            const struct bounce_demote_facts *f)
 {

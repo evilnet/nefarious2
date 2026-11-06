@@ -237,11 +237,17 @@ enum Flag
     FLAG_JUNCTION,                  /**< Junction causing the net.burst. */
     FLAG_BURST,                     /**< Server is receiving a net.burst */
     FLAG_BURST_ACK,                 /**< Server is waiting for eob ack */
-    FLAG_BURST_GATED,               /**< Outbound burst is gated on peer's
-                                         BX F (reconcile-end) for bouncer
-                                         active-vs-active resolution.
-                                         Cleared on BX F arrival; the deferred
-                                         server_finish_burst then runs. */
+    FLAG_BURST_GATED,               /**< Our burst tail to this link is held
+                                         while bouncer convergence is in
+                                         flight (server_estab).  Meanwhile
+                                         sendcmdto_serv_butone and
+                                         sendcmdto_flag_serv_butone send it
+                                         only what
+                                         bounce_burst_gate_passes() lets
+                                         through; the IRCv3-only and
+                                         legacy-only senders send it
+                                         nothing.  Cleared by
+                                         server_release_burst_gate(). */
     FLAG_IPCHECK,                   /**< Added or updated IPregistry data */
     FLAG_LOCOP,                     /**< Local operator -- SRB */
     FLAG_SERVNOTICE,                /**< server notices such as kill */
