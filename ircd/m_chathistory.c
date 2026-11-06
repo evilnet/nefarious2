@@ -9689,7 +9689,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     eq = strchr(cur, '=');
     key = cur;
     if (eq == cur || (!eq && !tagform)) {
-      send_fail(sptr, "SEARCH", "INVALID_PARAMS", cur, "Selectors are key=value");
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "*", "Selectors are key=value");
       return 0;
     }
     if (eq) {
@@ -9701,7 +9701,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     /* An escaped CR or LF must not reach the CH Q selectors, which go
      * to the storage servers raw. */
     if (strpbrk(val, "\r\n")) {
-      send_fail(sptr, "SEARCH", "INVALID_PARAMS", key, "Line breaks are not allowed");
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "*", "Line breaks are not allowed");
       return 0;
     }
 
