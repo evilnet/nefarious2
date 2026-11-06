@@ -5222,7 +5222,12 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
         if (feature_bool(FEAT_CHMODE_Z_STRICT) && (state.dir == MODE_ADD) &&
             (chptr->nonsslusers > 0 || channel_has_plaintext_alias(chptr)) &&
             MyUser(sptr))
-          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, chptr->chname, "Z", "Mode cannot be set while non-SSL members are present");
+          /* An alias is hidden from NAMES and WHO, so say when one is the
+           * reason: the op sees only TLS users otherwise. */
+          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, chptr->chname, "Z",
+                     chptr->nonsslusers > 0
+                     ? "Mode cannot be set while non-SSL members are present"
+                     : "Mode cannot be set while a member has a non-SSL bouncer connection");
         else if ((feature_bool(FEAT_CHMODE_Z) && IsSSL(sptr)) ||
             IsOper(sptr) || IsServer(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
