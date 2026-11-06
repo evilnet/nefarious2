@@ -1490,6 +1490,10 @@ int rehash(struct Client *cptr, int sig)
 
   auth_send_event("rehash", NULL);
 
+  /* A class or feature a live session's record stamp reads may have
+   * changed: re-stamped at the next persist tick. */
+  bounce_restamp_sessions();
+
   return ret;
 }
 

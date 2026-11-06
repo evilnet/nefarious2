@@ -626,6 +626,52 @@ static void test_stamp_each_missing_fact_writes_zero(void **state)
   assert_true(bounce_record_stamp(NULL, 0) == 0);
 }
 
+static void test_shutdown_stamp_is_the_crash_rule(void **state)
+{
+  struct bounce_stamp_facts f;
+
+  (void)state;
+  /* A session a disconnect would hold: held from the shutdown, a real
+   * time (an older build restores it too), never the marker. */
+  f = restorable();
+  assert_true(bounce_record_shutdown_stamp(&f, 0, NOW) == NOW);
+  /* Held here for its full hold: its own time. */
+  f = held_here();
+  assert_true(bounce_record_shutdown_stamp(&f, NOW - 600, NOW) == NOW - 600);
+  /* Everything a disconnect would not hold here ends cleanly. */
+  f = restorable(); f.wants_hold = 0;
+  assert_true(bounce_record_shutdown_stamp(&f, 0, NOW) == 0);
+  f = restorable(); f.remote_devices = 1;
+  assert_true(bounce_record_shutdown_stamp(&f, 0, NOW) == 0);
+  f = restorable(); f.primary_live = 0;   /* a device of ours, primary elsewhere */
+  assert_true(bounce_record_shutdown_stamp(&f, 0, NOW) == 0);
+  f = restorable(); f.logged_in = 0;
+  assert_true(bounce_record_shutdown_stamp(&f, 0, NOW) == 0);
+  f = restorable(); f.bouncer_on = 0;
+  assert_true(bounce_record_shutdown_stamp(&f, 0, NOW) == 0);
+  f = held_here(); f.brief_hold = 1;
+  assert_true(bounce_record_shutdown_stamp(&f, NOW - 600, NOW) == 0);
+  f = held_here(); f.held_here = 0;
+  assert_true(bounce_record_shutdown_stamp(&f, NOW - 600, NOW) == 0);
+  assert_true(bounce_record_shutdown_stamp(NULL, 0, NOW) == 0);
+  assert_true(bounce_record_shutdown_stamp(NULL, NOW - 600, NOW) == 0);
+}
+
+static void test_record_marked(void **state)
+{
+  struct BounceSessionRecord *r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 0, 0);
+
+  (void)state;
+  assert_true(bounce_record_marked(r));
+  r->bsr_disconnect_time = 0;
+  assert_false(bounce_record_marked(r));
+  r->bsr_disconnect_time = NOW - 60;
+  assert_false(bounce_record_marked(r));
+  r->bsr_disconnect_time = -2;
+  assert_false(bounce_record_marked(r));
+  free(r);
+}
+
 static void test_stamp_then_restore_round_trip(void **state)
 {
   struct bounce_stamp_facts f = restorable();
@@ -811,6 +857,8 @@ int main(void)
     cmocka_unit_test(test_stamp_hold_not_ours_to_bring_back),
     cmocka_unit_test(test_stamp_restorable_active_session),
     cmocka_unit_test(test_stamp_each_missing_fact_writes_zero),
+    cmocka_unit_test(test_shutdown_stamp_is_the_crash_rule),
+    cmocka_unit_test(test_record_marked),
     cmocka_unit_test(test_stamp_then_restore_round_trip),
     cmocka_unit_test(test_hold_length_earned),
     cmocka_unit_test(test_hold_length_decay),

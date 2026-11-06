@@ -2367,6 +2367,10 @@ void umode_sync_apply(struct Client *cptr, int flag, int on)
   /* Its session's devices here follow it through the existing mirror,
    * each told its own change once; this connection was told above. */
   bounce_sync_session_umodes(cptr, NULL, cptr);
+  /* The hold preference is what a crash restore reads from the session's
+   * record (bounce_record_stamp()); this path ends no session. */
+  if (flag == FLAG_BNC_HOLDPREF)
+    bounce_hold_pref_changed(cptr, on);
 }
 
 /** One mode-synced metadata key a MODE command changed (umode.*,

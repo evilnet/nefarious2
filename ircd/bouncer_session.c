@@ -328,6 +328,32 @@ void bounce_dirty_persist_restart_timer(void)
 }
 
 /** See include/bouncer_session.h. */
+void bounce_hold_pref_changed(struct Client *cptr, int on)
+{
+  struct BouncerSession *s = bounce_get_session(cptr);
+
+  if (!s)
+    return;
+  if (on)
+    bounce_session_mark_dirty(s);
+  else
+    bounce_session_persist_now(s, 0);
+}
+
+/** See include/bouncer_session.h. */
+void bounce_restamp_sessions(void)
+{
+  struct BouncerSession *s;
+  int i;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
+      if (s->hs_state == BOUNCE_ACTIVE && s->hs_client
+          && MyUser(s->hs_client) && !IsBouncerAlias(s->hs_client))
+        bounce_session_mark_dirty(s);
+}
+
+/** See include/bouncer_session.h. */
 void bounce_session_mark_dirty(struct BouncerSession *session)
 {
   if (!session)
@@ -3159,6 +3185,10 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr,
    * then it is the hold's (or none), as before the attach (or already the
    * live one, when the id adopt above wrote it). */
   bounce_session_mark_dirty(session);
+  /* The hold is over: its reason goes to the resume summary, not /CHECK. */
+  ircd_strncpy(session->hs_resume_reason, session->hs_hold_reason,
+               sizeof(session->hs_resume_reason));
+  session->hs_hold_reason[0] = '\0';
 
   /* Recompute session union caps for the new primary + existing aliases */
   bounce_recompute_session_caps(cptr);
@@ -4864,41 +4894,103 @@ static int bounce_db_del(const char *sessid)
   return 0;
 }
 
-/** Persist all local bouncer sessions to MDBX before shutdown.
- * ACTIVE sessions are snapshotted (channels from live client) first.
+/** Delete every record still carrying the restart marker: at a clean
+ * shutdown, after every session we hold was written, such a record names
+ * a session this server no longer holds. */
+static int bounce_db_sweep_markers(struct db_env *env, struct db_cf *cf)
+{
+  struct db_iter *it = db_iter_open(env, cf, /*snap=*/NULL);
+  struct db_writebatch *wb = db_writebatch_new(env);
+  int rc, swept = 0;
+
+  if (it && wb) {
+    for (rc = db_iter_seek_first(it);
+         rc == DB_OK && db_iter_valid(it);
+         rc = db_iter_next(it)) {
+      size_t klen, vlen;
+      const void *kbuf = db_iter_key(it, &klen);
+      const void *vbuf = db_iter_value(it, &vlen);
+      struct BounceSessionRecord rec;
+      uint32_t version;
+
+      if (bounce_record_decode(vbuf, vlen, &rec, &version) == BOUNCE_REC_CURRENT
+          && bounce_record_marked(&rec)
+          && db_writebatch_del(wb, cf, kbuf, klen) == DB_OK)
+        swept++;
+    }
+  }
+  if (it)
+    db_iter_close(it);
+  if (wb) {
+    if (swept)
+      (void)db_writebatch_commit(wb, /*sync_durably=*/0);
+    db_writebatch_destroy(wb);
+  }
+  return swept;
+}
+
+/** Persist the local bouncer sessions to MDBX before shutdown, by the
+ * crash rule (bounce_record_shutdown_stamp(); user decision 2026-11-06):
+ * what a disconnect would hold here -- hold on, the primary ours, no
+ * device of the session on another server -- is written held from now,
+ * a session held here for its full hold keeps its time, and the record of
+ * anything else is deleted: it ends cleanly (a hold-off session; one
+ * with a device on another server, which that server's split promote
+ * carries; a brief hold; another server's hold; a device of ours whose
+ * primary is elsewhere).  A live primary's channels are snapshotted
+ * first.  Then no restart marker is left on disk.
  * Called from server_die()/server_restart() before flush_connections().
  */
 void bounce_db_shutdown(void)
 {
   int i;
   struct BouncerSession *s;
-  int count = 0;
+  int count = 0, ended = 0, swept;
+  struct db_env *env;
+  struct db_cf *cf;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+    return;
+  env = metadata_get_env();
+  cf = metadata_get_bouncer_cf();
+  if (!env || !cf)
     return;
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      struct bounce_stamp_facts f;
+      struct Client *p = s->hs_client;
+      int64_t stamp;
+
       /* Per redesign C.2: shutdown-persist sessions we hold locally. */
       if (!session_has_local_holder(s))
         continue;
 
-      /* Snapshot ACTIVE sessions — they have a live client with channels —
-       * and write them held from now. */
-      if (s->hs_state == BOUNCE_ACTIVE && s->hs_client) {
-        bounce_snapshot_channels(s, s->hs_client);
-        bounce_db_write(s, (int64_t)CurrentTime, 0);
-      } else
-        bounce_db_put(s);
-      count++;
+      if (s->hs_state == BOUNCE_ACTIVE && p && MyUser(p)
+          && !IsBouncerHold(p) && !IsBouncerAlias(p))
+        bounce_snapshot_channels(s, p);
+      bounce_stamp_facts_of(s, &f);
+      stamp = bounce_record_shutdown_stamp(&f, (int64_t)s->hs_disconnect_time,
+                                           (int64_t)CurrentTime);
+      if (stamp == 0) {
+        bounce_db_del(s->hs_sessid);
+        ended++;
+      } else {
+        bounce_db_write(s, stamp, 0);
+        count++;
+      }
     }
   }
+
+  swept = bounce_db_sweep_markers(env, cf);
 
   /* No crash loop to break at the next start, and the heartbeat says
    * when this server went. */
   bounce_boot_clean_exit();
 
-  log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: shutdown — persisted %d sessions", count);
+  log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: shutdown — persisted %d "
+            "sessions; %d not kept (a disconnect would not hold them here); "
+            "%d stale restart markers removed", count, ended, swept);
 }
 
 /* ---------------------------------------------------------------- */
@@ -8853,9 +8945,9 @@ static void bounce_emit_connect_count(struct BouncerSession *session)
 const char *bounce_last_hold_reason(struct Client *cptr)
 {
   struct BouncerSession *session = bounce_get_session(cptr);
-  if (!session || !session->hs_hold_reason[0])
+  if (!session || !session->hs_resume_reason[0])
     return NULL;
-  return session->hs_hold_reason;
+  return session->hs_resume_reason;
 }
 
 /** Hold @a cptr, the primary of @a session, as its ghost.  @a brief: the
@@ -9703,6 +9795,10 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * then it is the hold's, which a restart restores held, as before (or
    * already the live one, when the id adopt above wrote it). */
   bounce_session_mark_dirty(session);
+  /* The hold is over: its reason goes to the resume summary, not /CHECK. */
+  ircd_strncpy(session->hs_resume_reason, session->hs_hold_reason,
+               sizeof(session->hs_resume_reason));
+  session->hs_hold_reason[0] = '\0';
 
   /* Recompute session union caps */
   bounce_recompute_session_caps(ghost);

@@ -613,8 +613,15 @@ struct BouncerSession {
                                        *   "Read error: ...", a QUIT message,
                                        *   "WebSocket closed", ...).  In-memory
                                        *   diagnostic only -- NOT persisted to
-                                       *   MDBX (a restart clears it); echoed
-                                       *   at resume + shown in /CHECK. */
+                                       *   MDBX (a restart clears it; a crash
+                                       *   restore sets "Server restarted");
+                                       *   shown in /CHECK while held, and
+                                       *   moved to hs_resume_reason by the
+                                       *   revive or attach that ends the hold. */
+  char hs_resume_reason[128];         /**< The hold reason of the hold the
+                                       *   last revive or attach ended: the
+                                       *   resume summary's "Previous
+                                       *   disconnect" (bounce_last_hold_reason()). */
 
   struct BounceChannel hs_channels[BOUNCER_MAX_CHANNELS];
   int hs_chancount;
@@ -836,6 +843,18 @@ extern void bounce_dirty_persist_restart_timer(void);
  * the new window (now, if that has passed, or the window is 0).  No-op
  * for a start that restored nothing or has settled. */
 extern void bounce_restore_crash_window_changed(void);
+
+/** @a cptr's hold preference (+b, FLAG_BNC_HOLDPREF) changed with no mode
+ * command behind it -- the account row (umode_sync_apply()) -- which ends
+ * no session: its session's record stamp reads the preference.  Turned
+ * on, the session is marked dirty; turned off, written at once (a record
+ * still carrying the restart marker would bring it back held). */
+extern void bounce_hold_pref_changed(struct Client *cptr, int on);
+
+/** After a REHASH: every live session whose primary is ours is marked
+ * dirty, so its record stamp is recomputed against the new class and
+ * features (BOUNCER_ENABLE, BOUNCER_DEFAULT_HOLD, a bouncer class). */
+extern void bounce_restamp_sessions(void);
 
 /** Create a new session for an authenticated client.
  * @param[in] cptr Client creating the session.

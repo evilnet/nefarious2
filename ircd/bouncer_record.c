@@ -228,6 +228,20 @@ int64_t bounce_record_stamp(const struct bounce_stamp_facts *f,
   return 0;
 }
 
+int bounce_record_marked(const struct BounceSessionRecord *rec)
+{
+  return rec->bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART;
+}
+
+int64_t bounce_record_shutdown_stamp(const struct bounce_stamp_facts *f,
+                                     int64_t disconnect_time, int64_t now)
+{
+  int64_t stamp = bounce_record_stamp(f, disconnect_time);
+
+  /* The crash rule; a clean shutdown knows its own time. */
+  return stamp == BOUNCE_REC_HELD_AT_RESTART ? now : stamp;
+}
+
 int64_t bounce_hold_length(const struct bounce_hold_rule *r,
                            uint32_t connect_count, int64_t total_active,
                            int64_t idle)

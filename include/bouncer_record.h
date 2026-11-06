@@ -92,6 +92,28 @@ struct bounce_stamp_facts {
 extern int64_t bounce_record_stamp(const struct bounce_stamp_facts *f,
                                    int64_t disconnect_time);
 
+/** The disconnect time a clean shutdown (DIE, RESTART, SIGTERM) writes:
+ * the crash rule (bounce_record_stamp()) with the shutdown's own time in
+ * place of the restart marker -- a session a disconnect would hold here
+ * is held from @a now; a held one keeps its time; anything else carries
+ * 0, and the shutdown deletes its record (the session ends cleanly: a
+ * hold-off session, one with a device on another server -- that server's
+ * split promote carries it --, a brief hold, another server's hold, a
+ * device of ours whose primary is elsewhere).
+ * @param[in] f               The facts (NULL: none hold).
+ * @param[in] disconnect_time The session's hs_disconnect_time.
+ * @param[in] now             The shutdown's time.
+ * @return The bsr_disconnect_time to write, or 0 for none.
+ */
+extern int64_t bounce_record_shutdown_stamp(const struct bounce_stamp_facts *f,
+                                            int64_t disconnect_time,
+                                            int64_t now);
+
+/** Whether @a rec carries the restart marker (a live session's record
+ * an unclean exit brings back).  A clean shutdown deletes every such
+ * record it did not just write: a session it no longer holds. */
+extern int bounce_record_marked(const struct BounceSessionRecord *rec);
+
 /** The adaptive hold's figures (testnet spec bouncer-adaptive-hold-spec):
  * BOUNCER_SESSION_HOLD, BOUNCER_MAX_HOLD, BOUNCER_HOLD_DECAY_PERCENT. */
 struct bounce_hold_rule {
