@@ -132,6 +132,37 @@ static void test_huge_max_still_adopts(void **state)
   assert_true(r.physical_ms == 1000000000000ULL);
 }
 
+/* The peer-time rule: no bound at 0; at or behind now is fine; ahead by
+ * exactly the bound is fine, one more is not; a huge bound cannot wrap. */
+static void test_peer_time_ok(void **state)
+{
+  (void)state;
+  assert_true(hlc_peer_time_ok(UINT64_MAX, 1000, 0));
+  assert_true(hlc_peer_time_ok(0, 1000, 5000));
+  assert_true(hlc_peer_time_ok(1000, 1000, 5000));
+  assert_true(hlc_peer_time_ok(6000, 1000, 5000));
+  assert_false(hlc_peer_time_ok(6001, 1000, 5000));
+  assert_true(hlc_peer_time_ok(1000000000000ULL, 1000, UINT64_MAX));
+  assert_true(hlc_peer_time_ok(UINT64_MAX, UINT64_MAX - 1, 1));
+  assert_false(hlc_peer_time_ok(UINT64_MAX, 0, UINT64_MAX - 1));
+}
+
+/* hlc_receive_bounded refuses exactly what hlc_peer_time_ok refuses. */
+static void test_receive_follows_peer_time_ok(void **state)
+{
+  uint64_t aheads[] = { 0, 4999, 5000, 5001, 600000 };
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof aheads / sizeof aheads[0]; i++) {
+    struct HLC local = { 1000, 0, 1 };
+    struct HLC remote = { 1000 + aheads[i], 0, 2 };
+    int rej = -1;
+    hlc_receive_bounded(&local, &remote, 1000, 5000, &rej);
+    assert_int_equal(!hlc_peer_time_ok(remote.physical_ms, 1000, 5000), rej);
+  }
+}
+
 static void test_huge_max_remote_behind_unchanged(void **state)
 {
   struct HLC local = { 5000, 3, 1 };
@@ -197,6 +228,8 @@ int main(void)
     cmocka_unit_test(test_zero_is_unbounded),
     cmocka_unit_test(test_remote_behind_unchanged),
     cmocka_unit_test(test_huge_max_still_adopts),
+    cmocka_unit_test(test_peer_time_ok),
+    cmocka_unit_test(test_receive_follows_peer_time_ok),
     cmocka_unit_test(test_huge_max_remote_behind_unchanged),
     cmocka_unit_test(test_local_overflow_carries),
     cmocka_unit_test(test_receive_overflow_carries),

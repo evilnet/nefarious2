@@ -90,6 +90,12 @@ struct HLC hlc_global_event(void);
 int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
                         uint64_t *ahead_ms);
 
+/** @brief Whether a peer's clock reading @a ms may be used, @a now_ms
+ *  being ours: not more than @a max_forward_ms ahead (0 = no bound).
+ *  The one rule for both the HLC receive and the event time a line
+ *  stamps; overflow-safe for any @a max_forward_ms. */
+int hlc_peer_time_ok(uint64_t ms, uint64_t now_ms, uint64_t max_forward_ms);
+
 /** @brief Read FEAT_HLC_MAX_FORWARD_MS, normalised for hlc_global_receive /
  *  md_stamp_ahead: a negative configured value has no sane bounded
  *  meaning and is treated as 0 (unbounded) rather than sign-extended

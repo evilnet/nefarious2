@@ -379,6 +379,7 @@ char *history_format_timestamp(char *buf, size_t buflen)
 
 uint64_t history_event_time_ms(struct Client *link)
 {
+  /* parse.c has already replaced a time too far ahead (hlc_peer_time_ok). */
   if (link && cli_s2s_time_ms(link))
     return cli_s2s_time_ms(link);
   return hlc_global()->physical_ms;
