@@ -365,6 +365,20 @@ void bounce_session_mark_dirty(struct BouncerSession *session)
   bounce_start_dirty_persist_timer();
 }
 
+/** @a session is live again: the hold reason is the last hold's, and
+ * /CHECK shows it only while held.  A revive or attach (@a resumed) gives
+ * it to the resume summary's "Previous disconnect"; another way out of
+ * the hold (a device taking over, the KEEP repair, our held copy yielding
+ * to another server's live one) drops it (review m4). */
+static void bounce_hold_reason_done(struct BouncerSession *session,
+                                    int resumed)
+{
+  if (resumed)
+    ircd_strncpy(session->hs_resume_reason, session->hs_hold_reason,
+                 sizeof(session->hs_resume_reason));
+  session->hs_hold_reason[0] = '\0';
+}
+
 /** Mark a bouncer session as dirty (needs periodic persist).
  * Called from channel.c on JOIN/PART/KICK and MODE changes.
  * @param[in] cptr Client whose session to mark dirty.
@@ -914,6 +928,7 @@ static void bounce_hold_expire(struct Event *ev)
       /* The record on disk says held: re-written live at the next tick
        * (bounce_record_stamp()). */
       bounce_session_mark_dirty(session);
+      bounce_hold_reason_done(session, 0);
     }
     return;
   case BOUNCE_HOLD_DROP:
@@ -3189,9 +3204,7 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr,
    * live one, when the id adopt above wrote it). */
   bounce_session_mark_dirty(session);
   /* The hold is over: its reason goes to the resume summary, not /CHECK. */
-  ircd_strncpy(session->hs_resume_reason, session->hs_hold_reason,
-               sizeof(session->hs_resume_reason));
-  session->hs_hold_reason[0] = '\0';
+  bounce_hold_reason_done(session, 1);
 
   /* Recompute session union caps for the new primary + existing aliases */
   bounce_recompute_session_caps(cptr);
@@ -6654,6 +6667,7 @@ static int bounce_held_copy_yields(struct BouncerSession *s,
   s->hs_disconnect_time = 0;
   s->hs_last_active = CurrentTime;
   s->hs_restore_pending = 0;
+  bounce_hold_reason_done(s, 0);
   ircd_strncpy(s->hs_origin, cli_yxx(cli_user(peer)->server),
                sizeof(s->hs_origin));
   ircd_strncpy(s->hs_ghost_numeric, cli_yxx(peer),
@@ -8573,6 +8587,8 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
      * After hs_state (#1). */
     if (MyConnect(alias))
       bounce_session_mark_dirty(session);
+    /* Live again under the device: the last hold is over. */
+    bounce_hold_reason_done(session, 0);
     /* If the session has an oper grant and the new primary isn't yet
      * opered (e.g. alias predated the grant, or grant survived a
      * primary-disconnect-and-cleanup gap), re-grant from the local
@@ -9848,9 +9864,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * already the live one, when the id adopt above wrote it). */
   bounce_session_mark_dirty(session);
   /* The hold is over: its reason goes to the resume summary, not /CHECK. */
-  ircd_strncpy(session->hs_resume_reason, session->hs_hold_reason,
-               sizeof(session->hs_resume_reason));
-  session->hs_hold_reason[0] = '\0';
+  bounce_hold_reason_done(session, 1);
 
   /* Recompute session union caps */
   bounce_recompute_session_caps(ghost);
@@ -12694,7 +12708,7 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
                                             time_t granted_at)
 {
   struct Client *primary;
-  int i;
+  int i, changed;
 
   if (!sess)
     return;
@@ -12702,9 +12716,11 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
   /* Update the session record itself so /CHECK and a future server
    * restart see the right state. */
   if (opername && *opername) {
+    changed = 0 != strcmp(sess->hs_oper_name, opername);
     ircd_strncpy(sess->hs_oper_name, opername, sizeof(sess->hs_oper_name));
     sess->hs_oper_granted_at = granted_at ? granted_at : CurrentTime;
   } else {
+    changed = sess->hs_oper_name[0] != '\0';
     sess->hs_oper_name[0] = '\0';
     sess->hs_oper_granted_at = 0;
   }
@@ -12714,11 +12730,15 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
    * clear is written at once, durably: a record still carrying a revoked
    * grant would give it back at a restart (bounce_record_stamp()).  A
    * grant waits for the next persist tick -- lost at an unclean exit
-   * before it, it fails closed. */
-  if (sess->hs_oper_name[0])
-    bounce_session_mark_dirty(sess);
-  else
-    bounce_session_persist_now(sess, 1);
+   * before it, it fails closed.  Only a change is written: the echo of
+   * our own BS O (and a repeat) would otherwise fsync again for nothing
+   * (review m3). */
+  if (changed) {
+    if (sess->hs_oper_name[0])
+      bounce_session_mark_dirty(sess);
+    else
+      bounce_session_persist_now(sess, 1);
+  }
 
   /* Apply to local primary, if any.  Remote primaries are handled by
    * the P10 MODE +o / -o that arrives in the same TCP stream from the

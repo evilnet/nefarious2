@@ -824,7 +824,9 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
          ircd_snprintf(0, outbuf, sizeof(outbuf), "  Hold override:: %s", hold_str);
          send_reply(sptr, RPL_DATASTR, outbuf);
 
-         if (session->hs_hold_reason[0]) {
+         /* The reason of the hold the session is in: a live one has none
+          * (every way out of a hold clears it; this covers any other). */
+         if (session->hs_state == BOUNCE_HOLDING && session->hs_hold_reason[0]) {
             ircd_snprintf(0, outbuf, sizeof(outbuf), "Last disconnect:: %s",
                           session->hs_hold_reason);
             send_reply(sptr, RPL_DATASTR, outbuf);
