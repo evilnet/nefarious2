@@ -48,8 +48,9 @@ extern enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
 /** The bsr_disconnect_time of a record written while its session is
  * ACTIVE, for a session an unclean exit of this server (a crash, SIGKILL,
  * the OOM killer) must bring back held (bounce_record_stamp()).  Not a
- * time: the restore reads it as "held from the restart"
- * (bounce_record_restore()).  A binary from before it reads it as a
+ * time: the restore reads it as "held from the crash" -- the previous
+ * run's last heartbeat -- and rewrites it with that real time before it
+ * builds any ghost (bounce_record_restore()).  A binary from before it reads it as a
  * disconnect one second before the epoch -- expired -- and evicts the
  * record, as it evicted the 0 those binaries wrote for every ACTIVE
  * record: a downgrade loses no more than it did.  On-disk format: never
@@ -91,27 +92,159 @@ struct bounce_stamp_facts {
 extern int64_t bounce_record_stamp(const struct bounce_stamp_facts *f,
                                    int64_t disconnect_time);
 
-/** What a restart does with a persisted record (bounce_record_restore()). */
-enum BounceRestoreVerdict {
-  BOUNCE_RESTORE_EXPIRED,  /**< not restored; the eviction pass deletes it */
-  BOUNCE_RESTORE_HELD      /**< restored as a held session */
+/** The adaptive hold's figures (testnet spec bouncer-adaptive-hold-spec):
+ * BOUNCER_SESSION_HOLD, BOUNCER_MAX_HOLD, BOUNCER_HOLD_DECAY_PERCENT. */
+struct bounce_hold_rule {
+  int64_t base;       /**< the hold every session gets */
+  int64_t max;        /**< the ceiling of the earned hold */
+  int decay_pct;      /**< idle share of the earned hold before it decays
+                       *   (0: no decay) */
 };
 
-/** The one rule the restore and its eviction pass read.  0 (a live
- * session no unclean exit brings back, or any ACTIVE record of an older
- * build) is expired; BOUNCE_REC_HELD_AT_RESTART is held from @a now; any
- * other time is held from that time unless more than @a max_hold has
- * passed since (a time before the epoch is expired).
- * @param[in]  disconnect_time The record's bsr_disconnect_time.
- * @param[in]  now             The current time.
- * @param[in]  max_hold        FEAT_BOUNCER_MAX_HOLD.
- * @param[out] held_since      When held: the session's hs_disconnect_time
- *                             (may be NULL).
+/** The hold a session holds for after @a idle seconds held: the earned
+ * hold -- @a base, plus a quarter of base per connection, plus an hour
+ * per 24 h attached, capped at @a max; @a base alone for a session that
+ * never connected -- decayed once @a decay_pct of it has passed idle (the
+ * part left at that point halves for every further quarter of the earned
+ * hold, never below base).  The one rule the hold timer, BOUNCER INFO,
+ * /CHECK and the restore read.
+ * @param[in] r             The figures.
+ * @param[in] connect_count The session's connections.
+ * @param[in] total_active  Seconds it was attached.
+ * @param[in] idle          Seconds held (0 or less: none, the earned hold).
+ * @return The hold, in seconds.
+ */
+extern int64_t bounce_hold_length(const struct bounce_hold_rule *r,
+                                  uint32_t connect_count, int64_t total_active,
+                                  int64_t idle);
+
+/** What a restart reads a record against (bounce_record_restore()). */
+struct bounce_restore_clock {
+  int64_t now;         /**< the current time */
+  int64_t max_hold;    /**< FEAT_BOUNCER_MAX_HOLD */
+  int64_t last_alive;  /**< the previous run's last heartbeat
+                        *   (BOUNCE_ALIVE_KEY); 0 when unknown */
+  struct bounce_hold_rule hold;  /**< the adaptive hold's figures */
+};
+
+/** What a restart does with a persisted record (bounce_record_restore()). */
+enum BounceRestoreVerdict {
+  BOUNCE_RESTORE_EXPIRED,       /**< not restored; the eviction pass
+                                 *   deletes it */
+  BOUNCE_RESTORE_HELD,          /**< held when this server went: restored
+                                 *   held from its own time */
+  BOUNCE_RESTORE_HELD_AT_CRASH  /**< live at an unclean exit (the restart
+                                 *   marker): restored held from the crash */
+};
+
+/** The one rule the restore and its eviction pass read.
+ *  - 0 (a live session no unclean exit brings back, or any ACTIVE record
+ *    of an older build), or any other time before the epoch: expired.
+ *  - BOUNCE_REC_HELD_AT_RESTART: held from the crash -- the latest time
+ *    the server is known to have been alive with the session live: the
+ *    previous run's last heartbeat, or the record's own bsr_last_active
+ *    when later (never after now) -- and expired when the outage outlived
+ *    the session's hold (bounce_hold_length() with its own connections and
+ *    active time, idle for the outage) or BOUNCER_MAX_HOLD.  With no
+ *    heartbeat known (a record of a build without one): held from now.
+ *  - Any other time: held from it, unless more than BOUNCER_MAX_HOLD has
+ *    passed since (the hold timer ends a shorter hold that ran out: it is
+ *    armed with a settling period at the restore).
+ * @param[in]  rec        The record (current layout).
+ * @param[in]  c          The clock.
+ * @param[out] held_since When held: the session's hs_disconnect_time (may
+ *                        be NULL).
  * @return The verdict.
  */
-extern enum BounceRestoreVerdict bounce_record_restore(int64_t disconnect_time,
-                                                       int64_t now,
-                                                       int64_t max_hold,
-                                                       int64_t *held_since);
+extern enum BounceRestoreVerdict
+bounce_record_restore(const struct BounceSessionRecord *rec,
+                      const struct bounce_restore_clock *c,
+                      int64_t *held_since);
+
+/* ---- Outside the bouncer column family ----
+ * Two keys in the metadata env's default column family: an old binary's
+ * restore iterates only the bouncer CF, and would read anything else
+ * there as a bad record. */
+
+/** Key of the heartbeat: when this server was last known alive. */
+#define BOUNCE_ALIVE_KEY "bouncer/alive"
+/** Key of the boot record: the last start that restored sessions, and
+ * the ones it restored because they were live at the crash. */
+#define BOUNCE_BOOT_KEY  "bouncer/boot"
+
+/** The heartbeat value's size (version, pad, time). */
+#define BOUNCE_ALIVE_REC_SIZE 16
+
+/** Encode the heartbeat @a t into @a buf (BOUNCE_ALIVE_REC_SIZE bytes). */
+extern void bounce_alive_rec_encode(void *buf, int64_t t);
+
+/** Decode a heartbeat value.
+ * @return 0 and *t, or -1 when @a len or the version is not ours. */
+extern int bounce_alive_rec_decode(const void *buf, size_t len, int64_t *t);
+
+/** A start's boot record states. */
+enum bounce_boot_state {
+  BOUNCE_BOOT_NONE = 0,     /**< no record: the last start that restored
+                             *   ended cleanly (or none ever did) */
+  BOUNCE_BOOT_RUNNING = 1,  /**< that start is (or was, if we are reading
+                             *   it at a boot) inside its crash window */
+  BOUNCE_BOOT_SETTLED = 2   /**< that start outlived its crash window */
+};
+
+/** Size of a boot record naming @a count sessions (a header, then each
+ * session id in BOUNCER_SESSID_LEN bytes, NUL-terminated). */
+extern size_t bounce_boot_rec_size(uint32_t count);
+
+/** Write a boot record's header into @a buf (bounce_boot_rec_size(count)
+ * bytes); the ids follow by bounce_boot_rec_put_id(). */
+extern void bounce_boot_rec_put_header(void *buf,
+                                       enum bounce_boot_state state,
+                                       int64_t start, uint32_t count);
+
+/** Write session id @a i of a boot record (truncated to
+ * BOUNCER_SESSID_LEN - 1 characters, NUL-padded). */
+extern void bounce_boot_rec_put_id(void *buf, uint32_t i, const char *id);
+
+/** Decode a boot record.
+ * @return 0 with the header's fields, or -1 when the value is not a
+ *         well-formed record of ours (a short or long value, an unknown
+ *         version or state, an id without its NUL). */
+extern int bounce_boot_rec_decode(const void *buf, size_t len,
+                                  enum bounce_boot_state *state,
+                                  int64_t *start, uint32_t *count);
+
+/** Session id @a i of a boot record bounce_boot_rec_decode() accepted. */
+extern const char *bounce_boot_rec_id(const void *buf, uint32_t i);
+
+/** Whether a session restored with verdict @a v goes on this start's
+ * boot record, the list the crash-loop breaker skips if this start dies
+ * inside its window: only a session restored because it was live at the
+ * crash (BOUNCE_RESTORE_HELD_AT_CRASH, the restart marker).  A session
+ * held before the crash came back before the crash restore existed, and
+ * keeps coming back (ruling 2026-11-06: the skipped sessions are "lost,
+ * as before this change").
+ * @param[in] v The session's restore verdict.
+ * @return 1 to list it, else 0. */
+extern int bounce_boot_lists(enum BounceRestoreVerdict v);
+
+/** The crash-loop breaker (user decision 2026-11-06).  A start that
+ * restored sessions writes its boot record RUNNING, before it builds any
+ * ghost, naming the sessions it restored because they were live at the
+ * crash (bounce_boot_lists()); it marks it SETTLED once it has lived
+ * BOUNCER_RESTORE_CRASH_WINDOW seconds, and a clean shutdown deletes it.
+ * A boot that finds the previous start's record still RUNNING -- it ended
+ * uncleanly inside its window: a crash, possibly in the restore or caused
+ * by what it restored -- does not restore the sessions that record
+ * names.  The heartbeat stands in for a lost settle mark: a start known
+ * alive for its window is not one to break.
+ * @param[in] prev       The previous start's state.
+ * @param[in] prev_start When it started.
+ * @param[in] last_alive Its last heartbeat (0: unknown).
+ * @param[in] window     BOUNCER_RESTORE_CRASH_WINDOW (0 or less: off).
+ * @return 1 to skip what the previous start restored, else 0.
+ */
+extern int bounce_restore_breaker(enum bounce_boot_state prev,
+                                  int64_t prev_start, int64_t last_alive,
+                                  int64_t window);
 
 #endif /* INCLUDED_bouncer_record_h */

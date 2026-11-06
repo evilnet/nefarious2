@@ -831,6 +831,12 @@ extern void bounce_init(void);
  * new interval via bounce_start_dirty_persist_timer. */
 extern void bounce_dirty_persist_restart_timer(void);
 
+/** Apply a runtime change to FEAT_BOUNCER_RESTORE_CRASH_WINDOW: this
+ * start's settle mark for the crash-loop breaker is due at its start plus
+ * the new window (now, if that has passed, or the window is 0).  No-op
+ * for a start that restored nothing or has settled. */
+extern void bounce_restore_crash_window_changed(void);
+
 /** Create a new session for an authenticated client.
  * @param[in] cptr Client creating the session.
  * @param[out] session Pointer to created session (on success).

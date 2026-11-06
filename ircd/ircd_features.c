@@ -867,6 +867,15 @@ feature_notify_bouncer_persist_interval(void)
   bounce_dirty_persist_restart_timer();
 }
 
+/** Handle FEAT_BOUNCER_RESTORE_CRASH_WINDOW change -- re-arm (or fire) the
+ * timer that marks this start settled for the crash-loop breaker.
+ */
+static void
+feature_notify_bouncer_restore_crash_window(void)
+{
+  bounce_restore_crash_window_changed();
+}
+
 #ifdef USE_LIBKC
 /** Handle FEAT_SASL_HEALTH_INTERVAL change — re-arm the Keycloak
  * health retry timer at the new cadence (no-op if Keycloak is healthy).
@@ -1470,6 +1479,7 @@ static struct FeatureDesc {
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, feature_notify_bouncer_persist_interval), /* periodic persist interval (seconds) */
+  F_I(BOUNCER_RESTORE_CRASH_WINDOW, 0, 600, feature_notify_bouncer_restore_crash_window), /* a start that dies sooner after restoring sessions does not get them back at the next (seconds; 0: off) */
   F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),

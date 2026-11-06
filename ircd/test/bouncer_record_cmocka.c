@@ -319,8 +319,55 @@ static void test_unterminated_strings_stay_bounded(void **state)
  * restore/eviction rule (user decision 2026-11-06: an ACTIVE session
  * survives an unclean restart, restored as held). ---- */
 
-#define NOW      ((int64_t)1762400000)   /* 2025-11-06 */
+#define NOW      ((int64_t)1793923200)   /* 2026-11-06 00:00:00 UTC */
 #define MAX_HOLD ((int64_t)1209600)      /* 14 days, the feature default */
+#define BASE     ((int64_t)14400)        /* BOUNCER_SESSION_HOLD default */
+
+/* The feature defaults: 4 h base, 14 d ceiling, decay from 50 %. */
+static const struct bounce_hold_rule DEFAULT_RULE = { BASE, MAX_HOLD, 50 };
+
+/* The restart's clock, the previous run last alive at @a last_alive. */
+static struct bounce_restore_clock clock_at(int64_t last_alive)
+{
+  struct bounce_restore_clock c;
+
+  memset(&c, 0, sizeof(c));
+  c.now = NOW;
+  c.max_hold = MAX_HOLD;
+  c.last_alive = last_alive;
+  c.hold = DEFAULT_RULE;
+  return c;
+}
+
+/* A current-layout record with the fields the restore rule reads. */
+static struct BounceSessionRecord *rec_with(int64_t disconnect_time,
+                                            int64_t last_active,
+                                            uint32_t connect_count,
+                                            int64_t total_active)
+{
+  struct BounceSessionRecord *r = calloc(1, sizeof(*r));
+
+  assert_non_null(r);
+  r->bsr_version = BOUNCER_DB_VERSION;
+  r->bsr_disconnect_time = disconnect_time;
+  r->bsr_last_active = last_active;
+  r->bsr_connect_count = connect_count;
+  r->bsr_total_active = total_active;
+  return r;
+}
+
+/* bounce_record_restore() on a record of @a disconnect_time alone. */
+static enum BounceRestoreVerdict restore_time(int64_t disconnect_time,
+                                              int64_t last_alive,
+                                              int64_t *since)
+{
+  struct bounce_restore_clock c = clock_at(last_alive);
+  struct BounceSessionRecord *r = rec_with(disconnect_time, 0, 0, 0);
+  enum BounceRestoreVerdict v = bounce_record_restore(r, &c, since);
+
+  free(r);
+  return v;
+}
 
 /* A session an unclean exit must bring back: every fact holds. */
 static struct bounce_stamp_facts restorable(void)
@@ -353,74 +400,140 @@ static void test_marker_value_is_pinned(void **state)
   assert_true(BOUNCE_REC_HELD_AT_RESTART != 0);
 }
 
-static void test_restore_zero_is_expired(void **state)
+static void test_record_field_offsets(void **state)
+{
+  (void)state;
+  /* The fields the restore rule and the eviction pass read, as literal
+   * offsets of the current (v12) layout, LP64: a move of any of them
+   * changes the on-disk format (bump BOUNCER_DB_VERSION instead). */
+  assert_int_equal(offsetof(struct BounceSessionRecord, bsr_disconnect_time), 200);
+  assert_int_equal(offsetof(struct BounceSessionRecord, bsr_last_active), 208);
+  assert_int_equal(offsetof(struct BounceSessionRecord, bsr_total_active), 224);
+  assert_int_equal(offsetof(struct BounceSessionRecord, bsr_connect_count), 236);
+}
+
+static void test_restore_zero_and_negatives_are_expired(void **state)
 {
   int64_t since = 12345;
 
   (void)state;
   /* An ACTIVE record no unclean exit brings back (or any ACTIVE record an
-   * older build wrote). */
-  assert_int_equal(bounce_record_restore(0, NOW, MAX_HOLD, &since),
-                   BOUNCE_RESTORE_EXPIRED);
-  /* Even with a hold ceiling past the epoch distance. */
-  assert_int_equal(bounce_record_restore(0, NOW, NOW + 1, NULL),
-                   BOUNCE_RESTORE_EXPIRED);
+   * older build wrote), with or without a heartbeat. */
+  assert_int_equal(restore_time(0, 0, &since), BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(restore_time(0, NOW - 60, &since), BOUNCE_RESTORE_EXPIRED);
+  /* A time before the epoch that is not the marker (a torn or foreign
+   * record), without computing now - INT64_MIN. */
+  assert_int_equal(restore_time(-2, NOW - 60, NULL), BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(restore_time(INT64_MIN, NOW - 60, NULL), BOUNCE_RESTORE_EXPIRED);
+  assert_true(since == 12345);   /* untouched when expired */
 }
 
-static void test_restore_marker_is_held_from_now(void **state)
+static void test_restore_marker_held_from_the_crash(void **state)
+{
+  struct bounce_restore_clock c = clock_at(NOW - 120);
+  struct BounceSessionRecord *r;
+  int64_t since = 0;
+
+  (void)state;
+  /* The previous run's last heartbeat is the crash. */
+  r = rec_with(BOUNCE_REC_HELD_AT_RESTART, NOW - 3600, 0, 0);
+  assert_int_equal(bounce_record_restore(r, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_true(since == NOW - 120);
+  /* The session itself was seen live later than the last heartbeat. */
+  r->bsr_last_active = NOW - 30;
+  assert_int_equal(bounce_record_restore(r, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_true(since == NOW - 30);
+  /* ... never after now (a clock that went back). */
+  r->bsr_last_active = NOW + 500;
+  assert_int_equal(bounce_record_restore(r, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_true(since == NOW);
+  /* NULL out-parameter is allowed. */
+  assert_int_equal(bounce_record_restore(r, &c, NULL),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  free(r);
+}
+
+static void test_restore_marker_without_heartbeat_is_held_from_now(void **state)
 {
   int64_t since = 0;
 
   (void)state;
-  assert_int_equal(bounce_record_restore(BOUNCE_REC_HELD_AT_RESTART, NOW,
-                                         MAX_HOLD, &since),
-                   BOUNCE_RESTORE_HELD);
+  /* A record of a build that kept no heartbeat. */
+  assert_int_equal(restore_time(BOUNCE_REC_HELD_AT_RESTART, 0, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
   assert_true(since == NOW);
-  /* No ceiling to speak of: still held, from now. */
-  since = 0;
-  assert_int_equal(bounce_record_restore(BOUNCE_REC_HELD_AT_RESTART, NOW, 0,
-                                         &since),
-                   BOUNCE_RESTORE_HELD);
-  assert_true(since == NOW);
-  /* NULL out-parameter is allowed. */
-  assert_int_equal(bounce_record_restore(BOUNCE_REC_HELD_AT_RESTART, NOW,
-                                         MAX_HOLD, NULL),
-                   BOUNCE_RESTORE_HELD);
+}
+
+static void test_restore_marker_outage_outlived_its_hold(void **state)
+{
+  struct bounce_restore_clock c;
+  struct BounceSessionRecord *r;
+
+  (void)state;
+  /* No connections: the base hold, 4 h.  With decay from 50 %, the
+   * decayed hold never goes below base. */
+  c = clock_at(NOW - BASE);
+  r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 0, 0);
+  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
+  c = clock_at(NOW - BASE - 1);
+  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_EXPIRED);
+  free(r);
+  /* Four connections: earned 8 h; decay from 4 h idle, a quarter (2 h)
+   * per halving: after 6 h idle the hold is 4 h + 2 h = 6 h. */
+  r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 4, 0);
+  c = clock_at(NOW - 21600);
+  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
+  c = clock_at(NOW - 21601);
+  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_EXPIRED);
+  free(r);
+}
+
+static void test_restore_marker_past_max_hold(void **state)
+{
+  struct bounce_restore_clock c = clock_at(NOW - 601);
+  struct BounceSessionRecord *r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 4, 0);
+
+  (void)state;
+  c.max_hold = 600;
+  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_EXPIRED);
+  c = clock_at(NOW - 600);
+  c.max_hold = 600;
+  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
+  free(r);
 }
 
 static void test_restore_real_time_is_todays_check(void **state)
 {
+  struct bounce_restore_clock c = clock_at(NOW - 60);
+  struct BounceSessionRecord *r;
   int64_t since = 0;
 
   (void)state;
   /* Held an hour ago: held, from then. */
-  assert_int_equal(bounce_record_restore(NOW - 3600, NOW, MAX_HOLD, &since),
-                   BOUNCE_RESTORE_HELD);
+  assert_int_equal(restore_time(NOW - 3600, NOW - 60, &since), BOUNCE_RESTORE_HELD);
   assert_true(since == NOW - 3600);
   /* Exactly the ceiling: still held (the check is "more than"). */
-  assert_int_equal(bounce_record_restore(NOW - MAX_HOLD, NOW, MAX_HOLD, &since),
-                   BOUNCE_RESTORE_HELD);
+  assert_int_equal(restore_time(NOW - MAX_HOLD, NOW - 60, &since), BOUNCE_RESTORE_HELD);
   assert_true(since == NOW - MAX_HOLD);
   /* One second past it: expired. */
-  assert_int_equal(bounce_record_restore(NOW - MAX_HOLD - 1, NOW, MAX_HOLD,
-                                         &since),
+  assert_int_equal(restore_time(NOW - MAX_HOLD - 1, NOW - 60, &since),
                    BOUNCE_RESTORE_EXPIRED);
   /* A disconnect stamped ahead of our clock is held, as it was. */
-  assert_int_equal(bounce_record_restore(NOW + 60, NOW, MAX_HOLD, &since),
-                   BOUNCE_RESTORE_HELD);
+  assert_int_equal(restore_time(NOW + 60, NOW - 60, &since), BOUNCE_RESTORE_HELD);
   assert_true(since == NOW + 60);
-}
-
-static void test_restore_other_negatives_are_expired(void **state)
-{
-  (void)state;
-  /* A time before the epoch that is not the marker (a torn or foreign
-   * record) is expired, as the elapsed check found it -- without
-   * computing now - INT64_MIN. */
-  assert_int_equal(bounce_record_restore(-2, NOW, MAX_HOLD, NULL),
-                   BOUNCE_RESTORE_EXPIRED);
-  assert_int_equal(bounce_record_restore(INT64_MIN, NOW, MAX_HOLD, NULL),
-                   BOUNCE_RESTORE_EXPIRED);
+  /* A real time is not read against its own hold: the restore arms the
+   * hold timer, which ends it after the settling period (today). */
+  r = rec_with(NOW - 20000, 0, 0, 0);
+  assert_int_equal(bounce_record_restore(r, &c, &since), BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW - 20000);
+  /* Nor does the heartbeat move it. */
+  c = clock_at(0);
+  assert_int_equal(bounce_record_restore(r, &c, &since), BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW - 20000);
+  free(r);
 }
 
 static void test_marker_is_expired_for_an_old_binary(void **state)
@@ -432,11 +545,11 @@ static void test_marker_is_expired_for_an_old_binary(void **state)
   assert_true(old_binary_expires(0, NOW, MAX_HOLD));
   /* And the two rules agree on every real time. */
   assert_int_equal(old_binary_expires(NOW - 3600, NOW, MAX_HOLD),
-                   bounce_record_restore(NOW - 3600, NOW, MAX_HOLD, NULL)
+                   restore_time(NOW - 3600, NOW - 60, NULL)
                      == BOUNCE_RESTORE_EXPIRED);
   assert_int_equal(old_binary_expires(NOW - MAX_HOLD - 1, NOW, MAX_HOLD),
-                   bounce_record_restore(NOW - MAX_HOLD - 1, NOW, MAX_HOLD,
-                                         NULL) == BOUNCE_RESTORE_EXPIRED);
+                   restore_time(NOW - MAX_HOLD - 1, NOW - 60, NULL)
+                     == BOUNCE_RESTORE_EXPIRED);
 }
 
 /* Our own held ghost, held for its full hold. */
@@ -519,27 +632,158 @@ static void test_stamp_then_restore_round_trip(void **state)
   int64_t since = 0;
 
   (void)state;
-  /* The defect: an ACTIVE session's record came back expired. */
-  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, 0), NOW,
-                                         MAX_HOLD, &since),
-                   BOUNCE_RESTORE_HELD);
-  assert_true(since == NOW);
+  /* The defect: an ACTIVE session's record came back expired.  Now it is
+   * held from the crash. */
+  assert_int_equal(restore_time(bounce_record_stamp(&f, 0), NOW - 90, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_true(since == NOW - 90);
   /* One a crash must not bring back stays expired. */
   f.wants_hold = 0;
-  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, 0), NOW,
-                                         MAX_HOLD, NULL),
+  assert_int_equal(restore_time(bounce_record_stamp(&f, 0), NOW - 90, NULL),
                    BOUNCE_RESTORE_EXPIRED);
   f = restorable();
   f.remote_devices = 1;
-  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, 0), NOW,
-                                         MAX_HOLD, NULL),
+  assert_int_equal(restore_time(bounce_record_stamp(&f, 0), NOW - 90, NULL),
                    BOUNCE_RESTORE_EXPIRED);
   /* A held one keeps its own clock. */
   f = held_here();
-  assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, NOW - 600),
-                                         NOW, MAX_HOLD, &since),
+  assert_int_equal(restore_time(bounce_record_stamp(&f, NOW - 600), NOW - 90, &since),
                    BOUNCE_RESTORE_HELD);
   assert_true(since == NOW - 600);
+}
+
+static void test_hold_length_earned(void **state)
+{
+  struct bounce_hold_rule r = DEFAULT_RULE;
+
+  (void)state;
+  r.decay_pct = 0;
+  /* Never connected: base, whatever its active time. */
+  assert_true(bounce_hold_length(&r, 0, 0, 0) == BASE);
+  assert_true(bounce_hold_length(&r, 0, 30 * 86400, 0) == BASE);
+  /* A quarter of base per connection. */
+  assert_true(bounce_hold_length(&r, 1, 0, 0) == BASE + BASE / 4);
+  assert_true(bounce_hold_length(&r, 4, 0, 0) == 2 * BASE);
+  /* An hour per full 24 h attached. */
+  assert_true(bounce_hold_length(&r, 4, 2 * 86400, 0) == 2 * BASE + 7200);
+  assert_true(bounce_hold_length(&r, 4, 2 * 86400 - 1, 0) == 2 * BASE + 3600);
+  /* Capped at the ceiling. */
+  assert_true(bounce_hold_length(&r, 100000, 0, 0) == MAX_HOLD);
+  /* No decay without it, however long held. */
+  assert_true(bounce_hold_length(&r, 4, 0, 10 * 86400) == 2 * BASE);
+}
+
+static void test_hold_length_decay(void **state)
+{
+  struct bounce_hold_rule r = DEFAULT_RULE;
+
+  (void)state;
+  /* Earned 8 h: decay from 4 h idle, 2 h per halving. */
+  assert_true(bounce_hold_length(&r, 4, 0, 0) == 28800);
+  assert_true(bounce_hold_length(&r, 4, 0, -50) == 28800);
+  assert_true(bounce_hold_length(&r, 4, 0, 14400) == 28800);
+  assert_true(bounce_hold_length(&r, 4, 0, 14401) == 28800);
+  assert_true(bounce_hold_length(&r, 4, 0, 21600) == 21600);
+  assert_true(bounce_hold_length(&r, 4, 0, 14400 + 4 * 7200) == 14400 + 900);
+  /* Never below base. */
+  assert_true(bounce_hold_length(&r, 4, 0, 365 * 86400) == BASE);
+  assert_true(bounce_hold_length(&r, 0, 0, 7200 + 2 * 3600) == BASE);
+}
+
+static void test_breaker(void **state)
+{
+  (void)state;
+  /* The last start ended cleanly, or outlived its window. */
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_NONE, NOW - 60, NOW - 30, 600), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_SETTLED, NOW - 60, NOW - 30, 600), 0);
+  /* It died inside its window: a crash loop is possible. */
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 30, 600), 1);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, 0, 600), 1);
+  /* ... before its first heartbeat (the previous run's is older). */
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 7200, 600), 1);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 700, NOW - 101, 600), 1);
+  /* Its heartbeat shows it lived the window (the settle mark was lost). */
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 700, NOW - 100, 600), 0);
+  /* The breaker is off. */
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 30, 0), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 30, -5), 0);
+}
+
+static void test_breaker_lists_only_crash_restores(void **state)
+{
+  (void)state;
+  /* Restored because it was live at the crash: the breaker may skip it
+   * if this start dies inside its window. */
+  assert_int_equal(bounce_boot_lists(BOUNCE_RESTORE_HELD_AT_CRASH), 1);
+  /* Held before the crash: restored before the crash restore existed,
+   * and never skipped (ruling 2026-11-06). */
+  assert_int_equal(bounce_boot_lists(BOUNCE_RESTORE_HELD), 0);
+  assert_int_equal(bounce_boot_lists(BOUNCE_RESTORE_EXPIRED), 0);
+}
+
+static void test_boot_record_codec(void **state)
+{
+  size_t len = bounce_boot_rec_size(2);
+  /* Odd-aligned on purpose: the store's value buffers have no alignment. */
+  unsigned char *raw = calloc(1, len + 2);
+  unsigned char *buf = raw + 1;
+  enum bounce_boot_state st = BOUNCE_BOOT_NONE;
+  int64_t start = 0;
+  uint32_t count = 0;
+  char longid[BOUNCER_SESSID_LEN + 10];
+
+  (void)state;
+  assert_non_null(raw);
+  assert_true(bounce_boot_rec_size(0) < len);
+  assert_true(len == bounce_boot_rec_size(0) + 2 * BOUNCER_SESSID_LEN);
+  memset(longid, 'z', sizeof(longid) - 1);
+  longid[sizeof(longid) - 1] = '\0';
+  bounce_boot_rec_put_header(buf, BOUNCE_BOOT_RUNNING, NOW - 5, 2);
+  bounce_boot_rec_put_id(buf, 0, "AZ4tXlSJcGOC5duroPhR2g");
+  bounce_boot_rec_put_id(buf, 1, longid);
+  assert_int_equal(bounce_boot_rec_decode(buf, len, &st, &start, &count), 0);
+  assert_int_equal(st, BOUNCE_BOOT_RUNNING);
+  assert_true(start == NOW - 5);
+  assert_int_equal(count, 2);
+  assert_string_equal(bounce_boot_rec_id(buf, 0), "AZ4tXlSJcGOC5duroPhR2g");
+  assert_int_equal(strlen(bounce_boot_rec_id(buf, 1)), BOUNCER_SESSID_LEN - 1);
+
+  /* Not ours: a short value, a long one, a bad version or state, an id
+   * without its NUL. */
+  assert_int_equal(bounce_boot_rec_decode(buf, 3, &st, &start, &count), -1);
+  assert_int_equal(bounce_boot_rec_decode(buf, len - 1, &st, &start, &count), -1);
+  assert_int_equal(bounce_boot_rec_decode(buf, len + 1, &st, &start, &count), -1);
+  buf[0] ^= 0x40;
+  assert_int_equal(bounce_boot_rec_decode(buf, len, &st, &start, &count), -1);
+  buf[0] ^= 0x40;
+  bounce_boot_rec_put_header(buf, (enum bounce_boot_state)7, NOW - 5, 2);
+  assert_int_equal(bounce_boot_rec_decode(buf, len, &st, &start, &count), -1);
+  bounce_boot_rec_put_header(buf, BOUNCE_BOOT_RUNNING, NOW - 5, 2);
+  memset(buf + bounce_boot_rec_size(1), 'q', BOUNCER_SESSID_LEN);
+  assert_int_equal(bounce_boot_rec_decode(buf, len, &st, &start, &count), -1);
+
+  /* A settled record names none. */
+  bounce_boot_rec_put_header(buf, BOUNCE_BOOT_SETTLED, NOW - 9, 0);
+  assert_int_equal(bounce_boot_rec_decode(buf, bounce_boot_rec_size(0), &st,
+                                          &start, &count), 0);
+  assert_int_equal(st, BOUNCE_BOOT_SETTLED);
+  assert_int_equal(count, 0);
+  free(raw);
+}
+
+static void test_alive_record_codec(void **state)
+{
+  unsigned char buf[BOUNCE_ALIVE_REC_SIZE + 1];
+  int64_t t = 0;
+
+  (void)state;
+  bounce_alive_rec_encode(buf + 1, NOW - 7);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t), 0);
+  assert_true(t == NOW - 7);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE - 1, &t), -1);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, 8, &t), -1);
+  buf[1] ^= 0x40;
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t), -1);
 }
 
 int main(void)
@@ -555,16 +799,25 @@ int main(void)
     cmocka_unit_test(test_wrong_size_and_unknown),
     cmocka_unit_test(test_unterminated_strings_stay_bounded),
     cmocka_unit_test(test_marker_value_is_pinned),
-    cmocka_unit_test(test_restore_zero_is_expired),
-    cmocka_unit_test(test_restore_marker_is_held_from_now),
+    cmocka_unit_test(test_record_field_offsets),
+    cmocka_unit_test(test_restore_zero_and_negatives_are_expired),
+    cmocka_unit_test(test_restore_marker_held_from_the_crash),
+    cmocka_unit_test(test_restore_marker_without_heartbeat_is_held_from_now),
+    cmocka_unit_test(test_restore_marker_outage_outlived_its_hold),
+    cmocka_unit_test(test_restore_marker_past_max_hold),
     cmocka_unit_test(test_restore_real_time_is_todays_check),
-    cmocka_unit_test(test_restore_other_negatives_are_expired),
     cmocka_unit_test(test_marker_is_expired_for_an_old_binary),
     cmocka_unit_test(test_stamp_real_time_is_written_as_is),
     cmocka_unit_test(test_stamp_hold_not_ours_to_bring_back),
     cmocka_unit_test(test_stamp_restorable_active_session),
     cmocka_unit_test(test_stamp_each_missing_fact_writes_zero),
     cmocka_unit_test(test_stamp_then_restore_round_trip),
+    cmocka_unit_test(test_hold_length_earned),
+    cmocka_unit_test(test_hold_length_decay),
+    cmocka_unit_test(test_breaker),
+    cmocka_unit_test(test_breaker_lists_only_crash_restores),
+    cmocka_unit_test(test_boot_record_codec),
+    cmocka_unit_test(test_alive_record_codec),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

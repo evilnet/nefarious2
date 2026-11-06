@@ -709,6 +709,7 @@ static void bounce_send_bsc(struct BouncerSession *s, struct Client *link);
 static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *link);
 static int session_own_alias_count(struct BouncerSession *s);
 static int session_own_remote_alias_count(struct BouncerSession *s);
+static void bounce_boot_clean_exit(void);
 static int session_hold_wanted(struct BouncerSession *s, struct Client *cptr);
 static void session_roster_add(struct BouncerSession *session,
                                const char *alias_numeric,
@@ -3201,21 +3202,24 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr,
 /** The hold a session has earned, before idle decay: base, plus a
  * quarter of base per connection, plus an hour per 24 h attached, capped
  * at BOUNCER_MAX_HOLD.  A session that never connected gets base. */
+/** The adaptive hold's figures, from the features. */
+static struct bounce_hold_rule bounce_hold_rule_now(void)
+{
+  struct bounce_hold_rule r;
+
+  r.base = feature_int(FEAT_BOUNCER_SESSION_HOLD);   /* default 4h */
+  r.max = feature_int(FEAT_BOUNCER_MAX_HOLD);        /* default 14d */
+  r.decay_pct = feature_int(FEAT_BOUNCER_HOLD_DECAY_PERCENT);
+  return r;
+}
+
 static time_t bounce_hold_earned(struct BouncerSession *session)
 {
-  time_t base = feature_int(FEAT_BOUNCER_SESSION_HOLD);  /* default 4h */
-  time_t max  = feature_int(FEAT_BOUNCER_MAX_HOLD);      /* default 14d */
-  time_t computed;
+  struct bounce_hold_rule r = bounce_hold_rule_now();
 
-  if (session->hs_connect_count == 0)
-    return base;
-
-  computed = base + (base * session->hs_connect_count / 4);
-
-  if (session->hs_total_active > 0)
-    computed += (session->hs_total_active / 86400) * 3600;
-
-  return (computed > max) ? max : computed;
+  r.decay_pct = 0;   /* the earned hold, before any decay */
+  return (time_t)bounce_hold_length(&r, session->hs_connect_count,
+                                    (int64_t)session->hs_total_active, 0);
 }
 
 /** The hold a holding session gets, after idle decay (spec: the
@@ -3227,26 +3231,16 @@ static time_t bounce_hold_earned(struct BouncerSession *session)
  * session would get if it were held now. */
 static time_t bounce_compute_hold_time(struct BouncerSession *session)
 {
-  time_t base = feature_int(FEAT_BOUNCER_SESSION_HOLD);
-  time_t earned = bounce_hold_earned(session);
-  int decay_pct = feature_int(FEAT_BOUNCER_HOLD_DECAY_PERCENT);
+  struct bounce_hold_rule r = bounce_hold_rule_now();
+  time_t idle = 0;
 
-  if (decay_pct > 0 && session->hs_state == BOUNCE_HOLDING
-      && session->hs_disconnect_time > 0) {
-    time_t idle = CurrentTime - session->hs_disconnect_time;
-    time_t decay_start = earned * decay_pct / 100;
-    time_t decay_unit = earned / 4;
-    if (idle > decay_start && decay_unit > 0) {
-      time_t remaining = earned - decay_start;
-      time_t halvings = (idle - decay_start) / decay_unit;
-      time_t computed;
-      while (halvings-- > 0 && remaining > 0)
-        remaining /= 2;
-      computed = decay_start + remaining;
-      return computed < base ? base : computed;
-    }
-  }
-  return earned;
+  /* bounce_hold_length() (bouncer_record.c, cmocka): the one rule the
+   * restore reads too. */
+  if (session->hs_state == BOUNCE_HOLDING && session->hs_disconnect_time > 0)
+    idle = CurrentTime - session->hs_disconnect_time;
+  return (time_t)bounce_hold_length(&r, session->hs_connect_count,
+                                    (int64_t)session->hs_total_active,
+                                    (int64_t)idle);
 }
 
 /** Seconds until a holding session expires, by the decayed hold; 0 when
@@ -4900,6 +4894,10 @@ void bounce_db_shutdown(void)
     }
   }
 
+  /* No crash loop to break at the next start, and the heartbeat says
+   * when this server went. */
+  bounce_boot_clean_exit();
+
   log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: shutdown — persisted %d sessions", count);
 }
 
@@ -5137,6 +5135,416 @@ static void bounce_restore_channels(struct Client *ghost,
   }
 }
 
+/* ---------------------------------------------------------------- */
+/* Restart bookkeeping outside the bouncer column family              */
+/* ---------------------------------------------------------------- */
+
+/* Two keys in the metadata env's default column family (an old binary's
+ * restore iterates only the bouncer CF and would read anything else there
+ * as a bad record): the heartbeat, when this server was last known alive
+ * -- a session live at an unclean exit is held from it, so its hold runs
+ * from the crash and a long outage expires it -- and the boot record of
+ * the last start that restored sessions, which the crash-loop breaker
+ * reads (bounce_restore_breaker()).  Both are kept only by a start that
+ * ran the restore: one with the bouncer off leaves them as the last
+ * restoring start left them, so the records it did not restore keep
+ * their real age. */
+
+/** Seconds between heartbeats: a crash is read as the last one, so a
+ * session live at it is held up to this much early. */
+#define BOUNCE_ALIVE_TICK 30
+
+static struct db_env *bounce_meta_env;
+static struct db_cf *bounce_meta_cf_handle;
+static struct Timer bounce_alive_timer;
+static struct Timer bounce_settle_timer;
+static int bounce_boot_restored;    /* this start ran the restore */
+static int bounce_boot_settled;     /* ... and outlived its crash window */
+static time_t bounce_boot_start;
+
+/** The metadata env's default column family, or NULL. */
+static struct db_cf *bounce_meta_cf(void)
+{
+  struct db_env *env = metadata_get_env();
+
+  if (!env)
+    return NULL;
+  if (env != bounce_meta_env) {
+    bounce_meta_env = env;
+    bounce_meta_cf_handle = NULL;
+    if (db_cf_open(env, "default", NULL, &bounce_meta_cf_handle) != DB_OK)
+      bounce_meta_cf_handle = NULL;
+  }
+  return bounce_meta_cf_handle;
+}
+
+/** Put (@a val non-NULL) or delete @a key in the default CF, in @a wb when
+ * given, else in a batch of its own committed now (fsync with
+ * @a durable).  @return 0, or -1 on a storage error. */
+static int bounce_meta_write(struct db_writebatch *wb, const char *key,
+                             const void *val, size_t len, int durable)
+{
+  struct db_env *env = metadata_get_env();
+  struct db_cf *mcf = bounce_meta_cf();
+  struct db_writebatch *own = NULL;
+  int rc;
+
+  if (!env || !mcf)
+    return -1;
+  if (!wb) {
+    wb = own = db_writebatch_new(env);
+    if (!wb)
+      return -1;
+  }
+  rc = val ? db_writebatch_put(wb, mcf, key, strlen(key), val, len)
+           : db_writebatch_del(wb, mcf, key, strlen(key));
+  if (own) {
+    if (rc == DB_OK)
+      rc = db_writebatch_commit(own, durable);
+    db_writebatch_destroy(own);
+  }
+  if (rc != DB_OK && rc != DB_NOTFOUND) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: %s %s failed: %s",
+              val ? "put" : "del", key, db_strerror(rc));
+    return -1;
+  }
+  return 0;
+}
+
+/** The previous run's last heartbeat, or 0 when none is known. */
+static int64_t bounce_alive_read(void)
+{
+  struct db_env *env = metadata_get_env();
+  struct db_cf *mcf = bounce_meta_cf();
+  struct db_val v = { NULL, 0 };
+  int64_t t = 0;
+
+  if (!env || !mcf
+      || db_get(env, mcf, BOUNCE_ALIVE_KEY, sizeof(BOUNCE_ALIVE_KEY) - 1,
+                NULL, &v) != DB_OK)
+    return 0;
+  if (bounce_alive_rec_decode(v.base, v.len, &t) != 0 || t < 0)
+    t = 0;
+  db_val_free(&v);
+  return t;
+}
+
+/** Write the heartbeat: now. */
+static void bounce_alive_write(void)
+{
+  unsigned char buf[BOUNCE_ALIVE_REC_SIZE];
+
+  if (!bounce_boot_restored || !feature_bool(FEAT_BOUNCER_PERSIST)
+      || !metadata_lmdb_is_available())
+    return;
+  bounce_alive_rec_encode(buf, (int64_t)CurrentTime);
+  (void)bounce_meta_write(NULL, BOUNCE_ALIVE_KEY, buf, sizeof(buf), 0);
+}
+
+static void bounce_alive_cb(struct Event *ev)
+{
+  if (ev_type(ev) == ET_DESTROY)
+    return;
+  bounce_alive_write();
+}
+
+/** This start outlived its crash window: what it restored is no longer
+ * one the breaker skips at the next start. */
+static void bounce_boot_settle(void)
+{
+  unsigned char buf[64];
+
+  if (!bounce_boot_restored || bounce_boot_settled
+      || !feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+    return;
+  bounce_boot_rec_put_header(buf, BOUNCE_BOOT_SETTLED,
+                             (int64_t)bounce_boot_start, 0);
+  if (bounce_meta_write(NULL, BOUNCE_BOOT_KEY, buf, bounce_boot_rec_size(0), 0) == 0) {
+    bounce_boot_settled = 1;
+    bounce_alive_write();
+    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: this start outlived its "
+              "crash window (BOUNCER_RESTORE_CRASH_WINDOW): an unclean exit "
+              "from now on restores what it restored");
+  }
+}
+
+static void bounce_settle_cb(struct Event *ev)
+{
+  if (ev_type(ev) == ET_DESTROY)
+    return;
+  bounce_boot_settle();
+}
+
+/** Arm the settle mark at this start plus the crash window (now, when
+ * that has passed or the window is 0). */
+static void bounce_settle_arm(void)
+{
+  int window = feature_int(FEAT_BOUNCER_RESTORE_CRASH_WINDOW);
+  time_t due;
+
+  if (!bounce_boot_restored || bounce_boot_settled)
+    return;
+  if (window <= 0 || CurrentTime >= bounce_boot_start + window) {
+    if (t_active(&bounce_settle_timer))
+      timer_del(&bounce_settle_timer);
+    bounce_boot_settle();
+    return;
+  }
+  due = bounce_boot_start + window - CurrentTime;
+  if (t_active(&bounce_settle_timer))
+    timer_chg(&bounce_settle_timer, TT_RELATIVE, due);
+  else
+    timer_add(timer_init(&bounce_settle_timer), bounce_settle_cb, NULL,
+              TT_RELATIVE, due);
+}
+
+/** See include/bouncer_session.h. */
+void bounce_restore_crash_window_changed(void)
+{
+  bounce_settle_arm();
+}
+
+/** After the restore: the heartbeat starts, and the settle mark is armed. */
+static void bounce_boot_timers_start(void)
+{
+  bounce_alive_write();
+  if (!t_active(&bounce_alive_timer))
+    timer_add(timer_init(&bounce_alive_timer), bounce_alive_cb, NULL,
+              TT_PERIODIC, BOUNCE_ALIVE_TICK);
+  bounce_settle_arm();
+}
+
+/** A clean shutdown: no crash loop to break (the boot record goes), and
+ * the heartbeat says when this server went. */
+static void bounce_boot_clean_exit(void)
+{
+  if (!bounce_boot_restored)
+    return;
+  (void)bounce_meta_write(NULL, BOUNCE_BOOT_KEY, NULL, 0, 0);
+  bounce_alive_write();
+}
+
+/* What the restore's first pass decided for each session id. */
+#define RM_RESTORE 1   /* restored by this start */
+#define RM_CRASH   2   /* live at an unclean exit (the restart marker) */
+#define RM_SKIP    4   /* the breaker: the last start restored it from the
+                        * marker and died */
+#define RM_LISTED  8   /* on this start's boot record (bounce_boot_lists()) */
+
+struct restore_mark {
+  char id[BOUNCER_SESSID_LEN];
+  unsigned char flags;
+};
+
+struct restore_marks {
+  struct restore_mark *v;
+  size_t n, cap;
+};
+
+static int restore_mark_cmp(const void *a, const void *b)
+{
+  return strcmp(((const struct restore_mark *)a)->id,
+                ((const struct restore_mark *)b)->id);
+}
+
+static void restore_marks_add(struct restore_marks *m, const char *id,
+                              unsigned char flags)
+{
+  if (m->n == m->cap) {
+    m->cap = m->cap ? m->cap * 2 : 64;
+    m->v = (struct restore_mark *)MyRealloc(m->v, m->cap * sizeof(*m->v));
+  }
+  ircd_strncpy(m->v[m->n].id, id, sizeof(m->v[m->n].id));
+  m->v[m->n].flags = flags;
+  m->n++;
+}
+
+/** Sort @a m for restore_marks_find(). */
+static void restore_marks_sort(struct restore_marks *m)
+{
+  if (m->n > 1)
+    qsort(m->v, m->n, sizeof(*m->v), restore_mark_cmp);
+}
+
+static struct restore_mark *restore_marks_find(struct restore_marks *m,
+                                               const char *id)
+{
+  struct restore_mark key;
+
+  if (!m->n)
+    return NULL;
+  ircd_strncpy(key.id, id, sizeof(key.id));
+  return (struct restore_mark *)bsearch(&key, m->v, m->n, sizeof(*m->v),
+                                        restore_mark_cmp);
+}
+
+static void restore_marks_free(struct restore_marks *m)
+{
+  MyFree(m->v);
+  m->v = NULL;
+  m->n = m->cap = 0;
+}
+
+/** The restore's first pass, before any ghost is built.
+ *  - The crash-loop breaker: when the last start that restored sessions
+ *    ended uncleanly inside its crash window, the sessions it restored
+ *    because they were live at the crash are not restored again, and
+ *    their records go (logged at L_CRIT).  A session held before that
+ *    crash restores as it always did.
+ *  - Every record the restart marker brings back is rewritten with its
+ *    real time (held from the crash) now, so a crash while the ghosts are
+ *    built, or any unclean exit after, does not restart its hold.
+ *  - This start's boot record, RUNNING, names every session it restores
+ *    because it was live at the crash (bounce_boot_lists()); written with
+ *    the rest, durably.
+ * The decisions are left in @a plan (sorted) for the second pass.
+ * @return Records the breaker dropped. */
+static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
+                                  const struct bounce_restore_clock *clock,
+                                  struct restore_marks *plan)
+{
+  struct db_cf *mcf = bounce_meta_cf();
+  struct db_val boot = { NULL, 0 };
+  enum bounce_boot_state prev = BOUNCE_BOOT_NONE;
+  int64_t prev_start = 0;
+  uint32_t prev_n = 0, i, nlisted = 0;
+  struct restore_marks skip = { NULL, 0, 0 };
+  struct db_writebatch *wb;
+  struct db_iter *it;
+  int window = feature_int(FEAT_BOUNCER_RESTORE_CRASH_WINDOW);
+  int breaker, rc, skipped = 0, rewritten = 0;
+
+  if (mcf && db_get(env, mcf, BOUNCE_BOOT_KEY, sizeof(BOUNCE_BOOT_KEY) - 1,
+                    NULL, &boot) == DB_OK
+      && bounce_boot_rec_decode(boot.base, boot.len, &prev, &prev_start,
+                                &prev_n) != 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: the boot record "
+              "(%zu bytes) is not one this build reads: no crash-loop check "
+              "this start", boot.len);
+    prev = BOUNCE_BOOT_NONE;
+    prev_n = 0;
+  }
+  breaker = bounce_restore_breaker(prev, prev_start, clock->last_alive, window);
+  if (breaker) {
+    log_write(LS_SYSTEM, L_CRIT, 0, "bouncer_persist: the last start (at %Tu, "
+              "last alive %Tu) ended uncleanly within its crash window "
+              "(BOUNCER_RESTORE_CRASH_WINDOW %d s): a crash loop is possible, "
+              "so the %u sessions it restored because they were live at the "
+              "crash are not restored now",
+              (time_t)prev_start, (time_t)clock->last_alive, window, prev_n);
+    for (i = 0; i < prev_n; i++)
+      restore_marks_add(&skip, bounce_boot_rec_id(boot.base, i), RM_SKIP);
+    restore_marks_sort(&skip);
+  }
+
+  wb = db_writebatch_new(env);
+  it = db_iter_open(env, cf, /*snap=*/NULL);
+  if (!wb || !it) {
+    if (it)
+      db_iter_close(it);
+    if (wb)
+      db_writebatch_destroy(wb);
+    restore_marks_free(&skip);
+    db_val_free(&boot);
+    return 0;
+  }
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
+    struct BounceSessionRecord rec;
+    enum BounceRecordStatus st;
+    enum BounceRestoreVerdict v;
+    char id[BOUNCER_SESSID_LEN];
+    unsigned char flags;
+    uint32_t version;
+    int64_t since;
+
+    st = bounce_record_decode(vbuf, vlen, &rec, &version);
+    /* v7 records get their id at the second pass; bad ones are not
+     * restored (the eviction pass deletes them). */
+    if (st != BOUNCE_REC_CURRENT && st != BOUNCE_REC_MIGRATED)
+      continue;
+    ircd_strncpy(id, rec.bsr_sessid, sizeof(id));
+    if (breaker && restore_marks_find(&skip, id)) {
+      log_write(LS_SYSTEM, L_CRIT, 0, "bouncer_persist: not restoring session "
+                "%s (%s, %s): the last start restored it, live at the crash, "
+                "and died within its crash window", id, rec.bsr_account,
+                rec.bsr_nick);
+      db_writebatch_del(wb, cf, kbuf, klen);
+      restore_marks_add(plan, id, RM_SKIP);
+      skipped++;
+      continue;
+    }
+    v = bounce_record_restore(&rec, clock, &since);
+    if (v == BOUNCE_RESTORE_EXPIRED) {
+      if (rec.bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART)
+        log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: session %s (%s) was "
+                  "live at an unclean exit (last alive %Tu), and the outage "
+                  "outlived its hold: not restored", id, rec.bsr_account,
+                  (time_t)clock->last_alive);
+      continue;
+    }
+    flags = RM_RESTORE;
+    if (v == BOUNCE_RESTORE_HELD_AT_CRASH) {
+      /* Its real time, before any ghost is built. */
+      rec.bsr_disconnect_time = since;
+      if (st == BOUNCE_REC_CURRENT
+          && db_writebatch_put(wb, cf, kbuf, klen, &rec, sizeof(rec)) == DB_OK)
+        rewritten++;
+      flags |= RM_CRASH;
+    }
+    if (bounce_boot_lists(v)) {
+      flags |= RM_LISTED;
+      nlisted++;
+    }
+    restore_marks_add(plan, id, flags);
+  }
+  db_iter_close(it);
+
+  /* This start's boot record: RUNNING, the sessions it restores because
+   * they were live at the crash. */
+  if (mcf) {
+    size_t blen = bounce_boot_rec_size(nlisted);
+    unsigned char *bbuf = (unsigned char *)MyMalloc(blen);
+    uint32_t k = 0;
+    size_t j;
+
+    bounce_boot_rec_put_header(bbuf, BOUNCE_BOOT_RUNNING, clock->now, nlisted);
+    for (j = 0; j < plan->n; j++)
+      if (plan->v[j].flags & RM_LISTED)
+        bounce_boot_rec_put_id(bbuf, k++, plan->v[j].id);
+    (void)bounce_meta_write(wb, BOUNCE_BOOT_KEY, bbuf, blen, 0);
+    MyFree(bbuf);
+  }
+  rc = db_writebatch_commit(wb, /*sync_durably=*/1);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK)
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: the restore's first "
+              "pass did not commit (%s): %d records live at an unclean exit "
+              "keep the marker until written again", db_strerror(rc), rewritten);
+  else if (rewritten)
+    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: %d sessions live at an "
+              "unclean exit, held from the crash (last alive %Tu)", rewritten,
+              (time_t)clock->last_alive);
+
+  /* With no default CF there is no heartbeat or boot record to keep. */
+  bounce_boot_restored = mcf ? 1 : 0;
+  if (!mcf)
+    log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: the metadata store's "
+              "default column family did not open: no heartbeat (a session "
+              "live at an unclean exit is held from the restart) and no "
+              "crash-loop check");
+  bounce_boot_settled = 0;
+  bounce_boot_start = (time_t)clock->now;
+  restore_marks_sort(plan);
+  restore_marks_free(&skip);
+  db_val_free(&boot);
+  return skipped;
+}
+
 /** Restore bouncer sessions from MDBX after restart.
  * Creates ghost clients, joins them to channels, registers sessions
  * in hash tables. Runs before listeners open, so no collision possible.
@@ -5154,7 +5562,9 @@ int bounce_db_restore(void)
   int migrated = 0;   /* v8..v11 records read through a frozen layout */
   int rejected = 0;   /* wrong size for their version, or unknown version */
   int restarted = 0;  /* live when an unclean exit took this server down */
-  time_t max_hold;
+  int skipped = 0;    /* the crash-loop breaker's */
+  struct bounce_restore_clock clock;
+  struct restore_marks plan = { NULL, 0, 0 };
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
     return 0;
@@ -5177,7 +5587,16 @@ int bounce_db_restore(void)
     return 0;
   }
 
-  max_hold = feature_int(FEAT_BOUNCER_MAX_HOLD);
+  memset(&clock, 0, sizeof(clock));
+  clock.now = (int64_t)CurrentTime;
+  clock.max_hold = feature_int(FEAT_BOUNCER_MAX_HOLD);
+  clock.last_alive = bounce_alive_read();
+  clock.hold = bounce_hold_rule_now();
+
+  /* The first pass: the crash-loop breaker, the restart markers rewritten
+   * with their real time, this start's boot record -- all before any
+   * ghost is built. */
+  skipped = bounce_restore_prepare(env, cf, &clock, &plan);
 
   /* Iterate through all persisted records */
   it = db_iter_open(env, cf, /*snap=*/NULL);
@@ -5185,6 +5604,8 @@ int bounce_db_restore(void)
     log_write(LS_SYSTEM, L_ERROR, 0,
               "bouncer_persist: db_iter_open failed: %s",
               db_env_last_error(env) ? db_env_last_error(env) : "unknown");
+    restore_marks_free(&plan);
+    bounce_boot_timers_start();   /* the first pass wrote a boot record */
     return -1;
   }
 
@@ -5198,11 +5619,14 @@ int bounce_db_restore(void)
     struct BouncerSession *session;
     struct Client *ghost;
     struct AccountSessions *as;
+    struct restore_mark *mark;
+    enum BounceRestoreVerdict verdict;
+    enum BounceRecordStatus status;
     int64_t held_since;
     time_t remaining;
     uint32_t version;
 
-    switch (bounce_record_decode(vbuf, vlen, &rec_buf, &version)) {
+    switch ((status = bounce_record_decode(vbuf, vlen, &rec_buf, &version))) {
     case BOUNCE_REC_CURRENT:
       break;
     case BOUNCE_REC_MIGRATED:
@@ -5240,13 +5664,19 @@ int bounce_db_restore(void)
     }
     rec = &rec_buf;
 
+    /* What the first pass decided: the breaker's skip, or a session live
+     * at an unclean exit (its record now carries its real time). */
+    mark = (status == BOUNCE_REC_MIGRATED_V7) ? NULL
+           : restore_marks_find(&plan, rec->bsr_sessid);
+    if (mark && (mark->flags & RM_SKIP))
+      continue;
+
     /* Check expiry (the eviction pass below reads the same rule): a live
      * session's record is expired unless it carries the restart marker,
-     * which brings it back held from now -- an unclean exit left it
-     * there (bounce_record_stamp()). */
-    if (bounce_record_restore(rec->bsr_disconnect_time, (int64_t)CurrentTime,
-                              (int64_t)max_hold, &held_since)
-        == BOUNCE_RESTORE_EXPIRED) {
+     * which brings it back held from the crash (bounce_record_stamp(),
+     * bounce_record_restore()). */
+    verdict = bounce_record_restore(rec, &clock, &held_since);
+    if (verdict == BOUNCE_RESTORE_EXPIRED) {
       expired++;
       continue;
     }
@@ -5302,11 +5732,13 @@ int bounce_db_restore(void)
     session->hs_last_active = (time_t)rec->bsr_last_active;
     session->hs_last_msg_time = (time_t)rec->bsr_last_msg_time;
     session->hs_disconnect_time = (time_t)held_since;
-    /* Live when this server went down: held from now, and written so at
-     * the end of the restore -- the record carries a real time from then
-     * on, so another unclean exit before anything else writes it does not
-     * start its hold again. */
-    if (rec->bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART) {
+    /* Live when this server went down: held from the crash.  The first
+     * pass wrote its record with that real time before any ghost was
+     * built; written again at the end of the restore (should that pass
+     * not have committed), so another unclean exit does not restart its
+     * hold. */
+    if (verdict == BOUNCE_RESTORE_HELD_AT_CRASH
+        || (mark && (mark->flags & RM_CRASH))) {
       ircd_strncpy(session->hs_hold_reason, "Server restarted",
                    sizeof(session->hs_hold_reason));
       session->hs_dirty = 1;
@@ -5427,8 +5859,9 @@ int bounce_db_restore(void)
     restored++;
     log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored session %s (%s) ghost=%s remaining=%Tu%s",
               session->hs_sessid, session->hs_account, cli_name(ghost), remaining,
-              rec->bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART
-                ? " (live at an unclean exit: held from now)" : "");
+              (verdict == BOUNCE_RESTORE_HELD_AT_CRASH
+               || (mark && (mark->flags & RM_CRASH)))
+                ? " (live at an unclean exit: held from the crash)" : "");
   }
 
   db_iter_close(it);
@@ -5467,15 +5900,12 @@ int bounce_db_restore(void)
             should_delete = 1;
           } else if (version == BOUNCER_DB_VERSION
                      && vlen == sizeof(struct BounceSessionRecord)) {
-            int64_t disconnect_time;
-            /* The value buffer carries no alignment guarantee. */
-            memcpy(&disconnect_time,
-                   (const char *)vbuf
-                     + offsetof(struct BounceSessionRecord, bsr_disconnect_time),
-                   sizeof(disconnect_time));
-            if (bounce_record_restore(disconnect_time, (int64_t)CurrentTime,
-                                      (int64_t)max_hold, NULL)
-                == BOUNCE_RESTORE_EXPIRED)
+            struct BounceSessionRecord erec;
+            uint32_t ever;
+            /* The restore's own rule, on an aligned copy. */
+            if (bounce_record_decode(vbuf, vlen, &erec, &ever) != BOUNCE_REC_CURRENT
+                || bounce_record_restore(&erec, &clock, NULL)
+                   == BOUNCE_RESTORE_EXPIRED)
               should_delete = 1;
           } else {
             /* Unknown version or wrong size — evict.  v8..v11 records
@@ -5527,8 +5957,12 @@ int bounce_db_restore(void)
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "bouncer_persist: restored %d sessions (%d migrated from v7, "
-            "%d from v8-v11, %d unreadable, %d live at an unclean exit)",
-            restored, migrated_v7, migrated, rejected, restarted);
+            "%d from v8-v11, %d unreadable, %d live at an unclean exit, "
+            "%d dropped by the crash-loop breaker)",
+            restored, migrated_v7, migrated, rejected, restarted, skipped);
+  restore_marks_free(&plan);
+  /* The heartbeat and this start's settle mark (the breaker). */
+  bounce_boot_timers_start();
   return restored;
 }
 
