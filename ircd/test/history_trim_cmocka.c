@@ -3156,6 +3156,437 @@ static void test_owner_evict_reports_newest_deleted(void **state)
   assert_int_equal(htc_parse_ms("2019.000"), owner_trimmed_ms[0]);
 }
 
+/** A REDACT row of @a bytes for @a owner at @a secs, redacting @a parent. */
+static void seed_redact(const char *target, uint64_t secs, const char *msgid,
+                        const char *owner, const char *parent, uint32_t bytes)
+{
+  char ts[32];
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)secs);
+  seed_row_sized(target, ts, msgid, owner, HTC_F_REDACT, "", parent, 0, bytes, NULL);
+}
+
+/** Whether the reply_index link REDACT row @a rmid (at @a secs) holds
+ * under @a parent is there. */
+static int redact_link(const char *target, const char *parent, uint64_t secs,
+                       const char *rmid)
+{
+  char rk[HTC_MSG_KEY_MAX], ts[32];
+  int n;
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)secs);
+  n = htc_reply_child_key(rk, sizeof rk, target, parent, ts, rmid);
+  assert_true(n > 0);
+  return key_exists(st.reply, rk, (size_t)n);
+}
+
+/* A redaction never comes undone.  The moderator is over its share, and
+ * its oldest row is the REDACT row hiding bob's message.  The step takes
+ * that row, and bob's original goes with it (charged to bob): an original
+ * left behind replays the redacted text, since a redaction lives only in
+ * its REDACT row. */
+static void test_evict_owner_share_redact_takes_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, redact_link("#c", "ORIG", 1001, "RDX"));
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_true(owner_of("a:mod") <= 1000);
+  assert_int_equal(5500, owner_of("-"));
+  assert_acct_matches_cf();
+}
+
+/* A REDACT row older than its original (the redacter's server clock is
+ * behind the author's): oldest-overall reaches the REDACT row first and
+ * takes the original with it; the walk then meets the original's by_time
+ * row in the same slice and deletes and counts nothing twice. */
+static void test_evict_oldest_skewed_redact_takes_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_redact("#c", 900, "RDX", "a:mod", "ORIG", 100);   /* stamped first */
+  seed_sized("#c", 905, "ORIG", "a:bob", 100);
+  seed_run("#n", "N", "-", 84, 1000, 100);
+  assert_int_equal(8600, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 900, "RDX"));
+  assert_int_equal(0, row_present("#c", 905, "ORIG"));
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_int_equal(0, owner_of("a:mod"));
+  assert_int_equal(2 + 9, htrim_stats()->deleted[HTRIM_PATH_OLDEST]);
+  assert_int_equal(7500, total_now());
+  assert_acct_matches_cf();
+}
+
+/* Age-out, same skew: the REDACT row is past retention, its original is
+ * not; both go. */
+static void test_ageout_skewed_redact_takes_original(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  struct htc_rec rr, ro, rk;
+  char tr[32], to[32], tk[32];
+  uint64_t total;
+  (void)state;
+
+  ageout_ready();
+  ts_ago(tr, sizeof tr, 7, 10);                  /* past the cutoff */
+  ts_ago(to, sizeof to, 6, 86390);               /* 10 s inside it */
+  ts_ago(tk, sizeof tk, 1, 0);
+  seed_row("#c", tr, "RDX", "a:mod", HTC_F_REDACT, "", "ORIG", 0, &rr);
+  seed_row("#c", to, "ORIG", "a:bob", 0, "", "", 0, &ro);
+  seed_row("#c", tk, "KEEP", "a:bob", 0, "", "", 0, &rk);
+  seed_targets("#c", tk);
+  total = htc_acct_total(htrim_acct());
+
+  htrim_pass_start(&p);
+  run_until_idle(&p);
+  assert_row_rows("#c", tr, "RDX", "a:mod", HTC_F_REDACT, "", "ORIG", 0);
+  assert_row_rows("#c", to, "ORIG", "a:bob", 0, "", "", 0);
+  assert_row_rows("#c", tk, "KEEP", "a:bob", 0, "", "", 1);
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, fake_db_rows(st.redact));
+  assert_int_equal(2, htrim_stats()->deleted[HTRIM_PATH_AGEOUT]);
+  assert_int_equal(total - rr.bytes - ro.bytes, htc_acct_total(htrim_acct()));
+  assert_int_equal(rk.bytes, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_acct_matches_cf();
+}
+
+/* A self-redaction inside one owner step: the walk deletes the original
+ * (older), then the REDACT row, whose original this slice deleted
+ * already -- nothing is staged or counted twice. */
+static void test_evict_owner_self_redaction_once(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:mod", 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(1000, owner_of("a:mod"));
+  assert_int_equal(22, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_acct_matches_cf();
+}
+
+/* A REDACT row whose original is not stored (aged out, never here) is
+ * deleted alone. */
+static void test_evict_redact_without_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "GONE", 100);
+  seed_run("#f", "F", "a:mod", 31, 2000, 100);
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(1000, owner_of("a:mod"));
+  assert_int_equal(22, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_acct_matches_cf();
+}
+
+/* The backfill's uncounted delete of a legacy REDACT row past retention
+ * takes its original, which was indexed and counted: the original's
+ * bytes come off its owner's total. */
+static void test_backfill_redact_takes_counted_original(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char tp[32], tr[32];
+  (void)state;
+
+  load_acct_backfill_pending();
+  seed_plain("#t", ts_ago(tp, sizeof tp, 1, 0), "P", "a:bob", NULL);
+  seed_legacy_row("#t", ts_ago(tr, sizeof tr, 8, 0), "R", "Mod", HTC_F_REDACT, "", "P", 0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_acct_matches_cf();
+}
+
+/* An original not indexed yet (the backfill still pending), newer than
+ * its REDACT row, which age-out takes: the original's messages row goes
+ * too, uncounted, and the backfill finds nothing left to index. */
+static void test_ageout_redact_takes_unindexed_original(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char tr[32], to[32];
+  (void)state;
+
+  load_acct_backfill_pending();
+  seed_row("#c", ts_ago(tr, sizeof tr, 8, 0), "RDX", "a:mod", HTC_F_REDACT, "", "ORIG", 0, NULL);
+  seed_legacy_row("#c", ts_ago(to, sizeof to, 1, 0), "ORIG", "Bob", 0, "", "", 0);
+  htrim_pass_start(&p);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(0, fake_db_rows(st.msgid));
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.by_owner));
+  assert_int_equal(0, htc_acct_total(htrim_acct()));
+  assert_acct_matches_cf();
+}
+
+/* An original whose by_time record does not parse: the cascade rebuilds
+ * it from the messages row and takes its by_owner size, so the message
+ * row goes and its bytes come off exactly once. */
+static void test_evict_redact_takes_unparseable_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char bt[HTC_BT_KEY_MAX], mk[HTC_MSG_KEY_MAX], val[81];
+  struct db_writebatch *wb;
+  int btl, mkl;
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_row_sized("#c", "1000.000", "ORIG", "a:bob", 0, "", "", 0, 100, NULL);
+  btl = bt_of(bt, sizeof bt, "#c", "1000.000", "ORIG");
+  mkl = htc_msg_key(mk, sizeof mk, "#c", "1000.000", "ORIG");
+  test_value(val, "Bob", 0, "", "");           /* as the store writes it */
+  wb = db_writebatch_new(env);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, mk, (size_t)mkl, val, 80));
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_time, bt, (size_t)btl, "junk", 4));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(0, owner_of("a:bob"));     /* its by_owner size, once */
+  assert_acct_matches_cf();
+}
+
+/* A self-redaction stamped before its original: the owner step reaches
+ * the REDACT row first, and the original it takes counts toward the
+ * step -- the owner ends at its share, not below it. */
+static void test_evict_owner_self_skew_to_share(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_redact("#c", 1000, "RDX", "a:mod", "ORIG", 100);
+  seed_sized("#c", 1001, "ORIG", "a:mod", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  run_until_idle(&p);
+  assert_int_equal(1000, owner_of("a:mod"));
+  assert_int_equal(0, row_present("#c", 1001, "ORIG"));
+  assert_acct_matches_cf();
+}
+
+/** Overwrite @a target/@a ts/@a msgid's messages value with one naming
+ * @a account (the store's form; the seeds name the owner string), and
+ * optionally its by_time record with junk. */
+static void restore_value(const char *target, const char *ts, const char *msgid,
+                          const char *account, unsigned char flags,
+                          const char *redact_parent, int junk_record)
+{
+  char mk[HTC_MSG_KEY_MAX], bt[HTC_BT_KEY_MAX], val[81];
+  struct db_writebatch *wb = db_writebatch_new(env);
+  int mkl = htc_msg_key(mk, sizeof mk, target, ts, msgid);
+  int btl = bt_of(bt, sizeof bt, target, ts, msgid);
+
+  test_value(val, account, flags, "", redact_parent);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.messages, mk, (size_t)mkl, val, 80));
+  if (junk_record)
+    assert_int_equal(DB_OK, db_writebatch_put(wb, st.by_time, bt, (size_t)btl, "junk", 4));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+}
+
+/* An original reachable only through its legacy bare-msgid row (value
+ * "target\0ts\0") is still found and deleted with its REDACT row. */
+static void test_evict_redact_takes_legacy_msgid_original(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  char ik[HTC_MSG_KEY_MAX];
+  const char legacy[] = "#c\0" "1000.000";
+  struct db_writebatch *wb;
+  int ikl;
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  ikl = htc_msgid_key(ik, sizeof ik, "ORIG", "#c");
+  wb = db_writebatch_new(env);
+  assert_int_equal(DB_OK, db_writebatch_del(wb, st.msgid, ik, (size_t)ikl));
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.msgid, "ORIG", 4, legacy, sizeof legacy));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_acct_matches_cf();
+}
+
+/* Age-out reaches an original with an unreadable record first (its
+ * index alone goes), then its REDACT row in the same slice: the cascade
+ * still deletes the original's messages row, and its by_owner bytes come
+ * off once. */
+static void test_ageout_index_only_then_redact(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char to[32], tr[32];
+  (void)state;
+
+  ageout_ready();
+  ts_ago(to, sizeof to, 9, 0);
+  ts_ago(tr, sizeof tr, 8, 0);
+  seed_row("#c", to, "ORIG", "a:bob", 0, "", "", 0, NULL);
+  restore_value("#c", to, "ORIG", "Bob", 0, "", 1);
+  seed_row("#c", tr, "RDX", "a:mod", HTC_F_REDACT, "", "ORIG", 0, NULL);
+  seed_targets("#c", tr);
+
+  htrim_pass_start(&p);
+  run_until_idle(&p);
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.by_owner));
+  assert_int_equal(0, fake_db_rows(st.reply));
+  assert_int_equal(0, htc_acct_total(htrim_acct()));
+  assert_acct_matches_cf();
+}
+
+/* A redaction of a redaction: only a peer can write one.  Deleting the
+ * last REDACT row leaves its REDACT parent, which goes on hiding the
+ * original. */
+static void test_evict_redaction_chain_stops_at_redact(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 54, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "R1", "a:x", "ORIG", 100);
+  seed_redact("#c", 1002, "R2", "a:mod", "R1", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 1002, "R2"));
+  assert_int_equal(1, row_present("#c", 1001, "R1"));
+  assert_int_equal(1, row_present("#c", 1000, "ORIG"));
+  assert_acct_matches_cf();
+}
+
+/* A purge deletes a REDACT row of the incarnation that lost, and leaves the
+ * original: another incarnation's row is not the loser's to delete. */
+static void test_purge_redact_keeps_original(void **state)
+{
+  uint64_t bob;
+  (void)state;
+
+  load_acct();
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  bob = htc_acct_owner(htrim_acct(), "a:bob");
+
+  assert_int_equal(1, del_row(HTRIM_PATH_INCARNATION, "#c", "1001.000", "RDX", 1));
+  assert_int_equal(0, row_present("#c", 1001, "RDX"));
+  assert_int_equal(1, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(bob, htc_acct_owner(htrim_acct(), "a:bob"));
+  assert_int_equal(0, htc_acct_owner(htrim_acct(), "a:mod"));
+  assert_acct_matches_cf();
+}
+
+/* Both rows unindexed, the REDACT row aged out and the original newer: the
+ * same slice's backfill meets the original after the cascade staged its
+ * delete, and must not index it. */
+static void test_backfill_skips_original_cascaded_same_slice(void **state)
+{
+  struct htrim_params p = bf_params(0);
+  char tr[32], to[32];
+  (void)state;
+
+  load_acct_backfill_pending();
+  seed_legacy_row("#c", ts_ago(tr, sizeof tr, 8, 0), "RDX", "Mod", HTC_F_REDACT, "", "ORIG", 0);
+  seed_legacy_row("#c", ts_ago(to, sizeof to, 1, 0), "ORIG", "Bob", 0, "", "", 0);
+  run_until_idle(&p);
+  assert_int_equal(1, htrim_backfill_done());
+  assert_int_equal(0, fake_db_rows(st.messages));
+  assert_int_equal(0, fake_db_rows(st.by_time));
+  assert_int_equal(0, fake_db_rows(st.by_owner));
+  assert_int_equal(0, htc_acct_total(htrim_acct()));
+  assert_acct_matches_cf();
+}
+
+/* Two owners over share in one slice: the moderator's step takes bob's
+ * redacted original with its REDACT row, and bob's step then trims only
+ * what is still over -- bob ends at his share, not below it. */
+static void test_evict_cascade_counts_toward_later_owner(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 56, 500, 100);
+  seed_sized("#c", 990, "ORIG", "a:bob", 100);
+  seed_redact("#c", 991, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#b", "B", "a:bob", 14, 1500, 100);
+  seed_run("#f", "F", "a:mod", 15, 2000, 100);   /* mod first: the larger */
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 990, "ORIG"));
+  assert_int_equal(1000, owner_of("a:bob"));
+  assert_int_equal(1000, owner_of("a:mod"));
+  assert_acct_matches_cf();
+}
+
+/* The same, with bob's original's record unreadable: bob's step meets its
+ * by_owner entry after the cascade removed it, and subtracts nothing a
+ * second time. */
+static void test_evict_cascade_unreadable_cross_owner_once(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 56, 500, 100);
+  seed_sized("#c", 990, "ORIG", "a:bob", 100);
+  restore_value("#c", "990.000", "ORIG", "Bob", 0, "", 1);
+  seed_redact("#c", 991, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#b", "B", "a:bob", 14, 1500, 100);
+  seed_run("#f", "F", "a:mod", 15, 2000, 100);
+
+  run_until_idle(&p);
+  assert_int_equal(0, row_present("#c", 991, "RDX"));
+  assert_acct_matches_cf();
+  assert_int_equal(1000, owner_of("a:bob"));
+}
+
 /* Nobody over share: the oldest rows go, whoever owns them, until the
  * store is at the low watermark; the coverage floor follows them. */
 static void test_evict_oldest_after_shares(void **state)
@@ -5324,6 +5755,22 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_evict_owner_share_first, setup, teardown),
     cmocka_unit_test_setup_teardown(test_owner_slice_reports_touched_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_owner_evict_reports_newest_deleted, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_share_redact_takes_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_oldest_skewed_redact_takes_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_skewed_redact_takes_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_self_redaction_once, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_without_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_redact_takes_counted_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_redact_takes_unindexed_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_takes_unparseable_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_owner_self_skew_to_share, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_takes_legacy_msgid_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_ageout_index_only_then_redact, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redaction_chain_stops_at_redact, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_purge_redact_keeps_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_backfill_skips_original_cascaded_same_slice, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_cascade_counts_toward_later_owner, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_cascade_unreadable_cross_owner_once, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_oldest_after_shares, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_hysteresis, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_truncated_plan_spares_compliant_owner, setup, teardown),
