@@ -71,6 +71,7 @@ CMOCKA_TESTPROGS = \
 	db_api_fake_cmocka \
 	db_api_rocksdb_cmocka \
 	ssl_teardown_cmocka \
+	close_connection_cmocka \
 	log_async_cmocka
 
 CMOCKA_LIBS = -lcmocka
@@ -134,6 +135,7 @@ DEP_SRC = \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
 	paste_listener_cmocka.c \
+	close_connection_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -439,6 +441,19 @@ SSL_TEARDOWN_CMOCKA_OBJS = ssl_teardown_cmocka.o ../ssl.o ../ircd_string.o \
 	../ircd_snprintf.o ../ircd_alloc.o
 ssl_teardown_cmocka: $(SSL_TEARDOWN_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(SSL_TEARDOWN_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# close_connection tests - a closed user socket tells iauth the client is
+# gone ("<fd> D") while the descriptor is still the client's, whichever
+# path closed it (exit_client, a bouncer hold, BX X); a held ghost's exit
+# (no descriptor) and a server link send nothing.  Includes ../s_bsd.c,
+# compiled with -ffunction-sections and linked with --gc-sections: the
+# program keeps close_connection() and what it calls, so only those are
+# stubbed in the test, not everything else s_bsd.c reaches.
+close_connection_cmocka.o: ${srcdir}/close_connection_cmocka.c ../s_bsd.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/close_connection_cmocka.c
+
+close_connection_cmocka: close_connection_cmocka.o
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections close_connection_cmocka.o $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

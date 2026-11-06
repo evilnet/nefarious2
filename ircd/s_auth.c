@@ -1782,8 +1782,10 @@ void auth_send_event(const char *event, const char *paramstring)
     sendto_iauth(NULL, "e %s%s%s", event, (paramstring ? " :" : ""), (paramstring ? paramstring : ""));
 }
 
-/** Send exit notification for \a cptr to iauth.
- * @param[in] cptr Client who is exiting.
+/** Send exit notification for \a cptr to iauth: "<cli_fd> D".
+ * close_connection() sends it as a user connection's socket closes,
+ * while cli_fd is still the socket's descriptor.
+ * @param[in] cptr Client whose socket is closing.
  */
 void auth_send_exit(struct Client *cptr)
 {

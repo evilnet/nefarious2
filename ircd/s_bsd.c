@@ -796,6 +796,20 @@ void close_connection(struct Client *cptr)
 {
   struct ConfItem* aconf;
 
+  /* iauth knows a user connection by its descriptor (start_auth() sends
+   * the C on a user port) and is owed "<fd> D" when that socket closes:
+   * here, whichever path closes it -- exit_client(), a bouncer hold (the
+   * client stays, a held ghost), BX X's close of a device of ours.  It
+   * goes before the descriptor is touched: socket_del_keepfd() below
+   * makes cli_fd -1, and once close() returns the number belongs to the
+   * next accept(), whose C must come after this D (iauthd-ts and
+   * iauthd.pl exit on a C for a number they still hold).  A client with no
+   * descriptor sends nothing: a held ghost's exit, whose hold already
+   * told iauth.  A revive closes no socket (bounce_revive() moves the
+   * descriptor onto the ghost, whose own close owes the D later). */
+  if ((IsUser(cptr) || IsUserPort(cptr)) && cli_fd(cptr) >= 0)
+    auth_send_exit(cptr);
+
   if (IsServer(cptr)) {
     ServerStats->is_sv++;
     ServerStats->is_sbs += cli_sendB(cptr);

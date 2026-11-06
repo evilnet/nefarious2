@@ -968,10 +968,12 @@ int exit_client(struct Client *cptr,
 
     on_for = CurrentTime - cli_firsttime(victim);
 
+    /* iauth's "<fd> D" goes from close_connection() below, which every
+     * close of a user socket runs through (a bouncer hold and BX X's
+     * close do not come here). */
     if (IsUser(victim) || IsUserPort(victim)) {
       sasl_session_free(victim);  /* Clean up local SASL session if present */
       abort_sasl(victim, 0);
-      auth_send_exit(victim);
       pending_rename_client_exit(victim);
     }
 
