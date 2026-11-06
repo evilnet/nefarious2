@@ -2850,15 +2850,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
             _oper_sess->hs_oper_granted_at = 0;
-            /* bounce_mark_dirty arms the persist timer; a manual
-             * hs_dirty=1 alone leaves the grant-clear unflushed
-             * until either another dirty event or a graceful
-             * shutdown.  Once its tick has written the record, an
-             * abrupt termination that brings the session back
-             * (bounce_record_stamp()) brings it back without the
-             * grant; within the tick, a session that comes back
-             * still carries it. */
-            bounce_mark_dirty(acptr);
+            /* Written at once, durably, keyed on the session (a held
+             * ghost's too): a record still carrying the revoked grant
+             * would give it back at a restart, a crash restore
+             * included (bounce_record_stamp()).  A deferred dirty mark
+             * left a window of one persist tick. */
+            bounce_session_persist_now(_oper_sess, 1);
             bounce_broadcast(_oper_sess, 'O', NULL);
           }
         }
@@ -2884,9 +2881,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
             _oper_sess->hs_oper_granted_at = 0;
-            /* bounce_mark_dirty arms the persist timer (see -o
-             * branch above). */
-            bounce_mark_dirty(acptr);
+            /* Written at once, durably (see the -o branch above). */
+            bounce_session_persist_now(_oper_sess, 1);
             bounce_broadcast(_oper_sess, 'O', NULL);
           }
         }

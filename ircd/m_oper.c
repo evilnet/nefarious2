@@ -315,7 +315,9 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
    * session back only when its record carries the restart marker -- hold
    * on, primary here, no device on another server (bounce_record_stamp())
    * -- and as that record has it: with the grant once this tick has
-   * written it, without it before. */
+   * written it, without it before (fails closed).  A grant's clear (-o,
+   * -O, BS O) does not wait: it is written at once
+   * (bounce_session_persist_now()). */
   {
     struct BouncerSession *sess = bounce_get_session(sptr);
     if (sess) {

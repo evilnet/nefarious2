@@ -439,18 +439,43 @@ static void test_marker_is_expired_for_an_old_binary(void **state)
                                          NULL) == BOUNCE_RESTORE_EXPIRED);
 }
 
+/* Our own held ghost, held for its full hold. */
+static struct bounce_stamp_facts held_here(void)
+{
+  struct bounce_stamp_facts f;
+
+  memset(&f, 0, sizeof(f));
+  f.held_here = 1;
+  return f;
+}
+
 static void test_stamp_real_time_is_written_as_is(void **state)
 {
-  struct bounce_stamp_facts f = restorable();
+  struct bounce_stamp_facts f = held_here();
 
   (void)state;
-  /* A hold's time (the session is HOLDING). */
-  f.active = 0;
+  /* A hold's time, our own held ghost. */
   assert_true(bounce_record_stamp(&f, NOW - 60) == NOW - 60);
-  /* A clean shutdown's "now" for a live session. */
+}
+
+static void test_stamp_hold_not_ours_to_bring_back(void **state)
+{
+  struct bounce_stamp_facts f;
+
+  (void)state;
+  /* A brief hold (hold off, held only until a device elsewhere takes
+   * over): a restart would restore it as a full one, against the
+   * preference. */
+  f = held_here(); f.brief_hold = 1;
+  assert_true(bounce_record_stamp(&f, NOW - 60) == 0);
+  /* Another server's hold (a replica with a device of ours on its
+   * roster): its holder's record is the one to restore. */
+  f = held_here(); f.held_here = 0;
+  assert_true(bounce_record_stamp(&f, NOW - 60) == 0);
+  assert_true(bounce_record_stamp(NULL, NOW - 60) == 0);
+  /* A live session's facts do not make a hold time ours. */
   f = restorable();
-  assert_true(bounce_record_stamp(&f, NOW) == NOW);
-  assert_true(bounce_record_stamp(NULL, NOW) == NOW);
+  assert_true(bounce_record_stamp(&f, NOW - 60) == 0);
 }
 
 static void test_stamp_restorable_active_session(void **state)
@@ -510,8 +535,7 @@ static void test_stamp_then_restore_round_trip(void **state)
                                          MAX_HOLD, NULL),
                    BOUNCE_RESTORE_EXPIRED);
   /* A held one keeps its own clock. */
-  f = restorable();
-  f.active = 0;
+  f = held_here();
   assert_int_equal(bounce_record_restore(bounce_record_stamp(&f, NOW - 600),
                                          NOW, MAX_HOLD, &since),
                    BOUNCE_RESTORE_HELD);
@@ -537,6 +561,7 @@ int main(void)
     cmocka_unit_test(test_restore_other_negatives_are_expired),
     cmocka_unit_test(test_marker_is_expired_for_an_old_binary),
     cmocka_unit_test(test_stamp_real_time_is_written_as_is),
+    cmocka_unit_test(test_stamp_hold_not_ours_to_bring_back),
     cmocka_unit_test(test_stamp_restorable_active_session),
     cmocka_unit_test(test_stamp_each_missing_fact_writes_zero),
     cmocka_unit_test(test_stamp_then_restore_round_trip),

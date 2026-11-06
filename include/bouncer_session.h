@@ -2459,16 +2459,31 @@ extern void bounce_db_shutdown(void);
 extern void bounce_mark_dirty(struct Client *cptr);
 
 /** Mark @a session itself dirty (hs_dirty) and arm the persist timer,
- * whatever its state: the next tick writes the record -- a live session's
- * with its channels snapshotted and its unclean-exit stamp recomputed
- * (bounce_record_stamp(), include/bouncer_record.h), a session held here
- * (our own held ghost, not a brief hold) as it is.  Every path that makes
+ * whatever its state: the next tick writes the record
+ * (bounce_session_persist_now()) -- a live session's with its channels
+ * snapshotted and its unclean-exit stamp recomputed (bounce_record_stamp(),
+ * include/bouncer_record.h), a held one as it is (a brief hold or another
+ * server's hold carries 0: never ours to bring back).  Every path that makes
  * a client of ours the primary of a live session marks it (the promote,
  * the BX P install, revive, attach), so an unclean exit after the next
  * tick brings the session back held.  NULL is a no-op.
  * @param[in] session Session to mark.
  */
 extern void bounce_session_mark_dirty(struct BouncerSession *session);
+
+/** Write @a session's record now: the dirty timer's own body, for a change
+ * that may not wait for its tick.  A live primary of ours has its
+ * channels snapshotted; the stamp is recomputed (bounce_record_stamp());
+ * the dirty mark is cleared, or set again (the timer retries) when the
+ * write fails.  Nothing is written for a session we hold nothing of, or
+ * with persistence off.  A revoked oper grant is written this way, with
+ * @a durable: a record still carrying it would give it back at a restart.
+ * @param[in] session Session to write (NULL: no-op).
+ * @param[in] durable Commit with an fsync.
+ * @return 0, or -1 when the write failed.
+ */
+extern int bounce_session_persist_now(struct BouncerSession *session,
+                                      int durable);
 
 /** Apply one BX U field update to a bouncer alias.
  *

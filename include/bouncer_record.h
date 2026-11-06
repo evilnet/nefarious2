@@ -69,16 +69,21 @@ struct bounce_stamp_facts {
   int remote_devices;  /**< live devices of the session's own copy on
                         *   another server: that server's split promote
                         *   carries the session when we go */
+  int held_here;       /**< the session is HOLDING and its primary is our
+                        *   own held ghost (not another server's hold) */
+  int brief_hold;      /**< that hold lasts only until a device on another
+                        *   server takes over (the hold preference is off) */
 };
 
-/** The disconnect time a session's record carries.  A real time is
- * written as it is: a hold's, or the "now" a clean shutdown gives a live
- * session (bounce_db_shutdown()).  With none (0, an ACTIVE session): the
- * restart marker BOUNCE_REC_HELD_AT_RESTART when an unclean exit now
- * should leave the session held here -- it is active, its primary is
- * ours, live and logged in, the bouncer is on, its hold preference is on,
- * and no device of it is on another server -- else 0 (the restore expires
- * it).
+/** The disconnect time a session's record carries.  A real time (a
+ * hold's) is written as it is for a session held here, by our own ghost,
+ * for its full hold; a brief hold (hold off: only until a device
+ * elsewhere takes over) or another server's hold carries 0 -- never ours
+ * to bring back.  With none (0, an ACTIVE session): the restart marker
+ * BOUNCE_REC_HELD_AT_RESTART when an unclean exit now should leave the
+ * session held here -- it is active, its primary is ours, live and logged
+ * in, the bouncer is on, its hold preference is on, and no device of it
+ * is on another server -- else 0 (the restore expires it).
  * @param[in] f               The facts (NULL: none hold).
  * @param[in] disconnect_time The session's hs_disconnect_time.
  * @return The bsr_disconnect_time to write.

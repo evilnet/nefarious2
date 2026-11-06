@@ -213,9 +213,10 @@ enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
 int64_t bounce_record_stamp(const struct bounce_stamp_facts *f,
                             int64_t disconnect_time)
 {
-  /* A real time: a hold's, or a clean shutdown's "now". */
+  /* A real time: a hold's.  Ours to bring back only when the ghost is
+   * ours and held for the session's full hold. */
   if (disconnect_time != 0)
-    return disconnect_time;
+    return (f && f->held_here && !f->brief_hold) ? disconnect_time : 0;
   /* An unclean exit drops every connection of ours at once.  The session
    * is held here then only if its disconnect would hold it -- an active
    * session, its primary ours and live, logged in, the bouncer on, hold
