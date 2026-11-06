@@ -420,10 +420,21 @@ int bounce_boot_lists(enum BounceRestoreVerdict v)
   return v == BOUNCE_RESTORE_HELD_AT_CRASH;
 }
 
-int bounce_restore_breaker(enum bounce_boot_state prev, int64_t prev_start,
-                           int64_t last_alive, int64_t window)
+unsigned int bounce_boot_steps(int store_open, int persist_on, int bouncer_on)
 {
-  if (prev != BOUNCE_BOOT_RUNNING || window <= 0)
+  if (!store_open)
+    return 0;
+  /* Every start with the store open: the markers on disk are the last
+   * run's, and this start's heartbeat will replace that run's. */
+  return BOUNCE_BOOT_STEP_REWRITE
+         | ((persist_on && bouncer_on) ? BOUNCE_BOOT_STEP_RESTORE : 0);
+}
+
+int bounce_restore_breaker(enum bounce_boot_state prev, uint32_t listed,
+                           int64_t prev_start, int64_t last_alive,
+                           int64_t window)
+{
+  if (prev != BOUNCE_BOOT_RUNNING || listed == 0 || window <= 0)
     return 0;
   /* Known alive for its whole window: the settle mark was lost, not a
    * start that died early. */

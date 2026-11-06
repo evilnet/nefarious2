@@ -740,19 +740,37 @@ static void test_breaker(void **state)
 {
   (void)state;
   /* The last start ended cleanly, or outlived its window. */
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_NONE, NOW - 60, NOW - 30, 600), 0);
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_SETTLED, NOW - 60, NOW - 30, 600), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_NONE, 1, NOW - 60, NOW - 30, 600), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_SETTLED, 1, NOW - 60, NOW - 30, 600), 0);
   /* It died inside its window: a crash loop is possible. */
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 30, 600), 1);
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, 0, 600), 1);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 60, NOW - 30, 600), 1);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 60, 0, 600), 1);
   /* ... before its first heartbeat (the previous run's is older). */
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 7200, 600), 1);
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 700, NOW - 101, 600), 1);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 60, NOW - 7200, 600), 1);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 700, NOW - 101, 600), 1);
   /* Its heartbeat shows it lived the window (the settle mark was lost). */
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 700, NOW - 100, 600), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 700, NOW - 100, 600), 0);
   /* The breaker is off. */
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 30, 0), 0);
-  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, NOW - 60, NOW - 30, -5), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 60, NOW - 30, 0), 0);
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 1, NOW - 60, NOW - 30, -5), 0);
+  /* A record naming nobody (an older build's): nothing to break, no
+   * L_CRIT after every early crash (review m1). */
+  assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 0, NOW - 60, NOW - 30, 600), 0);
+}
+
+static void test_boot_steps(void **state)
+{
+  (void)state;
+  /* The store is open: the markers are rewritten whatever the features
+   * say (review I-A); only persistence and the bouncer on restore. */
+  assert_int_equal(bounce_boot_steps(1, 1, 1),
+                   BOUNCE_BOOT_STEP_REWRITE | BOUNCE_BOOT_STEP_RESTORE);
+  assert_int_equal(bounce_boot_steps(1, 1, 0), BOUNCE_BOOT_STEP_REWRITE);
+  assert_int_equal(bounce_boot_steps(1, 0, 1), BOUNCE_BOOT_STEP_REWRITE);
+  assert_int_equal(bounce_boot_steps(1, 0, 0), BOUNCE_BOOT_STEP_REWRITE);
+  /* No store: nothing to read or write. */
+  assert_int_equal(bounce_boot_steps(0, 1, 1), 0);
+  assert_int_equal(bounce_boot_steps(0, 0, 0), 0);
 }
 
 static void test_breaker_lists_only_crash_restores(void **state)
@@ -864,6 +882,7 @@ int main(void)
     cmocka_unit_test(test_hold_length_decay),
     cmocka_unit_test(test_breaker),
     cmocka_unit_test(test_breaker_lists_only_crash_restores),
+    cmocka_unit_test(test_boot_steps),
     cmocka_unit_test(test_boot_record_codec),
     cmocka_unit_test(test_alive_record_codec),
   };

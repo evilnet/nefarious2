@@ -736,6 +736,9 @@ static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *lin
 static int session_own_alias_count(struct BouncerSession *s);
 static int session_own_remote_alias_count(struct BouncerSession *s);
 static void bounce_boot_clean_exit(void);
+/** This start's first pass rewrote the last run's restart markers (and
+ * committed): from then on the heartbeat on disk is this run's. */
+static int bounce_markers_rewritten;
 static int session_hold_wanted(struct BouncerSession *s, struct Client *cptr);
 static void session_roster_add(struct BouncerSession *session,
                                const char *alias_numeric,
@@ -4982,7 +4985,10 @@ void bounce_db_shutdown(void)
     }
   }
 
-  swept = bounce_db_sweep_markers(env, cf);
+  /* Only a start whose own first pass rewrote the last run's markers:
+   * otherwise a marker left on disk may be that run's, which a start that
+   * could not rewrite it must leave for the next. */
+  swept = bounce_markers_rewritten ? bounce_db_sweep_markers(env, cf) : 0;
 
   /* No crash loop to break at the next start, and the heartbeat says
    * when this server went. */
@@ -5236,11 +5242,16 @@ static void bounce_restore_channels(struct Client *ghost,
  * as a bad record): the heartbeat, when this server was last known alive
  * -- a session live at an unclean exit is held from it, so its hold runs
  * from the crash and a long outage expires it -- and the boot record of
- * the last start that restored sessions, which the crash-loop breaker
- * reads (bounce_restore_breaker()).  Both are kept only by a start that
- * ran the restore: one with the bouncer off leaves them as the last
- * restoring start left them, so the records it did not restore keep
- * their real age. */
+ * the last start that restored sessions from the restart marker, which
+ * the crash-loop breaker reads (bounce_restore_breaker()).
+ *
+ * Every start with the store open rewrites the restart markers on disk
+ * first, whatever BOUNCER_ENABLE and BOUNCER_PERSIST say
+ * (bounce_boot_steps()), and only then keeps the heartbeat (while
+ * persistence is on): every marker on disk was written by the run whose
+ * heartbeat is on disk, and the records a start that does not restore
+ * leaves keep their real age.  The boot record is kept only by a start
+ * that restored something from the marker. */
 
 /** Seconds between heartbeats: a crash is read as the last one, so a
  * session live at it is held up to this much early. */
@@ -5251,7 +5262,8 @@ static struct db_cf *bounce_meta_cf_handle;
 static struct Timer bounce_alive_timer;
 static struct Timer bounce_settle_timer;
 static int bounce_boot_restored;    /* this start ran the restore */
-static int bounce_boot_settled;     /* ... and outlived its crash window */
+static int bounce_boot_settled;     /* ... and outlived its crash window
+                                     * (or listed nothing to break) */
 static time_t bounce_boot_start;
 
 /** The metadata env's default column family, or NULL. */
@@ -5326,7 +5338,7 @@ static void bounce_alive_write(void)
 {
   unsigned char buf[BOUNCE_ALIVE_REC_SIZE];
 
-  if (!bounce_boot_restored || !feature_bool(FEAT_BOUNCER_PERSIST)
+  if (!bounce_markers_rewritten || !feature_bool(FEAT_BOUNCER_PERSIST)
       || !metadata_lmdb_is_available())
     return;
   bounce_alive_rec_encode(buf, (int64_t)CurrentTime);
@@ -5396,9 +5408,12 @@ void bounce_restore_crash_window_changed(void)
   bounce_settle_arm();
 }
 
-/** After the restore: the heartbeat starts, and the settle mark is armed. */
+/** After the first pass: the heartbeat starts (it writes while persistence
+ * is on), and a start that listed sessions arms its settle mark. */
 static void bounce_boot_timers_start(void)
 {
+  if (!bounce_markers_rewritten)
+    return;
   bounce_alive_write();
   if (!t_active(&bounce_alive_timer))
     timer_add(timer_init(&bounce_alive_timer), bounce_alive_cb, NULL,
@@ -5410,9 +5425,8 @@ static void bounce_boot_timers_start(void)
  * the heartbeat says when this server went. */
 static void bounce_boot_clean_exit(void)
 {
-  if (!bounce_boot_restored)
-    return;
-  (void)bounce_meta_write(NULL, BOUNCE_BOOT_KEY, NULL, 0, 0);
+  if (bounce_boot_restored)
+    (void)bounce_meta_write(NULL, BOUNCE_BOOT_KEY, NULL, 0, 0);
   bounce_alive_write();
 }
 
@@ -5477,19 +5491,25 @@ static void restore_marks_free(struct restore_marks *m)
   m->n = m->cap = 0;
 }
 
-/** The restore's first pass, before any ghost is built.
+/** The first pass, before anything else, run by every start with the
+ * store open (bounce_boot_steps()), the bouncer and persistence on or not.
+ *  - Every restart marker on disk -- the last run's: its heartbeat is the
+ *    one on disk -- is rewritten with its real time (held from the
+ *    crash), or its record deleted when the outage outlived its hold.  A
+ *    crash while the ghosts are built, or any later unclean exit, then
+ *    does not restart its hold, and a start that does not restore leaves
+ *    the records with their real age.
+ * With @a plan (a start that restores):
  *  - The crash-loop breaker: when the last start that restored sessions
- *    ended uncleanly inside its crash window, the sessions it restored
- *    because they were live at the crash are not restored again, and
- *    their records go (logged at L_CRIT).  A session held before that
- *    crash restores as it always did.
- *  - Every record the restart marker brings back is rewritten with its
- *    real time (held from the crash) now, so a crash while the ghosts are
- *    built, or any unclean exit after, does not restart its hold.
+ *    from the marker ended uncleanly inside its crash window, the sessions
+ *    its boot record names are not restored again, and their records go
+ *    (logged at L_CRIT).  A session held before that crash restores as it
+ *    always did.
  *  - This start's boot record, RUNNING, names every session it restores
- *    because it was live at the crash (bounce_boot_lists()); written with
- *    the rest, durably.
- * The decisions are left in @a plan (sorted) for the second pass.
+ *    because it was live at the crash (bounce_boot_lists()); with none,
+ *    the key is deleted: nothing to break (review m1).
+ * Without it, the boot record is left as it is.  Everything is written in
+ * one batch, durably; the decisions are left in @a plan (sorted).
  * @return Records the breaker dropped. */
 static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
                                   const struct bounce_restore_clock *clock,
@@ -5504,10 +5524,11 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
   struct db_writebatch *wb;
   struct db_iter *it;
   int window = feature_int(FEAT_BOUNCER_RESTORE_CRASH_WINDOW);
-  int breaker, rc, skipped = 0, rewritten = 0;
+  int breaker = 0, rc, skipped = 0, rewritten = 0, outlived = 0;
 
-  if (mcf && db_get(env, mcf, BOUNCE_BOOT_KEY, sizeof(BOUNCE_BOOT_KEY) - 1,
-                    NULL, &boot) == DB_OK
+  if (plan && mcf
+      && db_get(env, mcf, BOUNCE_BOOT_KEY, sizeof(BOUNCE_BOOT_KEY) - 1,
+                NULL, &boot) == DB_OK
       && bounce_boot_rec_decode(boot.base, boot.len, &prev, &prev_start,
                                 &prev_n) != 0) {
     log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: the boot record "
@@ -5516,7 +5537,9 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
     prev = BOUNCE_BOOT_NONE;
     prev_n = 0;
   }
-  breaker = bounce_restore_breaker(prev, prev_start, clock->last_alive, window);
+  if (plan)
+    breaker = bounce_restore_breaker(prev, prev_n, prev_start,
+                                     clock->last_alive, window);
   if (breaker) {
     log_write(LS_SYSTEM, L_CRIT, 0, "bouncer_persist: the last start (at %Tu, "
               "last alive %Tu) ended uncleanly within its crash window "
@@ -5572,11 +5595,17 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
     }
     v = bounce_record_restore(&rec, clock, &since);
     if (v == BOUNCE_RESTORE_EXPIRED) {
-      if (rec.bsr_disconnect_time == BOUNCE_REC_HELD_AT_RESTART)
+      /* A marker whose outage outlived its hold goes now: rewritten as a
+       * real time, a later restore would hold it again until its hold
+       * timer. */
+      if (bounce_record_marked(&rec)) {
         log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: session %s (%s) was "
                   "live at an unclean exit (last alive %Tu), and the outage "
                   "outlived its hold: not restored", id, rec.bsr_account,
                   (time_t)clock->last_alive);
+        if (db_writebatch_del(wb, cf, kbuf, klen) == DB_OK)
+          outlived++;
+      }
       continue;
     }
     flags = RM_RESTORE;
@@ -5588,6 +5617,8 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
         rewritten++;
       flags |= RM_CRASH;
     }
+    if (!plan)
+      continue;
     if (bounce_boot_lists(v)) {
       flags |= RM_LISTED;
       nlisted++;
@@ -5597,41 +5628,52 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
   db_iter_close(it);
 
   /* This start's boot record: RUNNING, the sessions it restores because
-   * they were live at the crash. */
-  if (mcf) {
-    size_t blen = bounce_boot_rec_size(nlisted);
-    unsigned char *bbuf = (unsigned char *)MyMalloc(blen);
-    uint32_t k = 0;
-    size_t j;
+   * they were live at the crash; none, no record. */
+  if (plan && mcf) {
+    if (nlisted) {
+      size_t blen = bounce_boot_rec_size(nlisted);
+      unsigned char *bbuf = (unsigned char *)MyMalloc(blen);
+      uint32_t k = 0;
+      size_t j;
 
-    bounce_boot_rec_put_header(bbuf, BOUNCE_BOOT_RUNNING, clock->now, nlisted);
-    for (j = 0; j < plan->n; j++)
-      if (plan->v[j].flags & RM_LISTED)
-        bounce_boot_rec_put_id(bbuf, k++, plan->v[j].id);
-    (void)bounce_meta_write(wb, BOUNCE_BOOT_KEY, bbuf, blen, 0);
-    MyFree(bbuf);
+      bounce_boot_rec_put_header(bbuf, BOUNCE_BOOT_RUNNING, clock->now, nlisted);
+      for (j = 0; j < plan->n; j++)
+        if (plan->v[j].flags & RM_LISTED)
+          bounce_boot_rec_put_id(bbuf, k++, plan->v[j].id);
+      (void)bounce_meta_write(wb, BOUNCE_BOOT_KEY, bbuf, blen, 0);
+      MyFree(bbuf);
+    } else
+      (void)bounce_meta_write(wb, BOUNCE_BOOT_KEY, NULL, 0, 0);
   }
   rc = db_writebatch_commit(wb, /*sync_durably=*/1);
   db_writebatch_destroy(wb);
   if (rc != DB_OK)
-    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: the restore's first "
-              "pass did not commit (%s): %d records live at an unclean exit "
-              "keep the marker until written again", db_strerror(rc), rewritten);
-  else if (rewritten)
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: the first pass did not "
+              "commit (%s): %d records live at an unclean exit keep the "
+              "marker until written again, and this start keeps no heartbeat",
+              db_strerror(rc), rewritten);
+  else if (rewritten || outlived)
     log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: %d sessions live at an "
-              "unclean exit, held from the crash (last alive %Tu)", rewritten,
-              (time_t)clock->last_alive);
+              "unclean exit held from the crash, %d past their hold removed "
+              "(last alive %Tu)%s", rewritten, outlived,
+              (time_t)clock->last_alive, plan ? "" : "; not restored this start");
 
-  /* With no default CF there is no heartbeat or boot record to keep. */
-  bounce_boot_restored = mcf ? 1 : 0;
+  /* The heartbeat is this run's once every marker of the last run is gone
+   * (bounce_alive_write()). */
+  bounce_markers_rewritten = (rc == DB_OK);
   if (!mcf)
     log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: the metadata store's "
               "default column family did not open: no heartbeat (a session "
               "live at an unclean exit is held from the restart) and no "
               "crash-loop check");
-  bounce_boot_settled = 0;
-  bounce_boot_start = (time_t)clock->now;
-  restore_marks_sort(plan);
+  if (plan) {
+    /* With no default CF there is no boot record to keep. */
+    bounce_boot_restored = mcf ? 1 : 0;
+    /* Nothing listed: nothing to settle. */
+    bounce_boot_settled = (nlisted == 0);
+    bounce_boot_start = (time_t)clock->now;
+    restore_marks_sort(plan);
+  }
   restore_marks_free(&skip);
   db_val_free(&boot);
   return skipped;
@@ -5655,29 +5697,20 @@ int bounce_db_restore(void)
   int rejected = 0;   /* wrong size for their version, or unknown version */
   int restarted = 0;  /* live when an unclean exit took this server down */
   int skipped = 0;    /* the crash-loop breaker's */
+  unsigned int steps;
   struct bounce_restore_clock clock;
   struct restore_marks plan = { NULL, 0, 0 };
 
-  if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+  if (!metadata_lmdb_is_available())
     return 0;
 
   env = metadata_get_env();
   cf  = metadata_get_bouncer_cf();
   if (!env || !cf)
-    return -1;
+    return feature_bool(FEAT_BOUNCER_PERSIST) ? -1 : 0;
 
-  /* Don't restore persisted sessions when the bouncer feature is globally
-   * disabled.  Restoring would create ghost clients with no enabled
-   * subsystem to manage their lifecycle — they'd sit in HOLDING forever,
-   * collide with peer N introductions on the same account, and require
-   * /bouncer reset (or a full session destroy) to clean up.  The records
-   * stay on disk; if the feature is re-enabled later, restore picks them
-   * up at next boot. */
-  if (!bounce_enabled()) {
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "bouncer_persist: skipping restore — FEAT_BOUNCER_ENABLE is off");
-    return 0;
-  }
+  steps = bounce_boot_steps(1, feature_bool(FEAT_BOUNCER_PERSIST),
+                            bounce_enabled());
 
   memset(&clock, 0, sizeof(clock));
   clock.now = (int64_t)CurrentTime;
@@ -5685,8 +5718,27 @@ int bounce_db_restore(void)
   clock.last_alive = bounce_alive_read();
   clock.hold = bounce_hold_rule_now();
 
-  /* The first pass: the crash-loop breaker, the restart markers rewritten
-   * with their real time, this start's boot record -- all before any
+  /* Don't restore persisted sessions when the bouncer feature is globally
+   * disabled.  Restoring would create ghost clients with no enabled
+   * subsystem to manage their lifecycle — they'd sit in HOLDING forever,
+   * collide with peer N introductions on the same account, and require
+   * /bouncer reset (or a full session destroy) to clean up.  The records
+   * stay on disk; if the feature is re-enabled later, restore picks them
+   * up at next boot -- with their real age: the restart markers are
+   * rewritten anyway, and this start keeps the heartbeat (review I-A). */
+  if (!(steps & BOUNCE_BOOT_STEP_RESTORE)) {
+    (void)bounce_restore_prepare(env, cf, &clock, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "bouncer_persist: skipping restore — %s is off (restart markers "
+              "rewritten with their real time)",
+              !feature_bool(FEAT_BOUNCER_PERSIST) ? "BOUNCER_PERSIST"
+                                                  : "FEAT_BOUNCER_ENABLE");
+    bounce_boot_timers_start();
+    return 0;
+  }
+
+  /* The first pass: the restart markers rewritten with their real time,
+   * the crash-loop breaker, this start's boot record -- all before any
    * ghost is built. */
   skipped = bounce_restore_prepare(env, cf, &clock, &plan);
 

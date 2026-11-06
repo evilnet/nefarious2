@@ -258,15 +258,43 @@ extern int bounce_boot_lists(enum BounceRestoreVerdict v);
  * uncleanly inside its window: a crash, possibly in the restore or caused
  * by what it restored -- does not restore the sessions that record
  * names.  The heartbeat stands in for a lost settle mark: a start known
- * alive for its window is not one to break.
+ * alive for its window is not one to break.  A record naming no session
+ * has nothing to break (a start writes none: it deletes the key).
  * @param[in] prev       The previous start's state.
+ * @param[in] listed     The sessions its record names.
  * @param[in] prev_start When it started.
  * @param[in] last_alive Its last heartbeat (0: unknown).
  * @param[in] window     BOUNCER_RESTORE_CRASH_WINDOW (0 or less: off).
  * @return 1 to skip what the previous start restored, else 0.
  */
 extern int bounce_restore_breaker(enum bounce_boot_state prev,
-                                  int64_t prev_start, int64_t last_alive,
-                                  int64_t window);
+                                  uint32_t listed, int64_t prev_start,
+                                  int64_t last_alive, int64_t window);
+
+/** What a start does with the bouncer store before anything else
+ * (bounce_boot_steps()). */
+enum bounce_boot_step {
+  BOUNCE_BOOT_STEP_REWRITE = 1,  /**< rewrite every restart marker on disk
+                                  *   with its real time (held from the
+                                  *   crash), or delete it when the outage
+                                  *   outlived its hold; then keep the
+                                  *   heartbeat */
+  BOUNCE_BOOT_STEP_RESTORE = 2   /**< restore: the crash-loop breaker, this
+                                  *   start's boot record, the ghosts */
+};
+
+/** The steps a start takes with the bouncer store.  Every start with the
+ * store open rewrites the restart markers, whatever BOUNCER_ENABLE and
+ * BOUNCER_PERSIST say, so every marker on disk was written by the run
+ * whose heartbeat is on disk: a start that does not restore keeps the
+ * heartbeat too, and the records it leaves keep their real age.  Only a
+ * start with persistence and the bouncer on restores (and keeps a boot
+ * record).
+ * @param[in] store_open The metadata store (and its bouncer CF) is open.
+ * @param[in] persist_on BOUNCER_PERSIST.
+ * @param[in] bouncer_on BOUNCER_ENABLE.
+ * @return A mask of enum bounce_boot_step. */
+extern unsigned int bounce_boot_steps(int store_open, int persist_on,
+                                      int bouncer_on);
 
 #endif /* INCLUDED_bouncer_record_h */
