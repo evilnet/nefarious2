@@ -1375,6 +1375,64 @@ static void a_ban_never_promotes_a_fault_never_ends(void **s)
   }
 }
 
+/* bounce_kill_takes_killer(killer_device_here, killer_is_victim,
+ * killer_in_session, victim_is_primary) -- race survey #8: an opered
+ * device KILLs its own session's primary. */
+
+static void a_device_killing_its_own_primary_goes_last(void **s)
+{
+  (void)s;
+  /* The primary's end exits every device on the roster: the KILLer
+   * leaves the roster first and exits after the victim. */
+  assert_true(bounce_kill_takes_killer(1, 0, 1, 1));
+}
+
+static void a_killer_outside_the_session_is_left_alone(void **s)
+{
+  (void)s;
+  /* Another account's oper, an alias of another session: no end of the
+   * victim's session reaches it. */
+  assert_false(bounce_kill_takes_killer(1, 0, 0, 1));
+  assert_false(bounce_kill_takes_killer(0, 0, 0, 1));
+}
+
+static void a_primary_killing_itself_is_the_victim(void **s)
+{
+  (void)s;
+  /* The session's primary KILLs its own nick: it is the victim, whose
+   * exit already ends the KILL (CPTR_KILLED). */
+  assert_false(bounce_kill_takes_killer(0, 1, 0, 1));
+  assert_false(bounce_kill_takes_killer(1, 1, 1, 1));
+}
+
+static void a_kill_that_ends_no_session_takes_no_killer(void **s)
+{
+  (void)s;
+  /* The victim is no session's primary: nothing cascades from its exit. */
+  assert_false(bounce_kill_takes_killer(1, 0, 1, 0));
+}
+
+static void a_remote_killer_is_its_own_servers(void **s)
+{
+  (void)s;
+  /* A KILL from another server's device: the connection being handled
+   * is a server link, never on a roster; that device's own server spares
+   * it. */
+  assert_false(bounce_kill_takes_killer(0, 0, 1, 1));
+}
+
+static void the_killer_goes_last_only_on_every_fact(void **s)
+{
+  int d, v, m, p;
+  (void)s;
+  for (d = 0; d < 2; d++)
+  for (v = 0; v < 2; v++)
+  for (m = 0; m < 2; m++)
+  for (p = 0; p < 2; p++)
+    assert_int_equal(bounce_kill_takes_killer(d, v, m, p),
+                     d && !v && m && p);
+}
+
 /* bounce_member_end_letter(how), bounce_member_end_parse(letter) */
 
 static void member_end_letters_round_trip(void **s)
@@ -3070,6 +3128,12 @@ int main(void)
     cmocka_unit_test(a_fault_on_a_device_is_its_own_exit),
     cmocka_unit_test(a_forced_exit_in_no_session_is_plain),
     cmocka_unit_test(a_ban_on_a_device_of_a_remote_primary_goes_to_its_holder),
+    cmocka_unit_test(a_device_killing_its_own_primary_goes_last),
+    cmocka_unit_test(a_killer_outside_the_session_is_left_alone),
+    cmocka_unit_test(a_primary_killing_itself_is_the_victim),
+    cmocka_unit_test(a_kill_that_ends_no_session_takes_no_killer),
+    cmocka_unit_test(a_remote_killer_is_its_own_servers),
+    cmocka_unit_test(the_killer_goes_last_only_on_every_fact),
     cmocka_unit_test(member_end_letters_round_trip),
     cmocka_unit_test(an_unknown_member_end_letter_is_refused),
     cmocka_unit_test(a_member_end_goes_to_the_holder),

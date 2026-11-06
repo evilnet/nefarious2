@@ -107,9 +107,27 @@
 static int do_kill(struct Client* cptr, struct Client* sptr,
 		   struct Client* victim, char* inpath, char* path, char* msg)
 {
+  char comment[1024];   /* as exit_client_msg()'s */
+  int killer_last;
+  int rc;
+
   assert(0 != cptr);
   assert(0 != sptr);
   assert(!IsServer(victim));
+
+  /* An opered device of a bouncer session KILLing its own nick KILLs its
+   * session's primary, and the session's end below (the hook's
+   * bounce_kill_session() for a primary of ours, exit_one_client()'s
+   * KILLED cascade for another server's) exits every device on the
+   * roster: the KILLer too, freed while this KILL line is still being
+   * handled (race survey #8: SIGSEGV at parse.c:1744 or s_misc.c:998).
+   * Off the roster first, it is out of the end's reach, and it exits last,
+   * after the victim, as BOUNCER RESET's caller does: the KILL ends the
+   * whole session (#12).  Until then it is live for the relay, the notices
+   * and the victim's exit, which all read it.  (A KILLer of ours is always
+   * the connection being handled: cptr == sptr.) */
+  killer_last = bounce_kill_spare_killer(sptr, victim);
+  assert(!killer_last || cptr == sptr);
 
   /*
    * Notify all *local* opers about the KILL (this includes the one
@@ -187,11 +205,17 @@ static int do_kill(struct Client* cptr, struct Client* sptr,
       bounce_kill_session(bsess, msg);
   }
 
-  return exit_client_msg(cptr, victim, feature_bool(FEAT_HIS_KILLWHO)
-			 ? &me : sptr, "Killed (%s %s)",
-			 feature_bool(FEAT_HIS_KILLWHO) ?
-			 feature_str(FEAT_HIS_SERVERNAME) : cli_name(sptr),
-			 msg);
+  ircd_snprintf(0, comment, sizeof(comment), "Killed (%s %s)",
+                feature_bool(FEAT_HIS_KILLWHO) ?
+                feature_str(FEAT_HIS_SERVERNAME) : cli_name(sptr), msg);
+  /* On a server link, sptr can be another server's device of the victim's
+   * session, freed here by the victim's KILLED cascade: never read after. */
+  rc = exit_client(cptr, victim, feature_bool(FEAT_HIS_KILLWHO)
+                   ? &me : sptr, comment);
+  if (killer_last)
+    /* The session's last device: CPTR_KILLED (cptr == sptr). */
+    return exit_client(cptr, sptr, &me, comment);
+  return rc;
 }
 
 /*
@@ -301,6 +325,16 @@ int mo_kill(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Changed KILL %s into %s", sptr,
 		  user, cli_name(victim));
   }
+  /* A device of a bouncer session is KILLed as its session: the KILL names
+   * the session's primary, the one face every server knows, and ends the
+   * whole session (#12).  The nick hash never yields a device; the nick
+   * history can (a client that changed nick, then joined a session as a
+   * device).  A KILL of a device itself would end the session by another
+   * road -- relayed under a numeric no legacy server knows, or, for a
+   * device of ours, not at all -- and the session's end could reach the
+   * KILLer by a path do_kill() does not guard. */
+  if (IsBouncerAlias(victim) && cli_alias_primary(victim))
+    victim = cli_alias_primary(victim);
   if (!HasPriv(sptr, MyConnect(victim) ? PRIV_LOCAL_KILL : PRIV_KILL))
     return send_reply(sptr, ERR_NOPRIVILEGES);
 

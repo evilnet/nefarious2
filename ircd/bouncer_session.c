@@ -3397,6 +3397,39 @@ void bounce_kill_session(struct BouncerSession *session, const char *comment)
   bounce_end_session(session, BOUNCE_END_KILL, comment);
 }
 
+/** See include/bouncer_session.h. */
+int bounce_kill_spare_killer(struct Client *killer, struct Client *victim)
+{
+  struct BouncerSession *s = NULL;
+  int device, in_session = 0;
+
+  if (!killer || !victim || !IsUser(killer) || !cli_user(killer))
+    return 0;
+  device = MyConnect(killer) && IsBouncerAlias(killer);
+  if (device && killer != victim) {
+    s = bounce_get_session(victim);
+    in_session = s && (session_roster_has(s, killer)
+                       || cli_alias_primary(killer) == victim);
+  }
+  if (!bounce_kill_takes_killer(device, killer == victim, in_session,
+                                s && s->hs_client == victim))
+    return 0;
+  /* Off the roster: neither bounce_kill_session() nor exit_one_client()'s
+   * KILLED cascade (the two ends a KILL of the primary runs) can exit it.
+   * Off every record that lists it, not only @a s: the end walks the
+   * record bounce_get_session() picks for the victim, which prefers one
+   * with a device of ours on its roster -- with the KILLer gone from @a s,
+   * that can be another record naming the same primary.  It leaves the
+   * session anyway (its own exit would untrack it). */
+  session_roster_drop_account(killer, NULL);
+  session_roster_drop(s, killer, 0);
+  log_write(LS_USER, L_INFO, 0, "Bouncer: %s%s (%s), a device of %s's "
+            "session %s, KILLs its primary %s: it leaves the session's "
+            "roster and exits after it", cli_yxx(&me), cli_yxx(killer),
+            cli_name(killer), s->hs_account, s->hs_sessid, cli_name(victim));
+  return 1;
+}
+
 /** @a c when it is a held ghost of ours (a socket we may exit), else
  * NULL: a retire exits nothing of another server's (B-2). */
 static struct Client *retire_ghost_ours(struct Client *c)

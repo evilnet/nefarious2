@@ -349,6 +349,15 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
   return session_primary ? BOUNCE_FORCED_END_SESSION : BOUNCE_FORCED_PLAIN;
 }
 
+int bounce_kill_takes_killer(int killer_device_here, int killer_is_victim,
+                             int killer_in_session, int victim_is_primary)
+{
+  /* Only a device of ours that the victim's session end would reach: the
+   * session's primary is the victim, and the KILLer is not it. */
+  return killer_device_here && !killer_is_victim && killer_in_session
+         && victim_is_primary;
+}
+
 char bounce_member_end_letter(enum bounce_member_end how)
 {
   switch (how) {

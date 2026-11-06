@@ -809,6 +809,32 @@ bounce_forced_exit_action(enum bounce_forced_exit why, int is_alias,
                           int session_primary, int primary_ours,
                           int primary_remote);
 
+/** Does a KILL take its KILLer along with the session it ends?  An opered
+ * device of a session (OPER on any device opers the session, #14) that
+ * KILLs its own nick KILLs its session's primary, and the session's end
+ * exits every device on the roster (#12): bounce_kill_session() under the
+ * KILL of a primary of ours, exit_one_client()'s KILLED cascade under the
+ * relayed KILL of another server's.  That would free the connection whose
+ * KILL is being handled while do_kill() and parse_client() still read it
+ * (race survey #8, 2026-11-06: SIGSEGV at parse.c:1744 or s_misc.c:998).
+ * Such a KILLer leaves the roster before the end and exits last, after
+ * the victim, as BOUNCER RESET's caller does.  Only a device of ours: a
+ * KILL from another server's device arrives on a server link, and that
+ * device's own server spares it.
+ *
+ * @param[in] killer_device_here The KILLer is a device (alias) of ours.
+ * @param[in] killer_is_victim   The KILLer KILLs itself.
+ * @param[in] killer_in_session  The KILLer is on the roster of the
+ *                               victim's session, or follows the victim as
+ *                               its primary.
+ * @param[in] victim_is_primary  The victim is its session's primary (live
+ *                               or held): its exit ends the session.
+ */
+extern int bounce_kill_takes_killer(int killer_device_here,
+                                    int killer_is_victim,
+                                    int killer_in_session,
+                                    int victim_is_primary);
+
 /** How a member's end of a session ends it.  On the wire (BS E) a letter:
  * bounce_member_end_letter(), bounce_member_end_parse().  The kinds differ
  * in what the end does besides ending the session (its side effects,

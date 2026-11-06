@@ -1382,6 +1382,24 @@ extern enum bounce_end_route bounce_member_end_route(struct BouncerSession *sess
 extern void bounce_kill_session(struct BouncerSession *session,
                                 const char *comment);
 
+/** Before a KILL of @a victim by @a killer, the client whose KILL line is
+ * being handled: when @a killer is a device of ours in the session whose
+ * primary @a victim is (bounce_kill_takes_killer(): an opered device
+ * KILLing its own nick), take it off that session's roster, so the
+ * session's end under the KILL -- bounce_kill_session() for a primary of
+ * ours, exit_one_client()'s KILLED cascade for another server's -- does
+ * not exit (free) it mid-command (race survey #8, 2026-11-06).  The
+ * caller then exits @a killer itself, last, after the victim: the KILL
+ * ends the whole session (#12), its KILLer included.
+ *
+ * @param[in] killer The KILLer (do_kill()'s sptr).
+ * @param[in] victim The client being KILLed.
+ * @return 1 when @a killer was taken off the roster and must be exited
+ *         last by the caller, else 0 (nothing changed).
+ */
+extern int bounce_kill_spare_killer(struct Client *killer,
+                                    struct Client *victim);
+
 /** Retire a held session of ours: end it (its own copy's aliases, BS X
  * toward the aware links) and then exit its ghost (BX X toward the aware
  * links, a Q toward the legacy ones).  Unlike a KILL, a retire never
