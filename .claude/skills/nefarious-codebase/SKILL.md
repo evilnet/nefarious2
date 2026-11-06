@@ -93,6 +93,10 @@ Channel, nick and account names are case-insensitive under the casemapping, but 
 
 ircu headers wrap every include as `#ifndef INCLUDED_ircd_defs_h / #include "ircd_defs.h" / #endif`. An include added *inside* another header's block is skipped whenever that header was already included, and the symbol is "undeclared" only in some translation units. Add a new include as its own guarded block (`#ifndef INCLUDED_account_id_h ... #endif`).
 
+## Trap: iauth's disconnect line comes from `close_connection()`
+
+iauth (iauthd-ts / iauthd.pl) keys its entries by fd from `C` to `D`, and exits on a duplicate `C`.  The `<fd> D` is sent from `close_connection()` (s_bsd.c), before the fd is touched, for every user socket with fd >= 0 -- a bouncer hold close and a BX X local-alias close included (2026-11-06).  Never send it from `exit_client()` (a held ghost there has fd -1 and would send "-1 D"); a revive moves the fd onto the ghost and owes nothing until that socket closes.
+
 ## Trap: a STATS entry with no gating feature must be `STAT_FLAG_OPERONLY`
 
 `m_stats.c` evaluates `feature_bool(sd->sd_control)` for a non-privileged client whenever an entry (table in `s_stats.c`) carries `STAT_FLAG_OPERFEAT`. Eight fork entries (chathistoryads, chathistory, metadata, webpush, webhook, authtoken, dnsbl, gitsync) used `STAT_FLAG_OPERFEAT` with `FEAT_LAST_F` as the control, meaning "no such feature": `feature_bool` then asserts the sentinel row's type (`(flags & FEAT_MASK) == FEAT_BOOL`, flags are 0) and, with asserts on in the shipped image (`--disable-asserts` is not passed), aborts the server. Any non-oper could crash prod with `STATS webpush`. Fixed 2026-09-23 (webhook plan 3 review): those entries are `STAT_FLAG_OPERONLY` (481 for a non-oper). Use `STAT_FLAG_OPERFEAT` only with a real `FEAT_HIS_STATS_x` boolean; every bed test drives STATS from an oper, so this path never ran under test until the transport suite's non-oper case.
