@@ -711,6 +711,8 @@ static int utf8_folded_prefix(const char *h, const char *n)
 
 /** Case-insensitive substring search for UTF-8 text.  ASCII follows the
  * server casemapping; Latin, Greek, Cyrillic and Armenian fold one to one.
+ * Not folded: multi-character folds (U+00DF against "ss"), U+1E9E, U+0130,
+ * and every other script.
  * @param[in] hay Text to scan.
  * @param[in] needle Text to find; empty matches at the start.
  * @return Start of the first match in \a hay, or NULL.
@@ -727,7 +729,7 @@ const char* ircd_utf8_strcasestr(const char* hay, const char* needle)
     /* An ASCII unit only ever equals an ASCII byte, and no sequence holds
      * one, so bytes will do until one matches. */
     for (; *hay; hay++)
-      if ((unsigned char)ToLower((unsigned char)*hay) == first
+      if ((unsigned char)ToLower(*hay) == first
           && utf8_folded_prefix(hay + 1, rest))
         return hay;
     return NULL;
