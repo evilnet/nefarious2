@@ -2051,3 +2051,17 @@ bounds account minting from a botnet spread across many addresses.
 Trips are logged at L_WARNING.  Note this is per-server, not
 per-network: each server enforces its own budget.  0 disables the
 global limiter.
+
+P10_MESSAGE_TAGS
+ * Type: boolean
+ * Default: TRUE
+
+Whether this server announces message tags (the H flag) to its server
+links and sends compact @time/@msgid tags to the peers that announce
+them too.  A legacy peer never gets tags, whatever this is set to.
+
+Upgrade note: before this default changed, a server with no
+P10_MESSAGE_TAGS line announced nothing.  It now announces H, so a link
+between an upgraded server and an older one can carry tags one way
+only.  Upgrade fork servers together, or pin the line to the value you
+want on every server.
