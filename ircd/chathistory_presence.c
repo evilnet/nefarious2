@@ -1268,8 +1268,9 @@ int presence_filter_messages(struct Client *requestor,
      * is undermined.  Reactions / replies do NOT inherit (Phase B —
      * edits may join the inheritance set once their IRCv3 spec firms
      * up).  Orphan redact (parent already evicted) fails safe by
-     * dropping the redact; the eviction cascade in a follow-up commit
-     * eliminates this case at storage time. */
+     * dropping the redact.  (Trim deletes a REDACT row's original with
+     * it, never the reverse, so an orphan redact is one whose original
+     * went first or was never stored here.) */
     if (!visible && m->type == HISTORY_REDACT
         && m->content[0]) {
       char target_msgid[64];

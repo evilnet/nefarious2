@@ -2672,8 +2672,11 @@ static int history_trim_delete_stored(struct htrim_slice *s, enum htrim_path pat
  * (history_trim_delete_stored), all of them in one unbudgeted slice: one
  * batch, the owner totals moved only once it commits, and the channel's
  * targets key dropped (CH A -) if that left it empty.  A row's replies
- * and reactions are not deleted with it (no cascade): those stored in the
- * same incarnation are pruned by this same walk, any other stays.
+ * and reactions are not deleted with it: those stored in the same
+ * incarnation are pruned by this same walk, any other stays.  So does an
+ * original from another incarnation when its REDACT row goes here: the
+ * losing side's redaction is undone, like its other actions, and the
+ * trim engine's REDACT cascade does not run on this path.
  * @return rows deleted, or -1. */
 int history_purge_incarnation(const char *channel, time_t incarnation)
 {
