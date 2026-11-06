@@ -7549,8 +7549,6 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       struct HistoryMessage *rows = NULL, *m;
       int count;
 
-      if (IsMemberAlias(member))
-        continue;   /* the primary's membership covers it */
       if (check_history_access(sptr, member->channel->chname, lookup_target,
                                sizeof(lookup_target)) != 0)
         continue;
