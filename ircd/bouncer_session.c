@@ -2223,6 +2223,20 @@ static void session_roster_drop_account(struct Client *c,
     session_roster_drop(s, c, s == into);
 }
 
+/** Take @a c off every roster before an end of @a s that must not exit
+ * it -- the connection being handled, left to its command or the orphan
+ * sweep, or a device its caller exits: every record of its account, and
+ * @a s itself (the record the end walks).  bounce_alias_untrack() stops
+ * at the first record that lists the client; a device on two records of
+ * one primary (split-brain residue) stayed on the other, and if that was
+ * @a s, bounce_kill_session(s) exited it -- freed mid-command, or exited
+ * a second time by its caller (review I-3, 2026-11-06). */
+static void session_roster_leave(struct BouncerSession *s, struct Client *c)
+{
+  session_roster_drop_account(c, NULL);
+  session_roster_drop(s, c, 0);
+}
+
 static int bounce_in_session_by_id(struct BouncerSession *s, struct Client *c);
 
 /** How bounce_repoint_aliases() tells the network of a re-point. */
@@ -3421,8 +3435,7 @@ int bounce_kill_spare_killer(struct Client *killer, struct Client *victim)
    * with a device of ours on its roster -- with the KILLer gone from @a s,
    * that can be another record naming the same primary.  It leaves the
    * session anyway (its own exit would untrack it). */
-  session_roster_drop_account(killer, NULL);
-  session_roster_drop(s, killer, 0);
+  session_roster_leave(s, killer);
   log_write(LS_USER, L_INFO, 0, "Bouncer: %s%s (%s), a device of %s's "
             "session %s, KILLs its primary %s: it leaves the session's "
             "roster and exits after it", cli_yxx(&me), cli_yxx(killer),
@@ -6280,7 +6293,7 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
    * KILL-class end of the session does not exit it. */
   if (how == BOUNCE_MEMBER_END_RESET && cptr && cptr != primary
       && MyConnect(cptr) && IsBouncerAlias(cptr) && session_roster_has(s, cptr))
-    bounce_alias_untrack(cptr);
+    session_roster_leave(s, cptr);
 
   /* Every device of ours that follows the primary, filed on the roster or
    * not: a device has no nick of its own and cannot carry on outside a
@@ -6302,7 +6315,7 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
       /* The connection being handled is never exited under its own
        * command: with no primary, the orphan sweep ends it once the
        * command is done (unless the command exits it first). */
-      bounce_alias_untrack(a);
+      session_roster_leave(s, a);
       cli_user(a)->alias_primary = NULL;
       bounce_give_own_sessid(a, ended);
       orphan_arm();
@@ -8484,10 +8497,10 @@ int bounce_forced_exit(struct Client *cptr, struct Client *victim,
      * neither (the latter, left with no primary, goes by the orphan
      * sweep). */
     if (is_alias)
-      bounce_alias_untrack(victim);
+      session_roster_leave(s, victim);
     if (cptr && cptr != victim && MyConnect(cptr) && IsBouncerAlias(cptr)
         && session_roster_has(s, cptr))
-      bounce_alias_untrack(cptr);
+      session_roster_leave(s, cptr);
     bounce_kill_session(s, comment);
     if (primary_ours) {
       if (primary != cptr) {
