@@ -14,6 +14,9 @@
 
 #include "bouncer_rebind_auth.h"   /* enum BounceKcJoin (pure) */
 
+#include <stddef.h>                /* size_t */
+#include <stdint.h>                /* uint64_t */
+
 /** May a direct server link know a face as a user it learned by N from
  * us?
  *
@@ -1680,5 +1683,257 @@ extern int bounce_hold_on_tells(int asker_device, int target_ours,
  */
 extern int bounce_wait_entry_stays(long wait_until, long now, int waiting,
                                    int *rearm_in);
+
+/** A session member's own away state, as the away aggregation reads it
+ * (W3 Task 16): a connection of the deciding server from its own
+ * connection, another server's from what that server replicated
+ * (BX U aw=). */
+enum bounce_away_state {
+  BOUNCE_AWAY_UNKNOWN = -1, /**< never reported: an older server's device,
+                             *   or its aw= is not here yet */
+  BOUNCE_AWAY_PRESENT = 0,  /**< looking */
+  BOUNCE_AWAY_AWAY = 1,     /**< away, with its own text when known */
+  BOUNCE_AWAY_STAR = 2      /**< AWAY * (draft/pre-away): "treated as
+                             *   though the connection did not exist" */
+};
+
+/** The away text for an away with no text known when the configured word
+ * (FEAT_AWAY_STAR_MSG) is empty: the feature's own default, the word
+ * away_send_to_servers() gives a legacy link for a star.  Never "*": a fork
+ * server takes that for a star (W3 Task 16 fix round 1, M-3). */
+#define BOUNCE_AWAY_WORD "Away"
+
+/** The form of a report of a connection's own away state. */
+enum bounce_away_form {
+  BOUNCE_AWAY_FORM_REPORT, /**< a BX U aw= value: "<0|1|2>[ <text>]" */
+  BOUNCE_AWAY_FORM_LINE    /**< an AWAY line's text: none present, "*" a
+                            *   star, anything else away with that text */
+};
+
+/** A connection's own away state, as bounce_away_parse() reads it. */
+struct bounce_away_report {
+  int state;         /**< enum bounce_away_state; BOUNCE_AWAY_UNKNOWN when
+                      *   the value is no report */
+  const char *text;  /**< its own text (BOUNCE_AWAY_AWAY), pointing into the
+                      *   value; NULL when it has none */
+  size_t len;        /**< the text's length, capped at the limit given */
+};
+
+/** Read a report of a connection's own away state: the value of a BX U aw=
+ * (`<0|1|2>[ <text>]`: one digit, alone or followed by a space; for 1,
+ * everything after that space is the text, a leading space or colon
+ * included; text on 0 or 2 means nothing) or an AWAY line's text (none
+ * present, `*` alone a star, else away with it).  The one parse of both
+ * (W3 Task 16 fix round 1).
+ *
+ * @param[in]  value  The value (NULL is no report, or present for a line).
+ * @param[in]  form   Which of the two it is.
+ * @param[in]  maxlen The text's limit (AWAYLEN).
+ * @param[out] out    The state, and the text when it has one.
+ * @return out->state. */
+extern int bounce_away_parse(const char *value, enum bounce_away_form form,
+                             size_t maxlen, struct bounce_away_report *out);
+
+/** One member of a session for bounce_away_aggregate(). */
+struct bounce_away_member {
+  int state;         /**< enum bounce_away_state; any other value is unknown */
+  const char *text;  /**< its own away text (BOUNCE_AWAY_AWAY); NULL or ""
+                      *   when none is known */
+  uint64_t ms;       /**< the time of the event that set it (epoch ms, the
+                      *   HLC's); 0 when none is known (ranks below every
+                      *   timed one) */
+};
+
+/** A session's away state over its members' own states (draft/pre-away;
+ * W3 Task 16, user decisions 2026-11-07; fix round 2: the newest explicit
+ * event wins):
+ *  - a star does not count; an unknown member counts as looking (an error
+ *    toward present, never a presence the user did not give);
+ *  - any member looking: present (*msg "");
+ *  - else any member away: away, with the text of the newest event among
+ *    the away members that have text (time order, ties to the lower index;
+ *    an untimed member ranks below every timed one); among untimed ones
+ *    only, @a prev while a member still has it, else the last in order;
+ *    with no text anywhere, @a fallback (the configured word; "*" counts as
+ *    none), else BOUNCE_AWAY_WORD.  Never "" (an empty away text on the
+ *    wire is "back", defect (a)) and never "*" (a star);
+ *  - else (every member a star, or none): BOUNCE_AWAY_STAR, *msg "*".
+ * The member the outcome comes from goes to @a winner (the text's, else
+ * the newest of the state's members; -1 for none): its event's msgid and
+ * time go on the decision's line on its first showing
+ * (bounce_away_first_showing()).
+ *
+ * @param[in]  members  The session's members, the primary first.
+ * @param[in]  n        How many.
+ * @param[in]  prev     The text the session shows now, or NULL.
+ * @param[in]  fallback The text for away with none known (FEAT_AWAY_STAR_MSG).
+ * @param[out] msg      The session's away text (points into the members,
+ *                      @a prev, @a fallback or a literal).
+ * @param[out] winner   The member the outcome comes from, or -1.
+ * @return BOUNCE_AWAY_PRESENT, BOUNCE_AWAY_AWAY or BOUNCE_AWAY_STAR. */
+extern int bounce_away_aggregate(const struct bounce_away_member *members,
+                                 int n, const char *prev,
+                                 const char *fallback, const char **msg,
+                                 int *winner);
+
+/** Does a decision's line carry its winner's event (msgid and time)?  Only
+ * the first time that event is shown: when its time is newer than the
+ * session's shown-event mark (hs_effective_away_ms).  A leave, a merge, an
+ * older winner surfacing again and a restatement mint their own: a later,
+ * different line under an old msgid could be dropped as a duplicate.
+ * @param[in] winner_ms The winner's event time (0: none).
+ * @param[in] shown_ms  The session's shown-event mark. */
+extern int bounce_away_first_showing(uint64_t winner_ms, uint64_t shown_ms);
+
+/** The event time a report of a member's own away state stands for: its
+ * S2S time tag; with none, now while its server is live (a report as it
+ * happens), 0 while its server bursts (an older server's re-report of an
+ * event whose time it never had; ranks below every timed one).
+ * @param[in] tag_ms   The report's time tag, or 0.
+ * @param[in] bursting Its server is bursting.
+ * @param[in] now_ms   The HLC's time now. */
+extern uint64_t bounce_away_report_ms(uint64_t tag_ms, int bursting,
+                                      uint64_t now_ms);
+
+/** The holder's away barrier toward a link (W3 Task 16 fix round 4).
+ *
+ * At a relink the holder restates its sessions' away decisions to the link,
+ * since AWAY is not in the P10 burst.  The far side's merge lines (its D.2
+ * demote or swap, the BX C convert, its re-filed devices and their aw=
+ * reports, a retired held ghost's Q) are made while it reads OUR burst, so
+ * they reach us after its end of burst: restated then, the decision would
+ * be the one from before the merge, and the far side would see the user's
+ * away flap.  So once our burst to the link is out and its end of burst
+ * has come, the holder sends the link a PING on the normal queue (a
+ * priority one could overtake our burst) whose origin is this token; the
+ * far side reads it after our whole burst and answers PONG on its normal
+ * queue, behind every line it made reading our burst.  At that PONG the
+ * holder restates each decision it has -- it never decides again there.
+ *
+ * The token names the link's establishment (struct Server link_serial):
+ * "bxaway.<serial>".  It never starts with '!' (m_pong.c's AsLL reply) and
+ * is never a server's name (check_pings' PING carries ours). */
+#define BOUNCE_AWAY_BARRIER_PREFIX "bxaway."
+/** Room for a barrier token: the prefix, an unsigned long, the NUL. */
+#define BOUNCE_AWAY_BARRIER_TOKENLEN 32
+
+/** Write the barrier token for a link's establishment @a serial.
+ * @param[out] buf  Where it goes.
+ * @param[in]  size Its size (BOUNCE_AWAY_BARRIER_TOKENLEN is enough).
+ * @param[in]  serial The link's link_serial.
+ * @return 1, or 0 when it did not fit (@a buf is then "" when it has room). */
+extern int bounce_away_barrier_token(char *buf, size_t size,
+                                     unsigned long serial);
+
+/** Does a PONG's destination end the holder's away barrier toward a link?
+ * Only while the barrier is armed (@a pending), and only for the barrier
+ * token it was armed with (@a expected): an AsLL reply ('!'), check_pings'
+ * reply (our name), another establishment's token or none never does.
+ * @param[in] pending  The barrier toward the link is armed.
+ * @param[in] token    The PONG's destination (the PING's origin echoed).
+ * @param[in] expected The token the barrier was armed with.
+ * @return 1 on a match (the caller clears the barrier and restates). */
+extern int bounce_away_barrier_match(int pending, const char *token,
+                                     const char *expected);
+
+/** A relink's merge is decided once, at the barrier (W3 Task 16 fix round
+ * 5).  The holder decides a session's away on each member change; during a
+ * relink the far side's merge lines (the demoted face's report, then each
+ * re-filed device's BX C and report) arrive one at a time, and deciding on
+ * each showed every server an away and back (B-5c).  So each direct link
+ * has a merge window, from its registration until its barrier PONG: a
+ * decision due on a line from that link is deferred (the record is marked
+ * pending on the link), and at the PONG -- after every line the link made
+ * reading our burst -- each pending record is decided once, from the whole
+ * merged membership, before the restatement.  That is the relink
+ * reconciliation the user allowed, not a recompute. */
+enum bounce_away_merge_event {
+  BOUNCE_AWAY_MERGE_LINK_UP,   /**< a direct link registered (server_estab) */
+  BOUNCE_AWAY_MERGE_LINE,      /**< a decision due on a line from a direct
+                                *   link in its merge window */
+  BOUNCE_AWAY_MERGE_LOCAL,     /**< a decision due on anything else: our own
+                                *   client (explicit actions show), a timer,
+                                *   a link out of its window */
+  BOUNCE_AWAY_MERGE_PROMOTE,   /**< a promote or install that recomputes
+                                *   nothing (no recompute at a promote) */
+  BOUNCE_AWAY_MERGE_PONG,      /**< the link's barrier PONG */
+  BOUNCE_AWAY_MERGE_LINK_GONE  /**< the link went before its PONG */
+};
+
+/** What happens to a record's away decision. */
+enum bounce_away_merge_action {
+  BOUNCE_AWAY_MERGE_NOTHING,       /**< nothing for this record */
+  BOUNCE_AWAY_MERGE_DEFER,         /**< mark it pending on the link; do not
+                                    *   decide */
+  BOUNCE_AWAY_MERGE_DECIDE_NOW,    /**< decide now (the whole current
+                                    *   state): any pending mark goes */
+  BOUNCE_AWAY_MERGE_FLUSH_THEN_PROMOTE, /**< decide the pending merge with the
+                                    *   membership before the promote, clear
+                                    *   the mark, then promote */
+  BOUNCE_AWAY_MERGE_DECIDE_PENDING /**< decide the record once, clear the
+                                    *   mark */
+};
+
+/** Which event a decision due now is: a line from a direct link whose
+ * merge window is open defers; anything else decides at once (nothing to
+ * defer before a link registers).
+ * @param[in] from_link   The line being handled came from a direct server
+ *                        link (the current inbound link).
+ * @param[in] window_open That link's merge window is open. */
+extern enum bounce_away_merge_event bounce_away_merge_decide_event(int from_link,
+                                                                   int window_open);
+
+/** A direct link's merge window after an event on that link: open at its
+ * registration when it is IRCv3-aware (a legacy link -- a stock server,
+ * services -- sends no merge line, and one that never echoes the barrier
+ * PING would keep it open for good); closed at its PONG and when it goes.
+ * @param[in] ev         The event (LINK_UP, PONG, LINK_GONE; any other
+ *                       leaves it).
+ * @param[in] open       The window is open now.
+ * @param[in] link_aware The link is IRCv3-aware. */
+extern int bounce_away_merge_window(enum bounce_away_merge_event ev, int open,
+                                    int link_aware);
+
+/** One record's step for an event.
+ * - LINE: defer (mark pending on the link; a record pending on another
+ *   link moves to this one -- with 3+ fork links it decides at that
+ *   link's PONG).
+ * - LOCAL: decide now; that computed the whole current state, so any
+ *   pending mark goes.
+ * - PROMOTE: a pending record is decided first, with the membership before
+ *   the promote, then promoted (nothing recomputed because of the promote,
+ *   the merge's effect not lost) -- unless the promote is itself a step of
+ *   that merge (it came on a line from the link the record is pending on):
+ *   the PONG then decides the merged whole.
+ * - PONG / LINK_GONE of a link: a record pending on that link is decided
+ *   once.
+ * - LINK_UP: nothing for any record (the window opens).
+ *
+ * @param[in] ev           The event.
+ * @param[in] pending      The record's merge decision is pending.
+ * @param[in] pending_here It is pending on the event's link (PONG,
+ *                         LINK_GONE: that link; PROMOTE: the link whose line
+ *                         is being handled).
+ * @return The action. */
+extern enum bounce_away_merge_action bounce_away_merge_step(enum bounce_away_merge_event ev,
+                                                            int pending,
+                                                            int pending_here);
+
+/** What a server does with a member's away change (W3 Task 16, design B:
+ * one writer per session). */
+enum bounce_away_role {
+  BOUNCE_AWAY_REPORTS, /**< not the holder: it sets the member's own state,
+                        *   answers it (305/306) and tells the network
+                        *   (BX U aw=) -- nothing else */
+  BOUNCE_AWAY_DECIDES  /**< the holder: it aggregates the session and, on a
+                        *   change, broadcasts AWAY from the primary and
+                        *   tells its channels */
+};
+
+/** The role of a server in a session's away: the holder is the server of
+ * the session's primary, a held ghost included.
+ *
+ * @param[in] primary_is_ours The session's primary is a client of ours. */
+extern enum bounce_away_role bounce_away_role(int primary_is_ours);
 
 #endif /* INCLUDED_bouncer_wire_h */

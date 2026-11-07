@@ -3090,9 +3090,641 @@ static void registration_and_hold_on_agree(void **s)
       }
 }
 
+/* bounce_away_aggregate(members, n, prev, fallback, &msg, &winner): a
+ * session's away state over its members' own states (W3 Task 16, the
+ * holder decides; fix round 2: the newest explicit event wins).  Member 0
+ * is the primary, the rest its devices; a member of another server is
+ * read from what its server replicated (BX U aw=, with its event's time),
+ * and unknown when it never said. */
+
+static struct bounce_away_member away_t(int state, const char *text,
+                                        uint64_t ms)
+{
+  struct bounce_away_member m;
+  m.state = state;
+  m.text = text;
+  m.ms = ms;
+  return m;
+}
+
+static struct bounce_away_member away_m(int state, const char *text)
+{
+  return away_t(state, text, 0);
+}
+
+static void away_remote_primary_present_hides_a_star(void **s)
+{
+  /* P present on the hub, its device on the leaf says AWAY *: a star does
+   * not count, P is looking -- present (the R13 defect showed P away). */
+  struct bounce_away_member m[2];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_PRESENT, NULL, 5);
+  m[1] = away_t(BOUNCE_AWAY_STAR, NULL, 9);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_PRESENT);
+  assert_string_equal(msg, "");
+  assert_int_equal(w, 0);
+}
+
+static void away_remote_primary_away_with_a_star_is_its_text(void **s)
+{
+  /* P AWAY :gone, its device AWAY * (newer): away, with P's own text --
+   * a star is excluded even when it is the newest event. */
+  struct bounce_away_member m[2];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 5);
+  m[1] = away_t(BOUNCE_AWAY_STAR, NULL, 50);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+  assert_int_equal(w, 0);
+}
+
+static void away_all_star_is_star(void **s)
+{
+  struct bounce_away_member m[3];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_STAR, NULL, 1);
+  m[1] = away_t(BOUNCE_AWAY_STAR, NULL, 7);
+  m[2] = away_t(BOUNCE_AWAY_STAR, NULL, 3);
+  assert_int_equal(bounce_away_aggregate(m, 3, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_STAR);
+  assert_string_equal(msg, "*");
+  assert_int_equal(w, 1);      /* the newest star */
+  /* One member alone, the star: the same. */
+  assert_int_equal(bounce_away_aggregate(m, 1, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_STAR);
+  assert_string_equal(msg, "*");
+  /* No member at all (not a session the server keeps): nobody looking. */
+  assert_int_equal(bounce_away_aggregate(m, 0, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_STAR);
+  assert_string_equal(msg, "*");
+  assert_int_equal(w, -1);
+}
+
+static void away_unknown_member_counts_present(void **s)
+{
+  /* A device whose server never said (an older server, or its aw= not
+   * here yet) counts as looking: an error toward present, never a
+   * presence the user did not give. */
+  struct bounce_away_member m[2];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 9);
+  m[1] = away_m(BOUNCE_AWAY_UNKNOWN, NULL);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_PRESENT);
+  assert_string_equal(msg, "");
+  assert_int_equal(w, 1);
+  m[0] = away_m(BOUNCE_AWAY_UNKNOWN, NULL);
+  m[1] = away_m(BOUNCE_AWAY_STAR, NULL);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_PRESENT);
+  /* Any value outside the enum is unknown too. */
+  m[0] = away_m(7, NULL);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_PRESENT);
+}
+
+static void away_without_text_is_never_back(void **s)
+{
+  /* Away with no text known anywhere (an older server's aw=1 carries
+   * none): the configured word, never "" -- "" on the wire is "back"
+   * (defect (a)). */
+  struct bounce_away_member m[2];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_STAR, NULL, 1);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, NULL, 2);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "Away");
+  assert_int_equal(w, 1);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "", 2);
+  assert_int_equal(bounce_away_aggregate(m, 2, "", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "Away");
+  /* No configured word either -- or "*", which counts as none: the fixed
+   * word, still away -- never "*", which a fork server would take for a
+   * star (fix round 1, M-3, and its nit). */
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, BOUNCE_AWAY_WORD);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, NULL, &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, BOUNCE_AWAY_WORD);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "*", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, BOUNCE_AWAY_WORD);
+  assert_string_equal(BOUNCE_AWAY_WORD, "Away");
+}
+
+static void away_present_and_away_is_present(void **s)
+{
+  /* One member looking, one away with its own text: present -- even when
+   * the away is the newest event. */
+  struct bounce_away_member m[2];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_PRESENT, NULL, 1);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "brb", 100);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_PRESENT);
+  assert_string_equal(msg, "");
+  assert_int_equal(w, 0);
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 100);
+  m[1] = away_t(BOUNCE_AWAY_PRESENT, NULL, 1);
+  assert_int_equal(bounce_away_aggregate(m, 2, "gone", "Away", &msg, &w),
+                   BOUNCE_AWAY_PRESENT);
+  assert_string_equal(msg, "");
+  assert_int_equal(w, 1);
+}
+
+static void away_newest_text_wins(void **s)
+{
+  /* Two away members with their own texts: the newer event's text --
+   * whichever member it is, whatever the session shows now. */
+  struct bounce_away_member m[2];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 5);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "brb", 10);
+  assert_int_equal(bounce_away_aggregate(m, 2, "gone", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "brb");
+  assert_int_equal(w, 1);
+  /* P says "gone" again (a new event): its text, though the same. */
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 20);
+  assert_int_equal(bounce_away_aggregate(m, 2, "brb", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+  assert_int_equal(w, 0);
+  /* A member that did not change keeps its old time: no text change. */
+  assert_int_equal(bounce_away_aggregate(m, 2, "gone", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+}
+
+static void away_time_ties_go_to_the_lower_index(void **s)
+{
+  struct bounce_away_member m[3];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 7);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "brb", 7);
+  m[2] = away_t(BOUNCE_AWAY_AWAY, "lunch", 7);
+  assert_int_equal(bounce_away_aggregate(m, 3, "lunch", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+  assert_int_equal(w, 0);
+  m[0] = away_t(BOUNCE_AWAY_STAR, NULL, 7);
+  assert_int_equal(bounce_away_aggregate(m, 3, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "brb");
+  assert_int_equal(w, 1);
+}
+
+static void away_untimed_ranks_below_timed(void **s)
+{
+  /* A report with no time (an older server's, while it bursts) ranks
+   * below every timed one; among untimed ones the text shown stays while
+   * a member still has it, else the last in order. */
+  struct bounce_away_member m[3];
+  const char *msg = NULL;
+  int w = -2;
+  (void)s;
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 0);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "brb", 3);
+  assert_int_equal(bounce_away_aggregate(m, 2, "gone", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "brb");
+  assert_int_equal(w, 1);
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 3);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "brb", 0);
+  assert_int_equal(bounce_away_aggregate(m, 2, "brb", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+  assert_int_equal(w, 0);
+  /* All untimed. */
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 0);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, "brb", 0);
+  m[2] = away_t(BOUNCE_AWAY_STAR, NULL, 0);
+  assert_int_equal(bounce_away_aggregate(m, 3, "gone", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+  assert_int_equal(w, 0);
+  assert_int_equal(bounce_away_aggregate(m, 3, "lunch", "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "brb");
+  assert_int_equal(w, 1);
+  assert_int_equal(bounce_away_aggregate(m, 3, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "brb");
+  /* The newest away member has no text: the newest one that has text. */
+  m[0] = away_t(BOUNCE_AWAY_AWAY, "gone", 4);
+  m[1] = away_t(BOUNCE_AWAY_AWAY, NULL, 9);
+  assert_int_equal(bounce_away_aggregate(m, 2, NULL, "Away", &msg, &w),
+                   BOUNCE_AWAY_AWAY);
+  assert_string_equal(msg, "gone");
+  assert_int_equal(w, 0);
+}
+
+static void away_first_showing_reuses_the_event(void **s)
+{
+  /* The decision's line carries the winner's msgid and time only the
+   * first time that event is shown: newer than the session's shown-event
+   * mark.  Otherwise (a leave, a merge, an older winner surfacing again,
+   * a restatement) a new one is minted. */
+  (void)s;
+  assert_true(bounce_away_first_showing(10, 5));
+  assert_true(bounce_away_first_showing(10, 0));
+  assert_false(bounce_away_first_showing(5, 5));
+  assert_false(bounce_away_first_showing(3, 5));
+  assert_false(bounce_away_first_showing(0, 0));
+}
+
+static void away_report_time_live_or_bursting(void **s)
+{
+  /* A report's event time: its tag's; with none, now while its server is
+   * live, nothing (0, ranks below every timed one) while it bursts. */
+  (void)s;
+  assert_int_equal(bounce_away_report_ms(42, 0, 100), 42);
+  assert_int_equal(bounce_away_report_ms(42, 1, 100), 42);
+  assert_int_equal(bounce_away_report_ms(0, 0, 100), 100);
+  assert_int_equal(bounce_away_report_ms(0, 1, 100), 0);
+}
+
+/* bounce_away_parse(value, form, maxlen, &r): a report of a connection's
+ * own away state -- a BX U aw= value, or an AWAY line's text. */
+
+static void away_parse_report_states(void **s)
+{
+  struct bounce_away_report r;
+  (void)s;
+  assert_int_equal(bounce_away_parse("0", BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_PRESENT);
+  assert_int_equal(r.state, BOUNCE_AWAY_PRESENT);
+  assert_null(r.text);
+  assert_int_equal(bounce_away_parse("1", BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_AWAY);
+  assert_null(r.text);
+  assert_int_equal(r.len, 0);
+  assert_int_equal(bounce_away_parse("2", BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_STAR);
+  assert_null(r.text);
+  /* A trailing space with nothing after it: away, no text. */
+  assert_int_equal(bounce_away_parse("1 ", BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_AWAY);
+  assert_null(r.text);
+  /* Text on a present or a star report means nothing. */
+  assert_int_equal(bounce_away_parse("0 gone", BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_PRESENT);
+  assert_null(r.text);
+  assert_int_equal(bounce_away_parse("2 gone", BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_STAR);
+  assert_null(r.text);
+}
+
+static void away_parse_report_text(void **s)
+{
+  /* Everything after the first space is the text, as typed: spaces, a
+   * leading space, a leading colon. */
+  struct bounce_away_report r;
+  (void)s;
+  assert_int_equal(bounce_away_parse("1 out to lunch", BOUNCE_AWAY_FORM_REPORT,
+                                     250, &r), BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 12);
+  assert_memory_equal(r.text, "out to lunch", 12);
+  assert_int_equal(bounce_away_parse("1  lead-space", BOUNCE_AWAY_FORM_REPORT,
+                                     250, &r), BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 11);
+  assert_memory_equal(r.text, " lead-space", 11);
+  assert_int_equal(bounce_away_parse("1 :colon", BOUNCE_AWAY_FORM_REPORT,
+                                     250, &r), BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 6);
+  assert_memory_equal(r.text, ":colon", 6);
+}
+
+static void away_parse_report_garbage(void **s)
+{
+  /* Anything but one digit 0-2, alone or before a space, is no report. */
+  static const char *const bad[] = {
+    "", "x", "1x", "-1", "+1", " 1", "3", "9", "12", "01", "10 text", "2x gone"
+  };
+  struct bounce_away_report r;
+  size_t i;
+  (void)s;
+  for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    assert_int_equal(bounce_away_parse(bad[i], BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                     BOUNCE_AWAY_UNKNOWN);
+    assert_int_equal(r.state, BOUNCE_AWAY_UNKNOWN);
+    assert_null(r.text);
+  }
+  assert_int_equal(bounce_away_parse(NULL, BOUNCE_AWAY_FORM_REPORT, 250, &r),
+                   BOUNCE_AWAY_UNKNOWN);
+}
+
+static void away_parse_caps_the_text(void **s)
+{
+  /* Over the limit (AWAYLEN): capped, never longer. */
+  struct bounce_away_report r;
+  (void)s;
+  assert_int_equal(bounce_away_parse("1 abcdefghij", BOUNCE_AWAY_FORM_REPORT,
+                                     4, &r), BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 4);
+  assert_memory_equal(r.text, "abcd", 4);
+  assert_int_equal(bounce_away_parse("abcdefghij", BOUNCE_AWAY_FORM_LINE,
+                                     4, &r), BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 4);
+  assert_memory_equal(r.text, "abcd", 4);
+}
+
+static void away_parse_line(void **s)
+{
+  /* An AWAY line's text: none is present, the star alone is a star,
+   * anything else is away with that text. */
+  struct bounce_away_report r;
+  (void)s;
+  assert_int_equal(bounce_away_parse(NULL, BOUNCE_AWAY_FORM_LINE, 250, &r),
+                   BOUNCE_AWAY_PRESENT);
+  assert_null(r.text);
+  assert_int_equal(bounce_away_parse("", BOUNCE_AWAY_FORM_LINE, 250, &r),
+                   BOUNCE_AWAY_PRESENT);
+  assert_int_equal(bounce_away_parse("*", BOUNCE_AWAY_FORM_LINE, 250, &r),
+                   BOUNCE_AWAY_STAR);
+  assert_null(r.text);
+  assert_int_equal(bounce_away_parse("**", BOUNCE_AWAY_FORM_LINE, 250, &r),
+                   BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 2);
+  assert_int_equal(bounce_away_parse("gone fishing", BOUNCE_AWAY_FORM_LINE,
+                                     250, &r), BOUNCE_AWAY_AWAY);
+  assert_int_equal(r.len, 12);
+  assert_memory_equal(r.text, "gone fishing", 12);
+  assert_int_equal(bounce_away_parse("1", BOUNCE_AWAY_FORM_LINE, 250, &r),
+                   BOUNCE_AWAY_AWAY);
+  assert_memory_equal(r.text, "1", 1);
+}
+
+/* bounce_away_barrier_match(pending, token, expected): the PONG that ends
+ * the holder's away barrier toward a link (W3 Task 16 fix round 4).  The
+ * holder PINGs a link once both bursts are through and restates its
+ * decisions at the matching PONG, which the far side sends after every
+ * line it made while reading our burst. */
+
+static void barrier_token_names_the_link_serial(void **s)
+{
+  char t[BOUNCE_AWAY_BARRIER_TOKENLEN];
+
+  (void)s;
+  assert_int_equal(bounce_away_barrier_token(t, sizeof(t), 7), 1);
+  assert_string_equal(t, "bxaway.7");
+  /* Never an AsLL origin ('!') and never a server's name. */
+  assert_true(t[0] != '!');
+  assert_int_equal(bounce_away_barrier_token(t, sizeof(t), 4294967295UL), 1);
+  assert_string_equal(t, "bxaway.4294967295");
+  /* Too small a buffer: nothing usable. */
+  assert_int_equal(bounce_away_barrier_token(t, 4, 7), 0);
+  assert_int_equal(bounce_away_barrier_token(NULL, 0, 7), 0);
+}
+
+static void barrier_matching_pong_ends_it(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_barrier_match(1, "bxaway.7", "bxaway.7"), 1);
+}
+
+static void barrier_wrong_token_is_not_ours(void **s)
+{
+  /* Another establishment's token (a PONG from before a relink), or none. */
+  (void)s;
+  assert_int_equal(bounce_away_barrier_match(1, "bxaway.6", "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "bxaway.70", "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "bxaway.", "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "", "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, NULL, "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "bxaway.7", NULL), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "bxaway.7", ""), 0);
+}
+
+static void barrier_not_pending_matches_nothing(void **s)
+{
+  /* Restated already (the barrier is cleared at its PONG), or never armed:
+   * a repeat PONG restates nothing -- exactly once per establishment. */
+  (void)s;
+  assert_int_equal(bounce_away_barrier_match(0, "bxaway.7", "bxaway.7"), 0);
+}
+
+static void barrier_asll_pong_is_not_ours(void **s)
+{
+  /* An AsLL reply's destination starts with '!' (m_pong.c's AsLL branch):
+   * never the barrier's, even were it the token we expect. */
+  (void)s;
+  assert_int_equal(bounce_away_barrier_match(1, "!1699999999.123", "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "!bxaway.7", "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "!bxaway.7", "!bxaway.7"), 0);
+}
+
+static void barrier_our_name_is_not_ours(void **s)
+{
+  /* check_pings' PING carries our own name: its PONG is the link's
+   * liveness, never the barrier -- even when the expected token were (by a
+   * fault) a server's name, only a barrier token matches. */
+  (void)s;
+  assert_int_equal(bounce_away_barrier_match(1, "testnet.fractalrealities.net",
+                                             "bxaway.7"), 0);
+  assert_int_equal(bounce_away_barrier_match(1, "testnet.fractalrealities.net",
+                                             "testnet.fractalrealities.net"), 0);
+}
+
+/* The merge window and the pending merge decision (fix round 5): a relink's
+ * merge is decided once, at the link's barrier PONG. */
+
+static void merge_window_opens_at_link_up_for_an_aware_link(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINK_UP, 0, 1), 1);
+  /* A legacy link (a stock server, services) sends no merge line; one that
+   * never echoes the PING would hold decisions for good. */
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINK_UP, 0, 0), 0);
+}
+
+static void merge_window_closes_at_pong_and_link_gone(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_PONG, 1, 1), 0);
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINK_GONE, 1, 1), 0);
+  /* Decisions and promotes leave it as it is. */
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINE, 1, 1), 1);
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_LOCAL, 1, 1), 1);
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_PROMOTE, 1, 1), 1);
+  assert_int_equal(bounce_away_merge_window(BOUNCE_AWAY_MERGE_LOCAL, 0, 1), 0);
+}
+
+static void merge_decide_from_a_window_link_is_a_merge_line(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_decide_event(1, 1), BOUNCE_AWAY_MERGE_LINE);
+  /* A link out of its window (after its PONG), not registered yet, or no
+   * link at all (our own client, a timer): decided at once. */
+  assert_int_equal(bounce_away_merge_decide_event(1, 0), BOUNCE_AWAY_MERGE_LOCAL);
+  assert_int_equal(bounce_away_merge_decide_event(0, 0), BOUNCE_AWAY_MERGE_LOCAL);
+  assert_int_equal(bounce_away_merge_decide_event(0, 1), BOUNCE_AWAY_MERGE_LOCAL);
+}
+
+static void merge_line_defers(void **s)
+{
+  /* Pending or not, on this link or another: a merge line never decides. */
+  (void)s;
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINE, 0, 0),
+                   BOUNCE_AWAY_MERGE_DEFER);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINE, 1, 1),
+                   BOUNCE_AWAY_MERGE_DEFER);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINE, 1, 0),
+                   BOUNCE_AWAY_MERGE_DEFER);
+}
+
+static void merge_local_decides_now(void **s)
+{
+  /* Explicit actions show, pending or not (the mark goes with it). */
+  (void)s;
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LOCAL, 0, 0),
+                   BOUNCE_AWAY_MERGE_DECIDE_NOW);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LOCAL, 1, 0),
+                   BOUNCE_AWAY_MERGE_DECIDE_NOW);
+}
+
+static void merge_promote_flushes_a_pending_merge(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PROMOTE, 1, 0),
+                   BOUNCE_AWAY_MERGE_FLUSH_THEN_PROMOTE);
+  /* Nothing pending: the promote recomputes nothing. */
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PROMOTE, 0, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+  /* A promote that is a step of the pending merge (a line from that very
+   * link): the PONG decides the merged whole. */
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PROMOTE, 1, 1),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+}
+
+static void merge_pong_decides_its_pending_once(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PONG, 1, 1),
+                   BOUNCE_AWAY_MERGE_DECIDE_PENDING);
+  /* Decided and cleared: a repeat finds nothing. */
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PONG, 0, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+  /* Pending on another link: that link's PONG decides it. */
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PONG, 1, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+}
+
+static void merge_link_gone_decides_its_pending(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINK_GONE, 1, 1),
+                   BOUNCE_AWAY_MERGE_DECIDE_PENDING);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINK_GONE, 1, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINK_GONE, 0, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+}
+
+static void merge_link_up_touches_no_record(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINK_UP, 0, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_LINK_UP, 1, 0),
+                   BOUNCE_AWAY_MERGE_NOTHING);
+}
+
+static void merge_b5c_sequence(void **s)
+{
+  /* The bed's B-5c on the holder: its window opens at link up; the
+   * demoted face's report and the re-filed device's BX C and report each
+   * defer; the PONG decides once. */
+  int window, pending = 0;
+
+  (void)s;
+  window = bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINK_UP, 0, 1);
+  assert_int_equal(window, 1);
+  assert_int_equal(bounce_away_merge_step(bounce_away_merge_decide_event(1, window),
+                                          pending, pending),
+                   BOUNCE_AWAY_MERGE_DEFER);
+  pending = 1;
+  assert_int_equal(bounce_away_merge_step(bounce_away_merge_decide_event(1, window),
+                                          pending, pending),
+                   BOUNCE_AWAY_MERGE_DEFER);
+  window = bounce_away_merge_window(BOUNCE_AWAY_MERGE_PONG, window, 1);
+  assert_int_equal(window, 0);
+  assert_int_equal(bounce_away_merge_step(BOUNCE_AWAY_MERGE_PONG, pending, 1),
+                   BOUNCE_AWAY_MERGE_DECIDE_PENDING);
+  pending = 0;
+  /* After the PONG a line from the link decides at once. */
+  assert_int_equal(bounce_away_merge_step(bounce_away_merge_decide_event(1, window),
+                                          pending, 0),
+                   BOUNCE_AWAY_MERGE_DECIDE_NOW);
+}
+
+static void away_role_is_the_holders(void **s)
+{
+  /* One writer per session: the server of its primary (a held ghost
+   * counts) decides; every other server reports its own devices. */
+  (void)s;
+  assert_int_equal(bounce_away_role(1), BOUNCE_AWAY_DECIDES);
+  assert_int_equal(bounce_away_role(0), BOUNCE_AWAY_REPORTS);
+  assert_int_equal(bounce_away_role(5), BOUNCE_AWAY_DECIDES);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(away_remote_primary_present_hides_a_star),
+    cmocka_unit_test(away_remote_primary_away_with_a_star_is_its_text),
+    cmocka_unit_test(away_all_star_is_star),
+    cmocka_unit_test(away_unknown_member_counts_present),
+    cmocka_unit_test(away_without_text_is_never_back),
+    cmocka_unit_test(away_newest_text_wins),
+    cmocka_unit_test(away_time_ties_go_to_the_lower_index),
+    cmocka_unit_test(away_untimed_ranks_below_timed),
+    cmocka_unit_test(away_first_showing_reuses_the_event),
+    cmocka_unit_test(away_report_time_live_or_bursting),
+    cmocka_unit_test(away_role_is_the_holders),
+    cmocka_unit_test(barrier_token_names_the_link_serial),
+    cmocka_unit_test(barrier_matching_pong_ends_it),
+    cmocka_unit_test(barrier_wrong_token_is_not_ours),
+    cmocka_unit_test(barrier_not_pending_matches_nothing),
+    cmocka_unit_test(barrier_asll_pong_is_not_ours),
+    cmocka_unit_test(barrier_our_name_is_not_ours),
+    cmocka_unit_test(merge_window_opens_at_link_up_for_an_aware_link),
+    cmocka_unit_test(merge_window_closes_at_pong_and_link_gone),
+    cmocka_unit_test(merge_decide_from_a_window_link_is_a_merge_line),
+    cmocka_unit_test(merge_line_defers),
+    cmocka_unit_test(merge_local_decides_now),
+    cmocka_unit_test(merge_promote_flushes_a_pending_merge),
+    cmocka_unit_test(merge_pong_decides_its_pending_once),
+    cmocka_unit_test(merge_link_gone_decides_its_pending),
+    cmocka_unit_test(merge_link_up_touches_no_record),
+    cmocka_unit_test(merge_b5c_sequence),
+    cmocka_unit_test(away_present_and_away_is_present),
+    cmocka_unit_test(away_parse_report_states),
+    cmocka_unit_test(away_parse_report_text),
+    cmocka_unit_test(away_parse_report_garbage),
+    cmocka_unit_test(away_parse_caps_the_text),
+    cmocka_unit_test(away_parse_line),
     cmocka_unit_test(burst_gate_passes_kill_and_squit),
     cmocka_unit_test(burst_gate_passes_end_of_burst),
     cmocka_unit_test(burst_gate_holds_ban_changes),

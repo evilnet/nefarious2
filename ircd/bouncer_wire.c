@@ -11,6 +11,7 @@
  */
 #include "bouncer_wire.h"
 
+#include <stdio.h>
 #include <string.h>
 
 int bounce_legacy_link_knows(int link_aware, int link_gated,
@@ -893,4 +894,204 @@ int bounce_wait_entry_stays(long wait_until, long now, int waiting,
   if (rearm_in)
     *rearm_in = (int)(wait_until - now);
   return 1;
+}
+
+static int away_text_known(const char *text)
+{
+  return text && *text;
+}
+
+/* Is member @a i's event newer than member @a best's (time order, ties to
+ * the lower index; untimed, 0, below every timed one)?  @a best -1: yes. */
+static int away_newer(const struct bounce_away_member *members, int i, int best)
+{
+  if (best < 0)
+    return 1;
+  return members[i].ms > members[best].ms;
+}
+
+int bounce_away_aggregate(const struct bounce_away_member *members, int n,
+                          const char *prev, const char *fallback,
+                          const char **msg, int *winner)
+{
+  int present = -1, away = -1, star = -1;
+  int timed_text = -1, last_text = -1, prev_held = -1;
+  int i;
+
+  for (i = 0; i < n; i++) {
+    int state = members[i].state;
+
+    if (state == BOUNCE_AWAY_STAR) {
+      if (away_newer(members, i, star))
+        star = i;
+      continue;
+    }
+    if (state != BOUNCE_AWAY_AWAY) {
+      /* Present, or never reported (unknown): someone is looking. */
+      if (away_newer(members, i, present))
+        present = i;
+      continue;
+    }
+    if (away_newer(members, i, away))
+      away = i;
+    if (!away_text_known(members[i].text))
+      continue;
+    if (members[i].ms && away_newer(members, i, timed_text))
+      timed_text = i;
+    last_text = i;
+    if (prev_held < 0 && away_text_known(prev)
+        && 0 == strcmp(members[i].text, prev))
+      prev_held = i;
+  }
+  if (present >= 0) {
+    *msg = "";
+    *winner = present;
+    return BOUNCE_AWAY_PRESENT;
+  }
+  if (away < 0) {
+    *msg = "*";
+    *winner = star;
+    return BOUNCE_AWAY_STAR;
+  }
+  if (timed_text >= 0)
+    *winner = timed_text;      /* the newest explicit event's text */
+  else if (prev_held >= 0)
+    *winner = prev_held;       /* untimed only: the text shown stays */
+  else
+    *winner = last_text;       /* untimed only: the last in order */
+  if (*winner >= 0)
+    *msg = members[*winner].text;
+  else {
+    *winner = away;
+    if (away_text_known(fallback) && !(fallback[0] == '*' && fallback[1] == '\0'))
+      *msg = fallback;
+    else
+      *msg = BOUNCE_AWAY_WORD;
+  }
+  return BOUNCE_AWAY_AWAY;
+}
+
+int bounce_away_first_showing(uint64_t winner_ms, uint64_t shown_ms)
+{
+  return winner_ms != 0 && winner_ms > shown_ms;
+}
+
+uint64_t bounce_away_report_ms(uint64_t tag_ms, int bursting, uint64_t now_ms)
+{
+  if (tag_ms)
+    return tag_ms;
+  return bursting ? 0 : now_ms;
+}
+
+int bounce_away_parse(const char *value, enum bounce_away_form form,
+                      size_t maxlen, struct bounce_away_report *out)
+{
+  const char *text = NULL;
+
+  out->state = BOUNCE_AWAY_UNKNOWN;
+  out->text = NULL;
+  out->len = 0;
+  if (form == BOUNCE_AWAY_FORM_LINE) {
+    if (!value || !*value)
+      out->state = BOUNCE_AWAY_PRESENT;
+    else if (value[0] == '*' && value[1] == '\0')
+      out->state = BOUNCE_AWAY_STAR;
+    else {
+      out->state = BOUNCE_AWAY_AWAY;
+      text = value;
+    }
+  } else {
+    /* One digit 0-2, alone or before a space. */
+    if (!value || value[0] < '0' || value[0] > '2'
+        || (value[1] != '\0' && value[1] != ' '))
+      return out->state;
+    out->state = value[0] - '0';
+    if (out->state == BOUNCE_AWAY_AWAY && value[1] == ' ')
+      text = value + 2;
+  }
+  if (text && *text) {
+    size_t len = strlen(text);
+
+    out->text = text;
+    out->len = len > maxlen ? maxlen : len;
+  }
+  return out->state;
+}
+
+enum bounce_away_role bounce_away_role(int primary_is_ours)
+{
+  return primary_is_ours ? BOUNCE_AWAY_DECIDES : BOUNCE_AWAY_REPORTS;
+}
+
+int bounce_away_barrier_token(char *buf, size_t size, unsigned long serial)
+{
+  int n;
+
+  if (!buf || !size)
+    return 0;
+  n = snprintf(buf, size, "%s%lu", BOUNCE_AWAY_BARRIER_PREFIX, serial);
+  if (n < 0 || (size_t)n >= size) {
+    buf[0] = '\0';
+    return 0;
+  }
+  return 1;
+}
+
+int bounce_away_barrier_match(int pending, const char *token,
+                              const char *expected)
+{
+  size_t plen = sizeof(BOUNCE_AWAY_BARRIER_PREFIX) - 1;
+
+  if (!pending || !token || !expected)
+    return 0;
+  /* An AsLL reply, or anything that is not a barrier token (check_pings'
+   * reply carries our name): never the barrier, whatever was expected. */
+  if (token[0] == '!' || 0 != strncmp(token, BOUNCE_AWAY_BARRIER_PREFIX, plen)
+      || !token[plen])
+    return 0;
+  return 0 == strcmp(token, expected);
+}
+
+enum bounce_away_merge_event bounce_away_merge_decide_event(int from_link,
+                                                            int window_open)
+{
+  return (from_link && window_open) ? BOUNCE_AWAY_MERGE_LINE
+                                    : BOUNCE_AWAY_MERGE_LOCAL;
+}
+
+int bounce_away_merge_window(enum bounce_away_merge_event ev, int open,
+                             int link_aware)
+{
+  switch (ev) {
+  case BOUNCE_AWAY_MERGE_LINK_UP:
+    return link_aware ? 1 : 0;
+  case BOUNCE_AWAY_MERGE_PONG:
+  case BOUNCE_AWAY_MERGE_LINK_GONE:
+    return 0;
+  default:
+    return open ? 1 : 0;
+  }
+}
+
+enum bounce_away_merge_action bounce_away_merge_step(enum bounce_away_merge_event ev,
+                                                     int pending,
+                                                     int pending_here)
+{
+  switch (ev) {
+  case BOUNCE_AWAY_MERGE_LINE:
+    return BOUNCE_AWAY_MERGE_DEFER;
+  case BOUNCE_AWAY_MERGE_LOCAL:
+    return BOUNCE_AWAY_MERGE_DECIDE_NOW;
+  case BOUNCE_AWAY_MERGE_PROMOTE:
+    /* A step of the pending merge itself leaves it to the PONG. */
+    return (pending && !pending_here) ? BOUNCE_AWAY_MERGE_FLUSH_THEN_PROMOTE
+                                      : BOUNCE_AWAY_MERGE_NOTHING;
+  case BOUNCE_AWAY_MERGE_PONG:
+  case BOUNCE_AWAY_MERGE_LINK_GONE:
+    return (pending && pending_here) ? BOUNCE_AWAY_MERGE_DECIDE_PENDING
+                                     : BOUNCE_AWAY_MERGE_NOTHING;
+  case BOUNCE_AWAY_MERGE_LINK_UP:
+  default:
+    return BOUNCE_AWAY_MERGE_NOTHING;
+  }
 }
