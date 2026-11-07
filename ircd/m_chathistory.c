@@ -6540,6 +6540,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * probe counts VISIBLE rows (audit #8). */
     struct HistoryRowFilter fed_bare;
     struct HistoryRowFilter *fed_hook = presence_query_filter_hook(fed_pf);
+    int walk_truncated = 0;   /* fed_hook->truncated, read before the close */
     if (!fed_hook) {
       memset(&fed_bare, 0, sizeof(fed_bare));
       fed_hook = &fed_bare;
@@ -6678,8 +6679,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
       return 0;
     }
+    /* A presence hook lives inside fed_pf: read what the walk left on it
+     * before the close frees it (the flag used to be read after). */
+    walk_truncated = fed_hook->truncated;
     presence_query_filter_close(fed_pf);
     fed_pf = NULL;
+    fed_hook = NULL;
 
     if (count <= 0) {
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
@@ -6694,7 +6699,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * origin must not stamp chathistory-end on it.  Every local path
        * honours hook->truncated through query_page_complete; the
        * responder did not (re-review R8). */
-      if (fed_hook && fed_hook->truncated)
+      if (walk_truncated)
         truncated = 1;
       if ((query_subcmd_char == 'L' || query_subcmd_char == 'B'
            || query_subcmd_char == 'A' || query_subcmd_char == 'W')
