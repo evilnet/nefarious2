@@ -106,7 +106,12 @@
  * recorded as that row's CHILD, the redact_index row for HTC_F_REDACT,
  * and the by_time/by_owner rows -- plus the pending accounting delta and
  * touched-target bookkeeping described above.  A row's OWN children
- * (replies, redactions) are never touched: no cascade.  None of it is
+ * (replies, redactions) are never touched.  The one cascade runs the
+ * other way: a REDACT row takes the original it redacts with it
+ * (delete_redacted_parent), since a redaction lives only in its REDACT
+ * row and an original left behind would replay the redacted text.  A row
+ * reached twice in one slice -- by its walk and by a REDACT row's delete
+ * -- is deleted and counted once (the slice's deleted-key set).  None of it is
  * visible to a reader until the batch commits; a failed commit leaves
  * every row, index entry, total and counter exactly as it was.
  */
@@ -116,6 +121,7 @@
 #include "history_trim_codec.h"
 #include "history_stamp.h"
 #include "redact_index.h"
+#include "db_casefold.h"
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
@@ -247,6 +253,21 @@ struct htrim_slice {
   /* What the slice deleted from each tracked CF (compaction hints). */
   struct htrim_hint     hint[HH_COUNT];
   size_t                idx_only;    /* by_owner entries removed alone (no row) */
+
+  /* Every by_time key this slice deleted (an open-addressed set over a
+   * byte arena): a redacted original is deleted with its REDACT row, so a
+   * row can be reached twice in one slice -- once by the walk, once by a
+   * REDACT row's delete -- and the second delete must stage and count
+   * nothing.  dup_hit tells the caller the last delete was such a repeat
+   * (its bytes are not freed again). */
+  size_t               *del_slot;    /* arena offset + 1 per slot, 0 = empty */
+  size_t                del_nslot, del_n;
+  char                 *del_arena;
+  size_t                del_alen, del_acap;
+  int                   dup_hit;
+  uint64_t              cascade_bytes; /* counted bytes the cascade freed */
+  uint64_t              cascade_own_bytes; /* ... of them, the stepping
+                                              owner's own (ev_owner) */
 
   /* An eviction step, applied at commit. */
   int                   ev_step;
@@ -1322,6 +1343,8 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->ev_bt);
   MyFree(s->ts_cursor);
   MyFree(s->ts_names);
+  MyFree(s->del_slot);
+  MyFree(s->del_arena);
   for (i = 0; i < HH_COUNT; i++)
     hint_free(&s->hint[i]);
   MyFree(s);
@@ -1427,6 +1450,22 @@ static void slice_add_delta(struct htrim_slice *s, const char *bo_key,
   s->keys_len += bo_klen;
 }
 
+/** The bytes this slice's staged deletes take off @a owner (the
+ * negative pending deltas under its by_owner keys). */
+static uint64_t slice_owner_freed(const struct htrim_slice *s, const char *owner)
+{
+  size_t i, ol = strlen(owner);
+  uint64_t n = 0;
+
+  for (i = 0; i < s->npend; i++) {
+    const struct htrim_pending *p = &s->pend[i];
+    if (p->delta < 0 && p->klen > ol && s->keys[p->koff + ol] == '\0'
+        && memcmp(s->keys + p->koff, owner, ol) == 0)
+      n += (uint64_t)(-p->delta);
+  }
+  return n;
+}
+
 /** Remember @a target as touched, keeping the newest deleted ts.  A long
  * single-target drain stays one entry (the last one is merged in place);
  * commit deduplicates the rest. */
@@ -1499,28 +1538,299 @@ static void stage_paste_deletes(struct htrim_slice *s, const char *msgid)
   db_iter_close(it);
 }
 
+static uint64_t del_hash(const void *k, size_t kl)
+{
+  const unsigned char *p = (const unsigned char *)k;
+  uint64_t h = 1469598103934665603ULL;           /* FNV-1a */
+  size_t i;
+  for (i = 0; i < kl; i++) {
+    h ^= p[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+/** The slot of by_time key @a k in the slice's deleted set: where it is,
+ * or the empty slot it would take. */
+static size_t del_find(const struct htrim_slice *s, const void *k, size_t kl)
+{
+  size_t i = (size_t)(del_hash(k, kl) & (s->del_nslot - 1));
+  for (;;) {
+    size_t o = s->del_slot[i];
+    if (!o)
+      return i;
+    o--;
+    {
+      size_t len;
+      memcpy(&len, s->del_arena + o, sizeof len);
+      if (len == kl && memcmp(s->del_arena + o + sizeof len, k, kl) == 0)
+        return i;
+    }
+    i = (i + 1) & (s->del_nslot - 1);
+  }
+}
+
+/** Record by_time key @a k as deleted by this slice.
+ * @return 1 it was recorded already (a repeat), 0 recorded now. */
+static int del_note(struct htrim_slice *s, const void *k, size_t kl)
+{
+  size_t i, need;
+
+  if (s->del_nslot && s->del_slot[del_find(s, k, kl)])
+    return 1;
+  if ((s->del_n + 1) * 2 > s->del_nslot) {      /* grow: load <= 1/2 */
+    size_t n = s->del_nslot ? s->del_nslot * 2 : 64, j;
+    size_t *old = s->del_slot, oldn = s->del_nslot;
+    s->del_slot = (size_t *)MyCalloc(n, sizeof *s->del_slot);
+    s->del_nslot = n;
+    for (j = 0; j < oldn; j++) {
+      size_t o = old[j], len;
+      if (!o)
+        continue;
+      memcpy(&len, s->del_arena + o - 1, sizeof len);
+      s->del_slot[del_find(s, s->del_arena + o - 1 + sizeof len, len)] = o;
+    }
+    MyFree(old);
+  }
+  need = sizeof kl + kl;
+  if (s->del_alen + need > s->del_acap) {
+    size_t cap = s->del_acap ? s->del_acap * 2 : 4096;
+    while (cap < s->del_alen + need)
+      cap *= 2;
+    s->del_arena = (char *)MyRealloc(s->del_arena, cap);
+    s->del_acap = cap;
+  }
+  i = del_find(s, k, kl);
+  memcpy(s->del_arena + s->del_alen, &kl, sizeof kl);
+  memcpy(s->del_arena + s->del_alen + sizeof kl, k, kl);
+  s->del_slot[i] = s->del_alen + 1;
+  s->del_alen += need;
+  s->del_n++;
+  return 0;
+}
+
+/* The deleted set holds three kinds of key, each tagged by its first
+ * byte: 'M' a messages key THE full delete removed, 'T' a by_time key
+ * (removed by the full or the index-only delete), 'O' a by_owner key
+ * (removed by either delete, or alone by the owner step).  A full delete
+ * that finds its row's index removed already by the index-only form still
+ * removes the row's messages and other rows; nothing is subtracted twice
+ * because each by_owner key is removed once. */
+#define DEL_KEY_MAX (1 + HTC_MSG_KEY_MAX + HTC_BO_KEY_MAX)
+
+static int del_tagged(struct htrim_slice *s, char tag, const void *k, size_t kl,
+                      int note)
+{
+  char buf[DEL_KEY_MAX];
+
+  if (kl + 1 > sizeof buf)
+    return 0;                     /* cannot be named: never a repeat */
+  buf[0] = tag;
+  memcpy(buf + 1, k, kl);
+  if (!note)
+    return s->del_nslot && s->del_slot[del_find(s, buf, kl + 1)] ? 1 : 0;
+  return del_note(s, buf, kl + 1);
+}
+
+/** Whether this slice removed by_owner key @a k already; else record it. */
+static int bo_seen(struct htrim_slice *s, const void *k, size_t kl)
+{
+  return del_tagged(s, 'O', k, kl, 1);
+}
+
+
+/** The stored ts of @a msgid in folded @a target: its msgid_index row
+ * (value: the timestamp), else the legacy bare-msgid row (value:
+ * "target\0timestamp[\0]", history.c's parse_legacy_msgid_val), taken
+ * only when its target folds to @a target.  @return 1 found, 0 none, -1 a
+ * read failed. */
+static int parent_ts(const char *target, const char *msgid, char *ts, size_t tsz)
+{
+  char ik[HTRIM_MSGID_KEY_MAX];
+  struct db_val v = { NULL, 0 };
+  int ikl, rc, found = 0;
+
+  ikl = htc_msgid_key(ik, sizeof ik, msgid, target);
+  if (ikl >= 0) {
+    rc = db_get(g.st.env, g.st.msgid, ik, (size_t)ikl, NULL, &v);
+    if (rc != DB_OK && rc != DB_NOTFOUND)
+      return -1;
+    if (rc == DB_OK) {
+      if (v.base && v.len > 0 && v.len < tsz) {
+        memcpy(ts, v.base, v.len);
+        ts[v.len] = '\0';
+        found = 1;
+      }
+      db_val_free(&v);
+      if (found)
+        return 1;
+    }
+  }
+
+  rc = db_get(g.st.env, g.st.msgid, msgid, strlen(msgid), NULL, &v);
+  if (rc == DB_NOTFOUND)
+    return 0;
+  if (rc != DB_OK)
+    return -1;
+  if (v.base && v.len) {
+    const char *b = (const char *)v.base;
+    const char *sep = memchr(b, '\0', v.len);
+    if (sep) {
+      size_t tl = (size_t)(sep - b), cl;
+      char folded[HTC_TARGET_MAX];
+      const char *t = sep + 1;
+      cl = v.len - tl - 1;
+      if (cl > 0 && t[cl - 1] == '\0')
+        cl--;
+      if (tl == strlen(target) && tl < sizeof folded && cl > 0 && cl < tsz) {
+        db_casefold_bytes(folded, b, tl);
+        if (memcmp(folded, target, tl) == 0) {
+          memcpy(ts, t, cl);
+          ts[cl] = '\0';
+          found = 1;
+        }
+      }
+    }
+  }
+  db_val_free(&v);
+  return found;
+}
+
+/** The original a REDACT row redacts (@a parent in folded @a target),
+ * deleted with it under the same @a path whenever it is still stored: a
+ * redaction lives only in its REDACT row (replay hides the original
+ * because the REDACT row is its reply_index child), so an original left
+ * behind would replay the redacted text.  Whichever walk reached the
+ * REDACT row first -- an owner-share step on the redacter, or an age walk
+ * where the REDACT row is the older (a redact stamped by a server whose
+ * clock is behind the author's) -- the original goes too.
+ *
+ * The original is found through msgid_index (or its legacy bare-msgid
+ * row), and its record taken from by_time.  An original with no readable
+ * by_time record (not indexed yet, or a record that does not parse) gets
+ * one rebuilt from its messages row the way the backfill builds it, and
+ * is counted only when its by_owner entry is there to say what it was
+ * charged.  Its bytes count as freed (s->cascade_bytes; and, when the
+ * original is the stepping owner's own, s->cascade_own_bytes).  A parent
+ * that is itself a REDACT row stays: only a peer can write one, and it
+ * goes on hiding its own original.
+ * @return 0, or -1 a read failed or the slice is poisoned. */
+static int delete_redacted_parent(struct htrim_slice *s, enum htrim_path path,
+                                  const char *target, const char *parent)
+{
+  char ts[HTC_TS_MAX], bt[HTC_BT_KEY_MAX], mk[HTC_MSG_KEY_MAX], bo[HTC_BO_KEY_MAX];
+  struct db_val v = { NULL, 0 };
+  struct htc_rec prec;
+  int btl, mkl, bol, rc, parsed = 0, counted = 1;
+
+  rc = parent_ts(target, parent, ts, sizeof ts);
+  if (rc <= 0)
+    goto read_rc;
+  btl = htc_bt_key(bt, sizeof bt, htc_parse_ms(ts), target, parent);
+  mkl = htc_msg_key(mk, sizeof mk, target, ts, parent);
+  if (btl < 0 || mkl < 0)
+    return 0;
+  if (del_tagged(s, 'M', mk, (size_t)mkl, 0))
+    return 0;                     /* deleted in full by this slice already */
+
+  rc = db_get(g.st.env, g.st.by_time, bt, (size_t)btl, NULL, &v);
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    goto read_rc;
+  if (rc == DB_OK)
+    parsed = htc_rec_parse(v.base, v.len, &prec) == 0;
+  db_val_free(&v);
+  if (parsed && strcmp(prec.ts, ts) != 0)
+    parsed = 0;                   /* a record for another row: rebuild */
+
+  if (!parsed) {
+    /* No readable record: rebuild it from the messages row. */
+    struct htrim_row_info info;
+
+    rc = db_get(g.st.env, g.st.messages, mk, (size_t)mkl, NULL, &v);
+    if (rc == DB_NOTFOUND)
+      return 0;                   /* not stored: nothing left to hide */
+    if (rc != DB_OK)
+      goto read_rc;
+    memset(&info, 0, sizeof info);
+    if (!g.parse || g.parse(v.base, v.len, &info) != 0)
+      memset(&info, 0, sizeof info);
+    db_val_free(&v);
+    info.account[sizeof info.account - 1] = '\0';
+    info.reply_parent[sizeof info.reply_parent - 1] = '\0';
+    info.redact_parent[sizeof info.redact_parent - 1] = '\0';
+    memset(&prec, 0, sizeof prec);
+    prec.flags = info.flags & (HTC_F_REDACT | HTC_F_ML);
+    if (strlen(ts) >= sizeof prec.ts)
+      return 0;
+    memcpy(prec.ts, ts, strlen(ts) + 1);
+    if (htc_owner_key(prec.owner, sizeof prec.owner, info.account, NULL, NULL) < 0)
+      memcpy(prec.owner, HTC_OWNER_NONE, sizeof HTC_OWNER_NONE);
+    memcpy(prec.reply_parent, info.reply_parent, strlen(info.reply_parent) + 1);
+    memcpy(prec.redact_parent, info.redact_parent, strlen(info.redact_parent) + 1);
+
+    /* Counted only as its by_owner entry says: the size there is what
+     * the store charged it, under this owner. */
+    counted = 0;
+    bol = htc_bo_key(bo, sizeof bo, prec.owner, bt, (size_t)btl);
+    if (bol > 0) {
+      rc = db_get(g.st.env, g.st.by_owner, bo, (size_t)bol, NULL, &v);
+      if (rc != DB_OK && rc != DB_NOTFOUND)
+        goto read_rc;
+      if (rc == DB_OK && htc_size_parse(v.base, v.len, &prec.bytes) == 0)
+        counted = 1;
+      db_val_free(&v);
+    }
+  }
+
+  if (prec.flags & HTC_F_REDACT)
+    return 0;
+  if (htrim_delete_row(s, path, bt, (size_t)btl, &prec, counted) != 0)
+    return -1;
+  if (!s->dup_hit && counted) {
+    s->cascade_bytes += prec.bytes;
+    if (s->ev_owner[0] && strcmp(prec.owner, s->ev_owner) == 0)
+      s->cascade_own_bytes += prec.bytes;
+  }
+  return 0;
+
+read_rc:
+  if (rc == 0 || rc == DB_NOTFOUND)
+    return 0;
+  s->broken = 1;
+  return -1;
+}
+
 /** The index-only delete for a row the engine cannot read: its by_time
  * key, and its by_owner key when @a rec names the owner (with the delta
  * when @a counted).  Nothing else -- the engine never guesses at a
  * message row it cannot name.  Counts under @a path so the caller's walk
- * over by_time advances past it. */
+ * over by_time advances past it.  A by_time key this slice removed
+ * already is a repeat (dup_hit): nothing staged or counted. */
 static int delete_index_only(struct htrim_slice *s, enum htrim_path path,
                              const void *bt_key, size_t bt_klen,
                              const struct htc_rec *rec, int counted)
 {
   char bo[HTC_BO_KEY_MAX];
-  int bol = -1;
+  int bol = -1, bo_new = 0;
 
+  if (del_tagged(s, 'T', bt_key, bt_klen, 1)) {
+    s->dup_hit = 1;
+    return 0;
+  }
   slice_del(s, g.st.by_time, bt_key, bt_klen);
   if (rec) {
     bol = htc_bo_key(bo, sizeof bo, rec->owner, bt_key, bt_klen);
-    if (bol > 0)
+    if (bol > 0 && !bo_seen(s, bo, (size_t)bol)) {
       slice_del(s, g.st.by_owner, bo, (size_t)bol);
+      bo_new = 1;
+    }
   }
   if (s->broken)
     return -2;
-  if (counted && rec && bol > 0 && rec->bytes)
+  if (counted && bo_new && rec->bytes)
     slice_add_delta(s, bo, (size_t)bol, -(int64_t)rec->bytes);
+  else
+    s->dup_hit = counted && rec && bol > 0;   /* its bytes went already */
   s->counts[path]++;
   s->rows++;
   return 0;
@@ -1537,13 +1847,14 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   char rk1[HTRIM_REPLY_KEY_MAX], rk2[HTRIM_REPLY_KEY_MAX];
   char bo[HTC_BO_KEY_MAX];
   unsigned char xk[RDX_KEY_MAX];
-  int mkl, ikl = -1, rk1l = -1, rk2l = -1, xkl = -1, bol;
+  int mkl, ikl = -1, rk1l = -1, rk2l = -1, xkl = -1, bol, bt_new, bo_new;
 
   if (!s || !g.inited || !bt_key || !bt_klen
       || (int)path < 0 || path >= HTRIM_PATH_COUNT)
     return -1;
   if (s->broken)
     return -2;
+  s->dup_hit = 0;
   if (!rec || !rec->ts[0]
       || htc_bt_key_parse(bt_key, bt_klen, &ms, target, sizeof target,
                           msgid, sizeof msgid) != 0 || !target[0])
@@ -1580,6 +1891,16 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   if (bol < 0)
     return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
 
+  /* A row this slice deleted in full already is a repeat.  One whose
+   * index alone went (the index-only form, its record unreadable) still
+   * loses its messages row and the rest now; its by_owner key, if gone
+   * already, is neither removed nor subtracted again. */
+  if (del_tagged(s, 'M', mk, (size_t)mkl, 1)) {
+    s->dup_hit = 1;
+    return 0;
+  }
+  bt_new = !del_tagged(s, 'T', bt_key, bt_klen, 1);
+  bo_new = !bo_seen(s, bo, (size_t)bol);
   slice_del(s, g.st.messages, mk, (size_t)mkl);
   if (msgid[0]) {
     slice_del(s, g.st.msgid, ik, (size_t)ikl);
@@ -1596,16 +1917,29 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
     slice_del(s, g.st.reply, rk1, (size_t)rk1l);
   if (rk2l > 0)
     slice_del(s, g.st.reply, rk2, (size_t)rk2l);
-  slice_del(s, g.st.by_time, bt_key, bt_klen);
-  slice_del(s, g.st.by_owner, bo, (size_t)bol);
+  if (bt_new)
+    slice_del(s, g.st.by_time, bt_key, bt_klen);
+  if (bo_new)
+    slice_del(s, g.st.by_owner, bo, (size_t)bol);
   if (s->broken)
     return -2;
 
-  if (counted && rec->bytes)
+  if (counted && bo_new && rec->bytes)
     slice_add_delta(s, bo, (size_t)bol, -(int64_t)rec->bytes);
   slice_touch(s, target, rec->ts);
-  s->counts[path]++;
-  s->rows++;
+  if (bt_new) {
+    s->counts[path]++;
+    s->rows++;
+  }
+  /* The redacted original.  Not for a purge: its REDACT row was written by
+   * the incarnation that lost, and the rows of that incarnation go by the
+   * purge's own walk.  An original from another incarnation stays, as every
+   * other action of the losing side is undone. */
+  if ((rec->flags & HTC_F_REDACT) && rec->redact_parent[0]
+      && path != HTRIM_PATH_INCARNATION
+      && delete_redacted_parent(s, path, target, rec->redact_parent) != 0)
+    return -2;
+  s->dup_hit = counted && !bo_new;   /* this row's bytes went already */
   return 0;
 }
 
@@ -2370,6 +2704,11 @@ static int backfill_row(struct htrim_slice *s, const void *k, size_t kl,
     return 0;
   }
 
+  /* Deleted already by this slice (a REDACT row's delete took it as the
+   * redacted original): the delete is staged, so nothing to index. */
+  if (del_tagged(s, 'T', bt, (size_t)btl, 0) || del_tagged(s, 'M', k, kl, 0))
+    return 0;
+
   /* Indexed (and counted) at store time: age-out owns it. */
   rc = db_exists(g.st.env, g.st.by_time, bt, (size_t)btl, NULL);
   if (rc == DB_OK)
@@ -2586,6 +2925,11 @@ static void drain_end(uint64_t cap)
 static int evict_entry_only(struct htrim_slice *s, const void *k, size_t kl,
                             uint32_t size)
 {
+  s->dup_hit = 0;
+  if (bo_seen(s, k, kl)) {
+    s->dup_hit = 1;              /* removed (and subtracted) already */
+    return 0;
+  }
   if (slice_del(s, g.st.by_owner, k, kl) < 0)
     return -1;
   if (size)
@@ -2633,16 +2977,26 @@ static int owner_walk(struct htrim_slice *s, const char *owner,
       parsed = htc_rec_parse(tv.base, tv.len, &rec) == 0;
     db_val_free(&tv);
     if (parsed && strcmp(rec.owner, owner) == 0) {
+      uint64_t casc = s->cascade_bytes, own = s->cascade_own_bytes;
       drc = htrim_delete_row(s, HTRIM_PATH_OWNER, bt, btl, &rec, 1);
-      size = rec.bytes;
+      size = s->dup_hit ? 0 : rec.bytes;
+      /* A redacted original went with it: another owner's frees only the
+       * total; this owner's own counts toward its step too. */
+      s->ev_freed += s->cascade_bytes - casc - (s->cascade_own_bytes - own);
+      size += (uint32_t)(s->cascade_own_bytes - own);
     } else if (grc == DB_OK && !parsed) {
       /* An unreadable record: the index-only delete takes its by_time
        * key; this entry goes alone. */
       drc = htrim_delete_row(s, HTRIM_PATH_OWNER, bt, btl, NULL, 1);
       if (drc == 0)
         drc = evict_entry_only(s, k, kl, size);
-    } else                       /* no by_time row, or another owner's */
+      if (s->dup_hit)
+        size = 0;
+    } else {                     /* no by_time row, or another owner's */
       drc = evict_entry_only(s, k, kl, size);
+      if (s->dup_hit)
+        size = 0;
+    }
     if (drc != 0) {
       db_iter_close(it);
       return -1;
@@ -2807,15 +3161,18 @@ static int oldest_walk(struct htrim_slice *s, enum htrim_path path, uint64_t nee
     struct htc_rec rec;
     uint64_t ms;
     int parsed = v && htc_rec_parse(v, vl, &rec) == 0;
+    uint64_t casc = s->cascade_bytes;
 
     if (htrim_delete_row(s, path, k, kl, parsed ? &rec : NULL, 1) != 0) {
       db_iter_close(it);
       return -1;
     }
-    if (parsed) {
+    if (parsed && !s->dup_hit) {
       freed += rec.bytes;
       s->ev_freed += rec.bytes;
     }
+    freed += s->cascade_bytes - casc;           /* a redacted original */
+    s->ev_freed += s->cascade_bytes - casc;
     ms = bt_key_ms(k, kl);
     if (ms > s->floor_ms)
       s->floor_ms = ms;
@@ -2903,7 +3260,14 @@ static int phase_evict(struct htrim_slice *s, const struct htrim_params *p)
       return 0;
     if (slice_staged(s) && htrim_slice_expired(s))
       return 0;
-    rc = evict_owner(s, st->owner, st->trim, 0);
+    {
+      /* A redacted original a REDACT row took with it earlier in this
+       * slice may have been this owner's: its share is reached sooner. */
+      uint64_t gone = slice_owner_freed(s, st->owner);
+      if (gone >= st->trim)
+        continue;
+      rc = evict_owner(s, st->owner, st->trim - gone, 0);
+    }
     if (rc || s->ev_zero[0] || s->ev_recount)
       return rc < 0 ? -1 : 0;
   }
