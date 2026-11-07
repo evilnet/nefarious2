@@ -4977,6 +4977,23 @@ mode_channel_registered_hook(struct Channel *chptr, struct Client *cptr,
   }
 }
 
+/** Whether a plaintext bouncer alias is in a channel.  An alias is on the
+ * member list but not in nonsslusers.
+ * @param[in] chptr Channel to check.
+ * @return Non-zero if a member is an alias with no TLS connection.
+ */
+static int channel_has_plaintext_alias(const struct Channel *chptr)
+{
+  struct Membership *member;
+
+  if (!chptr->aliases)
+    return 0;
+  for (member = chptr->members; member; member = member->next_member)
+    if (IsMemberAlias(member) && !IsSSL(member->user))
+      return 1;
+  return 0;
+}
+
 /**
  * This routine is intended to parse MODE or OPMODE commands and effect the
  * changes (or just build the bounce buffer).
@@ -5203,8 +5220,14 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
       case 'Z': /* deal with oper only */
         /* If they're not an SSL user, they can't +/- EXMODE_SSLONLY. */
         if (feature_bool(FEAT_CHMODE_Z_STRICT) && (state.dir == MODE_ADD) &&
-            (chptr->nonsslusers > 0) && MyUser(sptr))
-          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, chptr->chname, "Z", "Mode cannot be set while non-SSL members are present");
+            (chptr->nonsslusers > 0 || channel_has_plaintext_alias(chptr)) &&
+            MyUser(sptr))
+          /* An alias is hidden from NAMES and WHO, so say when one is the
+           * reason: the op sees only TLS users otherwise. */
+          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, chptr->chname, "Z",
+                     chptr->nonsslusers > 0
+                     ? "Mode cannot be set while non-SSL members are present"
+                     : "Mode cannot be set while a member has a non-SSL bouncer connection");
         else if ((feature_bool(FEAT_CHMODE_Z) && IsSSL(sptr)) ||
             IsOper(sptr) || IsServer(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);

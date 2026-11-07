@@ -1202,6 +1202,8 @@ struct BouncerSession *bounce_find_best_held(const char *account)
  * means the entire session is treated as non-TLS for +Z purposes.
  * @param[in] cptr Client to check (must be the primary).
  * @return 1 if any connection (primary or alias) lacks TLS, 0 otherwise.
+ * Local primaries only: for a remote primary cli_socket() is the server
+ * link's socket, so the primary check would read the link's TLS state.
  */
 int bounce_session_has_plaintext(struct Client *cptr)
 {
