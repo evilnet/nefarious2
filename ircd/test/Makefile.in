@@ -38,6 +38,7 @@ CMOCKA_TESTPROGS = \
 	ircd_cloaking_cmocka \
 	dbuf_cmocka \
 	ircd_crypt_cmocka \
+	ircd_crypt_pbkdf2_cmocka \
 	crule_cmocka \
 	history_cmocka \
 	history_trim_codec_cmocka \
@@ -95,6 +96,7 @@ DEP_SRC = \
 	ircd_cloaking_cmocka.c \
 	dbuf_cmocka.c \
 	ircd_crypt_cmocka.c \
+	ircd_crypt_pbkdf2_cmocka.c \
 	crule_cmocka.c \
 	history_cmocka.c \
 	history_trim_codec_cmocka.c \
@@ -218,6 +220,15 @@ dbuf_cmocka: $(DBUF_CMOCKA_OBJS)
 IRCD_CRYPT_CMOCKA_OBJS = ircd_crypt_cmocka.o test_stub.o ../ircd_string.o ../ircd_md5.o
 ircd_crypt_cmocka: $(IRCD_CRYPT_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_CRYPT_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ircd_crypt_pbkdf2 tests - base64 codec (sized decode, canary-guarded
+# overflow regression) and the PBKDF2-SHA256/SHA512 hash/verify round
+# trip.  Uses #include .c (like ircd_cloaking_cmocka.c) to reach the
+# static base64_decode()/base64_encode()/parse_pbkdf2_*_hash(); needs
+# SSL_LIBS for the real EVP_KDF/RAND_bytes calls in do_pbkdf2().
+IRCD_CRYPT_PBKDF2_CMOCKA_OBJS = ircd_crypt_pbkdf2_cmocka.o test_stub.o
+ircd_crypt_pbkdf2_cmocka: $(IRCD_CRYPT_PBKDF2_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_CRYPT_PBKDF2_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 
 # crule tests - connection rule parser (uses CR_DEBUG mode, includes crule.c)
 CRULE_CMOCKA_OBJS = crule_cmocka.o test_stub.o ../ircd_string.o

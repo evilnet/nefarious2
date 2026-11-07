@@ -91,24 +91,47 @@ static int base64_encode(const unsigned char *input, int input_len, char *output
   return j;
 }
 
-/** Decode base64 to binary
- * @param input Base64 input string
- * @param output Output buffer (must be at least (strlen(input) * 3 / 4) bytes)
- * @return Length of decoded data, or -1 on error
+/** Decode base64 to binary, writing no more than output_size bytes.
+ * @param input Base64 input string (unpadded, as produced by base64_encode())
+ * @param output Output buffer
+ * @param output_size Size of output buffer in bytes
+ * @return Length of decoded data, or -1 on error (invalid character,
+ *         a length that cannot be valid unpadded base64, or a decoded
+ *         length that would not fit in output_size)
  */
-static int base64_decode(const char *input, unsigned char *output)
+static int base64_decode(const char *input, unsigned char *output, size_t output_size)
 {
   int i, j, len;
   unsigned int triplet;
-  unsigned char c, d[4];
+  unsigned char d[4];
   const char *p;
+  size_t exact_len;
 
   len = strlen(input);
+
+  /* An unpadded base64 string's length is never 1 more than a multiple
+   * of 4: a single leftover character encodes fewer than 8 bits and
+   * cannot represent a whole trailing byte. */
+  if (len % 4 == 1) return -1;
+
+  /* Exact decoded length for unpadded input: each full 4-char group
+   * decodes to 3 bytes; a trailing 2-char group to 1 byte, a trailing
+   * 3-char group to 2 bytes. Reject up front if it would not fit --
+   * this also catches the over-long-config-string case before a
+   * single byte is written. */
+  exact_len = (len / 4) * 3;
+  if (len % 4 == 2) exact_len += 1;
+  else if (len % 4 == 3) exact_len += 2;
+
+  if (exact_len > output_size) return -1;
+
   for (i = 0, j = 0; i < len; ) {
-    /* Decode 4 base64 chars to 3 bytes */
-    for (int k = 0; k < 4; k++) {
+    int k, chars_in_group = (len - i < 4) ? (len - i) : 4;
+
+    /* Decode up to 4 base64 chars to at most 3 bytes */
+    for (k = 0; k < 4; k++) {
       if (i < len) {
-        c = input[i++];
+        unsigned char c = input[i++];
         p = strchr(base64_chars, c);
         if (p == NULL) return -1;
         d[k] = p - base64_chars;
@@ -118,14 +141,12 @@ static int base64_decode(const char *input, unsigned char *output)
     }
 
     triplet = (d[0] << 18) | (d[1] << 12) | (d[2] << 6) | d[3];
-    output[j++] = (triplet >> 16) & 0xff;
-    output[j++] = (triplet >> 8) & 0xff;
-    output[j++] = triplet & 0xff;
+    /* Write only the bytes this group actually encodes -- never the
+     * full 3 regardless of how many input characters were present. */
+    if (chars_in_group >= 2) output[j++] = (triplet >> 16) & 0xff;
+    if (chars_in_group >= 3) output[j++] = (triplet >> 8) & 0xff;
+    if (chars_in_group == 4) output[j++] = triplet & 0xff;
   }
-
-  /* Adjust for missing padding */
-  if (len % 4 == 2) j -= 2;
-  else if (len % 4 == 3) j -= 1;
 
   return j;
 }
@@ -200,6 +221,9 @@ static int parse_pbkdf2_hash(const char *hash, int *iterations,
                              unsigned char *salt, int *salt_len,
                              unsigned char *stored_hash, int *hash_len)
 {
+  /* Caller buffers (ircd_crypt_pbkdf2()'s salt_bytes / stored_hash) are
+   * sized exactly PBKDF2_SALT_LEN and PBKDF2_SHA256_LEN -- pass those
+   * as the sized decode's bound, never sizeof() on a pointer param. */
   const char *p;
   char iter_str[16];
   char salt_b64[64];
@@ -241,10 +265,10 @@ static int parse_pbkdf2_hash(const char *hash, int *iterations,
   hash_b64[i] = '\0';
 
   /* Decode salt and hash */
-  *salt_len = base64_decode(salt_b64, salt);
+  *salt_len = base64_decode(salt_b64, salt, PBKDF2_SALT_LEN);
   if (*salt_len < 0) return 0;
 
-  *hash_len = base64_decode(hash_b64, stored_hash);
+  *hash_len = base64_decode(hash_b64, stored_hash, PBKDF2_SHA256_LEN);
   if (*hash_len < 0) return 0;
 
   return 1;
@@ -303,11 +327,13 @@ static int parse_pbkdf2_sha512_hash(const char *hash, int *iterations,
     hash_b64[i] = *p;
   hash_b64[i] = '\0';
 
-  /* Decode salt and hash */
-  *salt_len = base64_decode(salt_b64, salt);
+  /* Decode salt and hash.  Caller buffers (ircd_crypt_pbkdf2_sha512()'s
+   * salt_bytes / stored_hash) are sized exactly PBKDF2_SALT_LEN and
+   * PBKDF2_SHA512_LEN. */
+  *salt_len = base64_decode(salt_b64, salt, PBKDF2_SALT_LEN);
   if (*salt_len < 0) return 0;
 
-  *hash_len = base64_decode(hash_b64, stored_hash);
+  *hash_len = base64_decode(hash_b64, stored_hash, PBKDF2_SHA512_LEN);
   if (*hash_len < 0) return 0;
 
   return 1;
