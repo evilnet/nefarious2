@@ -5970,7 +5970,9 @@ static void search_sel_unescape(char *v)
 /** The search walk shared by the local path and the S2S responder: BEFORE
  * from @a before_unix, the match hook chained behind @a base's presence
  * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
- * newest @a limit matches in @a *out, redaction placeholders dropped.
+ * newest @a limit matches in @a *out.  The hook keeps only message rows, so
+ * no REDACT row reaches redact_filter_messages here: the walk itself skips
+ * a redacted line, and it does not take a page slot.
  * @a *truncated is set when the scan budget cut the window short. */
 static int search_walk(const char *lookup_target, const char *before_unix,
                        int limit, struct SearchMatch *sm, int *budget,
@@ -5991,6 +5993,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   filter.type_mask = base ? base->type_mask : 0;
   filter.veto = base ? base->veto : NULL;
   filter.veto_ctx = base ? base->veto_ctx : NULL;
+  filter.skip_redacted = 1;
   filter.scan_max = *budget;
 
   count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
@@ -5998,9 +6001,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   *budget -= filter.scanned;
   if (truncated)
     *truncated = filter.truncated;
-  if (count < 0)
-    return -1;
-  return redact_filter_messages(out, count);
+  return count;
 }
 
 static int search_one_target(struct Client *sptr, const char *lookup_target,
@@ -6099,8 +6100,9 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 static void complete_search_fed(struct FedRequest *req)
 {
   struct Client *client;
-  struct HistoryMessage *merged, *m, **all;
+  struct HistoryMessage *merged, *m, **pp, **all;
   int total = 0, k, keep;
+  int recheck_steps = 0;
 
   if (!req || req->response_sent)
     return;
@@ -6111,8 +6113,25 @@ static void complete_search_fed(struct FedRequest *req)
   /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
    * the union is sorted and trimmed below. */
   merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
-  for (m = merged; m; m = m->next)
-    total++;
+  /* Hide what this server knows is deleted: a REDACT can land while the
+   * responders are awaited, and a store that missed one still sends the
+   * line.  A server with no store cannot tell (-1), so that keeps the row.
+   * Anyone can add children to a line, so the child reads share one budget
+   * for the whole union; a row it runs out on (-2) is dropped, which errs
+   * toward hiding, and the page may come back short. */
+  for (pp = &merged; (m = *pp); ) {
+    int rv = history_message_is_redacted_budget(req->target, m->msgid,
+                                                &recheck_steps,
+                                                HISTORY_FILTER_SCAN_MAX);
+    if (rv == 1 || rv == -2) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+    } else {
+      total++;
+      pp = &m->next;
+    }
+  }
   if (total == 0) {
     search_send(client, NULL, NULL, req->label[0] ? req->label : NULL);
     return;
@@ -7405,8 +7424,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * newest `limit` matches.  `text` is a case-insensitive substring, no
  * regular expressions (the spec's ReDoS note).  The presence hook rides
  * in front of the match so a member who was not there does not find it,
- * and the reply side runs the same redaction and presence filters as a
- * CHATHISTORY page.  There is no index: search is bounded by a scan
+ * the walk skips a redacted line (search_walk), and the reply side runs the
+ * same presence filter as a CHATHISTORY page.  There is no index: search is bounded by a scan
  * budget of SEARCH_SCAN_MAX raw rows per request, spent across the
  * channels searched when `in` is absent; a client wanting more asks
  * narrower windows.  Without `in`, the channels the requester is in are

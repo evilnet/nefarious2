@@ -63,6 +63,13 @@ struct HistoryRowFilter {
    * typing-only TAGMSG rows that should never consume a page slot. */
   int (*veto)(const struct HistoryMessage *msg, void *veto_ctx);
   void *veto_ctx;
+  /** Skip a row that has a REDACT child, read through the walk's own
+   * snapshot.  For a walk whose rows reach the client without their
+   * context children, so the reply-side redaction filter cannot see them
+   * (SEARCH).  One walk of the row's reply-index children per row the filter
+   * would keep, each child counted against scan_max; a failed lookup, or a
+   * walk scan_max cuts short, skips the row, since it may be a deleted line. */
+  int skip_redacted;
   int scan_max;    /**< raw rows examined before giving up; 0 = default */
   int scanned;     /**< out: raw rows examined (kept + skipped) */
   int truncated;   /**< out: scan_max hit -- page may be incomplete */
@@ -498,6 +505,13 @@ extern int history_redact_message(const char *target, const char *msgid);
  * REDACT context row reference it?
  * @return 1 if redacted, 0 if not, -1 on error. */
 extern int history_message_is_redacted(const char *target, const char *msgid);
+/** history_message_is_redacted with a step budget: each reply-index child
+ * read adds one to *@a steps, and none is read once it reaches @a max_steps.
+ * @return 1 if redacted, 0 if not, -1 on error (no store, a failed read),
+ * -2 when the budget ran out before an answer (even after a failed read). */
+extern int history_message_is_redacted_budget(const char *target,
+                                              const char *msgid,
+                                              int *steps, int max_steps);
 /* Redaction catch-up index (design B; redact_index.h): rows since @a since_ms
  * in time order, at most @a limit (0 = all); *truncated set when cut short. */
 struct rdx_val;
