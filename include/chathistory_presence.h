@@ -203,7 +203,13 @@ extern int presence_filter_messages(struct Client *requestor,
 /* Strict-presence hardening (2026-08-30 audit wave) */
 extern void presence_touch_last_alive(void);
 extern void presence_backfill_now(void);
+/** Start (or restart) the link-time presence sync to a direct peer at its
+ * END_OF_BURST: every stored account window goes out as PN lines, paced --
+ * FEAT_CHATHISTORY_PRESENCE_SYNC_SLICE lines a second, held while the
+ * link's sendq is over half its limit -- with no line ceiling. */
 extern void presence_burst_sync(struct Client *cptr);
+/** A server is leaving (exit_one_client): drop the sync to it, if any. */
+extern void presence_burst_sync_link_gone(struct Client *link);
 extern void presence_apply_close(const char *anchor, int anchor_is_session,
                                  const char *channel, int64_t start,
                                  int64_t end);

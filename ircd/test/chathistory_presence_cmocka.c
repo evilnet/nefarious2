@@ -65,6 +65,7 @@
 #include "history.h"
 #include "chathistory_presence.h"
 #include "crdt_hlc.h"
+#include "ircd_events.h"
 
 /* ------------------------------------------------------------------ */
 /* Link-time stubs for chathistory_presence.c's other dependencies.   */
@@ -293,6 +294,43 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
                    struct Client *to, const char *pattern, ...)
 {
   (void)from; (void)cmd; (void)tok; (void)to; (void)pattern;
+}
+
+/* The paced link-time sync (presence_burst_sync, W5 Task 7): it returns
+ * before any of these while presence_persistence_ready stays 0, and
+ * presence_shutdown's cancel-all finds no sync to cancel, but the
+ * standalone link needs the symbols. */
+int db_iter_seek(struct db_iter *it, const void *key, size_t klen)
+{
+  (void)it; (void)key; (void)klen;
+  return DB_NOTFOUND;
+}
+struct Client *FindNServer(const char *numeric)
+{
+  (void)numeric;
+  return NULL;
+}
+unsigned int get_sendq(struct Client *cptr)
+{
+  (void)cptr;
+  return 0;
+}
+struct Timer *timer_init(struct Timer *timer)
+{
+  return timer;
+}
+void timer_add(struct Timer *timer, EventCallBack call, void *data,
+               enum TimerType type, time_t value)
+{
+  (void)timer; (void)call; (void)data; (void)type; (void)value;
+}
+void timer_del(struct Timer *timer)
+{
+  (void)timer;
+}
+void timer_chg(struct Timer *timer, enum TimerType type, time_t value)
+{
+  (void)timer; (void)type; (void)value;
 }
 
 /* ------------------------------------------------------------------ */

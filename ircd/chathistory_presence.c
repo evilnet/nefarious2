@@ -22,6 +22,7 @@
 #include "chathistory_presence.h"
 
 #include "channel.h"
+#include "class.h"
 #include "client.h"
 #include "crdt_hlc.h"
 #include "hash.h"
@@ -34,9 +35,12 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
+#include "ircd_events.h"
 #include "metadata.h"
 #include "msg.h"
+#include "numnicks.h"
 #include "send.h"
+#include "struct.h"
 #include "s_debug.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -595,9 +599,14 @@ int presence_init(void)
   return 0;
 }
 
+static void presence_sync_cancel_all(void);  /* the link-time sync, below */
+
 void presence_shutdown(void)
 {
   unsigned int i;
+  /* Link-time syncs read the presence CF from a timer: stop them before
+   * the CF goes. */
+  presence_sync_cancel_all();
   /* Free in-memory session entries. */
   for (i = 0; i < PRESENCE_HASH_SIZE; i++) {
     struct presence_session_entry *e = session_buckets[i];
@@ -1066,98 +1075,343 @@ void presence_anchor_transfer(struct Client *cptr,
   }
 }
 
-/** Link-time catch-up (#6 step 2): send this server's account-anchored
- * closed intervals to a newly-linked peer as PN lines.  Windows that
- * closed while the peer was unreachable (netsplit, downtime, a brand
- * new server) were never observed there and their PN broadcasts were
- * lost -- without this sync the steady-state flood only re-covers what
- * per-server observation already records.  Union application on the
- * receiver makes re-sends across repeated relinks harmless.
- * Bounded by the per-record FIFO cap and the retention sweep; a hard
- * line ceiling guards pathological stores. */
-void presence_burst_sync(struct Client *cptr)
+/* ---------------------------------------------------------------- */
+/* Link-time catch-up (#6 step 2), paced by the link (W5 Task 7)     */
+/* ---------------------------------------------------------------- */
+
+/** One direct peer's link-time presence sync, while it runs.
+ *
+ * The sync sends the peer every account-anchored record this server
+ * stores, as PN lines, from a timer: each tick sends whole records until
+ * FEAT_CHATHISTORY_PRESENCE_SYNC_SLICE lines are out, or stops early while
+ * the link's sendq is over half its limit (the W4 metadata pull answered at
+ * the same END_OF_BURST can queue about 1 MB on it), and re-arms for a
+ * second later; the next tick resumes after the last key sent.  The 1 s
+ * pacing bounds both the main loop and the link: 2000 lines a second at
+ * the default.  Records are read fresh each tick: a record that changes
+ * behind the cursor reached the peer live (the peer is linked by then: a
+ * close floods PN, a PN applied here is relayed on by ms_presencesync, a
+ * join or part is observed there), so nothing is missed.
+ *
+ * Lifetime.  The entry is on #presence_syncs from presence_burst_sync()
+ * until it is retired, and freed in exactly one place: its timer's
+ * ET_DESTROY (the timer is embedded in it, as m_rename.c's pending renames
+ * do).  Every retirement unlinks it first and sets @c retired:
+ *  - at a tick, when the sync is done, or its link is gone or changed, or
+ *    the store went away: the tick does not re-arm, and timer_run()
+ *    destroys the timer once the tick returns;
+ *  - from outside a tick -- the link exits (presence_burst_sync_link_gone,
+ *    from exit_one_client), a new sync for the same peer replaces it, the
+ *    store shuts down (presence_shutdown): presence_sync_cancel()'s
+ *    timer_del(), whose ET_DESTROY frees it before timer_del() returns.  A
+ *    cancel that ever ran inside the entry's own tick only drops the
+ *    timer's re-add (ircd_events.c timer_del), and @c retired keeps the
+ *    tick from re-arming: the entry is freed after the tick returns.
+ * @c peer is compared, never trusted: a tick dereferences it only after
+ * FindNServer(yxx) returned that same pointer (a live server), with the
+ * same link timestamp.  Client structs are recycled from a free list, so
+ * the address alone could name the next connection. */
+struct presence_sync {
+  struct presence_sync *next;
+  struct Client *peer;            /**< The direct peer (see above). */
+  char yxx[4];                    /**< Its server numeric (as cli_yxx). */
+  char name[HOSTLEN + 1];         /**< Its name, for the log lines. */
+  time_t link_ts;                 /**< cli_serv(peer)->timestamp at the start. */
+  char last_key[ACCOUNTLEN + 1 + CHANNELLEN + 1]; /**< The last key sent
+                                     (sized like build_acct_key's buffers). */
+  size_t last_klen;               /**< Its length; 0 = start at the first key. */
+  unsigned int sent;              /**< PN lines sent so far. */
+  unsigned int slices;            /**< Ticks run so far. */
+  int timer_live;                 /**< The timer is not yet deleted or done. */
+  int retired;                    /**< Off the list: a running tick must not re-arm. */
+  struct Timer timer;             /**< The slice timer (frees the entry). */
+};
+
+/** Every running link-time sync, one per direct peer at most. */
+static struct presence_sync *presence_syncs = NULL;
+
+/** Take @a e off #presence_syncs (idempotent) and mark it retired. */
+static void presence_sync_unlink(struct presence_sync *e)
 {
-  struct db_env *env;
-  struct db_iter *it;
-  unsigned int sent = 0;
-  const unsigned int line_ceiling = 20000;
+  struct presence_sync **pp;
 
-  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
-    return;
-  if (!presence_persistence_ready || !presence_cf)
-    return;
-  env = metadata_get_env();
-  if (!env)
-    return;
-
-  it = db_iter_open(env, presence_cf, NULL);
-  if (!it)
-    return;
-  if (db_iter_seek_first(it) == DB_OK) {
-    while (db_iter_valid(it) && sent < line_ceiling) {
-      size_t klen, vlen;
-      const void *kptr = db_iter_key(it, &klen);
-      const void *vptr = db_iter_value(it, &vlen);
-      struct presence_record r;
-
-      /* Key: "<account>\0<channel>"; the meta row starts with NUL and
-       * its value size differs from the record -- both checks skip it. */
-      if (kptr && klen > 2 && ((const char *)kptr)[0] != '\0'
-          && vptr && vlen == sizeof(r)) {
-        const char *account = (const char *)kptr;
-        size_t alen = strnlen(account, klen);
-        if (alen < klen) {
-          const char *channel = account + alen + 1;
-          size_t clen = klen - alen - 1;
-          char chanbuf[CHANNELLEN + 1];
-          uint8_t k;
-          if (clen > 0 && clen <= CHANNELLEN) {
-            memcpy(chanbuf, channel, clen);
-            chanbuf[clen] = '\0';
-            memcpy(&r, vptr, sizeof(r));
-            record_norm_ms(&r);
-            for (k = 0; k < r.count && sent < line_ceiling; k++) {
-              char sb[24], eb[24];
-              snprintf(sb, sizeof(sb), "%lld", (long long)r.intervals[k].start);
-              snprintf(eb, sizeof(eb), "%lld", (long long)r.intervals[k].end);
-              sendcmdto_one(&me, CMD_PRESENCE, cptr, "%s %s %s %s",
-                            account, chanbuf, sb, eb);
-              sent++;
-            }
-            /* An interval still OPEN spans the split the peer lost: send
-             * it as [open, now] so the peer unions it; the real close
-             * later extends the same window.  Closed-only sync left the
-             * peer with a permanent hole across the split (re-review
-             * 2026-09-07 R17). */
-            if (r.open_since != 0 && sent < line_ceiling) {
-              char sb[24], eb[24];
-              int64_t now = presence_clock_time();
-              if (now < r.open_since)
-                now = r.open_since;
-              snprintf(sb, sizeof(sb), "%lld", (long long)r.open_since);
-              snprintf(eb, sizeof(eb), "%lld", (long long)now);
-              sendcmdto_one(&me, CMD_PRESENCE, cptr, "%s %s %s %s",
-                            account, chanbuf, sb, eb);
-              sent++;
-            }
-          }
-        }
-      }
-      if (db_iter_next(it) != DB_OK)
-        break;
+  for (pp = &presence_syncs; *pp; pp = &(*pp)->next) {
+    if (*pp == e) {
+      *pp = e->next;
+      break;
     }
   }
+  e->next = NULL;
+  e->retired = 1;
+}
+
+/** Retire @a e from outside its tick: unlink it and delete its timer,
+ * which frees it (see struct presence_sync).  @a e is gone on return. */
+static void presence_sync_cancel(struct presence_sync *e)
+{
+  presence_sync_unlink(e);
+  if (e->timer_live) {
+    e->timer_live = 0;
+    timer_del(&e->timer);   /* -> ET_DESTROY -> MyFree(e), synchronously */
+  }
+}
+
+/** Strict presence is on and its account store is open. */
+static int presence_sync_store_ok(void)
+{
+  return feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
+         && presence_persistence_ready && presence_cf
+         && metadata_get_env();
+}
+
+/** @a e's link is still the one its sync started on. */
+static int presence_sync_link_ok(const struct presence_sync *e)
+{
+  struct Client *peer = FindNServer(e->yxx);
+
+  if (!peer || peer != e->peer)
+    return 0;
+  /* peer is a live server from here on. */
+  return cli_serv(peer) && cli_serv(peer)->timestamp == e->link_ts
+         && MyConnect(peer) && !IsDead(peer) && IsIRCv3Aware(peer);
+}
+
+/** Lines per slice: FEAT_CHATHISTORY_PRESENCE_SYNC_SLICE, at least 1 (a
+ * slice of 0 would never finish; "unlimited" was the old one-pass walk). */
+static unsigned int presence_sync_budget(void)
+{
+  int v = feature_int(FEAT_CHATHISTORY_PRESENCE_SYNC_SLICE);
+  return v < 1 ? 1u : (unsigned int)v;
+}
+
+/** Send one stored record to @a peer as PN lines: its closed intervals,
+ * then an interval still open as [open, now].  Returns the lines sent (0
+ * for the meta row and anything else that is not a record). */
+static unsigned int presence_sync_record(struct Client *peer,
+                                         const char *kptr, size_t klen,
+                                         const void *vptr, size_t vlen)
+{
+  struct presence_record r;
+  char chanbuf[CHANNELLEN + 1];
+  char sb[24], eb[24];
+  size_t alen, clen;
+  unsigned int n = 0;
+  uint8_t k;
+
+  /* Key: "<account>\0<channel>"; the meta row starts with NUL and its
+   * value size differs from the record -- both checks skip it. */
+  if (klen <= 2 || kptr[0] == '\0' || !vptr || vlen != sizeof(r))
+    return 0;
+  alen = strnlen(kptr, klen);
+  if (alen >= klen)
+    return 0;
+  clen = klen - alen - 1;
+  if (clen == 0 || clen > CHANNELLEN)
+    return 0;
+  memcpy(chanbuf, kptr + alen + 1, clen);
+  chanbuf[clen] = '\0';
+  memcpy(&r, vptr, sizeof(r));
+  record_norm_ms(&r);
+
+  for (k = 0; k < r.count; k++) {
+    snprintf(sb, sizeof(sb), "%lld", (long long)r.intervals[k].start);
+    snprintf(eb, sizeof(eb), "%lld", (long long)r.intervals[k].end);
+    sendcmdto_one(&me, CMD_PRESENCE, peer, "%s %s %s %s",
+                  kptr, chanbuf, sb, eb);
+    n++;
+  }
+  /* An interval still OPEN spans the split the peer lost: send it as
+   * [open, now] so the peer unions it; the real close later extends the
+   * same window.  Closed-only sync left the peer with a permanent hole
+   * across the split (re-review 2026-09-07 R17). */
+  if (r.open_since != 0) {
+    int64_t now = presence_clock_time();
+    if (now < r.open_since)
+      now = r.open_since;
+    snprintf(sb, sizeof(sb), "%lld", (long long)r.open_since);
+    snprintf(eb, sizeof(eb), "%lld", (long long)now);
+    sendcmdto_one(&me, CMD_PRESENCE, peer, "%s %s %s %s",
+                  kptr, chanbuf, sb, eb);
+    n++;
+  }
+  return n;
+}
+
+/** Run one slice of @a e's sync (its link checked by the caller).
+ * @return 1 when records remain (the budget or the sendq stopped it), 0 at
+ * the end of the store, -1 when no iterator could be opened. */
+static int presence_sync_slice(struct presence_sync *e)
+{
+  struct Client *peer = e->peer;
+  unsigned int budget = presence_sync_budget();
+  unsigned int room = get_sendq(peer) / 2;
+  unsigned int spent = 0;
+  struct db_iter *it;
+  int more = 0;
+
+  it = db_iter_open(metadata_get_env(), presence_cf, NULL);
+  if (!it)
+    return -1;
+
+  if (e->last_klen == 0)
+    db_iter_seek_first(it);
+  else {
+    /* Resume after the last key sent; it may be gone (retention sweep),
+     * and the seek then lands on the next key, which is not sent yet. */
+    db_iter_seek(it, e->last_key, e->last_klen);
+    if (db_iter_valid(it)) {
+      size_t klen;
+      const void *kptr = db_iter_key(it, &klen);
+      if (kptr && klen == e->last_klen
+          && 0 == memcmp(kptr, e->last_key, klen))
+        db_iter_next(it);
+    }
+  }
+
+  for (; db_iter_valid(it); db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kptr, *vptr;
+
+    /* Whole records: the budget and the sendq are checked between them. */
+    if (spent >= budget || IsDead(peer)
+        || MsgQLength(&cli_sendQ(peer)) > room) {
+      more = 1;
+      break;
+    }
+    kptr = db_iter_key(it, &klen);
+    vptr = db_iter_value(it, &vlen);
+    /* No key builder writes a key longer than the cursor holds; one that
+     * could not be resumed after is skipped, not sent. */
+    if (!kptr || klen == 0 || klen > sizeof(e->last_key))
+      continue;
+    spent += presence_sync_record(peer, (const char *)kptr, klen, vptr, vlen);
+    memcpy(e->last_key, kptr, klen);
+    e->last_klen = klen;
+  }
   db_iter_close(it);
-  if (sent >= line_ceiling)
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "presence: burst sync to %s hit the %u-line ceiling; accounts "
-              "sorting after it were NOT synced (their split windows stay "
-              "hidden on that peer until they part and rejoin)",
-              cli_name(cptr), line_ceiling);
-  if (sent)
+  e->sent += spent;
+  return more;
+}
+
+/** The slice timer: one slice per expiry, then re-arm or retire. */
+static void presence_sync_tick(struct Event *ev)
+{
+  struct presence_sync *e;
+  int more;
+
+  assert(0 != ev_timer(ev));
+  assert(0 != t_data(ev_timer(ev)));
+  e = (struct presence_sync *)t_data(ev_timer(ev));
+
+  if (ev_type(ev) == ET_DESTROY) {
+    /* The only place an entry is freed (see struct presence_sync); every
+     * path here unlinked it already. */
+    presence_sync_unlink(e);
+    MyFree(e);
+    return;
+  }
+  if (ev_type(ev) != ET_EXPIRE || e->retired)
+    return;
+
+  if (!presence_sync_link_ok(e) || !presence_sync_store_ok()) {
     log_write(LS_SYSTEM, L_INFO, 0,
-              "presence: burst-synced %u interval(s) to %s",
-              sent, cli_name(cptr));
+              "presence: burst sync to %s dropped after %u interval(s) in "
+              "%u slice(s) (the link is gone or changed, or strict presence "
+              "is off)", e->name, e->sent, e->slices);
+    presence_sync_unlink(e);
+    e->timer_live = 0;      /* not re-armed: timer_run() destroys it */
+    return;
+  }
+
+  e->slices++;
+  more = presence_sync_slice(e);
+  if (e->retired)           /* cancelled while the slice ran */
+    return;
+  if (more > 0) {
+    /* timer_chg, not timer_add: inside its own expiry the timer is
+     * re-queued when the callback returns (bouncer_session.c's dirty
+     * persist timer does the same). */
+    timer_chg(&e->timer, TT_RELATIVE, 1);
+    return;
+  }
+
+  if (more < 0)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "presence: burst sync to %s stopped after %u interval(s) in "
+              "%u slice(s): cannot open the presence store's iterator",
+              e->name, e->sent, e->slices);
+  else if (e->sent)
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence: burst-synced %u interval(s) to %s in %u slice(s)",
+              e->sent, e->name, e->slices);
+  presence_sync_unlink(e);
+  e->timer_live = 0;        /* not re-armed: timer_run() destroys it */
+}
+
+/** Link-time catch-up (#6 step 2): send this server's account-anchored
+ * presence windows to a newly-linked direct peer as PN lines.  Windows
+ * that closed while the peer was unreachable (netsplit, downtime, a brand
+ * new server) were never observed there and their PN broadcasts were lost
+ * -- without this sync the steady-state flood only re-covers what
+ * per-server observation already records.  Union application on the
+ * receiver makes re-sends across repeated relinks harmless.
+ *
+ * Starts this peer's paced sync (see struct presence_sync), replacing one
+ * already running for it.  No line ceiling: the old one-pass walk stopped
+ * at 20 000 lines, and accounts that sorted after the cut were never
+ * synced.  The first slice runs at the next timer pass, after what this
+ * END_OF_BURST's other catch-ups queue on the link. */
+void presence_burst_sync(struct Client *cptr)
+{
+  struct presence_sync *e, *next;
+
+  if (!cptr || !cli_serv(cptr) || !presence_sync_store_ok())
+    return;
+
+  for (e = presence_syncs; e; e = next) {
+    next = e->next;
+    if (e->peer == cptr || 0 == strcmp(e->yxx, cli_yxx(cptr))) {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "presence: burst sync to %s restarts (%u interval(s) in "
+                "%u slice(s) sent before)", e->name, e->sent, e->slices);
+      presence_sync_cancel(e);
+    }
+  }
+
+  e = (struct presence_sync *)MyCalloc(1, sizeof(*e));
+  e->peer = cptr;
+  ircd_strncpy(e->yxx, cli_yxx(cptr), sizeof(e->yxx));
+  ircd_strncpy(e->name, cli_name(cptr), sizeof(e->name));
+  e->link_ts = cli_serv(cptr)->timestamp;
+  e->next = presence_syncs;
+  presence_syncs = e;
+  e->timer_live = 1;
+  timer_add(timer_init(&e->timer), presence_sync_tick, (void *)e,
+            TT_RELATIVE, 0);
+}
+
+/** A server is leaving (exit_one_client): drop the sync to it, if it is a
+ * direct peer with one running. */
+void presence_burst_sync_link_gone(struct Client *link)
+{
+  struct presence_sync *e, *next;
+
+  for (e = presence_syncs; e; e = next) {
+    next = e->next;           /* the cancel frees e */
+    if (e->peer != link)
+      continue;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence: burst sync to %s dropped after %u interval(s) in "
+              "%u slice(s) (the link exited)", e->name, e->sent, e->slices);
+    presence_sync_cancel(e);
+  }
+}
+
+/** Drop every running sync (the store is closing). */
+static void presence_sync_cancel_all(void)
+{
+  while (presence_syncs)
+    presence_sync_cancel(presence_syncs);
 }
 
 void presence_purge_session(const char *session_id)

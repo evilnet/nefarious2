@@ -406,6 +406,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * now, the clients behind it gone (W3 Task 16 fix round 5). */
     bounce_away_merge_link_gone(bcptr);
     chathistory_fed_cleanup_link(bcptr);
+    /* The paced link-time presence sync to it, if one runs (W5 Task 7). */
+    presence_burst_sync_link_gone(bcptr);
   }
   if (IsUser(bcptr)) {
     /* (A client whose registration was deferred leaves the pending queue
