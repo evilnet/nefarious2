@@ -114,7 +114,8 @@
  * under the one msgid and time minted at the origin, so a federated merge
  * -- which deduplicates by msgid -- shows the event once.  The row is what
  * this server's members saw live: the source they saw (&his for a server)
- * and the victim as resolved here.
+ * and the victim as resolved here.  A KICK the channel was not shown (of a
+ * +D member not yet shown: m_kick, ms_kick) is not stored at all.
  *
  * @param[in] src Who kicked, as the members saw it (&his for a server).
  * @param[in] chptr Channel; its live incarnation is stamped on the row.
@@ -316,9 +317,12 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     sendcmdto_set_client_msgid(NULL);
 
 #ifdef USE_ROCKSDB
-    /* Store KICK event in history — same msgid as broadcast */
-    channel_store_kick(sptr, chptr, cli_name(who), comment,
-                       kick_msgid[0] ? kick_msgid : NULL, kick_ms);
+    /* Store KICK event in history — same msgid as broadcast.  History is
+     * what the channel saw live: a +D member it never showed was kicked
+     * in front of the kicker and the victim only, so no row. */
+    if (!IsDelayedJoin(member))
+      channel_store_kick(sptr, chptr, cli_name(who), comment,
+                         kick_msgid[0] ? kick_msgid : NULL, kick_ms);
 #endif
     /* The victim's presence interval closes at the kick's time, not at
      * whenever make_zombie's removal happens to run (P2). */
@@ -463,10 +467,12 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
 #ifdef USE_ROCKSDB
       /* Our members saw it: the row, under the origin's msgid and time,
-       * as they saw it (a server's KICK from the hidden server). */
-      channel_store_kick(IsServer(sptr) ? &his : sptr, chptr, cli_name(who),
-                         comment, kick_msgid[0] ? kick_msgid : NULL,
-                         kick_time_ms);
+       * as they saw it (a server's KICK from the hidden server).  Not for
+       * a +D member the channel never showed: only the victim was told. */
+      if (!IsDelayedJoin(member))
+        channel_store_kick(IsServer(sptr) ? &his : sptr, chptr, cli_name(who),
+                           comment, kick_msgid[0] ? kick_msgid : NULL,
+                           kick_time_ms);
 #endif
       presence_set_event_time(kick_msgid[0] ? presence_event_time(kick_msgid, kick_time_ms) : 0);
       make_zombie(member, who, cptr, sptr, chptr);

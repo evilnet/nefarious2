@@ -192,7 +192,8 @@ netride_kicks(struct Client *victim, int check_modes, int check_exmodes)
 }
 
 /** A Net Rider KICK ms_burst() made, kept until the channel has taken the
- * BURST's TS: its row is stored then, under the surviving incarnation. */
+ * BURST's TS and modes: its row is stored then, under the surviving
+ * incarnation, unless the merged channel is +P. */
 struct NetRiderKick {
   char nick[NICKLEN + 1];       /**< The kicked member, as the KICK named it. */
   char msgid[64];               /**< The KICK's msgid ("" with msgids off). */
@@ -379,9 +380,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          * Each KICK is one event, minted here: one msgid and one time for
          * the S2S KICK (@A, so every receiver delivers and stores it under
          * them), our members' line, the presence close and our row.  The
-         * row waits until the channel has taken the BURST's TS (below):
-         * stored now it would carry the losing incarnation and be pruned
-         * with it. */
+         * row waits until the channel has taken the BURST's TS and modes
+         * (below): stored now it would carry the losing incarnation and be
+         * pruned with it, and miss a +P the BURST brings. */
         member = chptr->members;
         while (member)
         {
@@ -454,16 +455,6 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       history_purge_incarnation(chptr->chname, chptr->creationtime);
 #endif
     chptr->creationtime = timestamp;
-#ifdef USE_ROCKSDB
-    {
-      /* The Net Rider KICKs above, now under the surviving incarnation. */
-      int nr;
-      for (nr = 0; nr < nriders; nr++)
-        channel_store_kick(&his, chptr, riders[nr].nick, "Net Rider",
-                           riders[nr].msgid[0] ? riders[nr].msgid : NULL,
-                           riders[nr].ms);
-    }
-#endif
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,
 		 MODEBUF_DEST_CHANNEL | MODEBUF_DEST_NOKEY);
@@ -498,7 +489,6 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     parse_flags |= MODE_PARSE_SET; /* set new modes */
   }
-  MyFree(riders);
 
   param = 3; /* parse parameters */
   while (param < parc) {
@@ -775,6 +765,21 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       break;
     } /* switch (*parv[param]) */
   } /* while (param < parc) */
+
+  /* The Net Rider KICKs (made only when our TS lost), stored now: under
+   * the surviving incarnation, taken above, and after the BURST's modes
+   * are applied, so channel_store_kick() sees the winning side's +P too
+   * (our exmodes are kept at a TS loss, and the BURST adds its own). */
+#ifdef USE_ROCKSDB
+  {
+    int nr;
+    for (nr = 0; nr < nriders; nr++)
+      channel_store_kick(&his, chptr, riders[nr].nick, "Net Rider",
+                         riders[nr].msgid[0] ? riders[nr].msgid : NULL,
+                         riders[nr].ms);
+  }
+#endif
+  MyFree(riders);
 
   nickstr[nickpos] = '\0';
   nickstro[nickposo] = '\0';
