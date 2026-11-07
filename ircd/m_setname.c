@@ -130,7 +130,13 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * BX U (bounce_emit_alias_update) below syncs other servers'
    * aliases. Local sibling aliases share the cli_info pointer indirectly
    * via realname propagation, but we re-stamp them in case any code
-   * reads cli_info(alias) directly. */
+   * reads cli_info(alias) directly.
+   *
+   * cptr stays the connection that typed it (cptr == sptr on entry): the
+   * FAIL, the echo and the S2S source are its.  Sourced as the primary,
+   * a remote primary's SETNAME went toward the primary's own server,
+   * which dropped it as a fake direction; the echo went to the primary
+   * (with it remote, nowhere) instead of the device that sent it. */
   if (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
     sptr = cli_alias_primary(sptr);
 
@@ -140,8 +146,8 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (strlen(newname) > REALLEN) {
     if (feature_bool(FEAT_SETNAME_STRICT_LENGTH)) {
       /* IRCv3 spec: reject with FAIL if too long */
-      if (CapActive(sptr, CAP_STANDARDREPLIES))
-        send_fail(sptr, "SETNAME", "INVALID_REALNAME", NULL, "Realname too long");
+      if (CapActive(cptr, CAP_STANDARDREPLIES))
+        send_fail(cptr, "SETNAME", "INVALID_REALNAME", NULL, "Realname too long");
       return 0;
     }
     /* Legacy behavior: truncate */
@@ -170,10 +176,14 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       }
     }
 
-    /* Propagate to other servers (with S2S tags) */
+    /* Propagate to other servers (with S2S tags).  Sourced as the typing
+     * connection: for an alias, sendcmdto_serv_butone_v3 sends the
+     * alias-sourced line toward the primary's server (which knows the
+     * alias by BX C and files it under the primary, ms_setname) and the
+     * primary-sourced one everywhere else (#10). */
     if (sn_msgid[0])
       sendcmdto_want_s2s_tags(1);
-    sendcmdto_serv_butone_v3(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+    sendcmdto_serv_butone_v3(cptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
     /* Update bouncer aliases with new realname */
     bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
@@ -182,12 +192,15 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (sn_msgid[0])
       sendcmdto_set_client_msgid(sn_msgid);
 
-    /* Echo SETNAME back to the sender per IRCv3 spec */
-    if (CapOwnHas(sptr, CAP_SETNAME))
-      sendcmdto_one(sptr, CMD_SETNAME, sptr, ":%s", cli_info(sptr));
+    /* Echo SETNAME back to the sender per IRCv3 spec: the connection
+     * that typed it, from the session's identity */
+    if (CapOwnHas(cptr, CAP_SETNAME))
+      sendcmdto_one(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
-    /* Notify channel members with setname capability (excluding sender who already got echo) */
-    sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
+    /* Notify channel members with setname capability (excluding the
+     * sender, who already got the echo).  A local primary is told when
+     * another device of its session typed it. */
+    sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, cptr,
                                            CAP_SETNAME, CAP_NONE,
                                            ":%s", cli_info(sptr));
 
@@ -208,6 +221,7 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char *newname;
+  struct Client *origin = sptr;   /* the connection that sent it */
 
   assert(0 != cptr);
   assert(0 != sptr);
@@ -261,10 +275,19 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       }
     }
 
-    /* Propagate to other servers (with S2S tags) */
+    /* Propagate to other servers (with S2S tags), sourced as the line
+     * came: the alias when a device sent it.  The sender splits it
+     * (invariant #10): the alias-sourced line goes toward the primary's
+     * server, the primary-sourced one everywhere else.  Sourced as the
+     * primary, a server between the device and the primary (a third fork
+     * server) sent the primary's own numeric toward the primary's server,
+     * which dropped it as a fake direction.  On the primary's server
+     * (the only placement two fork servers have) nothing changes: the
+     * primary is ours, there is no primary direction, and every link gets
+     * the primary-sourced line as before. */
     if (sn_msgid[0])
       sendcmdto_want_s2s_tags(1);
-    sendcmdto_serv_butone_v3(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+    sendcmdto_serv_butone_v3(origin, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
     /* Update bouncer aliases with new realname */
     bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
@@ -273,7 +296,10 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (sn_msgid[0])
       sendcmdto_set_client_msgid(sn_msgid);
 
-    sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
+    /* Skip the connection that sent it, not the primary: when a device of
+     * the session on another server typed it, our local primary is told
+     * its own realname changed, as m_setname tells it for a local device. */
+    sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, origin,
                                            CAP_SETNAME, CAP_NONE,
                                            ":%s", cli_info(sptr));
 
