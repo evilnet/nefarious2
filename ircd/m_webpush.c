@@ -862,7 +862,15 @@ static void wp_conn_state(struct Client *c, int held, long long replicated,
  * plain client); aliases are read from the session, local ones through
  * their own idle clock and away state, remote ones through the activity
  * the bouncer replicates (BX U la=) and their AWAY.  See
- * webpush-attention-trigger.md. */
+ * webpush-attention-trigger.md.
+ *
+ * A split: a far-side alias usually leaves the roster as it goes
+ * (bounce_alias_untrack, s_misc.c), so the loop below never reaches it;
+ * one still listed an instant longer finds its numeric no longer
+ * resolves (wp_conn_state(al, al ? 0 : 1, ...) below) and reads held all
+ * the same.  Either way the primary's own server decides alone from
+ * whatever is left, and a push from it is that message's only delivery
+ * to the far side -- D-W (user, 2026-11-07): keep today's behaviour. */
 static int webpush_account_unattended(struct Client *acptr, const char *account)
 {
   struct webpush_conn_state st[BOUNCER_MAX_ALIASES + 1];
