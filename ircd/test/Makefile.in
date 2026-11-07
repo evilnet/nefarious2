@@ -303,8 +303,16 @@ IPCHECK_REFUND_CMOCKA_OBJS = ipcheck_refund_cmocka.o ipcheck_refund_test.o
 ipcheck_refund_cmocka: $(IPCHECK_REFUND_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IPCHECK_REFUND_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-# fake-lag credit: header-only (include/fakelag.h)
-FAKELAG_CMOCKA_OBJS = fakelag_cmocka.o
+# fake-lag credit (include/fakelag.h) and the shared pool (ircd/fakelag.c),
+# the latter recompiled with -DCMOCKA_TEST for its reset hook; the clock,
+# the features and get_lag_factor() are stubbed in fakelag_cmocka.c.
+fakelag_test.o: ../fakelag.c ../../include/fakelag.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -DCMOCKA_TEST -c -o $@ ../fakelag.c
+
+fakelag_cmocka.o: fakelag_cmocka.c ../../include/fakelag.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -DCMOCKA_TEST -c -o $@ fakelag_cmocka.c
+
+FAKELAG_CMOCKA_OBJS = fakelag_cmocka.o fakelag_test.o test_stub.o ../ircd_string.o
 fakelag_cmocka: $(FAKELAG_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(FAKELAG_CMOCKA_OBJS) $(CMOCKA_LIBS)
 

@@ -413,6 +413,8 @@ struct Connection
   int                 con_lagcredit; /**< Fake-lag seconds still to be
                                         absorbed before con_since is
                                         charged (post-registration grace) */
+  time_t              con_lagborrow_until; /**< Last second the pool
+                                        allowance is live */
   struct MsgQ         con_sendQ;     /**< Outgoing message queue */
   struct DBuf         con_recvQ;     /**< Incoming data yet to be parsed */
   unsigned int        con_sendM;     /**< Stats: protocol messages sent */
@@ -689,6 +691,8 @@ struct Client {
 #define cli_since(cli)		con_since(cli_connect(cli))
 /** Get the client's unspent fake-lag credit. */
 #define cli_lagcredit(cli)	con_lagcredit(cli_connect(cli))
+/** Get the last second the client's fake-lag pool allowance is live. */
+#define cli_lagborrow_until(cli)	con_lagborrow_until(cli_connect(cli))
 /** Get time client was created. */
 #define cli_firsttime(cli)	((cli)->cli_firsttime)
 /** Get time client last changed nickname. */
@@ -992,6 +996,8 @@ struct Client {
 #define con_since(con)          ((con)->con_since)
 /** Get the connection's unspent fake-lag credit. */
 #define con_lagcredit(con)      ((con)->con_lagcredit)
+/** Get the last second the connection's fake-lag pool allowance is live. */
+#define con_lagborrow_until(con) ((con)->con_lagborrow_until)
 /** Get SendQ for connection. */
 #define con_sendQ(con)		((con)->con_sendQ)
 /** Get RecvQ for connection. */
