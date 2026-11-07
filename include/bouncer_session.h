@@ -1112,6 +1112,9 @@ extern void pending_bx_cleanup_link(struct Client *link);
 extern void bounce_emit_alias_caps(struct Client *cptr);
 
 /** Broadcast BX U identity updates to all aliases when primary changes.
+ * This server's own copy of each alias (a local connection or a replica of
+ * another server's) is updated directly; every other server gets
+ * `BX U <alias> :<field>=<value>`, the value trailing (1.8).
  * @param[in] primary The primary client whose identity changed.
  * @param[in] field   Field name (host, realname, fakehost, etc.).
  * @param[in] value   New value for the field.
@@ -2512,9 +2515,10 @@ extern int bounce_session_persist_now(struct BouncerSession *session,
 
 /** Apply one BX U field update to a bouncer alias.
  *
- * The single applier for both directions: the local-alias pass inside
- * bounce_emit_alias_update() (aliases on the primary's own server, which
- * the S2S broadcast deliberately skips for loop prevention) and the
+ * The single applier for both directions: the pass inside
+ * bounce_emit_alias_update() (this server's copy of every alias of the
+ * primary -- its own connections and its replicas of other servers' --
+ * which the S2S broadcast deliberately skips for loop prevention) and the
  * bounce_alias_update() receiver (aliases reached over BX U).  Having
  * one body is the point -- the two open-coded dispatches had drifted
  * two fields apart, so local aliases silently never learned account or

@@ -1368,7 +1368,7 @@ static void bounce_emit_session_kc_id(struct BouncerSession *session)
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(primary)->server), cli_yxx(primary));
   sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "U %s kcid=%s", full_numeric, session->hs_kc_id);
+                        "U %s :kcid=%s", full_numeric, session->hs_kc_id);
 }
 
 /** Give the session's members here that carry no id the session's. */
@@ -6367,7 +6367,7 @@ static void bounce_announce_aliases_to(struct BouncerSession *s,
       ircd_snprintf(0, hex, sizeof(hex), "%x",
                     s->hs_aliases[a].ba_caps);
       sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link,
-                    "U %s caps=%s",
+                    "U %s :caps=%s",
                     s->hs_aliases[a].ba_numeric, hex);
     }
     /* And its own away state (AWAY * in particular), which the
@@ -6376,7 +6376,7 @@ static void bounce_announce_aliases_to(struct BouncerSession *s,
         && MyConnect(alias) && cli_connect(alias)
         && con_pre_away(cli_connect(alias)) != 0)
       sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link,
-                    "U %s aw=%d",
+                    "U %s :aw=%d",
                     s->hs_aliases[a].ba_numeric,
                     con_pre_away(cli_connect(alias)));
 
@@ -6419,12 +6419,12 @@ static void bounce_announce_session_to(struct BouncerSession *s,
    * as is for older peers); it rides on BX U like la= and aw=. */
   if (s->hs_client && cli_user(s->hs_client) && cli_user(s->hs_client)->server)
   {
-    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s cc=%u",
+    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s :cc=%u",
                   cli_yxx(cli_user(s->hs_client)->server),
                   cli_yxx(s->hs_client), s->hs_connect_count);
     /* BS C does not update a replica that already exists: ta= does,
      * by the larger figure. */
-    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s ta=%Tu",
+    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s :ta=%Tu",
                   cli_yxx(cli_user(s->hs_client)->server),
                   cli_yxx(s->hs_client), s->hs_total_active);
   }
@@ -6480,7 +6480,7 @@ static void bounce_announce_session_to(struct BouncerSession *s,
    * the session whose primary BS A just resolved. */
   if (account_id_valid(s->hs_kc_id) && s->hs_client
       && cli_user(s->hs_client) && cli_user(s->hs_client)->server)
-    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s kcid=%s",
+    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s%s :kcid=%s",
                   cli_yxx(cli_user(s->hs_client)->server),
                   cli_yxx(s->hs_client), s->hs_kc_id);
 
@@ -8988,7 +8988,7 @@ static void bounce_emit_total_active(struct BouncerSession *session)
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(primary)->server), cli_yxx(primary));
   sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "U %s ta=%Tu", full_numeric, session->hs_total_active);
+                        "U %s :ta=%Tu", full_numeric, session->hs_total_active);
 }
 
 /** Tell the BX-aware peers a session's connection count (BX U cc=), so a
@@ -9003,7 +9003,7 @@ static void bounce_emit_connect_count(struct BouncerSession *session)
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(primary)->server), cli_yxx(primary));
   sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "U %s cc=%u", full_numeric, session->hs_connect_count);
+                        "U %s :cc=%u", full_numeric, session->hs_connect_count);
 }
 
 /** Transition a client to bouncer HOLDING state (ghost mode).
@@ -12205,25 +12205,31 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
 
   for (i = 0; i < sess->hs_alias_count; i++) {
     struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
-
-    /* Local aliases on this (primary's) server: apply the field update
-     * directly. The S2S broadcast below skips us for loop-prevention,
-     * so without this pass our own local aliases stay stale. */
-    if (alias && IsBouncerAlias(alias) && MyConnect(alias))
-      bounce_apply_alias_field(alias, bounce_alias_field_id(field), value);
-
     /* The account field rides AC U's coherence rules: if the network
      * cannot be told the account was cleared (legacy accounts have no
      * AC unregister form), do not tell the aliases either -- a
      * half-applied clear leaves one session's connections disagreeing
      * about their own account. */
-    if (bounce_alias_field_id(field) == BX_ALIAS_FIELD_ACCOUNT
-        && value[0] == '\0'
-        && !feature_bool(FEAT_EXTENDED_ACCOUNTS))
+    int unsent = (bounce_alias_field_id(field) == BX_ALIAS_FIELD_ACCOUNT
+                  && value[0] == '\0'
+                  && !feature_bool(FEAT_EXTENDED_ACCOUNTS));
+
+    /* This server's copy of every alias -- its own connections and its
+     * replicas of other servers' -- takes the update directly.  The S2S
+     * broadcast below skips us for loop-prevention, so without this pass
+     * our own aliases stay stale, and a replica would learn the value
+     * only from its home server's echo.  A field the wire is not told
+     * stays off the replicas too: their home servers keep the old value. */
+    if (alias && IsBouncerAlias(alias) && (MyConnect(alias) || !unsent))
+      bounce_apply_alias_field(alias, bounce_alias_field_id(field), value);
+
+    if (unsent)
       continue;
 
+    /* The value is the trailing parameter: a realname has spaces, and a
+     * receiver reads parv[3] whole (1.8). */
     sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                          "U %s %s=%s",
+                          "U %s :%s=%s",
                           sess->hs_aliases[i].ba_numeric, field, value);
   }
 }
@@ -12333,7 +12339,7 @@ void bounce_emit_alias_caps(struct Client *cptr)
   }
 
   sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "U %s caps=%s", full_numeric, hex);
+                        "U %s :caps=%s", full_numeric, hex);
 }
 
 /** User mode flags that should be synchronized between primary and aliases.
@@ -15037,9 +15043,12 @@ forward:
 
 /** Handle BX U (Identity Update).
  *
- * Wire format: <server> BX U <alias_numeric> <field>=<value>
+ * Wire format: <server> BX U <alias_numeric> :<field>=<value>
  *
- * Updates an alias's identity fields (host, realname, etc.)
+ * Updates an alias's identity fields (host, realname, etc.)  The value is
+ * the trailing parameter, so parv[3] is all of it (a realname has spaces);
+ * a sender before 1.8 put it in the middle, and only its first word
+ * arrived.  Every relay keeps it trailing.
  */
 static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
                                int parc, char *parv[])
@@ -15178,7 +15187,7 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
       defer_bx_for_alias(alias_numeric, cptr, sptr, parc, parv);
     if (!is_replay)
       sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                            "U %s %s", parv[2], parv[3]);
+                            "U %s :%s", parv[2], parv[3]);
     return 0;
   }
 
@@ -15211,7 +15220,7 @@ forward:
    * arrival already broadcast — re-running here would duplicate. */
   if (!is_replay)
     sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                          "U %s %s", parv[2], parv[3]);
+                          "U %s :%s", parv[2], parv[3]);
   return 0;
 }
 
@@ -16947,7 +16956,7 @@ void bounce_note_away_state(struct Client *who, int state)
   ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                 cli_yxx(cli_user(who)->server), cli_yxx(who));
   sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "U %s aw=%d", full_numeric, state);
+                        "U %s :aw=%d", full_numeric, state);
 }
 
 int bounce_activity_quiet(const char *account)
@@ -16993,7 +17002,7 @@ void bounce_record_activity(struct Client *from)
                  >= bounce_activity_quiet(cli_user(from)->account)) {
             sess->hs_aliases[i].ba_last_active_emitted = CurrentTime;
             sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                                  "U %s la=%lu", full_numeric,
+                                  "U %s :la=%lu", full_numeric,
                                   (unsigned long)CurrentTime);
           }
           return;
@@ -17014,7 +17023,7 @@ void bounce_record_activity(struct Client *from)
                >= bounce_activity_quiet(cli_user(from)->account)) {
           sess->hs_last_active_emitted = CurrentTime;
           sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                                "U %s%s la=%lu",
+                                "U %s%s :la=%lu",
                                 cli_yxx(cli_user(from)->server), cli_yxx(from),
                                 (unsigned long)CurrentTime);
         }
