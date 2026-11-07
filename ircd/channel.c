@@ -966,9 +966,24 @@ void remove_user_from_channel(struct Client* cptr, struct Channel* chptr)
   assert(0 != chptr);
 
   if ((member = find_member_link(chptr, cptr))) {
-    /* Auto-sync: remove aliases of this user from the channel first */
-    if (!IsMemberAlias(member))
+    /* Auto-sync: remove aliases of this user from the channel first.
+     * The member counts as live while they go.  A kick marks it a zombie
+     * before it is removed (make_zombie()), and a device's removal that
+     * found only zombies left swept it as well: the membership this call
+     * holds was unlinked there and again below, and the channel was
+     * destroyed twice (a session primary kicked -- by itself, by a
+     * server, as a Net Rider -- from a channel it shared only with its
+     * own devices).  Each device's removal reads the cleared flag twice:
+     * channel_all_zombies() sees a live member and sweeps nothing (the
+     * fix), and the device's presence_on_channel_remove() sees a live
+     * sibling of its anchor (anchor_sibling_in_channel()) and closes
+     * nothing -- this member's own hook below closes the interval once,
+     * at the same armed time, where a zombie used to let both close it.
+     * The member itself is removed right after. */
+    if (!IsMemberAlias(member)) {
+      member->status &= ~CHFL_ZOMBIE;
       bounce_sync_alias_part(chptr, cptr);
+    }
     /* Strict-presence chathistory: close the presence interval for this
      * client's anchor in this channel (no-op if a sibling connection
      * is still a member, or if the feature is disabled).  Called

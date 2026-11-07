@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -161,6 +162,34 @@ netride_exmodes(int parc, char **parv, const char *curr_key)
   return result;
 }
 
+/** Whether a BURST's winning modes shut @a victim out of the channel (the
+ * Net Rider rule): a key it did not match, or +i/+r/+a/+O/+Z it does not
+ * pass.  @a victim is never a bouncer device on its own: +Z holds a
+ * session to the join rule (m_join.c), under which a session with any
+ * plaintext connection is plaintext.
+ * @param[in] victim A local user, a session's primary when it is in one.
+ * @param[in] check_modes netride_modes() of the BURST.
+ * @param[in] check_exmodes netride_exmodes() of the BURST.
+ * @return Non-zero when @a victim rides out. */
+static int
+netride_kicks(struct Client *victim, int check_modes, int check_exmodes)
+{
+  if (check_modes & MODE_KEY)
+    return 1;
+  if ((check_modes & MODE_INVITEONLY) && !IsAnOper(victim))
+    return 1;
+  if ((check_modes & MODE_REGONLY) && !IsAccount(victim))
+    return 1;
+  if ((check_exmodes & EXMODE_ADMINONLY) && !IsAdmin(victim))
+    return 1;
+  if ((check_exmodes & EXMODE_OPERONLY) && !IsAnOper(victim))
+    return 1;
+  if ((check_exmodes & EXMODE_SSLONLY)
+      && (!IsSSL(victim) || bounce_session_has_plaintext(victim)))
+    return 1;
+  return 0;
+}
+
 /*
  * ms_burst - server message handler
  *
@@ -233,7 +262,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct ModeBuf modebuf, *mbuf = 0;
   struct Channel *chptr;
   time_t timestamp;
-  struct Membership *member, *nmember;
+  struct Membership *member;
   struct Ban *lp, **lp_p;
   unsigned int parse_flags = (MODE_PARSE_FORCE | MODE_PARSE_BURST);
   int param, nickpos = 0, nickposo = 0, banpos = 0, expos = 0;
@@ -322,25 +351,37 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       {
         /* Clear any outstanding rogue invites */
         mode_invite_clear(chptr);
-        for (member = chptr->members; member; member = nmember)
+        /* Kick as netrider each local user the winning modes shut out
+         * (netride_kicks()).  A bouncer session is kicked once, as its
+         * primary: a device's alias membership is never kicked on its own
+         * -- the primary's removal takes its devices out with it
+         * (bounce_sync_alias_part()), and a KICK naming a device's numeric
+         * is unknown to a legacy peer (bouncer-architecture #10).
+         *
+         * A kick can take other members with it (those devices; every
+         * zombie, once only zombies are left) and can destroy the channel,
+         * so no member is held across one: after each kick the walk looks
+         * the channel up again and starts over from the head.  A local
+         * member is removed at once (make_zombie()), so none is kicked
+         * twice and each pass is shorter. */
+        member = chptr->members;
+        while (member)
         {
-          nmember = member->next_member;
-          if (!MyUser(member->user) || IsZombie(member))
+          struct Client *victim = member->user;
+
+          if (!MyUser(victim) || IsZombie(member) || IsMemberAlias(member)
+              || !netride_kicks(victim, check_modes, check_exmodes))
+          {
+            member = member->next_member;
             continue;
-          /* Kick as netrider if key mismatch *or* remote channel is
-           * +i (unless user is an oper) *or* remote channel is +r
-           * (unless user has an account).
-           */
-          if (!(check_modes & MODE_KEY)
-              && (!(check_modes & MODE_INVITEONLY) || IsAnOper(member->user))
-              && (!(check_modes & MODE_REGONLY) || IsAccount(member->user))
-              && (!(check_exmodes & EXMODE_ADMINONLY) || IsAdmin(member->user))
-              && (!(check_exmodes & EXMODE_OPERONLY) || IsAnOper(member->user))
-              && (!(check_exmodes & EXMODE_SSLONLY) || IsSSL(member->user)))
-            continue;
-          sendcmdto_serv_butone(&me, CMD_KICK, NULL, "%H %C :Net Rider", chptr, member->user);
-          sendcmdto_channel_butserv_butone(&his, CMD_KICK, chptr, NULL, 0, "%H %C :Net Rider", chptr, member->user);
-          make_zombie(member, member->user, &me, &me, chptr);
+          }
+          sendcmdto_serv_butone(&me, CMD_KICK, NULL, "%H %C :Net Rider", chptr, victim);
+          sendcmdto_channel_butserv_butone(&his, CMD_KICK, chptr, NULL, 0, "%H %C :Net Rider", chptr, victim);
+          make_zombie(member, victim, &me, &me, chptr);
+          /* Looked up by the BURST's own name: chptr may be gone. */
+          if (!(chptr = FindChannel(parv[1])))
+            break;
+          member = chptr->members;
         }
       }
       break;
