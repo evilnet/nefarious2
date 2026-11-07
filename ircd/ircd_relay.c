@@ -921,7 +921,8 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       char timestamp[32];
 
       history_format_ms(timestamp, sizeof(timestamp), history_event_time_ms(one));
-      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp, NULL);
+      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp,
+                             (client_tags && *client_tags) ? client_tags : NULL);
     }
 #endif
   }
@@ -1013,7 +1014,8 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       char timestamp[32];
 
       history_format_ms(timestamp, sizeof(timestamp), history_event_time_ms(one));
-      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp, NULL);
+      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp,
+                             (client_tags && *client_tags) ? client_tags : NULL);
     }
 #endif
   }
