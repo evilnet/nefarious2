@@ -10437,7 +10437,10 @@ static int swap_session_plaintext(struct BouncerSession *s, struct Client *face,
  *   server a netjoin's KICK comes from -- toward every link but the
  *   survivor's (its server never held it there), so a receiver removes
  *   the member at once instead of keeping a zombie for an acknowledgement
- *   no server would send, and logs no HACK. */
+ *   no server would send, and logs no HACK.
+ * - Our history gets the KICK of the face, under its one msgid and time
+ *   (no other server stores it: the survivor's never held the face there,
+ *   and a legacy server stores nothing). */
 static void bounce_swap_kick(struct Channel *chptr, struct Client *face,
                              struct Client *survivor)
 {
@@ -10464,9 +10467,20 @@ static void bounce_swap_kick(struct Channel *chptr, struct Client *face,
   log_write(LS_USER, L_INFO, 0, "Bouncer swap: %s may not be in %s (its "
             "admission modes): %s leaves it (Net Rider)", cli_name(survivor),
             chptr->chname, cli_name(face));
+#ifdef USE_ROCKSDB
+  /* Our members saw the face kicked: the row, under the KICK's msgid and
+   * time.  Before the removal: it can destroy chptr, and the row takes the
+   * live incarnation.  With msgids off there is no row (m_kick would mint
+   * one; recorded, W5 Task 3). */
+  if (msgid[0])
+    channel_store_kick(&his, chptr, cli_name(face), "Net Rider", msgid, ms);
+#endif
   /* The face, still the primary here, and with it its alias members
-   * (bounce_sync_alias_part); counts move as for any part. */
+   * (bounce_sync_alias_part); counts move as for any part.  The account's
+   * presence closes (the face's own close) at the KICK's time. */
+  presence_set_event_time(msgid[0] ? presence_event_time(msgid, ms) : 0);
   remove_user_from_channel(face, chptr);
+  presence_set_event_time(0);
   sendcmdto_set_inbound_link(inbound);
 }
 

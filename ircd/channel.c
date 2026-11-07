@@ -1179,14 +1179,22 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
       /* Invariant violation: TLS primary in +Z but session has plaintext.
        * Kick from channel — this shouldn't happen with gates A/B working. */
       char ssl_kick_msgid[64] = "";
-      int64_t ssl_kick_ms = history_event_time_ms(NULL);
+      uint64_t ssl_kick_ms = 0;
+      /* One msgid and one time, minted here -- the time read after the
+       * mint, which advances the HLC.  The S2S KICK carries them (@A), so
+       * every receiver delivers and stores it under them; our members'
+       * line, our row and the presence close use them too. */
       if (feature_bool(FEAT_MSGID)) {
         generate_msgid(ssl_kick_msgid, sizeof(ssl_kick_msgid));
-        sendcmdto_set_client_event(ssl_kick_msgid, ssl_kick_ms);
+        ssl_kick_ms = history_event_time_ms(NULL);
+        sendcmdto_set_s2s_tags(ssl_kick_ms, ssl_kick_msgid);
+        sendcmdto_want_s2s_tags(1);
       }
       sendcmdto_serv_butone(&me, CMD_KICK, NULL,
                             "%H %C :SSL-only channel (insecure session)",
                             member->channel, member->user);
+      if (ssl_kick_msgid[0])
+        sendcmdto_set_client_event(ssl_kick_msgid, ssl_kick_ms);
       sendcmdto_channel_butserv_butone(&me, CMD_KICK, member->channel, NULL, 0,
                                        "%H %C :SSL-only channel (insecure session)",
                                        member->channel, member->user);
@@ -1198,7 +1206,7 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
                       cli_name(member->user));
         store_channel_event(&me, member->channel, kick_text,
                             HISTORY_KICK, ssl_kick_msgid[0] ? ssl_kick_msgid : NULL,
-                            0);
+                            ssl_kick_ms);
       }
 #endif
       /* The victim's presence interval closes at the kick's time, the

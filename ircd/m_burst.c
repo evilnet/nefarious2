@@ -83,6 +83,7 @@
 
 #include "bouncer_session.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
@@ -190,6 +191,14 @@ netride_kicks(struct Client *victim, int check_modes, int check_exmodes)
   return 0;
 }
 
+/** A Net Rider KICK ms_burst() made, kept until the channel has taken the
+ * BURST's TS: its row is stored then, under the surviving incarnation. */
+struct NetRiderKick {
+  char nick[NICKLEN + 1];       /**< The kicked member, as the KICK named it. */
+  char msgid[64];               /**< The KICK's msgid ("" with msgids off). */
+  uint64_t ms;                  /**< The KICK's time (0 with msgids off). */
+};
+
 /*
  * ms_burst - server message handler
  *
@@ -268,6 +277,8 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   int param, nickpos = 0, nickposo = 0, banpos = 0, expos = 0;
   char modestr[BUFSIZE], modestro[BUFSIZE], nickstr[BUFSIZE];
   char nickstro[BUFSIZE], banstr[BUFSIZE], exstr[BUFSIZE];
+  struct NetRiderKick *riders = NULL;   /* this BURST's Net Rider KICKs */
+  int nriders = 0, riders_max = 0;
 
   if (parc < 3)
     return protocol_violation(sptr,"Too few parameters for BURST");
@@ -363,11 +374,20 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          * so no member is held across one: after each kick the walk looks
          * the channel up again and starts over from the head.  A local
          * member is removed at once (make_zombie()), so none is kicked
-         * twice and each pass is shorter. */
+         * twice and each pass is shorter.
+         *
+         * Each KICK is one event, minted here: one msgid and one time for
+         * the S2S KICK (@A, so every receiver delivers and stores it under
+         * them), our members' line, the presence close and our row.  The
+         * row waits until the channel has taken the BURST's TS (below):
+         * stored now it would carry the losing incarnation and be pruned
+         * with it. */
         member = chptr->members;
         while (member)
         {
           struct Client *victim = member->user;
+          char msgid[64] = "";
+          uint64_t ms = 0;
 
           if (!MyUser(victim) || IsZombie(member) || IsMemberAlias(member)
               || !netride_kicks(victim, check_modes, check_exmodes))
@@ -375,9 +395,31 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
             member = member->next_member;
             continue;
           }
+          if (feature_bool(FEAT_MSGID)) {
+            generate_msgid(msgid, sizeof(msgid));
+            ms = history_event_time_ms(NULL);
+            sendcmdto_set_s2s_tags(ms, msgid);
+            sendcmdto_want_s2s_tags(1);
+          }
           sendcmdto_serv_butone(&me, CMD_KICK, NULL, "%H %C :Net Rider", chptr, victim);
+          if (msgid[0])
+            sendcmdto_set_client_event(msgid, ms);
           sendcmdto_channel_butserv_butone(&his, CMD_KICK, chptr, NULL, 0, "%H %C :Net Rider", chptr, victim);
+          sendcmdto_set_client_msgid(NULL);
+          if (nriders == riders_max) {
+            riders_max = riders_max ? 2 * riders_max : 8;
+            riders = (struct NetRiderKick *)MyRealloc(riders,
+                                                      riders_max * sizeof(*riders));
+          }
+          ircd_strncpy(riders[nriders].nick, cli_name(victim),
+                       sizeof(riders[nriders].nick));
+          ircd_strncpy(riders[nriders].msgid, msgid, sizeof(riders[nriders].msgid));
+          riders[nriders].ms = ms;
+          nriders++;
+          /* The victim's presence closes at the KICK's own time. */
+          presence_set_event_time(msgid[0] ? presence_event_time(msgid, ms) : 0);
           make_zombie(member, victim, &me, &me, chptr);
+          presence_set_event_time(0);
           /* Looked up by the BURST's own name: chptr may be gone. */
           if (!(chptr = FindChannel(parv[1])))
             break;
@@ -388,8 +430,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     /* If the channel had only locals, it went away by now. */
-    if (!(chptr = get_channel(sptr, parv[1], CGT_CREATE)))
+    if (!(chptr = get_channel(sptr, parv[1], CGT_CREATE))) {
+      MyFree(riders);
       return 0; /* can't create the channel? */
+    }
   }
 
   /* turn off burst joined flag */
@@ -410,6 +454,16 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       history_purge_incarnation(chptr->chname, chptr->creationtime);
 #endif
     chptr->creationtime = timestamp;
+#ifdef USE_ROCKSDB
+    {
+      /* The Net Rider KICKs above, now under the surviving incarnation. */
+      int nr;
+      for (nr = 0; nr < nriders; nr++)
+        channel_store_kick(&his, chptr, riders[nr].nick, "Net Rider",
+                           riders[nr].msgid[0] ? riders[nr].msgid : NULL,
+                           riders[nr].ms);
+    }
+#endif
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,
 		 MODEBUF_DEST_CHANNEL | MODEBUF_DEST_NOKEY);
@@ -444,6 +498,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     parse_flags |= MODE_PARSE_SET; /* set new modes */
   }
+  MyFree(riders);
 
   param = 3; /* parse parameters */
   while (param < parc) {

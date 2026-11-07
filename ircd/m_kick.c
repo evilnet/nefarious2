@@ -104,20 +104,32 @@
 #include <time.h>
 
 #ifdef USE_ROCKSDB
-/** Store a KICK event in the history database.
- * The message content is formatted as "kicked_nick :reason" per event-playback spec.
- * @param[in] sptr Client that did the kick.
- * @param[in] chptr Channel where kick occurred.
- * @param[in] who Client that was kicked.
+/** Store one KICK row in the history database, its content
+ * "victim :reason" per the event-playback spec.
+ *
+ * Every server that delivers a KICK to its members stores it, each into
+ * its own store: the kicker's server (m_kick), every server the KICK is
+ * relayed to that holds the victim (ms_kick), and a server that kicks on
+ * its own (the burst's Net Rider pass, the D.2 swap).  All of them store
+ * under the one msgid and time minted at the origin, so a federated merge
+ * -- which deduplicates by msgid -- shows the event once.  The row is what
+ * this server's members saw live: the source they saw (&his for a server)
+ * and the victim as resolved here.
+ *
+ * @param[in] src Who kicked, as the members saw it (&his for a server).
+ * @param[in] chptr Channel; its live incarnation is stamped on the row.
+ * @param[in] victim The kicked member's nick.
  * @param[in] comment Kick reason.
+ * @param[in] msgid The event's msgid, or NULL to mint one here.
+ * @param[in] event_ms The event's time, or 0 for the mint time.
  */
-static void store_kick_event(struct Client *sptr, struct Channel *chptr,
-                             struct Client *who, const char *comment,
-                             const char *broadcast_msgid, uint64_t event_ms)
+void channel_store_kick(struct Client *src, struct Channel *chptr,
+                        const char *victim, const char *comment,
+                        const char *msgid, uint64_t event_ms)
 {
   char timestamp[32];
   char fallback_msgid[64];
-  const char *msgid;
+  const char *use_msgid;
   char sender[HISTORY_SENDER_LEN];
   char kick_text[512];
   char owner[HTC_OWNER_MAX];
@@ -130,22 +142,15 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
-  /* Receiver-side storage: every server with the channel stores its
-   * own copy (same policy as store_channel_history -- the old
-   * MyUser-only gate left remote kicks unstored here, so their
-   * delivered msgids never entered the local index).  Cross-server
-   * duplicates don't arise: each server stores into its own DB, and
-   * federated query merges dedup by the now-shared msgid. */
-
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Use broadcast msgid so clients can deduplicate */
-  if (broadcast_msgid && broadcast_msgid[0])
-    msgid = broadcast_msgid;
+  /* The event's msgid, so clients and federated merges deduplicate */
+  if (msgid && msgid[0])
+    use_msgid = msgid;
   else
-    msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
+    use_msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
 
   /* Row time: the event's one time (the S2S tag time the caller already
    * put on the wire), else the mint time of the msgid chosen above. */
@@ -153,26 +158,26 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
                     event_ms ? event_ms : history_event_time_ms(NULL));
 
   /* Build sender string: nick!user@host */
-  if (cli_user(sptr))
+  if (cli_user(src))
     ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
-                  cli_name(sptr),
-                  cli_user(sptr)->username,
-                  cli_user(sptr)->host);
+                  cli_name(src),
+                  cli_user(src)->username,
+                  cli_user(src)->host);
   else
-    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+    ircd_strncpy(sender, cli_name(src), sizeof(sender) - 1);
 
   /* Get account name if logged in */
-  account = (cli_user(sptr) && cli_user(sptr)->account[0])
-            ? cli_user(sptr)->account : NULL;
+  account = (cli_user(src) && cli_user(src)->account[0])
+            ? cli_user(src)->account : NULL;
   /* The row's trim owner: the client whose account it carries. */
-  history_owner_of(owner, sizeof(owner), sptr);
+  history_owner_of(owner, sizeof(owner), src);
 
   /* Build kick text: "kicked_nick :reason" */
   ircd_snprintf(0, kick_text, sizeof(kick_text), "%s :%s",
-                cli_name(who), comment ? comment : "");
+                victim, comment ? comment : "");
 
   /* Store in database */
-  history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
+  history_store_message(use_msgid, timestamp, chptr->chname, NULL, sender,
                         account, HISTORY_KICK, kick_text, NULL, owner);
 }
 #endif /* USE_ROCKSDB */
@@ -312,8 +317,8 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
 #ifdef USE_ROCKSDB
     /* Store KICK event in history — same msgid as broadcast */
-    store_kick_event(sptr, chptr, who, comment,
-                     kick_msgid[0] ? kick_msgid : NULL, kick_ms);
+    channel_store_kick(sptr, chptr, cli_name(who), comment,
+                       kick_msgid[0] ? kick_msgid : NULL, kick_ms);
 #endif
     /* The victim's presence interval closes at the kick's time, not at
      * whenever make_zombie's removal happens to run (P2). */
@@ -456,6 +461,13 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       sendcmdto_set_client_msgid(NULL);
 
+#ifdef USE_ROCKSDB
+      /* Our members saw it: the row, under the origin's msgid and time,
+       * as they saw it (a server's KICK from the hidden server). */
+      channel_store_kick(IsServer(sptr) ? &his : sptr, chptr, cli_name(who),
+                         comment, kick_msgid[0] ? kick_msgid : NULL,
+                         kick_time_ms);
+#endif
       presence_set_event_time(kick_msgid[0] ? presence_event_time(kick_msgid, kick_time_ms) : 0);
       make_zombie(member, who, cptr, sptr, chptr);
       presence_set_event_time(0);

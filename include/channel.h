@@ -542,6 +542,13 @@ extern int member_can_send_to_channel(struct Membership* member, int reveal);
 extern int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int reveal);
 
 extern void remove_user_from_channel(struct Client *sptr, struct Channel *chptr);
+#ifdef USE_ROCKSDB
+/* m_kick.c: one KICK row, "victim :comment", from src (&his for a server),
+ * under the event's msgid and time (NULL / 0: minted here); +P skips. */
+extern void channel_store_kick(struct Client *src, struct Channel *chptr,
+                               const char *victim, const char *comment,
+                               const char *msgid, uint64_t event_ms);
+#endif
 extern void remove_user_from_all_channels(struct Client* cptr);
 extern void channel_account_adjust(struct Client *cptr, int delta);
 
