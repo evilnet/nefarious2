@@ -1110,10 +1110,15 @@ int has_voice(struct Client* cptr, struct Channel* chptr)
  *  <li> You aren't banned.
  *  <li> The channel isn't +m
  *  <li> The channel isn't +n or you are on the channel.
+ *  <li> The channel isn't +Z, or your own connection is TLS (per
+ *       connection: a bouncer session's other devices do not count).
  * </ol>
  *
  * This function will optionally reveal a user on a delayed join channel if
- * they are allowed to send to the channel.
+ * they are allowed to send to the channel.  It has no other side effect:
+ * callers (m_part, m_quit, the relays) go on using @a member and its
+ * channel after it returns, so it must never remove a member or destroy
+ * a channel.
  *
  * @param member	The membership of the user
  * @param reveal	If true, the user will be "revealed" on a delayed
@@ -1136,9 +1141,13 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
     return 1;
   }
 
-  /* Alias inherits primary's send rights — same trust as remote users. */
+  /* Alias inherits primary's send rights — same trust as remote users.
+   * Except +Z, judged by each connection's own TLS (per device, user
+   * 2026-11-06): a plaintext device that is a member of a +Z channel
+   * (one that went +Z after it attached) does not speak there. */
   if (IsBouncerAlias(member->user))
-    return 1;
+    return !((member->channel->mode.exmode & EXMODE_SSLONLY)
+             && !IsSSL(member->user));
 
   /* Discourage using the Apass to get op.  They should use the Upass. */
   if (IsChannelManager(member) && member->channel->mode.apass[0] &&
@@ -1169,57 +1178,13 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
     return 0;
 
   /* If only SSL users may join and you're not one, you can't speak.
-   * For bouncer sessions: if ANY connection is non-TLS, the session
-   * is treated as non-TLS.  If this invariant is violated (user is
-   * somehow in a +Z channel with a plaintext session), kick them
-   * rather than silently muting — makes the bug visible. */
-  if ((member->channel->mode.exmode & EXMODE_SSLONLY) &&
-      (!IsSSL(member->user) || bounce_session_has_plaintext(member->user))) {
-    if (IsSSL(member->user) && bounce_session_has_plaintext(member->user)) {
-      /* Invariant violation: TLS primary in +Z but session has plaintext.
-       * Kick from channel — this shouldn't happen with gates A/B working. */
-      char ssl_kick_msgid[64] = "";
-      uint64_t ssl_kick_ms = 0;
-      /* One msgid and one time, minted here -- the time read after the
-       * mint, which advances the HLC.  The S2S KICK carries them (@A), so
-       * every receiver delivers and stores it under them; our members'
-       * line, our row and the presence close use them too. */
-      if (feature_bool(FEAT_MSGID)) {
-        generate_msgid(ssl_kick_msgid, sizeof(ssl_kick_msgid));
-        ssl_kick_ms = history_event_time_ms(NULL);
-        sendcmdto_set_s2s_tags(ssl_kick_ms, ssl_kick_msgid);
-        sendcmdto_want_s2s_tags(1);
-      }
-      sendcmdto_serv_butone(&me, CMD_KICK, NULL,
-                            "%H %C :SSL-only channel (insecure session)",
-                            member->channel, member->user);
-      if (ssl_kick_msgid[0])
-        sendcmdto_set_client_event(ssl_kick_msgid, ssl_kick_ms);
-      sendcmdto_channel_butserv_butone(&me, CMD_KICK, member->channel, NULL, 0,
-                                       "%H %C :SSL-only channel (insecure session)",
-                                       member->channel, member->user);
-      sendcmdto_set_client_msgid(NULL);
-#ifdef USE_ROCKSDB
-      {
-        char kick_text[512];
-        ircd_snprintf(0, kick_text, sizeof(kick_text), "%s :SSL-only channel (insecure session)",
-                      cli_name(member->user));
-        store_channel_event(&me, member->channel, kick_text,
-                            HISTORY_KICK, ssl_kick_msgid[0] ? ssl_kick_msgid : NULL,
-                            ssl_kick_ms);
-      }
-#endif
-      /* The victim's presence interval closes at the kick's time, the
-       * same stamp every peer closes at from the KICK's msgid, not at
-       * whatever make_zombie's removal runs at (P2; every m_kick.c site
-       * already arms this -- re-review 2026-09-07 R16). */
-      presence_set_event_time(ssl_kick_msgid[0]
-                              ? presence_event_time(ssl_kick_msgid, ssl_kick_ms) : 0);
-      make_zombie(member, member->user, &me, &me, member->channel);
-      presence_set_event_time(0);
-    }
+   * Judged by the member's own connection (+Z per device, user
+   * 2026-11-06): a TLS primary speaks whatever its devices use; its
+   * plaintext device is kept out of the channel (bouncer invariant #17)
+   * and refused here by its own connection when it is a member anyway
+   * (the alias branch above). */
+  if ((member->channel->mode.exmode & EXMODE_SSLONLY) && !IsSSL(member->user))
     return 0;
-  }
 
   /* If only logged in users may join and you're not one, you can't speak. */
   if (member->channel->mode.mode & MODE_REGONLY && !IsAccount(member->user))
