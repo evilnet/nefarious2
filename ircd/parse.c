@@ -1759,7 +1759,7 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
         && !(0 == strcmp(mptr->cmd, MSG_PONG) && cli_connect(cptr)
              && input_hold_pong_free(&con_input_hold(cli_connect(cptr)),
                                      CurrentTime, s, cli_name(&me))))
-      cli_since(cptr) += fakelag_charge(&cli_lagcredit(cptr), lag);
+      cli_since(cptr) += fakelag_charge_client(cptr, mptr->cmd, lag);
   }
   /*
    * Allow only 1 msg per 2 seconds

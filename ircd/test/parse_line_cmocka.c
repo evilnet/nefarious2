@@ -334,6 +334,14 @@ int get_lag_factor(struct Client *cptr)
   return test_lagfactor;
 }
 
+/* The fake-lag pool (fakelag.c) is not linked: its charge is the credit's
+ * alone, as with FAKELAG_POOL off. */
+int fakelag_charge_client(struct Client *cptr, const char *cmd, int lag)
+{
+  (void)cmd;
+  return fakelag_charge(&cli_lagcredit(cptr), lag);
+}
+
 void batch_end_line(struct Client *cptr)
 {
   (void)cptr;
