@@ -184,13 +184,17 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * killed by m_nick.) */
 
     /* Strict-presence #6 step 2: catch the newly-linked peer up on
-     * closed account intervals it could not have observed (netsplit
-     * windows, downtime, brand-new servers) -- their PN broadcasts
-     * were lost while the link was down.  Self-gated on the feature
-     * and storage availability; union application on the receiver
-     * makes repeat syncs across relinks harmless. */
+     * account windows it could not have observed (netsplit windows,
+     * downtime, brand-new servers) -- their PN broadcasts were lost
+     * while the link was down.  This only starts the sync: a timer
+     * sends the whole store in slices of CHATHISTORY_PRESENCE_SYNC_SLICE
+     * lines a second, held while this link's sendq is over half full,
+     * with no line ceiling (W5 Task 7); a relink restarts it.  Self-gated
+     * on the feature and storage availability; union application on the
+     * receiver makes repeat syncs across relinks harmless. */
     /* Legacy peers (X3, vanilla ircu) do not speak PN and logged every
-     * line as a parse error -- up to 20000 of them per relink (audit P4). */
+     * line as a parse error, one per stored window (audit P4); each
+     * slice re-checks IsIRCv3Aware too. */
     if (IsIRCv3Aware(sptr))
       presence_burst_sync(sptr);
 
