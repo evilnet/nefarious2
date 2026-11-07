@@ -40,6 +40,7 @@ extern int ircd_utf8_clamp(char* s, size_t maxbytes);
 extern size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max);
 extern int ircd_text_mentions(const char* text, const char* nick);
 extern char* ircd_json_escape(char* dst, size_t dstlen, const char* src);
+extern char* ircd_tag_value_unescape(char* s);
 extern int         unique_name_vector(char* names, char token,
                                       char** vector, int size);
 extern int         token_vector(char* names, char token,

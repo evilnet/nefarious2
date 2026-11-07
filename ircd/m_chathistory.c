@@ -6061,11 +6061,12 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     generate_batch_id(batchid, sizeof(batchid), sptr);
     bid = batchid;
-    if (label)
-      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
+    if (label && *label) {
+      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s soju.im/search", label,
                     cli_name(&me), batchid);
-    else
-      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
+      cli_label_responded(sptr) = 1;   /* the batch answers: no generic ACK */
+    } else
+      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s soju.im/search", cli_name(&me), batchid);
   }
 
   for (msg = head; msg; msg = msg->next) {
@@ -6082,8 +6083,10 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 
   if (bid)
     sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
-  else if (label)
+  else if (label && *label) {
     sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
+    cli_label_responded(sptr) = 1;
+  }
 }
 
 
@@ -7393,10 +7396,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * SEARCH -- soju.im/search
  * (https://codeberg.org/emersion/soju/src/branch/master/doc/ext/search.md)
  *
- *   SEARCH in=<target> [from=<nick>] [text=<words>] [after=<ts>]
- *          [before=<ts>] [limit=<n>]
+ *   SEARCH in=<target>[;from=<nick>][;text=<words>][;after=<ts>]
+ *          [;before=<ts>][;limit=<n>]
  *
- * Answered with a batch of type `search`: the matching PRIVMSG / NOTICE
+ * One parameter, values escaped like tag values (`\s` a space, `\:` a
+ * `;`), as soju reads it.  The older form, one `key=value` per parameter
+ * with a trailing last one, is still accepted when there are two or more.
+ *
+ * Answered with a batch of type `soju.im/search`, as soju sends it: the matching PRIVMSG / NOTICE
  * rows in ascending time order, each with msgid and time, or an empty
  * batch.  Malformed selectors get FAIL SEARCH INVALID_PARAMS.
  *
@@ -7415,8 +7422,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * rows are not merged (2026-09-20).
  * ==================================================================== */
 
-/** Handle SEARCH (soju.im/search).  parv[1..] are `key=value` selectors;
- * the last one may carry spaces (a trailing parameter). */
+/** Handle SEARCH (soju.im/search).  parv[1] is soju's `;`-joined attribute
+ * list, tag-escaped; two or more parameters are our older form, one
+ * `key=value` each, the last one trailing so it may carry spaces. */
 int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   struct SearchMatch sm;
@@ -7427,6 +7435,8 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   const char *pm_other = NULL;
   int limit = 0, max_limit;
   int budget = SEARCH_SCAN_MAX;
+  char *cur, *next;
+  int tagform;
   int i;
 
   if (!CapActive(sptr, CAP_SOJU_SEARCH))
@@ -7441,25 +7451,58 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   before_unix[0] = '\0';
   after_unix[0] = '\0';
 
-  for (i = 1; i < parc; i++) {
-    char *eq = strchr(parv[i], '=');
-    const char *key = parv[i];
-    const char *val;
+  /* soju.im/search sends one parameter, attributes joined by ';' and
+   * escaped like tag values (soju reads it with irc.ParseTags).  Our
+   * older form spreads them over parameters, unescaped, the last one
+   * trailing so a text may hold spaces; it is still read when there is
+   * more than one parameter. */
+  tagform = (parc == 2);
+  next = parc > 1 ? parv[1] : NULL;
+  for (i = 1; (cur = next); ) {
+    char *eq;
+    const char *key, *val;
 
-    if (!eq || eq == parv[i]) {
-      send_fail(sptr, "SEARCH", "INVALID_PARAMS", parv[i], "Selectors are key=value");
+    if (tagform) {
+      char *semi = strchr(cur, ';');
+
+      next = NULL;
+      if (semi) {
+        *semi = '\0';
+        next = semi + 1;
+      }
+      if (!*cur)
+        continue;   /* ";;" or a trailing ';' */
+    } else {
+      next = ++i < parc ? parv[i] : NULL;
+    }
+
+    eq = strchr(cur, '=');
+    key = cur;
+    if (eq == cur || (!eq && !tagform)) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "*", "Selectors are key=value");
       return 0;
     }
-    *eq = '\0';
-    val = eq + 1;
+    if (eq) {
+      *eq = '\0';
+      val = tagform ? ircd_tag_value_unescape(eq + 1) : eq + 1;
+    } else {
+      val = "";   /* a tag with no value */
+    }
+    /* An escaped CR or LF must not reach the CH Q selectors, which go
+     * to the storage servers raw. */
+    if (strpbrk(val, "\r\n")) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "*", "Line breaks are not allowed");
+      return 0;
+    }
 
     if (ircd_strcmp(key, "in") == 0) {
       ircd_strncpy(in, val, sizeof(in));
     } else if (ircd_strcmp(key, "from") == 0) {
       ircd_strncpy(sm.from, val, sizeof(sm.from));
     } else if (ircd_strcmp(key, "text") == 0) {
-      if (val[0])
-        sm.text = val;
+      /* The last text wins, an empty one too: text=a;text= searches
+       * for nothing in particular, as an unrepeated text= does. */
+      sm.text = val[0] ? val : NULL;
     } else if (ircd_strcmp(key, "after") == 0) {
       if (!val[0] || history_iso_to_unix(val, after_unix, sizeof(after_unix)) != 0) {
         send_fail(sptr, "SEARCH", "INVALID_PARAMS", "after", "Invalid timestamp");

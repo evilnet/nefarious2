@@ -564,6 +564,30 @@ static void test_mentions_null_safe(void **state)
   assert_int_equal(0, ircd_text_mentions("text", ""));
 }
 
+/* --- ircd_tag_value_unescape --- */
+
+static void test_tag_unescape_sequences(void **state)
+{
+  char buf[64];
+  (void)state;
+  strcpy(buf, "a\\:b\\sc\\\\d\\re\\nf");
+  assert_string_equal(ircd_tag_value_unescape(buf), "a;b c\\d\re\nf");
+}
+
+static void test_tag_unescape_other_and_trailing(void **state)
+{
+  char buf[64];
+  (void)state;
+  /* An unknown escape is the character itself; a trailing \ is dropped. */
+  strcpy(buf, "\\x\\");
+  assert_string_equal(ircd_tag_value_unescape(buf), "x");
+  strcpy(buf, "plain #chan");
+  assert_string_equal(ircd_tag_value_unescape(buf), "plain #chan");
+  strcpy(buf, "");
+  assert_string_equal(ircd_tag_value_unescape(buf), "");
+  assert_null(ircd_tag_value_unescape(NULL));
+}
+
 /* --- ircd_utf8_clamp --- */
 
 static void test_utf8_clamp_fits_untouched(void **state)
@@ -1043,6 +1067,10 @@ int main(void)
         cmocka_unit_test(test_json_escape_passthrough),
         cmocka_unit_test(test_json_escape_specials),
         cmocka_unit_test(test_json_escape_truncates_cleanly),
+
+        /* ircd_tag_value_unescape */
+        cmocka_unit_test(test_tag_unescape_sequences),
+        cmocka_unit_test(test_tag_unescape_other_and_trailing),
 
         /* string_is_valid_utf8 / string_sanitize_utf8 */
         cmocka_unit_test(test_utf8_valid_plain_ascii),
