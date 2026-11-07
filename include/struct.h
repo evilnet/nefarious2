@@ -72,6 +72,15 @@ struct Server {
   unsigned long link_serial;    /**< Direct link: which establishment of a link
                                      this is (server_estab), never reused; 0
                                      for a server behind another */
+  unsigned char away_barrier;   /**< Direct link: the holder's away barrier
+                                     PING is out and its PONG not read yet
+                                     (bounce_away_restate_to(), W3 Task 16);
+                                     its token names link_serial */
+  unsigned char away_merge;     /**< Direct link: its away merge window is
+                                     open (registration to barrier PONG): a
+                                     session away decision due on a line
+                                     from it waits for the PONG (W3 Task 16
+                                     fix round 5) */
 
   struct MdSyncLink *mdsync;    /**< W4 stamped account-metadata sync state
                                      for this direct link (metadata_sync.h);
@@ -79,6 +88,8 @@ struct Server {
 };
 
 /** Describes a user on the network. */
+struct UserAwayEvent;   /* bouncer_session.c: a remote member's own-away event */
+
 struct User {
   struct Client*     server;         /**< client structure of server */
   struct Client*     alias_primary;  /**< For alias numerics: pointer to the primary Client */
@@ -87,6 +98,16 @@ struct User {
   struct SLink*      watch;          /**< chain of watch pointer blocks */
   struct Ban*        silence;        /**< chain of silence pointer blocks */
   char*              away;           /**< pointer to away message */
+  /** Another server's connection's OWN away state, as its server
+   * replicates it (BX U aw=; W3 Task 16): what the server holding its
+   * session's primary aggregates, and webpush judges attention by.  Never
+   * set for a connection of ours, whose own state is its Connection's
+   * con_pre_away (a remote client shares its link's Connection, #13). */
+  unsigned char      own_away_known; /**< 1 once its server said */
+  unsigned char      own_away;       /**< 0 present, 1 away, 2 AWAY * */
+  char*              own_away_msg;   /**< its own text (state 1), or NULL */
+  struct UserAwayEvent* own_away_ev; /**< the event its last report carried
+                                      * (time, msgid), lazily; NULL none */
   char*              opername;       /**< pointer to /OPER user name */
   time_t             last;           /**< last time user sent a message */
   unsigned int       refcnt;         /**< Number of times this block is referenced */

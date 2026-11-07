@@ -402,6 +402,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     s2s_multiline_cleanup_link(bcptr);
     s2s_bxm_cleanup_link(bcptr);
     pending_bx_cleanup_link(bcptr);
+    /* A record whose away decision waited on its merge window is decided
+     * now, the clients behind it gone (W3 Task 16 fix round 5). */
+    bounce_away_merge_link_gone(bcptr);
     chathistory_fed_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {

@@ -530,13 +530,6 @@ struct BounceAlias {
   time_t ba_last_active_emitted; /**< Local bookkeeping on the alias's own
                                  server: when its activity was last put on
                                  the wire (BX U la=).  Not replicated. */
-  int ba_away;              /**< The alias's OWN away state as its server
-                                 reports it (BX U aw=): 0 present, 1 away,
-                                 2 AWAY * (draft/pre-away, not looking).
-                                 The webpush attention rule and the away
-                                 aggregation read this for remote aliases
-                                 instead of the session's mirrored aggregate. */
-  int ba_away_known;        /**< 1 once a BX U aw= arrived for this alias. */
   char ba_active_profile[33]; /**< Phase 4 M4b: alias's active draft/persistence
                                    profile name (PERSISTENCE_PROFILE_NAME_MAX + NUL).
                                    Empty string resolves to "default" by the
@@ -640,11 +633,23 @@ struct BouncerSession {
                                             so a subsequent non-enforced attach can detach
                                             a stale-enforced session. */
 
-  int hs_primary_away;                 /**< The primary's OWN away state as replicated
-                                            (BX U aw=), for servers that do not host it. */
-  int hs_primary_away_known;           /**< 1 once a BX U aw= arrived for the primary. */
-  int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
-  char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
+  int hs_effective_away;               /**< The session's away state: 0=present, 1=away,
+                                            2=all-star.  Decided by the server of the
+                                            primary; another server keeps what that
+                                            server's AWAY said (W3 Task 16).  A
+                                            connection's own state is its own
+                                            (bounce_member_own_away()). */
+  char hs_effective_away_msg[AWAYLEN + 1]; /**< Its away text ("*" for 2) */
+  uint64_t hs_effective_away_ms;       /**< The time of the event the session's state
+                                            was last shown with (its line's): an event
+                                            newer than this is shown under its own msgid,
+                                            any other line mints one (fix round 2).  In
+                                            memory only (#20). */
+  struct Client *hs_away_merge_link;   /**< The direct link whose merge lines this
+                                            record's away decision waits on (its
+                                            barrier PONG decides it once), or NULL
+                                            (fix round 5).  In memory only; cleared
+                                            when that link goes. */
 
   /* Session-anchored oper state.  Set when any session member runs
    * /OPER; cleared on /DEOPER.  Persisted in BounceSessionRecord so
@@ -1112,9 +1117,12 @@ extern void pending_bx_cleanup_link(struct Client *link);
 extern void bounce_emit_alias_caps(struct Client *cptr);
 
 /** Broadcast BX U identity updates to all aliases when primary changes.
+ * Session identity fields only (realname, host, fakehost, username,
+ * account) -- never caps, aw or la, which have emitters of their own.
  * This server's own copy of each alias (a local connection or a replica of
  * another server's) is updated directly; every other server gets
- * `BX U <alias> :<field>=<value>`, the value trailing (1.8).
+ * `BX U <alias> :<field>=<value>`, the value trailing (1.8; any new BX U
+ * field must be sent trailing).
  * @param[in] primary The primary client whose identity changed.
  * @param[in] field   Field name (host, realname, fakehost, etc.).
  * @param[in] value   New value for the field.
@@ -1572,9 +1580,13 @@ extern void ephemeral_purge_session(struct Client *cli);
  */
 extern void bounce_record_activity(struct Client *from);
 /** A local session connection's own away state changed (0 present, 1 away,
- * 2 AWAY *): put it on the wire (BX U aw=) so other servers judge attention
- * and aggregate away from the connection's own state, not the mirror. */
-extern void bounce_note_away_state(struct Client *who, int state);
+ * 2 AWAY *; con_pre_away): put it on the wire, `BX U <who> :aw=<n>[ <text>]`
+ * with the event's msgid and time (stored on its Connection with the state),
+ * so the server of the session's primary aggregates the session from each
+ * connection's own state (W3 Task 16) and webpush judges attention by it --
+ * never the session's state, which a present sibling hides.
+ * @param[in] who     The connection (ours). */
+extern void bounce_note_away_state(struct Client *who);
 
 
 /** Set a session's user-assigned name.
@@ -1616,26 +1628,95 @@ extern struct BouncerSession *bounce_find_any_session(const char *account);
  */
 extern int bounce_connection_count(struct BouncerSession *session);
 
-/** Compute effective away state across all session connections.
- * @param[in] session Bouncer session.
- * @param[out] effective_state 0=present, 1=away, 2=away-star-only.
- * @param[out] effective_msg Effective away message buffer (AWAYLEN+1).
- * @return 1 if effective state changed, 0 if unchanged.
- */
-extern int bounce_compute_effective_away(struct BouncerSession *session,
-                                          int *effective_state,
-                                          char *effective_msg);
+/** A session member's OWN away state (W3 Task 16): a connection of ours
+ * (a held ghost included) from its own connection (con_pre_away), another
+ * server's from what its server replicated (BX U aw=, kept on its User);
+ * never another server's client's Connection, which is its link's (#13).
+ * @param[in]  c     The member.
+ * @param[out] text  Its own away text (state 1) when known, else NULL; may
+ *                   be NULL.
+ * @param[out] ms    The time of the event that set it (0 unknown); may be NULL.
+ * @param[out] msgid That event's msgid ("" none); may be NULL.
+ * @return enum bounce_away_state (BOUNCE_AWAY_UNKNOWN when its server
+ *   never said). */
+extern int bounce_member_own_away(struct Client *c, const char **text,
+                                  uint64_t *ms, const char **msgid);
 
-/** Re-aggregate effective away state across a session and broadcast
- * (channel away-notify + S2S AWAY) if the effective state or message
- * changed. Mirrors the result onto cli_user->away of every local
- * session connection. Call when session membership changes (alias
- * attach, detach, ghost revive) so the network-visible away tracks
- * connection presence without requiring a fresh /away.
+/** Re-aggregate the session's away state over its members' own states and,
+ * when it or its text changed, tell the network and the channels (W3 Task
+ * 16: only the server holding the primary decides).  Call when the
+ * session's members change (a device attaches or leaves, a ghost revives,
+ * a demote) so the network-visible away tracks who is looking without a
+ * fresh /away.  Never after a promote (user, 2026-11-07: no presence
+ * change the user did not ask for).
  *
  * @param[in] session Session to re-aggregate.
  */
 extern void bounce_recompute_session_away(struct BouncerSession *session);
+
+/** A member's own away state was set (a local AWAY, its event stamped on
+ * its Connection): re-aggregate as bounce_recompute_session_away() does.
+ * The newest explicit event wins, so this member's text shows; its line
+ * carries the event's msgid and time on its first showing.
+ * @param[in] session The member's session.
+ * @param[in] told    The connection already answered (305/306), not told
+ *                    again by away-notify; or NULL. */
+extern void bounce_session_away_event(struct BouncerSession *session,
+                                      struct Client *told);
+
+/** An AWAY from another server's device @a c (an older server reports its
+ * device's own state that way): keep it as @a c's own state and text, and
+ * let every session of ours whose primary is ours decide again (the
+ * event's @a msgid and @a time_ms, the time it stands for).
+ * @return The number of sessions that decided: 0 when no session of ours
+ *   with our primary lists @a c. */
+extern int bounce_member_away_report(struct Client *c, const char *away,
+                                     const char *msgid, uint64_t time_ms);
+
+/** The holder's away barrier toward @a link, a direct server link whose
+ * burst has ended and to which our own burst is fully out (its end of
+ * burst, or the release of its burst gate after it): arm the barrier
+ * (struct Server away_barrier) and send the link a PING whose origin is
+ * the barrier token (bounce_away_barrier_token()), on the normal queue.
+ * The far side's merge lines -- made while it reads our burst -- come
+ * ahead of its PONG; bounce_away_barrier_pong() restates our decisions
+ * then (W3 Task 16 fix round 4; AWAY is not in the P10 burst, and a relink
+ * or a merge reconciles the two sides this way, user 2026-11-07).  Nothing
+ * runs at a promote. */
+extern void bounce_away_restate_to(struct Client *link);
+
+/** A PONG from @a link, a direct server link, whose destination is
+ * @a token: when it ends the link's away barrier (bounce_away_barrier_match()),
+ * clear the barrier and restate every session of ours whose primary is ours
+ * (a held ghost included) toward the link, once: AWAY from the primary with a
+ * minted msgid and the HLC's time -- the decided state toward an IRCv3-aware
+ * link, present included (a receiver showing it already does nothing,
+ * ms_away), and toward a legacy link only a state that is not present (its
+ * faces from our burst are fresh).  It restates the decision the session
+ * has; it never decides again (no recompute, user 2026-11-07).
+ * @return 1 when the PONG was the barrier's (the caller is done with it),
+ *   else 0 (the PONG is the link's own business, untouched). */
+extern int bounce_away_barrier_pong(struct Client *link, const char *token);
+
+/** @a link, a direct server link, registered (server_estab(), both
+ * directions): its away merge window opens when it is IRCv3-aware
+ * (bounce_away_merge_window()).  Until its barrier PONG, a session away
+ * decision due on a line from it is deferred and decided once at the PONG,
+ * from the whole merged membership (W3 Task 16 fix round 5). */
+extern void bounce_away_merge_link_up(struct Client *link);
+
+/** @a link, a direct server link, is going (exit_one_client(), after the
+ * clients behind it): every record whose away decision waits on its merge
+ * window is decided now, and no record names the link any more. */
+extern void bounce_away_merge_link_gone(struct Client *link);
+
+/** An AWAY from another server's session primary @a primary is that
+ * server's decision for the session: keep it as the session's state here
+ * (hs_effective_away / _msg; the virtual metadata keys read them, and this
+ * server compares against them when it decides); @a time_ms, the line's
+ * time tag, is the shown-event mark (hs_effective_away_ms). */
+extern void bounce_effective_away_heard(struct Client *primary,
+                                        const char *away, uint64_t time_ms);
 
 /** Activity replication: a connection's first message after a quiet
  * period puts its activity on the wire (BX U <numeric> la=<ts>), so every

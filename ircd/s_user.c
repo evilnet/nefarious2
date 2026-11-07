@@ -130,6 +130,10 @@ void free_user(struct User* user)
   if (--user->refcnt == 0) {
     if (user->away)
       MyFree(user->away);
+    if (user->own_away_msg)
+      MyFree(user->own_away_msg);
+    if (user->own_away_ev)
+      MyFree(user->own_away_ev);
     if (user->opername)
       MyFree(user->opername);
     /*
@@ -735,6 +739,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
         revive_target = NULL;
       }
 
+      /* Did the reviving socket say AWAY before registration -- present
+       * included (draft/pre-away; mu_away stamps every one)?  Read before
+       * the revive moves it onto the ghost and the socket's client goes. */
+      int pre_away_said = cli_connect(sptr)
+                          && con_pre_away_ms(cli_connect(sptr)) != 0;
       int revived = revive_target ? bounce_revive(revive_target, sptr) : -1;
 
       /* The event engine would not take this connection's socket for the
@@ -845,11 +854,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* The reviving socket's pre-registration AWAY (draft/pre-away),
          * carried over by bounce_revive(); applied here as the fresh
          * path does after the MOTD.  Through away_apply() so the
-         * session re-aggregates and the channels get away-notify. */
-        if (con_pre_away(cli_connect(ghost)))
+         * session re-aggregates and the channels get away-notify.  A
+         * declared present (AWAY with no text) is an explicit action too
+         * and is decided (W3 Task 16 fix round 3, item 4). */
+        if (pre_away_said || con_pre_away(cli_connect(ghost)))
           away_apply(ghost, ghost,
-                     con_pre_away(cli_connect(ghost)) == 2
-                       ? (char *)"*" : con_pre_away_msg(cli_connect(ghost)),
+                     con_pre_away(cli_connect(ghost)) == 2 ? (char *)"*"
+                     : con_pre_away(cli_connect(ghost)) == 1
+                       ? con_pre_away_msg(cli_connect(ghost)) : NULL,
                      0);
 
         /* Replay channel state */

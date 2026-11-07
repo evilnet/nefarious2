@@ -498,6 +498,8 @@ struct Connection
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
   char                con_pre_away_msg[AWAYLEN + 1]; /**< Pre-registration away message */
+  uint64_t            con_pre_away_ms; /**< When this connection last set its own away state (the event's HLC time, epoch ms); 0 never (W3 Task 16) */
+  char                con_pre_away_msgid[S2S_MSGID_BUFSIZE]; /**< That event's msgid; "" none */
   /* draft/persistence active profile (Phase 4 / M2).
    * Set via PERSISTENCE ATTACH pre-CAP-END or implicitly to
    * "default" at registration if not specified.  Per-connection
@@ -1097,6 +1099,10 @@ struct Client {
 #define con_pre_away(con)	((con)->con_pre_away)
 /** Get the pre-registration away message. */
 #define con_pre_away_msg(con)	((con)->con_pre_away_msg)
+/** Get the time of the connection's last own-away event. */
+#define con_pre_away_ms(con)	((con)->con_pre_away_ms)
+/** Get the msgid of the connection's last own-away event. */
+#define con_pre_away_msgid(con)	((con)->con_pre_away_msgid)
 /** Get the active draft/persistence profile name (per-connection). */
 #define con_active_profile(con)	((con)->con_active_profile)
 #define cli_active_profile(cli)	con_active_profile(cli_connect(cli))

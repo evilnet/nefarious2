@@ -183,6 +183,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     static unsigned long link_serials;
     cli_serv(cptr)->link_serial = ++link_serials;
   }
+  /* Its away merge window opens: until its barrier PONG, a session away
+   * decision due on a line from it is decided once, at that PONG (W3 Task
+   * 16 fix round 5). */
+  bounce_away_merge_link_up(cptr);
 
 /*    nextping = CurrentTime; */
 
@@ -660,6 +664,16 @@ int server_release_burst_gate(struct Client *cptr)
   server_ban_burst(cptr);
   sendcmdto_set_inbound_link(inbound);
 
-  return server_finish_burst(cptr);
+  {
+    int ret = server_finish_burst(cptr);
+
+    /* Our burst is fully out now: when the link's own end of burst came
+     * already (it waited behind the gate), the holder's away barrier PING
+     * goes, and its PONG restates the sessions' away decisions to the link
+     * (bounce_away_restate_to(); W3 Task 16 fix rounds 2 and 4). */
+    if (!IsBurst(cptr))
+      bounce_away_restate_to(cptr);
+    return ret;
+  }
 }
 

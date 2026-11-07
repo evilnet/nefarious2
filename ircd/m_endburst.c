@@ -120,9 +120,15 @@
 int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Channel *chan, *next_chan;
+  int was_gated;
 
   assert(0 != cptr);
   assert(0 != sptr);
+
+  /* A direct link still gated now has our burst's tail outstanding: the
+   * release sends it the away barrier PING (server_release_burst_gate),
+   * whether that release happens below or later. */
+  was_gated = MyConnect(sptr) && IsBurstGated(sptr);
 
   sendto_opmask_butone(0, SNO_NETWORK, "Completed net.burst from %C.",
   	sptr);
@@ -198,6 +204,14 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * presence_burst_sync just above. */
     if (IsIRCv3Aware(sptr))
       mdsync_link_eob(sptr);
+
+    /* W3 Task 16 (fix rounds 2 and 4): the holder's away barrier -- a
+     * PING behind our burst, now that the link's end of burst has come and
+     * our own burst to it is fully out (a gated link: at its release).  At
+     * its PONG, after every line the link made reading our burst, the
+     * holder restates its sessions' away decisions to it. */
+    if (!was_gated)
+      bounce_away_restate_to(sptr);
 
     /* Webhook plan 4: catch the peer up on the Keycloak events applied
      * here while it was away (netsplit, downtime, a new server); it

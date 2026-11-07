@@ -757,6 +757,17 @@ static int session_hold_wanted(struct BouncerSession *s, struct Client *cptr);
 static void session_roster_add(struct BouncerSession *session,
                                const char *alias_numeric,
                                const char *alias_profile);
+static void member_own_away_set(struct Client *c,
+                                const struct bounce_away_report *r,
+                                uint64_t ms, const char *msgid);
+static void own_away_send(struct Client *who, struct Client *link);
+static int member_away_changed(struct Client *c);
+static void session_away_decide(struct BouncerSession *s, struct Client *told);
+static void session_away_decide_as(struct BouncerSession *s,
+                                   struct Client *told, int force);
+static void away_merge_promote(struct BouncerSession *s);
+static void face_keeps_shown_away(struct BouncerSession *s, struct Client *from,
+                                  struct Client *face);
 static void bounce_retract_crossed_face(struct BouncerSession *s,
                                         const char *reason);
 static void bounce_bsx_end_devices(struct BouncerSession *s,
@@ -1971,6 +1982,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_hold_override = -1; /* Use default */
   session->hs_effective_away = 0;
   session->hs_effective_away_msg[0] = '\0';
+  session->hs_effective_away_ms = 0;
   session->hs_chancount = 0;
   session->hs_created = CurrentTime;
   session->hs_last_active = CurrentTime;
@@ -2497,8 +2509,8 @@ static void bounce_alias_take_channels(struct Client *c, struct Client *p)
  *     socket told first (#2), the session's modes;
  *  4. with @a take_channels, P's channels (a joiner has none of its own
  *     left; a re-pointed alias keeps the ones it has);
- *  5. the BX C (its channel list), then its caps and its own away state
- *     (BX U), which a receiver's re-file starts afresh. */
+ *  5. the BX C (its channel list) and its own away state (BX U, both from
+ *     bounce_announce_alias()), then its caps. */
 static void bounce_alias_enter_record(struct BouncerSession *record,
                                       struct Client *c, struct Client *p,
                                       int take_channels)
@@ -2513,8 +2525,6 @@ static void bounce_alias_enter_record(struct BouncerSession *record,
     bounce_alias_take_channels(c, p);
   bounce_announce_alias(record, c, p);
   bounce_emit_alias_caps(c);
-  if (cli_connect(c) && con_pre_away(cli_connect(c)) != 0)
-    bounce_note_away_state(c, con_pre_away(cli_connect(c)));
 }
 
 /** Every device of @a old follows @a new_primary when @a old stops being
@@ -3209,16 +3219,24 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr,
   /* Recompute session union caps for the new primary + existing aliases */
   bounce_recompute_session_caps(cptr);
 
-  /* Membership changed (HOLDING ghost replaced by live primary) — refresh
-   * effective away so any prior auto-away or stale aggregate clears. */
-  bounce_recompute_session_away(session);
+  /* Not a renumber in place: the ghost QUITs everywhere and the network
+   * sees the attaching client's own face -- its new N at registration, or
+   * the face it has (BOUNCER RESUME).  It keeps its own away, never the
+   * ghost's, and the record follows it (fix round 2, Part C). */
+  face_keeps_shown_away(session, cptr, cptr);
 
   /* A client already on the network (a BOUNCER RESUME): every server
    * re-points its copy to it now, before our ghost's QUIT -- a copy still
    * naming the ghost would end itself on that QUIT (and send BS X back).
-   * A registering client's caller announces it once its N is due. */
-  if (announce)
+   * Then the session's away is decided, the face being on the network.
+   * A registering client's caller announces it once its N is due, and
+   * registration decides after its N (a pre-registration AWAY,
+   * register_user()); deciding here, with no numeric yet, would send an
+   * AWAY from the server and move the record past the real line. */
+  if (announce) {
     bounce_broadcast(session, 'A', cli_yxx(cptr));
+    bounce_recompute_session_away(session);
+  }
   bounce_emit_connect_count(session);
 
   /* The ghost leaves.  The record names the client, so its exit ends
@@ -5885,6 +5903,7 @@ int bounce_db_restore(void)
     session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
     session->hs_effective_away = 0;
     session->hs_effective_away_msg[0] = '\0';
+    session->hs_effective_away_ms = 0;
     session->hs_created = (time_t)rec->bsr_created;
     session->hs_last_active = (time_t)rec->bsr_last_active;
     session->hs_last_msg_time = (time_t)rec->bsr_last_msg_time;
@@ -6256,10 +6275,13 @@ static void bounce_send_primary_bsa(struct BouncerSession *s, struct Client *lin
 {
   struct Client *p = s->hs_client;
 
-  if (p && MyConnect(p) && IsUser(p) && !IsBouncerAlias(p) && !IsBouncerHold(p))
+  if (p && MyConnect(p) && IsUser(p) && !IsBouncerAlias(p) && !IsBouncerHold(p)) {
     sendcmdto_one(&me, CMD_BOUNCER_SESSION, link, "A %s %s %s %lu 0",
                   s->hs_account, s->hs_sessid, cli_yxx(p),
                   (unsigned long)s->hs_last_active);
+    /* Its own away state, as every BS A of a primary of ours. */
+    own_away_send(p, link);
+  }
 }
 
 /** Announce the live aliases of session @a s on the link @a link: a BX C
@@ -6370,15 +6392,13 @@ static void bounce_announce_aliases_to(struct BouncerSession *s,
                     "U %s :caps=%s",
                     s->hs_aliases[a].ba_numeric, hex);
     }
-    /* And its own away state (AWAY * in particular), which the
-     * peer's attention rule must not read off the mirror. */
+    /* And its own away state and text, which the server of the primary
+     * aggregates the session from and the peer's attention rule reads
+     * (W3 Task 16); never the session's state, which a present sibling
+     * hides. */
     if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
-        && MyConnect(alias) && cli_connect(alias)
-        && con_pre_away(cli_connect(alias)) != 0)
-      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link,
-                    "U %s :aw=%d",
-                    s->hs_aliases[a].ba_numeric,
-                    con_pre_away(cli_connect(alias)));
+        && MyConnect(alias))
+      own_away_send(alias, link);
 
     /* Per redesign C.3 + B.1 + B.6: emit BS A per alias to carry
      * per-alias last_active + caps so the receiver can populate
@@ -6474,6 +6494,11 @@ static void bounce_announce_session_to(struct BouncerSession *s,
                   s->hs_account, s->hs_sessid,
                   cli_yxx(s->hs_client),
                   (unsigned long)s->hs_last_active);
+  /* Our primary's own away state and text (W3 Task 16): the peer keeps
+   * it for webpush, and decides from it should the session's primary
+   * come to be one of its own while ours stays a member. */
+  if (s->hs_client && MyConnect(s->hs_client))
+    own_away_send(s->hs_client, link);
 
   /* The Keycloak user the session belongs to (a new peer's attach
    * gate and merges read it).  After BS A: the receiver files it under
@@ -6563,6 +6588,14 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
                           extra ? extra : "",
                           (unsigned long)la, caps);
     bounce_emit_session_kc_id(session);
+    /* The primary's own away state and text (W3 Task 16), after the BS A
+     * that names it: a state set before the session existed was never
+     * reported (bounce_note_away_state() skips an account with no
+     * session), and the other servers keep it for webpush and for the
+     * day the session's primary is one of theirs while ours stays. */
+    if (extra && session->hs_client && MyConnect(session->hs_client)
+        && 0 == strcmp(cli_yxx(session->hs_client), extra))
+      own_away_send(session->hs_client, NULL);
     break;
   }
 
@@ -6661,6 +6694,11 @@ static int bounce_held_copy_yields(struct BouncerSession *s,
             "live primary %s%s%s (%s)", s->hs_sessid, s->hs_account,
             cli_name(sptr), cli_name(peer), ghost ? "; ghost " : "",
             ghost ? cli_name(ghost) : "", site);
+  /* The peer's primary is the session's face here now, a face our legacy
+   * links know by its own N (our ghost leaves them by Q): it keeps its own
+   * away, as they show it, and the record follows it (fix round 2, A-1).
+   * The holder's restatement at its away barrier's PONG reconciles. */
+  face_keeps_shown_away(s, peer, peer);
   if (t_active(&s->hs_hold_timer))
     timer_del(&s->hs_hold_timer);
   s->hs_state = BOUNCE_ACTIVE;
@@ -7614,6 +7652,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     session->hs_hold_override = -1;
     session->hs_effective_away = 0;
     session->hs_effective_away_msg[0] = '\0';
+    session->hs_effective_away_ms = 0;
     session->hs_created = created;
     session->hs_last_active = created;
     session->hs_attach_count = attach_count;
@@ -7782,6 +7821,11 @@ bsc_forward:
       if (bsa == BOUNCE_BSA_INSTALL
           && !bounce_hs_client_assign_checked(session, primary, "BS A"))
         bsa = BOUNCE_BSA_IGNORE;
+      /* A face the network knows by its own N (an attach's, a held copy's
+       * yield): it keeps its own away, and the record follows it (fix
+       * round 2, A-3). */
+      if (bsa == BOUNCE_BSA_INSTALL)
+        face_keeps_shown_away(session, primary, primary);
       if (bsa != BOUNCE_BSA_IGNORE)
         ircd_strncpy(session->hs_ghost_numeric, parv[4],
                      sizeof(session->hs_ghost_numeric));
@@ -8385,6 +8429,11 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   if (session->hs_alias_count <= 0)
     return -1;
 
+  /* A merge decision pending on a link goes first, with the membership
+   * before this promote (fix round 5): the promote itself recomputes
+   * nothing. */
+  away_merge_promote(session);
+
   /* A1: Save old primary reference before any changes.
    * May be NULL in SQUIT path (nulled by bounce_prepare_squit_promotions). */
   old_primary = session->hs_client;
@@ -8565,6 +8614,9 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
      * it (bounce_bse_action()). */
     handoff_set(session, MyConnect(alias) ? NULL : winner_numeric);
     session->hs_client = alias;
+    /* The promoted face shows what the session's face showed: no line, no
+     * aggregation (no recompute at a promote, user 2026-11-07). */
+    face_keeps_shown_away(session, old_primary, alias);
     session->hs_state = BOUNCE_ACTIVE;
     session->hs_last_active = CurrentTime;
     session->hs_disconnect_time = 0;
@@ -9621,13 +9673,22 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   bounce_accumulate_and_reset_primary(session, ghost);
   cli_firsttime(ghost) = cli_firsttime(temp);
 
-  /* The new socket's pre-registration AWAY (draft/pre-away).  Only when
-   * it declared one: a socket that said nothing leaves the ghost's own
-   * state as it was (an AWAY set before the hold survives the revive). */
-  if (con_pre_away(temp_con)) {
+  /* The new socket's pre-registration AWAY (draft/pre-away), present
+   * included.  Only when it declared one: a socket that said nothing
+   * leaves the ghost's own state as it was (an AWAY set before the hold
+   * survives the revive). */
+  if (con_pre_away(temp_con) || con_pre_away_ms(temp_con)) {
+    /* A socket that said AWAY with no text before registration declared
+     * itself present (stamped by mu_away): an explicit action, shown too
+     * (fix round 3, item 4); one that said nothing leaves the ghost's. */
     con_pre_away(ghost_con) = con_pre_away(temp_con);
     ircd_strncpy(con_pre_away_msg(ghost_con), con_pre_away_msg(temp_con),
                  AWAYLEN + 1);
+    /* ... with its event's time and msgid, which the session's decision
+     * orders and shows it by (#4: the revive's fast path). */
+    con_pre_away_ms(ghost_con) = con_pre_away_ms(temp_con);
+    ircd_strncpy(con_pre_away_msgid(ghost_con), con_pre_away_msgid(temp_con),
+                 sizeof(con_pre_away_msgid(ghost_con)));
   }
   /* Record connect event in connection history */
   bounce_history_connect(session, con_sock_ip(ghost_con),
@@ -10099,6 +10160,10 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
                  sizeof(session->hs_ghost_numeric));
   }
 
+  /* The rebound client is the same face, showing the away it showed; the
+   * record's state follows it. */
+  face_keeps_shown_away(session, ghost, ghost);
+
   /* Update local aliases' alias_primary pointer (struct address didn't
    * change, but be defensive — the session might have been restored
    * with stale state). */
@@ -10334,6 +10399,12 @@ static void bounce_announce_alias(struct BouncerSession *session,
                            session->hs_account, session->hs_sessid,
                            *alias_modes ? "+" : "+", alias_modes,
                            chanlist_buf);
+  /* Right behind it, its own away state with its event (W3 Task 16): a
+   * receiver that refused this client's N at a merge (a D.2 keep) learns
+   * the client only from this BX C, and the server of the primary decides
+   * the session from the report -- a demoted face's own away included
+   * (fix round 3). */
+  own_away_send(alias, NULL);
 }
 
 /** Is the survivor of a swap plaintext for m_join's +Z rule, as this
@@ -10815,8 +10886,6 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
     ircd_strncpy(ba->ba_server, cli_yxx(&me), sizeof(ba->ba_server));
     ba->ba_caps = 0;
     ba->ba_caps_known = 0;
-    ba->ba_away = 0;
-    ba->ba_away_known = 0;
   }
 
   bounce_db_del(session->hs_sessid);
@@ -10855,6 +10924,12 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
               cli_name(demoted_alias));
     return -1;
   }
+  /* The new primary is the session's face here now.  A swap renumbered our
+   * legacy links' face in place (legacy_done), which keeps its away: so
+   * does ours.  Otherwise they had the demoted face's QUIT and know the
+   * new primary by its own N: it keeps its own away (fix round 2, A-1). */
+  face_keeps_shown_away(session, legacy_done ? demoted_alias : new_primary,
+                        new_primary);
   /* The record now mirrors the new primary's server (the demote set the
    * origin): the numeric it knows the primary by, and that server's copy,
    * which is live, stay in step with it -- a member's end resolves the
@@ -11105,6 +11180,10 @@ int bounce_yield_held_ghost(struct BouncerSession *session, struct Client *ghost
    * another account already, so it does not refuse): the session is live
    * again, held by its server; no hold timer runs here. */
   installed = bounce_hs_client_assign_checked(target, new_primary, "yield");
+  /* The legacy links renumbered the ghost's face to it, and keep the away
+   * it showed: so does our new face. */
+  if (installed)
+    face_keeps_shown_away(target, ghost, new_primary);
   if (!installed)
     log_write(LS_USER, L_WARNING, 0, "Bouncer yield: session %s of %s "
               "refused %s as its primary after the same-nick verdict; the "
@@ -13055,6 +13134,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
 {
   struct Client *old_client;
   struct Client *new_client;
+  int face_ours = 0;   /* the line names our record's own primary as new */
   const char *old_numeric;
   const char *new_numeric;
   const char *sessid;
@@ -13301,6 +13381,9 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
      * (a session ending exits each roster entry it finds, and would exit a
      * primary twice).  Before the record is decided: a yield below exits a
      * client, and nothing after it reads the roster for this one. */
+    /* A merge decision pending on a link goes first, with the membership
+     * before this promote (fix round 5): the install recomputes nothing. */
+    away_merge_promote(bsess);
     session_roster_drop_account(new_client, bsess);
     /* A record whose primary slot holds our own client is ours to decide,
      * as at BS A and BS D (bounce_bxp_session_action): a BX P naming that
@@ -13323,6 +13406,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       case BOUNCE_BXP_APPLY:
         break;
       case BOUNCE_BXP_KEEP:
+        face_ours = slot == new_client;
         if (slot == new_client)
           log_write(LS_USER, L_INFO, 0,
                     "BX P: %s names our %s %s as the new face of %s's session "
@@ -13389,6 +13473,13 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       bounce_recompute_session_away(bsess);
     }
   }
+
+  /* The new face shows what the old one showed (I-1): every server that
+   * runs this line renumbers the face in place, as a legacy link does, and
+   * keeps its away -- no line, no aggregation.  Not over our own primary,
+   * whose away is ours to decide. */
+  if (!face_ours)
+    face_keeps_shown_away(NULL, old_client, new_client);
 
   /* C3: Remove old_client from channels silently, then exit with
    * FLAG_BOUNCER_INTERNAL_DESTROY to suppress S2S QUIT propagation —
@@ -13688,6 +13779,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
                              alias_profile,
                              chanlist_buf);
     }
+    /* Right behind the BX C: the device's own away state (a
+     * pre-registration AWAY, draft/pre-away) with its event's msgid and
+     * time, which registration's pre-away block never reports for this
+     * path (W3 Task 16, defect (b); #4).  The server of the primary
+     * decides the session from it. */
+    own_away_send(sptr, NULL);
   } /* end YYXXX numeric scope */
 
   /* --- Step 9: Send welcome sequence to the alias client ---
@@ -13802,10 +13899,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
             cli_name(sptr), user->username, user->realhost,
             session->hs_sessid, cli_name(&me), cli_sock_ip(sptr));
 
-  /* New session connection — re-aggregate effective away. A present
-   * alias attaching to an away primary should flip the session to
-   * present (and broadcast away-notify) even though no /away was typed. */
-  bounce_recompute_session_away(session);
+  /* New session connection -- re-aggregate the session's away where we
+   * hold its primary (a device of another server's primary was reported
+   * above, and that server decides).  A present device attaching to an
+   * away session makes it present though no /away was typed; its own
+   * pre-registration text shows if it is the newest event. */
+  session_away_decide(session, NULL);
 
   /* Publish initial cap state to the network so other servers can
    * decide BX M vs BX E for this alias without waiting for a
@@ -13944,8 +14043,6 @@ static void session_roster_add(struct BouncerSession *session,
     ba->ba_last_active = CurrentTime;
     ba->ba_caps = 0;
     ba->ba_caps_known = 0;
-    ba->ba_away = 0;
-    ba->ba_away_known = 0;
     /* M4b: record the alias's active draft/persistence profile,
      * received as the positional field after modes.  Old peers
      * don't send this; default to empty (= "default" at the
@@ -14609,6 +14706,19 @@ track_alias:
       bounce_send_member_snomask(alias, session);
   }
 
+  /* The primary is ours: we decide the session's away with the device in
+   * it (W3 Task 16, (c)) -- when we know the device's own state: a device
+   * re-filed or a face converted in place, whose server reported it
+   * before.  A new device's own state comes right behind its BX C (BX U
+   * aw=), and that line decides: deciding now, on a device we know
+   * nothing of, would count it as looking and show an away user present
+   * for one line when it attached away or with AWAY *.  Its event keeps
+   * the time it had, so after a relink the text shown changes only for a
+   * newer event (fix round 2). */
+  if (session && MyConnect(primary) && cli_user(alias)
+      && cli_user(alias)->own_away_known)
+    session_away_decide(session, NULL);
+
   Debug((DEBUG_INFO, "BX C: created alias %s for primary %s (%s)",
          alias_numeric, primary_numeric, cli_name(primary)));
 
@@ -15071,33 +15181,48 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
    * on its own server).  Applies to aliases AND primaries -- the numeric
    * may name a primary, which the alias guard below would otherwise
    * defer forever waiting for a BX C that never comes. */
-  /* aw=<0|1|2>: a connection's OWN away state (0 present, 1 away,
-   * 2 AWAY *), replicated so the attention rule and the away aggregation
-   * on other servers see the connection, not the session's mirror.
-   * Applies to aliases AND primaries, like la=. */
+  /* aw=<0|1|2>[ <text>]: a connection's OWN away state (0 present,
+   * 1 away, 2 AWAY *) and, for 1, its own text (W3 Task 16; a sender
+   * before it gave the state alone, and an older receiver atoi()s the
+   * state and ignores the rest).  Kept on the connection's own User for
+   * any user numeric -- it follows the client through a promote, a BX P,
+   * a yield or a swap, and arrives in any order with BS A -- so the
+   * server holding its session's primary aggregates the session from it,
+   * and webpush judges attention by it.  The report carries the event it
+   * stands for (its msgid and time; fix round 2), kept with the state, and
+   * that server decides again now: the newest event's text shows, and its
+   * line reuses the event only on its first showing. */
   if (0 == strncmp(field_value, "aw=", 3)) {
     struct Client *who = bx_find_user_strict(alias_numeric);
-    int aw = atoi(field_value + 3);
-    if (who && IsUser(who) && IsAccount(who) && aw >= 0 && aw <= 2) {
-      struct AccountSessions *as = bounce_find_by_account(cli_user(who)->account);
-      struct BouncerSession *sess;
-      int i;
-      for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
-        if (!IsBouncerAlias(who)) {
-          if (sess->hs_client == who) {
-            sess->hs_primary_away = aw;
-            sess->hs_primary_away_known = 1;
-          }
-          continue;
-        }
-        for (i = 0; i < sess->hs_alias_count; i++)
-          if (0 == strcmp(sess->hs_aliases[i].ba_numeric, alias_numeric)) {
-            sess->hs_aliases[i].ba_away = aw;
-            sess->hs_aliases[i].ba_away_known = 1;
-          }
+    struct bounce_away_report r;
+    char ev_msgid[64] = "";
+    uint64_t ev_time = cli_s2s_time_ms(cptr);
+
+    ircd_strncpy(ev_msgid, cli_s2s_msgid(cptr), sizeof(ev_msgid));
+    /* Onward first, with the report's own msgid and time. */
+    if (!is_replay) {
+      if (ev_msgid[0]) {
+        sendcmdto_set_s2s_tags(ev_time, ev_msgid);
+        sendcmdto_want_s2s_tags(1);
       }
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                               "U %s :%s", parv[2], parv[3]);
     }
-    goto forward;
+    if (who && IsUser(who) && !MyConnect(who)
+        && bounce_away_parse(field_value + 3, BOUNCE_AWAY_FORM_REPORT, AWAYLEN,
+                             &r) != BOUNCE_AWAY_UNKNOWN) {
+      /* With the event it stands for (fix round 2: the newest explicit
+       * event wins): the report's time tag -- a re-report (a burst, a
+       * re-point, a BS A) carries its stored event's -- else now while its
+       * server is live, else none (0) while it bursts. */
+      uint64_t ms = bounce_away_report_ms(ev_time,
+                                          IsServer(sptr) && IsBurstOrBurstAck(sptr),
+                                          history_event_time_ms(NULL));
+
+      member_own_away_set(who, &r, ms, ev_time ? ev_msgid : "");
+      member_away_changed(who);
+    }
+    return 0;
   }
   if (0 == strncmp(field_value, "la=", 3)) {
     struct Client *who = bx_find_user_strict(alias_numeric);
@@ -16934,29 +17059,61 @@ void ephemeral_purge_session(struct Client *cli)
   chathistory_ephemeral_purge(cli);
 }
 
-/** Record per-connection activity for bouncer-aware tiebreaking.
- *
- * Per redesign B.1: D.2's primary-identity tiebreaker operates on
- * per-connection granularity (oldest cli_firsttime → highest
- * last_active → lex on numeric).  This requires tracking last_active
- * per connection — primary's value lives on session->hs_last_active,
- * each alias's on its hs_aliases[i].ba_last_active entry.
- *
- * Called from the general idle-update chokepoints so every non-trivial
- * activity from a bouncer connection bumps the right slot.
- */
-void bounce_note_away_state(struct Client *who, int state)
+/** Report @a who's own away state, a connection of ours: `BX U <YYXXX>
+ * :aw=<0|1|2>[ <text>]` (W3 Task 16: the text of an away with one; an
+ * older receiver atoi()s the state and ignores it), to @a link, or to
+ * every IRCv3-aware link when @a link is NULL, always with the event that
+ * set it -- its msgid and time, stored on the Connection with the state
+ * (fix round 2): a re-report (the burst, a BS A, a re-point, the attach
+ * right behind BX C) carries the event it stands for, so the server
+ * deciding the session orders it by when it happened, not by when it
+ * arrived.  The server of the session's primary aggregates from it, and
+ * webpush judges attention by it. */
+static void own_away_send(struct Client *who, struct Client *link)
 {
-  char full_numeric[16];
+  struct Connection *con;
+  char full[6];
+  int state;
+
+  if (!who || !MyConnect(who) || !IsUser(who) || !cli_user(who)
+      || !cli_user(who)->server || !(con = cli_connect(who)))
+    return;
+  state = con_pre_away(con);
+  if (state > BOUNCE_AWAY_STAR)
+    return;
+  ircd_snprintf(0, full, sizeof(full), "%s%s",
+                cli_yxx(cli_user(who)->server), cli_yxx(who));
+  if (con_pre_away_msgid(con)[0] && con_pre_away_ms(con))
+    sendcmdto_set_s2s_tags(con_pre_away_ms(con), con_pre_away_msgid(con));
+  if (link) {
+    /* sendcmdto_one() takes the armed msgid and time, and clears them. */
+    if (state == BOUNCE_AWAY_AWAY && con_pre_away_msg(con)[0])
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s :aw=1 %s", full,
+                    con_pre_away_msg(con));
+    else
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, link, "U %s :aw=%d", full,
+                    state);
+    return;
+  }
+  if (con_pre_away_msgid(con)[0] && con_pre_away_ms(con))
+    sendcmdto_want_s2s_tags(1);
+  if (state == BOUNCE_AWAY_AWAY && con_pre_away_msg(con)[0])
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL, "U %s :aw=1 %s",
+                             full, con_pre_away_msg(con));
+  else
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL, "U %s :aw=%d",
+                             full, state);
+}
+
+/** See include/bouncer_session.h. */
+void bounce_note_away_state(struct Client *who)
+{
   if (!who || !MyConnect(who) || !IsUser(who) || !IsAccount(who)
       || !cli_user(who) || !cli_user(who)->server)
     return;
   if (!bounce_has_sessions(cli_user(who)->account))
     return;
-  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
-                cli_yxx(cli_user(who)->server), cli_yxx(who));
-  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "U %s :aw=%d", full_numeric, state);
+  own_away_send(who, NULL);
 }
 
 int bounce_activity_quiet(const char *account)
@@ -16968,6 +17125,17 @@ int bounce_activity_quiet(const char *account)
   return quiet < 1 ? 1 : (int)quiet;
 }
 
+/** Record per-connection activity for bouncer-aware tiebreaking.
+ *
+ * Per redesign B.1: D.2's primary-identity tiebreaker operates on
+ * per-connection granularity (oldest cli_firsttime → highest
+ * last_active → lex on numeric).  This requires tracking last_active
+ * per connection — primary's value lives on session->hs_last_active,
+ * each alias's on its hs_aliases[i].ba_last_active entry.
+ *
+ * Called from the general idle-update chokepoints so every non-trivial
+ * activity from a bouncer connection bumps the right slot.
+ */
 void bounce_record_activity(struct Client *from)
 {
   struct AccountSessions *as;
@@ -17056,216 +17224,595 @@ time_t bounce_session_last_active(struct BouncerSession *session)
   return best;
 }
 
-/** Compute effective away state across all session connections.
- *
- * Implements the draft/pre-away aggregation rules:
- * 1. Filter out AWAY * connections (they "don't exist")
- * 2. Of remaining:
- *    - ANY present → effective state is PRESENT (no AWAY broadcast)
- *    - ALL have explicit AWAY messages → effective is AWAY (most recent msg)
- *    - NO connections remain → effective is AWAY (empty message)
- *
- * @param[in] session Bouncer session to compute for.
- * @param[out] effective_state Set to 0 (present), 1 (away), 2 (away-star-only).
- * @param[out] effective_msg Buffer for the effective away message (AWAYLEN+1).
- * @return 1 if effective state changed from previous, 0 if unchanged.
- */
-int bounce_compute_effective_away(struct BouncerSession *session,
-                                   int *effective_state,
-                                   char *effective_msg)
+/** Another server's member's last own-away event (W3 Task 16 fix round
+ * 2): the time and msgid its report carried, kept with its own state on
+ * its User -- allocated only for a client that reported one. */
+struct UserAwayEvent {
+  uint64_t ms;                       /**< the event's time (epoch ms); 0 none */
+  char msgid[S2S_MSGID_BUFSIZE];     /**< its msgid; "" none */
+};
+
+/** See include/bouncer_session.h. */
+int bounce_member_own_away(struct Client *c, const char **text, uint64_t *ms,
+                           const char **msgid)
 {
-  struct Client *primary;
-  int has_present = 0;
-  int has_away = 0;
-  const char *latest_away_msg = NULL;
+  if (text)
+    *text = NULL;
+  if (ms)
+    *ms = 0;
+  if (msgid)
+    *msgid = "";
+  if (!c || !IsUser(c) || !cli_user(c))
+    return BOUNCE_AWAY_UNKNOWN;
+  if (MyConnect(c)) {
+    /* Ours, a held ghost included: its own connection says. */
+    struct Connection *con = cli_connect(c);
+
+    if (!con || con_pre_away(con) > BOUNCE_AWAY_STAR)
+      return BOUNCE_AWAY_UNKNOWN;
+    if (con_pre_away(con) == BOUNCE_AWAY_AWAY && text
+        && con_pre_away_msg(con)[0])
+      *text = con_pre_away_msg(con);
+    if (ms)
+      *ms = con_pre_away_ms(con);
+    if (msgid)
+      *msgid = con_pre_away_msgid(con);
+    return con_pre_away(con);
+  }
+  /* Another server's: what its server replicated, never the link's
+   * Connection (#13). */
+  if (!cli_user(c)->own_away_known)
+    return BOUNCE_AWAY_UNKNOWN;
+  if (cli_user(c)->own_away == BOUNCE_AWAY_AWAY && text)
+    *text = cli_user(c)->own_away_msg;
+  if (cli_user(c)->own_away_ev) {
+    if (ms)
+      *ms = cli_user(c)->own_away_ev->ms;
+    if (msgid)
+      *msgid = cli_user(c)->own_away_ev->msgid;
+  }
+  return cli_user(c)->own_away;
+}
+
+/** Keep @a c's own away state as its server replicates it (BX U aw=, or
+ * an older server's AWAY from it, read by bounce_away_parse()), with the
+ * event it stands for (@a ms, @a msgid: fix round 2).  An untimed report
+ * of what we have already (an older server's re-report while it bursts)
+ * keeps the event we had.  Another server's client only. */
+static void member_own_away_set(struct Client *c,
+                                const struct bounce_away_report *r,
+                                uint64_t ms, const char *msgid)
+{
+  struct User *u = cli_user(c);
+  int same;
+
+  if (!u || MyConnect(c) || r->state < BOUNCE_AWAY_PRESENT
+      || r->state > BOUNCE_AWAY_STAR)
+    return;
+  same = u->own_away_known && u->own_away == r->state
+         && (r->state != BOUNCE_AWAY_AWAY
+             || (!u->own_away_msg == !r->text
+                 && (!r->text || (strlen(u->own_away_msg) == r->len
+                                  && 0 == memcmp(u->own_away_msg, r->text,
+                                                 r->len)))));
+  if (!same) {
+    u->own_away_known = 1;
+    u->own_away = (unsigned char)r->state;
+    if (u->own_away_msg) {
+      MyFree(u->own_away_msg);
+      u->own_away_msg = NULL;
+    }
+    if (r->state == BOUNCE_AWAY_AWAY && r->text) {
+      u->own_away_msg = (char *)MyMalloc(r->len + 1);
+      memcpy(u->own_away_msg, r->text, r->len);
+      u->own_away_msg[r->len] = '\0';
+    }
+  }
+  if (!ms && same)
+    return;
+  if (!u->own_away_ev) {
+    if (!ms)
+      return;
+    u->own_away_ev = (struct UserAwayEvent *)MyMalloc(sizeof(*u->own_away_ev));
+  }
+  u->own_away_ev->ms = ms;
+  ircd_strncpy(u->own_away_ev->msgid, msgid ? msgid : "",
+               sizeof(u->own_away_ev->msgid));
+}
+
+/** The away aggregation's view of session @a s: its primary first, then
+ * every live device on its roster, each with its own state and the event
+ * that set it (bounce_member_own_away()), whose msgid goes to @a msgids.
+ * @return the number of members. */
+static int session_away_members(struct BouncerSession *s,
+                                struct bounce_away_member *m,
+                                const char **msgids)
+{
+  int n = 0;
   int i;
 
-  assert(0 != session);
-  assert(0 != effective_state);
-  assert(0 != effective_msg);
-
-  primary = session->hs_client;
-  effective_msg[0] = '\0';
-
-  /* Check primary connection's per-connection away state.
-   * con_pre_away tracks the primary's own away state (0=present, 1=away, 2=away-star),
-   * independent of alias commands.  con_pre_away_msg stores the primary's per-connection
-   * away message.  cli_user(primary)->away reflects the EFFECTIVE state and is updated
-   * by the caller after this computation. */
-  if (primary && MyUser(primary)) {
-    int primary_state = con_pre_away(cli_connect(primary));
-    if (primary_state == 2) {
-      /* AWAY * — invisible to aggregation */
-    } else if (primary_state == 1) {
-      has_away = 1;
-      if (con_pre_away_msg(cli_connect(primary))[0])
-        latest_away_msg = con_pre_away_msg(cli_connect(primary));
-    } else {
-      /* Present */
-      has_present = 1;
-    }
+  if (s->hs_client) {
+    m[n].state = bounce_member_own_away(s->hs_client, &m[n].text, &m[n].ms,
+                                        &msgids[n]);
+    n++;
   }
+  for (i = 0; i < s->hs_alias_count && n < BOUNCER_MAX_ALIASES + 1; i++) {
+    struct Client *al = findNUser(s->hs_aliases[i].ba_numeric);
 
-  /* Check alias connections */
-  for (i = 0; i < session->hs_alias_count; i++) {
-    struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
-    if (!alias || !IsBouncerAlias(alias))
+    if (!al || !IsBouncerAlias(al) || al == s->hs_client)
       continue;
-    if (MyUser(alias)) {
-      int alias_state = con_pre_away(cli_connect(alias));
-      if (alias_state == 2) {
-        /* AWAY * — invisible to aggregation */
-      } else if (alias_state == 1) {
-        has_away = 1;
-        if (con_pre_away_msg(cli_connect(alias))[0])
-          latest_away_msg = con_pre_away_msg(cli_connect(alias));
-      } else {
-        has_present = 1;
-      }
-    } else if (session->hs_aliases[i].ba_away_known) {
-      /* Remote alias with its own state replicated (BX U aw=). */
-      if (session->hs_aliases[i].ba_away == 2) {
-        /* AWAY * — invisible to aggregation */
-      } else if (session->hs_aliases[i].ba_away == 1) {
-        has_away = 1;
-      } else {
-        has_present = 1;
-      }
-    } else {
-      /* Remote alias — check its user away state */
-      if (cli_user(alias) && cli_user(alias)->away)
-        has_away = 1;
-      else
-        has_present = 1;
+    m[n].state = bounce_member_own_away(al, &m[n].text, &m[n].ms, &msgids[n]);
+    n++;
+  }
+  return n;
+}
+
+/** Decide session @a s's away state (W3 Task 16; user decisions
+ * 2026-11-07: the server holding the primary decides; on any other server
+ * this does nothing -- it reported its devices, and hears the primary's
+ * AWAY).  Aggregates every member's own state (bounce_away_aggregate():
+ * the newest explicit event's text wins) and, when the session's state or
+ * its text changed: every local member's away is set to it, AWAY goes
+ * from the primary to every link (a star as the configured word to a
+ * legacy one, away_send_to_servers()) and the primary's channels here are
+ * told (away-notify).  The line carries the winning event's msgid and
+ * time the first time that event is shown (bounce_away_first_showing():
+ * newer than hs_effective_away_ms); any other decision -- a member
+ * leaving, a merge, an older event surfacing again -- mints its own.
+ *
+ * A decision due on a line from a direct link in its merge window waits
+ * for that link's barrier PONG (the record is marked pending on it), where
+ * it is decided once from the whole merged membership (fix round 5:
+ * bounce_away_merge_step()); with @a force (that PONG, a promote's flush,
+ * the link going) it decides now.  Any decision that runs clears the mark:
+ * it computed the whole current state.
+ *
+ * @param[in] s     The session.
+ * @param[in] told  A connection of ours already answered (305/306): not
+ *                  told again by away-notify; or NULL.
+ * @param[in] force Decide now even on a line from a link in its window. */
+static void session_away_decide_as(struct BouncerSession *s,
+                                   struct Client *told, int force)
+{
+  struct bounce_away_member m[BOUNCER_MAX_ALIASES + 1];
+  const char *msgids[BOUNCER_MAX_ALIASES + 1];
+  struct Client *primary;
+  const char *agg;
+  const char *fallback;
+  char eff_msg[AWAYLEN + 1];
+  char away_msgid[64] = "";
+  uint64_t time_ms;
+  int n, prev, now, winner, i;
+
+  if (!s || !s->hs_client)
+    return;
+  primary = s->hs_client;
+  /* Defensive: if exit_one_client failed to null hs_client when the
+   * primary was freed (pre-existing burst-desync can leave hs_client !=
+   * dying bcptr, so the session-owner cleanup branch skips), MyConnect /
+   * cli_user reads below would deref freed memory.  IsUser is a cheap
+   * sanity gate -- a freed Client has cli_status zeroed in the typical
+   * free path.  Not bulletproof against full UAF (reused memory could
+   * pass), but pairs with the tokenHash sweep in exit_one_client. */
+  if (!IsUser(primary) || !cli_user(primary)) {
+    s->hs_client = NULL;
+    s->hs_away_merge_link = NULL;
+    return;
+  }
+
+  /* One writer per session: the server of its primary (a held ghost
+   * included).  Any other server has reported its own devices (BX U aw=)
+   * and leaves the session to that one; the AWAY it then hears from the
+   * primary is the session's (bounce_effective_away_heard()).  A merge
+   * decision pending here is the new holder's now. */
+  if (bounce_away_role(MyConnect(primary)) != BOUNCE_AWAY_DECIDES) {
+    s->hs_away_merge_link = NULL;
+    return;
+  }
+
+  /* A line from a direct link in its merge window (a relink's merge lines
+   * arrive one at a time: deciding on each would show an away and back):
+   * wait for its barrier PONG (fix round 5).  Our own clients' actions, a
+   * timer, a link out of its window: decide now. */
+  if (!force) {
+    struct Client *in = sendcmdto_inbound_link();
+    int from_link = in && IsServer(in) && MyConnect(in) && cli_serv(in);
+
+    if (bounce_away_merge_step(
+          bounce_away_merge_decide_event(from_link,
+                                         from_link && cli_serv(in)->away_merge),
+          s->hs_away_merge_link != NULL, s->hs_away_merge_link == in)
+        == BOUNCE_AWAY_MERGE_DEFER) {
+      s->hs_away_merge_link = in;
+      return;
     }
   }
+  s->hs_away_merge_link = NULL;
 
-  /* Apply aggregation rules */
-  if (has_present) {
-    *effective_state = 0; /* PRESENT — at least one non-AWAY* connection is present */
-    effective_msg[0] = '\0';
-  } else if (has_away) {
-    *effective_state = 1; /* AWAY — all non-AWAY* connections are away */
-    if (latest_away_msg)
-      ircd_strncpy(effective_msg, latest_away_msg, AWAYLEN + 1);
-  } else {
-    *effective_state = 2; /* All connections are AWAY * — effectively hidden */
-    effective_msg[0] = '\0';
+  n = session_away_members(s, m, msgids);
+  prev = s->hs_effective_away;
+  fallback = feature_str(FEAT_AWAY_STAR_MSG);
+  now = bounce_away_aggregate(m, n,
+                              prev == BOUNCE_AWAY_AWAY ? s->hs_effective_away_msg
+                                                       : NULL,
+                              fallback, &agg, &winner);
+  ircd_strncpy(eff_msg, agg, sizeof(eff_msg));
+  if (now == prev && (now != BOUNCE_AWAY_AWAY
+                      || 0 == strcmp(eff_msg, s->hs_effective_away_msg)))
+    return;
+
+  /* Every local member shows the session's state (WHOIS, the PRIVMSG
+   * auto-reply): one user, whichever connection is asked. */
+  if (MyConnect(primary))
+    user_set_away(cli_user(primary), now ? eff_msg : NULL);
+  for (i = 0; i < s->hs_alias_count; i++) {
+    struct Client *al = findNUser(s->hs_aliases[i].ba_numeric);
+
+    if (al && IsBouncerAlias(al) && MyConnect(al))
+      user_set_away(cli_user(al), now ? eff_msg : NULL);
   }
 
-  return 1; /* Always return 1; caller tracks change detection */
+  /* The line's msgid and time: the winning event's on its first showing
+   * (one msgid per user action, on its report and on this line), else a
+   * new msgid with the HLC's time -- a later, different line under an old
+   * msgid could be dropped as a duplicate (the single-msgid rule). */
+  if (winner >= 0 && bounce_away_first_showing(m[winner].ms,
+                                               s->hs_effective_away_ms)) {
+    time_ms = m[winner].ms;
+    if (feature_bool(FEAT_MSGID) && msgids[winner] && msgids[winner][0])
+      ircd_strncpy(away_msgid, msgids[winner], sizeof(away_msgid));
+    else if (feature_bool(FEAT_MSGID))
+      generate_msgid(away_msgid, sizeof(away_msgid));
+  } else {
+    if (feature_bool(FEAT_MSGID))
+      generate_msgid(away_msgid, sizeof(away_msgid));
+    time_ms = history_event_time_ms(NULL);
+  }
+  if (away_msgid[0]) {
+    sendcmdto_set_s2s_tags(time_ms, away_msgid);
+    sendcmdto_want_s2s_tags(1);
+  }
+  away_send_to_servers(primary, NULL, now ? eff_msg : NULL);
+  if (away_msgid[0])
+    sendcmdto_set_client_event(away_msgid, time_ms);
+  /* Every channel member here, the primary's own socket too (it did not
+   * ask), but the connection that asked: it had its 305/306. */
+  if (now == BOUNCE_AWAY_PRESENT)
+    sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, told,
+                                           CAP_AWAYNOTIFY, CAP_NONE, "");
+  else
+    away_notify_common(primary, told, eff_msg);
+  sendcmdto_set_client_msgid(NULL);
+
+  s->hs_effective_away = now;
+  ircd_strncpy(s->hs_effective_away_msg, now ? eff_msg : "", AWAYLEN + 1);
+  s->hs_effective_away_ms = time_ms;
+}
+
+/** Decide session @a s's away (session_away_decide_as()): deferred to the
+ * barrier PONG on a merge line from a link in its window. */
+static void session_away_decide(struct BouncerSession *s, struct Client *told)
+{
+  session_away_decide_as(s, told, 0);
+}
+
+/** A promote or install that recomputes nothing is about to change @a s's
+ * face (no recompute at a promote): a merge decision pending on a link is
+ * decided first, with the membership before the promote, so the merge's
+ * effect is not lost and nothing is recomputed because of the promote --
+ * unless the promote is itself a step of that merge (a line from the very
+ * link the record waits on), whose PONG then decides the merged whole
+ * (fix round 5, bounce_away_merge_step()). */
+static void away_merge_promote(struct BouncerSession *s)
+{
+  if (!s)
+    return;
+  if (bounce_away_merge_step(BOUNCE_AWAY_MERGE_PROMOTE,
+                             s->hs_away_merge_link != NULL,
+                             s->hs_away_merge_link != NULL
+                             && s->hs_away_merge_link == sendcmdto_inbound_link())
+      == BOUNCE_AWAY_MERGE_FLUSH_THEN_PROMOTE)
+    session_away_decide_as(s, NULL, 1);
+}
+
+/** The records whose away decision waits on @a link's merge window take
+ * their step for @a ev (its PONG, or its going): each is decided once. */
+static void away_merge_decide_pending(struct Client *link,
+                                      enum bounce_away_merge_event ev)
+{
+  struct BouncerSession *s;
+  int i;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      if (!s->hs_away_merge_link)
+        continue;
+      if (bounce_away_merge_step(ev, 1, s->hs_away_merge_link == link)
+          != BOUNCE_AWAY_MERGE_DECIDE_PENDING)
+        continue;
+      session_away_decide_as(s, NULL, 1);
+      s->hs_away_merge_link = NULL;
+    }
+}
+
+/** See include/bouncer_session.h. */
+void bounce_away_merge_link_up(struct Client *link)
+{
+  if (!link || !IsServer(link) || !MyConnect(link) || !cli_serv(link))
+    return;
+  cli_serv(link)->away_merge =
+    bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINK_UP,
+                             cli_serv(link)->away_merge, IsIRCv3Aware(link));
+}
+
+/** See include/bouncer_session.h. */
+void bounce_away_merge_link_gone(struct Client *link)
+{
+  if (!link || !MyConnect(link))
+    return;
+  if (cli_serv(link))
+    cli_serv(link)->away_merge =
+      bounce_away_merge_window(BOUNCE_AWAY_MERGE_LINK_GONE,
+                               cli_serv(link)->away_merge, 0);
+  away_merge_decide_pending(link, BOUNCE_AWAY_MERGE_LINK_GONE);
+}
+
+
+/** A new face of a session shows what L shows of it (W3 Task 16 fix
+ * rounds 1 and 2, I-1 and A-1; user decision 3: a promote changes nothing
+ * anyone sees).  WHOIS and the PRIVMSG auto-reply read the face's own
+ * User, and a fork server must show every face as the legacy servers it
+ * feeds do:
+ *  - a face renumbered in place (a BX P: a promote, the BX P install, a
+ *    held ghost's yield, a swap's demote) keeps the old face's away, so
+ *    @a from's displayed away -- else, with no outgoing face (a SQUIT
+ *    promote), the session's state -- goes onto @a face's User;
+ *  - a face introduced by its own N (a held copy's yield, a demote with
+ *    no swap, a BS A install, an attach) keeps its own: the caller passes
+ *    @a from == @a face, which keeps what it shows (as a rebind does).
+ * No line and no aggregation; a User write only (#13).
+ *
+ * Then every record of ours whose primary @a face is takes that as its
+ * state (hs_effective_away/_msg): the baseline the next decision compares
+ * against, so a mismatch neither sends a change nobody made nor swallows
+ * a real one.
+ *
+ * @param[in] s    The session (its state stands in for a gone face), or NULL.
+ * @param[in] from The outgoing face, or NULL.
+ * @param[in] face The new face. */
+static void face_keeps_shown_away(struct BouncerSession *s, struct Client *from,
+                                  struct Client *face)
+{
+  char shown[AWAYLEN + 1];
+  struct bounce_away_report r;
+  struct AccountSessions *as;
+  struct BouncerSession *rec;
+
+  if (!face || !IsUser(face) || !cli_user(face))
+    return;
+  if (from && IsUser(from) && cli_user(from))
+    ircd_strncpy(shown, cli_user(from)->away ? cli_user(from)->away : "",
+                 sizeof(shown));
+  else if (s)
+    ircd_strncpy(shown, s->hs_effective_away != BOUNCE_AWAY_PRESENT
+                        ? s->hs_effective_away_msg : "", sizeof(shown));
+  else
+    return;
+  if (from != face)
+    user_set_away(cli_user(face), shown[0] ? shown : NULL);
+
+  bounce_away_parse(shown, BOUNCE_AWAY_FORM_LINE, AWAYLEN, &r);
+  as = IsAccount(face) ? bounce_find_by_account(cli_user(face)->account) : NULL;
+  for (rec = as ? as->as_sessions : NULL; rec; rec = rec->hs_anext) {
+    if (rec->hs_client != face)
+      continue;
+    if (rec->hs_effective_away != r.state
+        || 0 != strcmp(rec->hs_effective_away_msg, shown))
+      log_write(LS_USER, L_INFO, 0, "Bouncer: session %s of %s shows \"%s\" "
+                "on its new face %s, its state said %d \"%s\": the state "
+                "follows the face", rec->hs_sessid, rec->hs_account, shown,
+                cli_name(face), rec->hs_effective_away,
+                rec->hs_effective_away_msg);
+    rec->hs_effective_away = r.state;
+    ircd_strncpy(rec->hs_effective_away_msg, shown,
+                 sizeof(rec->hs_effective_away_msg));
+  }
+}
+
+/** Is session @a s's primary ours to speak for (the holder)? */
+static int restate_primary_ours(struct BouncerSession *s)
+{
+  struct Client *p = s->hs_client;
+
+  return p && MyConnect(p) && IsUser(p) && !IsBouncerAlias(p) && cli_user(p);
+}
+
+/** Restate session @a s's decided away toward @a link: AWAY from its
+ * primary (ours) with a minted msgid and the HLC's time -- the decided
+ * state toward an IRCv3-aware link, present included; toward a legacy
+ * link only a state that is not present.  The decision the session has:
+ * nothing is decided here. */
+static void restate_one(struct BouncerSession *s, struct Client *link)
+{
+  struct Client *p = s->hs_client;
+  int aware = IsIRCv3Aware(link);
+  char msgid[64] = "";
+
+  if (!restate_primary_ours(s))
+    return;
+  if (s->hs_state != BOUNCE_ACTIVE && s->hs_state != BOUNCE_HOLDING)
+    return;
+  /* A legacy link's faces from our burst are fresh, so present: it is
+   * told only an away. */
+  if (!aware && s->hs_effective_away == BOUNCE_AWAY_PRESENT)
+    return;
+  /* A line of its own: a minted msgid and the HLC's time (never an earlier
+   * event's, which its first showing carried). */
+  if (aware && feature_bool(FEAT_MSGID)) {
+    generate_msgid(msgid, sizeof(msgid));
+    sendcmdto_set_s2s_tags(history_event_time_ms(NULL), msgid);
+  }
+  if (s->hs_effective_away == BOUNCE_AWAY_PRESENT)
+    sendcmdto_one(p, CMD_AWAY, link, "");
+  else if (s->hs_effective_away == BOUNCE_AWAY_STAR)
+    sendcmdto_one(p, CMD_AWAY, link, ":%s",
+                  aware ? "*" : away_text_for(NULL, "*"));
+  else
+    sendcmdto_one(p, CMD_AWAY, link, ":%s",
+                  s->hs_effective_away_msg[0] ? s->hs_effective_away_msg
+                                              : BOUNCE_AWAY_WORD);
+}
+
+/** Can a restatement go toward @a link (a direct server link, not going)? */
+static int restate_link_ok(struct Client *link)
+{
+  return link && IsServer(link) && MyConnect(link) && !IsDead(link)
+         && !HasFlag(link, FLAG_CLOSING);
+}
+
+/** See include/bouncer_session.h. */
+void bounce_away_restate_to(struct Client *link)
+{
+  char token[BOUNCE_AWAY_BARRIER_TOKENLEN];
+
+  if (!restate_link_ok(link) || !cli_serv(link))
+    return;
+  if (!bounce_away_barrier_token(token, sizeof(token),
+                                 cli_serv(link)->link_serial))
+    return;
+  /* The normal queue, behind our whole burst: a priority PING (as
+   * check_pings sends) could overtake it.  One parameter: no AsLL reply
+   * (parc > 3 there) and no forwarding (no destination); the far side
+   * answers "PONG <itself> :<token>" on its own normal queue, behind every
+   * line it made reading our burst (fix round 4). */
+  cli_serv(link)->away_barrier = 1;
+  sendcmdto_one(&me, CMD_PING, link, ":%s", token);
+}
+
+/** See include/bouncer_session.h. */
+int bounce_away_barrier_pong(struct Client *link, const char *token)
+{
+  char expected[BOUNCE_AWAY_BARRIER_TOKENLEN];
+  struct BouncerSession *s;
+  int i;
+
+  if (!link || !IsServer(link) || !MyConnect(link) || !cli_serv(link))
+    return 0;
+  if (!bounce_away_barrier_token(expected, sizeof(expected),
+                                 cli_serv(link)->link_serial)
+      || !bounce_away_barrier_match(cli_serv(link)->away_barrier, token,
+                                    expected))
+    return 0;
+  /* Once per establishment: a repeat PONG finds the barrier cleared. */
+  cli_serv(link)->away_barrier = 0;
+  /* Every line the far side made while reading our burst -- its D.2
+   * demote or swap, the BX C converts and re-filed devices with their aw=
+   * reports, a retired held ghost's Q -- came ahead of this PONG and has
+   * been read.  The link's merge window closes, and each record whose
+   * decision those lines deferred is decided once, from the whole merged
+   * membership (fix round 5; the relink reconciliation the user allowed,
+   * not a recompute: a record with nothing pending is not decided). */
+  cli_serv(link)->away_merge =
+    bounce_away_merge_window(BOUNCE_AWAY_MERGE_PONG,
+                             cli_serv(link)->away_merge, IsIRCv3Aware(link));
+  away_merge_decide_pending(link, BOUNCE_AWAY_MERGE_PONG);
+  if (!restate_link_ok(link))
+    return 1;
+  /* Then each decision of ours is the one after the merge: restate it
+   * toward the link, deciding nothing again. */
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++)
+    for (s = tokenHash[i]; s; s = s->hs_tnext)
+      restate_one(s, link);
+  return 1;
 }
 
 /** Re-aggregate effective away across a session and broadcast on change. */
 void bounce_recompute_session_away(struct BouncerSession *session)
 {
-  int new_effective = 0;
-  char new_msg[AWAYLEN + 1];
-  int prev_effective;
-  int msg_changed;
-  const char *eff_msg;
-  struct Client *primary;
-  int i;
-
-  if (!session || !session->hs_client)
-    return;
-
-  primary = session->hs_client;
-  /* Defensive: if exit_one_client failed to null hs_client when the
-   * primary was freed (pre-existing burst-desync can leave hs_client !=
-   * dying bcptr, so the session-owner cleanup branch skips), MyConnect /
-   * cli_user reads below would deref freed memory.  IsUser is a cheap
-   * sanity gate — a freed Client has cli_status zeroed in the typical
-   * free path.  Not bulletproof against full UAF (reused memory could
-   * pass), but pairs with the tokenHash sweep in exit_one_client. */
-  if (!IsUser(primary) || !cli_user(primary)) {
-    session->hs_client = NULL;
-    return;
-  }
-  prev_effective = session->hs_effective_away;
-  bounce_compute_effective_away(session, &new_effective, new_msg);
-
-  if (new_effective == 0)
-    eff_msg = "";
-  else if (new_effective == 1)
-    eff_msg = new_msg[0] ? new_msg : "";
-  else
-    eff_msg = "*"; /* the star itself; substituted per viewer at emission */
-
-  msg_changed = (new_effective == 1 && prev_effective == 1)
-                && 0 != ircd_strcmp(eff_msg, session->hs_effective_away_msg);
-
-  if (new_effective == prev_effective && !msg_changed)
-    return;
-
-  /* Mirror onto every local session connection's cli_user->away. */
-  if (MyConnect(primary))
-    user_set_away(cli_user(primary), new_effective ? (char *)eff_msg : NULL);
-  for (i = 0; i < session->hs_alias_count; i++) {
-    struct Client *al = findNUser(session->hs_aliases[i].ba_numeric);
-    if (al && IsBouncerAlias(al) && MyConnect(al))
-      user_set_away(cli_user(al), new_effective ? (char *)eff_msg : NULL);
-  }
-
-  /* Broadcast.  Pick the source carefully:
-   *
-   * - If primary is local, use primary directly.
-   * - If primary is remote, using primary as `from` would send primary's
-   *   numeric to primary's own home server, producing a "Fake direction"
-   *   protocol violation.  Substitute a local alias as the from instead;
-   *   the auto-rewrite branch in sendcmdto_serv_butone then does split
-   *   delivery (alias numeric to primary's direction, primary numeric
-   *   elsewhere), which is the correct alias-aware S2S routing.
-   * - If primary is remote and we have no local alias, skip the
-   *   broadcast — there's no local connection authoritative enough to
-   *   speak for the session here.  Primary's home server will handle.
-   *
-   * butone=NULL: every channel member of primary needs to know,
-   * including primary's own IRC client. */
-  {
-    struct Client *broadcaster = MyConnect(primary) ? primary : NULL;
-    if (!broadcaster) {
-      int j;
-      for (j = 0; j < session->hs_alias_count; j++) {
-        struct Client *al = findNUser(session->hs_aliases[j].ba_numeric);
-        if (al && IsBouncerAlias(al) && MyConnect(al)) {
-          broadcaster = al;
-          break;
-        }
-      }
-    }
-
-    if (broadcaster) {
-      char away_msgid[64] = "";
-      uint64_t away_time_ms = 0;
-      if (feature_bool(FEAT_MSGID)) {
-        struct timeval tv;
-        generate_msgid(away_msgid, sizeof(away_msgid));
-        gettimeofday(&tv, NULL);
-        away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-        sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
-        sendcmdto_want_s2s_tags(1);
-      }
-
-      /* eff_msg is "" for new_effective == 0, so one call covers present,
-       * a normal away message, and the all-connections-AWAY-* case; the
-       * star gets FEAT_AWAY_STAR_MSG for legacy peers downstream, same as
-       * every other AWAY broadcast (away_send_to_servers). */
-      away_send_to_servers(broadcaster, NULL, eff_msg);
-      if (away_msgid[0])
-        sendcmdto_set_client_msgid(away_msgid);
-      if (new_effective == 0)
-        sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
-                                               CAP_AWAYNOTIFY, CAP_NONE, "");
-      else
-        away_notify_common(primary, NULL, eff_msg);
-      sendcmdto_set_client_msgid(NULL);
-    }
-  }
-
-  session->hs_effective_away = new_effective;
-  ircd_strncpy(session->hs_effective_away_msg, eff_msg, AWAYLEN + 1);
+  session_away_decide(session, NULL);
 }
+
+/** See include/bouncer_session.h. */
+void bounce_session_away_event(struct BouncerSession *session,
+                               struct Client *told)
+{
+  session_away_decide(session, told);
+}
+
+/** Does @a c belong to session @a s (its primary, or a device on its
+ * roster)? */
+static int session_has_member(struct BouncerSession *s, struct Client *c)
+{
+  return s->hs_client == c || session_roster_has(s, c);
+}
+
+/** Another server's member @a c reported its own away state (BX U aw=,
+ * or an older server's AWAY from it), its event kept with it: every
+ * session of ours it belongs to whose primary is ours decides again (the
+ * newest explicit event wins).  @return how many did. */
+static int member_away_changed(struct Client *c)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+  int decided = 0;
+
+  if (!c || !IsUser(c) || !IsAccount(c) || !cli_user(c))
+    return 0;
+  as = bounce_find_by_account(cli_user(c)->account);
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext) {
+    if (!s->hs_client || !MyConnect(s->hs_client)
+        || !session_has_member(s, c))
+      continue;
+    session_away_decide(s, NULL);
+    decided++;
+  }
+  return decided;
+}
+
+/** See include/bouncer_session.h. */
+int bounce_member_away_report(struct Client *c, const char *away,
+                              const char *msgid, uint64_t time_ms)
+{
+  struct bounce_away_report r;
+  struct Client *server;
+  uint64_t ms;
+
+  if (!c || MyConnect(c) || !IsBouncerAlias(c))
+    return 0;
+  bounce_away_parse(away, BOUNCE_AWAY_FORM_LINE, AWAYLEN, &r);
+  server = cli_user(c) ? cli_user(c)->server : NULL;
+  ms = bounce_away_report_ms(time_ms, server && IsBurstOrBurstAck(server),
+                             history_event_time_ms(NULL));
+  member_own_away_set(c, &r, ms, time_ms ? msgid : "");
+  return member_away_changed(c);
+}
+
+/** See include/bouncer_session.h. */
+void bounce_effective_away_heard(struct Client *primary, const char *away,
+                                 uint64_t time_ms)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+  struct bounce_away_report r;
+
+  if (!primary || MyConnect(primary) || !IsAccount(primary)
+      || !cli_user(primary))
+    return;
+  bounce_away_parse(away, BOUNCE_AWAY_FORM_LINE, AWAYLEN, &r);
+  as = bounce_find_by_account(cli_user(primary)->account);
+  for (s = as ? as->as_sessions : NULL; s; s = s->hs_anext)
+    if (s->hs_client == primary) {
+      s->hs_effective_away = r.state;
+      ircd_strncpy(s->hs_effective_away_msg,
+                   r.state == BOUNCE_AWAY_PRESENT ? ""
+                   : r.state == BOUNCE_AWAY_STAR ? "*" : away,
+                   AWAYLEN + 1);
+      /* The line's time is the shown-event mark: an event of a member
+       * newer than it is a first showing, should we come to decide. */
+      s->hs_effective_away_ms = time_ms ? time_ms : history_event_time_ms(NULL);
+    }
+}
+
 
 /** Get the total number of connections for a session. */
 int bounce_connection_count(struct BouncerSession *session)

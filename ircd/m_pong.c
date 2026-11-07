@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -122,6 +123,15 @@ int ms_pong(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   ClearPingSent(cptr);
   ClearPingSent(sptr);
   cli_lasttime(cptr) = CurrentTime;
+
+  /* The reply to the holder's away barrier PING toward this direct link
+   * (bounce_away_restate_to(); W3 Task 16 fix round 4): the far side read
+   * our whole burst before it, so every line it made reading it has come;
+   * the sessions' away decisions are restated now.  Any other PONG is not
+   * the barrier's and goes on below untouched. */
+  if (MyConnect(cptr) && sptr == cptr && parc > 2
+      && bounce_away_barrier_pong(cptr, destination))
+    return 0;
 
   if (parc > 5)
   {
