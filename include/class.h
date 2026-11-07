@@ -29,6 +29,7 @@
 #endif
 
 #include "client.h"
+#include "fakelag.h"
 
 struct ConfItem;
 struct StatDesc;
@@ -70,6 +71,8 @@ struct ConnectionClass {
   unsigned int            ref_count;      /**< Number of references to class. */
   signed int              lag_min;        /**< Minimum number of seconds for fake lag. */
   signed int              lag_factor;     /**< Factor by which the message length is divided to add to fake lag. */
+  signed int              lag_share;      /**< Lag-seconds of FAKELAG_POOL reserved for this class per minute. */
+  struct FakelagBucket    lag_bucket;     /**< What is left of lag_share (fakelag.c). */
   unsigned short          ping_freq;      /**< Ping frequency for clients. */
   unsigned short          conn_freq;      /**< Auto-connect frequency. */
   unsigned char           valid;          /**< Valid flag (cleared after this
@@ -100,6 +103,8 @@ struct ConnectionClass {
 #define LagMin(x)       ((x)->lag_min)
 /** Get fake lag factor for \a x. */
 #define LagFactor(x)    ((x)->lag_factor)
+/** Get the fake-lag pool share reserved for \a x. */
+#define LagShare(x)     ((x)->lag_share)
 
 /** Get class name for ConfItem \a x. */
 #define ConfClass(x)    ((x)->conn_class->cc_name)

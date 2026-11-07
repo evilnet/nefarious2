@@ -108,6 +108,7 @@ IRCD_SRC = \
 	db_casefold.c \
 	destruct_event.c \
 	dnsbl.c \
+	fakelag.c \
 	fileio.c \
 	forwarded_label.c \
 	gline.c \
