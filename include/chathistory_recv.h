@@ -88,8 +88,10 @@ extern void rcv_close(struct rcv_record *r, int64_t now_ms);
 
 /** 1 iff [@a lo_ms, @a hi_ms] lies wholly inside exactly one of the
  * closed intervals, or inside [open_since, @a now_ms] while a window is
- * open; 0 otherwise (including a gap straddling two intervals, or a
- * span straddling an interval and the open window). */
+ * open; 0 otherwise (including a gap straddling two intervals, a span
+ * straddling an interval and the open window, or an inverted range --
+ * @a lo_ms > @a hi_ms -- which is never "received", whatever bounds it
+ * falls between). */
 extern int rcv_covers(const struct rcv_record *r, int64_t lo_ms,
                        int64_t hi_ms, int64_t now_ms);
 

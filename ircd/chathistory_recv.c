@@ -3,7 +3,7 @@
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
+ * the Free Software Foundation; either version 1, or (at your option)
  * any later version.
  *
  * See include/chathistory_recv.h.  Pure: no ircd dependencies, nothing
@@ -66,8 +66,8 @@ int rcv_covers(const struct rcv_record *r, int64_t lo_ms, int64_t hi_ms,
 {
   uint8_t i;
 
-  if (!r)
-    return 0;
+  if (!r || lo_ms > hi_ms)
+    return 0;                    /* an inverted range is never "received" */
 
   for (i = 0; i < r->count; i++) {
     if (lo_ms >= r->iv[i].start && hi_ms <= r->iv[i].end)

@@ -28,6 +28,22 @@ static void test_rcv_open_covers(void **state)
   assert_int_equal(rcv_covers(&r, 500, 2000, 6000), 0);
 }
 
+static void test_rcv_covers_inverted_range_is_never_covered(void **state)
+{
+  struct rcv_record r;
+  (void)state;
+
+  memset(&r, 0, sizeof(r));
+  rcv_open(&r, 1000);
+
+  /* lo > hi: an inverted range is never "received", even though lo and
+   * hi independently satisfy the open window's bounds on their own. */
+  assert_int_equal(rcv_covers(&r, 5000, 2000, 6000), 0);
+
+  rcv_close(&r, 100000);                /* interval: [1000, 70000] */
+  assert_int_equal(rcv_covers(&r, 60000, 10000, 999999), 0);
+}
+
 static void test_rcv_close_slack(void **state)
 {
   struct rcv_record r;
@@ -54,6 +70,19 @@ static void test_rcv_short_interval_dropped(void **state)
 
   assert_int_equal(r.count, 0);
   assert_int_equal(r.open_since, 0);   /* the window still closed */
+}
+
+static void test_rcv_close_on_closed_is_noop(void **state)
+{
+  struct rcv_record r;
+  (void)state;
+
+  memset(&r, 0, sizeof(r));
+  /* never opened: open_since is already 0 */
+  rcv_close(&r, 100000);
+
+  assert_int_equal(r.count, 0);
+  assert_int_equal(r.open_since, 0);
 }
 
 static void test_rcv_gap_not_covered(void **state)
@@ -135,6 +164,18 @@ static void test_rcv_clip_open(void **state)
   assert_int_equal(rcv_covers(&r, 5001, 6000, 9000), 1);
 }
 
+static void test_rcv_clip_open_future_unchanged(void **state)
+{
+  struct rcv_record r;
+  (void)state;
+
+  memset(&r, 0, sizeof(r));
+  rcv_open(&r, 9999);
+  rcv_clip(&r, 5000);                  /* floor is before open_since: no-op on it */
+
+  assert_int_equal(r.open_since, 9999);
+}
+
 static void test_rcv_boot_close(void **state)
 {
   struct rcv_record r;
@@ -214,20 +255,136 @@ static void test_rcv_unpack_rejects(void **state)
   assert_int_equal(rcv_unpack(buf, (size_t)(n - 1), &out), -1);  /* short */
 }
 
+/* Fix round 1, IMPORTANT: test_rcv_pack_roundtrip alone cannot catch a
+ * byte-order regression (e.g. swapping rcv_pack/rcv_unpack's body for
+ * a host-native memcpy of the struct) because it round-trips through
+ * the SAME host, which would still agree with itself. This test packs
+ * a record with distinct, non-palindromic bytes in every field and
+ * checks the exact byte layout at known offsets: version, count, then
+ * little-endian open_since, then little-endian start/end -- a layout
+ * only the documented wire format produces, not whatever the host's
+ * struct padding/endianness happen to be. */
+static void test_rcv_pack_exact_bytes(void **state)
+{
+  struct rcv_record in;
+  unsigned char buf[2 + 8 + 16];
+  int n;
+  (void)state;
+
+  memset(&in, 0, sizeof(in));
+  in.count = 1;
+  in.open_since  = (int64_t)0x0102030405060708LL;
+  in.iv[0].start = (int64_t)0x1112131415161718LL;
+  in.iv[0].end   = (int64_t)0x2122232425262728LL;
+
+  n = rcv_pack(&in, buf, sizeof(buf));
+  assert_int_equal(n, (int)sizeof(buf));
+
+  assert_int_equal(buf[0], RCV_PACK_VERSION);
+  assert_int_equal(buf[1], 1);
+
+  /* open_since = 0x0102030405060708, little-endian: least-significant
+   * byte (0x08) first. */
+  assert_int_equal(buf[2], 0x08); assert_int_equal(buf[3], 0x07);
+  assert_int_equal(buf[4], 0x06); assert_int_equal(buf[5], 0x05);
+  assert_int_equal(buf[6], 0x04); assert_int_equal(buf[7], 0x03);
+  assert_int_equal(buf[8], 0x02); assert_int_equal(buf[9], 0x01);
+
+  /* iv[0].start = 0x1112131415161718, little-endian. */
+  assert_int_equal(buf[10], 0x18); assert_int_equal(buf[11], 0x17);
+  assert_int_equal(buf[12], 0x16); assert_int_equal(buf[13], 0x15);
+  assert_int_equal(buf[14], 0x14); assert_int_equal(buf[15], 0x13);
+  assert_int_equal(buf[16], 0x12); assert_int_equal(buf[17], 0x11);
+
+  /* iv[0].end = 0x2122232425262728, little-endian. */
+  assert_int_equal(buf[18], 0x28); assert_int_equal(buf[19], 0x27);
+  assert_int_equal(buf[20], 0x26); assert_int_equal(buf[21], 0x25);
+  assert_int_equal(buf[22], 0x24); assert_int_equal(buf[23], 0x23);
+  assert_int_equal(buf[24], 0x22); assert_int_equal(buf[25], 0x21);
+}
+
+/* The other half of the byte-order regression check: a buffer built
+ * by hand (not via rcv_pack) decodes to the values its bytes spell out
+ * in little-endian, not whatever a host-native read would give. */
+static void test_rcv_unpack_hand_built(void **state)
+{
+  unsigned char buf[2 + 8 + 16] = {
+    RCV_PACK_VERSION, 1,
+    0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,  /* open_since */
+    0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,  /* iv[0].start */
+    0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21,  /* iv[0].end */
+  };
+  struct rcv_record out;
+  (void)state;
+
+  memset(&out, 0xff, sizeof(out));
+  assert_int_equal(rcv_unpack(buf, sizeof(buf), &out), 0);
+
+  assert_int_equal(out.count, 1);
+  assert_true(out.open_since  == (int64_t)0x0102030405060708LL);
+  assert_true(out.iv[0].start == (int64_t)0x1112131415161718LL);
+  assert_true(out.iv[0].end   == (int64_t)0x2122232425262728LL);
+}
+
+/* Fix round 1, Minor: a declared count over RCV_MAX is refused even
+ * when the buffer is otherwise long enough for that (bogus) count. */
+static void test_rcv_unpack_rejects_count_over_max(void **state)
+{
+  unsigned char buf[2 + 8 + (RCV_MAX + 1) * 16];
+  struct rcv_record out;
+  (void)state;
+
+  memset(buf, 0, sizeof(buf));
+  buf[0] = RCV_PACK_VERSION;
+  buf[1] = RCV_MAX + 1;                /* one more than the cap */
+
+  assert_int_equal(rcv_unpack(buf, sizeof(buf), &out), -1);
+}
+
+/* Fix round 1, Minor: pack/unpack at a buffer size exactly at the
+ * limit succeeds; one byte short fails on both sides. */
+static void test_rcv_pack_unpack_size_boundary(void **state)
+{
+  struct rcv_record in, out;
+  unsigned char buf[2 + 8 + 16];
+  int n;
+  (void)state;
+
+  memset(&in, 0, sizeof(in));
+  in.count = 1;
+  in.iv[0].start = 1;
+  in.iv[0].end = 2;
+
+  assert_int_equal(rcv_pack(&in, buf, sizeof(buf)), (int)sizeof(buf));
+  assert_int_equal(rcv_pack(&in, buf, sizeof(buf) - 1), -1);
+
+  n = rcv_pack(&in, buf, sizeof(buf));
+  assert_int_equal(n, (int)sizeof(buf));
+  assert_int_equal(rcv_unpack(buf, (size_t)n, &out), 0);
+  assert_int_equal(rcv_unpack(buf, (size_t)n - 1, &out), -1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_rcv_open_covers),
+    cmocka_unit_test(test_rcv_covers_inverted_range_is_never_covered),
     cmocka_unit_test(test_rcv_close_slack),
     cmocka_unit_test(test_rcv_short_interval_dropped),
+    cmocka_unit_test(test_rcv_close_on_closed_is_noop),
     cmocka_unit_test(test_rcv_gap_not_covered),
     cmocka_unit_test(test_rcv_fifo),
     cmocka_unit_test(test_rcv_clip),
     cmocka_unit_test(test_rcv_clip_open),
+    cmocka_unit_test(test_rcv_clip_open_future_unchanged),
     cmocka_unit_test(test_rcv_boot_close),
     cmocka_unit_test(test_rcv_open_idempotent),
     cmocka_unit_test(test_rcv_pack_roundtrip),
     cmocka_unit_test(test_rcv_unpack_rejects),
+    cmocka_unit_test(test_rcv_pack_exact_bytes),
+    cmocka_unit_test(test_rcv_unpack_hand_built),
+    cmocka_unit_test(test_rcv_unpack_rejects_count_over_max),
+    cmocka_unit_test(test_rcv_pack_unpack_size_boundary),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
