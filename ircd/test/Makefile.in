@@ -45,6 +45,7 @@ CMOCKA_TESTPROGS = \
 	history_trim_cmocka \
 	chathistory_presence_cmocka \
 	chathistory_merge_cmocka \
+	chathistory_recv_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
@@ -104,6 +105,7 @@ DEP_SRC = \
 	history_trim_cmocka.c \
 	chathistory_presence_cmocka.c \
 	chathistory_merge_cmocka.c \
+	chathistory_recv_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
@@ -285,6 +287,15 @@ chathistory_presence_cmocka: $(CHATHISTORY_PRESENCE_CMOCKA_OBJS)
 CHATHISTORY_MERGE_CMOCKA_OBJS = chathistory_merge_cmocka.o test_stub.o ../chathistory_merge.o ../ircd_alloc.o ../ircd_string.o
 chathistory_merge_cmocka: $(CHATHISTORY_MERGE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_MERGE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# chathistory_recv tests - receive windows (W5 Task 8): what a peer
+# relationship has already received of one channel's history
+# federation, so a later request only pulls the gap.  The module is
+# pure (no ircd deps); links the REAL ../chathistory_recv.o only, no
+# test_stub.o.
+CHATHISTORY_RECV_CMOCKA_OBJS = chathistory_recv_cmocka.o ../chathistory_recv.o
+chathistory_recv_cmocka: $(CHATHISTORY_RECV_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_RECV_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o

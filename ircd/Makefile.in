@@ -122,6 +122,7 @@ IRCD_SRC = \
 	chathistory_ephemeral.c \
 	chathistory_merge.c \
 	chathistory_presence.c \
+	chathistory_recv.c \
 	ircd.c \
 	ircd_alloc.c \
 	ircd_cloaking.c \
