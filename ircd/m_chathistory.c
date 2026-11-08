@@ -1492,7 +1492,7 @@ struct ChathistoryAd {
   int channel_count;               /**< Number of channels in set */
   char **channels;                 /**< Array of channel names (lowercase) */
   /** Its CH A S came before the end of the burst that carries its state to
-   * us (its own EB, or the EB of the link it is heard through): its absence
+   * us (its own EB, or the EB of any server on the path to it): its absence
    * stays open, and its REDACT catch-up waits, until that EB
    * (chathistory_server_eob).  Goes with the entry (clear_server_ad). */
   unsigned char eob_pending;
@@ -3805,14 +3805,23 @@ void chathistory_reflood_ads(struct Client *newpeer)
 }
 
 /** Is the burst that carries @a server's state to us still open?  Its own
- * (a store still bursting, its EB not seen yet) or that of the direct link
- * we hear it through: a link that gated its burst toward us holds the burst
- * tail (the users and channels of every server behind it) and its EB, and
- * drops the serv_butone lines meanwhile, a relayed store's REDACTs among
- * them (52ac2d63). */
+ * (a store still bursting, its EB not seen yet) or that of any server on
+ * the path to it: a server that gated its burst toward its new uplink holds
+ * the burst tail (the users and channels of every server behind it) and its
+ * EB, and drops the serv_butone lines meanwhile, the REDACTs of a store
+ * behind it among them (52ac2d63).  That junction need not be our direct
+ * link: in A-B-C-D, with D already linked to C and C relinking to B, A sees
+ * C bursting while D and B are not, and D's CH A S still reaches A (C's
+ * reflood goes to B ungated, B relays it).  So walk the uplinks to us, as
+ * m_server's net-junction check does; for a direct store this is
+ * IsBurst(server). */
 static int ad_burst_pending(struct Client *server)
 {
-  return IsBurst(server) || IsBurst(cli_from(server));
+  struct Client *s;
+  for (s = server; s && !IsMe(s) && cli_serv(s); s = cli_serv(s)->up)
+    if (IsBurst(s))
+      return 1;
+  return 0;
 }
 
 /** A store advertised and the burst that carries its state here has ended:
@@ -3829,9 +3838,10 @@ static void ad_store_back(int idx)
 /** A server's END_OF_BURST arrived (ms_end_of_burst, after ClearBurst; for
  * every server, relayed EBs included): every store whose CH A S came while
  * its burst was still open, and whose burst has now ended -- its own EB and
- * its link's both seen -- is back (ad_store_back), and its flag is cleared
- * (W5 Task 12).  The EB that ends a pending store's burst is its own or its
- * link's; checking every pending ad covers both.
+ * that of every server on the path to it seen -- is back (ad_store_back),
+ * and its flag is cleared (W5 Task 12).  The EB that ends a pending store's
+ * burst is its own or that of a server on its path, so one EB can settle
+ * several stores; checking every pending ad covers them all.
  * @param[in] server The server whose EB this is. */
 void chathistory_server_eob(struct Client *server)
 {
@@ -7195,9 +7205,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->last_update = CurrentTime;
       /* Back -- but not caught up until the burst that carries its state
        * here has ended.  A store sends CH A S when OUR end of burst reaches
-       * it, ungated; when it (or the link we hear it through) has gated its
-       * burst toward us, its burst tail and EB are still held, and the
-       * serv_butone lines meanwhile (REDACT, KICK, TOPIC ...) are dropped.
+       * it, ungated; when it (or any server on the path to it) has gated
+       * its burst toward its uplink, that burst tail and EB are still held,
+       * and the serv_butone lines meanwhile (REDACT, KICK, TOPIC ...) are
+       * dropped.
        * Closing the absence now made pages over that window look whole,
        * and the catch-up ran before its REDACTs (W5 Task 12). */
       if (ad_burst_pending(sptr))
