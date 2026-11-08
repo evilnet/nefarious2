@@ -191,6 +191,15 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         continue;
       }
 
+      /* A CREATE for a channel this server has a window open on: two
+       * servers created it at about the same time, and the remote creator
+       * could speak before our CREATE reached its server -- not routed here.
+       * Whatever the TS (a same-second or a bounced one keeps ours), the
+       * window's creation start no longer holds: start over (receive
+       * windows, W5 Task 9 fix round 2, M1). */
+      if (chptr->recv_open)
+        history_recv_reset(chptr);
+
       /* Check if we need to bounce a mode */
       if (TStime() - chanTS > TS_LAG_TIME ||
 	  (chptr->creationtime && chanTS > chptr->creationtime &&

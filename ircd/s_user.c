@@ -3881,13 +3881,12 @@ void set_snomask(struct Client *cptr, unsigned int newmask, int what)
   cli_snomask(cptr) = newmask;
 }
 
-/** Check whether \a sptr is allowed to send a message to \a acptr.
- * If \a sptr is a remote user, it means some server has an outdated
- * SILENCE list for \a acptr, so send the missing SILENCE mask(s) back
- * in the direction of \a sptr.  Skip the check if \a sptr is a server.
- * @param[in] sptr Client trying to send a message.
- * @param[in] acptr Destination of message.
- * @return Non-zero if \a sptr is SILENCEd by \a acptr, zero if not.
+/** Whether \a cptr's SILENCE list holds a positive (non-~) mask.
+ * Channel messages from a matching sender skip it (FEAT_SILENCE_CHANMSGS,
+ * applied on the sender's server), so the receive windows never count it
+ * (W5 Task 9).
+ * @param[in] cptr Client whose SILENCE list to read.
+ * @return Non-zero if it holds at least one positive mask.
  */
 int has_positive_silence(const struct Client *cptr)
 {
@@ -3901,6 +3900,14 @@ int has_positive_silence(const struct Client *cptr)
   return 0;
 }
 
+/** Check whether \a sptr is allowed to send a message to \a acptr.
+ * If \a sptr is a remote user, it means some server has an outdated
+ * SILENCE list for \a acptr, so send the missing SILENCE mask(s) back
+ * in the direction of \a sptr.  Skip the check if \a sptr is a server.
+ * @param[in] sptr Client trying to send a message.
+ * @param[in] acptr Destination of message.
+ * @return Non-zero if \a sptr is SILENCEd by \a acptr, zero if not.
+ */
 int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg)
 {
   struct Ban *found;

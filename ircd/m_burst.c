@@ -461,7 +461,13 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * still open (local members stay) restarts now (W5 Task 9).  A channel
      * new here takes an older TS as well: a record left by an earlier
      * incarnation of the name says nothing about this one (fix round 1,
-     * M6). */
+     * M6).
+     * Every restart lands here for every channel it held (Ruling R34):
+     * a channel the restart restored (a held ghost's) is recreated at boot
+     * time and loses this burst, any other is new here; so the windows
+     * from before a server's last restart are gone after its first burst,
+     * and scrollback wholly before that restart always federates.
+     * Accepted; keeping them needs an incarnation stamp on the record. */
     history_recv_reset(chptr);
 #endif
     chptr->creationtime = timestamp;
