@@ -44,6 +44,7 @@
 extern int redact_apply_row(struct Client *src, struct Channel *chptr, const char *msgid,
                             const char *redact_msgid, uint64_t time_ms, const char *reason,
                             const char *sender_str, const char *account_str, int show_always);
+extern int redact_row_judge(const char *target, const char *msgid);
 extern void redact_announce_local(struct Client *src, struct Channel *chptr,
                                   const char *msgid, const char *redact_msgid,
                                   uint64_t time_ms, const char *reason);
@@ -3432,15 +3433,39 @@ static void process_write_forward(const char *target, const char *msgid,
     Debug((DEBUG_DEBUG, "CH W: Channel %s doesn't exist locally, storing anyway (CH W trust)", target));
   }
 
-  /* REDACT: delete the original message before storing the REDACT event */
-  if (type == HISTORY_REDACT && content) {
+  /* REDACT: stored only beside its message, once -- the rule every
+   * REDACT that reaches this store from elsewhere follows (redact_apply_row,
+   * rdx_row_decide).  A message write-forwarded by the same server reached
+   * us ahead of this line (forward_channel_history), so an orphan here is a
+   * message this store never held; see redact_apply_row for why skipping
+   * it is safe.  A repeat under a new REDACT msgid stores no second row
+   * (the msgid dedup above catches only the same one). */
+  if (type == HISTORY_REDACT) {
     char target_msgid[HISTORY_MSGID_LEN];
-    const char *space = strchr(content, ' ');
-    size_t len = space ? (size_t)(space - content) : strlen(content);
+    const char *space;
+    size_t len;
+    int d;
+
+    if (!content)
+      return;
+    space = strchr(content, ' ');
+    len = space ? (size_t)(space - content) : strlen(content);
     if (len >= sizeof(target_msgid))
       len = sizeof(target_msgid) - 1;
     memcpy(target_msgid, content, len);
     target_msgid[len] = '\0';
+    d = redact_row_judge(target, target_msgid);
+    if (d != RDX_ROW_APPLY) {
+      Debug((DEBUG_DEBUG, "CH W: REDACT %s of %s in %s from %s not stored (%s)",
+             msgid, target_msgid, target, origin,
+             d == RDX_ROW_SKIP_ORPHAN ? "message not here"
+             : d == RDX_ROW_SKIP_APPLIED ? "already redacted" : "store not read"));
+      if (d == RDX_ROW_RETRY)
+        log_write(LS_SYSTEM, L_NOTICE, 0,
+                  "CH W: REDACT %s %s from %s: the store could not be read; no REDACT row stored",
+                  target, target_msgid, origin);
+      return;
+    }
     history_redact_message(target, target_msgid);
   }
 
@@ -4624,9 +4649,10 @@ static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
  * - A row is stored and shown to the channel's local members only when this
  *   store holds its message and has not applied it (redact_apply_row,
  *   rdx_row_decide).  An orphan (a message this store does not hold: it
- *   never reached it, or the trim evicted it) is neither stored nor shown,
- *   and neither is a redaction applied already, live or by an earlier
- *   round: every round re-reads from the watermark less a slack.
+ *   never reached it, or the trim evicted it) is neither stored nor shown
+ *   (why that is safe: redact_apply_row), and neither is a redaction
+ *   applied already, live or by an earlier round: every round re-reads
+ *   from the watermark less a slack.
  * - A row the store could not read cuts the round (RETRY).
  * - A row for a channel that does not exist here (empty network-wide since)
  *   is skipped and counted, as before.
@@ -5592,10 +5618,12 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
    * relayed or stored.  A returned child names the first REDACT event, and
    * the echo carries its msgid and time.  The local check is the fallback
    * for an older responder, which returns no children.  On a local miss it
-   * rarely finds a row: a REDACT from a peer is stored only beside its
-   * message (redact_apply_row, W5 Task 5), so a row here is left from
-   * before that rule, came by a CH W write-forward, or outlived its message
-   * in the trim.  It answers only that one exists, so that echo carries no
+   * rarely finds a row: a REDACT that reaches a store from elsewhere (a
+   * peer's, a catch-up row, a CH W write-forward) is stored only beside its
+   * message (redact_apply_row, process_write_forward; W5 Task 5), so a row
+   * here is left from before that rule, was stored by this server's own
+   * REDACT on a store read error (m_redact), or outlived its message in the
+   * trim.  It answers only that one exists, so that echo carries no
    * msgid.  An older responder's repeat it misses is shown and relayed
    * again, and every store skips the row it already holds. */
   for (m = req->fed_msgs; m; m = m->next)

@@ -404,12 +404,15 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 }
 
 /** Judge one redaction against this server's store (rdx_row_decide): is
- * the message here, and does a REDACT row annotate it already?
- * @param[in] target Canonical channel name (the store's key spelling).
+ * the message here, and does a REDACT row annotate it already?  Every
+ * REDACT row that reaches this store from elsewhere is judged here: a
+ * peer's live REDACT and a catch-up row (redact_apply_row), and a
+ * write-forwarded one (process_write_forward, m_chathistory.c).
+ * @param[in] target Channel name (store keys fold; the canonical spelling).
  * @param[in] msgid The redacted message.
- * @return An enum rdx_row value.
+ * @return An enum rdx_row value (redact_index.h).
  */
-static enum rdx_row redact_row_judge(const char *target, const char *msgid)
+int redact_row_judge(const char *target, const char *msgid)
 {
   struct HistoryMessage *m = NULL;
   int rc, redacted = 0;
@@ -466,8 +469,23 @@ int redact_apply_row(struct Client *src, struct Channel *chptr,
   enum rdx_row d = RDX_ROW_SKIP_ORPHAN;
 
   if (history_is_available())
-    d = redact_row_judge(target, msgid);
+    d = (enum rdx_row)redact_row_judge(target, msgid);
 
+  /* An orphan (the message is not here) is skipped, and nothing remembers
+   * it.  That is safe only because every path that stores a channel
+   * message row stores it before any REDACT of that message can reach this
+   * server:
+   * - a relayed message is stored while its own relay line is processed,
+   *   before this server relays it on, and a REDACT caused by it travels
+   *   the same tree links after it (each link is FIFO);
+   * - a write-forward (CH W/WB) goes out ahead of its message's relay
+   *   (forward_channel_history, ircd_relay.c; ms_tagmsg), so its store
+   *   holds the row before it relays the message toward any redactor.
+   * Federated chathistory replies are never stored, and a burst-gated or
+   * bursting link drops lines, never reorders them.  A future path that
+   * stores message rows later (a backfill, an import, a replay) must
+   * re-apply the redactions after it (the catch-up index, redact_index),
+   * or it brings back what was redacted. */
   if (d == RDX_ROW_APPLY) {
     char timestamp[32];
     char sender[HISTORY_SENDER_LEN];

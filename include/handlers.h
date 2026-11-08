@@ -332,6 +332,9 @@ extern int redact_apply_row(struct Client *src, struct Channel *chptr,
                             uint64_t time_ms, const char *reason,
                             const char *sender_str, const char *account_str,
                             int show_always);
+/* Judge one redaction against this server's store: an enum rdx_row value
+ * (redact_index.h; APPLY only when the message is here and not redacted). */
+extern int redact_row_judge(const char *target, const char *msgid);
 /* Show one redaction to @a chptr's local members: arm the REDACT event's
  * msgid and time, fan out (the redacter's echo included), clear.  Stores
  * and relays nothing. */
