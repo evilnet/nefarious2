@@ -236,8 +236,12 @@ extern void sendcmdto_one_tags_with_client(struct Client *from,
  * row (W5 Task 2: a CH R line, a first CH B line, and their middle-hop
  * relay): @A<time_ms><msgid>,C<client_tags> toward a link that takes S2S
  * tags (send_s2s_tags_on), the plain line otherwise, or when there are no
- * tags, or when @a msgid is not a 14-char compact msgid.  Leaves no
- * override armed. */
+ * tags, or when @a msgid is not a 14-char compact msgid.  Call it with no
+ * S2S override armed: on the tagged path it overwrites the msgid/time
+ * overrides with the row's and the send clears cptr/msgid/time/ml (a ,S
+ * armed for another send would ride this line), and the plain path is
+ * sendcmdto_one, which emits whatever is armed.  It never arms the
+ * client-facing event time. */
 extern void sendcmdto_one_ctags(struct Client *from, const char *cmd,
                                 const char *tok, struct Client *to,
                                 uint64_t time_ms, const char *msgid,
