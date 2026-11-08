@@ -6736,12 +6736,16 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     } else if (query_subcmd_char == 'X') {
       presence_query_filter_close(fed_pf);
       fed_pf = NULL;
-      /* Exact message lookup by msgid — used for federated REDACT.
-       * ref is M<msgid> format from S2S. ref_value is the msgid.
-       */
-      if (ref_type == HISTORY_REF_MSGID && ref_value) {
+      /* Exact message lookup by msgid -- used for federated REDACT.  The
+       * reference is M<msgid> (start_redact_fed_query): the prefix keeps a
+       * msgid whose server numeric starts with a digit from reading as a
+       * timestamp.  parse_s2s_reference does not strip it -- 80859cb2 took
+       * the T/M prefixes out of the page queries before X was added -- so
+       * every X lookup used to look up "M<msgid>" and answer E 0: strip
+       * it here.  Anything else is malformed. */
+      if (ref[0] == 'M' && ref[1]) {
         struct HistoryMessage *single_msg = NULL;
-        int lrc = history_lookup_message(target, ref_value, &single_msg);
+        int lrc = history_lookup_message(target, ref + 1, &single_msg);
         if (lrc == 0 && single_msg) {
           send_ch_response(sptr, reqid, single_msg);
           sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 1", reqid);
