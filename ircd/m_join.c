@@ -634,6 +634,10 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       flags |= HasFlag(sptr, FLAG_TS8) ? CHFL_SERVOPOK : 0;
 
       chptr->creationtime = creation;
+      /* New here with a remote TS: a record left by an earlier incarnation
+       * of the name says nothing about this one (receive windows, W5 Task
+       * 9; as a channel new in a BURST). */
+      history_recv_reset(chptr);
     }
     else { /* We have a valid channel? */
       if ((member = find_member_link(chptr, sptr)))

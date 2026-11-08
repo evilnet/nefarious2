@@ -165,6 +165,7 @@ static uint64_t history_trim_clock(void);
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count);
 static void recv_alive_write(void);
+static void history_recv_store_lost(const char *target, const char *timestamp);
 static void history_trim_emptied(const char **targets, int count);
 static int history_trim_parse(const void *val, size_t vlen,
                               struct htrim_row_info *out);
@@ -1720,6 +1721,8 @@ store_wb_fail:
 store_cleanup:
   if (rc != 0 && failed)
     history_store_failed(failed, target, msgid, db_rc);
+  if (rc != 0 && history_available)
+    history_recv_store_lost(target, timestamp);
   if (wb) db_writebatch_destroy(wb);
   if (valbuf != valbuf_stack) MyFree(valbuf);
 #ifdef USE_ZSTD
@@ -1728,12 +1731,37 @@ store_cleanup:
   return rc;
 }
 
+static int history_store_multiline_row(const char *msgid, const char *timestamp,
+                                       const char *target, const char *original_target,
+                                       const char *sender,
+                                       const char *account, const char *content,
+                                       size_t content_len, const char *paste_secret,
+                                       const char *owner);
+
 int history_store_multiline(const char *msgid, const char *timestamp,
                             const char *target, const char *original_target,
                             const char *sender,
                             const char *account, const char *content,
                             size_t content_len, const char *paste_secret,
                             const char *owner)
+{
+  int rc = history_store_multiline_row(msgid, timestamp, target, original_target,
+                                       sender, account, content, content_len,
+                                       paste_secret, owner);
+
+  if (rc != 0 && history_available)
+    history_recv_store_lost(target, timestamp);
+  return rc;
+}
+
+/** history_store_multiline's store itself (every early return is a row
+ * not stored). */
+static int history_store_multiline_row(const char *msgid, const char *timestamp,
+                                       const char *target, const char *original_target,
+                                       const char *sender,
+                                       const char *account, const char *content,
+                                       size_t content_len, const char *paste_secret,
+                                       const char *owner)
 {
   struct db_writebatch *wb = NULL;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
@@ -3451,6 +3479,47 @@ void history_recv_update(struct Channel *chptr)
   if (floor)
     rcv_clip(&r, (int64_t)floor);
   recv_write(key, klen, &r, want ? "open" : "close", chptr->chname);
+}
+
+/** A channel row this server received was not stored (a failed write, a
+ * row the trim record refuses, a key that does not fit; push review m1):
+ * the store no longer holds all of what the window claims.  The window is
+ * dropped in memory at once -- the channel counts as not received until
+ * its next local member change opens a new one -- and, best effort, on
+ * disk: closed before the row's time when the row is inside it, else
+ * closed and every interval clipped up to the row's time (an older
+ * interval may hold it).  @a timestamp is the row's "sec.mmm". */
+static void history_recv_store_lost(const char *target, const char *timestamp)
+{
+  char key[CHANNELLEN + 2];
+  struct rcv_record r;
+  struct Channel *chptr;
+  int64_t row, now;
+  int klen, was_open = 0;
+
+  if (!target || !IsChannelName(target))
+    return;
+  if ((chptr = FindChannel(target))) {
+    was_open = chptr->recv_open != 0;
+    chptr->recv_open = 0;
+  }
+  if (!history_available || !history_cf_recv
+      || (klen = build_target_key(key, sizeof key, target)) < 0
+      || recv_read(key, klen, &r) != 1)
+    return;
+  now = (int64_t)history_recv_now_ms();
+  row = timestamp ? (int64_t)history_parse_ms(timestamp) : 0;
+  if (was_open && r.open_since && row >= r.open_since)
+    rcv_close(&r, row < now ? row : now);
+  else {
+    if (was_open)
+      rcv_close(&r, now);
+    else
+      r.open_since = 0;               /* stale: never this run's open window */
+    if (row > 0)
+      rcv_clip(&r, row);
+  }
+  recv_write(key, klen, &r, "drop (row not stored)", target);
 }
 
 void history_recv_link_up(void)

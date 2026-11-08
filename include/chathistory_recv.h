@@ -53,7 +53,14 @@
 
 /** Backed off from "now" when closing a window: an in-flight relay can
  * still carry origin times stamped before the last PART reached us, so
- * the window's reported end sits this far behind the close event. */
+ * the window's reported end sits this far behind the close event.
+ * history.c also opens a window (one that is not a channel's creation) this
+ * far AFTER the JOIN: a line stamped after our JOIN but sent before the
+ * JOIN reached its sender's server is not routed here.
+ * Assumption: an event's propagation and processing between servers takes
+ * less than this.  A sender whose main loop stalls for longer (a line
+ * stamped, then relayed more than 30 s later) can put a line this server
+ * never received inside a window, or one it did receive outside. */
 #define RCV_CLOSE_SLACK_MS 30000
 
 /** One closed, completed span.  Epoch ms, inclusive both ends. */

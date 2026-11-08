@@ -1578,10 +1578,20 @@ static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
  * Stores only diverge across a netsplit: while a storage server is away it
  * is not consulted and, before this table, forgotten.  Each server that
  * ever advertised storage keeps its last few absence intervals
- * [SQUIT, relink) (end 0 = still away), pruned past retention.  A query
- * whose span overlaps an interval fans out even when the local page is
- * full (the other side's rows are otherwise hidden), and one that
- * overlaps an OPEN interval is answered partial. */
+ * [SQUIT, relink) (end 0 = still away).  A query whose span overlaps an
+ * interval fans out even when the local page is full (the other side's
+ * rows are otherwise hidden), and one that overlaps an OPEN interval is
+ * answered partial.
+ *
+ * An absence is the ONLY record of what the other side said during the
+ * split: the receive windows stay open across it (W5 Task 9), so a
+ * forgotten absence lets a page over that split be answered locally and
+ * complete.  So none is forgotten while a row of its time can still be
+ * asked about: a full table folds its oldest interval into the next-oldest
+ * (one interval from the older split's start to the newer one's end:
+ * it can only make more pages fan out), and an interval ages out only once
+ * its end is at or below this store's floor (history_local_floor_ms(); never
+ * with unlimited retention and no eviction floor).  Push D review I-1. */
 #define MAX_ABSENCES 4
 struct StorageAbsence {
   time_t start;
@@ -1592,7 +1602,7 @@ static struct StorageAbsence *absences[MAX_AD_SERVERS];
 static void absence_open(int idx)
 {
   struct StorageAbsence *a;
-  int i;
+  int i, j;
   if (idx < 0 || idx >= MAX_AD_SERVERS)
     return;
   if (!absences[idx])
@@ -1601,6 +1611,17 @@ static void absence_open(int idx)
   for (i = 0; i < MAX_ABSENCES; i++)
     if (a[i].start && a[i].end == 0)
       return;   /* already open */
+  /* Every slot is closed here.  Close the holes an aged-out slot left
+   * (newest first), then, when the table is full, fold the oldest interval
+   * into the next-oldest instead of dropping it. */
+  for (i = j = 0; i < MAX_ABSENCES; i++)
+    if (a[i].start)
+      a[j++] = a[i];
+  for (; j < MAX_ABSENCES; j++)
+    a[j].start = a[j].end = 0;
+  if (a[MAX_ABSENCES - 1].start && a[MAX_ABSENCES - 2].start
+      && a[MAX_ABSENCES - 1].start < a[MAX_ABSENCES - 2].start)
+    a[MAX_ABSENCES - 2].start = a[MAX_ABSENCES - 1].start;
   /* Shift the oldest out, newest at [0]. */
   memmove(&a[1], &a[0], sizeof(a[0]) * (MAX_ABSENCES - 1));
   a[0].start = CurrentTime;
@@ -1621,18 +1642,15 @@ static void absence_close(int idx)
 
 /** Does [lo, hi] (unix seconds; 0 = unbounded on that side) overlap any
  * known storage-server absence?  Sets *open_hit when an overlapping
- * absence is still open (that server is away right now).  Intervals
- * older than retention are dropped as they are met. */
+ * absence is still open (that server is away right now).  An interval
+ * whose end is at or below this store's floor (history_local_floor_ms())
+ * is dropped as it is met: no row of its time is left to ask about here. */
 static int absence_overlap(time_t lo, time_t hi, int *open_hit)
 {
   int idx, i, any = 0;
-  time_t horizon;
-  {
-    int days = feature_int(FEAT_CHATHISTORY_RETENTION);
-    if (days <= 0 || days > 30)
-      days = 30;
-    horizon = CurrentTime - (time_t)days * 86400;
-  }
+  uint64_t floor_ms = history_local_floor_ms();
+  time_t horizon = (time_t)(floor_ms / 1000ULL);
+
   if (lo == 0)
     lo = horizon;
   if (hi == 0)
@@ -1645,7 +1663,7 @@ static int absence_overlap(time_t lo, time_t hi, int *open_hit)
     for (i = 0; i < MAX_ABSENCES; i++) {
       if (!a[i].start)
         continue;
-      if (a[i].end && a[i].end < horizon) {
+      if (a[i].end && floor_ms && (uint64_t)a[i].end * 1000ULL <= floor_ms) {
         a[i].start = a[i].end = 0;   /* aged out */
         continue;
       }

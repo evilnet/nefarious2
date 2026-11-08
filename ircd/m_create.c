@@ -261,8 +261,11 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Set (or correct) our copy of the TS */
       chptr->creationtime = chanTS;
       /* Another incarnation's TS: what this server received was not its
-       * traffic (receive windows, W5 Task 9 fix round 1, M6). */
-      if (old_ts && old_ts != chanTS)
+       * traffic (receive windows, W5 Task 9 fix round 1, M6).  A channel
+       * new here (old_ts 0) takes a remote TS as well: a record left by an
+       * earlier incarnation of the name says nothing about this one, as for
+       * a channel new in a BURST. */
+      if (old_ts != chanTS)
         history_recv_reset(chptr);
       /* Pre-populate per-channel msgid from incoming S2S tag (positional).
        * The tag has MAXJOINARGS slots: a channel past them, or one whose
