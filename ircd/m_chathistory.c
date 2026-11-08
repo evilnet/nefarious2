@@ -5531,8 +5531,10 @@ struct RedactContext {
  * authorized under the same rule as a row found locally, and a REDACT
  * child of it (or a local REDACT row) makes the request an idempotent
  * repeat.  Otherwise the REDACT is shown to the local members under its
- * own msgid and time and relayed; no row is stored here, since this store
- * does not hold the message it would annotate.
+ * own msgid and time and relayed, and this store keeps it as a tombstone
+ * (it does not hold the message): every other store keeps its row when the
+ * relayed REDACT reaches it, and the requester never receives its own
+ * relay (W5 Task 5, R23).
  */
 static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
                               struct Client *sptr)
@@ -5644,39 +5646,32 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
   {
     char redact_msgid[HISTORY_MSGID_LEN];
     uint64_t time_ms;
+    char timestamp[32];
+    char redact_content[512];
 
     generate_msgid(redact_msgid, sizeof(redact_msgid));
     time_ms = history_event_time_ms(NULL);   /* the msgid's own mint time (audit #16) */
+    history_format_ms(timestamp, sizeof(timestamp), time_ms);
+    if (reason)
+      ircd_snprintf(0, redact_content, sizeof(redact_content),
+                    "%s :%s", ctx->msgid, reason);
+    else
+      ircd_snprintf(0, redact_content, sizeof(redact_content),
+                    "%s", ctx->msgid);
 
-    /* Write-forward the REDACT event to a STORE server (non-STORE only) */
+    /* Write-forward the REDACT event to a STORE server (non-STORE only).
+     * Reason is client-supplied: sentinel-escape for the CH W payload,
+     * same as m_redact.c's forward site (missed by the 0c9d97a composer
+     * conversion). */
     {
-      char timestamp[32];
-      char redact_content[512];
-
-      history_format_ms(timestamp, sizeof(timestamp), time_ms);
-
-      if (reason)
-        ircd_snprintf(0, redact_content, sizeof(redact_content),
-                      "%s :%s", ctx->msgid, reason);
-      else
-        ircd_snprintf(0, redact_content, sizeof(redact_content),
-                      "%s", ctx->msgid);
-
-      {
-        /* Reason is client-supplied: sentinel-escape for the CH W
-         * payload, same as m_redact.c's forward site (missed by the
-         * 0c9d97a composer conversion). */
-        char fwd_content[sizeof(redact_content) * 2 + 1];
-        history_forward_encode(fwd_content, sizeof(fwd_content), NULL,
-                               redact_content);
-        forward_history_write(chptr, sptr, redact_msgid, timestamp,
-                              HISTORY_REDACT, fwd_content);
-      }
+      char fwd_content[sizeof(redact_content) * 2 + 1];
+      history_forward_encode(fwd_content, sizeof(fwd_content), NULL,
+                             redact_content);
+      forward_history_write(chptr, sptr, redact_msgid, timestamp,
+                            HISTORY_REDACT, fwd_content);
     }
 
-    /* Show it to the local members under the event's msgid and time.  No
-     * local row: this store does not hold the message it would annotate
-     * (it was a local miss, or there is no store). */
+    /* Show it to the local members under the event's msgid and time. */
     redact_announce_local(sptr, chptr, ctx->msgid, redact_msgid, time_ms, reason);
 
     /* Propagate to other servers (ms_redact on storage servers stores the
@@ -5685,6 +5680,36 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
     sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone_v3(sptr, CMD_REDACT, sptr, "%s %s :%s",
                           req->target, ctx->msgid, reason ? reason : "");
+
+    /* This store's own row, under the same msgid and time: a tombstone, as
+     * the message is not here (a local miss) -- or beside it, should it
+     * have arrived during the lookup -- by the rule every store follows
+     * (redact_row_judge; redact_apply_row says why a tombstone).  The
+     * repeat checks above already answered an idempotent repeat, so a
+     * REDACT row found here now (one that arrived during the lookup)
+     * stores nothing.  Never in a +P channel; nothing without a store. */
+    if (history_is_available() && !(chptr->mode.exmode & EXMODE_NOSTORAGE)) {
+      int d = redact_row_judge(chptr->chname, ctx->msgid);
+
+      if (d == RDX_ROW_APPLY || d == RDX_ROW_SKIP_ORPHAN) {
+        char sender[HISTORY_SENDER_LEN];
+        char owner[HTC_OWNER_MAX];
+
+        if (d == RDX_ROW_APPLY)
+          history_redact_message(chptr->chname, ctx->msgid);
+        ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                      cli_name(sptr), cli_user(sptr)->username,
+                      cli_user(sptr)->host);
+        history_store_message(redact_msgid, timestamp, chptr->chname, NULL,
+                              sender,
+                              cli_user(sptr)->account[0] ? cli_user(sptr)->account : "",
+                              HISTORY_REDACT, redact_content, NULL,
+                              history_owner_of(owner, sizeof(owner), sptr));
+      } else if (d == RDX_ROW_RETRY)
+        log_write(LS_SYSTEM, L_NOTICE, 0,
+                  "REDACT %s %s by %s: the store could not be read; no REDACT row stored",
+                  chptr->chname, ctx->msgid, cli_name(sptr));
+    }
   }
 }
 
