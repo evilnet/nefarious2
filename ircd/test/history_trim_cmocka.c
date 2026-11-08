@@ -90,6 +90,25 @@ static void on_coverage(void)
   coverage_calls++;
 }
 
+/** The owner-trimmed callback (W5 Task 9, Q1): what the last call named. */
+#define MAX_OWNER_TRIMMED 8
+static int      owner_trimmed_calls;
+static int      owner_trimmed_count;
+static char     owner_trimmed_names[MAX_OWNER_TRIMMED][HTC_TARGET_MAX];
+static uint64_t owner_trimmed_ms[MAX_OWNER_TRIMMED];
+
+static void on_owner_trimmed(const char *const *targets, const uint64_t *newest_ms,
+                             int count)
+{
+  int i;
+  owner_trimmed_calls++;
+  owner_trimmed_count = count;
+  for (i = 0; i < count && i < MAX_OWNER_TRIMMED; i++) {
+    snprintf(owner_trimmed_names[i], sizeof owner_trimmed_names[i], "%s", targets[i]);
+    owner_trimmed_ms[i] = newest_ms[i];
+  }
+}
+
 /** The test value format: account|flags|reply|redact|payload. */
 static int parse_cb(const void *val, size_t vlen, struct htrim_row_info *out)
 {
@@ -152,6 +171,11 @@ static int setup(void **state)
   emptied_total = 0;
   coverage_calls = 0;
   htrim_set_coverage_cb(on_coverage);
+  owner_trimmed_calls = 0;
+  owner_trimmed_count = 0;
+  memset(owner_trimmed_names, 0, sizeof owner_trimmed_names);
+  memset(owner_trimmed_ms, 0, sizeof owner_trimmed_ms);
+  htrim_set_owner_trimmed_cb(on_owner_trimmed);
   assert_int_equal(0, htrim_init(&st, parse_cb, fake_clock, on_emptied));
   return 0;
 }
@@ -3067,6 +3091,71 @@ static void test_evict_owner_share_first(void **state)
   assert_acct_matches_cf();
 }
 
+/* W5 Task 9 (Q1): a committed slice of owner-path deletes tells the
+ * owner-trimmed callback, once, every target it touched (deduplicated,
+ * folded) with the newest row time it deleted there -- the receive
+ * windows are clipped up to it.  An age-out slice and a failed commit do
+ * not call it. */
+static void test_owner_slice_reports_touched_targets(void **state)
+{
+  struct htrim_slice *s;
+  (void)state;
+
+  load_acct();
+  seed_plain("#a", "1000.000", "A1", "a:bob", NULL);
+  seed_plain("#a", "2000.000", "A2", "a:bob", NULL);
+  seed_plain("#b", "1500.000", "B1", "a:bob", NULL);
+  seed_plain("#c", "500.000", "C1", "a:bob", NULL);
+  seed_plain("#d", "600.000", "D1", "a:bob", NULL);
+
+  /* One owner step: #a twice (not adjacent), #b once. */
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  stage_del(s, HTRIM_PATH_OWNER, "#a", "1000.000", "A1", 1);
+  stage_del(s, HTRIM_PATH_OWNER, "#b", "1500.000", "B1", 1);
+  stage_del(s, HTRIM_PATH_OWNER, "#a", "2000.000", "A2", 1);
+  assert_int_equal(3, htrim_slice_commit(s));
+  assert_int_equal(1, owner_trimmed_calls);
+  assert_int_equal(2, owner_trimmed_count);
+  assert_string_equal("#a", owner_trimmed_names[0]);
+  assert_int_equal(htc_parse_ms("2000.000"), owner_trimmed_ms[0]);
+  assert_string_equal("#b", owner_trimmed_names[1]);
+  assert_int_equal(htc_parse_ms("1500.000"), owner_trimmed_ms[1]);
+
+  /* An age-out slice: not an owner trim. */
+  assert_int_equal(1, del_row(HTRIM_PATH_AGEOUT, "#c", "500.000", "C1", 1));
+  assert_int_equal(1, owner_trimmed_calls);
+
+  /* A failed commit deleted nothing. */
+  fake_db_fail_next_commit(env);
+  assert_int_equal(-1, del_row(HTRIM_PATH_OWNER, "#d", "600.000", "D1", 1));
+  assert_int_equal(1, owner_trimmed_calls);
+  assert_true(row_present("#d", 600, "D1"));
+}
+
+/* The engine's own owner step reports through the same callback: the
+ * flood owner's share trim in #f deleted F00..F19, so #f is clipped up to
+ * F19's time; the oldest-overall path never ran, and #n/#q were not
+ * touched. */
+static void test_owner_evict_reports_newest_deleted(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  int i;
+  (void)state;
+
+  evict_ready();
+  seed_run("#n", "N", "-", 52, 1000, 100);
+  seed_run("#q", "Q", "a:quiet", 5, 1500, 100);
+  seed_run("#f", "F", "a:flood", 30, 2000, 100);
+  run_until_idle(&p);
+  assert_int_equal(20, htrim_stats()->deleted[HTRIM_PATH_OWNER]);
+  assert_true(owner_trimmed_calls >= 1);
+  for (i = 0; i < owner_trimmed_count; i++)
+    assert_string_equal("#f", owner_trimmed_names[i]);
+  assert_int_equal(1, owner_trimmed_count);
+  assert_int_equal(htc_parse_ms("2019.000"), owner_trimmed_ms[0]);
+}
+
 /* Nobody over share: the oldest rows go, whoever owns them, until the
  * store is at the low watermark; the coverage floor follows them. */
 static void test_evict_oldest_after_shares(void **state)
@@ -5233,6 +5322,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_backfill_end_no_warning_under_high, setup, teardown),
     cmocka_unit_test_setup_teardown(test_backfill_end_partial_waits_for_scan, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_owner_share_first, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_owner_slice_reports_touched_targets, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_owner_evict_reports_newest_deleted, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_oldest_after_shares, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_hysteresis, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_truncated_plan_spares_compliant_owner, setup, teardown),

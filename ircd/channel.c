@@ -833,7 +833,24 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
      * client's anchor in this channel (no-op if a sibling connection
      * was already a member, or if the feature is disabled). */
     presence_on_channel_add(who, chptr);
+
+    /* Receive windows (W5 Task 9): a local member -- a user, a local
+     * alias, a local held ghost -- may open this server's window for the
+     * channel.  A remote member never changes what this server receives;
+     * a remote alias membership (a BX V receiver's) included. */
+    if (MyConnect(who))
+      history_recv_update(chptr);
   }
+}
+
+int channel_has_local_member(const struct Channel *chptr)
+{
+  const struct Membership *member;
+
+  for (member = chptr->members; member; member = member->next_member)
+    if (!IsZombie(member) && MyConnect(member->user))
+      return 1;
+  return 0;
 }
 
 /** Remove a person from a channel, given their Membership*
@@ -845,8 +862,10 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
 static int remove_member_from_channel(struct Membership* member)
 {
   struct Channel* chptr;
+  int was_local;
   assert(0 != member);
   chptr = member->channel;
+  was_local = MyConnect(member->user);
   /*
    * unlink channel member list
    */
@@ -875,6 +894,12 @@ static int remove_member_from_channel(struct Membership* member)
 
   member->next_member = membershipFreeList;
   membershipFreeList = member;
+
+  /* Receive windows (W5 Task 9): the last local member leaving closes
+   * this server's window.  Here, with the member unlinked, and before
+   * both returns below: sub1_from_channel() may free chptr. */
+  if (was_local)
+    history_recv_update(chptr);
 
   if (IsMemberAlias(member)) {
     /* Alias removal: decrement alias counter only.
@@ -2125,6 +2150,7 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
   struct Channel *newchptr;
   struct Membership *member;
   struct SLink *link;
+  char oldname[CHANNELLEN + 1];
 
   if (!chptr_p || !*chptr_p || !newname || !*newname)
     return -1;
@@ -2140,11 +2166,15 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
     return -2;
 
   oldlen = strlen(chptr->chname);
+  /* The receive window moves to the new name (W5 Task 9): the rows stay
+   * under the old one, and so must what it says was received. */
+  ircd_strncpy(oldname, chptr->chname, sizeof(oldname));
 
   /* If new name fits in existing allocation, just update in place */
   if (newlen <= oldlen) {
     hChangeChannel(chptr, newname);
     strcpy(chptr->chname, newname);
+    history_recv_rename(chptr, oldname);
     return 0;
   }
 
@@ -2196,6 +2226,7 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
   /* Update caller's pointer */
   *chptr_p = newchptr;
 
+  history_recv_rename(newchptr, oldname);
   return 0;
 }
 

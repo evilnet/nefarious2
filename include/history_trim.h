@@ -273,6 +273,23 @@ void htrim_set_coverage_cb(htrim_coverage_fn cb);
  * rows older than it may be missing inside retention; 0 = none. */
 uint64_t htrim_coverage_floor_ms(void);
 
+/** Called once after a committed slice that deleted rows on
+ * HTRIM_PATH_OWNER (an over-share owner's eviction), with every target
+ * those deletes touched -- deduplicated, folded as the by_time keys hold
+ * them, in byte order -- and the newest row time (epoch ms) deleted from
+ * each.  Only the owner-path deletes count: other paths in the same slice
+ * are not reported, a failed commit reports nothing.  The receive windows
+ * (W5 Task 9, Q1) are clipped up to those times: rows of other owners
+ * stay, so the span no longer counts as wholly received here.  Runs at
+ * the end of htrim_slice_commit (owner deletes only happen in the
+ * engine's own evict slices: the slice timer, never inside a store). */
+typedef void (*htrim_owner_trimmed_fn)(const char *const *targets,
+                                       const uint64_t *newest_ms, int count);
+
+/** Register the owner-trimmed callback (NULL = none).  It survives
+ * htrim_init / htrim_shutdown. */
+void htrim_set_owner_trimmed_cb(htrim_owner_trimmed_fn cb);
+
 /** @return non-zero while an eviction drain is under way. */
 int htrim_draining(void);
 

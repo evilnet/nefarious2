@@ -289,6 +289,77 @@ typedef void (*history_coverage_cb)(void);
 /** Register the coverage callback (NULL = none). */
 extern void history_set_coverage_callback(history_coverage_cb cb);
 
+/* ---------------------------------------------------------------- */
+/* Receive windows (W5 Task 9, D2 = B)                                */
+/*                                                                    */
+/* P10 relays a channel's messages only toward links with members     */
+/* behind them, so this server holds a channel's messages only for    */
+/* the time it had a local member there.  Per channel, the recv_windows */
+/* CF (key: the folded name, as the targets CF) holds those windows   */
+/* (chathistory_recv.h's rcv_* record), and a channel page federates  */
+/* when the span it claims is not inside one of them.                 */
+/* ---------------------------------------------------------------- */
+
+struct Channel;
+
+/** "Now" for the receive windows, epoch ms: the HLC's physical time, never
+ * behind the wall clock (the time every stored row is stamped against). */
+extern uint64_t history_recv_now_ms(void);
+
+/** A local member joined or left @a chptr (channel.c's hooks, called only
+ * for a member with MyConnect: a remote member, a remote alias membership
+ * included, never changes what this server receives).  Opens or closes the
+ * channel's window when channel_has_local_member() changed against
+ * chptr->recv_open -- a read-modify-write of its record, clipped at the
+ * local floor; nothing else is written.  An open starts at the channel's
+ * creation when the new member is its only member in a channel created by
+ * this very join (nobody could have spoken there before), else just after
+ * now; a close ends RCV_CLOSE_SLACK_MS before now.  Does nothing before
+ * history_recv_link_up(). */
+extern void history_recv_update(struct Channel *chptr);
+
+/** The first storage peer's burst after boot has ended (m_chathistory.c's
+ * ad_store_back): open, at now, the window of every channel with a local
+ * member.  Until then this server has not received that peer's side and
+ * no window opens.  Later calls do nothing. */
+extern void history_recv_link_up(void);
+
+/** @a chptr lost its TS in a burst (m_burst.c's incarnation prune): the
+ * surviving side's history was never received here.  Delete the record;
+ * reopen it at now when a window was open (local members stay). */
+extern void history_recv_reset(struct Channel *chptr);
+
+/** @a chptr was renamed in place from @a oldname (channel.c's
+ * rename_channel; rows stay under the old name): close the old name's
+ * window and open the new name's. */
+extern void history_recv_rename(struct Channel *chptr, const char *oldname);
+
+/** Did this server receive channel @a chname's traffic over the whole of
+ * [@a lo_ms, @a hi_ms] (epoch ms)?  1 when one window holds it (an open
+ * one only while chptr->recv_open says this run opened it); 0 when not,
+ * when nothing is recorded or the record cannot be read, and when @a lo_ms
+ * is below history_local_floor_ms() (rows there may be gone, whatever the
+ * record says). */
+extern int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_ms);
+
+/** The oldest time this store can still answer for, epoch ms: the later of
+ * the trim's coverage floor (htrim_coverage_floor_ms(): oldest-overall and
+ * emergency eviction) and now minus CHATHISTORY_RETENTION days when that
+ * is set (CurrentTime-based); 0 = no floor. */
+extern uint64_t history_local_floor_ms(void);
+
+/** Boot (ircd.c, before any client or link): every window the last run left
+ * open -- a crash, or a clean DIE/RESTART, which closes the stores before
+ * clients leave -- is closed at @a alive_ms (the last time this server is
+ * known to have been alive: max(newest stored row, presence last-alive))
+ * less RCV_CLOSE_SLACK_MS; every record is clipped at the local floor, and
+ * one left with no interval is deleted. */
+extern void history_recv_boot(uint64_t alive_ms);
+
+/** STATS chathistory: "Federation: started N (unreceived N, short N,
+ * absence N), slot misses N" (m_chathistory.c). */
+extern void chathistory_fed_report(struct Client *to);
+
 #ifdef USE_ROCKSDB
 struct db_env;
 /** Get the history storage environment (for subsystems that share it). */

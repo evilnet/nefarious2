@@ -562,6 +562,35 @@ static void migrate_metadata_clock_cf(void **state)
   env_free(env);
 }
 
+static void migrate_recv_windows_cf(void **state)
+{
+  /* W5 Task 9: the recv_windows column family is keyed by the bare
+   * channel name (history.c's build_target_key, like targets), listed in
+   * history_init's migration with mask 1u.  A record written under an
+   * unfolded spelling by hand moves to the folded key; one already folded
+   * stays. */
+  struct db_env *env = env_new();
+  struct db_cf *rw = cf_of(env, "recv_windows");
+  struct db_casefold_cf cfs[] = { { NULL, "recv_windows", 1u } };
+  (void)state;
+  cfs[0].cf = rw;
+
+  seed(rw, B("#Linux"), "rec-a");
+  seed(rw, B("#ops[x]"), "rec-b");
+  seed(rw, B("#quiet"), "rec-c");
+
+  assert_int_equal(db_casefold_migrate(env, "t", cfs, 1), 0);
+
+  assert_int_equal(rw->n, 3);
+  assert_row(rw, B("#linux"), "rec-a");
+  assert_row(rw, B("#ops{x}"), "rec-b");
+  assert_row(rw, B("#quiet"), "rec-c");
+  assert_no_row(rw, B("#Linux"));
+  assert_no_row(rw, B("#ops[x]"));
+
+  env_free(env);
+}
+
 static void migrate_folds_only_masked_components(void **state)
 {
   struct db_env *env = env_new();
@@ -700,6 +729,7 @@ int main(void)
     cmocka_unit_test(migrate_moves_unfolded_rows),
     cmocka_unit_test(migrate_keeps_existing_folded_row_on_collision),
     cmocka_unit_test(migrate_metadata_clock_cf),
+    cmocka_unit_test(migrate_recv_windows_cf),
     cmocka_unit_test(migrate_folds_only_masked_components),
     cmocka_unit_test(migrate_runs_once_per_env),
     cmocka_unit_test(migrate_handles_more_rows_than_one_batch),

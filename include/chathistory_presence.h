@@ -98,6 +98,13 @@ extern void presence_alive_tick(void);
  * call before presence_init. */
 extern void presence_set_boot_alive_hint(uint64_t newest_ms);
 
+/** The last time the previous run is known to have been alive (epoch ms),
+ * as presence_init's boot-close used it: the stored last-alive stamp
+ * (PRESENCE_META_LAST_ALIVE, read before presence_init rewrote it) or the
+ * boot hint, whichever is later; 0 before presence_init, or when it had
+ * no store.  The receive windows' boot close reads it (W5 Task 9). */
+extern uint64_t presence_boot_alive_ms(void);
+
 /** The presence time of an event: its msgid's HLC stamp when the msgid
  * decodes and its millisecond agrees with @a event_ms (the row's stamp),
  * else (@a event_ms, logical 0). */

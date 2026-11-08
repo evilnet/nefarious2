@@ -1678,84 +1678,186 @@ static time_t ref_unix_secs(enum HistoryRefType t, const char *v)
   return 0;
 }
 
-/** The span a page answers for: the rows when the page was full (that is
- * what it covers), else the requested window with open ends (0). */
-static void query_span(struct HistoryMessage *rows, int count, int limit,
-                       time_t ref1, time_t ref2, time_t *lo, time_t *hi)
+/** Which subcommand a page answers (claim_span: where it fills from). */
+enum fed_page {
+  FP_LATEST,     /**< newest first, back from now (r1: an optional "after" anchor) */
+  FP_BEFORE,     /**< newest first, back from r1 */
+  FP_AFTER,      /**< oldest first, on from r1 */
+  FP_AROUND,     /**< half back from r1, the rest on from it */
+  FP_BETWEEN     /**< from r1 toward r2 */
+};
+
+/** The span a page claims to answer completely, in unix seconds (0 = open:
+ * no lower bound / up to now).  A page fills from its starting bound toward
+ * the other one, so it claims everything from that start to where it
+ * stopped: its last row when it filled up (count >= limit), the far bound
+ * when the walk ran out:
+ *   LATEST [r1]  back from now:    [full ? oldest : r1, now]
+ *   BEFORE r1    back from r1:     [full ? oldest : open, r1]
+ *   AFTER r1     on from r1:       [r1, full ? newest : now]
+ *   BETWEEN      ascending:        [r1, full ? newest : r2]
+ *                descending:       [full ? oldest : r2, r1]
+ *   AROUND r1    back half full (at least limit/2 rows before r1) ? oldest
+ *                : open, and the forward half full (count >= limit) ?
+ *                newest : now.
+ * A bound this server cannot resolve (0) is open, which claims more.
+ * (The span used to be a full page's own first..last rows: a full LATEST
+ * page whose newest row predates a stretch this server never received
+ * claimed nothing newer was said -- W5 Task 9.  Rows before a reference in
+ * the reference's own second are not counted for AROUND, which can only
+ * open its lower end.) */
+static void claim_span(enum fed_page page, struct HistoryMessage *rows,
+                       int count, int limit, time_t r1, time_t r2, int desc,
+                       time_t *lo, time_t *hi)
 {
-  if (count >= limit && rows) {
-    struct HistoryMessage *m;
-    time_t first = (time_t)strtoul(rows->timestamp, NULL, 10), last = first;
-    for (m = rows; m; m = m->next)
-      last = (time_t)strtoul(m->timestamp, NULL, 10);
-    *lo = first < last ? first : last;
-    *hi = first < last ? last : first;
-    return;
+  struct HistoryMessage *m;
+  time_t oldest = 0, newest = 0;
+  int full = count >= limit && rows, before = 0;
+
+  for (m = rows; m; m = m->next) {
+    time_t t = (time_t)strtoul(m->timestamp, NULL, 10);
+    if (!oldest || t < oldest)
+      oldest = t;
+    if (t > newest)
+      newest = t;
+    if (r1 && t < r1)
+      before++;
   }
-  if (ref1 && ref2) {
-    *lo = ref1 < ref2 ? ref1 : ref2;
-    *hi = ref1 < ref2 ? ref2 : ref1;
-  } else {
-    *lo = ref1 ? ref1 : ref2;   /* one bound known: the other is open */
+  switch (page) {
+  case FP_LATEST:
+    *lo = full ? oldest : r1;
     *hi = 0;
-    if (*lo && rows) {
-      /* BEFORE: bound is the upper end; AFTER/LATEST-anchor: the lower.
-       * Use the rows to tell: rows older than the bound => it was hi. */
-      time_t first = (time_t)strtoul(rows->timestamp, NULL, 10);
-      if (first < *lo) { *hi = *lo; *lo = 0; }
+    break;
+  case FP_BEFORE:
+    *lo = full ? oldest : 0;
+    *hi = r1;
+    break;
+  case FP_AFTER:
+    *lo = r1;
+    *hi = full ? newest : 0;
+    break;
+  case FP_BETWEEN:
+    if (desc) {
+      *lo = full ? oldest : r2;
+      *hi = r1;
+    } else {
+      *lo = r1;
+      *hi = full ? newest : r2;
     }
+    break;
+  case FP_AROUND:
+  default:
+    *lo = (rows && before >= limit / 2) ? oldest : 0;
+    *hi = full ? newest : 0;
+    break;
   }
 }
 
-/** Origin-side split check for one page.  Returns non-zero when the
- * fan-out must happen regardless of the local page (span overlaps an
- * absence); sets *partial when an overlapping absence is still open. */
-static int split_check(struct HistoryMessage *rows, int count, int limit,
-                       enum HistoryRefType t1, const char *v1,
-                       enum HistoryRefType t2, const char *v2, int *partial)
+/** Why a page federates (federation_wanted; the STATS counters). */
+enum fed_reason {
+  FED_WHY_NONE = 0,
+  FED_WHY_UNRECEIVED,   /**< a channel span this server did not receive */
+  FED_WHY_SHORT,        /**< a PM page that ran out (count < limit) */
+  FED_WHY_ABSENCE,      /**< the span overlaps a storage peer's absence */
+  FED_WHY_COUNT
+};
+
+/** Federation started per reason, and wanted with no request slot free,
+ * since this server started (STATS chathistory "Federation:"). */
+static unsigned long fed_started_why[FED_WHY_COUNT];
+static unsigned long fed_slot_misses;
+
+/** Count a start_fed_query outcome for a page that wanted it for @a why. */
+static void fed_count(const struct FedRequest *req, int why)
 {
-  time_t lo, hi;
-  int open_hit = 0;
-  query_span(rows, count, limit, ref_unix_secs(t1, v1), ref_unix_secs(t2, v2), &lo, &hi);
-  if (!absence_overlap(lo, hi, &open_hit))
-    return 0;
-  if (open_hit)
-    *partial = 1;
-  return 1;
+  if (req)
+    fed_started_why[why]++;
+  else if (fed_start_capacity_miss)
+    fed_slot_misses++;
 }
 
-/** Check if we should trigger federation query.
- * Returns 1 if we should federate, 0 otherwise.
- */
-static int should_federate(const char *target, int local_count, int limit)
+void chathistory_fed_report(struct Client *to)
 {
-  /* PM (identity pair-key) targets federate too.  Historically refused
-   * "until history was more reliable" and then forgotten: the ORIGIN
-   * server has already participant-checked the requester
-   * (check_history_access normalizes the target and verifies the
-   * caller is one of the pair), and responders operate under the P10
-   * server-trust model exactly as for channels. */
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Federation: started %lu (unreceived %lu, short %lu, "
+             "absence %lu), slot misses %lu",
+             fed_started_why[FED_WHY_UNRECEIVED] + fed_started_why[FED_WHY_SHORT]
+             + fed_started_why[FED_WHY_ABSENCE],
+             fed_started_why[FED_WHY_UNRECEIVED], fed_started_why[FED_WHY_SHORT],
+             fed_started_why[FED_WHY_ABSENCE], fed_slot_misses);
+}
 
-  /* Check if federation is enabled */
-  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
-    return 0;
+int chathistory_retention_advertised(void);   /* below; handlers.h */
 
-  /* Federate if we got fewer messages than requested.
-   * Note: count_servers() already skips U-lined services (X3 etc.) since
-   * they don't store chat history. If only services are connected,
-   * start_fed_query() returns NULL and we return local results immediately.
-   *
-   * TODO: This still has a "kick the can" problem for multi-server:
-   * - If local_count == 0 and remote servers exist, we federate
-   * - But if remote servers also have no history, we wait for timeout
-   * - The spec says return empty batch immediately, but we can't know
-   *   if remote servers have history without asking them
-   * - Possible future optimization: async channel presence tracking
-   */
-  if (local_count < limit)
-    return 1;
+/** Did this server receive all of channel @a chname's traffic over
+ * [@a lo, @a hi] (unix seconds, 0 = open; claim_span)?  Widened to whole
+ * seconds and clamped to what can be asked of anyone:
+ *   lo' = max(lo, the channel's creation, now - the widest retention a
+ *             reachable store keeps, when that is limited),
+ *   hi' = hi, else now -- never past now.
+ * history_recv_covers() then answers from the receive windows (and says
+ * no for a span reaching below this store's own floor). */
+static int channel_span_received(const char *chname, time_t lo, time_t hi)
+{
+  struct Channel *chptr = FindChannel(chname);
+  uint64_t now = history_recv_now_ms();
+  uint64_t lo_ms = (uint64_t)lo * 1000ULL;
+  uint64_t hi_ms = hi ? (uint64_t)hi * 1000ULL + 999ULL : now;
+  int widest = chathistory_retention_advertised();
 
-  return 0;
+  if (hi_ms > now)
+    hi_ms = now;
+  if (chptr && chptr->creationtime > 0
+      && (uint64_t)chptr->creationtime * 1000ULL > lo_ms)
+    lo_ms = (uint64_t)chptr->creationtime * 1000ULL;
+  if (widest > 0) {
+    /* The same clock as history_local_floor_ms()'s retention horizon, so a
+     * store that keeps exactly the widest retention is not below its own
+     * floor here. */
+    uint64_t span = (uint64_t)widest * 1000ULL;
+    uint64_t base = (uint64_t)CurrentTime * 1000ULL;
+    uint64_t horizon = base > span ? base - span : 0;
+    if (horizon > lo_ms)
+      lo_ms = horizon;
+  }
+  return history_recv_covers(chname, lo_ms, hi_ms);
+}
+
+/** Should this page fan out to the storage peers (W5 Task 9)?
+ *   - a channel: when the span the page claims (claim_span) is not one
+ *     this server received (channel_span_received), or overlaps a storage
+ *     peer's absence -- a full page included, a short one over a received
+ *     span not (it is complete);
+ *   - a PM target: when the page is short, or the span overlaps an absence.
+ * An overlapping absence that is still open (that store is away now) sets
+ * *@a partial.
+ * @return the reason (enum fed_reason), FED_WHY_NONE for no. */
+static int federation_wanted(const char *target, enum fed_page page,
+                             int count, int limit, struct HistoryMessage *rows,
+                             enum HistoryRefType t1, const char *v1,
+                             enum HistoryRefType t2, const char *v2,
+                             int *partial)
+{
+  time_t r1 = ref_unix_secs(t1, v1), r2 = ref_unix_secs(t2, v2), lo, hi;
+  int desc = 0, open_hit = 0, absent;
+
+  if (page == FP_BETWEEN) {
+    desc = history_between_descending(target, t1, v1, t2, v2);
+    if (desc < 0)
+      desc = r1 > r2;
+  }
+  claim_span(page, rows, count, limit, r1, r2, desc, &lo, &hi);
+  absent = absence_overlap(lo, hi, &open_hit);
+  if (absent && open_hit)
+    *partial = 1;
+  if (!IsChannelName(target)) {
+    if (count < limit)
+      return FED_WHY_SHORT;
+    return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
+  }
+  if (!channel_span_received(target, lo, hi))
+    return FED_WHY_UNRECEIVED;
+  return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
 }
 
 /** Single convergence point for chathistory result delivery.
@@ -1925,7 +2027,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  int force_fed = 0, partial = 0;
+  int fed_why = FED_WHY_NONE, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2000,14 +2102,18 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  /* Split windows: a page whose span overlaps a known store's absence
-   * fans out even when the local page is full, and is partial while that
-   * store is still away (chathistory-partial, 2026-09-08). */
-  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
-  if (should_federate(lookup_target, count, limit) || force_fed) {
+  /* A channel page fans out when the span it claims was not received
+   * here (the receive windows, W5 Task 9), a PM page when it is short;
+   * either when the span overlaps a known store's absence, and then it is
+   * partial while that store is still away (chathistory-partial,
+   * 2026-09-08). */
+  fed_why = federation_wanted(lookup_target, FP_LATEST, count, limit, messages,
+                              ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (fed_why) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "LATEST",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    fed_count(req, fed_why);
     if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
       partial = 1;
@@ -2055,7 +2161,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  int force_fed = 0, partial = 0;
+  int fed_why = FED_WHY_NONE, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2101,14 +2207,18 @@ static int chathistory_before(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  /* Split windows: a page whose span overlaps a known store's absence
-   * fans out even when the local page is full, and is partial while that
-   * store is still away (chathistory-partial, 2026-09-08). */
-  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
-  if (should_federate(lookup_target, count, limit) || force_fed) {
+  /* A channel page fans out when the span it claims was not received
+   * here (the receive windows, W5 Task 9), a PM page when it is short;
+   * either when the span overlaps a known store's absence, and then it is
+   * partial while that store is still away (chathistory-partial,
+   * 2026-09-08). */
+  fed_why = federation_wanted(lookup_target, FP_BEFORE, count, limit, messages,
+                              ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (fed_why) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BEFORE",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    fed_count(req, fed_why);
     if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
       partial = 1;
@@ -2151,7 +2261,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  int force_fed = 0, partial = 0;
+  int fed_why = FED_WHY_NONE, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2197,14 +2307,18 @@ static int chathistory_after(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  /* Split windows: a page whose span overlaps a known store's absence
-   * fans out even when the local page is full, and is partial while that
-   * store is still away (chathistory-partial, 2026-09-08). */
-  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
-  if (should_federate(lookup_target, count, limit) || force_fed) {
+  /* A channel page fans out when the span it claims was not received
+   * here (the receive windows, W5 Task 9), a PM page when it is short;
+   * either when the span overlaps a known store's absence, and then it is
+   * partial while that store is still away (chathistory-partial,
+   * 2026-09-08). */
+  fed_why = federation_wanted(lookup_target, FP_AFTER, count, limit, messages,
+                              ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (fed_why) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AFTER",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    fed_count(req, fed_why);
     if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
       partial = 1;
@@ -2247,7 +2361,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  int force_fed = 0, partial = 0;
+  int fed_why = FED_WHY_NONE, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2293,14 +2407,18 @@ static int chathistory_around(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  /* Split windows: a page whose span overlaps a known store's absence
-   * fans out even when the local page is full, and is partial while that
-   * store is still away (chathistory-partial, 2026-09-08). */
-  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
-  if (should_federate(lookup_target, count, limit) || force_fed) {
+  /* A channel page fans out when the span it claims was not received
+   * here (the receive windows, W5 Task 9), a PM page when it is short;
+   * either when the span overlaps a known store's absence, and then it is
+   * partial while that store is still away (chathistory-partial,
+   * 2026-09-08). */
+  fed_why = federation_wanted(lookup_target, FP_AROUND, count, limit, messages,
+                              ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (fed_why) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AROUND",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    fed_count(req, fed_why);
     if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
       partial = 1;
@@ -2344,7 +2462,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type1, ref_type2;
   const char *ref_value1, *ref_value2;
   int limit, count, max_limit;
-  int force_fed = 0, partial = 0;
+  int fed_why = FED_WHY_NONE, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2401,14 +2519,18 @@ static int chathistory_between(struct Client *sptr, const char *target,
   /* Federation (oversight fix): BETWEEN was the one subcommand that
    * never federated -- the CH Q wire had a single ref slot; W now
    * carries an optional trailing second ref. */
-  /* Split windows: a page whose span overlaps a known store's absence
-   * fans out even when the local page is full, and is partial while that
-   * store is still away (chathistory-partial, 2026-09-08). */
-  force_fed = split_check(messages, count, limit, ref_type1, ref_value1, ref_type2, ref_value2, &partial);
-  if (should_federate(lookup_target, count, limit) || force_fed) {
+  /* A channel page fans out when the span it claims was not received
+   * here (the receive windows, W5 Task 9), a PM page when it is short;
+   * either when the span overlaps a known store's absence, and then it is
+   * partial while that store is still away (chathistory-partial,
+   * 2026-09-08). */
+  fed_why = federation_wanted(lookup_target, FP_BETWEEN, count, limit, messages,
+                              ref_type1, ref_value1, ref_type2, ref_value2, &partial);
+  if (fed_why) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BETWEEN",
                                               ref1_str, limit, messages, count,
                                               ops_override, ref2_str, complete);
+    fed_count(req, fed_why);
     if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
       partial = 1;
@@ -3950,7 +4072,10 @@ static void ad_store_back(int idx)
 {
   absence_close(idx);   /* back: close its absence */
   redact_catchup_kick((unsigned int)idx);   /* what did we miss while it was away? */
-  /* W5 Task 9 adds history_recv_link_up() here (the first close after boot). */
+  /* The first one after boot: this server receives the network's traffic
+   * from now on, so its receive windows open (W5 Task 9; later calls do
+   * nothing). */
+  history_recv_link_up();
 }
 
 /** A server's END_OF_BURST arrived (ms_end_of_burst, after ClearBurst; for

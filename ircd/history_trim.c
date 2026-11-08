@@ -13,6 +13,8 @@
  *     signed delta, applied through acct_apply() after the commit;
  *   - touched targets: the folded target and the newest rec->ts deleted
  *     from it, deduplicated (qsort) at commit, then checked for emptiness;
+ *     the owner-path deletes' targets are also kept in a second such list,
+ *     handed to the owner-trimmed callback after the commit (W5 Task 9);
  *   - per-path delete counters, added to htrim_stats after the commit.
  * A failed commit applies none of them.
  *
@@ -209,6 +211,10 @@ struct htrim_slice {
   size_t                npend, cap_pend;
   struct htrim_touch   *touch;
   size_t                ntouch, cap_touch;
+  /* The targets its HTRIM_PATH_OWNER deletes touched (the owner-trimmed
+   * callback, W5 Task 9): kept apart from touch[], which every path fills. */
+  struct htrim_touch   *otouch;
+  size_t                notouch, cap_otouch;
 
   /* An age-out step, applied at commit. */
   int                   ao_step;     /* this slice walked by_time */
@@ -421,6 +427,8 @@ static struct {
 
 /** The coverage callback: outside g, so a restart keeps it. */
 static htrim_coverage_fn coverage_cb;
+/** The owner-trimmed callback (W5 Task 9): outside g, likewise. */
+static htrim_owner_trimmed_fn owner_trimmed_cb;
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -1311,6 +1319,7 @@ static void slice_free(struct htrim_slice *s)
   MyFree(s->keys);
   MyFree(s->pend);
   MyFree(s->touch);
+  MyFree(s->otouch);
   MyFree(s->ao_cursor);
   MyFree(s->ao_next);
   MyFree(s->ao_store);
@@ -1427,29 +1436,41 @@ static void slice_add_delta(struct htrim_slice *s, const char *bo_key,
   s->keys_len += bo_klen;
 }
 
-/** Remember @a target as touched, keeping the newest deleted ts.  A long
- * single-target drain stays one entry (the last one is merged in place);
- * commit deduplicates the rest. */
-static void slice_touch(struct htrim_slice *s, const char *target, const char *ts)
+/** Remember @a target in the touched list *@a list (*@a n used, *@a cap
+ * allocated), keeping the newest deleted ts.  A long single-target drain
+ * stays one entry (the last one is merged in place); the reader
+ * deduplicates the rest. */
+static void touch_add(struct htrim_touch **list, size_t *n, size_t *cap,
+                      const char *target, const char *ts)
 {
   struct htrim_touch *t;
   size_t tl = strlen(ts);
 
-  if (s->ntouch) {
-    t = &s->touch[s->ntouch - 1];
+  if (*n) {
+    t = &(*list)[*n - 1];
     if (strcmp(t->target, target) == 0) {
       if (history_stamp_newer(ts, tl, t->ts, strlen(t->ts)))
         memcpy(t->ts, ts, tl + 1);
       return;
     }
   }
-  if (s->ntouch == s->cap_touch) {
-    s->cap_touch = s->cap_touch ? s->cap_touch * 2 : 16;
-    s->touch = (struct htrim_touch *)MyRealloc(s->touch, s->cap_touch * sizeof *s->touch);
+  if (*n == *cap) {
+    *cap = *cap ? *cap * 2 : 16;
+    *list = (struct htrim_touch *)MyRealloc(*list, *cap * sizeof **list);
   }
-  t = &s->touch[s->ntouch++];
+  t = &(*list)[(*n)++];
   memcpy(t->target, target, strlen(target) + 1);
   memcpy(t->ts, ts, tl + 1);
+}
+
+/** Remember @a target as touched by this slice (the emptiness cleanup),
+ * and, for an owner-path delete, for the owner-trimmed callback too. */
+static void slice_touch(struct htrim_slice *s, enum htrim_path path,
+                        const char *target, const char *ts)
+{
+  touch_add(&s->touch, &s->ntouch, &s->cap_touch, target, ts);
+  if (path == HTRIM_PATH_OWNER)
+    touch_add(&s->otouch, &s->notouch, &s->cap_otouch, target, ts);
 }
 
 static int slice_del(struct htrim_slice *s, struct db_cf *cf,
@@ -1603,7 +1624,7 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
 
   if (counted && rec->bytes)
     slice_add_delta(s, bo, (size_t)bol, -(int64_t)rec->bytes);
-  slice_touch(s, target, rec->ts);
+  slice_touch(s, path, target, rec->ts);
   s->counts[path]++;
   s->rows++;
   return 0;
@@ -2060,6 +2081,38 @@ static void cost_learn(uint64_t *c, uint64_t us, size_t n)
     *c -= (*c - sample) / 4;
 }
 
+/** After a committed slice: tell the owner-trimmed callback, once, every
+ * target the slice's HTRIM_PATH_OWNER deletes touched -- deduplicated, in
+ * byte order -- with the newest row time deleted from each (W5 Task 9,
+ * Q1: the receive windows are clipped up to it). */
+static void owner_trimmed_report(struct htrim_slice *s)
+{
+  const char **names;
+  uint64_t *ms;
+  size_t i, n = 0;
+
+  if (!owner_trimmed_cb || !s->notouch)
+    return;
+  qsort(s->otouch, s->notouch, sizeof *s->otouch, touch_cmp);
+  names = (const char **)MyMalloc(s->notouch * sizeof *names);
+  ms = (uint64_t *)MyMalloc(s->notouch * sizeof *ms);
+  for (i = 0; i < s->notouch; i++) {
+    const struct htrim_touch *t = &s->otouch[i];
+    uint64_t m = htc_parse_ms(t->ts);
+
+    if (n && strcmp(names[n - 1], t->target) == 0) {
+      if (m > ms[n - 1])
+        ms[n - 1] = m;
+      continue;
+    }
+    names[n] = t->target;
+    ms[n++] = m;
+  }
+  owner_trimmed_cb((const char *const *)names, ms, (int)n);
+  MyFree(names);
+  MyFree(ms);
+}
+
 int htrim_slice_commit(struct htrim_slice *s)
 {
   uint64_t t0 = 0, t1 = 0, now;
@@ -2152,6 +2205,8 @@ int htrim_slice_commit(struct htrim_slice *s)
   }
   if (s->phase != HTRIM_PH_NONE)
     record_slice(s->phase);
+  /* Outside the measured span: the callback writes to the store. */
+  owner_trimmed_report(s);
   rows = s->rows;
   slice_free(s);
   return rows;
@@ -3498,6 +3553,11 @@ int htrim_tsweep_pending(void)
 void htrim_set_coverage_cb(htrim_coverage_fn cb)
 {
   coverage_cb = cb;
+}
+
+void htrim_set_owner_trimmed_cb(htrim_owner_trimmed_fn cb)
+{
+  owner_trimmed_cb = cb;
 }
 
 uint64_t htrim_coverage_floor_ms(void)

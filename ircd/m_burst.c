@@ -451,8 +451,13 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * surviving channel's history (a channel recreated behind a split;
      * 2026-09-08).  Prune them now, while we still know which
      * creationtime they carry. */
-    if (chptr->creationtime)
+    if (chptr->creationtime) {
       history_purge_incarnation(chptr->chname, chptr->creationtime);
+      /* What this server received was the losing incarnation's traffic,
+       * never the surviving side's: its receive windows go too, and one
+       * still open (local members stay) restarts now (W5 Task 9). */
+      history_recv_reset(chptr);
+    }
 #endif
     chptr->creationtime = timestamp;
 

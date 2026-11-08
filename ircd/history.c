@@ -32,6 +32,7 @@
 #include "config.h"
 
 #include "chathistory_presence.h"
+#include "chathistory_recv.h"
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
@@ -85,6 +86,9 @@ static struct db_cf  *history_cf_redact = NULL;   /* redaction catch-up index (r
  * by_time row and a by_owner row in its own batch. */
 static struct db_cf  *history_cf_by_time = NULL;
 static struct db_cf  *history_cf_by_owner = NULL;
+/* Receive windows (W5 Task 9): per channel, when this server received its
+ * traffic (chathistory_recv.h's record, keyed by the folded name). */
+static struct db_cf  *history_cf_recv = NULL;
 
 /** The trimmer's slice timer (history_trim_arm adds it, only when it is
  * not already queued). */
@@ -158,6 +162,8 @@ static history_coverage_cb coverage_callback = NULL;
 /* Forward declarations */
 static void history_retire_quotas(struct db_cf *meta);
 static uint64_t history_trim_clock(void);
+static void history_recv_owner_trimmed(const char *const *targets,
+                                       const uint64_t *newest_ms, int count);
 static void history_trim_emptied(const char **targets, int count);
 static int history_trim_parse(const void *val, size_t vlen,
                               struct htrim_row_info *out);
@@ -537,7 +543,8 @@ int history_init(const char *dbpath)
       || db_cf_open(history_db_env, "reply_index", &cf_opts, &history_cf_reply) != DB_OK
       || db_cf_open(history_db_env, "redact_index", &cf_opts, &history_cf_redact) != DB_OK
       || db_cf_open(history_db_env, "by_time", &cf_opts, &history_cf_by_time) != DB_OK
-      || db_cf_open(history_db_env, "by_owner", &cf_opts, &history_cf_by_owner) != DB_OK) {
+      || db_cf_open(history_db_env, "by_owner", &cf_opts, &history_cf_by_owner) != DB_OK
+      || db_cf_open(history_db_env, "recv_windows", &cf_opts, &history_cf_recv) != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open failed: %s",
               db_env_last_error(history_db_env));
     db_env_close(history_db_env);
@@ -557,6 +564,7 @@ int history_init(const char *dbpath)
       { history_cf_targets,  "targets",     DB_CASEFOLD_ALL },
       { history_cf_quotas,   "quotas",      3u },   /* channel\0account */
       { history_cf_reply,    "reply_index", 1u },   /* target\0parent\0ts\0child */
+      { history_cf_recv,     "recv_windows", 1u },  /* channel */
     };
     if (db_casefold_migrate(history_db_env, "history", cfs,
                             sizeof(cfs) / sizeof(cfs[0])) != 0)
@@ -610,6 +618,8 @@ int history_init(const char *dbpath)
       history_db_env = NULL;
       return -1;
     }
+    /* A per-owner eviction clips the channel's receive windows (Q1). */
+    htrim_set_owner_trimmed_cb(history_recv_owner_trimmed);
   }
 
   /* Strict-presence init moved to ircd.c: the account records now live
@@ -654,6 +664,7 @@ void history_shutdown(void)
   db_cf_close(history_db_env, history_cf_reply);
   db_cf_close(history_db_env, history_cf_by_time);
   db_cf_close(history_db_env, history_cf_by_owner);
+  db_cf_close(history_db_env, history_cf_recv);
   db_env_close(history_db_env);
   history_db_env = NULL;
   history_cf_messages = NULL;
@@ -664,6 +675,7 @@ void history_shutdown(void)
   history_cf_reply = NULL;
   history_cf_by_time = NULL;
   history_cf_by_owner = NULL;
+  history_cf_recv = NULL;
   history_available = 0;
 
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
@@ -3198,6 +3210,402 @@ int history_coverage_days(void)
                             (uint64_t)time(NULL) * 1000ULL);
 }
 
+/* ---------------------------------------------------------------- */
+/* Receive windows (W5 Task 9, D2 = B)                                */
+/*                                                                    */
+/* A channel's record lists the windows during which this server had a */
+/* local member there, so received its traffic (P10 relays a channel's */
+/* messages only toward links with members behind them).  Only member  */
+/* transitions open and close windows -- never a row: a stored row,    */
+/* a REDACT tombstone for a parent this server does not hold included, */
+/* says nothing about what else was said meanwhile.  Every write is a  */
+/* read-modify-write of one small record (rcv_pack/rcv_unpack); the     */
+/* in-memory chptr->recv_open says whether this run has the window     */
+/* open, and a failed write always leaves the record claiming LESS     */
+/* than was received (a stale open is ignored by history_recv_covers   */
+/* and dropped by the next open), never more.                          */
+/* ---------------------------------------------------------------- */
+
+/** history_recv_link_up() ran: the first storage peer's burst after boot
+ * has ended, and windows open and close from now on. */
+static int history_recv_linked = 0;
+
+uint64_t history_recv_now_ms(void)
+{
+  uint64_t wall = hlc_wall_clock_ms();
+  uint64_t hlc = hlc_global()->physical_ms;
+  return hlc > wall ? hlc : wall;
+}
+
+uint64_t history_local_floor_ms(void)
+{
+  uint64_t floor = history_available ? htrim_coverage_floor_ms() : 0;
+  int days = feature_int(FEAT_CHATHISTORY_RETENTION);
+
+  if (days > 0) {
+    uint64_t span = (uint64_t)days * 86400000ULL;
+    uint64_t now = (uint64_t)CurrentTime * 1000ULL;
+    uint64_t horizon = now > span ? now - span : 0;
+    if (horizon > floor)
+      floor = horizon;
+  }
+  return floor;
+}
+
+/** Read the record under @a key into *@a r (zeroed when there is none).
+ * @return 1 read, 0 none, -1 a read error or a record that does not
+ * decode (*@a r zeroed: the caller starts over, claiming less). */
+static int recv_read(const char *key, int klen, struct rcv_record *r)
+{
+  struct db_val v = { NULL, 0 };
+  int rc;
+
+  memset(r, 0, sizeof *r);
+  rc = db_get(history_db_env, history_cf_recv, key, (size_t)klen, NULL, &v);
+  if (rc == DB_NOTFOUND)
+    return 0;
+  if (rc != DB_OK)
+    return -1;
+  rc = (v.base && rcv_unpack((const unsigned char *)v.base, v.len, r) == 0) ? 1 : -1;
+  db_val_free(&v);
+  if (rc < 0)
+    memset(r, 0, sizeof *r);
+  return rc;
+}
+
+/** Stage *@a r under @a key on @a wb: a delete when it holds nothing (no
+ * interval, no open window).  @return DB_OK or the failing status. */
+static int recv_stage(struct db_writebatch *wb, const char *key, int klen,
+                      const struct rcv_record *r)
+{
+  unsigned char buf[2 + 8 + RCV_MAX * 16];
+  int n;
+
+  if (r->count == 0 && r->open_since == 0)
+    return db_writebatch_del(wb, history_cf_recv, key, (size_t)klen);
+  n = rcv_pack(r, buf, sizeof buf);
+  if (n < 0)
+    return DB_ERR_OTHER;
+  return db_writebatch_put(wb, history_cf_recv, key, (size_t)klen, buf, (size_t)n);
+}
+
+/** Write *@a r under @a key in its own batch; a failure is logged with
+ * @a what and @a chname (the record then claims less than was received,
+ * or a stale open that history_recv_covers ignores). */
+static void recv_write(const char *key, int klen, const struct rcv_record *r,
+                       const char *what, const char *chname)
+{
+  struct db_writebatch *wb = db_writebatch_new(history_db_env);
+  int rc = wb ? recv_stage(wb, key, klen, r) : DB_ERR_MEMORY;
+
+  if (rc == DB_OK)
+    rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  if (rc != DB_OK)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive window %s for %s not stored: %s (%s)", what,
+              chname, db_strerror(rc),
+              db_env_last_error(history_db_env)
+                ? db_env_last_error(history_db_env) : "no backend detail");
+  if (wb)
+    db_writebatch_destroy(wb);
+}
+
+/** Where a window opened after link-up starts: the channel's creation when
+ * the new member is its only member (users 1, no alias) in a channel this
+ * very join created (its creationtime is this second: get_channel stamps
+ * TStime() for a local creator) -- nobody could have spoken there before;
+ * otherwise just after now.  A channel kept alive empty (+z, an Apass, a
+ * delayed destruct) may have had remote members who spoke while this
+ * server had none: its creation is not a safe start. */
+static int64_t recv_open_start(const struct Channel *chptr, uint64_t now)
+{
+  if (chptr->users == 1 && chptr->aliases == 0 && chptr->creationtime > 0
+      && chptr->creationtime >= TStime()) {
+    uint64_t c = (uint64_t)chptr->creationtime * 1000ULL;
+    return (int64_t)(c < now ? c : now);
+  }
+  return (int64_t)now + 1;
+}
+
+void history_recv_update(struct Channel *chptr)
+{
+  char key[CHANNELLEN + 2];
+  struct rcv_record r;
+  uint64_t now, floor;
+  int want, klen;
+
+  if (!chptr || !history_recv_linked)
+    return;
+  want = channel_has_local_member(chptr);
+  if (want == (chptr->recv_open != 0))
+    return;                                     /* no transition */
+  chptr->recv_open = (unsigned char)want;
+  if (!history_available || !history_cf_recv)
+    return;
+  klen = build_target_key(key, sizeof key, chptr->chname);
+  if (klen < 0)
+    return;
+  (void)recv_read(key, klen, &r);               /* unreadable: start over */
+  now = history_recv_now_ms();
+  if (want) {
+    r.open_since = 0;   /* a close that was not stored: drop that window */
+    rcv_open(&r, recv_open_start(chptr, now));
+  } else
+    rcv_close(&r, (int64_t)now);
+  floor = history_local_floor_ms();
+  if (floor)
+    rcv_clip(&r, (int64_t)floor);
+  recv_write(key, klen, &r, want ? "open" : "close", chptr->chname);
+}
+
+void history_recv_link_up(void)
+{
+  struct Channel *chptr;
+  struct db_writebatch *wb;
+  uint64_t now, floor;
+  unsigned int opened = 0;
+  int rc = DB_OK;
+
+  if (history_recv_linked)
+    return;
+  history_recv_linked = 1;
+  if (!history_available || !history_cf_recv)
+    return;
+  wb = db_writebatch_new(history_db_env);
+  if (!wb) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive windows not opened at link-up (no batch); "
+              "they open as members join");
+    return;
+  }
+  now = history_recv_now_ms();
+  floor = history_local_floor_ms();
+  for (chptr = GlobalChannelList; chptr; chptr = chptr->next) {
+    char key[CHANNELLEN + 2];
+    struct rcv_record r;
+    int klen;
+
+    if (chptr->recv_open || !channel_has_local_member(chptr))
+      continue;
+    klen = build_target_key(key, sizeof key, chptr->chname);
+    if (klen < 0)
+      continue;
+    (void)recv_read(key, klen, &r);
+    r.open_since = 0;   /* boot closed it; one left open is not this run's */
+    rcv_open(&r, (int64_t)now);
+    if (floor)
+      rcv_clip(&r, (int64_t)floor);
+    if ((rc = recv_stage(wb, key, klen, &r)) != DB_OK)
+      break;
+    chptr->recv_open = 1;
+    opened++;
+  }
+  if (rc == DB_OK && opened)
+    rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive windows at link-up not stored: %s (%s); "
+              "those channels federate until a member rejoins",
+              db_strerror(rc),
+              db_env_last_error(history_db_env)
+                ? db_env_last_error(history_db_env) : "no backend detail");
+  else
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: the first storage peer's burst ended: receive "
+              "windows opened for %u channel%s", opened, opened == 1 ? "" : "s");
+}
+
+void history_recv_reset(struct Channel *chptr)
+{
+  char key[CHANNELLEN + 2];
+  struct rcv_record r;
+  int klen;
+
+  if (!chptr || !history_available || !history_cf_recv)
+    return;
+  klen = build_target_key(key, sizeof key, chptr->chname);
+  if (klen < 0)
+    return;
+  memset(&r, 0, sizeof r);
+  if (chptr->recv_open)
+    rcv_open(&r, (int64_t)history_recv_now_ms());
+  recv_write(key, klen, &r, "reset", chptr->chname);
+}
+
+void history_recv_rename(struct Channel *chptr, const char *oldname)
+{
+  char key[CHANNELLEN + 2];
+  struct rcv_record r;
+  int klen;
+
+  if (!chptr || !oldname || !chptr->recv_open)
+    return;                                     /* nothing open */
+  chptr->recv_open = 0;
+  if (history_available && history_cf_recv
+      && (klen = build_target_key(key, sizeof key, oldname)) >= 0) {
+    uint64_t floor = history_local_floor_ms();
+    (void)recv_read(key, klen, &r);
+    rcv_close(&r, (int64_t)history_recv_now_ms());
+    if (floor)
+      rcv_clip(&r, (int64_t)floor);
+    recv_write(key, klen, &r, "close (rename)", oldname);
+  }
+  history_recv_update(chptr);                   /* open under the new name */
+}
+
+int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_ms)
+{
+  char key[CHANNELLEN + 2];
+  struct rcv_record r;
+  struct Channel *chptr;
+  int klen;
+
+  if (!chname || !history_available || !history_cf_recv)
+    return 0;
+  if (lo_ms < history_local_floor_ms())
+    return 0;                                   /* rows there may be gone */
+  klen = build_target_key(key, sizeof key, chname);
+  if (klen < 0 || recv_read(key, klen, &r) != 1)
+    return 0;
+  /* Only a window this run opened, and has not closed, is open: one the
+   * record shows open otherwise was never closed on disk (a failed
+   * write). */
+  chptr = FindChannel(chname);
+  if (!chptr || !chptr->recv_open)
+    r.open_since = 0;
+  return rcv_covers(&r, (int64_t)lo_ms, (int64_t)hi_ms,
+                    (int64_t)history_recv_now_ms());
+}
+
+/** history_recv_boot's work on one stored record (@a k, @a kl; value
+ * @a v, @a vl): staged on @a wb when it changed, counted in @a n
+ * ([0] closed, [1] deleted, [2] rewritten).  @return DB_OK or the failing
+ * batch status. */
+static int recv_boot_one(struct db_writebatch *wb, const void *k, size_t kl,
+                         const void *v, size_t vl, uint64_t alive_ms,
+                         uint64_t floor, unsigned int n[3])
+{
+  unsigned char buf[2 + 8 + RCV_MAX * 16];
+  struct rcv_record r;
+  int len;
+
+  if (!k || !kl || kl > CHANNELLEN + 1)
+    return DB_OK;                               /* not a channel's key */
+  if (!v || rcv_unpack((const unsigned char *)v, vl, &r) != 0) {
+    /* Undecodable: what it claimed is unknown, so it claims nothing. */
+    n[1]++;
+    return db_writebatch_del(wb, history_cf_recv, k, kl);
+  }
+  if (r.open_since)
+    n[0]++;
+  rcv_boot_close(&r, (int64_t)alive_ms);
+  if (floor)
+    rcv_clip(&r, (int64_t)floor);
+  if (r.count == 0) {
+    n[1]++;
+    return db_writebatch_del(wb, history_cf_recv, k, kl);
+  }
+  len = rcv_pack(&r, buf, sizeof buf);
+  if (len < 0 || ((size_t)len == vl && memcmp(buf, v, vl) == 0))
+    return DB_OK;                               /* unchanged */
+  n[2]++;
+  return db_writebatch_put(wb, history_cf_recv, k, kl, buf, (size_t)len);
+}
+
+void history_recv_boot(uint64_t alive_ms)
+{
+  struct db_iter *it;
+  struct db_writebatch *wb;
+  uint64_t floor;
+  unsigned int n[3] = { 0, 0, 0 };
+  int rc;
+
+  if (!history_available || !history_cf_recv)
+    return;
+  it = db_iter_open(history_db_env, history_cf_recv, NULL);
+  wb = it ? db_writebatch_new(history_db_env) : NULL;
+  if (!it || !wb) {
+    if (it)
+      db_iter_close(it);
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive windows not boot-closed (no iterator or "
+              "batch); a window left open is ignored until it reopens");
+    return;
+  }
+  floor = history_local_floor_ms();
+  rc = db_iter_seek_first(it);
+  if (rc == DB_NOTFOUND)
+    rc = DB_OK;                                 /* an empty CF */
+  while (rc == DB_OK && db_iter_valid(it)) {
+    size_t kl = 0, vl = 0;
+    const void *k = db_iter_key(it, &kl);
+    const void *v = db_iter_value(it, &vl);
+
+    rc = recv_boot_one(wb, k, kl, v, vl, alive_ms, floor, n);
+    if (rc == DB_OK)
+      (void)db_iter_next(it);
+  }
+  db_iter_close(it);
+  if (rc == DB_OK && db_writebatch_count(wb) > 0)
+    rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive windows not boot-closed: %s (%s); a window "
+              "left open is ignored until it reopens", db_strerror(rc),
+              db_env_last_error(history_db_env)
+                ? db_env_last_error(history_db_env) : "no backend detail");
+  else if (n[0] || n[1] || n[2])
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: receive windows: %u left open closed at %llu ms, "
+              "%u emptied records deleted, %u rewritten", n[0],
+              (unsigned long long)alive_ms, n[1], n[2]);
+}
+
+/** The trim's owner-trimmed callback (Q1): a per-owner eviction deleted
+ * rows up to @a newest_ms[i] in @a targets[i] while other owners' rows
+ * there stay, so nothing up to that time counts as received any more:
+ * clip each channel's record there, all in one batch.  A target with no
+ * record is skipped; a PM pair key is not a channel (PM pages keep the
+ * short-page rule). */
+static void history_recv_owner_trimmed(const char *const *targets,
+                                       const uint64_t *newest_ms, int count)
+{
+  struct db_writebatch *wb = NULL;
+  int i, rc = DB_OK, staged = 0;
+
+  if (!history_available || !history_cf_recv)
+    return;
+  for (i = 0; i < count && rc == DB_OK; i++) {
+    char key[CHANNELLEN + 2];
+    struct rcv_record r;
+    int klen;
+
+    if (!targets[i] || !IsChannelName(targets[i]))
+      continue;
+    klen = build_target_key(key, sizeof key, targets[i]);
+    if (klen < 0 || recv_read(key, klen, &r) != 1)
+      continue;
+    rcv_clip(&r, (int64_t)newest_ms[i]);
+    if (!wb && !(wb = db_writebatch_new(history_db_env))) {
+      rc = DB_ERR_MEMORY;
+      break;
+    }
+    rc = recv_stage(wb, key, klen, &r);
+    staged++;
+  }
+  if (rc == DB_OK && staged)
+    rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  if (wb)
+    db_writebatch_destroy(wb);
+  if (rc != DB_OK)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive windows not clipped after an owner trim: %s; "
+              "pages over the trimmed rows may not federate",
+              db_strerror(rc));
+}
+
 /* ---- redaction catch-up index: scan + watermark (design B) ---------- */
 
 /* The watermark lives in the index CF under a key that sorts LAST
@@ -3896,6 +4304,8 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                history_coverage_days(), feature_int(FEAT_CHATHISTORY_RETENTION),
                floor);
   }
+  /* The pages this server federated, by reason (W5 Task 9). */
+  chathistory_fed_report(to);
   if (htrim_backfill_done())
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Trim: backfill done, accounting %s",
