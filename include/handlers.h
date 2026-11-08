@@ -322,7 +322,8 @@ extern int ms_redact(struct Client*, struct Client*, int, char*[]);
  * _remote form is a peer's live REDACT (ms_redact), always shown to the
  * local members.  The _row form takes the stored sender/account explicitly
  * (the redaction catch-up keeps the original redacter; NULL = derive from
- * src), shows it only when stored unless show_always, and returns the
+ * src), shows it only when applied (a tombstone is stored but not shown)
+ * unless show_always, and returns the
  * store's decision (an enum rdx_row value, redact_index.h). */
 extern void redact_apply_remote(struct Client *src, const char *target,
                                 const char *msgid, const char *redact_msgid,

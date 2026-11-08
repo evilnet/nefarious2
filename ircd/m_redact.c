@@ -487,7 +487,10 @@ int redact_apply_row(struct Client *src, struct Channel *chptr,
      * the window on the sender's own link; it is a best effort, not an
      * invariant, so the tombstone is what keeps the message redacted.  A
      * tombstone also serves the catch-up index: a peer that holds the
-     * message applies it from here.  A +P channel stores nothing new. */
+     * message applies it from here.  No tombstone in a +P channel: no new
+     * rows are stored there.  An APPLY is stored even in +P: it redacts a
+     * row stored before +P was set, which would otherwise stay visible
+     * (m_redact's own found path does the same). */
     store = d == RDX_ROW_APPLY
             || (d == RDX_ROW_SKIP_ORPHAN
                 && !(chptr->mode.exmode & EXMODE_NOSTORAGE));
@@ -545,8 +548,9 @@ int redact_apply_row(struct Client *src, struct Channel *chptr,
   return (int)d;
 }
 
-/** A peer's live REDACT (ms_redact): stored when this store holds the
- * message (redact_apply_row), always shown to the local members. */
+/** A peer's live REDACT (ms_redact): stored beside the message when this
+ * store holds it, else as a tombstone (redact_apply_row); always shown to
+ * the local members. */
 void redact_apply_remote(struct Client *src, const char *target,
                          const char *msgid, const char *redact_msgid,
                          uint64_t time_ms, const char *reason)

@@ -4649,8 +4649,9 @@ static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
  *   store holds its message and has not applied it (redact_apply_row,
  *   rdx_row_decide).  An orphan (a message this store does not hold: it
  *   never reached it, or the trim evicted it) is stored as a tombstone
- *   (redact_apply_row says why) and shown to no client: no member here saw
- *   its message.  A redaction applied or tombstoned already, live or by an
+ *   (redact_apply_row says why; none in a +P channel, logged "+P skipped")
+ *   and shown to no client: no member here saw its message.  A redaction
+ *   applied or tombstoned already, live or by an
  *   earlier round, is neither stored nor shown: every round re-reads from
  *   the watermark less a slack.
  * - A row the store could not read cuts the round (RETRY).
@@ -4665,10 +4666,11 @@ static void complete_redact_catchup(struct FedRequest *req)
 {
   struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
   struct HistoryMessage *m;
-  int applied = 0, repeats = 0, tombstones = 0, unread = 0, gone = 0;
+  int applied = 0, repeats = 0, tombstones = 0, pskipped = 0, unread = 0, gone = 0;
   uint64_t wm = 0;
   enum rdx_wm wd;
   char gonebuf[48] = "";
+  char pbuf[32] = "";
   char why[96];
 
   for (m = req->fed_msgs; m; m = m->next) {
@@ -4694,7 +4696,12 @@ static void complete_redact_catchup(struct FedRequest *req)
                              reason, m->sender, m->account, 0)) {
     case RDX_ROW_APPLY:        applied++; break;
     case RDX_ROW_SKIP_APPLIED: repeats++; break;
-    case RDX_ROW_SKIP_ORPHAN:  tombstones++; break;
+    case RDX_ROW_SKIP_ORPHAN:  /* a tombstone, but none in +P (redact_apply_row) */
+      if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+        pskipped++;
+      else
+        tombstones++;
+      break;
     case RDX_ROW_RETRY:        unread++; req->cut = 1; break;
     }
   }
@@ -4721,9 +4728,11 @@ static void complete_redact_catchup(struct FedRequest *req)
     ircd_snprintf(0, why, sizeof why, "watermark %llu", (unsigned long long)wm);
   if (gone)
     ircd_snprintf(0, gonebuf, sizeof gonebuf, ", %d for a channel not here", gone);
+  if (pskipped)
+    ircd_snprintf(0, pbuf, sizeof pbuf, ", %d +P skipped", pskipped);
   log_write(LS_SYSTEM, L_NOTICE, 0,
-            "REDACT catch-up from %s (round %d): applied %d, skipped %d applied, %d tombstone%s; %s",
-            rc->store_yxx, rc->round, applied, repeats, tombstones, gonebuf, why);
+            "REDACT catch-up from %s (round %d): applied %d, skipped %d applied, %d tombstone%s%s; %s",
+            rc->store_yxx, rc->round, applied, repeats, tombstones, pbuf, gonebuf, why);
 
   if (wd == RDX_WM_SET_CONTINUE)
     start_redact_catchup(rc->store_yxx, rc->last_ms, rc->round + 1);
@@ -5684,10 +5693,14 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
     /* This store's own row, under the same msgid and time: a tombstone, as
      * the message is not here (a local miss) -- or beside it, should it
      * have arrived during the lookup -- by the rule every store follows
-     * (redact_row_judge; redact_apply_row says why a tombstone).  The
-     * repeat checks above already answered an idempotent repeat, so a
-     * REDACT row found here now (one that arrived during the lookup)
-     * stores nothing.  Never in a +P channel; nothing without a store. */
+     * (redact_row_judge; redact_apply_row says why a tombstone).  A REDACT
+     * row that arrived during the lookup is caught by the repeat check
+     * above (history_message_is_redacted, read here at completion), which
+     * answered the request as a repeat and returned; so the judge sees
+     * APPLY or SKIP_ORPHAN, and stores nothing on SKIP_APPLIED should it
+     * see one.  Nothing in a +P channel: no message is stored there during
+     * the lookup, so the row could only be a tombstone, and +P keeps none.
+     * Nothing without a store. */
     if (history_is_available() && !(chptr->mode.exmode & EXMODE_NOSTORAGE)) {
       int d = redact_row_judge(chptr->chname, ctx->msgid);
 
