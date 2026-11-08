@@ -284,7 +284,9 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       sendcmdto_set_client_msgid(NULL);
 
-      /* Store for chathistory event-playback — same msgid as broadcast */
+      /* Store for chathistory event-playback — same msgid as broadcast.
+       * Ahead of the S2S propagation below, as every write-forward is
+       * (forward_channel_history, ircd_relay.c). */
       store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid, tagmsg_ms);
 
       /* Propagate to other servers (S2S). Use the same msgid and time
@@ -487,6 +489,14 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     sendcmdto_set_client_msgid(NULL);
 
+    /* Store in history (or write-forward to STORE server) AHEAD of the
+     * relay to other servers, so a store holds the row before any REDACT
+     * of it can reach it (forward_channel_history, ircd_relay.c).
+     * Use S2S msgid if available so clients can deduplicate. */
+    store_tagmsg_history(sptr, chptr, client_tags,
+                         cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL,
+                         history_event_time_ms(cptr));
+
     /* Propagate to other servers: client tags ride ,C instead of the
      * body (audit 0.1), and the origin's msgid/time are restated via
      * cptr rather than left for a fresh mint -- this relay used to go
@@ -502,12 +512,6 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                       client_tags, target))
       sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
                                client_tags, target);
-
-    /* Store in history (or write-forward to STORE server).
-     * Use S2S msgid if available so clients can deduplicate. */
-    store_tagmsg_history(sptr, chptr, client_tags,
-                         cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL,
-                         history_event_time_ms(cptr));
   }
   else {
     /* Target is a user */

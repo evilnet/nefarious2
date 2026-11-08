@@ -159,6 +159,43 @@ int history_pm_identity_matches(struct Client *cli, const char *half, size_t hal
 }
 
 #ifdef USE_ROCKSDB
+/** Write-forward a channel message to a store (CH W/WB), on a server with
+ * no store of its own (CHATHISTORY_STORE off, CHATHISTORY_WRITE_FORWARD
+ * on); a no-op on a store.  Called AHEAD of the message's own relay, never
+ * after it: on the link to the store the order is then [CH W M][M], so the
+ * store holds M before it relays M on toward any server whose user could
+ * redact it, and a REDACT of M can reach that store only after M is
+ * stored.  Forwarding after the relay let such a REDACT overtake the CH W
+ * line, and the store would skip the REDACT (its message not held: the
+ * orphan rule, redact_apply_row) and then store M unredacted.  The CH W
+ * line leaves the relay's armed S2S tags alone (ch_write_line).
+ * @param[in] sptr Client that sent the message.
+ * @param[in] chptr Target channel.
+ * @param[in] text Message content.
+ * @param[in] type Message type (HISTORY_PRIVMSG or HISTORY_NOTICE).
+ * @param[in] msgid Message ID (the relay's).
+ * @param[in] timestamp The message's time (the relay's).
+ * @param[in] client_tags Client-only tags, or NULL.
+ */
+static void forward_channel_history(struct Client *sptr, struct Channel *chptr,
+                                    const char *text, enum HistoryMessageType type,
+                                    const char *msgid, const char *timestamp,
+                                    const char *client_tags)
+{
+  /* history_forward_encode sentinel-escapes the payload and brackets the
+   * client tags in \x06 so the storage server can split them back out
+   * (process_write_forward) without raw client bytes ever reading as
+   * structure. */
+  char tagged_content[(512 + 512) * 2 + 3];
+
+  if (!history_is_available() || feature_bool(FEAT_CHATHISTORY_STORE)
+      || !feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD))
+    return;
+  history_forward_encode(tagged_content, sizeof(tagged_content),
+                         client_tags, text);
+  forward_history_write(chptr, sptr, msgid, timestamp, type, tagged_content);
+}
+
 /** Store a channel message in the history database.
  * Stores the message with the provided msgid and timestamp.
  * @param[in] sptr Client that sent the message.
@@ -187,22 +224,10 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (!history_is_available())
     return;
 
-  /* Check if chathistory storage is enabled */
-  if (!feature_bool(FEAT_CHATHISTORY_STORE)) {
-    /* If write forwarding is enabled, forward to a storage server.
-     * history_forward_encode sentinel-escapes the payload and brackets
-     * the client tags in \x06 so the storage server can split them back
-     * out (process_write_forward) without raw client bytes ever reading
-     * as structure. */
-    if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
-      char tagged_content[(512 + 512) * 2 + 3];
-      history_forward_encode(tagged_content, sizeof(tagged_content),
-                             client_tags, text);
-      forward_history_write(chptr, sptr, msgid, timestamp, type,
-                            tagged_content);
-    }
+  /* No store here: the write-forward went ahead of the relay
+   * (forward_channel_history). */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
-  }
 
   /* Determine if we have local interest in this channel:
    * - Local sender: always interested (our user sent it)
@@ -611,6 +636,15 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     if (msgid[0])
       sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
 
+#ifdef USE_ROCKSDB
+    /* No store here: write-forward AHEAD of the relay (forward_channel_history) */
+    if (msgid[0]) {
+      const char *fwd_ctags = cli_client_tags(sptr);
+      forward_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG, msgid, timestamp,
+                              (fwd_ctags && *fwd_ctags) ? fwd_ctags : NULL);
+    }
+#endif
+
     /* Alias source rewriting: use primary's numeric for S2S delivery.
      * When primary is remote, use split S2S delivery: primary numeric for
      * most servers, alias numeric for the primary's server direction
@@ -770,6 +804,15 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
     if (msgid[0])
       sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
 
+#ifdef USE_ROCKSDB
+    /* No store here: write-forward AHEAD of the relay (forward_channel_history) */
+    if (msgid[0]) {
+      const char *fwd_ctags = cli_client_tags(sptr);
+      forward_channel_history(sptr, chptr, mytext, HISTORY_NOTICE, msgid, timestamp,
+                              (fwd_ctags && *fwd_ctags) ? fwd_ctags : NULL);
+    }
+#endif
+
     /* Alias source rewriting (see relay_channel_message) */
     {
       struct Client *from = sptr;
@@ -900,6 +943,19 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       sendcmdto_set_client_event(relay_msgid, history_event_time_ms(one));
     }
 
+#ifdef USE_ROCKSDB
+    /* No store here: write-forward AHEAD of the relay
+     * (forward_channel_history); the same msgid and time as the store
+     * below would use. */
+    if (relay_msgid[0]) {
+      char fwd_ts[32];
+
+      history_format_ms(fwd_ts, sizeof(fwd_ts), history_event_time_ms(one));
+      forward_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, fwd_ts,
+                              (client_tags && *client_tags) ? client_tags : NULL);
+    }
+#endif
+
     if (client_tags && *client_tags) {
       sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, one,
                          SKIP_DEAF | SKIP_BURST, text[0], client_tags,
@@ -994,6 +1050,19 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
         generate_msgid(relay_msgid, sizeof(relay_msgid));
       sendcmdto_set_client_event(relay_msgid, history_event_time_ms(one));
     }
+
+#ifdef USE_ROCKSDB
+    /* No store here: write-forward AHEAD of the relay
+     * (forward_channel_history); the same msgid and time as the store
+     * below would use. */
+    if (relay_msgid[0]) {
+      char fwd_ts[32];
+
+      history_format_ms(fwd_ts, sizeof(fwd_ts), history_event_time_ms(one));
+      forward_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, fwd_ts,
+                              (client_tags && *client_tags) ? client_tags : NULL);
+    }
+#endif
 
     if (client_tags && *client_tags) {
       sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, one,

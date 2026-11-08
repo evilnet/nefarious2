@@ -3469,6 +3469,26 @@ static void process_write_forward(const char *target, const char *msgid,
   }
 }
 
+/** Send one CH W/WB line to @a server, untouched by the S2S tag state.
+ * A write-forward goes out ahead of its message's own relay
+ * (forward_channel_history, ircd_relay.c; m_tagmsg.c), while the relay's
+ * msgid/time/sessid/alias overrides are already armed, and sendcmdto_one
+ * consumes or clears every one of them: the relay would lose its tags.
+ * The CH W payload names its msgid and time itself, so the line needs no
+ * tags.  Ungated like sendcmdto_one: a burst-gated store still gets it.
+ * @param[in] server Target storage server.
+ * @param[in] pattern Format for the CH arguments (after "CH ").
+ */
+static void ch_write_line(struct Client *server, const char *pattern, ...)
+{
+  struct VarData vd;
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  sendrawto_one(cli_from(server), "%:#C %s %v", &me, TOK_CHATHISTORY, &vd);
+  va_end(vd.vd_args);
+}
+
 /** Send CH W or CH WB to a target server.
  * Handles chunking for large/multiline content.
  *
@@ -3516,7 +3536,7 @@ static void send_ch_write(struct Client *server, const char *target,
 
   /* Plain W only when the content has no newline AND fits one line. */
   if (strchr(content, '\n') == NULL && strlen(content) <= full) {
-    sendcmdto_one(&me, CMD_CHATHISTORY, server, "W %s %s %s %s %s %c :%s",
+    ch_write_line(server, "W %s %s %s %s %s %c :%s",
                   target, msgid, timestamp, sender, account, type_char, content);
     return;
   }
@@ -3526,7 +3546,7 @@ static void send_ch_write(struct Client *server, const char *target,
   b64_len = ((content_len + 2) / 3) * 4 + 1;
   b64 = MyMalloc(b64_len);
   if (!b64) {
-    sendcmdto_one(&me, CMD_CHATHISTORY, server, "W %s %s %s %s %s %c :[content too large]",
+    ch_write_line(server, "W %s %s %s %s %s %c :[content too large]",
                   target, msgid, timestamp, sender, account, type_char);
     return;
   }
@@ -3536,7 +3556,7 @@ static void send_ch_write(struct Client *server, const char *target,
 
   /* If it fits in one message, send complete WB message (no + marker) */
   if (b64_total <= full) {
-    sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c :%s",
+    ch_write_line(server, "WB %s %s %s %s %s %c :%s",
                   target, msgid, timestamp, sender, account, type_char, b64);
     MyFree(b64);
     return;
@@ -3560,17 +3580,17 @@ static void send_ch_write(struct Client *server, const char *target,
 
     if (first) {
       if (more)
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c + :%s",
+        ch_write_line(server, "WB %s %s %s %s %s %c + :%s",
                       target, msgid, timestamp, sender, account, type_char, chunk);
       else
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c :%s",
+        ch_write_line(server, "WB %s %s %s %s %s %c :%s",
                       target, msgid, timestamp, sender, account, type_char, chunk);
       first = 0;
     } else if (more) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s + :%s",
+      ch_write_line(server, "WB %s %s + :%s",
                     target, msgid, chunk);
     } else {
-      sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s :%s",
+      ch_write_line(server, "WB %s %s :%s",
                     target, msgid, chunk);
     }
     offset += chunk_size;
