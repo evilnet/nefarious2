@@ -420,7 +420,9 @@ int redact_row_judge(const char *target, const char *msgid)
   rc = history_lookup_message(target, msgid, &m);
   if (m)
     history_free_messages(m);
-  if (rc == 0)
+  /* A REDACT row annotates the message through the reply index whether or
+   * not the message is here: a tombstone counts as applied. */
+  if (rc >= 0)
     redacted = history_message_is_redacted(target, msgid);
   return rdx_row_decide(rc, redacted);
 }
@@ -429,14 +431,16 @@ int redact_row_judge(const char *target, const char *msgid)
  * peer's live REDACT (ms_redact, through redact_apply_remote) or a row of
  * the redaction catch-up (complete_redact_catchup, m_chathistory.c).
  *
- * The REDACT row is stored, under the origin's redact_msgid and time (one
- * event, one msgid, one time), only when this store holds the message and
- * no REDACT row annotates it yet (rdx_row_decide, redact_index.h):
+ * The REDACT row is stored once, under the origin's redact_msgid and time
+ * (one event, one msgid, one time), unless a REDACT row annotates the
+ * message already (rdx_row_decide, redact_index.h):
+ * - a message this store holds: the row annotates it (APPLY);
  * - a message this store does not hold (it never reached it, or the trim
- *   evicted it) is an orphan: a row would annotate nothing, and the
- *   message's holders store their own (2026-10-24);
+ *   evicted it), an orphan: the row is kept as a TOMBSTONE (user decision
+ *   2026-11-08), never in a +P channel -- see below;
  * - a repeat (two servers or two users redacting the same message, or a
- *   catch-up re-reading one already applied) stores no second row;
+ *   catch-up re-reading one already applied or tombstoned) stores no
+ *   second row;
  * - a store that cannot be read stores nothing (RETRY).
  * The trim owns deletes; nothing here deletes.
  *
@@ -456,7 +460,7 @@ int redact_row_judge(const char *target, const char *msgid)
  * @param[in] account_str Stored redacter's account (catch-up); NULL derives it from @a src.
  * @param[in] show_always Nonzero: show it even when nothing was stored.
  * @return The store's decision, an enum rdx_row value (redact_index.h);
- *   RDX_ROW_SKIP_ORPHAN when this server has no store.
+ *   RDX_ROW_SKIP_ORPHAN, storing nothing, when this server has no store.
  */
 int redact_apply_row(struct Client *src, struct Channel *chptr,
                      const char *msgid, const char *redact_msgid,
@@ -467,33 +471,37 @@ int redact_apply_row(struct Client *src, struct Channel *chptr,
   /* Store keys are the canonical spelling (see m_redact). */
   const char *target = chptr->chname;
   enum rdx_row d = RDX_ROW_SKIP_ORPHAN;
+  int store = 0;
 
-  if (history_is_available())
+  if (history_is_available()) {
     d = (enum rdx_row)redact_row_judge(target, msgid);
+    /* An orphan's REDACT row is a TOMBSTONE: it annotates, through the
+     * reply index, a message this store does not hold, so the message
+     * stays hidden if it is stored here later.  That can happen: a
+     * write-forward (CH W/WB) from a server with no store can arrive after
+     * a REDACT of its message -- a leaf without a store forwards a message
+     * it relayed back to its uplink, and a REDACT through that uplink can
+     * get there first -- and a future backfill, import or replay would
+     * store rows late too.  Sending the write-forward ahead of the
+     * message's own relay (forward_channel_history, ircd_relay.c) narrows
+     * the window on the sender's own link; it is a best effort, not an
+     * invariant, so the tombstone is what keeps the message redacted.  A
+     * tombstone also serves the catch-up index: a peer that holds the
+     * message applies it from here.  A +P channel stores nothing new. */
+    store = d == RDX_ROW_APPLY
+            || (d == RDX_ROW_SKIP_ORPHAN
+                && !(chptr->mode.exmode & EXMODE_NOSTORAGE));
+  }
 
-  /* An orphan (the message is not here) is skipped, and nothing remembers
-   * it.  That is safe only because every path that stores a channel
-   * message row stores it before any REDACT of that message can reach this
-   * server:
-   * - a relayed message is stored while its own relay line is processed,
-   *   before this server relays it on, and a REDACT caused by it travels
-   *   the same tree links after it (each link is FIFO);
-   * - a write-forward (CH W/WB) goes out ahead of its message's relay
-   *   (forward_channel_history, ircd_relay.c; ms_tagmsg), so its store
-   *   holds the row before it relays the message toward any redactor.
-   * Federated chathistory replies are never stored, and a burst-gated or
-   * bursting link drops lines, never reorders them.  A future path that
-   * stores message rows later (a backfill, an import, a replay) must
-   * re-apply the redactions after it (the catch-up index, redact_index),
-   * or it brings back what was redacted. */
-  if (d == RDX_ROW_APPLY) {
+  if (store) {
     char timestamp[32];
     char sender[HISTORY_SENDER_LEN];
     char redact_content[512];
     char owner[HTC_OWNER_MAX];
 
     /* Redact message: strip content but keep entry for context */
-    history_redact_message(target, msgid);
+    if (d == RDX_ROW_APPLY)
+      history_redact_message(target, msgid);
 
     ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
                   (unsigned long long)(time_ms / 1000),

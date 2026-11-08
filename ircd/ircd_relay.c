@@ -161,14 +161,15 @@ int history_pm_identity_matches(struct Client *cli, const char *half, size_t hal
 #ifdef USE_ROCKSDB
 /** Write-forward a channel message to a store (CH W/WB), on a server with
  * no store of its own (CHATHISTORY_STORE off, CHATHISTORY_WRITE_FORWARD
- * on); a no-op on a store.  Called AHEAD of the message's own relay, never
- * after it: on the link to the store the order is then [CH W M][M], so the
- * store holds M before it relays M on toward any server whose user could
- * redact it, and a REDACT of M can reach that store only after M is
- * stored.  Forwarding after the relay let such a REDACT overtake the CH W
- * line, and the store would skip the REDACT (its message not held: the
- * orphan rule, redact_apply_row) and then store M unredacted.  The CH W
- * line leaves the relay's armed S2S tags alone (ch_write_line).
+ * on); a no-op on a store.  Called AHEAD of the message's own relay: on the
+ * link to the store the order is then [CH W M][M], so a store downstream of
+ * this server holds M before it relays M on toward a redactor.  That is a
+ * best effort, not an invariant: a message this server relays reaches its
+ * store (often its uplink) after passing it, and a REDACT through that
+ * store can get there before the CH W.  A store therefore keeps a REDACT
+ * of a message it does not hold as a tombstone (redact_apply_row), which
+ * hides M when the CH W stores it late.  The CH W line leaves the relay's
+ * armed S2S tags alone (ch_write_line).
  * @param[in] sptr Client that sent the message.
  * @param[in] chptr Target channel.
  * @param[in] text Message content.

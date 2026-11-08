@@ -102,13 +102,11 @@ unsigned int ch_e_flags(const char *param)
 
 enum rdx_row rdx_row_decide(int parent_lookup_rc, int already_redacted)
 {
-  if (parent_lookup_rc < 0)
+  if (parent_lookup_rc < 0 || already_redacted < 0)
     return RDX_ROW_RETRY;
-  if (parent_lookup_rc > 0)
-    return RDX_ROW_SKIP_ORPHAN;
-  if (already_redacted < 0)
-    return RDX_ROW_RETRY;
-  return already_redacted ? RDX_ROW_SKIP_APPLIED : RDX_ROW_APPLY;
+  if (already_redacted)
+    return RDX_ROW_SKIP_APPLIED;
+  return parent_lookup_rc > 0 ? RDX_ROW_SKIP_ORPHAN : RDX_ROW_APPLY;
 }
 
 static enum rdx_wm rdx_wm_set(enum rdx_wm d, uint64_t ms, uint64_t *wm_out)

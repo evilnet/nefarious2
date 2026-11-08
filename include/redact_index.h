@@ -55,17 +55,22 @@ int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out);
 #define CH_E_UNANSWERED  0x2
 unsigned int ch_e_flags(const char *param);
 
-/* Applying one redaction (a peer's live REDACT, or a catch-up row) to this
- * server's store.  @a parent_lookup_rc is history_lookup_message's answer for
- * the redacted message (0 found, 1 not found, < 0 read error);
- * @a already_redacted is history_message_is_redacted's (1 yes, 0 no, < 0 read
- * error), read only when the message was found.  In order:
+/* Applying one redaction (a peer's live REDACT, a catch-up row, or a
+ * write-forwarded one) to this server's store.  @a parent_lookup_rc is
+ * history_lookup_message's answer for the redacted message (0 found, 1 not
+ * found, < 0 read error); @a already_redacted is history_message_is_redacted's
+ * (1 yes, 0 no, < 0 read error), read whenever the lookup did not fail -- a
+ * REDACT row annotates a message through the reply index whether or not the
+ * message itself is here.  In order:
  *  RETRY        -- either read failed: store nothing; a catch-up round is cut,
  *                  so its watermark stays and the row is asked for again;
+ *  SKIP_APPLIED -- a REDACT row already annotates it (live, an earlier
+ *                  catch-up, or a tombstone): store no second one;
  *  SKIP_ORPHAN  -- the message is not here (it never reached this store, or
- *                  the trim evicted it): a REDACT row would annotate nothing;
- *  SKIP_APPLIED -- a REDACT row already annotates it (live, or an earlier
- *                  catch-up): store no second one;
+ *                  the trim evicted it): the caller stores the REDACT row as
+ *                  a TOMBSTONE (user decision 2026-11-08) -- it hides the
+ *                  message if the message is stored here later -- and shows
+ *                  a catch-up row to no client;
  *  APPLY        -- store the REDACT row. */
 enum rdx_row { RDX_ROW_APPLY, RDX_ROW_SKIP_APPLIED, RDX_ROW_SKIP_ORPHAN, RDX_ROW_RETRY };
 enum rdx_row rdx_row_decide(int parent_lookup_rc, int already_redacted);

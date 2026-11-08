@@ -317,8 +317,8 @@ extern void chathistory_init_callbacks(void);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
 /* Apply a channel redaction that reached us from elsewhere: ONE REDACT row,
- * stored only when this store holds the message and no REDACT row annotates
- * it yet (rdx_row_decide; an orphan or a repeat stores nothing).  The
+ * unless one annotates the message already (rdx_row_decide); beside the
+ * message, or as a tombstone when the message is not here.  The
  * _remote form is a peer's live REDACT (ms_redact), always shown to the
  * local members.  The _row form takes the stored sender/account explicitly
  * (the redaction catch-up keeps the original redacter; NULL = derive from
@@ -333,7 +333,8 @@ extern int redact_apply_row(struct Client *src, struct Channel *chptr,
                             const char *sender_str, const char *account_str,
                             int show_always);
 /* Judge one redaction against this server's store: an enum rdx_row value
- * (redact_index.h; APPLY only when the message is here and not redacted). */
+ * (redact_index.h; APPLY: the message is here and not redacted; SKIP_ORPHAN:
+ * not here and not tombstoned, the caller stores a tombstone). */
 extern int redact_row_judge(const char *target, const char *msgid);
 /* Show one redaction to @a chptr's local members: arm the REDACT event's
  * msgid and time, fan out (the redacter's echo included), clear.  Stores

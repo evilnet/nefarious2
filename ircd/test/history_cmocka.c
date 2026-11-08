@@ -251,8 +251,9 @@ static void test_rdx_row_decide(void **state)
   assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(-1, 0));
   /* the redacted check could not read: never guess either way */
   assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(0, -1));
-  /* a REDACT row with no parent here (one stored before this rule) */
-  assert_int_equal(RDX_ROW_SKIP_ORPHAN, rdx_row_decide(1, 1));
+  assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(1, -1));
+  /* a tombstone already annotates the missing message: no second one */
+  assert_int_equal(RDX_ROW_SKIP_APPLIED, rdx_row_decide(1, 1));
   assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(-1, 1));
 }
 

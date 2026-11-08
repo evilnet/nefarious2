@@ -490,8 +490,9 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendcmdto_set_client_msgid(NULL);
 
     /* Store in history (or write-forward to STORE server) AHEAD of the
-     * relay to other servers, so a store holds the row before any REDACT
-     * of it can reach it (forward_channel_history, ircd_relay.c).
+     * relay to other servers, as forward_channel_history (ircd_relay.c)
+     * does: a best effort at a store holding the row before a REDACT of
+     * it arrives (a late one is caught by the store's tombstone).
      * Use S2S msgid if available so clients can deduplicate. */
     store_tagmsg_history(sptr, chptr, client_tags,
                          cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL,
