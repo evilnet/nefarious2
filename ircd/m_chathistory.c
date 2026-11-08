@@ -2875,10 +2875,15 @@ static void complete_targets_fed(struct FedRequest *req)
   /* Send to client with access filtering and limit enforcement */
   /* Complete only if nothing was cut: a storage server that timed out
    * or capped its rows (fed_truncated) leaves targets unlisted, and the
-   * end tag would tell the client it may skip them. */
+   * end tag would tell the client it may skip them.  req->cut covers
+   * the same gap when a responder's CH E carried U instead of T (no
+   * store / an unknown subcommand / a read error): before CH E U
+   * existed, every path that set cut also set fed_truncated, so
+   * fed_truncated alone was a safe proxy; U breaks that, so cut is
+   * checked explicitly too (audit 2026-11-07, Task 6 fix round 1). */
   send_targets_batch(client, merged, req->limit, req->label,
                      ctx->local_count + ctx->fed_count < req->limit
-                     && !req->fed_truncated);
+                     && !req->fed_truncated && !req->cut);
 
   history_free_targets(merged);
 }
@@ -5809,10 +5814,14 @@ static void complete_autoreplay_channel(struct FedRequest *req)
     if (total > 0) {
       /* Complete only when the page was short of the limit AND no
        * responder was cut (send_fed_response's rule; a full page was
-       * stamped chathistory-end here -- re-review R7). */
+       * stamped chathistory-end here -- re-review R7).  req->cut
+       * checked explicitly too: since CH E U (Task 6), a responder can
+       * set cut without fed_truncated (no store / an unknown
+       * subcommand / a read error), which this hand-inlined copy of
+       * send_fed_response's rule had missed (fix round 1). */
       send_history_batch(sptr, req->target, merged, total, 0, NULL,
                          total < req->limit && !req->fed_truncated
-                         && !req->local_incomplete);
+                         && !req->local_incomplete && !req->cut);
       ctx->total_replayed += total;
       ctx->chan_count++;
     }
