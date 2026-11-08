@@ -3303,6 +3303,7 @@ static const char recv_floor_key[] = "\0recv_floor";
 static int64_t recv_floor_hw;           /**< the mark */
 static int64_t recv_floor_saved;        /**< the value last written */
 static int64_t recv_floor_saved_at;     /**< CurrentTime ms it was written */
+static int recv_floor_capping;          /**< the last raise was cut at now (R41) */
 
 static void recv_floor_write(void);
 
@@ -3330,21 +3331,52 @@ static uint64_t local_floor_at(uint64_t now_ms, int days)
   return floor;
 }
 
-/** Raise the high-water floor to @a floor_ms (rcv_floor_raise) and write it
- * at once when it rose by more than the clock explains: the retention
- * horizon moving on rises with the clock and waits for the heartbeat; a
- * lower retention or an eviction is written now.  Both the floor and its
- * clock are whole seconds (CurrentTime, time(NULL)), so one second of rise
- * beyond the elapsed time is still the clock's.
+/** Raise the mark to @a floor_ms, never past now (history_recv_now_ms():
+ * the clock rows are stamped against), R41.  A clock stepped forward, or a
+ * corrupt or future key, would otherwise put the mark ahead of every row
+ * and -- rewritten each minute -- keep it there across restarts.  Capping
+ * never claims more: every span asked about is clamped to now
+ * (channel_span_clamp), so a floor at now already refuses all of them, as
+ * a floor past now would.  The cut is logged once per episode, not per
+ * call.
+ * @return The mark. */
+static int64_t recv_floor_raise_now(uint64_t floor_ms, const char *what)
+{
+  int64_t was = recv_floor_hw > (int64_t)floor_ms ? recv_floor_hw : (int64_t)floor_ms;
+  int64_t now = (int64_t)history_recv_now_ms();
+  int capped = 0;
+  int64_t hw = rcv_floor_raise(&recv_floor_hw, (int64_t)floor_ms, now, &capped);
+
+  if (capped && !recv_floor_capping)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: the received floor (%s) was %lld ms, past now (%lld "
+              "ms) -- a clock stepped forward, or a stored floor from the "
+              "future: capped at now", what, (long long)was, (long long)now);
+  recv_floor_capping = capped;
+  return hw;
+}
+
+/** Raise the high-water floor to @a floor_ms (recv_floor_raise_now) and
+ * write it at once when it rose by more than the clock explains: the
+ * retention horizon moving on rises with the clock and waits for the
+ * heartbeat; a lower retention or an eviction is written now.  Both the
+ * floor and its clock are whole seconds (CurrentTime, time(NULL)), so one
+ * second of rise beyond the elapsed time is still the clock's.
  * @return The effective floor (the mark). */
 static uint64_t recv_floor_note(uint64_t floor_ms)
 {
   int64_t now = (int64_t)CurrentTime * 1000LL;
-  int64_t hw = rcv_floor_raise(&recv_floor_hw, (int64_t)floor_ms);
+  int64_t hw = recv_floor_raise_now(floor_ms, "raised");
 
   if (hw - recv_floor_saved > (now - recv_floor_saved_at) + 1000LL)
     recv_floor_write();
   return (uint64_t)hw;
+}
+
+uint64_t history_live_floor_ms(void)
+{
+  return local_floor_at((uint64_t)CurrentTime * 1000ULL,
+                        feature_int(FEAT_CHATHISTORY_RETENTION));
 }
 
 uint64_t history_local_floor_ms(void)
@@ -3396,9 +3428,7 @@ static void recv_alive_write(void)
 
   if (!history_available || !history_cf_recv)
     return;
-  hw = rcv_floor_raise(&recv_floor_hw,
-                       (int64_t)local_floor_at((uint64_t)CurrentTime * 1000ULL,
-                                               feature_int(FEAT_CHATHISTORY_RETENTION)));
+  hw = recv_floor_raise_now(history_live_floor_ms(), "heartbeat");
   rcv_ms_pack((int64_t)now, v);
   rcv_ms_pack(hw, f);
   wb = db_writebatch_new(history_db_env);
@@ -3793,7 +3823,8 @@ static int recv_boot_one(struct db_writebatch *wb, const void *k, size_t kl,
   int len;
 
   if (!k || !kl || kl > CHANNELLEN + 1 || ((const char *)k)[0] == '\0')
-    return DB_OK;                   /* the heartbeat, not a channel's key */
+    return DB_OK;                   /* a meta row (the heartbeat, the high-water
+                                     * floor), not a channel's key */
   if (!v || rcv_unpack((const unsigned char *)v, vl, &r) != 0) {
     /* Undecodable: what it claimed is unknown, so it claims nothing. */
     n[1]++;
@@ -3830,14 +3861,20 @@ void history_recv_boot(void)
   if (!history_available || !history_cf_recv)
     return;
   /* The high-water floor the last run applied (R40), before anything
-   * clips: a retention raised across the restart must not lower it.  With
-   * no key (a first boot of a build that keeps it) the floor as it is now
-   * starts it: no build that ever applied a higher one wrote no key. */
+   * clips: a retention raised across the restart must not lower it.  It
+   * is capped at now (R41); a cut key is written back at once.  With no
+   * key (the first boot of a build that keeps it) the floor as it is now
+   * starts it.  An older build may have deleted under a higher floor (the
+   * Push C build runs age-out and writes no key), but no record it left
+   * matters: there are no window records before Push D, and R34 resets
+   * every pre-restart record at the first burst. */
   {
     uint64_t saved = recv_meta_read(recv_floor_key, RECV_FLOOR_KLEN);
-    (void)rcv_floor_raise(&recv_floor_hw, (int64_t)saved);
+    int64_t hw = recv_floor_raise_now(saved, "stored");
     recv_floor_saved = (int64_t)saved;
     recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
+    if (hw < (int64_t)saved)
+      recv_floor_write();
   }
   /* The last time a build that keeps the windows was running (R32): never
    * the newest row or presence's stamp, which an older build in between

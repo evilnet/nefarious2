@@ -1590,9 +1590,14 @@ static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
  * asked about: a full table folds its oldest interval into the next-oldest
  * (one interval from the older split's start to the newer one's end:
  * it can only make more pages fan out), and an interval ages out only once
- * its whole end second is at or below this store's floor
- * (history_local_floor_ms(); never with unlimited retention and no eviction
- * floor).  Push D review I-1. */
+ * its whole end second is at or below this store's floor as it is now
+ * (history_live_floor_ms(); never with unlimited retention and no eviction
+ * floor).  Push D review I-1.  Not the received floor's high-water mark
+ * (history_local_floor_ms(), R40): the mark can sit above what was really
+ * deleted (retention lowered and raised before age-out caught up, a clock
+ * step), and an absence aged out early lets a full PM page over that split
+ * -- PM pages never consult the windows -- be answered locally and
+ * complete; one kept longer only adds fan-out (R41). */
 #define MAX_ABSENCES 4
 struct StorageAbsence {
   time_t start;
@@ -1644,13 +1649,14 @@ static void absence_close(int idx)
 /** Does [lo, hi] (unix seconds; 0 = unbounded on that side) overlap any
  * known storage-server absence?  Sets *open_hit when an overlapping
  * absence is still open (that server is away right now).  An interval
- * whose whole end second is at or below this store's floor
- * (history_local_floor_ms()) is dropped as it is met: no row of its time
- * is left to ask about here. */
+ * whose whole end second is at or below this store's floor as it is now
+ * (history_live_floor_ms(), never the high-water mark: see the table's
+ * comment) is dropped as it is met: no row of its time is left to ask
+ * about here. */
 static int absence_overlap(time_t lo, time_t hi, int *open_hit)
 {
   int idx, i, any = 0;
-  uint64_t floor_ms = history_local_floor_ms();
+  uint64_t floor_ms = history_live_floor_ms();
   time_t horizon = (time_t)(floor_ms / 1000ULL);
 
   if (lo == 0)

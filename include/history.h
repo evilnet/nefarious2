@@ -356,8 +356,16 @@ extern int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_m
  * CurrentTime-based) -- never lower than the highest such floor this store
  * has applied (its high-water mark, kept across restarts: R40), so a
  * raised retention, retention 0 or a clock stepped back never lowers it
- * below rows already deleted; 0 = no floor yet. */
+ * below rows already deleted, and never past now (R41: a clock stepped
+ * forward or a future key is cut there, logged once); 0 = no floor yet. */
 extern uint64_t history_local_floor_ms(void);
+
+/** The floor as it is now, without the high-water mark: the later of the
+ * trim's coverage floor and the live retention's horizon (the pre-R40
+ * history_local_floor_ms()).  Only for the absence age-out
+ * (m_chathistory.c): the mark can sit above what was really deleted, and
+ * an absence kept longer only adds fan-out (R41). */
+extern uint64_t history_live_floor_ms(void);
 
 /** Boot (ircd.c, before any client or link): every window the last run left
  * open -- a crash, or a clean DIE/RESTART, which closes the stores before

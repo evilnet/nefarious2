@@ -366,23 +366,58 @@ static void test_rcv_pack_unpack_size_boundary(void **state)
 
 /* The received floor's high-water mark (Push D R40): it only rises.  A
  * lower floor -- retention raised or set to 0, the clock stepped back, an
- * eviction floor dropped once retention passed it -- never lowers it, and
+ * eviction floor dropped once retention passes it -- never lowers it, and
  * the effective floor is always the high-water mark. */
 static void test_rcv_floor_raise_only_rises(void **state)
 {
+  const int64_t now = 1800000000000LL;
   int64_t hw = 0;
+  int capped = -1;
   (void)state;
 
-  assert_int_equal(rcv_floor_raise(&hw, 1000), 1000);
+  assert_int_equal(rcv_floor_raise(&hw, 1000, now, &capped), 1000);
   assert_int_equal(hw, 1000);
-  assert_int_equal(rcv_floor_raise(&hw, 400), 1000);    /* retention raised */
+  assert_int_equal(capped, 0);
+  assert_int_equal(rcv_floor_raise(&hw, 400, now, &capped), 1000);    /* retention raised */
   assert_int_equal(hw, 1000);
-  assert_int_equal(rcv_floor_raise(&hw, 0), 1000);      /* retention 0, no eviction */
+  assert_int_equal(rcv_floor_raise(&hw, 0, now, NULL), 1000);         /* retention 0, no eviction */
   assert_int_equal(hw, 1000);
-  assert_int_equal(rcv_floor_raise(&hw, 1000), 1000);
-  assert_int_equal(rcv_floor_raise(&hw, 1700000000123LL), 1700000000123LL);
+  assert_int_equal(rcv_floor_raise(&hw, 1000, now, NULL), 1000);
+  assert_int_equal(rcv_floor_raise(&hw, 1700000000123LL, now, &capped), 1700000000123LL);
   assert_int_equal(hw, 1700000000123LL);
-  assert_int_equal(rcv_floor_raise(NULL, 5), 5);        /* no mark: the floor itself */
+  assert_int_equal(capped, 0);
+  assert_int_equal(rcv_floor_raise(NULL, 5, now, NULL), 5);           /* no mark: the floor itself */
+}
+
+/* The mark never passes now (R41): a clock stepped forward, or a corrupt
+ * or future key, would otherwise put it ahead of every row and keep it
+ * there across restarts.  A floor past now is cut to now; a mark already
+ * past now (a loaded key) comes down to now; both say they capped.  Below
+ * now nothing is capped, a floor equal to now included. */
+static void test_rcv_floor_raise_capped_at_now(void **state)
+{
+  const int64_t now = 1800000000000LL;
+  int64_t hw = 1000;
+  int capped = 0;
+  (void)state;
+
+  assert_int_equal(rcv_floor_raise(&hw, now + 86400000LL, now, &capped), now);
+  assert_int_equal(hw, now);
+  assert_int_equal(capped, 1);
+  /* Time moves on: the mark stays where it was cut, nothing capped. */
+  assert_int_equal(rcv_floor_raise(&hw, 2000, now + 5000, &capped), now);
+  assert_int_equal(capped, 0);
+
+  hw = now + 3600000LL;                                   /* a key from the future */
+  assert_int_equal(rcv_floor_raise(&hw, 0, now, &capped), now);
+  assert_int_equal(hw, now);
+  assert_int_equal(capped, 1);
+
+  hw = 0;
+  assert_int_equal(rcv_floor_raise(&hw, now, now, &capped), now);    /* at now: not capped */
+  assert_int_equal(capped, 0);
+  assert_int_equal(rcv_floor_raise(NULL, now + 1, now, &capped), now);
+  assert_int_equal(capped, 1);
 }
 
 /* The meta rows' 8-byte value (the heartbeat's, the floor's): epoch ms,
@@ -431,6 +466,7 @@ int main(void)
     cmocka_unit_test(test_rcv_unpack_rejects_count_over_max),
     cmocka_unit_test(test_rcv_pack_unpack_size_boundary),
     cmocka_unit_test(test_rcv_floor_raise_only_rises),
+    cmocka_unit_test(test_rcv_floor_raise_capped_at_now),
     cmocka_unit_test(test_rcv_ms_pack),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

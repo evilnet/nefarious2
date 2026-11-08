@@ -182,13 +182,23 @@ int rcv_unpack(const unsigned char *buf, size_t len, struct rcv_record *r)
   return 0;
 }
 
-int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms)
+int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms, int64_t ceil_ms,
+                        int *capped)
 {
-  if (!hw)
-    return floor_ms;
-  if (floor_ms > *hw)
-    *hw = floor_ms;
-  return *hw;
+  int64_t mark = hw ? *hw : floor_ms;
+  int cut = 0;
+
+  if (floor_ms > mark)
+    mark = floor_ms;
+  if (mark > ceil_ms) {
+    mark = ceil_ms;
+    cut = 1;
+  }
+  if (hw)
+    *hw = mark;
+  if (capped)
+    *capped = cut;
+  return mark;
 }
 
 void rcv_ms_pack(int64_t ms, unsigned char out[8])

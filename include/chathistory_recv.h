@@ -135,10 +135,14 @@ extern int rcv_unpack(const unsigned char *buf, size_t len,
  * floor stay deleted when retention is raised or set to 0, when the clock
  * steps back, or when the eviction floor is dropped once retention passes
  * it -- so a lower floor never lowers the mark.  Raise *@a hw to @a floor_ms
- * when that is higher.
- * @return The effective floor: *@a hw after the raise (@a floor_ms when
- * @a hw is NULL). */
-extern int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms);
+ * when that is higher -- but never past @a ceil_ms (now, R41): a clock
+ * stepped forward or a corrupt key would otherwise put the mark ahead of
+ * every row and keep it there.  A mark already past @a ceil_ms comes down
+ * to it.  *@a capped (when not NULL) says whether the ceiling cut it.
+ * @return The effective floor: *@a hw after the raise (the floor itself,
+ * capped, when @a hw is NULL). */
+extern int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms, int64_t ceil_ms,
+                               int *capped);
 
 /** A meta row's value (the windows' heartbeat, the high-water floor):
  * @a ms as 8 little-endian bytes into @a out. */
