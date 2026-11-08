@@ -57,11 +57,14 @@
 
 /** Send one REDACT line to a local client that has the capability.
  * The sender only sees its own REDACT with echo-message, as with any
- * other message it originates.  The line carries the client tags
- * (sendcmdto_one_tags): the armed event's msgid and time when the caller
- * armed them (redact_announce_local), so the live REDACT matches its
- * stored row.  sendcmdto_one, used before, tags nothing outside a labeled
- * batch, and every live REDACT went out with no msgid and no @time. */
+ * other message it originates.  The line carries the event's tags
+ * (sendcmdto_one_event): the msgid and time the caller armed
+ * (redact_announce_local), so the live REDACT matches its stored row.
+ * sendcmdto_one, used before, tags nothing outside a labeled batch, and
+ * every live REDACT went out with no msgid and no @time.  Only the
+ * requester's own echo answers a command, so only it may carry that
+ * command's label: any other member's line joins none of its open
+ * batches (an async LIST's) and takes none of its labels. */
 static void send_redact_to(struct Client *sptr, struct Client *acptr,
                            const char *target, const char *msgid,
                            const char *reason)
@@ -77,9 +80,11 @@ static void send_redact_to(struct Client *sptr, struct Client *acptr,
   cap_route_ctx.stc_skipcap = CAP_NONE;
 
   if (reason && *reason)
-    sendcmdto_one_tags(sptr, CMD_REDACT, acptr, "%s %s :%s", target, msgid, reason);
+    sendcmdto_one_event(sptr, CMD_REDACT, acptr, acptr == sptr,
+                        "%s %s :%s", target, msgid, reason);
   else
-    sendcmdto_one_tags(sptr, CMD_REDACT, acptr, "%s %s", target, msgid);
+    sendcmdto_one_event(sptr, CMD_REDACT, acptr, acptr == sptr,
+                        "%s %s", target, msgid);
 
   cap_route_ctx.stc_active = 0;
   cap_route_ctx.stc_withcap = CAP_NONE;
@@ -128,7 +133,10 @@ void redact_announce_local(struct Client *src, struct Channel *chptr, const char
 
 /** Answer a repeat REDACT of an already-redacted message: the requester's
  * own echo (with echo-message, as the first time), and nothing stored,
- * shown to the channel or relayed (idempotent success, 451769d).
+ * shown to the channel or relayed (idempotent success, 451769d).  A
+ * caller that knows the first REDACT's msgid and time arms them around
+ * this call (sendcmdto_set_client_event), so the echo names that event;
+ * otherwise it carries no msgid.
  * @param[in] sptr The local requester.
  * @param[in] target Target name (channel).
  * @param[in] msgid The redacted message.
@@ -294,10 +302,23 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
        * success -- a client that missed the first REDACT gets a consistent
        * reply -- but store no second context row and repeat nothing to the
        * channel or the network.  The spec is silent on repeats. */
-      if (history_message_is_redacted(target, msgid) == 1) {
-        history_free_messages(msg);
-        redact_echo_requester(sptr, target, msgid, reason);
-        return 0;
+      {
+        /* The REDACT child itself (history_attach_context hangs the row's
+         * context children after it), so the echo names that first
+         * REDACT event: its msgid and time. */
+        struct HistoryMessage *c;
+        history_attach_context(target, msg);
+        for (c = msg->next; c; c = c->next)
+          if (c->is_context && c->type == HISTORY_REDACT)
+            break;
+        if (c) {
+          if (feature_bool(FEAT_MSGID))
+            sendcmdto_set_client_event(c->msgid, history_parse_ms(c->timestamp));
+          redact_echo_requester(sptr, target, msgid, reason);
+          sendcmdto_set_client_msgid(NULL);
+          history_free_messages(msg);
+          return 0;
+        }
       }
 
       /* Redact message: strip content but keep entry for context */

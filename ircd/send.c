@@ -1743,6 +1743,85 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   msgq_clean(mb);
 }
 
+/** Send one event's line to a single local client, tagged as a channel
+ * fan-out tags it: the msgid and @time the caller armed
+ * (sendcmdto_set_client_event), @account, the oper and bot tags, each on
+ * the recipient's own caps.  Unlike sendcmdto_one_tags, the line joins
+ * no batch the recipient has open and takes none of its labels: an async
+ * LIST keeps cli_batch_id set across event-loop turns (sendcmdto_one),
+ * and a label left from the recipient's last command is not this line's.
+ * Only when @a respond -- the line answers the recipient's own command
+ * (its echo) -- does it carry that command's pending @label, or its
+ * @batch inside the labeled batch the command opened
+ * (labeled_batch_start), the same gate sendcmdto_one uses.
+ * @param[in] from Client the event comes from.
+ * @param[in] cmd Long name of command (used if \a to is a user).
+ * @param[in] tok Short name of command (used if \a to is a server).
+ * @param[in] to Destination of command.
+ * @param[in] respond Non-zero when the line answers \a to's own command.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
+                         struct Client *to, int respond, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char head[96];
+  char rest[256];
+  char tagbuf[512];
+  const char *tags = NULL;
+  int flags;
+  int prio;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  head[0] = '\0';
+  if (respond && MyConnect(to)) {
+    if (cli_labeled_batch(to) && cli_batch_id(to)[0]
+        && feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH))
+      snprintf(head, sizeof(head), "batch=%s", cli_batch_id(to));
+    else if (feature_bool(FEAT_CAP_labeled_response) && CapOwnHas(to, CAP_LABELEDRESP)
+             && cli_label(to)[0] && !cli_label_responded(to)) {
+      snprintf(head, sizeof(head), "label=%s", cli_label(to));
+      cli_label_responded(to) = 1;   /* answered: no ACK (send_labeled_ack) */
+    }
+  }
+
+  /* format_message_tags_ex writes "@ " when its only flag found nothing
+   * to say (account-tag, from no account): that is no tags. */
+  flags = MyConnect(to) ? get_client_tag_flags(to, from, 0) : 0;
+  if (flags && format_message_tags_ex(rest, sizeof(rest), from, flags)
+      && rest[1] != ' ') {
+    if (head[0]) {
+      snprintf(tagbuf, sizeof(tagbuf), "@%s;%s", head, rest + 1);   /* rest = "@...; " */
+      tags = tagbuf;
+    } else
+      tags = rest;
+  } else if (head[0]) {
+    snprintf(tagbuf, sizeof(tagbuf), "@%s ", head);
+    tags = tagbuf;
+  }
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
+                   &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+                   &vd);
+
+  va_end(vd.vd_args);
+
+  /* Flush immediately for messages from U-lined servers (services) */
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+
+  send_buffer(to, mb, prio);
+
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to a single client with message tags,
  * using a supplied msgid instead of generating one.
  * @param[in] from Client sending the command.

@@ -150,6 +150,14 @@ extern void sendcmdto_one(struct Client *from, const char *cmd,
 extern void sendcmdto_one_tags(struct Client *from, const char *cmd,
 			  const char *tok, struct Client *to,
 			  const char *pattern, ...);
+/* One event's line to a single local client, tagged as a channel fan-out
+ * tags it (the armed msgid and @time, @account, ...): never the
+ * recipient's open batch or a stale label.  @a respond: the line answers
+ * the recipient's own command (its echo), so it carries that command's
+ * pending @label, or its labeled batch. */
+extern void sendcmdto_one_event(struct Client *from, const char *cmd,
+                                const char *tok, struct Client *to, int respond,
+                                const char *pattern, ...);
 
 /* Same as above, but also return the generated msgid and timestamp */
 extern void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd,

@@ -5529,15 +5529,22 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
   /* Already redacted: a store returned a REDACT child of the row, or this
    * server holds one (an older responder sends no children).  A repeat is
    * an idempotent success: the requester's echo, nothing shown to the
-   * channel, relayed or stored. */
-  for (m = req->fed_msgs; m && !already; m = m->next)
+   * channel, relayed or stored.  A returned child names the first REDACT
+   * event, and the echo carries its msgid and time; the local fallback
+   * knows only that one exists, so its echo carries no msgid. */
+  for (m = req->fed_msgs; m; m = m->next)
     if (m->is_context && m->type == HISTORY_REDACT
         && strcmp(m->ctx_parent, ctx->msgid) == 0)
-      already = 1;
-  if (!already && history_message_is_redacted(req->target, ctx->msgid) == 1)
+      break;
+  if (m) {
+    already = 1;
+    if (feature_bool(FEAT_MSGID))
+      sendcmdto_set_client_event(m->msgid, history_parse_ms(m->timestamp));
+  } else if (history_message_is_redacted(req->target, ctx->msgid) == 1)
     already = 1;
   if (already) {
     redact_echo_requester(sptr, req->target, ctx->msgid, reason);
+    sendcmdto_set_client_msgid(NULL);
     return;
   }
 
