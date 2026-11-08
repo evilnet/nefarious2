@@ -6189,7 +6189,27 @@ struct SearchMatch {
   char from[NICKLEN + 1];   /**< sender nick to match, or empty */
   const char *text;         /**< substring to match, or NULL */
   int64_t after_ms;         /**< stop below this (0 = no floor) */
+  const char *target;       /**< the walk's store key (search_walk sets it) */
+  int redact_unread;        /**< matches dropped: their redaction lookup failed */
 };
+
+/** Is the matched row @a msgid of @a target redacted, or not provably
+ * unredacted?  A REDACT leaves its message's row as it was
+ * (history_redact_message is a no-op): only the reply index links the row
+ * to its REDACT child, so this is a point read of that index.  A lookup
+ * error (-1) answers yes -- fail closed: a message this server cannot
+ * prove unredacted is not shown -- and counts in @a *unread so the caller
+ * can say so once rather than per row. */
+static int search_hides(const char *target, const char *msgid, int *unread)
+{
+  int r = history_message_is_redacted(target, msgid);
+
+  if (r == 0)
+    return 0;
+  if (r < 0)
+    (*unread)++;
+  return 1;
+}
 
 /** Case-insensitive substring, the ircd's case mapping. */
 static const char *search_strcasestr(const char *hay, const char *needle)
@@ -6211,7 +6231,7 @@ static const char *search_strcasestr(const char *hay, const char *needle)
 }
 
 /** Walk hook: the presence decision first (it may seek), then the
- * window floor, the row type and the selectors. */
+ * window floor, the row type, the selectors and last the redaction. */
 static int search_row_hook(const struct HistoryMessage *msg, int reverse,
                            void *ctx, int64_t *skip_to)
 {
@@ -6243,6 +6263,17 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
     if (!body || !body[0] || !search_strcasestr(body, sm->text))
       return 0;
   }
+
+  /* A redacted message is never a match.  A page hides it by attaching
+   * its REDACT child and filtering the list; this walk never admits a
+   * REDACT row, so the check is here, inside the walk: a redacted match is
+   * skipped before it counts, and the answer is the next unredacted
+   * matches, not fewer rows.  Last, so only a row that would otherwise be
+   * returned pays the point read; every row it is asked about is a
+   * scanned row, so the walk's scan budget (SEARCH_SCAN_MAX) bounds the
+   * reads too. */
+  if (search_hides(sm->target, msg->msgid, &sm->redact_unread))
+    return 0;
 
   return 1;
 }
@@ -6282,7 +6313,9 @@ static void search_sel_unescape(char *v)
 /** The search walk shared by the local path and the S2S responder: BEFORE
  * from @a before_unix, the match hook chained behind @a base's presence
  * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
- * newest @a limit matches in @a *out, redaction placeholders dropped.
+ * newest @a limit unredacted matches in @a *out (the hook drops a redacted
+ * one inside the walk: a list filter afterwards would find no REDACT row
+ * to filter by, and could only return fewer than @a limit).
  * @a *truncated is set when the scan budget cut the window short. */
 static int search_walk(const char *lookup_target, const char *before_unix,
                        int limit, struct SearchMatch *sm, int *budget,
@@ -6298,6 +6331,8 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   memset(&filter, 0, sizeof(filter));
   sm->presence_fn = base && base->fn ? base->fn : NULL;
   sm->presence_ctx = base && base->fn ? base->ctx : NULL;
+  sm->target = lookup_target;
+  sm->redact_unread = 0;
   filter.fn = search_row_hook;
   filter.ctx = sm;
   filter.type_mask = base ? base->type_mask : 0;
@@ -6310,9 +6345,15 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   *budget -= filter.scanned;
   if (truncated)
     *truncated = filter.truncated;
+  /* A store whose reply index cannot be read hides every match (each one
+   * still a scanned row, so the budget ends the walk): say so. */
+  if (sm->redact_unread)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SEARCH %s: %d match(es) not shown, their redaction could not be read",
+              lookup_target, sm->redact_unread);
   if (count < 0)
     return -1;
-  return redact_filter_messages(out, count);
+  return count;
 }
 
 static int search_one_target(struct Client *sptr, const char *lookup_target,
@@ -6420,6 +6461,29 @@ static void complete_search_fed(struct FedRequest *req)
   client = findNUser(req->client_yxx);
   if (!client)
     return;
+  /* A responder filters its own redacted matches (search_row_hook); an
+   * older one does not, so the responders' rows pass the same check
+   * against this store before the merge.  It finds what this store knows:
+   * a REDACT relayed here, or a tombstone.  One point read per row, at
+   * most limit per responder.  The local rows were checked in the walk. */
+  {
+    struct HistoryMessage **pp = &req->fed_msgs;
+    int unread = 0;
+    while (*pp) {
+      struct HistoryMessage *cur = *pp;
+      if (search_hides(req->target, cur->msgid, &unread)) {
+        *pp = cur->next;
+        cur->next = NULL;
+        history_free_messages(cur);
+        req->fed_count--;
+      } else
+        pp = &cur->next;
+    }
+    if (unread)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SEARCH %s: %d peer row(s) not shown, their redaction could not be read",
+                req->target, unread);
+  }
   /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
    * the union is sorted and trimmed below. */
   merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
@@ -6918,7 +6982,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * or * as ref2, the selectors as the trailing parameter (parv[11]), the
        * requester's presence already opened above.  Rows go back with
        * the page machinery; E carries T when our scan budget cut the
-       * window short. */
+       * window short.  The walk drops a redacted match itself, so an
+       * older requester, which does not check, never receives one. */
       struct SearchMatch ssm;
       struct HistoryMessage *rows = NULL, *r;
       int budget = SEARCH_SCAN_MAX, truncated = 0, n = 0;
@@ -7733,11 +7798,13 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * newest `limit` matches.  `text` is a case-insensitive substring, no
  * regular expressions (the spec's ReDoS note).  The presence hook rides
  * in front of the match so a member who was not there does not find it,
- * and the reply side runs the same redaction and presence filters as a
- * CHATHISTORY page.  There is no index: search is bounded by a scan
- * budget of SEARCH_SCAN_MAX raw rows per request, spent across the
- * channels searched when `in` is absent; a client wanting more asks
- * narrower windows.  Without `in`, the channels the requester is in are
+ * and the reply side runs the same presence filter as a CHATHISTORY page.
+ * A redacted message is never a match (search_row_hook): it is dropped
+ * inside the walk, so it takes no slot of `limit`; a storage peer's rows
+ * get the same check before the merge.  There is no index: search is
+ * bounded by a scan budget of SEARCH_SCAN_MAX raw rows per request,
+ * spent across the channels searched when `in` is absent; a client
+ * wanting more asks narrower windows.  Without `in`, the channels the requester is in are
  * searched (private conversations need `in=<nick>`: their keyspace is
  * not enumerable per requester).  Local store only; a storage peer's
  * rows are not merged (2026-09-20).

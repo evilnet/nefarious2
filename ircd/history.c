@@ -3670,6 +3670,7 @@ int history_message_is_redacted(const char *target, const char *msgid)
   int plen;
   int rc;
   int redacted = 0;
+  int unread = 0;
 
   if (!history_available || !target || !msgid || !*msgid)
     return -1;
@@ -3728,9 +3729,17 @@ int history_message_is_redacted(const char *target, const char *msgid)
     main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
     if (main_keylen < 0)
       continue;
-    if (db_get(history_db_env, history_cf_messages, main_keybuf, main_keylen,
-               snap, &main_val) != DB_OK)
-      continue;
+    {
+      int grc = db_get(history_db_env, history_cf_messages, main_keybuf,
+                       main_keylen, snap, &main_val);
+      /* A child row that is gone is not a REDACT.  One that could not be
+       * read may be one: unless another child is, the answer is unknown. */
+      if (grc != DB_OK) {
+        if (grc != DB_NOTFOUND)
+          unread = 1;
+        continue;
+      }
+    }
     memset(&child, 0, sizeof(child));
     if (history_deserialize_record(main_val.base, main_val.len, &child) == 0
         && child.type == HISTORY_REDACT)
@@ -3740,7 +3749,14 @@ int history_message_is_redacted(const char *target, const char *msgid)
 
   db_iter_close(ri_it);
   db_snapshot_destroy(snap);
-  return redacted;
+  if (redacted)
+    return 1;
+  /* The children were not all read (a read error, or the index walk ended
+   * on one rather than at its end): the answer is unknown, not "no".
+   * SEARCH hides such a message; a REDACT store retries (rdx_row_decide). */
+  if (unread || (rc != DB_OK && rc != DB_NOTFOUND))
+    return -1;
+  return 0;
 }
 
 /** Build a readmarker key from account and target.
