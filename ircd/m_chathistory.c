@@ -6196,10 +6196,11 @@ struct SearchMatch {
 /** Is the matched row @a msgid of @a target redacted, or not provably
  * unredacted?  A REDACT leaves its message's row as it was
  * (history_redact_message is a no-op): only the reply index links the row
- * to its REDACT child, so this is a point read of that index.  A lookup
- * error (-1) answers yes -- fail closed: a message this server cannot
- * prove unredacted is not shown -- and counts in @a *unread so the caller
- * can say so once rather than per row. */
+ * to its REDACT child, so this walks the row's children there (the cost is
+ * noted at search_row_hook).  A lookup error (-1) answers yes -- fail
+ * closed: a message this server cannot prove unredacted is not shown --
+ * and counts in @a *unread so the caller can say so once rather than per
+ * row. */
 static int search_hides(const char *target, const char *msgid, int *unread)
 {
   int r = history_message_is_redacted(target, msgid);
@@ -6269,9 +6270,13 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
    * REDACT row, so the check is here, inside the walk: a redacted match is
    * skipped before it counts, and the answer is the next unredacted
    * matches, not fewer rows.  Last, so only a row that would otherwise be
-   * returned pays the point read; every row it is asked about is a
-   * scanned row, so the walk's scan budget (SEARCH_SCAN_MAX) bounds the
-   * reads too. */
+   * returned pays for it.  Each check is the per-row cost a page pays in
+   * history_attach_context -- a bounded reply-index iterator, a seek, then
+   * one db_get and one deserialize per child (replies and reactions are
+   * children too, not only REDACTs) -- plus a snapshot of its own, where a
+   * page shares one across its rows.  Every row checked is a scanned row,
+   * so the scan budget (SEARCH_SCAN_MAX) bounds how many checks a walk
+   * makes -- not what one check costs. */
   if (search_hides(sm->target, msg->msgid, &sm->redact_unread))
     return 0;
 
@@ -6464,8 +6469,9 @@ static void complete_search_fed(struct FedRequest *req)
   /* A responder filters its own redacted matches (search_row_hook); an
    * older one does not, so the responders' rows pass the same check
    * against this store before the merge.  It finds what this store knows:
-   * a REDACT relayed here, or a tombstone.  One point read per row, at
-   * most limit per responder.  The local rows were checked in the walk. */
+   * a REDACT relayed here, or a tombstone.  One check per row (at most
+   * limit per responder), each costing what a walk's check costs
+   * (search_row_hook).  The local rows were checked in the walk. */
   {
     struct HistoryMessage **pp = &req->fed_msgs;
     int unread = 0;
@@ -7804,10 +7810,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * get the same check before the merge.  There is no index: search is
  * bounded by a scan budget of SEARCH_SCAN_MAX raw rows per request,
  * spent across the channels searched when `in` is absent; a client
- * wanting more asks narrower windows.  Without `in`, the channels the requester is in are
- * searched (private conversations need `in=<nick>`: their keyspace is
- * not enumerable per requester).  Local store only; a storage peer's
- * rows are not merged (2026-09-20).
+ * wanting more asks narrower windows.  Without `in`, the channels the
+ * requester is in are searched (private conversations need `in=<nick>`:
+ * their keyspace is not enumerable per requester).
  * ==================================================================== */
 
 /** Handle SEARCH (soju.im/search).  parv[1..] are `key=value` selectors;
