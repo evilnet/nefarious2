@@ -130,4 +130,23 @@ extern int rcv_pack(const struct rcv_record *r, unsigned char *buf,
 extern int rcv_unpack(const unsigned char *buf, size_t len,
                        struct rcv_record *r);
 
+/** The received floor's high-water mark (Push D R40): a store's "rows at or
+ * before this may be gone" floor only rises.  Rows deleted under a higher
+ * floor stay deleted when retention is raised or set to 0, when the clock
+ * steps back, or when the eviction floor is dropped once retention passes
+ * it -- so a lower floor never lowers the mark.  Raise *@a hw to @a floor_ms
+ * when that is higher.
+ * @return The effective floor: *@a hw after the raise (@a floor_ms when
+ * @a hw is NULL). */
+extern int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms);
+
+/** A meta row's value (the windows' heartbeat, the high-water floor):
+ * @a ms as 8 little-endian bytes into @a out. */
+extern void rcv_ms_pack(int64_t ms, unsigned char out[8]);
+
+/** Parse a meta row's value: exactly 8 little-endian bytes.
+ * @return 0 with *@a ms set, or -1 (NULL, or not 8 bytes; *@a ms
+ * untouched). */
+extern int rcv_ms_unpack(const unsigned char *buf, size_t len, int64_t *ms);
+
 #endif /* INCLUDED_chathistory_recv_h */

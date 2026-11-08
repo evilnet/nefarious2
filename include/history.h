@@ -353,7 +353,10 @@ extern int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_m
  * (htrim_coverage_floor_ms(): the newest ms oldest-overall and emergency
  * eviction deleted) and, when CHATHISTORY_RETENTION is set, one ms before
  * now minus that many days (age-out deletes what is strictly older;
- * CurrentTime-based); 0 = no floor. */
+ * CurrentTime-based) -- never lower than the highest such floor this store
+ * has applied (its high-water mark, kept across restarts: R40), so a
+ * raised retention, retention 0 or a clock stepped back never lowers it
+ * below rows already deleted; 0 = no floor yet. */
 extern uint64_t history_local_floor_ms(void);
 
 /** Boot (ircd.c, before any client or link): every window the last run left
@@ -371,7 +374,9 @@ extern void history_recv_alive_tick(void);
 /** STATS chathistory: "Federation: started N (unreceived N, short N,
  * absence N, context N), slot misses N, window misses N" (m_chathistory.c;
  * window misses: pages federated for their context only whose peers held
- * a row inside the page's own received span that this store lacks). */
+ * a row inside the page's own received span that this store lacks -- a
+ * sign, not proof, of a wrong window; not counted when the peers' walks
+ * were wider: strict presence with a requester that has no account). */
 extern void chathistory_fed_report(struct Client *to);
 
 #ifdef USE_ROCKSDB

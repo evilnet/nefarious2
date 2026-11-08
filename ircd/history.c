@@ -165,6 +165,7 @@ static uint64_t history_trim_clock(void);
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count);
 static void recv_alive_write(void);
+static void recv_floor_trim(uint64_t now_ms, int days);
 static void history_recv_store_lost(const char *target, const char *timestamp);
 static void history_trim_emptied(const char **targets, int count);
 static int history_trim_parse(const void *val, size_t vlen,
@@ -887,6 +888,9 @@ void history_trim_tick(int pass_start)
   p.share_pct      = feature_int(FEAT_CHATHISTORY_USER_QUOTA_PCT);
   p.slice_ms       = trim_slice_ms();
   p.compact_min_rows = HISTORY_TRIM_COMPACT_MIN_ROWS;
+  /* The floor this tick's slices delete under counts before they run
+   * (R40: the receive windows' high-water floor). */
+  recv_floor_trim(p.now_ms, p.retention_days);
 
   /* A pass start: an age-out pass -- resuming where the walk stopped, or
    * back at the oldest row indexed behind it since (a late store, a
@@ -3223,6 +3227,7 @@ void history_set_channel_removed_callback(history_channels_removed_cb cb)
  * next slice), never inside a store. */
 static void history_coverage_forward(void)
 {
+  (void)history_local_floor_ms();   /* an eviction raises the mark now (R40) */
   if (coverage_callback)
     coverage_callback();
 }
@@ -3280,6 +3285,27 @@ static int history_recv_linked = 0;
 static const char recv_alive_key[] = "\0recv_alive";
 #define RECV_ALIVE_KLEN (sizeof(recv_alive_key) - 1)
 
+/** The received floor's high-water mark (Push D R40): the highest
+ * "rows at or before this may be gone" floor this store has applied --
+ * the trim's coverage floor or its retention cutoff -- which never goes
+ * down.  The floor history_local_floor_ms() computes can: CHATHISTORY_
+ * RETENTION is settable at run time (raised, or set to 0), the clock can
+ * step back, and the eviction floor is dropped once retention passes it.
+ * Rows deleted under a higher floor stay deleted, and a window or a stale
+ * closed interval over them would claim them again.  Kept in memory; on
+ * disk in recv_windows under its own NUL-prefixed meta key (as the
+ * heartbeat: no channel key can meet it, the casefold migration leaves
+ * it, the boot walk skips it), written with the heartbeat and at once on
+ * any rise the clock does not explain (recv_floor_note); read at boot
+ * before the boot close.  An older build ignores it. */
+static const char recv_floor_key[] = "\0recv_floor";
+#define RECV_FLOOR_KLEN (sizeof(recv_floor_key) - 1)
+static int64_t recv_floor_hw;           /**< the mark */
+static int64_t recv_floor_saved;        /**< the value last written */
+static int64_t recv_floor_saved_at;     /**< CurrentTime ms it was written */
+
+static void recv_floor_write(void);
+
 uint64_t history_recv_now_ms(void)
 {
   uint64_t wall = hlc_wall_clock_ms();
@@ -3287,41 +3313,105 @@ uint64_t history_recv_now_ms(void)
   return hlc > wall ? hlc : wall;
 }
 
-uint64_t history_local_floor_ms(void)
+/** The floor as the trim applies it at @a now_ms with @a days of
+ * retention: the later of the coverage floor (the newest ms oldest-overall
+ * and emergency eviction deleted) and, when retention is set, one ms before
+ * now minus that many days (age-out deletes what is strictly older). */
+static uint64_t local_floor_at(uint64_t now_ms, int days)
 {
   uint64_t floor = history_available ? htrim_coverage_floor_ms() : 0;
-  int days = feature_int(FEAT_CHATHISTORY_RETENTION);
 
   if (days > 0) {
-    /* Age-out deletes rows strictly older than now - retention: the
-     * newest that may be gone is one ms before that. */
     uint64_t span = (uint64_t)days * 86400000ULL;
-    uint64_t now = (uint64_t)CurrentTime * 1000ULL;
-    uint64_t gone = now > span ? now - span - 1 : 0;
+    uint64_t gone = now_ms > span ? now_ms - span - 1 : 0;
     if (gone > floor)
       floor = gone;
   }
   return floor;
 }
 
-/** Write the heartbeat (recv_alive_key) as now. */
-static void recv_alive_write(void)
+/** Raise the high-water floor to @a floor_ms (rcv_floor_raise) and write it
+ * at once when it rose by more than the clock explains: the retention
+ * horizon moving on rises with the clock and waits for the heartbeat; a
+ * lower retention or an eviction is written now.  Both the floor and its
+ * clock are whole seconds (CurrentTime, time(NULL)), so one second of rise
+ * beyond the elapsed time is still the clock's.
+ * @return The effective floor (the mark). */
+static uint64_t recv_floor_note(uint64_t floor_ms)
+{
+  int64_t now = (int64_t)CurrentTime * 1000LL;
+  int64_t hw = rcv_floor_raise(&recv_floor_hw, (int64_t)floor_ms);
+
+  if (hw - recv_floor_saved > (now - recv_floor_saved_at) + 1000LL)
+    recv_floor_write();
+  return (uint64_t)hw;
+}
+
+uint64_t history_local_floor_ms(void)
+{
+  return recv_floor_note(local_floor_at((uint64_t)CurrentTime * 1000ULL,
+                                        feature_int(FEAT_CHATHISTORY_RETENTION)));
+}
+
+/** The age-out about to run with @a p's clock and retention (history_trim_
+ * tick, before any slice): the floor it applies counts at once, at the
+ * trim's own clock, so a retention raised right after cannot lower what
+ * was deleted under it. */
+static void recv_floor_trim(uint64_t now_ms, int days)
+{
+  (void)recv_floor_note(local_floor_at(now_ms, days));
+}
+
+/** Write the high-water floor (recv_floor_key) alone. */
+static void recv_floor_write(void)
 {
   unsigned char v[8];
-  uint64_t now = history_recv_now_ms();
   struct db_writebatch *wb;
-  int i;
+  int64_t hw = recv_floor_hw;
 
   if (!history_available || !history_cf_recv)
     return;
-  for (i = 0; i < 8; i++)
-    v[i] = (unsigned char)(now >> (8 * i));
+  rcv_ms_pack(hw, v);
+  wb = db_writebatch_new(history_db_env);
+  if (!wb)
+    return;
+  if (db_writebatch_put(wb, history_cf_recv, recv_floor_key, RECV_FLOOR_KLEN,
+                        v, sizeof v) == DB_OK
+      && db_writebatch_commit(wb, /*sync_durably=*/0) == DB_OK) {
+    recv_floor_saved = hw;
+    recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
+  }
+  db_writebatch_destroy(wb);
+}
+
+/** Write the heartbeat (recv_alive_key) as now, and the high-water floor
+ * (recv_floor_key, raised first to the floor as it is now) in the same
+ * batch. */
+static void recv_alive_write(void)
+{
+  unsigned char v[8], f[8];
+  uint64_t now = history_recv_now_ms();
+  struct db_writebatch *wb;
+  int64_t hw;
+
+  if (!history_available || !history_cf_recv)
+    return;
+  hw = rcv_floor_raise(&recv_floor_hw,
+                       (int64_t)local_floor_at((uint64_t)CurrentTime * 1000ULL,
+                                               feature_int(FEAT_CHATHISTORY_RETENTION)));
+  rcv_ms_pack((int64_t)now, v);
+  rcv_ms_pack(hw, f);
   wb = db_writebatch_new(history_db_env);
   if (!wb)
     return;
   if (db_writebatch_put(wb, history_cf_recv, recv_alive_key, RECV_ALIVE_KLEN,
-                        v, sizeof v) == DB_OK)
-    (void)db_writebatch_commit(wb, /*sync_durably=*/0);
+                        v, sizeof v) == DB_OK
+      && db_writebatch_put(wb, history_cf_recv, recv_floor_key, RECV_FLOOR_KLEN,
+                           f, sizeof f) == DB_OK
+      && db_writebatch_commit(wb, /*sync_durably=*/0) == DB_OK) {
+    recv_floor_saved = hw;
+    recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
+  }
   db_writebatch_destroy(wb);
 }
 
@@ -3330,22 +3420,26 @@ void history_recv_alive_tick(void)
   recv_alive_write();
 }
 
+/** The meta row under @a key (epoch ms, rcv_ms_unpack), 0 when there is
+ * none or it cannot be read. */
+static uint64_t recv_meta_read(const char *key, size_t klen)
+{
+  struct db_val v = { NULL, 0 };
+  int64_t ms = 0;
+
+  if (db_get(history_db_env, history_cf_recv, key, klen, NULL, &v) != DB_OK)
+    return 0;
+  if (rcv_ms_unpack((const unsigned char *)v.base, v.len, &ms) != 0 || ms < 0)
+    ms = 0;
+  db_val_free(&v);
+  return (uint64_t)ms;
+}
+
 /** The heartbeat the last run left (epoch ms), 0 when there is none or it
  * cannot be read. */
 static uint64_t recv_alive_read(void)
 {
-  struct db_val v = { NULL, 0 };
-  uint64_t ms = 0;
-  int i;
-
-  if (db_get(history_db_env, history_cf_recv, recv_alive_key, RECV_ALIVE_KLEN,
-             NULL, &v) != DB_OK)
-    return 0;
-  if (v.base && v.len == 8)
-    for (i = 7; i >= 0; i--)
-      ms = (ms << 8) | ((const unsigned char *)v.base)[i];
-  db_val_free(&v);
-  return ms;
+  return recv_meta_read(recv_alive_key, RECV_ALIVE_KLEN);
 }
 
 /** Read the record under @a key into *@a r (zeroed when there is none).
@@ -3590,8 +3684,9 @@ void history_recv_link_up(void)
   if (rc != DB_OK)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "history: receive windows at link-up not stored: %s (%s); "
-              "channels left unopened, and opened ones with no record yet, "
-              "federate until their next local member change",
+              "channels left unopened federate until a local member change "
+              "opens them, opened ones with no record yet until their window "
+              "closes (the last local member leaves)",
               db_strerror(rc),
               db_env_last_error(history_db_env)
                 ? db_env_last_error(history_db_env) : "no backend detail");
@@ -3734,6 +3829,16 @@ void history_recv_boot(void)
 
   if (!history_available || !history_cf_recv)
     return;
+  /* The high-water floor the last run applied (R40), before anything
+   * clips: a retention raised across the restart must not lower it.  With
+   * no key (a first boot of a build that keeps it) the floor as it is now
+   * starts it: no build that ever applied a higher one wrote no key. */
+  {
+    uint64_t saved = recv_meta_read(recv_floor_key, RECV_FLOOR_KLEN);
+    (void)rcv_floor_raise(&recv_floor_hw, (int64_t)saved);
+    recv_floor_saved = (int64_t)saved;
+    recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
+  }
   /* The last time a build that keeps the windows was running (R32): never
    * the newest row or presence's stamp, which an older build in between
    * keeps writing while it leaves the windows as they were. */
@@ -3794,19 +3899,25 @@ static void history_recv_owner_trimmed(const char *const *targets,
   struct db_writebatch *wb = NULL;
   int i, rc = DB_OK, staged = 0;
 
+  /* Memory first, every target, in a pass of its own: a failed batch
+   * below must not leave a later target's open window unclipped. */
+  for (i = 0; i < count; i++) {
+    struct Channel *chptr;
+
+    if (targets[i] && IsChannelName(targets[i])
+        && (chptr = FindChannel(targets[i])) && chptr->recv_open
+        && chptr->recv_open_since <= (int64_t)newest_ms[i])
+      chptr->recv_open_since = (int64_t)newest_ms[i] + 1;
+  }
   if (!history_available || !history_cf_recv)
     return;
   for (i = 0; i < count && rc == DB_OK; i++) {
     char key[CHANNELLEN + 2];
     struct rcv_record r;
-    struct Channel *chptr;
     int klen;
 
     if (!targets[i] || !IsChannelName(targets[i]))
       continue;
-    if ((chptr = FindChannel(targets[i])) && chptr->recv_open
-        && chptr->recv_open_since <= (int64_t)newest_ms[i])
-      chptr->recv_open_since = (int64_t)newest_ms[i] + 1;
     klen = build_target_key(key, sizeof key, targets[i]);
     if (klen < 0 || recv_read(key, klen, &r) != 1)
       continue;

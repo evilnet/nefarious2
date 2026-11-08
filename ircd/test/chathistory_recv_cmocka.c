@@ -364,6 +364,51 @@ static void test_rcv_pack_unpack_size_boundary(void **state)
   assert_int_equal(rcv_unpack(buf, (size_t)n - 1, &out), -1);
 }
 
+/* The received floor's high-water mark (Push D R40): it only rises.  A
+ * lower floor -- retention raised or set to 0, the clock stepped back, an
+ * eviction floor dropped once retention passed it -- never lowers it, and
+ * the effective floor is always the high-water mark. */
+static void test_rcv_floor_raise_only_rises(void **state)
+{
+  int64_t hw = 0;
+  (void)state;
+
+  assert_int_equal(rcv_floor_raise(&hw, 1000), 1000);
+  assert_int_equal(hw, 1000);
+  assert_int_equal(rcv_floor_raise(&hw, 400), 1000);    /* retention raised */
+  assert_int_equal(hw, 1000);
+  assert_int_equal(rcv_floor_raise(&hw, 0), 1000);      /* retention 0, no eviction */
+  assert_int_equal(hw, 1000);
+  assert_int_equal(rcv_floor_raise(&hw, 1000), 1000);
+  assert_int_equal(rcv_floor_raise(&hw, 1700000000123LL), 1700000000123LL);
+  assert_int_equal(hw, 1700000000123LL);
+  assert_int_equal(rcv_floor_raise(NULL, 5), 5);        /* no mark: the floor itself */
+}
+
+/* The meta rows' 8-byte value (the heartbeat's, the floor's): epoch ms,
+ * little-endian, exactly 8 bytes -- the byte order the heartbeat has
+ * always been written in. */
+static void test_rcv_ms_pack(void **state)
+{
+  unsigned char b[8];
+  static const unsigned char want[8] = { 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01 };
+  int64_t ms = 0;
+  (void)state;
+
+  rcv_ms_pack(0x0102030405060708LL, b);
+  assert_memory_equal(b, want, 8);
+  assert_int_equal(rcv_ms_unpack(b, 8, &ms), 0);
+  assert_int_equal(ms, 0x0102030405060708LL);
+  rcv_ms_pack(1700000000123LL, b);
+  assert_int_equal(rcv_ms_unpack(b, 8, &ms), 0);
+  assert_int_equal(ms, 1700000000123LL);
+  ms = 42;
+  assert_int_equal(rcv_ms_unpack(b, 7, &ms), -1);
+  assert_int_equal(rcv_ms_unpack(b, 9, &ms), -1);
+  assert_int_equal(rcv_ms_unpack(NULL, 8, &ms), -1);
+  assert_int_equal(ms, 42);                              /* untouched on a reject */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -385,6 +430,8 @@ int main(void)
     cmocka_unit_test(test_rcv_unpack_hand_built),
     cmocka_unit_test(test_rcv_unpack_rejects_count_over_max),
     cmocka_unit_test(test_rcv_pack_unpack_size_boundary),
+    cmocka_unit_test(test_rcv_floor_raise_only_rises),
+    cmocka_unit_test(test_rcv_ms_pack),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

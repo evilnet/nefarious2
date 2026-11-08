@@ -582,14 +582,17 @@ static void migrate_recv_windows_cf(void **state)
    * first component -- it stays as written, and no channel's key (never
    * empty, never a NUL) folds onto it. */
   seed(rw, B("\0recv_ALIVE"), "hb");
+  /* The received floor's high-water mark (Push D R40): the same shape. */
+  seed(rw, B("\0recv_FLOOR"), "fl");
 
   assert_int_equal(db_casefold_migrate(env, "t", cfs, 1), 0);
 
-  assert_int_equal(rw->n, 4);
+  assert_int_equal(rw->n, 5);
   assert_row(rw, B("#linux"), "rec-a");
   assert_row(rw, B("#ops{x}"), "rec-b");
   assert_row(rw, B("#quiet"), "rec-c");
   assert_row(rw, B("\0recv_ALIVE"), "hb");
+  assert_row(rw, B("\0recv_FLOOR"), "fl");
   assert_no_row(rw, B("#Linux"));
   assert_no_row(rw, B("#ops[x]"));
 

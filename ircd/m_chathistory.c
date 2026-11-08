@@ -1793,8 +1793,9 @@ enum fed_reason {
 static unsigned long fed_started_why[FED_WHY_COUNT];
 static unsigned long fed_slot_misses;
 /** Pages federated for their context only whose peers held a row inside
- * the page's own (received) span that this store lacks: a receive window
- * claimed what this server did not receive (context_only_peer_rows). */
+ * the page's own (received) span that this store lacks: a sign that a
+ * receive window claimed what this server did not receive
+ * (context_only_peer_rows; not counted when the peers' walks were wider). */
 static unsigned long fed_window_misses;
 
 /** Count a start_fed_query outcome for a page that wanted it for @a why. */
@@ -2696,6 +2697,10 @@ struct FedRequest {
                                        *   the merge is centred on it (hm_trim_around) */
   uint64_t around_ms;                 /**< That reference's time (epoch ms) */
   char around_msgid[HISTORY_MSGID_LEN]; /**< ... and row, for a msgid reference (else empty) */
+  int peer_walk_wider;                /**< The responders' walks are not filtered as
+                                       *   this page's was: strict presence, and a
+                                       *   requester with no account (a responder
+                                       *   filters only by account presence) */
   struct FedCtxPair ctx_pairs[MAX_FED_CTX]; /**< Declared context children (CH C) */
   int ctx_pair_count;
   unsigned char e_seen[MAX_AD_SERVERS / 8]; /**< responders whose CH E arrived (dup guard) */
@@ -5226,8 +5231,11 @@ static void splice_fed_context(struct HistoryMessage *merged,
  *   - Any other row is not on the page.  One strictly between the oldest
  *     and the newest local row should not exist -- the page's own span
  *     was received here -- so the page is counted (STATS "window
- *     misses") and logged: the only sign that a receive window claimed
- *     what this server did not receive.
+ *     misses") and logged: a sign that a receive window claimed what this
+ *     server did not receive.  Not when the peers' walks were wider than
+ *     this page's (req->peer_walk_wider: strict presence, a requester with
+ *     no account), nor is it proof: a peer's presence records, replicated
+ *     by observation, can differ from this server's.
  * The rows left in req->fed_msgs are freed with the request.
  * @return The extended context list (splice_fed_context takes it). */
 static struct HistoryMessage *context_only_peer_rows(struct FedRequest *req,
@@ -5284,12 +5292,13 @@ static struct HistoryMessage *context_only_peer_rows(struct FedRequest *req,
     }
     pp = &m->next;
   }
-  if (misses) {
+  if (misses && !req->peer_walk_wider) {
     fed_window_misses++;
     log_write(LS_SYSTEM, L_DEBUG, 0,
               "chathistory: %s: a page fanned out for its context only got "
               "%d row(s) inside its own span that this store lacks (first "
-              "%s at %s): a receive window claimed what was not received",
+              "%s at %s): a receive window may have claimed what was not "
+              "received",
               req->target, misses, first_miss->msgid, first_miss->timestamp);
   }
   return ctx_list;
@@ -5699,6 +5708,14 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
     }
     req->around = req->around_ms != 0;   /* 0: unparseable */
   }
+  /* Strict presence filters this page's walk for any requester, but a
+   * responder filters its own only by ACCOUNT presence (a session anchor
+   * lives here alone): with no account the peers' pages are wider, and a
+   * row of theirs this page lacks is no sign of a wrong window
+   * (context_only_peer_rows). */
+  req->peer_walk_wider = feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
+                         && !(IsAccount(sptr) && cli_user(sptr)
+                              && cli_user(sptr)->account[0]);
 
   /* Save label for async response delivery */
   req->label[0] = '\0';

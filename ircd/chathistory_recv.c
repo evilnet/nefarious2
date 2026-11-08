@@ -181,3 +181,25 @@ int rcv_unpack(const unsigned char *buf, size_t len, struct rcv_record *r)
 
   return 0;
 }
+
+int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms)
+{
+  if (!hw)
+    return floor_ms;
+  if (floor_ms > *hw)
+    *hw = floor_ms;
+  return *hw;
+}
+
+void rcv_ms_pack(int64_t ms, unsigned char out[8])
+{
+  rcv_le_put64(out, ms);
+}
+
+int rcv_ms_unpack(const unsigned char *buf, size_t len, int64_t *ms)
+{
+  if (!buf || len != 8 || !ms)
+    return -1;
+  *ms = rcv_le_get64(buf);
+  return 0;
+}
