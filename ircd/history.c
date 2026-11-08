@@ -3257,7 +3257,11 @@ int history_coverage_days(void)
 /* open and chptr->recv_open_since where it starts; history_recv_covers*/
 /* reads those, never the record's open_since, so a failed write always*/
 /* leaves the record claiming LESS than was received (a stale open is  */
-/* ignored, and dropped by the next open), never more.                 */
+/* ignored, and dropped by the next open), never more.  Every write    */
+/* takes the open start from memory too, so whatever narrows a window  */
+/* must narrow memory first: the local floor needs no clip there       */
+/* (history_recv_covers says no at or below it), a per-owner eviction  */
+/* does (history_recv_owner_trimmed).                                  */
 /* ---------------------------------------------------------------- */
 
 /** history_recv_link_up() ran: the first storage peer's burst after boot
@@ -3586,7 +3590,8 @@ void history_recv_link_up(void)
   if (rc != DB_OK)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "history: receive windows at link-up not stored: %s (%s); "
-              "those channels federate until a member rejoins",
+              "channels left unopened, and opened ones with no record yet, "
+              "federate until their next local member change",
               db_strerror(rc),
               db_env_last_error(history_db_env)
                 ? db_env_last_error(history_db_env) : "no backend detail");
@@ -3776,10 +3781,13 @@ void history_recv_boot(void)
 
 /** The trim's owner-trimmed callback (Q1): a per-owner eviction deleted
  * rows up to @a newest_ms[i] in @a targets[i] while other owners' rows
- * there stay, so nothing up to that time counts as received any more:
- * clip each channel's record there, all in one batch.  A target with no
- * record is skipped; a PM pair key is not a channel (PM pages keep the
- * short-page rule). */
+ * there stay, and it moves no floor, so nothing up to that time counts as
+ * received any more.  Each channel's open window is clipped there in
+ * memory first -- chptr->recv_open_since is what history_recv_covers
+ * reads and what every later write records (Push D final review) -- for a
+ * channel with no record too; then its record, all in one batch (a target
+ * with no record has nothing more to clip).  A PM pair key is not a
+ * channel (PM pages keep the short-page rule). */
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count)
 {
@@ -3791,10 +3799,14 @@ static void history_recv_owner_trimmed(const char *const *targets,
   for (i = 0; i < count && rc == DB_OK; i++) {
     char key[CHANNELLEN + 2];
     struct rcv_record r;
+    struct Channel *chptr;
     int klen;
 
     if (!targets[i] || !IsChannelName(targets[i]))
       continue;
+    if ((chptr = FindChannel(targets[i])) && chptr->recv_open
+        && chptr->recv_open_since <= (int64_t)newest_ms[i])
+      chptr->recv_open_since = (int64_t)newest_ms[i] + 1;
     klen = build_target_key(key, sizeof key, targets[i]);
     if (klen < 0 || recv_read(key, klen, &r) != 1)
       continue;

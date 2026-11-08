@@ -1792,6 +1792,10 @@ enum fed_reason {
  * since this server started (STATS chathistory "Federation:"). */
 static unsigned long fed_started_why[FED_WHY_COUNT];
 static unsigned long fed_slot_misses;
+/** Pages federated for their context only whose peers held a row inside
+ * the page's own (received) span that this store lacks: a receive window
+ * claimed what this server did not receive (context_only_peer_rows). */
+static unsigned long fed_window_misses;
 
 /** Count a start_fed_query outcome for a page that wanted it for @a why. */
 static void fed_count(const struct FedRequest *req, int why)
@@ -1806,12 +1810,12 @@ void chathistory_fed_report(struct Client *to)
 {
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Federation: started %lu (unreceived %lu, short %lu, "
-             "absence %lu, context %lu), slot misses %lu",
+             "absence %lu, context %lu), slot misses %lu, window misses %lu",
              fed_started_why[FED_WHY_UNRECEIVED] + fed_started_why[FED_WHY_SHORT]
              + fed_started_why[FED_WHY_ABSENCE] + fed_started_why[FED_WHY_CONTEXT],
              fed_started_why[FED_WHY_UNRECEIVED], fed_started_why[FED_WHY_SHORT],
              fed_started_why[FED_WHY_ABSENCE], fed_started_why[FED_WHY_CONTEXT],
-             fed_slot_misses);
+             fed_slot_misses, fed_window_misses);
 }
 
 int chathistory_retention_advertised(void);   /* below; handlers.h */
@@ -5209,26 +5213,52 @@ static void splice_fed_context(struct HistoryMessage *merged,
   }
 }
 
-/** A page federated for its context only (FED_WHY_CONTEXT): move every
- * row a peer sent as a row of its own page that is a reaction or REDACT of
- * one of @a rows (the local page) out of req->fed_msgs, marked as that
- * row's context child, onto the end of @a ctx_list.  A peer whose page
- * reaches past ours (it lacks some of our rows) holds such a child as a
- * row, not behind a CH C.  The rows left in req->fed_msgs are not on the
- * page; free_fed_request frees them.
+/** The rows the peers sent as rows of their own pages, for a page
+ * federated for its context only (FED_WHY_CONTEXT; their declared context
+ * is already out, extract_fed_context).  @a rows is the local page.
+ *   - A duplicate of a local row is not added; the local row takes its
+ *     client-only tags when it has none (hm_merge's rule: a local row
+ *     stored before relays kept them, W5 Task 2).
+ *   - A reaction or REDACT of a local row moves out of req->fed_msgs onto
+ *     the end of @a ctx_list, marked as that row's context child: a peer
+ *     whose page reaches past ours (it lacks some of our rows) holds such
+ *     a child as a row, not behind a CH C.
+ *   - Any other row is not on the page.  One strictly between the oldest
+ *     and the newest local row should not exist -- the page's own span
+ *     was received here -- so the page is counted (STATS "window
+ *     misses") and logged: the only sign that a receive window claimed
+ *     what this server did not receive.
+ * The rows left in req->fed_msgs are freed with the request.
  * @return The extended context list (splice_fed_context takes it). */
-static struct HistoryMessage *adopt_fed_row_children(struct FedRequest *req,
+static struct HistoryMessage *context_only_peer_rows(struct FedRequest *req,
                                                      struct HistoryMessage *rows,
                                                      struct HistoryMessage *ctx_list)
 {
-  struct HistoryMessage **pp = &req->fed_msgs, *tail = ctx_list;
+  struct HistoryMessage **pp = &req->fed_msgs, *tail = ctx_list, *r;
+  struct HistoryMessage *first_miss = NULL;
+  uint64_t oldest = 0, newest = 0;
+  int misses = 0;
 
   while (tail && tail->next)
     tail = tail->next;
+  for (r = rows; r; r = r->next) {
+    uint64_t t = history_parse_ms(r->timestamp);
+    if (!oldest || t < oldest)
+      oldest = t;
+    if (t > newest)
+      newest = t;
+  }
   while (*pp) {
-    struct HistoryMessage *m = *pp, *r;
+    struct HistoryMessage *m = *pp;
     char parent[HISTORY_MSGID_LEN];
+    uint64_t t;
 
+    if ((r = hm_find_dup(rows, m))) {
+      if (!r->client_tags[0] && m->client_tags[0])
+        ircd_strncpy(r->client_tags, m->client_tags, sizeof(r->client_tags));
+      pp = &m->next;
+      continue;
+    }
     if (hm_context_parent(m, parent, sizeof(parent))) {
       for (r = rows; r; r = r->next)
         if (!r->is_context && strcmp(r->msgid, parent) == 0)
@@ -5247,7 +5277,20 @@ static struct HistoryMessage *adopt_fed_row_children(struct FedRequest *req,
         continue;
       }
     }
+    t = history_parse_ms(m->timestamp);
+    if (oldest < t && t < newest) {
+      if (!misses++)
+        first_miss = m;
+    }
     pp = &m->next;
+  }
+  if (misses) {
+    fed_window_misses++;
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "chathistory: %s: a page fanned out for its context only got "
+              "%d row(s) inside its own span that this store lacks (first "
+              "%s at %s): a receive window claimed what was not received",
+              req->target, misses, first_miss->msgid, first_miss->timestamp);
   }
   return ctx_list;
 }
@@ -5286,11 +5329,13 @@ static void send_fed_response(struct FedRequest *req)
        * centred where it lacks our rows, an AFTER that runs on past them)
        * must not move or trim it.  The peers add context to those rows: the
        * children they declared (CH C) and any row of theirs that is a
-       * child of ours.  The local list goes to the replay engine whole; it
-       * leaves the request so free_fed_request does not free it too. */
+       * child of ours; a duplicate of ours lends it its client-only tags
+       * (context_only_peer_rows).  The local list goes to the replay engine
+       * whole; it leaves the request so free_fed_request does not free it
+       * too. */
       merged = req->local_msgs;
       req->local_msgs = NULL;
-      fed_ctx = adopt_fed_row_children(req, merged, fed_ctx);
+      fed_ctx = context_only_peer_rows(req, merged, fed_ctx);
     } else if (req->around) {
       /* Merged uncut, then centred on the reference (hm_trim_around frees
        * the rows it cuts, which are the merge's own copies). */
