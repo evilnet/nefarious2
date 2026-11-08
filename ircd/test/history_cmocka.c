@@ -228,6 +228,18 @@ static void test_rdx_reply_parse(void **state)
   assert_int_equal(-1, rdx_reply_parse(10, pv, &r)); /* no time */
 }
 
+static void test_ch_e_flags(void **state)
+{
+  (void)state;
+  assert_int_equal(0, ch_e_flags(NULL));
+  assert_int_equal(0, ch_e_flags(""));
+  assert_int_equal(CH_E_TRUNCATED, ch_e_flags("T"));
+  assert_int_equal(CH_E_UNANSWERED, ch_e_flags("U"));
+  assert_int_equal(CH_E_TRUNCATED | CH_E_UNANSWERED, ch_e_flags("TU"));
+  assert_int_equal(CH_E_TRUNCATED | CH_E_UNANSWERED, ch_e_flags("UT"));
+  assert_int_equal(0, ch_e_flags("x"));
+}
+
 /* ========== build_key Tests ========== */
 
 static void test_build_key_target_only(void **state)
@@ -1308,6 +1320,7 @@ int main(void)
         cmocka_unit_test(test_rdx_key_roundtrip_and_order),
     cmocka_unit_test(test_rdx_val_roundtrip),
     cmocka_unit_test(test_rdx_reply_parse),
+    cmocka_unit_test(test_ch_e_flags),
     cmocka_unit_test(test_build_key_target_only),
         cmocka_unit_test(test_build_key_with_timestamp),
         cmocka_unit_test(test_build_key_with_msgid),

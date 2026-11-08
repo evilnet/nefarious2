@@ -80,6 +80,20 @@ int rdx_val_parse(const void *val, size_t vlen, struct rdx_val *out)
   return 0;
 }
 
+unsigned int ch_e_flags(const char *param)
+{
+  unsigned int flags = 0;
+  if (!param)
+    return 0;
+  for (; *param; param++) {
+    if (*param == 'T')
+      flags |= CH_E_TRUNCATED;
+    else if (*param == 'U')
+      flags |= CH_E_UNANSWERED;
+  }
+  return flags;
+}
+
 int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out)
 {
   const char *reason;

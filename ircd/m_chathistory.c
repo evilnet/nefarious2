@@ -6386,8 +6386,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       sc.to = sptr;
       sc.reqid = reqid;
       sc.n = 0;
-      if (history_is_available())
-        history_redact_index_scan(since, lim, rdx_scan_emit_cb, &sc, &trunc);
+      if (!history_is_available()) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
+      history_redact_index_scan(since, lim, rdx_scan_emit_cb, &sc, &trunc);
       Debug((DEBUG_DEBUG, "CH Q D: since %llu -> %d row(s) trunc %d for %s",
              (unsigned long long)since, sc.n, trunc, reqid));
       if (trunc)
@@ -6443,7 +6446,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       int fetch_limit;
 
       if (!history_is_available()) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
 
@@ -6474,7 +6477,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
                                           fetch_limit, &targets,
                                           rq ? targets_visible_cb : NULL, rq);
       }
-      if (tgt_count <= 0) {
+      if (tgt_count < 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
+      if (tgt_count == 0) {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
         return 0;
       }
@@ -6497,7 +6504,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Check if we have history backend */
     if (!history_is_available()) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
       return 0;
     }
 
@@ -6640,7 +6647,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       presence_query_filter_close(fed_pf);
       fed_pf = NULL;
       if (n < 0) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
       for (r = rows; r; r = r->next)
@@ -6676,7 +6683,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     } else {
       /* Unsupported subcommand for federation */
       presence_query_filter_close(fed_pf);
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
       return 0;
     }
     /* A presence hook lives inside fed_pf: read what the walk left on it
@@ -6686,7 +6693,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     fed_pf = NULL;
     fed_hook = NULL;
 
-    if (count <= 0) {
+    if (count < 0) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+      return 0;
+    }
+    if (count == 0) {
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
       return 0;
     }
@@ -7053,11 +7064,19 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Optional trailing T: that server's result hit its limit.  OR
-     * across servers -- any truncated contributor means the aggregate
-     * cannot claim completeness. */
-    if (parc > 4 && parv[4] && parv[4][0] == 'T')
-      req->fed_truncated = 1;
+    /* Optional trailing flags (letters, any order): T = that server's
+     * result hit its limit; U = that server never answered the query at
+     * all (no store, an unknown subcommand, or a read error) -- distinct
+     * from a genuine "no rows" (bare E with no flags).  OR across
+     * servers -- any truncated or unanswered contributor means the
+     * aggregate cannot claim completeness. */
+    {
+      unsigned int eflags = ch_e_flags((parc > 4 && parv[4]) ? parv[4] : NULL);
+      if (eflags & CH_E_TRUNCATED)
+        req->fed_truncated = 1;
+      if (eflags & CH_E_UNANSWERED)
+        req->cut = 1;   /* a responder never answered: partial, never advance the watermark */
+    }
 
     /* Decrement pending count -- once per responder: a duplicate CH E
      * from one server completed the request without the others' rows

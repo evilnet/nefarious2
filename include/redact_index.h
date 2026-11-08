@@ -44,4 +44,13 @@ int rdx_val_parse(const void *val, size_t vlen, struct rdx_val *out);
  * parv[1] == "D"; 0 on success, -1 if short/malformed. */
 int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out);
 
+/* CH E <reqid> <count> [flags] -- the optional trailing flags param, letters
+ * in any order: T = this responder's result was truncated (more exists);
+ * U = this responder never answered the query at all (no store, an unknown
+ * subcommand, or a read error) -- distinct from a genuine zero-row answer.
+ * NULL-safe; unrecognized letters are ignored. */
+#define CH_E_TRUNCATED   0x1
+#define CH_E_UNANSWERED  0x2
+unsigned int ch_e_flags(const char *param);
+
 #endif
