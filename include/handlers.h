@@ -316,17 +316,22 @@ extern void broadcast_channel_advertisement(const char*);
 extern void chathistory_init_callbacks(void);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
-/* Apply a channel redaction that reached us from elsewhere the way ms_redact
- * does (placeholder + ONE context row + member fan-out; idempotent).  The
- * _row form takes the stored sender/account explicitly (the redaction
- * catch-up replay keeps the original redacter; NULL = derive from src). */
+/* Apply a channel redaction that reached us from elsewhere: ONE REDACT row,
+ * stored only when this store holds the message and no REDACT row annotates
+ * it yet (rdx_row_decide; an orphan or a repeat stores nothing).  The
+ * _remote form is a peer's live REDACT (ms_redact), always shown to the
+ * local members.  The _row form takes the stored sender/account explicitly
+ * (the redaction catch-up keeps the original redacter; NULL = derive from
+ * src), shows it only when stored unless show_always, and returns the
+ * store's decision (an enum rdx_row value, redact_index.h). */
 extern void redact_apply_remote(struct Client *src, const char *target,
                                 const char *msgid, const char *redact_msgid,
                                 uint64_t time_ms, const char *reason);
-extern void redact_apply_row(struct Client *src, const char *target,
-                             const char *msgid, const char *redact_msgid,
-                             uint64_t time_ms, const char *reason,
-                             const char *sender_str, const char *account_str);
+extern int redact_apply_row(struct Client *src, struct Channel *chptr,
+                            const char *msgid, const char *redact_msgid,
+                            uint64_t time_ms, const char *reason,
+                            const char *sender_str, const char *account_str,
+                            int show_always);
 /* Show one redaction to @a chptr's local members: arm the REDACT event's
  * msgid and time, fan out (the redacter's echo included), clear.  Stores
  * and relays nothing. */

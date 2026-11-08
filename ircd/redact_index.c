@@ -1,5 +1,6 @@
-/* redact_index.c -- pure encoders for the redaction catch-up index, and the
- * REDACT authorization rule (see .h).  Links against ../ircd_string.o only
+/* redact_index.c -- pure encoders for the redaction catch-up index, the
+ * REDACT authorization rule, and the rules for applying a redaction and
+ * moving the catch-up watermark (see .h).  Links against ../ircd_string.o only
  * (ircd_strcmp); history.h is read for its message-type values alone. */
 #include "config.h"
 #include "redact_index.h"
@@ -97,6 +98,39 @@ unsigned int ch_e_flags(const char *param)
       flags |= CH_E_UNANSWERED;
   }
   return flags;
+}
+
+enum rdx_row rdx_row_decide(int parent_lookup_rc, int already_redacted)
+{
+  if (parent_lookup_rc < 0)
+    return RDX_ROW_RETRY;
+  if (parent_lookup_rc > 0)
+    return RDX_ROW_SKIP_ORPHAN;
+  if (already_redacted < 0)
+    return RDX_ROW_RETRY;
+  return already_redacted ? RDX_ROW_SKIP_APPLIED : RDX_ROW_APPLY;
+}
+
+static enum rdx_wm rdx_wm_set(enum rdx_wm d, uint64_t ms, uint64_t *wm_out)
+{
+  if (wm_out)
+    *wm_out = ms;
+  return d;
+}
+
+enum rdx_wm rdx_watermark_decide(int cut, int truncated, int round, int max_rounds,
+                                 uint64_t last_ms, uint64_t start_ms, uint64_t *wm_out)
+{
+  if (cut)
+    return RDX_WM_KEEP;
+  if (truncated) {
+    /* More exists past what was fetched: never past the newest row seen. */
+    if (!last_ms)
+      return RDX_WM_KEEP;
+    return rdx_wm_set(round < max_rounds ? RDX_WM_SET_CONTINUE : RDX_WM_SET,
+                      last_ms, wm_out);
+  }
+  return rdx_wm_set(RDX_WM_SET, start_ms, wm_out);
 }
 
 int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out)

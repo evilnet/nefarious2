@@ -41,9 +41,9 @@
 #include "history_trim_codec.h"
 #include "redact_index.h"   /* redaction catch-up query (design B) */
 /* m_redact.c (handlers.h cannot be included here -- forward_history_write prototype nit) */
-extern void redact_apply_row(struct Client *src, const char *target, const char *msgid,
-                             const char *redact_msgid, uint64_t time_ms, const char *reason,
-                             const char *sender_str, const char *account_str);
+extern int redact_apply_row(struct Client *src, struct Channel *chptr, const char *msgid,
+                            const char *redact_msgid, uint64_t time_ms, const char *reason,
+                            const char *sender_str, const char *account_str, int show_always);
 extern void redact_announce_local(struct Client *src, struct Channel *chptr,
                                   const char *msgid, const char *redact_msgid,
                                   uint64_t time_ms, const char *reason);
@@ -4597,16 +4597,37 @@ static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
     rc->last_ms = rr->time_ms;
 }
 
-/* Completion: apply every row (idempotent), then move the watermark.  A
- * truncated reply continues from its newest row for a few rounds; a cut
- * (timeout) advances nothing. */
+/* A catch-up continues a truncated reply for at most this many rounds. */
+#define RDX_CATCHUP_ROUNDS 8
+
+/* Completion: judge every row against this store, then move the watermark.
+ * - A row is stored and shown to the channel's local members only when this
+ *   store holds its message and has not applied it (redact_apply_row,
+ *   rdx_row_decide).  An orphan (a message this store does not hold: it
+ *   never reached it, or the trim evicted it) is neither stored nor shown,
+ *   and neither is a redaction applied already, live or by an earlier
+ *   round: every round re-reads from the watermark less a slack.
+ * - A row the store could not read cuts the round (RETRY).
+ * - A row for a channel that does not exist here (empty network-wide since)
+ *   is skipped and counted, as before.
+ * - The watermark (rdx_watermark_decide): a cut (a timeout, a CH E U, a row
+ *   not read) keeps it.  A truncated reply continues from its newest row for
+ *   up to RDX_CATCHUP_ROUNDS rounds; after the last, the watermark stops at
+ *   that row, never past rows it did not fetch, and the next catch-up asks
+ *   for the rest.  A complete one sets it to when the round was asked. */
 static void complete_redact_catchup(struct FedRequest *req)
 {
   struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
   struct HistoryMessage *m;
-  int applied = 0;
+  int applied = 0, repeats = 0, orphans = 0, unread = 0, gone = 0;
+  uint64_t wm = 0;
+  enum rdx_wm wd;
+  char gonebuf[48] = "";
+  char why[96];
+
   for (m = req->fed_msgs; m; m = m->next) {
     char parent[HISTORY_MSGID_LEN];
+    struct Channel *chptr;
     const char *sp = strchr(m->content, ' ');
     const char *reason = NULL;
     size_t pl = sp ? (size_t)(sp - m->content) : strlen(m->content);
@@ -4619,28 +4640,47 @@ static void complete_redact_catchup(struct FedRequest *req)
       if (*reason == ':') reason++;
       if (!*reason) reason = NULL;
     }
-    redact_apply_row(&me, m->target, parent, m->msgid, history_parse_ms(m->timestamp),
-                     reason, m->sender, m->account);
-    applied++;
+    if (!IsChannelName(m->target) || !(chptr = FindChannel(m->target))) {
+      gone++;
+      continue;
+    }
+    switch (redact_apply_row(&me, chptr, parent, m->msgid, history_parse_ms(m->timestamp),
+                             reason, m->sender, m->account, 0)) {
+    case RDX_ROW_APPLY:        applied++; break;
+    case RDX_ROW_SKIP_APPLIED: repeats++; break;
+    case RDX_ROW_SKIP_ORPHAN:  orphans++; break;
+    case RDX_ROW_RETRY:        unread++; req->cut = 1; break;
+    }
   }
   if (!rc)
     return;
-  if (req->cut) {
-    log_write(LS_SYSTEM, L_NOTICE, 0,
-              "REDACT catch-up from %s: cut after %d row(s), watermark kept", rc->store_yxx, applied);
-    return;
-  }
-  if (req->fed_truncated && rc->last_ms && rc->round < 8) {
-    history_redact_watermark_set(rc->last_ms);
-    log_write(LS_SYSTEM, L_NOTICE, 0,
-              "REDACT catch-up from %s: %d row(s), more -> round %d", rc->store_yxx, applied, rc->round + 1);
+
+  wd = rdx_watermark_decide(req->cut, req->fed_truncated, rc->round, RDX_CATCHUP_ROUNDS,
+                            rc->last_ms, rc->start_ms, &wm);
+  if (wd != RDX_WM_KEEP)
+    history_redact_watermark_set(wm);
+
+  if (wd == RDX_WM_KEEP && unread)
+    ircd_snprintf(0, why, sizeof why, "%d row(s) unread, watermark kept", unread);
+  else if (wd == RDX_WM_KEEP && req->cut)
+    ircd_snprintf(0, why, sizeof why, "cut, watermark kept");
+  else if (wd == RDX_WM_KEEP)
+    ircd_snprintf(0, why, sizeof why, "truncated with no row, watermark kept");
+  else if (wd == RDX_WM_SET_CONTINUE)
+    ircd_snprintf(0, why, sizeof why, "more -> round %d", rc->round + 1);
+  else if (req->fed_truncated)
+    ircd_snprintf(0, why, sizeof why, "more after %d rounds, watermark at the newest row %llu",
+                  rc->round, (unsigned long long)wm);
+  else
+    ircd_snprintf(0, why, sizeof why, "watermark %llu", (unsigned long long)wm);
+  if (gone)
+    ircd_snprintf(0, gonebuf, sizeof gonebuf, ", %d for a channel not here", gone);
+  log_write(LS_SYSTEM, L_NOTICE, 0,
+            "REDACT catch-up from %s (round %d): applied %d, skipped %d applied, %d orphan%s; %s",
+            rc->store_yxx, rc->round, applied, repeats, orphans, gonebuf, why);
+
+  if (wd == RDX_WM_SET_CONTINUE)
     start_redact_catchup(rc->store_yxx, rc->last_ms, rc->round + 1);
-    return;
-  }
-  history_redact_watermark_set(rc->start_ms);
-  if (applied)
-    log_write(LS_SYSTEM, L_NOTICE, 0,
-              "REDACT catch-up from %s: applied %d redaction(s)", rc->store_yxx, applied);
 }
 
 static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round)
@@ -5527,11 +5567,17 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
   }
 
   /* Already redacted: a store returned a REDACT child of the row, or this
-   * server holds one (an older responder sends no children).  A repeat is
-   * an idempotent success: the requester's echo, nothing shown to the
-   * channel, relayed or stored.  A returned child names the first REDACT
-   * event, and the echo carries its msgid and time; the local fallback
-   * knows only that one exists, so its echo carries no msgid. */
+   * server's own store holds a REDACT row for it.  A repeat is an
+   * idempotent success: the requester's echo, nothing shown to the channel,
+   * relayed or stored.  A returned child names the first REDACT event, and
+   * the echo carries its msgid and time.  The local check is the fallback
+   * for an older responder, which returns no children.  On a local miss it
+   * rarely finds a row: a REDACT from a peer is stored only beside its
+   * message (redact_apply_row, W5 Task 5), so a row here is left from
+   * before that rule, came by a CH W write-forward, or outlived its message
+   * in the trim.  It answers only that one exists, so that echo carries no
+   * msgid.  An older responder's repeat it misses is shown and relayed
+   * again, and every store skips the row it already holds. */
   for (m = req->fed_msgs; m; m = m->next)
     if (m->is_context && m->type == HISTORY_REDACT
         && strcmp(m->ctx_parent, ctx->msgid) == 0)

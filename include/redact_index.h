@@ -4,7 +4,9 @@
  * Every store that applies a redaction keeps a time-ordered index row so a
  * store that was absent can ask "redactions since T" and apply what it
  * missed.  This module is PURE (no IRCd deps) so the cmocka harness gates it:
- * key/value encoding for the index column family and the CH D reply parser.
+ * key/value encoding for the index column family and the CH D reply parser,
+ * the REDACT authorization rule, and what applying a redaction stores and
+ * where a catch-up round leaves the watermark.
  */
 #ifndef INCLUDED_redact_index_h
 #define INCLUDED_redact_index_h
@@ -52,6 +54,37 @@ int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out);
 #define CH_E_TRUNCATED   0x1
 #define CH_E_UNANSWERED  0x2
 unsigned int ch_e_flags(const char *param);
+
+/* Applying one redaction (a peer's live REDACT, or a catch-up row) to this
+ * server's store.  @a parent_lookup_rc is history_lookup_message's answer for
+ * the redacted message (0 found, 1 not found, < 0 read error);
+ * @a already_redacted is history_message_is_redacted's (1 yes, 0 no, < 0 read
+ * error), read only when the message was found.  In order:
+ *  RETRY        -- either read failed: store nothing; a catch-up round is cut,
+ *                  so its watermark stays and the row is asked for again;
+ *  SKIP_ORPHAN  -- the message is not here (it never reached this store, or
+ *                  the trim evicted it): a REDACT row would annotate nothing;
+ *  SKIP_APPLIED -- a REDACT row already annotates it (live, or an earlier
+ *                  catch-up): store no second one;
+ *  APPLY        -- store the REDACT row. */
+enum rdx_row { RDX_ROW_APPLY, RDX_ROW_SKIP_APPLIED, RDX_ROW_SKIP_ORPHAN, RDX_ROW_RETRY };
+enum rdx_row rdx_row_decide(int parent_lookup_rc, int already_redacted);
+
+/* Where a finished redaction catch-up round (CH Q * D) leaves the watermark,
+ * the time before which this store holds every redaction a peer had.  In
+ * order:
+ *  @a cut (a timeout, a CH E U, a row the store could not read) -> KEEP;
+ *  @a truncated (more rows exist) with no row fetched (@a last_ms 0) -> KEEP;
+ *  @a truncated below @a max_rounds -> SET_CONTINUE at @a last_ms (the newest
+ *    row fetched; the next round asks from there);
+ *  @a truncated at @a max_rounds -> SET at @a last_ms: the rows after it were
+ *    never fetched, so the next catch-up asks from there;
+ *  complete -> SET at @a start_ms (when this round was asked).
+ * @a round counts from 1.  *wm_out is written only on SET/SET_CONTINUE, and
+ * wm_out may be NULL. */
+enum rdx_wm  { RDX_WM_KEEP, RDX_WM_SET, RDX_WM_SET_CONTINUE };
+enum rdx_wm  rdx_watermark_decide(int cut, int truncated, int round, int max_rounds,
+                                  uint64_t last_ms, uint64_t start_ms, uint64_t *wm_out);
 
 /* The one REDACT authorization rule, for a row found in this server's
  * store (m_redact) and for one a storage peer returned (complete_redact_fed,

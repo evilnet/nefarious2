@@ -240,6 +240,78 @@ static void test_ch_e_flags(void **state)
   assert_int_equal(0, ch_e_flags("x"));
 }
 
+/* ========== applying a redaction: rdx_row_decide / rdx_watermark_decide ========== */
+
+static void test_rdx_row_decide(void **state)
+{
+  (void)state;
+  assert_int_equal(RDX_ROW_APPLY, rdx_row_decide(0, 0));
+  assert_int_equal(RDX_ROW_SKIP_APPLIED, rdx_row_decide(0, 1));
+  assert_int_equal(RDX_ROW_SKIP_ORPHAN, rdx_row_decide(1, 0));
+  assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(-1, 0));
+  /* the redacted check could not read: never guess either way */
+  assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(0, -1));
+  /* a REDACT row with no parent here (one stored before this rule) */
+  assert_int_equal(RDX_ROW_SKIP_ORPHAN, rdx_row_decide(1, 1));
+  assert_int_equal(RDX_ROW_RETRY, rdx_row_decide(-1, 1));
+}
+
+static void test_rdx_wm_cut_keeps(void **state)
+{
+  uint64_t wm = 7;
+  (void)state;
+  assert_int_equal(RDX_WM_KEEP, rdx_watermark_decide(1, 0, 1, 8, 500, 900, &wm));
+  assert_int_equal(RDX_WM_KEEP, rdx_watermark_decide(1, 1, 1, 8, 500, 900, &wm));
+  assert_int_equal(RDX_WM_KEEP, rdx_watermark_decide(1, 1, 8, 8, 500, 900, &wm));
+  assert_int_equal(7, wm);   /* untouched on KEEP */
+}
+
+static void test_rdx_wm_truncated_continues(void **state)
+{
+  uint64_t wm = 7;
+  (void)state;
+  assert_int_equal(RDX_WM_SET_CONTINUE, rdx_watermark_decide(0, 1, 1, 8, 500, 900, &wm));
+  assert_int_equal(500, wm);
+  wm = 7;
+  assert_int_equal(RDX_WM_SET_CONTINUE, rdx_watermark_decide(0, 1, 7, 8, 500, 900, &wm));
+  assert_int_equal(500, wm);
+}
+
+/* Review Focus 3: still truncated after the last round, the watermark stops
+ * at the newest row fetched (it used to jump to the round's start, past the
+ * rows it never fetched). */
+static void test_rdx_wm_round_cap_keeps_last(void **state)
+{
+  uint64_t wm = 7;
+  (void)state;
+  assert_int_equal(RDX_WM_SET, rdx_watermark_decide(0, 1, 8, 8, 500, 900, &wm));
+  assert_int_equal(500, wm);
+  assert_int_equal(RDX_WM_SET, rdx_watermark_decide(0, 1, 8, 8, 500, 900, NULL));   /* NULL-safe */
+}
+
+static void test_rdx_wm_complete_sets_start(void **state)
+{
+  uint64_t wm = 7;
+  (void)state;
+  assert_int_equal(RDX_WM_SET, rdx_watermark_decide(0, 0, 1, 8, 500, 900, &wm));
+  assert_int_equal(900, wm);
+  wm = 7;   /* a complete round with no rows: nothing was missed before it */
+  assert_int_equal(RDX_WM_SET, rdx_watermark_decide(0, 0, 1, 8, 0, 900, &wm));
+  assert_int_equal(900, wm);
+  wm = 7;   /* the last round of a continuation */
+  assert_int_equal(RDX_WM_SET, rdx_watermark_decide(0, 0, 8, 8, 500, 900, &wm));
+  assert_int_equal(900, wm);
+}
+
+static void test_rdx_wm_truncated_no_rows_keeps(void **state)
+{
+  uint64_t wm = 7;
+  (void)state;
+  assert_int_equal(RDX_WM_KEEP, rdx_watermark_decide(0, 1, 1, 8, 0, 900, &wm));
+  assert_int_equal(RDX_WM_KEEP, rdx_watermark_decide(0, 1, 8, 8, 0, 900, &wm));
+  assert_int_equal(7, wm);
+}
+
 /* ========== redact_authorize (redact_index.c): the one REDACT rule ========== */
 
 /* A plain member's request for a PRIVMSG row sent at t=1000; each case
@@ -1439,6 +1511,12 @@ int main(void)
     cmocka_unit_test(test_rdx_val_roundtrip),
     cmocka_unit_test(test_rdx_reply_parse),
     cmocka_unit_test(test_ch_e_flags),
+    cmocka_unit_test(test_rdx_row_decide),
+    cmocka_unit_test(test_rdx_wm_cut_keeps),
+    cmocka_unit_test(test_rdx_wm_truncated_continues),
+    cmocka_unit_test(test_rdx_wm_round_cap_keeps_last),
+    cmocka_unit_test(test_rdx_wm_complete_sets_start),
+    cmocka_unit_test(test_rdx_wm_truncated_no_rows_keeps),
     cmocka_unit_test(test_redact_auth_owner_no_window),
     cmocka_unit_test(test_redact_auth_oper_window),
     cmocka_unit_test(test_redact_auth_chanop_others),

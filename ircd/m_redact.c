@@ -403,48 +403,79 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
-/** ms_redact - Handle REDACT command from server.
- *
- * parv[0] = sender prefix (numeric)
- * parv[1] = target (channel or nick)
- * parv[2] = message ID
- * parv[3] = reason (optional)
- *
- * @param[in] cptr Client that sent us the message.
- * @param[in] sptr Original source of message.
- * @param[in] parc Number of arguments.
- * @param[in] parv Argument vector.
- * @return CPTR_KILLED if client was squit, else 0.
+/** Judge one redaction against this server's store (rdx_row_decide): is
+ * the message here, and does a REDACT row annotate it already?
+ * @param[in] target Canonical channel name (the store's key spelling).
+ * @param[in] msgid The redacted message.
+ * @return An enum rdx_row value.
  */
-/* Apply a channel redaction that reached us from elsewhere (P10 REDACT, or
- * the redaction catch-up replay): placeholder the row, store ONE REDACT
- * context row under the origin's redact_msgid/time (one-time-per-message),
- * fan out to local members with the capability.  Idempotent: a repeat (two
- * servers or two users redacting the same message, or the catch-up query
- * replaying one we already applied) is still shown locally but stores no
- * second row.  @a sender_str / @a account_str name the stored redacter
- * explicitly (catch-up); NULL derives them from @a src. */
-void redact_apply_row(struct Client *src, const char *target,
-                      const char *msgid, const char *redact_msgid,
-                      uint64_t time_ms, const char *reason,
-                      const char *sender_str, const char *account_str)
+static enum rdx_row redact_row_judge(const char *target, const char *msgid)
 {
-  struct Channel *chptr;
+  struct HistoryMessage *m = NULL;
+  int rc, redacted = 0;
 
-  if (!IsChannelName(target) || !(chptr = FindChannel(target)))
-    return;
+  rc = history_lookup_message(target, msgid, &m);
+  if (m)
+    history_free_messages(m);
+  if (rc == 0)
+    redacted = history_message_is_redacted(target, msgid);
+  return rdx_row_decide(rc, redacted);
+}
+
+/** Apply a channel redaction that reached this server from elsewhere: a
+ * peer's live REDACT (ms_redact, through redact_apply_remote) or a row of
+ * the redaction catch-up (complete_redact_catchup, m_chathistory.c).
+ *
+ * The REDACT row is stored, under the origin's redact_msgid and time (one
+ * event, one msgid, one time), only when this store holds the message and
+ * no REDACT row annotates it yet (rdx_row_decide, redact_index.h):
+ * - a message this store does not hold (it never reached it, or the trim
+ *   evicted it) is an orphan: a row would annotate nothing, and the
+ *   message's holders store their own (2026-10-24);
+ * - a repeat (two servers or two users redacting the same message, or a
+ *   catch-up re-reading one already applied) stores no second row;
+ * - a store that cannot be read stores nothing (RETRY).
+ * The trim owns deletes; nothing here deletes.
+ *
+ * Who sees it: a live REDACT is shown to the channel's local members
+ * whatever the store decided (@a show_always): live delivery is not the
+ * store's business, and a member may hold the message from a federated
+ * page this store never saw.  A catch-up row is shown only when it was
+ * applied: a member here saw no orphan's message, and saw an applied
+ * redaction already.
+ * @param[in] src Who redacted (a remote client, or &me for a catch-up row).
+ * @param[in] chptr Channel (its canonical name is the store key).
+ * @param[in] msgid The redacted message.
+ * @param[in] redact_msgid The REDACT event's msgid.
+ * @param[in] time_ms The REDACT event's time (epoch ms).
+ * @param[in] reason Reason (may be NULL).
+ * @param[in] sender_str Stored redacter (catch-up); NULL derives it from @a src.
+ * @param[in] account_str Stored redacter's account (catch-up); NULL derives it from @a src.
+ * @param[in] show_always Nonzero: show it even when nothing was stored.
+ * @return The store's decision, an enum rdx_row value (redact_index.h);
+ *   RDX_ROW_SKIP_ORPHAN when this server has no store.
+ */
+int redact_apply_row(struct Client *src, struct Channel *chptr,
+                     const char *msgid, const char *redact_msgid,
+                     uint64_t time_ms, const char *reason,
+                     const char *sender_str, const char *account_str,
+                     int show_always)
+{
   /* Store keys are the canonical spelling (see m_redact). */
-  target = chptr->chname;
-  /* Redact message: strip content but keep entry for context */
-  if (history_is_available())
-    history_redact_message(target, msgid);
+  const char *target = chptr->chname;
+  enum rdx_row d = RDX_ROW_SKIP_ORPHAN;
 
-  if (history_is_available()
-      && history_message_is_redacted(target, msgid) != 1) {
+  if (history_is_available())
+    d = redact_row_judge(target, msgid);
+
+  if (d == RDX_ROW_APPLY) {
     char timestamp[32];
     char sender[HISTORY_SENDER_LEN];
     char redact_content[512];
     char owner[HTC_OWNER_MAX];
+
+    /* Redact message: strip content but keep entry for context */
+    history_redact_message(target, msgid);
 
     ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
                   (unsigned long long)(time_ms / 1000),
@@ -483,16 +514,41 @@ void redact_apply_row(struct Client *src, const char *target,
   }
 
   /* Show it to the channel's members under the event's msgid and time */
-  redact_announce_local(src, chptr, msgid, redact_msgid, time_ms, reason);
+  if (show_always || d == RDX_ROW_APPLY)
+    redact_announce_local(src, chptr, msgid, redact_msgid, time_ms, reason);
+  return (int)d;
 }
 
+/** A peer's live REDACT (ms_redact): stored when this store holds the
+ * message (redact_apply_row), always shown to the local members. */
 void redact_apply_remote(struct Client *src, const char *target,
                          const char *msgid, const char *redact_msgid,
                          uint64_t time_ms, const char *reason)
 {
-  redact_apply_row(src, target, msgid, redact_msgid, time_ms, reason, NULL, NULL);
+  struct Channel *chptr;
+
+  if (!IsChannelName(target) || !(chptr = FindChannel(target)))
+    return;
+  if (redact_apply_row(src, chptr, msgid, redact_msgid, time_ms, reason,
+                       NULL, NULL, 1) == RDX_ROW_RETRY)
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT %s %s from %s: the store could not be read; no REDACT row stored",
+              chptr->chname, msgid, cli_name(src));
 }
 
+/** ms_redact - Handle REDACT command from server.
+ *
+ * parv[0] = sender prefix (numeric)
+ * parv[1] = target (channel or nick)
+ * parv[2] = message ID
+ * parv[3] = reason (optional)
+ *
+ * @param[in] cptr Client that sent us the message.
+ * @param[in] sptr Original source of message.
+ * @param[in] parc Number of arguments.
+ * @param[in] parv Argument vector.
+ * @return CPTR_KILLED if client was squit, else 0.
+ */
 int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *target;
