@@ -15,7 +15,10 @@
  *  - the trim direction (keep_oldest);
  *  - same-millisecond rows from two legs in msgid order (re-review R10);
  *  - the ownership hand-off of heap content to the copy (2026-09-06: two
- *    owners of one raw_content/dyn_content was a double free).
+ *    owners of one raw_content/dyn_content was a double free);
+ *  - hm_trim_around: a merged AROUND page cut on its reference as a local
+ *    AROUND page is (W5 Push D: keeping the newest rows drifted it off);
+ *  - hm_context_parent: the row a peer's reaction or REDACT hangs on.
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -252,6 +255,128 @@ static void test_find_dup(void **s)
   history_free_messages(other);
 }
 
+/* The msgids of @a m, space-separated, for one assert_string_equal. */
+static const char *ids(const struct HistoryMessage *m)
+{
+  static char buf[512];
+  size_t n = 0;
+
+  buf[0] = '\0';
+  for (; m; m = m->next)
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", n ? " " : "", m->msgid);
+  return buf;
+}
+
+/* Seven rows a second apart, msgids P1 P2 P3 R Q1 Q2 Q3: the union a
+ * federated AROUND page merges when the requester holds P2 P3 R Q1 and a
+ * peer missing the P rows sent R Q1 Q2 Q3. */
+static struct HistoryMessage *around_union(void)
+{
+  return chain(7, row("P1", "1790000001.000", ""), row("P2", "1790000002.000", ""),
+                  row("P3", "1790000003.000", ""), row("R",  "1790000004.000", ""),
+                  row("Q1", "1790000005.000", ""), row("Q2", "1790000006.000", ""),
+                  row("Q3", "1790000007.000", ""));
+}
+
+/* AROUND msgid=R 4, as a local AROUND page is cut: the newest limit/2 rows
+ * before the reference, then the reference and the rows after it up to the
+ * limit.  (Keeping the newest four gave R Q1 Q2 Q3: off its reference.) */
+static void test_trim_around_centres_on_msgid_ref(void **s)
+{
+  struct HistoryMessage *m;
+
+  (void)s;
+  m = hm_trim_around(around_union(), 4, 1790000004000ULL, "R");
+  assert_string_equal(ids(m), "P2 P3 R Q1");
+  history_free_messages(m);
+
+  /* An odd limit: the after side takes the extra row. */
+  m = hm_trim_around(around_union(), 5, 1790000004000ULL, "R");
+  assert_string_equal(ids(m), "P2 P3 R Q1 Q2");
+  history_free_messages(m);
+}
+
+/* Fewer rows before the reference than half the limit: the rows after it
+ * fill the rest.  Fewer after: the before side is NOT topped up past
+ * limit/2 -- a local AROUND page is not either. */
+static void test_trim_around_short_sides(void **s)
+{
+  struct HistoryMessage *m;
+
+  (void)s;
+  m = hm_trim_around(around_union(), 4, 1790000002000ULL, "P2");
+  assert_string_equal(ids(m), "P1 P2 P3 R");
+  m = hm_trim_around(m, 4, 1790000006000ULL, "Q2");   /* before: P1 P2 P3 R */
+  assert_string_equal(ids(m), "P3 R");
+  history_free_messages(m);
+}
+
+/* A timestamp reference: the rows in its own millisecond belong to the
+ * after side (a local AROUND anchors its after-walk one ms earlier); a
+ * msgid reference splits that millisecond at the reference row, in msgid
+ * order. */
+static void test_trim_around_same_ms(void **s)
+{
+  struct HistoryMessage *m;
+
+  (void)s;
+  m = chain(4, row("A", "1790000003.000", ""), row("M3", "1790000004.000", ""),
+               row("M5", "1790000004.000", ""), row("M7", "1790000005.000", ""));
+  m = hm_trim_around(m, 2, 1790000004000ULL, NULL);
+  assert_string_equal(ids(m), "A M3");
+  history_free_messages(m);
+
+  m = chain(4, row("A", "1790000003.000", ""), row("M3", "1790000004.000", ""),
+               row("M5", "1790000004.000", ""), row("M7", "1790000004.000", ""));
+  m = hm_trim_around(m, 2, 1790000004000ULL, "M5");
+  assert_string_equal(ids(m), "M3 M5");
+  history_free_messages(m);
+}
+
+/* Nothing to cut under the limit; an empty list stays empty. */
+static void test_trim_around_under_limit(void **s)
+{
+  struct HistoryMessage *m;
+
+  (void)s;
+  m = hm_trim_around(around_union(), 10, 1790000004000ULL, "R");
+  assert_int_equal(count(m), 7);
+  history_free_messages(m);
+  assert_null(hm_trim_around(NULL, 4, 1790000004000ULL, "R"));
+}
+
+/* The row a reaction or REDACT hangs on, by the reply index's own rule
+ * (history.c: a TAGMSG's +reply, else +draft/reply; a REDACT's first
+ * content word); anything else hangs on nothing. */
+static void test_context_parent(void **s)
+{
+  char buf[HISTORY_MSGID_LEN];
+  struct HistoryMessage *m = row("C", "1790000004.000", "+draft/react=x;+reply=PARENT");
+
+  (void)s;
+  m->type = HISTORY_TAGMSG;
+  assert_string_equal(hm_context_parent(m, buf, sizeof buf), "PARENT");
+  ircd_strncpy(m->client_tags, "+draft/reply=OLD;+draft/react=x", sizeof(m->client_tags));
+  assert_string_equal(hm_context_parent(m, buf, sizeof buf), "OLD");
+  ircd_strncpy(m->client_tags, "+draft/reply=OLD;+reply=NEW", sizeof(m->client_tags));
+  assert_string_equal(hm_context_parent(m, buf, sizeof buf), "NEW");
+  ircd_strncpy(m->client_tags, "+xreply=NO;+draft/react=x", sizeof(m->client_tags));
+  assert_null(hm_context_parent(m, buf, sizeof buf));
+
+  m->type = HISTORY_REDACT;
+  ircd_strncpy(m->client_tags, "", sizeof(m->client_tags));
+  ircd_strncpy(m->content, "TARGET :spam", sizeof(m->content));
+  assert_string_equal(hm_context_parent(m, buf, sizeof buf), "TARGET");
+  ircd_strncpy(m->content, "TARGET", sizeof(m->content));
+  assert_string_equal(hm_context_parent(m, buf, sizeof buf), "TARGET");
+
+  /* A reply is a message in its own right, never context. */
+  m->type = HISTORY_PRIVMSG;
+  ircd_strncpy(m->client_tags, "+reply=PARENT", sizeof(m->client_tags));
+  assert_null(hm_context_parent(m, buf, sizeof buf));
+  history_free_messages(m);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -262,6 +387,11 @@ int main(void)
     cmocka_unit_test(test_merge_same_ms_msgid_order),
     cmocka_unit_test(test_merge_moves_heap_content),
     cmocka_unit_test(test_find_dup),
+    cmocka_unit_test(test_trim_around_centres_on_msgid_ref),
+    cmocka_unit_test(test_trim_around_short_sides),
+    cmocka_unit_test(test_trim_around_same_ms),
+    cmocka_unit_test(test_trim_around_under_limit),
+    cmocka_unit_test(test_context_parent),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

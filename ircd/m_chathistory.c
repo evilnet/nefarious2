@@ -1539,7 +1539,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            struct HistoryMessage *local_msgs,
                                            int local_count, int ops_override,
                                            const char *ref2, int local_complete);
-static void fed_request_set_partial(struct FedRequest *req, int partial);
+static void fed_request_set_why(struct FedRequest *req, int why, int partial);
 static int count_storage_servers(const char *target, time_t query_time);
 static int is_ulined_server(struct Client *server);
 static void fed_timeout_callback(struct Event *ev);
@@ -1590,8 +1590,9 @@ static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
  * asked about: a full table folds its oldest interval into the next-oldest
  * (one interval from the older split's start to the newer one's end:
  * it can only make more pages fan out), and an interval ages out only once
- * its end is at or below this store's floor (history_local_floor_ms(); never
- * with unlimited retention and no eviction floor).  Push D review I-1. */
+ * its whole end second is at or below this store's floor
+ * (history_local_floor_ms(); never with unlimited retention and no eviction
+ * floor).  Push D review I-1. */
 #define MAX_ABSENCES 4
 struct StorageAbsence {
   time_t start;
@@ -1643,8 +1644,9 @@ static void absence_close(int idx)
 /** Does [lo, hi] (unix seconds; 0 = unbounded on that side) overlap any
  * known storage-server absence?  Sets *open_hit when an overlapping
  * absence is still open (that server is away right now).  An interval
- * whose end is at or below this store's floor (history_local_floor_ms())
- * is dropped as it is met: no row of its time is left to ask about here. */
+ * whose whole end second is at or below this store's floor
+ * (history_local_floor_ms()) is dropped as it is met: no row of its time
+ * is left to ask about here. */
 static int absence_overlap(time_t lo, time_t hi, int *open_hit)
 {
   int idx, i, any = 0;
@@ -1663,7 +1665,11 @@ static int absence_overlap(time_t lo, time_t hi, int *open_hit)
     for (i = 0; i < MAX_ABSENCES; i++) {
       if (!a[i].start)
         continue;
-      if (a[i].end && floor_ms && (uint64_t)a[i].end * 1000ULL <= floor_ms) {
+      /* Its end is a whole second, inclusive (as the overlap test below
+       * reads it): it ages out only once that second's last ms is at or
+       * below the floor. */
+      if (a[i].end && floor_ms
+          && (uint64_t)a[i].end * 1000ULL + 999ULL <= floor_ms) {
         a[i].start = a[i].end = 0;   /* aged out */
         continue;
       }
@@ -1882,12 +1888,14 @@ static int channel_range_check(const char *chname, time_t lo, time_t hi,
  *     time; REDACT context hides its parent from every requester), and a
  *     child can be born any time after its parent: such a page also needs
  *     [its claimed start, now] received and clear of absences, or it fans
- *     out (FED_WHY_CONTEXT; user decision 2026-11-08, option B).  An empty
- *     page has no parents: its own span decides;
+ *     out (FED_WHY_CONTEXT; user decision 2026-11-08, option B) -- for its
+ *     rows' context only (send_fed_response keeps the local rows).  An
+ *     empty page has no parents: its own span decides;
  *   - a PM target: when the page is short, or the claimed span overlaps an
  *     absence.
- * An overlapping absence that is still open (that store is away now) sets
- * *@a partial.
+ * An absence that is still open (that store is away now) and overlaps the
+ * page's OWN span sets *@a partial; one that meets only the context range
+ * does not (user decision 2026-11-08 15:08).
  * @return the reason (enum fed_reason), FED_WHY_NONE for no. */
 static int federation_wanted(const char *target, enum fed_page page,
                              int count, int limit, struct HistoryMessage *rows,
@@ -1915,10 +1923,14 @@ static int federation_wanted(const char *target, enum fed_page page,
   why = channel_range_check(target, lo, hi, partial);
   /* The context range: from where the page's claim starts (at or before
    * its oldest row) up to now.  Only needed when the claim stops short of
-   * now. */
-  if (why == FED_WHY_NONE && count > 0 && rows && hi != 0
-      && channel_range_check(target, lo, 0, partial) != FED_WHY_NONE)
-    why = FED_WHY_CONTEXT;
+   * now.  A gap there federates but never makes the page partial: its rows
+   * are complete, only a reaction or REDACT may be missing (user decision
+   * 2026-11-08 15:08), so an open absence there is not reported. */
+  if (why == FED_WHY_NONE && count > 0 && rows && hi != 0) {
+    int context_partial = 0;
+    if (channel_range_check(target, lo, 0, &context_partial) != FED_WHY_NONE)
+      why = FED_WHY_CONTEXT;
+  }
   return why;
 }
 
@@ -2176,12 +2188,14 @@ static int chathistory_latest(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    if (!req && fed_start_capacity_miss) {
-      complete = 0;   /* federation wanted, no slot: withhold the end tag */
+    /* Federation wanted, no slot: withhold the end tag -- unless only the
+     * rows' context was wanted (their own span is complete here). */
+    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+      complete = 0;
       partial = 1;
     }
     if (req)
-      fed_request_set_partial(req, partial);
+      fed_request_set_why(req, fed_why, partial);
     if (req) {
       /* Federation started - response will be sent when complete */
       /* Note: messages ownership transferred to req */
@@ -2281,12 +2295,14 @@ static int chathistory_before(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    if (!req && fed_start_capacity_miss) {
-      complete = 0;   /* federation wanted, no slot: withhold the end tag */
+    /* Federation wanted, no slot: withhold the end tag -- unless only the
+     * rows' context was wanted (their own span is complete here). */
+    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+      complete = 0;
       partial = 1;
     }
     if (req)
-      fed_request_set_partial(req, partial);
+      fed_request_set_why(req, fed_why, partial);
     if (req)
       return 0;
   }
@@ -2381,12 +2397,14 @@ static int chathistory_after(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    if (!req && fed_start_capacity_miss) {
-      complete = 0;   /* federation wanted, no slot: withhold the end tag */
+    /* Federation wanted, no slot: withhold the end tag -- unless only the
+     * rows' context was wanted (their own span is complete here). */
+    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+      complete = 0;
       partial = 1;
     }
     if (req)
-      fed_request_set_partial(req, partial);
+      fed_request_set_why(req, fed_why, partial);
     if (req)
       return 0;
   }
@@ -2481,12 +2499,14 @@ static int chathistory_around(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    if (!req && fed_start_capacity_miss) {
-      complete = 0;   /* federation wanted, no slot: withhold the end tag */
+    /* Federation wanted, no slot: withhold the end tag -- unless only the
+     * rows' context was wanted (their own span is complete here). */
+    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+      complete = 0;
       partial = 1;
     }
     if (req)
-      fed_request_set_partial(req, partial);
+      fed_request_set_why(req, fed_why, partial);
     if (req)
       return 0;
   }
@@ -2593,12 +2613,14 @@ static int chathistory_between(struct Client *sptr, const char *target,
                                               ref1_str, limit, messages, count,
                                               ops_override, ref2_str, complete);
     fed_count(req, fed_why);
-    if (!req && fed_start_capacity_miss) {
-      complete = 0;   /* federation wanted, no slot: withhold the end tag */
+    /* Federation wanted, no slot: withhold the end tag -- unless only the
+     * rows' context was wanted (their own span is complete here). */
+    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+      complete = 0;
       partial = 1;
     }
     if (req)
-      fed_request_set_partial(req, partial);
+      fed_request_set_why(req, fed_why, partial);
     if (req)
       return 0;  /* messages ownership transferred to req */
   }
@@ -2663,6 +2685,13 @@ struct FedRequest {
   int fed_truncated;                  /**< Any storage server flagged its result truncated (CH E ... T) */
   int local_incomplete;               /**< The origin's own walk did not exhaust (scan cap / short) */
   int keep_oldest;                    /**< Merge trim direction: 1 keep oldest (AFTER/asc BETWEEN), 0 keep newest */
+  int context_only;                   /**< Federated only for the rows' context
+                                       *   (FED_WHY_CONTEXT): the local rows are the
+                                       *   page, the peers add context to them */
+  int around;                         /**< An AROUND page whose reference resolved:
+                                       *   the merge is centred on it (hm_trim_around) */
+  uint64_t around_ms;                 /**< That reference's time (epoch ms) */
+  char around_msgid[HISTORY_MSGID_LEN]; /**< ... and row, for a msgid reference (else empty) */
   struct FedCtxPair ctx_pairs[MAX_FED_CTX]; /**< Declared context children (CH C) */
   int ctx_pair_count;
   unsigned char e_seen[MAX_AD_SERVERS / 8]; /**< responders whose CH E arrived (dup guard) */
@@ -2672,9 +2701,12 @@ struct FedRequest {
   char label[64];                     /**< Saved label for labeled-response on async completion */
 };
 
-static void fed_request_set_partial(struct FedRequest *req, int partial)
+/** Record why a subcommand page federates (federation_wanted's reason) and
+ * whether a store away over its own span makes it partial. */
+static void fed_request_set_why(struct FedRequest *req, int why, int partial)
 {
   req->partial = partial;
+  req->context_only = (why == FED_WHY_CONTEXT);
 }
 
 /** Global array of pending federation requests */
@@ -5177,6 +5209,49 @@ static void splice_fed_context(struct HistoryMessage *merged,
   }
 }
 
+/** A page federated for its context only (FED_WHY_CONTEXT): move every
+ * row a peer sent as a row of its own page that is a reaction or REDACT of
+ * one of @a rows (the local page) out of req->fed_msgs, marked as that
+ * row's context child, onto the end of @a ctx_list.  A peer whose page
+ * reaches past ours (it lacks some of our rows) holds such a child as a
+ * row, not behind a CH C.  The rows left in req->fed_msgs are not on the
+ * page; free_fed_request frees them.
+ * @return The extended context list (splice_fed_context takes it). */
+static struct HistoryMessage *adopt_fed_row_children(struct FedRequest *req,
+                                                     struct HistoryMessage *rows,
+                                                     struct HistoryMessage *ctx_list)
+{
+  struct HistoryMessage **pp = &req->fed_msgs, *tail = ctx_list;
+
+  while (tail && tail->next)
+    tail = tail->next;
+  while (*pp) {
+    struct HistoryMessage *m = *pp, *r;
+    char parent[HISTORY_MSGID_LEN];
+
+    if (hm_context_parent(m, parent, sizeof(parent))) {
+      for (r = rows; r; r = r->next)
+        if (!r->is_context && strcmp(r->msgid, parent) == 0)
+          break;
+      if (r) {
+        *pp = m->next;
+        m->next = NULL;
+        m->is_context = 1;
+        ircd_strncpy(m->ctx_parent, parent, sizeof(m->ctx_parent));
+        if (tail)
+          tail->next = m;
+        else
+          ctx_list = m;
+        tail = m;
+        req->fed_count--;
+        continue;
+      }
+    }
+    pp = &m->next;
+  }
+  return ctx_list;
+}
+
 /** Send federation results to client (does NOT free the request)
  * Call this to send results, then let timer destroy event free the request.
  */
@@ -5184,7 +5259,7 @@ static void send_fed_response(struct FedRequest *req)
 {
   struct HistoryMessage *merged;
   struct Client *client;
-  int total;
+  int total, flags;
 
   if (!req || req->response_sent)
     return;
@@ -5204,7 +5279,25 @@ static void send_fed_response(struct FedRequest *req)
   {
     struct HistoryMessage *fed_ctx = extract_fed_context(req);
 
-    merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
+    if (req->context_only) {
+      /* Federated for the rows' context only: the page's own span was
+       * received here and no absence overlaps it, so the local rows are
+       * complete for it and ARE the page -- a peer's wider page (an AROUND
+       * centred where it lacks our rows, an AFTER that runs on past them)
+       * must not move or trim it.  The peers add context to those rows: the
+       * children they declared (CH C) and any row of theirs that is a
+       * child of ours.  The local list goes to the replay engine whole; it
+       * leaves the request so free_fed_request does not free it too. */
+      merged = req->local_msgs;
+      req->local_msgs = NULL;
+      fed_ctx = adopt_fed_row_children(req, merged, fed_ctx);
+    } else if (req->around) {
+      /* Merged uncut, then centred on the reference (hm_trim_around frees
+       * the rows it cuts, which are the merge's own copies). */
+      merged = hm_trim_around(hm_merge(req->local_msgs, req->fed_msgs, INT_MAX, 0),
+                              req->limit, req->around_ms, req->around_msgid);
+    } else
+      merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
 
     /* Count total */
     total = 0;
@@ -5221,12 +5314,18 @@ static void send_fed_response(struct FedRequest *req)
    * Completeness judged on the PRE-filter merged total (see the
    * query_count note in the subcommand handlers). */
   /* Partial = a responder was cut (timeout/SQUIT/aggregate cap) or a
-   * known store was away over the span (chathistory-partial). */
+   * known store was away over the span (chathistory-partial).  A page
+   * federated for its context only is as complete as its local walk: a
+   * lost responder or a store away costs it context, never a row, and that
+   * is not partial (user decision 2026-11-08 15:08). */
+  if (req->context_only)
+    flags = req->local_incomplete ? 0 : REPLAY_COMPLETE;
+  else
+    flags = ((total < req->limit && !req->fed_truncated
+              && !req->local_incomplete) ? REPLAY_COMPLETE : 0)
+            | ((req->cut || req->partial) ? REPLAY_PARTIAL : 0);
   total = presence_filter_and_replay(client, req->target, &merged, total,
-                                     req->ops_override, req->label,
-                                     ((total < req->limit && !req->fed_truncated
-                                       && !req->local_incomplete) ? REPLAY_COMPLETE : 0)
-                                     | ((req->cut || req->partial) ? REPLAY_PARTIAL : 0),
+                                     req->ops_override, req->label, flags,
                                      req->requested);
 }
 
@@ -5536,6 +5635,24 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
     }
   } else {
     req->keep_oldest = 0;
+  }
+  /* An AROUND page is merged uncut and then centred on its reference, as a
+   * local AROUND page is (hm_trim_around).  The handler already resolved a
+   * msgid reference here (fail_unknown_msgid); one that does not resolve
+   * now keeps the newest-limit trim. */
+  if (s2s_subcmd == 'R' && parse_reference(ref, &ref_type, &ref_value) == 0
+      && ref_value) {
+    char ts[HISTORY_TIMESTAMP_LEN];
+    if (ref_type == HISTORY_REF_MSGID
+        && history_msgid_to_timestamp(ref_value, ts) == 0) {
+      req->around_ms = history_parse_ms(ts);
+      ircd_strncpy(req->around_msgid, ref_value, sizeof(req->around_msgid));
+    } else if (ref_type == HISTORY_REF_TIMESTAMP) {
+      if (history_iso_to_unix(ref_value, ts, sizeof(ts)) != 0)
+        ircd_strncpy(ts, ref_value, sizeof(ts));
+      req->around_ms = history_parse_ms(ts);
+    }
+    req->around = req->around_ms != 0;   /* 0: unparseable */
   }
 
   /* Save label for async response delivery */

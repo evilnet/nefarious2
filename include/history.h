@@ -339,8 +339,10 @@ extern void history_recv_reset(struct Channel *chptr);
 extern void history_recv_rename(struct Channel *chptr, const char *oldname);
 
 /** Did this server receive channel @a chname's traffic over the whole of
- * [@a lo_ms, @a hi_ms] (epoch ms)?  1 when one window holds it (an open
- * one only while chptr->recv_open says this run opened it); 0 when not,
+ * [@a lo_ms, @a hi_ms] (epoch ms)?  1 when one window holds it (a closed
+ * interval of the record, or this run's open window as memory has it:
+ * chptr->recv_open from chptr->recv_open_since -- never the record's own
+ * open_since, which a failed write can leave stale); 0 when not,
  * when nothing is recorded or the record cannot be read, and when @a lo_ms
  * is at or below history_local_floor_ms() (rows there may be gone,
  * whatever the record says). */

@@ -22,6 +22,15 @@
 #ifndef INCLUDED_chathistory_merge_h
 #define INCLUDED_chathistory_merge_h
 
+#ifndef INCLUDED_stdint_h
+#include <stdint.h>
+#define INCLUDED_stdint_h
+#endif
+#ifndef INCLUDED_stddef_h
+#include <stddef.h>
+#define INCLUDED_stddef_h
+#endif
+
 struct HistoryMessage;
 
 /** The row in @a list that is the same message as @a check: the same
@@ -43,5 +52,28 @@ extern struct HistoryMessage *hm_find_dup(struct HistoryMessage *list,
 extern struct HistoryMessage *hm_merge(struct HistoryMessage *a,
                                        struct HistoryMessage *b,
                                        int limit, int keep_oldest);
+
+/** Cut a time-ordered row list to @a limit rows centred on an AROUND
+ * page's reference, as a local AROUND page is cut (history_query_around):
+ * the newest limit/2 rows before the reference, then the reference row and
+ * the rows after it, oldest first, up to @a limit.  The before side is not
+ * topped up when the after side runs short (nor is a local page's).  A row
+ * is before the reference when its time is earlier than @a ref_ms, or, in
+ * that millisecond, when @a ref_msgid is set and the row's msgid sorts
+ * before it (a timestamp reference: every row of its millisecond is after).
+ * The rows cut are freed (history_free_messages); call it on a list the
+ * caller owns, such as hm_merge's result.
+ * @return The cut list. */
+extern struct HistoryMessage *hm_trim_around(struct HistoryMessage *list,
+                                             int limit, uint64_t ref_ms,
+                                             const char *ref_msgid);
+
+/** The msgid of the row @a m hangs on as context, by the reply index's own
+ * rule (history.c's store path): a TAGMSG's +reply tag (else its legacy
+ * +draft/reply), a REDACT's first content word.  Any other row -- a reply
+ * PRIVMSG included, a message in its own right -- hangs on nothing.
+ * @return @a buf holding the msgid, or NULL. */
+extern const char *hm_context_parent(const struct HistoryMessage *m,
+                                     char *buf, size_t buflen);
 
 #endif /* INCLUDED_chathistory_merge_h */

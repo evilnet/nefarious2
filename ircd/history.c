@@ -3254,9 +3254,10 @@ int history_coverage_days(void)
 /* says nothing about what else was said meanwhile.  Every write is a  */
 /* read-modify-write of one small record (rcv_pack/rcv_unpack); the     */
 /* in-memory chptr->recv_open says whether this run has the window     */
-/* open, and a failed write always leaves the record claiming LESS     */
-/* than was received (a stale open is ignored by history_recv_covers   */
-/* and dropped by the next open), never more.                          */
+/* open and chptr->recv_open_since where it starts; history_recv_covers*/
+/* reads those, never the record's open_since, so a failed write always*/
+/* leaves the record claiming LESS than was received (a stale open is  */
+/* ignored, and dropped by the next open), never more.                 */
 /* ---------------------------------------------------------------- */
 
 /** history_recv_link_up() ran: the first storage peer's burst after boot
@@ -3455,6 +3456,7 @@ void history_recv_update(struct Channel *chptr)
   char key[CHANNELLEN + 2];
   struct rcv_record r;
   uint64_t now, floor;
+  int64_t was_since;
   int want, klen;
 
   if (!chptr || !history_recv_linked)
@@ -3462,19 +3464,28 @@ void history_recv_update(struct Channel *chptr)
   want = channel_has_local_member(chptr);
   if (want == (chptr->recv_open != 0))
     return;                                     /* no transition */
+  now = history_recv_now_ms();
+  was_since = chptr->recv_open_since;
   chptr->recv_open = (unsigned char)want;
+  /* In memory first, whatever the write below does: this run received
+   * from here on (an open), or no longer does (a close). */
+  chptr->recv_open_since = want ? recv_open_start(chptr, now) : 0;
   if (!history_available || !history_cf_recv)
     return;
   klen = build_target_key(key, sizeof key, chptr->chname);
   if (klen < 0)
     return;
   (void)recv_read(key, klen, &r);               /* unreadable: start over */
-  now = history_recv_now_ms();
+  /* The record's own open_since is never used: memory says where this
+   * run's window started.  A stale one on disk (a write that failed) is
+   * dropped on an open, and a close records the window memory had. */
   if (want) {
-    r.open_since = 0;   /* a close that was not stored: drop that window */
-    rcv_open(&r, recv_open_start(chptr, now));
-  } else
+    r.open_since = 0;
+    rcv_open(&r, chptr->recv_open_since);
+  } else {
+    r.open_since = was_since;
     rcv_close(&r, (int64_t)now);
+  }
   floor = history_local_floor_ms();
   if (floor)
     rcv_clip(&r, (int64_t)floor);
@@ -3486,22 +3497,26 @@ void history_recv_update(struct Channel *chptr)
  * the store no longer holds all of what the window claims.  The window is
  * dropped in memory at once -- the channel counts as not received until
  * its next local member change opens a new one -- and, best effort, on
- * disk: closed before the row's time when the row is inside it, else
- * closed and every interval clipped up to the row's time (an older
- * interval may hold it).  @a timestamp is the row's "sec.mmm". */
+ * disk: the window memory had open is closed before the row's time when
+ * the row is inside it, else closed and every interval clipped up to the
+ * row's time (an older interval may hold it); an open on disk that memory
+ * does not have is stale and dropped.  @a timestamp is the row's
+ * "sec.mmm". */
 static void history_recv_store_lost(const char *target, const char *timestamp)
 {
   char key[CHANNELLEN + 2];
   struct rcv_record r;
   struct Channel *chptr;
-  int64_t row, now;
-  int klen, was_open = 0;
+  int64_t row, now, was_since = 0;
+  int klen;
 
   if (!target || !IsChannelName(target))
     return;
   if ((chptr = FindChannel(target))) {
-    was_open = chptr->recv_open != 0;
+    if (chptr->recv_open)
+      was_since = chptr->recv_open_since;
     chptr->recv_open = 0;
+    chptr->recv_open_since = 0;
   }
   if (!history_available || !history_cf_recv
       || (klen = build_target_key(key, sizeof key, target)) < 0
@@ -3509,13 +3524,13 @@ static void history_recv_store_lost(const char *target, const char *timestamp)
     return;
   now = (int64_t)history_recv_now_ms();
   row = timestamp ? (int64_t)history_parse_ms(timestamp) : 0;
-  if (was_open && r.open_since && row >= r.open_since)
+  /* The open window is the one memory had (0: none this run); a stale
+   * open on disk is never this run's. */
+  r.open_since = was_since;
+  if (r.open_since && row >= r.open_since)
     rcv_close(&r, row < now ? row : now);
   else {
-    if (was_open)
-      rcv_close(&r, now);
-    else
-      r.open_since = 0;               /* stale: never this run's open window */
+    rcv_close(&r, now);               /* no-op when none was open */
     if (row > 0)
       rcv_clip(&r, row);
   }
@@ -3562,6 +3577,7 @@ void history_recv_link_up(void)
     if ((rc = recv_stage(wb, key, klen, &r)) != DB_OK)
       break;
     chptr->recv_open = 1;
+    chptr->recv_open_since = recv_open_late(now);
     opened++;
   }
   if (rc == DB_OK && opened)
@@ -3586,7 +3602,13 @@ void history_recv_reset(struct Channel *chptr)
   struct rcv_record r;
   int klen;
 
-  if (!chptr || !history_available || !history_cf_recv)
+  if (!chptr)
+    return;
+  /* The open window starts over in memory first, whatever the write does:
+   * nothing before now counts as received any more. */
+  if (chptr->recv_open)
+    chptr->recv_open_since = recv_open_late(history_recv_now_ms());
+  if (!history_available || !history_cf_recv)
     return;
   klen = build_target_key(key, sizeof key, chptr->chname);
   if (klen < 0)
@@ -3599,7 +3621,7 @@ void history_recv_reset(struct Channel *chptr)
     return;
   memset(&r, 0, sizeof r);
   if (chptr->recv_open)
-    rcv_open(&r, recv_open_late(history_recv_now_ms()));
+    rcv_open(&r, chptr->recv_open_since);
   recv_write(key, klen, &r, "reset", chptr->chname);
 }
 
@@ -3607,15 +3629,19 @@ void history_recv_rename(struct Channel *chptr, const char *oldname)
 {
   char key[CHANNELLEN + 2];
   struct rcv_record r;
+  int64_t was_since;
   int klen;
 
   if (!chptr || !oldname || !chptr->recv_open)
     return;                                     /* nothing open */
+  was_since = chptr->recv_open_since;
   chptr->recv_open = 0;
+  chptr->recv_open_since = 0;
   if (history_available && history_cf_recv
       && (klen = build_target_key(key, sizeof key, oldname)) >= 0) {
     uint64_t floor = history_local_floor_ms();
     (void)recv_read(key, klen, &r);
+    r.open_since = was_since;                   /* memory's window, never the disk's */
     rcv_close(&r, (int64_t)history_recv_now_ms());
     if (floor)
       rcv_clip(&r, (int64_t)floor);
@@ -3641,12 +3667,13 @@ int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_ms)
   klen = build_target_key(key, sizeof key, chname);
   if (klen < 0 || recv_read(key, klen, &r) != 1)
     return 0;
-  /* Only a window this run opened, and has not closed, is open: one the
-   * record shows open otherwise was never closed on disk (a failed
-   * write). */
+  /* The open window is this run's, as memory has it: the record's
+   * open_since is never trusted.  A failed write can leave it stale -- an
+   * open that was never closed on disk, or one from before a store loss
+   * (history_recv_store_lost) or a reset whose own write failed too -- and
+   * it would claim what this run never received (Push D review m2). */
   chptr = FindChannel(chname);
-  if (!chptr || !chptr->recv_open)
-    r.open_since = 0;
+  r.open_since = (chptr && chptr->recv_open) ? chptr->recv_open_since : 0;
   return rcv_covers(&r, (int64_t)lo_ms, (int64_t)hi_ms,
                     (int64_t)history_recv_now_ms());
 }

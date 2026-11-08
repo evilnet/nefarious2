@@ -33,6 +33,7 @@
 #include "ircd_alloc.h"
 #include "ircd_string.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 struct HistoryMessage *hm_find_dup(struct HistoryMessage *list,
@@ -134,8 +135,9 @@ struct HistoryMessage *hm_merge(struct HistoryMessage *list1,
    * AFTER and an ascending BETWEEN keep the OLDEST `limit` (drop from
    * the tail) -- keeping the newest for a forward query dropped the
    * rows right after the anchor, so the client's next AFTER started
-   * past them (audit 2026-09-06 #9).  AROUND keeps newest (rare over
-   * federation; centring would need the ref position). */
+   * past them (audit 2026-09-06 #9).  An AROUND page is not cut here:
+   * its caller merges it uncut and centres it on its reference
+   * (hm_trim_around; W5 Push D -- keeping the newest drifted it off). */
   if (count > limit && result) {
     if (keep_oldest) {
       struct HistoryMessage *m = result;
@@ -158,4 +160,118 @@ struct HistoryMessage *hm_merge(struct HistoryMessage *list1,
   }
 
   return result;
+}
+
+/** Epoch ms of a row's "sec.mmm" timestamp (a shorter fraction is scaled:
+ * "sec.5" is 500 ms). */
+static uint64_t hm_ts_ms(const char *ts)
+{
+  char *p;
+  uint64_t ms = (uint64_t)strtoull(ts, &p, 10) * 1000ULL, frac = 0;
+  int d;
+
+  if (*p == '.')
+    p++;
+  for (d = 0; d < 3; d++) {
+    frac *= 10;
+    if (*p >= '0' && *p <= '9')
+      frac += (uint64_t)(*p++ - '0');
+  }
+  return ms + frac;
+}
+
+/** Is @a m before an AROUND reference (hm_trim_around)? */
+static int hm_before_ref(const struct HistoryMessage *m, uint64_t ref_ms,
+                         const char *ref_msgid)
+{
+  uint64_t t = hm_ts_ms(m->timestamp);
+
+  if (t != ref_ms)
+    return t < ref_ms;
+  return ref_msgid && ref_msgid[0] && strcmp(m->msgid, ref_msgid) < 0;
+}
+
+struct HistoryMessage *hm_trim_around(struct HistoryMessage *list, int limit,
+                                      uint64_t ref_ms, const char *ref_msgid)
+{
+  struct HistoryMessage *m, **pp;
+  int before = 0, after = 0, keep_before, keep_after, drop_before;
+
+  if (limit < 0)
+    limit = 0;
+  for (m = list; m; m = m->next) {
+    if (hm_before_ref(m, ref_ms, ref_msgid))
+      before++;
+    else
+      after++;
+  }
+  keep_before = before < limit / 2 ? before : limit / 2;
+  keep_after = after < limit - keep_before ? after : limit - keep_before;
+  /* The list is in time order: the before rows to drop are the first ones
+   * met (the oldest), the after rows to keep the first ones met. */
+  drop_before = before - keep_before;
+  pp = &list;
+  while ((m = *pp)) {
+    int drop;
+
+    if (hm_before_ref(m, ref_ms, ref_msgid)) {
+      drop = drop_before > 0;
+      if (drop)
+        drop_before--;
+    } else {
+      drop = keep_after <= 0;
+      if (!drop)
+        keep_after--;
+    }
+    if (drop) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+    } else
+      pp = &m->next;
+  }
+  return list;
+}
+
+const char *hm_context_parent(const struct HistoryMessage *m, char *buf,
+                              size_t buflen)
+{
+  /* history.c's extract_reply_tag: the ratified +reply wins over the
+   * legacy +draft/reply, each only at the start of the list or after a
+   * separator. */
+  static const char *const needles[] = { "+reply=", "+draft/reply=" };
+  const char *p, *end;
+  size_t i, len;
+
+  if (!m || !buf || !buflen)
+    return NULL;
+  if (m->type == HISTORY_REDACT) {
+    p = m->dyn_content ? m->dyn_content : m->content;
+    end = strchr(p, ' ');
+    len = end ? (size_t)(end - p) : strlen(p);
+    if (len == 0 || len >= buflen)
+      return NULL;
+    memcpy(buf, p, len);
+    buf[len] = '\0';
+    return buf;
+  }
+  if (m->type != HISTORY_TAGMSG || !m->client_tags[0])
+    return NULL;
+  for (i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+    size_t nlen = strlen(needles[i]);
+
+    for (p = m->client_tags; (p = strstr(p, needles[i])) != NULL; p += nlen) {
+      if (p != m->client_tags && p[-1] != ';')
+        continue;
+      p += nlen;
+      end = strchr(p, ';');
+      len = end ? (size_t)(end - p) : strlen(p);
+      if (len == 0 || len >= buflen)
+        return NULL;
+      memcpy(buf, p, len);
+      buf[len] = '\0';
+      return buf;
+    }
+  }
+  return NULL;
 }

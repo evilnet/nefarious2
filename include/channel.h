@@ -397,6 +397,10 @@ struct Channel {
   unsigned char      recv_open;    /**< This run has the channel's receive window
                                     *   open: a local member is here (W5 Task 9,
                                     *   history_recv_update) */
+  int64_t            recv_open_since; /**< Where that window starts (epoch ms;
+                                    *   0 while closed).  history_recv_covers
+                                    *   reads it, never the record's copy, which
+                                    *   a failed write can leave stale */
   struct Membership* members;	   /**< Pointer to the clients on this channel*/
   struct SLink*      invites;	   /**< List of invites on this channel */
   struct Ban*        banlist;      /**< List of bans on this channel */
