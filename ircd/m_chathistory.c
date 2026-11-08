@@ -1777,6 +1777,8 @@ enum fed_reason {
   FED_WHY_UNRECEIVED,   /**< a channel span this server did not receive */
   FED_WHY_SHORT,        /**< a PM page that ran out (count < limit) */
   FED_WHY_ABSENCE,      /**< the span overlaps a storage peer's absence */
+  FED_WHY_CONTEXT,      /**< the page's own span passed, but its rows' context
+                             range [oldest row, now] did not */
   FED_WHY_COUNT
 };
 
@@ -1798,11 +1800,12 @@ void chathistory_fed_report(struct Client *to)
 {
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Federation: started %lu (unreceived %lu, short %lu, "
-             "absence %lu), slot misses %lu",
+             "absence %lu, context %lu), slot misses %lu",
              fed_started_why[FED_WHY_UNRECEIVED] + fed_started_why[FED_WHY_SHORT]
-             + fed_started_why[FED_WHY_ABSENCE],
+             + fed_started_why[FED_WHY_ABSENCE] + fed_started_why[FED_WHY_CONTEXT],
              fed_started_why[FED_WHY_UNRECEIVED], fed_started_why[FED_WHY_SHORT],
-             fed_started_why[FED_WHY_ABSENCE], fed_slot_misses);
+             fed_started_why[FED_WHY_ABSENCE], fed_started_why[FED_WHY_CONTEXT],
+             fed_slot_misses);
 }
 
 int chathistory_retention_advertised(void);   /* below; handlers.h */
@@ -1842,11 +1845,45 @@ static void channel_span_clamp(const char *chname, time_t lo, time_t hi,
   }
 }
 
+/** One channel range's check: is [@a lo, @a hi] (claimed, unix seconds,
+ * 0 = open), clamped (channel_span_clamp), received here and clear of
+ * every storage peer's absence?  An overlapping absence that is still open
+ * sets *@a partial.
+ * @return FED_WHY_UNRECEIVED, FED_WHY_ABSENCE or FED_WHY_NONE. */
+static int channel_range_check(const char *chname, time_t lo, time_t hi,
+                               int *partial)
+{
+  uint64_t lo_ms, hi_ms;
+  int open_hit = 0, absent;
+
+  channel_span_clamp(chname, lo, hi, &lo_ms, &hi_ms);
+  /* An inverted span (the page lies wholly before the channel's creation:
+   * a registered channel's earlier incarnation) is never received; its
+   * absence check keeps the span as claimed. */
+  if (lo_ms <= hi_ms)
+    absent = absence_overlap((time_t)(lo_ms / 1000ULL), (time_t)(hi_ms / 1000ULL),
+                             &open_hit);
+  else
+    absent = absence_overlap(lo, hi, &open_hit);
+  if (absent && open_hit)
+    *partial = 1;
+  if (!history_recv_covers(chname, lo_ms, hi_ms))
+    return FED_WHY_UNRECEIVED;
+  return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
+}
+
 /** Should this page fan out to the storage peers (W5 Task 9)?
  *   - a channel: when the span the page claims (claim_span), clamped
  *     (channel_span_clamp), is not one this server received
  *     (history_recv_covers), or overlaps a storage peer's absence -- a full
- *     page included, a short one over a received span not (it is complete);
+ *     page included, a short one over a received span not (it is
+ *     complete).  A page that holds rows carries their context too
+ *     (history_attach_context: reactions, REDACTs -- whatever their own
+ *     time; REDACT context hides its parent from every requester), and a
+ *     child can be born any time after its parent: such a page also needs
+ *     [its claimed start, now] received and clear of absences, or it fans
+ *     out (FED_WHY_CONTEXT; user decision 2026-11-08, option B).  An empty
+ *     page has no parents: its own span decides;
  *   - a PM target: when the page is short, or the claimed span overlaps an
  *     absence.
  * An overlapping absence that is still open (that store is away now) sets
@@ -1859,8 +1896,7 @@ static int federation_wanted(const char *target, enum fed_page page,
                              int *partial)
 {
   time_t r1 = ref_unix_secs(t1, v1), r2 = ref_unix_secs(t2, v2), lo, hi;
-  uint64_t lo_ms, hi_ms;
-  int desc = 0, open_hit = 0, absent;
+  int desc = 0, open_hit = 0, absent, why;
 
   if (page == FP_BETWEEN) {
     desc = history_between_descending(target, t1, v1, t2, v2);
@@ -1876,20 +1912,14 @@ static int federation_wanted(const char *target, enum fed_page page,
       return FED_WHY_SHORT;
     return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
   }
-  channel_span_clamp(target, lo, hi, &lo_ms, &hi_ms);
-  /* An inverted span (the page lies wholly before the channel's creation:
-   * a registered channel's earlier incarnation) is never received; its
-   * absence check keeps the span as claimed. */
-  if (lo_ms <= hi_ms)
-    absent = absence_overlap((time_t)(lo_ms / 1000ULL), (time_t)(hi_ms / 1000ULL),
-                             &open_hit);
-  else
-    absent = absence_overlap(lo, hi, &open_hit);
-  if (absent && open_hit)
-    *partial = 1;
-  if (!history_recv_covers(target, lo_ms, hi_ms))
-    return FED_WHY_UNRECEIVED;
-  return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
+  why = channel_range_check(target, lo, hi, partial);
+  /* The context range: from where the page's claim starts (at or before
+   * its oldest row) up to now.  Only needed when the claim stops short of
+   * now. */
+  if (why == FED_WHY_NONE && count > 0 && rows && hi != 0
+      && channel_range_check(target, lo, 0, partial) != FED_WHY_NONE)
+    why = FED_WHY_CONTEXT;
+  return why;
 }
 
 /** Single convergence point for chathistory result delivery.

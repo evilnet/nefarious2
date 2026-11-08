@@ -367,7 +367,7 @@ extern void history_recv_boot(void);
 extern void history_recv_alive_tick(void);
 
 /** STATS chathistory: "Federation: started N (unreceived N, short N,
- * absence N), slot misses N" (m_chathistory.c). */
+ * absence N, context N), slot misses N" (m_chathistory.c). */
 extern void chathistory_fed_report(struct Client *to);
 
 #ifdef USE_ROCKSDB
