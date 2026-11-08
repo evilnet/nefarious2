@@ -44,6 +44,11 @@
 extern void redact_apply_row(struct Client *src, const char *target, const char *msgid,
                              const char *redact_msgid, uint64_t time_ms, const char *reason,
                              const char *sender_str, const char *account_str);
+extern void redact_announce_local(struct Client *src, struct Channel *chptr,
+                                  const char *msgid, const char *redact_msgid,
+                                  uint64_t time_ms, const char *reason);
+extern void redact_echo_requester(struct Client *sptr, const char *target,
+                                  const char *msgid, const char *reason);
 static void redact_catchup_kick(unsigned int store_num);   /* design B trigger (defined with the catch-up) */
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -233,6 +238,58 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
       offset += chunk_size;
     }
     MyFree(b64);
+  }
+}
+
+/** Send a responder's rows to the requester @a to under @a reqid, in list
+ * order.  A context child (history_attach_context: a reaction or a REDACT
+ * of the row before it) is preceded by a CH C declaration naming its parent
+ * -- the last non-context row sent -- so the requester splices it after
+ * that parent, uncounted; older requesters ignore CH C and see the child as
+ * an ordinary row.  The child's client-only tags (reactions live entirely
+ * in them) ride the declaration: the R row's trailing param is the content,
+ * which is empty for a TAGMSG.
+ * @param[in] to Requester (the server the reply goes to).
+ * @param[in] reqid Request ID.
+ * @param[in] rows Rows, context children spliced in after their parents.
+ */
+static void send_ch_rows(struct Client *to, const char *reqid, struct HistoryMessage *rows)
+{
+  const char *last_parent = NULL;
+  struct HistoryMessage *msg;
+
+  for (msg = rows; msg; msg = msg->next) {
+    if (msg->is_context && last_parent) {
+      if (msg->client_tags[0]) {
+        /* Measure the line like the R/B rows: client_tags is 512
+         * wide and the header ~170, so msgq would cut a long tag
+         * set mid-tag and the receiver stored the fragment
+         * verbatim (re-review R13).  Drop whole tags from the
+         * end at ';' boundaries until it fits. */
+        char ctags[512];
+        size_t over = 3 + 4 /* CH C */ + 4 /* spaces */ + 2 /* " :" */
+                    + strlen(reqid) + strlen(last_parent) + strlen(msg->msgid);
+        size_t room = (over + 4 < 510) ? (size_t)(510 - over - 4) : 0;
+        ircd_strncpy(ctags, msg->client_tags, sizeof(ctags) - 1);
+        ctags[sizeof(ctags) - 1] = '\0';
+        while (strlen(ctags) > room) {
+          char *semi = strrchr(ctags, ';');
+          if (!semi) { ctags[0] = '\0'; break; }
+          *semi = '\0';
+        }
+        if (ctags[0])
+          sendcmdto_one(&me, CMD_CHATHISTORY, to, "C %s %s %s :%s",
+                        reqid, last_parent, msg->msgid, ctags);
+        else
+          sendcmdto_one(&me, CMD_CHATHISTORY, to, "C %s %s %s",
+                        reqid, last_parent, msg->msgid);
+      } else
+        sendcmdto_one(&me, CMD_CHATHISTORY, to, "C %s %s %s",
+                      reqid, last_parent, msg->msgid);
+    }
+    else if (!msg->is_context)
+      last_parent = msg->msgid;
+    send_ch_response(to, reqid, msg);
   }
 }
 
@@ -5364,10 +5421,12 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
  * ============================================================================
  * Federated REDACT Support
  *
- * When a non-storing server receives a REDACT, it cannot look up the message
- * locally. Instead, it sends a CH Q X (exact msgid lookup) federation query
- * to storage servers. On completion, the callback validates authorization
- * and propagates the REDACT if permitted.
+ * When a REDACT names a message this server does not store -- it has no
+ * store, or the row never reached it (a channel message reaches only the
+ * servers with a member) -- it sends a CH Q X (exact msgid lookup)
+ * federation query to the storage servers.  On completion, the callback
+ * authorizes under the one rule (redact_authorize, redact_index.c) and
+ * shows and relays the REDACT if permitted.
  * ============================================================================
  */
 
@@ -5379,31 +5438,28 @@ struct RedactContext {
   int is_oper;                         /**< Whether requester is oper */
 };
 
-/** Completion callback for federated REDACT.
- * Runs authorization logic on the looked-up message and propagates if permitted.
+/** Answer a federated REDACT (complete_redact_fed, below, wraps it in
+ * the requester's labeled-response).
+ * The parent is the first non-context row a storage peer returned (a
+ * responder sends the row first, then its context children); it is
+ * authorized under the same rule as a row found locally, and a REDACT
+ * child of it (or a local REDACT row) makes the request an idempotent
+ * repeat.  Otherwise the REDACT is shown to the local members under its
+ * own msgid and time and relayed; no row is stored here, since this store
+ * does not hold the message it would annotate.
  */
-static void complete_redact_fed(struct FedRequest *req)
+static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
+                              struct Client *sptr)
 {
-  struct RedactContext *ctx;
-  struct Client *sptr;
   struct Channel *chptr;
-  struct HistoryMessage *msg;
-  time_t msg_time, window;
-  int can_redact = 0;
-
-  if (!req || req->response_sent)
-    return;
-
-  req->response_sent = 1;
-
-  ctx = (struct RedactContext *)req->cb_data;
-  if (!ctx)
-    return;
-
-  /* Look up the client — may have disconnected during federation */
-  sptr = findNUser(req->client_yxx);
-  if (!sptr)
-    return;
+  struct HistoryMessage *msg, *m;
+  struct redact_auth_in ai;
+  enum redact_auth verdict;
+  char fctx[BUFSIZE];   /* spec: <target> <msgid> */
+  char req_mask[HISTORY_SENDER_LEN];
+  const char *reason;
+  long window = 0;
+  int already = 0;
 
   /* Look up the channel */
   chptr = FindChannel(req->target);
@@ -5413,67 +5469,87 @@ static void complete_redact_fed(struct FedRequest *req)
     return;
   }
 
-  /* Check if we got a message back from federation */
-  msg = req->fed_msgs;
+  ircd_snprintf(0, fctx, sizeof(fctx), "%s %s", req->target, ctx->msgid);
+  reason = ctx->reason[0] ? ctx->reason : NULL;
+
+  /* The parent: the first non-context row (CH C marked the children). */
+  for (msg = req->fed_msgs; msg && msg->is_context; msg = msg->next)
+    ;
   if (!msg) {
-    /* No storage server had this message */
-    {
-      char fctx[BUFSIZE];   /* spec: <target> <msgid> */
-      ircd_snprintf(0, fctx, sizeof(fctx), "%s %s", req->target, ctx->msgid);
-      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fctx, "Message not found");
-    }
+    /* No store returned it.  When a store never answered (timeout, SQUIT,
+     * CH E U) the row may still exist there, but the redaction spec has
+     * no "unavailable" code: answer UNKNOWN_MSGID as for a row no store
+     * holds (ruling R20) and say in the log the lookup was cut. */
+    if (req->cut)
+      log_write(LS_SYSTEM, L_NOTICE, 0,
+                "REDACT %s %s by %s: federated lookup cut (a store did not answer); "
+                "answering UNKNOWN_MSGID", req->target, ctx->msgid, cli_name(sptr));
+    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fctx, "Message not found");
     return;
   }
 
-  /* Run the same authorization logic as the synchronous path in m_redact.c */
-  msg_time = (time_t)strtoul(msg->timestamp, NULL, 10);
+  /* The one rule, as for a local row -- but never the unauthenticated
+   * mask path: the row's sender came over the wire (header_repaired). */
+  ircd_snprintf(0, req_mask, sizeof(req_mask), "%s!%s@%s",
+                cli_name(sptr), cli_user(sptr)->username,
+                cli_user(sptr)->host);
+  memset(&ai, 0, sizeof(ai));
+  ai.msg_type = msg->type;
+  ai.msg_time = (long)strtoul(msg->timestamp, NULL, 10);
+  ai.now = (long)CurrentTime;
+  ai.msg_account = msg->account;
+  ai.msg_sender = msg->sender;
+  ai.req_account = cli_user(sptr)->account;
+  ai.req_mask = req_mask;
+  ai.header_repaired = 1;
+  ai.is_oper = ctx->is_oper;
+  ai.is_chanop = ctx->is_chanop;
+  ai.chanop_others = feature_bool(FEAT_REDACT_CHANOP_OTHERS);
+  ai.window = feature_int(FEAT_REDACT_WINDOW);
+  ai.oper_window = feature_int(FEAT_REDACT_OPER_WINDOW);
+  verdict = redact_authorize(&ai, &window);
 
-  if (ctx->is_oper) {
-    /* Opers: oper-specific window (0 = unlimited) */
-    window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
-    if (window > 0 && (CurrentTime - msg_time) > window) {
-      send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", ctx->msgid,
-                "Redaction window has expired");
-      return;
-    }
-    can_redact = 1;
-  } else if (msg->account[0] && cli_user(sptr)
-             && cli_user(sptr)->account[0]
-             && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
-    /* Authenticated owner: account match, no time window */
-    can_redact = 1;
-  } else {
-    /* Everyone else: regular time window applies */
-    window = (time_t)feature_int(FEAT_REDACT_WINDOW);
-    if (window > 0 && (CurrentTime - msg_time) > window) {
-      send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", ctx->msgid,
-                "Redaction window has expired");
-      return;
-    }
-
-    /* Chanops can redact others' messages */
-    if (ctx->is_chanop && feature_bool(FEAT_REDACT_CHANOP_OTHERS)) {
-      can_redact = 1;
-    }
+  if (verdict == REDACT_AUTH_NOT_MESSAGE) {
+    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fctx, "Not a message");
+    return;
   }
-
-  if (!can_redact) {
-    send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", ctx->msgid,
+  if (verdict == REDACT_AUTH_EXPIRED) {
+    char wctx[BUFSIZE];   /* spec: <target> <msgid> <window> */
+    ircd_snprintf(0, wctx, sizeof(wctx), "%s %ld", fctx, window);
+    send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", wctx,
+              "Redaction window has expired");
+    return;
+  }
+  if (verdict != REDACT_AUTH_OK) {
+    send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", fctx,
               "You are not authorized to redact this message");
     return;
   }
 
-  /* Authorization passed — generate msgid and propagate REDACT */
+  /* Already redacted: a store returned a REDACT child of the row, or this
+   * server holds one (an older responder sends no children).  A repeat is
+   * an idempotent success: the requester's echo, nothing shown to the
+   * channel, relayed or stored. */
+  for (m = req->fed_msgs; m && !already; m = m->next)
+    if (m->is_context && m->type == HISTORY_REDACT
+        && strcmp(m->ctx_parent, ctx->msgid) == 0)
+      already = 1;
+  if (!already && history_message_is_redacted(req->target, ctx->msgid) == 1)
+    already = 1;
+  if (already) {
+    redact_echo_requester(sptr, req->target, ctx->msgid, reason);
+    return;
+  }
+
+  /* Authorization passed: one msgid and one time for the event */
   {
-    struct Membership *member;
-    const char *reason = ctx->reason[0] ? ctx->reason : NULL;
     char redact_msgid[HISTORY_MSGID_LEN];
     uint64_t time_ms;
 
     generate_msgid(redact_msgid, sizeof(redact_msgid));
     time_ms = history_event_time_ms(NULL);   /* the msgid's own mint time (audit #16) */
 
-    /* Write-forward the REDACT event to STORE servers */
+    /* Write-forward the REDACT event to a STORE server (non-STORE only) */
     {
       char timestamp[32];
       char redact_content[512];
@@ -5499,44 +5575,54 @@ static void complete_redact_fed(struct FedRequest *req)
       }
     }
 
-    /* Set msgid for live channel broadcast */
-    if (feature_bool(FEAT_MSGID))
-      sendcmdto_set_client_msgid(redact_msgid);
+    /* Show it to the local members under the event's msgid and time.  No
+     * local row: this store does not hold the message it would annotate
+     * (it was a local miss, or there is no store). */
+    redact_announce_local(sptr, chptr, ctx->msgid, redact_msgid, time_ms, reason);
 
-    for (member = chptr->members; member; member = member->next_member) {
-      struct Client *acptr = member->user;
-
-      if (!MyUser(acptr))
-        continue;
-      /* Per-connection caps, not the bouncer session's union: this send
-       * is unrouted (no cap_route_ctx), so a sibling connection without
-       * the cap received the REDACT because another one had it
-       * (re-review 2026-09-07 R6; same class as wave-1 #8). */
-      if (!CapRecipientHas(acptr, CAP_DRAFT_REDACT))
-        continue;
-      if (acptr == sptr && !CapRecipientHas(acptr, CAP_ECHOMSG))
-        continue;
-
-      if (reason) {
-        sendcmdto_one(sptr, CMD_REDACT, acptr, "%s %s :%s",
-                      req->target, ctx->msgid, reason);
-      } else {
-        sendcmdto_one(sptr, CMD_REDACT, acptr, "%s %s",
-                      req->target, ctx->msgid);
-      }
-    }
-
-    /* Propagate to other servers (ms_redact on storage servers will delete
-     * and store the REDACT event with this same msgid via S2S tags). */
+    /* Propagate to other servers (ms_redact on storage servers stores the
+     * REDACT row under this same msgid and time via the S2S tags). */
     sendcmdto_set_s2s_tags(time_ms, redact_msgid);
     sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone_v3(sptr, CMD_REDACT, sptr, "%s %s :%s",
                           req->target, ctx->msgid, reason ? reason : "");
+  }
+}
 
-    /* Disarm: this runs from a federation callback, outside any
-     * per-line reset, so a left-armed msgid tags the next unrelated
-     * client send with this REDACT's id (as m_redact.c does). */
-    sendcmdto_set_client_msgid(NULL);
+/** Completion callback for federated REDACT: the requester still here,
+ * answer it under its saved label. */
+static void complete_redact_fed(struct FedRequest *req)
+{
+  struct RedactContext *ctx;
+  struct Client *sptr;
+
+  if (!req || req->response_sent)
+    return;
+
+  req->response_sent = 1;
+
+  ctx = (struct RedactContext *)req->cb_data;
+  if (!ctx)
+    return;
+
+  /* Look up the client -- may have disconnected during federation */
+  sptr = findNUser(req->client_yxx);
+  if (!sptr || !MyUser(sptr) || !cli_user(sptr))
+    return;
+
+  /* labeled-response: the REDACT's label was saved, and its generic ACK
+   * suppressed, when the lookup started.  Answer under it -- the echo or
+   * the FAIL carries it -- and ACK when the answer sent nothing labeled
+   * (no echo-message); then clear it, as the end of a command would. */
+  if (req->label[0]) {
+    ircd_strncpy(cli_label(sptr), req->label, sizeof(cli_label(sptr)));
+    cli_label_responded(sptr) = 0;
+  }
+  redact_fed_answer(req, ctx, sptr);
+  if (req->label[0]) {
+    send_labeled_ack(sptr);
+    cli_label(sptr)[0] = '\0';
+    cli_label_responded(sptr) = 0;
   }
 }
 
@@ -5610,6 +5696,13 @@ int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
   req->ops_override = 0;
   req->completion_cb = complete_redact_fed;
   req->cb_data = ctx;
+
+  /* labeled-response: complete_redact_fed answers under this label;
+   * suppress the generic ACK the end of the command would send. */
+  if (cli_label(sptr)[0]) {
+    ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
+    cli_label_responded(sptr) = 1;
+  }
 
   fed_requests[i] = req;
 
@@ -6389,7 +6482,6 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     const char *query_subcmd_full;
     int limit, count;
     struct HistoryMessage *messages = NULL;
-    struct HistoryMessage *msg;
     enum HistoryRefType ref_type;
     const char *ref_value;
 
@@ -6747,11 +6839,19 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         struct HistoryMessage *single_msg = NULL;
         int lrc = history_lookup_message(target, ref + 1, &single_msg);
         if (lrc == 0 && single_msg) {
-          send_ch_response(sptr, reqid, single_msg);
+          /* The row first, then its context children, each after its
+           * CH C: a REDACT among them tells the requester the message is
+           * already redacted (a repeat is an idempotent success there).
+           * An older requester reads only the first row -- the parent --
+           * and ignores the rest.  E counts the row alone, as for pages. */
+          history_attach_context(target, single_msg);
+          send_ch_rows(sptr, reqid, single_msg);
           sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 1", reqid);
           history_free_messages(single_msg);
         } else {
-          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+          /* A read error is no answer (U), not "no such row". */
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr,
+                        lrc < 0 ? "E %s 0 U" : "E %s 0", reqid);
           if (single_msg)
             history_free_messages(single_msg);
         }
@@ -6822,50 +6922,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * and see the child as an ordinary row (harmless). */
       history_attach_context(target, messages);
 
-      /* Send response messages.
-       * Uses base64 chunked encoding for long content (>400 bytes).
+      /* Send response messages (each context child after its CH C).
+       * send_ch_response picks the line form per row:
        * - CH R: normal response (content as-is)
        * - CH B: base64 encoded response (with chunking if needed)
        */
-      {
-        const char *last_parent = NULL;
-        for (msg = messages; msg; msg = msg->next) {
-          if (msg->is_context && last_parent) {
-            /* The child's client-only tags (reactions live entirely in
-             * them) ride the declaration -- the R row's trailing param
-             * is the content, which is empty for a TAGMSG. */
-            if (msg->client_tags[0]) {
-              /* Measure the line like the R/B rows: client_tags is 512
-               * wide and the header ~170, so msgq would cut a long tag
-               * set mid-tag and the receiver stored the fragment
-               * verbatim (re-review R13).  Drop whole tags from the
-               * end at ';' boundaries until it fits. */
-              char ctags[512];
-              size_t over = 3 + 4 /* CH C */ + 4 /* spaces */ + 2 /* " :" */
-                          + strlen(reqid) + strlen(last_parent) + strlen(msg->msgid);
-              size_t room = (over + 4 < 510) ? (size_t)(510 - over - 4) : 0;
-              ircd_strncpy(ctags, msg->client_tags, sizeof(ctags) - 1);
-              ctags[sizeof(ctags) - 1] = '\0';
-              while (strlen(ctags) > room) {
-                char *semi = strrchr(ctags, ';');
-                if (!semi) { ctags[0] = '\0'; break; }
-                *semi = '\0';
-              }
-              if (ctags[0])
-                sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "C %s %s %s :%s",
-                              reqid, last_parent, msg->msgid, ctags);
-              else
-                sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "C %s %s %s",
-                              reqid, last_parent, msg->msgid);
-            } else
-              sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "C %s %s %s",
-                            reqid, last_parent, msg->msgid);
-          }
-          else if (!msg->is_context)
-            last_parent = msg->msgid;
-          send_ch_response(sptr, reqid, msg);
-        }
-      }
+      send_ch_rows(sptr, reqid, messages);
 
       /* Send end marker; trailing T = this result was truncated at the
        * requested limit (optional param, ignored by older parsers). */

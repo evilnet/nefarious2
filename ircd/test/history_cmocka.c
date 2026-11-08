@@ -240,6 +240,124 @@ static void test_ch_e_flags(void **state)
   assert_int_equal(0, ch_e_flags("x"));
 }
 
+/* ========== redact_authorize (redact_index.c): the one REDACT rule ========== */
+
+/* A plain member's request for a PRIVMSG row sent at t=1000; each case
+ * overrides what it tests.  "" = none, as the struct documents. */
+static struct redact_auth_in rda_base(long age)
+{
+  struct redact_auth_in in;
+  memset(&in, 0, sizeof in);
+  in.msg_type = HISTORY_PRIVMSG;
+  in.msg_time = 1000;
+  in.now = 1000 + age;
+  in.msg_account = "";
+  in.msg_sender = "s!u@h";
+  in.req_account = "";
+  in.req_mask = "r!u@h";
+  in.window = 60;
+  in.oper_window = 0;
+  return in;
+}
+
+static void test_redact_auth_owner_no_window(void **state)
+{
+  struct redact_auth_in in = rda_base(3600);
+  long w = -1;
+  (void)state;
+  in.msg_account = "w5a";
+  in.req_account = "W5A";   /* accounts compare case-insensitively */
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+}
+
+static void test_redact_auth_oper_window(void **state)
+{
+  struct redact_auth_in in = rda_base(601);
+  long w = -1;
+  (void)state;
+  in.is_oper = 1;
+  in.oper_window = 600;
+  assert_int_equal(REDACT_AUTH_EXPIRED, redact_authorize(&in, &w));
+  assert_int_equal(600, w);
+  in.now = 1000 + 600;      /* at the edge: still within */
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+  in.oper_window = 0;       /* 0 = no oper window */
+  in.now = 1000 + 1000000;
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+}
+
+static void test_redact_auth_chanop_others(void **state)
+{
+  struct redact_auth_in in = rda_base(10);
+  long w = -1;
+  (void)state;
+  in.is_chanop = 1;
+  in.chanop_others = 1;
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+  in.chanop_others = 0;
+  assert_int_equal(REDACT_AUTH_FORBIDDEN, redact_authorize(&in, &w));
+}
+
+static void test_redact_auth_not_message(void **state)
+{
+  struct redact_auth_in in = rda_base(10);
+  long w = -1;
+  (void)state;
+  in.msg_type = HISTORY_JOIN;
+  in.is_oper = 1;           /* not even an oper redacts a JOIN */
+  assert_int_equal(REDACT_AUTH_NOT_MESSAGE, redact_authorize(&in, &w));
+  in.msg_type = HISTORY_REDACT;
+  assert_int_equal(REDACT_AUTH_NOT_MESSAGE, redact_authorize(&in, &w));
+  in.msg_type = HISTORY_NOTICE;
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+  in.msg_type = HISTORY_TAGMSG;
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+  in.msg_type = HISTORY_MULTILINE;
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+}
+
+static void test_redact_auth_unauth_mask(void **state)
+{
+  struct redact_auth_in in = rda_base(10);
+  long w = -1;
+  (void)state;
+  in.msg_sender = "N!u@h";
+  in.req_mask = "n!u@h";
+  assert_int_equal(REDACT_AUTH_OK, redact_authorize(&in, &w));
+  in.req_mask = "m!u@h";
+  in.window = 0;
+  assert_int_equal(REDACT_AUTH_FORBIDDEN, redact_authorize(&in, &w));
+}
+
+static void test_redact_auth_header_repaired(void **state)
+{
+  struct redact_auth_in in = rda_base(10);
+  long w = -1;
+  (void)state;
+  in.msg_sender = "n!u@h";
+  in.req_mask = "n!u@h";
+  in.header_repaired = 1;   /* the mask proves nothing for a repaired row */
+  assert_int_equal(REDACT_AUTH_FORBIDDEN, redact_authorize(&in, &w));
+  in.now = 1000 + 61;
+  assert_int_equal(REDACT_AUTH_EXPIRED, redact_authorize(&in, &w));
+  assert_int_equal(60, w);
+}
+
+static void test_redact_auth_window_expired_other(void **state)
+{
+  struct redact_auth_in in = rda_base(61);
+  long w = -1;
+  (void)state;
+  assert_int_equal(REDACT_AUTH_EXPIRED, redact_authorize(&in, &w));
+  assert_int_equal(60, w);
+  in.is_chanop = 1;         /* the window binds a chanop too */
+  in.chanop_others = 1;
+  w = -1;
+  assert_int_equal(REDACT_AUTH_EXPIRED, redact_authorize(&in, &w));
+  assert_int_equal(60, w);
+  assert_int_equal(REDACT_AUTH_EXPIRED, redact_authorize(&in, NULL));   /* NULL-safe */
+}
+
 /* ========== build_key Tests ========== */
 
 static void test_build_key_target_only(void **state)
@@ -1321,6 +1439,13 @@ int main(void)
     cmocka_unit_test(test_rdx_val_roundtrip),
     cmocka_unit_test(test_rdx_reply_parse),
     cmocka_unit_test(test_ch_e_flags),
+    cmocka_unit_test(test_redact_auth_owner_no_window),
+    cmocka_unit_test(test_redact_auth_oper_window),
+    cmocka_unit_test(test_redact_auth_chanop_others),
+    cmocka_unit_test(test_redact_auth_not_message),
+    cmocka_unit_test(test_redact_auth_unauth_mask),
+    cmocka_unit_test(test_redact_auth_header_repaired),
+    cmocka_unit_test(test_redact_auth_window_expired_other),
     cmocka_unit_test(test_build_key_target_only),
         cmocka_unit_test(test_build_key_with_timestamp),
         cmocka_unit_test(test_build_key_with_msgid),

@@ -694,8 +694,9 @@ extern int chathistory_page_since(struct Client *sptr, const char *target,
 extern void chathistory_fed_cleanup_link(struct Client *link);
 
 /** Start a federated REDACT query (exact message lookup via CH Q X).
- * Used by m_redact on non-storing servers to look up message metadata
- * from storage servers for authorization before propagating REDACT.
+ * Used by m_redact when this server does not hold the message (no store,
+ * or a local miss) to look up its metadata on the storage servers for
+ * authorization before showing and propagating the REDACT.
  * @param[in] sptr Client requesting the redaction.
  * @param[in] chptr Channel containing the message.
  * @param[in] target Channel name.

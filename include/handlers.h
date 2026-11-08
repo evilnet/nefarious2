@@ -327,6 +327,15 @@ extern void redact_apply_row(struct Client *src, const char *target,
                              const char *msgid, const char *redact_msgid,
                              uint64_t time_ms, const char *reason,
                              const char *sender_str, const char *account_str);
+/* Show one redaction to @a chptr's local members: arm the REDACT event's
+ * msgid and time, fan out (the redacter's echo included), clear.  Stores
+ * and relays nothing. */
+extern void redact_announce_local(struct Client *src, struct Channel *chptr,
+                                  const char *msgid, const char *redact_msgid,
+                                  uint64_t time_ms, const char *reason);
+/* A repeat REDACT of an already-redacted message: the requester's echo only. */
+extern void redact_echo_requester(struct Client *sptr, const char *target,
+                                  const char *msgid, const char *reason);
 extern int m_register(struct Client*, struct Client*, int, char*[]);
 extern int m_verify(struct Client*, struct Client*, int, char*[]);
 extern int m_markread(struct Client*, struct Client*, int, char*[]);

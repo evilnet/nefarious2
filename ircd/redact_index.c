@@ -1,5 +1,10 @@
-/* redact_index.c -- pure encoders for the redaction catch-up index (see .h). */
+/* redact_index.c -- pure encoders for the redaction catch-up index, and the
+ * REDACT authorization rule (see .h).  Links against ../ircd_string.o only
+ * (ircd_strcmp); history.h is read for its message-type values alone. */
+#include "config.h"
 #include "redact_index.h"
+#include "history.h"
+#include "ircd_string.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -114,4 +119,67 @@ int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out)
   if (!out->reqid[0] || !out->redact_msgid[0] || !out->v.target[0] || !out->v.parent_msgid[0])
     return -1;
   return 0;
+}
+
+/* "" for NULL, so a caller that has no account or mask may pass either. */
+static const char *rda_str(const char *s)
+{
+  return s ? s : "";
+}
+
+/* Within a window: 0 = none; else the row is at most @a window seconds old. */
+static int rda_within(const struct redact_auth_in *in, long window)
+{
+  return window <= 0 || (in->now - in->msg_time) <= window;
+}
+
+static enum redact_auth rda_expired(long window, long *window_out)
+{
+  if (window_out)
+    *window_out = window;
+  return REDACT_AUTH_EXPIRED;
+}
+
+enum redact_auth redact_authorize(const struct redact_auth_in *in, long *window_out)
+{
+  const char *macct, *racct;
+
+  if (!in)
+    return REDACT_AUTH_FORBIDDEN;
+  macct = rda_str(in->msg_account);
+  racct = rda_str(in->req_account);
+
+  /* 1. spec: the msgid MUST name a PRIVMSG, NOTICE or TAGMSG (a stored
+   * multiline is a PRIVMSG batch); a JOIN, MODE or REDACT row is not
+   * redactable (audit 2026-09-06 #59). */
+  if (in->msg_type != HISTORY_PRIVMSG && in->msg_type != HISTORY_NOTICE
+      && in->msg_type != HISTORY_TAGMSG && in->msg_type != HISTORY_MULTILINE)
+    return REDACT_AUTH_NOT_MESSAGE;
+
+  /* 2. Opers: their own window (0 = unlimited), any sender. */
+  if (in->is_oper)
+    return rda_within(in, in->oper_window) ? REDACT_AUTH_OK
+                                           : rda_expired(in->oper_window, window_out);
+
+  /* 3. The authenticated owner: account match, no window. */
+  if (macct[0] && racct[0] && ircd_strcmp(macct, racct) == 0)
+    return REDACT_AUTH_OK;
+
+  /* 4. The unauthenticated sender-mask fallback: both the row and the
+   * requester unauthenticated, and nick!user@host equal.  Never for a row
+   * whose '|'-shifted header was repaired on read (ce441a04): its account
+   * is empty because none could be trusted, not because the sender was
+   * unauthenticated, so the mask proves nothing.  A federated row always
+   * counts as repaired: its sender came over the wire. */
+  if (!macct[0] && !racct[0] && !in->header_repaired
+      && ircd_strcmp(rda_str(in->req_mask), rda_str(in->msg_sender)) == 0)
+    return REDACT_AUTH_OK;
+
+  /* 5. Everyone else, chanops included: the regular window, then the
+   * chanop-others grant. */
+  if (!rda_within(in, in->window))
+    return rda_expired(in->window, window_out);
+  if (in->is_chanop && in->chanop_others)
+    return REDACT_AUTH_OK;
+  return REDACT_AUTH_FORBIDDEN;
 }

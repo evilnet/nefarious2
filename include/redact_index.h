@@ -53,4 +53,28 @@ int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out);
 #define CH_E_UNANSWERED  0x2
 unsigned int ch_e_flags(const char *param);
 
+/* The one REDACT authorization rule, for a row found in this server's
+ * store (m_redact) and for one a storage peer returned (complete_redact_fed,
+ * m_chathistory.c), in order:
+ *  1. a row that is not a PRIVMSG/NOTICE/TAGMSG/MULTILINE -> NOT_MESSAGE;
+ *  2. an oper: within oper_window -> OK, else EXPIRED (*window_out = oper_window);
+ *  3. the row's account owner (both accounts set, ircd_strcmp) -> OK, no window;
+ *  4. both accounts empty, the header not repaired, req_mask == msg_sender
+ *     (ircd_strcmp) -> OK;
+ *  5. everyone else: outside window -> EXPIRED (*window_out = window); a
+ *     chanop with chanop_others -> OK; else FORBIDDEN.
+ * "Within" a window: 0 = no window, else (now - msg_time) <= window.
+ * NULL strings read as "".  *window_out is written only on EXPIRED, and
+ * window_out may be NULL. */
+enum redact_auth { REDACT_AUTH_OK, REDACT_AUTH_NOT_MESSAGE, REDACT_AUTH_EXPIRED, REDACT_AUTH_FORBIDDEN };
+struct redact_auth_in {
+  int msg_type;                       /* enum HistoryMessageType value (history.h) */
+  long msg_time, now;                 /* unix seconds */
+  const char *msg_account, *msg_sender, *req_account, *req_mask;   /* "" when none */
+  int header_repaired;                /* row header repaired on read (ce441a04); 1 for every federated row */
+  int is_oper, is_chanop, chanop_others;
+  long window, oper_window;           /* REDACT_WINDOW, REDACT_OPER_WINDOW; 0 = none */
+};
+enum redact_auth redact_authorize(const struct redact_auth_in *in, long *window_out);
+
 #endif
