@@ -34,6 +34,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "chathistory_ephemeral.h"
+#include "chathistory_merge.h"
 #include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
@@ -137,6 +138,16 @@ static int ch_base64_encode(const char *input, size_t inlen, char *output)
  *   CH B <reqid> <msgid> <ts> <type> <sender> <account> + :<b64>    - start/more
  *   CH B <reqid> <msgid> + :<b64>                                    - continue
  *   CH B <reqid> <msgid> :<b64>                                      - final
+ * The R line and the first B line carry the row's client-only tags in the
+ * compact tag region, @A<row time><row msgid>,C<tags> (W5 Task 2), toward
+ * a peer that takes S2S tags (sendcmdto_one_ctags); the receiver keeps
+ * them with the row.  The tags go verbatim, the server's own PM markers
+ * (+evilnet.github.io/ssid= / rsid= / sid=) included: the requester's PM
+ * naming reads them (replay.c), and strip_internal_tags removes them
+ * before any client sees the row.  A continuation B line has no tags,
+ * and Z needs none: its payload is the stored record, tags inside.
+ * The tag region does not count against the line's body (msgq_vmake), so
+ * the measured budgets below stand.
  * @param[in] sptr Target server.
  * @param[in] reqid Request ID.
  * @param[in] msg History message.
@@ -147,6 +158,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
   const char *account = msg->account[0] ? msg->account : "*";
   const char *content = msg->dyn_content ? msg->dyn_content : msg->content;
   int wire_type = msg->dyn_content ? HISTORY_MULTILINE : msg->type;
+  uint64_t row_ms = history_parse_ms(msg->timestamp);
   char tbuf[8];
   size_t full, cont;
 
@@ -185,9 +197,10 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
 
   /* Plain R only when the raw content has no newline AND fits one line. */
   if (!ch_needs_encoding(content) && strlen(content) <= full) {
-    sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
-                  reqid, msg->msgid, msg->timestamp, wire_type,
-                  msg->sender, account, content);
+    sendcmdto_one_ctags(&me, CMD_CHATHISTORY, sptr, row_ms, msg->msgid, msg->client_tags,
+                        "R %s %s %s %d %s %s :%s",
+                        reqid, msg->msgid, msg->timestamp, wire_type,
+                        msg->sender, account, content);
     return;
   }
 
@@ -199,18 +212,20 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
     size_t b64_total, offset = 0;
     int first = 1;
     if (!b64) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
-                    reqid, msg->msgid, msg->timestamp, wire_type,
-                    msg->sender, account, "[content too large]");
+      sendcmdto_one_ctags(&me, CMD_CHATHISTORY, sptr, row_ms, msg->msgid, msg->client_tags,
+                          "R %s %s %s %d %s %s :%s",
+                          reqid, msg->msgid, msg->timestamp, wire_type,
+                          msg->sender, account, "[content too large]");
       return;
     }
     ch_base64_encode(content, content_len, b64);
     b64_total = strlen(b64);
 
     if (b64_total <= full) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s :%s",
-                    reqid, msg->msgid, msg->timestamp, wire_type,
-                    msg->sender, account, b64);
+      sendcmdto_one_ctags(&me, CMD_CHATHISTORY, sptr, row_ms, msg->msgid, msg->client_tags,
+                          "B %s %s %s %d %s %s :%s",
+                          reqid, msg->msgid, msg->timestamp, wire_type,
+                          msg->sender, account, b64);
       MyFree(b64);
       return;
     }
@@ -226,10 +241,10 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
       memcpy(chunk, b64 + offset, chunk_size);
       chunk[chunk_size] = '\0';
       if (first) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr,
-                      more ? "B %s %s %s %d %s %s + :%s" : "B %s %s %s %d %s %s :%s",
-                      reqid, msg->msgid, msg->timestamp, wire_type,
-                      msg->sender, account, chunk);
+        sendcmdto_one_ctags(&me, CMD_CHATHISTORY, sptr, row_ms, msg->msgid, msg->client_tags,
+                            more ? "B %s %s %s %d %s %s + :%s" : "B %s %s %s %d %s %s :%s",
+                            reqid, msg->msgid, msg->timestamp, wire_type,
+                            msg->sender, account, chunk);
         first = 0;
       } else {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr,
@@ -3187,6 +3202,8 @@ struct ChunkEntry {
                                       * measured wire chunking and was then cut
                                       * on reassembly (re-review R14) */
   char account[ACCOUNTLEN + 1];
+  char client_tags[512];   /**< the first line's ,C tags (W5 Task 2), kept
+                            * for the final chunk; as wide as the row's */
   char *b64_data;          /**< Accumulated base64 */
   size_t b64_len;
   size_t b64_alloc;
@@ -4486,10 +4503,12 @@ void chathistory_fed_cleanup_link(struct Client *link)
       free_write_chunk(pending_write_chunks[i]);
 }
 
-/** Create a new chunk entry */
+/** Create a new chunk entry.  @a client_tags are the first line's ,C
+ * tags (may be NULL or empty): only that line carries them. */
 static struct ChunkEntry *create_chunk(const char *reqid, const char *msgid,
                                        const char *timestamp, int type,
-                                       const char *sender, const char *account)
+                                       const char *sender, const char *account,
+                                       const char *client_tags)
 {
   struct ChunkEntry *chunk;
   int i;
@@ -4509,6 +4528,8 @@ static struct ChunkEntry *create_chunk(const char *reqid, const char *msgid,
   chunk->type = type;
   ircd_strncpy(chunk->sender, sender, sizeof(chunk->sender) - 1);
   ircd_strncpy(chunk->account, account, sizeof(chunk->account) - 1);
+  if (client_tags)
+    ircd_strncpy(chunk->client_tags, client_tags, sizeof(chunk->client_tags));
   chunk->b64_alloc = 1024;
   chunk->b64_data = MyMalloc(chunk->b64_alloc);
   chunk->b64_data[0] = '\0';
@@ -4842,11 +4863,15 @@ static void free_fed_request(struct FedRequest *req)
   MyFree(req);
 }
 
-/** Add a message to the federated results list */
+/** Add a message to the federated results list.  @a client_tags are the
+ * row's client-only tags as its responder sent them (the ,C segment of a
+ * CH R or first CH B line, or the record a CH Z carries); NULL or empty
+ * for none (an older responder sends none).  A CH C declaration's tags
+ * fill in only when the row brought none of its own. */
 static void add_fed_message(struct FedRequest *req, const char *msgid,
                             const char *timestamp, int type,
                             const char *sender, const char *account,
-                            const char *content)
+                            const char *content, const char *client_tags)
 {
   struct HistoryMessage *msg, *tail;
 
@@ -4868,6 +4893,8 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
   msg->type = type;
   if (content)
     ircd_strncpy(msg->content, content, sizeof(msg->content) - 1);
+  if (client_tags)
+    ircd_strncpy(msg->client_tags, client_tags, sizeof(msg->client_tags));
   msg->next = NULL;
 
   /* CH C declaration already seen for this msgid?  Mark the row as a
@@ -4924,8 +4951,6 @@ static struct HistoryMessage *extract_fed_context(struct FedRequest *req)
   return ctx_head;
 }
 
-static int message_exists(struct HistoryMessage *list, struct HistoryMessage *check);
-
 /** Splice federated context children into a merged result list after
  * their parents (after any locally-attached context run).  Ownership
  * of ctx_list transfers here: spliced nodes join \a merged, children
@@ -4942,7 +4967,7 @@ static void splice_fed_context(struct HistoryMessage *merged,
 
     ctx->next = NULL;
 
-    if (!message_exists(merged, ctx)) {
+    if (!hm_find_dup(merged, ctx)) {
       for (m = merged; m; m = m->next) {
         if (!m->is_context && strcmp(m->msgid, ctx->ctx_parent) == 0) {
           parent = m;
@@ -4963,123 +4988,6 @@ static void splice_fed_context(struct HistoryMessage *merged,
     }
     ctx = next_ctx;
   }
-}
-
-/** Check if message already exists in a list (by msgid) */
-static int message_exists(struct HistoryMessage *list, struct HistoryMessage *check)
-{
-  struct HistoryMessage *m;
-  const char *check_content = check->dyn_content ? check->dyn_content : check->content;
-
-  for (m = list; m; m = m->next) {
-    /* Exact msgid match */
-    if (strcmp(m->msgid, check->msgid) == 0)
-      return 1;
-    /* Semantic duplicate: same timestamp + sender + type + content.
-     * Catches the same message stored on different servers with
-     * different msgids (e.g. Bj-* on hub vs AC-* on leaf). */
-    if (m->type == check->type
-        && strcmp(m->timestamp, check->timestamp) == 0
-        && strcmp(m->sender, check->sender) == 0) {
-      const char *m_content = m->dyn_content ? m->dyn_content : m->content;
-      if (strcmp(m_content, check_content) == 0)
-        return 1;
-    }
-  }
-  return 0;
-}
-
-/** Merge and deduplicate two message lists, sort by timestamp */
-static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
-                                              struct HistoryMessage *list2,
-                                              int limit, int keep_oldest)
-{
-  struct HistoryMessage *result = NULL, *tail = NULL;
-  int count = 0;
-
-  /* Merge-sort both lists by timestamp (both are already chronological).
-   * Collect ALL unique messages first, then truncate to keep the N most
-   * recent. The old code greedily filled from list1 first, which meant
-   * stale local messages (e.g. typing indicators) could crowd out newer
-   * federated messages. */
-
-  /* Step 1: Merge both lists into one sorted list (no limit yet) */
-  struct HistoryMessage *p1 = list1, *p2 = list2;
-  while (p1 || p2) {
-    struct HistoryMessage *pick;
-    if (!p1) {
-      pick = p2; p2 = p2->next;
-    } else if (!p2) {
-      pick = p1; p1 = p1->next;
-    } else {
-      /* Same-millisecond rows from two legs must land in store-key
-       * order (msgid), or the client's next exact AFTER seek steps past
-       * the sibling the merge emitted first (re-review R10). */
-      int c = strcmp(p1->timestamp, p2->timestamp);
-      if (c == 0)
-        c = strcmp(p1->msgid, p2->msgid);
-      if (c <= 0) {
-        pick = p1; p1 = p1->next;
-      } else {
-        pick = p2; p2 = p2->next;
-      }
-    }
-
-    /* Deduplicate by msgid */
-    if (message_exists(result, pick))
-      continue;
-
-    struct HistoryMessage *copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
-    memcpy(copy, pick, sizeof(*copy));
-    copy->next = NULL;
-    /* Ownership of the heap content moves to the copy: the merged list
-     * is handed to the replay engine, which frees it with
-     * history_free_messages, and the source lists are freed by
-     * free_fed_request afterwards.  Leaving both pointing at the same
-     * raw_content/dyn_content was a double free on every federated page
-     * with a compressed (>256 B) or multiline local row (2026-09-06). */
-    pick->raw_content = NULL;
-    pick->raw_content_len = 0;
-    pick->dyn_content = NULL;
-    pick->dyn_content_len = 0;
-    if (!result) {
-      result = tail = copy;
-    } else {
-      tail->next = copy;
-      tail = copy;
-    }
-    count++;
-  }
-
-  /* Step 2: trim to `limit`.  Direction matters: LATEST/BEFORE and a
-   * descending BETWEEN keep the NEWEST `limit` (drop from the front);
-   * AFTER and an ascending BETWEEN keep the OLDEST `limit` (drop from
-   * the tail) -- keeping the newest for a forward query dropped the
-   * rows right after the anchor, so the client's next AFTER started
-   * past them (audit 2026-09-06 #9).  AROUND keeps newest (rare over
-   * federation; centring would need the ref position). */
-  if (count > limit && result) {
-    if (keep_oldest) {
-      struct HistoryMessage *m = result;
-      int i = 1;
-      while (m && i < limit) { m = m->next; i++; }
-      if (m && m->next) {
-        struct HistoryMessage *drop = m->next;
-        m->next = NULL;
-        history_free_messages(drop);
-      }
-    } else {
-      while (count > limit && result) {
-        struct HistoryMessage *old = result;
-        result = result->next;
-        old->next = NULL;
-        history_free_messages(old);
-        count--;
-      }
-    }
-  }
-
-  return result;
 }
 
 /** Send federation results to client (does NOT free the request)
@@ -5109,7 +5017,7 @@ static void send_fed_response(struct FedRequest *req)
   {
     struct HistoryMessage *fed_ctx = extract_fed_context(req);
 
-    merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
+    merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
 
     /* Count total */
     total = 0;
@@ -6100,7 +6008,7 @@ static void complete_autoreplay_channel(struct FedRequest *req)
     int total;
 
     fed_ctx = extract_fed_context(req);
-    merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
+    merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
     total = 0;
     for (struct HistoryMessage *m = merged; m; m = m->next)
       total++;
@@ -6492,14 +6400,14 @@ static void complete_search_fed(struct FedRequest *req)
   }
   /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
    * the union is sorted and trimmed below. */
-  merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
+  merged = hm_merge(req->local_msgs, req->fed_msgs, INT_MAX, 0);
   for (m = merged; m; m = m->next)
     total++;
   if (total == 0) {
     search_send(client, NULL, NULL, req->label[0] ? req->label : NULL);
     return;
   }
-  /* merge_messages assumes sorted inputs; responders' rows arrive in
+  /* hm_merge assumes sorted inputs; responders' rows arrive in
    * reply order, so sort the union by time and keep the newest limit. */
   all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
   for (k = 0, m = merged; m; m = m->next)
@@ -6635,7 +6543,10 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
  * the first intermediate server and federation only works between directly
  * linked pairs. Drops (matching prior behavior) when the origin is unknown,
  * local (stale reply after timeout), or would bounce back out the arrival
- * link. */
+ * link.  A line that arrived with client-only tags (an R or a first B
+ * line's ,C, W5 Task 2) goes on with the same tag region -- the row's
+ * time and msgid from the link's stash beside them -- so the origin keeps
+ * the tags across a middle hop. */
 static void forward_fed_reply(struct Client *sptr, struct Client *cptr,
                               int parc, char *parv[])
 {
@@ -6663,7 +6574,10 @@ static void forward_fed_reply(struct Client *sptr, struct Client *cptr,
   for (i = 1; i < parc - 1; i++)
     out += ircd_snprintf(0, out, end - out, "%s%s", i > 1 ? " " : "", parv[i]);
   ircd_snprintf(0, out, end - out, " :%s", parv[parc - 1]);
-  sendcmdto_one(sptr, CMD_CHATHISTORY, origin, "%s", buf);
+  /* sendcmdto_one_ctags sends the plain line when the stash holds no
+   * tags (every other reply), and toward a link that takes no S2S tags. */
+  sendcmdto_one_ctags(sptr, CMD_CHATHISTORY, origin, cli_s2s_time_ms(cptr),
+                      cli_s2s_msgid(cptr), cli_s2s_client_tags(cptr), "%s", buf);
 }
 
 int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
@@ -7220,8 +7134,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Add message to federated results */
-    add_fed_message(req, msgid, timestamp, type, sender, account, content);
+    /* Add message to federated results, with the client-only tags the
+     * line's ,C segment brought (parse_server's per-line stash of this
+     * link; empty from a responder that sends none). */
+    add_fed_message(req, msgid, timestamp, type, sender, account, content,
+                    cli_s2s_client_tags(cptr));
   }
   else if (strcmp(subcmd, "D") == 0) {   /* a redaction from the catch-up scan */
     struct rdx_reply rr;
@@ -7270,9 +7187,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * code passed the decompressed record blob VERBATIM as message
      * content -- header bytes rendered as message text for any
      * compressed (>threshold) record served over federation.  Wire
-     * msgid/ts/sender/account stay authoritative for parity with R/B;
-     * record client_tags are dropped like R/B drop them (tags-over-
-     * federation is a separate, pre-existing wire gap). */
+     * msgid/ts/sender/account stay authoritative for parity with R/B.
+     * The record's client_tags are the row's: they ride the payload, so
+     * Z needs no ,C segment, and they are kept like an R or B line's ,C
+     * tags (W5 Task 2). */
     {
       char *decoded;
       size_t decoded_len;
@@ -7283,7 +7201,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         memset(&rec, 0, sizeof(rec));
         if (history_deserialize_record(decoded, decoded_len, &rec) == 0) {
           add_fed_message(req, msgid, timestamp, rec.type, sender, account,
-                          rec.content);
+                          rec.content, rec.client_tags);
         } else {
           Debug((DEBUG_DEBUG, "CH Z: undecodable record for %s, dropping", msgid));
         }
@@ -7366,7 +7284,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       if (!chunk)
         return 0;  /* Continuation without start */
     } else {
-      chunk = create_chunk(reqid, msgid, parv[4], atoi(parv[5]), parv[6], parv[7]);
+      /* Only the first line carries the row's ,C tags: keep them for
+       * the final chunk. */
+      chunk = create_chunk(reqid, msgid, parv[4], atoi(parv[5]), parv[6], parv[7],
+                           cli_s2s_client_tags(cptr));
       if (!chunk)
         return 0;  /* No slots available */
     }
@@ -7382,7 +7303,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
       if (ch_base64_decode(chunk->b64_data, chunk->b64_len, &decoded, &decoded_len)) {
         add_fed_message(req, chunk->msgid, chunk->timestamp, chunk->type,
-                        chunk->sender, chunk->account, decoded);
+                        chunk->sender, chunk->account, decoded, chunk->client_tags);
         MyFree(decoded);
       }
       free_chunk(chunk);

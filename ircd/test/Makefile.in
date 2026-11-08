@@ -44,6 +44,7 @@ CMOCKA_TESTPROGS = \
 	history_trim_codec_cmocka \
 	history_trim_cmocka \
 	chathistory_presence_cmocka \
+	chathistory_merge_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
@@ -102,6 +103,7 @@ DEP_SRC = \
 	history_trim_codec_cmocka.c \
 	history_trim_cmocka.c \
 	chathistory_presence_cmocka.c \
+	chathistory_merge_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
@@ -274,6 +276,15 @@ history_trim_cmocka: $(HISTORY_TRIM_CMOCKA_OBJS)
 CHATHISTORY_PRESENCE_CMOCKA_OBJS = chathistory_presence_cmocka.o test_stub.o ../chathistory_presence.o ../ircd_alloc.o ../ircd_string.o
 chathistory_presence_cmocka: $(CHATHISTORY_PRESENCE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_PRESENCE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# chathistory_merge tests - the federated page merge (hm_merge: dedup,
+# tag adoption, same-ms msgid order, trim direction, the heap-content
+# hand-off to the copy) and its duplicate test (hm_find_dup).  Links the
+# REAL ../chathistory_merge.o; history_free_messages is defined in the
+# suite itself (history.c needs the store).
+CHATHISTORY_MERGE_CMOCKA_OBJS = chathistory_merge_cmocka.o test_stub.o ../chathistory_merge.o ../ircd_alloc.o ../ircd_string.o
+chathistory_merge_cmocka: $(CHATHISTORY_MERGE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_MERGE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o

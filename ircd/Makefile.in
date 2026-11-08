@@ -120,6 +120,7 @@ IRCD_SRC = \
 	ipcheck_refund.c \
 	redact_index.c \
 	chathistory_ephemeral.c \
+	chathistory_merge.c \
 	chathistory_presence.c \
 	ircd.c \
 	ircd_alloc.c \

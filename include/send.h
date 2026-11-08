@@ -232,6 +232,18 @@ extern void sendcmdto_one_tags_with_client(struct Client *from,
                                            const char *client_tags,
                                            const char *pattern, ...);
 
+/* A line toward a server link that carries @a client_tags for a stored
+ * row (W5 Task 2: a CH R line, a first CH B line, and their middle-hop
+ * relay): @A<time_ms><msgid>,C<client_tags> toward a link that takes S2S
+ * tags (send_s2s_tags_on), the plain line otherwise, or when there are no
+ * tags, or when @a msgid is not a 14-char compact msgid.  Leaves no
+ * override armed. */
+extern void sendcmdto_one_ctags(struct Client *from, const char *cmd,
+                                const char *tok, struct Client *to,
+                                uint64_t time_ms, const char *msgid,
+                                const char *client_tags,
+                                const char *pattern, ...);
+
 /* Send command to all channels user is on */
 extern void sendcmdto_common_channels_butone(struct Client *from,
 					     const char *cmd,

@@ -1,0 +1,161 @@
+/*
+ * IRC - Internet Relay Chat, ircd/chathistory_merge.c
+ * Copyright (C) 2026 Nefarious Development Team
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 1, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ */
+/** @file
+ * @brief Merging a federated chathistory page (moved out of
+ *   m_chathistory.c, where it was message_exists / merge_messages, so the
+ *   merge can be unit-tested without the store).
+ *
+ * The requester of a federated page holds two row lists: its own store's
+ * (local_msgs) and the rows its peers sent back (fed_msgs).  hm_merge
+ * makes the page from both; hm_find_dup is its duplicate test, also used
+ * by the context splice.
+ */
+#include "config.h"
+
+#include "chathistory_merge.h"
+#include "history.h"
+#include "ircd_alloc.h"
+#include "ircd_string.h"
+
+#include <string.h>
+
+struct HistoryMessage *hm_find_dup(struct HistoryMessage *list,
+                                   const struct HistoryMessage *check)
+{
+  struct HistoryMessage *m;
+  const char *check_content = check->dyn_content ? check->dyn_content : check->content;
+
+  for (m = list; m; m = m->next) {
+    /* Exact msgid match */
+    if (strcmp(m->msgid, check->msgid) == 0)
+      return m;
+    /* Semantic duplicate: same timestamp + sender + type + content.
+     * Catches the same message stored on different servers with
+     * different msgids (e.g. Bj-* on hub vs AC-* on leaf). */
+    if (m->type == check->type
+        && strcmp(m->timestamp, check->timestamp) == 0
+        && strcmp(m->sender, check->sender) == 0) {
+      const char *m_content = m->dyn_content ? m->dyn_content : m->content;
+      if (strcmp(m_content, check_content) == 0)
+        return m;
+    }
+  }
+  return NULL;
+}
+
+struct HistoryMessage *hm_merge(struct HistoryMessage *list1,
+                                struct HistoryMessage *list2,
+                                int limit, int keep_oldest)
+{
+  struct HistoryMessage *result = NULL, *tail = NULL;
+  struct HistoryMessage *p1 = list1, *p2 = list2;
+  int count = 0;
+
+  /* Merge-sort both lists by timestamp (both are already chronological).
+   * Collect ALL unique messages first, then truncate to keep the N most
+   * recent. The old code greedily filled from list1 first, which meant
+   * stale local messages (e.g. typing indicators) could crowd out newer
+   * federated messages. */
+
+  /* Step 1: Merge both lists into one sorted list (no limit yet) */
+  while (p1 || p2) {
+    struct HistoryMessage *pick, *kept, *copy;
+    if (!p1) {
+      pick = p2; p2 = p2->next;
+    } else if (!p2) {
+      pick = p1; p1 = p1->next;
+    } else {
+      /* Same-millisecond rows from two legs must land in store-key
+       * order (msgid), or the client's next exact AFTER seek steps past
+       * the sibling the merge emitted first (re-review R10). */
+      int c = strcmp(p1->timestamp, p2->timestamp);
+      if (c == 0)
+        c = strcmp(p1->msgid, p2->msgid);
+      if (c <= 0) {
+        pick = p1; p1 = p1->next;
+      } else {
+        pick = p2; p2 = p2->next;
+      }
+    }
+
+    /* Deduplicate.  The dropped copy may be the only one that kept the
+     * message's client-only tags: a local row stored before relays kept
+     * them (W5 Task 1), or one a peer sent back with ,C while the kept
+     * copy came from an older peer that sends none.  The kept row takes
+     * them then, and never loses tags of its own. */
+    kept = hm_find_dup(result, pick);
+    if (kept) {
+      if (!kept->client_tags[0] && pick->client_tags[0])
+        ircd_strncpy(kept->client_tags, pick->client_tags, sizeof(kept->client_tags));
+      continue;
+    }
+
+    copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
+    memcpy(copy, pick, sizeof(*copy));
+    copy->next = NULL;
+    /* Ownership of the heap content moves to the copy: the merged list
+     * is handed to the replay engine, which frees it with
+     * history_free_messages, and the source lists are freed by
+     * free_fed_request afterwards.  Leaving both pointing at the same
+     * raw_content/dyn_content was a double free on every federated page
+     * with a compressed (>256 B) or multiline local row (2026-09-06).
+     * A dropped duplicate (above) keeps its own: its source frees it. */
+    pick->raw_content = NULL;
+    pick->raw_content_len = 0;
+    pick->dyn_content = NULL;
+    pick->dyn_content_len = 0;
+    if (!result) {
+      result = tail = copy;
+    } else {
+      tail->next = copy;
+      tail = copy;
+    }
+    count++;
+  }
+
+  /* Step 2: trim to `limit`.  Direction matters: LATEST/BEFORE and a
+   * descending BETWEEN keep the NEWEST `limit` (drop from the front);
+   * AFTER and an ascending BETWEEN keep the OLDEST `limit` (drop from
+   * the tail) -- keeping the newest for a forward query dropped the
+   * rows right after the anchor, so the client's next AFTER started
+   * past them (audit 2026-09-06 #9).  AROUND keeps newest (rare over
+   * federation; centring would need the ref position). */
+  if (count > limit && result) {
+    if (keep_oldest) {
+      struct HistoryMessage *m = result;
+      int i = 1;
+      while (m && i < limit) { m = m->next; i++; }
+      if (m && m->next) {
+        struct HistoryMessage *drop = m->next;
+        m->next = NULL;
+        history_free_messages(drop);
+      }
+    } else {
+      while (count > limit && result) {
+        struct HistoryMessage *old = result;
+        result = result->next;
+        old->next = NULL;
+        history_free_messages(old);
+        count--;
+      }
+    }
+  }
+
+  return result;
+}
