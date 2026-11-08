@@ -140,6 +140,17 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
   ClearBurst(sptr);
   SetBurstAck(sptr);
 
+  /* W5 Task 12: a store whose CH A S came while the burst that carries its
+   * state here was still open (its own, or a gated link's) is back now --
+   * its absence closes and its REDACT catch-up starts.  For every EB,
+   * relayed ones included, so outside the MyConnect block; after ClearBurst,
+   * which it reads.  First of the EOB hooks: it only reads what this EB ends
+   * and sends one CH Q * D, which the store answers from its redaction index
+   * alone -- nothing below depends on it, nor it on them (the presence sync,
+   * the MD re-pull, the away barrier PING, our own CH A S) -- so the
+   * catch-up is on the wire ahead of their traffic. */
+  chathistory_server_eob(sptr);
+
   /* Convergence-completion event: a gated peer waiting only because
    * this one was IsBurst can release its gate now (subject to the
    * other condition, hs_restore_pending, also being clear). */

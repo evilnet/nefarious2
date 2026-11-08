@@ -1491,6 +1491,11 @@ struct ChathistoryAd {
   int has_channel_ads;             /**< Received CH A F? */
   int channel_count;               /**< Number of channels in set */
   char **channels;                 /**< Array of channel names (lowercase) */
+  /** Its CH A S came before the end of the burst that carries its state to
+   * us (its own EB, or the EB of the link it is heard through): its absence
+   * stays open, and its REDACT catch-up waits, until that EB
+   * (chathistory_server_eob).  Goes with the entry (clear_server_ad). */
+  unsigned char eob_pending;
 };
 
 /** Global array of server advertisements, indexed by server numeric */
@@ -3796,6 +3801,57 @@ void chathistory_reflood_ads(struct Client *newpeer)
     if (cli_from(owner) == newpeer)
       continue;   /* reached via the new peer -- it already has this ad */
     sendcmdto_one(owner, CMD_CHATHISTORY, newpeer, "A S %d", ad->retention_days);
+  }
+}
+
+/** Is the burst that carries @a server's state to us still open?  Its own
+ * (a store still bursting, its EB not seen yet) or that of the direct link
+ * we hear it through: a link that gated its burst toward us holds the burst
+ * tail (the users and channels of every server behind it) and its EB, and
+ * drops the serv_butone lines meanwhile, a relayed store's REDACTs among
+ * them (52ac2d63). */
+static int ad_burst_pending(struct Client *server)
+{
+  return IsBurst(server) || IsBurst(cli_from(server));
+}
+
+/** A store advertised and the burst that carries its state here has ended:
+ * it is back for real.  The one closer: the CH A S handler calls it for a
+ * store that advertises after that burst (an ungated relink: its EB comes
+ * first), chathistory_server_eob for one that advertised before it. */
+static void ad_store_back(int idx)
+{
+  absence_close(idx);   /* back: close its absence */
+  redact_catchup_kick((unsigned int)idx);   /* what did we miss while it was away? */
+  /* W5 Task 9 adds history_recv_link_up() here (the first close after boot). */
+}
+
+/** A server's END_OF_BURST arrived (ms_end_of_burst, after ClearBurst; for
+ * every server, relayed EBs included): every store whose CH A S came while
+ * its burst was still open, and whose burst has now ended -- its own EB and
+ * its link's both seen -- is back (ad_store_back), and its flag is cleared
+ * (W5 Task 12).  The EB that ends a pending store's burst is its own or its
+ * link's; checking every pending ad covers both.
+ * @param[in] server The server whose EB this is. */
+void chathistory_server_eob(struct Client *server)
+{
+  int si;
+  if (!server || !IsServer(server))
+    return;
+  for (si = 0; si < MAX_AD_SERVERS; si++) {
+    struct ChathistoryAd *ad = server_ads[si];
+    struct Client *owner;
+    char yxx[4];
+    if (!ad || !ad->eob_pending)
+      continue;
+    inttobase64(yxx, si, 2);
+    owner = FindNServer(yxx);
+    if (!owner || owner == &me || !IsServer(owner) || ad_burst_pending(owner))
+      continue;
+    ad->eob_pending = 0;
+    Debug((DEBUG_DEBUG, "CH A S: %s's burst ended (EB of %s): absence closed, REDACT catch-up kicked",
+           cli_name(owner), cli_name(server)));
+    ad_store_back(si);
   }
 }
 
@@ -7137,8 +7193,19 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->is_storage_server = 1;
       ad->retention_days = retention;
       ad->last_update = CurrentTime;
-      absence_close(server_ad_index(sptr));   /* back: close its absence */
-      redact_catchup_kick((unsigned int)server_ad_index(sptr));   /* what did we miss while it was away? */
+      /* Back -- but not caught up until the burst that carries its state
+       * here has ended.  A store sends CH A S when OUR end of burst reaches
+       * it, ungated; when it (or the link we hear it through) has gated its
+       * burst toward us, its burst tail and EB are still held, and the
+       * serv_butone lines meanwhile (REDACT, KICK, TOPIC ...) are dropped.
+       * Closing the absence now made pages over that window look whole,
+       * and the catch-up ran before its REDACTs (W5 Task 12). */
+      if (ad_burst_pending(sptr))
+        ad->eob_pending = 1;   /* chathistory_server_eob closes and kicks */
+      else {
+        ad->eob_pending = 0;
+        ad_store_back(server_ad_index(sptr));
+      }
 
       Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));
