@@ -532,11 +532,17 @@ extern int sub1_from_channel(struct Channel* chptr);
 extern int destruct_channel(struct Channel* chptr);
 extern void add_user_to_channel(struct Channel* chptr, struct Client* who,
                                 unsigned int flags, int oplevel);
-/** Does @a chptr have a non-zombie member with MyConnect (a local user, a
- * local alias, a local held ghost)?  What decides whether this server
- * receives the channel's traffic (W5 Task 9): a remote alias membership (a
- * BX V receiver's CHFL_ALIAS member) never counts. */
+/** Does @a chptr have a member this server is relayed the channel's
+ * messages for: non-zombie, MyConnect (a local user, a local alias, a
+ * local held ghost), not deaf (+d) and with no positive SILENCE mask?
+ * What decides whether this server receives the channel's traffic (W5
+ * Task 9): a remote alias membership (a BX V receiver's CHFL_ALIAS
+ * member) never counts. */
 extern int channel_has_local_member(const struct Channel *chptr);
+/** A local member's own relay state changed (+d, its first or last
+ * positive SILENCE mask): re-decide the receive window of each of its
+ * channels (history_recv_update). */
+extern void channel_recv_member_changed(struct Client *cptr);
 extern void make_zombie(struct Membership* member, struct Client* who,
                         struct Client* cptr, struct Client* sptr,
                         struct Channel* chptr);

@@ -38,6 +38,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "history.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -672,8 +673,13 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		        !chptr->mode.apass[0] && chptr->users == 0))) {
         struct Membership *member;
         struct ModeBuf mbuf;
+        time_t old_ts = chptr->creationtime;
 
 	chptr->creationtime = creation;
+        /* Another incarnation's TS: what this server received was not its
+         * traffic (receive windows, W5 Task 9 fix round 1, M6). */
+        if (old_ts && old_ts != creation)
+          history_recv_reset(chptr);
         /* Wipe out the current modes on the channel. */
         modebuf_init(&mbuf, sptr, cptr, chptr, MODEBUF_DEST_CHANNEL | MODEBUF_DEST_HACK3);
 

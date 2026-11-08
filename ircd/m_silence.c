@@ -116,6 +116,7 @@ forward_silences(struct Client *sptr, char *silences, struct Client *dest)
   struct Ban *accepted[MAXPARA], *sile, **plast;
   char *cp, *p, buf[BUFSIZE];
   size_t ac_count, buf_used, slen, ii;
+  int silencer = MyConnect(sptr) && has_positive_silence(sptr);
 
   /* Split the list of silences and try to apply each one in turn. */
   for (cp = ircd_strtok(&p, silences, ","), ac_count = 0;
@@ -263,6 +264,12 @@ forward_silences(struct Client *sptr, char *silences, struct Client *dest)
       free_ban(accepted[ii]);
     }
   }
+
+  /* A local user's first positive mask, or its last one gone: channel
+   * messages from a matching sender skip it, so whether this server
+   * receives its channels may have changed (receive windows, W5 Task 9). */
+  if (MyConnect(sptr) && silencer != has_positive_silence(sptr))
+    channel_recv_member_changed(sptr);
 }
 
 /** Handle a SILENCE command from a local user.

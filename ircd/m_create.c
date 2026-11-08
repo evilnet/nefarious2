@@ -88,6 +88,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "history.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -246,8 +247,14 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       chptr = get_channel(sptr, name, CGT_CREATE);
 
     if (!badop) {
+      time_t old_ts = chptr->creationtime;
+
       /* Set (or correct) our copy of the TS */
       chptr->creationtime = chanTS;
+      /* Another incarnation's TS: what this server received was not its
+       * traffic (receive windows, W5 Task 9 fix round 1, M6). */
+      if (old_ts && old_ts != chanTS)
+        history_recv_reset(chptr);
       /* Pre-populate per-channel msgid from incoming S2S tag (positional).
        * The tag has MAXJOINARGS slots: a channel past them, or one whose
        * slot is empty, mints its own -- clear the joinbuf slot so it

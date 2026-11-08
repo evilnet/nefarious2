@@ -12487,6 +12487,7 @@ int bounce_umode_flag_synced(int flag)
 static void bounce_copy_umodes(struct Client *from, struct Client *to)
 {
   int i;
+  int was_deaf = IsDeaf(to) ? 1 : 0;
 
   for (i = 0; umode_sync_flags[i] >= 0; i++) {
     /* +s is known only where the connection is: P10 never carries it,
@@ -12507,6 +12508,11 @@ static void bounce_copy_umodes(struct Client *from, struct Client *to)
    * convert-in-place case (an already-counted client converted to a remote alias
    * becomes ineligible and releases its prior count). */
   userstats_count_sync(to);
+
+  /* +d copied onto (or off) a local connection: channel messages skip a
+   * deaf member, so its channels' receive windows may change (W5 Task 9). */
+  if (MyConnect(to) && was_deaf != (IsDeaf(to) ? 1 : 0))
+    channel_recv_member_changed(to);
 }
 
 /** The server notice mask of session member @a cptr as this server knows

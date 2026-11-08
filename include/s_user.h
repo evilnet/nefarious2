@@ -132,6 +132,10 @@ extern void away_notify_common(struct Client *sptr, struct Client *one,
 extern void away_notify_channel(struct Client *sptr, struct Channel *chptr,
                                 const char *text);
 extern int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg);
+/** Whether @a cptr's SILENCE list holds a positive (non-~) mask: channel
+ * messages from a matching sender skip it (FEAT_SILENCE_CHANMSGS, applied
+ * on the sender's server), so the receive windows never count it. */
+extern int has_positive_silence(const struct Client *cptr);
 extern int hunt_server_cmd(struct Client *from, const char *cmd,
 			   const char *tok, struct Client *one,
 			   int MustBeOper, const char *pattern, int server,

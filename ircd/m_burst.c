@@ -328,6 +328,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          timestamp = chptr->creationtime, then the other
 	 side must do this: */
       chptr->creationtime = timestamp;	/* Use the same TS on both sides. */
+#ifdef USE_ROCKSDB
+      history_recv_reset(chptr);	/* another TS: W5 Task 9 fix round 1, M6 */
+#endif
     }
     /* In more complex cases, we might still end up with a
        creationtime desync of a few seconds, but that should
@@ -451,13 +454,15 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * surviving channel's history (a channel recreated behind a split;
      * 2026-09-08).  Prune them now, while we still know which
      * creationtime they carry. */
-    if (chptr->creationtime) {
+    if (chptr->creationtime)
       history_purge_incarnation(chptr->chname, chptr->creationtime);
-      /* What this server received was the losing incarnation's traffic,
-       * never the surviving side's: its receive windows go too, and one
-       * still open (local members stay) restarts now (W5 Task 9). */
-      history_recv_reset(chptr);
-    }
+    /* What this server received was the losing incarnation's traffic,
+     * never the surviving side's: its receive windows go too, and one
+     * still open (local members stay) restarts now (W5 Task 9).  A channel
+     * new here takes an older TS as well: a record left by an earlier
+     * incarnation of the name says nothing about this one (fix round 1,
+     * M6). */
+    history_recv_reset(chptr);
 #endif
     chptr->creationtime = timestamp;
 

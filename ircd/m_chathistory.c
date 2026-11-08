@@ -1789,27 +1789,29 @@ void chathistory_fed_report(struct Client *to)
 
 int chathistory_retention_advertised(void);   /* below; handlers.h */
 
-/** Did this server receive all of channel @a chname's traffic over
- * [@a lo, @a hi] (unix seconds, 0 = open; claim_span)?  Widened to whole
- * seconds and clamped to what can be asked of anyone:
+/** The part of a channel page's claimed span [@a lo, @a hi] (unix seconds,
+ * 0 = open; claim_span) that anyone can be asked about, in epoch ms,
+ * widened to whole seconds:
  *   lo' = max(lo, the channel's creation, now - the widest retention a
  *             reachable store keeps, when that is limited),
  *   hi' = hi, else now -- never past now.
- * history_recv_covers() then answers from the receive windows (and says
- * no for a span reaching below this store's own floor). */
-static int channel_span_received(const char *chname, time_t lo, time_t hi)
+ * Both the receive windows and the absence table are asked about this span
+ * (fix round 1, R31): before the channel existed, or past every store's
+ * retention, nothing was said that a peer could hold. */
+static void channel_span_clamp(const char *chname, time_t lo, time_t hi,
+                               uint64_t *lo_ms, uint64_t *hi_ms)
 {
   struct Channel *chptr = FindChannel(chname);
   uint64_t now = history_recv_now_ms();
-  uint64_t lo_ms = (uint64_t)lo * 1000ULL;
-  uint64_t hi_ms = hi ? (uint64_t)hi * 1000ULL + 999ULL : now;
   int widest = chathistory_retention_advertised();
 
-  if (hi_ms > now)
-    hi_ms = now;
+  *lo_ms = (uint64_t)lo * 1000ULL;
+  *hi_ms = hi ? (uint64_t)hi * 1000ULL + 999ULL : now;
+  if (*hi_ms > now)
+    *hi_ms = now;
   if (chptr && chptr->creationtime > 0
-      && (uint64_t)chptr->creationtime * 1000ULL > lo_ms)
-    lo_ms = (uint64_t)chptr->creationtime * 1000ULL;
+      && (uint64_t)chptr->creationtime * 1000ULL > *lo_ms)
+    *lo_ms = (uint64_t)chptr->creationtime * 1000ULL;
   if (widest > 0) {
     /* The same clock as history_local_floor_ms()'s retention horizon, so a
      * store that keeps exactly the widest retention is not below its own
@@ -1817,18 +1819,18 @@ static int channel_span_received(const char *chname, time_t lo, time_t hi)
     uint64_t span = (uint64_t)widest * 1000ULL;
     uint64_t base = (uint64_t)CurrentTime * 1000ULL;
     uint64_t horizon = base > span ? base - span : 0;
-    if (horizon > lo_ms)
-      lo_ms = horizon;
+    if (horizon > *lo_ms)
+      *lo_ms = horizon;
   }
-  return history_recv_covers(chname, lo_ms, hi_ms);
 }
 
 /** Should this page fan out to the storage peers (W5 Task 9)?
- *   - a channel: when the span the page claims (claim_span) is not one
- *     this server received (channel_span_received), or overlaps a storage
- *     peer's absence -- a full page included, a short one over a received
- *     span not (it is complete);
- *   - a PM target: when the page is short, or the span overlaps an absence.
+ *   - a channel: when the span the page claims (claim_span), clamped
+ *     (channel_span_clamp), is not one this server received
+ *     (history_recv_covers), or overlaps a storage peer's absence -- a full
+ *     page included, a short one over a received span not (it is complete);
+ *   - a PM target: when the page is short, or the claimed span overlaps an
+ *     absence.
  * An overlapping absence that is still open (that store is away now) sets
  * *@a partial.
  * @return the reason (enum fed_reason), FED_WHY_NONE for no. */
@@ -1839,6 +1841,7 @@ static int federation_wanted(const char *target, enum fed_page page,
                              int *partial)
 {
   time_t r1 = ref_unix_secs(t1, v1), r2 = ref_unix_secs(t2, v2), lo, hi;
+  uint64_t lo_ms, hi_ms;
   int desc = 0, open_hit = 0, absent;
 
   if (page == FP_BETWEEN) {
@@ -1847,15 +1850,26 @@ static int federation_wanted(const char *target, enum fed_page page,
       desc = r1 > r2;
   }
   claim_span(page, rows, count, limit, r1, r2, desc, &lo, &hi);
-  absent = absence_overlap(lo, hi, &open_hit);
-  if (absent && open_hit)
-    *partial = 1;
   if (!IsChannelName(target)) {
+    absent = absence_overlap(lo, hi, &open_hit);
+    if (absent && open_hit)
+      *partial = 1;
     if (count < limit)
       return FED_WHY_SHORT;
     return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
   }
-  if (!channel_span_received(target, lo, hi))
+  channel_span_clamp(target, lo, hi, &lo_ms, &hi_ms);
+  /* An inverted span (the page lies wholly before the channel's creation:
+   * a registered channel's earlier incarnation) is never received; its
+   * absence check keeps the span as claimed. */
+  if (lo_ms <= hi_ms)
+    absent = absence_overlap((time_t)(lo_ms / 1000ULL), (time_t)(hi_ms / 1000ULL),
+                             &open_hit);
+  else
+    absent = absence_overlap(lo, hi, &open_hit);
+  if (absent && open_hit)
+    *partial = 1;
+  if (!history_recv_covers(target, lo_ms, hi_ms))
     return FED_WHY_UNRECEIVED;
   return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
 }

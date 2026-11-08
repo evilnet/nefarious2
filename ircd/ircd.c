@@ -877,6 +877,7 @@ static void presence_alive_callback(struct Event* ev)
 {
   (void)ev;
   presence_alive_tick();
+  history_recv_alive_tick();   /* the receive windows' own (W5 Task 9) */
 }
 
 /** Compute the effective interval for the history_purge_timer.
@@ -1409,16 +1410,10 @@ int main(int argc, char **argv) {
 
     /* Receive windows (W5 Task 9): close every window the last run left
      * open -- a crash, or a clean DIE/RESTART (the stores close before
-     * clients leave) -- at the last time it is known to have been alive:
-     * the newest stored row, or presence's last-alive stamp when later (a
-     * quiet server's newest row alone closes early).  Nothing opens again
-     * until the first storage peer's burst has ended. */
-    {
-      uint64_t alive_ms = presence_boot_alive_ms();
-      if (newest_row_ms > alive_ms)
-        alive_ms = newest_row_ms;
-      history_recv_boot(alive_ms);
-    }
+     * clients leave) -- at the windows' own heartbeat, the last time a
+     * build that keeps them was running.  Nothing opens again until the
+     * first storage peer's burst has ended. */
+    history_recv_boot();
   }
 #endif
 

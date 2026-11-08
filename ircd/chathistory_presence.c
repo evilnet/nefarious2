@@ -136,18 +136,10 @@ int presence_account_store_ready(void)
  * history store holds, handed in by ircd.c before presence_init so this
  * module stays free of history.c (the cmocka harness links it alone). */
 static uint64_t      boot_alive_hint_ms = 0;
-/** What presence_init's boot-close took as the last time the previous run
- * was alive (epoch ms; presence_boot_alive_ms). */
-static uint64_t      boot_alive_used_ms = 0;
 
 void presence_set_boot_alive_hint(uint64_t newest_ms)
 {
   boot_alive_hint_ms = newest_ms;
-}
-
-uint64_t presence_boot_alive_ms(void)
-{
-  return boot_alive_used_ms;
 }
 
 /* ---------------------------------------------------------------- */
@@ -567,7 +559,6 @@ int presence_init(void)
       if (newest > last_alive)
         last_alive = newest;
     }
-    boot_alive_used_ms = last_alive > 0 ? (uint64_t)PRESENCE_TIME_MS(last_alive) : 0;
 
     if (it && wb && db_iter_seek_first(it) == DB_OK) {
       while (db_iter_valid(it)) {

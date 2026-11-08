@@ -843,14 +843,39 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
   }
 }
 
+/* Who counts (W5 Task 9; fix round 1, R30): a member a channel message
+ * is actually relayed toward.  The relay (sendcmdto_channel_butone,
+ * SKIP_DEAF) skips a deaf member and one that SILENCEs the sender, on the
+ * sender's own server (positive silence masks reach every server), so a
+ * deaf member never counts, nor one with any positive SILENCE mask: which
+ * senders it silences is not something a window can record.
+ *
+ * Topology assumption: a local alias (a bouncer device) is relayed the
+ * channel only through BX-aware hops.  Aliases are never introduced to a
+ * legacy server (bouncer-architecture #10), so behind a legacy hop a
+ * server whose only local member is an alias is not routed the channel's
+ * messages while counting here as receiving them.  Prod's shape (every
+ * fork server linked to the others through BX-aware servers, or holding
+ * the session's primary) keeps that from happening. */
 int channel_has_local_member(const struct Channel *chptr)
 {
   const struct Membership *member;
 
   for (member = chptr->members; member; member = member->next_member)
-    if (!IsZombie(member) && MyConnect(member->user))
+    if (!IsZombie(member) && MyConnect(member->user)
+        && !IsDeaf(member->user) && !has_positive_silence(member->user))
       return 1;
   return 0;
+}
+
+void channel_recv_member_changed(struct Client *cptr)
+{
+  struct Membership *member;
+
+  if (!cptr || !MyConnect(cptr) || !cli_user(cptr))
+    return;
+  for (member = cli_user(cptr)->channel; member; member = member->next_channel)
+    history_recv_update(member->channel);
 }
 
 /** Remove a person from a channel, given their Membership*
@@ -5296,8 +5321,12 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
 	recv_ts = atoi(modestr);
 
-	if (recv_ts && recv_ts < state.chptr->creationtime)
+	if (recv_ts && recv_ts < state.chptr->creationtime) {
 	  state.chptr->creationtime = recv_ts; /* respect earlier TS */
+	  /* An older incarnation: what this server received was not its
+	   * traffic (receive windows, W5 Task 9 fix round 1, M6). */
+	  history_recv_reset(state.chptr);
+	}
         else if (recv_ts > state.chptr->creationtime) {
           struct Client *sserv;
 

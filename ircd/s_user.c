@@ -3472,6 +3472,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
                   METADATA_VIS_PRIVATE);
   umode_md_finalize(umd, &umd_n, acptr, &setflags);
   umode_md_write(umd, umd_n, cptr, acptr, asker_device);
+  /* Channel messages skip a deaf member, so +d/-d on a local user may
+   * change whether this server receives its channels (receive windows,
+   * W5 Task 9).  Before the hold tail below, which may exit acptr. */
+  if (MyConnect(acptr) && !FlagHas(&setflags, FLAG_DEAF) != !IsDeaf(acptr))
+    channel_recv_member_changed(acptr);
   /* A login by this command (an SVSMODE/OPMODE +r of a registered user):
    * our connection takes the account's modes, each change echoed with
    * its M line (push-2 final fix wave, I-1) -- after this command's own
@@ -3884,6 +3889,18 @@ void set_snomask(struct Client *cptr, unsigned int newmask, int what)
  * @param[in] acptr Destination of message.
  * @return Non-zero if \a sptr is SILENCEd by \a acptr, zero if not.
  */
+int has_positive_silence(const struct Client *cptr)
+{
+  const struct Ban *sile;
+
+  if (!cptr || !cli_user(cptr))
+    return 0;
+  for (sile = cli_user(cptr)->silence; sile; sile = sile->next)
+    if (!(sile->flags & BAN_EXCEPTION))
+      return 1;
+  return 0;
+}
+
 int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg)
 {
   struct Ban *found;

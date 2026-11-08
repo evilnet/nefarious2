@@ -164,6 +164,7 @@ static void history_retire_quotas(struct db_cf *meta);
 static uint64_t history_trim_clock(void);
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count);
+static void recv_alive_write(void);
 static void history_trim_emptied(const char **targets, int count);
 static int history_trim_parse(const void *val, size_t vlen,
                               struct htrim_row_info *out);
@@ -654,6 +655,10 @@ void history_shutdown(void)
   history_trim_pass_pending = 0;
   history_trim_started = 0;
   htrim_shutdown();
+
+  /* The receive windows stay open on disk (clients leave after the stores
+   * close): the restart closes them at this last heartbeat. */
+  recv_alive_write();
 
   presence_shutdown();
   ml_content_shutdown(history_db_env);
@@ -3230,6 +3235,18 @@ int history_coverage_days(void)
  * has ended, and windows open and close from now on. */
 static int history_recv_linked = 0;
 
+/** The receive windows' own heartbeat (fix round 1, R32): a meta row in
+ * the recv_windows CF holding the last time (epoch ms, 8 bytes LE) a build
+ * that keeps the windows was running -- written each minute, at shutdown,
+ * by no older build.  A restart closes what the last run left open there,
+ * never at a time an older build in between kept alive.  Its key starts
+ * with a NUL; a channel's key is its folded name (build_target_key), which
+ * is never empty and never holds a NUL, so the two cannot meet, and the
+ * casefold migration (mask 1u: the empty first component) leaves it as it
+ * is.  The boot walk skips it. */
+static const char recv_alive_key[] = "\0recv_alive";
+#define RECV_ALIVE_KLEN (sizeof(recv_alive_key) - 1)
+
 uint64_t history_recv_now_ms(void)
 {
   uint64_t wall = hlc_wall_clock_ms();
@@ -3243,13 +3260,59 @@ uint64_t history_local_floor_ms(void)
   int days = feature_int(FEAT_CHATHISTORY_RETENTION);
 
   if (days > 0) {
+    /* Age-out deletes rows strictly older than now - retention: the
+     * newest that may be gone is one ms before that. */
     uint64_t span = (uint64_t)days * 86400000ULL;
     uint64_t now = (uint64_t)CurrentTime * 1000ULL;
-    uint64_t horizon = now > span ? now - span : 0;
-    if (horizon > floor)
-      floor = horizon;
+    uint64_t gone = now > span ? now - span - 1 : 0;
+    if (gone > floor)
+      floor = gone;
   }
   return floor;
+}
+
+/** Write the heartbeat (recv_alive_key) as now. */
+static void recv_alive_write(void)
+{
+  unsigned char v[8];
+  uint64_t now = history_recv_now_ms();
+  struct db_writebatch *wb;
+  int i;
+
+  if (!history_available || !history_cf_recv)
+    return;
+  for (i = 0; i < 8; i++)
+    v[i] = (unsigned char)(now >> (8 * i));
+  wb = db_writebatch_new(history_db_env);
+  if (!wb)
+    return;
+  if (db_writebatch_put(wb, history_cf_recv, recv_alive_key, RECV_ALIVE_KLEN,
+                        v, sizeof v) == DB_OK)
+    (void)db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+}
+
+void history_recv_alive_tick(void)
+{
+  recv_alive_write();
+}
+
+/** The heartbeat the last run left (epoch ms), 0 when there is none or it
+ * cannot be read. */
+static uint64_t recv_alive_read(void)
+{
+  struct db_val v = { NULL, 0 };
+  uint64_t ms = 0;
+  int i;
+
+  if (db_get(history_db_env, history_cf_recv, recv_alive_key, RECV_ALIVE_KLEN,
+             NULL, &v) != DB_OK)
+    return 0;
+  if (v.base && v.len == 8)
+    for (i = 7; i >= 0; i--)
+      ms = (ms << 8) | ((const unsigned char *)v.base)[i];
+  db_val_free(&v);
+  return ms;
 }
 
 /** Read the record under @a key into *@a r (zeroed when there is none).
@@ -3310,21 +3373,53 @@ static void recv_write(const char *key, int klen, const struct rcv_record *r,
     db_writebatch_destroy(wb);
 }
 
+/** Where a window that is not a creation opens: RCV_CLOSE_SLACK_MS after
+ * @a now (fix round 1, M4) -- traffic stamped after this server's JOIN,
+ * but sent before the JOIN reached the sender's server, is not routed
+ * here, as at the close (rcv_close backdates by the same slack). */
+static int64_t recv_open_late(uint64_t now)
+{
+  return (int64_t)(now + RCV_CLOSE_SLACK_MS);
+}
+
+/** Is @a chptr's one real member (users == 1) also everyone else there:
+ * every other member is one of its own session's aliases? */
+static int recv_sole_session(const struct Channel *chptr)
+{
+  const struct Membership *m;
+  const struct Client *real = NULL;
+
+  if (chptr->users != 1)
+    return 0;
+  for (m = chptr->members; m; m = m->next_member)
+    if (!IsMemberAlias(m)) {
+      real = m->user;
+      break;
+    }
+  if (!real)
+    return 0;
+  for (m = chptr->members; m; m = m->next_member)
+    if (IsMemberAlias(m) && cli_alias_primary(m->user) != real)
+      return 0;
+  return 1;
+}
+
 /** Where a window opened after link-up starts: the channel's creation when
- * the new member is its only member (users 1, no alias) in a channel this
- * very join created (its creationtime is this second: get_channel stamps
- * TStime() for a local creator) -- nobody could have spoken there before;
- * otherwise just after now.  A channel kept alive empty (+z, an Apass, a
- * delayed destruct) may have had remote members who spoke while this
- * server had none: its creation is not a safe start. */
+ * this very join created it (its creationtime is this second: get_channel
+ * stamps TStime() for a local creator) and its one member's session is all
+ * that is there (its own devices may have joined with it, in either order:
+ * fix round 1, M7) -- nobody could have spoken there before; otherwise
+ * recv_open_late().  A channel kept alive empty (+z, an Apass, a delayed
+ * destruct) may have had remote members who spoke while this server had
+ * none: its creation is not a safe start. */
 static int64_t recv_open_start(const struct Channel *chptr, uint64_t now)
 {
-  if (chptr->users == 1 && chptr->aliases == 0 && chptr->creationtime > 0
-      && chptr->creationtime >= TStime()) {
+  if (chptr->creationtime > 0 && chptr->creationtime >= TStime()
+      && recv_sole_session(chptr)) {
     uint64_t c = (uint64_t)chptr->creationtime * 1000ULL;
     return (int64_t)(c < now ? c : now);
   }
-  return (int64_t)now + 1;
+  return recv_open_late(now);
 }
 
 void history_recv_update(struct Channel *chptr)
@@ -3392,7 +3487,7 @@ void history_recv_link_up(void)
       continue;
     (void)recv_read(key, klen, &r);
     r.open_since = 0;   /* boot closed it; one left open is not this run's */
-    rcv_open(&r, (int64_t)now);
+    rcv_open(&r, recv_open_late(now));
     if (floor)
       rcv_clip(&r, (int64_t)floor);
     if ((rc = recv_stage(wb, key, klen, &r)) != DB_OK)
@@ -3427,9 +3522,15 @@ void history_recv_reset(struct Channel *chptr)
   klen = build_target_key(key, sizeof key, chptr->chname);
   if (klen < 0)
     return;
+  /* Nothing recorded and nothing open: nothing to write (a burst resets
+   * every channel new to this server). */
+  if (!chptr->recv_open
+      && db_exists(history_db_env, history_cf_recv, key, (size_t)klen,
+                   NULL) == DB_NOTFOUND)
+    return;
   memset(&r, 0, sizeof r);
   if (chptr->recv_open)
-    rcv_open(&r, (int64_t)history_recv_now_ms());
+    rcv_open(&r, recv_open_late(history_recv_now_ms()));
   recv_write(key, klen, &r, "reset", chptr->chname);
 }
 
@@ -3459,12 +3560,15 @@ int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_ms)
   char key[CHANNELLEN + 2];
   struct rcv_record r;
   struct Channel *chptr;
+  uint64_t floor;
   int klen;
 
   if (!chname || !history_available || !history_cf_recv)
     return 0;
-  if (lo_ms < history_local_floor_ms())
-    return 0;                                   /* rows there may be gone */
+  floor = history_local_floor_ms();
+  if (floor && lo_ms <= floor)
+    return 0;           /* rows there may be gone (the floor is the newest
+                         * ms that may be deleted, as rcv_clip reads it) */
   klen = build_target_key(key, sizeof key, chname);
   if (klen < 0 || recv_read(key, klen, &r) != 1)
     return 0;
@@ -3480,8 +3584,10 @@ int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_ms)
 
 /** history_recv_boot's work on one stored record (@a k, @a kl; value
  * @a v, @a vl): staged on @a wb when it changed, counted in @a n
- * ([0] closed, [1] deleted, [2] rewritten).  @return DB_OK or the failing
- * batch status. */
+ * ([0] closed, [1] deleted, [2] rewritten).  A window left open closes at
+ * @a alive_ms (the heartbeat; less the slack), or, with no heartbeat
+ * (@a alive_ms 0), is dropped: nothing says how long it stayed open.
+ * @return DB_OK or the failing batch status. */
 static int recv_boot_one(struct db_writebatch *wb, const void *k, size_t kl,
                          const void *v, size_t vl, uint64_t alive_ms,
                          uint64_t floor, unsigned int n[3])
@@ -3490,16 +3596,20 @@ static int recv_boot_one(struct db_writebatch *wb, const void *k, size_t kl,
   struct rcv_record r;
   int len;
 
-  if (!k || !kl || kl > CHANNELLEN + 1)
-    return DB_OK;                               /* not a channel's key */
+  if (!k || !kl || kl > CHANNELLEN + 1 || ((const char *)k)[0] == '\0')
+    return DB_OK;                   /* the heartbeat, not a channel's key */
   if (!v || rcv_unpack((const unsigned char *)v, vl, &r) != 0) {
     /* Undecodable: what it claimed is unknown, so it claims nothing. */
     n[1]++;
     return db_writebatch_del(wb, history_cf_recv, k, kl);
   }
-  if (r.open_since)
+  if (r.open_since) {
     n[0]++;
-  rcv_boot_close(&r, (int64_t)alive_ms);
+    if (alive_ms)
+      rcv_boot_close(&r, (int64_t)alive_ms);
+    else
+      r.open_since = 0;
+  }
   if (floor)
     rcv_clip(&r, (int64_t)floor);
   if (r.count == 0) {
@@ -3513,16 +3623,20 @@ static int recv_boot_one(struct db_writebatch *wb, const void *k, size_t kl,
   return db_writebatch_put(wb, history_cf_recv, k, kl, buf, (size_t)len);
 }
 
-void history_recv_boot(uint64_t alive_ms)
+void history_recv_boot(void)
 {
   struct db_iter *it;
   struct db_writebatch *wb;
-  uint64_t floor;
+  uint64_t floor, alive_ms;
   unsigned int n[3] = { 0, 0, 0 };
   int rc;
 
   if (!history_available || !history_cf_recv)
     return;
+  /* The last time a build that keeps the windows was running (R32): never
+   * the newest row or presence's stamp, which an older build in between
+   * keeps writing while it leaves the windows as they were. */
+  alive_ms = recv_alive_read();
   it = db_iter_open(history_db_env, history_cf_recv, NULL);
   wb = it ? db_writebatch_new(history_db_env) : NULL;
   if (!it || !wb) {
@@ -3558,8 +3672,9 @@ void history_recv_boot(uint64_t alive_ms)
                 ? db_env_last_error(history_db_env) : "no backend detail");
   else if (n[0] || n[1] || n[2])
     log_write(LS_SYSTEM, L_INFO, 0,
-              "history: receive windows: %u left open closed at %llu ms, "
+              "history: receive windows: %u left open closed at %s%llu ms, "
               "%u emptied records deleted, %u rewritten", n[0],
+              alive_ms ? "" : "(no heartbeat: dropped) ",
               (unsigned long long)alive_ms, n[1], n[2]);
 }
 
