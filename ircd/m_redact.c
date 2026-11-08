@@ -229,6 +229,17 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* A msgid no store can hold (HISTORY_MSGID_LEN) names no message.  One
+   * with a valid time prefix made the store's key builder fail, the lookup
+   * read as a store error, and the "trust the client" branch below stored,
+   * showed and relayed the REDACT with no authorization at all. */
+  if (strlen(msgid) >= HISTORY_MSGID_LEN) {
+    char fail_ctx[BUFSIZE];   /* spec: <target> <msgid> */
+    ircd_snprintf(0, fail_ctx, sizeof(fail_ctx), "%s %s", target, msgid);
+    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx, "Message not found");
+    return 0;
+  }
+
   /* Determine authorization level */
   is_oper = IsOper(sptr);
   is_chanop = IsChanOp(member);

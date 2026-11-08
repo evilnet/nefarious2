@@ -5569,9 +5569,12 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
   ircd_snprintf(0, fctx, sizeof(fctx), "%s %s", req->target, ctx->msgid);
   reason = ctx->reason[0] ? ctx->reason : NULL;
 
-  /* The parent: the first non-context row (CH C marked the children). */
-  for (msg = req->fed_msgs; msg && msg->is_context; msg = msg->next)
-    ;
+  /* The parent: the first non-context row (CH C marked the children)
+   * that IS the requested message -- a row with any other msgid is not
+   * it, and authorizing against it would judge the wrong message. */
+  for (msg = req->fed_msgs; msg; msg = msg->next)
+    if (!msg->is_context && strcmp(msg->msgid, ctx->msgid) == 0)
+      break;
   if (!msg) {
     /* No store returned it.  When a store never answered (timeout, SQUIT,
      * CH E U) the row may still exist there, but the redaction spec has
@@ -5689,6 +5692,10 @@ static void redact_fed_answer(struct FedRequest *req, struct RedactContext *ctx,
     sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone_v3(sptr, CMD_REDACT, sptr, "%s %s :%s",
                           req->target, ctx->msgid, reason ? reason : "");
+    /* sendcmdto_set_s2s_tags armed the client event time too; clear it, as
+     * complete_redact_fed did before W5, or the next bare
+     * sendcmdto_set_client_msgid stamps this REDACT's time as its @time. */
+    sendcmdto_set_client_msgid(NULL);
 
     /* This store's own row, under the same msgid and time: a tombstone, as
      * the message is not here (a local miss) -- or beside it, should it
@@ -6694,7 +6701,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
-      history_redact_index_scan(since, lim, rdx_scan_emit_cb, &sc, &trunc);
+      /* A scan that could not start (no redact_index CF, the iterator
+       * failed) answered nothing: say so (U), or the requester reads a
+       * complete round and moves its watermark past every redaction this
+       * store holds.  A row unreadable mid-scan is skipped, as before. */
+      if (history_redact_index_scan(since, lim, rdx_scan_emit_cb, &sc, &trunc) < 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
       Debug((DEBUG_DEBUG, "CH Q D: since %llu -> %d row(s) trunc %d for %s",
              (unsigned long long)since, sc.n, trunc, reqid));
       if (trunc)
