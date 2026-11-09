@@ -121,12 +121,27 @@
  * @param[in] chptr Channel; its live incarnation is stamped on the row.
  * @param[in] victim The kicked member's nick.
  * @param[in] comment Kick reason.
+ * Every store passes the one gate every channel row passes
+ * (channel_store_wanted, W5 Task 13).  The kicker's server, the Net Rider
+ * pass and the swap kick made the KICK here (\a ours): they store it
+ * whatever their members (the Net Rider rows are stored after the riders
+ * left).  A relayed KICK (ms_kick) is stored only while a member of ours
+ * is in the channel, checked before make_zombie(), so a KICK of this
+ * server's only member is still stored here.  With
+ * CHATHISTORY_REQUIRE_AUTH on, a channel with no authenticated member
+ * that is not +H stores none of them.
+ *
+ * @param[in] src Who kicked, as the members saw it (&his for a server).
+ * @param[in] chptr Channel; its live incarnation is stamped on the row.
+ * @param[in] victim The kicked member's nick.
+ * @param[in] comment Kick reason.
  * @param[in] msgid The event's msgid, or NULL to mint one here.
  * @param[in] event_ms The event's time, or 0 for the mint time.
+ * @param[in] ours 1 when the KICK was made here, 0 for a relayed one.
  */
 void channel_store_kick(struct Client *src, struct Channel *chptr,
                         const char *victim, const char *comment,
-                        const char *msgid, uint64_t event_ms)
+                        const char *msgid, uint64_t event_ms, int ours)
 {
   char timestamp[32];
   char fallback_msgid[64];
@@ -145,6 +160,10 @@ void channel_store_kick(struct Client *src, struct Channel *chptr,
 
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    return;
+
+  /* The storage gate (see above) */
+  if (!channel_store_wanted(chptr, ours))
     return;
 
   /* The event's msgid, so clients and federated merges deduplicate */
@@ -322,7 +341,7 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * in front of the kicker and the victim only, so no row. */
     if (!IsDelayedJoin(member))
       channel_store_kick(sptr, chptr, cli_name(who), comment,
-                         kick_msgid[0] ? kick_msgid : NULL, kick_ms);
+                         kick_msgid[0] ? kick_msgid : NULL, kick_ms, 1);
 #endif
     /* The victim's presence interval closes at the kick's time, not at
      * whenever make_zombie's removal happens to run (P2). */
@@ -468,11 +487,14 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 #ifdef USE_ROCKSDB
       /* Our members saw it: the row, under the origin's msgid and time,
        * as they saw it (a server's KICK from the hidden server).  Not for
-       * a +D member the channel never showed: only the victim was told. */
+       * a +D member the channel never showed: only the victim was told.
+       * Relayed (ours = 0): stored only while a member of ours is in the
+       * channel -- here, before make_zombie() below, so a local victim
+       * still counts (W5 Task 13). */
       if (!IsDelayedJoin(member))
         channel_store_kick(IsServer(sptr) ? &his : sptr, chptr, cli_name(who),
                            comment, kick_msgid[0] ? kick_msgid : NULL,
-                           kick_time_ms);
+                           kick_time_ms, 0);
 #endif
       presence_set_event_time(kick_msgid[0] ? presence_event_time(kick_msgid, kick_time_ms) : 0);
       make_zombie(member, who, cptr, sptr, chptr);

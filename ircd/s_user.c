@@ -1649,6 +1649,12 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
           for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
               continue;
+            /* The storage gate every channel row passes (W5 Task 13), per
+             * channel: our own user's NICK is ours; a remote one is stored
+             * only where a member of ours is in the channel; and the
+             * CHATHISTORY_REQUIRE_AUTH rule. */
+            if (!channel_store_wanted(chan->channel, MyUser(sptr)))
+              continue;
             history_store_message(nick_msgid, timestamp, chan->channel->chname,
                                   NULL, old_sender, account, HISTORY_NICK,
                                   nick, NULL, owner);

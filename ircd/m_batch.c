@@ -1817,7 +1817,10 @@ process_multiline_batch(struct Client *sptr)
       history_owner_of(owner, sizeof(owner), sptr);
 
       if (is_channel) {
-        if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr))
+        /* The storage gate every channel row passes (W5 Task 13): our
+         * own user's batch is ours; the CHATHISTORY_REQUIRE_AUTH rule. */
+        if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr)
+            && channel_store_wanted(chptr, 1))
           store_target = chptr->chname;
       } else if (IsServer(sptr) || IsServer(acptr)
                  || IsServiceClient(sptr) || IsServiceClient(acptr)) {
@@ -2727,7 +2730,11 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       history_owner_of(owner, sizeof(owner), sptr);
 
       if (is_channel) {
-        if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr))
+        /* The storage gate every channel row passes (W5 Task 13): a
+         * relayed batch is stored only while a member of ours is in the
+         * channel; and the CHATHISTORY_REQUIRE_AUTH rule. */
+        if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr)
+            && channel_store_wanted(chptr, 0))
           store_target = chptr->chname;
       } else if (IsServer(sptr) || IsServer(acptr)
                  || IsServiceClient(sptr) || IsServiceClient(acptr)) {

@@ -70,12 +70,19 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
-  /* Receiver-side storage (see store_kick_event): every server with
-   * the channel stores its own copy; the msgid is unified via the S2S
-   * tag, so federated merges dedup cleanly. */
+  /* Receiver-side storage (see channel_store_kick): every server with a
+   * member in the channel stores its own copy; the msgid is unified via
+   * the S2S tag, so federated merges dedup cleanly. */
 
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    return;
+
+  /* The storage gate every channel row passes (channel_store_wanted, W5
+   * Task 13): a local user's TOPIC is ours; a remote one (or a server's)
+   * is stored only while a member of ours is in the channel; and the
+   * CHATHISTORY_REQUIRE_AUTH rule. */
+  if (!channel_store_wanted(chptr, MyUser(sptr)))
     return;
 
   /* Check if sender has +Y (no storage) user mode */

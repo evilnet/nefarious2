@@ -214,7 +214,6 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   char sender[HISTORY_SENDER_LEN];
   char owner[HTC_OWNER_MAX];
   const char *account;
-  int has_local_interest;
 
   /* WebPush v2: channel-highlight pushes for held members.  PRIVMSG
    * only (channel NOTICEs are bot noise by design); before the history
@@ -230,33 +229,20 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
-  /* Determine if we have local interest in this channel:
-   * - Local sender: always interested (our user sent it)
-   * - Remote sender: only if we have local users in channel
-   * This prevents hub servers from storing messages they're just relaying.
-   */
-  if (MyConnect(sptr)) {
-    has_local_interest = 1;
-  } else {
-    struct Membership *member;
-    has_local_interest = 0;
-    for (member = chptr->members; member; member = member->next_member) {
-      if (MyConnect(member->user) || IsMemberAlias(member)) {
-        has_local_interest = 1;
-        break;
-      }
-    }
-  }
-
-  if (!has_local_interest) {
-    /* No local interest - don't store.
-     * STORE servers without users in a channel don't receive messages via P10
-     * relay anyway (P10 only sends to servers with channel members). They rely
-     * on CH W forwarding from non-STORE servers, which handles registered
-     * channel storage in process_write_forward().
-     */
+  /* The storage gate every channel row passes (channel_store_wanted, W5
+   * Task 13): a local sender's message is ours; a remote one is stored
+   * only while a member of ours (non-zombie, MyConnect) is in the channel,
+   * so a hub stores nothing for a channel it only relays toward others.
+   * A remote alias membership (a device on another server, mirrored here)
+   * is not interest: that device's own server stores the row.  And with
+   * CHATHISTORY_REQUIRE_AUTH on, a channel with no authenticated member
+   * that is not +H stores nothing: no unauthenticated client can ever
+   * query it, so the rows would be dead bytes (the delivered msgid still
+   * resolves to its mint time intrinsically, 2026-09 repack; no anchor
+   * row is needed).  A store with no member here is kept by CH W from a
+   * storeless server instead (process_write_forward, not gated). */
+  if (!channel_store_wanted(chptr, MyUser(sptr)))
     return;
-  }
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -276,22 +262,6 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
-
-  /* Storage gate: when CHATHISTORY_REQUIRE_AUTH is on, no unauthed
-   * client can ever query — storing into a channel with no authed
-   * member would be dead bytes that nobody can read.  Skip in that
-   * case (unless +H makes the channel public-history).  When
-   * REQUIRE_AUTH is off, store unconditionally — the admin has opted
-   * into open history and unauthed clients may pull these records.
-   * STRICT_PRESENCE only filters at replay, never gates storage. */
-  if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
-      && chptr->authusers == 0
-      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
-    return;   /* no content stored; the delivered msgid still resolves
-               * to its mint time intrinsically (2026-09 repack), so no
-               * anchor row is needed.  +Y/opt-out GAPs below are kept
-               * for their visible unavailable-marker role, not
-               * anchoring. */
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {

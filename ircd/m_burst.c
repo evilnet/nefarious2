@@ -792,7 +792,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     for (nr = 0; nr < nriders; nr++)
       channel_store_kick(&his, chptr, riders[nr].nick, "Net Rider",
                          riders[nr].msgid[0] ? riders[nr].msgid : NULL,
-                         riders[nr].ms);
+                         riders[nr].ms, 1);   /* made here: ours */
   }
 #endif
   MyFree(riders);

@@ -131,10 +131,13 @@ static int has_only_ephemeral_tags(const char *tags)
 /**
  * Store a TAGMSG in channel history for event-playback.
  * TAGMSG content is stored as the client-only tags.
+ * @param[in] ours 1 for a local client's TAGMSG (m_tagmsg), 0 for a
+ *            relayed one (ms_tagmsg): the storage gate's "made here".
  */
 static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
                                   const char *client_tags,
-                                  const char *broadcast_msgid, uint64_t event_ms)
+                                  const char *broadcast_msgid, uint64_t event_ms,
+                                  int ours)
 {
   char timestamp[32];
   char fallback_msgid[64];
@@ -161,6 +164,14 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
 
   /* Check if sender has +Y (no storage) user mode */
   if (IsNoStorage(sptr))
+    return;
+
+  /* A store keeps the row only past the one gate every channel row
+   * passes (channel_store_wanted, W5 Task 13): a local client's TAGMSG,
+   * or a member of ours in the channel now; and the
+   * CHATHISTORY_REQUIRE_AUTH rule.  The write-forward below is not
+   * gated: the store it reaches keeps a storeless server's channels. */
+  if (feature_bool(FEAT_CHATHISTORY_STORE) && !channel_store_wanted(chptr, ours))
     return;
 
   /* Use broadcast msgid so clients can deduplicate */
@@ -287,7 +298,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Store for chathistory event-playback — same msgid as broadcast.
        * Ahead of the S2S propagation below, as every write-forward is
        * (forward_channel_history, ircd_relay.c). */
-      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid, tagmsg_ms);
+      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid, tagmsg_ms, 1);
 
       /* Propagate to other servers (S2S). Use the same msgid and time
        * we generated for local delivery; client tags ride the ,C
@@ -501,7 +512,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * Use S2S msgid if available so clients can deduplicate. */
     store_tagmsg_history(sptr, chptr, client_tags,
                          cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL,
-                         history_event_time_ms(cptr));
+                         history_event_time_ms(cptr), 0);
 
     /* Propagate to other servers: client tags ride ,C instead of the
      * body (audit 0.1), and the origin's msgid/time are restated via

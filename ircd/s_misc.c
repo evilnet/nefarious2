@@ -294,6 +294,13 @@ static void store_quit_events(struct Client *sptr, const char *comment,
     /* Skip channels with +P (no storage) mode */
     if (member->channel->mode.exmode & EXMODE_NOSTORAGE)
       continue;
+    /* The storage gate every channel row passes (channel_store_wanted, W5
+     * Task 13), per channel: our own user's QUIT is ours; a remote one is
+     * stored only where a member of ours is in the channel; and the
+     * CHATHISTORY_REQUIRE_AUTH rule.  The quitter is still a member here,
+     * so it still counts toward the channel's authenticated members. */
+    if (!channel_store_wanted(member->channel, MyUser(sptr)))
+      continue;
 
     history_store_message(msgid, timestamp, member->channel->chname, NULL,
                           sender, account, HISTORY_QUIT,

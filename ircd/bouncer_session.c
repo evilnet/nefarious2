@@ -10473,7 +10473,8 @@ static void bounce_swap_kick(struct Channel *chptr, struct Client *face,
    * live incarnation.  With msgids off there is no row (m_kick would mint
    * one; recorded, W5 Task 3). */
   if (msgid[0])
-    channel_store_kick(&his, chptr, cli_name(face), "Net Rider", msgid, ms);
+    channel_store_kick(&his, chptr, cli_name(face), "Net Rider", msgid, ms,
+                       1);   /* made here: ours (W5 Task 13) */
 #endif
   /* The face, still the primary here, and with it its alias members
    * (bounce_sync_alias_part); counts move as for any part.  The account's

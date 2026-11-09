@@ -114,26 +114,23 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Events store UNCONDITIONALLY (send-time filtering per client cap
-   * happens in should_send_message_type): every delivered msgid must
-   * be indexable, or event msgids become unusable anchors -- briefly
-   * shipped feature-gated and it broke ATTACH cursors on prod. */
-
-  /* Storage gate: when CHATHISTORY_REQUIRE_AUTH is on, unauthed
-   * clients can never query, so storing into a channel with no
-   * authed member would be dead bytes nobody can read.  Skip in that
-   * case (unless +H makes the channel public-history).  When
-   * REQUIRE_AUTH is off, store unconditionally — admin has chosen
-   * open history.  STRICT_PRESENCE only filters at replay, never
-   * gates storage.  Mirrors store_channel_history (ircd_relay.c).
+  /* Events are not filtered by the client caps here (send-time
+   * filtering per client cap happens in should_send_message_type):
+   * briefly shipped feature-gated, it broke ATTACH cursors on prod.
+   *
+   * The storage gate (W5 Task 13), the one every channel row passes:
+   * the event is ours -- a local user's own JOIN/PART/MODE/reveal, or
+   * this server's own MODE -- or a member of ours is in the channel at
+   * this moment (a remote subject never counts: a hub stores no event
+   * for a channel it only relays or merely knows); and, with
+   * CHATHISTORY_REQUIRE_AUTH on, the channel has an authenticated member
+   * or is +H.  An unstored event's msgid still resolves to its time
+   * intrinsically (2026-09 repack); no anchor row is needed.
    *
    * Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
    * not channel events (JOIN/PART/etc) which are metadata. */
-  if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
-      && chptr->authusers == 0
-      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
-    return;  /* msgid resolves intrinsically (2026-09 repack); no
-              * anchor row needed */
+  if (!channel_store_wanted(chptr, MyUser(sptr) || IsMe(sptr)))
+    return;
 
   /* Use provided msgid or generate a new one -- BEFORE reading the time:
    * minting advances the HLC and the row time must be the mint time. */
@@ -856,7 +853,11 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
  * server whose only local member is an alias is not routed the channel's
  * messages while counting here as receiving them.  Prod's shape (every
  * fork server linked to the others through BX-aware servers, or holding
- * the session's primary) keeps that from happening. */
+ * the session's primary) keeps that from happening.
+ *
+ * Paired with channel_has_local_interest() below (the storage gate, W5
+ * Task 13), which must never be narrower than this: a server whose window
+ * is open stores every channel row it is routed. */
 int channel_has_local_member(const struct Channel *chptr)
 {
   const struct Membership *member;
@@ -866,6 +867,50 @@ int channel_has_local_member(const struct Channel *chptr)
         && !IsDeaf(member->user) && !has_positive_silence(member->user))
       return 1;
   return 0;
+}
+
+/* Local interest (W5 Task 13): what a store keeps a channel's rows for --
+ * any non-zombie member with MyConnect: a user, a local bouncer device, a
+ * local held ghost (it stores for its replay), deaf, silencing and +D
+ * members included, since each of them is shown events and the lines it
+ * does not silence.  A remote alias membership (a device on another
+ * server, mirrored here as CHFL_ALIAS) is not: its own server stores.
+ *
+ * NEVER narrower than channel_has_local_member() above, which decides the
+ * receive windows: a row this server is routed while its window is open
+ * must be stored, or a page answered locally from that window misses it.
+ * This predicate is that one without the deaf and SILENCE conditions. */
+int channel_has_local_interest(const struct Channel *chptr)
+{
+  const struct Membership *member;
+
+  for (member = chptr->members; member; member = member->next_member)
+    if (!IsZombie(member) && MyConnect(member->user))
+      return 1;
+  return 0;
+}
+
+/* The one storage gate for a channel row a store keeps (W5 Task 13):
+ * PRIVMSG/NOTICE, TAGMSG, multiline, JOIN/PART/MODE (the reveal JOIN and
+ * the burst MODE included), TOPIC, KICK, QUIT and NICK.  A row is stored
+ * when it is ours (made here) or a member of ours is in the channel now,
+ * AND, with CHATHISTORY_REQUIRE_AUTH on, the channel has an authenticated
+ * member or is +H: unauthenticated clients can never query, so a row in a
+ * channel nobody can read would be dead bytes.  STRICT_PRESENCE only
+ * filters at replay, never here.
+ *
+ * Not for the CH W write-forward (process_write_forward stores what a
+ * storeless server sends it), REDACT rows and tombstones, PM stores, or
+ * the forwarding side of any store. */
+int channel_store_wanted(const struct Channel *chptr, int ours)
+{
+  if (!ours && !channel_has_local_interest(chptr))
+    return 0;
+  if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
+      && chptr->authusers == 0
+      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return 0;
+  return 1;
 }
 
 void channel_recv_member_changed(struct Client *cptr)

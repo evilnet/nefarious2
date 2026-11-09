@@ -541,8 +541,22 @@ extern void add_user_to_channel(struct Channel* chptr, struct Client* who,
  * local held ghost), not deaf (+d) and with no positive SILENCE mask?
  * What decides whether this server receives the channel's traffic (W5
  * Task 9): a remote alias membership (a BX V receiver's CHFL_ALIAS
- * member) never counts. */
+ * member) never counts.  channel_has_local_interest() (the storage gate)
+ * must never be narrower than this. */
 extern int channel_has_local_member(const struct Channel *chptr);
+/** Does @a chptr have a non-zombie member with MyConnect: a user, a local
+ * bouncer device, a local held ghost -- deaf, silencing and +D members
+ * included?  The local-interest half of the storage gate (W5 Task 13).
+ * Never narrower than channel_has_local_member() (the receive windows):
+ * every row inside an open window must be stored. */
+extern int channel_has_local_interest(const struct Channel *chptr);
+/** The storage gate for a channel row on a store (W5 Task 13): (@a ours
+ * || channel_has_local_interest()) AND the CHATHISTORY_REQUIRE_AUTH rule
+ * (with it on, a channel with no authenticated member that is not +H
+ * stores nothing).  @a ours = the event was made here: a local client's
+ * command, this server's own act.  Not used by CH W
+ * (process_write_forward), REDACT rows, PM stores or any write-forward. */
+extern int channel_store_wanted(const struct Channel *chptr, int ours);
 /** A local member's own relay state changed (+d, its first or last
  * positive SILENCE mask): re-decide the receive window of each of its
  * channels (history_recv_update). */
@@ -562,10 +576,13 @@ extern int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr
 extern void remove_user_from_channel(struct Client *sptr, struct Channel *chptr);
 #ifdef USE_ROCKSDB
 /* m_kick.c: one KICK row, "victim :comment", from src (&his for a server),
- * under the event's msgid and time (NULL / 0: minted here); +P skips. */
+ * under the event's msgid and time (NULL / 0: minted here); +P skips, and
+ * so does the storage gate (channel_store_wanted: ours = the KICK was made
+ * here -- a local kicker, the Net Rider pass, the swap kick). */
 extern void channel_store_kick(struct Client *src, struct Channel *chptr,
                                const char *victim, const char *comment,
-                               const char *msgid, uint64_t event_ms);
+                               const char *msgid, uint64_t event_ms,
+                               int ours);
 #endif
 extern void remove_user_from_all_channels(struct Client* cptr);
 extern void channel_account_adjust(struct Client *cptr, int delta);
