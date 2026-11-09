@@ -365,6 +365,36 @@ static void test_rdx_wm_complete_sets_start(void **state)
   assert_int_equal(900, wm);
 }
 
+/* W5 Push F, I-3: a catch-up round that leaves the store's REDACTs not all
+ * fetched, while the store stays linked, is retried without waiting for the
+ * next relink.  A failure (KEEP: a cut, an unread row, truncated with no
+ * row; or a round that could not start) backs off; the last round's SET
+ * with more left progressed and retries at the first interval; a continue
+ * starts its next round itself; a complete round needs nothing. */
+static void test_rdx_retry_decide(void **state)
+{
+  (void)state;
+  assert_int_equal(RDX_RETRY_BACKOFF, rdx_retry_decide(RDX_WM_KEEP, 0));
+  assert_int_equal(RDX_RETRY_BACKOFF, rdx_retry_decide(RDX_WM_KEEP, 1));
+  assert_int_equal(RDX_RETRY_SOON, rdx_retry_decide(RDX_WM_SET, 1));
+  assert_int_equal(RDX_RETRY_NONE, rdx_retry_decide(RDX_WM_SET, 0));
+  assert_int_equal(RDX_RETRY_NONE, rdx_retry_decide(RDX_WM_SET_CONTINUE, 1));
+}
+
+/* The backoff: 30 s, doubling, capped at 10 min. */
+static void test_rdx_retry_next_delay(void **state)
+{
+  (void)state;
+  assert_int_equal(30, rdx_retry_next_delay(0));
+  assert_int_equal(30, rdx_retry_next_delay(-5));
+  assert_int_equal(60, rdx_retry_next_delay(30));
+  assert_int_equal(120, rdx_retry_next_delay(60));
+  assert_int_equal(480, rdx_retry_next_delay(240));
+  assert_int_equal(600, rdx_retry_next_delay(480));
+  assert_int_equal(600, rdx_retry_next_delay(600));
+  assert_int_equal(600, rdx_retry_next_delay(1 << 30));
+}
+
 static void test_rdx_wm_truncated_no_rows_keeps(void **state)
 {
   uint64_t wm = 7;
@@ -1582,6 +1612,8 @@ int main(void)
     cmocka_unit_test(test_rdx_wm_round_cap_keeps_last),
     cmocka_unit_test(test_rdx_wm_complete_sets_start),
     cmocka_unit_test(test_rdx_wm_truncated_no_rows_keeps),
+    cmocka_unit_test(test_rdx_retry_decide),
+    cmocka_unit_test(test_rdx_retry_next_delay),
     cmocka_unit_test(test_redact_auth_owner_no_window),
     cmocka_unit_test(test_redact_auth_oper_window),
     cmocka_unit_test(test_redact_auth_chanop_others),

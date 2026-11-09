@@ -52,6 +52,8 @@ extern void redact_announce_local(struct Client *src, struct Channel *chptr,
 extern void redact_echo_requester(struct Client *sptr, const char *target,
                                   const char *msgid, const char *reason);
 static void redact_catchup_kick(unsigned int store_num);   /* design B trigger (defined with the catch-up) */
+static void rdx_retry_reset(int idx);    /* the catch-up retry (W5 Push F, I-3), with it */
+static void rdx_retry_cancel(int idx);
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
@@ -4334,6 +4336,7 @@ void clear_server_ad(struct Client *server)
   if (server_ads[idx] && server_ads[idx]->has_advertisement
       && server_ads[idx]->is_storage_server)
     absence_open(idx);   /* a known store is going away: remember it */
+  rdx_retry_cancel(idx);   /* its catch-up waits for its next advertisement */
   if (server_ads[idx]) {
     /* Free channel array if present */
     if (server_ads[idx]->channels) {
@@ -4435,6 +4438,7 @@ static int storage_peers_linked(void)
 static void ad_store_back(int idx)
 {
   absence_close(idx);   /* back: close its absence */
+  rdx_retry_reset(idx);   /* the kick below is the attempt (I-3) */
   redact_catchup_kick((unsigned int)idx);   /* what did we miss while it was away? */
   /* The first one after boot: this server receives the network's traffic
    * from now on, so its receive windows open (W5 Task 9; later calls do
@@ -5122,7 +5126,9 @@ struct RdxCatchup {
 
 static struct FedRequest *find_fed_request(const char *reqid);
 static void free_fed_request(struct FedRequest *req);
-static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round);
+static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms,
+                                               int round, int *slot_miss);
+static void rdx_retry_arm(int idx, int soon, const char *why);
 
 /* A CH D row -> a REDACT HistoryMessage on the request (target carried). */
 static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
@@ -5176,7 +5182,14 @@ static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
  *   not read) keeps it.  A truncated reply continues from its newest row for
  *   up to RDX_CATCHUP_ROUNDS rounds; after the last, the watermark stops at
  *   that row, never past rows it did not fetch, and the next catch-up asks
- *   for the rest.  A complete one sets it to when the round was asked. */
+ *   for the rest.  A complete one sets it to when the round was asked.
+ * - While the store stays linked, a round that keeps the watermark, a
+ *   continue that cannot start, and a last round that left more are asked
+ *   again (rdx_retry_decide: backed off from 30 s to 10 min; the last-round
+ *   case at 30 s), never only at the store's next relink: SEARCH (local),
+ *   the context redaction lookup (F-2) and the catch-up replay all trust
+ *   this store to hold every REDACT (W5 Push F, I-3).  A complete round
+ *   resets the backoff. */
 static void complete_redact_catchup(struct FedRequest *req)
 {
   struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
@@ -5249,17 +5262,41 @@ static void complete_redact_catchup(struct FedRequest *req)
             "REDACT catch-up from %s (round %d): applied %d, skipped %d applied, %d tombstone%s%s; %s",
             rc->store_yxx, rc->round, applied, repeats, tombstones, pbuf, gonebuf, why);
 
-  if (wd == RDX_WM_SET_CONTINUE)
-    start_redact_catchup(rc->store_yxx, rc->last_ms, rc->round + 1);
+  {
+    int idx = base64toint(rc->store_yxx);
+
+    if (wd == RDX_WM_SET_CONTINUE) {
+      int miss = 0;
+      if (!start_redact_catchup(rc->store_yxx, rc->last_ms, rc->round + 1, &miss))
+        rdx_retry_arm(idx, 0, miss ? "its next round found no free request slot"
+                                   : "its next round could not start");
+    } else {
+      switch (rdx_retry_decide(wd, req->fed_truncated)) {
+      case RDX_RETRY_BACKOFF:
+        rdx_retry_arm(idx, 0, why);
+        break;
+      case RDX_RETRY_SOON:
+        rdx_retry_arm(idx, 1, why);
+        break;
+      case RDX_RETRY_NONE:
+      default:
+        rdx_retry_reset(idx);
+        break;
+      }
+    }
+  }
 }
 
-static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round)
+static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms,
+                                               int round, int *slot_miss)
 {
   struct FedRequest *req;
   struct RdxCatchup *rc;
   struct Client *server;
   char reqid[32];
   int i;
+  if (slot_miss)
+    *slot_miss = 0;
   if (!feature_bool(FEAT_CHATHISTORY_FEDERATION) || !history_is_available())
     return NULL;
   server = FindNServer(store_yxx);
@@ -5268,8 +5305,16 @@ static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t s
   for (i = 0; i < MAX_FED_REQUESTS; i++)
     if (!fed_requests[i])
       break;
-  if (i >= MAX_FED_REQUESTS)
+  if (i >= MAX_FED_REQUESTS) {
+    /* It used to return here silently (W5 Push F, I-3): the caller now
+     * asks again while the store stays linked (rdx_retry_arm). */
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s (round %d): no free request slot",
+              store_yxx, round);
+    if (slot_miss)
+      *slot_miss = 1;
     return NULL;
+  }
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), ++fed_reqid_counter);
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
   rc = (struct RdxCatchup *)MyCalloc(1, sizeof(struct RdxCatchup));
@@ -5296,17 +5341,156 @@ static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t s
 }
 
 /* Trigger: a store just (re)advertised itself -- first sight after our
- * boot, or back after a split.  Ask it for what we may have missed since
- * our watermark (60 s slack; 0 = everything, bounded per round). */
+ * boot, or back after a split -- or its retry came round (rdx_retry_cb).
+ * Ask it for what we may have missed since our watermark (60 s slack; 0 =
+ * everything, bounded per round).  No free request slot: asked again
+ * while it stays linked. */
 static void redact_catchup_kick(unsigned int store_num)
 {
   char yxx[4];
   uint64_t wm;
+  int miss = 0;
   if (!feature_bool(FEAT_CHATHISTORY_FEDERATION) || !history_is_available())
     return;
   wm = history_redact_watermark_get();
-  start_redact_catchup(inttobase64(yxx, (int)store_num, 2),
-                       wm > 60000 ? wm - 60000 : 0, 1);
+  if (!start_redact_catchup(inttobase64(yxx, (int)store_num, 2),
+                            wm > 60000 ? wm - 60000 : 0, 1, &miss) && miss)
+    rdx_retry_arm((int)store_num, 0, "no free request slot");
+}
+
+/* ---- the per-store catch-up retry (W5 Push F, I-3) ------------------ */
+/* A catch-up that failed -- a slot miss at the kick, a round that kept the */
+/* watermark (a timeout, a CH E U, a row not read), a continue that could  */
+/* not start -- or stopped at RDX_CATCHUP_ROUNDS with more left used to    */
+/* wait for that store's next (re)advertisement, possibly weeks; SEARCH    */
+/* (local), F-2's authoritative lookup and the catch-up replay showed the  */
+/* redacted message meanwhile.  Now it is asked again while the store     */
+/* stays linked: one timer per store, backed off (rdx_retry_next_delay),  */
+/* reset by a complete round, dropped when the store leaves                */
+/* (clear_server_ad) or advertises again (ad_store_back kicks at once).    */
+/* No request slot is reserved for the catch-up: the retry covers a miss.  */
+
+struct RdxRetry {
+  struct Timer timer;
+  int idx;                 /**< the store's server_ads index */
+  int delay;               /**< the interval last armed, seconds (0: none yet) */
+  unsigned char armed;     /**< the timer is queued */
+  unsigned char in_cb;     /**< inside its expiry (timer_run holds the timer) */
+  unsigned char gone;      /**< the store left: freed at its ET_DESTROY */
+};
+static struct RdxRetry *rdx_retry[MAX_AD_SERVERS];
+
+/** Store @a idx, when it is linked here, advertises storage and its burst
+ * has ended; else NULL. */
+static struct Client *rdx_store_up(int idx)
+{
+  struct ChathistoryAd *ad;
+  struct Client *server;
+  char yxx[4];
+
+  if (idx < 0 || idx >= MAX_AD_SERVERS)
+    return NULL;
+  ad = server_ads[idx];
+  if (!ad || !ad->has_advertisement || !ad->is_storage_server || ad->eob_pending)
+    return NULL;
+  server = FindNServer(inttobase64(yxx, idx, 2));
+  if (!server || server == &me || !IsServer(server))
+    return NULL;
+  return server;
+}
+
+static void rdx_retry_cb(struct Event *ev)
+{
+  struct RdxRetry *rr = (struct RdxRetry *)t_data(ev_timer(ev));
+
+  if (!rr)
+    return;
+  switch (ev_type(ev)) {
+  case ET_EXPIRE: {
+    struct Client *server;
+
+    rr->armed = 0;
+    if (rr->gone || !(server = rdx_store_up(rr->idx)))
+      break;   /* gone, or not back yet: its next advertisement kicks */
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: asking again (after %d s)",
+              cli_name(server), rr->delay);
+    rr->in_cb = 1;
+    redact_catchup_kick((unsigned int)rr->idx);
+    rr->in_cb = 0;
+    break;
+  }
+  case ET_DESTROY:
+    if (rr->gone)
+      MyFree(rr);
+    break;
+  default:
+    break;
+  }
+}
+
+/** Ask store @a idx again later, while it stays linked: at the first
+ * interval when @a soon (its last round moved on and left more), else at
+ * the next backed-off one.  One retry at a time per store; nothing when it
+ * is not linked (its next advertisement kicks).  @a why is logged. */
+static void rdx_retry_arm(int idx, int soon, const char *why)
+{
+  struct RdxRetry *rr;
+  struct Client *server = rdx_store_up(idx);
+
+  if (!server)
+    return;
+  if (!(rr = rdx_retry[idx])) {
+    rr = (struct RdxRetry *)MyCalloc(1, sizeof(*rr));
+    rr->idx = idx;
+    rdx_retry[idx] = rr;
+  }
+  if (rr->armed)
+    return;
+  rr->delay = soon ? RDX_RETRY_FIRST_S : rdx_retry_next_delay(rr->delay);
+  /* Inside its own expiry timer_run still holds the timer: re-add it
+   * without timer_init (GEN_READD re-queues it after the callback). */
+  if (rr->in_cb)
+    timer_add(&rr->timer, rdx_retry_cb, (void *)rr, TT_RELATIVE, rr->delay);
+  else
+    timer_add(timer_init(&rr->timer), rdx_retry_cb, (void *)rr, TT_RELATIVE, rr->delay);
+  rr->armed = 1;
+  log_write(LS_SYSTEM, L_NOTICE, 0,
+            "REDACT catch-up from %s: %s; asking again in %d s while it stays linked",
+            cli_name(server), why, rr->delay);
+}
+
+/** Store @a idx's catch-up completed, or it advertised again (a fresh
+ * catch-up starts): the next failure starts at the first interval, and a
+ * queued retry is dropped. */
+static void rdx_retry_reset(int idx)
+{
+  struct RdxRetry *rr = (idx >= 0 && idx < MAX_AD_SERVERS) ? rdx_retry[idx] : NULL;
+
+  if (!rr)
+    return;
+  rr->delay = 0;
+  if (rr->armed) {
+    rr->armed = 0;
+    timer_del(&rr->timer);   /* ET_DESTROY: kept (not gone) */
+  }
+}
+
+/** Store @a idx left (clear_server_ad): its retry goes with it. */
+static void rdx_retry_cancel(int idx)
+{
+  struct RdxRetry *rr;
+
+  if (idx < 0 || idx >= MAX_AD_SERVERS || !(rr = rdx_retry[idx]))
+    return;
+  rdx_retry[idx] = NULL;
+  rr->gone = 1;
+  if (rr->armed) {
+    rr->armed = 0;
+    timer_del(&rr->timer);   /* ET_DESTROY frees it -- now, or after its expiry */
+  } else if (!rr->in_cb)
+    MyFree(rr);
+  /* else inside its expiry: timer_run's ET_DESTROY frees it */
 }
 
 static struct FedRequest *find_fed_request(const char *reqid)

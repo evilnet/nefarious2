@@ -123,6 +123,29 @@ enum rdx_wm  { RDX_WM_KEEP, RDX_WM_SET, RDX_WM_SET_CONTINUE };
 enum rdx_wm  rdx_watermark_decide(int cut, int truncated, int round, int max_rounds,
                                   uint64_t last_ms, uint64_t start_ms, uint64_t *wm_out);
 
+/* W5 Push F, I-3: whether a store's catch-up must be asked again while it
+ * stays linked, rather than at its next (re)advertisement.  From a
+ * finished round's rdx_watermark_decide outcome @a wd and whether more was
+ * left (@a truncated):
+ *  KEEP (a cut, an unread row, truncated with no row)  -> BACKOFF: retry
+ *    after the next backed-off interval (rdx_retry_next_delay);
+ *  SET after the last round with more left              -> SOON: it moved
+ *    on, so retry at the first interval to fetch the rest;
+ *  SET_CONTINUE (its next round starts at once)         -> NONE;
+ *  SET complete                                         -> NONE (the
+ *    caller resets the backoff).
+ * A round that could not start at all (no request slot, a continue lost)
+ * is a BACKOFF too; the caller decides that without a round. */
+enum rdx_retry { RDX_RETRY_NONE, RDX_RETRY_BACKOFF, RDX_RETRY_SOON };
+enum rdx_retry rdx_retry_decide(enum rdx_wm wd, int truncated);
+
+/* The catch-up retry's intervals (seconds): RDX_RETRY_FIRST_S after the
+ * first failure, doubling, at most RDX_RETRY_MAX_S. */
+#define RDX_RETRY_FIRST_S 30
+#define RDX_RETRY_MAX_S   600
+/* The interval after @a prev (0 or less: none yet). */
+int rdx_retry_next_delay(int prev);
+
 /* The one REDACT authorization rule, for a row found in this server's
  * store (m_redact) and for one a storage peer returned (complete_redact_fed,
  * m_chathistory.c), in order:

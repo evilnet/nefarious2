@@ -157,6 +157,28 @@ enum rdx_wm rdx_watermark_decide(int cut, int truncated, int round, int max_roun
   return rdx_wm_set(RDX_WM_SET, start_ms, wm_out);
 }
 
+enum rdx_retry rdx_retry_decide(enum rdx_wm wd, int truncated)
+{
+  switch (wd) {
+  case RDX_WM_KEEP:
+    return RDX_RETRY_BACKOFF;
+  case RDX_WM_SET:
+    return truncated ? RDX_RETRY_SOON : RDX_RETRY_NONE;
+  case RDX_WM_SET_CONTINUE:
+  default:
+    return RDX_RETRY_NONE;
+  }
+}
+
+int rdx_retry_next_delay(int prev)
+{
+  if (prev <= 0)
+    return RDX_RETRY_FIRST_S;
+  if (prev >= RDX_RETRY_MAX_S / 2)
+    return RDX_RETRY_MAX_S;
+  return prev * 2;
+}
+
 int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out)
 {
   const char *reason;
