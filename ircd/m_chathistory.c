@@ -723,10 +723,13 @@ static struct HistoryRowFilter *query_row_filter(struct Client *sptr,
 
 /** Copy @a in to @a out without the server's own reserved vendor tags
  * (`+evilnet.github.io/sid=`, `ssid=`, `rsid=`, `chathistory-gap`, and
- * the legacy `+afternet.org/sid=`; see is_reserved_vendor_tag(), the
- * single source of truth for this list -- shared with parse.c's
+ * the legacy `+afternet.org/sid=`).  Thin wrapper over the pure
+ * ircd_strip_reserved_vendor_tags() (ircd_string.c) -- the same
+ * filter ircd_relay.c's store_private_history() uses as defence in
+ * depth on the way IN, built on ircd_reserved_vendor_tag(), the
+ * single source of truth for this list, shared with parse.c's
  * capture-time reservation gate, so a future server-written tag only
- * needs adding there).  The PM markers exist for the ephemeral
+ * needs adding there.  The PM markers exist for the ephemeral
  * participant check in check_history_access and for naming a
  * conversation after the right session (replay.c), and carry session
  * ids that are nobody else's business; `chathistory-gap` never
@@ -737,25 +740,7 @@ static struct HistoryRowFilter *query_row_filter(struct Client *sptr,
  * @return @a out (empty when nothing else was there). */
 static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
 {
-  size_t pos = 0;
-
-  out[0] = '\0';
-  if (!in)
-    return out;
-  while (*in) {
-    const char *end = strchr(in, ';');
-    size_t len = end ? (size_t)(end - in) : strlen(in);
-    int internal = is_reserved_vendor_tag(in, len);
-    if (!internal && len > 0 && pos + len + 2 <= outsz) {
-      if (pos)
-        out[pos++] = ';';
-      memcpy(out + pos, in, len);
-      pos += len;
-      out[pos] = '\0';
-    }
-    in = end ? end + 1 : in + len;
-  }
-  return out;
+  return ircd_strip_reserved_vendor_tags(in, out, outsz);
 }
 
 /** Client line budget for the message body: 512 bytes for everything

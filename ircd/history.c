@@ -4442,9 +4442,10 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
      * immediately after a ';' separator): the server prepends its sid
      * tag at position 0, so an unanchored strstr would also accept the
      * needle as a substring of a longer client-supplied tag value.
-     * (Both vendor namespaces are reserved from client tags at
-     * capture, so a client cannot plant either needle in new
-     * records.) */
+     * (`sid` is one of the specific NAMES reserved under
+     * `+evilnet.github.io/` from client tags at capture, and the
+     * legacy `+afternet.org/` namespace stays reserved whole, so a
+     * client cannot plant either needle in new records.) */
     if (!m->client_tags[0])
       continue;
     for (ni = 0; ni < n_needles && !found; ni++) {

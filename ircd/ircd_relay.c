@@ -467,8 +467,23 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
    * one. */
   {
     char tagbuf[800];
+    char filtered_tags[800];
     size_t pos = 0;
     const char *eph_sessid = NULL;
+
+    /* Defence in depth: scrub any reserved vendor tag already sitting
+     * in the INCOMING client_tags -- e.g. relayed from another
+     * server's S2S ',C' field, which never passes through parse.c's
+     * capture-time gate the way a locally-submitted tag does -- before
+     * layering this server's own sid/ssid/rsid on top below.  A buggy
+     * or hostile fork peer forging one would otherwise sit right next
+     * to (not instead of) our own legitimate marker in the stored
+     * record. */
+    if (client_tags && *client_tags)
+      ircd_strip_reserved_vendor_tags(client_tags, filtered_tags, sizeof(filtered_tags));
+    else
+      filtered_tags[0] = '\0';
+
     if (!IsAccount(sptr) && cli_session_id(sptr)[0])
       eph_sessid = cli_session_id(sptr);
     else if (!IsAccount(acptr) && cli_session_id(acptr)[0])
@@ -484,8 +499,10 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
      * only when it is the same session (a bouncer primary and its
      * aliases share the id), never merely the same account -- an account
      * can be online under several nicks at once.  Stripped on playback
-     * with the sid marker (strip_internal_tags); the vendor namespace is
-     * reserved at tag capture, so a client cannot forge them. */
+     * (strip_internal_tags); `sid`/`ssid`/`rsid` are specific NAMES
+     * reserved under `+evilnet.github.io/` at tag capture, so a LOCAL
+     * client cannot forge them -- the filtering above covers the
+     * remaining S2S case. */
     if (cli_session_id(sptr)[0])
       pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
                            "%s+evilnet.github.io/ssid=%s", pos ? ";" : "",
@@ -494,11 +511,11 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
       pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
                            "%s+evilnet.github.io/rsid=%s", pos ? ";" : "",
                            cli_session_id(acptr));
-    if (client_tags && *client_tags)
+    if (*filtered_tags)
       pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
-                           "%s%s", pos ? ";" : "", client_tags);
+                           "%s%s", pos ? ";" : "", filtered_tags);
     history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                          account, type, text, pos ? tagbuf : client_tags,
+                          account, type, text, pos ? tagbuf : NULL,
                           owner);
   }
 }
