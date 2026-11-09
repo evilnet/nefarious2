@@ -4109,14 +4109,40 @@ void del_isupport(const char *name)
   touch_isupport();
 }
 
-/** Populate #isupport_lines from #isupport. */
+/** Populate #isupport_lines from #isupport.
+ *
+ * ircd_snprintf() returns the C99 "would-be" length even when its
+ * write was truncated (see its own doc comment).  This used to render
+ * each item directly into `buf + used` and then do `used += len` on
+ * that would-be length regardless -- so one ISUPPORT value longer
+ * than the room left on the current line (`usable - used`) made
+ * `used` run past `usable`, and on an unlucky value (long enough:
+ * CLIENTTAGDENY can run close to BUFSIZE since the hotfix 6 series)
+ * past BUFSIZE outright.  `used`/`usable`/`len` were plain `int`, so
+ * `usable - used` going negative became a huge size_t the next time
+ * it was handed to ircd_snprintf() as a buffer size, or the final
+ * `buf[used] = '\0'` wrote straight past buf[BUFSIZE].  Any
+ * add_isupport_s() value can trigger this given a long enough
+ * string, not just CLIENTTAGDENY -- NETWORK, a custom draft/ICON or
+ * draft/FILEHOST URL, the VAPID key, etc.  Reachable by an operator
+ * via config or SET, so this is reachable without a compromised
+ * client.
+ *
+ * Now: each item renders into its own scratch buffer first, so
+ * `used` only ever advances by what's ACTUALLY there (strlen() of
+ * that scratch buffer), never by a would-be length that might exceed
+ * it.  An item that doesn't fit on the current line starts a fresh
+ * one instead of overflowing it; an item too long to fit even alone
+ * on an empty line is logged and skipped, never written at all. */
 static void
 build_isupport_lines(void)
 {
   struct ISupport *is;
   struct SLink **plink;
   char buf[BUFSIZE];
-  int used, len, usable, item = 0;
+  char tmp[BUFSIZE];
+  size_t used, actual;
+  int len, usable, item = 0;
 
   /* Extra buffer space for :me.name 005 ClientNick <etc> */
   assert(isupport_lines == 0);
@@ -4128,20 +4154,19 @@ build_isupport_lines(void)
   used = 0;
 
   /* For each ISUPPORT feature, */
-  for (is = isupport; is; ) {
-    /* Try to append it to the buffer. */
+  for (is = isupport; is; is = is->is_next) {
+    /* Render into a scratch buffer, not into `buf` directly -- see
+     * the function comment for why `len` (ircd_snprintf()'s return)
+     * is never trusted for arithmetic that writes into `buf`. */
     switch (is->is_type) {
     case OPT_NONE:
-      len = ircd_snprintf(NULL, buf + used, usable - used,
-                          " %s", is->is_name);
+      len = ircd_snprintf(NULL, tmp, sizeof(tmp), " %s", is->is_name);
       break;
     case OPT_INT:
-      len = ircd_snprintf(NULL, buf + used, usable - used,
-                          " %s=%d", is->is_name, is->is_value.iv);
+      len = ircd_snprintf(NULL, tmp, sizeof(tmp), " %s=%d", is->is_name, is->is_value.iv);
       break;
     case OPT_STRING:
-      len = ircd_snprintf(NULL, buf + used, usable - used,
-                          " %s=%s", is->is_name, is->is_value.sv);
+      len = ircd_snprintf(NULL, tmp, sizeof(tmp), " %s=%s", is->is_name, is->is_value.sv);
       break;
     default:
       assert(0 && "Unhandled ISUPPORT option type");
@@ -4149,20 +4174,46 @@ build_isupport_lines(void)
       break;
     }
 
-    item++;
-    is = is->is_next;
+    actual = strlen(tmp);   /* what's ACTUALLY in tmp, truncated or not */
 
-    if (item < 13) {
-      used += len;
-    } else {
-      assert(used > 0);
-      *plink = make_link();
-      DupString((*plink)->value.cp, buf + 1);
-      (*plink)->next = 0;
-      plink = &(*plink)->next;
+    if (len < 0 || (size_t)len != actual) {
+      /* Truncated even inside a fresh BUFSIZE-sized scratch buffer:
+       * this one token cannot be advertised on any line, full or
+       * empty.  Skip it rather than clip it silently mid-value. */
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "ISUPPORT token %s is too long to advertise (%d bytes, max %zu)",
+                is->is_name, len, sizeof(tmp) - 1);
+      continue;
+    }
+
+    if (actual > (size_t)usable) {
+      /* Fits in the scratch buffer but not within one 005 line's
+       * byte budget even alone on an otherwise-empty line. */
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "ISUPPORT token %s is too long to advertise (%zu bytes, line budget %d)",
+                is->is_name, actual, usable);
+      continue;
+    }
+
+    if (used + actual > (size_t)usable || item >= 13) {
+      /* Doesn't fit on the current line, or the line already holds
+       * the usual 13-item cap -- flush it and start a fresh one.
+       * `actual <= usable` is already established above, so this
+       * item is guaranteed to fit once `used` resets to 0. */
+      if (used > 0) {
+        buf[used] = '\0';
+        *plink = make_link();
+        DupString((*plink)->value.cp, buf + 1);
+        (*plink)->next = 0;
+        plink = &(*plink)->next;
+      }
       used = 0;
       item = 0;
     }
+
+    memcpy(buf + used, tmp, actual + 1);
+    used += actual;
+    item++;
   }
 
   if (used > 0) {
@@ -4318,9 +4369,12 @@ void init_isupport(void)
    * Sanitised through ircd_clienttagdeny_isupport() (ircd_string.c),
    * the SAME pure helper set_isupport_clienttagdeny()'s change notify
    * uses -- this call runs at boot and unconditionally on every
-   * REHASH (s_conf.c rehash()), so using the raw feature value here
-   * used to silently undo both the "+" normalisation and any
-   * CLIENTTAGDENY SET made since the last config load. */
+   * REHASH (s_conf.c rehash()).  (A REHASH resetting a SET-only value
+   * back to its config/default is normal and by design, via
+   * feature_mark(); that part was never the bug.)  Using the raw
+   * feature value here instead of this sanitiser used to skip the
+   * "+" normalisation on whatever value WAS current post-REHASH --
+   * config-set or still-SET, either way. */
   {
     const char *deny_list = feature_str(FEAT_CLIENTTAGDENY);
     char clean[BUFSIZE];
