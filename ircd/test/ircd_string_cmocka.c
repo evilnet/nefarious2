@@ -612,19 +612,21 @@ static void test_ctd_value_bearing_tag_matches_by_name(void **state)
     assert_int_equal(CTD_MATCH("draft/x", "+draft/xy"), 0);
 }
 
-static void test_ctd_old_matcher_missed_spec_form(void **state)
+static void test_ctd_plus_star_is_deny_all(void **state)
 {
-    /* Semantic RED pin: reproduces the OLD is_client_tag_denied()
-     * positive-match rule (pre-fix, ircd.c ~:401-413) inline, showing
-     * the spec-form entry it failed to deny.  Kept after the fix
-     * lands so a regression that reintroduces the +-only requirement
-     * trips THIS test too, not just a missing symbol. */
-    const char *tag = "+draft/language";
+    /* Semantic RED pin (hotfix 6 fix round 1, LOW 4): the matcher must
+     * treat a bare "+*" entry the same as "*" (deny-all), matching
+     * what ircd_clienttagdeny_isupport() already normalises it to in
+     * the 005.  Reproduces the OLD first-pass deny-all check (which
+     * recognised only a literal "*", never "+*") inline, so a
+     * regression that reintroduces that gap trips THIS test too, not
+     * just the plain match() case below. */
+    const char *tag = "+draft/x";
     size_t tag_len = strlen(tag);
-    const char *deny_list = "draft/language";
-    const char *p, *pattern_start;
-    size_t pattern_len;
-    int explicitly_denied = 0;
+    const char *deny_list = "+*";
+    const char *p, *entry_start;
+    size_t entry_len;
+    int old_deny_all = 0;
     (void)state;
 
     p = deny_list;
@@ -633,18 +635,17 @@ static void test_ctd_old_matcher_missed_spec_form(void **state)
         p++;
       if (!*p)
         break;
-      pattern_start = p;
+      entry_start = p;
       while (*p && *p != ',')
         p++;
-      pattern_len = p - pattern_start;
-      /* OLD rule: a positive entry only matched with a literal '+'. */
-      if (pattern_start[0] == '+' &&
-          tag_len == pattern_len &&
-          ircd_strncmp(tag, pattern_start, pattern_len) == 0)
-        explicitly_denied = 1;
+      entry_len = p - entry_start;
+      /* OLD rule: only a literal bare "*" set deny-all. */
+      if (entry_len == 1 && entry_start[0] == '*')
+        old_deny_all = 1;
     }
-    assert_int_equal(explicitly_denied, 0);    /* old matcher: missed it (the bug) */
-    assert_int_equal(CTD_MATCH(deny_list, tag), 1); /* new matcher: denies it (fixed) */
+    (void)tag_len;
+    assert_int_equal(old_deny_all, 0);               /* old matcher: missed it (the bug) */
+    assert_int_equal(CTD_MATCH(deny_list, tag), 1);  /* new matcher: deny-all (fixed) */
 }
 
 
@@ -727,6 +728,157 @@ static void test_rvt_lookalike_shorter_than_prefix(void **state)
     (void)state;
     assert_int_equal(RVT("+afternet.org"), 0);
     assert_int_equal(RVT("+evilnet.github.io"), 0);
+}
+
+
+/* ========== ircd_clienttagdeny_isupport ========== */
+/* Fix round 1 (review of hotfix 6): the sanitiser that keeps the 005 in
+ * spec form is now the single function BOTH set_isupport_clienttagdeny()
+ * (ircd_features.c) and init_isupport() (s_user.c, run at boot and on
+ * every REHASH) call -- init_isupport() used to re-add the raw feature
+ * string, silently undoing the "+" normalisation and any runtime SET on
+ * the next REHASH (MEDIUM/HIGH 1).  These pin the sanitiser itself:
+ * MEDIUM 2 (negation-wins dedup missing the comma-less tail entry),
+ * LOW-MEDIUM 3 (space trimming), LOW 4 ("+*" -> "*"). */
+
+#define ISUP(in) (ircd_clienttagdeny_isupport((in), isup_buf, sizeof(isup_buf)))
+
+static char isup_buf[600];
+
+static void test_isup_negation_wins_plain_entry_last(void **state)
+{
+    /* Semantic RED pin: the pre-fix dedup searched for "name," directly
+     * in the output buffer, which the LAST entry never has (no trailing
+     * comma) -- so when the plain form landed last, the negation never
+     * won.  Reproduced here against a few of the exact inputs the
+     * review's h.c harness flagged. */
+    const char *old_result;
+    (void)state;
+
+    /* OLD behaviour (pre-fix set_isupport_clienttagdeny, reproduced
+     * inline): "name," is searched for directly in `clean`, which the
+     * tail entry (no trailing comma) never satisfies. */
+    {
+      static char old_clean[64];
+      old_clean[0] = '\0';
+      strcpy(old_clean, "x");   /* after processing "x" alone */
+      /* Processing "-x" next: probe "x," is absent from "x" (no comma). */
+      old_result = strstr(old_clean, "x,");
+    }
+    assert_null(old_result);                    /* old: missed it (the bug) */
+    assert_string_equal(ISUP("x,-x"), "-x");     /* new: negation wins (fixed) */
+
+    assert_string_equal(ISUP("a,x,-x"), "a,-x");
+    assert_string_equal(ISUP("+x,-x"), "-x");    /* fork-form plain, tail */
+    assert_string_equal(ISUP("x,-+x"), "-x");    /* fork-form negation, tail */
+}
+
+static void test_isup_negation_wins_plain_entry_not_last(void **state)
+{
+    /* Already worked pre-fix (plain entry NOT the comma-less tail);
+     * pinned so the rewrite doesn't regress it. */
+    (void)state;
+    assert_string_equal(ISUP("-x,x"), "-x");
+    assert_string_equal(ISUP("x,a,-x"), "-x,a");
+}
+
+static void test_isup_exact_duplicate_collapses(void **state)
+{
+    (void)state;
+    assert_string_equal(ISUP("+x,x"), "x");
+    assert_string_equal(ISUP("*,*"), "*");
+}
+
+static void test_isup_spaces_trimmed(void **state)
+{
+    /* RED at the pre-fix code: strtok_r split on ',' only, so a space
+     * right after the comma (or before it) rode along into the 005
+     * token verbatim, and a leading space on an entry blocked the '+'
+     * strip (body[0] was ' ', not '+'). */
+    (void)state;
+    assert_string_equal(ISUP("*, -draft/react"), "*,-draft/react");
+    assert_string_equal(ISUP(" +draft/x"), "draft/x");
+    assert_string_equal(ISUP("draft/x ,-draft/x"), "-draft/x");
+    assert_string_equal(ISUP("  "), "");
+    assert_string_equal(ISUP("*,,-draft/react, ,-draft/reply  ,"), "*,-draft/react,-draft/reply");
+}
+
+static void test_isup_plus_star_normalises_to_star(void **state)
+{
+    (void)state;
+    assert_string_equal(ISUP("+*"), "*");
+}
+
+static void test_isup_entries_that_vanish(void **state)
+{
+    (void)state;
+    assert_string_equal(ISUP("-"), "");
+    assert_string_equal(ISUP("+"), "");
+    assert_string_equal(ISUP("-+"), "");
+    assert_string_equal(ISUP(",,,"), "");
+}
+
+static void test_isup_empty_or_null_clears(void **state)
+{
+    (void)state;
+    assert_string_equal(ISUP(""), "");
+    isup_buf[0] = 'X';   /* poison first, confirm NULL still clears it */
+    ircd_clienttagdeny_isupport(NULL, isup_buf, sizeof(isup_buf));
+    assert_string_equal(isup_buf, "");
+}
+
+static void test_isup_zero_outsz_is_a_safe_noop(void **state)
+{
+    char tiny[1] = { 'X' };
+    (void)state;
+    ircd_clienttagdeny_isupport("draft/x", tiny, 0);
+    assert_int_equal(tiny[0], 'X');   /* untouched, not written out of bounds */
+}
+
+
+/* ========== ircd_strip_reserved_vendor_tags ========== */
+/* Hardening fold (review of hotfix 6): the same filter
+ * m_chathistory.c's strip_internal_tags() uses on the way OUT (hiding
+ * the server's own markers from chathistory playback) now also runs
+ * in ircd_relay.c's store_private_history() on the way IN, as defence
+ * in depth against a forged reserved tag arriving via another
+ * server's S2S ',C'. */
+
+static void test_strip_rvt_drops_reserved_keeps_others(void **state)
+{
+    char out[256];
+    (void)state;
+    ircd_strip_reserved_vendor_tags(
+      "+evilnet.github.io/sid=S;+evilnet.github.io/ssid=A;+evilnet.github.io/rsid=B;"
+      "+draft/reply=x;+evilnet.github.io/machine-translated=1",
+      out, sizeof(out));
+    assert_string_equal(out, "+draft/reply=x;+evilnet.github.io/machine-translated=1");
+}
+
+static void test_strip_rvt_afternet_whole_namespace(void **state)
+{
+    char out[64];
+    (void)state;
+    ircd_strip_reserved_vendor_tags("+afternet.org/sid=S;+draft/react=y", out, sizeof(out));
+    assert_string_equal(out, "+draft/react=y");
+}
+
+static void test_strip_rvt_sidecar_not_mistaken_for_sid(void **state)
+{
+    char out[64];
+    (void)state;
+    ircd_strip_reserved_vendor_tags("+evilnet.github.io/sidecar=1;+evilnet.github.io/rsid", out, sizeof(out));
+    assert_string_equal(out, "+evilnet.github.io/sidecar=1");
+}
+
+static void test_strip_rvt_empty_segments_and_null(void **state)
+{
+    char out[64];
+    (void)state;
+    ircd_strip_reserved_vendor_tags(";;+evilnet.github.io/sid=S;;", out, sizeof(out));
+    assert_string_equal(out, "");
+    ircd_strip_reserved_vendor_tags(NULL, out, sizeof(out));
+    assert_string_equal(out, "");
 }
 
 
@@ -1257,7 +1409,7 @@ int main(void)
         cmocka_unit_test(test_ctd_tag_without_plus_never_denied),
         cmocka_unit_test(test_ctd_empty_or_null_list_denies_nothing),
         cmocka_unit_test(test_ctd_value_bearing_tag_matches_by_name),
-        cmocka_unit_test(test_ctd_old_matcher_missed_spec_form),
+        cmocka_unit_test(test_ctd_plus_star_is_deny_all),
 
         /* ircd_reserved_vendor_tag */
         cmocka_unit_test(test_rvt_reserved_names_bare),
@@ -1268,6 +1420,22 @@ int main(void)
         cmocka_unit_test(test_rvt_evilnet_empty_name_not_reserved),
         cmocka_unit_test(test_rvt_unrelated_tag_not_reserved),
         cmocka_unit_test(test_rvt_lookalike_shorter_than_prefix),
+
+        /* ircd_clienttagdeny_isupport */
+        cmocka_unit_test(test_isup_negation_wins_plain_entry_last),
+        cmocka_unit_test(test_isup_negation_wins_plain_entry_not_last),
+        cmocka_unit_test(test_isup_exact_duplicate_collapses),
+        cmocka_unit_test(test_isup_spaces_trimmed),
+        cmocka_unit_test(test_isup_plus_star_normalises_to_star),
+        cmocka_unit_test(test_isup_entries_that_vanish),
+        cmocka_unit_test(test_isup_empty_or_null_clears),
+        cmocka_unit_test(test_isup_zero_outsz_is_a_safe_noop),
+
+        /* ircd_strip_reserved_vendor_tags */
+        cmocka_unit_test(test_strip_rvt_drops_reserved_keeps_others),
+        cmocka_unit_test(test_strip_rvt_afternet_whole_namespace),
+        cmocka_unit_test(test_strip_rvt_sidecar_not_mistaken_for_sid),
+        cmocka_unit_test(test_strip_rvt_empty_segments_and_null),
 
         /* ircd_utf8_clamp */
         cmocka_unit_test(test_utf8_clamp_fits_untouched),

@@ -492,84 +492,23 @@ set_isupport_utf8only(void)
  * The message-tags spec writes entries WITHOUT the client-only '+'
  * prefix ("*,-draft/react"); this fork's config has historically
  * carried entries with it ("+draft/language").  Both name the same
- * tag, so each entry's single leading '+' (after any leading '-')
- * is normalised away FIRST, before the #600 dedup below -- otherwise
- * "+draft/x" and "draft/x" in one config would look like two
- * different tags and both get advertised.  The 005 always ends up
- * in spec form either way; ircd_clienttagdeny_match() (ircd_string.c)
- * accepts both forms on the matching side. */
+ * tag, so the sanitiser (ircd_clienttagdeny_isupport(), ircd_string.c)
+ * normalises each entry's single leading '+' away, applies the #600
+ * dedup, and trims spaces -- see that function's doc comment.  The
+ * 005 always ends up in spec form either way;
+ * ircd_clienttagdeny_match() (ircd_string.c) accepts both forms on
+ * the matching side.
+ *
+ * init_isupport() (s_user.c) calls the SAME sanitiser at boot and on
+ * every REHASH; this notify and that call are the only two places
+ * CLIENTTAGDENY reaches the 005, and both must agree. */
 static void
 set_isupport_clienttagdeny(void)
 {
-    /* #600: "Servers MUST NOT advertise the same tag twice in the
-     * list, negated or otherwise."  Sanitize the operator string:
-     * exact duplicates dropped; when a tag appears both negated and
-     * plain, only the negated form survives (matching the evaluator,
-     * where negation wins). */
     const char *deny_list = feature_str(FEAT_CLIENTTAGDENY);
     static char clean[BUFSIZE];
-    char work[BUFSIZE];
-    char haystack[BUFSIZE + 2];
-    char *saveptr = NULL;
-    char *tok;
 
-    if (!deny_list || !*deny_list) {
-        del_isupport("CLIENTTAGDENY");
-        return;
-    }
-
-    ircd_strncpy(work, deny_list, sizeof(work));
-    clean[0] = '\0';
-    for (tok = strtok_r(work, ",", &saveptr); tok;
-         tok = strtok_r(NULL, ",", &saveptr)) {
-        /* Strip one leading '+' (after any leading '-') to the spec
-         * form BEFORE dedup/emission -- "*" is untouched (no +/-). */
-        char norm[520];
-        const char *body = tok;
-        int neg = (*body == '-');
-        const char *name;
-        char probe_neg[520], probe_plain[520];
-        size_t cur;
-
-        if (neg)
-            body++;
-        if (*body == '+')
-            body++;
-        if (neg)
-            ircd_snprintf(0, norm, sizeof(norm), "-%s", body);
-        else
-            ircd_strncpy(norm, body, sizeof(norm));
-
-        name = neg ? norm + 1 : norm;
-        if (!*name)
-            continue;
-        ircd_snprintf(0, probe_neg, sizeof(probe_neg), ",-%s,", name);
-        ircd_snprintf(0, probe_plain, sizeof(probe_plain), ",%s,", name);
-        ircd_snprintf(0, haystack, sizeof(haystack), ",%s,", clean);
-        if (strstr(haystack, probe_neg))
-            continue;   /* negated form already advertised */
-        if (strstr(haystack, probe_plain)) {
-            if (neg) {
-                /* plain form emitted earlier; negation must win */
-                char *hit = strstr(clean, probe_plain + 1);
-                while (hit && hit != clean && hit[-1] != ',')
-                    hit = strstr(hit + 1, probe_plain + 1);
-                if (hit && strlen(clean) + 2 < sizeof(clean)) {
-                    memmove(hit + 1, hit, strlen(hit) + 1);
-                    *hit = '-';
-                }
-            }
-            continue;
-        }
-        cur = strlen(clean);
-        if (cur + strlen(norm) + 2 >= sizeof(clean))
-            break;
-        if (cur) {
-            clean[cur++] = ',';
-            clean[cur] = '\0';
-        }
-        memcpy(clean + cur, norm, strlen(norm) + 1);
-    }
+    ircd_clienttagdeny_isupport(deny_list, clean, sizeof(clean));
 
     if (clean[0])
         add_isupport_s("CLIENTTAGDENY", clean);

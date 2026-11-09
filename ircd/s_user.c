@@ -4314,11 +4314,21 @@ void init_isupport(void)
   if (feature_bool(FEAT_RENAME_CONSENT))
     add_isupport_i("RELOCATE", feature_int(FEAT_RELOCATE_GRACE));
 
-  /* IRCv3 CLIENTTAGDENY - advertise blocked client-only tag patterns */
+  /* IRCv3 CLIENTTAGDENY - advertise blocked client-only tag patterns.
+   * Sanitised through ircd_clienttagdeny_isupport() (ircd_string.c),
+   * the SAME pure helper set_isupport_clienttagdeny()'s change notify
+   * uses -- this call runs at boot and unconditionally on every
+   * REHASH (s_conf.c rehash()), so using the raw feature value here
+   * used to silently undo both the "+" normalisation and any
+   * CLIENTTAGDENY SET made since the last config load. */
   {
     const char *deny_list = feature_str(FEAT_CLIENTTAGDENY);
-    if (deny_list && *deny_list)
-      add_isupport_s("CLIENTTAGDENY", deny_list);
+    char clean[BUFSIZE];
+    ircd_clienttagdeny_isupport(deny_list, clean, sizeof(clean));
+    if (clean[0])
+      add_isupport_s("CLIENTTAGDENY", clean);
+    else
+      del_isupport("CLIENTTAGDENY");
   }
 }
 

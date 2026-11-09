@@ -752,7 +752,9 @@ int csv_contains_token(const char* csv, const char* token)
  *     an exemption always wins over a denial of the same tag;
  *   - spaces around an entry are ignored; empty entries (from
  *     doubled commas, etc.) are skipped;
- *   - comparisons are case-sensitive per ircd_strncmp (ASCII fold).
+ *   - a bare "+*" is treated the same as "*" (deny-all), matching
+ *     what ircd_clienttagdeny_isupport() normalises it to;
+ *   - comparisons are case-INsensitive per ircd_strncmp (ASCII fold).
  *
  * @param[in] deny_list The FEAT_CLIENTTAGDENY value (comma-separated
  *                      entries); NULL or empty denies nothing.
@@ -786,8 +788,10 @@ int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_
     entry_len = p - entry_start;
     while (entry_len > 0 && entry_start[entry_len - 1] == ' ')
       entry_len--;
-    if (entry_len == 1 && entry_start[0] == '*')
-      deny_all = 1;
+    if ((entry_len == 1 && entry_start[0] == '*') ||
+        (entry_len == 2 && entry_start[0] == '+' && entry_start[1] == '*'))
+      deny_all = 1;   /* "*" and "+*" both mean deny-all (005 normalises
+                       * "+*" to "*"; the matcher must agree). */
   }
 
   /* Second pass: negated and positive entries, '+' normalised away. */
@@ -809,7 +813,8 @@ int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_
       entry_len--;
     if (entry_len == 0)
       continue;
-    if (entry_len == 1 && entry_start[0] == '*')
+    if ((entry_len == 1 && entry_start[0] == '*') ||
+        (entry_len == 2 && entry_start[0] == '+' && entry_start[1] == '*'))
       continue;   /* handled in the first pass */
 
     name = entry_start;
@@ -863,6 +868,139 @@ int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_
   if (deny_all)
     return 1;
   return 0;
+}
+
+/** Sanitize a CLIENTTAGDENY feature value into its 005 ISUPPORT form.
+ *
+ * Every caller that puts CLIENTTAGDENY on the wire -- the feature's own
+ * change notify (ircd_features.c set_isupport_clienttagdeny()) AND
+ * init_isupport()'s unconditional rebuild at boot and on every REHASH
+ * (s_user.c) -- must go through this ONE function, or whichever ran
+ * last wins: init_isupport() used to re-add the raw feature string
+ * verbatim after a REHASH, silently undoing both the "+" normalisation
+ * below and a prior runtime SET.
+ *
+ * - Each entry is trimmed of leading/trailing spaces; an empty entry
+ *   (from doubled commas, or an entry that was only spaces) is skipped.
+ * - One optional leading '+' (after any leading '-') is stripped, same
+ *   as ircd_clienttagdeny_match() -- spec form and fork form advertise
+ *   identically.  "+*" normalises to the bare "*" deny-all.
+ * - IRCv3 #600 ("Servers MUST NOT advertise the same tag twice in the
+ *   list, negated or otherwise"): exact duplicates are dropped; when a
+ *   tag appears both plain and negated, only the negated form
+ *   survives (matching ircd_clienttagdeny_match(), where negation
+ *   wins) -- regardless of which form came first, and regardless of
+ *   whether the surviving entry ends up as the last, comma-less token
+ *   in \a out (the lookup walks a comma-WRAPPED copy of \a out so
+ *   every entry, including the tail, is anchored on both sides; the
+ *   pre-fix code searched for "name," directly in \a out, which a
+ *   comma-less tail entry never has, so a plain-before-negated pair
+ *   where the plain entry landed last was never fixed up).
+ *
+ * @param[in] in The FEAT_CLIENTTAGDENY value; NULL/empty clears \a out.
+ * @param[out] out The sanitised, comma-separated 005 value.
+ * @param[in] outsz Size of \a out; \a out is always NUL-terminated.
+ * @return \a out. */
+const char *ircd_clienttagdeny_isupport(const char *in, char *out, size_t outsz)
+{
+  const char *p, *entry_start;
+  size_t entry_len;
+
+  if (outsz > 0)
+    out[0] = '\0';
+  if (!in || !*in || outsz == 0)
+    return out;
+
+  p = in;
+  while (*p) {
+    const char *name;
+    size_t name_len;
+    int negate;
+    char norm[BUFSIZE];
+    char haystack[BUFSIZE + 2];
+    char probe_neg[BUFSIZE + 2];
+    char probe_plain[BUFSIZE + 2];
+    char *hit;
+    size_t cur;
+
+    /* Trim: leading spaces/commas between entries, then trailing
+     * spaces on this one. */
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+    entry_start = p;
+    while (*p && *p != ',')
+      p++;
+    entry_len = p - entry_start;
+    while (entry_len > 0 && entry_start[entry_len - 1] == ' ')
+      entry_len--;
+    if (entry_len == 0)
+      continue;
+
+    /* Normalise: strip one leading '-' (negation), then one leading
+     * '+' (spec/fork equivalence; "+*" -> "*" deny-all falls out of
+     * this for free, since "*" alone is left untouched below). */
+    name = entry_start;
+    name_len = entry_len;
+    negate = (name_len > 0 && name[0] == '-');
+    if (negate) {
+      name++;
+      name_len--;
+    }
+    if (name_len > 0 && name[0] == '+') {
+      name++;
+      name_len--;
+    }
+    if (name_len == 0)
+      continue;
+    if (name_len > sizeof(norm) - 2)
+      name_len = sizeof(norm) - 2;   /* defensive clamp; BUFSIZE-sized
+                                      * config values never reach this */
+
+    if (negate) {
+      norm[0] = '-';
+      memcpy(norm + 1, name, name_len);
+      norm[name_len + 1] = '\0';
+    } else {
+      memcpy(norm, name, name_len);
+      norm[name_len] = '\0';
+    }
+
+    /* #600 dedup against what's in `out` so far. */
+    snprintf(haystack, sizeof(haystack), ",%s,", out);
+    snprintf(probe_neg, sizeof(probe_neg), ",-%.*s,", (int)name_len, name);
+    snprintf(probe_plain, sizeof(probe_plain), ",%.*s,", (int)name_len, name);
+
+    if (strstr(haystack, probe_neg))
+      continue;   /* negated form already present */
+
+    hit = strstr(haystack, probe_plain);
+    if (hit) {
+      if (negate) {
+        /* Plain form already present; negation wins.  `haystack` is
+         * `out` shifted right by the one leading sentinel comma, so
+         * `hit - haystack` is `name`'s offset into `out` too -- this
+         * works even when the plain entry is the last, comma-less
+         * token in `out`, which a direct search of `out` itself
+         * (for "name,") would miss. */
+        char *in_out = out + (hit - haystack);
+        if (strlen(out) + 2 < outsz) {
+          memmove(in_out + 1, in_out, strlen(in_out) + 1);
+          *in_out = '-';
+        }
+      }
+      continue;   /* plain form (or now-negated form) already present */
+    }
+
+    cur = strlen(out);
+    if (cur + strlen(norm) + 2 >= outsz)
+      break;
+    if (cur)
+      out[cur++] = ',';
+    memcpy(out + cur, norm, strlen(norm) + 1);
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------
@@ -942,6 +1080,45 @@ int ircd_reserved_vendor_tag(const char *tag, size_t tag_len)
         return 1;
   }
   return 0;
+}
+
+/** Copy \a in to \a out, dropping any ';'-separated client-only tag
+ * for which ircd_reserved_vendor_tag() is true.  One pure filter
+ * shared by m_chathistory.c's strip_internal_tags() (hiding these
+ * from chathistory playback) and ircd_relay.c's
+ * store_private_history() (defence in depth: scrub anything already
+ * in an incoming client_tags -- e.g. relayed from another server's
+ * S2S ',C' -- before layering this server's own sid/ssid/rsid on top,
+ * in case a buggy or hostile fork peer forged one; this is in
+ * addition to, never a substitute for, the capture-time gate in
+ * parse.c, which already keeps a tag matching a reserved name out of
+ * a LOCAL client's client_tags to begin with).
+ * @param[in] in The tag list to filter; NULL is treated as empty.
+ * @param[out] out The filtered, ';'-separated tag list.
+ * @param[in] outsz Size of \a out; \a out is always NUL-terminated.
+ * @return \a out (empty when nothing else was there). */
+const char *ircd_strip_reserved_vendor_tags(const char *in, char *out, size_t outsz)
+{
+  size_t pos = 0;
+
+  if (outsz > 0)
+    out[0] = '\0';
+  if (!in || outsz == 0)
+    return out;
+
+  while (*in) {
+    const char *end = strchr(in, ';');
+    size_t len = end ? (size_t)(end - in) : strlen(in);
+    if (!ircd_reserved_vendor_tag(in, len) && len > 0 && pos + len + 2 <= outsz) {
+      if (pos)
+        out[pos++] = ';';
+      memcpy(out + pos, in, len);
+      pos += len;
+      out[pos] = '\0';
+    }
+    in = end ? end + 1 : in + len;
+  }
+  return out;
 }
 
 /** Fill a vector of distinct names from a delimited input list.
