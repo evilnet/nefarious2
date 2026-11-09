@@ -5809,7 +5809,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   char s2s_subcmd;
   int i, server_count;
   const char **kids = NULL;   /* the children request's msgids (W5 Task 14) */
-  int k_n = 0, k_stores = 0;
+  int k_n = 0, k_stores = 0, pages_sent = 0, label_responded;
   time_t query_time = 0;
   enum HistoryRefType ref_type;
   const char *ref_value;
@@ -5980,6 +5980,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 
   /* Save label for async response delivery */
   req->label[0] = '\0';
+  label_responded = cli_label_responded(sptr);
   if (cli_label(sptr)[0]) {
     ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
     cli_label_responded(sptr) = 1;  /* Suppress generic ACK */
@@ -6066,6 +6067,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                       target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
                       s2s_ref2[0] ? s2s_ref2 : "*",
                       token, req->client_yxx, mask);
+        pages_sent++;
       }
 
       /* Then the children request (W5 Task 14), to every K-capable store
@@ -6093,6 +6095,20 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   }
   if (kids)
     MyFree(kids);
+
+  /* Nothing went out (fix round 1: the counts above and the loop apply
+   * the same skips, so this should not happen): no reply will come, and
+   * waiting for the timeout would only delay the page.  Give the rows back
+   * and answer locally.  A store that was counted but not asked is a page
+   * that is not complete, as for a missing slot. */
+  if (pages_sent == 0 && req->k_pending <= 0) {
+    fed_start_capacity_miss = server_count > 0;
+    req->local_msgs = NULL;   /* the caller keeps them and answers with them */
+    cli_label_responded(sptr) = label_responded;
+    req->timer_active = 0;
+    timer_del(&req->timer);   /* ET_DESTROY frees the request */
+    return NULL;
+  }
 
   return req;
 }
