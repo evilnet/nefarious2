@@ -7017,8 +7017,18 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (dest_numeric) {
       struct Client *dest = FindNServer(dest_numeric);
       if (dest && dest != &me) {
-        /* Forward to destination via P10 routing — don't process locally */
-        if (requester)
+        /* Forward to destination via P10 routing — don't process locally.
+         * The trailing parameter after the type mask goes on whole: a
+         * SEARCH's selectors, a children request's msgid list (CH Q K).
+         * A middle hop used to re-emit the parameters only up to the mask,
+         * so the far store got neither: it matched every row for a SEARCH
+         * (W5 Task 14, F-1).  An older middle hop still drops it. */
+        if (requester && parc >= 12 && parv[11])
+          sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s %s %s :%s",
+                        target, query_subcmd_str, ref, limit, reqid,
+                        dest_numeric, ref2 ? ref2 : "*", requester,
+                        parv[10][0] ? parv[10] : "0", parv[11]);
+        else if (requester)
           sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s %s%s%s",
                         target, query_subcmd_str, ref, limit, reqid,
                         dest_numeric, ref2 ? ref2 : "*", requester,
