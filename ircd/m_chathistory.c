@@ -1823,6 +1823,12 @@ static unsigned long fed_slot_misses;
  * receive window claimed what this server did not receive
  * (context_only_peer_rows; not counted when the peers' walks were wider). */
 static unsigned long fed_window_misses;
+/** The children request (CH Q K, W5 Task 14), since this server started:
+ * stores asked and the lines sent them; children kept, and dropped (past
+ * the request's cap, no parent, not a TAGMSG/REDACT); stores whose
+ * last-line E never came before the request's timeout. */
+static unsigned long fed_children_asked, fed_children_lines;
+static unsigned long fed_children_rows, fed_children_dropped, fed_children_unanswered;
 
 /** Count a start_fed_query outcome for a page that wanted it for @a why. */
 static void fed_count(const struct FedRequest *req, int why)
@@ -1843,6 +1849,11 @@ void chathistory_fed_report(struct Client *to)
              fed_started_why[FED_WHY_UNRECEIVED], fed_started_why[FED_WHY_SHORT],
              fed_started_why[FED_WHY_ABSENCE], fed_started_why[FED_WHY_CONTEXT],
              fed_slot_misses, fed_window_misses);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Federation children: asked %lu (lines %lu), rows %lu, "
+             "dropped %lu, unanswered %lu",
+             fed_children_asked, fed_children_lines, fed_children_rows,
+             fed_children_dropped, fed_children_unanswered);
 }
 
 int chathistory_retention_advertised(void);   /* below; handlers.h */
@@ -2699,6 +2710,12 @@ struct FedCtxPair {
   char tags[512];   /**< Child's client-only tags (CH R never carries them) */
 };
 #define MAX_FED_CTX 64
+/** The children leg's CH C declarations in flight (W5 Task 14).  Each one
+ * is removed when its row arrives (add_fed_child), and a responder sends a
+ * declaration right before its row, so this bounds what interleaves across
+ * responders.  A full table costs nothing: the row names its parent itself
+ * (hm_context_parent). */
+#define FED_K_DECL_MAX 16
 
 struct FedRequest {
   char reqid[32];                     /**< Request ID */
@@ -2738,6 +2755,16 @@ struct FedRequest {
   struct FedCtxPair ctx_pairs[MAX_FED_CTX]; /**< Declared context children (CH C) */
   int ctx_pair_count;
   unsigned char e_seen[MAX_AD_SERVERS / 8]; /**< responders whose CH E arrived (dup guard) */
+  /* The children request (CH Q K, W5 Task 14): its own reply leg, under
+   * <reqid>K (find_fed_request_leg).  Its replies never touch fed_count,
+   * fed_truncated, cut, partial or ctx_pairs: a context gap is never
+   * partial (user decision 2026-11-08 15:08). */
+  int k_pending;                      /**< K-capable stores whose last-line E has not come */
+  unsigned char k_e_seen[MAX_AD_SERVERS / 8]; /**< children leg CH E dup guard */
+  struct HistoryMessage *k_msgs;      /**< the children (is_context, ctx_parent set) */
+  int k_count;
+  struct FedCtxPair k_decl[FED_K_DECL_MAX]; /**< children leg CH C, removed on match */
+  int k_decl_count;
   void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
   void *cb_data;                      /**< Custom data for completion callback */
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
@@ -5089,6 +5116,34 @@ static struct FedRequest *find_fed_request(const char *reqid)
   return NULL;
 }
 
+/** The request a reply's reqid belongs to, and its leg: the page leg's
+ * reqid exactly, else the children leg's, <reqid>K (W5 Task 14; a minted
+ * reqid ends in a digit, so the two never collide).
+ * @param[out] k_leg 1 for the children leg, else 0. */
+static struct FedRequest *find_fed_request_leg(const char *reqid, int *k_leg)
+{
+  struct FedRequest *req;
+  size_t len;
+  int i;
+
+  *k_leg = 0;
+  if (!reqid)
+    return NULL;
+  if ((req = find_fed_request(reqid)))
+    return req;
+  len = strlen(reqid);
+  if (len < 2 || reqid[len - 1] != 'K')
+    return NULL;
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    req = fed_requests[i];
+    if (req && strlen(req->reqid) == len - 1 && strncmp(req->reqid, reqid, len - 1) == 0) {
+      *k_leg = 1;
+      return req;
+    }
+  }
+  return NULL;
+}
+
 /** Free a federation request */
 static void free_fed_request(struct FedRequest *req)
 {
@@ -5102,6 +5157,8 @@ static void free_fed_request(struct FedRequest *req)
     history_free_messages(req->local_msgs);
   if (req->fed_msgs)
     history_free_messages(req->fed_msgs);
+  if (req->k_msgs)
+    history_free_messages(req->k_msgs);
 
   /* Free custom callback data */
   if (req->cb_data) {
@@ -5187,6 +5244,65 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
     tail->next = msg;
   }
   req->fed_count++;
+}
+
+/** Add a row of the children leg (CH Q K, W5 Task 14) to req->k_msgs as a
+ * context child.  Its parent is its CH C declaration's (removed from the
+ * table on match), else the row's own (hm_context_parent: a TAGMSG's
+ * +reply / +draft/reply, a REDACT's first content word); the
+ * declaration's tags fill in when the row brought none.  Dropped (and
+ * counted) past FED_CHILDREN_MAX children, with no parent, or unless it is
+ * a TAGMSG or a REDACT.  Never touches fed_count, fed_truncated or cut: a
+ * child lost costs a page context, never a row. */
+static void add_fed_child(struct FedRequest *req, const char *msgid,
+                          const char *timestamp, int type,
+                          const char *sender, const char *account,
+                          const char *content, const char *client_tags)
+{
+  struct HistoryMessage *msg, **tp;
+  char parent[HISTORY_MSGID_LEN] = "";
+  char dtags[sizeof(req->k_decl[0].tags)] = "";
+  int i;
+
+  for (i = 0; i < req->k_decl_count; i++) {
+    if (strcmp(req->k_decl[i].child, msgid) == 0) {
+      ircd_strncpy(parent, req->k_decl[i].parent, sizeof(parent));
+      ircd_strncpy(dtags, req->k_decl[i].tags, sizeof(dtags));
+      req->k_decl[i] = req->k_decl[--req->k_decl_count];
+      break;
+    }
+  }
+  if (req->k_count >= FED_CHILDREN_MAX
+      || (type != HISTORY_TAGMSG && type != HISTORY_REDACT)) {
+    fed_children_dropped++;
+    return;
+  }
+  msg = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+  ircd_strncpy(msg->msgid, msgid, sizeof(msg->msgid));
+  ircd_strncpy(msg->timestamp, timestamp, sizeof(msg->timestamp));
+  ircd_strncpy(msg->target, req->target, sizeof(msg->target));
+  ircd_strncpy(msg->sender, sender, sizeof(msg->sender));
+  if (account && strcmp(account, "*") != 0)
+    ircd_strncpy(msg->account, account, sizeof(msg->account));
+  msg->type = type;
+  if (content)
+    ircd_strncpy(msg->content, content, sizeof(msg->content));
+  if (client_tags && client_tags[0])
+    ircd_strncpy(msg->client_tags, client_tags, sizeof(msg->client_tags));
+  else if (dtags[0])
+    ircd_strncpy(msg->client_tags, dtags, sizeof(msg->client_tags));
+  if (!parent[0] && !hm_context_parent(msg, parent, sizeof(parent))) {
+    history_free_messages(msg);
+    fed_children_dropped++;
+    return;
+  }
+  msg->is_context = 1;
+  ircd_strncpy(msg->ctx_parent, parent, sizeof(msg->ctx_parent));
+  for (tp = &req->k_msgs; *tp; tp = &(*tp)->next)
+    ;
+  *tp = msg;
+  req->k_count++;
+  fed_children_rows++;
 }
 
 /** Unlink federated context children (marked via CH C) from a
@@ -5350,6 +5466,22 @@ static void send_fed_response(struct FedRequest *req)
     } else
       merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
 
+    /* The children leg's (CH Q K, W5 Task 14) go after the page leg's
+     * context: the children of local rows a peer holds and this store
+     * lacks.  They are never counted (total is counted before them) and
+     * spliced like the rest, so a child already on the page -- attached
+     * locally, brought by the page leg, or a row of the merge -- appears
+     * once (hm_splice_context's hm_find_dup), and one whose parent the
+     * merge dropped is freed. */
+    if (req->k_msgs) {
+      struct HistoryMessage **tp = &fed_ctx;
+      while (*tp)
+        tp = &(*tp)->next;
+      *tp = req->k_msgs;
+      req->k_msgs = NULL;
+      req->k_count = 0;
+    }
+
     /* Count total */
     total = 0;
     for (struct HistoryMessage *m = merged; m; m = m->next)
@@ -5432,6 +5564,10 @@ static void fed_timeout_callback(struct Event *ev)
       req->fed_truncated = 1;
       req->cut = 1;   /* a responder never answered: partial */
     }
+    /* A children-leg store that never answered (W5 Task 14) costs the page
+     * context only: counted, never partial. */
+    if (req->k_pending > 0)
+      fed_children_unanswered += (unsigned long)req->k_pending;
     complete_fed_request(req);
     break;
 
@@ -5562,6 +5698,64 @@ static void fed_ref_to_unix(const char *ref, char *out, size_t n)
   /* HISTORY_REF_NONE ("*"): leave empty -> no direction preference. */
 }
 
+/** hm_children_wanted's test for a channel page's row (W5 Task 14): was
+ * [@a ms, now], widened to whole seconds, received here and clear of every
+ * storage peer's absence?  The page's own context check (federation_wanted),
+ * applied per row; @a ctx is the channel name. */
+static int fed_ctx_received(uint64_t ms, void *ctx)
+{
+  int partial = 0;
+  return channel_range_check((const char *)ctx, (time_t)(ms / 1000ULL), 0,
+                             &partial) == FED_WHY_NONE;
+}
+
+/** Is @a si's ad a store a children request may go to: it advertised
+ * storage with K, and it is a linked, non-U-lined server other than us
+ * (every skip the page loop applies, except retention: a child's time is
+ * not its parent's, so a short-retention store can hold a recent reaction
+ * to an old row; W5 Task 14). */
+static struct Client *children_store(int si)
+{
+  struct ChathistoryAd *ad = server_ads[si];
+  struct Client *server;
+  char yxx[4];
+
+  if (!ad || !ad->has_advertisement || !ad->is_storage_server
+      || !(ad->features & CH_AD_CHILDREN))
+    return NULL;
+  server = FindNServer(inttobase64(yxx, si, 2));
+  if (!server || server == &me || is_ulined_server(server))
+    return NULL;
+  return server;
+}
+
+/** Send one store the children request (CH Q K, W5 Task 14): @a ids packed
+ * into lines of at most @a room bytes of list, '+' on every line but the
+ * last ('*').  Every id fits a line (start_fed_query dropped any that
+ * could not).
+ * @return the lines sent. */
+static int send_children_request(struct Client *server, const char *dest_yxx,
+                                 const char *target, const char *kreqid,
+                                 char token, const char *client_yxx,
+                                 unsigned int mask, const char *const *ids,
+                                 int n, size_t room)
+{
+  char list[BUFSIZE];
+  int from = 0, lines = 0;
+
+  while (from < n) {
+    int got = hm_pack_ids(ids, n, from, room, list, sizeof(list));
+    if (got <= 0)
+      break;   /* not reached: every id fits */
+    from += got;
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s K %c %d %s %s * %c%s %x :%s",
+                  target, from < n ? '+' : '*', FED_CHILDREN_MAX, kreqid, dest_yxx,
+                  token, client_yxx, mask, list);
+    lines++;
+  }
+  return lines;
+}
+
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
                                            const char *requested,
                                            const char *subcmd, const char *ref,
@@ -5578,6 +5772,8 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   char s2s_ref2[64];
   char s2s_subcmd;
   int i, server_count;
+  const char **kids = NULL;   /* the children request's msgids (W5 Task 14) */
+  int k_n = 0, k_stores = 0;
   time_t query_time = 0;
   enum HistoryRefType ref_type;
   const char *ref_value;
@@ -5626,8 +5822,36 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
    * Layer 1: Also filters by channel advertisements if present.
    */
   server_count = count_storage_servers(target, query_time);
-  if (server_count == 0)
+
+  /* The children request (W5 Task 14): the page's own rows whose children
+   * a peer may hold and this store lacks -- those whose context range
+   * [row, now] was not received here (hm_children_wanted, newest first,
+   * the first rejection taking every older row).  A store that never held
+   * such a row still answers for it: its reply index is keyed by the
+   * parent's msgid.  Asked of every K-capable store, whatever the page's
+   * retention filter, so a request starts for it alone when no store
+   * covers the page.  Channel pages only. */
+  if (local_count > 0 && local_msgs && IsChannelName(target)
+      && feature_bool(FEAT_CHATHISTORY_FED_CHILDREN)) {
+    int si, rows = 0;
+    struct HistoryMessage *m;
+
+    for (si = 0; si < MAX_AD_SERVERS; si++)
+      if (children_store(si))
+        k_stores++;
+    for (m = local_msgs; m; m = m->next)
+      rows++;
+    if (k_stores > 0 && rows > 0) {
+      kids = (const char **)MyMalloc((size_t)rows * sizeof(*kids));
+      k_n = hm_children_wanted(local_msgs, fed_ctx_received, (void *)target,
+                               kids, rows);
+    }
+  }
+  if (server_count == 0 && k_n == 0) {
+    if (kids)
+      MyFree(kids);
     return NULL;  /* No storage servers to query */
+  }
 
   /* Find empty slot */
   for (i = 0; i < MAX_FED_REQUESTS; i++) {
@@ -5635,7 +5859,11 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
       break;
   }
   if (i >= MAX_FED_REQUESTS) {
-    fed_start_capacity_miss = 1;   /* callers: the page is not complete */
+    /* callers: the page is not complete -- unless only children were to be
+     * asked (no store covers the page): a context gap is never partial */
+    fed_start_capacity_miss = server_count > 0;
+    if (kids)
+      MyFree(kids);
     return NULL;  /* No room */
   }
 
@@ -5737,6 +5965,33 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
    */
   {
     int si;
+    unsigned int mask = requester_type_mask(sptr);
+    char token = ops_override ? 'F' : 'P';
+    char kreqid[sizeof(req->reqid) + 1] = "";
+    size_t room = 0;
+
+    /* The children request's lines: the fixed part measured once (every
+     * destination is two characters), the list in what is left of the 510
+     * a P10 line may carry, 4 bytes spare (send_ch_response's margin).  An
+     * id that could not fit a line alone is dropped (none can: a msgid is
+     * at most 63 bytes, the room at least ~245). */
+    if (k_n > 0) {
+      char fixed[BUFSIZE];
+      int j, kept = 0;
+      size_t flen;
+
+      ircd_snprintf(0, kreqid, sizeof(kreqid), "%sK", reqid);
+      ircd_snprintf(0, fixed, sizeof(fixed), "Q %s K * %d %s AA * %c%s %x",
+                    target, FED_CHILDREN_MAX, kreqid, token, req->client_yxx, mask);
+      flen = strlen(fixed);
+      room = (6 /* "<YY> CH " */ + flen + 2 /* " :" */ + 4 < 510)
+             ? 510 - 6 - flen - 2 - 4 : 0;
+      for (j = 0; j < k_n; j++)
+        if (strlen(kids[j]) <= room)
+          kids[kept++] = kids[j];
+      k_n = kept;
+    }
+
     for (si = 0; si < MAX_AD_SERVERS; si++) {
       struct ChathistoryAd *ad = server_ads[si];
       struct Client *server;
@@ -5753,32 +6008,44 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
       if (is_ulined_server(server))
         continue;
 
-      if (query_time != 0 && !server_retention_covers(server, query_time))
-        continue;
+      /* The page query, to a store whose retention covers the page. */
+      if (query_time == 0 || server_retention_covers(server, query_time)) {
+        /* Layer 1 channel-list filter intentionally NOT applied here —
+         * see the matching rationale in count_storage_servers(): CH A F
+         * is burst-time only and silently breaks federation for any
+         * channel created post-burst.  Keep this loop in sync with the
+         * counter; the bloom-filter design at
+         * .claude/plans/federation-dedup-s2s-msgid.md will revive a
+         * principled per-target filter when it lands. */
+        /* Trailing requester token (presence-aware paging on the
+         * responder): P<yxx> = filter to the requester's presence,
+         * F<yxx> = the requester asked for ":full" (the responder applies
+         * has_ops_override itself).  ref2 is "*" when absent so the token
+         * keeps its slot; older responders ignore both. */
+        /* Trailing type mask (hex): the row types the requester can
+         * receive, so the responder skips the rest INSIDE its walk and
+         * its limit+1 probe counts VISIBLE rows.  0 = all types.  Older
+         * responders ignore the extra param (audit #8). */
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s %c%s %x",
+                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
+                      s2s_ref2[0] ? s2s_ref2 : "*",
+                      token, req->client_yxx, mask);
+      }
 
-      /* Layer 1 channel-list filter intentionally NOT applied here —
-       * see the matching rationale in count_storage_servers(): CH A F
-       * is burst-time only and silently breaks federation for any
-       * channel created post-burst.  Keep this loop in sync with the
-       * counter; the bloom-filter design at
-       * .claude/plans/federation-dedup-s2s-msgid.md will revive a
-       * principled per-target filter when it lands. */
-      /* Trailing requester token (presence-aware paging on the
-       * responder): P<yxx> = filter to the requester's presence,
-       * F<yxx> = the requester asked for ":full" (the responder applies
-       * has_ops_override itself).  ref2 is "*" when absent so the token
-       * keeps its slot; older responders ignore both. */
-      /* Trailing type mask (hex): the row types the requester can
-       * receive, so the responder skips the rest INSIDE its walk and
-       * its limit+1 probe counts VISIBLE rows.  0 = all types.  Older
-       * responders ignore the extra param (audit #8). */
-      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s %c%s %x",
-                    target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
-                    s2s_ref2[0] ? s2s_ref2 : "*",
-                    ops_override ? 'F' : 'P', req->client_yxx,
-                    requester_type_mask(sptr));
+      /* Then the children request (W5 Task 14), to every K-capable store
+       * whatever the page's retention filter (children_store).  On its own
+       * reply leg, <reqid>K. */
+      if (k_n > 0 && children_store(si) == server) {
+        fed_children_lines += send_children_request(server, dest_yxx, target, kreqid,
+                                                     token, req->client_yxx, mask,
+                                                     kids, k_n, room);
+        req->k_pending++;
+        fed_children_asked++;
+      }
     }
   }
+  if (kids)
+    MyFree(kids);
 
   return req;
 }
@@ -7540,13 +7807,29 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * context child of parent for splice-after-parent handling. */
     struct FedRequest *req;
     struct HistoryMessage *m;
+    int k_leg;
 
     if (parc < 5)
       return 0;
 
-    req = find_fed_request(parv[2]);
+    req = find_fed_request_leg(parv[2], &k_leg);
     if (!req) {
       forward_fed_reply(sptr, cptr, parc, parv);
+      return 0;
+    }
+
+    if (k_leg) {
+      /* The children leg (W5 Task 14): kept until its row comes, which
+       * removes it (add_fed_child).  A full table leaves the row to name
+       * its parent itself (hm_context_parent). */
+      if (req->k_decl_count < FED_K_DECL_MAX) {
+        struct FedCtxPair *pair = &req->k_decl[req->k_decl_count++];
+        ircd_strncpy(pair->child, parv[4], sizeof(pair->child));
+        ircd_strncpy(pair->parent, parv[3], sizeof(pair->parent));
+        pair->tags[0] = '\0';
+        if (parc > 5 && parv[5])
+          ircd_strncpy(pair->tags, parv[5], sizeof(pair->tags));
+      }
       return 0;
     }
 
@@ -7572,7 +7855,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
   else if (strcmp(subcmd, "R") == 0) {
     /* Response: R <reqid> <msgid> <ts> <type> <sender> <account> :<content> */
     char *reqid, *msgid, *timestamp, *sender, *account, *content;
-    int type;
+    int type, k_leg;
     struct FedRequest *req;
 
     if (parc < 8)
@@ -7586,8 +7869,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     account = parv[7];
     content = (parc > 8) ? parv[8] : "";
 
-    /* Find the request */
-    req = find_fed_request(reqid);
+    /* Find the request (and leg: <reqid>K is the children leg's) */
+    req = find_fed_request_leg(reqid, &k_leg);
     if (!req) {
       forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
@@ -7596,8 +7879,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* Add message to federated results, with the client-only tags the
      * line's ,C segment brought (parse_server's per-line stash of this
      * link; empty from a responder that sends none). */
-    add_fed_message(req, msgid, timestamp, type, sender, account, content,
+    if (k_leg)
+      add_fed_child(req, msgid, timestamp, type, sender, account, content,
                     cli_s2s_client_tags(cptr));
+    else
+      add_fed_message(req, msgid, timestamp, type, sender, account, content,
+                      cli_s2s_client_tags(cptr));
   }
   else if (strcmp(subcmd, "D") == 0) {   /* a redaction from the catch-up scan */
     struct rdx_reply rr;
@@ -7616,7 +7903,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * Content is base64-encoded zstd-compressed data for bandwidth savings.
      */
     char *reqid, *msgid, *timestamp, *sender, *account, *b64_content;
-    int type;
+    int type, k_leg;
     struct FedRequest *req;
 
     if (parc < 8)
@@ -7630,8 +7917,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     account = parv[7];
     b64_content = (parc > 8) ? parv[8] : "";
 
-    /* Find the request */
-    req = find_fed_request(reqid);
+    /* Find the request (and leg) */
+    req = find_fed_request_leg(reqid, &k_leg);
     if (!req) {
       forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
@@ -7659,8 +7946,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         struct HistoryMessage rec;
         memset(&rec, 0, sizeof(rec));
         if (history_deserialize_record(decoded, decoded_len, &rec) == 0) {
-          add_fed_message(req, msgid, timestamp, rec.type, sender, account,
+          if (k_leg)
+            add_fed_child(req, msgid, timestamp, rec.type, sender, account,
                           rec.content, rec.client_tags);
+          else
+            add_fed_message(req, msgid, timestamp, rec.type, sender, account,
+                            rec.content, rec.client_tags);
         } else {
           Debug((DEBUG_DEBUG, "CH Z: undecodable record for %s, dropping", msgid));
         }
@@ -7669,6 +7960,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
 #else
     /* No zstd support - can't decompress, skip this message */
+    (void)k_leg;
     Debug((DEBUG_DEBUG, "CH Z: Received compressed response but USE_ZSTD not enabled"));
 #endif
   }
@@ -7684,6 +7976,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     char chunk_key[128];
     int has_more = 0;
     int is_continuation = 0;
+    int k_leg;
 
     /* The shortest form is the final continuation, "B <reqid> <msgid>
      * :<b64>" (parc 5).  A 4-param line has no data: the continuation
@@ -7696,8 +7989,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     reqid = parv[2];
     msgid = parv[3];
 
-    /* Find the request */
-    req = find_fed_request(reqid);
+    /* Find the request (and leg; the chunk key below carries the reqid as
+     * sent, so the two legs' chunks never meet) */
+    req = find_fed_request_leg(reqid, &k_leg);
     if (!req) {
       forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
@@ -7761,8 +8055,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       size_t decoded_len;
 
       if (ch_base64_decode(chunk->b64_data, chunk->b64_len, &decoded, &decoded_len)) {
-        add_fed_message(req, chunk->msgid, chunk->timestamp, chunk->type,
+        if (k_leg)
+          add_fed_child(req, chunk->msgid, chunk->timestamp, chunk->type,
                         chunk->sender, chunk->account, decoded, chunk->client_tags);
+        else
+          add_fed_message(req, chunk->msgid, chunk->timestamp, chunk->type,
+                          chunk->sender, chunk->account, decoded, chunk->client_tags);
         MyFree(decoded);
       }
       free_chunk(chunk);
@@ -7791,7 +8089,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
   else if (strcmp(subcmd, "E") == 0) {
     /* End: E <reqid> <count> */
     char *reqid;
-    int count;
+    int count, k_leg;
     struct FedRequest *req;
 
     if (parc < 4)
@@ -7800,10 +8098,32 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     reqid = parv[2];
     count = atoi(parv[3]);
 
-    /* Find the request */
-    req = find_fed_request(reqid);
+    /* Find the request (and leg) */
+    req = find_fed_request_leg(reqid, &k_leg);
     if (!req) {
       forward_fed_reply(sptr, cptr, parc, parv);
+      return 0;
+    }
+
+    /* The children leg (W5 Task 14): one E per store, after its request's
+     * last line.  Its flags are logged, never applied: a store that could
+     * not answer (U) or cut its answer (T) costs the page context, never a
+     * row, and that is not partial (user decision 2026-11-08 15:08). */
+    if (k_leg) {
+      unsigned int kflags = ch_e_flags((parc > 4 && parv[4]) ? parv[4] : NULL);
+      int si = server_ad_index(sptr);
+      if (si >= 0 && si < MAX_AD_SERVERS) {
+        if (req->k_e_seen[si >> 3] & (1u << (si & 7)))
+          return 0;
+        req->k_e_seen[si >> 3] |= (unsigned char)(1u << (si & 7));
+      }
+      if (kflags)
+        Debug((DEBUG_DEBUG, "CH E %s from %s: children leg %s%s", reqid, cli_name(sptr),
+               (kflags & CH_E_UNANSWERED) ? "unanswered" : "",
+               (kflags & CH_E_TRUNCATED) ? " truncated" : ""));
+      req->k_pending--;
+      if (req->servers_pending <= 0 && req->k_pending <= 0)
+        complete_fed_request(req);
       return 0;
     }
 
@@ -7834,8 +8154,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
     req->servers_pending--;
 
-    /* If all servers have responded, complete the request */
-    if (req->servers_pending <= 0) {
+    /* If all servers have responded -- on both legs: a children request
+     * (W5 Task 14) may still be out -- complete the request */
+    if (req->servers_pending <= 0 && req->k_pending <= 0) {
       complete_fed_request(req);
     }
   }
