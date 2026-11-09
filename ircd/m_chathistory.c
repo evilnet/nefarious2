@@ -7320,20 +7320,22 @@ static void skip_redacted_context(const char *target, struct HistoryMessage **he
  * history_attach_context hangs the children on it, so the rule is the
  * local attach rule exactly (a TAGMSG or a REDACT, in index order; a child
  * already in the list is skipped).  The requester's type mask (@a mask,
- * 0 = all) and the typing-only veto drop what it could not show; no
- * presence filter here: the requester filters every row it is sent, as
- * for page context (a responder's replicated presence records can differ
- * from the origin's, and only the origin holds a session anchor).  At most
- * min(@a cap, FED_CHILDREN_MAX) children.  Each child goes after a CH C
- * naming its parent (send_ch_rows, parents 0: the stubs are not sent).
- * @a list is split in place.
- * @return The children sent. */
+ * 0 = all) and the typing-only veto drop what it could not show -- never a
+ * REDACT, which hides its target on the requester whatever the client sees
+ * (W5 Task 15 final fixes); no presence filter here: the requester filters
+ * every row it is sent, as for page context (a responder's replicated
+ * presence records can differ from the origin's, and only the origin holds
+ * a session anchor).  At most min(@a cap, FED_CHILDREN_MAX) children other
+ * than REDACTs, every REDACT besides.  Each child goes after a CH C naming
+ * its parent (send_ch_rows, parents 0: the stubs are not sent).  @a list
+ * is split in place.
+ * @return The children sent, REDACTs included. */
 static int fed_children_answer(struct Client *to, const char *target, const char *reqid,
                                char *list, unsigned int mask, int cap)
 {
   const char *ids[FED_K_IDS_MAX];
   struct HistoryMessage *stubs = NULL, *tail = NULL, *m, **pp;
-  int n, i, sent = 0;
+  int n, i, sent = 0, kept = 0;
 
   if (cap <= 0 || cap > FED_CHILDREN_MAX)
     cap = FED_CHILDREN_MAX;
@@ -7352,17 +7354,26 @@ static int fed_children_answer(struct Client *to, const char *target, const char
     return 0;
   history_attach_context(target, stubs);
   skip_redacted_context(target, &stubs, 0);
+  /* A REDACT child is never dropped -- not for the requester's type mask
+   * (a client without draft/message-redaction: the requester's own replay
+   * strips the REDACT line, after its redaction filter has used it), nor
+   * for the cap, which counts the other children only.  A requester that
+   * lacks it (a split before catch-up) would show the message (W5 Task 15
+   * final fixes, M-1). */
   for (pp = &stubs; (m = *pp); ) {
-    if (m->is_context
+    if (m->is_context && m->type != HISTORY_REDACT
         && ((mask && !(mask & (1u << m->type)))
-            || history_row_is_typing_only(m) || sent >= cap)) {
+            || history_row_is_typing_only(m) || kept >= cap)) {
       *pp = m->next;
       m->next = NULL;
       history_free_messages(m);
       continue;
     }
-    if (m->is_context)
+    if (m->is_context) {
       sent++;
+      if (m->type != HISTORY_REDACT)
+        kept++;
+    }
     pp = &m->next;
   }
   send_ch_rows(to, reqid, stubs, 0);

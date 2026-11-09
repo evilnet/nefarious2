@@ -3265,9 +3265,14 @@ int history_coverage_days(void)
 /* read-modify-write of one small record (rcv_pack/rcv_unpack); the     */
 /* in-memory chptr->recv_open says whether this run has the window     */
 /* open and chptr->recv_open_since where it starts; history_recv_covers*/
-/* reads those, never the record's open_since, so a failed write always*/
-/* leaves the record claiming LESS than was received (a stale open is  */
-/* ignored, and dropped by the next open), never more.  Every write    */
+/* reads those, never the record's open_since, so while this run      */
+/* lasts a failed write leaves the record claiming LESS than was       */
+/* received (a stale open is ignored, and dropped by the next open).   */
+/* Not across a restart: a failed CLOSE leaves the record open, and    */
+/* the boot closes it at the last heartbeat less the slack             */
+/* (recv_boot_one), so it then claims the span from the real close to  */
+/* that heartbeat, which was not received (registered; W5 Task 15      */
+/* final fixes, M-3).  Every write                                     */
 /* takes the open start from memory too, so whatever narrows a window  */
 /* must narrow memory first: the local floor needs no clip there       */
 /* (history_recv_covers says no at or below it), a per-owner eviction  */
@@ -3803,9 +3808,13 @@ void history_recv_recheck_all(void)
   /* Every channel's decision is made in memory (recv_decide), and the
    * records of the ones that move go out in ONE batch, as at link-up: a
    * SET or a rehash can move every channel at once.  A record not written
-   * (no batch, a staging or commit failure) claims less than this run
-   * received, never more: the windows are read from memory, and a stale
-   * open on disk is dropped by the next open. */
+   * (no batch, a staging or commit failure) stays as it was on disk.  While
+   * this run lasts that claims no more than was received: the windows are
+   * read from memory, and a stale open on disk is dropped by the next open.
+   * Across a restart a failed CLOSE claims more: the record is still open,
+   * and the boot closes it at the last heartbeat less the slack
+   * (recv_boot_one), past the real close (registered; W5 Task 15 final
+   * fixes, M-3). */
   for (chptr = GlobalChannelList; chptr; chptr = chptr->next) {
     char key[CHANNELLEN + 2];
     struct rcv_record r;
@@ -3836,7 +3845,8 @@ void history_recv_recheck_all(void)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "history: receive windows re-decided for "
               "CHATHISTORY_REQUIRE_AUTH (%u opened, %u closed) not stored: "
-              "%s (%s); those records claim less than was received",
+              "%s (%s); until rewritten those records claim less than was "
+              "received (a close not stored: more, after a restart)",
               opened, closed, db_strerror(rc),
               db_env_last_error(history_db_env)
                 ? db_env_last_error(history_db_env) : "no backend detail");
