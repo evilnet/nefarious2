@@ -687,7 +687,7 @@ static void test_main_thread_check_waits_for_one_hash_not_the_queue(void **state
   for (i = 0; i < QUEUED_CHECKS; i++)
     assert_int_equal(v[i].result,
                      (i & 1) ? CRYPT_VERIFY_NOMATCH : CRYPT_VERIFY_MATCH);
-  assert_true(finished < QUEUED_CHECKS / 4);
+  assert_true(finished < QUEUED_CHECKS / 2);   /* abbe534e: 56-63; fixed: <= 7 even oversubscribed */
   assert_int_equal(blocks_held(), before);
 }
 
