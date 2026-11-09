@@ -877,8 +877,10 @@ int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_
  * init_isupport()'s unconditional rebuild at boot and on every REHASH
  * (s_user.c) -- must go through this ONE function, or whichever ran
  * last wins: init_isupport() used to re-add the raw feature string
- * verbatim after a REHASH, silently undoing both the "+" normalisation
- * below and a prior runtime SET.
+ * verbatim after a REHASH, skipping the "+" normalisation below on
+ * whatever value was current at that point (a REHASH resetting a
+ * SET-only value back to its config/default, via feature_mark(), is
+ * normal and by design -- that part was never the bug).
  *
  * - Each entry is trimmed of leading/trailing spaces; an empty entry
  *   (from doubled commas, or an entry that was only spaces) is skipped.
@@ -910,6 +912,16 @@ const char *ircd_clienttagdeny_isupport(const char *in, char *out, size_t outsz)
     out[0] = '\0';
   if (!in || !*in || outsz == 0)
     return out;
+
+  /* The scratch buffers below (norm/haystack/probe_*) are sized off
+   * BUFSIZE, matching both real callers (set_isupport_clienttagdeny(),
+   * init_isupport(), each with a BUFSIZE-sized `out`).  Clamp the
+   * working size so a hypothetical caller with a LARGER buffer can't
+   * grow `out`'s accumulated content past what `haystack` can hold --
+   * otherwise the dedup search below would run against a silently
+   * truncated copy of `out`, missing or misplacing a match. */
+  if (outsz > BUFSIZE)
+    outsz = BUFSIZE;
 
   p = in;
   while (*p) {
@@ -954,6 +966,17 @@ const char *ircd_clienttagdeny_isupport(const char *in, char *out, size_t outsz)
     }
     if (name_len == 0)
       continue;
+    /* A negated bare "*" ("-*", "-+*") does not mean "exempt the
+     * literal tag named *" -- no real tag is ever named that -- so
+     * letting it fall into the ordinary dedup path below would
+     * negate-and-rewrite an EARLIER bare "*" deny-all entry into
+     * "-*", which a spec client reads as "nothing is denied" while
+     * the matcher (ircd_clienttagdeny_match(), where the same
+     * negated-"*" entry is equally inert) still denies everything.
+     * Drop it outright; it never changes what the 005 or the
+     * matcher do. */
+    if (negate && name_len == 1 && name[0] == '*')
+      continue;
     if (name_len > sizeof(norm) - 2)
       name_len = sizeof(norm) - 2;   /* defensive clamp; BUFSIZE-sized
                                       * config values never reach this */
@@ -988,14 +1011,36 @@ const char *ircd_clienttagdeny_isupport(const char *in, char *out, size_t outsz)
         if (strlen(out) + 2 < outsz) {
           memmove(in_out + 1, in_out, strlen(in_out) + 1);
           *in_out = '-';
+        } else {
+          /* No room left to insert the leading '-'.  Leaving the
+           * plain form in place would be actively wrong -- it would
+           * go on advertising this tag as allowed (or denied) with
+           * the opposite of the polarity the operator just asked
+           * for -- so delete the entry outright instead: absent is
+           * honest, wrong-polarity is not. */
+          size_t at = (size_t)(in_out - out);
+          size_t total = strlen(out);
+          size_t after = at + name_len;
+          if (after < total && out[after] == ',')
+            after++;                      /* swallow the trailing comma */
+          else if (at > 0 && out[at - 1] == ',')
+            at--;                         /* tail entry: swallow the leading comma instead */
+          memmove(out + at, out + after, total - after + 1);  /* +1 for NUL */
         }
       }
-      continue;   /* plain form (or now-negated form) already present */
+      continue;   /* plain form (or now-negated/now-deleted form) already present */
     }
 
     cur = strlen(out);
     if (cur + strlen(norm) + 2 >= outsz)
-      break;
+      continue;   /* THIS entry doesn't fit -- skip only it; a later
+                   * negation of a tag already in `out` still needs
+                   * its turn (it only inserts one '-' into existing
+                   * content, so it fits even when a whole new entry
+                   * would not). A bare `break` here used to abandon
+                   * every entry after the first one that overflowed,
+                   * so a negation placed later in a long list was
+                   * silently never applied. */
     if (cur)
       out[cur++] = ',';
     memcpy(out + cur, norm, strlen(norm) + 1);

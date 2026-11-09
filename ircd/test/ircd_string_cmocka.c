@@ -736,10 +736,14 @@ static void test_rvt_lookalike_shorter_than_prefix(void **state)
  * spec form is now the single function BOTH set_isupport_clienttagdeny()
  * (ircd_features.c) and init_isupport() (s_user.c, run at boot and on
  * every REHASH) call -- init_isupport() used to re-add the raw feature
- * string, silently undoing the "+" normalisation and any runtime SET on
- * the next REHASH (MEDIUM/HIGH 1).  These pin the sanitiser itself:
+ * string, skipping the "+" normalisation on whatever value was current
+ * at that point, config-set or still-SET (a REHASH resetting a SET-only
+ * value back to its config/default is normal and by design; that part
+ * was never the bug) (MEDIUM/HIGH 1).  These pin the sanitiser itself:
  * MEDIUM 2 (negation-wins dedup missing the comma-less tail entry),
- * LOW-MEDIUM 3 (space trimming), LOW 4 ("+*" -> "*"). */
+ * LOW-MEDIUM 3 (space trimming), LOW 4 ("+*" -> "*").  Fix round 2 adds
+ * item A (a negated bare "*" must not undo an earlier deny-all) and
+ * item B (a long list must not disagree with itself, or overflow). */
 
 #define ISUP(in) (ircd_clienttagdeny_isupport((in), isup_buf, sizeof(isup_buf)))
 
@@ -809,6 +813,28 @@ static void test_isup_plus_star_normalises_to_star(void **state)
     assert_string_equal(ISUP("+*"), "*");
 }
 
+static void test_isup_negated_star_never_undoes_deny_all(void **state)
+{
+    /* Fix round 2, item A: a negated bare "*" ("-*", "-+*") used to
+     * fall into the ordinary per-tag dedup path, where it rewrote an
+     * earlier plain "*" into "-*" -- a spec client reads that as
+     * "nothing is denied", while ircd_clienttagdeny_match() (where
+     * the same negated-"*" entry is equally inert, see
+     * test_ctd_negated_plus_form_equivalent-style cases) still denies
+     * everything.  "*,-*" must keep advertising plain "*". */
+    (void)state;
+    assert_string_equal(ISUP("*,-*"), "*");
+    assert_string_equal(ISUP("+*,-+*"), "*");
+    assert_string_equal(ISUP("*,-+*"), "*");
+    /* A lone negated "*" with no preceding deny-all has nothing to
+     * undo either way. */
+    assert_string_equal(ISUP("-*"), "");
+    assert_string_equal(ISUP("-+*"), "");
+    /* A NAMED wildcard ("draft/" + "*") is not the bare deny-all case
+     * and keeps negating normally. */
+    assert_string_equal(ISUP("draft/*,-draft/*"), "-draft/*");
+}
+
 static void test_isup_entries_that_vanish(void **state)
 {
     (void)state;
@@ -833,6 +859,71 @@ static void test_isup_zero_outsz_is_a_safe_noop(void **state)
     (void)state;
     ircd_clienttagdeny_isupport("draft/x", tiny, 0);
     assert_int_equal(tiny[0], 'X');   /* untouched, not written out of bounds */
+}
+
+static void test_isup_negation_reaches_past_an_overflowed_entry(void **state)
+{
+    /* Fix round 2, item B: a bare `break` on the first entry that
+     * didn't fit in `out` used to abandon every entry still left in
+     * the input, so a negation placed later in a long list never got
+     * applied even though it only needed to insert one '-' into
+     * content already there.  80 short "draft/tagNN" entries (~958
+     * bytes) plus two negations overflow a BUFSIZE(512) output well
+     * before the list ends; "-draft/tag01" negates an entry added
+     * near the very start (long before the overflow point), so it
+     * must still take effect. */
+    char big[2048];
+    char out[BUFSIZE];
+    size_t n = 0;
+    int i;
+    (void)state;
+
+    for (i = 0; i < 80; i++)
+      n += (size_t)sprintf(big + n, "%sdraft/tag%02d", i ? "," : "", i);
+    sprintf(big + n, ",-draft/tag01,-draft/tag79");
+
+    ircd_clienttagdeny_isupport(big, out, sizeof(out));
+    assert_true(strlen(out) < sizeof(out));             /* no overflow */
+    assert_non_null(strstr(out, "-draft/tag01"));        /* reached, negated */
+    assert_null(strstr(out, ",draft/tag01,"));           /* not ALSO plain */
+}
+
+static void test_isup_no_room_to_negate_deletes_the_plain_entry(void **state)
+{
+    /* Fix round 2, item B: when there's no room left to insert the
+     * leading '-' for a negation whose plain form is already present,
+     * the entry must be deleted outright -- advertising the
+     * unnegated plain form would claim the opposite polarity from
+     * what the operator asked for. outsz=34 leaves exactly one byte
+     * too few for the '-' once all three plain entries are in. */
+    char small[34];
+    (void)state;
+    ircd_clienttagdeny_isupport("aaaaaaaaaa,bbbbbbbbbb,cccccccccc,-aaaaaaaaaa", small, sizeof(small));
+    assert_string_equal(small, "bbbbbbbbbb,cccccccccc");
+    /* One byte more and there IS room: insert, not delete. */
+    {
+      char room[35];
+      ircd_clienttagdeny_isupport("aaaaaaaaaa,bbbbbbbbbb,cccccccccc,-aaaaaaaaaa", room, sizeof(room));
+      assert_string_equal(room, "-aaaaaaaaaa,bbbbbbbbbb,cccccccccc");
+    }
+}
+
+static void test_isup_outsz_larger_than_bufsize_is_capped(void **state)
+{
+    /* Fix round 2, item B: outsz is capped at BUFSIZE so the internal
+     * haystack scratch buffer (sized off BUFSIZE) can never truncate
+     * `out`'s accumulated content mid-dedup, even if a caller passed
+     * a bigger buffer than either real caller ever does.  A single
+     * entry longer than BUFSIZE still can't be advertised, but
+     * doesn't corrupt anything either. */
+    char big_out[1024];
+    char value[1000];
+    (void)state;
+    memset(value, 'q', sizeof(value) - 1);
+    value[sizeof(value) - 1] = '\0';
+    ircd_clienttagdeny_isupport(value, big_out, sizeof(big_out));
+    assert_string_equal(big_out, "");
+    assert_true(strlen(big_out) < BUFSIZE);
 }
 
 
@@ -1427,9 +1518,13 @@ int main(void)
         cmocka_unit_test(test_isup_exact_duplicate_collapses),
         cmocka_unit_test(test_isup_spaces_trimmed),
         cmocka_unit_test(test_isup_plus_star_normalises_to_star),
+        cmocka_unit_test(test_isup_negated_star_never_undoes_deny_all),
         cmocka_unit_test(test_isup_entries_that_vanish),
         cmocka_unit_test(test_isup_empty_or_null_clears),
         cmocka_unit_test(test_isup_zero_outsz_is_a_safe_noop),
+        cmocka_unit_test(test_isup_negation_reaches_past_an_overflowed_entry),
+        cmocka_unit_test(test_isup_no_room_to_negate_deletes_the_plain_entry),
+        cmocka_unit_test(test_isup_outsz_larger_than_bufsize_is_capped),
 
         /* ircd_strip_reserved_vendor_tags */
         cmocka_unit_test(test_strip_rvt_drops_reserved_keeps_others),
