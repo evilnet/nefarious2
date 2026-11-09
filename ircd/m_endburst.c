@@ -242,13 +242,17 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * The retention value tells the remote server how far back our history
      * really goes: the configured retention, or less once oldest-overall
      * eviction left a coverage floor inside it (later changes go out as
-     * CH A R, chathistory_coverage_changed).
+     * CH A R, chathistory_coverage_changed).  A trailing K says we answer
+     * CH Q K, the children request (W5 Task 14), unless the operator turned
+     * CHATHISTORY_FED_CHILDREN off: peers that see it ask us for the
+     * context children of their pages' rows; an older peer ignores it.
      *
      * Gate on IsIRCv3Aware(sptr) — legacy peers (X3, vanilla ircu) don't
      * implement the CH token and log "PARSE ERROR" on receipt. */
     if (feature_bool(FEAT_CHATHISTORY_STORE) && IsIRCv3Aware(sptr)) {
       int retention = history_coverage_days();
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "A S %d", retention);
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "A S %d%s", retention,
+                    feature_bool(FEAT_CHATHISTORY_FED_CHILDREN) ? " K" : "");
 
       /* Layer 1: Also send channel advertisements (CH A F) */
       send_channel_advertisements(sptr);

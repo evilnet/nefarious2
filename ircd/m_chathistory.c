@@ -268,8 +268,12 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
  * @param[in] to Requester (the server the reply goes to).
  * @param[in] reqid Request ID.
  * @param[in] rows Rows, context children spliced in after their parents.
+ * @param[in] parents 1: send every row.  0 (the children request, CH Q K;
+ *   W5 Task 14): a non-context row is a stub that only names the parent of
+ *   the children after it -- declare and send the children, never the stub.
  */
-static void send_ch_rows(struct Client *to, const char *reqid, struct HistoryMessage *rows)
+static void send_ch_rows(struct Client *to, const char *reqid, struct HistoryMessage *rows,
+                         int parents)
 {
   const char *last_parent = NULL;
   struct HistoryMessage *msg;
@@ -303,8 +307,13 @@ static void send_ch_rows(struct Client *to, const char *reqid, struct HistoryMes
         sendcmdto_one(&me, CMD_CHATHISTORY, to, "C %s %s %s",
                       reqid, last_parent, msg->msgid);
     }
-    else if (!msg->is_context)
+    else if (!msg->is_context) {
       last_parent = msg->msgid;
+      if (!parents)
+        continue;   /* a stub: it names the parent, it is not a row */
+    }
+    else if (!parents)
+      continue;     /* a child with no parent before it: nothing to name */
     send_ch_response(to, reqid, msg);
   }
 }
@@ -1569,7 +1578,18 @@ struct ChathistoryAd {
    * stays open, and its REDACT catch-up waits, until that EB
    * (chathistory_server_eob).  Goes with the entry (clear_server_ad). */
   unsigned char eob_pending;
+  /** CH_AD_* letters of its last CH A S (K = it answers CH Q K, the children
+   * request; W5 Task 14).  Replaced on every CH A S, never OR'd: a relinked
+   * server that dropped one starts without it. */
+  unsigned int features;
 };
+
+/** " K" when an ad's features carry the children request, else "": the
+ * letters a CH A S relay or re-flood passes on (CH A S <days> [<features>]). */
+static const char *ad_feature_letters(unsigned int features)
+{
+  return (features & CH_AD_CHILDREN) ? " K" : "";
+}
 
 /** Global array of server advertisements, indexed by server numeric */
 static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
@@ -2662,6 +2682,14 @@ static int chathistory_between(struct Client *sptr, const char *target,
 
 /** Maximum messages collected per request */
 #define MAX_FED_MESSAGES 500
+
+/** The children request (CH Q K, W5 Task 14): the most context children a
+ * request takes (the requester's bound, and the <cap> it puts on the wire;
+ * a responder sends at most min(<cap>, this) per line). */
+#define FED_CHILDREN_MAX 500
+/** The most msgids one CH Q K line is read for (a 510-byte line holds no
+ * more than this many one-character tokens). */
+#define FED_K_IDS_MAX 256
 
 /** Structure for a pending federation request */
 /** Parent linkage for a federated context child (CH C declaration). */
@@ -4149,7 +4177,8 @@ void chathistory_reflood_ads(struct Client *newpeer)
       continue;
     if (cli_from(owner) == newpeer)
       continue;   /* reached via the new peer -- it already has this ad */
-    sendcmdto_one(owner, CMD_CHATHISTORY, newpeer, "A S %d", ad->retention_days);
+    sendcmdto_one(owner, CMD_CHATHISTORY, newpeer, "A S %d%s", ad->retention_days,
+                  ad_feature_letters(ad->features));
   }
 }
 
@@ -4431,10 +4460,11 @@ void chathistory_report_ads(struct Client *to, const struct StatDesc *sd, char *
     if (ad->is_storage_server) {
       storage_count++;
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "A :  %s: STORE retention=%d days (updated %s)",
+                 "A :  %s: STORE retention=%d days (updated %s)%s",
                  cli_name(server),
                  ad->retention_days,
-                 timebuf);
+                 timebuf,
+                 (ad->features & CH_AD_CHILDREN) ? " features=K" : "");
     } else if (ad->has_advertisement) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "A :  %s: advertisement present but not storage",
@@ -6853,6 +6883,62 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
   return req;
 }
 
+/** Answer one line of a children request (CH Q K, W5 Task 14): the context
+ * children this store holds of the msgids in @a list, whether or not it
+ * holds those rows -- the reply index is keyed by the parent's msgid and
+ * written when the child is stored.  Each msgid becomes a stub row and
+ * history_attach_context hangs the children on it, so the rule is the
+ * local attach rule exactly (a TAGMSG or a REDACT, in index order; a child
+ * already in the list is skipped).  The requester's type mask (@a mask,
+ * 0 = all) and the typing-only veto drop what it could not show; no
+ * presence filter here: the requester filters every row it is sent, as
+ * for page context (a responder's replicated presence records can differ
+ * from the origin's, and only the origin holds a session anchor).  At most
+ * min(@a cap, FED_CHILDREN_MAX) children.  Each child goes after a CH C
+ * naming its parent (send_ch_rows, parents 0: the stubs are not sent).
+ * @a list is split in place.
+ * @return The children sent. */
+static int fed_children_answer(struct Client *to, const char *target, const char *reqid,
+                               char *list, unsigned int mask, int cap)
+{
+  const char *ids[FED_K_IDS_MAX];
+  struct HistoryMessage *stubs = NULL, *tail = NULL, *m, **pp;
+  int n, i, sent = 0;
+
+  if (cap <= 0 || cap > FED_CHILDREN_MAX)
+    cap = FED_CHILDREN_MAX;
+  n = hm_parse_ids(list, ids, FED_K_IDS_MAX);
+  for (i = 0; i < n; i++) {
+    m = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+    ircd_strncpy(m->msgid, ids[i], sizeof(m->msgid));
+    ircd_strncpy(m->target, target, sizeof(m->target));
+    if (tail)
+      tail->next = m;
+    else
+      stubs = m;
+    tail = m;
+  }
+  if (!stubs)
+    return 0;
+  history_attach_context(target, stubs);
+  for (pp = &stubs; (m = *pp); ) {
+    if (m->is_context
+        && ((mask && !(mask & (1u << m->type)))
+            || history_row_is_typing_only(m) || sent >= cap)) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+      continue;
+    }
+    if (m->is_context)
+      sent++;
+    pp = &m->next;
+  }
+  send_ch_rows(to, reqid, stubs, 0);
+  history_free_messages(stubs);
+  return sent;
+}
+
 /*
  * ms_chathistory - server message handler for S2S chathistory federation
  *
@@ -7042,6 +7128,36 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, sc.n);
       else
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, sc.n);
+      return 0;
+    }
+
+    /* Children request (W5 Task 14): the context children of the msgids a
+     * requester's page holds, whatever this store's own page would be.
+     *   CH Q <target> K <+|*> <cap> <reqid>K <dest> * <P|F><yxx> <mask> :<msgid> ...
+     * '+' = more lines of this request follow, '*' = the last.  Stateless
+     * per line: each is answered as it comes, and one E follows the '*'
+     * line (P10 is FIFO per link and the path to us is fixed, so it is the
+     * last to arrive).  Only ever sent addressed, to a store whose CH A S
+     * carried K: one without a destination is ignored, never propagated.
+     * A line whose list an older middle hop dropped is answered with
+     * nothing. */
+    if (query_subcmd_str[0] == 'K' && query_subcmd_str[1] == '\0') {
+      int last = !(ref[0] == '+' && ref[1] == '\0');
+      int n = 0;
+
+      if (!dest_numeric)
+        return 0;
+      if (!history_is_available()) {
+        if (last)
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
+      if (IsChannelName(target) && parc >= 12 && !EmptyString(parv[11]))
+        n = fed_children_answer(sptr, target, reqid, parv[11], req_type_mask, limit);
+      Debug((DEBUG_DEBUG, "CH Q K: %s %s -> %d child(ren)%s", target, reqid, n,
+             last ? ", last line" : ""));
+      if (last)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, n);
       return 0;
     }
 
@@ -7324,7 +7440,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
            * An older requester reads only the first row -- the parent --
            * and ignores the rest.  E counts the row alone, as for pages. */
           history_attach_context(target, single_msg);
-          send_ch_rows(sptr, reqid, single_msg);
+          send_ch_rows(sptr, reqid, single_msg, 1);
           sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 1", reqid);
           history_free_messages(single_msg);
         } else {
@@ -7406,7 +7522,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * - CH R: normal response (content as-is)
        * - CH B: base64 encoded response (with chunking if needed)
        */
-      send_ch_rows(sptr, reqid, messages);
+      send_ch_rows(sptr, reqid, messages, 1);
 
       /* Send end marker; trailing T = this result was truncated at the
        * requested limit (optional param, ignored by older parsers). */
@@ -7744,7 +7860,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
 
     if (subtype[0] == 'S') {
-      /* Storage capability: S <retention_days> */
+      /* Storage capability: S <retention_days> [<features>] -- the feature
+       * letters (ch_ad_features; K = it answers CH Q K, W5 Task 14) are
+       * replaced on every CH A S, never OR'd.  An older server sends none
+       * and ignores ours; an older middle hop drops them on relay, so a
+       * store behind it looks K-less (fails safe: it is asked no K). */
       int retention;
 
       if (parc < 4)
@@ -7754,6 +7874,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->has_advertisement = 1;
       ad->is_storage_server = 1;
       ad->retention_days = retention;
+      ad->features = parc >= 5 ? ch_ad_features(parv[4]) : 0;
       ad->last_update = CurrentTime;
       /* Back -- but not caught up until the burst that carries its state
        * here has ended.  A store sends CH A S when OUR end of burst reaches
@@ -7773,8 +7894,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));
 
-      /* Propagate to other servers (except source) */
-      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d", retention);
+      /* Propagate to other servers (except source), its letters with it */
+      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d%s", retention,
+                               ad_feature_letters(ad->features));
       chathistory_update_retention_isupport(1);
     }
     else if (subtype[0] == 'R') {
