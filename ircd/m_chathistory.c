@@ -2774,6 +2774,8 @@ struct FedRequest {
   int k_count;
   struct FedCtxPair k_decl[FED_K_DECL_MAX]; /**< children leg CH C, removed on match */
   int k_decl_count;
+  char (*k_ids)[HISTORY_MSGID_LEN];   /**< the msgids asked about, sorted (fed_k_listed) */
+  int k_id_count;
   void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
   void *cb_data;                      /**< Custom data for completion callback */
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
@@ -5169,6 +5171,8 @@ static void free_fed_request(struct FedRequest *req)
     history_free_messages(req->fed_msgs);
   if (req->k_msgs)
     history_free_messages(req->k_msgs);
+  if (req->k_ids)
+    MyFree(req->k_ids);
 
   /* Free custom callback data */
   if (req->cb_data) {
@@ -5256,14 +5260,35 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
   req->fed_count++;
 }
 
+/** qsort/bsearch order of the children request's msgid list. */
+static int fed_k_id_cmp(const void *a, const void *b)
+{
+  return strcmp((const char *)a, (const char *)b);
+}
+
+/** Was @a msgid one of the rows this request asked the children of (CH Q K,
+ * W5 Task 14)?  A store answers only for the msgids it was sent, so a child
+ * of any other parent is not this page's (fix round 1). */
+static int fed_k_listed(const struct FedRequest *req, const char *msgid)
+{
+  char key[HISTORY_MSGID_LEN];
+
+  if (!req->k_ids || req->k_id_count <= 0 || !msgid || !msgid[0])
+    return 0;
+  ircd_strncpy(key, msgid, sizeof(key));
+  return bsearch(key, req->k_ids, (size_t)req->k_id_count, sizeof(req->k_ids[0]),
+                 fed_k_id_cmp) != NULL;
+}
+
 /** Add a row of the children leg (CH Q K, W5 Task 14) to req->k_msgs as a
  * context child.  Its parent is its CH C declaration's (removed from the
  * table on match), else the row's own (hm_context_parent: a TAGMSG's
  * +reply / +draft/reply, a REDACT's first content word); the
  * declaration's tags fill in when the row brought none.  Dropped (and
- * counted) past FED_CHILDREN_MAX children, with no parent, or unless it is
- * a TAGMSG or a REDACT.  Never touches fed_count, fed_truncated or cut: a
- * child lost costs a page context, never a row. */
+ * counted) past FED_CHILDREN_MAX children, with no parent, with a parent
+ * the request did not ask about (fed_k_listed), after the answer went out,
+ * or unless it is a TAGMSG or a REDACT.  Never touches fed_count,
+ * fed_truncated or cut: a child lost costs a page context, never a row. */
 static void add_fed_child(struct FedRequest *req, const char *msgid,
                           const char *timestamp, int type,
                           const char *sender, const char *account,
@@ -5282,7 +5307,7 @@ static void add_fed_child(struct FedRequest *req, const char *msgid,
       break;
     }
   }
-  if (req->k_count >= FED_CHILDREN_MAX
+  if (req->response_sent || req->k_count >= FED_CHILDREN_MAX
       || (type != HISTORY_TAGMSG && type != HISTORY_REDACT)) {
     fed_children_dropped++;
     return;
@@ -5301,7 +5326,8 @@ static void add_fed_child(struct FedRequest *req, const char *msgid,
     ircd_strncpy(msg->client_tags, client_tags, sizeof(msg->client_tags));
   else if (dtags[0])
     ircd_strncpy(msg->client_tags, dtags, sizeof(msg->client_tags));
-  if (!parent[0] && !hm_context_parent(msg, parent, sizeof(parent))) {
+  if ((!parent[0] && !hm_context_parent(msg, parent, sizeof(parent)))
+      || !fed_k_listed(req, parent)) {
     history_free_messages(msg);
     fed_children_dropped++;
     return;
@@ -6053,6 +6079,17 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
         fed_children_asked++;
       }
     }
+  }
+
+  /* The msgids asked about, kept to check each child's parent against
+   * (fed_k_listed; fix round 1). */
+  if (req->k_pending > 0 && k_n > 0) {
+    int j;
+    req->k_ids = MyMalloc((size_t)k_n * sizeof(req->k_ids[0]));
+    for (j = 0; j < k_n; j++)
+      ircd_strncpy(req->k_ids[j], kids[j], sizeof(req->k_ids[0]));
+    qsort(req->k_ids, (size_t)k_n, sizeof(req->k_ids[0]), fed_k_id_cmp);
+    req->k_id_count = k_n;
   }
   if (kids)
     MyFree(kids);
