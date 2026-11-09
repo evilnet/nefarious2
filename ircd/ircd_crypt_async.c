@@ -45,29 +45,32 @@ struct crypt_verify_ctx {
 
 /**
  * Work function - runs in thread pool worker.
- * This is the CPU-intensive part that we're offloading.
+ * This is the CPU-intensive part that we're offloading.  ircd_crypt() holds
+ * the crypt lock while it hashes, so the workers never share a mechanism's
+ * static buffer with each other or with the main thread; the string it
+ * returns is this check's own heap copy, freed here.
  */
 static void *crypt_verify_work(void *arg)
 {
   struct crypt_verify_ctx *ctx = arg;
   int *result;
-  const char *computed;
+  char *computed;
 
   result = (int *)MyMalloc(sizeof(int));
-  if (!result) {
-    *result = CRYPT_VERIFY_ERROR;
-    return result;
-  }
+  if (!result)
+    return NULL;  /* crypt_verify_done() reports a NULL result as an error */
 
   /* Call the blocking crypt function - this is the slow part */
   computed = ircd_crypt(ctx->password, ctx->hash);
 
   if (!computed) {
     *result = CRYPT_VERIFY_ERROR;
-  } else if (strcmp(computed, ctx->hash) == 0) {
-    *result = CRYPT_VERIFY_MATCH;
   } else {
-    *result = CRYPT_VERIFY_NOMATCH;
+    if (strcmp(computed, ctx->hash) == 0)
+      *result = CRYPT_VERIFY_MATCH;
+    else
+      *result = CRYPT_VERIFY_NOMATCH;
+    MyFree(computed);
   }
 
   Debug((DEBUG_DEBUG, "crypt_verify_work: result=%d for hash prefix %.8s...",

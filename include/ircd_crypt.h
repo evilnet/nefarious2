@@ -63,6 +63,11 @@ extern char* ircd_crypt(const char* key, const char* salt);
 extern int ircd_crypt_register_mech(crypt_mech_t* mechanism);
 extern int ircd_crypt_unregister_mech(crypt_mech_t* mechanism);
 extern int oper_password_match(const char* to_match, const char* passwd);
+/* Held around any direct call of a mechanism's crypt_function (each one
+ * returns a static buffer) until its result is copied out; ircd_crypt()
+ * takes it itself. */
+extern void ircd_crypt_lock(void);
+extern void ircd_crypt_unlock(void);
 
 /* exported variables */
 extern crypt_mechs_t* crypt_mechs_root;

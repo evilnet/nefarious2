@@ -62,9 +62,45 @@
 #include <unistd.h>
 #include <string.h>
 #include <openssl/crypto.h>
+#ifdef HAVE_PTHREAD
+#include <pthread.h>
+#endif
 
 /* evil global */
 crypt_mechs_t* crypt_mechs_root;
+
+#ifdef HAVE_PTHREAD
+/** Serializes every use of the crypt mechanisms.  Each one returns a static
+ * buffer -- crypt(3)'s own (native, bcrypt), smd5's, pbkdf2's -- and the
+ * async checks run on several thread pool workers while the main thread
+ * hashes too, so without it two checks read each other's result (a wrong
+ * password checked beside a right one against the same stored hash could
+ * match) and ircd_crypt()'s heap copy could overrun its block when the
+ * buffer grew under it.  Statically initialized: usable before
+ * ircd_crypt_init() and in a process that never starts the thread pool. */
+static pthread_mutex_t crypt_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+/** Take the lock every caller of a crypt mechanism holds from the call
+ * until it has copied the result out of the mechanism's static buffer.
+ * ircd_crypt() takes it itself; a caller that runs a mechanism directly
+ * (m_mkpasswd) takes it around the call and the copy.  Not recursive:
+ * never call ircd_crypt() while holding it.  A no-op without pthreads,
+ * where nothing runs at once. */
+void ircd_crypt_lock(void)
+{
+#ifdef HAVE_PTHREAD
+  pthread_mutex_lock(&crypt_mutex);
+#endif
+}
+
+/** Release the lock ircd_crypt_lock() took. */
+void ircd_crypt_unlock(void)
+{
+#ifdef HAVE_PTHREAD
+  pthread_mutex_unlock(&crypt_mutex);
+#endif
+}
 
 /** Add a crypt mechanism to the list 
  * @param mechanism Pointer to the mechanism details struct
@@ -122,16 +158,9 @@ int ircd_crypt_unregister_mech(crypt_mech_t* mechanism)
 return 0;
 }
 
-/** Wrapper for generating a hashed password passed on the supplied password
- * @param key Pointer to the password we want crypted
- * @param salt Pointer to the password we're comparing to (for the salt)
- * @return Pointer to the generated password (must be MyFree()'d).
- *
- * This is a wrapper function which attempts to establish the password
- * format and funnel it off to the correct mechanism handler function.  The
- * returned password is compared in the oper_password_match() routine.
-*/
-char* ircd_crypt(const char* key, const char* salt)
+/** ircd_crypt()'s body, run with the crypt lock held: it calls the
+ * mechanisms and copies their static result to the heap. */
+static char* crypt_locked(const char* key, const char* salt)
 {
 char *hashed_pass = NULL;
 const char *temp_hashed_pass, *mysalt;
@@ -231,6 +260,28 @@ crypt_mechs_t* crypt_mech;
  }
 
  return NULL;
+}
+
+/** Wrapper for generating a hashed password passed on the supplied password
+ * @param key Pointer to the password we want crypted
+ * @param salt Pointer to the password we're comparing to (for the salt)
+ * @return Pointer to the generated password (must be MyFree()'d).
+ *
+ * This is a wrapper function which attempts to establish the password
+ * format and funnel it off to the correct mechanism handler function.  The
+ * returned password is compared in the oper_password_match() routine.
+ *
+ * Safe from any thread: it holds the crypt lock from the mechanism call
+ * through the heap copy, so the result is this call's own.
+*/
+char* ircd_crypt(const char* key, const char* salt)
+{
+ char *hashed_pass;
+
+ ircd_crypt_lock();
+ hashed_pass = crypt_locked(key, salt);
+ ircd_crypt_unlock();
+ return hashed_pass;
 }
 
 /** Some basic init.

@@ -27,6 +27,7 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
 #include "ircd_crypt.h"
 #include "ircd_crypt_native.h"
 #include "ircd_crypt_plain.h"
@@ -74,7 +75,10 @@ static char *make_md5_salt(void)
  */
 int m_mkpasswd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  const char *pass;
+  const char *(*mech)(const char *, const char *);
+  const char *salt;
+  const char *result;
+  char *pass = NULL;
   const char *prefix = "";
 
   if (parc < 2)
@@ -82,14 +86,18 @@ int m_mkpasswd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc == 3) {
     if (!ircd_strcmp(parv[2], "DES")) {
-      pass = ircd_crypt_native(parv[1], make_salt());
+      mech = ircd_crypt_native;
+      salt = make_salt();
     } else if (!ircd_strcmp(parv[2], "MD5")) {
-      pass = ircd_crypt_native(parv[1], make_md5_salt());
+      mech = ircd_crypt_native;
+      salt = make_md5_salt();
     } else if (!ircd_strcmp(parv[2], "SMD5")) {
-      pass = ircd_crypt_smd5(parv[1], make_salt());
+      mech = ircd_crypt_smd5;
+      salt = make_salt();
       prefix = "$SMD5$";
     } else if (!ircd_strcmp(parv[2], "PLAIN")) {
-      pass = ircd_crypt_plain(parv[1], "plain");
+      mech = ircd_crypt_plain;
+      salt = "plain";
       prefix = "$PLAIN$";
     } else {
       sendcmdto_one(&me, CMD_NOTICE, sptr,
@@ -98,12 +106,23 @@ int m_mkpasswd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
     }
   } else {
-    pass = ircd_crypt_native(parv[1], make_salt());
+    mech = ircd_crypt_native;
+    salt = make_salt();
   }
+
+  /* The mechanism returns a static buffer that a thread pool worker's
+   * password check may be writing: call it and copy its result out under
+   * the crypt lock. */
+  ircd_crypt_lock();
+  result = mech(parv[1], salt);
+  if (result)
+    DupString(pass, result);
+  ircd_crypt_unlock();
 
   sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Encryption for [%s]: %s%s",
                 sptr, parv[1], prefix, pass);
 
+  MyFree(pass);
   return 0;
 }
 

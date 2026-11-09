@@ -39,6 +39,7 @@ CMOCKA_TESTPROGS = \
 	dbuf_cmocka \
 	ircd_crypt_cmocka \
 	ircd_crypt_pbkdf2_cmocka \
+	ircd_crypt_concurrency_cmocka \
 	crule_cmocka \
 	history_cmocka \
 	history_trim_codec_cmocka \
@@ -83,6 +84,7 @@ ZSTD_LIBS = -lzstd
 CURL_LIBS = -lcurl
 JANSSON_LIBS = -ljansson
 SSL_LIBS = -lssl -lcrypto
+CRYPT_LIBS = -lcrypt
 ROCKSDB_LIBS = -lrocksdb -lstdc++ -lpthread
 
 DEP_SRC = \
@@ -100,6 +102,7 @@ DEP_SRC = \
 	dbuf_cmocka.c \
 	ircd_crypt_cmocka.c \
 	ircd_crypt_pbkdf2_cmocka.c \
+	ircd_crypt_concurrency_cmocka.c \
 	crule_cmocka.c \
 	history_cmocka.c \
 	history_trim_codec_cmocka.c \
@@ -235,6 +238,21 @@ ircd_crypt_cmocka: $(IRCD_CRYPT_CMOCKA_OBJS)
 IRCD_CRYPT_PBKDF2_CMOCKA_OBJS = ircd_crypt_pbkdf2_cmocka.o test_stub.o
 ircd_crypt_pbkdf2_cmocka: $(IRCD_CRYPT_PBKDF2_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_CRYPT_PBKDF2_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# ircd_crypt_concurrency tests - password checks running at once (the
+# async ones on the thread pool's workers, the synchronous ones on the main
+# thread) never read each other's result from a mechanism's static buffer,
+# and the async check frees the hash it computed.  Links the REAL
+# ircd_crypt.o, ircd_crypt_async.o, thread_pool.o and every mechanism (so
+# CRYPT_LIBS and SSL_LIBS); DoMalloc() lives in the test and free() is
+# wrapped (--wrap=free) to count the blocks the ircd code holds.
+IRCD_CRYPT_CONCURRENCY_CMOCKA_OBJS = ircd_crypt_concurrency_cmocka.o \
+	../ircd_crypt.o ../ircd_crypt_async.o ../thread_pool.o \
+	../ircd_crypt_plain.o ../ircd_crypt_smd5.o ../ircd_crypt_native.o \
+	../ircd_crypt_bcrypt.o ../ircd_crypt_pbkdf2.o ../ircd_md5.o \
+	../ircd_string.o
+ircd_crypt_concurrency_cmocka: $(IRCD_CRYPT_CONCURRENCY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=free $(IRCD_CRYPT_CONCURRENCY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(CRYPT_LIBS) $(SSL_LIBS) -lpthread
 
 # crule tests - connection rule parser (uses CR_DEBUG mode, includes crule.c)
 CRULE_CMOCKA_OBJS = crule_cmocka.o test_stub.o ../ircd_string.o
