@@ -1189,50 +1189,57 @@ static int ml_is_multiline_ref(int type, const char *content)
   return 0;
 }
 
-/* Mirror of ircd.c is_reserved_vendor_tag -- pure prefix test; the real
- * one uses ircd_strncmp (case-insensitive IRC casemap), available here
- * because the suite links ../ircd_string.o. */
-extern int ircd_strncmp(const char *a, const char *b, size_t n);
-static int is_reserved_vendor_tag(const char *tag, size_t tag_len)
-{
-  static const char *prefixes[] = { "+evilnet.github.io/", "+afternet.org/" };
-  size_t i;
-  if (!tag)
-    return 0;
-  for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
-    size_t plen = strlen(prefixes[i]);
-    if (tag_len >= plen && 0 == ircd_strncmp(tag, prefixes[i], plen))
-      return 1;
-  }
-  return 0;
-}
+/* is_reserved_vendor_tag (ircd.c) is a thin wrapper over the real,
+ * pure ircd_reserved_vendor_tag() (ircd_string.c) -- call that one
+ * directly rather than keeping a second, driftable mirror; the suite
+ * already links ../ircd_string.o.  Hotfix 6, part 2 (2026-11-09):
+ * only specific NAMES are reserved under +evilnet.github.io/ now
+ * (Seance, an evilnet project, uses the rest of that namespace for
+ * ordinary client-only tags); +afternet.org/ stays reserved whole. */
+extern int ircd_reserved_vendor_tag(const char *tag, size_t tag_len);
 
 static void test_reserved_vendor_tag(void **state)
 {
   (void)state;
-  /* The org vendor namespace is reserved (case-insensitive vendor). */
-  assert_true(is_reserved_vendor_tag("+evilnet.github.io/sid=abc",
+  /* The specific server-written names are reserved (case-insensitive
+   * domain). */
+  assert_true(ircd_reserved_vendor_tag("+evilnet.github.io/sid=abc",
                                      strlen("+evilnet.github.io/sid=abc")));
-  assert_true(is_reserved_vendor_tag("+EvilNet.GitHub.IO/sid=abc",
+  assert_true(ircd_reserved_vendor_tag("+EvilNet.GitHub.IO/sid=abc",
                                      strlen("+EvilNet.GitHub.IO/sid=abc")));
-  assert_true(is_reserved_vendor_tag("+evilnet.github.io/anything",
+  assert_true(ircd_reserved_vendor_tag("+evilnet.github.io/ssid=abc",
+                                     strlen("+evilnet.github.io/ssid=abc")));
+  assert_true(ircd_reserved_vendor_tag("+evilnet.github.io/rsid=abc",
+                                     strlen("+evilnet.github.io/rsid=abc")));
+  assert_true(ircd_reserved_vendor_tag("+evilnet.github.io/chathistory-gap",
+                                     strlen("+evilnet.github.io/chathistory-gap")));
+  /* Anything else under the namespace is NOT reserved anymore --
+   * Seance's own tags live there now. */
+  assert_false(ircd_reserved_vendor_tag("+evilnet.github.io/anything",
                                      strlen("+evilnet.github.io/anything")));
-  /* The legacy namespace stays reserved (pre-2026-08-29 records carry
-   * the sid marker there and the auth check still honors it). */
-  assert_true(is_reserved_vendor_tag("+afternet.org/sid=abc",
+  assert_false(ircd_reserved_vendor_tag("+evilnet.github.io/machine-translated",
+                                     strlen("+evilnet.github.io/machine-translated")));
+  /* "sid" must not match "sidecar" (name-boundary, not a byte-prefix). */
+  assert_false(ircd_reserved_vendor_tag("+evilnet.github.io/sidecar",
+                                     strlen("+evilnet.github.io/sidecar")));
+  /* The legacy namespace stays reserved WHOLE (pre-2026-08-29 records
+   * carry the sid marker there and the auth check still honors it). */
+  assert_true(ircd_reserved_vendor_tag("+afternet.org/sid=abc",
                                      strlen("+afternet.org/sid=abc")));
-  assert_true(is_reserved_vendor_tag("+AfterNet.ORG/sid=abc",
+  assert_true(ircd_reserved_vendor_tag("+AfterNet.ORG/sid=abc",
                                      strlen("+AfterNet.ORG/sid=abc")));
+  assert_true(ircd_reserved_vendor_tag("+afternet.org/anything",
+                                     strlen("+afternet.org/anything")));
   /* Other client tags pass through untouched. */
-  assert_false(is_reserved_vendor_tag("+reply=abc", strlen("+reply=abc")));
-  assert_false(is_reserved_vendor_tag("+draft/react=x", strlen("+draft/react=x")));
-  assert_false(is_reserved_vendor_tag("+example.com/afternet.org",
+  assert_false(ircd_reserved_vendor_tag("+reply=abc", strlen("+reply=abc")));
+  assert_false(ircd_reserved_vendor_tag("+draft/react=x", strlen("+draft/react=x")));
+  assert_false(ircd_reserved_vendor_tag("+example.com/afternet.org",
                                       strlen("+example.com/afternet.org")));
   /* A lookalike shorter than the prefix cannot match. */
-  assert_false(is_reserved_vendor_tag("+afternet.org", strlen("+afternet.org")));
-  assert_false(is_reserved_vendor_tag("+evilnet.github.io",
+  assert_false(ircd_reserved_vendor_tag("+afternet.org", strlen("+afternet.org")));
+  assert_false(ircd_reserved_vendor_tag("+evilnet.github.io",
                                       strlen("+evilnet.github.io")));
-  assert_false(is_reserved_vendor_tag(NULL, 0));
+  assert_false(ircd_reserved_vendor_tag(NULL, 0));
 }
 
 static void test_multiline_ref_is_type_keyed(void **state)

@@ -648,6 +648,88 @@ static void test_ctd_old_matcher_missed_spec_form(void **state)
 }
 
 
+/* ========== ircd_reserved_vendor_tag ========== */
+/* Pre-fix, is_reserved_vendor_tag() (ircd.c) reserved the WHOLE
+ * `+evilnet.github.io/` namespace from client tags.  User decision
+ * 2026-11-09: Seance (an evilnet project) may use the rest of that
+ * namespace for ordinary client-only tags (e.g.
+ * `+evilnet.github.io/machine-translated`) -- only the specific
+ * NAMES the server itself writes (sid, ssid, rsid, chathistory-gap)
+ * stay reserved there.  `+afternet.org/` stays reserved whole
+ * (legacy). */
+
+#define RVT(tag) ircd_reserved_vendor_tag((tag), strlen(tag))
+
+static void test_rvt_reserved_names_bare(void **state)
+{
+    (void)state;
+    assert_int_equal(RVT("+evilnet.github.io/sid"), 1);
+    assert_int_equal(RVT("+evilnet.github.io/ssid"), 1);
+    assert_int_equal(RVT("+evilnet.github.io/rsid"), 1);
+    assert_int_equal(RVT("+evilnet.github.io/chathistory-gap"), 1);
+}
+
+static void test_rvt_reserved_names_with_value(void **state)
+{
+    (void)state;
+    assert_int_equal(RVT("+evilnet.github.io/sid=abc123"), 1);
+    assert_int_equal(RVT("+evilnet.github.io/ssid=abc123"), 1);
+    assert_int_equal(RVT("+evilnet.github.io/rsid=abc123"), 1);
+    assert_int_equal(RVT("+evilnet.github.io/chathistory-gap=1"), 1);
+}
+
+static void test_rvt_afternet_namespace_reserved_whole(void **state)
+{
+    (void)state;
+    assert_int_equal(RVT("+afternet.org/sid=abc"), 1);
+    assert_int_equal(RVT("+afternet.org/anything"), 1);
+    assert_int_equal(RVT("+afternet.org/machine-translated"), 1);
+    assert_int_equal(RVT("+AfterNet.ORG/sid=abc"), 1); /* case-insensitive domain */
+}
+
+static void test_rvt_other_evilnet_names_pass_through(void **state)
+{
+    (void)state;
+    /* The whole point of this hotfix: Seance's own tag must NOT be
+     * reserved just for living under the evilnet.github.io host. */
+    assert_int_equal(RVT("+evilnet.github.io/machine-translated"), 0);
+    assert_int_equal(RVT("+evilnet.github.io/machine-translated=1"), 0);
+}
+
+static void test_rvt_name_boundary_not_a_byte_prefix(void **state)
+{
+    (void)state;
+    /* "sid" must not match "sidecar" -- the pre-fix bug this hotfix
+     * also fixes in m_chathistory.c's strip_internal_tags(), which
+     * used the same kind of unanchored byte-prefix memcmp. */
+    assert_int_equal(RVT("+evilnet.github.io/sidecar"), 0);
+    assert_int_equal(RVT("+evilnet.github.io/sidecar=x"), 0);
+}
+
+static void test_rvt_evilnet_empty_name_not_reserved(void **state)
+{
+    (void)state;
+    assert_int_equal(RVT("+evilnet.github.io/"), 0);
+    assert_int_equal(RVT("+evilnet.github.io/="), 0);
+}
+
+static void test_rvt_unrelated_tag_not_reserved(void **state)
+{
+    (void)state;
+    assert_int_equal(RVT("+draft/react"), 0);
+    assert_int_equal(RVT("+draft/react=x"), 0);
+    assert_int_equal(ircd_reserved_vendor_tag(NULL, 0), 0);
+    assert_int_equal(RVT(""), 0);
+}
+
+static void test_rvt_lookalike_shorter_than_prefix(void **state)
+{
+    (void)state;
+    assert_int_equal(RVT("+afternet.org"), 0);
+    assert_int_equal(RVT("+evilnet.github.io"), 0);
+}
+
+
 /* --- ircd_json_escape --- */
 
 static void test_json_escape_passthrough(void **state)
@@ -1176,6 +1258,16 @@ int main(void)
         cmocka_unit_test(test_ctd_empty_or_null_list_denies_nothing),
         cmocka_unit_test(test_ctd_value_bearing_tag_matches_by_name),
         cmocka_unit_test(test_ctd_old_matcher_missed_spec_form),
+
+        /* ircd_reserved_vendor_tag */
+        cmocka_unit_test(test_rvt_reserved_names_bare),
+        cmocka_unit_test(test_rvt_reserved_names_with_value),
+        cmocka_unit_test(test_rvt_afternet_namespace_reserved_whole),
+        cmocka_unit_test(test_rvt_other_evilnet_names_pass_through),
+        cmocka_unit_test(test_rvt_name_boundary_not_a_byte_prefix),
+        cmocka_unit_test(test_rvt_evilnet_empty_name_not_reserved),
+        cmocka_unit_test(test_rvt_unrelated_tag_not_reserved),
+        cmocka_unit_test(test_rvt_lookalike_shorter_than_prefix),
 
         /* ircd_utf8_clamp */
         cmocka_unit_test(test_utf8_clamp_fits_untouched),

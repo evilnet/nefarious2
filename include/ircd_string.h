@@ -37,6 +37,7 @@ extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);
 extern int csv_contains_token(const char* csv, const char* token);
 extern int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_len);
+extern int ircd_reserved_vendor_tag(const char *tag, size_t tag_len);
 extern int ircd_utf8_clamp(char* s, size_t maxbytes);
 extern size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max);
 extern int ircd_text_mentions(const char* text, const char* nick);

@@ -455,12 +455,16 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
    * (evilnet = the upstream-org vendor namespace, same host as the
    * evilnet.github.io/bouncer-replay batch; records written before
    * 2026-08-29 carry the legacy `+afternet.org/sid=` form, which the
-   * auth check still accepts).  Tag is
-   * server-injected and trusted: the whole `+afternet.org/` vendor
-   * namespace is reserved at tag capture (parse.c drops any
-   * client-supplied tag in it via is_reserved_vendor_tag), so the
-   * client_tags appended below cannot carry a forged sid marker and
-   * the auth check can rely on this one. */
+   * auth check still accepts).  Tag is server-injected and trusted:
+   * `sid` (along with `ssid`/`rsid` below and `chathistory-gap`) is
+   * one of the specific NAMES reserved under `+evilnet.github.io/`
+   * at tag capture (parse.c drops a client-supplied tag matching one
+   * of them via is_reserved_vendor_tag) -- the rest of that namespace
+   * is an ordinary client-only tag now (Seance uses it), but `sid`
+   * stays unforgeable.  `+afternet.org/` stays reserved whole
+   * (legacy).  Either way, the client_tags appended below cannot
+   * carry a forged sid marker and the auth check can rely on this
+   * one. */
   {
     char tagbuf[800];
     size_t pos = 0;

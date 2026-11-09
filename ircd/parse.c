@@ -1558,11 +1558,16 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
           /* IRCv3 CLIENTTAGDENY: check if this tag is blocked by operator config */
           if (is_client_tag_denied(tag_name, tag_len))
             ; /* Tag is denied, silently drop it */
-          /* Reserved vendor namespace: a client must not squat
-           * `+afternet.org/*`, which the server authors and trusts
-           * (e.g. the `+evilnet.github.io/sid=` PM-history auth marker;
-           * the legacy `+afternet.org/` namespace stays reserved too).
-           * Drop silently, same as a denied tag. */
+          /* Reserved vendor tags: a client must not squat the NAMES
+           * the server itself writes and trusts --
+           * `+evilnet.github.io/{sid,ssid,rsid,chathistory-gap}` (sid
+           * is the PM-history auth marker; forging it would grant
+           * access to another session's PM history) -- or any of the
+           * legacy `+afternet.org/*` namespace.  Everything else
+           * under `+evilnet.github.io/` is an ordinary client-only
+           * tag (Seance, an evilnet project, uses that room for its
+           * own, e.g. `+evilnet.github.io/machine-translated`).
+           * Drop a reserved one silently, same as a denied tag. */
           else if (is_reserved_vendor_tag(tag_name, tag_len))
             ; /* Reserved for the server, silently drop it */
           /* Copy client-only tag to buffer for TAGMSG relay.

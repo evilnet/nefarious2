@@ -292,35 +292,29 @@ const char* get_vapid_pubkey(void)
  * @return 1 if tag is denied, 0 if allowed.
  */
 /** Check whether a client-only tag squats a server-reserved vendor
- * namespace.  The server authors tags there and trusts them: the
- * `+evilnet.github.io/sid=<sessid>` marker injected into PM history
- * (ircd_relay.c) is what chathistory's ephemeral-participant auth check
- * (history_pm_target_has_sessid) matches against.  `+afternet.org/` is
- * ALSO reserved, permanently and independent of any single use: it is
- * the network's own domain (cf. the afternet.org/account WEBIRC
- * option), so client tags have no claim to it -- and concretely,
- * records stored before 2026-08-29 carry the sid marker under it and
- * the auth check still honors those.  Do NOT drop this entry when the
- * legacy records age out.  A client-supplied
- * tag in either namespace is dropped at capture (parse.c).  The vendor
- * part is a DNS name -> case-insensitive match (ircd_strncmp folds
- * ASCII letters; the '.' '/' '+' are compared exactly).
+ * tag.  Thin wrapper over the pure ircd_reserved_vendor_tag()
+ * (ircd_string.c) -- see that function's doc comment for exactly
+ * which names qualify.
+ *
+ * `+afternet.org/` is reserved WHOLE (legacy; pre-2026-08-29
+ * PM-history records carry their sid marker under it).
+ * `+evilnet.github.io/` reserves only the specific NAMES the server
+ * itself writes and trusts there -- `sid` (the PM-history auth
+ * marker chathistory's ephemeral-participant check,
+ * history_pm_target_has_sessid, matches against), `ssid`, `rsid`,
+ * and `chathistory-gap` -- not the whole namespace: Seance, itself
+ * an evilnet project, may use the rest of it for ordinary
+ * client-only tags (user decision 2026-11-09).  A client-supplied
+ * tag matching one of those reserved names is dropped at capture
+ * (parse.c); anything else under `+evilnet.github.io/` passes
+ * through as an ordinary client-only tag, still subject to
+ * CLIENTTAGDENY.
  * @param[in] tag The tag name to check (including + prefix).
  * @param[in] tag_len Length of the tag (name, optionally =value).
- * @return 1 if the tag is in a reserved namespace, 0 otherwise. */
+ * @return 1 if the tag is reserved to the server, 0 otherwise. */
 int is_reserved_vendor_tag(const char *tag, size_t tag_len)
 {
-  static const char *prefixes[] = { "+evilnet.github.io/", "+afternet.org/" };
-  size_t i;
-
-  if (!tag)
-    return 0;
-  for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
-    size_t plen = strlen(prefixes[i]);
-    if (tag_len >= plen && 0 == ircd_strncmp(tag, prefixes[i], plen))
-      return 1;
-  }
-  return 0;
+  return ircd_reserved_vendor_tag(tag, tag_len);
 }
 
 int is_client_tag_denied(const char *tag, size_t tag_len)

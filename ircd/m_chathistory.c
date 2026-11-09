@@ -721,12 +721,19 @@ static struct HistoryRowFilter *query_row_filter(struct Client *sptr,
   return hook;
 }
 
-/** Copy @a in to @a out without the server's own PM-history markers
- * (`+evilnet.github.io/sid=` and the legacy `+afternet.org/sid=`, and the
- * sender's and recipient's `ssid=` / `rsid=`).  They exist for the
- * ephemeral participant check in check_history_access and for naming a
- * conversation after the right session (replay.c), and carry session ids
- * that are nobody else's business.
+/** Copy @a in to @a out without the server's own reserved vendor tags
+ * (`+evilnet.github.io/sid=`, `ssid=`, `rsid=`, `chathistory-gap`, and
+ * the legacy `+afternet.org/sid=`; see is_reserved_vendor_tag(), the
+ * single source of truth for this list -- shared with parse.c's
+ * capture-time reservation gate, so a future server-written tag only
+ * needs adding there).  The PM markers exist for the ephemeral
+ * participant check in check_history_access and for naming a
+ * conversation after the right session (replay.c), and carry session
+ * ids that are nobody else's business; `chathistory-gap` never
+ * actually reaches stored client_tags (it's sent live, never stored),
+ * so stripping it here is a no-op kept for the same reason reusing
+ * the whole `+afternet.org/` namespace is: one list, not two to keep
+ * in sync.
  * @return @a out (empty when nothing else was there). */
 static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
 {
@@ -738,10 +745,7 @@ static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
   while (*in) {
     const char *end = strchr(in, ';');
     size_t len = end ? (size_t)(end - in) : strlen(in);
-    int internal = (len >= 22 && memcmp(in, "+evilnet.github.io/sid", 22) == 0)
-                   || (len >= 23 && memcmp(in, "+evilnet.github.io/ssid", 23) == 0)
-                   || (len >= 23 && memcmp(in, "+evilnet.github.io/rsid", 23) == 0)
-                   || (len >= 17 && memcmp(in, "+afternet.org/sid", 17) == 0);
+    int internal = is_reserved_vendor_tag(in, len);
     if (!internal && len > 0 && pos + len + 2 <= outsz) {
       if (pos)
         out[pos++] = ';';

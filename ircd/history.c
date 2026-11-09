@@ -4411,10 +4411,13 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
   /* The vendor-tag forms prepended at store time: see ircd_relay.c
    * store_private_history's Phase 5a block.  Current records carry the
    * evilnet-org form; records stored before 2026-08-29 carry the
-   * legacy afternet form (both namespaces are reserved from client
-   * tags at capture -- is_reserved_vendor_tag -- so neither is
-   * forgeable in NEW records; pre-reservation legacy poison is the
-   * same accepted residue as 3ab3038's). */
+   * legacy afternet form.  `sid` is one of the specific NAMES
+   * reserved under `+evilnet.github.io/` from client tags at capture
+   * (is_reserved_vendor_tag) -- not the whole namespace anymore
+   * (Seance may use the rest of it) -- while the legacy
+   * `+afternet.org/` namespace stays reserved whole.  Either way
+   * `sid` is unforgeable in NEW records; pre-reservation legacy
+   * poison is the same accepted residue as 3ab3038's. */
   ircd_snprintf(0, needles[0], sizeof(needles[0]),
                 "+evilnet.github.io/sid=%s", sessid);
   ircd_snprintf(0, needles[1], sizeof(needles[1]),

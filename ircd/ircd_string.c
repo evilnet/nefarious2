@@ -865,6 +865,85 @@ int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_
   return 0;
 }
 
+/* ------------------------------------------------------------------
+ * Reserved vendor tag namespace (server-authored, client-unforgeable)
+ *
+ * `+afternet.org/` is reserved WHOLE: the network's own domain (cf.
+ * the afternet.org/account WEBIRC option), independent of any single
+ * use -- and pre-2026-08-29 PM-history records carry their sid
+ * marker under it, so the reservation can never be narrowed without
+ * re-poisoning that legacy residue.
+ *
+ * `+evilnet.github.io/` is this fork's own vendor namespace, but
+ * Seance -- itself an evilnet project -- legitimately wants ordinary
+ * client-only tags under it too (e.g.
+ * `+evilnet.github.io/machine-translated`; user decision 2026-11-09).
+ * So only the NAMES the server itself writes and trusts are reserved
+ * there -- not the whole namespace:
+ *   sid              -- the PM-history auth marker.  SECURITY-relevant:
+ *                        forging it would grant access to another
+ *                        session's PM history (ircd_relay.c store;
+ *                        history.c / history_pm_target_has_sessid
+ *                        checks it).
+ *   ssid, rsid       -- internal PM naming tags (ircd_relay.c store;
+ *                        replay.c pm_tag_value() reads them).
+ *   chathistory-gap  -- the server's own gap-marker line
+ *                        (m_chathistory.c send_gap_marker()).
+ * Everything else under `+evilnet.github.io/` is an ordinary
+ * client-only tag -- still subject to CLIENTTAGDENY above, just not
+ * reserved outright.
+ *
+ * Add a future server-written tag name HERE ONLY: is_reserved_vendor_tag()
+ * (ircd.c, the parse.c capture-time gate) and m_chathistory.c's
+ * strip_internal_tags() (hiding these from chathistory playback) both
+ * call this one function.
+ * ------------------------------------------------------------------ */
+static const char rvt_evilnet_prefix[] = "+evilnet.github.io/";
+static const char rvt_afternet_prefix[] = "+afternet.org/";
+static const char *rvt_evilnet_reserved_names[] = { "sid", "ssid", "rsid", "chathistory-gap" };
+
+/** Does the NAME at \a name (length \a name_len, optionally followed
+ * by "=value" within the original tag) equal \a want exactly -- never
+ * a byte-prefix ("sid" must not match "sidecar")? */
+static int rvt_name_is(const char *name, size_t name_len, const char *want)
+{
+  size_t wlen = strlen(want);
+  if (name_len < wlen)
+    return 0;
+  if (0 != ircd_strncmp(name, want, wlen))
+    return 0;
+  return name_len == wlen || name[wlen] == '=';
+}
+
+/** Is \a tag (length \a tag_len, including its leading '+') in a
+ * vendor namespace the server reserves for its own use?  See the
+ * block comment above for exactly which names qualify.
+ * @param[in] tag The tag name to check (including + prefix).
+ * @param[in] tag_len Length of the tag (name, optionally "=value").
+ * @return 1 if the tag is reserved to the server, 0 otherwise. */
+int ircd_reserved_vendor_tag(const char *tag, size_t tag_len)
+{
+  size_t plen;
+
+  if (!tag)
+    return 0;
+
+  plen = strlen(rvt_afternet_prefix);
+  if (tag_len >= plen && 0 == ircd_strncmp(tag, rvt_afternet_prefix, plen))
+    return 1;   /* whole namespace reserved (legacy) */
+
+  plen = strlen(rvt_evilnet_prefix);
+  if (tag_len >= plen && 0 == ircd_strncmp(tag, rvt_evilnet_prefix, plen)) {
+    const char *name = tag + plen;
+    size_t name_len = tag_len - plen;
+    size_t i;
+    for (i = 0; i < sizeof(rvt_evilnet_reserved_names) / sizeof(rvt_evilnet_reserved_names[0]); i++)
+      if (rvt_name_is(name, name_len, rvt_evilnet_reserved_names[i]))
+        return 1;
+  }
+  return 0;
+}
+
 /** Fill a vector of distinct names from a delimited input list.
  * Empty tokens (when \a token occurs at the start or end of \a list,
  * or when \a token occurs adjacent to itself) are ignored.  When
