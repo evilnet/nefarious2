@@ -746,6 +746,18 @@ static void test_removed_class_frees_its_share(void **state)
   assert_int_equal(fakelag_pool_take(&cl_users, 100000), 600);
 }
 
+/* A removed class's clients lend from the free part only: its old share
+ * is counted there now, and must not be lent a second time. */
+static void test_removed_class_lends_no_share(void **state)
+{
+  (void)state;
+  cl_staff.lag_share = 100;
+  fakelag_pool_take(&cl_staff, 0);
+  CurrentTime += 60;
+  cl_staff.valid = 0;
+  assert_int_equal(fakelag_pool_take(&cl_staff, 100000), 600);
+}
+
 /* Shares over the pool leave nothing unreserved, and each class still
  * gets its own. */
 static void test_shares_over_the_pool(void **state)
@@ -874,6 +886,7 @@ int main(void)
     cmocka_unit_test_setup(test_unreserved_is_pool_minus_shares, pool_setup),
     cmocka_unit_test_setup(test_share_then_unreserved, pool_setup),
     cmocka_unit_test_setup(test_removed_class_frees_its_share, pool_setup),
+    cmocka_unit_test_setup(test_removed_class_lends_no_share, pool_setup),
     cmocka_unit_test_setup(test_shares_over_the_pool, pool_setup),
     cmocka_unit_test_setup(test_pool_off_silences_shares, pool_setup),
     cmocka_unit_test_setup(test_budget_spans_classes, pool_setup),
