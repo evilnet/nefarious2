@@ -412,3 +412,88 @@ int hm_parse_ids(char *list, const char **ids, int max)
   }
   return n;
 }
+
+/* ---- W5 Task 15: redaction and context on history pages ---- */
+
+/** Can a REDACT name @a m?  redact_authorize's rule: a PRIVMSG, a NOTICE,
+ * a TAGMSG or a stored multiline. */
+static int hm_redactable(const struct HistoryMessage *m)
+{
+  return m->type == HISTORY_PRIVMSG || m->type == HISTORY_NOTICE
+         || m->type == HISTORY_TAGMSG || m->type == HISTORY_MULTILINE;
+}
+
+/** qsort/bsearch order of the REDACT target set. */
+static int hm_id_cmp(const void *a, const void *b)
+{
+  return strcmp((const char *)a, (const char *)b);
+}
+
+/** The walk of hm_redact_filter and hm_redact_filter_closed: @a set holds
+ * @a nset sorted names, or @a closed names every redactable entry. */
+static int hm_redact_walk(struct HistoryMessage **head, int count,
+                          const char (*set)[HISTORY_MSGID_LEN], int nset,
+                          int closed)
+{
+  struct HistoryMessage **pp = head;
+  int kept = 0, dropped = 0;
+
+  while (*pp) {
+    struct HistoryMessage *cur = *pp;
+    int drop = 0;
+
+    if (cur->type != HISTORY_REDACT && hm_redactable(cur)
+        && (closed || (nset > 0 && bsearch(cur->msgid, set, (size_t)nset,
+                                           sizeof(set[0]), hm_id_cmp))))
+      drop = 1;   /* F-6: a REDACT of the page names it */
+    if (drop) {
+      *pp = cur->next;
+      cur->next = NULL;
+      history_free_messages(cur);
+      dropped++;
+    } else {
+      pp = &cur->next;
+      kept++;
+    }
+  }
+  return dropped ? kept : count;
+}
+
+int hm_redact_filter_closed(struct HistoryMessage **head, int count)
+{
+  if (!head || !*head || count <= 0)
+    return count;
+  return hm_redact_walk(head, count, NULL, 0, 1);
+}
+
+int hm_redact_filter(struct HistoryMessage **head, int count)
+{
+  struct HistoryMessage *m;
+  char (*set)[HISTORY_MSGID_LEN] = NULL;
+  int n = 0, nset = 0, rc;
+
+  if (!head || !*head || count <= 0)
+    return count;
+
+  /* The REDACT entries' targets, as many as the page carries (F-6: the
+   * old fixed table of 100 showed the redacted originals past it). */
+  for (m = *head; m; m = m->next)
+    if (m->type == HISTORY_REDACT)
+      n++;
+  if (n == 0)
+    return count;
+  set = (char (*)[HISTORY_MSGID_LEN])MyMalloc((size_t)n * sizeof(*set));
+  /* MyMalloc's out-of-memory handler does not return; were it to, no
+   * redacted text may show for want of the set. */
+  if (!set)
+    return hm_redact_filter_closed(head, count);
+  for (m = *head; m; m = m->next)
+    if (m->type == HISTORY_REDACT
+        && hm_context_parent(m, set[nset], sizeof(set[nset])))
+      nset++;
+  qsort(set, (size_t)nset, sizeof(*set), hm_id_cmp);
+  rc = hm_redact_walk(head, count, (const char (*)[HISTORY_MSGID_LEN])set,
+                      nset, 0);
+  MyFree(set);
+  return rc;
+}

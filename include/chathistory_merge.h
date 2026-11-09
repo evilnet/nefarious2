@@ -115,4 +115,21 @@ extern int hm_pack_ids(const char *const *ids, int n, int from, size_t room,
  * @return the count. */
 extern int hm_parse_ids(char *list, const char **ids, int max);
 
+/** The reply-side redaction filter of a history page (W5 Task 15; it was
+ * m_chathistory.c's redact_filter_messages, which kept 100 targets and
+ * showed the redacted originals past them).  Every PRIVMSG/NOTICE/TAGMSG/
+ * MULTILINE entry of @a *head, context or not, that a REDACT entry of the
+ * list names (its first content word) is dropped.  The set of names is
+ * sized from the list, with no cap (F-6); when it cannot be allocated the
+ * filter fails closed (hm_redact_filter_closed).  REDACT entries and
+ * events are never dropped.
+ * @return @a count when nothing was dropped, else the entries left. */
+extern int hm_redact_filter(struct HistoryMessage **head, int count);
+
+/** hm_redact_filter's fail-closed form, for a set it could not allocate:
+ * every entry a REDACT could name (PRIVMSG/NOTICE/TAGMSG/MULTILINE) is
+ * dropped, context or not; REDACT entries and events stay.
+ * @return @a count when nothing was dropped, else the entries left. */
+extern int hm_redact_filter_closed(struct HistoryMessage **head, int count);
+
 #endif /* INCLUDED_chathistory_merge_h */

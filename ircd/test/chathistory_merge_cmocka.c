@@ -22,7 +22,11 @@
  *  - the children request (W5 Task 14): hm_children_wanted (which of a
  *    page's rows to ask about, newest first with the monotone stop),
  *    hm_pack_ids / hm_parse_ids (a CH Q K line's msgid list), and
- *    hm_splice_context (the context splice, moved from m_chathistory.c).
+ *    hm_splice_context (the context splice, moved from m_chathistory.c);
+ *  - the redaction filter of a history page (W5 Task 15): hm_redact_filter
+ *    drops every message a REDACT of the page names, with no cap on their
+ *    number (F-6), and its fail-closed form every message a REDACT could
+ *    name.
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -616,9 +620,121 @@ static void test_splice_drops_dup_and_orphan(void **s)
   history_free_messages(merged);
 }
 
+/* ---- W5 Task 15: redaction and context on history pages ---- */
+
+/* A row of @a type; a REDACT's content names @a target_msgid. */
+static struct HistoryMessage *typed(const char *msgid, const char *ts, int type,
+                                    const char *target_msgid)
+{
+  struct HistoryMessage *m = row(msgid, ts, "");
+
+  m->type = type;
+  if (type == HISTORY_REDACT)
+    ircd_strncpy(m->content, target_msgid, sizeof(m->content));
+  else if (type == HISTORY_TAGMSG)
+    m->content[0] = '\0';
+  return m;
+}
+
+/* A context row (history_attach_context's: is_context, no ctx_parent). */
+static struct HistoryMessage *as_ctx(struct HistoryMessage *m)
+{
+  m->is_context = 1;
+  return m;
+}
+
+/* F-6: no cap on the REDACT targets.  150 messages and their 150 REDACT
+ * rows on one page (the old filter kept 100 targets and showed the rest):
+ * every message goes, every REDACT stays.  Then the same with the REDACTs
+ * as context, each after its message. */
+static void test_redact_filter_no_cap(void **s)
+{
+  struct HistoryMessage *head = NULL, **tp = &head, *m;
+  char id[16], ts[24], tgt[16];
+  int i, n;
+
+  (void)s;
+  for (i = 0; i < 150; i++) {
+    snprintf(id, sizeof id, "M%03d", i);
+    snprintf(ts, sizeof ts, "1790000%03d.000", i);
+    *tp = typed(id, ts, HISTORY_PRIVMSG, NULL);
+    tp = &(*tp)->next;
+  }
+  for (i = 0; i < 150; i++) {
+    snprintf(id, sizeof id, "D%03d", i);
+    snprintf(ts, sizeof ts, "1790001%03d.000", i);
+    snprintf(tgt, sizeof tgt, "M%03d", 149 - i);
+    *tp = typed(id, ts, HISTORY_REDACT, tgt);
+    tp = &(*tp)->next;
+  }
+  n = hm_redact_filter(&head, 300);
+  assert_int_equal(n, 150);
+  assert_int_equal(count(head), 150);
+  for (m = head; m; m = m->next)
+    assert_int_equal(m->type, HISTORY_REDACT);
+  history_free_messages(head);
+
+  head = NULL;
+  tp = &head;
+  for (i = 0; i < 150; i++) {
+    snprintf(id, sizeof id, "M%03d", i);
+    snprintf(ts, sizeof ts, "1790000%03d.000", i);
+    *tp = typed(id, ts, HISTORY_PRIVMSG, NULL);
+    tp = &(*tp)->next;
+    snprintf(id, sizeof id, "D%03d", i);
+    snprintf(tgt, sizeof tgt, "M%03d", i);
+    *tp = as_ctx(typed(id, "1790009000.000", HISTORY_REDACT, tgt));
+    tp = &(*tp)->next;
+  }
+  n = hm_redact_filter(&head, 150);
+  assert_int_equal(n, 150);
+  for (m = head; m; m = m->next)
+    assert_int_equal(m->type, HISTORY_REDACT);
+  history_free_messages(head);
+}
+
+/* Nothing dropped: the count comes back as given (here 7, not the list's
+ * length). */
+static void test_redact_filter_nothing_dropped(void **s)
+{
+  struct HistoryMessage *head = chain(3,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      typed("D", "5.000", HISTORY_REDACT, "X"),
+      typed("N", "2.000", HISTORY_PRIVMSG, NULL));
+
+  (void)s;
+  assert_int_equal(hm_redact_filter(&head, 7), 7);
+  assert_string_equal(ids(head), "M D N");
+  history_free_messages(head);
+  head = NULL;
+  assert_int_equal(hm_redact_filter(&head, 0), 0);
+  assert_int_equal(hm_redact_filter(NULL, 0), 0);
+}
+
+/* The fail-closed form (the target set could not be allocated): every row
+ * a REDACT could name goes, context or not; REDACTs and events stay. */
+static void test_redact_filter_closed(void **s)
+{
+  struct HistoryMessage *head = chain(6,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(typed("R", "5.000", HISTORY_TAGMSG, NULL)),
+      typed("J", "2.000", HISTORY_JOIN, NULL),
+      typed("D", "3.000", HISTORY_REDACT, "X"),
+      typed("N", "4.000", HISTORY_NOTICE, NULL),
+      typed("ML", "4.500", HISTORY_MULTILINE, NULL));
+
+  (void)s;
+  assert_int_equal(hm_redact_filter_closed(&head, 5), 2);
+  assert_string_equal(ids(head), "J D");
+  history_free_messages(head);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_redact_filter_no_cap),
+    cmocka_unit_test(test_redact_filter_nothing_dropped),
+    cmocka_unit_test(test_redact_filter_closed),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),
