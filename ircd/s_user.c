@@ -4144,12 +4144,17 @@ build_isupport_lines(void)
   size_t used, actual;
   int len, usable, item = 0;
 
-  /* Extra buffer space for :me.name 005 ClientNick <etc> */
+  /* Extra buffer space for :me.name 005 ClientNick <etc>.  The nick is
+   * budgeted at the compile-time NICKLEN, the hard cap on any nick
+   * (m_nick.c clamps to IRCD_MIN(NICKLEN, FEAT_NICKLEN)): FEAT_NICKLEN
+   * is an unchecked oper setting, and a value outside [0, NICKLEN]
+   * would push `usable` below 0 or past BUFSIZE.  With server names at
+   * most HOSTLEN, `usable` stays within buf. */
   assert(isupport_lines == 0);
   usable = BUFSIZE - 10
       - strlen(cli_name(&me))
       - strlen(get_error_numeric(RPL_ISUPPORT)->format)
-      - feature_int(FEAT_NICKLEN);
+      - NICKLEN;
   plink = &isupport_lines;
   used = 0;
 
