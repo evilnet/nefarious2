@@ -60,12 +60,15 @@ struct crypt_mechs_s {
 /* exported functions */
 extern void ircd_crypt_init(void);
 extern char* ircd_crypt(const char* key, const char* salt);
+/* ircd_crypt() for a thread pool worker: yields the crypt lock to the main
+ * thread. */
+extern char* ircd_crypt_worker(const char* key, const char* salt);
 extern int ircd_crypt_register_mech(crypt_mech_t* mechanism);
 extern int ircd_crypt_unregister_mech(crypt_mech_t* mechanism);
 extern int oper_password_match(const char* to_match, const char* passwd);
 /* Held around any direct call of a mechanism's crypt_function (each one
  * returns a static buffer) until its result is copied out; ircd_crypt()
- * takes it itself. */
+ * takes it itself.  Both take it with the main thread's priority. */
 extern void ircd_crypt_lock(void);
 extern void ircd_crypt_unlock(void);
 

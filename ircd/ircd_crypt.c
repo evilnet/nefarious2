@@ -70,36 +70,74 @@
 crypt_mechs_t* crypt_mechs_root;
 
 #ifdef HAVE_PTHREAD
-/** Serializes every use of the crypt mechanisms.  Each one returns a static
- * buffer -- crypt(3)'s own (native, bcrypt), smd5's, pbkdf2's -- and the
- * async checks run on several thread pool workers while the main thread
- * hashes too, so without it two checks read each other's result (a wrong
- * password checked beside a right one against the same stored hash could
- * match) and ircd_crypt()'s heap copy could overrun its block when the
- * buffer grew under it.  Statically initialized: usable before
- * ircd_crypt_init() and in a process that never starts the thread pool. */
+/* The crypt lock serializes every use of the crypt mechanisms.  Each one
+ * returns a static buffer -- crypt(3)'s own (native, bcrypt), smd5's,
+ * pbkdf2's -- and the async checks run on several thread pool workers while
+ * the main thread hashes too, so without it two checks read each other's
+ * result (a wrong password checked beside a right one against the same
+ * stored hash could match) and ircd_crypt()'s heap copy could overrun its
+ * block when the buffer grew under it.
+ *
+ * The main thread goes first.  A plain mutex lets the worker that releases
+ * it take it straight back for the next queued check, so a main-thread
+ * check (MKPASSWD, a remote OPER, DIE, RESTART, a fallback when the queue
+ * is full) waited for the whole queue -- up to THREAD_POOL_MAX_PENDING
+ * hashes, tens of seconds of a stalled main loop.  Here a worker does not
+ * take the lock while a main-thread caller waits for it, so that caller
+ * waits for the one hash running at most.
+ *
+ * Statically initialized: usable before ircd_crypt_init() and in a process
+ * that never starts the thread pool. */
 static pthread_mutex_t crypt_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t crypt_cond = PTHREAD_COND_INITIALIZER;
+static int crypt_busy;          /**< someone holds the crypt lock */
+static int crypt_main_waiting;  /**< main-thread callers waiting for it */
+
+/** Take the crypt lock.
+ * @param[in] worker Nonzero for a thread pool worker, which yields to every
+ * main-thread caller waiting; zero for the main thread. */
+static void crypt_acquire(int worker)
+{
+  pthread_mutex_lock(&crypt_mutex);
+  if (!worker)
+    crypt_main_waiting++;
+  while (crypt_busy || (worker && crypt_main_waiting))
+    pthread_cond_wait(&crypt_cond, &crypt_mutex);
+  if (!worker)
+    crypt_main_waiting--;
+  crypt_busy = 1;
+  pthread_mutex_unlock(&crypt_mutex);
+}
+
+/** Release the crypt lock and wake everyone waiting for it: a waiting
+ * main-thread caller takes it, and the workers check again. */
+static void crypt_release(void)
+{
+  pthread_mutex_lock(&crypt_mutex);
+  crypt_busy = 0;
+  pthread_cond_broadcast(&crypt_cond);
+  pthread_mutex_unlock(&crypt_mutex);
+}
+#else
+/* Without pthreads there is no thread pool and nothing runs at once. */
+#define crypt_acquire(worker) ((void)0)
+#define crypt_release() ((void)0)
 #endif
 
 /** Take the lock every caller of a crypt mechanism holds from the call
- * until it has copied the result out of the mechanism's static buffer.
- * ircd_crypt() takes it itself; a caller that runs a mechanism directly
- * (m_mkpasswd) takes it around the call and the copy.  Not recursive:
- * never call ircd_crypt() while holding it.  A no-op without pthreads,
- * where nothing runs at once. */
+ * until it has copied the result out of the mechanism's static buffer,
+ * with the main thread's priority.  ircd_crypt() takes it itself; a caller
+ * that runs a mechanism directly (m_mkpasswd) takes it around the call and
+ * the copy.  Not recursive: never call ircd_crypt() while holding it. */
 void ircd_crypt_lock(void)
 {
-#ifdef HAVE_PTHREAD
-  pthread_mutex_lock(&crypt_mutex);
-#endif
+  crypt_acquire(0);
 }
 
 /** Release the lock ircd_crypt_lock() took. */
 void ircd_crypt_unlock(void)
 {
-#ifdef HAVE_PTHREAD
-  pthread_mutex_unlock(&crypt_mutex);
-#endif
+  crypt_release();
 }
 
 /** Add a crypt mechanism to the list 
@@ -271,16 +309,34 @@ crypt_mechs_t* crypt_mech;
  * format and funnel it off to the correct mechanism handler function.  The
  * returned password is compared in the oper_password_match() routine.
  *
- * Safe from any thread: it holds the crypt lock from the mechanism call
- * through the heap copy, so the result is this call's own.
+ * For the main thread: it holds the crypt lock, with the main thread's
+ * priority, from the mechanism call through the heap copy, so the result
+ * is this call's own.  A thread pool worker calls ircd_crypt_worker().
 */
 char* ircd_crypt(const char* key, const char* salt)
 {
  char *hashed_pass;
 
- ircd_crypt_lock();
+ crypt_acquire(0);
  hashed_pass = crypt_locked(key, salt);
- ircd_crypt_unlock();
+ crypt_release();
+ return hashed_pass;
+}
+
+/** ircd_crypt() for a thread pool worker: the same result, under the same
+ * lock held through the heap copy, but it waits while a main-thread caller
+ * waits, so the main loop never queues behind the workers' backlog.
+ * @param key Pointer to the password we want crypted
+ * @param salt Pointer to the password we're comparing to (for the salt)
+ * @return Pointer to the generated password (must be MyFree()'d).
+ */
+char* ircd_crypt_worker(const char* key, const char* salt)
+{
+ char *hashed_pass;
+
+ crypt_acquire(1);
+ hashed_pass = crypt_locked(key, salt);
+ crypt_release();
  return hashed_pass;
 }
 

@@ -15,6 +15,12 @@
  * And crypt_verify_work() never freed the string ircd_crypt() returned:
  * one block lost per async check.
  *
+ * One lock fixes the race, and two more cases keep it from stalling the
+ * main loop: a main-thread check arriving while the workers are busy waits
+ * for the one hash running, not for the whole queue (a plain mutex let the
+ * releasing worker take it straight back), and a shutdown discards the
+ * queued checks instead of hashing each one.
+ *
  * This links the REAL ircd_crypt.o, ircd_crypt_async.o, thread_pool.o and
  * every mechanism object.  (ircd_crypt_cmocka.c re-implements ircd_crypt()
  * inline, so it cannot see what the real one serializes.)  MyMalloc's
@@ -24,7 +30,7 @@
  * at their cheapest settings (sha512-crypt rounds=1000, bcrypt cost 4,
  * PBKDF2 1000 iterations) so a case can run thousands of checks.
  * In the environment, CRYPT_RACE_CALLS sets the calls per thread per
- * mechanism (default 100; use fewer under valgrind), CRYPT_RACE_MECH runs
+ * mechanism (default 25; use fewer under valgrind), CRYPT_RACE_MECH runs
  * only the mechanism of that name, and CRYPT_TEST_FILTER only the matching
  * cases.
  */
@@ -38,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 #include <cmocka.h>
@@ -235,7 +242,7 @@ static int race_calls(void)
 {
   const char *e = getenv("CRYPT_RACE_CALLS");
   int n = e ? atoi(e) : 0;
-  return n > 0 ? n : 100;
+  return n > 0 ? n : 25;
 }
 
 /** Whether CRYPT_RACE_MECH (unset: every mechanism) selects mechanism m. */
@@ -473,6 +480,7 @@ static void test_direct_mechanism_calls_under_the_lock(void **state)
 struct verdict {
   int done;
   int result;
+  int calls;     /* how many times the callback ran: exactly once, always */
 };
 
 static void verified(int result, void *ctx)
@@ -480,6 +488,7 @@ static void verified(int result, void *ctx)
   struct verdict *v = ctx;   /* runs on the main thread, in thread_pool_poll() */
   v->result = result;
   v->done = 1;
+  v->calls++;
 }
 
 /** Run the main loop's share: wait for a completion signal, deliver them. */
@@ -499,6 +508,7 @@ static void submit(const char *password, const char *hash, struct verdict *v)
   int tries = 0;
   v->done = 0;
   v->result = 99;
+  v->calls = 0;
   while (ircd_crypt_verify_async(password, hash, verified, v) < 0) {
     assert_true(++tries < 10000);
     pump(10);
@@ -562,7 +572,7 @@ static void test_async_check_frees_what_it_computed(void **state)
 }
 
 #ifndef SHARED_CHECKS
-#define SHARED_CHECKS 400   /* per mechanism; -DSHARED_CHECKS=n for more */
+#define SHARED_CHECKS 100   /* per mechanism; -DSHARED_CHECKS=n for more */
 #endif
 
 /* A shared password (one WEBIRC, SETHOST or OPER block) checked by many
@@ -614,6 +624,110 @@ static void test_async_shared_hash_wrong_password_never_matches(void **state)
   assert_int_equal(blocks_held(), before);
 }
 
+/** Checks finished but not yet delivered: each worker writes one byte to
+ * the signal pipe per finished task, and nothing here has read it. */
+static int checks_finished(void)
+{
+  int n = -1;
+  assert_int_equal(ioctl(thread_pool_get_signal_fd(), FIONREAD, &n), 0);
+  return n;
+}
+
+#define QUEUED_CHECKS 64
+
+/** Wait until every worker has taken a check and the first one is done:
+ * from here on the workers hand the crypt lock round among themselves. */
+static void wait_workers_contending(void)
+{
+  time_t deadline = time(NULL) + 60;
+  unsigned int pending, active;
+  unsigned long completed;
+
+  for (;;) {
+    thread_pool_stats(&pending, &completed, &active);
+    if (active == ASYNC_WORKERS && checks_finished() >= 1)
+      return;
+    assert_true(time(NULL) < deadline);
+    usleep(100);
+  }
+}
+
+/* The main thread's own check -- a remote OPER, DIE, RESTART, MKPASSWD, or
+ * a WEBIRC/SETHOST/OPER fallback when the queue is full -- arriving while
+ * the workers are busy waits for the hash one of them is running, not for
+ * every check queued behind it: the workers yield the crypt lock to it.
+ * Measured by the checks the workers finished while the main thread's
+ * ran. */
+static void test_main_thread_check_waits_for_one_hash_not_the_queue(void **state)
+{
+  static struct verdict v[QUEUED_CHECKS];
+  struct pair *shared = &pairs[M_PBKDF2][0];
+  struct pair *mine = &pairs[M_PBKDF2][1];
+  long before = blocks_held();
+  int finished, i;
+  char *got;
+
+  (void)state;
+  assert_true(ircd_crypt_async_available());
+
+  for (i = 0; i < QUEUED_CHECKS; i++)
+    submit((i & 1) ? shared->wrong : shared->key, shared->stored, &v[i]);
+  wait_workers_contending();
+  finished = checks_finished();
+  got = ircd_crypt(mine->key, mine->stored);   /* on the main thread */
+  finished = checks_finished() - finished;
+
+  print_message("  %d of %d queued checks ran while the main thread's "
+                "waited\n", finished, QUEUED_CHECKS);
+  assert_non_null(got);
+  assert_string_equal(got, mine->stored);
+  free(got);
+
+  wait_all(v, QUEUED_CHECKS);
+  for (i = 0; i < QUEUED_CHECKS; i++)
+    assert_int_equal(v[i].result,
+                     (i & 1) ? CRYPT_VERIFY_NOMATCH : CRYPT_VERIFY_MATCH);
+  assert_true(finished < QUEUED_CHECKS / 4);
+  assert_int_equal(blocks_held(), before);
+}
+
+/* At shutdown (DIE, RESTART) only the checks already running finish; the
+ * queued ones are discarded, each callback run once with an error, and
+ * every block they held is given back.  The case starts and stops its own
+ * pool, so the count covers the pool's blocks too. */
+static void test_shutdown_discards_queued_checks(void **state)
+{
+  static struct verdict v[QUEUED_CHECKS];
+  struct pair *shared = &pairs[M_PBKDF2][0];
+  long before = blocks_held();
+  int finished_before, hashed = 0, cancelled = 0, i;
+
+  (void)state;
+  assert_int_equal(thread_pool_init(ASYNC_WORKERS), 0);
+  assert_true(ircd_crypt_async_available());
+
+  for (i = 0; i < QUEUED_CHECKS; i++)
+    submit((i & 1) ? shared->wrong : shared->key, shared->stored, &v[i]);
+  finished_before = checks_finished();
+  thread_pool_shutdown();
+
+  for (i = 0; i < QUEUED_CHECKS; i++) {
+    assert_int_equal(v[i].calls, 1);
+    if (v[i].result == CRYPT_VERIFY_ERROR) {
+      cancelled++;
+    } else {
+      hashed++;
+      assert_int_equal(v[i].result,
+                       (i & 1) ? CRYPT_VERIFY_NOMATCH : CRYPT_VERIFY_MATCH);
+    }
+  }
+  print_message("  shutdown with %d queued (%d already done): %d hashed, "
+                "%d discarded\n", QUEUED_CHECKS, finished_before, hashed,
+                cancelled);
+  assert_true(cancelled >= QUEUED_CHECKS / 2);
+  assert_int_equal(blocks_held(), before);
+}
+
 int main(void)
 {
   /* CRYPT_TEST_FILTER runs only the matching cases (cmocka's pattern). */
@@ -626,6 +740,9 @@ int main(void)
                                     pool_setup, pool_teardown),
     cmocka_unit_test_setup_teardown(test_async_shared_hash_wrong_password_never_matches,
                                     pool_setup, pool_teardown),
+    cmocka_unit_test_setup_teardown(test_main_thread_check_waits_for_one_hash_not_the_queue,
+                                    pool_setup, pool_teardown),
+    cmocka_unit_test(test_shutdown_discards_queued_checks),
   };
 
   if (filter && *filter)

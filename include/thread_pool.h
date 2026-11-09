@@ -68,8 +68,10 @@ int thread_pool_init(int num_threads);
 
 /**
  * Shut down the thread pool.
- * Waits for pending tasks to complete, then terminates worker threads.
- * Any tasks submitted after this returns will fail.
+ * Waits for the tasks the workers are running and delivers them, then
+ * terminates the worker threads.  Queued tasks that no worker had started
+ * are discarded: their callback runs with a NULL result and must free what
+ * it owns.  Any tasks submitted after this returns will fail.
  */
 void thread_pool_shutdown(void);
 

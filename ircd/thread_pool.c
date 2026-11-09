@@ -238,41 +238,57 @@ int thread_pool_init(int num_threads)
 
 /**
  * Shut down the thread pool.
+ * The tasks a worker is running finish and are delivered; the queued ones
+ * are discarded without running.  Each worker took the next queued task
+ * until the queue was empty, so a DIE or RESTART behind a backlog of
+ * password checks waited for every one of them, one hash at a time (the
+ * crypt lock serializes them): up to THREAD_POOL_MAX_PENDING hashes, tens
+ * of seconds.  The queue is taken away before the workers are told to
+ * stop, so they find it empty once their running task is done.
  */
 void thread_pool_shutdown(void)
 {
   int i;
-  struct thread_task *task;
+  struct thread_task *task, *discarded;
+  unsigned int ndiscarded;
 
   if (!pool.running)
     return;
 
   log_write(LS_SYSTEM, L_INFO, 0, "thread_pool: shutting down");
 
-  /* Signal workers to exit */
+  /* Take the queue and signal workers to exit */
   pthread_mutex_lock(&pool.task_mutex);
+  discarded = pool.task_head;
+  ndiscarded = pool.pending_count;
+  pool.task_head = pool.task_tail = NULL;
+  pool.pending_count = 0;
   pool.running = 0;
   pthread_cond_broadcast(&pool.task_cond);
   pthread_mutex_unlock(&pool.task_mutex);
 
-  /* Wait for workers */
+  /* Wait for workers: each finishes the task it is running */
   for (i = 0; i < pool.num_workers; i++) {
     pthread_join(pool.workers[i], NULL);
   }
 
-  /* Process any remaining completed tasks */
+  /* Deliver the tasks that finished */
   thread_pool_poll();
 
-  /* Free pending tasks (shouldn't be any, but just in case) */
-  pthread_mutex_lock(&pool.task_mutex);
-  while ((task = pool.task_head)) {
-    pool.task_head = task->next;
-    /* Call callback with NULL result to indicate cancellation */
+  /* Discard the queued ones: a NULL result tells the callback the task
+   * never ran (a password check reports CRYPT_VERIFY_ERROR); it frees
+   * what it owns.  The main thread runs these with every client still
+   * in place: server_die() and server_restart() close the connections
+   * only after shutdown_writers() returns. */
+  if (ndiscarded)
+    log_write(LS_SYSTEM, L_INFO, 0, "thread_pool: discarding %u queued "
+              "task(s)", ndiscarded);
+  while ((task = discarded)) {
+    discarded = task->next;
     if (task->callback)
       task->callback(NULL, task->ctx);
     MyFree(task);
   }
-  pthread_mutex_unlock(&pool.task_mutex);
 
   /* Cleanup */
   MyFree(pool.workers);

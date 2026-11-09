@@ -45,10 +45,11 @@ struct crypt_verify_ctx {
 
 /**
  * Work function - runs in thread pool worker.
- * This is the CPU-intensive part that we're offloading.  ircd_crypt() holds
- * the crypt lock while it hashes, so the workers never share a mechanism's
- * static buffer with each other or with the main thread; the string it
- * returns is this check's own heap copy, freed here.
+ * This is the CPU-intensive part that we're offloading.  ircd_crypt_worker()
+ * holds the crypt lock while it hashes, so the workers never share a
+ * mechanism's static buffer with each other or with the main thread, and
+ * it yields that lock to a main-thread check; the string it returns is
+ * this check's own heap copy, freed here.
  */
 static void *crypt_verify_work(void *arg)
 {
@@ -61,7 +62,7 @@ static void *crypt_verify_work(void *arg)
     return NULL;  /* crypt_verify_done() reports a NULL result as an error */
 
   /* Call the blocking crypt function - this is the slow part */
-  computed = ircd_crypt(ctx->password, ctx->hash);
+  computed = ircd_crypt_worker(ctx->password, ctx->hash);
 
   if (!computed) {
     *result = CRYPT_VERIFY_ERROR;

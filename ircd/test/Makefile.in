@@ -84,7 +84,10 @@ ZSTD_LIBS = -lzstd
 CURL_LIBS = -lcurl
 JANSSON_LIBS = -ljansson
 SSL_LIBS = -lssl -lcrypto
-CRYPT_LIBS = -lcrypt
+# The library configure found crypt() in (AC_SEARCH_LIBS: -lcrypt or
+# -ldescrypt, or none where libc has it, as on macOS); GNU make's filter
+# picks it out of the ircd's own link line.
+CRYPT_LIBS = $(filter -lcrypt -ldescrypt,@LIBS@)
 ROCKSDB_LIBS = -lrocksdb -lstdc++ -lpthread
 
 DEP_SRC = \
