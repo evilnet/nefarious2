@@ -251,6 +251,32 @@ static void test_ch_ad_features(void **state)
   assert_int_equal(0, ch_ad_features("x"));
 }
 
+/* The letters a CH A S relay and re-flood pass on (fix round 1): every
+ * letter the store sent, known or not, so a later feature survives a hop
+ * that does not know it -- [A-Za-z] only, at most CH_AD_LETTERS_MAX. */
+static void test_ch_ad_letters(void **state)
+{
+  char out[CH_AD_LETTERS_MAX + 1];
+
+  (void)state;
+  assert_int_equal(2, ch_ad_letters("KZ", out, sizeof out));
+  assert_string_equal(out, "KZ");
+  assert_int_equal(CH_AD_CHILDREN, ch_ad_features(out));
+  assert_int_equal(1, ch_ad_letters("Z", out, sizeof out));
+  assert_string_equal(out, "Z");
+  assert_int_equal(0, ch_ad_features(out));
+  assert_int_equal(2, ch_ad_letters("K!z9:", out, sizeof out));
+  assert_string_equal(out, "Kz");
+  assert_int_equal(CH_AD_LETTERS_MAX, ch_ad_letters("ABCDEFGHIJKL", out, sizeof out));
+  assert_string_equal(out, "ABCDEFGH");
+  assert_int_equal(0, ch_ad_letters(NULL, out, sizeof out));
+  assert_string_equal(out, "");
+  assert_int_equal(0, ch_ad_letters("", out, sizeof out));
+  assert_string_equal(out, "");
+  assert_int_equal(1, ch_ad_letters("KZ", out, 2));
+  assert_string_equal(out, "K");
+}
+
 /* ========== applying a redaction: rdx_row_decide / rdx_watermark_decide ========== */
 
 static void test_rdx_row_decide(void **state)
@@ -1524,6 +1550,7 @@ int main(void)
     cmocka_unit_test(test_rdx_reply_parse),
     cmocka_unit_test(test_ch_e_flags),
     cmocka_unit_test(test_ch_ad_features),
+    cmocka_unit_test(test_ch_ad_letters),
     cmocka_unit_test(test_rdx_row_decide),
     cmocka_unit_test(test_rdx_wm_cut_keeps),
     cmocka_unit_test(test_rdx_wm_truncated_continues),

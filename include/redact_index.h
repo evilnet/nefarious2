@@ -62,6 +62,15 @@ unsigned int ch_e_flags(const char *param);
 #define CH_AD_CHILDREN   0x1
 unsigned int ch_ad_features(const char *param);
 
+/* The letters of a CH A S <days> [<features>] as a receiver keeps them to
+ * relay and re-flood with the ad: the [A-Za-z] characters of @a param, in
+ * order, known or not, so a later feature survives a hop that does not know
+ * it (fix round 1).  At most @a outsz - 1 of them (CH_AD_LETTERS_MAX + 1 is
+ * the buffer a receiver keeps).  NULL-safe; @a out is always terminated
+ * when @a outsz > 0.  @return the letters kept. */
+#define CH_AD_LETTERS_MAX 8
+size_t ch_ad_letters(const char *param, char *out, size_t outsz);
+
 /* Applying one redaction (a peer's live REDACT, a catch-up row, or a
  * write-forwarded one) to this server's store.  @a parent_lookup_rc is
  * history_lookup_message's answer for the redacted message (0 found, 1 not

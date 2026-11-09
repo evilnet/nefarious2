@@ -100,6 +100,20 @@ unsigned int ch_e_flags(const char *param)
   return flags;
 }
 
+size_t ch_ad_letters(const char *param, char *out, size_t outsz)
+{
+  size_t n = 0;
+
+  if (!out || !outsz)
+    return 0;
+  for (; param && *param && n + 1 < outsz; param++) {
+    if ((*param >= 'A' && *param <= 'Z') || (*param >= 'a' && *param <= 'z'))
+      out[n++] = *param;
+  }
+  out[n] = '\0';
+  return n;
+}
+
 unsigned int ch_ad_features(const char *param)
 {
   unsigned int features = 0;

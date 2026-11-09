@@ -1578,17 +1578,26 @@ struct ChathistoryAd {
    * stays open, and its REDACT catch-up waits, until that EB
    * (chathistory_server_eob).  Goes with the entry (clear_server_ad). */
   unsigned char eob_pending;
-  /** CH_AD_* letters of its last CH A S (K = it answers CH Q K, the children
-   * request; W5 Task 14).  Replaced on every CH A S, never OR'd: a relinked
-   * server that dropped one starts without it. */
+  /** The feature letters of its last CH A S, as it sent them (ch_ad_letters:
+   * [A-Za-z], at most CH_AD_LETTERS_MAX, known to this build or not), and
+   * the CH_AD_* bits this build reads from them (K = it answers CH Q K, the
+   * children request; W5 Task 14).  Both replaced on every CH A S, never
+   * OR'd: a relinked server that dropped one starts without it.  The
+   * letters go on verbatim with every relay and re-flood of the ad, so a
+   * hop never strips a feature it does not know or has turned off itself
+   * (fix round 1). */
+  char letters[CH_AD_LETTERS_MAX + 1];
   unsigned int features;
 };
 
-/** " K" when an ad's features carry the children request, else "": the
- * letters a CH A S relay or re-flood passes on (CH A S <days> [<features>]). */
-static const char *ad_feature_letters(unsigned int features)
+/** " <letters>" for a CH A S relay or re-flood of @a ad, or "" when it
+ * carried none (CH A S <days> [<features>]). */
+static const char *ad_feature_suffix(const struct ChathistoryAd *ad, char *buf, size_t bufsz)
 {
-  return (features & CH_AD_CHILDREN) ? " K" : "";
+  if (!ad->letters[0])
+    return "";
+  ircd_snprintf(0, buf, bufsz, " %s", ad->letters);
+  return buf;
 }
 
 /** Global array of server advertisements, indexed by server numeric */
@@ -4188,6 +4197,7 @@ void chathistory_reflood_ads(struct Client *newpeer)
     struct ChathistoryAd *ad = server_ads[si];
     struct Client *owner;
     char yxx[4];
+    char letters[CH_AD_LETTERS_MAX + 2];
     if (!ad || !ad->has_advertisement || !ad->is_storage_server)
       continue;
     inttobase64(yxx, si, 2);
@@ -4205,7 +4215,7 @@ void chathistory_reflood_ads(struct Client *newpeer)
     if (cli_from(owner) == newpeer)
       continue;   /* reached via the new peer -- it already has this ad */
     sendcmdto_one(owner, CMD_CHATHISTORY, newpeer, "A S %d%s", ad->retention_days,
-                  ad_feature_letters(ad->features));
+                  ad_feature_suffix(ad, letters, sizeof(letters)));
   }
 }
 
@@ -4487,11 +4497,11 @@ void chathistory_report_ads(struct Client *to, const struct StatDesc *sd, char *
     if (ad->is_storage_server) {
       storage_count++;
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "A :  %s: STORE retention=%d days (updated %s)%s",
+                 "A :  %s: STORE retention=%d days (updated %s)%s%s",
                  cli_name(server),
                  ad->retention_days,
                  timebuf,
-                 (ad->features & CH_AD_CHILDREN) ? " features=K" : "");
+                 ad->letters[0] ? " features=" : "", ad->letters);
     } else if (ad->has_advertisement) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "A :  %s: advertisement present but not storage",
@@ -8183,9 +8193,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (subtype[0] == 'S') {
       /* Storage capability: S <retention_days> [<features>] -- the feature
        * letters (ch_ad_features; K = it answers CH Q K, W5 Task 14) are
-       * replaced on every CH A S, never OR'd.  An older server sends none
-       * and ignores ours; an older middle hop drops them on relay, so a
-       * store behind it looks K-less (fails safe: it is asked no K). */
+       * replaced on every CH A S, never OR'd, and relayed as received
+       * (ch_ad_letters).  An older server sends none and ignores ours; an
+       * older middle hop drops them on relay, so a store behind it looks
+       * K-less (fails safe: it is asked no K). */
       int retention;
 
       if (parc < 4)
@@ -8195,7 +8206,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->has_advertisement = 1;
       ad->is_storage_server = 1;
       ad->retention_days = retention;
-      ad->features = parc >= 5 ? ch_ad_features(parv[4]) : 0;
+      ch_ad_letters(parc >= 5 ? parv[4] : NULL, ad->letters, sizeof(ad->letters));
+      ad->features = ch_ad_features(ad->letters);
       ad->last_update = CurrentTime;
       /* Back -- but not caught up until the burst that carries its state
        * here has ended.  A store sends CH A S when OUR end of burst reaches
@@ -8215,9 +8227,13 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));
 
-      /* Propagate to other servers (except source), its letters with it */
-      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d%s", retention,
-                               ad_feature_letters(ad->features));
+      /* Propagate to other servers (except source), its letters with it,
+       * verbatim: known here or not, and whatever our own switch says */
+      {
+        char letters[CH_AD_LETTERS_MAX + 2];
+        sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d%s", retention,
+                                 ad_feature_suffix(ad, letters, sizeof(letters)));
+      }
       chathistory_update_retention_isupport(1);
     }
     else if (subtype[0] == 'R') {
