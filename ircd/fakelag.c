@@ -157,7 +157,9 @@ int fakelag_pool_take(struct ConnectionClass *cl, int want)
   for (c = get_class_list(); c; c = c->next)
     if (c->valid && reserved < FAKELAG_POOL_MAX)
       reserved += share_of(c);
-  if (cl)
+  /* A class a rehash removed keeps its clients but no share: what it held
+   * is no longer counted in reserved, so it must not be lent twice. */
+  if (cl && cl->valid)
     got = bucket_take(&cl->lag_bucket, share_of(cl), want);
   got += bucket_take(&unreserved, pool > reserved ? pool - reserved : 0,
                      want - got);
