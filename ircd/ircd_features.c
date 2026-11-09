@@ -487,7 +487,17 @@ set_isupport_utf8only(void)
 
 /** Set CLIENTTAGDENY from FEAT_CLIENTTAGDENY.  IRCv3 token
  * advertising blocked client-only tag patterns; empty value
- * removes the advert. */
+ * removes the advert.
+ *
+ * The message-tags spec writes entries WITHOUT the client-only '+'
+ * prefix ("*,-draft/react"); this fork's config has historically
+ * carried entries with it ("+draft/language").  Both name the same
+ * tag, so each entry's single leading '+' (after any leading '-')
+ * is normalised away FIRST, before the #600 dedup below -- otherwise
+ * "+draft/x" and "draft/x" in one config would look like two
+ * different tags and both get advertised.  The 005 always ends up
+ * in spec form either way; ircd_clienttagdeny_match() (ircd_string.c)
+ * accepts both forms on the matching side. */
 static void
 set_isupport_clienttagdeny(void)
 {
@@ -512,9 +522,25 @@ set_isupport_clienttagdeny(void)
     clean[0] = '\0';
     for (tok = strtok_r(work, ",", &saveptr); tok;
          tok = strtok_r(NULL, ",", &saveptr)) {
-        const char *name = (*tok == '-') ? tok + 1 : tok;
+        /* Strip one leading '+' (after any leading '-') to the spec
+         * form BEFORE dedup/emission -- "*" is untouched (no +/-). */
+        char norm[520];
+        const char *body = tok;
+        int neg = (*body == '-');
+        const char *name;
         char probe_neg[520], probe_plain[520];
         size_t cur;
+
+        if (neg)
+            body++;
+        if (*body == '+')
+            body++;
+        if (neg)
+            ircd_snprintf(0, norm, sizeof(norm), "-%s", body);
+        else
+            ircd_strncpy(norm, body, sizeof(norm));
+
+        name = neg ? norm + 1 : norm;
         if (!*name)
             continue;
         ircd_snprintf(0, probe_neg, sizeof(probe_neg), ",-%s,", name);
@@ -523,7 +549,7 @@ set_isupport_clienttagdeny(void)
         if (strstr(haystack, probe_neg))
             continue;   /* negated form already advertised */
         if (strstr(haystack, probe_plain)) {
-            if (*tok == '-') {
+            if (neg) {
                 /* plain form emitted earlier; negation must win */
                 char *hit = strstr(clean, probe_plain + 1);
                 while (hit && hit != clean && hit[-1] != ',')
@@ -536,13 +562,13 @@ set_isupport_clienttagdeny(void)
             continue;
         }
         cur = strlen(clean);
-        if (cur + strlen(tok) + 2 >= sizeof(clean))
+        if (cur + strlen(norm) + 2 >= sizeof(clean))
             break;
         if (cur) {
             clean[cur++] = ',';
             clean[cur] = '\0';
         }
-        memcpy(clean + cur, tok, strlen(tok) + 1);
+        memcpy(clean + cur, norm, strlen(norm) + 1);
     }
 
     if (clean[0])

@@ -501,6 +501,153 @@ static void test_csv_contains_token_match_and_case(void **state)
 }
 
 
+/* ========== ircd_clienttagdeny_match ========== */
+/* The IRCv3 message-tags spec writes CLIENTTAGDENY entries WITHOUT
+ * the client-only `+` prefix (e.g. "*,-draft/react"); the fork's
+ * matcher (pre-fix: is_client_tag_denied() in ircd.c) required a
+ * literal leading '+' on positive entries.  These pin the normalised
+ * behaviour: spec form and `+`-form entries are equivalent, both as
+ * positive denials and as negations. */
+
+#define CTD_MATCH(list, tag) \
+  ircd_clienttagdeny_match((list), (tag), strlen(tag))
+
+static void test_ctd_spec_form_denies(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("draft/language", "+draft/language"), 1);
+    assert_int_equal(CTD_MATCH("draft/language", "+draft/react"), 0);
+}
+
+static void test_ctd_plus_form_denies_same(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("+draft/language", "+draft/language"), 1);
+    assert_int_equal(CTD_MATCH("+draft/language", "+draft/react"), 0);
+}
+
+static void test_ctd_star_denies_all(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("*", "+draft/language"), 1);
+    assert_int_equal(CTD_MATCH("*", "+anything/at-all"), 1);
+}
+
+static void test_ctd_star_with_negation_exempts_one(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("*,-draft/react", "+draft/react"), 0);
+    assert_int_equal(CTD_MATCH("*,-draft/react", "+draft/language"), 1);
+}
+
+static void test_ctd_negated_plus_form_equivalent(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("-+draft/react", "+draft/react"), 0);
+    assert_int_equal(CTD_MATCH("-draft/react", "+draft/react"), 0);
+    /* Without a deny-all, a bare negation entry denies nothing else. */
+    assert_int_equal(CTD_MATCH("-+draft/react", "+draft/language"), 0);
+}
+
+static void test_ctd_prefix_wildcard_positive(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("draft/*", "+draft/x"), 1);
+    assert_int_equal(CTD_MATCH("draft/*", "+drafty"), 0);
+    /* Bare prefix with nothing past the slash does not match -- the
+     * same "longer than the prefix" rule as negation (unified; see
+     * the hotfix report for the pre-fix positive/negative asymmetry). */
+    assert_int_equal(CTD_MATCH("draft/*", "+draft/"), 0);
+}
+
+static void test_ctd_prefix_wildcard_negated_exempts_subtree(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("*,-draft/*", "+draft/language"), 0);
+    assert_int_equal(CTD_MATCH("*,-draft/*", "+draft/react"), 0);
+    assert_int_equal(CTD_MATCH("*,-draft/*", "+other/tag"), 1);
+}
+
+static void test_ctd_exemption_wins_over_denial(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("draft/language,-draft/language", "+draft/language"), 0);
+    assert_int_equal(CTD_MATCH("+draft/language,-draft/language", "+draft/language"), 0);
+}
+
+static void test_ctd_spaces_and_empty_entries_ignored(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH(" draft/language ,, -draft/react ", "+draft/language"), 1);
+    assert_int_equal(CTD_MATCH(" draft/language ,, -draft/react ", "+draft/react"), 0);
+}
+
+static void test_ctd_tag_without_plus_never_denied(void **state)
+{
+    (void)state;
+    assert_int_equal(ircd_clienttagdeny_match("*", "draft/language", strlen("draft/language")), 0);
+    assert_int_equal(ircd_clienttagdeny_match("*", "", 0), 0);
+}
+
+static void test_ctd_empty_or_null_list_denies_nothing(void **state)
+{
+    (void)state;
+    assert_int_equal(CTD_MATCH("", "+draft/language"), 0);
+    assert_int_equal(ircd_clienttagdeny_match(NULL, "+draft/language", strlen("+draft/language")), 0);
+}
+
+static void test_ctd_value_bearing_tag_matches_by_name(void **state)
+{
+    (void)state;
+    /* A client-only tag almost always carries a value
+     * (draft/reply=<msgid>, draft/react=<emoji>); CLIENTTAGDENY
+     * filters by tag KEY, not value -- the spec's own worked example
+     * (-draft/react,-draft/reply in FEATURE_FLAGS_CONFIG.md) would be
+     * silently inert otherwise, since those tags are never sent bare. */
+    assert_int_equal(CTD_MATCH("draft/language", "+draft/language=x"), 1);
+    assert_int_equal(CTD_MATCH("*,-draft/react", "+draft/react=\xf0\x9f\x91\x8d"), 0);
+    assert_int_equal(CTD_MATCH("draft/*", "+draft/reply=12345"), 1);
+    /* A longer NAME must not be mistaken for the entry plus a value:
+     * "draft/x" must not match "+draft/xy" (no '=' boundary). */
+    assert_int_equal(CTD_MATCH("draft/x", "+draft/xy"), 0);
+}
+
+static void test_ctd_old_matcher_missed_spec_form(void **state)
+{
+    /* Semantic RED pin: reproduces the OLD is_client_tag_denied()
+     * positive-match rule (pre-fix, ircd.c ~:401-413) inline, showing
+     * the spec-form entry it failed to deny.  Kept after the fix
+     * lands so a regression that reintroduces the +-only requirement
+     * trips THIS test too, not just a missing symbol. */
+    const char *tag = "+draft/language";
+    size_t tag_len = strlen(tag);
+    const char *deny_list = "draft/language";
+    const char *p, *pattern_start;
+    size_t pattern_len;
+    int explicitly_denied = 0;
+    (void)state;
+
+    p = deny_list;
+    while (*p) {
+      while (*p == ' ' || *p == ',')
+        p++;
+      if (!*p)
+        break;
+      pattern_start = p;
+      while (*p && *p != ',')
+        p++;
+      pattern_len = p - pattern_start;
+      /* OLD rule: a positive entry only matched with a literal '+'. */
+      if (pattern_start[0] == '+' &&
+          tag_len == pattern_len &&
+          ircd_strncmp(tag, pattern_start, pattern_len) == 0)
+        explicitly_denied = 1;
+    }
+    assert_int_equal(explicitly_denied, 0);    /* old matcher: missed it (the bug) */
+    assert_int_equal(CTD_MATCH(deny_list, tag), 1); /* new matcher: denies it (fixed) */
+}
+
+
 /* --- ircd_json_escape --- */
 
 static void test_json_escape_passthrough(void **state)
@@ -1014,6 +1161,21 @@ int main(void)
         /* csv_contains_token */
         cmocka_unit_test(test_csv_contains_token_empty_denies),
         cmocka_unit_test(test_csv_contains_token_match_and_case),
+
+        /* ircd_clienttagdeny_match */
+        cmocka_unit_test(test_ctd_spec_form_denies),
+        cmocka_unit_test(test_ctd_plus_form_denies_same),
+        cmocka_unit_test(test_ctd_star_denies_all),
+        cmocka_unit_test(test_ctd_star_with_negation_exempts_one),
+        cmocka_unit_test(test_ctd_negated_plus_form_equivalent),
+        cmocka_unit_test(test_ctd_prefix_wildcard_positive),
+        cmocka_unit_test(test_ctd_prefix_wildcard_negated_exempts_subtree),
+        cmocka_unit_test(test_ctd_exemption_wins_over_denial),
+        cmocka_unit_test(test_ctd_spaces_and_empty_entries_ignored),
+        cmocka_unit_test(test_ctd_tag_without_plus_never_denied),
+        cmocka_unit_test(test_ctd_empty_or_null_list_denies_nothing),
+        cmocka_unit_test(test_ctd_value_bearing_tag_matches_by_name),
+        cmocka_unit_test(test_ctd_old_matcher_missed_spec_form),
 
         /* ircd_utf8_clamp */
         cmocka_unit_test(test_utf8_clamp_fits_untouched),

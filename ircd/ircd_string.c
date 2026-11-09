@@ -716,6 +716,155 @@ int csv_contains_token(const char* csv, const char* token)
   return 0;
 }
 
+/* ------------------------------------------------------------------
+ * CLIENTTAGDENY matcher (message-tags spec normalisation)
+ *
+ * The IRCv3 message-tags spec writes CLIENTTAGDENY entries WITHOUT
+ * the client-only '+' prefix (e.g. "*,-draft/react,-draft/reply"),
+ * but this fork's config has historically carried entries with it
+ * ("+draft/language").  Both forms name the same tag; this matcher
+ * normalises an entry's single optional leading '+' (after any
+ * leading '-') away before comparing, so a deny list can mix spec
+ * form and fork form freely.  It is pure and dependency-light (no
+ * feature_str() lookup here -- the caller passes the deny list in),
+ * matching the msgid_decode_time_ms() helpers above.
+ * ------------------------------------------------------------------ */
+
+/** Match a client-only tag against an operator CLIENTTAGDENY list.
+ *
+ * Semantics (preserved from the pre-fix is_client_tag_denied(),
+ * except where noted):
+ *   - a tag not starting with '+' is never denied;
+ *   - a bare "*" entry denies every client-only tag;
+ *   - "name/" + "*" (or "+name/" + "*") is a prefix wildcard -- it
+ *     denies/exempts any "+name/<something>" tag, but NOT the bare
+ *     "+name/" itself with nothing past the slash.  The pre-fix
+ *     matcher applied that "longer than the prefix" rule only to
+ *     negated wildcards; positive wildcards now follow the same
+ *     rule for consistency (see the hotfix 6 report for the
+ *     pre-fix asymmetry);
+ *   - an exact entry matches the tag's NAME, ignoring any
+ *     "=value" the tag carries on the wire -- CLIENTTAGDENY
+ *     filters by tag key per spec, and tags like draft/reply or
+ *     draft/react are essentially never sent bare;
+ *   - a negated wildcard/exact entry ("-name", "-+name",
+ *     "-name/" + "*", "-+name/" + "*") exempts a matching tag, and
+ *     an exemption always wins over a denial of the same tag;
+ *   - spaces around an entry are ignored; empty entries (from
+ *     doubled commas, etc.) are skipped;
+ *   - comparisons are case-sensitive per ircd_strncmp (ASCII fold).
+ *
+ * @param[in] deny_list The FEAT_CLIENTTAGDENY value (comma-separated
+ *                      entries); NULL or empty denies nothing.
+ * @param[in] tag The client-only tag as seen on the wire, including
+ *                its leading '+' (name, optionally "=value").
+ * @param[in] tag_len Length of \a tag.
+ * @return 1 if the tag is denied, 0 otherwise. */
+int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_len)
+{
+  const char *p, *entry_start;
+  size_t entry_len;
+  int deny_all = 0;
+  int exempted = 0;
+  int denied = 0;
+
+  if (!tag || tag_len == 0 || tag[0] != '+')
+    return 0;
+  if (!deny_list || !*deny_list)
+    return 0;
+
+  /* First pass: a bare "*" entry means deny-all (whitelist mode). */
+  p = deny_list;
+  while (*p) {
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+    entry_start = p;
+    while (*p && *p != ',')
+      p++;
+    entry_len = p - entry_start;
+    while (entry_len > 0 && entry_start[entry_len - 1] == ' ')
+      entry_len--;
+    if (entry_len == 1 && entry_start[0] == '*')
+      deny_all = 1;
+  }
+
+  /* Second pass: negated and positive entries, '+' normalised away. */
+  p = deny_list;
+  while (*p) {
+    const char *name;
+    size_t name_len;
+    int negate = 0;
+
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+    entry_start = p;
+    while (*p && *p != ',')
+      p++;
+    entry_len = p - entry_start;
+    while (entry_len > 0 && entry_start[entry_len - 1] == ' ')
+      entry_len--;
+    if (entry_len == 0)
+      continue;
+    if (entry_len == 1 && entry_start[0] == '*')
+      continue;   /* handled in the first pass */
+
+    name = entry_start;
+    name_len = entry_len;
+    if (name_len > 0 && name[0] == '-') {
+      negate = 1;
+      name++;
+      name_len--;
+      if (name_len == 0)
+        continue;
+    }
+    /* Spec form ("draft/x") and fork form ("+draft/x") name the
+     * same tag -- one leading '+' on the (possibly negated) entry
+     * is optional and dropped before comparing. */
+    if (name_len > 0 && name[0] == '+') {
+      name++;
+      name_len--;
+      if (name_len == 0)
+        continue;
+    }
+
+    if (name_len >= 2 && name[name_len - 1] == '*' && name[name_len - 2] == '/') {
+      /* "prefix/" + "*" wildcard: requires at least one char past
+       * the slash on the tag side (same rule for both polarities). */
+      size_t prefix_len = name_len - 1;  /* includes '/', excludes '*' */
+      if (tag_len - 1 > prefix_len &&
+          ircd_strncmp(tag + 1, name, prefix_len) == 0) {
+        if (negate)
+          exempted = 1;
+        else
+          denied = 1;
+      }
+    }
+    else if (tag_len - 1 >= name_len &&
+             ircd_strncmp(tag + 1, name, name_len) == 0 &&
+             (tag_len - 1 == name_len || tag[1 + name_len] == '=')) {
+      /* Exact name match, tolerating a trailing "=value" on the
+       * wire tag (see the doc comment: CLIENTTAGDENY filters by
+       * tag key, not value). */
+      if (negate)
+        exempted = 1;
+      else
+        denied = 1;
+    }
+  }
+
+  if (exempted)
+    return 0;
+  if (denied)
+    return 1;
+  if (deny_all)
+    return 1;
+  return 0;
+}
+
 /** Fill a vector of distinct names from a delimited input list.
  * Empty tokens (when \a token occurs at the start or end of \a list,
  * or when \a token occurs adjacent to itself) are ignored.  When
