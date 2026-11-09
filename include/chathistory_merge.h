@@ -384,7 +384,10 @@ extern int hm_targets_page(struct HistoryTarget **list, uint64_t first_ms,
  * folded name), then the veto rows (at or past the upper bound, which can
  * only disqualify a target), cut to @a cap -- past it only to finish a
  * group of equal in-window stamps -- so a cut drops veto rows (a duplicate
- * at worst) before any in-window row (a hole).
+ * at worst) before any in-window row (a hole).  When no in-window row was
+ * dropped, the first veto row is kept even past the cap (one row more), so
+ * the requester sees that every in-window row came first (it reads a cut
+ * with no veto row as an in-window cut: hm_targets_cut_partial).
  * @param[out] cut 1 when rows were dropped at the cap.
  * @return The rows kept in @a *list, in that order. */
 extern int hm_targets_responder(struct HistoryTarget **list, uint64_t first_ms,

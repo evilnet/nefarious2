@@ -1786,6 +1786,119 @@ static void test_cut_partial_no_hole(void **s)
   tfree(page);
 }
 
+/* Task 11 leftover (W5 Push F): two cut responders, neither with a veto
+ * row, leave two horizons; the page is held to the NEAREST one -- the
+ * smallest stamp forwards, the largest backwards -- whichever order the
+ * responders came in. */
+static void test_cut_partial_two_responders_nearest(void **s)
+{
+  struct hm_targets_resp r[2];
+  struct HistoryTarget *page;
+  (void)s;
+  /* Forwards from 0: horizons 30 and 20; the nearest is 20. */
+  r[0] = resp_cut(1, S(30), 0, 1);
+  r[1] = resp_cut(1, S(20), 0, 1);
+  page = tchain(2, tgt("#a", "10.000"), tgt("#b", "25.000"));
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(0), S(100), page, 1), 1);
+  assert_int_equal(hm_targets_cut_partial(&r[1], 1, S(0), S(100), page, 1), 1);
+  assert_int_equal(hm_targets_cut_partial(&r[0], 1, S(0), S(100), page, 1), 0);   /* 25 < 30 */
+  r[0] = resp_cut(1, S(20), 0, 1);   /* the other order */
+  r[1] = resp_cut(1, S(30), 0, 1);
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(0), S(100), page, 1), 1);
+  tfree(page);
+  page = tchain(1, tgt("#a", "15.000"));   /* inside both horizons, more beyond */
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(0), S(100), page, 1), 0);
+  tfree(page);
+
+  /* Backwards from 100: horizons 50 and 60; the nearest is 60. */
+  r[0] = resp_cut(1, S(50), 0, 1);
+  r[1] = resp_cut(1, S(60), 0, 1);
+  page = tchain(2, tgt("#a", "55.000"), tgt("#b", "90.000"));
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(100), S(0), page, 1), 1);
+  assert_int_equal(hm_targets_cut_partial(&r[0], 1, S(100), S(0), page, 1), 0);   /* 55 > 50 */
+  r[0] = resp_cut(1, S(60), 0, 1);
+  r[1] = resp_cut(1, S(50), 0, 1);
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(100), S(0), page, 1), 1);
+  tfree(page);
+  page = tchain(1, tgt("#a", "70.000"));
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(100), S(0), page, 1), 0);
+  tfree(page);
+
+  /* A responder that cut before sending any in-window row: its horizon is
+   * the first bound itself, so any page row is past it. */
+  r[0] = resp_cut(0, 0, 0, 1);
+  r[1] = resp_cut(1, S(30), 0, 1);
+  page = tchain(1, tgt("#a", "10.000"));
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(0), S(100), page, 1), 1);
+  tfree(page);
+}
+
+/* Task 11 re-review nit (W5 Push F): a responder whose in-window rows fill
+ * its cap exactly, with veto rows left over, cut nothing in-window.  It
+ * sends one veto row past the cap, so the requester (which reads a T with
+ * no veto row as an in-window cut: hm_targets_cut_partial) does not flag a
+ * hole that is not there.  A responder that did cut in-window rows still
+ * sends no veto row. */
+static void test_responder_veto_past_cap(void **s)
+{
+  struct HistoryTarget *l, *t;
+  struct hm_targets_resp r;
+  int cut = -1, n;
+  (void)s;
+  /* Three in-window rows, cap three, two veto rows: one veto row past the cap. */
+  l = tchain(5, tgt("#v2", "300.000"), tgt("#c", "40.000"), tgt("#a", "20.000"),
+             tgt("#v1", "200.000"), tgt("#b", "30.000"));
+  n = hm_targets_responder(&l, S(10), S(100), 3, &cut);
+  assert_int_equal(n, 4);
+  assert_string_equal(tdump(l), "#a@20.000 #b@30.000 #c@40.000 #v1@200.000");
+  assert_int_equal(cut, 1);
+  /* What the requester records of it: a veto row, so no horizon. */
+  memset(&r, 0, sizeof r);
+  r.cut = cut;
+  for (t = l; t; t = t->next)
+    hm_targets_resp_row(&r, S(10), S(100), (uint64_t)atoi(t->last_timestamp) * 1000ULL);
+  assert_int_equal(r.saw_veto, 1);
+  tfree(l);
+  l = tchain(1, tgt("#a", "90.000"));
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(10), S(100), l, 0), 0);
+  tfree(l);
+
+  /* Backwards, the same. */
+  l = tchain(4, tgt("#v1", "200.000"), tgt("#c", "40.000"), tgt("#a", "20.000"),
+             tgt("#v2", "300.000"));
+  n = hm_targets_responder(&l, S(100), S(10), 2, &cut);
+  assert_int_equal(n, 3);
+  assert_string_equal(tdump(l), "#c@40.000 #a@20.000 #v1@200.000");
+  assert_int_equal(cut, 1);
+  tfree(l);
+
+  /* In-window rows cut at the cap: no veto row follows (the requester's
+   * horizon is right). */
+  l = tchain(5, tgt("#v1", "200.000"), tgt("#a", "20.000"), tgt("#b", "30.000"),
+             tgt("#c", "40.000"), tgt("#d", "50.000"));
+  n = hm_targets_responder(&l, S(10), S(100), 3, &cut);
+  assert_int_equal(n, 3);
+  assert_string_equal(tdump(l), "#a@20.000 #b@30.000 #c@40.000");
+  assert_int_equal(cut, 1);
+  tfree(l);
+
+  /* Room under the cap: veto rows fill it as before, the rest cut. */
+  l = tchain(4, tgt("#a", "20.000"), tgt("#v1", "200.000"), tgt("#v2", "300.000"),
+             tgt("#v3", "400.000"));
+  n = hm_targets_responder(&l, S(10), S(100), 2, &cut);
+  assert_int_equal(n, 2);
+  assert_string_equal(tdump(l), "#a@20.000 #v1@200.000");
+  assert_int_equal(cut, 1);
+  tfree(l);
+
+  /* Exactly the cap and no veto row: nothing cut. */
+  l = tchain(2, tgt("#a", "20.000"), tgt("#b", "30.000"));
+  n = hm_targets_responder(&l, S(10), S(100), 2, &cut);
+  assert_int_equal(n, 2);
+  assert_int_equal(cut, 0);
+  tfree(l);
+}
+
 /* hm_targets_resp_row: what a responder's rows tell (in-window, veto). */
 static void test_resp_row(void **s)
 {
@@ -1840,6 +1953,8 @@ int main(void)
     cmocka_unit_test(test_cut_partial_short_page_inside_horizon),
     cmocka_unit_test(test_cut_partial_backward),
     cmocka_unit_test(test_cut_partial_no_hole),
+    cmocka_unit_test(test_cut_partial_two_responders_nearest),
+    cmocka_unit_test(test_responder_veto_past_cap),
     cmocka_unit_test(test_resp_row),
     cmocka_unit_test(test_targets_ref_ms_huge),
     cmocka_unit_test(test_targets_ref_ms_calendar),

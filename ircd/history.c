@@ -5094,6 +5094,17 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   }
   /* The pages this server federated, by reason (W5 Task 9). */
   chathistory_fed_report(to);
+  /* The PM pair index (W5 Task 11): rebuilt at every start, on the init
+   * worker before any client or link, so it is never seen rebuilding here;
+   * a failed rebuild lasts until a start whose rebuild completes (no
+   * runtime retry: registered).  Task 11 leftover, W5 Push F. */
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  PM pair index: %s",
+             history_pm_index_ok
+             ? "whole"
+             : "rebuild FAILED at this start -- TARGETS with CHATHISTORY_PRIVATE "
+               "is partial here and answered U to peers until a start whose "
+               "rebuild completes");
   if (htrim_backfill_done())
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Trim: backfill done, accounting %s",

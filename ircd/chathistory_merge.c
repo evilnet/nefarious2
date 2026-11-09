@@ -1228,8 +1228,12 @@ int hm_targets_responder(struct HistoryTarget **list, uint64_t first_ms, uint64_
     kept++;
     edge = in[i].ms;
   }
+  /* Veto rows fill what the cap leaves.  When nothing in-window was cut,
+   * one goes out even past the cap: the requester reads a cut (T) with no
+   * veto row as a cut among the in-window rows (hm_targets_cut_partial) and
+   * would flag a hole that is not there (Task 11 re-review nit; W5 Push F). */
   for (i = 0; i < nveto; i++) {
-    if (kept >= cap) {
+    if (kept >= cap && (*cut || i > 0)) {
       *cut = 1;
       MyFree(veto[i].t);
       continue;

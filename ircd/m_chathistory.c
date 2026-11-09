@@ -3012,12 +3012,23 @@ static int targets_collect(struct Client *rq, uint64_t lo_ms, struct HistoryTarg
  * a store whose PM pair index rebuild failed at this start
  * (history_pm_index_whole).
  * @return 1 to federate, 0 not. */
+/** qsort / bsearch order of a HistoryTarget pointer array by name (the
+ * IRC case mapping, as channel names compare). */
+static int targets_by_name(const void *a, const void *b)
+{
+  const struct HistoryTarget *const *x = (const struct HistoryTarget *const *)a;
+  const struct HistoryTarget *const *y = (const struct HistoryTarget *const *)b;
+  return ircd_strcmp((*x)->target, (*y)->target);
+}
+
 static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *local,
                                      uint64_t lo_ms, uint64_t hi_ms, int *partial)
 {
   struct Membership *m;
-  int want = 0;
+  struct HistoryTarget **byname = NULL, *t;
+  int want = 0, n = 0;
 
+  (void)lo_ms;
   if (!cli_user(sptr))
     return 0;
   if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
@@ -3030,20 +3041,37 @@ static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *
      * page may lack PM conversations this store holds. */
     if (!history_pm_index_whole())
       *partial = 1;
-    want = 1;
+    /* Decided: it federates, and the channels below could only set partial
+     * for a store away now, which the test above already did (final review
+     * m-1: their checks were dead work on every TARGETS with PM history,
+     * prod's setting). */
+    return 1;
+  }
+  /* The requester's own channel stamps, looked up by name: one sort, not a
+   * walk of the list per membership (m-1). */
+  for (t = local; t; t = t->next)
+    n++;
+  if (n > 0) {
+    int i = 0;
+    byname = (struct HistoryTarget **)MyMalloc((size_t)n * sizeof(*byname));
+    for (t = local; t; t = t->next)
+      byname[i++] = t;
+    qsort(byname, (size_t)n, sizeof(*byname), targets_by_name);
   }
   for (m = cli_user(sptr)->channel; m; m = m->next_channel) {
     struct Channel *ch = m->channel;
-    struct HistoryTarget *t;
+    struct HistoryTarget key, *kp = &key, **hit = NULL;
     time_t from = 0;
 
     if (!ch || check_history_access(sptr, ch->chname, NULL, 0) != 0)
       continue;
-    for (t = local; t; t = t->next)
-      if (ircd_strcmp(t->target, ch->chname) == 0)
-        break;
-    if (t) {
-      uint64_t ms = history_parse_ms(t->last_timestamp);
+    if (byname) {
+      ircd_strncpy(key.target, ch->chname, sizeof(key.target));
+      hit = (struct HistoryTarget **)bsearch(&kp, byname, (size_t)n, sizeof(*byname),
+                                             targets_by_name);
+    }
+    if (hit) {
+      uint64_t ms = history_parse_ms((*hit)->last_timestamp);
       if (ms >= hi_ms)
         continue;
       from = (time_t)(ms / 1000ULL);
@@ -3051,6 +3079,8 @@ static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *
     if (channel_range_check(ch->chname, from, 0, partial) != FED_WHY_NONE)
       want = 1;
   }
+  if (byname)
+    MyFree(byname);
   return want;
 }
 
@@ -8215,14 +8245,18 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * at most CH_T_MAX_ROWS, then E <reqid> <n> [T].  The requester is
      * named by P<yxx> and, from a Task 11 origin, its identity
      * (parv[11]: targets_requester); one this store cannot name, an
-     * unparsable span, a read error or a PM pair index this start could not
-     * rebuild is answered E <reqid> 0 U, never a walk over every target. */
+     * unparsable span or a read error is answered E <reqid> 0 U, never a
+     * walk over every target.  A PM pair index this start could not
+     * rebuild may lack pairs: the rows it has (every channel, the pairs the
+     * index holds) still go, then E <reqid> <n> [T]U -- every linkable
+     * origin keeps CH T rows and reads U as an unanswered store, so the
+     * page keeps them and is partial (W5 Push F; it was a bare E 0 U). */
     if (query_subcmd_str[0] == 'T') {
       struct HistoryTarget *targets = NULL, *tgt;
       struct Client *rq;
       char *comma;
       uint64_t first_ms = 0, second_ms = 0;
-      int n, cut = 0, ok;
+      int n, cut = 0, ok, index_short;
 
       if (!history_is_available()) {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
@@ -8245,11 +8279,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
 
       /* A pair index this start could not rebuild may lack pairs: the
-       * answer would be missing some, so say it could not answer. */
-      if (feature_bool(FEAT_CHATHISTORY_PRIVATE) && !history_pm_index_whole()) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
-        return 0;
-      }
+       * answer may be missing some -- U after the rows it has. */
+      index_short = feature_bool(FEAT_CHATHISTORY_PRIVATE) && !history_pm_index_whole();
       rq = targets_requester(requester, (parc >= 12 && !EmptyString(parv[11])) ? parv[11] : NULL);
       if (!rq) {
         Debug((DEBUG_DEBUG, "CH Q T %s: requester %s %s not named here", reqid,
@@ -8265,8 +8296,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       for (tgt = targets; tgt; tgt = tgt->next)
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "T %s %s %s",
                       reqid, tgt->target, tgt->last_timestamp);
-      if (cut)
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, n);
+      if (cut || index_short)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d %s%s", reqid, n,
+                      cut ? "T" : "", index_short ? "U" : "");
       else
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, n);
       history_free_targets(targets);
