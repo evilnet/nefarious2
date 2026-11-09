@@ -30,8 +30,7 @@
 #include <stddef.h>
 #define INCLUDED_stddef_h
 #endif
-
-struct HistoryMessage;
+#include "history.h"   /* HISTORY_MSGID_LEN: the page leg's declaration table */
 
 /** The row in @a list that is the same message as @a check: the same
  * msgid, else the same timestamp, sender, type and content (one message
@@ -119,26 +118,52 @@ extern int hm_parse_ids(char *list, const char **ids, int max);
  * Task 15, F-2)?  1 yes, 0 no, -1 unknown (a read error). */
 typedef int (*hm_redacted_fn)(const struct HistoryMessage *m, void *arg);
 
+/** The most targets an hm_idset keeps (64 bytes each). */
+#define HM_IDSET_MAX 2048
+
+/** The targets of the REDACTs a federated request had to drop for budget
+ * (W5 Task 15 fix round 1): a REDACT is never lost to a cap -- its target
+ * goes here and hm_redact_filter still hides it.  Grown on demand up to
+ * HM_IDSET_MAX.  Zeroed = empty. */
+struct hm_idset {
+  char (*ids)[HISTORY_MSGID_LEN];
+  int n, cap;
+  int lost;   /**< a REDACT's target could not be kept (the set was full,
+               *   or the REDACT was lost before its content was read): the
+               *   page's peer rows fail closed (hm_fail_closed) */
+};
+
+/** Add @a id to @a s.  @return 1 kept, 0 not (full: @a s->lost is set). */
+extern int hm_idset_add(struct hm_idset *s, const char *id);
+
+/** A row of @a type and @a content dropped for budget: when it is a REDACT,
+ * keep its target (its first content word) in @a s. */
+extern void hm_idset_note_redact(struct hm_idset *s, int type, const char *content);
+
+/** Free @a s's storage and empty it. */
+extern void hm_idset_free(struct hm_idset *s);
+
 /** The reply-side redaction filter of a history page (W5 Task 15; it was
  * m_chathistory.c's redact_filter_messages, which kept 100 targets and
  * showed the redacted originals past them).  @a *head is a page: rows in
  * time order, each followed by its context run (history_attach_context and
- * hm_splice_context put a row's context right after it).
+ * hm_splice_context put a row's context right after it).  The redacted set
+ * is the targets the page's REDACT entries name (their first content word)
+ * and those of @a extra (REDACTs dropped for budget; NULL for none).
  *   - F-6: every PRIVMSG/NOTICE/TAGMSG/MULTILINE entry, context or not,
- *     that a REDACT entry of the list names (its first content word) is
- *     dropped.  The set of names is sized from the list, with no cap; when
- *     it cannot be allocated the filter fails closed
+ *     in the redacted set is dropped.  The set is sized from the list, with
+ *     no cap; when it cannot be allocated the filter fails closed
  *     (hm_redact_filter_closed).
  *   - F-7: the context run of a row dropped that way goes with it, except
  *     its REDACT entries (kept as before).
  *   - F-2: each context entry that survives and could be a REDACT target
  *     is looked up once with @a redacted (NULL: none is), and dropped
- *     unless the answer is 0: a read error hides it (fail closed).  No
- *     context of context is ever attached, so a reaction's own REDACT is on
- *     the page only when its time is.
+ *     unless the answer is 0: a read error hides it (fail closed).  No context of context is ever attached, so a reaction's
+ *     own REDACT is on the page only when its time is.
  * REDACT entries and events are never dropped.
  * @return @a count when nothing was dropped, else the entries left. */
 extern int hm_redact_filter(struct HistoryMessage **head, int count,
+                            const struct hm_idset *extra,
                             hm_redacted_fn redacted, void *arg);
 
 /** hm_redact_filter's fail-closed form, for a set it could not allocate:
@@ -147,9 +172,15 @@ extern int hm_redact_filter(struct HistoryMessage **head, int count,
  * @return @a count when nothing was dropped, else the entries left. */
 extern int hm_redact_filter_closed(struct HistoryMessage **head, int count);
 
+/** hm_redact_filter_closed on a list of a peer's rows or context (W5 Task
+ * 15 fix round 1: a REDACT this request could not keep may name any of
+ * them).  @return how many entries were dropped. */
+extern int hm_fail_closed(struct HistoryMessage **list);
+
 /** The parent a page-leg row of a federated page hangs on as context,
- * when that parent is on the page (W5 Task 15, F-3: a declaration past the
- * page leg's CH C table never arrives).  @a m's own parent
+ * when that parent is on the page (W5 Task 15, F-3: a declaration the full
+ * CH C table dropped never comes; hm_leg_add uses this only then).  @a m's
+ * own parent
  * (hm_context_parent: a TAGMSG's +reply, a REDACT's target) must be a
  * non-context row of @a local, or a non-context row of @a peer, other than
  * @a m, that hangs on nothing itself: a row that is itself a child may be
@@ -186,5 +217,77 @@ enum hm_admit {
  * A context child never counts against, or is refused by, the row cap. */
 extern enum hm_admit hm_fed_admit(int is_context, int *rows, int *ctx,
                                   int row_max, int ctx_max);
+
+/** The page leg's CH C declarations in flight (W5 Task 15 fix round 1).
+ * A responder sends each declaration right before its row (send_ch_rows),
+ * and the row takes it out (remove-on-match), so a table this size fills
+ * only if 64 rows never come. */
+#define HM_DECL_MAX 64
+
+/** A CH C declaration: @a child is a context child of @a parent. */
+struct hm_decl {
+  char child[HISTORY_MSGID_LEN];
+  char parent[HISTORY_MSGID_LEN];
+  char tags[512];   /**< the child's client-only tags (CH R never carried them) */
+};
+
+/** A federated request's page leg (W5 Task 15): what the peers sent as rows
+ * of their pages, the context they declared, and the budgets.  Zeroed =
+ * empty; hm_leg_free empties it. */
+struct hm_page_leg {
+  struct HistoryMessage *msgs;   /**< rows and context children, arrival order */
+  int rows;                      /**< rows held (the row cap) */
+  int ctx;                       /**< context children held (their own cap, F-4) */
+  int derive;                    /**< a history page: once a declaration was
+                                  *   lost, a row whose own parent is on the
+                                  *   page is context (F-3's fallback) */
+  struct hm_decl decl[HM_DECL_MAX];
+  int ndecl;
+  int decl_lost;                 /**< a declaration came with the table full */
+  struct hm_idset side;          /**< targets of REDACTs dropped for budget */
+};
+
+/** Take a peer's row into @a leg.  It is a context child when a declaration
+ * names it (taken out of the table), else -- only when @a leg->derive and a
+ * declaration was lost -- when hm_page_parent places it on the page (parents
+ * among @a local and the leg's rows).  A peer's in-span reaction, never
+ * declared, stays a row, as on a local page.  It then counts against
+ * @a ctx_max or @a row_max (hm_fed_admit); dropped, it is freed, and a
+ * REDACT dropped leaves its target in @a leg->side.
+ * @return the admission (HM_DROP_ROW: the caller cuts the page). */
+extern enum hm_admit hm_leg_add(struct hm_page_leg *leg, struct HistoryMessage *msg,
+                                const struct HistoryMessage *local,
+                                int row_max, int ctx_max);
+
+/** A CH C declaration for @a leg.  A row already here under @a child (it
+ * came first) becomes the context child, moving from the row budget to
+ * the context budget (dropped when that is full, a REDACT's target kept);
+ * else the declaration waits in the table, or, the table full, is lost
+ * (@a leg->decl_lost). */
+extern void hm_leg_declare(struct hm_page_leg *leg, const char *parent,
+                           const char *child, const char *tags, int ctx_max);
+
+/** A row @a leg will never get (lost before it was read): take its
+ * declaration out of the table.  @return 1 when it was declared (context:
+ * its loss is never partial), else 0. */
+extern int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child);
+
+/** Unlink @a leg's context children (they splice after their parents,
+ * uncounted, #526) and return them; @a leg keeps its rows. */
+extern struct HistoryMessage *hm_leg_extract_context(struct hm_page_leg *leg);
+
+/** At completion, once a declaration was lost: hm_derive_context over
+ * @a leg's rows (a parent that came after its child, from another
+ * responder), appended to *@a ctx_list.  Nothing when none was lost.
+ * @return how many rows became context. */
+extern int hm_leg_derive(struct hm_page_leg *leg, const struct HistoryMessage *local,
+                         struct HistoryMessage **ctx_list);
+
+/** Does @a leg hold a row (not only context)?  The federated auto-replay
+ * delivers a channel only then. */
+extern int hm_leg_has_rows(const struct hm_page_leg *leg);
+
+/** Free @a leg's rows and side set and empty it. */
+extern void hm_leg_free(struct hm_page_leg *leg);
 
 #endif /* INCLUDED_chathistory_merge_h */

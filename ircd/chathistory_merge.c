@@ -480,7 +480,23 @@ int hm_redact_filter_closed(struct HistoryMessage **head, int count)
   return hm_redact_walk(head, count, NULL, 0, 1, NULL, NULL);
 }
 
+int hm_fail_closed(struct HistoryMessage **list)
+{
+  struct HistoryMessage *m;
+  int before = 0, after = 0;
+
+  if (!list || !*list)
+    return 0;
+  for (m = *list; m; m = m->next)
+    before++;
+  hm_redact_walk(list, before, NULL, 0, 1, NULL, NULL);
+  for (m = *list; m; m = m->next)
+    after++;
+  return before - after;
+}
+
 int hm_redact_filter(struct HistoryMessage **head, int count,
+                     const struct hm_idset *extra,
                      hm_redacted_fn redacted, void *arg)
 {
   struct HistoryMessage *m;
@@ -490,11 +506,14 @@ int hm_redact_filter(struct HistoryMessage **head, int count,
   if (!head || !*head || count <= 0)
     return count;
 
-  /* The REDACT entries' targets, as many as the page carries (F-6: the
-   * old fixed table of 100 showed the redacted originals past it). */
+  /* The targets of the page's REDACT entries, as many as it carries (F-6:
+   * the old fixed table of 100 showed the redacted originals past it),
+   * and of the REDACTs dropped for budget (@a extra). */
   for (m = *head; m; m = m->next)
     if (m->type == HISTORY_REDACT)
       n++;
+  if (extra)
+    n += extra->n;
   if (n > 0) {
     set = (char (*)[HISTORY_MSGID_LEN])MyMalloc((size_t)n * sizeof(*set));
     /* MyMalloc's out-of-memory handler does not return; were it to, no
@@ -505,6 +524,10 @@ int hm_redact_filter(struct HistoryMessage **head, int count,
       if (m->type == HISTORY_REDACT
           && hm_context_parent(m, set[nset], sizeof(set[nset])))
         nset++;
+    if (extra && extra->n > 0) {
+      memcpy(set[nset], extra->ids, (size_t)extra->n * sizeof(*set));
+      nset += extra->n;
+    }
     qsort(set, (size_t)nset, sizeof(*set), hm_id_cmp);
   }
   rc = hm_redact_walk(head, count, (const char (*)[HISTORY_MSGID_LEN])set,
@@ -512,6 +535,55 @@ int hm_redact_filter(struct HistoryMessage **head, int count,
   if (set)
     MyFree(set);
   return rc;
+}
+
+int hm_idset_add(struct hm_idset *s, const char *id)
+{
+  if (!s || !id || !id[0])
+    return 0;
+  if (s->n >= HM_IDSET_MAX) {
+    s->lost = 1;
+    return 0;
+  }
+  if (s->n >= s->cap) {
+    int cap = s->cap ? s->cap * 2 : 16;
+    if (cap > HM_IDSET_MAX)
+      cap = HM_IDSET_MAX;
+    s->ids = (char (*)[HISTORY_MSGID_LEN])MyRealloc(s->ids, (size_t)cap * sizeof(*s->ids));
+    s->cap = cap;
+  }
+  ircd_strncpy(s->ids[s->n], id, sizeof(s->ids[0]));
+  s->n++;
+  return 1;
+}
+
+void hm_idset_note_redact(struct hm_idset *s, int type, const char *content)
+{
+  char id[HISTORY_MSGID_LEN];
+  const char *end;
+  size_t len;
+
+  if (!s || type != HISTORY_REDACT || !content)
+    return;
+  /* hm_context_parent's REDACT rule: the first content word. */
+  end = strchr(content, ' ');
+  len = end ? (size_t)(end - content) : strlen(content);
+  if (len == 0 || len >= sizeof(id))
+    return;   /* names nothing: hides nothing */
+  memcpy(id, content, len);
+  id[len] = '\0';
+  hm_idset_add(s, id);
+}
+
+void hm_idset_free(struct hm_idset *s)
+{
+  if (!s)
+    return;
+  if (s->ids)
+    MyFree(s->ids);
+  s->ids = NULL;
+  s->n = s->cap = 0;
+  s->lost = 0;
 }
 
 const char *hm_page_parent(const struct HistoryMessage *m,
@@ -581,4 +653,147 @@ enum hm_admit hm_fed_admit(int is_context, int *rows, int *ctx,
     return HM_DROP_ROW;
   (*rows)++;
   return HM_ADMIT_ROW;
+}
+
+/** The declaration naming @a child, taken out of @a leg's table
+ * (remove-on-match).  @return 1 found (parent/tags copied), else 0. */
+static int hm_leg_take_decl(struct hm_page_leg *leg, const char *child,
+                            char *parent, size_t plen, char *tags, size_t tlen)
+{
+  int i;
+
+  for (i = 0; i < leg->ndecl; i++) {
+    if (strcmp(leg->decl[i].child, child) == 0) {
+      ircd_strncpy(parent, leg->decl[i].parent, plen);
+      ircd_strncpy(tags, leg->decl[i].tags, tlen);
+      leg->decl[i] = leg->decl[--leg->ndecl];
+      return 1;
+    }
+  }
+  return 0;
+}
+
+enum hm_admit hm_leg_add(struct hm_page_leg *leg, struct HistoryMessage *msg,
+                         const struct HistoryMessage *local,
+                         int row_max, int ctx_max)
+{
+  char parent[HISTORY_MSGID_LEN], tags[sizeof(leg->decl[0].tags)];
+  struct HistoryMessage **tp;
+  enum hm_admit a;
+
+  if (hm_leg_take_decl(leg, msg->msgid, parent, sizeof(parent), tags, sizeof(tags))) {
+    msg->is_context = 1;
+    ircd_strncpy(msg->ctx_parent, parent, sizeof(msg->ctx_parent));
+    if (tags[0] && !msg->client_tags[0])
+      ircd_strncpy(msg->client_tags, tags, sizeof(msg->client_tags));
+  } else if (leg->derive && leg->decl_lost
+             && hm_page_parent(msg, local, leg->msgs, parent, sizeof(parent))) {
+    /* F-3's fallback: its declaration may be the one the full table lost */
+    msg->is_context = 1;
+    ircd_strncpy(msg->ctx_parent, parent, sizeof(msg->ctx_parent));
+  }
+
+  a = hm_fed_admit(msg->is_context, &leg->rows, &leg->ctx, row_max, ctx_max);
+  if (a == HM_DROP_ROW || a == HM_DROP_CONTEXT) {
+    hm_idset_note_redact(&leg->side, msg->type,
+                         msg->dyn_content ? msg->dyn_content : msg->content);
+    history_free_messages(msg);
+    return a;
+  }
+  msg->next = NULL;
+  for (tp = &leg->msgs; *tp; tp = &(*tp)->next)
+    ;
+  *tp = msg;
+  return a;
+}
+
+void hm_leg_declare(struct hm_page_leg *leg, const char *parent,
+                    const char *child, const char *tags, int ctx_max)
+{
+  struct HistoryMessage **pp, *m;
+
+  /* The row came first: it is the child.  A row counted as one moves to the
+   * context budget, and is dropped when that is full (never partial). */
+  for (pp = &leg->msgs; (m = *pp); pp = &m->next) {
+    if (strcmp(m->msgid, child) != 0)
+      continue;
+    if (!m->is_context) {
+      leg->rows--;
+      if (hm_fed_admit(1, &leg->rows, &leg->ctx, 0, ctx_max) == HM_DROP_CONTEXT) {
+        *pp = m->next;
+        m->next = NULL;
+        hm_idset_note_redact(&leg->side, m->type,
+                             m->dyn_content ? m->dyn_content : m->content);
+        history_free_messages(m);
+        return;
+      }
+    }
+    m->is_context = 1;
+    ircd_strncpy(m->ctx_parent, parent, sizeof(m->ctx_parent));
+    if (tags && tags[0] && !m->client_tags[0])
+      ircd_strncpy(m->client_tags, tags, sizeof(m->client_tags));
+    return;
+  }
+
+  if (leg->ndecl >= HM_DECL_MAX) {
+    leg->decl_lost = 1;   /* its row will come undeclared: F-3's fallback */
+    return;
+  }
+  ircd_strncpy(leg->decl[leg->ndecl].child, child, sizeof(leg->decl[0].child));
+  ircd_strncpy(leg->decl[leg->ndecl].parent, parent, sizeof(leg->decl[0].parent));
+  ircd_strncpy(leg->decl[leg->ndecl].tags, tags ? tags : "", sizeof(leg->decl[0].tags));
+  leg->ndecl++;
+}
+
+int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child)
+{
+  char parent[HISTORY_MSGID_LEN], tags[sizeof(leg->decl[0].tags)];
+
+  return hm_leg_take_decl(leg, child, parent, sizeof(parent), tags, sizeof(tags));
+}
+
+struct HistoryMessage *hm_leg_extract_context(struct hm_page_leg *leg)
+{
+  struct HistoryMessage **pp = &leg->msgs, *head = NULL, **tp = &head;
+
+  while (*pp) {
+    struct HistoryMessage *m = *pp;
+    if (m->is_context && m->ctx_parent[0]) {
+      *pp = m->next;
+      m->next = NULL;
+      *tp = m;
+      tp = &m->next;
+      leg->ctx--;   /* never counted as a row */
+    } else
+      pp = &m->next;
+  }
+  return head;
+}
+
+int hm_leg_derive(struct hm_page_leg *leg, const struct HistoryMessage *local,
+                  struct HistoryMessage **ctx_list)
+{
+  int moved;
+
+  if (!leg->derive || !leg->decl_lost)
+    return 0;
+  moved = hm_derive_context(&leg->msgs, local, ctx_list);
+  leg->rows -= moved;
+  return moved;
+}
+
+int hm_leg_has_rows(const struct hm_page_leg *leg)
+{
+  return leg->rows > 0 && leg->msgs != NULL;
+}
+
+void hm_leg_free(struct hm_page_leg *leg)
+{
+  if (leg->msgs)
+    history_free_messages(leg->msgs);
+  leg->msgs = NULL;
+  leg->rows = leg->ctx = 0;
+  leg->ndecl = 0;
+  leg->decl_lost = 0;
+  hm_idset_free(&leg->side);
 }

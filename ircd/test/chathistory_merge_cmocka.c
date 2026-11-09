@@ -32,7 +32,11 @@
  *  - a federated page's context (W5 Task 15): hm_page_parent /
  *    hm_derive_context (a peer row with no CH C declaration whose own
  *    parent is on the page is context, F-3) and hm_fed_admit (context
- *    children have a budget apart from the rows', F-4).
+ *    children have a budget apart from the rows', F-4);
+ *  - fix round 1: the page leg's state (hm_page_leg: remove-on-match
+ *    declarations, the derivation only once one was lost, the two budgets
+ *    wired), a REDACT's target kept past every cap (hm_idset) and the
+ *    fail-closed peer lists when even that overflows.
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -687,7 +691,7 @@ static void test_redact_filter_no_cap(void **s)
     *tp = typed(id, ts, HISTORY_REDACT, tgt);
     tp = &(*tp)->next;
   }
-  n = hm_redact_filter(&head, 300, NULL, NULL);
+  n = hm_redact_filter(&head, 300, NULL, NULL, NULL);
   assert_int_equal(n, 150);
   assert_int_equal(count(head), 150);
   for (m = head; m; m = m->next)
@@ -706,7 +710,7 @@ static void test_redact_filter_no_cap(void **s)
     *tp = as_ctx(typed(id, "1790009000.000", HISTORY_REDACT, tgt));
     tp = &(*tp)->next;
   }
-  n = hm_redact_filter(&head, 150, NULL, NULL);
+  n = hm_redact_filter(&head, 150, NULL, NULL, NULL);
   assert_int_equal(n, 150);
   for (m = head; m; m = m->next)
     assert_int_equal(m->type, HISTORY_REDACT);
@@ -728,7 +732,7 @@ static void test_redact_filter_drops_children_of_redacted(void **s)
 
   (void)s;
   redacted_calls = 0;
-  assert_int_equal(hm_redact_filter(&head, 2, fake_redacted, NULL), 3);
+  assert_int_equal(hm_redact_filter(&head, 2, NULL, fake_redacted, NULL), 3);
   assert_string_equal(ids(head), "D N R2");
   assert_int_equal(redacted_calls, 1);
   history_free_messages(head);
@@ -752,7 +756,7 @@ static void test_redact_filter_checks_context(void **s)
 
   (void)s;
   redacted_calls = 0;
-  assert_int_equal(hm_redact_filter(&head, 3, fake_redacted, NULL), 5);
+  assert_int_equal(hm_redact_filter(&head, 3, NULL, fake_redacted, NULL), 5);
   assert_string_equal(ids(head), "M okc REDe REDrow N");
   assert_int_equal(redacted_calls, 3);   /* REDa, ERRb, okc */
   history_free_messages(head);
@@ -770,16 +774,16 @@ static void test_redact_filter_nothing_dropped(void **s)
       typed("N", "2.000", HISTORY_PRIVMSG, NULL));
 
   (void)s;
-  assert_int_equal(hm_redact_filter(&head, 7, NULL, NULL), 7);
+  assert_int_equal(hm_redact_filter(&head, 7, NULL, NULL, NULL), 7);
   assert_string_equal(ids(head), "M REDx N");
   redacted_calls = 0;
-  assert_int_equal(hm_redact_filter(&head, 7, fake_redacted, NULL), 2);
+  assert_int_equal(hm_redact_filter(&head, 7, NULL, fake_redacted, NULL), 2);
   assert_int_equal(redacted_calls, 1);
   assert_string_equal(ids(head), "M N");
   history_free_messages(head);
   head = NULL;
-  assert_int_equal(hm_redact_filter(&head, 0, fake_redacted, NULL), 0);
-  assert_int_equal(hm_redact_filter(NULL, 0, NULL, NULL), 0);
+  assert_int_equal(hm_redact_filter(&head, 0, NULL, fake_redacted, NULL), 0);
+  assert_int_equal(hm_redact_filter(NULL, 0, NULL, NULL, NULL), 0);
 }
 
 /* The fail-closed form (the target set could not be allocated): every row
@@ -883,6 +887,210 @@ static void test_fed_admit_two_budgets(void **s)
   assert_int_equal(hm_fed_admit(0, &rows, &ctx, 500, 500), HM_ADMIT_ROW);
 }
 
+/* ---- W5 Task 15 fix round 1 ---- */
+
+/* A TAGMSG with no reply tag (a declared child carries its parent in the
+ * declaration). */
+static struct HistoryMessage *bare_tag(const char *msgid, const char *ts)
+{
+  return typed(msgid, ts, HISTORY_TAGMSG, NULL);
+}
+
+/* Remove-on-match: a responder sends each CH C right before its row, so
+ * the 65th and later declarations are honoured exactly -- 70 children of
+ * one row, each declared then sent, all context, the table never full.
+ * The declaration's tags fill a child that brought none. */
+static void test_leg_decl_remove_on_match(void **s)
+{
+  struct hm_page_leg leg;
+  char id[16];
+  int i;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  assert_int_equal(hm_leg_add(&leg, row("P", "1.000", ""), NULL, 500, 500), HM_ADMIT_ROW);
+  for (i = 0; i < 70; i++) {
+    snprintf(id, sizeof id, "c%02d", i);
+    hm_leg_declare(&leg, "P", id, "+draft/react=x;+reply=P", 500);
+    assert_int_equal(leg.ndecl, 1);
+    assert_int_equal(hm_leg_add(&leg, bare_tag(id, "9.000"), NULL, 500, 500), HM_ADMIT_CONTEXT);
+    assert_int_equal(leg.ndecl, 0);
+  }
+  assert_int_equal(leg.decl_lost, 0);
+  assert_int_equal(leg.rows, 1);
+  assert_int_equal(leg.ctx, 70);
+  assert_string_equal(leg.msgs->next->ctx_parent, "P");
+  assert_string_equal(leg.msgs->next->client_tags, "+draft/react=x;+reply=P");
+  hm_leg_free(&leg);
+  assert_null(leg.msgs);
+}
+
+/* The derivation is a fallback: a peer's in-span reaction (never declared)
+ * stays a row, as on a local page -- until a declaration is lost to a full
+ * table; then an undeclared reaction whose parent is on the page is
+ * context, at arrival and at completion.  Not on a request that is not a
+ * page (derive 0). */
+static void test_leg_fallback_flag(void **s)
+{
+  struct hm_page_leg leg;
+  struct HistoryMessage *ctx = NULL, *late;
+  char id[16];
+  int i;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  leg.derive = 1;
+  hm_leg_add(&leg, row("A", "1.000", ""), NULL, 500, 500);
+  assert_int_equal(hm_leg_add(&leg, reaction("rin", "2.000", "A"), NULL, 500, 500), HM_ADMIT_ROW);
+  late = reaction("rlate", "3.000", "B");          /* its parent comes later */
+  assert_int_equal(hm_leg_add(&leg, late, NULL, 500, 500), HM_ADMIT_ROW);
+  assert_int_equal(hm_leg_derive(&leg, NULL, &ctx), 0);   /* nothing lost: no derivation */
+  for (i = 0; i < HM_DECL_MAX; i++) {
+    snprintf(id, sizeof id, "d%02d", i);
+    hm_leg_declare(&leg, "A", id, "", 500);
+  }
+  assert_int_equal(leg.decl_lost, 0);
+  hm_leg_declare(&leg, "A", "dlost", "", 500);
+  assert_int_equal(leg.decl_lost, 1);
+  assert_int_equal(leg.ndecl, HM_DECL_MAX);
+  assert_int_equal(hm_leg_add(&leg, reaction("rlost", "4.000", "A"), NULL, 500, 500),
+                   HM_ADMIT_CONTEXT);
+  hm_leg_add(&leg, row("B", "1.500", ""), NULL, 500, 500);
+  assert_int_equal(leg.rows, 4);                   /* A rin rlate B */
+  assert_int_equal(hm_leg_derive(&leg, NULL, &ctx), 2);   /* rin and rlate */
+  assert_string_equal(ids(ctx), "rin rlate");
+  assert_int_equal(leg.rows, 2);
+  history_free_messages(ctx);
+  hm_leg_free(&leg);
+
+  memset(&leg, 0, sizeof(leg));                    /* derive 0: not a page */
+  hm_leg_add(&leg, row("A", "1.000", ""), NULL, 500, 500);
+  leg.decl_lost = 1;
+  assert_int_equal(hm_leg_add(&leg, reaction("r", "2.000", "A"), NULL, 500, 500), HM_ADMIT_ROW);
+  hm_leg_free(&leg);
+}
+
+/* A REDACT is never lost to a cap: dropped as a row past the row cap, as a
+ * context child past the context cap, or on the CH C row-ahead move into a
+ * full context budget, its target is kept and the filter still hides it. */
+static void test_leg_redact_kept_past_every_cap(void **s)
+{
+  struct hm_page_leg leg;
+  struct HistoryMessage *page;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  assert_int_equal(hm_leg_add(&leg, row("P", "1.000", ""), NULL, 1, 1), HM_ADMIT_ROW);
+  assert_int_equal(hm_leg_add(&leg, typed("D1", "2.000", HISTORY_REDACT, "T1 :why"),
+                              NULL, 1, 1), HM_DROP_ROW);
+  hm_leg_declare(&leg, "P", "c1", "", 1);
+  assert_int_equal(hm_leg_add(&leg, bare_tag("c1", "3.000"), NULL, 1, 1), HM_ADMIT_CONTEXT);
+  hm_leg_declare(&leg, "P", "D2", "", 1);
+  assert_int_equal(hm_leg_add(&leg, typed("D2", "4.000", HISTORY_REDACT, "T2"),
+                              NULL, 1, 1), HM_DROP_CONTEXT);
+  hm_leg_free(&leg);
+  assert_int_equal(leg.side.n, 0);   /* freed with the leg */
+
+  memset(&leg, 0, sizeof(leg));
+  assert_int_equal(hm_leg_add(&leg, typed("D1", "2.000", HISTORY_REDACT, "T1 :why"),
+                              NULL, 0, 1), HM_DROP_ROW);
+  hm_leg_add(&leg, bare_tag("c1", "3.000"), NULL, 1, 0);         /* a row, the cap 1 */
+  assert_int_equal(hm_leg_add(&leg, typed("D3", "5.000", HISTORY_REDACT, "T3"),
+                              NULL, 2, 0), HM_ADMIT_ROW);
+  hm_leg_declare(&leg, "c1", "D3", "", 0);                       /* row-ahead, ctx cap 0 */
+  assert_int_equal(leg.rows, 1);
+  assert_int_equal(leg.ctx, 0);
+  assert_string_equal(ids(leg.msgs), "c1");
+  hm_leg_add(&leg, typed("D2", "4.000", HISTORY_REDACT, "T2"), NULL, 1, 0);   /* row cap */
+  assert_int_equal(leg.side.n, 3);
+  assert_int_equal(leg.side.lost, 0);
+
+  page = chain(5, typed("T1", "1.000", HISTORY_PRIVMSG, NULL),
+                  typed("T2", "1.100", HISTORY_NOTICE, NULL),
+                  as_ctx(bare_tag("x", "1.150")),
+                  typed("T3", "1.200", HISTORY_TAGMSG, NULL),
+                  typed("N", "1.300", HISTORY_PRIVMSG, NULL));
+  assert_int_equal(hm_redact_filter(&page, 4, &leg.side, NULL, NULL), 1);
+  assert_string_equal(ids(page), "N");
+  history_free_messages(page);
+  hm_leg_free(&leg);
+}
+
+/* The side set is bounded: past HM_IDSET_MAX it is lost, and a lost side
+ * set makes the page's peer lists fail closed. */
+static void test_idset_overflow_closed(void **s)
+{
+  struct hm_idset set;
+  struct HistoryMessage *peer;
+  char id[16];
+  int i;
+
+  (void)s;
+  memset(&set, 0, sizeof(set));
+  hm_idset_note_redact(&set, HISTORY_PRIVMSG, "X");   /* not a REDACT: ignored */
+  assert_int_equal(set.n, 0);
+  for (i = 0; i < HM_IDSET_MAX; i++) {
+    snprintf(id, sizeof id, "T%04d", i);
+    assert_int_equal(hm_idset_add(&set, id), 1);
+  }
+  assert_int_equal(set.lost, 0);
+  hm_idset_note_redact(&set, HISTORY_REDACT, "ONEMORE :r");
+  assert_int_equal(set.lost, 1);
+  assert_int_equal(set.n, HM_IDSET_MAX);
+  hm_idset_free(&set);
+  assert_int_equal(set.n, 0);
+
+  peer = chain(4, typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+                  typed("D", "2.000", HISTORY_REDACT, "Q"),
+                  typed("J", "3.000", HISTORY_JOIN, NULL),
+                  bare_tag("R", "4.000"));
+  assert_int_equal(hm_fail_closed(&peer), 2);
+  assert_string_equal(ids(peer), "D J");
+  history_free_messages(peer);
+  peer = NULL;
+  assert_int_equal(hm_fail_closed(&peer), 0);
+}
+
+/* F-4's wiring: context children never count as rows -- extracting them
+ * leaves the row count alone; a row that came ahead of its declaration
+ * moves from the row budget to the context budget; the auto-replay
+ * delivers a channel only when a row came, not context alone. */
+static void test_leg_f4_wiring(void **s)
+{
+  struct hm_page_leg leg;
+  struct HistoryMessage *ctx;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  hm_leg_declare(&leg, "R", "C1", "", 500);
+  hm_leg_add(&leg, bare_tag("C1", "2.000"), NULL, 500, 500);
+  assert_int_equal(hm_leg_has_rows(&leg), 0);      /* context alone: no delivery */
+  hm_leg_add(&leg, row("R", "1.000", ""), NULL, 500, 500);
+  hm_leg_declare(&leg, "R", "C2", "", 500);
+  hm_leg_add(&leg, bare_tag("C2", "2.500"), NULL, 500, 500);
+  hm_leg_add(&leg, bare_tag("X", "3.000"), NULL, 500, 500);     /* a row, for now */
+  assert_int_equal(leg.rows, 2);
+  assert_int_equal(leg.ctx, 2);
+  assert_int_equal(hm_leg_has_rows(&leg), 1);
+  hm_leg_declare(&leg, "R", "X", "+draft/react=y", 500);         /* row-ahead */
+  assert_int_equal(leg.rows, 1);
+  assert_int_equal(leg.ctx, 3);
+  assert_int_equal(leg.ndecl, 0);
+  hm_leg_declare(&leg, "R", "LOST", "", 500);        /* its row never comes */
+  assert_int_equal(hm_leg_forget_decl(&leg, "LOST"), 1);
+  assert_int_equal(hm_leg_forget_decl(&leg, "LOST"), 0);
+  assert_int_equal(leg.ndecl, 0);
+  ctx = hm_leg_extract_context(&leg);
+  assert_string_equal(ids(ctx), "C1 C2 X");
+  assert_string_equal(ctx->next->next->ctx_parent, "R");
+  assert_string_equal(ctx->next->next->client_tags, "+draft/react=y");
+  assert_int_equal(leg.rows, 1);
+  assert_int_equal(leg.ctx, 0);
+  assert_string_equal(ids(leg.msgs), "R");
+  history_free_messages(ctx);
+  hm_leg_free(&leg);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -893,6 +1101,11 @@ int main(void)
     cmocka_unit_test(test_redact_filter_closed),
     cmocka_unit_test(test_page_parent_derives_context),
     cmocka_unit_test(test_fed_admit_two_budgets),
+    cmocka_unit_test(test_leg_decl_remove_on_match),
+    cmocka_unit_test(test_leg_fallback_flag),
+    cmocka_unit_test(test_leg_redact_kept_past_every_cap),
+    cmocka_unit_test(test_idset_overflow_closed),
+    cmocka_unit_test(test_leg_f4_wiring),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),
