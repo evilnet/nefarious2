@@ -552,9 +552,10 @@ extern int channel_has_local_member(const struct Channel *chptr);
 /** Does @a chptr have a non-zombie member with MyConnect: a user, a local
  * bouncer device, a local held ghost -- deaf, silencing and +D members
  * included?  The local-interest half of the storage gate (W5 Task 13).
- * Never narrower than channel_has_local_member(): storage covers what a
+ * Never narrower than channel_has_local_member().  Storage covers what a
  * receive window claims because the window is channel_has_local_member()
- * AND channel_store_open(), the gate this AND channel_store_open() (R43). */
+ * AND channel_store_open(), and the gate is (ours OR
+ * channel_has_local_interest()) AND the same channel_store_open() (R43). */
 extern int channel_has_local_interest(const struct Channel *chptr);
 /** The channel half of the storage rule (W5 Task 13, R43): not +P, and
  * with CHATHISTORY_REQUIRE_AUTH on an authenticated member or +H

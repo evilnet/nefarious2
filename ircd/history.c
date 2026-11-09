@@ -3595,16 +3595,16 @@ static int64_t recv_open_start(const struct Channel *chptr, uint64_t now)
   return recv_open_late(now);
 }
 
-void history_recv_update(struct Channel *chptr)
+/** history_recv_update()'s decision for @a chptr, made in memory: whether
+ * its window opens (1), closes (0) or stays as it is (-1).  On a
+ * transition chptr->recv_open and recv_open_since move here, whatever the
+ * record write does: this run received from here on (an open), or no
+ * longer does (a close); *@a was_since and *@a now are what the record
+ * write needs. */
+static int recv_decide(struct Channel *chptr, int64_t *was_since, uint64_t *now)
 {
-  char key[CHANNELLEN + 2];
-  struct rcv_record r;
-  uint64_t now, floor;
-  int64_t was_since;
-  int want, klen;
+  int want;
 
-  if (!chptr)
-    return;
   /* The window is open only while a local member is here AND the store
    * keeps the channel's rows (R43: channel_store_open, the storage gate's
    * channel half), so storage covers whatever the window claims.  A
@@ -3616,34 +3616,63 @@ void history_recv_update(struct Channel *chptr)
   } else
     want = channel_has_local_member(chptr);
   if (!history_recv_linked)
-    return;
+    return -1;
   if (want == (chptr->recv_open != 0))
-    return;                                     /* no transition */
-  now = history_recv_now_ms();
-  was_since = chptr->recv_open_since;
+    return -1;                                  /* no transition */
+  *now = history_recv_now_ms();
+  *was_since = chptr->recv_open_since;
   chptr->recv_open = (unsigned char)want;
-  /* In memory first, whatever the write below does: this run received
-   * from here on (an open), or no longer does (a close). */
-  chptr->recv_open_since = want ? recv_open_start(chptr, now) : 0;
+  chptr->recv_open_since = want ? recv_open_start(chptr, *now) : 0;
+  return want;
+}
+
+/** The record @a chptr's transition (recv_decide: @a want, @a was_since,
+ * @a now) leaves, into *@a r, under the key built into @a key (*@a klen),
+ * clipped at @a floor (0: none).  @return 0, or -1 when there is no store
+ * or no key (nothing to write). */
+static int recv_transition_record(const struct Channel *chptr, int want,
+                                  int64_t was_since, uint64_t now,
+                                  uint64_t floor, char *key, size_t keysize,
+                                  int *klen, struct rcv_record *r)
+{
   if (!history_available || !history_cf_recv)
-    return;
-  klen = build_target_key(key, sizeof key, chptr->chname);
-  if (klen < 0)
-    return;
-  (void)recv_read(key, klen, &r);               /* unreadable: start over */
+    return -1;
+  *klen = build_target_key(key, keysize, chptr->chname);
+  if (*klen < 0)
+    return -1;
+  (void)recv_read(key, *klen, r);               /* unreadable: start over */
   /* The record's own open_since is never used: memory says where this
    * run's window started.  A stale one on disk (a write that failed) is
    * dropped on an open, and a close records the window memory had. */
   if (want) {
-    r.open_since = 0;
-    rcv_open(&r, chptr->recv_open_since);
+    r->open_since = 0;
+    rcv_open(r, chptr->recv_open_since);
   } else {
-    r.open_since = was_since;
-    rcv_close(&r, (int64_t)now);
+    r->open_since = was_since;
+    rcv_close(r, (int64_t)now);
   }
-  floor = history_local_floor_ms();
   if (floor)
-    rcv_clip(&r, (int64_t)floor);
+    rcv_clip(r, (int64_t)floor);
+  return 0;
+}
+
+void history_recv_update(struct Channel *chptr)
+{
+  char key[CHANNELLEN + 2];
+  struct rcv_record r;
+  uint64_t now = 0;
+  int64_t was_since = 0;
+  int want, klen;
+
+  if (!chptr)
+    return;
+  want = recv_decide(chptr, &was_since, &now);
+  if (want < 0)
+    return;
+  if (recv_transition_record(chptr, want, was_since, now,
+                             history_local_floor_ms(), key, sizeof key,
+                             &klen, &r) < 0)
+    return;
   recv_write(key, klen, &r, want ? "open" : "close", chptr->chname);
 }
 
@@ -3757,9 +3786,60 @@ void history_recv_link_up(void)
 void history_recv_recheck_all(void)
 {
   struct Channel *chptr;
+  struct db_writebatch *wb = NULL;
+  uint64_t floor = 0;
+  unsigned int opened = 0, closed = 0;
+  int rc = DB_OK;
 
-  for (chptr = GlobalChannelList; chptr; chptr = chptr->next)
-    history_recv_update(chptr);
+  if (history_available && history_cf_recv && history_recv_linked) {
+    wb = db_writebatch_new(history_db_env);
+    floor = history_local_floor_ms();
+  }
+  /* Every channel's decision is made in memory (recv_decide), and the
+   * records of the ones that move go out in ONE batch, as at link-up: a
+   * SET or a rehash can move every channel at once.  A record not written
+   * (no batch, a staging or commit failure) claims less than this run
+   * received, never more: the windows are read from memory, and a stale
+   * open on disk is dropped by the next open. */
+  for (chptr = GlobalChannelList; chptr; chptr = chptr->next) {
+    char key[CHANNELLEN + 2];
+    struct rcv_record r;
+    uint64_t now = 0;
+    int64_t was_since = 0;
+    int want, klen;
+
+    want = recv_decide(chptr, &was_since, &now);
+    if (want < 0)
+      continue;
+    if (want)
+      opened++;
+    else
+      closed++;
+    if (!wb || rc != DB_OK
+        || recv_transition_record(chptr, want, was_since, now, floor, key,
+                                  sizeof key, &klen, &r) < 0)
+      continue;
+    rc = recv_stage(wb, key, klen, &r);
+  }
+  if (wb) {
+    if (rc == DB_OK && (opened || closed))
+      rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+    db_writebatch_destroy(wb);
+  } else if (opened || closed)
+    rc = DB_ERR_MEMORY;
+  if (rc != DB_OK && history_available && history_cf_recv)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: receive windows re-decided for "
+              "CHATHISTORY_REQUIRE_AUTH (%u opened, %u closed) not stored: "
+              "%s (%s); those records claim less than was received",
+              opened, closed, db_strerror(rc),
+              db_env_last_error(history_db_env)
+                ? db_env_last_error(history_db_env) : "no backend detail");
+  else if (opened || closed)
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: CHATHISTORY_REQUIRE_AUTH changed: receive windows "
+              "opened for %u channel%s, closed for %u", opened,
+              opened == 1 ? "" : "s", closed);
 }
 
 void history_recv_reset(struct Channel *chptr)

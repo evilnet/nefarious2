@@ -324,8 +324,9 @@ extern uint64_t history_recv_now_ms(void);
  * before history_recv_link_up() but note a refusing store (recv_shut). */
 extern void history_recv_update(struct Channel *chptr);
 
-/** history_recv_update() over every channel: CHATHISTORY_REQUIRE_AUTH was
- * set or reset (its feature notify; R43). */
+/** history_recv_update() over every channel, every changed record in one
+ * write batch: CHATHISTORY_REQUIRE_AUTH was set or reset (its feature
+ * notify; R43). */
 extern void history_recv_recheck_all(void);
 
 /** The first storage peer's burst after boot has ended (m_chathistory.c's
