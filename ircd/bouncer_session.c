@@ -8533,7 +8533,7 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
       if (!IsSSL(alias) && !IsChannelService(alias))
         ++chptr->nonsslusers;
       if (IsAccount(alias))
-        ++chptr->authusers;
+        channel_authusers_add(chptr, 1);   /* re-decides the window (R43) */
     }
   }
 
@@ -10856,8 +10856,8 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
         if (chptr->nonsslusers > 0)
           --chptr->nonsslusers;
       }
-      if (IsAccount(acptr) && chptr->authusers > 0)
-        --chptr->authusers;
+      if (IsAccount(acptr))
+        channel_authusers_add(chptr, -1);   /* re-decides the window (R43) */
     }
   }
 
@@ -13315,7 +13315,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
         if (!IsSSL(new_client) && !IsChannelService(new_client))
           member->channel->nonsslusers++;
         if (IsAccount(new_client))
-          member->channel->authusers++;
+          channel_authusers_add(member->channel, 1);   /* window: R43 */
         ++(cli_user(new_client))->joined;
       }
     }
@@ -14142,8 +14142,8 @@ static void bxc_apply_channel_list(struct Client *alias, struct Client *primary,
           if (chptr->nonsslusers > 0)
             --chptr->nonsslusers;
         }
-        if (IsAccount(alias) && chptr->authusers > 0)
-          --chptr->authusers;
+        if (IsAccount(alias))
+          channel_authusers_add(chptr, -1);   /* re-decides the window (R43) */
       }
       continue;
     }

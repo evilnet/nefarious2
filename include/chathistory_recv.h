@@ -165,4 +165,24 @@ extern void rcv_ms_pack(int64_t ms, unsigned char out[8]);
  * untouched). */
 extern int rcv_ms_unpack(const unsigned char *buf, size_t len, int64_t *ms);
 
+/** The channel half of the storage rule (W5 Task 13, R43): does a store
+ * keep a channel's rows at all?  Not with +P (@a nostorage); and with
+ * CHATHISTORY_REQUIRE_AUTH on (@a require_auth), only while the channel
+ * has an authenticated member (@a authusers) or is +H (@a public_history).
+ * The storage gate reads it, and so does the receive window: a window is
+ * open only while it holds, so storage covers whatever a window claims.
+ * @return 1 when rows are kept, 0 when every row is refused. */
+extern int rcv_store_open(int require_auth, unsigned int authusers,
+                          int public_history, int nostorage);
+
+/** May a receive window opening now start at the channel's creation?  Only
+ * when this very join created it (@a creation_s, unix seconds, is set and
+ * not before @a now_s), its one member's session is all that is there
+ * (@a sole_session: nobody else could have spoken), and the storage rule has
+ * held since the creation (@a store_shut 0, R43: rows refused while it did
+ * not are not this store's to claim).  Otherwise a window opens
+ * RCV_CLOSE_SLACK_MS after now. */
+extern int rcv_creation_start_ok(int64_t creation_s, int64_t now_s,
+                                 int sole_session, int store_shut);
+
 #endif /* INCLUDED_chathistory_recv_h */

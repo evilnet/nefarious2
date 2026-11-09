@@ -481,6 +481,48 @@ static void test_rcv_ms_pack(void **state)
   assert_int_equal(ms, 42);                              /* untouched on a reject */
 }
 
+/* The channel half of the storage rule (W5 Task 13, R43): the storage gate
+ * and the receive window both read it.  +P refuses everything; with
+ * CHATHISTORY_REQUIRE_AUTH on, so does a channel with no authenticated
+ * member, unless it is +H; with it off, the count does not matter. */
+static void test_rcv_store_open(void **state)
+{
+  (void)state;
+
+  /* REQUIRE_AUTH off: open unless +P, whatever the count and +H. */
+  assert_int_equal(rcv_store_open(0, 0, 0, 0), 1);
+  assert_int_equal(rcv_store_open(0, 3, 0, 0), 1);
+  assert_int_equal(rcv_store_open(0, 0, 1, 0), 1);
+  assert_int_equal(rcv_store_open(0, 0, 0, 1), 0);
+  assert_int_equal(rcv_store_open(0, 3, 1, 1), 0);
+  /* REQUIRE_AUTH on: an authenticated member, or +H. */
+  assert_int_equal(rcv_store_open(1, 0, 0, 0), 0);
+  assert_int_equal(rcv_store_open(1, 1, 0, 0), 1);
+  assert_int_equal(rcv_store_open(1, 0, 1, 0), 1);
+  assert_int_equal(rcv_store_open(1, 7, 1, 0), 1);
+  /* ... and +P wins over both. */
+  assert_int_equal(rcv_store_open(1, 1, 0, 1), 0);
+  assert_int_equal(rcv_store_open(1, 0, 1, 1), 0);
+}
+
+/* A window may start at the channel's creation only when this very join
+ * created it (created this second), its one member's session is all that is
+ * there, and the storage rule has held since the creation (R43): a channel
+ * whose store was shut at any point since had rows refused, which a window
+ * from the creation would claim. */
+static void test_rcv_creation_start_ok(void **state)
+{
+  const int64_t now = 1700000000;
+  (void)state;
+
+  assert_int_equal(rcv_creation_start_ok(now, now, 1, 0), 1);
+  assert_int_equal(rcv_creation_start_ok(now + 1, now, 1, 0), 1);  /* clock: never later */
+  assert_int_equal(rcv_creation_start_ok(now, now, 1, 1), 0);      /* store was shut */
+  assert_int_equal(rcv_creation_start_ok(now - 1, now, 1, 0), 0);  /* not this second */
+  assert_int_equal(rcv_creation_start_ok(now, now, 0, 0), 0);      /* someone else is there */
+  assert_int_equal(rcv_creation_start_ok(0, now, 1, 0), 0);        /* creation unknown (remote) */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -506,6 +548,8 @@ int main(void)
     cmocka_unit_test(test_rcv_floor_raise_capped_at_now),
     cmocka_unit_test(test_rcv_floor_boot_bound),
     cmocka_unit_test(test_rcv_ms_pack),
+    cmocka_unit_test(test_rcv_store_open),
+    cmocka_unit_test(test_rcv_creation_start_ok),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

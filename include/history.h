@@ -309,16 +309,24 @@ extern uint64_t history_recv_now_ms(void);
 /** A local member joined or left @a chptr, or changed what it is relayed
  * (+d, its first or last positive SILENCE mask) (channel.c's hooks, called
  * only for a member with MyConnect: a remote member, a remote alias
- * membership included, never changes what this server receives).  Opens or
- * closes the channel's window when channel_has_local_member() changed
- * against chptr->recv_open -- a read-modify-write of its record, clipped at
- * the local floor; nothing else is written.  An open starts at the
- * channel's creation when this very join created it and only the joiner's
- * session is there (nobody could have spoken there before), else
- * RCV_CLOSE_SLACK_MS after now (a relay in flight before the JOIN reached
- * its sender is not routed here); a close ends RCV_CLOSE_SLACK_MS before
- * now.  Does nothing before history_recv_link_up(). */
+ * membership included, never changes what this server receives), or an
+ * input of the storage rule's channel half changed (W5 Task 13, R43: the
+ * authenticated-member count crossing 0, ±H, ±P, the
+ * CHATHISTORY_REQUIRE_AUTH feature).  Opens or closes the channel's window
+ * when channel_has_local_member() AND channel_store_open() changed against
+ * chptr->recv_open -- a read-modify-write of its record, clipped at the
+ * local floor; nothing else is written.  An open starts at the channel's
+ * creation when this very join created it, only the joiner's session is
+ * there (nobody could have spoken there before) and the store has kept the
+ * channel's rows since (chptr->recv_shut clear), else RCV_CLOSE_SLACK_MS
+ * after now (a relay in flight before the JOIN reached its sender is not
+ * routed here); a close ends RCV_CLOSE_SLACK_MS before now.  Does nothing
+ * before history_recv_link_up() but note a refusing store (recv_shut). */
 extern void history_recv_update(struct Channel *chptr);
+
+/** history_recv_update() over every channel: CHATHISTORY_REQUIRE_AUTH was
+ * set or reset (its feature notify; R43). */
+extern void history_recv_recheck_all(void);
 
 /** The first storage peer's burst after boot has ended (m_chathistory.c's
  * ad_store_back): open, RCV_CLOSE_SLACK_MS after now, the window of every

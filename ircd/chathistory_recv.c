@@ -229,3 +229,19 @@ int rcv_ms_unpack(const unsigned char *buf, size_t len, int64_t *ms)
   *ms = rcv_le_get64(buf);
   return 0;
 }
+
+int rcv_store_open(int require_auth, unsigned int authusers,
+                   int public_history, int nostorage)
+{
+  if (nostorage)
+    return 0;
+  if (require_auth && authusers == 0 && !public_history)
+    return 0;
+  return 1;
+}
+
+int rcv_creation_start_ok(int64_t creation_s, int64_t now_s,
+                          int sole_session, int store_shut)
+{
+  return creation_s > 0 && creation_s >= now_s && sole_session && !store_shut;
+}

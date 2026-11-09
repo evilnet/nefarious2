@@ -56,6 +56,7 @@
 #include "sys.h"
 #include "whowas.h"
 #include "history.h"
+#include "chathistory_recv.h"
 #include "history_trim_codec.h"
 #include "metadata.h"
 
@@ -818,7 +819,7 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
       if (!IsSSL(who) && !IsChannelService(who))
         ++chptr->nonsslusers;
       if (IsAccount(who))
-        ++chptr->authusers;
+        channel_authusers_add(chptr, 1);   /* any member: an input of the window */
       ++((cli_user(who))->joined);
       /* Auto-sync: add local aliases of this user to the channel */
       bounce_sync_alias_join(chptr, who);
@@ -876,10 +877,11 @@ int channel_has_local_member(const struct Channel *chptr)
  * does not silence.  A remote alias membership (a device on another
  * server, mirrored here as CHFL_ALIAS) is not: its own server stores.
  *
- * NEVER narrower than channel_has_local_member() above, which decides the
- * receive windows: a row this server is routed while its window is open
- * must be stored, or a page answered locally from that window misses it.
- * This predicate is that one without the deaf and SILENCE conditions. */
+ * NEVER narrower than channel_has_local_member() above: a row this server
+ * is routed while its window is open must be stored, or a page answered
+ * locally from that window misses it.  This predicate is that one without
+ * the deaf and SILENCE conditions; the window and the gate both AND it
+ * with channel_store_open() (R43), so the gate covers the window. */
 int channel_has_local_interest(const struct Channel *chptr)
 {
   const struct Membership *member;
@@ -890,14 +892,31 @@ int channel_has_local_interest(const struct Channel *chptr)
   return 0;
 }
 
+/* The channel half of the storage rule (W5 Task 13, R43): +P refuses
+ * every row; with CHATHISTORY_REQUIRE_AUTH on, so does a channel with no
+ * authenticated member that is not +H -- unauthenticated clients can never
+ * query, so its rows would be dead bytes.  Channel state every server
+ * holds, but each judges a row against its own view on arrival, and a row
+ * crossing a change from another server (its first authenticated member
+ * arriving, its last leaving, ±H, ±P) is judged on either side of it.  So
+ * the receive window reads this too (history_recv_update): it is open only
+ * while this holds, with the 30 s slack on both edges, and a row refused
+ * here never falls inside a window. */
+int channel_store_open(const struct Channel *chptr)
+{
+  return rcv_store_open(feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH),
+                        chptr->authusers,
+                        (chptr->mode.exmode & EXMODE_PUBLICHISTORY) != 0,
+                        (chptr->mode.exmode & EXMODE_NOSTORAGE) != 0);
+}
+
 /* The one storage gate for a channel row a store keeps (W5 Task 13):
  * PRIVMSG/NOTICE, TAGMSG, multiline, JOIN/PART/MODE (the reveal JOIN and
  * the burst MODE included), TOPIC, KICK, QUIT and NICK.  A row is stored
  * when it is ours (made here) or a member of ours is in the channel now,
- * AND, with CHATHISTORY_REQUIRE_AUTH on, the channel has an authenticated
- * member or is +H: unauthenticated clients can never query, so a row in a
- * channel nobody can read would be dead bytes.  STRICT_PRESENCE only
- * filters at replay, never here.
+ * AND the channel's own storage rule holds (channel_store_open).
+ * STRICT_PRESENCE only filters at replay, never here; per-user exclusions
+ * (+Y) are their sites' own.
  *
  * Not for the CH W write-forward (process_write_forward stores what a
  * storeless server sends it), REDACT rows and tombstones, PM stores, or
@@ -906,11 +925,30 @@ int channel_store_wanted(const struct Channel *chptr, int ours)
 {
   if (!ours && !channel_has_local_interest(chptr))
     return 0;
-  if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
-      && chptr->authusers == 0
-      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
-    return 0;
-  return 1;
+  return channel_store_open(chptr);
+}
+
+/* Every change of the authenticated-member count (R43): it is an input of
+ * channel_store_open(), so the receive window is re-decided when it
+ * crosses 0 -- a remote member's arrival or departure included, which
+ * changes nothing else this server receives. */
+void channel_authusers_add(struct Channel *chptr, int delta)
+{
+  unsigned int before = chptr->authusers;
+
+  if (delta > 0)
+    ++chptr->authusers;
+  else if (delta < 0 && chptr->authusers > 0)
+    --chptr->authusers;
+  if ((before == 0) != (chptr->authusers == 0))
+    history_recv_update(chptr);
+}
+
+void channel_store_modes_changed(struct Channel *chptr, unsigned int old_exmode)
+{
+  if ((old_exmode ^ chptr->mode.exmode)
+      & (EXMODE_PUBLICHISTORY | EXMODE_NOSTORAGE))
+    history_recv_update(chptr);
 }
 
 void channel_recv_member_changed(struct Client *cptr)
@@ -965,17 +1003,16 @@ static int remove_member_from_channel(struct Membership* member)
   member->next_member = membershipFreeList;
   membershipFreeList = member;
 
-  /* Receive windows (W5 Task 9): the last local member leaving closes
-   * this server's window.  Here, with the member unlinked, and before
-   * both returns below: sub1_from_channel() may free chptr. */
-  if (was_local)
-    history_recv_update(chptr);
-
   if (IsMemberAlias(member)) {
     /* Alias removal: decrement alias counter only.
      * Skip joined/nonssl/auth decrements. */
     if (chptr->aliases > 0)
       --chptr->aliases;
+    /* Receive windows (W5 Task 9): the last local member leaving closes
+     * this server's window.  Before the return below: sub1_from_channel()
+     * may free chptr. */
+    if (was_local)
+      history_recv_update(chptr);
     /* If this was the last alias and no real users remain,
      * the channel is truly empty — destroy it. */
     if (chptr->aliases == 0 && chptr->users == 0)
@@ -987,8 +1024,16 @@ static int remove_member_from_channel(struct Membership* member)
 
   if (!IsSSL(member->user) && !IsChannelService(member->user))
     --chptr->nonsslusers;
-  if (IsAccount(member->user) && chptr->authusers > 0)
-    --chptr->authusers;
+  /* The channel's last authenticated member leaving -- a remote one too --
+   * re-decides the window (R43), after the count moved. */
+  if (IsAccount(member->user))
+    channel_authusers_add(chptr, -1);
+
+  /* Receive windows (W5 Task 9): the last local member leaving closes
+   * this server's window.  Here, with the member unlinked and the counts
+   * moved, and before the return: sub1_from_channel() may free chptr. */
+  if (was_local)
+    history_recv_update(chptr);
 
   return sub1_from_channel(chptr);
 }
@@ -1022,10 +1067,7 @@ void channel_account_adjust(struct Client *cptr, int delta)
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
     if (IsMemberAlias(member))
       continue;
-    if (delta > 0)
-      ++member->channel->authusers;
-    else if (member->channel->authusers > 0)
-      --member->channel->authusers;
+    channel_authusers_add(member->channel, delta > 0 ? 1 : -1);
   }
 }
 
@@ -2150,8 +2192,11 @@ int SetAutoChanModes(struct Channel *chptr)
 
   } /* for (; *modestr; modestr++) { */
 
-  if (t_exmode != 0)
+  if (t_exmode != 0) {
+    unsigned int old_exmode = chptr->mode.exmode;
     chptr->mode.exmode = t_exmode;
+    channel_store_modes_changed(chptr, old_exmode);   /* an auto +P/+H */
+  }
 
   return 0;
 }
@@ -5469,7 +5514,13 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
       mode_invite_clear(state.chptr);
 
     state.chptr->mode.mode = t_mode;
-    state.chptr->mode.exmode = t_exmode;
+    {
+      unsigned int old_exmode = state.chptr->mode.exmode;
+      state.chptr->mode.exmode = t_exmode;
+      /* ±H / ±P (MODE, OPMODE, a burst, a TS loss) re-decide the
+       * receive window (R43). */
+      channel_store_modes_changed(state.chptr, old_exmode);
+    }
 
     /* B3: fire the channel-metadata ±R hook AFTER the flip (so the persist
      * leg observes the new bit).  See mode_channel_registered_hook. */

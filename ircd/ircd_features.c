@@ -728,6 +728,19 @@ feature_notify_strict_presence(void)
   presence_backfill_now();
 }
 
+/** CHATHISTORY_REQUIRE_AUTH is an input of the storage rule's channel half
+ * (channel_store_open), which the receive windows read (W5 Task 13, R43):
+ * a SET, a RESET or a rehash re-decides every channel's window.  Before
+ * the server exists (conf parse, `ircd -k`) there is no channel and no
+ * window: nothing to do. */
+static void
+feature_notify_chathistory_require_auth(void)
+{
+  if (!cli_serv(&me))
+    return;
+  history_recv_recheck_all();
+}
+
 static void
 feature_notify_chathistory_retention(void)
 {
@@ -1419,7 +1432,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
   F_I(CHATHISTORY_TRIM_SLICE_MS, 0, 15, feature_notify_chathistory_trim_slice_ms),  /* Main-loop ms one trim slice may take (clamped 1..1000) */
-  F_B(CHATHISTORY_REQUIRE_AUTH, 0, 0, 0),   /* Require auth for channel history (non-+H) — default off so unauthed/ephemeral clients can use CHATHISTORY out of the box; Afternet sets this to 1 in ircd.conf */
+  F_B(CHATHISTORY_REQUIRE_AUTH, 0, 0, feature_notify_chathistory_require_auth),   /* Require auth for channel history (non-+H) — default off so unauthed/ephemeral clients can use CHATHISTORY out of the box; Afternet sets this to 1 in ircd.conf */
   F_B(CHATHISTORY_STRICT_PRESENCE, 0, 0, feature_notify_strict_presence), /* Filter chathistory to caller's presence windows (strict mode) */
   F_I(CHATHISTORY_PRESENCE_MAX_INTERVALS, 0, 64, 0), /* Per-(anchor,channel) cap on retained presence intervals; oldest evicted FIFO when exceeded */
   F_I(CHATHISTORY_PRESENCE_SYNC_SLICE, 0, 2000, 0), /* Link-time presence sync: PN lines per one-second slice (whole records; below 1 counts as 1); a slice also stops while the link's sendq is over half full */

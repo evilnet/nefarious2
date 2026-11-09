@@ -3576,16 +3576,19 @@ static int recv_sole_session(const struct Channel *chptr)
 
 /** Where a window opened after link-up starts: the channel's creation when
  * this very join created it (its creationtime is this second: get_channel
- * stamps TStime() for a local creator) and its one member's session is all
+ * stamps TStime() for a local creator), its one member's session is all
  * that is there (its own devices may have joined with it, in either order:
- * fix round 1, M7) -- nobody could have spoken there before; otherwise
+ * fix round 1, M7) -- nobody could have spoken there before -- and the
+ * store has kept the channel's rows since the creation (R43:
+ * chptr->recv_shut, set whenever channel_store_open() was seen failing --
+ * the creator's own rows were refused meanwhile); otherwise
  * recv_open_late().  A channel kept alive empty (+z, an Apass, a delayed
  * destruct) may have had remote members who spoke while this server had
  * none: its creation is not a safe start. */
 static int64_t recv_open_start(const struct Channel *chptr, uint64_t now)
 {
-  if (chptr->creationtime > 0 && chptr->creationtime >= TStime()
-      && recv_sole_session(chptr)) {
+  if (rcv_creation_start_ok((int64_t)chptr->creationtime, (int64_t)TStime(),
+                            recv_sole_session(chptr), chptr->recv_shut)) {
     uint64_t c = (uint64_t)chptr->creationtime * 1000ULL;
     return (int64_t)(c < now ? c : now);
   }
@@ -3600,9 +3603,20 @@ void history_recv_update(struct Channel *chptr)
   int64_t was_since;
   int want, klen;
 
-  if (!chptr || !history_recv_linked)
+  if (!chptr)
     return;
-  want = channel_has_local_member(chptr);
+  /* The window is open only while a local member is here AND the store
+   * keeps the channel's rows (R43: channel_store_open, the storage gate's
+   * channel half), so storage covers whatever the window claims.  A
+   * failure of the latter is remembered: no later window starts at the
+   * creation (recv_open_start). */
+  if (!channel_store_open(chptr)) {
+    chptr->recv_shut = 1;
+    want = 0;
+  } else
+    want = channel_has_local_member(chptr);
+  if (!history_recv_linked)
+    return;
   if (want == (chptr->recv_open != 0))
     return;                                     /* no transition */
   now = history_recv_now_ms();
@@ -3705,7 +3719,8 @@ void history_recv_link_up(void)
     struct rcv_record r;
     int klen;
 
-    if (chptr->recv_open || !channel_has_local_member(chptr))
+    if (chptr->recv_open || !channel_has_local_member(chptr)
+        || !channel_store_open(chptr))       /* R43: the store refuses its rows */
       continue;
     klen = build_target_key(key, sizeof key, chptr->chname);
     if (klen < 0)
@@ -3737,6 +3752,14 @@ void history_recv_link_up(void)
     log_write(LS_SYSTEM, L_INFO, 0,
               "history: the first storage peer's burst ended: receive "
               "windows opened for %u channel%s", opened, opened == 1 ? "" : "s");
+}
+
+void history_recv_recheck_all(void)
+{
+  struct Channel *chptr;
+
+  for (chptr = GlobalChannelList; chptr; chptr = chptr->next)
+    history_recv_update(chptr);
 }
 
 void history_recv_reset(struct Channel *chptr)

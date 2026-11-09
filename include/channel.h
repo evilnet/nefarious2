@@ -395,8 +395,13 @@ struct Channel {
   unsigned int       authusers;    /**< Number of authenticated (logged-in) members */
   unsigned int       aliases;      /**< Number of CHFL_ALIAS members (not counted in users) */
   unsigned char      recv_open;    /**< This run has the channel's receive window
-                                    *   open: a local member is here (W5 Task 9,
-                                    *   history_recv_update) */
+                                    *   open: a local member is here and the
+                                    *   store keeps the channel's rows (W5 Task 9,
+                                    *   Task 13 R43; history_recv_update) */
+  unsigned char      recv_shut;    /**< The storage rule's channel half
+                                    *   (channel_store_open) has failed at some
+                                    *   point since the creation: a window never
+                                    *   starts at the creation (R43) */
   int64_t            recv_open_since; /**< Where that window starts (epoch ms;
                                     *   0 while closed).  history_recv_covers
                                     *   reads it, never the record's copy, which
@@ -547,16 +552,31 @@ extern int channel_has_local_member(const struct Channel *chptr);
 /** Does @a chptr have a non-zombie member with MyConnect: a user, a local
  * bouncer device, a local held ghost -- deaf, silencing and +D members
  * included?  The local-interest half of the storage gate (W5 Task 13).
- * Never narrower than channel_has_local_member() (the receive windows):
- * every row inside an open window must be stored. */
+ * Never narrower than channel_has_local_member(): storage covers what a
+ * receive window claims because the window is channel_has_local_member()
+ * AND channel_store_open(), the gate this AND channel_store_open() (R43). */
 extern int channel_has_local_interest(const struct Channel *chptr);
+/** The channel half of the storage rule (W5 Task 13, R43): not +P, and
+ * with CHATHISTORY_REQUIRE_AUTH on an authenticated member or +H
+ * (rcv_store_open).  Read by the storage gate and by the receive window,
+ * which is open only while it holds: every input change re-decides the
+ * window (channel_authusers_add, the ±H/±P mode writes, the feature). */
+extern int channel_store_open(const struct Channel *chptr);
 /** The storage gate for a channel row on a store (W5 Task 13): (@a ours
- * || channel_has_local_interest()) AND the CHATHISTORY_REQUIRE_AUTH rule
- * (with it on, a channel with no authenticated member that is not +H
- * stores nothing).  @a ours = the event was made here: a local client's
- * command, this server's own act.  Not used by CH W
+ * || channel_has_local_interest()) AND channel_store_open().  @a ours =
+ * the event was made here: a local client's command, this server's own
+ * act.  Per-user exclusions (+Y) stay at their sites.  Not used by CH W
  * (process_write_forward), REDACT rows, PM stores or any write-forward. */
 extern int channel_store_wanted(const struct Channel *chptr, int ours);
+/** Add @a delta (+1 or -1; a decrement never goes below 0) to @a chptr's
+ * authenticated-member count, and re-decide the receive window when the
+ * count crosses 0 (it is an input of channel_store_open()).  Every change
+ * of authusers goes through here. */
+extern void channel_authusers_add(struct Channel *chptr, int delta);
+/** @a chptr's extended modes were @a old_exmode before a write: re-decide
+ * its receive window when +H or +P changed (R43). */
+extern void channel_store_modes_changed(struct Channel *chptr,
+                                        unsigned int old_exmode);
 /** A local member's own relay state changed (+d, its first or last
  * positive SILENCE mask): re-decide the receive window of each of its
  * channels (history_recv_update). */

@@ -177,7 +177,11 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
   modebuf_mode(&mbuf, MODE_DEL | (del_mode & chptr->mode.mode));
   modebuf_mode(&mbuf, MODE_DEL | (del_exmode & chptr->mode.exmode));
   chptr->mode.mode &= ~del_mode; /* and of course actually delete them */
-  chptr->mode.exmode &= ~del_exmode;
+  {
+    unsigned int old_exmode = chptr->mode.exmode;
+    chptr->mode.exmode &= ~del_exmode;
+    channel_store_modes_changed(chptr, old_exmode);   /* ±H/±P: R43 */
+  }
 
   /* If we're removing invite, remove all the invites */
   if (del_mode & MODE_INVITEONLY)
