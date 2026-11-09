@@ -145,6 +145,11 @@ struct HistoryMessage {
   struct HistoryMessage *next;         /**< Next in linked list (for results) */
   int is_context;                      /**< Non-zero if draft/chathistory-context message */
   char ctx_parent[HISTORY_MSGID_LEN];  /**< Federated context child: parent msgid (else empty) */
+  /** history_attach_context could not read one of this row's children (a
+   * read error, an undecodable record, a walk cut short): it may be
+   * redacted, so the page's redaction filter hides it (fail closed; W5
+   * Task 15 fix round 1).  In memory only, never stored. */
+  int ctx_unread;
   /** Channel incarnation the row belongs to: the channel's creationtime
    * at store time (0 = stamped before 2026-09-08, counts as current).
    * A channel recreated on the losing side of a split is a different
@@ -608,6 +613,18 @@ extern int history_redact_message(const char *target, const char *msgid);
  * REDACT context row reference it?
  * @return 1 if redacted, 0 if not, -1 on error. */
 extern int history_message_is_redacted(const char *target, const char *msgid);
+
+/** One page's redaction lookups in one snapshot (W5 Task 15 fix round 1:
+ * a page checks each context reaction it shows).  NULL with no store, or
+ * when no snapshot could be taken. */
+struct HistoryRedactLookup;
+extern struct HistoryRedactLookup *history_redact_lookup_open(void);
+/** history_message_is_redacted, read in @a h's snapshot, walking at most
+ * @a max_children of the message's children (0 = all): past them, with
+ * no REDACT found, the answer is unknown (-1).  -1 for a NULL @a h. */
+extern int history_redact_lookup(struct HistoryRedactLookup *h, const char *target,
+                                 const char *msgid, int max_children);
+extern void history_redact_lookup_close(struct HistoryRedactLookup *h);
 /* Redaction catch-up index (design B; redact_index.h): rows since @a since_ms
  * in time order, at most @a limit (0 = all); *truncated set when cut short. */
 struct rdx_val;

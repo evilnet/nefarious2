@@ -4419,8 +4419,14 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
   /* Pin a snapshot so the reply-index walks and main-DBI gets see the
    * same point-in-time view. */
   snap = db_snapshot_new(history_db_env);
-  if (!snap)
+  if (!snap) {
+    /* No child of any row can be read: each may be redacted (fail closed,
+     * W5 Task 15 fix round 1; the page's redaction filter hides them). */
+    for (msg = messages; msg; msg = msg->next)
+      if (!msg->is_context)
+        msg->ctx_unread = 1;
     return 0;
+  }
 
   /* One iterator per message, bounded to exactly that message's
    * children (history_prefix_iter): most messages have none, and an
@@ -4443,8 +4449,10 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
     if (plen < 0)
       continue;
     ri_it = history_prefix_iter(history_cf_reply, snap, prefix, (size_t)plen);
-    if (!ri_it)
+    if (!ri_it) {
+      msg->ctx_unread = 1;   /* its children cannot be walked: fail closed */
       continue;
+    }
 
     rc = db_iter_seek_first(ri_it);
     while (rc == DB_OK && db_iter_valid(ri_it)) {
@@ -4500,13 +4508,21 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
 
         grc = db_get(history_db_env, history_cf_messages,
                      main_keybuf, main_keylen, snap, &main_val);
-        if (grc != DB_OK)
+        if (grc != DB_OK) {
+          /* A child that is gone is not a REDACT.  One that could not be
+           * read may be: the row is hidden rather than shown with a
+           * redaction this walk could not see (W5 Task 15 fix round 1,
+           * as history_message_is_redacted's -1). */
+          if (grc != DB_NOTFOUND)
+            msg->ctx_unread = 1;
           goto next_child;
+        }
 
         ctx = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
         if (history_deserialize_record(main_val.base, main_val.len, ctx) != 0) {
           MyFree(ctx);
           db_val_free(&main_val);
+          msg->ctx_unread = 1;   /* an undecodable child may be a REDACT */
           goto next_child;
         }
         db_val_free(&main_val);
@@ -4544,6 +4560,8 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
 next_child:
       rc = db_iter_next(ri_it);
     }
+    if (rc != DB_OK && rc != DB_NOTFOUND)
+      msg->ctx_unread = 1;   /* the walk ended on an error, not at its end */
     db_iter_close(ri_it);
   }
 
@@ -4574,18 +4592,19 @@ int history_redact_message(const char *target, const char *msgid)
   return 0;
 }
 
-int history_message_is_redacted(const char *target, const char *msgid)
+/** history_message_is_redacted's walk, read in @a snap, over at most
+ * @a max_children of the message's children (0 = all): past that many,
+ * with no REDACT among them, the answer is unknown (-1). */
+static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
+                                  const char *msgid, int max_children)
 {
-  struct db_snapshot *snap;
   struct db_iter *ri_it;
   char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
   int plen;
   int rc;
   int redacted = 0;
   int unread = 0;
-
-  if (!history_available || !target || !msgid || !*msgid)
-    return -1;
+  int seen = 0;
 
   /* A redaction is a REDACT context row whose reply-index parent is the
    * message (history_store_message links it; history_redact_message
@@ -4595,16 +4614,11 @@ int history_message_is_redacted(const char *target, const char *msgid)
   if (plen < 0)
     return -1;
 
-  snap = db_snapshot_new(history_db_env);
-  if (!snap)
-    return -1;
   /* Exactly this message's children (history_prefix_iter): an unredacted,
    * childless message must not walk on into its neighbours' ranges. */
   ri_it = history_prefix_iter(history_cf_reply, snap, prefix, (size_t)plen);
-  if (!ri_it) {
-    db_snapshot_destroy(snap);
+  if (!ri_it)
     return -1;
-  }
 
   for (rc = db_iter_seek_first(ri_it);
        rc == DB_OK && db_iter_valid(ri_it) && !redacted;
@@ -4623,6 +4637,10 @@ int history_message_is_redacted(const char *target, const char *msgid)
 
     if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
       break;
+    if (max_children > 0 && ++seen > max_children) {
+      unread = 1;   /* more children than the caller will read: unknown */
+      break;
+    }
 
     /* After the prefix: timestamp\0child_msgid */
     child_part = (const char *)kbase + plen;
@@ -4660,15 +4678,67 @@ int history_message_is_redacted(const char *target, const char *msgid)
   }
 
   db_iter_close(ri_it);
-  db_snapshot_destroy(snap);
   if (redacted)
     return 1;
-  /* The children were not all read (a read error, or the index walk ended
-   * on one rather than at its end): the answer is unknown, not "no".
-   * SEARCH hides such a message; a REDACT store retries (rdx_row_decide). */
+  /* The children were not all read (a read error, the walk ended on one
+   * rather than at its end, or past @a max_children): the answer is
+   * unknown, not "no".  SEARCH hides such a message; a REDACT store retries
+   * (rdx_row_decide); a page hides such a context row (W5 Task 15). */
   if (unread || (rc != DB_OK && rc != DB_NOTFOUND))
     return -1;
   return 0;
+}
+
+int history_message_is_redacted(const char *target, const char *msgid)
+{
+  struct db_snapshot *snap;
+  int r;
+
+  if (!history_available || !target || !msgid || !*msgid)
+    return -1;
+  snap = db_snapshot_new(history_db_env);
+  if (!snap)
+    return -1;
+  r = message_is_redacted_in(snap, target, msgid, 0);
+  db_snapshot_destroy(snap);
+  return r;
+}
+
+/** One page's redaction lookups (W5 Task 15 fix round 1): one snapshot. */
+struct HistoryRedactLookup {
+  struct db_snapshot *snap;
+};
+
+struct HistoryRedactLookup *history_redact_lookup_open(void)
+{
+  struct HistoryRedactLookup *h;
+  struct db_snapshot *snap;
+
+  if (!history_available)
+    return NULL;
+  snap = db_snapshot_new(history_db_env);
+  if (!snap)
+    return NULL;
+  h = (struct HistoryRedactLookup *)MyMalloc(sizeof(*h));
+  h->snap = snap;
+  return h;
+}
+
+int history_redact_lookup(struct HistoryRedactLookup *h, const char *target,
+                          const char *msgid, int max_children)
+{
+  if (!h || !history_available || !target || !msgid || !*msgid)
+    return -1;
+  return message_is_redacted_in(h->snap, target, msgid, max_children);
+}
+
+void history_redact_lookup_close(struct HistoryRedactLookup *h)
+{
+  if (!h)
+    return;
+  if (history_available)
+    db_snapshot_destroy(h->snap);
+  MyFree(h);
 }
 
 /** Build a readmarker key from account and target.

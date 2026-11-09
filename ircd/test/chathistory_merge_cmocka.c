@@ -36,7 +36,8 @@
  *  - fix round 1: the page leg's state (hm_page_leg: remove-on-match
  *    declarations, the derivation only once one was lost, the two budgets
  *    wired), a REDACT's target kept past every cap (hm_idset) and the
- *    fail-closed peer lists when even that overflows.
+ *    fail-closed peer lists when even that overflows, F-7 for rows, and a
+ *    row whose child could not be read.
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -1091,6 +1092,53 @@ static void test_leg_f4_wiring(void **s)
   hm_leg_free(&leg);
 }
 
+/* F-7 for rows: a reaction that is a row of the page, to a message a
+ * REDACT of the page (or the side set) names, goes too; a reaction to an
+ * unredacted message stays. */
+static void test_redact_filter_rows_of_redacted(void **s)
+{
+  struct HistoryMessage *head = chain(6,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      typed("D", "2.000", HISTORY_REDACT, "M"),
+      reaction("Rm", "3.000", "M"),
+      typed("N", "4.000", HISTORY_PRIVMSG, NULL),
+      reaction("Rn", "5.000", "N"),
+      reaction("Rgone", "6.000", "GONE"));
+  struct hm_idset side;
+
+  (void)s;
+  memset(&side, 0, sizeof(side));
+  hm_idset_add(&side, "GONE");
+  assert_int_equal(hm_redact_filter(&head, 6, &side, NULL, NULL), 3);
+  assert_string_equal(ids(head), "D N Rn");
+  history_free_messages(head);
+  hm_idset_free(&side);
+}
+
+/* A row one of whose children could not be read (history_attach_context's
+ * ctx_unread) may be redacted: it goes, and its context run with it. */
+static void test_redact_filter_unread_child(void **s)
+{
+  struct HistoryMessage *head = chain(4,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(bare_tag("R", "5.000")),
+      typed("N", "2.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(bare_tag("R2", "6.000")));
+
+  (void)s;
+  head->ctx_unread = 1;
+  assert_int_equal(hm_redact_filter(&head, 2, NULL, NULL, NULL), 2);
+  assert_string_equal(ids(head), "N R2");
+  history_free_messages(head);
+
+  /* An event can never be redacted: it stays. */
+  head = chain(1, typed("J", "1.000", HISTORY_JOIN, NULL));
+  head->ctx_unread = 1;
+  assert_int_equal(hm_redact_filter(&head, 1, NULL, NULL, NULL), 1);
+  assert_string_equal(ids(head), "J");
+  history_free_messages(head);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1106,6 +1154,8 @@ int main(void)
     cmocka_unit_test(test_leg_redact_kept_past_every_cap),
     cmocka_unit_test(test_idset_overflow_closed),
     cmocka_unit_test(test_leg_f4_wiring),
+    cmocka_unit_test(test_redact_filter_rows_of_redacted),
+    cmocka_unit_test(test_redact_filter_unread_child),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),

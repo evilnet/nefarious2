@@ -2007,25 +2007,40 @@ static int federation_wanted(const char *target, enum fed_page page,
  *              list transfers to the replay engine on return.
  * @return     The post-filter message count.
  */
-/** F-2's lookup, through hm_redact_filter: the target to look a context
- * row up under, and how many lookups could not be read. */
+/** The most children a context reaction's redaction lookup walks (F-2;
+ * W5 Task 15 fix round 1).  A reaction's children are its REDACT -- one
+ * is stored, a repeat is idempotent -- and the rare reaction to it; past
+ * this many, with no REDACT among them, the lookup answers unknown and the
+ * reaction is hidden (fail closed). */
+#define CTX_REDACT_CHILDREN_MAX 32
+
+/** F-2's lookups for one page, through hm_redact_filter: the store key,
+ * one snapshot opened at the first lookup, and the lookups that came back
+ * unknown. */
 struct CtxRedactCheck {
   const char *target;
+  struct HistoryRedactLookup *h;
+  int opened;
   int unread;
 };
 
 /** Is the context row @a m redacted in this server's store (W5 Task 15,
  * F-2)?  REDACTs reach every store, a tombstone where the message is not
- * held (Push B), so the answer here is authoritative.  One
- * history_message_is_redacted per context row: a bounded reply-index
- * iterator and seek over @a m's own children, one db_get per child (a
- * reaction rarely has any) -- what history_attach_context already paid to
- * fetch the row itself.  -1 (unreadable) is counted and hides the row. */
+ * held (Push B), so the answer here is authoritative.  One capped walk of
+ * @a m's own children (CTX_REDACT_CHILDREN_MAX) per context row, in the
+ * page's one snapshot.  -1 -- unreadable, too many children, or no store
+ * at all (a storeless server cannot know: every context reaction it was
+ * sent is hidden, the binding fail-closed ruling) -- hides the row. */
 static int ctx_redacted_here(const struct HistoryMessage *m, void *arg)
 {
   struct CtxRedactCheck *c = (struct CtxRedactCheck *)arg;
-  int r = history_message_is_redacted(c->target, m->msgid);
+  int r;
 
+  if (!c->opened) {
+    c->opened = 1;
+    c->h = history_redact_lookup_open();
+  }
+  r = history_redact_lookup(c->h, c->target, m->msgid, CTX_REDACT_CHILDREN_MAX);
   if (r < 0)
     c->unread++;
   return r;
@@ -2035,12 +2050,12 @@ static int ctx_redacted_here(const struct HistoryMessage *m, void *arg)
  * (hm_redact_filter; W5 Task 15): drop the PRIVMSG/NOTICE/TAGMSG/MULTILINE
  * entries a REDACT entry of @a *head names, however many (F-6), or that
  * @a extra names (the targets of REDACTs a federated request dropped for
- * budget; NULL for none), the context reactions of a row dropped that way
- * (F-7), and every context entry this server's store knows redacted, or
- * cannot read (F-2).  REDACT entries stay (the audit/visibility artifact
- * the client relies on, and the tombstone policy).  @a target is the store
- * key the page was read under.  A server with no store (a federated
- * auto-replay) has no authority to look up: F-2 is not applied there.
+ * budget; NULL for none), a row one of whose children could not be read,
+ * the reactions of a message dropped that way (F-7), and every context
+ * entry this server's store knows redacted, or cannot read, or cannot ask
+ * (no store) (F-2).  REDACT entries stay (the audit/visibility artifact the
+ * client relies on, and the tombstone policy).  @a target is the store key
+ * the page was read under.
  * @return the post-filter count (@a count when nothing was dropped). */
 static int redact_filter_messages(const char *target,
                                   struct HistoryMessage **head, int count,
@@ -2048,15 +2063,20 @@ static int redact_filter_messages(const char *target,
 {
   struct CtxRedactCheck c;
 
+  memset(&c, 0, sizeof(c));
   c.target = target;
-  c.unread = 0;
-  count = hm_redact_filter(head, count, extra,
-                           (target && history_is_available()) ? ctx_redacted_here : NULL,
-                           &c);
-  if (c.unread)
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "chathistory %s: %d context row(s) not shown, their redaction "
-              "could not be read", target, c.unread);
+  count = hm_redact_filter(head, count, extra, ctx_redacted_here, &c);
+  if (c.h)
+    history_redact_lookup_close(c.h);
+  if (c.unread) {
+    if (!history_is_available())
+      Debug((DEBUG_DEBUG, "chathistory %s: no store to look up %d context "
+             "row(s) in: not shown", target, c.unread));
+    else
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "chathistory %s: %d context row(s) not shown, their redaction "
+                "could not be read", target, c.unread);
+  }
   return count;
 }
 
@@ -6561,49 +6581,12 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
     /* Save cursor for next iteration (after this channel completes) */
     ctx->cursor = member->next_channel;
 
-    /* Try local first if available.  limit+1 completeness probe, same
-     * as the local replay legs: overflow head trimmed (LATEST =>
-     * chronological list of the latest, oldest first). */
-    if (history_is_available()) {
-      struct HistoryMessage *messages = NULL;
-      int complete = 1;
-      struct PresenceQueryFilter *pf = NULL;
-      struct HistoryRowFilter bare;
-      int count = 0;
-      /* Presence-aware paging: the walk itself skips rows outside the
-       * session's presence, so a long absence no longer empties the
-       * replay page while older visible rows sit behind it. */
-      if (open_query_presence(sptr, channame, 0, &pf) == 0)
-        count = history_query_latest(channame, HISTORY_REF_NONE, "*",
-                                     ctx->limit + 1, &messages,
-                                     query_row_filter(sptr, pf, &bare));
-      presence_query_filter_close(pf);
-      if (count > ctx->limit && messages) {
-        struct HistoryMessage *extra = messages;
-        messages = messages->next;
-        extra->next = NULL;
-        history_free_messages(extra);
-        count = ctx->limit;
-        complete = 0;
-      }
-      /* Strict-presence: this replay leg bypassed the filter (audit
-       * finding #3) -- apply it exactly like the query paths. */
-      count = presence_filter_messages(sptr, channame, &messages, count, 0);
-      if (count > 0 && messages) {
-        send_history_batch(sptr, channame, messages, count, 0, NULL, complete);
-        ctx->total_replayed += count;
-        ctx->chan_count++;
-        history_free_messages(messages);
-        /* SendQ safety — break out if sendQ is getting full */
-        if (!sendq_replay_ok(sptr))
-          return;
-        continue;
-      }
-      if (messages)
-        history_free_messages(messages);
-    }
-
-    /* No local history or insufficient — federate */
+    /* No local leg: chathistory_auto_replay_fed runs only on a server
+     * with no store (bouncer_session.c; a server with one replays through
+     * replay_start_catchup and chathistory_page_since), and a store never
+     * opens after boot (history_init runs once).  The local leg that stood
+     * here was unreachable, and replayed without the context attach or
+     * the redaction filter (W5 Task 15 fix round 1). */
     server_count = count_storage_servers(channame, 0);
     if (server_count == 0)
       continue;  /* No storage servers, skip this channel */
@@ -7245,6 +7228,40 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
   return req;
 }
 
+/** Unlink, from a responder's rows and their attached context, every
+ * context reaction (a non-REDACT context row) this store knows is
+ * redacted: it holds the reaction and so its REDACT, under the reaction in
+ * the reply index (W5 Task 15 fix round 1).  A requester that lacks that
+ * REDACT -- it missed it across a split, or has no store -- is then never
+ * sent the reaction.  Only a known redaction (1) skips: an unknown answer
+ * (-1) is left to the requester, whose own lookup hides it.  One capped
+ * lookup per context reaction (CTX_REDACT_CHILDREN_MAX), in one snapshot.
+ * REDACT entries and rows are untouched; no line changes form. */
+static void skip_redacted_context(const char *target, struct HistoryMessage **head)
+{
+  struct HistoryRedactLookup *h = NULL;
+  struct HistoryMessage **pp, *m;
+  int opened = 0;
+
+  for (pp = head; (m = *pp); ) {
+    if (m->is_context && m->type != HISTORY_REDACT) {
+      if (!opened) {
+        opened = 1;
+        h = history_redact_lookup_open();
+      }
+      if (history_redact_lookup(h, target, m->msgid, CTX_REDACT_CHILDREN_MAX) == 1) {
+        *pp = m->next;
+        m->next = NULL;
+        history_free_messages(m);
+        continue;
+      }
+    }
+    pp = &m->next;
+  }
+  if (h)
+    history_redact_lookup_close(h);
+}
+
 /** Answer one line of a children request (CH Q K, W5 Task 14): the context
  * children this store holds of the msgids in @a list, whether or not it
  * holds those rows -- the reply index is keyed by the parent's msgid and
@@ -7283,6 +7300,7 @@ static int fed_children_answer(struct Client *to, const char *target, const char
   if (!stubs)
     return 0;
   history_attach_context(target, stubs);
+  skip_redacted_context(target, &stubs);
   for (pp = &stubs; (m = *pp); ) {
     if (m->is_context
         && ((mask && !(mask & (1u << m->type)))
@@ -7878,6 +7896,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * splice on it, older requesters ignore the unknown subcommand
        * and see the child as an ordinary row (harmless). */
       history_attach_context(target, messages);
+      /* A reaction this store knows is redacted is not declared or sent
+       * (W5 Task 15 fix round 1): a requester without its REDACT -- one
+       * that missed it across a split, one with no store -- would show it. */
+      skip_redacted_context(target, &messages);
 
       /* Send response messages (each context child after its CH C).
        * send_ch_response picks the line form per row:

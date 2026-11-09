@@ -115,7 +115,7 @@ extern int hm_pack_ids(const char *const *ids, int n, int from, size_t room,
 extern int hm_parse_ids(char *list, const char **ids, int max);
 
 /** Is the context row @a m redacted, as this server's store knows it (W5
- * Task 15, F-2)?  1 yes, 0 no, -1 unknown (a read error). */
+ * Task 15, F-2)?  1 yes, 0 no, -1 unknown (a read error, no store). */
 typedef int (*hm_redacted_fn)(const struct HistoryMessage *m, void *arg);
 
 /** The most targets an hm_idset keeps (64 bytes each). */
@@ -154,11 +154,16 @@ extern void hm_idset_free(struct hm_idset *s);
  *     in the redacted set is dropped.  The set is sized from the list, with
  *     no cap; when it cannot be allocated the filter fails closed
  *     (hm_redact_filter_closed).
+ *   - A row one of whose children history_attach_context could not read
+ *     (ctx_unread), and that a REDACT could name, is dropped: it may be
+ *     redacted (fail closed).
  *   - F-7: the context run of a row dropped that way goes with it, except
- *     its REDACT entries (kept as before).
+ *     its REDACT entries (kept as before); so does any TAGMSG, row or
+ *     context, whose own parent (hm_context_parent) is in the redacted set.
  *   - F-2: each context entry that survives and could be a REDACT target
  *     is looked up once with @a redacted (NULL: none is), and dropped
- *     unless the answer is 0: a read error hides it (fail closed).  No context of context is ever attached, so a reaction's
+ *     unless the answer is 0: a read error, or no store, hides it (fail
+ *     closed).  No context of context is ever attached, so a reaction's
  *     own REDACT is on the page only when its time is.
  * REDACT entries and events are never dropped.
  * @return @a count when nothing was dropped, else the entries left. */

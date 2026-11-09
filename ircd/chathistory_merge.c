@@ -443,6 +443,7 @@ static int hm_redact_walk(struct HistoryMessage **head, int count,
 
   while (*pp) {
     struct HistoryMessage *cur = *pp;
+    char parent[HISTORY_MSGID_LEN];
     int drop = 0;
 
     if (!cur->is_context)
@@ -452,8 +453,14 @@ static int hm_redact_walk(struct HistoryMessage **head, int count,
           && (closed || (nset > 0 && bsearch(cur->msgid, set, (size_t)nset,
                                              sizeof(set[0]), hm_id_cmp))))
         drop = 1;   /* F-6: a REDACT of the page names it */
+      else if (!cur->is_context && cur->ctx_unread && hm_redactable(cur))
+        drop = 1;   /* a child of it could not be read: it may be redacted */
       else if (cur->is_context && parent_gone)
         drop = 1;   /* F-7: the row it hangs on went for redaction */
+      else if (cur->type == HISTORY_TAGMSG && nset > 0
+               && hm_context_parent(cur, parent, sizeof(parent))
+               && bsearch(parent, set, (size_t)nset, sizeof(set[0]), hm_id_cmp))
+        drop = 1;   /* F-7, a reaction row too: what it reacts to is redacted */
       else if (cur->is_context && redacted && hm_redactable(cur)
                && redacted(cur, arg) != 0)
         drop = 1;   /* F-2: redacted here, or not provably not */
