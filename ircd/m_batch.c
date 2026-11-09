@@ -970,6 +970,68 @@ ml_send_line(struct Client *from, struct Client *server, char flag,
   }
 }
 
+/** The number of direct server links (cli_serv(&me)->down): the most
+ * distinct links ml_channel_links() can return. */
+static int
+ml_down_count(void)
+{
+  struct DLink *lp;
+  int n = 0;
+
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next)
+    n++;
+  return n;
+}
+
+/** The server links a channel multiline line is routed toward (W5 Task 13).
+ *
+ * Every distinct direct server link (IsServer) with a member of \a chptr
+ * behind it that is not ours (local members are delivered here), in member
+ * order, \a skip_link excluded.  Multiline's own local delivery skips no
+ * member, so neither does this: every server whose local delivery would
+ * reach a member -- and so every server whose receive window is open -- is
+ * on the list.  Deduplicated in \a links itself: the walks this replaces
+ * marked links with private counters in cli_sentalong(), a field that holds
+ * send.c's own sentalong_marker values, so a link a channel send had last
+ * marked with the same number was skipped (F-4).
+ *
+ * @param[in] chptr Channel (NULL: none).
+ * @param[in] skip_link Link to leave out (the one the batch came on), or NULL.
+ * @param[out] links Filled with the links found.
+ * @param[in] max Size of \a links: the number of direct server links
+ *            (ml_down_count()).
+ * @return The number of links in \a links.
+ */
+static int
+ml_channel_links(struct Channel *chptr, struct Client *skip_link,
+                 struct Client **links, int max)
+{
+  struct Membership *member;
+  int n = 0;
+  int i;
+
+  if (!chptr || !links || max <= 0)
+    return 0;
+  for (member = chptr->members; member; member = member->next_member) {
+    struct Client *server;
+
+    if (MyConnect(member->user))
+      continue;
+    server = cli_from(member->user);
+    if (!IsServer(server) || server == skip_link)
+      continue;
+    for (i = 0; i < n; i++)
+      if (links[i] == server)
+        break;
+    if (i < n)
+      continue;
+    if (n >= max)
+      break;  /* sized to every direct link: not reached */
+    links[n++] = server;
+  }
+  return n;
+}
+
 /** Process and deliver a completed multiline batch */
 static int
 process_multiline_batch(struct Client *sptr)
@@ -1589,29 +1651,22 @@ process_multiline_batch(struct Client *sptr)
    * now we send once per server with appropriate format.
    */
   if (is_channel && chptr) {
-    static unsigned long s2s_relay_marker = 0;
     char s2s_batch_id[16];
     int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
     int total_lines = con_ml_msg_count(con);
+    int max_links = ml_down_count();
+    struct Client **links = max_links
+        ? (struct Client **)MyMalloc(sizeof(*links) * max_links) : NULL;
+    int nlinks = ml_channel_links(chptr, NULL, links, max_links);
+    int li;
 
     ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
                   cli_yxx(sptr), (unsigned long)CurrentTime);
 
-    /* Increment marker for this send cycle */
-    s2s_relay_marker++;
-
-    /* Iterate channel members to find servers that need the message */
-    for (member = chptr->members; member; member = member->next_member) {
-      struct Client *server;
-
-      if (MyConnect(member->user))
-        continue;  /* Local users already handled above */
-
-      server = cli_from(member->user);
-      if (!IsServer(server) || cli_sentalong(server) == s2s_relay_marker)
-        continue;  /* Already sent to this server */
-
-      cli_sentalong(server) = s2s_relay_marker;
+    /* Each server link with a member of the channel behind it, once
+     * (ml_channel_links: local members were handled above). */
+    for (li = 0; li < nlinks; li++) {
+      struct Client *server = links[li];
 
       /* Split delivery: alias numeric toward primary's server direction
        * to avoid fake direction (primary's server would drop messages
@@ -1683,6 +1738,8 @@ process_multiline_batch(struct Client *sptr)
       }
       } /* end split delivery block */
     }
+    if (links)
+      MyFree(links);
   }
 
   /* Notify sender about fallback if they support standard-replies */
@@ -2079,6 +2136,15 @@ struct S2SMultilineBatch {
   char client_tags[512];        /**< Client-only tags from batch opener */
   char msgid[64];               /**< Base msgid from originating server */
   uint64_t time_ms;             /**< Timestamp (ms) from originating server */
+  /** A channel batch's relay route (W5 Task 13): the multiline links its
+   * start line was relayed to, fixed there so every later line of the
+   * batch goes to exactly those links.  MyMalloc'd (NULL when empty),
+   * freed with the batch.  Only ever compared with the live downlinks,
+   * never dereferenced: a link gone mid-batch is simply not in the live
+   * list, and nothing needs clearing on link exit. */
+  struct Client **route;
+  int route_count;              /**< Entries in route */
+  int routed;                   /**< 1 for a channel batch (route is set) */
 };
 
 /** Compute the network-wide maximum multiline byte limit.
@@ -2233,6 +2299,9 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   else
     batch->msgid[0] = '\0';
   batch->time_ms = time_ms;
+  batch->route = NULL;
+  batch->route_count = 0;
+  batch->routed = 0;
 
   s2s_ml_batches[i] = batch;
   return batch;
@@ -2298,6 +2367,8 @@ free_s2s_multiline_batch(struct S2SMultilineBatch *batch)
     }
   }
 
+  if (batch->route)
+    MyFree(batch->route);
   MyFree(batch);
 }
 
@@ -2538,27 +2609,21 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
    * users in the channel but don't support multiline (ms_multiline only
    * propagates ML tokens to IsMultiline servers). */
   if (is_channel && chptr) {
-    static unsigned long s2s_fallback_marker = 0;
     int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
     int total_lines = batch->msg_count;
+    int max_links = ml_down_count();
+    struct Client **links = max_links
+        ? (struct Client **)MyMalloc(sizeof(*links) * max_links) : NULL;
+    int nlinks = ml_channel_links(chptr, cli_from(cptr), links, max_links);
+    int li;
 
-    s2s_fallback_marker++;
+    /* Each link with a member behind it, once, never back toward the
+     * source (ml_channel_links). */
+    for (li = 0; li < nlinks; li++) {
+      struct Client *server = links[li];
 
-    for (member = chptr->members; member; member = member->next_member) {
-      struct Client *server;
-
-      if (MyConnect(member->user))
-        continue;  /* Local users already handled above */
-
-      server = cli_from(member->user);
-      if (!IsServer(server) || cli_sentalong(server) == s2s_fallback_marker)
-        continue;  /* Already sent to this server */
-      if (server == cli_from(cptr))
-        continue;  /* Don't send back toward source */
       if (IsMultiline(server))
         continue;  /* Multiline-capable servers already got ML tokens */
-
-      cli_sentalong(server) = s2s_fallback_marker;
 
       /* Send fallback PRIVMSGs to legacy server.
        * Set S2S tags on first line for unified msgid. */
@@ -2598,6 +2663,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         }
       }
     }
+    if (links)
+      MyFree(links);
   }
 
   /* Store S2S multiline batch to history.
@@ -2861,10 +2928,58 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   if (is_start && cli_s2s_client_tags(cptr)[0])
     client_tags = cli_s2s_client_tags(cptr);
 
+  /* A start line opens the batch here first (a reused reference frees
+   * the old one), so a channel batch's relay route is fixed before the
+   * start line goes anywhere; every later line looks the batch up. */
+  if (is_start) {
+    batch = find_s2s_multiline_batch(batch_ref);
+    if (batch) {
+      /* Batch ID collision - clear old one */
+      free_s2s_multiline_batch(batch);
+    }
+
+    batch = create_s2s_multiline_batch(batch_ref, target, sptr, cptr,
+                                       client_tags,
+                                       cli_s2s_msgid(cptr), cli_s2s_time_ms(cptr));
+    /* A channel batch's route (W5 Task 13): the multiline links with a
+     * member behind them now, never the source.  A channel unknown here
+     * has no member here: the route is empty and nothing is relayed. */
+    if (batch && IsChannelName(target)) {
+      int max_links = ml_down_count();
+      struct Client **links = max_links
+          ? (struct Client **)MyMalloc(sizeof(*links) * max_links) : NULL;
+      int nlinks = ml_channel_links(FindChannel(target), cli_from(cptr),
+                                    links, max_links);
+      int i, n = 0;
+
+      for (i = 0; i < nlinks; i++)
+        if (IsMultiline(links[i]))
+          links[n++] = links[i];
+      if (n) {
+        batch->route = links;
+      } else if (links) {
+        MyFree(links);
+      }
+      batch->route_count = n;
+      batch->routed = 1;
+    }
+  } else
+    batch = find_s2s_multiline_batch(batch_ref);
+
   /* Propagate ML tokens only to multiline-capable servers.
    * Legacy servers don't understand the ML token and silently drop it.
    * Fallback PRIVMSGs for legacy servers are sent from
    * deliver_s2s_multiline_batch() when the batch completes.
+   *
+   * A channel batch goes only toward links with a member behind them
+   * (W5 Task 13), the WHOLE batch to the links its start line went to:
+   * recomputed per line, a link that lost its last member mid-batch would
+   * get a start and no end (a batch slot held there until it times out),
+   * and one that gained a member would get an end with no start.  A
+   * channel line of a batch this server holds no record of (the create
+   * failed: the per-link cap, a full table) goes to the links with a
+   * member now, as best effort.  A DM batch still goes to every
+   * multiline link but the source.
    *
    * Each line carries the originating server's batch msgid and time
    * forward: the ones on this line (a start line, or a tag-framed line
@@ -2881,22 +2996,55 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
     if (cli_s2s_msgid(cptr)[0]) {
       fwd_msgid = cli_s2s_msgid(cptr);
       fwd_time_ms = cli_s2s_time_ms(cptr);
-    } else if (!is_start) {
-      struct S2SMultilineBatch *known = find_s2s_multiline_batch(batch_ref);
-      if (known && known->msgid[0]) {
-        fwd_msgid = known->msgid;
-        fwd_time_ms = known->time_ms;
-      }
+    } else if (!is_start && batch && batch->msgid[0]) {
+      fwd_msgid = batch->msgid;
+      fwd_time_ms = batch->time_ms;
     }
 
-    for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-      struct Client *srv = lp->value.cptr;
-      if (srv == cli_from(cptr))
-        continue;  /* Don't send back to source */
-      if (!IsMultiline(srv))
-        continue;  /* Legacy server — handled by fallback at batch end */
-      ml_send_line(sptr, srv, flag, batch_ref, target, client_tags, text,
-                   fwd_time_ms, fwd_msgid);
+    if (batch && batch->routed) {
+      /* The route fixed at the start line, compared with the live
+       * downlinks only. */
+      for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+        struct Client *srv = lp->value.cptr;
+        int i;
+
+        for (i = 0; i < batch->route_count; i++)
+          if (batch->route[i] == srv)
+            break;
+        if (i == batch->route_count)
+          continue;
+        if (srv == cli_from(cptr) || !IsMultiline(srv))
+          continue;  /* never in a route; a new link at a freed address */
+        ml_send_line(sptr, srv, flag, batch_ref, target, client_tags, text,
+                     fwd_time_ms, fwd_msgid);
+      }
+    } else if (IsChannelName(target)) {
+      /* No record of this batch here: the links with a member now. */
+      int max_links = ml_down_count();
+      struct Client **links = max_links
+          ? (struct Client **)MyMalloc(sizeof(*links) * max_links) : NULL;
+      int nlinks = ml_channel_links(FindChannel(target), cli_from(cptr),
+                                    links, max_links);
+      int i;
+
+      for (i = 0; i < nlinks; i++) {
+        if (!IsMultiline(links[i]))
+          continue;  /* Legacy server — handled by fallback at batch end */
+        ml_send_line(sptr, links[i], flag, batch_ref, target, client_tags,
+                     text, fwd_time_ms, fwd_msgid);
+      }
+      if (links)
+        MyFree(links);
+    } else {
+      for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+        struct Client *srv = lp->value.cptr;
+        if (srv == cli_from(cptr))
+          continue;  /* Don't send back to source */
+        if (!IsMultiline(srv))
+          continue;  /* Legacy server — handled by fallback at batch end */
+        ml_send_line(sptr, srv, flag, batch_ref, target, client_tags, text,
+                     fwd_time_ms, fwd_msgid);
+      }
     }
   }
 
@@ -2913,26 +3061,12 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   }
 
   if (is_start) {
-    /* Start new batch */
-    batch = find_s2s_multiline_batch(batch_ref);
-    if (batch) {
-      /* Batch ID collision - clear old one */
-      free_s2s_multiline_batch(batch);
-    }
-
-    batch = create_s2s_multiline_batch(batch_ref, target, sptr, cptr,
-                                       client_tags,
-                                       cli_s2s_msgid(cptr), cli_s2s_time_ms(cptr));
-    if (!batch)
-      return 0;  /* No room for new batch */
-
     /* Add first line if present */
-    if (!EmptyString(text))
+    if (batch && !EmptyString(text))
       add_s2s_multiline_message(batch, text, 0);
   }
   else if (is_end) {
     /* End batch and deliver */
-    batch = find_s2s_multiline_batch(batch_ref);
     if (batch) {
       /* Capture forwarded paste URL from end token text param */
       if (!EmptyString(text))
@@ -2943,7 +3077,6 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   }
   else {
     /* Continuation line */
-    batch = find_s2s_multiline_batch(batch_ref);
     if (batch)
       add_s2s_multiline_message(batch, text, is_concat);
   }
