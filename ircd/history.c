@@ -3417,6 +3417,22 @@ static int64_t recv_floor_saved;        /**< the value last written */
 static int64_t recv_floor_saved_at;     /**< CurrentTime ms it was written */
 static int recv_floor_capping;          /**< the last raise was cut at now (R41) */
 
+/** The last time (epoch ms, 8 bytes LE) a storage peer was linked and caught
+ * up here (W5 Push F, I-1): a meta row in recv_windows under its own
+ * NUL-prefixed key, as the heartbeat and the floor (no channel key can meet
+ * it, the casefold migration leaves it, the boot walk skips it).  Written
+ * when the count of such peers turns non-zero (history_recv_peers_linked)
+ * and with every heartbeat while it is; never by an older build, which
+ * ignores it.  It outlives a restart, which the absence table (memory only)
+ * does not: read at boot, it says this server has had a storage peer, so
+ * until the first one is back (history_recv_link_up) a page over a span
+ * never received here may lack that peer's rows (history_recv_peer_missing).
+ * A server that never had a storage peer has none. */
+static const char recv_peer_key[] = "\0recv_peer";
+#define RECV_PEER_KLEN (sizeof(recv_peer_key) - 1)
+static uint64_t recv_peer_ms;           /**< the row's value (0: none) */
+static int recv_peers_now;              /**< storage peers linked right now */
+
 /** The heartbeat's period: ircd.c's minute timer (presence_alive_callback). */
 #define RECV_ALIVE_PERIOD_MS 60000LL
 /** How far a stored mark may legitimately pass the stored heartbeat (R42):
@@ -3559,15 +3575,71 @@ static void recv_alive_write(void)
   wb = db_writebatch_new(history_db_env);
   if (!wb)
     return;
+  /* While a storage peer is linked the recv_peer row moves with the
+   * heartbeat (W5 Push F, I-1), in the same batch. */
   if (db_writebatch_put(wb, history_cf_recv, recv_alive_key, RECV_ALIVE_KLEN,
                         v, sizeof v) == DB_OK
       && db_writebatch_put(wb, history_cf_recv, recv_floor_key, RECV_FLOOR_KLEN,
                            f, sizeof f) == DB_OK
+      && (recv_peers_now <= 0
+          || db_writebatch_put(wb, history_cf_recv, recv_peer_key, RECV_PEER_KLEN,
+                               v, sizeof v) == DB_OK)
       && db_writebatch_commit(wb, /*sync_durably=*/0) == DB_OK) {
     recv_floor_saved = hw;
     recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
+    if (recv_peers_now > 0)
+      recv_peer_ms = now;
   }
   db_writebatch_destroy(wb);
+}
+
+/** Write the recv_peer row (W5 Push F, I-1) alone, as now. */
+static void recv_peer_write(void)
+{
+  unsigned char v[8];
+  struct db_writebatch *wb;
+  uint64_t now = history_recv_now_ms();
+
+  if (!history_available || !history_cf_recv)
+    return;
+  rcv_ms_pack((int64_t)now, v);
+  wb = db_writebatch_new(history_db_env);
+  if (!wb)
+    return;
+  if (db_writebatch_put(wb, history_cf_recv, recv_peer_key, RECV_PEER_KLEN,
+                        v, sizeof v) == DB_OK
+      && db_writebatch_commit(wb, /*sync_durably=*/0) == DB_OK)
+    recv_peer_ms = now;
+  else
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: the receive windows' storage-peer mark not stored (%s); "
+              "a restart before the next heartbeat may answer pages over spans "
+              "never received here complete until a storage peer links",
+              db_env_last_error(history_db_env)
+                ? db_env_last_error(history_db_env) : "no backend detail");
+  db_writebatch_destroy(wb);
+}
+
+void history_recv_peers_linked(int n)
+{
+  int was = recv_peers_now;
+
+  recv_peers_now = n > 0 ? n : 0;
+  if (recv_peers_now > 0 && was <= 0)
+    recv_peer_write();
+}
+
+int history_recv_peer_missing(void)
+{
+  uint64_t floor;
+
+  if (history_recv_linked || !recv_peer_ms)
+    return 0;
+  /* As an absence ages out: once every row of the time this server last had
+   * a storage peer may be gone here, no page can be missing one of that
+   * peer's rows from then (Push D review I-1's rule, absence_overlap). */
+  floor = history_live_floor_ms();
+  return !floor || recv_peer_ms > floor;
 }
 
 void history_recv_alive_tick(void)
@@ -4057,7 +4129,8 @@ static int recv_boot_one(struct db_writebatch *wb, const void *k, size_t kl,
 
   if (!k || !kl || kl > CHANNELLEN + 1 || ((const char *)k)[0] == '\0')
     return DB_OK;                   /* a meta row (the heartbeat, the high-water
-                                     * floor), not a channel's key */
+                                     * floor, the storage-peer mark), not a
+                                     * channel's key */
   if (!v || rcv_unpack((const unsigned char *)v, vl, &r) != 0) {
     /* Undecodable: what it claimed is unknown, so it claims nothing. */
     n[1]++;
@@ -4130,6 +4203,10 @@ void history_recv_boot(void)
       recv_floor_write();
     }
   }
+  /* The last time the last run had a storage peer linked (W5 Push F, I-1),
+   * kept as it is: until a storage peer is back, a page over a span never
+   * received here may lack its rows (history_recv_peer_missing). */
+  recv_peer_ms = recv_meta_read(recv_peer_key, RECV_PEER_KLEN);
   it = db_iter_open(history_db_env, history_cf_recv, NULL);
   wb = it ? db_writebatch_new(history_db_env) : NULL;
   if (!it || !wb) {

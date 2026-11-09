@@ -1544,6 +1544,16 @@ static int check_history_access(struct Client *sptr, const char *target,
 /** Set by start_fed_query when federation was wanted but no request slot
  * was free: the local page must then NOT claim completeness (audit #22). */
 static int fed_start_capacity_miss = 0;
+/** Set by start_fed_query (and start_fed_targets_query) when federation was
+ * wanted but CHATHISTORY_FEDERATION is off here while a storage peer that
+ * could be asked is linked (W5 Push F, I-1): the peer may hold what this
+ * page lacks and is not asked, so, as for a missing slot, the page is not
+ * complete.  Not a slot miss (STATS does not count it). */
+static int fed_start_unasked = 0;
+/** start_fed_query found a storage peer to ask and did not ask it: no free
+ * request slot, or federation off here (callers: the page is partial unless
+ * only its rows' context was wanted). */
+#define fed_start_missed() (fed_start_capacity_miss || fed_start_unasked)
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
                                            const char *requested,
                                            const char *subcmd, const char *ref,
@@ -1719,6 +1729,22 @@ static int absence_overlap(time_t lo, time_t hi, int *open_hit)
     }
   }
   return any;
+}
+
+/** Is a storage peer away right now (W5 Push F, I-1)?  An absence in the
+ * table that is still open, or -- after this server restarted, before the
+ * first storage peer's burst has ended -- the on-disk mark that it has had
+ * one (history_recv_peer_missing): the table lives in memory, so a restart
+ * forgets every absence, and the receive windows have not opened. */
+static int storage_peers_linked(void);   /* below, with the ads */
+
+static int store_away_now(void)
+{
+  int open_hit = 0;
+
+  if (absence_overlap(0, 0, &open_hit) && open_hit)
+    return 1;
+  return history_recv_peer_missing();
 }
 
 /** Unix seconds of a client reference (0 = unresolvable). */
@@ -1908,7 +1934,12 @@ static void channel_span_clamp(const char *chname, time_t lo, time_t hi,
 /** One channel range's check: is [@a lo, @a hi] (claimed, unix seconds,
  * 0 = open), clamped (channel_span_clamp), received here and clear of
  * every storage peer's absence?  An overlapping absence that is still open
- * sets *@a partial.
+ * sets *@a partial; so does a range this server never received while a
+ * storage peer is away right now, wherever its absence started
+ * (store_away_now: that peer may hold the range and cannot be asked; W5
+ * Push F, I-1 -- before, such a page found nobody to ask and was answered
+ * complete).  Callers checking a page's context range ignore *@a partial
+ * (a context gap is never partial: user decision 2026-11-08 15:08).
  * @return FED_WHY_UNRECEIVED, FED_WHY_ABSENCE or FED_WHY_NONE. */
 static int channel_range_check(const char *chname, time_t lo, time_t hi,
                                int *partial)
@@ -1927,8 +1958,11 @@ static int channel_range_check(const char *chname, time_t lo, time_t hi,
     absent = absence_overlap(lo, hi, &open_hit);
   if (absent && open_hit)
     *partial = 1;
-  if (!history_recv_covers(chname, lo_ms, hi_ms))
+  if (!history_recv_covers(chname, lo_ms, hi_ms)) {
+    if (store_away_now())
+      *partial = 1;
     return FED_WHY_UNRECEIVED;
+  }
   return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
 }
 
@@ -1949,7 +1983,12 @@ static int channel_range_check(const char *chname, time_t lo, time_t hi,
  *     absence.
  * An absence that is still open (that store is away now) and overlaps the
  * page's OWN span sets *@a partial; one that meets only the context range
- * does not (user decision 2026-11-08 15:08).
+ * does not (user decision 2026-11-08 15:08).  So does a storage peer away
+ * now (store_away_now) when the page's own rows are the ones a peer may
+ * complete -- a channel page whose own span was not received here, a PM
+ * page that ran short -- wherever that peer's absence started (W5 Push F,
+ * I-1).  Never for the context range: a page federated for its context
+ * only is never partial (R38).
  * @return the reason (enum fed_reason), FED_WHY_NONE for no. */
 static int federation_wanted(const char *target, enum fed_page page,
                              int count, int limit, struct HistoryMessage *rows,
@@ -1970,8 +2009,11 @@ static int federation_wanted(const char *target, enum fed_page page,
     absent = absence_overlap(lo, hi, &open_hit);
     if (absent && open_hit)
       *partial = 1;
-    if (count < limit)
+    if (count < limit) {
+      if (store_away_now())
+        *partial = 1;   /* the peer that may complete it is away (I-1) */
       return FED_WHY_SHORT;
+    }
     return absent ? FED_WHY_ABSENCE : FED_WHY_NONE;
   }
   why = channel_range_check(target, lo, hi, partial);
@@ -2244,9 +2286,10 @@ static int chathistory_latest(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    /* Federation wanted, no slot: withhold the end tag -- unless only the
+    /* Federation wanted and a peer not asked (no slot, or federation off
+     * here: fed_start_missed): withhold the end tag -- unless only the
      * rows' context was wanted (their own span is complete here). */
-    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+    if (!req && fed_start_missed() && fed_why != FED_WHY_CONTEXT) {
       complete = 0;
       partial = 1;
     }
@@ -2351,9 +2394,10 @@ static int chathistory_before(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    /* Federation wanted, no slot: withhold the end tag -- unless only the
+    /* Federation wanted and a peer not asked (no slot, or federation off
+     * here: fed_start_missed): withhold the end tag -- unless only the
      * rows' context was wanted (their own span is complete here). */
-    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+    if (!req && fed_start_missed() && fed_why != FED_WHY_CONTEXT) {
       complete = 0;
       partial = 1;
     }
@@ -2453,9 +2497,10 @@ static int chathistory_after(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    /* Federation wanted, no slot: withhold the end tag -- unless only the
+    /* Federation wanted and a peer not asked (no slot, or federation off
+     * here: fed_start_missed): withhold the end tag -- unless only the
      * rows' context was wanted (their own span is complete here). */
-    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+    if (!req && fed_start_missed() && fed_why != FED_WHY_CONTEXT) {
       complete = 0;
       partial = 1;
     }
@@ -2555,9 +2600,10 @@ static int chathistory_around(struct Client *sptr, const char *target,
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
     fed_count(req, fed_why);
-    /* Federation wanted, no slot: withhold the end tag -- unless only the
+    /* Federation wanted and a peer not asked (no slot, or federation off
+     * here: fed_start_missed): withhold the end tag -- unless only the
      * rows' context was wanted (their own span is complete here). */
-    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+    if (!req && fed_start_missed() && fed_why != FED_WHY_CONTEXT) {
       complete = 0;
       partial = 1;
     }
@@ -2669,9 +2715,10 @@ static int chathistory_between(struct Client *sptr, const char *target,
                                               ref1_str, limit, messages, count,
                                               ops_override, ref2_str, complete);
     fed_count(req, fed_why);
-    /* Federation wanted, no slot: withhold the end tag -- unless only the
+    /* Federation wanted and a peer not asked (no slot, or federation off
+     * here: fed_start_missed): withhold the end tag -- unless only the
      * rows' context was wanted (their own span is complete here). */
-    if (!req && fed_start_capacity_miss && fed_why != FED_WHY_CONTEXT) {
+    if (!req && fed_start_missed() && fed_why != FED_WHY_CONTEXT) {
       complete = 0;
       partial = 1;
     }
@@ -2946,10 +2993,12 @@ static int targets_collect(struct Client *rq, uint64_t lo_ms, struct HistoryTarg
  *     channel's creation (channel_span_clamp) -- up to now.  One whose
  *     stamp here is already at or past the window's upper bound is out of
  *     the window whatever a peer says (the latest only rises).
- * A storage peer that is away right now leaves a known hole: *@a partial
- * is set (user decision 2026-11-08: no end tag, and
- * evilnet.github.io/chathistory-partial), even when no peer is left to
- * ask -- this replaces "no storage peers, so complete".  So is a page from
+ * A storage peer that is away right now (store_away_now: an open absence,
+ * or, since this server restarted, one it has had that is not back yet)
+ * leaves a known hole: *@a partial is set (user decision 2026-11-08: no
+ * end tag, and evilnet.github.io/chathistory-partial), even when no peer
+ * is left to ask -- this replaces "no storage peers, so complete".  So is a
+ * page from
  * a store whose PM pair index rebuild failed at this start
  * (history_pm_index_whole).
  * @return 1 to federate, 0 not. */
@@ -2962,8 +3011,10 @@ static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *
   if (!cli_user(sptr))
     return 0;
   if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
-    int open_hit = 0;
-    if (absence_overlap((time_t)(lo_ms / 1000ULL), 0, &open_hit) && open_hit)
+    /* An open absence always meets [lo, now]; so does a storage peer this
+     * server has had and that is not back since it restarted (W5 Push F,
+     * I-1: store_away_now). */
+    if (store_away_now())
       *partial = 1;
     /* A pair index whose rebuild failed at this start may lack pairs: the
      * page may lack PM conversations this store holds. */
@@ -3202,9 +3253,12 @@ static struct FedRequest *start_fed_targets_query(
   int i, server_count;
 
   fed_start_capacity_miss = 0;
-  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
-    return NULL;
+  fed_start_unasked = 0;
   server_count = count_storage_servers(NULL, 0);
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION)) {
+    fed_start_unasked = server_count > 0;   /* a peer not asked (I-1) */
+    return NULL;
+  }
   if (server_count == 0)
     return NULL;
 
@@ -3448,11 +3502,14 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
                                                      limit, targets, partial);
     if (req)
       return 0;  /* Deferred: complete_targets_fed answers */
-    /* No request slot: the peers' answers are missing (partial, as the
-     * row handlers do; re-review 2026-09-07 R19).  No peer to ask, or no
-     * federation: the local answer is all there is. */
-    if (fed_start_capacity_miss) {
-      fed_slot_misses++;
+    /* No request slot, or federation off here while a storage peer is
+     * linked: the peers' answers are missing (partial, as the row handlers
+     * do; re-review 2026-09-07 R19; W5 Push F, I-1).  No peer to ask: the
+     * local answer is all there is -- partial when one is away
+     * (targets_federation_wanted). */
+    if (fed_start_missed()) {
+      if (fed_start_capacity_miss)
+        fed_slot_misses++;
       whole = 0;
       partial = 1;
     }
@@ -4282,6 +4339,7 @@ void clear_server_ad(struct Client *server)
     server_ads[idx] = NULL;
   }
   chathistory_update_retention_isupport(1);   /* a store may have left: no grace */
+  history_recv_peers_linked(storage_peers_linked());
 }
 
 /** Re-flood every known storage advertisement to a newly linked peer,
@@ -4346,6 +4404,26 @@ static int ad_burst_pending(struct Client *server)
  * it is back for real.  The one closer: the CH A S handler calls it for a
  * store that advertises after that burst (an ungated relink: its EB comes
  * first), chathistory_server_eob for one that advertised before it. */
+/** The storage peers linked here whose burst has ended (W5 Push F, I-1:
+ * the receive windows' storage-peer mark, history_recv_peers_linked). */
+static int storage_peers_linked(void)
+{
+  int si, n = 0;
+  char yxx[4];
+
+  for (si = 0; si < MAX_AD_SERVERS; si++) {
+    struct ChathistoryAd *ad = server_ads[si];
+    struct Client *server;
+
+    if (!ad || !ad->has_advertisement || !ad->is_storage_server || ad->eob_pending)
+      continue;
+    server = FindNServer(inttobase64(yxx, si, 2));
+    if (server && server != &me && IsServer(server) && !is_ulined_server(server))
+      n++;
+  }
+  return n;
+}
+
 static void ad_store_back(int idx)
 {
   absence_close(idx);   /* back: close its absence */
@@ -4354,6 +4432,10 @@ static void ad_store_back(int idx)
    * from now on, so its receive windows open (W5 Task 9; later calls do
    * nothing). */
   history_recv_link_up();
+  /* A storage peer is linked: remembered on disk, so a restart before it
+   * is back answers pages over spans never received here partial (W5 Push
+   * F, I-1). */
+  history_recv_peers_linked(storage_peers_linked());
 }
 
 /** A server's END_OF_BURST arrived (ms_end_of_burst, after ClearBurst; for
@@ -5993,6 +6075,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   struct FedRequest *req;
 
   fed_start_capacity_miss = 0;
+  fed_start_unasked = 0;
   char reqid[32];
   char s2s_ref[64];
   char s2s_ref2[64];
@@ -6004,9 +6087,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   enum HistoryRefType ref_type;
   const char *ref_value;
 
-  /* Check if federation is enabled */
-  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+  /* Check if federation is enabled.  Off while a storage peer is linked:
+   * that peer may hold what the page lacks and is not asked -- the page is
+   * not complete (fed_start_unasked; W5 Push F, I-1). */
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION)) {
+    fed_start_unasked = count_storage_servers(target, 0) > 0;
     return NULL;
+  }
 
   /* Convert to efficient S2S format */
   s2s_subcmd = subcmd_to_s2s(subcmd);

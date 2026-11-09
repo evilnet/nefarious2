@@ -340,6 +340,23 @@ extern void history_recv_recheck_all(void);
  * that peer's side and no window opens.  Later calls do nothing. */
 extern void history_recv_link_up(void);
 
+/** How many storage peers are linked and caught up here right now
+ * (m_chathistory.c, at every change: a store back after its burst, a store
+ * gone).  While one is, the receive windows' meta row recv_peer (W5 Push F,
+ * I-1) holds now: written at once when the count turns non-zero, then with
+ * every heartbeat. */
+extern void history_recv_peers_linked(int n);
+
+/** W5 Push F, I-1: a storage peer this server has had is not back yet since
+ * it started.  1 before the first storage peer's burst after boot has ended
+ * (history_recv_link_up) when the recv_peer meta row says this server had
+ * one linked at some time, and that time is still within this store's
+ * floor as it is now (history_live_floor_ms(); none: always) -- the absence
+ * table lives in memory, so after a restart this is the only sign that a
+ * page over a span never received here may be missing a peer's rows.  0
+ * for a server that never had a storage peer, and once one is back. */
+extern int history_recv_peer_missing(void);
+
 /** @a chptr took another incarnation's TS -- it lost its TS in a burst
  * (m_burst.c's incarnation prune), arrived new in a burst, or a CREATE,
  * JOIN or MODE moved it: the history of that incarnation was never received
