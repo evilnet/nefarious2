@@ -77,15 +77,6 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
   return 0;
 }
 
-/** history_query_targets filter for the bouncer PM leg: a pair key that
- * involves the reattaching client. */
-static int replay_pm_target_cb(const char *target, const char *last_ts, void *ctx)
-{
-  (void)last_ts;
-  return strchr(target, ':') != NULL
-      && is_pm_target_for_client(target, (struct Client *)ctx);
-}
-
 /** Cap on the session's own PM conversations listed for one replay. */
 #define REPLAY_PM_TARGETS_MAX 200
 
@@ -415,35 +406,32 @@ int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
                             char *out, size_t outsz)
 {
   struct HistoryTarget *list = NULL, *t;
-  const char *best_ts = NULL;
+  char identity[S2S_SESSID_BUFSIZE];
   int found = 0;
 
   if (!nick || !*nick || !out || outsz == 0)
     return 0;
   out[0] = '\0';
 
-  /* Every target on this server -- the walk TARGETS makes, unbounded,
-   * because the index is in key order and a limit would cut off the
-   * newest pairs -- kept to the PM pairs that involve the caller.  Of
-   * those whose other party the TARGETS derivation names @a nick, the
-   * most recently active wins: a guest nick is reused by different
-   * people over time. */
-  if (history_query_targets("0", "99999999999.999", 1, 200, &list, replay_pm_target_cb, sptr) <= 0
-      || !list)
+  /* The caller's own PM pairs (the pair index, W5 Task 11), newest first.
+   * Of those whose other party the TARGETS derivation names @a nick, the
+   * most recently active wins: a guest nick is reused by different people
+   * over time.  (This used to walk every target on the server in key
+   * order, capped at 200, so on a busy server the caller's pairs could lie
+   * past the cap.) */
+  history_pm_identity(sptr, identity, sizeof(identity));
+  if (history_identity_pm_targets(identity, 0, UINT64_MAX, /*include_newer=*/1,
+                                  /*max=*/0, &list, NULL, NULL) <= 0 || !list)
     return 0;
   for (t = list; t; t = t->next) {
     char name[NICKLEN + 1];
-    if (IsChannelName(t->target) || !strchr(t->target, ':'))
-      continue;
     if (!is_pm_target_for_client(t->target, sptr))
       continue;
-    if (best_ts && strcmp(t->last_timestamp, best_ts) <= 0)
-      continue;   /* older than the best match so far */
     if (replay_pm_display_nick(sptr, t->target, name, sizeof(name))
         && ircd_strcmp(name, nick) == 0) {
       ircd_strncpy(out, t->target, outsz);
-      best_ts = t->last_timestamp;
       found = 1;
+      break;   /* newest first: the first match is the most recent */
     }
   }
   history_free_targets(list);
@@ -894,18 +882,21 @@ void replay_continue(struct Client *sptr)
 
       /* Channels exhausted — move to PMs */
       if (feature_bool(FEAT_CHATHISTORY_PRIVATE) && IsAccount(sptr)) {
-        char now_timestamp[HISTORY_TIMESTAMP_LEN];
-        ircd_snprintf(0, now_timestamp, sizeof(now_timestamp), "%lu.000",
-                      (unsigned long)CurrentTime);
+        char identity[S2S_SESSID_BUFSIZE];
+        uint64_t since_ms = history_parse_ms(rs->since_timestamp);
         /* Auto-replay wants the plain in-window view: no veto rows
-         * (this is a local availability sweep, not #565 matching).
-         * The filter keeps only THIS session's pair keys inside the
-         * walk: the targets CF is in key order with channels first, so
-         * an unfiltered 50-row window never reached the PMs on a busy
-         * server (audit 2026-09-06, wave 1). */
-        history_query_targets(rs->since_timestamp, now_timestamp,
-                              /*include_newer=*/0, REPLAY_PM_TARGETS_MAX,
-                              &rs->pm_targets, replay_pm_target_cb, sptr);
+         * (this is a local availability sweep, not #565 matching), the
+         * session's own pairs active since it left -- since itself
+         * included -- through the end of the current second, newest
+         * first: the pair index (W5 Task 11) gives exactly this
+         * identity's pairs, so the cap keeps the newest 200 rather than
+         * the first 200 in key order. */
+        history_pm_identity(sptr, identity, sizeof(identity));
+        if (history_identity_pm_targets(identity, since_ms ? since_ms - 1 : 0,
+                                        ((uint64_t)CurrentTime + 1) * 1000ULL,
+                                        /*include_newer=*/0, REPLAY_PM_TARGETS_MAX,
+                                        &rs->pm_targets, NULL, NULL) < 0)
+          rs->pm_targets = NULL;
         rs->pm_cursor = rs->pm_targets;
         rs->phase = REPLAY_PHASE_PMS;
       } else {

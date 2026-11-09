@@ -123,6 +123,7 @@ IRCD_SRC = \
 	chathistory_merge.c \
 	chathistory_presence.c \
 	chathistory_recv.c \
+	pm_pair_index.c \
 	ircd.c \
 	ircd_alloc.c \
 	ircd_cloaking.c \
@@ -642,6 +643,9 @@ history.o: history.c ../config.h ../include/history.h ../include/ircd_alloc.h \
   ../include/s_debug.h
 history_trim_codec.o: history_trim_codec.c ../config.h \
   ../include/history_trim_codec.h ../include/db_casefold.h ../include/res.h
+pm_pair_index.o: pm_pair_index.c ../config.h ../include/pm_pair_index.h \
+  ../include/db_casefold.h ../include/db_cursor.h ../include/db_txn.h \
+  ../include/db_types.h
 history_trim.o: history_trim.c ../config.h ../include/history_trim.h \
   ../include/history_trim_codec.h ../include/history_stamp.h \
   ../include/redact_index.h ../include/db_cursor.h ../include/db_env.h \

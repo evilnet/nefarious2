@@ -2810,280 +2810,273 @@ static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
 static unsigned long fed_reqid_counter = 0;
 
 /* ---------------------------------------------------------------- */
-/* TARGETS Federation Support                                        */
+/* CHATHISTORY TARGETS (W5 Task 11)                                  */
+/*                                                                  */
+/* TARGETS lists the REQUESTER'S OWN targets -- its channels and its */
+/* PM pairs (the pair index) -- read one by one, never a walk over   */
+/* every target the server holds.  It has BETWEEN's semantics        */
+/* (chathistory.md :111, :119): both bounds exclusive, the limit      */
+/* counted from the first argument, the argument order the direction */
+/* (forwards from an older first bound, backwards from a newer one); */
+/* rows ascending (:126), ties by folded name (:128); a group of     */
+/* equal stamps never split at the page edge (hm_targets_page).      */
+/* Times compare as integer ms, never as "sec.mmm" strings.          */
+/*                                                                  */
+/* A target's "latest" is network-wide: the maximum over the stores  */
+/* that answered.  Each server sends the requester's targets whose   */
+/* stamp is above the window's lower bound -- in-window rows, and    */
+/* veto rows at or past its upper bound, which can only disqualify a */
+/* target another store holds in the window -- and the requester     */
+/* merges them, keeps the window, and pages.                         */
 /* ---------------------------------------------------------------- */
+
+/** The most CH T lines one responder sends for a request (in-window rows
+ * first, nearest the first selector; veto rows last: hm_targets_responder).
+ * Past it the answer ends "E <reqid> <n> T". */
+#define CH_T_MAX_ROWS 500
+
+static int server_ad_index(struct Client *server);   /* below */
+
+/** What one storage peer sent for a TARGETS request (its order is
+ * hm_targets_responder's), to tell where a cut answer stops being whole. */
+struct TargetsResp {
+  int si;                 /**< server_ad_index of the responder */
+  int any_in;             /**< it sent an in-window row */
+  uint64_t last_in_ms;    /**< the last in-window row's stamp: the farthest
+                           *   from the first selector it reached */
+  int saw_veto;           /**< it sent a veto row: every in-window row it
+                           *   held came before it */
+  int cut;                /**< its E carried T */
+};
 
 /** Context for federated TARGETS query, stored in FedRequest.cb_data. */
 struct TargetsFedContext {
-  struct HistoryTarget *local_targets;   /**< Local MDBX results */
-  struct HistoryTarget *fed_targets;     /**< Accumulated federated results */
-  char ts1[64];                          /**< Requested window start (client ref) */
-  char ts2[64];                          /**< Requested window end (client ref) */
-  int local_count;
-  int fed_count;
+  struct HistoryTarget *local_targets;   /**< The requester's own (targets_collect) */
+  struct HistoryTarget *fed_targets;     /**< The peers' CH T rows */
+  uint64_t first_ms;                     /**< The client's first bound */
+  uint64_t second_ms;                    /**< ... and its second */
+  struct TargetsResp *resp;              /**< One per responder heard from */
+  int nresp, resp_max;
 };
 
 /* Forward declarations for TARGETS federation */
 static void complete_targets_fed(struct FedRequest *req);
 static void cleanup_targets_context(void *data);
 
-/** Check if we should federate a TARGETS query. */
-static int should_federate_targets(int local_count, int limit)
+/** Is @a name one of @a rq's own targets, one it may be shown?  A channel
+ * it is a member of (an unjoined +H channel is not its target: decided
+ * 2026-10-25) that check_history_access lets it read; a PM pair whose one
+ * half is its identity (account, else session id). */
+static int targets_own(struct Client *rq, const char *name)
 {
-  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+  if (IsChannelName(name)) {
+    struct Channel *ch = FindChannel(name);
+    if (!ch || !find_member_link(ch, rq))
+      return 0;
+    return check_history_access(rq, ch->chname, NULL, 0) == 0;
+  } else {
+    const char *colon = strchr(name, ':');
+    if (!colon || colon == name || !colon[1] || strchr(colon + 1, ':'))
+      return 0;
+    return history_pm_identity_matches(rq, name, (size_t)(colon - name))
+        || history_pm_identity_matches(rq, colon + 1, strlen(colon + 1));
+  }
+}
+
+/** Prepend a copy of (@a name, @a ts) to @a *list. */
+static void targets_push(struct HistoryTarget **list, const char *name, const char *ts)
+{
+  struct HistoryTarget *t = (struct HistoryTarget *)MyCalloc(1, sizeof(*t));
+  ircd_strncpy(t->target, name, sizeof(t->target));
+  ircd_strncpy(t->last_timestamp, ts, sizeof(t->last_timestamp));
+  t->next = *list;
+  *list = t;
+}
+
+/** @a rq's own targets this store holds a stamp for above @a lo_ms
+ * (exclusive; veto rows included): each channel it is a member of that
+ * targets_own accepts (one point read in the targets index), and with
+ * CHATHISTORY_PRIVATE its PM pairs (the pair index).  Uncapped: bounded by
+ * the requester's own memberships and conversations.  Works for a remote
+ * @a rq too (a responder): membership and identity are network-wide.
+ * @return The count, or -1 on a storage error (*out NULL). */
+static int targets_collect(struct Client *rq, uint64_t lo_ms, struct HistoryTarget **out)
+{
+  struct HistoryTarget *list = NULL;
+  struct Membership *m;
+  int n = 0;
+
+  *out = NULL;
+  if (!cli_user(rq))
     return 0;
-  if (local_count >= limit)
-    return 0;  /* Local DB satisfied the request */
-  if (count_storage_servers(NULL, 0) == 0)
-    return 0;  /* No storage servers to query */
-  return 1;
-}
-
-/** Accumulate a CH T response into the federated targets list. */
-static void add_fed_target(struct FedRequest *req, const char *target,
-                           const char *last_timestamp)
-{
-  struct TargetsFedContext *ctx;
-  struct HistoryTarget *tgt;
-
-  if (!req || !req->cb_data)
-    return;
-
-  ctx = (struct TargetsFedContext *)req->cb_data;
-
-  tgt = (struct HistoryTarget *)MyCalloc(1, sizeof(struct HistoryTarget));
-  ircd_strncpy(tgt->target, target, sizeof(tgt->target) - 1);
-  ircd_strncpy(tgt->last_timestamp, last_timestamp,
-               sizeof(tgt->last_timestamp) - 1);
-
-  /* Prepend to list (order doesn't matter pre-merge) */
-  tgt->next = ctx->fed_targets;
-  ctx->fed_targets = tgt;
-  ctx->fed_count++;
-}
-
-/** Merge local + federated targets: dedup by name, keep latest timestamp,
- * sort descending by recency (most recent first, per IRCv3 spec). */
-static struct HistoryTarget *merge_targets(struct HistoryTarget *local,
-                                            struct HistoryTarget *remote)
-{
-  struct HistoryTarget *result = NULL, *tail = NULL;
-  struct HistoryTarget *tgt, *existing;
-
-  /* 1. Start with copies of all local targets */
-  for (tgt = local; tgt; tgt = tgt->next) {
-    struct HistoryTarget *copy = (struct HistoryTarget *)MyCalloc(1, sizeof(struct HistoryTarget));
-    memcpy(copy, tgt, sizeof(struct HistoryTarget));
-    copy->next = NULL;
-    if (tail) { tail->next = copy; tail = copy; }
-    else { result = tail = copy; }
+  for (m = cli_user(rq)->channel; m; m = m->next_channel) {
+    char ts[HISTORY_TIMESTAMP_LEN];
+    int rc;
+    if (!m->channel || check_history_access(rq, m->channel->chname, NULL, 0) != 0)
+      continue;
+    rc = history_target_latest(m->channel->chname, ts, sizeof(ts));
+    if (rc < 0) {
+      history_free_targets(list);
+      return -1;
+    }
+    if (rc > 0 || history_parse_ms(ts) <= lo_ms)
+      continue;
+    targets_push(&list, m->channel->chname, ts);
+    n++;
   }
+  if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+    char identity[S2S_SESSID_BUFSIZE];
+    struct HistoryTarget *pm = NULL, *t;
+    int rc;
+    history_pm_identity(rq, identity, sizeof(identity));
+    rc = history_identity_pm_targets(identity, lo_ms, 0, /*include_newer=*/1,
+                                     /*max=*/0, &pm, NULL, NULL);
+    if (rc < 0) {
+      history_free_targets(list);
+      return -1;
+    }
+    for (t = pm; t && t->next; t = t->next)
+      ;
+    if (t) {
+      t->next = list;
+      list = pm;
+    }
+    n += rc;
+  }
+  *out = list;
+  return n;
+}
 
-  /* 2. Merge remote targets: dedup by target name, keep latest timestamp */
-  for (tgt = remote; tgt; tgt = tgt->next) {
-    existing = NULL;
-    for (struct HistoryTarget *r = result; r; r = r->next) {
-      if (ircd_strcmp(r->target, tgt->target) == 0) {
-        existing = r;
+/** Should a TARGETS page ask the storage peers (W5 Task 11)?  It should
+ * whenever a peer could hold a stamp for one of the requester's targets
+ * that this store lacks:
+ *   - with CHATHISTORY_PRIVATE, always: a PM pair is held only where one of
+ *     its parties had a connection, so any store may hold one;
+ *   - a channel the requester is a member of, unless this store received it
+ *     (history_recv_covers) and no storage peer was away (the absence
+ *     table) from its own latest stamp here -- or, with none, from the
+ *     channel's creation (channel_span_clamp) -- up to now.  One whose
+ *     stamp here is already at or past the window's upper bound is out of
+ *     the window whatever a peer says (the latest only rises).
+ * A storage peer that is away right now leaves a known hole: *@a partial
+ * is set (user decision 2026-11-08: no end tag, and
+ * evilnet.github.io/chathistory-partial), even when no peer is left to
+ * ask -- this replaces "no storage peers, so complete".
+ * @return 1 to federate, 0 not. */
+static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *local,
+                                     uint64_t lo_ms, uint64_t hi_ms, int *partial)
+{
+  struct Membership *m;
+  int want = 0;
+
+  if (!cli_user(sptr))
+    return 0;
+  if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+    int open_hit = 0;
+    if (absence_overlap((time_t)(lo_ms / 1000ULL), 0, &open_hit) && open_hit)
+      *partial = 1;
+    want = 1;
+  }
+  for (m = cli_user(sptr)->channel; m; m = m->next_channel) {
+    struct Channel *ch = m->channel;
+    struct HistoryTarget *t;
+    time_t from = 0;
+
+    if (!ch || check_history_access(sptr, ch->chname, NULL, 0) != 0)
+      continue;
+    for (t = local; t; t = t->next)
+      if (ircd_strcmp(t->target, ch->chname) == 0)
         break;
-      }
+    if (t) {
+      uint64_t ms = history_parse_ms(t->last_timestamp);
+      if (ms >= hi_ms)
+        continue;
+      from = (time_t)(ms / 1000ULL);
     }
-    if (existing) {
-      /* Keep the later timestamp */
-      if (strcmp(tgt->last_timestamp, existing->last_timestamp) > 0)
-        ircd_strncpy(existing->last_timestamp, tgt->last_timestamp,
-                     sizeof(existing->last_timestamp) - 1);
-    } else {
-      struct HistoryTarget *copy = (struct HistoryTarget *)MyCalloc(1, sizeof(struct HistoryTarget));
-      memcpy(copy, tgt, sizeof(struct HistoryTarget));
-      copy->next = NULL;
-      if (tail) { tail->next = copy; tail = copy; }
-      else { result = tail = copy; }
-    }
+    if (channel_range_check(ch->chname, from, 0, partial) != FED_WHY_NONE)
+      want = 1;
   }
-
-  /* 3. Sort descending by last_timestamp (most recent first).
-   * Bubble sort — target lists are small (capped by limit * over-fetch). */
-  if (result && result->next) {
-    int swapped;
-    do {
-      swapped = 0;
-      struct HistoryTarget **pp = &result;
-      while ((*pp)->next) {
-        struct HistoryTarget *a = *pp;
-        struct HistoryTarget *b = a->next;
-        if (strcmp(a->last_timestamp, b->last_timestamp) < 0) {
-          a->next = b->next;
-          b->next = a;
-          *pp = b;
-          swapped = 1;
-        }
-        pp = &((*pp)->next);
-      }
-    } while (swapped);
-  }
-
-  return result;
+  return want;
 }
 
-/** Drop merged TARGETS rows whose final (network-wide max) latest
- * falls outside the requested window.  Local and remote queries run
- * with include_newer so out-of-window-high latests arrive as veto
- * rows; after the merge keeps the max per target, anything outside
- * [ts1,ts2] is a target the network-wide latest disqualifies. */
-static void filter_targets_window(struct HistoryTarget **list,
-                                  const char *ref_ts1, const char *ref_ts2)
-{
-  char u1[HISTORY_TIMESTAMP_LEN], u2[HISTORY_TIMESTAMP_LEN];
-  const char *ts1, *ts2;
-  struct HistoryTarget **pp;
-
-  ts1 = (history_iso_to_unix(ref_ts1, u1, sizeof(u1)) == 0) ? u1 : ref_ts1;
-  ts2 = (history_iso_to_unix(ref_ts2, u2, sizeof(u2)) == 0) ? u2 : ref_ts2;
-  if (strcmp(ts1, ts2) > 0) {
-    const char *tmp = ts1;
-    ts1 = ts2;
-    ts2 = tmp;
-  }
-
-  pp = list;
-  while (*pp) {
-    struct HistoryTarget *t = *pp;
-    if (strcmp(t->last_timestamp, ts1) < 0
-        || strcmp(t->last_timestamp, ts2) > 0) {
-      *pp = t->next;
-      t->next = NULL;
-      history_free_targets(t);
-    } else
-      pp = &t->next;
-  }
-}
-
-/** Send TARGETS results to a client with access filtering and limit.
- * @param[in] sptr Client to send to.
- * @param[in] targets List of targets to send.
- * @param[in] limit Maximum number of targets.
- * @param[in] label Label string for labeled-response (NULL for auto-replay).
- */
-/** history_query_targets filter: the target is one @a ctx (the requester)
- * may read, and -- for a channel under strict presence without +H --
- * one it was present in at the target's last activity.  Same rules as
- * send_targets_batch's emit loop, applied INSIDE the walk so other
- * people's targets never count against the requester's limit. */
-static int targets_visible_cb(const char *target, const char *last_ts, void *ctx)
+/** hm_targets_page's eligibility test: what the requester may be shown,
+ * judged on the merged (network-wide) stamp -- its own target
+ * (targets_own); for a channel under strict presence without +H, one it
+ * was present in at that last activity; for a PM pair, one with somebody
+ * to name it after (replay_pm_display_nick: never a session id, never a
+ * service bot). */
+static int targets_eligible(const struct HistoryTarget *t, void *ctx)
 {
   struct Client *sptr = (struct Client *)ctx;
 
-  if (check_history_access(sptr, target, NULL, 0) != 0)
+  if (!targets_own(sptr, t->target))
     return 0;
-  if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE) && IsChannelName(target)) {
-    struct Channel *pchan = FindChannel(target);
-    if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
-      int p_is_session = 0;
-      const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-      int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(last_ts));
-      if (!p_anchor || act == 0
-          || !presence_was_present(p_anchor, p_is_session, target, act))
-        return 0;
-    }
-  }
-  return 1;
-}
-
-static void send_targets_batch(struct Client *sptr, struct HistoryTarget *targets,
-                               int limit, const char *label, int query_complete)
-{
-  char batchid[BATCH_ID_LEN];
-  char iso_time[32];
-  const char *time_str;
-  int sent = 0;
-  int final;
-
-  generate_batch_id(batchid, sizeof(batchid), sptr);
-
-  /* Completeness (spec: valueless draft/chathistory-end on the FIRST
-   * BATCH line of a draft/chathistory-targets batch when no more are
-   * available).  This used to be stamped unconditionally ("TARGETS
-   * always returns all results") -- false: the query over-fetch, the
-   * access/presence filters, and the send limit all clip.  The tag
-   * rides the opener, so pre-count the eligible rows: final only when
-   * the QUERY was exhausted and everything eligible fits the limit. */
-  final = query_complete;
-  if (final) {
-    int eligible = 0;
-    struct HistoryTarget *tgt;
-    for (tgt = targets; tgt && eligible <= limit; tgt = tgt->next) {
-      if (check_history_access(sptr, tgt->target, NULL, 0) != 0)
-        continue;
-      if (!IsChannelName(tgt->target) && strchr(tgt->target, ':')) {
-        char name[NICKLEN + 1];
-        if (!replay_pm_display_nick(sptr, tgt->target, name, sizeof(name)))
-          continue;   /* nobody to name it after (see the emit loop) */
-      }
-      if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
-          && IsChannelName(tgt->target)) {
-        struct Channel *pchan = FindChannel(tgt->target);
-        if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
-          int p_is_session = 0;
-          const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-          /* The index holds only the last activity's millisecond; read it
-           * as the end of that millisecond so activity in the join's own
-           * millisecond counts as witnessed (rows are ordered exactly by
-           * their msgid's HLC when they are queried). */
-          int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(tgt->last_timestamp));
-          if (!p_anchor || act == 0
-              || !presence_was_present(p_anchor, p_is_session,
-                                       tgt->target, act))
-            continue;
-        }
-      }
-      eligible++;
-    }
-    if (eligible > limit)
-      final = 0;
-  }
-
-  if (CapRecipientHas(sptr, CAP_BATCH)) {
-    if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
-        CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-      sendrawto_one(sptr, "@%slabel=%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
-                    final ? "draft/chathistory-end;" : "",
-                    label, cli_name(&me), batchid);
-      cli_label_responded(sptr) = 1;
-    } else if (final) {
-      sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
-                    cli_name(&me), batchid);
-    } else {
-      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
-                    cli_name(&me), batchid);
-    }
-  }
-
-  for (struct HistoryTarget *tgt = targets; tgt && sent < limit; tgt = tgt->next) {
-    /* Access filter — skip targets the client can't read */
-    if (check_history_access(sptr, tgt->target, NULL, 0) != 0)
-      continue;
-
-    /* Strict-presence filter (oversight fix): TARGETS leaked the
-     * last-activity timestamp of channels the requester was a member
-     * of but NOT present for.  Same policy as the message filter:
-     * channel targets require presence at the activity time; +H
-     * bypasses; PM targets are already participant-checked above. */
-    if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
-        && IsChannelName(tgt->target)) {
-      struct Channel *pchan = FindChannel(tgt->target);
+  if (IsChannelName(t->target)) {
+    if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)) {
+      struct Channel *pchan = FindChannel(t->target);
       if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
         int p_is_session = 0;
         const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-        /* Same reading as the local TARGETS check: the index holds only
-         * the last activity's millisecond, read as the end of it. */
-        int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(tgt->last_timestamp));
+        /* The index holds only the last activity's millisecond; read it
+         * as the end of that millisecond so activity in the join's own
+         * millisecond counts as witnessed. */
+        int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(t->last_timestamp));
         if (!p_anchor || act == 0
-            || !presence_was_present(p_anchor, p_is_session,
-                                     tgt->target, act))
-          continue;
+            || !presence_was_present(p_anchor, p_is_session, t->target, act))
+          return 0;
       }
     }
+    return 1;
+  } else {
+    char name[CHANNELLEN + 1];
+    return replay_pm_display_nick(sptr, t->target, name, sizeof(name));
+  }
+}
+
+/** Send a TARGETS page (@a page: ascending, every row eligible).
+ * @a end sets draft/chathistory-end ("the next page will return an empty
+ * batch", :136); @a partial sets evilnet.github.io/chathistory-partial (a
+ * storage peer's answer is known to be missing) and always withholds the
+ * end tag, as on chathistory batches. */
+static void send_targets_batch(struct Client *sptr, struct HistoryTarget *page,
+                               const char *label, int end, int partial)
+{
+  char batchid[BATCH_ID_LEN];
+  char iso_time[32];
+  struct HistoryTarget *tgt;
+  int batch = CapRecipientHas(sptr, CAP_BATCH);
+
+  if (partial)
+    end = 0;
+  generate_batch_id(batchid, sizeof(batchid), sptr);
+  if (batch) {
+    char tagbuf[256];
+    int tl = 0;
+    int want_label = label && label[0] && feature_bool(FEAT_CAP_labeled_response)
+                     && CapRecipientHas(sptr, CAP_LABELEDRESP);
+    tagbuf[0] = '\0';
+    if (end)
+      tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "draft/chathistory-end");
+    if (partial)
+      tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl,
+                          "%sevilnet.github.io/chathistory-partial", tl ? ";" : "");
+    if (want_label)
+      tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%slabel=%s",
+                          tl ? ";" : "", label);
+    if (tagbuf[0])
+      sendrawto_one(sptr, "@%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+                    tagbuf, cli_name(&me), batchid);
+    else
+      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+                    cli_name(&me), batchid);
+    if (want_label)
+      cli_label_responded(sptr) = 1;
+  }
+
+  for (tgt = page; tgt; tgt = tgt->next) {
+    const char *row_target = tgt->target;
+    const char *time_str;
+    char other_buf[CHANNELLEN + 1];
 
     if (history_unix_to_iso(tgt->last_timestamp, iso_time, sizeof(iso_time)) == 0)
       time_str = iso_time;
@@ -3092,78 +3085,168 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
 
     /* Spec conformance (#565 clarified format): response rows carry a
      * BARE ISO timestamp -- the "timestamp=" prefix belongs to request
-     * syntax only; conformant clients failed to parse prefixed rows.
-     * PM rows: the store key is the identity pair "a:b"; the spec's
-     * <nickname> is the OTHER participant, so emit the half that is
-     * not the requester (identity = account for authed users). */
-    {
-      const char *row_target = tgt->target;
-      char other_buf[CHANNELLEN + 1];
-      if (IsChannelName(tgt->target)) {
-        /* The index keys folded names (db_casefold.h); show a live
-         * channel under its current spelling. */
-        struct Channel *live = FindChannel(tgt->target);
-        if (live)
-          row_target = live->chname;
-      } else if (strchr(tgt->target, ':')) {
-        /* PM pair key: name the row after the other party (their live
-         * nick, else the nick their newest row carries).  The raw half
-         * of the key is an identity -- for an account-less party a
-         * session id -- and must never reach a client as a "target":
-         * PoxChat opened "Dialog with AaBj..." on prod (2026-09-02).
-         * Pairs nobody can be named for, and pairs with a service bot,
-         * are not listed. */
-        if (!replay_pm_display_nick(sptr, tgt->target, other_buf, sizeof(other_buf)))
-          continue;
-        row_target = other_buf;
-      }
-      if (CapRecipientHas(sptr, CAP_BATCH))
-        sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s %s",
-                      batchid, cli_name(&me), "chathistory", cli_name(&me),
-                      row_target, time_str);
-      else
-        sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s %s",
-                      cli_name(&me), "chathistory", cli_name(&me),
-                      row_target, time_str);
+     * syntax only.  PM rows: the store key is the identity pair "a:b";
+     * the spec's <nickname> is the OTHER participant. */
+    if (IsChannelName(tgt->target)) {
+      /* The index keys folded names (db_casefold.h); show a live
+       * channel under its current spelling. */
+      struct Channel *live = FindChannel(tgt->target);
+      if (live)
+        row_target = live->chname;
+    } else {
+      /* PM pair key: name the row after the other party (their live
+       * nick, else the nick their newest row carries).  The raw half of
+       * the key is an identity -- for an account-less party a session id
+       * -- and must never reach a client as a "target" (PoxChat opened
+       * "Dialog with AaBj..." on prod, 2026-09-02).  targets_eligible
+       * already kept only pairs that can be named. */
+      if (!replay_pm_display_nick(sptr, tgt->target, other_buf, sizeof(other_buf)))
+        continue;
+      row_target = other_buf;
     }
-    sent++;
+    if (batch)
+      sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s %s",
+                    batchid, cli_name(&me), "chathistory", cli_name(&me),
+                    row_target, time_str);
+    else
+      sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s %s",
+                    cli_name(&me), "chathistory", cli_name(&me),
+                    row_target, time_str);
   }
 
-  if (CapRecipientHas(sptr, CAP_BATCH))
+  if (batch)
     sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
 }
 
-/** Initiate a federated TARGETS query to storage servers. */
+/** Page and send a TARGETS answer from @a list (consumed: the requester's
+ * own targets, merged with its peers' when it federated).
+ * @param[in] whole Every store that could be asked answered in full (no
+ *   responder cut its rows, none was lost, no request slot was missing).
+ * @param[in] partial A store's answer is known to be missing.
+ * @param[in] horizon When @a has_horizon, the farthest stamp from the first
+ *   selector up to which every cut responder's in-window rows arrived: a
+ *   page row beyond it may lack that responder's stamp (partial). */
+static void targets_answer(struct Client *sptr, struct HistoryTarget *list,
+                           uint64_t first_ms, uint64_t second_ms, int limit,
+                           const char *label, int whole, int partial,
+                           int has_horizon, uint64_t horizon)
+{
+  struct HistoryTarget *t;
+  int more = 0;
+
+  hm_targets_page(&list, first_ms, second_ms, limit, targets_eligible, sptr, &more);
+  if (has_horizon)
+    for (t = list; t; t = t->next) {
+      uint64_t ms = history_parse_ms(t->last_timestamp);
+      if (first_ms < second_ms ? ms > horizon : ms < horizon) {
+        partial = 1;
+        break;
+      }
+    }
+  /* The end tag (I8): nothing eligible beyond the page in its direction,
+   * and the network's answer whole. */
+  send_targets_batch(sptr, list, label, whole && !partial && !more, partial);
+  history_free_targets(list);
+}
+
+/** The responder entry for @a si (added when new; NULL past the table). */
+static struct TargetsResp *targets_resp(struct TargetsFedContext *ctx, int si)
+{
+  int i;
+  for (i = 0; i < ctx->nresp; i++)
+    if (ctx->resp[i].si == si)
+      return &ctx->resp[i];
+  if (ctx->nresp >= ctx->resp_max)
+    return NULL;
+  memset(&ctx->resp[ctx->nresp], 0, sizeof(ctx->resp[0]));
+  ctx->resp[ctx->nresp].si = si;
+  return &ctx->resp[ctx->nresp++];
+}
+
+/** Accumulate a CH T response into the federated targets list. */
+static void add_fed_target(struct FedRequest *req, struct Client *from,
+                           const char *target, const char *last_timestamp)
+{
+  struct TargetsFedContext *ctx;
+  struct TargetsResp *r;
+  uint64_t ms, lo, hi;
+
+  if (!req || !req->cb_data || req->completion_cb != complete_targets_fed)
+    return;
+  ctx = (struct TargetsFedContext *)req->cb_data;
+  targets_push(&ctx->fed_targets, target, last_timestamp);
+
+  /* Where this responder's answer has reached (it sends in-window rows
+   * nearest the first selector first, veto rows last). */
+  ms = history_parse_ms(last_timestamp);
+  lo = ctx->first_ms < ctx->second_ms ? ctx->first_ms : ctx->second_ms;
+  hi = ctx->first_ms < ctx->second_ms ? ctx->second_ms : ctx->first_ms;
+  r = targets_resp(ctx, server_ad_index(from));
+  if (!r)
+    return;
+  if (ms > lo && ms < hi) {
+    r->any_in = 1;
+    r->last_in_ms = ms;
+  } else if (ms >= hi)
+    r->saw_veto = 1;
+}
+
+/** A TARGETS responder's E carried T: it cut its answer at CH_T_MAX_ROWS. */
+static void targets_note_cut(struct FedRequest *req, struct Client *from)
+{
+  struct TargetsResp *r;
+  if (!req || !req->cb_data || req->completion_cb != complete_targets_fed)
+    return;
+  r = targets_resp((struct TargetsFedContext *)req->cb_data, server_ad_index(from));
+  if (r)
+    r->cut = 1;
+}
+
+/** Initiate a federated TARGETS query to storage servers.  Takes
+ * ownership of @a local_targets when it returns a request. */
 static struct FedRequest *start_fed_targets_query(
   struct Client *sptr,
   const char *ts1, const char *ts2,
+  uint64_t first_ms, uint64_t second_ms,
   int limit,
   struct HistoryTarget *local_targets,
-  int local_count)
+  int partial)
 {
   struct FedRequest *req;
   struct TargetsFedContext *ctx;
   char reqid[32];
-  char s2s_ref[64];
+  char s2s_ref[128];
+  char idtok[ACCOUNTLEN + S2S_SESSID_BUFSIZE + 2];
   int i, server_count;
 
+  fed_start_capacity_miss = 0;
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return NULL;
   server_count = count_storage_servers(NULL, 0);
   if (server_count == 0)
     return NULL;
 
   /* Find empty slot */
-  fed_start_capacity_miss = 0;
   for (i = 0; i < MAX_FED_REQUESTS; i++) {
     if (!fed_requests[i])
       break;
   }
   if (i >= MAX_FED_REQUESTS) {
-    fed_start_capacity_miss = 1;   /* caller: the local page is not complete */
+    fed_start_capacity_miss = 1;   /* caller: the local page is partial */
     return NULL;
   }
 
-  /* Build S2S dual-timestamp ref: <ts1>,<ts2> */
+  /* S2S dual-timestamp ref: the client's two bounds, in its order (the
+   * responder pages from the first: hm_targets_responder). */
   ircd_snprintf(0, s2s_ref, sizeof(s2s_ref), "%s,%s", ts1, ts2);
+
+  /* The requester's identity, so a responder never takes a reused or
+   * swapped numeric (BX P) for it: A<account>, else S<session id>
+   * (targets_requester). */
+  if (IsAccount(sptr) && cli_user(sptr) && cli_user(sptr)->account[0])
+    ircd_snprintf(0, idtok, sizeof(idtok), "A%s", cli_user(sptr)->account);
+  else
+    ircd_snprintf(0, idtok, sizeof(idtok), "S%s", cli_session_id(sptr));
 
   /* Generate request ID */
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
@@ -3172,9 +3255,10 @@ static struct FedRequest *start_fed_targets_query(
   /* Create context for targets accumulation */
   ctx = (struct TargetsFedContext *)MyCalloc(1, sizeof(struct TargetsFedContext));
   ctx->local_targets = local_targets;
-  ctx->local_count = local_count;
-  ircd_strncpy(ctx->ts1, ts1, sizeof(ctx->ts1) - 1);
-  ircd_strncpy(ctx->ts2, ts2, sizeof(ctx->ts2) - 1);
+  ctx->first_ms = first_ms;
+  ctx->second_ms = second_ms;
+  ctx->resp_max = server_count;
+  ctx->resp = (struct TargetsResp *)MyCalloc((size_t)server_count, sizeof(*ctx->resp));
 
   /* Create request */
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
@@ -3186,6 +3270,7 @@ static struct FedRequest *start_fed_targets_query(
   req->servers_pending = server_count;
   req->start_time = CurrentTime;
   req->limit = limit;
+  req->partial = partial;
   req->completion_cb = complete_targets_fed;
   req->cb_data = ctx;
   req->cleanup_cb = cleanup_targets_context;
@@ -3224,11 +3309,12 @@ static struct FedRequest *start_fed_targets_query(
       if (is_ulined_server(server))
         continue;
 
-      /* Trailing "*" keeps ref2's slot; P<yxx> names the requester so
-       * the responder filters the walk to ITS targets (older responders
-       * ignore both). */
-      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * T %s %d %s %s * P%s",
-                    s2s_ref, limit, reqid, dest_yxx, req->client_yxx);
+      /* "*" keeps ref2's slot; P<yxx> names the requester, "0" holds the
+       * type mask's slot (a responder parses parv[10] as a hex mask for
+       * every subcommand: 0 = all), and the identity token follows
+       * (parv[11]; a middle hop re-emits it, older responders ignore it). */
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * T %s %d %s %s * P%s 0 %s",
+                    s2s_ref, limit, reqid, dest_yxx, req->client_yxx, idtok);
     }
   }
 
@@ -3241,6 +3327,8 @@ static void complete_targets_fed(struct FedRequest *req)
   struct TargetsFedContext *ctx;
   struct HistoryTarget *merged;
   struct Client *client;
+  uint64_t horizon = 0;
+  int has_horizon = 0, i, fwd;
 
   if (!req || req->response_sent || !req->cb_data)
     return;
@@ -3252,28 +3340,32 @@ static void complete_targets_fed(struct FedRequest *req)
     return;  /* Client disconnected */
 
   ctx = (struct TargetsFedContext *)req->cb_data;
+  fwd = ctx->first_ms < ctx->second_ms;
 
-  /* Merge local + federated targets (dedup + sort by recency), then
-   * re-filter to the requested window: the merge keeps the network-wide
-   * max latest per target, and veto rows (include_newer) can push a
-   * target's final latest out of the window. */
-  merged = merge_targets(ctx->local_targets, ctx->fed_targets);
-  filter_targets_window(&merged, ctx->ts1, ctx->ts2);
+  /* A responder that cut its answer (T) and sent no veto row may hold
+   * in-window rows past the last one it sent: the page is whole only up to
+   * there (the nearest such point over every cut responder). */
+  for (i = 0; i < ctx->nresp; i++) {
+    struct TargetsResp *r = &ctx->resp[i];
+    uint64_t h;
+    if (!r->cut || r->saw_veto)
+      continue;
+    h = r->any_in ? r->last_in_ms : ctx->first_ms;
+    if (!has_horizon || (fwd ? h < horizon : h > horizon))
+      horizon = h;
+    has_horizon = 1;
+  }
 
-  /* Send to client with access filtering and limit enforcement */
-  /* Complete only if nothing was cut: a storage server that timed out
-   * or capped its rows (fed_truncated) leaves targets unlisted, and the
-   * end tag would tell the client it may skip them.  req->cut covers
-   * the same gap when a responder's CH E carried U instead of T (no
-   * store / an unknown subcommand / a read error): before CH E U
-   * existed, every path that set cut also set fed_truncated, so
-   * fed_truncated alone was a safe proxy; U breaks that, so cut is
-   * checked explicitly too (audit 2026-11-07, Task 6 fix round 1). */
-  send_targets_batch(client, merged, req->limit, req->label,
-                     ctx->local_count + ctx->fed_count < req->limit
-                     && !req->fed_truncated && !req->cut);
-
-  history_free_targets(merged);
+  /* One row per target at its network-wide latest, then the page.  A
+   * responder lost (timeout, SQUIT) or one that could not answer (U)
+   * leaves a known hole: partial, no end tag (user decision 2026-11-08).
+   * One that cut its rows (T) leaves the answer not whole: no end tag. */
+  merged = hm_targets_merge(ctx->local_targets, ctx->fed_targets);
+  ctx->local_targets = NULL;
+  ctx->fed_targets = NULL;
+  targets_answer(client, merged, ctx->first_ms, ctx->second_ms, req->limit,
+                 req->label, !req->fed_truncated && !req->cut,
+                 req->partial || req->cut, has_horizon, horizon);
 }
 
 /** Custom cleanup for TargetsFedContext — frees inner target lists. */
@@ -3286,7 +3378,53 @@ static void cleanup_targets_context(void *data)
     history_free_targets(ctx->local_targets);
   if (ctx->fed_targets)
     history_free_targets(ctx->fed_targets);
+  if (ctx->resp)
+    MyFree(ctx->resp);
   MyFree(ctx);
+}
+
+/** The requester a CH Q * T names: P<yxx> (or F<yxx>) is its numeric and
+ * @a idtok, when the origin sent one, its identity -- A<account> or
+ * S<session id> (start_fed_targets_query).  The numeric's client when it
+ * carries that identity; else, for a session id, the one non-alias user
+ * carrying it (the numeric was reused, or BX P swapped it in place); else
+ * nobody.  An origin that sends no token (an older build) gets the numeric
+ * alone, as before.
+ * @return The requester, or NULL (answered E <reqid> 0 U). */
+static struct Client *targets_requester(const char *ptok, const char *idtok)
+{
+  struct Client *rq = NULL;
+
+  if (ptok && (ptok[0] == 'P' || ptok[0] == 'F') && ptok[1])
+    rq = findNUser(ptok + 1);
+  if (rq && (!IsUser(rq) || !cli_user(rq)))
+    rq = NULL;
+  if (!idtok || !idtok[0])
+    return rq;
+  if (idtok[0] == 'A' && idtok[1]) {
+    if (rq && IsAccount(rq) && cli_user(rq)->account[0]
+        && ircd_strcmp(cli_user(rq)->account, idtok + 1) == 0)
+      return rq;
+    return NULL;
+  }
+  if (idtok[0] == 'S' && idtok[1]) {
+    struct Client *found[BOUNCER_MAX_ALIASES + 4], *one = NULL;
+    size_t n, i;
+    if (rq && !IsAccount(rq) && strcmp(cli_session_id(rq), idtok + 1) == 0)
+      return rq;
+    n = client_find_by_session_id(idtok + 1, found, sizeof(found) / sizeof(found[0]));
+    if (n > sizeof(found) / sizeof(found[0]))
+      n = sizeof(found) / sizeof(found[0]);
+    for (i = 0; i < n; i++) {
+      if (!found[i] || IsBouncerAlias(found[i]) || IsAccount(found[i]) || !cli_user(found[i]))
+        continue;
+      if (one)
+        return NULL;   /* not one: cannot tell */
+      one = found[i];
+    }
+    return one;
+  }
+  return NULL;
 }
 
 /** Handle CHATHISTORY TARGETS subcommand. */
@@ -3296,21 +3434,23 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   struct HistoryTarget *targets = NULL;
   enum HistoryRefType ref_type1, ref_type2;
   const char *ts1, *ts2;
+  uint64_t first_ms, second_ms, lo, hi;
   int limit, count, max_limit;
-  int slot_miss = 0;
+  int partial = 0, whole = 1;
 
   /* TARGETS uses timestamp references only */
   if (parse_reference(ref1_str, &ref_type1, &ts1) != 0 ||
-      ref_type1 != HISTORY_REF_TIMESTAMP) {
+      ref_type1 != HISTORY_REF_TIMESTAMP ||
+      parse_reference(ref2_str, &ref_type2, &ts2) != 0 ||
+      ref_type2 != HISTORY_REF_TIMESTAMP) {
     send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "TARGETS",
               "TARGETS requires timestamp references");
     return 0;
   }
-
-  if (parse_reference(ref2_str, &ref_type2, &ts2) != 0 ||
-      ref_type2 != HISTORY_REF_TIMESTAMP) {
+  /* Integer ms, whatever the width of the seconds (I1). */
+  if (hm_targets_ref_ms(ts1, &first_ms) != 0 || hm_targets_ref_ms(ts2, &second_ms) != 0) {
     send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "TARGETS",
-              "TARGETS requires timestamp references");
+              "Invalid timestamp");
     return 0;
   }
 
@@ -3321,57 +3461,38 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   if (limit > max_limit)
     limit = max_limit;
 
-  /* Over-fetch from MDBX to compensate for post-query access filtering */
-  {
-    int fetch_limit = limit * 3;
-    if (fetch_limit > 500)
-      fetch_limit = 500;
+  lo = first_ms < second_ms ? first_ms : second_ms;
+  hi = first_ms < second_ms ? second_ms : first_ms;
+  if (lo == hi) {
+    /* Both bounds exclusive: an empty window, and so is every page from it. */
+    send_targets_batch(sptr, NULL, cli_label(sptr), 1, 0);
+    return 0;
+  }
 
-    count = history_query_targets(ts1, ts2, /*include_newer=*/1,
-                                  fetch_limit, &targets,
-                                  targets_visible_cb, sptr);
-    if (count < 0) {
-      send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("TARGETS", "*"),
-                "Failed to retrieve targets");
-      return 0;
+  count = targets_collect(sptr, lo, &targets);
+  if (count < 0) {
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("TARGETS", "*"),
+              "Failed to retrieve targets");
+    return 0;
+  }
+
+  if (targets_federation_wanted(sptr, targets, lo, hi, &partial)) {
+    struct FedRequest *req = start_fed_targets_query(sptr, ts1, ts2, first_ms, second_ms,
+                                                     limit, targets, partial);
+    if (req)
+      return 0;  /* Deferred: complete_targets_fed answers */
+    /* No request slot: the peers' answers are missing (partial, as the
+     * row handlers do; re-review 2026-09-07 R19).  No peer to ask, or no
+     * federation: the local answer is all there is. */
+    if (fed_start_capacity_miss) {
+      fed_slot_misses++;
+      whole = 0;
+      partial = 1;
     }
   }
 
-  /* Federation decision: if local didn't fill the request, ask storage servers */
-  if (should_federate_targets(count, limit)) {
-    struct FedRequest *req = start_fed_targets_query(sptr, ts1, ts2, limit,
-                                                      targets, count);
-    if (req)
-      return 0;  /* Deferred — response sent asynchronously by complete_targets_fed */
-    /* Federation failed to start — fall through to local-only response.
-     * targets ownership stays with us (not transferred to FedRequest).
-     * A slot-exhaustion miss withholds the end tag, as the five row
-     * handlers do (re-review 2026-09-07 R19). */
-    if (fed_start_capacity_miss)
-      slot_miss = 1;
-  }
-
-  /* Local-only path: sort by recency and send.  Query exhaustion:
-   * the over-fetch returned fewer rows than it asked for. */
-  {
-    struct HistoryTarget *sorted = merge_targets(targets, NULL);
-    int fetch_limit = limit * 3;
-    /* Complete only when the network was exhausted.  If the local walk
-     * filled the page, federation was skipped, but other storage servers
-     * may hold targets that belong on it: say nothing, and let the client
-     * page on.  Without federation (or nobody to ask) local is all. */
-    int fed_skipped = feature_bool(FEAT_CHATHISTORY_FEDERATION)
-                      && count >= limit
-                      && count_storage_servers(NULL, 0) > 0;
-    if (fetch_limit > 500)
-      fetch_limit = 500;
-    filter_targets_window(&sorted, ts1, ts2);
-    send_targets_batch(sptr, sorted, limit, cli_label(sptr),
-                       count < fetch_limit && !slot_miss && !fed_skipped);
-    history_free_targets(sorted);
-  }
-  history_free_targets(targets);
-
+  targets_answer(sptr, targets, first_ms, second_ms, limit, cli_label(sptr),
+                 whole, partial, 0, 0);
   return 0;
 }
 
@@ -7639,64 +7760,60 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
     }
 
-    /* TARGETS: handle before channel check (uses * as target) */
+    /* TARGETS (W5 Task 11): the named requester's own targets this store
+     * holds above the window's lower bound -- in-window rows first,
+     * nearest the first selector, veto rows last (hm_targets_responder),
+     * at most CH_T_MAX_ROWS, then E <reqid> <n> [T].  The requester is
+     * named by P<yxx> and, from a Task 11 origin, its identity
+     * (parv[11]: targets_requester); one this store cannot name, an
+     * unparsable span or a read error is answered E <reqid> 0 U, never a
+     * walk over every target. */
     if (query_subcmd_str[0] == 'T') {
-      struct HistoryTarget *targets = NULL;
-      struct HistoryTarget *tgt;
+      struct HistoryTarget *targets = NULL, *tgt;
+      struct Client *rq;
       char *comma;
-      char ts1_buf[HISTORY_TIMESTAMP_LEN], ts2_buf[HISTORY_TIMESTAMP_LEN];
-      int tgt_count;
-      int fetch_limit;
+      uint64_t first_ms = 0, second_ms = 0;
+      int n, cut = 0, ok;
 
       if (!history_is_available()) {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
 
-      /* Parse dual timestamp from ref: <ts1>,<ts2> */
+      /* Parse dual timestamp from ref: <ts1>,<ts2>, in the client's order */
       comma = strchr(ref, ',');
       if (!comma) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
-        return 0;
-      }
-      *comma = '\0';
-      ircd_strncpy(ts1_buf, ref, sizeof(ts1_buf) - 1);
-      ircd_strncpy(ts2_buf, comma + 1, sizeof(ts2_buf) - 1);
-      *comma = ',';  /* Restore for propagation */
-
-      /* Over-fetch to give originating server room for access filtering */
-      fetch_limit = limit * 3;
-      if (fetch_limit > 500)
-        fetch_limit = 500;
-
-      /* Filter for the REQUESTER when the origin named it (its
-       * membership and identity are network-wide); otherwise the
-       * unfiltered walk, and the origin filters what it can. */
-      {
-        struct Client *rq = NULL;
-        if (requester && (requester[0] == 'P' || requester[0] == 'F') && requester[1])
-          rq = findNUser(requester + 1);
-        tgt_count = history_query_targets(ts1_buf, ts2_buf, /*include_newer=*/1,
-                                          fetch_limit, &targets,
-                                          rq ? targets_visible_cb : NULL, rq);
-      }
-      if (tgt_count < 0) {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
-      if (tgt_count == 0) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      *comma = '\0';
+      ok = hm_targets_ref_ms(ref, &first_ms) == 0
+           && hm_targets_ref_ms(comma + 1, &second_ms) == 0;
+      *comma = ',';
+      if (!ok) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
 
-      /* Send CH T responses */
-      for (tgt = targets; tgt; tgt = tgt->next) {
+      rq = targets_requester(requester, (parc >= 12 && !EmptyString(parv[11])) ? parv[11] : NULL);
+      if (!rq) {
+        Debug((DEBUG_DEBUG, "CH Q T %s: requester %s %s not named here", reqid,
+               requester ? requester : "-", (parc >= 12 && parv[11]) ? parv[11] : "-"));
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
+      if (targets_collect(rq, first_ms < second_ms ? first_ms : second_ms, &targets) < 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
+      n = hm_targets_responder(&targets, first_ms, second_ms, CH_T_MAX_ROWS, &cut);
+      for (tgt = targets; tgt; tgt = tgt->next)
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "T %s %s %s",
                       reqid, tgt->target, tgt->last_timestamp);
-      }
-
-      /* End marker */
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, tgt_count);
+      if (cut)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, n);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, n);
       history_free_targets(targets);
       return 0;
     }
@@ -8259,7 +8376,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    add_fed_target(req, target, last_timestamp);
+    add_fed_target(req, sptr, target, last_timestamp);
   }
   else if (strcmp(subcmd, "E") == 0) {
     /* End: E <reqid> <count> */
@@ -8310,8 +8427,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * aggregate cannot claim completeness. */
     {
       unsigned int eflags = ch_e_flags((parc > 4 && parv[4]) ? parv[4] : NULL);
-      if (eflags & CH_E_TRUNCATED)
+      if (eflags & CH_E_TRUNCATED) {
         req->fed_truncated = 1;
+        targets_note_cut(req, sptr);   /* a TARGETS request's cut responder */
+      }
       if (eflags & CH_E_UNANSWERED)
         req->cut = 1;   /* a responder never answered: partial, never advance the watermark */
     }

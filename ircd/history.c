@@ -42,6 +42,7 @@
 #include "history_trim.h"
 #include "history_trim_codec.h"
 #include "redact_index.h"
+#include "pm_pair_index.h"
 #include "ml_content.h"
 #include "client.h"
 #include "channel.h"
@@ -89,6 +90,9 @@ static struct db_cf  *history_cf_by_owner = NULL;
 /* Receive windows (W5 Task 9): per channel, when this server received its
  * traffic (chathistory_recv.h's record, keyed by the folded name). */
 static struct db_cf  *history_cf_recv = NULL;
+/* The PM pairs each identity takes part in (W5 Task 11, pm_pair_index.h):
+ * TARGETS finds a requester's own pairs without walking every target. */
+static struct db_cf  *history_cf_pm_pairs = NULL;
 
 /** The trimmer's slice timer (history_trim_arm adds it, only when it is
  * not already queued). */
@@ -145,11 +149,11 @@ static history_channels_removed_cb channel_removed_callback = NULL;
 /** Callback for coverage changes (CH A R); history_set_coverage_callback. */
 static history_coverage_cb coverage_callback = NULL;
 
-/** Maximum number of named databases.  Currently: 8 history CFs
+/** Maximum number of named databases.  Currently: 10 history CFs
  * (messages, msgid_index, targets, quotas, reply_index, redact_index,
- * by_time, by_owner) + 2 ml_content CFs (ml_content, ml_paste_secrets)
- * + the default CF (marker/meta rows) = 11; the presence CF lives on the
- * metadata env.  16 leaves headroom. */
+ * by_time, by_owner, recv_windows, pm_pairs) + 2 ml_content CFs
+ * (ml_content, ml_paste_secrets) + the default CF (marker/meta rows) = 13;
+ * the presence CF lives on the metadata env.  16 leaves headroom. */
 #define HISTORY_MAX_DBS 16
 
 /** Key separator character */
@@ -552,7 +556,8 @@ int history_init(const char *dbpath)
       || db_cf_open(history_db_env, "redact_index", &cf_opts, &history_cf_redact) != DB_OK
       || db_cf_open(history_db_env, "by_time", &cf_opts, &history_cf_by_time) != DB_OK
       || db_cf_open(history_db_env, "by_owner", &cf_opts, &history_cf_by_owner) != DB_OK
-      || db_cf_open(history_db_env, "recv_windows", &cf_opts, &history_cf_recv) != DB_OK) {
+      || db_cf_open(history_db_env, "recv_windows", &cf_opts, &history_cf_recv) != DB_OK
+      || db_cf_open(history_db_env, "pm_pairs", &cf_opts, &history_cf_pm_pairs) != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open failed: %s",
               db_env_last_error(history_db_env));
     db_env_close(history_db_env);
@@ -573,6 +578,9 @@ int history_init(const char *dbpath)
       { history_cf_quotas,   "quotas",      3u },   /* channel\0account */
       { history_cf_reply,    "reply_index", 1u },   /* target\0parent\0ts\0child */
       { history_cf_recv,     "recv_windows", 1u },  /* channel */
+      /* identity\0pair key: written folded from birth (pm_pair_index_key);
+       * listed so a store that predates the marker is no different. */
+      { history_cf_pm_pairs, "pm_pairs",    DB_CASEFOLD_ALL },
     };
     if (db_casefold_migrate(history_db_env, "history", cfs,
                             sizeof(cfs) / sizeof(cfs[0])) != 0)
@@ -583,6 +591,21 @@ int history_init(const char *dbpath)
                 db_env_last_error(history_db_env)
                   ? db_env_last_error(history_db_env) : "no backend detail");
   }
+
+  /* The PM pair index (W5 Task 11) follows the targets CF: a row under each
+   * half of every pair key there, none whose pair is gone.  Rebuilt at
+   * every open, on this (init worker) thread: an older build opens the CF
+   * and ignores it, so a downgrade and re-upgrade leaves it behind.  It
+   * writes only what is missing or orphaned, in bounded batches; a failure
+   * leaves whole batches and the next open completes it.  Until then a
+   * pair without its rows is missing from TARGETS (logged). */
+  if (pm_pair_index_rebuild(history_db_env, history_cf_targets,
+                            history_cf_pm_pairs) != 0)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: PM pair index rebuild did not complete; TARGETS may "
+              "miss PM conversations until the next start (%s)",
+              db_env_last_error(history_db_env)
+                ? db_env_last_error(history_db_env) : "no backend detail");
 
   /* Open multiline content databases (shares this env) */
   if (ml_content_init(history_db_env) != 0) {
@@ -677,6 +700,7 @@ void history_shutdown(void)
   db_cf_close(history_db_env, history_cf_by_time);
   db_cf_close(history_db_env, history_cf_by_owner);
   db_cf_close(history_db_env, history_cf_recv);
+  db_cf_close(history_db_env, history_cf_pm_pairs);
   db_env_close(history_db_env);
   history_db_env = NULL;
   history_cf_messages = NULL;
@@ -688,6 +712,7 @@ void history_shutdown(void)
   history_cf_by_time = NULL;
   history_cf_by_owner = NULL;
   history_cf_recv = NULL;
+  history_cf_pm_pairs = NULL;
   history_available = 0;
 
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
@@ -763,6 +788,40 @@ static uint64_t history_trim_clock(void)
  * -- never from inside a store. */
 static void history_trim_emptied(const char **targets, int count)
 {
+  struct db_writebatch *wb = NULL;
+  int i;
+
+  /* The PM pair index (W5 Task 11) loses the rows of every emptied pair,
+   * in a second batch after the trim's own commit -- history_trim.c has
+   * no PM concept and stays pure.  The two batches are not atomic: an
+   * index row left behind costs TARGETS one point read that finds no
+   * stamp, and the next open's rebuild drops it.  A pair stored again
+   * since the trim's commit keeps its rows (its targets key is back). */
+  for (i = 0; i < count && history_cf_pm_pairs; i++) {
+    if (!targets[i] || IsChannelName(targets[i]))
+      continue;
+    {
+      char tkey[CHANNELLEN + 2];
+      int tlen = build_target_key(tkey, sizeof(tkey), targets[i]);
+      if (tlen < 0 || pm_pair_split(tkey, (size_t)tlen, NULL) != 0)
+        continue;
+      if (db_exists(history_db_env, history_cf_targets, tkey, (size_t)tlen, NULL) != DB_NOTFOUND)
+        continue;
+      if (!wb && !(wb = db_writebatch_new(history_db_env)))
+        break;
+      if (pm_pair_index_unstage(wb, history_cf_pm_pairs, tkey, (size_t)tlen) != 0)
+        break;
+    }
+  }
+  if (wb) {
+    if (db_writebatch_count(wb) > 0 && db_writebatch_commit(wb, 0) != DB_OK)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: PM pair index cleanup failed after a trim; the next "
+                "start's rebuild drops the rows (%s)",
+                db_env_last_error(history_db_env)
+                  ? db_env_last_error(history_db_env) : "no backend detail");
+    db_writebatch_destroy(wb);
+  }
   if (channel_removed_callback && count > 0)
     channel_removed_callback(targets, count);
 }
@@ -1271,17 +1330,25 @@ static int stage_target_stamp(struct db_writebatch *wb, const char *target,
 {
   char tkey[CHANNELLEN + 2];
   struct db_val cur = { NULL, 0 };
-  int newer = 1;
+  int newer = 1, stamped = 0;
   int tlen = build_target_key(tkey, sizeof(tkey), target);
 
   if (tlen < 0)
     return -1;
   if (db_get(history_db_env, history_cf_targets, tkey, (size_t)tlen,
              NULL, &cur) == DB_OK && cur.base && cur.len > 0) {
+    stamped = 1;
     newer = history_stamp_newer(timestamp, strlen(timestamp),
                                 (const char *)cur.base, cur.len);
     db_val_free(&cur);
   }
+  /* A PM pair's first stamp: its two index rows (W5 Task 11), in the same
+   * batch.  A stamped pair has them already (the rebuild at open covers a
+   * store written by a build without the index). */
+  if (!stamped && history_cf_pm_pairs && !IsChannelName(target)
+      && pm_pair_split(tkey, (size_t)tlen, NULL) == 0
+      && pm_pair_index_stage(wb, history_cf_pm_pairs, tkey, (size_t)tlen) != 0)
+    return -1;
   if (!newer)
     return DB_OK;
   return db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
@@ -3033,110 +3100,130 @@ int history_query_between(const char *target,
   return count;
 }
 
-int history_query_targets(const char *timestamp1, const char *timestamp2,
-                          int include_newer, int limit,
-                          struct HistoryTarget **result,
-                          history_target_filter_fn filter, void *filter_ctx)
+int history_target_latest(const char *target, char *ts, size_t tslen)
 {
-  struct db_iter *it;
-  struct HistoryTarget *head = NULL, *tail = NULL, *tgt;
-  char unix_ts1[HISTORY_TIMESTAMP_LEN];
-  char unix_ts2[HISTORY_TIMESTAMP_LEN];
-  const char *ts1, *ts2;
-  int count = 0;
+  char tkey[CHANNELLEN + 2];
+  struct db_val v = { NULL, 0 };
+  int tlen, rc;
+
+  if (!history_available || !target || !ts || tslen == 0)
+    return -1;
+  ts[0] = '\0';
+  tlen = build_target_key(tkey, sizeof(tkey), target);
+  if (tlen < 0)
+    return 1;   /* longer than any stored name: never stamped */
+  rc = db_get(history_db_env, history_cf_targets, tkey, (size_t)tlen, NULL, &v);
+  if (rc == DB_NOTFOUND)
+    return 1;
+  if (rc != DB_OK)
+    return -1;
+  if (!v.base || v.len == 0 || v.len >= tslen) {
+    db_val_free(&v);
+    return 1;   /* not a stamp: as good as none */
+  }
+  memcpy(ts, v.base, v.len);
+  ts[v.len] = '\0';
+  db_val_free(&v);
+  return 0;
+}
+
+/** history_identity_pm_targets' walk state. */
+struct pm_targets_walk {
+  uint64_t lo_ms, hi_ms;
+  int include_newer;
+  history_target_filter_fn filter;
+  void *filter_ctx;
+  struct HistoryTarget *head;
+  int count;
+  int error;
+};
+
+static int pm_targets_walk_cb(const char *pair, size_t plen, void *ctx)
+{
+  struct pm_targets_walk *w = (struct pm_targets_walk *)ctx;
+  char name[CHANNELLEN + 1], ts[HISTORY_TIMESTAMP_LEN];
+  struct HistoryTarget *t;
+  uint64_t ms;
   int rc;
 
+  if (plen >= sizeof(name))
+    return 0;
+  memcpy(name, pair, plen);
+  name[plen] = '\0';
+  rc = history_target_latest(name, ts, sizeof(ts));
+  if (rc < 0) {
+    w->error = 1;   /* fail closed: the caller answers "could not" */
+    return 1;
+  }
+  if (rc > 0)
+    return 0;       /* an orphan index row: the pair's rows are gone */
+  ms = history_parse_ms(ts);
+  if (ms <= w->lo_ms || (!w->include_newer && ms >= w->hi_ms))
+    return 0;
+  if (w->filter && !w->filter(name, ts, w->filter_ctx))
+    return 0;
+  t = (struct HistoryTarget *)MyCalloc(1, sizeof(*t));
+  ircd_strncpy(t->target, name, sizeof(t->target));
+  ircd_strncpy(t->last_timestamp, ts, sizeof(t->last_timestamp));
+  t->next = w->head;
+  w->head = t;
+  w->count++;
+  return 0;
+}
+
+/** Newest stamp first (history_identity_pm_targets' order). */
+static int pm_target_newest_first(const void *a, const void *b)
+{
+  const struct HistoryTarget *x = *(const struct HistoryTarget *const *)a;
+  const struct HistoryTarget *y = *(const struct HistoryTarget *const *)b;
+  uint64_t xm = history_parse_ms(x->last_timestamp);
+  uint64_t ym = history_parse_ms(y->last_timestamp);
+  if (xm != ym)
+    return xm > ym ? -1 : 1;
+  return strcmp(x->target, y->target);
+}
+
+int history_identity_pm_targets(const char *identity, uint64_t lo_ms, uint64_t hi_ms,
+                                int include_newer, int max,
+                                struct HistoryTarget **result,
+                                history_target_filter_fn filter, void *filter_ctx)
+{
+  struct pm_targets_walk w;
+  struct HistoryTarget **arr, *t;
+  int i, n;
+
   *result = NULL;
-
-  if (!history_available)
+  if (!history_available || !history_cf_pm_pairs)
     return -1;
-
-  /* Convert client ISO timestamps to Unix for comparison */
-  if (history_iso_to_unix(timestamp1, unix_ts1, sizeof(unix_ts1)) == 0)
-    ts1 = unix_ts1;
-  else
-    ts1 = timestamp1;  /* Assume already Unix format */
-
-  if (history_iso_to_unix(timestamp2, unix_ts2, sizeof(unix_ts2)) == 0)
-    ts2 = unix_ts2;
-  else
-    ts2 = timestamp2;  /* Assume already Unix format */
-
-  /* Ensure ts1 < ts2 */
-  if (strcmp(ts1, ts2) > 0) {
-    const char *tmp = ts1;
-    ts1 = ts2;
-    ts2 = tmp;
-  }
-
-  it = db_iter_open(history_db_env, history_cf_targets, NULL);
-  if (!it)
+  if (!identity || !*identity)
+    return 0;   /* nobody: no pairs */
+  memset(&w, 0, sizeof w);
+  w.lo_ms = lo_ms;
+  w.hi_ms = hi_ms;
+  w.include_newer = include_newer;
+  w.filter = filter;
+  w.filter_ctx = filter_ctx;
+  if (pm_pair_index_walk(history_db_env, history_cf_pm_pairs, identity,
+                         pm_targets_walk_cb, &w) < 0 || w.error) {
+    history_free_targets(w.head);
     return -1;
-
-  /* Iterate all targets */
-  rc = db_iter_seek_first(it);
-  while (rc == DB_OK && db_iter_valid(it) && count < limit) {
-    size_t klen, vlen;
-    const void *kbase = db_iter_key(it, &klen);
-    const void *vbase = db_iter_value(it, &vlen);
-
-    /* Check if target's last message is in range */
-    char last_ts[HISTORY_TIMESTAMP_LEN];
-    if (vlen >= sizeof(last_ts)) {
-      rc = db_iter_next(it);
-      continue;
-    }
-    memcpy(last_ts, vbase, vlen);
-    last_ts[vlen] = '\0';
-
-    /* include_newer: also return targets whose latest is ABOVE the
-     * window.  A federated requester needs those as VETO rows -- a
-     * remote server holding a newer latest pushes the network-wide
-     * latest out of the window, so the target must NOT be listed
-     * (#565 latest-message matching is a network-wide property).
-     * The requester re-filters to the window after the merge. */
-    if (strcmp(last_ts, ts1) >= 0
-        && (include_newer || strcmp(last_ts, ts2) <= 0)) {
-      tgt = (struct HistoryTarget *)MyMalloc(sizeof(struct HistoryTarget));
-      if (!tgt)
-        break;
-      memset(tgt, 0, sizeof(*tgt));
-
-      if (klen > CHANNELLEN) {
-        MyFree(tgt);
-        rc = db_iter_next(it);
-        continue;
-      }
-      memcpy(tgt->target, kbase, klen);
-      tgt->target[klen] = '\0';
-      ircd_strncpy(tgt->last_timestamp, last_ts, sizeof(tgt->last_timestamp));
-      tgt->next = NULL;
-
-      /* The caller's filter runs inside the walk so only ITS targets
-       * count toward the limit (2026-09-05: a 30-day TARGETS on a server
-       * with ~3000 targets listed one, because the first 3x<limit>
-       * window-matching keys in key order were other people's). */
-      if (filter && !filter(tgt->target, tgt->last_timestamp, filter_ctx)) {
-        MyFree(tgt);
-        rc = db_iter_next(it);
-        continue;
-      }
-
-      if (tail)
-        tail->next = tgt;
-      else
-        head = tgt;
-      tail = tgt;
-      count++;
-    }
-
-    rc = db_iter_next(it);
   }
-
-  db_iter_close(it);
-
-  *result = head;
-  return count;
+  if (w.count == 0)
+    return 0;
+  /* Newest first, then cut to max. */
+  arr = (struct HistoryTarget **)MyMalloc(sizeof(*arr) * (size_t)w.count);
+  for (i = 0, t = w.head; t; t = t->next)
+    arr[i++] = t;
+  qsort(arr, (size_t)w.count, sizeof(*arr), pm_target_newest_first);
+  n = (max > 0 && max < w.count) ? max : w.count;
+  for (i = 0; i < w.count; i++) {
+    arr[i]->next = (i + 1 < n) ? arr[i + 1] : NULL;
+    if (i >= n)
+      MyFree(arr[i]);
+  }
+  *result = arr[0];
+  MyFree(arr);
+  return n;
 }
 
 void history_free_messages(struct HistoryMessage *list)

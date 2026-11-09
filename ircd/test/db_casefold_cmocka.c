@@ -599,6 +599,31 @@ static void migrate_recv_windows_cf(void **state)
   env_free(env);
 }
 
+static void migrate_pm_pairs_cf(void **state)
+{
+  /* W5 Task 11: the pm_pairs column family keys "<identity>\0<pair key>",
+   * both names, listed in history_init's migration with DB_CASEFOLD_ALL.
+   * Rows are written folded from birth (pm_pair_index_key); one written
+   * unfolded by hand moves to the folded key. */
+  struct db_env *env = env_new();
+  struct db_cf *pp = cf_of(env, "pm_pairs");
+  struct db_casefold_cf cfs[] = { { NULL, "pm_pairs", DB_CASEFOLD_ALL } };
+  (void)state;
+  cfs[0].cf = pp;
+
+  seed(pp, B("Rubin\0Rubin:Zed["), "1");
+  seed(pp, B("zed{\0rubin:zed{"), "1");
+
+  assert_int_equal(db_casefold_migrate(env, "t", cfs, 1), 0);
+
+  assert_int_equal(pp->n, 2);
+  assert_row(pp, B("rubin\0rubin:zed{"), "1");
+  assert_row(pp, B("zed{\0rubin:zed{"), "1");
+  assert_no_row(pp, B("Rubin\0Rubin:Zed["));
+
+  env_free(env);
+}
+
 static void migrate_folds_only_masked_components(void **state)
 {
   struct db_env *env = env_new();
@@ -738,6 +763,7 @@ int main(void)
     cmocka_unit_test(migrate_keeps_existing_folded_row_on_collision),
     cmocka_unit_test(migrate_metadata_clock_cf),
     cmocka_unit_test(migrate_recv_windows_cf),
+    cmocka_unit_test(migrate_pm_pairs_cf),
     cmocka_unit_test(migrate_folds_only_masked_components),
     cmocka_unit_test(migrate_runs_once_per_env),
     cmocka_unit_test(migrate_handles_more_rows_than_one_batch),

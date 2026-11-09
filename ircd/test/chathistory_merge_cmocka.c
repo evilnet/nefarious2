@@ -43,7 +43,14 @@
  *    merge's cut, two responders declaring one child, and the CH B entries
  *    a request owns;
  *  - fix round 3: the responder's skip never drops a REDACT (and does no
- *    row skip on the children leg); the side set's duplicates.
+ *    row skip on the children leg); the side set's duplicates;
+ *  - CHATHISTORY TARGETS (W5 Task 11): a bound's time as an integer
+ *    (hm_targets_ref_ms), the merge's latest per target (hm_targets_merge),
+ *    the page (hm_targets_page: exclusive bounds, the limit counted from
+ *    the first argument, a group of equal stamps never split at its edge,
+ *    rows ascending with ties by folded name) and a responder's order and
+ *    cut (hm_targets_responder: in-window rows nearest the first selector
+ *    first, veto rows last).
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -1328,9 +1335,394 @@ static void test_idset_duplicates_do_not_overflow(void **s)
   hm_idset_free(&set);
 }
 
+/* ------------------------------------------------------------------ */
+/* CHATHISTORY TARGETS (W5 Task 11): BETWEEN's semantics               */
+/*   (chathistory.md :111, :119): both bounds exclusive, the limit     */
+/*   counted from the first argument, its order the direction; rows    */
+/*   ascending (:126), ties by folded name (:128); a group of equal    */
+/*   stamps never split at the page edge (:69 "MAY return more").      */
+/* ------------------------------------------------------------------ */
+
+static struct HistoryTarget *tgt(const char *name, const char *ts)
+{
+  struct HistoryTarget *t = (struct HistoryTarget *)MyCalloc(1, sizeof(*t));
+  ircd_strncpy(t->target, name, sizeof(t->target));
+  ircd_strncpy(t->last_timestamp, ts, sizeof(t->last_timestamp));
+  return t;
+}
+
+static struct HistoryTarget *tchain(int n, ...)
+{
+  struct HistoryTarget *head = NULL, *tail = NULL;
+  va_list ap;
+  int i;
+
+  va_start(ap, n);
+  for (i = 0; i < n; i++) {
+    struct HistoryTarget *t = va_arg(ap, struct HistoryTarget *);
+    if (tail)
+      tail->next = t;
+    else
+      head = t;
+    tail = t;
+  }
+  va_end(ap);
+  return head;
+}
+
+static void tfree(struct HistoryTarget *t)
+{
+  while (t) {
+    struct HistoryTarget *n = t->next;
+    MyFree(t);
+    t = n;
+  }
+}
+
+/** "name@ts name@ts ..." of a list, for one-line comparisons. */
+static const char *tdump(const struct HistoryTarget *t)
+{
+  static char buf[4096];
+  size_t o = 0;
+  buf[0] = '\0';
+  for (; t && o < sizeof(buf) - 64; t = t->next)
+    o += (size_t)snprintf(buf + o, sizeof(buf) - o, "%s%s@%s", o ? " " : "",
+                          t->target, t->last_timestamp);
+  return buf;
+}
+
+/** Seconds -> ms. */
+#define S(x) ((uint64_t)(x) * 1000ULL)
+
+static void test_targets_ref_ms(void **s)
+{
+  uint64_t ms = 1;
+  (void)s;
+  assert_int_equal(hm_targets_ref_ms("2000-01-01T00:00:00.000Z", &ms), 0);
+  assert_true(ms == 946684800000ULL);
+  assert_int_equal(hm_targets_ref_ms("2300-01-01T00:00:00.000Z", &ms), 0);
+  assert_true(ms == 10413792000000ULL);
+  assert_int_equal(hm_targets_ref_ms("9999-01-01T00:00:00Z", &ms), 0);
+  assert_true(ms == 253370764800000ULL);
+  assert_int_equal(hm_targets_ref_ms("2001-09-09T00:00:00.5Z", &ms), 0);
+  assert_true(ms == 999993600500ULL);
+  assert_int_equal(hm_targets_ref_ms("1790000000.25", &ms), 0);
+  assert_true(ms == 1790000000250ULL);
+  assert_int_equal(hm_targets_ref_ms("1790000000", &ms), 0);
+  assert_true(ms == 1790000000000ULL);
+  assert_int_equal(hm_targets_ref_ms("yesterday", &ms), -1);
+  assert_int_equal(hm_targets_ref_ms("", &ms), -1);
+  assert_int_equal(hm_targets_ref_ms("2026-11-09T12:00:00.000Zjunk", &ms), -1);
+}
+
+/* Stamps equal to either bound are outside the window, either direction. */
+static void test_page_exclusive_bounds(void **s)
+{
+  struct HistoryTarget *l;
+  int more = -1, n;
+  (void)s;
+  l = tchain(3, tgt("#a", "1000.000"), tgt("#b", "2000.000"), tgt("#c", "3000.000"));
+  n = hm_targets_page(&l, S(1000), S(3000), 10, NULL, NULL, &more);
+  assert_int_equal(n, 1);
+  assert_string_equal(tdump(l), "#b@2000.000");
+  assert_int_equal(more, 0);
+  tfree(l);
+
+  l = tchain(3, tgt("#a", "1000.000"), tgt("#b", "2000.000"), tgt("#c", "3000.000"));
+  n = hm_targets_page(&l, S(3000), S(1000), 10, NULL, NULL, &more);
+  assert_int_equal(n, 1);
+  assert_string_equal(tdump(l), "#b@2000.000");
+  assert_int_equal(more, 0);
+  tfree(l);
+
+  /* An empty window (equal bounds) lists nothing and has nothing beyond. */
+  l = tchain(1, tgt("#a", "1000.000"));
+  n = hm_targets_page(&l, S(1000), S(1000), 10, NULL, NULL, &more);
+  assert_int_equal(n, 0);
+  assert_null(l);
+  assert_int_equal(more, 0);
+}
+
+static struct HistoryTarget *tie_run(void)
+{
+  /* 10, 20 x4, 30 -- given out of order on purpose. */
+  return tchain(6, tgt("#t30", "30.000"), tgt("#t20d", "20.000"), tgt("#t20a", "20.000"),
+                tgt("#t10", "10.000"), tgt("#t20c", "20.000"), tgt("#t20b", "20.000"));
+}
+
+/* Forward, limit 3: the page runs on through the whole group at 20, and
+ * the next page from 20 starts right after it -- no omission, no stall. */
+static void test_page_tie_run_extends(void **s)
+{
+  struct HistoryTarget *l;
+  int more = -1, n;
+  (void)s;
+  l = tie_run();
+  n = hm_targets_page(&l, S(0), S(100), 3, NULL, NULL, &more);
+  assert_int_equal(n, 5);
+  assert_string_equal(tdump(l), "#t10@10.000 #t20a@20.000 #t20b@20.000 #t20c@20.000 #t20d@20.000");
+  assert_int_equal(more, 1);
+  tfree(l);
+
+  l = tie_run();
+  n = hm_targets_page(&l, S(20), S(100), 3, NULL, NULL, &more);
+  assert_int_equal(n, 1);
+  assert_string_equal(tdump(l), "#t30@30.000");
+  assert_int_equal(more, 0);
+  tfree(l);
+
+  /* Backward, limit 2: 30, then the whole group at 20; next from 20: 10. */
+  l = tie_run();
+  n = hm_targets_page(&l, S(100), S(0), 2, NULL, NULL, &more);
+  assert_int_equal(n, 5);
+  assert_string_equal(tdump(l), "#t20a@20.000 #t20b@20.000 #t20c@20.000 #t20d@20.000 #t30@30.000");
+  assert_int_equal(more, 1);
+  tfree(l);
+
+  l = tie_run();
+  n = hm_targets_page(&l, S(20), S(0), 2, NULL, NULL, &more);
+  assert_int_equal(n, 1);
+  assert_string_equal(tdump(l), "#t10@10.000");
+  assert_int_equal(more, 0);
+  tfree(l);
+}
+
+/* A group of equal stamps larger than the limit comes whole; the page
+ * from that stamp is empty and final. */
+static void test_page_tie_run_over_limit(void **s)
+{
+  struct HistoryTarget *l;
+  int more = -1, n;
+  (void)s;
+  l = tchain(4, tgt("#d", "20.000"), tgt("#c", "20.000"), tgt("#b", "20.000"), tgt("#a", "20.000"));
+  n = hm_targets_page(&l, S(0), S(100), 2, NULL, NULL, &more);
+  assert_int_equal(n, 4);
+  assert_string_equal(tdump(l), "#a@20.000 #b@20.000 #c@20.000 #d@20.000");
+  assert_int_equal(more, 0);
+  tfree(l);
+
+  l = tchain(4, tgt("#d", "20.000"), tgt("#c", "20.000"), tgt("#b", "20.000"), tgt("#a", "20.000"));
+  n = hm_targets_page(&l, S(20), S(100), 2, NULL, NULL, &more);
+  assert_int_equal(n, 0);
+  assert_null(l);
+  assert_int_equal(more, 0);
+}
+
+static struct HistoryTarget *eight(void)
+{
+  return tchain(8, tgt("#e", "5.000"), tgt("#a", "1.000"), tgt("#h", "8.000"), tgt("#c", "3.000"),
+                tgt("#g", "7.000"), tgt("#b", "2.000"), tgt("#f", "6.000"), tgt("#d", "4.000"));
+}
+
+/* The limit counts from the first argument: forward the oldest, backward
+ * the newest; both sent ascending. */
+static void test_page_direction(void **s)
+{
+  struct HistoryTarget *l;
+  int more = -1, n;
+  (void)s;
+  l = eight();
+  n = hm_targets_page(&l, S(0), S(100), 2, NULL, NULL, &more);
+  assert_int_equal(n, 2);
+  assert_string_equal(tdump(l), "#a@1.000 #b@2.000");
+  assert_int_equal(more, 1);
+  tfree(l);
+
+  l = eight();
+  n = hm_targets_page(&l, S(100), S(0), 2, NULL, NULL, &more);
+  assert_int_equal(n, 2);
+  assert_string_equal(tdump(l), "#g@7.000 #h@8.000");
+  assert_int_equal(more, 1);
+  tfree(l);
+
+  /* The whole window fits: nothing beyond. */
+  l = eight();
+  n = hm_targets_page(&l, S(100), S(0), 8, NULL, NULL, &more);
+  assert_int_equal(n, 8);
+  assert_int_equal(more, 0);
+  tfree(l);
+}
+
+/* The same input in any order gives the same page, ties by folded name. */
+static void test_page_tiebreak_deterministic(void **s)
+{
+  struct HistoryTarget *l;
+  int more, n;
+  char first[256];
+  (void)s;
+  l = tchain(4, tgt("#d", "20.000"), tgt("#B", "20.000"), tgt("#a", "20.000"), tgt("#C", "20.000"));
+  n = hm_targets_page(&l, S(0), S(100), 10, NULL, NULL, &more);
+  assert_int_equal(n, 4);
+  snprintf(first, sizeof first, "%s", tdump(l));
+  assert_string_equal(first, "#a@20.000 #B@20.000 #C@20.000 #d@20.000");
+  tfree(l);
+
+  l = tchain(4, tgt("#C", "20.000"), tgt("#a", "20.000"), tgt("#d", "20.000"), tgt("#B", "20.000"));
+  n = hm_targets_page(&l, S(0), S(100), 10, NULL, NULL, &more);
+  assert_int_equal(n, 4);
+  assert_string_equal(tdump(l), first);
+  tfree(l);
+}
+
+static int not_b(const struct HistoryTarget *t, void *ctx)
+{
+  (*(int *)ctx)++;
+  return strcmp(t->target, "#b") != 0;
+}
+
+/* A row the requester may not see never counts toward the limit, and
+ * never makes the page look unfinished. */
+static void test_page_skips_ineligible(void **s)
+{
+  struct HistoryTarget *l;
+  int more = -1, n, calls = 0;
+  (void)s;
+  l = tchain(4, tgt("#a", "1.000"), tgt("#b", "2.000"), tgt("#c", "3.000"), tgt("#d", "4.000"));
+  n = hm_targets_page(&l, S(0), S(100), 2, not_b, &calls, &more);
+  assert_int_equal(n, 2);
+  assert_string_equal(tdump(l), "#a@1.000 #c@3.000");
+  assert_int_equal(more, 1);
+  /* Asked about #a, #b, #c, and #d to learn there is more: never past it. */
+  assert_int_equal(calls, 4);
+  tfree(l);
+
+  l = tchain(2, tgt("#a", "1.000"), tgt("#b", "2.000"));
+  n = hm_targets_page(&l, S(0), S(100), 1, not_b, &calls, &more);
+  assert_int_equal(n, 1);
+  assert_string_equal(tdump(l), "#a@1.000");
+  assert_int_equal(more, 0);
+  tfree(l);
+}
+
+/* Bounds and stamps compare as integers: a start before 2001-09-09 or an
+ * end after 2286 used to compare as strings and list nothing. */
+static void test_bounds_width(void **s)
+{
+  struct HistoryTarget *l;
+  uint64_t y2000, y2300, y9999;
+  int more, n;
+  (void)s;
+  assert_int_equal(hm_targets_ref_ms("2000-01-01T00:00:00.000Z", &y2000), 0);
+  assert_int_equal(hm_targets_ref_ms("2300-01-01T00:00:00.000Z", &y2300), 0);
+  assert_int_equal(hm_targets_ref_ms("9999-01-01T00:00:00.000Z", &y9999), 0);
+
+  l = tchain(3, tgt("#now", "1790000000.000"), tgt("#old", "999999999.999"), tgt("#new", "1000000000.000"));
+  n = hm_targets_page(&l, y2000, y2300, 10, NULL, NULL, &more);
+  assert_int_equal(n, 3);
+  assert_string_equal(tdump(l), "#old@999999999.999 #new@1000000000.000 #now@1790000000.000");
+  tfree(l);
+
+  l = tchain(3, tgt("#now", "1790000000.000"), tgt("#old", "999999999.999"), tgt("#new", "1000000000.000"));
+  n = hm_targets_page(&l, y9999, y2000, 2, NULL, NULL, &more);
+  assert_int_equal(n, 2);
+  assert_string_equal(tdump(l), "#new@1000000000.000 #now@1790000000.000");
+  assert_int_equal(more, 1);
+  tfree(l);
+}
+
+/* The merge keeps each target once, at its latest stamp compared as an
+ * integer, whatever case each server keyed it under. */
+static void test_targets_merge_integer_max(void **s)
+{
+  struct HistoryTarget *a, *b, *m, *t;
+  int n = 0;
+  (void)s;
+  a = tchain(2, tgt("#x", "999999999.999"), tgt("#z", "7.000"));
+  b = tchain(3, tgt("#X", "1000000000.000"), tgt("#y", "5.000"), tgt("#z", "6.000"));
+  m = hm_targets_merge(a, b);
+  for (t = m; t; t = t->next) {
+    n++;
+    if (!ircd_strcmp(t->target, "#x"))
+      assert_string_equal(t->last_timestamp, "1000000000.000");
+    else if (!strcmp(t->target, "#y"))
+      assert_string_equal(t->last_timestamp, "5.000");
+    else if (!strcmp(t->target, "#z"))
+      assert_string_equal(t->last_timestamp, "7.000");
+    else
+      fail_msg("unexpected %s", t->target);
+  }
+  assert_int_equal(n, 3);
+  tfree(m);
+}
+
+/* The responder sends the in-window rows first, nearest the first
+ * selector, and the veto rows last: a cut at the cap drops veto rows
+ * (duplicates at worst) before any in-window row (a hole). */
+static void test_responder_cut_priority(void **s)
+{
+  struct HistoryTarget *l = NULL, **tail = &l, *t;
+  int i, cut = -1, n;
+  (void)s;
+  for (i = 0; i < 600; i++) {
+    char name[32], ts[32];
+    snprintf(name, sizeof name, "#veto%03d", i);
+    snprintf(ts, sizeof ts, "%d.000", 2000 + i);
+    *tail = tgt(name, ts);
+    tail = &(*tail)->next;
+    if (i == 300) {   /* the in-window rows in the middle of the input */
+      int j;
+      for (j = 0; j < 5; j++) {
+        snprintf(name, sizeof name, "#in%d", j);
+        snprintf(ts, sizeof ts, "%d.000", 14 - j);
+        *tail = tgt(name, ts);
+        tail = &(*tail)->next;
+      }
+    }
+  }
+  /* Rows at or below the lower bound are of no use to the requester. */
+  *tail = tgt("#below", "1.000");
+  n = hm_targets_responder(&l, S(1), S(1000), 500, &cut);
+  assert_int_equal(n, 500);
+  assert_int_equal(cut, 1);
+  for (i = 0, t = l; i < 5; i++, t = t->next) {
+    char want[8];
+    snprintf(want, sizeof want, "#in%d", 4 - i);   /* forward: oldest first */
+    assert_string_equal(t->target, want);
+  }
+  for (; t; t = t->next)
+    assert_int_equal(strncmp(t->target, "#veto", 5), 0);
+  tfree(l);
+}
+
+/* Backward, the in-window rows go newest first; a cut inside a group of
+ * equal in-window stamps takes the whole group. */
+static void test_responder_direction_and_ties(void **s)
+{
+  struct HistoryTarget *l;
+  int cut = -1, n;
+  (void)s;
+  l = tchain(7, tgt("#c30", "30.000"), tgt("#b40", "40.000"), tgt("#v", "500.000"),
+             tgt("#a50", "50.000"), tgt("#d40", "40.000"), tgt("#e40", "40.000"),
+             tgt("#low", "5.000"));
+  n = hm_targets_responder(&l, S(100), S(10), 2, &cut);
+  assert_int_equal(n, 4);
+  assert_string_equal(tdump(l), "#a50@50.000 #b40@40.000 #d40@40.000 #e40@40.000");
+  assert_int_equal(cut, 1);
+  tfree(l);
+
+  /* Under the cap: everything above the lower bound, in-window first. */
+  l = tchain(4, tgt("#v", "500.000"), tgt("#a", "20.000"), tgt("#b", "30.000"), tgt("#low", "10.000"));
+  n = hm_targets_responder(&l, S(10), S(100), 500, &cut);
+  assert_int_equal(n, 3);
+  assert_string_equal(tdump(l), "#a@20.000 #b@30.000 #v@500.000");
+  assert_int_equal(cut, 0);
+  tfree(l);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_targets_ref_ms),
+    cmocka_unit_test(test_page_exclusive_bounds),
+    cmocka_unit_test(test_page_tie_run_extends),
+    cmocka_unit_test(test_page_tie_run_over_limit),
+    cmocka_unit_test(test_page_direction),
+    cmocka_unit_test(test_page_tiebreak_deterministic),
+    cmocka_unit_test(test_page_skips_ineligible),
+    cmocka_unit_test(test_bounds_width),
+    cmocka_unit_test(test_targets_merge_integer_max),
+    cmocka_unit_test(test_responder_cut_priority),
+    cmocka_unit_test(test_responder_direction_and_ties),
     cmocka_unit_test(test_redact_filter_no_cap),
     cmocka_unit_test(test_redact_filter_drops_children_of_redacted),
     cmocka_unit_test(test_redact_filter_checks_context),

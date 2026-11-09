@@ -334,4 +334,60 @@ extern int hm_leg_has_rows(const struct hm_page_leg *leg);
 /** Free @a leg's rows and side set and empty it. */
 extern void hm_leg_free(struct hm_page_leg *leg);
 
+/* ------------------------------------------------------------------ */
+/* CHATHISTORY TARGETS (W5 Task 11)                                    */
+/*                                                                    */
+/* TARGETS has BETWEEN's semantics (chathistory.md :111, :119): both   */
+/* bounds exclusive, the limit counted from the FIRST argument, and    */
+/* the argument order is the direction.  Rows go ascending (:126),     */
+/* ties by folded name (:128).  Every time below is epoch ms: bounds   */
+/* and stamps compare as integers, never as "sec.mmm" strings (a       */
+/* variable-width seconds field made a start before 2001-09-09 or an   */
+/* end after 2286 list nothing).                                       */
+/* ------------------------------------------------------------------ */
+
+/** Epoch ms of a TARGETS bound: ISO 8601 "YYYY-MM-DDThh:mm:ss[.fff]Z"
+ * (what a client sends after "timestamp="), or "sec[.mmm]".
+ * @return 0, or -1 when @a ref is neither. */
+extern int hm_targets_ref_ms(const char *ref, uint64_t *ms);
+
+/** Epoch ms of a stored "sec[.mmm]" stamp. */
+extern uint64_t hm_targets_stamp_ms(const char *stamp);
+
+/** One row per target from @a a and @a b (consumed; names compared under
+ * the casemapping), at its latest stamp: the network-wide latest is the
+ * maximum over whoever answered.
+ * @return The merged list, in no particular order (caller frees). */
+extern struct HistoryTarget *hm_targets_merge(struct HistoryTarget *a,
+                                              struct HistoryTarget *b);
+
+/** Whether the requester may be shown @a t (access, presence, a name to
+ * show it under).  Called only for rows the page considers. */
+typedef int (*hm_target_ok_fn)(const struct HistoryTarget *t, void *ctx);
+
+/** Cut @a *list to a TARGETS page: the rows strictly between @a first_ms
+ * and @a second_ms, counted from @a first_ms (forwards when it is the
+ * older bound, else backwards), at most @a limit -- more only to finish a
+ * group of equal stamps at the page's far edge, so the next page from
+ * that stamp starts exactly after the group (never fewer).  A row @a ok
+ * rejects (when given) is dropped and not counted.  The page is left in
+ * @a *list ascending by (stamp, folded name); everything else is freed.
+ * @param[out] more 1 when an eligible row lies beyond the page in its
+ *   direction (the end tag must then not be set), else 0.
+ * @return The rows on the page. */
+extern int hm_targets_page(struct HistoryTarget **list, uint64_t first_ms,
+                           uint64_t second_ms, int limit, hm_target_ok_fn ok,
+                           void *ctx, int *more);
+
+/** Order a storage peer's CH T answer: the rows strictly above the lower
+ * bound, the in-window ones first (nearest @a first_ms first, ties by
+ * folded name), then the veto rows (at or past the upper bound, which can
+ * only disqualify a target), cut to @a cap -- past it only to finish a
+ * group of equal in-window stamps -- so a cut drops veto rows (a duplicate
+ * at worst) before any in-window row (a hole).
+ * @param[out] cut 1 when rows were dropped at the cap.
+ * @return The rows kept in @a *list, in that order. */
+extern int hm_targets_responder(struct HistoryTarget **list, uint64_t first_ms,
+                                uint64_t second_ms, int cap, int *cut);
+
 #endif /* INCLUDED_chathistory_merge_h */

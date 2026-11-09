@@ -46,6 +46,7 @@ CMOCKA_TESTPROGS = \
 	chathistory_presence_cmocka \
 	chathistory_merge_cmocka \
 	chathistory_recv_cmocka \
+	pm_pair_index_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
@@ -106,6 +107,7 @@ DEP_SRC = \
 	chathistory_presence_cmocka.c \
 	chathistory_merge_cmocka.c \
 	chathistory_recv_cmocka.c \
+	pm_pair_index_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
@@ -296,6 +298,16 @@ chathistory_merge_cmocka: $(CHATHISTORY_MERGE_CMOCKA_OBJS)
 CHATHISTORY_RECV_CMOCKA_OBJS = chathistory_recv_cmocka.o ../chathistory_recv.o
 chathistory_recv_cmocka: $(CHATHISTORY_RECV_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_RECV_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# pm_pair_index tests - the PM pairs each identity takes part in (W5
+# Task 11: CHATHISTORY TARGETS finds a requester's own PM pairs without
+# walking every target).  Links the REAL ../pm_pair_index.o against the
+# in-memory store (fake_db.o is the whole db_* backend here), with
+# ../db_casefold.o + ../ircd_string.o for the name folding; no RocksDB.
+PM_PAIR_INDEX_CMOCKA_OBJS = pm_pair_index_cmocka.o test_stub.o ../pm_pair_index.o \
+	../db_casefold.o ../ircd_string.o fake_db.o
+pm_pair_index_cmocka: $(PM_PAIR_INDEX_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(PM_PAIR_INDEX_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o

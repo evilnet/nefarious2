@@ -518,26 +518,31 @@ extern int history_query_between(const char *target,
                                   int limit, struct HistoryMessage **result,
                                   struct HistoryRowFilter *filter);
 
-/** Query targets with recent message activity.
- * Used for CHATHISTORY TARGETS command.
- * @param[in] timestamp1 Start of time range (Unix timestamp).
- * @param[in] timestamp2 End of time range (Unix timestamp).
- * @param[in] limit Maximum targets to return.
- * @param[out] result Pointer to result list head (caller must free).
- * @return Number of targets returned, or -1 on error.
- */
-/** Per-target keep/skip hook for history_query_targets: 1 keeps the
- * target (it counts toward the limit), 0 skips it.  The walk is in key
- * order, not recency, so any filtering the caller would do afterwards
- * (access, presence) must happen HERE or a server with more active
- * targets than the limit crowds the caller's own targets out. */
+/** Per-target keep/skip hook for history_identity_pm_targets: 1 keeps
+ * the target, 0 skips it (it then never counts toward the limit). */
 typedef int (*history_target_filter_fn)(const char *target, const char *last_ts,
                                         void *ctx);
 
-extern int history_query_targets(const char *timestamp1, const char *timestamp2,
-                                 int include_newer,
-                                 int limit, struct HistoryTarget **result,
-                                 history_target_filter_fn filter, void *filter_ctx);
+/** The latest stamp held for one target (the targets index; W5 Task 11:
+ * TARGETS reads the requester's own targets one by one instead of walking
+ * every target on the server).
+ * @param[in] target Channel name or PM pair key (any case).
+ * @param[out] ts Its stamp, "sec.mmm".
+ * @return 0 found, 1 none, -1 on a storage error. */
+extern int history_target_latest(const char *target, char *ts, size_t tslen);
+
+/** The PM pairs @a identity (an account, or a session id) is a half of,
+ * through the pair index (pm_pair_index.h), with their stamps: those whose
+ * stamp is above @a lo_ms (exclusive) and -- unless @a include_newer --
+ * below @a hi_ms (exclusive), compared as integers; @a filter applied;
+ * newest first; at most @a max (<= 0: all).  A pair whose targets row is
+ * gone (an orphan index row) is skipped.
+ * @return The count, or -1 on a storage error (nothing returned). */
+extern int history_identity_pm_targets(const char *identity, uint64_t lo_ms,
+                                       uint64_t hi_ms, int include_newer, int max,
+                                       struct HistoryTarget **result,
+                                       history_target_filter_fn filter,
+                                       void *filter_ctx);
 
 /** Find the most recent JOIN event for a nick in a channel.
  * Scans backward through the channel's history looking for a JOIN

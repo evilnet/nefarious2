@@ -27,7 +27,9 @@
  * by the context splice (hm_splice_context).  The children request's pure
  * parts live here too (W5 Task 14): which of a page's rows to ask about
  * (hm_children_wanted) and a CH Q K line's msgid list (hm_pack_ids,
- * hm_parse_ids).
+ * hm_parse_ids).  So do CHATHISTORY TARGETS' (W5 Task 11): a bound's time,
+ * the merge of the requester's and its peers' targets, the page, and a
+ * responder's order and cut (hm_targets_*).
  */
 #include "config.h"
 
@@ -38,6 +40,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 struct HistoryMessage *hm_find_dup(struct HistoryMessage *list,
                                    const struct HistoryMessage *check)
@@ -912,4 +915,301 @@ void hm_leg_free(struct hm_page_leg *leg)
   leg->ndecl = 0;
   leg->decl_lost = 0;
   hm_idset_free(&leg->side);
+}
+
+/* ------------------------------------------------------------------ */
+/* CHATHISTORY TARGETS (W5 Task 11; chathistory_merge.h)               */
+/* ------------------------------------------------------------------ */
+
+/** Read @a n digits at @a p as a number; -1 when one is not a digit. */
+static long hm_digits(const char *p, int n)
+{
+  long v = 0;
+  int i;
+  for (i = 0; i < n; i++) {
+    if (p[i] < '0' || p[i] > '9')
+      return -1;
+    v = v * 10 + (p[i] - '0');
+  }
+  return v;
+}
+
+int hm_targets_ref_ms(const char *ref, uint64_t *ms)
+{
+  const char *p;
+  uint64_t frac = 0;
+  int d;
+
+  if (!ref || !*ref || !ms)
+    return -1;
+  if (strlen(ref) >= 19 && ref[4] == '-' && ref[7] == '-' && ref[10] == 'T'
+      && ref[13] == ':' && ref[16] == ':') {
+    /* ISO 8601, UTC: YYYY-MM-DDThh:mm:ss[.fff...][Z] */
+    struct tm tm;
+    long y = hm_digits(ref, 4), mo = hm_digits(ref + 5, 2), da = hm_digits(ref + 8, 2);
+    long h = hm_digits(ref + 11, 2), mi = hm_digits(ref + 14, 2), se = hm_digits(ref + 17, 2);
+    time_t t;
+
+    if (y < 0 || mo < 1 || mo > 12 || da < 1 || da > 31 || h < 0 || h > 23
+        || mi < 0 || mi > 59 || se < 0 || se > 60)
+      return -1;
+    p = ref + 19;
+    if (*p == '.') {
+      /* A decimal fraction: ".5" is 500 ms, ".123456" is 123 ms. */
+      p++;
+      if (*p < '0' || *p > '9')
+        return -1;
+      for (d = 0; *p >= '0' && *p <= '9'; p++, d++)
+        if (d < 3)
+          frac = frac * 10 + (uint64_t)(*p - '0');
+      for (; d < 3; d++)
+        frac *= 10;
+    }
+    if (*p == 'Z')
+      p++;
+    if (*p)
+      return -1;
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = (int)(y - 1900);
+    tm.tm_mon = (int)(mo - 1);
+    tm.tm_mday = (int)da;
+    tm.tm_hour = (int)h;
+    tm.tm_min = (int)mi;
+    tm.tm_sec = (int)se;
+    t = timegm(&tm);
+    if (t == (time_t)-1 && y != 1969)
+      return -1;
+    *ms = t < 0 ? 0 : (uint64_t)t * 1000ULL + frac;
+    return 0;
+  }
+  /* "sec[.mmm]" */
+  for (p = ref; *p >= '0' && *p <= '9'; p++)
+    ;
+  if (p == ref)
+    return -1;
+  if (*p == '.') {
+    const char *f = p + 1;
+    for (p = f; *p >= '0' && *p <= '9'; p++)
+      ;
+  }
+  if (*p)
+    return -1;
+  *ms = hm_ts_ms(ref);
+  return 0;
+}
+
+uint64_t hm_targets_stamp_ms(const char *stamp)
+{
+  return stamp ? hm_ts_ms(stamp) : 0;
+}
+
+/** A target and its stamp in ms, for sorting. */
+struct hm_tent {
+  struct HistoryTarget *t;
+  uint64_t ms;
+};
+
+/** Ascending stamp, then folded name (then bytes, so two spellings of
+ * one name, which a merged list never holds, still order). */
+static int hm_tent_asc(const void *a, const void *b)
+{
+  const struct hm_tent *x = (const struct hm_tent *)a;
+  const struct hm_tent *y = (const struct hm_tent *)b;
+  int c;
+  if (x->ms != y->ms)
+    return x->ms < y->ms ? -1 : 1;
+  c = ircd_strcmp(x->t->target, y->t->target);
+  return c ? c : strcmp(x->t->target, y->t->target);
+}
+
+/** Descending stamp, then folded name ascending. */
+static int hm_tent_desc(const void *a, const void *b)
+{
+  const struct hm_tent *x = (const struct hm_tent *)a;
+  const struct hm_tent *y = (const struct hm_tent *)b;
+  int c;
+  if (x->ms != y->ms)
+    return x->ms > y->ms ? -1 : 1;
+  c = ircd_strcmp(x->t->target, y->t->target);
+  return c ? c : strcmp(x->t->target, y->t->target);
+}
+
+/** Folded name, then the latest stamp first (hm_targets_merge). */
+static int hm_tent_name(const void *a, const void *b)
+{
+  const struct hm_tent *x = (const struct hm_tent *)a;
+  const struct hm_tent *y = (const struct hm_tent *)b;
+  int c = ircd_strcmp(x->t->target, y->t->target);
+  if (c)
+    return c;
+  if (x->ms != y->ms)
+    return x->ms > y->ms ? -1 : 1;
+  return strcmp(x->t->target, y->t->target);
+}
+
+/** The list as an array (the nodes are not copied); its length in @a n. */
+static struct hm_tent *hm_tent_array(struct HistoryTarget *list, int *n)
+{
+  struct HistoryTarget *t;
+  struct hm_tent *arr;
+  int i = 0;
+
+  *n = 0;
+  for (t = list; t; t = t->next)
+    (*n)++;
+  if (*n == 0)
+    return NULL;
+  arr = (struct hm_tent *)MyMalloc(sizeof(*arr) * (size_t)*n);
+  for (t = list; t; t = t->next, i++) {
+    arr[i].t = t;
+    arr[i].ms = hm_ts_ms(t->last_timestamp);
+  }
+  return arr;
+}
+
+/** Relink the entries @a keep marks, in array order; free the others. */
+static struct HistoryTarget *hm_tent_relink(struct hm_tent *arr, const char *keep, int n)
+{
+  struct HistoryTarget *head = NULL, **tail = &head;
+  int i;
+  for (i = 0; i < n; i++) {
+    if (keep[i]) {
+      *tail = arr[i].t;
+      tail = &arr[i].t->next;
+    } else {
+      MyFree(arr[i].t);
+    }
+  }
+  *tail = NULL;
+  return head;
+}
+
+struct HistoryTarget *hm_targets_merge(struct HistoryTarget *a, struct HistoryTarget *b)
+{
+  struct HistoryTarget **tail = &a;
+  struct hm_tent *arr;
+  char *keep;
+  int n, i;
+
+  while (*tail)
+    tail = &(*tail)->next;
+  *tail = b;
+  arr = hm_tent_array(a, &n);
+  if (!arr)
+    return NULL;
+  qsort(arr, (size_t)n, sizeof(*arr), hm_tent_name);
+  keep = (char *)MyCalloc(1, (size_t)n);
+  for (i = 0; i < n; i++)
+    keep[i] = (i == 0 || ircd_strcmp(arr[i].t->target, arr[i - 1].t->target) != 0);
+  a = hm_tent_relink(arr, keep, n);
+  MyFree(keep);
+  MyFree(arr);
+  return a;
+}
+
+int hm_targets_page(struct HistoryTarget **list, uint64_t first_ms, uint64_t second_ms,
+                    int limit, hm_target_ok_fn ok, void *ctx, int *more)
+{
+  uint64_t lo = first_ms < second_ms ? first_ms : second_ms;
+  uint64_t hi = first_ms < second_ms ? second_ms : first_ms;
+  int fwd = first_ms < second_ms;
+  struct hm_tent *arr;
+  char *keep;
+  uint64_t edge = 0;
+  int n, i, step, taken = 0;
+
+  *more = 0;
+  if (limit < 1)
+    limit = 1;
+  arr = hm_tent_array(*list, &n);
+  if (!arr) {
+    *list = NULL;
+    return 0;
+  }
+  qsort(arr, (size_t)n, sizeof(*arr), hm_tent_asc);
+  keep = (char *)MyCalloc(1, (size_t)n);
+  step = fwd ? 1 : -1;
+  for (i = fwd ? 0 : n - 1; i >= 0 && i < n; i += step) {
+    const struct hm_tent *e = &arr[i];
+    if (e->ms <= lo || e->ms >= hi)
+      continue;   /* outside the window: both bounds are exclusive */
+    if (taken >= limit && e->ms != edge) {
+      /* Past the page and its last group: is anything here to page on to? */
+      if (!ok || ok(e->t, ctx)) {
+        *more = 1;
+        break;
+      }
+      continue;
+    }
+    if (ok && !ok(e->t, ctx))
+      continue;
+    keep[i] = 1;
+    taken++;
+    edge = e->ms;
+  }
+  *list = hm_tent_relink(arr, keep, n);
+  MyFree(keep);
+  MyFree(arr);
+  return taken;
+}
+
+int hm_targets_responder(struct HistoryTarget **list, uint64_t first_ms, uint64_t second_ms,
+                         int cap, int *cut)
+{
+  uint64_t lo = first_ms < second_ms ? first_ms : second_ms;
+  uint64_t hi = first_ms < second_ms ? second_ms : first_ms;
+  int fwd = first_ms < second_ms;
+  struct hm_tent *arr, *in, *veto;
+  struct HistoryTarget *head = NULL, **tail = &head;
+  uint64_t edge = 0;
+  int n, i, nin = 0, nveto = 0, kept = 0;
+
+  *cut = 0;
+  if (cap < 1)
+    cap = 1;
+  arr = hm_tent_array(*list, &n);
+  if (!arr) {
+    *list = NULL;
+    return 0;
+  }
+  in = (struct hm_tent *)MyMalloc(sizeof(*in) * (size_t)n);
+  veto = (struct hm_tent *)MyMalloc(sizeof(*veto) * (size_t)n);
+  for (i = 0; i < n; i++) {
+    if (arr[i].ms <= lo) {
+      MyFree(arr[i].t);          /* no use to the requester: below the window */
+    } else if (arr[i].ms < hi)
+      in[nin++] = arr[i];
+    else
+      veto[nveto++] = arr[i];
+  }
+  qsort(in, (size_t)nin, sizeof(*in), fwd ? hm_tent_asc : hm_tent_desc);
+  qsort(veto, (size_t)nveto, sizeof(*veto), hm_tent_asc);
+  for (i = 0; i < nin; i++) {
+    /* Past the cap only to finish the last kept group of equal stamps. */
+    if (kept >= cap && (*cut || in[i].ms != edge)) {
+      *cut = 1;
+      MyFree(in[i].t);
+      continue;
+    }
+    *tail = in[i].t;
+    tail = &in[i].t->next;
+    kept++;
+    edge = in[i].ms;
+  }
+  for (i = 0; i < nveto; i++) {
+    if (kept >= cap) {
+      *cut = 1;
+      MyFree(veto[i].t);
+      continue;
+    }
+    *tail = veto[i].t;
+    tail = &veto[i].t->next;
+    kept++;
+  }
+  *tail = NULL;
+  *list = head;
+  MyFree(in);
+  MyFree(veto);
+  MyFree(arr);
+  return kept;
 }
