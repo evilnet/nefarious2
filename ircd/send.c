@@ -3321,6 +3321,175 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
     msgq_clean(serv_mb_alias);
 }
 
+/** Send a fork-only channel line to every IRCv3-aware server link with a
+ * member of \a to behind it (W5 Task 13), once per link.
+ *
+ * Who gets it: a direct server link is sent the line when some member of
+ * \a to is not ours (MyConnect members are this server's to deliver), not
+ * a zombie, reached through that link (whose fd is open), and -- with
+ * SKIP_DEAF in \a skip -- not deaf (+d); never the link toward \a one
+ * (bump_sentalong), never a legacy (!IsIRCv3Aware) link and never a link
+ * whose burst is still gated.  No local client is sent anything.
+ *
+ * That is the receiving server's own delivery predicate for a channel
+ * TAGMSG (sendcmdto_channel_client_tags skips deaf members and nothing
+ * else a remote server can know), so every server whose local delivery
+ * would reach a member is routed the line, and every server whose receive
+ * window is open (channel_has_local_member: non-zombie, MyConnect, not
+ * deaf, no positive SILENCE -- a subset) is too.  A bursting link is not
+ * skipped: TAGMSG never skipped one.
+ *
+ * The lines are built exactly as sendcmdto_serv_butone_v3() builds them
+ * (its alias preamble and tag block, verbatim): the tagged variant -- the
+ * armed msgid/time, or the stash of the link \a one's line came on through
+ * s2s_cptr_override, and ,C from sendcmdto_set_s2s_client_tags() -- when
+ * sendcmdto_want_s2s_tags(1) was armed and P10_MESSAGE_TAGS is on, else
+ * the plain line.  An alias \a from goes as its primary, and as itself
+ * toward the primary's own direction (no fake direction there).  Every S2S
+ * override it may read is cleared whether or not a link got the line.
+ *
+ * @param[in] from Client originating the command.
+ * @param[in] cmd Long name of command (ignored).
+ * @param[in] tok Short name of command.
+ * @param[in] to Destination channel.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] skip SKIP_DEAF, or 0.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_serv_butone_v3(struct Client *from, const char *cmd,
+                                      const char *tok, struct Channel *to,
+                                      struct Client *one, unsigned int skip,
+                                      const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb = NULL;
+  struct MsgBuf *mb_alias = NULL;
+  struct Membership *member;
+  struct Client *alias_from = NULL;
+  struct Client *primary_dir = NULL;
+
+  if (s2s_alias_source) {
+    alias_from = s2s_alias_source;
+    s2s_alias_source = NULL;
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  } else if (IsBouncerAlias(from) && cli_alias_primary(from)) {
+    alias_from = from;
+    from = cli_alias_primary(from);
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  }
+
+  vd.vd_format = pattern;
+
+  {
+    int want_tags = s2s_want_tags;
+    s2s_want_tags = 0;
+
+    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+      if (s2s_raw_tags[0]) {
+        va_start(vd.vd_args, pattern);
+        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
+        va_end(vd.vd_args);
+        if (alias_from) {
+          va_start(vd.vd_args, pattern);
+          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
+          va_end(vd.vd_args);
+        }
+        s2s_raw_tags[0] = '\0';
+        s2s_cptr_override = NULL;
+        s2s_msgid_override[0] = '\0';
+        s2s_sessid_override[0] = '\0';
+        s2s_held_override = '\0';
+        s2s_time_override = 0;
+        s2s_client_tags_override = NULL;  /* no ,C slot on this path; clear unconsumed */
+      } else {
+        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                                : (MyConnect(from) ? NULL : cli_from(from));
+        s2s_cptr_override = NULL;
+        if (s2s_client_tags_override) {
+          /* Client-only tags ride ,C (audit 0.1); sized as in
+           * sendcmdto_serv_butone_v3(). */
+          char s2s_tagbuf_ctags[4200];
+          const char *ctags = s2s_client_tags_override;
+          s2s_client_tags_override = NULL;  /* consumed */
+          if (format_s2s_tags_with_client(s2s_tagbuf_ctags, sizeof(s2s_tagbuf_ctags),
+                                          tag_cptr, ctags, NULL, 0)) {
+            va_start(vd.vd_args, pattern);
+            mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_ctags, from, tok, &vd);
+            va_end(vd.vd_args);
+            if (alias_from) {
+              va_start(vd.vd_args, pattern);
+              mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_ctags, alias_from, tok, &vd);
+              va_end(vd.vd_args);
+            }
+          }
+        } else {
+          char s2s_tagbuf[128];
+          if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+            va_start(vd.vd_args, pattern);
+            mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+            va_end(vd.vd_args);
+            if (alias_from) {
+              va_start(vd.vd_args, pattern);
+              mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+              va_end(vd.vd_args);
+            }
+          }
+        }
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      }
+    } else {
+      /* No tagged variant was built, so nothing consumed the overrides:
+       * clear them, or they ride the next server-bound emit (see
+       * sendcmdto_serv_butone_v3()). */
+      s2s_cptr_override = NULL;
+      s2s_raw_tags[0] = '\0';
+      s2s_msgid_override[0] = '\0';
+      s2s_sessid_override[0] = '\0';
+      s2s_held_override = '\0';
+      s2s_time_override = 0;
+      s2s_client_tags_override = NULL;  /* no tagged variant built; clear unconsumed */
+    }
+  }
+
+  if (!mb) {
+    va_start(vd.vd_args, pattern);
+    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+    if (alias_from) {
+      va_start(vd.vd_args, pattern);
+      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+      va_end(vd.vd_args);
+    }
+  }
+
+  /* Member-routed dispatch: each link once (a remote member's sentalong
+   * is its link's), and only an IRCv3-aware, ungated link is sent it. */
+  bump_sentalong(one);
+  for (member = to->members; member; member = member->next_member) {
+    struct Client *link;
+
+    if (MyConnect(member->user) || IsZombie(member))
+      continue;
+    if ((skip & SKIP_DEAF) && IsDeaf(member->user))
+      continue;
+    link = cli_from(member->user);
+    if (cli_fd(link) < 0 || cli_sentalong(member->user) == sentalong_marker)
+      continue;
+    cli_sentalong(member->user) = sentalong_marker;
+    if (!IsIRCv3Aware(link) || IsBurstGated(link))
+      continue;
+    if (mb_alias && link == primary_dir)
+      send_buffer(link, mb_alias, 0);
+    else
+      send_buffer(link, mb, 0);
+  }
+
+  msgq_clean(mb);
+  if (mb_alias)
+    msgq_clean(mb_alias);
+}
+
 
 /** Send a (prefixed) command to all users on this channel, except for
  * \a one and those matching \a skip.

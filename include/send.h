@@ -307,6 +307,17 @@ extern void sendcmdto_channel_servers_butone(struct Client *from,
                                              unsigned int skip,
                                              const char *pattern, ...);
 
+/* A fork-only channel line (TAGMSG) to every IRCv3-aware server link with
+ * a member of the channel behind it, once per link; built exactly as
+ * sendcmdto_serv_butone_v3() builds its lines (W5 Task 13). */
+extern void sendcmdto_channel_serv_butone_v3(struct Client *from,
+                                             const char *cmd,
+                                             const char *tok,
+                                             struct Channel *to,
+                                             struct Client *one,
+                                             unsigned int skip,
+                                             const char *pattern, ...);
+
 /* Send command to all interested channel users */
 extern void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 				     const char *tok, struct Channel *to,

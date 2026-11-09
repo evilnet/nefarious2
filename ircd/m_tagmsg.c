@@ -295,26 +295,31 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * large client tag used to push the body past a peer's 512-byte
        * cap and drop the whole link.
        *
-       * sendcmdto_serv_butone_v3() reaches only IRCv3-aware peers, and
-       * toward those it builds the tag region exactly when
-       * P10_MESSAGE_TAGS is on (send_s2s_tags_on()).  With the feature
-       * off there is no ,C to carry the tags, so keep the body form
-       * "@<tags> #chan" that every receiver still reads (ms_tagmsg's
-       * parv[1][0] == '@' branch) -- a bare "TM #chan" would be
-       * dropped -- but only when the whole line fits: the line is cut
-       * at 510 bytes, and a cut ending inside the channel name lands
-       * the tags in another channel (send_s2s_untagged_fits). */
+       * Member-routed, like a channel PRIVMSG (W5 Task 13):
+       * sendcmdto_channel_serv_butone_v3() sends once per IRCv3-aware
+       * link with a member of the channel behind it, skipping deaf
+       * members as this line's local delivery does, so a server with no
+       * member (and every legacy peer) gets nothing.  Toward those links
+       * it builds the tag region exactly when P10_MESSAGE_TAGS is on
+       * (send_s2s_tags_on()).  With the feature off there is no ,C to
+       * carry the tags, so keep the body form "@<tags> #chan" that every
+       * receiver still reads (ms_tagmsg's parv[1][0] == '@' branch) -- a
+       * bare "TM #chan" would be dropped -- but only when the whole line
+       * fits: the line is cut at 510 bytes, and a cut ending inside the
+       * channel name lands the tags in another channel
+       * (send_s2s_untagged_fits). */
       if (!IsLocalChannel(chptr->chname)) {
         if (feature_bool(FEAT_P10_MESSAGE_TAGS)) {
           sendcmdto_set_s2s_tags(tagmsg_ms, tagmsg_msgid);
           sendcmdto_want_s2s_tags(1);
           sendcmdto_set_s2s_client_tags(client_tags);
-          sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s",
-                                chptr->chname);
+          sendcmdto_channel_serv_butone_v3(sptr, CMD_TAGMSG, chptr, cptr,
+                                           SKIP_DEAF, "%s", chptr->chname);
         } else if (send_s2s_untagged_fits(sptr, TOK_TAGMSG, "@%s %s",
                                           client_tags, chptr->chname))
-          sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
-                                client_tags, chptr->chname);
+          sendcmdto_channel_serv_butone_v3(sptr, CMD_TAGMSG, chptr, cptr,
+                                           SKIP_DEAF, "@%s %s",
+                                           client_tags, chptr->chname);
       }
     }
   }
@@ -501,18 +506,22 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Propagate to other servers: client tags ride ,C instead of the
      * body (audit 0.1), and the origin's msgid/time are restated via
      * cptr rather than left for a fresh mint -- this relay used to go
-     * out untagged, losing the msgid.  With P10_MESSAGE_TAGS off no
-     * peer gets a tag region, so the body form, as in m_tagmsg(), when
-     * the whole line fits. */
+     * out untagged, losing the msgid.  Member-routed as at the origin
+     * (W5 Task 13): only toward IRCv3-aware links with a member behind
+     * them, never back toward cptr.  With P10_MESSAGE_TAGS off no peer
+     * gets a tag region, so the body form, as in m_tagmsg(), when the
+     * whole line fits. */
     if (feature_bool(FEAT_P10_MESSAGE_TAGS)) {
       sendcmdto_set_s2s_cptr(cptr);
       sendcmdto_want_s2s_tags(1);
       sendcmdto_set_s2s_client_tags(client_tags);
-      sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "%s", target);
+      sendcmdto_channel_serv_butone_v3(sptr, CMD_TAGMSG, chptr, cptr,
+                                       SKIP_DEAF, "%s", target);
     } else if (send_s2s_untagged_fits(sptr, TOK_TAGMSG, "@%s %s",
                                       client_tags, target))
-      sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
-                               client_tags, target);
+      sendcmdto_channel_serv_butone_v3(sptr, CMD_TAGMSG, chptr, cptr,
+                                       SKIP_DEAF, "@%s %s",
+                                       client_tags, target);
   }
   else {
     /* Target is a user */
