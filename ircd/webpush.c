@@ -1051,8 +1051,10 @@ int webpush_send_async(const struct webpush_subscription *sub,
     goto error;
   }
 
-  /* Note: headers are owned by libkc/curl now; do NOT free them here.
+  /* kc_http_request() copies the headers into a list of its own (freed
+   * with the transfer), so ours is freed here as on the error path.
    * ctx will be freed in the callback. */
+  curl_slist_free_all(headers);
   return 0;
 
 error:
