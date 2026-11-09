@@ -91,9 +91,11 @@ extern void hm_splice_context(struct HistoryMessage *merged,
  * every non-context row at or before the newest one whose context range
  * [its time, now] @a received rejects.  received(ms, ctx) is 1 when that
  * range was received here and no storage peer's absence overlaps it.
- * Monotone (a later start is a sub-range): rows are checked newest first
- * and the first rejection takes every older row, so received() runs at
- * most (passing rows + 1) times.  A context row is never a parent (no
+ * Monotone (a later start is a sub-range): every row up to the newest
+ * rejected one is rejected, so the oldest row is checked first (it passes:
+ * nothing is wanted), then the newest (it is rejected: everything is), and
+ * a bisection finds the cut between them -- received() runs at most
+ * ceil(log2 n) + 2 times for n rows.  A context row is never a parent (no
  * context of context).  The ids point into @a rows.
  * @return msgids written to @a ids, in time order, at most @a max (the
  *   oldest ones when more are wanted). */

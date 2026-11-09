@@ -331,12 +331,26 @@ int hm_children_wanted(const struct HistoryMessage *rows,
   for (i = 0, m = rows; m; m = m->next)
     if (!m->is_context)
       v[i++] = m;
-  /* Newest first: a later start is a sub-range of an earlier one, so the
-   * first rejection takes every older row with it. */
-  for (i = n - 1; i >= 0; i--) {
-    if (!received(hm_ts_ms(v[i]->timestamp), ctx)) {
-      cut = i;
-      break;
+  /* received() is monotone in the row's time (a later start is a
+   * sub-range of an earlier one): every row up to the newest rejected one
+   * is rejected, every row after it passes.  So the oldest row decides
+   * whether anything is wanted, the newest whether everything is, and
+   * between them a bisection finds the cut: at most ceil(log2 n) + 2
+   * calls (each reads the window record and scans every storage peer's
+   * absences; fix round 1). */
+  if (!received(hm_ts_ms(v[0]->timestamp), ctx)) {
+    if (n == 1 || !received(hm_ts_ms(v[n - 1]->timestamp), ctx))
+      cut = n - 1;
+    else {
+      int lo = 0, hi = n - 1;   /* v[lo] rejected, v[hi] passes */
+      while (hi - lo > 1) {
+        int mid = lo + (hi - lo) / 2;
+        if (received(hm_ts_ms(v[mid]->timestamp), ctx))
+          hi = mid;
+        else
+          lo = mid;
+      }
+      cut = lo;
     }
   }
   for (i = 0; i <= cut && out < max; i++)

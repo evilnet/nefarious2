@@ -408,7 +408,8 @@ static struct HistoryMessage *wanted_rows(void)
 }
 
 /* received() rejects [b, now] and passes [d, now]: a and b are asked
- * about, newest first with the monotone stop (e, d, then b: three calls). */
+ * about.  The oldest (a) is rejected and the newest (e) passes, so a
+ * bisection finds the cut: a, e, b, d -- four calls for four rows. */
 static void test_children_wanted_cuts_at_newest_unreceived(void **s)
 {
   struct HistoryMessage *m = wanted_rows();
@@ -422,11 +423,12 @@ static void test_children_wanted_cuts_at_newest_unreceived(void **s)
   assert_string_equal(out[0], "a");
   assert_string_equal(out[1], "b");
   assert_null(out[2]);
-  assert_int_equal(received_calls, 3);
+  assert_int_equal(received_calls, 4);
   history_free_messages(m);
 }
 
-/* Every row's context range was received: nothing to ask. */
+/* Every row's context range was received: nothing to ask.  The oldest
+ * row passing settles it: one call. */
 static void test_children_wanted_all_received(void **s)
 {
   struct HistoryMessage *m = wanted_rows();
@@ -437,12 +439,13 @@ static void test_children_wanted_all_received(void **s)
   received_always = 1;
   assert_int_equal(hm_children_wanted(m, fake_received, NULL, out, 5), 0);
   assert_null(out[0]);
-  assert_int_equal(received_calls, 4);   /* the four rows, the context row skipped */
+  assert_int_equal(received_calls, 1);   /* the oldest row passes: so do the rest */
   history_free_messages(m);
 }
 
 /* None was: every non-context row, in time order; the context row c is no
- * parent (no context of context).  The newest rejects at once: one call. */
+ * parent (no context of context).  The oldest and the newest both reject:
+ * two calls. */
 static void test_children_wanted_none_received_skips_context(void **s)
 {
   struct HistoryMessage *m = wanted_rows();
@@ -457,8 +460,49 @@ static void test_children_wanted_none_received_skips_context(void **s)
   assert_string_equal(out[2], "d");
   assert_string_equal(out[3], "e");
   assert_null(out[4]);
-  assert_int_equal(received_calls, 1);
+  assert_int_equal(received_calls, 2);
   history_free_messages(m);
+}
+
+/* A full page (1000 rows, one a second): wherever the cut falls, the ids
+ * are every row up to it and received() runs at most ceil(log2 n) + 2
+ * times (fix round 1: the per-row check reads the window record and scans
+ * every storage peer's absences). */
+static void test_children_wanted_bisects(void **s)
+{
+  enum { N = 1000 };
+  static const int cuts[] = { -1, 0, 1, 2, 499, 500, 997, 998, 999 };
+  struct HistoryMessage *head = NULL, *tail = NULL, *m;
+  static const char *out[N];
+  char id[16], ts[24];
+  size_t c;
+  int i;
+
+  (void)s;
+  for (i = 0; i < N; i++) {
+    snprintf(id, sizeof id, "R%04d", i);
+    snprintf(ts, sizeof ts, "%d.000", i + 1);
+    m = row(id, ts, "");
+    if (tail)
+      tail->next = m;
+    else
+      head = m;
+    tail = m;
+  }
+  for (c = 0; c < sizeof(cuts) / sizeof(cuts[0]); c++) {
+    int k = cuts[c];   /* rows 0..k rejected (-1: none) */
+    received_calls = 0;
+    received_always = -1;
+    received_from = (uint64_t)(k + 2) * 1000ULL;   /* row i is at (i + 1) * 1000 ms */
+    assert_int_equal(hm_children_wanted(head, fake_received, NULL, out, N), k + 1);
+    if (k >= 0) {
+      assert_string_equal(out[0], "R0000");
+      snprintf(id, sizeof id, "R%04d", k);
+      assert_string_equal(out[k], id);
+    }
+    assert_true(received_calls <= 12);   /* ceil(log2 1000) + 2 */
+  }
+  history_free_messages(head);
 }
 
 /* At most max ids are written, nothing past them. */
@@ -579,6 +623,7 @@ int main(void)
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),
     cmocka_unit_test(test_children_wanted_max),
+    cmocka_unit_test(test_children_wanted_bisects),
     cmocka_unit_test(test_pack_ids_room),
     cmocka_unit_test(test_parse_ids_tokens),
     cmocka_unit_test(test_splice_after_context_run),
