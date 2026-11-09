@@ -1561,6 +1561,14 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            struct HistoryMessage *local_msgs,
                                            int local_count, int ops_override,
                                            const char *ref2, int local_complete);
+static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *target,
+                                              const char *requested,
+                                              const char *subcmd, const char *ref,
+                                              int limit,
+                                              struct HistoryMessage *local_msgs,
+                                              int local_count, int ops_override,
+                                              const char *ref2, int local_complete,
+                                              int own_label);
 static void fed_request_set_why(struct FedRequest *req, int why, int partial);
 static int count_storage_servers(const char *target, time_t query_time);
 static int is_ulined_server(struct Client *server);
@@ -6064,13 +6072,19 @@ static int send_children_request(struct Client *server, const char *dest_yxx,
   return lines;
 }
 
-static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
-                                           const char *requested,
-                                           const char *subcmd, const char *ref,
-                                           int limit,
-                                           struct HistoryMessage *local_msgs,
-                                           int local_count, int ops_override,
-                                           const char *ref2, int local_complete)
+/** start_fed_query, and the bouncer catch-up's channel leg (W5 Push F, I-2)
+ * with @a own_label 0: a leg started while the client's command is still
+ * being processed (an alias attach at registration) must not take that
+ * command's label nor suppress its acknowledgement -- its rows go to the
+ * catch-up's batches, never to a labeled response. */
+static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *target,
+                                              const char *requested,
+                                              const char *subcmd, const char *ref,
+                                              int limit,
+                                              struct HistoryMessage *local_msgs,
+                                              int local_count, int ops_override,
+                                              const char *ref2, int local_complete,
+                                              int own_label)
 {
   struct FedRequest *req;
 
@@ -6257,7 +6271,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   /* Save label for async response delivery */
   req->label[0] = '\0';
   label_responded = cli_label_responded(sptr);
-  if (cli_label(sptr)[0]) {
+  if (own_label && cli_label(sptr)[0]) {
     ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
     cli_label_responded(sptr) = 1;  /* Suppress generic ACK */
   }
@@ -6387,6 +6401,18 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   }
 
   return req;
+}
+
+static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
+                                           const char *requested,
+                                           const char *subcmd, const char *ref,
+                                           int limit,
+                                           struct HistoryMessage *local_msgs,
+                                           int local_count, int ops_override,
+                                           const char *ref2, int local_complete)
+{
+  return start_fed_query_ex(sptr, target, requested, subcmd, ref, limit, local_msgs,
+                            local_count, ops_override, ref2, local_complete, 1);
 }
 
 /*
@@ -6905,6 +6931,93 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
   MyFree(ctx);
 }
 
+/** Drop the rows of @a *head at or before the ATTACH cursor @a since_ts /
+ * @a since_msgid, in the store's key order (time, then msgid): a peer's
+ * LATEST from the cursor's millisecond includes the cursor row and the rows
+ * before it in that millisecond, which the client saw and the local walk
+ * (floored at the cursor's own row) left out.  No-op without a msgid. */
+static void autoreplay_drop_through_cursor(struct HistoryMessage **head,
+                                           const char *since_ts,
+                                           const char *since_msgid)
+{
+  struct HistoryMessage **pp = head;
+  uint64_t cur;
+
+  if (!since_ts || !since_msgid || !since_msgid[0])
+    return;
+  cur = history_parse_ms(since_ts);
+  while (*pp) {
+    struct HistoryMessage *m = *pp;
+    uint64_t t = history_parse_ms(m->timestamp);
+
+    if (t < cur || (t == cur && strcmp(m->msgid, since_msgid) <= 0)) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+      continue;
+    }
+    pp = &m->next;
+  }
+}
+
+/** The page of a federated auto-replay leg: the chain the storeless
+ * auto-replay has run since audit #3 / re-review R7, shared since W5 Push F
+ * (I-2) with a store's bouncer catch-up leg (complete_replay_leg).  The
+ * peers' declared context set aside, every REDACT they sent kept in the
+ * side set (I-B), F-3's fallback, the merge (the newest req->limit, as a
+ * LATEST page), the children leg (CH Q K, W5 Task 14: the children of
+ * local rows a peer holds; none on a storeless server), the ATTACH
+ * cursor's rows dropped (autoreplay_drop_through_cursor; @a since_ts NULL
+ * for none), context, the fail-closed close, the redaction filter and
+ * strict presence -- as presence_filter_and_replay and
+ * chathistory_page_since run them.
+ * @param[out] out The page (the caller owns it), NULL when empty.
+ * @param[out] merged The page's count before the reply-side filters.
+ * @return Its count after them. */
+static int autoreplay_page(struct FedRequest *req, struct Client *sptr,
+                           const char *since_ts, const char *since_msgid,
+                           struct HistoryMessage **out, int *merged)
+{
+  struct HistoryMessage *page, *fed_ctx;
+  int total = 0;
+
+  fed_ctx = extract_fed_context(req);
+  /* As send_fed_response: every REDACT the peers sent keeps its target
+   * past the merge; a lost declaration's child is context. */
+  fed_seed_side(req, fed_ctx);
+  hm_leg_derive(&req->leg, req->local_msgs, &fed_ctx);
+  page = hm_merge(req->local_msgs, req->leg.msgs, req->limit, req->keep_oldest);
+  /* The children leg's children go after the page leg's context, spliced
+   * like the rest (send_fed_response). */
+  if (req->k_msgs) {
+    struct HistoryMessage **tp = &fed_ctx;
+    while (*tp)
+      tp = &(*tp)->next;
+    *tp = req->k_msgs;
+    req->k_msgs = NULL;
+    req->k_count = 0;
+  }
+  autoreplay_drop_through_cursor(&page, since_ts, since_msgid);
+  for (struct HistoryMessage *m = page; m; m = m->next)
+    total++;
+  hm_splice_context(page, fed_ctx);
+
+  /* Same reply-side sequence as presence_filter_and_replay and
+   * chathistory_page_since: context, redaction placeholders, then
+   * strict presence (audit #3; re-review R7 -- this leg replayed
+   * redacted originals). */
+  history_attach_context(req->target, page);
+  /* A REDACT lost with its target unknown: the page fails closed. */
+  fed_close_page(req, &page);
+  if (!page)
+    total = 0;
+  *merged = total;
+  total = redact_filter_messages(req->target, &page, total, &req->leg.side);
+  total = presence_filter_messages(sptr, req->target, &page, total, 0);
+  *out = page;
+  return total;
+}
+
 /** Completion callback for per-channel auto-replay federation request. */
 static void complete_autoreplay_channel(struct FedRequest *req)
 {
@@ -6932,33 +7045,10 @@ static void complete_autoreplay_channel(struct FedRequest *req)
 
   /* Deliver federated results to client */
   if (hm_leg_has_rows(&req->leg)) {
-    struct HistoryMessage *merged;
-    struct HistoryMessage *fed_ctx;
-    int total;
+    struct HistoryMessage *merged = NULL;
+    int total, rows;
 
-    fed_ctx = extract_fed_context(req);
-    /* As send_fed_response: every REDACT the peers sent keeps its target
-     * past the merge; a lost declaration's child is context. */
-    fed_seed_side(req, fed_ctx);
-    hm_leg_derive(&req->leg, req->local_msgs, &fed_ctx);
-    merged = hm_merge(req->local_msgs, req->leg.msgs, req->limit, req->keep_oldest);
-    total = 0;
-    for (struct HistoryMessage *m = merged; m; m = m->next)
-      total++;
-    hm_splice_context(merged, fed_ctx);
-
-    /* Same reply-side sequence as presence_filter_and_replay and
-     * chathistory_page_since: context, redaction placeholders, then
-     * strict presence (audit #3; re-review R7 -- this leg replayed
-     * redacted originals). */
-    history_attach_context(req->target, merged);
-    /* A REDACT lost with its target unknown: the page fails closed. */
-    fed_close_page(req, &merged);
-    if (!merged)
-      total = 0;
-    total = redact_filter_messages(req->target, &merged, total, &req->leg.side);
-    total = presence_filter_messages(sptr, req->target, &merged, total, 0);
-
+    total = autoreplay_page(req, sptr, NULL, NULL, &merged, &rows);
     if (total > 0) {
       /* Complete only when the page was short of the limit AND no
        * responder was cut (send_fed_response's rule; a full page was
@@ -6979,6 +7069,127 @@ static void complete_autoreplay_channel(struct FedRequest *req)
 
   /* Continue to next channel */
   autoreplay_next_channel(ctx);
+}
+
+/* ---------------------------------------------------------------- */
+/* A store's bouncer catch-up, channel leg (W5 Push F, I-2)          */
+/* ---------------------------------------------------------------- */
+
+/** What a federated catch-up leg carries to its completion. */
+struct ReplayLegCtx {
+  unsigned long seq;                     /**< the catch-up's leg (replay_leg_done) */
+  char since_ts[32];                     /**< the floor, "sec.mmm" */
+  char since_msgid[HISTORY_MSGID_LEN];   /**< the ATTACH cursor's row, else empty */
+};
+
+/** A catch-up leg's federation ended: hand its page to the catch-up
+ * (replay_leg_done), which sends it in the leg's place and goes on to the
+ * next channel.  Complete as a LATEST page is (send_fed_response): short
+ * of the limit before the reply-side filters, nobody truncated or cut, the
+ * local walk exhausted; partial when a responder was cut or a store is
+ * away over the leg. */
+static void complete_replay_leg(struct FedRequest *req)
+{
+  struct ReplayLegCtx *ctx;
+  struct Client *sptr;
+  struct HistoryMessage *page = NULL;
+  int total, merged, flags;
+
+  if (!req || req->response_sent)
+    return;
+  req->response_sent = 1;
+  ctx = (struct ReplayLegCtx *)req->cb_data;   /* freed with the request */
+  sptr = findNUser(req->client_yxx);
+  if (!ctx || !sptr || !MyConnect(sptr) || IsDead(sptr))
+    return;
+  total = autoreplay_page(req, sptr, ctx->since_ts, ctx->since_msgid, &page, &merged);
+  flags = ((merged < req->limit && !req->fed_truncated && !req->local_incomplete
+            && !req->cut) ? REPLAY_COMPLETE : 0)
+          | ((req->cut || req->partial) ? REPLAY_PARTIAL : 0);
+  replay_leg_done(sptr, ctx->seq, req->target, page, total, flags);
+}
+
+int chathistory_replay_channel_leg(struct Client *sptr, const char *channame, int limit,
+                                   const char *since_timestamp, const char *since_msgid,
+                                   unsigned long seq, struct HistoryMessage **out,
+                                   int *flags)
+{
+  struct HistoryMessage *messages = NULL;
+  struct PresenceQueryFilter *pf = NULL;
+  struct HistoryRowFilter bare, *hook;
+  int count, complete, partial = 0, why;
+
+  *out = NULL;
+  *flags = 0;
+  if (!history_is_available())
+    return -1;
+
+  /* The local walk chathistory_page_since makes: LATEST with a floor, the
+   * presence hook, type mask and typing veto inside it. */
+  if (open_query_presence(sptr, channame, 0, &pf) < 0)
+    return 0;   /* fail closed: nothing visible to replay */
+  hook = query_row_filter(sptr, pf, &bare);
+  count = history_query_latest_after(channame, limit, since_timestamp,
+                                     since_msgid, &messages, hook);
+  complete = query_page_complete(hook, count, limit);
+  presence_query_filter_close(pf);
+  if (count < 0)
+    return -1;
+
+  /* The leg is a LATEST page from the floor: the same receive-window and
+   * absence decision as an on-demand LATEST (federation_wanted), so a leg
+   * whose span this store did not receive, or that crosses a storage
+   * peer's absence, asks the peers, the local rows going with the request
+   * as an on-demand page's do. */
+  why = federation_wanted(channame, FP_LATEST, count, limit, messages,
+                          HISTORY_REF_TIMESTAMP, since_timestamp, HISTORY_REF_NONE,
+                          NULL, &partial);
+  if (why) {
+    char iso[64], ref[80];
+    struct FedRequest *req = NULL;
+    int missed = 1;
+
+    if (history_unix_to_iso(since_timestamp, iso, sizeof(iso)) == 0) {
+      ircd_snprintf(0, ref, sizeof(ref), "timestamp=%s", iso);
+      req = start_fed_query_ex(sptr, channame, channame, "LATEST", ref, limit,
+                               messages, count, 0, NULL, complete, /*own_label=*/0);
+      fed_count(req, why);
+      missed = fed_start_missed();
+    }
+    if (req) {
+      struct ReplayLegCtx *ctx = (struct ReplayLegCtx *)MyCalloc(1, sizeof(*ctx));
+
+      ctx->seq = seq;
+      ircd_strncpy(ctx->since_ts, since_timestamp, sizeof(ctx->since_ts));
+      if (since_msgid)
+        ircd_strncpy(ctx->since_msgid, since_msgid, sizeof(ctx->since_msgid));
+      fed_request_set_why(req, why, partial);
+      req->completion_cb = complete_replay_leg;
+      req->cb_data = ctx;   /* MyFree'd with the request */
+      return REPLAY_LEG_PENDING;   /* the rows went with the request */
+    }
+    /* Not started.  A storage peer that may hold the rest exists and was
+     * not asked (no slot, federation off here): the local rows go out
+     * partial, with no end tag.  No peer to ask at all: they are all there
+     * is -- partial only when one is away (federation_wanted). */
+    if (missed && why != FED_WHY_CONTEXT)
+      partial = 1;
+  }
+
+  if (count > 0 && messages) {
+    /* Same reply-side sequence as presence_filter_and_replay. */
+    history_attach_context(channame, messages);
+    count = redact_filter_messages(channame, &messages, count, NULL);
+    count = presence_filter_messages(sptr, channame, &messages, count, 0);
+  }
+  if (count <= 0 || !messages) {
+    if (messages)
+      history_free_messages(messages);
+    return 0;
+  }
+  *out = messages;
+  *flags = (complete && !partial ? REPLAY_COMPLETE : 0) | (partial ? REPLAY_PARTIAL : 0);
+  return count;
 }
 
 /** Start federated auto-replay for a bouncer alias.

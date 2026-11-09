@@ -845,6 +845,25 @@ extern int chathistory_page_since(struct Client *sptr, const char *target,
                                   const char *since_msgid,
                                   struct HistoryMessage **out, int *complete);
 
+/** The bouncer catch-up's leg for channel @a channame on a store (W5 Push
+ * F, I-2; replay.c's replay_next_channel): chathistory_page_since's walk,
+ * then the on-demand LATEST page's receive-window and absence decision
+ * (federation_wanted).  A leg this store did not wholly receive, or that
+ * crosses a storage peer's absence, is federated -- the local rows with
+ * the request, as an on-demand page's -- and its page arrives later
+ * through replay_leg_done(@a sptr, @a seq, ...): REPLAY_LEG_PENDING.  A leg
+ * that cannot be federated while a storage peer that may hold the rest is
+ * linked (no request slot, federation off here), or while one is away, is
+ * the local rows, REPLAY_PARTIAL.
+ * @param[out] out Page rows (oldest first), NULL when empty; caller owns.
+ * @param[out] flags REPLAY_COMPLETE / REPLAY_PARTIAL for the batch opener.
+ * @return Row count (0 = nothing to replay), -1 on error, or
+ *   REPLAY_LEG_PENDING. */
+extern int chathistory_replay_channel_leg(struct Client *sptr, const char *channame,
+                                          int limit, const char *since_timestamp,
+                                          const char *since_msgid, unsigned long seq,
+                                          struct HistoryMessage **out, int *flags);
+
 /** Free partial federation chunk reassembly buffers (CH B read responses and
  *  CH WB writes) that arrived from a server link that is now exiting, so they
  *  don't leak when a peer squits mid-stream. Call from exit_one_client. */

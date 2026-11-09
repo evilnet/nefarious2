@@ -57,6 +57,10 @@ enum ReplayPhase {
 #define REPLAY_COMPLETE 1
 #define REPLAY_PARTIAL  2
 
+/** chathistory_replay_channel_leg: the leg was federated; its page comes
+ * through replay_leg_done (W5 Push F, I-2). */
+#define REPLAY_LEG_PENDING (-2)
+
 struct ReplayState {
   /* === Message-level iteration (current batch) === */
   struct HistoryMessage *messages;    /**< Owned linked list */
@@ -77,6 +81,12 @@ struct ReplayState {
   int label_used;                     /**< Whether label was applied */
   int is_last_page;                   /**< True if query returned fewer results than limit */
   int is_partial;                     /**< evilnet.github.io/chathistory-partial on the opener */
+
+  /** A bouncer catch-up waiting for a federated channel leg (W5 Push F,
+   * I-2): nothing is sent and no further channel is read until
+   * replay_leg_done brings the leg whose number is leg_seq. */
+  int leg_pending;
+  unsigned long leg_seq;
 
   /** A bouncer catch-up suspended while this on-demand page is served;
    * reinstalled and continued when this state is freed (audit #26/#20:
@@ -155,6 +165,17 @@ extern void replay_continue(struct Client *sptr);
  * @param[in] sptr Client to cancel replay for.
  */
 extern void replay_cancel(struct Client *sptr);
+
+/** A federated catch-up leg's page arrived (m_chathistory.c's
+ * complete_replay_leg; W5 Push F, I-2): @a msgs (@a count rows, owned from
+ * here; NULL/0 for none) for channel @a target with @a flags
+ * (REPLAY_COMPLETE / REPLAY_PARTIAL), for the catch-up of @a sptr waiting
+ * on leg @a seq -- the active one, or one suspended behind an on-demand
+ * page.  It is sent in the leg's place, in the same order and batching as
+ * a local leg, and the catch-up goes on.  Freed when no such catch-up is
+ * waiting (cancelled, replaced). */
+extern void replay_leg_done(struct Client *sptr, unsigned long seq, const char *target,
+                            struct HistoryMessage *msgs, int count, int flags);
 
 /** Name the other party of the PM pair key @a pair_key for @a sptr: the
  * live client on the other half's account, else the newest row's sender

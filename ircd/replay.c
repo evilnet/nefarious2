@@ -642,9 +642,15 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
   return 1;  /* Batch completed */
 }
 
+/** The number of the next federated catch-up leg (W5 Push F, I-2): never
+ * reused, so a leg that comes back after its catch-up was cancelled, or a
+ * new one started, finds nobody waiting for it. */
+static unsigned long replay_leg_counter;
+
 /** Advance to the next channel in a bouncer replay.
  * Queries history for each channel, skipping channels with no missed messages.
- * @return 1 if a new batch was started, 0 if channels exhausted.
+ * @return 1 if a new batch was started, 0 if channels exhausted, -1 when a
+ * channel's leg was federated (rs->leg_pending; replay_leg_done resumes).
  */
 static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
 {
@@ -683,14 +689,30 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
      * veto inside the walk, context attached, redacted originals
      * dropped.  A bare walk here replayed redacted content and let a
      * JOIN/PART run empty the page (audit 2026-09-06, wave 1). */
+    /* A store's leg is checked against its receive windows and the
+     * storage peers' absences as an on-demand LATEST page is (W5 Push F,
+     * I-2): a channel this server had no member in while the session was
+     * away, so was routed none of its traffic, is federated -- the leg
+     * waits for its page (replay_leg_done), and the next channel waits
+     * behind it, so the order and batching stay as they were.  A leg that
+     * cannot be federated while a peer may hold the rest is partial: no
+     * draft/chathistory-end. */
     {
-      int complete = 1;
-      count = chathistory_page_since(sptr, channame, rs->replay_limit,
-                                     chan_since, rs->since_msgid,
-                                     &messages, &complete);
+      int flags = 0;
+      unsigned long seq = ++replay_leg_counter;
+
+      count = chathistory_replay_channel_leg(sptr, channame, rs->replay_limit,
+                                             chan_since, rs->since_msgid, seq,
+                                             &messages, &flags);
+      if (count == REPLAY_LEG_PENDING) {
+        rs->leg_pending = 1;
+        rs->leg_seq = seq;
+        return -1;
+      }
       if (count <= 0 || !messages)
         continue;
-      rs->is_last_page = complete;
+      rs->is_partial = (flags & REPLAY_PARTIAL) != 0;
+      rs->is_last_page = (flags & REPLAY_COMPLETE) && !rs->is_partial;
     }
 
     /* Set up new batch */
@@ -734,6 +756,7 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
       if (count <= 0 || !messages)
         continue;
       rs->is_last_page = complete;
+      rs->is_partial = 0;   /* a channel leg before it may have set it */
     }
 
     /* Set up new batch.  Storage key is "lowerNick:higherNick" — the
@@ -843,6 +866,11 @@ void replay_continue(struct Client *sptr)
     return;
   }
 
+  /* A federated channel leg is out (W5 Push F, I-2): replay_leg_done
+   * resumes. */
+  if (rs->leg_pending)
+    return;
+
   /* If we have messages queued, keep sending.  A page resumed after a
    * suspension has rows but its batch was closed: reopen it. */
   if (rs->current) {
@@ -871,7 +899,11 @@ void replay_continue(struct Client *sptr)
   /* Multi-channel bouncer replay — advance to next target */
   for (;;) {
     if (rs->phase == REPLAY_PHASE_CHANNELS) {
-      if (replay_next_channel(sptr, rs)) {
+      int next = replay_next_channel(sptr, rs);
+
+      if (next < 0)
+        return;   /* a federated leg is out: replay_leg_done resumes */
+      if (next) {
         /* New batch opened — send messages */
         if (!replay_send_messages(sptr, rs))
           return;  /* Paused for sendQ */
@@ -986,18 +1018,23 @@ void replay_start_batch(struct Client *sptr, const char *target,
    * state, and replay_cancel reinstalls it when this on-demand page is
    * done.  The user's own query is served first; nothing is dropped.
    * Anything else in the slot (another on-demand page) is cancelled as
-   * before. */
+   * before -- and a catch-up THAT page had suspended, which replay_cancel
+   * reinstalls, is suspended behind this one in turn (it used to be
+   * overwritten below and leaked, its remaining channels never sent;
+   * reachable once a catch-up leg can wait on a peer: W5 Push F, I-2). */
   if (cli_replay(sptr)) {
     struct ReplayState *old = cli_replay(sptr);
-    if (old->phase == REPLAY_PHASE_CHANNELS || old->phase == REPLAY_PHASE_PMS) {
+    if (old->phase != REPLAY_PHASE_CHANNELS && old->phase != REPLAY_PHASE_PMS) {
+      replay_cancel(sptr);
+      old = cli_replay(sptr);
+    }
+    if (old && (old->phase == REPLAY_PHASE_CHANNELS || old->phase == REPLAY_PHASE_PMS)) {
       if (old->batch_open && !IsDead(sptr))
         replay_close_batch(sptr, old);
       if (old->outer_batch_open && !IsDead(sptr))
         replay_close_outer_batch(sptr, old);
       cli_replay(sptr) = NULL;
       suspended = old;
-    } else {
-      replay_cancel(sptr);
     }
   }
 
@@ -1193,6 +1230,45 @@ void replay_start_catchup(struct Client *sptr, time_t since_time, int limit)
               "Cursor msgid not found; replaying from last activity");
   }
   replay_start_bouncer(sptr, since_time, limit);
+}
+
+void replay_leg_done(struct Client *sptr, unsigned long seq, const char *target,
+                     struct HistoryMessage *msgs, int count, int flags)
+{
+  struct ReplayState *rs = NULL;
+
+  /* The catch-up waiting for this leg: the active state, or one suspended
+   * behind an on-demand page (replay_start_batch keeps it in ->resume). */
+  if (sptr && MyConnect(sptr) && !IsDead(sptr))
+    for (rs = cli_replay(sptr); rs; rs = rs->resume)
+      if (rs->leg_pending && rs->leg_seq == seq)
+        break;
+  if (!rs) {
+    if (msgs)
+      history_free_messages(msgs);
+    return;
+  }
+  rs->leg_pending = 0;
+  if (count > 0 && msgs) {
+    /* The leg's page, as replay_next_channel sets up a local one; its batch
+     * opens when it is sent (replay_continue opens one for a page that has
+     * rows and no open batch). */
+    rs->messages = msgs;
+    rs->current = msgs;
+    ircd_strncpy(rs->target, target, sizeof(rs->target));
+    rs->other_nick[0] = '\0';
+    rs->is_pm = 0;
+    rs->is_partial = (flags & REPLAY_PARTIAL) != 0;
+    rs->is_last_page = (flags & REPLAY_COMPLETE) && !rs->is_partial;
+    rs->chan_count++;
+  } else if (msgs)
+    history_free_messages(msgs);
+  /* Suspended: it goes on when the on-demand page is done (replay_cancel
+   * reinstalls it). */
+  if (rs == cli_replay(sptr)) {
+    update_write(sptr);
+    replay_continue(sptr);
+  }
 }
 
 /** Cancel and clean up any in-progress replay.
