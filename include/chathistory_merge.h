@@ -390,4 +390,31 @@ extern int hm_targets_page(struct HistoryTarget **list, uint64_t first_ms,
 extern int hm_targets_responder(struct HistoryTarget **list, uint64_t first_ms,
                                 uint64_t second_ms, int cap, int *cut);
 
+/** What one storage peer has sent for a TARGETS request, in its order
+ * (hm_targets_responder's: in-window rows nearest the first selector, then
+ * veto rows), so the requester can tell where a cut answer stops being
+ * whole. */
+struct hm_targets_resp {
+  int si;                 /**< the responder (server_ad_index) */
+  int any_in;             /**< it sent an in-window row */
+  uint64_t last_in_ms;    /**< the last in-window row's stamp: the farthest
+                           *   from the first selector it reached */
+  int saw_veto;           /**< it sent a veto row: every in-window row it
+                           *   held came before it */
+  int cut;                /**< its E carried T (it stopped at its cap) */
+};
+
+/** Record a CH T row of stamp @a ms on @a r. */
+extern void hm_targets_resp_row(struct hm_targets_resp *r, uint64_t first_ms,
+                                uint64_t second_ms, uint64_t ms);
+
+/** Does a responder's cut leave a known hole in the TARGETS @a page
+ * (ascending, as hm_targets_page leaves it; @a more its "more beyond")?
+ * A responder that cut (T) before any veto row may hold in-window rows
+ * past the last one it sent -- its horizon.  The page is partial when it
+ * reaches past the nearest such horizon. */
+extern int hm_targets_cut_partial(const struct hm_targets_resp *resp, int n,
+                                  uint64_t first_ms, uint64_t second_ms,
+                                  const struct HistoryTarget *page, int more);
+
 #endif /* INCLUDED_chathistory_merge_h */

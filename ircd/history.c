@@ -93,6 +93,9 @@ static struct db_cf  *history_cf_recv = NULL;
 /* The PM pairs each identity takes part in (W5 Task 11, pm_pair_index.h):
  * TARGETS finds a requester's own pairs without walking every target. */
 static struct db_cf  *history_cf_pm_pairs = NULL;
+/** The pair index's rebuild at this start succeeded: it holds every pair
+ * key of the targets CF (history_pm_index_whole). */
+static int history_pm_index_ok = 0;
 
 /** The trimmer's slice timer (history_trim_arm adds it, only when it is
  * not already queued). */
@@ -598,12 +601,18 @@ int history_init(const char *dbpath)
    * and ignores it, so a downgrade and re-upgrade leaves it behind.  It
    * writes only what is missing or orphaned, in bounded batches; a failure
    * leaves whole batches and the next open completes it.  Until then a
-   * pair without its rows is missing from TARGETS (logged). */
+   * pair without its rows may be missing from TARGETS, so every TARGETS
+   * that lists PM conversations is answered partial, here and on the
+   * peers this store answers (history_pm_index_whole; logged). */
+  history_pm_index_ok = 0;
   if (pm_pair_index_rebuild(history_db_env, history_cf_targets,
-                            history_cf_pm_pairs) != 0)
+                            history_cf_pm_pairs) == 0)
+    history_pm_index_ok = 1;
+  else
     log_write(LS_SYSTEM, L_WARNING, 0,
-              "history: PM pair index rebuild did not complete; TARGETS may "
-              "miss PM conversations until the next start (%s)",
+              "history: PM pair index rebuild did not complete; until a start "
+              "whose rebuild completes, TARGETS may miss PM conversations and "
+              "is answered partial (%s)",
               db_env_last_error(history_db_env)
                 ? db_env_last_error(history_db_env) : "no backend detail");
 
@@ -713,6 +722,7 @@ void history_shutdown(void)
   history_cf_by_owner = NULL;
   history_cf_recv = NULL;
   history_cf_pm_pairs = NULL;
+  history_pm_index_ok = 0;
   history_available = 0;
 
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
@@ -3098,6 +3108,11 @@ int history_query_between(const char *target,
 
   *result = head;
   return count;
+}
+
+int history_pm_index_whole(void)
+{
+  return history_available && history_pm_index_ok;
 }
 
 int history_target_latest(const char *target, char *ts, size_t tslen)

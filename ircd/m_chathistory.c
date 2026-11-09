@@ -2837,25 +2837,13 @@ static unsigned long fed_reqid_counter = 0;
 
 static int server_ad_index(struct Client *server);   /* below */
 
-/** What one storage peer sent for a TARGETS request (its order is
- * hm_targets_responder's), to tell where a cut answer stops being whole. */
-struct TargetsResp {
-  int si;                 /**< server_ad_index of the responder */
-  int any_in;             /**< it sent an in-window row */
-  uint64_t last_in_ms;    /**< the last in-window row's stamp: the farthest
-                           *   from the first selector it reached */
-  int saw_veto;           /**< it sent a veto row: every in-window row it
-                           *   held came before it */
-  int cut;                /**< its E carried T */
-};
-
 /** Context for federated TARGETS query, stored in FedRequest.cb_data. */
 struct TargetsFedContext {
   struct HistoryTarget *local_targets;   /**< The requester's own (targets_collect) */
   struct HistoryTarget *fed_targets;     /**< The peers' CH T rows */
   uint64_t first_ms;                     /**< The client's first bound */
   uint64_t second_ms;                    /**< ... and its second */
-  struct TargetsResp *resp;              /**< One per responder heard from */
+  struct hm_targets_resp *resp;          /**< One per responder heard from */
   int nresp, resp_max;
 };
 
@@ -2961,7 +2949,9 @@ static int targets_collect(struct Client *rq, uint64_t lo_ms, struct HistoryTarg
  * A storage peer that is away right now leaves a known hole: *@a partial
  * is set (user decision 2026-11-08: no end tag, and
  * evilnet.github.io/chathistory-partial), even when no peer is left to
- * ask -- this replaces "no storage peers, so complete".
+ * ask -- this replaces "no storage peers, so complete".  So is a page from
+ * a store whose PM pair index rebuild failed at this start
+ * (history_pm_index_whole).
  * @return 1 to federate, 0 not. */
 static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *local,
                                      uint64_t lo_ms, uint64_t hi_ms, int *partial)
@@ -2974,6 +2964,10 @@ static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *
   if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
     int open_hit = 0;
     if (absence_overlap((time_t)(lo_ms / 1000ULL), 0, &open_hit) && open_hit)
+      *partial = 1;
+    /* A pair index whose rebuild failed at this start may lack pairs: the
+     * page may lack PM conversations this store holds. */
+    if (!history_pm_index_whole())
       *partial = 1;
     want = 1;
   }
@@ -3094,8 +3088,12 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *page,
       if (live)
         row_target = live->chname;
     } else {
-      /* PM pair key: name the row after the other party (their live
-       * nick, else the nick their newest row carries).  The raw half of
+      /* PM pair key: name the row after the other party from the newest
+       * stored rows (replay_pm_display_nick): the nick the other party's
+       * newest row carries -- that same session's current nick while it
+       * is connected -- else the nick the requester addressed, else the
+       * other party's account.  Never another live client's nick: an
+       * account's connections are not interchangeable.  The raw half of
        * the key is an identity -- for an account-less party a session id
        * -- and must never reach a client as a "target" (PoxChat opened
        * "Dialog with AaBj..." on prod, 2026-09-02).  targets_eligible
@@ -3123,26 +3121,18 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *page,
  * @param[in] whole Every store that could be asked answered in full (no
  *   responder cut its rows, none was lost, no request slot was missing).
  * @param[in] partial A store's answer is known to be missing.
- * @param[in] horizon When @a has_horizon, the farthest stamp from the first
- *   selector up to which every cut responder's in-window rows arrived: a
- *   page row beyond it may lack that responder's stamp (partial). */
+ * @param[in] resp What each responder sent (NULL when local): a cut one's
+ *   answer may leave a hole the page reaches into (hm_targets_cut_partial). */
 static void targets_answer(struct Client *sptr, struct HistoryTarget *list,
                            uint64_t first_ms, uint64_t second_ms, int limit,
                            const char *label, int whole, int partial,
-                           int has_horizon, uint64_t horizon)
+                           const struct hm_targets_resp *resp, int nresp)
 {
-  struct HistoryTarget *t;
   int more = 0;
 
   hm_targets_page(&list, first_ms, second_ms, limit, targets_eligible, sptr, &more);
-  if (has_horizon)
-    for (t = list; t; t = t->next) {
-      uint64_t ms = history_parse_ms(t->last_timestamp);
-      if (first_ms < second_ms ? ms > horizon : ms < horizon) {
-        partial = 1;
-        break;
-      }
-    }
+  if (resp && hm_targets_cut_partial(resp, nresp, first_ms, second_ms, list, more))
+    partial = 1;
   /* The end tag (I8): nothing eligible beyond the page in its direction,
    * and the network's answer whole. */
   send_targets_batch(sptr, list, label, whole && !partial && !more, partial);
@@ -3150,7 +3140,7 @@ static void targets_answer(struct Client *sptr, struct HistoryTarget *list,
 }
 
 /** The responder entry for @a si (added when new; NULL past the table). */
-static struct TargetsResp *targets_resp(struct TargetsFedContext *ctx, int si)
+static struct hm_targets_resp *targets_resp(struct TargetsFedContext *ctx, int si)
 {
   int i;
   for (i = 0; i < ctx->nresp; i++)
@@ -3168,8 +3158,7 @@ static void add_fed_target(struct FedRequest *req, struct Client *from,
                            const char *target, const char *last_timestamp)
 {
   struct TargetsFedContext *ctx;
-  struct TargetsResp *r;
-  uint64_t ms, lo, hi;
+  struct hm_targets_resp *r;
 
   if (!req || !req->cb_data || req->completion_cb != complete_targets_fed)
     return;
@@ -3178,23 +3167,16 @@ static void add_fed_target(struct FedRequest *req, struct Client *from,
 
   /* Where this responder's answer has reached (it sends in-window rows
    * nearest the first selector first, veto rows last). */
-  ms = history_parse_ms(last_timestamp);
-  lo = ctx->first_ms < ctx->second_ms ? ctx->first_ms : ctx->second_ms;
-  hi = ctx->first_ms < ctx->second_ms ? ctx->second_ms : ctx->first_ms;
   r = targets_resp(ctx, server_ad_index(from));
-  if (!r)
-    return;
-  if (ms > lo && ms < hi) {
-    r->any_in = 1;
-    r->last_in_ms = ms;
-  } else if (ms >= hi)
-    r->saw_veto = 1;
+  if (r)
+    hm_targets_resp_row(r, ctx->first_ms, ctx->second_ms,
+                        history_parse_ms(last_timestamp));
 }
 
 /** A TARGETS responder's E carried T: it cut its answer at CH_T_MAX_ROWS. */
 static void targets_note_cut(struct FedRequest *req, struct Client *from)
 {
-  struct TargetsResp *r;
+  struct hm_targets_resp *r;
   if (!req || !req->cb_data || req->completion_cb != complete_targets_fed)
     return;
   r = targets_resp((struct TargetsFedContext *)req->cb_data, server_ad_index(from));
@@ -3258,7 +3240,7 @@ static struct FedRequest *start_fed_targets_query(
   ctx->first_ms = first_ms;
   ctx->second_ms = second_ms;
   ctx->resp_max = server_count;
-  ctx->resp = (struct TargetsResp *)MyCalloc((size_t)server_count, sizeof(*ctx->resp));
+  ctx->resp = (struct hm_targets_resp *)MyCalloc((size_t)server_count, sizeof(*ctx->resp));
 
   /* Create request */
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
@@ -3327,8 +3309,6 @@ static void complete_targets_fed(struct FedRequest *req)
   struct TargetsFedContext *ctx;
   struct HistoryTarget *merged;
   struct Client *client;
-  uint64_t horizon = 0;
-  int has_horizon = 0, i, fwd;
 
   if (!req || req->response_sent || !req->cb_data)
     return;
@@ -3340,32 +3320,19 @@ static void complete_targets_fed(struct FedRequest *req)
     return;  /* Client disconnected */
 
   ctx = (struct TargetsFedContext *)req->cb_data;
-  fwd = ctx->first_ms < ctx->second_ms;
-
-  /* A responder that cut its answer (T) and sent no veto row may hold
-   * in-window rows past the last one it sent: the page is whole only up to
-   * there (the nearest such point over every cut responder). */
-  for (i = 0; i < ctx->nresp; i++) {
-    struct TargetsResp *r = &ctx->resp[i];
-    uint64_t h;
-    if (!r->cut || r->saw_veto)
-      continue;
-    h = r->any_in ? r->last_in_ms : ctx->first_ms;
-    if (!has_horizon || (fwd ? h < horizon : h > horizon))
-      horizon = h;
-    has_horizon = 1;
-  }
 
   /* One row per target at its network-wide latest, then the page.  A
    * responder lost (timeout, SQUIT) or one that could not answer (U)
    * leaves a known hole: partial, no end tag (user decision 2026-11-08).
-   * One that cut its rows (T) leaves the answer not whole: no end tag. */
+   * One that cut its rows (T) leaves the answer not whole: no end tag; and
+   * where it cut before its veto rows, a hole the page may reach into
+   * (hm_targets_cut_partial). */
   merged = hm_targets_merge(ctx->local_targets, ctx->fed_targets);
   ctx->local_targets = NULL;
   ctx->fed_targets = NULL;
   targets_answer(client, merged, ctx->first_ms, ctx->second_ms, req->limit,
                  req->label, !req->fed_truncated && !req->cut,
-                 req->partial || req->cut, has_horizon, horizon);
+                 req->partial || req->cut, ctx->resp, ctx->nresp);
 }
 
 /** Custom cleanup for TargetsFedContext — frees inner target lists. */
@@ -3492,7 +3459,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   }
 
   targets_answer(sptr, targets, first_ms, second_ms, limit, cli_label(sptr),
-                 whole, partial, 0, 0);
+                 whole, partial, NULL, 0);
   return 0;
 }
 
@@ -7766,8 +7733,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * at most CH_T_MAX_ROWS, then E <reqid> <n> [T].  The requester is
      * named by P<yxx> and, from a Task 11 origin, its identity
      * (parv[11]: targets_requester); one this store cannot name, an
-     * unparsable span or a read error is answered E <reqid> 0 U, never a
-     * walk over every target. */
+     * unparsable span, a read error or a PM pair index this start could not
+     * rebuild is answered E <reqid> 0 U, never a walk over every target. */
     if (query_subcmd_str[0] == 'T') {
       struct HistoryTarget *targets = NULL, *tgt;
       struct Client *rq;
@@ -7795,6 +7762,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         return 0;
       }
 
+      /* A pair index this start could not rebuild may lack pairs: the
+       * answer would be missing some, so say it could not answer. */
+      if (feature_bool(FEAT_CHATHISTORY_PRIVATE) && !history_pm_index_whole()) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
       rq = targets_requester(requester, (parc >= 12 && !EmptyString(parv[11])) ? parv[11] : NULL);
       if (!rq) {
         Debug((DEBUG_DEBUG, "CH Q T %s: requester %s %s not named here", reqid,

@@ -1709,9 +1709,140 @@ static void test_responder_direction_and_ties(void **s)
   tfree(l);
 }
 
+/* Fix round 1 (review of 28cc0b18): where a responder's cut leaves a hole.
+ * A responder that cut (T) before any veto row may hold in-window rows past
+ * the last one it sent (its horizon). */
+static struct hm_targets_resp resp_cut(int any_in, uint64_t last_in_ms, int saw_veto, int cut)
+{
+  struct hm_targets_resp r;
+  memset(&r, 0, sizeof r);
+  r.any_in = any_in;
+  r.last_in_ms = last_in_ms;
+  r.saw_veto = saw_veto;
+  r.cut = cut;
+  return r;
+}
+
+/* The page reaches past the horizon: partial. */
+static void test_cut_partial_page_past_horizon(void **s)
+{
+  struct hm_targets_resp r = resp_cut(1, S(20), 0, 1);
+  struct HistoryTarget *page = tchain(2, tgt("#a", "10.000"), tgt("#b", "30.000"));
+  (void)s;
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(0), S(100), page, 1), 1);
+  tfree(page);
+}
+
+/* The page stops at or before the horizon and more lies beyond it: the
+ * next page asks the responder again from there -- no hole. */
+static void test_cut_partial_full_page_inside_horizon(void **s)
+{
+  struct hm_targets_resp r = resp_cut(1, S(20), 0, 1);
+  struct HistoryTarget *page = tchain(2, tgt("#a", "10.000"), tgt("#b", "20.000"));
+  (void)s;
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(0), S(100), page, 1), 0);
+  tfree(page);
+}
+
+/* The gap the review found: a short (or last) page inside the horizon
+ * claims the whole rest of the window, but the cut responder holds
+ * in-window rows past its horizon that never arrived.  Partial. */
+static void test_cut_partial_short_page_inside_horizon(void **s)
+{
+  struct hm_targets_resp r = resp_cut(1, S(20), 0, 1);
+  struct HistoryTarget *page = tchain(1, tgt("#a", "10.000"));
+  (void)s;
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(0), S(100), page, 0), 1);
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(0), S(100), NULL, 0), 1);
+  tfree(page);
+}
+
+/* Backwards: the horizon is the oldest in-window stamp it reached. */
+static void test_cut_partial_backward(void **s)
+{
+  struct hm_targets_resp r = resp_cut(1, S(50), 0, 1);
+  struct HistoryTarget *page;
+  (void)s;
+  page = tchain(1, tgt("#a", "40.000"));
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(100), S(0), page, 1), 1);
+  tfree(page);
+  page = tchain(1, tgt("#a", "60.000"));
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(100), S(0), page, 1), 0);
+  assert_int_equal(hm_targets_cut_partial(&r, 1, S(100), S(0), page, 0), 1);
+  tfree(page);
+}
+
+/* No hole: a responder that did not cut, or cut only among its veto rows
+ * (it sent one, so every in-window row came first). */
+static void test_cut_partial_no_hole(void **s)
+{
+  struct hm_targets_resp r[2];
+  struct HistoryTarget *page = tchain(1, tgt("#a", "90.000"));
+  (void)s;
+  r[0] = resp_cut(1, S(20), 0, 0);
+  r[1] = resp_cut(1, S(20), 1, 1);
+  assert_int_equal(hm_targets_cut_partial(r, 2, S(0), S(100), page, 0), 0);
+  assert_int_equal(hm_targets_cut_partial(NULL, 0, S(0), S(100), page, 0), 0);
+  tfree(page);
+}
+
+/* hm_targets_resp_row: what a responder's rows tell (in-window, veto). */
+static void test_resp_row(void **s)
+{
+  struct hm_targets_resp r;
+  (void)s;
+  memset(&r, 0, sizeof r);
+  hm_targets_resp_row(&r, S(0), S(100), S(0));     /* at the bound: neither */
+  assert_int_equal(r.any_in, 0);
+  hm_targets_resp_row(&r, S(0), S(100), S(30));
+  hm_targets_resp_row(&r, S(0), S(100), S(40));
+  assert_int_equal(r.any_in, 1);
+  assert_true(r.last_in_ms == S(40));
+  assert_int_equal(r.saw_veto, 0);
+  hm_targets_resp_row(&r, S(0), S(100), S(100));   /* the upper bound: veto */
+  assert_int_equal(r.saw_veto, 1);
+}
+
+/* A bound's seconds past what ms can hold clamp, never wrap. */
+static void test_targets_ref_ms_huge(void **s)
+{
+  uint64_t ms = 0, big = 0;
+  (void)s;
+  assert_int_equal(hm_targets_ref_ms("18446744073709552", &ms), 0);   /* x1000 wraps */
+  assert_true(ms > 253370764800000ULL);                               /* past 9999 */
+  assert_int_equal(hm_targets_ref_ms("99999999999999999999999.999", &big), 0);
+  assert_true(big >= ms);
+  assert_int_equal(hm_targets_ref_ms("253370764800", &ms), 0);
+  assert_true(ms == 253370764800000ULL);
+}
+
+/* An ISO day that does not exist in its month is refused (timegm would
+ * roll it into the next month: "Feb 30" would page from March 2). */
+static void test_targets_ref_ms_calendar(void **s)
+{
+  uint64_t ms;
+  (void)s;
+  assert_int_equal(hm_targets_ref_ms("2026-02-30T00:00:00.000Z", &ms), -1);
+  assert_int_equal(hm_targets_ref_ms("2023-02-29T00:00:00.000Z", &ms), -1);
+  assert_int_equal(hm_targets_ref_ms("1900-02-29T00:00:00.000Z", &ms), -1);
+  assert_int_equal(hm_targets_ref_ms("2026-04-31T00:00:00.000Z", &ms), -1);
+  assert_int_equal(hm_targets_ref_ms("2024-02-29T00:00:00.000Z", &ms), 0);
+  assert_int_equal(hm_targets_ref_ms("2000-02-29T00:00:00.000Z", &ms), 0);
+  assert_true(ms == 951782400000ULL);
+  assert_int_equal(hm_targets_ref_ms("2026-12-31T23:59:59.999Z", &ms), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_cut_partial_page_past_horizon),
+    cmocka_unit_test(test_cut_partial_full_page_inside_horizon),
+    cmocka_unit_test(test_cut_partial_short_page_inside_horizon),
+    cmocka_unit_test(test_cut_partial_backward),
+    cmocka_unit_test(test_cut_partial_no_hole),
+    cmocka_unit_test(test_resp_row),
+    cmocka_unit_test(test_targets_ref_ms_huge),
+    cmocka_unit_test(test_targets_ref_ms_calendar),
     cmocka_unit_test(test_targets_ref_ms),
     cmocka_unit_test(test_page_exclusive_bounds),
     cmocka_unit_test(test_page_tie_run_extends),

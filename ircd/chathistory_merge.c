@@ -921,6 +921,19 @@ void hm_leg_free(struct hm_page_leg *leg)
 /* CHATHISTORY TARGETS (W5 Task 11; chathistory_merge.h)               */
 /* ------------------------------------------------------------------ */
 
+/** The largest whole second whose ms (with a .999 fraction) fits a
+ * uint64_t: a bound past it is clamped, never wrapped. */
+#define HM_SEC_MAX (UINT64_MAX / 1000ULL - 1ULL)
+
+/** Days in month @a mo (1-12) of year @a y (proleptic Gregorian). */
+static int hm_month_days(long y, long mo)
+{
+  static const int days[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+  if (mo == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0))
+    return 29;
+  return days[mo - 1];
+}
+
 /** Read @a n digits at @a p as a number; -1 when one is not a digit. */
 static long hm_digits(const char *p, int n)
 {
@@ -950,8 +963,11 @@ int hm_targets_ref_ms(const char *ref, uint64_t *ms)
     long h = hm_digits(ref + 11, 2), mi = hm_digits(ref + 14, 2), se = hm_digits(ref + 17, 2);
     time_t t;
 
-    if (y < 0 || mo < 1 || mo > 12 || da < 1 || da > 31 || h < 0 || h > 23
-        || mi < 0 || mi > 59 || se < 0 || se > 60)
+    /* A day its month does not have is refused: timegm would roll it
+     * over ("Feb 30" is March 2), paging from a time the client never
+     * meant.  A leap second (:60) is accepted and is the next second. */
+    if (y < 0 || mo < 1 || mo > 12 || da < 1 || da > hm_month_days(y, mo)
+        || h < 0 || h > 23 || mi < 0 || mi > 59 || se < 0 || se > 60)
       return -1;
     p = ref + 19;
     if (*p == '.') {
@@ -982,20 +998,36 @@ int hm_targets_ref_ms(const char *ref, uint64_t *ms)
     *ms = t < 0 ? 0 : (uint64_t)t * 1000ULL + frac;
     return 0;
   }
-  /* "sec[.mmm]" */
-  for (p = ref; *p >= '0' && *p <= '9'; p++)
-    ;
-  if (p == ref)
-    return -1;
-  if (*p == '.') {
-    const char *f = p + 1;
-    for (p = f; *p >= '0' && *p <= '9'; p++)
-      ;
+  /* "sec[.mmm]": seconds past HM_SEC_MAX clamp to it (a far bound),
+   * never wrap through the x1000. */
+  {
+    uint64_t sec = 0;
+    int clamped = 0;
+    for (p = ref; *p >= '0' && *p <= '9'; p++) {
+      unsigned int dgt = (unsigned int)(*p - '0');
+      if (!clamped && sec > (HM_SEC_MAX - dgt) / 10ULL)
+        clamped = 1;
+      if (!clamped)
+        sec = sec * 10ULL + dgt;
+    }
+    if (p == ref)
+      return -1;
+    if (*p == '.') {
+      for (p++, d = 0; *p >= '0' && *p <= '9'; p++, d++)
+        if (d < 3)
+          frac = frac * 10 + (uint64_t)(*p - '0');
+      for (; d < 3; d++)
+        frac *= 10;
+    }
+    if (*p)
+      return -1;
+    if (clamped) {
+      sec = HM_SEC_MAX;
+      frac = 999;
+    }
+    *ms = sec * 1000ULL + frac;
+    return 0;
   }
-  if (*p)
-    return -1;
-  *ms = hm_ts_ms(ref);
-  return 0;
 }
 
 uint64_t hm_targets_stamp_ms(const char *stamp)
@@ -1212,4 +1244,50 @@ int hm_targets_responder(struct HistoryTarget **list, uint64_t first_ms, uint64_
   MyFree(veto);
   MyFree(arr);
   return kept;
+}
+
+void hm_targets_resp_row(struct hm_targets_resp *r, uint64_t first_ms,
+                         uint64_t second_ms, uint64_t ms)
+{
+  uint64_t lo = first_ms < second_ms ? first_ms : second_ms;
+  uint64_t hi = first_ms < second_ms ? second_ms : first_ms;
+
+  if (ms > lo && ms < hi) {
+    r->any_in = 1;
+    r->last_in_ms = ms;
+  } else if (ms >= hi)
+    r->saw_veto = 1;
+}
+
+int hm_targets_cut_partial(const struct hm_targets_resp *resp, int n,
+                           uint64_t first_ms, uint64_t second_ms,
+                           const struct HistoryTarget *page, int more)
+{
+  int fwd = first_ms < second_ms, has = 0, i;
+  uint64_t horizon = 0;
+  const struct HistoryTarget *t;
+
+  for (i = 0; i < n; i++) {
+    uint64_t h;
+    if (!resp[i].cut || resp[i].saw_veto)
+      continue;
+    h = resp[i].any_in ? resp[i].last_in_ms : first_ms;
+    if (!has || (fwd ? h < horizon : h > horizon))
+      horizon = h;
+    has = 1;
+  }
+  if (!has)
+    return 0;
+  /* A page that claims the rest of the window (nothing eligible beyond
+   * it) claims what lies past the horizon too: a hole (review of
+   * 28cc0b18).  A full page with more beyond is whole up to its edge when
+   * the edge is inside the horizon; the next page asks again from there. */
+  if (!more)
+    return 1;
+  for (t = page; t; t = t->next) {
+    uint64_t ms = hm_ts_ms(t->last_timestamp);
+    if (fwd ? ms > horizon : ms < horizon)
+      return 1;
+  }
+  return 0;
 }

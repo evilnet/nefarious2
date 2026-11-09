@@ -531,6 +531,12 @@ typedef int (*history_target_filter_fn)(const char *target, const char *last_ts,
  * @return 0 found, 1 none, -1 on a storage error. */
 extern int history_target_latest(const char *target, char *ts, size_t tslen);
 
+/** Did this start's PM pair index rebuild complete (pm_pair_index.h)?
+ * When not, the index may lack pairs until a later start's rebuild does,
+ * and TARGETS answers partial wherever it lists PM conversations.
+ * @return 1 whole, 0 not (or no store). */
+extern int history_pm_index_whole(void);
+
 /** The PM pairs @a identity (an account, or a session id) is a half of,
  * through the pair index (pm_pair_index.h), with their stamps: those whose
  * stamp is above @a lo_ms (exclusive) and -- unless @a include_newer --

@@ -416,12 +416,18 @@ int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
   /* The caller's own PM pairs (the pair index, W5 Task 11), newest first.
    * Of those whose other party the TARGETS derivation names @a nick, the
    * most recently active wins: a guest nick is reused by different people
-   * over time.  (This used to walk every target on the server in key
-   * order, capped at 200, so on a busy server the caller's pairs could lie
-   * past the cap.) */
+   * over time.  Only the newest REPLAY_PM_TARGETS_MAX are looked at: each
+   * costs a page read (replay_pm_display_nick) on the main loop, and a
+   * CHATHISTORY for a nick nobody holds reaches here; a conversation older
+   * than that many others is "not found", as on a nick with no rows.
+   * (This used to walk every target on the server in key order, keeping
+   * the first 200 of the caller's: on a busy server the newest could lie
+   * past them.  No index names a pair by the nick its rows carry, so there
+   * is no direct lookup; the walk itself is one point read per pair.) */
   history_pm_identity(sptr, identity, sizeof(identity));
   if (history_identity_pm_targets(identity, 0, UINT64_MAX, /*include_newer=*/1,
-                                  /*max=*/0, &list, NULL, NULL) <= 0 || !list)
+                                  REPLAY_PM_TARGETS_MAX, &list, NULL, NULL) <= 0
+      || !list)
     return 0;
   for (t = list; t; t = t->next) {
     char name[NICKLEN + 1];
