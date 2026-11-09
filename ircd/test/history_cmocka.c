@@ -277,6 +277,27 @@ static void test_ch_ad_letters(void **state)
   assert_string_equal(out, "K");
 }
 
+/* W5 Task 15 fix round 1 (S2): the reply index's one-byte entry value.  A
+ * REDACT link reads "R", any other child "C"; an older build's entry is
+ * empty and the lookup must read the child row.  A non-empty value it does
+ * not know is a known non-REDACT (no fetch, never counted). */
+static void test_ri_link_kind(void **state)
+{
+  char v;
+
+  (void)state;
+  v = ri_link_value(1);
+  assert_int_equal(v, RI_LINK_REDACT);
+  assert_int_equal(ri_link_kind(&v, 1), RI_LINK_IS_REDACT);
+  v = ri_link_value(0);
+  assert_int_equal(v, RI_LINK_CHILD);
+  assert_int_equal(ri_link_kind(&v, 1), RI_LINK_NOT_REDACT);
+  assert_int_equal(ri_link_kind("", 0), RI_LINK_LEGACY);
+  assert_int_equal(ri_link_kind(NULL, 0), RI_LINK_LEGACY);
+  assert_int_equal(ri_link_kind("X", 1), RI_LINK_NOT_REDACT);
+  assert_int_equal(ri_link_kind("Rx", 2), RI_LINK_IS_REDACT);
+}
+
 /* ========== applying a redaction: rdx_row_decide / rdx_watermark_decide ========== */
 
 static void test_rdx_row_decide(void **state)
@@ -1551,6 +1572,7 @@ int main(void)
     cmocka_unit_test(test_ch_e_flags),
     cmocka_unit_test(test_ch_ad_features),
     cmocka_unit_test(test_ch_ad_letters),
+    cmocka_unit_test(test_ri_link_kind),
     cmocka_unit_test(test_rdx_row_decide),
     cmocka_unit_test(test_rdx_wm_cut_keeps),
     cmocka_unit_test(test_rdx_wm_truncated_continues),

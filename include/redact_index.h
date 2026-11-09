@@ -71,6 +71,21 @@ unsigned int ch_ad_features(const char *param);
 #define CH_AD_LETTERS_MAX 8
 size_t ch_ad_letters(const char *param, char *out, size_t outsz);
 
+/* The reply index's entry value (W5 Task 15 fix round 1): one byte saying
+ * what links the child to its parent, so a redaction lookup reads it off
+ * the index instead of fetching the child row -- and a crowd of children
+ * (anyone can react to a reaction) cannot push a REDACT out of reach.  The
+ * key (target\0parent\0ts\0child) is unchanged; an older build reads keys
+ * only, and an entry it wrote is empty (RI_LINK_LEGACY: read the row). */
+#define RI_LINK_REDACT 'R'   /* the child is a REDACT of the parent */
+#define RI_LINK_CHILD  'C'   /* any other child: a reaction, a reply */
+enum ri_link { RI_LINK_LEGACY, RI_LINK_IS_REDACT, RI_LINK_NOT_REDACT };
+/* The value byte to store for a REDACT link (@a redact) or any other. */
+char ri_link_value(int redact);
+/* What an entry value says: empty (or NULL) = LEGACY; first byte 'R' =
+ * IS_REDACT; any other non-empty value = NOT_REDACT. */
+enum ri_link ri_link_kind(const void *value, size_t len);
+
 /* Applying one redaction (a peer's live REDACT, a catch-up row, or a
  * write-forwarded one) to this server's store.  @a parent_lookup_rc is
  * history_lookup_message's answer for the redacted message (0 found, 1 not

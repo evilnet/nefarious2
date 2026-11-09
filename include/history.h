@@ -619,9 +619,11 @@ extern int history_message_is_redacted(const char *target, const char *msgid);
  * when no snapshot could be taken. */
 struct HistoryRedactLookup;
 extern struct HistoryRedactLookup *history_redact_lookup_open(void);
-/** history_message_is_redacted, read in @a h's snapshot, walking at most
- * @a max_children of the message's children (0 = all): past them, with
- * no REDACT found, the answer is unknown (-1).  -1 for a NULL @a h. */
+/** history_message_is_redacted, read in @a h's snapshot.  A child whose
+ * index entry carries its link type (ri_link_kind) is read off the index,
+ * never fetched or counted; at most @a max_children legacy (untyped)
+ * children are fetched (0 = all): past them, with no REDACT found, the
+ * answer is unknown (-1).  -1 for a NULL @a h. */
 extern int history_redact_lookup(struct HistoryRedactLookup *h, const char *target,
                                  const char *msgid, int max_children);
 extern void history_redact_lookup_close(struct HistoryRedactLookup *h);

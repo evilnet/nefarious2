@@ -2007,11 +2007,12 @@ static int federation_wanted(const char *target, enum fed_page page,
  *              list transfers to the replay engine on return.
  * @return     The post-filter message count.
  */
-/** The most children a context reaction's redaction lookup walks (F-2;
- * W5 Task 15 fix round 1).  A reaction's children are its REDACT -- one
- * is stored, a repeat is idempotent -- and the rare reaction to it; past
- * this many, with no REDACT among them, the lookup answers unknown and the
- * reaction is hidden (fail closed). */
+/** The most LEGACY children (indexed by an older build, untyped) a context
+ * reaction's redaction lookup fetches (F-2; W5 Task 15 fix round 1).  A
+ * child indexed by this build carries its link type and is never fetched
+ * or counted (history_redact_lookup), so only old entries can reach this,
+ * and no one can add those: past this many, with no REDACT among them, the
+ * lookup answers unknown and the reaction is hidden (fail closed). */
 #define CTX_REDACT_CHILDREN_MAX 32
 
 /** F-2's lookups for one page, through hm_redact_filter: the store key,
@@ -2026,9 +2027,10 @@ struct CtxRedactCheck {
 
 /** Is the context row @a m redacted in this server's store (W5 Task 15,
  * F-2)?  REDACTs reach every store, a tombstone where the message is not
- * held (Push B), so the answer here is authoritative.  One capped walk of
- * @a m's own children (CTX_REDACT_CHILDREN_MAX) per context row, in the
- * page's one snapshot.  -1 -- unreadable, too many children, or no store
+ * held (Push B), so the answer here is authoritative.  One walk of @a m's
+ * own children per context row, in the page's one snapshot: each typed
+ * child read off the index, at most CTX_REDACT_CHILDREN_MAX legacy ones
+ * fetched.  -1 -- unreadable, too many legacy children, or no store
  * at all (a storeless server cannot know: every context reaction it was
  * sent is hidden, the binding fail-closed ruling) -- hides the row. */
 static int ctx_redacted_here(const struct HistoryMessage *m, void *arg)
@@ -7229,14 +7231,16 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
 }
 
 /** Unlink, from a responder's rows and their attached context, every
- * context reaction (a non-REDACT context row) this store knows is
- * redacted: it holds the reaction and so its REDACT, under the reaction in
- * the reply index (W5 Task 15 fix round 1).  A requester that lacks that
- * REDACT -- it missed it across a split, or has no store -- is then never
- * sent the reaction.  Only a known redaction (1) skips: an unknown answer
- * (-1) is left to the requester, whose own lookup hides it.  One capped
- * lookup per context reaction (CTX_REDACT_CHILDREN_MAX), in one snapshot.
- * REDACT entries and rows are untouched; no line changes form. */
+ * context reaction (a non-REDACT context row) this store does not know to
+ * be unredacted: it holds the reaction and so its REDACT, under the
+ * reaction in the reply index (W5 Task 15 fix round 1).  A requester that
+ * lacks that REDACT -- it missed it across a split, or has no store -- is
+ * then never sent the reaction.  Fail closed, as the page path: redacted
+ * (1) or unknown (-1: a read error, or more than CTX_REDACT_CHILDREN_MAX
+ * children an older build indexed untyped -- typed children are never
+ * counted, so no one can force -1) both skip.  One lookup per context
+ * reaction, in one snapshot.  REDACT entries and rows are untouched; no
+ * line changes form. */
 static void skip_redacted_context(const char *target, struct HistoryMessage **head)
 {
   struct HistoryRedactLookup *h = NULL;
@@ -7249,7 +7253,7 @@ static void skip_redacted_context(const char *target, struct HistoryMessage **he
         opened = 1;
         h = history_redact_lookup_open();
       }
-      if (history_redact_lookup(h, target, m->msgid, CTX_REDACT_CHILDREN_MAX) == 1) {
+      if (history_redact_lookup(h, target, m->msgid, CTX_REDACT_CHILDREN_MAX) != 0) {
         *pp = m->next;
         m->next = NULL;
         history_free_messages(m);

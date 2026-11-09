@@ -241,3 +241,16 @@ enum redact_auth redact_authorize(const struct redact_auth_in *in, long *window_
     return REDACT_AUTH_OK;
   return REDACT_AUTH_FORBIDDEN;
 }
+
+char ri_link_value(int redact)
+{
+  return redact ? RI_LINK_REDACT : RI_LINK_CHILD;
+}
+
+enum ri_link ri_link_kind(const void *value, size_t len)
+{
+  if (!value || len == 0)
+    return RI_LINK_LEGACY;
+  return ((const char *)value)[0] == RI_LINK_REDACT ? RI_LINK_IS_REDACT
+                                                     : RI_LINK_NOT_REDACT;
+}

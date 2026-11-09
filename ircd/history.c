@@ -356,18 +356,23 @@ static int build_reply_index_prefix(char *buf, size_t bufsize,
 }
 
 /* Stage a reply-index put on @a wb.  Flat-key encoding: the key embeds
- * the child msgid + timestamp; value is empty.  Walking all children of
- * a parent is a prefix scan on target\0parent_msgid\0. */
+ * the child msgid + timestamp.  Walking all children of a parent is a
+ * prefix scan on target\0parent_msgid\0.  The value is one byte
+ * (ri_link_value: 'R' for a REDACT link, @a redact; 'C' for any other),
+ * so a redaction lookup reads the link off the index (W5 Task 15 fix
+ * round 1).  An older build wrote it empty, and reads keys only. */
 static void reply_index_put(struct db_writebatch *wb, const char *target,
                             const char *parent_msgid,
-                            const char *timestamp, const char *child_msgid)
+                            const char *timestamp, const char *child_msgid,
+                            int redact)
 {
   char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char link = ri_link_value(redact);
   int klen = build_reply_index_key(keybuf, sizeof(keybuf),
                                    target, parent_msgid,
                                    timestamp, child_msgid);
   if (klen < 0) return;
-  db_writebatch_put(wb, history_cf_reply, keybuf, (size_t)klen, "", 0);
+  db_writebatch_put(wb, history_cf_reply, keybuf, (size_t)klen, &link, 1);
 }
 
 /*
@@ -1655,9 +1660,9 @@ store_retry:
    * Flat-key encoding (target\0parent\0timestamp\0child) makes this
    * backend-agnostic — no DUPSORT needed. */
   if (reply_parent[0])
-    reply_index_put(wb, target, reply_parent, timestamp, msgid);
+    reply_index_put(wb, target, reply_parent, timestamp, msgid, 0);
   if (redact_parent[0]) {
-    reply_index_put(wb, target, redact_parent, timestamp, msgid);
+    reply_index_put(wb, target, redact_parent, timestamp, msgid, 1);
     /* Catch-up index (design B): time-ordered so an absent store can
      * ask for redactions since T on return.  Same batch as the row; keyed
      * at the row's own time (trow.ms), which the trim delete reads back
@@ -4592,9 +4597,15 @@ int history_redact_message(const char *target, const char *msgid)
   return 0;
 }
 
-/** history_message_is_redacted's walk, read in @a snap, over at most
- * @a max_children of the message's children (0 = all): past that many,
- * with no REDACT among them, the answer is unknown (-1). */
+/** history_message_is_redacted's walk, read in @a snap.  Each child's
+ * entry value says what links it (ri_link_kind): a REDACT link answers
+ * yes with no fetch; any other typed child is skipped with no fetch and
+ * never counted -- one iterator step each, uncapped, the same O(children)
+ * the local attach already pays.  Only an entry an older build wrote
+ * (empty value) is fetched and read, and at most @a max_children of those
+ * (0 = all): past that many, with no REDACT among them, the answer is
+ * unknown (-1).  No one can add legacy entries after the upgrade, so no
+ * one can push a REDACT past the cap (W5 Task 15 fix round 1, S2). */
 static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
                                   const char *msgid, int max_children)
 {
@@ -4637,8 +4648,21 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
 
     if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
       break;
+    {
+      size_t vlen = 0;
+      const void *vbase = db_iter_value(ri_it, &vlen);
+      enum ri_link link = ri_link_kind(vbase, vlen);
+
+      if (link == RI_LINK_IS_REDACT) {
+        redacted = 1;
+        continue;
+      }
+      if (link == RI_LINK_NOT_REDACT)
+        continue;
+    }
+    /* A legacy entry: read the child row, and count it. */
     if (max_children > 0 && ++seen > max_children) {
-      unread = 1;   /* more children than the caller will read: unknown */
+      unread = 1;   /* more legacy children than the caller will read */
       break;
     }
 
