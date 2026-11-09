@@ -1308,7 +1308,8 @@ static int open_query_presence(struct Client *sptr, const char *lookup_target,
                                struct PresenceQueryFilter **pf_out);
 static int query_page_complete(struct HistoryRowFilter *hook, int count,
                                int limit);
-static int redact_filter_messages(struct HistoryMessage **head, int count);
+static int redact_filter_messages(const char *target,
+                                  struct HistoryMessage **head, int count);
 
 /** Build one page of history since @a since_timestamp for @a sptr on
  * @a target the way the on-demand handlers do.  See history.h.  This is
@@ -1344,7 +1345,7 @@ int chathistory_page_since(struct Client *sptr, const char *target, int limit,
   if (count > 0 && messages) {
     /* Same reply-side sequence as presence_filter_and_replay. */
     history_attach_context(target, messages);
-    count = redact_filter_messages(&messages, count);
+    count = redact_filter_messages(target, &messages, count);
     count = presence_filter_messages(sptr, target, &messages, count, 0);
   }
   if (count <= 0 || !messages) {
@@ -2004,17 +2005,55 @@ static int federation_wanted(const char *target, enum fed_page page,
  *              list transfers to the replay engine on return.
  * @return     The post-filter message count.
  */
+/** F-2's lookup, through hm_redact_filter: the target to look a context
+ * row up under, and how many lookups could not be read. */
+struct CtxRedactCheck {
+  const char *target;
+  int unread;
+};
+
+/** Is the context row @a m redacted in this server's store (W5 Task 15,
+ * F-2)?  REDACTs reach every store, a tombstone where the message is not
+ * held (Push B), so the answer here is authoritative.  One
+ * history_message_is_redacted per context row: a bounded reply-index
+ * iterator and seek over @a m's own children, one db_get per child (a
+ * reaction rarely has any) -- what history_attach_context already paid to
+ * fetch the row itself.  -1 (unreadable) is counted and hides the row. */
+static int ctx_redacted_here(const struct HistoryMessage *m, void *arg)
+{
+  struct CtxRedactCheck *c = (struct CtxRedactCheck *)arg;
+  int r = history_message_is_redacted(c->target, m->msgid);
+
+  if (r < 0)
+    c->unread++;
+  return r;
+}
+
 /** The reply-side redaction filter of every history page
  * (hm_redact_filter; W5 Task 15): drop the PRIVMSG/NOTICE/TAGMSG/MULTILINE
- * entries a REDACT entry of @a *head names, however many REDACT entries
- * the page carries (F-6: a fixed table of 100 targets showed the redacted
- * originals past it once CHATHISTORY_MAX passed 100, or context brought
- * more).  REDACT entries stay (the audit/visibility artifact the client
- * relies on, and the tombstone policy).
+ * entries a REDACT entry of @a *head names, however many (F-6), the
+ * context reactions of a row dropped that way (F-7), and every context
+ * entry this server's store knows redacted, or cannot read (F-2).  REDACT
+ * entries stay (the audit/visibility artifact the client relies on, and
+ * the tombstone policy).  @a target is the store key the page was read
+ * under.  A server with no store (a federated auto-replay) has no
+ * authority to look up: F-2 is not applied there.
  * @return the post-filter count (@a count when nothing was dropped). */
-static int redact_filter_messages(struct HistoryMessage **head, int count)
+static int redact_filter_messages(const char *target,
+                                  struct HistoryMessage **head, int count)
 {
-  return hm_redact_filter(head, count);
+  struct CtxRedactCheck c;
+
+  c.target = target;
+  c.unread = 0;
+  count = hm_redact_filter(head, count,
+                           (target && history_is_available()) ? ctx_redacted_here : NULL,
+                           &c);
+  if (c.unread)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "chathistory %s: %d context row(s) not shown, their redaction "
+              "could not be read", target, c.unread);
+  return count;
 }
 
 static int presence_filter_and_replay(struct Client *sptr,
@@ -2035,7 +2074,7 @@ static int presence_filter_and_replay(struct Client *sptr,
   /* Drop redacted originals before presence + replay so redacted
    * content never reaches the wire for normal queries.  Audit access
    * (a later capability) would skip this filter. */
-  count = redact_filter_messages(head, count);
+  count = redact_filter_messages(target, head, count);
   count = presence_filter_messages(sptr, target, head, count, real_override);
   replay_start_batch(sptr, target, *head, count, real_override, label,
                      complete, requested);
@@ -6651,7 +6690,7 @@ static void complete_autoreplay_channel(struct FedRequest *req)
      * strict presence (audit #3; re-review R7 -- this leg replayed
      * redacted originals). */
     history_attach_context(req->target, merged);
-    total = redact_filter_messages(&merged, total);
+    total = redact_filter_messages(req->target, &merged, total);
     total = presence_filter_messages(sptr, req->target, &merged, total, 0);
 
     if (total > 0) {

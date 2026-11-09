@@ -430,22 +430,36 @@ static int hm_id_cmp(const void *a, const void *b)
 }
 
 /** The walk of hm_redact_filter and hm_redact_filter_closed: @a set holds
- * @a nset sorted names, or @a closed names every redactable entry. */
+ * @a nset sorted names, or @a closed names every redactable entry.  A row
+ * (not context) ends the context run of the row before it, so
+ * @a parent_gone says whether the run being walked hangs on a row dropped
+ * here. */
 static int hm_redact_walk(struct HistoryMessage **head, int count,
                           const char (*set)[HISTORY_MSGID_LEN], int nset,
-                          int closed)
+                          int closed, hm_redacted_fn redacted, void *arg)
 {
   struct HistoryMessage **pp = head;
-  int kept = 0, dropped = 0;
+  int kept = 0, dropped = 0, parent_gone = 0;
 
   while (*pp) {
     struct HistoryMessage *cur = *pp;
     int drop = 0;
 
-    if (cur->type != HISTORY_REDACT && hm_redactable(cur)
-        && (closed || (nset > 0 && bsearch(cur->msgid, set, (size_t)nset,
-                                           sizeof(set[0]), hm_id_cmp))))
-      drop = 1;   /* F-6: a REDACT of the page names it */
+    if (!cur->is_context)
+      parent_gone = 0;
+    if (cur->type != HISTORY_REDACT) {
+      if (hm_redactable(cur)
+          && (closed || (nset > 0 && bsearch(cur->msgid, set, (size_t)nset,
+                                             sizeof(set[0]), hm_id_cmp))))
+        drop = 1;   /* F-6: a REDACT of the page names it */
+      else if (cur->is_context && parent_gone)
+        drop = 1;   /* F-7: the row it hangs on went for redaction */
+      else if (cur->is_context && redacted && hm_redactable(cur)
+               && redacted(cur, arg) != 0)
+        drop = 1;   /* F-2: redacted here, or not provably not */
+      if (drop && !cur->is_context)
+        parent_gone = 1;
+    }
     if (drop) {
       *pp = cur->next;
       cur->next = NULL;
@@ -463,10 +477,11 @@ int hm_redact_filter_closed(struct HistoryMessage **head, int count)
 {
   if (!head || !*head || count <= 0)
     return count;
-  return hm_redact_walk(head, count, NULL, 0, 1);
+  return hm_redact_walk(head, count, NULL, 0, 1, NULL, NULL);
 }
 
-int hm_redact_filter(struct HistoryMessage **head, int count)
+int hm_redact_filter(struct HistoryMessage **head, int count,
+                     hm_redacted_fn redacted, void *arg)
 {
   struct HistoryMessage *m;
   char (*set)[HISTORY_MSGID_LEN] = NULL;
@@ -480,20 +495,21 @@ int hm_redact_filter(struct HistoryMessage **head, int count)
   for (m = *head; m; m = m->next)
     if (m->type == HISTORY_REDACT)
       n++;
-  if (n == 0)
-    return count;
-  set = (char (*)[HISTORY_MSGID_LEN])MyMalloc((size_t)n * sizeof(*set));
-  /* MyMalloc's out-of-memory handler does not return; were it to, no
-   * redacted text may show for want of the set. */
-  if (!set)
-    return hm_redact_filter_closed(head, count);
-  for (m = *head; m; m = m->next)
-    if (m->type == HISTORY_REDACT
-        && hm_context_parent(m, set[nset], sizeof(set[nset])))
-      nset++;
-  qsort(set, (size_t)nset, sizeof(*set), hm_id_cmp);
+  if (n > 0) {
+    set = (char (*)[HISTORY_MSGID_LEN])MyMalloc((size_t)n * sizeof(*set));
+    /* MyMalloc's out-of-memory handler does not return; were it to, no
+     * redacted text may show for want of the set. */
+    if (!set)
+      return hm_redact_filter_closed(head, count);
+    for (m = *head; m; m = m->next)
+      if (m->type == HISTORY_REDACT
+          && hm_context_parent(m, set[nset], sizeof(set[nset])))
+        nset++;
+    qsort(set, (size_t)nset, sizeof(*set), hm_id_cmp);
+  }
   rc = hm_redact_walk(head, count, (const char (*)[HISTORY_MSGID_LEN])set,
-                      nset, 0);
-  MyFree(set);
+                      nset, 0, redacted, arg);
+  if (set)
+    MyFree(set);
   return rc;
 }

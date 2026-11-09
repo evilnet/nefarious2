@@ -26,7 +26,9 @@
  *  - the redaction filter of a history page (W5 Task 15): hm_redact_filter
  *    drops every message a REDACT of the page names, with no cap on their
  *    number (F-6), and its fail-closed form every message a REDACT could
- *    name.
+ *    name; the context reactions of a message it drops go too, its REDACTs
+ *    stay (F-7); a context reaction this store knows redacted, or cannot
+ *    read, goes (F-2).
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -643,6 +645,20 @@ static struct HistoryMessage *as_ctx(struct HistoryMessage *m)
   return m;
 }
 
+/* The local-store check a page runs on a context row (F-2): an answer per
+ * msgid prefix ("RED" redacted, "ERR" unreadable, else not), and a count. */
+static int redacted_calls;
+static int fake_redacted(const struct HistoryMessage *m, void *arg)
+{
+  (void)arg;
+  redacted_calls++;
+  if (strncmp(m->msgid, "RED", 3) == 0)
+    return 1;
+  if (strncmp(m->msgid, "ERR", 3) == 0)
+    return -1;
+  return 0;
+}
+
 /* F-6: no cap on the REDACT targets.  150 messages and their 150 REDACT
  * rows on one page (the old filter kept 100 targets and showed the rest):
  * every message goes, every REDACT stays.  Then the same with the REDACTs
@@ -667,7 +683,7 @@ static void test_redact_filter_no_cap(void **s)
     *tp = typed(id, ts, HISTORY_REDACT, tgt);
     tp = &(*tp)->next;
   }
-  n = hm_redact_filter(&head, 300);
+  n = hm_redact_filter(&head, 300, NULL, NULL);
   assert_int_equal(n, 150);
   assert_int_equal(count(head), 150);
   for (m = head; m; m = m->next)
@@ -686,29 +702,80 @@ static void test_redact_filter_no_cap(void **s)
     *tp = as_ctx(typed(id, "1790009000.000", HISTORY_REDACT, tgt));
     tp = &(*tp)->next;
   }
-  n = hm_redact_filter(&head, 150);
+  n = hm_redact_filter(&head, 150, NULL, NULL);
   assert_int_equal(n, 150);
   for (m = head; m; m = m->next)
     assert_int_equal(m->type, HISTORY_REDACT);
   history_free_messages(head);
 }
 
+/* F-7: a message dropped for redaction takes its context reactions with
+ * it, never its REDACT rows; another row's context stays.  A reaction
+ * dropped that way is not looked up (F-2's check runs on survivors). */
+static void test_redact_filter_drops_children_of_redacted(void **s)
+{
+  struct HistoryMessage *head = chain(6,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(typed("R", "5.000", HISTORY_TAGMSG, NULL)),
+      as_ctx(typed("D", "6.000", HISTORY_REDACT, "M")),
+      as_ctx(typed("R1", "7.000", HISTORY_TAGMSG, NULL)),
+      typed("N", "2.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(typed("R2", "8.000", HISTORY_TAGMSG, NULL)));
+
+  (void)s;
+  redacted_calls = 0;
+  assert_int_equal(hm_redact_filter(&head, 2, fake_redacted, NULL), 3);
+  assert_string_equal(ids(head), "D N R2");
+  assert_int_equal(redacted_calls, 1);
+  history_free_messages(head);
+}
+
+/* F-2: each surviving context row that could be a target is checked once
+ * against the local store: redacted or unreadable (fail closed) goes.  A
+ * row, a REDACT row and a context reaction a REDACT of the list names are
+ * not looked up. */
+static void test_redact_filter_checks_context(void **s)
+{
+  struct HistoryMessage *head = chain(8,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(typed("REDa", "5.000", HISTORY_TAGMSG, NULL)),
+      as_ctx(typed("ERRb", "6.000", HISTORY_TAGMSG, NULL)),
+      as_ctx(typed("okc", "7.000", HISTORY_TAGMSG, NULL)),
+      as_ctx(typed("okd", "7.500", HISTORY_TAGMSG, NULL)),
+      as_ctx(typed("REDe", "8.000", HISTORY_REDACT, "okd")),
+      typed("REDrow", "2.000", HISTORY_TAGMSG, NULL),
+      typed("N", "3.000", HISTORY_PRIVMSG, NULL));
+
+  (void)s;
+  redacted_calls = 0;
+  assert_int_equal(hm_redact_filter(&head, 3, fake_redacted, NULL), 5);
+  assert_string_equal(ids(head), "M okc REDe REDrow N");
+  assert_int_equal(redacted_calls, 3);   /* REDa, ERRb, okc */
+  history_free_messages(head);
+}
+
 /* Nothing dropped: the count comes back as given (here 7, not the list's
- * length). */
+ * length); no check without a callback (a server with no store has no
+ * authority to ask).  With one, the redacted context row goes and the
+ * count is the rows left. */
 static void test_redact_filter_nothing_dropped(void **s)
 {
   struct HistoryMessage *head = chain(3,
       typed("M", "1.000", HISTORY_PRIVMSG, NULL),
-      typed("D", "5.000", HISTORY_REDACT, "X"),
+      as_ctx(typed("REDx", "5.000", HISTORY_TAGMSG, NULL)),
       typed("N", "2.000", HISTORY_PRIVMSG, NULL));
 
   (void)s;
-  assert_int_equal(hm_redact_filter(&head, 7), 7);
-  assert_string_equal(ids(head), "M D N");
+  assert_int_equal(hm_redact_filter(&head, 7, NULL, NULL), 7);
+  assert_string_equal(ids(head), "M REDx N");
+  redacted_calls = 0;
+  assert_int_equal(hm_redact_filter(&head, 7, fake_redacted, NULL), 2);
+  assert_int_equal(redacted_calls, 1);
+  assert_string_equal(ids(head), "M N");
   history_free_messages(head);
   head = NULL;
-  assert_int_equal(hm_redact_filter(&head, 0), 0);
-  assert_int_equal(hm_redact_filter(NULL, 0), 0);
+  assert_int_equal(hm_redact_filter(&head, 0, fake_redacted, NULL), 0);
+  assert_int_equal(hm_redact_filter(NULL, 0, NULL, NULL), 0);
 }
 
 /* The fail-closed form (the target set could not be allocated): every row
@@ -733,6 +800,8 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_redact_filter_no_cap),
+    cmocka_unit_test(test_redact_filter_drops_children_of_redacted),
+    cmocka_unit_test(test_redact_filter_checks_context),
     cmocka_unit_test(test_redact_filter_nothing_dropped),
     cmocka_unit_test(test_redact_filter_closed),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),

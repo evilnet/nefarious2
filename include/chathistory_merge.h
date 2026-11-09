@@ -115,16 +115,31 @@ extern int hm_pack_ids(const char *const *ids, int n, int from, size_t room,
  * @return the count. */
 extern int hm_parse_ids(char *list, const char **ids, int max);
 
+/** Is the context row @a m redacted, as this server's store knows it (W5
+ * Task 15, F-2)?  1 yes, 0 no, -1 unknown (a read error). */
+typedef int (*hm_redacted_fn)(const struct HistoryMessage *m, void *arg);
+
 /** The reply-side redaction filter of a history page (W5 Task 15; it was
  * m_chathistory.c's redact_filter_messages, which kept 100 targets and
- * showed the redacted originals past them).  Every PRIVMSG/NOTICE/TAGMSG/
- * MULTILINE entry of @a *head, context or not, that a REDACT entry of the
- * list names (its first content word) is dropped.  The set of names is
- * sized from the list, with no cap (F-6); when it cannot be allocated the
- * filter fails closed (hm_redact_filter_closed).  REDACT entries and
- * events are never dropped.
+ * showed the redacted originals past them).  @a *head is a page: rows in
+ * time order, each followed by its context run (history_attach_context and
+ * hm_splice_context put a row's context right after it).
+ *   - F-6: every PRIVMSG/NOTICE/TAGMSG/MULTILINE entry, context or not,
+ *     that a REDACT entry of the list names (its first content word) is
+ *     dropped.  The set of names is sized from the list, with no cap; when
+ *     it cannot be allocated the filter fails closed
+ *     (hm_redact_filter_closed).
+ *   - F-7: the context run of a row dropped that way goes with it, except
+ *     its REDACT entries (kept as before).
+ *   - F-2: each context entry that survives and could be a REDACT target
+ *     is looked up once with @a redacted (NULL: none is), and dropped
+ *     unless the answer is 0: a read error hides it (fail closed).  No
+ *     context of context is ever attached, so a reaction's own REDACT is on
+ *     the page only when its time is.
+ * REDACT entries and events are never dropped.
  * @return @a count when nothing was dropped, else the entries left. */
-extern int hm_redact_filter(struct HistoryMessage **head, int count);
+extern int hm_redact_filter(struct HistoryMessage **head, int count,
+                            hm_redacted_fn redacted, void *arg);
 
 /** hm_redact_filter's fail-closed form, for a set it could not allocate:
  * every entry a REDACT could name (PRIVMSG/NOTICE/TAGMSG/MULTILINE) is
