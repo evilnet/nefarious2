@@ -147,4 +147,44 @@ extern int hm_redact_filter(struct HistoryMessage **head, int count,
  * @return @a count when nothing was dropped, else the entries left. */
 extern int hm_redact_filter_closed(struct HistoryMessage **head, int count);
 
+/** The parent a page-leg row of a federated page hangs on as context,
+ * when that parent is on the page (W5 Task 15, F-3: a declaration past the
+ * page leg's CH C table never arrives).  @a m's own parent
+ * (hm_context_parent: a TAGMSG's +reply, a REDACT's target) must be a
+ * non-context row of @a local, or a non-context row of @a peer, other than
+ * @a m, that hangs on nothing itself: a row that is itself a child may be
+ * made context, and its own children would then have no row to follow, so
+ * they stay rows.  A duplicate of a local row (hm_find_dup) stays a row:
+ * the merge keeps one copy and lends it the other's tags.
+ * @return @a buf holding the parent, or NULL. */
+extern const char *hm_page_parent(const struct HistoryMessage *m,
+                                  const struct HistoryMessage *local,
+                                  const struct HistoryMessage *peer,
+                                  char *buf, size_t buflen);
+
+/** Move every non-context row of *@a peer that hm_page_parent places on the
+ * page (parents among @a local and *@a peer) onto the end of *@a ctx_list,
+ * marked is_context with ctx_parent set (W5 Task 15, F-3).  Order does not
+ * matter: a moved row is never a parent (it hangs on something).
+ * @return how many moved. */
+extern int hm_derive_context(struct HistoryMessage **peer,
+                             const struct HistoryMessage *local,
+                             struct HistoryMessage **ctx_list);
+
+/** How a federated request takes one row of a peer's reply (W5 Task 15,
+ * F-4): rows and context children have budgets of their own. */
+enum hm_admit {
+  HM_ADMIT_ROW,      /**< a row, counted against the row cap */
+  HM_ADMIT_CONTEXT,  /**< a context child, counted against its own cap */
+  HM_DROP_CONTEXT,   /**< a context child past its cap: dropped; context
+                      *   loss is never partial */
+  HM_DROP_ROW        /**< a row past the row cap: dropped, the page is cut */
+};
+
+/** Take one row (@a is_context: a declared or derived context child) against
+ * *@a rows < @a row_max or *@a ctx < @a ctx_max, counting it when admitted.
+ * A context child never counts against, or is refused by, the row cap. */
+extern enum hm_admit hm_fed_admit(int is_context, int *rows, int *ctx,
+                                  int row_max, int ctx_max);
+
 #endif /* INCLUDED_chathistory_merge_h */

@@ -2680,6 +2680,12 @@ static int chathistory_between(struct Client *sptr, const char *target,
 
 /** Maximum messages collected per request */
 #define MAX_FED_MESSAGES 500
+/** The page leg's context children a request keeps (W5 Task 15, F-4):
+ * their own bound, apart from MAX_FED_MESSAGES, so a reaction-heavy reply
+ * can neither cut the page nor push a row out, and a peer cannot flood
+ * memory with them.  The excess is dropped: a lost child costs context,
+ * never a row, and is never partial (user decision 2026-11-08 15:08). */
+#define MAX_FED_CONTEXT 500
 
 /** The children request (CH Q K, W5 Task 14): the most context children a
  * request takes (the requester's bound, and the <cap> it puts on the wire;
@@ -2717,7 +2723,12 @@ struct FedRequest {
                                        *   NOT a responder's own full page (that is
                                        *   fed_truncated = "more exists") */
   int local_count;                    /**< Number of local messages */
-  int fed_count;                      /**< Number of federated messages */
+  int fed_count;                      /**< Federated rows in fed_msgs (MAX_FED_MESSAGES) */
+  int fed_ctx_count;                  /**< ... and page-leg context children
+                                       *   (MAX_FED_CONTEXT; W5 Task 15, F-4) */
+  int page;                           /**< A history page (start_fed_query, the
+                                       *   auto-replay): a page-leg row whose own
+                                       *   parent is on the page is context (F-3) */
   int servers_pending;                /**< Servers we're waiting for */
   time_t start_time;                  /**< When request started */
   int limit;                          /**< Original limit requested */
@@ -5180,51 +5191,79 @@ static void free_fed_request(struct FedRequest *req)
  * row's client-only tags as its responder sent them (the ,C segment of a
  * CH R or first CH B line, or the record a CH Z carries); NULL or empty
  * for none (an older responder sends none).  A CH C declaration's tags
- * fill in only when the row brought none of its own. */
+ * fill in only when the row brought none of its own.
+ *
+ * A context child -- declared (CH C), or on a page (req->page) a row whose
+ * own parent is a row of the page (hm_page_parent: the declaration may
+ * never come, the CH C table holding MAX_FED_CTX; W5 Task 15, F-3) -- is
+ * counted against MAX_FED_CONTEXT, never against MAX_FED_MESSAGES, and
+ * past it is dropped without cutting the page (F-4).  A row past
+ * MAX_FED_MESSAGES is dropped and cuts the page, as before. */
 static void add_fed_message(struct FedRequest *req, const char *msgid,
                             const char *timestamp, int type,
                             const char *sender, const char *account,
                             const char *content, const char *client_tags)
 {
   struct HistoryMessage *msg, *tail;
+  int ci;
 
   if (!req)
     return;
-  if (req->fed_count >= MAX_FED_MESSAGES) {
-    req->fed_truncated = 1;   /* rows beyond the cap are dropped: say so */
-    req->cut = 1;             /* ... and dropped rows can be anywhere: partial */
-    return;
-  }
 
   msg = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
-  ircd_strncpy(msg->msgid, msgid, sizeof(msg->msgid) - 1);
-  ircd_strncpy(msg->timestamp, timestamp, sizeof(msg->timestamp) - 1);
-  ircd_strncpy(msg->target, req->target, sizeof(msg->target) - 1);
-  ircd_strncpy(msg->sender, sender, sizeof(msg->sender) - 1);
+  ircd_strncpy(msg->msgid, msgid, sizeof(msg->msgid));
+  ircd_strncpy(msg->timestamp, timestamp, sizeof(msg->timestamp));
+  ircd_strncpy(msg->target, req->target, sizeof(msg->target));
+  ircd_strncpy(msg->sender, sender, sizeof(msg->sender));
   if (account && strcmp(account, "*") != 0)
-    ircd_strncpy(msg->account, account, sizeof(msg->account) - 1);
+    ircd_strncpy(msg->account, account, sizeof(msg->account));
   msg->type = type;
   if (content)
-    ircd_strncpy(msg->content, content, sizeof(msg->content) - 1);
+    ircd_strncpy(msg->content, content, sizeof(msg->content));
   if (client_tags)
     ircd_strncpy(msg->client_tags, client_tags, sizeof(msg->client_tags));
   msg->next = NULL;
 
   /* CH C declaration already seen for this msgid?  Mark the row as a
    * context child so the merge treats it as spliced-uncounted. */
-  {
-    int ci;
-    for (ci = 0; ci < req->ctx_pair_count; ci++) {
-      if (strcmp(req->ctx_pairs[ci].child, msgid) == 0) {
-        msg->is_context = 1;
-        ircd_strncpy(msg->ctx_parent, req->ctx_pairs[ci].parent,
-                     sizeof(msg->ctx_parent) - 1);
-        if (req->ctx_pairs[ci].tags[0] && !msg->client_tags[0])
-          ircd_strncpy(msg->client_tags, req->ctx_pairs[ci].tags,
-                       sizeof(msg->client_tags) - 1);
-        break;
-      }
+  for (ci = 0; ci < req->ctx_pair_count; ci++) {
+    if (strcmp(req->ctx_pairs[ci].child, msgid) == 0) {
+      msg->is_context = 1;
+      ircd_strncpy(msg->ctx_parent, req->ctx_pairs[ci].parent,
+                   sizeof(msg->ctx_parent));
+      if (req->ctx_pairs[ci].tags[0] && !msg->client_tags[0])
+        ircd_strncpy(msg->client_tags, req->ctx_pairs[ci].tags,
+                     sizeof(msg->client_tags));
+      break;
     }
+  }
+  /* No declaration: on a page, a reaction or REDACT whose own parent is a
+   * row already here (the local page, or a peer row received) is context
+   * all the same.  A parent that arrives later is found at completion
+   * (hm_derive_context in send_fed_response). */
+  if (!msg->is_context && req->page) {
+    char parent[HISTORY_MSGID_LEN];
+    if (hm_page_parent(msg, req->local_msgs, req->fed_msgs, parent, sizeof(parent))) {
+      msg->is_context = 1;
+      ircd_strncpy(msg->ctx_parent, parent, sizeof(msg->ctx_parent));
+    }
+  }
+
+  switch (hm_fed_admit(msg->is_context, &req->fed_count, &req->fed_ctx_count,
+                       MAX_FED_MESSAGES, MAX_FED_CONTEXT)) {
+  case HM_DROP_ROW:
+    req->fed_truncated = 1;   /* rows beyond the cap are dropped: say so */
+    req->cut = 1;             /* ... and dropped rows can be anywhere: partial */
+    history_free_messages(msg);
+    return;
+  case HM_DROP_CONTEXT:
+    /* Context only: never partial, never a row lost. */
+    Debug((DEBUG_DEBUG, "chathistory %s: request %s keeps %d context children; "
+           "%s dropped", req->target, req->reqid, MAX_FED_CONTEXT, msgid));
+    history_free_messages(msg);
+    return;
+  default:
+    break;
   }
 
   /* Append to list */
@@ -5235,7 +5274,6 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
       ;
     tail->next = msg;
   }
-  req->fed_count++;
 }
 
 /** qsort/bsearch order of the children request's msgid list. */
@@ -5338,7 +5376,7 @@ static struct HistoryMessage *extract_fed_context(struct FedRequest *req)
       else
         ctx_head = m;
       ctx_tail = m;
-      req->fed_count--;
+      req->fed_ctx_count--;   /* never counted as a row (add_fed_message) */
     } else
       pp = &m->next;
   }
@@ -5472,13 +5510,21 @@ static void send_fed_response(struct FedRequest *req)
       merged = req->local_msgs;
       req->local_msgs = NULL;
       fed_ctx = context_only_peer_rows(req, merged, fed_ctx);
-    } else if (req->around) {
-      /* Merged uncut, then centred on the reference (hm_trim_around frees
-       * the rows it cuts, which are the merge's own copies). */
-      merged = hm_trim_around(hm_merge(req->local_msgs, req->fed_msgs, INT_MAX, 0),
-                              req->limit, req->around_ms, req->around_msgid);
-    } else
-      merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
+    } else {
+      /* A peer row with no declaration whose own parent is a row of the
+       * page is context, not a row (W5 Task 15, F-3): one whose parent
+       * arrived after it, from another responder (add_fed_message took the
+       * rest).  The merge then counts and places rows only; a child whose
+       * parent the merge drops is freed by the splice. */
+      req->fed_count -= hm_derive_context(&req->fed_msgs, req->local_msgs, &fed_ctx);
+      if (req->around) {
+        /* Merged uncut, then centred on the reference (hm_trim_around frees
+         * the rows it cuts, which are the merge's own copies). */
+        merged = hm_trim_around(hm_merge(req->local_msgs, req->fed_msgs, INT_MAX, 0),
+                                req->limit, req->around_ms, req->around_msgid);
+      } else
+        merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
+    }
 
     /* The children leg's (CH Q K, W5 Task 14) go after the page leg's
      * context: the children of local rows a peer holds and this store
@@ -5898,6 +5944,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   req->local_count = local_count;
   req->fed_msgs = NULL;
   req->fed_count = 0;
+  req->page = 1;
   req->servers_pending = server_count;
   req->start_time = CurrentTime;
   req->limit = limit;
@@ -6584,6 +6631,7 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
     req->local_count = 0;
     req->fed_msgs = NULL;
     req->fed_count = 0;
+    req->page = 1;
     req->servers_pending = server_count;
     req->start_time = CurrentTime;
     req->limit = ctx->limit;
@@ -6679,6 +6727,8 @@ static void complete_autoreplay_channel(struct FedRequest *req)
     int total;
 
     fed_ctx = extract_fed_context(req);
+    /* As send_fed_response: a child whose parent came later is context. */
+    req->fed_count -= hm_derive_context(&req->fed_msgs, req->local_msgs, &fed_ctx);
     merged = hm_merge(req->local_msgs, req->fed_msgs, req->limit, req->keep_oldest);
     total = 0;
     for (struct HistoryMessage *m = merged; m; m = m->next)
@@ -7882,13 +7932,29 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         ircd_strncpy(pair->tags, parv[5], sizeof(pair->tags) - 1);
     }
 
-    /* Row may have arrived ahead of the declaration */
-    for (m = req->fed_msgs; m; m = m->next) {
-      if (strcmp(m->msgid, parv[4]) == 0) {
+    /* Row may have arrived ahead of the declaration.  A row counted as one
+     * moves to the context budget (W5 Task 15, F-4), and is dropped when
+     * that is full: context loss is never partial. */
+    {
+      struct HistoryMessage **pp;
+
+      for (pp = &req->fed_msgs; (m = *pp); pp = &m->next) {
+        if (strcmp(m->msgid, parv[4]) != 0)
+          continue;
+        if (!m->is_context) {
+          req->fed_count--;
+          if (hm_fed_admit(1, &req->fed_count, &req->fed_ctx_count,
+                           MAX_FED_MESSAGES, MAX_FED_CONTEXT) == HM_DROP_CONTEXT) {
+            *pp = m->next;
+            m->next = NULL;
+            history_free_messages(m);
+            break;
+          }
+        }
         m->is_context = 1;
-        ircd_strncpy(m->ctx_parent, parv[3], sizeof(m->ctx_parent) - 1);
+        ircd_strncpy(m->ctx_parent, parv[3], sizeof(m->ctx_parent));
         if (parc > 5 && parv[5] && !m->client_tags[0])
-          ircd_strncpy(m->client_tags, parv[5], sizeof(m->client_tags) - 1);
+          ircd_strncpy(m->client_tags, parv[5], sizeof(m->client_tags));
         break;
       }
     }

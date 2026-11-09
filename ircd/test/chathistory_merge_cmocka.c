@@ -28,7 +28,11 @@
  *    number (F-6), and its fail-closed form every message a REDACT could
  *    name; the context reactions of a message it drops go too, its REDACTs
  *    stay (F-7); a context reaction this store knows redacted, or cannot
- *    read, goes (F-2).
+ *    read, goes (F-2);
+ *  - a federated page's context (W5 Task 15): hm_page_parent /
+ *    hm_derive_context (a peer row with no CH C declaration whose own
+ *    parent is on the page is context, F-3) and hm_fed_admit (context
+ *    children have a budget apart from the rows', F-4).
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -796,6 +800,89 @@ static void test_redact_filter_closed(void **s)
   history_free_messages(head);
 }
 
+/* A reaction with +reply=@a parent. */
+static struct HistoryMessage *reaction(const char *msgid, const char *ts, const char *parent)
+{
+  char tags[128];
+  struct HistoryMessage *m;
+
+  snprintf(tags, sizeof tags, "+draft/react=x;+reply=%s", parent);
+  m = row(msgid, ts, tags);
+  m->type = HISTORY_TAGMSG;
+  m->content[0] = '\0';
+  return m;
+}
+
+/* F-3: a page-leg row with no declaration is context when its own parent
+ * is a row of the page: a local row, or a peer row that hangs on nothing
+ * itself.  A child of a child, an orphan and a duplicate of a local row
+ * stay rows (the merge decides them, as before). */
+static void test_page_parent_derives_context(void **s)
+{
+  struct HistoryMessage *local = chain(2, row("P", "1.000", ""),
+                                          reaction("dup", "1.500", "P"));
+  struct HistoryMessage *peer = chain(7,
+      reaction("rr", "6.000", "r1"),          /* child of a child: before it */
+      row("A", "2.000", ""),
+      reaction("r1", "3.000", "P"),           /* local parent */
+      reaction("r2", "4.000", "A"),           /* peer parent */
+      typed("rd", "5.000", HISTORY_REDACT, "A"),
+      reaction("r3", "7.000", "GONE"),        /* parent not on the page */
+      reaction("dup", "1.500", "P"));         /* the local row's copy */
+  struct HistoryMessage *ctx = NULL;
+  char buf[HISTORY_MSGID_LEN];
+
+  (void)s;
+  assert_string_equal(hm_page_parent(peer->next->next, local, peer, buf, sizeof buf), "P");
+  assert_null(hm_page_parent(peer, local, peer, buf, sizeof buf));
+  assert_null(hm_page_parent(peer->next, local, peer, buf, sizeof buf));
+  assert_int_equal(hm_derive_context(&peer, local, &ctx), 3);
+  assert_string_equal(ids(peer), "rr A r3 dup");
+  assert_string_equal(ids(ctx), "r1 r2 rd");
+  assert_int_equal(ctx->is_context, 1);
+  assert_string_equal(ctx->ctx_parent, "P");
+  assert_string_equal(ctx->next->ctx_parent, "A");
+  assert_string_equal(ctx->next->next->ctx_parent, "A");
+  /* Appended after what the list already held. */
+  {
+    struct HistoryMessage *more = chain(1, reaction("r4", "8.000", "A"));
+    assert_int_equal(hm_derive_context(&more, NULL, &ctx), 0);   /* A is not local */
+    assert_string_equal(ids(more), "r4");
+    peer->next->next->next->next = more;   /* dup -> r4 */
+    assert_int_equal(hm_derive_context(&peer, local, &ctx), 1);
+    assert_string_equal(ids(ctx), "r1 r2 rd r4");
+  }
+  history_free_messages(local);
+  history_free_messages(peer);
+  history_free_messages(ctx);
+}
+
+/* F-4: a context child counts against its own cap, never the row cap, and
+ * past it is dropped without touching the rows; a row past the row cap is
+ * the cut (partial), as before. */
+static void test_fed_admit_two_budgets(void **s)
+{
+  int rows = 0, ctx = 0, i;
+
+  (void)s;
+  assert_int_equal(hm_fed_admit(0, &rows, &ctx, 2, 3), HM_ADMIT_ROW);
+  for (i = 0; i < 3; i++)
+    assert_int_equal(hm_fed_admit(1, &rows, &ctx, 2, 3), HM_ADMIT_CONTEXT);
+  assert_int_equal(hm_fed_admit(1, &rows, &ctx, 2, 3), HM_DROP_CONTEXT);
+  assert_int_equal(rows, 1);
+  assert_int_equal(ctx, 3);
+  assert_int_equal(hm_fed_admit(0, &rows, &ctx, 2, 3), HM_ADMIT_ROW);
+  assert_int_equal(hm_fed_admit(0, &rows, &ctx, 2, 3), HM_DROP_ROW);
+  assert_int_equal(hm_fed_admit(1, &rows, &ctx, 2, 3), HM_DROP_CONTEXT);
+  assert_int_equal(rows, 2);
+  assert_int_equal(ctx, 3);
+  /* 500 context children before a single row: the row still fits. */
+  rows = ctx = 0;
+  for (i = 0; i < 500; i++)
+    hm_fed_admit(1, &rows, &ctx, 500, 500);
+  assert_int_equal(hm_fed_admit(0, &rows, &ctx, 500, 500), HM_ADMIT_ROW);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -804,6 +891,8 @@ int main(void)
     cmocka_unit_test(test_redact_filter_checks_context),
     cmocka_unit_test(test_redact_filter_nothing_dropped),
     cmocka_unit_test(test_redact_filter_closed),
+    cmocka_unit_test(test_page_parent_derives_context),
+    cmocka_unit_test(test_fed_admit_two_budgets),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),

@@ -513,3 +513,72 @@ int hm_redact_filter(struct HistoryMessage **head, int count,
     MyFree(set);
   return rc;
 }
+
+const char *hm_page_parent(const struct HistoryMessage *m,
+                           const struct HistoryMessage *local,
+                           const struct HistoryMessage *peer,
+                           char *buf, size_t buflen)
+{
+  const struct HistoryMessage *r;
+  char own[HISTORY_MSGID_LEN];
+
+  if (!m || !hm_context_parent(m, buf, buflen))
+    return NULL;
+  /* A copy of a local row stays a row: hm_merge keeps one and lends it
+   * the other's tags (hm_find_dup only reads the list). */
+  if (local && hm_find_dup((struct HistoryMessage *)local, m))
+    return NULL;
+  for (r = local; r; r = r->next)
+    if (!r->is_context && strcmp(r->msgid, buf) == 0)
+      return buf;
+  for (r = peer; r; r = r->next)
+    if (r != m && !r->is_context && strcmp(r->msgid, buf) == 0
+        && !hm_context_parent(r, own, sizeof(own)))
+      return buf;
+  return NULL;
+}
+
+int hm_derive_context(struct HistoryMessage **peer,
+                      const struct HistoryMessage *local,
+                      struct HistoryMessage **ctx_list)
+{
+  struct HistoryMessage **pp, **tp;
+  int moved = 0;
+
+  if (!peer || !ctx_list)
+    return 0;
+  for (tp = ctx_list; *tp; tp = &(*tp)->next)
+    ;
+  pp = peer;
+  while (*pp) {
+    struct HistoryMessage *m = *pp;
+    char parent[HISTORY_MSGID_LEN];
+
+    if (!m->is_context && hm_page_parent(m, local, *peer, parent, sizeof(parent))) {
+      *pp = m->next;
+      m->next = NULL;
+      m->is_context = 1;
+      ircd_strncpy(m->ctx_parent, parent, sizeof(m->ctx_parent));
+      *tp = m;
+      tp = &m->next;
+      moved++;
+    } else
+      pp = &m->next;
+  }
+  return moved;
+}
+
+enum hm_admit hm_fed_admit(int is_context, int *rows, int *ctx,
+                           int row_max, int ctx_max)
+{
+  if (is_context) {
+    if (*ctx >= ctx_max)
+      return HM_DROP_CONTEXT;
+    (*ctx)++;
+    return HM_ADMIT_CONTEXT;
+  }
+  if (*rows >= row_max)
+    return HM_DROP_ROW;
+  (*rows)++;
+  return HM_ADMIT_ROW;
+}
