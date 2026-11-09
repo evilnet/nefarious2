@@ -596,13 +596,13 @@ extern int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr
 extern void remove_user_from_channel(struct Client *sptr, struct Channel *chptr);
 #ifdef USE_ROCKSDB
 /* m_kick.c: one KICK row, "victim :comment", from src (&his for a server),
- * under the event's msgid and time (NULL / 0: minted here); +P skips, and
- * so does the storage gate (channel_store_wanted: ours = the KICK was made
- * here -- a local kicker, the Net Rider pass, the swap kick). */
+ * under the event's msgid and time (NULL / 0: minted here), when the
+ * caller's storage gate said so (@a wanted: channel_store_wanted, judged
+ * while the victim was still a member); +P at store time skips too. */
 extern void channel_store_kick(struct Client *src, struct Channel *chptr,
                                const char *victim, const char *comment,
                                const char *msgid, uint64_t event_ms,
-                               int ours);
+                               int wanted);
 #endif
 extern void remove_user_from_all_channels(struct Client* cptr);
 extern void channel_account_adjust(struct Client *cptr, int delta);

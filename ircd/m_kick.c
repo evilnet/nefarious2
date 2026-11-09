@@ -117,19 +117,17 @@
  * and the victim as resolved here.  A KICK the channel was not shown (of a
  * +D member not yet shown: m_kick, ms_kick) is not stored at all.
  *
- * @param[in] src Who kicked, as the members saw it (&his for a server).
- * @param[in] chptr Channel; its live incarnation is stamped on the row.
- * @param[in] victim The kicked member's nick.
- * @param[in] comment Kick reason.
  * Every store passes the one gate every channel row passes
- * (channel_store_wanted, W5 Task 13).  The kicker's server, the Net Rider
- * pass and the swap kick made the KICK here (\a ours): they store it
- * whatever their members (the Net Rider rows are stored after the riders
- * left).  A relayed KICK (ms_kick) is stored only while a member of ours
- * is in the channel, checked before make_zombie(), so a KICK of this
- * server's only member is still stored here.  With
- * CHATHISTORY_REQUIRE_AUTH on, a channel with no authenticated member
- * that is not +H stores none of them.
+ * (channel_store_wanted, W5 Task 13), judged by the caller while the victim
+ * is still a member (\a wanted): the kicker's server, the Net Rider pass
+ * and the swap kick made the KICK here (ours), so they need no member of
+ * their own; a relayed KICK (ms_kick) needs a member of ours, and, checked
+ * before make_zombie(), a KICK of this server's only member still has one.
+ * The channel's own storage rule (channel_store_open: +P,
+ * CHATHISTORY_REQUIRE_AUTH) is judged then too, with the victim still
+ * counted -- the Net Rider rows are stored after the riders left, under the
+ * decision made at each KICK (fix round 1, m1).  +P is checked again here,
+ * at store time: a BURST's +P lands between a Net Rider KICK and its row.
  *
  * @param[in] src Who kicked, as the members saw it (&his for a server).
  * @param[in] chptr Channel; its live incarnation is stamped on the row.
@@ -137,11 +135,11 @@
  * @param[in] comment Kick reason.
  * @param[in] msgid The event's msgid, or NULL to mint one here.
  * @param[in] event_ms The event's time, or 0 for the mint time.
- * @param[in] ours 1 when the KICK was made here, 0 for a relayed one.
+ * @param[in] wanted The caller's channel_store_wanted() for this KICK.
  */
 void channel_store_kick(struct Client *src, struct Channel *chptr,
                         const char *victim, const char *comment,
-                        const char *msgid, uint64_t event_ms, int ours)
+                        const char *msgid, uint64_t event_ms, int wanted)
 {
   char timestamp[32];
   char fallback_msgid[64];
@@ -162,8 +160,8 @@ void channel_store_kick(struct Client *src, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* The storage gate (see above) */
-  if (!channel_store_wanted(chptr, ours))
+  /* The storage gate, as the caller judged it (see above) */
+  if (!wanted)
     return;
 
   /* The event's msgid, so clients and federated merges deduplicate */
@@ -341,7 +339,8 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * in front of the kicker and the victim only, so no row. */
     if (!IsDelayedJoin(member))
       channel_store_kick(sptr, chptr, cli_name(who), comment,
-                         kick_msgid[0] ? kick_msgid : NULL, kick_ms, 1);
+                         kick_msgid[0] ? kick_msgid : NULL, kick_ms,
+                         channel_store_wanted(chptr, 1));   /* ours */
 #endif
     /* The victim's presence interval closes at the kick's time, not at
      * whenever make_zombie's removal happens to run (P2). */
@@ -494,7 +493,7 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       if (!IsDelayedJoin(member))
         channel_store_kick(IsServer(sptr) ? &his : sptr, chptr, cli_name(who),
                            comment, kick_msgid[0] ? kick_msgid : NULL,
-                           kick_time_ms, 0);
+                           kick_time_ms, channel_store_wanted(chptr, 0));
 #endif
       presence_set_event_time(kick_msgid[0] ? presence_event_time(kick_msgid, kick_time_ms) : 0);
       make_zombie(member, who, cptr, sptr, chptr);

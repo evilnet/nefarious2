@@ -198,6 +198,8 @@ struct NetRiderKick {
   char nick[NICKLEN + 1];       /**< The kicked member, as the KICK named it. */
   char msgid[64];               /**< The KICK's msgid ("" with msgids off). */
   uint64_t ms;                  /**< The KICK's time (0 with msgids off). */
+  int wanted;                   /**< channel_store_wanted(chptr, 1) at the
+                                 *   KICK, the rider still a member (m1) */
 };
 
 /*
@@ -419,6 +421,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                        sizeof(riders[nriders].nick));
           ircd_strncpy(riders[nriders].msgid, msgid, sizeof(riders[nriders].msgid));
           riders[nriders].ms = ms;
+          /* The storage gate as the channel was at this KICK, the rider
+           * still counted (its departure can take the channel's last
+           * authenticated member); +P is checked again at the store. */
+          riders[nriders].wanted = channel_store_wanted(chptr, 1);
           nriders++;
           /* The victim's presence closes at the KICK's own time. */
           presence_set_event_time(msgid[0] ? presence_event_time(msgid, ms) : 0);
@@ -792,7 +798,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     for (nr = 0; nr < nriders; nr++)
       channel_store_kick(&his, chptr, riders[nr].nick, "Net Rider",
                          riders[nr].msgid[0] ? riders[nr].msgid : NULL,
-                         riders[nr].ms, 1);   /* made here: ours */
+                         riders[nr].ms, riders[nr].wanted);
   }
 #endif
   MyFree(riders);

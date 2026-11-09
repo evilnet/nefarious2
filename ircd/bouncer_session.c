@@ -10474,7 +10474,7 @@ static void bounce_swap_kick(struct Channel *chptr, struct Client *face,
    * one; recorded, W5 Task 3). */
   if (msgid[0])
     channel_store_kick(&his, chptr, cli_name(face), "Net Rider", msgid, ms,
-                       1);   /* made here: ours (W5 Task 13) */
+                       channel_store_wanted(chptr, 1));   /* ours (W5 Task 13) */
 #endif
   /* The face, still the primary here, and with it its alias members
    * (bounce_sync_alias_part); counts move as for any part.  The account's
