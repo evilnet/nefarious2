@@ -100,6 +100,18 @@ unsigned int ch_e_flags(const char *param)
   return flags;
 }
 
+unsigned int ch_ad_features(const char *param)
+{
+  unsigned int features = 0;
+  if (!param)
+    return 0;
+  for (; *param; param++) {
+    if (*param == 'K')
+      features |= CH_AD_CHILDREN;
+  }
+  return features;
+}
+
 enum rdx_row rdx_row_decide(int parent_lookup_rc, int already_redacted)
 {
   if (parent_lookup_rc < 0 || already_redacted < 0)

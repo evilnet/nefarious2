@@ -5185,45 +5185,6 @@ static struct HistoryMessage *extract_fed_context(struct FedRequest *req)
   return ctx_head;
 }
 
-/** Splice federated context children into a merged result list after
- * their parents (after any locally-attached context run).  Ownership
- * of ctx_list transfers here: spliced nodes join \a merged, children
- * whose parent is absent or already present (local copy attached by
- * history_attach_context) are freed. */
-static void splice_fed_context(struct HistoryMessage *merged,
-                               struct HistoryMessage *ctx_list)
-{
-  struct HistoryMessage *ctx = ctx_list;
-
-  while (ctx) {
-    struct HistoryMessage *next_ctx = ctx->next;
-    struct HistoryMessage *parent = NULL, *m;
-
-    ctx->next = NULL;
-
-    if (!hm_find_dup(merged, ctx)) {
-      for (m = merged; m; m = m->next) {
-        if (!m->is_context && strcmp(m->msgid, ctx->ctx_parent) == 0) {
-          parent = m;
-          break;
-        }
-      }
-    }
-
-    if (parent) {
-      /* Insert after the parent's existing context run */
-      struct HistoryMessage *ins = parent;
-      while (ins->next && ins->next->is_context)
-        ins = ins->next;
-      ctx->next = ins->next;
-      ins->next = ctx;
-    } else {
-      history_free_messages(ctx);
-    }
-    ctx = next_ctx;
-  }
-}
-
 /** The rows the peers sent as rows of their own pages, for a page
  * federated for its context only (FED_WHY_CONTEXT; their declared context
  * is already out, extract_fed_context).  @a rows is the local page.
@@ -5243,7 +5204,7 @@ static void splice_fed_context(struct HistoryMessage *merged,
  *     no account), nor is it proof: a peer's presence records, replicated
  *     by observation, can differ from this server's.
  * The rows left in req->fed_msgs are freed with the request.
- * @return The extended context list (splice_fed_context takes it). */
+ * @return The extended context list (hm_splice_context takes it). */
 static struct HistoryMessage *context_only_peer_rows(struct FedRequest *req,
                                                      struct HistoryMessage *rows,
                                                      struct HistoryMessage *ctx_list)
@@ -5368,7 +5329,7 @@ static void send_fed_response(struct FedRequest *req)
      * then splice the remote-only children (dedup against the local
      * attach by msgid). */
     history_attach_context(req->target, merged);
-    splice_fed_context(merged, fed_ctx);
+    hm_splice_context(merged, fed_ctx);
   }
   /* Async replay — ownership of merged list transfers to ReplayState.
    * Completeness judged on the PRE-filter merged total (see the
@@ -6384,7 +6345,7 @@ static void complete_autoreplay_channel(struct FedRequest *req)
     total = 0;
     for (struct HistoryMessage *m = merged; m; m = m->next)
       total++;
-    splice_fed_context(merged, fed_ctx);
+    hm_splice_context(merged, fed_ctx);
 
     /* Same reply-side sequence as presence_filter_and_replay and
      * chathistory_page_since: context, redaction placeholders, then

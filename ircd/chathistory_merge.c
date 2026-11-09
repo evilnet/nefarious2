@@ -24,7 +24,10 @@
  * The requester of a federated page holds two row lists: its own store's
  * (local_msgs) and the rows its peers sent back (fed_msgs).  hm_merge
  * makes the page from both; hm_find_dup is its duplicate test, also used
- * by the context splice.
+ * by the context splice (hm_splice_context).  The children request's pure
+ * parts live here too (W5 Task 14): which of a page's rows to ask about
+ * (hm_children_wanted) and a CH Q K line's msgid list (hm_pack_ids,
+ * hm_parse_ids).
  */
 #include "config.h"
 
@@ -274,4 +277,124 @@ const char *hm_context_parent(const struct HistoryMessage *m, char *buf,
     }
   }
   return NULL;
+}
+
+void hm_splice_context(struct HistoryMessage *merged,
+                       struct HistoryMessage *ctx_list)
+{
+  struct HistoryMessage *ctx = ctx_list;
+
+  while (ctx) {
+    struct HistoryMessage *next_ctx = ctx->next;
+    struct HistoryMessage *parent = NULL, *m;
+
+    ctx->next = NULL;
+
+    if (!hm_find_dup(merged, ctx)) {
+      for (m = merged; m; m = m->next) {
+        if (!m->is_context && strcmp(m->msgid, ctx->ctx_parent) == 0) {
+          parent = m;
+          break;
+        }
+      }
+    }
+
+    if (parent) {
+      /* Insert after the parent's existing context run */
+      struct HistoryMessage *ins = parent;
+      while (ins->next && ins->next->is_context)
+        ins = ins->next;
+      ctx->next = ins->next;
+      ins->next = ctx;
+    } else {
+      history_free_messages(ctx);
+    }
+    ctx = next_ctx;
+  }
+}
+
+int hm_children_wanted(const struct HistoryMessage *rows,
+                       int (*received)(uint64_t ms, void *ctx), void *ctx,
+                       const char **ids, int max)
+{
+  const struct HistoryMessage *m, **v;
+  int n = 0, i, cut = -1, out = 0;
+
+  if (!rows || !received || !ids || max <= 0)
+    return 0;
+  for (m = rows; m; m = m->next)
+    if (!m->is_context)
+      n++;
+  if (n == 0)
+    return 0;
+  v = (const struct HistoryMessage **)MyMalloc((size_t)n * sizeof(*v));
+  for (i = 0, m = rows; m; m = m->next)
+    if (!m->is_context)
+      v[i++] = m;
+  /* Newest first: a later start is a sub-range of an earlier one, so the
+   * first rejection takes every older row with it. */
+  for (i = n - 1; i >= 0; i--) {
+    if (!received(hm_ts_ms(v[i]->timestamp), ctx)) {
+      cut = i;
+      break;
+    }
+  }
+  for (i = 0; i <= cut && out < max; i++)
+    ids[out++] = v[i]->msgid;
+  MyFree(v);
+  return out;
+}
+
+int hm_pack_ids(const char *const *ids, int n, int from, size_t room,
+                char *out, size_t outsz)
+{
+  size_t len = 0;
+  int k = 0, i;
+
+  if (!out || !outsz)
+    return 0;
+  out[0] = '\0';
+  if (!ids || from < 0)
+    return 0;
+  for (i = from; i < n; i++) {
+    size_t l = strlen(ids[i]);
+    size_t need = len + (k ? 1 : 0) + l;
+
+    if (need > room || need + 1 > outsz)
+      break;
+    if (k)
+      out[len++] = ' ';
+    memcpy(out + len, ids[i], l);
+    len += l;
+    out[len] = '\0';
+    k++;
+  }
+  return k;
+}
+
+int hm_parse_ids(char *list, const char **ids, int max)
+{
+  char *p = list;
+  int n = 0;
+
+  if (!list || !ids || max <= 0)
+    return 0;
+  while (*p && n < max) {
+    char *tok;
+    size_t len;
+
+    while (*p == ' ')
+      p++;
+    if (!*p)
+      break;
+    tok = p;
+    while (*p && *p != ' ')
+      p++;
+    len = (size_t)(p - tok);
+    if (*p)
+      *p++ = '\0';
+    if (len < HISTORY_MSGID_LEN)
+      ids[n++] = tok;
+  }
+  return n;
 }

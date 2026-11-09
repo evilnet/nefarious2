@@ -55,6 +55,13 @@ int rdx_reply_parse(int parc, char **parv, struct rdx_reply *out);
 #define CH_E_UNANSWERED  0x2
 unsigned int ch_e_flags(const char *param);
 
+/* CH A S <retention_days> [<features>] -- feature letters a store advertises
+ * with its storage ad, any order: K = it answers CH Q K, the context children
+ * of named msgids (W5 Task 14).  NULL-safe; unknown letters ignored, so later
+ * features add letters. */
+#define CH_AD_CHILDREN   0x1
+unsigned int ch_ad_features(const char *param);
+
 /* Applying one redaction (a peer's live REDACT, a catch-up row, or a
  * write-forwarded one) to this server's store.  @a parent_lookup_rc is
  * history_lookup_message's answer for the redacted message (0 found, 1 not

@@ -18,7 +18,11 @@
  *    owners of one raw_content/dyn_content was a double free);
  *  - hm_trim_around: a merged AROUND page cut on its reference as a local
  *    AROUND page is (W5 Push D: keeping the newest rows drifted it off);
- *  - hm_context_parent: the row a peer's reaction or REDACT hangs on.
+ *  - hm_context_parent: the row a peer's reaction or REDACT hangs on;
+ *  - the children request (W5 Task 14): hm_children_wanted (which of a
+ *    page's rows to ask about, newest first with the monotone stop),
+ *    hm_pack_ids / hm_parse_ids (a CH Q K line's msgid list), and
+ *    hm_splice_context (the context splice, moved from m_chathistory.c).
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -377,9 +381,208 @@ static void test_context_parent(void **s)
   history_free_messages(m);
 }
 
+/* ---- W5 Task 14: the children request's pure parts ---- */
+
+static int received_calls;
+static int received_always;      /* 0 or 1: a constant answer; -1: received_from */
+static uint64_t received_from;   /* received(ms) = ms >= received_from */
+
+/* A store's "was [ms, now] received here, clear of every absence?" */
+static int fake_received(uint64_t ms, void *ctx)
+{
+  (void)ctx;
+  received_calls++;
+  if (received_always >= 0)
+    return received_always;
+  return ms >= received_from;
+}
+
+/* a(1000) b(2000) [context c(2500)] d(3000) e(4000), times in ms. */
+static struct HistoryMessage *wanted_rows(void)
+{
+  struct HistoryMessage *m = chain(5, row("a", "1.000", ""), row("b", "2.000", ""),
+                                      row("c", "2.500", ""), row("d", "3.000", ""),
+                                      row("e", "4.000", ""));
+  m->next->next->is_context = 1;
+  return m;
+}
+
+/* received() rejects [b, now] and passes [d, now]: a and b are asked
+ * about, newest first with the monotone stop (e, d, then b: three calls). */
+static void test_children_wanted_cuts_at_newest_unreceived(void **s)
+{
+  struct HistoryMessage *m = wanted_rows();
+  const char *out[5] = { NULL, NULL, NULL, NULL, NULL };
+
+  (void)s;
+  received_calls = 0;
+  received_always = -1;
+  received_from = 3000;
+  assert_int_equal(hm_children_wanted(m, fake_received, NULL, out, 5), 2);
+  assert_string_equal(out[0], "a");
+  assert_string_equal(out[1], "b");
+  assert_null(out[2]);
+  assert_int_equal(received_calls, 3);
+  history_free_messages(m);
+}
+
+/* Every row's context range was received: nothing to ask. */
+static void test_children_wanted_all_received(void **s)
+{
+  struct HistoryMessage *m = wanted_rows();
+  const char *out[5] = { NULL, NULL, NULL, NULL, NULL };
+
+  (void)s;
+  received_calls = 0;
+  received_always = 1;
+  assert_int_equal(hm_children_wanted(m, fake_received, NULL, out, 5), 0);
+  assert_null(out[0]);
+  assert_int_equal(received_calls, 4);   /* the four rows, the context row skipped */
+  history_free_messages(m);
+}
+
+/* None was: every non-context row, in time order; the context row c is no
+ * parent (no context of context).  The newest rejects at once: one call. */
+static void test_children_wanted_none_received_skips_context(void **s)
+{
+  struct HistoryMessage *m = wanted_rows();
+  const char *out[5] = { NULL, NULL, NULL, NULL, NULL };
+
+  (void)s;
+  received_calls = 0;
+  received_always = 0;
+  assert_int_equal(hm_children_wanted(m, fake_received, NULL, out, 5), 4);
+  assert_string_equal(out[0], "a");
+  assert_string_equal(out[1], "b");
+  assert_string_equal(out[2], "d");
+  assert_string_equal(out[3], "e");
+  assert_null(out[4]);
+  assert_int_equal(received_calls, 1);
+  history_free_messages(m);
+}
+
+/* At most max ids are written, nothing past them. */
+static void test_children_wanted_max(void **s)
+{
+  struct HistoryMessage *m = wanted_rows();
+  const char *sentinel = "untouched";
+  const char *out[4] = { NULL, NULL, sentinel, sentinel };
+
+  (void)s;
+  received_calls = 0;
+  received_always = 0;
+  assert_int_equal(hm_children_wanted(m, fake_received, NULL, out, 2), 2);
+  assert_non_null(out[0]);
+  assert_non_null(out[1]);
+  assert_ptr_equal(out[2], sentinel);
+  assert_ptr_equal(out[3], sentinel);
+  assert_int_equal(hm_children_wanted(NULL, fake_received, NULL, out, 2), 0);
+  history_free_messages(m);
+}
+
+/* Packing a CH Q K line's list: whole ids, space-separated, within room. */
+static void test_pack_ids_room(void **s)
+{
+  const char *const in[3] = { "AAAAAAAAAAAAA1", "AAAAAAAAAAAAA2", "AAAAAAAAAAAAA3" };
+  char out[64];
+
+  (void)s;
+  assert_int_equal(hm_pack_ids(in, 3, 0, 29, out, sizeof out), 2);
+  assert_string_equal(out, "AAAAAAAAAAAAA1 AAAAAAAAAAAAA2");
+  assert_int_equal(hm_pack_ids(in, 3, 0, 13, out, sizeof out), 0);
+  assert_int_equal(hm_pack_ids(in, 3, 2, 14, out, sizeof out), 1);
+  assert_string_equal(out, "AAAAAAAAAAAAA3");
+  /* The output buffer bounds it too. */
+  assert_int_equal(hm_pack_ids(in, 3, 0, 500, out, 20), 1);
+  assert_string_equal(out, "AAAAAAAAAAAAA1");
+  assert_int_equal(hm_pack_ids(in, 3, 3, 500, out, sizeof out), 0);
+}
+
+/* Parsing a CH Q K list in place: runs of spaces, an over-long token
+ * skipped, at most max. */
+static void test_parse_ids_tokens(void **s)
+{
+  char l1[] = "a  b c";
+  char l2[128];
+  char l3[] = "a b c";
+  char l4[] = "  ";
+  const char *out[4];
+  int i;
+
+  (void)s;
+  assert_int_equal(hm_parse_ids(l1, out, 4), 3);
+  assert_string_equal(out[0], "a");
+  assert_string_equal(out[1], "b");
+  assert_string_equal(out[2], "c");
+
+  strcpy(l2, "x ");
+  for (i = 0; i < 70; i++)
+    strcat(l2, "L");
+  strcat(l2, " y");
+  assert_int_equal(hm_parse_ids(l2, out, 4), 2);
+  assert_string_equal(out[0], "x");
+  assert_string_equal(out[1], "y");
+
+  assert_int_equal(hm_parse_ids(l3, out, 2), 2);
+  assert_string_equal(out[0], "a");
+  assert_string_equal(out[1], "b");
+
+  assert_int_equal(hm_parse_ids(l4, out, 4), 0);
+  assert_int_equal(hm_parse_ids(NULL, out, 4), 0);
+}
+
+/* A context row on @a parent. */
+static struct HistoryMessage *ctx_row(const char *msgid, const char *ts, const char *parent)
+{
+  struct HistoryMessage *m = row(msgid, ts, "");
+
+  m->type = HISTORY_TAGMSG;
+  m->is_context = 1;
+  ircd_strncpy(m->ctx_parent, parent, sizeof(m->ctx_parent));
+  return m;
+}
+
+/* A spliced child goes after its parent's existing context run. */
+static void test_splice_after_context_run(void **s)
+{
+  struct HistoryMessage *merged = chain(3, row("P", "1.000", ""), ctx_row("x", "2.000", "P"),
+                                           row("Q", "3.000", ""));
+
+  (void)s;
+  hm_splice_context(merged, ctx_row("y", "2.500", "P"));
+  assert_string_equal(ids(merged), "P x y Q");
+  history_free_messages(merged);
+}
+
+/* Freed, merged unchanged: a duplicate of a child already there (by
+ * msgid), a child whose parent is not on the page, and a child whose
+ * parent is itself context (no context of context). */
+static void test_splice_drops_dup_and_orphan(void **s)
+{
+  struct HistoryMessage *merged = chain(3, row("P", "1.000", ""), ctx_row("x", "2.000", "P"),
+                                           row("Q", "3.000", ""));
+  int before = count(merged);
+
+  (void)s;
+  hm_splice_context(merged, chain(3, ctx_row("x", "2.200", "P"),
+                                     ctx_row("z", "2.300", "NOPE"),
+                                     ctx_row("w", "2.400", "x")));
+  assert_int_equal(count(merged), before);
+  assert_string_equal(ids(merged), "P x Q");
+  history_free_messages(merged);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
+    cmocka_unit_test(test_children_wanted_all_received),
+    cmocka_unit_test(test_children_wanted_none_received_skips_context),
+    cmocka_unit_test(test_children_wanted_max),
+    cmocka_unit_test(test_pack_ids_room),
+    cmocka_unit_test(test_parse_ids_tokens),
+    cmocka_unit_test(test_splice_after_context_run),
+    cmocka_unit_test(test_splice_drops_dup_and_orphan),
     cmocka_unit_test(test_merge_adopts_tags_from_duplicate),
     cmocka_unit_test(test_merge_keeps_first_tags),
     cmocka_unit_test(test_merge_semantic_dup),

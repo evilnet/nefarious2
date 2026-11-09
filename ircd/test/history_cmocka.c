@@ -240,6 +240,17 @@ static void test_ch_e_flags(void **state)
   assert_int_equal(0, ch_e_flags("x"));
 }
 
+/* CH A S <days> [<features>]: the letters a store advertises (W5 Task 14). */
+static void test_ch_ad_features(void **state)
+{
+  (void)state;
+  assert_int_equal(0, ch_ad_features(NULL));
+  assert_int_equal(0, ch_ad_features(""));
+  assert_int_equal(CH_AD_CHILDREN, ch_ad_features("K"));
+  assert_int_equal(CH_AD_CHILDREN, ch_ad_features("xK"));
+  assert_int_equal(0, ch_ad_features("x"));
+}
+
 /* ========== applying a redaction: rdx_row_decide / rdx_watermark_decide ========== */
 
 static void test_rdx_row_decide(void **state)
@@ -1512,6 +1523,7 @@ int main(void)
     cmocka_unit_test(test_rdx_val_roundtrip),
     cmocka_unit_test(test_rdx_reply_parse),
     cmocka_unit_test(test_ch_e_flags),
+    cmocka_unit_test(test_ch_ad_features),
     cmocka_unit_test(test_rdx_row_decide),
     cmocka_unit_test(test_rdx_wm_cut_keeps),
     cmocka_unit_test(test_rdx_wm_truncated_continues),

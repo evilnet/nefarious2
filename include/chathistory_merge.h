@@ -76,4 +76,41 @@ extern struct HistoryMessage *hm_trim_around(struct HistoryMessage *list,
 extern const char *hm_context_parent(const struct HistoryMessage *m,
                                      char *buf, size_t buflen);
 
+/** Splice each context child of @a ctx_list (is_context, ctx_parent set)
+ * into @a merged after its parent's existing context run.  Ownership of
+ * @a ctx_list moves here: a child joins @a merged, or is freed when
+ * hm_find_dup finds it in @a merged already (a local copy attached by
+ * history_attach_context, an earlier splice, or the same message as a
+ * row) or when its parent is not a non-context row of @a merged.  Moved
+ * unchanged from m_chathistory.c's splice_fed_context (W5 Task 14). */
+extern void hm_splice_context(struct HistoryMessage *merged,
+                              struct HistoryMessage *ctx_list);
+
+/** The msgids of the rows of @a rows (time order) whose children a peer may
+ * hold and this store lacks (the children request, CH Q K; W5 Task 14):
+ * every non-context row at or before the newest one whose context range
+ * [its time, now] @a received rejects.  received(ms, ctx) is 1 when that
+ * range was received here and no storage peer's absence overlaps it.
+ * Monotone (a later start is a sub-range): rows are checked newest first
+ * and the first rejection takes every older row, so received() runs at
+ * most (passing rows + 1) times.  A context row is never a parent (no
+ * context of context).  The ids point into @a rows.
+ * @return msgids written to @a ids, in time order, at most @a max (the
+ *   oldest ones when more are wanted). */
+extern int hm_children_wanted(const struct HistoryMessage *rows,
+                              int (*received)(uint64_t ms, void *ctx), void *ctx,
+                              const char **ids, int max);
+
+/** Pack ids[from..n) space-separated into @a out while the text stays
+ * within @a room bytes (and fits @a outsz with its NUL).
+ * @return how many were packed (0 when ids[from] alone does not fit). */
+extern int hm_pack_ids(const char *const *ids, int n, int from, size_t room,
+                       char *out, size_t outsz);
+
+/** Split a CH Q K msgid list in place: at most @a max space-separated
+ * tokens of 1..HISTORY_MSGID_LEN-1 characters (a longer one is skipped);
+ * runs of spaces separate.  NULL-safe.
+ * @return the count. */
+extern int hm_parse_ids(char *list, const char **ids, int max);
+
 #endif /* INCLUDED_chathistory_merge_h */
