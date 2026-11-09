@@ -3305,6 +3305,14 @@ static int64_t recv_floor_saved;        /**< the value last written */
 static int64_t recv_floor_saved_at;     /**< CurrentTime ms it was written */
 static int recv_floor_capping;          /**< the last raise was cut at now (R41) */
 
+/** The heartbeat's period: ircd.c's minute timer (presence_alive_callback). */
+#define RECV_ALIVE_PERIOD_MS 60000LL
+/** How far a stored mark may legitimately pass the stored heartbeat (R42):
+ * the mark goes out in the heartbeat's batch, or alone by a raise between
+ * heartbeats -- at most one period after the last one -- plus one more
+ * period for a late tick (a main-loop stall delays the timer). */
+#define RECV_FLOOR_BOOT_SLACK_MS (2 * RECV_ALIVE_PERIOD_MS)
+
 static void recv_floor_write(void);
 
 uint64_t history_recv_now_ms(void)
@@ -3331,27 +3339,32 @@ static uint64_t local_floor_at(uint64_t now_ms, int days)
   return floor;
 }
 
-/** Raise the mark to @a floor_ms, never past now (history_recv_now_ms():
- * the clock rows are stamped against), R41.  A clock stepped forward, or a
- * corrupt or future key, would otherwise put the mark ahead of every row
- * and -- rewritten each minute -- keep it there across restarts.  Capping
- * never claims more: every span asked about is clamped to now
- * (channel_span_clamp), so a floor at now already refuses all of them, as
- * a floor past now would.  The cut is logged once per episode, not per
- * call.
+/** Raise the mark toward @a floor_ms during a run: max(mark, min(floor,
+ * now)), now being history_recv_now_ms() (the clock rows are stamped
+ * against), R41/R42.  A floor past now -- rows stamped ahead of this clock
+ * were deleted (a CH W row from the future, a clock that went back after
+ * an eviction) -- raises the mark only to now, so a run never writes a
+ * mark from the future.  Cutting never claims more: every span asked about
+ * is clamped to now (channel_span_clamp), so a floor at now refuses all of
+ * them as a floor past now would; while the floor stays past now, the mark
+ * keeps rising with now.  A mark already past now (one loaded while this
+ * clock is behind the store) is never lowered: that costs only federation
+ * until the clock passes it.  The cut is logged once per episode (the
+ * flag clears at the next raise that is not cut), not per call; the boot
+ * bound (history_recv_boot) is the only other cut, logged on its own.
  * @return The mark. */
 static int64_t recv_floor_raise_now(uint64_t floor_ms, const char *what)
 {
-  int64_t was = recv_floor_hw > (int64_t)floor_ms ? recv_floor_hw : (int64_t)floor_ms;
   int64_t now = (int64_t)history_recv_now_ms();
   int capped = 0;
   int64_t hw = rcv_floor_raise(&recv_floor_hw, (int64_t)floor_ms, now, &capped);
 
   if (capped && !recv_floor_capping)
     log_write(LS_SYSTEM, L_WARNING, 0,
-              "history: the received floor (%s) was %lld ms, past now (%lld "
-              "ms) -- a clock stepped forward, or a stored floor from the "
-              "future: capped at now", what, (long long)was, (long long)now);
+              "history: the received floor's %s value %llu ms is past now "
+              "(%lld ms) -- rows stamped ahead of this clock were deleted, or "
+              "the clock is behind the store: raised only to now",
+              what, (unsigned long long)floor_ms, (long long)now);
   recv_floor_capping = capped;
   return hw;
 }
@@ -3860,26 +3873,43 @@ void history_recv_boot(void)
 
   if (!history_available || !history_cf_recv)
     return;
-  /* The high-water floor the last run applied (R40), before anything
-   * clips: a retention raised across the restart must not lower it.  It
-   * is capped at now (R41); a cut key is written back at once.  With no
-   * key (the first boot of a build that keeps it) the floor as it is now
-   * starts it.  An older build may have deleted under a higher floor (the
-   * Push C build runs age-out and writes no key), but no record it left
-   * matters: there are no window records before Push D, and R34 resets
-   * every pre-restart record at the first burst. */
-  {
-    uint64_t saved = recv_meta_read(recv_floor_key, RECV_FLOOR_KLEN);
-    int64_t hw = recv_floor_raise_now(saved, "stored");
-    recv_floor_saved = (int64_t)saved;
-    recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
-    if (hw < (int64_t)saved)
-      recv_floor_write();
-  }
   /* The last time a build that keeps the windows was running (R32): never
    * the newest row or presence's stamp, which an older build in between
    * keeps writing while it leaves the windows as they were. */
   alive_ms = recv_alive_read();
+  /* The high-water floor the last run applied (R40), before anything
+   * clips: a retention raised across the restart must not lower it.  It is
+   * bounded by the last run's own clock, not this run's (R42): the HLC
+   * restarts from the wall clock, and a clock behind the store would cut a
+   * legitimate mark.  The bound is the later of the stored heartbeat plus
+   * RECV_FLOOR_BOOT_SLACK_MS (same clock, same batch) and this run's now; a
+   * mark beyond it is corrupt or forged, is cut there, logged and written
+   * back.  With no heartbeat (a first boot) now alone bounds it.  With no
+   * key the floor as it is now starts the mark.  An older build may have
+   * deleted under a higher floor (the Push C build runs age-out and writes
+   * no key), but no record it left matters: there are no window records
+   * before Push D, and R34 resets every pre-restart record at the first
+   * burst. */
+  {
+    int64_t saved = (int64_t)recv_meta_read(recv_floor_key, RECV_FLOOR_KLEN);
+    int64_t now = (int64_t)history_recv_now_ms();
+    int cut = 0;
+    int64_t keep = rcv_floor_boot_bound(saved, (int64_t)alive_ms,
+                                        RECV_FLOOR_BOOT_SLACK_MS, now, &cut);
+
+    if (keep > recv_floor_hw)
+      recv_floor_hw = keep;               /* never lowered, never cut to now */
+    recv_floor_saved = saved;
+    recv_floor_saved_at = (int64_t)CurrentTime * 1000LL;
+    if (cut) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: the stored received floor %lld ms is beyond the "
+                "last heartbeat (%llu ms) and now (%lld ms) -- a corrupt or "
+                "forged key: cut to %lld ms", (long long)saved,
+                (unsigned long long)alive_ms, (long long)now, (long long)keep);
+      recv_floor_write();
+    }
+  }
   it = db_iter_open(history_db_env, history_cf_recv, NULL);
   wb = it ? db_writebatch_new(history_db_env) : NULL;
   if (!it || !wb) {

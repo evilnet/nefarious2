@@ -134,15 +134,27 @@ extern int rcv_unpack(const unsigned char *buf, size_t len,
  * before this may be gone" floor only rises.  Rows deleted under a higher
  * floor stay deleted when retention is raised or set to 0, when the clock
  * steps back, or when the eviction floor is dropped once retention passes
- * it -- so a lower floor never lowers the mark.  Raise *@a hw to @a floor_ms
- * when that is higher -- but never past @a ceil_ms (now, R41): a clock
- * stepped forward or a corrupt key would otherwise put the mark ahead of
- * every row and keep it there.  A mark already past @a ceil_ms comes down
- * to it.  *@a capped (when not NULL) says whether the ceiling cut it.
- * @return The effective floor: *@a hw after the raise (the floor itself,
- * capped, when @a hw is NULL). */
+ * it -- so a lower floor never lowers the mark.  The mark becomes
+ * max(*@a hw, min(@a floor_ms, @a ceil_ms)) (R41, R42): a raise never goes
+ * past @a ceil_ms (now) -- a floor past now (rows stamped ahead of this
+ * clock were deleted) raises it only to now -- and never lowers the mark,
+ * one already past now (loaded while this clock is behind) included.
+ * *@a capped (when not NULL) says whether the ceiling cut the floor.
+ * @return The effective floor: *@a hw after the raise (min(@a floor_ms,
+ * @a ceil_ms) when @a hw is NULL). */
 extern int64_t rcv_floor_raise(int64_t *hw, int64_t floor_ms, int64_t ceil_ms,
                                int *capped);
+
+/** The stored mark a restart keeps (R42): at most the later of the last
+ * run's heartbeat @a alive_ms plus @a slack_ms -- the mark is written in
+ * the heartbeat's batch, or by a raise at most about a heartbeat period
+ * after it -- and this run's @a now_ms (a mark at or before now cannot put
+ * the floor in the future).  With no heartbeat (@a alive_ms 0) only
+ * @a now_ms bounds it.  A stored mark beyond the bound is corrupt or
+ * forged: it is cut to the bound and *@a cut (when not NULL) set.
+ * @return The mark to keep. */
+extern int64_t rcv_floor_boot_bound(int64_t stored, int64_t alive_ms,
+                                    int64_t slack_ms, int64_t now_ms, int *cut);
 
 /** A meta row's value (the windows' heartbeat, the high-water floor):
  * @a ms as 8 little-endian bytes into @a out. */

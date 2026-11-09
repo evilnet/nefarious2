@@ -356,8 +356,11 @@ extern int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_m
  * CurrentTime-based) -- never lower than the highest such floor this store
  * has applied (its high-water mark, kept across restarts: R40), so a
  * raised retention, retention 0 or a clock stepped back never lowers it
- * below rows already deleted, and never past now (R41: a clock stepped
- * forward or a future key is cut there, logged once); 0 = no floor yet. */
+ * below rows already deleted.  A run never raises it past now (R41/R42: a
+ * floor past now raises it only to now, logged once per episode), and a
+ * stored mark beyond the last run's heartbeat (plus slack) and this run's
+ * now is cut at boot as corrupt; one above a clock that is behind is kept;
+ * 0 = no floor yet. */
 extern uint64_t history_local_floor_ms(void);
 
 /** The floor as it is now, without the high-water mark: the later of the

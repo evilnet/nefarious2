@@ -389,11 +389,11 @@ static void test_rcv_floor_raise_only_rises(void **state)
   assert_int_equal(rcv_floor_raise(NULL, 5, now, NULL), 5);           /* no mark: the floor itself */
 }
 
-/* The mark never passes now (R41): a clock stepped forward, or a corrupt
- * or future key, would otherwise put it ahead of every row and keep it
- * there across restarts.  A floor past now is cut to now; a mark already
- * past now (a loaded key) comes down to now; both say they capped.  Below
- * now nothing is capped, a floor equal to now included. */
+/* A raise never lowers the mark, and never raises it past now (R41, R42):
+ * the mark becomes max(mark, min(floor, now)).  A floor past now (rows
+ * stamped ahead of this clock were deleted) raises it only to now, and says
+ * it cut; a mark already past now (one loaded while this clock is behind)
+ * is kept -- that costs only federation until the clock passes it. */
 static void test_rcv_floor_raise_capped_at_now(void **state)
 {
   const int64_t now = 1800000000000LL;
@@ -401,23 +401,60 @@ static void test_rcv_floor_raise_capped_at_now(void **state)
   int capped = 0;
   (void)state;
 
+  /* The floor past now, the mark below: cut to now. */
   assert_int_equal(rcv_floor_raise(&hw, now + 86400000LL, now, &capped), now);
   assert_int_equal(hw, now);
   assert_int_equal(capped, 1);
-  /* Time moves on: the mark stays where it was cut, nothing capped. */
+  /* Time moves on: the mark stays where it was cut, nothing cut. */
   assert_int_equal(rcv_floor_raise(&hw, 2000, now + 5000, &capped), now);
   assert_int_equal(capped, 0);
 
-  hw = now + 3600000LL;                                   /* a key from the future */
-  assert_int_equal(rcv_floor_raise(&hw, 0, now, &capped), now);
-  assert_int_equal(hw, now);
-  assert_int_equal(capped, 1);
+  /* The mark above now (this clock behind it): kept, whatever the floor. */
+  hw = now + 3600000LL;
+  assert_int_equal(rcv_floor_raise(&hw, 0, now, &capped), now + 3600000LL);
+  assert_int_equal(hw, now + 3600000LL);
+  assert_int_equal(capped, 0);
+  assert_int_equal(rcv_floor_raise(&hw, now + 7200000LL, now, &capped), now + 3600000LL);
+  assert_int_equal(hw, now + 3600000LL);
+  assert_int_equal(capped, 1);                          /* the floor was cut */
 
   hw = 0;
-  assert_int_equal(rcv_floor_raise(&hw, now, now, &capped), now);    /* at now: not capped */
+  assert_int_equal(rcv_floor_raise(&hw, now, now, &capped), now);    /* at now: not cut */
   assert_int_equal(capped, 0);
   assert_int_equal(rcv_floor_raise(NULL, now + 1, now, &capped), now);
   assert_int_equal(capped, 1);
+}
+
+/* The stored mark a restart keeps (R42): at most the later of the last
+ * run's heartbeat plus the slack and this run's now.  A legitimate mark
+ * is written in the heartbeat's batch, or by a raise within a period of
+ * it, so one beyond both is corrupt or forged and is cut.  A clock behind
+ * the store (this now before the heartbeat) keeps a mark within the slack;
+ * with no heartbeat only now bounds it. */
+static void test_rcv_floor_boot_bound(void **state)
+{
+  const int64_t hb = 1800000000000LL, slack = 120000LL;
+  int cut = -1;
+  (void)state;
+
+  /* Inside the heartbeat's slack: kept, with this clock ahead or behind. */
+  assert_int_equal(rcv_floor_boot_bound(hb - 1000, hb, slack, hb + 600000LL, &cut), hb - 1000);
+  assert_int_equal(cut, 0);
+  assert_int_equal(rcv_floor_boot_bound(hb + slack, hb, slack, hb - 3600000LL, &cut), hb + slack);
+  assert_int_equal(cut, 0);
+  /* Beyond the heartbeat's slack but at or before now: kept (it cannot put
+   * the floor in the future). */
+  assert_int_equal(rcv_floor_boot_bound(hb + 600000LL, hb, slack, hb + 900000LL, &cut), hb + 600000LL);
+  assert_int_equal(cut, 0);
+  /* Beyond both: cut to the later of them. */
+  assert_int_equal(rcv_floor_boot_bound(hb + 86400000LL, hb, slack, hb - 3600000LL, &cut), hb + slack);
+  assert_int_equal(cut, 1);
+  assert_int_equal(rcv_floor_boot_bound(hb + 86400000LL, hb, slack, hb + 900000LL, &cut), hb + 900000LL);
+  assert_int_equal(cut, 1);
+  /* No heartbeat (a first boot): now alone bounds it. */
+  assert_int_equal(rcv_floor_boot_bound(hb + 1, 0, slack, hb, &cut), hb);
+  assert_int_equal(cut, 1);
+  assert_int_equal(rcv_floor_boot_bound(hb - 1, 0, slack, hb, NULL), hb - 1);
 }
 
 /* The meta rows' 8-byte value (the heartbeat's, the floor's): epoch ms,
@@ -467,6 +504,7 @@ int main(void)
     cmocka_unit_test(test_rcv_pack_unpack_size_boundary),
     cmocka_unit_test(test_rcv_floor_raise_only_rises),
     cmocka_unit_test(test_rcv_floor_raise_capped_at_now),
+    cmocka_unit_test(test_rcv_floor_boot_bound),
     cmocka_unit_test(test_rcv_ms_pack),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
