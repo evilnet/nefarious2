@@ -249,8 +249,11 @@ char ri_link_value(int redact)
 
 enum ri_link ri_link_kind(const void *value, size_t len)
 {
-  if (!value || len == 0)
+  if (!value || len != 1)
     return RI_LINK_LEGACY;
-  return ((const char *)value)[0] == RI_LINK_REDACT ? RI_LINK_IS_REDACT
-                                                     : RI_LINK_NOT_REDACT;
+  if (((const char *)value)[0] == RI_LINK_REDACT)
+    return RI_LINK_IS_REDACT;
+  if (((const char *)value)[0] == RI_LINK_CHILD)
+    return RI_LINK_NOT_REDACT;
+  return RI_LINK_LEGACY;   /* not a value this build writes: read the row */
 }

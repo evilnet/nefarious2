@@ -279,8 +279,8 @@ static void test_ch_ad_letters(void **state)
 
 /* W5 Task 15 fix round 1 (S2): the reply index's one-byte entry value.  A
  * REDACT link reads "R", any other child "C"; an older build's entry is
- * empty and the lookup must read the child row.  A non-empty value it does
- * not know is a known non-REDACT (no fetch, never counted). */
+ * empty and the lookup must read the child row, as it must for any value
+ * but "R" and "C". */
 static void test_ri_link_kind(void **state)
 {
   char v;
@@ -294,8 +294,11 @@ static void test_ri_link_kind(void **state)
   assert_int_equal(ri_link_kind(&v, 1), RI_LINK_NOT_REDACT);
   assert_int_equal(ri_link_kind("", 0), RI_LINK_LEGACY);
   assert_int_equal(ri_link_kind(NULL, 0), RI_LINK_LEGACY);
-  assert_int_equal(ri_link_kind("X", 1), RI_LINK_NOT_REDACT);
-  assert_int_equal(ri_link_kind("Rx", 2), RI_LINK_IS_REDACT);
+  /* Only "C" is a known non-REDACT (fix round 2): any other value is read
+   * as an older build's -- the row is fetched (fail closed). */
+  assert_int_equal(ri_link_kind("X", 1), RI_LINK_LEGACY);
+  assert_int_equal(ri_link_kind("Rx", 2), RI_LINK_LEGACY);
+  assert_int_equal(ri_link_kind("Cx", 2), RI_LINK_LEGACY);
 }
 
 /* ========== applying a redaction: rdx_row_decide / rdx_watermark_decide ========== */

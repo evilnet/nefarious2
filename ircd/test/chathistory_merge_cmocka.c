@@ -37,7 +37,11 @@
  *    declarations, the derivation only once one was lost, the two budgets
  *    wired), a REDACT's target kept past every cap (hm_idset) and the
  *    fail-closed peer lists when even that overflows, F-7 for rows, and a
- *    row whose child could not be read.
+ *    row whose child could not be read;
+ *  - fix round 2: a lost REDACT withholds the local rows too, a declared
+ *    one lost keeps its target, every REDACT a peer sent is kept past the
+ *    merge's cut, two responders declaring one child, and the CH B entries
+ *    a request owns.
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -1078,8 +1082,8 @@ static void test_leg_f4_wiring(void **s)
   assert_int_equal(leg.ctx, 3);
   assert_int_equal(leg.ndecl, 0);
   hm_leg_declare(&leg, "R", "LOST", "", 500);        /* its row never comes */
-  assert_int_equal(hm_leg_forget_decl(&leg, "LOST"), 1);
-  assert_int_equal(hm_leg_forget_decl(&leg, "LOST"), 0);
+  assert_int_equal(hm_leg_forget_decl(&leg, "LOST", NULL, 0), 1);
+  assert_int_equal(hm_leg_forget_decl(&leg, "LOST", NULL, 0), 0);
   assert_int_equal(leg.ndecl, 0);
   ctx = hm_leg_extract_context(&leg);
   assert_string_equal(ids(ctx), "C1 C2 X");
@@ -1139,6 +1143,115 @@ static void test_redact_filter_unread_child(void **s)
   history_free_messages(head);
 }
 
+/* ---- W5 Task 15 fix round 2 ---- */
+
+/* I-A(b): a REDACT whose target this request could not keep (side.lost)
+ * may name a LOCAL row too (a children-leg REDACT always does; a peer
+ * row's local duplicate is the one the merge keeps; a context-only page is
+ * all local rows): every row of the finished page a REDACT could name is
+ * withheld, local ones included.  Without lost, nothing is. */
+static void test_leg_close_page_local_rows(void **s)
+{
+  struct hm_page_leg leg;
+  struct HistoryMessage *page;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  page = chain(5, typed("L1", "1.000", HISTORY_PRIVMSG, NULL),
+                  as_ctx(bare_tag("Lr", "5.000")),
+                  typed("J", "2.000", HISTORY_JOIN, NULL),
+                  typed("D", "3.000", HISTORY_REDACT, "Q"),
+                  typed("L2", "4.000", HISTORY_NOTICE, NULL));
+  assert_int_equal(hm_leg_close_page(&leg, &page), 0);
+  assert_string_equal(ids(page), "L1 Lr J D L2");
+  leg.side.lost = 1;
+  assert_int_equal(hm_leg_close_page(&leg, &page), 3);
+  assert_string_equal(ids(page), "J D");
+  history_free_messages(page);
+  hm_leg_free(&leg);
+}
+
+/* I-A(a): a declared REDACT lost before it was read (a CH B with no slot,
+ * an undecodable line) still names its target -- its declaration's parent:
+ * forgetting the declaration hands it back. */
+static void test_leg_forget_decl_parent(void **s)
+{
+  struct hm_page_leg leg;
+  char parent[HISTORY_MSGID_LEN];
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  hm_leg_declare(&leg, "TARGET", "RD", "", 500);
+  assert_int_equal(hm_leg_forget_decl(&leg, "RD", parent, sizeof parent), 1);
+  assert_string_equal(parent, "TARGET");
+  assert_int_equal(leg.ndecl, 0);
+  assert_int_equal(hm_leg_forget_decl(&leg, "RD", parent, sizeof parent), 0);
+  hm_leg_free(&leg);
+}
+
+/* I-B: the merge limit can cut a peer's REDACT row (newer) while the row
+ * it names (older) stays on the page.  Every REDACT the peers sent is seeded
+ * into the side set before the merge, so the filter still hides its
+ * target. */
+static void test_side_seeded_before_merge(void **s)
+{
+  struct hm_page_leg leg;
+  struct HistoryMessage *merged;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  hm_leg_add(&leg, typed("T", "1.000", HISTORY_PRIVMSG, NULL), NULL, 500, 500);
+  hm_leg_add(&leg, typed("D", "9.000", HISTORY_REDACT, "T :spam"), NULL, 500, 500);
+  hm_idset_note_list(&leg.side, leg.msgs);
+  hm_idset_note_list(&leg.side, NULL);
+  assert_int_equal(leg.side.n, 1);
+  merged = hm_merge(NULL, leg.msgs, 1, 1);             /* AFTER: keeps the oldest */
+  assert_string_equal(ids(merged), "T");
+  assert_int_equal(hm_redact_filter(&merged, 1, &leg.side, NULL, NULL), 0);
+  assert_null(merged);
+  hm_leg_free(&leg);
+}
+
+/* Minor 1: with three or more stores two responders can each declare the
+ * same child.  The second declaration must wait for its own row, not be
+ * swallowed by the first responder's row (already context) -- or the
+ * second copy arrives undeclared and is merged as a row. */
+static void test_leg_two_responders_declare_one_child(void **s)
+{
+  struct hm_page_leg leg;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  hm_leg_add(&leg, row("P", "1.000", ""), NULL, 500, 500);
+  hm_leg_declare(&leg, "P", "X", "", 500);                       /* A */
+  assert_int_equal(hm_leg_add(&leg, bare_tag("X", "5.000"), NULL, 500, 500),
+                   HM_ADMIT_CONTEXT);
+  hm_leg_declare(&leg, "P", "X", "", 500);                       /* B */
+  assert_int_equal(leg.ndecl, 1);
+  assert_int_equal(hm_leg_add(&leg, bare_tag("X", "5.000"), NULL, 500, 500),
+                   HM_ADMIT_CONTEXT);
+  assert_int_equal(leg.rows, 1);
+  assert_int_equal(leg.ctx, 2);
+  assert_int_equal(leg.ndecl, 0);
+  hm_leg_free(&leg);
+}
+
+/* Minor 2: a request's CH B reassembly entries are keyed "<reqid>:<msgid>"
+ * (page leg) and "<reqid>K:<msgid>" (children leg); freeing the request
+ * frees exactly those. */
+static void test_chunk_of_request(void **s)
+{
+  (void)s;
+  assert_int_equal(hm_chunk_of_request("Bj12:AAAA", "Bj12"), 1);
+  assert_int_equal(hm_chunk_of_request("Bj12K:AAAA", "Bj12"), 1);
+  assert_int_equal(hm_chunk_of_request("Bj123:AAAA", "Bj12"), 0);
+  assert_int_equal(hm_chunk_of_request("Bj12KK:AAAA", "Bj12"), 0);
+  assert_int_equal(hm_chunk_of_request("Bj1:AAAA", "Bj12"), 0);
+  assert_int_equal(hm_chunk_of_request("Bj12", "Bj12"), 0);
+  assert_int_equal(hm_chunk_of_request(NULL, "Bj12"), 0);
+  assert_int_equal(hm_chunk_of_request("Bj12:AAAA", ""), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1156,6 +1269,11 @@ int main(void)
     cmocka_unit_test(test_leg_f4_wiring),
     cmocka_unit_test(test_redact_filter_rows_of_redacted),
     cmocka_unit_test(test_redact_filter_unread_child),
+    cmocka_unit_test(test_leg_close_page_local_rows),
+    cmocka_unit_test(test_leg_forget_decl_parent),
+    cmocka_unit_test(test_side_seeded_before_merge),
+    cmocka_unit_test(test_leg_two_responders_declare_one_child),
+    cmocka_unit_test(test_chunk_of_request),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),

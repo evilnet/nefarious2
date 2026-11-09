@@ -140,6 +140,11 @@ extern int hm_idset_add(struct hm_idset *s, const char *id);
  * keep its target (its first content word) in @a s. */
 extern void hm_idset_note_redact(struct hm_idset *s, int type, const char *content);
 
+/** Keep in @a s the target of every REDACT in @a list (fix round 2, I-B:
+ * the merge's limit may cut a peer's REDACT while the row it names stays
+ * on the page).  NULL-safe. */
+extern void hm_idset_note_list(struct hm_idset *s, const struct HistoryMessage *list);
+
 /** Free @a s's storage and empty it. */
 extern void hm_idset_free(struct hm_idset *s);
 
@@ -264,8 +269,10 @@ extern enum hm_admit hm_leg_add(struct hm_page_leg *leg, struct HistoryMessage *
                                 const struct HistoryMessage *local,
                                 int row_max, int ctx_max);
 
-/** A CH C declaration for @a leg.  A row already here under @a child (it
- * came first) becomes the context child, moving from the row budget to
+/** A CH C declaration for @a leg.  A row already here under @a child, not
+ * yet context (it came first; with three or more stores a second
+ * responder may declare a child the first already sent), becomes the
+ * context child, moving from the row budget to
  * the context budget (dropped when that is full, a REDACT's target kept);
  * else the declaration waits in the table, or, the table full, is lost
  * (@a leg->decl_lost). */
@@ -273,9 +280,24 @@ extern void hm_leg_declare(struct hm_page_leg *leg, const char *parent,
                            const char *child, const char *tags, int ctx_max);
 
 /** A row @a leg will never get (lost before it was read): take its
- * declaration out of the table.  @return 1 when it was declared (context:
- * its loss is never partial), else 0. */
-extern int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child);
+ * declaration out of the table, its parent (for a REDACT: its target)
+ * copied to @a parent when @a parent is not NULL.  @return 1 when it was
+ * declared (context: its loss is never partial), else 0. */
+extern int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child,
+                              char *parent, size_t plen);
+
+/** When @a leg lost a REDACT whose target it cannot know (@a
+ * leg->side.lost), withhold every entry of the finished @a page a REDACT
+ * could name -- local rows included (fix round 2, I-A: a children-leg
+ * REDACT always names a local row, a peer row's local copy is the one the
+ * merge keeps, a context-only page is all local rows).  Never partial.
+ * @return how many entries were withheld (0 when nothing was lost). */
+extern int hm_leg_close_page(const struct hm_page_leg *leg, struct HistoryMessage **page);
+
+/** Does the CH B reassembly key @a key ("<reqid>:<msgid>", or
+ * "<reqid>K:<msgid>" on the children leg) belong to request @a reqid?  A
+ * request freed mid-row frees its entries (fix round 2). */
+extern int hm_chunk_of_request(const char *key, const char *reqid);
 
 /** Unlink @a leg's context children (they splice after their parents,
  * uncounted, #526) and return them; @a leg keeps its rows. */

@@ -5185,6 +5185,12 @@ static void free_fed_request(struct FedRequest *req)
     history_free_messages(req->k_msgs);
   if (req->k_ids)
     MyFree(req->k_ids);
+  /* Its CH B entries still in reassembly (a row cut off by the timeout or
+   * the request's end): the table is global and has no expiry, so a slot
+   * left behind would make later pages lose rows (W5 Task 15 fix round 2). */
+  for (i = 0; i < MAX_PENDING_CHUNKS; i++)
+    if (pending_chunks[i] && hm_chunk_of_request(pending_chunks[i]->key, req->reqid))
+      free_chunk(pending_chunks[i]);
 
   /* Free custom callback data */
   if (req->cb_data) {
@@ -5358,52 +5364,94 @@ static struct HistoryMessage *extract_fed_context(struct FedRequest *req)
   return hm_leg_extract_context(&req->leg);
 }
 
-/** A REDACT this request could not keep -- its side set full, or lost
- * before its content was read (fed_row_lost) -- may name any of the peers'
- * rows or context: all of them fail closed (hm_fail_closed; W5 Task 15 fix
- * round 1).  The local rows are judged against this store as always.
- * @return the peer rows dropped (the caller decides what that costs). */
-static int fed_fail_closed_if_lost(struct FedRequest *req,
-                                   struct HistoryMessage **fed_ctx)
+/** Keep the target of every REDACT the peers sent -- rows, page-leg
+ * context, children -- in the request's side set, before the merge (W5
+ * Task 15 fix round 2, I-B): the merge's limit (an AFTER page keeps the
+ * oldest rows, an AROUND page is cut on its reference) can cut a peer's
+ * REDACT row while the older row it names stays on the page.  Within the
+ * side set's bound; past it the page fails closed (fed_close_page). */
+static void fed_seed_side(struct FedRequest *req, const struct HistoryMessage *fed_ctx)
 {
-  int rows;
+  hm_idset_note_list(&req->leg.side, req->leg.msgs);
+  hm_idset_note_list(&req->leg.side, fed_ctx);
+  hm_idset_note_list(&req->leg.side, req->k_msgs);
+}
 
-  if (!req->leg.side.lost)
-    return 0;
-  rows = hm_fail_closed(&req->leg.msgs);
-  req->leg.rows -= rows;
-  hm_fail_closed(fed_ctx);
-  hm_fail_closed(&req->k_msgs);
-  log_write(LS_SYSTEM, L_NOTICE, 0,
-            "chathistory %s: request %s lost a REDACT it could not keep; its "
-            "peers' rows and context fail closed (%d row(s) withheld)",
-            req->target, req->reqid, rows);
-  return rows;
+/** A REDACT this request could not keep -- its side set full, or lost
+ * before it was read with no declaration to name its target
+ * (fed_row_lost) -- may name any row of the page, a local one included (a
+ * children-leg REDACT always names one; a peer row's local copy is the one
+ * the merge keeps; a context-only page is all local rows): every row of
+ * the finished page a REDACT could name is withheld (hm_leg_close_page;
+ * W5 Task 15 fix rounds 1 and 2).  Never partial: as every other
+ * fail-closed hide (an unreadable child, a lookup that cannot tell). */
+static void fed_close_page(struct FedRequest *req, struct HistoryMessage **page)
+{
+  int n = hm_leg_close_page(&req->leg, page);
+
+  if (req->leg.side.lost)
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "chathistory %s: request %s lost a REDACT it could not keep; "
+              "%d row(s) of the page withheld (fail closed)",
+              req->target, req->reqid, n);
+}
+
+/** Take a declaration out of the children leg's table (W5 Task 15 fix
+ * round 2): @a msgid's, its parent copied to @a parent.
+ * @return 1 when it was declared, else 0. */
+static int fed_k_forget_decl(struct FedRequest *req, const char *msgid,
+                             char *parent, size_t plen)
+{
+  int i;
+
+  for (i = 0; i < req->k_decl_count; i++) {
+    if (strcmp(req->k_decl[i].child, msgid) == 0) {
+      ircd_strncpy(parent, req->k_decl[i].parent, plen);
+      req->k_decl[i] = req->k_decl[--req->k_decl_count];
+      return 1;
+    }
+  }
+  return 0;
 }
 
 /** A peer's row this request could not take before reading its content
- * (W5 Task 15 fix round 1): a CH B whose first line found no reassembly
- * slot (MAX_PENDING_CHUNKS), a CH B or CH Z that would not decode, a CH Z
- * with no zstd here.  @a type is the type its line carried.
- *   - A REDACT names a target this request cannot know: the page's peer
- *     rows fail closed (req->leg.side.lost).  A REDACT row can come this
- *     way: its content is "<msgid> :<reason>", and a long or encoded
- *     reason makes send_ch_response use CH B, a compressed record CH Z.
- *   - Any other row lost from the page leg is a row lost: the page is cut
- *     (partial) -- unless its CH C declared it context (the declaration
- *     leaves the table), or it came on the children leg: lost context is
- *     never partial. */
+ * (W5 Task 15 fix rounds 1 and 2): a CH B whose first line found no
+ * reassembly slot (MAX_PENDING_CHUNKS), a CH B or CH Z that would not
+ * decode, a CH Z with no zstd here.  @a type is the type its line carried.
+ * A REDACT row can come this way: its content is "<msgid> :<reason>", and
+ * a long or encoded reason makes send_ch_response use CH B, a compressed
+ * record CH Z.
+ *   - A declared REDACT (CH C, on either leg) still names its target: its
+ *     declaration's parent goes into the side set, and the page hides it.
+ *   - An undeclared REDACT names a target this request cannot know: the
+ *     page fails closed (req->leg.side.lost; fed_close_page).
+ *   - A row lost from the page leg that its CH C did not declare context
+ *     is a row lost: the page is cut (partial).  Lost context -- declared,
+ *     or on the children leg -- is never partial. */
 static void fed_row_lost(struct FedRequest *req, int k_leg, const char *msgid,
                          int type)
 {
-  if (type == HISTORY_REDACT)
-    req->leg.side.lost = 1;
-  if (!k_leg && !hm_leg_forget_decl(&req->leg, msgid))
+  char parent[HISTORY_MSGID_LEN] = "";
+  int declared;
+
+  if (k_leg)
+    declared = fed_k_forget_decl(req, msgid, parent, sizeof(parent));
+  else
+    declared = hm_leg_forget_decl(&req->leg, msgid, parent, sizeof(parent));
+  if (type == HISTORY_REDACT) {
+    if (declared && parent[0])
+      hm_idset_add(&req->leg.side, parent);
+    else
+      req->leg.side.lost = 1;
+  }
+  if (!k_leg && !declared)
     req->cut = 1;
   log_write(LS_SYSTEM, L_NOTICE, 0,
             "chathistory %s: request %s lost a peer's row %s (type %d) before "
             "reading it%s", req->target, req->reqid, msgid, type,
-            type == HISTORY_REDACT ? ": its peers' rows fail closed" : "");
+            type != HISTORY_REDACT ? ""
+            : req->leg.side.lost ? ": the page fails closed"
+            : ": its declared target is still hidden");
 }
 
 /** The rows the peers sent as rows of their own pages, for a page
@@ -5519,10 +5567,9 @@ static void send_fed_response(struct FedRequest *req)
   {
     struct HistoryMessage *fed_ctx = extract_fed_context(req);
 
-    /* A REDACT this request could not keep may name any peer row: they
-     * fail closed, and the page's peer rows withheld make it partial. */
-    if (fed_fail_closed_if_lost(req, &fed_ctx) && !req->context_only)
-      req->cut = 1;
+    /* Every REDACT the peers sent keeps its target past the merge's cut
+     * (I-B). */
+    fed_seed_side(req, fed_ctx);
 
     if (req->context_only) {
       /* Federated for the rows' context only: the page's own span was
@@ -5581,6 +5628,8 @@ static void send_fed_response(struct FedRequest *req)
      * attach by msgid). */
     history_attach_context(req->target, merged);
     hm_splice_context(merged, fed_ctx);
+    /* A REDACT lost with its target unknown: the page fails closed. */
+    fed_close_page(req, &merged);
   }
   /* Async replay — ownership of merged list transfers to ReplayState.
    * Completeness judged on the PRE-filter merged total (see the
@@ -6713,10 +6762,9 @@ static void complete_autoreplay_channel(struct FedRequest *req)
     int total;
 
     fed_ctx = extract_fed_context(req);
-    /* As send_fed_response: a lost REDACT fails the peer rows closed (and
-     * the replay is not complete); a lost declaration's child is context. */
-    if (fed_fail_closed_if_lost(req, &fed_ctx))
-      req->cut = 1;
+    /* As send_fed_response: every REDACT the peers sent keeps its target
+     * past the merge; a lost declaration's child is context. */
+    fed_seed_side(req, fed_ctx);
     hm_leg_derive(&req->leg, req->local_msgs, &fed_ctx);
     merged = hm_merge(req->local_msgs, req->leg.msgs, req->limit, req->keep_oldest);
     total = 0;
@@ -6729,6 +6777,10 @@ static void complete_autoreplay_channel(struct FedRequest *req)
      * strict presence (audit #3; re-review R7 -- this leg replayed
      * redacted originals). */
     history_attach_context(req->target, merged);
+    /* A REDACT lost with its target unknown: the page fails closed. */
+    fed_close_page(req, &merged);
+    if (!merged)
+      total = 0;
     total = redact_filter_messages(req->target, &merged, total, &req->leg.side);
     total = presence_filter_messages(sptr, req->target, &merged, total, 0);
 
@@ -7239,15 +7291,28 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
  * (1) or unknown (-1: a read error, or more than CTX_REDACT_CHILDREN_MAX
  * children an older build indexed untyped -- typed children are never
  * counted, so no one can force -1) both skip.  One lookup per context
- * reaction, in one snapshot.  REDACT entries and rows are untouched; no
- * line changes form. */
+ * reaction, in one snapshot.  A row one of whose children the attach
+ * could not read (ctx_unread) and that a REDACT could name is skipped too,
+ * with its context run, which would otherwise be declared under the row
+ * before it (fix round 2; only on a read error).  REDACT rows and context
+ * REDACTs of a kept row are untouched; no line changes form. */
 static void skip_redacted_context(const char *target, struct HistoryMessage **head)
 {
   struct HistoryRedactLookup *h = NULL;
   struct HistoryMessage **pp, *m;
-  int opened = 0;
+  int opened = 0, skip_run = 0;
 
   for (pp = head; (m = *pp); ) {
+    if (!m->is_context)
+      skip_run = m->ctx_unread
+                 && (m->type == HISTORY_PRIVMSG || m->type == HISTORY_NOTICE
+                     || m->type == HISTORY_TAGMSG || m->type == HISTORY_MULTILINE);
+    if (skip_run) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+      continue;
+    }
     if (m->is_context && m->type != HISTORY_REDACT) {
       if (!opened) {
         opened = 1;

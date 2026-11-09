@@ -82,8 +82,9 @@ size_t ch_ad_letters(const char *param, char *out, size_t outsz);
 enum ri_link { RI_LINK_LEGACY, RI_LINK_IS_REDACT, RI_LINK_NOT_REDACT };
 /* The value byte to store for a REDACT link (@a redact) or any other. */
 char ri_link_value(int redact);
-/* What an entry value says: empty (or NULL) = LEGACY; first byte 'R' =
- * IS_REDACT; any other non-empty value = NOT_REDACT. */
+/* What an entry value says: exactly "R" = IS_REDACT; exactly "C" =
+ * NOT_REDACT; anything else -- empty (an older build), NULL, or a value
+ * this build never writes -- = LEGACY: read the child row (fail closed). */
 enum ri_link ri_link_kind(const void *value, size_t len);
 
 /* Applying one redaction (a peer's live REDACT, a catch-up row, or a

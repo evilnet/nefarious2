@@ -582,6 +582,15 @@ void hm_idset_note_redact(struct hm_idset *s, int type, const char *content)
   hm_idset_add(s, id);
 }
 
+void hm_idset_note_list(struct hm_idset *s, const struct HistoryMessage *list)
+{
+  const struct HistoryMessage *m;
+
+  for (m = list; m; m = m->next)
+    if (m->type == HISTORY_REDACT)
+      hm_idset_note_redact(s, m->type, m->dyn_content ? m->dyn_content : m->content);
+}
+
 void hm_idset_free(struct hm_idset *s)
 {
   if (!s)
@@ -722,7 +731,9 @@ void hm_leg_declare(struct hm_page_leg *leg, const char *parent,
   /* The row came first: it is the child.  A row counted as one moves to the
    * context budget, and is dropped when that is full (never partial). */
   for (pp = &leg->msgs; (m = *pp); pp = &m->next) {
-    if (strcmp(m->msgid, child) != 0)
+    /* A row already context is another responder's copy: this
+     * declaration waits for its own row. */
+    if (strcmp(m->msgid, child) != 0 || m->is_context)
       continue;
     if (!m->is_context) {
       leg->rows--;
@@ -752,11 +763,37 @@ void hm_leg_declare(struct hm_page_leg *leg, const char *parent,
   leg->ndecl++;
 }
 
-int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child)
+int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child,
+                       char *parent, size_t plen)
 {
-  char parent[HISTORY_MSGID_LEN], tags[sizeof(leg->decl[0].tags)];
+  char p[HISTORY_MSGID_LEN], tags[sizeof(leg->decl[0].tags)];
 
-  return hm_leg_take_decl(leg, child, parent, sizeof(parent), tags, sizeof(tags));
+  if (!hm_leg_take_decl(leg, child, p, sizeof(p), tags, sizeof(tags)))
+    return 0;
+  if (parent && plen)
+    ircd_strncpy(parent, p, plen);
+  return 1;
+}
+
+int hm_leg_close_page(const struct hm_page_leg *leg, struct HistoryMessage **page)
+{
+  if (!leg->side.lost)
+    return 0;
+  return hm_fail_closed(page);
+}
+
+int hm_chunk_of_request(const char *key, const char *reqid)
+{
+  size_t n;
+
+  if (!key || !reqid || !reqid[0])
+    return 0;
+  n = strlen(reqid);
+  if (strncmp(key, reqid, n) != 0)
+    return 0;
+  if (key[n] == 'K')
+    n++;
+  return key[n] == ':';
 }
 
 struct HistoryMessage *hm_leg_extract_context(struct hm_page_leg *leg)

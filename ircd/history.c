@@ -4695,8 +4695,9 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
       }
     }
     memset(&child, 0, sizeof(child));
-    if (history_deserialize_record(main_val.base, main_val.len, &child) == 0
-        && child.type == HISTORY_REDACT)
+    if (history_deserialize_record(main_val.base, main_val.len, &child) != 0)
+      unread = 1;   /* an undecodable child may be a REDACT (as the attach) */
+    else if (child.type == HISTORY_REDACT)
       redacted = 1;
     db_val_free(&main_val);
   }
