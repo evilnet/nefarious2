@@ -118,8 +118,11 @@ extern int hm_parse_ids(char *list, const char **ids, int max);
  * Task 15, F-2)?  1 yes, 0 no, -1 unknown (a read error, no store). */
 typedef int (*hm_redacted_fn)(const struct HistoryMessage *m, void *arg);
 
-/** The most targets an hm_idset keeps (64 bytes each). */
+/** The most distinct targets an hm_idset keeps (64 bytes each);
+ * duplicates are never kept twice, so never count toward it. */
 #define HM_IDSET_MAX 2048
+/** An hm_idset is re-sorted when this many targets were added unsorted. */
+#define HM_IDSET_TAIL 64
 
 /** The targets of the REDACTs a federated request had to drop for budget
  * (W5 Task 15 fix round 1): a REDACT is never lost to a cap -- its target
@@ -128,12 +131,14 @@ typedef int (*hm_redacted_fn)(const struct HistoryMessage *m, void *arg);
 struct hm_idset {
   char (*ids)[HISTORY_MSGID_LEN];
   int n, cap;
+  int nsorted;   /**< ids[0..nsorted) are sorted and distinct */
   int lost;   /**< a REDACT's target could not be kept (the set was full,
                *   or the REDACT was lost before its content was read): the
                *   page's peer rows fail closed (hm_fail_closed) */
 };
 
-/** Add @a id to @a s.  @return 1 kept, 0 not (full: @a s->lost is set). */
+/** Add @a id to @a s (a target already kept is not added again).
+ * @return 1 kept, 0 not (full of distinct targets: @a s->lost is set). */
 extern int hm_idset_add(struct hm_idset *s, const char *id);
 
 /** A row of @a type and @a content dropped for budget: when it is a REDACT,
@@ -293,6 +298,18 @@ extern int hm_leg_forget_decl(struct hm_page_leg *leg, const char *child,
  * merge keeps, a context-only page is all local rows).  Never partial.
  * @return how many entries were withheld (0 when nothing was lost). */
 extern int hm_leg_close_page(const struct hm_page_leg *leg, struct HistoryMessage **page);
+
+/** A responder's rows and their attached context, before it sends them
+ * (W5 Task 15 fix rounds 1-3): every context reaction (non-REDACT context)
+ * that @a redacted does not clear (anything but 0) is unlinked and freed.
+ * With @a skip_unread_rows (the page leg, whose rows are sent), a row its
+ * attach could not fully read (ctx_unread) that a REDACT could name goes
+ * too, with its non-REDACT context.  A REDACT entry is never dropped: it
+ * may be all that hides the requester's own copy of its target.  The
+ * children leg passes 0: its stub rows are never sent, and each child is
+ * checked by itself. */
+extern void hm_responder_skip(struct HistoryMessage **head, int skip_unread_rows,
+                              hm_redacted_fn redacted, void *arg);
 
 /** Does the CH B reassembly key @a key ("<reqid>:<msgid>", or
  * "<reqid>K:<msgid>" on the children leg) belong to request @a reqid?  A

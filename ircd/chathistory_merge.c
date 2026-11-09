@@ -544,10 +544,55 @@ int hm_redact_filter(struct HistoryMessage **head, int count,
   return rc;
 }
 
+/** Sort @a s and drop its duplicates; all of it is then the sorted prefix. */
+static void hm_idset_compact(struct hm_idset *s)
+{
+  int i, w;
+
+  if (s->n > 1) {
+    qsort(s->ids, (size_t)s->n, sizeof(*s->ids), hm_id_cmp);
+    for (i = 1, w = 1; i < s->n; i++) {
+      if (strcmp(s->ids[i], s->ids[w - 1]) == 0)
+        continue;
+      if (w != i)
+        memcpy(s->ids[w], s->ids[i], sizeof(*s->ids));
+      w++;
+    }
+    s->n = w;
+  }
+  s->nsorted = s->n;
+}
+
+/** Is @a id in @a s?  A bsearch of the sorted prefix, then a scan of the
+ * short unsorted tail (at most HM_IDSET_TAIL). */
+static int hm_idset_has(const struct hm_idset *s, const char *id)
+{
+  int i;
+
+  if (s->nsorted > 0
+      && bsearch(id, s->ids, (size_t)s->nsorted, sizeof(*s->ids), hm_id_cmp))
+    return 1;
+  for (i = s->nsorted; i < s->n; i++)
+    if (strcmp(s->ids[i], id) == 0)
+      return 1;
+  return 0;
+}
+
 int hm_idset_add(struct hm_idset *s, const char *id)
 {
+  char key[HISTORY_MSGID_LEN];
+
   if (!s || !id || !id[0])
     return 0;
+  /* A target already kept is not kept twice: duplicates -- the same
+   * REDACT from three stores, a row and its seeded copy -- never count
+   * toward HM_IDSET_MAX (fix round 3).  Lookups stay cheap: the set is
+   * sorted whenever its unsorted tail reaches HM_IDSET_TAIL. */
+  ircd_strncpy(key, id, sizeof(key));
+  if (hm_idset_has(s, key))
+    return 1;
+  if (s->n - s->nsorted >= HM_IDSET_TAIL || s->n >= HM_IDSET_MAX)
+    hm_idset_compact(s);
   if (s->n >= HM_IDSET_MAX) {
     s->lost = 1;
     return 0;
@@ -559,7 +604,7 @@ int hm_idset_add(struct hm_idset *s, const char *id)
     s->ids = (char (*)[HISTORY_MSGID_LEN])MyRealloc(s->ids, (size_t)cap * sizeof(*s->ids));
     s->cap = cap;
   }
-  ircd_strncpy(s->ids[s->n], id, sizeof(s->ids[0]));
+  memcpy(s->ids[s->n], key, sizeof(key));
   s->n++;
   return 1;
 }
@@ -598,7 +643,7 @@ void hm_idset_free(struct hm_idset *s)
   if (s->ids)
     MyFree(s->ids);
   s->ids = NULL;
-  s->n = s->cap = 0;
+  s->n = s->cap = s->nsorted = 0;
   s->lost = 0;
 }
 
@@ -735,16 +780,14 @@ void hm_leg_declare(struct hm_page_leg *leg, const char *parent,
      * declaration waits for its own row. */
     if (strcmp(m->msgid, child) != 0 || m->is_context)
       continue;
-    if (!m->is_context) {
-      leg->rows--;
-      if (hm_fed_admit(1, &leg->rows, &leg->ctx, 0, ctx_max) == HM_DROP_CONTEXT) {
-        *pp = m->next;
-        m->next = NULL;
-        hm_idset_note_redact(&leg->side, m->type,
-                             m->dyn_content ? m->dyn_content : m->content);
-        history_free_messages(m);
-        return;
-      }
+    leg->rows--;
+    if (hm_fed_admit(1, &leg->rows, &leg->ctx, 0, ctx_max) == HM_DROP_CONTEXT) {
+      *pp = m->next;
+      m->next = NULL;
+      hm_idset_note_redact(&leg->side, m->type,
+                           m->dyn_content ? m->dyn_content : m->content);
+      history_free_messages(m);
+      return;
     }
     m->is_context = 1;
     ircd_strncpy(m->ctx_parent, parent, sizeof(m->ctx_parent));
@@ -780,6 +823,35 @@ int hm_leg_close_page(const struct hm_page_leg *leg, struct HistoryMessage **pag
   if (!leg->side.lost)
     return 0;
   return hm_fail_closed(page);
+}
+
+void hm_responder_skip(struct HistoryMessage **head, int skip_unread_rows,
+                       hm_redacted_fn redacted, void *arg)
+{
+  struct HistoryMessage **pp, *m;
+  int skip_run = 0;
+
+  for (pp = head; (m = *pp); ) {
+    int drop = 0;
+
+    if (!m->is_context) {
+      skip_run = skip_unread_rows && m->ctx_unread && hm_redactable(m);
+      drop = skip_run;
+    } else if (m->type != HISTORY_REDACT) {
+      /* The skipped row's reactions go with it, unlooked; any other's go
+       * unless the lookup clears them. */
+      drop = skip_run || (redacted && redacted(m, arg) != 0);
+    }
+    /* A REDACT entry always stays.  Its row skipped, send_ch_rows declares
+     * it under the row before (or sends it bare when none came first): its
+     * target still reaches the requester's redacted set by its content. */
+    if (drop) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+    } else
+      pp = &m->next;
+  }
 }
 
 int hm_chunk_of_request(const char *key, const char *reqid)

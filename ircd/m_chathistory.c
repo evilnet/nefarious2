@@ -7282,53 +7282,35 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
   return req;
 }
 
-/** Unlink, from a responder's rows and their attached context, every
- * context reaction (a non-REDACT context row) this store does not know to
- * be unredacted: it holds the reaction and so its REDACT, under the
- * reaction in the reply index (W5 Task 15 fix round 1).  A requester that
- * lacks that REDACT -- it missed it across a split, or has no store -- is
- * then never sent the reaction.  Fail closed, as the page path: redacted
- * (1) or unknown (-1: a read error, or more than CTX_REDACT_CHILDREN_MAX
- * children an older build indexed untyped -- typed children are never
- * counted, so no one can force -1) both skip.  One lookup per context
- * reaction, in one snapshot.  A row one of whose children the attach
- * could not read (ctx_unread) and that a REDACT could name is skipped too,
- * with its context run, which would otherwise be declared under the row
- * before it (fix round 2; only on a read error).  REDACT rows and context
- * REDACTs of a kept row are untouched; no line changes form. */
-static void skip_redacted_context(const char *target, struct HistoryMessage **head)
+/** A responder's rows and their attached context, before it sends them
+ * (W5 Task 15 fix rounds 1-3; hm_responder_skip): every context reaction
+ * this store cannot show to be unredacted is not sent -- it holds the
+ * reaction and so its REDACT, under the reaction in the reply index, and a
+ * requester lacking that REDACT (it missed it across a split, or has no
+ * store) would show the reaction.  Redacted (1) or unknown (-1: a read
+ * error, or more than CTX_REDACT_CHILDREN_MAX children an older build
+ * indexed untyped; typed children are never counted, so no one can force
+ * -1) both skip, as on the page path.  One lookup per context reaction, in
+ * one snapshot.  On the page leg (@a page_leg) a row its attach could not
+ * fully read (ctx_unread) that a REDACT could name is skipped too, with
+ * its context reactions -- only on a read error.  A REDACT entry is never
+ * skipped: it may be all that hides the requester's own copy of its
+ * target.  When its row was skipped, send_ch_rows declares it under the
+ * row before (or, with no row before it, sends it bare): its content still
+ * names its target, which reaches the requester's redacted set (the
+ * page's REDACT set, and the side-set seed), so only its position is
+ * off.  The children leg passes 0: its stub rows are never sent, and each
+ * child is checked by itself.  No line changes form. */
+static void skip_redacted_context(const char *target, struct HistoryMessage **head,
+                                  int page_leg)
 {
-  struct HistoryRedactLookup *h = NULL;
-  struct HistoryMessage **pp, *m;
-  int opened = 0, skip_run = 0;
+  struct CtxRedactCheck c;
 
-  for (pp = head; (m = *pp); ) {
-    if (!m->is_context)
-      skip_run = m->ctx_unread
-                 && (m->type == HISTORY_PRIVMSG || m->type == HISTORY_NOTICE
-                     || m->type == HISTORY_TAGMSG || m->type == HISTORY_MULTILINE);
-    if (skip_run) {
-      *pp = m->next;
-      m->next = NULL;
-      history_free_messages(m);
-      continue;
-    }
-    if (m->is_context && m->type != HISTORY_REDACT) {
-      if (!opened) {
-        opened = 1;
-        h = history_redact_lookup_open();
-      }
-      if (history_redact_lookup(h, target, m->msgid, CTX_REDACT_CHILDREN_MAX) != 0) {
-        *pp = m->next;
-        m->next = NULL;
-        history_free_messages(m);
-        continue;
-      }
-    }
-    pp = &m->next;
-  }
-  if (h)
-    history_redact_lookup_close(h);
+  memset(&c, 0, sizeof(c));
+  c.target = target;
+  hm_responder_skip(head, page_leg, ctx_redacted_here, &c);
+  if (c.h)
+    history_redact_lookup_close(c.h);
 }
 
 /** Answer one line of a children request (CH Q K, W5 Task 14): the context
@@ -7369,7 +7351,7 @@ static int fed_children_answer(struct Client *to, const char *target, const char
   if (!stubs)
     return 0;
   history_attach_context(target, stubs);
-  skip_redacted_context(target, &stubs);
+  skip_redacted_context(target, &stubs, 0);
   for (pp = &stubs; (m = *pp); ) {
     if (m->is_context
         && ((mask && !(mask & (1u << m->type)))
@@ -7968,7 +7950,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       /* A reaction this store knows is redacted is not declared or sent
        * (W5 Task 15 fix round 1): a requester without its REDACT -- one
        * that missed it across a split, one with no store -- would show it. */
-      skip_redacted_context(target, &messages);
+      skip_redacted_context(target, &messages, 1);
 
       /* Send response messages (each context child after its CH C).
        * send_ch_response picks the line form per row:

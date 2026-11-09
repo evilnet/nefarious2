@@ -41,7 +41,9 @@
  *  - fix round 2: a lost REDACT withholds the local rows too, a declared
  *    one lost keeps its target, every REDACT a peer sent is kept past the
  *    merge's cut, two responders declaring one child, and the CH B entries
- *    a request owns.
+ *    a request owns;
+ *  - fix round 3: the responder's skip never drops a REDACT (and does no
+ *    row skip on the children leg); the side set's duplicates.
  *
  * The rows are built here; history_free_messages (history.c, which needs
  * the store) is defined here with the same body.
@@ -1252,6 +1254,80 @@ static void test_chunk_of_request(void **s)
   assert_int_equal(hm_chunk_of_request("Bj12:AAAA", ""), 0);
 }
 
+/* ---- W5 Task 15 fix round 3 ---- */
+
+/* I-C: the responder's skip.  A row its attach could not fully read goes
+ * with its non-REDACT context -- never its REDACTs, which may be all that
+ * hides the requester's own copy.  On the children leg (stubs, never sent)
+ * there is no row skip: each child is checked by itself.  A context
+ * reaction the lookup does not clear (redacted, or unknown) goes. */
+static void test_responder_skip_keeps_redacts(void **s)
+{
+  struct HistoryMessage *head = chain(6,
+      typed("M", "1.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(bare_tag("R", "5.000")),
+      as_ctx(typed("D", "6.000", HISTORY_REDACT, "M")),
+      typed("N", "2.000", HISTORY_PRIVMSG, NULL),
+      as_ctx(bare_tag("REDr", "7.000")),
+      as_ctx(bare_tag("ok", "8.000")));
+
+  (void)s;
+  head->ctx_unread = 1;
+  redacted_calls = 0;
+  hm_responder_skip(&head, 1, fake_redacted, NULL);
+  assert_string_equal(ids(head), "D N ok");
+  assert_int_equal(redacted_calls, 2);   /* REDr, ok: R went with M unlooked */
+  history_free_messages(head);
+
+  /* The children leg: a stub with an unreadable child keeps its children,
+   * each checked by itself; its REDACT always stays. */
+  head = chain(4, typed("STUB", "0", HISTORY_PRIVMSG, NULL),
+                  as_ctx(bare_tag("ok", "5.000")),
+                  as_ctx(bare_tag("ERRx", "6.000")),
+                  as_ctx(typed("D", "7.000", HISTORY_REDACT, "STUB")));
+  head->ctx_unread = 1;
+  redacted_calls = 0;
+  hm_responder_skip(&head, 0, fake_redacted, NULL);
+  assert_string_equal(ids(head), "STUB ok D");
+  assert_int_equal(redacted_calls, 2);
+  history_free_messages(head);
+
+  /* An event's unread child skips nothing (it cannot be redacted). */
+  head = chain(2, typed("J", "1.000", HISTORY_JOIN, NULL),
+                  as_ctx(bare_tag("ok", "5.000")));
+  head->ctx_unread = 1;
+  hm_responder_skip(&head, 1, fake_redacted, NULL);
+  assert_string_equal(ids(head), "J ok");
+  history_free_messages(head);
+}
+
+/* m1: duplicates never count toward HM_IDSET_MAX -- three stores each
+ * sending the same mass self-redaction must not withhold the page. */
+static void test_idset_duplicates_do_not_overflow(void **s)
+{
+  struct hm_idset set;
+  char id[16];
+  int i, round;
+
+  (void)s;
+  memset(&set, 0, sizeof(set));
+  for (i = 0; i < 5000; i++)
+    assert_int_equal(hm_idset_add(&set, "SAME"), 1);
+  assert_int_equal(set.n, 1);
+  hm_idset_free(&set);
+
+  for (round = 0; round < 3; round++)          /* three stores, one set */
+    for (i = 0; i < HM_IDSET_MAX; i++) {
+      snprintf(id, sizeof id, "T%04d", (i * 7 + round) % HM_IDSET_MAX);
+      assert_int_equal(hm_idset_add(&set, id), 1);
+    }
+  assert_int_equal(set.lost, 0);
+  assert_int_equal(set.n, HM_IDSET_MAX);
+  assert_int_equal(hm_idset_add(&set, "NEW"), 0);   /* a distinct one past it */
+  assert_int_equal(set.lost, 1);
+  hm_idset_free(&set);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1274,6 +1350,8 @@ int main(void)
     cmocka_unit_test(test_side_seeded_before_merge),
     cmocka_unit_test(test_leg_two_responders_declare_one_child),
     cmocka_unit_test(test_chunk_of_request),
+    cmocka_unit_test(test_responder_skip_keeps_redacts),
+    cmocka_unit_test(test_idset_duplicates_do_not_overflow),
     cmocka_unit_test(test_children_wanted_cuts_at_newest_unreceived),
     cmocka_unit_test(test_children_wanted_all_received),
     cmocka_unit_test(test_children_wanted_none_received_skips_context),
