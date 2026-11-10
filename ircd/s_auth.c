@@ -1744,6 +1744,11 @@ int auth_spawn(int argc, char *argv[])
  * restart. */
 static int conf_iauth_argc;
 static char **conf_iauth_argv;
+static int conf_iauth_toplevel;   /**< recorded block came from ircd.conf itself */
+
+/** Depth of the configuration include stack (ircd_lexer.l); 0 while the
+ * top-level file is being read. */
+extern int include_stack_ptr;
 
 static void auth_conf_free(void)
 {
@@ -1754,6 +1759,7 @@ static void auth_conf_free(void)
   MyFree(conf_iauth_argv);
   conf_iauth_argv = NULL;
   conf_iauth_argc = 0;
+  conf_iauth_toplevel = 0;
 }
 
 /** Start a configuration pass: forget any IAuth{} block from the last. */
@@ -1762,21 +1768,34 @@ void auth_conf_begin(void)
   auth_conf_free();
 }
 
-/** Record an IAuth{} block; a later block replaces an earlier one.
+/** Record an IAuth{} block.  A block in the top-level configuration file
+ * always wins over one from an included file (e.g. a network-wide synced
+ * include), whatever order the lexer reads them in -- it can lex buffered
+ * text of the top-level file before an include's; among blocks of the same
+ * kind the last one wins.
  * @param[in] argc Number of program arguments.
  * @param[in] argv Program arguments (copied).
  */
 void auth_conf_iauth(int argc, char *argv[])
 {
   int ii;
+  int toplevel = (include_stack_ptr == 0);
 
   if (conf_iauth_argv) {
+    if (conf_iauth_toplevel && !toplevel) {
+      log_write(LS_CONFIG, L_WARNING, 0, "IAuth: ignoring an IAuth block "
+                "in an included file; the one in the main file is used");
+      return;
+    }
     log_write(LS_CONFIG, L_WARNING, 0, "IAuth: more than one IAuth block; "
-              "using the last one (%s)", argc > 0 ? argv[0] : "");
+              "using %s (%s)", toplevel ? "the one in the main file"
+              : "the last one", argc > 0 ? argv[0] : "");
     sendto_opmask_butone(0, SNO_OLDSNO, "IAuth: more than one IAuth block; "
-                         "using the last one");
+                         "using %s", toplevel ? "the one in the main file"
+                         : "the last one");
   }
   auth_conf_free();
+  conf_iauth_toplevel = toplevel;
   if (argc <= 0)
     return;
   conf_iauth_argv = MyCalloc(argc + 1, sizeof(conf_iauth_argv[0]));
