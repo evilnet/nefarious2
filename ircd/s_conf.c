@@ -1165,11 +1165,13 @@ int read_configuration_file(void)
   conf_error = 0;
   feature_unmark(); /* unmark all features for resetting later */
   clear_nameservers(); /* clear previous list of DNS servers */
+  auth_conf_begin();         /* clear the pending IAuth{} */
   if (!init_lexer())
     return 0;
   yyparse();
   deinit_lexer();
   feature_mark(); /* reset unmarked features */
+  auth_conf_apply();      /* spawn (or keep) the last IAuth{} block's program */
   conf_already_read = 1;
   return 1;
 }
