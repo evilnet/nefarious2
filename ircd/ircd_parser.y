@@ -1548,7 +1548,7 @@ pseudoflags: FAST ';'
 
 iauthblock: IAUTH '{' iauthitems '}' ';'
 {
-  auth_spawn(stringno, stringlist);
+  auth_conf_iauth(stringno, stringlist);
   while (stringno > 0)
   {
     --stringno;
