@@ -46,6 +46,12 @@ struct db_env_opts {
   const char *const *deletion_heavy_cfs;
   size_t deletion_window;     /**< N (0 = 4096; RocksDB rounds up to 128s) */
   size_t deletion_trigger;    /**< D (0 = half of N) */
+  /** RocksDB: cap on the env's write-ahead logs.  Every CF shares one WAL,
+   * and a log file is deleted only once every CF has flushed what it holds,
+   * so one rarely written CF pins every file written after its oldest
+   * unflushed row.  Past this many bytes RocksDB flushes the CFs holding
+   * the oldest file.  0 = RocksDB's default; libmdbx ignores it. */
+  size_t max_total_wal_bytes;
 };
 
 /** Per-CF tuning at open time.  RocksDB uses these for column-family

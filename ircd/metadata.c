@@ -276,6 +276,12 @@ int metadata_lmdb_init(const char *dbpath)
     env_opts.size_floor = METADATA_MAP_SIZE;
     env_opts.size_max   = METADATA_MAP_SIZE;
   }
+  /* Four CFs share this env's WAL; bouncer_sessions and metadata_clock
+   * are written rarely and, uncapped, pinned every log file behind them
+   * (prod held ~4.6 GB of WAL over 436 KB of data).  A small memtable too:
+   * the store is tiny, and each WAL file is preallocated to ~1.1x it. */
+  env_opts.max_total_wal_bytes = 128UL * 1024 * 1024;
+  env_opts.write_buffer_bytes  = 8UL * 1024 * 1024;
   if (feature_bool(FEAT_METADATA_DB_NORDAHEAD)) {
     env_opts.random_access = 1;
     log_write(LS_SYSTEM, L_INFO, 0,

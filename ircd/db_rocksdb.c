@@ -336,6 +336,15 @@ int db_env_open(const char *path,
     rocksdb_options_set_write_buffer_size(env->db_opts, opts->write_buffer_bytes);
   if (opts && opts->random_access)
     rocksdb_options_set_advise_random_on_open(env->db_opts, 1);
+  if (opts && opts->max_total_wal_bytes)
+    rocksdb_options_set_max_total_wal_size(env->db_opts,
+                                           opts->max_total_wal_bytes);
+  /* RocksDB's info log (LOG, renamed LOG.old.<ts> at every open): left at
+   * the library defaults it kept 1000 old files, unbounded in size, with
+   * periodic stats dumps at INFO.  Keep a few, roll them, log warnings. */
+  rocksdb_options_set_info_log_level(env->db_opts, 2 /* WARN_LEVEL */);
+  rocksdb_options_set_keep_log_file_num(env->db_opts, 10);
+  rocksdb_options_set_max_log_file_size(env->db_opts, 16UL * 1024 * 1024);
 
   env->wopts_normal = rocksdb_writeoptions_create();
   rocksdb_writeoptions_set_sync(env->wopts_normal, 0);
