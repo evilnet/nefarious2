@@ -2168,6 +2168,67 @@ int auth_spawn(int argc, char *argv[])
   return 1;
 }
 
+/** The IAuth{} block read so far in this configuration pass.  Only one
+ * %IAuth program runs: blocks are collected while the file (and its
+ * includes) is parsed and the LAST one is spawned once, by
+ * auth_conf_apply(), after the whole configuration is read.  Spawning
+ * each block as it was parsed reused the running program for one block,
+ * then replaced the pointer to it for the next -- an orphaned process
+ * that respawned itself when killed and survived every rehash until a
+ * restart. */
+static int conf_iauth_argc;
+static char **conf_iauth_argv;
+
+static void auth_conf_free(void)
+{
+  int ii;
+
+  for (ii = 0; ii < conf_iauth_argc; ++ii)
+    MyFree(conf_iauth_argv[ii]);
+  MyFree(conf_iauth_argv);
+  conf_iauth_argv = NULL;
+  conf_iauth_argc = 0;
+}
+
+/** Start a configuration pass: forget any IAuth{} block from the last. */
+void auth_conf_begin(void)
+{
+  auth_conf_free();
+}
+
+/** Record an IAuth{} block; a later block replaces an earlier one.
+ * @param[in] argc Number of program arguments.
+ * @param[in] argv Program arguments (copied).
+ */
+void auth_conf_iauth(int argc, char *argv[])
+{
+  int ii;
+
+  if (conf_iauth_argv) {
+    log_write(LS_CONFIG, L_WARNING, 0, "IAuth: more than one IAuth block; "
+              "using the last one (%s)", argc > 0 ? argv[0] : "");
+    sendto_opmask_butone(0, SNO_OLDSNO, "IAuth: more than one IAuth block; "
+                         "using the last one");
+  }
+  auth_conf_free();
+  if (argc <= 0)
+    return;
+  conf_iauth_argv = MyCalloc(argc + 1, sizeof(conf_iauth_argv[0]));
+  for (ii = 0; ii < argc; ++ii)
+    DupString(conf_iauth_argv[ii], argv[ii]);
+  conf_iauth_argc = argc;
+}
+
+/** End of a configuration pass: spawn the recorded program, or keep the
+ * running one when its arguments are unchanged.  With no IAuth{} block,
+ * the running program stays marked closing and auth_close_unused() ends it. */
+void auth_conf_apply(void)
+{
+  if (conf_iauth_argv)
+    auth_spawn(conf_iauth_argc, conf_iauth_argv);
+  auth_conf_free();
+}
+
 /** Mark all %IAuth connections as closing. */
 void auth_mark_closing(void)
 {

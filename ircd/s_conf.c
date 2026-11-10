@@ -1273,6 +1273,7 @@ int read_configuration_file(void)
   clear_nameservers(); /* clear previous list of DNS servers */
   sasl_conf_reset_pending(); /* clear Webhook{} / Keycloak{} pending */
   authtoken_conf_begin();    /* clear Authtoken{} pending */
+  auth_conf_begin();         /* clear the pending IAuth{} */
   if (!init_lexer())
     return 0;
   yyparse();
@@ -1280,6 +1281,7 @@ int read_configuration_file(void)
   feature_mark(); /* reset unmarked features */
   sasl_conf_apply(); /* push pending Webhook{}/Keycloak{} into libkc */
   authtoken_conf_apply(); /* diff Authtoken{} services: TOKEN NEW/DEL */
+  auth_conf_apply();      /* spawn (or keep) the last IAuth{} block's program */
   conf_already_read = 1;
   return 1;
 }
