@@ -2072,6 +2072,7 @@ dnsblscore: SCORE '=' expr ';'
 include: INCLUDE QSTRING ';'
 {
   init_lexer_file($2);
+  MyFree($2);
 }
 
 sslblock: SSLTOK '{' sslcertitems '}' ';';

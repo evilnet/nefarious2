@@ -375,9 +375,13 @@ init_lexer_file(char* file)
     lexer_input = include_stack[--include_stack_ptr].lexer_input;
     return 0;
   }
-#ifdef YY_NEW_FILE
-  YY_NEW_FILE;
-#endif
+  /* Read the included file through a buffer of its own.  The rest of the
+   * including file's current line -- whatever follows the include
+   * directive -- stays in the including file's buffer and is read when the
+   * included file ends (next_lexer_file()), so the configuration is read
+   * in the order it is written.  (Restarting the current buffer here
+   * discarded that text without a word.) */
+  yypush_buffer_state(yy_create_buffer(NULL, YY_BUF_SIZE));
   lineno = 1;
   linefile = strdup(file);
   return 1;
@@ -398,6 +402,9 @@ int next_lexer_file(void)
   lineno = include_stack[include_stack_ptr].lineno;
   linefile = include_stack[include_stack_ptr].linefile;
   lexer_input = include_stack[include_stack_ptr].lexer_input;
+  /* Back to the including file's buffer, where reading resumes right after
+   * the include directive (yywrap() returning 0 after a buffer switch). */
+  yypop_buffer_state();
 
   return 0;
 }
