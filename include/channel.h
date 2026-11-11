@@ -531,6 +531,11 @@ extern int rename_services_ac(struct Client *cptr, struct Client *sptr,
  * period elapses takes its record and grace timer with it. */
 extern void relocate_tombstone_channel_gone(struct Channel *chptr);
 
+/* Called by server_finish_burst() right after a channel's BURST has been
+ * sent to `cptr`: when the channel is a live tombstone, its record follows
+ * (old name, creation timestamp, target, deadline). */
+extern void relocate_burst(struct Client *cptr, struct Channel *chptr);
+
 /* Grace-period member status restore (spec, "Status preservation").  Called
  * from do_join() once a join to an existing channel has completed; looks up
  * and CONSUMES a status snapshot for `who` in whichever live tombstone (if

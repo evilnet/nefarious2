@@ -3769,6 +3769,205 @@ static void three_way_crossing_converges_in_every_order(void **state)
   }
 }
 
+/* --- A.2: a tombstone is announced in the burst --- */
+
+/** "<sptr> RT <old> <ts> <new> <expires>" arriving on link @a cptr. */
+static void server_tombstone(struct Client *cptr, struct Client *sptr,
+                             const char *oldname, const char *ts,
+                             const char *newname, const char *expires)
+{
+  char store[4][256];
+  char *parv[6];
+
+  parv[0] = cli_name(sptr);
+  snprintf(store[0], sizeof(store[0]), "%s", oldname);
+  parv[1] = store[0];
+  snprintf(store[1], sizeof(store[1]), "%s", ts);
+  parv[2] = store[1];
+  snprintf(store[2], sizeof(store[2]), "%s", newname);
+  parv[3] = store[2];
+  snprintf(store[3], sizeof(store[3]), "%s", expires);
+  parv[4] = store[3];
+  parv[5] = NULL;
+  ms_tombstone(cptr, sptr, 5, parv);
+}
+
+/** What server_finish_burst() does for each channel after its BURST. */
+static void burst_to(struct Client *link)
+{
+  int i;
+  for (i = 0; i < nchannels; i++)
+    if (channels[i])
+      relocate_burst(link, channels[i]);
+}
+
+/* A server that links mid-grace is sent the record after the channel's
+ * BURST: the old name, the old channel's creation timestamp, the target
+ * and the deadline.  A fork server gets it and so does a rename-capable
+ * one that is not IRCv3-aware (X3); a plain legacy server never does. */
+static void tombstone_is_announced_in_the_burst(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *fork, *x3, *legacy;
+  (void)state;
+
+  add_member(channel_at("#old", 500000, bob), carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  fork = linked("new.example", "Bn", "v");
+  x3 = linked("x3.services", "AX", "sr");
+  legacy = linked("old.example", "Bo", "");
+  forget();
+
+  burst_to(fork);
+  burst_to(x3);
+  burst_to(legacy);
+
+  /* one line each: the tombstone, not the channel it redirects to */
+  assert_int_equal(sent_count_to(fork), 1);
+  assert_string_equal(sent_to(fork, 0), "AC RT #old 500000 #new 1000900");
+  assert_int_equal(sent_count_to(x3), 1);
+  assert_string_equal(sent_to(x3, 0), "AC RT #old 500000 #new 1000900");
+  assert_int_equal(sent_count_to(legacy), 0);
+}
+
+/* An ordinary channel that is +z and +L (services' persist, an op's
+ * overflow redirect) is nobody's tombstone and is not announced. */
+static void ordinary_persistent_redirecting_channel_is_not_announced(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *fork;
+  struct Channel *ch;
+  (void)state;
+
+  ch = channel_at("#lobby", 500000, alice);
+  ch->mode.exmode |= EXMODE_PERSIST;
+  ch->mode.mode |= MODE_REDIRECT | MODE_LIMIT;
+  ch->mode.limit = 50;
+  ircd_strncpy(ch->mode.redir, "#overflow", sizeof(ch->mode.redir));
+
+  fork = linked("new.example", "Bn", "v");
+  burst_to(fork);
+  assert_int_equal(sent_count_to(fork), 0);
+}
+
+/* A tombstone a chanop took +L off is not one any more (its record only
+ * waits to hand +z back): not announced. */
+static void cancelled_tombstone_is_not_announced(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *fork;
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->mode.mode &= ~MODE_REDIRECT;           /* MODE #old -L */
+  oldch->mode.redir[0] = '\0';
+
+  fork = linked("new.example", "Bn", "v");
+  forget();
+  burst_to(fork);
+  assert_int_equal(sent_count_to(fork), 0);
+}
+
+/* After a crossing both tombstones are announced, each with the shared
+ * deadline and the winner as its target; a chain's old names with the
+ * flattened target. */
+static void crossing_and_chain_are_announced_as_they_stand(void **state)
+{
+  struct Crossing w;
+  struct Client *zed, *fork;
+  struct Channel *first;
+  int i, old = 0, y = 0, f = 0;
+  (void)state;
+
+  crossing_world(&w);
+  zed = user_on(w.pa, "zed", "AAF");
+  first = channel_at("#first", 400000, zed);
+  server_relocate(w.pa, zed, "#first", "#x", "1000500", "");
+  remove_user_from_channel(zed, channel_named("#x"));   /* zed leaves; #x is free */
+  (void)first;
+  uma_relocates(&w);
+  vic_relocates(&w);
+
+  fork = linked("new.example", "Bn", "v");
+  forget();
+  burst_to(fork);
+
+  assert_int_equal(sent_count_to(fork), 3);
+  for (i = 0; i < 3; i++) {
+    const char *line = sent_to(fork, i);
+
+    if (0 == strcmp(line, "AC RT #old 500000 #x 1000900")) old++;
+    if (0 == strcmp(line, "AC RT #y 500000 #x 1000900")) y++;
+    if (0 == strcmp(line, "AC RT #first 400000 #x 1000500")) f++;
+  }
+  assert_int_equal(old, 1);
+  assert_int_equal(y, 1);
+  assert_int_equal(f, 1);
+}
+
+/* An announcement is relayed the way burst state is, so a server two
+ * hops from the newcomer learns of the tombstone too: to the other fork
+ * links and the rename-capable ones, as it came, never back, never to a
+ * plain legacy server. */
+static void announcement_is_relayed_like_burst_state(void **state)
+{
+  struct Client *peer = linked("new.example", "Bn", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *legacy = linked("old.example", "Bo", "");
+  struct Client *far = behind(peer, "far.example", "Bf", "v");
+  (void)state;
+
+  server_tombstone(peer, far, "#old", "500000", "#new", "1000900");
+
+  assert_string_equal(sent_to(down, 0), "Bf RT #old 500000 #new 1000900");
+  assert_string_equal(sent_to(x3, 0), "Bf RT #old 500000 #new 1000900");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_int_equal(sent_count_to(legacy), 0);
+  assert_int_equal(nviolations, 0);
+}
+
+/* What is not an announcement is refused from the message alone -- the
+ * same on every server, so it is not relayed either. */
+static void malformed_announcement_is_refused_and_not_relayed(void **state)
+{
+  struct Client *peer = linked("new.example", "Bn", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  char *parv[6];
+  char a[] = "#old", b[] = "500000", c[] = "#new";
+  (void)state;
+
+  server_tombstone(peer, peer, "#old", "soon", "#new", "1000900");
+  server_tombstone(peer, peer, "#old", "500000", "#new", "-1");
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900 ");
+  server_tombstone(peer, peer, "&old", "500000", "#new", "1000900");
+  server_tombstone(peer, peer, "#old", "500000", "&new", "1000900");
+  server_tombstone(peer, peer, "#old", "500000", "#ne,w", "1000900");
+  server_tombstone(peer, peer, "old", "500000", "#new", "1000900");
+  /* a channel that redirects to itself */
+  server_tombstone(peer, peer, "#old", "500000", "#OLD", "1000900");
+  assert_int_equal(nviolations, 8);
+  /* from a user: no server sends that */
+  server_tombstone(peer, bob, "#old", "500000", "#new", "1000900");
+  assert_int_equal(nviolations, 9);
+  /* too short */
+  parv[0] = cli_name(peer); parv[1] = a; parv[2] = b; parv[3] = c; parv[4] = NULL;
+  ms_tombstone(peer, peer, 4, parv);
+  assert_int_equal(nviolations, 10);
+
+  assert_int_equal(sent_count_to(down), 0);
+  assert_int_equal(ntimers, 0);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -3889,6 +4088,13 @@ int main(void)
     T(crossing_loser_name_taken_here),
     T(crossing_winner_name_taken_here),
     T(three_way_crossing_converges_in_every_order),
+
+    T(tombstone_is_announced_in_the_burst),
+    T(ordinary_persistent_redirecting_channel_is_not_announced),
+    T(cancelled_tombstone_is_not_announced),
+    T(crossing_and_chain_are_announced_as_they_stand),
+    T(announcement_is_relayed_like_burst_state),
+    T(malformed_announcement_is_refused_and_not_relayed),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

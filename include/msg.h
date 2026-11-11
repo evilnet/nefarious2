@@ -564,6 +564,12 @@ struct Client;
 #define TOK_RELOCATE	"RLO"
 #define CMD_RELOCATE	MSG_RELOCATE, TOK_RELOCATE
 
+/* Server-to-server only: a relocation tombstone, announced after its
+ * channel's BURST (ircd/m_rename.c, ms_tombstone()). */
+#define MSG_TOMBSTONE	"TOMBSTONE"
+#define TOK_TOMBSTONE	"RT"
+#define CMD_TOMBSTONE	MSG_TOMBSTONE, TOK_TOMBSTONE
+
 #define MSG_METADATA	"METADATA"
 #define TOK_METADATA	"MD"
 #define CMD_METADATA	MSG_METADATA, TOK_METADATA

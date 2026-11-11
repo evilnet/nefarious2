@@ -1052,6 +1052,14 @@ struct Message msgtab[] = {
     "<oldchannel> <newchannel> [:<reason>] - Server-to-client relocation notice (no client command)"
   },
   {
+    MSG_TOMBSTONE,
+    TOK_TOMBSTONE,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_ignore, ms_tombstone, m_ignore, m_ignore },
+    "S2S-only: a relocation tombstone, announced after its channel's BURST"
+  },
+  {
     MSG_METADATA,
     TOK_METADATA,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

@@ -2950,6 +2950,149 @@ static void relocate_propagate(struct Client *sptr, struct Client *one,
   rename_forward_rcapable(sptr, skip, oldname, newname, marker, reason);
 }
 
+/* ---------- The tombstone in the burst ----------
+ *
+ * A server that links, restarts or heals a netsplit inside a tombstone's
+ * grace learns of the channel from its BURST -- "+z, +L <target>" and
+ * whoever is still in it -- and from that alone it cannot tell a
+ * tombstone from a persistent channel with a redirect: it would keep the
+ * members and +zL for good.  So the record itself follows the channel's
+ * BURST:
+ *
+ *     <server> RT <old> <old-creation-ts> <new> <expires>
+ *     AC RT #old 1731000000 #new 1731340900
+ *
+ * - <old>: the tombstone.  <old-creation-ts>: its channel's creation
+ *   timestamp as the sender holds it -- with the name, the channel's
+ *   identity, exactly as in BURST: a receiver whose channel of that name
+ *   has another timestamp holds another channel, and the announcement is
+ *   not about it.
+ * - <new>: where it redirects (chain-flattened; the winner, for both
+ *   tombstones of a crossing).
+ * - <expires>: the deadline, network time, the same field as in the RN
+ *   (include/rename_proto.h).
+ *
+ * That is all of the record a receiver needs.  The status snapshots are
+ * NOT sent: a restore is the act of one server -- the one the follower
+ * joins through -- and goes out as an ordinary MODE, so it is not state
+ * the network has to agree on; sending it would put a per-member list of
+ * who is to be opped where on every link at every netjoin, for every
+ * tombstone.  A server that builds a record from an announcement
+ * snapshots the members it holds in the tombstone at that moment instead
+ * (after a netsplit those are its own users, with the status they had).
+ * What is lost: a former member who is no longer in the tombstone when
+ * the announcement arrives (it parted, or its server restarted and it
+ * reconnected) and who follows through that server joins the new channel
+ * without its old status.  Services access on a registered channel is
+ * not affected.
+ *
+ * A token of its own (TOMBSTONE, RT), not a new marker on RN: every
+ * existing receiver of RN -- a fork server from before this, X3 -- reads
+ * an RN whose fourth parameter is not exactly "C" as a CLASSIC rename and
+ * would rename the channel, and one that is "C" as a relocation to
+ * execute (move the issuer, snapshot again).  An unknown token is counted
+ * and dropped by parse_server() (ServerStats->is_unco) and logged as a
+ * parse error by X3's parse_line(); neither acts on it, and neither
+ * relays it.
+ *
+ * Sent to IRCv3-aware links and to rename-capable links that are not
+ * (X3, a relay-only server): the peers an RN goes to.  Never to a plain
+ * legacy server.  Relayed by every server that understands it, as it
+ * came, to the same kinds of link -- as a BURST is passed on -- whether
+ * or not this server could use it.
+ */
+
+/** Is @a link a server a relocation's messages go to?
+ */
+static int relocate_link_wants(struct Client *link)
+{
+  return IsIRCv3Aware(link) || IsRenameCapable(link);
+}
+
+void relocate_burst(struct Client *cptr, struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+  char digits[RELOCATE_EXPIRY_BUFLEN];
+
+  if (!relocate_link_wants(cptr))
+    return;
+
+  /* Only a LIVE tombstone: a record whose channel no longer authenticates
+   * (its +L was removed) is waiting to hand +z back and describes nothing
+   * the other side should build. */
+  if (!(ts = relocate_tombstone_find(chptr->chname))
+      || relocate_tombstone_channel(ts) != chptr)
+    return;
+
+  relocate_expiry_format(digits, sizeof(digits), ts->expires);
+  sendcmdto_one(&me, CMD_TOMBSTONE, cptr, "%H %Tu %s %s", chptr,
+                chptr->creationtime, ts->newname, digits);
+}
+
+/** ms_tombstone - a relocation tombstone announced by a server.
+ *
+ * parv[0] = sender prefix (a server)
+ * parv[1] = the tombstone's (old) channel name
+ * parv[2] = that channel's creation timestamp
+ * parv[3] = the channel it redirects to
+ * parv[4] = the deadline, network time
+ *
+ * See "The tombstone in the burst" above for the line and who gets it.
+ *
+ * @param[in] cptr Link the message arrived on.
+ * @param[in] sptr Original source of the message.
+ * @param[in] parc Number of arguments.
+ * @param[in] parv Argument vector.
+ */
+int ms_tombstone(struct Client *cptr, struct Client *sptr, int parc,
+                 char *parv[])
+{
+  struct DLink *dlp;
+  time_t chan_ts, expires;
+  enum RenameNameError bad;
+
+  /* Refused from the message alone -- every server refuses alike, so
+   * there is nobody to keep in step and the line is not passed on: a
+   * source that is not a server, too few fields, names RN would refuse
+   * (a local channel, not a channel, a byte no channel name has), a
+   * channel redirecting to itself, a timestamp or deadline that is not a
+   * number. */
+  if (!IsServer(sptr))
+    return protocol_violation(cptr, "TOMBSTONE from %s, which is not a "
+                              "server", cli_name(sptr));
+  if (parc < 5)
+    return protocol_violation(cptr, "TOMBSTONE from %s with too few "
+                              "parameters", cli_name(sptr));
+  if ((bad = rename_check_names(parv[1], parv[3], CHANNELLEN, 0))
+      != RENAME_NAME_OK)
+    return protocol_violation(cptr, "TOMBSTONE %s -> %s from %s refused: %s",
+                              parv[1], parv[3], cli_name(sptr),
+                              rename_name_error_text(bad));
+  if (0 == ircd_strcmp(parv[1], parv[3]))
+    return protocol_violation(cptr, "TOMBSTONE %s -> %s from %s refused: a "
+                              "channel cannot redirect to itself",
+                              parv[1], parv[3], cli_name(sptr));
+  if (!relocate_expiry_parse(parv[2], &chan_ts)
+      || !relocate_expiry_parse(parv[4], &expires))
+    return protocol_violation(cptr, "TOMBSTONE %s -> %s from %s refused: "
+                              "\"%s\" / \"%s\" are not a creation timestamp "
+                              "and a deadline", parv[1], parv[3],
+                              cli_name(sptr), parv[2], parv[4]);
+
+  /* Passed on as it came, to every other link an announcement goes to. */
+  sendcmdto_serv_butone_v3(sptr, CMD_TOMBSTONE, cptr, "%s %s %s %s",
+                           parv[1], parv[2], parv[3], parv[4]);
+  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    if (dlp->value.cptr == cptr || IsIRCv3Aware(dlp->value.cptr)
+        || !IsRenameCapable(dlp->value.cptr))
+      continue;
+    sendcmdto_one(sptr, CMD_TOMBSTONE, dlp->value.cptr, "%s %s %s %s",
+                  parv[1], parv[2], parv[3], parv[4]);
+  }
+
+  return 0;
+}
+
 /* ========== End Relocation ========== */
 
 /** m_rename - Handle RENAME command from local client.
