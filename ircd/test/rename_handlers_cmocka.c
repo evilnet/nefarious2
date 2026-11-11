@@ -2681,6 +2681,170 @@ static void grace_zero_still_flattens_a_chain(void **state)
   assert_int_equal(ntimers, 1);         /* #a's */
 }
 
+/* --- C.2: a tombstone that is +R at its deadline is cancelled --- */
+
+/* Services register the old name inside the grace.  Nothing happens when
+ * the +R arrives; at the deadline the tombstone is cancelled instead of
+ * swept: nobody is parted, the redirect goes, +z is left to services. */
+static void registered_tombstone_is_cancelled_at_the_deadline(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *dave = user_on(peer, "dave", "AAD");
+  struct Channel *oldch, *newch;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  add_member(oldch, dave, 0);
+  client_rename(alice, "#old", "#new", "moving");
+  newch = channel_named("#new");
+
+  /* MODE #old +R, mid-grace: the record, the redirect and the timer are
+   * as they were */
+  advance(400);
+  oldch->mode.mode |= MODE_REGISTERED;
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_true(oldch->mode.mode & MODE_REDIRECT);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(ntimers, 1);
+  forget();
+
+  advance(500);
+
+  /* cancelled: members stay, and are told the redirect is gone */
+  assert_non_null(member_of(oldch, bob));
+  assert_non_null(member_of(oldch, dave));
+  assert_int_equal(oldch->users, 2);
+  assert_int_equal(sent_count_to(bob), 1);
+  assert_string_equal(sent_to(bob, 0), ":me.example MODE #old -L");
+  assert_false(oldch->mode.mode & MODE_REDIRECT);
+  assert_string_equal(oldch->mode.redir, "");
+  /* an ordinary registered channel again; +z is services' to clear */
+  assert_true(oldch->mode.mode & MODE_REGISTERED);
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_false(was_destroyed(oldch));
+  /* the record is gone, and its snapshots with it */
+  assert_int_equal(ntimers, 0);
+  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 0);
+  /* nothing goes to a server: every server does this by itself */
+  assert_int_equal(sent_count_to(peer), 0);
+}
+
+/* The race that makes "at the deadline" the rule.  A channel is
+ * registered and relocated within a second; services' MODE +R is still
+ * on its way.
+ *
+ * Order one (the hub in the field report): +R is applied BEFORE the RN.
+ * The new channel inherits it, the tombstone has it stripped, and at the
+ * deadline the tombstone -- not +R -- is swept. */
+static void stray_registration_before_the_relocation(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+
+  oldch->mode.mode |= MODE_REGISTERED;                  /* M #old +R */
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  assert_true(channel_named("#new")->mode.mode & MODE_REGISTERED);
+  assert_false(oldch->mode.mode & MODE_REGISTERED);
+  assert_int_equal(timers_at(1000900), 1);
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#old"));
+}
+
+/* Order two (the issuing leaf): the RN is executed first and the +R then
+ * lands on the tombstone.  The record is not touched by it -- the same
+ * deadline, the same redirect, the snapshots -- and at the deadline this
+ * server does what ITS +R bit says: the tombstone is cancelled. */
+static void stray_registration_after_the_relocation(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_VOICE);
+
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  newch = channel_named("#new");
+  oldch->mode.mode |= MODE_REGISTERED;                  /* M #old +R */
+
+  /* neither the mode nor time passing has corrupted the record */
+  assert_false(newch->mode.mode & MODE_REGISTERED);
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(ntimers, 1);
+  advance(899);
+  assert_non_null(member_of(oldch, carol));
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(relocate_snap_lookup(newch, carol, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_VOICE);
+
+  advance(1);
+  assert_non_null(member_of(oldch, carol));
+  assert_string_equal(oldch->mode.redir, "");
+  assert_true(oldch->mode.mode & MODE_REGISTERED);
+  assert_false(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
+/* The repair services have the whole grace for: -R on the old name.
+ * Then order two ends as order one does. */
+static void stray_registration_corrected_before_the_deadline(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->mode.mode |= MODE_REGISTERED;                  /* M #old +R */
+  advance(5);
+  oldch->mode.mode &= ~MODE_REGISTERED;                 /* M #old -R */
+
+  advance(895);
+  assert_true(was_destroyed(oldch));
+}
+
+/* With no grace the same question is asked on the spot: the relocation
+ * has just taken +R off the tombstone, so it is swept. */
+static void registered_channel_relocated_without_grace_is_swept(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  oldch->mode.mode |= MODE_REGISTERED;
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000000", "");
+
+  assert_true(channel_named("#new")->mode.mode & MODE_REGISTERED);
+  assert_true(was_destroyed(oldch));
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -2763,6 +2927,12 @@ int main(void)
     T(grace_zero_leaves_the_old_name_free),
     T(deadline_of_this_very_second_dissolves_at_once),
     T(grace_zero_still_flattens_a_chain),
+
+    T(registered_tombstone_is_cancelled_at_the_deadline),
+    T(stray_registration_before_the_relocation),
+    T(stray_registration_after_the_relocation),
+    T(stray_registration_corrected_before_the_deadline),
+    T(registered_channel_relocated_without_grace_is_swept),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

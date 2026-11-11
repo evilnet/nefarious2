@@ -1120,6 +1120,7 @@ static struct RelocateTombstone *relocate_tombstones = NULL;
 
 static void relocate_tombstone_expire_cb(struct Event *ev);
 static void relocate_snap_free_list(struct RelocateSnap *head);
+static void relocate_withdraw_redirect(struct Channel *chptr);
 
 /** Find a live tombstone by its (old) channel name, case-insensitively.
  * @param[in] name Channel name to look up.
@@ -1405,7 +1406,9 @@ static void relocate_tombstone_clear_marks(struct Channel *chptr)
 
 /** Grace-period expiry sweep: PART every remaining member of a tombstone and
  * dissolve the channel (spec, "The tombstone": at grace expiry the server
- * removes each remaining member with a server-generated PART).
+ * removes each remaining member with a server-generated PART) -- unless the
+ * channel is registered at that moment, in which case the tombstone is
+ * cancelled and nobody is parted (see the comment in the function).
  *
  * NOTHING here goes to servers.  Every server on the network processed the
  * same RN C marker and registered its own tombstone with its own timer, so
@@ -1497,6 +1500,40 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
         sub1_from_channel(stray);
     }
 
+    return;
+  }
+
+  /* The channel is this tombstone -- and it is REGISTERED: services have
+   * registered the old name inside the grace.  Sweeping it would part
+   * everybody, the services bot included, and destroy a registered
+   * channel.  So the tombstone is cancelled instead: nobody is parted, the
+   * redirect is withdrawn (a registered channel that sends every joiner
+   * elsewhere is not usable), the record is dropped (the caller has
+   * unlinked it), and the channel is an ordinary registered channel again.
+   * +z is left alone: on a registered channel it is services' to keep or
+   * clear.
+   *
+   * The +R is looked at HERE, at the deadline, and never when it arrives
+   * (2026-11-11, a bed run).  A channel registered and relocated within
+   * one second had services' MODE +R still on its way: one server applied
+   * it before the RN -- its new channel inherited +R, its tombstone had
+   * it stripped -- and another executed the RN first and then put +R on
+   * what was by then the tombstone.  A stray +R like that and a
+   * deliberate registration of the old name look the same when the MODE
+   * arrives; cancelling on arrival would cancel the tombstone on the
+   * second server only, for good.  At the deadline every server reads the
+   * same channel at the same moment, and services have had the whole
+   * grace to take a stray +R back.  Nothing goes on the wire: each server
+   * does this from its own copy of the channel. */
+  if (chptr->mode.mode & MODE_REGISTERED) {
+    relocate_withdraw_redirect(chptr);
+    ts->oldchan = NULL;
+
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "relocate: tombstone %s -> %s is registered at its deadline; "
+              "cancelled, %u member%s left in place",
+              ts->oldname, ts->newname, chptr->users,
+              (chptr->users == 1) ? "" : "s");
     return;
   }
 
@@ -1820,6 +1857,27 @@ static void relocate_announce_redirect(struct Channel *chptr)
   modebuf_init(&mbuf, &me, NULL, chptr, MODEBUF_DEST_CHANNEL);
   modebuf_mode_string(&mbuf, MODE_ADD | MODE_REDIRECT, chptr->mode.redir, 0);
   modebuf_flush(&mbuf);
+}
+
+/** Take a tombstone's redirect off its channel and tell the remaining
+ * LOCAL members -- the counterpart of relocate_announce_redirect(), for a
+ * tombstone that is cancelled at its deadline because it is registered.
+ * Channel-only for the same reason: every server does the same from its
+ * own copy of the channel at the same deadline.  -L takes no parameter
+ * and modebuf_mode_string() keeps no reference to the string for it, so
+ * the redirect is cleared in place afterwards (as m_clearmode.c does).
+ * @param[in] chptr The tombstone channel.
+ */
+static void relocate_withdraw_redirect(struct Channel *chptr)
+{
+  struct ModeBuf mbuf;
+
+  modebuf_init(&mbuf, &me, NULL, chptr, MODEBUF_DEST_CHANNEL);
+  modebuf_mode_string(&mbuf, MODE_DEL | MODE_REDIRECT, chptr->mode.redir, 0);
+  modebuf_flush(&mbuf);
+
+  chptr->mode.mode &= ~MODE_REDIRECT;
+  chptr->mode.redir[0] = '\0';
 }
 
 /** Chain-flattening: a rename of a channel that is itself some tombstone's
