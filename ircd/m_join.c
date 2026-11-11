@@ -158,6 +158,15 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     int exceptkli = 0;
     struct Ban *ban = NULL;
 
+    /* A relocation tombstone that is detached from its target (the
+     * target's name is another channel's on this server; m_rename.c,
+     * relocate_tombstone_point()) has no redirect to forward along, and
+     * like every tombstone it admits nobody. */
+    if (!*chptr->mode.redir && relocate_is_tombstone(chptr)) {
+      send_reply(sptr, ERR_CHANNELISFULL, chptr->chname);
+      return;
+    }
+
     if (*chptr->mode.redir && (*chptr->mode.redir != '\0')) {
       /* The ordinary +L forwards only when the channel is full.  A live
        * relocation tombstone forwards ALWAYS: it admits nobody, whatever

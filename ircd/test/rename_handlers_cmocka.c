@@ -5941,31 +5941,277 @@ static void rename_of_a_target_not_held_here_still_retargets(void **state)
   assert_int_equal(timers_at(1000900), 1);
 }
 
-/* ... also when the new name is taken here by an unrelated channel: the
- * redirect says what the network's says, and nothing follows into the
- * unrelated channel (it is not the target by creation timestamp). */
-static void rename_of_a_target_onto_a_name_taken_here_still_retargets(void **state)
+/* --- a target this server cannot follow: the tombstone is DETACHED --- */
+
+/** A detached tombstone: still one (do_join() admits nobody: it refuses a
+ * JOIN of a tombstone that has no redirect), still on its clock, but
+ * pointing nowhere. */
+static void assert_detached(struct Channel *tomb)
+{
+  assert_true(relocate_is_tombstone(tomb));
+  assert_string_equal(tomb->mode.redir, "");
+  assert_true(tomb->mode.exmode & EXMODE_PERSIST);
+}
+
+/* The network renames the target to a name that ANOTHER channel has on
+ * this server (another creation timestamp).  This server cannot follow,
+ * and it must not point the tombstone at the stranger's channel: joiners
+ * would be forwarded into it, and a follower's status carried into it.
+ * The tombstone is detached -- redirect withdrawn, the operators told --
+ * and still ends on time: members parted, +z gone, channel collected. */
+static void target_renamed_onto_a_strangers_name_detaches_the_tombstone(void **state)
 {
   struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
   struct Client *bob = user_on(peer, "bob", "AAC");
   struct Client *carol = user_on(&me, "carol", "AAD");
   struct Client *dan = user_on(&me, "dan", "AAE");
-  struct Channel *oldch, *unrelated;
+  struct Channel *oldch, *stranger;
   (void)state;
 
   oldch = channel_at("#old", 500000, bob);
   add_member(oldch, carol, CHFL_CHANOP);
   server_relocate(peer, bob, "#old", "#new", "1000900", "");
-  unrelated = channel_at("#newer", 700000, dan);
+  stranger = channel_at("#newer", 700000, dan);
   forget();
 
   server_rename(peer, bob, "#new", "#newer", "");
 
-  assert_int_equal(nopnotices, 1);
-  assert_non_null(channel_named("#new"));               /* still here */
-  assert_string_equal(oldch->mode.redir, "#newer");
-  assert_int_equal(joins(carol, unrelated), 0);
+  /* the rename could not be applied: two notices, the RN's and ours */
+  assert_non_null(channel_named("#new"));
+  assert_int_equal(nopnotices, 2);
+  assert_non_null(strstr(opnotices[1], "#old"));
+  assert_non_null(strstr(opnotices[1], "detached"));
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #new #newer :");
+  /* no forward ... */
+  assert_detached(oldch);
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old -L");
+  /* ... no status: not into the stranger's channel, and not into the
+   * channel left under the old name either */
+  assert_int_equal(joins(carol, stranger), 0);
   assert_non_null(member_of(oldch, carol));
+  remove_user_from_channel(carol, stranger);
+  assert_int_equal(joins(carol, channel_named("#new")), 0);
+  assert_non_null(member_of(oldch, carol));
+  /* what it tells a new link is what the NETWORK calls the target; its
+   * own BURST of the channel carries no redirect to spread */
+  forget();
+  burst_to(down);
+  assert_string_equal(sent_to(down, 0), "AC RT #old 500000 #newer 1000900");
+
+  /* ... and it ends on time */
+  forget();
+  advance(900);
+  assert_string_equal(sent_to(carol, 0),
+                      ":carol!user@host.example PART #old :Channel has moved to #newer");
+  assert_true(was_destroyed(oldch));
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(ntimers, 0);
+  assert_false(logged("no longer authenticates"));
+}
+
+/* The new name is held here by the RIGHT channel -- the record's target
+ * by creation timestamp (this server already has the channel under its
+ * new name): the tombstone is retargeted. */
+static void target_renamed_onto_the_right_channel_retargets(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAF");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newer;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_VOICE);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  newer = channel_at("#newer", 500000, eve);    /* the same channel, by TS */
+  forget();
+
+  server_rename(peer, bob, "#new", "#newer", "");
+
+  assert_int_equal(nopnotices, 1);                      /* the RN's alone */
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old +L #newer");
+  assert_int_equal(joins(carol, newer), CHFL_VOICE);
+  assert_null(member_of(oldch, carol));
+}
+
+/* The same three, with the tombstone learned from a burst announcement
+ * AFTER the rename went through: the announcement names the target as
+ * the network has it, and the receiver applies the same test. */
+static void announcement_naming_a_strangers_channel_builds_a_detached_tombstone(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *eve = user_on(hub, "eve", "AAF");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch, *stranger;
+  (void)state;
+
+  stranger = channel_at("#newer", 700000, dan);
+  /* BjAAF RN #new #newer: nothing here by either name; relayed */
+  server_rename(hub, eve, "#new", "#newer", "");
+  /* Bj B #old 500000 +zL #newer carol..., then the record */
+  oldch = burst_tombstone("#old", 500000, "#newer", carol);
+  member_of(oldch, carol)->status |= CHFL_CHANOP;
+  forget();
+  server_tombstone(hub, hub, "#old", "500000", "#newer", "1000900");
+
+  assert_detached(oldch);
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old -L");
+  assert_int_equal(sent_count_to(carol), 1);            /* no "join #newer" */
+  assert_int_equal(joins(carol, stranger), 0);
+  assert_non_null(member_of(oldch, carol));
+  assert_int_equal(timers_at(1000900), 1);
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+}
+
+static void announcement_naming_the_right_channel_builds_an_attached_tombstone(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *eve = user_on(hub, "eve", "AAF");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newer;
+  (void)state;
+
+  newer = channel_at("#newer", 500000, eve);
+  oldch = burst_tombstone("#old", 500000, "#newer", carol);
+  member_of(oldch, carol)->status |= CHFL_VOICE;
+  server_tombstone(hub, hub, "#old", "500000", "#newer", "1000900");
+
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_int_equal(joins(carol, newer), CHFL_VOICE);
+}
+
+/* The target is not held here and its name is free: attached, pointing at
+ * a name with no local channel (as a tombstone whose target emptied
+ * always could). */
+static void announcement_naming_a_free_name_builds_an_attached_tombstone(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#newer", carol);
+  server_tombstone(hub, hub, "#old", "500000", "#newer", "1000900");
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_true(relocate_is_tombstone(oldch));
+  assert_non_null(strstr(sent_to(carol, 0), "has moved to #newer"));
+}
+
+/* A detached tombstone is attached again when it can be: the stranger's
+ * channel goes away and a peer's BURST and announcement name the target
+ * once more -- or the network renames the target again, to a free name. */
+static void detached_tombstone_is_attached_again_when_it_can_be(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch, *stranger, *real;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  stranger = channel_at("#newer", 700000, dan);
+  server_rename(peer, bob, "#new", "#newer", "");
+  assert_detached(oldch);
+
+  /* a BURST puts "+L #newer" back while the stranger's channel is there:
+   * withdrawn again when the BURST has been taken in */
+  ircd_strncpy(oldch->mode.redir, "#newer", sizeof(oldch->mode.redir));
+  relocate_tombstone_burst_done(oldch);
+  assert_detached(oldch);
+
+  /* only one operator notice for it, not one per BURST */
+  {
+    int i, n = 0;
+    for (i = 0; i < nopnotices; i++)
+      if (strstr(opnotices[i], "detached"))
+        n++;
+    assert_int_equal(n, 1);
+  }
+
+  /* the stranger's channel empties and the real target turns up under
+   * the name; until something points the tombstone again it stays
+   * detached, and carries nothing even there */
+  remove_user_from_channel(dan, stranger);
+  assert_true(was_destroyed(stranger));
+  real = channel_at("#newer", 500000, bob);
+  member_of(oldch, carol)->status |= CHFL_VOICE;
+  assert_int_equal(joins(carol, real), 0);
+  assert_non_null(member_of(oldch, carol));
+  remove_user_from_channel(carol, real);
+
+  /* the announcement attaches it */
+  forget();
+  server_tombstone(peer, peer, "#old", "500000", "#newer", "1000900");
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old +L #newer");
+  assert_true(relocate_is_tombstone(oldch));
+  assert_int_equal(joins(carol, real), CHFL_VOICE);
+  assert_null(member_of(oldch, carol));
+}
+
+/* A detached tombstone that is itself renamed (classic) keeps its record,
+ * detached, and still ends on time under its new name. */
+static void detached_tombstone_renamed_still_ends_on_time(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAF");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch, *older;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  channel_at("#newer", 700000, dan);
+  server_rename(peer, bob, "#new", "#newer", "");
+  assert_detached(oldch);
+
+  server_rename(peer, eve, "#old", "#older", "");
+  older = channel_named("#older");
+  assert_detached(older);
+  assert_int_equal(timers_at(1000900), 1);
+  advance(900);
+  assert_true(was_destroyed(older));
+}
+
+/* A crossing whose winner's name is a stranger's channel here: both
+ * tombstones are detached rather than pointed at it. */
+static void crossing_onto_a_strangers_channel_detaches(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bh", "v");
+  struct Client *uma = user_on(&me, "uma", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch, *y;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, uma);
+  client_rename(uma, "#old", "#y", "");
+  y = channel_named("#y");
+  channel_at("#x", 700000, dan);                /* a stranger's #x */
+
+  /* the other side relocated #old to #x */
+  ircd_strncpy(oldch->mode.redir, "#x", sizeof(oldch->mode.redir));
+  server_tombstone(hub, hub, "#old", "500000", "#x", "1000900");
+
+  assert_detached(oldch);
+  assert_detached(y);
+  assert_int_equal(timers_at(1000900), 2);
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_true(was_destroyed(y));
 }
 
 /* A tombstone that was itself renamed (classic) and whose target is
@@ -6547,7 +6793,14 @@ int main(void)
     T(approved_rename_of_a_target_takes_its_tombstones_along),
     T(renamed_stranger_under_the_targets_name_takes_nothing),
     T(rename_of_a_target_not_held_here_still_retargets),
-    T(rename_of_a_target_onto_a_name_taken_here_still_retargets),
+    T(target_renamed_onto_a_strangers_name_detaches_the_tombstone),
+    T(target_renamed_onto_the_right_channel_retargets),
+    T(announcement_naming_a_strangers_channel_builds_a_detached_tombstone),
+    T(announcement_naming_the_right_channel_builds_an_attached_tombstone),
+    T(announcement_naming_a_free_name_builds_an_attached_tombstone),
+    T(detached_tombstone_is_attached_again_when_it_can_be),
+    T(detached_tombstone_renamed_still_ends_on_time),
+    T(crossing_onto_a_strangers_channel_detaches),
     T(renamed_tombstone_and_renamed_target_in_either_order),
     T(crossing_whose_winner_is_renamed_in_either_order),
     T(chain_across_a_crossing_winner_moves_on),
