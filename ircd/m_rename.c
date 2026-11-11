@@ -2648,14 +2648,15 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* Find the channel */
   chptr = FindChannel(oldname);
-  if (!chptr) {
-    return 0; /* Channel doesn't exist on this server */
-  }
-
-  /* Store old name before rename */
-  ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
 
   if (relocate) {
+    if (!chptr) {
+      return 0; /* Channel doesn't exist on this server */
+    }
+
+    /* Store old name before rename */
+    ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
+
     rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason);
 
     if (rc == -2) {
@@ -2694,14 +2695,84 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Perform the rename (updates chptr if reallocated) */
-  rc = rename_channel(&chptr, newname);
-  if (rc != 0) {
-    /* Rename failed - log and continue */
-    log_write(LS_DEBUG, L_ERROR, 0,
-              "RENAME failed from %#C: %s -> %s (rc=%d)",
-              sptr, oldname, newname, rc);
-    return 0;
+  /* Classic rename.  Apply it when this server can; when it cannot, the
+   * rename is still relayed.
+   *
+   * The names were judged above, so what is left to stop the rename is
+   * this server's own state: the channel is not here under the old name,
+   * or the new name is taken here.  Neither says anything about the
+   * servers behind this one.  Two servers can disagree for a moment -- a
+   * user creates #new here while #old is renamed to #new elsewhere, two
+   * renames of one channel cross, the channel emptied here just before
+   * the RN arrived -- and a server that answered that by dropping the
+   * line became a wall: everything behind it never heard of the rename at
+   * all, and kept the old name for good.  So, exactly as the relocation
+   * branch above does for its own collision: leave local state alone,
+   * tell the operators (this server may now differ from the network, and
+   * only a person can sort that out), and pass the line on to the peers a
+   * successful rename would have told, in the same form.
+   *
+   * No loop can come of it: the line goes to every link but the one it
+   * arrived on, here as on success, and the network is a tree. */
+  {
+    struct Channel *taken = chptr ? FindChannel(newname) : NULL;
+
+    if (!chptr) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RENAME %s -> %s from %C NOT applied locally: %s "
+                           "does not exist on this server.  The rename has "
+                           "been relayed onward; unless that channel has "
+                           "just emptied everywhere, this server is now "
+                           "divergent and needs manual reconciliation.",
+                           oldname, newname, sptr, oldname);
+      rc = -1;
+    } else if (taken == chptr) {
+      /* The two names are one channel here (they differ in case only).
+       * m_rename refuses that at the origin, so only a server that
+       * disagrees about the channel's name can have sent it. */
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RENAME %s -> %s from %C NOT applied locally: "
+                           "both names are the channel %s on this server.  "
+                           "The rename has been relayed onward.",
+                           oldname, newname, sptr, chptr->chname);
+      rc = -1;
+    } else if (taken) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RENAME %s -> %s from %C NOT applied locally: %s "
+                           "already exists on this server.  The rename has "
+                           "been relayed onward, so this server is now "
+                           "divergent and needs manual reconciliation.",
+                           oldname, newname, sptr, taken->chname);
+      rc = -1;
+    } else {
+      /* Store old name before rename */
+      ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
+
+      /* Perform the rename (updates chptr if reallocated) */
+      rc = rename_channel(&chptr, newname);
+      if (rc != 0)
+        sendto_opmask_butone(0, SNO_OLDSNO,
+                             "RENAME %s -> %s from %C NOT applied locally "
+                             "(rename_channel: %d).  The rename has been "
+                             "relayed onward, so this server is now "
+                             "divergent and needs manual reconciliation.",
+                             oldname, newname, sptr, rc);
+    }
+
+    if (rc != 0) {
+      log_write(LS_DEBUG, L_ERROR, 0,
+                "RENAME from %#C not applied, relayed: %s -> %s",
+                sptr, oldname, newname);
+
+      /* The names as received: there is no local channel to take a
+       * spelling from. */
+      sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
+                               oldname, newname, reason);
+      /* Rename-capable non-v3 links (X3), with the same alias source
+       * rewrite a successful rename gets. */
+      rename_forward_rcapable(sptr, cptr, oldname, newname, "", reason);
+      return 0;
+    }
   }
 
   /* Send to local channel members */

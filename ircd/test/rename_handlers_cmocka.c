@@ -1594,6 +1594,167 @@ static void server_rename_away_from_a_bad_name_is_applied(void **state)
   assert_non_null(channel_named("#ab"));
 }
 
+/* ====================================================================
+ * Fix 3: an RN this server cannot apply is still relayed
+ * ==================================================================== */
+
+/* What a rename that DOES apply sends, for the cases below to match. */
+static void server_rename_applied_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  CapSet(cli_active_own(alice), CAP_DRAFT_CHANRENAME);
+  plain_channel("#old", alice);
+
+  server_rename(peer, bob, "#old", "#new", "moving");
+
+  assert_null(channel_named("#old"));
+  assert_non_null(channel_named("#new"));
+  assert_string_equal(sent_to(alice, 0), ":bob!user@host.example RENAME #old #new :moving");
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new :moving");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new :moving");
+  assert_int_equal(sent_count_to(peer), 0);     /* not back where it came from */
+  assert_int_equal(nopnotices, 0);
+}
+
+/* The channel is not here under the old name (it emptied here, or was
+ * renamed here by a crossing RN): local state untouched, operators told,
+ * and the line goes on exactly as above. */
+static void server_rename_of_a_channel_not_here_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *legacy_like = linked("plain.example", "Bn", "");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("#unrelated", alice);
+
+  server_rename(peer, bob, "#old", "#new", "moving");
+
+  assert_null(channel_named("#old"));
+  assert_null(channel_named("#new"));
+  assert_non_null(channel_named("#unrelated"));
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new :moving");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new :moving");
+  assert_int_equal(sent_count_to(down), 1);
+  assert_int_equal(sent_count_to(x3), 1);
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_int_equal(sent_count_to(legacy_like), 0);      /* neither v3 nor 'r' */
+  assert_int_equal(sent_count_to(alice), 0);
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "#old"));
+  assert_non_null(strstr(opnotices[0], "#new"));
+  assert_non_null(strstr(opnotices[0], "does not exist"));
+  assert_non_null(strstr(opnotices[0], "relayed"));
+  assert_int_equal(nviolations, 0);
+}
+
+/* The new name is taken here (somebody created it while the rename was
+ * on its way): both channels stay as they are, and the line goes on. */
+static void server_rename_onto_a_name_taken_here_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  CapSet(cli_active_own(alice), CAP_DRAFT_CHANRENAME);
+  oldch = plain_channel("#old", alice);
+  newch = plain_channel("#new", carol);
+
+  server_rename(peer, bob, "#old", "#new", "moving");
+
+  /* the very same two channels, the same members */
+  assert_ptr_equal(channel_named("#old"), oldch);
+  assert_ptr_equal(channel_named("#new"), newch);
+  assert_ptr_equal(oldch->members->user, alice);
+  assert_ptr_equal(newch->members->user, carol);
+  assert_int_equal(sent_count_to(alice), 0);
+  assert_int_equal(sent_count_to(carol), 0);
+
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new :moving");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new :moving");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "#old"));
+  assert_non_null(strstr(opnotices[0], "#new"));
+  assert_non_null(strstr(opnotices[0], "already exists"));
+  assert_non_null(strstr(opnotices[0], "divergent"));
+}
+
+/* Two renames of one channel that cross: this server renamed #x to #a,
+ * the peer renamed it to #b.  The peer's RN finds no #x here. */
+static void crossing_renames_are_both_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  add_member(plain_channel("#x", alice), bob, CHFL_CHANOP);
+
+  client_rename(alice, "#x", "#a", "mine");
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #x #a :mine");
+  assert_string_equal(sent_to(down, 0), "ACAAB RN #x #a :mine");
+  forget();
+
+  server_rename(peer, bob, "#x", "#b", "theirs");
+  assert_non_null(channel_named("#a"));
+  assert_null(channel_named("#b"));
+  /* the server behind this one hears of both */
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #x #b :theirs");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_int_equal(nopnotices, 1);
+}
+
+/* A case-only rename names one channel twice here. */
+static void server_rename_to_the_same_channel_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("#Chan", alice);
+  server_rename(peer, bob, "#chan", "#CHAN", "case");
+  assert_non_null(channel_named("#Chan"));
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #chan #CHAN :case");
+  assert_int_equal(nopnotices, 1);
+}
+
+/* The source rewrite for a bouncer alias still happens on the relay of a
+ * rename that was not applied: a rename-capable non-v3 peer (X3) was
+ * never told about the alias, so it gets the primary as the source. */
+static void unapplied_rename_from_an_alias_reaches_x3_as_its_primary(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *primary = user_on(peer, "bob", "AAC");
+  struct Client *alias = user_on(peer, "bob", "AAE");
+  (void)state;
+
+  SetBouncerAlias(alias);
+  cli_user(alias)->alias_primary = primary;
+
+  server_rename(peer, alias, "#old", "#new", "moving");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new :moving");
+  assert_int_equal(nopnotices, 1);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -1639,6 +1800,13 @@ int main(void)
     T(server_rename_to_an_unusable_name_is_a_violation),
     T(server_rename_is_not_held_to_local_policy),
     T(server_rename_away_from_a_bad_name_is_applied),
+
+    T(server_rename_applied_is_relayed),
+    T(server_rename_of_a_channel_not_here_is_relayed),
+    T(server_rename_onto_a_name_taken_here_is_relayed),
+    T(crossing_renames_are_both_relayed),
+    T(server_rename_to_the_same_channel_is_relayed),
+    T(unapplied_rename_from_an_alias_reaches_x3_as_its_primary),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
