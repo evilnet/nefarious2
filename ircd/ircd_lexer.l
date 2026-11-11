@@ -316,11 +316,40 @@ int include_stack_ptr = 0;
 #undef YY_INPUT
 #define YY_INPUT(buf, res, size) res = (fbgets(buf, size, lexer_input) ? strlen(buf) : 0)
 
+/** The configuration file lexer_open_config() opened for the next
+ * init_lexer() to read, or NULL. */
+static FBFILE *lexer_opened;
+
+/** Close a configuration file lexer_open_config() opened that is not to
+ * be read after all. */
+void lexer_close_config(void)
+{
+  if (lexer_opened != NULL)
+  {
+    fbclose(lexer_opened);
+    lexer_opened = NULL;
+  }
+}
+
+/** Open the configuration file now, for the next init_lexer() to read.
+ * A rehash opens it before it discards anything of the running
+ * configuration: a file that cannot be opened stops the rehash there, and
+ * the file it checked is the one that is parsed.
+ * @return The open file, or NULL (errno set) if it cannot be opened.
+ */
+FBFILE *lexer_open_config(void)
+{
+  lexer_close_config();
+  lexer_opened = fbopen(configfile, "r");
+  return lexer_opened;
+}
+
 int
 init_lexer(void)
 {
   include_stack_ptr = 0;
-  lexer_input = fbopen(configfile, "r");
+  lexer_input = lexer_opened ? lexer_opened : fbopen(configfile, "r");
+  lexer_opened = NULL;
   if (lexer_input == NULL)
   {
 #ifdef YY_FATAL_ERROR
