@@ -1,0 +1,1054 @@
+/*
+ * s2s_handlers_cmocka.c - server-to-server handlers against a fake network.
+ *
+ * Links the REAL handler objects (m_burst.o so far), with numnicks.o,
+ * match.o and the ircd's own printf, so every line asserted below is the
+ * line the handler would put on the wire.  What sits underneath the
+ * handlers is stubbed: the send layer records instead of sending, the
+ * channel table is a list, and mode_parse() / the modebuf only count what
+ * a BURST's mode string uses up.
+ *
+ * Lines reach a handler split the way parse_server() splits them: parv[0]
+ * is the source, a parameter starting with ':' takes the rest of the line.
+ * The fake network is built per test: this server is "hub.test" (AB);
+ * linked() makes a server linked to it, remote_user() a user on one.
+ */
+#include "config.h"
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <cmocka.h>
+
+#include "channel.h"
+#include "client.h"
+#include "handlers.h"
+#include "hash.h"
+#include "ircd.h"
+#include "ircd_alloc.h"
+#include "ircd_features.h"
+#include "ircd_log.h"
+#include "ircd_reply.h"
+#include "ircd_snprintf.h"
+#include "ircd_string.h"
+#include "list.h"
+#include "match.h"
+#include "msg.h"
+#include "numnicks.h"
+#include "s_debug.h"
+#include "s_misc.h"
+#include "send.h"
+#include "struct.h"
+
+/* ====================================================================
+ * Globals the linked objects expect
+ * ==================================================================== */
+
+struct Client me;
+struct Client his;
+time_t CurrentTime = 1000000;
+time_t TSoffset;
+int log_inassert;
+
+/* ====================================================================
+ * What the code under test did
+ * ==================================================================== */
+
+#define LINE 2048               /* longer than any wire line: an over-long
+                                 * line is seen whole, not cut */
+#define MAXREC 256
+
+struct Sent {
+  struct Client *to;            /* the connection the line went to */
+  char text[LINE];
+};
+
+static struct Sent sent[MAXREC];
+static int nsent;
+static char violations[MAXREC][LINE];
+static int nviolations;
+
+static void record_sent(struct Client *to, const char *text)
+{
+  assert_true(nsent < MAXREC);
+  sent[nsent].to = to;
+  snprintf(sent[nsent].text, LINE, "%s", text);
+  nsent++;
+}
+
+/** How many lines went to @a to. */
+static int sent_count_to(struct Client *to)
+{
+  int i, count = 0;
+  for (i = 0; i < nsent; i++)
+    if (sent[i].to == to)
+      count++;
+  return count;
+}
+
+/** The @a nth (from 0) line that went to @a to, or "" when there are
+ * fewer. */
+static const char *sent_to(struct Client *to, int nth)
+{
+  int i;
+  for (i = 0; i < nsent; i++)
+    if (sent[i].to == to && nth-- == 0)
+      return sent[i].text;
+  return "";
+}
+
+static void forget(void)
+{
+  nsent = nviolations = 0;
+}
+
+/* ====================================================================
+ * The fake network
+ * ==================================================================== */
+
+#define MAXOBJ 256
+static struct Client *made[MAXOBJ];
+static int nmade;
+static struct Connection me_con;
+static struct Server me_serv;
+
+static struct Client *fake_client(const char *name, int status)
+{
+  struct Client *c = calloc(1, sizeof(*c));
+
+  assert_non_null(c);
+  assert_true(nmade < MAXOBJ);
+  made[nmade++] = c;
+  ircd_strncpy(cli_name(c), name, sizeof(c->cli_name));
+  cli_status(c) = status;
+  return c;
+}
+
+/** A server linked directly to this one, numeric @a numeric with room for
+ * 4096 users.  @a oplevels: it understands op-levels (FLAG_OPLEVELS). */
+static struct Client *linked(const char *name, const char *numeric,
+                             int oplevels)
+{
+  struct Client *c = fake_client(name, STAT_SERVER);
+  struct DLink *dl = calloc(1, sizeof(*dl));
+  char yxx[6];
+
+  assert_non_null(dl);
+  cli_serv(c) = calloc(1, sizeof(struct Server));
+  assert_non_null(cli_serv(c));
+  snprintf(yxx, sizeof(yxx), "%s]]]", numeric);
+  SetServerYXX(c, c, yxx);
+  if (oplevels)
+    SetFlag(c, FLAG_OPLEVELS);
+  cli_connect(c) = calloc(1, sizeof(struct Connection));
+  assert_non_null(cli_connect(c));
+  con_client(cli_connect(c)) = c;
+  cli_serv(c)->up = &me;
+
+  dl->value.cptr = c;
+  dl->next = cli_serv(&me)->down;
+  cli_serv(&me)->down = dl;
+  return c;
+}
+
+static struct Client *a_user(const char *nick)
+{
+  struct Client *c = fake_client(nick, STAT_USER);
+
+  cli_user(c) = calloc(1, sizeof(struct User));
+  assert_non_null(cli_user(c));
+  ircd_strncpy(cli_user(c)->username, "user", sizeof(cli_user(c)->username));
+  ircd_strncpy(cli_user(c)->host, "host.example", sizeof(cli_user(c)->host));
+  ircd_strncpy(cli_info(c), "Real Name", sizeof(c->cli_info));
+  return c;
+}
+
+/** A user on @a server (made by linked()), full numeric @a numnick. */
+static struct Client *remote_user(struct Client *server, const char *nick,
+                                  const char *numnick)
+{
+  struct Client *c = a_user(nick);
+
+  cli_user(c)->server = server;
+  cli_connect(c) = cli_connect(server);
+  SetRemoteNumNick(c, numnick);
+  return c;
+}
+
+/* --- channels: a list instead of the hash --- */
+
+static struct Channel *channels[MAXOBJ];
+static int nchannels;
+
+static struct Channel *fake_channel(const char *name)
+{
+  struct Channel *ch = calloc(1, sizeof(*ch) + strlen(name));
+
+  assert_non_null(ch);
+  assert_true(nchannels < MAXOBJ);
+  strcpy(ch->chname, name);
+  channels[nchannels++] = ch;
+  return ch;
+}
+
+static struct Membership *add_member(struct Channel *ch, struct Client *who,
+                                     unsigned int status, int oplevel)
+{
+  struct Membership *m = calloc(1, sizeof(*m));
+
+  assert_non_null(m);
+  m->user = who;
+  m->channel = ch;
+  m->status = status;
+  m->oplevel = oplevel;
+  m->next_member = ch->members;
+  if (ch->members)
+    ch->members->prev_member = m;
+  ch->members = m;
+  ch->users++;
+  return m;
+}
+
+static int count_bans(struct Ban *list)
+{
+  int n = 0;
+  for (; list; list = list->next)
+    n++;
+  return n;
+}
+
+/* --- features --- */
+
+static int feat_excepts;
+
+/* --- the modebuf, as far as ms_burst() reads it back --- */
+
+static const char *fake_modes;  /* what modebuf_extract() reports */
+static int ban_invalidations, except_invalidations;
+
+/* --- the source of a line, as parse_server() splits it --- */
+
+#define MAXARGS (MAXPARA + 2)
+
+static int split_line(char *line, char **parv)
+{
+  int parc = 1;
+
+  while (*line && parc < MAXARGS - 1) {
+    while (*line == ' ')
+      line++;
+    if (!*line)
+      break;
+    if (*line == ':') {
+      parv[parc++] = line + 1;
+      break;
+    }
+    parv[parc++] = line;
+    while (*line && *line != ' ')
+      line++;
+    if (*line)
+      *line++ = '\0';
+  }
+  parv[parc] = NULL;
+  return parc;
+}
+
+/** Hand @a fmt (the line after "<source> <token>") to @a handler as
+ * arriving on @a link from @a source. */
+static int deliver(int (*handler)(struct Client *, struct Client *, int, char *[]),
+                   struct Client *link, struct Client *source,
+                   const char *fmt, ...)
+{
+  static char buf[LINE];
+  char *parv[MAXARGS];
+  va_list vl;
+  int parc;
+
+  va_start(vl, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, vl);
+  va_end(vl);
+  parv[0] = cli_name(source);
+  parc = split_line(buf, parv);
+  return handler(link, source, parc, parv);
+}
+
+/* --- setup / teardown --- */
+
+static int world_setup(void **state)
+{
+  (void)state;
+
+  forget();
+  nmade = nchannels = 0;
+  ban_invalidations = except_invalidations = 0;
+  fake_modes = "";
+  feat_excepts = 0;
+
+  memset(&me, 0, sizeof(me));
+  memset(&me_con, 0, sizeof(me_con));
+  memset(&me_serv, 0, sizeof(me_serv));
+  ircd_strncpy(cli_name(&me), "hub.test", sizeof(me.cli_name));
+  cli_status(&me) = STAT_ME;
+  cli_connect(&me) = &me_con;
+  con_client(&me_con) = &me;
+  cli_serv(&me) = &me_serv;
+  SetServerYXX(&me, &me, "AB]]]");
+
+  memset(&his, 0, sizeof(his));
+  ircd_strncpy(cli_name(&his), "his.example", sizeof(his.cli_name));
+  cli_status(&his) = STAT_SERVER;
+  cli_connect(&his) = &me_con;
+
+  CurrentTime = 1000000;
+  TSoffset = 0;
+  return 0;
+}
+
+static int world_teardown(void **state)
+{
+  int i;
+  (void)state;
+
+  for (i = 0; i < nmade; i++)
+    if (IsServer(made[i]))
+      ClearServerYXX(made[i]);
+  ClearServerYXX(&me);
+  /* The objects themselves are left to the process: a test binary. */
+  return 0;
+}
+
+/* ====================================================================
+ * Stubs
+ * ==================================================================== */
+
+void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
+               const char *fmt, ...)
+{
+  (void)subsys; (void)severity; (void)flags; (void)fmt;
+}
+
+void debug(int level, const char *form, ...)
+{
+  (void)level; (void)form;
+}
+
+int exit_client(struct Client *cptr, struct Client *victim,
+                struct Client *killer, const char *comment)
+{
+  (void)cptr; (void)victim; (void)killer; (void)comment;
+  fail_msg("exit_client() called");
+  return 0;
+}
+
+int feature_bool(enum Feature feat)
+{
+  switch (feat) {
+  case FEAT_EXCEPTS: return feat_excepts;
+  default: return 0;
+  }
+}
+
+int protocol_violation(struct Client *cptr, const char *pattern, ...)
+{
+  va_list vl;
+  (void)cptr;
+
+  assert_true(nviolations < MAXREC);
+  va_start(vl, pattern);
+  ircd_vsnprintf(NULL, violations[nviolations++], LINE, pattern, vl);
+  va_end(vl);
+  return 0;
+}
+
+/* The real one goes through msgq_make(&me, "%C %s %v") to every server
+ * link with the flags asked for, but not to @a one's. */
+void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
+                                const char *tok, struct Client *one,
+                                int require, int forbid,
+                                const char *pattern, ...)
+{
+  struct DLink *lp;
+  (void)cmd;
+
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *to = lp->value.cptr;
+    struct VarData vd;
+    char buf[LINE];
+
+    if (one && to == cli_from(one))
+      continue;
+    if ((require < FLAG_LAST_FLAG && !HasFlag(to, require))
+        || (forbid < FLAG_LAST_FLAG && HasFlag(to, forbid)))
+      continue;
+    vd.vd_format = pattern;
+    va_start(vd.vd_args, pattern);
+    ircd_snprintf(&me, buf, sizeof(buf), "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+    record_sent(to, buf);
+  }
+}
+
+void sendcmdto_serv_butone(struct Client *from, const char *cmd,
+                           const char *tok, struct Client *one,
+                           const char *pattern, ...)
+{
+  struct DLink *lp;
+  (void)cmd;
+
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *to = lp->value.cptr;
+    struct VarData vd;
+    char buf[LINE];
+
+    if (one && to == cli_from(one))
+      continue;
+    vd.vd_format = pattern;
+    va_start(vd.vd_args, pattern);
+    ircd_snprintf(&me, buf, sizeof(buf), "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+    record_sent(to, buf);
+  }
+}
+
+static void to_local_members(struct Client *from, const char *cmd,
+                             struct Channel *to, struct Client *one,
+                             const char *pattern, va_list args)
+{
+  struct Membership *m;
+
+  for (m = to->members; m; m = m->next_member) {
+    struct VarData vd;
+    char buf[LINE];
+
+    if (!MyConnect(m->user) || !IsUser(m->user) || IsZombie(m)
+        || m->user == one)
+      continue;
+    vd.vd_format = pattern;
+    va_copy(vd.vd_args, args);
+    ircd_snprintf(m->user, buf, sizeof(buf), "%:#C %s %v", from, cmd, &vd);
+    va_end(vd.vd_args);
+    record_sent(m->user, buf);
+  }
+}
+
+void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
+                                      const char *tok, struct Channel *to,
+                                      struct Client *one, unsigned int skip,
+                                      const char *pattern, ...)
+{
+  va_list vl;
+  (void)tok; (void)skip;
+
+  va_start(vl, pattern);
+  to_local_members(from, cmd, to, one, pattern, vl);
+  va_end(vl);
+}
+
+void sendcmdto_channel_capab_butserv_butone(struct Client *from,
+                                            const char *cmd, const char *tok,
+                                            struct Channel *to,
+                                            struct Client *one,
+                                            unsigned int skip, int withcap,
+                                            int skipcap,
+                                            const char *pattern, ...)
+{
+  va_list vl;
+  (void)tok; (void)skip; (void)skipcap;
+
+  /* Each JOIN goes out twice, with and without extended-join; record the
+   * plain form only. */
+  if (withcap != CAP_NONE)
+    return;
+  va_start(vl, pattern);
+  to_local_members(from, cmd, to, one, pattern, vl);
+  va_end(vl);
+}
+
+void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
+{
+  (void)msgid; (void)event_ms;
+}
+
+void sendcmdto_set_client_msgid(const char *msgid)
+{
+  (void)msgid;
+}
+
+void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
+{
+  (void)time_ms; (void)msgid;
+}
+
+void sendcmdto_want_s2s_tags(int want)
+{
+  (void)want;
+}
+
+char *generate_msgid(char *buf, size_t buflen)
+{
+  ircd_strncpy(buf, "ABAAAAAAAAAAAB", buflen);
+  return buf;
+}
+
+uint64_t history_event_time_ms(struct Client *link)
+{
+  (void)link;
+  return (uint64_t)CurrentTime * 1000;
+}
+
+int history_purge_incarnation(const char *channel, time_t incarnation)
+{
+  (void)channel; (void)incarnation;
+  return 0;
+}
+
+void history_recv_reset(struct Channel *chptr)
+{
+  (void)chptr;
+}
+
+int64_t presence_event_time(const char *msgid, uint64_t event_ms)
+{
+  (void)msgid;
+  return (int64_t)event_ms;
+}
+
+void presence_set_event_time(int64_t t)
+{
+  (void)t;
+}
+
+int channel_store_wanted(const struct Channel *chptr, int ours)
+{
+  (void)chptr; (void)ours;
+  return 0;
+}
+
+void channel_store_kick(struct Client *src, struct Channel *chptr,
+                        const char *victim, const char *comment,
+                        const char *msgid, uint64_t event_ms, int wanted)
+{
+  (void)src; (void)chptr; (void)victim; (void)comment; (void)msgid;
+  (void)event_ms; (void)wanted;
+}
+
+void relocate_channel_restamped(struct Channel *chptr, time_t old_ts)
+{
+  (void)chptr; (void)old_ts;
+}
+
+void relocate_tombstone_burst_done(struct Channel *chptr)
+{
+  (void)chptr;
+}
+
+void relocate_tombstone_ts_lost(struct Channel *chptr)
+{
+  (void)chptr;
+}
+
+int bounce_session_has_plaintext(struct Client *cptr)
+{
+  (void)cptr;
+  return 0;
+}
+
+struct Channel *hSeekChannel(const char *name)
+{
+  int i;
+  for (i = 0; i < nchannels; i++)
+    if (channels[i] && 0 == ircd_strcmp(channels[i]->chname, name))
+      return channels[i];
+  return NULL;
+}
+
+struct Channel *get_channel(struct Client *cptr, char *chname,
+                            ChannelGetType flag)
+{
+  struct Channel *ch = hSeekChannel(chname);
+  (void)cptr;
+
+  if (!ch && flag == CGT_CREATE)
+    ch = fake_channel(chname);
+  return ch;
+}
+
+int sub1_from_channel(struct Channel *chptr)
+{
+  (void)chptr;
+  return 0;
+}
+
+struct Membership *find_member_link(struct Channel *chptr,
+                                    const struct Client *cptr)
+{
+  struct Membership *m;
+  for (m = chptr->members; m; m = m->next_member)
+    if (m->user == cptr)
+      return m;
+  return NULL;
+}
+
+void add_user_to_channel(struct Channel *chptr, struct Client *who,
+                         unsigned int flags, int oplevel)
+{
+  add_member(chptr, who, flags, oplevel);
+}
+
+/* What the Net Rider loop needs of the real one: the member is a zombie
+ * afterwards, so the walk passes over it. */
+void make_zombie(struct Membership *member, struct Client *who,
+                 struct Client *cptr, struct Client *sptr,
+                 struct Channel *chptr)
+{
+  (void)who; (void)cptr; (void)sptr; (void)chptr;
+  member->status |= CHFL_ZOMBIE;
+}
+
+void mode_invite_clear(struct Channel *chan)
+{
+  (void)chan;
+}
+
+void mode_ban_invalidate(struct Channel *chan)
+{
+  (void)chan;
+  ban_invalidations++;
+}
+
+void mode_except_invalidate(struct Channel *chan)
+{
+  (void)chan;
+  except_invalidations++;
+}
+
+/* The real pretty_extmask() canonifies through pretty_mask(); for the
+ * masks these tests use -- a bare nick, or a mask already in n!u@h form --
+ * that is "nick!*@*" and the mask itself. */
+char *pretty_extmask(char *mask)
+{
+  static char retmask[NICKLEN + USERLEN + HOSTLEN + 3];
+
+  if (strchr(mask, '!') || strchr(mask, '@') || strchr(mask, '.'))
+    ircd_strncpy(retmask, mask, sizeof(retmask));
+  else
+    ircd_snprintf(0, retmask, sizeof(retmask), "%s!*@*", mask);
+  return retmask;
+}
+
+struct Ban *make_ban(const char *banstr)
+{
+  struct Ban *ban = calloc(1, sizeof(*ban));
+
+  assert_non_null(ban);
+  ircd_strncpy(ban->banstr, banstr, sizeof(ban->banstr));
+  return ban;
+}
+
+void free_ban(struct Ban *ban)
+{
+  free(ban);
+}
+
+void modebuf_init(struct ModeBuf *mbuf, struct Client *source,
+                  struct Client *connect, struct Channel *chan,
+                  unsigned int dest)
+{
+  memset(mbuf, 0, sizeof(*mbuf));
+  mbuf->mb_source = source;
+  mbuf->mb_connect = connect;
+  mbuf->mb_channel = chan;
+  mbuf->mb_dest = dest;
+}
+
+void modebuf_mode(struct ModeBuf *mbuf, unsigned int mode)
+{
+  (void)mbuf; (void)mode;
+}
+
+void modebuf_mode_client(struct ModeBuf *mbuf, unsigned int mode,
+                         struct Client *client, int oplevel)
+{
+  (void)mbuf; (void)mode; (void)client; (void)oplevel;
+}
+
+void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,
+                         char *string, int free_it)
+{
+  (void)mbuf; (void)mode;
+  if (free_it)
+    MyFree(string);
+}
+
+int modebuf_flush(struct ModeBuf *mbuf)
+{
+  (void)mbuf;
+  return 0;
+}
+
+void modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
+{
+  (void)mbuf; (void)oplevels;
+  strcpy(buf, fake_modes);
+}
+
+/* How many parameters the real mode_parse() takes in a BURST
+ * (MODE_PARSE_BURST: one mode string): the string, and one for every
+ * letter channel.c's mode_parse() hands a parameter to while adding --
+ * the prefixes o h v, the lists b e, the keys k A U, and l L, which
+ * take theirs only when added.  The modes themselves are not applied. */
+int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
+               struct Client *sptr, struct Channel *chptr, int parc,
+               char *parv[], unsigned int flags, struct Membership *member)
+{
+  const char *p;
+  int used = 1, adding = 1;
+  (void)mbuf; (void)cptr; (void)sptr; (void)chptr; (void)flags; (void)member;
+
+  for (p = parv[0]; *p; p++) {
+    switch (*p) {
+    case '+': adding = 1; break;
+    case '-': adding = 0; break;
+    case 'l': case 'L':
+      if (!adding)
+        break;
+      /* fall through */
+    case 'o': case 'h': case 'v': case 'b': case 'e':
+    case 'k': case 'A': case 'U':
+      if (used < parc)
+        used++;
+      break;
+    }
+  }
+  return used;
+}
+
+/* ====================================================================
+ * Reading a relayed BURST back
+ * ==================================================================== */
+
+/** The parameters of @a line after "<source> B <channel> <ts>". */
+static int burst_params(const char *line, char *copy, size_t size,
+                        char **params)
+{
+  char *parv[MAXARGS];
+  int parc, i;
+
+  snprintf(copy, size, "%s", line);
+  parc = split_line(copy, parv);
+  /* parv[1] = source, [2] = B, [3] = channel, [4] = ts */
+  for (i = 5; i < parc; i++)
+    params[i - 5] = parv[i];
+  params[i - 5] = NULL;
+  return parc > 5 ? parc - 5 : 0;
+}
+
+/** Whether @a mask is one of the bans (or, with @a excepts, exceptions)
+ * the relayed lines to @a to carry. */
+static int relayed_ban(struct Client *to, const char *mask, int excepts)
+{
+  int i;
+
+  for (i = 0; i < sent_count_to(to); i++) {
+    char copy[LINE], *params[MAXARGS], *list, *tok, *save = NULL;
+    int n = burst_params(sent_to(to, i), copy, sizeof(copy), params);
+    int in_excepts = 0;
+
+    if (n == 0 || params[n - 1][0] != '%')
+      continue;
+    list = params[n - 1] + 1;
+    for (tok = strtok_r(list, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
+      if (!strcmp(tok, "~")) {
+        in_excepts = 1;
+        continue;
+      }
+      if (in_excepts == excepts && !strcmp(tok, mask))
+        return 1;
+    }
+  }
+  return 0;
+}
+
+/* Members as a receiver reads them out of the relayed lines: the mode of
+ * every nick, line by line, with each line starting afresh (ms_burst()'s
+ * own rules for a ":<mode>" field: v, h, o, and digits -- absolute after
+ * a v or h or at the start, an increment otherwise). */
+struct ReadMember {
+  char numnick[8];
+  int voice, halfop, op, oplevel;
+};
+
+static int read_members(struct Client *to, struct ReadMember *out, int max)
+{
+  int i, n = 0;
+
+  for (i = 0; i < sent_count_to(to); i++) {
+    char copy[LINE], *params[MAXARGS], *save = NULL, *nick;
+    int np = burst_params(sent_to(to, i), copy, sizeof(copy), params), k;
+    int voice = 0, halfop = 0, op = 0, oplevel = -1;
+
+    for (k = 0; k < np; k++) {
+      if (params[k][0] == '+' || params[k][0] == '%')
+        continue;
+      for (nick = strtok_r(params[k], ",", &save); nick;
+           nick = strtok_r(NULL, ",", &save)) {
+        char *spec = strchr(nick, ':');
+
+        if (spec) {
+          *spec++ = '\0';
+          voice = halfop = op = 0;
+          for (; *spec; spec++) {
+            if (*spec == 'v') {
+              voice = 1;
+              oplevel = -1;
+            } else if (*spec == 'h') {
+              halfop = 1;
+              oplevel = -1;
+            } else if (*spec == 'o') {
+              op = 1;
+              oplevel = MAXOPLEVEL;
+            } else if (*spec >= '0' && *spec <= '9') {
+              unsigned long v = strtoul(spec, &spec, 10);
+              spec--;
+              op = 1;
+              oplevel = (oplevel == -1) ? (int)v : oplevel + (int)v;
+            }
+          }
+        }
+        assert_true(n < max);
+        snprintf(out[n].numnick, sizeof(out[n].numnick), "%s", nick);
+        out[n].voice = voice;
+        out[n].halfop = halfop;
+        out[n].op = op;
+        out[n].oplevel = oplevel;
+        n++;
+      }
+    }
+  }
+  return n;
+}
+
+/** Every line that went to @a to is a BURST of @a chname at @a ts that
+ * fits on the wire: at most 510 bytes before CR LF. */
+static void assert_burst_lines(struct Client *to, const char *chname,
+                               unsigned long ts)
+{
+  char head[64];
+  int i;
+
+  snprintf(head, sizeof(head), "AC B %s %lu", chname, ts);
+  assert_true(sent_count_to(to) > 0);
+  for (i = 0; i < sent_count_to(to); i++) {
+    const char *l = sent_to(to, i);
+    if (strlen(l) > BUFSIZE - 2)
+      fail_msg("line %d to %s is %zu bytes: %.80s...", i, cli_name(to),
+               strlen(l), l);
+    assert_memory_equal(l, head, strlen(head));
+  }
+}
+
+/* ====================================================================
+ * BURST: the relay holds whatever the line it got grows to
+ * ==================================================================== */
+
+/* 160 two-letter masks: "aa ab ... " as one '%' parameter, 479 bytes. */
+static void short_masks(char *buf, size_t size, int count, char first)
+{
+  int i;
+  size_t pos = 0;
+
+  for (i = 0; i < count; i++)
+    pos += snprintf(buf + pos, size - pos, "%s%c%c", i ? " " : "",
+                    first + i / 13, 'a' + i % 13);
+}
+
+/* Each "aa" is relayed as "aa!*@*": one 495-byte line from a peer becomes
+ * over a thousand bytes of bans.  They used to be copied into banstr[512]
+ * with no bound (a stack overflow); now they go on as many BURST lines as
+ * they need, and none is dropped, from the relay or the channel. */
+static void test_burst_bans_growing_past_a_line_all_relayed(void **state)
+{
+  struct Client *ac, *ad, *ae;
+  struct Channel *ch;
+  char masks[600], expect[16];
+  int i;
+  (void)state;
+
+  ac = linked("leafa.test", "AC", 1);
+  ad = linked("leafb.test", "AD", 0);  /* no op-levels: the other relay */
+  ae = linked("leafc.test", "AE", 1);
+  short_masks(masks, sizeof(masks), 160, 'a');
+  assert_true(strlen(masks) < 480);
+
+  deliver(ms_burst, ac, ac, "#bb 999000 :%%%s", masks);
+
+  ch = hSeekChannel("#bb");
+  assert_non_null(ch);
+  assert_int_equal(count_bans(ch->banlist), 160);
+  assert_int_equal(sent_count_to(ac), 0);
+  assert_burst_lines(ad, "#bb", 999000);
+  assert_burst_lines(ae, "#bb", 999000);
+  assert_true(sent_count_to(ae) > 1);
+  for (i = 0; i < 160; i++) {
+    snprintf(expect, sizeof(expect), "%c%c!*@*", 'a' + i / 13, 'a' + i % 13);
+    assert_true(relayed_ban(ad, expect, 0));
+    assert_true(relayed_ban(ae, expect, 0));
+  }
+  assert_true(ban_invalidations > 0);
+}
+
+/* The same for ban exceptions ("~" in the list, relayed with EXCEPTS on). */
+static void test_burst_excepts_growing_past_a_line_all_relayed(void **state)
+{
+  struct Client *ac, *ae;
+  struct Channel *ch;
+  char bans[300], excepts[300], expect[16];
+  int i;
+  (void)state;
+
+  feat_excepts = 1;
+  ac = linked("leafa.test", "AC", 1);
+  ae = linked("leafc.test", "AE", 1);
+  short_masks(bans, sizeof(bans), 70, 'a');
+  short_masks(excepts, sizeof(excepts), 70, 'n');
+
+  deliver(ms_burst, ac, ac, "#bb 999000 :%%%s ~ %s", bans, excepts);
+
+  ch = hSeekChannel("#bb");
+  assert_int_equal(count_bans(ch->banlist), 70);
+  assert_int_equal(count_bans(ch->exceptlist), 70);
+  assert_burst_lines(ae, "#bb", 999000);
+  for (i = 0; i < 70; i++) {
+    snprintf(expect, sizeof(expect), "%c%c!*@*", 'a' + i / 13, 'a' + i % 13);
+    assert_true(relayed_ban(ae, expect, 0));
+    assert_false(relayed_ban(ae, expect, 1));
+    snprintf(expect, sizeof(expect), "%c%c!*@*", 'n' + i / 13, 'a' + i % 13);
+    assert_true(relayed_ban(ae, expect, 1));
+    assert_false(relayed_ban(ae, expect, 0));
+  }
+  assert_true(except_invalidations > 0);
+}
+
+/* The mode string goes on the first relayed line only, as
+ * send_channel_modes() puts it on the first line of a channel's BURST. */
+static void test_burst_split_relay_modes_on_first_line_only(void **state)
+{
+  struct Client *ac, *ae;
+  char masks[600], copy[LINE], *params[MAXARGS];
+  int i;
+  (void)state;
+
+  ac = linked("leafa.test", "AC", 1);
+  ae = linked("leafc.test", "AE", 1);
+  fake_modes = "+nt";
+  short_masks(masks, sizeof(masks), 150, 'a');
+
+  deliver(ms_burst, ac, ac, "#bb 999000 +nt :%%%s", masks);
+
+  assert_burst_lines(ae, "#bb", 999000);
+  assert_true(sent_count_to(ae) > 1);
+  for (i = 0; i < sent_count_to(ae); i++) {
+    int n = burst_params(sent_to(ae, i), copy, sizeof(copy), params);
+    assert_true(n > 0);
+    if (i == 0)
+      assert_string_equal(params[0], "+nt");
+    else
+      assert_int_equal(params[0][0], '%');
+  }
+}
+
+/** "ACAA" and the @a i-th numnick digit: the i-th user on AC. */
+static void nth_numnick(char *buf, int i)
+{
+  char digit[2];
+
+  inttobase64(digit, i, 1);
+  sprintf(buf, "ACAA%s", digit);
+}
+
+/* Members whose mode field comes out longer than it went in (":5h" is
+ * relayed as ":h" and the op-level -1 that 'h' leaves, ten digits) used to
+ * overflow nickstr[512] the same way.  Every member is relayed, and a
+ * continued line states the mode of its first member again. */
+static void test_burst_members_growing_past_a_line_all_relayed(void **state)
+{
+  struct Client *ac, *ae, *ad;
+  struct ReadMember got[128];
+  char list[700], numnick[8];
+  size_t pos = 0;
+  int i, n;
+  (void)state;
+
+  ac = linked("leafa.test", "AC", 1);
+  ad = linked("leafb.test", "AD", 0);
+  ae = linked("leafc.test", "AE", 1);
+  for (i = 0; i < 52; i++) {
+    nth_numnick(numnick, i);
+    remote_user(ac, numnick, numnick);
+    pos += snprintf(list + pos, sizeof(list) - pos, "%s%s:%s", i ? "," : "",
+                    numnick, (i & 1) ? "v" : "5h");
+  }
+  assert_true(pos < 470);
+
+  deliver(ms_burst, ac, ac, "#nn 999000 %s", list);
+
+  assert_int_equal(hSeekChannel("#nn")->users, 52);
+  assert_burst_lines(ae, "#nn", 999000);
+  assert_burst_lines(ad, "#nn", 999000);
+  assert_true(sent_count_to(ae) > 1);
+
+  n = read_members(ae, got, 128);
+  assert_int_equal(n, 52);
+  for (i = 0; i < 52; i++) {
+    nth_numnick(numnick, i);
+    assert_string_equal(got[i].numnick, numnick);
+    if (i & 1) {
+      assert_true(got[i].voice);
+      assert_false(got[i].op);
+    } else {
+      assert_true(got[i].halfop);
+      assert_true(got[i].op);
+    }
+  }
+  n = read_members(ad, got, 128);
+  assert_int_equal(n, 52);
+  for (i = 0; i < 52; i++) {
+    assert_int_equal(got[i].voice, i & 1);
+    assert_int_equal(got[i].op, !(i & 1));
+  }
+}
+
+/* A BURST that fits keeps its one relayed line, unchanged. */
+static void test_burst_that_fits_relayed_as_one_line(void **state)
+{
+  struct Client *ac, *ae;
+  (void)state;
+
+  ac = linked("leafa.test", "AC", 1);
+  ae = linked("leafc.test", "AE", 1);
+  remote_user(ac, "alice", "ACAAA");
+  remote_user(ac, "amy", "ACAAB");
+
+  deliver(ms_burst, ac, ac, "#c 999000 ACAAA:o,ACAAB :%%a b!c@d");
+
+  assert_int_equal(sent_count_to(ae), 1);
+  assert_string_equal(sent_to(ae, 0), "AC B #c 999000 ACAAA:o,ACAAB :%a!*@* b!c@d");
+}
+
+int main(void)
+{
+  const struct CMUnitTest tests[] = {
+#define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
+    T(test_burst_bans_growing_past_a_line_all_relayed),
+    T(test_burst_excepts_growing_past_a_line_all_relayed),
+    T(test_burst_split_relay_modes_on_first_line_only),
+    T(test_burst_members_growing_past_a_line_all_relayed),
+    T(test_burst_that_fits_relayed_as_one_line),
+#undef T
+  };
+
+  return cmocka_run_group_tests_name("s2s_handlers", tests, NULL, NULL);
+}

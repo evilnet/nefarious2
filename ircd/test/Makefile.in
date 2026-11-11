@@ -76,6 +76,7 @@ CMOCKA_TESTPROGS = \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
 	auth_recheck_cmocka \
+	s2s_handlers_cmocka \
 	webhook_eventlog_cmocka \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
@@ -155,6 +156,7 @@ DEP_SRC = \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
 	auth_recheck_cmocka.c \
+	s2s_handlers_cmocka.c \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
@@ -507,6 +509,16 @@ auth_recheck_cmocka.o: ${srcdir}/auth_recheck_cmocka.c ../s_auth.c
 
 auth_recheck_cmocka: $(AUTH_RECHECK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=timer_add $(AUTH_RECHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# s2s_handlers tests - server-to-server handlers against a fake network:
+# the REAL m_burst.o, with numnicks.o, match.o and the ircd's printf (so
+# the lines asserted are the lines that go on the wire); the send layer,
+# the channel table and the modebuf are stubbed in the test.  Defines its
+# own log_write()/me, so test_stub.o is not linked.
+S2S_HANDLERS_CMOCKA_OBJS = s2s_handlers_cmocka.o ../m_burst.o \
+	../numnicks.o ../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o \
+	../match.o
+s2s_handlers_cmocka: $(S2S_HANDLERS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(S2S_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_subject tests - the pure webhook subject decision over real
 # Keycloak admin-event shapes (fixtures/webhook); links no ircd objects
