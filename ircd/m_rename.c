@@ -1066,7 +1066,17 @@ struct RelocateSnap {
   int oplevel;                    /**< Oplevel to restore alongside flags */
 };
 
-/** A tombstoned old channel, alive for FEAT_RELOCATE_GRACE seconds after a
+/** Where a tombstone record's embedded timer stands.  It decides who
+ * frees the record -- see "Lifetime" in the struct comment below. */
+enum RelocateTimer {
+  RELOCATE_TIMER_NONE = 0,  /**< never armed: the event engine holds nothing
+                                 of the record */
+  RELOCATE_TIMER_ARMED,     /**< queued in the event engine */
+  RELOCATE_TIMER_FIRING     /**< inside its own ET_EXPIRE; the engine still
+                                 holds the timer and ET_DESTROY follows */
+};
+
+/** A tombstoned old channel, alive until its deadline after a
  * relocation-mode rename.
  *
  * Like struct PendingRename above, this deliberately does NOT trust its
@@ -1074,7 +1084,19 @@ struct RelocateSnap {
  * ordinary empty-channel destruct can't free it, but services DESTRUCT
  * (m_destruct.c) still can.  @a oldname is the authority and @a oldchan is
  * a cache -- resolve through relocate_tombstone_channel(), never by reading
- * the field directly. */
+ * the field directly.
+ *
+ * Lifetime.  The struct Timer is embedded, and the event engine keeps
+ * using a timer after its ET_EXPIRE callback returns (and timer_del() on a
+ * timer in dispatch does nothing), so a record whose timer the engine
+ * holds is freed in exactly one place: the ET_DESTROY case of
+ * relocate_tombstone_expire_cb().  A record whose timer was never armed is
+ * freed by hand.  ONE function decides which, from @a timer_state, for
+ * every end of a record outside its own expiry: relocate_tombstone_end().
+ * Nothing else frees a record, and nothing may assume a record it is
+ * about to end has no timer -- a record that is re-armed for a deadline
+ * that has meanwhile passed (a second RN, a merged deadline, a step of the
+ * network clock) HAS one. */
 struct RelocateTombstone {
   struct RelocateTombstone *next;   /**< Linked list */
   struct Channel *oldchan;          /**< CACHE ONLY -- see struct comment */
@@ -1096,16 +1118,11 @@ struct RelocateTombstone {
                                          the same number on every server.  The
                                          timer is armed for it in the event
                                          loop's clock (minus TSoffset) by
-                                         relocate_tombstone_arm() */
-  struct Timer timer;               /**< Embedded -- freed only on ET_DESTROY,
-                                         mirroring the PendingRename timer
-                                         discipline documented above */
-  int timer_active;                 /**< Whether the timer still owns this
-                                         struct's lifetime.  Zero before
-                                         relocate_tombstone_arm() and for a
-                                         record that is dissolved at once
-                                         (relocate_tombstone_dissolve_now()),
-                                         which is then freed by hand */
+                                         relocate_tombstone_settle() */
+  struct Timer timer;               /**< Embedded -- see "Lifetime" above */
+  enum RelocateTimer timer_state;   /**< Where the timer stands, and so who
+                                         frees this struct -- "Lifetime"
+                                         above */
   struct RelocateSnap *snaps;       /**< Member status snapshots for a
                                          grace-period follow-join (spec,
                                          "Status preservation").  Freed as a
@@ -1119,6 +1136,7 @@ struct RelocateTombstone {
 static struct RelocateTombstone *relocate_tombstones = NULL;
 
 static void relocate_tombstone_expire_cb(struct Event *ev);
+static void relocate_tombstone_sweep(struct RelocateTombstone *ts);
 static void relocate_snap_free_list(struct RelocateSnap *head);
 static void relocate_withdraw_redirect(struct Channel *chptr);
 
@@ -1177,9 +1195,9 @@ static struct Channel *relocate_tombstone_channel(struct RelocateTombstone *ts)
   return chptr;
 }
 
-/** Unlink a tombstone from the global list.  Does NOT touch the timer and
- * does NOT free @a ts -- the free happens exactly once, in the ET_DESTROY
- * case of relocate_tombstone_expire_cb().
+/** Unlink a tombstone from the global list, so that no lookup finds it
+ * any more.  Does NOT touch the timer and does NOT free @a ts.  Harmless
+ * for a record that is not on the list.
  * @param[in] ts Tombstone to unlink.
  */
 static void relocate_tombstone_unlink(struct RelocateTombstone *ts)
@@ -1192,38 +1210,7 @@ static void relocate_tombstone_unlink(struct RelocateTombstone *ts)
       break;
     }
   }
-}
-
-/** Retire a tombstone from OUTSIDE the timer dispatch: unlink it and cancel
- * its grace timer.
- *
- * Mirrors pending_rename_remove() exactly.  ts's struct Timer is embedded in
- * ts, and timer_del() on a timer that is not mid-dispatch synchronously
- * fires ET_DESTROY (ircd_events.c timer_del() -> event_generate()), whose
- * case in relocate_tombstone_expire_cb() does the MyFree() -- so ts is
- * already GONE by the time this returns and must not be touched afterwards.
- *
- * Never call this from inside relocate_tombstone_expire_cb(): timer_del()
- * returns early on a GEN_MARKED (in-dispatch) timer, so the free would not
- * happen here and the caller would be left believing it had cancelled.
- * @param[in] ts Tombstone to retire.
- */
-static void relocate_tombstone_remove(struct RelocateTombstone *ts)
-{
-  if (!ts)
-    return;
-
-  relocate_tombstone_unlink(ts);
-
-  if (ts->timer_active) {
-    ts->timer_active = 0;
-    timer_del(&ts->timer); /* -> ET_DESTROY -> MyFree(ts), synchronously */
-  } else {
-    /* Never armed (the channel died between relocate_tombstone_add() and
-     * relocate_tombstone_arm()): no timer owns it. */
-    relocate_snap_free_list(ts->snaps);
-    MyFree(ts);
-  }
+  ts->next = NULL;
 }
 
 /** Free an entire snapshot list.
@@ -1618,6 +1605,60 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
             ts->oldname, ts->newname, nswept, (nswept == 1) ? "" : "s");
 }
 
+/** End a tombstone record -- the ONE way a record goes other than by its
+ * own timer expiring (RelocateTombstone, "Lifetime").
+ *
+ * In order:
+ * 1. The record is unlinked, so that nothing below can find it again.
+ *    That is what makes the rest safe to re-enter: a sweep ends in
+ *    destruct_channel(), which calls relocate_tombstone_channel_gone(),
+ *    which looks the dying channel's record up by name -- and must not
+ *    find the record that is being ended.
+ * 2. With @a dissolve, the deadline's work is done here and now
+ *    (relocate_tombstone_sweep(): sweep, or cancel when the channel is
+ *    registered or no longer the tombstone).  The record is intact while
+ *    it runs.
+ * 3. The record is freed by whoever owns it:
+ *    - RELOCATE_TIMER_NONE: nobody else; freed here, with its snapshots.
+ *    - RELOCATE_TIMER_ARMED: the event engine holds the embedded timer.
+ *      timer_del() takes it out of the queue and generates ET_DESTROY
+ *      synchronously, and relocate_tombstone_expire_cb()'s ET_DESTROY
+ *      case frees the record.  No ET_EXPIRE can follow, so the sweep is
+ *      not repeated.
+ *    - RELOCATE_TIMER_FIRING: this is the record whose ET_EXPIRE is on
+ *      the stack.  Its callback has unlinked it and is doing the sweep
+ *      itself, and the engine generates ET_DESTROY when the callback
+ *      returns.  Nothing is done here -- not even the sweep; timer_del()
+ *      would be a no-op on a timer in dispatch, and a free would leave
+ *      the engine with freed memory.  (Not reachable today: an unlinked
+ *      record cannot be looked up.  Kept so that it cannot become a
+ *      double free.)
+ *
+ * @a ts must not be used after this returns, and the tombstone's channel
+ * may have been freed by the sweep.
+ * @param[in] ts Record to end.
+ * @param[in] dissolve Non-zero to do the deadline's work first; zero to
+ *                     drop the record and touch no channel.
+ */
+static void relocate_tombstone_end(struct RelocateTombstone *ts, int dissolve)
+{
+  if (!ts || ts->timer_state == RELOCATE_TIMER_FIRING)
+    return;
+
+  relocate_tombstone_unlink(ts);
+
+  if (dissolve)
+    relocate_tombstone_sweep(ts);
+
+  if (ts->timer_state == RELOCATE_TIMER_ARMED) {
+    timer_del(&ts->timer); /* -> ET_DESTROY -> MyFree(ts), synchronously */
+  } else {
+    relocate_snap_free_list(ts->snaps);
+    ts->snaps = NULL;
+    MyFree(ts);
+  }
+}
+
 /** A struct Channel is about to be freed: retire any tombstone record that
  * refers to it.
  *
@@ -1641,8 +1682,11 @@ void relocate_tombstone_channel_gone(struct Channel *chptr)
   if (!chptr)
     return;
 
-  /* Cache ->next before the removal: relocate_tombstone_remove() frees ts
-   * synchronously, the same reason pending_rename_client_exit() caches it. */
+  /* Cache ->next before the removal: relocate_tombstone_end() frees ts
+   * synchronously, the same reason pending_rename_client_exit() caches it.
+   * The record whose own sweep is destroying this channel is not on the
+   * list (relocate_tombstone_end() and the timer callback both unlink
+   * first), so it is never ended a second time from here. */
   for (ts = relocate_tombstones; ts; ts = next) {
     next = ts->next;
 
@@ -1664,19 +1708,19 @@ void relocate_tombstone_channel_gone(struct Channel *chptr)
               ts->oldname, ts->newname,
               (ts->expires > TStime()) ? (ts->expires - TStime()) : 0);
 
-    relocate_tombstone_remove(ts); /* ts is freed by this call */
+    relocate_tombstone_end(ts, 0); /* ts is freed by this call */
   }
 }
 
-/** Timer callback for a tombstone's grace period.
+/** Timer callback for a tombstone's deadline.
  *
  * ts's struct Timer is embedded in ts, so the same free-once discipline as
- * pending_rename_timeout_cb() applies verbatim: timer_run() keeps touching
- * the generator after ET_EXPIRE returns, so ET_EXPIRE may only make ts
- * unreachable (unlink + clear timer_active) and ET_DESTROY -- which fires
- * automatically right after ET_EXPIRE, or synchronously from a
- * relocate_tombstone_remove() timer_del() -- is the single place ts is
- * freed.
+ * pending_rename_timeout_cb() applies: timer_run() keeps touching the
+ * generator after ET_EXPIRE returns, so ET_EXPIRE may only make ts
+ * unreachable (unlink, RELOCATE_TIMER_FIRING) and do the deadline's work.
+ * ET_DESTROY -- which fires automatically right after ET_EXPIRE, or
+ * synchronously from relocate_tombstone_end()'s timer_del() -- is the
+ * single place a record with a timer is freed.
  * @param[in] ev Timer event.
  */
 static void relocate_tombstone_expire_cb(struct Event *ev)
@@ -1690,42 +1734,29 @@ static void relocate_tombstone_expire_cb(struct Event *ev)
 
   switch (ev_type(ev)) {
   case ET_EXPIRE:
-    /* Unlink and disown the timer BEFORE the sweep, not after.
+    /* Unlink BEFORE the sweep.  The sweep ends in destruct_channel(),
+     * which calls relocate_tombstone_channel_gone(), which walks the
+     * record list for this very channel's name: found there, this record
+     * would be handed to relocate_tombstone_end() from inside its own
+     * callback.  That function refuses a FIRING record, so it would not
+     * be freed twice -- but unlinked, it is simply not found.
      *
-     * Defensive, not load-bearing, and the distinction is written down here
-     * so nobody reverts it after checking timer_run(): the sweep ends in
-     * destruct_channel(), which calls relocate_tombstone_channel_gone(),
-     * which walks this very list.  With ts still linked, that hook would
-     * match our own record and reach timer_del() on a mid-dispatch timer,
-     * where it returns early on GEN_MARKED (ircd_events.c:513-521) without
-     * generating ET_DESTROY.  That does NOT leak -- timer_run() generates
-     * ET_DESTROY for a TT_ABSOLUTE timer unconditionally once the callback
-     * returns, so ts is freed either way.  What it would do is let a record
-     * that is already being retired be "retired" a second time from inside
-     * its own callback, with timer_active cleared by a path that did not
-     * actually cancel anything.  Unlinking first makes the record simply
-     * unfindable for the duration of the sweep, which is cheaper to reason
-     * about than that interleaving.
-     *
-     * Do NOT call timer_del() here: that one IS a correctness rule, and it
-     * is the PendingRename discipline this callback inherits. */
+     * Do NOT call timer_del() here: it returns early on a timer in
+     * dispatch (GEN_MARKED) without generating ET_DESTROY; timer_run()
+     * generates it once this returns. */
     relocate_tombstone_unlink(ts);
-    ts->timer_active = 0;
+    ts->timer_state = RELOCATE_TIMER_FIRING;
 
     relocate_tombstone_sweep(ts);
     break;
 
   case ET_DESTROY:
-    /* The only place ts is freed -- see the function comment above.  Any
-     * snapshot entries still on the list belong to members who never
-     * followed within the grace period; per spec ("Status preservation")
-     * they simply lose the restore now -- free them here so they don't
-     * outlive the record they are keyed to.  Covers every retirement path:
-     * relocate_tombstone_remove()'s timer_del() reaches this case
-     * synchronously, and the sweep-cancellation branch above returns
-     * without freeing ts, leaving this the only free (and thus the only
-     * necessary snaps-free) either way. */
+    /* The only place a record with a timer is freed -- see the function
+     * comment.  Any snapshot entries still on the list belong to members
+     * who never followed within the grace period; per spec ("Status
+     * preservation") they simply lose the restore now. */
     relocate_snap_free_list(ts->snaps);
+    ts->snaps = NULL;
     MyFree(ts);
     break;
 
@@ -1747,7 +1778,7 @@ static time_t relocate_local_deadline(void)
 
 /** Register a tombstone for @a chptr.  The record is linked but its timer
  * is NOT armed: the caller fills the record in and then calls
- * relocate_tombstone_arm().
+ * relocate_tombstone_settle().
  * @param[in] chptr Channel being tombstoned (keeps its own name).
  * @param[in] newname Redirect target.
  * @param[in] expires The deadline, network time.
@@ -1792,52 +1823,42 @@ relocate_tombstone_add(struct Channel *chptr, const char *newname,
   return ts;
 }
 
-/** Arm (or re-arm) a tombstone's timer for its deadline.
+/** Arm (or re-arm) a tombstone's timer for its deadline -- or, when the
+ * deadline is already here, do its work on the spot and end the record.
  *
  * The deadline is network time; the event loop runs on this server's own
  * clock, so the timer is set for the deadline less TSoffset -- the same
  * instant.  (A SETTIME that moves TSoffset later does not move a timer
  * that is already armed.)
- * @param[in] ts Tombstone.
- * @return 1 when the timer is armed; 0 when the deadline is now or past,
- *         nothing was armed, and the caller must dissolve the tombstone
- *         itself (relocate_tombstone_dissolve_now()).
+ *
+ * A deadline that is now or past -- a relocation with no grace, an RN
+ * that arrived after its deadline, or a record re-armed after its
+ * deadline went by with its timer still queued -- is dissolved here and
+ * not through a timer that is already due, so that there is no redirect
+ * window at all: a due timer fires only after the event loop has dealt
+ * with every line it has already read, and a JOIN of the old name among
+ * them would still be forwarded.  relocate_tombstone_end() frees the
+ * record whichever state its timer is in.
+ * @param[in] ts Tombstone, linked.
+ * @return 1 when the record lives on with its timer armed; 0 when it was
+ *         dissolved: @a ts is then gone and its channel may be too.
  */
-static int relocate_tombstone_arm(struct RelocateTombstone *ts)
+static int relocate_tombstone_settle(struct RelocateTombstone *ts)
 {
-  if (ts->expires <= TStime())
+  if (ts->expires <= TStime()) {
+    relocate_tombstone_end(ts, 1);
     return 0;
+  }
 
-  if (ts->timer_active) {
+  if (ts->timer_state == RELOCATE_TIMER_ARMED) {
     timer_chg(&ts->timer, TT_ABSOLUTE, ts->expires - TSoffset);
-  } else {
+  } else if (ts->timer_state == RELOCATE_TIMER_NONE) {
     timer_add(timer_init(&ts->timer), relocate_tombstone_expire_cb,
               (void *)ts, TT_ABSOLUTE, ts->expires - TSoffset);
-    ts->timer_active = 1;
+    ts->timer_state = RELOCATE_TIMER_ARMED;
   }
 
   return 1;
-}
-
-/** Dissolve a tombstone whose deadline is already here: a relocation with
- * a grace of zero, or one whose RN arrived after its deadline.
- *
- * Done on the spot and not through a timer that is already due, so there
- * is no redirect window at all: a timer would fire only after the event
- * loop has dealt with every line it has already read, and a JOIN of the
- * old name among them would still be forwarded.
- *
- * The channel may be freed by this call, and @a ts is.
- * @param[in] ts Tombstone whose timer was never armed.
- */
-static void relocate_tombstone_dissolve_now(struct RelocateTombstone *ts)
-{
-  assert(!ts->timer_active);
-
-  relocate_tombstone_unlink(ts);
-  relocate_tombstone_sweep(ts);
-  relocate_snap_free_list(ts->snaps);
-  MyFree(ts);
 }
 
 /** Announce a tombstone's (possibly updated) redirect to its remaining
@@ -2400,9 +2421,9 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
             oldname, newname_buf, sptr, nmovers, nmembers - nmovers);
 
   /* Last: a deadline that is already here dissolves the tombstone on the
-   * spot, and that can free chptr. */
-  if (ts && !relocate_tombstone_arm(ts))
-    relocate_tombstone_dissolve_now(ts);
+   * spot, and that can free chptr (and frees ts). */
+  if (ts)
+    relocate_tombstone_settle(ts);
 
   return 0;
 }

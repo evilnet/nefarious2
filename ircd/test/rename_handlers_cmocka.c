@@ -271,6 +271,7 @@ static int feat_relocate_grace;
 
 static struct Timer *timers[MAXOBJ];
 static int ntimers;
+static struct Timer *in_dispatch;       /* the timer whose ET_EXPIRE runs */
 
 static void fire(struct Timer *t, enum EventType type)
 {
@@ -279,7 +280,11 @@ static void fire(struct Timer *t, enum EventType type)
   memset(&ev, 0, sizeof(ev));
   ev.ev_type = type;
   ev.ev_gen.gen_timer = t;
+  if (type == ET_EXPIRE)
+    in_dispatch = t;
   (*t->t_header.gh_call)(&ev);
+  if (type == ET_EXPIRE)
+    in_dispatch = NULL;
 }
 
 /** How many timers are armed for @a when (the event loop's clock). */
@@ -643,22 +648,37 @@ void timer_add(struct Timer *timer, EventCallBack call, void *data,
   timers[ntimers++] = timer;
 }
 
-/* As the real one outside a dispatch: ET_DESTROY at once. */
+/* As the real one outside a dispatch: ET_DESTROY at once.  The two ways
+ * to misuse it fail the test: on a timer in dispatch the real one does
+ * nothing (the caller then believes it cancelled), and a timer that is
+ * not queued has no business being deleted. */
 void timer_del(struct Timer *timer)
 {
   int i;
 
+  if (timer == in_dispatch)
+    fail_msg("timer_del() on the timer whose ET_EXPIRE is running");
   for (i = 0; i < ntimers; i++) {
     if (timers[i] == timer) {
       timers[i] = timers[--ntimers];
       break;
     }
   }
+  if (i > ntimers)
+    fail_msg("timer_del() on a timer that is not queued");
   fire(timer, ET_DESTROY);
 }
 
 void timer_chg(struct Timer *timer, enum TimerType type, time_t value)
 {
+  int i;
+
+  assert_true(value != 0);              /* as the real one asserts */
+  for (i = 0; i < ntimers; i++)
+    if (timers[i] == timer)
+      break;
+  if (i == ntimers)
+    fail_msg("timer_chg() on a timer that is not queued");
   timer->t_type = type;
   timer->t_value = value;
 }
@@ -2845,6 +2865,122 @@ static void registered_channel_relocated_without_grace_is_swept(void **state)
   assert_true(was_destroyed(oldch));
 }
 
+/* --- the life of a tombstone record ---
+ *
+ * A record's timer is embedded in it, so a record the event engine holds
+ * is freed only from the timer's ET_DESTROY.  These run clean under
+ * AddressSanitizer or they are wrong; the timer fakes above fail a
+ * timer_del() the real engine would ignore. */
+
+/* The deadline has come but the timer has not fired yet (the same
+ * second), and a second relocation of the tombstone arrives: the record,
+ * whose timer IS armed, is dissolved on the spot and freed once. */
+static void record_with_an_armed_timer_is_ended_through_its_timer(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAE");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000100", "");
+  assert_int_equal(timers_at(1000100), 1);
+
+  CurrentTime = 1000100;        /* due, not yet run */
+  server_relocate(peer, eve, "#old", "#other", "1000050", "");
+
+  assert_int_equal(ntimers, 0);
+  assert_true(was_destroyed(oldch));
+  /* nothing is left to fire, or to find */
+  advance(1000);
+  assert_null(channel_named("#old"));
+}
+
+/* The same through a step of the network clock: the timer is still far
+ * off on this server's clock, the deadline is behind on the network's. */
+static void record_past_its_deadline_by_a_clock_step_is_ended_through_its_timer(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  assert_int_equal(timers_at(1000900), 1);
+
+  TSoffset = 5000;              /* SETTIME: network time is 1005000 */
+  server_relocate(peer, eve, "#old", "#other", "1000950", "");
+
+  assert_int_equal(ntimers, 0);
+  assert_true(was_destroyed(oldch));
+}
+
+/* The tombstone's channel is destroyed under a record whose timer is
+ * armed (services DESTRUCT): the record goes with it, through its timer,
+ * and nothing fires later. */
+static void record_goes_with_its_channel(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  client_rename(alice, "#old", "#new", "");
+  assert_int_equal(ntimers, 1);
+
+  oldch->mode.exmode &= ~EXMODE_PERSIST;
+  sub1_from_channel(oldch);             /* as destruct_channel() */
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+  advance(900);
+}
+
+/* The sweep at the deadline empties the channel, which destroys it, which
+ * runs the destruct hook for the record that is being swept: it is not
+ * found, and freed once -- from the timer here ... */
+static void sweep_that_destroys_the_channel_frees_the_record_once(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "");
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
+/* ... and by hand for a record that never had a timer. */
+static void sweep_on_the_spot_frees_the_record_once(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 0;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "");
+
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -2933,6 +3069,12 @@ int main(void)
     T(stray_registration_after_the_relocation),
     T(stray_registration_corrected_before_the_deadline),
     T(registered_channel_relocated_without_grace_is_swept),
+
+    T(record_with_an_armed_timer_is_ended_through_its_timer),
+    T(record_past_its_deadline_by_a_clock_step_is_ended_through_its_timer),
+    T(record_goes_with_its_channel),
+    T(sweep_that_destroys_the_channel_frees_the_record_once),
+    T(sweep_on_the_spot_frees_the_record_once),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
