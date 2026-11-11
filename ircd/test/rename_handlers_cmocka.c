@@ -201,6 +201,7 @@ static struct Client *user_on(struct Client *server, const char *nick,
   ircd_strncpy(cli_user(c)->username, "user", sizeof(cli_user(c)->username));
   ircd_strncpy(cli_user(c)->host, "host.example", sizeof(cli_user(c)->host));
   ircd_strncpy(cli_yxx(c), yxx, sizeof(c->cli_yxx));
+  ircd_strncpy(cli_info(c), "Real Name", sizeof(c->cli_info));
   if (server == &me) {
     cli_connect(c) = calloc(1, sizeof(struct Connection));
     assert_non_null(cli_connect(c));
@@ -386,6 +387,25 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 {
   struct VarData vd;
   char buf[LINE];
+
+  to = cli_from(to);
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  ircd_snprintf(to, buf, sizeof(buf), "%:#C %s %v", from,
+                IsServer(to) || IsMe(to) ? tok : cmd, &vd);
+  va_end(vd.vd_args);
+  record_sent(to, buf);
+}
+
+/* The real one adds the recipient's tags (@time, @account, ...) in front;
+ * the line itself is formatted the same way. */
+void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
+                         struct Client *to, int respond, const char *pattern,
+                         ...)
+{
+  struct VarData vd;
+  char buf[LINE];
+  (void)respond;
 
   to = cli_from(to);
   vd.vd_format = pattern;
@@ -1755,6 +1775,97 @@ static void unapplied_rename_from_an_alias_reaches_x3_as_its_primary(void **stat
   assert_int_equal(nopnotices, 1);
 }
 
+/* ====================================================================
+ * Fix 4: the PART/JOIN fallback's JOIN for an extended-join member
+ * ==================================================================== */
+
+static void login(struct Client *who, const char *account)
+{
+  ircd_strncpy(cli_user(who)->account, account, sizeof(cli_user(who)->account));
+  SetAccount(who);
+}
+
+/* Four local members, each told in the form its own connection asked
+ * for. */
+static void fallback_join_has_the_form_the_member_negotiated(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *plain = user_on(&me, "plain", "AAB");
+  struct Client *ext = user_on(&me, "ext", "AAD");
+  struct Client *extanon = user_on(&me, "extanon", "AAE");
+  struct Client *capable = user_on(&me, "capable", "AAF");
+  struct Channel *ch;
+  (void)state;
+
+  login(plain, "plainacct");
+  login(ext, "extacct");
+  CapSet(cli_active_own(ext), CAP_EXTJOIN);
+  CapSet(cli_active_own(extanon), CAP_EXTJOIN);
+  login(capable, "capacct");
+  CapSet(cli_active_own(capable), CAP_EXTJOIN);
+  CapSet(cli_active_own(capable), CAP_DRAFT_CHANRENAME);
+
+  ch = plain_channel("#old", plain);
+  add_member(ch, ext, 0);
+  add_member(ch, extanon, 0);
+  add_member(ch, capable, 0);
+  add_member(ch, bob, CHFL_CHANOP);
+
+  server_rename(peer, bob, "#old", "#new", "why");
+
+  /* no extended-join: the bare JOIN, as before */
+  assert_string_equal(sent_to(plain, 0),
+                      ":plain!user@host.example PART #old :Channel renamed to #new: why");
+  assert_string_equal(sent_to(plain, 1), ":plain!user@host.example JOIN #new");
+  assert_string_equal(sent_to(plain, 2), "(names of #new)");
+
+  /* extended-join, logged in: account and realname */
+  assert_string_equal(sent_to(ext, 0),
+                      ":ext!user@host.example PART #old :Channel renamed to #new: why");
+  assert_string_equal(sent_to(ext, 1),
+                      ":ext!user@host.example JOIN #new extacct :Real Name");
+  assert_string_equal(sent_to(ext, 2), "(names of #new)");
+
+  /* extended-join, not logged in: "*" for the account */
+  assert_string_equal(sent_to(extanon, 1),
+                      ":extanon!user@host.example JOIN #new * :Real Name");
+
+  /* draft/channel-rename: the RENAME and nothing else */
+  assert_int_equal(sent_count_to(capable), 1);
+  assert_string_equal(sent_to(capable, 0),
+                      ":bob!user@host.example RENAME #old #new :why");
+}
+
+/* A bouncer alias has its own connection and its own caps; its shadow
+ * membership is walked like any member, and the form follows the alias
+ * connection, not the primary's. */
+static void fallback_join_follows_each_bouncer_connection(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *primary = user_on(&me, "dana", "AAB");
+  struct Client *alias = user_on(&me, "dana", "AAD");
+  struct Channel *ch;
+  (void)state;
+
+  login(primary, "dana");
+  login(alias, "dana");
+  SetBouncerAlias(alias);
+  cli_user(alias)->alias_primary = primary;
+  CapSet(cli_active_own(alias), CAP_EXTJOIN);   /* the alias only */
+
+  ch = plain_channel("#old", primary);
+  add_member(ch, alias, CHFL_ALIAS);
+  add_member(ch, bob, CHFL_CHANOP);
+
+  server_rename(peer, bob, "#old", "#new", "");
+
+  assert_string_equal(sent_to(primary, 1), ":dana!user@host.example JOIN #new");
+  assert_string_equal(sent_to(alias, 1),
+                      ":dana!user@host.example JOIN #new dana :Real Name");
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -1807,6 +1918,9 @@ int main(void)
     T(crossing_renames_are_both_relayed),
     T(server_rename_to_the_same_channel_is_relayed),
     T(unapplied_rename_from_an_alias_reaches_x3_as_its_primary),
+
+    T(fallback_join_has_the_form_the_member_negotiated),
+    T(fallback_join_follows_each_bouncer_connection),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

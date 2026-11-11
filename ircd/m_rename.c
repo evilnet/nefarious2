@@ -920,14 +920,14 @@ int rename_services_ac(struct Client *cptr, struct Client *sptr, int parc,
 
 /** Deliver the rename notification for ONE local member: a RENAME message
  * when that connection negotiated draft/channel-rename, the legacy
- * PART/JOIN(+TOPIC/NAMES) pair otherwise.
+ * PART/JOIN(+TOPIC/NAMES) pair otherwise -- the JOIN in the extended-join
+ * form for a connection that negotiated that.
  *
  * Split out of send_rename_to_members() so relocation mode can drive it
  * per-member: under FEAT_RENAME_CONSENT only the movers (issuer and +F
  * users) may be told "your membership now points at the new name", and
  * they are no longer walkable as "every member of chptr" -- see
- * relocate_execute().  The emissions below are unchanged from the
- * historical inline body.
+ * relocate_execute().
  *
  * @param[in] sptr Client that initiated the rename (message source).
  * @param[in] acptr Local member to notify.  Caller guarantees MyUser().
@@ -949,7 +949,24 @@ static void send_rename_to_member(struct Client *sptr, struct Client *acptr,
                   oldname, chptr->chname,
                   (reason && *reason) ? ": " : "",
                   (reason && *reason) ? reason : "");
-    sendcmdto_one(acptr, CMD_JOIN, acptr, "%s", chptr->chname);
+    /* The JOIN half is this member's own JOIN of the new name, so it has
+     * the shape and the tags of one.  There is no JOIN-specific send
+     * helper: the join path (joinbuf_join() in channel.c, and the bouncer
+     * replays in bouncer_session.c) picks the form with CapRecipientHas()
+     * -- the receiving CONNECTION's own caps, which is what makes it
+     * right for a bouncer alias, whose shadow membership this walk also
+     * visits -- and writes the extended-join form as "<channel> <account
+     * or *> :<realname>".  sendcmdto_one_event() tags one recipient's line
+     * the way the channel fan-out of a JOIN tags it (@time, @account, the
+     * oper and bot tags, each on the recipient's caps), and keeps it out
+     * of any batch or label the recipient has open for something else.
+     * No msgid: none is armed here, and this is not a stored JOIN event. */
+    if (CapRecipientHas(acptr, CAP_EXTJOIN))
+      sendcmdto_one_event(acptr, CMD_JOIN, acptr, 0, "%H %s :%s", chptr,
+                          IsAccount(acptr) ? cli_account(acptr) : "*",
+                          cli_info(acptr));
+    else
+      sendcmdto_one_event(acptr, CMD_JOIN, acptr, 0, "%H", chptr);
     if (chptr->topic[0]) {
       send_reply(acptr, RPL_TOPIC, chptr->chname, chptr->topic);
       send_reply(acptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
