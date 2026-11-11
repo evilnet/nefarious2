@@ -85,6 +85,22 @@ Environment Variables:
   IRCD_GENERAL_NUMERIC      Server numeric, must be unique on network (default: 1)
   IRCD_ADMIN_LOCATION       Admin location info (default: Somewhere)
   IRCD_ADMIN_CONTACT        Admin contact info (default: root@localhost)
+  IRCD_CONF_REGENERATE      Set to 1 to replace a base.conf that has no
+                            generation marker (default: 0, see below)
+
+On every start the container writes these values into
+/home/nefarious/ircd/base.conf. A base.conf it has generated begins with a
+marker comment and is generated afresh on each start. A base.conf without
+that marker is taken to be yours: it is left alone, and the variables above
+are NOT applied to it.
+
+Upgrading: images before the marker existed regenerated base.conf on every
+start. A base.conf from such an image that has been kept on a volume has no
+marker, so a newer image leaves it alone and it stops following the
+variables. To hand it back to the generator, start the container once with
+IRCD_CONF_REGENERATE=1: the existing file is saved next to itself as
+base.conf.pre-regenerate.<UTC time> and replaced by a generated one. After
+that the variable has no effect and may stay set.
 
 Example:
 

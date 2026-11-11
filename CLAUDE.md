@@ -67,7 +67,7 @@ Required environment variables (with defaults in dockerentrypoint.sh):
 - `IRCD_ADMIN_CONTACT` - Admin contact info
 
 The Docker setup uses multiple config files included by main `ircd.conf`:
-- `base.conf` - Generated from base.conf-dist with variable substitution
+- `base.conf` - Generated from base.conf-dist with variable substitution. A generated file starts with a marker comment and is regenerated on every start; a `base.conf` without the marker is user-managed and left alone (the variables are not applied to it). `IRCD_CONF_REGENERATE=1` replaces an unmarked file once, after saving it as `base.conf.pre-regenerate.<UTC time>`
 - `local.conf` - Local server-specific settings
 - `linesync.conf` - Line sync configuration
 
