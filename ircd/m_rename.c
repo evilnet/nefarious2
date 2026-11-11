@@ -1210,10 +1210,23 @@ static struct RelocateTombstone *relocate_tombstone_find(const char *name)
  * the same name well inside the grace period -- FindChannel() would hand
  * that fresh channel back and a chain-flattening retarget would stamp
  * +L onto somebody's live channel.  So the result is only accepted when it
- * still carries the marks this engine put on it: the internal persist bit,
- * the redirect bit, and a redirect string still pointing where this
+ * still carries a tombstone's marks: the persist bit (mode.exmode) and a
+ * redirect -- mode.redir, the string -- still pointing where this
  * tombstone points.  Anything else is a different channel wearing the same
  * name.
+ *
+ * The redirect IS the string.  +L, like +l and +k, lives in its parameter
+ * and nowhere else: mode_parse_redir() writes mode.redir, channel_modes()
+ * and do_join() read it, and nothing in channel.c ever sets, clears or
+ * reads MODE_REDIRECT in a channel's mode.mode.  This check used to
+ * demand that bit as well, and relocate_execute() set it by hand -- so a
+ * tombstone was recognised only on a server that had executed the
+ * relocation itself.  One that got "+z +L <target>" from a BURST (a
+ * server that linked or healed a netsplit inside the grace) never had
+ * the bit: its record, built from the announcement, did not authenticate,
+ * its members were told nothing, and at the deadline it was "cancelled"
+ * with the log line "+L was cleared" while every other server swept
+ * (bed, 2026-11-11).  The engine no longer touches that bit at all.
  * @param[in] ts Tombstone to resolve.
  * @return The tombstone channel, or NULL if it is gone or has been
  *         replaced by an unrelated channel of the same name.
@@ -1235,8 +1248,8 @@ static struct Channel *relocate_tombstone_channel(struct RelocateTombstone *ts)
   if (!(chptr = FindChannel(ts->oldname)))
     return NULL;
 
+  /* (An empty mode.redir -- no +L -- never equals a target.) */
   if (!(chptr->mode.exmode & EXMODE_PERSIST)
-      || !(chptr->mode.mode & MODE_REDIRECT)
       || 0 != ircd_strcmp(chptr->mode.redir, ts->newname))
     return NULL;
 
@@ -1435,7 +1448,6 @@ int relocate_snap_lookup(struct Channel *chptr, struct Client *who,
  */
 static void relocate_tombstone_clear_marks(struct Channel *chptr)
 {
-  chptr->mode.mode &= ~MODE_REDIRECT;
   chptr->mode.redir[0] = '\0';
   chptr->mode.exmode &= ~EXMODE_PERSIST;
 }
@@ -1484,9 +1496,8 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
    * But cancelling the record is not enough on its own, because the most
    * likely way to get here is ONE unprivileged command.  `MODE #old -L` has
    * no privilege gate beyond ordinary chanop (channel.c:5021-5023 dispatches
-   * straight into mode_parse_redir()), and it clears MODE_REDIRECT and
-   * mode.redir -- failing the identity check while leaving EXMODE_PERSIST
-   * set.  And EXMODE_PERSIST is exactly the bit no ordinary user can undo:
+   * straight into mode_parse_redir()), and it clears mode.redir --
+   * failing the identity check while leaving EXMODE_PERSIST set.  And EXMODE_PERSIST is exactly the bit no ordinary user can undo:
    * channel.c:5094-5097 ignores 'z' unless the source is a service or comes
    * from a service's server.  So a chanop typing -L on a tombstone would
    * strand a channel that no member count can ever collect -- a permanent
@@ -1515,7 +1526,7 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
               ts->oldname, ts->newname,
               !stray ? "channel is gone"
                 : !(stray->mode.exmode & EXMODE_PERSIST) ? "+z was cleared"
-                : !(stray->mode.mode & MODE_REDIRECT) ? "+L was cleared"
+                : !stray->mode.redir[0] ? "+L was cleared"
                 : "redirect was retargeted");
 
     if (stray && (stray->mode.exmode & EXMODE_PERSIST)
@@ -2016,7 +2027,6 @@ static void relocate_withdraw_redirect(struct Channel *chptr)
   modebuf_mode_string(&mbuf, MODE_DEL | MODE_REDIRECT, chptr->mode.redir, 0);
   modebuf_flush(&mbuf);
 
-  chptr->mode.mode &= ~MODE_REDIRECT;
   chptr->mode.redir[0] = '\0';
 }
 
@@ -2061,7 +2071,6 @@ static void relocate_tombstone_retarget(const char *oldtarget,
     ts->target_ts = target_ts;
 
     ircd_strncpy(chptr->mode.redir, ts->newname, sizeof(chptr->mode.redir));
-    chptr->mode.mode |= MODE_REDIRECT;
     relocate_announce_redirect(chptr);
 
     log_write(LS_DEBUG, L_DEBUG, 0,
@@ -2275,7 +2284,8 @@ static void relocate_notify_stayer(struct Client *source, struct Client *user,
  */
 static void relocate_tombstone_normalise(struct Channel *chptr)
 {
-  chptr->mode.mode &= ~MODE_LIMIT;
+  /* The limit, like the redirect, is its parameter: there is no
+   * MODE_LIMIT bit in a channel's mode.mode to clear. */
   chptr->mode.limit = 0;
   chptr->mode.apass[0] = '\0';
   chptr->mode.upass[0] = '\0';
@@ -2301,8 +2311,9 @@ static void relocate_mark_tombstone(struct Channel *chptr, const char *target,
     chptr->mode.mode &= ~MODE_REGISTERED;
   relocate_tombstone_normalise(chptr);
 
+  /* +z is a bit of mode.exmode; +L is mode.redir and nothing else (see
+   * relocate_tombstone_channel()). */
   chptr->mode.exmode |= EXMODE_PERSIST;
-  chptr->mode.mode |= MODE_REDIRECT;
   ircd_strncpy(chptr->mode.redir, target, sizeof(chptr->mode.redir));
 }
 
@@ -2691,7 +2702,6 @@ static struct Channel *relocate_channel_from_tombstone(struct Client *sptr,
 
   newchan->mode = tomb->mode;
   newchan->mode.exmode &= ~EXMODE_PERSIST;
-  newchan->mode.mode &= ~MODE_REDIRECT;
   newchan->mode.redir[0] = '\0';
 
   newchan->creationtime = tomb->creationtime;
@@ -2990,7 +3000,7 @@ static void relocate_again(struct Client *sptr, struct RelocateTombstone *ts,
          * one belongs to the community, and the community's channel is
          * now the winner.  relocate_tombstone_loser() strips the same
          * things off the loser (relocate_mark_tombstone()). */
-        wchan->mode.mode |= lchan->mode.mode & (MODE_REGISTERED | MODE_LIMIT);
+        wchan->mode.mode |= lchan->mode.mode & MODE_REGISTERED;
         wchan->mode.limit = lchan->mode.limit;
         wchan->mode.exmode |= lchan->mode.exmode & EXMODE_PERSIST;
         ircd_strncpy(wchan->mode.apass, lchan->mode.apass,
@@ -3213,8 +3223,7 @@ static void relocate_announced_cross(struct RelocateTombstone *ts,
   }
 
   /* The old channel. */
-  changed = !(chptr->mode.mode & MODE_REDIRECT)
-            || 0 != ircd_strcmp(chptr->mode.redir, winner);
+  changed = (0 != ircd_strcmp(chptr->mode.redir, winner));
   relocate_mark_tombstone(chptr, winner, 0);
   ircd_strncpy(ts->newname, winner, sizeof(ts->newname));
   ts->oldchan = chptr;

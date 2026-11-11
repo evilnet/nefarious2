@@ -374,10 +374,31 @@ static int world_setup(void **state)
   return 0;
 }
 
+/* +L and +l live in their parameters (mode.redir, mode.limit) and
+ * nowhere else: nothing in channel.c ever sets, clears or reads
+ * MODE_REDIRECT or MODE_LIMIT in a channel's mode.mode -- mode_parse_redir()
+ * writes the string, channel_modes() and do_join() read it.  So a channel
+ * that got its redirect from a BURST or a MODE never has the bit, and the
+ * relocation engine may neither rely on it nor leave it behind (it once
+ * did both: a tombstone learned from a BURST was never recognised).  Every
+ * channel of every test is checked on the way out. */
+static void assert_parameter_modes_are_not_bits(void)
+{
+  int i;
+
+  for (i = 0; i < nchannels; i++)
+    if (channels[i])
+      assert_int_equal(channels[i]->mode.mode & (MODE_REDIRECT | MODE_LIMIT), 0);
+  for (i = 0; i < ndestroyed; i++)
+    assert_int_equal(destroyed[i]->mode.mode & (MODE_REDIRECT | MODE_LIMIT), 0);
+}
+
 static int world_teardown(void **state)
 {
   int i;
   (void)state;
+
+  assert_parameter_modes_are_not_bits();
 
   /* Requests still waiting on services go the way they would in the
    * ircd, so no pending request leaks into the next test. */
@@ -2290,7 +2311,6 @@ static void cancelled_tombstone_gives_the_persist_flag_back(void **state)
   client_rename(alice, "#old", "#new", "moving");
 
   /* MODE #old -L */
-  oldch->mode.mode &= ~MODE_REDIRECT;
   oldch->mode.redir[0] = '\0';
   forget();
 
@@ -2301,6 +2321,14 @@ static void cancelled_tombstone_gives_the_persist_flag_back(void **state)
   assert_false(was_destroyed(oldch));
   assert_int_equal(nopnotices, 1);
   assert_non_null(strstr(opnotices[0], "lost its redirect"));
+  /* the log names what happened: the redirect is gone, not changed */
+  {
+    int i, said = 0;
+    for (i = 0; i < ndebug; i++)
+      if (strstr(debuglines[i], "(+L was cleared)"))
+        said = 1;
+    assert_true(said);
+  }
 
   /* ... and the last member leaving now collects it */
   remove_user_from_channel(bob, oldch);
@@ -2318,7 +2346,6 @@ static void cancelled_empty_tombstone_is_collected(void **state)
   oldch = channel_at("#old", 500000, alice);
   oldch->mode.exmode |= EXMODE_PERSIST;
   client_rename(alice, "#old", "#new", "moving");
-  oldch->mode.mode &= ~MODE_REDIRECT;
   oldch->mode.redir[0] = '\0';
 
   advance(900);
@@ -2337,7 +2364,6 @@ static void cancelled_registered_channel_keeps_its_persist_flag(void **state)
   oldch = channel_at("#old", 500000, alice);
   add_member(oldch, bob, CHFL_CHANOP);
   client_rename(alice, "#old", "#new", "moving");
-  oldch->mode.mode &= ~MODE_REDIRECT;
   oldch->mode.redir[0] = '\0';
   oldch->mode.mode |= MODE_REGISTERED;
 
@@ -2729,7 +2755,6 @@ static void registered_tombstone_is_cancelled_at_the_deadline(void **state)
   advance(400);
   oldch->mode.mode |= MODE_REGISTERED;
   assert_string_equal(oldch->mode.redir, "#new");
-  assert_true(oldch->mode.mode & MODE_REDIRECT);
   assert_int_equal(timers_at(1000900), 1);
   assert_int_equal(ntimers, 1);
   forget();
@@ -2742,7 +2767,6 @@ static void registered_tombstone_is_cancelled_at_the_deadline(void **state)
   assert_int_equal(oldch->users, 2);
   assert_int_equal(sent_count_to(bob), 1);
   assert_string_equal(sent_to(bob, 0), ":me.example MODE #old -L");
-  assert_false(oldch->mode.mode & MODE_REDIRECT);
   assert_string_equal(oldch->mode.redir, "");
   /* an ordinary registered channel again; +z is services' to clear */
   assert_true(oldch->mode.mode & MODE_REGISTERED);
@@ -3230,7 +3254,7 @@ static void crossing_world(struct Crossing *w)
   w->old = channel_at("#old", 500000, w->vic);
   add_member(w->old, w->uma, CHFL_CHANOP);
   add_member(w->old, w->carol, CHFL_VOICE);
-  w->old->mode.mode |= MODE_NOPRIVMSGS | MODE_LIMIT;
+  w->old->mode.mode |= MODE_NOPRIVMSGS;
   w->old->mode.limit = 5;
   ircd_strncpy(w->old->mode.key, "sesame", sizeof(w->old->mode.key));
 }
@@ -3258,19 +3282,15 @@ static void assert_crossing_end_state(struct Crossing *w)
 
   /* #old: a tombstone redirecting to the winner, with the stayer */
   assert_string_equal(w->old->mode.redir, "#x");
-  assert_true(w->old->mode.mode & MODE_REDIRECT);
   assert_true(w->old->mode.exmode & EXMODE_PERSIST);
-  assert_false(w->old->mode.mode & MODE_LIMIT);
   assert_int_equal(w->old->users, 1);
   assert_non_null(member_of(w->old, w->carol));
 
   /* the winner: an ordinary channel with the state the old one had --
    * nothing of the tombstone's +z, +L or redirect -- and its issuer */
   assert_false(x->mode.exmode & EXMODE_PERSIST);
-  assert_false(x->mode.mode & MODE_REDIRECT);
   assert_string_equal(x->mode.redir, "");
   assert_true(x->mode.mode & MODE_NOPRIVMSGS);
-  assert_true(x->mode.mode & MODE_LIMIT);
   assert_int_equal(x->mode.limit, 5);
   assert_string_equal(x->mode.key, "sesame");
   assert_int_equal(x->creationtime, 500000);
@@ -3280,10 +3300,8 @@ static void assert_crossing_end_state(struct Crossing *w)
   /* the loser: a tombstone too, redirecting to the winner, with ITS
    * issuer, who can follow from there */
   assert_string_equal(y->mode.redir, "#x");
-  assert_true(y->mode.mode & MODE_REDIRECT);
   assert_true(y->mode.exmode & EXMODE_PERSIST);
   assert_true(y->mode.mode & MODE_NOPRIVMSGS);
-  assert_false(y->mode.mode & MODE_LIMIT);
   assert_int_equal(y->mode.limit, 0);
   assert_string_equal(y->mode.key, "sesame");
   assert_int_equal(y->creationtime, 500000);
@@ -3844,7 +3862,6 @@ static void ordinary_persistent_redirecting_channel_is_not_announced(void **stat
 
   ch = channel_at("#lobby", 500000, alice);
   ch->mode.exmode |= EXMODE_PERSIST;
-  ch->mode.mode |= MODE_REDIRECT | MODE_LIMIT;
   ch->mode.limit = 50;
   ircd_strncpy(ch->mode.redir, "#overflow", sizeof(ch->mode.redir));
 
@@ -3867,7 +3884,7 @@ static void cancelled_tombstone_is_not_announced(void **state)
   oldch = channel_at("#old", 500000, bob);
   add_member(oldch, carol, CHFL_CHANOP);
   server_relocate(peer, bob, "#old", "#new", "1000900", "");
-  oldch->mode.mode &= ~MODE_REDIRECT;           /* MODE #old -L */
+  /* MODE #old -L */
   oldch->mode.redir[0] = '\0';
 
   fork = linked("new.example", "Bn", "v");
@@ -3971,7 +3988,10 @@ static void malformed_announcement_is_refused_and_not_relayed(void **state)
 /* --- A.3 / A.4: acting on an announcement --- */
 
 /** A channel as the BURST of a tombstone leaves it on a server that had
- * no such channel or held it as an ordinary one: +z, +L @a target. */
+ * no such channel or held it as an ordinary one: +z, +L @a target --
+ * exactly what mode_parse() writes for "+zL <target>": the persist bit in
+ * mode.exmode and the target in mode.redir.  No MODE_REDIRECT bit; there
+ * is no such thing in a real channel. */
 static struct Channel *burst_tombstone(const char *name, time_t ts,
                                        const char *target, struct Client *who)
 {
@@ -3979,7 +3999,6 @@ static struct Channel *burst_tombstone(const char *name, time_t ts,
 
   ch->creationtime = ts;
   ch->mode.exmode |= EXMODE_PERSIST;
-  ch->mode.mode |= MODE_REDIRECT;
   ircd_strncpy(ch->mode.redir, target, sizeof(ch->mode.redir));
   if (who)
     add_member(ch, who, 0);
@@ -4004,7 +4023,7 @@ static void announcement_builds_the_record(void **state)
 
   oldch = burst_tombstone("#old", 500000, "#new", bob);
   add_member(oldch, carol, CHFL_CHANOP);
-  oldch->mode.mode |= MODE_LIMIT;       /* our side still had +l */
+  /* our side still had +l */
   oldch->mode.limit = 10;
   newch = channel_at("#new", 500000, bob);
 
@@ -4014,7 +4033,6 @@ static void announcement_builds_the_record(void **state)
   assert_int_equal(ntimers, 1);
   /* the limit would keep the redirect from firing */
   assert_int_equal(oldch->mode.limit, 0);
-  assert_false(oldch->mode.mode & MODE_LIMIT);
   assert_non_null(strstr(sent_to(carol, 0),
                          "NOTICE #old :#old has moved to #new. Join #new to "
                          "follow; this channel closes in 15 minutes."));
@@ -4193,6 +4211,13 @@ static void announcement_for_a_channel_with_another_redirect(void **state)
   assert_non_null(member_of(oldch, carol));
   assert_string_equal(oldch->mode.redir, "#aaa");
   assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  {
+    int i, said = 0;
+    for (i = 0; i < ndebug; i++)
+      if (strstr(debuglines[i], "(redirect was retargeted)"))
+        said = 1;
+    assert_true(said);
+  }
 }
 
 /* Both sides hold the tombstone, with deadlines of their own (one side
@@ -4275,7 +4300,6 @@ static void disagreeing_announcements_on_the_winning_side(void **state)
   assert_string_equal(w.old->mode.redir, "#x");
   assert_string_equal(y->mode.redir, "#x");
   assert_true(y->mode.exmode & EXMODE_PERSIST);
-  assert_true(y->mode.mode & MODE_REDIRECT);
   assert_non_null(member_of(y, w.uma));
   assert_int_equal(ntimers, 2);
   assert_int_equal(timers_at(1000900), 2);
@@ -4314,7 +4338,6 @@ static void disagreeing_announcements_before_the_losers_burst(void **state)
 
   /* B #y 500000 +n ... uma */
   y = channel_at("#y", 500000, w.uma);
-  y->mode.mode |= MODE_LIMIT;
   y->mode.limit = 5;
   relocate_tombstone_burst_done(y);
 
@@ -4494,7 +4517,6 @@ static void burst_hooks_leave_ordinary_channels_alone(void **state)
 
   ch = channel_at("#plain", 500000, alice);
   ch->mode.exmode |= EXMODE_PERSIST;
-  ch->mode.mode |= MODE_LIMIT;
   ch->mode.limit = 7;
   relocate_tombstone_burst_lost(ch);
   relocate_tombstone_burst_done(ch);
@@ -4513,14 +4535,279 @@ static void burst_cannot_leave_a_limit_on_a_tombstone(void **state)
   crossing_world(&w);
   vic_relocates(&w);
 
-  w.old->mode.mode |= MODE_LIMIT;               /* B #old 500000 +l 10 ... */
+  /* B #old 500000 +l 10 ... */
   w.old->mode.limit = 10;
   relocate_tombstone_burst_done(w.old);
 
   assert_int_equal(w.old->mode.limit, 0);
-  assert_false(w.old->mode.mode & MODE_LIMIT);
   assert_string_equal(w.old->mode.redir, "#x");
   assert_int_equal(timers_at(1000900), 1);
+}
+
+/* --- the bed's netjoin (2026-11-11, sync 4) ---
+ *
+ * #rssp, created on the hub and joined from the leaf, same creation
+ * timestamp on both.  The leaf splits away; the hub's only member
+ * relocates the channel (1 moved, 0 stayed: an EMPTY tombstone); the leaf
+ * links again inside the grace.  On the bed the leaf told its member
+ * nothing and at the deadline logged "no longer authenticates (+L was
+ * cleared)": it had looked for a MODE_REDIRECT bit that a BURST's +L
+ * never sets. */
+
+/* The leaf.  What it holds when the announcement arrives is exactly what
+ * the hub's "B #rssp <ts> +tnzL #rsspn" made of its own channel. */
+static void netjoin_leaf_with_a_local_member_gets_the_tombstone(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *issuer = user_on(hub, "issuer", "AA7");
+  struct Client *stayer = user_on(&me, "stayer", "AAE");
+  struct Channel *oldch, *newch;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  /* ours since before the split: +tn, our member (voiced, say) */
+  oldch = fake_channel("#rssp");
+  oldch->creationtime = 500000;
+  oldch->mode.mode |= MODE_TOPICLIMIT | MODE_NOPRIVMSGS;
+  add_member(oldch, stayer, CHFL_VOICE);
+
+  /* Bj B #rsspn 500000 +tn BjAA7:o */
+  newch = channel_at("#rsspn", 500000, issuer);
+  /* Bj B #rssp 500000 +tnzL #rsspn -- merged at the equal timestamp */
+  oldch->mode.exmode |= EXMODE_PERSIST;
+  ircd_strncpy(oldch->mode.redir, "#rsspn", sizeof(oldch->mode.redir));
+  relocate_tombstone_burst_done(oldch);
+  /* Bj RT #rssp 500000 #rsspn 1000045 */
+  server_tombstone(hub, hub, "#rssp", "500000", "#rsspn", "1000045");
+
+  /* Defect 1: the member is told NOW */
+  assert_int_equal(sent_count_to(stayer), 1);
+  assert_non_null(strstr(sent_to(stayer, 0),
+                         "NOTICE #rssp :#rssp has moved to #rsspn. Join "
+                         "#rsspn to follow; this channel closes in 0 minutes."));
+  assert_int_equal(timers_at(1000045), 1);
+  /* ... can regain its status by following ... */
+  assert_int_equal(relocate_snap_lookup(newch, stayer, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_VOICE);
+  /* ... and the leaf announces the tombstone onward as its own */
+  forget();
+  burst_to(hub);
+  assert_string_equal(sent_to(hub, 0), "AC RT #rssp 500000 #rsspn 1000045");
+
+  /* Defect 2: at the deadline the tombstone IS one -- swept, dissolved */
+  forget();
+  advance(45);
+  assert_string_equal(sent_to(stayer, 0),
+                      ":stayer!user@host.example PART #rssp :Channel has moved to #rsspn");
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#rssp"));
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(ntimers, 0);
+}
+
+/* The same leaf when its member has left before the deadline (the bed
+ * run: the test client quit).  The empty tombstone stays what it is --
+ * +z, redirecting, recorded -- until the deadline, and is dissolved then:
+ * not "cancelled", and not by accident. */
+static void netjoin_leaf_whose_member_left_keeps_the_tombstone(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *stayer = user_on(&me, "stayer", "AAE");
+  struct Channel *oldch;
+  int i;
+  (void)state;
+
+  oldch = burst_tombstone("#rssp", 500000, "#rsspn", stayer);
+  server_tombstone(hub, hub, "#rssp", "500000", "#rsspn", "1000045");
+  remove_user_from_channel(stayer, oldch);              /* QUIT */
+
+  assert_false(was_destroyed(oldch));
+  assert_string_equal(oldch->mode.redir, "#rsspn");
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  advance(44);
+  assert_false(was_destroyed(oldch));
+  assert_string_equal(oldch->mode.redir, "#rsspn");
+  assert_int_equal(timers_at(1000045), 1);
+
+  advance(1);
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(nopnotices, 0);
+  /* swept and dissolved, said the log -- not "no longer authenticates" */
+  for (i = 0; i < ndebug; i++)
+    assert_null(strstr(debuglines[i], "no longer authenticates"));
+}
+
+/* The hub.  Its tombstone was empty; the leaf's BURST puts the leaf's
+ * member into it.  Nothing about the tombstone changes, and at the
+ * deadline the hub removes that REMOTE member from its copy and destroys
+ * the channel without a word to anybody: the member's own server parts it
+ * at the same instant (previous two cases), which is what makes the two
+ * agree that the channel is gone and nobody is in it. */
+static void netjoin_hub_with_an_empty_tombstone_takes_the_leafs_member(void **state)
+{
+  struct Client *leaf;
+  struct Client *issuer = user_on(&me, "issuer", "AA7");
+  struct Client *stayer;
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 45;
+  oldch = channel_at("#rssp", 500000, issuer);
+  oldch->mode.mode |= MODE_TOPICLIMIT | MODE_NOPRIVMSGS;
+  client_rename(issuer, "#rssp", "#rsspn", "during the split");
+  assert_int_equal(oldch->users, 0);
+
+  leaf = linked("leaf.example", "AD", "v");
+  stayer = user_on(leaf, "stayer", "AAE");
+  forget();
+  /* our burst to the leaf carries the record */
+  burst_to(leaf);
+  assert_string_equal(sent_to(leaf, 0), "AC RT #rssp 500000 #rsspn 1000045");
+  /* AD B #rssp 500000 +tn ADAAE */
+  add_member(oldch, stayer, 0);
+  relocate_tombstone_burst_done(oldch);
+
+  assert_string_equal(oldch->mode.redir, "#rsspn");
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(timers_at(1000045), 1);
+  assert_int_equal(oldch->users, 1);
+
+  forget();
+  advance(45);
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#rssp"));
+  assert_int_equal(nsent, 0);           /* no server, no client */
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(ntimers, 0);
+}
+
+/* An empty tombstone -- the issuer was the only member -- keeps its marks
+ * and its record for the whole grace: the name stays redirected. */
+static void empty_tombstone_lasts_until_its_deadline(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *down;
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  client_rename(alice, "#old", "#new", "");
+  assert_int_equal(oldch->users, 0);
+
+  advance(899);
+  assert_false(was_destroyed(oldch));
+  assert_ptr_equal(channel_named("#old"), oldch);
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(timers_at(1000900), 1);
+  down = linked("down.example", "Bk", "v");
+  burst_to(down);
+  assert_string_equal(sent_to(down, sent_count_to(down) - 1),
+                      "AC RT #old 500000 #new 1000900");
+
+  advance(1);
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
+/* The last LOCAL member of a tombstone leaves mid-grace; members on other
+ * servers are still in it.  Nothing about the tombstone changes. */
+static void last_local_member_leaving_changes_nothing(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *dave = user_on(peer, "dave", "AAD");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, dave, 0);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  advance(100);
+  remove_user_from_channel(carol, oldch);               /* PART #old */
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_non_null(member_of(oldch, dave));
+  assert_int_equal(timers_at(1000900), 1);
+
+  /* and the remote one too */
+  remove_user_from_channel(dave, oldch);
+  assert_false(was_destroyed(oldch));
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(timers_at(1000900), 1);
+
+  forget();
+  advance(800);
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nopnotices, 0);
+}
+
+/* The other mark: services took +z off the tombstone (MODE -z).  It is
+ * not a tombstone any more -- the existing cancellation, unchanged: at the
+ * deadline nobody is parted, and it is not announced meanwhile. */
+static void tombstone_that_lost_its_persist_flag_is_not_swept(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch;
+  int i, said = 0;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->mode.exmode &= ~EXMODE_PERSIST;                /* M #old -z */
+  forget();
+
+  burst_to(peer);
+  assert_int_equal(sent_count_to(peer), 0);
+
+  advance(900);
+  assert_non_null(member_of(oldch, carol));
+  assert_int_equal(sent_count_to(carol), 0);
+  assert_false(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+  for (i = 0; i < ndebug; i++)
+    if (strstr(debuglines[i], "no longer authenticates")
+        && strstr(debuglines[i], "+z was cleared"))
+      said = 1;
+  assert_true(said);
+}
+
+/* Dissolving a tombstone whose members are all on other servers: each is
+ * removed from this server's copy, nothing is sent to any server or
+ * client, and the channel is destroyed. */
+static void dissolve_with_only_remote_members(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *dave = user_on(peer, "dave", "AAD");
+  struct Client *eve = user_on(peer, "eve", "AAF");
+  struct Channel *oldch;
+  (void)state; (void)x3;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, dave, CHFL_CHANOP);
+  add_member(oldch, eve, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  assert_int_equal(oldch->users, 2);
+  forget();
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#old"));
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(ntimers, 0);
 }
 
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
@@ -4671,6 +4958,14 @@ int main(void)
     T(tombstone_that_loses_a_burst_on_timestamp_is_cancelled),
     T(burst_hooks_leave_ordinary_channels_alone),
     T(burst_cannot_leave_a_limit_on_a_tombstone),
+
+    T(netjoin_leaf_with_a_local_member_gets_the_tombstone),
+    T(netjoin_leaf_whose_member_left_keeps_the_tombstone),
+    T(netjoin_hub_with_an_empty_tombstone_takes_the_leafs_member),
+    T(empty_tombstone_lasts_until_its_deadline),
+    T(last_local_member_leaving_changes_nothing),
+    T(tombstone_that_lost_its_persist_flag_is_not_swept),
+    T(dissolve_with_only_remote_members),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
