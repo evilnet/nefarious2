@@ -3226,8 +3226,8 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN + 1);
 
     /* A relocation tombstone (m_rename.c) whose redirect is removed or
-     * changed is over at once.  Not for a BURST's merge, which is not a
-     * MODE anybody gave. */
+     * changed is over at once.  Not for a BURST's merge: ms_burst()
+     * settles that when the BURST has been taken in. */
     if (!(state->flags & MODE_PARSE_BURST))
       relocate_tombstone_marks_changed(state->chptr);
   }

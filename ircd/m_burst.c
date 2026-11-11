@@ -771,5 +771,12 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
   }
 
-  return mbuf ? modebuf_flush(mbuf) : 0;
+  {
+    int ret = mbuf ? modebuf_flush(mbuf) : 0;
+
+    /* A relocation tombstone keeps its form through a merge, and one
+     * that was waiting for this channel's BURST gets its channel. */
+    relocate_tombstone_burst_done(chptr);
+    return ret;
+  }
 }

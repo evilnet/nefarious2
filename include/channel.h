@@ -553,6 +553,12 @@ extern int relocate_join_verdict(struct Channel *chptr);
  * and is parted from it. */
 extern void relocate_follow(struct Client *cptr, struct Client *sptr,
                             struct Channel *chptr);
+/* server_finish_burst(), after a channel's BURST has been sent to a link:
+ * when the channel is a live tombstone its record follows (RT). */
+extern void relocate_burst(struct Client *cptr, struct Channel *chptr);
+/* ms_burst(), when a BURST has been taken in: a tombstone keeps its form,
+ * and one that was waiting for its channel gets it. */
+extern void relocate_tombstone_burst_done(struct Channel *chptr);
 extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 

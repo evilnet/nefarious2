@@ -484,6 +484,10 @@ struct Client;
 #define TOK_RENAME		"RN"
 #define CMD_RENAME		MSG_RENAME, TOK_RENAME
 
+#define MSG_TOMBSTONE		"TOMBSTONE"	/* server links only: MFLG_TOKONLY */
+#define TOK_TOMBSTONE		"RT"
+#define CMD_TOMBSTONE		MSG_TOMBSTONE, TOK_TOMBSTONE
+
 #define MSG_WATCH		"WATCH"
 #define TOK_WATCH		"WATCH"
 #define CMD_WATCH		MSG_WATCH, TOK_WATCH

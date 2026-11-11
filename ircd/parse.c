@@ -951,6 +951,16 @@ struct Message msgtab[] = {
     ""
   },
   {
+    /* Between servers only (MFLG_TOKONLY): a relocation tombstone,
+     * announced after its channel's BURST.  See m_rename.c. */
+    MSG_TOMBSTONE,
+    TOK_TOMBSTONE,
+    0, MAXPARA, MFLG_SLOW | MFLG_TOKONLY, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_tombstone, m_ignore, m_ignore },
+    ""
+  },
+  {
     MSG_WATCH,
     TOK_WATCH,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

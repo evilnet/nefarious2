@@ -337,8 +337,13 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
    */
   {
     struct Channel *chptr;
-    for (chptr = GlobalChannelList; chptr; chptr = chptr->next)
+    for (chptr = GlobalChannelList; chptr; chptr = chptr->next) {
       send_channel_modes(cptr, chptr);
+      /* A relocation tombstone's BURST says only "+z, +L <target>"; its
+       * record follows (RT), so that the new link dissolves it on time
+       * too. */
+      relocate_burst(cptr, chptr);
+    }
   }
   sendcmdto_one(&me, CMD_END_OF_BURST, cptr, "");
   return 0;
