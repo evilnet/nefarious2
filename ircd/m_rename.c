@@ -31,8 +31,17 @@
  *
  *   renames its own copy of the channel, tells its own members, and
  *   passes the message on (ms_rename());
- * - it passes it on to every link whose server said it takes it: 'v' in
- *   its SERVER flags (a server of that branch) or 'r' (services, or a
+ * - it takes the other form of that message, a channel relocation
+ *
+ *       <source> RN <old> <new> C <expires> :<reason>
+ *
+ *   in which only the issuer moves to the new channel and the old one
+ *   stays behind until <expires> as a tombstone that redirects there:
+ *   it does to its own copy of the two channels what every server does,
+ *   dissolves its own copy of the tombstone at that deadline, and passes
+ *   the message on ("Relocation" below);
+ * - it passes both on to every link whose server said it takes RN: 'v'
+ *   in its SERVER flags (a server of that branch) or 'r' (services, or a
  *   server that carries renames the way this one does);
  * - it carries the question such a server asks services before it
  *   renames a registered channel, and services' answer, between the two
@@ -43,8 +52,12 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "destruct_event.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
+#include "ircd_events.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
@@ -62,17 +75,22 @@
 #include <string.h>
 
 /** The fourth parameter of an RN that is not a rename but a channel
- * relocation, a different feature of the ircv3.2-upgrade branch (members
- * are asked to follow to the new channel instead of being moved):
+ * relocation (see "Relocation" below):
  *
  *     rename:      RN <old> <new> :<reason>
- *     relocation:  RN <old> <new> C [<more>] :<reason>
+ *     relocation:  RN <old> <new> C <expires> :<reason>
+ *     from a server from before the deadline travelled:
+ *                  RN <old> <new> C :<reason>
  *
  * It counts only when at least one more parameter follows it: "RN <old>
  * <new> :C" is a rename whose reason is the letter C.  That is the test
- * the servers that implement relocation apply, so that every server reads
- * one line the same way.  This server does not implement relocation; see
- * ms_rename().
+ * every server applies, so that all read one line the same way: taken
+ * for a relocation on one server and a rename on another, it would move
+ * everybody here and only the issuer there.
+ *
+ * <expires> is the moment the tombstone is dissolved, in network time
+ * (TStime()); include/rename_proto.h has the field's form and the rules
+ * a receiver applies to it.
  */
 #define RELOCATE_MARKER "C"
 
@@ -89,7 +107,8 @@
  * @param[in] oldname Channel's old name.
  * @param[in] newname Channel's new name.
  * @param[in] rest Everything after the two names, as it goes on the
- *                 wire: ":<reason>" for a rename.
+ *                 wire: ":<reason>" for a rename, "C <expires> :<reason>"
+ *                 for a relocation.
  */
 static void rename_relay(struct Client *sptr, struct Client *cptr,
                          const char *oldname, const char *newname,
@@ -156,6 +175,1517 @@ static void send_rename_to_members(struct Channel *chptr, const char *oldname,
   }
 }
 
+/* ---------- Relocation ----------
+ *
+ * The second form of a rename on the ircv3.2-upgrade branch
+ * (evilnet/channel-relocate): the channel moves to a new name, and its
+ * members are asked to follow instead of being moved.
+ *
+ *     <user> RN <old> <new> C <expires> :<reason>
+ *     ADAAA RN #old #new C 1731340900 :moving
+ *
+ * - The new channel is made with the old one's state: modes, key, limit,
+ *   passwords, creation timestamp, topic, bans and excepts, and its
+ *   pending invites.
+ * - Only the issuer -- the source of the RN -- is moved to it, with the
+ *   status it had.
+ * - The old channel stays, with everybody else in it, as a TOMBSTONE: it
+ *   is +z (it does not go away when it empties), it has +L <new> and no
+ *   limit (a JOIN of it is forwarded to the new channel, m_join.c), and
+ *   its registration (+R) and passwords are gone; they moved.
+ * - At <expires>, network time, the tombstone is dissolved: every member
+ *   still in it is parted, the marks come off, and the empty channel is
+ *   collected.  Unless it is registered (+R) at that moment: then it is
+ *   cancelled instead -- nobody is parted, the redirect is withdrawn, and
+ *   it is an ordinary channel again.
+ * - Until then a member of the tombstone who joins the new channel takes
+ *   the status he holds in the tombstone with him and is parted from it
+ *   ("Following: live status, then part"), and nobody else gets into the
+ *   tombstone ("Who can be in a tombstone").
+ *
+ * None of this is sent from server to server but the RN itself.  Every
+ * server does all of it to its own copy of the two channels, tells its
+ * own users, arms its own timer for the one deadline the RN carries, and
+ * parts its own users at it.  So a server that only carries the RN -- as
+ * this one did before -- ends with the issuer in a channel no other
+ * server has him in, a tombstone nobody dissolves, and none of its users
+ * redirected.  That is why a server that offers none of it to its own
+ * users still does all of it here.
+ *
+ * What this server tells its own users is what a server of that branch
+ * tells a client without that branch's capabilities, in the same words:
+ * a NOTICE to each member who stays, the issuer's PART, the MODE +L, and
+ * at the deadline each member's own PART.
+ */
+
+/** The grace of a relocation whose RN carries no deadline, in seconds.
+ *
+ * The deadline is the issuing server's to set, and it travels in the RN.
+ * Only a server from before it travelled sends none ("RN <old> <new> C
+ * :<reason>"), and each receiver of that form counts a grace of its own
+ * from the moment of receipt.  On that branch the grace is the setting
+ * RELOCATE_GRACE; this is its default.  It is a constant here: a setting
+ * would be an operator's knob for a feature this server does not offer,
+ * read only until the last such server has been upgraded, and the
+ * deadline computed from it is relayed, so every server behind this one
+ * shares it whatever its value. */
+#define RELOCATE_GRACE_FALLBACK 900
+
+/** Where a tombstone record's embedded timer stands.  It decides who
+ * frees the record; see "Lifetime" at struct RelocateTombstone. */
+enum RelocateTimer {
+  RELOCATE_TIMER_NONE = 0,  /**< never armed: the event engine holds
+                                 nothing of the record */
+  RELOCATE_TIMER_ARMED,     /**< queued in the event engine */
+  RELOCATE_TIMER_FIRING     /**< inside its own ET_EXPIRE; the engine still
+                                 holds the timer and ET_DESTROY follows */
+};
+
+/** A tombstone: the old channel of a relocation, until its deadline.
+ *
+ * The record names its channel -- by name and creation timestamp, a
+ * channel's identity here as in BURST -- and keeps no pointer to it.  +z
+ * keeps a tombstone from being collected when it empties, but services
+ * can still destroy it (DESTRUCT), a rename can reallocate it, and
+ * somebody can then make a new channel of the same name.  Whoever needs
+ * the channel asks relocate_tombstone_channel(), which also checks that
+ * it still is this tombstone.
+ *
+ * Lifetime.  The struct Timer is embedded, and the event engine goes on
+ * using a timer after its ET_EXPIRE callback has returned (and
+ * timer_del() of a timer in dispatch does nothing).  So a record whose
+ * timer the engine holds is freed in exactly one place: the ET_DESTROY
+ * case of relocate_tombstone_expire_cb().  A record whose timer was
+ * never armed is freed by hand.  ONE function decides which, from
+ * @a timer_state, for every end of a record other than its own expiry:
+ * relocate_tombstone_end().  Nothing else frees a record, and nothing
+ * may assume that a record it is about to end has no timer: one that is
+ * settled again after its deadline has passed (a second message about
+ * the tombstone, a step of the network clock) has one. */
+struct RelocateTombstone {
+  struct RelocateTombstone *next;   /**< next in relocate_tombstones */
+  char oldname[CHANNELLEN + 1];     /**< the tombstone's own name */
+  time_t chan_ts;                   /**< creation timestamp of the channel
+                                         the record was made for.  +z and a
+                                         +L to the same target are things
+                                         the network can put on ANOTHER
+                                         channel that later has the name,
+                                         and the record must not answer for
+                                         that one */
+  char newname[CHANNELLEN + 1];     /**< where it redirects: the name the
+                                         network has for the target now */
+  time_t target_ts;                 /**< creation timestamp of the channel
+                                         the relocation made under
+                                         @a newname.  A member of this
+                                         tombstone who joins THAT channel
+                                         follows (relocate_follow()); one
+                                         who joins a channel somebody made
+                                         under the name after it emptied
+                                         does not.  Every channel a
+                                         relocation makes has the old
+                                         channel's timestamp */
+  time_t expires;                   /**< the deadline, in NETWORK time
+                                         (TStime()), as the RN carries it:
+                                         the same number on every server */
+  struct Timer timer;               /**< embedded; see "Lifetime" */
+  enum RelocateTimer timer_state;   /**< where the timer stands, and so
+                                         who frees this record */
+  int detached;                     /**< the tombstone is DETACHED from its
+                                         target: @a newname is what the
+                                         network calls the target, but on
+                                         this server that name is another
+                                         channel's, so the tombstone must
+                                         not point at it and has no +L here.
+                                         See relocate_tombstone_point() */
+};
+
+/** Every tombstone this server holds. */
+static struct RelocateTombstone *relocate_tombstones = NULL;
+
+static void relocate_tombstone_expire_cb(struct Event *ev);
+static void relocate_tombstone_end(struct RelocateTombstone *ts, int dissolve);
+static void relocate_tombstone_detach(struct RelocateTombstone *ts,
+                                      struct Channel *chptr,
+                                      struct Channel *there);
+
+/** Find a tombstone's record by the name of its (old) channel.
+ * @param[in] name Channel name.
+ * @return The record, or NULL.
+ */
+static struct RelocateTombstone *relocate_tombstone_find(const char *name)
+{
+  struct RelocateTombstone *ts;
+
+  if (EmptyString(name))
+    return NULL;
+
+  for (ts = relocate_tombstones; ts; ts = ts->next)
+    if (0 == ircd_strcmp(ts->oldname, name))
+      return ts;
+
+  return NULL;
+}
+
+/** Find the channel a record is the tombstone of.
+ *
+ * The name alone does not say it.  A tombstone can lose what makes it
+ * one -- a chanop removes or changes +L, services take +z off -- or go
+ * away altogether, and a channel somebody then makes under the name is
+ * not this record's to redirect, strip or sweep.  So the channel is
+ * accepted only when it IS the channel the record was made for -- the
+ * name and the creation timestamp -- and still carries the marks: +z,
+ * and a redirect to where this record points.  The marks alone are not
+ * enough: services can make another channel of the name +z, and anybody
+ * can give it a +L to the same target.  A DETACHED tombstone is the one
+ * that must have no redirect at all (relocate_tombstone_point()).
+ *
+ * The redirect IS the name in mode.redir.  +L, like +l and +k, lives in
+ * its parameter and nowhere else: mode_parse_redir() writes mode.redir,
+ * channel_modes() and do_join() read it, and nothing sets or reads a
+ * MODE_REDIRECT bit in a channel's mode.mode.  So nothing here does
+ * either: a tombstone this server learns from a BURST ("+z +L <new>")
+ * has to be recognised exactly as one it made itself from an RN.
+ * @param[in] ts The record.
+ * @return Its channel, or NULL when that is gone or no longer its
+ *         tombstone.
+ */
+static struct Channel *relocate_tombstone_channel(struct RelocateTombstone *ts)
+{
+  struct Channel *chptr;
+
+  if (!ts || !(chptr = FindChannel(ts->oldname)))
+    return NULL;
+
+  /* (An empty mode.redir -- no +L -- never equals a target.) */
+  if (chptr->creationtime != ts->chan_ts
+      || !(chptr->mode.exmode & EXMODE_PERSIST)
+      || (ts->detached ? chptr->mode.redir[0] != '\0'
+                       : 0 != ircd_strcmp(chptr->mode.redir, ts->newname)))
+    return NULL;
+
+  return chptr;
+}
+
+/** Take a record off the list, so that no lookup finds it any more.  Does
+ * not touch its timer and does not free it.
+ * @param[in] ts The record.
+ */
+static void relocate_tombstone_unlink(struct RelocateTombstone *ts)
+{
+  struct RelocateTombstone **pp;
+
+  for (pp = &relocate_tombstones; *pp; pp = &(*pp)->next) {
+    if (*pp == ts) {
+      *pp = ts->next;
+      break;
+    }
+  }
+  ts->next = NULL;
+}
+
+/** Take the marks of a tombstone off a channel that is being dissolved:
+ * the redirect, and +z -- always.  +z is all that keeps the empty channel
+ * from being collected, and whoever set it, it does not belong on what is
+ * left: this engine's own is handed back, and one from before the
+ * relocation was the registration's, which moved to the new channel with
+ * everything else.  Every server dissolves alike, so it goes everywhere.
+ * @param[in] chptr The tombstone.
+ */
+static void relocate_tombstone_clear_marks(struct Channel *chptr)
+{
+  chptr->mode.redir[0] = '\0';
+  chptr->mode.exmode &= ~EXMODE_PERSIST;
+}
+
+/** Which of a tombstone's marks is its channel missing?  For a log line
+ * or a notice to operators.
+ * @param[in] ts The record.
+ * @param[in] chptr The channel of the record's name (may be NULL).
+ * @return A constant string.
+ */
+static const char *relocate_missing_mark(struct RelocateTombstone *ts,
+                                         struct Channel *chptr)
+{
+  if (!chptr)
+    return "channel is gone";
+  if (!(chptr->mode.exmode & EXMODE_PERSIST))
+    return "+z was removed";
+  if (ts->detached)
+    return "a redirect was set on it while it was detached from its target";
+  if (!chptr->mode.redir[0])
+    return "+L was removed";
+  return "+L was changed";
+}
+
+/** A tombstone has been cancelled -- one of its marks was taken off, or
+ * changed -- and its channel is an ordinary channel again: do what is
+ * owed to the CHANNEL.  (The record is the caller's to end.)
+ *
+ * Nobody is parted.  +z goes, as when a tombstone is dissolved: it is
+ * the one mark no user can remove (MODE takes 'z' from services only),
+ * so a chanop's -L would otherwise leave a channel that is never
+ * collected.  The one channel left alone is one that is REGISTERED: its
+ * +z is services'.  A redirect that is on the channel now is not
+ * touched: it is whatever the MODE made it, an ordinary +L.  The
+ * operators are told.
+ *
+ * An EMPTY channel has to be collected by hand now, because every member
+ * who left while +z was set left a channel that could not be.  From
+ * inside a MODE that is still being parsed the channel must not be
+ * freed, so its collection is scheduled, as MODE -z does for an empty
+ * channel (@a defer); at the deadline it is collected at once.
+ * @param[in] ts The record (for the names).
+ * @param[in] chptr The channel.
+ * @param[in] defer Non-zero when called under mode_parse() or CLEARMODE.
+ */
+static void relocate_tombstone_cancelled(struct RelocateTombstone *ts,
+                                         struct Channel *chptr, int defer)
+{
+  const char *why = relocate_missing_mark(ts, chptr);
+
+  if (chptr->mode.mode & MODE_REGISTERED)
+    return;
+
+  sendto_opmask_butone(0, SNO_OLDSNO,
+                       "Relocation tombstone %s (-> %s) was cancelled: %s.  "
+                       "It is an ordinary channel again; its %u member%s "
+                       "were NOT parted.",
+                       ts->oldname, ts->newname, why, chptr->users,
+                       (chptr->users == 1) ? "" : "s");
+
+  if (!(chptr->mode.exmode & EXMODE_PERSIST))
+    return;                     /* -z: whoever took it off deals with it */
+
+  chptr->mode.exmode &= ~EXMODE_PERSIST;
+
+  if (!chptr->members) {
+    if (defer)
+      schedule_destruct_event_1m(chptr);
+    else
+      sub1_from_channel(chptr);         /* may free chptr */
+  }
+}
+
+/** A MODE (a user's, an operator's OPMODE or CLEARMODE, services', a
+ * server's) has just changed a channel's redirect or its +z: if the
+ * channel was a tombstone and no longer is, the tombstone is over NOW,
+ * not at its deadline.
+ *
+ * Why at once.  A record that waited for the deadline could be made to
+ * match again: a remaining op takes +L off (the channel stops being a
+ * tombstone, so it admits anybody), lets people in and ops them, and
+ * sets "+L <target>" again -- a live tombstone once more, with members
+ * who were never in the old channel and who could each follow with
+ * status.  Cancelling is final: the record is ended here, and a redirect
+ * set later is an ordinary redirect on an ordinary channel.
+ *
+ * Every server sees the same MODE and ends its own record at the same
+ * point of the same stream, so this converges as the MODE does.
+ *
+ * NOT called for what this file itself does to a tombstone's redirect
+ * (relocate_tombstone_point()), which writes the channel directly, nor
+ * for the mode merge of a BURST.
+ *
+ * The channel is never freed here (the caller is in the middle of a
+ * MODE).
+ * @param[in] chptr The channel whose mode.redir or +z changed.
+ */
+void relocate_tombstone_marks_changed(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+
+  if (!relocate_tombstones
+      || !(ts = relocate_tombstone_find(chptr->chname))
+      || ts->chan_ts != chptr->creationtime)
+    return;
+
+  /* Still the tombstone: the MODE set the redirect it already had, or
+   * changed something else. */
+  if (relocate_tombstone_channel(ts) == chptr)
+    return;
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "relocate: tombstone %s -> %s cancelled (%s)", ts->oldname,
+            ts->newname, relocate_missing_mark(ts, chptr));
+
+  relocate_tombstone_cancelled(ts, chptr, 1);
+  relocate_tombstone_end(ts, 0);
+}
+
+/** Announce a tombstone's redirect to its LOCAL members, as a MODE +L
+ * from the server.  Nothing goes to other servers: each does the same
+ * from the same RN.
+ * @param[in] chptr The tombstone; its mode.redir is set.
+ */
+static void relocate_announce_redirect(struct Channel *chptr)
+{
+  struct ModeBuf mbuf;
+
+  modebuf_init(&mbuf, &me, NULL, chptr, MODEBUF_DEST_CHANNEL);
+  modebuf_mode_string(&mbuf, MODE_ADD | MODE_REDIRECT, chptr->mode.redir, 0);
+  modebuf_flush(&mbuf);
+}
+
+/** Take a tombstone's redirect off its channel and tell its LOCAL
+ * members (MODE -L from the server) -- for a tombstone that is cancelled
+ * at its deadline because it is registered.  Nothing goes to other
+ * servers, for the same reason.  -L has no parameter and the mode buffer
+ * keeps no reference to the name, so the name is cleared here.
+ * @param[in] chptr The tombstone.
+ */
+static void relocate_withdraw_redirect(struct Channel *chptr)
+{
+  struct ModeBuf mbuf;
+
+  if (!chptr->mode.redir[0])
+    return;                     /* a detached tombstone has none */
+
+  modebuf_init(&mbuf, &me, NULL, chptr, MODEBUF_DEST_CHANNEL);
+  modebuf_mode_string(&mbuf, MODE_DEL | MODE_REDIRECT, chptr->mode.redir, 0);
+  modebuf_flush(&mbuf);
+
+  chptr->mode.redir[0] = '\0';
+}
+
+/** The deadline's work for one tombstone: part every member still in it
+ * and let the channel go -- or cancel the tombstone, when its channel is
+ * registered or is no longer the tombstone.
+ *
+ * NOTHING here goes to servers.  Every server holds the same tombstone
+ * with the same deadline and runs this over its own copy of the members;
+ * a PART sent out would be applied a second time everywhere.  A user of
+ * another server is taken out of this server's copy without a word, and
+ * that user's own server tells him.
+ *
+ * @param[in] ts The record, already off the list.
+ */
+static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
+{
+  struct Channel *chptr;
+  struct Membership *member;
+  unsigned int nswept = 0;
+
+  /* SAFETY NET.  A record whose channel is not its tombstone any more
+   * should not reach its deadline: whatever takes a mark off a tombstone
+   * ends the record there and then (relocate_tombstone_marks_changed()),
+   * and whatever replaces or re-stamps the channel tells the record
+   * (relocate_tombstone_channel_gone(), _ts_lost(),
+   * relocate_channel_restamped()).  What can still arrive here is a
+   * change that went past every hook, a BURST's mode merge among them.
+   * The record is dropped (the caller has unlinked it) and NOBODY
+   * is parted: a channel that is not the tombstone may be somebody else's
+   * under the old name. */
+  if (!(chptr = relocate_tombstone_channel(ts))) {
+    struct Channel *stray = FindChannel(ts->oldname);
+
+    /* First: is it the record's channel at all?  One of another creation
+     * timestamp is another channel that has the name now.  Nothing of it
+     * is this record's -- not its members, not its +z, not its redirect
+     * -- and nothing of it is touched. */
+    if (stray && stray->creationtime != ts->chan_ts) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "relocate: tombstone %s -> %s: the channel of that name is "
+                "another channel at the deadline (created %Tu, the "
+                "tombstone's was created %Tu); record dropped, channel not "
+                "touched", ts->oldname, ts->newname, stray->creationtime,
+                ts->chan_ts);
+      return;
+    }
+
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "relocate: tombstone %s -> %s is no longer one at its "
+              "deadline (%s); record dropped, nobody parted",
+              ts->oldname, ts->newname, relocate_missing_mark(ts, stray));
+
+    if (stray)
+      relocate_tombstone_cancelled(ts, stray, 0);
+    return;
+  }
+
+  /* The tombstone is REGISTERED: services registered the old name inside
+   * the grace.  Sweeping it would part everybody, services' own client
+   * included, and destroy a registered channel.  It is cancelled instead:
+   * nobody is parted, the redirect is withdrawn, the record goes (the
+   * caller has unlinked it), and the channel is an ordinary registered
+   * channel again.  +z stays; on a registered channel it is services'.
+   *
+   * +R is looked at HERE, at the deadline, and never when it arrives.  A
+   * MODE +R that crosses the RN lands on the old channel on one server
+   * (before the relocation: it moves to the new channel with the rest)
+   * and on the tombstone on another; that and a deliberate registration
+   * of the old name look the same when the MODE arrives.  At the
+   * deadline every server reads its own copy at the same moment, and
+   * services have had the whole grace to take a stray +R back. */
+  if (chptr->mode.mode & MODE_REGISTERED) {
+    relocate_withdraw_redirect(chptr);
+
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "relocate: tombstone %s -> %s is registered at its deadline; "
+              "cancelled, %u member%s left in place",
+              ts->oldname, ts->newname, chptr->users,
+              (chptr->users == 1) ? "" : "s");
+    return;
+  }
+
+  /* From the head each time: removing a member can remove others
+   * (remove_user_from_channel() clears out a channel left with zombies
+   * only).  +z is still set, so the channel survives its last member. */
+  while ((member = chptr->members)) {
+    struct Client *user = member->user;
+
+    /* A member whose JOIN the channel was never shown (+D) is not shown
+     * leaving either, as in joinbuf_flush(); a local one gets his own
+     * PART.  For everybody else the channel-wide PART includes the user
+     * himself. */
+    if (!(member->status & (CHFL_ZOMBIE | CHFL_DELAYED)))
+      sendcmdto_channel_butserv_butone(user, CMD_PART, chptr, NULL, 0,
+                                       "%H :Channel has moved to %s",
+                                       chptr, ts->newname);
+    else if (MyUser(user))
+      sendcmdto_one(user, CMD_PART, user, "%H :Channel has moved to %s",
+                    chptr, ts->newname);
+
+    remove_user_from_channel(user, chptr);
+    nswept++;
+  }
+
+  /* The marks had to stay on until here, or the last removal would have
+   * destroyed the channel under the loop.  That also means no removal
+   * scheduled the collection of the empty channel; it is done by hand,
+   * the way a last PART would.  The passwords are gone since the
+   * relocation, so sub1_from_channel() resets the modes and destroys the
+   * channel or schedules that; chptr may be freed by it. */
+  relocate_tombstone_clear_marks(chptr);
+  sub1_from_channel(chptr);
+
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "relocate: tombstone %s -> %s dissolved (%u member%s parted)",
+            ts->oldname, ts->newname, nswept, (nswept == 1) ? "" : "s");
+}
+
+/** End a tombstone record -- the ONE way a record goes other than by its
+ * own timer expiring (struct RelocateTombstone, "Lifetime").
+ *
+ * In order:
+ * 1. The record is unlinked, so that nothing below finds it again.  A
+ *    sweep ends in destruct_channel(), which calls
+ *    relocate_tombstone_channel_gone(), which looks the dying channel's
+ *    record up by name -- and must not find the one being ended.
+ * 2. With @a dissolve, the deadline's work is done here and now
+ *    (relocate_tombstone_sweep()).  The record is whole while it runs.
+ * 3. The record is freed by whoever owns it:
+ *    - RELOCATE_TIMER_NONE: nobody else; freed here.
+ *    - RELOCATE_TIMER_ARMED: the event engine holds the embedded timer.
+ *      timer_del() takes it off the queue and generates ET_DESTROY
+ *      before it returns, and relocate_tombstone_expire_cb() frees the
+ *      record there.  No ET_EXPIRE can follow, so nothing is swept
+ *      twice.
+ *    - RELOCATE_TIMER_FIRING: the record's own ET_EXPIRE is on the
+ *      stack.  Its callback has unlinked it and is sweeping, and the
+ *      engine generates ET_DESTROY when the callback returns.  Nothing
+ *      is done here, not even the sweep: timer_del() does nothing to a
+ *      timer in dispatch, and a free would leave the engine with freed
+ *      memory.  (An unlinked record cannot be looked up, so this is not
+ *      reached today; it is here so that it cannot become a double
+ *      free.)
+ *
+ * @a ts must not be used after this returns, and the tombstone's channel
+ * may have been freed by the sweep.
+ * @param[in] ts The record.
+ * @param[in] dissolve Non-zero to do the deadline's work first; zero to
+ *                     drop the record and touch no channel.
+ */
+static void relocate_tombstone_end(struct RelocateTombstone *ts, int dissolve)
+{
+  if (!ts || ts->timer_state == RELOCATE_TIMER_FIRING)
+    return;
+
+  relocate_tombstone_unlink(ts);
+
+  if (dissolve)
+    relocate_tombstone_sweep(ts);
+
+  if (ts->timer_state == RELOCATE_TIMER_ARMED) {
+    timer_del(&ts->timer);      /* -> ET_DESTROY -> MyFree(ts), at once */
+  } else {
+    MyFree(ts);
+  }
+}
+
+/** A channel has been renamed by an RN from the network: if it was a
+ * tombstone, its record follows it.
+ *
+ * The servers that issue renames refuse to rename a tombstone for their
+ * own users, but such an RN can arrive all the same -- from a server
+ * without that refusal, from services -- and every server applies it, so
+ * this one does.  The record is kept by the tombstone's name.  Left under
+ * the old one it would describe nothing, and the renamed channel would
+ * keep +z and +L for good, with members nobody parts.  Under the new
+ * name everything the record stands for carries on: the channel still
+ * redirects, a member can still follow out of it, and it is dissolved at
+ * the same deadline.  Every server does the same from the RN alone.
+ * Cancelling the tombstone instead would make a channel whose community
+ * has left a live one again, on the word of a message that says nothing
+ * of the kind.
+ *
+ * The record is not freed and its timer is not touched; a detached
+ * record stays detached.
+ * @param[in] oldname The name the channel had.
+ * @param[in] chptr The channel under its new name.
+ */
+static void relocate_tombstone_renamed(const char *oldname,
+                                       struct Channel *chptr)
+{
+  struct RelocateTombstone *ts, *stale;
+
+  if (!(ts = relocate_tombstone_find(oldname)))
+    return;
+
+  /* A record under the old name that was made for another channel (its
+   * creation timestamp is not this one's) does not follow this one. */
+  if (ts->chan_ts != chptr->creationtime) {
+    relocate_tombstone_end(ts, 0);
+    return;
+  }
+
+  /* A record left under the new name describes a channel that is gone
+   * (the name was free for this rename): two records must not answer to
+   * one name. */
+  if ((stale = relocate_tombstone_find(chptr->chname)) && stale != ts)
+    relocate_tombstone_end(stale, 0);
+
+  /* rename_channel() keeps the creation timestamp. */
+  ircd_strncpy(ts->oldname, chptr->chname, sizeof(ts->oldname));
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "relocate: tombstone %s (-> %s) was renamed to %s; its record "
+            "follows it", oldname, ts->newname, ts->oldname);
+}
+
+/** A channel is about to be freed (destruct_channel()): a tombstone
+ * record for it is over.
+ *
+ * +z keeps a tombstone from being collected when it empties, but not
+ * from services' DESTRUCT, nor from a -z by services followed by the
+ * last member leaving.  The record would be left with a timer running
+ * for a name anybody can make a channel under.
+ * relocate_tombstone_channel() would keep that channel from being swept,
+ * but a record that describes nothing is better ended when it stops
+ * describing something.
+ *
+ * The record whose own sweep is destroying the channel is not on the
+ * list (both ways a record is swept unlink it first), so it is not ended
+ * a second time from here.
+ * @param[in] chptr The channel.
+ */
+void relocate_tombstone_channel_gone(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+
+  if ((ts = relocate_tombstone_find(chptr->chname)))
+    relocate_tombstone_end(ts, 0);
+}
+
+/* ---------- A channel's creation timestamp changes ----------
+ *
+ * A record is bound to its channel by name and creation timestamp
+ * (RelocateTombstone.chan_ts), so every place that changes a channel's
+ * creationtime has to say which of two things happened:
+ *
+ * - The channel was WIPED for an older timestamp: the channel of that
+ *   name is another server's older one from here on, and ours -- with
+ *   the tombstone it was -- is over.  ms_burst()'s wipe-out, and
+ *   ms_join()'s for a JOIN that carries an older timestamp.
+ *   -> relocate_tombstone_ts_lost(), BEFORE the timestamp is assigned.
+ * - The timestamp was CHANGED and the channel left as it is, modes and
+ *   all: mode_parse() for a server MODE with an older timestamp (always
+ *   older: a correction), ms_create() for a CREATE it accepts for a
+ *   channel that exists (older: a correction; later: only for an empty
+ *   channel, which is being made anew), and ms_burst() when our EMPTY
+ *   channel is a few seconds older than the BURST's ("use the same TS on
+ *   both sides": always later, the other side's channel).
+ *   -> relocate_channel_restamped(), AFTER the assignment: to an OLDER
+ *      timestamp the records follow; to a later one they do not.
+ *
+ * get_channel(), and ms_join() for a channel it has just made, stamp a
+ * NEW channel; no record exists for one.  A local JOIN of an empty
+ * channel (do_join(), m_svsjoin.c) adds a second to the timestamp, but
+ * never of a channel that is +z, so never of a tombstone.  A destroyed
+ * channel takes its record along (relocate_tombstone_channel_gone()),
+ * and a renamed one keeps its timestamp.
+ *
+ * A record whose channel changed timestamp WITHOUT either call would no
+ * longer find it; relocate_tombstone_sweep() then drops the record at
+ * the deadline without touching the channel, and logs exactly that.
+ */
+
+/** A channel is about to be wiped because a line carries an older
+ * creation timestamp for its name (ms_burst(), ms_join()): the channel
+ * of that name is another server's from here on.  A tombstone held for
+ * the losing channel is over, at once and on every server that loses
+ * alike: its record is dropped, and so are its two marks, neither of
+ * which the wipe-out can be relied on to take -- +z is an extended mode,
+ * which both wipe-outs leave alone, and ms_join()'s does not clear a
+ * redirect either.  Left on, they would make an ordinary channel a
+ * tombstone that nobody will ever dissolve.  The redirect goes only when
+ * it is still the record's own.
+ * @param[in] chptr The channel, before its timestamp is changed and
+ *                  before the winner's modes are applied.
+ */
+void relocate_tombstone_ts_lost(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+
+  if (!(ts = relocate_tombstone_find(chptr->chname)))
+    return;
+
+  /* A record made for another channel that had the name: only the record
+   * goes. */
+  if (ts->chan_ts == chptr->creationtime) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "relocate: tombstone %s -> %s (created %Tu) lost to an older "
+              "creation timestamp; cancelled", ts->oldname, ts->newname,
+              ts->chan_ts);
+
+    chptr->mode.exmode &= ~EXMODE_PERSIST;
+    if (chptr->mode.redir[0]
+        && 0 == ircd_strcmp(chptr->mode.redir, ts->newname))
+      relocate_withdraw_redirect(chptr);
+  }
+
+  relocate_tombstone_end(ts, 0);
+}
+
+/** A channel's creation timestamp has been changed and the channel
+ * itself left alone (see "A channel's creation timestamp changes"): what
+ * of the records bound to it -- the record of the channel as a tombstone
+ * (chan_ts), and every record that points AT it and knows its target by
+ * that timestamp (target_ts)?  Only a record bound to the old value is
+ * concerned.
+ *
+ * - To an OLDER timestamp: a correction of the same channel -- this
+ *   server learned that the channel is older than it thought, from a
+ *   server MODE or a CREATE that carries the earlier time.  The records
+ *   follow.
+ * - To a LATER timestamp: not a correction.  Only an EMPTY channel takes
+ *   one (ms_create() for a channel without members, ms_burst()'s
+ *   few-seconds rule), and what it means is that somebody made the name
+ *   anew.  The records do NOT follow:
+ *     * a tombstone whose TARGET this was has lost its target: it is
+ *       detached (relocate_tombstone_detach()) -- no forward, no status,
+ *       still dissolved on time;
+ *     * a record whose OWN channel this was no longer describes it and
+ *       is ended; the channel, which is somebody else's now, is not
+ *       touched.
+ *
+ * (A target that was DESTROYED and made again from scratch comes through
+ * no hook at all; relocate_join_verdict() finds it out when the redirect
+ * is about to be used.)
+ * @param[in] chptr The channel, with its new timestamp.
+ * @param[in] old_ts The timestamp it had.
+ */
+void relocate_channel_restamped(struct Channel *chptr, time_t old_ts)
+{
+  struct RelocateTombstone *ts, *next;
+  int older = (chptr->creationtime < old_ts);
+
+  if (old_ts == chptr->creationtime)
+    return;
+
+  /* ->next first: a record can be ended in this loop (that one only). */
+  for (ts = relocate_tombstones; ts; ts = next) {
+    next = ts->next;
+
+    /* As a target. */
+    if (ts->target_ts == old_ts
+        && 0 == ircd_strcmp(ts->newname, chptr->chname)) {
+      if (older)
+        ts->target_ts = chptr->creationtime;
+      else if (!ts->detached) {
+        struct Channel *tomb = relocate_tombstone_channel(ts);
+
+        if (tomb)
+          relocate_tombstone_detach(ts, tomb, chptr);
+      }
+    }
+
+    /* As the tombstone's own channel. */
+    if (ts->chan_ts == old_ts
+        && 0 == ircd_strcmp(ts->oldname, chptr->chname)) {
+      if (older)
+        ts->chan_ts = chptr->creationtime;
+      else {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "relocate: the channel of tombstone %s -> %s was "
+                  "re-stamped from %Tu to a later %Tu: another channel has "
+                  "the name; record ended, channel not touched",
+                  ts->oldname, ts->newname, old_ts, chptr->creationtime);
+        relocate_tombstone_end(ts, 0);
+      }
+    }
+  }
+}
+
+/** A tombstone's timer: its deadline, and its end.
+ *
+ * ET_EXPIRE makes the record unreachable and does the deadline's work.
+ * It does not free the record and does not call timer_del(): the engine
+ * still uses the timer when the callback returns, and generates
+ * ET_DESTROY itself then.  ET_DESTROY -- that one, or the one
+ * relocate_tombstone_end()'s timer_del() generates -- is the only place
+ * a record that had a timer is freed.
+ * @param[in] ev The timer's event.
+ */
+static void relocate_tombstone_expire_cb(struct Event *ev)
+{
+  struct RelocateTombstone *ts;
+
+  assert(0 != ev_timer(ev));
+  assert(0 != t_data(ev_timer(ev)));
+
+  ts = (struct RelocateTombstone *)t_data(ev_timer(ev));
+
+  switch (ev_type(ev)) {
+  case ET_EXPIRE:
+    /* Unlinked BEFORE the sweep, for the reason given at
+     * relocate_tombstone_end(). */
+    relocate_tombstone_unlink(ts);
+    ts->timer_state = RELOCATE_TIMER_FIRING;
+
+    relocate_tombstone_sweep(ts);
+    break;
+
+  case ET_DESTROY:
+    MyFree(ts);
+    break;
+
+  default:
+    break;
+  }
+}
+
+/** The deadline this server goes by when the RN carries none.
+ * @return Network time.
+ */
+static time_t relocate_fallback_deadline(void)
+{
+  return relocate_expiry_from_grace(TStime(), RELOCATE_GRACE_FALLBACK);
+}
+
+/** Make the record of a tombstone: bound to the channel's name and
+ * creation timestamp.  It is linked, and its timer is NOT armed: the
+ * caller fills it in and then calls relocate_tombstone_settle().
+ * @param[in] chptr The tombstone.
+ * @param[in] newname The name the network has for its target.
+ * @param[in] expires The deadline, network time.
+ * @return The record.
+ */
+static struct RelocateTombstone *
+relocate_tombstone_add(struct Channel *chptr, const char *newname,
+                       time_t expires)
+{
+  struct RelocateTombstone *ts;
+
+  /* One record per name.  One that is still under this name is not this
+   * channel's live tombstone -- the callers deal with that case before
+   * they come here -- but a leftover: the record of a tombstone that
+   * lost its redirect and was waiting out its deadline, or of another
+   * channel that had the name.  It goes, whatever state its timer is
+   * in. */
+  if ((ts = relocate_tombstone_find(chptr->chname)))
+    relocate_tombstone_end(ts, 0);
+
+  ts = (struct RelocateTombstone *)MyMalloc(sizeof(struct RelocateTombstone));
+  memset(ts, 0, sizeof(*ts));
+  ircd_strncpy(ts->oldname, chptr->chname, sizeof(ts->oldname));
+  ircd_strncpy(ts->newname, newname, sizeof(ts->newname));
+  ts->chan_ts = chptr->creationtime;
+  ts->expires = expires;
+
+  ts->next = relocate_tombstones;
+  relocate_tombstones = ts;
+
+  return ts;
+}
+
+/** Arm a record's timer for its deadline, or arm it again for a deadline
+ * that changed -- or, when the deadline is already here, do its work on
+ * the spot and end the record.
+ *
+ * The deadline is network time and the event loop runs on this server's
+ * own clock, so the timer is set for the deadline less TSoffset: the
+ * same instant.  (A SETTIME that moves TSoffset afterwards does not move
+ * a timer that is armed.)
+ *
+ * A deadline that is now or past -- an RN that says so, one that arrived
+ * late, a record settled again after its time -- is not left to a timer
+ * that is already due.  Such a timer runs only after the event loop has
+ * dealt with the lines it has already read, and a JOIN of the old name
+ * among them would still be forwarded.  relocate_tombstone_end() frees
+ * the record whatever state its timer is in.
+ * @param[in] ts The record, linked.
+ * @return 1 when the record lives on with its timer armed; 0 when it was
+ *         dissolved: @a ts is gone then, and its channel may be.
+ */
+static int relocate_tombstone_settle(struct RelocateTombstone *ts)
+{
+  if (ts->expires <= TStime()) {
+    relocate_tombstone_end(ts, 1);
+    return 0;
+  }
+
+  if (ts->timer_state == RELOCATE_TIMER_ARMED) {
+    timer_chg(&ts->timer, TT_ABSOLUTE, ts->expires - TSoffset);
+  } else if (ts->timer_state == RELOCATE_TIMER_NONE) {
+    timer_add(timer_init(&ts->timer), relocate_tombstone_expire_cb,
+              (void *)ts, TT_ABSOLUTE, ts->expires - TSoffset);
+    ts->timer_state = RELOCATE_TIMER_ARMED;
+  }
+
+  return 1;
+}
+
+/** Detach a tombstone from its target (RelocateTombstone.detached): the
+ * +L is withdrawn from the channel, with a MODE -L from the server to its
+ * local members, and the operators are told, once.  See
+ * relocate_tombstone_point() for what a detached tombstone is.
+ * @param[in] ts The record.
+ * @param[in] chptr The tombstone.
+ * @param[in] there The channel that has the target's name here.
+ */
+static void relocate_tombstone_detach(struct RelocateTombstone *ts,
+                                      struct Channel *chptr,
+                                      struct Channel *there)
+{
+  relocate_withdraw_redirect(chptr);
+
+  if (ts->detached)
+    return;
+
+  ts->detached = 1;
+  sendto_opmask_butone(0, SNO_OLDSNO,
+                       "Relocation tombstone %s: its target %s is another "
+                       "channel on this server (created %Tu; the target was "
+                       "created %Tu).  The tombstone has been detached from "
+                       "its target: it forwards nobody and carries no "
+                       "status, and is still dissolved at its deadline.",
+                       ts->oldname, ts->newname, there->creationtime,
+                       ts->target_ts);
+}
+
+/** Point a tombstone at a target -- or DETACH it, when the target's name
+ * is not the target here.
+ *
+ * A tombstone's redirect may only ever name a channel that, IF it exists
+ * on this server, is the channel the record means: the same name, and
+ * the creation timestamp every channel of this relocation has
+ * (@a target_ts).  A name that is free here is fine -- the tombstone then
+ * points at a channel this server does not hold, as it does whenever its
+ * target has emptied.  A name that ANOTHER channel has here is not:
+ * pointed at it, the tombstone would forward every joiner into a
+ * stranger's channel.  That happens when this server is out of step with
+ * the network -- the network renamed the target to a name that is taken
+ * here -- and when the target emptied and somebody made its name again
+ * (relocate_channel_restamped(), relocate_join_verdict()).
+ *
+ * Then the tombstone is detached (RelocateTombstone.detached): the record
+ * remembers the network's name for the target, the +L is withdrawn from
+ * the channel (a MODE -L from the server to its local members), and the
+ * operators are told.  A detached tombstone forwards nobody and admits
+ * nobody (do_join()), nobody follows out of it with status
+ * (relocate_follow()), and it still ends on time: its members are parted
+ * at the deadline and +z goes, as for any tombstone.  It is attached
+ * again as soon as something points it at a name that passes this test.
+ * @param[in] ts The tombstone's record.
+ * @param[in] chptr The tombstone.
+ * @param[in] target The name the network has for the target.
+ * @param[in] target_ts The target's creation timestamp.
+ */
+static void relocate_tombstone_point(struct RelocateTombstone *ts,
+                                     struct Channel *chptr, const char *target,
+                                     time_t target_ts)
+{
+  struct Channel *there = FindChannel(target);
+  char target_buf[CHANNELLEN + 1];
+
+  /* @a target may be the record's own newname. */
+  ircd_strncpy(target_buf, target, sizeof(target_buf));
+  ircd_strncpy(ts->newname, target_buf, sizeof(ts->newname));
+  ts->target_ts = target_ts;
+
+  if (there && there->creationtime != target_ts) {
+    relocate_tombstone_detach(ts, chptr, there);
+    return;
+  }
+
+  ts->detached = 0;
+  if (0 != ircd_strcmp(chptr->mode.redir, ts->newname)) {
+    ircd_strncpy(chptr->mode.redir, ts->newname, sizeof(chptr->mode.redir));
+    relocate_announce_redirect(chptr);
+  } else
+    /* the same name, perhaps in another spelling */
+    ircd_strncpy(chptr->mode.redir, ts->newname, sizeof(chptr->mode.redir));
+}
+
+/** A channel that tombstones redirect to has itself moved on -- it was
+ * relocated again, or renamed: they redirect to where it went.  A JOIN
+ * of the oldest name is then forwarded once and not along a chain ("#a
+ * to #b, then #b to #c": #a redirects to #c), and never lands on a name
+ * the community has left, which anybody could take.
+ *
+ * The target is a channel, not a name: only the tombstones bound to THE
+ * channel that moved -- its name and its creation timestamp
+ * (RelocateTombstone.target_ts) -- follow it.  One whose target emptied,
+ * and whose target's name somebody has since taken, does not follow that
+ * channel when it is renamed or relocated.  Each is repointed through
+ * relocate_tombstone_point(): when the new name is another channel's on
+ * this server it is detached instead.
+ * @param[in] oldtarget The name that stopped being where the channel is.
+ * @param[in] old_ts Creation timestamp of the channel that had that name,
+ *                   or NULL when this server does not hold it (a rename
+ *                   it could only pass on): every tombstone pointing at
+ *                   the name is then repointed.
+ * @param[in] newtarget The name it is under now.
+ * @param[in] new_ts Creation timestamp of the channel under @a newtarget;
+ *                   NULL to leave each record's as it is.
+ */
+static void relocate_tombstone_retarget(const char *oldtarget,
+                                        const time_t *old_ts,
+                                        const char *newtarget,
+                                        const time_t *new_ts)
+{
+  struct RelocateTombstone *ts;
+  /* Copies: either may point into a record this loop rewrites. */
+  time_t was = old_ts ? *old_ts : 0;
+  time_t becomes = new_ts ? *new_ts : 0;
+
+  for (ts = relocate_tombstones; ts; ts = ts->next) {
+    struct Channel *chptr;
+
+    if (0 != ircd_strcmp(ts->newname, oldtarget))
+      continue;
+    if (old_ts && ts->target_ts != was)
+      continue;
+
+    /* Before the record is changed: the channel is recognised by its
+     * redirect to where the record points NOW.  A record whose channel
+     * is no longer its tombstone is left as it is. */
+    if (!(chptr = relocate_tombstone_channel(ts)))
+      continue;
+
+    relocate_tombstone_point(ts, chptr, newtarget,
+                             new_ts ? becomes : ts->target_ts);
+  }
+}
+
+/** A channel has been renamed by an RN -- one this server applied, or
+ * one it could only pass on: every tombstone whose target it was now
+ * points at its new name.
+ *
+ * Otherwise the tombstone's +L and its record would go on naming a
+ * channel that no longer exists, and whoever made a channel of that name
+ * next would be sent every user the tombstone forwards for the rest of
+ * the grace.
+ *
+ * Every server does this from the RN alone, the one that cannot apply
+ * the rename included: the network did rename the channel, and a
+ * redirect left on the old name here would be the one that can be taken.
+ * But a tombstone is pointed at the new name only when that name is free
+ * here or is the target itself; when this server could not apply the
+ * rename because ANOTHER channel has the new name, the tombstone is
+ * detached (relocate_tombstone_point()).
+ * @param[in] oldname The name the channel had.
+ * @param[in] newname The name it has now.
+ * @param[in] chptr The channel, when this server holds it (under either
+ *                  name), or NULL when it does not.
+ */
+static void relocate_target_renamed(const char *oldname, const char *newname,
+                                    struct Channel *chptr)
+{
+  relocate_tombstone_retarget(oldname, chptr ? &chptr->creationtime : NULL,
+                              newname, chptr ? &chptr->creationtime : NULL);
+}
+
+/** Copy a ban list.  The tombstone keeps its own bans, so the new
+ * channel gets copies.  make_ban() works out from the mask everything
+ * that follows from it; who set the ban, when, and whether it is an
+ * exception are carried over.
+ * @param[in,out] dst Head of the list to fill (empty).
+ * @param[in] src The list to copy.
+ */
+static void relocate_copy_bans(struct Ban **dst, struct Ban *src)
+{
+  struct Ban *b;
+  struct Ban **tail = dst;
+
+  for (b = src; b; b = b->next) {
+    struct Ban *nb = make_ban(b->banstr);
+
+    if (!nb)
+      return;
+
+    nb->when = b->when;
+    nb->flags |= (b->flags & BAN_EXCEPTION);
+    ircd_strncpy(nb->who, b->who, sizeof(nb->who));
+    nb->next = NULL;
+
+    *tail = nb;
+    tail = &nb->next;
+  }
+}
+
+/** Tell one LOCAL member who stays in a tombstone that the channel has
+ * moved.  The words are those a server of the ircv3.2-upgrade branch
+ * sends a client that did not ask for that branch's RELOCATE message,
+ * which no client here can have.
+ * @param[in] user The member.
+ * @param[in] chptr The tombstone.
+ * @param[in] newname Where the channel went.
+ * @param[in] reason Reason given (may be empty).
+ * @param[in] expires The tombstone's deadline, network time.
+ */
+static void relocate_notify_stayer(struct Client *user, struct Channel *chptr,
+                                   const char *newname, const char *reason,
+                                   time_t expires)
+{
+  char reasonpart[TOPICLEN + 4];
+
+  if (*reason)
+    ircd_snprintf(0, reasonpart, sizeof(reasonpart), " (%s)", reason);
+  else
+    reasonpart[0] = '\0';
+
+  sendcmdto_one(&his, CMD_NOTICE, user,
+                "%H :%s has moved to %s%s. Join %s to follow; this "
+                "channel closes in %d minutes.",
+                chptr, chptr->chname, newname, reasonpart, newname,
+                (int)((expires > TStime() ? expires - TStime() : 0) / 60));
+}
+
+/** Take off a tombstone what would keep it from working as one, or what
+ * is not a dissolving channel's to keep: the limit -- the redirect of
+ * +L is followed only by a JOIN that finds the channel full (do_join()),
+ * which without a limit is every JOIN -- and the channel passwords.
+ * Nobody is told; every server does the same.
+ * @param[in] chptr The tombstone.
+ */
+static void relocate_tombstone_normalise(struct Channel *chptr)
+{
+  /* The limit is its parameter, as the redirect is: there is no bit for
+   * it in mode.mode. */
+  chptr->mode.limit = 0;
+  chptr->mode.apass[0] = '\0';
+  chptr->mode.upass[0] = '\0';
+}
+
+/** Make a channel a tombstone's channel: +z, no limit and no passwords
+ * (relocate_tombstone_normalise()).  The redirect is set by the caller
+ * (relocate_execute() itself, relocate_tombstone_point()).  Nobody is
+ * told here.  The registration (+R) comes off: it has moved to the new
+ * channel, and services repoint their own record.
+ * @param[in] chptr The channel that becomes a tombstone.
+ */
+static void relocate_mark_tombstone(struct Channel *chptr)
+{
+  chptr->mode.mode &= ~MODE_REGISTERED;
+  relocate_tombstone_normalise(chptr);
+
+  chptr->mode.exmode |= EXMODE_PERSIST;
+}
+
+/** Relocate a channel on THIS server, as every server does from the same
+ * RN: make the new channel with the old one's state, move the issuer,
+ * tell the local members who stay, and turn the old channel into a
+ * tombstone until @a expires.  Nothing is sent to servers.
+ *
+ * @param[in] sptr The issuer: the source of the RN.  Only a user who is
+ *                 a member of @a chptr here is moved.  When the source is
+ *                 a server (services relocated the channel), or a user
+ *                 this server does not have in the channel, nobody is
+ *                 moved and the new channel starts empty -- on every
+ *                 server alike.
+ * @param[in] chptr The channel; it keeps its name and becomes the
+ *                  tombstone.  When @a expires is now or past it is
+ *                  dissolved before this returns and may be freed.
+ * @param[in] newname Name of the channel to make.
+ * @param[in] reason Reason given (may be empty).
+ * @param[in] expires The tombstone's deadline, network time.
+ * @return 0 when done, -1 when @a newname cannot be a channel here, -2
+ *         when a channel of that name exists here.
+ */
+static int relocate_execute(struct Client *sptr, struct Channel *chptr,
+                            const char *newname, const char *reason,
+                            time_t expires)
+{
+  struct Channel *newchan;
+  struct Membership *member, *mover = NULL;
+  struct RelocateTombstone *ts;
+  struct SLink *link;
+  char oldname[CHANNELLEN + 1];
+  char newname_buf[CHANNELLEN + 1];
+
+  if (strlen(newname) > CHANNELLEN)
+    return -1;
+  if (FindChannel(newname))
+    return -2;
+
+  ircd_strncpy(oldname, chptr->chname, sizeof(oldname));
+  ircd_strncpy(newname_buf, newname, sizeof(newname_buf));
+
+  /* A record still under this channel's name is a leftover: the caller
+   * has dealt with a channel that is a live tombstone, so this is one
+   * that lost its redirect and whose record was waiting out its deadline
+   * to hand +z back.  Hand it back now, by that record's rule (not from
+   * a registered channel), so that the new channel does not inherit a
+   * tombstone's +z as the channel's own.  A record made for another
+   * channel that had the name is just dropped: this channel's +z is its
+   * own. */
+  if ((ts = relocate_tombstone_find(oldname))) {
+    if (ts->chan_ts == chptr->creationtime
+        && !(chptr->mode.mode & MODE_REGISTERED))
+      chptr->mode.exmode &= ~EXMODE_PERSIST;
+    relocate_tombstone_end(ts, 0);
+  }
+
+  if (!(newchan = get_channel(sptr, newname_buf, CGT_CREATE)))
+    return -1;
+
+  /* 1. The channel's state goes to the new name -- what a rename keeps
+   * by keeping the structure.  struct Mode is modes, key, limit and
+   * passwords, so registration (+R) and ownership (the passwords) follow
+   * the community; step 2 takes them off the tombstone.  The tombstone
+   * keeps its own bans, so the new channel gets copies.  Pending invites
+   * move: an invite is leave to join the community, which is at the new
+   * name now, and each invited user's own list is repointed as
+   * rename_channel() repoints it. */
+  newchan->mode = chptr->mode;
+  newchan->creationtime = chptr->creationtime;
+  newchan->topic_time = chptr->topic_time;
+  ircd_strncpy(newchan->topic, chptr->topic, sizeof(newchan->topic));
+  ircd_strncpy(newchan->topic_nick, chptr->topic_nick,
+               sizeof(newchan->topic_nick));
+  relocate_copy_bans(&newchan->banlist, chptr->banlist);
+  relocate_copy_bans(&newchan->exceptlist, chptr->exceptlist);
+
+  newchan->invites = chptr->invites;
+  chptr->invites = NULL;
+  for (link = newchan->invites; link; link = link->next) {
+    struct SLink *inv;
+
+    for (inv = cli_user(link->value.cptr)->invited; inv; inv = inv->next) {
+      if (inv->value.chptr == chptr) {
+        inv->value.chptr = newchan;
+        break;
+      }
+    }
+  }
+
+  /* 2. The old channel becomes the tombstone, BEFORE anybody leaves it:
+   * +z is what keeps it when the issuer was its last member.  It is set
+   * on the structure and never sent; every server sets it from the RN. */
+  relocate_mark_tombstone(chptr);
+  /* newname_buf is the channel made a few lines up: the target itself. */
+  ircd_strncpy(chptr->mode.redir, newname_buf, sizeof(chptr->mode.redir));
+
+  /* 3. The members.  The issuer moves; everybody else stays where he
+   * is, and is told when he is a user of this server.  A zombie is
+   * neither moved nor told. */
+  for (member = chptr->members; member; member = member->next_member) {
+    if (IsZombie(member))
+      continue;
+
+    if (member->user == sptr)
+      mover = member;
+    else if (MyUser(member->user))
+      relocate_notify_stayer(member->user, chptr, newname_buf, reason,
+                             expires);
+  }
+
+  /* 4. Move the issuer, with the status he has; a hidden (+D) join stays
+   * hidden.  Nothing is sent to servers -- the RN says it -- and the
+   * issuer is never a user of this server, which has no command that
+   * issues a relocation, so there is nobody to tell that he is in the
+   * new channel now.  The local members who stay see him leave, unless
+   * they never saw him join. */
+  if (mover) {
+    unsigned int status = mover->status & (CHFL_CHANOP | CHFL_HALFOP
+                                           | CHFL_VOICE | CHFL_DELAYED);
+    int oplevel = OpLevel(mover);
+
+    add_user_to_channel(newchan, sptr, status, oplevel);
+    remove_user_from_channel(sptr, chptr);
+
+    if (!(status & CHFL_DELAYED))
+      sendcmdto_channel_butserv_butone(sptr, CMD_PART, chptr, NULL, 0,
+                                       "%H :Moved to %s", chptr, newname_buf);
+  }
+
+  /* 5. The redirect is shown to the members who stayed, the record is
+   * made, and tombstones that redirected to this channel now redirect to
+   * where it went. */
+  relocate_announce_redirect(chptr);
+
+  ts = relocate_tombstone_add(chptr, newname_buf, expires);
+  ts->target_ts = newchan->creationtime;
+
+  relocate_tombstone_retarget(oldname, &newchan->creationtime, newname_buf,
+                              &newchan->creationtime);
+
+  /* Last: a deadline that is already here dissolves the tombstone on the
+   * spot, which frees ts and can free chptr. */
+  relocate_tombstone_settle(ts);
+
+  return 0;
+}
+
+/* ---------- Who can be in a tombstone ----------
+ *
+ * A member who follows takes the status he holds in the tombstone when
+ * he follows (below).  So an op who stayed can op or voice somebody in
+ * the tombstone afterwards, and that member then arrives in the new
+ * channel with it.  That is sound PROVIDED the membership of a tombstone
+ * is closed: nobody gets in after the relocation.
+ *
+ * do_join() forwards a JOIN of a channel with a redirect only when the
+ * channel is "full" (users >= limit).  A tombstone has no limit, so that
+ * is always true -- until a remaining chanop sets one (MODE +l 500): a
+ * stranger would then join the tombstone itself.  So for a live
+ * tombstone do_join() forwards unconditionally (relocate_join_verdict()),
+ * before it looks at +i, +k, bans, invites or X-tra ops: nothing a user
+ * can set on the tombstone, and no INVITE, lets anybody in.  A user who does not follow
+ * redirects (umode +L) is refused as before and is not joined either.  A
+ * detached tombstone has nowhere to forward to and refuses the JOIN.
+ *
+ * A chanop removing +L ends the tombstone: the channel is then joined
+ * like any channel and nothing follows out of it.  SVSJOIN puts a user
+ * into a channel past every check; that is services' to answer for.  A
+ * member a remote server brings (a JOIN from a server that does not hold
+ * the record, the far side of a netsplit) is that server's user; this
+ * server never moves him, and removes him with everybody at the
+ * deadline.
+ */
+
+/** What is do_join() to do with a local JOIN of @a chptr?  Asked before
+ * any admission check.
+ *
+ * - Not a live tombstone: the ordinary rules (RELOCATE_JOIN_ORDINARY).
+ * - A live tombstone: forward to its redirect whatever its limit
+ *   (RELOCATE_JOIN_FORWARD) -- after one more look at where the redirect
+ *   leads.  The record knows its target by creation timestamp.  If a
+ *   channel of ANOTHER timestamp has the target's name now -- the target
+ *   emptied, was collected, and somebody made the name again, which no
+ *   hook reports -- the target is lost: the tombstone is detached here
+ *   and now, and the JOIN refused.  When no channel has the name the
+ *   JOIN is forwarded and makes one: that is the joiner's own new
+ *   channel, not somebody else's, and the next JOIN finds it and
+ *   detaches.
+ * - A detached tombstone: refuse (RELOCATE_JOIN_REFUSE); it has nowhere
+ *   to forward to, and like every tombstone it admits nobody.
+ * @param[in] chptr The channel being joined.
+ * @return One of the RELOCATE_JOIN_ values.
+ */
+int relocate_join_verdict(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+  struct Channel *there;
+
+  if (!relocate_tombstones
+      || !(ts = relocate_tombstone_find(chptr->chname))
+      || relocate_tombstone_channel(ts) != chptr)
+    return RELOCATE_JOIN_ORDINARY;
+
+  if (!ts->detached && (there = FindChannel(ts->newname))
+      && there->creationtime != ts->target_ts)
+    relocate_tombstone_detach(ts, chptr, there);
+
+  return ts->detached ? RELOCATE_JOIN_REFUSE : RELOCATE_JOIN_FORWARD;
+}
+
+/* ---------- Following: live status, then part ----------
+ *
+ * A member who stays in the tombstone does not lose his standing by
+ * following later.  When he joins the new channel he takes with him the
+ * status he holds IN THE TOMBSTONE AT THAT MOMENT, and leaves the
+ * tombstone in the same breath.  Nothing is recorded when the relocation
+ * runs: the membership is the standing, every server has the same one, a
+ * MODE or KICK in the tombstone changes it like anywhere else, and the
+ * PART that goes with the follow takes it off the network, so it is used
+ * once.
+ *
+ * The rule, for a user of THIS server whose own JOIN of a channel has
+ * just succeeded (do_join(); a JOIN of an old name that +L forwarded
+ * comes the same way):
+ *
+ * 1. The channel joined must be the target of a live tombstone, by name
+ *    and creation timestamp (RelocateTombstone.target_ts): the channel
+ *    the relocation made, not one somebody made under the name after it
+ *    emptied.  Targets are kept flat, so after "#a to #b to #c" every
+ *    tombstone the user could come from points straight at the channel
+ *    he has joined.
+ * 2. The user must be a member of that tombstone right now, and not a
+ *    zombie.  One who was kicked, has parted, or never was in it gets an
+ *    ordinary JOIN.
+ * 3. A user in SEVERAL such tombstones (he stayed in #a, followed to #b,
+ *    stayed again when #b went to #c) leaves all of them and takes the
+ *    union of what he holds in them.
+ * 4. He is given what he holds there and does not have here already --
+ *    never less than the JOIN itself gave him (a channel password that
+ *    ops).
+ * 5. He is parted from the tombstone(s) with a real PART, reason "Channel
+ *    has moved to <new>" (the deadline's): to himself, to the members who
+ *    stay, and to every server.
+ *
+ * On the wire, in this order, from the follower's server:
+ *
+ *     <user> J #new <creation-ts>                 (do_join(), just before)
+ *     <server> M #new +o <user> <creation-ts>     (only if he had status)
+ *     <user> L #old :Channel has moved to #new
+ *
+ * JOIN first: a MODE for somebody who is not in the channel is dropped by
+ * the receiver.  PART last: the status is taken from the old membership,
+ * and at no point is the user in neither channel.  Every receiver applies
+ * three ordinary lines; nothing in them is specific to relocation, and a
+ * remote user's follow needs no code here at all.
+ *
+ * Not done, on purpose:
+ * - A JOIN of the new channel by somebody who is already in it is ignored
+ *   by do_join() before any of this: nothing moves, and he is not parted
+ *   from the tombstone either (a command that did nothing must not part
+ *   its user from another channel).  He is parted at the deadline.
+ * - A JOIN that fails (banned, +i, +k, +r, a full channel) returns from
+ *   do_join() earlier still: the user stays in the tombstone.
+ *
+ * This is what a server of the ircv3.2-upgrade branch does for its own
+ * users, less that branch's bouncer bookkeeping.  It is not something
+ * this server offers: it completes a relocation another server issued,
+ * for the users who happen to be here -- and the PART is what keeps every
+ * other server's copy of the tombstone the same as this one's.
+ */
+
+/** A user of this server has joined @a chptr: if he is following out of
+ * a tombstone, carry his status over and part him from there.  See
+ * "Following: live status, then part".
+ * @param[in] cptr The connection the JOIN came from.
+ * @param[in] sptr The user who joined.
+ * @param[in] chptr The channel he is now a member of.
+ */
+void relocate_follow(struct Client *cptr, struct Client *sptr,
+                     struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+  struct Membership *here;
+  struct JoinBuf part;
+  char reason[CHANNELLEN + 32];
+  unsigned int status = 0, grant;
+  int oplevel = MAXOPLEVEL;
+
+  /* The common case first: no tombstone anywhere. */
+  if (!relocate_tombstones)
+    return;
+  if (!MyUser(sptr) || !(here = find_channel_member(sptr, chptr)))
+    return;
+
+  /* What does he hold in the tombstones that point here? */
+  for (ts = relocate_tombstones; ts; ts = ts->next) {
+    struct Channel *tomb;
+    struct Membership *there;
+
+    if (ts->detached || 0 != ircd_strcmp(ts->newname, chptr->chname)
+        || ts->target_ts != chptr->creationtime)
+      continue;
+    if (!(tomb = relocate_tombstone_channel(ts)))
+      continue;
+    if (!(there = find_channel_member(sptr, tomb)))
+      continue;
+
+    status |= there->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE);
+    if ((there->status & CHFL_CHANOP) && OpLevel(there) < oplevel)
+      oplevel = OpLevel(there);
+  }
+
+  /* The status: what he holds there and not here.  (In no tombstone that
+   * points here: nothing to give, and nothing to part below.) */
+  grant = status & ~here->status;
+
+  if (grant) {
+    struct ModeBuf mbuf;
+
+    /* A join that +D is hiding is shown first, as for any member who is
+     * given a status (mode_process_clients()). */
+    if (IsDelayedJoin(here) && !IsZombie(here))
+      RevealDelayedJoin(here);
+
+    here->status = (here->status & ~CHFL_DEOPPED) | grant;
+    if (grant & CHFL_CHANOP)
+      SetOpLevel(here, oplevel);
+
+    modebuf_init(&mbuf, &me, cptr, chptr,
+                 MODEBUF_DEST_CHANNEL | MODEBUF_DEST_SERVER);
+    if (grant & CHFL_CHANOP)
+      modebuf_mode_client(&mbuf, MODE_ADD | MODE_CHANOP, sptr, oplevel);
+    if (grant & CHFL_HALFOP)
+      modebuf_mode_client(&mbuf, MODE_ADD | MODE_HALFOP, sptr, oplevel);
+    if (grant & CHFL_VOICE)
+      modebuf_mode_client(&mbuf, MODE_ADD | MODE_VOICE, sptr, oplevel);
+    modebuf_flush(&mbuf);
+  }
+
+  /* The PART(s), after the status has been taken: one line for all of
+   * them.  A member the tombstone never saw join (+D) is not shown
+   * leaving it; he is told himself (joinbuf_join()'s rule for a PART).
+   * The list of records does not change under this loop: a tombstone is
+   * +z, so losing a member never destroys it. */
+  ircd_snprintf(0, reason, sizeof(reason), "Channel has moved to %s",
+                chptr->chname);
+  joinbuf_init(&part, sptr, cptr, JOINBUF_TYPE_PART, reason, 0);
+
+  for (ts = relocate_tombstones; ts; ts = ts->next) {
+    struct Channel *tomb;
+    struct Membership *there;
+
+    if (ts->detached || 0 != ircd_strcmp(ts->newname, chptr->chname)
+        || ts->target_ts != chptr->creationtime)
+      continue;
+    if (!(tomb = relocate_tombstone_channel(ts)))
+      continue;
+    if (!(there = find_channel_member(sptr, tomb)))
+      continue;
+
+    joinbuf_join(&part, tomb, IsDelayedJoin(there) ? CHFL_DELAYED : 0);
+  }
+
+  joinbuf_flush(&part);
+}
+
+/** Pass a relocation on: "<source> RN <old> <new> C <expires> :<reason>"
+ * to every link that takes RN, but the one it came from (rename_relay()).
+ *
+ * It is written out again and not repeated byte for byte, as a server of
+ * the ircv3.2-upgrade branch writes it: with the deadline this server
+ * went by -- the one it was sent, cut if it was absurd, or its own for a
+ * message that carried none -- so that every server behind this one
+ * dissolves the tombstone when this one does.  A well-formed RN goes on
+ * exactly as it came.
+ * @param[in] sptr Source of the RN, kept as it is.
+ * @param[in] cptr Link it arrived on.
+ * @param[in] oldname Old channel name.
+ * @param[in] newname New channel name.
+ * @param[in] expires The deadline this server went by, network time.
+ * @param[in] reason Reason (may be empty; always sent).
+ */
+static void relocate_relay(struct Client *sptr, struct Client *cptr,
+                           const char *oldname, const char *newname,
+                           time_t expires, const char *reason)
+{
+  char digits[RELOCATE_EXPIRY_BUFLEN];
+  char rest[BUFSIZE];
+
+  relocate_expiry_format(digits, sizeof(digits), expires);
+  ircd_snprintf(0, rest, sizeof(rest), "%s %s :%s", RELOCATE_MARKER, digits,
+                reason);
+  rename_relay(sptr, cptr, oldname, newname, rest);
+}
+
 /** ms_rename - a channel was renamed, or relocated, on another server.
  *
  * parv[0] = sender prefix
@@ -166,15 +1696,20 @@ static void send_rename_to_members(struct Channel *chptr, const char *oldname,
  * or, for a relocation (see RELOCATE_MARKER):
  *
  * parv[3] = "C"
- * parv[4..parc - 1] = whatever a relocation carries; the last is its
- *                     reason
+ * parv[4] = the tombstone's deadline, network time (absent in the
+ *           five-parameter form of an older server)
+ * parv[parc - 1] = reason
  *
  * The message is reachable from a server link only: it is in the token
  * table and not in the command table (MFLG_TOKONLY in parse.c), so a
  * user's "RENAME" is an unknown command here, as it always was, and
  * "RN" from a user is not looked up as a token at all.  The source is
  * whatever the sending server gave: the user who renamed the channel as
- * a rule, possibly a server.  It is not used for anything but the relay.
+ * a rule, possibly a server.  A rename uses it for nothing but the
+ * relay; a relocation moves it to the new channel when it is a member of
+ * the old one.  It is always a client this server knows, and never one
+ * of its own: parse_server() drops a line whose source it cannot find or
+ * that arrives from the wrong direction before any handler sees it.
  *
  * @param[in] cptr Link the message arrived on.
  * @param[in] sptr Source of the message.
@@ -190,6 +1725,8 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   enum RenameNameError bad;
   char oldname_buf[CHANNELLEN + 1];
   char rest[BUFSIZE];
+  int relocate = 0;
+  time_t expires = 0;
   int rc;
 
   if (parc < 3 || EmptyString(parv[1]) || EmptyString(parv[2]))
@@ -198,6 +1735,40 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   oldname = parv[1];
   newname = parv[2];
   reason = (parc > 3 && !EmptyString(parv[3])) ? parv[3] : "";
+
+  /* A relocation: the marker, and at least one parameter after it.  With
+   * six parameters the fifth is the deadline.  With five, the message
+   * comes from or through a server from before the deadline travelled,
+   * and this server counts a grace of its own from now, as every server
+   * did then.  A fifth of six that is not a deadline gets the same
+   * fallback, and a notice: the relocation itself has to be done either
+   * way, or this server's members differ from everybody's.  A deadline
+   * more than RELOCATE_GRACE_MAX ahead is cut to that
+   * (relocate_expiry_check()); one that is past is kept, and dissolves
+   * the tombstone as soon as it is made.
+   *
+   * The reason is the last parameter; what an RN with more than six has
+   * between the deadline and the reason is not read. */
+  if (parc > 4 && 0 == strcmp(parv[3], RELOCATE_MARKER)) {
+    relocate = 1;
+    reason = !EmptyString(parv[parc - 1]) ? parv[parc - 1] : "";
+
+    if (parc == 5) {
+      expires = relocate_fallback_deadline();
+    } else if (!relocate_expiry_parse(parv[4], &expires)) {
+      protocol_violation(cptr, "RENAME %s -> %s from %s: \"%s\" is not a "
+                         "relocation deadline; using this server's own grace",
+                         parv[1], parv[2], cli_name(sptr), parv[4]);
+      expires = relocate_fallback_deadline();
+    } else if (relocate_expiry_check(&expires, TStime())
+               == RELOCATE_EXPIRY_CLAMPED) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "RENAME %s -> %s from %s carries a deadline (%s) more than "
+                "%d seconds ahead; cut to %Tu",
+                parv[1], parv[2], cli_name(cptr), parv[4], RELOCATE_GRACE_MAX,
+                expires);
+    }
+  }
 
   /* Names that are refused for what they are: not applied and NOT passed
    * on.  Every server judges these from the message alone and refuses
@@ -232,36 +1803,76 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                               oldname, newname, cli_name(sptr),
                               rename_name_error_text(bad));
 
-  /* A relocation.  This server does not implement it, and must not take
-   * it for a rename: a rename moves every member, a relocation only
-   * those who agreed, and a server that moved them all would disagree
-   * with every other server about who is on which channel.  So nothing
-   * is changed here.  The line is still passed on, unchanged, to the
-   * links that take RN -- the servers behind this one may well implement
-   * it -- and the operators are told, because from here on this server's
-   * view of the two channels differs from the network's.
-   *
-   * The parameters after the marker are not interpreted, only repeated:
-   * all but the last are single words, the last may hold anything. */
-  if (parc > 4 && 0 == strcmp(parv[3], RELOCATE_MARKER)) {
-    size_t len = 0;
-    int i;
+  chptr = FindChannel(oldname);
 
-    rest[0] = '\0';
-    for (i = 3; i < parc && len < sizeof(rest) - 1; i++) {
-      ircd_snprintf(0, rest + len, sizeof(rest) - len,
-                    (i < parc - 1) ? "%s " : ":%s", parv[i]);
-      len += strlen(rest + len);
+  /* A relocation.  Done here when this server can; when it cannot -- the
+   * old channel is not here, the new name is taken here -- it is still
+   * passed on, for the reason given for a rename below: that is this
+   * server's state and says nothing of the servers behind it, which
+   * would otherwise keep the old channel, with the issuer in it, and
+   * never hear of the tombstone or its deadline.  Local state is left
+   * alone, the operators are told, and the line goes to the links an
+   * applied relocation would have gone to, in the same form. */
+  if (relocate) {
+    if (!chptr) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RELOCATE %s -> %s from %C NOT applied locally: "
+                           "%s does not exist on this server.  The "
+                           "relocation has been relayed onward; unless that "
+                           "channel has just emptied everywhere, this server "
+                           "is now divergent and needs manual "
+                           "reconciliation.",
+                           oldname, newname, sptr, oldname);
+      /* The names as received: there is no local spelling to prefer. */
+      relocate_relay(sptr, cptr, oldname, newname, expires, reason);
+      return 0;
     }
 
-    sendto_opmask_butone(0, SNO_OLDSNO,
-                         "RENAME %s -> %s from %C is a channel relocation, "
-                         "which this server does not support.  Nothing was "
-                         "changed here and the message has been relayed "
-                         "onward, so this server now differs from the "
-                         "servers that applied it.",
-                         oldname, newname, sptr);
-    rename_relay(sptr, cptr, oldname, newname, rest);
+    /* The name the channel has here, in this server's spelling. */
+    ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
+
+    /* The channel is already a live tombstone here: it has been
+     * relocated twice, by two servers that had not heard of each other.
+     * A second relocation is not done on top of the first -- the new
+     * channel would be made from a tombstone, +z and redirect included.
+     * The first stands here, the operators are told, and the line goes
+     * on. */
+    {
+      struct RelocateTombstone *ts = relocate_tombstone_find(oldname_buf);
+
+      if (ts && relocate_tombstone_channel(ts) == chptr) {
+        sendto_opmask_butone(0, SNO_OLDSNO,
+                             "RELOCATE %s -> %s from %C NOT applied locally: "
+                             "%s has already been relocated to %s here.  The "
+                             "relocation has been relayed onward, so this "
+                             "server is now divergent and needs manual "
+                             "reconciliation.",
+                             oldname_buf, newname, sptr, oldname_buf,
+                             ts->newname);
+        relocate_relay(sptr, cptr, oldname_buf, newname, expires, reason);
+        return 0;
+      }
+    }
+
+    /* chptr may be gone when this returns (a deadline of "now"). */
+    rc = relocate_execute(sptr, chptr, newname, reason, expires);
+
+    if (rc == -2)
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RELOCATE %s -> %s from %C NOT applied locally: "
+                           "%s already exists on this server.  The rename "
+                           "has been relayed onward, so this server is now "
+                           "divergent and needs manual reconciliation.",
+                           oldname_buf, newname, sptr, newname);
+    else if (rc != 0)
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RELOCATE %s -> %s from %C NOT applied locally "
+                           "(relocate_execute: %d).  The relocation has "
+                           "been relayed onward, so this server is now "
+                           "divergent and needs manual reconciliation.",
+                           oldname_buf, newname, sptr, rc);
+
+    relocate_relay(sptr, cptr, oldname_buf, newname, expires, reason);
     return 0;
   }
 
@@ -284,7 +1895,6 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * arrived on, here as on success, and the network is a tree. */
   ircd_snprintf(0, rest, sizeof(rest), ":%s", reason);
 
-  chptr = FindChannel(oldname);
   taken = chptr ? FindChannel(newname) : NULL;
 
   if (!chptr) {
@@ -327,11 +1937,26 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                            "relayed onward, so this server is now "
                            "divergent and needs manual reconciliation.",
                            oldname, newname, sptr, rc);
+    else {
+      /* The channel may be a relocation tombstone: its record goes with
+       * it to the new name.  Or a tombstone's target: the tombstone
+       * follows it. */
+      relocate_tombstone_renamed(oldname_buf, chptr);
+      relocate_target_renamed(oldname_buf, chptr->chname, chptr);
+    }
   }
 
   if (rc != 0) {
     Debug((DEBUG_ERROR, "RENAME from %s not applied, relayed: %s -> %s",
            cli_name(sptr), oldname, newname));
+
+    /* Not applied HERE -- but the network renamed the channel, and its
+     * tombstones' redirects with it: ours follow, or they would name a
+     * channel that is gone everywhere else (relocate_target_renamed()).
+     * Not for a case-only rename: both names are one name. */
+    if (taken != chptr || !chptr)
+      relocate_target_renamed(oldname, newname, chptr);
+
     /* The names as received: there is no local spelling to prefer. */
     rename_relay(sptr, cptr, oldname, newname, rest);
     return 0;

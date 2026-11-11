@@ -149,8 +149,27 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     int exceptkli = 0;
     struct Ban *ban = NULL;
 
+    int relocated = relocate_join_verdict(chptr);
+
+    /* A relocation tombstone (m_rename.c) admits nobody: a member who
+     * follows out of it takes his current status along, so nobody may
+     * get in after the relocation.  Asked before every admission check
+     * below (+i, +k, bans, invites, X-tra ops), so none of those opens
+     * it.
+     *
+     * One that is detached from its target -- the target's name is
+     * another channel's on this server -- has nowhere to forward to. */
+    if (relocated == RELOCATE_JOIN_REFUSE) {
+      send_reply(sptr, ERR_CHANNELISFULL, chptr->chname);
+      return;
+    }
+
     if (*chptr->mode.redir && (*chptr->mode.redir != '\0')) {
-      if (chptr->users >= chptr->mode.limit) {
+      /* The ordinary +L forwards only when the channel is full.  A live
+       * tombstone forwards ALWAYS, whatever limit a remaining chanop
+       * gives it. */
+      if (chptr->users >= chptr->mode.limit
+          || relocated == RELOCATE_JOIN_FORWARD) {
         if (IsNoLink(sptr))
           send_reply(sptr, ERR_LINKCHAN, chptr->chname, chptr->mode.redir);
         else if (!IsChannelName(chptr->mode.redir) || !strIsIrcCh(chptr->mode.redir))
@@ -271,6 +290,17 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
       modebuf_flush(&mbuf);
     }
   }
+
+  /* A channel that was relocated (m_rename.c): a member of the old
+   * channel's tombstone who follows -- this JOIN, of the channel the
+   * tombstone redirects to -- takes the status he holds in the tombstone
+   * right now into this channel and is parted from the tombstone.  Both
+   * branches above come here; a channel this JOIN made under the name is
+   * not the relocation's, and nothing follows into it.  Only the user's
+   * own server does this, and what it does goes out as an ordinary MODE
+   * and an ordinary PART behind the JOIN. */
+  if (MyUser(sptr))
+    relocate_follow(cptr, sptr, chptr);
 
   del_invite(sptr, chptr);
 
@@ -454,6 +484,12 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		        !chptr->mode.apass[0] && chptr->users == 0))) {
         struct Membership *member;
         struct ModeBuf mbuf;
+
+        /* The channel is wiped below for another timestamp: a relocation
+         * tombstone held for it is over -- its record, and the +z and the
+         * redirect, neither of which this wipe-out takes. */
+        if (chptr->creationtime && chptr->creationtime != creation)
+          relocate_tombstone_ts_lost(chptr);
 
 	chptr->creationtime = creation;
         /* Wipe out the current modes on the channel. */

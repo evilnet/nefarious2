@@ -356,6 +356,11 @@ int destruct_channel(struct Channel* chptr)
 
   assert(0 == chptr->members);
 
+  /* The one place a channel is freed: a relocation tombstone's record
+   * (m_rename.c) must not outlive its channel.  Does nothing for any
+   * other channel. */
+  relocate_tombstone_channel_gone(chptr);
+
   /*
    * Now, find all invite links from channel structure
    */
@@ -3219,6 +3224,12 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       *state->chptr->mode.redir = '\0';
     else
       ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN + 1);
+
+    /* A relocation tombstone (m_rename.c) whose redirect is removed or
+     * changed is over at once.  Not for a BURST's merge, which is not a
+     * MODE anybody gave. */
+    if (!(state->flags & MODE_PARSE_BURST))
+      relocate_tombstone_marks_changed(state->chptr);
   }
 }
 
@@ -4861,8 +4872,15 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
 	recv_ts = atoi(modestr);
 
-	if (recv_ts && recv_ts < state.chptr->creationtime)
+	if (recv_ts && recv_ts < state.chptr->creationtime) {
+	  time_t old_ts = state.chptr->creationtime;
+
 	  state.chptr->creationtime = recv_ts; /* respect earlier TS */
+	  /* The channel is re-stamped to an OLDER timestamp, not wiped: the
+	   * same channel, corrected.  A relocation tombstone's record
+	   * (m_rename.c) follows. */
+	  relocate_channel_restamped(state.chptr, old_ts);
+	}
         else if (recv_ts > state.chptr->creationtime) {
           struct Client *sserv;
 
@@ -4954,8 +4972,18 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 	!(t_mode & MODE_INVITEONLY))
       mode_invite_clear(state.chptr);
 
-    state.chptr->mode.mode = t_mode;
-    state.chptr->mode.exmode = t_exmode;
+    {
+      unsigned int old_exmode = state.chptr->mode.exmode;
+
+      state.chptr->mode.mode = t_mode;
+      state.chptr->mode.exmode = t_exmode;
+
+      /* -z on a relocation tombstone ends it at once (a BURST only ever
+       * adds the flag). */
+      if (((old_exmode ^ t_exmode) & EXMODE_PERSIST)
+          && !(state.flags & MODE_PARSE_BURST))
+        relocate_tombstone_marks_changed(state.chptr);
+    }
   }
 
   if (state.flags & MODE_PARSE_WIPEOUT) {
