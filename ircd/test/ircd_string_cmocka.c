@@ -1002,6 +1002,79 @@ static void test_json_escape_truncates_cleanly(void **state)
   assert_string_equal(ircd_json_escape(buf, sizeof(buf), "ab\"cd"), "ab");
 }
 
+/* --- ircd_utf8_strcasestr --- */
+
+static void assert_finds(const char *hay, const char *needle)
+{
+  assert_non_null(ircd_utf8_strcasestr(hay, needle));
+}
+
+static void assert_misses(const char *hay, const char *needle)
+{
+  assert_null(ircd_utf8_strcasestr(hay, needle));
+}
+
+static void test_utf8_strcasestr_folds_scripts(void **state)
+{
+  (void)state;
+  assert_finds("HELLO there", "hello");
+  assert_finds("\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82 world",   /* Privet */
+               "\xD0\xBF\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82");
+  assert_finds("\xC3\x9C" "BER alles", "\xC3\xBC" "ber");                 /* Latin-1 */
+  assert_finds("\xC5\x81" "odz", "\xC5\x82" "odz");                       /* Ext-A */
+  assert_finds("\xC6\xA0" "n", "\xC6\xA1" "n");                          /* Vietnamese, Ext-B */
+  assert_finds("\xE1\xBA\xA0" "n", "\xE1\xBA\xA1" "n");                  /* Vietnamese, Additional */
+  assert_finds("\xCE\xA3", "\xCF\x83");                                  /* Greek sigma */
+  assert_finds("\xCF\x82", "\xCF\x83");                                  /* final sigma */
+  assert_finds("\xD4\xB1", "\xD5\xA1");                                  /* Armenian */
+  assert_finds("\xC5\xB8", "\xC3\xBF");                                  /* Y diaeresis */
+  assert_finds("\xD0\x81", "\xD1\x91");                                  /* Cyrillic Io, +80 */
+  assert_finds("\xD0\x8F", "\xD1\x9F");                                  /* Cyrillic Dzhe, +80 */
+  assert_finds("\xCE\x86", "\xCE\xAC");                                  /* Greek alpha tonos, +38 */
+  assert_finds("\xCE\x88", "\xCE\xAD");                                  /* Greek epsilon tonos, +37 */
+  assert_finds("\xCE\x8C", "\xCF\x8C");                                  /* Greek omicron tonos, +64 */
+  assert_finds("\xCE\x8E", "\xCF\x8D");                                  /* Greek upsilon tonos, +63 */
+  assert_finds("\xD3\x80", "\xD3\x8F");                                  /* Cyrillic palochka, +15 */
+  assert_finds("AAAB", "aab");                                           /* ASCII first unit retried */
+  assert_finds("\xD0\x9F x", "X");                                       /* ASCII after a sequence */
+  assert_misses("\xD0\x9F", "\x9F" "x");
+  assert_misses("CAF\xC9", "caf\xE9");                                    /* raw Latin-1 stays exact */
+}
+
+static void test_utf8_strcasestr_ignores_what_does_not_fold(void **state)
+{
+  (void)state;
+  assert_finds("\xE4\xBD\xA0\xE5\xA5\xBD", "\xE5\xA5\xBD");              /* CJK */
+  assert_misses("\xC3\x97", "\xC3\xB7");                                /* times, divide */
+  assert_misses("\xC4\xB0", "i");                                        /* dotted I stays */
+}
+
+static void test_utf8_strcasestr_no_false_hits_from_bytes(void **state)
+{
+  (void)state;
+  /* A byte table folded U+041F's lead D0 onto the emoji lead F0. */
+  assert_misses("\xF0\x9F\x98\x80", "\xD0\x9F");
+  /* And C3 A3 onto E3 A3 80. */
+  assert_misses("\xE3\xA3\x80", "\xC3\xA3");
+}
+
+static void test_utf8_strcasestr_edges(void **state)
+{
+  const char *hay = "ab\xD0\xBF";
+
+  (void)state;
+  assert_ptr_equal(hay, ircd_utf8_strcasestr(hay, ""));
+  assert_ptr_equal(hay + 2, ircd_utf8_strcasestr(hay, "\xD0\x9F"));
+  assert_null(ircd_utf8_strcasestr("", "a"));
+  assert_misses("ab", "abc");                  /* needle outlasts the text */
+  assert_misses("abd", "abc");                 /* mismatch on the last unit */
+  /* Truncated and invalid sequences compare as bytes and stop at the NUL. */
+  assert_misses("a\xD0", "\xD0\x9F");
+  assert_misses("a\xE1\xBA", "\xE1\xBA\xA0");
+  assert_finds("a\xD0", "\xD0");
+  assert_misses("\xFE", "\xFF");
+}
+
 /* --- ircd_text_mentions --- */
 
 static void test_mentions_basic_and_case(void **state)
@@ -1573,6 +1646,10 @@ int main(void)
         cmocka_unit_test(test_utf8_sanitize_truncates_at_a_sequence_boundary),
         cmocka_unit_test(test_utf8_valid_len_runs_past_nul),
         cmocka_unit_test(test_utf8_valid_len_stops_at_len),
+        cmocka_unit_test(test_utf8_strcasestr_folds_scripts),
+        cmocka_unit_test(test_utf8_strcasestr_ignores_what_does_not_fold),
+        cmocka_unit_test(test_utf8_strcasestr_no_false_hits_from_bytes),
+        cmocka_unit_test(test_utf8_strcasestr_edges),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
