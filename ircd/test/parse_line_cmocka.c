@@ -1,0 +1,732 @@
+/*
+ * parse_line_cmocka.c - a line that ends after its tags or its source
+ * prefix is parsed from its own bytes only, never from what is left in
+ * the buffer after its terminator
+ *
+ * A connection's input buffer is reused line after line: a line is copied
+ * in from offset 0 and NUL-terminated, and whatever a longer earlier line
+ * left after that NUL is still there.  parse_server() stepped over the NUL
+ * in three places:
+ *
+ *  - a line of tags, a space and nothing else ("@x ", which also covers
+ *    the S2S compact form "@A<time><msgid> ") reached the numeric-prefix
+ *    code with the cursor on the NUL; that reported "Missing Prefix" and
+ *    then advanced past the NUL, so the earlier line's tail was parsed as
+ *    this line's command -- and run, with the link as its source;
+ *  - an unknown source prefix with nothing after it read ch[1] (the "SQ"
+ *    test) when ch[0] was the NUL, and ch[2] (the "KILL" test) when ch[1]
+ *    was;
+ *  - a one-character numeric prefix at the end of the line read ch[2].
+ *
+ * parse_client() is checked for the same edge cases: its tag and prefix
+ * skips stop at the NUL.
+ *
+ * This includes the real parse.c, compiled with -ffunction-sections and
+ * linked with --gc-sections, so the program keeps parse_server(),
+ * parse_client() and what they call, and nothing else of parse.c (not the
+ * message table and its handlers): only those need the ircd around them
+ * here.  Each case runs the line twice over: alone in a zeroed buffer
+ * (the reference), and after a previous line laid out so that a parser
+ * reading past the terminator would run it, plus single-byte fillers that
+ * steer the ch[1]/ch[2] tests.  The outcome must be the reference one
+ * every time -- and the reference outcome is checked against the expected
+ * one.  Each line is also parsed from an exact-size heap block, so a read
+ * past the terminator is an out-of-bounds read under valgrind or ASan.
+ */
+#include "config.h"
+
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <cmocka.h>
+
+/* parse.c's own comments name a vendor tag namespace with a trailing
+ * slash-star, which -Wall's -Wcomment reports; it is parse.c's, not ours. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcomment"
+#include "../parse.c"
+#pragma GCC diagnostic pop
+
+/* ------------------------------------------------------------------ */
+/* The ircd around parse_server() and parse_client()                   */
+/* ------------------------------------------------------------------ */
+
+time_t CurrentTime;
+int log_inassert;
+struct Client me;
+static struct ServerStatistics server_stats;
+struct ServerStatistics *ServerStats = &server_stats;
+
+static struct Connection me_con, leaf_con, user_con;
+static struct Client leaf;       /* leafa.test, numeric AC, our link */
+static struct Client user;       /* a registered local client */
+static struct User user_user;
+
+/** What one parse did, beyond its return value. */
+static struct {
+  int handler_calls;       /* a command handler ran */
+  char handler_cmd[16];    /* which (token) */
+  char handler_par1[64];   /* its first parameter */
+  int violations;          /* protocol_violation() */
+  int numerics;            /* send_reply() */
+  int last_numeric;
+  int do_numeric;          /* do_numeric() */
+  int kills;               /* sendcmdto_one() (the unknown-numeric KILL) */
+} seen;
+
+static void record_handler(const char *cmd, int parc, char *parv[])
+{
+  seen.handler_calls++;
+  snprintf(seen.handler_cmd, sizeof(seen.handler_cmd), "%s", cmd);
+  snprintf(seen.handler_par1, sizeof(seen.handler_par1), "%s",
+           parc > 1 && parv[1] ? parv[1] : "");
+}
+
+static int h_ping(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr;
+  record_handler("PING", parc, parv);
+  return 0;
+}
+
+static int h_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr;
+  record_handler("KICK", parc, parv);
+  return 0;
+}
+
+static int h_squit(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr;
+  record_handler("SQUIT", parc, parv);
+  return 0;
+}
+
+static int h_kill(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr;
+  record_handler("KILL", parc, parv);
+  return 0;
+}
+
+static int h_nick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr;
+  record_handler("NICK", parc, parv);
+  return 0;
+}
+
+#define ALL_HANDLERS(h) { h, h, h, h, h }   /* LAST_HANDLER_TYPE */
+static struct Message test_msgs[] = {
+  { "PING", "G", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_ping), NULL },
+  { "KICK", "K", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_kick), NULL },
+  { "SQUIT", "SQ", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_squit), NULL },
+  { "KILL", "D", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_kill), NULL },
+  { "NICK", "N", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_nick), NULL },
+};
+
+/* parse_client() compares the handler with these two. */
+int m_ping(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr; (void)parc; (void)parv;
+  return 0;
+}
+
+int m_ignore(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr; (void)parc; (void)parv;
+  return 0;
+}
+
+/* Quiet: parse_*() log every line they parse. */
+void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
+               const char *fmt, ...)
+{
+  (void)subsys; (void)severity; (void)flags; (void)fmt;
+}
+
+void debug(int level, const char *form, ...)
+{
+  (void)level; (void)form;
+}
+
+void *DoMalloc(size_t len, const char *type, const char *file, int line)
+{
+  void *p = malloc(len);
+
+  (void)type; (void)file; (void)line;
+  assert_non_null(p);
+  return p;
+}
+
+void *DoMallocZero(size_t len, const char *type, const char *file, int line)
+{
+  void *p = calloc(1, len);
+
+  (void)type; (void)file; (void)line;
+  assert_non_null(p);
+  return p;
+}
+
+const char *get_client_name(const struct Client *sptr, int showip)
+{
+  (void)showip;
+  return cli_name(sptr);
+}
+
+/* FindClient() is a macro over this. */
+struct Client *hSeekClient(const char *name, int TMask)
+{
+  (void)TMask;
+  if (!strcmp(name, "leafa.test"))
+    return &leaf;
+  if (!strcmp(name, "hub.test"))
+    return &me;
+  return NULL;
+}
+
+/* A server numeric, or a user numnick's server part (its first two). */
+struct Client *FindNServer(const char *numeric)
+{
+  return strncmp(numeric, "AC", 2) ? NULL : &leaf;
+}
+
+struct Client *findNUser(const char *yxx)
+{
+  (void)yxx;
+  return NULL;
+}
+
+int protocol_violation(struct Client *cptr, const char *pattern, ...)
+{
+  (void)cptr; (void)pattern;
+  seen.violations++;
+  return 0;
+}
+
+int send_reply(struct Client *to, int reply, ...)
+{
+  (void)to;
+  seen.numerics++;
+  seen.last_numeric = reply;
+  return 0;
+}
+
+void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
+                   struct Client *to, const char *pattern, ...)
+{
+  (void)from; (void)cmd; (void)tok; (void)to; (void)pattern;
+  seen.kills++;
+}
+
+int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
+               int parc, char *parv[])
+{
+  (void)numeric; (void)nnn; (void)cptr; (void)sptr; (void)parc; (void)parv;
+  seen.do_numeric++;
+  return 0;
+}
+
+int feature_bool(enum Feature feat)
+{
+  (void)feat;
+  return 0;
+}
+
+int feature_int(enum Feature feat)
+{
+  (void)feat;
+  return 0;
+}
+
+/* S2S compact tags: the HLC receive. */
+uint64_t base64toint_64(const char *str)
+{
+  (void)str;
+  return 0;
+}
+
+unsigned int base64toint(const char *str)
+{
+  (void)str;
+  return 0;
+}
+
+uint64_t hlc_max_forward_ms(void)
+{
+  return 0;
+}
+
+int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
+                       uint64_t *ahead)
+{
+  (void)remote; (void)max_forward_ms; (void)ahead;
+  return 0;
+}
+
+void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
+                                      time_t *rate, const char *pattern, ...)
+{
+  (void)one; (void)mask; (void)rate; (void)pattern;
+}
+
+int bounce_hold_mark_valid(char mark)
+{
+  return mark == 'h' || mark == 'p' || mark == 'n';
+}
+
+/* parse_client() */
+void fwd_label_close_draining(struct Client *cptr)
+{
+  (void)cptr;
+}
+
+int is_client_tag_denied(const char *tag, size_t len)
+{
+  (void)tag; (void)len;
+  return 0;
+}
+
+int is_reserved_vendor_tag(const char *tag, size_t len)
+{
+  (void)tag; (void)len;
+  return 0;
+}
+
+struct Shun *shun_lookup(struct Client *cptr, unsigned int flags)
+{
+  (void)cptr; (void)flags;
+  return NULL;
+}
+
+int get_lag_min(struct Client *cptr)
+{
+  (void)cptr;
+  return -1;
+}
+
+int get_lag_factor(struct Client *cptr)
+{
+  (void)cptr;
+  return 0;                       /* no fake lag */
+}
+
+void labeled_batch_end(struct Client *cptr)
+{
+  (void)cptr;
+}
+
+void send_labeled_ack(struct Client *cptr)
+{
+  (void)cptr;
+}
+
+void bounce_record_activity(struct Client *cptr)
+{
+  (void)cptr;
+}
+
+/* ------------------------------------------------------------------ */
+/* Fixture                                                             */
+/* ------------------------------------------------------------------ */
+
+static int group_setup(void **state)
+{
+  size_t i;
+
+  (void)state;
+  memset(&msg_tree, 0, sizeof(msg_tree));
+  memset(&tok_tree, 0, sizeof(tok_tree));
+  for (i = 0; i < sizeof(test_msgs) / sizeof(test_msgs[0]); i++) {
+    add_msg_element(&msg_tree, &test_msgs[i], test_msgs[i].cmd);
+    add_msg_element(&tok_tree, &test_msgs[i], test_msgs[i].tok);
+  }
+
+  cli_connect(&me) = &me_con;    /* cli_from() is the Connection's */
+  ircd_strncpy(cli_name(&me), "hub.test", sizeof(cli_name(&me)));
+  cli_from(&me) = &me;
+  cli_status(&me) = STAT_ME;
+
+  cli_connect(&leaf) = &leaf_con;
+  ircd_strncpy(cli_name(&leaf), "leafa.test", sizeof(cli_name(&leaf)));
+  cli_from(&leaf) = &leaf;
+  cli_status(&leaf) = STAT_SERVER;
+  con_handler(&leaf_con) = SERVER_HANDLER;
+
+  cli_connect(&user) = &user_con;
+  ircd_strncpy(cli_name(&user), "tagger", sizeof(cli_name(&user)));
+  cli_from(&user) = &user;
+  cli_status(&user) = STAT_USER;
+  cli_user(&user) = &user_user;
+  con_handler(&user_con) = CLIENT_HANDLER;
+  CapSet(cli_active(&user), CAP_MSGTAGS);
+  return 0;
+}
+
+/** Everything a parse is judged by. */
+struct outcome {
+  int ret;
+  int handler_calls;
+  char handler_cmd[16];
+  char handler_par1[64];
+  int violations;
+  int numerics, last_numeric;
+  int do_numeric;
+  int kills;
+  unsigned int empt, unpf, unco, wrdi, ref;
+};
+
+typedef int (*parse_fn)(struct Client *, char *, char *);
+
+static void run(parse_fn fn, struct Client *cptr, char *buf, size_t len,
+                struct outcome *o)
+{
+  struct ServerStatistics before = server_stats;
+
+  memset(&seen, 0, sizeof(seen));
+  o->ret = fn(cptr, buf, buf + len);
+  o->handler_calls = seen.handler_calls;
+  memcpy(o->handler_cmd, seen.handler_cmd, sizeof(o->handler_cmd));
+  memcpy(o->handler_par1, seen.handler_par1, sizeof(o->handler_par1));
+  o->violations = seen.violations;
+  o->numerics = seen.numerics;
+  o->last_numeric = seen.last_numeric;
+  o->do_numeric = seen.do_numeric;
+  o->kills = seen.kills;
+  o->empt = server_stats.is_empt - before.is_empt;
+  o->unpf = server_stats.is_unpf - before.is_unpf;
+  o->unco = server_stats.is_unco - before.is_unco;
+  o->wrdi = server_stats.is_wrdi - before.is_wrdi;
+  o->ref = server_stats.is_ref - before.is_ref;
+}
+
+static void assert_same(const char *line, const char *how,
+                        const struct outcome *want, const struct outcome *got)
+{
+  if (want->ret != got->ret || want->handler_calls != got->handler_calls
+      || strcmp(want->handler_cmd, got->handler_cmd)
+      || strcmp(want->handler_par1, got->handler_par1)
+      || want->violations != got->violations || want->numerics != got->numerics
+      || want->last_numeric != got->last_numeric
+      || want->do_numeric != got->do_numeric || want->kills != got->kills
+      || want->empt != got->empt || want->unpf != got->unpf
+      || want->unco != got->unco || want->wrdi != got->wrdi
+      || want->ref != got->ref)
+    fail_msg("\"%s\" %s: ret %d/%d, handler %d %s(%s)/%d %s(%s), violations %d/%d, "
+             "numerics %d/%d, kills %d/%d, empty %u/%u, unknown prefix %u/%u, "
+             "unknown command %u/%u, wrong direction %u/%u (reference/this run)",
+             line, how, want->ret, got->ret,
+             want->handler_calls, want->handler_cmd, want->handler_par1,
+             got->handler_calls, got->handler_cmd, got->handler_par1,
+             want->violations, got->violations, want->numerics, got->numerics,
+             want->kills, got->kills, want->empt, got->empt, want->unpf, got->unpf,
+             want->unco, got->unco, want->wrdi, got->wrdi);
+}
+
+#define BUFLEN 256
+
+/** Parse \a line every way: alone (the reference), after previous lines
+ * and fillers that a parser reading past the terminator would act on, and
+ * from an exact-size heap block.  Every run must match the reference.
+ * @return The reference outcome, for the case to check. */
+static struct outcome parse_every_way(parse_fn fn, struct Client *cptr,
+                                      const char *line)
+{
+  static const char fillers[] = { ' ', 'Q', 'L', 'N', 'I', ':', '@', 'G' };
+  struct outcome ref, o;
+  char buf[BUFLEN], prev[BUFLEN];
+  size_t len = strlen(line), i;
+  char *exact;
+
+  assert_true(len + 40 < BUFLEN);
+
+  /* the reference: nothing after the terminator */
+  memset(buf, 0, sizeof(buf));
+  memcpy(buf, line, len);
+  run(fn, cptr, buf, len, &ref);
+
+  /* an exact-size block: a read past the NUL is out of bounds */
+  exact = malloc(len + 1);
+  assert_non_null(exact);
+  memcpy(exact, line, len + 1);
+  run(fn, cptr, exact, len, &o);
+  free(exact);
+  assert_same(line, "from an exact-size block", &ref, &o);
+
+  /* a previous line whose tail is a command: an unknown word long enough
+   * to cover this line and its NUL, then the command (a PING from the
+   * link, or from the client) */
+  snprintf(prev, sizeof(prev), "%.*s G :stale PING :stale", (int)(len + 3),
+           "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+           "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+           "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+  memset(buf, 0, sizeof(buf));
+  memcpy(buf, prev, strlen(prev));
+  memcpy(buf, line, len);
+  buf[len] = '\0';
+  run(fn, cptr, buf, len, &o);
+  assert_same(line, "after a previous line", &ref, &o);
+
+  /* the same, with the command right after the terminator */
+  memset(buf, 0, sizeof(buf));
+  snprintf(buf + len + 1, sizeof(buf) - len - 1, "G :stale");
+  memcpy(buf, line, len);
+  run(fn, cptr, buf, len, &o);
+  assert_same(line, "with G after the terminator", &ref, &o);
+
+  /* single bytes the SQUIT / KILL / nick-change tests look at */
+  for (i = 0; i < sizeof(fillers); i++) {
+    char how[40];
+
+    memset(buf, fillers[i], sizeof(buf));
+    memcpy(buf, line, len);
+    buf[len] = '\0';
+    run(fn, cptr, buf, len, &o);
+    snprintf(how, sizeof(how), "with '%c' after the terminator", fillers[i]);
+    assert_same(line, how, &ref, &o);
+  }
+
+  return ref;
+}
+
+static void expect_empty(const char *line, const struct outcome *o)
+{
+  if (o->ret != -1 || o->handler_calls || o->empt != 1 || o->violations
+      || o->numerics || o->kills || o->unpf || o->unco)
+    fail_msg("\"%s\": want an empty line (-1, empty 1, nothing run or sent); "
+             "got ret %d, handler %d %s, empty %u, unknown prefix %u, "
+             "unknown command %u, violations %d, numerics %d, kills %d",
+             line, o->ret, o->handler_calls, o->handler_cmd, o->empt, o->unpf,
+             o->unco, o->violations, o->numerics, o->kills);
+}
+
+static void expect_unknown_prefix(const char *line, const struct outcome *o)
+{
+  if (o->ret != 0 || o->handler_calls || o->empt || o->unpf != 1
+      || o->violations || o->numerics || o->kills)
+    fail_msg("\"%s\": want a dropped unknown prefix (0, unknown prefix 1, "
+             "nothing run or sent); got ret %d, handler %d %s, empty %u, "
+             "unknown prefix %u, violations %d, numerics %d, kills %d",
+             line, o->ret, o->handler_calls, o->handler_cmd, o->empt, o->unpf,
+             o->violations, o->numerics, o->kills);
+}
+
+static void expect_handler(const char *line, const struct outcome *o,
+                           const char *cmd, const char *par1)
+{
+  if (o->handler_calls != 1 || strcmp(o->handler_cmd, cmd)
+      || strcmp(o->handler_par1, par1) || o->violations || o->empt)
+    fail_msg("\"%s\": want %s(%s); got handler %d %s(%s), ret %d, empty %u, "
+             "violations %d", line, cmd, par1, o->handler_calls,
+             o->handler_cmd, o->handler_par1, o->ret, o->empt, o->violations);
+}
+
+/* ------------------------------------------------------------------ */
+/* parse_server()                                                      */
+/* ------------------------------------------------------------------ */
+
+#define COMPACT "@A" "BBBBBBB" "AAAAAAAAAAAAAA"   /* version A, 1+7+14 */
+
+/* Tags, then nothing: an empty line.  It used to report "Missing Prefix"
+ * and run the previous line's tail. */
+static void server_tags_then_nothing_is_an_empty_line(void **state)
+{
+  static const char *const lines[] = {
+    "@x ", "@x   ", "@ ", "@+tag=value ", "@label=a;+b=c ",
+    COMPACT " ", COMPACT "   ", COMPACT ",Sabc,Hh ", COMPACT ",Cfoo=bar ",
+    "@A ",
+  };
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+    struct outcome o = parse_every_way(parse_server, &leaf, lines[i]);
+    expect_empty(lines[i], &o);
+  }
+}
+
+/* A source prefix and nothing after it. */
+static void server_prefix_then_nothing(void **state)
+{
+  static const char *const empty[] = {
+    "AC ", "AC   ", ":leafa.test ", "@x :leafa.test ", "@x AC ",
+    COMPACT " AC ", COMPACT " :leafa.test ",
+  };
+  static const char *const unknown[] = {
+    /* the prefix names nobody: dropped, whatever the bytes after it */
+    ":nosuch.test ", "@x :nosuch.test ", "ZZZZZ ", "ZZZZZ", "AC", "A",
+    "ZZZ", "@x", "@", COMPACT, "@x ZZZZZ ",
+  };
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(empty) / sizeof(empty[0]); i++) {
+    struct outcome o = parse_every_way(parse_server, &leaf, empty[i]);
+    expect_empty(empty[i], &o);
+  }
+  for (i = 0; i < sizeof(unknown) / sizeof(unknown[0]); i++) {
+    struct outcome o = parse_every_way(parse_server, &leaf, unknown[i]);
+    expect_unknown_prefix(unknown[i], &o);
+  }
+}
+
+/* A P9 prefix with no space after it, and a P9 prefix of another
+ * direction. */
+static void server_p9_prefix_edges(void **state)
+{
+  static const char *const lines[] = {
+    ":leafa.test", "@x :leafa.test", ":nosuch.test", "@x :nosuch.test", ":",
+  };
+  struct outcome o;
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+    o = parse_every_way(parse_server, &leaf, lines[i]);
+    if (o.ret != -1 || o.handler_calls || o.empt || o.unpf || o.violations)
+      fail_msg("\"%s\": want -1 and nothing else; got ret %d, handler %d, "
+               "empty %u, unknown prefix %u", lines[i], o.ret,
+               o.handler_calls, o.empt, o.unpf);
+  }
+  o = parse_every_way(parse_server, &leaf, ":hub.test ");
+  assert_int_equal(o.ret, 0);
+  assert_int_equal(o.wrdi, 1);
+  assert_int_equal(o.handler_calls, 0);
+}
+
+/* An unknown prefix lets SQUIT and KILL through (they travel against a
+ * split), and asks for a KILL of an unknown nick-change source -- but only
+ * for a command that is on the line. */
+static void server_unknown_prefix_exceptions_read_only_the_line(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_server, &leaf, "ZZZZZ K");
+  expect_unknown_prefix("ZZZZZ K", &o);
+  o = parse_every_way(parse_server, &leaf, "ZZZZZ KI");
+  expect_unknown_prefix("ZZZZZ KI", &o);
+  o = parse_every_way(parse_server, &leaf, "ZZZZZ S");
+  expect_unknown_prefix("ZZZZZ S", &o);
+  o = parse_every_way(parse_server, &leaf, ":nosuch.test S");
+  expect_unknown_prefix(":nosuch.test S", &o);
+
+  o = parse_every_way(parse_server, &leaf, "ZZZZZ SQ x 0 :gone");
+  expect_handler("ZZZZZ SQ x 0 :gone", &o, "SQUIT", "x");
+  o = parse_every_way(parse_server, &leaf, ":nosuch.test SQ x 0 :gone");
+  expect_handler(":nosuch.test SQ x 0 :gone", &o, "SQUIT", "x");
+  o = parse_every_way(parse_server, &leaf, "ZZZZZ D ABAAA :bye");
+  expect_handler("ZZZZZ D ABAAA :bye", &o, "KILL", "ABAAA");
+  o = parse_every_way(parse_server, &leaf, "ACZZZ N newnick 1");
+  assert_int_equal(o.kills, 1);
+  assert_int_equal(o.handler_calls, 0);
+}
+
+/* Lines with a command still parse as they did. */
+static void server_ordinary_lines(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_server, &leaf, "AC G :hello");
+  expect_handler("AC G :hello", &o, "PING", "hello");
+  o = parse_every_way(parse_server, &leaf, "@x AC G :hello");
+  expect_handler("@x AC G :hello", &o, "PING", "hello");
+  o = parse_every_way(parse_server, &leaf, COMPACT ",Sabc AC G :hello");
+  expect_handler(COMPACT ",Sabc AC G :hello", &o, "PING", "hello");
+  o = parse_every_way(parse_server, &leaf, "@x   :leafa.test   PING   x");
+  expect_handler("@x   :leafa.test   PING   x", &o, "PING", "x");
+  o = parse_every_way(parse_server, &leaf, "AC G");
+  expect_handler("AC G", &o, "PING", "");
+  /* no prefix: reported, and the line is the link's own */
+  o = parse_every_way(parse_server, &leaf, " G :x");
+  assert_int_equal(o.violations, 1);
+  /* a numeric reply */
+  o = parse_every_way(parse_server, &leaf, "AC 401 ABAAA x :No such nick");
+  assert_int_equal(o.do_numeric, 1);
+}
+
+/* Spaces only: no prefix (reported, as before), then an empty line. */
+static void server_spaces_only(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_server, &leaf, "   ");
+  assert_int_equal(o.ret, -1);
+  assert_int_equal(o.violations, 1);
+  assert_int_equal(o.empt, 1);
+  assert_int_equal(o.handler_calls, 0);
+  o = parse_every_way(parse_server, &leaf, " ");
+  assert_int_equal(o.ret, -1);
+  assert_int_equal(o.empt, 1);
+  assert_int_equal(o.handler_calls, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* parse_client()                                                      */
+/* ------------------------------------------------------------------ */
+
+static void client_tags_or_prefix_then_nothing_is_an_empty_line(void **state)
+{
+  static const char *const lines[] = {
+    "@x ", "@x   ", "@ ", "@+typing=active ", "@label=abc ",
+    "@x :pfx", "@x :pfx ", ":pfx", ":pfx ", ":", "   ", " ",
+    "  @x ",
+  };
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+    struct outcome o = parse_every_way(parse_client, &user, lines[i]);
+    expect_empty(lines[i], &o);
+  }
+}
+
+/* "@x" with no space is a command word, not a tag section: unknown
+ * command, 421 (as for any unknown command). */
+static void client_tags_without_space_is_an_unknown_command(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_client, &user, "@x");
+  assert_int_equal(o.ret, -1);
+  assert_int_equal(o.handler_calls, 0);
+  assert_int_equal(o.numerics, 1);
+  assert_int_equal(o.last_numeric, ERR_UNKNOWNCOMMAND);
+}
+
+static void client_ordinary_lines(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_client, &user, "PING :hello");
+  expect_handler("PING :hello", &o, "PING", "hello");
+  o = parse_every_way(parse_client, &user, "@x PING :hello");
+  expect_handler("@x PING :hello", &o, "PING", "hello");
+  o = parse_every_way(parse_client, &user, "@x :pfx PING :hello");
+  expect_handler("@x :pfx PING :hello", &o, "PING", "hello");
+}
+
+int main(void)
+{
+  const struct CMUnitTest tests[] = {
+    cmocka_unit_test(server_tags_then_nothing_is_an_empty_line),
+    cmocka_unit_test(server_prefix_then_nothing),
+    cmocka_unit_test(server_p9_prefix_edges),
+    cmocka_unit_test(server_unknown_prefix_exceptions_read_only_the_line),
+    cmocka_unit_test(server_ordinary_lines),
+    cmocka_unit_test(server_spaces_only),
+    cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
+    cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
+    cmocka_unit_test(client_ordinary_lines),
+  };
+
+  return cmocka_run_group_tests(tests, group_setup, NULL);
+}

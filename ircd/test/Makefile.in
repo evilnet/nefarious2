@@ -84,7 +84,8 @@ CMOCKA_TESTPROGS = \
 	db_api_rocksdb_cmocka \
 	ssl_teardown_cmocka \
 	close_connection_cmocka \
-	log_async_cmocka
+	log_async_cmocka \
+	parse_line_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -164,6 +165,7 @@ DEP_SRC = \
 	ircd_events_cmocka.c \
 	paste_listener_cmocka.c \
 	close_connection_cmocka.c \
+	parse_line_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -613,6 +615,22 @@ close_connection_cmocka.o: ${srcdir}/close_connection_cmocka.c ../s_bsd.c
 
 close_connection_cmocka: close_connection_cmocka.o
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections close_connection_cmocka.o $(CMOCKA_LIBS)
+
+# parse_line tests - a line that ends after its tags or its source prefix
+# ("@x ", "@A<time><msgid> ", ":prefix ", "AC ") is parsed from its own
+# bytes only: never from what a longer earlier line left after its
+# terminator in the reused input buffer (parse_server stepped over the NUL
+# and ran the earlier line's tail).  Includes ../parse.c, compiled with
+# -ffunction-sections and linked with --gc-sections: the program keeps
+# parse_server(), parse_client() and what they call, not the message table
+# and its handlers, so only those are stubbed in the test.
+# ../ircd_string.o supplies the character table msg_tree_parse() reads.
+parse_line_cmocka.o: ${srcdir}/parse_line_cmocka.c ../parse.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/parse_line_cmocka.c
+
+PARSE_LINE_CMOCKA_OBJS = parse_line_cmocka.o ../ircd_string.o
+parse_line_cmocka: $(PARSE_LINE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(PARSE_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
