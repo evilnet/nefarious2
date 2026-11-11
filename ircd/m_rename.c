@@ -2879,8 +2879,32 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   chptr = FindChannel(oldname);
 
   if (relocate) {
+    /* A relocation this server cannot apply is still relayed, exactly as
+     * a classic rename is (below): what stops it here is this server's
+     * own state -- the old channel is not here, the new name is taken
+     * here -- and says nothing about the servers behind this one.  A
+     * server that dropped the line became a wall: everything behind it
+     * kept the old channel, with the issuer in it, and never heard of
+     * the tombstone or its deadline.  So: leave local state alone, tell
+     * the operators (this server may now differ from the network, and
+     * only a person can sort that out), and pass the line on to the peers
+     * a relocation that was applied would have told, in the same form.
+     * The link the RN arrived on is skipped as on success, so nothing
+     * can loop. */
     if (!chptr) {
-      return 0; /* Channel doesn't exist on this server */
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RELOCATE %s -> %s from %C NOT applied locally: "
+                           "%s does not exist on this server.  The "
+                           "relocation has been relayed onward; unless that "
+                           "channel has just emptied everywhere, this server "
+                           "is now divergent and needs manual "
+                           "reconciliation.",
+                           oldname, newname, sptr, oldname);
+      /* The names as received: there is no local channel to take a
+       * spelling from. */
+      relocate_propagate(sptr, cptr, cptr, oldname, newname, expires,
+                         reason);
+      return 0;
     }
 
     /* Store old name before rename */
@@ -2890,15 +2914,8 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason, expires);
 
     if (rc == -2) {
-      /* Both names already exist HERE.  That is a pre-existing local
-       * divergence, not a defect in the message, and it is exactly the
-       * case where dropping the relay does the most damage: this server
-       * would become a silent wall, leaving every server behind it on the
-       * old name forever while everything in front of it moved.  So warn
-       * loudly enough for an operator to act -- the two channels have to
-       * be reconciled by hand -- and CONTINUE propagating.  Containment of
-       * the divergence to this one server beats orphaning the whole
-       * subtree. */
+      /* Both names already exist HERE: a local divergence, not a defect
+       * in the message. */
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "RELOCATE %s -> %s from %C NOT applied locally: "
                            "%s already exists on this server.  The rename "
@@ -2907,14 +2924,18 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                            oldname_buf, newname, sptr, newname);
       /* fall through to propagation */
     } else if (rc != 0) {
-      /* Any other failure is deterministic from the message itself (name
-       * too long, allocation failure), so every server fails it the same
-       * way and there is nothing downstream to orphan.  Log and drop,
-       * matching the classic failure path below. */
+      /* Anything else relocate_execute() can fail on here is this
+       * server's as well (an allocation): the names were judged above. */
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RELOCATE %s -> %s from %C NOT applied locally "
+                           "(relocate_execute: %d).  The relocation has "
+                           "been relayed onward, so this server is now "
+                           "divergent and needs manual reconciliation.",
+                           oldname_buf, newname, sptr, rc);
       log_write(LS_DEBUG, L_ERROR, 0,
-                "RELOCATE failed from %#C: %s -> %s (rc=%d)",
-                sptr, oldname, newname, rc);
-      return 0;
+                "RELOCATE from %#C not applied, relayed: %s -> %s (rc=%d)",
+                sptr, oldname_buf, newname, rc);
+      /* fall through to propagation */
     }
 
     /* Propagate with the marker, and with the deadline this server went

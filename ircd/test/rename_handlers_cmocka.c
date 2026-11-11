@@ -2981,6 +2981,94 @@ static void sweep_on_the_spot_frees_the_record_once(void **state)
   assert_int_equal(ntimers, 0);
 }
 
+/* --- D.1: a relocation this server cannot apply is still relayed --- */
+
+/* The old channel is not here.  The servers behind this one must hear of
+ * the relocation all the same, with the deadline, and the operators of
+ * this one must hear that it may now differ. */
+static void relocation_of_a_channel_not_here_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  (void)state;
+
+  server_relocate(peer, bob, "#old", "#new", "1000300", "moving");
+
+  assert_null(channel_named("#old"));
+  assert_null(channel_named("#new"));
+  assert_int_equal(ntimers, 0);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000300 :moving");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new C 1000300 :moving");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "#old"));
+  assert_non_null(strstr(opnotices[0], "#new"));
+  assert_non_null(strstr(opnotices[0], "does not exist"));
+  assert_non_null(strstr(opnotices[0], "relayed"));
+}
+
+/* ... in the old form too: relayed with the deadline this server would
+ * have gone by. */
+static void five_parameter_relocation_of_a_channel_not_here_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  (void)state;
+
+  feat_relocate_grace = 60;
+  server_relocate(peer, bob, "#old", "#new", NULL, "moving");
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000060 :moving");
+  assert_int_equal(nopnotices, 1);
+}
+
+/* The new name is taken here: nothing is touched, and it is relayed (as
+ * before this change). */
+static void relocation_onto_a_name_taken_here_is_relayed(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, alice, 0);
+  newch = channel_at("#new", 600000, carol);
+
+  server_relocate(peer, bob, "#old", "#new", "1000300", "moving");
+
+  assert_non_null(member_of(oldch, bob));
+  assert_string_equal(oldch->mode.redir, "");
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_null(member_of(newch, bob));
+  assert_int_equal(ntimers, 0);
+  assert_int_equal(sent_count_to(alice), 0);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000300 :moving");
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "already exists"));
+}
+
+/* The alias source rewrite toward X3 happens on such a relay as well. */
+static void unapplied_relocation_from_an_alias_reaches_x3_as_its_primary(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *primary = user_on(peer, "bob", "AAC");
+  struct Client *alias = user_on(peer, "bob", "AAE");
+  (void)state;
+
+  SetBouncerAlias(alias);
+  cli_user(alias)->alias_primary = primary;
+
+  server_relocate(peer, alias, "#old", "#new", "1000300", "");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new C 1000300 :");
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -3075,6 +3163,11 @@ int main(void)
     T(record_goes_with_its_channel),
     T(sweep_that_destroys_the_channel_frees_the_record_once),
     T(sweep_on_the_spot_frees_the_record_once),
+
+    T(relocation_of_a_channel_not_here_is_relayed),
+    T(five_parameter_relocation_of_a_channel_not_here_is_relayed),
+    T(relocation_onto_a_name_taken_here_is_relayed),
+    T(unapplied_relocation_from_an_alias_reaches_x3_as_its_primary),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
