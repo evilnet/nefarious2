@@ -15,6 +15,12 @@ services:
       IRCD_GENERAL_NUMERIC: 1
       IRCD_ADMIN_LOCATION: "New York, USA"
       IRCD_ADMIN_CONTACT: "admin@example.com"
+      # A base.conf without the generation marker (your own file, or one an
+      # older image generated and a volume kept) is left alone and the
+      # variables above are not applied to it. To replace it with a
+      # generated one, start once with the line below; the existing file is
+      # saved as base.conf.pre-regenerate.<UTC time> first.
+      # IRCD_CONF_REGENERATE: 1
     volumes:
       # Persist SSL certificate
       - ./ircd.pem:/home/nefarious/ircd/ircd.pem
