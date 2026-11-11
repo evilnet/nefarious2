@@ -85,7 +85,8 @@ CMOCKA_TESTPROGS = \
 	ssl_teardown_cmocka \
 	close_connection_cmocka \
 	log_async_cmocka \
-	parse_line_cmocka
+	parse_line_cmocka \
+	conf_reattach_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -166,6 +167,7 @@ DEP_SRC = \
 	paste_listener_cmocka.c \
 	close_connection_cmocka.c \
 	parse_line_cmocka.c \
+	conf_reattach_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -632,6 +634,21 @@ parse_line_cmocka.o: ${srcdir}/parse_line_cmocka.c ../parse.c
 PARSE_LINE_CMOCKA_OBJS = parse_line_cmocka.o ../ircd_string.o
 parse_line_cmocka: $(PARSE_LINE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(PARSE_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# conf_reattach tests - after a rehash, a registered server link is put
+# under the new Connect block that admits it (same name, its recorded host
+# or address, its SSL fingerprint), or keeps the one it linked under; the
+# ConfItem and class reference counts follow, and no block another link
+# holds is freed.  Includes ../s_conf.c, compiled with -ffunction-sections
+# and linked with --gc-sections: the program keeps rehash_reattach_server()
+# and the conf code it calls, so only those are stubbed in the test.
+conf_reattach_cmocka.o: ${srcdir}/conf_reattach_cmocka.c ../s_conf.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/conf_reattach_cmocka.c
+
+CONF_REATTACH_CMOCKA_OBJS = conf_reattach_cmocka.o ../ircd_string.o ../match.o \
+	../ircd_snprintf.o
+conf_reattach_cmocka: $(CONF_REATTACH_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CONF_REATTACH_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
