@@ -476,6 +476,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * Accepted; keeping them needs an incarnation stamp on the record. */
     history_recv_reset(chptr);
 #endif
+    /* Our channel of this name lost: a relocation tombstone held for it
+     * is over (its record, and the +z the wipe-out below leaves alone). */
+    if (chptr->creationtime)
+      relocate_tombstone_burst_lost(chptr);
     chptr->creationtime = timestamp;
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,
@@ -902,5 +906,12 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
   }
 
-  return mbuf ? modebuf_flush(mbuf) : 0;
+  {
+    int ret = mbuf ? modebuf_flush(mbuf) : 0;
+
+    /* A relocation tombstone keeps its form through a merge, and one
+     * that was waiting for this channel's BURST gets its channel. */
+    relocate_tombstone_burst_done(chptr);
+    return ret;
+  }
 }

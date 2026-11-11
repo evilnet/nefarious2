@@ -389,4 +389,65 @@ extern int relocate_name_cmp(const char *a, const char *b);
  */
 extern const char *relocate_winner(const char *a, const char *b);
 
+/*
+ * Relocation mode: a tombstone announced in a burst
+ *
+ *     <server> RT <old> <old-creation-ts> <new> <expires>
+ *
+ * (ircd/m_rename.c, "The tombstone in the burst").  What it means to the
+ * receiver depends on what the receiver holds.
+ */
+
+/** What a server holds when an announcement arrives.  Fill in every
+ * field. */
+struct RelocateAnnounceFacts {
+  int channel_exists;   /**< a channel of the old name exists here */
+  int ts_matches;       /**< ... and its creation timestamp is the one
+                             announced */
+  int have_record;      /**< a tombstone record is kept under the old name
+                             (whether or not its channel still carries its
+                             marks: the BURST that came first may have
+                             changed the redirect) */
+  int same_target;      /**< ... and its target is the one announced */
+};
+
+/** What to do with an announcement.  It is passed on in every case. */
+enum RelocateAnnounceVerdict {
+  RELOCATE_ANNOUNCE_NO_CHANNEL = 0, /**< nothing: no such channel here */
+  RELOCATE_ANNOUNCE_OTHER_CHANNEL,  /**< nothing: the channel of that name
+                                         here is another one (creation
+                                         timestamps differ) */
+  RELOCATE_ANNOUNCE_BUILD,          /**< make the record */
+  RELOCATE_ANNOUNCE_MERGE,          /**< the same tombstone: keep one
+                                         deadline (relocate_deadline_merge()) */
+  RELOCATE_ANNOUNCE_CROSS           /**< the two servers relocated the
+                                         channel to different names: the
+                                         crossing rule (relocate_name_cmp()) */
+};
+
+/** Decide what an announcement means here.
+ *
+ * - No channel of that name: nothing.  The BURST that precedes an
+ *   announcement creates the channel, so this is an announcement that
+ *   lost its BURST; there is nothing to make a tombstone of.
+ * - A channel with another creation timestamp: nothing.  The sender's
+ *   tombstone is an older or newer channel than the one here; the
+ *   timestamp rule of BURST has decided (or will, when ours reaches the
+ *   sender) which survives, and an announcement about the other says
+ *   nothing of this one.
+ * - The channel, and no record: build one.  Also when the channel is
+ *   registered -- whether a registered tombstone is cancelled is decided
+ *   at its deadline, not here -- and also when it does not carry the
+ *   redirect announced: the record then expires like any tombstone that
+ *   lost its redirect, which is what the sender's does.
+ * - The channel, and a record with the same target: one tombstone, two
+ *   deadlines; merge.
+ * - The channel, and a record with another target: a crossing.
+ *
+ * @param[in] facts What the caller found.
+ * @return The verdict.
+ */
+extern enum RelocateAnnounceVerdict
+relocate_announce_decide(const struct RelocateAnnounceFacts *facts);
+
 #endif /* INCLUDED_rename_proto_h */

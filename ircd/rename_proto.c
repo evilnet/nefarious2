@@ -371,3 +371,17 @@ const char *relocate_winner(const char *a, const char *b)
 {
   return (relocate_name_cmp(a, b) <= 0) ? a : b;
 }
+
+enum RelocateAnnounceVerdict
+relocate_announce_decide(const struct RelocateAnnounceFacts *facts)
+{
+  if (!facts->channel_exists)
+    return RELOCATE_ANNOUNCE_NO_CHANNEL;
+  if (!facts->ts_matches)
+    return RELOCATE_ANNOUNCE_OTHER_CHANNEL;
+  if (!facts->have_record)
+    return RELOCATE_ANNOUNCE_BUILD;
+
+  return facts->same_target ? RELOCATE_ANNOUNCE_MERGE
+                            : RELOCATE_ANNOUNCE_CROSS;
+}

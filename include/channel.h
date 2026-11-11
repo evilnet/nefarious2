@@ -536,6 +536,14 @@ extern void relocate_tombstone_channel_gone(struct Channel *chptr);
  * (old name, creation timestamp, target, deadline). */
 extern void relocate_burst(struct Client *cptr, struct Channel *chptr);
 
+/* Called by ms_burst(): the first when a channel is about to be wiped
+ * because the BURST's creation timestamp is older (a tombstone held for
+ * the losing channel is over); the second when a BURST has been taken in
+ * (a tombstone keeps its form, and one that was waiting for its channel
+ * gets it). */
+extern void relocate_tombstone_burst_lost(struct Channel *chptr);
+extern void relocate_tombstone_burst_done(struct Channel *chptr);
+
 /* Grace-period member status restore (spec, "Status preservation").  Called
  * from do_join() once a join to an existing channel has completed; looks up
  * and CONSUMES a status snapshot for `who` in whichever live tombstone (if

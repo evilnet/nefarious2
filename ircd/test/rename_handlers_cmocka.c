@@ -3968,6 +3968,561 @@ static void malformed_announcement_is_refused_and_not_relayed(void **state)
   assert_int_equal(ntimers, 0);
 }
 
+/* --- A.3 / A.4: acting on an announcement --- */
+
+/** A channel as the BURST of a tombstone leaves it on a server that had
+ * no such channel or held it as an ordinary one: +z, +L @a target. */
+static struct Channel *burst_tombstone(const char *name, time_t ts,
+                                       const char *target, struct Client *who)
+{
+  struct Channel *ch = fake_channel(name);
+
+  ch->creationtime = ts;
+  ch->mode.exmode |= EXMODE_PERSIST;
+  ch->mode.mode |= MODE_REDIRECT;
+  ircd_strncpy(ch->mode.redir, target, sizeof(ch->mode.redir));
+  if (who)
+    add_member(ch, who, 0);
+  return ch;
+}
+
+/* The server that healed a netsplit (or linked) mid-grace: the BURST gave
+ * it "+z +L #new", the announcement gives it the record.  Its local
+ * members -- who were never told the channel moved -- are told now, can
+ * regain their status if they follow, and the tombstone is dissolved at
+ * the deadline everybody else has. */
+static void announcement_builds_the_record(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#new", bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  oldch->mode.mode |= MODE_LIMIT;       /* our side still had +l */
+  oldch->mode.limit = 10;
+  newch = channel_at("#new", 500000, bob);
+
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(ntimers, 1);
+  /* the limit would keep the redirect from firing */
+  assert_int_equal(oldch->mode.limit, 0);
+  assert_false(oldch->mode.mode & MODE_LIMIT);
+  assert_non_null(strstr(sent_to(carol, 0),
+                         "NOTICE #old :#old has moved to #new. Join #new to "
+                         "follow; this channel closes in 15 minutes."));
+  assert_int_equal(sent_count_to(carol), 1);
+  assert_string_equal(sent_to(down, 0), "Bj RT #old 500000 #new 1000900");
+  assert_int_equal(relocate_snap_lookup(newch, carol, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_CHANOP);
+
+  /* and this server now announces it in its own bursts */
+  forget();
+  burst_to(down);
+  assert_string_equal(sent_to(down, 0), "AC RT #old 500000 #new 1000900");
+
+  forget();
+  advance(900);
+  assert_string_equal(sent_to(carol, 0),
+                      ":carol!user@host.example PART #old :Channel has moved to #new");
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
+/* With evilnet/channel-relocate the local member gets a RELOCATE, from
+ * the server (nobody here knows who relocated the channel). */
+static void announcement_tells_a_member_with_the_cap(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  (void)state;
+
+  CapSet(cli_active(carol), CAP_EVILNET_RELOCATE);
+  burst_tombstone("#old", 500000, "#new", carol);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+  assert_string_equal(sent_to(carol, 0), ":his.example RELOCATE #old #new :");
+}
+
+/* The receiver had already dissolved its copy; the sender's BURST brought
+ * the channel back and its announcement says the deadline is past: gone
+ * again at once, and the stale deadline is passed on as it came. */
+static void announcement_with_a_past_deadline_dissolves_at_once(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#new", bob);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "999990");
+
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+  assert_string_equal(sent_to(down, 0), "Bj RT #old 500000 #new 999990");
+}
+
+/* ... or still ahead: the tombstone is back until then (the later
+ * deadline wins also against a server that had none left). */
+static void announcement_restores_a_tombstone_the_receiver_had_dissolved(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#new", bob);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000040");
+  assert_int_equal(timers_at(1000040), 1);
+  advance(40);
+  assert_true(was_destroyed(oldch));
+}
+
+static void announcement_with_an_absurd_deadline_is_clamped(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  (void)state;
+
+  burst_tombstone("#old", 500000, "#new", bob);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "2147483647");
+  assert_int_equal(timers_at(1000000 + RELOCATE_GRACE_MAX), 1);
+}
+
+/* A registered channel is not left out: the record is built, and the +R
+ * decides at the deadline -- here it is still set, so the tombstone is
+ * cancelled and nobody is parted. */
+static void announcement_for_a_registered_channel_builds_the_record_too(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#new", carol);
+  oldch->mode.mode |= MODE_REGISTERED;
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+
+  assert_int_equal(timers_at(1000900), 1);
+  assert_true(oldch->mode.mode & MODE_REGISTERED);
+  assert_string_equal(oldch->mode.redir, "#new");
+
+  advance(900);
+  assert_non_null(member_of(oldch, carol));
+  assert_string_equal(oldch->mode.redir, "");
+  assert_true(oldch->mode.mode & MODE_REGISTERED);
+  assert_false(was_destroyed(oldch));
+}
+
+/* ... and with the stray +R taken back in time, swept. */
+static void announced_registered_tombstone_is_swept_once_unregistered(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#new", carol);
+  oldch->mode.mode |= MODE_REGISTERED;
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+  oldch->mode.mode &= ~MODE_REGISTERED;                 /* M #old -R */
+  advance(900);
+  assert_true(was_destroyed(oldch));
+}
+
+/* The BURST lost on timestamp here: our channel of that name is older,
+ * and is not the sender's tombstone.  Nothing is built; the line still
+ * goes on. */
+static void announcement_for_another_incarnation_is_ignored(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *ours;
+  (void)state;
+
+  ours = channel_at("#old", 400000, carol);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+
+  assert_int_equal(ntimers, 0);
+  assert_int_equal(sent_count_to(carol), 0);
+  assert_string_equal(ours->mode.redir, "");
+  assert_string_equal(sent_to(down, 0), "Bj RT #old 500000 #new 1000900");
+  advance(900);
+  assert_non_null(member_of(ours, carol));
+}
+
+static void announcement_for_a_channel_not_here_is_ignored(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  (void)state;
+
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+  assert_int_equal(ntimers, 0);
+  assert_null(channel_named("#old"));
+  assert_string_equal(sent_to(down, 0), "Bj RT #old 500000 #new 1000900");
+}
+
+/* The channel is the one, but the burst merge left it with another
+ * redirect (an op's own +L here sorted first): on the sender the
+ * tombstone has lost its redirect the same way.  The record is kept, as
+ * the sender's is, and at the deadline nobody is parted and +z goes. */
+static void announcement_for_a_channel_with_another_redirect(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#aaa", carol);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+
+  assert_int_equal(timers_at(1000900), 1);
+  assert_string_equal(oldch->mode.redir, "#aaa");       /* not imposed */
+  assert_int_equal(sent_count_to(carol), 0);            /* not a tombstone here */
+
+  advance(900);
+  assert_non_null(member_of(oldch, carol));
+  assert_string_equal(oldch->mode.redir, "#aaa");
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+}
+
+/* Both sides hold the tombstone, with deadlines of their own (one side
+ * was behind an older server): one deadline, the later, whichever side
+ * this server is on. */
+static void announcement_for_a_tombstone_held_here_keeps_the_later_deadline(void **state)
+{
+  struct Crossing w;
+  struct Client *hub;
+  (void)state;
+
+  crossing_world(&w);
+  hub = linked("hub.example", "Bh", "v");
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000300", "");
+  forget();
+
+  server_tombstone(hub, hub, "#old", "500000", "#new", "1000900");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(sent_count_to(w.carol), 0);          /* told long ago */
+
+  /* an earlier one changes nothing ... */
+  server_tombstone(hub, hub, "#old", "500000", "#NEW", "1000100");
+  assert_int_equal(timers_at(1000900), 1);
+  /* ... nor does one that is already past: the record's timer is armed,
+   * and stays so */
+  server_tombstone(hub, hub, "#old", "500000", "#new", "999000");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_ptr_equal(channel_named("#old"), w.old);
+
+  /* what this server announces is the merged deadline */
+  forget();
+  burst_to(hub);
+  assert_string_equal(sent_to(hub, 0), "AC RT #old 500000 #new 1000900");
+}
+
+/* The record's own deadline is due this second and its timer has not
+ * run; an announcement that cannot move it past now arrives.  Dissolved
+ * on the spot, the armed record freed through its timer. */
+static void announcement_meeting_a_record_that_is_due_dissolves_through_the_timer(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000100", "");
+  CurrentTime = 1000100;
+
+  server_tombstone(w.pb, w.pb, "#old", "500000", "#new", "1000050");
+
+  assert_int_equal(ntimers, 0);
+  assert_true(was_destroyed(w.old));
+  advance(1000);
+}
+
+/* Two sides of a netsplit relocated #old to different names.  At the
+ * netjoin each side announces its own tombstone; both apply the crossing
+ * rule to the pair and end alike.
+ *
+ * This is the side whose name wins (#x): #old keeps pointing at #x, and
+ * the other side's #y is a tombstone redirecting to #x -- here its BURST
+ * arrived before the announcement. */
+static void disagreeing_announcements_on_the_winning_side(void **state)
+{
+  struct Crossing w;
+  struct Channel *y;
+  (void)state;
+
+  crossing_world(&w);
+  remove_user_from_channel(w.uma, w.old);       /* uma was across the split */
+  vic_relocates(&w);                            /* 1000900 */
+
+  /* the other side's burst: #y with uma, then #old (+L #y loses the +L
+   * merge to #x, which sorts first), then the record */
+  y = channel_at("#y", 500000, w.uma);
+  forget();
+  server_tombstone(w.pb, w.pb, "#old", "500000", "#y", "1000600");
+
+  assert_string_equal(w.old->mode.redir, "#x");
+  assert_string_equal(y->mode.redir, "#x");
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_true(y->mode.mode & MODE_REDIRECT);
+  assert_non_null(member_of(y, w.uma));
+  assert_int_equal(ntimers, 2);
+  assert_int_equal(timers_at(1000900), 2);
+  assert_int_equal(sent_count_to(w.carol), 0);
+  assert_string_equal(sent_to(w.pa, 0), "Bk RT #old 500000 #y 1000600");
+
+  /* the other side announces #y too once it has made it a tombstone
+   * (it does that when OUR announcement reaches it): the same record */
+  server_tombstone(w.pb, w.pb, "#y", "500000", "#x", "1000900");
+  assert_int_equal(ntimers, 2);
+  assert_int_equal(timers_at(1000900), 2);
+
+  advance(900);
+  assert_true(was_destroyed(w.old));
+  assert_true(was_destroyed(y));
+  assert_non_null(channel_named("#x"));
+}
+
+/* The same side, but the announcement arrives BEFORE the BURST of #y
+ * (channels are burst in no particular order).  The loser cannot be made
+ * a tombstone yet; it is when its BURST has been taken in. */
+static void disagreeing_announcements_before_the_losers_burst(void **state)
+{
+  struct Crossing w;
+  struct Channel *y;
+  (void)state;
+
+  crossing_world(&w);
+  remove_user_from_channel(w.uma, w.old);
+  vic_relocates(&w);
+
+  server_tombstone(w.pb, w.pb, "#old", "500000", "#y", "1000600");
+  assert_null(channel_named("#y"));
+  assert_string_equal(w.old->mode.redir, "#x");
+  assert_int_equal(timers_at(1000900), 2);      /* #old's, and one waiting for #y */
+
+  /* B #y 500000 +n ... uma */
+  y = channel_at("#y", 500000, w.uma);
+  y->mode.mode |= MODE_LIMIT;
+  y->mode.limit = 5;
+  relocate_tombstone_burst_done(y);
+
+  assert_string_equal(y->mode.redir, "#x");
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(y->mode.limit, 0);
+  assert_int_equal(ntimers, 2);
+
+  advance(900);
+  assert_true(was_destroyed(y));
+  assert_true(was_destroyed(w.old));
+}
+
+/* ... and a channel of another creation timestamp that turns up under
+ * the loser's name is not that channel: it is left alone, and the
+ * waiting record expires without touching it. */
+static void waiting_record_does_not_take_another_channel(void **state)
+{
+  struct Crossing w;
+  struct Client *dan = user_on(&me, "dan", "AAG");
+  struct Channel *y;
+  (void)state;
+
+  crossing_world(&w);
+  remove_user_from_channel(w.uma, w.old);
+  vic_relocates(&w);
+  server_tombstone(w.pb, w.pb, "#old", "500000", "#y", "1000600");
+
+  y = channel_at("#y", 1000010, dan);           /* a stranger's #y */
+  relocate_tombstone_burst_done(y);
+  assert_string_equal(y->mode.redir, "");
+  assert_false(y->mode.exmode & EXMODE_PERSIST);
+
+  /* nor does the stranger's channel going away take the waiting record
+   * with it: the real #y may still be burst */
+  remove_user_from_channel(dan, y);
+  assert_true(was_destroyed(y));
+  assert_int_equal(ntimers, 2);
+
+  /* a second stranger's #y, +z by services, is there at the deadline */
+  y = channel_at("#y", 1000020, dan);
+  y->mode.exmode |= EXMODE_PERSIST;
+  forget();
+  advance(900);
+  assert_non_null(member_of(y, dan));
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(sent_count_to(dan), 0);
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(ntimers, 0);
+}
+
+/* The side whose name loses (#y, with uma local): the BURST's +L merge
+ * has already pointed #old at #x; the announcement makes that the
+ * record's target, turns the local #y into a tombstone redirecting to #x
+ * and tells uma. */
+static void disagreeing_announcements_on_the_losing_side(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bh", "v");
+  struct Client *vic = user_on(hub, "vic", "AAC");
+  struct Client *uma = user_on(&me, "uma", "AAD");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch, *y, *x;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 600;
+  oldch = channel_at("#old", 500000, uma);
+  add_member(oldch, carol, CHFL_VOICE);
+  client_rename(uma, "#old", "#y", "to y");     /* deadline 1000600 */
+  y = channel_named("#y");
+
+  /* the hub's burst: #x with vic; #old "+z +L #x" (merged: #x sorts
+   * first); then the record */
+  x = channel_at("#x", 500000, vic);
+  ircd_strncpy(oldch->mode.redir, "#x", sizeof(oldch->mode.redir));
+  forget();
+  server_tombstone(hub, hub, "#old", "500000", "#x", "1000900");
+
+  assert_string_equal(oldch->mode.redir, "#x");
+  assert_string_equal(y->mode.redir, "#x");
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_non_null(member_of(y, uma));
+  assert_int_equal(ntimers, 2);
+  assert_int_equal(timers_at(1000900), 2);
+  /* uma, in the loser, is told like any stayer */
+  assert_non_null(strstr(sent_to(uma, 0), "NOTICE #y :#y has moved to #x. Join #x"));
+  assert_string_equal(sent_to(uma, 1), ":me.example MODE #y +L #x");
+  /* carol's snapshot in #old's record now restores her in the winner */
+  assert_int_equal(relocate_snap_lookup(x, carol, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_VOICE);
+  flags = 0;
+  assert_int_equal(relocate_snap_lookup(x, uma, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_CHANOP);
+
+  /* what this side announces from now on is the agreed state */
+  forget();
+  burst_to(hub);
+  assert_int_equal(sent_count_to(hub), 2);
+}
+
+/* The losing side again, with two things the first case leaves out: the
+ * BURST's merge did not change #old's redirect (whatever the reason, the
+ * announcement must), and an earlier tombstone -- #first, relocated to
+ * #old before -- pointed at the loser and has to follow to the winner. */
+static void disagreeing_announcements_retarget_everything_on_the_losing_side(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bh", "v");
+  struct Client *zed = user_on(&me, "zed", "AAF");
+  struct Client *uma = user_on(&me, "uma", "AAD");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *first, *oldch, *y;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 600;
+  first = channel_at("#first", 500000, zed);
+  add_member(first, carol, 0);
+  client_rename(zed, "#first", "#old", "");
+  oldch = channel_named("#old");
+  add_member(oldch, uma, CHFL_CHANOP);
+  client_rename(uma, "#old", "#y", "");
+  y = channel_named("#y");
+  assert_string_equal(first->mode.redir, "#y");
+  assert_string_equal(oldch->mode.redir, "#y");
+  forget();
+
+  server_tombstone(hub, hub, "#old", "500000", "#x", "1000900");
+
+  assert_string_equal(oldch->mode.redir, "#x");
+  assert_string_equal(first->mode.redir, "#x");
+  assert_string_equal(y->mode.redir, "#x");
+  /* zed, left in #old, and carol, left in #first, see where they point */
+  assert_string_equal(sent_to(zed, 0), ":me.example MODE #old +L #x");
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #first +L #x");
+  /* #first keeps its own deadline; #old and #y share the later */
+  assert_int_equal(timers_at(1000600), 1);
+  assert_int_equal(timers_at(1000900), 2);
+
+  /* and all three are announced that way */
+  forget();
+  burst_to(hub);
+  assert_int_equal(sent_count_to(hub), 3);
+}
+
+/* --- A.4: what a BURST does to a tombstone held here --- */
+
+/* The channel loses the BURST on timestamp: it is another server's older
+ * channel now, wiped as any loser is.  The tombstone is over at that
+ * moment -- record dropped, and the +z, which the wipe-out leaves alone,
+ * taken off (if the winner is itself +z its BURST sets it again). */
+static void tombstone_that_loses_a_burst_on_timestamp_is_cancelled(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  vic_relocates(&w);
+  assert_int_equal(ntimers, 1);
+
+  relocate_tombstone_burst_lost(w.old);
+
+  assert_int_equal(ntimers, 0);
+  assert_false(w.old->mode.exmode & EXMODE_PERSIST);
+  assert_non_null(member_of(w.old, w.carol));
+  advance(900);
+  assert_non_null(member_of(w.old, w.carol));
+}
+
+/* A BURST for an ordinary channel changes nothing through either hook. */
+static void burst_hooks_leave_ordinary_channels_alone(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Channel *ch;
+  (void)state;
+
+  ch = channel_at("#plain", 500000, alice);
+  ch->mode.exmode |= EXMODE_PERSIST;
+  ch->mode.mode |= MODE_LIMIT;
+  ch->mode.limit = 7;
+  relocate_tombstone_burst_lost(ch);
+  relocate_tombstone_burst_done(ch);
+  assert_true(ch->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(ch->mode.limit, 7);
+}
+
+/* The other side still held the channel as an ordinary one with +l; the
+ * merge put the limit on our tombstone, where it would stop the redirect
+ * from firing.  Stripped again when the BURST has been taken in. */
+static void burst_cannot_leave_a_limit_on_a_tombstone(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  vic_relocates(&w);
+
+  w.old->mode.mode |= MODE_LIMIT;               /* B #old 500000 +l 10 ... */
+  w.old->mode.limit = 10;
+  relocate_tombstone_burst_done(w.old);
+
+  assert_int_equal(w.old->mode.limit, 0);
+  assert_false(w.old->mode.mode & MODE_LIMIT);
+  assert_string_equal(w.old->mode.redir, "#x");
+  assert_int_equal(timers_at(1000900), 1);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -4095,6 +4650,27 @@ int main(void)
     T(crossing_and_chain_are_announced_as_they_stand),
     T(announcement_is_relayed_like_burst_state),
     T(malformed_announcement_is_refused_and_not_relayed),
+
+    T(announcement_builds_the_record),
+    T(announcement_tells_a_member_with_the_cap),
+    T(announcement_with_a_past_deadline_dissolves_at_once),
+    T(announcement_restores_a_tombstone_the_receiver_had_dissolved),
+    T(announcement_with_an_absurd_deadline_is_clamped),
+    T(announcement_for_a_registered_channel_builds_the_record_too),
+    T(announced_registered_tombstone_is_swept_once_unregistered),
+    T(announcement_for_another_incarnation_is_ignored),
+    T(announcement_for_a_channel_not_here_is_ignored),
+    T(announcement_for_a_channel_with_another_redirect),
+    T(announcement_for_a_tombstone_held_here_keeps_the_later_deadline),
+    T(announcement_meeting_a_record_that_is_due_dissolves_through_the_timer),
+    T(disagreeing_announcements_on_the_winning_side),
+    T(disagreeing_announcements_before_the_losers_burst),
+    T(waiting_record_does_not_take_another_channel),
+    T(disagreeing_announcements_on_the_losing_side),
+    T(disagreeing_announcements_retarget_everything_on_the_losing_side),
+    T(tombstone_that_loses_a_burst_on_timestamp_is_cancelled),
+    T(burst_hooks_leave_ordinary_channels_alone),
+    T(burst_cannot_leave_a_limit_on_a_tombstone),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -883,6 +883,62 @@ static void deadline_merge_is_order_independent(void **state)
   }
 }
 
+/* ========== relocation: what a burst announcement means here ========== */
+
+static enum RelocateAnnounceVerdict announce(int exists, int ts_matches,
+                                             int have_record, int same_target)
+{
+  struct RelocateAnnounceFacts f;
+
+  memset(&f, 0, sizeof(f));
+  f.channel_exists = exists;
+  f.ts_matches = ts_matches;
+  f.have_record = have_record;
+  f.same_target = same_target;
+  return relocate_announce_decide(&f);
+}
+
+static void announcement_for_a_channel_not_here_is_nothing(void **state)
+{
+  int rec, same, ts;
+  (void)state;
+
+  /* whatever else is claimed: no channel, nothing to make a tombstone of */
+  for (rec = 0; rec < 2; rec++)
+    for (same = 0; same < 2; same++)
+      for (ts = 0; ts < 2; ts++)
+        assert_int_equal(announce(0, ts, rec, same),
+                         RELOCATE_ANNOUNCE_NO_CHANNEL);
+}
+
+/* The same name with another creation timestamp is another channel: the
+ * BURST that preceded the announcement lost on timestamp here. */
+static void announcement_for_another_incarnation_is_nothing(void **state)
+{
+  int rec, same;
+  (void)state;
+
+  for (rec = 0; rec < 2; rec++)
+    for (same = 0; same < 2; same++)
+      assert_int_equal(announce(1, 0, rec, same),
+                       RELOCATE_ANNOUNCE_OTHER_CHANNEL);
+}
+
+static void announcement_without_a_record_builds_one(void **state)
+{
+  (void)state;
+  assert_int_equal(announce(1, 1, 0, 0), RELOCATE_ANNOUNCE_BUILD);
+  /* "same target" means nothing without a record */
+  assert_int_equal(announce(1, 1, 0, 1), RELOCATE_ANNOUNCE_BUILD);
+}
+
+static void announcement_meeting_a_record_merges_or_crosses(void **state)
+{
+  (void)state;
+  assert_int_equal(announce(1, 1, 1, 1), RELOCATE_ANNOUNCE_MERGE);
+  assert_int_equal(announce(1, 1, 1, 0), RELOCATE_ANNOUNCE_CROSS);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -938,6 +994,10 @@ int main(void)
     cmocka_unit_test(winner_comparison_is_antisymmetric_and_agrees_with_the_ircd),
     cmocka_unit_test(deadline_merge_keeps_the_later),
     cmocka_unit_test(deadline_merge_is_order_independent),
+    cmocka_unit_test(announcement_for_a_channel_not_here_is_nothing),
+    cmocka_unit_test(announcement_for_another_incarnation_is_nothing),
+    cmocka_unit_test(announcement_without_a_record_builds_one),
+    cmocka_unit_test(announcement_meeting_a_record_merges_or_crosses),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
