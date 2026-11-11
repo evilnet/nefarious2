@@ -894,7 +894,7 @@ in case of an existing server introducing another server (also during burst), th
 
 New to Nefarious
 - the <flags> field can additionally include the o flag to indicate that a server supports op levels. If not supplied Nefarious will not send any op levels in the BURST (B) message or MODE (M) message. But instead will send traditional +o modes.
-- the <flags> field can additionally include the r flag: the server accepts and relays the channel rename message (RN).
+- the <flags> field can additionally include the r flag: the server accepts and relays the channel rename message (RN). Nefarious sends it for itself.
 - the <flags> field can additionally include the v flag: the server speaks the IRCv3 server-to-server extensions of the ircv3.2-upgrade branch (which include RN). Nefarious does not send it for itself.
 - Nefarious records r and v for a server that sends them. When it introduces such a server to others it writes r for either and never v: a server shown with v must be reachable through servers that all speak those extensions, and Nefarious does not.
 
