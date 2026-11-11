@@ -53,6 +53,7 @@ struct Client me;
 struct Client his;
 struct Client *GlobalClientList;
 time_t CurrentTime = 1000000;
+time_t TSoffset;
 int log_inassert;
 
 /* ====================================================================
@@ -60,7 +61,7 @@ int log_inassert;
  * ==================================================================== */
 
 #define LINE 700
-#define MAXREC 48
+#define MAXREC 96
 
 struct Sent {
   struct Client *to;            /* the local connection the line went to */
@@ -114,7 +115,7 @@ static void forget(void)
  * The fake network
  * ==================================================================== */
 
-#define MAXOBJ 32
+#define MAXOBJ 64
 static struct Client *made[MAXOBJ];
 static int nmade;
 static struct Connection me_con;
@@ -215,6 +216,8 @@ static struct Client *user_on(struct Client *server, const char *nick,
 
 static struct Channel *channels[MAXOBJ];
 static int nchannels;
+static struct Channel *destroyed[MAXOBJ];   /* see fake_destruct() */
+static int ndestroyed;
 
 static struct Channel *fake_channel(const char *name)
 {
@@ -240,7 +243,10 @@ static struct Membership *add_member(struct Channel *ch, struct Client *who,
   if (ch->members)
     ch->members->prev_member = m;
   ch->members = m;
-  ch->users++;
+  if (status & CHFL_ALIAS)
+    ch->aliases++;
+  else
+    ch->users++;
   return m;
 }
 
@@ -259,6 +265,7 @@ static int feat_rename_services;
 static int feat_rename_consent;
 static int feat_channellen;
 static int feat_utf8_only;
+static int feat_relocate_grace;
 
 /* --- timers: recorded, fired by hand --- */
 
@@ -273,6 +280,43 @@ static void fire(struct Timer *t, enum EventType type)
   ev.ev_type = type;
   ev.ev_gen.gen_timer = t;
   (*t->t_header.gh_call)(&ev);
+}
+
+/** How many timers are armed for @a when (the event loop's clock). */
+static int timers_at(time_t when)
+{
+  int i, count = 0;
+  for (i = 0; i < ntimers; i++)
+    if (timers[i]->t_type == TT_ABSOLUTE && timers[i]->t_value == when)
+      count++;
+  return count;
+}
+
+/** Fire every tombstone timer that is due (they are the absolute ones;
+ * the services timeouts are relative and stay). */
+static void fire_due(void)
+{
+  int i;
+
+  for (i = 0; i < ntimers; ) {
+    struct Timer *t = timers[i];
+
+    if (t->t_type != TT_ABSOLUTE || t->t_value > CurrentTime) {
+      i++;
+      continue;
+    }
+    timers[i] = timers[--ntimers];
+    fire(t, ET_EXPIRE);
+    fire(t, ET_DESTROY);
+    i = 0;                      /* the callback may have changed the list */
+  }
+}
+
+/** Let @a seconds pass. */
+static void advance(int seconds)
+{
+  CurrentTime += seconds;
+  fire_due();
 }
 
 /** Let every pending rename's services timeout expire. */
@@ -293,6 +337,7 @@ static int world_setup(void **state)
 
   forget();
   nmade = nchannels = ntimers = 0;
+  ndestroyed = 0;
   GlobalClientList = NULL;
 
   memset(&me, 0, sizeof(me));
@@ -308,10 +353,19 @@ static int world_setup(void **state)
   cli_next(&me) = NULL;
   GlobalClientList = &me;
 
+  /* the name server-sourced lines to clients go out under */
+  memset(&his, 0, sizeof(his));
+  ircd_strncpy(cli_name(&his), "his.example", sizeof(his.cli_name));
+  cli_status(&his) = STAT_SERVER;
+  cli_connect(&his) = &me_con;
+
   feat_rename_services = 1;
   feat_rename_consent = 0;
   feat_channellen = CHANNELLEN;
   feat_utf8_only = 0;
+  feat_relocate_grace = 900;
+  CurrentTime = 1000000;
+  TSoffset = 0;
   return 0;
 }
 
@@ -376,6 +430,7 @@ int feature_int(enum Feature feat)
 {
   switch (feat) {
   case FEAT_CHANNELLEN: return feat_channellen;
+  case FEAT_RELOCATE_GRACE: return feat_relocate_grace;
   default: return 0;
   }
 }
@@ -441,14 +496,29 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
   }
 }
 
+/* As the real one: every local member's connection, the source's own
+ * and bouncer aliases included; zombies and @a one are skipped. */
 void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
                                       const char *tok, struct Channel *to,
                                       struct Client *one, unsigned int skip,
                                       const char *pattern, ...)
 {
-  (void)from; (void)cmd; (void)tok; (void)to; (void)one; (void)skip;
-  (void)pattern;
-  fail_msg("a channel-wide send: only relocation mode does that");
+  struct Membership *m;
+  (void)tok; (void)skip;
+
+  for (m = to->members; m; m = m->next_member) {
+    struct VarData vd;
+    char buf[LINE];
+
+    if (!MyConnect(m->user) || !IsUser(m->user) || IsZombie(m)
+        || m->user == one)
+      continue;
+    vd.vd_format = pattern;
+    va_start(vd.vd_args, pattern);
+    ircd_snprintf(m->user, buf, sizeof(buf), "%:#C %s %v", from, cmd, &vd);
+    va_end(vd.vd_args);
+    record_sent(m->user, buf);
+  }
 }
 
 void send_fail(struct Client *to, const char *command, const char *code,
@@ -565,8 +635,8 @@ struct Timer *timer_init(struct Timer *timer)
 void timer_add(struct Timer *timer, EventCallBack call, void *data,
                enum TimerType type, time_t value)
 {
-  (void)type; (void)value;
-
+  timer->t_type = type;
+  timer->t_value = value;
   timer->t_header.gh_call = call;
   timer->t_header.gh_data = data;
   assert_true(ntimers < MAXOBJ);
@@ -587,64 +657,185 @@ void timer_del(struct Timer *timer)
   fire(timer, ET_DESTROY);
 }
 
-/* Relocation mode (FEAT_RENAME_CONSENT) is not exercised here; anything
- * only it reaches fails the test that reached it. */
-#define RELOCATION_ONLY(name) fail_msg(name "() called: relocation mode only")
+void timer_chg(struct Timer *timer, enum TimerType type, time_t value)
+{
+  timer->t_type = type;
+  timer->t_value = value;
+}
 
+/* --- what relocation mode needs of channel.c ---
+ *
+ * The channel table is the list above; a destroyed channel leaves it (and
+ * is kept, not freed, so a stale pointer in the code under test reads
+ * something a test can still assert on). */
+
+static void fake_destruct(struct Channel *ch)
+{
+  int i;
+
+  assert_null(ch->members);
+  /* as destruct_channel() */
+  relocate_tombstone_channel_gone(ch);
+  for (i = 0; i < nchannels; i++)
+    if (channels[i] == ch)
+      channels[i] = NULL;
+  assert_true(ndestroyed < MAXOBJ);
+  destroyed[ndestroyed++] = ch;
+}
+
+static int was_destroyed(struct Channel *ch)
+{
+  int i;
+  for (i = 0; i < ndestroyed; i++)
+    if (destroyed[i] == ch)
+      return 1;
+  return 0;
+}
+
+/* As the real one: a channel a local user makes is stamped now, one made
+ * for a remote line is stamped by its caller. */
 struct Channel *get_channel(struct Client *cptr, char *chname,
                             ChannelGetType flag)
 {
-  (void)cptr; (void)chname; (void)flag;
-  RELOCATION_ONLY("get_channel");
-  return NULL;
+  struct Channel *ch = hSeekChannel(chname);
+
+  if (ch || flag != CGT_CREATE)
+    return ch;
+  ch = fake_channel(chname);
+  ch->creationtime = MyUser(cptr) ? TStime() : (time_t)0;
+  return ch;
 }
 
 void add_user_to_channel(struct Channel *chptr, struct Client *who,
                          unsigned int flags, int oplevel)
 {
-  (void)chptr; (void)who; (void)flags; (void)oplevel;
-  RELOCATION_ONLY("add_user_to_channel");
+  SetOpLevel(add_member(chptr, who, flags), oplevel);
 }
 
-void remove_user_from_channel(struct Client *sptr, struct Channel *chptr)
-{
-  (void)sptr; (void)chptr;
-  RELOCATION_ONLY("remove_user_from_channel");
-}
-
+/* As the real one for a channel without oplevels or zannels: an empty
+ * channel that is not persistent and has no alias left is reset and
+ * destroyed. */
 int sub1_from_channel(struct Channel *chptr)
 {
-  (void)chptr;
-  RELOCATION_ONLY("sub1_from_channel");
+  if (chptr->users > 1) {
+    --chptr->users;
+    return 1;
+  }
+  chptr->users = 0;
+  if (chptr->aliases > 0)
+    return 0;
+  if (chptr->mode.exmode & EXMODE_PERSIST)
+    return 0;
+  chptr->mode.mode = 0;
+  chptr->mode.exmode = 0;
+  chptr->mode.limit = 0;
+  chptr->mode.redir[0] = '\0';
+  chptr->mode.key[0] = '\0';
+  fake_destruct(chptr);
   return 0;
+}
+
+static void unlink_member(struct Membership *m)
+{
+  struct Channel *ch = m->channel;
+
+  if (m->prev_member)
+    m->prev_member->next_member = m->next_member;
+  else
+    ch->members = m->next_member;
+  if (m->next_member)
+    m->next_member->prev_member = m->prev_member;
+  free(m);
+}
+
+/* As the real one: the member's alias shadows go first and silently
+ * (bounce_sync_alias_part()), zombies are found too. */
+void remove_user_from_channel(struct Client *sptr, struct Channel *chptr)
+{
+  struct Membership *m, *next;
+  int was_alias;
+
+  for (m = chptr->members; m; m = m->next_member)
+    if (m->user == sptr)
+      break;
+  if (!m)
+    return;
+  was_alias = IsMemberAlias(m) ? 1 : 0;
+
+  if (!was_alias) {
+    struct Membership *a;
+
+    for (a = chptr->members; a; a = next) {
+      next = a->next_member;
+      if (IsMemberAlias(a) && cli_user(a->user)->alias_primary == sptr) {
+        unlink_member(a);
+        chptr->aliases--;
+      }
+    }
+  }
+  unlink_member(m);
+  if (was_alias)
+    chptr->aliases--;
+  else
+    sub1_from_channel(chptr);
 }
 
 struct Ban *make_ban(const char *banstr)
 {
-  (void)banstr;
-  RELOCATION_ONLY("make_ban");
-  return NULL;
+  struct Ban *ban = calloc(1, sizeof(*ban));
+
+  assert_non_null(ban);
+  snprintf(ban->banstr, sizeof(ban->banstr), "%s", banstr);
+  return ban;
 }
+
+/* A mode buffer that holds one +L/-L for the channel's local members. */
+static struct {
+  struct Channel *chan;
+  struct Client *source;
+  unsigned int mode;
+  char arg[CHANNELLEN + 1];
+} fake_mb;
 
 void modebuf_init(struct ModeBuf *mbuf, struct Client *source,
                   struct Client *connect, struct Channel *chan,
                   unsigned int dest)
 {
-  (void)mbuf; (void)source; (void)connect; (void)chan; (void)dest;
-  RELOCATION_ONLY("modebuf_init");
+  (void)mbuf; (void)connect;
+  /* nothing relocation does to a mode may reach a server */
+  assert_int_equal(dest, MODEBUF_DEST_CHANNEL);
+  fake_mb.chan = chan;
+  fake_mb.source = source;
+  fake_mb.mode = 0;
 }
 
 void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,
                          char *string, int free_it)
 {
-  (void)mbuf; (void)mode; (void)string; (void)free_it;
-  RELOCATION_ONLY("modebuf_mode_string");
+  (void)mbuf; (void)free_it;
+  assert_true(mode & MODE_REDIRECT);
+  fake_mb.mode = mode;
+  snprintf(fake_mb.arg, sizeof(fake_mb.arg), "%s", string);
 }
 
 int modebuf_flush(struct ModeBuf *mbuf)
 {
+  struct Membership *m;
+  char buf[LINE];
   (void)mbuf;
-  RELOCATION_ONLY("modebuf_flush");
+
+  if (!fake_mb.mode)
+    return 0;
+  if (fake_mb.mode & MODE_ADD)
+    snprintf(buf, sizeof(buf), ":%s MODE %s +L %s", cli_name(fake_mb.source),
+             fake_mb.chan->chname, fake_mb.arg);
+  else
+    snprintf(buf, sizeof(buf), ":%s MODE %s -L", cli_name(fake_mb.source),
+             fake_mb.chan->chname);
+  for (m = fake_mb.chan->members; m; m = m->next_member)
+    if (MyConnect(m->user) && IsUser(m->user) && !IsZombie(m))
+      record_sent(m->user, buf);
+  fake_mb.mode = 0;
   return 0;
 }
 
@@ -1866,6 +2057,154 @@ static void fallback_join_follows_each_bouncer_connection(void **state)
                       ":dana!user@host.example JOIN #new dana :Real Name");
 }
 
+/* ====================================================================
+ * Relocation mode (evilnet/channel-relocate)
+ * ==================================================================== */
+
+/** "<sptr> RN <old> <new> C [<expires>] :<reason>" arriving on link
+ * @a cptr; @a expires NULL for the five-parameter form of a server from
+ * before the expiry travelled. */
+static void server_relocate(struct Client *cptr, struct Client *sptr,
+                            const char *oldname, const char *newname,
+                            const char *expires, const char *reason)
+{
+  char store[5][256];
+  char *parv[7];
+  int n = 0;
+
+  parv[n++] = cli_name(sptr);
+  snprintf(store[0], sizeof(store[0]), "%s", oldname);
+  parv[n++] = store[0];
+  snprintf(store[1], sizeof(store[1]), "%s", newname);
+  parv[n++] = store[1];
+  snprintf(store[2], sizeof(store[2]), "C");
+  parv[n++] = store[2];
+  if (expires) {
+    snprintf(store[3], sizeof(store[3]), "%s", expires);
+    parv[n++] = store[3];
+  }
+  snprintf(store[4], sizeof(store[4]), "%s", reason);
+  parv[n++] = store[4];
+  parv[n] = NULL;
+  ms_rename(cptr, sptr, n, parv);
+}
+
+/** A channel created at @a ts with @a op as its only member, opped. */
+static struct Channel *channel_at(const char *name, time_t ts,
+                                  struct Client *op)
+{
+  struct Channel *ch = plain_channel(name, op);
+
+  ch->creationtime = ts;
+  return ch;
+}
+
+static struct Membership *member_of(struct Channel *ch, struct Client *who)
+{
+  struct Membership *m;
+  for (m = ch->members; m; m = m->next_member)
+    if (m->user == who)
+      return m;
+  return NULL;
+}
+
+/* --- D.3: whose snapshot, and for which channel --- */
+
+/* A former op of #old who follows gets the status back, once. */
+static void follower_regains_status_once(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *newch;
+  unsigned int flags = 0;
+  int oplevel = -1;
+  (void)state;
+
+  feat_rename_consent = 1;
+  add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "moving");
+
+  newch = channel_named("#new");
+  assert_non_null(newch);
+  assert_int_equal(newch->creationtime, 500000);
+  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_CHANOP);
+  /* consumed */
+  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 0);
+}
+
+/* The issuer was moved with its status; it has nothing to regain, so a
+ * PART and JOIN after being deopped in #new does not re-op it. */
+static void issuer_has_no_snapshot(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *newch;
+  unsigned int flags = 0;
+  int oplevel = -1;
+  (void)state;
+
+  feat_rename_consent = 1;
+  add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "moving");
+
+  newch = channel_named("#new");
+  assert_non_null(member_of(newch, alice));
+  assert_true(member_of(newch, alice)->status & CHFL_CHANOP);
+  assert_int_equal(relocate_snap_lookup(newch, alice, &flags, &oplevel), 0);
+}
+
+/* #new empties and a stranger creates it again inside the grace: a
+ * former op of #old is not opped in the stranger's channel. */
+static void snapshot_is_not_honoured_in_a_recreated_channel(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *newch, *again;
+  char name[] = "#new";
+  unsigned int flags = 0;
+  int oplevel = -1;
+  (void)state;
+
+  feat_rename_consent = 1;
+  add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "moving");
+
+  newch = channel_named("#new");
+  remove_user_from_channel(alice, newch);
+  assert_true(was_destroyed(newch));
+
+  again = get_channel(carol, name, CGT_CREATE);
+  assert_ptr_not_equal(again, newch);
+  assert_int_equal(again->creationtime, CurrentTime);
+  add_member(again, carol, CHFL_CHANOP);
+
+  assert_int_equal(relocate_snap_lookup(again, bob, &flags, &oplevel), 0);
+  assert_int_equal(flags, 0);
+}
+
+/* A chain keeps the binding: #a -> #b -> #c, and an op of #a who follows
+ * straight to #c is restored there. */
+static void snapshot_follows_a_chain_to_the_same_channel(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  unsigned int flags = 0;
+  int oplevel = -1;
+  (void)state;
+
+  feat_rename_consent = 1;
+  add_member(channel_at("#a", 500000, alice), bob, CHFL_CHANOP);
+  client_rename(alice, "#a", "#b", "one");
+  client_rename(alice, "#b", "#c", "two");
+
+  assert_string_equal(channel_named("#a")->mode.redir, "#c");
+  assert_int_equal(relocate_snap_lookup(channel_named("#c"), bob, &flags,
+                                        &oplevel), 1);
+  assert_int_equal(flags, CHFL_CHANOP);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -1921,6 +2260,11 @@ int main(void)
 
     T(fallback_join_has_the_form_the_member_negotiated),
     T(fallback_join_follows_each_bouncer_connection),
+
+    T(follower_regains_status_once),
+    T(issuer_has_no_snapshot),
+    T(snapshot_is_not_honoured_in_a_recreated_channel),
+    T(snapshot_follows_a_chain_to_the_same_channel),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

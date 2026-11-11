@@ -1061,6 +1061,17 @@ struct RelocateTombstone {
   struct Channel *oldchan;          /**< CACHE ONLY -- see struct comment */
   char oldname[CHANNELLEN + 1];     /**< The tombstone's own (stable) name */
   char newname[CHANNELLEN + 1];     /**< Redirect target, chain-flattened */
+  time_t target_ts;                 /**< Creation timestamp of the channel the
+                                         relocation made under @a newname.
+                                         Name and creation timestamp together
+                                         are a channel's identity, here as in
+                                         BURST: the snapshots below are
+                                         honoured only in that channel, not in
+                                         one a stranger creates under the name
+                                         after it emptied.  Every channel a
+                                         relocation makes takes the old
+                                         channel's timestamp, so the value
+                                         survives chain flattening. */
   time_t expires;                   /**< When the grace period elapses */
   struct Timer timer;               /**< Embedded -- freed only on ET_DESTROY,
                                          mirroring the PendingRename timer
@@ -1264,8 +1275,13 @@ static struct RelocateSnap **relocate_snap_find(struct RelocateTombstone *ts,
  * preservation").
  *
  * Called from do_join() once a join to an existing channel has completed.
- * @a newname is matched against every live tombstone's CURRENT (chain-
- * flattened) redirect target, not against any one tombstone's own name --
+ * @a chptr is matched against every live tombstone's CURRENT (chain-
+ * flattened) redirect target -- by name AND by creation timestamp
+ * (RelocateTombstone.target_ts): a snapshot is for the channel the
+ * relocation made.  When that channel empties and is destroyed, a channel
+ * a stranger then creates under the name has a later timestamp, and a
+ * former op of the old channel who joins it is not server-opped in it.
+ * The target is matched, not any one tombstone's own name --
  * relocate_tombstone_retarget() keeps every record's ->newname pointed at
  * the newest name as renames chain, so a follower who joins the FINAL name
  * of a multi-hop chain still matches the ORIGINAL tombstone's snapshot
@@ -1273,21 +1289,17 @@ static struct RelocateSnap **relocate_snap_find(struct RelocateTombstone *ts,
  *
  * This function MUST scan every matching tombstone, not stop at the first,
  * because a multi-hop chain is the ORDINARY way to get more than one live
- * record targeting the same @a newname -- not a hypothetical corner case
- * (review round 1 corrected an earlier version of this comment that called
- * it one).  Relocate #a -> #b, then before #b's grace expires relocate
- * #b -> #c: relocate_tombstone_retarget() repoints #a's record's ->newname
- * from #b to #c, and #b's OWN fresh record also targets #c -- so #a's and
- * #b's records BOTH have ->newname == "#c" for the rest of #a's grace
- * period.  A member who was in #b (and thus snapshotted into #b's record)
- * at the second rename, but who was ALSO an unconsumed mover snapshot from
- * the first rename still sitting in #a's record (moved automatically, so
- * never "followed" and never consumed it), has a valid entry in BOTH.  The
- * loop below finds #b's record first: relocate_tombstone_add() prepends
- * (ts->next = relocate_tombstones; relocate_tombstones = ts;), so the
+ * record targeting the same channel.  Relocate #a -> #b, then before #b's
+ * grace expires relocate #b -> #c: relocate_tombstone_retarget() repoints
+ * #a's record's ->newname from #b to #c, and #b's OWN fresh record also
+ * targets #c -- so #a's and #b's records BOTH have ->newname == "#c" for
+ * the rest of #a's grace period.  A member who stayed in #a at the first
+ * relocation, followed to #b (consuming nothing there if it already had
+ * status) and stayed in #b at the second has an entry in BOTH.  The loop
+ * below finds #b's record first: relocate_tombstone_add() prepends, so the
  * newest hop is always closest to the list head.  That is the desired
  * outcome, not an arbitrary tie-break -- the newer snapshot reflects this
- * member's status as of the MORE RECENT rename, which is the one that
+ * member's status as of the MORE RECENT relocation, which is the one that
  * actually describes what they last held before declining to move.
  *
  * A tombstone's own (old) name can never be a match target here: the spec
@@ -1299,7 +1311,7 @@ static struct RelocateSnap **relocate_snap_find(struct RelocateTombstone *ts,
  * (m_join.c:160-163) therefore can never accidentally trigger a restore
  * there -- the lookup key it would use is the tombstone's OWN name, which
  * this invariant guarantees no record's ->newname can match.
- * @param[in] newname Channel the join just completed against.
+ * @param[in] chptr Channel the join just completed against.
  * @param[in] who Joining client.
  * @param[out] flags Set to the restored CHFL_CHANOP|CHFL_HALFOP|CHFL_VOICE
  *                    subset on a hit.  Left untouched on a miss.
@@ -1307,18 +1319,19 @@ static struct RelocateSnap **relocate_snap_find(struct RelocateTombstone *ts,
  *                      on a miss.
  * @return 1 if a snapshot was found (and consumed), 0 otherwise.
  */
-int relocate_snap_lookup(const char *newname, struct Client *who,
+int relocate_snap_lookup(struct Channel *chptr, struct Client *who,
                          unsigned int *flags, int *oplevel)
 {
   struct RelocateTombstone *ts;
 
-  if (EmptyString(newname) || !who || !IsUser(who))
+  if (!chptr || !who || !IsUser(who))
     return 0;
 
   for (ts = relocate_tombstones; ts; ts = ts->next) {
     struct RelocateSnap **pp, *snap;
 
-    if (0 != ircd_strcmp(ts->newname, newname))
+    if (0 != ircd_strcmp(ts->newname, chptr->chname)
+        || ts->target_ts != chptr->creationtime)
       continue;
 
     if (!(pp = relocate_snap_find(ts, who)))
@@ -2098,18 +2111,18 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
     if (IsMemberAlias(member) || IsZombie(member))
       continue;
 
-    /* Task 4: snapshot EVERY member's status/oplevel here, for a
-     * grace-period follow-join restore (spec, "Status preservation").
-     * Movers are included even though a move keeps their status through
-     * to newchan (so restoring it there would be a no-op): if a mover
-     * later PARTs #new and re-follows within the same grace period, they
-     * need a snapshot to restore from exactly like anyone else, and
-     * carrying one for everybody is simpler than special-casing that one
-     * path.  Read-only with respect to the membership list, so it is safe
-     * in this same pass.  Allocation failure here is non-fatal -- unlike
-     * the mover array above, a missing snapshot only costs one member the
-     * optional grace-period restore, not the relocation itself. */
-    {
+    /* Snapshot every member who STAYS, for a grace-period follow-join
+     * restore (spec, "Status preservation").  The mover -- the issuer --
+     * gets none: it is moved with its status, so its snapshot was used the
+     * moment the relocation ran, and one left behind was never consumed --
+     * deopped or kicked in the new channel, the issuer got its op back
+     * with a PART and a JOIN.  Every server runs this pass and leaves the
+     * issuer out alike.  Read-only with respect to the membership list, so
+     * it is safe in this same pass.  Allocation failure here is non-fatal
+     * -- unlike the mover array above, a missing snapshot only costs one
+     * member the optional grace-period restore, not the relocation
+     * itself. */
+    if (user != sptr) {
       struct RelocateSnap *snap =
         (struct RelocateSnap *)MyMalloc(sizeof(struct RelocateSnap));
 
@@ -2252,6 +2265,7 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
        * the same name must not survive alongside it. */
       relocate_snap_free_list(ts->snaps);
       ts->snaps = snaphead;
+      ts->target_ts = newchan->creationtime;
       ts->persist_was_ours = persist_was_ours;
     } else {
       /* Allocation failure inside relocate_tombstone_add() itself -- there

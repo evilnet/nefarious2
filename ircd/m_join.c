@@ -287,10 +287,10 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
    * follows to the new channel within the grace period gets back the
    * op/halfop/voice (and oplevel) they held in the old channel at rename
    * time.  Applies to BOTH branches above (an existing #new, or one this
-   * join just (re)created) -- relocate_snap_lookup() matches on chptr's
-   * name regardless of which branch got us here, and a member who just
-   * created the channel already has full CHFL_CHANOP status from that, so
-   * the "no status yet" gate below is a no-op for them.
+   * join just (re)created) -- but relocate_snap_lookup() matches only the
+   * channel the relocation made (its name and its creation timestamp), so
+   * a channel this join re-created under the name, or one a stranger
+   * re-created after the relocated one emptied, restores nothing.
    *
    * Only the joining user's OWN server performs this.  Every server that
    * sees this JOIN reconstructs its own tombstone/snapshot list from its
@@ -324,7 +324,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
      * (it was that member's one shot at a restore either way), this just
      * skips doing work for an empty grant. */
     if (rmember && !(rmember->status & CHFL_VOICED_OR_OPPED)
-        && relocate_snap_lookup(chptr->chname, sptr, &rflags, &roplevel)
+        && relocate_snap_lookup(chptr, sptr, &rflags, &roplevel)
         && rflags != 0) {
       struct ModeBuf mbuf;
 
