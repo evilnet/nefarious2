@@ -87,6 +87,7 @@ struct User {
   char               realhost[HOSTLEN + 1];   /**< actual hostname */
   char               account[ACCOUNTLEN + 1]; /**< IRC account name */
   time_t             acc_create;              /**< IRC account timestamp */
+  char               kc_id[ACCOUNT_ID_LEN + 1]; /**< account id as announced (opaque, carried through) */
   char               swhois[BUFSIZE + 1];     /**< SWHOIS message */
   char               cloakip[HOSTLEN + 1];    /**< Cloaked IP */
   char               cloakhost[HOSTLEN + 1];  /**< Cloaked host */

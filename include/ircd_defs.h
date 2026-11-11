@@ -69,6 +69,9 @@
  * logged into which account, for the benefit of irc services.
  */
 #define ACCOUNTLEN      15
+/** Length of an account id as it appears on the wire: the 22 unpadded
+ * base64url characters of a UUID.  This server only carries it. */
+#define ACCOUNT_ID_LEN  22
 /** Maximum length for user supplied information about a client
  * connection (gcos). This information is set at client/server registration
  * time.
