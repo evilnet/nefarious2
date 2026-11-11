@@ -3,8 +3,8 @@
  *
  * rename_proto.c - the parts of channel RENAME that depend on nothing but
  * their arguments.  See include/rename_proto.h for the wire forms and the
- * name rules.  The cookie half uses nothing of the ircd; the name half
- * uses only the character tables and string checks in ircd_string.c.
+ * name rules.  The cookie codec uses nothing of the ircd; the rest uses
+ * only the character tables and string checks in ircd_string.c.
  */
 #include "config.h"
 #include "rename_proto.h"
@@ -132,6 +132,71 @@ enum RenameCookieForm rename_cookie_parse(const char *text, char numeric[3],
   numeric[numlen] = '\0';
   *n = value;
   return RENAME_COOKIE_ROUTED;
+}
+
+int rename_query_relayable(enum RenameCookieForm form, int cookie_names_source)
+{
+  return form == RENAME_COOKIE_ROUTED && cookie_names_source;
+}
+
+enum RenameReplyVerdict
+rename_reply_decide(const struct RenameReplyFacts *facts)
+{
+  /* Only services decide, and only services' word is carried. */
+  if (!facts->source_is_services)
+    return RENAME_REPLY_NOT_SERVICES;
+
+  if (facts->form != RENAME_COOKIE_ROUTED && facts->form != RENAME_COOKIE_LEGACY)
+    return RENAME_REPLY_BAD_COOKIE;
+
+  /* Another server's: in transit.  Whether a request with the same number
+   * happens to be pending here is deliberately not looked at. */
+  if (facts->form == RENAME_COOKIE_ROUTED && !facts->cookie_is_ours) {
+    if (!facts->cookie_server_known)
+      return RENAME_REPLY_UNKNOWN_SERVER;
+    if (facts->cookie_server_is_back)
+      return RENAME_REPLY_BACKWARD;
+    return RENAME_REPLY_RELAY;
+  }
+
+  /* Ours, or a bare number (which is nobody's, so can only be tried
+   * here): the request must exist, and the answer must come from the
+   * services server it was sent to. */
+  if (!facts->bound_name)
+    return RENAME_REPLY_NO_REQUEST;
+  if (!facts->source_name
+      || 0 != ircd_strcmp(facts->bound_name, facts->source_name))
+    return RENAME_REPLY_NOT_BOUND;
+  if (facts->form == RENAME_COOKIE_LEGACY && !facts->source_is_direct)
+    return RENAME_REPLY_BARE_INDIRECT;
+
+  return RENAME_REPLY_APPLY;
+}
+
+const char *rename_reply_verdict_text(enum RenameReplyVerdict verdict)
+{
+  switch (verdict) {
+  case RENAME_REPLY_APPLY:
+    return "applied";
+  case RENAME_REPLY_RELAY:
+    return "relayed";
+  case RENAME_REPLY_NOT_SERVICES:
+    return "its source is not a services server";
+  case RENAME_REPLY_BAD_COOKIE:
+    return "malformed cookie";
+  case RENAME_REPLY_UNKNOWN_SERVER:
+    return "no server has the numeric in its cookie";
+  case RENAME_REPLY_BACKWARD:
+    return "the server in its cookie is back down the link it arrived on";
+  case RENAME_REPLY_NO_REQUEST:
+    return "no such request is pending here";
+  case RENAME_REPLY_NOT_BOUND:
+    return "the request was sent to a different services server";
+  case RENAME_REPLY_BARE_INDIRECT:
+    return "a bare-number cookie from a server that is not linked here";
+  }
+
+  return "unknown verdict";
 }
 
 enum RenameNameError rename_check_names(const char *oldname,

@@ -1,7 +1,8 @@
 /*
  * rename_proto_cmocka.c - the argument-only parts of channel RENAME: the
  * cookie a services permission query travels under ("<numeric>.<n>", and
- * the bare "<n>" older servers send), and the rules a pair of channel
+ * the bare "<n>" older servers send), who may relay a query and whose
+ * reply is applied, relayed or dropped, and the rules a pair of channel
  * names has to pass.
  */
 #include "config.h"
@@ -214,6 +215,214 @@ static void parse_over_long(void **state)
   expect_invalid(big);
 }
 
+/* ========== who may move or answer a request ========== */
+
+static void query_is_relayed_only_when_its_cookie_names_its_source(void **state)
+{
+  (void)state;
+  assert_true(rename_query_relayable(RENAME_COOKIE_ROUTED, 1));
+  /* a routed cookie naming some other server */
+  assert_false(rename_query_relayable(RENAME_COOKIE_ROUTED, 0));
+  /* the bare number of a server that does not name itself */
+  assert_false(rename_query_relayable(RENAME_COOKIE_LEGACY, 0));
+  assert_false(rename_query_relayable(RENAME_COOKIE_LEGACY, 1));
+  assert_false(rename_query_relayable(RENAME_COOKIE_INVALID, 0));
+  assert_false(rename_query_relayable(RENAME_COOKIE_INVALID, 1));
+}
+
+/** A reply from services "x3.services", linked here, about our own
+ * pending request that was sent to x3.services: the case that applies. */
+static struct RenameReplyFacts good_reply(enum RenameCookieForm form)
+{
+  struct RenameReplyFacts f;
+
+  memset(&f, 0, sizeof(f));
+  f.form = form;
+  f.source_is_services = 1;
+  f.source_is_direct = 1;
+  f.source_name = "x3.services";
+  f.cookie_is_ours = (form == RENAME_COOKIE_ROUTED);
+  f.bound_name = "x3.services";
+  return f;
+}
+
+static void reply_for_our_request_from_its_services_server_applies(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_ROUTED);
+  (void)state;
+
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_APPLY);
+  /* services two hops away are still the server the request went to */
+  f.source_is_direct = 0;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_APPLY);
+  /* server names compare the way the ircd compares them */
+  f.source_name = "X3.Services";
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_APPLY);
+}
+
+static void reply_from_a_non_services_source_does_nothing(void **state)
+{
+  enum RenameCookieForm forms[] = { RENAME_COOKIE_ROUTED, RENAME_COOKIE_LEGACY,
+                                    RENAME_COOKIE_INVALID };
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+    struct RenameReplyFacts f = good_reply(forms[i]);
+
+    f.source_is_services = 0;
+    assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_SERVICES);
+    /* ... not even when it claims the name the request was sent to, and
+     * not when the cookie is another server's: a relay does not carry a
+     * forged answer */
+    f.cookie_is_ours = 0;
+    f.cookie_server_known = 1;
+    assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_SERVICES);
+  }
+}
+
+static void reply_with_a_cookie_of_neither_form_is_dropped(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_INVALID);
+  (void)state;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_BAD_COOKIE);
+}
+
+static void reply_for_another_server_is_relayed(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_ROUTED);
+  (void)state;
+
+  f.cookie_is_ours = 0;
+  f.cookie_server_known = 1;
+  f.bound_name = NULL;                  /* a relay holds no request */
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_RELAY);
+  f.source_is_direct = 0;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_RELAY);
+
+  f.cookie_server_is_back = 1;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_BACKWARD);
+
+  f.cookie_server_is_back = 0;
+  f.cookie_server_known = 0;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_UNKNOWN_SERVER);
+}
+
+/* A request with the same number may well be pending HERE while a reply
+ * for another server's request passes through: it is relayed, never
+ * applied. */
+static void reply_for_another_server_never_touches_our_request(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_ROUTED);
+  (void)state;
+
+  f.cookie_is_ours = 0;
+  f.cookie_server_known = 1;
+  f.bound_name = "x3.services";         /* our own request <n>, same services */
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_RELAY);
+}
+
+static void reply_without_a_pending_request_is_dropped(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_ROUTED);
+  (void)state;
+
+  f.bound_name = NULL;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NO_REQUEST);
+  f = good_reply(RENAME_COOKIE_LEGACY);
+  f.bound_name = NULL;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NO_REQUEST);
+}
+
+/* The request went to one services server; another one answers. */
+static void reply_from_a_services_server_the_request_was_not_sent_to(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_ROUTED);
+  (void)state;
+
+  f.source_name = "other.services";
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_BOUND);
+  f.source_is_direct = 0;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_BOUND);
+
+  f = good_reply(RENAME_COOKIE_LEGACY);
+  f.source_name = "other.services";
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_BOUND);
+
+  /* a name that merely starts the same */
+  f = good_reply(RENAME_COOKIE_ROUTED);
+  f.source_name = "x3.services.example";
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_BOUND);
+  f.source_name = "";
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_BOUND);
+  f.source_name = NULL;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_NOT_BOUND);
+}
+
+/* The bare number: only from the services server the request went to,
+ * and only when that server is linked here. */
+static void bare_number_reply(void **state)
+{
+  struct RenameReplyFacts f = good_reply(RENAME_COOKIE_LEGACY);
+  (void)state;
+
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_APPLY);
+
+  f.source_is_direct = 0;
+  assert_int_equal(rename_reply_decide(&f), RENAME_REPLY_BARE_INDIRECT);
+}
+
+/* Every combination of the facts: a bare number is never relayed, and
+ * nothing is ever applied without the source being the services server
+ * the pending request was sent to. */
+static void reply_decision_invariants(void **state)
+{
+  enum RenameCookieForm forms[] = { RENAME_COOKIE_INVALID, RENAME_COOKIE_LEGACY,
+                                    RENAME_COOKIE_ROUTED };
+  const char *names[] = { NULL, "x3.services", "other.services" };
+  unsigned int bits;
+  size_t fi, si, bi;
+  (void)state;
+
+  for (fi = 0; fi < 3; fi++)
+    for (si = 0; si < 3; si++)
+      for (bi = 0; bi < 3; bi++)
+        for (bits = 0; bits < 32; bits++) {
+          struct RenameReplyFacts f;
+          enum RenameReplyVerdict v;
+
+          memset(&f, 0, sizeof(f));
+          f.form = forms[fi];
+          f.source_name = names[si];
+          f.bound_name = names[bi];
+          f.source_is_services = bits & 1;
+          f.source_is_direct = (bits >> 1) & 1;
+          f.cookie_is_ours = (bits >> 2) & 1;
+          f.cookie_server_known = (bits >> 3) & 1;
+          f.cookie_server_is_back = (bits >> 4) & 1;
+          v = rename_reply_decide(&f);
+
+          if (v == RENAME_REPLY_APPLY) {
+            assert_true(f.source_is_services);
+            assert_non_null(f.bound_name);
+            assert_non_null(f.source_name);
+            assert_string_equal(f.bound_name, f.source_name);
+            assert_true(f.form == RENAME_COOKIE_LEGACY
+                        || (f.form == RENAME_COOKIE_ROUTED && f.cookie_is_ours));
+            if (f.form == RENAME_COOKIE_LEGACY)
+              assert_true(f.source_is_direct);
+          }
+          if (v == RENAME_REPLY_RELAY) {
+            assert_true(f.source_is_services);
+            assert_int_equal(f.form, RENAME_COOKIE_ROUTED);
+            assert_false(f.cookie_is_ours);
+            assert_true(f.cookie_server_known);
+            assert_false(f.cookie_server_is_back);
+          }
+          assert_non_null(rename_reply_verdict_text(v));
+        }
+}
+
 /* ========== names ========== */
 
 #define OK(o, n)        assert_int_equal(rename_check_names((o), (n), CHANNELLEN, 0), RENAME_NAME_OK)
@@ -402,6 +611,16 @@ int main(void)
     cmocka_unit_test(parse_leading_zero_is_not_what_a_server_prints),
     cmocka_unit_test(parse_overflow),
     cmocka_unit_test(parse_over_long),
+    cmocka_unit_test(query_is_relayed_only_when_its_cookie_names_its_source),
+    cmocka_unit_test(reply_for_our_request_from_its_services_server_applies),
+    cmocka_unit_test(reply_from_a_non_services_source_does_nothing),
+    cmocka_unit_test(reply_with_a_cookie_of_neither_form_is_dropped),
+    cmocka_unit_test(reply_for_another_server_is_relayed),
+    cmocka_unit_test(reply_for_another_server_never_touches_our_request),
+    cmocka_unit_test(reply_without_a_pending_request_is_dropped),
+    cmocka_unit_test(reply_from_a_services_server_the_request_was_not_sent_to),
+    cmocka_unit_test(bare_number_reply),
+    cmocka_unit_test(reply_decision_invariants),
     cmocka_unit_test(names_plain_rename_is_fine),
     cmocka_unit_test(names_local_channels_are_refused_on_either_side),
     cmocka_unit_test(names_without_a_channel_prefix),

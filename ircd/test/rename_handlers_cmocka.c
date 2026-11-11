@@ -808,19 +808,45 @@ static void query_from_an_origin_two_hops_away(void **state)
   assert_string_equal(sent[0].text, "Bj AC BjAAC R Bj.4 #reg RENAME #new");
 }
 
-/* The old bare-number cookie of a server not upgraded yet goes on as it
- * is. */
-static void query_with_an_old_cookie_is_relayed_unchanged(void **state)
+/* The bare-number cookie of a server not upgraded yet is NOT passed on:
+ * services' answer to it would name no server. */
+static void query_with_a_bare_cookie_is_dropped(void **state)
 {
   struct Client *leaf = linked("leaf.example", "Bj", "v");
   struct Client *x3 = linked("x3.services", "AX", "sr");
-  (void)state;
+  struct Client *bob = user_on(leaf, "bob", "AAC");
+  (void)state; (void)x3;
 
   assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "17", "#reg",
                                 "RENAME", "#new"), 1);
-  assert_int_equal(nsent, 1);
-  assert_ptr_equal(sent[0].to, x3);
-  assert_string_equal(sent[0].text, "Bj AC BjAAC R 17 #reg RENAME #new");
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nviolations, 0);
+  assert_true(ndebug > 0);
+  assert_non_null(strstr(debuglines[ndebug - 1], "does not name its source"));
+  /* and it is still not an account stamp */
+  assert_false(IsAccount(bob));
+}
+
+/* A cookie that names a server other than the one asking would send the
+ * answer to a server that never asked. */
+static void query_whose_cookie_names_another_server_is_dropped(void **state)
+{
+  struct Client *leaf = linked("leaf.example", "Bj", "v");
+  struct Client *other = linked("other.example", "Bm", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  (void)state; (void)other; (void)x3;
+
+  /* another server's numeric, ours, an unknown one, a malformed one */
+  assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "Bm.17", "#reg",
+                                "RENAME", "#new"), 1);
+  assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "AC.17", "#reg",
+                                "RENAME", "#new"), 1);
+  assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "Zz.17", "#reg",
+                                "RENAME", "#new"), 1);
+  assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "Bj.", "#reg",
+                                "RENAME", "#new"), 1);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(ndebug, 4);
 }
 
 /* Never back down the link it came from: with the only services server on
@@ -853,35 +879,67 @@ static void query_with_no_services_at_all_is_dropped(void **state)
   assert_true(ndebug > 0);
 }
 
-/* Two services servers, one of them back where the query came from: the
- * other one. */
-static void query_picks_the_services_server_on_another_link(void **state)
+/* Several services servers: every server picks the one with the lowest
+ * numeric, so the relay sends where the origin meant -- wherever the
+ * others are, and whichever was linked first. */
+static void query_goes_to_the_services_server_every_server_picks(void **state)
 {
-  struct Client *leaf = linked("leaf.example", "Bj", "v");
-  struct Client *behind_leaf = behind(leaf, "stats.services", "AY", "s");
+  /* x3 first, so it is LAST in the global client list */
   struct Client *hub = linked("hub.example", "AB", "v");
   struct Client *x3 = behind(hub, "x3.services", "AX", "sr");
-  (void)state; (void)behind_leaf; (void)x3;
+  struct Client *leaf = linked("leaf.example", "Bj", "v");
+  struct Client *behind_leaf = behind(leaf, "stats.services", "AY", "s");
+  struct Client *near = linked("near.services", "AZ", "sr");
+  (void)state; (void)behind_leaf; (void)near; (void)x3;
 
   assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "Bj.17", "#reg",
                                 "RENAME", "#new"), 1);
   assert_int_equal(nsent, 1);
-  assert_ptr_equal(sent[0].to, hub);
+  assert_ptr_equal(sent[0].to, hub);    /* AX, not the one linked here */
 }
 
-/* A services server linked here wins over one further away. */
-static void query_prefers_a_services_server_linked_here(void **state)
+/* ... and when that one lies back where the query came from, the two
+ * servers disagree about the network: dropped, not sent elsewhere. */
+static void query_is_not_diverted_to_another_services_server(void **state)
 {
   struct Client *leaf = linked("leaf.example", "Bj", "v");
-  struct Client *x3 = linked("x3.services", "AX", "sr");
-  struct Client *hub = linked("hub.example", "AB", "v");
-  struct Client *far = behind(hub, "far.services", "AY", "s");
-  (void)state; (void)far;
+  struct Client *behind_leaf = behind(leaf, "x3.services", "AX", "sr");
+  struct Client *near = linked("near.services", "AZ", "sr");
+  (void)state; (void)behind_leaf;
 
   assert_int_equal(account_line(leaf, leaf, 6, "BjAAC", "R", "Bj.17", "#reg",
                                 "RENAME", "#new"), 1);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(sent_count_to(near), 0);
+}
+
+/* The origin picks by the same rule and remembers whom it asked. */
+static void origin_asks_the_services_server_every_server_picks(void **state)
+{
+  /* x3 first, so it is LAST in the global client list */
+  struct Client *hub = linked("hub.example", "AB", "v");
+  struct Client *x3 = behind(hub, "x3.services", "AX", "sr");
+  struct Client *near = linked("near.services", "AZ", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char reply[64];
+  (void)state;
+
+  registered_channel("#reg", alice);
+  client_rename(alice, "#reg", "#new", "");
   assert_int_equal(nsent, 1);
-  assert_ptr_equal(sent[0].to, x3);
+  assert_ptr_equal(sent[0].to, hub);
+  snprintf(reply, sizeof(reply), "%s", cookie_of(sent[0].text));
+  forget();
+
+  /* the other services server may not answer for it */
+  assert_int_equal(account_line(near, near, 3, reply, "A", "RENAME"), 1);
+  assert_non_null(channel_named("#reg"));
+  assert_int_equal(nviolations, 1);
+  assert_non_null(strstr(violations[0], "near.services"));
+  assert_non_null(strstr(violations[0], "different services server"));
+
+  assert_int_equal(account_line(hub, x3, 3, reply, "A", "RENAME"), 1);
+  assert_non_null(channel_named("#new"));
 }
 
 /* A new name that could not be written back as one parameter would turn
@@ -1120,8 +1178,10 @@ static void a_second_reply_for_the_same_cookie_does_nothing(void **state)
   assert_non_null(channel_named("#new"));
 }
 
-/* The undotted cookie of the old form: a local lookup, as before. */
-static void old_form_reply_is_looked_up_locally(void **state)
+/* A bare-number reply names no server.  It is never relayed, and it
+ * completes a request only when it comes from the services server that
+ * request was sent to, linked to this server itself. */
+static void bare_number_reply_from_the_asked_services_server_linked_here(void **state)
 {
   struct Client *x3 = linked("x3.services", "AX", "sr");
   struct Client *leaf = linked("leaf.example", "Bj", "v");
@@ -1143,10 +1203,139 @@ static void old_form_reply_is_looked_up_locally(void **state)
   assert_int_equal(sent_count_to(leaf), 0);
   assert_non_null(channel_named("#reg"));
 
-  /* the bare number of a request that IS pending here is today's lookup */
   snprintf(bare, sizeof(bare), "%u", n);
   assert_int_equal(account_line(x3, x3, 3, bare, "A", "RENAME"), 1);
   assert_non_null(channel_named("#new"));
+}
+
+static void bare_number_reply_from_services_further_away_is_dropped(void **state)
+{
+  struct Client *hub = linked("hub.example", "AB", "v");
+  struct Client *x3 = behind(hub, "x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char numeric[3], bare[32];
+  unsigned int n;
+  (void)state;
+
+  registered_channel("#reg", alice);
+  client_rename(alice, "#reg", "#new", "");
+  assert_int_equal(rename_cookie_parse(cookie_of(sent[0].text), numeric, &n),
+                   RENAME_COOKIE_ROUTED);
+  forget();
+
+  snprintf(bare, sizeof(bare), "%u", n);
+  assert_int_equal(account_line(hub, x3, 3, bare, "A", "RENAME"), 1);
+  assert_int_equal(nsent, 0);
+  assert_non_null(channel_named("#reg"));
+  assert_null(channel_named("#new"));
+}
+
+/* The cross-approval this design must not allow.  This server is
+ * services' uplink and has request <n> of its own pending (alice, on
+ * #victim).  A server that still sends bare cookies asks about an
+ * unrelated channel under the same number -- the numbers are small
+ * counters, so that is easy to arrange.  Were its query passed on,
+ * services' answer "AC <n> A RENAME" would come back to this server,
+ * name nobody, and be tried against this server's table: alice's rename
+ * of #victim approved by an answer about somebody else's channel. */
+static void a_bare_query_cannot_get_another_servers_request_approved(void **state)
+{
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *old = linked("old.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *mallory = user_on(old, "mallory", "AAC");
+  char numeric[3], bare[32];
+  unsigned int n;
+  (void)state; (void)mallory;
+
+  registered_channel("#victim", alice);
+  client_rename(alice, "#victim", "#taken", "");
+  assert_ptr_equal(sent[0].to, x3);
+  assert_int_equal(rename_cookie_parse(cookie_of(sent[0].text), numeric, &n),
+                   RENAME_COOKIE_ROUTED);
+  forget();
+
+  /* the old server's query, same number: it goes no further */
+  snprintf(bare, sizeof(bare), "%u", n);
+  assert_int_equal(account_line(old, old, 6, "BjAAC", "R", bare, "#mallorys",
+                                "RENAME", "#other"), 1);
+  assert_int_equal(sent_count_to(x3), 0);
+  assert_int_equal(nsent, 0);
+
+  /* so services never answer it, and #victim stays where it is until
+   * services answer ALICE's question */
+  assert_non_null(channel_named("#victim"));
+  assert_null(channel_named("#taken"));
+
+  /* nor can the old server supply the answer itself */
+  assert_int_equal(account_line(old, old, 3, bare, "A", "RENAME"), 1);
+  assert_int_equal(account_line(old, old, 3, "AC.1", "A", "RENAME"), 1);
+  assert_non_null(channel_named("#victim"));
+  assert_int_equal(nviolations, 2);
+}
+
+/* A second services server answering a request it was never sent. */
+static void reply_from_a_services_server_that_was_not_asked_is_refused(void **state)
+{
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *other = linked("other.services", "AY", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char numeric[3], reply[64], bare[32];
+  unsigned int n;
+  (void)state;
+
+  registered_channel("#reg", alice);
+  client_rename(alice, "#reg", "#new", "");
+  assert_ptr_equal(sent[0].to, x3);
+  snprintf(reply, sizeof(reply), "%s", cookie_of(sent[0].text));
+  assert_int_equal(rename_cookie_parse(reply, numeric, &n), RENAME_COOKIE_ROUTED);
+  snprintf(bare, sizeof(bare), "%u", n);
+  forget();
+
+  assert_int_equal(account_line(other, other, 3, reply, "A", "RENAME"), 1);
+  assert_int_equal(account_line(other, other, 3, bare, "A", "RENAME"), 1);
+  assert_int_equal(account_line(other, other, 4, reply, "D", "RENAME", "no"), 1);
+  assert_int_equal(nsent, 0);                   /* neither renamed nor denied */
+  assert_int_equal(nviolations, 3);
+  assert_non_null(channel_named("#reg"));
+
+  /* the request is still there for the server that was asked */
+  assert_int_equal(account_line(x3, x3, 3, reply, "A", "RENAME"), 1);
+  assert_non_null(channel_named("#new"));
+}
+
+/* The services server leaves: its requests fail at once instead of
+ * waiting out the timer. */
+static void services_leaving_fails_the_requests_sent_to_them(void **state)
+{
+  struct Client *hub = linked("hub.example", "AB", "v");
+  struct Client *x3 = behind(hub, "x3.services", "AX", "sr");
+  struct Client *other = linked("other.example", "Bm", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char reply[64];
+  (void)state;
+
+  registered_channel("#reg", alice);
+  client_rename(alice, "#reg", "#new", "");
+  snprintf(reply, sizeof(reply), "%s", cookie_of(sent[0].text));
+  forget();
+
+  /* some other server going does not concern the request */
+  pending_rename_server_exit(other);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(ntimers, 1);
+
+  pending_rename_server_exit(x3);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_to(alice, 0),
+                      "FAIL RENAME TEMPORARILY_UNAVAILABLE #reg :Registration service is not available");
+  assert_int_equal(ntimers, 0);
+  forget();
+
+  /* an answer that was already on its way finds nothing */
+  assert_int_equal(account_line(hub, x3, 3, reply, "A", "RENAME"), 1);
+  assert_int_equal(nsent, 0);
+  assert_non_null(channel_named("#reg"));
 }
 
 /* No answer: the origin's own timeout tells the user. */
@@ -1414,11 +1603,13 @@ int main(void)
     T(query_is_relayed_to_a_services_server_linked_here),
     T(query_is_relayed_toward_services_further_on),
     T(query_from_an_origin_two_hops_away),
-    T(query_with_an_old_cookie_is_relayed_unchanged),
+    T(query_with_a_bare_cookie_is_dropped),
+    T(query_whose_cookie_names_another_server_is_dropped),
     T(query_is_never_sent_back_where_it_came_from),
     T(query_with_no_services_at_all_is_dropped),
-    T(query_picks_the_services_server_on_another_link),
-    T(query_prefers_a_services_server_linked_here),
+    T(query_goes_to_the_services_server_every_server_picks),
+    T(query_is_not_diverted_to_another_services_server),
+    T(origin_asks_the_services_server_every_server_picks),
     T(query_with_a_malformed_new_name_is_dropped),
     T(account_messages_are_left_alone),
     T(reply_is_relayed_toward_the_server_in_the_cookie),
@@ -1431,7 +1622,11 @@ int main(void)
     T(origin_completes_on_an_approval_for_its_own_cookie),
     T(origin_denies_with_services_reason),
     T(a_second_reply_for_the_same_cookie_does_nothing),
-    T(old_form_reply_is_looked_up_locally),
+    T(bare_number_reply_from_the_asked_services_server_linked_here),
+    T(bare_number_reply_from_services_further_away_is_dropped),
+    T(a_bare_query_cannot_get_another_servers_request_approved),
+    T(reply_from_a_services_server_that_was_not_asked_is_refused),
+    T(services_leaving_fails_the_requests_sent_to_them),
     T(origin_times_out_without_an_answer),
 
     T(client_cannot_rename_a_local_channel),

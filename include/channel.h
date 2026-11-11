@@ -522,6 +522,7 @@ extern struct PendingRename *pending_rename_find(unsigned int cookie);
 extern void pending_rename_complete(struct PendingRename *pr);
 extern void pending_rename_deny(struct PendingRename *pr, const char *reason);
 extern void pending_rename_client_exit(struct Client *cptr);
+extern void pending_rename_server_exit(struct Client *server);
 extern int rename_services_ac(struct Client *cptr, struct Client *sptr,
                               int parc, char *parv[]);
 

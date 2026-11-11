@@ -415,6 +415,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     chathistory_fed_cleanup_link(bcptr);
     /* The paced link-time presence sync to it, if one runs (W5 Task 7). */
     presence_burst_sync_link_gone(bcptr);
+    /* Renames waiting on its answer, if it is the services server they
+     * asked: it will not come. */
+    pending_rename_server_exit(bcptr);
   }
   if (IsUser(bcptr)) {
     /* (A client whose registration was deferred leaves the pending queue

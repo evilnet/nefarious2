@@ -36,9 +36,10 @@
  * A server that is not the origin forwards the reply toward that numeric;
  * the origin strips it and looks <n> up in its own table.
  *
- * Before this form the cookie was the bare number ("17").  A server that
- * still sends it gets it back unchanged, so the parser tells the two apart
- * rather than refusing the old one.
+ * Before this form the cookie was the bare number ("17"), which only
+ * worked when the asking server was services' own uplink.  The parser
+ * tells the two apart; what each may still do is decided below
+ * (rename_query_relayable(), rename_reply_decide()).
  */
 
 /** Room for the longest cookie: two numeric characters, the dot, ten
@@ -82,6 +83,100 @@ extern int rename_cookie_format(char *buf, size_t buflen, const char *numeric,
 extern enum RenameCookieForm rename_cookie_parse(const char *text,
                                                  char numeric[3],
                                                  unsigned int *n);
+
+/*
+ * Who may move or answer a request.
+ *
+ * Both decisions are made from facts the caller looks up, so that the
+ * rules themselves can be read, and tested, in one place.
+ */
+
+/** May a server that is not its origin pass a permission query on?
+ *
+ * Only when the cookie is the routed form AND the server it names is the
+ * server the query came from (its source).  Then the reply can only come
+ * back to the server that asked.  A bare-number cookie names nobody: its
+ * reply would be looked up in the table of whichever server received it,
+ * and passing the query on to services is what would produce that reply.
+ * A cookie naming some other server would send the reply to a server that
+ * never asked.  Either is dropped at the first hop.
+ *
+ * @param[in] form What rename_cookie_parse() made of the cookie.
+ * @param[in] cookie_names_source Non-zero when the cookie's numeric is
+ *            the numeric of the query's source server.
+ * @return Non-zero when the query may be forwarded.
+ */
+extern int rename_query_relayable(enum RenameCookieForm form,
+                                  int cookie_names_source);
+
+/** What a server knows about a reply (AC <cookie> A|D RENAME) it has just
+ * received.  Fill in every field; the comments say which matter when. */
+struct RenameReplyFacts {
+  enum RenameCookieForm form;   /**< rename_cookie_parse() of the cookie */
+  int source_is_services;       /**< the source is a server that announced
+                                     itself as a services server */
+  int source_is_direct;         /**< the source is linked to this server
+                                     itself (nothing in between) */
+  const char *source_name;      /**< the source server's name */
+  int cookie_is_ours;           /**< ROUTED: the numeric is this server's */
+  int cookie_server_known;      /**< ROUTED, not ours: a server has that
+                                     numeric */
+  int cookie_server_is_back;    /**< ROUTED, not ours: that server is
+                                     reached through the link the reply
+                                     arrived on */
+  const char *bound_name;       /**< ours or LEGACY: name of the services
+                                     server this server sent request <n>
+                                     to, NULL when it has no request <n>
+                                     pending */
+};
+
+/** What to do with a reply. */
+enum RenameReplyVerdict {
+  RENAME_REPLY_APPLY = 0,       /**< complete or deny our pending request */
+  RENAME_REPLY_RELAY,           /**< forward toward the server in the cookie */
+  RENAME_REPLY_NOT_SERVICES,    /**< dropped: the source is not services */
+  RENAME_REPLY_BAD_COOKIE,      /**< dropped: the cookie is neither form */
+  RENAME_REPLY_UNKNOWN_SERVER,  /**< dropped: nobody has the cookie's numeric */
+  RENAME_REPLY_BACKWARD,        /**< dropped: its server is back down the
+                                     link it came from */
+  RENAME_REPLY_NO_REQUEST,      /**< dropped: no such request pending here */
+  RENAME_REPLY_NOT_BOUND,       /**< dropped: the request was sent to a
+                                     different services server */
+  RENAME_REPLY_BARE_INDIRECT    /**< dropped: a bare-number cookie from a
+                                     server not linked here */
+};
+
+/** Decide what to do with a reply.
+ *
+ * - Nothing is done for a source that is not a services server, whatever
+ *   the cookie says: not applied, and not relayed either, so that a relay
+ *   never carries a forged answer to an origin.
+ * - A routed cookie naming ANOTHER server is relayed toward it (unless
+ *   that server is unknown, or back where the reply came from).  The
+ *   relay holds no request, so there is nothing more it can check; the
+ *   origin does.
+ * - A routed cookie naming THIS server, or a bare number, is ours to
+ *   apply only when request <n> is pending here AND the reply's source is
+ *   the very services server that request was sent to.  A services server
+ *   answering a request it was not sent, a second services server, or a
+ *   reply meant for another server's request with the same number: none
+ *   of them passes.
+ * - A bare number is never relayed (it names nobody), and is applied only
+ *   under the rule above and only from a services server linked to this
+ *   server itself -- the one arrangement in which the form was ever
+ *   produced: the asking server being services' own uplink.
+ *
+ * @param[in] facts What the caller found out; see the struct.
+ * @return The verdict; anything but APPLY and RELAY means drop.
+ */
+extern enum RenameReplyVerdict
+rename_reply_decide(const struct RenameReplyFacts *facts);
+
+/** Why a reply was dropped, for a log line.
+ * @param[in] verdict A value rename_reply_decide() returned.
+ * @return A static string; never NULL.
+ */
+extern const char *rename_reply_verdict_text(enum RenameReplyVerdict verdict);
 
 /*
  * Name rules.

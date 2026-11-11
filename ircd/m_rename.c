@@ -75,6 +75,14 @@ struct PendingRename {
   char newname[CHANNELLEN + 1];    /**< Requested new name */
   char reason[TOPICLEN + 1];       /**< Rename reason */
   unsigned int cookie;             /**< Unique identifier for matching response */
+  char services[HOSTLEN + 1];      /**< Name of the services server the query
+                                         was sent to: the only server whose
+                                         answer is taken.  A name and not a
+                                         struct Client *, for the reason the
+                                         struct comment gives for the channel
+                                         (pending_rename_server_exit() retires
+                                         the request when that server goes,
+                                         but nothing here depends on it) */
   struct Timer timeout;            /**< Timeout timer */
   int timer_active;                /**< Whether the timer still owns this
                                          struct's lifetime -- see the
@@ -131,57 +139,32 @@ static struct RelocateTombstone *relocate_tombstone_find(const char *name);
  * membership this server left behind. */
 #define RELOCATE_MARKER_SP RELOCATE_MARKER " "
 
-/** Find the services server.
- * @return Pointer to services server, or NULL if not connected.
+/** Find the services server rename permission queries go to.
+ *
+ * The query (AC <user> R <cookie> <#chan> RENAME <new>) names no
+ * destination, so the server that asks and every server that passes the
+ * query on have to pick the SAME services server: the asking server
+ * accepts an answer only from the one it picked (PendingRename.services).
+ * Hence a rule that does not depend on anything local: of the servers
+ * that announced themselves as services ('s' in their SERVER flags), the
+ * one with the lowest numeric.  Every server that knows the same servers
+ * gets the same answer; the order of the global client list, which this
+ * used to go by, is each server's own.  With one services server -- the
+ * usual network -- there is nothing to choose.
+ * @return Pointer to the services server, or NULL if none is linked.
  */
 static struct Client *find_services_server(void)
 {
-  struct Client *acptr;
+  struct Client *acptr, *best = NULL;
 
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (IsServer(acptr) && IsService(acptr))
-      return acptr;
+    if (!IsServer(acptr) || !IsService(acptr))
+      continue;
+    if (!best || strcmp(cli_yxx(acptr), cli_yxx(best)) < 0)
+      best = acptr;
   }
 
-  return NULL;
-}
-
-/** Find the services server a permission query that arrived on @a link
- * should go on to.
- *
- * The query (AC <user> R <cookie> <#chan> RENAME <new>) names no
- * destination: its origin picked one with find_services_server() and sent
- * the line down that server's link, and every hop after it has to choose
- * again.  The choice here:
- *
- * - a services server linked directly to this server is the destination
- *   (this server is its uplink, nobody else can hand it the query);
- * - otherwise the first services server in the global list -- the order
- *   find_services_server() uses -- that is NOT reached through @a link.
- *
- * Never back down @a link: the servers on that side have already been
- * passed.  That rule alone keeps the relay loop-free (the network is a
- * tree, and a line that never turns round visits each server once), so two
- * hops that would rank several services servers differently still cannot
- * bounce a query between them.
- * @param[in] link The local link the query arrived on.
- * @return The services server to send toward, or NULL when every one this
- *         server knows lies back the way the query came (or there is none).
- */
-static struct Client *find_services_server_beyond(struct Client *link)
-{
-  struct DLink *dlp;
-  struct Client *acptr;
-
-  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next)
-    if (dlp->value.cptr != link && IsService(dlp->value.cptr))
-      return dlp->value.cptr;
-
-  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr))
-    if (IsServer(acptr) && IsService(acptr) && cli_from(acptr) != link)
-      return acptr;
-
-  return NULL;
+  return best;
 }
 
 /** Channel-oplevel gate for rename authorization.  When a channel has
@@ -301,12 +284,16 @@ static void rename_forward_rcapable(struct Client *sptr, struct Client *skip,
  *                     (see the PendingRename struct comment).
  * @param[in] newname New channel name.
  * @param[in] reason Rename reason.
+ * @param[in] services The services server the query is about to be sent
+ *                     to; its name is recorded, and only its answer will
+ *                     be accepted.
  * @return Pointer to new pending request, or NULL on error.
  */
 static struct PendingRename *pending_rename_add(struct Client *client,
                                                  struct Channel *channel,
                                                  const char *newname,
-                                                 const char *reason)
+                                                 const char *reason,
+                                                 struct Client *services)
 {
   struct PendingRename *pr;
 
@@ -325,6 +312,7 @@ static struct PendingRename *pending_rename_add(struct Client *client,
     ircd_strncpy(pr->reason, reason, TOPICLEN + 1);
   }
   pr->cookie = rename_cookie_counter++;
+  ircd_strncpy(pr->services, cli_name(services), sizeof(pr->services));
 
   /* Add to list */
   pr->next = pending_renames;
@@ -337,8 +325,9 @@ static struct PendingRename *pending_rename_add(struct Client *client,
   pr->timer_active = 1;
 
   log_write(LS_DEBUG, L_DEBUG, 0,
-            "pending_rename_add: cookie=%u channel=%s newname=%s client=%C",
-            pr->cookie, pr->oldname, pr->newname, client);
+            "pending_rename_add: cookie=%u channel=%s newname=%s client=%C "
+            "services=%s",
+            pr->cookie, pr->oldname, pr->newname, client, pr->services);
 
   return pr;
 }
@@ -680,21 +669,64 @@ void pending_rename_client_exit(struct Client *cptr)
   }
 }
 
+/** Retire the pending renames that were waiting on a services server
+ * that has just left the network: it will not answer, and the requester
+ * need not wait out RENAME_TIMEOUT to be told so.
+ *
+ * Called from exit_one_client() (s_misc.c) for every server that exits,
+ * directly or behind a broken link.
+ * @param[in] server The departing server.
+ */
+void pending_rename_server_exit(struct Client *server)
+{
+  struct PendingRename *pr, *next;
+
+  /* ->next cached first: pending_rename_remove() frees pr (see
+   * pending_rename_client_exit()). */
+  for (pr = pending_renames; pr; pr = next) {
+    next = pr->next;
+
+    if (0 != ircd_strcmp(pr->services, cli_name(server)))
+      continue;
+
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "pending_rename_server_exit: cookie=%u, services server %s "
+              "left", pr->cookie, pr->services);
+
+    send_fail(pr->client, "RENAME", "TEMPORARILY_UNAVAILABLE", pr->oldname,
+              "Registration service is not available");
+    pending_rename_remove(pr);
+  }
+}
+
 /* ---------- Services arbitration across servers ----------
  *
  * The query and its reply ride on ACCOUNT (see include/rename_proto.h for
  * the three line shapes and the cookie).  Neither is addressed: the query
- * goes "toward services", the reply goes to the server named in its
- * cookie.  A server in between is a stateless relay -- it keeps nothing
- * about the request and forwards both lines with their original source.
+ * goes toward the services server (find_services_server(), the same one
+ * on every hop), the reply goes to the server named in its cookie.  A
+ * server in between is a stateless relay -- it keeps nothing about the
+ * request and forwards both lines with their original source.
+ *
+ * Who may do what is decided in rename_proto.c: rename_query_relayable()
+ * for a query passing through, rename_reply_decide() for a reply.  In
+ * short: a query is passed on only when its cookie names the server it
+ * comes from, so its answer can come back to nobody else; an answer is
+ * taken, and carried, only from a services server; and a pending request
+ * is completed or denied only by the services server its query was sent
+ * to.
  *
  * Mixed versions.  A fork server from before this relay existed, sitting
  * BETWEEN the origin and services, still runs the query through the
  * account-stamp code and forwards neither line: the origin's
  * RENAME_TIMEOUT answers the user, as it always did.  One sitting at the
- * ORIGIN sends the bare-number cookie; it is forwarded as it is, and its
- * reply -- which names no server -- can only be looked up locally by
- * whichever server receives it, again as it always was.
+ * ORIGIN sends the bare-number cookie, and gets what it always got:
+ * arbitration when it is services' own uplink (nothing passes through a
+ * relay then), a timeout otherwise -- the first server that would have to
+ * relay its query drops it.  Passing it on would be worse than useless:
+ * services' bare-number answer names no server, so services' uplink would
+ * try it against its OWN table, and approve an unrelated request of its
+ * own that happens to carry the same small number.
  */
 
 /** Relay a permission query that is passing through this server.
@@ -708,6 +740,21 @@ static void rename_services_query_relay(struct Client *cptr,
                                         struct Client *sptr, char *parv[])
 {
   struct Client *services;
+  enum RenameCookieForm form;
+  char numeric[3];
+  unsigned int n;
+
+  /* The cookie must name the server the query comes from: that is the
+   * server the reply will be delivered to (rename_query_relayable()). */
+  form = rename_cookie_parse(parv[3], numeric, &n);
+  if (!rename_query_relayable(form, form == RENAME_COOKIE_ROUTED
+                                    && FindNServer(numeric) == sptr)) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "rename query from %C (cookie %s, channel %s) dropped: its "
+              "cookie does not name its source server", sptr, parv[3],
+              parv[4]);
+    return;
+  }
 
   /* parv[6] is the one field that can have been a trailing parameter, so
    * the only one that can be empty or hold a space.  No channel name is
@@ -721,9 +768,13 @@ static void rename_services_query_relay(struct Client *cptr,
     return;
   }
 
-  if (!(services = find_services_server_beyond(cptr))) {
-    /* Nothing to do for the user from here: the origin's RENAME_TIMEOUT
-     * tells them. */
+  /* Toward the services server the origin picked -- and never back down
+   * the link the query came from: if that is where this server believes
+   * services are, the two disagree about the network (a link is forming
+   * or breaking), and returning the line would only bounce it.  Either
+   * way there is nothing to do for the user from here; the origin's
+   * RENAME_TIMEOUT tells them. */
+  if (!(services = find_services_server()) || cli_from(services) == cptr) {
     log_write(LS_DEBUG, L_DEBUG, 0,
               "rename query from %C (cookie %s, channel %s) dropped: no "
               "services server beyond the link it came from (%C)",
@@ -752,47 +803,51 @@ static void rename_services_reply(struct Client *cptr, struct Client *sptr,
 {
   int approved = (parv[2][0] == 'A');
   const char *reason = (parc > 4) ? parv[4] : NULL;
-  struct PendingRename *pr;
+  struct RenameReplyFacts facts;
+  struct PendingRename *pr = NULL;
+  struct Client *origin = NULL;
+  enum RenameReplyVerdict verdict;
   char numeric[3];
-  unsigned int n;
+  unsigned int n = 0;
 
-  /* Only services decide.  The answer to "may this user rename this
-   * registered channel" is taken from a server that announced itself as a
-   * services server -- the 's' in its SERVER line's flags (FLAG_SERVICE;
-   * set_server_flags() in m_server.c, passed on by every hop that
-   * introduces the server).  Without this any server could approve a
-   * pending rename, and the cookie's number is a small counter.  Checked
-   * before forwarding too, so a relay does not carry a forged approval to
-   * an origin that might not check. */
-  if (!IsServer(sptr) || !IsService(sptr)) {
-    protocol_violation(cptr, "ACCOUNT rename reply (cookie %s) from %s, "
-                       "which is not a services server", parv[1],
-                       cli_name(sptr));
-    return;
+  /* Gather what rename_reply_decide() rules on.
+   *
+   * "Services" is a server that announced itself as one -- the 's' in its
+   * SERVER line's flags (FLAG_SERVICE; set_server_flags() in m_server.c,
+   * passed on by every hop that introduces the server).  That alone lets
+   * a reply be relayed.  To be APPLIED it must also come from the one
+   * services server this server sent the request to (pr->services). */
+  memset(&facts, 0, sizeof(facts));
+  facts.form = rename_cookie_parse(parv[1], numeric, &n);
+  facts.source_is_services = IsServer(sptr) && IsService(sptr);
+  facts.source_is_direct = (cli_from(sptr) == sptr);
+  facts.source_name = cli_name(sptr);
+
+  if (facts.form == RENAME_COOKIE_ROUTED) {
+    origin = FindNServer(numeric);
+    facts.cookie_is_ours = (origin && IsMe(origin));
+    facts.cookie_server_known = (origin != NULL);
+    facts.cookie_server_is_back = (origin && !IsMe(origin)
+                                   && cli_from(origin) == cptr);
   }
 
-  switch (rename_cookie_parse(parv[1], numeric, &n)) {
-  case RENAME_COOKIE_ROUTED: {
-    struct Client *origin = FindNServer(numeric);
+  /* Our table is consulted only for a cookie that can be ours. */
+  if (facts.form == RENAME_COOKIE_LEGACY || facts.cookie_is_ours) {
+    pr = pending_rename_find(n);
+    facts.bound_name = pr ? pr->services : NULL;
+  }
 
-    if (origin && IsMe(origin))
-      break;                    /* ours: look n up below */
+  verdict = rename_reply_decide(&facts);
 
-    if (!origin) {
-      log_write(LS_DEBUG, L_DEBUG, 0,
-                "rename reply %s from %C dropped: no server has numeric %s",
-                parv[1], sptr, numeric);
-      return;
-    }
-    if (cli_from(origin) == cptr) {
-      /* Its origin is back where the reply came from; whoever sent it this
-       * way was wrong, and returning it would only repeat that. */
-      log_write(LS_DEBUG, L_DEBUG, 0,
-                "rename reply %s from %C dropped: %C is back down the link "
-                "it arrived on", parv[1], sptr, origin);
-      return;
-    }
+  switch (verdict) {
+  case RENAME_REPLY_APPLY:
+    if (approved)
+      pending_rename_complete(pr);
+    else
+      pending_rename_deny(pr, reason ? reason : "Permission denied");
+    return;
 
+  case RENAME_REPLY_RELAY:
     /* In transit: same source, same cookie, same reason. */
     if (reason)
       sendcmdto_one(sptr, CMD_ACCOUNT, origin, "%s %s %s :%s",
@@ -801,33 +856,23 @@ static void rename_services_reply(struct Client *cptr, struct Client *sptr,
       sendcmdto_one(sptr, CMD_ACCOUNT, origin, "%s %s %s",
                     parv[1], parv[2], parv[3]);
     return;
-  }
 
-  case RENAME_COOKIE_LEGACY:
-    /* The bare number of a server that does not name itself in the cookie
-     * yet.  There is nowhere to forward it; all that can be done is what
-     * was always done, a lookup in this server's own table. */
-    break;
+  case RENAME_REPLY_NOT_SERVICES:
+  case RENAME_REPLY_NOT_BOUND:
+    /* Somebody answering who was not asked: operators should hear of it. */
+    protocol_violation(cptr, "ACCOUNT rename reply (cookie %s) from %s "
+                       "ignored: %s", parv[1], cli_name(sptr),
+                       rename_reply_verdict_text(verdict));
+    return;
 
   default:
+    /* Late (the request timed out or its requester left), misrouted or
+     * malformed. */
     log_write(LS_DEBUG, L_DEBUG, 0,
-              "rename reply from %C dropped: malformed cookie \"%s\"",
-              sptr, parv[1]);
+              "rename reply (cookie %s) from %C dropped: %s",
+              parv[1], sptr, rename_reply_verdict_text(verdict));
     return;
   }
-
-  if (!(pr = pending_rename_find(n))) {
-    /* Timed out, or the requester left. */
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "rename reply %s from %C: no such pending request",
-              parv[1], sptr);
-    return;
-  }
-
-  if (approved)
-    pending_rename_complete(pr);
-  else
-    pending_rename_deny(pr, reason ? reason : "Permission denied");
 }
 
 /** Is this ACCOUNT message part of channel-rename arbitration?  If so,
@@ -2378,7 +2423,8 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * The services server need not be linked to THIS server: the query is
    * sent toward it and every server on the way relays it, as each relays
    * the reply back by the server numeric in the cookie (see "Services
-   * arbitration across servers" above).
+   * arbitration across servers" above).  The request remembers which
+   * services server it asked, and no other server's answer is taken.
    */
   if (chptr->mode.mode & MODE_REGISTERED) {
     struct Client *services;
@@ -2408,7 +2454,7 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    if (!(pr = pending_rename_add(sptr, chptr, newname, reason))) {
+    if (!(pr = pending_rename_add(sptr, chptr, newname, reason, services))) {
       send_fail(sptr, "RENAME", "TEMPORARILY_UNAVAILABLE", oldname,
                 "Too many renames in progress");
       return 0;
