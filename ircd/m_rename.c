@@ -33,7 +33,10 @@
  *   passes the message on (ms_rename());
  * - it passes it on to every link whose server said it takes it: 'v' in
  *   its SERVER flags (a server of that branch) or 'r' (services, or a
- *   server that carries renames the way this one does).
+ *   server that carries renames the way this one does);
+ * - it carries the question such a server asks services before it
+ *   renames a registered channel, and services' answer, between the two
+ *   (rename_services_ac()).
  */
 #include "config.h"
 
@@ -49,6 +52,7 @@
 #include "list.h"
 #include "msg.h"
 #include "numeric.h"
+#include "numnicks.h"
 #include "rename_proto.h"
 #include "s_debug.h"
 #include "s_user.h"
@@ -335,6 +339,247 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   send_rename_to_members(chptr, oldname_buf, reason);
   rename_relay(sptr, cptr, oldname_buf, chptr->chname, rest);
+
+  return 0;
+}
+
+/* ---------- Services arbitration, passing through ----------
+ *
+ * Before it renames a registered channel, a server of the ircv3.2-upgrade
+ * branch asks services for permission, and services answer.  Both lines
+ * ride on ACCOUNT (include/rename_proto.h has the three shapes and the
+ * cookie):
+ *
+ *     <origin> AC <user> R <cookie> <#chan> RENAME <new>
+ *     <services> AC <cookie> A RENAME
+ *     <services> AC <cookie> D RENAME :<reason>
+ *
+ * Neither is addressed.  The query goes toward the services server
+ * (find_services_server(), the same one on every hop); the reply goes to
+ * the server named in its cookie, <origin-numeric>.<n>.  A server in
+ * between keeps nothing about the request and forwards both lines with
+ * their original source.
+ *
+ * This server is only ever in between: it has no RENAME command, so it
+ * never asks, and no reply is ever meant for it.  It forwards, or drops:
+ *
+ * - a query only when its cookie has the routed form and names the
+ *   server the query comes from (rename_query_relayable()), so that the
+ *   answer can come back to nobody else;
+ * - a reply only from a services server, and only toward a known server
+ *   that is not back down the link the reply arrived on
+ *   (rename_reply_decide()).  A reply whose cookie names this server, or
+ *   a bare number that names nobody, has no request here to answer and
+ *   is dropped.
+ *
+ * The server that asked makes the checks that need its own state: that
+ * request <n> is pending, and that the answer comes from the services
+ * server it was sent to.
+ */
+
+/** Find the services server rename permission queries go to.
+ *
+ * The query names no destination, so the server that asks and every
+ * server that passes the query on have to pick the SAME services server:
+ * the asking server accepts an answer only from the one it picked.
+ * Hence a rule that does not depend on anything local, and that is the
+ * asking server's rule: of the servers that announced themselves as
+ * services ('s' in their SERVER flags), the one with the lowest numeric.
+ * With one services server -- the usual network -- there is nothing to
+ * choose.
+ * @return The services server, or NULL if none is linked.
+ */
+static struct Client *find_services_server(void)
+{
+  struct Client *acptr, *best = NULL;
+
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!IsServer(acptr) || !IsService(acptr))
+      continue;
+    if (!best || strcmp(cli_yxx(acptr), cli_yxx(best)) < 0)
+      best = acptr;
+  }
+
+  return best;
+}
+
+/** Relay a permission query that is passing through this server.
+ * @param[in] cptr Link the query arrived on.
+ * @param[in] sptr Its source, the origin server.
+ * @param[in] parv parv[1] user numeric, parv[3] cookie, parv[4] channel,
+ *                 parv[5] "RENAME", parv[6] new name (caller checked the
+ *                 shape and that there are at least seven parameters).
+ */
+static void rename_services_query_relay(struct Client *cptr,
+                                        struct Client *sptr, char *parv[])
+{
+  struct Client *services;
+  enum RenameCookieForm form;
+  char numeric[3];
+  unsigned int n;
+
+  /* The cookie must name the server the query comes from: that is the
+   * server the reply will be delivered to (rename_query_relayable()). */
+  form = rename_cookie_parse(parv[3], numeric, &n);
+  if (!rename_query_relayable(form, form == RENAME_COOKIE_ROUTED
+                                    && FindNServer(numeric) == sptr)) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "rename query from %C (cookie %s, channel %s) dropped: its "
+              "cookie does not name its source server", sptr, parv[3],
+              parv[4]);
+    return;
+  }
+
+  /* parv[6] is the one field that can have been a trailing parameter, so
+   * the only one that can be empty or hold a space.  No channel name is
+   * either, and written back out such a field would change the number of
+   * parameters: the next hop would no longer see a rename query, it would
+   * see an account stamp for the requesting user.  Do not pass it on. */
+  if (EmptyString(parv[6]) || parv[6][0] == ':' || strchr(parv[6], ' ')) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "rename query from %C (cookie %s, channel %s) dropped: "
+              "malformed new name", sptr, parv[3], parv[4]);
+    return;
+  }
+
+  /* Toward the services server the origin picked -- and never back down
+   * the link the query came from: if that is where this server believes
+   * services are, the two disagree about the network (a link is forming
+   * or breaking), and returning the line would only bounce it.  Either
+   * way there is nothing to do for the user from here; the origin's
+   * timeout tells them. */
+  if (!(services = find_services_server()) || cli_from(services) == cptr) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "rename query from %C (cookie %s, channel %s) dropped: no "
+              "services server beyond the link it came from (%C)",
+              sptr, parv[3], parv[4], cptr);
+    return;
+  }
+
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "rename query from %C (cookie %s, channel %s) relayed toward %C",
+            sptr, parv[3], parv[4], services);
+
+  sendcmdto_one(sptr, CMD_ACCOUNT, services, "%s R %s %s %s %s",
+                parv[1], parv[3], parv[4], parv[5], parv[6]);
+}
+
+/** Relay services' answer to a permission query toward the server that
+ * asked, or drop it.
+ * @param[in] cptr Link the reply arrived on.
+ * @param[in] sptr Its source.
+ * @param[in] parc Number of parameters (at least four).
+ * @param[in] parv parv[1] cookie, parv[2] "A" or "D", parv[3] "RENAME",
+ *                 parv[4] the reason of a "D" (optional).
+ */
+static void rename_services_reply_relay(struct Client *cptr,
+                                        struct Client *sptr, int parc,
+                                        char *parv[])
+{
+  const char *reason = (parc > 4) ? parv[4] : NULL;
+  struct RenameReplyFacts facts;
+  struct Client *origin = NULL;
+  enum RenameReplyVerdict verdict;
+  char numeric[3];
+  unsigned int n = 0;
+
+  /* Gather what rename_reply_decide() rules on.
+   *
+   * "Services" is a server that announced itself as one: IsService() is
+   * the 's' in its SERVER line's flags (set_server_flags() in m_server.c,
+   * repeated by every hop that introduces the server) and nothing more --
+   * a server's own word, no configuration of this server behind it.  A
+   * reply is carried on the strength of that alone.  It is the same test
+   * the asking server applies, which then also requires the reply to
+   * come from the one services server it sent the request to.
+   *
+   * bound_name stays NULL: this server sends no requests, so none is
+   * pending here, and a reply that could only be this server's own (its
+   * numeric in the cookie, or a bare number) comes out as "no such
+   * request". */
+  memset(&facts, 0, sizeof(facts));
+  facts.form = rename_cookie_parse(parv[1], numeric, &n);
+  facts.source_is_services = IsServer(sptr) && IsService(sptr);
+  facts.source_is_direct = (cli_from(sptr) == sptr);
+  facts.source_name = cli_name(sptr);
+
+  if (facts.form == RENAME_COOKIE_ROUTED) {
+    origin = FindNServer(numeric);
+    facts.cookie_is_ours = (origin && IsMe(origin));
+    facts.cookie_server_known = (origin != NULL);
+    facts.cookie_server_is_back = (origin && !IsMe(origin)
+                                   && cli_from(origin) == cptr);
+  }
+
+  verdict = rename_reply_decide(&facts);
+
+  switch (verdict) {
+  case RENAME_REPLY_RELAY:
+    /* In transit: same source, same cookie, same reason. */
+    if (reason)
+      sendcmdto_one(sptr, CMD_ACCOUNT, origin, "%s %s %s :%s",
+                    parv[1], parv[2], parv[3], reason);
+    else
+      sendcmdto_one(sptr, CMD_ACCOUNT, origin, "%s %s %s",
+                    parv[1], parv[2], parv[3]);
+    return;
+
+  case RENAME_REPLY_NOT_SERVICES:
+    /* Somebody answering who is not services: operators should hear of
+     * it. */
+    protocol_violation(cptr, "ACCOUNT rename reply (cookie %s) from %s "
+                       "ignored: %s", parv[1], cli_name(sptr),
+                       rename_reply_verdict_text(verdict));
+    return;
+
+  default:
+    /* Misrouted or malformed, or addressed to this server, which never
+     * asked. */
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "rename reply (cookie %s) from %C dropped: %s",
+              parv[1], sptr, rename_reply_verdict_text(verdict));
+    return;
+  }
+}
+
+/** Is this ACCOUNT message part of channel-rename arbitration?  If so,
+ * deal with it.
+ *
+ * Called by ms_account() before it reads the message as anything else,
+ * and before its EXTENDED_ACCOUNTS split: neither line is an account
+ * message, and read as one the query is a stamp for the requesting user
+ * with the cookie (or, without EXTENDED_ACCOUNTS, the letter R) as the
+ * account name, and the reply's cookie is looked up as a server numeric.
+ *
+ * The query is recognised exactly as services recognise it -- subtype R,
+ * at least seven parameters, the fifth the literal RENAME -- so that the
+ * relay and services always agree about which lines are queries.  An
+ * account stamp never has that shape: it has at most five parameters.
+ * The reply is recognised by the RENAME that follows the A or D; a
+ * login-on-connect reply has a request id there, which starts with a
+ * dot.
+ *
+ * @param[in] cptr Link the message arrived on.
+ * @param[in] sptr Its source; the caller has checked it is a server.
+ * @param[in] parc Number of parameters (at least three).
+ * @param[in] parv Parameter vector of the ACCOUNT message.
+ * @return Non-zero when the message was a rename query or reply and
+ *         needs no further handling, zero when it is something else.
+ */
+int rename_services_ac(struct Client *cptr, struct Client *sptr, int parc,
+                       char *parv[])
+{
+  if (parv[2][0] == 'R' && !parv[2][1] && parc >= 7
+      && 0 == strcmp(parv[5], "RENAME")) {
+    rename_services_query_relay(cptr, sptr, parv);
+    return 1;
+  }
+
+  if ((parv[2][0] == 'A' || parv[2][0] == 'D') && !parv[2][1] && parc > 3
+      && 0 == ircd_strcmp(parv[3], "RENAME")) {
+    rename_services_reply_relay(cptr, sptr, parc, parv);
+    return 1;
+  }
 
   return 0;
 }

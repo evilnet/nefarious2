@@ -579,7 +579,8 @@ listener.o: listener.c ../config.h ../include/listener.h \
   ../include/numeric.h ../include/s_bsd.h ../include/s_conf.h \
   ../include/s_misc.h ../include/s_stats.h ../include/send.h \
   ../include/sys.h
-m_account.o: m_account.c ../config.h ../include/client.h ../include/ircd.h \
+m_account.o: m_account.c ../config.h ../include/channel.h \
+  ../include/client.h ../include/ircd.h \
   ../include/ircd_alloc.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
   ../include/numnicks.h ../include/s_auth.h ../include/s_bsd.h \
@@ -894,8 +895,9 @@ m_rename.o: m_rename.c ../config.h ../include/capab.h ../include/channel.h \
   ../include/client.h ../include/hash.h ../include/ircd.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_snprintf.h \
   ../include/ircd_string.h ../include/list.h ../include/msg.h \
-  ../include/numeric.h ../include/rename_proto.h ../include/s_debug.h \
-  ../include/s_user.h ../include/send.h ../include/struct.h
+  ../include/numeric.h ../include/numnicks.h ../include/rename_proto.h \
+  ../include/s_debug.h ../include/s_user.h ../include/send.h \
+  ../include/struct.h
 m_reset.o: m_reset.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/numeric.h \

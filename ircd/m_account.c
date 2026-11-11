@@ -80,6 +80,7 @@
  */
 #include "config.h"
 
+#include "channel.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -143,6 +144,24 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
   if (!IsServer(sptr))
     return protocol_violation(cptr, "ACCOUNT from non-server %s",
 			      cli_name(sptr));
+
+  /* Channel-rename arbitration borrows this command for two lines that
+   * are not account messages at all:
+   *
+   *   AC <user> R <cookie> <#chan> RENAME <new>   a server asks services
+   *   AC <cookie> A|D RENAME [:<reason>]          services answer
+   *
+   * They are taken out here, before anything below can read the first as
+   * an account stamp for <user> (the cookie as the account name, or the
+   * letter R without EXTENDED_ACCOUNTS) or look the second's cookie up as
+   * a server numeric.  This server only passes them on: the query toward
+   * services, the reply toward the server named in the cookie (m_rename.c,
+   * "Services arbitration, passing through").  This handler is the SERVER
+   * slot of the ACCOUNT message only (parse.c: every other slot is
+   * m_ignore) and the source was just checked to be a server, so no user
+   * can inject either line. */
+  if (rename_services_ac(cptr, sptr, parc, parv))
+    return 0;
 
   if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
     if (strlen(parv[2]) != 1)

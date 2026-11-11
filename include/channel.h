@@ -518,6 +518,8 @@ extern void send_channel_modes(struct Client *cptr, struct Channel *chptr);
 extern char *pretty_mask(char *mask);
 extern char *pretty_extmask(char *mask);
 extern int rename_channel(struct Channel **chptr_p, const char *newname);
+extern int rename_services_ac(struct Client *cptr, struct Client *sptr,
+                              int parc, char *parv[]);
 extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 
