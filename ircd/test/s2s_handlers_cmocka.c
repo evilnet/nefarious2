@@ -1,8 +1,8 @@
 /*
  * s2s_handlers_cmocka.c - server-to-server handlers against a fake network.
  *
- * Links the REAL handler objects (m_burst.o, m_svsnick.o, m_svsquit.o,
- * m_topic.o), with numnicks.o,
+ * Links the REAL handler objects (m_burst.o, m_destruct.o, m_endburst.o,
+ * m_svsnick.o, m_svsquit.o, m_topic.o), with numnicks.o,
  * match.o and the ircd's own printf, so every line asserted below is the
  * line the handler would put on the wire.  What sits underneath the
  * handlers is stubbed: the send layer records instead of sending, the
@@ -28,6 +28,7 @@
 #include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
+#include "destruct_event.h"
 #include "handlers.h"
 #include "hash.h"
 #include "history.h"
@@ -53,6 +54,7 @@
 
 struct Client me;
 struct Client his;
+struct Channel *GlobalChannelList;
 time_t CurrentTime = 1000000;
 time_t TSoffset;
 int log_inassert;
@@ -74,6 +76,9 @@ static struct Sent sent[MAXREC];
 static int nsent;
 static char violations[MAXREC][LINE];
 static int nviolations;
+static char opnotices[MAXREC][LINE];
+static int nopnotices;
+static int destructed;                  /* destruct_channel() calls */
 
 static void record_sent(struct Client *to, const char *text)
 {
@@ -106,7 +111,7 @@ static const char *sent_to(struct Client *to, int nth)
 
 static void forget(void)
 {
-  nsent = nviolations = 0;
+  nsent = nviolations = nopnotices = destructed = 0;
 }
 
 /* ====================================================================
@@ -953,6 +958,106 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   record_sent(to, buf);
 }
 
+/* --- for m_endburst.o and m_destruct.o --- */
+
+void sendto_opmask_butone(struct Client *one, unsigned int mask,
+                          const char *pattern, ...)
+{
+  va_list vl;
+  (void)one; (void)mask;
+
+  assert_true(nopnotices < MAXREC);
+  va_start(vl, pattern);
+  ircd_vsnprintf(NULL, opnotices[nopnotices++], LINE, pattern, vl);
+  va_end(vl);
+}
+
+void send_netjoin_batch_end(struct Client *server)
+{
+  (void)server;
+}
+
+void chathistory_server_eob(struct Client *server)
+{
+  (void)server;
+}
+
+void chathistory_reflood_ads(struct Client *newpeer)
+{
+  (void)newpeer;
+}
+
+int send_channel_advertisements(struct Client *cptr)
+{
+  (void)cptr;
+  return 0;
+}
+
+int history_coverage_days(void)
+{
+  return 0;
+}
+
+void bounce_release_idle_gates(void)
+{
+}
+
+void bounce_prune_stale_aliases(void)
+{
+}
+
+void bounce_post_burst_reconcile(void)
+{
+}
+
+void bounce_away_restate_to(struct Client *link)
+{
+  (void)link;
+}
+
+void presence_burst_sync(struct Client *cptr)
+{
+  (void)cptr;
+}
+
+void mdsync_link_eob(struct Client *link)
+{
+  (void)link;
+}
+
+void sasl_webhook_link_catchup(struct Client *cptr)
+{
+  (void)cptr;
+}
+
+const char *get_sasl_mechanisms(void)
+{
+  return "PLAIN";
+}
+
+void send_cap_notify(const char *capname, int available, const char *value)
+{
+  (void)capname; (void)available; (void)value;
+}
+
+int destruct_channel(struct Channel *chptr)
+{
+  (void)chptr;
+  destructed++;
+  return 0;
+}
+
+void remove_destruct_event(struct Channel *chptr)
+{
+  (void)chptr;
+}
+
+void modebuf_mode_uint(struct ModeBuf *mbuf, unsigned int mode,
+                       unsigned int uint)
+{
+  (void)mbuf; (void)mode; (void)uint;
+}
+
 /* ====================================================================
  * Reading a relayed BURST back
  * ==================================================================== */
@@ -1560,6 +1665,96 @@ static void test_topic_without_a_setter(void **state)
   assert_string_equal(sent_to(ae, 0), "AC T #c 999000 1000500 :the topic");
 }
 
+/* ====================================================================
+ * Burst state from a user source
+ * ==================================================================== */
+
+/* A server ends its burst: relayed, announced, acknowledged. */
+static void test_end_of_burst_from_a_server(void **state)
+{
+  struct Client *ac, *ae;
+  (void)state;
+  ac = linked("leafa.test", "AC", 1);
+  ae = linked("leafc.test", "AE", 1);
+  SetBurst(ac);
+
+  deliver(ms_end_of_burst, ac, ac, "");
+
+  assert_false(IsBurst(ac));
+  assert_string_equal(sent_to(ae, 0), "AC EB ");
+  assert_string_equal(sent_to(ac, 0), "AB EA ");
+  assert_int_equal(nopnotices, 1);
+  assert_int_equal(nviolations, 0);
+}
+
+/* "ACAAA EB" was relayed and announced as "Completed net.burst from
+ * alice."  END_OF_BURST, its ack, BURST and DESTRUCT are server messages;
+ * from a user they are protocol violations, go no further and change
+ * nothing.  The link that carried them stays. */
+static void test_end_of_burst_from_a_user(void **state)
+{
+  struct Client *ac, *ae, *alice;
+  (void)state;
+  ac = linked("leafa.test", "AC", 1);
+  ae = linked("leafc.test", "AE", 1);
+  alice = remote_user(ac, "alice", "ACAAA");
+
+  assert_int_equal(deliver(ms_end_of_burst, ac, alice, ""), 0);
+
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(nviolations, 1);
+  assert_int_equal(sent_count_to(ae), 0);
+}
+
+static void test_end_of_burst_ack_from_a_user(void **state)
+{
+  struct Client *ac, *alice;
+  (void)state;
+  ac = linked("leafa.test", "AC", 1);
+  linked("leafc.test", "AE", 1);
+  alice = remote_user(ac, "alice", "ACAAA");
+
+  assert_int_equal(deliver(ms_end_of_burst_ack, ac, alice, ""), 0);
+
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(nviolations, 1);
+}
+
+static void test_burst_from_a_user(void **state)
+{
+  struct Client *ac, *alice;
+  (void)state;
+  ac = linked("leafa.test", "AC", 1);
+  linked("leafc.test", "AE", 1);
+  alice = remote_user(ac, "alice", "ACAAA");
+
+  assert_int_equal(deliver(ms_burst, ac, alice, "#ub 999000 +i ACAAA:o"), 0);
+
+  assert_null(hSeekChannel("#ub"));
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nviolations, 1);
+}
+
+static void test_destruct_from_a_user(void **state)
+{
+  struct Client *ac, *alice;
+  struct Channel *ch;
+  (void)state;
+  ac = linked("leafa.test", "AC", 1);
+  linked("leafc.test", "AE", 1);
+  alice = remote_user(ac, "alice", "ACAAA");
+  ch = fake_channel("#empty");
+  ch->creationtime = 999000;
+
+  assert_int_equal(deliver(ms_destruct, ac, alice, "#empty 999000"), 0);
+
+  assert_int_equal(destructed, 0);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nviolations, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1585,6 +1780,11 @@ int main(void)
     T(test_topic_with_a_setter),
     T(test_topic_setter_with_no_nick),
     T(test_topic_without_a_setter),
+    T(test_end_of_burst_from_a_server),
+    T(test_end_of_burst_from_a_user),
+    T(test_end_of_burst_ack_from_a_user),
+    T(test_burst_from_a_user),
+    T(test_destruct_from_a_user),
 #undef T
   };
 

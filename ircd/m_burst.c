@@ -524,6 +524,11 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct NetRiderKick *riders = NULL;   /* this BURST's Net Rider KICKs */
   int nriders = 0, riders_max = 0;
 
+  /* A channel's state from a server (its own, or relayed): a BURST from
+   * a user would be applied and relayed with the user as its source. */
+  if (!IsServer(sptr))
+    return protocol_violation(sptr, "BURST from non-server %s", cli_name(sptr));
+
   if (parc < 3)
     return protocol_violation(sptr,"Too few parameters for BURST");
 
