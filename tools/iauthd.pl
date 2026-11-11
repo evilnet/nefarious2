@@ -22,14 +22,17 @@
 #   Copy somewhere convenient
 #
 # Usage:
-#   iauth.pl -f /path/to/config
+#   iauthd.pl -c /path/to/config
 #
 # Configuration:
 #
-#   * Config directives begin with #IAUTHD and are one per line
+#   * Config directives begin with #IAUTH and are one per line
 #   * Because configuration begins with a #, it can piggy back on existing 
 #     ircd.conf file. ircd will ignore it. Handy for those using linesync.
-#   * Syntax is: #IAUTHD <directive> <arguments>
+#   * Only the file given with -c is read.  ircd.conf's include lines are
+#     not followed, so if the #IAUTH lines are in an included file, give
+#     -c that file.
+#   * Syntax is: #IAUTH <directive> <arguments>
 # 
 # 
 # Description of config directives:
