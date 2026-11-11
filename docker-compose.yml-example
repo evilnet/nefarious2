@@ -22,7 +22,9 @@ services:
       # saved as base.conf.pre-regenerate.<UTC time> first.
       # IRCD_CONF_REGENERATE: 1
     volumes:
-      # Persist SSL certificate
+      # Persist SSL certificate. Create the file first (touch ircd.pem), or
+      # Docker makes a directory of that name; an empty file is filled with
+      # a self-signed certificate on the first start.
       - ./ircd.pem:/home/nefarious/ircd/ircd.pem
       # Custom configuration (optional)
       - ./local.conf:/home/nefarious/ircd/local.conf

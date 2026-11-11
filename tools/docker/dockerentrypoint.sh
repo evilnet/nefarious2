@@ -269,14 +269,18 @@ fi
 
 #If cmd is the ircd...
 if [ "$1" == "/home/nefarious/bin/ircd" ]; then
-    # Generate a pem file if there isnt one...
-    if [ ! -f /home/nefarious/ircd/ircd.pem ]; then
+    # Generate a pem file if there isnt one.  An empty one counts as none:
+    # to bind-mount ircd.pem as a single file it has to exist on the host
+    # first, and there it starts out empty.  The file is named by its full
+    # path, not relative to the working directory: the ircd reads ircd.pem
+    # from its own directory whatever directory the container is run in.
+    if [ ! -s "$IRCDPEM" ] || [ ! -f "$IRCDPEM" ]; then
         echo "Generating self signed ssl key for ircd.pem"
-        openssl req -new --x509 -days 365 -nodes -out ircd.pem -newkey rsa:4096 -keyout ircd.pem -subj "/CN=$IRCD_GENERAL_NAME/"
-        test 1 -eq 1 || test ! -f /dev/urandom || openssl gendh -rand $1/ircd.rand 512 >> $1/ircd.pem
-        test 1 -eq 1 || test -f /dev/urandom || openssl gendh 512 >> $1/ircd.pem
-        openssl x509 -subject -dates -fingerprint -noout -in $IRCDPEM
-
+        if openssl req -new --x509 -days 365 -nodes -out "$IRCDPEM" -newkey rsa:4096 -keyout "$IRCDPEM" -subj "/CN=$IRCD_GENERAL_NAME/"; then
+            openssl x509 -subject -dates -fingerprint -noout -in "$IRCDPEM"
+        else
+            echo "dockerentrypoint: WARNING: could not generate $IRCDPEM; the ircd does not start without a certificate there unless its conf names another (SSL_CERTFILE, SSL_KEYFILE)" >&2
+        fi
     fi
 fi
 
