@@ -254,3 +254,90 @@ const char *rename_name_error_text(enum RenameNameError err)
 
   return "Invalid channel name";
 }
+
+/*
+ * Relocation: the deadline.
+ */
+
+time_t relocate_expiry_from_grace(time_t now, int grace)
+{
+  if (grace < 0)
+    grace = 0;
+  if (grace > RELOCATE_GRACE_MAX)
+    grace = RELOCATE_GRACE_MAX;
+
+  return now + grace;
+}
+
+int relocate_expiry_format(char *buf, size_t buflen, time_t expires)
+{
+  char digits[RELOCATE_EXPIRY_BUFLEN];
+  unsigned long long value;
+  size_t ndigits = 0, i;
+
+  if (!buf || !buflen)
+    return 0;
+  buf[0] = '\0';
+
+  value = (expires < 0) ? 0 : (unsigned long long)expires;
+
+  /* Decimal by hand, as the cookie: no stdio in this file. */
+  do {
+    digits[ndigits++] = (char)('0' + value % 10);
+    value /= 10;
+  } while (value);
+
+  if (ndigits + 1 > buflen)
+    return 0;
+
+  for (i = 0; i < ndigits; i++)
+    buf[i] = digits[ndigits - 1 - i];
+  buf[ndigits] = '\0';
+
+  return (int)ndigits;
+}
+
+int relocate_expiry_parse(const char *text, time_t *expires)
+{
+  /* The largest value a time_t holds, whatever its width. */
+  const unsigned long long limit =
+    (((unsigned long long)1 << (sizeof(time_t) * CHAR_BIT - 2)) - 1) * 2 + 1;
+  unsigned long long value = 0;
+  const char *p;
+
+  if (!text || !*text)
+    return 0;
+  if (text[0] == '0' && text[1])
+    return 0;                   /* "%Tu" never writes a leading zero */
+
+  for (p = text; *p; p++) {
+    unsigned long long digit;
+
+    if (*p < '0' || *p > '9')
+      return 0;
+    digit = (unsigned long long)(*p - '0');
+    /* Refuse before the multiply can pass the limit: no length check is
+     * needed and a 600-digit number fails at its twentieth digit. */
+    if (value > (limit - digit) / 10)
+      return 0;
+    value = value * 10 + digit;
+  }
+
+  *expires = (time_t)value;
+  return 1;
+}
+
+enum RelocateExpiryKind relocate_expiry_check(time_t *expires, time_t now)
+{
+  if (*expires <= now)
+    return RELOCATE_EXPIRY_PAST;
+
+  /* Compared as a difference: now + RELOCATE_GRACE_MAX cannot overflow
+   * for any real clock, *expires - now cannot for an *expires above now. */
+  if (*expires - now > RELOCATE_GRACE_MAX) {
+    *expires = now + RELOCATE_GRACE_MAX;
+    return RELOCATE_EXPIRY_CLAMPED;
+  }
+
+  return RELOCATE_EXPIRY_LIVE;
+}

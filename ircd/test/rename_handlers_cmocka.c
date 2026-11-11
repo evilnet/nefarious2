@@ -2327,6 +2327,232 @@ static void cancelled_registered_channel_keeps_its_persist_flag(void **state)
   assert_int_equal(nopnotices, 0);
 }
 
+/* --- A.1: the deadline travels --- */
+
+/* The issuing server computes the deadline once, in network time, and
+ * every peer a relocation goes to is sent it. */
+static void relocation_carries_its_deadline(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *legacy = linked("old.example", "Bo", "r");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  (void)state; (void)legacy;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 900;
+  TSoffset = 250;               /* network time is 1000250 */
+  add_member(channel_at("#old", 500000, alice), bob, 0);
+
+  client_rename(alice, "#old", "#new", "moving");
+
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #old #new C 1001150 :moving");
+  assert_string_equal(sent_to(x3, 0), "ACAAB RN #old #new C 1001150 :moving");
+  /* armed for the same instant on this server's own clock */
+  assert_int_equal(timers_at(1000900), 1);
+  assert_non_null(strstr(sent_to(bob, 0), "this channel closes in 15 minutes."));
+}
+
+/* An empty reason is still sent: the trailing parameter is what makes the
+ * marker a marker. */
+static void relocation_without_a_reason_keeps_the_trailing_parameter(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  feat_rename_consent = 1;
+  channel_at("#old", 500000, alice);
+  client_rename(alice, "#old", "#new", "");
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #old #new C 1000900 :");
+}
+
+/* A registered channel's relocation, approved by services, carries it
+ * too. */
+static void approved_relocation_carries_its_deadline(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char cookie[64];
+  (void)state;
+
+  feat_rename_consent = 1;
+  registered_channel("#reg", alice)->creationtime = 500000;
+  client_rename(alice, "#reg", "#new", "why");
+  snprintf(cookie, sizeof(cookie), "%s", cookie_of(sent_to(x3, 0)));
+  forget();
+
+  assert_int_equal(account_line(x3, x3, 3, cookie, "A", "RENAME"), 1);
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #reg #new C 1000900 :why");
+  assert_string_equal(sent_to(x3, 0), "ACAAB RN #reg #new C 1000900 :why");
+  assert_true(channel_named("#new")->mode.mode & MODE_REGISTERED);
+  assert_false(channel_named("#reg")->mode.mode & MODE_REGISTERED);
+}
+
+/* A receiver arms for the deadline it is sent -- not for its own grace
+ * counted from now -- and passes the same deadline on. */
+static void receiver_arms_for_the_deadline_on_the_wire(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_relocate_grace = 900;    /* ours; the issuer's was 300 */
+  TSoffset = -40;               /* network time is 999960 */
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+
+  server_relocate(peer, bob, "#old", "#new", "1000260", "moving");
+
+  assert_non_null(member_of(channel_named("#new"), bob));
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(timers_at(1000300), 1);      /* 1000260 less TSoffset */
+  assert_int_equal(ntimers, 1);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000260 :moving");
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new C 1000260 :moving");
+  assert_int_equal(sent_count_to(peer), 0);
+  /* five minutes are left of it */
+  assert_non_null(strstr(sent_to(carol, 0), "this channel closes in 5 minutes."));
+
+  /* not yet ... */
+  advance(299);
+  assert_non_null(member_of(oldch, carol));
+  /* ... now */
+  advance(1);
+  assert_true(was_destroyed(oldch));
+}
+
+/* The five-parameter form of a peer from before the deadline travelled:
+ * this server's own grace from now, as every server used to; and what it
+ * relays carries the deadline it went by. */
+static void five_parameter_relocation_uses_the_local_grace(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  (void)state;
+
+  feat_relocate_grace = 120;
+  add_member(channel_at("#old", 500000, bob), carol, 0);
+
+  server_relocate(peer, bob, "#old", "#new", NULL, "moving");
+
+  assert_non_null(member_of(channel_named("#new"), bob));
+  assert_int_equal(timers_at(1000120), 1);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000120 :moving");
+  assert_int_equal(nviolations, 0);
+}
+
+/* A reason that happens to be a number is a reason in the five-parameter
+ * form. */
+static void five_parameter_reason_is_never_read_as_a_deadline(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  (void)state;
+
+  feat_relocate_grace = 120;
+  channel_at("#old", 500000, bob);
+  server_relocate(peer, bob, "#old", "#new", NULL, "1000050");
+  assert_int_equal(timers_at(1000120), 1);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000120 :1000050");
+}
+
+/* A fifth parameter that is not a deadline: the relocation is executed
+ * all the same (or membership would diverge), on the local grace. */
+static void garbage_deadline_falls_back_to_the_local_grace(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  (void)state;
+
+  feat_relocate_grace = 120;
+  channel_at("#old", 500000, bob);
+  server_relocate(peer, bob, "#old", "#new", "-5", "moving");
+
+  assert_non_null(member_of(channel_named("#new"), bob));
+  assert_int_equal(timers_at(1000120), 1);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 1000120 :moving");
+  assert_int_equal(nviolations, 1);
+  assert_non_null(strstr(violations[0], "not a relocation deadline"));
+}
+
+/* A deadline already past: the relocation is executed and the tombstone
+ * dissolved on the spot; the relay passes the same past time on. */
+static void past_deadline_dissolves_at_once(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+
+  server_relocate(peer, bob, "#old", "#new", "999990", "moving");
+
+  assert_non_null(member_of(channel_named("#new"), bob));
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#old"));
+  assert_int_equal(ntimers, 0);
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #old #new C 999990 :moving");
+}
+
+/* A deadline absurdly far ahead is cut to the protocol's longest grace,
+ * and the cut value is what goes on. */
+static void far_deadline_is_clamped_and_relayed_clamped(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  char expect[LINE];
+  (void)state;
+
+  channel_at("#old", 500000, bob);
+  server_relocate(peer, bob, "#old", "#new", "2147483647", "moving");
+
+  assert_int_equal(timers_at(1000000 + RELOCATE_GRACE_MAX), 1);
+  snprintf(expect, sizeof(expect), "BjAAC RN #old #new C %d :moving",
+           1000000 + RELOCATE_GRACE_MAX);
+  assert_string_equal(sent_to(down, 0), expect);
+}
+
+/* A relocation issued from a bouncer alias reaches X3 as its primary,
+ * with the deadline. */
+static void relocation_from_an_alias_reaches_x3_as_its_primary(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *primary = user_on(peer, "bob", "AAC");
+  struct Client *alias = user_on(peer, "bob", "AAE");
+  (void)state;
+
+  SetBouncerAlias(alias);
+  cli_user(alias)->alias_primary = primary;
+  channel_at("#old", 500000, primary);
+
+  server_relocate(peer, alias, "#old", "#new", "1000300", "moving");
+
+  /* the primary is the member, and the one that moved */
+  assert_non_null(member_of(channel_named("#new"), primary));
+  assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new C 1000300 :moving");
+  /* fork servers know the alias (the real send rewrites toward the ones
+   * that do not) */
+  assert_string_equal(sent_to(down, 0), "BjAAE RN #old #new C 1000300 :moving");
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -2393,6 +2619,17 @@ int main(void)
     T(cancelled_tombstone_gives_the_persist_flag_back),
     T(cancelled_empty_tombstone_is_collected),
     T(cancelled_registered_channel_keeps_its_persist_flag),
+
+    T(relocation_carries_its_deadline),
+    T(relocation_without_a_reason_keeps_the_trailing_parameter),
+    T(approved_relocation_carries_its_deadline),
+    T(receiver_arms_for_the_deadline_on_the_wire),
+    T(five_parameter_relocation_uses_the_local_grace),
+    T(five_parameter_reason_is_never_read_as_a_deadline),
+    T(garbage_deadline_falls_back_to_the_local_grace),
+    T(past_deadline_dissolves_at_once),
+    T(far_deadline_is_clamped_and_relayed_clamped),
+    T(relocation_from_an_alias_reaches_x3_as_its_primary),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

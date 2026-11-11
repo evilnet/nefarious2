@@ -111,33 +111,51 @@ struct RelocateTombstone;
 static int rename_is_consent(void);
 static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                             const char *oldname, const char *newname,
-                            const char *reason);
+                            const char *reason, time_t expires);
 static struct RelocateTombstone *relocate_tombstone_find(const char *name);
+static time_t relocate_local_deadline(void);
+static void relocate_propagate(struct Client *sptr, struct Client *one,
+                               struct Client *skip, const char *oldname,
+                               const char *newname, time_t expires,
+                               const char *reason);
 
-/** Wire marker distinguishing a relocation-mode RN from a classic one,
- * as the parameter immediately before the trailing reason:
+/** Wire marker distinguishing a relocation-mode RN from a classic one:
  *
  *     classic:     RN <old> <new> :<reason>
- *     relocation:  RN <old> <new> C :<reason>
+ *     relocation:  RN <old> <new> C <expires> :<reason>
+ *     before the deadline travelled:
+ *                  RN <old> <new> C :<reason>
+ *
+ * <expires> is the moment the tombstone is dissolved, in network time
+ * (TStime()); include/rename_proto.h has the field's form and the rules a
+ * receiver applies to it.  The server that executes the relocation
+ * computes it once, every relay passes on the deadline it armed for, and
+ * so every server dissolves the tombstone at the same moment instead of
+ * each counting its own RELOCATE_GRACE from its own time of receipt.
  *
  * NORMATIVE for every emitter (including X3): the trailing reason
  * parameter MUST be present -- emit ":" with an empty reason rather than
- * dropping it.  ms_rename() only honours the marker in the five-parameter
- * shape, because a four-parameter "RN <old> <new> :C" is a classic rename
- * whose reason happens to be the letter C and must not be mistaken for a
- * relocation.  Honouring a marker in the shorter shape would turn that
- * message into a partition on some servers and a force-move on others --
- * i.e. permanent membership divergence -- which is strictly worse than
- * losing the marker on a malformed emission. */
+ * dropping it.  ms_rename() only honours the marker when a parameter
+ * follows it, because a four-parameter "RN <old> <new> :C" is a classic
+ * rename whose reason happens to be the letter C and must not be mistaken
+ * for a relocation.  Honouring a marker in the shorter shape would turn
+ * that message into a partition on some servers and a force-move on others
+ * -- i.e. permanent membership divergence -- which is strictly worse than
+ * losing the marker on a malformed emission.
+ *
+ * Mixed versions.  The six-parameter form is sent to every peer a
+ * relocation is sent to; no SERVER flag tells an older fork server from a
+ * newer one.  An older receiver tests only "more than four parameters and
+ * the fourth is C" and takes the FIFTH as the reason: it executes the
+ * relocation, counts its own grace, shows its local members the digits of
+ * <expires> where the reason belongs, and relays the five-parameter form
+ * with those digits as the reason.  X3 tests the marker the same way and
+ * reads no reason at all.  Neither misapplies the message. */
 #define RELOCATE_MARKER "C"
-/** RELOCATE_MARKER as a "%s %s %s:%s" splice.  EVERY emitter -- the v3
- * sendcmdto_serv_butone_v3() broadcasts as much as rename_forward_rcapable()
- * -- must use THIS, not bare RELOCATE_MARKER: the trailing space is what
- * separates the marker from the reason's leading colon.  Without it the
- * wire renders "RN #old #new C:reason", a four-parameter classic rename
- * whose reason is "C:reason", and every downstream server force-moves a
- * membership this server left behind. */
-#define RELOCATE_MARKER_SP RELOCATE_MARKER " "
+
+/** Room for "C <expires> ", the splice relocate_propagate() puts in front
+ * of the reason's colon. */
+#define RELOCATE_MARKER_BUFLEN (sizeof(RELOCATE_MARKER) + RELOCATE_EXPIRY_BUFLEN + 2)
 
 /** Find the services server rename permission queries go to.
  *
@@ -236,8 +254,9 @@ static struct Client *rename_legacy_blocker(void)
  * @param[in] marker Extra parameter to splice in before the trailing
  *                   reason, ALREADY trailing-space terminated -- "" for a
  *                   classic rename (the emission is then byte-identical to
- *                   the historical "%s %s :%s" shape) or "C " for a
- *                   relocation-mode rename.
+ *                   the historical "%s %s :%s" shape) or "C <expires> "
+ *                   for a relocation-mode rename (relocate_propagate()
+ *                   builds it).
  * @param[in] reason Rename reason (may be empty string).
  */
 static void rename_forward_rcapable(struct Client *sptr, struct Client *skip,
@@ -520,19 +539,19 @@ void pending_rename_complete(struct PendingRename *pr)
    * chptr keeps its old name here, so the propagated new name comes from
    * pr->newname rather than chptr->chname. */
   if (rename_is_consent()) {
+    time_t expires = relocate_local_deadline();
+
+    /* chptr may be gone when this returns (a deadline of "now"). */
     if (relocate_execute(pr->client, chptr, pr->oldname, pr->newname,
-                         pr->reason) != 0) {
+                         pr->reason, expires) != 0) {
       send_fail(pr->client, "RENAME", "CANNOT_RENAME", pr->oldname,
                 "Rename failed");
       pending_rename_remove(pr);
       return;
     }
 
-    sendcmdto_serv_butone_v3(pr->client, CMD_RENAME, cli_from(pr->client),
-                             "%s %s %s:%s", pr->oldname, pr->newname,
-                             RELOCATE_MARKER_SP, pr->reason);
-    rename_forward_rcapable(pr->client, NULL, pr->oldname, pr->newname,
-                            RELOCATE_MARKER_SP, pr->reason);
+    relocate_propagate(pr->client, cli_from(pr->client), NULL, pr->oldname,
+                       pr->newname, expires, pr->reason);
 
     pending_rename_remove(pr);
     return;
@@ -1072,12 +1091,21 @@ struct RelocateTombstone {
                                          relocation makes takes the old
                                          channel's timestamp, so the value
                                          survives chain flattening. */
-  time_t expires;                   /**< When the grace period elapses */
+  time_t expires;                   /**< The deadline, in NETWORK time
+                                         (TStime()), as it travels in the RN:
+                                         the same number on every server.  The
+                                         timer is armed for it in the event
+                                         loop's clock (minus TSoffset) by
+                                         relocate_tombstone_arm() */
   struct Timer timer;               /**< Embedded -- freed only on ET_DESTROY,
                                          mirroring the PendingRename timer
                                          discipline documented above */
   int timer_active;                 /**< Whether the timer still owns this
-                                         struct's lifetime */
+                                         struct's lifetime.  Zero before
+                                         relocate_tombstone_arm() and for a
+                                         record that is dissolved at once
+                                         (relocate_tombstone_dissolve_now()),
+                                         which is then freed by hand */
   struct RelocateSnap *snaps;       /**< Member status snapshots for a
                                          grace-period follow-join (spec,
                                          "Status preservation").  Freed as a
@@ -1091,6 +1119,7 @@ struct RelocateTombstone {
 static struct RelocateTombstone *relocate_tombstones = NULL;
 
 static void relocate_tombstone_expire_cb(struct Event *ev);
+static void relocate_snap_free_list(struct RelocateSnap *head);
 
 /** Find a live tombstone by its (old) channel name, case-insensitively.
  * @param[in] name Channel name to look up.
@@ -1188,6 +1217,11 @@ static void relocate_tombstone_remove(struct RelocateTombstone *ts)
   if (ts->timer_active) {
     ts->timer_active = 0;
     timer_del(&ts->timer); /* -> ET_DESTROY -> MyFree(ts), synchronously */
+  } else {
+    /* Never armed (the channel died between relocate_tombstone_add() and
+     * relocate_tombstone_arm()): no timer owns it. */
+    relocate_snap_free_list(ts->snaps);
+    MyFree(ts);
   }
 }
 
@@ -1378,13 +1412,11 @@ static void relocate_tombstone_clear_marks(struct Channel *chptr)
  * every server runs this same sweep over its own copy of the membership;
  * broadcasting the removals would double them.  The removals are therefore
  * local bookkeeping plus local-client emission only, exactly like
- * relocate_execute()'s partition.  The cost is that the sweeps are not
- * simultaneous: the timers were armed when each server processed the RN, so
- * they fire within the link latency of each other (seconds).  For those few
- * seconds a member already swept on server A is still listed in the
- * tombstone on server B.  That is accepted -- the channel is empty and
- * dissolving on both, and the alternative (a network-wide PART burst per
- * member, from every server) is far worse.
+ * relocate_execute()'s partition.  The sweeps are simultaneous to the
+ * accuracy of the network clock: every server arms for the one deadline
+ * the RN carried (RelocateTombstone.expires).  Only a server that was sent
+ * no deadline -- behind a server from before it travelled -- counts its own
+ * grace and can be a little late.
  *
  * @param[in] ts Tombstone whose grace period has elapsed.  Already unlinked
  *               from the global list by the caller.
@@ -1593,7 +1625,7 @@ void relocate_tombstone_channel_gone(struct Channel *chptr)
               "relocate_tombstone_channel_gone: %s -> %s retired early "
               "(channel destroyed with %Tu seconds of grace left)",
               ts->oldname, ts->newname,
-              (ts->expires > CurrentTime) ? (ts->expires - CurrentTime) : 0);
+              (ts->expires > TStime()) ? (ts->expires - TStime()) : 0);
 
     relocate_tombstone_remove(ts); /* ts is freed by this call */
   }
@@ -1665,13 +1697,28 @@ static void relocate_tombstone_expire_cb(struct Event *ev)
   }
 }
 
-/** Register a tombstone for @a chptr and arm its grace timer.
+/** This server's own deadline for a relocation executed now: the one the
+ * issuing server puts in the RN, and the fallback of a receiver that was
+ * sent none.
+ * @return Network time.
+ */
+static time_t relocate_local_deadline(void)
+{
+  return relocate_expiry_from_grace(TStime(),
+                                    feature_int(FEAT_RELOCATE_GRACE));
+}
+
+/** Register a tombstone for @a chptr.  The record is linked but its timer
+ * is NOT armed: the caller fills the record in and then calls
+ * relocate_tombstone_arm().
  * @param[in] chptr Channel being tombstoned (keeps its own name).
  * @param[in] newname Redirect target.
+ * @param[in] expires The deadline, network time.
  * @return The new tombstone, or NULL on allocation failure.
  */
 static struct RelocateTombstone *
-relocate_tombstone_add(struct Channel *chptr, const char *newname)
+relocate_tombstone_add(struct Channel *chptr, const char *newname,
+                       time_t expires)
 {
   struct RelocateTombstone *ts;
 
@@ -1696,20 +1743,64 @@ relocate_tombstone_add(struct Channel *chptr, const char *newname)
   ts->oldchan = chptr;
   ircd_strncpy(ts->oldname, chptr->chname, sizeof(ts->oldname));
   ircd_strncpy(ts->newname, newname, sizeof(ts->newname));
-  ts->expires = CurrentTime + feature_int(FEAT_RELOCATE_GRACE);
+  ts->expires = expires;
 
   ts->next = relocate_tombstones;
   relocate_tombstones = ts;
-
-  timer_add(timer_init(&ts->timer), relocate_tombstone_expire_cb, (void *)ts,
-            TT_ABSOLUTE, ts->expires);
-  ts->timer_active = 1;
 
   log_write(LS_DEBUG, L_DEBUG, 0,
             "relocate_tombstone_add: %s -> %s expires=%Tu",
             ts->oldname, ts->newname, ts->expires);
 
   return ts;
+}
+
+/** Arm (or re-arm) a tombstone's timer for its deadline.
+ *
+ * The deadline is network time; the event loop runs on this server's own
+ * clock, so the timer is set for the deadline less TSoffset -- the same
+ * instant.  (A SETTIME that moves TSoffset later does not move a timer
+ * that is already armed.)
+ * @param[in] ts Tombstone.
+ * @return 1 when the timer is armed; 0 when the deadline is now or past,
+ *         nothing was armed, and the caller must dissolve the tombstone
+ *         itself (relocate_tombstone_dissolve_now()).
+ */
+static int relocate_tombstone_arm(struct RelocateTombstone *ts)
+{
+  if (ts->expires <= TStime())
+    return 0;
+
+  if (ts->timer_active) {
+    timer_chg(&ts->timer, TT_ABSOLUTE, ts->expires - TSoffset);
+  } else {
+    timer_add(timer_init(&ts->timer), relocate_tombstone_expire_cb,
+              (void *)ts, TT_ABSOLUTE, ts->expires - TSoffset);
+    ts->timer_active = 1;
+  }
+
+  return 1;
+}
+
+/** Dissolve a tombstone whose deadline is already here: a relocation with
+ * a grace of zero, or one whose RN arrived after its deadline.
+ *
+ * Done on the spot and not through a timer that is already due, so there
+ * is no redirect window at all: a timer would fire only after the event
+ * loop has dealt with every line it has already read, and a JOIN of the
+ * old name among them would still be forwarded.
+ *
+ * The channel may be freed by this call, and @a ts is.
+ * @param[in] ts Tombstone whose timer was never armed.
+ */
+static void relocate_tombstone_dissolve_now(struct RelocateTombstone *ts)
+{
+  assert(!ts->timer_active);
+
+  relocate_tombstone_unlink(ts);
+  relocate_tombstone_sweep(ts);
+  relocate_snap_free_list(ts->snaps);
+  MyFree(ts);
 }
 
 /** Announce a tombstone's (possibly updated) redirect to its remaining
@@ -1889,7 +1980,8 @@ struct RelocateMover {
  * because joinbuf broadcasts, and the RN C marker already implies the move
  * network-wide (same contract as a classic rename).
  *
- * @a chptr is NOT freed and NOT renamed -- it survives as the tombstone.
+ * @a chptr is NOT renamed -- it survives as the tombstone, until the
+ * deadline.
  *
  * @param[in] sptr Issuer of the rename.  May be a server when services
  *                 drove the rename: no membership can match a server, so
@@ -1900,17 +1992,21 @@ struct RelocateMover {
  * @param[in] oldname @a chptr's name, snapshotted by the caller.
  * @param[in] newname Name to relocate to.
  * @param[in] reason Reason (may be empty string).
+ * @param[in] expires The tombstone's deadline, network time.  When it is
+ *                    now or past the tombstone is dissolved before this
+ *                    returns, and @a chptr may have been freed.
  * @return 0 on success, -1 on bad/oversized name or allocation failure,
  *         -2 if @a newname is already in use.
  */
 static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                             const char *oldname, const char *newname,
-                            const char *reason)
+                            const char *reason, time_t expires)
 {
   struct Channel *newchan;
   struct Membership *member;
   struct RelocateMover *movers;
   struct RelocateSnap *snaphead = NULL, **snaptail = &snaphead;
+  struct RelocateTombstone *ts;
   char newname_buf[CHANNELLEN + 1];
   char reasonpart[TOPICLEN + 4];
   int nmembers = 0;
@@ -2152,7 +2248,7 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                     "%H :%s has moved to %s%s. Join %s to follow; this "
                     "channel closes in %d minutes.",
                     chptr, oldname, newname_buf, reasonpart, newname_buf,
-                    feature_int(FEAT_RELOCATE_GRACE) / 60);
+                    (int)((expires > TStime() ? expires - TStime() : 0) / 60));
   }
 
   /* ---- 4. Move the movers ----
@@ -2215,27 +2311,25 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
   /* ---- 5. Announce the redirect and arm the grace timer ---- */
   relocate_announce_redirect(chptr);
 
-  {
-    struct RelocateTombstone *ts = relocate_tombstone_add(chptr, newname_buf);
+  ts = relocate_tombstone_add(chptr, newname_buf, expires);
 
-    if (ts) {
-      /* relocate_tombstone_add() can hand back an EXISTING record: its own
-       * "repoint" branch, for a diverged link re-tombstoning a name that is
-       * already one (see its comment).  Free whatever that record was
-       * still carrying before installing this call's fresher data -- the
-       * membership walked above is this server's current truth, and a
-       * stale snapshot from an earlier relocation of the same name must
-       * not survive alongside it. */
-      relocate_snap_free_list(ts->snaps);
-      ts->snaps = snaphead;
-      ts->target_ts = newchan->creationtime;
-    } else {
-      /* Allocation failure inside relocate_tombstone_add() itself -- there
-       * is no record to attach these to.  Same "life goes on without
-       * grace tracking" contract Task 3 already accepted for this failure;
-       * just don't leak the list built above. */
-      relocate_snap_free_list(snaphead);
-    }
+  if (ts) {
+    /* relocate_tombstone_add() can hand back an EXISTING record: its own
+     * "repoint" branch, for a diverged link re-tombstoning a name that is
+     * already one (see its comment).  Free whatever that record was
+     * still carrying before installing this call's fresher data -- the
+     * membership walked above is this server's current truth, and a
+     * stale snapshot from an earlier relocation of the same name must
+     * not survive alongside it. */
+    relocate_snap_free_list(ts->snaps);
+    ts->snaps = snaphead;
+    ts->target_ts = newchan->creationtime;
+  } else {
+    /* Allocation failure inside relocate_tombstone_add() itself -- there
+     * is no record to attach these to.  Same "life goes on without
+     * grace tracking" contract Task 3 already accepted for this failure;
+     * just don't leak the list built above. */
+    relocate_snap_free_list(snaphead);
   }
 
   /* A tombstone that pointed at oldname must now point at newname_buf --
@@ -2247,7 +2341,46 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
             "relocate_execute: %s -> %s by %#C (%d moved, %d stayed)",
             oldname, newname_buf, sptr, nmovers, nmembers - nmovers);
 
+  /* Last: a deadline that is already here dissolves the tombstone on the
+   * spot, and that can free chptr. */
+  if (ts && !relocate_tombstone_arm(ts))
+    relocate_tombstone_dissolve_now(ts);
+
   return 0;
+}
+
+/** Send a relocation on: "<sptr> RN <old> <new> C <expires> :<reason>" to
+ * the IRCv3-aware links and to the rename-capable non-v3 ones (X3), which
+ * get the alias source rewrite rename_forward_rcapable() does.
+ * @param[in] sptr The issuer (message source).
+ * @param[in] one Client whose link the IRCv3-aware broadcast skips: the
+ *                issuer's own connection for a relocation executed here,
+ *                the link the RN arrived on for a relay.
+ * @param[in] skip Rename-capable link to skip: the link the RN arrived
+ *                 on, or NULL for a relocation executed here.
+ * @param[in] oldname Old channel name.
+ * @param[in] newname New channel name.
+ * @param[in] expires The deadline this server went by, network time.
+ * @param[in] reason Reason (may be an empty string; always sent).
+ */
+static void relocate_propagate(struct Client *sptr, struct Client *one,
+                               struct Client *skip, const char *oldname,
+                               const char *newname, time_t expires,
+                               const char *reason)
+{
+  char digits[RELOCATE_EXPIRY_BUFLEN];
+  char marker[RELOCATE_MARKER_BUFLEN];
+
+  /* "C <expires> ": the trailing space is what separates the deadline
+   * from the reason's colon.  Without it the line would read
+   * "RN #old #new C 1731340900:reason" and the reason would be lost in
+   * the deadline. */
+  relocate_expiry_format(digits, sizeof(digits), expires);
+  ircd_snprintf(0, marker, sizeof(marker), "%s %s ", RELOCATE_MARKER, digits);
+
+  sendcmdto_serv_butone_v3(sptr, CMD_RENAME, one, "%s %s %s:%s",
+                           oldname, newname, marker, reason);
+  rename_forward_rcapable(sptr, skip, oldname, newname, marker, reason);
 }
 
 /* ========== End Relocation ========== */
@@ -2495,7 +2628,10 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Relocation mode: partition instead of force-moving, and mark the RN so
    * every other server does the same.  Classic mode below is untouched. */
   if (rename_is_consent()) {
-    rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason);
+    time_t expires = relocate_local_deadline();
+
+    /* chptr may be gone when this returns (a deadline of "now"). */
+    rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason, expires);
     if (rc == -1) {
       send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
                 "New channel name is too long");
@@ -2506,10 +2642,8 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s %s:%s",
-                             oldname_buf, newname, RELOCATE_MARKER_SP, reason);
-    rename_forward_rcapable(sptr, NULL, oldname_buf, newname,
-                            RELOCATE_MARKER_SP, reason);
+    relocate_propagate(sptr, cptr, NULL, oldname_buf, newname, expires,
+                       reason);
     return 0;
   }
 
@@ -2560,6 +2694,7 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   const char *reason;
   char oldname_buf[CHANNELLEN + 1];
   int relocate = 0;
+  time_t expires = 0;
   int rc;
 
   /* Need at least old and new channel names */
@@ -2571,15 +2706,37 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   newname = parv[2];
   reason = (parc > 3 && !EmptyString(parv[3])) ? parv[3] : "";
 
-  /* Relocation marker: RN <old> <new> C :<reason>.  Recognised only in the
-   * five-parameter shape -- see the RELOCATE_MARKER comment for why the
-   * four-parameter shape must stay a classic rename with the reason "C".
-   * When the marker is present relocation semantics apply on THIS server
-   * regardless of the local FEAT_RENAME_CONSENT setting. */
+  /* Relocation marker: RN <old> <new> C [<expires>] :<reason>.  Recognised
+   * only when a parameter follows it -- see the RELOCATE_MARKER comment
+   * for why the four-parameter shape must stay a classic rename with the
+   * reason "C".  When the marker is present relocation semantics apply on
+   * THIS server regardless of the local FEAT_RENAME_CONSENT setting.
+   *
+   * With six parameters the fifth is the deadline; with five, the message
+   * comes from (or through) a server from before the deadline travelled,
+   * and this server counts its own grace from now, as every server used
+   * to.  A fifth of six that is not a deadline gets the same fallback:
+   * the relocation itself has to be executed either way, or this server's
+   * membership differs from everyone's. */
   if (parc > 4 && !EmptyString(parv[3]) && 0 == strcmp(parv[3],
                                                        RELOCATE_MARKER)) {
     relocate = 1;
-    reason = !EmptyString(parv[4]) ? parv[4] : "";
+    reason = !EmptyString(parv[parc - 1]) ? parv[parc - 1] : "";
+
+    if (parc == 5) {
+      expires = relocate_local_deadline();
+    } else if (!relocate_expiry_parse(parv[4], &expires)) {
+      protocol_violation(cptr, "RENAME %s -> %s from %s: \"%s\" is not a "
+                         "relocation deadline; using this server's own grace",
+                         parv[1], parv[2], cli_name(sptr), parv[4]);
+      expires = relocate_local_deadline();
+    } else if (relocate_expiry_check(&expires, TStime())
+               == RELOCATE_EXPIRY_CLAMPED) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "RENAME from %#C: %s -> %s carries a deadline (%s) more than "
+                "%d seconds ahead; cut to %Tu",
+                cptr, parv[1], parv[2], parv[4], RELOCATE_GRACE_MAX, expires);
+    }
   } else if (parc == 4 && !EmptyString(parv[3]) && parv[3][0] == 'C'
              && IsIRCv3Aware(cptr)) {
     /* Tripwire for a mis-spliced marker.  A peer that emits the marker
@@ -2650,7 +2807,8 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     /* Store old name before rename */
     ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
 
-    rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason);
+    /* chptr may be gone when this returns (a deadline of "now"). */
+    rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason, expires);
 
     if (rc == -2) {
       /* Both names already exist HERE.  That is a pre-existing local
@@ -2680,11 +2838,12 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    /* Propagate with the marker preserved. */
-    sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s %s:%s",
-                             oldname_buf, newname, RELOCATE_MARKER_SP, reason);
-    rename_forward_rcapable(sptr, cptr, oldname_buf, newname,
-                            RELOCATE_MARKER_SP, reason);
+    /* Propagate with the marker, and with the deadline this server went
+     * by: the one it was sent (cut, if it was absurd), or -- for the
+     * five-parameter form of an older peer -- the one it has just
+     * computed, so that every server behind this one shares it. */
+    relocate_propagate(sptr, cptr, cptr, oldname_buf, newname, expires,
+                       reason);
     return 0;
   }
 

@@ -2,8 +2,9 @@
  * rename_proto_cmocka.c - the argument-only parts of channel RENAME: the
  * cookie a services permission query travels under ("<numeric>.<n>", and
  * the bare "<n>" older servers send), who may relay a query and whose
- * reply is applied, relayed or dropped, and the rules a pair of channel
- * names has to pass.
+ * reply is applied, relayed or dropped, the rules a pair of channel
+ * names has to pass, and relocation's shared rules: the deadline on the
+ * wire and what a receiver makes of it.
  */
 #include "config.h"
 #include <stdarg.h>
@@ -594,6 +595,178 @@ static void names_every_error_has_its_own_text(void **state)
   assert_non_null(rename_name_error_text((enum RenameNameError)999));
 }
 
+/* ========== relocation: the deadline on the wire ========== */
+
+static void expiry_round_trips(void **state)
+{
+  static const time_t values[] = { 0, 1, 9, 10, 1731340000, 2147483647 };
+  char buf[RELOCATE_EXPIRY_BUFLEN];
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+    time_t back = -1;
+    int len = relocate_expiry_format(buf, sizeof(buf), values[i]);
+
+    assert_true(len > 0);
+    assert_int_equal((size_t)len, strlen(buf));
+    assert_int_equal(relocate_expiry_parse(buf, &back), 1);
+    assert_true(back == values[i]);
+  }
+  assert_int_equal(relocate_expiry_format(buf, sizeof(buf), 1731340000), 10);
+  assert_string_equal(buf, "1731340000");
+}
+
+static void expiry_format_largest_value_fits_the_documented_buffer(void **state)
+{
+  char buf[RELOCATE_EXPIRY_BUFLEN];
+  time_t big = (time_t)(((unsigned long long)1 << (sizeof(time_t) * 8 - 1)) - 1);
+  time_t back = 0;
+  (void)state;
+
+  assert_true(relocate_expiry_format(buf, sizeof(buf), big) > 0);
+  assert_int_equal(relocate_expiry_parse(buf, &back), 1);
+  assert_true(back == big);
+}
+
+static void expiry_format_refuses_a_buffer_too_small(void **state)
+{
+  char buf[RELOCATE_EXPIRY_BUFLEN] = "x";
+  (void)state;
+
+  assert_int_equal(relocate_expiry_format(buf, 10, 1731340000), 0);
+  assert_string_equal(buf, "");
+  assert_int_equal(relocate_expiry_format(buf, 11, 1731340000), 10);
+  assert_int_equal(relocate_expiry_format(buf, 0, 5), 0);
+  assert_int_equal(relocate_expiry_format(NULL, 5, 5), 0);
+}
+
+/* A time before 1970 is no deadline anybody set; it is written as 0,
+ * which every receiver reads as "already past". */
+static void expiry_format_writes_a_negative_time_as_zero(void **state)
+{
+  char buf[RELOCATE_EXPIRY_BUFLEN];
+  (void)state;
+
+  assert_int_equal(relocate_expiry_format(buf, sizeof(buf), (time_t)-5), 1);
+  assert_string_equal(buf, "0");
+}
+
+static void expiry_parse_garbage(void **state)
+{
+  static const char *const bad[] = {
+    "", " ", "-1", "+1", "1 ", " 1", "1x", "x1", "0x10", "1.5", "1e9",
+    "moving", ":", "C", "17313400OO", "\xff", "١٢٣",
+  };
+  time_t out = 4242;
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    assert_int_equal(relocate_expiry_parse(bad[i], &out), 0);
+    assert_true(out == 4242);       /* untouched */
+  }
+  assert_int_equal(relocate_expiry_parse(NULL, &out), 0);
+}
+
+static void expiry_parse_leading_zero_is_not_what_a_server_prints(void **state)
+{
+  time_t out = 4242;
+  (void)state;
+
+  assert_int_equal(relocate_expiry_parse("0", &out), 1);
+  assert_true(out == 0);
+  out = 4242;
+  assert_int_equal(relocate_expiry_parse("00", &out), 0);
+  assert_int_equal(relocate_expiry_parse("01731340000", &out), 0);
+  assert_true(out == 4242);
+}
+
+static void expiry_parse_overflow(void **state)
+{
+  time_t out = 4242;
+  char longer[700];
+  (void)state;
+
+  /* one past the largest signed 64-bit value, and far past it */
+  assert_int_equal(relocate_expiry_parse("9223372036854775808", &out), 0);
+  assert_int_equal(relocate_expiry_parse("18446744073709551616", &out), 0);
+  assert_int_equal(relocate_expiry_parse("99999999999999999999999999", &out), 0);
+  memset(longer, '9', sizeof(longer) - 1);
+  longer[sizeof(longer) - 1] = '\0';
+  assert_int_equal(relocate_expiry_parse(longer, &out), 0);
+  assert_true(out == 4242);
+  if (sizeof(time_t) == 8)
+    assert_int_equal(relocate_expiry_parse("9223372036854775807", &out), 1);
+}
+
+/* ========== relocation: what a receiver makes of a deadline ========== */
+
+static void deadline_from_grace(void **state)
+{
+  (void)state;
+  assert_true(relocate_expiry_from_grace(1000000, 900) == 1000900);
+  assert_true(relocate_expiry_from_grace(1000000, 45) == 1000045);
+  /* 0 is "dissolve at once"; a negative setting means the same */
+  assert_true(relocate_expiry_from_grace(1000000, 0) == 1000000);
+  assert_true(relocate_expiry_from_grace(1000000, -30) == 1000000);
+  /* no server announces a deadline another would have to clamp */
+  assert_true(relocate_expiry_from_grace(1000000, RELOCATE_GRACE_MAX)
+              == 1000000 + RELOCATE_GRACE_MAX);
+  assert_true(relocate_expiry_from_grace(1000000, RELOCATE_GRACE_MAX + 1)
+              == 1000000 + RELOCATE_GRACE_MAX);
+  assert_true(relocate_expiry_from_grace(1000000, INT_MAX)
+              == 1000000 + RELOCATE_GRACE_MAX);
+}
+
+static void deadline_in_the_future_is_taken_as_it_is(void **state)
+{
+  time_t e = 1000900;
+  (void)state;
+
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_LIVE);
+  assert_true(e == 1000900);
+  e = 1000001;
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_LIVE);
+  assert_true(e == 1000001);
+  e = 1000000 + RELOCATE_GRACE_MAX;
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_LIVE);
+  assert_true(e == 1000000 + RELOCATE_GRACE_MAX);
+}
+
+static void deadline_now_or_past_dissolves_at_once(void **state)
+{
+  time_t e = 1000000;
+  (void)state;
+
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_PAST);
+  assert_true(e == 1000000);          /* relayed as received */
+  e = 999999;
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_PAST);
+  assert_true(e == 999999);
+  e = 0;
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_PAST);
+  assert_true(e == 0);
+}
+
+static void deadline_absurdly_far_is_clamped(void **state)
+{
+  time_t e = 1000000 + RELOCATE_GRACE_MAX + 1;
+  (void)state;
+
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_CLAMPED);
+  assert_true(e == 1000000 + RELOCATE_GRACE_MAX);
+  e = 2147483647;
+  assert_int_equal(relocate_expiry_check(&e, 1000000), RELOCATE_EXPIRY_CLAMPED);
+  assert_true(e == 1000000 + RELOCATE_GRACE_MAX);
+  if (sizeof(time_t) == 8) {
+    e = (time_t)0x7fffffffffffffffLL;
+    assert_int_equal(relocate_expiry_check(&e, 1000000),
+                     RELOCATE_EXPIRY_CLAMPED);
+    assert_true(e == 1000000 + RELOCATE_GRACE_MAX);
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -632,6 +805,17 @@ int main(void)
     cmocka_unit_test(names_mixed_prefix),
     cmocka_unit_test(names_first_broken_rule_wins),
     cmocka_unit_test(names_every_error_has_its_own_text),
+    cmocka_unit_test(expiry_round_trips),
+    cmocka_unit_test(expiry_format_largest_value_fits_the_documented_buffer),
+    cmocka_unit_test(expiry_format_refuses_a_buffer_too_small),
+    cmocka_unit_test(expiry_format_writes_a_negative_time_as_zero),
+    cmocka_unit_test(expiry_parse_garbage),
+    cmocka_unit_test(expiry_parse_leading_zero_is_not_what_a_server_prints),
+    cmocka_unit_test(expiry_parse_overflow),
+    cmocka_unit_test(deadline_from_grace),
+    cmocka_unit_test(deadline_in_the_future_is_taken_as_it_is),
+    cmocka_unit_test(deadline_now_or_past_dissolves_at_once),
+    cmocka_unit_test(deadline_absurdly_far_is_clamped),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

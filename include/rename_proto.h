@@ -2,8 +2,9 @@
  * IRC - Internet Relay Chat, include/rename_proto.h
  *
  * The parts of channel RENAME that depend on nothing but their arguments:
- * the cookie a services permission query travels under, and (below) the
- * rules a pair of channel names has to pass before a rename is attempted.
+ * the cookie a services permission query travels under, the rules a pair
+ * of channel names has to pass before a rename is attempted, and (last)
+ * the rules of relocation mode that every server has to apply alike.
  * Kept apart from m_rename.c so they can be unit-tested
  * (ircd/test/rename_proto_cmocka.c).
  */
@@ -11,6 +12,7 @@
 #define INCLUDED_rename_proto_h
 
 #include <stddef.h>
+#include <time.h>
 
 /*
  * The services permission query for a registered channel
@@ -232,5 +234,104 @@ extern enum RenameNameError rename_check_names(const char *oldname,
  * @return A static string; never NULL.
  */
 extern const char *rename_name_error_text(enum RenameNameError err);
+
+/*
+ * Relocation mode (evilnet/channel-relocate): the deadline.
+ *
+ * A relocated channel's old name stays behind as a tombstone until a
+ * deadline, and every server has to dissolve it at the same moment.  So
+ * the deadline is an absolute time, computed once by the server that
+ * executes the relocation and carried by the message:
+ *
+ *     <user> RN <old> <new> C <expires> :<reason>
+ *     ABAAC RN #old #new C 1731340900 :moving
+ *
+ * <expires> is network time -- TStime(), the clock channel creation
+ * timestamps are in -- in seconds, as "%Tu" prints it: decimal digits, no
+ * sign, no leading zero.  A server from before the deadline travelled
+ * sends
+ *
+ *     <user> RN <old> <new> C :<reason>
+ *
+ * and a receiver of that form counts its own RELOCATE_GRACE from the
+ * moment of receipt, as every server used to.
+ */
+
+/** Longest grace, in seconds, and so the furthest a deadline may lie
+ * ahead: seven days.
+ *
+ * It is a constant of the protocol and not a feature, because every
+ * server must cut an over-long deadline to the same length.  A tombstone
+ * holds a name (+z, +L) that nobody can use; RELOCATE_GRACE is minutes
+ * (default 900 s) and a network that wants a long notice may want a day
+ * or two.  A week is beyond any of that and still bounds what one
+ * corrupt or hostile <expires> (0x7fffffff, say) can do: without a bound
+ * it would pin the name for decades, on every server. */
+#define RELOCATE_GRACE_MAX 604800
+
+/** Room for the longest <expires>: the nineteen digits of the largest
+ * 64-bit time_t, one to spare, and the terminating NUL. */
+#define RELOCATE_EXPIRY_BUFLEN 21
+
+/** The deadline of a relocation executed at @a now with a grace of
+ * @a grace seconds (the issuing server's RELOCATE_GRACE; also the
+ * fallback of a receiver that was sent no deadline).
+ * @param[in] now Network time.
+ * @param[in] grace Seconds; below 0 counts as 0 (dissolve at once),
+ *            above RELOCATE_GRACE_MAX as RELOCATE_GRACE_MAX, so that no
+ *            server announces a deadline another would cut.
+ * @return The deadline, network time.
+ */
+extern time_t relocate_expiry_from_grace(time_t now, int grace);
+
+/** Write a deadline as it goes on the wire.
+ * @param[out] buf Receives the digits, NUL-terminated.
+ * @param[in] buflen Size of @a buf; RELOCATE_EXPIRY_BUFLEN always suffices.
+ * @param[in] expires The deadline; a negative time is written as 0.
+ * @return The length written, or 0 when @a buf is too small (it then
+ *         holds an empty string if it has any room at all).
+ */
+extern int relocate_expiry_format(char *buf, size_t buflen, time_t expires);
+
+/** Read a deadline off the wire.
+ *
+ * Strict: only what relocate_expiry_format() can have written -- digits,
+ * no sign, no leading zero, no trailing byte, nothing that does not fit a
+ * time_t.  Anything else is not a deadline, and the caller falls back to
+ * its own grace rather than guess.
+ * @param[in] text The parameter as received (may be NULL).
+ * @param[out] expires Receives the deadline; untouched on failure.
+ * @return 1 when @a text is a deadline, 0 otherwise.
+ */
+extern int relocate_expiry_parse(const char *text, time_t *expires);
+
+/** What a receiver makes of a deadline. */
+enum RelocateExpiryKind {
+  RELOCATE_EXPIRY_LIVE = 0,   /**< ahead, within RELOCATE_GRACE_MAX: arm for it */
+  RELOCATE_EXPIRY_PAST,       /**< now or earlier: dissolve at once */
+  RELOCATE_EXPIRY_CLAMPED     /**< further ahead than RELOCATE_GRACE_MAX:
+                                   cut to now + RELOCATE_GRACE_MAX */
+};
+
+/** Judge a deadline against this server's clock.
+ *
+ * - Now or already past: the tombstone is dissolved at once.  The
+ *   deadline is left as it is, so a relay passes the same past time on
+ *   and every server behind it dissolves at once too.
+ * - More than RELOCATE_GRACE_MAX ahead: cut to now + RELOCATE_GRACE_MAX
+ *   (see the constant for why there is a bound and why it is fixed).
+ *   The cut value is what this server arms for AND what it relays, so
+ *   the servers behind it get a sane deadline and the same one; servers
+ *   that receive the absurd value by different routes cut at their own
+ *   moment of receipt and can differ by the delay between them.
+ * - Otherwise it is taken as it is.
+ *
+ * @param[in,out] expires The deadline; cut when the result is
+ *                RELOCATE_EXPIRY_CLAMPED, otherwise unchanged.
+ * @param[in] now Network time.
+ * @return What was found.
+ */
+extern enum RelocateExpiryKind relocate_expiry_check(time_t *expires,
+                                                     time_t now);
 
 #endif /* INCLUDED_rename_proto_h */
