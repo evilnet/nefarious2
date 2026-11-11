@@ -2553,6 +2553,134 @@ static void relocation_from_an_alias_reaches_x3_as_its_primary(void **state)
   assert_string_equal(sent_to(down, 0), "BjAAE RN #old #new C 1000300 :moving");
 }
 
+/* --- C.3: RELOCATE_GRACE 0 --- */
+
+/* The issuer moves, everyone else is parted in the same breath, the old
+ * channel is gone when the command returns, and nothing is left to fire
+ * or to restore from. */
+static void grace_zero_dissolves_at_once(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *dave = user_on(peer, "dave", "AAD");
+  struct Channel *oldch, *newch;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 0;
+  CapSet(cli_active_own(alice), CAP_DRAFT_CHANRENAME);
+  oldch = channel_at("#old", 500000, alice);
+  oldch->mode.exmode |= EXMODE_PERSIST;      /* even a +z from before */
+  add_member(oldch, bob, CHFL_CHANOP);
+  add_member(oldch, dave, CHFL_VOICE);
+
+  client_rename(alice, "#old", "#new", "now");
+
+  /* the issuer moved, with its status, and was told */
+  newch = channel_named("#new");
+  assert_non_null(newch);
+  assert_true(member_of(newch, alice)->status & CHFL_CHANOP);
+  assert_int_equal(newch->users, 1);
+  assert_string_equal(sent_to(alice, 0),
+                      ":alice!user@host.example RENAME #old #new :now");
+  assert_int_equal(sent_count_to(alice), 1);
+
+  /* the stayer: the notice, the issuer leaving, the redirect, its own
+   * PART -- in that order, and nothing after */
+  assert_non_null(strstr(sent_to(bob, 0), "#old has moved to #new (now)."));
+  assert_non_null(strstr(sent_to(bob, 0), "closes in 0 minutes."));
+  assert_string_equal(sent_to(bob, 1),
+                      ":alice!user@host.example PART #old :Moved to #new");
+  assert_string_equal(sent_to(bob, 2), ":me.example MODE #old +L #new");
+  assert_string_equal(sent_to(bob, 3),
+                      ":dave!user@host.example PART #old :Channel has moved to #new");
+  assert_string_equal(sent_to(bob, 4),
+                      ":bob!user@host.example PART #old :Channel has moved to #new");
+  assert_int_equal(sent_count_to(bob), 5);
+
+  /* nothing left behind: no channel, no timer, no snapshot */
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#old"));
+  assert_int_equal(ntimers, 0);
+  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 0);
+
+  /* the deadline on the wire is now */
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #old #new C 1000000 :now");
+  assert_string_equal(sent_to(x3, 0), "ACAAB RN #old #new C 1000000 :now");
+}
+
+/* The name is free again at once: it can be created and relocated anew,
+ * and that relocation is not confused by anything the first left. */
+static void grace_zero_leaves_the_old_name_free(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *again;
+  char name[] = "#old";
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 0;
+  channel_at("#old", 500000, alice);
+  client_rename(alice, "#old", "#new", "");
+  assert_null(channel_named("#old"));
+
+  feat_relocate_grace = 900;
+  again = get_channel(bob, name, CGT_CREATE);
+  add_member(again, bob, CHFL_CHANOP);
+  forget();
+  client_rename(bob, "#old", "#other", "");
+  assert_string_equal(again->mode.redir, "#other");
+  assert_true(again->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(ntimers, 1);
+}
+
+/* A receiver whose clock stands exactly at the deadline dissolves at
+ * once too: "now" is not "later". */
+static void deadline_of_this_very_second_dissolves_at_once(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000000", "");
+
+  assert_non_null(member_of(channel_named("#new"), bob));
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
+/* A chain still flattens when its last hop has no grace: #a -> #b, then
+ * #b -> #c at once; #a redirects to #c and #b is gone. */
+static void grace_zero_still_flattens_a_chain(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *a;
+  (void)state;
+
+  feat_rename_consent = 1;
+  a = channel_at("#a", 500000, alice);
+  add_member(a, bob, 0);
+  client_rename(alice, "#a", "#b", "");
+  feat_relocate_grace = 0;
+  client_rename(alice, "#b", "#c", "");
+
+  assert_string_equal(a->mode.redir, "#c");
+  assert_null(channel_named("#b"));
+  assert_non_null(member_of(channel_named("#c"), alice));
+  assert_int_equal(ntimers, 1);         /* #a's */
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -2630,6 +2758,11 @@ int main(void)
     T(past_deadline_dissolves_at_once),
     T(far_deadline_is_clamped_and_relayed_clamped),
     T(relocation_from_an_alias_reaches_x3_as_its_primary),
+
+    T(grace_zero_dissolves_at_once),
+    T(grace_zero_leaves_the_old_name_free),
+    T(deadline_of_this_very_second_dissolves_at_once),
+    T(grace_zero_still_flattens_a_chain),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
