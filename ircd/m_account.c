@@ -119,7 +119,11 @@ static struct Client *decode_auth_id(const char *id)
   cookie = atoi(cookiestr + 1);
   Debug((DEBUG_DEBUG, "ACCOUNT auth id fd=%u cookie=%u", fd, cookie));
 
-  if (!(cptr = LocalClientArray[fd]) || !cli_loc(cptr) || cli_loc(cptr)->cookie != cookie)
+  /* The fd is whatever the peer sent: it indexes LocalClientArray only
+   * inside the array (fd is unsigned, so a negative number fails the
+   * same test). */
+  if (fd >= MAXCONNECTIONS || !(cptr = LocalClientArray[fd]) || !cli_loc(cptr)
+      || cli_loc(cptr)->cookie != cookie)
     return NULL;
   return cptr;
 }

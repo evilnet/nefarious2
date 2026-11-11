@@ -162,8 +162,11 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   fd = atoi(fdstr);
   cookie = atoi(cookiestr);
 
-  /* Could not find a matching client, ignore the message */
-  if (!(acptr = LocalClientArray[fd]) || (cli_saslcookie(acptr) != cookie))
+  /* Could not find a matching client, ignore the message.  The fd is
+   * whatever the peer sent: it indexes LocalClientArray only inside the
+   * array (fd is unsigned, so a negative number fails the same test). */
+  if (fd >= MAXCONNECTIONS || !(acptr = LocalClientArray[fd])
+      || (cli_saslcookie(acptr) != cookie))
     return 0;
 
   /* OK we now know who the message is for, let's deal with it! */
