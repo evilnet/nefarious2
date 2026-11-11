@@ -9,19 +9,49 @@ to refer to any IRC server implementing this protocol, "ircu" to refer
 to Undernet ircd, and "ircd" to refer to IRCnet ircd.
 
 Certain messages are relayed to interested operators.  ircu implements
-this by using the 131072 (SNO_AUTH) server notice mask.  ircd
+this by using the 262144 (SNO_AUTH) server notice mask.  ircd
 implements this by using the &AUTH local channel.
 
 STARTING IAUTH
 ==============
 
-The path to the iauth program is specified in the server configuration
-file.  The server spawns that program when reading the configuration
-file or when the previous iauth instance terminates.  To protect
-against a series of crashes, the server will refuse to restart an
-iauth instance that it spawned in the last five seconds.  A rehash
-operation will clear this behavior.  The server and iauth instance
-communicate over the iauth instance's stdin and stdout.
+The path to the iauth program and its arguments are given by an IAuth
+block in the server configuration file.  Only one iauth instance runs.
+If more than one IAuth block is read, a block in the main configuration
+file wins over one from an included file, wherever it stands; among
+blocks from the same kind of file, the last one read is used.
+
+The server starts the program at the end of each configuration pass:
+at startup and on every rehash.  A rehash keeps the running instance
+when the program and its arguments are unchanged, replaces it when they
+changed, and stops it when the IAuth block was removed.  A pass that
+reports any configuration error changes nothing: the running instance,
+or none, is kept until the configuration reads cleanly again, and the
+server logs a CONFIG warning saying so (an error can swallow the IAuth
+block, and without an iauth instance clients are admitted unchecked).
+A configuration check (ircd -k) reads the IAuth block but starts
+nothing.  "REHASH a" stops the running instance and starts the program
+again.
+
+The server and iauth instance communicate over the iauth instance's
+stdin and stdout; lines it writes to stderr are logged and relayed to
+interested operators.  The server stops an instance by closing those
+sockets, so an instance must exit when it reads end of file.
+
+An instance that exits on its own is started again: at once if it had
+run for at least five seconds, otherwise after 5 seconds, a delay that
+doubles with each further failure up to 300 seconds (5, 10, 20, 40, 80,
+160, 300, 300, ...).  An instance that has run for 60 seconds ends the
+series.  A program that cannot be started at all is retried on the same
+schedule.  Interested operators are told of each failure and of the
+recovery.  A rehash that starts the program afresh, or "REHASH a",
+cancels a pending retry.
+
+While no iauth instance is running, clients register without iauth,
+whatever policy the last instance set.  Clients still waiting for an
+instance when it exits, is replaced, is restarted or is removed are
+released at that moment: they register without iauth, and the next
+instance is not told about them.
 
 Every message from the server to the iauth instance is a single line.
 The line starts with an integer client identifier.  This may be -1 to
@@ -372,7 +402,8 @@ Comments: Sets policy options for the iauth conversation.  Old policy
    R - Require clients to be approved before registering them.
        When this policy is in effect, it affects the behavior
        of a registration timeout; for details, see the documentation
-       for the T server message.
+       for the T server message.  It applies only while an iauth
+       instance is running (see STARTING IAUTH).
    T - When the R policy is in effect and the iauth service does not
        respond for a client, this causes the server to count the number
        of clients refused, to send a warning message to interested
