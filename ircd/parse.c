@@ -1972,7 +1972,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
             uint64_t ahead = 0;
             uint64_t hlc_max_forward = hlc_max_forward_ms();
 
-            if (hlc_global_receive(&remote_hlc, hlc_max_forward, &ahead))
+            if (hlc_global_receive(&remote_hlc, hlc_max_forward, &ahead)) {
               sendto_opmask_butone_ratelimited(0, SNO_NETWORK, &hlc_refuse_rate,
                                                "Clock of %s is %llu ms ahead of ours "
                                                "(HLC_MAX_FORWARD_MS %llu); its time was "
@@ -1980,6 +1980,12 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
                                                cli_name(cptr),
                                                (unsigned long long)ahead,
                                                (unsigned long long)hlc_max_forward);
+              /* Refused for the HLC, so refused as the line's event time
+               * too: replace it here, once, so every reader of the stash
+               * (history rows, @time, presence, the onward relay) agrees
+               * on one time for this line. */
+              cli_s2s_time_ms(cptr) = hlc_global()->physical_ms;
+            }
           }
         }
       }
