@@ -517,6 +517,48 @@ extern int IsInvited(struct Client* cptr, const void* chptr);
 extern void send_channel_modes(struct Client *cptr, struct Channel *chptr);
 extern char *pretty_mask(char *mask);
 extern char *pretty_extmask(char *mask);
+extern int rename_channel(struct Channel **chptr_p, const char *newname);
+extern int rename_services_ac(struct Client *cptr, struct Client *sptr,
+                              int parc, char *parv[]);
+/* Channel relocation (m_rename.c): the old channel of a relocation is
+ * kept as a tombstone until a deadline.  destruct_channel() says when a
+ * channel goes, so that a tombstone's record goes with it. */
+extern void relocate_tombstone_channel_gone(struct Channel *chptr);
+/* A tombstone's record is bound to its channel, and to its target, by
+ * name and creation timestamp, so whatever changes a channel's
+ * creationtime calls one of these (m_rename.c, "A channel's creation
+ * timestamp changes"): _ts_lost() BEFORE a channel is wiped for an older
+ * timestamp (ms_burst(), ms_join()) -- a tombstone held for it is over;
+ * relocate_channel_restamped() AFTER a timestamp is changed with the
+ * channel left as it is (mode_parse(), ms_create(), ms_burst()'s
+ * few-seconds rule) -- to an OLDER timestamp the records follow, to a
+ * later one they do not. */
+extern void relocate_tombstone_ts_lost(struct Channel *chptr);
+extern void relocate_channel_restamped(struct Channel *chptr, time_t old_ts);
+/* Wherever a MODE has just changed a channel's redirect (mode.redir) or
+ * its +z: mode_parse_redir(), mode_parse()'s exmode flush, CLEARMODE.  A
+ * tombstone that lost a mark is ended there and then.  Not for a BURST's
+ * mode merge. */
+extern void relocate_tombstone_marks_changed(struct Channel *chptr);
+/* What do_join() does with a local JOIN of the channel, asked before any
+ * admission check: the ordinary rules, forward it to the redirect
+ * whatever the limit (a live tombstone admits nobody), or refuse it (a
+ * tombstone that is detached from its target). */
+#define RELOCATE_JOIN_ORDINARY 0
+#define RELOCATE_JOIN_FORWARD  1
+#define RELOCATE_JOIN_REFUSE   2
+extern int relocate_join_verdict(struct Channel *chptr);
+/* do_join(), when a user of this server has joined a channel: a member of
+ * a tombstone that redirects there takes the status he holds in it along
+ * and is parted from it. */
+extern void relocate_follow(struct Client *cptr, struct Client *sptr,
+                            struct Channel *chptr);
+/* server_finish_burst(), after a channel's BURST has been sent to a link:
+ * when the channel is a live tombstone its record follows (RT). */
+extern void relocate_burst(struct Client *cptr, struct Channel *chptr);
+/* ms_burst(), when a BURST has been taken in: a tombstone keeps its form,
+ * and one that was waiting for its channel gets it. */
+extern void relocate_tombstone_burst_done(struct Channel *chptr);
 extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 

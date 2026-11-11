@@ -480,6 +480,14 @@ struct Client;
 #define TOK_REMOVE		"RM"
 #define CMD_REMOVE		MSG_REMOVE, TOK_REMOVE
 
+#define MSG_RENAME		"RENAME"	/* server links only: MFLG_TOKONLY */
+#define TOK_RENAME		"RN"
+#define CMD_RENAME		MSG_RENAME, TOK_RENAME
+
+#define MSG_TOMBSTONE		"TOMBSTONE"	/* server links only: MFLG_TOKONLY */
+#define TOK_TOMBSTONE		"RT"
+#define CMD_TOMBSTONE		MSG_TOMBSTONE, TOK_TOMBSTONE
+
 #define MSG_WATCH		"WATCH"
 #define TOK_WATCH		"WATCH"
 #define CMD_WATCH		MSG_WATCH, TOK_WATCH
@@ -514,6 +522,12 @@ struct Client;
                                          * mptr->extra be passed in
                                          * parv[1]. */
 #define   MFLG_NOSHUN            0x10   /** Command is SHUN exempt. */
+#define   MFLG_TOKONLY           0x20   /** Message exists between servers
+                                         * only: it is looked up by its
+                                         * token, which only a server link
+                                         * can use, and not by its name, so
+                                         * to a client it is an unknown
+                                         * command. */
 
 /*
  * Structures

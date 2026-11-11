@@ -237,6 +237,8 @@ extern int ms_privs(struct Client*, struct Client*, int, char*[]);
 extern int ms_quit(struct Client*, struct Client*, int, char*[]);
 extern int ms_rehash(struct Client*, struct Client*, int, char*[]);
 extern int ms_remove(struct Client*, struct Client*, int, char*[]);
+extern int ms_rename(struct Client*, struct Client*, int, char*[]);
+extern int ms_tombstone(struct Client*, struct Client*, int, char*[]);
 extern int ms_rping(struct Client*, struct Client*, int, char*[]);
 extern int ms_rpong(struct Client*, struct Client*, int, char*[]);
 extern int ms_rules(struct Client*, struct Client*, int, char*[]);

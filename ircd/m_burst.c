@@ -285,7 +285,14 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       /* If one side of the net.junction does the above
          timestamp = chptr->creationtime, then the other
 	 side must do this: */
+      time_t old_ts = chptr->creationtime;
+
       chptr->creationtime = timestamp;	/* Use the same TS on both sides. */
+      /* Our EMPTY channel takes the other side's later timestamp: from
+       * here on it is the channel the other side made.  A relocation
+       * tombstone bound to ours -- as its own channel, or as its target
+       * -- does not follow it (m_rename.c). */
+      relocate_channel_restamped(chptr, old_ts);
     }
     /* In more complex cases, we might still end up with a
        creationtime desync of a few seconds, but that should
@@ -359,6 +366,11 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* new channel or an older one */
   if (!chptr->creationtime || chptr->creationtime > timestamp) {
+    /* Our channel of this name lost: a relocation tombstone held for it
+     * is over (its record, the +z the wipe-out below leaves alone, and
+     * its redirect). */
+    if (chptr->creationtime)
+      relocate_tombstone_ts_lost(chptr);
     chptr->creationtime = timestamp;
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,
@@ -759,5 +771,12 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
   }
 
-  return mbuf ? modebuf_flush(mbuf) : 0;
+  {
+    int ret = mbuf ? modebuf_flush(mbuf) : 0;
+
+    /* A relocation tombstone keeps its form through a merge, and one
+     * that was waiting for this channel's BURST gets its channel. */
+    relocate_tombstone_burst_done(chptr);
+    return ret;
+  }
 }

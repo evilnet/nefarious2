@@ -105,8 +105,11 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 2) {
     send_reply(sptr, RPL_HELPSTART, "*", "Nefarious Help System");
-    for (i = 0; msgtab[i].cmd; i++)
+    for (i = 0; msgtab[i].cmd; i++) {
+      if (msgtab[i].flags & MFLG_TOKONLY)
+        continue; /* not a command a client has */
       send_reply(sptr, RPL_HELPTXT, "*", msgtab[i].cmd, msgtab[i].help);
+    }
     return send_reply(sptr, RPL_ENDOFHELP, "*", "End of HELP");
   }
   else {
@@ -120,7 +123,7 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
     send_reply(sptr, RPL_HELPSTART, cmd, "Nefarious Help System");
     for (i = 0; msgtab[i].cmd; i++) {
-      if (!strcmp(cmd, msgtab[i].cmd)) {
+      if (!(msgtab[i].flags & MFLG_TOKONLY) && !strcmp(cmd, msgtab[i].cmd)) {
         send_reply(sptr, RPL_HELPTXT, cmd, msgtab[i].cmd, msgtab[i].help);
         return send_reply(sptr, RPL_ENDOFHELP, cmd, "");
       }

@@ -176,6 +176,7 @@ IRCD_SRC = \
 	m_quit.c \
 	m_rehash.c \
 	m_remove.c \
+	m_rename.c \
 	m_reset.c \
 	m_restart.c \
 	m_rping.c \
@@ -235,6 +236,7 @@ IRCD_SRC = \
 	parse.c \
 	querycmds.c \
 	random.c \
+	rename_proto.c \
 	s_auth.c \
 	s_bsd.c \
 	s_conf.c \
@@ -577,7 +579,8 @@ listener.o: listener.c ../config.h ../include/listener.h \
   ../include/numeric.h ../include/s_bsd.h ../include/s_conf.h \
   ../include/s_misc.h ../include/s_stats.h ../include/send.h \
   ../include/sys.h
-m_account.o: m_account.c ../config.h ../include/client.h ../include/ircd.h \
+m_account.o: m_account.c ../config.h ../include/channel.h \
+  ../include/client.h ../include/ircd.h \
   ../include/ircd_alloc.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
   ../include/numnicks.h ../include/s_auth.h ../include/s_bsd.h \
@@ -888,6 +891,16 @@ m_remove.o: m_remove.c ../config.h ../include/client.h ../include/gline.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
   ../include/numeric.h ../include/numnicks.h ../include/send.h \
   ../include/shun.h ../include/zline.h
+m_rename.o: m_rename.c ../config.h ../include/capab.h ../include/channel.h \
+  ../include/client.h ../include/destruct_event.h ../include/hash.h \
+  ../include/ircd.h \
+  ../include/ircd_alloc.h ../include/ircd_events.h \
+  ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_snprintf.h \
+  ../include/ircd_string.h ../include/list.h ../include/msg.h \
+  ../include/numeric.h ../include/numnicks.h ../include/rename_proto.h \
+  ../include/s_debug.h ../include/s_user.h ../include/send.h \
+  ../include/struct.h
 m_reset.o: m_reset.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/numeric.h \
@@ -1185,6 +1198,8 @@ querycmds.o: querycmds.c ../config.h ../include/querycmds.h \
 random.o: random.c ../config.h ../include/random.h ../include/client.h \
   ../include/ircd_log.h ../include/ircd_md5.h ../include/ircd_reply.h \
   ../include/send.h
+rename_proto.o: rename_proto.c ../config.h ../include/rename_proto.h \
+  ../include/channel.h ../include/ircd_chattr.h ../include/ircd_string.h
 s_auth.o: s_auth.c ../config.h ../include/s_auth.h ../include/class.h \
   ../include/client.h ../include/hash.h ../include/IPcheck.h \
   ../include/ircd.h ../include/ircd_alloc.h ../include/ircd_chattr.h \

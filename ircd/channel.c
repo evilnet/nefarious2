@@ -356,6 +356,11 @@ int destruct_channel(struct Channel* chptr)
 
   assert(0 == chptr->members);
 
+  /* The one place a channel is freed: a relocation tombstone's record
+   * (m_rename.c) must not outlive its channel.  Does nothing for any
+   * other channel. */
+  relocate_tombstone_channel_gone(chptr);
+
   /*
    * Now, find all invite links from channel structure
    */
@@ -1858,6 +1863,121 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
   return chptr;
 }
 
+/** Give a channel a new name.
+ *
+ * The channel stays the channel it was: members and their status
+ * (zombies and delayed joins included), modes, keys, Apass and Upass,
+ * bans and excepts, invites, topic, creation time and a pending
+ * destruct event all carry over.  Only the name, and with it the hash
+ * bucket, changes.
+ *
+ * The name is stored at the end of the structure, which is allocated to
+ * fit it.  A new name no longer than the old one is written in place; a
+ * longer one needs a new structure, and then everything that points at
+ * the channel is repointed: the hash chain, the global channel list,
+ * each membership, the invite list entry of each invited user, and the
+ * destruct event.  Nothing else holds a struct Channel pointer across
+ * calls.  The caller's own pointer is updated through \a chptr_p; any
+ * other copy the caller holds is stale afterwards.
+ *
+ * Nothing is sent, to members or to servers, and the name is not judged
+ * here beyond its length: both are up to the caller.
+ *
+ * A +L redirect on another channel that names this one is a string
+ * (mode.redir) and is left as it is.  It now names a channel that does
+ * not exist, and a redirected JOIN creates that channel, as for any
+ * redirect to a missing channel; changing the string here would be a
+ * mode change no server and no member was told about.
+ *
+ * @param[in,out] chptr_p Channel to rename; updated when the channel had
+ *                to be reallocated.
+ * @param[in] newname New name.
+ * @return 0 on success, -1 on bad arguments or a name longer than
+ *         CHANNELLEN, -2 when a channel of that name exists (which
+ *         includes \a newname being this channel's own name in another
+ *         case).
+ */
+int rename_channel(struct Channel **chptr_p, const char *newname)
+{
+  struct Channel *chptr;
+  size_t oldlen, newlen;
+  struct Channel *newchptr;
+  struct Membership *member;
+  struct SLink *link;
+
+  if (!chptr_p || !*chptr_p || !newname || !*newname)
+    return -1;
+
+  chptr = *chptr_p;
+
+  newlen = strlen(newname);
+  if (newlen > CHANNELLEN)
+    return -1;
+
+  /* Check if new name already exists */
+  if (FindChannel(newname))
+    return -2;
+
+  oldlen = strlen(chptr->chname);
+
+  /* If new name fits in existing allocation, just update in place */
+  if (newlen <= oldlen) {
+    hChangeChannel(chptr, newname);
+    strcpy(chptr->chname, newname);
+    return 0;
+  }
+
+  /* New name is longer - need to reallocate */
+  newchptr = (struct Channel*) MyMalloc(sizeof(struct Channel) + newlen);
+  if (!newchptr)
+    return -1;
+
+  /* Copy all data from old to new */
+  memcpy(newchptr, chptr, sizeof(struct Channel));
+  strcpy(newchptr->chname, newname);
+
+  /* Update hash table */
+  hRemChannel(chptr);
+  hAddChannel(newchptr);
+
+  /* Update global linked list */
+  if (chptr->prev)
+    chptr->prev->next = newchptr;
+  else
+    GlobalChannelList = newchptr;
+  if (chptr->next)
+    chptr->next->prev = newchptr;
+
+  /* Update all membership pointers */
+  for (member = newchptr->members; member; member = member->next_member)
+    member->channel = newchptr;
+
+  /* Update user invite lists that point to this channel */
+  for (link = newchptr->invites; link; link = link->next) {
+    struct Client *cptr = link->value.cptr;
+    struct SLink *inv;
+    /* Find and update user's invite pointer to this channel */
+    for (inv = cli_user(cptr)->invited; inv; inv = inv->next) {
+      if (inv->value.chptr == chptr) {
+        inv->value.chptr = newchptr;
+        break;
+      }
+    }
+  }
+
+  /* Update destruct event if pending */
+  if (newchptr->destruct_event)
+    newchptr->destruct_event->chptr = newchptr;
+
+  /* Free old channel structure */
+  MyFree(chptr);
+
+  /* Update caller's pointer */
+  *chptr_p = newchptr;
+
+  return 0;
+}
+
 /** invite a user to a channel.
  *
  * Adds an invite for a user to a channel.  Limits the number of invites
@@ -3104,6 +3224,12 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       *state->chptr->mode.redir = '\0';
     else
       ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN + 1);
+
+    /* A relocation tombstone (m_rename.c) whose redirect is removed or
+     * changed is over at once.  Not for a BURST's merge: ms_burst()
+     * settles that when the BURST has been taken in. */
+    if (!(state->flags & MODE_PARSE_BURST))
+      relocate_tombstone_marks_changed(state->chptr);
   }
 }
 
@@ -4746,8 +4872,15 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
 	recv_ts = atoi(modestr);
 
-	if (recv_ts && recv_ts < state.chptr->creationtime)
+	if (recv_ts && recv_ts < state.chptr->creationtime) {
+	  time_t old_ts = state.chptr->creationtime;
+
 	  state.chptr->creationtime = recv_ts; /* respect earlier TS */
+	  /* The channel is re-stamped to an OLDER timestamp, not wiped: the
+	   * same channel, corrected.  A relocation tombstone's record
+	   * (m_rename.c) follows. */
+	  relocate_channel_restamped(state.chptr, old_ts);
+	}
         else if (recv_ts > state.chptr->creationtime) {
           struct Client *sserv;
 
@@ -4839,8 +4972,18 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 	!(t_mode & MODE_INVITEONLY))
       mode_invite_clear(state.chptr);
 
-    state.chptr->mode.mode = t_mode;
-    state.chptr->mode.exmode = t_exmode;
+    {
+      unsigned int old_exmode = state.chptr->mode.exmode;
+
+      state.chptr->mode.mode = t_mode;
+      state.chptr->mode.exmode = t_exmode;
+
+      /* -z on a relocation tombstone ends it at once (a BURST only ever
+       * adds the flag). */
+      if (((old_exmode ^ t_exmode) & EXMODE_PERSIST)
+          && !(state.flags & MODE_PARSE_BURST))
+        relocate_tombstone_marks_changed(state.chptr);
+    }
   }
 
   if (state.flags & MODE_PARSE_WIPEOUT) {

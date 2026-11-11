@@ -941,6 +941,26 @@ struct Message msgtab[] = {
     ""
   },
   {
+    /* Between servers only (MFLG_TOKONLY): there is no RENAME command
+     * for a client on this server.  See m_rename.c. */
+    MSG_RENAME,
+    TOK_RENAME,
+    0, MAXPARA, MFLG_SLOW | MFLG_TOKONLY, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_rename, m_ignore, m_ignore },
+    ""
+  },
+  {
+    /* Between servers only (MFLG_TOKONLY): a relocation tombstone,
+     * announced after its channel's BURST.  See m_rename.c. */
+    MSG_TOMBSTONE,
+    TOK_TOMBSTONE,
+    0, MAXPARA, MFLG_SLOW | MFLG_TOKONLY, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_tombstone, m_ignore, m_ignore },
+    ""
+  },
+  {
     MSG_WATCH,
     TOK_WATCH,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
@@ -1093,7 +1113,15 @@ del_msg_element(struct MessageTree *mtree_p, char *cmd)
   return NULL;
 }
 
-/** Initialize the message lookup trie with all known commands. */
+/** Initialize the message lookup trie with all known commands.
+ *
+ * A client's command is looked up by name only (parse_client()); a
+ * server's by token first and by name second (parse_server()).  A
+ * message marked MFLG_TOKONLY is therefore left out of the name trie: a
+ * server link reaches it by its token, and for a client it does not
+ * exist -- ERR_UNKNOWNCOMMAND, not the silence the m_ignore of a
+ * server-only message in both tries gives.
+ */
 void
 initmsgtree(void)
 {
@@ -1104,7 +1132,8 @@ initmsgtree(void)
 
   for (i = 0; msgtab[i].cmd != NULL ; i++)
   {
-    add_msg_element(&msg_tree, &msgtab[i], msgtab[i].cmd);
+    if (!(msgtab[i].flags & MFLG_TOKONLY))
+      add_msg_element(&msg_tree, &msgtab[i], msgtab[i].cmd);
     add_msg_element(&tok_tree, &msgtab[i], msgtab[i].tok);
   }
 }

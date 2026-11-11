@@ -220,8 +220,17 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       chptr = get_channel(sptr, name, CGT_CREATE);
 
     if (!badop) {
+      time_t old_ts = chptr->creationtime;
+
       /* Set (or correct) our copy of the TS */
       chptr->creationtime = chanTS;
+      /* An existing channel re-stamped and otherwise left as it is.  To
+       * an older timestamp it is the same channel, corrected; to a later
+       * one (only an empty channel takes that) it is a channel made anew
+       * under the name.  The relocation code (m_rename.c) tells the two
+       * apart. */
+      if (old_ts && old_ts != chanTS)
+        relocate_channel_restamped(chptr, old_ts);
       joinbuf_join(&create, chptr, CHFL_CHANOP);
     }
   }

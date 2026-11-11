@@ -203,6 +203,11 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
     *chptr->mode.redir = '\0';
   }
 
+  /* A relocation tombstone (m_rename.c) that has just lost its redirect
+   * or its +z is over at once. */
+  if ((del_mode & MODE_REDIRECT) || (del_exmode & EXMODE_PERSIST))
+    relocate_tombstone_marks_changed(chptr);
+
   /*
    * Go through and mark the bans for deletion; note that we can't
    * free them until after modebuf_* are done with them
