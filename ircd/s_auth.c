@@ -2353,6 +2353,8 @@ int auth_spawn(int argc, char *argv[])
 static int conf_iauth_argc;
 static char **conf_iauth_argv;
 static int conf_iauth_toplevel;   /**< recorded block came from ircd.conf itself */
+/** Non-zero when the configuration is only being checked (ircd -k). */
+static int conf_check_only;
 
 /** Depth of the configuration include stack (ircd_lexer.l); 0 while the
  * top-level file is being read. */
@@ -2401,6 +2403,13 @@ static int auth_spawn_recorded(void)
   return res;
 }
 
+/** This process only checks the configuration (ircd -k): an IAuth{} block
+ * is read and checked as usual, but no program is started. */
+void auth_conf_check_only(void)
+{
+  conf_check_only = 1;
+}
+
 /** Start a configuration pass: forget any IAuth{} block from the last. */
 void auth_conf_begin(void)
 {
@@ -2444,7 +2453,8 @@ void auth_conf_iauth(int argc, char *argv[])
  * a refused block, an include that could not be read) changes nothing
  * here: the error may have swallowed the IAuth{} block, and without a
  * program clients are admitted unchecked whatever its policy said.  The
- * running program (or none) stays as it was until a pass parses cleanly. */
+ * running program (or none) stays as it was until a pass parses cleanly.
+ * A configuration check (ircd -k, auth_conf_check_only()) starts nothing. */
 void auth_conf_apply(void)
 {
   if (conf_get_error_flag()) {
@@ -2460,6 +2470,10 @@ void auth_conf_apply(void)
                 "errors; IAuth is left as it was (program: %s%s)", what,
                 state);
     }
+    auth_conf_free();
+    return;
+  }
+  if (conf_check_only) {
     auth_conf_free();
     return;
   }

@@ -66,6 +66,7 @@ extern void auth_send_exit(struct Client *cptr);
 extern void auth_send_xreply(struct Client *sptr, const char *routing, const char *reply);
 extern void auth_mark_closing(void);
 extern void auth_close_unused(void);
+extern void auth_conf_check_only(void);
 extern void auth_conf_begin(void);
 extern void auth_conf_iauth(int argc, char *argv[]);
 extern void auth_conf_apply(void);
