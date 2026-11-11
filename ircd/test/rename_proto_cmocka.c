@@ -1,7 +1,8 @@
 /*
  * rename_proto_cmocka.c - the argument-only parts of channel RENAME: the
  * cookie a services permission query travels under ("<numeric>.<n>", and
- * the bare "<n>" older servers send).
+ * the bare "<n>" older servers send), and the rules a pair of channel
+ * names has to pass.
  */
 #include "config.h"
 #include <stdarg.h>
@@ -11,6 +12,7 @@
 #include <string.h>
 #include <cmocka.h>
 
+#include "ircd_defs.h"
 #include "rename_proto.h"
 
 /* ========== cookie: format ========== */
@@ -212,6 +214,177 @@ static void parse_over_long(void **state)
   expect_invalid(big);
 }
 
+/* ========== names ========== */
+
+#define OK(o, n)        assert_int_equal(rename_check_names((o), (n), CHANNELLEN, 0), RENAME_NAME_OK)
+#define BAD(o, n, why)  assert_int_equal(rename_check_names((o), (n), CHANNELLEN, 0), (why))
+
+static void names_plain_rename_is_fine(void **state)
+{
+  (void)state;
+  OK("#old", "#new");
+  OK("#old", "#");
+  OK("#old", "#new-name_[with]{odd}|chars^`'");
+  OK("#old", "#caf\xc3\xa9");                   /* UTF-8, no 0xA0 byte */
+  OK("#old", "#\xe9t\xe9");                     /* Latin-1: JOIN takes it unless UTF-8 only */
+  OK("#old", "#a:b");
+  OK("#old", "##");
+  OK("#old", "#a&b");
+}
+
+static void names_local_channels_are_refused_on_either_side(void **state)
+{
+  (void)state;
+  BAD("&ops", "#leak", RENAME_NAME_OLD_LOCAL);
+  BAD("&ops", "&staff", RENAME_NAME_OLD_LOCAL);
+  BAD("#chan", "&chan", RENAME_NAME_NEW_LOCAL);
+  BAD("#chan", "&", RENAME_NAME_NEW_LOCAL);
+}
+
+static void names_without_a_channel_prefix(void **state)
+{
+  (void)state;
+  BAD("#old", "new", RENAME_NAME_NEW_NOT_CHANNEL);
+  BAD("#old", "", RENAME_NAME_NEW_NOT_CHANNEL);
+  BAD("#old", NULL, RENAME_NAME_NEW_NOT_CHANNEL);
+  BAD("#old", "+new", RENAME_NAME_NEW_NOT_CHANNEL);
+  BAD("#old", "!new", RENAME_NAME_NEW_NOT_CHANNEL);
+  BAD("#old", " #new", RENAME_NAME_NEW_NOT_CHANNEL);
+  BAD("old", "#new", RENAME_NAME_OLD_NOT_CHANNEL);
+  BAD("", "#new", RENAME_NAME_OLD_NOT_CHANNEL);
+  BAD(NULL, "#new", RENAME_NAME_OLD_NOT_CHANNEL);
+  /* the old name is judged first */
+  BAD("old", "&new", RENAME_NAME_OLD_NOT_CHANNEL);
+}
+
+static void names_comma(void **state)
+{
+  (void)state;
+  BAD("#a", "#a,b", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#a", "#a,#b", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#a", "#,", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#a", "#b,", RENAME_NAME_NEW_BAD_CHARS);
+}
+
+static void names_control_characters_and_space(void **state)
+{
+  char name[8];
+  int c;
+  (void)state;
+
+  /* every byte from 0x01 to 0x20 */
+  for (c = 1; c <= 0x20; c++) {
+    name[0] = '#'; name[1] = 'a'; name[2] = (char)c; name[3] = 'b'; name[4] = '\0';
+    BAD("#old", name, RENAME_NAME_NEW_BAD_CHARS);
+  }
+  BAD("#old", "#bell\007", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#old", "#a b", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#old", "#tab\there", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#old", "#\001", RENAME_NAME_NEW_BAD_CHARS);
+  /* 0x21 and 0x7f are in JOIN's set, so they are in ours */
+  OK("#old", "#a!b");
+  OK("#old", "#a\177");
+}
+
+static void names_nbsp_byte(void **state)
+{
+  (void)state;
+  BAD("#old", "#a\xa0" "b", RENAME_NAME_NEW_BAD_CHARS);
+  BAD("#old", "#\xa0", RENAME_NAME_NEW_BAD_CHARS);
+  /* also when it is the second byte of a UTF-8 sequence ("a grave"):
+   * JOIN refuses the byte wherever it stands, and so does this */
+  BAD("#old", "#voil\xc3\xa0", RENAME_NAME_NEW_BAD_CHARS);
+}
+
+static void names_length_cap(void **state)
+{
+  char name[CHANNELLEN + 3];
+  (void)state;
+
+  memset(name, 'x', sizeof(name));
+  name[0] = '#';
+
+  name[CHANNELLEN] = '\0';              /* exactly CHANNELLEN bytes */
+  assert_int_equal(rename_check_names("#old", name, CHANNELLEN, 0), RENAME_NAME_OK);
+  assert_int_equal(rename_check_names("#old", name, CHANNELLEN - 1, 0),
+                   RENAME_NAME_NEW_TOO_LONG);
+
+  name[CHANNELLEN] = 'x';
+  name[CHANNELLEN + 1] = '\0';          /* one over */
+  assert_int_equal(rename_check_names("#old", name, CHANNELLEN, 0),
+                   RENAME_NAME_NEW_TOO_LONG);
+
+  /* a lower configured cap (FEAT_CHANNELLEN) */
+  assert_int_equal(rename_check_names("#old", "#12345", 6, 0), RENAME_NAME_OK);
+  assert_int_equal(rename_check_names("#old", "#123456", 6, 0), RENAME_NAME_NEW_TOO_LONG);
+  /* the old name's length is nobody's business */
+  assert_int_equal(rename_check_names("#a-long-old-name", "#new", 6, 0), RENAME_NAME_OK);
+}
+
+static void names_utf8_only_when_asked(void **state)
+{
+  (void)state;
+  assert_int_equal(rename_check_names("#old", "#\xe9t\xe9", CHANNELLEN, 0), RENAME_NAME_OK);
+  assert_int_equal(rename_check_names("#old", "#\xe9t\xe9", CHANNELLEN, 1),
+                   RENAME_NAME_NEW_BAD_UTF8);
+  assert_int_equal(rename_check_names("#old", "#caf\xc3\xa9", CHANNELLEN, 1), RENAME_NAME_OK);
+  assert_int_equal(rename_check_names("#old", "#ascii", CHANNELLEN, 1), RENAME_NAME_OK);
+  /* a truncated sequence */
+  assert_int_equal(rename_check_names("#old", "#caf\xc3", CHANNELLEN, 1),
+                   RENAME_NAME_NEW_BAD_UTF8);
+}
+
+/* With # and & the only prefixes, two names of different type always have
+ * a local channel on one side, and that is what is reported. */
+static void names_mixed_prefix(void **state)
+{
+  (void)state;
+  BAD("&a", "#a", RENAME_NAME_OLD_LOCAL);
+  BAD("#a", "&a", RENAME_NAME_NEW_LOCAL);
+  assert_int_not_equal(rename_check_names("&a", "#a", CHANNELLEN, 0), RENAME_NAME_OK);
+  assert_int_not_equal(rename_check_names("#a", "&a", CHANNELLEN, 0), RENAME_NAME_OK);
+}
+
+static void names_first_broken_rule_wins(void **state)
+{
+  char name[CHANNELLEN + 8];
+  (void)state;
+
+  /* local beats bad characters */
+  BAD("#a", "&a,b", RENAME_NAME_NEW_LOCAL);
+  /* bad characters beat length */
+  memset(name, 'x', sizeof(name));
+  name[0] = '#';
+  name[5] = ',';
+  name[sizeof(name) - 1] = '\0';
+  BAD("#a", name, RENAME_NAME_NEW_BAD_CHARS);
+}
+
+static void names_every_error_has_its_own_text(void **state)
+{
+  enum RenameNameError all[] = {
+    RENAME_NAME_OLD_NOT_CHANNEL, RENAME_NAME_OLD_LOCAL,
+    RENAME_NAME_NEW_NOT_CHANNEL, RENAME_NAME_NEW_LOCAL,
+    RENAME_NAME_NEW_BAD_CHARS, RENAME_NAME_NEW_BAD_UTF8,
+    RENAME_NAME_NEW_TOO_LONG, RENAME_NAME_PREFIX_MISMATCH
+  };
+  size_t i, j, count = sizeof(all) / sizeof(all[0]);
+  (void)state;
+
+  for (i = 0; i < count; i++) {
+    const char *text = rename_name_error_text(all[i]);
+    assert_non_null(text);
+    assert_true(strlen(text) > 0);
+    /* a FAIL description is one trailing parameter */
+    assert_null(strchr(text, '\n'));
+    assert_null(strchr(text, '\r'));
+    for (j = 0; j < i; j++)
+      assert_string_not_equal(text, rename_name_error_text(all[j]));
+  }
+  assert_non_null(rename_name_error_text(RENAME_NAME_OK));
+  assert_non_null(rename_name_error_text((enum RenameNameError)999));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -229,6 +402,17 @@ int main(void)
     cmocka_unit_test(parse_leading_zero_is_not_what_a_server_prints),
     cmocka_unit_test(parse_overflow),
     cmocka_unit_test(parse_over_long),
+    cmocka_unit_test(names_plain_rename_is_fine),
+    cmocka_unit_test(names_local_channels_are_refused_on_either_side),
+    cmocka_unit_test(names_without_a_channel_prefix),
+    cmocka_unit_test(names_comma),
+    cmocka_unit_test(names_control_characters_and_space),
+    cmocka_unit_test(names_nbsp_byte),
+    cmocka_unit_test(names_length_cap),
+    cmocka_unit_test(names_utf8_only_when_asked),
+    cmocka_unit_test(names_mixed_prefix),
+    cmocka_unit_test(names_first_broken_rule_wins),
+    cmocka_unit_test(names_every_error_has_its_own_text),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

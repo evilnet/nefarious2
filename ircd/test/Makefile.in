@@ -447,9 +447,11 @@ account_id_cmocka: $(ACCOUNT_ID_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ACCOUNT_ID_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # rename_proto tests - the argument-only parts of channel RENAME: the
-# services query cookie codec ("<numeric>.<n>").  Pure; links no other
-# ircd object.
-RENAME_PROTO_CMOCKA_OBJS = rename_proto_cmocka.o ../rename_proto.o
+# services query cookie codec ("<numeric>.<n>") and the rules a rename's
+# two names must pass.  Pure apart from the character tables and string
+# checks in ircd_string.o (whose asserts want test_stub.o's log stubs).
+RENAME_PROTO_CMOCKA_OBJS = rename_proto_cmocka.o test_stub.o ../rename_proto.o \
+	../ircd_string.o
 rename_proto_cmocka: $(RENAME_PROTO_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(RENAME_PROTO_CMOCKA_OBJS) $(CMOCKA_LIBS)
 

@@ -2,8 +2,10 @@
  * IRC - Internet Relay Chat, include/rename_proto.h
  *
  * The parts of channel RENAME that depend on nothing but their arguments:
- * the cookie a services permission query travels under.  Kept apart from
- * m_rename.c so they can be unit-tested (ircd/test/rename_proto_cmocka.c).
+ * the cookie a services permission query travels under, and (below) the
+ * rules a pair of channel names has to pass before a rename is attempted.
+ * Kept apart from m_rename.c so they can be unit-tested
+ * (ircd/test/rename_proto_cmocka.c).
  */
 #ifndef INCLUDED_rename_proto_h
 #define INCLUDED_rename_proto_h
@@ -80,5 +82,60 @@ extern int rename_cookie_format(char *buf, size_t buflen, const char *numeric,
 extern enum RenameCookieForm rename_cookie_parse(const char *text,
                                                  char numeric[3],
                                                  unsigned int *n);
+
+/*
+ * Name rules.
+ */
+
+/** Why a pair of names cannot be renamed, RENAME_NAME_OK when it can. */
+enum RenameNameError {
+  RENAME_NAME_OK = 0,
+  RENAME_NAME_OLD_NOT_CHANNEL,  /**< old name is empty or has no channel prefix */
+  RENAME_NAME_OLD_LOCAL,        /**< old name is a local (&) channel */
+  RENAME_NAME_NEW_NOT_CHANNEL,  /**< new name is empty or has no channel prefix */
+  RENAME_NAME_NEW_LOCAL,        /**< new name is a local (&) channel */
+  RENAME_NAME_NEW_BAD_CHARS,    /**< new name has a byte JOIN refuses: a comma,
+                                     a space or control character, 0xA0 */
+  RENAME_NAME_NEW_BAD_UTF8,     /**< new name is neither ASCII nor valid UTF-8
+                                     (only when asked to check) */
+  RENAME_NAME_NEW_TOO_LONG,     /**< new name is longer than the cap given */
+  RENAME_NAME_PREFIX_MISMATCH   /**< old and new are different channel types */
+};
+
+/** Check a rename's two names.
+ *
+ * The new name gets the checks JOIN applies to a name a user asks for
+ * (m_join.c: IsChannelName, strIsIrcCh, the VALID_UTF8_CHANNELS_ONLY
+ * check, the length cap in do_join).  Local (&) channels are refused on
+ * either side: a local channel exists on one server only, but RN is
+ * applied by every server by NAME, so renaming one would rename every
+ * other server's unrelated channel of the same name, and renaming a
+ * global channel to a local name would leave each server with a private
+ * copy of what used to be one channel.
+ *
+ * The old name's characters are deliberately NOT checked: the channel
+ * exists, and renaming a badly named channel is how it gets a good name.
+ *
+ * The checks run in the order of the enum, so the first failing one is
+ * reported.  With today's two prefixes (# and &) a prefix mismatch always
+ * has a local channel on one side and is reported as that;
+ * RENAME_NAME_PREFIX_MISMATCH is there for the day a third prefix exists.
+ *
+ * @param[in] oldname The channel's current name (may be NULL).
+ * @param[in] newname The requested name (may be NULL).
+ * @param[in] maxlen Longest new name accepted, in bytes.
+ * @param[in] utf8_only Non-zero to refuse a new name that is neither
+ *            plain ASCII nor valid UTF-8.
+ * @return RENAME_NAME_OK or the first rule broken.
+ */
+extern enum RenameNameError rename_check_names(const char *oldname,
+                                               const char *newname,
+                                               size_t maxlen, int utf8_only);
+
+/** Text for a client (the description of a FAIL RENAME CANNOT_RENAME).
+ * @param[in] err A value rename_check_names() returned.
+ * @return A static string; never NULL.
+ */
+extern const char *rename_name_error_text(enum RenameNameError err);
 
 #endif /* INCLUDED_rename_proto_h */

@@ -2,10 +2,15 @@
  * IRC - Internet Relay Chat, ircd/rename_proto.c
  *
  * rename_proto.c - the parts of channel RENAME that depend on nothing but
- * their arguments.  See include/rename_proto.h for the wire forms.
+ * their arguments.  See include/rename_proto.h for the wire forms and the
+ * name rules.  The cookie half uses nothing of the ircd; the name half
+ * uses only the character tables and string checks in ircd_string.c.
  */
 #include "config.h"
 #include "rename_proto.h"
+
+#include "channel.h"            /* IsChannelName, IsLocalChannel */
+#include "ircd_string.h"        /* strIsIrcCh, the UTF-8 check */
 
 #include <limits.h>
 #include <string.h>
@@ -127,4 +132,60 @@ enum RenameCookieForm rename_cookie_parse(const char *text, char numeric[3],
   numeric[numlen] = '\0';
   *n = value;
   return RENAME_COOKIE_ROUTED;
+}
+
+enum RenameNameError rename_check_names(const char *oldname,
+                                        const char *newname,
+                                        size_t maxlen, int utf8_only)
+{
+  if (!oldname || !IsChannelName(oldname))
+    return RENAME_NAME_OLD_NOT_CHANNEL;
+  if (IsLocalChannel(oldname))
+    return RENAME_NAME_OLD_LOCAL;
+
+  if (!newname || !IsChannelName(newname))
+    return RENAME_NAME_NEW_NOT_CHANNEL;
+  if (IsLocalChannel(newname))
+    return RENAME_NAME_NEW_LOCAL;
+
+  /* m_join.c, for each name a user asks to join: NTL_IRCCH is every byte
+   * from 0x21 up except the comma and 0xA0. */
+  if (!strIsIrcCh(newname))
+    return RENAME_NAME_NEW_BAD_CHARS;
+  if (utf8_only && !string_character_structure_is_sane(newname))
+    return RENAME_NAME_NEW_BAD_UTF8;
+  if (strlen(newname) > maxlen)
+    return RENAME_NAME_NEW_TOO_LONG;
+
+  if (oldname[0] != newname[0])
+    return RENAME_NAME_PREFIX_MISMATCH;
+
+  return RENAME_NAME_OK;
+}
+
+const char *rename_name_error_text(enum RenameNameError err)
+{
+  switch (err) {
+  case RENAME_NAME_OK:
+    return "Channel names are acceptable";
+  case RENAME_NAME_OLD_NOT_CHANNEL:
+    return "Not a channel";
+  case RENAME_NAME_OLD_LOCAL:
+    return "Local channels cannot be renamed";
+  case RENAME_NAME_NEW_NOT_CHANNEL:
+    return "Invalid channel name";
+  case RENAME_NAME_NEW_LOCAL:
+    return "A channel cannot be renamed to a local channel name";
+  case RENAME_NAME_NEW_BAD_CHARS:
+    return "New channel name contains a character that is not allowed "
+           "in channel names";
+  case RENAME_NAME_NEW_BAD_UTF8:
+    return "New channel name is not valid UTF-8";
+  case RENAME_NAME_NEW_TOO_LONG:
+    return "New channel name is too long";
+  case RENAME_NAME_PREFIX_MISMATCH:
+    return "Old and new channel names must be the same type of channel";
+  }
+
+  return "Invalid channel name";
 }

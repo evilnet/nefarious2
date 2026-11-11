@@ -202,6 +202,22 @@ static int rename_oplevel_ok(struct Channel *chptr, struct Membership *member)
          || (member && (OpLevel(member) == 0 || IsChannelManager(member)));
 }
 
+/** Longest new name a user of THIS server may rename a channel to: the
+ * cap do_join() puts on a name a user asks to create (m_join.c),
+ * IRCD_MIN(CHANNELLEN, FEAT_CHANNELLEN).  A FEAT_CHANNELLEN outside
+ * 0..CHANNELLEN leaves the compile-time limit, which rename_channel()
+ * enforces whatever the feature says.
+ */
+static size_t rename_newname_maxlen(void)
+{
+  int cap = feature_int(FEAT_CHANNELLEN);
+
+  if (cap < 0 || cap > CHANNELLEN)
+    cap = CHANNELLEN;
+
+  return (size_t)cap;
+}
+
 /** RENAME is only sound when every server can apply RN.  Legacy servers
  * neither relay nor apply unknown tokens (design doc section 2), so refuse
  * while any non-v3-aware, non-rename-capable server is linked.  A server
@@ -469,6 +485,23 @@ void pending_rename_complete(struct PendingRename *pr)
                 "pending_rename_complete: channel %s changed identity while "
                 "awaiting services", pr->oldname);
       pending_rename_deny(pr, "Channel changed while awaiting services");
+      return;
+    }
+  }
+
+  /* Re-run m_rename's name rules.  The names themselves cannot change
+   * while the request waits, but what this server accepts can: a REHASH
+   * or SET may have lowered CHANNELLEN or turned VALID_UTF8_CHANNELS_ONLY
+   * on, and the approval must not carry a name past a limit that would
+   * stop a JOIN of it now (services arbitrate ownership, not this
+   * server's naming policy). */
+  {
+    enum RenameNameError bad =
+      rename_check_names(pr->oldname, pr->newname, rename_newname_maxlen(),
+                         feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY));
+
+    if (bad != RENAME_NAME_OK) {
+      pending_rename_deny(pr, rename_name_error_text(bad));
       return;
     }
   }
@@ -2254,11 +2287,24 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Validate new channel name */
-  if (!IsChannelName(newname)) {
-    send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
-              "Invalid channel name");
-    return 0;
+  /* Validate the names, classic and relocation mode alike and before any
+   * services query: no local (&) channel on either side, and for the new
+   * name everything JOIN demands of a name a user asks for -- a channel
+   * prefix, the channel character set (no comma, no space or control
+   * character, no 0xA0), valid UTF-8 under VALID_UTF8_CHANNELS_ONLY, the
+   * CHANNELLEN cap.  rename_check_names() (rename_proto.c) has the rules
+   * and why local channels are out.  Each case has its own text; the
+   * BADCHAN check below is the remaining JOIN-time rule. */
+  {
+    enum RenameNameError bad =
+      rename_check_names(chptr->chname, newname, rename_newname_maxlen(),
+                         feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY));
+
+    if (bad != RENAME_NAME_OK) {
+      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+                rename_name_error_text(bad));
+      return 0;
+    }
   }
 
   /* Check if new channel name already exists */
@@ -2511,6 +2557,47 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               "marker it omitted the separating space, and this server has "
               "just applied a CLASSIC rename to a channel it partitioned.",
               cptr, parv[1], parv[2], parv[3]);
+  }
+
+  /* Names from a peer.  A peer is trusted to have run the checks m_rename
+   * runs for its own users, and most of them are that server's policy and
+   * not this one's to repeat: its CHANNELLEN feature, its
+   * VALID_UTF8_CHANNELS_ONLY, its BADCHAN list (see m_rename) -- a remote
+   * rename is accepted on those counts the way a remote JOIN is.  What is
+   * refused here is what no policy can make right, because the damage is
+   * to the network and not to one channel:
+   *
+   * - A local (&) channel on either side.  RN is applied by name on every
+   *   server; "&ops" here is not the channel the sender renamed, and a
+   *   global channel renamed to "&x" would become one private channel per
+   *   server.  The same rule, and the same answer, as for a remote JOIN
+   *   of a local channel (ms_join).
+   * - A name that is not a channel name at all (old or new).
+   * - A new name with a byte outside the channel character set: a comma,
+   *   a space or control character, 0xA0.  The comma is the one that
+   *   breaks the protocol -- JOIN, PART and CREATE carry channel LISTS, so
+   *   every later "J #a,b" would be read as two channels by every server
+   *   -- and the rest are bytes no fork server lets a user JOIN, so such a
+   *   channel could not be joined or parted by name again.  The OLD
+   *   name's bytes are not checked: renaming a badly named channel away
+   *   is the repair.
+   * - A new name over the compile-time CHANNELLEN, which no server can
+   *   store (rename_channel() refused it before, with a debug line).
+   *
+   * Refused means not applied and NOT relayed, unlike a rename this server
+   * merely cannot apply (below): every server judges these from the
+   * message alone and refuses alike, so there is no subtree to keep in
+   * step, and passing the line on would only spread it.  A server from
+   * before these checks does apply such an RN; that divergence exists the
+   * moment its user's RENAME was accepted, whatever is done here. */
+  {
+    enum RenameNameError bad =
+      rename_check_names(oldname, newname, CHANNELLEN, 0);
+
+    if (bad != RENAME_NAME_OK)
+      return protocol_violation(cptr, "RENAME %s -> %s from %s refused: %s",
+                                oldname, newname, cli_name(sptr),
+                                rename_name_error_text(bad));
   }
 
   /* Find the channel */

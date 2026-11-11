@@ -672,6 +672,34 @@ static void client_rename(struct Client *who, const char *oldname,
   m_rename(who, who, 4, parv);
 }
 
+/** "<sptr> RN <old> <new> :<reason>" arriving on link @a cptr. */
+static void server_rename(struct Client *cptr, struct Client *sptr,
+                          const char *oldname, const char *newname,
+                          const char *reason)
+{
+  char a[256], b[256], c[256];
+  char *parv[5];
+
+  snprintf(a, sizeof(a), "%s", oldname);
+  snprintf(b, sizeof(b), "%s", newname);
+  snprintf(c, sizeof(c), "%s", reason);
+  parv[0] = cli_name(sptr);
+  parv[1] = a;
+  parv[2] = b;
+  parv[3] = c;
+  parv[4] = NULL;
+  ms_rename(cptr, sptr, 4, parv);
+}
+
+/** An unregistered channel with @a op as its only member, opped. */
+static struct Channel *plain_channel(const char *name, struct Client *op)
+{
+  struct Channel *ch = fake_channel(name);
+
+  add_member(ch, op, CHFL_CHANOP);
+  return ch;
+}
+
 /** A registered channel with @a op as its only member, opped. */
 static struct Channel *registered_channel(const char *name, struct Client *op)
 {
@@ -1145,6 +1173,238 @@ static void origin_times_out_without_an_answer(void **state)
   assert_non_null(channel_named("#reg"));
 }
 
+/* ====================================================================
+ * Fix 2: local channels and the new name's validity
+ * ==================================================================== */
+
+/** Expect a local user's RENAME to be refused with exactly @a text, and
+ * nothing to have left this server. */
+static void expect_refused(struct Client *who, struct Client *peer,
+                           const char *oldname, const char *newname,
+                           const char *text)
+{
+  char expect[LINE];
+
+  forget();
+  client_rename(who, oldname, newname, "x");
+  snprintf(expect, sizeof(expect), "FAIL RENAME CANNOT_RENAME %s :%s",
+           oldname, text);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_to(who, 0), expect);
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_non_null(channel_named(oldname));
+}
+
+static void client_cannot_rename_a_local_channel(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("&ops", alice);
+  expect_refused(alice, peer, "&ops", "#leak", "Local channels cannot be renamed");
+  expect_refused(alice, peer, "&ops", "&staff", "Local channels cannot be renamed");
+  assert_null(channel_named("#leak"));
+  assert_null(channel_named("&staff"));
+}
+
+static void client_cannot_rename_to_a_local_name(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("#chan", alice);
+  expect_refused(alice, peer, "#chan", "&chan",
+                 "A channel cannot be renamed to a local channel name");
+  assert_null(channel_named("&chan"));
+}
+
+static void client_new_name_must_be_one_join_would_take(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  const char *badchars = "New channel name contains a character that is "
+                         "not allowed in channel names";
+  char longname[CHANNELLEN + 3];
+  (void)state;
+
+  plain_channel("#a", alice);
+
+  expect_refused(alice, peer, "#a", "#a,b", badchars);
+  expect_refused(alice, peer, "#a", "#a\007", badchars);
+  expect_refused(alice, peer, "#a", "#a\001b", badchars);
+  expect_refused(alice, peer, "#a", "#a\xa0" "b", badchars);
+  expect_refused(alice, peer, "#a", "nochan", "Invalid channel name");
+
+  /* the compile-time cap */
+  memset(longname, 'x', sizeof(longname));
+  longname[0] = '#';
+  longname[CHANNELLEN + 1] = '\0';
+  expect_refused(alice, peer, "#a", longname, "New channel name is too long");
+
+  /* the configured cap, as do_join() applies it to a new name */
+  feat_channellen = 8;
+  expect_refused(alice, peer, "#a", "#12345678", "New channel name is too long");
+  forget();
+  client_rename(alice, "#a", "#1234567", "x");
+  assert_non_null(channel_named("#1234567"));
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #a #1234567 :x");
+}
+
+static void client_utf8_only_feature_is_honoured(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("#a", alice);
+
+  feat_utf8_only = 1;
+  expect_refused(alice, peer, "#a", "#\xe9t\xe9", "New channel name is not valid UTF-8");
+
+  feat_utf8_only = 0;
+  forget();
+  client_rename(alice, "#a", "#\xe9t\xe9", "x");
+  assert_non_null(channel_named("#\xe9t\xe9"));
+}
+
+/* For a registered channel the names are judged before services are
+ * asked. */
+static void client_bad_name_never_reaches_services(void **state)
+{
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  registered_channel("#reg", alice);
+  expect_refused(alice, x3, "#reg", "#reg,b",
+                 "New channel name contains a character that is not allowed "
+                 "in channel names");
+  expect_refused(alice, x3, "#reg", "&reg",
+                 "A channel cannot be renamed to a local channel name");
+  assert_int_equal(ntimers, 0);         /* no request was left pending */
+}
+
+/* The limit can change while services think about it. */
+static void approval_does_not_carry_a_name_past_a_lowered_cap(void **state)
+{
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char reply[64];
+  (void)state;
+
+  registered_channel("#reg", alice);
+  client_rename(alice, "#reg", "#a-rather-long-name", "");
+  snprintf(reply, sizeof(reply), "%s", cookie_of(sent[0].text));
+  forget();
+
+  feat_channellen = 10;                 /* REHASH */
+  assert_int_equal(account_line(x3, x3, 3, reply, "A", "RENAME"), 1);
+
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_to(alice, 0),
+                      "FAIL RENAME CANNOT_RENAME #reg :New channel name is too long");
+  assert_non_null(channel_named("#reg"));
+  assert_null(channel_named("#a-rather-long-name"));
+  assert_int_equal(sent_count_to(x3), 0);
+}
+
+/* From a peer: a local channel on either side is a protocol violation,
+ * not applied and not relayed. */
+static void server_rename_naming_a_local_channel_is_a_violation(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  /* our own, unrelated &ops */
+  plain_channel("&ops", alice);
+  plain_channel("#chan", alice);
+
+  server_rename(peer, bob, "&ops", "#leak", "x");
+  assert_int_equal(nviolations, 1);
+  assert_non_null(strstr(violations[0], "&ops"));
+  assert_non_null(channel_named("&ops"));
+  assert_null(channel_named("#leak"));
+
+  server_rename(peer, bob, "#chan", "&chan", "x");
+  assert_int_equal(nviolations, 2);
+  assert_non_null(channel_named("#chan"));
+  assert_null(channel_named("&chan"));
+
+  /* nobody was told anything: no member, no other server, no services */
+  assert_int_equal(nsent, 0);
+  assert_int_equal(sent_count_to(down) + sent_count_to(x3), 0);
+  assert_int_equal(nopnotices, 0);
+}
+
+/* From a peer: a new name that would corrupt later messages. */
+static void server_rename_to_an_unusable_name_is_a_violation(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char longname[CHANNELLEN + 3];
+  (void)state;
+
+  plain_channel("#chan", alice);
+
+  server_rename(peer, bob, "#chan", "#chan,b", "x");
+  server_rename(peer, bob, "#chan", "#chan\007", "x");
+  server_rename(peer, bob, "#chan", "#chan\xa0", "x");
+  server_rename(peer, bob, "#chan", "chan", "x");
+  server_rename(peer, bob, "chan", "#chan2", "x");
+  memset(longname, 'x', sizeof(longname));
+  longname[0] = '#';
+  longname[CHANNELLEN + 1] = '\0';
+  server_rename(peer, bob, "#chan", longname, "x");
+
+  assert_int_equal(nviolations, 6);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(sent_count_to(down), 0);
+  assert_non_null(channel_named("#chan"));
+}
+
+/* From a peer: this server's own naming policy is not the peer's. */
+static void server_rename_is_not_held_to_local_policy(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("#chan", alice);
+  feat_channellen = 8;
+  feat_utf8_only = 1;
+
+  server_rename(peer, bob, "#chan", "#longer-than-eight-\xe9", "x");
+  assert_int_equal(nviolations, 0);
+  assert_null(channel_named("#chan"));
+  assert_non_null(channel_named("#longer-than-eight-\xe9"));
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #chan #longer-than-eight-\xe9 :x");
+  assert_int_equal(sent_count_to(peer), 0);
+}
+
+/* From a peer: a badly named OLD channel can be renamed away. */
+static void server_rename_away_from_a_bad_name_is_applied(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  (void)state;
+
+  plain_channel("#a,b", alice);
+  server_rename(peer, bob, "#a,b", "#ab", "repair");
+  assert_int_equal(nviolations, 0);
+  assert_non_null(channel_named("#ab"));
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -1173,6 +1433,17 @@ int main(void)
     T(a_second_reply_for_the_same_cookie_does_nothing),
     T(old_form_reply_is_looked_up_locally),
     T(origin_times_out_without_an_answer),
+
+    T(client_cannot_rename_a_local_channel),
+    T(client_cannot_rename_to_a_local_name),
+    T(client_new_name_must_be_one_join_would_take),
+    T(client_utf8_only_feature_is_honoured),
+    T(client_bad_name_never_reaches_services),
+    T(approval_does_not_carry_a_name_past_a_lowered_cap),
+    T(server_rename_naming_a_local_channel_is_a_violation),
+    T(server_rename_to_an_unusable_name_is_a_violation),
+    T(server_rename_is_not_held_to_local_policy),
+    T(server_rename_away_from_a_bad_name_is_applied),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
