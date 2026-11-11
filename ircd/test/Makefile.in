@@ -53,6 +53,7 @@ CMOCKA_TESTPROGS = \
 	ipcheck_refund_cmocka \
 	ipcheck_cmocka \
 	fakelag_cmocka \
+	iauth_respawn_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
 	webpush_keyring_cmocka \
@@ -123,6 +124,7 @@ DEP_SRC = \
 	ipcheck_refund_cmocka.c \
 	ipcheck_cmocka.c \
 	fakelag_cmocka.c \
+	iauth_respawn_cmocka.c \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
 	webpush_keyring_cmocka.c \
@@ -381,6 +383,11 @@ ipcheck_refund_cmocka: $(IPCHECK_REFUND_CMOCKA_OBJS)
 FAKELAG_CMOCKA_OBJS = fakelag_cmocka.o
 fakelag_cmocka: $(FAKELAG_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(FAKELAG_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# IAuth respawn backoff: header-only (include/iauth_respawn.h)
+IAUTH_RESPAWN_CMOCKA_OBJS = iauth_respawn_cmocka.o
+iauth_respawn_cmocka: $(IAUTH_RESPAWN_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IAUTH_RESPAWN_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # kc_url tests - vendored libkc URL builders.  kc_url.c calls
 # curl_easy_escape in kc_url_group_by_path, hence -lcurl.  The test

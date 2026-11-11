@@ -42,6 +42,7 @@
 #include "authtoken.h"
 #include "client.h"
 #include "hash.h"
+#include "iauth_respawn.h"
 #include "IPcheck.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -226,6 +227,8 @@ struct IAuth {
   int i_argc;                           /**< number of arguments in argument list */
   unsigned int i_timeout_count;         /**< consecutive auth timeout counter for circuit breaker */
   int i_circuit_open;                   /**< 1 if circuit breaker is tripped (bypassing IAUTH_REQUIRED) */
+  struct IAuthRespawn i_backoff;        /**< failure streak of the program */
+  struct Timer i_respawn;               /**< next start, or end of a streak */
 };
 
 /** Return whether flag \a flag is set on \a iauth. */
@@ -2034,13 +2037,12 @@ int auth_send_sasl_abort(struct Client *cptr)
   return sendto_iauth(cptr, "A X");
 }
 
-/** Attempt to spawn the process for an IAuth instance.
+/** Attempt to spawn the process for an IAuth instance.  When to try
+ * (again) is the callers' business: iauth_start().
  * @param[in] iauth IAuth descriptor.
- * @param[in] automatic If non-zero, apply sanity checks against
- *   excessive automatic restarts.
  * @return 0 on success, non-zero on failure.
  */
-int iauth_do_spawn(struct IAuth *iauth, int automatic)
+static int iauth_do_spawn(struct IAuth *iauth)
 {
   pid_t cpid;
   int s_io[2] = { -1, -1 };
@@ -2048,14 +2050,15 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
   int res;
   const char *step;
 
-  if (automatic && CurrentTime - iauth->started < 5)
-  {
-    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth crashed fast, leaving it dead.");
-    return -1;
-  }
-
   /* Record time we tried to spawn the iauth process. */
   iauth->started = CurrentTime;
+
+  /* A new child is a new conversation: nothing queued for, or half read
+   * from, a program that went away carries over to it. */
+  MsgQClear(i_sendQ(iauth));
+  IAuthClr(iauth, IAUTH_BLOCKED);
+  iauth->i_count = 0;
+  iauth->i_errcount = 0;
 
   /* Attempt to allocate a pair of sockets. */
   if (os_socketpair(s_io)) {
@@ -2137,17 +2140,17 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
     execvp(iauth->i_argv[0], iauth->i_argv);
   }
 
-  /* If we got here, something was seriously wrong. */
-  exit(EXIT_FAILURE);
+  /* If we got here, something was seriously wrong (the program is
+   * missing or not executable).  _exit(): this is a copy of the server,
+   * whose exit handlers and buffers are not the child's to run. */
+  _exit(EXIT_FAILURE);
 
 failed:
-  /* Say so: IAuth stays down (clients register without it) until a rehash
-   * spawns it again.  An engine other than epoll may refuse a registration
-   * without setting errno. */
+  /* Say so; the caller schedules the next attempt.  An engine other than
+   * epoll may refuse a registration without setting errno. */
   log_write(LS_IAUTH, L_ERROR, 0, "IAuth spawn failed: unable to %s: %s",
             step, res ? strerror(res) : "no error code");
-  sendto_opmask_butone(NULL, SNO_AUTH, "IAuth spawn failed: unable to %s: %s; "
-                       "IAuth is down until a rehash",
+  sendto_opmask_butone(NULL, SNO_AUTH, "IAuth spawn failed: unable to %s: %s",
                        step, res ? strerror(res) : "no error code");
 
   /* A spawn that fails part-way leaves nothing behind.  Each socket
@@ -2157,8 +2160,8 @@ failed:
    * a number: i_GetConnected() is false, a rehash spawns afresh, and
    * iauth_disconnect() finds nothing to close.  A refused socket is not
    * active and is not deleted.  The deletes run the sockets' ET_DESTROY
-   * callbacks, whose automatic respawn must not run for this failure (the
-   * 5-second guard would only refuse it, as "IAuth crashed fast"):
+   * callbacks, which must not take this failure for a program that went
+   * away (iauth_went_away()): the caller schedules the next attempt.
    * IAUTH_SPAWN_UNDO keeps them from it. */
   IAuthSet(iauth, IAUTH_SPAWN_UNDO);
   if (s_active(i_stderr(iauth)))
@@ -2177,6 +2180,110 @@ failed:
   s_fd(i_stderr(iauth)) = -1;
   s_fd(i_socket(iauth)) = -1;
   return res ? res : -1;          /* a failure, even without an errno */
+}
+
+static void iauth_respawn_callback(struct Event *ev);
+
+/** Arm the respawn timer of \a iauth for \a delay (non-zero) seconds,
+ * replacing whatever it was waiting for.  Safe inside the timer's own
+ * callback, where timer_chg() re-adds it after the callback returns.
+ * @param[in] iauth IAuth descriptor.
+ * @param[in] delay Seconds from now.
+ */
+static void iauth_timer_arm(struct IAuth *iauth, unsigned int delay)
+{
+  if (t_active(&iauth->i_respawn))
+    timer_chg(&iauth->i_respawn, TT_RELATIVE, delay);
+  else
+    timer_add(timer_init(&iauth->i_respawn), iauth_respawn_callback, iauth,
+              TT_RELATIVE, delay);
+}
+
+/** Start the program of \a iauth.  When no child could be started the
+ * next attempt is scheduled; while a failure streak runs, a new child is
+ * watched until it has run long enough to end the streak.
+ * @param[in] iauth IAuth descriptor.
+ * @return 0 when a child was started, non-zero otherwise.
+ */
+static int iauth_start(struct IAuth *iauth)
+{
+  unsigned int delay;
+  int res;
+
+  res = iauth_do_spawn(iauth);
+  if (res) {
+    delay = iauth_respawn_exited(&iauth->i_backoff, 0);
+    log_write(LS_IAUTH, L_WARNING, 0, "IAuth program %s not started; "
+              "trying again in %u seconds", iauth->i_argv[0], delay);
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s not started; "
+                         "trying again in %u seconds", iauth->i_argv[0],
+                         delay);
+    iauth_timer_arm(iauth, delay);
+  } else if (iauth->i_backoff.failures && i_GetConnected(iauth))
+    iauth_timer_arm(iauth, IAUTH_RESPAWN_STABLE);
+  /* (Not connected after a start: the first write failed and
+   * iauth_went_away() has scheduled the next attempt.) */
+  return res;
+}
+
+/** The program of \a iauth went away on its own: both its sockets are
+ * gone and nothing is closing it.  Start it again -- at once after a good
+ * run, otherwise after the backoff delay (iauth_respawn.h).  Until then
+ * clients register without IAuth.
+ * @param[in] iauth IAuth descriptor.
+ */
+static void iauth_went_away(struct IAuth *iauth)
+{
+  long up = (long)(CurrentTime - iauth->started);
+  unsigned int delay;
+
+  delay = iauth_respawn_exited(&iauth->i_backoff, CurrentTime - iauth->started);
+  if (!delay) {
+    log_write(LS_IAUTH, L_WARNING, 0, "IAuth program %s exited after %ld "
+              "seconds; restarting it", iauth->i_argv[0], up);
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s exited after %ld "
+                         "seconds; restarting it", iauth->i_argv[0], up);
+    iauth_start(iauth);
+    return;
+  }
+  log_write(LS_IAUTH, L_WARNING, 0, "IAuth program %s exited after %ld "
+            "seconds (%u in a row); restarting it in %u seconds",
+            iauth->i_argv[0], up, iauth->i_backoff.failures, delay);
+  sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s exited after %ld "
+                       "seconds (%u in a row); restarting it in %u seconds",
+                       iauth->i_argv[0], up, iauth->i_backoff.failures,
+                       delay);
+  iauth_timer_arm(iauth, delay);
+}
+
+/** Respawn timer of an %IAuth instance: start a program that is due to be
+ * started again, or end the failure streak of one that has now run long
+ * enough.
+ * @param[in] ev Timer event; the IAuth instance is its data.
+ */
+static void iauth_respawn_callback(struct Event *ev)
+{
+  struct IAuth *iauth = (struct IAuth *) t_data(ev_timer(ev));
+  unsigned int failures;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  if (!i_GetConnected(iauth)) {
+    iauth_start(iauth);
+    return;
+  }
+  failures = iauth_respawn_stable(&iauth->i_backoff);
+  if (failures) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth program %s recovered: running "
+              "for %ld seconds after %u failure%s", iauth->i_argv[0],
+              (long)(CurrentTime - iauth->started), failures,
+              failures == 1 ? "" : "s");
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s recovered: "
+                         "running for %ld seconds after %u failure%s",
+                         iauth->i_argv[0],
+                         (long)(CurrentTime - iauth->started), failures,
+                         failures == 1 ? "" : "s");
+  }
 }
 
 /** See if an %IAuth program must be spawned.
@@ -2228,8 +2335,8 @@ int auth_spawn(int argc, char *argv[])
     DupString(iauth->i_argv[ii], argv[ii]);
   iauth->i_argv[ii] = NULL;
   iauth->i_argc = argc;
-  /* Try to spawn it, and handle the results. */
-  if (iauth_do_spawn(iauth, 0))
+  /* Try to spawn it; when that fails, iauth_start() schedules a retry. */
+  if (iauth_start(iauth))
     return 0;
   IAuthClr(iauth, IAUTH_CLOSING);
   return 1;
@@ -2399,8 +2506,9 @@ static void iauth_disconnect(struct IAuth *iauth)
 
   /* Close both sockets.  A socket_del() can respawn IAuth: when the other
    * socket is no longer active and we are not closing, the ET_DESTROY
-   * callback calls iauth_do_spawn(), which registers this same Socket
-   * again, with the new child's descriptor, before socket_del() returns
+   * callback calls iauth_went_away(), which after a good run spawns the
+   * program at once: that registers this same Socket again, with the new
+   * child's descriptor, before socket_del() returns
    * (outside the socket's own callbacks the destroy is not deferred).  So
    * clear s_fd only if the socket still reads as deleted (GEN_DESTROY).
    * Comparing numbers cannot tell: socketpair() reuses the number just
@@ -2446,6 +2554,12 @@ void auth_close_unused(void)
     struct SLink *node, *next;
 
     iauth_disconnect(iauth);
+
+    /* No retry or streak watch outlives the instance; nor does output
+     * queued for its program. */
+    if (t_active(&iauth->i_respawn))
+      timer_del(&iauth->i_respawn);
+    MsgQClear(i_sendQ(iauth));
 
     /* Free version string */
     MyFree(iauth->i_version);
@@ -3676,7 +3790,7 @@ static void iauth_sock_callback(struct Event *ev)
   case ET_DESTROY:
     if (!IAuthHas(iauth, IAUTH_CLOSING) && !IAuthHas(iauth, IAUTH_SPAWN_UNDO)
         && !s_active(i_stderr(iauth)))
-      iauth_do_spawn(iauth, 1);
+      iauth_went_away(iauth);
     break;
   case ET_READ:
     iauth_read(iauth);
@@ -3757,7 +3871,7 @@ static void iauth_stderr_callback(struct Event *ev)
   case ET_DESTROY:
     if (!IAuthHas(iauth, IAUTH_CLOSING) && !IAuthHas(iauth, IAUTH_SPAWN_UNDO)
         && !s_active(i_socket(iauth)))
-      iauth_do_spawn(iauth, 1);
+      iauth_went_away(iauth);
     break;
   case ET_READ:
     iauth_read_stderr(iauth);
