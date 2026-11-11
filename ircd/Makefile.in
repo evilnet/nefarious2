@@ -220,6 +220,7 @@ IRCD_SRC = \
 	m_persistence.c \
 	persistence_profile.c \
 	m_rename.c \
+	rename_proto.c \
 	m_token.c \
 	m_webpush.c \
 	webpush_mute.c \

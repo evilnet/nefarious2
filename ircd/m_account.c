@@ -155,6 +155,24 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
     return protocol_violation(cptr, "ACCOUNT from non-server %s",
 			      cli_name(sptr));
 
+  /* Channel-rename arbitration borrows this command for two lines that
+   * are not account messages at all:
+   *
+   *   AC <user> R <cookie> <#chan> RENAME <new>   a server asks services
+   *   AC <cookie> A|D RENAME [:<reason>]          services answer
+   *
+   * They are taken out here, before anything below can read the first as
+   * an account stamp for <user> (the cookie as the account name, or the
+   * letter R without EXTENDED_ACCOUNTS) or look the second's cookie up as
+   * a numeric: this server relays the query toward services and the reply
+   * toward the server named in the cookie, or completes its own request
+   * (m_rename.c, "Services arbitration across servers").  This handler is
+   * the SERVER slot of the ACCOUNT message only (parse.c: every other
+   * slot is m_ignore) and the source was just checked to be a server, so
+   * no user can inject either line. */
+  if (rename_services_ac(cptr, sptr, parc, parv))
+    return 0;
+
   if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
     if (strlen(parv[2]) != 1)
       return protocol_violation(cptr, "ACCOUNT detected invalid subcommand token "
@@ -363,30 +381,13 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                       parv[1], parv[2], parv[3], parv[4], parv[5]);
       return 0;
     } else if (type == 'A' || type == 'D') {
-      /* LOC Replies (A=accept, D=deny) or Rename Permission Replies */
+      /* LOC Replies (A=accept, D=deny).  A rename permission reply has
+       * the same two letters, and carries the explicit RENAME
+       * discriminator (parv[3]) so that its cookie is never looked up as
+       * a server numeric here (F2); rename_services_ac() above has
+       * already taken it. */
       if (parc < 3)
         return need_more_params(sptr, "ACCOUNT");
-
-      /* Rename reply carries the explicit RENAME discriminator (parv[3]);
-       * route by cookie without FindNServer so a decimal cookie can't
-       * alias a server numeric (F2). */
-      if (parc > 3 && !ircd_strcmp(parv[3], "RENAME")) {
-        unsigned int cookie = atoi(parv[1]);
-        struct PendingRename *pr = pending_rename_find(cookie);
-
-        if (pr) {
-          if (type == 'A') {
-            Debug((DEBUG_DEBUG, "ACCOUNT rename allow cookie=%u", cookie));
-            pending_rename_complete(pr);
-          } else {
-            /* Deny response: parv[4] contains the reason (trailing param) */
-            const char *reason = (parc > 4) ? parv[4] : "Permission denied";
-            Debug((DEBUG_DEBUG, "ACCOUNT rename deny cookie=%u reason=%s", cookie, reason));
-            pending_rename_deny(pr, reason);
-          }
-        }
-        return 0;
-      }
 
       /* First check if this is a server numeric (LOC reply) */
       acptr = FindNServer(parv[1]);

@@ -1,0 +1,130 @@
+/*
+ * IRC - Internet Relay Chat, ircd/rename_proto.c
+ *
+ * rename_proto.c - the parts of channel RENAME that depend on nothing but
+ * their arguments.  See include/rename_proto.h for the wire forms.
+ */
+#include "config.h"
+#include "rename_proto.h"
+
+#include <limits.h>
+#include <string.h>
+
+/** Is @a c a character of a P10 numeric (numnicks.c convert2y[])?
+ * Spelled out rather than isalnum(): that follows the locale, and a
+ * Latin-1 one takes bytes above 0x7f as letters. */
+static int is_numeric_char(int c)
+{
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+      || (c >= '0' && c <= '9') || c == '[' || c == ']';
+}
+
+/** Length of the server numeric at the start of @a s -- one or two numeric
+ * characters -- when it is followed by @a end; 0 otherwise. */
+static size_t server_numeric_len(const char *s, char end)
+{
+  size_t len = 0;
+
+  while (len < 2 && is_numeric_char((unsigned char)s[len]))
+    len++;
+
+  return (len > 0 && s[len] == end) ? len : 0;
+}
+
+/** Read the decimal number that is ALL of @a s, as "%u" prints one.
+ * @return 1 and the value in @a out, or 0 when @a s is anything else
+ *         (empty, a sign, a leading zero, a non-digit, too large). */
+static int parse_request_number(const char *s, unsigned int *out)
+{
+  unsigned int value = 0;
+  const char *p;
+
+  if (!*s)
+    return 0;
+  if (s[0] == '0' && s[1])
+    return 0;                   /* "%u" never writes a leading zero */
+
+  for (p = s; *p; p++) {
+    unsigned int digit;
+
+    if (*p < '0' || *p > '9')
+      return 0;
+    digit = (unsigned int)(*p - '0');
+    /* Refuse before the multiply can wrap, so no length check is needed
+     * and a 600-digit number fails at its eleventh digit. */
+    if (value > (UINT_MAX - digit) / 10)
+      return 0;
+    value = value * 10 + digit;
+  }
+
+  *out = value;
+  return 1;
+}
+
+int rename_cookie_format(char *buf, size_t buflen, const char *numeric,
+                         unsigned int n)
+{
+  char digits[11];              /* ten digits and the NUL */
+  size_t numlen, ndigits = 0, i;
+  char *p;
+
+  if (!buf || !buflen)
+    return 0;
+  buf[0] = '\0';
+
+  if (!numeric || !(numlen = server_numeric_len(numeric, '\0')))
+    return 0;
+
+  /* Decimal by hand (least significant digit first): this file stays free
+   * of the ircd's printf family and of stdio. */
+  do {
+    digits[ndigits++] = (char)('0' + n % 10);
+    n /= 10;
+  } while (n);
+
+  if (numlen + 1 + ndigits + 1 > buflen)
+    return 0;
+
+  p = buf;
+  memcpy(p, numeric, numlen);
+  p += numlen;
+  *p++ = '.';
+  for (i = ndigits; i > 0; i--)
+    *p++ = digits[i - 1];
+  *p = '\0';
+
+  return (int)(p - buf);
+}
+
+enum RenameCookieForm rename_cookie_parse(const char *text, char numeric[3],
+                                          unsigned int *n)
+{
+  const char *dot;
+  size_t numlen;
+  unsigned int value;
+
+  numeric[0] = '\0';
+
+  if (!text || !*text)
+    return RENAME_COOKIE_INVALID;
+
+  if (!(dot = strchr(text, '.'))) {
+    /* The form before the origin was part of the cookie. */
+    if (!parse_request_number(text, &value))
+      return RENAME_COOKIE_INVALID;
+    *n = value;
+    return RENAME_COOKIE_LEGACY;
+  }
+
+  /* <numeric> "." <n>.  A second dot is not a digit, so the number parse
+   * refuses it. */
+  if (!(numlen = server_numeric_len(text, '.')))
+    return RENAME_COOKIE_INVALID;
+  if (!parse_request_number(dot + 1, &value))
+    return RENAME_COOKIE_INVALID;
+
+  memcpy(numeric, text, numlen);
+  numeric[numlen] = '\0';
+  *n = value;
+  return RENAME_COOKIE_ROUTED;
+}

@@ -71,6 +71,8 @@ CMOCKA_TESTPROGS = \
 	websocket_cmocka \
 	db_casefold_cmocka \
 	account_id_cmocka \
+	rename_proto_cmocka \
+	rename_handlers_cmocka \
 	webhook_eventlog_cmocka \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
@@ -145,6 +147,8 @@ DEP_SRC = \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
 	account_id_cmocka.c \
+	rename_proto_cmocka.c \
+	rename_handlers_cmocka.c \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
@@ -441,6 +445,24 @@ db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
 ACCOUNT_ID_CMOCKA_OBJS = account_id_cmocka.o ../account_id.o ../webpush_keyring.o
 account_id_cmocka: $(ACCOUNT_ID_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ACCOUNT_ID_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# rename_proto tests - the argument-only parts of channel RENAME: the
+# services query cookie codec ("<numeric>.<n>").  Pure; links no other
+# ircd object.
+RENAME_PROTO_CMOCKA_OBJS = rename_proto_cmocka.o ../rename_proto.o
+rename_proto_cmocka: $(RENAME_PROTO_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(RENAME_PROTO_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# rename_handlers tests - channel RENAME's handlers against a fake
+# network: the REAL m_rename.o, rename_proto.o, numnicks.o and the ircd's
+# printf (so the lines asserted are the lines that go on the wire), with
+# the send layer, the channel table and the timers stubbed in the test.
+# Defines its own log_write()/me, so test_stub.o is not linked.
+RENAME_HANDLERS_CMOCKA_OBJS = rename_handlers_cmocka.o ../m_rename.o \
+	../rename_proto.o ../numnicks.o ../ircd_snprintf.o ../ircd_string.o \
+	../ircd_alloc.o ../match.o
+rename_handlers_cmocka: $(RENAME_HANDLERS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(RENAME_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_subject tests - the pure webhook subject decision over real
 # Keycloak admin-event shapes (fixtures/webhook); links no ircd objects
