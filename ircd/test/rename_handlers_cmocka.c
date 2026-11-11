@@ -3069,6 +3069,144 @@ static void unapplied_relocation_from_an_alias_reaches_x3_as_its_primary(void **
   assert_string_equal(sent_to(x3, 0), "BjAAC RN #old #new C 1000300 :");
 }
 
+/* --- D.2: a classic rename of a live tombstone --- */
+
+/* Refused for a local user whatever RENAME_CONSENT says here: the
+ * tombstone came off the wire, and this server's own setting has no say
+ * in whether it is one. */
+static void tombstone_cannot_be_renamed_with_consent_off(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 0;
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  forget();
+
+  client_rename(carol, "#old", "#mine", "");
+
+  assert_string_equal(sent_to(carol, 0),
+                      "FAIL RENAME CANNOT_RENAME #old :Channel is a relocation tombstone");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_ptr_equal(channel_named("#old"), oldch);
+  assert_null(channel_named("#mine"));
+}
+
+/* ... and when it became one while services were being asked. */
+static void approval_does_not_rename_a_tombstone_with_consent_off(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  char cookie[64];
+  (void)state;
+
+  feat_rename_consent = 0;
+  oldch = registered_channel("#old", carol);
+  oldch->creationtime = 500000;
+  add_member(oldch, bob, CHFL_CHANOP);
+
+  client_rename(carol, "#old", "#mine", "");            /* asks services */
+  snprintf(cookie, sizeof(cookie), "%s", cookie_of(sent_to(x3, 0)));
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->mode.mode |= MODE_REGISTERED;  /* a stray +R, still an op */
+  forget();
+
+  assert_int_equal(account_line(x3, x3, 3, cookie, "A", "RENAME"), 1);
+  assert_string_equal(sent_to(carol, 0),
+                      "FAIL RENAME CANNOT_RENAME #old :Channel is a relocation tombstone");
+  assert_ptr_equal(channel_named("#old"), oldch);
+  assert_null(channel_named("#mine"));
+}
+
+/* A classic RN for a tombstone from the network (a server with the
+ * refusal missing, or a services rename): the channel is renamed like
+ * any other, and its record goes with it -- the tombstone, under its new
+ * name, still redirects, still restores a follower, and is dissolved at
+ * its deadline instead of being left +z +L for good. */
+static void renamed_tombstone_keeps_its_record(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAE");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *renamed;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  add_member(oldch, carol, CHFL_VOICE);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  forget();
+
+  server_rename(peer, eve, "#old", "#older", "tidy");
+
+  renamed = channel_named("#older");
+  assert_non_null(renamed);
+  assert_null(channel_named("#old"));
+  assert_string_equal(renamed->mode.redir, "#new");
+  assert_true(renamed->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(sent_to(down, 0), "BjAAE RN #old #older :tidy");
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(ntimers, 1);
+  /* a follower is still restored */
+  assert_int_equal(relocate_snap_lookup(channel_named("#new"), carol, &flags,
+                                        &oplevel), 1);
+  assert_int_equal(flags, CHFL_VOICE);
+  forget();
+
+  advance(900);
+  assert_string_equal(sent_to(carol, 0),
+                      ":carol!user@host.example PART #older :Channel has moved to #new");
+  assert_true(was_destroyed(renamed));
+  assert_null(channel_named("#older"));
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(ntimers, 0);
+}
+
+/* The old name is free at once: a channel created under it afterwards is
+ * nobody's tombstone. */
+static void renamed_tombstone_frees_its_old_name(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAE");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *again;
+  char name[] = "#old";
+  (void)state;
+
+  add_member(channel_at("#old", 500000, bob), eve, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  server_rename(peer, eve, "#old", "#older", "");
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 2000;
+  again = get_channel(carol, name, CGT_CREATE);
+  add_member(again, carol, CHFL_CHANOP);
+  forget();
+  client_rename(carol, "#old", "#fresh", "");
+  assert_string_equal(sent_to(carol, 0), ":carol!user@host.example PART #old :Channel renamed to #fresh");
+  assert_non_null(member_of(channel_named("#fresh"), carol));
+
+  /* the first tombstone's deadline does not touch the new #old */
+  advance(900);
+  assert_null(channel_named("#older"));
+  assert_ptr_equal(channel_named("#old"), again);
+  assert_string_equal(again->mode.redir, "#fresh");
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -3168,6 +3306,11 @@ int main(void)
     T(five_parameter_relocation_of_a_channel_not_here_is_relayed),
     T(relocation_onto_a_name_taken_here_is_relayed),
     T(unapplied_relocation_from_an_alias_reaches_x3_as_its_primary),
+
+    T(tombstone_cannot_be_renamed_with_consent_off),
+    T(approval_does_not_rename_a_tombstone_with_consent_off),
+    T(renamed_tombstone_keeps_its_record),
+    T(renamed_tombstone_frees_its_old_name),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

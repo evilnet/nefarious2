@@ -113,6 +113,8 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                             const char *oldname, const char *newname,
                             const char *reason, time_t expires);
 static struct RelocateTombstone *relocate_tombstone_find(const char *name);
+static void relocate_tombstone_renamed(const char *oldname,
+                                       struct Channel *chptr);
 static time_t relocate_local_deadline(void);
 static void relocate_propagate(struct Client *sptr, struct Client *one,
                                struct Client *skip, const char *oldname,
@@ -528,9 +530,10 @@ void pending_rename_complete(struct PendingRename *pr)
   }
 
   /* The channel can also have BECOME a tombstone during the round-trip
-   * (some other channel relocated onto this name).  Same refusal as the
-   * request-time check in m_rename(). */
-  if (rename_is_consent() && relocate_tombstone_find(pr->oldname)) {
+   * (a relocation of it arrived from another server).  Same refusal as
+   * the request-time check in m_rename(), and like it whatever this
+   * server's own RENAME_CONSENT says. */
+  if (relocate_tombstone_find(pr->oldname)) {
     pending_rename_deny(pr, "Channel is a relocation tombstone");
     return;
   }
@@ -1659,6 +1662,50 @@ static void relocate_tombstone_end(struct RelocateTombstone *ts, int dissolve)
   }
 }
 
+/** A channel has been renamed by a classic RN from the network: if it was
+ * a tombstone, its record follows it.
+ *
+ * No server lets its own users rename a tombstone (m_rename()), but an RN
+ * that does arrives all the same -- from a server without that refusal, or
+ * from services -- and every server applies it, so this one has to as
+ * well.  The record is keyed by the tombstone's name; left under the old
+ * one it would point at nothing, expire as "channel is gone", and the
+ * renamed channel would keep +z and +L for good, with members nobody
+ * parts.  Re-keyed, everything the record stands for carries on under the
+ * new name: the channel is still redirected, a follower is still restored
+ * (snapshots are bound to the TARGET, which has not changed), and it is
+ * dissolved at the same deadline.  Every server does the same from the
+ * RN alone.  The alternative -- cancelling the tombstone at the rename --
+ * would turn a channel whose community has left into a live one again, on
+ * the word of a message that says nothing of the kind.
+ *
+ * The record is not freed, so its timer is not touched.
+ * @param[in] oldname The name the channel had.
+ * @param[in] chptr The channel under its new name (rename_channel() may
+ *                  have reallocated it).
+ */
+static void relocate_tombstone_renamed(const char *oldname,
+                                       struct Channel *chptr)
+{
+  struct RelocateTombstone *ts, *stale;
+
+  if (!(ts = relocate_tombstone_find(oldname)))
+    return;
+
+  /* A record left under the new name describes a channel that is not
+   * there any more (the name was free for this rename): drop it rather
+   * than have two records answer to one name. */
+  if ((stale = relocate_tombstone_find(chptr->chname)) && stale != ts)
+    relocate_tombstone_end(stale, 0);
+
+  ircd_strncpy(ts->oldname, chptr->chname, sizeof(ts->oldname));
+  ts->oldchan = chptr;
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "relocate: tombstone %s (-> %s) was renamed to %s; its record "
+            "follows it", oldname, ts->newname, ts->oldname);
+}
+
 /** A struct Channel is about to be freed: retire any tombstone record that
  * refers to it.
  *
@@ -2523,8 +2570,17 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * name is reserved for the grace period and its remaining members were
    * explicitly NOT moved once already.  Renaming it would either strand
    * them again or produce a redirect chain nobody asked for (spec,
-   * "Multiple renames": a tombstone channel itself cannot be renamed). */
-  if (rename_is_consent() && relocate_tombstone_find(oldname)) {
+   * "Multiple renames": a tombstone channel itself cannot be renamed).
+   *
+   * Whatever this server's own RENAME_CONSENT says: a tombstone comes off
+   * the wire (the RN's marker is obeyed regardless of the local setting),
+   * so a server with the feature off holds tombstones too, and a classic
+   * rename of one would take the channel away from under its record --
+   * which is keyed by the old name -- leaving +z and +L on the renamed
+   * channel for good.  ms_rename() repairs that when such a rename
+   * arrives from elsewhere (relocate_tombstone_renamed()); it is not to
+   * be started here. */
+  if (relocate_tombstone_find(oldname)) {
     send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
               "Channel is a relocation tombstone");
     return 0;
@@ -3009,6 +3065,10 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                              "relayed onward, so this server is now "
                              "divergent and needs manual reconciliation.",
                              oldname, newname, sptr, rc);
+      else
+        /* The channel may have been a relocation tombstone: its record
+         * follows it to the new name. */
+        relocate_tombstone_renamed(oldname_buf, chptr);
     }
 
     if (rc != 0) {
