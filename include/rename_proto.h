@@ -398,14 +398,43 @@ extern const char *relocate_winner(const char *a, const char *b);
  * receiver depends on what the receiver holds.
  */
 
+/** How many seconds younger than the announced creation timestamp the
+ * channel here may be and still be the announced channel: m_burst.c's
+ * figure.  A BURST whose timestamp is up to this much OLDER than that of
+ * a channel here that has users does not wipe it ("do not deop our
+ * side"): it is merged as if the timestamps were equal, and the channel
+ * keeps its own.  The announcement follows that BURST, so it meets a
+ * channel that carries the tombstone's +z and +L under a timestamp of its
+ * own. */
+#define RELOCATE_TS_FUZZ 4
+
+/** Is the channel here, created at @a mine, the channel an announcement
+ * with creation timestamp @a announced is about?
+ *
+ * Yes when the timestamps are equal, or when the one here is younger by
+ * no more than RELOCATE_TS_FUZZ.  Those are exactly the states the BURST
+ * before the announcement leaves a channel in that took the tombstone's
+ * modes: it was wiped and took the sender's timestamp, it was new, it had
+ * the same timestamp, or it was merged under the rule above.  A channel
+ * here that is OLDER than announced won that BURST and took nothing; one
+ * younger by more would have been wiped and be equal now, so it is one
+ * the BURST never reached.
+ * @param[in] announced The <old-creation-ts> of the RT.
+ * @param[in] mine The creation timestamp of the channel of that name here.
+ * @return Non-zero when they are the same channel.
+ */
+extern int relocate_announce_ts_matches(time_t announced, time_t mine);
+
 /** What a server holds when an announcement arrives.  Fill in every
  * field. */
 struct RelocateAnnounceFacts {
   int channel_exists;   /**< a channel of the old name exists here */
-  int ts_matches;       /**< ... and its creation timestamp is the one
-                             announced */
-  int have_record;      /**< a tombstone record is kept under the old name
-                             (whether or not its channel still carries its
+  int ts_matches;       /**< ... and it is the announced channel
+                             (relocate_announce_ts_matches()) */
+  int have_record;      /**< a tombstone record is kept for that channel --
+                             under the old name and made for the channel
+                             that is there, by creation timestamp --
+                             (whether or not the channel still carries its
                              marks: the BURST that came first may have
                              changed the redirect) */
   int same_target;      /**< ... and its target is the one announced */

@@ -329,10 +329,15 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       /* If one side of the net.junction does the above
          timestamp = chptr->creationtime, then the other
 	 side must do this: */
+      time_t old_ts = chptr->creationtime;
+
       chptr->creationtime = timestamp;	/* Use the same TS on both sides. */
 #ifdef USE_ROCKSDB
       history_recv_reset(chptr);	/* another TS: W5 Task 9 fix round 1, M6 */
 #endif
+      /* The same channel, re-stamped: a relocation tombstone's record
+       * follows (an empty tombstone is exactly such a channel). */
+      relocate_tombstone_ts_follow(chptr, old_ts);
     }
     /* In more complex cases, we might still end up with a
        creationtime desync of a few seconds, but that should
@@ -477,9 +482,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     history_recv_reset(chptr);
 #endif
     /* Our channel of this name lost: a relocation tombstone held for it
-     * is over (its record, and the +z the wipe-out below leaves alone). */
+     * is over (its record, the +z the wipe-out below leaves alone, and
+     * its redirect). */
     if (chptr->creationtime)
-      relocate_tombstone_burst_lost(chptr);
+      relocate_tombstone_ts_lost(chptr);
     chptr->creationtime = timestamp;
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,

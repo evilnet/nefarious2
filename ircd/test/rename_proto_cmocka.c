@@ -939,6 +939,41 @@ static void announcement_meeting_a_record_merges_or_crosses(void **state)
   assert_int_equal(announce(1, 1, 1, 0), RELOCATE_ANNOUNCE_CROSS);
 }
 
+/* ========== relocation: is the announced channel the one here ========== */
+
+/* Equal creation timestamps: the same channel. */
+static void announced_timestamp_equal_is_the_channel(void **state)
+{
+  (void)state;
+  assert_true(relocate_announce_ts_matches(500000, 500000));
+}
+
+/* The BURST that precedes an announcement merges into a channel here that
+ * is up to four seconds younger and has users (m_burst.c: "do not deop our
+ * side"); that channel then carries the tombstone's +z and +L under its
+ * own timestamp, and the announcement is about it. */
+static void announced_timestamp_within_the_burst_fuzz_is_the_channel(void **state)
+{
+  int d;
+  (void)state;
+
+  for (d = 1; d <= RELOCATE_TS_FUZZ; d++)
+    assert_true(relocate_announce_ts_matches(500000, 500000 + d));
+  assert_false(relocate_announce_ts_matches(500000, 500000 + RELOCATE_TS_FUZZ + 1));
+  assert_false(relocate_announce_ts_matches(500000, 600000));
+}
+
+/* A channel here that is OLDER than the announced one won the BURST: it
+ * took none of the tombstone's modes and is not it, by however little. */
+static void announced_timestamp_newer_than_ours_is_another_channel(void **state)
+{
+  (void)state;
+  assert_false(relocate_announce_ts_matches(500000, 499999));
+  assert_false(relocate_announce_ts_matches(500000, 499996));
+  assert_false(relocate_announce_ts_matches(500000, 400000));
+  assert_false(relocate_announce_ts_matches(500000, 0));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -998,6 +1033,9 @@ int main(void)
     cmocka_unit_test(announcement_for_another_incarnation_is_nothing),
     cmocka_unit_test(announcement_without_a_record_builds_one),
     cmocka_unit_test(announcement_meeting_a_record_merges_or_crosses),
+    cmocka_unit_test(announced_timestamp_equal_is_the_channel),
+    cmocka_unit_test(announced_timestamp_within_the_burst_fuzz_is_the_channel),
+    cmocka_unit_test(announced_timestamp_newer_than_ours_is_another_channel),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

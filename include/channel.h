@@ -536,12 +536,17 @@ extern void relocate_tombstone_channel_gone(struct Channel *chptr);
  * (old name, creation timestamp, target, deadline). */
 extern void relocate_burst(struct Client *cptr, struct Channel *chptr);
 
-/* Called by ms_burst(): the first when a channel is about to be wiped
- * because the BURST's creation timestamp is older (a tombstone held for
- * the losing channel is over); the second when a BURST has been taken in
- * (a tombstone keeps its form, and one that was waiting for its channel
- * gets it). */
-extern void relocate_tombstone_burst_lost(struct Channel *chptr);
+/* A relocation tombstone's record is bound to its channel by name and
+ * creation timestamp, so whatever changes a channel's creationtime calls
+ * one of these (ircd/m_rename.c, "A channel's creation timestamp changes"):
+ * _ts_lost() BEFORE a channel is wiped for an older timestamp (ms_burst(),
+ * ms_join()) -- a tombstone held for it is over; _ts_follow() AFTER a
+ * timestamp is corrected with the channel left as it is (mode_parse(),
+ * ms_create(), ms_burst()'s few-seconds rule) -- the record follows.
+ * _burst_done(): a BURST has been taken in (a tombstone keeps its form,
+ * and one that was waiting for its channel gets it). */
+extern void relocate_tombstone_ts_lost(struct Channel *chptr);
+extern void relocate_tombstone_ts_follow(struct Channel *chptr, time_t old_ts);
 extern void relocate_tombstone_burst_done(struct Channel *chptr);
 
 /* Grace-period member status restore (spec, "Status preservation").  Called

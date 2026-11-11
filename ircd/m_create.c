@@ -267,6 +267,10 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * a channel new in a BURST. */
       if (old_ts != chanTS)
         history_recv_reset(chptr);
+      /* An existing channel re-stamped and otherwise left as it is: a
+       * relocation tombstone's record follows the timestamp. */
+      if (old_ts && old_ts != chanTS)
+        relocate_tombstone_ts_follow(chptr, old_ts);
       /* Pre-populate per-channel msgid from incoming S2S tag (positional).
        * The tag has MAXJOINARGS slots: a channel past them, or one whose
        * slot is empty, mints its own -- clear the joinbuf slot so it

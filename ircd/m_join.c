@@ -679,6 +679,12 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         struct ModeBuf mbuf;
         time_t old_ts = chptr->creationtime;
 
+        /* The channel is wiped below for another timestamp: a relocation
+         * tombstone held for it is over -- its record, and the +z and the
+         * redirect, neither of which this wipe-out takes. */
+        if (old_ts && old_ts != creation)
+          relocate_tombstone_ts_lost(chptr);
+
 	chptr->creationtime = creation;
         /* Another incarnation's TS: what this server received was not its
          * traffic (receive windows, W5 Task 9 fix round 1, M6). */

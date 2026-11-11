@@ -1104,6 +1104,20 @@ struct RelocateTombstone {
   struct RelocateTombstone *next;   /**< Linked list */
   struct Channel *oldchan;          /**< CACHE ONLY -- see struct comment */
   char oldname[CHANNELLEN + 1];     /**< The tombstone's own (stable) name */
+  time_t chan_ts;                   /**< Creation timestamp of the channel
+                                         this record was made for.  With
+                                         @a oldname it is that channel's
+                                         identity, as everywhere in this code
+                                         base: +z and a +L to the same target
+                                         are things the network can put on
+                                         ANOTHER channel that later has the
+                                         name, and the record must not answer
+                                         for that one.  Set wherever a record
+                                         is made, checked by
+                                         relocate_tombstone_channel(), moved
+                                         only by relocate_tombstone_ts_follow().
+                                         For a record that is @a waiting: the
+                                         timestamp its channel will have */
   char newname[CHANNELLEN + 1];     /**< Redirect target, chain-flattened */
   time_t target_ts;                 /**< Creation timestamp of the channel the
                                          relocation made under @a newname.
@@ -1143,9 +1157,9 @@ struct RelocateTombstone {
                                          relocate_tombstone_burst_done() finds
                                          the channel; relocate_tombstone_find()
                                          does not return it, and nothing is
-                                         done to any channel on its behalf */
-  time_t want_ts;                   /**< ... and the creation timestamp that
-                                         channel will have (the old
+                                         done to any channel on its behalf.
+                                         @a chan_ts is the creation timestamp
+                                         that channel will have (the old
                                          channel's): one of another timestamp
                                          under the name is a stranger's */
   struct RelocateSnap *snaps;       /**< Member status snapshots for a
@@ -1210,10 +1224,14 @@ static struct RelocateTombstone *relocate_tombstone_find(const char *name)
  * the same name well inside the grace period -- FindChannel() would hand
  * that fresh channel back and a chain-flattening retarget would stamp
  * +L onto somebody's live channel.  So the result is only accepted when it
- * still carries a tombstone's marks: the persist bit (mode.exmode) and a
- * redirect -- mode.redir, the string -- still pointing where this
- * tombstone points.  Anything else is a different channel wearing the same
- * name.
+ * IS the channel the record was made for -- the name and the creation
+ * timestamp (RelocateTombstone.chan_ts), a channel's identity here as in
+ * BURST -- and still carries a tombstone's marks: the persist bit
+ * (mode.exmode) and a redirect -- mode.redir, the string -- still pointing
+ * where this tombstone points.  The marks alone are not enough: services
+ * can persist another channel of the name and anybody can give it a +L to
+ * the same target.  Anything else is a different channel wearing the same
+ * name, or this one no longer a tombstone.
  *
  * The redirect IS the string.  +L, like +l and +k, lives in its parameter
  * and nowhere else: mode_parse_redir() writes mode.redir, channel_modes()
@@ -1249,7 +1267,8 @@ static struct Channel *relocate_tombstone_channel(struct RelocateTombstone *ts)
     return NULL;
 
   /* (An empty mode.redir -- no +L -- never equals a target.) */
-  if (!(chptr->mode.exmode & EXMODE_PERSIST)
+  if (chptr->creationtime != ts->chan_ts
+      || !(chptr->mode.exmode & EXMODE_PERSIST)
       || 0 != ircd_strcmp(chptr->mode.redir, ts->newname))
     return NULL;
 
@@ -1520,6 +1539,24 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
   if (!(chptr = relocate_tombstone_channel(ts))) {
     struct Channel *stray = FindChannel(ts->oldname);
 
+    /* First of all: is it the record's channel at all?  One of another
+     * creation timestamp is another channel that has the name now.  Every
+     * path that replaces or re-stamps a channel tells the record
+     * (relocate_tombstone_channel_gone(), _ts_lost(), _ts_follow()), so
+     * this should not be reachable; if it is, the record is dropped, the
+     * channel -- its members, its +z, its redirect, none of them this
+     * record's -- is not touched, and the log says what was found, not
+     * that a mark was removed. */
+    if (stray && stray->creationtime != ts->chan_ts) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "relocate: tombstone %s -> %s: the channel of that name is "
+                "another channel at grace expiry (created %Tu, the "
+                "tombstone's was created %Tu); record dropped, channel not "
+                "touched", ts->oldname, ts->newname, stray->creationtime,
+                ts->chan_ts);
+      return;
+    }
+
     log_write(LS_SYSTEM, L_WARNING, 0,
               "relocate: tombstone %s -> %s no longer authenticates at grace "
               "expiry (%s); record cancelled without sweeping",
@@ -1755,13 +1792,23 @@ static void relocate_tombstone_renamed(const char *oldname,
   if (!(ts = relocate_tombstone_find(oldname)))
     return;
 
+  /* A record under the old name that was made for another channel (its
+   * creation timestamp is not this one's) does not follow this one. */
+  if (ts->chan_ts != chptr->creationtime) {
+    relocate_tombstone_end(ts, 0);
+    return;
+  }
+
   /* A record left under the new name describes a channel that is not
    * there any more (the name was free for this rename): drop it rather
    * than have two records answer to one name. */
   if ((stale = relocate_tombstone_find_any(chptr->chname)) && stale != ts)
     relocate_tombstone_end(stale, 0);
 
+  /* rename_channel() keeps the creation timestamp; the record is bound to
+   * the channel it finds under the new name. */
   ircd_strncpy(ts->oldname, chptr->chname, sizeof(ts->oldname));
+  ts->chan_ts = chptr->creationtime;
   ts->oldchan = chptr;
 
   log_write(LS_SYSTEM, L_INFO, 0,
@@ -1947,8 +1994,10 @@ relocate_tombstone_add(struct Channel *chptr, const char *newname,
   struct RelocateTombstone *ts =
     relocate_tombstone_add_named(chptr->chname, newname, expires);
 
-  if (ts)
+  if (ts) {
     ts->oldchan = chptr;
+    ts->chan_ts = chptr->creationtime;  /* the channel it is made for */
+  }
 
   return ts;
 }
@@ -2392,7 +2441,11 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
    * registered), so that the new channel made below does not inherit a
    * tombstone's persist flag as if it were the channel's own. */
   if ((ts = relocate_tombstone_find(chptr->chname))) {
-    if (!(chptr->mode.mode & MODE_REGISTERED))
+    /* ... when the record is this channel's.  One made for another
+     * channel that had the name is just dropped: this channel's +z is its
+     * own. */
+    if (ts->chan_ts == chptr->creationtime
+        && !(chptr->mode.mode & MODE_REGISTERED))
       chptr->mode.exmode &= ~EXMODE_PERSIST;
     relocate_tombstone_end(ts, 0);
   }
@@ -3133,7 +3186,7 @@ static void relocate_propagate(struct Client *sptr, struct Client *one,
  * relays it.
  *
  * Receiving it: relocate_announced().  Bringing a tombstone held here
- * through a BURST: relocate_tombstone_burst_lost() and _burst_done().
+ * through a BURST: relocate_tombstone_ts_lost() and _burst_done().
  *
  * Sent to IRCv3-aware links and to rename-capable links that are not
  * (X3, a relay-only server): the peers an RN goes to.  Never to a plain
@@ -3246,7 +3299,7 @@ static void relocate_announced_cross(struct RelocateTombstone *ts,
                              deadline, 0);
   } else if ((rec = relocate_tombstone_add_named(loser, winner, deadline))) {
     rec->waiting = 1;
-    rec->want_ts = chan_ts;
+    rec->chan_ts = chan_ts;
     rec->target_ts = ts->target_ts;
     ircd_strncpy(rec->family, oldname, sizeof(rec->family));
   }
@@ -3271,8 +3324,15 @@ static void relocate_announced(const char *oldname, time_t chan_ts,
     chptr ? relocate_tombstone_find(chptr->chname) : NULL;
 
   memset(&facts, 0, sizeof(facts));
+  /* A record under the name that was made for another channel is not a
+   * record of this one; relocate_tombstone_add() replaces it. */
+  if (ts && ts->chan_ts != chptr->creationtime)
+    ts = NULL;
+
   facts.channel_exists = (chptr != NULL);
-  facts.ts_matches = (chptr && chptr->creationtime == chan_ts);
+  facts.ts_matches = (chptr
+                      && relocate_announce_ts_matches(chan_ts,
+                                                      chptr->creationtime));
   facts.have_record = (ts != NULL);
   facts.same_target = (ts && 0 == ircd_strcmp(ts->newname, target));
 
@@ -3286,7 +3346,8 @@ static void relocate_announced(const char *oldname, time_t chan_ts,
     log_write(LS_DEBUG, L_DEBUG, 0,
               "relocate: announced tombstone %s (%Tu) -> %s not taken: %s",
               oldname, chan_ts, target,
-              chptr ? "the channel here has another creation timestamp"
+              chptr ? "the channel here is another one (its creation "
+                      "timestamp is older, or more than a few seconds younger)"
                     : "no such channel here");
     return;
 
@@ -3300,7 +3361,10 @@ static void relocate_announced(const char *oldname, time_t chan_ts,
       return;
     if (relocate_tombstone_channel(ts) == chptr) {
       relocate_tombstone_normalise(chptr);
-      ts->target_ts = chptr->creationtime;
+      /* The new channel has the timestamp the sender's old channel has --
+       * the announced one, which is not always this channel's
+       * (relocate_announce_ts_matches()). */
+      ts->target_ts = chan_ts;
       /* No MODE +L: the BURST's own mode change showed the members that. */
       relocate_tombstone_populate(ts, chptr, &his, "", 0);
     }
@@ -3320,28 +3384,98 @@ static void relocate_announced(const char *oldname, time_t chan_ts,
   }
 }
 
-/** A channel is about to be wiped by a BURST whose creation timestamp is
- * older (ms_burst()): the channel of that name is another server's from
- * here on.  A tombstone held for the losing channel is over -- its
- * record is dropped, and its +z, which the wipe-out leaves alone (it
- * clears mode.mode, not the extended modes), goes with it.  When the
- * winning channel is itself a tombstone its BURST sets +z again and its
- * announcement, which follows, builds a new record.
- * @param[in] chptr The channel, before the BURST's modes are applied.
+/* ---------- A channel's creation timestamp changes ----------
+ *
+ * A record is bound to its channel by name and creation timestamp
+ * (RelocateTombstone.chan_ts), so every place that changes a channel's
+ * creationtime has to say which of two things happened:
+ *
+ * - The channel was WIPED for an older timestamp: the channel of that
+ *   name is another server's older one from here on, and ours -- with the
+ *   tombstone it was -- is over.  ms_burst()'s wipe-out, and ms_join()'s
+ *   for a JOIN that carries an older timestamp.
+ *   -> relocate_tombstone_ts_lost(), BEFORE the timestamp is assigned.
+ * - The timestamp was CORRECTED and the channel left as it is, modes and
+ *   all: mode_parse() for a server MODE with an older timestamp,
+ *   ms_create() for a CREATE it accepts for a channel that exists, and
+ *   ms_burst() when our empty channel is a few seconds older than the
+ *   BURST's ("use the same TS on both sides").  It is the same channel,
+ *   still marked.
+ *   -> relocate_tombstone_ts_follow(), AFTER the assignment.
+ *
+ * (get_channel(), and ms_join() for a channel it has just made, stamp a
+ * NEW channel; a record never exists for one.  A destroyed channel takes
+ * its record along: relocate_tombstone_channel_gone().)
+ *
+ * A record whose channel changed timestamp WITHOUT either call would stop
+ * authenticating; relocate_tombstone_sweep() then drops it at the deadline
+ * without touching the channel and logs exactly that.
  */
-void relocate_tombstone_burst_lost(struct Channel *chptr)
+
+/** A channel is about to be wiped because a line carries an older
+ * creation timestamp for its name (ms_burst(), ms_join()): the channel of
+ * that name is another server's from here on.  A tombstone held for the
+ * losing channel is over, at once and on every server that loses alike:
+ * its record is dropped, and so are its two marks, neither of which the
+ * wipe-out can be relied on to take -- +z is an extended mode, which both
+ * wipe-outs leave alone, and ms_join()'s does not clear a redirect either.
+ * Left on, they would make an ordinary channel a tombstone that nobody
+ * will ever dissolve.  The redirect goes only when it is still the
+ * record's own.  When the winning channel is itself a tombstone, its BURST
+ * sets +z and +L again and its announcement, which follows, builds a new
+ * record.
+ * @param[in] chptr The channel, before its timestamp is changed and
+ *                  before the winner's modes are applied.
+ */
+void relocate_tombstone_ts_lost(struct Channel *chptr)
 {
   struct RelocateTombstone *ts;
 
   if (!(ts = relocate_tombstone_find(chptr->chname)))
     return;
 
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "relocate: tombstone %s -> %s lost a BURST on timestamp; "
-            "cancelled", ts->oldname, ts->newname);
+  /* A record made for another channel that had the name: only the record
+   * goes. */
+  if (ts->chan_ts == chptr->creationtime) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "relocate: tombstone %s -> %s (created %Tu) lost to an older "
+              "creation timestamp; cancelled", ts->oldname, ts->newname,
+              ts->chan_ts);
 
-  chptr->mode.exmode &= ~EXMODE_PERSIST;
+    chptr->mode.exmode &= ~EXMODE_PERSIST;
+    if (chptr->mode.redir[0]
+        && 0 == ircd_strcmp(chptr->mode.redir, ts->newname))
+      relocate_withdraw_redirect(chptr);
+  }
+
   relocate_tombstone_end(ts, 0);
+}
+
+/** A channel's creation timestamp has been corrected and the channel
+ * itself left alone (see "A channel's creation timestamp changes"): the
+ * records bound to it follow.  That is the record of the channel as a
+ * tombstone (chan_ts), and every record that points AT the channel, whose
+ * snapshots are bound to the target's timestamp (target_ts).  Only a
+ * record that was bound to the old value moves.
+ * @param[in] chptr The channel, with its new timestamp.
+ * @param[in] old_ts The timestamp it had.
+ */
+void relocate_tombstone_ts_follow(struct Channel *chptr, time_t old_ts)
+{
+  struct RelocateTombstone *ts;
+
+  if (old_ts == chptr->creationtime)
+    return;
+
+  for (ts = relocate_tombstones; ts; ts = ts->next) {
+    if (!ts->waiting && ts->chan_ts == old_ts
+        && 0 == ircd_strcmp(ts->oldname, chptr->chname))
+      ts->chan_ts = chptr->creationtime;
+
+    if (ts->target_ts == old_ts
+        && 0 == ircd_strcmp(ts->newname, chptr->chname))
+      ts->target_ts = chptr->creationtime;
+  }
 }
 
 /** A BURST for a channel has been taken in (ms_burst(), last thing).
@@ -3364,7 +3498,7 @@ void relocate_tombstone_burst_done(struct Channel *chptr)
     return;
 
   if (ts->waiting) {
-    if (chptr->creationtime != ts->want_ts)
+    if (chptr->creationtime != ts->chan_ts)
       return;                   /* a stranger's channel under the name */
 
     ts->waiting = 0;

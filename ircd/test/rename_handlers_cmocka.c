@@ -4499,7 +4499,7 @@ static void tombstone_that_loses_a_burst_on_timestamp_is_cancelled(void **state)
   vic_relocates(&w);
   assert_int_equal(ntimers, 1);
 
-  relocate_tombstone_burst_lost(w.old);
+  relocate_tombstone_ts_lost(w.old);
 
   assert_int_equal(ntimers, 0);
   assert_false(w.old->mode.exmode & EXMODE_PERSIST);
@@ -4518,7 +4518,7 @@ static void burst_hooks_leave_ordinary_channels_alone(void **state)
   ch = channel_at("#plain", 500000, alice);
   ch->mode.exmode |= EXMODE_PERSIST;
   ch->mode.limit = 7;
-  relocate_tombstone_burst_lost(ch);
+  relocate_tombstone_ts_lost(ch);
   relocate_tombstone_burst_done(ch);
   assert_true(ch->mode.exmode & EXMODE_PERSIST);
   assert_int_equal(ch->mode.limit, 7);
@@ -4810,6 +4810,346 @@ static void dissolve_with_only_remote_members(void **state)
   assert_int_equal(ntimers, 0);
 }
 
+/* --- a record is bound to its channel: name AND creation timestamp --- */
+
+static int logged(const char *what)
+{
+  int i;
+  for (i = 0; i < ndebug; i++)
+    if (strstr(debuglines[i], what))
+      return 1;
+  return 0;
+}
+
+/* The channel under the old name is ANOTHER one -- another creation
+ * timestamp -- and it happens to be +z with the same redirect (services'
+ * persist, an op's +L to the same place, a burst).  Name and marks all
+ * match; the record was not made for it.  Its members are not swept, its
+ * +z is not taken, and the log says why. */
+static void another_channel_with_the_same_marks_is_not_swept(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Client *fork;
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  /* the channel under the name is replaced by one created later, by a
+   * path that told the engine nothing; +z and +L #new are on it */
+  oldch->creationtime = 600000;
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(oldch->mode.redir, "#new");
+
+  /* not announced as the tombstone meanwhile */
+  fork = linked("new.example", "Bn", "v");
+  forget();
+  burst_to(fork);
+  assert_int_equal(sent_count_to(fork), 0);
+
+  advance(900);
+  assert_non_null(member_of(oldch, carol));
+  assert_int_equal(sent_count_to(carol), 0);
+  assert_false(was_destroyed(oldch));
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);     /* not ours to take */
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(ntimers, 0);
+  /* the reason given is the true one */
+  assert_true(logged("another channel"));
+  assert_true(logged("600000"));
+  assert_false(logged("+L was cleared"));
+  assert_false(logged("+z was cleared"));
+  assert_false(logged("retargeted"));
+}
+
+/* The same through the ordinary route: the tombstone is destroyed
+ * (services DESTRUCT) and somebody creates the name again; services
+ * persist it and it is given the same redirect.  The record went with the
+ * first channel; nothing happens to the second at the old deadline, and
+ * an announcement of the FIRST (its timestamp) is not about it. */
+static void recreated_channel_is_nobodys_tombstone(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch, *again;
+  char name[] = "#old";
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->mode.exmode &= ~EXMODE_PERSIST;
+  sub1_from_channel(oldch);                     /* DESTRUCT */
+  assert_true(was_destroyed(oldch));
+
+  again = get_channel(carol, name, CGT_CREATE); /* created at 1000000 */
+  add_member(again, carol, CHFL_CHANOP);
+  again->mode.exmode |= EXMODE_PERSIST;
+  ircd_strncpy(again->mode.redir, "#new", sizeof(again->mode.redir));
+
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+  assert_int_equal(ntimers, 0);
+
+  advance(900);
+  assert_non_null(member_of(again, carol));
+  assert_true(again->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(again->mode.redir, "#new");
+  assert_int_equal(sent_count_to(carol), 0);
+}
+
+/* A relocation of such a channel is a relocation of THAT channel: the
+ * stale record under its name is dropped, and the +z, which is the
+ * channel's own, goes to the new channel with the rest of its state. */
+static void relocating_another_channel_under_a_stale_record(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAF");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->creationtime = 600000;                 /* another channel now */
+
+  server_relocate(peer, eve, "#old", "#second", "1002000", "");
+
+  assert_true(channel_named("#second")->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(channel_named("#second")->creationtime, 600000);
+  assert_non_null(member_of(channel_named("#second"), eve));
+  assert_string_equal(oldch->mode.redir, "#second");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1002000), 1);
+}
+
+/* A stale record under the name is in nobody's way.  The channel that
+ * has the name now (another timestamp) is announced as a tombstone in its
+ * own right: a record is built for IT, and it is swept at ITS deadline. */
+static void announcement_for_another_channel_under_a_stale_record(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->creationtime = 600000;                 /* another channel now */
+
+  server_tombstone(peer, peer, "#old", "600000", "#new", "1000300");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000300), 1);
+
+  advance(300);
+  assert_true(was_destroyed(oldch));
+  assert_false(logged("another channel"));
+}
+
+/* ... losing to an older timestamp, it keeps what is its own: only the
+ * stale record goes. */
+static void another_channel_under_a_stale_record_is_wiped_as_itself(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->creationtime = 600000;
+  forget();
+
+  relocate_tombstone_ts_lost(oldch);
+  assert_int_equal(ntimers, 0);
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(sent_count_to(carol), 0);
+}
+
+/* ... and renamed, it does not take the stale record along. */
+static void another_channel_under_a_stale_record_is_renamed_as_itself(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAF");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch, *renamed;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  oldch->creationtime = 600000;
+
+  server_rename(peer, eve, "#old", "#older", "");
+  renamed = channel_named("#older");
+  assert_non_null(renamed);
+  assert_int_equal(ntimers, 0);
+
+  advance(900);
+  assert_non_null(member_of(renamed, carol));
+  assert_false(was_destroyed(renamed));
+}
+
+/* The channel's timestamp is corrected without the channel being wiped:
+ * a MODE or CREATE carrying an older timestamp, a BURST for an empty
+ * channel a few seconds off.  It is the same channel with its marks; the
+ * record follows the timestamp, and so does a record that points AT the
+ * channel (its snapshots are bound to the target's timestamp). */
+static void record_follows_a_corrected_timestamp(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Client *down;
+  struct Channel *oldch, *newch;
+  unsigned int flags = 0;
+  int oplevel = 0;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_VOICE);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  newch = channel_named("#new");
+
+  oldch->creationtime = 499998;                 /* M #old +m 499998 */
+  relocate_tombstone_ts_follow(oldch, 500000);
+  newch->creationtime = 499998;                 /* the same for #new */
+  relocate_tombstone_ts_follow(newch, 500000);
+
+  /* still the tombstone: announced with its timestamp of now ... */
+  down = linked("down.example", "Bk", "v");
+  burst_to(down);
+  assert_string_equal(sent_to(down, sent_count_to(down) - 1),
+                      "AC RT #old 499998 #new 1000900");
+  /* ... a follower still restored in the new channel ... */
+  assert_int_equal(relocate_snap_lookup(newch, carol, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_VOICE);
+  /* ... and swept at the deadline */
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_false(logged("no longer authenticates"));
+}
+
+/* ... and nothing follows a timestamp that is not the record's. */
+static void follow_leaves_other_records_alone(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  oldch->creationtime = 700000;
+  relocate_tombstone_ts_follow(oldch, 650000);  /* not the record's 500000 */
+
+  advance(900);
+  assert_non_null(member_of(oldch, carol));     /* not swept */
+  assert_true(logged("another channel"));
+}
+
+/* The channel is WIPED for an older timestamp outside a burst: a remote
+ * JOIN carrying one (m_join.c takes the modes, the limit and the keys,
+ * deops everybody -- and leaves +z and the redirect standing).  The
+ * tombstone is over at that moment, as when it loses a BURST: record
+ * dropped, +z off, and its redirect withdrawn, so that what is left is an
+ * ordinary channel and not a tombstone nobody will ever dissolve. */
+static void tombstone_wiped_for_an_older_timestamp_is_ended(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  vic_relocates(&w);
+  forget();
+
+  relocate_tombstone_ts_lost(w.old);
+  w.old->creationtime = 400000;
+
+  assert_int_equal(ntimers, 0);
+  assert_false(w.old->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(w.old->mode.redir, "");
+  assert_string_equal(sent_to(w.carol, 0), ":me.example MODE #old -L");
+  assert_non_null(member_of(w.old, w.carol));
+  advance(900);
+  assert_non_null(member_of(w.old, w.carol));
+  assert_int_equal(nopnotices, 0);
+}
+
+/* ... but a redirect that is not the tombstone's (an op changed it) is
+ * left for the wipe to deal with. */
+static void wiped_tombstone_keeps_a_redirect_that_is_not_its_own(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  vic_relocates(&w);
+  ircd_strncpy(w.old->mode.redir, "#elsewhere", sizeof(w.old->mode.redir));
+  forget();
+
+  relocate_tombstone_ts_lost(w.old);
+  assert_int_equal(ntimers, 0);
+  assert_string_equal(w.old->mode.redir, "#elsewhere");
+  assert_int_equal(sent_count_to(w.carol), 0);
+}
+
+/* The BURST before an announcement merged into our channel although ours
+ * is a few seconds younger (we have users: m_burst.c does not deop our
+ * side).  The announcement carries the sender's timestamp; it is about
+ * this channel all the same, and the record is bound to OUR timestamp. */
+static void announcement_within_the_burst_fuzz_builds_the_record(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500003, "#new", carol);
+  server_tombstone(hub, hub, "#old", "500000", "#new", "1000900");
+
+  assert_int_equal(timers_at(1000900), 1);
+  assert_non_null(strstr(sent_to(carol, 0), "has moved to #new"));
+  forget();
+  burst_to(down);
+  assert_string_equal(sent_to(down, 0), "AC RT #old 500003 #new 1000900");
+  advance(900);
+  assert_true(was_destroyed(oldch));
+}
+
+/* Outside that rule the channel here is another one. */
+static void announcement_outside_the_burst_fuzz_is_ignored(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  (void)state;
+
+  burst_tombstone("#old", 500005, "#new", carol);
+  server_tombstone(hub, hub, "#old", "500000", "#new", "1000900");
+  assert_int_equal(ntimers, 0);
+
+  burst_tombstone("#older", 499999, "#new", carol);
+  server_tombstone(hub, hub, "#older", "500000", "#new", "1000900");
+  assert_int_equal(ntimers, 0);
+  assert_int_equal(sent_count_to(carol), 0);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -4966,6 +5306,19 @@ int main(void)
     T(last_local_member_leaving_changes_nothing),
     T(tombstone_that_lost_its_persist_flag_is_not_swept),
     T(dissolve_with_only_remote_members),
+
+    T(another_channel_with_the_same_marks_is_not_swept),
+    T(recreated_channel_is_nobodys_tombstone),
+    T(relocating_another_channel_under_a_stale_record),
+    T(announcement_for_another_channel_under_a_stale_record),
+    T(another_channel_under_a_stale_record_is_wiped_as_itself),
+    T(another_channel_under_a_stale_record_is_renamed_as_itself),
+    T(record_follows_a_corrected_timestamp),
+    T(follow_leaves_other_records_alone),
+    T(tombstone_wiped_for_an_older_timestamp_is_ended),
+    T(wiped_tombstone_keeps_a_redirect_that_is_not_its_own),
+    T(announcement_within_the_burst_fuzz_builds_the_record),
+    T(announcement_outside_the_burst_fuzz_is_ignored),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -372,6 +372,11 @@ const char *relocate_winner(const char *a, const char *b)
   return (relocate_name_cmp(a, b) <= 0) ? a : b;
 }
 
+int relocate_announce_ts_matches(time_t announced, time_t mine)
+{
+  return mine >= announced && mine - announced <= RELOCATE_TS_FUZZ;
+}
+
 enum RelocateAnnounceVerdict
 relocate_announce_decide(const struct RelocateAnnounceFacts *facts)
 {
