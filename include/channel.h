@@ -549,13 +549,13 @@ extern void relocate_tombstone_ts_lost(struct Channel *chptr);
 extern void relocate_tombstone_ts_follow(struct Channel *chptr, time_t old_ts);
 extern void relocate_tombstone_burst_done(struct Channel *chptr);
 
-/* Grace-period member status restore (spec, "Status preservation").  Called
- * from do_join() once a join to an existing channel has completed; looks up
- * and CONSUMES a status snapshot for `who` in whichever live tombstone (if
- * any) currently redirects to `chptr` -- the channel the relocation made,
- * by name AND creation timestamp, not a later channel of the same name. */
-extern int relocate_snap_lookup(struct Channel *chptr, struct Client *who,
-                                unsigned int *flags, int *oplevel);
+/* Status preservation (spec): called from do_join() when a LOCAL user's
+ * own JOIN of `chptr` has succeeded.  If the user is, right now, a member
+ * of a live tombstone that redirects to `chptr`, it is given in `chptr`
+ * the status it holds there and is parted from the tombstone (a real
+ * PART).  ircd/m_rename.c, "Following: live status, then part". */
+extern void relocate_follow(struct Client *cptr, struct Client *sptr,
+                            struct Channel *chptr);
 
 extern struct Membership* find_member_link(struct Channel * chptr,
                                            const struct Client* cptr);

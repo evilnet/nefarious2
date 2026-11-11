@@ -218,6 +218,7 @@ static struct Channel *channels[MAXOBJ];
 static int nchannels;
 static struct Channel *destroyed[MAXOBJ];   /* see fake_destruct() */
 static int ndestroyed;
+static int alias_syncs, dirty_marks;        /* calls into the bouncer */
 
 static struct Channel *fake_channel(const char *name)
 {
@@ -239,6 +240,8 @@ static struct Membership *add_member(struct Channel *ch, struct Client *who,
   m->user = who;
   m->channel = ch;
   m->status = status;
+  /* as a member of a channel without oplevels (no +A) has it */
+  m->oplevel = MAXOPLEVEL;
   m->next_member = ch->members;
   if (ch->members)
     ch->members->prev_member = m;
@@ -343,6 +346,7 @@ static int world_setup(void **state)
   forget();
   nmade = nchannels = ntimers = 0;
   ndestroyed = 0;
+  alias_syncs = dirty_marks = 0;
   GlobalClientList = NULL;
 
   memset(&me, 0, sizeof(me));
@@ -830,12 +834,20 @@ struct Ban *make_ban(const char *banstr)
   return ban;
 }
 
-/* A mode buffer that holds one +L/-L for the channel's local members. */
+/* A mode buffer that holds one +L/-L, or up to three member modes.  The
+ * engine's own marks (+L on a tombstone) are for the channel's local
+ * members only; the one thing that may also go to servers is the status a
+ * follower takes along (relocate_follow()). */
 static struct {
   struct Channel *chan;
   struct Client *source;
+  unsigned int dest;
   unsigned int mode;
   char arg[CHANNELLEN + 1];
+  int nclients;
+  unsigned int cmode[3];
+  struct Client *client[3];
+  int oplevel[3];
 } fake_mb;
 
 void modebuf_init(struct ModeBuf *mbuf, struct Client *source,
@@ -843,11 +855,13 @@ void modebuf_init(struct ModeBuf *mbuf, struct Client *source,
                   unsigned int dest)
 {
   (void)mbuf; (void)connect;
-  /* nothing relocation does to a mode may reach a server */
-  assert_int_equal(dest, MODEBUF_DEST_CHANNEL);
+  assert_true(dest == MODEBUF_DEST_CHANNEL
+              || dest == (MODEBUF_DEST_CHANNEL | MODEBUF_DEST_SERVER));
   fake_mb.chan = chan;
   fake_mb.source = source;
+  fake_mb.dest = dest;
   fake_mb.mode = 0;
+  fake_mb.nclients = 0;
 }
 
 void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,
@@ -855,29 +869,177 @@ void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,
 {
   (void)mbuf; (void)free_it;
   assert_true(mode & MODE_REDIRECT);
+  /* a tombstone's redirect never goes to a server as a MODE */
+  assert_int_equal(fake_mb.dest, MODEBUF_DEST_CHANNEL);
   fake_mb.mode = mode;
   snprintf(fake_mb.arg, sizeof(fake_mb.arg), "%s", string);
 }
 
+void modebuf_mode_client(struct ModeBuf *mbuf, unsigned int mode,
+                         struct Client *client, int oplevel)
+{
+  (void)mbuf;
+  assert_true(fake_mb.nclients < 3);
+  assert_true(mode & MODE_ADD);
+  fake_mb.cmode[fake_mb.nclients] = mode;
+  fake_mb.client[fake_mb.nclients] = client;
+  fake_mb.oplevel[fake_mb.nclients] = oplevel;
+  fake_mb.nclients++;
+}
+
+/* As the real one, in outline: ":<source> MODE <chan> +ov nick nick" to
+ * the local members, "<server> M <chan> +ov <numnick> <numnick> <ts>" to
+ * every server link when the buffer was opened for servers too. */
 int modebuf_flush(struct ModeBuf *mbuf)
 {
   struct Membership *m;
   char buf[LINE];
   (void)mbuf;
 
-  if (!fake_mb.mode)
-    return 0;
-  if (fake_mb.mode & MODE_ADD)
-    snprintf(buf, sizeof(buf), ":%s MODE %s +L %s", cli_name(fake_mb.source),
-             fake_mb.chan->chname, fake_mb.arg);
-  else
-    snprintf(buf, sizeof(buf), ":%s MODE %s -L", cli_name(fake_mb.source),
-             fake_mb.chan->chname);
-  for (m = fake_mb.chan->members; m; m = m->next_member)
-    if (MyConnect(m->user) && IsUser(m->user) && !IsZombie(m))
-      record_sent(m->user, buf);
-  fake_mb.mode = 0;
+  if (fake_mb.mode) {
+    if (fake_mb.mode & MODE_ADD)
+      snprintf(buf, sizeof(buf), ":%s MODE %s +L %s", cli_name(fake_mb.source),
+               fake_mb.chan->chname, fake_mb.arg);
+    else
+      snprintf(buf, sizeof(buf), ":%s MODE %s -L", cli_name(fake_mb.source),
+               fake_mb.chan->chname);
+    for (m = fake_mb.chan->members; m; m = m->next_member)
+      if (MyConnect(m->user) && IsUser(m->user) && !IsZombie(m))
+        record_sent(m->user, buf);
+    fake_mb.mode = 0;
+  }
+
+  if (fake_mb.nclients) {
+    char letters[8], nicks[300] = "", nums[100] = "";
+    struct DLink *lp;
+    int i;
+
+    for (i = 0; i < fake_mb.nclients; i++) {
+      struct Client *c = fake_mb.client[i];
+      char one[100];
+
+      letters[i] = (fake_mb.cmode[i] & MODE_CHANOP) ? 'o'
+                 : (fake_mb.cmode[i] & MODE_HALFOP) ? 'h' : 'v';
+      snprintf(one, sizeof(one), " %s", cli_name(c));
+      strcat(nicks, one);
+      if ((fake_mb.cmode[i] & MODE_CHANOP) && fake_mb.oplevel[i] < MAXOPLEVEL)
+        snprintf(one, sizeof(one), " %s%s:%d", cli_yxx(cli_user(c)->server),
+                 cli_yxx(c), fake_mb.oplevel[i]);
+      else
+        snprintf(one, sizeof(one), " %s%s", cli_yxx(cli_user(c)->server),
+                 cli_yxx(c));
+      strcat(nums, one);
+    }
+    letters[i] = '\0';
+
+    snprintf(buf, sizeof(buf), ":%s MODE %s +%s%s", cli_name(fake_mb.source),
+             fake_mb.chan->chname, letters, nicks);
+    for (m = fake_mb.chan->members; m; m = m->next_member)
+      if (MyConnect(m->user) && IsUser(m->user) && !IsZombie(m))
+        record_sent(m->user, buf);
+
+    if (fake_mb.dest & MODEBUF_DEST_SERVER) {
+      snprintf(buf, sizeof(buf), "%s M %s +%s%s %ld", cli_yxx(fake_mb.source),
+               fake_mb.chan->chname, letters, nums,
+               (long)fake_mb.chan->creationtime);
+      for (lp = cli_serv(&me)->down; lp; lp = lp->next)
+        record_sent(lp->value.cptr, buf);
+    }
+    fake_mb.nclients = 0;
+  }
+
   return 0;
+}
+
+/* --- PART through a join buffer, as m_part and relocate_follow() do ---
+ *
+ * joinbuf_join() tells the channel (the parting user's own connections
+ * are members and hear it there; a member the channel never saw JOIN is
+ * told alone); joinbuf_flush() removes the member and sends ONE line,
+ * "<user> L <chan>[,<chan>] :<comment>", to every server. */
+
+void joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
+                  struct Client *connect, unsigned int type, char *comment,
+                  time_t create)
+{
+  (void)create;
+  assert_int_equal(type, JOINBUF_TYPE_PART);
+  assert_non_null(connect);
+  memset(jbuf, 0, sizeof(*jbuf));
+  jbuf->jb_source = source;
+  jbuf->jb_connect = connect;
+  jbuf->jb_type = type;
+  jbuf->jb_comment = comment;
+}
+
+void joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan,
+                  unsigned int flags)
+{
+  char buf[LINE];
+
+  ircd_snprintf(jbuf->jb_source, buf, sizeof(buf), "%:#C PART %s :%s",
+                jbuf->jb_source, chan->chname, jbuf->jb_comment);
+  if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED))) {
+    struct Membership *m;
+
+    for (m = chan->members; m; m = m->next_member)
+      if (MyConnect(m->user) && IsUser(m->user) && !IsZombie(m))
+        record_sent(m->user, buf);
+  } else if (MyUser(jbuf->jb_source))
+    record_sent(jbuf->jb_source, buf);
+
+  assert_true(jbuf->jb_count < MAXJOINARGS);
+  jbuf->jb_channels[jbuf->jb_count++] = chan;
+}
+
+int joinbuf_flush(struct JoinBuf *jbuf)
+{
+  char list[300] = "", buf[LINE];
+  struct DLink *lp;
+  unsigned int i;
+
+  if (!jbuf->jb_count)
+    return 0;
+  for (i = 0; i < jbuf->jb_count; i++) {
+    if (i)
+      strcat(list, ",");
+    strcat(list, jbuf->jb_channels[i]->chname);
+    remove_user_from_channel(jbuf->jb_source, jbuf->jb_channels[i]);
+  }
+  jbuf->jb_count = 0;
+
+  snprintf(buf, sizeof(buf), "%s%s L %s :%s",
+           cli_yxx(cli_user(jbuf->jb_source)->server), cli_yxx(jbuf->jb_source),
+           list, jbuf->jb_comment);
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next)
+    record_sent(lp->value.cptr, buf);
+  return 0;
+}
+
+/* As the real one: the hidden member is shown to the others. */
+void RevealDelayedJoin(struct Membership *member)
+{
+  struct Membership *m;
+  char buf[LINE];
+
+  member->status &= ~CHFL_DELAYED;
+  ircd_snprintf(member->user, buf, sizeof(buf), "%:#C JOIN %s", member->user,
+                member->channel->chname);
+  for (m = member->channel->members; m; m = m->next_member)
+    if (m->user != member->user && MyConnect(m->user) && IsUser(m->user))
+      record_sent(m->user, buf);
+}
+
+void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *primary)
+{
+  (void)chptr; (void)primary;
+  alias_syncs++;
+}
+
+void bounce_mark_dirty(struct Client *cptr)
+{
+  (void)cptr;
+  dirty_marks++;
 }
 
 /* ====================================================================
@@ -2149,67 +2311,342 @@ static struct Membership *member_of(struct Channel *ch, struct Client *who)
   return NULL;
 }
 
-/* --- D.3: whose snapshot, and for which channel --- */
+/* --- Status preservation: live status, then part (no snapshots) --- */
 
-/* A former op of #old who follows gets the status back, once. */
-static void follower_regains_status_once(void **state)
+#define STATUS (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
+
+/** A successful JOIN of an existing channel as do_join() carries it out:
+ * joinbuf_join() adds the member (deopped; hidden on a +D channel) and
+ * sends the J to every server at once, and then -- for a local user only
+ * -- comes relocate_follow().  @a conn is the connection the JOIN came
+ * from (the user's own, or one of its bouncer devices).
+ * @return The status the user has in the channel afterwards. */
+static unsigned int joins_from(struct Client *conn, struct Client *who,
+                               struct Channel *ch)
 {
-  struct Client *alice = user_on(&me, "alice", "AAB");
-  struct Client *bob = user_on(&me, "bob", "AAC");
-  struct Channel *newch;
-  unsigned int flags = 0;
-  int oplevel = -1;
-  (void)state;
+  struct Membership *m;
+  struct DLink *lp;
+  char buf[LINE];
 
-  feat_rename_consent = 1;
-  add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
-  client_rename(alice, "#old", "#new", "moving");
+  m = add_member(ch, who, CHFL_DEOPPED
+                 | ((ch->mode.mode & MODE_DELJOINS) ? CHFL_DELAYED : 0));
+  snprintf(buf, sizeof(buf), "%s%s J %s %ld", cli_yxx(cli_user(who)->server),
+           cli_yxx(who), ch->chname, (long)ch->creationtime);
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next)
+    record_sent(lp->value.cptr, buf);
 
-  newch = channel_named("#new");
-  assert_non_null(newch);
-  assert_int_equal(newch->creationtime, 500000);
-  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_CHANOP);
-  /* consumed */
-  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 0);
+  if (MyUser(who))
+    relocate_follow(conn, who, ch);
+
+  return m->status & STATUS;
 }
 
-/* The issuer was moved with its status; it has nothing to regain, so a
- * PART and JOIN after being deopped in #new does not re-op it. */
-static void issuer_has_no_snapshot(void **state)
+static unsigned int joins(struct Client *who, struct Channel *ch)
+{
+  return joins_from(who, who, ch);
+}
+
+/* A member who stayed follows: it gets, in the new channel, the status it
+ * holds in the tombstone NOW, and is parted from the tombstone -- for its
+ * own client, for the members who stay, and for every server.  JOIN, then
+ * MODE, then PART. */
+static void follower_takes_its_current_status_and_leaves_the_tombstone(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  add_member(oldch, carol, CHFL_VOICE);
+  client_rename(alice, "#old", "#new", "moving");
+  newch = channel_named("#new");
+  forget();
+
+  assert_int_equal(joins(bob, newch), CHFL_CHANOP);
+
+  /* the membership moved */
+  assert_false(member_of(newch, bob)->status & CHFL_DEOPPED);
+  assert_null(member_of(oldch, bob));
+  assert_int_equal(oldch->users, 1);
+  /* every server: the JOIN, the status, the PART -- in that order, and
+   * nothing else */
+  assert_int_equal(sent_count_to(peer), 3);
+  assert_string_equal(sent_to(peer, 0), "ACAAC J #new 500000");
+  assert_string_equal(sent_to(peer, 1), "AC M #new +o ACAAC 500000");
+  assert_string_equal(sent_to(peer, 2), "ACAAC L #old :Channel has moved to #new");
+  assert_string_equal(sent_to(x3, 2), "ACAAC L #old :Channel has moved to #new");
+  /* its own client: the MODE in the new channel, the PART of the old */
+  assert_string_equal(sent_to(bob, 0), ":me.example MODE #new +o bob");
+  assert_string_equal(sent_to(bob, 1),
+                      ":bob!user@host.example PART #old :Channel has moved to #new");
+  assert_int_equal(sent_count_to(bob), 2);
+  /* the member who stays sees it go; the one in the new channel sees the op */
+  assert_string_equal(sent_to(carol, 0),
+                      ":bob!user@host.example PART #old :Channel has moved to #new");
+  assert_string_equal(sent_to(alice, 0), ":me.example MODE #new +o bob");
+  /* the bouncer hooks every member-mode grant calls */
+  assert_int_equal(alias_syncs, 1);
+  assert_true(dirty_marks >= 1);
+  /* the tombstone itself is untouched */
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(ntimers, 1);
+
+  /* voice likewise, and an unprivileged member takes nothing but leaves */
+  forget();
+  assert_int_equal(joins(carol, newch), CHFL_VOICE);
+  assert_string_equal(sent_to(peer, 1), "AC M #new +v ACAAD 500000");
+  assert_null(member_of(oldch, carol));
+}
+
+/* The status is the one held when following, not the one held when the
+ * channel was relocated: deopped in the tombstone since, the member
+ * follows without ops -- and still leaves the tombstone. */
+static void deopped_in_the_tombstone_follows_without_ops(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+
+  member_of(oldch, bob)->status &= ~CHFL_CHANOP;        /* M #old -o bob */
+  forget();
+  assert_int_equal(joins(bob, newch), 0);
+
+  assert_null(member_of(oldch, bob));
+  assert_int_equal(sent_count_to(peer), 2);             /* J and L: no MODE */
+  assert_string_equal(sent_to(peer, 1), "ACAAC L #old :Channel has moved to #new");
+  assert_int_equal(sent_count_to(alice), 0);
+}
+
+/* ... and opped in the tombstone since, with ops. */
+static void opped_in_the_tombstone_since_follows_with_ops(void **state)
 {
   struct Client *alice = user_on(&me, "alice", "AAB");
   struct Client *bob = user_on(&me, "bob", "AAC");
-  struct Channel *newch;
-  unsigned int flags = 0;
-  int oplevel = -1;
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "");
+  member_of(oldch, bob)->status |= CHFL_CHANOP | CHFL_VOICE;
+  assert_int_equal(joins(bob, channel_named("#new")), CHFL_CHANOP | CHFL_VOICE);
+}
+
+/* Kicked from the tombstone (or parted from it): not a member, nothing to
+ * take -- an ordinary JOIN.  The same for a zombie, a member that was
+ * kicked but has not been removed yet. */
+static void not_in_the_tombstone_any_more_gets_nothing(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  add_member(oldch, carol, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+
+  remove_user_from_channel(bob, oldch);                 /* KICK #old bob */
+  member_of(oldch, carol)->status |= CHFL_ZOMBIE;
+  forget();
+
+  assert_int_equal(joins(bob, newch), 0);
+  assert_int_equal(joins(carol, newch), 0);
+  assert_int_equal(sent_count_to(peer), 2);             /* the two J */
+  assert_int_equal(sent_count_to(bob), 0);
+  assert_non_null(member_of(oldch, carol));             /* the zombie stays */
+}
+
+/* Used once.  The follower is deopped in the new channel, parts and joins
+ * again: nothing -- it is not in the tombstone, and no server holds a
+ * copy of anything.  The same when it comes back through another server. */
+static void status_is_carried_over_once(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *bob_elsewhere;
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  login(bob, "bobacct");
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+
+  assert_int_equal(joins(bob, newch), CHFL_CHANOP);
+  member_of(newch, bob)->status &= ~CHFL_CHANOP;        /* M #new -o bob */
+  remove_user_from_channel(bob, newch);                 /* PART #new */
+  forget();
+  assert_int_equal(joins(bob, newch), 0);
+  assert_int_equal(sent_count_to(peer), 1);             /* the J alone */
+
+  /* reconnected through the peer, same account, same nick and host: its
+   * JOIN arrives as a remote JOIN and this server gives it nothing */
+  remove_user_from_channel(bob, newch);
+  bob_elsewhere = user_on(peer, "bob", "AAF");
+  login(bob_elsewhere, "bobacct");
+  forget();
+  assert_int_equal(joins(bob_elsewhere, newch), 0);
+  assert_int_equal(sent_count_to(alice), 0);
+  assert_null(member_of(oldch, bob_elsewhere));
+}
+
+/* Never in the old channel: an ordinary JOIN. */
+static void never_a_member_gets_nothing(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *eve = user_on(&me, "eve", "AAE");
   (void)state;
 
   feat_rename_consent = 1;
   add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
-  client_rename(alice, "#old", "#new", "moving");
+  client_rename(alice, "#old", "#new", "");
+  forget();
 
+  assert_int_equal(joins(eve, channel_named("#new")), 0);
+  assert_int_equal(sent_count_to(peer), 1);
+  assert_int_equal(sent_count_to(eve), 0);
+}
+
+/* The issuer was moved by the relocation and is not in the tombstone:
+ * deopped in the new channel, a PART and a JOIN give it nothing. */
+static void issuer_has_nothing_to_take(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
   newch = channel_named("#new");
-  assert_non_null(member_of(newch, alice));
   assert_true(member_of(newch, alice)->status & CHFL_CHANOP);
-  assert_int_equal(relocate_snap_lookup(newch, alice, &flags, &oplevel), 0);
+
+  add_member(newch, bob, 0);                    /* somebody keeps it alive */
+  remove_user_from_channel(alice, newch);
+  assert_int_equal(joins(alice, newch), 0);
 }
 
-/* #new empties and a stranger creates it again inside the grace: a
- * former op of #old is not opped in the stranger's channel. */
-static void snapshot_is_not_honoured_in_a_recreated_channel(void **state)
+/* Somebody who is ALREADY in the new channel and also still in the
+ * tombstone (it got into the new channel some other way).  do_join()
+ * ignores its JOIN of the new channel before anything here runs, so
+ * nothing moves; it is swept from the tombstone at the deadline.  When it
+ * parts the new channel and really joins it, it follows like anybody. */
+static void already_in_the_new_channel(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  add_member(newch, bob, 0);                    /* e.g. SVSJOIN */
+  forget();
+
+  /* "JOIN #new": find_member_link() says already on channel; do_join()
+   * returns.  Nothing was called, nothing changed. */
+  assert_non_null(member_of(oldch, bob));
+  assert_false(member_of(newch, bob)->status & CHFL_CHANOP);
+
+  remove_user_from_channel(bob, newch);         /* PART #new */
+  assert_int_equal(joins(bob, newch), CHFL_CHANOP);
+  assert_null(member_of(oldch, bob));
+}
+
+/* What the JOIN itself gave is kept, and only what is missing is added. */
+static void follower_is_never_given_less_than_the_join_gave(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP | CHFL_VOICE);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  forget();
+
+  /* the JOIN opped it (a channel key that does) */
+  add_member(newch, bob, CHFL_CHANOP);
+  relocate_follow(bob, bob, newch);
+
+  assert_int_equal(member_of(newch, bob)->status & STATUS,
+                   CHFL_CHANOP | CHFL_VOICE);
+  assert_string_equal(sent_to(peer, 0), "AC M #new +v ACAAC 500000");
+  assert_null(member_of(oldch, bob));
+}
+
+/* A channel with oplevels (+A): the oplevel the member holds in the
+ * tombstone goes with the op, on the wire as "<numnick>:<level>". */
+static void follower_takes_its_oplevel(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  SetOpLevel(add_member(oldch, bob, CHFL_CHANOP), 3);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  forget();
+
+  assert_int_equal(joins(bob, newch), CHFL_CHANOP);
+  assert_int_equal(OpLevel(member_of(newch, bob)), 3);
+  assert_string_equal(sent_to(peer, 1), "AC M #new +o ACAAC:3 500000");
+}
+
+/* The new channel emptied and a stranger made it again: it is not the
+ * channel the relocation made (another creation timestamp).  A member of
+ * the tombstone who joins it takes nothing into the stranger's channel
+ * and stays in the tombstone. */
+static void nothing_follows_into_a_recreated_channel(void **state)
 {
   struct Client *alice = user_on(&me, "alice", "AAB");
   struct Client *bob = user_on(&me, "bob", "AAC");
   struct Client *carol = user_on(&me, "carol", "AAD");
-  struct Channel *newch, *again;
+  struct Channel *oldch, *newch, *again;
   char name[] = "#new";
-  unsigned int flags = 0;
-  int oplevel = -1;
   (void)state;
 
   feat_rename_consent = 1;
-  add_member(channel_at("#old", 500000, alice), bob, CHFL_CHANOP);
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
   client_rename(alice, "#old", "#new", "moving");
 
   newch = channel_named("#new");
@@ -2217,33 +2654,223 @@ static void snapshot_is_not_honoured_in_a_recreated_channel(void **state)
   assert_true(was_destroyed(newch));
 
   again = get_channel(carol, name, CGT_CREATE);
-  assert_ptr_not_equal(again, newch);
   assert_int_equal(again->creationtime, CurrentTime);
   add_member(again, carol, CHFL_CHANOP);
+  forget();
 
-  assert_int_equal(relocate_snap_lookup(again, bob, &flags, &oplevel), 0);
-  assert_int_equal(flags, 0);
+  assert_int_equal(joins(bob, again), 0);
+  assert_non_null(member_of(oldch, bob));
+  assert_true(member_of(oldch, bob)->status & CHFL_CHANOP);
+  assert_int_equal(sent_count_to(carol), 0);
 }
 
-/* A chain keeps the binding: #a -> #b -> #c, and an op of #a who follows
- * straight to #c is restored there. */
-static void snapshot_follows_a_chain_to_the_same_channel(void **state)
+/* A chain: #a -> #b -> #c.  Both tombstones point at #c.  A member of #a
+ * who joins #c moves from #a; one who is in BOTH old channels leaves both
+ * with one PART and takes the union of what it holds in them. */
+static void follower_through_a_chain(void **state)
 {
+  struct Client *peer = linked("peer.example", "Bj", "v");
   struct Client *alice = user_on(&me, "alice", "AAB");
   struct Client *bob = user_on(&me, "bob", "AAC");
-  unsigned int flags = 0;
-  int oplevel = -1;
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *a, *b, *c;
   (void)state;
 
   feat_rename_consent = 1;
-  add_member(channel_at("#a", 500000, alice), bob, CHFL_CHANOP);
+  a = channel_at("#a", 500000, alice);
+  add_member(a, bob, CHFL_CHANOP);
+  add_member(a, carol, CHFL_VOICE);
   client_rename(alice, "#a", "#b", "one");
+  b = channel_named("#b");
+  assert_int_equal(joins(carol, b), CHFL_VOICE);        /* carol follows once */
+  add_member(a, carol, CHFL_VOICE);                     /* (and rejoins #a) */
+  member_of(b, carol)->status |= CHFL_HALFOP;
   client_rename(alice, "#b", "#c", "two");
+  c = channel_named("#c");
+  assert_string_equal(a->mode.redir, "#c");
+  assert_string_equal(b->mode.redir, "#c");
+  forget();
 
-  assert_string_equal(channel_named("#a")->mode.redir, "#c");
-  assert_int_equal(relocate_snap_lookup(channel_named("#c"), bob, &flags,
-                                        &oplevel), 1);
-  assert_int_equal(flags, CHFL_CHANOP);
+  /* bob: in #a only */
+  assert_int_equal(joins(bob, c), CHFL_CHANOP);
+  assert_null(member_of(a, bob));
+  assert_string_equal(sent_to(peer, 2), "ACAAC L #a :Channel has moved to #c");
+
+  /* carol: voice in #a, voice and halfop in #b */
+  forget();
+  assert_int_equal(joins(carol, c), CHFL_VOICE | CHFL_HALFOP);
+  assert_null(member_of(a, carol));
+  assert_null(member_of(b, carol));
+  assert_int_equal(sent_count_to(peer), 3);
+  assert_string_equal(sent_to(peer, 1), "AC M #c +hv ACAAD ACAAD 500000");
+  assert_string_equal(sent_to(peer, 2), "ACAAD L #b,#a :Channel has moved to #c");
+}
+
+/* A tombstone that is not one any more -- a chanop took +L off -- moves
+ * nobody: its member joins the new channel like anybody else. */
+static void cancelled_tombstone_moves_nobody(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  oldch->mode.redir[0] = '\0';                          /* MODE #old -L */
+
+  assert_int_equal(joins(bob, channel_named("#new")), 0);
+  assert_non_null(member_of(oldch, bob));
+}
+
+/* Delayed join.  The new channel is +D: a follower with status is shown
+ * to the channel before it is opped; one without stays hidden.  And a
+ * member the TOMBSTONE never saw join is not announced leaving it -- only
+ * its own connection is told. */
+static void follower_and_delayed_join(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  oldch->mode.mode |= MODE_DELJOINS;
+  add_member(oldch, bob, CHFL_CHANOP);
+  add_member(oldch, carol, CHFL_DELAYED);       /* hidden in #old */
+  add_member(oldch, dan, 0);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  assert_true(newch->mode.mode & MODE_DELJOINS);
+  forget();
+
+  /* with status: revealed, then opped */
+  assert_int_equal(joins(bob, newch), CHFL_CHANOP);
+  assert_false(member_of(newch, bob)->status & CHFL_DELAYED);
+  assert_string_equal(sent_to(alice, 0), ":bob!user@host.example JOIN #new");
+  assert_string_equal(sent_to(alice, 1), ":me.example MODE #new +o bob");
+
+  /* without: hidden in the new channel too; and its PART of the old
+   * channel, where it was hidden, goes to itself alone */
+  forget();
+  assert_int_equal(joins(carol, newch), 0);
+  assert_true(member_of(newch, carol)->status & CHFL_DELAYED);
+  assert_null(member_of(oldch, carol));
+  assert_int_equal(sent_count_to(alice), 0);
+  assert_int_equal(sent_count_to(dan), 0);
+  assert_string_equal(sent_to(carol, 0),
+                      ":carol!user@host.example PART #old :Channel has moved to #new");
+  /* the network is told all the same */
+  assert_string_equal(sent_to(peer, 1), "ACAAD L #old :Channel has moved to #new");
+}
+
+/* A bouncer session.  The membership is the primary's; its devices hold
+ * shadows of it.  A JOIN from a device is the primary's JOIN (m_join()
+ * rewrites the source): the primary takes the status and is parted, both
+ * connections hear the PART, and the shadow goes with the membership. */
+static void follower_with_a_bouncer_device(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *primary = user_on(&me, "dana", "AAC");
+  struct Client *device = user_on(&me, "dana", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  SetBouncerAlias(device);
+  cli_user(device)->alias_primary = primary;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, primary, CHFL_CHANOP);
+  add_member(oldch, device, CHFL_ALIAS | CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  forget();
+
+  /* "JOIN #new" typed on the device */
+  assert_int_equal(joins_from(device, primary, newch), CHFL_CHANOP);
+
+  assert_null(member_of(oldch, primary));
+  assert_null(member_of(oldch, device));
+  assert_int_equal(oldch->aliases, 0);
+  assert_string_equal(sent_to(peer, 2), "ACAAC L #old :Channel has moved to #new");
+  assert_string_equal(sent_to(primary, sent_count_to(primary) - 1),
+                      ":dana!user@host.example PART #old :Channel has moved to #new");
+  assert_string_equal(sent_to(device, sent_count_to(device) - 1),
+                      ":dana!user@host.example PART #old :Channel has moved to #new");
+  assert_int_equal(alias_syncs, 1);
+}
+
+/* A device whose primary is on ANOTHER server: the JOIN is the remote
+ * primary's, this server is not its server, and nothing is done here --
+ * the session stays in the tombstone until the deadline. */
+static void device_of_a_remote_primary_does_not_follow_here(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *primary = user_on(peer, "dana", "AAC");
+  struct Client *device = user_on(&me, "dana", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  SetBouncerAlias(device);
+  cli_user(device)->alias_primary = primary;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, primary, CHFL_CHANOP);
+  add_member(oldch, device, CHFL_ALIAS | CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  forget();
+
+  assert_int_equal(joins_from(device, primary, newch), 0);
+  /* do_join() does not even call it for a user that is not local; called
+   * all the same, it does nothing */
+  relocate_follow(device, primary, newch);
+  assert_int_equal(member_of(newch, primary)->status & STATUS, 0);
+  assert_non_null(member_of(oldch, primary));
+  assert_non_null(member_of(oldch, device));
+  assert_int_equal(sent_count_to(peer), 1);             /* the J */
+}
+
+/* A remote user's follow reaches this server as three ordinary lines from
+ * its own server -- J, M, L -- and this server adds nothing of its own to
+ * any of them. */
+static void remote_follower_is_just_applied(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *eve = user_on(peer, "eve", "AAE");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, eve, CHFL_CHANOP);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  newch = channel_named("#new");
+  forget();
+
+  /* BjAAE J #new 500000 */
+  assert_int_equal(joins(eve, newch), 0);
+  relocate_follow(eve, eve, newch);             /* not even if it were called */
+  assert_int_equal(member_of(newch, eve)->status & STATUS, 0);
+  /* nothing but the relayed J went anywhere (the fake sends it to every
+   * link); eve is in both channels until her server's M and L arrive */
+  assert_int_equal(sent_count_to(down), 1);
+  assert_int_equal(sent_count_to(carol), 0);
+  assert_non_null(member_of(oldch, eve));
+  assert_int_equal(alias_syncs, 0);
 }
 
 /* --- C.1: a dissolved tombstone is never left +z --- */
@@ -2612,8 +3239,6 @@ static void grace_zero_dissolves_at_once(void **state)
   struct Client *bob = user_on(&me, "bob", "AAC");
   struct Client *dave = user_on(peer, "dave", "AAD");
   struct Channel *oldch, *newch;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   feat_rename_consent = 1;
@@ -2648,15 +3273,17 @@ static void grace_zero_dissolves_at_once(void **state)
                       ":bob!user@host.example PART #old :Channel has moved to #new");
   assert_int_equal(sent_count_to(bob), 5);
 
-  /* nothing left behind: no channel, no timer, no snapshot */
+  /* nothing left behind: no channel, no timer */
   assert_true(was_destroyed(oldch));
   assert_null(channel_named("#old"));
   assert_int_equal(ntimers, 0);
-  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 0);
 
   /* the deadline on the wire is now */
   assert_string_equal(sent_to(peer, 0), "ACAAB RN #old #new C 1000000 :now");
   assert_string_equal(sent_to(x3, 0), "ACAAB RN #old #new C 1000000 :now");
+
+  /* ... and nothing to take along: swept, bob joins like anybody */
+  assert_int_equal(joins(bob, newch), 0);
 }
 
 /* The name is free again at once: it can be created and relocated anew,
@@ -2739,8 +3366,6 @@ static void registered_tombstone_is_cancelled_at_the_deadline(void **state)
   struct Client *bob = user_on(&me, "bob", "AAC");
   struct Client *dave = user_on(peer, "dave", "AAD");
   struct Channel *oldch, *newch;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   feat_rename_consent = 1;
@@ -2772,11 +3397,14 @@ static void registered_tombstone_is_cancelled_at_the_deadline(void **state)
   assert_true(oldch->mode.mode & MODE_REGISTERED);
   assert_true(oldch->mode.exmode & EXMODE_PERSIST);
   assert_false(was_destroyed(oldch));
-  /* the record is gone, and its snapshots with it */
+  /* the record is gone */
   assert_int_equal(ntimers, 0);
-  assert_int_equal(relocate_snap_lookup(newch, bob, &flags, &oplevel), 0);
   /* nothing goes to a server: every server does this by itself */
   assert_int_equal(sent_count_to(peer), 0);
+  /* and #old is an ordinary channel: its op joins #new as anybody would,
+   * taking nothing and leaving nothing */
+  assert_int_equal(joins(bob, newch), 0);
+  assert_non_null(member_of(oldch, bob));
 }
 
 /* The race that makes "at the deadline" the rule.  A channel is
@@ -2818,13 +3446,13 @@ static void stray_registration_after_the_relocation(void **state)
   struct Client *peer = linked("peer.example", "Bj", "v");
   struct Client *bob = user_on(peer, "bob", "AAC");
   struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
   struct Channel *oldch, *newch;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   oldch = channel_at("#old", 500000, bob);
   add_member(oldch, carol, CHFL_VOICE);
+  add_member(oldch, dan, CHFL_VOICE);
 
   server_relocate(peer, bob, "#old", "#new", "1000900", "");
   newch = channel_named("#new");
@@ -2838,8 +3466,9 @@ static void stray_registration_after_the_relocation(void **state)
   advance(899);
   assert_non_null(member_of(oldch, carol));
   assert_string_equal(oldch->mode.redir, "#new");
-  assert_int_equal(relocate_snap_lookup(newch, carol, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_VOICE);
+  /* it is still a tombstone to follow out of */
+  assert_int_equal(joins(dan, newch), CHFL_VOICE);
+  assert_null(member_of(oldch, dan));
 
   advance(1);
   assert_non_null(member_of(oldch, carol));
@@ -3162,14 +3791,14 @@ static void renamed_tombstone_keeps_its_record(void **state)
   struct Client *bob = user_on(peer, "bob", "AAC");
   struct Client *eve = user_on(peer, "eve", "AAE");
   struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAG");
   struct Channel *oldch, *renamed;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   oldch = channel_at("#old", 500000, bob);
   add_member(oldch, eve, CHFL_CHANOP);
   add_member(oldch, carol, CHFL_VOICE);
+  add_member(oldch, dan, CHFL_VOICE);
   server_relocate(peer, bob, "#old", "#new", "1000900", "");
   forget();
 
@@ -3184,10 +3813,9 @@ static void renamed_tombstone_keeps_its_record(void **state)
   assert_int_equal(nopnotices, 0);
   assert_int_equal(timers_at(1000900), 1);
   assert_int_equal(ntimers, 1);
-  /* a follower is still restored */
-  assert_int_equal(relocate_snap_lookup(channel_named("#new"), carol, &flags,
-                                        &oplevel), 1);
-  assert_int_equal(flags, CHFL_VOICE);
+  /* a member still follows out of it, with its status */
+  assert_int_equal(joins(dan, channel_named("#new")), CHFL_VOICE);
+  assert_null(member_of(renamed, dan));
   forget();
 
   advance(900);
@@ -3273,8 +3901,6 @@ static void uma_relocates(struct Crossing *w)
 static void assert_crossing_end_state(struct Crossing *w)
 {
   struct Channel *x = channel_named("#x"), *y = channel_named("#y");
-  unsigned int flags;
-  int oplevel;
 
   assert_non_null(x);
   assert_non_null(y);
@@ -3312,20 +3938,16 @@ static void assert_crossing_end_state(struct Crossing *w)
   assert_int_equal(ntimers, 2);
   assert_int_equal(timers_at(1000900), 2);
 
-  /* a member of #old regains its status in the winner; so does the
-   * loser's issuer, who was one -- each once */
-  flags = 0;
-  assert_int_equal(relocate_snap_lookup(x, w->carol, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_VOICE);
-  assert_int_equal(relocate_snap_lookup(x, w->carol, &flags, &oplevel), 0);
-  flags = 0;
-  assert_int_equal(relocate_snap_lookup(x, w->uma, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_CHANOP);
-  assert_int_equal(relocate_snap_lookup(x, w->uma, &flags, &oplevel), 0);
-  /* the winner's issuer was moved with its status and has none */
-  assert_int_equal(relocate_snap_lookup(x, w->vic, &flags, &oplevel), 0);
-  /* and nothing restores anybody in the loser */
-  assert_int_equal(relocate_snap_lookup(y, w->carol, &flags, &oplevel), 0);
+  /* a member of #old follows into the WINNER with its status and leaves
+   * #old; joining the loser moves nobody (it is no tombstone's target) */
+  assert_int_equal(joins(w->carol, y), 0);
+  assert_non_null(member_of(w->old, w->carol));
+  remove_user_from_channel(w->carol, y);
+  assert_int_equal(joins(w->carol, x), CHFL_VOICE);
+  assert_null(member_of(w->old, w->carol));
+  /* (uma, in the loser, is another server's user: her own server moves
+   * her when she joins #x -- crossing_loser_with_the_cap_gets_a_relocate
+   * has the local case) */
 
   /* at the deadline both tombstones go, and the winner stays */
   advance(900);
@@ -3448,6 +4070,13 @@ static void crossing_loser_with_the_cap_gets_a_relocate(void **state)
 
   assert_string_equal(sent_to(uma, 0),
                       ":vic!user@host.example RELOCATE #y #x :to x");
+
+  /* she follows from the LOSER's channel, itself a tombstone now, with the
+   * status she holds there, and leaves it */
+  assert_int_equal(joins(uma, channel_named("#x")), CHFL_CHANOP);
+  assert_null(member_of(channel_named("#y"), uma));
+  assert_string_equal(sent_to(peer, sent_count_to(peer) - 1),
+                      "ACAAD L #y :Channel has moved to #x");
 }
 
 /* The winner's issuer on its own server: nothing changes for it; the
@@ -4016,13 +4645,13 @@ static void announcement_builds_the_record(void **state)
   struct Client *down = linked("down.example", "Bk", "v");
   struct Client *bob = user_on(peer, "bob", "AAC");
   struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAG");
   struct Channel *oldch, *newch;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   oldch = burst_tombstone("#old", 500000, "#new", bob);
   add_member(oldch, carol, CHFL_CHANOP);
+  add_member(oldch, dan, CHFL_CHANOP);
   /* our side still had +l */
   oldch->mode.limit = 10;
   newch = channel_at("#new", 500000, bob);
@@ -4038,8 +4667,9 @@ static void announcement_builds_the_record(void **state)
                          "follow; this channel closes in 15 minutes."));
   assert_int_equal(sent_count_to(carol), 1);
   assert_string_equal(sent_to(down, 0), "Bj RT #old 500000 #new 1000900");
-  assert_int_equal(relocate_snap_lookup(newch, carol, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_CHANOP);
+  /* a member follows from it as from any tombstone */
+  assert_int_equal(joins(dan, newch), CHFL_CHANOP);
+  assert_null(member_of(oldch, dan));
 
   /* and this server now announces it in its own bursts */
   forget();
@@ -4400,8 +5030,6 @@ static void disagreeing_announcements_on_the_losing_side(void **state)
   struct Client *uma = user_on(&me, "uma", "AAD");
   struct Client *carol = user_on(&me, "carol", "AAE");
   struct Channel *oldch, *y, *x;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   feat_rename_consent = 1;
@@ -4427,12 +5055,11 @@ static void disagreeing_announcements_on_the_losing_side(void **state)
   /* uma, in the loser, is told like any stayer */
   assert_non_null(strstr(sent_to(uma, 0), "NOTICE #y :#y has moved to #x. Join #x"));
   assert_string_equal(sent_to(uma, 1), ":me.example MODE #y +L #x");
-  /* carol's snapshot in #old's record now restores her in the winner */
-  assert_int_equal(relocate_snap_lookup(x, carol, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_VOICE);
-  flags = 0;
-  assert_int_equal(relocate_snap_lookup(x, uma, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_CHANOP);
+  /* carol, in #old, and uma, in the loser, both follow into the winner */
+  assert_int_equal(joins(carol, x), CHFL_VOICE);
+  assert_null(member_of(oldch, carol));
+  assert_int_equal(joins(uma, x), CHFL_CHANOP);
+  assert_null(member_of(y, uma));
 
   /* what this side announces from now on is the agreed state */
   forget();
@@ -4561,9 +5188,8 @@ static void netjoin_leaf_with_a_local_member_gets_the_tombstone(void **state)
   struct Client *hub = linked("hub.example", "Bj", "v");
   struct Client *issuer = user_on(hub, "issuer", "AA7");
   struct Client *stayer = user_on(&me, "stayer", "AAE");
+  struct Client *other = user_on(&me, "other", "AAF");
   struct Channel *oldch, *newch;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   /* ours since before the split: +tn, our member (voiced, say) */
@@ -4571,6 +5197,7 @@ static void netjoin_leaf_with_a_local_member_gets_the_tombstone(void **state)
   oldch->creationtime = 500000;
   oldch->mode.mode |= MODE_TOPICLIMIT | MODE_NOPRIVMSGS;
   add_member(oldch, stayer, CHFL_VOICE);
+  add_member(oldch, other, CHFL_VOICE);
 
   /* Bj B #rsspn 500000 +tn BjAA7:o */
   newch = channel_at("#rsspn", 500000, issuer);
@@ -4581,15 +5208,16 @@ static void netjoin_leaf_with_a_local_member_gets_the_tombstone(void **state)
   /* Bj RT #rssp 500000 #rsspn 1000045 */
   server_tombstone(hub, hub, "#rssp", "500000", "#rsspn", "1000045");
 
-  /* Defect 1: the member is told NOW */
+  /* Defect 1: the members are told NOW */
+  assert_int_equal(sent_count_to(other), 1);
   assert_int_equal(sent_count_to(stayer), 1);
   assert_non_null(strstr(sent_to(stayer, 0),
                          "NOTICE #rssp :#rssp has moved to #rsspn. Join "
                          "#rsspn to follow; this channel closes in 0 minutes."));
   assert_int_equal(timers_at(1000045), 1);
-  /* ... can regain its status by following ... */
-  assert_int_equal(relocate_snap_lookup(newch, stayer, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_VOICE);
+  /* ... one of them follows, with its status ... */
+  assert_int_equal(joins(other, newch), CHFL_VOICE);
+  assert_null(member_of(oldch, other));
   /* ... and the leaf announces the tombstone onward as its own */
   forget();
   burst_to(hub);
@@ -5006,7 +5634,7 @@ static void another_channel_under_a_stale_record_is_renamed_as_itself(void **sta
  * a MODE or CREATE carrying an older timestamp, a BURST for an empty
  * channel a few seconds off.  It is the same channel with its marks; the
  * record follows the timestamp, and so does a record that points AT the
- * channel (its snapshots are bound to the target's timestamp). */
+ * channel (which knows the channel to follow into by that timestamp). */
 static void record_follows_a_corrected_timestamp(void **state)
 {
   struct Client *peer = linked("peer.example", "Bj", "v");
@@ -5014,8 +5642,6 @@ static void record_follows_a_corrected_timestamp(void **state)
   struct Client *carol = user_on(&me, "carol", "AAE");
   struct Client *down;
   struct Channel *oldch, *newch;
-  unsigned int flags = 0;
-  int oplevel = 0;
   (void)state;
 
   oldch = channel_at("#old", 500000, bob);
@@ -5033,10 +5659,10 @@ static void record_follows_a_corrected_timestamp(void **state)
   burst_to(down);
   assert_string_equal(sent_to(down, sent_count_to(down) - 1),
                       "AC RT #old 499998 #new 1000900");
-  /* ... a follower still restored in the new channel ... */
-  assert_int_equal(relocate_snap_lookup(newch, carol, &flags, &oplevel), 1);
-  assert_int_equal(flags, CHFL_VOICE);
-  /* ... and swept at the deadline */
+  /* ... a member still follows into the new channel ... */
+  assert_int_equal(joins(carol, newch), CHFL_VOICE);
+  assert_null(member_of(oldch, carol));
+  /* ... and dissolved at the deadline */
   advance(900);
   assert_true(was_destroyed(oldch));
   assert_false(logged("no longer authenticates"));
@@ -5206,10 +5832,23 @@ int main(void)
     T(fallback_join_has_the_form_the_member_negotiated),
     T(fallback_join_follows_each_bouncer_connection),
 
-    T(follower_regains_status_once),
-    T(issuer_has_no_snapshot),
-    T(snapshot_is_not_honoured_in_a_recreated_channel),
-    T(snapshot_follows_a_chain_to_the_same_channel),
+    T(follower_takes_its_current_status_and_leaves_the_tombstone),
+    T(deopped_in_the_tombstone_follows_without_ops),
+    T(opped_in_the_tombstone_since_follows_with_ops),
+    T(not_in_the_tombstone_any_more_gets_nothing),
+    T(status_is_carried_over_once),
+    T(never_a_member_gets_nothing),
+    T(issuer_has_nothing_to_take),
+    T(already_in_the_new_channel),
+    T(follower_is_never_given_less_than_the_join_gave),
+    T(follower_takes_its_oplevel),
+    T(nothing_follows_into_a_recreated_channel),
+    T(follower_through_a_chain),
+    T(cancelled_tombstone_moves_nobody),
+    T(follower_and_delayed_join),
+    T(follower_with_a_bouncer_device),
+    T(device_of_a_remote_primary_does_not_follow_here),
+    T(remote_follower_is_just_applied),
 
     T(dissolve_clears_the_persist_flag_it_set),
     T(dissolve_clears_a_persist_flag_that_was_there_before),

@@ -283,93 +283,21 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     }
   }
 
-  /* evilnet/channel-relocate, "Status preservation": a former member who
-   * follows to the new channel within the grace period gets back the
-   * op/halfop/voice (and oplevel) they held in the old channel at rename
-   * time.  Applies to BOTH branches above (an existing #new, or one this
-   * join just (re)created) -- but relocate_snap_lookup() matches only the
-   * channel the relocation made (its name and its creation timestamp), so
-   * a channel this join re-created under the name, or one a stranger
-   * re-created after the relocated one emptied, restores nothing.
+  /* evilnet/channel-relocate, "Status preservation": a member of the old
+   * channel's tombstone who follows -- this JOIN, of the channel the
+   * tombstone redirects to -- takes the status it holds in the tombstone
+   * right now into this channel and is parted from the tombstone
+   * (relocate_follow(), m_rename.c; no snapshots).  Both branches above
+   * come here; a channel this JOIN (re)created under the name is not the
+   * relocation's channel and nothing follows into it.
    *
-   * Only the joining user's OWN server performs this.  Every server that
-   * sees this JOIN reconstructs its own tombstone/snapshot list from its
-   * own local membership walk at relocate_execute() time (Task 2/3's
-   * per-server contract), so if every server tried to grant the restore
-   * independently off its own copy, each would broadcast its own MODE for
-   * what is really one event.  Gating on MyUser(sptr) makes this run
-   * exactly once, on the server the follow-join actually landed on; the
-   * MODE it broadcasts below is a perfectly ordinary network mode change,
-   * and every OTHER server applies it through the normal MODE path when it
-   * arrives, exactly as it would for a services-issued grant -- no special
-   * handling is needed anywhere else.  A remote sptr here (a bouncer alias
-   * whose primary lives elsewhere -- see the alias rewrite in m_join())
-   * simply does not get this treatment; that is a known gap, not a bug: the
-   * primary's own server never runs do_join() for this join at all (it
-   * sees ms_join() instead), so there is no second chance to apply it. */
-  if (MyUser(sptr)) {
-    struct Membership *rmember = find_member_link(chptr, sptr);
-    unsigned int rflags = 0;
-    int roplevel = 0;
-
-    /* "no status in the new channel" is CHFL_VOICED_OR_OPPED being clear --
-     * a member who already has any of op/halfop/voice from the join itself
-     * (channel creator, apass/upass match, etc.) keeps what the join gave
-     * them; this never downgrades, and consuming the snapshot here would
-     * otherwise burn it on a join that had no need for it.  rflags != 0 is
-     * checked too (review round 1, M1): a plain member's own snapshot
-     * carries flags == 0 (every member is snapshotted at relocate_execute()
-     * time, not just former op/halfop/voice holders), and there is nothing
-     * to grant or broadcast for that -- the lookup above still consumes it
-     * (it was that member's one shot at a restore either way), this just
-     * skips doing work for an empty grant. */
-    if (rmember && !(rmember->status & CHFL_VOICED_OR_OPPED)
-        && relocate_snap_lookup(chptr, sptr, &rflags, &roplevel)
-        && rflags != 0) {
-      struct ModeBuf mbuf;
-
-      /* Reveal a +D (delayed-join) member BEFORE writing status, mirroring
-       * mode_process_clients() (channel.c:4678-4679) exactly.  This is the
-       * COMMON case for a channel that carries MODE_DELJOINS, not an edge
-       * case: joinbuf_join() (channel.c:5431-5433) always adds a follow-
-       * joiner to a +D channel with CHFL_DELAYED set (the entry flags here
-       * are CHFL_DEOPPED, which is not in CHFL_VOICED_OR_OPPED), so
-       * relocate_snap_lookup() runs -- and can hit -- before this member has
-       * ever been revealed.  Without this, a granted CHFL_CHANOP would sit
-       * on a membership nobody's client has been told exists: a MODE for a
-       * nick absent from every local NAMES/JOIN view, and CHFL_DELAYED
-       * sitting alongside CHFL_CHANOP on the same Membership. */
-      if (IsDelayedJoin(rmember) && !IsZombie(rmember))
-        RevealDelayedJoin(rmember);
-
-      /* Clear CHFL_DEOPPED alongside granting status, mirroring the
-       * equivalent burst-revealed-chanop transition in m_burst.c (~494,
-       * ~519, ~563): a member who just joined deopped-by-server and is now
-       * being handed op/halfop/voice back is no longer "deopped". */
-      rmember->status = (rmember->status & ~CHFL_DEOPPED) | rflags;
-      SetOpLevel(rmember, roplevel);
-
-      /* Every OTHER client-mode grant in this codebase (channel.c:4692,
-       * m_clearmode.c:271) syncs the primary's bouncer aliases and marks
-       * the session dirty in the same breath; this grant is otherwise
-       * indistinguishable from those to a bouncer user's secondary
-       * connections, and skipping it would leave them with no @#chan
-       * delivery and no op perms until an unrelated mode change happened
-       * to resync. */
-      bounce_sync_alias_chanmodes(chptr, sptr);
-      bounce_mark_dirty(sptr);
-
-      modebuf_init(&mbuf, &me, cptr, chptr,
-                  MODEBUF_DEST_CHANNEL | MODEBUF_DEST_SERVER);
-      if (rflags & CHFL_CHANOP)
-        modebuf_mode_client(&mbuf, MODE_ADD | MODE_CHANOP, sptr, roplevel);
-      if (rflags & CHFL_HALFOP)
-        modebuf_mode_client(&mbuf, MODE_ADD | MODE_HALFOP, sptr, roplevel);
-      if (rflags & CHFL_VOICE)
-        modebuf_mode_client(&mbuf, MODE_ADD | MODE_VOICE, sptr, roplevel);
-      modebuf_flush(&mbuf);
-    }
-  }
+   * Only the user's OWN server does this, for its own JOIN, and what it
+   * does goes out as an ordinary MODE and an ordinary PART behind the
+   * JOIN; every other server just applies them.  A remote sptr here (a
+   * bouncer device whose primary is on another server -- see the alias
+   * rewrite in m_join()) is not a local user and gets none of it. */
+  if (MyUser(sptr))
+    relocate_follow(cptr, sptr, chptr);
 
   del_invite(sptr, chptr);
 
