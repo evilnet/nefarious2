@@ -2,22 +2,27 @@
  * IRC - Internet Relay Chat, include/rename_proto.h
  *
  * The parts of channel RENAME that depend on nothing but their arguments:
- * the cookie a services permission query travels under, and (below) the
- * rules a pair of channel names has to pass before a rename is attempted.
+ * the cookie a services permission query travels under, the rules a pair
+ * of channel names has to pass before a rename is attempted, and (last)
+ * the rules of relocation mode that every server has to apply alike.
  * Kept apart from m_rename.c so they can be unit-tested
  * (ircd/test/rename_proto_t.c).
  *
  * This file and rename_proto.c are the ircv3.2-upgrade branch's, which is
- * where renames are issued.  This branch only carries them (m_rename.c):
- * it never asks services anything, so it has no pending requests, never
- * calls rename_cookie_format(), and rename_reply_decide() never returns
- * RENAME_REPLY_APPLY to it.  The whole of both is kept so that the two
- * branches decide alike and are tested by the same cases.
+ * where renames and relocations are issued.  This branch only carries
+ * them (m_rename.c): it never asks services anything, so it has no
+ * pending requests, never calls rename_cookie_format(), and
+ * rename_reply_decide() never returns RENAME_REPLY_APPLY to it; and it
+ * never issues a relocation, so the RELOCATE_GRACE the comments below
+ * speak of is that branch's setting (this one has a fixed fallback, see
+ * m_rename.c).  The whole of both is kept so that the two branches decide
+ * alike and are tested by the same cases.
  */
 #ifndef INCLUDED_rename_proto_h
 #define INCLUDED_rename_proto_h
 
 #include <stddef.h>
+#include <time.h>
 
 /*
  * The services permission query for a registered channel
@@ -239,5 +244,249 @@ extern enum RenameNameError rename_check_names(const char *oldname,
  * @return A static string; never NULL.
  */
 extern const char *rename_name_error_text(enum RenameNameError err);
+
+/*
+ * Relocation mode (evilnet/channel-relocate): the deadline.
+ *
+ * A relocated channel's old name stays behind as a tombstone until a
+ * deadline, and every server has to dissolve it at the same moment.  So
+ * the deadline is an absolute time, computed once by the server that
+ * executes the relocation and carried by the message:
+ *
+ *     <user> RN <old> <new> C <expires> :<reason>
+ *     ABAAC RN #old #new C 1731340900 :moving
+ *
+ * <expires> is network time -- TStime(), the clock channel creation
+ * timestamps are in -- in seconds, as "%Tu" prints it: decimal digits, no
+ * sign, no leading zero.  A server from before the deadline travelled
+ * sends
+ *
+ *     <user> RN <old> <new> C :<reason>
+ *
+ * and a receiver of that form counts its own RELOCATE_GRACE from the
+ * moment of receipt, as every server used to.
+ */
+
+/** Longest grace, in seconds, and so the furthest a deadline may lie
+ * ahead: seven days.
+ *
+ * It is a constant of the protocol and not a feature, because every
+ * server must cut an over-long deadline to the same length.  A tombstone
+ * holds a name (+z, +L) that nobody can use; RELOCATE_GRACE is minutes
+ * (default 900 s) and a network that wants a long notice may want a day
+ * or two.  A week is beyond any of that and still bounds what one
+ * corrupt or hostile <expires> (0x7fffffff, say) can do: without a bound
+ * it would pin the name for decades, on every server. */
+#define RELOCATE_GRACE_MAX 604800
+
+/** Room for the longest <expires>: the nineteen digits of the largest
+ * 64-bit time_t, one to spare, and the terminating NUL. */
+#define RELOCATE_EXPIRY_BUFLEN 21
+
+/** The deadline of a relocation executed at @a now with a grace of
+ * @a grace seconds (the issuing server's RELOCATE_GRACE; also the
+ * fallback of a receiver that was sent no deadline).
+ * @param[in] now Network time.
+ * @param[in] grace Seconds; below 0 counts as 0 (dissolve at once),
+ *            above RELOCATE_GRACE_MAX as RELOCATE_GRACE_MAX, so that no
+ *            server announces a deadline another would cut.
+ * @return The deadline, network time.
+ */
+extern time_t relocate_expiry_from_grace(time_t now, int grace);
+
+/** Write a deadline as it goes on the wire.
+ * @param[out] buf Receives the digits, NUL-terminated.
+ * @param[in] buflen Size of @a buf; RELOCATE_EXPIRY_BUFLEN always suffices.
+ * @param[in] expires The deadline; a negative time is written as 0.
+ * @return The length written, or 0 when @a buf is too small (it then
+ *         holds an empty string if it has any room at all).
+ */
+extern int relocate_expiry_format(char *buf, size_t buflen, time_t expires);
+
+/** Read a deadline off the wire.
+ *
+ * Strict: only what relocate_expiry_format() can have written -- digits,
+ * no sign, no leading zero, no trailing byte, nothing that does not fit a
+ * time_t.  Anything else is not a deadline, and the caller falls back to
+ * its own grace rather than guess.
+ * @param[in] text The parameter as received (may be NULL).
+ * @param[out] expires Receives the deadline; untouched on failure.
+ * @return 1 when @a text is a deadline, 0 otherwise.
+ */
+extern int relocate_expiry_parse(const char *text, time_t *expires);
+
+/** What a receiver makes of a deadline. */
+enum RelocateExpiryKind {
+  RELOCATE_EXPIRY_LIVE = 0,   /**< ahead, within RELOCATE_GRACE_MAX: arm for it */
+  RELOCATE_EXPIRY_PAST,       /**< now or earlier: dissolve at once */
+  RELOCATE_EXPIRY_CLAMPED     /**< further ahead than RELOCATE_GRACE_MAX:
+                                   cut to now + RELOCATE_GRACE_MAX */
+};
+
+/** Judge a deadline against this server's clock.
+ *
+ * - Now or already past: the tombstone is dissolved at once.  The
+ *   deadline is left as it is, so a relay passes the same past time on
+ *   and every server behind it dissolves at once too.
+ * - More than RELOCATE_GRACE_MAX ahead: cut to now + RELOCATE_GRACE_MAX
+ *   (see the constant for why there is a bound and why it is fixed).
+ *   The cut value is what this server arms for AND what it relays, so
+ *   the servers behind it get a sane deadline and the same one; servers
+ *   that receive the absurd value by different routes cut at their own
+ *   moment of receipt and can differ by the delay between them.
+ * - Otherwise it is taken as it is.
+ *
+ * @param[in,out] expires The deadline; cut when the result is
+ *                RELOCATE_EXPIRY_CLAMPED, otherwise unchanged.
+ * @param[in] now Network time.
+ * @return What was found.
+ */
+extern enum RelocateExpiryKind relocate_expiry_check(time_t *expires,
+                                                     time_t now);
+
+/*
+ * Relocation mode: rules two servers apply to the same two inputs and
+ * must get the same answer from.
+ */
+
+/** One deadline from two, for a tombstone that two servers each hold a
+ * deadline for (the same relocation heard twice, two relocations of one
+ * channel that crossed, a burst announcement meeting a record): the LATER.
+ *
+ * Symmetric, idempotent and associative, so every server ends with the
+ * same deadline in whatever order and however often it hears the others.
+ * The later and not the earlier, for three reasons.  It is the only rule
+ * that can also be kept toward a server that has already dissolved its
+ * copy: that server holds no record and announces nothing, the server
+ * that still holds the tombstone bursts it, and the tombstone is back
+ * everywhere until the later deadline -- so "the earlier wins" could not
+ * be made true in that case, and "the later wins" always is.  It never
+ * takes away grace a member was promised ("this channel closes in N
+ * minutes").  And it cannot be driven upward: no server invents a later
+ * deadline when it merges, and every deadline that enters is bounded by
+ * RELOCATE_GRACE_MAX from the moment it was made.
+ * @param[in] a One deadline.
+ * @param[in] b The other.
+ * @return The deadline both servers keep.
+ */
+extern time_t relocate_deadline_merge(time_t a, time_t b);
+
+/** Order two channel names under the server casemapping: the order that
+ * decides which of two crossing relocations of one channel wins (the new
+ * name that sorts FIRST).
+ *
+ * Byte by byte after folding each byte with the ircd's lower-case table
+ * (ToLower(): A-Z, the rfc1459 pairs [ \ ] ^ -> { | } ~, and the ISO
+ * 8859-1 capitals), the folded bytes compared AS SIGNED bytes, the end of
+ * a name counting as a zero byte.  That is exactly what ircd_strcmp()
+ * computes where plain char is signed (x86-64, which every server of the
+ * network runs on) -- the comparison the +L burst merge in
+ * mode_parse_redir() already makes -- but written out so that the answer
+ * is the same on a platform where char is unsigned: the winner must not
+ * depend on the build host.  The consequences, pinned by the tests: a
+ * byte above 127 (any UTF-8 lead or continuation byte) sorts before
+ * every ASCII byte, and before the end of a name -- "#a" comes before
+ * "#ab" but after "#a" followed by such a byte.
+ * @param[in] a One name.
+ * @param[in] b The other.
+ * @return Below zero when @a a sorts first, above zero when @a b does,
+ *         zero when they are the same channel name.
+ */
+extern int relocate_name_cmp(const char *a, const char *b);
+
+/** The one of two new names that wins: relocate_name_cmp()'s first.
+ * @return @a a or @a b (@a a when they are the same name).
+ */
+extern const char *relocate_winner(const char *a, const char *b);
+
+/*
+ * Relocation mode: a tombstone announced in a burst
+ *
+ *     <server> RT <old> <old-creation-ts> <new> <expires>
+ *
+ * (ircd/m_rename.c, "The tombstone in the burst").  What it means to the
+ * receiver depends on what the receiver holds.
+ */
+
+/** How many seconds younger than the announced creation timestamp the
+ * channel here may be and still be the announced channel: m_burst.c's
+ * figure.  A BURST whose timestamp is up to this much OLDER than that of
+ * a channel here that has users does not wipe it ("do not deop our
+ * side"): it is merged as if the timestamps were equal, and the channel
+ * keeps its own.  The announcement follows that BURST, so it meets a
+ * channel that carries the tombstone's +z and +L under a timestamp of its
+ * own. */
+#define RELOCATE_TS_FUZZ 4
+
+/** Is the channel here, created at @a mine, the channel an announcement
+ * with creation timestamp @a announced is about?
+ *
+ * Yes when the timestamps are equal, or when the one here is younger by
+ * no more than RELOCATE_TS_FUZZ.  Those are exactly the states the BURST
+ * before the announcement leaves a channel in that took the tombstone's
+ * modes: it was wiped and took the sender's timestamp, it was new, it had
+ * the same timestamp, or it was merged under the rule above.  A channel
+ * here that is OLDER than announced won that BURST and took nothing; one
+ * younger by more would have been wiped and be equal now, so it is one
+ * the BURST never reached.
+ * @param[in] announced The <old-creation-ts> of the RT.
+ * @param[in] mine The creation timestamp of the channel of that name here.
+ * @return Non-zero when they are the same channel.
+ */
+extern int relocate_announce_ts_matches(time_t announced, time_t mine);
+
+/** What a server holds when an announcement arrives.  Fill in every
+ * field. */
+struct RelocateAnnounceFacts {
+  int channel_exists;   /**< a channel of the old name exists here */
+  int ts_matches;       /**< ... and it is the announced channel
+                             (relocate_announce_ts_matches()) */
+  int have_record;      /**< a tombstone record is kept for that channel --
+                             under the old name and made for the channel
+                             that is there, by creation timestamp --
+                             (whether or not the channel still carries its
+                             marks: the BURST that came first may have
+                             changed the redirect) */
+  int same_target;      /**< ... and its target is the one announced */
+};
+
+/** What to do with an announcement.  It is passed on in every case. */
+enum RelocateAnnounceVerdict {
+  RELOCATE_ANNOUNCE_NO_CHANNEL = 0, /**< nothing: no such channel here */
+  RELOCATE_ANNOUNCE_OTHER_CHANNEL,  /**< nothing: the channel of that name
+                                         here is another one (creation
+                                         timestamps differ) */
+  RELOCATE_ANNOUNCE_BUILD,          /**< make the record */
+  RELOCATE_ANNOUNCE_MERGE,          /**< the same tombstone: keep one
+                                         deadline (relocate_deadline_merge()) */
+  RELOCATE_ANNOUNCE_CROSS           /**< the two servers relocated the
+                                         channel to different names: the
+                                         crossing rule (relocate_name_cmp()) */
+};
+
+/** Decide what an announcement means here.
+ *
+ * - No channel of that name: nothing.  The BURST that precedes an
+ *   announcement creates the channel, so this is an announcement that
+ *   lost its BURST; there is nothing to make a tombstone of.
+ * - A channel with another creation timestamp: nothing.  The sender's
+ *   tombstone is an older or newer channel than the one here; the
+ *   timestamp rule of BURST has decided (or will, when ours reaches the
+ *   sender) which survives, and an announcement about the other says
+ *   nothing of this one.
+ * - The channel, and no record: build one.  Also when the channel is
+ *   registered -- whether a registered tombstone is cancelled is decided
+ *   at its deadline, not here -- and also when it does not carry the
+ *   redirect announced: the record then expires like any tombstone that
+ *   lost its redirect, which is what the sender's does.
+ * - The channel, and a record with the same target: one tombstone, two
+ *   deadlines; merge.
+ * - The channel, and a record with another target: a crossing.
+ *
+ * @param[in] facts What the caller found.
+ * @return The verdict.
+ */
+extern enum RelocateAnnounceVerdict
+relocate_announce_decide(const struct RelocateAnnounceFacts *facts);
 
 #endif /* INCLUDED_rename_proto_h */
