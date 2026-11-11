@@ -3207,6 +3207,568 @@ static void renamed_tombstone_frees_its_old_name(void **state)
   assert_string_equal(again->mode.redir, "#fresh");
 }
 
+/* --- B: two relocations of one channel that cross --- */
+
+/* The world of a crossing, seen from a third server: vic on one peer
+ * relocates #old to #x, uma on another relocates it to #y, each before
+ * hearing of the other.  #x sorts first and wins. */
+struct Crossing {
+  struct Client *pa, *pb, *x3;
+  struct Client *vic, *uma, *carol;
+  struct Channel *old;
+};
+
+static void crossing_world(struct Crossing *w)
+{
+  w->pa = linked("a.example", "Bj", "v");
+  w->pb = linked("b.example", "Bk", "v");
+  w->x3 = linked("x3.services", "AX", "sr");
+  w->vic = user_on(w->pa, "vic", "AAC");
+  w->uma = user_on(w->pb, "uma", "AAD");
+  w->carol = user_on(&me, "carol", "AAE");
+
+  w->old = channel_at("#old", 500000, w->vic);
+  add_member(w->old, w->uma, CHFL_CHANOP);
+  add_member(w->old, w->carol, CHFL_VOICE);
+  w->old->mode.mode |= MODE_NOPRIVMSGS | MODE_LIMIT;
+  w->old->mode.limit = 5;
+  ircd_strncpy(w->old->mode.key, "sesame", sizeof(w->old->mode.key));
+}
+
+static void vic_relocates(struct Crossing *w)
+{
+  server_relocate(w->pa, w->vic, "#old", "#x", "1000900", "to x");
+}
+
+static void uma_relocates(struct Crossing *w)
+{
+  server_relocate(w->pb, w->uma, "#old", "#y", "1000600", "to y");
+}
+
+/* What every server must hold after both, whichever came first. */
+static void assert_crossing_end_state(struct Crossing *w)
+{
+  struct Channel *x = channel_named("#x"), *y = channel_named("#y");
+  unsigned int flags;
+  int oplevel;
+
+  assert_non_null(x);
+  assert_non_null(y);
+  assert_ptr_equal(channel_named("#old"), w->old);
+
+  /* #old: a tombstone redirecting to the winner, with the stayer */
+  assert_string_equal(w->old->mode.redir, "#x");
+  assert_true(w->old->mode.mode & MODE_REDIRECT);
+  assert_true(w->old->mode.exmode & EXMODE_PERSIST);
+  assert_false(w->old->mode.mode & MODE_LIMIT);
+  assert_int_equal(w->old->users, 1);
+  assert_non_null(member_of(w->old, w->carol));
+
+  /* the winner: an ordinary channel with the state the old one had --
+   * nothing of the tombstone's +z, +L or redirect -- and its issuer */
+  assert_false(x->mode.exmode & EXMODE_PERSIST);
+  assert_false(x->mode.mode & MODE_REDIRECT);
+  assert_string_equal(x->mode.redir, "");
+  assert_true(x->mode.mode & MODE_NOPRIVMSGS);
+  assert_true(x->mode.mode & MODE_LIMIT);
+  assert_int_equal(x->mode.limit, 5);
+  assert_string_equal(x->mode.key, "sesame");
+  assert_int_equal(x->creationtime, 500000);
+  assert_int_equal(x->users, 1);
+  assert_true(member_of(x, w->vic)->status & CHFL_CHANOP);
+
+  /* the loser: a tombstone too, redirecting to the winner, with ITS
+   * issuer, who can follow from there */
+  assert_string_equal(y->mode.redir, "#x");
+  assert_true(y->mode.mode & MODE_REDIRECT);
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_true(y->mode.mode & MODE_NOPRIVMSGS);
+  assert_false(y->mode.mode & MODE_LIMIT);
+  assert_int_equal(y->mode.limit, 0);
+  assert_string_equal(y->mode.key, "sesame");
+  assert_int_equal(y->creationtime, 500000);
+  assert_int_equal(y->users, 1);
+  assert_true(member_of(y, w->uma)->status & CHFL_CHANOP);
+
+  /* two records, one deadline: the later of the two */
+  assert_int_equal(ntimers, 2);
+  assert_int_equal(timers_at(1000900), 2);
+
+  /* a member of #old regains its status in the winner; so does the
+   * loser's issuer, who was one -- each once */
+  flags = 0;
+  assert_int_equal(relocate_snap_lookup(x, w->carol, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_VOICE);
+  assert_int_equal(relocate_snap_lookup(x, w->carol, &flags, &oplevel), 0);
+  flags = 0;
+  assert_int_equal(relocate_snap_lookup(x, w->uma, &flags, &oplevel), 1);
+  assert_int_equal(flags, CHFL_CHANOP);
+  assert_int_equal(relocate_snap_lookup(x, w->uma, &flags, &oplevel), 0);
+  /* the winner's issuer was moved with its status and has none */
+  assert_int_equal(relocate_snap_lookup(x, w->vic, &flags, &oplevel), 0);
+  /* and nothing restores anybody in the loser */
+  assert_int_equal(relocate_snap_lookup(y, w->carol, &flags, &oplevel), 0);
+
+  /* at the deadline both tombstones go, and the winner stays */
+  advance(900);
+  assert_true(was_destroyed(w->old));
+  assert_true(was_destroyed(y));
+  assert_null(channel_named("#old"));
+  assert_null(channel_named("#y"));
+  assert_ptr_equal(channel_named("#x"), x);
+  assert_int_equal(ntimers, 0);
+}
+
+/* This server hears the winner first. */
+static void crossing_relocations_winner_first(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  vic_relocates(&w);
+  forget();
+  uma_relocates(&w);
+
+  /* each RN goes on as it came, with its own deadline: the servers
+   * behind work the same thing out from the same two lines */
+  assert_string_equal(sent_to(w.pa, 0), "BkAAD RN #old #y C 1000600 :to y");
+  assert_string_equal(sent_to(w.x3, 0), "BkAAD RN #old #y C 1000600 :to y");
+  assert_int_equal(sent_count_to(w.pb), 0);
+  /* the stayer saw the second issuer leave; the redirect did not change */
+  assert_string_equal(sent_to(w.carol, 0),
+                      ":uma!user@host.example PART #old :Moved to #y");
+  assert_int_equal(sent_count_to(w.carol), 1);
+  assert_int_equal(nopnotices, 0);
+
+  assert_crossing_end_state(&w);
+}
+
+/* This server hears the loser first: its first new channel becomes the
+ * second tombstone, and #old is pointed at the winner. */
+static void crossing_relocations_loser_first(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  uma_relocates(&w);
+  assert_string_equal(w.old->mode.redir, "#y");
+  assert_int_equal(channel_named("#y")->mode.limit, 5);
+  forget();
+  vic_relocates(&w);
+
+  assert_string_equal(sent_to(w.pb, 0), "BjAAC RN #old #x C 1000900 :to x");
+  assert_string_equal(sent_to(w.x3, 0), "BjAAC RN #old #x C 1000900 :to x");
+  assert_int_equal(sent_count_to(w.pa), 0);
+  /* the stayer saw the winner's issuer leave and the redirect change */
+  assert_string_equal(sent_to(w.carol, 0),
+                      ":vic!user@host.example PART #old :Moved to #x");
+  assert_string_equal(sent_to(w.carol, 1), ":me.example MODE #old +L #x");
+  assert_int_equal(sent_count_to(w.carol), 2);
+  assert_int_equal(nopnotices, 0);
+
+  assert_crossing_end_state(&w);
+}
+
+/* The issuer of the losing relocation on its own server: it sits in what
+ * is now a tombstone, and is told so like any stayer. */
+static void crossing_loser_is_told_on_its_own_server(void **state)
+{
+  struct Client *peer = linked("a.example", "Bj", "v");
+  struct Client *vic = user_on(peer, "vic", "AAC");
+  struct Client *uma = user_on(&me, "uma", "AAD");
+  struct Channel *oldch, *y;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 600;
+  CapSet(cli_active_own(uma), CAP_DRAFT_CHANRENAME);
+  oldch = channel_at("#old", 500000, vic);
+  add_member(oldch, uma, CHFL_CHANOP);
+
+  client_rename(uma, "#old", "#y", "to y");
+  y = channel_named("#y");
+  forget();
+  server_relocate(peer, vic, "#old", "#x", "1000900", "to x");
+
+  assert_string_equal(oldch->mode.redir, "#x");
+  assert_string_equal(y->mode.redir, "#x");
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_non_null(member_of(channel_named("#x"), vic));
+  assert_non_null(member_of(y, uma));
+  assert_non_null(strstr(sent_to(uma, 0),
+                         "NOTICE #y :#y has moved to #x (to x). Join #x to "
+                         "follow; this channel closes in 15 minutes."));
+  assert_string_equal(sent_to(uma, 1), ":me.example MODE #y +L #x");
+  assert_int_equal(sent_count_to(uma), 2);
+  assert_int_equal(timers_at(1000900), 2);
+
+  /* swept from the loser at the deadline */
+  forget();
+  advance(900);
+  assert_string_equal(sent_to(uma, 0),
+                      ":uma!user@host.example PART #y :Channel has moved to #x");
+  assert_true(was_destroyed(y));
+}
+
+/* ... and with evilnet/channel-relocate, as a RELOCATE from the winner's
+ * issuer. */
+static void crossing_loser_with_the_cap_gets_a_relocate(void **state)
+{
+  struct Client *peer = linked("a.example", "Bj", "v");
+  struct Client *vic = user_on(peer, "vic", "AAC");
+  struct Client *uma = user_on(&me, "uma", "AAD");
+  (void)state;
+
+  feat_rename_consent = 1;
+  CapSet(cli_active(uma), CAP_EVILNET_RELOCATE);
+  add_member(channel_at("#old", 500000, vic), uma, CHFL_CHANOP);
+  client_rename(uma, "#old", "#y", "");
+  forget();
+  server_relocate(peer, vic, "#old", "#x", "1000900", "to x");
+
+  assert_string_equal(sent_to(uma, 0),
+                      ":vic!user@host.example RELOCATE #y #x :to x");
+}
+
+/* The winner's issuer on its own server: nothing changes for it; the
+ * losing channel appears as a tombstone with its issuer in it. */
+static void crossing_winner_on_its_own_server(void **state)
+{
+  struct Client *peer = linked("b.example", "Bk", "v");
+  struct Client *uma = user_on(peer, "uma", "AAD");
+  struct Client *vic = user_on(&me, "vic", "AAC");
+  struct Channel *oldch, *y;
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_relocate_grace = 300;
+  oldch = channel_at("#old", 500000, vic);
+  add_member(oldch, uma, CHFL_CHANOP);
+
+  client_rename(vic, "#old", "#x", "to x");
+  forget();
+  server_relocate(peer, uma, "#old", "#y", "1000600", "to y");
+
+  y = channel_named("#y");
+  assert_non_null(y);
+  assert_string_equal(oldch->mode.redir, "#x");
+  assert_string_equal(y->mode.redir, "#x");
+  assert_non_null(member_of(y, uma));
+  assert_int_equal(oldch->users, 0);
+  assert_int_equal(sent_count_to(vic), 0);
+  /* one deadline for the pair: the later (uma's) */
+  assert_int_equal(timers_at(1000600), 2);
+  assert_int_equal(ntimers, 2);
+}
+
+/* Both servers relocated #old to the SAME name: nothing to decide.  The
+ * second issuer joins the first in the new channel, and the later
+ * deadline is kept. */
+static void same_relocation_twice_moves_the_second_issuer(void **state)
+{
+  struct Crossing w;
+  struct Channel *newch;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000300", "");
+  newch = channel_named("#new");
+  forget();
+  server_relocate(w.pb, w.uma, "#old", "#NEW", "1000900", "");
+
+  assert_ptr_equal(channel_named("#new"), newch);
+  assert_true(member_of(newch, w.vic)->status & CHFL_CHANOP);
+  assert_true(member_of(newch, w.uma)->status & CHFL_CHANOP);
+  assert_int_equal(newch->users, 2);
+  assert_int_equal(w.old->users, 1);
+  assert_string_equal(w.old->mode.redir, "#new");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_string_equal(sent_to(w.pa, 0), "BkAAD RN #old #NEW C 1000900 :");
+  assert_string_equal(sent_to(w.carol, 0),
+                      ":uma!user@host.example PART #old :Moved to #new");
+}
+
+/* ... and an earlier deadline in the second does not shorten the first. */
+static void same_relocation_twice_keeps_the_later_deadline(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000900", "");
+  server_relocate(w.pb, w.uma, "#old", "#new", "1000300", "");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000900), 1);
+
+  /* not even one that is already past: the armed record stays armed */
+  server_relocate(w.pb, w.uma, "#old", "#new", "999000", "");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000900), 1);
+  assert_ptr_equal(channel_named("#old"), w.old);
+}
+
+/* The merged deadline can itself be past: the record's timer is due this
+ * very second and has not run.  The tombstone is dissolved on the spot
+ * and its record, whose timer is armed, freed once. */
+static void merged_deadline_that_is_past_dissolves_through_the_timer(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000100", "");
+  assert_int_equal(timers_at(1000100), 1);
+
+  CurrentTime = 1000100;
+  server_relocate(w.pb, w.uma, "#old", "#new", "1000050", "");
+
+  assert_int_equal(ntimers, 0);
+  assert_true(was_destroyed(w.old));
+  assert_non_null(member_of(channel_named("#new"), w.uma));
+  advance(1000);
+}
+
+/* A chain is not a crossing: #a -> #b, then #b -> #c.  #b is no
+ * tombstone when it is relocated, so nobody "wins"; both old names
+ * redirect to #c, and #c carries nothing of a tombstone. */
+static void chain_is_not_a_crossing(void **state)
+{
+  struct Crossing w;
+  struct Channel *b, *c;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#b", "1000900", "");
+  b = channel_named("#b");
+  server_relocate(w.pa, w.vic, "#b", "#a", "1000950", "");     /* "#a" < "#b" */
+  c = channel_named("#a");
+
+  assert_non_null(c);
+  assert_string_equal(w.old->mode.redir, "#a");
+  assert_string_equal(b->mode.redir, "#a");
+  assert_true(b->mode.exmode & EXMODE_PERSIST);
+  assert_false(c->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(c->mode.redir, "");
+  assert_non_null(member_of(c, w.vic));
+  assert_int_equal(c->mode.limit, 5);
+  /* each keeps its own deadline */
+  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(timers_at(1000950), 1);
+  assert_int_equal(ntimers, 2);
+}
+
+/* A crossing under a chain: #first was relocated to #old before #old was
+ * relocated twice.  #first follows #old to the winner in either order,
+ * and keeps its own deadline. */
+static void crossing_carries_an_earlier_hop_to_the_winner(void **state)
+{
+  int order;
+  (void)state;
+
+  for (order = 0; order < 2; order++) {
+    struct Client *pa, *pb, *zed, *vic, *uma, *carol;
+    struct Channel *first, *oldch;
+
+    if (order) {
+      world_teardown(NULL);
+      world_setup(NULL);
+    }
+    pa = linked("a.example", "Bj", "v");
+    pb = linked("b.example", "Bk", "v");
+    zed = user_on(pa, "zed", "AAF");
+    vic = user_on(pa, "vic", "AAC");
+    uma = user_on(pb, "uma", "AAD");
+    carol = user_on(&me, "carol", "AAE");
+
+    first = channel_at("#first", 500000, zed);
+    add_member(first, carol, 0);
+    server_relocate(pa, zed, "#first", "#old", "1000500", "");
+    oldch = channel_named("#old");
+    add_member(oldch, vic, CHFL_CHANOP);        /* they followed */
+    add_member(oldch, uma, CHFL_CHANOP);
+    forget();
+
+    if (order == 0) {
+      server_relocate(pa, vic, "#old", "#x", "1000900", "");
+      server_relocate(pb, uma, "#old", "#y", "1000600", "");
+    } else {
+      server_relocate(pb, uma, "#old", "#y", "1000600", "");
+      assert_string_equal(first->mode.redir, "#y");
+      server_relocate(pa, vic, "#old", "#x", "1000900", "");
+    }
+
+    assert_string_equal(first->mode.redir, "#x");
+    assert_string_equal(oldch->mode.redir, "#x");
+    assert_string_equal(channel_named("#y")->mode.redir, "#x");
+    /* the local stayer of #first was told where it points now */
+    assert_string_equal(sent_to(carol, sent_count_to(carol) - 1),
+                        ":me.example MODE #first +L #x");
+    /* #first's deadline is its own; the crossing pair shares the later */
+    assert_int_equal(timers_at(1000500), 1);
+    assert_int_equal(timers_at(1000900), 2);
+    assert_int_equal(ntimers, 3);
+  }
+}
+
+/* The loser's channel emptied and was collected here before the winner
+ * arrived.  The servers that heard the winner first made that channel
+ * and hold it as a tombstone until the deadline; so must this one, or it
+ * is swept on some servers and not on others. */
+static void crossing_loser_that_emptied_here_is_a_tombstone_all_the_same(void **state)
+{
+  struct Crossing w;
+  struct Channel *y;
+  (void)state;
+
+  crossing_world(&w);
+  uma_relocates(&w);
+  y = channel_named("#y");
+  remove_user_from_channel(w.uma, y);           /* uma parts #y */
+  assert_true(was_destroyed(y));
+  vic_relocates(&w);
+
+  y = channel_named("#y");
+  assert_non_null(y);
+  assert_int_equal(y->users, 0);
+  assert_string_equal(y->mode.redir, "#x");
+  assert_true(y->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(y->creationtime, 500000);
+  assert_string_equal(w.old->mode.redir, "#x");
+  assert_non_null(member_of(channel_named("#x"), w.vic));
+  assert_int_equal(timers_at(1000900), 2);
+
+  advance(900);
+  assert_true(was_destroyed(y));
+  assert_null(channel_named("#y"));
+}
+
+/* ... which is what the server that heard the winner first holds after
+ * the same PART. */
+static void crossing_loser_that_emptied_after_both(void **state)
+{
+  struct Crossing w;
+  struct Channel *y;
+  (void)state;
+
+  crossing_world(&w);
+  vic_relocates(&w);
+  uma_relocates(&w);
+  y = channel_named("#y");
+  remove_user_from_channel(w.uma, y);
+
+  assert_false(was_destroyed(y));
+  assert_int_equal(y->users, 0);
+  assert_string_equal(y->mode.redir, "#x");
+  assert_int_equal(timers_at(1000900), 2);
+}
+
+/* The losing name is taken here by an unrelated channel: it is left
+ * alone, the operators are told, and #old still follows the winner. */
+static void crossing_loser_name_taken_here(void **state)
+{
+  struct Crossing w;
+  struct Client *dan = user_on(&me, "dan", "AAG");
+  struct Channel *y;
+  (void)state;
+
+  crossing_world(&w);
+  y = channel_at("#y", 700000, dan);
+  vic_relocates(&w);
+  forget();
+  uma_relocates(&w);
+
+  assert_string_equal(w.old->mode.redir, "#x");
+  assert_string_equal(y->mode.redir, "");
+  assert_false(y->mode.exmode & EXMODE_PERSIST);
+  assert_null(member_of(y, w.uma));
+  assert_int_equal(sent_count_to(dan), 0);
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "#y already exists"));
+  assert_string_equal(sent_to(w.pa, 0), "BkAAD RN #old #y C 1000600 :to y");
+}
+
+/* The winning name is taken here by an unrelated channel: nothing is
+ * touched, and the operators are told. */
+static void crossing_winner_name_taken_here(void **state)
+{
+  struct Crossing w;
+  struct Client *dan = user_on(&me, "dan", "AAG");
+  struct Channel *x;
+  (void)state;
+
+  crossing_world(&w);
+  x = channel_at("#x", 700000, dan);
+  uma_relocates(&w);
+  forget();
+  vic_relocates(&w);
+
+  assert_string_equal(w.old->mode.redir, "#y");
+  assert_null(member_of(x, w.vic));
+  assert_false(channel_named("#y")->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(sent_count_to(dan), 0);
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "#x already exists"));
+  assert_string_equal(sent_to(w.pb, 0), "BjAAC RN #old #x C 1000900 :to x");
+}
+
+/* Three relocations of one channel, in all six orders: the name that
+ * sorts first wins, the other two are tombstones redirecting to it, each
+ * issuer is in its own channel, and all three records share the latest
+ * deadline. */
+static void three_way_crossing_converges_in_every_order(void **state)
+{
+  static const int orders[6][3] = {
+    {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+  };
+  static const char *const target[3] = { "#p", "#q", "#r" };
+  static const char *const deadline[3] = { "1000600", "1000900", "1000700" };
+  int o, i;
+  (void)state;
+
+  for (o = 0; o < 6; o++) {
+    struct Client *peer[3], *who[3];
+    struct Channel *oldch;
+
+    if (o) {
+      world_teardown(NULL);
+      world_setup(NULL);
+    }
+    peer[0] = linked("a.example", "Bj", "v");
+    peer[1] = linked("b.example", "Bk", "v");
+    peer[2] = linked("c.example", "Bl", "v");
+    who[0] = user_on(peer[0], "one", "AAC");
+    who[1] = user_on(peer[1], "two", "AAD");
+    who[2] = user_on(peer[2], "three", "AAE");
+    oldch = channel_at("#old", 500000, who[0]);
+    add_member(oldch, who[1], CHFL_CHANOP);
+    add_member(oldch, who[2], CHFL_CHANOP);
+
+    for (i = 0; i < 3; i++) {
+      int n = orders[o][i];
+      server_relocate(peer[n], who[n], "#old", target[n], deadline[n], "");
+    }
+
+    assert_string_equal(oldch->mode.redir, "#p");
+    assert_int_equal(oldch->users, 0);
+    assert_false(channel_named("#p")->mode.exmode & EXMODE_PERSIST);
+    assert_string_equal(channel_named("#p")->mode.redir, "");
+    assert_string_equal(channel_named("#q")->mode.redir, "#p");
+    assert_string_equal(channel_named("#r")->mode.redir, "#p");
+    assert_true(channel_named("#q")->mode.exmode & EXMODE_PERSIST);
+    assert_true(channel_named("#r")->mode.exmode & EXMODE_PERSIST);
+    for (i = 0; i < 3; i++) {
+      assert_non_null(member_of(channel_named(target[i]), who[i]));
+      assert_int_equal(channel_named(target[i])->users, 1);
+    }
+    assert_int_equal(ntimers, 3);
+    assert_int_equal(timers_at(1000900), 3);
+    assert_int_equal(nopnotices, 0);
+  }
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -3311,6 +3873,22 @@ int main(void)
     T(approval_does_not_rename_a_tombstone_with_consent_off),
     T(renamed_tombstone_keeps_its_record),
     T(renamed_tombstone_frees_its_old_name),
+
+    T(crossing_relocations_winner_first),
+    T(crossing_relocations_loser_first),
+    T(crossing_loser_is_told_on_its_own_server),
+    T(crossing_loser_with_the_cap_gets_a_relocate),
+    T(crossing_winner_on_its_own_server),
+    T(same_relocation_twice_moves_the_second_issuer),
+    T(same_relocation_twice_keeps_the_later_deadline),
+    T(merged_deadline_that_is_past_dissolves_through_the_timer),
+    T(chain_is_not_a_crossing),
+    T(crossing_carries_an_earlier_hop_to_the_winner),
+    T(crossing_loser_that_emptied_here_is_a_tombstone_all_the_same),
+    T(crossing_loser_that_emptied_after_both),
+    T(crossing_loser_name_taken_here),
+    T(crossing_winner_name_taken_here),
+    T(three_way_crossing_converges_in_every_order),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

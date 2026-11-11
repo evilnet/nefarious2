@@ -10,6 +10,7 @@
 #include "rename_proto.h"
 
 #include "channel.h"            /* IsChannelName, IsLocalChannel */
+#include "ircd_chattr.h"        /* ToLower */
 #include "ircd_string.h"        /* strIsIrcCh, the UTF-8 check */
 
 #include <limits.h>
@@ -340,4 +341,33 @@ enum RelocateExpiryKind relocate_expiry_check(time_t *expires, time_t now)
   }
 
   return RELOCATE_EXPIRY_LIVE;
+}
+
+/*
+ * Relocation: rules that must give two servers the same answer.
+ */
+
+time_t relocate_deadline_merge(time_t a, time_t b)
+{
+  return (a > b) ? a : b;
+}
+
+int relocate_name_cmp(const char *a, const char *b)
+{
+  for (;; a++, b++) {
+    /* ToLower() takes a plain char (it indexes its table from CHAR_MIN);
+     * the result is compared as a signed byte whatever plain char is. */
+    int ca = (signed char)ToLower(*a);
+    int cb = (signed char)ToLower(*b);
+
+    if (ca != cb)
+      return (ca < cb) ? -1 : 1;
+    if (!*a)
+      return 0;
+  }
+}
+
+const char *relocate_winner(const char *a, const char *b)
+{
+  return (relocate_name_cmp(a, b) <= 0) ? a : b;
 }

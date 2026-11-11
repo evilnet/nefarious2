@@ -15,6 +15,7 @@
 #include <cmocka.h>
 
 #include "ircd_defs.h"
+#include "ircd_string.h"
 #include "rename_proto.h"
 
 /* ========== cookie: format ========== */
@@ -767,6 +768,121 @@ static void deadline_absurdly_far_is_clamped(void **state)
   }
 }
 
+/* ========== relocation: which of two new names wins ========== */
+
+static int sign(int v)
+{
+  return (v > 0) - (v < 0);
+}
+
+static void winner_is_the_name_that_sorts_first(void **state)
+{
+  (void)state;
+  assert_true(relocate_name_cmp("#alpha", "#beta") < 0);
+  assert_true(relocate_name_cmp("#beta", "#alpha") > 0);
+  assert_true(relocate_name_cmp("#a", "#ab") < 0);       /* a prefix first */
+  assert_true(relocate_name_cmp("#ab", "#a") > 0);
+  assert_true(relocate_name_cmp("#x1", "#x2") < 0);
+  assert_int_equal(relocate_name_cmp("#same", "#same"), 0);
+
+  assert_string_equal(relocate_winner("#alpha", "#beta"), "#alpha");
+  assert_string_equal(relocate_winner("#beta", "#alpha"), "#alpha");
+}
+
+/* Two spellings of one channel are one name: nobody wins. */
+static void winner_comparison_follows_the_casemapping(void **state)
+{
+  (void)state;
+  assert_int_equal(relocate_name_cmp("#Alpha", "#aLPHA"), 0);
+  /* rfc1459: [ \ ] ^ are the upper case of { | } ~ */
+  assert_int_equal(relocate_name_cmp("#a[b]", "#a{b}"), 0);
+  assert_int_equal(relocate_name_cmp("#a\\^", "#a|~"), 0);
+  /* case does not decide the order either */
+  assert_true(relocate_name_cmp("#ALPHA", "#beta") < 0);
+  assert_true(relocate_name_cmp("#alpha", "#BETA") < 0);
+  assert_true(relocate_name_cmp("#Zeta", "#alpha") > 0);
+}
+
+/* A name with bytes above 127 (UTF-8) is compared the way ircd_strcmp()
+ * compares it on the platforms the network runs on -- as signed bytes, so
+ * it sorts BEFORE every ASCII name -- and that is pinned here: the result
+ * must not depend on whether plain char is signed on the build host. */
+static void winner_comparison_is_pinned_for_bytes_above_127(void **state)
+{
+  (void)state;
+  assert_true(relocate_name_cmp("#\xc3\xa9t\xc3\xa9", "#zebra") < 0);
+  assert_true(relocate_name_cmp("#zebra", "#\xc3\xa9t\xc3\xa9") > 0);
+  assert_true(relocate_name_cmp("#\xc3\xa9", "#!") < 0);
+  assert_true(relocate_name_cmp("#\x80", "#\xff") < 0);
+  assert_true(relocate_name_cmp("#a\xc3\xa9", "#a") < 0);  /* before the NUL too */
+  assert_string_equal(relocate_winner("#zebra", "#\xc3\xa9"), "#\xc3\xa9");
+}
+
+/* The rule both servers apply must give both the same answer: it is
+ * antisymmetric, and it agrees with the comparison the rest of the ircd
+ * makes for channel names (the +L burst merge among them). */
+static void winner_comparison_is_antisymmetric_and_agrees_with_the_ircd(void **state)
+{
+  static const char *const names[] = {
+    "#a", "#A", "#b", "#ab", "#a[", "#a{", "#a^", "#a~", "#a|", "#a\\",
+    "#zebra", "#Zebra", "#\xc3\xa9", "#\xc3\x89", "#\xe2\x82\xac", "#1", "#!",
+    "#", "##", "#a b", "#\x80", "#\xff",
+  };
+  size_t i, j, n = sizeof(names) / sizeof(names[0]);
+  (void)state;
+
+  for (i = 0; i < n; i++) {
+    for (j = 0; j < n; j++) {
+      int fwd = relocate_name_cmp(names[i], names[j]);
+      int back = relocate_name_cmp(names[j], names[i]);
+
+      assert_int_equal(sign(fwd), -sign(back));
+      if (CHAR_MIN < 0)
+        assert_int_equal(sign(fwd), sign(ircd_strcmp(names[i], names[j])));
+      assert_int_equal(fwd == 0, 0 == ircd_strcmp(names[i], names[j]));
+      /* the winner is the same string whichever way round it is asked */
+      if (fwd != 0)
+        assert_ptr_equal(relocate_winner(names[i], names[j]),
+                         relocate_winner(names[j], names[i]));
+    }
+  }
+}
+
+/* ========== relocation: one deadline from two ========== */
+
+static void deadline_merge_keeps_the_later(void **state)
+{
+  (void)state;
+  assert_true(relocate_deadline_merge(1000900, 1000300) == 1000900);
+  assert_true(relocate_deadline_merge(1000300, 1000900) == 1000900);
+  assert_true(relocate_deadline_merge(1000900, 1000900) == 1000900);
+  assert_true(relocate_deadline_merge(0, 5) == 5);
+}
+
+/* Symmetric, idempotent and associative: whatever order servers hear the
+ * deadlines in, and however often, they end with the same one. */
+static void deadline_merge_is_order_independent(void **state)
+{
+  static const time_t v[] = { 0, 1, 999990, 1000000, 1000300, 1000900, 2147483647 };
+  size_t i, j, k, n = sizeof(v) / sizeof(v[0]);
+  (void)state;
+
+  for (i = 0; i < n; i++) {
+    assert_true(relocate_deadline_merge(v[i], v[i]) == v[i]);
+    for (j = 0; j < n; j++) {
+      time_t m = relocate_deadline_merge(v[i], v[j]);
+
+      assert_true(m == relocate_deadline_merge(v[j], v[i]));
+      assert_true(m == v[i] || m == v[j]);
+      assert_true(m >= v[i] && m >= v[j]);
+      for (k = 0; k < n; k++)
+        assert_true(relocate_deadline_merge(m, v[k])
+                    == relocate_deadline_merge(v[i],
+                                               relocate_deadline_merge(v[j], v[k])));
+    }
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -816,6 +932,12 @@ int main(void)
     cmocka_unit_test(deadline_in_the_future_is_taken_as_it_is),
     cmocka_unit_test(deadline_now_or_past_dissolves_at_once),
     cmocka_unit_test(deadline_absurdly_far_is_clamped),
+    cmocka_unit_test(winner_is_the_name_that_sorts_first),
+    cmocka_unit_test(winner_comparison_follows_the_casemapping),
+    cmocka_unit_test(winner_comparison_is_pinned_for_bytes_above_127),
+    cmocka_unit_test(winner_comparison_is_antisymmetric_and_agrees_with_the_ircd),
+    cmocka_unit_test(deadline_merge_keeps_the_later),
+    cmocka_unit_test(deadline_merge_is_order_independent),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

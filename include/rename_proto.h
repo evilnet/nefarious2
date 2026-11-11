@@ -334,4 +334,59 @@ enum RelocateExpiryKind {
 extern enum RelocateExpiryKind relocate_expiry_check(time_t *expires,
                                                      time_t now);
 
+/*
+ * Relocation mode: rules two servers apply to the same two inputs and
+ * must get the same answer from.
+ */
+
+/** One deadline from two, for a tombstone that two servers each hold a
+ * deadline for (the same relocation heard twice, two relocations of one
+ * channel that crossed, a burst announcement meeting a record): the LATER.
+ *
+ * Symmetric, idempotent and associative, so every server ends with the
+ * same deadline in whatever order and however often it hears the others.
+ * The later and not the earlier, for three reasons.  It is the only rule
+ * that can also be kept toward a server that has already dissolved its
+ * copy: that server holds no record and announces nothing, the server
+ * that still holds the tombstone bursts it, and the tombstone is back
+ * everywhere until the later deadline -- so "the earlier wins" could not
+ * be made true in that case, and "the later wins" always is.  It never
+ * takes away grace a member was promised ("this channel closes in N
+ * minutes").  And it cannot be driven upward: no server invents a later
+ * deadline when it merges, and every deadline that enters is bounded by
+ * RELOCATE_GRACE_MAX from the moment it was made.
+ * @param[in] a One deadline.
+ * @param[in] b The other.
+ * @return The deadline both servers keep.
+ */
+extern time_t relocate_deadline_merge(time_t a, time_t b);
+
+/** Order two channel names under the server casemapping: the order that
+ * decides which of two crossing relocations of one channel wins (the new
+ * name that sorts FIRST).
+ *
+ * Byte by byte after folding each byte with the ircd's lower-case table
+ * (ToLower(): A-Z, the rfc1459 pairs [ \ ] ^ -> { | } ~, and the ISO
+ * 8859-1 capitals), the folded bytes compared AS SIGNED bytes, the end of
+ * a name counting as a zero byte.  That is exactly what ircd_strcmp()
+ * computes where plain char is signed (x86-64, which every server of the
+ * network runs on) -- the comparison the +L burst merge in
+ * mode_parse_redir() already makes -- but written out so that the answer
+ * is the same on a platform where char is unsigned: the winner must not
+ * depend on the build host.  The consequences, pinned by the tests: a
+ * byte above 127 (any UTF-8 lead or continuation byte) sorts before
+ * every ASCII byte, and before the end of a name -- "#a" comes before
+ * "#ab" but after "#a" followed by such a byte.
+ * @param[in] a One name.
+ * @param[in] b The other.
+ * @return Below zero when @a a sorts first, above zero when @a b does,
+ *         zero when they are the same channel name.
+ */
+extern int relocate_name_cmp(const char *a, const char *b);
+
+/** The one of two new names that wins: relocate_name_cmp()'s first.
+ * @return @a a or @a b (@a a when they are the same name).
+ */
+extern const char *relocate_winner(const char *a, const char *b);
+
 #endif /* INCLUDED_rename_proto_h */
