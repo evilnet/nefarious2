@@ -159,7 +159,14 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     struct Ban *ban = NULL;
 
     if (*chptr->mode.redir && (*chptr->mode.redir != '\0')) {
-      if (chptr->users >= chptr->mode.limit) {
+      /* The ordinary +L forwards only when the channel is full.  A live
+       * relocation tombstone forwards ALWAYS: it admits nobody, whatever
+       * limit a remaining chanop gives it (a member who follows out of it
+       * takes its current status along, so nobody may get in after the
+       * relocation -- m_rename.c, "Who can be in a tombstone").  This
+       * test comes before every admission check below (+i, +k, bans,
+       * invites, X-tra ops), so none of those opens it either. */
+      if (chptr->users >= chptr->mode.limit || relocate_is_tombstone(chptr)) {
         if (IsNoLink(sptr))
           send_reply(sptr, ERR_LINKCHAN, chptr->chname, chptr->mode.redir);
         else if (!IsChannelName(chptr->mode.redir) || !strIsIrcCh(chptr->mode.redir))

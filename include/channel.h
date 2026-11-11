@@ -557,6 +557,11 @@ extern void relocate_tombstone_burst_done(struct Channel *chptr);
 extern void relocate_follow(struct Client *cptr, struct Client *sptr,
                             struct Channel *chptr);
 
+/* Is `chptr` a live relocation tombstone?  do_join() forwards every JOIN
+ * of one to its target, whatever the channel's limit: a tombstone admits
+ * nobody (ircd/m_rename.c, "Who can be in a tombstone"). */
+extern int relocate_is_tombstone(struct Channel *chptr);
+
 extern struct Membership* find_member_link(struct Channel * chptr,
                                            const struct Client* cptr);
 extern int sub1_from_channel(struct Channel* chptr);

@@ -6214,6 +6214,147 @@ static void crossing_winner_made_after_a_timestamp_correction(void **state)
   assert_null(member_of(w.old, w.carol));
 }
 
+/* --- who can be in a tombstone: a closed set --- */
+
+/* A follower takes its CURRENT status, so everything rests on nobody
+ * getting INTO a tombstone after the relocation.  do_join() forwards a
+ * JOIN of a channel with a redirect when "users >= limit OR
+ * relocate_is_tombstone()", before it looks at +i, +k, bans or invites;
+ * so for a live tombstone the forward does not depend on anything a
+ * remaining chanop can set.  Before, it depended on the limit alone: an
+ * op in the tombstone could MODE +l 500, a stranger then joined the
+ * tombstone itself, was opped there and followed with ops. */
+static void tombstone_admits_nobody_whatever_its_modes(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+
+  assert_true(relocate_is_tombstone(oldch));
+  /* what the remaining op can do to it: MODE #old +l 500 +i +k sesame */
+  oldch->mode.limit = 500;
+  assert_true(oldch->users < oldch->mode.limit);        /* the old test fails */
+  oldch->mode.mode |= MODE_INVITEONLY;
+  ircd_strncpy(oldch->mode.key, "sesame", sizeof(oldch->mode.key));
+  assert_true(relocate_is_tombstone(oldch));
+  /* -l again */
+  oldch->mode.limit = 0;
+  assert_true(relocate_is_tombstone(oldch));
+
+  /* the channel it points at is not one, nor is any ordinary channel */
+  assert_false(relocate_is_tombstone(newch));
+}
+
+/* Not a tombstone, so the ordinary +L rule (forward only when full)
+ * applies: an ordinary persistent channel with a redirect, a tombstone a
+ * chanop took +L off or services took +z off, and another channel under
+ * a record's name. */
+static void ordinary_redirecting_channels_keep_the_ordinary_rule(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Channel *lobby, *oldch, *second, *third;
+  (void)state;
+
+  lobby = channel_at("#lobby", 500000, alice);
+  lobby->mode.exmode |= EXMODE_PERSIST;
+  lobby->mode.limit = 50;
+  ircd_strncpy(lobby->mode.redir, "#overflow", sizeof(lobby->mode.redir));
+  assert_false(relocate_is_tombstone(lobby));
+
+  oldch = channel_at("#old", 500000, bob);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  assert_true(relocate_is_tombstone(oldch));
+  oldch->mode.redir[0] = '\0';                          /* MODE #old -L */
+  assert_false(relocate_is_tombstone(oldch));
+
+  second = channel_at("#two", 500000, bob);
+  server_relocate(peer, bob, "#two", "#twonew", "1000900", "");
+  second->mode.exmode &= ~EXMODE_PERSIST;               /* M #two -z */
+  assert_false(relocate_is_tombstone(second));
+
+  third = channel_at("#three", 500000, bob);
+  server_relocate(peer, bob, "#three", "#threenew", "1000900", "");
+  third->creationtime = 600000;                         /* another channel */
+  assert_false(relocate_is_tombstone(third));
+}
+
+/* A stranger who IS a member all the same: it joined the old name through
+ * a server that does not hold the tombstone (one from before these
+ * changes, or one still mid-netjoin), and its JOIN arrived here as an
+ * ordinary remote JOIN.  It is another server's user, so this server
+ * never moves it, whatever status it is given in the tombstone; it is
+ * removed with everybody else at the deadline. */
+static void stranger_in_the_tombstone_by_a_remote_join(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *mallory = user_on(peer, "mallory", "AAG");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  newch = channel_named("#new");
+
+  add_member(oldch, mallory, 0);                        /* BjAAG J #old */
+  member_of(oldch, mallory)->status |= CHFL_CHANOP;     /* M #old +o mallory */
+  forget();
+
+  /* BjAAG J #new: applied, nothing added */
+  assert_int_equal(joins(mallory, newch), 0);
+  relocate_follow(mallory, mallory, newch);
+  assert_int_equal(member_of(newch, mallory)->status & STATUS, 0);
+  assert_non_null(member_of(oldch, mallory));
+  assert_int_equal(sent_count_to(carol), 0);
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_int_equal(member_of(newch, mallory)->status & STATUS, 0);
+}
+
+/* A tombstone a chanop cancelled with -L is an ordinary channel again
+ * (until its record hands +z back): it can be joined like one, and its
+ * members -- opped there or not -- take nothing anywhere and are not
+ * parted from it. */
+static void cancelled_tombstone_carries_nothing(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *mallory = user_on(&me, "mallory", "AAG");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+
+  oldch->mode.redir[0] = '\0';                          /* bob: MODE #old -L */
+  assert_false(relocate_is_tombstone(oldch));
+  add_member(oldch, mallory, CHFL_CHANOP);              /* joins, is opped */
+  forget();
+
+  assert_int_equal(joins(mallory, newch), 0);
+  assert_int_equal(joins(bob, newch), 0);
+  assert_non_null(member_of(oldch, mallory));
+  assert_non_null(member_of(oldch, bob));
+  assert_int_equal(sent_count_to(peer), 2);             /* the two J */
+  assert_int_equal(sent_count_to(alice), 0);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -6287,6 +6428,10 @@ int main(void)
     T(follower_with_a_bouncer_device),
     T(device_of_a_remote_primary_does_not_follow_here),
     T(remote_follower_is_just_applied),
+    T(tombstone_admits_nobody_whatever_its_modes),
+    T(ordinary_redirecting_channels_keep_the_ordinary_rule),
+    T(stranger_in_the_tombstone_by_a_remote_join),
+    T(cancelled_tombstone_carries_nothing),
 
     T(dissolve_clears_the_persist_flag_it_set),
     T(dissolve_clears_a_persist_flag_that_was_there_before),

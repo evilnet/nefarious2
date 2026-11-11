@@ -2924,6 +2924,64 @@ static void relocate_again(struct Client *sptr, struct RelocateTombstone *ts,
   relocate_family_settle(family, deadline);
 }
 
+/* ---------- Who can be in a tombstone ----------
+ *
+ * A follower takes the status it holds in the tombstone when it follows
+ * (below), not the status it held when the channel was relocated.  So an
+ * op who stayed can op or voice somebody in the tombstone afterwards, and
+ * that member then arrives in the new channel with it.  That is within
+ * the design: the op is himself entitled to follow with ops and could
+ * give the same member the same status in the new channel a moment
+ * later; and a per-member "as of the relocation" marker would be exactly
+ * the per-server state the snapshots were removed for.
+ *
+ * It is sound PROVIDED the membership of a tombstone is closed: nobody
+ * gets in after the relocation.  The ways in, and what each is now:
+ *
+ * - A local JOIN of the old name.  do_join() forwards a JOIN of a channel
+ *   with a redirect only when the channel is "full" (users >= limit).  A
+ *   tombstone has no limit, so that was always true -- until a remaining
+ *   chanop set one (MODE +l 500): a stranger then joined the tombstone
+ *   itself.  CLOSED: for a live tombstone do_join() forwards
+ *   unconditionally (relocate_is_tombstone()), before it looks at +i, +k,
+ *   bans, invites or X-tra ops, so nothing a user can set on the
+ *   tombstone, and no INVITE, lets anybody in.  A +L (NOLINK) user is
+ *   refused with ERR_LINKCHAN as before and is not joined either.
+ * - A chanop removing +L: by design that ends the tombstone.  The channel
+ *   is then no tombstone (relocate_tombstone_channel()), is joined like
+ *   any channel, and nothing follows out of it: no status, no PART.
+ * - SVSJOIN: services put a user into the channel directly, past every
+ *   check (m_svsjoin.c).  Left alone: services can op anybody anywhere.
+ * - A remote JOIN, CREATE or BURST from a server that does not hold the
+ *   record: a fork server from before these changes (its own forward
+ *   still depends on the limit), or one on the far side of a netsplit,
+ *   where the channel was alive and people joined it.  Such a member is
+ *   that server's user.  This server never moves another server's user,
+ *   and the user's own server either gives a stranger nothing (the old
+ *   snapshot code) or, after the netjoin, treats the members its side
+ *   brought as what they are -- members of the channel as it stood there.
+ * - A bouncer device attaching, a held session being revived: one more
+ *   connection, or the same one again, of a user who is already a member.
+ *   No new member.
+ */
+
+/** Is @a chptr a live relocation tombstone -- a channel that has a
+ * record, is the channel the record was made for, and still carries its
+ * marks?  See "Who can be in a tombstone" above.
+ * @param[in] chptr Channel to test.
+ * @return Non-zero when it is.
+ */
+int relocate_is_tombstone(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+
+  if (!relocate_tombstones || !chptr)
+    return 0;
+
+  return (ts = relocate_tombstone_find(chptr->chname))
+         && relocate_tombstone_channel(ts) == chptr;
+}
+
 /* ---------- Following: live status, then part ----------
  *
  * Spec, "Status preservation": a member who declines to be force-moved
