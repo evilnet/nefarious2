@@ -56,18 +56,18 @@ Nefarious uses a hierarchical configuration file (`ircd.conf`) with block-based 
 
 For Docker deployments, the configuration uses environment variable templating:
 1. Template file: `tools/docker/base.conf-dist` contains `%VARIABLE_NAME%` placeholders
-2. Entry point script: `tools/docker/dockerentrypoint.sh` substitutes environment variables via sed
-3. Final config is written at container startup to `base.conf`
+2. Entry point script: `tools/docker/dockerentrypoint.sh` substitutes the environment variables (in the shell, one pass over the template)
+3. Final config is written at container startup to `base.conf`; if a value cannot be written (it contains `"` or a line break, is set but empty, or the numeric is out of range) or a placeholder has no value, the script exits non-zero and the ircd is not started
 
 Required environment variables (with defaults in dockerentrypoint.sh):
 - `IRCD_GENERAL_NAME` - Server name (default: localhost.localdomain)
 - `IRCD_GENERAL_DESCRIPTION` - Server description
-- `IRCD_GENERAL_NUMERIC` - Server numeric (0-4095, must be unique on network)
+- `IRCD_GENERAL_NUMERIC` - Server numeric (1-4095, must be unique on network)
 - `IRCD_ADMIN_LOCATION` - Admin location info
 - `IRCD_ADMIN_CONTACT` - Admin contact info
 
 The Docker setup uses multiple config files included by main `ircd.conf`:
-- `base.conf` - Generated from base.conf-dist with variable substitution
+- `base.conf` - Generated from base.conf-dist with variable substitution. A generated file starts with a marker comment and is regenerated on every start; a `base.conf` without the marker is user-managed and left alone (the variables are not applied to it). `IRCD_CONF_REGENERATE=1` replaces an unmarked file once, after saving it as `base.conf.pre-regenerate.<UTC time>`
 - `local.conf` - Local server-specific settings
 - `linesync.conf` - Line sync configuration
 
