@@ -127,9 +127,12 @@ static struct Client *decode_auth_id(const char *id)
 
   /* Bounds-check the wire-supplied fd before indexing LocalClientArray
    * [MAXCONNECTIONS] (fd is unsigned, so >= also catches a negative-wrapped
-   * value); MAXCONNECTIONS is the array bound, not HighestFd. */
-  if (fd >= MAXCONNECTIONS || !(cptr = LocalClientArray[fd]) || !cli_loc(cptr)
-      || cli_loc(cptr)->cookie != cookie)
+   * value); MAXCONNECTIONS is the array bound, not HighestFd.  A cookie is
+   * never 0 (auth_do_loc()); 0 is what a client has between PASS and its
+   * request going out -- for good on a server port, where it has no User
+   * either -- so it names nobody. */
+  if (!cookie || fd >= MAXCONNECTIONS || !(cptr = LocalClientArray[fd])
+      || !cli_loc(cptr) || cli_loc(cptr)->cookie != cookie)
     return NULL;
   return cptr;
 }

@@ -526,10 +526,10 @@ s2s_handlers_cmocka: $(S2S_HANDLERS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(S2S_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # services_reply tests - which local client a services reply reaches and
-# what it does to it: the REAL m_account.o, with numnicks.o and the
-# ircd's printf; everything else it calls is stubbed in the test.
+# what it does to it: the REAL m_account.o and m_sasl.o, with numnicks.o
+# and the ircd's printf; everything else they call is stubbed in the test.
 # Defines its own log_write()/me, so test_stub.o is not linked.
-SERVICES_REPLY_CMOCKA_OBJS = services_reply_cmocka.o ../m_account.o \
+SERVICES_REPLY_CMOCKA_OBJS = services_reply_cmocka.o ../m_account.o ../m_sasl.o \
 	../numnicks.o ../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o \
 	../match.o
 services_reply_cmocka: $(SERVICES_REPLY_CMOCKA_OBJS)

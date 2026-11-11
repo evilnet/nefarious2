@@ -178,6 +178,17 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   fd = atoi(fdstr);
   cookie = atoi(cookiestr);
 
+  /* This server never issues a cookie of 0 (m_authenticate(),
+   * sasl_start() draw again until it is not); 0 is what a client with no
+   * exchange in flight has -- never authenticated, done, aborted, a
+   * server link -- so a reply saying 0 (or anything atoi() reads as 0)
+   * names nobody. */
+  if (!cookie) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Reply with cookie 0 for fd %u "
+              "ignored (from %C)", fd, sptr);
+    return 0;
+  }
+
   /* Bounds-check the wire-supplied fd before indexing.  LocalClientArray is
    * [MAXCONNECTIONS], indexed by raw socket fd; os_set_fdlimit() caps real
    * fds below MAXCONNECTIONS, so that is the structural bound (not HighestFd,

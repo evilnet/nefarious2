@@ -2,11 +2,15 @@
  * services_reply_cmocka.c - what a services reply does to the local
  * client it names.
  *
- * A login-on-connect reply names its client with a request id
- * ".<fd>.<cookie>" (decode_auth_id(), m_account.c).  It arrives from
- * another server, so it is matched against this server's own state only.
+ * A SASL reply names its client with a token "<server>!<fd>.<cookie>"
+ * (ms_sasl(), m_sasl.c), a login-on-connect reply with a request id
+ * ".<fd>.<cookie>" (decode_auth_id(), m_account.c).  Both arrive from
+ * another server, so the fd may be any number, and only a cookie this
+ * server issued to a client with a request in flight may match: never 0,
+ * which is what a client with nothing in flight has.
  *
- * The REAL m_account.o is linked, with numnicks.o and the ircd's printf;
+ * The REAL m_account.o and m_sasl.o are linked, with numnicks.o and the
+ * ircd's printf;
  * everything it calls besides the lookup is stubbed below, and the stubs
  * that act on a client record what they did.
  */
@@ -37,6 +41,7 @@
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "sasl_auth.h"
 #include "send.h"
 #include "struct.h"
 
@@ -67,6 +72,10 @@ static struct Client *told[MAXREC];     /* clients sent a line */
 static int ntold;
 static int violations;
 static int set_accounts;                /* auth_set_account() calls */
+static struct Client *logged_in[MAXREC];   /* sasl_complete_login() */
+static char logged_as[MAXREC][ACCOUNTLEN + 1];
+static int nlogins;
+static int sasl_dones;                  /* auth_sasl_done() calls */
 static int auth_result;                 /* what it returns */
 
 static void tell(struct Client *to)
@@ -140,6 +149,17 @@ static struct Client *local_client(const char *name, int fd, int registering)
   return c;
 }
 
+/** A connection on a server port that has sent PASS but nothing else:
+ * no User yet (and none until it registers as a server). */
+static struct Client *server_port_client(int fd)
+{
+  struct Client *c = fake_client("", STAT_UNKNOWN_SERVER);
+
+  cli_fd(c) = fd;
+  LocalClientArray[fd] = c;
+  return c;
+}
+
 /** Give @a c a login-on-connect request for @a account with @a cookie
  * (0: PASS seen, the request not sent yet). */
 static void loc_request(struct Client *c, const char *account,
@@ -191,7 +211,7 @@ static int world_setup(void **state)
 {
   (void)state;
 
-  ntold = violations = set_accounts = nmade = 0;
+  ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
 
@@ -250,8 +270,7 @@ int feature_bool(enum Feature feat)
 
 int feature_int(enum Feature feat)
 {
-  (void)feat;
-  return 0;
+  return feat == FEAT_SASL_TIMEOUT ? 10 : 0;
 }
 
 int protocol_violation(struct Client *cptr, const char *pattern, ...)
@@ -377,6 +396,59 @@ int bounce_account_deauth_apply(struct Client *acptr)
   return 0;
 }
 
+int send_reply(struct Client *to, int reply, ...)
+{
+  (void)reply;
+  tell(to);
+  return 0;
+}
+
+const char *feature_str(enum Feature feat)
+{
+  return feat == FEAT_SASL_SERVER ? "*" : "";
+}
+
+void timer_del(struct Timer *timer)
+{
+  (void)timer;
+}
+
+/* The login the relay path ends in: whom, as what. */
+int sasl_complete_login(struct Client *sptr, const char *account,
+                        time_t acc_create, const char *kc_id, int id_live)
+{
+  (void)acc_create; (void)kc_id; (void)id_live;
+  assert_true(nlogins < MAXREC);
+  logged_in[nlogins] = sptr;
+  ircd_strncpy(logged_as[nlogins], account, sizeof(logged_as[nlogins]));
+  nlogins++;
+  return 0;
+}
+
+/* The identity a services L reply names, written as a whole (the real one
+ * is in sasl_auth.c, which this suite does not link). */
+void sasl_identity_set(struct Client *cptr, const char *account,
+                       time_t acc_create, const char *kc_id, int id_live)
+{
+  ircd_strncpy(cli_saslaccount(cptr), account ? account : "", ACCOUNTLEN + 1);
+  cli_saslacccreate(cptr) = acc_create;
+  ircd_strncpy(cli_saslkcid(cptr), kc_id ? kc_id : "",
+               sizeof(cli_saslkcid(cptr)));
+  cli_saslkcidlive(cptr) = id_live;
+}
+
+int auth_sasl_done(struct AuthRequest *auth)
+{
+  (void)auth;
+  sasl_dones++;
+  return 0;
+}
+
+void auth_sasl_clear(struct AuthRequest *auth)
+{
+  (void)auth;
+}
+
 /* The registration a login-on-connect answer lets go on: it may exit the
  * client (no I:line, a K-line) or swap it for a held bouncer session; the
  * test says which by auth_result. */
@@ -438,12 +510,222 @@ static void test_loc_accept_logs_in(void **state)
   assert_true(was_told(c));
 }
 
+/* ====================================================================
+ * SASL: which client a reply reaches
+ * ==================================================================== */
+
+/** Was @a c reached by any of the three replies a peer could forge: C (an
+ * AUTHENTICATE line down its connection), L + D S (a login), D F (a
+ * failure, which also lets registration go on)? */
+static int forged_sasl_reaches(struct Client *svs, const char *token)
+{
+  deliver(ms_sasl, svs, svs, "AB %s C :Zm9yZ2Vk", token);
+  deliver(ms_sasl, svs, svs, "AB %s L victim", token);
+  deliver(ms_sasl, svs, svs, "AB %s D S", token);
+  deliver(ms_sasl, svs, svs, "AB %s D F", token);
+  return ntold > 0 || nlogins > 0 || sasl_dones > 0;
+}
+
+/* A client that never started SASL has cookie 0: so did every reply
+ * naming its fd with cookie 0. */
+static void test_sasl_cookie_0_idle_client(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+
+  assert_false(forged_sasl_reaches(svs, "AB!7.0"));
+  assert_false(was_told(c));
+  assert_null(cli_saslagent(c));
+}
+
+/* ... a registered user (cookie 0 again once its own exchange is over) ... */
+static void test_sasl_cookie_0_registered_user(void **state)
+{
+  struct Client *svs;
+  (void)state;
+  svs = services_link();
+  local_client("alice", 8, 0);
+
+  assert_false(forged_sasl_reaches(svs, "AB!8.0"));
+}
+
+/* ... another server's link, which got "AUTHENTICATE <data>" ... */
+static void test_sasl_cookie_0_server_link(void **state)
+{
+  struct Client *svs, *leaf;
+  (void)state;
+  svs = services_link();
+  leaf = fake_client("leafa.test", STAT_SERVER);
+  cli_fd(leaf) = 9;
+  LocalClientArray[9] = leaf;
+
+  assert_false(forged_sasl_reaches(svs, "AB!9.0"));
+  assert_false(was_told(leaf));
+}
+
+/* ... a connection on a server port ... */
+static void test_sasl_cookie_0_server_port(void **state)
+{
+  struct Client *svs;
+  (void)state;
+  svs = services_link();
+  server_port_client(10);
+
+  assert_false(forged_sasl_reaches(svs, "AB!10.0"));
+}
+
+/* ... and anything atoi() reads as 0. */
+static void test_sasl_cookie_reading_as_0(void **state)
+{
+  struct Client *svs;
+  (void)state;
+  svs = services_link();
+  local_client("joiner", 7, 1);
+
+  assert_false(forged_sasl_reaches(svs, "AB!7.00"));
+  assert_false(forged_sasl_reaches(svs, "AB!7.x"));
+  assert_false(forged_sasl_reaches(svs, "AB!7."));
+}
+
+/* A client in a LOCAL (Keycloak) exchange has a cookie that never goes on
+ * the wire, never 0: a relay reply cannot reach the exchange. */
+static void test_sasl_local_exchange_unreachable(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslsession(c) = (struct SASLSession *)auth_storage[0];
+  cli_saslcookie(c) = 0x1234567;
+  cli_saslstart(c) = CurrentTime;
+
+  assert_false(forged_sasl_reaches(svs, "AB!7.0"));
+  assert_int_equal(cli_saslcookie(c), 0x1234567);
+}
+
+/* The fd is looked up only inside LocalClientArray: the two slots past
+ * its end hold clients whose cookie matches, and are never reached. */
+static void test_sasl_fd_past_the_end(void **state)
+{
+  struct Client *svs, *past, *past2;
+  char token[64];
+  (void)state;
+  svs = services_link();
+  past = fake_client("past", STAT_USER);
+  past2 = fake_client("past2", STAT_USER);
+  cli_saslcookie(past) = cli_saslcookie(past2) = 5;
+  LocalClientArray[MAXCONNECTIONS] = past;
+  LocalClientArray[MAXCONNECTIONS + 1] = past2;
+
+  snprintf(token, sizeof(token), "AB!%d.5", MAXCONNECTIONS);
+  assert_false(forged_sasl_reaches(svs, token));
+  snprintf(token, sizeof(token), "AB!%d.5", MAXCONNECTIONS + 1);
+  assert_false(forged_sasl_reaches(svs, token));
+  assert_false(forged_sasl_reaches(svs, "AB!-1.5"));
+  assert_false(forged_sasl_reaches(svs, "AB!4294967295.5"));
+}
+
+/* The exchange this server started (cookie 777 on fd 7) still works:
+ * the challenge reaches the client, L and D S log it in, and the server
+ * that answered becomes its agent. */
+static void test_sasl_legitimate_exchange(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslcookie(c) = 777;
+  cli_saslstart(c) = CurrentTime;
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 C :+");
+  assert_true(was_told(c));
+  assert_ptr_equal(cli_saslagent(c), svs);
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 L alice 1700000000");
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 D S");
+  assert_int_equal(nlogins, 1);
+  assert_ptr_equal(logged_in[0], c);
+  assert_string_equal(logged_as[0], "alice");
+
+  /* Another cookie on the same fd is not ours. */
+  ntold = 0;
+  deliver(ms_sasl, svs, svs, "AB AB!7.778 C :+");
+  assert_false(was_told(c));
+}
+
+/* ====================================================================
+ * Login-on-connect: which client a reply reaches
+ * ==================================================================== */
+
+/* A client that sent PASS :/account/password but whose request has not
+ * gone to services yet has cookie 0: an ACCOUNT A with cookie 0 logged it
+ * in as the account it named, its password never checked. */
+static void test_loc_cookie_0_request_not_sent(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  loc_request(c, "alice", 0);
+
+  deliver(ms_account, svs, svs, "AB A .7.0 1700000000");
+  deliver(ms_account, svs, svs, "AB A .7.x 1700000000");
+
+  assert_false(IsAccount(c));
+  assert_non_null(cli_loc(c));
+  assert_int_equal(set_accounts, 0);
+  assert_false(was_told(c));
+}
+
+/* A connection on a server port that sent PASS :/a/b keeps cookie 0 for
+ * good and has no User: the accept wrote through cli_user() == NULL. */
+static void test_loc_cookie_0_server_port(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = server_port_client(11);
+  loc_request(c, "a", 0);
+
+  deliver(ms_account, svs, svs, "AB A .11.0");
+  deliver(ms_account, svs, svs, "AB D .11.0");
+
+  assert_false(was_told(c));
+  assert_non_null(cli_loc(c));
+}
+
+/* A deny with cookie 0 does not end a request either. */
+static void test_loc_cookie_0_deny(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  loc_request(c, "alice", 0);
+
+  deliver(ms_account, svs, svs, "AB D .7.0");
+
+  assert_false(was_told(c));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
     T(test_loc_accept_returns_0_for_the_link),
     T(test_loc_accept_logs_in),
+    T(test_sasl_cookie_0_idle_client),
+    T(test_sasl_cookie_0_registered_user),
+    T(test_sasl_cookie_0_server_link),
+    T(test_sasl_cookie_0_server_port),
+    T(test_sasl_cookie_reading_as_0),
+    T(test_sasl_local_exchange_unreachable),
+    T(test_sasl_fd_past_the_end),
+    T(test_sasl_legitimate_exchange),
+    T(test_loc_cookie_0_request_not_sent),
+    T(test_loc_cookie_0_server_port),
+    T(test_loc_cookie_0_deny),
 #undef T
   };
 
