@@ -573,6 +573,9 @@ int mr_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   else if (prot < atoi(MINOR_PROTOCOL))
     return exit_new_server(cptr, sptr, host, timestamp,
                            "Incompatible protocol: %s", parv[5]);
+  /* SetServerYXX() reads the numeric by its length (3 or 5). */
+  if (!ValidServerNumNick(parv[6]))
+    return exit_client_msg(cptr, cptr, &me, "Bogus numeric (%s)", parv[6]);
 
   Debug((DEBUG_INFO, "Got SERVER %s with timestamp [%s] age %Tu (%Tu)",
 	 host, parv[4], start_timestamp, cli_serv(&me)->timestamp));
@@ -723,6 +726,12 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   else if (prot < atoi(MINOR_PROTOCOL))
     return exit_new_server(cptr, sptr, host, timestamp,
                            "Incompatible protocol: %s", parv[5]);
+  /* SetServerYXX() reads the numeric by its length (3 or 5); as for a
+   * bogus server name, a server this link introduces that cannot be
+   * filed under its own numeric ends the link. */
+  if (!ValidServerNumNick(parv[6]))
+    return exit_client_msg(cptr, cptr, &me, "Bogus numeric (%s) for %s",
+                           parv[6], host);
 
   Debug((DEBUG_INFO, "Got SERVER %s with timestamp [%s] age %Tu (%Tu)",
 	 host, parv[4], (time_t)atoi(parv[3]), cli_serv(&me)->timestamp));

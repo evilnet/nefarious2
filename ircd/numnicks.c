@@ -282,6 +282,43 @@ int ValidUserNumNick(const char* yxx)
   return 1;
 }
 
+/** Test whether a numnick names a user of @a server: well-formed
+ * (ValidUserNumNick()), starting with the server's own numnick, and as
+ * wide as the server's numeric was announced (3 for a one-character
+ * server numnick, 5 for a two-character one).  SetRemoteNumNick() files a
+ * user under its server by the client part alone, and the user is
+ * announced onward as the server's numnick and that part: any other
+ * numnick is filed, and relayed, as a different one.
+ * @param[in] server %Server introducing the user.
+ * @param[in] yxx Candidate numnick.
+ * @return Non-zero if \a yxx names a user of \a server.
+ */
+int ValidUserNumNickFor(const struct Client* server, const char* yxx)
+{
+  size_t slen = strlen(cli_yxx(server));
+
+  if (!ValidUserNumNick(yxx) || (slen != 1 && slen != 2))
+    return 0;
+  if (strlen(yxx) != (slen == 1 ? 3 : 5))
+    return 0;
+  return 0 == strncmp(yxx, cli_yxx(server), slen);
+}
+
+/** Test whether a server's numeric field is well-formed: its numnick and
+ * capacity, 3 (Y + XX) or 5 (YY + XXX) characters of the numnick
+ * alphabet, the two forms SetServerYXX() reads.  Check it on every
+ * SERVER a peer sends: any other length is filed under another numeric
+ * (or read past its end).
+ * @param[in] yyxxx Candidate numeric field.
+ * @return Non-zero if \a yyxxx is well-formed.
+ */
+int ValidServerNumNick(const char* yyxxx)
+{
+  /* The same shapes as a user numnick: server and capacity are a
+   * numnick's server and client parts. */
+  return ValidUserNumNick(yyxxx);
+}
+
 /** Remove a client from a server's user array.
  * @param[in] server %Server that owns the user to remove.
  * @param[in] yxx Numnick of client to remove.

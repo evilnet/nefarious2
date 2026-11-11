@@ -12,6 +12,7 @@
 #include <cmocka.h>
 #include <netinet/in.h>
 
+#include "ircd_alloc.h"
 #include "numnicks.h"
 #include "client.h"
 #include "res.h"
@@ -295,6 +296,63 @@ static void test_valid_user_numnick(void **state)
     assert_false(ValidUserNumNick("A_A"));
 }
 
+/* A server's numeric field (numnick and capacity) has the shapes
+ * SetServerYXX() reads: 3 (Y + XX) or 5 (YY + XXX) numnick characters.
+ * Any other length was filed under a different numeric (a 4-character
+ * "ABCD" as server "A" with capacity "BC"), or read past its end. */
+static void test_valid_server_numnick(void **state)
+{
+    (void)state;
+
+    assert_true(ValidServerNumNick("AB]]]"));
+    assert_true(ValidServerNumNick("A]]"));
+
+    assert_false(ValidServerNumNick(""));
+    assert_false(ValidServerNumNick("A"));
+    assert_false(ValidServerNumNick("AB"));
+    assert_false(ValidServerNumNick("ABCD"));
+    assert_false(ValidServerNumNick("AB]]]]"));
+    assert_false(ValidServerNumNick("A_]"));
+}
+
+/* A user a server introduces has a numnick of that server: its numeric
+ * first, at the width the server was announced with (3 for a one-
+ * character server numnick, 5 for a two-character one).  SetRemoteNumNick()
+ * files a user by the client part alone, and the user goes on as the
+ * server's numnick and that part: "ABC" from server AB was filed as "BC"
+ * and relayed as "ABBC", which upgraded peers drop. */
+static void test_user_numnick_fits_its_server(void **state)
+{
+    (void)state;
+    static struct Client wide, narrow;
+    static struct Server wide_serv, narrow_serv;
+
+    memset(&wide, 0, sizeof(wide));
+    memset(&narrow, 0, sizeof(narrow));
+    memset(&wide_serv, 0, sizeof(wide_serv));
+    memset(&narrow_serv, 0, sizeof(narrow_serv));
+    cli_serv(&wide) = &wide_serv;
+    cli_serv(&narrow) = &narrow_serv;
+    SetServerYXX(&wide, &wide, "AB]]]");        /* "AB", users YYXXX */
+    SetServerYXX(&narrow, &narrow, "C]]");      /* "C", users YXX */
+
+    assert_true(ValidUserNumNickFor(&wide, "ABAAA"));
+    assert_true(ValidUserNumNickFor(&wide, "AB]]]"));
+    assert_false(ValidUserNumNickFor(&wide, "ABC"));     /* too narrow */
+    assert_false(ValidUserNumNickFor(&wide, "ACAAA"));   /* another server's */
+    assert_false(ValidUserNumNickFor(&wide, "ABAA"));
+    assert_false(ValidUserNumNickFor(&wide, "AB_AA"));
+
+    assert_true(ValidUserNumNickFor(&narrow, "CAA"));
+    assert_false(ValidUserNumNickFor(&narrow, "CAAAA")); /* too wide */
+    assert_false(ValidUserNumNickFor(&narrow, "DAA"));
+
+    ClearServerYXX(&wide);
+    ClearServerYXX(&narrow);
+    MyFree(wide_serv.client_list);
+    MyFree(narrow_serv.client_list);
+}
+
 /* findNUser()/FindNServer() only resolve numnicks of a length that can
  * name them.  Before, findNUser("A") resolved server "A" and then the
  * client part "" to slot 0: the slot SetRemoteNumNick() filled for a
@@ -389,6 +447,8 @@ int main(void)
 
         /* Numnick validation and lookup */
         cmocka_unit_test(test_valid_user_numnick),
+        cmocka_unit_test(test_valid_server_numnick),
+        cmocka_unit_test(test_user_numnick_fits_its_server),
         cmocka_unit_test(test_find_rejects_short_numnicks),
 
         /* Edge cases */

@@ -398,10 +398,13 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* SetRemoteNumNick() and findNUser() index client_list[] from the
      * numnick, and the collision paths below decode the IP into a stack
-     * irc_in_addr: refuse a malformed one before anything uses it. */
-    if (!ValidUserNumNick(parv[parc - 2]))
-      return protocol_violation(cptr, "Malformed numnick %s for %s",
-                                parv[parc - 2], parv[1]);
+     * irc_in_addr: refuse a malformed one before anything uses it.  The
+     * numnick must also be one of sptr's (its numeric, at its width):
+     * the user is filed under sptr by the client part alone and relayed
+     * as sptr's numnick and that part, so any other would desync. */
+    if (!ValidUserNumNickFor(sptr, parv[parc - 2]))
+      return protocol_violation(cptr, "Malformed numnick %s for %s from %s",
+                                parv[parc - 2], parv[1], cli_name(sptr));
     if (base64toip(parv[parc - 3], &ip))
     {
       protocol_violation(cptr, "Malformed IP %s for %s (%s)",
