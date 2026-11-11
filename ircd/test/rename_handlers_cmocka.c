@@ -5776,6 +5776,444 @@ static void announcement_outside_the_burst_fuzz_is_ignored(void **state)
   assert_int_equal(sent_count_to(carol), 0);
 }
 
+/* --- a tombstone's TARGET is renamed (classic) --- */
+
+/* #old redirects to #new; #new is then renamed to #newer by a classic RN.
+ * Left alone, the tombstone would go on pointing at a name that no longer
+ * exists -- which anybody can create, to be sent every user the tombstone
+ * forwards.  It follows its target instead, as it does when the target is
+ * relocated on: the redirect, what the local members are shown, the
+ * record, what it announces, and where a member follows to. */
+static void renamed_target_takes_its_tombstones_along(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *mallory = user_on(&me, "mallory", "AAG");
+  struct Channel *oldch, *newer, *fake;
+  char name[] = "#new";
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  forget();
+
+  server_rename(peer, bob, "#new", "#newer", "tidy");
+
+  newer = channel_named("#newer");
+  assert_non_null(newer);
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old +L #newer");
+  assert_string_equal(sent_to(down, 0), "BjAAC RN #new #newer :tidy");
+  assert_int_equal(nopnotices, 0);
+  assert_int_equal(timers_at(1000900), 1);
+  forget();
+  burst_to(down);
+  assert_string_equal(sent_to(down, 0), "AC RT #old 500000 #newer 1000900");
+
+  /* the old target's name is free; whoever takes it gets nobody */
+  fake = get_channel(mallory, name, CGT_CREATE);
+  add_member(fake, mallory, CHFL_CHANOP);
+  forget();
+  assert_int_equal(joins(carol, fake), 0);
+  assert_non_null(member_of(oldch, carol));
+  remove_user_from_channel(carol, fake);
+
+  /* and a member follows to where the community is */
+  assert_int_equal(joins(carol, newer), CHFL_CHANOP);
+  assert_null(member_of(oldch, carol));
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+  assert_false(logged("no longer authenticates"));
+}
+
+/* The same when the rename is made HERE, by an op of the new channel on a
+ * server that runs classic renames (RENAME_CONSENT off) ... */
+static void locally_renamed_target_takes_its_tombstones_along(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 0;
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  add_member(channel_named("#new"), dan, CHFL_CHANOP);
+  forget();
+
+  client_rename(dan, "#new", "#newer", "");
+
+  assert_non_null(channel_named("#newer"));
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old +L #newer");
+  assert_string_equal(sent_to(peer, 0), "ACAAE RN #new #newer :");
+}
+
+/* ... and when services approved it (a registered target). */
+static void approved_rename_of_a_target_takes_its_tombstones_along(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch;
+  char cookie[64];
+  (void)state;
+
+  feat_rename_consent = 0;
+  oldch = channel_at("#old", 500000, bob);
+  oldch->mode.mode |= MODE_REGISTERED;
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  add_member(channel_named("#new"), dan, CHFL_CHANOP);
+  forget();
+
+  client_rename(dan, "#new", "#newer", "");
+  snprintf(cookie, sizeof(cookie), "%s", cookie_of(sent_to(x3, 0)));
+  assert_string_equal(oldch->mode.redir, "#new");       /* not yet */
+  assert_int_equal(account_line(x3, x3, 3, cookie, "A", "RENAME"), 1);
+
+  assert_non_null(channel_named("#newer"));
+  assert_string_equal(oldch->mode.redir, "#newer");
+}
+
+/* The renamed channel is NOT the tombstone's target: the target emptied
+ * and a stranger made the name again (another creation timestamp), then
+ * renamed it.  The tombstone does not follow a stranger's channel. */
+static void renamed_stranger_under_the_targets_name_takes_nothing(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *mallory = user_on(peer, "mallory", "AAG");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *fake;
+  char name[] = "#new";
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  remove_user_from_channel(bob, channel_named("#new"));  /* #new empties */
+
+  fake = get_channel(mallory, name, CGT_CREATE);
+  fake->creationtime = 1000005;
+  add_member(fake, mallory, CHFL_CHANOP);
+  forget();
+  server_rename(peer, mallory, "#new", "#trap", "");
+
+  assert_non_null(channel_named("#trap"));
+  assert_string_equal(oldch->mode.redir, "#new");
+  assert_int_equal(sent_count_to(carol), 0);
+}
+
+/* This server does not hold the target (it is out of step), so it cannot
+ * apply the rename and relays it -- but the rest of the network did
+ * rename the channel and moved its tombstones' redirects, and a redirect
+ * left on the old name here would be the one that can be hijacked.  The
+ * tombstone is retargeted all the same. */
+static void rename_of_a_target_not_held_here_still_retargets(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *eve = user_on(peer, "eve", "AAE");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#new", carol);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+  assert_null(channel_named("#new"));
+  forget();
+
+  server_rename(peer, eve, "#new", "#newer", "");
+
+  assert_int_equal(nopnotices, 1);                      /* not applied */
+  assert_string_equal(sent_to(down, 0), "BjAAE RN #new #newer :");
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_string_equal(sent_to(carol, 0), ":me.example MODE #old +L #newer");
+  assert_int_equal(timers_at(1000900), 1);
+}
+
+/* ... also when the new name is taken here by an unrelated channel: the
+ * redirect says what the network's says, and nothing follows into the
+ * unrelated channel (it is not the target by creation timestamp). */
+static void rename_of_a_target_onto_a_name_taken_here_still_retargets(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch, *unrelated;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  unrelated = channel_at("#newer", 700000, dan);
+  forget();
+
+  server_rename(peer, bob, "#new", "#newer", "");
+
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(channel_named("#new"));               /* still here */
+  assert_string_equal(oldch->mode.redir, "#newer");
+  assert_int_equal(joins(carol, unrelated), 0);
+  assert_non_null(member_of(oldch, carol));
+}
+
+/* A tombstone that was itself renamed (classic) and whose target is
+ * renamed too, in either order: the record is found under its new name
+ * and points at the target's new name. */
+static void renamed_tombstone_and_renamed_target_in_either_order(void **state)
+{
+  int order;
+  (void)state;
+
+  for (order = 0; order < 2; order++) {
+    struct Client *peer, *bob, *eve, *carol;
+    struct Channel *older;
+
+    if (order) {
+      world_teardown(NULL);
+      world_setup(NULL);
+    }
+    peer = linked("peer.example", "Bj", "v");
+    bob = user_on(peer, "bob", "AAC");
+    eve = user_on(peer, "eve", "AAE");
+    carol = user_on(&me, "carol", "AAD");
+
+    add_member(channel_at("#old", 500000, bob), eve, CHFL_CHANOP);
+    add_member(channel_named("#old"), carol, 0);
+    server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+    if (order == 0) {
+      server_rename(peer, eve, "#old", "#older", "");
+      server_rename(peer, bob, "#new", "#newer", "");
+    } else {
+      server_rename(peer, bob, "#new", "#newer", "");
+      server_rename(peer, eve, "#old", "#older", "");
+    }
+
+    older = channel_named("#older");
+    assert_non_null(older);
+    assert_string_equal(older->mode.redir, "#newer");
+    assert_int_equal(timers_at(1000900), 1);
+    assert_int_equal(ntimers, 1);
+    forget();
+    advance(900);
+    assert_true(was_destroyed(older));
+  }
+}
+
+/* A crossing whose WINNER is then renamed: both tombstones follow.  And
+ * the rename can overtake the losing relocation on its way to a third
+ * server -- the winner's server renamed before it heard of the loser.
+ * That server compares the loser's name with the name the first
+ * relocation was ISSUED with, not with what the channel is called by
+ * now, so it decides as everybody else does. */
+static void crossing_whose_winner_is_renamed_in_either_order(void **state)
+{
+  int order;
+  (void)state;
+
+  for (order = 0; order < 2; order++) {
+    struct Crossing w;
+
+    if (order) {
+      world_teardown(NULL);
+      world_setup(NULL);
+    }
+    crossing_world(&w);
+    vic_relocates(&w);                          /* #old -> #x */
+    if (order == 0) {
+      uma_relocates(&w);                        /* #old -> #y: loses */
+      server_rename(w.pa, w.vic, "#x", "#zz", "");
+    } else {
+      /* "#y" sorts before "#zz": by today's names the loser would win */
+      server_rename(w.pa, w.vic, "#x", "#zz", "");
+      uma_relocates(&w);
+    }
+
+    assert_null(channel_named("#x"));
+    assert_string_equal(w.old->mode.redir, "#zz");
+    assert_string_equal(channel_named("#y")->mode.redir, "#zz");
+    assert_true(channel_named("#y")->mode.exmode & EXMODE_PERSIST);
+    assert_string_equal(channel_named("#zz")->mode.redir, "");
+    assert_false(channel_named("#zz")->mode.exmode & EXMODE_PERSIST);
+    assert_non_null(member_of(channel_named("#zz"), w.vic));
+    assert_non_null(member_of(channel_named("#y"), w.uma));
+    assert_int_equal(channel_named("#zz")->mode.limit, 5);
+    assert_int_equal(ntimers, 2);
+    assert_int_equal(timers_at(1000900), 2);
+    assert_int_equal(nopnotices, 0);
+  }
+}
+
+/** #old is relocated to @a b by one, and to @a y by two; one then
+ * relocates @a b on to @a c.  The second and third reach a server in
+ * either order.  @return the name of the one channel left that is not a
+ * tombstone (asserting the rest are tombstones pointing at it). */
+static const char *chain_across_a_crossing(int order, const char *b,
+                                           const char *y, const char *c)
+{
+  struct Client *pa = linked("a.example", "Bj", "v");
+  struct Client *pb = linked("b.example", "Bk", "v");
+  struct Client *one = user_on(pa, "one", "AAC");
+  struct Client *two = user_on(pb, "two", "AAD");
+  const char *names[4];
+  const char *live = NULL;
+  int i;
+
+  names[0] = "#old"; names[1] = b; names[2] = y; names[3] = c;
+  add_member(channel_at("#old", 500000, one), two, CHFL_CHANOP);
+
+  server_relocate(pa, one, "#old", b, "1000900", "");
+  if (order == 0) {
+    server_relocate(pb, two, "#old", y, "1000600", "");
+    server_relocate(pa, one, b, c, "1000700", "");
+  } else {
+    server_relocate(pa, one, b, c, "1000700", "");
+    server_relocate(pb, two, "#old", y, "1000600", "");
+  }
+
+  for (i = 0; i < 4; i++) {
+    struct Channel *ch = channel_named(names[i]);
+
+    assert_non_null(ch);
+    if (!ch->mode.redir[0]) {
+      assert_null(live);
+      live = names[i];
+      assert_false(ch->mode.exmode & EXMODE_PERSIST);
+    }
+  }
+  assert_non_null(live);
+  for (i = 0; i < 4; i++)
+    if (names[i] != live) {
+      assert_string_equal(channel_named(names[i])->mode.redir, live);
+      assert_true(channel_named(names[i])->mode.exmode & EXMODE_PERSIST);
+    }
+  assert_int_equal(nopnotices, 0);
+  return live;
+}
+
+/* The winner of a crossing is relocated ON while the losing relocation is
+ * still on its way.  Whatever the three names, both orders leave the same
+ * channel alive -- here the winner's line (b, then c), although "#m"
+ * sorts before "#z". */
+static void chain_across_a_crossing_winner_moves_on(void **state)
+{
+  const char *first, *second;
+  (void)state;
+
+  first = chain_across_a_crossing(0, "#b", "#m", "#z");
+  world_teardown(NULL);
+  world_setup(NULL);
+  second = chain_across_a_crossing(1, "#b", "#m", "#z");
+  assert_string_equal(first, "#z");
+  assert_string_equal(second, "#z");
+}
+
+/* ... and here the other relocation of #old wins ("#b" before "#m"): the
+ * channel that lost, and the channel it was relocated on to, both end as
+ * tombstones of the winner -- a relocation of a channel that has lost a
+ * crossing loses with it. */
+static void chain_across_a_crossing_loser_moves_on(void **state)
+{
+  const char *first, *second;
+  (void)state;
+
+  first = chain_across_a_crossing(0, "#m", "#b", "#a");
+  world_teardown(NULL);
+  world_setup(NULL);
+  second = chain_across_a_crossing(1, "#m", "#b", "#a");
+  assert_string_equal(first, "#b");
+  assert_string_equal(second, "#b");
+}
+
+/* The same relocation heard a second time (two issuers) after its target
+ * was renamed: the second issuer goes where the first now is. */
+static void same_relocation_twice_after_the_target_was_renamed(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000300", "");
+  server_rename(w.pa, w.vic, "#new", "#newer", "");
+  server_relocate(w.pb, w.uma, "#old", "#new", "1000900", "");
+
+  assert_null(channel_named("#new"));
+  assert_non_null(member_of(channel_named("#newer"), w.uma));
+  assert_non_null(member_of(channel_named("#newer"), w.vic));
+  assert_string_equal(w.old->mode.redir, "#newer");
+  assert_int_equal(ntimers, 1);
+  assert_int_equal(timers_at(1000900), 1);
+}
+
+/* The same relocation heard a second time after its target was relocated
+ * ON (a chain): the second issuer goes into the channel of the name it
+ * relocated to -- a tombstone by now -- exactly where it is on a server
+ * that heard the two the other way round. */
+static void same_relocation_twice_across_a_chain_in_either_order(void **state)
+{
+  int order;
+  (void)state;
+
+  for (order = 0; order < 2; order++) {
+    struct Crossing w;
+    struct Channel *b;
+
+    if (order) {
+      world_teardown(NULL);
+      world_setup(NULL);
+    }
+    crossing_world(&w);
+    server_relocate(w.pa, w.vic, "#old", "#b", "1000300", "");
+    if (order == 0) {
+      server_relocate(w.pb, w.uma, "#old", "#b", "1000900", "");
+      server_relocate(w.pa, w.vic, "#b", "#c", "1000400", "");
+    } else {
+      server_relocate(w.pa, w.vic, "#b", "#c", "1000400", "");
+      server_relocate(w.pb, w.uma, "#old", "#b", "1000900", "");
+    }
+
+    b = channel_named("#b");
+    assert_non_null(member_of(b, w.uma));
+    assert_null(member_of(channel_named("#c"), w.uma));
+    assert_non_null(member_of(channel_named("#c"), w.vic));
+    assert_string_equal(b->mode.redir, "#c");
+    assert_string_equal(w.old->mode.redir, "#c");
+  }
+}
+
+/* The winner's channel is made here with the old channel's timestamp as
+ * it is NOW; when that was corrected since the first relocation, the
+ * tombstones that turn to the winner know it by its own timestamp, and a
+ * member still follows into it. */
+static void crossing_winner_made_after_a_timestamp_correction(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  uma_relocates(&w);                            /* #old -> #y, at 500000 */
+  w.old->creationtime = 499998;                 /* M #old ... 499998 */
+  relocate_tombstone_ts_follow(w.old, 500000);
+  vic_relocates(&w);                            /* #x wins, made at 499998 */
+
+  assert_int_equal(channel_named("#x")->creationtime, 499998);
+  assert_string_equal(w.old->mode.redir, "#x");
+  assert_int_equal(joins(w.carol, channel_named("#x")), CHFL_VOICE);
+  assert_null(member_of(w.old, w.carol));
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -5958,6 +6396,20 @@ int main(void)
     T(wiped_tombstone_keeps_a_redirect_that_is_not_its_own),
     T(announcement_within_the_burst_fuzz_builds_the_record),
     T(announcement_outside_the_burst_fuzz_is_ignored),
+
+    T(renamed_target_takes_its_tombstones_along),
+    T(locally_renamed_target_takes_its_tombstones_along),
+    T(approved_rename_of_a_target_takes_its_tombstones_along),
+    T(renamed_stranger_under_the_targets_name_takes_nothing),
+    T(rename_of_a_target_not_held_here_still_retargets),
+    T(rename_of_a_target_onto_a_name_taken_here_still_retargets),
+    T(renamed_tombstone_and_renamed_target_in_either_order),
+    T(crossing_whose_winner_is_renamed_in_either_order),
+    T(chain_across_a_crossing_winner_moves_on),
+    T(chain_across_a_crossing_loser_moves_on),
+    T(same_relocation_twice_after_the_target_was_renamed),
+    T(same_relocation_twice_across_a_chain_in_either_order),
+    T(crossing_winner_made_after_a_timestamp_correction),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
