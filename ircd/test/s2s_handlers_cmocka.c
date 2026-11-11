@@ -1,8 +1,8 @@
 /*
  * s2s_handlers_cmocka.c - server-to-server handlers against a fake network.
  *
- * Links the REAL handler objects (m_burst.o, m_svsnick.o, m_svsquit.o),
- * with numnicks.o,
+ * Links the REAL handler objects (m_burst.o, m_svsnick.o, m_svsquit.o,
+ * m_topic.o), with numnicks.o,
  * match.o and the ircd's own printf, so every line asserted below is the
  * line the handler would put on the wire.  What sits underneath the
  * handlers is stubbed: the send layer records instead of sending, the
@@ -30,6 +30,7 @@
 #include "client.h"
 #include "handlers.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
@@ -861,6 +862,97 @@ int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
   return used;
 }
 
+/* --- for m_topic.o: no storage, everybody may talk --- */
+
+int history_is_available(void)
+{
+  return 0;
+}
+
+void history_format_ms(char *buf, size_t buflen, uint64_t ms)
+{
+  ircd_snprintf(0, buf, buflen, "%llu", (unsigned long long)ms);
+}
+
+const char *history_owner_of(char *buf, size_t size, struct Client *sptr)
+{
+  ircd_strncpy(buf, cli_name(sptr), size);
+  return buf;
+}
+
+int history_store_message(const char *msgid, const char *timestamp,
+                          const char *target, const char *original_target,
+                          const char *sender, const char *account,
+                          enum HistoryMessageType type, const char *content,
+                          const char *client_tags, const char *owner)
+{
+  (void)msgid; (void)timestamp; (void)target; (void)original_target;
+  (void)sender; (void)account; (void)type; (void)content; (void)client_tags;
+  (void)owner;
+  return 0;
+}
+
+struct Membership *find_channel_member(struct Client *cptr,
+                                       struct Channel *chptr)
+{
+  return find_member_link(chptr, cptr);
+}
+
+int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr,
+                               int reveal)
+{
+  (void)cptr; (void)chptr; (void)reveal;
+  return 1;
+}
+
+int is_chan_op(struct Client *cptr, struct Channel *chptr)
+{
+  struct Membership *m = find_member_link(chptr, cptr);
+  return m && (m->status & CHFL_CHANOP);
+}
+
+int is_half_op(struct Client *cptr, struct Channel *chptr)
+{
+  (void)cptr; (void)chptr;
+  return 0;
+}
+
+void RevealDelayedJoin(struct Membership *member)
+{
+  (void)member;
+}
+
+void send_fail(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  (void)command; (void)code; (void)context; (void)description;
+  record_sent(to, "FAIL");
+}
+
+void send_warn(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  (void)command; (void)code; (void)context; (void)description;
+  record_sent(to, "WARN");
+}
+
+/* The real sendcmdto_one() formats "%:#C %s %v" for the link the
+ * destination is reached through; so does this. */
+void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
+                   struct Client *to, const char *pattern, ...)
+{
+  struct VarData vd;
+  char buf[LINE];
+
+  to = cli_from(to);
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  ircd_snprintf(to, buf, sizeof(buf), "%:#C %s %v", from,
+                IsServer(to) || IsMe(to) ? tok : cmd, &vd);
+  va_end(vd.vd_args);
+  record_sent(to, buf);
+}
+
 /* ====================================================================
  * Reading a relayed BURST back
  * ==================================================================== */
@@ -1401,6 +1493,73 @@ static void test_svsquit_remote_user_relayed(void **state)
   assert_string_equal(sent_to(leaf, 0), "AE SX ACAAA :bye");
 }
 
+/* ====================================================================
+ * TOPIC from a server
+ * ==================================================================== */
+
+/* Our #c with carol in it; leafa (AC) and leafc (AE) linked. */
+static struct Client *carol;
+static struct Channel *topic_world(struct Client **leafa, struct Client **leafc)
+{
+  struct Channel *ch;
+
+  *leafa = linked("leafa.test", "AC", 1);
+  *leafc = linked("leafc.test", "AE", 1);
+  carol = local_user("carol", "AAA");
+  ch = fake_channel("#c");
+  ch->creationtime = 999000;
+  add_member(ch, carol, CHFL_CHANOP, MAXOPLEVEL);
+  return ch;
+}
+
+/* A setter field: the members see its nick, the topic keeps the field. */
+static void test_topic_with_a_setter(void **state)
+{
+  struct Client *ac, *ae;
+  struct Channel *ch;
+  (void)state;
+  ch = topic_world(&ac, &ae);
+
+  deliver(ms_topic, ac, ac, "#c bob!b@host 999000 1000500 :the topic");
+
+  assert_string_equal(sent_to(carol, 0), ":leafa.test TOPIC #c :the topic (bob)");
+  assert_string_equal(ch->topic_nick, "bob!b@host");
+  assert_string_equal(sent_to(ae, 0), "AC T #c bob!b@host 999000 1000500 :the topic");
+}
+
+/* A setter field with no nick in it ("!") left nick[] unset, and the
+ * members were sent whatever the stack held: "(<garbage>)".  It is now
+ * no setter field: the topic names its source, as one sent without the
+ * field does (the server, not a NULL user -- b5f466aa). */
+static void test_topic_setter_with_no_nick(void **state)
+{
+  struct Client *ac, *ae;
+  struct Channel *ch;
+  (void)state;
+  ch = topic_world(&ac, &ae);
+
+  deliver(ms_topic, ac, ac, "#c ! 999000 1000500 :the topic");
+
+  assert_string_equal(sent_to(carol, 0), ":leafa.test TOPIC #c :the topic");
+  assert_string_equal(ch->topic, "the topic");
+  assert_string_equal(ch->topic_nick, "leafa.test");
+  assert_string_equal(sent_to(ae, 0), "AC T #c 999000 1000500 :the topic");
+}
+
+static void test_topic_without_a_setter(void **state)
+{
+  struct Client *ac, *ae;
+  struct Channel *ch;
+  (void)state;
+  ch = topic_world(&ac, &ae);
+
+  deliver(ms_topic, ac, ac, "#c 999000 1000500 :the topic");
+
+  assert_string_equal(sent_to(carol, 0), ":leafa.test TOPIC #c :the topic");
+  assert_string_equal(ch->topic_nick, "leafa.test");
+  assert_string_equal(sent_to(ae, 0), "AC T #c 999000 1000500 :the topic");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1423,6 +1582,9 @@ int main(void)
     T(test_svsnick_from_non_services),
     T(test_svsquit_our_user_keeps_the_link),
     T(test_svsquit_remote_user_relayed),
+    T(test_topic_with_a_setter),
+    T(test_topic_setter_with_no_nick),
+    T(test_topic_without_a_setter),
 #undef T
   };
 
