@@ -1,7 +1,7 @@
 /*
  * s2s_handlers_cmocka.c - server-to-server handlers against a fake network.
  *
- * Links the REAL handler objects (m_burst.o so far), with numnicks.o,
+ * Links the REAL handler objects (m_burst.o, m_svsnick.o), with numnicks.o,
  * match.o and the ircd's own printf, so every line asserted below is the
  * line the handler would put on the wire.  What sits underneath the
  * handlers is stubbed: the send layer records instead of sending, the
@@ -189,7 +189,39 @@ static struct Client *local_user(const char *nick, const char *yxx)
   assert_non_null(cli_connect(c));
   con_client(cli_connect(c)) = c;
   ircd_strncpy(cli_yxx(c), yxx, sizeof(c->cli_yxx));
+  cli_serv(&me)->client_list[base64toint(yxx) & cli_serv(&me)->nn_mask] = c;
   return c;
+}
+
+/** A services server: it announced itself with SERVER ... +s. */
+static struct Client *services(struct Client *server)
+{
+  SetService(server);
+  return server;
+}
+
+/* --- clients by name: a walk instead of the hash --- */
+
+static struct Client *exited[MAXOBJ];   /* what exit_client*() was asked to exit */
+static int nexited;
+
+static int was_exited(struct Client *c)
+{
+  int i;
+  for (i = 0; i < nexited; i++)
+    if (exited[i] == c)
+      return 1;
+  return 0;
+}
+
+struct Client *hSeekClient(const char *name, int TMask)
+{
+  int i;
+  for (i = 0; i < nmade; i++)
+    if ((cli_status(made[i]) & TMask) && !was_exited(made[i])
+        && 0 == ircd_strcmp(cli_name(made[i]), name))
+      return made[i];
+  return NULL;
 }
 
 /* --- channels: a list instead of the hash --- */
@@ -233,6 +265,11 @@ static int count_bans(struct Ban *list)
     n++;
   return n;
 }
+
+/* --- nick changes set_nick_name() was asked for --- */
+
+static char renames[MAXREC][LINE];
+static int nrenames;
 
 /* --- features --- */
 
@@ -296,7 +333,8 @@ static int world_setup(void **state)
   (void)state;
 
   forget();
-  nmade = nchannels = 0;
+  nmade = nchannels = nexited = 0;
+  nrenames = 0;
   ban_invalidations = except_invalidations = 0;
   fake_modes = "";
   feat_excepts = 0;
@@ -352,9 +390,80 @@ void debug(int level, const char *form, ...)
 int exit_client(struct Client *cptr, struct Client *victim,
                 struct Client *killer, const char *comment)
 {
-  (void)cptr; (void)victim; (void)killer; (void)comment;
-  fail_msg("exit_client() called");
+  (void)killer; (void)comment;
+  assert_true(nexited < MAXOBJ);
+  exited[nexited++] = victim;
+  return (cptr == victim) ? CPTR_KILLED : 0;
+}
+
+int exit_client_msg(struct Client *cptr, struct Client *bcptr,
+                    struct Client *sptr, const char *pattern, ...)
+{
+  return exit_client(cptr, bcptr, sptr, pattern);
+}
+
+static struct ServerStatistics server_stats;
+struct ServerStatistics *ServerStats = &server_stats;
+
+int need_more_params(struct Client *cptr, const char *cmd)
+{
+  (void)cptr; (void)cmd;
   return 0;
+}
+
+int send_reply(struct Client *to, int reply, ...)
+{
+  char buf[LINE];
+
+  snprintf(buf, sizeof(buf), "numeric %d", reply);
+  record_sent(to, buf);
+  return 0;
+}
+
+/* m_nick.c's, as it is: a nick ends at its first invalid character. */
+int do_nick_name(char *nick)
+{
+  char *ch = nick, *end = ch + NICKLEN;
+
+  if (*ch == '-' || IsDigit(*ch))
+    return 0;
+  for (; (ch < end) && *ch; ++ch)
+    if (!IsNickChar(*ch))
+      break;
+  *ch = '\0';
+  return (ch - nick);
+}
+
+int isNickJuped(const char *nick)
+{
+  (void)nick;
+  return 0;
+}
+
+int set_nick_name(struct Client *cptr, struct Client *sptr, const char *nick,
+                  int parc, char *parv[], int svsnick)
+{
+  (void)cptr; (void)parc; (void)parv; (void)svsnick;
+  assert_true(nrenames < MAXREC);
+  snprintf(renames[nrenames++], LINE, "%s -> %s", cli_name(sptr), nick);
+  ircd_strncpy(cli_name(sptr), nick, sizeof(sptr->cli_name));
+  return 0;
+}
+
+int feature_int(enum Feature feat)
+{
+  switch (feat) {
+  case FEAT_NICKLEN: return NICKLEN;
+  default: return 0;
+  }
+}
+
+const char *feature_str(enum Feature feat)
+{
+  switch (feat) {
+  case FEAT_HIS_SERVERNAME: return "*.example";
+  default: return "";
+  }
 }
 
 int feature_bool(enum Feature feat)
@@ -1146,6 +1255,103 @@ static void test_burst_netride_every_parameter_letter(void **state)
   }
 }
 
+/* ====================================================================
+ * SVSNICK
+ * ==================================================================== */
+
+/* The network for the SVSNICK cases: services (AE, +s) with its bot X3,
+ * a plain server AC with alice, and our dave, the target. */
+static struct Client *svs, *svsbot, *leaf, *alice, *dave;
+
+static void svsnick_world(void)
+{
+  svs = services(linked("x3.test", "AE", 0));
+  svsbot = remote_user(svs, "X3", "AEAAA");
+  leaf = linked("leafa.test", "AC", 1);
+  alice = remote_user(leaf, "alice", "ACAAA");
+  dave = local_user("dave", "AAB");
+}
+
+/* What services do with it: rename the target, and tell the network. */
+static void test_svsnick_from_services(void **state)
+{
+  (void)state;
+  svsnick_world();
+
+  deliver(ms_svsnick, svs, svs, "%s fresh 1000000", "ABAAB");
+
+  assert_int_equal(nrenames, 1);
+  assert_string_equal(renames[0], "dave -> fresh");
+  assert_int_equal(sent_count_to(svs), 0);
+  assert_int_equal(sent_count_to(leaf), 1);
+  assert_string_equal(sent_to(leaf, 0), "AE SN ABAAB fresh");
+  assert_int_equal(nviolations, 0);
+}
+
+/* (c) A nick another user holds: that user is killed (Nickname
+ * Enforcement) and the target renamed. */
+static void test_svsnick_nick_of_another_user(void **state)
+{
+  (void)state;
+  svsnick_world();
+
+  deliver(ms_svsnick, svs, svs, "ABAAB alice");
+
+  assert_true(was_exited(alice));
+  assert_false(was_exited(dave));
+  assert_int_equal(nrenames, 1);
+  assert_string_equal(renames[0], "dave -> alice");
+  assert_string_equal(sent_to(leaf, 0), "AB D ACAAA :hub.test (Nickname Enforcement)");
+  assert_string_equal(sent_to(leaf, 1), "AE SN ABAAB alice");
+}
+
+/* (a) The target's own nick: nothing to do. */
+static void test_svsnick_own_nick(void **state)
+{
+  (void)state;
+  svsnick_world();
+
+  deliver(ms_svsnick, svs, svs, "ABAAB dave");
+
+  assert_int_equal(nrenames, 0);
+  assert_int_equal(nexited, 0);
+  assert_int_equal(nsent, 0);
+}
+
+/* (b) The nick the source holds.  The handler used to kill the source to
+ * free the nick and then relay the SVSNICK from it: a NULL dereference
+ * (the source was freed).  It is refused: nobody is killed or renamed,
+ * nothing is relayed. */
+static void test_svsnick_nick_of_its_source(void **state)
+{
+  (void)state;
+  svsnick_world();
+
+  deliver(ms_svsnick, svs, svsbot, "ABAAB X3");
+
+  assert_false(was_exited(svsbot));
+  assert_int_equal(nexited, 0);
+  assert_int_equal(nrenames, 0);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nviolations, 1);
+}
+
+/* SVSNICK is a services command: from a server that did not announce
+ * itself as services, or a user on one, it is refused. */
+static void test_svsnick_from_non_services(void **state)
+{
+  (void)state;
+  svsnick_world();
+
+  deliver(ms_svsnick, leaf, leaf, "ABAAB fresh");
+  deliver(ms_svsnick, leaf, alice, "ABAAB alice");
+
+  assert_int_equal(nrenames, 0);
+  assert_int_equal(nexited, 0);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nviolations, 2);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1161,6 +1367,11 @@ int main(void)
     T(test_burst_netride_limit_redirect_key),
     T(test_burst_netride_redirect_other_key_kicks),
     T(test_burst_netride_every_parameter_letter),
+    T(test_svsnick_from_services),
+    T(test_svsnick_nick_of_another_user),
+    T(test_svsnick_own_nick),
+    T(test_svsnick_nick_of_its_source),
+    T(test_svsnick_from_non_services),
 #undef T
   };
 
