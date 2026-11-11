@@ -121,9 +121,10 @@ static struct Client *decode_auth_id(const char *id)
 
   /* The fd is whatever the peer sent: it indexes LocalClientArray only
    * inside the array (fd is unsigned, so a negative number fails the
-   * same test). */
-  if (fd >= MAXCONNECTIONS || !(cptr = LocalClientArray[fd]) || !cli_loc(cptr)
-      || cli_loc(cptr)->cookie != cookie)
+   * same test).  A cookie is never 0 (auth_do_loc()); 0 is what a client
+   * has between PASS and its request going out, so it matches nobody. */
+  if (!cookie || fd >= MAXCONNECTIONS || !(cptr = LocalClientArray[fd])
+      || !cli_loc(cptr) || cli_loc(cptr)->cookie != cookie)
     return NULL;
   return cptr;
 }
