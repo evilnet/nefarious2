@@ -3646,6 +3646,12 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       *state->chptr->mode.redir = '\0';
     else
       ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN + 1);
+
+    /* A relocation tombstone whose redirect is removed or changed is over
+     * at once.  Not for a BURST's merge: ms_burst() settles that when the
+     * BURST has been taken in. */
+    if (!(state->flags & MODE_PARSE_BURST))
+      relocate_tombstone_marks_changed(state->chptr);
   }
 }
 
@@ -5525,6 +5531,11 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
       /* ±H / ±P (MODE, OPMODE, a burst, a TS loss) re-decide the
        * receive window (R43). */
       channel_store_modes_changed(state.chptr, old_exmode);
+      /* -z on a relocation tombstone ends it at once (a BURST only ever
+       * adds the flag). */
+      if (((old_exmode ^ t_exmode) & EXMODE_PERSIST)
+          && !(state.flags & MODE_PARSE_BURST))
+        relocate_tombstone_marks_changed(state.chptr);
     }
 
     /* B3: fire the channel-metadata ±R hook AFTER the flip (so the persist

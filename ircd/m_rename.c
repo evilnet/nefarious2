@@ -30,6 +30,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "destruct_event.h"
 #include "gline.h"
 #include "hash.h"
 #include "ircd.h"
@@ -1154,6 +1155,18 @@ struct RelocateTombstone {
                                          @a newname, and still dissolved at
                                          its deadline.  See
                                          relocate_tombstone_point() */
+  int unsettled;                    /**< A BURST's mode merge left a redirect
+                                         on the tombstone that is not this
+                                         record's (relocate_tombstone_burst_done()).
+                                         It may be a crossing whose
+                                         announcement is the next line, which
+                                         settles it; if it is not, the record
+                                         is not allowed back: the next MODE
+                                         that touches a mark ends it
+                                         (relocate_tombstone_marks_changed()),
+                                         also one that would make the channel
+                                         match again, and failing that the
+                                         deadline drops it */
   int waiting;                      /**< The record is waiting for its
                                          channel: the loser of a crossing
                                          learned from burst announcements,
@@ -1175,6 +1188,7 @@ static struct RelocateTombstone *relocate_tombstones = NULL;
 
 static void relocate_tombstone_expire_cb(struct Event *ev);
 static void relocate_tombstone_sweep(struct RelocateTombstone *ts);
+static void relocate_tombstone_end(struct RelocateTombstone *ts, int dissolve);
 static void relocate_withdraw_redirect(struct Channel *chptr);
 
 /** Find a record by its (old) channel name, case-insensitively -- any
@@ -1318,6 +1332,129 @@ static void relocate_tombstone_clear_marks(struct Channel *chptr)
   chptr->mode.exmode &= ~EXMODE_PERSIST;
 }
 
+/** Which of a tombstone's marks is its channel missing?  For a log line
+ * or an operator notice.
+ * @param[in] ts The record.
+ * @param[in] chptr The channel of the record's name (may be NULL).
+ * @return A static string.
+ */
+static const char *relocate_missing_mark(struct RelocateTombstone *ts,
+                                         struct Channel *chptr)
+{
+  if (!chptr)
+    return "channel is gone";
+  if (!(chptr->mode.exmode & EXMODE_PERSIST))
+    return "+z was removed";
+  if (ts->detached)
+    return "a redirect was set on it while it was detached from its target";
+  if (!chptr->mode.redir[0])
+    return "+L was removed";
+  return "+L was changed";
+}
+
+/** A tombstone has been cancelled -- one of its marks was taken off, or
+ * changed -- and its channel is an ordinary channel again: do what is
+ * owed to the CHANNEL.  (The record is the caller's to end.)
+ *
+ * Nobody is parted.  The persist flag goes, as at a dissolve
+ * (relocate_tombstone_clear_marks()): it is the one mark no ordinary user
+ * can undo -- MODE ignores 'z' from anybody but services -- so a chanop's
+ * -L would otherwise strand a channel no member count can ever collect.
+ * The one channel left alone is one that is REGISTERED: its persist flag
+ * is services' business.  A redirect that is on the channel now is not
+ * touched: it is whatever the MODE made it, an ordinary +L.  The
+ * operators are told.
+ *
+ * An EMPTY channel has to be collected by hand now, because every
+ * removal while the bit was set took sub1_from_channel()'s persist early
+ * return.  From inside a MODE that is still being parsed the channel
+ * must not be freed, so its collection is scheduled, as MODE -z does for
+ * an empty channel (@a defer); at the deadline it is collected at once.
+ * @param[in] ts The record (for the names).
+ * @param[in] chptr The channel.
+ * @param[in] defer Non-zero when called under mode_parse() or CLEARMODE.
+ */
+static void relocate_tombstone_cancelled(struct RelocateTombstone *ts,
+                                         struct Channel *chptr, int defer)
+{
+  const char *why = relocate_missing_mark(ts, chptr);
+
+  if (chptr->mode.mode & MODE_REGISTERED)
+    return;
+
+  sendto_opmask_butone(0, SNO_OLDSNO,
+                       "Relocation tombstone %s (-> %s) was cancelled: %s.  "
+                       "It is an ordinary channel again; its %u member%s "
+                       "were NOT parted.",
+                       ts->oldname, ts->newname, why, chptr->users,
+                       (chptr->users == 1) ? "" : "s");
+
+  if (!(chptr->mode.exmode & EXMODE_PERSIST))
+    return;                     /* -z: whoever took it off deals with it */
+
+  chptr->mode.exmode &= ~EXMODE_PERSIST;
+
+  if (!chptr->members) {
+    if (defer)
+      schedule_destruct_event_1m(chptr);
+    else
+      sub1_from_channel(chptr);         /* may free chptr */
+  }
+}
+
+/** A MODE (a user's, an oper's OPMODE or CLEARMODE, services', a
+ * server's) has just changed a channel's redirect or its persist flag:
+ * if the channel was a tombstone and no longer is, the tombstone is over
+ * NOW -- not at its deadline.
+ *
+ * Why at once.  A record that waited for the deadline could be made to
+ * match again: a remaining op took +L off (the channel stopped being a
+ * tombstone, so it admitted anybody), let people in and opped them, and
+ * set "+L <target>" again -- a live tombstone once more, with members who
+ * were never in the old channel and who could each follow with status.
+ * Cancelling is final: the record is ended here, and a redirect set later
+ * is an ordinary redirect on an ordinary channel -- no record, no closed
+ * door, no status carried, no sweep.
+ *
+ * Every server sees the same MODE and ends its own record at the same
+ * point of the same message stream, so this converges as the MODE does.
+ *
+ * NOT called for what the engine itself does to a tombstone's redirect
+ * (relocate_tombstone_point(): a retarget, the withdrawal of a detached
+ * tombstone's +L) -- those write the channel directly -- nor for the mode
+ * merge of a BURST, which relocate_tombstone_burst_done() and the
+ * announcement that follows settle.
+ *
+ * The channel is never freed here (the caller is in the middle of a
+ * MODE).
+ * @param[in] chptr The channel whose mode.redir or EXMODE_PERSIST changed.
+ */
+void relocate_tombstone_marks_changed(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts;
+
+  if (!relocate_tombstones
+      || !(ts = relocate_tombstone_find(chptr->chname))
+      || ts->chan_ts != chptr->creationtime)
+    return;
+
+  /* Still the tombstone: the MODE set the redirect it already had, or
+   * changed something else.  (An unsettled record is not given the
+   * benefit: see RelocateTombstone.unsettled.) */
+  if (!ts->unsettled && relocate_tombstone_channel(ts) == chptr)
+    return;
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "relocate: tombstone %s -> %s cancelled (%s)", ts->oldname,
+            ts->newname,
+            ts->unsettled ? "a MODE on a tombstone a BURST had left with "
+                            "another redirect"
+                          : relocate_missing_mark(ts, chptr));
+
+  relocate_tombstone_cancelled(ts, chptr, 1);
+  relocate_tombstone_end(ts, 0);
+}
+
 /** Grace-period expiry sweep: PART every remaining member of a tombstone and
  * dissolve the channel (spec, "The tombstone": at grace expiry the server
  * removes each remaining member with a server-generated PART) -- unless the
@@ -1350,50 +1487,25 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
   if (ts->waiting)
     return;
 
-  /* The record can outlive its channel's identity: services DESTRUCT, a
-   * services MODE -z, or a chanop stripping +L all break the tombstone
-   * without going through relocate_tombstone_channel_gone(), and an
-   * unrelated channel can then be created on the same name well inside the
-   * grace period.  relocate_tombstone_channel() rejects all of those.  The
-   * caller has ALREADY unlinked ts and disowned the timer, so returning
-   * here cancels the record cleanly rather than leaving an unresolvable
-   * record with a fired timer behind it.
-   *
-   * But cancelling the record is not enough on its own, because the most
-   * likely way to get here is ONE unprivileged command.  `MODE #old -L` has
-   * no privilege gate beyond ordinary chanop (channel.c:5021-5023 dispatches
-   * straight into mode_parse_redir()), and it clears mode.redir --
-   * failing the identity check while leaving EXMODE_PERSIST set.  And EXMODE_PERSIST is exactly the bit no ordinary user can undo:
-   * channel.c:5094-5097 ignores 'z' unless the source is a service or comes
-   * from a service's server.  So a chanop typing -L on a tombstone would
-   * strand a channel that no member count can ever collect -- a permanent
-   * leak, reachable on purpose.
-   *
-   * So reclaim the bit -- always, as the dissolve proper does
-   * (relocate_tombstone_clear_marks()): a +z this engine set was taken
-   * unilaterally, on the struct and never on the wire, and is handed back
-   * the same way; a +z from before the relocation belonged to a
-   * registration that has moved to the new name.  The one channel left
-   * alone is one that is REGISTERED now: its persist flag is services'
-   * business again.
-   *
-   * What is NOT done here is the sweep: a channel that failed
-   * authentication may be an unrelated channel wearing the old name, and
-   * parting its members would be exactly the wrong-channel damage the
-   * identity check exists to prevent.  Members of a de-tombstoned channel
-   * simply stay where they are -- which is why the reclaim is reported to
-   * operators rather than only to the debug log. */
+  /* SAFETY NET.  A record whose channel is not its tombstone any more
+   * should not reach its deadline: whatever takes a mark off a tombstone
+   * ends the record there and then (relocate_tombstone_marks_changed()),
+   * whatever replaces or re-stamps the channel tells the record
+   * (relocate_tombstone_channel_gone(), _ts_lost(), _ts_follow()).  What
+   * can still arrive here is a record a BURST left unsettled
+   * (RelocateTombstone.unsettled), and a change that went past every hook.
+   * The record is dropped (the caller has unlinked it) and NOBODY is
+   * parted: a channel that fails the identity check may be an unrelated
+   * channel wearing the old name, and parting its members would be exactly
+   * the damage the check exists to prevent.  The log says which mark was
+   * wrong. */
   if (!(chptr = relocate_tombstone_channel(ts))) {
     struct Channel *stray = FindChannel(ts->oldname);
 
     /* First of all: is it the record's channel at all?  One of another
-     * creation timestamp is another channel that has the name now.  Every
-     * path that replaces or re-stamps a channel tells the record
-     * (relocate_tombstone_channel_gone(), _ts_lost(), _ts_follow()), so
-     * this should not be reachable; if it is, the record is dropped, the
+     * creation timestamp is another channel that has the name now: the
      * channel -- its members, its +z, its redirect, none of them this
-     * record's -- is not touched, and the log says what was found, not
-     * that a mark was removed. */
+     * record's -- is not touched. */
     if (stray && stray->creationtime != ts->chan_ts) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "relocate: tombstone %s -> %s: the channel of that name is "
@@ -1406,39 +1518,11 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
 
     log_write(LS_SYSTEM, L_WARNING, 0,
               "relocate: tombstone %s -> %s no longer authenticates at grace "
-              "expiry (%s); record cancelled without sweeping",
-              ts->oldname, ts->newname,
-              !stray ? "channel is gone"
-                : !(stray->mode.exmode & EXMODE_PERSIST) ? "+z was cleared"
-                : ts->detached ? "a redirect was set on it while it was "
-                                 "detached from its target"
-                : !stray->mode.redir[0] ? "+L was cleared"
-                : "redirect was retargeted");
+              "expiry (%s); record dropped without sweeping",
+              ts->oldname, ts->newname, relocate_missing_mark(ts, stray));
 
-    if (stray && (stray->mode.exmode & EXMODE_PERSIST)
-        && !(stray->mode.mode & MODE_REGISTERED)) {
-      stray->mode.exmode &= ~EXMODE_PERSIST;
-
-      sendto_opmask_butone(0, SNO_OLDSNO,
-                           "Relocation tombstone %s (-> %s) lost its redirect "
-                           "before its grace period expired; the "
-                           "persist flag has been reclaimed so the channel can "
-                           "be collected normally.  %u member%s left in place "
-                           "-- they were NOT parted, because the channel no "
-                           "longer authenticates as this tombstone.",
-                           ts->oldname, ts->newname, stray->users,
-                           (stray->users == 1) ? "" : "s");
-
-      /* Same reason the sweep proper needs this (see the tail of this
-       * function): every removal that happened while the bit was set took
-       * sub1_from_channel()'s persist early return, so an already-empty
-       * channel has nothing scheduled for it.  Mirrors what MODE -z itself
-       * does for an empty channel (channel.c, mode_parse 'z').  May free
-       * stray. */
-      if (!stray->members)
-        sub1_from_channel(stray);
-    }
-
+    if (stray)
+      relocate_tombstone_cancelled(ts, stray, 0);
     return;
   }
 
@@ -1967,6 +2051,7 @@ static void relocate_tombstone_point(struct RelocateTombstone *ts,
   ircd_strncpy(ts->newname, target_buf, sizeof(ts->newname));
   ts->target_ts = target_ts;
   ts->oldchan = chptr;
+  ts->unsettled = 0;            /* the engine has set the redirect itself */
 
   if (there && there->creationtime != target_ts) {
     relocate_withdraw_redirect(chptr);
@@ -3516,27 +3601,49 @@ static void relocate_announced(const char *oldname, time_t chan_ts,
      * announced target (an op's own +L here won the merge), the sender's
      * tombstone has lost its redirect the same way, and the record
      * expires as the sender's will -- nobody parted, +z handed back. */
+    /* Is the channel what the announcement describes -- +z, and the
+     * announced redirect, or none (the sender's tombstone is detached and
+     * its BURST had no +L)?  The BURST that precedes an announcement
+     * leaves it so, also on a server that had ended its own record for
+     * the channel: at an equal timestamp P10 merges the modes back.
+     *
+     * If it is not, there is no tombstone here and none is made: no
+     * record that could come to match later.  One case leaves something
+     * to undo: the channel carries ANOTHER redirect (an op's own +L here
+     * won the BURST's merge).  The sender's tombstone has lost its
+     * redirect to that merge too and is ending; the +z the merge put on
+     * this channel was that tombstone's, and goes -- unless the channel
+     * is registered. */
+    if (!(chptr->mode.exmode & EXMODE_PERSIST)
+        || (chptr->mode.redir[0]
+            && 0 != ircd_strcmp(chptr->mode.redir, target))) {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "relocate: announced tombstone %s -> %s not taken: the "
+                "channel here is not one (%s)", oldname, target,
+                !(chptr->mode.exmode & EXMODE_PERSIST) ? "no +z"
+                                                       : "another redirect");
+      if ((chptr->mode.exmode & EXMODE_PERSIST)
+          && !(chptr->mode.mode & MODE_REGISTERED)) {
+        chptr->mode.exmode &= ~EXMODE_PERSIST;
+        if (!chptr->members)
+          schedule_destruct_event_1m(chptr);
+      }
+      return;
+    }
+
     if (!(ts = relocate_tombstone_add(chptr, target, expires)))
       return;
     ircd_strncpy(ts->issued, target, sizeof(ts->issued));
+
+    relocate_tombstone_normalise(chptr);
     /* The new channel has the timestamp the sender's old channel has --
      * the announced one, which is not always this channel's
-     * (relocate_announce_ts_matches()). */
-    ts->target_ts = chan_ts;
-
-    if ((chptr->mode.exmode & EXMODE_PERSIST)
-        && (!chptr->mode.redir[0]
-            || 0 == ircd_strcmp(chptr->mode.redir, target))) {
-      /* The channel carries the announced redirect, or none (the sender's
-       * tombstone is detached and its BURST had no +L): it is the
-       * tombstone.  Point it -- which detaches it when the target's name
-       * is another channel's on this server -- and tell the local
-       * members, unless there is nowhere to tell them to go. */
-      relocate_tombstone_normalise(chptr);
-      relocate_tombstone_point(ts, chptr, target, chan_ts, 1);
-      if (!ts->detached)
-        relocate_tombstone_tell(ts, chptr, &his, "", 0);
-    }
+     * (relocate_announce_ts_matches()).  Pointing it detaches it when the
+     * target's name is another channel's on this server; then there is
+     * nowhere to tell the local members to go. */
+    relocate_tombstone_point(ts, chptr, target, chan_ts, 1);
+    if (!ts->detached)
+      relocate_tombstone_tell(ts, chptr, &his, "", 0);
     relocate_tombstone_settle(ts);
     return;
 
@@ -3693,6 +3800,12 @@ void relocate_tombstone_burst_done(struct Channel *chptr)
 
   if (relocate_tombstone_channel(ts) == chptr)
     relocate_tombstone_normalise(chptr);
+  else if (ts->chan_ts == chptr->creationtime)
+    /* The merge left a redirect on it that is not the record's.  If the
+     * sender relocated the channel elsewhere, its announcement is the
+     * next line and settles this as a crossing; until something does, the
+     * record is unsettled (see the field). */
+    ts->unsettled = 1;
 }
 
 /** ms_tombstone - a relocation tombstone announced by a server.

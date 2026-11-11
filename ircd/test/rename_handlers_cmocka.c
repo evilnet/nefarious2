@@ -219,6 +219,8 @@ static int nchannels;
 static struct Channel *destroyed[MAXOBJ];   /* see fake_destruct() */
 static int ndestroyed;
 static int alias_syncs, dirty_marks;        /* calls into the bouncer */
+static struct Channel *scheduled[MAXOBJ];   /* schedule_destruct_event_1m() */
+static int nscheduled;
 
 static struct Channel *fake_channel(const char *name)
 {
@@ -347,6 +349,7 @@ static int world_setup(void **state)
   nmade = nchannels = ntimers = 0;
   ndestroyed = 0;
   alias_syncs = dirty_marks = 0;
+  nscheduled = 0;
   GlobalClientList = NULL;
 
   memset(&me, 0, sizeof(me));
@@ -1040,6 +1043,14 @@ void bounce_mark_dirty(struct Client *cptr)
 {
   (void)cptr;
   dirty_marks++;
+}
+
+/* The real one destroys the channel about a minute later if it is still
+ * empty; here the request is recorded. */
+void schedule_destruct_event_1m(struct Channel *chptr)
+{
+  assert_true(nscheduled < MAXOBJ);
+  scheduled[nscheduled++] = chptr;
 }
 
 /* ====================================================================
@@ -2311,6 +2322,28 @@ static struct Membership *member_of(struct Channel *ch, struct Client *who)
   return NULL;
 }
 
+/** MODE <chan> -L as mode_parse_redir() applies it: the string goes, and
+ * the engine is told a mark changed. */
+static void mode_minus_L(struct Channel *ch)
+{
+  ch->mode.redir[0] = '\0';
+  relocate_tombstone_marks_changed(ch);
+}
+
+/** MODE <chan> +L <target>. */
+static void mode_plus_L(struct Channel *ch, const char *target)
+{
+  ircd_strncpy(ch->mode.redir, target, sizeof(ch->mode.redir));
+  relocate_tombstone_marks_changed(ch);
+}
+
+/** MODE <chan> -z (services). */
+static void mode_minus_z(struct Channel *ch)
+{
+  ch->mode.exmode &= ~EXMODE_PERSIST;
+  relocate_tombstone_marks_changed(ch);
+}
+
 /* --- Status preservation: live status, then part (no snapshots) --- */
 
 #define STATUS (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
@@ -2719,7 +2752,7 @@ static void cancelled_tombstone_moves_nobody(void **state)
   oldch = channel_at("#old", 500000, alice);
   add_member(oldch, bob, CHFL_CHANOP);
   client_rename(alice, "#old", "#new", "");
-  oldch->mode.redir[0] = '\0';                          /* MODE #old -L */
+  mode_minus_L(oldch);                                  /* MODE #old -L */
 
   assert_int_equal(joins(bob, channel_named("#new")), 0);
   assert_non_null(member_of(oldch, bob));
@@ -2873,7 +2906,13 @@ static void remote_follower_is_just_applied(void **state)
   assert_int_equal(alias_syncs, 0);
 }
 
-/* --- C.1: a dissolved tombstone is never left +z --- */
+/* --- C.1: a dissolved tombstone is never left +z ---
+ *
+ * The "cancelled" cases of this section take a mark off the channel
+ * WITHOUT telling the engine, as a change that went past every hook
+ * would: they exercise the deadline's safety net.  A real MODE ends the
+ * record at once -- "cancellation is immediate and final", further
+ * down. */
 
 /* The engine's own +z goes with the tombstone (as before). */
 static void dissolve_clears_the_persist_flag_it_set(void **state)
@@ -2947,12 +2986,14 @@ static void cancelled_tombstone_gives_the_persist_flag_back(void **state)
   assert_false(oldch->mode.exmode & EXMODE_PERSIST);
   assert_false(was_destroyed(oldch));
   assert_int_equal(nopnotices, 1);
-  assert_non_null(strstr(opnotices[0], "lost its redirect"));
-  /* the log names what happened: the redirect is gone, not changed */
+  assert_non_null(strstr(opnotices[0], "was cancelled: +L was removed"));
+  assert_non_null(strstr(opnotices[0], "NOT parted"));
+  /* the log names the mark that was missing: gone, not changed */
   {
     int i, said = 0;
     for (i = 0; i < ndebug; i++)
-      if (strstr(debuglines[i], "(+L was cleared)"))
+      if (strstr(debuglines[i], "no longer authenticates")
+          && strstr(debuglines[i], "(+L was removed)"))
         said = 1;
     assert_true(said);
   }
@@ -4820,9 +4861,10 @@ static void announcement_for_a_channel_not_here_is_ignored(void **state)
 }
 
 /* The channel is the one, but the burst merge left it with another
- * redirect (an op's own +L here sorted first): on the sender the
- * tombstone has lost its redirect the same way.  The record is kept, as
- * the sender's is, and at the deadline nobody is parted and +z goes. */
+ * redirect (an op's own +L here sorted first).  On the sender the
+ * tombstone has lost its redirect to the same merge.  Here the channel is
+ * not a tombstone, and no record is made that could come to match later;
+ * the +z the merge brought was the tombstone's, and goes. */
 static void announcement_for_a_channel_with_another_redirect(void **state)
 {
   struct Client *peer = linked("hub.example", "Bj", "v");
@@ -4833,21 +4875,32 @@ static void announcement_for_a_channel_with_another_redirect(void **state)
   oldch = burst_tombstone("#old", 500000, "#aaa", carol);
   server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
 
-  assert_int_equal(timers_at(1000900), 1);
+  assert_int_equal(ntimers, 0);
+  assert_false(relocate_is_tombstone(oldch));
   assert_string_equal(oldch->mode.redir, "#aaa");       /* not imposed */
-  assert_int_equal(sent_count_to(carol), 0);            /* not a tombstone here */
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_int_equal(sent_count_to(carol), 0);
 
+  /* a later "+L #new" by an op makes nothing of it */
+  mode_plus_L(oldch, "#new");
+  assert_false(relocate_is_tombstone(oldch));
   advance(900);
   assert_non_null(member_of(oldch, carol));
-  assert_string_equal(oldch->mode.redir, "#aaa");
-  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
-  {
-    int i, said = 0;
-    for (i = 0; i < ndebug; i++)
-      if (strstr(debuglines[i], "(redirect was retargeted)"))
-        said = 1;
-    assert_true(said);
-  }
+}
+
+/* ... unless the channel is registered: its +z is services'. */
+static void announcement_for_a_registered_channel_with_another_redirect(void **state)
+{
+  struct Client *peer = linked("hub.example", "Bj", "v");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = burst_tombstone("#old", 500000, "#aaa", carol);
+  oldch->mode.mode |= MODE_REGISTERED;
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+  assert_int_equal(ntimers, 0);
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
 }
 
 /* Both sides hold the tombstone, with deadlines of their own (one side
@@ -5405,7 +5458,7 @@ static void tombstone_that_lost_its_persist_flag_is_not_swept(void **state)
   assert_int_equal(ntimers, 0);
   for (i = 0; i < ndebug; i++)
     if (strstr(debuglines[i], "no longer authenticates")
-        && strstr(debuglines[i], "+z was cleared"))
+        && strstr(debuglines[i], "(+z was removed)"))
       said = 1;
   assert_true(said);
 }
@@ -6588,7 +6641,7 @@ static void cancelled_tombstone_carries_nothing(void **state)
   client_rename(alice, "#old", "#new", "");
   newch = channel_named("#new");
 
-  oldch->mode.redir[0] = '\0';                          /* bob: MODE #old -L */
+  mode_minus_L(oldch);                                  /* bob: MODE #old -L */
   assert_false(relocate_is_tombstone(oldch));
   add_member(oldch, mallory, CHFL_CHANOP);              /* joins, is opped */
   forget();
@@ -6599,6 +6652,330 @@ static void cancelled_tombstone_carries_nothing(void **state)
   assert_non_null(member_of(oldch, bob));
   assert_int_equal(sent_count_to(peer), 2);             /* the two J */
   assert_int_equal(sent_count_to(alice), 0);
+}
+
+/* --- cancellation is immediate and final --- */
+
+/* The toggle.  A remaining op takes +L off the tombstone, lets people in
+ * and ops them, and puts "+L #new" back.  Were the record still there --
+ * it used to wait for the deadline -- the channel would match it again:
+ * a live tombstone whose members were never in the old channel, each of
+ * them able to follow with status.  The record ends the moment the mark
+ * goes; what the op sets afterwards is an ordinary redirect. */
+static void taking_the_redirect_off_ends_the_tombstone_for_good(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Client *mallory = user_on(&me, "mallory", "AAG");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+  newch = channel_named("#new");
+  assert_int_equal(ntimers, 1);
+  forget();
+
+  mode_minus_L(oldch);                          /* bob: MODE #old -L */
+
+  /* over, there and then: no record, no +z, nobody parted, operators told */
+  assert_int_equal(ntimers, 0);
+  assert_false(relocate_is_tombstone(oldch));
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_non_null(member_of(oldch, bob));
+  assert_int_equal(sent_count_to(bob), 0);
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "cancelled"));
+  assert_non_null(strstr(opnotices[0], "+L was removed"));
+
+  add_member(oldch, mallory, CHFL_CHANOP);      /* joins, is opped */
+  mode_plus_L(oldch, "#new");                   /* bob: MODE #old +L #new */
+
+  /* an ordinary redirect on an ordinary channel */
+  assert_false(relocate_is_tombstone(oldch));
+  assert_int_equal(ntimers, 0);
+  forget();
+  assert_int_equal(joins(mallory, newch), 0);
+  assert_int_equal(joins(bob, newch), 0);
+  assert_non_null(member_of(oldch, mallory));
+  assert_non_null(member_of(oldch, bob));
+  assert_int_equal(sent_count_to(peer), 2);     /* the two J */
+  /* not announced, and nothing happens at what was the deadline */
+  burst_to(peer);
+  assert_int_equal(sent_count_to(peer), 2);
+  advance(900);
+  assert_non_null(member_of(oldch, mallory));
+  assert_false(was_destroyed(oldch));
+  assert_false(logged("no longer authenticates"));
+}
+
+/* The redirect CHANGED to another name ends it the same way. */
+static void changing_the_redirect_ends_the_tombstone(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "");
+
+  mode_plus_L(oldch, "#elsewhere");
+  assert_int_equal(ntimers, 0);
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(oldch->mode.redir, "#elsewhere");
+  assert_non_null(strstr(opnotices[0], "+L was changed"));
+}
+
+/* ... and -z alone (services). */
+static void taking_persist_off_ends_the_tombstone(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "");
+
+  mode_minus_z(oldch);
+  assert_int_equal(ntimers, 0);
+  assert_false(relocate_is_tombstone(oldch));
+  assert_non_null(member_of(oldch, bob));
+  assert_non_null(strstr(opnotices[0], "+z was removed"));
+  assert_int_equal(nscheduled, 0);              /* it has a member */
+}
+
+/* An EMPTY tombstone that is cancelled must not be left as an empty
+ * channel nothing collects; nor may it be freed under the MODE that is
+ * being parsed.  Its collection is scheduled, as MODE -z does. */
+static void cancelled_empty_tombstone_is_scheduled_for_collection(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  client_rename(alice, "#old", "#new", "");
+
+  mode_minus_L(oldch);
+  assert_int_equal(ntimers, 0);
+  assert_false(was_destroyed(oldch));
+  assert_int_equal(nscheduled, 1);
+  assert_ptr_equal(scheduled[0], oldch);
+}
+
+/* A registered tombstone that is cancelled keeps +z: services'. */
+static void cancelled_registered_tombstone_keeps_persist(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "");
+  oldch->mode.mode |= MODE_REGISTERED;
+  mode_minus_L(oldch);
+  assert_int_equal(ntimers, 0);
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+}
+
+/* What does NOT end it: a MODE that leaves both marks as they are (the
+ * same redirect set again, a limit, anything else), and everything the
+ * engine does to the redirect itself -- a retarget, and the withdrawal
+ * of a detached tombstone's +L. */
+static void what_does_not_end_a_tombstone(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Client *dan = user_on(&me, "dan", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  mode_plus_L(oldch, "#NEW");                   /* the same channel name */
+  oldch->mode.limit = 20;                       /* MODE +l 20 */
+  relocate_tombstone_marks_changed(oldch);
+  assert_true(relocate_is_tombstone(oldch));
+  assert_int_equal(timers_at(1000900), 1);
+
+  /* the engine retargets: #new is renamed to #newer */
+  server_rename(peer, bob, "#new", "#newer", "");
+  assert_string_equal(oldch->mode.redir, "#newer");
+  relocate_tombstone_marks_changed(oldch);      /* (some other MODE) */
+  assert_true(relocate_is_tombstone(oldch));
+
+  /* the engine detaches: #newer is renamed onto a stranger's name */
+  channel_at("#taken", 700000, dan);
+  server_rename(peer, bob, "#newer", "#taken", "");
+  assert_string_equal(oldch->mode.redir, "");
+  relocate_tombstone_marks_changed(oldch);
+  assert_true(relocate_is_tombstone(oldch));
+  assert_int_equal(timers_at(1000900), 1);
+
+  /* but a redirect a user puts on the detached tombstone ends it */
+  mode_plus_L(oldch, "#somewhere");
+  assert_false(relocate_is_tombstone(oldch));
+  assert_int_equal(ntimers, 0);
+}
+
+/* One side ended the tombstone (a MODE -L it alone saw, during a split);
+ * the other still holds and announces it.
+ *
+ * The announcement by itself does not bring it back: the channel here has
+ * neither mark, and is not the tombstone. */
+static void announcement_does_not_resurrect_an_ended_tombstone(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *down = linked("down.example", "Bk", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  mode_minus_L(oldch);
+  forget();
+
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+
+  assert_int_equal(ntimers, 0);
+  assert_false(relocate_is_tombstone(oldch));
+  assert_string_equal(oldch->mode.redir, "");
+  assert_int_equal(sent_count_to(carol), 0);
+  /* still passed on */
+  assert_string_equal(sent_to(down, 0), "Bj RT #old 500000 #new 1000900");
+  advance(900);
+  assert_non_null(member_of(oldch, carol));
+}
+
+/* The BURST that precedes the announcement is another matter: at an equal
+ * timestamp P10 merges modes, and "+z +L #new" is back on the channel
+ * before the announcement arrives -- as any mode removed on one side of a
+ * split comes back.  The channel then IS what the announcement describes,
+ * and the record is built: refusing would leave "+z +L" with nothing to
+ * end it, and the two sides apart. */
+static void burst_that_restores_the_marks_restores_the_tombstone(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  mode_minus_L(oldch);
+  assert_int_equal(ntimers, 0);
+
+  /* Bj B #old 500000 +zL #new ... */
+  oldch->mode.exmode |= EXMODE_PERSIST;
+  ircd_strncpy(oldch->mode.redir, "#new", sizeof(oldch->mode.redir));
+  relocate_tombstone_burst_done(oldch);
+  server_tombstone(peer, peer, "#old", "500000", "#new", "1000900");
+
+  assert_true(relocate_is_tombstone(oldch));
+  assert_int_equal(timers_at(1000900), 1);
+}
+
+/* A BURST can also leave a FOREIGN redirect on a tombstone (the other
+ * side's op set "+L #aaa", which sorts first in the merge) with no
+ * announcement to explain it.  The record is left unsettled -- it may be
+ * a crossing whose announcement is the next line -- but it cannot be
+ * brought back by hand: the next MODE that touches a mark ends it, also
+ * one that would make it match again. */
+static void burst_merged_redirect_cannot_be_toggled_back(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, CHFL_CHANOP);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+
+  ircd_strncpy(oldch->mode.redir, "#aaa", sizeof(oldch->mode.redir));
+  relocate_tombstone_burst_done(oldch);         /* B #old ... +L #aaa */
+  assert_false(relocate_is_tombstone(oldch));
+  assert_int_equal(ntimers, 1);                 /* unsettled, not ended */
+
+  mode_plus_L(oldch, "#new");                   /* carol: MODE #old +L #new */
+  assert_int_equal(ntimers, 0);
+  assert_false(relocate_is_tombstone(oldch));
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+}
+
+/* When the foreign redirect WAS a crossing, the announcement settles it:
+ * the record is whole again, and a later MODE that leaves the marks alone
+ * does not end it. */
+static void burst_merged_redirect_settled_by_its_announcement(void **state)
+{
+  struct Client *hub = linked("hub.example", "Bh", "v");
+  struct Client *uma = user_on(&me, "uma", "AAD");
+  struct Client *carol = user_on(&me, "carol", "AAE");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, uma);
+  add_member(oldch, carol, 0);
+  client_rename(uma, "#old", "#y", "");
+
+  /* B #old 500000 +zL #x: "#x" sorts first and replaces "#y" */
+  ircd_strncpy(oldch->mode.redir, "#x", sizeof(oldch->mode.redir));
+  relocate_tombstone_burst_done(oldch);
+  assert_false(relocate_is_tombstone(oldch));
+  /* RT #old 500000 #x ...: a crossing; #x wins */
+  server_tombstone(hub, hub, "#old", "500000", "#x", "1000900");
+  assert_true(relocate_is_tombstone(oldch));
+
+  mode_plus_L(oldch, "#x");                     /* MODE #old +L #x: no change */
+  assert_true(relocate_is_tombstone(oldch));
+  assert_int_equal(timers_at(1000900), 2);
+}
+
+/* ... and if nothing touches it, the deadline's safety net drops the
+ * record, takes +z back, parts nobody, and says which mark was wrong. */
+static void unsettled_record_is_dropped_at_the_deadline(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  ircd_strncpy(oldch->mode.redir, "#aaa", sizeof(oldch->mode.redir));
+  relocate_tombstone_burst_done(oldch);
+
+  advance(900);
+  assert_non_null(member_of(oldch, carol));
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_string_equal(oldch->mode.redir, "#aaa");
+  assert_int_equal(ntimers, 0);
+  assert_true(logged("+L was changed"));
 }
 
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
@@ -6756,6 +7133,7 @@ int main(void)
     T(announcement_for_another_incarnation_is_ignored),
     T(announcement_for_a_channel_not_here_is_ignored),
     T(announcement_for_a_channel_with_another_redirect),
+    T(announcement_for_a_registered_channel_with_another_redirect),
     T(announcement_for_a_tombstone_held_here_keeps_the_later_deadline),
     T(announcement_meeting_a_record_that_is_due_dissolves_through_the_timer),
     T(disagreeing_announcements_on_the_winning_side),
@@ -6801,6 +7179,18 @@ int main(void)
     T(detached_tombstone_is_attached_again_when_it_can_be),
     T(detached_tombstone_renamed_still_ends_on_time),
     T(crossing_onto_a_strangers_channel_detaches),
+
+    T(taking_the_redirect_off_ends_the_tombstone_for_good),
+    T(changing_the_redirect_ends_the_tombstone),
+    T(taking_persist_off_ends_the_tombstone),
+    T(cancelled_empty_tombstone_is_scheduled_for_collection),
+    T(cancelled_registered_tombstone_keeps_persist),
+    T(what_does_not_end_a_tombstone),
+    T(announcement_does_not_resurrect_an_ended_tombstone),
+    T(burst_that_restores_the_marks_restores_the_tombstone),
+    T(burst_merged_redirect_cannot_be_toggled_back),
+    T(burst_merged_redirect_settled_by_its_announcement),
+    T(unsettled_record_is_dropped_at_the_deadline),
     T(renamed_tombstone_and_renamed_target_in_either_order),
     T(crossing_whose_winner_is_renamed_in_either_order),
     T(chain_across_a_crossing_winner_moves_on),

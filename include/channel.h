@@ -562,6 +562,13 @@ extern void relocate_follow(struct Client *cptr, struct Client *sptr,
  * nobody (ircd/m_rename.c, "Who can be in a tombstone"). */
 extern int relocate_is_tombstone(struct Channel *chptr);
 
+/* Called wherever a MODE has just changed a channel's redirect
+ * (mode.redir) or its persist flag (EXMODE_PERSIST): mode_parse_redir(),
+ * mode_parse()'s exmode flush, CLEARMODE.  A tombstone that lost a mark
+ * is ended there and then.  Not for a BURST's mode merge
+ * (relocate_tombstone_burst_done() settles that). */
+extern void relocate_tombstone_marks_changed(struct Channel *chptr);
+
 extern struct Membership* find_member_link(struct Channel * chptr,
                                            const struct Client* cptr);
 extern int sub1_from_channel(struct Channel* chptr);
