@@ -1496,6 +1496,16 @@ int rehash(struct Client *cptr, int sig)
   for (i = 0; i <= HighestFd; i++) {
     if ((acptr = LocalClientArray[i])) {
       assert(!IsMe(acptr));
+      /* Only UWorld blocks are detached, and only from registered servers;
+       * attach_conf_uworld() below attaches the new ones.  Every other conf
+       * stays attached where it is, flagged illegal if it was in use: a
+       * client keeps its Client and Operator blocks, a link that is still
+       * connecting keeps everything, and a registered server keeps the
+       * Connect block it linked under -- even when the new configuration
+       * changed or removed it -- until the link drops.  That old block is
+       * what check_loop_and_lh() (m_server.c) reads the hub mask and
+       * maxhops from for every server the link introduces, and what gives
+       * the link its connection class. */
       if (IsServer(acptr))
         det_confs_butmask(acptr, ~(CONF_UWORLD | CONF_ILLEGAL));
       /* Because admin's are getting so uppity about people managing to
@@ -1746,9 +1756,11 @@ int conf_check_server(struct Client *cptr)
     c_conf = find_conf_byip(lp, &cli_ip(cptr), CONF_SERVER);
   /*
    * A rehash during the handshake marks the old Connect block illegal
-   * and leaves it attached only to this link (rehash detaches confs from
-   * registered servers alone); the detach below would free it, and
-   * attach_conf() would then use the freed block.  Treat it as gone.
+   * and leaves it attached to this link: rehash() detaches no Connect
+   * block from any link, registered or not (it detaches UWorld blocks
+   * only, and only from registered servers).  The detach below would free
+   * it, and attach_conf() would then use the freed block.  Treat it as
+   * gone.
    */
   if (c_conf && IsIllegal(c_conf))
     c_conf = NULL;

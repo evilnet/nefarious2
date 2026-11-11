@@ -130,7 +130,10 @@ check_loop_and_lh(struct Client* cptr, struct Client *sptr, time_t *ghost, const
     *ghost = 0;
 
   /*
-   * Calculate type of connect limit and applicable config item.
+   * Calculate type of connect limit and applicable config item.  This is
+   * the Connect block the link registered under: a rehash that changes or
+   * removes it leaves this one attached (flagged illegal) until the link
+   * drops, so its hub mask and maxhops still apply (see rehash()).
    */
   lhconf = find_conf_byname(cli_confs(cptr), cli_name(cptr), CONF_SERVER);
   assert(lhconf != NULL);
