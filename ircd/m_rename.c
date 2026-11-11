@@ -1085,18 +1085,6 @@ struct RelocateTombstone {
                                          relocate_tombstone_expire_cb()'s
                                          ET_DESTROY case is the only place
                                          that happens. */
-  int persist_was_ours;             /**< Whether THIS relocate_execute() call
-                                         is the one that set EXMODE_PERSIST on
-                                         the old channel, as opposed to
-                                         finding it already persisted
-                                         (services +z, or an earlier
-                                         relocation of the same channel on a
-                                         diverged link).  Gates whether the
-                                         grace-expiry reclaim path and
-                                         relocate_tombstone_clear_marks() may
-                                         strip the bit back off -- a bit this
-                                         engine never set is not this
-                                         engine's to clear. */
 };
 
 /** Global tombstone list. */
@@ -1357,33 +1345,28 @@ int relocate_snap_lookup(struct Channel *chptr, struct Client *who,
   return 0;
 }
 
-/** Strip the marks relocate_execute() put on a tombstone channel.
+/** Strip the tombstone marks from a channel that is being dissolved.
  *
- * The redirect bits are unconditional: relocate_execute() is unambiguously
- * the only thing that ever sets MODE_REDIRECT/mode.redir on a tombstone, so
- * there is nothing to attribute there, and relocate_tombstone_channel()'s
- * identity check keys on them -- left set, a dissolved channel would keep
- * validating as somebody's live tombstone.
+ * The redirect goes: relocate_tombstone_channel()'s identity check keys on
+ * it, and left set a dissolved channel would keep validating as somebody's
+ * live tombstone.
  *
- * EXMODE_PERSIST is different: it is the only thing keeping
- * sub1_from_channel() from collecting the channel once it is empty
- * (channel.c:370), but this engine does not always OWN that bit -- a
- * channel can already be +z (services persist, or an earlier relocation of
- * the same name on a diverged link) before relocate_execute() ever ORs it
- * in.  ts->persist_was_ours records which case this tombstone is, and only
- * a "yes" clears the bit here; otherwise it is left for whatever set it to
- * clear in its own time.
- * @param[in] ts Tombstone whose marks are being cleared.
+ * EXMODE_PERSIST goes too, ALWAYS -- it is the only thing keeping
+ * sub1_from_channel() from collecting the channel once it is empty.  It
+ * used to be cleared only when this engine had set it, and a channel that
+ * was +z before its relocation (a registered channel under services'
+ * persist) was left behind as an empty, opless, unregistered +z channel
+ * for good.  But a +z from before the relocation was the registration's,
+ * and the registration moved to the new name with everything else
+ * (relocate_execute() step 1b): on the tombstone it is stale whoever set
+ * it.  Every server dissolves alike, so the bit goes everywhere.
  * @param[in] chptr Channel to strip (the tombstone's own channel).
  */
-static void relocate_tombstone_clear_marks(struct RelocateTombstone *ts,
-                                           struct Channel *chptr)
+static void relocate_tombstone_clear_marks(struct Channel *chptr)
 {
   chptr->mode.mode &= ~MODE_REDIRECT;
   chptr->mode.redir[0] = '\0';
-
-  if (ts->persist_was_ours)
-    chptr->mode.exmode &= ~EXMODE_PERSIST;
+  chptr->mode.exmode &= ~EXMODE_PERSIST;
 }
 
 /** Grace-period expiry sweep: PART every remaining member of a tombstone and
@@ -1432,24 +1415,20 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
    * strand a channel that no member count can ever collect -- a permanent
    * leak, reachable on purpose.
    *
-   * So reclaim the bit -- IF this engine is the one that set it
-   * (ts->persist_was_ours).  This is not overreach when it is ours: it was
-   * set unilaterally by relocate_execute() on the struct and deliberately
-   * never put on the wire, precisely so relocation would not depend on
-   * services agreeing to persist the channel, and having taken it
-   * unilaterally is exactly why handing it back unilaterally is symmetric.
-   * But if the channel was already +z BEFORE this relocation -- services
-   * persist, or an earlier relocation of the same name on a diverged link
-   * -- the bit belongs to whoever set it THEN, and stripping it here would
-   * collect a channel something else still wants kept.  (Task 4.)
+   * So reclaim the bit -- always, as the dissolve proper does
+   * (relocate_tombstone_clear_marks()): a +z this engine set was taken
+   * unilaterally, on the struct and never on the wire, and is handed back
+   * the same way; a +z from before the relocation belonged to a
+   * registration that has moved to the new name.  The one channel left
+   * alone is one that is REGISTERED now: its persist flag is services'
+   * business again.
    *
-   * What is NOT done here, in either case, is the sweep: a channel that
-   * failed authentication may be an unrelated channel wearing the old name,
-   * and parting its members would be exactly the wrong-channel damage the
+   * What is NOT done here is the sweep: a channel that failed
+   * authentication may be an unrelated channel wearing the old name, and
+   * parting its members would be exactly the wrong-channel damage the
    * identity check exists to prevent.  Members of a de-tombstoned channel
-   * simply stay where they are -- which is why the reclaim (or the refusal
-   * to reclaim) is reported to operators rather than only to the debug
-   * log. */
+   * simply stay where they are -- which is why the reclaim is reported to
+   * operators rather than only to the debug log. */
   if (!(chptr = relocate_tombstone_channel(ts))) {
     struct Channel *stray = FindChannel(ts->oldname);
 
@@ -1462,12 +1441,13 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
                 : !(stray->mode.mode & MODE_REDIRECT) ? "+L was cleared"
                 : "redirect was retargeted");
 
-    if (stray && (stray->mode.exmode & EXMODE_PERSIST) && ts->persist_was_ours) {
+    if (stray && (stray->mode.exmode & EXMODE_PERSIST)
+        && !(stray->mode.mode & MODE_REGISTERED)) {
       stray->mode.exmode &= ~EXMODE_PERSIST;
 
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "Relocation tombstone %s (-> %s) lost its redirect "
-                           "before its grace period expired; the internal "
+                           "before its grace period expired; the "
                            "persist flag has been reclaimed so the channel can "
                            "be collected normally.  %u member%s left in place "
                            "-- they were NOT parted, because the channel no "
@@ -1479,20 +1459,10 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
        * function): every removal that happened while the bit was set took
        * sub1_from_channel()'s persist early return, so an already-empty
        * channel has nothing scheduled for it.  Mirrors what MODE -z itself
-       * does for an empty channel (channel.c:5099-5100).  May free stray. */
+       * does for an empty channel (channel.c, mode_parse 'z').  May free
+       * stray. */
       if (!stray->members)
         sub1_from_channel(stray);
-    } else if (stray && (stray->mode.exmode & EXMODE_PERSIST)) {
-      /* Not ours to reclaim: the persist bit predates this relocation, so
-       * leave it for whatever set it to clear in its own time. */
-      sendto_opmask_butone(0, SNO_OLDSNO,
-                           "Relocation tombstone %s (-> %s) lost its redirect "
-                           "before its grace period expired.  Its internal "
-                           "persist flag predates this relocation and has "
-                           "been left in place; %u member%s left where they "
-                           "are.",
-                           ts->oldname, ts->newname, stray->users,
-                           (stray->users == 1) ? "" : "s");
     }
 
     return;
@@ -1556,7 +1526,7 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
    * early return (channel.c:370) and so never scheduled the ordinary
    * empty-channel collection -- and nothing re-enters that path by itself.
    * So the dissolve clears the marks and then runs it once, by hand. */
-  relocate_tombstone_clear_marks(ts, chptr);
+  relocate_tombstone_clear_marks(chptr);
 
   ts->oldchan = NULL; /* about to be freed or zannel'd; never read again */
 
@@ -1945,7 +1915,6 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
   char reasonpart[TOPICLEN + 4];
   int nmembers = 0;
   int nmovers = 0;
-  int persist_was_ours;
   int i;
 
   if (!sptr || !chptr || EmptyString(newname))
@@ -2083,14 +2052,8 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
    * the members who are leaving anyway don't get a MODE for a channel they
    * are about to part.
    *
-   * persist_was_ours is captured BEFORE the |=, so it is false exactly
-   * when the channel already carried EXMODE_PERSIST for some other reason
-   * (services +z, or an earlier relocation of the same name on a diverged
-   * link) -- see the RelocateTombstone.persist_was_ours comment.  This is
-   * the ONLY point in the function that can observe the pre-OR state, so
-   * it has to happen right here, before the very next line changes it. */
-  persist_was_ours = !(chptr->mode.exmode & EXMODE_PERSIST);
-
+   * Whether the channel was +z already does not matter: the dissolve
+   * clears the bit either way (relocate_tombstone_clear_marks()). */
   chptr->mode.exmode |= EXMODE_PERSIST;
   chptr->mode.mode |= MODE_REDIRECT;
   ircd_strncpy(chptr->mode.redir, newname_buf, sizeof(chptr->mode.redir));
@@ -2261,12 +2224,11 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
        * already one (see its comment).  Free whatever that record was
        * still carrying before installing this call's fresher data -- the
        * membership walked above is this server's current truth, and a
-       * stale snapshot or provenance flag from an earlier relocation of
-       * the same name must not survive alongside it. */
+       * stale snapshot from an earlier relocation of the same name must
+       * not survive alongside it. */
       relocate_snap_free_list(ts->snaps);
       ts->snaps = snaphead;
       ts->target_ts = newchan->creationtime;
-      ts->persist_was_ours = persist_was_ours;
     } else {
       /* Allocation failure inside relocate_tombstone_add() itself -- there
        * is no record to attach these to.  Same "life goes on without

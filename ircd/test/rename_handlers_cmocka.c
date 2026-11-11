@@ -2205,6 +2205,128 @@ static void snapshot_follows_a_chain_to_the_same_channel(void **state)
   assert_int_equal(flags, CHFL_CHANOP);
 }
 
+/* --- C.1: a dissolved tombstone is never left +z --- */
+
+/* The engine's own +z goes with the tombstone (as before). */
+static void dissolve_clears_the_persist_flag_it_set(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "moving");
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  forget();
+
+  advance(900);
+  assert_string_equal(sent_to(bob, 0),
+                      ":bob!user@host.example PART #old :Channel has moved to #new");
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#old"));
+}
+
+/* A channel that was +z before it was relocated (a registered channel
+ * under services' persist) is not left behind as an empty, unregistered
+ * +z channel: the registration went with the relocation. */
+static void dissolve_clears_a_persist_flag_that_was_there_before(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  oldch->mode.exmode |= EXMODE_PERSIST;
+  add_member(oldch, bob, 0);
+  client_rename(alice, "#old", "#new", "moving");
+  /* the new channel keeps what the old one had */
+  assert_true(channel_named("#new")->mode.exmode & EXMODE_PERSIST);
+
+  advance(900);
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_true(was_destroyed(oldch));
+  assert_null(channel_named("#old"));
+}
+
+/* A chanop took +L off the tombstone: at the deadline nobody is parted
+ * (the channel no longer authenticates), but the +z goes -- whoever set
+ * it -- so the channel is collected like any other once it empties. */
+static void cancelled_tombstone_gives_the_persist_flag_back(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  oldch->mode.exmode |= EXMODE_PERSIST;
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "moving");
+
+  /* MODE #old -L */
+  oldch->mode.mode &= ~MODE_REDIRECT;
+  oldch->mode.redir[0] = '\0';
+  forget();
+
+  advance(900);
+  assert_int_equal(sent_count_to(bob), 0);
+  assert_non_null(member_of(oldch, bob));
+  assert_false(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_false(was_destroyed(oldch));
+  assert_int_equal(nopnotices, 1);
+  assert_non_null(strstr(opnotices[0], "lost its redirect"));
+
+  /* ... and the last member leaving now collects it */
+  remove_user_from_channel(bob, oldch);
+  assert_true(was_destroyed(oldch));
+}
+
+/* The same with nobody left in it: collected at the deadline. */
+static void cancelled_empty_tombstone_is_collected(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  oldch->mode.exmode |= EXMODE_PERSIST;
+  client_rename(alice, "#old", "#new", "moving");
+  oldch->mode.mode &= ~MODE_REDIRECT;
+  oldch->mode.redir[0] = '\0';
+
+  advance(900);
+  assert_true(was_destroyed(oldch));
+}
+
+/* ... unless the channel is registered by then: its +z is services'. */
+static void cancelled_registered_channel_keeps_its_persist_flag(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  struct Channel *oldch;
+  (void)state;
+
+  feat_rename_consent = 1;
+  oldch = channel_at("#old", 500000, alice);
+  add_member(oldch, bob, CHFL_CHANOP);
+  client_rename(alice, "#old", "#new", "moving");
+  oldch->mode.mode &= ~MODE_REDIRECT;
+  oldch->mode.redir[0] = '\0';
+  oldch->mode.mode |= MODE_REGISTERED;
+
+  advance(900);
+  assert_true(oldch->mode.exmode & EXMODE_PERSIST);
+  assert_non_null(member_of(oldch, bob));
+  assert_int_equal(nopnotices, 0);
+}
+
 #define T(f) cmocka_unit_test_setup_teardown(f, world_setup, world_teardown)
 
 int main(void)
@@ -2265,6 +2387,12 @@ int main(void)
     T(issuer_has_no_snapshot),
     T(snapshot_is_not_honoured_in_a_recreated_channel),
     T(snapshot_follows_a_chain_to_the_same_channel),
+
+    T(dissolve_clears_the_persist_flag_it_set),
+    T(dissolve_clears_a_persist_flag_that_was_there_before),
+    T(cancelled_tombstone_gives_the_persist_flag_back),
+    T(cancelled_empty_tombstone_is_collected),
+    T(cancelled_registered_channel_keeps_its_persist_flag),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
