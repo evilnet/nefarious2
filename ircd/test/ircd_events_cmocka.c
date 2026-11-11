@@ -21,6 +21,9 @@
  * This links the real event core and the real epoll engine.  A failure is
  * produced the way it happens in production: the file behind a registered
  * descriptor is replaced (dup2), so EPOLL_CTL_MOD on it fails with ENOENT.
+ * The one failure that cannot be produced that way -- the engine refusing
+ * the signal pipe at start-up -- goes through epoll_ctl() wrapped
+ * (--wrap=epoll_ctl), in a child process.
  * The event core's assert() comes here (events_assert.h), so a case can
  * see one fire, or run past it as a release build does.
  */
@@ -34,7 +37,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <cmocka.h>
@@ -117,6 +122,21 @@ void events_assert(int ok, const char *expression, const char *file, int line)
   assert_hits++;
   if (!release_build)
     mock_assert(0, expression, file, line);
+}
+
+/* The engine's epoll_ctl() (--wrap=epoll_ctl): a case can make it refuse
+ * every registration. */
+static int refuse_epoll_add;
+
+int __real_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+
+int __wrap_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+{
+  if (refuse_epoll_add && op == EPOLL_CTL_ADD) {
+    errno = ENOMEM;
+    return -1;
+  }
+  return __real_epoll_ctl(epfd, op, fd, event);
 }
 
 /* ------------------------------------------------------------------ */
@@ -535,8 +555,50 @@ static void errors_raised_while_delivering_are_delivered_too(void **state)
   probe_close(&b);
 }
 
+/* An engine without signal support (epoll) takes signals through a pipe
+ * that event_init() registers with it.  If the engine refuses that pipe,
+ * the server must not start: running on, no signal would be delivered --
+ * SIGHUP would never rehash, SIGTERM never stop it.  event_init() exits 8
+ * and says why on stderr (the log is not open yet).  Runs in a child, and
+ * before any other case has called event_init(). */
+static void refused_signal_pipe_fails_startup(void **state)
+{
+  char out[512];
+  size_t got = 0;
+  ssize_t n;
+  int err[2], status;
+  pid_t pid;
+
+  (void)state;
+  assert_int_equal(pipe(err), 0);
+  fflush(stdout);
+  fflush(stderr);
+  pid = fork();
+  assert_true(pid >= 0);
+  if (pid == 0) {
+    dup2(err[1], 2);
+    close(err[0]);
+    refuse_epoll_add = 1;
+    event_init(64);
+    _exit(0);                   /* it ran on */
+  }
+  close(err[1]);
+  while (got < sizeof(out) - 1
+         && (n = read(err[0], out + got, sizeof(out) - 1 - got)) > 0)
+    got += n;
+  out[got] = '\0';
+  close(err[0]);
+  assert_int_equal(waitpid(pid, &status, 0), pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 8);
+  assert_non_null(strstr(out, "Failed to register signal pipe"));
+}
+
 int main(void)
 {
+  const struct CMUnitTest startup[] = {
+    cmocka_unit_test(refused_signal_pipe_fails_startup),
+  };
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(failed_interest_change_runs_nothing_inside_the_caller),
     cmocka_unit_test(engine_loop_delivers_deferred_errors),
@@ -550,5 +612,8 @@ int main(void)
     cmocka_unit_test(errors_raised_while_delivering_are_delivered_too),
   };
 
-  return cmocka_run_group_tests(tests, group_setup, NULL);
+  int failed = cmocka_run_group_tests_name("startup", startup, NULL, NULL);
+
+  return failed + cmocka_run_group_tests_name("events", tests, group_setup,
+                                              NULL);
 }

@@ -31,8 +31,11 @@
 #include "s_debug.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <errno.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #define SIGS_PER_SOCK	10	/**< number of signals to process per socket
@@ -381,8 +384,19 @@ event_init(int max_sockets)
     }
 
     sigInfo.fd = p[1]; /* write end of pipe */
-    socket_add(&sigInfo.sock, signal_callback, 0, SS_NOTSOCK,
-	       SOCK_EVENT_READABLE, p[0]); /* read end of pipe */
+    if (!socket_add(&sigInfo.sock, signal_callback, 0, SS_NOTSOCK,
+		    SOCK_EVENT_READABLE, p[0])) { /* read end of pipe */
+      /* Running on would deliver no signal: SIGHUP would never rehash and
+       * SIGTERM never stop the server.  The log is not set up yet, so say
+       * it on stderr too (kept in the foreground, as under -n). */
+      const char *why = strerror(errno);
+
+      log_write(LS_SYSTEM, L_CRIT, 0, "Failed to register signal pipe "
+		"with the %s engine: %s", evInfo.engine->eng_name, why);
+      fprintf(stderr, "Failed to register signal pipe with the %s engine: "
+	      "%s\n", evInfo.engine->eng_name, why);
+      exit(8);
+    }
   }
 }
 
