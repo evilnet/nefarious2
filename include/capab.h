@@ -23,9 +23,11 @@
  * @version $Id: capab.h 1349 2005-04-05 01:46:05Z entrope $
  */
 
-#ifndef INCLUDED_client_h
-#include "client.h"
+#ifndef INCLUDED_flagset_h
+#include "flagset.h"
 #endif
+
+struct Client;
 
 #define CAPFL_HIDDEN	0x0001	/**< Do not advertize this capability */
 #define CAPFL_PROHIBIT	0x0002	/**< Client may not set this capability */
