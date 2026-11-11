@@ -483,6 +483,20 @@ check_start_timestamp(struct Client *cptr, time_t timestamp, time_t start_timest
 
 /** Interpret a server's flags.
  *
+ * Two of them are about channel rename, which the ircv3.2-upgrade branch
+ * issues and this server only carries: 'r' says the server takes the
+ * rename message RN, 'v' that it speaks all of that branch's
+ * server-to-server extensions, RN among them.  Both are recorded.
+ *
+ * They are NOT repeated as received when this server introduces the
+ * server to others (here in ms_server(), and twice in server_estab()).
+ * To a server of that branch, 'v' on a server means that every hop to it
+ * speaks those extensions, and it then sends things that way which this
+ * server would drop as unknown tokens.  So a server that announced 'v' or
+ * 'r' is introduced onward with 'r' and never with 'v': "an RN reaches
+ * it, nothing else of that branch does", which is the truth about any
+ * server behind this one.
+ *
  * @param[in] cptr New server structure.
  * @param[in] flags String listing server's P10 flags.
  */
@@ -493,6 +507,8 @@ void set_server_flags(struct Client *cptr, const char *flags)
     case 's': SetService(cptr); break;
     case '6': SetIPv6(cptr); break;
     case 'o': SetOpLevels(cptr); break;
+    case 'v': SetIRCv3Aware(cptr); break;
+    case 'r': SetRenameCapable(cptr); break;
     }
 }
 
@@ -788,11 +804,13 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       continue;
     if (0 == match(cli_name(&me), cli_name(acptr)))
       continue;
-    sendcmdto_one(sptr, CMD_SERVER, bcptr, "%s %d 0 %s %s %s%s +%s%s%s%s :%s",
+    sendcmdto_one(sptr, CMD_SERVER, bcptr, "%s %d 0 %s %s %s%s +%s%s%s%s%s :%s",
                   cli_name(acptr), hop + 1, parv[4], parv[5],
                   NumServCap(acptr), IsHub(acptr) ? "h" : "",
                   IsService(acptr) ? "s" : "", IsIPv6(acptr) ? "6" : "",
-                  IsOpLevels(acptr) ? "o" : "", cli_info(acptr));
+                  IsOpLevels(acptr) ? "o" : "",
+                  TakesRename(acptr) ? "r" : "", /* never 'v' */
+                  cli_info(acptr));
   }
   return 0;
 }

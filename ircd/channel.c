@@ -1858,6 +1858,121 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
   return chptr;
 }
 
+/** Give a channel a new name.
+ *
+ * The channel stays the channel it was: members and their status
+ * (zombies and delayed joins included), modes, keys, Apass and Upass,
+ * bans and excepts, invites, topic, creation time and a pending
+ * destruct event all carry over.  Only the name, and with it the hash
+ * bucket, changes.
+ *
+ * The name is stored at the end of the structure, which is allocated to
+ * fit it.  A new name no longer than the old one is written in place; a
+ * longer one needs a new structure, and then everything that points at
+ * the channel is repointed: the hash chain, the global channel list,
+ * each membership, the invite list entry of each invited user, and the
+ * destruct event.  Nothing else holds a struct Channel pointer across
+ * calls.  The caller's own pointer is updated through \a chptr_p; any
+ * other copy the caller holds is stale afterwards.
+ *
+ * Nothing is sent, to members or to servers, and the name is not judged
+ * here beyond its length: both are up to the caller.
+ *
+ * A +L redirect on another channel that names this one is a string
+ * (mode.redir) and is left as it is.  It now names a channel that does
+ * not exist, and a redirected JOIN creates that channel, as for any
+ * redirect to a missing channel; changing the string here would be a
+ * mode change no server and no member was told about.
+ *
+ * @param[in,out] chptr_p Channel to rename; updated when the channel had
+ *                to be reallocated.
+ * @param[in] newname New name.
+ * @return 0 on success, -1 on bad arguments or a name longer than
+ *         CHANNELLEN, -2 when a channel of that name exists (which
+ *         includes \a newname being this channel's own name in another
+ *         case).
+ */
+int rename_channel(struct Channel **chptr_p, const char *newname)
+{
+  struct Channel *chptr;
+  size_t oldlen, newlen;
+  struct Channel *newchptr;
+  struct Membership *member;
+  struct SLink *link;
+
+  if (!chptr_p || !*chptr_p || !newname || !*newname)
+    return -1;
+
+  chptr = *chptr_p;
+
+  newlen = strlen(newname);
+  if (newlen > CHANNELLEN)
+    return -1;
+
+  /* Check if new name already exists */
+  if (FindChannel(newname))
+    return -2;
+
+  oldlen = strlen(chptr->chname);
+
+  /* If new name fits in existing allocation, just update in place */
+  if (newlen <= oldlen) {
+    hChangeChannel(chptr, newname);
+    strcpy(chptr->chname, newname);
+    return 0;
+  }
+
+  /* New name is longer - need to reallocate */
+  newchptr = (struct Channel*) MyMalloc(sizeof(struct Channel) + newlen);
+  if (!newchptr)
+    return -1;
+
+  /* Copy all data from old to new */
+  memcpy(newchptr, chptr, sizeof(struct Channel));
+  strcpy(newchptr->chname, newname);
+
+  /* Update hash table */
+  hRemChannel(chptr);
+  hAddChannel(newchptr);
+
+  /* Update global linked list */
+  if (chptr->prev)
+    chptr->prev->next = newchptr;
+  else
+    GlobalChannelList = newchptr;
+  if (chptr->next)
+    chptr->next->prev = newchptr;
+
+  /* Update all membership pointers */
+  for (member = newchptr->members; member; member = member->next_member)
+    member->channel = newchptr;
+
+  /* Update user invite lists that point to this channel */
+  for (link = newchptr->invites; link; link = link->next) {
+    struct Client *cptr = link->value.cptr;
+    struct SLink *inv;
+    /* Find and update user's invite pointer to this channel */
+    for (inv = cli_user(cptr)->invited; inv; inv = inv->next) {
+      if (inv->value.chptr == chptr) {
+        inv->value.chptr = newchptr;
+        break;
+      }
+    }
+  }
+
+  /* Update destruct event if pending */
+  if (newchptr->destruct_event)
+    newchptr->destruct_event->chptr = newchptr;
+
+  /* Free old channel structure */
+  MyFree(chptr);
+
+  /* Update caller's pointer */
+  *chptr_p = newchptr;
+
+  return 0;
+}
+
 /** invite a user to a channel.
  *
  * Adds an invite for a user to a channel.  Limits the number of invites
