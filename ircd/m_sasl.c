@@ -164,8 +164,10 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* Could not find a matching client, ignore the message.  The fd is
    * whatever the peer sent: it indexes LocalClientArray only inside the
-   * array (fd is unsigned, so a negative number fails the same test). */
-  if (fd >= MAXCONNECTIONS || !(acptr = LocalClientArray[fd])
+   * array (fd is unsigned, so a negative number fails the same test).
+   * A cookie is never 0 (m_authenticate()); 0 is what a client with no
+   * exchange in flight has, so a cookie of 0 matches nobody. */
+  if (!cookie || fd >= MAXCONNECTIONS || !(acptr = LocalClientArray[fd])
       || (cli_saslcookie(acptr) != cookie))
     return 0;
 
