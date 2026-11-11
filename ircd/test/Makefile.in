@@ -10,13 +10,15 @@ TESTPROGS = \
 	ircd_chattr_t \
 	ircd_in_addr_t \
 	ircd_match_t \
-	ircd_string_t
+	ircd_string_t \
+	services_reply_t
 
 DEP_SRC = \
 	ircd_chattr_t.c \
 	ircd_in_addr_t.c \
 	ircd_match_t.c \
 	ircd_string_t.c \
+	services_reply_t.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -51,6 +53,10 @@ IRCD_STRING_T_OBJS = ircd_string_t.o test_stub.o ../ircd_string.o
 ircd_string_t: $(IRCD_STRING_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_T_OBJS)
 
+SERVICES_REPLY_T_OBJS = services_reply_t.o test_stub.o ../m_account.o ../m_sasl.o ../ircd_string.o
+services_reply_t: $(SERVICES_REPLY_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SERVICES_REPLY_T_OBJS)
+
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
 
@@ -75,6 +81,16 @@ ircd_match_t.o: ircd_match_t.c ../../include/ircd_log.h \
   ../../include/match.h ../../include/res.h ../../config.h
 ircd_string_t.o: ircd_string_t.c ../../include/ircd_string.h \
   ../../include/ircd_chattr.h
+services_reply_t.o: services_reply_t.c ../../config.h ../../include/client.h \
+  ../../include/ircd_defs.h ../../include/dbuf.h ../../include/msgq.h \
+  ../../include/ircd_events.h ../../include/ssl.h \
+  ../../include/ircd_osdep.h ../../include/ircd_handler.h \
+  ../../include/res.h ../../include/flagset.h ../../include/capab.h \
+  ../../include/handlers.h ../../include/ircd.h ../../include/struct.h \
+  ../../include/ircd_features.h ../../include/ircd_reply.h \
+  ../../include/ircd_string.h ../../include/ircd_chattr.h \
+  ../../include/numnicks.h ../../include/s_auth.h ../../include/s_user.h \
+  ../../include/send.h
 test_stub.o: test_stub.c ../../include/client.h ../../include/ircd_defs.h \
   ../../include/dbuf.h ../../include/msgq.h ../../include/ircd_events.h \
   ../../config.h ../../include/ircd_handler.h ../../include/res.h \
