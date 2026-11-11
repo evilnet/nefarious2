@@ -78,7 +78,7 @@ extern void SetYXXCapacity(struct Client* myself, unsigned int max_clients);
 extern void SetYXXServerName(struct Client* myself, unsigned int numeric);
 
 extern int            markMatchexServer(const char* cmask, int minlen);
-extern struct Client* find_match_server(char* mask);
+extern struct Client* find_match_server(const char* mask);
 extern struct Client* findNUser(const char* yxx);
 extern struct Client* FindNServer(const char* numeric);
 

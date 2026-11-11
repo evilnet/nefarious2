@@ -410,18 +410,20 @@ int markMatchexServer(const char *cmask, int minlen)
 }
 
 /** Find first server whose name matches the given mask.
- * @param[in,out] mask %Server name mask (collapse()d in-place).
+ * @param[in] mask %Server name mask (not modified; a copy is collapse()d).
  * @return Matching server with lowest numnick value (or NULL).
  */
-struct Client* find_match_server(char *mask)
+struct Client* find_match_server(const char *mask)
 {
   struct Client *acptr;
+  char buf[BUFSIZE];
   int i;
 
   if (!(BadPtr(mask))) {
-    collapse(mask);
+    ircd_strncpy(buf, mask, sizeof(buf));
+    collapse(buf);
     for (i = 0; i < lastNNServer; i++) {
-      if ((acptr = server_list[i]) && (!match(mask, cli_name(acptr))))
+      if ((acptr = server_list[i]) && (!match(buf, cli_name(acptr))))
         return acptr;
     }
   }

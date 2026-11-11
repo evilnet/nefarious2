@@ -234,7 +234,7 @@ int abort_sasl(struct Client* cptr, int timeout) {
   /* Look up the target server */
   if (!(acptr = cli_saslagent(cptr))) {
     if (strcmp(feature_str(FEAT_SASL_SERVER), "*"))
-      acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER));
+      acptr = find_match_server(feature_str(FEAT_SASL_SERVER));
     else
       acptr = NULL;
   }
