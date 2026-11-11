@@ -71,7 +71,8 @@ int ms_svsquit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                              : "Quit";
 
     bounce_forced_exit(cptr, acptr, BOUNCE_FORCED_SERVICES, why);
-    return exit_client(acptr, acptr, acptr, why);
+    /* cptr is the server link the SVSQUIT came on, never acptr: 0. */
+    return exit_client(cptr, acptr, acptr, why);
   }
 
   return 0;

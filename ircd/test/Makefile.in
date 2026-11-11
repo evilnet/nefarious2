@@ -510,12 +510,13 @@ auth_recheck_cmocka.o: ${srcdir}/auth_recheck_cmocka.c ../s_auth.c
 auth_recheck_cmocka: $(AUTH_RECHECK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=timer_add $(AUTH_RECHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # s2s_handlers tests - server-to-server handlers against a fake network:
-# the REAL m_burst.o and m_svsnick.o, with numnicks.o, match.o and the
-# ircd's printf (so the lines asserted are the lines that go on the wire);
+# the REAL m_burst.o, m_svsnick.o and m_svsquit.o, with numnicks.o, match.o
+# and the ircd's printf (so the lines asserted are the lines that go on the wire);
 # the send layer, the channel table, the client hash and the modebuf are
 # stubbed in the test.  Defines its own log_write()/me, so test_stub.o is
 # not linked.
 S2S_HANDLERS_CMOCKA_OBJS = s2s_handlers_cmocka.o ../m_burst.o ../m_svsnick.o \
+	../m_svsquit.o \
 	../numnicks.o ../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o \
 	../match.o
 s2s_handlers_cmocka: $(S2S_HANDLERS_CMOCKA_OBJS)

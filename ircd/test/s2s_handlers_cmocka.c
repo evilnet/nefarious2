@@ -1,7 +1,8 @@
 /*
  * s2s_handlers_cmocka.c - server-to-server handlers against a fake network.
  *
- * Links the REAL handler objects (m_burst.o, m_svsnick.o), with numnicks.o,
+ * Links the REAL handler objects (m_burst.o, m_svsnick.o, m_svsquit.o),
+ * with numnicks.o,
  * match.o and the ircd's own printf, so every line asserted below is the
  * line the handler would put on the wire.  What sits underneath the
  * handlers is stubbed: the send layer records instead of sending, the
@@ -24,6 +25,7 @@
 #include <string.h>
 #include <cmocka.h>
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "handlers.h"
@@ -204,6 +206,7 @@ static struct Client *services(struct Client *server)
 
 static struct Client *exited[MAXOBJ];   /* what exit_client*() was asked to exit */
 static int nexited;
+static int forced_exits;                /* bounce_forced_exit() calls */
 
 static int was_exited(struct Client *c)
 {
@@ -335,6 +338,7 @@ static int world_setup(void **state)
   forget();
   nmade = nchannels = nexited = 0;
   nrenames = 0;
+  forced_exits = 0;
   ban_invalidations = except_invalidations = 0;
   fake_modes = "";
   feat_excepts = 0;
@@ -432,6 +436,14 @@ int do_nick_name(char *nick)
       break;
   *ch = '\0';
   return (ch - nick);
+}
+
+int bounce_forced_exit(struct Client *cptr, struct Client *victim,
+                       enum bounce_forced_exit why, const char *reason)
+{
+  (void)cptr; (void)victim; (void)why; (void)reason;
+  forced_exits++;
+  return 0;
 }
 
 int isNickJuped(const char *nick)
@@ -1352,6 +1364,43 @@ static void test_svsnick_from_non_services(void **state)
   assert_int_equal(nviolations, 2);
 }
 
+/* ====================================================================
+ * SVSQUIT
+ * ==================================================================== */
+
+/* Services quit one of our users.  The handler returned exit_client()'s
+ * result for the USER as if it were the link's: CPTR_KILLED told the
+ * parser that the services link was gone, and the rest of what it had
+ * read from that link was thrown away.  Only the user goes. */
+static void test_svsquit_our_user_keeps_the_link(void **state)
+{
+  int ret;
+  (void)state;
+  svsnick_world();
+
+  ret = deliver(ms_svsquit, svs, svs, "ABAAB :bye");
+
+  assert_int_equal(ret, 0);
+  assert_true(was_exited(dave));
+  assert_false(was_exited(svs));
+  assert_int_equal(forced_exits, 1);
+}
+
+/* A user on another server: relayed toward it, nobody exited here. */
+static void test_svsquit_remote_user_relayed(void **state)
+{
+  int ret;
+  (void)state;
+  svsnick_world();
+
+  ret = deliver(ms_svsquit, svs, svs, "ACAAA :bye");
+
+  assert_int_equal(ret, 0);
+  assert_int_equal(nexited, 0);
+  assert_int_equal(sent_count_to(leaf), 1);
+  assert_string_equal(sent_to(leaf, 0), "AE SX ACAAA :bye");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1372,6 +1421,8 @@ int main(void)
     T(test_svsnick_own_nick),
     T(test_svsnick_nick_of_its_source),
     T(test_svsnick_from_non_services),
+    T(test_svsquit_our_user_keeps_the_link),
+    T(test_svsquit_remote_user_relayed),
 #undef T
   };
 
