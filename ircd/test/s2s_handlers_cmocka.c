@@ -11,7 +11,8 @@
  * Lines reach a handler split the way parse_server() splits them: parv[0]
  * is the source, a parameter starting with ':' takes the rest of the line.
  * The fake network is built per test: this server is "hub.test" (AB);
- * linked() makes a server linked to it, remote_user() a user on one.
+ * linked() makes a server linked to it, remote_user() a user on one, and
+ * local_user() one of ours.
  */
 #include "config.h"
 
@@ -175,6 +176,19 @@ static struct Client *remote_user(struct Client *server, const char *nick,
   cli_user(c)->server = server;
   cli_connect(c) = cli_connect(server);
   SetRemoteNumNick(c, numnick);
+  return c;
+}
+
+/** One of this server's users, numeric AB + @a yxx. */
+static struct Client *local_user(const char *nick, const char *yxx)
+{
+  struct Client *c = a_user(nick);
+
+  cli_user(c)->server = &me;
+  cli_connect(c) = calloc(1, sizeof(struct Connection));
+  assert_non_null(cli_connect(c));
+  con_client(cli_connect(c)) = c;
+  ircd_strncpy(cli_yxx(c), yxx, sizeof(c->cli_yxx));
   return c;
 }
 
@@ -1038,6 +1052,100 @@ static void test_burst_that_fits_relayed_as_one_line(void **state)
   assert_string_equal(sent_to(ae, 0), "AC B #c 999000 ACAAA:o,ACAAB :%a!*@* b!c@d");
 }
 
+/* ====================================================================
+ * BURST: the Net Rider check reads the key where mode_parse() does
+ * ==================================================================== */
+
+/** Whether a Net Rider KICK of @a victim went anywhere. */
+static int kicked(struct Client *victim)
+{
+  char needle[64];
+  int i;
+
+  snprintf(needle, sizeof(needle), " :Net Rider");
+  for (i = 0; i < nsent; i++)
+    if (strstr(sent[i].text, needle)
+        && (strstr(sent[i].text, cli_name(victim))
+            || strstr(sent[i].text, cli_yxx(victim))))
+      return 1;
+  return 0;
+}
+
+/** A BURST with an older timestamp than our #nr, which is +k key and has
+ * our dave in it: is dave kicked as a Net Rider? */
+static int burst_kicks(const char *modes_and_params)
+{
+  struct Client *ac, *dave;
+  struct Channel *ch;
+
+  ac = linked("leafa.test", "AC", 1);
+  linked("leafc.test", "AE", 1);
+  remote_user(ac, "alice", "ACAAA");
+  dave = local_user("dave", "AAB");
+  ch = fake_channel("#nr");
+  ch->creationtime = 2000000;
+  ircd_strncpy(ch->mode.key, "key", sizeof(ch->mode.key));
+  add_member(ch, dave, CHFL_CHANOP, MAXOPLEVEL);
+
+  deliver(ms_burst, ac, ac, "#nr 999000 %s ACAAA:o", modes_and_params);
+  return kicked(dave);
+}
+
+/* The control: a key that matches ours keeps our members; one that does
+ * not kicks them. */
+static void test_burst_netride_key_alone(void **state)
+{
+  (void)state;
+  assert_false(burst_kicks("+k key"));
+}
+
+static void test_burst_netride_other_key_kicks(void **state)
+{
+  (void)state;
+  assert_true(burst_kicks("+k other"));
+}
+
+/* +L takes a parameter in a BURST (the redirect), so the key is the one
+ * after it.  send_channel_modes() itself orders a channel's parameters
+ * l L k A U, so any +L+k channel losing its TS met this. */
+static void test_burst_netride_redirect_before_key(void **state)
+{
+  (void)state;
+  assert_false(burst_kicks("+Lk #redir key"));
+}
+
+static void test_burst_netride_limit_redirect_key(void **state)
+{
+  (void)state;
+  assert_false(burst_kicks("+lLk 10 #redir key"));
+}
+
+static void test_burst_netride_redirect_other_key_kicks(void **state)
+{
+  (void)state;
+  assert_true(burst_kicks("+Lk #redir other"));
+}
+
+/* Every other letter mode_parse() gives a parameter to while adding: the
+ * op-level passwords A U, the lists b e, the prefixes o h v. */
+static void test_burst_netride_every_parameter_letter(void **state)
+{
+  static const char *forms[] = {
+    "+Ak apass key", "+Uk upass key", "+bk *!*@x key", "+ek *!*@x key",
+    "+ok ACAAA key", "+hk ACAAA key", "+vk ACAAA key",
+    "+lLAUbeohvk 5 #r a u *!*@b *!*@e ACAAA ACAAA ACAAA key",
+  };
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(forms) / sizeof(forms[0]); i++) {
+    world_teardown(NULL);
+    world_setup(NULL);
+    if (burst_kicks(forms[i]))
+      fail_msg("\"%s\": our member kicked although the key matches", forms[i]);
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1047,6 +1155,12 @@ int main(void)
     T(test_burst_split_relay_modes_on_first_line_only),
     T(test_burst_members_growing_past_a_line_all_relayed),
     T(test_burst_that_fits_relayed_as_one_line),
+    T(test_burst_netride_key_alone),
+    T(test_burst_netride_other_key_kicks),
+    T(test_burst_netride_redirect_before_key),
+    T(test_burst_netride_limit_redirect_key),
+    T(test_burst_netride_redirect_other_key_kicks),
+    T(test_burst_netride_every_parameter_letter),
 #undef T
   };
 
