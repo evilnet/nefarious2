@@ -77,6 +77,7 @@ CMOCKA_TESTPROGS = \
 	sasl_handler_cmocka \
 	auth_recheck_cmocka \
 	s2s_handlers_cmocka \
+	services_reply_cmocka \
 	webhook_eventlog_cmocka \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
@@ -157,6 +158,7 @@ DEP_SRC = \
 	sasl_handler_cmocka.c \
 	auth_recheck_cmocka.c \
 	s2s_handlers_cmocka.c \
+	services_reply_cmocka.c \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
@@ -521,6 +523,16 @@ S2S_HANDLERS_CMOCKA_OBJS = s2s_handlers_cmocka.o ../m_burst.o ../m_svsnick.o \
 	../match.o
 s2s_handlers_cmocka: $(S2S_HANDLERS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(S2S_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# services_reply tests - which local client a services reply reaches and
+# what it does to it: the REAL m_account.o, with numnicks.o and the
+# ircd's printf; everything else it calls is stubbed in the test.
+# Defines its own log_write()/me, so test_stub.o is not linked.
+SERVICES_REPLY_CMOCKA_OBJS = services_reply_cmocka.o ../m_account.o \
+	../numnicks.o ../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o \
+	../match.o
+services_reply_cmocka: $(SERVICES_REPLY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SERVICES_REPLY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_subject tests - the pure webhook subject decision over real
 # Keycloak admin-event shapes (fixtures/webhook); links no ircd objects
