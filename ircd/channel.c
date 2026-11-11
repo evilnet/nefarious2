@@ -5424,9 +5424,10 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 	  /* An older incarnation: what this server received was not its
 	   * traffic (receive windows, W5 Task 9 fix round 1, M6). */
 	  history_recv_reset(state.chptr);
-	  /* The channel is re-stamped, not wiped: a relocation tombstone's
-	   * record follows the timestamp. */
-	  relocate_tombstone_ts_follow(state.chptr, old_ts);
+	  /* The channel is re-stamped to an OLDER timestamp, not wiped: the
+	   * same channel, corrected.  A relocation tombstone's record
+	   * follows. */
+	  relocate_channel_restamped(state.chptr, old_ts);
 	}
         else if (recv_ts > state.chptr->creationtime) {
           struct Client *sserv;

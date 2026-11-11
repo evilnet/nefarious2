@@ -536,17 +536,19 @@ extern void relocate_tombstone_channel_gone(struct Channel *chptr);
  * (old name, creation timestamp, target, deadline). */
 extern void relocate_burst(struct Client *cptr, struct Channel *chptr);
 
-/* A relocation tombstone's record is bound to its channel by name and
- * creation timestamp, so whatever changes a channel's creationtime calls
- * one of these (ircd/m_rename.c, "A channel's creation timestamp changes"):
- * _ts_lost() BEFORE a channel is wiped for an older timestamp (ms_burst(),
- * ms_join()) -- a tombstone held for it is over; _ts_follow() AFTER a
- * timestamp is corrected with the channel left as it is (mode_parse(),
- * ms_create(), ms_burst()'s few-seconds rule) -- the record follows.
- * _burst_done(): a BURST has been taken in (a tombstone keeps its form,
- * and one that was waiting for its channel gets it). */
+/* A relocation tombstone's record is bound to its channel, and to its
+ * target, by name and creation timestamp, so whatever changes a channel's
+ * creationtime calls one of these (ircd/m_rename.c, "A channel's creation
+ * timestamp changes"): _ts_lost() BEFORE a channel is wiped for an older
+ * timestamp (ms_burst(), ms_join()) -- a tombstone held for it is over;
+ * relocate_channel_restamped() AFTER a timestamp is changed with the
+ * channel left as it is (mode_parse(), ms_create(), ms_burst()'s
+ * few-seconds rule) -- to an OLDER timestamp the records follow, to a
+ * later one they do not.  _burst_done(): a BURST has been taken in (a
+ * tombstone keeps its form, and one that was waiting for its channel gets
+ * it). */
 extern void relocate_tombstone_ts_lost(struct Channel *chptr);
-extern void relocate_tombstone_ts_follow(struct Channel *chptr, time_t old_ts);
+extern void relocate_channel_restamped(struct Channel *chptr, time_t old_ts);
 extern void relocate_tombstone_burst_done(struct Channel *chptr);
 
 /* Status preservation (spec): called from do_join() when a LOCAL user's
@@ -561,6 +563,16 @@ extern void relocate_follow(struct Client *cptr, struct Client *sptr,
  * of one to its target, whatever the channel's limit: a tombstone admits
  * nobody (ircd/m_rename.c, "Who can be in a tombstone"). */
 extern int relocate_is_tombstone(struct Channel *chptr);
+
+/* What do_join() does with a local JOIN of `chptr`, asked before any
+ * admission check: the ordinary rules, forward it to the redirect
+ * whatever the limit (a live tombstone), or refuse it (a tombstone that
+ * is detached from its target -- or is found, at this moment, to point at
+ * a name another channel has taken). */
+#define RELOCATE_JOIN_ORDINARY 0
+#define RELOCATE_JOIN_FORWARD  1
+#define RELOCATE_JOIN_REFUSE   2
+extern int relocate_join_verdict(struct Channel *chptr);
 
 /* Called wherever a MODE has just changed a channel's redirect
  * (mode.redir) or its persist flag (EXMODE_PERSIST): mode_parse_redir(),

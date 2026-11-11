@@ -335,9 +335,11 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 #ifdef USE_ROCKSDB
       history_recv_reset(chptr);	/* another TS: W5 Task 9 fix round 1, M6 */
 #endif
-      /* The same channel, re-stamped: a relocation tombstone's record
-       * follows (an empty tombstone is exactly such a channel). */
-      relocate_tombstone_ts_follow(chptr, old_ts);
+      /* Our EMPTY channel takes the other side's later timestamp: from
+       * here on it is the channel the other side made.  A relocation
+       * tombstone bound to ours -- as its own channel, or as its target
+       * -- does not follow it (m_rename.c). */
+      relocate_channel_restamped(chptr, old_ts);
     }
     /* In more complex cases, we might still end up with a
        creationtime desync of a few seconds, but that should

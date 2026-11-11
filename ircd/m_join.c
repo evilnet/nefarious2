@@ -158,24 +158,27 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     int exceptkli = 0;
     struct Ban *ban = NULL;
 
-    /* A relocation tombstone that is detached from its target (the
-     * target's name is another channel's on this server; m_rename.c,
-     * relocate_tombstone_point()) has no redirect to forward along, and
-     * like every tombstone it admits nobody. */
-    if (!*chptr->mode.redir && relocate_is_tombstone(chptr)) {
+    int relocated = relocate_join_verdict(chptr);
+
+    /* A relocation tombstone admits nobody (a member who follows out of
+     * it takes its current status along, so nobody may get in after the
+     * relocation -- m_rename.c, "Who can be in a tombstone").  Asked
+     * before every admission check below (+i, +k, bans, invites, X-tra
+     * ops), so none of those opens it.
+     *
+     * One that is detached from its target -- the target's name is
+     * another channel's on this server -- has nowhere to forward to. */
+    if (relocated == RELOCATE_JOIN_REFUSE) {
       send_reply(sptr, ERR_CHANNELISFULL, chptr->chname);
       return;
     }
 
     if (*chptr->mode.redir && (*chptr->mode.redir != '\0')) {
       /* The ordinary +L forwards only when the channel is full.  A live
-       * relocation tombstone forwards ALWAYS: it admits nobody, whatever
-       * limit a remaining chanop gives it (a member who follows out of it
-       * takes its current status along, so nobody may get in after the
-       * relocation -- m_rename.c, "Who can be in a tombstone").  This
-       * test comes before every admission check below (+i, +k, bans,
-       * invites, X-tra ops), so none of those opens it either. */
-      if (chptr->users >= chptr->mode.limit || relocate_is_tombstone(chptr)) {
+       * tombstone forwards ALWAYS, whatever limit a remaining chanop
+       * gives it. */
+      if (chptr->users >= chptr->mode.limit
+          || relocated == RELOCATE_JOIN_FORWARD) {
         if (IsNoLink(sptr))
           send_reply(sptr, ERR_LINKCHAN, chptr->chname, chptr->mode.redir);
         else if (!IsChannelName(chptr->mode.redir) || !strIsIrcCh(chptr->mode.redir))
