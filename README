@@ -82,17 +82,24 @@ Environment Variables:
 
   IRCD_GENERAL_NAME         Server name (default: localhost.localdomain)
   IRCD_GENERAL_DESCRIPTION  Server description (default: localhost.localdomain)
-  IRCD_GENERAL_NUMERIC      Server numeric, must be unique on network (default: 1)
+  IRCD_GENERAL_NUMERIC      Server numeric, 1 to 4095, must be unique on network
+                            (default: 1)
   IRCD_ADMIN_LOCATION       Admin location info (default: Somewhere)
   IRCD_ADMIN_CONTACT        Admin contact info (default: root@localhost)
   IRCD_CONF_REGENERATE      Set to 1 to replace a base.conf that has no
                             generation marker (default: 0, see below)
 
 On every start the container writes these values into
-/home/nefarious/ircd/base.conf. A base.conf it has generated begins with a
-marker comment and is generated afresh on each start. A base.conf without
-that marker is taken to be yours: it is left alone, and the variables above
-are NOT applied to it.
+/home/nefarious/ircd/base.conf. A value the configuration file cannot hold
+is refused: the container logs which variable is at fault and exits without
+starting the server. That is the case for a value that contains a double
+quote (") or a line break, for a variable that is set but empty (leave it
+unset to get the default), and for a numeric that is not a number from 1 to
+4095.
+
+A base.conf the container has generated begins with a marker comment and is
+generated afresh on each start. A base.conf without that marker is taken to
+be yours: it is left alone, and the variables above are NOT applied to it.
 
 Upgrading: images before the marker existed regenerated base.conf on every
 start. A base.conf from such an image that has been kept on a volume has no
