@@ -861,7 +861,18 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
 {
   char *separator;
   char *content = msg->dyn_content ? msg->dyn_content : msg->content;
-  const char *ctx_tag = msg->is_context ? ";draft/chathistory-context" : "";
+
+  /* A context row (a reaction or REDACT hung on its parent) "MUST be
+   * tagged with the draft/chathistory-context tag" (chathistory spec), and
+   * context is sent at the server's discretion: a client that cannot be
+   * sent the tag (no message-tags on this connection) is sent no context
+   * row at all, never one untagged it would take for regular history.
+   * Context rows are loaded whatever the client's capabilities -- the
+   * redaction filters use a REDACT child to hide its parent before this
+   * -- and never counted toward a page's limit, so pages and their end
+   * tag are the same either way. */
+  if (msg->is_context && !CapRecipientHas(sptr, CAP_MSGTAGS))
+    return;
 
   /* Build tag prefix once, gating each tag behind its capability.
    * Format: "batch=X;time=T;msgid=M;account=A;ctx" or subset thereof.
@@ -871,6 +882,12 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
   int has_time = (time_str && *time_str && CapRecipientHas(sptr, CAP_SERVERTIME));
   int has_msgid = (msg->msgid[0] && CapRecipientHas(sptr, CAP_MSGTAGS));
   int has_account = (msg->account[0] && CapRecipientHas(sptr, CAP_ACCOUNTTAG));
+  /* draft/chathistory-context marks a row sent as context of another (a
+   * REDACT or reaction hung on its parent); the chathistory spec defines
+   * it, valueless and with no capability of its own, so it is sent under
+   * message-tags, as msgid is -- and a context row reaches only such a
+   * client (above). */
+  int has_ctx = msg->is_context;
 
   if (outer_batchid) {
     tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "batch=%s", outer_batchid);
@@ -887,9 +904,9 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     if (tpos) tags[tpos++] = ';';
     tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "account=%s", msg->account);
   }
-  if (ctx_tag[0]) {
-    /* ctx_tag starts with ';' already */
-    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "%s", ctx_tag);
+  if (has_ctx) {
+    if (tpos) tags[tpos++] = ';';
+    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "draft/chathistory-context");
   }
   tags[tpos] = '\0';
 
@@ -977,7 +994,7 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
   /* Build client tags suffix for PRIVMSG/NOTICE replay.
    * Format: ";+reply=abc123" (leading semicolon for tag list concatenation).
    * Only emit for PRIVMSG/NOTICE when recipient has message-tags cap.
-   * Note: ctx_tag and account are already in `tags` prefix above. */
+   * Note: draft/chathistory-context and account are already in `tags` above. */
   {
     char ctags_str[516] = "";
 
