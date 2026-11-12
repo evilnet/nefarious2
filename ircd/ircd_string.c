@@ -834,6 +834,37 @@ char* ircd_json_escape(char* dst, size_t dstlen, const char* src)
   return dst;
 }
 
+/** Unescape a message-tag value in place (IRCv3 message-tags): "\:" is
+ * ';', "\s" a space, "\\" a backslash, "\r" and "\n" CR and LF, any other
+ * escaped character stands for itself, and a lone trailing backslash is
+ * dropped.  Also used for attributes that borrow the tag syntax (SEARCH).
+ * @param[in,out] s Value to unescape (NULL is a no-op).
+ * @return s.
+ */
+char* ircd_tag_value_unescape(char* s)
+{
+  char *r, *w;
+
+  if (!s)
+    return s;
+  for (r = w = s; *r; r++) {
+    if (*r != '\\') {
+      *w++ = *r;
+      continue;
+    }
+    switch (*++r) {
+    case '\0': r--; break;          /* trailing backslash: dropped */
+    case ':':  *w++ = ';';  break;
+    case 's':  *w++ = ' ';  break;
+    case 'r':  *w++ = '\r'; break;
+    case 'n':  *w++ = '\n'; break;
+    default:   *w++ = *r;   break;  /* \\ among them */
+    }
+  }
+  *w = '\0';
+  return s;
+}
+
 int csv_contains_token(const char* csv, const char* token)
 {
   const char *p;
