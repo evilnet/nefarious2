@@ -850,7 +850,12 @@ static int check_auth_finished(struct AuthRequest *auth)
  * runs from the event loop's timer pass (a 0-second timer: the pass that
  * follows the current dispatch), where no handler is in progress.  A
  * check found satisfied meanwhile (the client's own CAP END registered it,
- * or it left) has nothing left to do. */
+ * or it left) has nothing left to do.
+ *
+ * The clients an IAuth program was still checking when it went away are
+ * released the same way (iauth_disconnect()): that is reached from inside
+ * a client's own registration step (a write to the program that fails),
+ * from a client's exit and from a rehash. */
 
 /** Take \a auth off #auth_recheck_list, if it is queued. */
 static void auth_recheck_unlink(struct AuthRequest *auth)
@@ -887,9 +892,10 @@ static void auth_recheck_callback(struct Event *ev)
 }
 
 /** Owe \a auth a registration check from the event loop.  For a Keycloak
- * answer that has just released what held registration (see above); never
- * for a handler's own synchronous path, which checks at once and returns
- * the result to its parser.
+ * answer that has just released what held registration, and for a client
+ * released by an IAuth program that went away (see above); never for a
+ * handler's own synchronous path, which checks at once and returns the
+ * result to its parser.
  * @param[in] auth Authorization request of a client.
  */
 void auth_recheck_later(struct AuthRequest *auth)
@@ -1369,6 +1375,14 @@ int auth_ping_timeout(struct Client *cptr)
               "auth_ping_timeout: native DNSBL lookup did not complete for %s; "
               "proceeding without it",
               cli_name(cptr)[0] ? cli_name(cptr) : "*");
+    return check_auth_finished(auth);
+  }
+
+  /* Owed a check from the event loop (auth_recheck_later(): a hold that
+   * ended outside the event loop, a client released by an IAuth program
+   * that went away) that has not run yet: it runs now. */
+  if (FlagHas(&auth->flags, AR_RECHECK)) {
+    auth_recheck_unlink(auth);
     return check_auth_finished(auth);
   }
 
@@ -2542,23 +2556,34 @@ static void iauth_disconnect(struct IAuth *iauth)
       s_fd(i_socket(iauth)) = -1;
   }
 
-  /* Release any clients stuck waiting for IAuth response. */
+  /* Release the clients this instance was still checking: nothing can
+   * answer for them now.  Each goes on as a client that connected while no
+   * program ran (start_iauth_query()): without AR_IAUTH_PENDING no line
+   * about it goes to any program, so a new instance never adopts it.  Its
+   * registration is not finished here but owed from the event loop
+   * (auth_recheck_later()): this is reached from inside a client's own
+   * registration step (a write that fails in sendto_iauth(), e.g. of its U
+   * line or its T line), from a client's exit (its D line, sent by
+   * close_connection()), from a rehash and while IAuth's own lines are
+   * parsed, and registering or exiting a client there -- the one whose
+   * step is running, or another one -- frees it under its caller.  A
+   * released client whose own next step comes first registers then. */
   for (ii = 0; ii <= HighestFd; ii++) {
-    cli = LocalClientArray[ii];
-    if (!cli || !(auth = cli_auth(cli)))
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
+        || !FlagHas(&auth->flags, AR_IAUTH_PENDING))
       continue;
-    if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
-      FlagClr(&auth->flags, AR_IAUTH_PENDING);
-      released++;
-      /* Try to complete registration now that IAuth is gone. */
-      check_auth_finished(auth);
-    }
+    FlagClr(&auth->flags, AR_IAUTH_PENDING);
+    auth_recheck_later(auth);
+    released++;
   }
 
-  if (released > 0)
+  if (released > 0) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: released %d "
+              "pending client(s)", released);
     sendto_opmask_butone(NULL, SNO_AUTH,
                          "IAuth disconnected: released %d pending client(s)",
                          released);
+  }
 }
 
 /** Close all %IAuth connections marked as closing. */
