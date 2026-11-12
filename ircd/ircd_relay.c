@@ -126,25 +126,6 @@ static int check_utf8_text(struct Client *sptr, char *text, const char *command)
   return 1;
 }
 
-/** Length of the host @a cli is shown with.  The relay's prefixes
- * (ircd_snprintf's %#C) show cli_user()->host; the multiline paths show
- * get_displayed_host() (m_batch.c), which is the real host while the
- * user is not hidden.  The two are the same string except for an alias
- * whose face is its primary's while its own real host differs, so take
- * the longer -- and never the real host of a hidden user, whose length
- * nobody else is shown. */
-static size_t relay_shown_host_len(struct Client *cli)
-{
-  size_t len = strlen(cli_user(cli)->host);
-
-  if (!IsHiddenHost(cli)) {
-    size_t real = strlen(cli_user(cli)->realhost);
-    if (real > len)
-      len = real;
-  }
-  return len;
-}
-
 /** Length of the longest "nick!user@host" a message from @a sptr is
  * shown with, to anyone.  Every client-side prefix is the same three
  * strings (no recipient sees a different host for the same source:
@@ -170,9 +151,17 @@ static size_t relay_source_len(struct Client *sptr)
 
     if (!cli_user(faces[i]))
       continue;
-    len = strlen(cli_name(faces[i])) + 1
-        + strlen(cli_user(faces[i])->username) + 1
-        + relay_shown_host_len(faces[i]);
+    /* The relay's prefixes (%#C) show cli_user()->host; the multiline
+     * paths show get_displayed_host() (m_batch.c), the real host while
+     * the user is not hidden.  They are the same string except for an
+     * alias whose face is its primary's while its own real host differs,
+     * so the longer counts -- never a hidden user's real host, whose
+     * length nobody else is shown. */
+    len = ircd_relay_face_len(cli_name(faces[i]),
+                              cli_user(faces[i])->username,
+                              cli_user(faces[i])->host,
+                              IsHiddenHost(faces[i]) ? NULL
+                              : cli_user(faces[i])->realhost);
     if (len > best)
       best = len;
   }
@@ -229,8 +218,17 @@ const char *relay_cut_text(struct Client *sptr, const char *cmd,
                            size_t target_len, size_t lead_len,
                            const char *text, char *buf, size_t bufsize)
 {
+  return relay_cut_to(text, relay_text_budget(sptr, cmd, target_len, lead_len),
+                      buf, bufsize);
+}
+
+/** Cut @a text to at most @a room bytes at a UTF-8 boundary
+ * (ircd_utf8_cut_len, the msgq backstop's own cut).
+ * @return @a text when it fits, else @a buf holding the cut copy. */
+const char *relay_cut_to(const char *text, size_t room, char *buf,
+                         size_t bufsize)
+{
   size_t len = strlen(text);
-  size_t room = relay_text_budget(sptr, cmd, target_len, lead_len);
   size_t keep;
 
   assert(bufsize > 0);
@@ -242,6 +240,46 @@ const char *relay_cut_text(struct Client *sptr, const char *cmd,
   memcpy(buf, text, keep);
   buf[keep] = '\0';
   return buf;
+}
+
+/** Does a DM from @a sptr reach other devices of its bouncer session (a
+ * session echo, BX E / BX M toward another server)? */
+static int relay_has_session_devices(struct Client *sptr)
+{
+  struct Client *primary = (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
+                           ? cli_user(sptr)->alias_primary : sptr;
+  struct BouncerSession *sess;
+
+  if (!IsAccount(primary) || !(sess = bounce_get_session(primary)))
+    return 0;
+  return sess->hs_alias_count > 0;
+}
+
+/** Bytes of text a DM from @a sptr to @a acptr can carry: the client
+ * line's room (relay_text_budget), and, when the sender's session has
+ * other devices, the room the session echo's BX frame leaves
+ * (ircd_bx_echo_text_room) -- a device on another server gets the DM in
+ * that frame, which the S2S cut would otherwise shorten, so it would read
+ * less than the echo here.  The frame binds only for a short source
+ * (under ~27 bytes for BX E, ~45 for a BX M first line).
+ * @param[in] msgid_len Length of the DM's msgid (0: none, "*" goes out).
+ * @param[in] ctags_len Length of the client-only tags a BX M first line
+ *                      carries (multiline), else 0.
+ * @param[in] multiline Non-zero for a multiline batch's lines. */
+size_t relay_dm_text_budget(struct Client *sptr, const char *cmd,
+                            struct Client *acptr, size_t msgid_len,
+                            size_t ctags_len, int multiline)
+{
+  size_t nick_len = strlen(cli_name(acptr));
+  size_t room = relay_text_budget(sptr, cmd, nick_len, 0);
+
+  if (relay_has_session_devices(sptr)) {
+    size_t bx = ircd_bx_echo_text_room(nick_len, msgid_len ? msgid_len : 1,
+                                       ctags_len, multiline, BUFSIZE - 2);
+    if (bx < room)
+      room = bx;
+  }
+  return room;
 }
 
 /* Effective DM-history identity: account when authenticated, else the
@@ -1258,7 +1296,6 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
 {
   struct Client* acptr;
   char*          host;
-  char           cutbuf[BUFSIZE];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1347,18 +1384,6 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
   if ((IsRestrictPrivMsg(sptr) || IsCommonChansOnly(acptr)) && !IsAnOper(sptr) &&
       !common_chan_count(acptr, sptr, 1) && (sptr != acptr)) {
     send_reply(sptr, ERR_COMMONCHANSONLY, cli_name(acptr), "PRIVMSG");
-    return;
-  }
-
-  /* Our own user gets ":nick!user@host PRIVMSG <name as written> :": cut
-   * the text to that line here (relay_cut_text).  A target written so
-   * long that it leaves no room for text is refused, not sent cut into
-   * its target.  (A message for a services server, above, is not cut:
-   * the service reads the P10 line, which is always the shorter form.) */
-  text = relay_cut_text(sptr, MSG_PRIVATE, strlen(name), 0, text,
-                        cutbuf, sizeof(cutbuf));
-  if (!*text) {
-    send_reply(sptr, ERR_INPUTTOOLONG);
     return;
   }
 
@@ -1459,12 +1484,18 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
     return;
   }
 
-  /* Cut here (see relay_directed_message); a NOTICE with no room left
-   * is dropped without a reply. */
-  text = relay_cut_text(sptr, MSG_NOTICE, strlen(name), 0, text,
-                        cutbuf, sizeof(cutbuf));
-  if (!*text)
-    return;
+  /* Our own user gets ":nick!user@host NOTICE <name as written> :": cut
+   * the text to that line here (relay_cut_text) -- unless it is a service
+   * (a +k channel service), which reads the whole line as a command; a
+   * NOTICE with no room left is dropped without a reply.  (A directed
+   * PRIVMSG is not cut at all: its local target is always a +k service,
+   * and toward a services server the P10 line is what is read.) */
+  if (!IsServiceClient(acptr)) {
+    text = relay_cut_text(sptr, MSG_NOTICE, strlen(name), 0, text,
+                          cutbuf, sizeof(cutbuf));
+    if (!*text)
+      return;
+  }
 
   if (!(is_silenced(sptr, acptr, 0))) {
     /* Alias source rewrite — see relay_directed_message IsMe branch. */
@@ -1553,13 +1584,6 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     return;
   }
 
-  /* Cut once, here, to what ":nick!user@host PRIVMSG <their nick> :"
-   * leaves of 510 (relay_cut_text): the recipient (and its aliases), the
-   * sender's echo and session, other servers, the history row and a web
-   * push all get this text. */
-  mytext = relay_cut_text(sptr, MSG_PRIVATE, strlen(cli_name(acptr)), 0,
-                          mytext, cutbuf, sizeof(cutbuf));
-
   /*
    * send away message if user away
    */
@@ -1580,6 +1604,21 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     history_format_ms(pm_timestamp, sizeof(pm_timestamp),
                       history_event_time_ms(NULL));
   }
+
+  /* Cut once, here, to what ":nick!user@host PRIVMSG <their nick> :"
+   * leaves of 510, and the session echo's BX frame when the sender has
+   * other devices (relay_dm_text_budget): the recipient (and its
+   * aliases), the sender's echo and session, other servers, the history
+   * row and a web push all get this text.  Not for a service: the
+   * service reads the P10 line, which carries the whole client line
+   * (services traffic is neither stored nor pushed), and a command cut
+   * here would run with its argument cut short.  The sender's echo of
+   * such a DM is left to the output backstop. */
+  if (!IsServiceClient(acptr))
+    mytext = relay_cut_to(mytext,
+                          relay_dm_text_budget(sptr, MSG_PRIVATE, acptr,
+                                               strlen(pm_msgid), 0, 0),
+                          cutbuf, sizeof(cutbuf));
 
   /* Alias source rewriting for S2S legacy compat.
    * If target is on the primary's server direction, keep alias numeric
@@ -1812,10 +1851,6 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     return;
   }
 
-  /* Cut once, here (see relay_private_message). */
-  mytext = relay_cut_text(sptr, MSG_NOTICE, strlen(cli_name(acptr)), 0,
-                          mytext, cutbuf, sizeof(cutbuf));
-
   /*
    * deliver the message
    */
@@ -1831,6 +1866,13 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     history_format_ms(pm_timestamp, sizeof(pm_timestamp),
                       history_event_time_ms(NULL));
   }
+
+  /* Cut once, here (see relay_private_message); not for a service. */
+  if (!IsServiceClient(acptr))
+    mytext = relay_cut_to(mytext,
+                          relay_dm_text_budget(sptr, MSG_NOTICE, acptr,
+                                               strlen(pm_msgid), 0, 0),
+                          cutbuf, sizeof(cutbuf));
 
   /* Alias source rewriting (see relay_private_message) */
   {

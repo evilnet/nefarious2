@@ -1954,9 +1954,11 @@ int whisper(struct Client* source, const char* nick, const char* channel,
 
   /* The recipient gets ":nick!user@host PRIVMSG|NOTICE <their nick> :" --
    * the channel parameter is gone -- so cut the text to that line once,
-   * here (relay_cut_text), not per recipient at output. */
-  text = relay_cut_text(source, is_notice ? MSG_NOTICE : MSG_PRIVATE,
-                        strlen(cli_name(dest)), 0, text, cutbuf, sizeof(cutbuf));
+   * here (relay_cut_text), not per recipient at output.  Not for a
+   * service (ChanServ sits in channels): it reads the P10 line, whole. */
+  if (!IsServiceClient(dest))
+    text = relay_cut_text(source, is_notice ? MSG_NOTICE : MSG_PRIVATE,
+                          strlen(cli_name(dest)), 0, text, cutbuf, sizeof(cutbuf));
 
   if (is_notice)
     sendcmdto_one(source, CMD_NOTICE, dest, "%C :%s", dest, text);

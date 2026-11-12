@@ -58,6 +58,11 @@ extern size_t relay_text_budget(struct Client *sptr, const char *cmd,
 extern const char *relay_cut_text(struct Client *sptr, const char *cmd,
                                   size_t target_len, size_t lead_len,
                                   const char *text, char *buf, size_t bufsize);
+extern const char *relay_cut_to(const char *text, size_t room, char *buf,
+                                size_t bufsize);
+extern size_t relay_dm_text_budget(struct Client *sptr, const char *cmd,
+                                   struct Client *acptr, size_t msgid_len,
+                                   size_t ctags_len, int multiline);
 
 /* DM chathistory identity keying (F-CH1): account when authenticated,
  * else the per-connection session id.  NEVER the nick. */
