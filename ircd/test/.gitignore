@@ -4,3 +4,5 @@ ircd_in_addr_t
 ircd_string_t
 ircd_match_t
 *.log
+parse_line_t
+handler_stubs.c
