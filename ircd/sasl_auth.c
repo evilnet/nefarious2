@@ -745,6 +745,37 @@ void sasl_broadcast_account(struct Client *cptr, char type)
   }
 }
 
+/* ---- The identity a login leaves for registration ---- */
+
+/** Set, as a whole, the identity a login gives a connection: the account
+ * name, its timestamp, its Keycloak id and whether Keycloak confirmed the
+ * id in this login.  Before registration these are what registration
+ * applies (auth_complete_sasl(), with the SASL-complete flag); they are
+ * never set one at a time, so a later login, a REGISTER or an undone login
+ * cannot leave one account's name beside another's id or timestamp.  An
+ * empty or NULL \a account clears them all.
+ * @param[in] cptr Local client.
+ * @param[in] account Account name, or NULL/"" for none.
+ * @param[in] acc_create Account timestamp (X3's), 0 for none.
+ * @param[in] kc_id Compact Keycloak id, NULL or invalid for none.
+ * @param[in] id_live Non-zero when Keycloak confirmed the id in this login.
+ */
+void sasl_identity_set(struct Client *cptr, const char *account,
+                       time_t acc_create, const char *kc_id, int id_live)
+{
+  if (EmptyString(account)) {
+    cli_saslaccount(cptr)[0] = '\0';
+    acc_create = 0;
+    kc_id = NULL;
+  } else if (account != cli_saslaccount(cptr))
+    ircd_strncpy(cli_saslaccount(cptr), account, ACCOUNTLEN + 1);
+  cli_saslacccreate(cptr) = acc_create;
+  ircd_strncpy(cli_saslkcid(cptr),
+               (kc_id && account_id_valid(kc_id)) ? kc_id : "",
+               sizeof(cli_saslkcid(cptr)));
+  cli_saslkcidlive(cptr) = (cli_saslkcid(cptr)[0] && id_live) ? 1 : 0;
+}
+
 /* ---- sasl_complete_login: shared between local and P10 paths ---- */
 
 /** The Keycloak id a logged-in connection belongs to: its bouncer
@@ -764,10 +795,10 @@ static const char *sasl_conn_kc_id(struct Client *sptr)
  *  numbers are the comments' below):
  *   0. Refuse a registered connection proving its account under another
  *      Keycloak id (nothing else happens then)
- *   1. Set cli_saslaccount
+ *   1. The login's identity as a whole: account, timestamp, Keycloak id
+ *      (sasl_identity_set())
  *   2. Send RPL_LOGGEDIN to client
  *   3. auth_set_account (pre-registration: tells IAuth)
- *   4. The account timestamp and Keycloak id
  *   5. SetHiddenHost (pre-registration, if configured)
  *   6. SetSASLComplete + RPL_SASLSUCCESS
  *   7. For registered users: metadata_load_account, account update,
@@ -823,8 +854,20 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   if (cli_auth(sptr))
     auth_sasl_start(cli_auth(sptr));
 
-  /* 1. Set account name */
-  ircd_strncpy(cli_saslaccount(sptr), account, ACCOUNTLEN + 1);
+  /* 1. The login's identity, as a whole (sasl_identity_set()): the account
+   * name; the account timestamp, which is X3's registration date when the
+   * SASL exchange was relayed through X3 (m_sasl.c hands back what X3 sent)
+   * and 0 for a local Keycloak login -- Keycloak's creation time is the
+   * directory's date, not X3's, and X3 refuses a stamp that differs from
+   * the date it knows, so the ircd stamps nothing of its own; and the
+   * Keycloak user id (an invalid value counts as none) with whether
+   * Keycloak confirmed it in this login rather than a cache or a locally
+   * checked token: only such a login may end the previous user's leftover
+   * bouncer session (user, 2026-10-23).  Set on every login, never
+   * inherited from a previous one on the same connection. */
+  sasl_identity_set(sptr, account, acc_create, kc_id, id_live);
+  Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
+         kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
   /* 2. Send RPL_LOGGEDIN */
   send_reply(sptr, RPL_LOGGEDIN,
@@ -836,26 +879,6 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   /* 3. Set account in auth request (pre-registration); held, see above */
   if (cli_auth(sptr))
     auth_set_account(cli_auth(sptr), cli_saslaccount(sptr));
-
-  /* 4. Account timestamp.  This is X3's registration date when the SASL
-   * exchange was relayed through X3 (m_sasl.c hands back what X3 sent) and
-   * 0 for a local Keycloak login: Keycloak's creation time is the
-   * directory's date, not X3's, and X3 refuses a stamp that differs from
-   * the date it knows, so the ircd stamps nothing of its own.  Set on every
-   * login, never inherited from a previous one on the same connection. */
-  cli_saslacccreate(sptr) = acc_create;
-
-  /* 4b. Keycloak user id: set or cleared on every login, never inherited
-   * from a previous one.  An invalid value counts as none. */
-  ircd_strncpy(cli_saslkcid(sptr),
-               (kc_id && account_id_valid(kc_id)) ? kc_id : "",
-               sizeof(cli_saslkcid(sptr)));
-  /* Confirmed by Keycloak in this login, not answered from a cache or a
-   * locally checked token: only such a login may end the previous
-   * user's leftover bouncer session (user, 2026-10-23). */
-  cli_saslkcidlive(sptr) = (cli_saslkcid(sptr)[0] && id_live) ? 1 : 0;
-  Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
-         kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
   /* 5. Pre-registration hidden host setup */
   if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||

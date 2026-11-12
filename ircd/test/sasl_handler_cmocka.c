@@ -118,6 +118,7 @@ struct fake {
   int numerics[16];           /**< numerics sent to it, in order */
   int n_numerics;
   char raw[600];              /**< the last raw line sent to it */
+  char fail_code[64];         /**< the code of the last FAIL sent to it */
 };
 
 #define NFAKE 8
@@ -291,7 +292,12 @@ void sendrawto_one(struct Client *to, const char *pattern, ...)
 
 void send_fail(struct Client *to, const char *command, const char *code,
                const char *context, const char *description)
-{ touch(to); }
+{
+  struct fake *f = fake_of(to);
+  touch(to);
+  if (f && !f->freed)
+    ircd_strncpy(f->fail_code, code, sizeof(f->fail_code));
+}
 void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
                    struct Client *to, const char *pattern, ...)
 { touch(to); }
@@ -1233,6 +1239,99 @@ static void authenticate_reaps_pending_register_answer(void **state)
   assert_int_equal(f->touched_after_free, 0);
 }
 
+/** REGISTER from a client whose SASL login completed (903) but which has
+ * not registered yet is refused: ALREADY_AUTHENTICATED, nothing asked of
+ * Keycloak, the login left as it is.  Without that, REGISTER parked the
+ * new account's name over the login while its Keycloak id stayed, and the
+ * client registered under the new name with the old login's id. */
+static void register_after_completed_login_is_refused(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+  int requests;
+
+  sasl_init_once();
+  c = new_client(55, "liz", 0, REG_KEEPS);
+  f = fake_of(c);
+  plain_b64("liz", "lizpw", data);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver(1);                          /* 903: logged in as liz */
+  run_event_loop();
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_false(IsAccount(c));               /* not registered yet */
+
+  requests = kc_requests;
+  assert_int_equal(register_line(c, "longpassword"), 0);
+  assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+  assert_int_equal(kc_requests, requests);  /* nothing asked of Keycloak */
+  assert_int_equal(cli_regcookie(c), 0);
+  assert_string_equal(cli_saslaccount(c), "liz");
+}
+
+/** Logs nina in as liz (PLAIN, 903), then starts over with OAUTHBEARER: the one
+ * re-authentication allowed after 903, which clears the SASL-complete
+ * flag. */
+static struct Client *login_then_restart(int fd)
+{
+  struct Client *c = new_client(fd, "nina", 0, REG_KEEPS);
+  char data[300], pw[16];
+
+  snprintf(pw, sizeof(pw), "lizpw%d", fd);   /* uncached: Keycloak answers */
+  plain_b64("liz", pw, data);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver(1);
+  run_event_loop();
+  assert_true(IsSASLComplete(c));
+  assert_string_equal(cli_saslaccount(c), "liz");
+  assert_true(cli_saslkcid(c)[0] != '\0');      /* the grant's id */
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  return c;
+}
+
+/** Undoing a completed login undoes its identity with the flag: account,
+ * timestamp, Keycloak id and its live mark, all of them. */
+static void undoing_a_login_clears_its_identity(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  c = login_then_restart(56);
+  assert_false(IsSASLComplete(c));
+  assert_string_equal(cli_saslaccount(c), "");
+  assert_string_equal(cli_saslkcid(c), "");
+  assert_int_equal(cli_saslkcidlive(c), 0);
+  assert_int_equal(cli_saslacccreate(c), 0);
+}
+
+/** The review's sequence: login, a re-authentication abandoned (here
+ * AUTHENTICATE *), then REGISTER -- allowed, nothing is logged in -- and
+ * the new account carries its own identity (no id: the create answer has
+ * none), never the abandoned login's id. */
+static void register_after_undone_login_carries_no_old_id(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = login_then_restart(57);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "*"), 0);
+  assert_int_equal(register_line(c, "longpassword"), 0);
+  assert_string_equal(f->fail_code, "");
+  pend_deliver(0);                          /* the lookup: name free */
+  pend_deliver(1);                          /* the create: done */
+  assert_true(IsSASLComplete(c));
+  assert_string_equal(cli_saslaccount(c), "nina");  /* "*": the nick */
+  assert_string_equal(cli_saslkcid(c), "");
+  assert_int_equal(cli_saslkcidlive(c), 0);
+  assert_int_equal(cli_saslacccreate(c), 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* A request that cannot be started                                    */
 /* ------------------------------------------------------------------ */
@@ -1311,6 +1410,9 @@ int main(void)
     cmocka_unit_test_setup(register_reaps_pending_sasl_answer, setup),
     cmocka_unit_test_setup(authenticate_reaps_pending_register_answer, setup),
     cmocka_unit_test_setup(refused_request_fails_at_once, setup),
+    cmocka_unit_test_setup(register_after_completed_login_is_refused, setup),
+    cmocka_unit_test_setup(undoing_a_login_clears_its_identity, setup),
+    cmocka_unit_test_setup(register_after_undone_login_carries_no_old_id, setup),
 #endif
   };
 

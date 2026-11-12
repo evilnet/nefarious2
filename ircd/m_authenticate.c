@@ -172,8 +172,13 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
                   "You have already completed SASL authentication");
       return send_reply(cptr, ERR_SASLALREADY);
     }
-    /* Clear the SASLComplete flag to allow token refresh */
+    /* Clear the SASLComplete flag to allow token refresh, and the identity
+     * the completed login left with it (sasl_identity_set()): before
+     * registration that identity is what registration applies, and a
+     * refresh that fails or is aborted leaves no login behind -- nothing
+     * of it may be applied with another login's name (a REGISTER). */
     ClearSASLComplete(cptr);
+    sasl_identity_set(cptr, NULL, 0, NULL, 0);
     /* Clear old SASL session state */
     if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))
       cli_saslagentref(cli_saslagent(cptr))--;

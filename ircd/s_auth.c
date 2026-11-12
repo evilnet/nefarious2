@@ -67,6 +67,7 @@
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "sasl_auth.h"
 #include "send.h"
 #include "ssl.h"
 
@@ -3314,12 +3315,19 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
     return 0;
   }
 
-  /* Store account in SASL fields */
-  ircd_strncpy(cli_saslaccount(cli), params[0], ACCOUNTLEN + 1);
+  /* The login's identity as a whole (sasl_identity_set()): the account
+   * name (without a ":<timestamp>" suffix), its timestamp when IAuth gives
+   * one, and no Keycloak id -- IAuth carries none, and none may be left
+   * from an earlier login on this connection. */
+  {
+    char account[ACCOUNTLEN + 1];
 
-  /* If account has a creation timestamp, use it. */
-  if (params[0][len] == ':') {
-    cli_saslacccreate(cli) = strtoul(params[0] + len + 1, NULL, 10);
+    memcpy(account, params[0], len);
+    account[len] = '\0';
+    sasl_identity_set(cli, account,
+                      params[0][len] == ':'
+                        ? strtoul(params[0] + len + 1, NULL, 10) : 0,
+                      NULL, 0);
   }
 
   /* Send RPL_LOGGEDIN to client */

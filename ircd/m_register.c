@@ -276,7 +276,11 @@ static void register_complete_success(struct Client *acptr, const char *account)
       metadata_mode_sync_restore(acptr, 1);
     }
   } else {
-    ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);
+    /* The new account's identity as a whole: its name, and no timestamp
+     * and no Keycloak id, as the branch above (the create answer carries
+     * neither; a later SASL login adopts the id) -- never what an earlier
+     * login on this connection left. */
+    sasl_identity_set(acptr, account, 0, NULL, 0);
     SetSASLComplete(acptr);
     /* A Keycloak answer: registration is checked from the event loop,
      * never here (auth_recheck_later() in s_auth.c says why), so acptr is
@@ -470,8 +474,15 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   email = parv[2];
   password = parv[3];
 
-  /* Check if already authenticated */
-  if (IsAccount(sptr)) {
+  /* Check if already authenticated: logged in, or, before registration,
+   * holding a completed SASL login (or an earlier REGISTER) that
+   * registration has yet to apply (auth_complete_sasl() reads the same
+   * two fields).  Otherwise the new account's name would be parked over
+   * that login while the login's Keycloak id stays, and the client would
+   * register under the new name with the old login's id. */
+  if (IsAccount(sptr)
+      || (!IsRegistered(sptr) && IsSASLComplete(sptr)
+          && cli_saslaccount(sptr)[0])) {
     send_fail(sptr, "REGISTER", "ALREADY_AUTHENTICATED", account,
               "You are already authenticated");
     return 0;

@@ -241,10 +241,10 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     return 0;
   } else if (reply[0] == 'L') {
-    /* Store account name and creation time for sasl_complete_login() on D S.
+    /* Store account name and creation time for sasl_complete_login() on D S,
+     * as a whole identity (sasl_identity_set(): X3 sends no Keycloak id).
      * No timestamp in the reply: none, not an earlier attempt's. */
-    cli_saslacccreate(acptr) = (parc > 5) ? atoi(parv[5]) : 0;
-    ircd_strncpy(cli_saslaccount(acptr), data, ACCOUNTLEN + 1);
+    sasl_identity_set(acptr, data, (parc > 5) ? atoi(parv[5]) : 0, NULL, 0);
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
       /* Success — use shared login completion function.  Its result says

@@ -116,6 +116,15 @@ extern int sasl_abort_local(struct Client *sptr);
 /** Free a local SASL session (disconnect cleanup). */
 extern void sasl_session_free(struct Client *sptr);
 
+/** Set, as a whole, the identity a login gives a connection (account name,
+ *  timestamp, Keycloak id, whether Keycloak confirmed the id); an empty
+ *  account clears them all.  Before registration this is what registration
+ *  applies with the SASL-complete flag.
+ */
+extern void sasl_identity_set(struct Client *cptr, const char *account,
+                              time_t acc_create, const char *kc_id,
+                              int id_live);
+
 /** Complete a successful SASL login.  Shared between local and P10 paths.
  *  Handles: account set, RPL_SASLSUCCESS, metadata load, account-notify,
  *  AC broadcast, hidden host, bouncer alias update, auth_sasl_done.
