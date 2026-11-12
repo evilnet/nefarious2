@@ -287,6 +287,68 @@ test_user_numnick(struct numnick_test *test)
            test->is_valid ? "valid" : "invalid");
 }
 
+/** Array of server numeric fields (numnick and capacity) to test with. */
+static struct numnick_test test_server_numnicks[] = {
+    { "AB]]]", 1 },
+    { "A]]", 1 },
+    { "", 0 },
+    { "A", 0 },
+    { "AB", 0 },
+    { "ABCD", 0 },
+    { "AB]]]]", 0 },
+    { "A_]", 0 },
+    { 0 }
+};
+
+/** Check ValidServerNumNick() on a single numeric field.
+ * @param[in] test Numeric field and whether it is well-formed.
+ */
+static void
+test_server_numnick(struct numnick_test *test)
+{
+    assert(!!ValidServerNumNick(test->numnick) == test->is_valid);
+    printf("Passed: server \"%s\" (%s)\n", test->numnick,
+           test->is_valid ? "valid" : "invalid");
+}
+
+/** Structure to describe a test of a user numnick against the server
+ * that introduces it. */
+struct numnick_for_test {
+    const char *server; /**< The server's own numnick (1 or 2 characters). */
+    const char *numnick; /**< Numnick it introduces a user with. */
+    unsigned int is_valid : 1; /**< Is it one of that server's? */
+};
+
+/** Array of user numnicks to test against their servers. */
+static struct numnick_for_test test_user_numnicks_for[] = {
+    { "AB", "ABAAA", 1 },
+    { "AB", "AB]]]", 1 },
+    { "C", "CAA", 1 },
+    { "AB", "ABC", 0 },         /* the width of a 1-character server */
+    { "AB", "BAA", 0 },
+    { "AB", "ACAAA", 0 },       /* another server's */
+    { "AB", "ABAA", 0 },
+    { "AB", "AB_AA", 0 },
+    { "C", "CAAAA", 0 },        /* the width of a 2-character server */
+    { "C", "DAA", 0 },
+    { "C", "C", 0 },
+    { 0 }
+};
+
+/** Check ValidUserNumNickFor() on a single server and numnick.
+ * @param[in] test Server, numnick and whether the numnick is the server's.
+ */
+static void
+test_user_numnick_for(struct numnick_for_test *test)
+{
+    static struct Client server;
+
+    ircd_strncpy(cli_yxx(&server), test->server, sizeof(cli_yxx(&server)));
+    assert(!!ValidUserNumNickFor(&server, test->numnick) == test->is_valid);
+    printf("Passed: \"%s\" from server \"%s\" (%s)\n", test->numnick,
+           test->server, test->is_valid ? "valid" : "invalid");
+}
+
 /** Check that an empty numnick decodes to 0 without reading past its
  * terminator.  A peer can send one: an empty BURST member, an empty
  * MODE -o parameter.
@@ -357,6 +419,10 @@ main(int argc, char *argv[])
     test_b64_empty();
     for (ii = 0; test_user_numnicks[ii].numnick; ++ii)
         test_user_numnick(&test_user_numnicks[ii]);
+    for (ii = 0; test_server_numnicks[ii].numnick; ++ii)
+        test_server_numnick(&test_server_numnicks[ii]);
+    for (ii = 0; test_user_numnicks_for[ii].server; ++ii)
+        test_user_numnick_for(&test_user_numnicks_for[ii]);
     test_short_numnicks();
 
     return 0;
