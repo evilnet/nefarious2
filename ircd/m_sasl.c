@@ -356,10 +356,11 @@ int abort_sasl(struct Client* cptr, int timeout) {
     acptr = NULL;
   }
 
-  if (timeout)
+  if (timeout == SASL_ABORT_REPLY_TIMEOUT)
     send_reply(cptr, ERR_SASLFAIL, ": request timed out");
-  else
+  else if (timeout == SASL_ABORT_REPLY_ABORTED)
     send_reply(cptr, ERR_SASLABORTED);
+  /* SASL_ABORT_REPLY_NONE: the caller has answered the client already. */
 
   if (acptr)
     sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u D A", acptr,

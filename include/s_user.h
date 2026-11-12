@@ -178,6 +178,11 @@ extern void send_isupport_update(void);
 
 void do_names(struct Client* sptr, struct Channel* chptr, int filter);
 
+/* abort_sasl()'s second argument: the reply the client gets. */
+#define SASL_ABORT_REPLY_ABORTED 0  /**< 906 ERR_SASLABORTED */
+#define SASL_ABORT_REPLY_TIMEOUT 1  /**< 904 ERR_SASLFAIL ":request timed out" */
+#define SASL_ABORT_REPLY_NONE    2  /**< none: the caller sent the failure (905) */
+
 extern int abort_sasl(struct Client* cptr, int timeout);
 
 #endif /* INCLUDED_s_user_h */

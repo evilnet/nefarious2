@@ -68,6 +68,7 @@
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_misc.h"
+#include "s_user.h"
 #include "sasl_auth.h"
 #include "send.h"
 
@@ -155,6 +156,7 @@ static struct fake_session {
 static struct fake fakes[NFAKE];
 static int in_kc_call;        /**< a libkc request call is running */
 static int in_login;          /**< inside sasl_complete_login() (test 1) */
+static int local_off;         /**< SASL_LOCAL off: the services (P10) tier */
 
 /* What a login completion does, in order: the lines it sends the client
  * and the network and the calls it makes, one entry each (tlog_add()).
@@ -380,8 +382,21 @@ int auth_send_sasl_data(struct Client *c, const char *d) { return 0; }
 int auth_send_sasl_abort(struct Client *c) { return 0; }
 int auth_iauth_sasl_fail(struct Client *c) { return 0; }
 
-/* m_sasl.c */
-int abort_sasl(struct Client *cptr, int timeout) { touch(cptr); return 0; }
+/* m_sasl.c: the end of a services exchange, as the real one leaves the
+ * client (EndSASLExchange(), the hold), and the reply it was asked for
+ * (-1: not called). */
+static int abort_reply = -1;
+int abort_sasl(struct Client *cptr, int timeout)
+{
+  touch(cptr);
+  if (!cli_saslcookie(cptr) || IsSASLExchangeDone(cptr))
+    return 0;
+  abort_reply = timeout;
+  EndSASLExchange(cptr);
+  if (cli_auth(cptr))
+    auth_sasl_clear(cli_auth(cptr));
+  return 0;
+}
 
 /* labeled-response, as send.c does it: a line answering a labeled command
  * carries its label once (the first line), unless the command opened a
@@ -583,6 +598,7 @@ int feature_bool(enum Feature feat)
   case FEAT_SASL_AUTOHIDEHOST:
     return bed_features;
   case FEAT_SASL_LOCAL:
+    return !local_off;
   case FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION:
   case FEAT_CAP_draft_account_registration:
     return 1;
@@ -1098,7 +1114,8 @@ static int setup(void **state)
 {
   memset(fakes, 0, sizeof(fakes));
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
-  in_kc_call = in_login = 0;
+  in_kc_call = in_login = local_off = 0;
+  abort_reply = -1;
   bed_features = 0;
   ntlog = 0;
 #ifdef USE_LIBKC
@@ -3649,6 +3666,186 @@ static void pre_registration_switch_allowed(void **state)
   assert_int_equal(auth_sasl_done(cli_auth(c)), 0);
   assert_int_equal(f->registered, 1);
 }
+
+/* ------------------------------------------------------------------ */
+/* 905: an over-long line ends the exchange, as 904 does (#221)         */
+/* ------------------------------------------------------------------ */
+
+/** A parameter longer than 400 bytes. */
+static const char *too_long(void)
+{
+  static char line[402];
+  memset(line, 'A', 401);
+  line[401] = '\0';
+  return line;
+}
+
+/** The exchange is gone: no local session, no cookie, no hold. */
+static void assert_no_exchange(struct Client *c)
+{
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_int_equal(fake_of(c)->hold, 0);
+}
+
+/** Local tier: 905, the exchange ended (no 906 then or later), and the
+ * client's next AUTHENTICATE <mechanism> starts a new one. */
+static void toolong_ends_local_exchange(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(40, "tl", 0, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_non_null(cli_saslsession(c));
+  f->raw[0] = '\0';
+
+  assert_int_equal(authenticate(c, too_long()), 0);
+  assert_true(has_numeric(f, ERR_SASLTOOLONG));
+  assert_false(has_numeric(f, ERR_SASLABORTED));
+  assert_false(has_numeric(f, ERR_SASLFAIL));
+  assert_no_exchange(c);
+
+  assert_int_equal(authenticate(c, "PLAIN"), 0);   /* a new exchange */
+  assert_non_null(cli_saslsession(c));
+  assert_string_equal(f->raw, "AUTHENTICATE +");
+}
+
+/** Local tier, CAP END already sent: the end lets registration go on
+ * inside the line, and the handler hands the parser what it did. */
+static void toolong_local_registration_exits(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(41, "tx", 1, REG_EXITS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, too_long()), CPTR_KILLED);
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** ... and a client registration keeps is registered once. */
+static void toolong_local_registration_keeps(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(42, "tk", 1, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(f->registered, 0);              /* held by the exchange */
+  assert_int_equal(authenticate(c, too_long()), 0);
+  assert_int_equal(f->registered, 1);
+  assert_no_exchange(c);
+}
+
+/** The total-length limit (the local tier's): 905, and the exchange ends
+ * there too; the client can start again. */
+static void total_limit_ends_local_exchange(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char chunk[401];
+  int i, rc = 0;
+
+  sasl_init_once();
+  c = new_client(43, "tt", 0, REG_KEEPS);
+  f = fake_of(c);
+  memset(chunk, 'A', 400);
+  chunk[400] = '\0';
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  for (i = 0; i < 64 && !has_numeric(f, ERR_SASLTOOLONG); i++)
+    rc = authenticate(c, chunk);
+  assert_int_equal(rc, 0);
+  assert_true(has_numeric(f, ERR_SASLTOOLONG));
+  assert_false(has_numeric(f, ERR_SASLABORTED));
+  assert_no_exchange(c);
+  f->raw[0] = '\0';
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_string_equal(f->raw, "AUTHENTICATE +");
+}
+
+/** No exchange in progress: 905 and nothing else. */
+static void toolong_without_exchange(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(44, "tn", 0, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, too_long()), 0);
+  assert_int_equal(f->n_numerics, 1);
+  assert_int_equal(f->numerics[0], ERR_SASLTOOLONG);
+  assert_int_equal(abort_reply, -1);
+  assert_no_exchange(c);
+}
+
+/** Services (P10) tier: services are told to drop it (abort_sasl()) with
+ * no further reply to the client, registration goes on, and the next
+ * AUTHENTICATE starts a new exchange (a new cookie). */
+static void toolong_ends_services_exchange(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  unsigned int first;
+
+  sasl_init_once();
+  local_off = 1;
+  c = new_client(45, "ts", 1, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_null(cli_saslsession(c));
+  first = cli_saslcookie(c);
+  assert_true(first != 0);
+  assert_int_equal(f->registered, 0);
+
+  assert_int_equal(authenticate(c, too_long()), 0);
+  assert_true(has_numeric(f, ERR_SASLTOOLONG));
+  assert_int_equal(abort_reply, SASL_ABORT_REPLY_NONE);
+  assert_no_exchange(c);
+  assert_int_equal(f->registered, 1);
+
+  cli_auth(c) = (struct AuthRequest *)&f->auth;    /* a later exchange */
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_true(cli_saslcookie(c) != 0 && cli_saslcookie(c) != first);
+}
+
+/** ... and an exit there is handed to the parser. */
+static void toolong_services_registration_exits(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  local_off = 1;
+  c = new_client(46, "tz", 1, REG_EXITS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, too_long()), CPTR_KILLED);
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** AUTHENTICATE * still answers 906 in the services tier (the shared end). */
+static void star_abort_services_exchange(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  local_off = 1;
+  c = new_client(47, "ta", 0, REG_KEEPS);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, "*"), 0);
+  assert_int_equal(abort_reply, SASL_ABORT_REPLY_ABORTED);
+  assert_no_exchange(c);
+}
 #endif /* USE_LIBKC */
 
 int main(void)
@@ -3715,6 +3912,14 @@ int main(void)
     cmocka_unit_test_setup(reauth_casemapping_only_names_refused, setup),
     cmocka_unit_test_setup(reauth_refresh_keeps_minus_x, setup),
     cmocka_unit_test_setup(reauth_relayed_exchange_takes_no_local_exchange, setup),
+    cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
+    cmocka_unit_test_setup(toolong_local_registration_exits, setup),
+    cmocka_unit_test_setup(toolong_local_registration_keeps, setup),
+    cmocka_unit_test_setup(total_limit_ends_local_exchange, setup),
+    cmocka_unit_test_setup(toolong_without_exchange, setup),
+    cmocka_unit_test_setup(toolong_ends_services_exchange, setup),
+    cmocka_unit_test_setup(toolong_services_registration_exits, setup),
+    cmocka_unit_test_setup(star_abort_services_exchange, setup),
 #endif
   };
 

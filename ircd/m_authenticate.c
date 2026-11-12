@@ -105,6 +105,54 @@
 
 static void sasl_timeout_callback(struct Event* ev);
 
+/** End @a cptr's SASL exchange in progress, in the tier that holds it --
+ * the local Keycloak session, IAuth, or services over P10 -- and let
+ * registration go on, as a failed exchange does: the next AUTHENTICATE
+ * starts a new one.  @a client_abort: the client sent AUTHENTICATE *, and
+ * gets 906 (904 after a local error challenge, RFC 7628 3.2.3); else the
+ * caller has sent the failure numeric itself (905) and nothing more goes.
+ * IAuth and services are told to drop their side (A X, SASL D A), as for
+ * an abort.
+ * @return What resuming registration did to @a cptr (CPTR_KILLED when it
+ * exited or freed it): the handler's own result, nothing may touch
+ * @a cptr after it.
+ */
+static int authenticate_end(struct Client *cptr, int client_abort)
+{
+  /* Only an exchange in progress: a cookie whose exchange has not
+   * completed -- a REGISTER login meanwhile, or the completed login a
+   * logged-in client's re-authentication keeps, completes no exchange
+   * (IsSASLExchangeDone()).  A re-authentication ended here leaves that
+   * login whole. */
+  if (!cli_saslcookie(cptr) || IsSASLExchangeDone(cptr))
+    return 0;
+
+  /* Local SASL session takes priority */
+  if (cli_saslsession(cptr)) {
+    if (client_abort) {
+      /* RFC 7628 §3.2.3: after an error challenge, client sends "*"
+       * to acknowledge failure — reply with SASLFAIL, not SASLABORTED. */
+      if (cli_saslsession(cptr)->state == SASL_STATE_FAILED)
+        send_reply(cptr, ERR_SASLFAIL, "");
+      else
+        send_reply(cptr, ERR_SASLABORTED);
+    }
+    /* Resumes registration; may exit cptr, so return its result. */
+    return sasl_abort_local(cptr);
+  }
+  /* Notify IAuth if applicable */
+  if (auth_iauth_handles_sasl())
+    auth_send_sasl_abort(cptr);
+  /* abort_sasl handles P10 notification and state cleanup; it only
+   * drops the registration hold, so resume registration here.  This
+   * may exit cptr, so return its result. */
+  abort_sasl(cptr, client_abort ? SASL_ABORT_REPLY_ABORTED
+                                : SASL_ABORT_REPLY_NONE);
+  if (cli_auth(cptr))
+    return auth_sasl_done(cli_auth(cptr));
+  return 0;
+}
+
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
@@ -118,42 +166,22 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   if (parc < 2) /* have enough parameters? */
     return need_more_params(cptr, "AUTHENTICATE");
 
+  /* sasl-3.1: "If authentication fails, a 904 or 905 numeric will be
+   * sent and the client MAY retry from the AUTHENTICATE <mechanism>
+   * command."  905 fails the exchange in progress as 904 does: it ends
+   * here, in its tier, or the client's next AUTHENTICATE <mechanism> would
+   * be read as data of this one (and its QUIT answered 906). */
   if (strlen(parv[1]) > 400) {
     if (CapActive(cptr, CAP_STANDARDREPLIES))
       send_fail(cptr, "AUTHENTICATE", "TOO_LONG", NULL, "SASL message too long");
-    return send_reply(cptr, ERR_SASLTOOLONG);
+    send_reply(cptr, ERR_SASLTOOLONG);
+    return authenticate_end(cptr, 0);
   }
 
-  /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec) */
-  if (parv[1][0] == '*' && parv[1][1] == '\0') {
-    /* Only abort if there's an active session: a cookie whose exchange has
-     * not completed -- a REGISTER login meanwhile, or the completed login a
-     * logged-in client's re-authentication keeps, completes no exchange
-     * (IsSASLExchangeDone()). */
-    if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr)) {
-      /* Local SASL session takes priority */
-      if (cli_saslsession(cptr)) {
-        /* RFC 7628 §3.2.3: after an error challenge, client sends "*"
-         * to acknowledge failure — reply with SASLFAIL, not SASLABORTED. */
-        if (cli_saslsession(cptr)->state == SASL_STATE_FAILED)
-          send_reply(cptr, ERR_SASLFAIL, "");
-        else
-          send_reply(cptr, ERR_SASLABORTED);
-        /* Resumes registration; may exit cptr, so return its result. */
-        return sasl_abort_local(cptr);
-      }
-      /* Notify IAuth if applicable */
-      if (auth_iauth_handles_sasl())
-        auth_send_sasl_abort(cptr);
-      /* abort_sasl handles P10 notification and state cleanup; it only
-       * drops the registration hold, so resume registration here.  This
-       * may exit cptr, so return its result. */
-      abort_sasl(cptr, 0);
-      if (cli_auth(cptr))
-        return auth_sasl_done(cli_auth(cptr));
-    }
-    return 0;
-  }
+  /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec); only an
+   * exchange in progress is aborted. */
+  if (parv[1][0] == '*' && parv[1][1] == '\0')
+    return authenticate_end(cptr, 1);
 
   /* A client that already has an account or a completed login -- SASL
    * completed, or an account set by services -- may authenticate again only
