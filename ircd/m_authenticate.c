@@ -223,20 +223,32 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     else
       ircd_strncpy(realhost, hoststr, sizeof(realhost));
 
+    /* A line that cannot be sent -- no program runs, or it is done with
+     * this client -- will never be answered: the exchange fails now, not
+     * at its timeout, and registration goes on.  This may exit cptr. */
     if (first) {
       if (*parv[1] == ':' || strchr(parv[1], ' '))
         return exit_client(cptr, sptr, sptr, "Malformed AUTHENTICATE");
 
       /* Send SASL start to IAuth */
-      auth_send_sasl_start(cptr, parv[1], cli_sslclifp(cptr));
+      if (!auth_send_sasl_start(cptr, parv[1], cli_sslclifp(cptr))) {
+        auth_iauth_sasl_fail(cptr);
+        return cli_auth(cptr) ? auth_sasl_done(cli_auth(cptr)) : 0;
+      }
 
       /* Send host info if configured */
       if (feature_bool(FEAT_SASL_SENDHOST))
         auth_send_sasl_host(cptr, cli_username(cptr), realhost, cli_sock_ip(cptr));
-    } else {
+    } else if (!auth_send_sasl_data(cptr, parv[1])) {
       /* Send SASL continuation data to IAuth */
-      auth_send_sasl_data(cptr, parv[1]);
+      auth_iauth_sasl_fail(cptr);
+      return cli_auth(cptr) ? auth_sasl_done(cli_auth(cptr)) : 0;
     }
+
+    /* The program went away as the line was sent: the exchange has
+     * failed already (iauth_disconnect()); no timer for it. */
+    if (!cli_saslcookie(cptr))
+      return 0;
 
     if (!t_active(&cli_sasltimeout(cptr))) {
       cli_freeflag(cptr) |= FREEFLAG_SASLTIMER;

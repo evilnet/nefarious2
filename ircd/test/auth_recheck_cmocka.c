@@ -201,6 +201,8 @@ int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...) { if (len) buf[0] = '\0'; return 0; }
 int send_reply(struct Client *to, int reply, ...) { return 0; }
 void sendrawto_one(struct Client *to, const char *pattern, ...) {}
+void send_fail(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description) {}
 void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
                    struct Client *to, const char *pattern, ...) {}
 void sendto_opmask_butone(struct Client *one, unsigned int mask,

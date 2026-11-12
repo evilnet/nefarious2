@@ -37,6 +37,7 @@
 
 #include "s_auth.h"
 #include "bouncer_session.h"
+#include "capab.h"
 #include "class.h"
 #include "dnsbl.h"
 #include "authtoken.h"
@@ -107,6 +108,7 @@ enum AuthRequestFlag {
     AR_DNSBL_PENDING,   /**< native DNSBL check pending */
     AR_CAP_DONE,        /**< CAP negotiation completed (CAP END received) */
     AR_RECHECK,         /**< on #auth_recheck_list: a check is owed from the event loop */
+    AR_IAUTH_SASL,      /**< the SASL exchange in progress is iauth's */
     AR_NUM_FLAGS
 };
 
@@ -1948,6 +1950,7 @@ void auth_sasl_start(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagSet(&auth->flags, AR_SASL_PENDING);
+  FlagClr(&auth->flags, AR_IAUTH_SASL);
 }
 
 /** Mark that SASL authentication has completed (success, fail, or abort).
@@ -1959,6 +1962,7 @@ int auth_sasl_done(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagClr(&auth->flags, AR_SASL_PENDING);
+  FlagClr(&auth->flags, AR_IAUTH_SASL);
   return check_auth_finished(auth);
 }
 
@@ -1972,6 +1976,7 @@ void auth_sasl_clear(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagClr(&auth->flags, AR_SASL_PENDING);
+  FlagClr(&auth->flags, AR_IAUTH_SASL);
 }
 
 /** Check if IAuth is configured to handle SASL authentication.
@@ -2002,13 +2007,24 @@ const char *auth_iauth_sasl_mechs(void)
  */
 int auth_send_sasl_start(struct Client *cptr, const char *mechanism, const char *certfp)
 {
+  struct AuthRequest *auth = cli_auth(cptr);
+  int res;
+
   if (!IAuthHas(iauth, IAUTH_SASL))
     return 0;
 
+  /* The exchange is iauth's from here (marked before the line goes, so
+   * that a write that fails finds it): if the program goes away before it
+   * ends, iauth_disconnect() fails it. */
+  if (auth)
+    FlagSet(&auth->flags, AR_IAUTH_SASL);
   if (!EmptyString(certfp))
-    return sendto_iauth(cptr, "A S %s :%s", mechanism, certfp);
+    res = sendto_iauth(cptr, "A S %s :%s", mechanism, certfp);
   else
-    return sendto_iauth(cptr, "A S :%s", mechanism);
+    res = sendto_iauth(cptr, "A S :%s", mechanism);
+  if (!res && auth)
+    FlagClr(&auth->flags, AR_IAUTH_SASL);
+  return res;
 }
 
 /** Send SASL host information to IAuth.
@@ -2037,6 +2053,38 @@ int auth_send_sasl_data(struct Client *cptr, const char *data)
     return 0;
 
   return sendto_iauth(cptr, "a :%s", data);
+}
+
+/** Fail \a cptr's SASL exchange with IAuth, which can no longer be
+ * answered: the program went away, or the exchange's line could not be
+ * sent to it.  The client gets ERR_SASLFAIL (and a FAIL, with
+ * standard-replies), as when no SASL service is reachable; the exchange's
+ * state and its timer are dropped, so the next AUTHENTICATE starts a new
+ * one.  The SASL hold on registration is dropped but registration is not
+ * resumed here: the caller does that (auth_sasl_done()), or a check owed
+ * from the event loop does (iauth_disconnect(), auth_recheck_later()).
+ * @param[in] cptr Local client in an IAuth SASL exchange.
+ * @return Non-zero when an exchange was in progress and has failed.
+ */
+int auth_iauth_sasl_fail(struct Client *cptr)
+{
+  struct AuthRequest *auth = cli_auth(cptr);
+
+  if (auth)
+    FlagClr(&auth->flags, AR_IAUTH_SASL);
+  if (!cli_saslcookie(cptr) || IsSASLComplete(cptr))
+    return 0;
+  if (auth)
+    FlagClr(&auth->flags, AR_SASL_PENDING);
+  if (CapActive(cptr, CAP_STANDARDREPLIES))
+    send_fail(cptr, "AUTHENTICATE", "SASL_FAIL", NULL,
+              "SASL service unavailable");
+  send_reply(cptr, ERR_SASLFAIL, ": service unavailable");
+  if (t_active(&cli_sasltimeout(cptr)))
+    timer_del(&cli_sasltimeout(cptr));
+  cli_saslcookie(cptr) = 0;
+  cli_saslstart(cptr) = 0;
+  return 1;
 }
 
 /** Send SASL abort to IAuth.
@@ -2527,6 +2575,7 @@ static void iauth_disconnect(struct IAuth *iauth)
 {
   int ii;
   int released = 0;
+  int sasl = 0;
   struct Client *cli;
   struct AuthRequest *auth;
 
@@ -2569,12 +2618,20 @@ static void iauth_disconnect(struct IAuth *iauth)
    * step is running, or another one -- frees it under its caller.  A
    * released client whose own next step comes first registers then. */
   for (ii = 0; ii <= HighestFd; ii++) {
-    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
-        || !FlagHas(&auth->flags, AR_IAUTH_PENDING))
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli)))
       continue;
-    FlagClr(&auth->flags, AR_IAUTH_PENDING);
-    auth_recheck_later(auth);
-    released++;
+    if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
+      FlagClr(&auth->flags, AR_IAUTH_PENDING);
+      auth_recheck_later(auth);
+      released++;
+    }
+    /* A SASL exchange with the program can never be answered now: it
+     * fails at once, and the client's registration is owed a check like a
+     * released client's (the exchange no longer holds it). */
+    if (FlagHas(&auth->flags, AR_IAUTH_SASL) && auth_iauth_sasl_fail(cli)) {
+      auth_recheck_later(auth);
+      sasl++;
+    }
   }
 
   if (released > 0) {
@@ -2583,6 +2640,13 @@ static void iauth_disconnect(struct IAuth *iauth)
     sendto_opmask_butone(NULL, SNO_AUTH,
                          "IAuth disconnected: released %d pending client(s)",
                          released);
+  }
+  if (sasl > 0) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: failed %d SASL "
+              "exchange(s)", sasl);
+    sendto_opmask_butone(NULL, SNO_AUTH,
+                         "IAuth disconnected: failed %d SASL exchange(s)",
+                         sasl);
   }
 }
 

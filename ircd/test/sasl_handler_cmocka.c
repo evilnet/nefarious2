@@ -264,6 +264,7 @@ int auth_send_sasl_start(struct Client *c, const char *m, const char *f) { retur
 int auth_send_sasl_host(struct Client *c, const char *u, const char *h, const char *i) { return 0; }
 int auth_send_sasl_data(struct Client *c, const char *d) { return 0; }
 int auth_send_sasl_abort(struct Client *c) { return 0; }
+int auth_iauth_sasl_fail(struct Client *c) { return 0; }
 
 /* m_sasl.c */
 int abort_sasl(struct Client *cptr, int timeout) { touch(cptr); return 0; }
