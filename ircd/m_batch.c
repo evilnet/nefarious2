@@ -873,6 +873,29 @@ multiline_add_message(struct Client *sptr, const char *target,
   return 0;
 }
 
+/** Whether a remote user gets a multiline batch as the legacy fallback
+ * because of its server, for the sender's MULTILINE_FALLBACK count.
+ *
+ * A server that announced ML (ms_multiline; the announcement reaches us
+ * only over multiline hops) gets the batch whole; any other -- a legacy
+ * server, or a fork server behind one -- gets the preview lines and the
+ * truncation NOTICE, from us or from the last multiline server on the
+ * way.  A remote client of a multiline server that lacks the cap gets
+ * the fallback too, but no server here knows its caps: such clients are
+ * not counted.  Neither are service clients: the warning is about people
+ * reading a cut message, and a channel service on every registered
+ * channel would raise it for every batch.
+ *
+ * @param[in] to Recipient, remote.
+ * @return Non-zero to count \a to.
+ */
+static int
+ml_remote_fallback_recipient(struct Client *to)
+{
+  return !MyConnect(to) && cli_user(to) && cli_user(to)->server
+         && !IsMultiline(cli_user(to)->server) && !IsServiceClient(to);
+}
+
 /** Helper to get user's displayed host */
 static const char *
 get_displayed_host(struct Client *sptr)
@@ -1139,8 +1162,13 @@ process_multiline_batch(struct Client *sptr)
       if (to == sptr)
         continue;  /* Skip sender (handle echo-message separately) */
 
-      if (!MyConnect(to))
-        continue;  /* Skip remote users - handled by S2S relay */
+      if (!MyConnect(to)) {
+        /* Delivered by the S2S relay below; counted here when its
+         * server takes the fallback, as the sender is told. */
+        if (!IsZombie(member) && ml_remote_fallback_recipient(to))
+          fallback_count++;
+        continue;
+      }
 
       /* With aliases, each connection is a separate Client with its own caps.
        * CapActive checks the client's own capabilities directly. */
@@ -1566,6 +1594,9 @@ process_multiline_batch(struct Client *sptr)
     if (!MyConnect(acptr)) {
       struct Client *target_server = cli_from(acptr);
       char s2s_batch_id[16];
+
+      if (ml_remote_fallback_recipient(acptr))
+        fallback_count++;
       ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
                     cli_yxx(sptr), (unsigned long)CurrentTime);
 
