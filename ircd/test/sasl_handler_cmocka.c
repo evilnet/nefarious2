@@ -328,9 +328,13 @@ int ircd_snprintf(struct Client *dest, char *buf, size_t len,
 }
 
 /* Features */
+static int verify_email_on;   /**< FEAT_REGISTER_VERIFY_EMAIL */
+
 int feature_bool(enum Feature feat)
 {
   switch (feat) {
+  case FEAT_REGISTER_VERIFY_EMAIL:
+    return verify_email_on;
   case FEAT_SASL_LOCAL:
   case FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION:
   case FEAT_CAP_draft_account_registration:
@@ -420,6 +424,7 @@ static enum {
 /** What a reaped pending answer says. */
 static int reap_ok;
 static int kc_requests;               /**< request calls made */
+static char next_grant_user[32];      /**< the user of the grant being made */
 
 /** An answer libkc owes (one request at a time is enough here). */
 enum pend_kind { P_NONE, P_TOKEN, P_USER, P_USERS, P_INTRO, P_RESULT };
@@ -427,6 +432,7 @@ struct pending {
   enum pend_kind kind;
   void *cb;
   void *data;
+  char user[32];        /**< a grant's user: its ID token names it */
 };
 #define NPEND 4
 static struct pending pend[NPEND];
@@ -449,21 +455,25 @@ static void pend_push(enum pend_kind kind, void *cb, void *data)
   fail_msg("too many pending answers");
 }
 
-/** Deliver the oldest pending answer: success or a failure. */
-static void pend_deliver(int ok)
+/** Deliver pending answer \a i with result \a res (KC_SUCCESS, or a
+ * failure code: KC_FORBIDDEN, KC_NOT_FOUND, KC_UNVERIFIED, ...). */
+static void pend_deliver_at(int i, int res)
 {
-  struct pending p = pend[0];
+  struct pending p = pend[i];
   struct kc_access_token tok;
   struct kc_user user;
   struct kc_token_info info;
+  char idt[64];
+  int ok = (res == KC_SUCCESS);
 
   assert_int_not_equal(p.kind, P_NONE);
-  memmove(pend, pend + 1, sizeof(pend) - sizeof(pend[0]));
+  memmove(pend + i, pend + i + 1, sizeof(pend) - (i + 1) * sizeof(pend[0]));
   memset(&pend[NPEND - 1], 0, sizeof(pend[0]));
 
   memset(&tok, 0, sizeof(tok));
   tok.access_token = "user-token";
-  tok.id_token = "hdr.payload.sig";
+  snprintf(idt, sizeof(idt), "hdr.%s.sig", p.user[0] ? p.user : "payload");
+  tok.id_token = idt;
   memset(&user, 0, sizeof(user));
   user.id = (char *)TEST_SUB;
   user.username = "who";
@@ -481,7 +491,8 @@ static void pend_deliver(int ok)
 
   switch (p.kind) {
   case P_TOKEN:
-    ((kc_token_cb)p.cb)(ok ? KC_SUCCESS : KC_FORBIDDEN, ok ? &tok : NULL, p.data);
+    ((kc_token_cb)p.cb)(ok ? KC_SUCCESS : res == KC_ERROR ? KC_FORBIDDEN : res,
+                        ok ? &tok : NULL, p.data);
     break;
   case P_USER:
     ((kc_user_cb)p.cb)(ok ? KC_SUCCESS : KC_NOT_FOUND, ok ? &user : NULL, p.data);
@@ -502,6 +513,24 @@ static void pend_deliver(int ok)
   }
 }
 
+/** Deliver the oldest pending answer: success or a failure. */
+static void pend_deliver(int ok)
+{
+  pend_deliver_at(0, ok ? KC_SUCCESS : KC_ERROR);
+}
+
+/** Deliver the oldest pending answer of \a kind with result \a res. */
+static void pend_deliver_kind(enum pend_kind kind, int res)
+{
+  int i;
+  for (i = 0; i < NPEND; i++)
+    if (pend[i].kind == kind) {
+      pend_deliver_at(i, res);
+      return;
+    }
+  fail_msg("no pending answer of kind %d", kind);
+}
+
 /** One request call: answer per #kc_mode. */
 static int kc_request(enum pend_kind kind, void *cb, void *data)
 {
@@ -512,6 +541,12 @@ static int kc_request(enum pend_kind kind, void *cb, void *data)
   if (kc_mode == KC_REAP)
     pend_deliver(reap_ok);
   pend_push(kind, cb, data);
+  if (kind == P_TOKEN) {
+    int i;
+    for (i = NPEND - 1; i >= 0; i--)
+      if (pend[i].kind == P_TOKEN && pend[i].data == data)
+        ircd_strncpy(pend[i].user, next_grant_user, sizeof(pend[i].user));
+  }
   if (kc_mode == KC_INLINE_OK || kc_mode == KC_INLINE_FAIL)
     pend_deliver(kc_mode == KC_INLINE_OK);
   in_kc_call--;
@@ -520,7 +555,10 @@ static int kc_request(enum pend_kind kind, void *cb, void *data)
 
 int kc_user_verify_password(const char *username, const char *password,
                             kc_token_cb cb, void *data)
-{ return kc_request(P_TOKEN, (void *)cb, data); }
+{
+  ircd_strncpy(next_grant_user, username, sizeof(next_grant_user));
+  return kc_request(P_TOKEN, (void *)cb, data);
+}
 int kc_user_get(const char *username, kc_user_cb cb, void *data)
 { return kc_request(P_USER, (void *)cb, data); }
 int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data)
@@ -535,9 +573,37 @@ int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
 int kc_token_ensure(kc_token_cb cb, void *data) { return 0; }
 int kc_jwt_prime_cache(struct kc_realm realm) { return KC_SUCCESS; }
 
+/** The Keycloak user id (a uuid) of \a user, as the fake grants issue it. */
+static void user_sub(const char *user, char *out, size_t size)
+{
+  unsigned long h = 5381;
+  for (; *user; user++)
+    h = h * 33 + (unsigned char)*user;
+  snprintf(out, size, "6e4e28ba-2fa1-11d2-883f-%012lx", h & 0xffffffffffffUL);
+}
+
+/** The compact id a login of \a user gets. */
+static const char *user_id(const char *user, char out[ACCOUNT_ID_LEN + 1])
+{
+  char sub[40];
+  user_sub(user, sub, sizeof(sub));
+  account_id_from_uuid(sub, out);
+  return out;
+}
+
+/** A grant's ID token is "hdr.<user>.sig": its sub is that user's. */
 int kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
 {
-  ircd_strncpy(out, TEST_SUB, out_size);
+  const char *a = strchr(token, '.'), *b = a ? strchr(a + 1, '.') : NULL;
+  char user[32];
+
+  if (!a || !b || b - a - 1 >= (int)sizeof(user) || !strncmp(a + 1, "payload", 7)) {
+    ircd_strncpy(out, TEST_SUB, out_size);
+    return 1;
+  }
+  memcpy(user, a + 1, b - a - 1);
+  user[b - a - 1] = '\0';
+  user_sub(user, out, out_size);
   return 1;
 }
 
@@ -612,12 +678,16 @@ static int authenticate(struct Client *cptr, const char *arg)
   return m_authenticate(cptr, cptr, 2, parv);
 }
 
-/** "REGISTER * * <password>" from \a cptr, through the real handler. */
-static int register_line(struct Client *cptr, const char *password)
+/** "REGISTER <account> <email> <password>" from \a cptr, through the real
+ * handler. */
+static int register_as(struct Client *cptr, const char *account,
+                       const char *email, const char *password)
 {
-  char a[8] = "*", e[8] = "*", p[64];
+  char a[32], e[64], p[64];
   char *parv[5];
 
+  ircd_strncpy(a, account, sizeof(a));
+  ircd_strncpy(e, email, sizeof(e));
   ircd_strncpy(p, password, sizeof(p));
   parv[0] = cli_name(cptr);
   parv[1] = a;
@@ -625,6 +695,12 @@ static int register_line(struct Client *cptr, const char *password)
   parv[3] = p;
   parv[4] = NULL;
   return m_register(cptr, cptr, 4, parv);
+}
+
+/** "REGISTER * * <password>" from \a cptr. */
+static int register_line(struct Client *cptr, const char *password)
+{
+  return register_as(cptr, "*", "*", password);
 }
 
 static void b64(const unsigned char *in, size_t len, char *out)
@@ -663,6 +739,7 @@ static int setup(void **state)
   kc_requests = 0;
   memset(pend, 0, sizeof(pend));
   jwt_local_undecided = 0;
+  verify_email_on = 0;
   user_pem[0] = scram_salt[0] = '\0';
 #endif
   return 0;
@@ -1333,6 +1410,246 @@ static void register_after_undone_login_carries_no_old_id(void **state)
 }
 
 /* ------------------------------------------------------------------ */
+/* Registering and authenticating in one connection flow               */
+/* ------------------------------------------------------------------ */
+
+/* draft/account-registration: after REGISTER SUCCESS the client is
+ * "assumed to be authenticated to the <account> as if it used SASL"; with
+ * e-mail verification on, REGISTER answers VERIFICATION_REQUIRED, the
+ * server keeps nothing, and the user logs in with SASL once verified,
+ * possibly on the same connection.  Each sequence runs before connection
+ * registration (the identity registration will apply) and after it (the
+ * user's own). */
+
+/** A client that has finished connection registration, with no account. */
+static struct Client *new_registered(int fd, const char *nick)
+{
+  struct Client *c = new_client(fd, nick, 1, REG_KEEPS);
+
+  cli_auth(c) = NULL;
+  cli_status(c) = STAT_USER;
+  return c;
+}
+
+/** REGISTER answered: the lookup (the name is free) and the create; with
+ * verification on also the lookup for the mail and the mail. */
+static void register_through(struct Client *c, const char *account,
+                             const char *email)
+{
+  kc_mode = KC_LATER;
+  assert_int_equal(register_as(c, account, email, "longpassword"), 0);
+  pend_deliver_kind(P_USER, KC_NOT_FOUND);
+  pend_deliver_kind(P_RESULT, KC_SUCCESS);
+  if (verify_email_on) {
+    pend_deliver_kind(P_USER, KC_SUCCESS);
+    pend_deliver_kind(P_RESULT, KC_SUCCESS);
+  }
+}
+
+/** A PLAIN exchange for \a user, its grant left pending. */
+static void plain_pending(struct Client *c, const char *user, const char *pw)
+{
+  char data[300];
+
+  plain_b64(user, pw, data);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+}
+
+/** The identity \a c holds: before registration what registration will
+ * apply (the SASL-complete flag and the login's fields), after it the
+ * user's own.  A login's timestamp is 0 here: local logins stamp none. */
+static void assert_identity(struct Client *c, const char *account,
+                            const char *kc_id, int live)
+{
+  if (IsRegistered(c)) {
+    assert_true(IsAccount(c));
+    assert_string_equal(cli_user(c)->account, account);
+    assert_string_equal(cli_user(c)->kc_id, kc_id);
+    assert_int_equal(cli_user(c)->acc_create, 0);
+  } else {
+    assert_true(IsSASLComplete(c));
+    assert_string_equal(cli_saslaccount(c), account);
+    assert_string_equal(cli_saslkcid(c), kc_id);
+    assert_int_equal(cli_saslkcidlive(c), live);
+    assert_int_equal(cli_saslacccreate(c), 0);
+  }
+}
+
+/** a. Verification off: REGISTER SUCCESS logs the client in as the new
+ * account -- with no Keycloak id, the create answer has none -- and a
+ * second REGISTER is ALREADY_AUTHENTICATED. */
+static void flow_register_logs_in(void **state)
+{
+  static const char *const names[2][2] = { { "na1", "nx1" }, { "na2", "nx2" } };
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(61, "fa2") : new_client(60, "fa1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char want[64];
+    int n;
+
+    register_through(c, names[post][0], "*");
+    snprintf(want, sizeof(want), "REGISTER SUCCESS %s", names[post][0]);
+    assert_non_null(strstr(f->raw, want));
+    assert_identity(c, names[post][0], "", 0);
+    n = kc_requests;
+    assert_int_equal(register_as(c, names[post][1], "*", "longpassword"), 0);
+    assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+    assert_int_equal(kc_requests, n);
+    if (!post) {                           /* CAP END: it registers */
+      f->cap_done = 1;
+      run_event_loop();
+      assert_int_equal(f->registered, 1);
+    }
+  }
+}
+
+/** b. Verification on: VERIFICATION_REQUIRED keeps nothing; a SASL login to
+ * the new account before the link is clicked fails with the verify-your-
+ * email reply, can be retried, and then gives the account's own Keycloak
+ * id, confirmed by Keycloak (a real login). */
+static void flow_verify_then_sasl(void **state)
+{
+  static const char *const names[2] = { "nb1", "nb2" };
+  int post;
+
+  sasl_init_once();
+  verify_email_on = 1;
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(63, "fb2") : new_client(62, "fb1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char want[64], id[ACCOUNT_ID_LEN + 1];
+
+    register_through(c, names[post], "user@example.test");
+    snprintf(want, sizeof(want), "REGISTER VERIFICATION_REQUIRED %s", names[post]);
+    assert_non_null(strstr(f->raw, want));
+    assert_false(IsSASLComplete(c));
+    assert_false(IsAccount(c));
+    assert_string_equal(cli_saslaccount(c), "");
+
+    plain_pending(c, names[post], "verifypw");
+    pend_deliver_kind(P_TOKEN, KC_UNVERIFIED);      /* not verified yet */
+    assert_string_equal(f->fail_code, "VERIFICATION_REQUIRED");
+    assert_true(has_numeric(f, ERR_SASLFAIL));
+    assert_null(cli_saslsession(c));
+    assert_false(IsSASLComplete(c));
+
+    plain_pending(c, names[post], "verifypw");      /* the link clicked */
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    assert_true(has_numeric(f, RPL_SASLSUCCESS));
+    assert_identity(c, names[post], user_id(names[post], id), 1);
+  }
+}
+
+/** c. Verification on, and the client gives up on the new account and
+ * logs in to another, existing one: that account's identity, nothing of
+ * the REGISTER. */
+static void flow_verify_then_other_account(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  verify_email_on = 1;
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(65, "fc2") : new_client(64, "fc1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char id[ACCOUNT_ID_LEN + 1];
+
+    register_through(c, post ? "nc2" : "nc1", "user@example.test");
+    assert_non_null(strstr(f->raw, "REGISTER VERIFICATION_REQUIRED"));
+    plain_pending(c, post ? "cal2" : "cal1", "calpw");
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    assert_true(has_numeric(f, RPL_SASLSUCCESS));
+    assert_identity(c, post ? "cal2" : "cal1", user_id(post ? "cal2" : "cal1", id), 1);
+  }
+}
+
+/* d. The overlaps, deliberate (no exclusion: the spec lets a client
+ * register and authenticate in one flow and says nothing of overlap), the
+ * identity whole in every outcome. */
+
+/** REGISTER's answer lands while a SASL exchange is in flight, which then
+ * succeeds: the SASL account with its id. */
+static void flow_register_answer_mid_sasl_then_success(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(67, "fd2") : new_client(66, "fd1", 0, REG_KEEPS);
+    char id[ACCOUNT_ID_LEN + 1];
+    const char *acct = post ? "nd2" : "nd1", *user = post ? "dan2" : "dan1";
+
+    kc_mode = KC_LATER;
+    assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
+    pend_deliver_kind(P_USER, KC_NOT_FOUND);        /* the create goes out */
+    plain_pending(c, user, "danpw");
+    pend_deliver_kind(P_RESULT, KC_SUCCESS);        /* REGISTER SUCCESS */
+    assert_identity(c, acct, "", 0);
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* then 903 */
+    assert_identity(c, user, user_id(user, id), 1);
+  }
+}
+
+/** ... which then fails: the REGISTER account, no id. */
+static void flow_register_answer_mid_sasl_then_failure(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(69, "fe2") : new_client(68, "fe1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    const char *acct = post ? "ne2" : "ne1";
+
+    kc_mode = KC_LATER;
+    assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
+    pend_deliver_kind(P_USER, KC_NOT_FOUND);
+    plain_pending(c, post ? "eve2" : "eve1", "evepw-bad");
+    pend_deliver_kind(P_RESULT, KC_SUCCESS);
+    pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);       /* 904 */
+    assert_true(has_numeric(f, ERR_SASLFAIL));
+    assert_identity(c, acct, "", 0);
+  }
+}
+
+/** SASL finishes before REGISTER's answer.  Before registration the
+ * REGISTER account replaces the login (its answer is the later success);
+ * after registration the login stays and REGISTER's answer is dropped
+ * without a reply (register_complete_success() on an account holder). */
+static void flow_sasl_then_register_answer(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(71, "fg2") : new_client(70, "fg1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char id[ACCOUNT_ID_LEN + 1];
+    const char *acct = post ? "ng2" : "ng1", *user = post ? "gus2" : "gus1";
+
+    kc_mode = KC_LATER;
+    assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
+    pend_deliver_kind(P_USER, KC_NOT_FOUND);
+    plain_pending(c, user, "guspw");
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* 903 first */
+    assert_identity(c, user, user_id(user, id), 1);
+    pend_deliver_kind(P_RESULT, KC_SUCCESS);        /* then REGISTER's */
+    if (post) {
+      assert_identity(c, user, id, 1);
+      assert_null(strstr(f->raw, "REGISTER"));
+    } else {
+      assert_non_null(strstr(f->raw, "REGISTER SUCCESS"));
+      assert_identity(c, acct, "", 0);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* A request that cannot be started                                    */
 /* ------------------------------------------------------------------ */
 
@@ -1413,6 +1730,12 @@ int main(void)
     cmocka_unit_test_setup(register_after_completed_login_is_refused, setup),
     cmocka_unit_test_setup(undoing_a_login_clears_its_identity, setup),
     cmocka_unit_test_setup(register_after_undone_login_carries_no_old_id, setup),
+    cmocka_unit_test_setup(flow_register_logs_in, setup),
+    cmocka_unit_test_setup(flow_verify_then_sasl, setup),
+    cmocka_unit_test_setup(flow_verify_then_other_account, setup),
+    cmocka_unit_test_setup(flow_register_answer_mid_sasl_then_success, setup),
+    cmocka_unit_test_setup(flow_register_answer_mid_sasl_then_failure, setup),
+    cmocka_unit_test_setup(flow_sasl_then_register_answer, setup),
 #endif
   };
 
