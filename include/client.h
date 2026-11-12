@@ -1871,8 +1871,14 @@ struct Client {
  * a client with message-tags that sends a label without labeled-response
  * (the bare capability still lets it send tagged lines, parse.c).  The
  * decision is this connection's own (each bouncer device's), never the
- * session's.  Every test of one of these capabilities goes through its
- * predicate below, not the bare capability bit. */
+ * session's.  Every test of one of these capabilities on a client goes
+ * through its predicate below, not the bare capability bit -- with one
+ * equivalent exception: m_batch.c's sender-echo label test inside
+ * process_multiline_batch(), which is reached only under
+ * MultilineInUse(), so batch is already active there; and msgq.c's tag
+ * table, which strips a label= tag only a predicate-gated sender could
+ * have written.  (The CAP LS value is advertisement, and the BX U caps bits
+ * carry the raw bits; their readers test multiline and batch together.) */
 
 /** labeled-response and batch both in the capability set @a cs. */
 #define CapSetLabeledResponseInUse(cs) \

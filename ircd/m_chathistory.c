@@ -7878,13 +7878,21 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
   const char *bid = NULL;
   struct HistoryMessage *msg;
 
+  /* The label is the SEARCH line's, saved when it came (federated SEARCH
+   * answers later): it is used only while labeled-response is still in
+   * use -- with batch, so the answer is always the labeled batch below. */
+  if (label && (!label[0] || !feature_bool(FEAT_CAP_labeled_response)
+                || !LabeledResponseInUse(sptr)))
+    label = NULL;
+
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     generate_batch_id(batchid, sizeof(batchid), sptr);
     bid = batchid;
-    if (label)
+    if (label) {
       sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
                     cli_name(&me), batchid);
-    else
+      cli_label_responded(sptr) = 1;   /* answered: no ACK after it */
+    } else
       sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
   }
 
@@ -7902,8 +7910,6 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 
   if (bid)
     sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
-  else if (label)
-    sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
 }
 
 

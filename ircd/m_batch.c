@@ -139,7 +139,7 @@ static int format_batch_open_tags(char *buf, size_t buflen,
 {
   size_t pos = 0;
   int use_tags = CapOwnHas(to, CAP_MSGTAGS);
-  int has_label = (label && *label && CapOwnHas(to, CAP_LABELEDRESP));
+  int has_label = (label && *label && LabeledResponseInUse(to));
   int has_ctags = (ctags && *ctags && use_tags);
   int has_account = (use_tags && from && IsUser(from) && IsAccount(from)
                      && CapOwnHas(to, CAP_ACCOUNTTAG));
@@ -233,7 +233,7 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
   if (!route_to || !wire_target || !MyConnect(route_to))
     return 0;
 
-  if (CapActive(route_to, CAP_DRAFT_MULTILINE) && CapActive(route_to, CAP_BATCH)) {
+  if (MultilineInUse(route_to)) {
     /* Proper draft/multiline BATCH wrapper preserves concat semantics. */
     char batchid[16];
     const char *label = preserve_label ? con_ml_label(con) : NULL;
@@ -1498,7 +1498,7 @@ process_multiline_batch(struct Client *sptr)
 
       /* With aliases, each connection is a separate Client with its own caps.
        * CapActive checks the client's own capabilities directly. */
-      if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
+      if (MultilineInUse(to)) {
         /* Send as batch to supporting client */
         char batchid[16];
         int use_tags = CapActive(to, CAP_MSGTAGS);
@@ -1593,7 +1593,7 @@ process_multiline_batch(struct Client *sptr)
       }
 
       if (!skip_echo && need_echo) {
-        if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+        if (MultilineInUse(sptr)) {
           /* Sender has multiline - send batch echo */
           char batchid[16];
           int use_tags = CapActive(sptr, CAP_MSGTAGS);
@@ -2850,7 +2850,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           || !persistence_channel_visible(to, chptr->chname))
         continue;
 
-      if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
+      if (MultilineInUse(to)) {
         /* Send as batch to supporting clients */
         char batchid[16];
         char timebuf[32];
@@ -2905,7 +2905,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     }
   } else if (acptr && MyConnect(acptr)) {
     /* Private message to local user */
-    if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
+    if (MultilineInUse(acptr)) {
       char batchid[16];
       char timebuf[32];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
