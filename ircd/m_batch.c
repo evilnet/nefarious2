@@ -2766,6 +2766,10 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     }
     if (links)
       MyFree(links);
+    /* The fallback lines above armed the batch's time through
+     * sendcmdto_set_s2s_tags, which arms the client-facing event time
+     * too; disarm it, as the originating server does. */
+    sendcmdto_set_client_event(NULL, 0);
   }
 
   /* Store S2S multiline batch to history.
@@ -3151,6 +3155,11 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
                      fwd_time_ms, fwd_msgid);
       }
     }
+    /* ml_send_line arms the batch's time for its S2S tags, and with it
+     * the client-facing event time, which no relay send consumes: left
+     * armed, it stamped the next client line anything here sent with
+     * only a client msgid armed (an AWAY change, much later). */
+    sendcmdto_set_client_event(NULL, 0);
   }
 
   /* A tag-framed continuation or end line restates the batch's msgid
