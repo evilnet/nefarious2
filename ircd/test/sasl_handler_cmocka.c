@@ -138,7 +138,8 @@ struct effects {
   int hostmasks;              /**< hide_hostmask() */
   int account_adjusts;        /**< channel_account_adjust() */
   int anchors;                /**< presence_anchor_transfer() */
-  int oper_notices;           /**< sendto_opmask_butone_ratelimited() */
+  int oper_notices;           /**< sendto_opmask_butone_ratelimited(): sent */
+  int oper_notices_tried;     /**< ... called */
 };
 static struct effects fx;
 
@@ -536,9 +537,17 @@ void sendcmdto_common_channels_capab_butone(struct Client *from,
   va_end(vl);
   tlog_add("channels %s %s %s", tname(from), cmd, buf);
 }
+/* The oper notice: rate-limited as the real one is (once per 30 s per
+ * rate); tried counts every call, oper_notices the ones sent. */
 void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
                                       time_t *rate, const char *pattern, ...)
-{ fx.oper_notices++; }
+{
+  fx.oper_notices_tried++;
+  if (CurrentTime - *rate < 30)
+    return;
+  *rate = CurrentTime;
+  fx.oper_notices++;
+}
 void send_cap_notify(const char *capname, int available, const char *value) {}
 void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
@@ -605,10 +614,47 @@ const char *feature_str(enum Feature feat)
 }
 
 /* Timers: nothing fires in this world. */
+/* Timers: nothing fires unless a case fires one (fire_timer()); an armed
+ * timer is active until deleted, as in the server. */
+#define NTIMERS 16
+static struct { struct Timer *t; EventCallBack cb; } timers[NTIMERS];
 struct Timer *timer_init(struct Timer *timer) { memset(timer, 0, sizeof(*timer)); return timer; }
 void timer_add(struct Timer *timer, EventCallBack call, void *data,
-               enum TimerType type, time_t value) {}
-void timer_del(struct Timer *timer) {}
+               enum TimerType type, time_t value)
+{
+  int i, free_slot = -1;
+  for (i = 0; i < NTIMERS; i++) {
+    if (timers[i].t == timer)
+      break;
+    if (!timers[i].t && free_slot < 0)
+      free_slot = i;
+  }
+  if (i == NTIMERS)
+    i = free_slot;
+  assert_true(i >= 0);
+  timers[i].t = timer;
+  timers[i].cb = call;
+  t_data(timer) = data;
+  timer->t_header.gh_flags |= GEN_ACTIVE;
+}
+void timer_del(struct Timer *timer) { timer->t_header.gh_flags &= ~GEN_ACTIVE; }
+
+/** The armed \a timer expires: its callback runs with ET_EXPIRE. */
+static void fire_timer(struct Timer *timer)
+{
+  struct Event ev;
+  int i;
+
+  assert_true(t_active(timer));
+  for (i = 0; i < NTIMERS && timers[i].t != timer; i++)
+    ;
+  assert_true(i < NTIMERS);
+  timer->t_header.gh_flags &= ~GEN_ACTIVE;
+  memset(&ev, 0, sizeof(ev));
+  ev.ev_type = ET_EXPIRE;
+  ev.ev_gen.gen_timer = timer;
+  timers[i].cb(&ev);
+}
 void free_connection(struct Connection *con) {}
 
 /* Logging */
@@ -1071,6 +1117,7 @@ static int setup(void **state)
   intro_sub = (char *)TEST_SUB;
 #endif
   memset(&fx, 0, sizeof(fx));
+  memset(timers, 0, sizeof(timers));
   memset(&fsess, 0, sizeof(fsess));
   return 0;
 }
@@ -2972,7 +3019,8 @@ static void assert_refused(struct Client *c, const struct login_snap *was,
   assert_int_equal(cli_saslcookie(c), 0);
   assert_login_unchanged(c, was);
   assert_nothing_announced(fx_was);
-  assert_true(fx.oper_notices > fx_was->oper_notices);
+  assert_true(fx.oper_notices_tried > fx_was->oper_notices_tried);
+  assert_false(IsSASLReauth(c));                /* the exchange's mark went */
   assert_int_equal(f->registered, 0);           /* no registration ran */
 
   f->n_numerics = 0;
@@ -3278,6 +3326,7 @@ static void reauth_failed_or_aborted_keeps_login(void **state)
   assert_true(has_numeric(f, ERR_SASLABORTED));
   assert_null(cli_saslsession(c));
   assert_int_equal(cli_saslcookie(c), 0);
+  assert_false(IsSASLReauth(c));
   assert_login_unchanged(c, &was);
   assert_nothing_announced(&fx_was);
   f->n_numerics = 0;
@@ -3297,6 +3346,7 @@ static void reauth_failed_or_aborted_keeps_login(void **state)
   assert_true(has_numeric(f, ERR_SASLFAIL));
   assert_null(cli_saslsession(c));
   assert_int_equal(cli_saslcookie(c), 0);
+  assert_false(IsSASLReauth(c));
   assert_login_unchanged(c, &was);
   assert_nothing_announced(&fx_was);
   f->n_numerics = 0;
@@ -3349,6 +3399,76 @@ static void reauth_after_register_login(void **state)
     assert_string_equal(cli_user(c)->kc_id, rid);
     assert_false(HasFlag(c, FLAG_REGLOGIN));   /* now a SASL login's */
   }
+}
+
+/** A logged-in client's re-authentication that times out: 904, the
+ * exchange gone with its re-authentication mark, the login as it was. */
+static void reauth_timeout_keeps_login(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *c;
+  struct fake *f;
+  struct login_snap was;
+
+  sasl_init_once();
+  c = new_logged_in(97, "xav", "xavier", user_id("xavier", xid), 1);
+  f = fake_of(c);
+  snap(c, &was);
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  assert_true(IsSASLReauth(c));
+  assert_false(IsSASLExchangeDone(c));
+  fire_timer(&cli_sasltimeout(c));
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_non_null(strstr(f->saslfail, "timed out"));
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_false(IsSASLReauth(c));
+  assert_true(IsSASLExchangeDone(c));
+  assert_login_unchanged(c, &was);
+}
+
+/** The two refusal notices are rate-limited apart: a client repeating the
+ * "another account" refusal with a token of its own does not keep the
+ * "previous Keycloak user" notice (the name-reuse signal) from the opers. */
+static void reauth_notice_rates_apart(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *c;
+  int sent;
+
+  sasl_init_once();
+  CurrentTime += 1000;                    /* past every earlier case's notice */
+  c = new_logged_in(98, "xav", "xavier", user_id("xavier", xid), 1);
+  sent = fx.oper_notices;
+  token_for("yvonne", "yvonne");
+  oauth_exchange(c, LOCAL);
+  assert_int_equal(fx.oper_notices, sent + 1);
+  oauth_exchange(c, LOCAL);                /* the same kind again: held back */
+  assert_int_equal(fx.oper_notices, sent + 1);
+  token_for("xavier", "xavier-recreated");
+  oauth_exchange(c, LOCAL);                /* the other kind: told */
+  assert_int_equal(fx.oper_notices, sent + 2);
+}
+
+/** A services success with no L before it, for a client logged in
+ * through services (no login record): it completes as no account, and the
+ * rule refuses it -- a success naming nothing is not the client's own
+ * account. */
+static void reauth_ds_without_l_refused(void **state)
+{
+  struct Client *c;
+  struct login_snap was;
+  struct effects fx_was;
+
+  sasl_init_once();
+  c = new_logged_in(99, "svc", "xavier", "", 0);
+  snap(c, &was);
+  fx_was = fx;
+  cli_saslcookie(c) = 4242;                /* the relayed exchange */
+  cli_saslstart(c) = CurrentTime;
+  SetSASLReauth(c);
+  assert_int_equal(sasl_complete_login(c, cli_saslaccount(c), 0, NULL, 0), 0);
+  assert_refused(c, &was, &fx_was, "logged in as xavier");
 }
 
 /** Before registration a login is not applied yet: a client may log in
@@ -3432,6 +3552,9 @@ int main(void)
     cmocka_unit_test_setup(reauth_failed_or_aborted_keeps_login, setup),
     cmocka_unit_test_setup(pre_registration_switch_allowed, setup),
     cmocka_unit_test_setup(reauth_after_register_login, setup),
+    cmocka_unit_test_setup(reauth_timeout_keeps_login, setup),
+    cmocka_unit_test_setup(reauth_notice_rates_apart, setup),
+    cmocka_unit_test_setup(reauth_ds_without_l_refused, setup),
 #endif
   };
 

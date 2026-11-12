@@ -2082,10 +2082,7 @@ int auth_iauth_sasl_fail(struct Client *cptr)
   send_reply(cptr, ERR_SASLFAIL, ": service unavailable");
   if (t_active(&cli_sasltimeout(cptr)))
     timer_del(&cli_sasltimeout(cptr));
-  cli_saslcookie(cptr) = 0;
-  cli_saslstart(cptr) = 0;
-  cli_saslnamed(cptr)[0] = '\0';
-  cli_saslnamedts(cptr) = 0;
+  EndSASLExchange(cptr);
   return 1;
 }
 
@@ -3601,10 +3598,7 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
     if (sasl_reauth_refused(cli, account, NULL)) {
       if (t_active(&cli_sasltimeout(cli)))
         timer_del(&cli_sasltimeout(cli));
-      cli_saslcookie(cli) = 0;
-      cli_saslstart(cli) = 0;
-      cli_saslnamed(cli)[0] = '\0';
-      cli_saslnamedts(cli) = 0;
+      EndSASLExchange(cli);
       if (cli_auth(cli))
         return auth_sasl_done(cli_auth(cli));
       return 0;
@@ -3645,10 +3639,7 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
    * goes with it. */
   if (t_active(&cli_sasltimeout(cli)))
     timer_del(&cli_sasltimeout(cli));
-  cli_saslcookie(cli) = 0;
-  cli_saslstart(cli) = 0;
-  cli_saslnamed(cli)[0] = '\0';
-  cli_saslnamedts(cli) = 0;
+  EndSASLExchange(cli);
 
   /* Unblock registration if SASL was holding it */
   if (cli_auth(cli))
@@ -3753,9 +3744,7 @@ static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
    * timer go.  A cookie left behind would read as an exchange still in
    * flight -- the next AUTHENTICATE taken for its data, past the check
    * that allows a client with a login only OAUTHBEARER (m_authenticate()). */
-  cli_saslcookie(cli) = 0;
-  cli_saslstart(cli) = 0;
-  ClearSASLReauth(cli);
+  EndSASLExchange(cli);
   if (t_active(&cli_sasltimeout(cli)))
     timer_del(&cli_sasltimeout(cli));
 

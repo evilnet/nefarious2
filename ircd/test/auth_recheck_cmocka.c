@@ -462,8 +462,10 @@ static void iauth_login_of_a_logged_in_client_refused(void **state)
   SetSASLComplete(&a->cli);
   cli_saslcookie(&a->cli) = 5;
 
+  SetSASLReauth(&a->cli);
   iauth_line(iauth_cmd_sasl_loggedin, a, "yvonne");
   assert_int_equal(refusals, 1);
+  assert_false(IsSASLReauth(&a->cli));
   assert_string_equal(cli_saslnamed(&a->cli), "");
   assert_int_equal(identity_sets, 0);
   assert_string_equal(cli_saslaccount(&a->cli), "xavier");
@@ -471,6 +473,29 @@ static void iauth_login_of_a_logged_in_client_refused(void **state)
   iauth_line(iauth_cmd_sasl_done, a, NULL);
   assert_int_equal(successes, 0);
   assert_string_equal(a->user.account, "xavier");
+}
+
+/** IAuth's other ends of an exchange -- its f (failed), and the failure
+ * when IAuth can no longer be told (auth_iauth_sasl_fail()) -- end it
+ * whole: no cookie, no re-authentication mark. */
+static void iauth_fail_ends_clear_the_reauth_mark(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);
+  SetSASLComplete(&a->cli);
+  cli_saslcookie(&a->cli) = 11;
+  SetSASLReauth(&a->cli);
+  iauth_line(iauth_cmd_sasl_fail, a, NULL);
+  assert_int_equal(cli_saslcookie(&a->cli), 0);
+  assert_false(IsSASLReauth(&a->cli));
+
+  cli_saslcookie(&a->cli) = 12;
+  SetSASLReauth(&a->cli);
+  assert_int_equal(auth_iauth_sasl_fail(&a->cli), 1);
+  assert_int_equal(cli_saslcookie(&a->cli), 0);
+  assert_false(IsSASLReauth(&a->cli));
+  destroy_auth_request(a->auth);
 }
 
 int main(void)
@@ -485,6 +510,7 @@ int main(void)
     cmocka_unit_test_setup(iauth_done_ends_the_exchange, setup),
     cmocka_unit_test_setup(iauth_answers_without_an_exchange_are_dropped, setup),
     cmocka_unit_test_setup(iauth_login_of_a_logged_in_client_refused, setup),
+    cmocka_unit_test_setup(iauth_fail_ends_clear_the_reauth_mark, setup),
   };
 
   event_init(64);

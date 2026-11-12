@@ -112,13 +112,10 @@
  * may touch acptr afterwards. */
 static void sasl_relay_end(struct Client *acptr)
 {
-  cli_saslnamed(acptr)[0] = '\0';
-  cli_saslnamedts(acptr) = 0;
   if ((cli_saslagent(acptr) != NULL) && cli_saslagentref(cli_saslagent(acptr)))
     cli_saslagentref(cli_saslagent(acptr))--;
   cli_saslagent(acptr) = NULL;
-  cli_saslcookie(acptr) = 0;
-  cli_saslstart(acptr) = 0;
+  EndSASLExchange(acptr);
   if (t_active(&cli_sasltimeout(acptr)))
     timer_del(&cli_sasltimeout(acptr));
 
@@ -367,10 +364,7 @@ int abort_sasl(struct Client* cptr, int timeout) {
   if ((cli_saslagent(cptr)!= NULL) && cli_saslagentref(cli_saslagent(cptr)))
     cli_saslagentref(cli_saslagent(cptr))--;
   cli_saslagent(cptr) = NULL;
-  cli_saslcookie(cptr) = 0;
-  cli_saslstart(cptr) = 0;
-  cli_saslnamed(cptr)[0] = '\0';
-  cli_saslnamedts(cptr) = 0;
+  EndSASLExchange(cptr);
 
   /* Drop the registration hold.  Do not resume registration from
    * here: auth_complete_sasl() calls this from inside

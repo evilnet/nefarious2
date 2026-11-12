@@ -800,6 +800,75 @@ static void test_sasl_reauth_other_account_refused_at_L(void **state)
   assert_int_equal(logged_ts[0], 1700000000);
 }
 
+/* Every end of a relayed re-authentication of a logged-in client -- D F,
+ * D A, a refused L, and abort_sasl() (its timeout, an agent's split, the
+ * client's AUTHENTICATE *) -- ends the exchange whole: no cookie and no
+ * re-authentication mark left behind, the completed login as it was. */
+static void test_sasl_relay_ends_clear_the_reauth_mark(void **state)
+{
+  static const char *const ends[] = { "D F", "D A", "L yvonne", NULL };
+  struct Client *svs, *c;
+  int i;
+  (void)state;
+  svs = services_link();
+  c = local_client("xav", 7, 0);
+  ircd_strncpy(cli_user(c)->account, "xavier", ACCOUNTLEN + 1);
+  SetAccount(c);
+  SetSASLComplete(c);
+
+  for (i = 0; i <= 3; i++) {
+    cli_saslcookie(c) = 700 + i;
+    cli_saslstart(c) = CurrentTime;
+    SetSASLReauth(c);
+    deliver(ms_sasl, svs, svs, "AB AB!7.%d C :+", 700 + i);
+    assert_ptr_equal(cli_saslagent(c), svs);
+    if (ends[i])
+      deliver(ms_sasl, svs, svs, "AB AB!7.%d %s", 700 + i, ends[i]);
+    else
+      abort_sasl(c, 1);                     /* the timeout */
+    assert_int_equal(cli_saslcookie(c), 0);
+    assert_false(IsSASLReauth(c));
+    assert_null(cli_saslagent(c));
+    assert_int_equal(cli_saslagentref(svs), 0);
+    assert_true(IsSASLComplete(c));
+    assert_string_equal(cli_user(c)->account, "xavier");
+  }
+  assert_int_equal(nlogins, 0);
+}
+
+/* A D S with no L before it, for a logged-in client: the success
+ * completes as the login it holds (its own account), never as anything
+ * services did not name.  With no login record at all (a services login)
+ * it completes as nothing -- the completion's rule then refuses it
+ * (sasl_handler_cmocka: reauth_ds_without_l_refused). */
+static void test_sasl_relay_ds_without_l(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("xav", 7, 0);
+  ircd_strncpy(cli_user(c)->account, "xavier", ACCOUNTLEN + 1);
+  SetAccount(c);
+  sasl_identity_set(c, "xavier", 0, NULL, 0);
+  SetSASLComplete(c);
+  cli_saslcookie(c) = 801;
+  cli_saslstart(c) = CurrentTime;
+  SetSASLReauth(c);
+  deliver(ms_sasl, svs, svs, "AB AB!7.801 D S");
+  assert_int_equal(nlogins, 1);
+  assert_string_equal(logged_as[0], "xavier");
+
+  c = local_client("svc", 8, 0);
+  ircd_strncpy(cli_user(c)->account, "xavier", ACCOUNTLEN + 1);
+  SetAccount(c);                            /* by services: no record */
+  cli_saslcookie(c) = 802;
+  cli_saslstart(c) = CurrentTime;
+  SetSASLReauth(c);
+  deliver(ms_sasl, svs, svs, "AB AB!8.802 D S");
+  assert_int_equal(nlogins, 2);
+  assert_string_equal(logged_as[1], "");
+}
+
 /* ====================================================================
  * Login-on-connect: which client a reply reaches
  * ==================================================================== */
@@ -872,6 +941,8 @@ int main(void)
     T(test_sasl_relay_exchange_times_out_after_register_login),
     T(test_sasl_relay_success_is_the_account_services_named),
     T(test_sasl_reauth_other_account_refused_at_L),
+    T(test_sasl_relay_ends_clear_the_reauth_mark),
+    T(test_sasl_relay_ds_without_l),
     T(test_loc_cookie_0_request_not_sent),
     T(test_loc_cookie_0_server_port),
     T(test_loc_cookie_0_deny),

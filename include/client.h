@@ -1454,10 +1454,20 @@ struct Client {
  * abortable and times out.  (Every completion drops its cookie; an IAuth
  * success sets the flag as an exchange does.) */
 #define IsSASLExchangeDone(x)   (IsSASLComplete(x) && !HasFlag(x, FLAG_REGLOGIN) \
-                                 && !HasFlag(x, FLAG_SASLREAUTH))
+                                 && !IsSASLReauth(x))
 /** Return non-zero if the client's SASL exchange is a logged-in client's
  * re-authentication (sasl_logged_in()). */
 #define IsSASLReauth(x)         HasFlag(x, FLAG_SASLREAUTH)
+/** End the connection side of a SASL exchange, whatever ends it (a login,
+ * a refusal, a failure, an abort, a timeout, an agent's split, a hold):
+ * no cookie (a late answer for it reaches nobody), no start time, no
+ * account named for it, no re-authentication mark.  Every place that
+ * drops a cookie goes through this, so none of them leaves the mark
+ * behind.  The timer, the agent and a local session are the caller's. */
+#define EndSASLExchange(x)      do { cli_saslcookie(x) = 0; cli_saslstart(x) = 0; \
+                                     cli_saslnamed(x)[0] = '\0'; \
+                                     cli_saslnamedts(x) = 0; \
+                                     ClearSASLReauth(x); } while (0)
 /** Return non-zero if the client has been marked. */
 #define IsMarked(x)             HasFlag(x, FLAG_MARKED)
 /** Return non-zero if the client cannot join channels. */

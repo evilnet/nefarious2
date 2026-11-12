@@ -174,7 +174,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * login, a client may authenticate again as anyone (SASL 3.1).
    */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr))
-    ClearSASLReauth(cptr);    /* a new exchange: a re-authentication if set below */
+    EndSASLExchange(cptr);    /* a new exchange: a re-authentication if set below */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
       && (IsSASLComplete(cptr) || IsAccount(cptr))) {
     /* Only allow re-authentication for token-based mechanisms */
@@ -204,12 +204,11 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       ClrFlag(cptr, FLAG_REGLOGIN);
       sasl_identity_set(cptr, NULL, 0, NULL, 0);
     }
-    /* Clear old SASL session state */
+    /* Clear old SASL session state (no cookie here: the exchange's own
+     * state was ended above) */
     if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))
       cli_saslagentref(cli_saslagent(cptr))--;
     cli_saslagent(cptr) = NULL;
-    cli_saslcookie(cptr) = 0;
-    cli_saslstart(cptr) = 0;
     if (t_active(&cli_sasltimeout(cptr)))
       timer_del(&cli_sasltimeout(cptr));
   }

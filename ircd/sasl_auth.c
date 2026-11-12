@@ -808,7 +808,10 @@ int sasl_logged_in(struct Client *cptr)
 int sasl_reauth_refused(struct Client *sptr, const char *account,
                         const char *kc_id)
 {
-  static time_t notice_rate;
+  /* One rate per kind of notice: the "previous Keycloak user" one is the
+   * name-reuse signal, and a client repeating the other kind with a token
+   * of its own must not keep it from the opers. */
+  static time_t notice_rate_other, notice_rate_id;
   const char *current;
   const char *conn_id;
   int other_id;
@@ -842,7 +845,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
               "SASL: %C, logged in as %s with Keycloak id %s, proved %s with "
               "Keycloak id %s: re-authentication refused", sptr, current,
               conn_id, account, kc_id);
-    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate,
+    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate_id,
                                      "SASL: %C (logged in as %s) proved the "
                                      "account under another Keycloak id: "
                                      "re-authentication refused", sptr, current);
@@ -858,7 +861,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
               "SASL: %C, logged in as %s, re-authenticated as %s: refused, a "
               "re-authentication cannot change the account", sptr, current,
               EmptyString(account) ? "(no account)" : account);
-    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate,
+    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate_other,
                                      "SASL: %C (logged in as %s) re-authenticated "
                                      "as %s: refused", sptr, current,
                                      EmptyString(account) ? "(no account)" : account);
@@ -946,9 +949,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
       cli_saslagentref(cli_saslagent(sptr))--;
     cli_saslagent(sptr) = NULL;
-    cli_saslcookie(sptr) = 0;
-    cli_saslstart(sptr) = 0;
-    ClearSASLReauth(sptr);
+    EndSASLExchange(sptr);
     if (t_active(&cli_sasltimeout(sptr)))
       timer_del(&cli_sasltimeout(sptr));
     sasl_session_free(sptr);
@@ -966,8 +967,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
       cli_saslagentref(cli_saslagent(sptr))--;
     cli_saslagent(sptr) = NULL;
-    cli_saslcookie(sptr) = 0;
-    cli_saslstart(sptr) = 0;
+    EndSASLExchange(sptr);
     if (t_active(&cli_sasltimeout(sptr)))
       timer_del(&cli_sasltimeout(sptr));
   }
@@ -1127,9 +1127,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
     cli_saslagentref(cli_saslagent(sptr))--;
   cli_saslagent(sptr) = NULL;
-  cli_saslcookie(sptr) = 0;
-  cli_saslstart(sptr) = 0;
-  ClearSASLReauth(sptr);
+  EndSASLExchange(sptr);
   if (t_active(&cli_sasltimeout(sptr)))
     timer_del(&cli_sasltimeout(sptr));
 
@@ -1302,8 +1300,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
     /* Send failure and clean up */
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
-    cli_saslcookie(acptr) = 0;
-    cli_saslstart(acptr) = 0;
+    EndSASLExchange(acptr);
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
@@ -1383,8 +1380,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
                 authcid_str, sptr);
       send_reply(sptr, ERR_SASLFAIL, "");
       session->state = SASL_STATE_FAILED;
-      cli_saslcookie(sptr) = 0;
-      cli_saslstart(sptr) = 0;
+      EndSASLExchange(sptr);
       if (t_active(&cli_sasltimeout(sptr)))
         timer_del(&cli_sasltimeout(sptr));
       sasl_session_free(sptr);
@@ -1480,8 +1476,7 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
               count, acptr);
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
-    cli_saslcookie(acptr) = 0;
-    cli_saslstart(acptr) = 0;
+    EndSASLExchange(acptr);
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
@@ -1495,8 +1490,7 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
               acptr, result);
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
-    cli_saslcookie(acptr) = 0;
-    cli_saslstart(acptr) = 0;
+    EndSASLExchange(acptr);
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
@@ -1943,8 +1937,7 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
               session->authcid, acptr);
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
-    cli_saslcookie(acptr) = 0;
-    cli_saslstart(acptr) = 0;
+    EndSASLExchange(acptr);
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
@@ -1968,8 +1961,7 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
               "the verification link, then try again");
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
-    cli_saslcookie(acptr) = 0;
-    cli_saslstart(acptr) = 0;
+    EndSASLExchange(acptr);
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
@@ -2754,8 +2746,7 @@ static int sasl_abort_cleanup(struct Client *sptr)
     timer_del(&cli_sasltimeout(sptr));
 
   /* Clean up session state */
-  cli_saslcookie(sptr) = 0;
-  cli_saslstart(sptr) = 0;
+  EndSASLExchange(sptr);
   sasl_session_free(sptr);
   return 1;
 }
