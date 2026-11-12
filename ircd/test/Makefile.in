@@ -49,6 +49,7 @@ CMOCKA_TESTPROGS = \
 	chathistory_recv_cmocka \
 	pm_pair_index_cmocka \
 	recv_classify_cmocka \
+	ml_route_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
 	ipcheck_cmocka \
@@ -126,6 +127,7 @@ DEP_SRC = \
 	chathistory_recv_cmocka.c \
 	pm_pair_index_cmocka.c \
 	recv_classify_cmocka.c \
+	ml_route_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
 	ipcheck_cmocka.c \
@@ -356,6 +358,14 @@ pm_pair_index_cmocka: $(PM_PAIR_INDEX_CMOCKA_OBJS)
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o
 recv_classify_cmocka: $(RECV_CLASSIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(RECV_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ml_route tests - ml_route_carries_multiline(), the test the originating
+# server of a multiline batch decides by (ML batch or single-line
+# fallback), over hand-built server trees.  Links the REAL ../ml_route.o
+# only: the suite defines &me itself and the module calls nothing.
+ML_ROUTE_CMOCKA_OBJS = ml_route_cmocka.o ../ml_route.o
+ml_route_cmocka: $(ML_ROUTE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(ML_ROUTE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # register_throttle tests - the module is recompiled with a 1-bucket,
 # 4-slot table so eviction is reachable without hash-collision gymnastics.
