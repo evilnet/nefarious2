@@ -126,6 +126,80 @@ static struct fake fakes[NFAKE];
 static int in_kc_call;        /**< a libkc request call is running */
 static int in_login;          /**< inside sasl_complete_login() (test 1) */
 
+/* What a login completion does, in order: the lines it sends the client
+ * and the network and the calls it makes, one entry each (tlog_add()).
+ * Cleared before a completion, compared after it. */
+#define TLOG_MAX 48
+#define TLOG_LEN 200
+static char tlog[TLOG_MAX][TLOG_LEN];
+static int ntlog;
+
+static void tlog_add(const char *fmt, ...)
+{
+  va_list vl;
+  if (ntlog >= TLOG_MAX)
+    fail_msg("transcript full");
+  va_start(vl, fmt);
+  vsnprintf(tlog[ntlog++], TLOG_LEN, fmt, vl);
+  va_end(vl);
+}
+
+static const char *tname(const struct Client *cptr);
+
+/** The ircd's send patterns, formatted the way the ircd would: %C is a
+ * client (its name), %Tu a time_t; %s %c %d %u as usual. */
+static void fmt_ircd(char *buf, size_t size, const char *pattern, va_list vl)
+{
+  size_t n = 0;
+  const char *p;
+
+  for (p = pattern; *p && n + 1 < size; p++) {
+    char tmp[64];
+    const char *s = tmp;
+
+    if (*p != '%') {
+      buf[n++] = *p;
+      continue;
+    }
+    switch (*++p) {
+    case 'C': {
+      struct Client *c = va_arg(vl, struct Client *);
+      s = c ? tname(c) : "(null)";
+      break;
+    }
+    case 'T':                                   /* %Tu */
+      if (p[1] == 'u')
+        p++;
+      snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)va_arg(vl, time_t));
+      break;
+    case 's':
+      s = va_arg(vl, const char *);
+      if (!s)
+        s = "(null)";
+      break;
+    case 'c':
+      tmp[0] = (char)va_arg(vl, int);
+      tmp[1] = '\0';
+      break;
+    case 'd':
+      snprintf(tmp, sizeof(tmp), "%d", va_arg(vl, int));
+      break;
+    case 'u':
+      snprintf(tmp, sizeof(tmp), "%u", va_arg(vl, unsigned int));
+      break;
+    case '%':
+      strcpy(tmp, "%");
+      break;
+    default:
+      fail_msg("pattern \"%s\": no fake for %%%c", pattern, *p);
+      return;
+    }
+    while (*s && n + 1 < size)
+      buf[n++] = *s++;
+  }
+  buf[n] = '\0';
+}
+
 static struct fake *fake_of(const struct Client *cptr)
 {
   int i;
@@ -152,6 +226,14 @@ static void touch(const struct Client *cptr)
   struct fake *f = fake_of(cptr);
   if (f && f->freed)
     f->touched_after_free++;
+}
+
+/** \a cptr's name for a transcript entry; a client registration freed is
+ * poisoned, so it is not read. */
+static const char *tname(const struct Client *cptr)
+{
+  struct fake *f = fake_of(cptr);
+  return (f && f->freed) ? "(freed)" : cli_name(cptr);
 }
 
 /** A connecting client on \a fd, past NICK and USER, CAP sasl active. */
@@ -244,6 +326,7 @@ int auth_sasl_done(struct AuthRequest *auth)
 int auth_set_account(struct AuthRequest *auth, const char *account)
 {
   struct fake *f = fake_of_auth(auth);
+  tlog_add("iauth R %s", account);      /* both forms tell IAuth the same */
   if (in_login && !f->hold)
     f->checks_unheld_in_login++;
   return registration_check(f);
@@ -256,6 +339,7 @@ void auth_recheck_later(struct AuthRequest *auth)
 
 void auth_set_account_later(struct AuthRequest *auth, const char *account)
 {
+  tlog_add("iauth R %s", account);
   fake_of_auth(auth)->recheck_queued = 1;
 }
 
@@ -273,9 +357,21 @@ int abort_sasl(struct Client *cptr, int timeout) { touch(cptr); return 0; }
 int send_reply(struct Client *to, int reply, ...)
 {
   struct fake *f = fake_of(to);
+  va_list vl;
   touch(to);
   if (f && !f->freed && f->n_numerics < 16)
     f->numerics[f->n_numerics++] = reply & ~SND_EXPLICIT;
+  if ((reply & ~SND_EXPLICIT) == RPL_LOGGEDIN) {
+    const char *nick, *user, *host, *account;
+    va_start(vl, reply);
+    nick = va_arg(vl, const char *);
+    user = va_arg(vl, const char *);
+    host = va_arg(vl, const char *);
+    account = va_arg(vl, const char *);
+    va_end(vl);
+    tlog_add("900 %s %s!%s@%s %s", tname(to), nick, user, host, account);
+  } else
+    tlog_add("%03d %s", reply & ~SND_EXPLICIT, tname(to));
   return 0;
 }
 
@@ -288,6 +384,7 @@ void sendrawto_one(struct Client *to, const char *pattern, ...)
     va_start(vl, pattern);
     vsnprintf(f->raw, sizeof(f->raw), pattern, vl);
     va_end(vl);
+    tlog_add("raw %s %s", tname(to), f->raw);
   }
 }
 
@@ -298,6 +395,7 @@ void send_fail(struct Client *to, const char *command, const char *code,
   touch(to);
   if (f && !f->freed)
     ircd_strncpy(f->fail_code, code, sizeof(f->fail_code));
+  tlog_add("FAIL %s %s %s", command, code, context ? context : "");
 }
 void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
                    struct Client *to, const char *pattern, ...)
@@ -305,12 +403,28 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 void sendcmdto_serv_butone(struct Client *from, const char *cmd,
                            const char *tok, struct Client *one,
                            const char *pattern, ...)
-{ touch(from); }
+{
+  char buf[TLOG_LEN];
+  va_list vl;
+  touch(from);
+  va_start(vl, pattern);
+  fmt_ircd(buf, sizeof(buf), pattern, vl);
+  va_end(vl);
+  tlog_add("servers %s %s", tok, buf);
+}
 void sendcmdto_common_channels_capab_butone(struct Client *from,
                                             const char *cmd, const char *tok,
                                             struct Client *one, int require,
                                             int forbid, const char *pattern, ...)
-{ touch(from); }
+{
+  char buf[TLOG_LEN];
+  va_list vl;
+  touch(from);
+  va_start(vl, pattern);
+  fmt_ircd(buf, sizeof(buf), pattern, vl);
+  va_end(vl);
+  tlog_add("channels %s %s %s", tname(from), cmd, buf);
+}
 void send_cap_notify(const char *capname, int available, const char *value) {}
 void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
@@ -330,12 +444,18 @@ int ircd_snprintf(struct Client *dest, char *buf, size_t len,
 
 /* Features */
 static int verify_email_on;   /**< FEAT_REGISTER_VERIFY_EMAIL */
+static int bed_features;      /**< the bed's account and host-hiding features:
+                                   EXTENDED_ACCOUNTS, SASL_AUTOHIDEHOST and
+                                   HOST_HIDING_STYLE 1 (off: all three 0) */
 
 int feature_bool(enum Feature feat)
 {
   switch (feat) {
   case FEAT_REGISTER_VERIFY_EMAIL:
     return verify_email_on;
+  case FEAT_EXTENDED_ACCOUNTS:
+  case FEAT_SASL_AUTOHIDEHOST:
+    return bed_features;
   case FEAT_SASL_LOCAL:
   case FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION:
   case FEAT_CAP_draft_account_registration:
@@ -351,6 +471,7 @@ int feature_int(enum Feature feat)
   case FEAT_SASL_TIMEOUT: return 30;
   case FEAT_SASL_NEGCACHE_TTL: return 60;
   case FEAT_SASL_POSCACHE_TTL: return 300;
+  case FEAT_HOST_HIDING_STYLE: return bed_features ? 1 : 0;
   default: return 0;
   }
 }
@@ -391,15 +512,26 @@ void bounce_session_adopt_kc_id(struct BouncerSession *s, const char *id) {}
 int bounce_account_kc_conflict(const char *account, const char *kc_id) { return 0; }
 int bounce_rebind_kc_conflict(const char *ghost_id, const char *incoming_id) { return 0; }
 void bounce_emit_alias_update(struct Client *primary, const char *field,
-                              const char *value) { touch(primary); }
-void bounce_sync_alias_identity(struct Client *primary) { touch(primary); }
-void channel_account_adjust(struct Client *cptr, int delta) { touch(cptr); }
+                              const char *value)
+{ touch(primary); tlog_add("alias update %s %s %s", tname(primary), field, value); }
+void bounce_sync_alias_identity(struct Client *primary)
+{ touch(primary); tlog_add("alias sync %s", tname(primary)); }
+void channel_account_adjust(struct Client *cptr, int delta)
+{ touch(cptr); tlog_add("channel account count %s %+d", tname(cptr), delta); }
 void presence_anchor_transfer(struct Client *cptr, const char *old_anchor,
                               int old_is_session, const char *new_anchor,
-                              int new_is_session) { touch(cptr); }
-int hide_hostmask(struct Client *cptr) { touch(cptr); return 0; }
-void metadata_load_account(struct Client *cptr, const char *account) { touch(cptr); }
-void metadata_mode_sync_restore(struct Client *cptr, int live) { touch(cptr); }
+                              int new_is_session)
+{
+  touch(cptr);
+  tlog_add("presence %s %s/%d -> %s/%d", tname(cptr), old_anchor,
+           old_is_session, new_anchor, new_is_session);
+}
+int hide_hostmask(struct Client *cptr)
+{ touch(cptr); tlog_add("hide_hostmask %s", tname(cptr)); return 0; }
+void metadata_load_account(struct Client *cptr, const char *account)
+{ touch(cptr); tlog_add("metadata load %s %s", tname(cptr), account); }
+void metadata_mode_sync_restore(struct Client *cptr, int live)
+{ touch(cptr); tlog_add("mode restore %s %d", tname(cptr), live); }
 enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
                                             time_t now, int limit, int period,
                                             int global_limit)
@@ -425,15 +557,20 @@ static enum {
 /** What a reaped pending answer says. */
 static int reap_ok;
 static int kc_requests;               /**< request calls made */
-static char next_grant_user[32];      /**< the user of the grant being made */
+static char next_user[32];            /**< the user the request being made
+                                           names (a grant's, a lookup's,
+                                           a create's) */
+static int grant_has_id;              /**< a grant's ID token carries a sub */
 
-/** An answer libkc owes (one request at a time is enough here). */
-enum pend_kind { P_NONE, P_TOKEN, P_USER, P_USERS, P_INTRO, P_RESULT };
+/** An answer libkc owes (one request at a time is enough here).  P_CREATED
+ * is REGISTER's account create; P_RESULT any other plain result. */
+enum pend_kind { P_NONE, P_TOKEN, P_USER, P_USERS, P_INTRO, P_RESULT, P_CREATED };
 struct pending {
   enum pend_kind kind;
   void *cb;
   void *data;
-  char user[32];        /**< a grant's user: its ID token names it */
+  char user[32];        /**< the user the request names: a grant's ID token,
+                             a lookup's answer */
 };
 #define NPEND 4
 static struct pending pend[NPEND];
@@ -507,6 +644,7 @@ static void pend_deliver_at(int i, int res)
                              p.data);
     break;
   case P_RESULT:
+  case P_CREATED:
     ((kc_result_cb)p.cb)(ok ? KC_SUCCESS : KC_ERROR, p.data);
     break;
   default:
@@ -542,12 +680,15 @@ static int kc_request(enum pend_kind kind, void *cb, void *data)
   if (kc_mode == KC_REAP)
     pend_deliver(reap_ok);
   pend_push(kind, cb, data);
-  if (kind == P_TOKEN) {
+  {
     int i;
     for (i = NPEND - 1; i >= 0; i--)
-      if (pend[i].kind == P_TOKEN && pend[i].data == data)
-        ircd_strncpy(pend[i].user, next_grant_user, sizeof(pend[i].user));
+      if (pend[i].kind == kind && pend[i].data == data) {
+        ircd_strncpy(pend[i].user, next_user, sizeof(pend[i].user));
+        break;
+      }
   }
+  next_user[0] = '\0';
   if (kc_mode == KC_INLINE_OK || kc_mode == KC_INLINE_FAIL)
     pend_deliver(kc_mode == KC_INLINE_OK);
   in_kc_call--;
@@ -557,18 +698,24 @@ static int kc_request(enum pend_kind kind, void *cb, void *data)
 int kc_user_verify_password(const char *username, const char *password,
                             kc_token_cb cb, void *data)
 {
-  ircd_strncpy(next_grant_user, username, sizeof(next_grant_user));
+  ircd_strncpy(next_user, username, sizeof(next_user));
   return kc_request(P_TOKEN, (void *)cb, data);
 }
 int kc_user_get(const char *username, kc_user_cb cb, void *data)
-{ return kc_request(P_USER, (void *)cb, data); }
+{
+  ircd_strncpy(next_user, username, sizeof(next_user));
+  return kc_request(P_USER, (void *)cb, data);
+}
 int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data)
 { return kc_request(P_USERS, (void *)cb, data); }
 int kc_token_introspect(const char *token, kc_introspect_cb cb, void *data)
 { return kc_request(P_INTRO, (void *)cb, data); }
 int kc_user_create_full(const struct kc_user_create_req *req,
                         kc_result_cb cb, void *data)
-{ return kc_request(P_RESULT, (void *)cb, data); }
+{
+  ircd_strncpy(next_user, req->username, sizeof(next_user));
+  return kc_request(P_CREATED, (void *)cb, data);
+}
 int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
 { return kc_request(P_RESULT, (void *)cb, data); }
 int kc_token_ensure(kc_token_cb cb, void *data) { return 0; }
@@ -598,6 +745,8 @@ int kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
   const char *a = strchr(token, '.'), *b = a ? strchr(a + 1, '.') : NULL;
   char user[32];
 
+  if (!grant_has_id)
+    return 0;
   if (!a || !b || b - a - 1 >= (int)sizeof(user) || !strncmp(a + 1, "payload", 7)) {
     ircd_strncpy(out, TEST_SUB, out_size);
     return 1;
@@ -734,6 +883,8 @@ static int setup(void **state)
   memset(fakes, 0, sizeof(fakes));
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
   in_kc_call = in_login = 0;
+  bed_features = 0;
+  ntlog = 0;
 #ifdef USE_LIBKC
   kc_mode = KC_LATER;
   reap_ok = 0;
@@ -741,6 +892,8 @@ static int setup(void **state)
   memset(pend, 0, sizeof(pend));
   jwt_local_undecided = 0;
   verify_email_on = 0;
+  grant_has_id = 1;
+  next_user[0] = '\0';
   user_pem[0] = scram_salt[0] = '\0';
 #endif
   return 0;
@@ -1440,7 +1593,7 @@ static void register_through(struct Client *c, const char *account,
   kc_mode = KC_LATER;
   assert_int_equal(register_as(c, account, email, "longpassword"), 0);
   pend_deliver_kind(P_USER, KC_NOT_FOUND);
-  pend_deliver_kind(P_RESULT, KC_SUCCESS);
+  pend_deliver_kind(P_CREATED, KC_SUCCESS);
   if (verify_email_on) {
     pend_deliver_kind(P_USER, KC_SUCCESS);
     pend_deliver_kind(P_RESULT, KC_SUCCESS);
@@ -1589,7 +1742,7 @@ static void flow_register_answer_mid_sasl_then_success(void **state)
     assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
     pend_deliver_kind(P_USER, KC_NOT_FOUND);        /* the create goes out */
     plain_pending(c, user, "danpw");
-    pend_deliver_kind(P_RESULT, KC_SUCCESS);        /* REGISTER SUCCESS */
+    pend_deliver_kind(P_CREATED, KC_SUCCESS);        /* REGISTER SUCCESS */
     assert_identity(c, acct, "", 0);
     pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* then 903 */
     assert_identity(c, user, user_id(user, id), 1);
@@ -1611,7 +1764,7 @@ static void flow_register_answer_mid_sasl_then_failure(void **state)
     assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
     pend_deliver_kind(P_USER, KC_NOT_FOUND);
     plain_pending(c, post ? "eve2" : "eve1", "evepw-bad");
-    pend_deliver_kind(P_RESULT, KC_SUCCESS);
+    pend_deliver_kind(P_CREATED, KC_SUCCESS);
     pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);       /* 904 */
     assert_true(has_numeric(f, ERR_SASLFAIL));
     assert_identity(c, acct, "", 0);
@@ -1639,7 +1792,7 @@ static void flow_sasl_then_register_answer(void **state)
     plain_pending(c, user, "guspw");
     pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* 903 first */
     assert_identity(c, user, user_id(user, id), 1);
-    pend_deliver_kind(P_RESULT, KC_SUCCESS);        /* then REGISTER's */
+    pend_deliver_kind(P_CREATED, KC_SUCCESS);        /* then REGISTER's */
     if (post) {
       assert_identity(c, user, id, 1);
       assert_null(strstr(f->raw, "REGISTER"));
@@ -1647,6 +1800,262 @@ static void flow_sasl_then_register_answer(void **state)
       assert_non_null(strstr(f->raw, "REGISTER SUCCESS"));
       assert_identity(c, acct, "", 0);
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* REGISTER SUCCESS is a SASL login                                    */
+/* ------------------------------------------------------------------ */
+
+/* draft/account-registration: after REGISTER SUCCESS the client "is
+ * assumed to be authenticated to the <account> as if it used SASL".  The
+ * owner's ruling: a real login, as the spec shows.  So a REGISTER's
+ * completion is compared with a SASL login's, entry by entry: what the
+ * client is sent, what the network is sent, and the calls on the way. */
+
+/** A completion's transcript (tlog), less the entries that name how the
+ * login was proved. */
+struct transcript {
+  char e[TLOG_MAX][TLOG_LEN];
+  int n;
+};
+
+/** Take the transcript so far into \a t, leaving out entries that begin
+ * with \a drop (NULL: none), and start a new one. */
+static void take_transcript(struct transcript *t, const char *drop)
+{
+  int i;
+
+  t->n = 0;
+  for (i = 0; i < ntlog; i++)
+    if (!drop || strncmp(tlog[i], drop, strlen(drop)))
+      strcpy(t->e[t->n++], tlog[i]);
+  ntlog = 0;
+}
+
+static int transcript_has(const struct transcript *t, const char *prefix)
+{
+  int i;
+  for (i = 0; i < t->n; i++)
+    if (!strncmp(t->e[i], prefix, strlen(prefix)))
+      return 1;
+  return 0;
+}
+
+static void assert_same_transcript(const struct transcript *sasl,
+                                   const struct transcript *reg)
+{
+  int i, same = (sasl->n == reg->n);
+
+  for (i = 0; same && i < sasl->n; i++)
+    same = !strcmp(sasl->e[i], reg->e[i]);
+  if (same)
+    return;
+  for (i = 0; i < sasl->n || i < reg->n; i++)
+    print_message("  %2d  SASL: %-58s  REGISTER: %s\n", i,
+                  i < sasl->n ? sasl->e[i] : "", i < reg->n ? reg->e[i] : "");
+  fail_msg("a REGISTER login differs from a SASL login");
+}
+
+/** Everything a login leaves on a connection. */
+struct ident {
+  int sasl_complete, account, hidden;
+  char sasl_account[ACCOUNTLEN + 1], sasl_id[ACCOUNT_ID_LEN + 1];
+  int sasl_live;
+  time_t sasl_ts;
+  char user_account[ACCOUNTLEN + 1], user_id[ACCOUNT_ID_LEN + 1];
+  time_t user_ts;
+};
+
+static void ident_of(struct Client *c, struct ident *id)
+{
+  memset(id, 0, sizeof(*id));
+  id->sasl_complete = !!IsSASLComplete(c);
+  id->account = !!IsAccount(c);
+  id->hidden = !!IsHiddenHost(c);
+  ircd_strncpy(id->sasl_account, cli_saslaccount(c), sizeof(id->sasl_account));
+  ircd_strncpy(id->sasl_id, cli_saslkcid(c), sizeof(id->sasl_id));
+  id->sasl_live = cli_saslkcidlive(c);
+  id->sasl_ts = cli_saslacccreate(c);
+  ircd_strncpy(id->user_account, cli_user(c)->account, sizeof(id->user_account));
+  ircd_strncpy(id->user_id, cli_user(c)->kc_id, sizeof(id->user_id));
+  id->user_ts = cli_user(c)->acc_create;
+}
+
+static void assert_same_ident(const struct ident *a, const struct ident *b)
+{
+  assert_int_equal(a->sasl_complete, b->sasl_complete);
+  assert_int_equal(a->account, b->account);
+  assert_int_equal(a->hidden, b->hidden);
+  assert_string_equal(a->sasl_account, b->sasl_account);
+  assert_string_equal(a->sasl_id, b->sasl_id);
+  assert_int_equal(a->sasl_live, b->sasl_live);
+  assert_int_equal(a->sasl_ts, b->sasl_ts);
+  assert_string_equal(a->user_account, b->user_account);
+  assert_string_equal(a->user_id, b->user_id);
+  assert_int_equal(a->user_ts, b->user_ts);
+}
+
+/** A SASL PLAIN login of \a acct on \a c, Keycloak's grant answering from
+ * the event loop: its transcript in \a t, 903 left out. */
+static void sasl_login_of(struct Client *c, const char *acct,
+                          struct transcript *t)
+{
+  char drop[TLOG_LEN];
+
+  plain_pending(c, acct, "samepw");
+  ntlog = 0;
+  pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+  snprintf(drop, sizeof(drop), "%03d %s", RPL_SASLSUCCESS, cli_name(c));
+  assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+  take_transcript(t, drop);
+}
+
+/** A REGISTER of \a acct on \a c (verification off), Keycloak answering
+ * from the event loop: the whole transcript of its completion in \a t. */
+static void register_login_of(struct Client *c, const char *acct,
+                              struct transcript *t)
+{
+  kc_mode = KC_LATER;
+  assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
+  pend_deliver_kind(P_USER, KC_NOT_FOUND);  /* the name is free */
+  ntlog = 0;
+  pend_deliver_kind(P_CREATED, KC_SUCCESS);  /* the account is created */
+  take_transcript(t, NULL);
+}
+
+/** REGISTER SUCCESS (verification off) leaves the client where a SASL
+ * login of that account leaves it, before and after connection
+ * registration: the same lines to the client (900, in the same
+ * nick!user@host form) and to the network (the AC), the same calls in the
+ * same order (IAuth told, metadata, the account's modes, the hidden host,
+ * the bouncer aliases, account-notify), the same identity and the same
+ * hidden host (SASL_AUTOHIDEHOST), with REGISTER SUCCESS in place of 903
+ * -- ahead of the 900, where the spec's before-connect example puts VERIFY
+ * SUCCESS -- and registration checked from the event loop after either. */
+static void register_success_is_a_sasl_login(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  bed_features = 1;
+  grant_has_id = 0;        /* neither login carries a Keycloak id here */
+  for (post = 0; post < 2; post++) {
+    const char *acct = post ? "same2" : "same1";
+    struct Client *s = post ? new_registered(74, "tw") : new_client(74, "tw", 0, REG_KEEPS);
+    struct Client *r = post ? new_registered(75, "tw") : new_client(75, "tw", 0, REG_KEEPS);
+    struct fake *fs = fake_of(s), *fr = fake_of(r);
+    struct transcript ts, tr, rest;
+    struct ident is, ir;
+    char success[64];
+    int i;
+
+    sasl_login_of(s, acct, &ts);
+    register_login_of(r, acct, &tr);
+
+    snprintf(success, sizeof(success), "raw tw REGISTER SUCCESS %s ", acct);
+    rest.n = 0;
+    for (i = 0; i < tr.n; i++)
+      if (strncmp(tr.e[i], success, strlen(success)))
+        strcpy(rest.e[rest.n++], tr.e[i]);
+    assert_same_transcript(&ts, &rest);
+    assert_int_equal(rest.n, tr.n - 1);                 /* one REGISTER SUCCESS */
+    assert_true(!strncmp(tr.e[0], success, strlen(success)));
+    assert_true(!strncmp(tr.e[1], "900 tw ", 7));       /* the 900 follows it */
+    assert_false(has_numeric(fr, RPL_SASLSUCCESS));     /* no 903 */
+
+    ident_of(s, &is);
+    ident_of(r, &ir);
+    assert_same_ident(&is, &ir);
+    assert_true(ir.sasl_complete);
+    assert_true(ir.hidden);
+    assert_string_equal(ir.sasl_account, acct);
+
+    if (!post) {          /* CAP END: both register, from the event loop */
+      fs->cap_done = fr->cap_done = 1;
+      run_event_loop();
+      assert_int_equal(fs->registered, 1);
+      assert_int_equal(fr->registered, 1);
+      assert_int_equal(fr->runs_inside_kc, 0);
+    }
+  }
+}
+
+/** REGISTER's success landing while the client's own SASL exchange is in
+ * flight leaves that exchange alone, its hold on registration with it:
+ * registration waits for the exchange, which then ends as it would have
+ * (the overlaps pinned above). */
+static void register_success_mid_sasl_keeps_the_exchange_hold(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(76, "hw", 0, REG_KEEPS);
+  f = fake_of(c);
+  kc_mode = KC_LATER;
+  assert_int_equal(register_as(c, "nh1", "*", "longpassword"), 0);
+  pend_deliver_kind(P_USER, KC_NOT_FOUND);
+  plain_pending(c, "hold1", "holdpw");
+  assert_true(f->hold);
+  f->cap_done = 1;                           /* CAP END sent meanwhile */
+  pend_deliver_kind(P_CREATED, KC_SUCCESS);  /* REGISTER SUCCESS */
+  assert_non_null(strstr(f->raw, "REGISTER SUCCESS nh1"));
+  assert_true(f->hold);
+  assert_non_null(cli_saslsession(c));       /* the exchange goes on */
+  run_event_loop();
+  assert_int_equal(f->registered, 0);        /* and holds registration */
+  pend_deliver_kind(P_TOKEN, KC_SUCCESS);    /* 903 */
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  run_event_loop();
+  assert_int_equal(f->registered, 1);
+  assert_string_equal(cli_saslaccount(c), "hold1");
+}
+
+/** AUTHENTICATE after REGISTER SUCCESS is answered as after 903: another
+ * mechanism is refused (907) and the login stays; OAUTHBEARER, the one
+ * re-authentication allowed, starts; before and after registration. */
+static void authenticate_after_register_success_is_as_after_903(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  grant_has_id = 0;        /* neither login carries a Keycloak id here */
+  for (post = 0; post < 2; post++) {
+    const char *acct = post ? "again2" : "again1";
+    struct Client *s = post ? new_registered(77, "aw") : new_client(77, "aw", 0, REG_KEEPS);
+    struct Client *r = post ? new_registered(78, "aw") : new_client(78, "aw", 0, REG_KEEPS);
+    struct transcript ts, tr;
+    struct ident is, ir;
+    char refused[32];
+
+    sasl_login_of(s, acct, &ts);
+    register_login_of(r, acct, &tr);
+
+    assert_int_equal(authenticate(s, "PLAIN"), 0);
+    take_transcript(&ts, NULL);
+    assert_int_equal(authenticate(r, "PLAIN"), 0);
+    take_transcript(&tr, NULL);
+    snprintf(refused, sizeof(refused), "%03d aw", ERR_SASLALREADY);
+    assert_true(transcript_has(&ts, refused));
+    assert_same_transcript(&ts, &tr);
+    ident_of(s, &is);
+    ident_of(r, &ir);
+    assert_string_equal(ir.sasl_account, acct);
+    assert_null(cli_saslsession(r));
+
+    assert_int_equal(authenticate(s, "OAUTHBEARER"), 0);
+    take_transcript(&ts, NULL);
+    assert_int_equal(authenticate(r, "OAUTHBEARER"), 0);
+    take_transcript(&tr, NULL);
+    assert_same_transcript(&ts, &tr);
+    assert_non_null(cli_saslsession(s));
+    assert_non_null(cli_saslsession(r));
+    ident_of(s, &is);
+    ident_of(r, &ir);
+    assert_same_ident(&is, &ir);
+    assert_int_equal(authenticate(s, "*"), 0);
+    assert_int_equal(authenticate(r, "*"), 0);
   }
 }
 
@@ -1737,6 +2146,9 @@ int main(void)
     cmocka_unit_test_setup(flow_register_answer_mid_sasl_then_success, setup),
     cmocka_unit_test_setup(flow_register_answer_mid_sasl_then_failure, setup),
     cmocka_unit_test_setup(flow_sasl_then_register_answer, setup),
+    cmocka_unit_test_setup(register_success_is_a_sasl_login, setup),
+    cmocka_unit_test_setup(register_success_mid_sasl_keeps_the_exchange_hold, setup),
+    cmocka_unit_test_setup(authenticate_after_register_success_is_as_after_903, setup),
 #endif
   };
 

@@ -1357,7 +1357,9 @@ SASL_AUTOHIDEHOST
  * Default: TRUE
 
 When enabled, users authenticating using SASL will automatically get
-user mode +x to hide their host name (requires HOST_HIDING_STYLE 1 or 3)
+user mode +x to hide their host name (requires HOST_HIDING_STYLE 1 or 3).
+A client that REGISTER (draft/account-registration) logs in counts as
+authenticating using SASL.
 
 SNOMASK_DEFAULT
  * Type: integer
@@ -1944,7 +1946,11 @@ verification link and the client is sent a REGISTER VERIFICATION_REQUIRED
 reply instead of being logged in. The draft/account-registration CAP 302
 value also gains the "email-required" token so clients can detect the
 policy before registering. When disabled, REGISTER creates a fully usable,
-already-verified account and logs the client in immediately.
+already-verified account and logs the client in immediately, exactly as a
+SASL login of that account would ("as if it used SASL", in the
+specification's words): REGISTER SUCCESS, then RPL_LOGGEDIN (900), the
+hidden host under SASL_AUTOHIDEHOST, and the account announced to the
+network -- only RPL_SASLSUCCESS (903) is not sent.
 
 Both SASL PLAIN and SASL SCRAM-SHA-256 gate on the same signal: a
 pending VERIFY_EMAIL required action on the Keycloak account (PLAIN via

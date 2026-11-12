@@ -125,7 +125,8 @@ extern void sasl_identity_set(struct Client *cptr, const char *account,
                               time_t acc_create, const char *kc_id,
                               int id_live);
 
-/** Complete a successful SASL login.  Shared between local and P10 paths.
+/** Complete a successful SASL login.  Shared between local and P10 paths
+ *  (and, through sasl_register_login(), REGISTER's success).
  *  Handles: account set, RPL_SASLSUCCESS, metadata load, account-notify,
  *  AC broadcast, hidden host, bouncer alias update, auth_sasl_done.
  *  @return CPTR_KILLED when the registration it resumes last exited or
@@ -138,9 +139,24 @@ extern int sasl_complete_login(struct Client *sptr, const char *account,
                                time_t acc_create, const char *kc_id,
                                int id_live);
 
+/** Log in a client whose REGISTER created \a account (e-mail verification
+ *  off) as a SASL login would -- draft/account-registration: after REGISTER
+ *  SUCCESS the client is "authenticated to the <account> as if it used
+ *  SASL" -- with REGISTER SUCCESS in place of 903.  For REGISTER's Keycloak
+ *  answer: the registration check is left to the event loop, and a SASL
+ *  exchange in flight on the connection is left alone.  The client must
+ *  hold no account.
+ *  @param[in] acptr Local client that sent the REGISTER.
+ *  @param[in] account The account created.
+ *  @param[in] kc_id Its compact Keycloak id, from Keycloak in this
+ *  registration, or NULL for none.
+ */
+extern void sasl_register_login(struct Client *acptr, const char *account,
+                                const char *kc_id);
+
 /** Broadcast an ACCOUNT (AC) message to other servers for a client whose
  *  account just changed.  Holds the four FEAT_EXTENDED_ACCOUNTS x ts/id
- *  variants; shared by SASL step 7 and REGISTER's post-registration path.
+ *  variants; the login's step 7 (a SASL login's and a REGISTER's).
  *  @param[in] cptr Client whose account just changed.
  *  @param[in] type 'R' (register/first login) or 'M' (modify).
  */

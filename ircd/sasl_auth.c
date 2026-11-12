@@ -710,8 +710,8 @@ static const char *sasl_id_for(const char *login_as, const char *verified,
 
 /** Broadcast an ACCOUNT (AC) message to other servers for a client whose
  * account just changed.  Holds the four FEAT_EXTENDED_ACCOUNTS x ts/id
- * variants, unchanged from SASL step 7; shared with REGISTER's
- * post-registration path (register_complete_success(), m_register.c).
+ * variants, unchanged from SASL step 7 (which a REGISTER's success reaches
+ * too: sasl_register_login()).
  *
  * @param[in] cptr Client whose account just changed.
  * @param[in] type 'R' (register/first login) or 'M' (modify).
@@ -788,22 +788,32 @@ static const char *sasl_conn_kc_id(struct Client *sptr)
   return id[0] ? id : cli_user(sptr)->kc_id;
 }
 
-/** Complete a successful SASL login.
+/** What proved a login.  draft/account-registration: after REGISTER
+ * SUCCESS the client "is assumed to be authenticated to the <account> as
+ * if it used SASL", so a REGISTER's success is a login like any other
+ * (the owner's ruling, 2026-11-11: "real login as the spec shows"). */
+enum sasl_login_proof {
+  LOGIN_BY_SASL,        /**< a SASL exchange: 903 */
+  LOGIN_BY_REGISTER     /**< REGISTER created the account: REGISTER SUCCESS */
+};
+
+/** Complete a successful login.
  *
- *  This is the shared function called by both the local Keycloak SASL path
- *  and the P10 relay path (ms_sasl D/S handler).  It performs (the step
- *  numbers are the comments' below):
+ *  This is the shared function called by the local Keycloak SASL path, the
+ *  P10 relay path (ms_sasl D/S handler) and a REGISTER's success
+ *  (sasl_register_login()).  It performs (the step numbers are the
+ *  comments' below):
  *   0. Refuse a registered connection proving its account under another
  *      Keycloak id (nothing else happens then)
  *   1. The login's identity as a whole: account, timestamp, Keycloak id
  *      (sasl_identity_set())
- *   2. Send RPL_LOGGEDIN to client
+ *   2. Send RPL_LOGGEDIN to client (a REGISTER: REGISTER SUCCESS first)
  *   3. auth_set_account (pre-registration: tells IAuth)
  *   5. SetHiddenHost (pre-registration, if configured)
- *   6. SetSASLComplete + RPL_SASLSUCCESS
+ *   6. SetSASLComplete + RPL_SASLSUCCESS (not for a REGISTER)
  *   7. For registered users: metadata_load_account, account update,
  *      bounce_emit_alias_update, account-notify, AC broadcast, hide_hostmask
- *   8. Clean up SASL session state and timer
+ *   8. Clean up SASL session state and timer (not for a REGISTER)
  *   9. Release the exchange's hold on registration (auth_sasl_done)
  *
  *  Registration is held until step 9 (it reads the account and the SASL
@@ -814,9 +824,23 @@ static const char *sasl_conn_kc_id(struct Client *sptr)
  *  returns that to its parser, ms_sasl (a services line) ignores it, and
  *  nothing may touch sptr after CPTR_KILLED; sasl_complete_login_from_kc(),
  *  for a Keycloak answer, leaves the check to the event loop.
+ *
+ *  A REGISTER (\a by LOGIN_BY_REGISTER) is the same login with three
+ *  differences, all because no SASL exchange proved it: REGISTER SUCCESS
+ *  where a SASL login sends 903 (ahead of the 900, where the spec's
+ *  before-connect example puts VERIFY SUCCESS); the hold on registration
+ *  is not touched -- it belongs to a SASL exchange, and one may be in
+ *  flight on the same connection (the overlaps are allowed; releasing its
+ *  hold would let registration run mid-exchange and end it), so step 3
+ *  owes the check to the event loop instead (auth_set_account_later(): a
+ *  Keycloak answer never runs registration in its own stack) and there is
+ *  no step 9; and step 8 leaves that exchange alone.  Step 0 never applies
+ *  to a REGISTER: it only logs in a client holding no account
+ *  (register_complete_success(), m_register.c).
  */
 static void sasl_login_apply(struct Client *sptr, const char *account,
-                             time_t acc_create, const char *kc_id, int id_live)
+                             time_t acc_create, const char *kc_id, int id_live,
+                             enum sasl_login_proof by)
 {
   /* 0. A connection logged in to this account under one Keycloak id proves
    * the same name under another: the account was deleted and recreated,
@@ -850,8 +874,9 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
    * set what it reads, nor free sptr under them.  The hold is normally on
    * already (auth_sasl_start() when the exchange began), but an exchange
    * begun while an earlier one's cookie was still set never took it (an
-   * IAuth success or failure leaves the cookie). */
-  if (cli_auth(sptr))
+   * IAuth success or failure leaves the cookie).  A REGISTER takes no hold:
+   * its step 3 checks nothing here (see above). */
+  if (by == LOGIN_BY_SASL && cli_auth(sptr))
     auth_sasl_start(cli_auth(sptr));
 
   /* 1. The login's identity, as a whole (sasl_identity_set()): the account
@@ -869,16 +894,26 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
          kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
-  /* 2. Send RPL_LOGGEDIN */
+  /* 2. Send RPL_LOGGEDIN; a REGISTER's own reply comes first, as the spec's
+   * example has it ("VERIFY SUCCESS ...", then "900 ..."). */
+  if (by == LOGIN_BY_REGISTER)
+    sendrawto_one(sptr, "REGISTER SUCCESS %s :Account registered",
+                  cli_saslaccount(sptr));
   send_reply(sptr, RPL_LOGGEDIN,
              BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr),
              (!cli_user(sptr) || BadPtr(cli_user(sptr)->username)) ? "*" : cli_user(sptr)->username,
              (!cli_user(sptr) || BadPtr(cli_user(sptr)->host)) ? "*" : cli_user(sptr)->host,
              cli_saslaccount(sptr), cli_saslaccount(sptr));
 
-  /* 3. Set account in auth request (pre-registration); held, see above */
-  if (cli_auth(sptr))
-    auth_set_account(cli_auth(sptr), cli_saslaccount(sptr));
+  /* 3. Set account in auth request (pre-registration); held, see above.
+   * A REGISTER's comes from a Keycloak answer and holds nothing: the check
+   * is owed to the event loop. */
+  if (cli_auth(sptr)) {
+    if (by == LOGIN_BY_SASL)
+      auth_set_account(cli_auth(sptr), cli_saslaccount(sptr));
+    else
+      auth_set_account_later(cli_auth(sptr), cli_saslaccount(sptr));
+  }
 
   /* 5. Pre-registration hidden host setup */
   if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
@@ -887,9 +922,13 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     SetHiddenHost(sptr);
   }
 
-  /* 6. SetSASLComplete + RPL_SASLSUCCESS */
+  /* 6. SetSASLComplete + RPL_SASLSUCCESS.  The flag for a REGISTER too:
+   * before registration it is what registration applies the identity by,
+   * and what makes a later AUTHENTICATE or REGISTER see a completed login
+   * (907, ALREADY_AUTHENTICATED), as after 903. */
   SetSASLComplete(sptr);
-  send_reply(sptr, RPL_SASLSUCCESS);
+  if (by == LOGIN_BY_SASL)
+    send_reply(sptr, RPL_SASLSUCCESS);
 
   /* 7. Post-registration account update (reauth or if already registered) */
   if (IsRegistered(sptr) && cli_user(sptr) && cli_saslaccount(sptr)[0]) {
@@ -968,7 +1007,10 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     }
   }
 
-  /* 8. Clean up SASL session state */
+  /* 8. Clean up SASL session state.  Not for a REGISTER: an exchange
+   * still in flight is the client's own, and ends as it would have. */
+  if (by == LOGIN_BY_REGISTER)
+    return;
   if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
     cli_saslagentref(cli_saslagent(sptr))--;
   cli_saslagent(sptr) = NULL;
@@ -987,7 +1029,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 int sasl_complete_login(struct Client *sptr, const char *account,
                         time_t acc_create, const char *kc_id, int id_live)
 {
-  sasl_login_apply(sptr, account, acc_create, kc_id, id_live);
+  sasl_login_apply(sptr, account, acc_create, kc_id, id_live, LOGIN_BY_SASL);
   /* 9. Unblock registration.  It may exit or free sptr; the result says
    * so, and nothing here touches sptr after it. */
   return sasl_hold_release(sptr);
@@ -1002,10 +1044,28 @@ static void sasl_complete_login_from_kc(struct Client *acptr,
                                         time_t acc_create, const char *kc_id,
                                         int id_live)
 {
-  sasl_login_apply(acptr, account, acc_create, kc_id, id_live);
+  sasl_login_apply(acptr, account, acc_create, kc_id, id_live, LOGIN_BY_SASL);
   sasl_hold_release_from_kc(acptr);
 }
 #endif
+
+/** A REGISTER created \a account (e-mail verification off): log \a acptr
+ * in to it as a SASL login would (sasl_login_apply()), with REGISTER
+ * SUCCESS in place of 903.  Called from REGISTER's Keycloak answer; the
+ * registration check is left to the event loop.  The caller makes sure
+ * the client holds no account (a registered client logged in meanwhile
+ * gets another reply).
+ * @param[in] acptr Local client that sent the REGISTER.
+ * @param[in] account The account created.
+ * @param[in] kc_id Its compact Keycloak id, as Keycloak answered it in this
+ *   registration, or NULL when there is none to be had.
+ */
+void sasl_register_login(struct Client *acptr, const char *account,
+                         const char *kc_id)
+{
+  /* No timestamp, as for every local Keycloak login (step 1). */
+  sasl_login_apply(acptr, account, 0, kc_id, kc_id != NULL, LOGIN_BY_REGISTER);
+}
 
 /* ---- PLAIN mechanism handler ---- */
 

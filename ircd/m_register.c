@@ -43,10 +43,7 @@
  */
 #include "config.h"
 
-#include "bouncer_session.h"
 #include "capab.h"
-#include "channel.h"
-#include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -57,7 +54,6 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
-#include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -66,7 +62,6 @@
 #include "s_auth.h"
 #include "s_conf.h"
 #include "s_debug.h"
-#include "s_user.h"
 #include "sasl_auth.h"
 #include "send.h"
 
@@ -213,82 +208,27 @@ static void reg_ctx_free(struct reg_ctx *ctx)
   MyFree(ctx);
 }
 
-/** Attach the freshly created account to the client and tell it so.
+/** Log the client in to the account its REGISTER created, and tell it so.
  *
- * Two shapes, matching the two moments a REGISTER can complete:
- *  - the client already finished registration (post-connect REGISTER), so
- *    the account is stamped directly and announced to account-notify peers;
- *  - the client is still pre-registration (before-connect REGISTER), so the
- *    account is parked in cli_saslaccount() and auth_complete_sasl() applies
- *    it when NICK/USER finish.
+ * draft/account-registration: after REGISTER SUCCESS the client "is
+ * assumed to be authenticated to the <account> as if it used SASL".  So it
+ * is a SASL login's completion, shared (sasl_register_login(),
+ * sasl_auth.c): before connection registration the identity registration
+ * applies, after it the account set and announced; 900, the hidden host,
+ * the account's metadata and modes, account-notify, the AC, the bouncer
+ * aliases -- with REGISTER SUCCESS where a SASL login sends 903.
+ *
+ * A registered client that logged in meanwhile (a SASL login finished while
+ * the REGISTER was in flight) keeps that login, and is not told anything.
  *
  * @param[in] acptr Client to log in.
  * @param[in] account Account name that was created.
  */
 static void register_complete_success(struct Client *acptr, const char *account)
 {
-  if (IsRegistered(acptr)) {
-    if (!IsAccount(acptr) && cli_user(acptr)) {
-      /* ircd_strncpy() is strlcpy-shaped: the third argument is the buffer
-       * SIZE, not a max character count.  The pre-rewrite ms_regreply()
-       * passed sizeof-1 here, which silently truncated a full-length
-       * (ACCOUNTLEN) account name to ACCOUNTLEN-1 -- and would now diverge
-       * from the name actually created in Keycloak. */
-      ircd_strncpy(cli_user(acptr)->account, account,
-                   sizeof(cli_user(acptr)->account));
-      SetAccount(acptr);
-      /* Chathistory gate: post-registration REGISTER is a FLAG_ACCOUNT
-       * flip mid-membership -- count it, or this client's eventual PART
-       * decrements a count it never added (authusers drift class). */
-      channel_account_adjust(acptr, +1);
-      /* Strict-presence anchor transfer: session -> new account. */
-      presence_anchor_transfer(acptr, cli_session_id(acptr), 1,
-                               cli_user(acptr)->account, 0);
-      /* P1 A3 residue: a post-registration REGISTER attaches an account to
-       * an already-registered client outside the register_user chokepoint
-       * (that ran at initial registration) -- load metadata here. */
-      metadata_load_account(acptr, cli_user(acptr)->account);
-
-      /* The create response carries no Keycloak id or X3-style timestamp;
-       * a later SASL login adopts one (sasl_auth.c's step 4b).  From here,
-       * mirror SASL step 7's order: acc_create/kc_id, the alias update,
-       * the account-notify tell, the AC broadcast, then hide_hostmask. */
-      cli_user(acptr)->acc_create = 0;
-      cli_user(acptr)->kc_id[0] = '\0';
-
-      bounce_emit_alias_update(acptr, "account", account);
-
-      sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
-      sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
-                                             CAP_ACCNOTIFY, CAP_NONE,
-                                             "%s", account);
-
-      sasl_broadcast_account(acptr, 'R');
-
-      if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
-           (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
-          IsHiddenHost(acptr))
-        hide_hostmask(acptr);
-
-      /* The account's modes, echoed with their M lines, after the AC
-       * above (push-2 final fix wave, I-1).  A new account has none
-       * unless it was written to before (a name reused). */
-      metadata_mode_sync_restore(acptr, 1);
-    }
-  } else {
-    /* The new account's identity as a whole: its name, and no timestamp
-     * and no Keycloak id, as the branch above (the create answer carries
-     * neither; a later SASL login adopts the id) -- never what an earlier
-     * login on this connection left. */
-    sasl_identity_set(acptr, account, 0, NULL, 0);
-    SetSASLComplete(acptr);
-    /* A Keycloak answer: registration is checked from the event loop,
-     * never here (auth_recheck_later() in s_auth.c says why), so acptr is
-     * still there for the reply. */
-    if (cli_auth(acptr))
-      auth_set_account_later(cli_auth(acptr), account);
-    sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
-  }
+  if (IsAccount(acptr))
+    return;
+  sasl_register_login(acptr, account, NULL);
 }
 
 /** Stage 2 result: the verification mail was (or was not) triggered.
