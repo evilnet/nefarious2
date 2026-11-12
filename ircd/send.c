@@ -5205,7 +5205,7 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
   struct MsgBuf *mb;
   char tagbuf[512];
   int pos = 0;
-  int use_time, use_label;
+  int use_time, use_label, use_batch;
 
   if (!MyConnect(to))
     return;
@@ -5215,17 +5215,30 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
    * native error format — falling back to NOTICE breaks conformance tests.
    * Legacy clients will simply ignore unknown commands. */
 
-  /* Format tags with explicit label override if provided */
+  /* Format tags with explicit label override if provided.  Without one,
+   * a standard reply answers the labeled command being handled: it goes in
+   * that command's labeled-response batch when one is open
+   * (labeled_batch_start(), the line's own -- never another batch open on
+   * the connection: not a typed batch nested in the answer, like a
+   * metadata batch, nor an asynchronous one), else it takes the label if
+   * no line took it yet (a label answers one line or one batch).  A client
+   * that sent no label gets its standard replies untagged, as before. */
   use_time = feature_bool(FEAT_CAP_server_time) && CapRecipientHas(to, CAP_SERVERTIME);
-  use_label = feature_bool(FEAT_CAP_labeled_response) &&
+  use_batch = !(label && *label) && feature_bool(FEAT_CAP_batch) &&
+              CapRecipientHas(to, CAP_BATCH) && cli_labeled_batch(to);
+  use_label = !use_batch && feature_bool(FEAT_CAP_labeled_response) &&
               LabeledResponseInUse(to) &&
-              ((label && *label) || cli_label(to)[0]);
+              ((label && *label) ||
+               (cli_label(to)[0] && !cli_label_responded(to)));
 
-  if (use_time || use_label) {
+  if (use_time || use_label || use_batch) {
     tagbuf[0] = '@';
     pos = 1;
 
-    if (use_label) {
+    if (use_batch)
+      pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "batch=%s",
+                      cli_connect(to)->con_batch[cli_labeled_batch(to) - 1].id);
+    else if (use_label) {
       /* Use explicit label if provided, otherwise use cli_label */
       const char *lbl = (label && *label) ? label : cli_label(to);
       pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", lbl);

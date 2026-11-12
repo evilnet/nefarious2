@@ -221,9 +221,14 @@ void persistence_send_status(struct Client *to)
   if (!to || !MyConnect(to))
     return;
   persistence_client_setting(to, client_setting, sizeof(client_setting));
-  sendrawto_one(to, ":%s PERSISTENCE STATUS %s %s",
-                cli_name(&me), client_setting,
-                persistence_state_keyword(to));
+  if (cli_batch_id(to)[0])   /* inside the answer's batch (registration's) */
+    sendrawto_one(to, "@batch=%s :%s PERSISTENCE STATUS %s %s",
+                  cli_batch_id(to), cli_name(&me), client_setting,
+                  persistence_state_keyword(to));
+  else
+    sendrawto_one(to, ":%s PERSISTENCE STATUS %s %s",
+                  cli_name(&me), client_setting,
+                  persistence_state_keyword(to));
 }
 
 /** Send the STATUS of a hold turned off: client-setting OFF, effective

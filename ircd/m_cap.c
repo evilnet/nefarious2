@@ -551,11 +551,42 @@ int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *
  * @param[in] rem Capabalities to show as removed (with no other modifier).
  * @param[in] subcmd Name of capability subcommand.
  */
+/** Send a CAP reply of @a n lines (@a lines, each "CAP <nick> <sub> ...")
+ * as the answer to a labeled CAP line: one line carries the label itself;
+ * several go in a labeled-response batch (while the client holds batch;
+ * else the first takes the label).  The label is the line's, accepted
+ * when it was parsed -- a CAP REQ :-batch or :-labeled-response that ends
+ * labels is still answered under it. */
+static void cap_reply(struct Client *sptr, char lines[][BUFSIZE], int n)
+{
+  int i, pending = feature_bool(FEAT_CAP_labeled_response)
+                   && cli_label(sptr)[0] && !cli_label_responded(sptr);
+  int batch = pending && n > 1 && labeled_batch_start(sptr);
+
+  for (i = 0; i < n; i++) {
+    if (batch && cli_batch_id(sptr)[0])
+      sendrawto_one(sptr, "@batch=%s :%s %s", cli_batch_id(sptr),
+                    cli_name(&me), lines[i]);
+    else if (pending && !cli_label_responded(sptr)) {
+      cli_label_responded(sptr) = 1;   /* answered: no ACK */
+      sendrawto_one(sptr, "@label=%s :%s %s", cli_label(sptr),
+                    cli_name(&me), lines[i]);
+    } else
+      sendrawto_one(sptr, ":%s %s", cli_name(&me), lines[i]);
+  }
+  if (batch)
+    labeled_batch_end(sptr);
+}
+
+#define CAP_REPLY_LINES 16
+
 static int
 send_caplist(struct Client *sptr, const struct CapSet *set,
              const struct CapSet *rem, const char *subcmd)
 {
   char capbuf[BUFSIZE] = "", pfx[16], valbuf[128];
+  static char lines[CAP_REPLY_LINES][BUFSIZE];
+  int nlines = 0;
   struct MsgBuf *mb;
   int i, loc, len, flags, pfx_len, val_len;
   int cap_version = cli_capab_version(sptr);
@@ -664,23 +695,27 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     len = capab_list[i].namelen + pfx_len + val_len; /* how much we'd add... */
     if (msgq_bufleft(mb) < loc + len + 2) { /* would add too much; must flush */
       /* For CAP 302+, use * continuation marker */
-      if (cap_version >= 302) {
-        sendcmdto_one(&me, CMD_CAP, sptr, "%s %s * :%s",
-                      BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd, capbuf);
-      } else {
-        sendcmdto_one(&me, CMD_CAP, sptr, "%s %s :%s",
-                      BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd, capbuf);
+      if (nlines == CAP_REPLY_LINES - 1) {   /* cannot happen with today's list */
+        cap_reply(sptr, lines, nlines);
+        nlines = 0;
       }
+      ircd_snprintf(0, lines[nlines++], BUFSIZE, MSG_CAP " %s %s %s:%s",
+                    BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd,
+                    cap_version >= 302 ? "* " : "", capbuf);
       capbuf[(loc = 0)] = '\0'; /* re-terminate the buffer... */
     }
 
+    /* A line just flushed: this capability starts the next one, without
+     * the separator built while it was still going to follow another. */
     loc += ircd_snprintf(0, capbuf + loc, sizeof(capbuf) - loc, "%s%s%s",
-                         pfx, capab_list[i].name, valbuf);
+                         (!loc && pfx[0] == ' ') ? pfx + 1 : pfx,
+                         capab_list[i].name, valbuf);
   }
 
-  msgq_append(0, mb, "%s", capbuf); /* append capabilities to the final cmd */
-  send_buffer(sptr, mb, 0); /* send them out... */
-  msgq_clean(mb); /* and release the buffer */
+  msgq_clean(mb); /* the buffer only measured the room per line */
+  ircd_snprintf(0, lines[nlines++], BUFSIZE, MSG_CAP " %s %s :%s",
+                BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd, capbuf);
+  cap_reply(sptr, lines, nlines);   /* labeled: one line or one batch */
 
   return 0; /* convenience return */
 }
@@ -720,8 +755,10 @@ cap_req(struct Client *sptr, const char *caplist)
     if (!(cap = find_cap(&cl, &neg)) /* look up capability... */
         || (!neg && (cap->flags & CAPFL_PROHIBIT)) /* is it prohibited? */
         || (neg && (cap->flags & CAPFL_STICKY))) { /* is it sticky? */
-      sendcmdto_one(&me, CMD_CAP, sptr, "%s NAK :%s",
+      static char nak[1][BUFSIZE];
+      ircd_snprintf(0, nak[0], BUFSIZE, MSG_CAP " %s NAK :%s",
                     BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), caplist);
+      cap_reply(sptr, nak, 1);
       return 0; /* can't complete requested op... */
     }
 

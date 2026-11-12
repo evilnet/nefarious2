@@ -122,7 +122,43 @@ struct oper_verify_ctx {
   unsigned int cookie;            /**< Unique cookie to verify client identity */
   char name[NICKLEN + 1];         /**< Oper name for logging */
   struct ConfItem *aconf;         /**< Oper config block */
+  char label[64];                 /**< The OPER line's label ("" = none) */
 };
+
+/** labeled-response for the asynchronous answer: the OPER line was not
+ * ACKed (its label was kept in the context); its answer -- several lines
+ * on success, one on failure -- goes out under that label, in a
+ * labeled-response batch, as a synchronous OPER's would.  The connection's
+ * own label state (a later line's) is put back afterwards.  Nothing is
+ * labelled once labeled-response is no longer in use. */
+struct oper_label_state {
+  char label[64];
+  unsigned char responded;
+  struct BatchSave batches;   /* the connection's open batches, set aside */
+  int batch;
+};
+
+static void oper_answer_begin(struct Client *sptr, const char *label,
+                              struct oper_label_state *st)
+{
+  memcpy(st->label, cli_label(sptr), sizeof(st->label));
+  st->responded = cli_label_responded(sptr);
+  batch_save(sptr, &st->batches);   /* this answer is not the current line's */
+  ircd_strncpy(cli_label(sptr), label, sizeof(st->label));
+  cli_label_responded(sptr) = 0;
+  st->batch = label[0] ? labeled_batch_start(sptr) : 0;
+}
+
+static void oper_answer_end(struct Client *sptr, struct oper_label_state *st)
+{
+  if (st->batch)
+    labeled_batch_end(sptr);
+  else if (cli_label(sptr)[0] && !cli_label_responded(sptr))
+    send_labeled_ack(sptr);
+  batch_restore(sptr, &st->batches);   /* ends anything the answer left open */
+  memcpy(cli_label(sptr), st->label, sizeof(st->label));
+  cli_label_responded(sptr) = st->responded;
+}
 
 /**
  * Callback invoked when async OPER password verification completes.
@@ -132,6 +168,7 @@ static void oper_password_verified(int result, void *arg)
 {
   struct oper_verify_ctx *ctx = arg;
   struct Client *sptr;
+  struct oper_label_state st;
 
   /* Look up client by fd */
   if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
@@ -156,6 +193,7 @@ static void oper_password_verified(int result, void *arg)
   ClearOperPending(sptr);
   cli_opercookie(sptr) = 0;
 
+  oper_answer_begin(sptr, ctx->label, &st);
   if (result == CRYPT_VERIFY_MATCH) {
     /* Password matched - complete OPER */
     if (MyUser(sptr)) {
@@ -165,6 +203,7 @@ static void oper_password_verified(int result, void *arg)
         sendto_opmask_butone_global(&me, SNO_OLDREALOP,
             "Failed OPER attempt by %s (%s@%s) (attach failed after async)",
             cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost);
+        oper_answer_end(sptr, &st);
         MyFree(ctx);
         return;
       }
@@ -183,6 +222,7 @@ static void oper_password_verified(int result, void *arg)
     Debug((DEBUG_INFO, "oper_password_verified: OPER failed for %s",
            cli_name(sptr)));
   }
+  oper_answer_end(sptr, &st);
 
   MyFree(ctx);
 }
@@ -448,12 +488,18 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     ctx->aconf = aconf;
     ircd_strncpy(ctx->name, name, NICKLEN + 1);
     ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
+    ctx->label[0] = '\0';
 
     if (ircd_crypt_verify_async(password, aconf->passwd,
                                  oper_password_verified, ctx) == 0) {
-      /* Async verification started */
+      /* Async verification started.  The answer is this line's: keep
+       * its label for it, and send no ACK now. */
       SetOperPending(sptr);
       cli_opercookie(sptr) = ctx->cookie;
+      if (cli_label(sptr)[0] && !cli_label_responded(sptr)) {
+        ircd_strncpy(ctx->label, cli_label(sptr), sizeof(ctx->label));
+        cli_label_responded(sptr) = 1;
+      }
       Debug((DEBUG_INFO, "can_oper: started async verification for %s",
              cli_name(sptr)));
       *_aconf = aconf;
@@ -545,7 +591,10 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     int result = can_oper(cptr, sptr, name, password, &aconf);
     if (result == -1) {
-      /* Sync verification succeeded */
+      /* Sync verification succeeded.  The answer is several lines (the
+       * MODE, 381, the snomask...): one labeled-response batch, closed
+       * by parse_client() when the line is done. */
+      labeled_batch_start(sptr);
       do_oper(cptr, sptr, aconf, 0);
       SetOperedLocal(sptr);
       ClearOperedRemote(sptr);

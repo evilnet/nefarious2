@@ -93,8 +93,13 @@ static char *reply_tags(struct Client *to, char *buf, size_t buflen)
     int pos = 0;
     int need_batch = feature_bool(FEAT_CAP_batch) &&
                      CapRecipientHas(to, CAP_BATCH) && cli_batch_id(to)[0];
+    /* A label answers one line or one batch: only the first line of a
+     * reply takes it (cli_label_responded), as the tag formatters do.  A
+     * reply of several lines belongs in a labeled-response batch, which
+     * its handler opens (labeled_batch_start()). */
     int need_label = !need_batch && feature_bool(FEAT_CAP_labeled_response) &&
-                     LabeledResponseInUse(to) && cli_label(to)[0];
+                     LabeledResponseInUse(to) && cli_label(to)[0] &&
+                     !cli_label_responded(to);
     int need_time = feature_bool(FEAT_CAP_server_time) &&
                     CapRecipientHas(to, CAP_SERVERTIME);
 

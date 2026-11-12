@@ -61,6 +61,7 @@
 #include "ircd_snprintf.h"
 #include "random.h"
 #include "ircd_string.h"
+#include "forwarded_label.h"
 #include "m_batch.h"
 #include "match.h"
 #include "metadata.h"
@@ -9482,6 +9483,24 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   if (!ghost_con || !temp_con)
     return -1;
 
+  /* What the ghost's Connection still holds of its OLD socket's protocol
+   * state -- the hold closed the socket (close_connection()) but none of
+   * this: an asynchronous LIST, a replay in progress, forwarded labels,
+   * an open client multiline batch, open batches, a label -- would go on
+   * on the reviving socket (the next ET_WRITE resumes LIST and replay
+   * into it).  It goes with the old socket: dropped now, while the ghost
+   * has no socket, nothing on the wire. */
+  if (cli_listing(ghost)) {
+    MyFree(cli_listing(ghost));
+    cli_listing(ghost) = NULL;
+  }
+  replay_forget(ghost);
+  fwd_label_cleanup(ghost);
+  multiline_discard_batch(ghost);
+  batch_end_all(ghost, 0);
+  cli_label(ghost)[0] = '\0';
+  cli_label_responded(ghost) = 0;
+
 #ifdef USE_SSL
   /* Gate: Refuse revival if ghost is in +Z channels and temp is plaintext.
    * A non-TLS connection cannot be in SSL-only channels. */
@@ -13914,7 +13933,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   } /* end YYXXX numeric scope */
 
   /* --- Step 9: Send welcome sequence to the alias client ---
-   * The client expects 001-005 + MOTD on connect. */
+   * The client expects 001-005 + MOTD on connect.  A labeled
+   * registration line is answered as on the fresh path (register_user()):
+   * one labeled batch over the burst, ended before the catch-up replay. */
+  labeled_batch_start(sptr);
   send_reply(sptr, RPL_WELCOME,
              feature_str(FEAT_NETWORK),
              feature_str(FEAT_PROVIDER) ? " via " : "",
@@ -13975,13 +13997,23 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * register_user() does for a fresh connection. */
   send_umode_signon(sptr);
 
-  /* Informational NOTE */
-  sendrawto_one(sptr,
-    ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s as alias on %s",
-    cli_name(&me), session->hs_sessid, cli_name(&me));
+  /* Informational NOTE (inside the registration line's labeled batch,
+   * when one is open) */
+  if (cli_batch_id(sptr)[0])
+    sendrawto_one(sptr,
+      "@batch=%s :%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s as alias on %s",
+      cli_batch_id(sptr), cli_name(&me), session->hs_sessid, cli_name(&me));
+  else
+    sendrawto_one(sptr,
+      ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s as alias on %s",
+      cli_name(&me), session->hs_sessid, cli_name(&me));
 
   /* --- Step 10: Send channel state (JOINs, TOPICs, NAMES) --- */
   bounce_send_channel_state(sptr);
+
+  /* The registration line's answer ends here (the replay is not part of
+   * it, and a page that pauses would outlive the batch). */
+  labeled_batch_end(sptr);
 
   /* Auto-replay missed messages for legacy clients.
    * Clients with draft/chathistory do their own replay via CHATHISTORY command.

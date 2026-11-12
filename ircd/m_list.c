@@ -417,6 +417,10 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  /* One labeled-response batch for the whole answer, RPL_LISTSTART
+   * included (a label answers one line or one batch); parse_client() ends
+   * it with the line, or the asynchronous LIST takes it over below. */
+  labeled_batch_start(sptr);
   send_reply(sptr, RPL_LISTSTART);
 
   if (!show_channels)
@@ -433,29 +437,19 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * while list_next_channels() sends into it, so a later line is
        * never nested in it nor disturbs it (send.c's nesting model). */
       cli_listing(sptr)->batch_id[0] = '\0';
-      if (MyConnect(sptr) && cli_label(sptr)[0] &&
-          feature_bool(FEAT_CAP_labeled_response) &&
-          LabeledResponseInUse(sptr) &&
-          feature_bool(FEAT_CAP_batch)) {
-        send_batch_start(sptr, "labeled-response");
+      if (cli_labeled_batch(sptr))
         batch_detach(sptr, cli_listing(sptr)->batch_id,
                      sizeof(cli_listing(sptr)->batch_id));
-      }
       list_next_channels(sptr);
       return 0;
     }
-    /* Sanity fail — sync path */
-    {
-      int lb = labeled_batch_start(sptr);
-      send_reply(sptr, RPL_LISTEND);
-      if (lb) labeled_batch_end(sptr);
-    }
+    /* Sanity fail — sync path (in the line's labeled batch) */
+    send_reply(sptr, RPL_LISTEND);
     return 0;
   }
 
-  /* Specific channel names — sync path */
+  /* Specific channel names — sync path (in the line's labeled batch) */
   {
-    int lb = labeled_batch_start(sptr);
     for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
     {
       chptr = FindChannel(name);
@@ -467,7 +461,6 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                    chptr->users - number_of_zombies(chptr), chptr->topic);
     }
     send_reply(sptr, RPL_LISTEND);
-    if (lb) labeled_batch_end(sptr);
   }
   return 0;
 }

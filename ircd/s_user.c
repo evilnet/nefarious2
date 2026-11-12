@@ -556,6 +556,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
   char             ip_base64[25];
   struct Shun*     ashun = NULL;
   int              res = 0;
+  int              catchup = 0;      /* start the catch-up replay at the end */
+  time_t           catchup_since = 0;
   struct SHostConf* sconf = NULL;
   struct Channel*  chptr;
   struct BouncerSession* auto_session = NULL;
@@ -780,8 +782,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
         if (IsSASLComplete(sptr) && IsIPChecked(ghost))
           IPcheck_login_refund(ghost, cli_user(ghost)->account);
 
+        /* labeled-response: the registration line is answered on the
+         * ghost, which now has the socket -- the mirror of the fresh
+         * path's batch.  The label was the temp's (its Connection); it
+         * goes with the line's answer. */
+        ircd_strncpy(cli_label(ghost), cli_label(sptr), sizeof(cli_label(ghost)));
+        cli_label_responded(ghost) = cli_label_responded(sptr);
+
         /* Free the temp client (no network messages) */
         bounce_free_temp_client(sptr);
+
+        labeled_batch_start(ghost);
 
         /* Send welcome sequence to the revived ghost.
          * Note: We can't use the normal register_user flow because
@@ -868,6 +879,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Replay channel state */
         bounce_send_channel_state(ghost);
 
+        /* The line's answer ends here: its labeled batch (and anything
+         * nested in it) closes, and its label is done with -- parse_client()
+         * does neither for a CPTR_KILLED line.  The catch-up replay comes
+         * after, outside it. */
+        batch_end_line(ghost);
+        send_labeled_ack(ghost);
+        cli_label(ghost)[0] = '\0';
+        cli_label_responded(ghost) = 0;
+
         /* Async auto-replay missed messages for legacy clients,
          * unless the user has disabled it via PERSISTENCE REPLAY SET
          * OFF on their active profile or account-global. */
@@ -891,7 +911,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * N token; other servers learn about it through BX C. */
     if ((auto_resumed == BOUNCE_RESUME_ALIAS_REMOTE
          || auto_resumed == BOUNCE_RESUME_ALIAS_LOCAL) && auto_session) {
-      int alias_result = bounce_setup_local_alias(sptr, auto_session);
+      int alias_result;
+
+      /* The registration line's labeled batch opens before anything is
+       * sent on this path (the IPcheck notice in the alias setup), as on
+       * the fresh path; bounce_setup_local_alias() ends it before its
+       * catch-up replay. */
+      labeled_batch_start(sptr);
+      alias_result = bounce_setup_local_alias(sptr, auto_session);
       if (alias_result == 0)
         return 0;  /* Alias setup complete — client is alive */
       /* Alias setup failed for an account with a live primary already
@@ -1034,6 +1061,18 @@ int register_user(struct Client *cptr, struct Client *sptr)
       return exit_client(cptr, sptr, &me, "Registration failed: no nickname");
     }
 
+    /* labeled-response: the line that completed registration (CAP END,
+     * NICK or USER, with a label) is answered by everything from here on
+     * -- the shun notice, 001 ... the MOTD, the channel state -- many
+     * lines: one labeled batch, opened right after the last early return
+     * and closed by parse_client() when the line is done (or before the
+     * catch-up replay below, which is not the line's answer).  Batches the
+     * burst opens (metadata, authtoken, persistence) nest in it.  Nothing
+     * is opened when registration completes later (DNS, ident, iauth): no
+     * line is being answered then.  Mirrored on the bouncer fast paths
+     * (the revive below, bounce_setup_local_alias()). */
+    labeled_batch_start(sptr);
+
     if ((ashun = shun_lookup(sptr, 0))) {
        sendto_opmask_butone_global(&me, SNO_GLINE, "Shun active for %s%s",
                           IsUnknown(sptr) ? "Unregistered Client ":"",
@@ -1162,11 +1201,16 @@ int register_user(struct Client *cptr, struct Client *sptr)
         bounce_send_channel_state(sptr);
 
       /* Async auto-replay for legacy clients (no chathistory CAP),
-       * unless the user has disabled it via PERSISTENCE REPLAY. */
+       * unless the user has disabled it via PERSISTENCE REPLAY.  Started
+       * at the end of the registration, after the labeled batch of the
+       * line ends: the replay is not that line's answer, and a page that
+       * pauses on the sendQ would outlive the batch. */
       if ((!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
            || cli_attach_cursor(sptr)[0])
-          && persistence_replay_enabled_for(sptr))
-        replay_start_catchup(sptr, saved_since_time, 0);
+          && persistence_replay_enabled_for(sptr)) {
+        catchup = 1;
+        catchup_since = saved_since_time;
+      }
     }
   }
   else {
@@ -1408,6 +1452,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
    * produce a phantom second "online" notification. */
   if (!IsBouncerAlias(sptr))
     check_status_watch(sptr, RPL_LOGON);
+
+  if (catchup) {
+    labeled_batch_end(sptr);
+    replay_start_catchup(sptr, catchup_since, 0);
+  }
 
   return 0;
 }

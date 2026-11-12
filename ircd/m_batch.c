@@ -730,6 +730,24 @@ clear_multiline_batch(struct Connection *con)
   con_ml_is_notice(con) = -1;
 }
 
+/** Discard @a cptr's open client multiline batch, if any, silently: the
+ * lines collected so far are freed and never delivered, nothing is sent,
+ * nothing is left to resume or to time out with a FAIL BATCH TIMEOUT
+ * later (the dead-batch reference is not kept either).  For a socket that
+ * is gone (a held ghost's, at its revive) and for draft/multiline going
+ * inert (a CAP change). */
+void multiline_discard_batch(struct Client *cptr)
+{
+  struct Connection *con;
+
+  if (!cptr || !MyConnect(cptr))
+    return;
+  con = cli_connect(cptr);
+  if (con_ml_batch_id(con)[0])
+    clear_multiline_batch(con);
+  con_ml_dead_batch_id(con)[0] = '\0';
+}
+
 /** Check for and handle client batch timeout.
  * Called periodically from check_pings().
  * @param[in] cptr Client to check.

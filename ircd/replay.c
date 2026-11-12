@@ -1390,6 +1390,27 @@ void replay_leg_done(struct Client *sptr, unsigned long seq, const char *target,
 /** Cancel and clean up any in-progress replay.
  * Called on disconnect, new CHATHISTORY, new replay, etc.
  */
+void replay_forget(struct Client *sptr)
+{
+  int i;
+
+  while (cli_replay(sptr)) {
+    struct ReplayState *rs = cli_replay(sptr);
+
+    cli_replay(sptr) = rs->resume;
+    if (rs->messages)
+      history_free_messages(rs->messages);
+    if (rs->chan_names) {
+      for (i = 0; i < rs->num_channels; i++)
+        MyFree(rs->chan_names[i]);
+      MyFree(rs->chan_names);
+    }
+    if (rs->pm_targets)
+      history_free_targets(rs->pm_targets);
+    MyFree(rs);
+  }
+}
+
 void replay_cancel(struct Client *sptr)
 {
   struct ReplayState *rs = cli_replay(sptr);

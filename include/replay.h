@@ -166,6 +166,11 @@ extern void replay_continue(struct Client *sptr);
  */
 extern void replay_cancel(struct Client *sptr);
 
+/** Drop every replay of @a sptr (and any suspended behind it) without
+ * anything on the wire: its socket is gone (a held ghost revived on a new
+ * socket, bounce_revive()). */
+extern void replay_forget(struct Client *sptr);
+
 /** A federated catch-up leg's page arrived (m_chathistory.c's
  * complete_replay_leg; W5 Push F, I-2): @a msgs (@a count rows, owned from
  * here; NULL/0 for none) for channel @a target with @a flags

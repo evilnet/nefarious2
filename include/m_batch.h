@@ -32,6 +32,9 @@ extern void send_multiline_fallback(struct Client *sptr, struct Client *to,
  */
 extern void s2s_multiline_cleanup_link(struct Client *link);
 
+/** Discard @a cptr's open client multiline batch silently (m_batch.c). */
+extern void multiline_discard_batch(struct Client *cptr);
+
 /** Free any S2S multiline batches whose original sender is exiting.
  * Called from exit_one_client for every exiting user, so a batch whose
  * sender QUITs mid-stream doesn't leave batch->sender dangling for
