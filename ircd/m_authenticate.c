@@ -223,8 +223,12 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       return sasl_continue(cptr, parv[1]);
     }
     /* New session — sasl_start() returns 0 on success, -1 if mechanism
-     * is unsupported (fall through to IAuth/P10 for unknown mechanisms) */
-    if (sasl_start(cptr, parv[1]) == 0)
+     * is unsupported (fall through to IAuth/P10 for unknown mechanisms).
+     * Only when no exchange is in flight: a cookie with no local session is
+     * an IAuth or services exchange (begun while Keycloak was unhealthy),
+     * and this line is its data -- taken as a new local exchange it would
+     * pass the mechanism check above (only a cookie-less line is checked). */
+    if (!cli_saslcookie(cptr) && sasl_start(cptr, parv[1]) == 0)
       return 0;
     /* Fall through to IAuth/P10 if sasl_start returned -1 */
   }

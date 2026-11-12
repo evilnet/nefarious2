@@ -3592,6 +3592,41 @@ static void reauth_refresh_keeps_minus_x(void **state)
   bed_features = 0;
 }
 
+/** A logged-in client's OAUTHBEARER that went to services (Keycloak was
+ * unhealthy: a cookie, no local session), then Keycloak back: its next
+ * AUTHENTICATE line is that exchange's data, never a new local exchange
+ * -- "PLAIN" there passed the OAUTHBEARER-only check, which reads only a
+ * line with no cookie.  The account cannot change either way: credentials
+ * for another account, had they reached a local login, are refused by
+ * the rule (reauth_other_account_refused). */
+static void reauth_relayed_exchange_takes_no_local_exchange(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1], data[300];
+  struct Client *c;
+  struct fake *f;
+  struct login_snap was;
+  int requests;
+
+  sasl_init_once();
+  c = new_logged_in(106, "xav", "xavier", user_id("xavier", xid), 1);
+  f = fake_of(c);
+  snap(c, &was);
+  cli_saslcookie(c) = 5151;                /* the relayed exchange */
+  cli_saslstart(c) = CurrentTime;
+  SetSASLReauth(c);
+  requests = kc_requests;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_null(cli_saslsession(c));         /* no local exchange */
+  assert_false(has_numeric(f, ERR_SASLALREADY));
+  plain_b64("yvonne", "yvonnepw", data);
+  assert_int_equal(authenticate(c, data), 0);
+  assert_null(cli_saslsession(c));
+  assert_int_equal(kc_requests, requests); /* Keycloak never asked */
+  assert_false(has_numeric(f, RPL_LOGGEDIN));
+  assert_int_equal(cli_saslcookie(c), 5151);
+  assert_login_unchanged(c, &was);
+}
+
 /** Before registration a login is not applied yet: a client may log in
  * again with OAUTHBEARER, as another account, and registration takes the
  * last login (SASL 3.1; the REGISTER cases above pin the rest). */
@@ -3679,6 +3714,7 @@ int main(void)
     cmocka_unit_test_setup(reauth_refresh_record, setup),
     cmocka_unit_test_setup(reauth_casemapping_only_names_refused, setup),
     cmocka_unit_test_setup(reauth_refresh_keeps_minus_x, setup),
+    cmocka_unit_test_setup(reauth_relayed_exchange_takes_no_local_exchange, setup),
 #endif
   };
 
