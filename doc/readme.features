@@ -1970,6 +1970,25 @@ accounts created by REGISTER while the policy is on (which carry the
 required action until the verification link is followed) are held to
 verification.
 
+Whatever the policy, REGISTER accepts an account name of nick characters
+only, and refuses with FAIL REGISTER BAD_ACCOUNT_NAME, before Keycloak is
+asked, a name holding a character the server's casemapping folds together
+with another character that is not its own letter case: with the rfc1459
+casemapping, [ \ ] ^ and { | } ~.  The server compares account names
+under its casemapping (sessions, history, metadata), but Keycloak's check
+for an existing name folds letter case only, so "name{" could be created
+beside an existing "name[" and the two would be one account to the
+server.  When Keycloak refuses the create itself, the client is told why:
+
+  ACCOUNT_EXISTS           the account name exists (HTTP 409)
+  UNACCEPTABLE_EMAIL       the email address belongs to another account (409)
+  BAD_ACCOUNT_NAME         Keycloak refused the account name (400)
+  INVALID_EMAIL            Keycloak refused the email address (400)
+  WEAK_PASSWORD            Keycloak refused the password or credential (400)
+  INVALID_PARAMS           Keycloak refused the create for another reason (400)
+  TEMPORARILY_UNAVAILABLE  Keycloak could not be reached or used (5xx, a
+                           timeout, the service account's token)
+
 REGISTER_THROTTLE_LIMIT
  * Type: integer
  * Default: 3

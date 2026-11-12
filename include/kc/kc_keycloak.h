@@ -28,7 +28,12 @@ enum kc_error {
     KC_TOKEN_ERROR      = -8,   /* Token refresh/acquisition failed */
     KC_INVALID_RESPONSE = -9,   /* Server returned unexpected response */
     KC_UNVERIFIED       = -10,  /* credentials OK-shaped but account not fully set up (pending required action) */
-    KC_CONFLICT         = -11   /* create: username/email already exists (HTTP 409) */
+    KC_CONFLICT         = -11,  /* create: the username already exists (HTTP 409) */
+    KC_CONFLICT_EMAIL   = -12,  /* create: the email is another user's (HTTP 409) */
+    KC_BAD_USERNAME     = -13,  /* create: Keycloak refused the username (HTTP 400) */
+    KC_BAD_EMAIL        = -14,  /* create: Keycloak refused the email (HTTP 400) */
+    KC_BAD_PASSWORD     = -15,  /* create: Keycloak refused the credential (HTTP 400) */
+    KC_REJECTED         = -16   /* create: refused (HTTP 400), for no reason above */
 };
 
 /* Keycloak configuration */
@@ -211,9 +216,12 @@ struct kc_user_create_req {
  * req->cred_data, and req->secret_data are all REQUIRED (see the struct's
  * field comments) — NULL in any of them (or a NULL req/cb) returns -1
  * without making a request; there is no credential-less create path.
- * The callback receives KC_CONFLICT (not KC_USER_EXISTS) on HTTP 409, and
- * on success the new user's id from the 201's Location header (no extra
- * request), or NULL if the answer named none. */
+ * The callback receives on success the new user's id from the 201's
+ * Location header (no extra request), or NULL if the answer named none;
+ * on a refusal what Keycloak's body says (kc_classify_create_error()):
+ * KC_CONFLICT (not KC_USER_EXISTS) or KC_CONFLICT_EMAIL on HTTP 409,
+ * KC_BAD_USERNAME / KC_BAD_EMAIL / KC_BAD_PASSWORD / KC_REJECTED on 400,
+ * KC_ERROR otherwise. */
 int kc_user_create_full(const struct kc_user_create_req *req,
                         kc_create_cb cb, void *data);
 

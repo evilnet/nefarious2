@@ -724,12 +724,13 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
                                shown, ctx->url ? ctx->url : "?");
                 ctx->cb.create(KC_SUCCESS, NULL, ctx->cb_data);
             }
-        } else if (resp->status_code == 409) {
-            /* username/email already exists — kc_user_create_full and its
-             * thin-wrapper kc_user_create share this dispatch arm. */
-            ctx->cb.create(KC_CONFLICT, NULL, ctx->cb_data);
         } else {
-            ctx->cb.create(KC_ERROR, NULL, ctx->cb_data);
+            /* Refused: what the status and body say (409: the username or
+             * the email exists; 400: Keycloak refused the username, email
+             * or credential), else KC_ERROR -- kc_user_create_full and its
+             * thin-wrapper kc_user_create share this dispatch arm. */
+            ctx->cb.create(kc_classify_create_error(resp->status_code, resp->json),
+                           NULL, ctx->cb_data);
         }
         break;
     }

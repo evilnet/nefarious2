@@ -373,7 +373,8 @@ static void reg_id_lookup_cb(int result, const struct kc_user *user,
 }
 
 /** Stage 1 result: the account create either landed or did not.
- * @param[in] result KC_SUCCESS, KC_CONFLICT, or another kc_error code.
+ * @param[in] result KC_SUCCESS, or why Keycloak refused the create
+ *   (kc_classify_create_error()), or another kc_error code.
  * @param[in] id The new user's Keycloak id as the answer names it, or NULL.
  * @param[in] data The struct reg_ctx.
  */
@@ -383,13 +384,42 @@ static void reg_create_cb(int result, const char *id, void *data)
   struct Client *acptr = reg_ctx_client(ctx);
 
   if (result != KC_SUCCESS) {
+    /* A refusal of what was sent is the client's to fix, and says what:
+     * the draft/account-registration code for it where one fits, and
+     * INVALID_PARAMS for a refusal Keycloak gave no reason we can name.
+     * Only a failure to reach or use Keycloak (5xx, a timeout, a token
+     * that would not come) is TEMPORARILY_UNAVAILABLE. */
     if (acptr) {
-      if (result == KC_CONFLICT)
+      switch (result) {
+      case KC_CONFLICT:
         send_fail(acptr, "REGISTER", "ACCOUNT_EXISTS", ctx->account,
                   "Account already exists");
-      else
+        break;
+      case KC_CONFLICT_EMAIL:
+        send_fail(acptr, "REGISTER", "UNACCEPTABLE_EMAIL", ctx->account,
+                  "That email address is already used by another account");
+        break;
+      case KC_BAD_USERNAME:
+        send_fail(acptr, "REGISTER", "BAD_ACCOUNT_NAME", ctx->account,
+                  "The account server does not accept this account name");
+        break;
+      case KC_BAD_EMAIL:
+        send_fail(acptr, "REGISTER", "INVALID_EMAIL", ctx->account,
+                  "The account server does not accept this email address");
+        break;
+      case KC_BAD_PASSWORD:
+        send_fail(acptr, "REGISTER", "WEAK_PASSWORD", ctx->account,
+                  "The account server does not accept this password");
+        break;
+      case KC_REJECTED:
+        send_fail(acptr, "REGISTER", "INVALID_PARAMS", ctx->account,
+                  "The account server refused this registration");
+        break;
+      default:
         send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
                   "Registration is temporarily unavailable");
+        break;
+      }
     }
     reg_ctx_free(ctx);
     return;
@@ -493,6 +523,40 @@ static void reg_search_cb(int result, const struct kc_user *user, void *data)
 
 #endif /* USE_LIBKC */
 
+/** The nick characters (the only ones an account name can hold) the ircd's
+ * casemapping folds together with another character that is not the same
+ * ASCII letter in the other case: under rfc1459 "[\\]^" and "{|}~".  Read
+ * from the casemapping table itself (ToLower()), never written out by
+ * hand.
+ * @return Their set, NUL-terminated, built once. */
+static const char *reg_folding_chars(void)
+{
+  static char set[257];
+  static int built;
+  int b, d, n = 0;
+
+  if (built)
+    return set;
+  for (b = 1; b < 256; b++)
+    for (d = 1; d < 256 && IsNickChar((char)b); d++) {
+      int letters = ((b | 0x20) >= 'a' && (b | 0x20) <= 'z'
+                     && (b | 0x20) == (d | 0x20));
+      if (d != b && !letters && ToLower((char)b) == ToLower((char)d)) {
+        set[n++] = (char)b;
+        break;
+      }
+    }
+  set[n] = '\0';
+  built = 1;
+  return set;
+}
+
+/** Is \a c one of reg_folding_chars()? */
+static int reg_folds_apart(char c)
+{
+  return c && strchr(reg_folding_chars(), c) != NULL;
+}
+
 /** m_register - Handle REGISTER command from local client.
  *
  * parv[0] = sender prefix
@@ -576,6 +640,24 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (!IsNickChar(*p)) {
       send_fail(sptr, "REGISTER", "BAD_ACCOUNT_NAME", account,
                 "Account name contains invalid characters");
+      return 0;
+    }
+  }
+
+  /* ... and one the ircd tells apart from every other account name as
+   * Keycloak does: no character the casemapping folds together with
+   * another character that is not its own letter case (reg_folds_apart()).
+   * Keycloak's "is the name taken?" folds letter case only, so "victim{"
+   * would be created beside an existing "victim[", and the ircd -- which
+   * compares account names under its casemapping -- would hold the two as
+   * one account: sessions, history and metadata keys. */
+  for (p = account; *p; p++) {
+    if (reg_folds_apart(*p)) {
+      char text[128];
+      ircd_snprintf(0, text, sizeof(text), "Account names may not contain "
+                    "any of %s: the server does not tell them apart",
+                    reg_folding_chars());
+      send_fail(sptr, "REGISTER", "BAD_ACCOUNT_NAME", account, text);
       return 0;
     }
   }

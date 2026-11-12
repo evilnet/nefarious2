@@ -672,8 +672,7 @@ static void pend_deliver_at(int i, int res)
     break;
   case P_CREATED:                  /* the id: the user's, as grants give it */
     user_sub(p.user, sub, sizeof(sub));
-    ((kc_create_cb)p.cb)(ok ? KC_SUCCESS : res == KC_CONFLICT ? KC_CONFLICT : KC_ERROR,
-                         ok && create_names_id ? sub : NULL, p.data);
+    ((kc_create_cb)p.cb)(res, ok && create_names_id ? sub : NULL, p.data);
     break;
   default:
     break;
@@ -2437,6 +2436,87 @@ static void register_success_mid_sasl_leaves_it_abortable(void **state)
 }
 
 /* ------------------------------------------------------------------ */
+/* Names the ircd folds together; what Keycloak refused                */
+/* ------------------------------------------------------------------ */
+
+/** An account name is refused before Keycloak is asked when it holds a
+ * character the ircd's casemapping folds together with another that is
+ * not its letter case: with rfc1459's table, [ \ ] ^ and { | } ~ --
+ * Keycloak's "is the name taken?" folds letter case only, so "victim{"
+ * would be made beside "victim[" and the ircd would hold the two as one.
+ * Every other nick character, letters in either case included, is asked
+ * about. */
+static void register_refuses_names_the_casemapping_folds(void **state)
+{
+  static const char folds[] = "[\\]^{|}~";
+  struct Client *c;
+  struct fake *f;
+  int b, refused = 0;
+
+  sasl_init_once();
+  c = new_client(94, "fw", 0, REG_KEEPS);
+  f = fake_of(c);
+  kc_mode = KC_LATER;
+  for (b = 1; b < 256; b++) {
+    char name[8];
+    int n;
+
+    if (!IsNickChar((char)b))
+      continue;
+    snprintf(name, sizeof(name), "ab%c", (char)b);
+    f->fail_code[0] = '\0';
+    ntlog = 0;
+    n = kc_requests;
+    assert_int_equal(register_as(c, name, "*", "longpassword"), 0);
+    if (strchr(folds, b)) {
+      if (strcmp(f->fail_code, "BAD_ACCOUNT_NAME") || kc_requests != n)
+        fail_msg("\"%s\" was not refused", name);
+      refused++;
+    } else {
+      if (kc_requests != n + 1)
+        fail_msg("\"%s\" was refused (%s)", name, f->fail_code);
+      pend_deliver_kind(P_USER, KC_SUCCESS);     /* taken: the REGISTER ends */
+      assert_string_equal(f->fail_code, "ACCOUNT_EXISTS");
+    }
+  }
+  assert_int_equal(refused, 8);
+}
+
+/** What Keycloak refused the create for (kc_classify_create_error()) is
+ * what the client is told: the draft/account-registration code for the
+ * reason, INVALID_PARAMS for a refusal it named no reason for, and
+ * TEMPORARILY_UNAVAILABLE only when Keycloak could not be used. */
+static void register_tells_why_keycloak_refused(void **state)
+{
+  static const struct { int res; const char *code; } cases[] = {
+    { KC_CONFLICT,       "ACCOUNT_EXISTS" },
+    { KC_CONFLICT_EMAIL, "UNACCEPTABLE_EMAIL" },
+    { KC_BAD_USERNAME,   "BAD_ACCOUNT_NAME" },
+    { KC_BAD_EMAIL,      "INVALID_EMAIL" },
+    { KC_BAD_PASSWORD,   "WEAK_PASSWORD" },
+    { KC_REJECTED,       "INVALID_PARAMS" },
+    { KC_ERROR,          "TEMPORARILY_UNAVAILABLE" },
+    { KC_TIMEOUT,        "TEMPORARILY_UNAVAILABLE" },
+    { KC_TOKEN_ERROR,    "TEMPORARILY_UNAVAILABLE" },
+  };
+  size_t i;
+
+  sasl_init_once();
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    struct Client *c = new_client(95, "kw", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+
+    kc_mode = KC_LATER;
+    assert_int_equal(register_as(c, "nkw", "a@b.test", "longpassword"), 0);
+    pend_deliver_kind(P_USER, KC_NOT_FOUND);
+    pend_deliver_kind(P_CREATED, cases[i].res);
+    assert_string_equal(f->fail_code, cases[i].code);
+    assert_false(IsSASLComplete(c));
+    assert_int_equal(cli_regcookie(c), 0);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* A request that cannot be started                                    */
 /* ------------------------------------------------------------------ */
 
@@ -2533,6 +2613,8 @@ int main(void)
     cmocka_unit_test_setup(register_client_gone_before_the_id, setup),
     cmocka_unit_test_setup(verify_on_does_not_log_in, setup),
     cmocka_unit_test_setup(register_success_mid_sasl_leaves_it_abortable, setup),
+    cmocka_unit_test_setup(register_refuses_names_the_casemapping_folds, setup),
+    cmocka_unit_test_setup(register_tells_why_keycloak_refused, setup),
 #endif
   };
 

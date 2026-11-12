@@ -25,4 +25,20 @@
  * NULL json => KC_FORBIDDEN. */
 int kc_classify_grant_error(json_t *json);
 
+/* Classify a user create's refusal (the admin API's POST .../users) by its
+ * HTTP status and JSON body.  409 (a user exists): KC_CONFLICT_EMAIL when
+ * the field is "email", or with no field the message names the email and
+ * not the username; else KC_CONFLICT.  400 (Keycloak refused the
+ * representation): each error object -- the body, and each in an "errors"
+ * list -- is read by its "field" when it has one (user-profile validation:
+ * "username", "email", a password/credential field; any other field names
+ * nothing), else by its message ("errorMessage", "error",
+ * "error_description"), where the password wins over the email and the
+ * email over the username (a password-policy message may mention the
+ * username).  Across several errors the username wins, then the email,
+ * then the password: KC_BAD_USERNAME / KC_BAD_EMAIL / KC_BAD_PASSWORD,
+ * else KC_REJECTED.  Any other status: KC_ERROR (5xx, 401/403: not the
+ * client's to fix). */
+int kc_classify_create_error(long status, json_t *json);
+
 #endif /* KC_ERROR_CLASSIFY_H */
