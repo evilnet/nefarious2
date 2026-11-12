@@ -64,3 +64,62 @@ int ml_split_lines(struct SLink *lines, size_t room)
   }
   return count;
 }
+
+/** Replace the text of one batch line, keeping its concat flag.
+ * @param[in,out] line The line (SLink value.cp: flag byte + text).
+ * @param[in] text The new text; may point anywhere but into the line. */
+void ml_line_set_text(struct SLink *line, const char *text)
+{
+  size_t len = strlen(text);
+  char *copy = (char *)MyMalloc(len + 2);
+
+  copy[0] = line->value.cp[0];
+  memcpy(copy + 1, text, len + 1);
+  MyFree(line->value.cp);
+  line->value.cp = copy;
+}
+
+/** Run a send check over every line of a multiline batch that has text,
+ * in order, as each line would be checked as a single message: a line
+ * the check transforms takes the new text (its concat flag kept); the
+ * first line it refuses stops the walk and refuses the batch, the lines
+ * after it untouched.  A blank line is no message of its own (it is
+ * never sent as one) and is not checked.
+ * @param[in,out] lines The batch's line list.
+ * @param[in] check The check.
+ * @param[in] ctx Passed to \a check.
+ * @return 0 when every line passed, -1 when one was refused.
+ */
+int ml_lines_check(struct SLink *lines, ml_line_check check, void *ctx)
+{
+  struct SLink *lp;
+
+  for (lp = lines; lp; lp = lp->next) {
+    const char *text = lp->value.cp + 1;
+    const char *out;
+
+    if (!*text)
+      continue;
+    if (!(out = check(text, ctx)))
+      return -1;
+    if (out != text)
+      ml_line_set_text(lp, out);
+  }
+  return 0;
+}
+
+/** A batch's size as multiline_add_message() counts it while the batch
+ * is built: the lines' text, and one byte for each line feed that joins
+ * a line to the one before (a concat line joins with none).
+ * @param[in] lines The batch's line list.
+ * @return The byte count. */
+int ml_lines_bytes(const struct SLink *lines)
+{
+  const struct SLink *lp;
+  int total = 0;
+
+  for (lp = lines; lp; lp = lp->next)
+    total += (int)strlen(lp->value.cp + 1)
+             + ((lp != lines && !lp->value.cp[0]) ? 1 : 0);
+  return total;
+}

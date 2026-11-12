@@ -206,6 +206,88 @@ static void test_colour_code_kept_whole(void **state)
   drop(l);
 }
 
+/* ml_lines_check(): the per-line send checks of a multiline batch. */
+
+/* A check that refuses a line holding 'X', upper-cases a line holding
+ * '!' (a transform: a copy, like StripColor's), and counts its calls. */
+static int calls;
+static char upper[64];
+static const char *check_x(const char *text, void *ctx)
+{
+  size_t i;
+  (void)ctx;
+  calls++;
+  if (strchr(text, 'X'))
+    return NULL;
+  if (strchr(text, '!')) {
+    for (i = 0; text[i] && i < sizeof(upper) - 1; i++)
+      upper[i] = (text[i] >= 'a' && text[i] <= 'z') ? text[i] - 32 : text[i];
+    upper[i] = '\0';
+    return upper;
+  }
+  return text;
+}
+
+static void test_check_blank_lines_not_checked(void **state)
+{
+  const char *text[] = { "a", "", "b", "" };
+  int concat[] = { 0, 0, 0, 0 };
+  struct SLink *l = batch(4, concat, text);
+  (void)state;
+
+  calls = 0;
+  assert_int_equal(0, ml_lines_check(l, check_x, NULL));
+  assert_int_equal(2, calls);            /* only the lines with text */
+  assert_string_equal("a\n\nb\n", joined(l));
+  drop(l);
+}
+
+static void test_check_transform_keeps_flag(void **state)
+{
+  const char *text[] = { "one", "two!", "three!" };
+  int concat[] = { 0, 1, 0 };
+  struct SLink *l = batch(3, concat, text);
+  (void)state;
+
+  calls = 0;
+  assert_int_equal(0, ml_lines_check(l, check_x, NULL));
+  assert_string_equal("TWO!", l->next->value.cp + 1);
+  assert_int_equal(1, l->next->value.cp[0]);          /* concat kept */
+  assert_string_equal("THREE!", l->next->next->value.cp + 1);
+  assert_int_equal(0, l->next->next->value.cp[0]);
+  drop(l);
+}
+
+static void test_check_first_refusal_stops(void **state)
+{
+  const char *text[] = { "ok!", "bad X", "later!" };
+  int concat[] = { 0, 0, 0 };
+  struct SLink *l = batch(3, concat, text);
+  (void)state;
+
+  calls = 0;
+  assert_int_equal(-1, ml_lines_check(l, check_x, NULL));
+  assert_int_equal(2, calls);                         /* stopped at "bad X" */
+  assert_string_equal("later!", l->next->next->value.cp + 1);  /* untouched */
+  drop(l);
+}
+
+static void test_lines_bytes(void **state)
+{
+  /* "ab" + LF + "cd" (concat: no LF) + "e" + LF + "" = 2+1+2+2+1+1+0 */
+  const char *text[] = { "ab", "cde", "f", "" };
+  int concat[] = { 0, 1, 0, 0 };
+  struct SLink *l = batch(4, concat, text);
+  (void)state;
+
+  assert_int_equal(2 + 3 + 1 + 1 + 1 + 0, ml_lines_bytes(l));
+  ml_line_set_text(l->next, "c");                     /* a shorter line */
+  assert_int_equal(2 + 1 + 1 + 1 + 1, ml_lines_bytes(l));
+  assert_int_equal(1, l->next->value.cp[0]);
+  assert_int_equal(0, ml_lines_bytes(NULL));
+  drop(l);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -215,6 +297,10 @@ int main(void)
     cmocka_unit_test(test_empty_and_no_room),
     cmocka_unit_test(test_utf8_boundary),
     cmocka_unit_test(test_colour_code_kept_whole),
+    cmocka_unit_test(test_check_blank_lines_not_checked),
+    cmocka_unit_test(test_check_transform_keeps_flag),
+    cmocka_unit_test(test_check_first_refusal_stops),
+    cmocka_unit_test(test_lines_bytes),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

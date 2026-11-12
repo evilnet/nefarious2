@@ -68,6 +68,7 @@
 #include "ml_fallback.h"
 #include "ml_route.h"
 #include "paste_listener.h"
+#include "persistence_profile.h"
 #include "webpush.h"
 #include "webpush_store.h"
 
@@ -1129,6 +1130,175 @@ ml_channel_links(struct Channel *chptr, struct Client *skip_link,
   return n;
 }
 
+/** Give the sender's answers to a refused batch the batch's label.
+ *
+ * The label of a labeled batch rides on its BATCH + line; it is kept in
+ * con_ml_label for the echo, the batch's answer.  A refused batch has no
+ * echo: its refusal (the numeric its lines would get as single messages)
+ * is the answer, and goes out while the BATCH - line is parsed, with no
+ * label of its own.  Arm the batch's label as that line's label while the
+ * send checks run, so the first answer carries it -- and a refusal that
+ * answers nothing (a NOTICE, SILENCE) is answered ACK by the parser.
+ * Nothing is armed when the BATCH - line has a label of its own.
+ * @return Non-zero when armed (ml_label_disarm() undoes it). */
+static int
+ml_label_arm(struct Client *sptr)
+{
+  struct Connection *con = cli_connect(sptr);
+
+  if (cli_label(sptr)[0] || !con_ml_label(con)[0])
+    return 0;
+  ircd_strncpy(cli_label(sptr), con_ml_label(con), sizeof(con->con_label));
+  cli_label_responded(sptr) = 0;
+  return 1;
+}
+
+/** Undo ml_label_arm() for an accepted batch: its echo carries the label. */
+static void
+ml_label_disarm(struct Client *sptr, int armed)
+{
+  if (armed) {
+    cli_label(sptr)[0] = '\0';
+    cli_label_responded(sptr) = 0;
+  }
+}
+
+/** What the per-line checks of ml_batch_refused() need (ml_lines_check). */
+struct ml_check_ctx {
+  struct Client *sptr;
+  struct Channel *chptr;
+  int is_notice;
+  int utf8;                 /**< worst relay_utf8_check() result seen */
+  char buf[BUFSIZE];        /**< the sanitised copy of the current line */
+};
+
+/** UTF8ONLY for one line (relay_utf8_check), answering nothing: strict
+ * mode refuses the line, warn mode hands back the sanitised copy. */
+static const char *
+ml_check_utf8(const char *text, void *v)
+{
+  struct ml_check_ctx *ctx = (struct ml_check_ctx *)v;
+  int r = relay_utf8_check(text, ctx->buf, sizeof(ctx->buf));
+
+  if (r > ctx->utf8)
+    ctx->utf8 = r;
+  if (r == RELAY_UTF8_REFUSED)
+    return NULL;
+  return r == RELAY_UTF8_SANITISED ? ctx->buf : text;
+}
+
+/** A channel's text checks for one line (relay_channel_text), answering
+ * the refusal as the line's command would.  One target: the batch's (a
+ * multi-target PRIVMSG is no batch). */
+static const char *
+ml_check_channel_text(const char *text, void *v)
+{
+  struct ml_check_ctx *ctx = (struct ml_check_ctx *)v;
+
+  return relay_channel_text(ctx->sptr, ctx->chptr, text, text, 1,
+                            ctx->is_notice);
+}
+
+/** The send checks of a multiline batch: exactly the checks its lines get
+ * as single-line PRIVMSGs or NOTICEs from the same sender to the same
+ * target, made once, here at the origin, before anything is delivered,
+ * echoed, stored, pushed or relayed -- with the single-line relay's own
+ * functions (ircd_relay.c), so the two cannot drift apart again.
+ *
+ * In the single-line relay's order:
+ *  1. UTF8ONLY, line by line (relay_utf8_check): one invalid line refuses
+ *     the batch in strict mode (FAIL <cmd> INVALID_UTF8, once); in warn
+ *     mode each invalid line is sanitised, and the one WARN goes out when
+ *     the batch is accepted (*\a utf8_warn).
+ *  2. The target exists: ERR_NOSUCHCHANNEL / ERR_NOSUCHNICK for a PRIVMSG
+ *     batch; a NOTICE batch is dropped silently, as NOTICE is.
+ *  3. A channel: relay_channel_refused() (may speak there -- +n, +m,
+ *     voice, bans, +M, +r, +O, +a, +Z by this connection; the target
+ *     limit; +N), then relay_channel_text() line by line (+C, +c; +S
+ *     strips the line, and a line +S leaves empty refuses the batch).
+ *     A blank line is no message of its own and is not tested.
+ *     A user: relay_private_refused() (target limit, SILENCE, +R, +D,
+ *     +q), about the target user; its devices are served after.
+ *  4. The transforms can change the batch's size: it is counted again
+ *     and held to MULTILINE_MAX_BYTES, as at acceptance.
+ * One refused line refuses the whole batch: nothing of it goes anywhere.
+ * The refusal is the numeric (or FAIL) the single-line path sends, once
+ * for the batch, carrying the batch's label (the caller arms it,
+ * ml_label_arm()); a NOTICE
+ * batch is silent where NOTICE is.  No cooldown is charged (a refused
+ * batch delivered nothing; its BATCH + line paid the parser's fakelag,
+ * as a refused single line does).
+ *
+ * @param[in] sptr The local sender (an alias is checked as itself, as the
+ *            single-line relay checks it).
+ * @param[in] is_channel Non-zero for a channel target.
+ * @param[out] chptr_p The target channel.
+ * @param[out] acptr_p The target user.
+ * @param[out] utf8_warn Set when a line was sanitised.
+ * @return 0 when the batch may go on, -1 when it is refused (the caller
+ *         clears it).
+ */
+static int
+ml_batch_refused(struct Client *sptr, int is_channel, struct Channel **chptr_p,
+                 struct Client **acptr_p, int *utf8_warn)
+{
+  struct Connection *con = cli_connect(sptr);
+  int is_notice = (con_ml_is_notice(con) == 1);
+  const char *cmd = is_notice ? "NOTICE" : "PRIVMSG";
+  const char *target = con_ml_target(con);
+  struct ml_check_ctx ctx;
+
+  *chptr_p = NULL;
+  *acptr_p = NULL;
+  *utf8_warn = 0;
+  ctx.sptr = sptr;
+  ctx.chptr = NULL;
+  ctx.is_notice = is_notice;
+  ctx.utf8 = RELAY_UTF8_OK;
+
+  /* 1. UTF8ONLY, line by line. */
+  if (ml_lines_check(con_ml_messages(con), ml_check_utf8, &ctx) < 0) {
+    relay_utf8_answer(sptr, cmd, RELAY_UTF8_REFUSED);
+    return -1;
+  }
+  *utf8_warn = (ctx.utf8 == RELAY_UTF8_SANITISED);
+
+  /* 2. The target. */
+  if (is_channel) {
+    if (!(*chptr_p = FindChannel(target))) {
+      if (!is_notice)
+        send_reply(sptr, ERR_NOSUCHCHANNEL, target);
+      return -1;
+    }
+  } else if (!(*acptr_p = FindUser(target))) {
+    if (!is_notice)
+      send_reply(sptr, ERR_NOSUCHNICK, target);
+    return -1;
+  }
+
+  /* 3. The send checks. */
+  if (is_channel) {
+    struct Channel *chptr = *chptr_p;
+
+    if (relay_channel_refused(sptr, chptr, is_notice))
+      return -1;
+    ctx.chptr = chptr;
+    if (ml_lines_check(con_ml_messages(con), ml_check_channel_text, &ctx) < 0)
+      return -1;
+  } else if (relay_private_refused(sptr, *acptr_p, is_notice))
+    return -1;
+
+  /* 4. The transforms changed the size: hold it to the limit again. */
+  con_ml_total_bytes(con) = ml_lines_bytes(con_ml_messages(con));
+  if (con_ml_total_bytes(con) > feature_int(FEAT_MULTILINE_MAX_BYTES)) {
+    send_fail_ctx(sptr, "BATCH", "MULTILINE_MAX_BYTES",
+                  "Multiline batch max-bytes exceeded", "%d",
+                  feature_int(FEAT_MULTILINE_MAX_BYTES));
+    return -1;
+  }
+  return 0;
+}
+
 /** Process and deliver a completed multiline batch */
 static int
 process_multiline_batch(struct Client *sptr)
@@ -1136,6 +1306,7 @@ process_multiline_batch(struct Client *sptr)
   struct Connection *con = cli_connect(sptr);
   struct Channel *chptr = NULL;
   struct Client *acptr = NULL;
+  struct Client *face;     /* who the message is from to others (an alias's primary) */
   struct SLink *lp;
   struct Membership *member;
   int is_channel;
@@ -1144,6 +1315,8 @@ process_multiline_batch(struct Client *sptr)
   int fallback_count = 0;  /* Track recipients who got truncated fallback */
   int is_notice = (con_ml_is_notice(con) == 1);
   const char *cmd_str = is_notice ? "NOTICE" : "PRIVMSG";
+  int label_armed;
+  int utf8_warn = 0;
 
   if (!con_ml_batch_id(con)[0])
     return 0;  /* No active batch */
@@ -1152,6 +1325,9 @@ process_multiline_batch(struct Client *sptr)
     clear_multiline_batch(con);
     return 0;  /* Empty batch */
   }
+
+  /* A refused batch is answered under its label (ml_label_arm). */
+  label_armed = ml_label_arm(sptr);
 
   /* IRCv3 multiline spec: reject batches consisting entirely of blank lines */
   {
@@ -1170,29 +1346,15 @@ process_multiline_batch(struct Client *sptr)
 
   is_channel = IsChannelName(con_ml_target(con));
 
-  /* Validate target */
-  if (is_channel) {
-    chptr = FindChannel(con_ml_target(con));
-    if (!chptr) {
-      send_reply(sptr, ERR_NOSUCHCHANNEL, con_ml_target(con));
-      clear_multiline_batch(con);
-      return 0;
-    }
-    /* Check if user can send to channel */
-    member = find_member_link(chptr, sptr);
-    if (!member && (chptr->mode.mode & MODE_NOPRIVMSGS)) {
-      send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
-      clear_multiline_batch(con);
-      return 0;
-    }
-  } else {
-    acptr = FindUser(con_ml_target(con));
-    if (!acptr) {
-      send_reply(sptr, ERR_NOSUCHNICK, con_ml_target(con));
-      clear_multiline_batch(con);
-      return 0;
-    }
+  /* The target, and every check its lines would get as single messages
+   * (ml_batch_refused): before anything below delivers, echoes, stores,
+   * pushes or relays any of it. */
+  if (ml_batch_refused(sptr, is_channel, &chptr, &acptr, &utf8_warn) < 0) {
+    clear_multiline_batch(con);
+    return 0;
   }
+  face = (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+         ? cli_alias_primary(sptr) : sptr;
 
   /* Generate ONE base msgid for the entire multiline batch.
    * Each line will get this base msgid with a sequence suffix: base:00, base:01, etc.
@@ -1245,6 +1407,20 @@ process_multiline_batch(struct Client *sptr)
     }
   }
 
+  /* Accepted.  The echo carries the label from here (not the armed one).
+   * What the single-line relay does for an accepted message before it is
+   * delivered, once for the batch: the sanitiser's WARN; for a channel,
+   * reveal a delayed-join sender (members see its JOIN before the
+   * message); for a user, RPL_AWAY (PRIVMSG) and the target's free reply
+   * (relay_private_accepted). */
+  ml_label_disarm(sptr, label_armed);
+  if (utf8_warn)
+    relay_utf8_answer(sptr, cmd_str, RELAY_UTF8_SANITISED);
+  if (is_channel)
+    RevealDelayedJoinIfNeeded(sptr, chptr);
+  else
+    relay_private_accepted(sptr, acptr, is_notice);
+
   /* ONE time for the whole batch: the msgid's own mint time, read right
    * after the mint (the truncation notices mint again later).  Row, live
    * @time, S2S @time and ml_content all use it -- this used to be four
@@ -1281,18 +1457,29 @@ process_multiline_batch(struct Client *sptr)
       if (to == sptr)
         continue;  /* Skip sender (handle echo-message separately) */
 
+      /* The members a single line reaches (the channel relay's filter,
+       * channel_member_skipped): not a zombie, not +d, not behind a
+       * bursting server, not one that SILENCEs the sender's face on
+       * channel messages; and, here, not a device whose profile hides the
+       * channel.  A remote member filtered out reads nothing, so it is
+       * not counted for the WARN either (its server filters it again). */
+      if (channel_member_skipped(face, member, SKIP_DEAF | SKIP_BURST))
+        continue;
+
       if (!MyConnect(to)) {
         /* Delivered by the S2S relay below.  Counted for the sender's
          * WARN when the way to its server does not carry ML: it gets the
          * fallback, from us or from the last server that takes ML.  Not
-         * a zombie (KICKed, its PART not back yet: no longer a reader)
-         * and not a service client (a channel service sits in every
-         * registered channel and would raise the WARN on every batch). */
-        if (!IsZombie(member) && !IsServiceClient(to)
+         * a service client (a channel service sits in every registered
+         * channel and would raise the WARN on every batch). */
+        if (!IsServiceClient(to)
             && !ml_route_carries_multiline(cli_user(to)->server))
           fallback_count++;
         continue;
       }
+
+      if (!persistence_channel_visible(to, chptr->chname))
+        continue;
 
       /* With aliases, each connection is a separate Client with its own caps.
        * CapActive checks the client's own capabilities directly. */
@@ -2265,6 +2452,10 @@ struct S2SMultilineBatch {
   struct Client **route;
   int route_count;              /**< Entries in route */
   int routed;                   /**< 1 for a channel batch (route is set) */
+  /** 1 when this server refuses the channel batch, as it refuses a
+   * single line (server_relay_channel_allowed at the start line): nothing
+   * of it is relayed on, delivered, stored or pushed here. */
+  int refused;
 };
 
 /** Compute the network-wide maximum multiline byte limit.
@@ -2422,6 +2613,7 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   batch->route = NULL;
   batch->route_count = 0;
   batch->routed = 0;
+  batch->refused = 0;
 
   s2s_ml_batches[i] = batch;
   return batch;
@@ -2563,12 +2755,15 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   int is_channel;
   int first;
   struct Client *sptr = batch->sender;
+  struct Client *face;     /* the sender as others see it: an alias's primary */
   char batch_base_msgid[64];  /* Base msgid for entire batch */
   int is_notice = batch->is_notice;
   const char *cmd_str = is_notice ? "NOTICE" : "PRIVMSG";
 
-  if (!batch || !batch->messages || !sptr)
+  if (!batch || !batch->messages || !sptr || batch->refused)
     return;
+  face = (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+         ? cli_alias_primary(sptr) : sptr;
 
   /* Reuse the originating server's msgid if available (unified delivery).
    * Only generate a new one if the origin didn't provide one (legacy server). */
@@ -2604,6 +2799,16 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     acptr = FindUser(batch->target);
     if (!acptr || !MyConnect(acptr))
       return;  /* User doesn't exist or isn't local */
+    /* The target's SILENCE list, which this server -- the target's --
+     * holds whole: the check server_relay_private_message makes for a
+     * single line.  The origin checks what it knows of the list, which
+     * is only what has been forwarded to it (positive masks only with
+     * SILENCE_CHANMSGS, and a server learns them lazily, as below).
+     * Silenced, the batch is dropped silently, as the single line is,
+     * and is_silenced() sends the mask back toward the sender's server so
+     * that the next message is refused at the origin. */
+    if (is_silenced(face, acptr, 0))
+      return;
   }
 
   /* Deliver to local recipients */
@@ -2616,6 +2821,14 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
       if (to == sptr)
         continue;  /* Skip sender (they already got echo) */
+
+      /* The members a single line from another server reaches here (the
+       * channel relay's filter): not +d, not one that SILENCEs the
+       * sender's face on channel messages, not a device whose profile
+       * hides the channel. */
+      if (channel_member_skipped(face, member, SKIP_DEAF | SKIP_BURST)
+          || !persistence_channel_visible(to, chptr->chname))
+        continue;
 
       if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
         /* Send as batch to supporting clients */
@@ -3091,6 +3304,30 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
       }
       batch->route_count = n;
       batch->routed = 1;
+
+      /* The far side's check (server_relay_channel_allowed), as for a
+       * single line from another server: the sender -- an alias as its
+       * primary -- may speak by this server's view of the channel.  A
+       * remote member may (a delayed-join one is revealed here now); a
+       * non-member, a zombie (KICKed here, its PART not back yet)
+       * included, is held to +n, +m, the bans and the off-channel modes.
+       * Refused, the batch goes nowhere from here -- not relayed on (the
+       * route is emptied before the start line goes out), not delivered,
+       * stored or pushed -- and the sender is answered as a single line's
+       * is.  The S2S batch carries no NOTICE bit, so it is answered as a
+       * PRIVMSG.  An older origin's batch and a desync are what this
+       * catches: an origin that checks refuses first. */
+      {
+        struct Channel *chptr = FindChannel(target);
+        struct Client *face = (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+                              ? cli_alias_primary(sptr) : sptr;
+
+        if (chptr && !server_relay_channel_allowed(face, chptr, 0)) {
+          batch->refused = 1;
+          batch->route_count = 0;
+          send_reply(face, ERR_CANNOTSENDTOCHAN, chptr->chname);
+        }
+      }
     }
   } else
     batch = find_s2s_multiline_batch(batch_ref);
