@@ -166,6 +166,9 @@ struct reg_ctx {
  * become unfindable -- losing its REGISTER reply and stranding the in-flight
  * guard set, which locks REGISTER out on that connection until it reconnects.
  * A dedicated cookie is owned solely by this file and cannot be clobbered.
+ * A bouncer revive that moves the socket onto a held session's ghost before
+ * the answer moves the cookie with it (bounce_revive()), so the answer
+ * reaches the connection that asked.
  *
  * @param[in] ctx Registration context.
  * @return The client, or NULL if it disconnected or the fd was reused.
@@ -228,8 +231,21 @@ static void reg_ctx_free(struct reg_ctx *ctx)
  * the account is no less created.  No timestamp, as for every local
  * Keycloak login.
  *
- * A registered client that logged in meanwhile (a SASL login finished while
- * the REGISTER was in flight) keeps that login, and is not told anything.
+ * A login that finished while the REGISTER was in flight (REGISTER and SASL
+ * may overlap) is not undone:
+ *  - a login to this very account (the create landed, and a SASL login of
+ *    it was answered first): REGISTER SUCCESS is true as it stands -- the
+ *    client is authenticated to the account -- and is all that is sent;
+ *  - after connection registration, a login to another account: that login
+ *    stays.  REGISTER SUCCESS would say the client is now authenticated to
+ *    the new account, which it is not, and a FAIL would say the REGISTER
+ *    failed, while the account was created.  The reply is the spec's code
+ *    for the reason, ALREADY_AUTHENTICATED ("the client is already
+ *    authenticated"), as a WARN: standard replies' type for a command that
+ *    was processed with something the client should know, and no new code.
+ *    The text says the account exists and how to use it;
+ *  - before connection registration the later answer still replaces a
+ *    completed login (the overlaps as pinned in sasl_handler_cmocka).
  *
  * @param[in] acptr Client to log in.
  * @param[in] account Account name that was created.
@@ -239,9 +255,22 @@ static void register_complete_success(struct Client *acptr, const char *account,
                                       const char *id)
 {
   char kcid[ACCOUNT_ID_LEN + 1] = "";
+  const char *held = IsAccount(acptr) ? cli_user(acptr)->account
+                   : IsSASLComplete(acptr) ? cli_saslaccount(acptr) : "";
 
-  if (IsAccount(acptr))
+  if (held[0] && 0 == ircd_strcmp(held, account)) {
+    sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
     return;
+  }
+  if (IsAccount(acptr)) {
+    char text[200];
+
+    ircd_snprintf(0, text, sizeof(text), "Account %s was created, but you are "
+                  "already logged in as %s; log in to %s with SASL to use it",
+                  account, held, account);
+    send_warn(acptr, "REGISTER", "ALREADY_AUTHENTICATED", account, text);
+    return;
+  }
   if (id && !account_id_from_uuid(id, kcid))
     kcid[0] = '\0';                     /* the callers pass UUIDs only */
   sasl_register_login(acptr, account, kcid[0] ? kcid : NULL);

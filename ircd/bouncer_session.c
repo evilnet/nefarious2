@@ -9536,6 +9536,13 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   /* Step 4: Update LocalClientArray */
   LocalClientArray[fd] = ghost;
 
+  /* A REGISTER still in flight on the socket (draft/account-registration)
+   * finds its client again by fd and this cookie (reg_ctx_client(),
+   * m_register.c): the answer goes to the connection that asked, now the
+   * ghost, and the one-in-flight guard moves with it. */
+  cli_regcookie(ghost) = cli_regcookie(temp);
+  cli_regcookie(temp) = 0;
+
 #ifdef USE_SSL
   /* Free ghost's old SSL object (should be NULL from close_connection) */
   if (con_socket(ghost_con).ssl) {

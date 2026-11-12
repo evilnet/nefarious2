@@ -119,6 +119,7 @@ struct fake {
   int n_numerics;
   char raw[600];              /**< the last raw line sent to it */
   char fail_code[64];         /**< the code of the last FAIL sent to it */
+  char warn[160];             /**< the last WARN sent to it */
 };
 
 #define NFAKE 8
@@ -396,6 +397,16 @@ void send_fail(struct Client *to, const char *command, const char *code,
   if (f && !f->freed)
     ircd_strncpy(f->fail_code, code, sizeof(f->fail_code));
   tlog_add("FAIL %s %s %s", command, code, context ? context : "");
+}
+void send_warn(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  struct fake *f = fake_of(to);
+  touch(to);
+  if (f && !f->freed)
+    snprintf(f->warn, sizeof(f->warn), "%s %s %s :%s", command, code,
+             context ? context : "", description);
+  tlog_add("WARN %s %s %s", command, code, context ? context : "");
 }
 void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
                    struct Client *to, const char *pattern, ...)
@@ -1815,9 +1826,10 @@ static void flow_register_answer_mid_sasl_then_failure(void **state)
 
 /** SASL finishes before REGISTER's answer.  Before registration the
  * REGISTER account, with its id, replaces the login (its answer is the
- * later success);
- * after registration the login stays and REGISTER's answer is dropped
- * without a reply (register_complete_success() on an account holder). */
+ * later success); after registration the login stays, and the client is
+ * told the account was created but is not the one it is logged in to:
+ * WARN REGISTER ALREADY_AUTHENTICATED -- a reply, never silence, never
+ * REGISTER SUCCESS (which says "you are now logged in to it"). */
 static void flow_sasl_then_register_answer(void **state)
 {
   int post;
@@ -1835,14 +1847,57 @@ static void flow_sasl_then_register_answer(void **state)
     plain_pending(c, user, "guspw");
     pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* 903 first */
     assert_identity(c, user, user_id(user, id), 1);
+    f->n_numerics = 0;
     pend_deliver_kind(P_CREATED, KC_SUCCESS);        /* then REGISTER's */
     if (post) {
+      char want[96];
       assert_identity(c, user, id, 1);
       assert_null(strstr(f->raw, "REGISTER"));
+      snprintf(want, sizeof(want), "REGISTER ALREADY_AUTHENTICATED %s :", acct);
+      assert_true(!strncmp(f->warn, want, strlen(want)));
+      assert_non_null(strstr(f->warn, user));          /* names the login */
+      assert_false(has_numeric(f, RPL_LOGGEDIN));
+      assert_int_equal(cli_regcookie(c), 0);
     } else {
       assert_non_null(strstr(f->raw, "REGISTER SUCCESS"));
       assert_identity(c, acct, user_id(acct, rid), 1);
     }
+  }
+}
+
+
+/** SASL logs in to the very account REGISTER is creating (the create
+ * landed in Keycloak, and the grant was answered before the create's own
+ * answer reached REGISTER): REGISTER SUCCESS is true then -- the client is
+ * logged in to it -- and is all that is sent; the login stays as it is,
+ * with no second 900. */
+static void register_answer_after_login_to_the_same_account(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    const char *acct = post ? "nsame2" : "nsame1";
+    struct Client *c = post ? new_registered(87, "sw") : new_client(87, "sw", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char id[ACCOUNT_ID_LEN + 1], want[64];
+
+    kc_mode = KC_LATER;
+    assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
+    pend_deliver_kind(P_USER, KC_NOT_FOUND);
+    plain_pending(c, acct, "longpassword");
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* logged in to it */
+    assert_identity(c, acct, user_id(acct, id), 1);
+    f->n_numerics = 0;
+    ntlog = 0;
+    pend_deliver_kind(P_CREATED, KC_SUCCESS);       /* REGISTER's answer */
+    snprintf(want, sizeof(want), "raw sw REGISTER SUCCESS %s ", acct);
+    assert_int_equal(ntlog, 1);
+    assert_true(!strncmp(tlog[0], want, strlen(want)));
+    assert_false(has_numeric(f, RPL_LOGGEDIN));
+    assert_identity(c, acct, id, 1);
+    assert_string_equal(f->warn, "");
+    assert_int_equal(cli_regcookie(c), 0);
   }
 }
 
@@ -2422,6 +2477,7 @@ int main(void)
     cmocka_unit_test_setup(flow_register_answer_mid_sasl_then_success, setup),
     cmocka_unit_test_setup(flow_register_answer_mid_sasl_then_failure, setup),
     cmocka_unit_test_setup(flow_sasl_then_register_answer, setup),
+    cmocka_unit_test_setup(register_answer_after_login_to_the_same_account, setup),
     cmocka_unit_test_setup(register_success_is_a_sasl_login, setup),
     cmocka_unit_test_setup(register_success_mid_sasl_keeps_the_exchange_hold, setup),
     cmocka_unit_test_setup(authenticate_after_register_success_is_as_after_903, setup),

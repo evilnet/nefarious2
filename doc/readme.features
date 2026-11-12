@@ -1952,7 +1952,13 @@ specification's words): REGISTER SUCCESS, then RPL_LOGGEDIN (900), the
 hidden host under SASL_AUTOHIDEHOST, and the account announced to the
 network with its Keycloak id (from Keycloak's answer to the create, or one
 lookup when that answer names none; without one if the lookup fails) --
-only RPL_SASLSUCCESS (903) is not sent.
+only RPL_SASLSUCCESS (903) is not sent.  When a SASL login finished while
+the REGISTER was in flight, that login is kept: if it is to the account
+REGISTER created, the client gets REGISTER SUCCESS alone; if the client
+has registered and is logged in to another account, it gets
+"WARN REGISTER ALREADY_AUTHENTICATED <account>" (the account exists, and
+the client may log in to it with SASL); before connection registration the
+later answer still replaces the login with the new account.
 
 Both SASL PLAIN and SASL SCRAM-SHA-256 gate on the same signal: a
 pending VERIFY_EMAIL required action on the Keycloak account (PLAIN via
