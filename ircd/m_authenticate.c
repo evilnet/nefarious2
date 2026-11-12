@@ -216,6 +216,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
         cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
       } while (!cli_saslcookie(cptr));
       cli_saslstart(cptr) = CurrentTime;
+      cli_saslnamed(cptr)[0] = '\0';      /* nothing named for it yet */
+      cli_saslnamedts(cptr) = 0;
       if (cli_auth(cptr))
         auth_sasl_start(cli_auth(cptr));
       first = 1;
@@ -303,6 +305,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
     } while (!cli_saslcookie(cptr));
     cli_saslstart(cptr) = CurrentTime;
+    cli_saslnamed(cptr)[0] = '\0';        /* nothing named for it yet */
+    cli_saslnamedts(cptr) = 0;
     if (cli_auth(cptr))
       auth_sasl_start(cli_auth(cptr));
     first = 1;

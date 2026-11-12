@@ -252,17 +252,32 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     return 0;
   } else if (reply[0] == 'L') {
-    /* Store account name and creation time for sasl_complete_login() on D S,
-     * as a whole identity (sasl_identity_set(): X3 sends no Keycloak id).
-     * No timestamp in the reply: none, not an earlier attempt's. */
-    sasl_identity_set(acptr, data, (parc > 5) ? atoi(parv[5]) : 0, NULL, 0);
+    /* The account (and creation time) services name for this exchange,
+     * kept for its D S (sasl_complete_login()).  Not the login identity
+     * yet: that is the success's to set, and a REGISTER login landing
+     * before it (draft/account-registration: the two may overlap) writes
+     * the identity meanwhile.  No timestamp in the reply: none, not an
+     * earlier attempt's. */
+    ircd_strncpy(cli_saslnamed(acptr), data, sizeof(cli_saslnamed(acptr)));
+    cli_saslnamedts(acptr) = (parc > 5) ? atoi(parv[5]) : 0;
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
-      /* Success — use shared login completion function.  Its result says
-       * whether acptr survived the registration it resumed; cptr is the
-       * server link, so it must not be returned from here, and nothing
-       * touches acptr after it. */
-      sasl_complete_login(acptr, cli_saslaccount(acptr), cli_saslacccreate(acptr), NULL, 0);   /* the wire from X3 carries no id */
+      /* Success — use shared login completion function, as the account
+       * services named in L (else, with no L, the identity as it stands,
+       * as before).  Its result says whether acptr survived the
+       * registration it resumed; cptr is the server link, so it must not
+       * be returned from here, and nothing touches acptr after it. */
+      char named[ACCOUNTLEN + 1];
+      time_t named_ts = cli_saslnamedts(acptr);
+
+      ircd_strncpy(named, cli_saslnamed(acptr)[0] ? cli_saslnamed(acptr)
+                                                  : cli_saslaccount(acptr),
+                   sizeof(named));
+      if (!cli_saslnamed(acptr)[0])
+        named_ts = cli_saslacccreate(acptr);
+      cli_saslnamed(acptr)[0] = '\0';
+      cli_saslnamedts(acptr) = 0;
+      sasl_complete_login(acptr, named, named_ts, NULL, 0);   /* the wire from X3 carries no id */
       return 0;
     } else if (data[0] == 'F') {
       send_reply(acptr, ERR_SASLFAIL, "");
@@ -270,6 +285,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       send_reply(acptr, ERR_SASLABORTED);
     }
     /* Cleanup for failure/abort cases (success cleanup is in sasl_complete_login) */
+    cli_saslnamed(acptr)[0] = '\0';
+    cli_saslnamedts(acptr) = 0;
     if ((cli_saslagent(acptr) != NULL) && cli_saslagentref(cli_saslagent(acptr)))
       cli_saslagentref(cli_saslagent(acptr))--;
     cli_saslagent(acptr) = NULL;
@@ -334,6 +351,8 @@ int abort_sasl(struct Client* cptr, int timeout) {
   cli_saslagent(cptr) = NULL;
   cli_saslcookie(cptr) = 0;
   cli_saslstart(cptr) = 0;
+  cli_saslnamed(cptr)[0] = '\0';
+  cli_saslnamedts(cptr) = 0;
 
   /* Drop the registration hold.  Do not resume registration from
    * here: auth_complete_sasl() calls this from inside

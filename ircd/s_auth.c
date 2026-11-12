@@ -2084,6 +2084,8 @@ int auth_iauth_sasl_fail(struct Client *cptr)
     timer_del(&cli_sasltimeout(cptr));
   cli_saslcookie(cptr) = 0;
   cli_saslstart(cptr) = 0;
+  cli_saslnamed(cptr)[0] = '\0';
+  cli_saslnamedts(cptr) = 0;
   return 1;
 }
 
@@ -3580,24 +3582,19 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
     return 0;
   }
 
-  /* The login's identity as a whole (sasl_identity_set()): the account
-   * name (without a ":<timestamp>" suffix), its timestamp when IAuth gives
-   * one, and no Keycloak id -- IAuth carries none, and none may be left
-   * from an earlier login on this connection. */
-  {
-    char account[ACCOUNTLEN + 1];
-
-    memcpy(account, params[0], len);
-    account[len] = '\0';
-    sasl_identity_set(cli, account,
-                      params[0][len] == ':'
-                        ? strtoul(params[0] + len + 1, NULL, 10) : 0,
-                      NULL, 0);
-  }
+  /* The account IAuth names for this exchange (without a ":<timestamp>"
+   * suffix) and its timestamp when IAuth gives one, kept for the success
+   * (iauth_cmd_sasl_done()), which sets the login's identity from it as a
+   * whole -- not the identity yet: a REGISTER login landing before the
+   * success (draft/account-registration) writes it meanwhile. */
+  memcpy(cli_saslnamed(cli), params[0], len);
+  cli_saslnamed(cli)[len] = '\0';
+  cli_saslnamedts(cli) = params[0][len] == ':'
+                         ? strtoul(params[0] + len + 1, NULL, 10) : 0;
 
   /* Send RPL_LOGGEDIN to client */
   send_reply(cli, RPL_LOGGEDIN, cli_name(cli), cli_user(cli) ? cli_user(cli)->username : "*",
-             cli_user(cli) ? cli_user(cli)->host : "*", cli_saslaccount(cli), cli_saslaccount(cli));
+             cli_user(cli) ? cli_user(cli)->host : "*", cli_saslnamed(cli), cli_saslnamed(cli));
 
   return 0;
 }
@@ -3621,6 +3618,8 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
     timer_del(&cli_sasltimeout(cli));
   cli_saslcookie(cli) = 0;
   cli_saslstart(cli) = 0;
+  cli_saslnamed(cli)[0] = '\0';
+  cli_saslnamedts(cli) = 0;
 
   /* Unblock registration if SASL was holding it */
   if (cli_auth(cli))
@@ -3698,6 +3697,16 @@ static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
                                int parc, char **params)
 {
+  /* The login's identity as a whole (sasl_identity_set()), from what the
+   * exchange's L named: no Keycloak id -- IAuth carries none, and none may
+   * be left from an earlier login on this connection.  With no L, the
+   * identity stays as it is (as before). */
+  if (cli_saslnamed(cli)[0]) {
+    sasl_identity_set(cli, cli_saslnamed(cli), cli_saslnamedts(cli), NULL, 0);
+    cli_saslnamed(cli)[0] = '\0';
+    cli_saslnamedts(cli) = 0;
+  }
+
   /* Mark SASL as complete: an exchange's completion (not a REGISTER
    * login's, IsSASLExchangeDone()) */
   SetFlag(cli, FLAG_SASLCOMPLETE);
