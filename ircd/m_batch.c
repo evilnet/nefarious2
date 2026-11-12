@@ -1128,6 +1128,70 @@ ml_channel_links(struct Channel *chptr, struct Client *skip_link,
   return n;
 }
 
+/** Split, when a batch is accepted, every line whose relayed form
+ *   ":<nick>!<user>@<host> <PRIVMSG|NOTICE> <target> :<text>"
+ * would pass 510 bytes (relay_text_budget, the single-line relay's own
+ * rule) into parts that fit, each part after the first marked
+ * draft/multiline-concat, so the joined message is byte-identical to
+ * what the client sent.  A line is otherwise cut at output, per
+ * recipient, and its tail is gone mid-message.  Done once, before the
+ * msgid is minted, so every path the batch takes from here -- the
+ * multiline and fallback deliveries, the echo, ML and BX M to other
+ * servers, the stored record, web push -- walks the same lines.
+ *
+ * The parts are cut at a UTF-8 boundary (ircd_utf8_cut_len).  The
+ * split adds no byte to the joined message (concat parts join with
+ * nothing between), so FEAT_MULTILINE_MAX_BYTES and the batch's total
+ * are unchanged; the line count grows, and the caller holds the result
+ * to FEAT_MULTILINE_MAX_LINES, the count every other server accepts
+ * from us (add_s2s_multiline_message drops lines past it).
+ *
+ * @param[in] con     The sender's connection (its ml line list).
+ * @param[in] sptr    The sender.
+ * @param[in] cmd     MSG_PRIVATE or MSG_NOTICE.
+ * @param[in] target  The target as recipients see it: the channel's
+ *                    name or the recipient's nick.
+ * @return The number of lines after the split.
+ */
+static int
+multiline_split_long_lines(struct Connection *con, struct Client *sptr,
+                           const char *cmd, const char *target)
+{
+  size_t room = relay_text_budget(sptr, cmd, strlen(target), 0);
+  struct SLink *lp;
+  int count = 0;
+
+  for (lp = con_ml_messages(con); lp; lp = lp->next) {
+    char *text = lp->value.cp + 1;
+    size_t len = strlen(text);
+
+    count++;
+    while (room > 0 && len > room) {
+      size_t keep = ircd_utf8_cut_len(text, len, room);
+      struct SLink *part;
+      char *copy;
+
+      if (keep == 0)
+        keep = room;  /* no boundary within room: byte-exact, so it ends */
+      copy = (char *)MyMalloc(len - keep + 2);
+      copy[0] = 1;  /* concat: joins its predecessor with nothing between */
+      memcpy(copy + 1, text + keep, len - keep + 1);
+      text[keep] = '\0';
+
+      part = make_link();
+      part->value.cp = copy;
+      part->next = lp->next;
+      lp->next = part;
+
+      lp = part;
+      text = copy + 1;
+      len -= keep;
+      count++;
+    }
+  }
+  return count;
+}
+
 /** Process and deliver a completed multiline batch */
 static int
 process_multiline_batch(struct Client *sptr)
@@ -1188,6 +1252,25 @@ process_multiline_batch(struct Client *sptr)
     acptr = FindUser(con_ml_target(con));
     if (!acptr) {
       send_reply(sptr, ERR_NOSUCHNICK, con_ml_target(con));
+      clear_multiline_batch(con);
+      return 0;
+    }
+  }
+
+  /* Lines too long for their relayed form are split into concat parts
+   * (multiline_split_long_lines); the result is what is relayed and
+   * stored, so it is what must fit every server's line limit. */
+  {
+    int max_lines = feature_int(FEAT_MULTILINE_MAX_LINES);
+    int lines = multiline_split_long_lines(con, sptr, cmd_str,
+                                           is_channel ? chptr->chname
+                                                      : cli_name(acptr));
+
+    con_ml_msg_count(con) = lines;
+    if (lines > max_lines) {
+      send_fail_ctx(sptr, "BATCH", "MULTILINE_MAX_LINES",
+                    "Too many lines in multiline batch once lines too long "
+                    "to relay are split", "%d", max_lines);
       clear_multiline_batch(con);
       return 0;
     }
