@@ -353,8 +353,16 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       if (MyConnect(acptr)) {
         /* Local user - deliver with client-only tags if they support message-tags */
         if (CapActive(acptr, CAP_MSGTAGS)) {
-          sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
-                                    "%C", acptr);
+          /* To yourself without echo-message: the delivered TAGMSG, not
+           * the answer -- no label, and ACK answers (labeled-response;
+           * see relay_private_message). */
+          if (acptr == sptr && !(feature_bool(FEAT_CAP_echo_message)
+                                 && CapOwnHas(sptr, CAP_ECHOMSG)))
+            sendcmdto_one_delivery(sptr, CMD_TAGMSG, acptr, client_tags,
+                                   "%C", acptr);
+          else
+            sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
+                                      "%C", acptr);
         }
         /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
          * per the IRCv3 spec - there's no message body to send as fallback */

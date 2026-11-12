@@ -1915,6 +1915,52 @@ void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
   msgq_clean(mb);
 }
 
+/** Deliver a message (PRIVMSG, NOTICE, TAGMSG) to a single local client
+ * as the delivered message, not as the answer to that client's own
+ * command: one it addressed to itself, or to its own bouncer session.
+ * Tagged as
+ * sendcmdto_one_event() tags an event (the msgid and @time the caller
+ * armed, @account, the oper and bot tags), led by the sender's
+ * client-only tags for a recipient with message-tags, and never with the
+ * recipient's pending @label or inside a batch it has open.  Per
+ * labeled-response, only the echo-message copy of a message to oneself
+ * may carry the label; without one, the command is answered by ACK.
+ * @param[in] from Client the message comes from.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (unused: \a to is a client).
+ * @param[in] to Local client the message is delivered to.
+ * @param[in] client_tags The sender's client-only tags, or NULL.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_delivery(struct Client *from, const char *cmd,
+                            const char *tok, struct Client *to,
+                            const char *client_tags, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[4608];
+  const char *tags;
+  int prio;
+
+  (void)tok;
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  tags = event_tags(tagbuf, sizeof(tagbuf), from, to, 0, client_tags);
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, cmd, &vd);
+
+  va_end(vd.vd_args);
+
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+  send_buffer(to, mb, prio);
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to a single client with message tags,
  * using a supplied msgid instead of generating one.
  * @param[in] from Client sending the command.

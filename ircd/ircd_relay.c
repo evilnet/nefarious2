@@ -1404,7 +1404,21 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         from = sptr;
     }
 
-    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+    if (acptr == sptr && !(feature_bool(FEAT_CAP_echo_message)
+                           && CapOwnHas(sptr, CAP_ECHOMSG))) {
+      /* A message to yourself without echo-message: this copy is the
+       * delivered message, not the answer to the PRIVMSG, so it carries
+       * no label and the PRIVMSG is answered by ACK (labeled-response:
+       * only the echo-message copy of a message to oneself is labeled).
+       * With echo-message the client is sent the same line twice, and the
+       * first -- this one, on the paths below -- keeps the label: the
+       * labeled echo, as the client sees it, then the unlabeled copy. */
+      if (pm_msgid[0])
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
+      sendcmdto_one_delivery(from, CMD_PRIVATE, acptr, client_tags,
+                             "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
+    } else if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       /* Set msgid override so format_message_tags_with_client includes it */
       if (pm_msgid[0])
         sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
@@ -1633,7 +1647,16 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
         from = sptr;
     }
 
-    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+    if (acptr == sptr && !(feature_bool(FEAT_CAP_echo_message)
+                           && CapOwnHas(sptr, CAP_ECHOMSG))) {
+      /* A notice to yourself without echo-message: the delivered
+       * message, unlabeled; ACK answers (see relay_private_message). */
+      if (pm_msgid[0])
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
+      sendcmdto_one_delivery(from, CMD_NOTICE, acptr, client_tags,
+                             "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
+    } else if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       if (pm_msgid[0])
         sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
       sendcmdto_one_client_tags(from, MSG_NOTICE, acptr, client_tags,

@@ -164,6 +164,14 @@ extern void sendcmdto_one_tags(struct Client *from, const char *cmd,
 extern void sendcmdto_one_event(struct Client *from, const char *cmd,
                                 const char *tok, struct Client *to, int respond,
                                 const char *pattern, ...);
+/* A message delivered to a local client that is not the answer to its own
+ * command (one it sent itself, or its own bouncer session): tagged as
+ * sendcmdto_one_event() tags an event, led by @a client_tags under
+ * message-tags; never the recipient's @label or open batch. */
+extern void sendcmdto_one_delivery(struct Client *from, const char *cmd,
+                                   const char *tok, struct Client *to,
+                                   const char *client_tags,
+                                   const char *pattern, ...);
 
 /* Same as above, but also return the generated msgid and timestamp */
 extern void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd,

@@ -11967,8 +11967,17 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
        * cannot stamp a later send. */
       if (msgid)
         sendcmdto_set_client_event(msgid, event_ms);
-      sendcmdto_one_tags_with_client(primary, cmd, tok, alias, msgid,
-                                     client_tags, "%C :%s", alias, text);
+      /* The device that sent a message to its own nick, without
+       * echo-message: this copy is the delivered message, not the answer
+       * to its command -- no label, and ACK answers (labeled-response;
+       * see relay_private_message). */
+      if (alias == from && !(feature_bool(FEAT_CAP_echo_message)
+                             && CapOwnHas(alias, CAP_ECHOMSG)))
+        sendcmdto_one_delivery(primary, cmd, tok, alias, client_tags,
+                               "%C :%s", alias, text);
+      else
+        sendcmdto_one_tags_with_client(primary, cmd, tok, alias, msgid,
+                                       client_tags, "%C :%s", alias, text);
       sendcmdto_set_client_msgid(NULL);
       continue;
     }

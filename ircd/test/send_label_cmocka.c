@@ -4,15 +4,22 @@
  * labeled-response: the server puts a command's label on the one line
  * that answers it (or on the batch holding its lines), and sends a
  * labeled ACK when nothing did.  parse.c decides the ACK from
- * cli_label_responded(), which the send that took the label sets.
+ * cli_label_responded(), which the send that took the label sets.  Two
+ * kinds of line reach the client whose command is being handled:
  *
- * An answer that goes out through a fan-out to many clients -- the PART
- * of a channel the client is on -- was tagged like every member's copy,
- * never with a label, so a labeled PART came back unlabeled and was then
- * ACKed (issue #216, case 1).  sendcmdto_channel_butserv_respond() gives
- * the copy to the asking connection its own tags: the command's label,
- * or its labeled-response batch -- and a bouncer sibling's copy stays as
- * it was.
+ *  - an answer that goes out through a fan-out to many clients -- the
+ *    PART of a channel it is on.  The fan-out tags every member's copy
+ *    alike and never with a label, so a labeled PART came back unlabeled
+ *    and was then ACKed (issue #216, case 1).
+ *    sendcmdto_channel_butserv_respond() gives the copy to the asking
+ *    connection its own tags: the command's label, or its
+ *    labeled-response batch -- and a bouncer sibling's copy stays as it
+ *    was;
+ *  - a message the client sent itself.  Without echo-message that line is
+ *    the delivered message, which must not carry the label (the spec
+ *    allows it only on the echo-message copy), so the command is ACKed
+ *    (case 2).  sendcmdto_one_delivery() never takes the label nor joins
+ *    the labeled batch.
  *
  * This includes the real send.c, compiled with -ffunction-sections and
  * linked with --gc-sections, so the program keeps the functions under
@@ -451,6 +458,82 @@ static void test_one_event_respond_label_once(void **state)
   assert_int_equal(cli_label_responded(&asker), 1);
 }
 
+/* ------------------------------------------------------------------ */
+/* A message the client sent itself                                    */
+/* ------------------------------------------------------------------ */
+
+/* PRIVMSG nick :to myself without echo-message: the delivered copy has
+ * the message's tags and no label; the label stays pending for the ACK. */
+static void test_delivery_takes_no_label(void **state)
+{
+  const char *a;
+  char v[64];
+
+  (void)state;
+  label_pending(&asker, "L3");
+  sendcmdto_set_client_event("MSGID00000002", 1700000000456ULL);
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%s",
+                         &asker, "to myself");
+  sendcmdto_set_client_msgid(NULL);
+  a = line_to(&asker);
+  assert_non_null(a);
+  assert_false(has_tag(a, "label"));
+  assert_string_equal(tag_value(a, "msgid", v, sizeof(v)), "MSGID00000002");
+  assert_true(has_tag(a, "time"));
+  assert_string_equal(body_of(a), ":nick!u@h.example PRIVMSG nick :to myself");
+  assert_int_equal(cli_label_responded(&asker), 0);
+}
+
+/* Nor does it join the labeled batch its command opened (PRIVMSG to a
+ * list of targets): it is not part of the answer. */
+static void test_delivery_outside_labeled_batch(void **state)
+{
+  const char *a;
+
+  (void)state;
+  label_pending(&asker, "L4");
+  cli_label_responded(&asker) = 1;
+  batch_open(&asker, "BID2");
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%s",
+                         &asker, "x");
+  a = line_to(&asker);
+  assert_false(has_tag(a, "batch"));
+  assert_false(has_tag(a, "label"));
+}
+
+/* Client-only tags lead the delivered copy for a message-tags client,
+ * and are left off for one without. */
+static void test_delivery_client_tags(void **state)
+{
+  const char *a;
+  char v[64];
+
+  (void)state;
+  label_pending(&asker, "L5");
+  sendcmdto_one_delivery(&asker, CMD_TAGMSG, &asker, "+typing=active",
+                         "%C", &asker);
+  a = line_to(&asker);
+  assert_true(!strncmp(a, "@+typing=active;", 16));
+  assert_string_equal(tag_value(a, "+typing", v, sizeof(v)), "active");
+  assert_false(has_tag(a, "label"));
+
+  FlagClr(cli_active_own(&other), CAP_MSGTAGS);
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &other, "+typing=active",
+                         "%C :%s", &other, "y");
+  assert_false(has_tag(line_to(&other), "+typing"));
+}
+
+/* A client with no tag capability gets the bare line. */
+static void test_delivery_no_tags_at_all(void **state)
+{
+  (void)state;
+  memset(cli_active_own(&other), 0, sizeof(*cli_active_own(&other)));
+  label_pending(&other, "L6");
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &other, "+x=y", "%C :%s",
+                         &other, "plain");
+  assert_string_equal(line_to(&other), ":nick!u@h.example PRIVMSG other :plain");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -460,6 +543,10 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_respond_fanout_asker_not_member, setup, teardown),
     cmocka_unit_test_setup_teardown(test_plain_fanout_labels_no_one, setup, teardown),
     cmocka_unit_test_setup_teardown(test_one_event_respond_label_once, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delivery_no_tags_at_all, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
