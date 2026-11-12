@@ -325,11 +325,12 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         sendcmdto_one(who, CMD_JOIN, sptr, "%H %s :%s", chptr, IsAccount(who) ? cli_account(who) : "*",  cli_info(who));
       else
         sendcmdto_one(who, CMD_JOIN, sptr, "%H", chptr);
-      sendcmdto_one(sptr, CMD_KICK, sptr, "%H %C :%s", chptr, who, comment);
+      sendcmdto_one_event(sptr, CMD_KICK, sptr, 1, "%H %C :%s", chptr, who, comment);
       CheckDelayedJoins(chptr);
     } else
-      sendcmdto_channel_butserv_butone(sptr, CMD_KICK, chptr, NULL, 0, "%H %C :%s", chptr, who,
-                                       comment);
+      /* The kicker's own copy answers its KICK (its label). */
+      sendcmdto_channel_butserv_respond(sptr, CMD_KICK, chptr, cptr, 0,
+                                        "%H %C :%s", chptr, who, comment);
 
     sendcmdto_set_client_msgid(NULL);
 

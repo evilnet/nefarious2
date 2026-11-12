@@ -43,6 +43,7 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h> /* for atoi() */
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -216,9 +217,12 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
        if (topic_msgid[0])
          sendcmdto_set_client_event(topic_msgid, topic_time_ms);
 
-       sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
-                                        (setter ? "%H :%s (%s)" : "%H :%s%s"),
-                                        chptr, chptr->topic, (setter ? nick : ""));
+       /* The setter's own copy answers its TOPIC (its label, or the
+        * labeled batch m_topic opened). */
+       sendcmdto_channel_butserv_respond(from, CMD_TOPIC, chptr,
+                                         MyUser(cptr) ? cptr : NULL, 0,
+                                         (setter ? "%H :%s (%s)" : "%H :%s%s"),
+                                         chptr, chptr->topic, (setter ? nick : ""));
 
        sendcmdto_set_client_msgid(NULL);
 
@@ -234,7 +238,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
        * it to everyone else on the channel to save bandwidth
        */
     else if (MyUser(sptr))
-      sendcmdto_one(sptr, CMD_TOPIC, sptr, "%H :%s", chptr, chptr->topic);
+      sendcmdto_one_event(sptr, CMD_TOPIC, sptr, 1, "%H :%s", chptr, chptr->topic);
    } /* end topic_msgid scope */
 }
 
@@ -256,6 +260,7 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char *topic = 0, *name, *p = 0;
   const char *topicnocolor = 0;
   int hascolor = 0;
+  int lb = 0;
 
   if (parc < 2)
     return need_more_params(sptr, "TOPIC");
@@ -284,6 +289,11 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (hascolor)
       topicnocolor = StripColor(topic);
   }
+
+  /* A TOPIC of more than one channel answers with a line (or two) per
+   * channel: a labeled one gets them in a labeled-response batch. */
+  if (strchr(parv[1], ','))
+    lb = labeled_batch_start(cptr);
 
   for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
   {
@@ -340,6 +350,8 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     do_settopic(sptr,cptr,chptr,topic,0,NULL);
   }
+  if (lb)
+    labeled_batch_end(cptr);
   return 0;
 }
 

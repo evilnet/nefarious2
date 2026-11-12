@@ -2937,13 +2937,17 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
         sendcmdto_set_client_event(mode_msgid, mode_time_ms);
       }
 
-      sendcmdto_channel_butserv_butone(app_source, CMD_MODE, mbuf->mb_channel, NULL, 0,
-                                       "%H %s%s%s%s%s%s%s%s", mbuf->mb_channel,
-                                       rembuf_i || rembuf_local_i ? "-" : "",
-                                       rembuf, rembuf_local,
-                                       addbuf_i || addbuf_local_i ? "+" : "",
-                                       addbuf, addbuf_local,
-                                       remstr, addstr);
+      /* The copy to the connection whose MODE (or OPMODE, CLEARMODE)
+       * this is answers that command: its label. */
+      sendcmdto_channel_butserv_respond(app_source, CMD_MODE, mbuf->mb_channel,
+                                        (mbuf->mb_connect && MyUser(mbuf->mb_connect))
+                                        ? mbuf->mb_connect : NULL, 0,
+                                        "%H %s%s%s%s%s%s%s%s", mbuf->mb_channel,
+                                        rembuf_i || rembuf_local_i ? "-" : "",
+                                        rembuf, rembuf_local,
+                                        addbuf_i || addbuf_local_i ? "+" : "",
+                                        addbuf, addbuf_local,
+                                        remstr, addstr);
 
       sendcmdto_set_client_msgid(NULL);
 

@@ -588,6 +588,21 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   va_end(vl);
 }
 
+/* m_topic's own setter's copy goes through this (labeled-response); a
+ * server-sourced TOPIC has no asker, so every member gets the same line. */
+void sendcmdto_channel_butserv_respond(struct Client *from, const char *cmd,
+                                       const char *tok, struct Channel *to,
+                                       struct Client *asker, unsigned int skip,
+                                       const char *pattern, ...)
+{
+  va_list vl;
+  (void)tok; (void)skip; (void)asker;
+
+  va_start(vl, pattern);
+  to_local_members(from, cmd, to, NULL, pattern, vl);
+  va_end(vl);
+}
+
 void sendcmdto_channel_capab_butserv_butone(struct Client *from,
                                             const char *cmd, const char *tok,
                                             struct Channel *to,
@@ -957,6 +972,29 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   va_end(vd.vd_args);
   record_sent(to, buf);
 }
+
+/* m_topic's unchanged-topic answer to a local setter: not reached by a
+ * server's TOPIC, recorded as sendcmdto_one() records. */
+void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
+                         struct Client *to, int respond, const char *pattern, ...)
+{
+  struct VarData vd;
+  char buf[LINE];
+  (void)respond;
+
+  to = cli_from(to);
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  ircd_snprintf(to, buf, sizeof(buf), "%:#C %s %v", from,
+                IsServer(to) || IsMe(to) ? tok : cmd, &vd);
+  va_end(vd.vd_args);
+  record_sent(to, buf);
+}
+
+/* m_topic's labeled batch for a TOPIC of several channels: a local
+ * client's only, never a server's. */
+int labeled_batch_start(struct Client *sptr) { (void)sptr; return 0; }
+void labeled_batch_end(struct Client *sptr) { (void)sptr; }
 
 /* --- for m_endburst.o and m_destruct.o --- */
 

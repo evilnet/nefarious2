@@ -8,9 +8,9 @@
  * kinds of line reach the client whose command is being handled:
  *
  *  - an answer that goes out through a fan-out to many clients -- the
- *    PART of a channel it is on.  The fan-out tags every member's copy
- *    alike and never with a label, so a labeled PART came back unlabeled
- *    and was then ACKed (issue #216, case 1).
+ *    PART, TOPIC, KICK or MODE of a channel it is on.  The fan-out tags
+ *    every member's copy alike and never with a label, so a labeled PART
+ *    came back unlabeled and was then ACKed (issue #216, case 1).
  *    sendcmdto_channel_butserv_respond() gives the copy to the asking
  *    connection its own tags: the command's label, or its
  *    labeled-response batch -- and a bouncer sibling's copy stays as it
