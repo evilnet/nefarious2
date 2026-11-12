@@ -1840,9 +1840,31 @@ void auth_conf_iauth(int argc, char *argv[])
 
 /** End of a configuration pass: spawn the recorded program, or keep the
  * running one when its arguments are unchanged.  With no IAuth{} block,
- * the running program stays marked closing and auth_close_unused() ends it. */
+ * the running program stays marked closing and auth_close_unused() ends it.
+ *
+ * A pass that reported a configuration error (yyerror(): a syntax error,
+ * a refused block, an include that could not be read) changes nothing
+ * here: the error may have swallowed the IAuth{} block, and without a
+ * program clients are admitted unchecked whatever its policy said.  The
+ * running program (or none) stays as it was until a pass parses cleanly. */
 void auth_conf_apply(void)
 {
+  if (conf_get_error_flag()) {
+    if (iauth || conf_iauth_argv) {
+      const char *what = iauth ? iauth->i_argv[0] : "none";
+      const char *state = !iauth ? "" : i_GetConnected(iauth) ? ", running"
+        : ", not running";
+
+      if (iauth)
+        IAuthClr(iauth, IAUTH_CLOSING);
+      /* LS_CONFIG also tells SNO_OLDSNO operators. */
+      log_write(LS_CONFIG, L_WARNING, 0, "IAuth: the configuration has "
+                "errors; IAuth is left as it was (program: %s%s)", what,
+                state);
+    }
+    auth_conf_free();
+    return;
+  }
   auth_spawn_recorded();
 }
 
