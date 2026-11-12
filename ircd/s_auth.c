@@ -39,6 +39,7 @@
 #include "class.h"
 #include "client.h"
 #include "hash.h"
+#include "iauth_respawn.h"
 #include "IPcheck.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -92,6 +93,9 @@ enum AuthRequestFlag {
     AR_IAUTH_SOFT_DONE, /**< iauth has no objection to client */
     AR_PASSWORD_CHECKED, /**< client password already checked */
     AR_LOC_DONE,        /**< loc messages have been sent */
+    AR_IAUTH_RELEASED,  /**< iauth went away while checking; registration
+                         * resumes from iauth_release_callback() */
+    AR_IAUTH_SASL,      /**< the SASL exchange in progress is iauth's */
     AR_NUM_FLAGS
 };
 
@@ -160,6 +164,8 @@ enum IAuthFlag
 {
   IAUTH_BLOCKED,                        /**< socket buffer full */
   IAUTH_CLOSING,                        /**< candidate to be disposed */
+  IAUTH_SPAWN_UNDO,                     /**< a failed spawn is deleting its
+                                         * sockets: no automatic respawn */
   /* The following flags are controlled by iauth's "O" options command. */
   IAUTH_ADDLINFO,                       /**< Send additional info
                                          * (password and username). */
@@ -199,6 +205,8 @@ struct IAuth {
   struct SLink *i_stats;                /**< statistics string list */
   char **i_argv;                        /**< argument list */
   int i_argc;                           /**< number of arguments in argument list */
+  struct IAuthRespawn i_backoff;        /**< failure streak of the program */
+  struct Timer i_respawn;               /**< next start, or end of a streak */
 };
 
 /** Return whether flag \a flag is set on \a iauth. */
@@ -969,8 +977,20 @@ int auth_ping_timeout(struct Client *cptr)
       sendheader(cptr, REPORT_FAIL_IAUTH);
       return exit_client_msg(cptr, cptr, &me, "Authorization Timeout");
     }
+    /* A T that cannot be written releases this client, and any other the
+     * program was checking (iauth_disconnect()); this one is finished
+     * here, as it would have been. */
     sendto_iauth(cptr, "T");
     FlagClr(&auth->flags, AR_IAUTH_PENDING);
+    return check_auth_finished(auth);
+  }
+
+  /* Released by an IAuth program that went away, and the check owed from
+   * the event loop (iauth_release_callback()) has not run yet: a T line
+   * for another client that failed in this same pass of check_pings(), or
+   * a release just before it.  The check runs now. */
+  if (FlagHas(&auth->flags, AR_IAUTH_RELEASED)) {
+    FlagClr(&auth->flags, AR_IAUTH_RELEASED);
     return check_auth_finished(auth);
   }
 
@@ -1448,6 +1468,7 @@ void auth_sasl_start(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagSet(&auth->flags, AR_SASL_PENDING);
+  FlagClr(&auth->flags, AR_IAUTH_SASL);
 }
 
 /** Mark that SASL authentication has completed (success, fail, or abort).
@@ -1459,6 +1480,7 @@ int auth_sasl_done(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagClr(&auth->flags, AR_SASL_PENDING);
+  FlagClr(&auth->flags, AR_IAUTH_SASL);
   return check_auth_finished(auth);
 }
 
@@ -1472,6 +1494,7 @@ void auth_sasl_clear(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagClr(&auth->flags, AR_SASL_PENDING);
+  FlagClr(&auth->flags, AR_IAUTH_SASL);
 }
 
 /** Check if IAuth is configured to handle SASL authentication.
@@ -1490,13 +1513,24 @@ int auth_iauth_handles_sasl(void)
  */
 int auth_send_sasl_start(struct Client *cptr, const char *mechanism, const char *certfp)
 {
+  struct AuthRequest *auth = cli_auth(cptr);
+  int res;
+
   if (!IAuthHas(iauth, IAUTH_SASL))
     return 0;
 
+  /* The exchange is iauth's from here (marked before the line goes, so
+   * that a write that fails finds it): if the program goes away before it
+   * ends, iauth_disconnect() fails it. */
+  if (auth)
+    FlagSet(&auth->flags, AR_IAUTH_SASL);
   if (!EmptyString(certfp))
-    return sendto_iauth(cptr, "A S %s :%s", mechanism, certfp);
+    res = sendto_iauth(cptr, "A S %s :%s", mechanism, certfp);
   else
-    return sendto_iauth(cptr, "A S :%s", mechanism);
+    res = sendto_iauth(cptr, "A S :%s", mechanism);
+  if (!res && auth)
+    FlagClr(&auth->flags, AR_IAUTH_SASL);
+  return res;
 }
 
 /** Send SASL host information to IAuth.
@@ -1527,98 +1561,102 @@ int auth_send_sasl_data(struct Client *cptr, const char *data)
   return sendto_iauth(cptr, "a :%s", data);
 }
 
-/** Attempt to spawn the process for an IAuth instance.
+/** Fail \a cptr's SASL exchange with IAuth, which can no longer be
+ * answered: the program went away, or the exchange's line could not be
+ * sent to it.  The client gets ERR_SASLFAIL, as when no SASL service is
+ * reachable; the exchange's cookie and its timer are dropped, so the next
+ * AUTHENTICATE starts a new one, and nothing goes to services (the
+ * exchange was never theirs).  The SASL hold on registration is dropped
+ * but registration is not resumed here: the caller does that
+ * (auth_sasl_done()), or the check owed from the event loop does
+ * (iauth_disconnect()).
+ * @param[in] cptr Local client in an IAuth SASL exchange.
+ * @return Non-zero when an exchange was in progress and has failed.
+ */
+int auth_iauth_sasl_fail(struct Client *cptr)
+{
+  struct AuthRequest *auth = cli_auth(cptr);
+
+  if (auth)
+    FlagClr(&auth->flags, AR_IAUTH_SASL);
+  if (!cli_saslcookie(cptr) || IsSASLComplete(cptr))
+    return 0;
+  if (auth)
+    FlagClr(&auth->flags, AR_SASL_PENDING);
+  send_reply(cptr, ERR_SASLFAIL, ": service unavailable");
+  if (t_active(&cli_sasltimeout(cptr)))
+    timer_del(&cli_sasltimeout(cptr));
+  cli_saslcookie(cptr) = 0;
+  return 1;
+}
+
+/** Attempt to spawn the process for an IAuth instance.  When to try
+ * (again) is the callers' business: iauth_start().
  * @param[in] iauth IAuth descriptor.
- * @param[in] automatic If non-zero, apply sanity checks against
- *   excessive automatic restarts.
  * @return 0 on success, non-zero on failure.
  */
-int iauth_do_spawn(struct IAuth *iauth, int automatic)
+static int iauth_do_spawn(struct IAuth *iauth)
 {
   pid_t cpid;
-  int s_io[2];
-  int s_err[2];
+  int s_io[2] = { -1, -1 };
+  int s_err[2] = { -1, -1 };
   int res;
-
-  if (automatic && CurrentTime - iauth->started < 5)
-  {
-    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth crashed fast, leaving it dead.");
-    return -1;
-  }
+  const char *step;
 
   /* Record time we tried to spawn the iauth process. */
   iauth->started = CurrentTime;
 
+  /* A new child is a new conversation: nothing queued for, or half read
+   * from, a program that went away carries over to it. */
+  MsgQClear(i_sendQ(iauth));
+  IAuthClr(iauth, IAUTH_BLOCKED);
+  iauth->i_count = 0;
+  iauth->i_errcount = 0;
+
   /* Attempt to allocate a pair of sockets. */
-  res = os_socketpair(s_io);
-  if (res) {
+  if (os_socketpair(s_io)) {
     res = errno;
-    Debug((DEBUG_INFO, "Unable to create IAuth socketpair: %s", strerror(res)));
-    return res;
+    step = "create IAuth socketpair";
+    s_io[0] = s_io[1] = -1;
+    goto failed;
   }
 
   /* Mark the parent's side of the pair (element 0) as non-blocking. */
-  res = os_set_nonblocking(s_io[0]);
-  if (!res) {
+  if (!os_set_nonblocking(s_io[0])) {
     res = errno;
-    Debug((DEBUG_INFO, "Unable to make IAuth socket non-blocking: %s", strerror(res)));
-    close(s_io[1]);
-    close(s_io[0]);
-    return res;
+    step = "make IAuth socket non-blocking";
+    goto failed;
   }
 
   /* Initialize the socket structure to talk to the child. */
-  res = socket_add(i_socket(iauth), iauth_sock_callback, iauth,
-                   SS_CONNECTED, SOCK_EVENT_READABLE, s_io[0]);
-  if (!res) {
+  if (!socket_add(i_socket(iauth), iauth_sock_callback, iauth,
+                  SS_CONNECTED, SOCK_EVENT_READABLE, s_io[0])) {
     res = errno;
-    Debug((DEBUG_INFO, "Unable to register IAuth socket: %s", strerror(res)));
-    close(s_io[1]);
-    close(s_io[0]);
-    /* Refused, so not registered: iauth_disconnect() must neither close
-     * this number again nor socket_del() it. */
-    s_fd(i_socket(iauth)) = -1;
-    return res;
+    step = "register IAuth socket";
+    goto failed;
   }
 
   /* Allocate another pair for stderr. */
-  res = os_socketpair(s_err);
-  if (res) {
+  if (os_socketpair(s_err)) {
     res = errno;
-    Debug((DEBUG_INFO, "Unable to create IAuth stderr: %s", strerror(res)));
-    socket_del(i_socket(iauth));
-    close(s_io[1]);
-    close(s_io[0]);
-    return res;
+    step = "create IAuth stderr";
+    s_err[0] = s_err[1] = -1;
+    goto failed;
   }
 
   /* Mark parent side of this pair non-blocking, too. */
-  res = os_set_nonblocking(s_err[0]);
-  if (!res) {
+  if (!os_set_nonblocking(s_err[0])) {
     res = errno;
-    Debug((DEBUG_INFO, "Unable to make IAuth stderr non-blocking: %s", strerror(res)));
-    close(s_err[1]);
-    close(s_err[0]);
-    socket_del(i_socket(iauth));
-    close(s_io[1]);
-    close(s_io[0]);
-    return res;
+    step = "make IAuth stderr non-blocking";
+    goto failed;
   }
 
   /* And set up i_stderr(iauth). */
-  res = socket_add(i_stderr(iauth), iauth_stderr_callback, iauth,
-                   SS_CONNECTED, SOCK_EVENT_READABLE, s_err[0]);
-  if (!res) {
+  if (!socket_add(i_stderr(iauth), iauth_stderr_callback, iauth,
+                  SS_CONNECTED, SOCK_EVENT_READABLE, s_err[0])) {
     res = errno;
-    Debug((DEBUG_INFO, "Unable to register IAuth stderr: %s", strerror(res)));
-    close(s_err[1]);
-    close(s_err[0]);
-    s_fd(i_stderr(iauth)) = -1;   /* refused: as for i_socket above */
-    socket_del(i_socket(iauth));
-    close(s_io[1]);
-    close(s_io[0]);
-    s_fd(i_socket(iauth)) = -1;   /* deleted and closed: not ours now */
-    return res;
+    step = "register IAuth stderr";
+    goto failed;
   }
 
   /* Attempt to fork a child process. */
@@ -1626,14 +1664,8 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
   if (cpid < 0) {
     /* Error forking the child, still in parent. */
     res = errno;
-    Debug((DEBUG_INFO, "Unable to fork IAuth child: %s", strerror(res)));
-    socket_del(i_stderr(iauth));
-    close(s_err[1]);
-    close(s_err[0]);
-    socket_del(i_socket(iauth));
-    close(s_io[1]);
-    close(s_io[0]);
-    return res;
+    step = "fork IAuth child";
+    goto failed;
   }
 
   if (cpid > 0) {
@@ -1661,42 +1693,150 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
     execvp(iauth->i_argv[0], iauth->i_argv);
   }
 
-  /* If we got here, something was seriously wrong. */
-  exit(EXIT_FAILURE);
+  /* If we got here, something was seriously wrong (the program is
+   * missing or not executable).  _exit(): this is a copy of the server,
+   * whose exit handlers and buffers are not the child's to run. */
+  _exit(EXIT_FAILURE);
+
+failed:
+  /* Say so; the caller schedules the next attempt.  An engine other than
+   * epoll may refuse a registration without setting errno. */
+  log_write(LS_IAUTH, L_ERROR, 0, "IAuth spawn failed: unable to %s: %s",
+            step, res ? strerror(res) : "no error code");
+  sendto_opmask_butone(NULL, SNO_AUTH, "IAuth spawn failed: unable to %s: %s",
+                       step, res ? strerror(res) : "no error code");
+
+  /* A spawn that fails part-way leaves nothing behind.  Each socket
+   * registered so far is deleted while its descriptor is still open, so
+   * the engine unregisters that descriptor and not a later owner of the
+   * number.  Then the ends that exist are closed, and neither socket keeps
+   * a number: i_GetConnected() is false, a rehash spawns afresh, and
+   * iauth_disconnect() finds nothing to close.  A refused socket is not
+   * active and is not deleted.  The deletes run the sockets' ET_DESTROY
+   * callbacks, which must not take this failure for a program that went
+   * away (iauth_went_away()): the caller schedules the next attempt.
+   * IAUTH_SPAWN_UNDO keeps them from it. */
+  IAuthSet(iauth, IAUTH_SPAWN_UNDO);
+  if (s_active(i_stderr(iauth)))
+    socket_del(i_stderr(iauth));
+  if (s_active(i_socket(iauth)))
+    socket_del(i_socket(iauth));
+  IAuthClr(iauth, IAUTH_SPAWN_UNDO);
+  if (s_err[1] >= 0)
+    close(s_err[1]);
+  if (s_err[0] >= 0)
+    close(s_err[0]);
+  if (s_io[1] >= 0)
+    close(s_io[1]);
+  if (s_io[0] >= 0)
+    close(s_io[0]);
+  s_fd(i_stderr(iauth)) = -1;
+  s_fd(i_socket(iauth)) = -1;
+  return res ? res : -1;          /* a failure, even without an errno */
 }
 
-/** Restart an %IAuth program.
- * @return 0 on failure, 1 on success, 2 on no IAuth program.
+static void iauth_respawn_callback(struct Event *ev);
+
+/** Arm the respawn timer of \a iauth for \a delay (non-zero) seconds,
+ * replacing whatever it was waiting for.  Safe inside the timer's own
+ * callback, where timer_chg() re-adds it after the callback returns.
+ * @param[in] iauth IAuth descriptor.
+ * @param[in] delay Seconds from now.
  */
-int auth_restart(void)
+static void iauth_timer_arm(struct IAuth *iauth, unsigned int delay)
 {
-  static struct IAuth *iauthnew;
-  int ii;
+  if (t_active(&iauth->i_respawn))
+    timer_chg(&iauth->i_respawn, TT_RELATIVE, delay);
+  else
+    timer_add(timer_init(&iauth->i_respawn), iauth_respawn_callback, iauth,
+              TT_RELATIVE, delay);
+}
 
-  if (!iauth)
-    return 2;
+/** Start the program of \a iauth.  When no child could be started the
+ * next attempt is scheduled; while a failure streak runs, a new child is
+ * watched until it has run long enough to end the streak.
+ * @param[in] iauth IAuth descriptor.
+ * @return 0 when a child was started, non-zero otherwise.
+ */
+static int iauth_start(struct IAuth *iauth)
+{
+  unsigned int delay;
+  int res;
 
-  /* Need to initialize a new connection. */
-  iauthnew = MyCalloc(1, sizeof(*iauthnew));
-  msgq_init(i_sendQ(iauthnew));
-  /* No descriptors yet (0 is someone else's): until a spawn registers
-   * them, i_GetConnected() is false and iauth_disconnect() leaves them. */
-  s_fd(i_socket(iauthnew)) = -1;
-  s_fd(i_stderr(iauthnew)) = -1;
-  /* Populate iauth's argv array. */
-  iauthnew->i_argv = MyCalloc(iauth->i_argc + 1, sizeof(iauthnew->i_argv[0]));
-  for (ii = 0; ii < iauth->i_argc; ++ii)
-    DupString(iauthnew->i_argv[ii], iauth->i_argv[ii]);
-  iauthnew->i_argv[ii] = NULL;
+  res = iauth_do_spawn(iauth);
+  if (res) {
+    delay = iauth_respawn_exited(&iauth->i_backoff, 0);
+    log_write(LS_IAUTH, L_WARNING, 0, "IAuth program %s not started; "
+              "trying again in %u seconds", iauth->i_argv[0], delay);
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s not started; "
+                         "trying again in %u seconds", iauth->i_argv[0],
+                         delay);
+    iauth_timer_arm(iauth, delay);
+  } else if (iauth->i_backoff.failures && i_GetConnected(iauth))
+    iauth_timer_arm(iauth, IAUTH_RESPAWN_STABLE);
+  /* (Not connected after a start: the first write failed and
+   * iauth_went_away() has scheduled the next attempt.) */
+  return res;
+}
 
-  auth_close_unused();
-  iauth = iauthnew;
+/** The program of \a iauth went away on its own: both its sockets are
+ * gone and nothing is closing it.  Start it again -- at once after a good
+ * run, otherwise after the backoff delay (iauth_respawn.h).  Until then
+ * clients register without IAuth.
+ * @param[in] iauth IAuth descriptor.
+ */
+static void iauth_went_away(struct IAuth *iauth)
+{
+  long up = (long)(CurrentTime - iauth->started);
+  unsigned int delay;
 
-  /* Try to spawn it, and handle the results. */
-  if (iauth_do_spawn(iauth, 0))
-    return 0;
-  IAuthClr(iauth, IAUTH_CLOSING);
-  return 1;
+  delay = iauth_respawn_exited(&iauth->i_backoff, CurrentTime - iauth->started);
+  if (!delay) {
+    log_write(LS_IAUTH, L_WARNING, 0, "IAuth program %s exited after %ld "
+              "seconds; restarting it", iauth->i_argv[0], up);
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s exited after %ld "
+                         "seconds; restarting it", iauth->i_argv[0], up);
+    iauth_start(iauth);
+    return;
+  }
+  log_write(LS_IAUTH, L_WARNING, 0, "IAuth program %s exited after %ld "
+            "seconds (%u in a row); restarting it in %u seconds",
+            iauth->i_argv[0], up, iauth->i_backoff.failures, delay);
+  sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s exited after %ld "
+                       "seconds (%u in a row); restarting it in %u seconds",
+                       iauth->i_argv[0], up, iauth->i_backoff.failures,
+                       delay);
+  iauth_timer_arm(iauth, delay);
+}
+
+/** Respawn timer of an %IAuth instance: start a program that is due to be
+ * started again, or end the failure streak of one that has now run long
+ * enough.
+ * @param[in] ev Timer event; the IAuth instance is its data.
+ */
+static void iauth_respawn_callback(struct Event *ev)
+{
+  struct IAuth *iauth = (struct IAuth *) t_data(ev_timer(ev));
+  unsigned int failures;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  if (!i_GetConnected(iauth)) {
+    iauth_start(iauth);
+    return;
+  }
+  failures = iauth_respawn_stable(&iauth->i_backoff);
+  if (failures) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth program %s recovered: running "
+              "for %ld seconds after %u failure%s", iauth->i_argv[0],
+              (long)(CurrentTime - iauth->started), failures,
+              failures == 1 ? "" : "s");
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth program %s recovered: "
+                         "running for %ld seconds after %u failure%s",
+                         iauth->i_argv[0],
+                         (long)(CurrentTime - iauth->started), failures,
+                         failures == 1 ? "" : "s");
+  }
 }
 
 /** See if an %IAuth program must be spawned.
@@ -1728,13 +1868,19 @@ int auth_spawn(int argc, char *argv[])
       IAuthClr(iauth, IAUTH_CLOSING);
       return 2;
     }
+    /* Only one program runs: the one being replaced is closed (and freed,
+     * which clears the pointer) before the next is spawned, whoever asked
+     * for the replacement. */
+    IAuthSet(iauth, IAUTH_CLOSING);
     auth_close_unused();
   }
 
   /* Need to initialize a new connection. */
   iauth = MyCalloc(1, sizeof(*iauth));
   msgq_init(i_sendQ(iauth));
-  s_fd(i_socket(iauth)) = -1;   /* no descriptors yet: as in auth_restart() */
+  /* No descriptors yet (0 is someone else's): until a spawn registers
+   * them, i_GetConnected() is false and iauth_disconnect() leaves them. */
+  s_fd(i_socket(iauth)) = -1;
   s_fd(i_stderr(iauth)) = -1;
   /* Populate iauth's argv array. */
   iauth->i_argv = MyCalloc(argc + 1, sizeof(iauth->i_argv[0]));
@@ -1742,8 +1888,8 @@ int auth_spawn(int argc, char *argv[])
     DupString(iauth->i_argv[ii], argv[ii]);
   iauth->i_argv[ii] = NULL;
   iauth->i_argc = argc;
-  /* Try to spawn it, and handle the results. */
-  if (iauth_do_spawn(iauth, 0))
+  /* Try to spawn it; when that fails, iauth_start() schedules a retry. */
+  if (iauth_start(iauth))
     return 0;
   IAuthClr(iauth, IAUTH_CLOSING);
   return 1;
@@ -1777,6 +1923,37 @@ static void auth_conf_free(void)
   conf_iauth_toplevel = 0;
 }
 
+/** Record \a argv as the program to run, replacing any earlier record.
+ * @param[in] argc Number of program arguments.
+ * @param[in] argv Program arguments (copied).
+ */
+static void auth_conf_record(int argc, char *argv[])
+{
+  int ii;
+
+  auth_conf_free();
+  if (argc <= 0)
+    return;
+  conf_iauth_argv = MyCalloc(argc + 1, sizeof(conf_iauth_argv[0]));
+  for (ii = 0; ii < argc; ++ii)
+    DupString(conf_iauth_argv[ii], argv[ii]);
+  conf_iauth_argc = argc;
+}
+
+/** Spawn the recorded program, or keep the running one when its arguments
+ * are unchanged, and forget the record.
+ * @return As auth_spawn(); 2 when nothing is recorded.
+ */
+static int auth_spawn_recorded(void)
+{
+  int res = 2;
+
+  if (conf_iauth_argv)
+    res = auth_spawn(conf_iauth_argc, conf_iauth_argv);
+  auth_conf_free();
+  return res;
+}
+
 /** Start a configuration pass: forget any IAuth{} block from the last. */
 void auth_conf_begin(void)
 {
@@ -1793,7 +1970,6 @@ void auth_conf_begin(void)
  */
 void auth_conf_iauth(int argc, char *argv[])
 {
-  int ii;
   int toplevel = (include_stack_ptr == 0);
 
   if (conf_iauth_argv) {
@@ -1809,24 +1985,56 @@ void auth_conf_iauth(int argc, char *argv[])
                          "using %s", toplevel ? "the one in the main file"
                          : "the last one");
   }
-  auth_conf_free();
+  auth_conf_record(argc, argv);
   conf_iauth_toplevel = toplevel;
-  if (argc <= 0)
-    return;
-  conf_iauth_argv = MyCalloc(argc + 1, sizeof(conf_iauth_argv[0]));
-  for (ii = 0; ii < argc; ++ii)
-    DupString(conf_iauth_argv[ii], argv[ii]);
-  conf_iauth_argc = argc;
 }
 
 /** End of a configuration pass: spawn the recorded program, or keep the
  * running one when its arguments are unchanged.  With no IAuth{} block,
- * the running program stays marked closing and auth_close_unused() ends it. */
+ * the running program stays marked closing and auth_close_unused() ends it.
+ *
+ * A pass that reported a configuration error (yyerror(): a syntax error,
+ * a refused block, an include that could not be read) changes nothing
+ * here: the error may have swallowed the IAuth{} block, and without a
+ * program clients are admitted unchecked whatever its policy said.  The
+ * running program (or none) stays as it was until a pass parses cleanly. */
 void auth_conf_apply(void)
 {
-  if (conf_iauth_argv)
-    auth_spawn(conf_iauth_argc, conf_iauth_argv);
-  auth_conf_free();
+  if (conf_get_error_flag()) {
+    if (iauth || conf_iauth_argv) {
+      const char *what = iauth ? iauth->i_argv[0] : "none";
+      const char *state = !iauth ? "" : i_GetConnected(iauth) ? ", running"
+        : ", not running";
+
+      if (iauth)
+        IAuthClr(iauth, IAUTH_CLOSING);
+      /* LS_CONFIG also tells SNO_OLDSNO operators. */
+      log_write(LS_CONFIG, L_WARNING, 0, "IAuth: the configuration has "
+                "errors; IAuth is left as it was (program: %s%s)", what,
+                state);
+    }
+    auth_conf_free();
+    return;
+  }
+  auth_spawn_recorded();
+}
+
+/** Restart the %IAuth program ("REHASH a").  The running program is
+ * closed -- the clients it was still checking are released, as when an
+ * IAuth program goes away -- and the same program is started again by the
+ * path a configuration pass takes, so exactly one runs afterwards.
+ * @return 0 on failure, 1 on success, 2 on no IAuth program.
+ */
+int auth_restart(void)
+{
+  if (!iauth)
+    return 2;
+  /* Recorded as a copy: the instance holding the arguments is freed
+   * before the new one is spawned. */
+  auth_conf_record(iauth->i_argc, iauth->i_argv);
+  IAuthSet(iauth, IAUTH_CLOSING);
+  auth_close_unused();
+  return auth_spawn_recorded();
 }
 
 /** Mark all %IAuth connections as closing. */
@@ -1836,35 +2044,149 @@ void auth_mark_closing(void)
     IAuthSet(iauth, IAUTH_CLOSING);
 }
 
+/** Finishes the registration of clients released by iauth_disconnect(). */
+static struct Timer iauth_release_timer;
+
+/** Finish the registration of the clients an %IAuth instance was still
+ * checking when it went away (#AR_IAUTH_RELEASED): each continues as a
+ * client that never had IAuth, and registers if nothing else holds it.
+ * This runs from the event loop, outside whatever closed the instance.
+ * @param[in] ev Timer event.
+ */
+static void iauth_release_callback(struct Event *ev)
+{
+  struct AuthRequest *auth;
+  struct Client *cli;
+  int ii;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  for (ii = 0; ii <= HighestFd; ii++) {
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
+        || !FlagHas(&auth->flags, AR_IAUTH_RELEASED))
+      continue;
+    FlagClr(&auth->flags, AR_IAUTH_RELEASED);
+    check_auth_finished(auth);
+  }
+}
+
+/** Run iauth_release_callback() from the event loop, as soon as it can. */
+static void iauth_release_soon(void)
+{
+  if (!t_active(&iauth_release_timer))
+    timer_add(timer_init(&iauth_release_timer), iauth_release_callback,
+              NULL, TT_RELATIVE, 0);
+  else if (iauth_release_timer.t_header.gh_flags & GEN_MARKED)
+    /* Inside the callback itself: it may have passed a client released
+     * now, so it runs again. */
+    timer_chg(&iauth_release_timer, TT_RELATIVE, 1);
+  /* (Otherwise it is due and will see every released client.) */
+}
+
 /** Complete disconnection of an %IAuth connection.
  * @param[in] iauth %Connection to fully close.
  */
 static void iauth_disconnect(struct IAuth *iauth)
 {
+  struct AuthRequest *auth;
+  struct Client *cli;
+  int released = 0;
+  int sasl = 0;
+  int ii;
+
   if (iauth == NULL)
     return;
 
-  /* Close error socket. */
+  /* Close both sockets.  A socket_del() can respawn IAuth: when the other
+   * socket is no longer active and we are not closing, the ET_DESTROY
+   * callback calls iauth_went_away(), which after a good run spawns the
+   * program at once: that registers this same Socket again, with the new
+   * child's descriptor, before socket_del() returns
+   * (outside the socket's own callbacks the destroy is not deferred).  So
+   * clear s_fd only if the socket still reads as deleted (GEN_DESTROY).
+   * Comparing numbers cannot tell: socketpair() reuses the number just
+   * closed. */
   if (s_fd(i_stderr(iauth)) != -1) {
     close(s_fd(i_stderr(iauth)));
     socket_del(i_stderr(iauth));
-    s_fd(i_stderr(iauth)) = -1;
+    if (i_stderr(iauth)->s_header.gh_flags & GEN_DESTROY)
+      s_fd(i_stderr(iauth)) = -1;
   }
 
-  /* Close main socket. */
   if (s_fd(i_socket(iauth)) != -1) {
     close(s_fd(i_socket(iauth)));
     socket_del(i_socket(iauth));
-    s_fd(i_socket(iauth)) = -1;
+    if (i_socket(iauth)->s_header.gh_flags & GEN_DESTROY)
+      s_fd(i_socket(iauth)) = -1;
   }
+
+  /* Release the clients this instance was still checking.  A client that
+   * connects while no IAuth program runs registers without one
+   * (start_iauth_query()); these do the same, and the next instance is
+   * not told about them.  Left pending, they waited for an answer that
+   * could not come until the registration timeout, which refused them
+   * under the R policy.  Their registration is finished from the event
+   * loop: a failed write to IAuth brings us here from inside a client's
+   * own registration step, where registering (or exiting) that client or
+   * another one would pull it from under its caller.
+   * A SASL exchange with the program can never be answered now either: it
+   * fails at once, and the client's registration is checked from the
+   * event loop the same way (the exchange no longer holds it). */
+  for (ii = 0; ii <= HighestFd; ii++) {
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli)))
+      continue;
+    if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
+      FlagClr(&auth->flags, AR_IAUTH_PENDING);
+      FlagSet(&auth->flags, AR_IAUTH_RELEASED);
+      released++;
+    }
+    if (FlagHas(&auth->flags, AR_IAUTH_SASL) && auth_iauth_sasl_fail(cli)) {
+      FlagSet(&auth->flags, AR_IAUTH_RELEASED);
+      sasl++;
+    }
+  }
+  if (released) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: released %d "
+              "pending client%s", released, released == 1 ? "" : "s");
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth disconnected: released %d "
+                         "pending client%s", released,
+                         released == 1 ? "" : "s");
+  }
+  if (sasl) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: failed %d SASL "
+              "exchange%s", sasl, sasl == 1 ? "" : "s");
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth disconnected: failed %d "
+                         "SASL exchange%s", sasl, sasl == 1 ? "" : "s");
+  }
+  if (released || sasl)
+    iauth_release_soon();
 }
 
 /** Close all %IAuth connections marked as closing. */
 void auth_close_unused(void)
 {
   if (IAuthHas(iauth, IAUTH_CLOSING)) {
+    struct SLink *node, *next;
     int ii;
+
     iauth_disconnect(iauth);
+    /* No retry or streak watch outlives the instance. */
+    if (t_active(&iauth->i_respawn))
+      timer_del(&iauth->i_respawn);
+    /* Output still queued for the program goes with the instance, and so
+     * does what the program told us. */
+    MsgQClear(i_sendQ(iauth));
+    MyFree(iauth->i_version);
+    for (node = iauth->i_config; node; node = next) {
+      next = node->next;
+      MyFree(node->value.cp);
+      free_link(node);
+    }
+    for (node = iauth->i_stats; node; node = next) {
+      next = node->next;
+      MyFree(node->value.cp);
+      free_link(node);
+    }
     if (iauth->i_argv) {
       for (ii = 0; iauth->i_argv[ii]; ++ii)
         MyFree(iauth->i_argv[ii]);
@@ -2908,8 +3230,9 @@ static void iauth_sock_callback(struct Event *ev)
 
   switch (ev_type(ev)) {
   case ET_DESTROY:
-    if (!IAuthHas(iauth, IAUTH_CLOSING) && !s_active(i_stderr(iauth)))
-      iauth_do_spawn(iauth, 1);
+    if (!IAuthHas(iauth, IAUTH_CLOSING) && !IAuthHas(iauth, IAUTH_SPAWN_UNDO)
+        && !s_active(i_stderr(iauth)))
+      iauth_went_away(iauth);
     break;
   case ET_READ:
     iauth_read(iauth);
@@ -2981,8 +3304,9 @@ static void iauth_stderr_callback(struct Event *ev)
 
   switch (ev_type(ev)) {
   case ET_DESTROY:
-    if (!IAuthHas(iauth, IAUTH_CLOSING) && !s_active(i_socket(iauth)))
-      iauth_do_spawn(iauth, 1);
+    if (!IAuthHas(iauth, IAUTH_CLOSING) && !IAuthHas(iauth, IAUTH_SPAWN_UNDO)
+        && !s_active(i_socket(iauth)))
+      iauth_went_away(iauth);
     break;
   case ET_READ:
     iauth_read_stderr(iauth);

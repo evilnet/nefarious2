@@ -81,7 +81,9 @@ iauthd-ts is automatically built as part of the Nefarious Docker image. The comp
 
 ## Configuration
 
-iauthd-ts reads configuration from `#IAUTH` directives in the config file. These can be embedded in your `ircd.conf` since IRCd ignores lines starting with `#`.
+iauthd-ts reads configuration from `#IAUTH` directives in the config file named by `-c`. These can be embedded in your `ircd.conf` since IRCd ignores lines starting with `#`.
+
+Only that one file is read: `include` lines in it are not followed. If your `#IAUTH` lines are in an included file (for example a network-wide file kept in sync across servers), give `-c` that file, not `ircd.conf`.
 
 ### Directives
 
@@ -309,6 +311,13 @@ IAuth {
 };
 ```
 
+How the IRCd runs it (details in `doc/readme.iauth`):
+
+- Only one IAuth program runs. If more than one `IAuth` block is read, a block in `ircd.conf` itself wins over one from an included file; among blocks from the same kind of file, the last one read is used.
+- A rehash keeps iauthd-ts running when its block is unchanged (with the `e` policy it gets a `rehash` event and rereads its `-c` file), replaces it when the block changed, and stops it when the block was removed. A rehash whose configuration has errors leaves it as it was. `/REHASH a` restarts it.
+- iauthd-ts exits when the IRCd closes its stdin. If it exits on its own, the IRCd starts it again: at once after a good run, otherwise after 5 seconds, doubling up to 300 seconds while it keeps failing.
+- While it is not running, clients connect without IAuth checks, whatever its policy (including `R`). Clients it was still checking when it stopped are let in at that moment, and a SASL exchange in progress through it fails at once (904).
+
 ### Monitoring
 
 To see IAuth debug messages as an operator:
@@ -455,6 +464,7 @@ npm run dev -- -c /path/to/config
 - Check that Node.js 18+ is installed: `node --version`
 - Verify config file path is correct and readable
 - Check for syntax errors in `#IAUTH` directives
+- Operators with the IAuth snomask (262144) see `IAuth program ... exited after N seconds ...; restarting it in D seconds` for each failed start, and what iauthd-ts writes to stderr; the IRCd keeps retrying (up to every 300 seconds) and reports `... recovered` once it has run for a minute
 
 ### Clients timing out
 - Increase `DNSTIMEOUT` if DNSBL servers are slow

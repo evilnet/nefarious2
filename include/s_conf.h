@@ -283,6 +283,7 @@ extern int find_except_conf_by_ip(const struct irc_in_addr *addr, int flags);
 extern struct ConfItem* get_client_conf(struct Client *acptr);
 
 extern void yyerror(const char *msg);
+extern int conf_get_error_flag(void);
 
 extern int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf);
 
