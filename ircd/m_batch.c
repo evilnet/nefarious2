@@ -2176,6 +2176,12 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_ml_msg_count(con) = 0;
     con_ml_total_bytes(con) = 0;
     con_ml_batch_start(con) = CurrentTime;
+    /* The batch's command is not known until its first line.  Only
+     * clear_multiline_batch() set this to "not set" (-1); a new
+     * Connection is zeroed, which reads as PRIVMSG, so a connection's
+     * first batch could not be a NOTICE batch ("Cannot mix PRIVMSG and
+     * NOTICE").  Every batch starts unset. */
+    con_ml_is_notice(con) = -1;
 
     /* Save the label from BATCH +id for labeled-response echo.
      * Suppress generic ACK — the label will be attached to the echo batch
