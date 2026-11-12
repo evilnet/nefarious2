@@ -1191,6 +1191,15 @@ yyerror(const char *msg)
  conf_error = 1;
 }
 
+/** Report whether the configuration pass in progress, or the last one,
+ * has seen an error (yyerror()).
+ * @return Non-zero after a configuration error.
+ */
+int conf_get_error_flag(void)
+{
+  return conf_error;
+}
+
 /** Attach CONF_UWORLD items to a server and everything attached to it. */
 static void
 attach_conf_uworld(struct Client *cptr)
