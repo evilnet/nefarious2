@@ -76,6 +76,8 @@ static struct {
   int do_numeric;          /* do_numeric() */
   int kills;               /* sendcmdto_one() (the unknown-numeric KILL) */
   char label[64];          /* the label the PING handler saw */
+  char batch_tag[128];     /* the batch= tag the PING handler saw */
+  int concat;              /* and draft/multiline-concat */
 } seen;
 
 static void record_handler(const char *cmd, int parc, char *parv[])
@@ -91,6 +93,9 @@ static int h_ping(struct Client *cptr, struct Client *sptr, int parc, char *parv
   (void)sptr;
   snprintf(seen.label, sizeof(seen.label), "%s",
            IsServer(cptr) ? "" : cli_label(cptr));
+  snprintf(seen.batch_tag, sizeof(seen.batch_tag), "%s",
+           IsServer(cptr) ? "" : cli_msg_batch_tag(cptr));
+  seen.concat = IsServer(cptr) ? 0 : cli_msg_concat(cptr);
   record_handler("PING", parc, parv);
   return 0;
 }
@@ -886,6 +891,56 @@ static void client_label_needs_batch(void **state)
   user_cap(CAP_BATCH, 0);
 }
 
+/* draft/multiline depends on batch the same way: until batch is active
+ * too, a client's batch= and draft/multiline-concat tags are not read --
+ * the line is the plain message a client without draft/multiline sends.
+ * Live once both are active, in either order; inert again without batch. */
+static void client_multiline_tags_need_batch(void **state)
+{
+  char buf[96];
+  const char *line = "@batch=r1;draft/multiline-concat PING :hello";
+
+  (void)state;
+  user_cap(CAP_DRAFT_MULTILINE, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, line);
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_int_equal(seen.handler_calls, 1);
+  assert_string_equal(seen.batch_tag, "");
+  assert_int_equal(seen.concat, 0);
+
+  user_cap(CAP_BATCH, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, line);
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.batch_tag, "r1");
+  assert_int_equal(seen.concat, 1);
+
+  user_cap(CAP_BATCH, 0);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, line);
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.batch_tag, "");
+  assert_int_equal(seen.concat, 0);
+
+  /* batch first, draft/multiline second: live */
+  user_cap(CAP_DRAFT_MULTILINE, 0);
+  user_cap(CAP_BATCH, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, line);
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.batch_tag, "");
+  user_cap(CAP_DRAFT_MULTILINE, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, line);
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.batch_tag, "r1");
+  assert_int_equal(seen.concat, 1);
+
+  user_cap(CAP_DRAFT_MULTILINE, 0);
+  user_cap(CAP_BATCH, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -900,6 +955,7 @@ int main(void)
     cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
     cmocka_unit_test(client_label_ends_with_its_line),
     cmocka_unit_test(client_label_needs_batch),
+    cmocka_unit_test(client_multiline_tags_need_batch),
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
     cmocka_unit_test(client_cannot_set_fallback_mark),

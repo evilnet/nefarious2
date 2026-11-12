@@ -1578,8 +1578,12 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
         }
         /* Check for batch= tag (draft/multiline) */
         else if (strncmp(tag_name, "batch=", 6) == 0) {
-          /* Extract batch ID for multiline message handling */
-          if (CapActive(cptr, CAP_DRAFT_MULTILINE)) {
+          /* Extract batch ID for multiline message handling -- only
+           * while draft/multiline is in use (it and batch active).  A
+           * client holding draft/multiline without batch is one without
+           * it: its batch= and draft/multiline-concat tags are not read,
+           * and each line goes out as the plain message it is. */
+          if (MultilineInUse(cptr)) {
             char *batch_val = tag_name + 6;
             size_t batch_len = next_semi - batch_val;
             if (batch_len >= sizeof(cli_msg_batch_tag(cptr)))
@@ -1590,7 +1594,7 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
         }
         /* Check for draft/multiline-concat tag */
         else if (tag_len == 22 && strncmp(tag_name, "draft/multiline-concat", 22) == 0) {
-          if (CapActive(cptr, CAP_DRAFT_MULTILINE))
+          if (MultilineInUse(cptr))
             cli_msg_concat(cptr) = 1;
         }
         /* Check for client-only tags (prefixed with +) */
@@ -1711,11 +1715,16 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
      * a small flat cli_since charge to keep batches from being a
      * full bypass of general flood accounting.  See
      * .claude/para/projects/multiline-cooldown.md.
+     *
+     * Only while draft/multiline is in use: a batch left open by a
+     * client that then dropped batch (or draft/multiline) takes no more
+     * lines -- they are plain messages now -- so they are charged as
+     * plain messages, not exempted until the batch times out.
      */
     /* The PONG to a server PING an orphan hold sent (s_bsd.c): a line
      * the server caused, parsed with the held lines at the release --
      * not charged, within the bounds input_hold_pong_free() keeps. */
-    if (!cli_ml_batch_id(cptr)[0]
+    if ((!cli_ml_batch_id(cptr)[0] || !MultilineInUse(cptr))
         && !(0 == strcmp(mptr->cmd, MSG_PONG) && cli_connect(cptr)
              && input_hold_pong_free(&con_input_hold(cli_connect(cptr)),
                                      CurrentTime, s, cli_name(&me))))

@@ -998,8 +998,7 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
    * consecutive messages for the fallback tiers. */
   {
     char pfx_first[1100], pfx_cont[1100];
-    int ml_client = CapRecipientHas(sptr, CAP_DRAFT_MULTILINE)
-                    && CapRecipientHas(sptr, CAP_BATCH);
+    int ml_client = MultilineInUse(sptr);
     size_t body_budget = history_line_budget(msg->sender, cmd, target);
     int first_over = strlen(content) > body_budget
                      && (!separator || (size_t)(separator - content) > body_budget);

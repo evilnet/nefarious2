@@ -16050,7 +16050,7 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
    * must NOT run when the sender vanished (from == &me, cli_user NULL).  Gate on
    * IsUser(from); a vanished sender falls through to send_multiline_fallback,
    * which is server-source-safe (renders &me as the source, no cli_user deref). */
-  if (IsUser(from) && CapActive(alias, CAP_DRAFT_MULTILINE) && CapActive(alias, CAP_BATCH)) {
+  if (IsUser(from) && MultilineInUse(alias)) {
     char alias_batchid[16];
     ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%u",
                   NumNick(from), con_batch_seq(cli_connect(alias))++);

@@ -1930,6 +1930,17 @@ too, in either order: until then the label tag is ignored (the command
 still runs), and the client is answered exactly as one without
 labeled-response.
 
+CAP_draft_multiline
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'draft/multiline' client capability (its
+value carries MULTILINE_MAX_BYTES and MULTILINE_MAX_LINES).  The
+capability depends on 'batch' and is a no-op until 'batch' is negotiated
+too, in either order: until then the client can neither send multiline
+batches (its BATCH and batch tags are handled as for a client without
+draft/multiline) nor is sent them.
+
 UPING_ENABLE
  * Type: boolean
  * Default: TRUE

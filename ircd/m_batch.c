@@ -2273,12 +2273,13 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!IsUser(sptr))
     return 0;
 
-  /* Require draft/multiline capability: it is the only client batch
-   * type accepted.  A client that opens some other type without the
-   * cap (a draft/authtoken batch, say) still deserves the answer the
+  /* Require draft/multiline in use (MultilineInUse: the capability and
+   * batch, which it MUST be negotiated with): it is the only client batch
+   * type accepted.  A client that opens some other type without it (a
+   * draft/authtoken batch, say) still deserves the answer the
    * client-batch spec asks for, FAIL BATCH UNKNOWN_TYPE, rather than
    * silence; batch ends and malformed starts stay quiet. */
-  if (!CapActive(sptr, CAP_DRAFT_MULTILINE)) {
+  if (!MultilineInUse(sptr)) {
     if (parc >= 3 && parv[1][0] == '+' && !EmptyString(parv[2])
         && ircd_strcmp(parv[2], "draft/multiline") != 0)
       send_fail(sptr, "BATCH", "UNKNOWN_TYPE", parv[2], "Unknown batch type");
