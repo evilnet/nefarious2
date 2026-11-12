@@ -96,6 +96,11 @@ int ms_destruct(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
   assert(0 != sptr);
   assert(IsServer(cptr));
 
+  /* A server's (destruct_event.c): from a user it is not acted on. */
+  if (!IsServer(sptr))
+    return protocol_violation(sptr, "DESTRUCT from non-server %s",
+                              cli_name(sptr));
+
   if (parc < 3 || EmptyString(parv[2]))
     return need_more_params(sptr,"DESTRUCT");
 

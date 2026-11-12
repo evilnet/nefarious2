@@ -239,6 +239,11 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   char modestr[BUFSIZE], modestro[BUFSIZE], nickstr[BUFSIZE];
   char nickstro[BUFSIZE], banstr[BUFSIZE], exstr[BUFSIZE];
 
+  /* A channel's state from a server (its own, or relayed): a BURST from
+   * a user would be applied and relayed with the user as its source. */
+  if (!IsServer(sptr))
+    return protocol_violation(sptr, "BURST from non-server %s", cli_name(sptr));
+
   if (parc < 3)
     return protocol_violation(sptr,"Too few parameters for BURST");
 
