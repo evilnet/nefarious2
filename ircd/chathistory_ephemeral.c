@@ -185,7 +185,9 @@ void chathistory_ephemeral_store_pair(struct Client *sender,
       else   MyFree(e);
     }
   }
-  if (MyConnect(recipient)) {
+  /* A DM to yourself: one ring, one copy (it was appended twice, and
+   * replayed twice). */
+  if (MyConnect(recipient) && recipient != sender) {
     struct EphemeralPmEntry *e =
         make_entry(sender, recipient, text, type, msgid, timestamp, client_tags);
     if (e) {
