@@ -492,7 +492,7 @@ void free_client(struct Client* cptr)
       if ((acptr = LocalClientArray[fd])) {
         if (cli_saslagent(acptr) == cptr) {
           /* Abort the SASL session - this sends ERR_SASLFAIL to the client */
-          if (cli_saslcookie(acptr) && !IsSASLComplete(acptr)) {
+          if (cli_saslcookie(acptr) && !IsSASLExchangeDone(acptr)) {
             /* Only log first few to avoid log spam during netsplit */
             if (aborted < 5) {
               log_write(LS_DEBUG, L_DEBUG, 0,

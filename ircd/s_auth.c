@@ -2072,7 +2072,7 @@ int auth_iauth_sasl_fail(struct Client *cptr)
 
   if (auth)
     FlagClr(&auth->flags, AR_IAUTH_SASL);
-  if (!cli_saslcookie(cptr) || IsSASLComplete(cptr))
+  if (!cli_saslcookie(cptr) || IsSASLExchangeDone(cptr))
     return 0;
   if (auth)
     FlagClr(&auth->flags, AR_SASL_PENDING);
@@ -3698,8 +3698,10 @@ static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
                                int parc, char **params)
 {
-  /* Mark SASL as complete */
+  /* Mark SASL as complete: an exchange's completion (not a REGISTER
+   * login's, IsSASLExchangeDone()) */
   SetFlag(cli, FLAG_SASLCOMPLETE);
+  ClrFlag(cli, FLAG_REGLOGIN);
 
   /* Send success to client */
   send_reply(cli, RPL_SASLSUCCESS);

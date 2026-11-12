@@ -869,6 +869,22 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     return;
   }
 
+  /* A REGISTER replacing a completed login (before registration, its answer
+   * after a completed exchange): a cookie left with no local session is that
+   * exchange's (an IAuth success keeps it), not one in flight -- clear it,
+   * or the REGISTER login (which completes no exchange, IsSASLExchangeDone())
+   * would leave it looking like one, aborted at registration. */
+  if (by == LOGIN_BY_REGISTER && IsSASLExchangeDone(sptr)
+      && !cli_saslsession(sptr) && cli_saslcookie(sptr)) {
+    if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
+      cli_saslagentref(cli_saslagent(sptr))--;
+    cli_saslagent(sptr) = NULL;
+    cli_saslcookie(sptr) = 0;
+    cli_saslstart(sptr) = 0;
+    if (t_active(&cli_sasltimeout(sptr)))
+      timer_del(&cli_sasltimeout(sptr));
+  }
+
   /* Registration waits for step 9.  Step 3 checks it too
    * (auth_set_account()), and it must not run before the steps below have
    * set what it reads, nor free sptr under them.  The hold is normally on
@@ -925,10 +941,15 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   /* 6. SetSASLComplete + RPL_SASLSUCCESS.  The flag for a REGISTER too:
    * before registration it is what registration applies the identity by,
    * and what makes a later AUTHENTICATE or REGISTER see a completed login
-   * (907, ALREADY_AUTHENTICATED), as after 903. */
+   * (907, ALREADY_AUTHENTICATED), as after 903.  FLAG_REGLOGIN says which
+   * set it: a REGISTER login completes no SASL exchange, and one still in
+   * flight stays abortable (IsSASLExchangeDone()). */
   SetSASLComplete(sptr);
-  if (by == LOGIN_BY_SASL)
+  if (by == LOGIN_BY_SASL) {
+    ClrFlag(sptr, FLAG_REGLOGIN);
     send_reply(sptr, RPL_SASLSUCCESS);
+  } else
+    SetFlag(sptr, FLAG_REGLOGIN);
 
   /* 7. Post-registration account update (reauth or if already registered) */
   if (IsRegistered(sptr) && cli_user(sptr) && cli_saslaccount(sptr)[0]) {

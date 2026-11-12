@@ -654,6 +654,42 @@ static void test_sasl_legitimate_exchange(void **state)
   assert_false(was_told(c));
 }
 
+/* A REGISTER login that lands while a relayed exchange is in flight sets
+ * the SASL-complete flag (draft/account-registration) but completes no
+ * exchange: the exchange still times out (and aborts) -- abort_sasl()
+ * answers the client and drops the cookie.  Before, it returned at once on
+ * the flag, so the exchange could be neither aborted nor timed out.  An
+ * exchange an IAuth success completed (the flag, no REGISTER) is still
+ * left alone. */
+static void test_sasl_relay_exchange_times_out_after_register_login(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslcookie(c) = 777;
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 C :+");
+  assert_ptr_equal(cli_saslagent(c), svs);
+
+  SetFlag(c, FLAG_SASLCOMPLETE);              /* the REGISTER login */
+  SetFlag(c, FLAG_REGLOGIN);
+  ntold = 0;
+  abort_sasl(c, 1);                            /* the exchange's timeout */
+  assert_true(was_told(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_null(cli_saslagent(c));
+
+  /* An exchange that completed and kept its cookie: untouched. */
+  c = local_client("iauthed", 8, 1);
+  cli_saslcookie(c) = 778;
+  SetFlag(c, FLAG_SASLCOMPLETE);
+  ntold = 0;
+  abort_sasl(c, 0);
+  assert_false(was_told(c));
+  assert_int_equal(cli_saslcookie(c), 778);
+}
+
 /* ====================================================================
  * Login-on-connect: which client a reply reaches
  * ==================================================================== */
@@ -723,6 +759,7 @@ int main(void)
     T(test_sasl_local_exchange_unreachable),
     T(test_sasl_fd_past_the_end),
     T(test_sasl_legitimate_exchange),
+    T(test_sasl_relay_exchange_times_out_after_register_login),
     T(test_loc_cookie_0_request_not_sent),
     T(test_loc_cookie_0_server_port),
     T(test_loc_cookie_0_deny),

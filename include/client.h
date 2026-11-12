@@ -347,6 +347,10 @@ enum Flag
                                      *   race-proof). Never set/cleared directly elsewhere. */
     FLAG_COUNTED_INV,              /**< This client currently contributes +1 to UserStats.inv_clients.
                                      *   Same discipline as FLAG_COUNTED_OPER. */
+    FLAG_REGLOGIN,                  /**< The SASL-complete flag was set by a REGISTER login
+                                     *   (draft/account-registration), not by a SASL exchange:
+                                     *   an exchange in flight has not completed
+                                     *   (IsSASLExchangeDone()) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -1425,6 +1429,14 @@ struct Client {
 #define IsNotIPCheckExempt(x)   HasFlag(x, FLAG_IPCNOTEXEMPT)
 /** Return non-zero if the client has completed SASL authentication. */
 #define IsSASLComplete(x)       HasFlag(x, FLAG_SASLCOMPLETE)
+/** Has the SASL exchange the connection's cookie belongs to completed?
+ * The SASL-complete flag says the connection holds a completed login; a
+ * REGISTER login (draft/account-registration) sets it too, possibly while
+ * a SASL exchange is still in flight (FLAG_REGLOGIN), and that exchange
+ * has not completed: it stays abortable and times out.  (An IAuth
+ * success, the one completion that leaves its cookie, sets the flag as an
+ * exchange does.) */
+#define IsSASLExchangeDone(x)   (IsSASLComplete(x) && !HasFlag(x, FLAG_REGLOGIN))
 /** Return non-zero if the client has been marked. */
 #define IsMarked(x)             HasFlag(x, FLAG_MARKED)
 /** Return non-zero if the client cannot join channels. */

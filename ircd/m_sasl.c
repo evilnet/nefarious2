@@ -296,7 +296,10 @@ int abort_sasl(struct Client* cptr, int timeout) {
   if (t_active(&cli_sasltimeout(cptr)))
     timer_del(&cli_sasltimeout(cptr));
 
-  if (!cli_saslcookie(cptr) || IsSASLComplete(cptr))
+  /* Nothing in flight, or the exchange completed (an IAuth success keeps
+   * its cookie).  A REGISTER login meanwhile completes no exchange: one
+   * still in flight is aborted, and its timeout fires (IsSASLExchangeDone). */
+  if (!cli_saslcookie(cptr) || IsSASLExchangeDone(cptr))
     return 0;
 
   /* Look up the target server */

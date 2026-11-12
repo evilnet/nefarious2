@@ -126,8 +126,10 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
 
   /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec) */
   if (parv[1][0] == '*' && parv[1][1] == '\0') {
-    /* Only abort if there's an active session */
-    if (cli_saslcookie(cptr) && !IsSASLComplete(cptr)) {
+    /* Only abort if there's an active session: a cookie whose exchange has
+     * not completed -- a REGISTER login meanwhile completes no exchange
+     * (IsSASLExchangeDone()). */
+    if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr)) {
       /* Local SASL session takes priority */
       if (cli_saslsession(cptr)) {
         /* RFC 7628 §3.2.3: after an error challenge, client sends "*"
@@ -178,6 +180,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
      * refresh that fails or is aborted leaves no login behind -- nothing
      * of it may be applied with another login's name (a REGISTER). */
     ClearSASLComplete(cptr);
+    ClrFlag(cptr, FLAG_REGLOGIN);
     sasl_identity_set(cptr, NULL, 0, NULL, 0);
     /* Clear old SASL session state */
     if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))

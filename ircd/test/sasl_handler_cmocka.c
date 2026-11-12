@@ -2391,6 +2391,52 @@ static void verify_on_does_not_log_in(void **state)
 }
 
 /* ------------------------------------------------------------------ */
+/* A REGISTER login mid-exchange                                       */
+/* ------------------------------------------------------------------ */
+
+/** REGISTER SUCCESS landing while the client's own SASL exchange is in
+ * flight completes no exchange: that exchange stays abortable.  Before,
+ * the SASL-complete flag the REGISTER login set made AUTHENTICATE * a
+ * silent no-op (and the relay tier's abort and timeout return early), so
+ * before registration the hold lasted until the exchange's own end.  Now
+ * the abort answers 906, drops the session and the hold -- registration
+ * goes on, in the line -- and the REGISTER login stays; the grant's late
+ * answer finds no exchange. */
+static void register_success_mid_sasl_leaves_it_abortable(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    const char *acct = post ? "nab2" : "nab1";
+    struct Client *c = post ? new_registered(93, "ab1") : new_client(93, "ab1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char id[ACCOUNT_ID_LEN + 1];
+
+    kc_mode = KC_LATER;
+    assert_int_equal(register_as(c, acct, "*", "longpassword"), 0);
+    pend_deliver_kind(P_USER, KC_NOT_FOUND);
+    plain_pending(c, post ? "abu2" : "abu1", "abupw");
+    pend_deliver_kind(P_CREATED, KC_SUCCESS);       /* REGISTER SUCCESS */
+    assert_non_null(cli_saslsession(c));
+    f->cap_done = 1;
+    f->n_numerics = 0;
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_true(has_numeric(f, ERR_SASLABORTED));
+    assert_null(cli_saslsession(c));
+    assert_int_equal(cli_saslcookie(c), 0);
+    if (!post) {
+      assert_int_equal(f->hold, 0);
+      assert_int_equal(f->registered, 1);           /* in the line */
+    }
+    assert_identity(c, acct, user_id(acct, id), 1);
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* the grant, too late */
+    assert_identity(c, acct, id, 1);
+    assert_false(has_numeric(f, RPL_SASLSUCCESS));
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* A request that cannot be started                                    */
 /* ------------------------------------------------------------------ */
 
@@ -2486,6 +2532,7 @@ int main(void)
     cmocka_unit_test_setup(register_id_lookup_wrong_answer, setup),
     cmocka_unit_test_setup(register_client_gone_before_the_id, setup),
     cmocka_unit_test_setup(verify_on_does_not_log_in, setup),
+    cmocka_unit_test_setup(register_success_mid_sasl_leaves_it_abortable, setup),
 #endif
   };
 
