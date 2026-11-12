@@ -1688,40 +1688,6 @@ failed:
   return res ? res : -1;          /* a failure, even without an errno */
 }
 
-/** Restart an %IAuth program.
- * @return 0 on failure, 1 on success, 2 on no IAuth program.
- */
-int auth_restart(void)
-{
-  static struct IAuth *iauthnew;
-  int ii;
-
-  if (!iauth)
-    return 2;
-
-  /* Need to initialize a new connection. */
-  iauthnew = MyCalloc(1, sizeof(*iauthnew));
-  msgq_init(i_sendQ(iauthnew));
-  /* No descriptors yet (0 is someone else's): until a spawn registers
-   * them, i_GetConnected() is false and iauth_disconnect() leaves them. */
-  s_fd(i_socket(iauthnew)) = -1;
-  s_fd(i_stderr(iauthnew)) = -1;
-  /* Populate iauth's argv array. */
-  iauthnew->i_argv = MyCalloc(iauth->i_argc + 1, sizeof(iauthnew->i_argv[0]));
-  for (ii = 0; ii < iauth->i_argc; ++ii)
-    DupString(iauthnew->i_argv[ii], iauth->i_argv[ii]);
-  iauthnew->i_argv[ii] = NULL;
-
-  auth_close_unused();
-  iauth = iauthnew;
-
-  /* Try to spawn it, and handle the results. */
-  if (iauth_do_spawn(iauth, 0))
-    return 0;
-  IAuthClr(iauth, IAUTH_CLOSING);
-  return 1;
-}
-
 /** See if an %IAuth program must be spawned.
  * If a process is already running with the specified options, keep it.
  * Otherwise spawn a new child process to perform the %IAuth function.
@@ -1751,13 +1717,19 @@ int auth_spawn(int argc, char *argv[])
       IAuthClr(iauth, IAUTH_CLOSING);
       return 2;
     }
+    /* Only one program runs: the one being replaced is closed (and freed,
+     * which clears the pointer) before the next is spawned, whoever asked
+     * for the replacement. */
+    IAuthSet(iauth, IAUTH_CLOSING);
     auth_close_unused();
   }
 
   /* Need to initialize a new connection. */
   iauth = MyCalloc(1, sizeof(*iauth));
   msgq_init(i_sendQ(iauth));
-  s_fd(i_socket(iauth)) = -1;   /* no descriptors yet: as in auth_restart() */
+  /* No descriptors yet (0 is someone else's): until a spawn registers
+   * them, i_GetConnected() is false and iauth_disconnect() leaves them. */
+  s_fd(i_socket(iauth)) = -1;
   s_fd(i_stderr(iauth)) = -1;
   /* Populate iauth's argv array. */
   iauth->i_argv = MyCalloc(argc + 1, sizeof(iauth->i_argv[0]));
@@ -1800,6 +1772,37 @@ static void auth_conf_free(void)
   conf_iauth_toplevel = 0;
 }
 
+/** Record \a argv as the program to run, replacing any earlier record.
+ * @param[in] argc Number of program arguments.
+ * @param[in] argv Program arguments (copied).
+ */
+static void auth_conf_record(int argc, char *argv[])
+{
+  int ii;
+
+  auth_conf_free();
+  if (argc <= 0)
+    return;
+  conf_iauth_argv = MyCalloc(argc + 1, sizeof(conf_iauth_argv[0]));
+  for (ii = 0; ii < argc; ++ii)
+    DupString(conf_iauth_argv[ii], argv[ii]);
+  conf_iauth_argc = argc;
+}
+
+/** Spawn the recorded program, or keep the running one when its arguments
+ * are unchanged, and forget the record.
+ * @return As auth_spawn(); 2 when nothing is recorded.
+ */
+static int auth_spawn_recorded(void)
+{
+  int res = 2;
+
+  if (conf_iauth_argv)
+    res = auth_spawn(conf_iauth_argc, conf_iauth_argv);
+  auth_conf_free();
+  return res;
+}
+
 /** Start a configuration pass: forget any IAuth{} block from the last. */
 void auth_conf_begin(void)
 {
@@ -1816,7 +1819,6 @@ void auth_conf_begin(void)
  */
 void auth_conf_iauth(int argc, char *argv[])
 {
-  int ii;
   int toplevel = (include_stack_ptr == 0);
 
   if (conf_iauth_argv) {
@@ -1832,14 +1834,8 @@ void auth_conf_iauth(int argc, char *argv[])
                          "using %s", toplevel ? "the one in the main file"
                          : "the last one");
   }
-  auth_conf_free();
+  auth_conf_record(argc, argv);
   conf_iauth_toplevel = toplevel;
-  if (argc <= 0)
-    return;
-  conf_iauth_argv = MyCalloc(argc + 1, sizeof(conf_iauth_argv[0]));
-  for (ii = 0; ii < argc; ++ii)
-    DupString(conf_iauth_argv[ii], argv[ii]);
-  conf_iauth_argc = argc;
 }
 
 /** End of a configuration pass: spawn the recorded program, or keep the
@@ -1847,9 +1843,25 @@ void auth_conf_iauth(int argc, char *argv[])
  * the running program stays marked closing and auth_close_unused() ends it. */
 void auth_conf_apply(void)
 {
-  if (conf_iauth_argv)
-    auth_spawn(conf_iauth_argc, conf_iauth_argv);
-  auth_conf_free();
+  auth_spawn_recorded();
+}
+
+/** Restart the %IAuth program ("REHASH a").  The running program is
+ * closed -- the clients it was still checking are released, as when an
+ * IAuth program goes away -- and the same program is started again by the
+ * path a configuration pass takes, so exactly one runs afterwards.
+ * @return 0 on failure, 1 on success, 2 on no IAuth program.
+ */
+int auth_restart(void)
+{
+  if (!iauth)
+    return 2;
+  /* Recorded as a copy: the instance holding the arguments is freed
+   * before the new one is spawned. */
+  auth_conf_record(iauth->i_argc, iauth->i_argv);
+  IAuthSet(iauth, IAUTH_CLOSING);
+  auth_close_unused();
+  return auth_spawn_recorded();
 }
 
 /** Mark all %IAuth connections as closing. */
