@@ -3104,10 +3104,54 @@ void sendcmdto_set_extra_withcap(int cap)
   sendcmdto_extra_withcap = cap;
 }
 
-void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd,
-                                      const char *tok, struct Client *one,
-                                      int withcap, int skipcap,
-                                      const char *pattern, ...)
+/** Whether @a to, a connection the channel walk did not pick (the
+ * sender itself) takes a channel-capab send: the same three filters as the walk, read from the connection's OWN
+ * caps (a primary's cli_active is its session's union). */
+static int capab_own_wants(struct Client *to, int withcap, int skipcap,
+                           int extracap)
+{
+  if ((withcap != CAP_NONE) && !CapOwnHas(to, withcap))
+    return 0;
+  if ((skipcap != CAP_NONE) && CapOwnHas(to, skipcap))
+    return 0;
+  if ((extracap != CAP_NONE) && !CapOwnHas(to, extracap))
+    return 0;
+  return 1;
+}
+
+/** Queue one recipient's copy of a channel-capab send: the buffer with the
+ * tags @a to negotiated (built on first use into @a mb_cache), else the
+ * untagged @a mb. */
+static void capab_send_tagged(struct Client *to, struct Client *from,
+                              const char *cmd, struct MsgBuf *mb,
+                              struct MsgBuf **mb_cache,
+                              const char *pattern, va_list ap)
+{
+  struct VarData vd;
+  char tagbuf[128];
+  int flags = get_client_tag_flags(to, from, 0);
+
+  if (flags && !mb_cache[flags]
+      && format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+    vd.vd_format = pattern;
+    va_copy(vd.vd_args, ap);
+    mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+    va_end(vd.vd_args);
+  }
+  send_buffer(to, (flags && mb_cache[flags]) ? mb_cache[flags] : mb, 0);
+}
+
+/** The body of sendcmdto_common_channels_capab_butone(): @a from's line
+ * to the local members of its channels that pass the capability filters,
+ * each once, except @a one, and to @a from itself when it is ours, not
+ * @a one, and passes the same filters on its own caps.  Every copy
+ * carries the tags its recipient negotiated -- @a from's own too, which
+ * used to go untagged unless a member with the same tag set had been sent
+ * one first. */
+static void
+common_channels_capab_vsend(struct Client *from, const char *cmd,
+                            struct Client *one, int withcap, int skipcap,
+                            const char *pattern, va_list ap)
 {
   struct VarData vd;
   struct MsgBuf *mb;
@@ -3115,7 +3159,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   struct MsgBuf *mb_cache[TAGS_CACHE_SIZE] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
-  char tagbuf[128];
+  int extracap = sendcmdto_extra_withcap;
   int flags;
 
   assert(0 != from);
@@ -3124,13 +3168,13 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   assert(!IsServer(from) && !IsMe(from));
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
-
-  va_start(vd.vd_args, pattern);
-
+  va_copy(vd.vd_args, ap);
   /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
+  /* Marks from itself: the walk never sends it a copy (it is a member of
+   * its own channels); the step after the walk does. */
   bump_sentalong(from);
 
   /* Set tag context for per-connection CAP routing */
@@ -3154,39 +3198,16 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
         continue;
       if ((skipcap != CAP_NONE) && CapActive(member->user, skipcap))
         continue;
-      if ((sendcmdto_extra_withcap != CAP_NONE)
-          && !CapActive(member->user, sendcmdto_extra_withcap))
+      if ((extracap != CAP_NONE) && !CapActive(member->user, extracap))
         continue;
-      {
-        cli_sentalong(member->user) = sentalong_marker;
-        flags = get_client_tag_flags(member->user, from, 0);
-        if (flags) {
-          /* Build cached message buffer for this flag combination if needed */
-          if (!mb_cache[flags]) {
-            if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
-              va_start(vd.vd_args, pattern);
-              mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
-              va_end(vd.vd_args);
-            }
-          }
-          if (mb_cache[flags])
-            send_buffer(member->user, mb_cache[flags], 0);
-          else
-            send_buffer(member->user, mb, 0);
-        } else {
-          send_buffer(member->user, mb, 0);
-        }
-      }
+      cli_sentalong(member->user) = sentalong_marker;
+      capab_send_tagged(member->user, from, cmd, mb, mb_cache, pattern, ap);
     }
   }
 
-  if (MyConnect(from) && from != one) {
-    flags = get_client_tag_flags(from, from, 0);
-    if (flags && mb_cache[flags])
-      send_buffer(from, mb_cache[flags], 0);
-    else
-      send_buffer(from, mb, 0);
-  }
+  if (MyConnect(from) && from != one
+      && capab_own_wants(from, withcap, skipcap, extracap))
+    capab_send_tagged(from, from, cmd, mb, mb_cache, pattern, ap);
 
   /* Clear cap route context */
   cap_route_ctx.stc_active = 0;
@@ -3199,6 +3220,19 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
       msgq_clean(mb_cache[flags]);
   }
   sendcmdto_extra_withcap = CAP_NONE;
+}
+
+void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd,
+                                      const char *tok, struct Client *one,
+                                      int withcap, int skipcap,
+                                      const char *pattern, ...)
+{
+  va_list ap;
+
+  (void)tok;
+  va_start(ap, pattern);
+  common_channels_capab_vsend(from, cmd, one, withcap, skipcap, pattern, ap);
+  va_end(ap);
 }
 
 /** The body of sendcmdto_channel_butserv_butone() and
