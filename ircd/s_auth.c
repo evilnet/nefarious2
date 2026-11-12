@@ -221,6 +221,8 @@ struct IAuth {
 
 /** Active instance of IAuth. */
 static struct IAuth *iauth;
+/** Non-zero when this process only checks the configuration (ircd -k). */
+static int auth_check_only;
 /** Freelist of AuthRequest structures. */
 static struct AuthRequest *auth_freelist;
 
@@ -1704,11 +1706,17 @@ int auth_restart(void)
  * Otherwise spawn a new child process to perform the %IAuth function.
  * @param[in] argc Number of parameters to use when starting process.
  * @param[in] argv Array of parameters to start process.
- * @return 0 on failure, 1 on new process, 2 on reuse of existing process.
+ * @return 0 on failure, 1 on new process, 2 on reuse of existing process
+ *   (or, in a configuration check, when no process is started).
  */
 int auth_spawn(int argc, char *argv[])
 {
   int ii;
+
+  /* A configuration check reads and checks the IAuth{} block, but runs
+   * nothing. */
+  if (auth_check_only)
+    return 2;
 
   if (iauth) {
     int same = 1;
@@ -1747,6 +1755,13 @@ int auth_spawn(int argc, char *argv[])
     return 0;
   IAuthClr(iauth, IAUTH_CLOSING);
   return 1;
+}
+
+/** This process only checks the configuration (ircd -k): an IAuth{} block
+ * is read and checked as usual, but auth_spawn() starts no program. */
+void auth_conf_check_only(void)
+{
+  auth_check_only = 1;
 }
 
 /** The IAuth{} block read so far in this configuration pass.  Only one
