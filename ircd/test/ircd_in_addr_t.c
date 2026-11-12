@@ -54,6 +54,19 @@ static struct address_test test_addrs[] = {
     { "a:0:b:0:c:0:d:e", "a::b:0:c:0:d:e",
       {{ 0xa, 0, 0xb, 0, 0xc, 0, 0xd, 0xe }},
       "AAAAAA", "AAK_AALAAAAAMAAAAANAAO", 1, 0, 0 },
+    /* The high 16 bits of each 32-bit encoding are 0x8000 or more. */
+    { "200.0.0.1", "200.0.0.1",
+      {{ 0, 0, 0, 0, 0, 0xffff, 0xc800, 1 }},
+      "DIAAAB", "DIAAAB", 1, 1, 0 },
+    { "255.255.255.255", "255.255.255.255",
+      {{ 0, 0, 0, 0, 0, 0xffff, 0xffff, 0xffff }},
+      "D]]]]]", "D]]]]]", 1, 1, 0 },
+    { "2002:c800:1::1", "2002:c800:1::1",
+      {{ 0x2002, 0xc800, 1, 0, 0, 0, 0, 1 }},
+      "DIAAAB", "CACMgAAAB_AAB", 1, 0, 0 },
+    { "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001::4136:e378:8000:63bf:3fff:fdd2",
+      {{ 0x2001, 0, 0x4136, 0xe378, 0x8000, 0x63bf, 0x3fff, 0xfdd2 }},
+      "DAAAIt", "CAB_EE2ON4IAAGO]D]]P3S", 1, 0, 0 },
     { 0 },
 };
 
