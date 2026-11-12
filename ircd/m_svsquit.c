@@ -63,10 +63,13 @@ int ms_svsquit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
 
+  /* cptr is the server link the SVSQUIT came on, never acptr: the exit
+   * returns 0 for it, not CPTR_KILLED, so the rest of its read is
+   * parsed. */
   if (parc > 1 && !BadPtr(parv[parc - 1]))
-    return exit_client_msg(acptr, acptr, acptr, "%s", parv[parc - 1]);
+    return exit_client_msg(cptr, acptr, acptr, "%s", parv[parc - 1]);
   else
-    return exit_client(acptr, acptr, acptr, "Quit");
+    return exit_client(cptr, acptr, acptr, "Quit");
 
   return 0;
 }
