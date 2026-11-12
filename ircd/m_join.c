@@ -374,7 +374,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   {
-    int lb = labeled_batch_start(sptr);
+    int lb = labeled_batch_start(cptr);   /* the connection whose JOIN it is: a device of a session, not its primary */
 
     joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
     joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, TStime());
@@ -492,7 +492,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     joinbuf_flush(&join); /* must be first, if there's a JOIN 0 */
     joinbuf_flush(&create);
 
-    if (lb) labeled_batch_end(sptr);
+    if (lb) labeled_batch_end(cptr);
   }
 
   return 0;

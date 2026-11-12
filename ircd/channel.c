@@ -5807,10 +5807,14 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 
     /* Add user to channel (presence opens at the JOIN's own stamp) */
     presence_set_event_time(presence_event_time(join_msgid, join_ms));
+    /* The session's local devices this files in the channel hear of the
+     * JOIN below, from this joinbuf, not from bounce_sync_alias_join(). */
+    bounce_alias_join_echo_quiet(1);
     if ((chan->mode.mode & MODE_DELJOINS) && !(flags & CHFL_VOICED_OR_OPPED))
       add_user_to_channel(chan, jbuf->jb_source, flags | CHFL_DELAYED, oplevel);
     else
       add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
+    bounce_alias_join_echo_quiet(0);
     presence_set_event_time(0);
 
       /* Stamp membership for bouncer replay with the same time; it
@@ -5854,13 +5858,15 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     }
 
     if (!((chan->mode.mode & MODE_DELJOINS) && !(flags & CHFL_VOICED_OR_OPPED))) {
-      /* When the joiner has a labeled-response batch active, skip them from
-       * the channel send and send a separate tagged message. The channel send
-       * functions use format_message_tags_ex() which only supports network
-       * batches, not per-client labeled-response batches (cli_batch_id). */
+      /* When the joining connection (jb_asker: the user, or the bouncer
+       * device whose JOIN this is) has a labeled-response batch active,
+       * skip it in the channel send and send it a separate tagged message.
+       * The channel send functions use format_message_tags_ex() which only
+       * supports network batches, not per-client labeled-response batches
+       * (cli_batch_id). */
       struct Client *skip_one = NULL;
-      if (MyUser(jbuf->jb_source) && has_active_batch(jbuf->jb_source))
-        skip_one = jbuf->jb_source;
+      if (jbuf->jb_asker && has_active_batch(jbuf->jb_asker))
+        skip_one = jbuf->jb_asker;
 
       /* Send the notification to the channel */
       sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_JOIN, chan, skip_one, 0,
@@ -5872,12 +5878,12 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 
       /* Send tagged JOIN echo to joiner separately (for labeled-response batch) */
       if (skip_one) {
-        if (CapRecipientHas(jbuf->jb_source, CAP_EXTJOIN))
-          sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, "%H %s :%s", chan,
+        if (CapRecipientHas(skip_one, CAP_EXTJOIN))
+          sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, skip_one, "%H %s :%s", chan,
                         IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                         cli_info(jbuf->jb_source));
         else
-          sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
+          sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, skip_one, ":%H", chan);
       }
 
 #ifdef USE_ROCKSDB
@@ -5899,20 +5905,42 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 	sendcmdto_channel_butserv_butone((chan->mode.apass[0] ? &his : jbuf->jb_source),
                                          CMD_MODE, chan, NULL, 0, "%H +o %C",
 					 chan, jbuf->jb_source);
-    } else if (MyUser(jbuf->jb_source)) {
-      /* Use tag-aware send so batch=/label=/time= tags are included */
-      if (CapRecipientHas(jbuf->jb_source, CAP_EXTJOIN))
-        sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, "%H %s :%s", chan,
-                      IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
-                      cli_info(jbuf->jb_source));
-      else
-        sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
+    } else {
+      /* +D: the JOIN is hidden from the channel; the joiner's own local
+       * connections are told -- the user, and the session's devices here
+       * (bounce_sync_alias_join() filed them and, this joinbuf being the
+       * caller, sent them nothing).  The joining connection's copy is
+       * tag-aware (its batch=/label=), the others' are tagged as events. */
+      struct Membership *dm;
+
+      for (dm = chan->members; dm; dm = dm->next_member) {
+        struct Client *to = dm->user;
+
+        if (!MyUser(to) || (to != jbuf->jb_source
+                            && !(IsBouncerAlias(to)
+                                 && cli_alias_primary(to) == jbuf->jb_source)))
+          continue;
+        if (to == jbuf->jb_asker || (!jbuf->jb_asker && to == jbuf->jb_source)) {
+          if (CapRecipientHas(to, CAP_EXTJOIN))
+            sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, to, "%H %s :%s", chan,
+                          IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
+                          cli_info(jbuf->jb_source));
+          else
+            sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, to, ":%H", chan);
+        } else if (CapRecipientHas(to, CAP_EXTJOIN))
+          sendcmdto_one_event(jbuf->jb_source, CMD_JOIN, to, 0, "%H %s :%s", chan,
+                              IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
+                              cli_info(jbuf->jb_source));
+        else
+          sendcmdto_one_event(jbuf->jb_source, CMD_JOIN, to, 0, ":%H", chan);
+      }
 
 #ifdef USE_ROCKSDB
       /* Store DELJOINS JOIN event in history (receiver-side) */
-      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid,
-                          memb ? (uint64_t)memb->join_tv.tv_sec * 1000
-                                 + memb->join_tv.tv_usec / 1000 : 0);
+      if (MyUser(jbuf->jb_source))
+        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid,
+                            memb ? (uint64_t)memb->join_tv.tv_sec * 1000
+                                   + memb->join_tv.tv_usec / 1000 : 0);
 #endif
     }
 

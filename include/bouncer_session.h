@@ -1046,6 +1046,10 @@ extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
  * @param[in] who   The primary client.
  */
 extern void bounce_sync_alias_join(struct Channel *chptr, struct Client *who);
+/** joinbuf_join() around its add_user_to_channel(): non-zero while the JOIN
+ * it handles is delivered to the local devices by the joinbuf itself, so
+ * bounce_sync_alias_join() sends them no JOIN/TOPIC/NAMES of its own. */
+extern void bounce_alias_join_echo_quiet(int quiet);
 
 /** Sync alias part: when primary leaves a channel, remove local aliases.
  * Called from remove_user_from_channel() for non-alias members.

@@ -11612,6 +11612,22 @@ void bounce_hold_on_fail(struct Client *to, const char *command,
 /* Alias channel auto-sync                                           */
 /* ---------------------------------------------------------------- */
 
+/** Set by joinbuf_join() around its add_user_to_channel(): the JOIN it
+ * is handling goes to the channel's local members -- a newly filed local
+ * device included -- through the joinbuf's own fan-out, and the TOPIC/
+ * NAMES replies through bounce_send_alias_join_replies(), so
+ * bounce_sync_alias_join() files the devices and sends them nothing of
+ * its own.  Its own echo gave a device that JOIN and NAMES twice, the
+ * first without the JOIN's msgid (and, for the device whose JOIN it was,
+ * outside its labeled batch). */
+static int alias_join_echo_quiet;
+
+/** See include/bouncer_session.h. */
+void bounce_alias_join_echo_quiet(int quiet)
+{
+  alias_join_echo_quiet = quiet;
+}
+
 /** Sync alias join: when primary joins a channel, add local aliases.
  * Called from add_user_to_channel() for non-alias members.
  * Iterates the primary's session aliases and adds any local ones
@@ -11737,8 +11753,9 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
        *
        * Send the JOIN echo with the primary's join_msgid + timestamp
        * (set above) so clients that key off JOIN msgid for chathistory
-       * see a stable identity. */
-      if (MyConnect(alias)) {
+       * see a stable identity.  Not when joinbuf_join() is the caller:
+       * its fan-out and replies tell the device (alias_join_echo_quiet). */
+      if (MyConnect(alias) && !alias_join_echo_quiet) {
         const char *join_msgid = (pmem && pmem->join_msgid[0])
                                  ? pmem->join_msgid : NULL;
         if (pmem && pmem->join_tv.tv_sec) {
