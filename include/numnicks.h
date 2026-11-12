@@ -82,6 +82,9 @@ extern struct Client* find_match_server(const char* mask);
 extern struct Client* findNUser(const char* yxx);
 extern struct Client* FindNServer(const char* numeric);
 extern int            ValidUserNumNick(const char* yxx);
+extern int            ValidUserNumNickFor(const struct Client* server,
+                                          const char* yxx);
+extern int            ValidServerNumNick(const char* yyxxx);
 
 extern unsigned int   base64toint(const char* str);
 extern const char*    inttobase64(char* buf, unsigned int v, unsigned int count);
