@@ -105,6 +105,10 @@ extern void sendcmdto_set_s2s_held(char mark);
  * sendcmdto_one_tags_with_client() toward a tag-carrying link (audit 0.1).
  * Consumed or cleared by that call. */
 extern void sendcmdto_set_s2s_ml(char flag, const char *batch_ref);
+/* Arm the multiline fallback mark ,F<msgid> for the next
+ * sendcmdto_one_tags_with_client() toward a tag-carrying link: the line
+ * renders multiline message <msgid>.  Consumed or cleared by that call. */
+extern void sendcmdto_set_s2s_fallback(const char *msgid);
 /* Whether a send toward this link carries the S2S compact tag region
  * (server link or &me, IRCv3-aware, P10_MESSAGE_TAGS on). */
 extern int send_s2s_tags_on(struct Client *to);

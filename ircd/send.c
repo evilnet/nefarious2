@@ -189,6 +189,15 @@ int sendcmdto_stash_is_current(struct Client *cptr)
  * sendcmdto_one_tags_with_client whether or not it was used. */
 static char s2s_ml_override[S2S_ML_BUFSIZE] = "";
 
+/** Multiline fallback mark (compact-tag ,F<msgid> segment) for the next
+ * S2S emit that builds the tag region: the line is one of the
+ * single-line fallback lines of multiline message <msgid>.  Armed by
+ * the originating server's DM fallback (m_batch.c) and by a relay
+ * passing such a line on (server_relay_private_message); consumed by
+ * format_s2s_tags_with_client and cleared by
+ * sendcmdto_one_tags_with_client whether or not it was used. */
+static char s2s_fallback_override[S2S_MSGID_BUFSIZE] = "";
+
 /** Client-only tags (compact-tag ,C segment) for the next S2S emit
  * through sendcmdto_serv_butone_v3() (audit 0.1): a channel TAGMSG
  * with a large client tag used to ride the message body, which could
@@ -328,6 +337,16 @@ void sendcmdto_set_s2s_ml(char flag, const char *batch_ref)
     s2s_ml_override[0] = '\0';
 }
 
+/** Arm the multiline fallback mark ,F<msgid> for the next S2S emit
+ * (see s2s_fallback_override).  NULL or empty disarms. */
+void sendcmdto_set_s2s_fallback(const char *msgid)
+{
+  if (msgid && *msgid)
+    ircd_strncpy(s2s_fallback_override, msgid, sizeof(s2s_fallback_override));
+  else
+    s2s_fallback_override[0] = '\0';
+}
+
 /** Arm client-only tags (,C<client_tags>) for the next
  * sendcmdto_serv_butone_v3() call (audit 0.1).  Stores \a client_tags
  * itself rather than a copy: the caller's buffer must stay valid until
@@ -437,6 +456,7 @@ void sendcmdto_reset_s2s_overrides(void)
   s2s_sessid_override[0] = '\0';
   s2s_held_override = '\0';
   s2s_ml_override[0] = '\0';
+  s2s_fallback_override[0] = '\0';
   s2s_client_tags_override = NULL;
   s2s_raw_tags[0] = '\0';
   s2s_want_tags = 0;
@@ -732,7 +752,7 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
 
 /** Format message tags for S2S relay including optional client-only tags.
  * Produces compact P10-native wire encoding:
- *   @A<time_b64_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,C<client_tags>]
+ *   @A<time_b64_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,F<msgid>][,C<client_tags>]
  * The ,C<client_tags> segment is appended only when client_tags is non-NULL
  * and non-empty. Receivers parse it into cli_s2s_client_tags(cptr) for
  * forwarding to local recipients.  ,S, ,H and ,M come from their armed
@@ -769,6 +789,7 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   char msgidbuf[S2S_MSGID_BUFSIZE];
   char sessidbuf[S2S_SESSID_BUFSIZE];
   char mlbuf[S2S_ML_BUFSIZE];
+  char fbbuf[S2S_MSGID_BUFSIZE];
   char heldbuf[2] = "";
   char held = '\0';
   uint64_t epoch_ms;
@@ -777,6 +798,7 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   int has_ctags = (client_tags && *client_tags);
   int has_sessid;
   int has_ml;
+  int has_fb;
   int stash;
 
   /* Check if P10 message tags are enabled */
@@ -789,6 +811,14 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   if (has_ml) {
     ircd_strncpy(mlbuf, s2s_ml_override, sizeof(mlbuf));
     s2s_ml_override[0] = '\0';  /* auto-clear after consumption */
+  }
+
+  /* Multiline fallback mark: likewise only the explicit override (a
+   * relay re-arms it, server_relay_private_message). */
+  has_fb = (s2s_fallback_override[0] != '\0');
+  if (has_fb) {
+    ircd_strncpy(fbbuf, s2s_fallback_override, sizeof(fbbuf));
+    s2s_fallback_override[0] = '\0';  /* auto-clear after consumption */
   }
 
   /* cptr's stash counts only while its link's line is being handled:
@@ -848,9 +878,10 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   }
 
   /* Compact format:
-   *   @A<time_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,C<client_tags>]
+   *   @A<time_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,F<msgid>][,C<client_tags>]
    *
-   * Segments are appended in order: ,S, then ,H, then ,M, then ,C.  ,C
+   * Segments are appended in order: ,S, then ,H, then ,M, then ,F, then
+   * ,C.  ,C
    * is always the LAST segment and must never be followed by another
    * segment: a client-tag value may itself contain a comma, so
    * receivers read ,C to the end of the tag region rather than
@@ -860,10 +891,11 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
   heldbuf[0] = held;
   heldbuf[1] = '\0';
   inttobase64_64(time_b64, epoch_ms, 7);
-  snprintf(buf, buflen, "@A%s%s%s%s%s%s%s%s%s%s ", time_b64, msgid_tag,
+  snprintf(buf, buflen, "@A%s%s%s%s%s%s%s%s%s%s%s%s ", time_b64, msgid_tag,
            has_sessid ? ",S" : "", has_sessid ? sessid_tag : "",
            held ? ",H" : "", heldbuf,
            has_ml ? ",M" : "", has_ml ? mlbuf : "",
+           has_fb ? ",F" : "", has_fb ? fbbuf : "",
            has_ctags ? ",C" : "", has_ctags ? client_tags : "");
   return buf;
 }
@@ -2029,7 +2061,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   struct VarData vd;
   struct MsgBuf *mb;
   char tagbuf[4608];
-  char s2s_tagbuf[4256];     /* fits @A prefix + ,S + ,M + ,C<4095-byte client_tags> */
+  char s2s_tagbuf[4352];     /* fits @A prefix + ,S + ,H + ,M + ,F + ,C<4095-byte client_tags> */
   char *tags;
   int prio;
   int has_ctags = (client_tags && *client_tags);
@@ -2098,6 +2130,7 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   s2s_msgid_override[0] = '\0';
   s2s_time_override = 0;
   s2s_ml_override[0] = '\0';
+  s2s_fallback_override[0] = '\0';
 }
 
 /** Send a line toward a server link with a stored row's client-only tags

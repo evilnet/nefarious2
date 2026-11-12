@@ -652,6 +652,60 @@ static void server_ordinary_lines(void **state)
   assert_int_equal(o.do_numeric, 1);
 }
 
+/* A compact tag segment the parser does not know is skipped, and the
+ * line and the segments after it are read as usual.  A new segment is
+ * rolled out on exactly this: an older server ignores it.  (The same
+ * lines -- ,F included -- were run against e81d12aa's parse.c, which
+ * does not know ,F, with the same result for the line and its ,C.) */
+static void server_unknown_segment_is_skipped(void **state)
+{
+  static const char *const lines[] = {
+    COMPACT ",Qzz,Cfoo=bar AC G :hello",
+    COMPACT ",Sabc,Qzz,Cfoo=bar AC G :hello",
+    COMPACT ",FAAAAAAAAAAAAAB,Cfoo=bar AC G :hello",
+    COMPACT ",Q,FAAAAAAAAAAAAAB,Cfoo=bar AC G :hello",
+  };
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
+    struct outcome o = parse_every_way(parse_server, &leaf, lines[i]);
+    expect_handler(lines[i], &o, "PING", "hello");
+    assert_string_equal(cli_s2s_client_tags(&leaf), "foo=bar");
+  }
+}
+
+/* The multiline fallback mark ,F<msgid>: kept for the line it came on,
+ * gone with the next line; present but empty still marks the line. */
+static void server_fallback_segment(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_server, &leaf, COMPACT ",FAAAAAAAAAAAAAB,Cfoo=bar AC G :hello");
+  expect_handler("fallback mark", &o, "PING", "hello");
+  assert_string_equal(cli_s2s_fallback(&leaf), "AAAAAAAAAAAAAB");
+  o = parse_every_way(parse_server, &leaf, COMPACT ",Sabc,Hh,F,Cfoo=bar AC G :hello");
+  assert_string_equal(cli_s2s_fallback(&leaf), "?");
+  o = parse_every_way(parse_server, &leaf, COMPACT " AC G :hello");
+  assert_string_equal(cli_s2s_fallback(&leaf), "");
+  /* Only a tag region's own segment sets it: inside ,C it is text. */
+  o = parse_every_way(parse_server, &leaf, COMPACT ",C+x=a,FAAAAAAAAAAAAAB AC G :hello");
+  assert_string_equal(cli_s2s_fallback(&leaf), "");
+  assert_string_equal(cli_s2s_client_tags(&leaf), "+x=a,FAAAAAAAAAAAAAB");
+}
+
+/* A client cannot set the mark: client lines never fill the S2S stash. */
+static void client_cannot_set_fallback_mark(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_client, &user, "@,FAAAAAAAAAAAAAB;+x=a,FAAAAAAAAAAAAAB PING :hello");
+  expect_handler("client mark", &o, "PING", "hello");
+  assert_string_equal(cli_s2s_fallback(&user), "");
+}
+
 /* Spaces only: no prefix (reported, as before), then an empty line. */
 static void server_spaces_only(void **state)
 {
@@ -751,10 +805,13 @@ int main(void)
     cmocka_unit_test(server_unknown_prefix_exceptions_read_only_the_line),
     cmocka_unit_test(server_ordinary_lines),
     cmocka_unit_test(server_spaces_only),
+    cmocka_unit_test(server_unknown_segment_is_skipped),
+    cmocka_unit_test(server_fallback_segment),
     cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
     cmocka_unit_test(client_label_ends_with_its_line),
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
+    cmocka_unit_test(client_cannot_set_fallback_mark),
   };
 
   return cmocka_run_group_tests(tests, group_setup, NULL);

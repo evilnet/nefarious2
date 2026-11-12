@@ -519,6 +519,39 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
                           owner);
   }
 }
+
+/** Store a DM that arrived from a server (server_relay_private_message,
+ * _notice) -- unless it is a multiline fallback line passing through.
+ *
+ * A line carrying the fallback mark (,F<msgid>, parse_server) is one of
+ * the single-line lines an originating server sent for multiline
+ * message <msgid>, which that server stored whole under <msgid>.
+ * Stored here as a PM of its own, a server it merely passes through
+ * added the preview lines and the "[N more lines]" NOTICE to the pair's
+ * history beside the message (a federated CHATHISTORY page showed them
+ * as extra rows), and -- since line 1 carries <msgid> and the same time
+ * -- a page answered from this store showed line 1 alone in place of
+ * the message.  So a server the line passes through (the target is not
+ * ours) stores nothing.  Nothing else keys on the row being stored: the
+ * pair index, TARGETS, gap markers and the ephemeral ring are all behind
+ * store_private_history, and so is its WebPush trigger, which pushes
+ * only for a target of this server (webpush_pm_account) -- there, at the
+ * target's server, it still fires, once.
+ *
+ * The target's own server stores the lines as before: they are what its
+ * client saw (a fork server whose way fails the origin's ML test, e.g.
+ * one with its multiline cap off).
+ */
+static void store_relayed_pm(struct Client *from, struct Client *acptr,
+                             const char *text, enum HistoryMessageType type,
+                             const char *msgid, const char *timestamp,
+                             const char *client_tags, const char *fallback_of)
+{
+  if (fallback_of && fallback_of[0] && !MyConnect(acptr))
+    return;
+  store_private_history(from, acptr, text, type, msgid, timestamp,
+                        client_tags);
+}
 #endif /* USE_ROCKSDB */
 
 /** Relay a local user's message to a channel.
@@ -1734,6 +1767,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   const char *client_tags;
   char pm_msgid[64];
   char pm_timestamp[32];
+  char fallback_of[S2S_MSGID_BUFSIZE];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1746,6 +1780,8 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     struct Client *one = cli_from(sptr);
     const char *s2s_tags = cli_s2s_client_tags(one);
     client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+    /* A multiline fallback line (,F): see store_relayed_pm(). */
+    ircd_strncpy(fallback_of, cli_s2s_fallback(one), sizeof(fallback_of));
   }
   from = sptr;
 
@@ -1824,6 +1860,8 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
       sendcmdto_set_s2s_cptr(cli_from(sptr));
       if (pm_msgid[0])
         sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+      if (fallback_of[0])
+        sendcmdto_set_s2s_fallback(fallback_of);  /* pass the mark on */
       sendcmdto_one_tags_with_client(send_from, CMD_PRIVATE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, text);
@@ -1840,8 +1878,8 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 #ifdef USE_ROCKSDB
   /* Store server-relayed private message in history database (if enabled) */
   if (pm_msgid[0])
-    store_private_history(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
-                          client_tags);
+    store_relayed_pm(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
+                     client_tags, fallback_of);
 #endif
 }
 
@@ -1859,6 +1897,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   const char *client_tags;
   char pm_msgid[64];
   char pm_timestamp[32];
+  char fallback_of[S2S_MSGID_BUFSIZE];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1871,6 +1910,8 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
     struct Client *one = cli_from(sptr);
     const char *s2s_tags = cli_s2s_client_tags(one);
     client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+    /* A multiline fallback line (,F): see store_relayed_pm(). */
+    ircd_strncpy(fallback_of, cli_s2s_fallback(one), sizeof(fallback_of));
   }
   from = sptr;
 
@@ -1956,6 +1997,8 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
         sendcmdto_set_s2s_cptr(cli_from(sptr));
         if (pm_msgid[0])
           sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
+        if (fallback_of[0])
+          sendcmdto_set_s2s_fallback(fallback_of);  /* pass the mark on */
         sendcmdto_one_tags_with_client(send_from, CMD_NOTICE, acptr,
                                        pm_msgid, client_tags,
                                        "%C :%s", acptr, text);
@@ -1973,8 +2016,8 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 #ifdef USE_ROCKSDB
   /* Store server-relayed private notice in history database (if enabled) */
   if (pm_msgid[0])
-    store_private_history(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp,
-                          client_tags);
+    store_relayed_pm(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp,
+                     client_tags, fallback_of);
 #endif
 }
 

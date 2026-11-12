@@ -494,6 +494,7 @@ struct Connection
   char                con_s2s_sessid[S2S_SESSID_BUFSIZE]; /**< S2S compact-tag ,S<sessid> segment from incoming message — bouncer session identity hint per redesign A.2 */
 #define S2S_ML_BUFSIZE 32  /**< ML framing: one flag byte + a multiline batch reference (senders use <=15) + NUL */
   char                con_s2s_ml[S2S_ML_BUFSIZE]; /**< S2S compact-tag ,M<flag><batchref> segment (multiline framing, audit 0.1); empty when absent */
+  char                con_s2s_fallback[S2S_MSGID_BUFSIZE]; /**< S2S compact-tag ,F<msgid> segment: the line is a multiline fallback line rendering message <msgid> (only its target's server stores it); empty when absent */
   char                con_s2s_held;  /**< S2S compact-tag ,H<x> segment: the bouncer hold mark of the N's client (BOUNCE_HOLD_MARK_*), 0 when absent or invalid */
   struct Client*      con_burst_stamp_link; /**< Local client: the server link our last burst N for it went to with a hold mark (compared only, never dereferenced) */
   char                con_burst_stamp; /**< Local client: the hold mark (BOUNCE_HOLD_MARK_*) that N carried, 0 when none */
@@ -750,6 +751,8 @@ struct Client {
 #define cli_s2s_ml(cli)          con_s2s_ml(cli_connect(cli))
 /** Get the bouncer hold mark from compact-tag ,H segment of incoming S2S message (0 = none) */
 #define cli_s2s_held(cli)        con_s2s_held(cli_connect(cli))
+/** Get the multiline-fallback mark (,F<msgid>) of the incoming S2S message ("" = none) */
+#define cli_s2s_fallback(cli)    con_s2s_fallback(cli_connect(cli))
 /** Get the link our last burst N for a local client carried a hold mark to */
 #define cli_burst_stamp_link(cli) con_burst_stamp_link(cli_connect(cli))
 /** Get the hold mark that burst N carried (0 = none) */
@@ -1095,6 +1098,8 @@ struct Client {
 #define con_s2s_ml(con)          ((con)->con_s2s_ml)
 /** Get the bouncer hold mark from compact-tag ,H segment of incoming S2S message. */
 #define con_s2s_held(con)        ((con)->con_s2s_held)
+/** Get the multiline-fallback mark from compact-tag ,F segment of incoming S2S message. */
+#define con_s2s_fallback(con)    ((con)->con_s2s_fallback)
 /** Get the link our last burst N for this local client carried a hold mark to. */
 #define con_burst_stamp_link(con) ((con)->con_burst_stamp_link)
 /** Get the hold mark that burst N carried. */

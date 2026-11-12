@@ -21,6 +21,24 @@ P10 is the server-to-server protocol used by Undernet-derived IRC servers (inclu
 - **Token**: 1-2 character command abbreviation (defined in `msg.h`)
 - **Parameters**: Space-separated, last param can be prefixed with `:` for spaces
 
+### S2S compact tag region (fork links only)
+
+Toward an IRCv3-aware link (SERVER flag `v`) with `P10_MESSAGE_TAGS` on, a line may start with one compact tag region (`format_s2s_tags_with_client`, send.c; parsed in `parse_server`, parse.c):
+
+```
+@A<time_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,F<msgid>][,C<client-tags>] <line>
+```
+
+| Segment | Meaning |
+|---|---|
+| `A` | version; the event's time (7 base64) and msgid (14) |
+| `,S` / `,H` | bouncer session id of the line's client / its hold mark (beside `,S` only) |
+| `,M` | multiline framing on `ML` lines: flag (`+` `c` `-` `.`) + batch reference |
+| `,F` | multiline fallback mark on a `P`/`O` line: one of the single-line fallback lines (preview lines and the `[N more lines]` NOTICE) an originating server sent for multiline message `<msgid>`, which it stored whole. A server the line passes through does not store it (`store_relayed_pm`, ircd_relay.c) and re-arms `,F` toward its next fork hop; the target's own server stores it as usual. Server-to-server only. |
+| `,C` | client-only tags, **always last** (its value may contain commas, it runs to the end of the region) |
+
+A receiver skips a segment letter it does not know (parse.c `default:`), and does not relay it: a new segment rolls out without breaking older fork servers, which simply do not act on it. Legacy links never get the region.
+
 ## Numeric Format
 
 | Type | Format | Example | Description |

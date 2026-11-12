@@ -987,6 +987,12 @@ ml_send_line(struct Client *from, struct Client *server, char flag,
  * next hop gets the bare line (sendcmdto_one_tags_with_client).  The
  * other lines and the NOTICE take their own msgids.
  *
+ * Every line, the NOTICE included, also carries the fallback mark
+ * ,F<msgid> toward an IRCv3-aware hop: this server stores the batch
+ * whole, so a fork server the lines merely pass through does not store
+ * them as single PMs (server_relay_private_message); only the target's
+ * own server does, as what its client saw.
+ *
  * - NOTICE stays NOTICE: \a is_notice picks the command of every line.
  * - Blank lines are not sent (the fallback skips them, as the client
  *   fallback does) and so are not counted either: neither in the preview
@@ -1038,6 +1044,7 @@ ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
       continue;
     if (sent == 0)
       sendcmdto_set_s2s_tags(time_ms, msgid);
+    sendcmdto_set_s2s_fallback(msgid);
     if (is_notice)
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr,
                                      sent == 0 ? msgid : NULL, client_tags,
@@ -1056,6 +1063,7 @@ ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
 
     generate_msgid(trunc_msgid, sizeof(trunc_msgid));
     sendcmdto_set_s2s_tags(history_event_time_ms(NULL), trunc_msgid);
+    sendcmdto_set_s2s_fallback(msgid);
     if (paste_url)
       /* URL outside the bracket so linkifiers don't grab the ']'. */
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr, trunc_msgid,

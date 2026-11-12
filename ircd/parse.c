@@ -1821,6 +1821,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_client_tags(cptr)[0] = '\0';
   cli_s2s_sessid(cptr)[0] = '\0';
   cli_s2s_ml(cptr)[0] = '\0';
+  cli_s2s_fallback(cptr)[0] = '\0';
   cli_s2s_held(cptr) = '\0';
 
   if (*ch == '@') {
@@ -1972,8 +1973,29 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
               }
               break;
             }
+            case 'F': {
+              /* Multiline fallback mark: the line (a PRIVMSG/NOTICE)
+               * is one of the single-line fallback lines an originating
+               * server sent for multiline message <msgid>, which that
+               * server stored whole.  Only the target's own server
+               * stores the line; a server it passes through does not
+               * (server_relay_private_message).  A segment present but
+               * unusable (empty, too long) still marks the line: "?". */
+              size_t data_len = seg_end - seg_data;
+              if (data_len > 0 &&
+                  data_len < sizeof(con_s2s_fallback(cli_connect(cptr)))) {
+                memcpy(cli_s2s_fallback(cptr), seg_data, data_len);
+                cli_s2s_fallback(cptr)[data_len] = '\0';
+              } else {
+                cli_s2s_fallback(cptr)[0] = '?';
+                cli_s2s_fallback(cptr)[1] = '\0';
+              }
+              break;
+            }
             default:
-              /* Unknown segment marker — skip silently */
+              /* Unknown segment marker — skip silently.  Rollouts of a
+               * new segment rest on this: an older server ignores it
+               * (and does not relay it), never rejects the line. */
               break;
             }
 
