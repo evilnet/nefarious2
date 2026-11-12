@@ -744,6 +744,14 @@ cap_req(struct Client *sptr, const char *caplist)
   send_caplist(sptr, &set, &rem, "ACK");
   *cli_capab(sptr) = cs;
   *cli_active_own(sptr) = as;
+  /* A client that removes draft/metadata-2 or batch is no longer
+   * metadata-aware (MetadataAware()): its subscription list goes, as
+   * cap_ack() and cap_clear() drop it ("If a client removes this
+   * capability or the batch capability from themselves, servers MUST
+   * clear that client's subscription list", draft/metadata-3, PR #613).
+   * This, the common path, used to keep it. */
+  if (CapHas(&rem, CAP_DRAFT_METADATA2) || CapHas(&rem, CAP_BATCH))
+    metadata_sub_free(sptr);
   bounce_recompute_session_caps(sptr);
   bounce_emit_alias_caps(sptr);
 
@@ -771,8 +779,12 @@ cap_ack(struct Client *sptr, const char *caplist)
         continue; /* but don't clear sticky capabilities */
       CapClr(cli_active_own(sptr), cap->cap);
 
-      /* Clean up metadata subscriptions when metadata-2 is disabled */
-      if (cap->cap == CAP_DRAFT_METADATA2) {
+      /* Clean up metadata subscriptions when metadata-2 is disabled, or
+       * batch, without which the client is not metadata-aware
+       * (MetadataAware()): "If a client removes this capability or the
+       * batch capability from themselves, servers MUST clear that client's
+       * subscription list" (draft/metadata-3, PR #613). */
+      if (cap->cap == CAP_DRAFT_METADATA2 || cap->cap == CAP_BATCH) {
         metadata_sub_free(sptr);
       }
     } else {
@@ -807,8 +819,9 @@ cap_clear(struct Client *sptr, const char *caplist)
     if (!(cap->flags & CAPFL_PROTO))
       CapClr(cli_active_own(sptr), cap->cap);
 
-    /* Clean up metadata subscriptions when metadata-2 is cleared */
-    if (cap->cap == CAP_DRAFT_METADATA2) {
+    /* Clean up metadata subscriptions when metadata-2 or batch is
+     * cleared (as for CAP REQ -cap, above) */
+    if (cap->cap == CAP_DRAFT_METADATA2 || cap->cap == CAP_BATCH) {
       metadata_sub_free(sptr);
     }
   }

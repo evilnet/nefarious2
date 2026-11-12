@@ -257,7 +257,7 @@ void metadata_notify_subscribers(const char *target, const char *key,
       continue;
     if (!IsUser(acptr))
       continue;
-    if (!CapActive(acptr, CAP_DRAFT_METADATA2))
+    if (!MetadataAware(acptr))
       continue;
 
     /* Check if subscribed to this key */
@@ -316,7 +316,7 @@ void metadata_send_join_notifications(struct Client *joiner, struct Channel *chp
   struct Membership *member;
   struct MetadataEntry *entry;
 
-  if (!MyUser(joiner) || !CapActive(joiner, CAP_DRAFT_METADATA2))
+  if (!MyUser(joiner) || !MetadataAware(joiner))
     return;
 
   /* Send subscribed user metadata for each existing channel member */
@@ -1452,11 +1452,12 @@ static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* The reply is a metadata batch (its METADATA lines carry @batch=):
-   * decided up front on the client's batch capability, not on whatever
-   * cli_batch_id holds -- a batch id left behind by an earlier unclosed
-   * batch would have the lines tagged with it and never closed.  A client
-   * without batch gets RPL_METADATASYNCLATER, as before. */
+  /* The reply is a metadata batch (its METADATA lines carry @batch=),
+   * decided on the client's batch capability, never on whatever
+   * cli_batch_id holds (an id left by an earlier unclosed batch would tag
+   * the lines and never be closed).  m_metadata() admits only a client
+   * that is metadata-aware, batch included (MetadataAware()), so this
+   * holds unless the batch feature is turned off. */
   if (!feature_bool(FEAT_CAP_batch) || !CapActive(sptr, CAP_BATCH)) {
     send_reply(sptr, RPL_METADATASYNCLATER, target);
     return 0;
@@ -1537,8 +1538,9 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *subcmd;
 
-  /* Must have draft/metadata-2 capability */
-  if (!CapActive(sptr, CAP_DRAFT_METADATA2)) {
+  /* Only a metadata-aware client (the cap and batch, MetadataAware());
+   * with the cap alone the client gets what one without it gets. */
+  if (!MetadataAware(sptr)) {
     return send_reply(sptr, ERR_UNKNOWNCOMMAND, "METADATA");
   }
 

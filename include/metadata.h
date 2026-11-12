@@ -29,6 +29,23 @@
 
 #ifndef INCLUDED_metadata_lww_h
 #include "metadata_lww.h"
+
+/** @a cli is a metadata-aware client: draft/metadata-2 AND batch both
+ * active on its connection.  "This specification depends on the batch
+ * capability which MUST be negotiated to use draft/metadata-2"; the owner's
+ * reading (2026-11-12): negotiating draft/metadata-2 is a no-op until batch
+ * is negotiated too -- the proposed draft/metadata-3 (ircv3-specifications
+ * PR #613) words the same rule: "A metadata-aware client is a client who
+ * has negotiated both the draft/metadata-3 capability and the batch
+ * capability."  The cap is ACKed alone (the order of negotiation is never
+ * enforced) and stays inert -- the client is treated exactly as one without
+ * it -- until batch is there, in either order, during or after
+ * registration, and again whenever batch is dropped (which, like dropping
+ * the cap, clears its subscriptions: m_cap.c).  Per connection: a bouncer
+ * device's own caps.  Every reader of the metadata-2 capability goes
+ * through this (the caller includes client.h and capab.h). */
+#define MetadataAware(cli) (CapActive((cli), CAP_DRAFT_METADATA2) \
+                            && CapActive((cli), CAP_BATCH))
 #endif
 
 struct Client;

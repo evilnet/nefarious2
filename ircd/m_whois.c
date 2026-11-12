@@ -252,7 +252,7 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
       send_reply(sptr, RPL_WHOISACCOUNT, name, user->account);
 
     /* IRCv3 draft/metadata-2: send metadata in WHOIS */
-    if (CapActive(sptr, CAP_DRAFT_METADATA2)) {
+    if (MetadataAware(sptr)) {
       struct MetadataEntry *md = metadata_list_client(acptr);
       while (md) {
         if (can_view_metadata(sptr, acptr, md))
