@@ -968,14 +968,11 @@ static void send_rename_to_member(struct Client *sptr, struct Client *acptr,
                                   const char *reason)
 {
   if (CapOwnHas(acptr, CAP_DRAFT_CHANRENAME)) {
-    /* Non-bouncer with cap — send RENAME.  The renamer's own copy
-     * answers its RENAME: it carries the RENAME's label. */
-    if (acptr == sptr)
-      sendcmdto_one_event(sptr, CMD_RENAME, acptr, 1, "%s %s :%s",
-                          oldname, chptr->chname, reason ? reason : "");
-    else
-      sendcmdto_one(sptr, CMD_RENAME, acptr, "%s %s :%s",
-                    oldname, chptr->chname, reason ? reason : "");
+    /* Non-bouncer with cap — send RENAME, tagged as an event (@time,
+     * @account, ...).  The renamer's own copy answers its RENAME: it
+     * carries the RENAME's label. */
+    sendcmdto_one_event(sptr, CMD_RENAME, acptr, acptr == sptr, "%s %s :%s",
+                        oldname, chptr->chname, reason ? reason : "");
   } else {
     /* Non-bouncer without cap — PART/JOIN fallback */
     sendcmdto_one(acptr, CMD_PART, acptr, "%s :Channel renamed to %s%s%s",

@@ -3307,6 +3307,35 @@ void sendcmdto_channel_butserv_respond(struct Client *from, const char *cmd,
   va_end(ap);
 }
 
+/** Open a labeled-response batch for a command naming a comma-separated
+ * list of targets, when it names two or more different ones: each gets
+ * a line of its own.  For one target the single line carries the label
+ * itself, and for none the command is answered by ACK (or its error).
+ * @param[in] sptr Local client whose command it is.
+ * @param[in] list The target list ("#a,#b").
+ * @return Non-zero if a batch was opened (labeled_batch_start()).
+ */
+int labeled_batch_start_list(struct Client *sptr, const char *list)
+{
+  const char *first = NULL, *p;
+  size_t first_len = 0;
+
+  for (p = list; p && *p; ) {
+    const char *end = strchr(p, ',');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+
+    if (len) {
+      if (!first) {
+        first = p;
+        first_len = len;
+      } else if (len != first_len || ircd_strncmp(p, first, len))
+        return labeled_batch_start(sptr);
+    }
+    p = end ? end + 1 : NULL;
+  }
+  return 0;
+}
+
 /** Send a (prefixed) command to all local users on a channel with or without
  *  a client capability specified.
  * @param[in] from Client originating the command.

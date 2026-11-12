@@ -307,6 +307,10 @@ extern void sendcmdto_channel_butserv_respond(struct Client *from,
                                               unsigned int skip,
                                               const char *pattern, ...);
 
+/* labeled_batch_start() for a command whose target list names two or more
+ * different targets. */
+extern int labeled_batch_start_list(struct Client *sptr, const char *list);
+
 /* Send command to all channel users on this server with or without a specified capbility */
 extern void sendcmdto_channel_capab_butserv_butone(struct Client *from,
                                             const char *cmd,

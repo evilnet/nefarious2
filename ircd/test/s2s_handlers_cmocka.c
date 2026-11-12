@@ -994,6 +994,11 @@ void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
 /* m_topic's labeled batch for a TOPIC of several channels: a local
  * client's only, never a server's. */
 int labeled_batch_start(struct Client *sptr) { (void)sptr; return 0; }
+int labeled_batch_start_list(struct Client *sptr, const char *list)
+{
+  (void)sptr; (void)list;
+  return 0;
+}
 void labeled_batch_end(struct Client *sptr) { (void)sptr; }
 
 /* --- for m_endburst.o and m_destruct.o --- */

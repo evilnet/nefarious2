@@ -290,10 +290,9 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       topicnocolor = StripColor(topic);
   }
 
-  /* A TOPIC of more than one channel answers with a line (or two) per
+  /* A TOPIC of two or more channels answers with a line (or two) per
    * channel: a labeled one gets them in a labeled-response batch. */
-  if (strchr(parv[1], ','))
-    lb = labeled_batch_start(cptr);
+  lb = labeled_batch_start_list(cptr, parv[1]);
 
   for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
   {
@@ -318,6 +317,9 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 	send_reply(sptr, RPL_NOTOPIC, chptr->chname);
       else
       {
+	/* Two lines (332, 333): a labeled query gets them in a batch. */
+	if (!lb)
+	  lb = labeled_batch_start(cptr);
 	send_reply(sptr, RPL_TOPIC, chptr->chname, chptr->topic);
 	send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
 		   chptr->topic_time);

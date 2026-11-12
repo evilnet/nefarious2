@@ -158,12 +158,11 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
               "Part message contained invalid UTF-8 and was sanitized");
   }
 
-  /* A PART of more than one channel answers with a line per channel (its
+  /* A PART of two or more channels answers with a line per channel (its
    * PART, or the error for it): a labeled one gets them in a
    * labeled-response batch.  A PART of one channel is answered by one
-   * line, which carries the label itself. */
-  if (strchr(parv[1], ','))
-    lb = labeled_batch_start(cptr);
+   * line, which carries the label itself; of none ("PART ,"), by ACK. */
+  lb = labeled_batch_start_list(cptr, parv[1]);
 
   /* init join/part buffer */
   part_comment = (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0;

@@ -318,14 +318,32 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     if (IsDelayedJoin(member)) {
       /* If it's a delayed join, only send the KICK to the person doing
-       * the kicking and the victim */
+       * the kicking and the victim.  Tagged as the channel's copies of a
+       * KICK are (the kick's msgid and @time); the kicker is shown the
+       * hidden member's JOIN first, under that JOIN's own msgid and
+       * time, and a labeled KICK gets both lines in one batch. */
+      int lb = labeled_batch_start(cptr);
+
       if (MyUser(who))
-        sendcmdto_one(sptr, CMD_KICK, who, "%H %C :%s", chptr, who, comment);
-      if (CapRecipientHas(sptr, CAP_EXTJOIN))
-        sendcmdto_one(who, CMD_JOIN, sptr, "%H %s :%s", chptr, IsAccount(who) ? cli_account(who) : "*",  cli_info(who));
+        sendcmdto_one_event(sptr, CMD_KICK, who, 0, "%H %C :%s", chptr, who, comment);
+      if (member->join_msgid[0])
+        sendcmdto_set_client_event(member->join_msgid,
+                                   (uint64_t)member->join_tv.tv_sec * 1000
+                                   + member->join_tv.tv_usec / 1000);
       else
-        sendcmdto_one(who, CMD_JOIN, sptr, "%H", chptr);
+        sendcmdto_set_client_msgid(NULL);
+      if (CapRecipientHas(sptr, CAP_EXTJOIN))
+        sendcmdto_one_event(who, CMD_JOIN, sptr, 1, "%H %s :%s", chptr,
+                            IsAccount(who) ? cli_account(who) : "*", cli_info(who));
+      else
+        sendcmdto_one_event(who, CMD_JOIN, sptr, 1, "%H", chptr);
+      if (kick_msgid[0])
+        sendcmdto_set_client_event(kick_msgid, kick_ms);
+      else
+        sendcmdto_set_client_msgid(NULL);
       sendcmdto_one_event(sptr, CMD_KICK, sptr, 1, "%H %C :%s", chptr, who, comment);
+      if (lb)
+        labeled_batch_end(cptr);
       CheckDelayedJoins(chptr);
     } else
       /* The kicker's own copy answers its KICK (its label). */

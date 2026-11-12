@@ -617,6 +617,34 @@ static void test_respond_follows_the_fanout_rules(void **state)
   assert_int_equal(cli_label_responded(&asker), 1);
 }
 
+/* A list of targets opens the labeled batch only when it names two or
+ * more different ones; one target's line carries the label itself, and
+ * none ("PART ,") is answered by ACK. */
+static void test_batch_for_two_or_more_targets(void **state)
+{
+  static const struct { const char *list; int batch; } cases[] = {
+    { "#a", 0 }, { "#a,", 0 }, { ",#a", 0 }, { ",", 0 }, { "", 0 },
+    { "#a,#a", 0 }, { "#a,#A", 0 }, { "#a,#b", 1 }, { "#a,,#b", 1 },
+    { "#a,#a,#b", 1 },
+  };
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    n_sent = 0;
+    label_pending(&asker, "L31");
+    cli_labeled_batch(&asker) = 0;
+    cli_batch_id(&asker)[0] = '\0';
+    assert_int_equal(labeled_batch_start_list(&asker, cases[i].list) != 0,
+                     cases[i].batch);
+    assert_int_equal(n_sent, cases[i].batch);
+    assert_int_equal(cli_label_responded(&asker), cases[i].batch);
+    if (cases[i].batch)
+      assert_true(strstr(sent[0].text, "BATCH +") != NULL
+                  && has_tag(sent[0].text, "label"));
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -629,6 +657,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_respond_no_label_is_the_plain_copy, setup, teardown),
     cmocka_unit_test_setup_teardown(test_respond_answered_label_is_not_taken, setup, teardown),
     cmocka_unit_test_setup_teardown(test_respond_follows_the_fanout_rules, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),
