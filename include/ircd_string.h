@@ -41,7 +41,10 @@ extern const char *ircd_clienttagdeny_isupport(const char *in, char *out, size_t
 extern int ircd_reserved_vendor_tag(const char *tag, size_t tag_len);
 extern const char *ircd_strip_reserved_vendor_tags(const char *in, char *out, size_t outsz);
 extern int ircd_utf8_clamp(char* s, size_t maxbytes);
+extern size_t ircd_utf8_cut_len(const char* text, size_t len, size_t max);
 extern size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max);
+extern size_t ircd_relay_text_room(size_t source_len, size_t cmd_len,
+                                   size_t target_len, size_t body_max);
 extern int ircd_text_mentions(const char* text, const char* nick);
 extern char* ircd_json_escape(char* dst, size_t dstlen, const char* src);
 extern int         unique_name_vector(char* names, char token,

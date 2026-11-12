@@ -1184,6 +1184,131 @@ static void test_line_body_clamp_stray_continuation(void **state)
   assert_int_equal(510, ircd_line_body_clamp(line, 514, 510));
 }
 
+/* --- ircd_utf8_cut_len (the cut ircd_line_body_clamp and the relay's
+ * origin cut share) --- */
+
+static void test_utf8_cut_len_fits(void **state)
+{
+  (void)state;
+  assert_int_equal(5, ircd_utf8_cut_len("hello", 5, 5));
+  assert_int_equal(5, ircd_utf8_cut_len("hello", 5, 400));
+  assert_int_equal(0, ircd_utf8_cut_len("", 0, 0));
+  assert_int_equal(7, ircd_utf8_cut_len(NULL, 7, 3)); /* NULL: nothing to measure */
+}
+
+static void test_utf8_cut_len_ascii(void **state)
+{
+  char text[600];
+  (void)state;
+  memset(text, 'a', sizeof(text));
+  assert_int_equal(480, ircd_utf8_cut_len(text, sizeof(text), 480));
+  assert_int_equal(0, ircd_utf8_cut_len(text, sizeof(text), 0));
+}
+
+static void test_utf8_cut_len_3byte_offsets(void **state)
+{
+  /* 166 x U+20AC (E2 82 AC) = 498 bytes.  A cut at a multiple of 3 lands
+   * on a lead byte and stays; one or two bytes past it falls back to the
+   * lead, so no recipient ever gets a split euro sign. */
+  char text[498];
+  int i;
+  (void)state;
+  for (i = 0; i < 166; i++)
+    memcpy(text + 3 * i, "\342\202\254", 3);
+  assert_int_equal(480, ircd_utf8_cut_len(text, sizeof(text), 480)); /* +0 */
+  assert_int_equal(480, ircd_utf8_cut_len(text, sizeof(text), 481)); /* +1 */
+  assert_int_equal(480, ircd_utf8_cut_len(text, sizeof(text), 482)); /* +2 */
+  assert_int_equal(483, ircd_utf8_cut_len(text, sizeof(text), 483)); /* next lead */
+}
+
+static void test_utf8_cut_len_leading_at_is_text(void **state)
+{
+  /* Unlike ircd_line_body_clamp(), a text that starts with '@' has no
+   * tag region: "@everyone ..." is text from its first byte. */
+  char text[600];
+  (void)state;
+  memset(text, 'a', sizeof(text));
+  text[0] = '@';
+  text[5] = ' ';
+  assert_int_equal(100, ircd_utf8_cut_len(text, sizeof(text), 100));
+  /* ...where the line clamp takes "@aaaa " as a tag region. */
+  assert_int_equal(6 + 100, ircd_line_body_clamp(text, sizeof(text), 100));
+}
+
+static void test_utf8_cut_len_cp1252_agrees_with_clamp(void **state)
+{
+  /* cp1252 text (e-acute E9 + right quote 92, repeated) is not UTF-8,
+   * but E9 reads as a 3-byte lead: a cut on the 92 after it backs off
+   * one byte, a cut on an E9 stays.  Either way the origin cut and the
+   * output backstop (ircd_line_body_clamp) give the same answer, so a
+   * text the origin cut is never cut again further down. */
+  char text[498];
+  int i;
+  (void)state;
+  for (i = 0; i < 249; i++)
+    memcpy(text + 2 * i, "\351\222", 2);
+  assert_int_equal(480, ircd_utf8_cut_len(text, sizeof(text), 481));
+  assert_int_equal(ircd_line_body_clamp(text, sizeof(text), 481),
+                   ircd_utf8_cut_len(text, sizeof(text), 481));
+  assert_int_equal(480, ircd_utf8_cut_len(text, sizeof(text), 480));
+}
+
+/* --- ircd_relay_text_room --- */
+
+static void test_relay_text_room_typical(void **state)
+{
+  /* ":sender!u@127.0.0.1 PRIVMSG #t :" is 32 bytes: 478 left. */
+  (void)state;
+  assert_int_equal(510 - 32,
+                   ircd_relay_text_room(strlen("sender!u@127.0.0.1"),
+                                        strlen("PRIVMSG"), strlen("#t"), 510));
+  /* NOTICE is a byte shorter than PRIVMSG, so its text gets a byte more. */
+  assert_int_equal(510 - 31,
+                   ircd_relay_text_room(strlen("sender!u@127.0.0.1"),
+                                        strlen("NOTICE"), strlen("#t"), 510));
+  /* A statusmsg target ("@#t") costs its prefix byte. */
+  assert_int_equal(510 - 32,
+                   ircd_relay_text_room(strlen("sender!u@127.0.0.1"),
+                                        strlen("NOTICE"), strlen("@#t"), 510));
+}
+
+static void test_relay_text_room_longest_names(void **state)
+{
+  /* The longest source (NICKLEN 30 + USERLEN 10 + HOSTLEN 75 + "!@") and
+   * the longest channel (CHANNELLEN 200) still leave 181 bytes: a
+   * PRIVMSG to a channel or a nick always has room for text. */
+  (void)state;
+  assert_int_equal(181, ircd_relay_text_room(30 + 1 + 10 + 1 + 75, 7, 200, 510));
+}
+
+static void test_relay_text_room_none_left(void **state)
+{
+  /* A target that eats the line (an oper's long $mask, a long
+   * nick%host@server) leaves nothing: 0, never a wrapped size_t. */
+  (void)state;
+  assert_int_equal(0, ircd_relay_text_room(117, 7, 400, 510));
+  /* Exactly full: 1 + 100 + 1 + 7 + 1 + 398 + 2 = 510. */
+  assert_int_equal(0, ircd_relay_text_room(100, 7, 398, 510));
+  /* One byte short of full: one byte of text. */
+  assert_int_equal(1, ircd_relay_text_room(100, 7, 397, 510));
+}
+
+static void test_relay_text_room_line_is_510(void **state)
+{
+  /* Room + cut, end to end: a 510-byte client line's text, cut to the
+   * room its relayed form leaves, gives a relayed line of exactly 510. */
+  char text[499], line[1100];
+  const char *src = "sender!u@127.0.0.1";
+  size_t room, keep;
+  (void)state;
+  memset(text, 'a', 498);
+  text[498] = '\0';
+  room = ircd_relay_text_room(strlen(src), 7, 2, 510);
+  keep = ircd_utf8_cut_len(text, 498, room);
+  snprintf(line, sizeof(line), ":%s PRIVMSG #t :%.*s", src, (int)keep, text);
+  assert_int_equal(510, strlen(line));
+}
+
 /* --- string_is_valid_utf8 / string_sanitize_utf8 --- */
 
 /* A line as an IRC client actually sends it: CTCP delimiters and the mIRC
@@ -1628,6 +1753,19 @@ int main(void)
         cmocka_unit_test(test_line_body_clamp_latin1_run),
         cmocka_unit_test(test_line_body_clamp_utf8_4byte),
         cmocka_unit_test(test_line_body_clamp_stray_continuation),
+
+        /* ircd_utf8_cut_len */
+        cmocka_unit_test(test_utf8_cut_len_fits),
+        cmocka_unit_test(test_utf8_cut_len_ascii),
+        cmocka_unit_test(test_utf8_cut_len_3byte_offsets),
+        cmocka_unit_test(test_utf8_cut_len_leading_at_is_text),
+        cmocka_unit_test(test_utf8_cut_len_cp1252_agrees_with_clamp),
+
+        /* ircd_relay_text_room */
+        cmocka_unit_test(test_relay_text_room_typical),
+        cmocka_unit_test(test_relay_text_room_longest_names),
+        cmocka_unit_test(test_relay_text_room_none_left),
+        cmocka_unit_test(test_relay_text_room_line_is_510),
 
         /* ircd_text_mentions */
         cmocka_unit_test(test_mentions_basic_and_case),

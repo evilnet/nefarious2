@@ -555,47 +555,36 @@ int ircd_utf8_clamp(char* s, size_t maxbytes)
   return 1;
 }
 
-/** Compute the length to keep \a line at or under \a body_max body
- * bytes, never splitting a UTF-8 sequence.  Pure function: it only
- * measures, it does not write to \a line.
+/** Compute how many of the \a len bytes at \a text to keep so that at
+ * most \a max are kept, never splitting a UTF-8 sequence.  Pure
+ * function: it only measures, it does not write to \a text.
  *
- * If \a line starts with '@' (an S2S tag region), the body is
- * everything after the first space; a tagged line with no space has
- * no body to measure, so the whole line is kept.  Otherwise the body
- * is the whole line.  When the body is already within \a body_max,
- * \a len is returned unchanged; otherwise, when the cut would split a
- * UTF-8 sequence, it is moved back to that sequence's lead byte so the
- * sequence is dropped whole.  The back-off is at most three bytes (a
- * sequence is at most four) and needs a lead byte whose sequence the
- * cut really splits; text that is not UTF-8 (a Latin-1 / cp1252 run of
- * 0x80-0xBF bytes) keeps the byte-exact cut instead of losing more.
+ * When \a len is already within \a max, \a len is returned unchanged;
+ * otherwise, when the cut would split a UTF-8 sequence, it is moved
+ * back to that sequence's lead byte so the sequence is dropped whole.
+ * The back-off is at most three bytes (a sequence is at most four) and
+ * needs a lead byte whose sequence the cut really splits; text that is
+ * not UTF-8 (a Latin-1 / cp1252 run of 0x80-0xBF bytes) keeps the
+ * byte-exact cut instead of losing more.  This is the one UTF-8 cut:
+ * ircd_line_body_clamp() (every line msgq builds) and the relay's cut
+ * of a message at its origin both use it, so they agree on where a
+ * text ends.
  *
- * @param[in] line     Line to measure (tag region + body, or just a
- *                      body); may be NULL.
- * @param[in] len       Length of \a line in bytes.
- * @param[in] body_max  Maximum number of body bytes to keep.
- * @return The length (<= \a len) that keeps the body at or under
- *         \a body_max bytes.
+ * @param[in] text  Bytes to measure (need not be NUL-terminated); may
+ *                  be NULL.
+ * @param[in] len   Number of bytes at \a text.
+ * @param[in] max   Maximum number of bytes to keep.
+ * @return The number of bytes (<= \a len, <= \a max when \a len > \a max)
+ *         to keep.
  */
-size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
+size_t ircd_utf8_cut_len(const char* text, size_t len, size_t max)
 {
-  size_t head = 0;
   size_t cut;
 
-  if (!line || len == 0)
+  if (!text || len <= max)
     return len;
 
-  if (line[0] == '@') {
-    const char* sp = memchr(line, ' ', len);
-    if (!sp)
-      return len; /* no space after the tag region: nothing to measure */
-    head = (size_t)(sp - line) + 1;
-  }
-
-  if (len - head <= body_max)
-    return len;
-
-  cut = head + body_max;
+  cut = max;
   /* The byte at the cut index is the first one dropped.  If it is a
    * continuation byte (10xxxxxx), walk back over at most three of them
    * to the lead byte (11xxxxxx) of the sequence they belong to, and cut
@@ -609,12 +598,12 @@ size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
     unsigned char lead;
     size_t seqlen;
 
-    while (steps < 3 && back > head
-           && ((unsigned char)line[back] & 0xC0) == 0x80) {
+    while (steps < 3 && back > 0
+           && ((unsigned char)text[back] & 0xC0) == 0x80) {
       --back;
       ++steps;
     }
-    lead = (unsigned char)line[back];
+    lead = (unsigned char)text[back];
     if (steps > 0 && (lead & 0xC0) == 0xC0) {
       seqlen = (lead >= 0xF0) ? 4 : (lead >= 0xE0) ? 3 : 2;
       if (back + seqlen > cut)
@@ -622,6 +611,65 @@ size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
     }
   }
   return cut;
+}
+
+/** Compute the length to keep \a line at or under \a body_max body
+ * bytes, never splitting a UTF-8 sequence.  Pure function: it only
+ * measures, it does not write to \a line.
+ *
+ * If \a line starts with '@' (a tag region -- the client form's or the
+ * S2S compact one), the body is everything after the first space; a
+ * tagged line with no space has no body to measure, so the whole line
+ * is kept.  Otherwise the body is the whole line.  The body is cut by
+ * ircd_utf8_cut_len().
+ *
+ * @param[in] line     Line to measure (tag region + body, or just a
+ *                      body); may be NULL.
+ * @param[in] len       Length of \a line in bytes.
+ * @param[in] body_max  Maximum number of body bytes to keep.
+ * @return The length (<= \a len) that keeps the body at or under
+ *         \a body_max bytes.
+ */
+size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max)
+{
+  size_t head = 0;
+
+  if (!line || len == 0)
+    return len;
+
+  if (line[0] == '@') {
+    const char* sp = memchr(line, ' ', len);
+    if (!sp)
+      return len; /* no space after the tag region: nothing to measure */
+    head = (size_t)(sp - line) + 1;
+  }
+
+  return head + ircd_utf8_cut_len(line + head, len - head, body_max);
+}
+
+/** Bytes a relayed line leaves for its trailing text.  The line a
+ * client receives for a relayed message is
+ *   ":" <source> " " <command> " " <target> " :" <text>
+ * and everything after the tag region must fit \a body_max bytes (510:
+ * RFC 1459's 512 less CRLF, which message-tags keeps for the part after
+ * the tags).  Pure arithmetic, so a caller can bound a text by the form
+ * its recipients will see before the text is stored or sent anywhere.
+ *
+ * @param[in] source_len  Length of the source as shown, "nick!user@host".
+ * @param[in] cmd_len     Length of the command word ("PRIVMSG").
+ * @param[in] target_len  Length of the target as shown, with any
+ *                        statusmsg prefix ("@#chan").
+ * @param[in] body_max    The line budget after the tags (BUFSIZE - 2).
+ * @return The text bytes that fit, or 0 when the line without any text
+ *         already fills (or overruns) \a body_max.
+ */
+size_t ircd_relay_text_room(size_t source_len, size_t cmd_len,
+                            size_t target_len, size_t body_max)
+{
+  /* ':' source ' ' cmd ' ' target ' ' ':' */
+  size_t head = 1 + source_len + 1 + cmd_len + 1 + target_len + 2;
+
+  return head < body_max ? body_max - head : 0;
 }
 
 /** Case-insensitive word-boundary search for \a nick in \a text, using
