@@ -156,7 +156,67 @@ struct reg_ctx {
   char *cred_data;                 /**< Keycloak credentialData JSON. */
   char *secret_data;               /**< Keycloak secretData JSON. */
   struct scram_sha256_creds scram; /**< SCRAM-SHA-256 attribute material. */
+  char label[64];                  /**< The REGISTER line's labeled-response
+                                        label ("" none): the answer's own */
 };
+
+/** The labeled-response state of whatever line the connection is on, kept
+ * aside while an answer to an earlier REGISTER goes out under that
+ * REGISTER's label (reg_answer_begin()). */
+struct reg_label_state {
+  char label[64];
+  unsigned char responded;
+  unsigned char labeled_batch;
+  char batch_id[16];
+  int batch;                       /**< a batch was opened for the answer */
+};
+
+/** Start sending the answer to \a ctx's REGISTER to \a acptr.  An answer
+ * comes later than its line (a Keycloak answer), by which time the
+ * connection's label is a later line's, or one already answered: the
+ * answer goes out under the REGISTER's own label, or none, and an answer
+ * of more than one line (a login: REGISTER SUCCESS, 900, ...) in a
+ * labeled-response batch, as a command's multi-line reply is
+ * (labeled_batch_start()).  reg_answer_end() puts the line's state back.
+ * @param[in] acptr The client that sent the REGISTER.
+ * @param[in] ctx Its registration context.
+ * @param[out] st Where the connection's own state is kept meanwhile.
+ * @param[in] lines Non-zero when the answer may be more than one line. */
+static void reg_answer_begin(struct Client *acptr, const struct reg_ctx *ctx,
+                             struct reg_label_state *st, int lines)
+{
+  memcpy(st->label, cli_label(acptr), sizeof(st->label));
+  st->responded = cli_label_responded(acptr);
+  st->labeled_batch = cli_labeled_batch(acptr);
+  memcpy(st->batch_id, cli_batch_id(acptr), sizeof(st->batch_id));
+  ircd_strncpy(cli_label(acptr), ctx->label, sizeof(st->label));
+  cli_label_responded(acptr) = 0;
+  cli_labeled_batch(acptr) = 0;
+  cli_batch_id(acptr)[0] = '\0';
+  st->batch = (lines && ctx->label[0]) ? labeled_batch_start(acptr) : 0;
+}
+
+/** End an answer reg_answer_begin() started. */
+static void reg_answer_end(struct Client *acptr, struct reg_label_state *st)
+{
+  if (st->batch)
+    labeled_batch_end(acptr);
+  memcpy(cli_label(acptr), st->label, sizeof(st->label));
+  cli_label_responded(acptr) = st->responded;
+  cli_labeled_batch(acptr) = st->labeled_batch;
+  memcpy(cli_batch_id(acptr), st->batch_id, sizeof(st->batch_id));
+}
+
+/** An asynchronous FAIL REGISTER, under the REGISTER's label. */
+static void reg_answer_fail(struct reg_ctx *ctx, struct Client *acptr,
+                            const char *code, const char *text)
+{
+  struct reg_label_state st;
+
+  reg_answer_begin(acptr, ctx, &st, 0);
+  send_fail(acptr, "REGISTER", code, ctx->account, text);
+  reg_answer_end(acptr, &st);
+}
 
 /** Re-find the client that issued the REGISTER, if it is still there.
  *
@@ -247,19 +307,26 @@ static void reg_ctx_free(struct reg_ctx *ctx)
  *  - before connection registration the later answer still replaces a
  *    completed login (the overlaps as pinned in sasl_handler_cmocka).
  *
+ * Every line goes out under the REGISTER's own label (reg_answer_begin()).
+ *
  * @param[in] acptr Client to log in.
- * @param[in] account Account name that was created.
+ * @param[in] ctx Its registration context (the account, the label).
  * @param[in] id The new user's Keycloak id (a UUID), or NULL.
  */
-static void register_complete_success(struct Client *acptr, const char *account,
-                                      const char *id)
+static void register_complete_success(struct Client *acptr,
+                                      struct reg_ctx *ctx, const char *id)
 {
+  const char *account = ctx->account;
   char kcid[ACCOUNT_ID_LEN + 1] = "";
   const char *held = IsAccount(acptr) ? cli_user(acptr)->account
                    : IsSASLComplete(acptr) ? cli_saslaccount(acptr) : "";
+  struct reg_label_state st;
 
   if (held[0] && 0 == ircd_strcmp(held, account)) {
-    sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
+    reg_answer_begin(acptr, ctx, &st, 0);
+    sendrawto_one_tags(acptr, "REGISTER SUCCESS %s :Account registered",
+                       account);
+    reg_answer_end(acptr, &st);
     return;
   }
   if (IsAccount(acptr)) {
@@ -268,12 +335,16 @@ static void register_complete_success(struct Client *acptr, const char *account,
     ircd_snprintf(0, text, sizeof(text), "Account %s was created, but you are "
                   "already logged in as %s; log in to %s with SASL to use it",
                   account, held, account);
+    reg_answer_begin(acptr, ctx, &st, 0);
     send_warn(acptr, "REGISTER", "ALREADY_AUTHENTICATED", account, text);
+    reg_answer_end(acptr, &st);
     return;
   }
   if (id && !account_id_from_uuid(id, kcid))
     kcid[0] = '\0';                     /* the callers pass UUIDs only */
+  reg_answer_begin(acptr, ctx, &st, 1);
   sasl_register_login(acptr, account, kcid[0] ? kcid : NULL);
+  reg_answer_end(acptr, &st);
 }
 
 /** Stage 2 result: the verification mail was (or was not) triggered.
@@ -296,10 +367,15 @@ static void reg_email_cb(int result, void *data)
               "account state is correct; verification completable out-of-band",
               ctx->account, result);
 
-  if (acptr)
-    sendrawto_one(acptr, "REGISTER VERIFICATION_REQUIRED %s :Account created - "
-                  "check your email for a verification link, then log in "
-                  "normally (SASL)", ctx->account);
+  if (acptr) {
+    struct reg_label_state st;
+
+    reg_answer_begin(acptr, ctx, &st, 0);
+    sendrawto_one_tags(acptr, "REGISTER VERIFICATION_REQUIRED %s "
+                       ":Account created - check your email for a verification "
+                       "link, then log in normally (SASL)", ctx->account);
+    reg_answer_end(acptr, &st);
+  }
 
   reg_ctx_free(ctx);
 }
@@ -368,7 +444,7 @@ static void reg_id_lookup_cb(int result, const struct kc_user *user,
               "not a UUID; logged in without one", ctx->account);
 
   if (acptr)
-    register_complete_success(acptr, ctx->account, id);
+    register_complete_success(acptr, ctx, id);
   reg_ctx_free(ctx);
 }
 
@@ -392,31 +468,31 @@ static void reg_create_cb(int result, const char *id, void *data)
     if (acptr) {
       switch (result) {
       case KC_CONFLICT:
-        send_fail(acptr, "REGISTER", "ACCOUNT_EXISTS", ctx->account,
+        reg_answer_fail(ctx, acptr, "ACCOUNT_EXISTS",
                   "Account already exists");
         break;
       case KC_CONFLICT_EMAIL:
-        send_fail(acptr, "REGISTER", "UNACCEPTABLE_EMAIL", ctx->account,
+        reg_answer_fail(ctx, acptr, "UNACCEPTABLE_EMAIL",
                   "That email address is already used by another account");
         break;
       case KC_BAD_USERNAME:
-        send_fail(acptr, "REGISTER", "BAD_ACCOUNT_NAME", ctx->account,
+        reg_answer_fail(ctx, acptr, "BAD_ACCOUNT_NAME",
                   "The account server does not accept this account name");
         break;
       case KC_BAD_EMAIL:
-        send_fail(acptr, "REGISTER", "INVALID_EMAIL", ctx->account,
+        reg_answer_fail(ctx, acptr, "INVALID_EMAIL",
                   "The account server does not accept this email address");
         break;
       case KC_BAD_PASSWORD:
-        send_fail(acptr, "REGISTER", "WEAK_PASSWORD", ctx->account,
+        reg_answer_fail(ctx, acptr, "WEAK_PASSWORD",
                   "The account server does not accept this password");
         break;
       case KC_REJECTED:
-        send_fail(acptr, "REGISTER", "INVALID_PARAMS", ctx->account,
+        reg_answer_fail(ctx, acptr, "INVALID_PARAMS",
                   "The account server refused this registration");
         break;
       default:
-        send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
+        reg_answer_fail(ctx, acptr, "TEMPORARILY_UNAVAILABLE",
                   "Registration is temporarily unavailable");
         break;
       }
@@ -460,7 +536,7 @@ static void reg_create_cb(int result, const char *id, void *data)
               "looked up; logged in without one", ctx->account);
   }
 
-  register_complete_success(acptr, ctx->account, id);
+  register_complete_success(acptr, ctx, id);
   reg_ctx_free(ctx);
 }
 
@@ -483,14 +559,14 @@ static void reg_search_cb(int result, const struct kc_user *user, void *data)
 
   if (result == KC_SUCCESS && user) {           /* name taken */
     if (acptr)
-      send_fail(acptr, "REGISTER", "ACCOUNT_EXISTS", ctx->account,
+      reg_answer_fail(ctx, acptr, "ACCOUNT_EXISTS",
                 "Account already exists");
     reg_ctx_free(ctx);
     return;
   }
   if (result != KC_NOT_FOUND) {                 /* connectivity trouble */
     if (acptr)
-      send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
+      reg_answer_fail(ctx, acptr, "TEMPORARILY_UNAVAILABLE",
                 "Registration is temporarily unavailable");
     reg_ctx_free(ctx);
     return;
@@ -515,7 +591,7 @@ static void reg_search_cb(int result, const struct kc_user *user, void *data)
   ctx->stage = 1;
   if (kc_user_create_full(&req, reg_create_cb, ctx) != 0) {
     if (acptr)
-      send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
+      reg_answer_fail(ctx, acptr, "TEMPORARILY_UNAVAILABLE",
                 "Registration is temporarily unavailable");
     reg_ctx_free(ctx);
   }
@@ -758,8 +834,18 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* labeled-response: the answer comes from Keycloak, after this line;
+   * it goes out under this line's label (reg_answer_begin()), and this line
+   * is not answered with an ACK meanwhile.  Taken here, where nothing
+   * before the request has answered. */
+  if (cli_label(cptr)[0]) {
+    ircd_strncpy(ctx->label, cli_label(cptr), sizeof(ctx->label));
+    cli_label_responded(cptr) = 1;
+  }
+
   ctx->stage = 0;
   if (kc_user_get(ctx->account, reg_search_cb, ctx) != 0) {
+    cli_label_responded(cptr) = 0;   /* the answer is this line's after all */
     send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
               "Registration is temporarily unavailable");
     reg_ctx_free(ctx);

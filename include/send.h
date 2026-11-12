@@ -58,6 +58,12 @@ extern void client_reconcile_sendq(struct Client *to);
  * WITHOUT A PREFIX!
  */
 extern void sendrawto_one(struct Client *to, const char *pattern, ...);
+/* The same line, with the tags the recipient's capabilities call for and
+ * no more (@label or the labeled-response @batch of an answer, @time
+ * under server-time): a server line that has always gone out without a
+ * source prefix keeps it that way; a client with no tag capability gets
+ * exactly what sendrawto_one() sends. */
+extern void sendrawto_one_tags(struct Client *to, const char *pattern, ...);
 
 /** Send a BATCH command to a client if it has CAP_BATCH.
  * Checks per-connection caps (CapOwnHas) to decide delivery.

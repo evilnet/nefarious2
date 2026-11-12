@@ -1590,6 +1590,35 @@ void sendrawto_one(struct Client *to, const char *pattern, ...)
   msgq_clean(mb);
 }
 
+/** Send a line without a source prefix to one local client, with the tags
+ * its capabilities call for (format_message_tags_for_ex() as for a line
+ * from this server: @label or the labeled-response @batch when answering
+ * a labeled command, @time under server-time; nothing else applies to a
+ * server source).  For server lines that have always been unprefixed --
+ * draft/account-registration's "REGISTER SUCCESS <account> :..." -- so a
+ * client that asked for no tags sees the line byte for byte as before.
+ * @param[in] to Client to send to.
+ * @param[in] pattern Format string for the line. */
+void sendrawto_one_tags(struct Client *to, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[512];
+  char *tags;
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), &me, to, NULL);
+  if (tags)
+    mb = msgq_make(to, "%s%v", tags, &vd);
+  else
+    mb = msgq_make(to, "%v", &vd);
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to a single client.
  * @param[in] from Client sending the command.
  * @param[in] cmd Long name of command (used if \a to is a user).

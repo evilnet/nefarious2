@@ -354,6 +354,50 @@ int auth_iauth_sasl_fail(struct Client *c) { return 0; }
 /* m_sasl.c */
 int abort_sasl(struct Client *cptr, int timeout) { touch(cptr); return 0; }
 
+/* labeled-response, as send.c does it: a line answering a labeled command
+ * carries its label once (the first line), unless the command opened a
+ * labeled-response batch (labeled_batch_start()), whose lines carry the
+ * batch.  The transcript notes the label a line went out with. */
+static const char *label_take(struct Client *to)
+{
+  struct fake *f = fake_of(to);
+  if (!f || f->freed || cli_labeled_batch(to))
+    return "";
+  if (cli_label(to)[0] && !cli_label_responded(to)) {
+    cli_label_responded(to) = 1;
+    return cli_label(to);
+  }
+  return "";
+}
+
+static void tlog_label(const char *label)
+{
+  if (label[0] && ntlog > 0) {
+    size_t n = strlen(tlog[ntlog - 1]);
+    snprintf(tlog[ntlog - 1] + n, TLOG_LEN - n, " [label=%s]", label);
+  }
+}
+
+int labeled_batch_start(struct Client *sptr)
+{
+  if (!cli_label(sptr)[0])
+    return 0;
+  tlog_add("BATCH + labeled-response %s [label=%s]", tname(sptr), cli_label(sptr));
+  cli_label_responded(sptr) = 1;
+  cli_labeled_batch(sptr) = 1;
+  ircd_strncpy(cli_batch_id(sptr), "lrb", sizeof(cli_batch_id(sptr)));
+  return 1;
+}
+
+void labeled_batch_end(struct Client *sptr)
+{
+  if (!cli_labeled_batch(sptr))
+    return;
+  tlog_add("BATCH - %s", tname(sptr));
+  cli_labeled_batch(sptr) = 0;
+  cli_batch_id(sptr)[0] = '\0';
+}
+
 /* The send layer: records what reaches a client. */
 int send_reply(struct Client *to, int reply, ...)
 {
@@ -373,6 +417,7 @@ int send_reply(struct Client *to, int reply, ...)
     tlog_add("900 %s %s!%s@%s %s", tname(to), nick, user, host, account);
   } else
     tlog_add("%03d %s", reply & ~SND_EXPLICIT, tname(to));
+  tlog_label(label_take(to));
   return 0;
 }
 
@@ -397,6 +442,7 @@ void send_fail(struct Client *to, const char *command, const char *code,
   if (f && !f->freed)
     ircd_strncpy(f->fail_code, code, sizeof(f->fail_code));
   tlog_add("FAIL %s %s %s", command, code, context ? context : "");
+  tlog_label(label_take(to));
 }
 void send_warn(struct Client *to, const char *command, const char *code,
                const char *context, const char *description)
@@ -407,6 +453,22 @@ void send_warn(struct Client *to, const char *command, const char *code,
     snprintf(f->warn, sizeof(f->warn), "%s %s %s :%s", command, code,
              context ? context : "", description);
   tlog_add("WARN %s %s %s", command, code, context ? context : "");
+  tlog_label(label_take(to));
+}
+void sendrawto_one_tags(struct Client *to, const char *pattern, ...)
+{
+  struct fake *f = fake_of(to);
+  char buf[TLOG_LEN];
+  va_list vl;
+  touch(to);
+  va_start(vl, pattern);
+  fmt_ircd(buf, sizeof(buf), pattern, vl);
+  va_end(vl);
+  if (f && !f->freed) {
+    ircd_strncpy(f->raw, buf, sizeof(f->raw));
+    tlog_add("raw %s %s", tname(to), f->raw);
+    tlog_label(label_take(to));
+  }
 }
 void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
                    struct Client *to, const char *pattern, ...)
@@ -2517,6 +2579,121 @@ static void register_tells_why_keycloak_refused(void **state)
 }
 
 /* ------------------------------------------------------------------ */
+/* labeled-response: the answer carries the REGISTER's own label       */
+/* ------------------------------------------------------------------ */
+
+/** The line \a c is on now: \a label ("" none), not yet answered. */
+static void next_line(struct Client *c, const char *label)
+{
+  ircd_strncpy(cli_label(c), label, sizeof(cli_label(c)));
+  cli_label_responded(c) = 0;
+}
+
+static int tlog_has(const char *entry)
+{
+  int i;
+  for (i = 0; i < ntlog; i++)
+    if (!strcmp(tlog[i], entry))
+      return 1;
+  return 0;
+}
+
+/** A REGISTER's answer comes from Keycloak, after its line: the REGISTER
+ * is not ACKed meanwhile, and the answer goes out under its own label --
+ * never the label of the line the client is on by then, nor none for a
+ * labeled REGISTER -- a login (REGISTER SUCCESS, 900, ...) in a
+ * labeled-response batch, a FAIL, WARN or VERIFICATION_REQUIRED on its
+ * line; an unlabeled REGISTER's answer carries no label.  The line the
+ * client is on keeps its own label state. */
+static void register_answer_carries_its_own_label(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  kc_mode = KC_LATER;
+
+  /* a login: in a batch under L1, while the client is on line L2 */
+  c = new_client(96, "lb", 0, REG_KEEPS);
+  next_line(c, "L1");
+  assert_int_equal(register_as(c, "nlab1", "*", "longpassword"), 0);
+  assert_int_equal(cli_label_responded(c), 1);      /* no ACK now */
+  next_line(c, "L2");
+  pend_deliver_kind(P_USER, KC_NOT_FOUND);
+  ntlog = 0;
+  pend_deliver_kind(P_CREATED, KC_SUCCESS);
+  assert_string_equal(tlog[0], "BATCH + labeled-response lb [label=L1]");
+  assert_string_equal(tlog[1], "raw lb REGISTER SUCCESS nlab1 :Account registered");
+  assert_true(!strncmp(tlog[2], "900 lb ", 7));
+  assert_string_equal(tlog[ntlog - 1], "BATCH - lb");
+  assert_string_equal(cli_label(c), "L2");          /* the line's own, back */
+  assert_int_equal(cli_label_responded(c), 0);
+  assert_int_equal(cli_labeled_batch(c), 0);
+
+  /* a FAIL, under L3 */
+  c = new_client(97, "lc", 0, REG_KEEPS);
+  next_line(c, "L3");
+  assert_int_equal(register_as(c, "nlab2", "*", "longpassword"), 0);
+  next_line(c, "L4");
+  ntlog = 0;
+  pend_deliver_kind(P_USER, KC_SUCCESS);            /* the name is taken */
+  assert_true(tlog_has("FAIL REGISTER ACCOUNT_EXISTS nlab2 [label=L3]"));
+  assert_string_equal(cli_label(c), "L4");
+  assert_int_equal(cli_label_responded(c), 0);
+
+  /* an unlabeled REGISTER answered while the client is on line L5 */
+  c = new_client(98, "ld", 0, REG_KEEPS);
+  next_line(c, "");
+  assert_int_equal(register_as(c, "nlab3", "*", "longpassword"), 0);
+  assert_int_equal(cli_label_responded(c), 0);
+  next_line(c, "L5");
+  ntlog = 0;
+  pend_deliver_kind(P_USER, KC_SUCCESS);
+  assert_true(tlog_has("FAIL REGISTER ACCOUNT_EXISTS nlab3"));
+  assert_string_equal(cli_label(c), "L5");
+  assert_int_equal(cli_label_responded(c), 0);      /* L5 still unanswered */
+
+  /* answered inside its own line (libkc answered at once): labeled, and
+   * the line is answered (no ACK) */
+  c = new_client(99, "le", 0, REG_KEEPS);
+  next_line(c, "L6");
+  kc_mode = KC_INLINE_FAIL;
+  ntlog = 0;
+  assert_int_equal(register_as(c, "nlab4", "*", "longpassword"), 0);
+  kc_mode = KC_LATER;
+  assert_true(tlog_has("FAIL REGISTER TEMPORARILY_UNAVAILABLE nlab4 [label=L6]"));
+  assert_string_equal(cli_label(c), "L6");
+  assert_int_equal(cli_label_responded(c), 1);
+
+  /* the WARN of a late answer, under L7 */
+  c = new_registered(100, "lf");
+  next_line(c, "L7");
+  assert_int_equal(register_as(c, "nlab5", "*", "longpassword"), 0);
+  pend_deliver_kind(P_USER, KC_NOT_FOUND);
+  next_line(c, "");
+  plain_pending(c, "labu", "labpw");
+  pend_deliver_kind(P_TOKEN, KC_SUCCESS);           /* logged in meanwhile */
+  next_line(c, "L8");
+  ntlog = 0;
+  pend_deliver_kind(P_CREATED, KC_SUCCESS);
+  assert_true(tlog_has("WARN REGISTER ALREADY_AUTHENTICATED nlab5 [label=L7]"));
+  assert_string_equal(cli_label(c), "L8");
+
+  /* VERIFICATION_REQUIRED, under L9 */
+  verify_email_on = 1;
+  c = new_client(101, "lg", 0, REG_KEEPS);
+  next_line(c, "L9");
+  assert_int_equal(register_as(c, "nlab6", "a@b.test", "longpassword"), 0);
+  next_line(c, "");
+  pend_deliver_kind(P_USER, KC_NOT_FOUND);
+  pend_deliver_kind(P_CREATED, KC_SUCCESS);
+  ntlog = 0;
+  pend_deliver_kind(P_RESULT, KC_SUCCESS);          /* the mail */
+  assert_true(tlog_has("raw lg REGISTER VERIFICATION_REQUIRED nlab6 :Account created - "
+                       "check your email for a verification link, then log in "
+                       "normally (SASL) [label=L9]"));
+}
+
+/* ------------------------------------------------------------------ */
 /* A request that cannot be started                                    */
 /* ------------------------------------------------------------------ */
 
@@ -2615,6 +2792,7 @@ int main(void)
     cmocka_unit_test_setup(register_success_mid_sasl_leaves_it_abortable, setup),
     cmocka_unit_test_setup(register_refuses_names_the_casemapping_folds, setup),
     cmocka_unit_test_setup(register_tells_why_keycloak_refused, setup),
+    cmocka_unit_test_setup(register_answer_carries_its_own_label, setup),
 #endif
   };
 
