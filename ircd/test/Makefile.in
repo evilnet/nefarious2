@@ -32,6 +32,7 @@ CMOCKA_TESTPROGS = \
 	ircd_chattr_cmocka \
 	ircd_match_cmocka \
 	ircd_string_cmocka \
+	msgq_cmocka \
 	numnicks_cmocka \
 	ircd_in_addr_cmocka \
 	ircd_compress_cmocka \
@@ -112,6 +113,7 @@ DEP_SRC = \
 	ircd_chattr_cmocka.c \
 	ircd_match_cmocka.c \
 	ircd_string_cmocka.c \
+	msgq_cmocka.c \
 	numnicks_cmocka.c \
 	ircd_in_addr_cmocka.c \
 	ircd_compress_cmocka.c \
@@ -231,6 +233,14 @@ ircd_match_cmocka: $(IRCD_MATCH_CMOCKA_OBJS)
 IRCD_STRING_CMOCKA_OBJS = ircd_string_cmocka.o test_stub.o ../ircd_string.o
 ircd_string_cmocka: $(IRCD_STRING_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# msgq_make()'s body cut (the client-line backstop under the relay's
+# origin cut): the real msgq/ircd_snprintf/ircd_string/ircd_alloc, the
+# rest stubbed in the test.
+MSGQ_CMOCKA_OBJS = msgq_cmocka.o test_stub.o ../msgq.o ../ircd_snprintf.o \
+	../ircd_string.o ../ircd_alloc.o
+msgq_cmocka: $(MSGQ_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(MSGQ_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 NUMNICKS_CMOCKA_OBJS = numnicks_cmocka.o test_stub.o ../numnicks.o ../ircd_string.o ../ircd_alloc.o ../match.o
 numnicks_cmocka: $(NUMNICKS_CMOCKA_OBJS)
