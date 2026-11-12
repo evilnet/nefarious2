@@ -68,12 +68,12 @@ int fwd_label_save(struct Client *from, const char *cmd,
   if (!from || !MyConnect(from) || !cmd)
     return 0;
 
-  /* Must have label + labeled-response + batch caps */
+  /* Must have a label and labeled-response in use (it and batch) */
   if (!cli_label(from)[0])
     return 0;
-  if (!feature_bool(FEAT_CAP_labeled_response) || !CapActive(from, CAP_LABELEDRESP))
+  if (!feature_bool(FEAT_CAP_labeled_response) || !LabeledResponseInUse(from))
     return 0;
-  if (!feature_bool(FEAT_CAP_batch) || !CapActive(from, CAP_BATCH))
+  if (!feature_bool(FEAT_CAP_batch))
     return 0;
 
   /* Look up command in terminal table */
@@ -170,8 +170,18 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
      * only ever created toward IRCv3-aware destinations (s_user.c), so
      * every correlatable reply carries its msgid. */
     if (msgid && msgid[0] && fl->fl_msgid[0]
-        && ircd_strcmp(fl->fl_msgid, msgid) == 0)
+        && ircd_strcmp(fl->fl_msgid, msgid) == 0) {
+      /* The client dropped batch before the first line of the answer
+       * came: labeled-response is inert now (LabeledResponseInUse), so
+       * no labeled batch is opened -- the answer goes out as it would to
+       * a client without labeled-response.  A batch already open is
+       * left to finish. */
+      if (fl->fl_state == FWD_LABEL_PENDING && !LabeledResponseInUse(acptr)) {
+        memset(fl, 0, sizeof(*fl));
+        return NULL;
+      }
       return fl;
+    }
   }
 
   return NULL;

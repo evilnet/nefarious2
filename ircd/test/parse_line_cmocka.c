@@ -783,12 +783,26 @@ static void client_ordinary_lines(void **state)
  * once parse_client() returns -- the line handled, or refused before a
  * handler -- it is gone, so nothing sent to the client afterwards (a
  * numeric relayed from a server, another client's event) can carry it. */
+/** Give or take a capability the way CAP REQ does: the connection's own
+ * set, then the active set the bouncer recomputes from it. */
+static void user_cap(int cap, int on)
+{
+  if (on) {
+    CapSet(cli_active_own(&user), cap);
+    CapSet(cli_active(&user), cap);
+  } else {
+    CapClr(cli_active_own(&user), cap);
+    CapClr(cli_active(&user), cap);
+  }
+}
+
 static void client_label_ends_with_its_line(void **state)
 {
   char buf[64];
 
   (void)state;
-  CapSet(cli_active(&user), CAP_LABELEDRESP);
+  user_cap(CAP_LABELEDRESP, 1);
+  user_cap(CAP_BATCH, 1);
 
   memset(&seen, 0, sizeof(seen));
   strcpy(buf, "@label=L1 PING :hello");
@@ -802,7 +816,74 @@ static void client_label_ends_with_its_line(void **state)
   assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
   assert_string_equal(cli_label(&user), "");
 
-  CapClr(cli_active(&user), CAP_LABELEDRESP);
+  user_cap(CAP_LABELEDRESP, 0);
+  user_cap(CAP_BATCH, 0);
+}
+
+/* labeled-response depends on batch, which "MUST be negotiated to use"
+ * it; the order of negotiation is not enforced.  Until batch is active
+ * too the capability is a no-op: the label is not accepted, so nothing
+ * is labelled.  It goes live when batch is added, in either order, and
+ * inert again when batch is dropped. */
+static void client_label_needs_batch(void **state)
+{
+  char buf[64];
+  struct outcome o;
+
+  (void)state;
+  /* labeled-response + message-tags, no batch: the line runs, unlabelled */
+  user_cap(CAP_LABELEDRESP, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, "@label=N1 PING :hello");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_int_equal(seen.handler_calls, 1);
+  assert_string_equal(seen.label, "");
+
+  /* batch added after labeled-response: live */
+  user_cap(CAP_BATCH, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, "@label=N2 PING :hello");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.label, "N2");
+
+  /* batch dropped: inert again */
+  user_cap(CAP_BATCH, 0);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, "@label=N3 PING :hello");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.label, "");
+
+  /* labeled-response alone (no message-tags, no batch, no server-time):
+   * the client has shown tag-awareness, so its tagged line is parsed and
+   * the command runs -- with the label ignored, as for a client with
+   * message-tags and without labeled-response. */
+  user_cap(CAP_MSGTAGS, 0);
+  o = parse_every_way(parse_client, &user, "@label=N4 PING :hello");
+  assert_int_equal(o.ret, 0);
+  assert_int_equal(o.handler_calls, 1);
+  assert_int_equal(o.ref, 0);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, "@label=N4 PING :hello");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.label, "");
+  /* No tag capability at all: refused before any handler (the gate). */
+  user_cap(CAP_LABELEDRESP, 0);
+  o = parse_every_way(parse_client, &user, "@label=N4 PING :hello");
+  assert_int_equal(o.ret, -1);
+  assert_int_equal(o.handler_calls, 0);
+  assert_int_equal(o.ref, 1);
+
+  /* batch first, labeled-response second: live */
+  user_cap(CAP_MSGTAGS, 1);
+  user_cap(CAP_BATCH, 1);
+  user_cap(CAP_LABELEDRESP, 1);
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, "@label=N5 PING :hello");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.label, "N5");
+
+  user_cap(CAP_LABELEDRESP, 0);
+  user_cap(CAP_BATCH, 0);
 }
 
 int main(void)
@@ -818,6 +899,7 @@ int main(void)
     cmocka_unit_test(server_fallback_segment),
     cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
     cmocka_unit_test(client_label_ends_with_its_line),
+    cmocka_unit_test(client_label_needs_batch),
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
     cmocka_unit_test(client_cannot_set_fallback_mark),

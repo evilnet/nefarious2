@@ -1235,7 +1235,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
     const char *end_tag = complete ? "draft/chathistory-end;" : "";
 
     if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
-        CapRecipientHas(sptr, CAP_LABELEDRESP)) {
+        LabeledResponseInUse(sptr)) {
       sendrawto_one(sptr, "@%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
                     end_tag, label, cli_name(&me), batchid, target);
       cli_label_responded(sptr) = 1;
@@ -3301,7 +3301,7 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *page,
     char tagbuf[256];
     int tl = 0;
     int want_label = label && label[0] && feature_bool(FEAT_CAP_labeled_response)
-                     && CapRecipientHas(sptr, CAP_LABELEDRESP);
+                     && LabeledResponseInUse(sptr);
     tagbuf[0] = '\0';
     if (end)
       tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "draft/chathistory-end");

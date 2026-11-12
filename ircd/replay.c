@@ -607,7 +607,7 @@ static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
     int tl = 0;
     int want_label = !rs->label_used && rs->label[0] &&
         feature_bool(FEAT_CAP_labeled_response) &&
-        CapRecipientHas(sptr, CAP_LABELEDRESP);
+        LabeledResponseInUse(sptr);
     tagbuf[0] = '\0';
     if (outer_tag[0])
       tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%s%s", tl ? ";" : "", outer_tag);
@@ -1173,7 +1173,7 @@ void replay_start_batch(struct Client *sptr, const char *target,
 
     if (CapRecipientHas(sptr, CAP_BATCH)) {
       int want_label = label && label[0] && feature_bool(FEAT_CAP_labeled_response)
-                       && CapRecipientHas(sptr, CAP_LABELEDRESP);
+                       && LabeledResponseInUse(sptr);
       tagbuf[0] = '\0';
       if (complete)
         tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%sdraft/chathistory-end", tl ? ";" : "");

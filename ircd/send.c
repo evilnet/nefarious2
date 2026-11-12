@@ -534,8 +534,8 @@ static int wants_message_tags(struct Client *to)
   /* Fallback: any capability that implies message tag support */
   return (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME)) ||
          (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG)) ||
-         (feature_bool(FEAT_CAP_labeled_response) && CapActive(to, CAP_LABELEDRESP) &&
-          MyConnect(to) && cli_label(to)[0]);
+         (feature_bool(FEAT_CAP_labeled_response) && MyConnect(to) &&
+          LabeledResponseInUse(to) && cli_label(to)[0]);
 }
 
 /* draft/oper-tag (#494): a server-attached tag on every command sent
@@ -950,8 +950,7 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
   int use_oper = feature_bool(FEAT_CAP_oper_tag)
       && CapOwnHas(to, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
-                  CapOwnHas(to, CAP_LABELEDRESP) &&
-                  to && MyConnect(to) && cli_label(to)[0] &&
+                  to && LabeledResponseInUse(to) && MyConnect(to) && cli_label(to)[0] &&
                   !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
@@ -1074,7 +1073,7 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
   int use_oper = feature_bool(FEAT_CAP_oper_tag)
       && CapHas(caps, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
-                  CapHas(caps, CAP_LABELEDRESP) &&
+                  CapSetLabeledResponseInUse(caps) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
                   !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapHas(caps, CAP_BATCH) &&
@@ -1156,8 +1155,7 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   int use_oper = feature_bool(FEAT_CAP_oper_tag)
       && CapOwnHas(to, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
-                  CapOwnHas(to, CAP_LABELEDRESP) &&
-                  to && MyConnect(to) && cli_label(to)[0] &&
+                  to && LabeledResponseInUse(to) && MyConnect(to) && cli_label(to)[0] &&
                   !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
@@ -1259,7 +1257,7 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
   int use_oper = feature_bool(FEAT_CAP_oper_tag)
       && CapHas(caps, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
-                  CapHas(caps, CAP_LABELEDRESP) &&
+                  CapSetLabeledResponseInUse(caps) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
                   !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapHas(caps, CAP_BATCH) &&
@@ -1865,7 +1863,7 @@ static char *event_tags(char *buf, size_t buflen, struct Client *from,
     if (cli_labeled_batch(to) && cli_batch_id(to)[0]
         && feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH))
       snprintf(head, sizeof(head), "batch=%s", cli_batch_id(to));
-    else if (feature_bool(FEAT_CAP_labeled_response) && CapOwnHas(to, CAP_LABELEDRESP)
+    else if (feature_bool(FEAT_CAP_labeled_response) && LabeledResponseInUse(to)
              && cli_label(to)[0] && !cli_label_responded(to)) {
       snprintf(head, sizeof(head), "label=%s", cli_label(to));
       cli_label_responded(to) = 1;   /* answered: no ACK (send_labeled_ack) */
@@ -4660,7 +4658,7 @@ void send_batch_start(struct Client *to, const char *type)
   /* Build message tags - include label if this is for labeled-response */
   tagbuf[0] = '\0';
   if (feature_bool(FEAT_CAP_labeled_response) &&
-      CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0] &&
+      LabeledResponseInUse(to) && cli_label(to)[0] &&
       !cli_label_responded(to)) {   /* an answered label goes on no batch */
     tagbuf[0] = '@';
     pos = 1;
@@ -5035,7 +5033,7 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
   /* Format tags with explicit label override if provided */
   use_time = feature_bool(FEAT_CAP_server_time) && CapRecipientHas(to, CAP_SERVERTIME);
   use_label = feature_bool(FEAT_CAP_labeled_response) &&
-              CapRecipientHas(to, CAP_LABELEDRESP) &&
+              LabeledResponseInUse(to) &&
               ((label && *label) || cli_label(to)[0]);
 
   if (use_time || use_label) {
@@ -5238,7 +5236,7 @@ void send_labeled_ack(struct Client *to)
   /* Only send ACK if client has labeled-response capability and a pending label */
   if (!to || !MyConnect(to))
     return;
-  if (!feature_bool(FEAT_CAP_labeled_response) || !CapRecipientHas(to, CAP_LABELEDRESP))
+  if (!feature_bool(FEAT_CAP_labeled_response) || !LabeledResponseInUse(to))
     return;
   if (!cli_label(to)[0])
     return;
@@ -5292,9 +5290,9 @@ int labeled_batch_start(struct Client *sptr)
    * (or left by an earlier command) opens nothing. */
   if (!cli_label(sptr)[0] || cli_label_responded(sptr))
     return 0;
-  if (!feature_bool(FEAT_CAP_labeled_response) || !CapActive(sptr, CAP_LABELEDRESP))
+  if (!feature_bool(FEAT_CAP_labeled_response) || !LabeledResponseInUse(sptr))
     return 0;
-  if (!feature_bool(FEAT_CAP_batch) || !CapActive(sptr, CAP_BATCH))
+  if (!feature_bool(FEAT_CAP_batch))
     return 0;
 
   send_batch_start(sptr, "labeled-response");

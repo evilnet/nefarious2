@@ -1500,7 +1500,11 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
      *     reference is the spec-required tag for batched delivery,
      *     including multiline).
      *   - labeled-response: clients send `@label=<value>` on commands
-     *     they want correlated.
+     *     they want correlated.  The bare capability counts here: this
+     *     gate is about tag-awareness, which negotiating it shows.  The
+     *     label itself is honoured only while labeled-response is in use
+     *     (with batch, LabeledResponseInUse(); see the label= tag below):
+     *     without batch the tag is ignored and the command runs.
      *   - server-time: strict IRCv3 reads server-time as server→client
      *     only (the server adds `@time=` to messages it generates).
      *     But a client that negotiated server-time has demonstrated
@@ -1556,8 +1560,13 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
 
         /* Check for label= tag */
         if (strncmp(tag_name, "label=", 6) == 0) {
-          /* Extract label value if client has capability */
-          if (CapActive(cptr, CAP_LABELEDRESP) &&
+          /* Accept the label only while labeled-response is in use
+           * (labeled-response and batch both active).  Without batch the
+           * tag is ignored and the command runs: the client is answered
+           * as a tag-capable client without labeled-response that sent a
+           * label -- no label, no ACK, no labeled batch.  Every later
+           * reader of cli_label() sees only a label accepted here. */
+          if (LabeledResponseInUse(cptr) &&
               feature_bool(FEAT_CAP_labeled_response)) {
             char *label_val = tag_name + 6;
             size_t label_len = next_semi - label_val;

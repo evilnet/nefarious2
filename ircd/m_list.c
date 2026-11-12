@@ -428,8 +428,8 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_listing(sptr)->batch_id[0] = '\0';
       if (MyConnect(sptr) && cli_label(sptr)[0] &&
           feature_bool(FEAT_CAP_labeled_response) &&
-          CapActive(sptr, CAP_LABELEDRESP) &&
-          feature_bool(FEAT_CAP_batch) && CapActive(sptr, CAP_BATCH)) {
+          LabeledResponseInUse(sptr) &&
+          feature_bool(FEAT_CAP_batch)) {
         send_batch_start(sptr, "labeled-response");
         ircd_strncpy(cli_listing(sptr)->batch_id, cli_batch_id(sptr),
                      sizeof(cli_listing(sptr)->batch_id));

@@ -1920,6 +1920,16 @@ CAP_tls
 
 Enables announcement of the 'tls' (STARTTLS) client capability.
 
+CAP_labeled_response
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'labeled-response' client capability.  The
+capability depends on 'batch' and is a no-op until 'batch' is negotiated
+too, in either order: until then the label tag is ignored (the command
+still runs), and the client is answered exactly as one without
+labeled-response.
+
 UPING_ENABLE
  * Type: boolean
  * Default: TRUE

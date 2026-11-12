@@ -1858,6 +1858,38 @@ struct Client {
 /** Test whether this specific connection has the capability (not the session union) */
 #define CapOwnHas(cli, cap) CapHas(cli_active_own(cli), (cap))
 
+/* Capabilities that depend on `batch`.  labeled-response, draft/multiline
+ * and draft/event-playback each say: "This specification depends on the
+ * batch capability which MUST be negotiated to use <it>.  The order of
+ * capability negotiation is not significant and MUST NOT be enforced."
+ * So the CAP REQ is ACKed whatever the state of `batch`, and the
+ * capability is a no-op until `batch` is active too: it goes live the
+ * moment both are active on the connection, in either order, and inert
+ * again when the client drops `batch`.  While inert, the client is
+ * treated exactly as a client that never requested the capability -- for
+ * labeled-response: its label tag is ignored and the command runs, as for
+ * a client with message-tags that sends a label without labeled-response
+ * (the bare capability still lets it send tagged lines, parse.c).  The
+ * decision is this connection's own (each bouncer device's), never the
+ * session's.  Every test of one of these capabilities goes through its
+ * predicate below, not the bare capability bit. */
+
+/** labeled-response and batch both in the capability set @a cs. */
+#define CapSetLabeledResponseInUse(cs) \
+  (CapHas((cs), CAP_LABELEDRESP) && CapHas((cs), CAP_BATCH))
+/** labeled-response is in use on this connection: a label is accepted
+ * from it and answered (labeled-response requires batch). */
+#define LabeledResponseInUse(cli) CapSetLabeledResponseInUse(cli_active_own(cli))
+/** draft/multiline is in use on this connection: it may send multiline
+ * batches and is sent them (draft/multiline requires batch). */
+#define MultilineInUse(cli) \
+  (CapOwnHas((cli), CAP_DRAFT_MULTILINE) && CapOwnHas((cli), CAP_BATCH))
+/** draft/event-playback is in use on this connection: its history
+ * batches carry the stored events (JOIN, PART, ...); draft/event-playback
+ * requires batch. */
+#define EventPlaybackInUse(cli) \
+  (CapOwnHas((cli), CAP_DRAFT_EVENTPLAYBACK) && CapOwnHas((cli), CAP_BATCH))
+
 /** Test whether a client has no-implicit-names (ratified or legacy draft form).
  * IRCv3 spec ratified 2026-03-18 (#590); legacy draft/ form kept for
  * backward compat with clients that haven't updated yet. */

@@ -579,6 +579,47 @@ static void test_respond_answered_label_is_not_taken(void **state)
   assert_int_equal(cli_labeled_batch(&asker), 0);
 }
 
+/* labeled-response is a no-op until batch is negotiated too: a label left
+ * on a connection that holds labeled-response without batch (one an
+ * answer that comes later put back, after the client dropped batch) is
+ * taken by nothing -- no labeled copy, no labeled batch, no ACK, no
+ * labeled FAIL.  The client gets what one without labeled-response gets. */
+static void test_label_inert_without_batch(void **state)
+{
+  int i;
+
+  (void)state;
+  FlagClr(cli_active_own(&asker), CAP_BATCH);
+  FlagClr(cli_active(&asker), CAP_BATCH);
+  label_pending(&asker, "L40");
+
+  sendcmdto_channel_butserv_respond(&asker, CMD_PART, chan, &asker, 0,
+                                    ":%H", chan);
+  assert_false(has_tag(line_to(&asker), "label"));
+  assert_int_equal(cli_label_responded(&asker), 0);
+
+  n_sent = 0;
+  assert_int_equal(labeled_batch_start(&asker), 0);
+  assert_int_equal(labeled_batch_start_list(&asker, "#a,#b"), 0);
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+  send_labeled_ack(&asker);
+  assert_int_equal(n_sent, 0);
+
+  send_fail(&asker, "BATCH", "UNKNOWN_TYPE", "x", "Unknown batch type");
+  assert_int_equal(n_sent, 1);
+  assert_false(has_tag(sent[0].text, "label"));
+
+  /* Batch back: live again, in either order of negotiation. */
+  FlagSet(cli_active_own(&asker), CAP_BATCH);
+  FlagSet(cli_active(&asker), CAP_BATCH);
+  n_sent = 0;
+  for (i = 0; i < MAX_SENT; i++)
+    sent[i].to = NULL;
+  send_labeled_ack(&asker);
+  assert_int_equal(n_sent, 1);
+  assert_true(has_tag(sent[0].text, "label"));
+}
+
 /* The fan-out's own rules decide whether the asker gets a copy at all:
  * a zombie member, a channel its profile hides, a skip mask that rules
  * it out -- no copy, and the label stays pending for the ACK. */
@@ -657,6 +698,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_respond_no_label_is_the_plain_copy, setup, teardown),
     cmocka_unit_test_setup_teardown(test_respond_answered_label_is_not_taken, setup, teardown),
     cmocka_unit_test_setup_teardown(test_respond_follows_the_fanout_rules, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_label_inert_without_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),

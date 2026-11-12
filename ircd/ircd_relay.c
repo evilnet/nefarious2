@@ -1839,7 +1839,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         /* Client tags first */
         tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, "%s", echo_client_tags);
         /* Then server tags: label, msgid, time */
-        if (cli_label(sptr)[0] && CapActive(sptr, CAP_LABELEDRESP) && !cli_label_responded(sptr)) {
+        if (cli_label(sptr)[0] && LabeledResponseInUse(sptr) && !cli_label_responded(sptr)) {
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";label=%s", cli_label(sptr));
           cli_label_responded(sptr) = 1;
         }
@@ -1882,7 +1882,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         echo_tagbuf[0] = '@';
         tpos = 1;
         tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, "%s", echo_client_tags);
-        if (cli_label(sptr)[0] && CapActive(sptr, CAP_LABELEDRESP) && !cli_label_responded(sptr)) {
+        if (cli_label(sptr)[0] && LabeledResponseInUse(sptr) && !cli_label_responded(sptr)) {
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";label=%s", cli_label(sptr));
           cli_label_responded(sptr) = 1;
         }

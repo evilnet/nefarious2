@@ -319,7 +319,7 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
    * labeled ACK now and untagged numerics when they arrive. */
   if (MyConnect(from) && cli_label(from)[0] &&
       feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
+      LabeledResponseInUse(from) &&
       IsIRCv3Aware(acptr)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
@@ -415,7 +415,7 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
    * IRCv3-aware destinations only -- see hunt_server_cmd. */
   if (MyConnect(from) && cli_label(from)[0] &&
       feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
+      LabeledResponseInUse(from) &&
       IsIRCv3Aware(acptr)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
@@ -1626,7 +1626,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
          * echo first, then skip them in the broadcast to other members. */
         if (MyConnect(sptr) && cli_label(sptr)[0]
             && feature_bool(FEAT_CAP_labeled_response)
-            && CapActive(sptr, CAP_LABELEDRESP)) {
+            && LabeledResponseInUse(sptr)) {
           sendcmdto_one_tags(sptr, CMD_NICK, sptr, ":%s", nick);
           sendcmdto_common_channels_butone(sptr, CMD_NICK, sptr, ":%s", nick);
         } else {
