@@ -1785,9 +1785,10 @@ void auth_conf_begin(void)
 
 /** Record an IAuth{} block.  A block in the top-level configuration file
  * always wins over one from an included file (e.g. a network-wide synced
- * include), whatever order the lexer reads them in -- it can lex buffered
- * text of the top-level file before an include's; among blocks of the same
- * kind the last one wins.
+ * include), whether it stands before or after the include line; among
+ * blocks of the same kind the last one read wins.  The configuration is
+ * read in the order it is written: an included file where its include
+ * directive stands, and the rest of that line after the included file.
  * @param[in] argc Number of program arguments.
  * @param[in] argv Program arguments (copied).
  */
