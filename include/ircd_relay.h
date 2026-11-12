@@ -49,6 +49,16 @@ extern void server_relay_masked_notice(struct Client* sptr, const char* mask, co
 extern void server_relay_private_message(struct Client* sptr, const char* name, const char* text);
 extern void server_relay_private_notice(struct Client* sptr, const char* name, const char* text);
 
+/* A local user's message is cut once, at its origin, to what the line
+ * its recipients get (":nick!user@host <cmd> <target> :<text>", 510
+ * bytes after the tags) can carry -- before it is delivered, echoed,
+ * relayed, stored or pushed. */
+extern size_t relay_text_budget(struct Client *sptr, const char *cmd,
+                                size_t target_len, size_t lead_len);
+extern const char *relay_cut_text(struct Client *sptr, const char *cmd,
+                                  size_t target_len, size_t lead_len,
+                                  const char *text, char *buf, size_t bufsize);
+
 /* DM chathistory identity keying (F-CH1): account when authenticated,
  * else the per-connection session id.  NEVER the nick. */
 extern void history_pm_identity(struct Client *cli, char *buf, size_t buflen);
