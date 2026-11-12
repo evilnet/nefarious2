@@ -3632,6 +3632,12 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
                                int parc, char **params)
 {
+  /* No exchange (it ended here -- an abort, a timeout -- and IAuth's
+   * answer to it came late: no cookie): no failure to give.  Told, the
+   * client would read it as the end of an exchange it started since. */
+  if (!cli_saslcookie(cli))
+    return 0;
+
   send_reply(cli, ERR_SASLFAIL, EmptyString(params[0]) ? "" : params[0]);
 
   /* The exchange is over, as when services fail one (ms_sasl(), D F):

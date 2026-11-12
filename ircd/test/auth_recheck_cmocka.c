@@ -200,10 +200,13 @@ int exit_client(struct Client *cptr, struct Client *victim,
 int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...) { if (len) buf[0] = '\0'; return 0; }
 static int successes;          /**< RPL_SASLSUCCESS sent */
+static int failures;           /**< ERR_SASLFAIL sent */
 int send_reply(struct Client *to, int reply, ...)
 {
   if ((reply & ~SND_EXPLICIT) == RPL_SASLSUCCESS)
     successes++;
+  if ((reply & ~SND_EXPLICIT) == ERR_SASLFAIL)
+    failures++;
   return 0;
 }
 void sendrawto_one(struct Client *to, const char *pattern, ...) {}
@@ -252,7 +255,7 @@ static int setup(void **state)
   memset(fakes, 0, sizeof(fakes));
   timer_arms = 0;
   in_dispatch = ran_in_dispatch = 0;
-  successes = identity_sets = refusals = 0;
+  successes = failures = identity_sets = refusals = 0;
   CurrentTime = time(NULL);
   return 0;
 }
@@ -444,6 +447,8 @@ static void iauth_answers_without_an_exchange_are_dropped(void **state)
   assert_int_equal(identity_sets, 0);
   assert_false(IsSASLComplete(&a->cli));
   assert_int_equal(successes, 0);
+  iauth_line(iauth_cmd_sasl_fail, a, NULL);   /* a late f: nothing told */
+  assert_int_equal(failures, 0);
   destroy_auth_request(a->auth);
 }
 
