@@ -258,23 +258,13 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   /* Advertise multiline capability — legacy servers (X3, vanilla ircu)
    * log PARSE ERROR on ML.  Gate on IsIRCv3Aware(cptr).  Comment about
    * "legacy servers ignore" was wrong: X3 explicitly errors on unknown
-   * tokens.
-   * Also burst ML capability for all known ML-capable servers so that when
-   * server C links to B after A already linked to B, C learns about A's
-   * capability (not just B's).
+   * tokens.  The other ML-capable servers we know are announced below,
+   * after the SERVER lines that introduce them.
    */
-  if (feature_bool(FEAT_CAP_draft_multiline) && IsIRCv3Aware(cptr)) {
-    struct Client *srv;
+  if (feature_bool(FEAT_CAP_draft_multiline) && IsIRCv3Aware(cptr))
     sendcmdto_one(&me, CMD_MULTILINE, cptr, "%d %d",
                   feature_int(FEAT_MULTILINE_MAX_BYTES),
                   feature_int(FEAT_MULTILINE_MAX_LINES));
-    for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
-      if (IsServer(srv) && !IsMe(srv) && srv != cptr && IsMultiline(srv))
-        sendcmdto_one(srv, CMD_MULTILINE, cptr, "%u %u",
-                      cli_serv(srv)->ml_max_bytes,
-                      cli_serv(srv)->ml_max_lines);
-    }
-  }
 
   /*
    * Pass on my client information to the new server
@@ -316,6 +306,26 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 		    IsBxfAware(acptr) ? "F" : "",
 		    IsHoldMark(acptr) ? "H" : "",
                     cli_info(acptr));
+    }
+  }
+
+  /* Burst the ML capability of every other ML-capable server we know, so
+   * that when server C links to B after A already linked to B, C learns
+   * about A's capability (not just B's).  Only now, after the SERVER lines
+   * above: an "<A> ML" sent before A's introduction has a prefix the new
+   * server does not know yet, so it dropped the line and never knew A
+   * takes ML -- and the originating server of a multiline batch decides by
+   * the ML flag of every server on the way (ml_route_carries_multiline).
+   * Exactly the servers whose SERVER line went out above. */
+  if (feature_bool(FEAT_CAP_draft_multiline) && IsIRCv3Aware(cptr)) {
+    struct Client *srv;
+    for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
+      if (!IsServer(srv) || cli_from(srv) == cptr || !IsMultiline(srv)
+          || 0 == match(cli_name(&me), cli_name(srv)))
+        continue;
+      sendcmdto_one(srv, CMD_MULTILINE, cptr, "%u %u",
+                    cli_serv(srv)->ml_max_bytes,
+                    cli_serv(srv)->ml_max_lines);
     }
   }
 
