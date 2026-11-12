@@ -375,11 +375,17 @@ void auth_set_account_later(struct AuthRequest *auth, const char *account)
   fake_of_auth(auth)->recheck_queued = 1;
 }
 
-int auth_iauth_handles_sasl(void) { return 0; }
-int auth_send_sasl_start(struct Client *c, const char *m, const char *f) { return 0; }
-int auth_send_sasl_host(struct Client *c, const char *u, const char *h, const char *i) { return 0; }
-int auth_send_sasl_data(struct Client *c, const char *d) { return 0; }
-int auth_send_sasl_abort(struct Client *c) { return 0; }
+/* The IAuth tier, off unless a test turns it on: the lines that would go
+ * to the program, counted. */
+static int iauth_on, iauth_starts, iauth_datas, iauth_aborts;
+int auth_iauth_handles_sasl(void) { return iauth_on; }
+int auth_send_sasl_start(struct Client *c, const char *m, const char *f)
+{ if (iauth_on) iauth_starts++; return iauth_on; }
+int auth_send_sasl_host(struct Client *c, const char *u, const char *h, const char *i) { return iauth_on; }
+int auth_send_sasl_data(struct Client *c, const char *d)
+{ if (iauth_on) iauth_datas++; return iauth_on; }
+int auth_send_sasl_abort(struct Client *c)
+{ if (iauth_on) iauth_aborts++; return iauth_on; }
 int auth_iauth_sasl_fail(struct Client *c) { return 0; }
 
 /* m_sasl.c: the end of a services exchange, as the real one leaves the
@@ -1116,6 +1122,7 @@ static int setup(void **state)
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
   in_kc_call = in_login = local_off = 0;
   abort_reply = -1;
+  iauth_on = iauth_starts = iauth_datas = iauth_aborts = 0;
   bed_features = 0;
   ntlog = 0;
 #ifdef USE_LIBKC
@@ -3833,6 +3840,47 @@ static void toolong_services_registration_exits(void **state)
   assert_int_equal(f->touched_after_free, 0);
 }
 
+/** IAuth tier: the program is told A X, no further reply goes to the
+ * client, registration goes on (and an exit is handed to the parser), and
+ * the next AUTHENTICATE starts a new exchange with a new A S. */
+static void toolong_ends_iauth_exchange(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int keep;
+
+  sasl_init_once();
+  for (keep = 1; keep >= 0; keep--) {
+    local_off = 1;
+    iauth_on = 1;
+    iauth_starts = iauth_aborts = 0;
+    abort_reply = -1;
+    c = new_client(48 + keep, keep ? "ik" : "ix", 1, keep ? REG_KEEPS : REG_EXITS);
+    f = fake_of(c);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(iauth_starts, 1);
+    assert_true(cli_saslcookie(c) != 0);
+    assert_int_equal(f->registered, 0);
+    if (!keep) {
+      assert_int_equal(authenticate(c, too_long()), CPTR_KILLED);
+      assert_true(f->freed);
+      assert_int_equal(f->touched_after_free, 0);
+      assert_int_equal(iauth_aborts, 1);
+      continue;
+    }
+    assert_int_equal(authenticate(c, too_long()), 0);
+    assert_true(has_numeric(f, ERR_SASLTOOLONG));
+    assert_false(has_numeric(f, ERR_SASLABORTED));
+    assert_int_equal(iauth_aborts, 1);
+    assert_int_equal(abort_reply, SASL_ABORT_REPLY_NONE);
+    assert_no_exchange(c);
+    assert_int_equal(f->registered, 1);
+    cli_auth(c) = (struct AuthRequest *)&f->auth;   /* a later exchange */
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(iauth_starts, 2);
+  }
+}
+
 /** AUTHENTICATE * still answers 906 in the services tier (the shared end). */
 static void star_abort_services_exchange(void **state)
 {
@@ -3920,6 +3968,7 @@ int main(void)
     cmocka_unit_test_setup(toolong_ends_services_exchange, setup),
     cmocka_unit_test_setup(toolong_services_registration_exits, setup),
     cmocka_unit_test_setup(star_abort_services_exchange, setup),
+    cmocka_unit_test_setup(toolong_ends_iauth_exchange, setup),
 #endif
   };
 
