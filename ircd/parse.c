@@ -1380,6 +1380,15 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
       ch++;
   }
 
+  /* Tags and nothing after them: an empty line.  Going on would take the
+   * terminator for a missing prefix and step over it, into whatever an
+   * earlier, longer line left in the buffer. */
+  if (*ch == '\0')
+  {
+    ServerStats->is_empt++;
+    return (-1);
+  }
+
   para[0] = cli_name(from);
 
   /*
@@ -1419,7 +1428,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
        * squit, is an SQUIT itself (the timestamp
        * protects us from being used wrong)
        */
-      if (ch[1] == 'Q')
+      if (*ch && ch[1] == 'Q')
       {
         para[0] = cli_name(cptr);
         from = cptr;
@@ -1458,16 +1467,19 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
       protocol_violation(cptr,"Missing Prefix");
       from = cptr;
     }
-    else if (' ' == ch[1] || ' ' == ch[2])
+    else if (' ' == ch[1] || (ch[1] && ' ' == ch[2]))
       from = FindNServer(numeric_prefix);
     else
       from = findNUser(numeric_prefix);
 
-    do
-    {
-      ++ch;
-    }
-    while (*ch != ' ' && *ch);
+    /* Never past the terminator: ch[2] above, and the tests below, read no
+     * further than the line either. */
+    if (*ch)
+      do
+      {
+        ++ch;
+      }
+      while (*ch != ' ' && *ch);
 
     /*
      * If the client corresponding to the
@@ -1500,8 +1512,8 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
        * Things that must be allowed to travel
        * upstream against an squit:
        */
-      if (ch[1] == 'Q' || (*ch == 'D' && ch[1] == ' ') ||
-          (*ch == 'K' && ch[2] == 'L'))
+      if (*ch && (ch[1] == 'Q' || (*ch == 'D' && ch[1] == ' ') ||
+                  (*ch == 'K' && ch[1] && ch[2] == 'L')))
         from = cptr;
       else
         return 0;

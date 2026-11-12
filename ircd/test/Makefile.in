@@ -10,13 +10,15 @@ TESTPROGS = \
 	ircd_chattr_t \
 	ircd_in_addr_t \
 	ircd_match_t \
-	ircd_string_t
+	ircd_string_t \
+	parse_line_t
 
 DEP_SRC = \
 	ircd_chattr_t.c \
 	ircd_in_addr_t.c \
 	ircd_match_t.c \
 	ircd_string_t.c \
+	parse_line_t.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -51,6 +53,20 @@ IRCD_STRING_T_OBJS = ircd_string_t.o test_stub.o ../ircd_string.o
 ircd_string_t: $(IRCD_STRING_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_T_OBJS)
 
+# parse_line_t links the real parse.o, whose message table names every
+# command handler: handler_stubs.c defines each handler that handlers.h
+# declares (once: mr_error is declared twice) as a stub that records its
+# name (handler_ran() in the test).
+handler_stubs.c: ${top_srcdir}/include/handlers.h
+	( echo '#include "handlers.h"'; \
+	  echo 'extern int handler_ran(const char *, int, char *[]);'; \
+	  sed -n 's/^extern int \([a-z_0-9]*\)(struct Client\*, struct Client\*, int, char\*\[\]);$$/int \1(struct Client *cptr, struct Client *sptr, int parc, char *parv[]) { return handler_ran("\1", parc, parv); }/p' \
+	    ${top_srcdir}/include/handlers.h | sort -u ) > $@
+
+PARSE_LINE_T_OBJS = parse_line_t.o handler_stubs.o ../parse.o ../ircd_string.o
+parse_line_t: $(PARSE_LINE_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(PARSE_LINE_T_OBJS)
+
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
 
@@ -60,7 +76,7 @@ distclean: clean
 	rm -f Makefile
 
 clean:
-	rm -f core *.o *.log ${TESTPROGS}
+	rm -f core *.o *.log ${TESTPROGS} handler_stubs.c
 
 # DO NOT DELETE THIS LINE (or the blank line after it) -- make depend depends on them.
 
@@ -75,6 +91,18 @@ ircd_match_t.o: ircd_match_t.c ../../include/ircd_log.h \
   ../../include/match.h ../../include/res.h ../../config.h
 ircd_string_t.o: ircd_string_t.c ../../include/ircd_string.h \
   ../../include/ircd_chattr.h
+parse_line_t.o: parse_line_t.c ../../config.h ../../include/class.h \
+  ../../include/client.h ../../include/ircd_defs.h ../../include/dbuf.h \
+  ../../include/msgq.h ../../include/ircd_events.h ../../include/ssl.h \
+  ../../include/ircd_osdep.h ../../include/ircd_handler.h \
+  ../../include/res.h ../../include/flagset.h ../../include/capab.h \
+  ../../include/hash.h ../../include/ircd.h ../../include/struct.h \
+  ../../include/ircd_alloc.h ../../include/ircd_features.h \
+  ../../include/ircd_log.h ../../include/ircd_reply.h \
+  ../../include/ircd_string.h ../../include/ircd_chattr.h \
+  ../../include/numnicks.h ../../include/parse.h ../../include/s_debug.h \
+  ../../include/s_misc.h ../../include/s_numeric.h ../../include/send.h \
+  ../../include/shun.h
 test_stub.o: test_stub.c ../../include/client.h ../../include/ircd_defs.h \
   ../../include/dbuf.h ../../include/msgq.h ../../include/ircd_events.h \
   ../../config.h ../../include/ircd_handler.h ../../include/res.h \
