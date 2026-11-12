@@ -86,6 +86,7 @@ extern int init_lexer_file(char* file);
   unsigned int snomask;
   int fakelagmin;
   int fakelagfactor;
+  int fakelagshare;
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans, redirport, hidehostcomps;
   char *name, *pass, *host, *from_host, *ip, *username, *origin, *hub_limit;
@@ -243,6 +244,7 @@ static void free_slist(struct SLink **link) {
 %token MATCHUSERNAME
 %token FAKELAGMINIMUM
 %token FAKELAGFACTOR
+%token FAKELAGSHARE
 %token DEFAULTTEXT
 %token SSLFP
 %token SSLCIPHERS
@@ -521,6 +523,7 @@ classblock: CLASS {
   snomask = 0;
   fakelagmin = -1;
   fakelagfactor = -1;
+  fakelagshare = 0;
   memset(&crestrict, 0, sizeof(crestrict));
 } '{' classitems '}' ';'
 {
@@ -538,6 +541,7 @@ classblock: CLASS {
     c_class->snomask = snomask;
     c_class->lag_min = fakelagmin;
     c_class->lag_factor = fakelagfactor;
+    c_class->lag_share = fakelagshare;
     c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
     memcpy(&c_class->privs_dirty, &privs_dirty, sizeof(c_class->privs_dirty));
@@ -565,7 +569,8 @@ classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
            classsendq | classrecvq | classusermode | classmaxchans | priv |
            classsnomask | classajoinchan | classajoinnotice | classrestrictjoin |
            classrestrictpm | classrestrictumode | classrequiresasl |
-           classbouncer | classfakelagmin | classfakelagfactor;
+           classbouncer | classfakelagmin | classfakelagfactor |
+           classfakelagshare;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -611,6 +616,10 @@ classfakelagmin: FAKELAGMINIMUM '=' expr ';'
 classfakelagfactor: FAKELAGFACTOR '=' expr ';'
 {
   fakelagfactor = $3;
+};
+classfakelagshare: FAKELAGSHARE '=' expr ';'
+{
+  fakelagshare = $3;
 };
 classajoinchan: AUTOJOINCHANNEL '=' QSTRING ';'
 {

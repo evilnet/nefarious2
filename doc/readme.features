@@ -2019,3 +2019,57 @@ bounds account minting from a botnet spread across many addresses.
 Trips are logged at L_WARNING.  Note this is per-server, not
 per-network: each server enforces its own budget.  0 disables the
 global limiter.
+
+POSTREG_GRACE
+ * Type: integer
+ * Default: 20
+
+Fake-lag seconds a logged-in connection may spend at registration before
+its lag clock moves: about ten more short commands in its first burst
+after 001.  One-shot; an anonymous connection gets none.  0 disables it,
+and with it FAKELAG_POOL.
+
+FAKELAG_POOL
+ * Type: integer
+ * Default: 0
+
+A server-wide pool of fake-lag seconds, refilled to this cap over 60
+seconds, that a logged-in connection may draw on for FAKELAG_BORROW_TIME
+seconds after registration once its POSTREG_GRACE is spent, up to
+FAKELAG_BORROW.  Only JOIN, CHATHISTORY, MODE and MARKREAD draw on it;
+PRIVMSG, NOTICE and everything else are charged as before.  A lone
+reconnecting client gets a much bigger connect burst; when many connect at
+once the pool runs dry and they fall back to POSTREG_GRACE alone.
+
+A Class block may reserve part of the pool with fakelagshare (see
+doc/example.conf): its clients draw on their class's share first, then
+on the part no class reserved, and never on another class's share.
+Keep the shares' sum within FAKELAG_POOL; past it nothing is left
+unreserved and each class has only its share.
+
+The pool starts empty and begins to fill at the first logged-in
+registration that could draw on it.  Capped at 100000.  Per server.  0
+disables it, shares included.  See doc/design/fakelag-htb.md.
+
+FAKELAG_BORROW
+ * Type: integer
+ * Default: 0
+
+The most one account may draw on FAKELAG_POOL per FAKELAG_ACCOUNT_TIME, in seconds
+(capped at 600), however many times it registers: a reconnect or a second
+device gets what is left.  With the defaults of 2 + bytes/120 seconds per
+command, 60 is about 30 more short commands.  0 disables borrowing.
+
+FAKELAG_BORROW_TIME
+ * Type: integer
+ * Default: 30
+
+How many seconds after registration a connection may draw on
+FAKELAG_POOL (1 to 3600).
+
+FAKELAG_ACCOUNT_TIME
+ * Type: integer
+ * Default: 60
+
+The window, in seconds, over which an account may draw at most
+FAKELAG_BORROW (1 to 3600).

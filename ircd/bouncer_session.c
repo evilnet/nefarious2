@@ -42,6 +42,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
+#include "fakelag.h"
 #include "authtoken.h"
 #include "client.h"
 #include "history.h"
@@ -13876,21 +13877,9 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 
   motd_signon(sptr);
 
-  /* Post-registration fakelag credit: modern clients burst init
-   * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
-   * the default ~10s cli_since headroom covers only ~5 of them.
-   * A credit the first charges absorb (fakelag_charge()) -- every
-   * command is still CHARGED (credit, not exemption), the one-shot
-   * grace just raises the initial burst budget; recvq byte caps still
-   * bound the wire.  Not a clock set below now: read_packet() floors
-   * the clock to the last read time and would erase that.
-   * Authenticated clients only: an anonymous connection (the
-   * drive-by/WS-flood surface) keeps the classic ~5-command burst. */
-  {
-    int grace = feature_int(FEAT_POSTREG_GRACE);
-    if (grace > 0 && IsAccount(sptr))
-      cli_lagcredit(sptr) = grace;
-  }
+  /* Post-registration fake-lag credit, and the shared-pool allowance:
+   * see fakelag_grant(). */
+  fakelag_grant(sptr);
 
   /* IRCv3 draft/metadata-2: mirror normal-path self-burst.  Aliases
    * inherit the primary's account-scoped metadata at attach time, so

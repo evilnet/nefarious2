@@ -1333,6 +1333,14 @@ static struct FeatureDesc {
    * bypass.  Defaults are meant for an exposed network -- the testnet bed
    * pins LIMIT/GLOBAL to 0 in its confs. */
   F_I(POSTREG_GRACE, 0, 20, 0),
+  /* Fake-lag pool (fakelag.c): POOL lag-seconds shared by the server,
+   * refilled over 60 s; for BORROW_TIME seconds after registration a
+   * logged-in client may draw on it once its POSTREG_GRACE is spent, and
+   * an account at most BORROW of them per ACCOUNT_TIME.  0 = off. */
+  F_I(FAKELAG_POOL, 0, 0, 0),
+  F_I(FAKELAG_BORROW, 0, 0, 0),
+  F_I(FAKELAG_BORROW_TIME, 0, 30, 0),
+  F_I(FAKELAG_ACCOUNT_TIME, 0, 60, 0),
   F_I(REGISTER_THROTTLE_LIMIT, 0, 3, 0),
   F_I(REGISTER_THROTTLE_PERIOD, 0, 3600, 0),
   F_I(REGISTER_THROTTLE_GLOBAL, 0, 60, 0),
