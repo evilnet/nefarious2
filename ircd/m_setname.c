@@ -193,9 +193,11 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_set_client_msgid(sn_msgid);
 
     /* Echo SETNAME back to the sender per IRCv3 spec: the connection
-     * that typed it, from the session's identity */
+     * that typed it, from the session's identity.  The echo answers the
+     * SETNAME: it carries its label, and the msgid and @time the other
+     * members' copies carry. */
     if (CapOwnHas(cptr, CAP_SETNAME))
-      sendcmdto_one(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+      sendcmdto_one_event(sptr, CMD_SETNAME, cptr, 1, ":%s", cli_info(sptr));
 
     /* Notify channel members with setname capability (excluding the
      * sender, who already got the echo).  A local primary is told when

@@ -237,30 +237,38 @@ static int parse_timestamp_param(const char *arg, char *unix_ts, size_t tslen)
  * @param[in] to Client to send to.
  * @param[in] target Channel or nick.
  * @param[in] unix_ts Unix timestamp (or "*" if unknown).
+ * @param[in] respond Non-zero when the line answers \a to's own MARKREAD:
+ *   it carries that command's label (sendcmdto_one_event()).
  */
-static void send_markread(struct Client *to, const char *target, const char *unix_ts)
+static void send_markread(struct Client *to, const char *target, const char *unix_ts,
+                          int respond)
 {
   char iso_ts[32];
+  const char *ts;
 
   /* Format: MARKREAD <target> timestamp=<ts>
    * The timestamp can be "*" if unknown.
    */
-  if (!unix_ts || !*unix_ts || *unix_ts == '*') {
-    sendrawto_one(to, ":%s MARKREAD %s timestamp=*", cli_name(&me), target);
-  } else if (history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0) {
-    sendrawto_one(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me), target, iso_ts);
-  } else {
-    /* Conversion failed - send as-is (might already be ISO or invalid) */
-    sendrawto_one(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me), target, unix_ts);
-  }
+  if (!unix_ts || !*unix_ts || *unix_ts == '*')
+    ts = "*";
+  else if (history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0)
+    ts = iso_ts;
+  else
+    ts = unix_ts;   /* Conversion failed - send as-is (might already be ISO or invalid) */
+
+  sendcmdto_one_event(&me, CMD_MARKREAD, to, respond, "%s timestamp=%s",
+                      target, ts);
 }
 
 /** Notify all local clients with matching account about a read marker update.
  * @param[in] account Account name.
  * @param[in] target Channel or nick.
  * @param[in] unix_ts Unix timestamp (will be converted to ISO for clients).
+ * @param[in] asker The connection whose MARKREAD set the marker, or NULL:
+ *   its copy answers that command; the others' are notifications.
  */
-static void notify_local_clients(const char *account, const char *target, const char *timestamp)
+static void notify_local_clients(const char *account, const char *target, const char *timestamp,
+                                 struct Client *asker)
 {
   struct Client *acptr;
 
@@ -280,7 +288,7 @@ static void notify_local_clients(const char *account, const char *target, const 
       continue;
     if (cli_session_id(acptr)[0]
         && 0 == strcmp(cli_session_id(acptr), account)) {
-      send_markread(acptr, target, timestamp);
+      send_markread(acptr, target, timestamp, acptr == asker);
       continue;
     }
     if (!cli_user(acptr) || !cli_user(acptr)->account[0])
@@ -288,7 +296,7 @@ static void notify_local_clients(const char *account, const char *target, const 
     if (ircd_strcmp(cli_user(acptr)->account, account) != 0)
       continue;
 
-    send_markread(acptr, target, timestamp);
+    send_markread(acptr, target, timestamp, acptr == asker);
   }
 }
 
@@ -371,13 +379,13 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          * local client matching the account; for session anchors the
          * "account" key is the session_id and no other Client shares
          * it, so the notify naturally hits just sptr. */
-        notify_local_clients(account, target, timestamp);
+        notify_local_clients(account, target, timestamp, sptr);
       } else if (rc == 1) {
         /* Not newer — echo current stored value. */
         if (session_markread_get(account, target, stored_ts) == 0)
-          send_markread(sptr, target, stored_ts);
+          send_markread(sptr, target, stored_ts, 1);
         else
-          send_markread(sptr, target, timestamp);
+          send_markread(sptr, target, timestamp, 1);
       }
     } else {
       if (!metadata_lmdb_is_available()) {
@@ -389,7 +397,7 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       rc = metadata_readmarker_set(account, target, timestamp);
       if (rc == 0) {
         /* Successfully updated - notify local clients and broadcast */
-        notify_local_clients(account, target, timestamp);
+        notify_local_clients(account, target, timestamp, sptr);
 
         /* Relay to the account's webpush subscriptions so other devices
          * can close their notifications (draft/webpush). */
@@ -402,9 +410,9 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         /* Timestamp was not newer - respond with current stored value */
         rc = metadata_readmarker_get(account, target, stored_ts);
         if (rc == 0) {
-          send_markread(sptr, target, stored_ts);
+          send_markread(sptr, target, stored_ts, 1);
         } else {
-          send_markread(sptr, target, timestamp);
+          send_markread(sptr, target, timestamp, 1);
         }
       } else {
         /* Error storing */
@@ -417,9 +425,9 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (is_session) {
       rc = session_markread_get(account, target, stored_ts);
       if (rc == 0)
-        send_markread(sptr, target, stored_ts);
+        send_markread(sptr, target, stored_ts, 1);
       else
-        send_markread(sptr, target, "*");
+        send_markread(sptr, target, "*", 1);
     } else {
       if (!metadata_lmdb_is_available()) {
         send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
@@ -429,10 +437,10 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       rc = metadata_readmarker_get(account, target, stored_ts);
       if (rc == 0) {
-        send_markread(sptr, target, stored_ts);
+        send_markread(sptr, target, stored_ts, 1);
       } else if (rc == 1) {
         /* Not found - send "*" */
-        send_markread(sptr, target, "*");
+        send_markread(sptr, target, "*", 1);
       } else {
         send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
                   "Could not retrieve read marker");
@@ -517,7 +525,7 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   if (rc == 0) {
     /* Taken: notify local clients, this server's push subscriptions, and
      * relay to other v3 peers (not back to where it came from). */
-    notify_local_clients(account, target, timestamp);
+    notify_local_clients(account, target, timestamp, NULL);
     webpush_notify_read(account, target, timestamp);
     sendcmdto_serv_butone_v3(sptr, CMD_MARKREAD, cptr, "%s %s %s",
                           account, target, timestamp);
@@ -563,11 +571,12 @@ void send_markread_on_join(struct Client *sptr, const char *target)
 
   account = cli_user(sptr)->account;
 
+  /* Part of the JOIN's replies, not the answer to a MARKREAD. */
   rc = metadata_readmarker_get(account, target, stored_ts);
   if (rc == 0) {
-    send_markread(sptr, target, stored_ts);
+    send_markread(sptr, target, stored_ts, 0);
   } else {
     /* No stored marker - send "*" */
-    send_markread(sptr, target, "*");
+    send_markread(sptr, target, "*", 0);
   }
 }
