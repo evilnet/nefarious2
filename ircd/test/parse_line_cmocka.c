@@ -689,6 +689,15 @@ static void server_fallback_segment(void **state)
   assert_string_equal(cli_s2s_fallback(&leaf), "?");
   o = parse_every_way(parse_server, &leaf, COMPACT " AC G :hello");
   assert_string_equal(cli_s2s_fallback(&leaf), "");
+  /* Too long for the buffer (>= 64 bytes): still a mark, "?". */
+  o = parse_every_way(parse_server, &leaf, COMPACT
+      ",F0123456789012345678901234567890123456789012345678901234567890123,Cfoo=bar AC G :hello");
+  expect_handler("long fallback mark", &o, "PING", "hello");
+  assert_string_equal(cli_s2s_fallback(&leaf), "?");
+  assert_string_equal(cli_s2s_client_tags(&leaf), "foo=bar");
+  /* Repeated: the last one counts. */
+  o = parse_every_way(parse_server, &leaf, COMPACT ",FAAAAAAAAAAAAAB,FBBBBBBBBBBBBBC AC G :hello");
+  assert_string_equal(cli_s2s_fallback(&leaf), "BBBBBBBBBBBBBC");
   /* Only a tag region's own segment sets it: inside ,C it is text. */
   o = parse_every_way(parse_server, &leaf, COMPACT ",C+x=a,FAAAAAAAAAAAAAB AC G :hello");
   assert_string_equal(cli_s2s_fallback(&leaf), "");

@@ -51,6 +51,7 @@ CMOCKA_TESTPROGS = \
 	recv_classify_cmocka \
 	ml_route_cmocka \
 	ml_fallback_cmocka \
+	send_s2s_tags_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
 	ipcheck_cmocka \
@@ -130,6 +131,7 @@ DEP_SRC = \
 	recv_classify_cmocka.c \
 	ml_route_cmocka.c \
 	ml_fallback_cmocka.c \
+	send_s2s_tags_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
 	ipcheck_cmocka.c \
@@ -375,6 +377,19 @@ ml_route_cmocka: $(ML_ROUTE_CMOCKA_OBJS)
 ML_FALLBACK_CMOCKA_OBJS = ml_fallback_cmocka.o ../ml_fallback.o
 ml_fallback_cmocka: $(ML_FALLBACK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ML_FALLBACK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# send_s2s_tags tests - the S2S compact tag region send.c builds for the
+# multiline fallback mark ,F: placed before the terminal ,C, consumed, put
+# on lines toward an IRCv3-aware link, cleared toward a legacy link or with
+# P10_MESSAGE_TAGS off.  Includes the real send.c, compiled with
+# -ffunction-sections and linked with --gc-sections; what the kept code
+# reaches is stubbed in the suite (no test_stub.o).
+send_s2s_tags_cmocka.o: ${srcdir}/send_s2s_tags_cmocka.c ../send.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/send_s2s_tags_cmocka.c
+
+SEND_S2S_TAGS_CMOCKA_OBJS = send_s2s_tags_cmocka.o
+send_s2s_tags_cmocka: $(SEND_S2S_TAGS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SEND_S2S_TAGS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # register_throttle tests - the module is recompiled with a 1-bucket,
 # 4-slot table so eviction is reachable without hash-collision gymnastics.
