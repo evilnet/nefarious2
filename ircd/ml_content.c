@@ -230,13 +230,19 @@ char *ml_content_get(const char *msgid, size_t *content_len_out,
   size_t raw_len = val.len;
   char *decompressed = NULL;
   int decomp_dynamic = 0;
+#ifdef USE_ZSTD
+  /* At function scope: raw points into it after the block below, and the
+   * parse reads it there -- declared inside the block, its lifetime ended
+   * before the read (ASan: stack-use-after-scope on every compressed
+   * multiline record). */
+  char decomp_stack[ML_VALUE_BUFSIZE];
+#endif
 
 #ifdef USE_ZSTD
   if (is_compressed((const unsigned char *)raw, raw_len)) {
     unsigned long long frame_size = ZSTD_getFrameContentSize(
         (const unsigned char *)raw + 1, raw_len - 1);
     size_t out_size;
-    char decomp_stack[ML_VALUE_BUFSIZE];
 
     if (frame_size != ZSTD_CONTENTSIZE_ERROR
         && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
@@ -332,13 +338,19 @@ int ml_content_resolve(struct db_snapshot *snap, struct HistoryMessage *msg)
   size_t raw_len = val.len;
   char *decompressed = NULL;
   int decomp_dynamic = 0;
+#ifdef USE_ZSTD
+  /* At function scope: raw points into it after the block below, and the
+   * parse reads it there -- declared inside the block, its lifetime ended
+   * before the read (ASan: stack-use-after-scope on every compressed
+   * multiline record). */
+  char decomp_stack[ML_VALUE_BUFSIZE];
+#endif
 
 #ifdef USE_ZSTD
   if (is_compressed((const unsigned char *)raw, raw_len)) {
     unsigned long long frame_size = ZSTD_getFrameContentSize(
         (const unsigned char *)raw + 1, raw_len - 1);
     size_t out_size;
-    char decomp_stack[ML_VALUE_BUFSIZE];
 
     if (frame_size != ZSTD_CONTENTSIZE_ERROR
         && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
