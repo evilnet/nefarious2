@@ -7,12 +7,14 @@ LDFLAGS  =
 CC = @CC@
 
 TESTPROGS = \
+	burst_netride_t \
 	ircd_chattr_t \
 	ircd_in_addr_t \
 	ircd_match_t \
 	ircd_string_t
 
 DEP_SRC = \
+	burst_netride_t.c \
 	ircd_chattr_t.c \
 	ircd_in_addr_t.c \
 	ircd_match_t.c \
@@ -34,6 +36,10 @@ depend: ${DEP_SRC}
 	fi
 
 install:
+
+BURST_NETRIDE_T_OBJS = burst_netride_t.o test_stub.o ../m_burst.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o ../match.o
+burst_netride_t: $(BURST_NETRIDE_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(BURST_NETRIDE_T_OBJS)
 
 IRCD_CHATTR_T_OBJS = ircd_chattr_t.o test_stub.o ../ircd_string.o
 ircd_chattr_t: $(IRCD_CHATTR_T_OBJS)
@@ -64,6 +70,17 @@ clean:
 
 # DO NOT DELETE THIS LINE (or the blank line after it) -- make depend depends on them.
 
+burst_netride_t.o: burst_netride_t.c ../../config.h \
+  ../../include/channel.h ../../include/ircd_defs.h ../../include/res.h \
+  ../../include/client.h ../../include/dbuf.h ../../include/msgq.h \
+  ../../include/ircd_events.h ../../include/ssl.h \
+  ../../include/ircd_osdep.h ../../include/ircd_handler.h \
+  ../../include/flagset.h ../../include/capab.h ../../include/handlers.h \
+  ../../include/ircd.h ../../include/struct.h \
+  ../../include/ircd_features.h ../../include/ircd_reply.h \
+  ../../include/ircd_string.h ../../include/ircd_chattr.h \
+  ../../include/match.h ../../include/numnicks.h ../../include/send.h \
+  ../../include/struct.h
 ircd_chattr_t.o: ircd_chattr_t.c ../../include/ircd_chattr.h
 ircd_in_addr_t.o: ircd_in_addr_t.c ../../include/ircd_log.h \
   ../../include/ircd_string.h ../../include/ircd_chattr.h \

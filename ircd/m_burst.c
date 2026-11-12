@@ -124,7 +124,20 @@ netride_modes(int parc, char **parv, const char *curr_key)
       if (--parc > 0 && strcmp(curr_key, *++parv))
         result |= MODE_KEY;
       break;
+    /* Every other letter mode_parse() gives a parameter to while adding
+     * (channel.c; a BURST takes the same path): the limit and redirect
+     * l L, the op-level passwords A U, the lists b e and the prefixes o h
+     * v.  Pass over theirs, so 'k' compares its own.  No exmode takes
+     * one. */
     case 'l':
+    case 'L':
+    case 'A':
+    case 'U':
+    case 'b':
+    case 'e':
+    case 'o':
+    case 'h':
+    case 'v':
       if (--parc > 0)
         ++parv;
       break;
