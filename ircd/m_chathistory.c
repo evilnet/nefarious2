@@ -2539,6 +2539,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   int limit, count, max_limit;
   int fed_why = FED_WHY_NONE, partial = 0;
   int complete = 1;
+  int around_exhausted = 0;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
@@ -2573,8 +2574,11 @@ static int chathistory_around(struct Client *sptr, const char *target,
   }
   hook = query_row_filter(sptr, pf, &bare);
   count = history_query_around(lookup_target, ref_type, ref_value, limit,
-                               &messages, hook);
-  complete = query_page_complete(hook, count, limit);
+                               &messages, hook, &around_exhausted);
+  /* The last page only when nothing lies past EITHER end (#214): a short
+   * page is not enough -- a back half that filled up may have more
+   * before it however few rows came after. */
+  complete = around_exhausted && !hook->truncated;
   presence_query_filter_close(pf);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("AROUND", target),
@@ -8341,6 +8345,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     struct HistoryRowFilter fed_bare;
     struct HistoryRowFilter *fed_hook = presence_query_filter_hook(fed_pf);
     int walk_truncated = 0;   /* fed_hook->truncated, read before the close */
+    int around_exhausted = 1; /* R: both walks ran out (history_query_around) */
     if (!fed_hook) {
       memset(&fed_bare, 0, sizeof(fed_bare));
       fed_hook = &fed_bare;
@@ -8358,7 +8363,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * collect reverse (latest-first) into a chronological list, so
      * their overflow is the HEAD (oldest); A walks forward, so its
      * overflow is the TAIL (newest).  R (around) is bidirectional --
-     * no probe, never flagged. */
+     * no probe: flagged when either side's walk filled up (#214; it was
+     * never flagged, so a responder's short AROUND page with a full back
+     * half read as "nothing more" at the origin). */
     if (query_subcmd_char == 'L') {
       count = history_query_latest(target, ref_type, ref_value, limit + 1,
                                    &messages, fed_hook);
@@ -8370,7 +8377,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
                                   &messages, fed_hook);
     } else if (query_subcmd_char == 'R') {
       count = history_query_around(target, ref_type, ref_value, limit,
-                                   &messages, fed_hook);
+                                   &messages, fed_hook, &around_exhausted);
     } else if (query_subcmd_char == 'W') {
       /* BETWEEN: second reference arrives as the optional trailing
        * param (after dest_numeric). */
@@ -8504,7 +8511,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
     if (count == 0) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      /* Nothing visible, but a walk that gave up (scan cap) or an AROUND
+       * side that never looked has not run out: T, as for a full page. */
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr,
+                    (walk_truncated || !around_exhausted) ? "E %s 0 T" : "E %s 0",
+                    reqid);
       return 0;
     }
 
@@ -8517,6 +8528,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * honours hook->truncated through query_page_complete; the
        * responder did not (re-review R8). */
       if (walk_truncated)
+        truncated = 1;
+      if (query_subcmd_char == 'R' && !around_exhausted)
         truncated = 1;
       if ((query_subcmd_char == 'L' || query_subcmd_char == 'B'
            || query_subcmd_char == 'A' || query_subcmd_char == 'W')

@@ -495,19 +495,25 @@ extern int history_query_latest_after(const char *target, int limit,
                                        struct HistoryMessage **result,
                                        struct HistoryRowFilter *filter);
 
-/** Query messages around a reference point.
- * Returns limit/2 messages before and limit/2 messages after.
+/** Query messages around a reference point: up to limit/2 rows before
+ * it, the reference row itself when it is a msgid this target holds (and
+ * the filter keeps), and the rest of the limit after it.
  * @param[in] target Channel or nick to query.
  * @param[in] ref_type Type of reference.
  * @param[in] reference Timestamp or msgid string.
  * @param[in] limit Maximum messages to return.
  * @param[out] result Pointer to result list head (caller must free).
+ * @param[out] exhausted If non-NULL: 1 when both walks ran out before
+ *             their limits -- nothing more lies on either side, the page
+ *             is the last one -- else 0 (a full side may have more).  The
+ *             filter's scan cap is not included.
  * @return Number of messages returned, or -1 on error.
  */
 extern int history_query_around(const char *target, enum HistoryRefType ref_type,
                                  const char *reference, int limit,
                                  struct HistoryMessage **result,
-                                 struct HistoryRowFilter *filter);
+                                 struct HistoryRowFilter *filter,
+                                 int *exhausted);
 
 /** Direction BETWEEN would walk for these selectors: 1 = descending
  * (first selector newer), 0 = ascending, -1 = a msgid selector could not

@@ -2640,13 +2640,15 @@ int history_find_last_join(const char *channel, const char *nick,
 int history_query_around(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
                          struct HistoryMessage **result,
-                         struct HistoryRowFilter *filter)
+                         struct HistoryRowFilter *filter, int *exhausted)
 {
   struct HistoryMessage *before = NULL, *after = NULL, *ref_msg = NULL;
   int half = limit / 2;
-  int count_before, count_after, count_ref = 0;
+  int count_before, count_after, count_ref = 0, after_limit;
 
   *result = NULL;
+  if (exhausted)
+    *exhausted = 0;
 
   /* For msgid references, also look up the reference message itself.
    * BEFORE and AFTER both exclude the reference, but AROUND should include it.
@@ -2693,6 +2695,7 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
    * the rows AT that millisecond belong to this page (the client asked
    * for the neighbourhood of that instant), so anchor the after-walk one
    * millisecond earlier (keys are millisecond-granular). */
+  after_limit = limit - count_before - count_ref;
   if (ref_type == HISTORY_REF_TIMESTAMP) {
     char unix_ts[HISTORY_TIMESTAMP_LEN], prev_ts[HISTORY_TIMESTAMP_LEN];
     uint64_t ms;
@@ -2701,18 +2704,28 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
     ms = history_parse_ms(unix_ts);
     history_format_ms(prev_ts, sizeof(prev_ts), ms > 0 ? ms - 1 : 0);
     count_after = history_query_after(target, HISTORY_REF_TIMESTAMP, prev_ts,
-                                      limit - count_before - count_ref, &after,
-                                      filter);
+                                      after_limit, &after, filter);
   } else
   count_after = history_query_after(target, ref_type, reference,
-                                    limit - count_before - count_ref, &after,
-                                    filter);
+                                    after_limit, &after, filter);
   if (count_after < 0) {
     history_free_messages(before);
     history_free_messages(ref_msg);
     history_free_messages(after);
     return -1;
   }
+
+  /* An AROUND page has two ends, and the next page past either one is
+   * empty only when that side's walk ran out before its own limit: the
+   * page is the last only when BOTH did (#214: a reference past the
+   * newest row filled the back half from the two newest rows and stopped
+   * there -- fewer rows than the limit, so the page said "end" while
+   * older history remained; so did a found reference near the end).  A
+   * side whose limit was 0 (limit 1, or the back half's rows plus the
+   * reference using it all) never looked, and has not run out.  The
+   * scan cap (filter->truncated) is the caller's to add. */
+  if (exhausted)
+    *exhausted = count_before < half && count_after < after_limit;
 
   /* Concatenate lists: before + ref_msg + after */
   if (before) {
