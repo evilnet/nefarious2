@@ -810,7 +810,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
       }
 
   if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
-    mytext = StripColor(text);
+    mytext = StripColor(mytext);
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
       return;
@@ -989,7 +989,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
         return;
 
   if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
-    mytext = StripColor(text);
+    mytext = StripColor(mytext);
     if (EmptyString(mytext))
       return;
   }
