@@ -8315,6 +8315,36 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     query_subcmd_char = query_subcmd_str[0];
     query_subcmd_full = s2s_to_subcmd(query_subcmd_char);
 
+    /* A page selector this store cannot place (review A1b, issue 214):
+     * not a row of the target here and not an id of the form this family
+     * mints -- a legacy id the origin's target holds and this one does
+     * not.  The walk would come back empty, and a bare "E <reqid> 0" reads
+     * at the origin as "this store has nothing in the span", which lets
+     * the page claim draft/chathistory-end with this store's rows never
+     * looked for.  Answer U, "never answered the query" (the flag the
+     * origin already has for no store, an unknown subcommand, a read
+     * error): it withholds the end tag and marks the page partial, as for
+     * any store that could not answer.  An origin from before the U flag
+     * ignores the trailing parameter and reads it as before. */
+    if (query_subcmd_char == 'L' || query_subcmd_char == 'B'
+        || query_subcmd_char == 'A' || query_subcmd_char == 'R'
+        || query_subcmd_char == 'W') {
+      char ts[HISTORY_TIMESTAMP_LEN];
+      enum HistoryRefType t2;
+      const char *v2;
+      int unplaced = ref_type == HISTORY_REF_MSGID
+                     && history_msgid_ref_timestamp(target, ref_value, ts) < 0;
+      if (!unplaced && query_subcmd_char == 'W' && ref2
+          && parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_MSGID)
+        unplaced = history_msgid_ref_timestamp(target, v2, ts) < 0;
+      if (unplaced) {
+        Debug((DEBUG_DEBUG, "CH Q %s %c: a selector this store cannot place: E U",
+               reqid, query_subcmd_char));
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+        return 0;
+      }
+    }
+
     /* Presence-aware paging on the responder.  The requester names its
      * client (P<yxx> / F<yxx>, F = ":full" requested) so a storage
      * server walks with the requester's presence and its limit+1
