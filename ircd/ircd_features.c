@@ -1369,7 +1369,7 @@ static struct FeatureDesc {
   F_I(WEBPUSH_IDLE, 0, 900, 0), /* a connection attends while it spoke within this many seconds; 0 = held/away only */
   F_I(WEBPUSH_MULTILINE_LINES, 0, 8, 0), /* lines of a multiline message pushed, one notification each; below 1 acts as 1, clamped to at most 64 */
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
-  F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */
+  F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* A client SET is also refused when its 761 line could pass 510 bytes (m_metadata.c metadata_value_fits_line): 300 fits a user's key of up to 63 bytes set public */
   F_I(METADATA_MAX_SUBS, 0, 50, 0),
   F_I(METADATA_RATE_LIMIT, 0, 10, 0),
   F_I(REDACT_WINDOW, 0, 300, 0),

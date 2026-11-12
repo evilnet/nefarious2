@@ -753,6 +753,39 @@ static const char *metadata_limit_why(int limit_rc)
   }
 }
 
+/** Does a value fit every line that will carry it to a client?  A value
+ * is shown, now and on every later GET, LIST, SYNC or subscription, as
+ *   ":" <server> " 761 " <viewer> " " <target> " " <key> " " <vis> " :" <value>
+ * (RPL_KEYVALUE; the METADATA notification ":" <server> " METADATA "
+ * <target> " " <key> " * :" <value> is shorter), and everything after
+ * the tags must fit 510 bytes -- or the msgq backstop cuts the value, a
+ * structured one included, for whoever reads it.  The server, the
+ * viewer and a user target's nick are not known when the value is set
+ * (another server answers its own clients from its copy; anyone may
+ * GET it; the nick can change), so they are taken at their longest:
+ * HOSTLEN, NICKLEN and NICKLEN.  A channel's name and the key are
+ * known.  So FEAT_METADATA_MAX_VALUE_BYTES' 300 holds for a user's key
+ * of up to 63 bytes set public, and a private one or a channel with a
+ * long name gets less: 300 is true by construction only where it fits.
+ * @return 1 if the value fits, 0 if it is to be refused (VALUE_INVALID). */
+static int metadata_value_fits_line(int is_channel, const char *target,
+                                    const char *key, const char *value,
+                                    int visibility)
+{
+  size_t tlen = strlen(target);
+  size_t vis = (visibility == METADATA_VIS_PRIVATE) ? strlen("private") : 1;
+  size_t line;
+
+  if (!value)
+    return 1;  /* a delete carries no value */
+  if (!is_channel && tlen < NICKLEN)
+    tlen = NICKLEN;
+  /* ':' server ' 761 ' viewer ' ' target ' ' key ' ' vis ' :' value */
+  line = 1 + HOSTLEN + 5 + NICKLEN + 1 + tlen + 1 + strlen(key) + 1 + vis + 2
+       + strlen(value);
+  return line <= BUFSIZE - 2;
+}
+
 /** Handle SET subcommand.
  * METADATA SET <target> <key> [<visibility>] [<value>]
  * If no value, deletes the key.
@@ -880,6 +913,10 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
           send_fail(sptr, "METADATA", "LIMIT_REACHED", key, "Maximum number of metadata keys reached");
           return 0;
         }
+        if (!metadata_value_fits_line(0, target, key, value, visibility)) {
+          send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is too long");
+          return 0;
+        }
       }
 
       if (metadata_account_write(sptr, account_name, key, value, visibility) < 0) {
@@ -931,6 +968,12 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   case METADATA_LIMIT_KEYS:
     send_fail(sptr, "METADATA", "LIMIT_REACHED", key, "Maximum number of metadata keys reached");
+    return 0;
+  }
+  if (!metadata_value_fits_line(is_channel,
+                                is_channel ? target_channel->chname : target,
+                                key, value, visibility)) {
+    send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is too long");
     return 0;
   }
 
