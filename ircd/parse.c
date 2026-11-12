@@ -1448,6 +1448,22 @@ int parse_client(struct Client *cptr, char *buffer, char *bufend)
   return result;
 }
 
+/** Whether the parameters @a params of a BATCH line are "-<ref>" for the
+ * open batch @a ref (spaces around it allowed). */
+static int batch_end_names(const char *params, const char *ref)
+{
+  size_t n = strlen(ref);
+
+  while (*params == ' ')
+    params++;
+  if (*params != '-' || strncmp(params + 1, ref, n) != 0)
+    return 0;
+  params += 1 + n;
+  while (*params == ' ')
+    params++;
+  return *params == '\0';
+}
+
 /** The body of parse_client(): one line from a user. */
 static int
 parse_client_line(struct Client *cptr, char *buffer, char *bufend)
@@ -1716,15 +1732,27 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
      * full bypass of general flood accounting.  See
      * .claude/para/projects/multiline-cooldown.md.
      *
-     * Only while draft/multiline is in use: a batch left open by a
-     * client that then dropped batch (or draft/multiline) takes no more
-     * lines -- they are plain messages now -- so they are charged as
-     * plain messages, not exempted until the batch times out.
+     * Exempt are only the batch's OWN lines: a PRIVMSG or NOTICE tagged
+     * with the open batch's reference, while draft/multiline is in use.
+     * Every other line sent while a batch is open -- untagged, tagged with
+     * another reference, or a command that does not join the batch
+     * (`@batch=<ref> WHOIS x`) -- is charged as usual: testing only that
+     * a batch was open let a client flood anything for the batch timeout,
+     * renewably.  The batch's own "BATCH -<ref>" stays exempt as on the
+     * tip: closing the batch is charged by the cooldown with the rest.  A
+     * batch left open by a client that then dropped batch (or
+     * draft/multiline) takes no more lines, so nothing is exempt.
      */
     /* The PONG to a server PING an orphan hold sent (s_bsd.c): a line
      * the server caused, parsed with the held lines at the release --
      * not charged, within the bounds input_hold_pong_free() keeps. */
-    if ((!cli_ml_batch_id(cptr)[0] || !MultilineInUse(cptr))
+    if (!(MultilineInUse(cptr)
+          && cli_ml_batch_id(cptr)[0]
+          && ((0 == strcmp(cli_msg_batch_tag(cptr), cli_ml_batch_id(cptr))
+               && (0 == strcmp(mptr->cmd, MSG_PRIVATE)
+                   || 0 == strcmp(mptr->cmd, MSG_NOTICE)))
+              || (0 == strcmp(mptr->cmd, MSG_BATCH_CMD) && s
+                  && batch_end_names(s, cli_ml_batch_id(cptr)))))
         && !(0 == strcmp(mptr->cmd, MSG_PONG) && cli_connect(cptr)
              && input_hold_pong_free(&con_input_hold(cli_connect(cptr)),
                                      CurrentTime, s, cli_name(&me))))

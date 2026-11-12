@@ -128,6 +128,13 @@ static int h_nick(struct Client *cptr, struct Client *sptr, int parc, char *parv
   return 0;
 }
 
+static int h_privmsg(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  (void)cptr; (void)sptr;
+  record_handler("PRIVMSG", parc, parv);
+  return 0;
+}
+
 #define ALL_HANDLERS(h) { h, h, h, h, h }   /* LAST_HANDLER_TYPE */
 static struct Message test_msgs[] = {
   { "PING", "G", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_ping), NULL },
@@ -135,6 +142,8 @@ static struct Message test_msgs[] = {
   { "SQUIT", "SQ", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_squit), NULL },
   { "KILL", "D", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_kill), NULL },
   { "NICK", "N", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_nick), NULL },
+  { "PRIVMSG", "P", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_privmsg), NULL },
+  { "BATCH", "BT", 0, MAXPARA, 0, 0, NULL, ALL_HANDLERS(h_privmsg), NULL },
 };
 
 /* parse_client() compares the handler with these two. */
@@ -316,10 +325,12 @@ int get_lag_min(struct Client *cptr)
   return -1;
 }
 
+static int test_lagfactor;         /* 0: no fake lag (the default) */
+
 int get_lag_factor(struct Client *cptr)
 {
   (void)cptr;
-  return 0;                       /* no fake lag */
+  return test_lagfactor;
 }
 
 void labeled_batch_end(struct Client *cptr)
@@ -941,6 +952,66 @@ static void client_multiline_tags_need_batch(void **state)
   user_cap(CAP_BATCH, 0);
 }
 
+/* Inside an open multiline batch only the batch's own lines -- a PRIVMSG
+ * or NOTICE tagged with its reference, while draft/multiline is in use --
+ * skip the per-line fake lag (the batch is charged by the multiline
+ * cooldown at its close).  Any other line sent meanwhile is charged as
+ * usual: an open batch is not a licence to flood. */
+static void client_batch_fakelag_only_its_own_lines(void **state)
+{
+  static const struct { const char *line; int charged; } cases[] = {
+    { "@batch=B1 PRIVMSG #c :in the batch", 0 },
+    { "@batch=B1;draft/multiline-concat PRIVMSG #c :more", 0 },
+    { "PRIVMSG #c :untagged, during the batch", 1 },
+    { "PRIVMSG elsewhere :untagged, another target", 1 },
+    { "@batch=B2 PRIVMSG #c :another reference", 1 },
+    { "@batch=B1 PING :tagged, but not a batch line", 1 },
+    { "PING :plain", 1 },
+    { "BATCH -B1", 0 },            /* the batch's own end: as on the tip */
+    { "BATCH -B2", 1 },            /* another reference */
+    { "BATCH +B3 draft/multiline #c", 1 },
+  };
+  char buf[128];
+  size_t i;
+
+  (void)state;
+  user_cap(CAP_DRAFT_MULTILINE, 1);
+  user_cap(CAP_BATCH, 1);
+  test_lagfactor = 120;
+  strcpy(cli_ml_batch_id(&user), "B1");
+
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    cli_since(&user) = 1000;
+    cli_lagcredit(&user) = 0;
+    strcpy(buf, cases[i].line);
+    assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+    if (cases[i].charged)
+      assert_true(cli_since(&user) > 1000);
+    else
+      assert_int_equal(cli_since(&user), 1000);
+  }
+
+  /* batch dropped with the batch still open: nothing is exempt */
+  user_cap(CAP_BATCH, 0);
+  cli_since(&user) = 1000;
+  strcpy(buf, "@batch=B1 PRIVMSG #c :inert now");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_true(cli_since(&user) > 1000);
+
+  /* no batch open: nothing is exempt */
+  user_cap(CAP_BATCH, 1);
+  cli_ml_batch_id(&user)[0] = '\0';
+  cli_since(&user) = 1000;
+  strcpy(buf, "@batch=B1 PRIVMSG #c :no batch open");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_true(cli_since(&user) > 1000);
+
+  test_lagfactor = 0;
+  cli_since(&user) = 0;
+  user_cap(CAP_DRAFT_MULTILINE, 0);
+  user_cap(CAP_BATCH, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -956,6 +1027,7 @@ int main(void)
     cmocka_unit_test(client_label_ends_with_its_line),
     cmocka_unit_test(client_label_needs_batch),
     cmocka_unit_test(client_multiline_tags_need_batch),
+    cmocka_unit_test(client_batch_fakelag_only_its_own_lines),
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
     cmocka_unit_test(client_cannot_set_fallback_mark),
