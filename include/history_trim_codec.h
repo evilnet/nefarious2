@@ -89,6 +89,15 @@ uint64_t htc_parse_ms(const char *ts);
 int htc_owner_key(char *buf, size_t size, const char *account,
                    const struct irc_in_addr *ip, const char *server);
 
+/** Compare two messages-CF keys on the SHORTER length only (memcmp
+ * sign): how a walk tests a row against a floor or a window end, so a row
+ * key shorter than the bound -- a stored msgid of another length than the
+ * bound's (the pre-HLC "<yxx>-<startup>-<n>" ids vary) -- can never dodge
+ * the test by being short (re-review 2026-09-07 R4).  A key equal to the
+ * other on the shorter length counts as reaching it (0). */
+int htc_key_cmp_bound(const void *key, size_t klen,
+                      const void *bound, size_t blen);
+
 /** Build the messages-CF key: fold(target) \0 ts \0 msgid. @a ts NULL
  * stops after fold(target) \0; @a msgid NULL (or "") stops after
  * fold(target) \0 ts \0. THE implementation of history.c's build_key

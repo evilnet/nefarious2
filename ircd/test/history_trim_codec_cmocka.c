@@ -51,6 +51,51 @@ static int keycmp(const void *a, size_t alen, const void *b, size_t blen)
   return 0;
 }
 
+/* The reverse walk's floor and BETWEEN's ascending end compare a row key
+ * with the bound on the SHORTER length (htc_key_cmp_bound).  The R4 fix
+ * (re-review 2026-09-07) was pinned on the wire by an over-long msgid
+ * anchor; since issue 214 such an anchor is refused before any walk, but
+ * stored ids of other lengths (the pre-HLC "<yxx>-<startup>-<n>" form)
+ * still meet a 14-character bound here.  This keeps the coverage. */
+static void test_key_cmp_bound_other_lengths(void **state)
+{
+  char bound[256], row[256];
+  int blen, rlen;
+  (void)state;
+
+  blen = htc_msg_key(bound, sizeof(bound), "#c", "1794500000.500", "ABAAAaHQReh6LK");
+  assert_true(blen > 0);
+
+  /* Same ms, a SHORTER legacy id sorting before the bound's: reached.  The
+   * R4 defect tested "klen >= floor_keylen" first and walked on past it. */
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.500", "AB-1-2");
+  assert_true(rlen < blen);
+  assert_true(htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen) <= 0);
+  /* An earlier ms, short id: below. */
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794499999.999", "AB-1-2");
+  assert_true(htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen) < 0);
+  /* A later ms, short id: above (the walk keeps it). */
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.501", "AB-1-2");
+  assert_true(htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen) > 0);
+  /* Same ms, a LONGER legacy id sorting after the bound's: above. */
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.500", "AC-1772000000-123456");
+  assert_true(rlen > blen);
+  assert_true(htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen) > 0);
+  /* Same ms, a longer id sorting before it: below. */
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.500", "AA-1772000000-123456");
+  assert_true(htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen) < 0);
+  /* A row id that is a prefix of the bound's: equal on the shorter
+   * length, which counts as reaching the bound (the walk stops). */
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.500", "ABAAAaHQ");
+  assert_int_equal(0, htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen));
+  /* A millisecond-only bound (a timestamp selector) against full rows. */
+  blen = htc_msg_key(bound, sizeof(bound), "#c", "1794500000.500", NULL);
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.500", "AB-1-2");
+  assert_int_equal(0, htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen));
+  rlen = htc_msg_key(row, sizeof(row), "#c", "1794500000.499", "ABAAAaHQReh6LK");
+  assert_true(htc_key_cmp_bound(row, (size_t)rlen, bound, (size_t)blen) < 0);
+}
+
 static void test_parse_ms(void **state)
 {
   (void)state;
@@ -856,6 +901,7 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_parse_ms),
+    cmocka_unit_test(test_key_cmp_bound_other_lengths),
     cmocka_unit_test(test_owner_account),
     cmocka_unit_test(test_owner_star),
     cmocka_unit_test(test_owner_ipv4),

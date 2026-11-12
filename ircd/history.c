@@ -2244,8 +2244,7 @@ static int history_query_internal(const char *target,
        * the floor's used to fail the length test and walk on past the
        * floor (re-review 2026-09-07 R4; the ascending BETWEEN bound
        * below already does this). */
-      size_t n = klen < (size_t)floor_keylen ? klen : (size_t)floor_keylen;
-      if (memcmp(kbase, floor_key, n) <= 0)
+      if (htc_key_cmp_bound(kbase, klen, floor_key, (size_t)floor_keylen) <= 0)
         break;
     }
 
@@ -3092,8 +3091,7 @@ int history_query_between(const char *target,
 
     /* Past the end of the window?  Compare on the shorter length so a
      * key can never dodge the check by being short. */
-    if (memcmp(kbase, end_prefix,
-               klen < (size_t)end_prefix_len ? klen : (size_t)end_prefix_len) >= 0)
+    if (htc_key_cmp_bound(kbase, klen, end_prefix, (size_t)end_prefix_len) >= 0)
       break;
 
     /* Parse and add message */

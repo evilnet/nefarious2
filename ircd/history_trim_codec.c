@@ -107,6 +107,12 @@ int htc_owner_key(char *buf, size_t size, const char *account,
  * msgid.  Mirrors its bound checks exactly (>= where a separator
  * still follows, > for the final unseparated field) so this is
  * byte-identical for every input, including at the overflow edge. */
+int htc_key_cmp_bound(const void *key, size_t klen,
+                      const void *bound, size_t blen)
+{
+  return memcmp(key, bound, klen < blen ? klen : blen);
+}
+
 int htc_msg_key(char *buf, size_t size, const char *target,
                  const char *ts, const char *msgid)
 {
