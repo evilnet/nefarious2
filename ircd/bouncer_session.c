@@ -1514,8 +1514,9 @@ static int bounce_choose_read(struct Client *cptr, const char *account,
     /* The primary is the session's identity for this login (ruling
      * W3-T12c-2b-f1b): a user of the session's account, not an alias, and
      * of the login's Keycloak id (a missing id never conflicts).  An
-     * account change under the session (an OAUTHBEARER re-auth of its
-     * primary) leaves it listed here with a primary of another identity:
+     * account change under the session (a services rename of its primary,
+     * AC M; a SASL re-authentication can no longer change an account,
+     * #223) leaves it listed here with a primary of another identity:
      * never joined, revived or aliased into. */
     r->primary_other = p && !bounce_session_primary_is_identity(s,
                               cli_user(cptr) ? cli_user(cptr)->kc_id : NULL);
@@ -11286,8 +11287,9 @@ static int bounce_links_mid_burst(void)
 
 /** A session the record holds @a c in by itself -- its primary slot, or
  * its alias roster -- whatever the account it is listed under; NULL when
- * none.  By the client, not by its account: an OAUTHBEARER re-auth changes
- * a member's account and leaves it where it is (fix round 2, N4).  A
+ * none.  By the client, not by its account: a services rename (AC M)
+ * changes a member's account and leaves it where it is (fix round 2, N4;
+ * a SASL re-authentication no longer can, #223).  A
  * roster entry counts only for an alias: a stale entry whose numeric a
  * plain user now carries (the numeric reused) is not that user's session
  * (fix round 3, I-5), nor is an entry of an alias that follows another

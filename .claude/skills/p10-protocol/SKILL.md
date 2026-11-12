@@ -161,7 +161,7 @@ Client              Nefarious                    X3
 
 ### SASL Flow - Post-Registration (REAUTHENTICATE)
 
-For token refresh after the user is already registered (introduced via `N`):
+For token refresh after the user is already registered (introduced via `N`). The account cannot change (#223): an `L` naming another account than the client's is refused at once (904, the exchange ends, the `D S` after it reaches nobody); a client that had no account may log in for the first time (`AC R`).
 
 ```
 Client              Nefarious                    X3
@@ -176,15 +176,15 @@ Client              Nefarious                    X3
   |--AUTHENTICATE <jwt>-|                         |
   |                     |--SASL tgt src C <jwt>-->|
   |                     |                         |
-  |                     |<--SASL src tgt L newacct|  (may be same or different)
+  |                     |<--SASL src tgt L acct---|  (must be the client's own)
   |                     |<--SASL src tgt D S------|
-  |<--904 LOGGEDIN------|                         |
+  |<--900 LOGGEDIN------|                         |
   |<--903 SASLSUCCESS---|                         |
   |                     |                         |
-  |                     |==AC usrnum newacct ts==>|  (broadcast if registered)
+  |                     |==AC usrnum R acct ts===>|  (first login after registration only)
 ```
 
-**Key**: After successful post-registration SASL, Nefarious MUST send `AC` to propagate the account change network-wide (only if user was already introduced via `N`).
+**Key**: A first login after registration sends `AC R` network-wide (the user was already introduced via `N`). A refresh of the same account sends no `AC`; a login naming another account is refused, so SASL never produces `AC M`.
 
 ## ACCOUNT (AC) Command
 

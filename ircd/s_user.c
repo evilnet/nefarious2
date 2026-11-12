@@ -723,8 +723,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
         revive_target = NULL;
       }
       /* Never a revive into another identity (ruling W3-T12c-2b-f1b): a
-       * session whose primary's account changed under it (an OAUTHBEARER
-       * re-auth) is listed under this account with a primary of another;
+       * session whose primary's account changed under it (a services
+       * rename, AC M) is listed under this account with a primary of another;
        * the chooser in bounce_auto_resume() below lets this login register
        * in no session then. */
       if (revive_target && revive_target->hs_client

@@ -1387,8 +1387,9 @@ struct bounce_choose_row {
                           *   for this login: not a user of the session's
                           *   account, or another Keycloak id than the
                           *   login's (its account changed under the
-                          *   session, e.g. an OAUTHBEARER re-auth;
-                          *   ruling W3-T12c-2b-f1b) */
+                          *   session, e.g. a services rename, AC M --
+                          *   SASL no longer can, #223; ruling
+                          *   W3-T12c-2b-f1b) */
   int announced;         /**< a peer's BS C made this live record a moment
                           *   ago and no BS A has named its primary yet:
                           *   the primary's N and BS A are on their way
@@ -1563,7 +1564,8 @@ struct bounce_hold_on_facts {
   int foreign_member;        /**< it is some session's primary or device by
                               *   itself -- the record holds it -- but that
                               *   session is not its account's (its account
-                              *   changed under it: an OAUTHBEARER re-auth) */
+                              *   changed under it: a services rename, AC M;
+                              *   SASL no longer can, #223) */
   int burst;                 /**< a server link of ours is mid-burst */
   struct bounce_choice choice; /**< the chooser's answer for the client */
   int primary_user;          /**< the chosen session's primary is a user,
