@@ -1238,8 +1238,18 @@ process_multiline_batch(struct Client *sptr)
       if (to == sptr)
         continue;  /* Skip sender (handle echo-message separately) */
 
-      if (!MyConnect(to))
-        continue;  /* Skip remote users - handled by S2S relay */
+      if (!MyConnect(to)) {
+        /* Delivered by the S2S relay below.  Counted for the sender's
+         * WARN when the way to its server does not carry ML: it gets the
+         * fallback, from us or from the last server that takes ML.  Not
+         * a zombie (KICKed, its PART not back yet: no longer a reader)
+         * and not a service client (a channel service sits in every
+         * registered channel and would raise the WARN on every batch). */
+        if (!IsZombie(member) && !IsServiceClient(to)
+            && !ml_route_carries_multiline(cli_user(to)->server))
+          fallback_count++;
+        continue;
+      }
 
       /* With aliases, each connection is a separate Client with its own caps.
        * CapActive checks the client's own capabilities directly. */
@@ -1695,6 +1705,10 @@ process_multiline_batch(struct Client *sptr)
                      cli_name(acptr), NULL, "",
                      batch_time_ms, batch_base_msgid);
       } else {
+        /* The target reads the fallback: counted for the WARN, unless it
+         * is a service (as in a channel). */
+        if (!IsServiceClient(acptr))
+          fallback_count++;
         ml_send_dm_fallback(sptr, acptr, con_ml_messages(con),
                             con_ml_client_tags(con), is_notice,
                             batch_time_ms, batch_base_msgid,
