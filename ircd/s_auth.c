@@ -3664,10 +3664,15 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
                                 int parc, char **params)
 {
+  const char *mechs;
+
   if (EmptyString(params[0]))
     return 0;
 
-  send_reply(cli, ERR_SASLMECHS, params[0]);
+  /* What the sasl capability advertises (cap_sasl_mechanisms(), as for
+   * services' list in ms_sasl()), IAuth's own only when it has none. */
+  mechs = cap_sasl_mechanisms();
+  send_reply(cli, ERR_SASLMECHS, mechs ? mechs : params[0]);
   return 0;
 }
 

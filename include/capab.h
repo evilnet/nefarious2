@@ -134,6 +134,10 @@ DECLARE_FLAGSET(CapSet, _CAP_LAST_CAP);
 extern void client_check_caps(struct Client *client, struct Client *replyto);
 extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *flags_out);
 
+/* The sasl capability's current value (mechanism list), or NULL: what CAP
+ * LS advertises, and what RPL_SASLMECHS (908) lists. */
+extern const char *cap_sasl_mechanisms(void);
+
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);
 

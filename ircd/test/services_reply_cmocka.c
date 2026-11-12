@@ -36,6 +36,7 @@
 #include "ircd_string.h"
 #include "list.h"
 #include "msg.h"
+#include "numeric.h"
 #include "numnicks.h"
 #include "s_auth.h"
 #include "s_debug.h"
@@ -78,6 +79,11 @@ static time_t logged_ts[MAXREC];
 static int nlogins;
 static int sasl_dones;                  /* auth_sasl_done() calls */
 static int auth_result;                 /* what it returns */
+/* The last RPL_SASLMECHS (908) sent, and its mechanism list. */
+static struct Client *mechs_to;
+static char mechs_sent[128];
+/* The sasl capability's value (m_cap.c); NULL: none. */
+static const char *cap_mechs;
 static int refusals;                    /* sasl_reauth_refused() said so */
 
 static void tell(struct Client *to)
@@ -214,6 +220,9 @@ static int world_setup(void **state)
   (void)state;
 
   ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
+  mechs_to = NULL;
+  mechs_sent[0] = '\0';
+  cap_mechs = NULL;
   refusals = 0;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
@@ -399,10 +408,21 @@ int bounce_account_deauth_apply(struct Client *acptr)
   return 0;
 }
 
+const char *cap_sasl_mechanisms(void)
+{
+  return cap_mechs;
+}
+
 int send_reply(struct Client *to, int reply, ...)
 {
-  (void)reply;
   tell(to);
+  if (reply == ERR_SASLMECHS) {
+    va_list vl;
+    va_start(vl, reply);
+    ircd_strncpy(mechs_sent, va_arg(vl, const char *), sizeof(mechs_sent));
+    va_end(vl);
+    mechs_to = to;
+  }
   return 0;
 }
 
@@ -869,6 +889,41 @@ static void test_sasl_relay_ds_without_l(void **state)
   assert_string_equal(logged_as[1], "");
 }
 
+/* RPL_SASLMECHS (#221): services answer an unsupported mechanism with
+ * their own list (SASL M); the client gets what the sasl capability
+ * advertises -- with the local Keycloak tier more than services offer. */
+static void test_sasl_mechs_lists_the_cap_value(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslcookie(c) = 777;
+  cli_saslstart(c) = CurrentTime;
+  cap_mechs = "PLAIN,OAUTHBEARER,SCRAM-SHA-256";
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 M :PLAIN");
+
+  assert_ptr_equal(mechs_to, c);
+  assert_string_equal(mechs_sent, "PLAIN,OAUTHBEARER,SCRAM-SHA-256");
+}
+
+/* ... and services' own list when the capability has no value. */
+static void test_sasl_mechs_services_list_without_cap_value(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslcookie(c) = 777;
+  cli_saslstart(c) = CurrentTime;
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 M :PLAIN,EXTERNAL");
+
+  assert_ptr_equal(mechs_to, c);
+  assert_string_equal(mechs_sent, "PLAIN,EXTERNAL");
+}
+
 /* ====================================================================
  * Login-on-connect: which client a reply reaches
  * ==================================================================== */
@@ -938,6 +993,8 @@ int main(void)
     T(test_sasl_local_exchange_unreachable),
     T(test_sasl_fd_past_the_end),
     T(test_sasl_legitimate_exchange),
+    T(test_sasl_mechs_lists_the_cap_value),
+    T(test_sasl_mechs_services_list_without_cap_value),
     T(test_sasl_relay_exchange_times_out_after_register_login),
     T(test_sasl_relay_success_is_the_account_services_named),
     T(test_sasl_reauth_other_account_refused_at_L),

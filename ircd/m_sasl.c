@@ -316,8 +316,15 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Cleanup for failure/abort cases (success cleanup is in sasl_complete_login) */
     sasl_relay_end(acptr);
     return 0;
-  } else if (reply[0] == 'M')
-    return send_reply(acptr, ERR_SASLMECHS, data);
+  } else if (reply[0] == 'M') {
+    /* RPL_SASLMECHS lists what the sasl capability advertises, not the
+     * services' own list: with the local Keycloak tier the two differ
+     * (sasl=PLAIN,OAUTHBEARER,SCRAM-SHA-256 against services' PLAIN), and a
+     * client that rebuilds its list from 908 would drop working
+     * mechanisms.  Services' list only when the capability has none. */
+    const char *mechs = cap_sasl_mechanisms();
+    return send_reply(acptr, ERR_SASLMECHS, mechs ? mechs : data);
+  }
 
   return 0;
 }

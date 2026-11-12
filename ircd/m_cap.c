@@ -215,11 +215,15 @@ void cap_notify_flush(void)
   cap_batch.count = 0;
 }
 
-/** Get effective SASL mechanisms (dynamic or default fallback).
+/** The mechanisms the sasl capability advertises now (CAP LS 302's
+ * sasl=<value>): the local Keycloak tier's, else the dynamic list (IAuth's,
+ * or services'), else SASL_DEFAULT_MECHANISMS.  Also the list RPL_SASLMECHS
+ * (908) gives, so that a client rebuilding its list from 908 keeps what CAP
+ * offered.
  * @return Mechanism string, or NULL if none available.
  */
-static const char *
-get_effective_sasl_mechanisms(void)
+const char *
+cap_sasl_mechanisms(void)
 {
   /* Local Keycloak mechanisms take priority.
    * This intentionally overrides any P10 SASL M broadcast from X3
@@ -264,7 +268,7 @@ sasl_server_available(void)
     return (auth_iauth_sasl_mechs() != NULL);
 
   /* No mechanisms = no SASL, regardless of server connectivity */
-  if (!get_effective_sasl_mechanisms())
+  if (!cap_sasl_mechanisms())
     return 0;
 
   sasl_server = feature_str(FEAT_SASL_SERVER);
@@ -610,7 +614,7 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     if (is_ls && cap_version >= 302) {
       /* For SASL, use effective mechanism list (dynamic or default fallback) */
       if (capab_list[i].cap == CAP_SASL) {
-        const char *mechs = get_effective_sasl_mechanisms();
+        const char *mechs = cap_sasl_mechanisms();
         if (mechs)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", mechs);
       } else if (capab_list[i].cap == CAP_DRAFT_MULTILINE) {
