@@ -1870,10 +1870,14 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     sendcmdto_set_client_msgid(NULL);
   }
 
-  /* Forward PM to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_PRIVATE, text,
-                               pm_msgid, history_parse_ms(pm_timestamp),
-                               client_tags);
+  /* Forward PM to all aliases of the target bouncer primary -- not
+   * a multiline fallback line (,F): the originating server served every
+   * device of the target itself (process_multiline_batch), so a copy here
+   * gave a device the preview a second time. */
+  if (!fallback_of[0])
+    bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_PRIVATE, text,
+                                 pm_msgid, history_parse_ms(pm_timestamp),
+                                 client_tags);
 
 #ifdef USE_ROCKSDB
   /* Store server-relayed private message in history database (if enabled) */
@@ -2008,10 +2012,14 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
     sendcmdto_set_client_msgid(NULL);
   }
 
-  /* Forward notice to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_NOTICE, text,
-                               pm_msgid, history_parse_ms(pm_timestamp),
-                               client_tags);
+  /* Forward notice to all aliases of the target bouncer primary -- not
+   * a multiline fallback line (,F): the originating server served every
+   * device of the target itself (process_multiline_batch), so a copy here
+   * gave a device the preview a second time. */
+  if (!fallback_of[0])
+    bounce_forward_pm_to_aliases(sptr, acptr, cli_from(sptr), CMD_NOTICE, text,
+                                 pm_msgid, history_parse_ms(pm_timestamp),
+                                 client_tags);
 
 #ifdef USE_ROCKSDB
   /* Store server-relayed private notice in history database (if enabled) */

@@ -1429,26 +1429,45 @@ process_multiline_batch(struct Client *sptr)
                                 batch_paste_url, is_notice, cmd_str,
                                 0 /* no label preservation for delivery */);
 
-    /* Forward to acptr's session aliases.  Skip sptr itself: when sender
-     * and recipient are aliases of the same session, primary delivery
-     * already covers acptr, and forwarding to sptr would echo the
-     * sender's own message back to itself.
+    /* Forward to acptr's session aliases: the target's other devices.
+     * Skip sptr itself: when sender and recipient are aliases of the same
+     * session, primary delivery already covers acptr, and forwarding to
+     * sptr would echo the sender's own message back to itself.
      *
-     * Local aliases: proper batch (or fallback) via deliver_multiline_dm_to_one.
+     * This server serves every device of the target, once, each in the
+     * best form its route and caps allow; no other server forwards a
+     * multiline DM to aliases (deliver_s2s_multiline_batch never did, and
+     * a server passing the ,F fallback lines on skips
+     * bounce_forward_pm_to_aliases for them).
      *
-     * Remote aliases: the wire target IS the alias (forwards present the
-     * alias as a normal recipient), so we can reuse the existing
-     * CMD_MULTILINE S2S relay machinery for multiline-capable peers —
-     * the alias's server reconstructs the BATCH for the local alias via
-     * deliver_s2s_multiline_batch().  For legacy peers we fall back to
-     * per-line PRIVMSG/NOTICE; the receiving legacy server has no
-     * multiline state, so each line is delivered as a regular PM. */
+     * - Local alias: a batch or the client fallback
+     *   (deliver_multiline_dm_to_one).
+     * - Remote alias, addressed by its NUMERIC (never by nick: an alias
+     *   carries its primary's nick and is not in the nick hash, so a batch
+     *   "to <nick>" was delivered to the primary again -- twice -- and
+     *   never to the alias):
+     *   - with draft/multiline + batch + echo-message (its replicated
+     *     BX U caps): a BX M batch, the numeric-addressed multiline frame
+     *     every fork server already delivers (its receiver serves only an
+     *     echo-message connection, hence the third cap);
+     *   - otherwise, or with its caps not known yet: the single-line
+     *     fallback with the ,F mark, addressed to the alias's numeric
+     *     (ml_send_dm_fallback), which any fork server delivers.  A
+     *     multiline-capable device without echo-message gets the
+     *     fallback: the ML start line names its target by nick, and a
+     *     numeric there would be dropped by every server built before
+     *     this change. */
     if (IsAccount(acptr) && !IsBouncerAlias(acptr)) {
       struct BouncerSession *acptr_sess = bounce_get_session(acptr);
       if (acptr_sess && acptr_sess->hs_alias_count > 0) {
+        struct Client *fwd_source =
+            (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+            ? cli_alias_primary(sptr) : sptr;
         int i;
         for (i = 0; i < acptr_sess->hs_alias_count; i++) {
           struct Client *alias = findNUser(acptr_sess->hs_aliases[i].ba_numeric);
+          unsigned int caps = acptr_sess->hs_aliases[i].ba_caps;
+
           if (!alias || alias == acptr || alias == sptr || !IsBouncerAlias(alias))
             continue;
           if (MyConnect(alias)) {
@@ -1456,65 +1475,22 @@ process_multiline_batch(struct Client *sptr)
                                         batch_base_msgid, batch_timebuf,
                                         batch_paste_url, is_notice, cmd_str,
                                         0);
+          } else if (acptr_sess->hs_aliases[i].ba_caps_known
+                     && (caps & BX_CAP_DRAFT_MULTILINE) && (caps & BX_CAP_BATCH)
+                     && (caps & BX_CAP_ECHO_MESSAGE)) {
+            /* Wire target acptr: the alias's own conversation (it carries
+             * acptr's nick).  Index -(2 + i) keeps the batch ids apart
+             * from the echo loop's (i, and -1 for the primary). */
+            emit_bxm_to_remote_member(alias, acptr_sess->hs_aliases[i].ba_numeric,
+                                      fwd_source, acptr, con, is_notice,
+                                      batch_base_msgid, batch_paste_url,
+                                      -(2 + i));
           } else {
-            struct Client *alias_server = cli_from(alias);
-            /* Prefer the alias's own cap state (set via BX U caps=)
-             * over the link-level IsMultiline proxy.  Falls back to
-             * IsMultiline if no caps info has arrived yet.  This
-             * forward path uses CMD_MULTILINE rather than BX M
-             * (the wire target IS the alias for forwards), but the
-             * decision criterion is the same as for echo. */
-            int forward_use_ml;
-            if (acptr_sess->hs_aliases[i].ba_caps_known) {
-              unsigned int caps = acptr_sess->hs_aliases[i].ba_caps;
-              forward_use_ml = (caps & BX_CAP_DRAFT_MULTILINE)
-                               && (caps & BX_CAP_BATCH);
-            } else {
-              forward_use_ml = IsServer(alias_server)
-                               && IsMultiline(alias_server);
-            }
-            if (forward_use_ml) {
-              /* Multiline-capable alias server: relay the full batch
-               * via CMD_MULTILINE so the remote alias sees a proper
-               * draft/multiline BATCH wrapper.  Per-alias batch_id keeps
-               * concurrent forwards from colliding on the receiver. */
-              char fwd_batch_id[16];
-              int first = 1;
-              ircd_snprintf(0, fwd_batch_id, sizeof(fwd_batch_id), "%s%lu%d",
-                            cli_yxx(sptr), (unsigned long)CurrentTime, i);
-              for (lp = con_ml_messages(con); lp; lp = lp->next) {
-                int concat = lp->value.cp[0];
-                char *text = lp->value.cp + 1;
-                ml_send_line(sptr, alias_server,
-                             first ? '+' : (concat ? 'c' : '.'),
-                             fwd_batch_id, cli_name(alias),
-                             con_ml_client_tags(con), text,
-                             batch_time_ms, batch_base_msgid);
-                first = 0;
-              }
-              ml_send_line(sptr, alias_server, '-', fwd_batch_id,
-                           cli_name(alias), NULL,
-                           batch_paste_url ? batch_paste_url : "",
-                           batch_time_ms, batch_base_msgid);
-            } else {
-              /* Legacy alias server: per-line PRIVMSG/NOTICE.  Receiver
-               * has no multiline state — delivers each line as a regular
-               * PM to the local alias. */
-              int alias_first = 1;
-              for (lp = con_ml_messages(con); lp; lp = lp->next) {
-                char *text = lp->value.cp + 1;
-                if (*text == '\0')
-                  continue;
-                const char *line_msgid = alias_first ? batch_base_msgid : NULL;
-                if (is_notice)
-                  sendcmdto_one_tags_ext(sptr, CMD_NOTICE, alias, line_msgid,
-                                         "%C :%s", alias, text);
-                else
-                  sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, alias, line_msgid,
-                                         "%C :%s", alias, text);
-                alias_first = 0;
-              }
-            }
+            fallback_count++;
+            ml_send_dm_fallback(sptr, alias, con_ml_messages(con),
+                                con_ml_client_tags(con), is_notice,
+                                batch_time_ms, batch_base_msgid,
+                                batch_paste_url);
           }
         }
       }
