@@ -114,6 +114,12 @@ int ms_svsnick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 3)
     return need_more_params(sptr, "SVSNICK"); 
 
+  /* A services command: from a server that announced itself as services
+   * (SERVER ... +s, relayed to every server) or one of its clients. */
+  if (!IsService(IsServer(sptr) ? sptr : cli_user(sptr)->server))
+    return protocol_violation(sptr, "SVSNICK from non-services %s",
+                              cli_name(sptr));
+
   if (!(acptr = findNUser(parv[1])))
     return 0; /* Ignore SVSNICK for a user that has quit */
 
@@ -153,6 +159,14 @@ int ms_svsnick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * through as it is probably a change in the nickname's case.
    */
   if ((acptr2 = SeekClient(nick))) {
+    /*
+     * The nick is the source's own: freeing it would kill the client
+     * that asked, which the SVSNICK is then relayed from.  Refuse it.
+     * (A nick never names a server: it has no '.'.)
+     */
+    if (acptr2 == sptr)
+      return protocol_violation(sptr, "SVSNICK of %C to the nick of its "
+                                "source %s", acptr, nick);
     /*
      * If acptr == acptr2, then we have a client doing a nick
      * change between *equivalent* nicknames as far as server
