@@ -62,6 +62,11 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
        from = &his;
    else
        from = sptr;
+   /* A setter field with no nick in it (nothing but '!') is no setter
+    * field: the topic names its source, as one sent without the field
+    * does.  nick[] would otherwise be shown to the members unset. */
+   if (setter != NULL && setter[strspn(setter, "!")] == '\0')
+     setter = NULL;
    /* Note if this is just a refresh of an old topic, and don't
     * send it to all the clients to save bandwidth.  We still send
     * it to other servers as they may have split and lost the topic.
