@@ -3391,9 +3391,21 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_usermode(struct IAuth *iauth, struct Client *cli,
                               int parc, char **params)
 {
+  char *parv[MAXPARA + 3];
+  int ii;
+
   if (parc > 0 && params[0][0] == '+')
   {
-    set_user_mode(cli, cli, parc + 2, params - 2, ALLOWMODES_ANY);
+    /* set_user_mode() reads the modes from parv[2] on.  It finds its
+     * target by the name in parv[1], and an unregistered client -- the
+     * only kind an M line can name -- is not in the user hash: with no
+     * name it changes the client itself, as m_user() does for USER's
+     * mode argument. */
+    parv[0] = parv[1] = NULL;
+    for (ii = 0; ii < parc && ii < MAXPARA; ++ii)
+      parv[ii + 2] = params[ii];
+    parv[ii + 2] = NULL;
+    set_user_mode(cli, cli, ii + 2, parv, ALLOWMODES_ANY);
   }
   return 0;
 }
