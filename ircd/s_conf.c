@@ -1233,7 +1233,50 @@ static void close_mappings(void)
   GlobalServiceMapList = NULL;
 }
 
-/** Reload the configuration file.
+extern FBFILE *lexer_open_config(void);
+extern void lexer_close_config(void);
+
+/** Open the configuration file for a rehash, before anything of the
+ * running configuration is discarded.  A file that cannot be read at all
+ * -- it cannot be opened, is a directory, or is empty, as it is for a
+ * moment while a deploy rewrites or swaps it -- abandons the rehash: every
+ * listener, block, class, feature and the IAuth program stay as they are.
+ * (Read with nothing kept, such a file closed every listener and stopped
+ * IAuth, leaving the server up but deaf and no oper able to reach it.)
+ * A file that can be read is parsed as before, errors and all.
+ * @return Non-zero if the file is open for read_configuration_file();
+ * zero if the rehash is abandoned.
+ */
+static int rehash_open_conf(void)
+{
+  struct stat sb;
+  FBFILE *file;
+  const char *why;
+
+  if (!(file = lexer_open_config()))
+    why = strerror(errno);
+  else if (fbstat(&sb, file))
+    why = strerror(errno);
+  else if (S_ISDIR(sb.st_mode))
+    why = strerror(EISDIR);
+  else if (S_ISREG(sb.st_mode) && 0 == sb.st_size)
+    why = "the file is empty";
+  else
+    return 1;
+
+  lexer_close_config();
+  /* The notice goes to the operators who saw the rehash announced, however
+   * the CONFIG log's snomask is set, and once. */
+  log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
+            "changed: cannot read configuration file %s: %s", configfile, why);
+  sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
+                       "cannot read configuration file %s: %s",
+                       configfile, why);
+  return 0;
+}
+
+/** Reload the configuration file.  A file that cannot be read at all
+ * abandons the rehash before anything is discarded (rehash_open_conf()).
  * @param cptr Client that requested rehash (if a signal, &me).
  * @param sig Type of rehash (0 = oper-requested, 1 = signal, 2 =
  *   oper-requested but do not restart resolver)
@@ -1252,6 +1295,9 @@ int rehash(struct Client *cptr, int sig)
   if (1 == sig)
     sendto_opmask_butone(0, SNO_OLDSNO,
                          "Got signal SIGHUP, reloading ircd conf. file");
+
+  if (!rehash_open_conf())
+    return 0;
 
   while ((tmp2 = *tmp)) {
     if (tmp2->clients) {
