@@ -287,10 +287,12 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
       MyFree(cli_loc(acptr));
 
+      /* Let registration go on.  Its result says whether acptr survived
+       * it (CPTR_KILLED when registration exited the client); cptr is the
+       * server link, so it must not be returned from here. */
       if (cli_auth(acptr))
-        return auth_set_account(cli_auth(acptr), cli_user(acptr)->account);
-      else
-        return 0;
+        auth_set_account(cli_auth(acptr), cli_user(acptr)->account);
+      return 0;
     } else {
       return protocol_violation(cptr, "ACCOUNT sub-type '%s' not implemented",
                                 parv[2]);
