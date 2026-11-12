@@ -45,6 +45,18 @@ extern size_t ircd_utf8_cut_len(const char* text, size_t len, size_t max);
 extern size_t ircd_line_body_clamp(const char* line, size_t len, size_t body_max);
 extern size_t ircd_relay_text_room(size_t source_len, size_t cmd_len,
                                    size_t target_len, size_t body_max);
+/** Longest BX M batch id (m_batch.c emit_bxm_to_remote_member's
+ * "<yxx><time><index>" in a 16-byte buffer). */
+#define BX_M_ID_MAX 15
+extern size_t ircd_relay_face_len(const char *nick, const char *user,
+                                  const char *host, const char *realhost);
+extern size_t ircd_bx_echo_text_room(size_t nick_len, size_t msgid_len,
+                                     size_t ctags_len, int multiline,
+                                     size_t body_max);
+extern size_t ircd_split_len(const char *text, size_t len, size_t room);
+extern size_t ircd_keyvalue_line_len(size_t server_len, size_t viewer_len,
+                                     size_t target_len, size_t key_len,
+                                     size_t vis_len, size_t value_len);
 extern int ircd_text_mentions(const char* text, const char* nick);
 extern char* ircd_json_escape(char* dst, size_t dstlen, const char* src);
 extern int         unique_name_vector(char* names, char token,

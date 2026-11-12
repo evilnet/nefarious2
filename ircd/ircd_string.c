@@ -672,6 +672,98 @@ size_t ircd_relay_text_room(size_t source_len, size_t cmd_len,
   return head < body_max ? body_max - head : 0;
 }
 
+/** Length of a source as clients are shown it, "nick!user@host".
+ * \a realhost is the real host when the user is not hidden (multiline
+ * delivery shows it then, m_batch.c get_displayed_host()) and NULL when
+ * the user is hidden, whose real host length nobody is shown; the longer
+ * of the two hosts is counted.  Pure, for relay_source_len(). */
+size_t ircd_relay_face_len(const char *nick, const char *user,
+                           const char *host, const char *realhost)
+{
+  size_t hlen = host ? strlen(host) : 0;
+
+  if (realhost && strlen(realhost) > hlen)
+    hlen = strlen(realhost);
+  return (nick ? strlen(nick) : 0) + 1 + (user ? strlen(user) : 0) + 1 + hlen;
+}
+
+/** Bytes a bouncer session echo frame leaves for a DM's text within
+ * \a body_max (510: S2S lines are cut there, ircd_line_body_clamp()).  A
+ * DM from a session with other devices reaches a device on another fork
+ * server inside a BX frame (bounce_echo_pm_to_session, m_batch.c
+ * emit_bxm_to_remote_member), whose head is longer than the client line's
+ * for a short source:
+ *   BX E:       "YY BX E AAAAA BBBBB T <nick> <msgid> :"           25+N+M
+ *   BX M first: "YY BX M +<id> AAAAA BBBBB T <nick> <msgid> [@<ctags>] :"
+ *                                                  27+I+N+M (+2+C)
+ * (YY the 2-character server numeric, AAAAA/BBBBB 5-character user
+ * numerics, T the one-letter P/O token, I the BX M batch id, at most
+ * BX_M_ID_MAX).  Later BX M lines ("M c<id> AAAAA :") are shorter than
+ * the first.  \a multiline takes the larger of the BX M first line and
+ * BX E (multiline DMs use both, BX E toward legacy bouncer servers).
+ * @return The text bytes that fit, or 0. */
+size_t ircd_bx_echo_text_room(size_t nick_len, size_t msgid_len,
+                              size_t ctags_len, int multiline,
+                              size_t body_max)
+{
+  size_t head = 25 + nick_len + msgid_len;
+
+  if (multiline) {
+    size_t mhead = 27 + BX_M_ID_MAX + nick_len + msgid_len
+                 + (ctags_len ? 2 + ctags_len : 0);
+    if (mhead > head)
+      head = mhead;
+  }
+  return head < body_max ? body_max - head : 0;
+}
+
+/** Where to split a multiline line of \a len bytes for a part of at most
+ * \a room bytes: ircd_utf8_cut_len(), then moved back so it does not
+ * split a mIRC colour code ("\003" with up to two digits, a comma and up
+ * to two more) -- the part after it would show the digits as text.  Never
+ * 0 for a line that needs a split, so a splitter always progresses (a cut
+ * that would leave nothing falls back to the byte-exact \a room).
+ * @return The bytes of the first part (\a len when it fits or \a room is 0). */
+size_t ircd_split_len(const char *text, size_t len, size_t room)
+{
+  size_t keep, p;
+
+  if (!text || room == 0 || len <= room)
+    return len;
+  keep = ircd_utf8_cut_len(text, len, room);
+  /* A colour code is at most 6 bytes ("\003NN,NN"): look back 5 bytes. */
+  for (p = keep; p > 0 && keep - p < 6; ) {
+    --p;
+    if (text[p] == '\003') {
+      size_t q = p + 1, d = 0;
+      while (q < len && d < 2 && text[q] >= '0' && text[q] <= '9') { ++q; ++d; }
+      if (d > 0 && q + 1 < len && text[q] == ',' && text[q + 1] >= '0'
+          && text[q + 1] <= '9') {
+        ++q; d = 0;
+        while (q < len && d < 2 && text[q] >= '0' && text[q] <= '9') { ++q; ++d; }
+      }
+      if (q > keep && p > 0)
+        keep = p;  /* the code runs past the cut: it goes to the next part */
+      break;
+    }
+  }
+  return keep ? keep : room;
+}
+
+/** Length of the RPL_KEYVALUE (761) line that carries a metadata value
+ * to a client, after the tags:
+ *   ":" <server> " 761 " <viewer> " " <target> " " <key> " " <vis> " :" <value>
+ * (the METADATA subscription notification ":" <server> " METADATA "
+ * <target> " " <key> " * :" <value> is never longer).  Pure; the caller
+ * passes the longest server name, viewer and target it cannot know. */
+size_t ircd_keyvalue_line_len(size_t server_len, size_t viewer_len,
+                              size_t target_len, size_t key_len,
+                              size_t vis_len, size_t value_len)
+{
+  return 1 + server_len + 5 + viewer_len + 1 + target_len + 1 + key_len
+       + 1 + vis_len + 2 + value_len;
+}
+
 /** Case-insensitive word-boundary search for \a nick in \a text, using
  * the IRC nickname character class as the boundary definition: a match
  * counts only when the characters on both sides of it are not nickname

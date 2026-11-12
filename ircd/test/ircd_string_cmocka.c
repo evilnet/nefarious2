@@ -1274,11 +1274,137 @@ static void test_relay_text_room_typical(void **state)
 
 static void test_relay_text_room_longest_names(void **state)
 {
-  /* The longest source (NICKLEN 30 + USERLEN 10 + HOSTLEN 75 + "!@") and
-   * the longest channel (CHANNELLEN 200) still leave 181 bytes: a
-   * PRIVMSG to a channel or a nick always has room for text. */
+  /* The longest source (NICKLEN + USERLEN + HOSTLEN and "!@") and the
+   * longest channel (CHANNELLEN) still leave room: a PRIVMSG to a channel
+   * or a nick always has text (181 bytes with 30/10/75/200). */
+  size_t room;
   (void)state;
-  assert_int_equal(181, ircd_relay_text_room(30 + 1 + 10 + 1 + 75, 7, 200, 510));
+  room = ircd_relay_text_room(NICKLEN + 1 + USERLEN + 1 + HOSTLEN, 7,
+                              CHANNELLEN, BUFSIZE - 2);
+  assert_int_equal(BUFSIZE - 2 - (1 + NICKLEN + 1 + USERLEN + 1 + HOSTLEN
+                                  + 1 + 7 + 1 + CHANNELLEN + 2), room);
+  assert_true(room > 100);
+}
+
+/* --- ircd_relay_face_len --- */
+
+static void test_face_len_host_or_realhost(void **state)
+{
+  (void)state;
+  /* hidden (realhost NULL): the shown host only */
+  assert_int_equal(strlen("n!u@cloak.example"),
+                   ircd_relay_face_len("n", "u", "cloak.example", NULL));
+  /* not hidden: the longer of host and realhost */
+  assert_int_equal(strlen("n!u@a-much-longer.real.host"),
+                   ircd_relay_face_len("n", "u", "short", "a-much-longer.real.host"));
+  assert_int_equal(strlen("n!u@longer.shown.host"),
+                   ircd_relay_face_len("n", "u", "longer.shown.host", "r"));
+  /* the longest face */
+  {
+    char nick[NICKLEN + 1], user[USERLEN + 1], host[HOSTLEN + 1];
+    memset(nick, 'n', NICKLEN); nick[NICKLEN] = '\0';
+    memset(user, 'u', USERLEN); user[USERLEN] = '\0';
+    memset(host, 'h', HOSTLEN); host[HOSTLEN] = '\0';
+    assert_int_equal(NICKLEN + 1 + USERLEN + 1 + HOSTLEN,
+                     ircd_relay_face_len(nick, user, host, NULL));
+  }
+}
+
+/* --- ircd_bx_echo_text_room --- */
+
+static void test_bx_echo_room_frames(void **state)
+{
+  /* "AB BX E ADAAB ABAAA P rcvr <14> :" is 43 bytes: 467 left (the BX E
+   * the bed probe saw cut a 478-byte DM to 467 before this). */
+  (void)state;
+  assert_int_equal(510 - 43, ircd_bx_echo_text_room(4, 14, 0, 0, 510));
+  /* the BX M first line: 27 + BX_M_ID_MAX + nick + msgid */
+  assert_int_equal(510 - (27 + BX_M_ID_MAX + 4 + 14),
+                   ircd_bx_echo_text_room(4, 14, 0, 1, 510));
+  /* client tags ride the BX M first line: " @<ctags>" */
+  assert_int_equal(510 - (27 + BX_M_ID_MAX + 4 + 14 + 2 + 20),
+                   ircd_bx_echo_text_room(4, 14, 20, 1, 510));
+  /* tags that eat the line leave 0, not a wrapped size_t */
+  assert_int_equal(0, ircd_bx_echo_text_room(4, 14, 600, 1, 510));
+}
+
+static void test_bx_echo_room_binds_for_short_sources(void **state)
+{
+  /* The client form ":<S> PRIVMSG <N> :" is 12+S+N; BX E is 25+N+M.
+   * With a 14-byte msgid the frame is the tighter one for S < 27. */
+  size_t n = 4, m = 14, s;
+  (void)state;
+  for (s = 5; s < 60; s++) {
+    size_t client = ircd_relay_text_room(s, 7, n, 510);
+    size_t bx = ircd_bx_echo_text_room(n, m, 0, 0, 510);
+    if (s < 27)
+      assert_true(bx < client);
+    else
+      assert_true(bx >= client);
+  }
+}
+
+/* --- ircd_split_len --- */
+
+static void test_split_len_basic(void **state)
+{
+  char text[600];
+  (void)state;
+  memset(text, 'a', sizeof(text));
+  assert_int_equal(600, ircd_split_len(text, 600, 600));   /* at the budget */
+  assert_int_equal(599, ircd_split_len(text, 600, 599));   /* one over */
+  assert_int_equal(600, ircd_split_len(text, 600, 0));     /* no room: no split */
+  assert_int_equal(0, ircd_split_len(text, 0, 10));        /* empty */
+}
+
+static void test_split_len_utf8(void **state)
+{
+  char text[300];
+  int i;
+  (void)state;
+  for (i = 0; i < 100; i++)
+    memcpy(text + 3 * i, "\342\202\254", 3);
+  assert_int_equal(99, ircd_split_len(text, 300, 100));   /* back to a lead */
+  assert_int_equal(99, ircd_split_len(text, 300, 101));
+  assert_int_equal(102, ircd_split_len(text, 300, 102));
+  /* a room smaller than one character still progresses (byte-exact) */
+  assert_int_equal(2, ircd_split_len(text, 300, 2));
+}
+
+static void test_split_len_colour_code(void **state)
+{
+  /* "...\00304,12coloured": a cut inside the code moves before the \003,
+   * so the next part starts with the whole code. */
+  char text[64];
+  size_t at;
+  (void)state;
+  memset(text, 'x', sizeof(text));
+  memcpy(text + 20, "\00304,12", 6);
+  for (at = 21; at <= 25; at++)
+    assert_int_equal(20, ircd_split_len(text, sizeof(text), at));
+  assert_int_equal(26, ircd_split_len(text, sizeof(text), 26)); /* after it */
+  assert_int_equal(20, ircd_split_len(text, sizeof(text), 20)); /* before it */
+  /* a bare \003 (colour reset) is one byte: nothing to keep together */
+  memcpy(text + 40, "\003x", 2);
+  assert_int_equal(41, ircd_split_len(text, sizeof(text), 41));
+}
+
+/* --- ircd_keyvalue_line_len --- */
+
+static void test_keyvalue_line_len(void **state)
+{
+  /* ":hub.test 761 mdc mdc <63 k> * :<300 v>" = 389 (the bed probe) */
+  (void)state;
+  assert_int_equal(389, ircd_keyvalue_line_len(8, 3, 3, 63, 1, 300));
+  /* the SET bound's worst case: HOSTLEN server, NICKLEN viewer and user
+   * target, a 63-byte key set public: 300 still fits 510 */
+  assert_true(ircd_keyvalue_line_len(HOSTLEN, NICKLEN, NICKLEN, 63, 1, 300)
+              <= BUFSIZE - 2);
+  /* ...set private, 294 is the most */
+  assert_true(ircd_keyvalue_line_len(HOSTLEN, NICKLEN, NICKLEN, 63, 7, 294)
+              <= BUFSIZE - 2);
+  assert_true(ircd_keyvalue_line_len(HOSTLEN, NICKLEN, NICKLEN, 63, 7, 295)
+              > BUFSIZE - 2);
 }
 
 static void test_relay_text_room_none_left(void **state)
@@ -1764,6 +1890,13 @@ int main(void)
         /* ircd_relay_text_room */
         cmocka_unit_test(test_relay_text_room_typical),
         cmocka_unit_test(test_relay_text_room_longest_names),
+        cmocka_unit_test(test_face_len_host_or_realhost),
+        cmocka_unit_test(test_bx_echo_room_frames),
+        cmocka_unit_test(test_bx_echo_room_binds_for_short_sources),
+        cmocka_unit_test(test_split_len_basic),
+        cmocka_unit_test(test_split_len_utf8),
+        cmocka_unit_test(test_split_len_colour_code),
+        cmocka_unit_test(test_keyvalue_line_len),
         cmocka_unit_test(test_relay_text_room_none_left),
         cmocka_unit_test(test_relay_text_room_line_is_510),
 

@@ -780,9 +780,8 @@ static int metadata_value_fits_line(int is_channel, const char *target,
     return 1;  /* a delete carries no value */
   if (!is_channel && tlen < NICKLEN)
     tlen = NICKLEN;
-  /* ':' server ' 761 ' viewer ' ' target ' ' key ' ' vis ' :' value */
-  line = 1 + HOSTLEN + 5 + NICKLEN + 1 + tlen + 1 + strlen(key) + 1 + vis + 2
-       + strlen(value);
+  line = ircd_keyvalue_line_len(HOSTLEN, NICKLEN, tlen, strlen(key), vis,
+                                strlen(value));
   return line <= BUFSIZE - 2;
 }
 
