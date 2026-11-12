@@ -129,6 +129,123 @@ static int count(const struct HistoryMessage *m)
   return n;
 }
 
+/* ---- hm_page_select: a page from the ephemeral ring (issue 215) ---- */
+
+/** Six rows r1..r6, one per millisecond, given out of order (the ring is
+ * delivery order), plus two siblings in millisecond 7. */
+static struct HistoryMessage *ring6(void)
+{
+  return chain(8,
+               row("AAAAAAAAAAAAA3", "1790000000.003", ""),
+               row("AAAAAAAAAAAAA1", "1790000000.001", ""),
+               row("AAAAAAAAAAAAA2", "1790000000.002", ""),
+               row("AAAAAAAAAAAAA4", "1790000000.004", ""),
+               row("AAAAAAAAAAAAA6", "1790000000.006", ""),
+               row("AAAAAAAAAAAAA5", "1790000000.005", ""),
+               row("CAAAAAAAAAAAA7", "1790000000.007", ""),
+               row("BAAAAAAAAAAAA7", "1790000000.007", ""));
+}
+
+/** The page as "1 2 3" (the last msgid character per row; 7 as B7/C7). */
+static const char *page_ids(const struct HistoryMessage *m)
+{
+  static char buf[128];
+  size_t o = 0;
+  buf[0] = '\0';
+  for (; m; m = m->next) {
+    size_t l = strlen(m->msgid);
+    if (m->msgid[l - 1] == '7')
+      o += (size_t)snprintf(buf + o, sizeof(buf) - o, "%s%c7", o ? " " : "", m->msgid[0]);
+    else
+      o += (size_t)snprintf(buf + o, sizeof(buf) - o, "%s%c", o ? " " : "", m->msgid[l - 1]);
+  }
+  return buf;
+}
+
+static void check_page(enum hm_page_op op, const struct hm_pos *p1,
+                       const struct hm_pos *p2, int limit,
+                       const char *want, int want_complete)
+{
+  int n = -1, complete = -1;
+  struct HistoryMessage *page = hm_page_select(ring6(), op, p1, p2, limit, &n, &complete);
+  assert_string_equal(want, page_ids(page));
+  assert_int_equal(count(page), n);
+  assert_int_equal(want_complete, complete);
+  history_free_messages(page);
+}
+
+static const struct hm_pos R1 = { 1790000000001ULL, "AAAAAAAAAAAAA1" };
+static const struct hm_pos R2 = { 1790000000002ULL, "AAAAAAAAAAAAA2" };
+static const struct hm_pos R3 = { 1790000000003ULL, "AAAAAAAAAAAAA3" };
+static const struct hm_pos R4 = { 1790000000004ULL, "AAAAAAAAAAAAA4" };
+static const struct hm_pos R6 = { 1790000000006ULL, "AAAAAAAAAAAAA6" };
+static const struct hm_pos MS3 = { 1790000000003ULL, NULL };
+static const struct hm_pos MS7 = { 1790000000007ULL, NULL };
+static const struct hm_pos C7 = { 1790000000007ULL, "CAAAAAAAAAAAA7" };
+/** An id the ring does not hold, minted in millisecond 3 after r3. */
+static const struct hm_pos X3 = { 1790000000003ULL, "ZAAAAAAAAAAAA3" };
+
+/* LATEST: the NEWEST rows (the ring query used to take the oldest), after
+ * the selector when there is one, the end tag only when nothing is left. */
+static void test_page_latest(void **s)
+{
+  (void)s;
+  check_page(HM_PAGE_LATEST, NULL, NULL, 2, "B7 C7", 0);
+  check_page(HM_PAGE_LATEST, NULL, NULL, 8, "1 2 3 4 5 6 B7 C7", 1);
+  check_page(HM_PAGE_LATEST, NULL, NULL, 50, "1 2 3 4 5 6 B7 C7", 1);
+  check_page(HM_PAGE_LATEST, &C7, NULL, 10, "", 1);
+  check_page(HM_PAGE_LATEST, &R4, NULL, 10, "5 6 B7 C7", 1);
+  check_page(HM_PAGE_LATEST, &R4, NULL, 1, "C7", 0);
+  check_page(HM_PAGE_LATEST, &MS7, NULL, 10, "", 1);   /* a whole ms excludes it all */
+}
+
+static void test_page_before_after(void **s)
+{
+  (void)s;
+  check_page(HM_PAGE_BEFORE, &R6, NULL, 10, "1 2 3 4 5", 1);
+  check_page(HM_PAGE_BEFORE, &R6, NULL, 2, "4 5", 0);
+  check_page(HM_PAGE_BEFORE, &R1, NULL, 2, "", 1);
+  check_page(HM_PAGE_BEFORE, &C7, NULL, 1, "B7", 0);   /* a sibling in its ms */
+  check_page(HM_PAGE_BEFORE, &MS7, NULL, 1, "6", 0);
+  check_page(HM_PAGE_AFTER, &R2, NULL, 2, "3 4", 0);
+  check_page(HM_PAGE_AFTER, &R2, NULL, 10, "3 4 5 6 B7 C7", 1);
+  check_page(HM_PAGE_AFTER, &X3, NULL, 1, "4", 0);      /* an id the ring lacks: its place */
+  check_page(HM_PAGE_AFTER, &MS3, NULL, 2, "4 5", 0);   /* a whole ms excludes its rows */
+}
+
+/* AROUND: limit/2 before, the row at a msgid selector, the rest after; the
+ * end only when both sides ran out; a timestamp puts its ms after. */
+static void test_page_around(void **s)
+{
+  (void)s;
+  check_page(HM_PAGE_AROUND, &R3, NULL, 3, "2 3 4", 0);
+  check_page(HM_PAGE_AROUND, &R3, NULL, 20, "1 2 3 4 5 6 B7 C7", 1);
+  check_page(HM_PAGE_AROUND, &C7, NULL, 1, "C7", 0);
+  check_page(HM_PAGE_AROUND, &R1, NULL, 1, "1", 0);
+  check_page(HM_PAGE_AROUND, &MS3, NULL, 2, "2 3", 0);
+  check_page(HM_PAGE_AROUND, &X3, NULL, 4, "2 3 4 5", 0);  /* no centre row */
+}
+
+/* BETWEEN: both selectors exclusive, counted from the first, either way. */
+static void test_page_between(void **s)
+{
+  (void)s;
+  check_page(HM_PAGE_BETWEEN, &R1, &R6, 10, "2 3 4 5", 1);
+  check_page(HM_PAGE_BETWEEN, &R1, &R6, 2, "2 3", 0);
+  check_page(HM_PAGE_BETWEEN, &R6, &R1, 2, "4 5", 0);
+  check_page(HM_PAGE_BETWEEN, &R6, &R1, 4, "2 3 4 5", 1);
+  check_page(HM_PAGE_BETWEEN, &MS3, &MS7, 10, "4 5 6", 1);
+}
+
+static void test_page_empty(void **s)
+{
+  int n = -1, complete = -1;
+  (void)s;
+  assert_null(hm_page_select(NULL, HM_PAGE_LATEST, NULL, NULL, 10, &n, &complete));
+  assert_int_equal(0, n);
+  assert_int_equal(1, complete);
+}
+
 /* The local copy has no tags (stored before relays kept them); the peer's
  * copy has +reply: the kept row takes the peer's. */
 static void test_merge_adopts_tags_from_duplicate(void **s)
@@ -2000,6 +2117,11 @@ int main(void)
     cmocka_unit_test(test_splice_after_context_run),
     cmocka_unit_test(test_splice_drops_dup_and_orphan),
     cmocka_unit_test(test_merge_adopts_tags_from_duplicate),
+    cmocka_unit_test(test_page_latest),
+    cmocka_unit_test(test_page_before_after),
+    cmocka_unit_test(test_page_around),
+    cmocka_unit_test(test_page_between),
+    cmocka_unit_test(test_page_empty),
     cmocka_unit_test(test_merge_keeps_first_tags),
     cmocka_unit_test(test_merge_semantic_dup),
     cmocka_unit_test(test_merge_trim_direction),

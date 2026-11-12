@@ -186,6 +186,177 @@ static uint64_t hm_ts_ms(const char *ts)
   return ms + frac;
 }
 
+/** Order of a row against a selector: <0 before it, 0 at it (the row
+ * itself, or any row of a whole-millisecond selector), >0 after it. */
+static int hm_pos_cmp(const struct HistoryMessage *m, const struct hm_pos *p)
+{
+  uint64_t t = hm_ts_ms(m->timestamp);
+
+  if (t != p->ms)
+    return t < p->ms ? -1 : 1;
+  if (!p->msgid || !p->msgid[0])
+    return 0;
+  return strcmp(m->msgid, p->msgid);
+}
+
+/** Order of two rows: time, then msgid. */
+static int hm_row_cmp(const struct HistoryMessage *a, const struct HistoryMessage *b)
+{
+  uint64_t ta = hm_ts_ms(a->timestamp), tb = hm_ts_ms(b->timestamp);
+
+  if (ta != tb)
+    return ta < tb ? -1 : 1;
+  return strcmp(a->msgid, b->msgid);
+}
+
+/** Order of two selectors, for BETWEEN's direction (a whole millisecond
+ * sorts before the rows in it, as its key prefix does in the store). */
+static int hm_pos_pos_cmp(const struct hm_pos *a, const struct hm_pos *b)
+{
+  const char *ia = a->msgid ? a->msgid : "", *ib = b->msgid ? b->msgid : "";
+
+  if (a->ms != b->ms)
+    return a->ms < b->ms ? -1 : 1;
+  return strcmp(ia, ib);
+}
+
+/** Stable insertion sort (the lists are a client's ring: small, and
+ * nearly sorted already -- the ring keeps delivery order). */
+static struct HistoryMessage *hm_sort_rows(struct HistoryMessage *list)
+{
+  struct HistoryMessage *sorted = NULL, *m, **pp;
+
+  while (list) {
+    m = list;
+    list = list->next;
+    for (pp = &sorted; *pp && hm_row_cmp(*pp, m) <= 0; pp = &(*pp)->next)
+      ;
+    m->next = *pp;
+    *pp = m;
+  }
+  return sorted;
+}
+
+struct HistoryMessage *hm_page_select(struct HistoryMessage *rows,
+                                      enum hm_page_op op,
+                                      const struct hm_pos *p1,
+                                      const struct hm_pos *p2,
+                                      int limit, int *count, int *complete)
+{
+  struct HistoryMessage **v, *m, *page = NULL, **tail = &page;
+  int n = 0, i, lo, hi, take_lo, take_hi, centre = -1;
+  int desc = 0;
+
+  *count = 0;
+  *complete = 1;
+  rows = hm_sort_rows(rows);
+  for (m = rows; m; m = m->next)
+    n++;
+  if (n == 0)
+    return NULL;
+  if (limit < 0)
+    limit = 0;
+  v = (struct HistoryMessage **)MyMalloc((size_t)n * sizeof(*v));
+  for (i = 0, m = rows; m; m = m->next)
+    v[i++] = m;
+
+  /* The eligible window [lo, hi) of the sorted rows, and which end of it
+   * the page is taken from. */
+  lo = 0;
+  hi = n;
+  take_lo = take_hi = 0;
+  switch (op) {
+  case HM_PAGE_LATEST:
+    if (p1)
+      while (lo < n && hm_pos_cmp(v[lo], p1) <= 0)
+        lo++;
+    take_hi = 1;
+    break;
+  case HM_PAGE_BEFORE:
+    while (hi > 0 && hm_pos_cmp(v[hi - 1], p1) >= 0)
+      hi--;
+    take_hi = 1;
+    break;
+  case HM_PAGE_AFTER:
+    while (lo < n && hm_pos_cmp(v[lo], p1) <= 0)
+      lo++;
+    take_lo = 1;
+    break;
+  case HM_PAGE_BETWEEN:
+    desc = hm_pos_pos_cmp(p1, p2) > 0;
+    {
+      const struct hm_pos *first = desc ? p2 : p1, *last = desc ? p1 : p2;
+      while (lo < n && hm_pos_cmp(v[lo], first) <= 0)
+        lo++;
+      while (hi > lo && hm_pos_cmp(v[hi - 1], last) >= 0)
+        hi--;
+    }
+    if (desc)
+      take_hi = 1;
+    else
+      take_lo = 1;
+    break;
+  case HM_PAGE_AROUND:
+  default:
+    break;
+  }
+
+  if (op == HM_PAGE_AROUND) {
+    /* before: rows < p1; the centre: the row AT a msgid selector; after:
+     * the rest (with a timestamp selector its whole millisecond). */
+    int nb = 0, half = limit / 2, kb, ka, room, b0, a0, na;
+
+    while (nb < n && hm_pos_cmp(v[nb], p1) < 0)
+      nb++;
+    if (limit > 0 && p1->msgid && p1->msgid[0] && nb < n && hm_pos_cmp(v[nb], p1) == 0)
+      centre = nb;
+    a0 = nb + (centre >= 0 ? 1 : 0);
+    na = n - a0;
+    kb = nb < half ? nb : half;
+    room = limit - kb - (centre >= 0 ? 1 : 0);
+    if (room < 0)
+      room = 0;
+    ka = na < room ? na : room;
+    b0 = nb - kb;
+    for (i = 0; i < n; i++) {
+      int keep = (i >= b0 && i < nb) || i == centre || (i >= a0 && i < a0 + ka);
+      if (keep) {
+        *tail = v[i];
+        tail = &v[i]->next;
+        (*count)++;
+      } else {
+        v[i]->next = NULL;
+        history_free_messages(v[i]);
+      }
+    }
+    *tail = NULL;
+    *complete = kb == nb && ka == na;
+    MyFree(v);
+    return page;
+  }
+
+  {
+    int avail = hi > lo ? hi - lo : 0, k = avail < limit ? avail : limit;
+    int from = take_hi ? hi - k : lo, to = from + k;
+
+    (void)take_lo;
+    for (i = 0; i < n; i++) {
+      if (i >= from && i < to) {
+        *tail = v[i];
+        tail = &v[i]->next;
+        (*count)++;
+      } else {
+        v[i]->next = NULL;
+        history_free_messages(v[i]);
+      }
+    }
+    *tail = NULL;
+    *complete = k == avail;
+  }
+  MyFree(v);
+  return page;
+}
+
 /** Is @a m before an AROUND reference (hm_trim_around)? */
 static int hm_before_ref(const struct HistoryMessage *m, uint64_t ref_ms,
                          const char *ref_msgid)

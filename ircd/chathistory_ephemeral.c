@@ -220,10 +220,9 @@ static struct HistoryMessage *entry_to_history(const struct EphemeralPmEntry *e)
   return m;
 }
 
-int chathistory_ephemeral_query(struct Client *cli,
-                                 const char *canonical_target,
-                                 int limit,
-                                 struct HistoryMessage **result_head)
+int chathistory_ephemeral_rows(struct Client *cli,
+                                const char *canonical_target,
+                                struct HistoryMessage **result_head)
 {
   struct EphemeralPmRing *r;
   struct EphemeralPmEntry *e;
@@ -231,8 +230,6 @@ int chathistory_ephemeral_query(struct Client *cli,
   int produced = 0;
 
   if (!cli || !canonical_target || !result_head)
-    return 0;
-  if (limit <= 0)
     return 0;
   r = cli_ephemeral_pm(cli);
   if (!r || !r->head)
@@ -245,7 +242,7 @@ int chathistory_ephemeral_query(struct Client *cli,
       tail = tail->next;
   }
 
-  for (e = r->head; e && produced < limit; e = e->next) {
+  for (e = r->head; e; e = e->next) {
     struct HistoryMessage *m;
     if (0 != ircd_strcmp(e->target, canonical_target))
       continue;

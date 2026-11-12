@@ -2188,6 +2188,92 @@ static int query_page_complete(struct HistoryRowFilter *hook, int count,
   return count < limit;
 }
 
+/** Is @a lookup_target a conversation held only in @a sptr's ephemeral
+ * ring -- a DM between two parties without an account, never stored
+ * (ircd_relay.c store_private_history), keyed by two session ids that no
+ * stored pair ever is?  check_history_access admitted the requester by
+ * its ring. */
+static int ring_only_pair(struct Client *sptr, const char *lookup_target)
+{
+  return !IsChannelName(lookup_target) && !IsAccount(sptr)
+      && cli_session_id(sptr)[0]
+      && chathistory_ephemeral_has_target(sptr, lookup_target);
+}
+
+/** A selector's place among @a rows (the pair's ring entries): the row
+ * with that msgid, else the time a decodable id carries, else unknown
+ * (-1) -- the rule the store resolves selectors by; a timestamp is its
+ * whole millisecond; "*" is no selector (1). */
+static int ring_pos(const struct HistoryMessage *rows, enum HistoryRefType t,
+                    const char *v, struct hm_pos *p)
+{
+  const struct HistoryMessage *m;
+
+  p->msgid = NULL;
+  p->ms = 0;
+  if (t == HISTORY_REF_NONE || !v)
+    return 1;
+  if (t == HISTORY_REF_TIMESTAMP)
+    return hm_targets_ref_ms(v, &p->ms) == 0 ? 0 : -1;
+  for (m = rows; m; m = m->next)
+    if (strcmp(m->msgid, v) == 0) {
+      p->ms = history_parse_ms(m->timestamp);
+      p->msgid = v;
+      return 0;
+    }
+  p->ms = msgid_decode_time_ms(v);
+  p->msgid = v;
+  return p->ms ? 0 : -1;
+}
+
+/** Answer a subcommand for a conversation held only in @a sptr's ring
+ * (ring_only_pair; issue 215 review B1).  The ring used to be read only
+ * by LATEST, oldest entries first up to the limit, its selector ignored
+ * and the end tag set whenever fewer than the limit came back; every
+ * other subcommand walked the store, found nothing, and claimed the end.
+ * Now every subcommand pages the ring by the store's rules
+ * (hm_page_select): the requester's type mask and typing veto first
+ * (uncounted, as inside a walk), selectors placed as the store places
+ * them, the end tag only when nothing is left beyond the page.  The ring
+ * is this server's alone: no federation. */
+static int ring_answer(struct Client *sptr, const char *subcmd,
+                       enum hm_page_op op, const char *target,
+                       const char *lookup_target,
+                       enum HistoryRefType t1, const char *v1,
+                       enum HistoryRefType t2, const char *v2, int limit)
+{
+  struct HistoryMessage *rows = NULL, *page, **pp, *m;
+  struct hm_pos p1, p2;
+  unsigned int mask = requester_type_mask(sptr);
+  int r1, r2, count = 0, complete = 1;
+
+  chathistory_ephemeral_rows(sptr, lookup_target, &rows);
+  r1 = ring_pos(rows, t1, v1, &p1);
+  r2 = ring_pos(rows, t2, v2, &p2);
+  if (r1 < 0 || r2 < 0) {
+    static char ctx[CHANNELLEN + HISTORY_MSGID_LEN + 40];
+    ircd_snprintf(0, ctx, sizeof(ctx), "%s %s %s", subcmd, target,
+                  r1 < 0 ? v1 : v2);
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ctx, "Unknown message id");
+    history_free_messages(rows);
+    return 0;
+  }
+  for (pp = &rows; (m = *pp); ) {
+    if ((mask && !(mask & (1u << m->type))) || history_row_is_typing_only(m)) {
+      *pp = m->next;
+      m->next = NULL;
+      history_free_messages(m);
+    } else
+      pp = &m->next;
+  }
+  page = hm_page_select(rows, op, r1 == 0 ? &p1 : NULL, r2 == 0 ? &p2 : NULL,
+                        limit, &count, &complete);
+  presence_filter_and_replay(sptr, lookup_target, &page, count, 0,
+                             cli_label(sptr), complete ? REPLAY_COMPLETE : 0,
+                             target, NULL);
+  return 0;
+}
+
 /** Handle CHATHISTORY LATEST subcommand.
  * @param[in] sptr Client sending the command.
  * @param[in] target Target channel or nick.
@@ -2233,6 +2319,9 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   }
   if (fail_unknown_msgid(sptr, "LATEST", target, lookup_target, ref_type, ref_value))
     return 0;
+  if (ring_only_pair(sptr, lookup_target))
+    return ring_answer(sptr, "LATEST", HM_PAGE_LATEST, target, lookup_target,
+                       ref_type, ref_value, HISTORY_REF_NONE, NULL, limit);
 
   /* Query local history using normalized target.  Presence-aware
    * paging: the walk skips rows outside the caller's presence without
@@ -2251,21 +2340,6 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("LATEST", target),
               "Failed to retrieve history");
     return 0;
-  }
-
-  /* Phase C: for ephemeral↔ephemeral PMs, the conversation lives only
-   * in the per-Client ring (LMDB has nothing under this target).  The
-   * ring and LMDB hold disjoint target sets, so a zero-count result
-   * here is the cue to consult the ring. */
-  if (count == 0 && !IsAccount(sptr) && cli_session_id(sptr)[0]
-      && !IsChannelName(target)) {
-    count = chathistory_ephemeral_query(sptr, lookup_target, limit, &messages);
-    if (count > 0) {
-      complete = (count < limit);
-      /* Skip federation when we satisfied the query from a local
-       * ephemeral ring — no peer has these records. */
-      goto skip_federation;
-    }
   }
 
   /* Check if we should try federation */
@@ -2298,7 +2372,6 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     /* Federation failed to start, fall through to local-only response */
   }
 
-skip_federation:
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
@@ -2359,6 +2432,9 @@ static int chathistory_before(struct Client *sptr, const char *target,
   }
   if (fail_unknown_msgid(sptr, "BEFORE", target, lookup_target, ref_type, ref_value))
     return 0;
+  if (ring_only_pair(sptr, lookup_target))
+    return ring_answer(sptr, "BEFORE", HM_PAGE_BEFORE, target, lookup_target,
+                       ref_type, ref_value, HISTORY_REF_NONE, NULL, limit);
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -2462,6 +2538,9 @@ static int chathistory_after(struct Client *sptr, const char *target,
   }
   if (fail_unknown_msgid(sptr, "AFTER", target, lookup_target, ref_type, ref_value))
     return 0;
+  if (ring_only_pair(sptr, lookup_target))
+    return ring_answer(sptr, "AFTER", HM_PAGE_AFTER, target, lookup_target,
+                       ref_type, ref_value, HISTORY_REF_NONE, NULL, limit);
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -2566,6 +2645,9 @@ static int chathistory_around(struct Client *sptr, const char *target,
   }
   if (fail_unknown_msgid(sptr, "AROUND", target, lookup_target, ref_type, ref_value))
     return 0;
+  if (ring_only_pair(sptr, lookup_target))
+    return ring_answer(sptr, "AROUND", HM_PAGE_AROUND, target, lookup_target,
+                       ref_type, ref_value, HISTORY_REF_NONE, NULL, limit);
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -2681,6 +2763,9 @@ static int chathistory_between(struct Client *sptr, const char *target,
   if (fail_unknown_msgid(sptr, "BETWEEN", target, lookup_target, ref_type1, ref_value1)
       || fail_unknown_msgid(sptr, "BETWEEN", target, lookup_target, ref_type2, ref_value2))
     return 0;
+  if (ring_only_pair(sptr, lookup_target))
+    return ring_answer(sptr, "BETWEEN", HM_PAGE_BETWEEN, target, lookup_target,
+                       ref_type1, ref_value1, ref_type2, ref_value2, limit);
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,

@@ -66,19 +66,15 @@ extern void chathistory_ephemeral_store_pair(struct Client *sender,
                                               const char *timestamp,
                                               const char *client_tags);
 
-/** Walk @a cli's ring and append every entry whose target matches @a
- * canonical_target to *@a result_head.  Honors @a limit; returns the
- * number of entries appended.  Caller still owns the resulting list
- * and must free via history_free_messages.
- *
- * The ring is oldest-first; this walks it in storage order and the
- * caller can reverse if they want newest-first display.  For LATEST
- * the standard chathistory replay path orders by timestamp anyway, so
- * a simple append is sufficient. */
-extern int chathistory_ephemeral_query(struct Client *cli,
-                                        const char *canonical_target,
-                                        int limit,
-                                        struct HistoryMessage **result_head);
+/** Append a copy of EVERY entry of @a cli's ring whose target matches
+ * @a canonical_target to *@a result_head, in ring (delivery) order;
+ * returns how many.  The caller cuts the page (hm_page_select: the
+ * subcommand, its selectors, the limit, the end tag -- as the store's
+ * walks do) and frees with history_free_messages.  The ring is bounded
+ * by a per-client byte cap, so "every entry" is small. */
+extern int chathistory_ephemeral_rows(struct Client *cli,
+                                      const char *canonical_target,
+                                      struct HistoryMessage **result_head);
 
 /** Returns non-zero iff @a cli's ring has any entry whose target
  * matches @a canonical_target.  Used by check_history_access to gate

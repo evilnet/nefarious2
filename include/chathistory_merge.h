@@ -63,6 +63,44 @@ extern struct HistoryMessage *hm_merge(struct HistoryMessage *a,
  * The rows cut are freed (history_free_messages); call it on a list the
  * caller owns, such as hm_merge's result.
  * @return The cut list. */
+/* ------------------------------------------------------------------ */
+/* A page from rows held in memory (the ephemeral PM ring, issue 215)  */
+/* by the rules the store walks follow (history.c): rows ordered by    */
+/* (time, msgid); a selector is a row (time + msgid) or a whole        */
+/* millisecond (a timestamp selector); every selector exclusive.       */
+/* ------------------------------------------------------------------ */
+
+/** A selector: @a msgid set = that row's place in the order (a row of the
+ * list or not: a well-formed id the list does not hold is placed by the
+ * time it carries); @a msgid NULL or "" = the whole millisecond @a ms. */
+struct hm_pos {
+  uint64_t ms;
+  const char *msgid;
+};
+
+enum hm_page_op {
+  HM_PAGE_LATEST,    /**< @a p1 NULL: the newest rows; else those after it */
+  HM_PAGE_BEFORE,    /**< newest rows before @a p1 */
+  HM_PAGE_AFTER,     /**< oldest rows after @a p1 */
+  HM_PAGE_AROUND,    /**< limit/2 newest before @a p1, the row at it, the rest after */
+  HM_PAGE_BETWEEN    /**< from @a p1 toward @a p2, both exclusive, either direction */
+};
+
+/** Cut one CHATHISTORY page out of @a rows -- every row one the requester
+ * may receive, in any order (sorted here by time, then msgid) -- and free
+ * the rest.  An AROUND page with a timestamp selector puts the rows of its
+ * millisecond after it, as history_query_around does.  *@a complete is 1
+ * when nothing lies beyond the page in its direction -- for AROUND, on
+ * either side -- so the next page would be empty (the list is all there
+ * is: exact, not "fewer than the limit").
+ * @return The page, ascending; *@a count its length. */
+extern struct HistoryMessage *hm_page_select(struct HistoryMessage *rows,
+                                             enum hm_page_op op,
+                                             const struct hm_pos *p1,
+                                             const struct hm_pos *p2,
+                                             int limit, int *count,
+                                             int *complete);
+
 extern struct HistoryMessage *hm_trim_around(struct HistoryMessage *list,
                                              int limit, uint64_t ref_ms,
                                              const char *ref_msgid);
