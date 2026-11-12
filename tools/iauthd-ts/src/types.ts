@@ -58,6 +58,11 @@ export interface SASLState {
   certfp?: string;
   /** Client host info (user@host:ip) */
   hostInfo?: string;
+  /** Which exchange this is: bumped by every start (A S) and abort (A X),
+   * so an answer computed for an exchange that has since ended is
+   * dropped instead of reaching the next one (the IAuth wire carries no
+   * cookie). */
+  serial?: number;
 }
 
 /** Client state during registration */

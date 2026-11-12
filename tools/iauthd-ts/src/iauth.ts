@@ -752,6 +752,8 @@ export class IAuthDaemon {
         client.sasl.mechanism = undefined;
         client.sasl.certfp = undefined;
         client.sasl.hostInfo = undefined;
+        // A check still running for the aborted exchange answers nobody.
+        client.sasl.serial = (client.sasl.serial ?? 0) + 1;
       }
       return;
     }
@@ -802,6 +804,8 @@ export class IAuthDaemon {
       client.sasl.mechanism = mechanism;
       client.sasl.certfp = certfp;
       client.sasl.started = true;
+      // A new exchange: a check still running for an earlier one answers nobody.
+      client.sasl.serial = (client.sasl.serial ?? 0) + 1;
 
       // Check if mechanism is supported
       const supported = getSupportedMechanisms();
@@ -850,8 +854,11 @@ export class IAuthDaemon {
     const data = args.substring(colonIdx + 1);
 
     if (client.sasl.mechanism?.toUpperCase() === 'PLAIN') {
+      const serial = client.sasl.serial;
       this.handleSASLPlain(client, data).catch(err => {
         this.debug(`SASL PLAIN auth error: ${err}`);
+        if (!this.saslCurrent(client, serial))
+          return;
         this.sendSASLFail(id);
         this.countSaslFail++;
       });
@@ -864,7 +871,14 @@ export class IAuthDaemon {
   /**
    * Handle SASL PLAIN authentication
    */
+  /** Is \a serial still \a client's exchange (not aborted, not replaced
+   * by a new one, the client not gone)? */
+  private saslCurrent(client: ClientState, serial: number | undefined): boolean {
+    return this.clients.get(client.id) === client && client.sasl?.serial === serial;
+  }
+
   private async handleSASLPlain(client: ClientState, base64Data: string): Promise<void> {
+    const serial = client.sasl?.serial;
     const decoded = decodeSASLPlain(base64Data);
 
     if (!decoded) {
@@ -881,6 +895,13 @@ export class IAuthDaemon {
       decoded.password,
       decoded.authzid
     );
+
+    // The exchange ended while the check ran (A X, a new A S, the client
+    // gone): its answer would reach the next exchange -- drop it.
+    if (!this.saslCurrent(client, serial)) {
+      this.debug(`SASL PLAIN result for ${client.id} dropped: its exchange ended`);
+      return;
+    }
 
     if (result.success && result.account) {
       this.debug(`SASL PLAIN auth success for ${client.id}: account=${result.account}`);

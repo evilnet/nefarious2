@@ -325,6 +325,32 @@ describe('IAuth Protocol Integration', () => {
       expect(failLine).toBeDefined();
     });
 
+    it('drops the answer of an exchange the ircd aborted, and answers the next one', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+      harness.send('0 A S :PLAIN');
+      await harness.waitForOutput(/^c 0/);
+
+      // Wrong credentials, and the ircd's abort (AUTHENTICATE *, a timeout)
+      // in the same write: the abort is read while the check still runs.
+      const bad = Buffer.from('\0testuser\0wrongpass').toString('base64');
+      harness.send(`0 a :${bad}\n0 A X`);
+
+      // A new exchange on the same connection, which succeeds.
+      harness.send('0 A S :PLAIN');
+      const deadline = Date.now() + 5000;
+      while (harness.output.filter((l) => /^c 0 /.test(l)).length < 2 && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 10));
+      const good = Buffer.from('\0testuser\0testpass').toString('base64');
+      harness.send(`0 a :${good}`);
+      await harness.waitForOutput(/^Z 0 192\.168\.1\.10 12345$/);
+      await new Promise((r) => setTimeout(r, 300));
+
+      // The aborted exchange's failure never went out: it would have failed
+      // the new exchange (IAuth lines carry no cookie).
+      expect(harness.output.filter((l) => /^f 0 /.test(l))).toHaveLength(0);
+      expect(harness.output.filter((l) => /^L 0 .* testuser$/.test(l))).toHaveLength(1);
+    });
+
     it('should handle SASL host info message', async () => {
       harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
 
