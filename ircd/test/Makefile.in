@@ -33,6 +33,7 @@ CMOCKA_TESTPROGS = \
 	ircd_match_cmocka \
 	ircd_string_cmocka \
 	msgq_cmocka \
+	ml_split_cmocka \
 	numnicks_cmocka \
 	ircd_in_addr_cmocka \
 	ircd_compress_cmocka \
@@ -114,6 +115,7 @@ DEP_SRC = \
 	ircd_match_cmocka.c \
 	ircd_string_cmocka.c \
 	msgq_cmocka.c \
+	ml_split_cmocka.c \
 	numnicks_cmocka.c \
 	ircd_in_addr_cmocka.c \
 	ircd_compress_cmocka.c \
@@ -241,6 +243,12 @@ MSGQ_CMOCKA_OBJS = msgq_cmocka.o test_stub.o ../msgq.o ../ircd_snprintf.o \
 	../ircd_string.o ../ircd_alloc.o
 msgq_cmocka: $(MSGQ_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(MSGQ_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ml_split_lines(): a multiline batch's long lines split into concat parts.
+ML_SPLIT_CMOCKA_OBJS = ml_split_cmocka.o test_stub.o ../ml_split.o \
+	../ircd_string.o ../ircd_alloc.o
+ml_split_cmocka: $(ML_SPLIT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(ML_SPLIT_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 NUMNICKS_CMOCKA_OBJS = numnicks_cmocka.o test_stub.o ../numnicks.o ../ircd_string.o ../ircd_alloc.o ../match.o
 numnicks_cmocka: $(NUMNICKS_CMOCKA_OBJS)

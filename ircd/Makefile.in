@@ -298,6 +298,7 @@ IRCD_SRC = \
 	ml_content.c \
 	ml_fallback.c \
 	ml_route.c \
+	ml_split.c \
 	memdebug.c \
 	motd.c \
 	msgq.c \

@@ -58,6 +58,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "ircd_relay.h"
+#include "ml_split.h"
 #include "msgq.h"
 #include "class.h"
 #include "bouncer_session.h"
@@ -1128,70 +1129,6 @@ ml_channel_links(struct Channel *chptr, struct Client *skip_link,
   return n;
 }
 
-/** Split, when a batch is accepted, every line whose relayed form
- *   ":<nick>!<user>@<host> <PRIVMSG|NOTICE> <target> :<text>"
- * would pass 510 bytes (relay_text_budget, the single-line relay's own
- * rule) into parts that fit, each part after the first marked
- * draft/multiline-concat, so the joined message is byte-identical to
- * what the client sent.  A line is otherwise cut at output, per
- * recipient, and its tail is gone mid-message.  Done once, before the
- * msgid is minted, so every path the batch takes from here -- the
- * multiline and fallback deliveries, the echo, ML and BX M to other
- * servers, the stored record, web push -- walks the same lines.
- *
- * The parts are cut at a UTF-8 boundary (ircd_utf8_cut_len).  The
- * split adds no byte to the joined message (concat parts join with
- * nothing between), so FEAT_MULTILINE_MAX_BYTES and the batch's total
- * are unchanged; the line count grows, and the caller holds the result
- * to FEAT_MULTILINE_MAX_LINES, the count every other server accepts
- * from us (add_s2s_multiline_message drops lines past it).
- *
- * @param[in] con     The sender's connection (its ml line list).
- * @param[in] sptr    The sender.
- * @param[in] cmd     MSG_PRIVATE or MSG_NOTICE.
- * @param[in] target  The target as recipients see it: the channel's
- *                    name or the recipient's nick.
- * @return The number of lines after the split.
- */
-static int
-multiline_split_long_lines(struct Connection *con, struct Client *sptr,
-                           const char *cmd, const char *target)
-{
-  size_t room = relay_text_budget(sptr, cmd, strlen(target), 0);
-  struct SLink *lp;
-  int count = 0;
-
-  for (lp = con_ml_messages(con); lp; lp = lp->next) {
-    char *text = lp->value.cp + 1;
-    size_t len = strlen(text);
-
-    count++;
-    while (room > 0 && len > room) {
-      size_t keep = ircd_utf8_cut_len(text, len, room);
-      struct SLink *part;
-      char *copy;
-
-      if (keep == 0)
-        keep = room;  /* no boundary within room: byte-exact, so it ends */
-      copy = (char *)MyMalloc(len - keep + 2);
-      copy[0] = 1;  /* concat: joins its predecessor with nothing between */
-      memcpy(copy + 1, text + keep, len - keep + 1);
-      text[keep] = '\0';
-
-      part = make_link();
-      part->value.cp = copy;
-      part->next = lp->next;
-      lp->next = part;
-
-      lp = part;
-      text = copy + 1;
-      len -= keep;
-      count++;
-    }
-  }
-  return count;
-}
-
 /** Process and deliver a completed multiline batch */
 static int
 process_multiline_batch(struct Client *sptr)
@@ -1257,15 +1194,47 @@ process_multiline_batch(struct Client *sptr)
     }
   }
 
-  /* Lines too long for their relayed form are split into concat parts
-   * (multiline_split_long_lines); the result is what is relayed and
-   * stored, so it is what must fit every server's line limit. */
-  {
-    int max_lines = feature_int(FEAT_MULTILINE_MAX_LINES);
-    int lines = multiline_split_long_lines(con, sptr, cmd_str,
-                                           is_channel ? chptr->chname
-                                                      : cli_name(acptr));
+  /* Generate ONE base msgid for the entire multiline batch.
+   * Each line will get this base msgid with a sequence suffix: base:00, base:01, etc.
+   * This ensures all lines can be retrieved together via CHATHISTORY by msgid prefix.
+   */
+  generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
+  /* Split, now the batch is accepted, every line whose relayed form
+   *   ":<nick>!<user>@<host> <PRIVMSG|NOTICE> <target> :<text>"
+   * passes 510 bytes into draft/multiline-concat parts (ml_split_lines),
+   * so the joined message is byte-identical to the client's instead of
+   * losing each long line's tail to the output cut.  The room is the
+   * single-line relay's (relay_text_budget); for a DM it is also the
+   * session echo's BX frame (relay_dm_text_budget), which carries the
+   * lines to the sender's devices on other servers.  Done before any
+   * delivery, so every path below -- multiline and fallback delivery,
+   * the echo, ML / BX M to other servers, the stored record, web push --
+   * walks the same lines.  Not for a service: the way to a service is
+   * never multiline, so each part would reach it as a PRIVMSG of its own
+   * and the tail would run as a command; its lines go as before.
+   *
+   * The split adds no byte to the joined message, so the byte limit and
+   * the cooldown's total are unchanged.  The line count is the split
+   * result's: MULTILINE_MAX_LINES is what we advertise to other servers
+   * and the most they accept from us (add_s2s_multiline_message drops
+   * lines past the network maximum), so a batch that passes it only once
+   * split is refused here.  The client cannot predict the split, so a
+   * batch within the advertised max-lines can be refused (owner's call;
+   * the alternative is to count the client's lines and give S2S a larger
+   * allowance). */
+  {
+    size_t room = 0;
+    int max_lines = feature_int(FEAT_MULTILINE_MAX_LINES);
+    int lines;
+
+    if (is_channel)
+      room = relay_text_budget(sptr, cmd_str, strlen(chptr->chname), 0);
+    else if (!IsServiceClient(acptr))
+      room = relay_dm_text_budget(sptr, cmd_str, acptr,
+                                  strlen(batch_base_msgid),
+                                  strlen(con_ml_client_tags(con)), 1);
+    lines = ml_split_lines(con_ml_messages(con), room);
     con_ml_msg_count(con) = lines;
     if (lines > max_lines) {
       send_fail_ctx(sptr, "BATCH", "MULTILINE_MAX_LINES",
@@ -1275,12 +1244,6 @@ process_multiline_batch(struct Client *sptr)
       return 0;
     }
   }
-
-  /* Generate ONE base msgid for the entire multiline batch.
-   * Each line will get this base msgid with a sequence suffix: base:00, base:01, etc.
-   * This ensures all lines can be retrieved together via CHATHISTORY by msgid prefix.
-   */
-  generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
   /* ONE time for the whole batch: the msgid's own mint time, read right
    * after the mint (the truncation notices mint again later).  Row, live
