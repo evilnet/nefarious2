@@ -50,6 +50,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
+#include "ircd_relay.h"
 #include "ircd_string.h"
 #include "list.h"
 #include "mark.h"
@@ -1899,6 +1900,7 @@ int whisper(struct Client* source, const char* nick, const char* channel,
   struct Client*     dest;
   struct Channel*    chptr;
   struct Membership* membership;
+  char               cutbuf[BUFSIZE];
 
   assert(0 != source);
   assert(0 != nick);
@@ -1949,7 +1951,13 @@ int whisper(struct Client* source, const char* nick, const char* channel,
     send_reply(source, ERR_PRIVDEAF, cli_name(dest), (is_notice) ? "CNOTICE" : "CPRIVMSG", cli_name(dest));
     return 0;
   }
-          
+
+  /* The recipient gets ":nick!user@host PRIVMSG|NOTICE <their nick> :" --
+   * the channel parameter is gone -- so cut the text to that line once,
+   * here (relay_cut_text), not per recipient at output. */
+  text = relay_cut_text(source, is_notice ? MSG_NOTICE : MSG_PRIVATE,
+                        strlen(cli_name(dest)), 0, text, cutbuf, sizeof(cutbuf));
+
   if (is_notice)
     sendcmdto_one(source, CMD_NOTICE, dest, "%C :%s", dest, text);
   else

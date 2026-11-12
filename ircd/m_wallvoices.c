@@ -86,6 +86,7 @@
 #include "ircd.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_relay.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
@@ -101,6 +102,8 @@
 int m_wallvoices(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Channel *chptr;
+  const char *text;
+  char cutbuf[BUFSIZE];
 
   assert(0 != cptr);
   assert(cptr == sptr);
@@ -112,16 +115,22 @@ int m_wallvoices(struct Client* cptr, struct Client* sptr, int parc, char* parv[
 
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);
+  text = parv[parc - 1];
 
   if (IsChannelName(parv[1]) && (chptr = FindChannel(parv[1]))) {
     if (client_can_send_to_channel(sptr, chptr, 0)) {
       if ((chptr->mode.mode & MODE_NOPRIVMSGS) &&
           check_target_limit(sptr, chptr, chptr->chname, 0))
         return 0;
+      /* Members get ":nick!user@host NOTICE +<chname> :+ <text>" (send.c
+       * rewrites the command for users): cut the text to that line once,
+       * here, so every member and every server gets the same text. */
+      text = relay_cut_text(sptr, MSG_NOTICE, 1 + strlen(chptr->chname), 2,
+                            text, cutbuf, sizeof(cutbuf));
       RevealDelayedJoinIfNeeded(sptr, chptr);
       sendcmdto_channel_butone(sptr, CMD_WALLVOICES, chptr, cptr,
 			       SKIP_DEAF | SKIP_BURST | SKIP_NONVOICES, 
-			       '\0', "%H :+ %s", chptr, parv[parc - 1]);
+			       '\0', "%H :+ %s", chptr, text);
     }
     else
       send_reply(sptr, ERR_CANNOTSENDTOCHAN, parv[1]);
