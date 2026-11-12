@@ -86,6 +86,14 @@ extern int chathistory_ephemeral_query(struct Client *cli,
 extern int chathistory_ephemeral_has_target(struct Client *cli,
                                              const char *canonical_target);
 
+/** The conversations in @a cli's ring, for CHATHISTORY TARGETS: one
+ * HistoryTarget per pair key whose newest entry is later than @a lo_ms
+ * (epoch ms), stamped with that entry's time.  *@a out is a new list the
+ * caller frees with history_free_targets.
+ * @return The number of targets. */
+extern int chathistory_ephemeral_targets(struct Client *cli, uint64_t lo_ms,
+                                         struct HistoryTarget **out);
+
 /** Free @a cli's ring and detach it from the Client.  Idempotent. */
 extern void chathistory_ephemeral_purge(struct Client *cli);
 

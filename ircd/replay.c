@@ -33,6 +33,7 @@
 #include "class.h"
 #include "client.h"
 #include "hash.h"
+#include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
 #include "history.h"
 #include "ircd.h"
@@ -41,6 +42,7 @@
 #include "ircd_relay.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "metadata.h"
 #include "msg.h"
 #include "msgq.h"
@@ -170,6 +172,31 @@ static struct Client *pm_same_session_client(const char *account, const char *se
     return acptr;
   }
   return NULL;
+}
+
+/** The connected party whose PM identity is @a half -- a session id: an
+ * IsUser client in that session with no account (history_pm_identity_
+ * matches; an account would make its identity the account).  An
+ * unauthenticated session is one connection (bouncer sessions need an
+ * account); more than one candidate is not one party, and gives NULL. */
+static struct Client *pm_ring_party(const char *half)
+{
+  struct Client *found[8], *one = NULL;
+  size_t n, i, hlen = strlen(half);
+
+  n = client_find_by_session_id(half, found, sizeof(found) / sizeof(found[0]));
+  if (n > sizeof(found) / sizeof(found[0]))
+    n = sizeof(found) / sizeof(found[0]);
+  for (i = 0; i < n; i++) {
+    struct Client *c = found[i];
+    if (!c || !IsUser(c) || !cli_user(c) || IsBouncerAlias(c)
+        || !history_pm_identity_matches(c, half, hlen))
+      continue;
+    if (one)
+      return NULL;
+    one = c;
+  }
+  return one;
 }
 
 /** The half of pair key @a key that is not the caller's identity. */
@@ -383,6 +410,25 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
       named = pm_other_nick_from_messages(sptr, msgs, buf, buflen);
       history_free_messages(msgs);
     }
+  }
+
+  /* No stored row, and the caller's ephemeral ring holds the pair: a
+   * conversation between two parties without an account, kept only in
+   * the ring of each one's own connection (ircd_relay.c
+   * store_private_history), its key two session ids (#215).  It is named
+   * after the other half's SAME session under its current nick, while
+   * that session is connected and still has no account -- the one name
+   * CHATHISTORY reaches the ring by (normalize_pm_target keys the other
+   * party by its identity, so a login changes the key and a departed
+   * session leaves nobody to hold it).  Whoever took the nick since, or
+   * any other connection, is never consulted.  Never the label fallback
+   * below: the half is a session id. */
+  if (!named && chathistory_ephemeral_has_target(sptr, pair_key)) {
+    struct Client *same = pm_ring_party(half);
+    if (!same)
+      return 0;
+    ircd_strncpy(buf, cli_name(same), buflen);
+    named = 1;
   }
 
 

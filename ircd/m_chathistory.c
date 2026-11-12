@@ -2930,9 +2930,14 @@ static void targets_push(struct HistoryTarget **list, const char *name, const ch
 /** @a rq's own targets this store holds a stamp for above @a lo_ms
  * (exclusive; veto rows included): each channel it is a member of that
  * targets_own accepts (one point read in the targets index), and with
- * CHATHISTORY_PRIVATE its PM pairs (the pair index).  Uncapped: bounded by
- * the requester's own memberships and conversations.  Works for a remote
- * @a rq too (a responder): membership and identity are network-wide.
+ * CHATHISTORY_PRIVATE its PM pairs (the pair index) and, for a local
+ * requester without an account, the conversations its ephemeral ring
+ * holds (#215: two parties without an account are never stored, only
+ * ringed, so the pair index never had them and TARGETS never listed one
+ * that LATEST returned).  Uncapped: bounded by the requester's own
+ * memberships and conversations.  Works for a remote @a rq too (a
+ * responder): membership and identity are network-wide; a ring is held
+ * by its client's own server alone, which lists it.
  * @return The count, or -1 on a storage error (*out NULL). */
 static int targets_collect(struct Client *rq, uint64_t lo_ms, struct HistoryTarget **out)
 {
@@ -2976,6 +2981,17 @@ static int targets_collect(struct Client *rq, uint64_t lo_ms, struct HistoryTarg
       list = pm;
     }
     n += rc;
+    if (MyConnect(rq) && !IsAccount(rq)) {
+      struct HistoryTarget *ring = NULL;
+      int rn = chathistory_ephemeral_targets(rq, lo_ms, &ring);
+      for (t = ring; t && t->next; t = t->next)
+        ;
+      if (t) {
+        t->next = list;
+        list = ring;
+      }
+      n += rn;
+    }
   }
   *out = list;
   return n;
@@ -3078,7 +3094,12 @@ static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *
  * (targets_own); for a channel under strict presence without +H, one it
  * was present in at that last activity; for a PM pair, one with somebody
  * to name it after (replay_pm_display_nick: never a session id, never a
- * service bot). */
+ * service bot), and for a conversation held only in the requester's
+ * ephemeral ring, only under a name that CHATHISTORY reaches it by --
+ * the same access check and key derivation LATEST uses (#215).  An
+ * unauthenticated party is weaker identity than an account: a nick can
+ * pass to someone else, and the ring is keyed by session ids, so the
+ * listing follows LATEST rather than any name the ring remembers. */
 static int targets_eligible(const struct HistoryTarget *t, void *ctx)
 {
   struct Client *sptr = (struct Client *)ctx;
@@ -3103,7 +3124,18 @@ static int targets_eligible(const struct HistoryTarget *t, void *ctx)
     return 1;
   } else {
     char name[CHANNELLEN + 1];
-    return replay_pm_display_nick(sptr, t->target, name, sizeof(name));
+    if (!replay_pm_display_nick(sptr, t->target, name, sizeof(name)))
+      return 0;
+    if (chathistory_ephemeral_has_target(sptr, t->target)) {
+      /* The ring pair is listed as `name` only when LATEST <name> reads
+       * exactly it: not when another conversation answers to that name
+       * (normalize_pm_target's stored-pair fallback) or access is refused. */
+      char lookup[CHANNELLEN + 1];
+      if (check_history_access(sptr, name, lookup, sizeof(lookup)) != 0
+          || ircd_strcmp(lookup, t->target) != 0)
+        return 0;
+    }
+    return 1;
   }
 }
 

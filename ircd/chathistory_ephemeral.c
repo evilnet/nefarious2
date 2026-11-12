@@ -278,6 +278,54 @@ int chathistory_ephemeral_has_target(struct Client *cli,
   return 0;
 }
 
+int chathistory_ephemeral_targets(struct Client *cli, uint64_t lo_ms,
+                                  struct HistoryTarget **out)
+{
+  struct EphemeralPmRing *r;
+  struct EphemeralPmEntry *e;
+  struct HistoryTarget *list = NULL, *t;
+  int n = 0;
+
+  if (out)
+    *out = NULL;
+  if (!cli || !out)
+    return 0;
+  r = cli_ephemeral_pm(cli);
+  if (!r)
+    return 0;
+
+  /* One row per pair key, at its newest entry.  The ring is small (a byte
+   * cap per client) and its pairs fewer, so a list walk per entry is
+   * fine. */
+  for (e = r->head; e; e = e->next) {
+    for (t = list; t; t = t->next)
+      if (0 == ircd_strcmp(t->target, e->target))
+        break;
+    if (!t) {
+      t = (struct HistoryTarget *)MyCalloc(1, sizeof(*t));
+      ircd_strncpy(t->target, e->target, sizeof(t->target));
+      t->next = list;
+      list = t;
+    }
+    if (!t->last_timestamp[0]
+        || history_parse_ms(e->timestamp) > history_parse_ms(t->last_timestamp))
+      ircd_strncpy(t->last_timestamp, e->timestamp, sizeof(t->last_timestamp));
+  }
+
+  /* Keep the pairs whose newest entry is above @a lo_ms. */
+  while (list) {
+    t = list;
+    list = list->next;
+    if (history_parse_ms(t->last_timestamp) > lo_ms) {
+      t->next = *out;
+      *out = t;
+      n++;
+    } else
+      MyFree(t);
+  }
+  return n;
+}
+
 void chathistory_ephemeral_purge(struct Client *cli)
 {
   struct EphemeralPmRing *r;
