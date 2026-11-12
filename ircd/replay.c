@@ -56,7 +56,6 @@
 extern void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
                                   const char *target, const char *outer_batchid,
                                   const char *time_str, const char *cmd);
-extern int should_send_message_type(struct Client *sptr, enum HistoryMessageType type);
 extern void generate_batch_id(char *buf, size_t buflen, struct Client *sptr);
 extern void send_gap_marker(struct Client *sptr, const char *target,
                              const char *batchid, const char *time_str,
@@ -569,7 +568,7 @@ static void replay_emit_outer_batch_if_needed(struct Client *sptr,
 {
   if (!rs->wants_outer_batch || rs->outer_batch_open)
     return;
-  if (!CapRecipientHas(sptr, CAP_BATCH))
+  if (!rs->framed)
     return;
   generate_batch_id(rs->outer_batch_id, sizeof(rs->outer_batch_id), sptr);
   sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s evilnet.github.io/bouncer-replay",
@@ -599,7 +598,8 @@ static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
     outer_tag = outer_buf;
   }
 
-  if (CapRecipientHas(sptr, CAP_BATCH)) {
+  rs->batch_framed = rs->framed;   /* the replay's decision, made at its start */
+  if (rs->batch_framed) {
     /* Assemble the tag list so it never ends in ';' -- a truncated inner
      * page used to open as "@batch=<outer>; :srv BATCH ..." (an empty
      * trailing tag, illegal per message-tags; audit 2026-09-06 #13). */
@@ -638,7 +638,7 @@ static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
 /** Close the current chathistory batch. */
 static void replay_close_batch(struct Client *sptr, struct ReplayState *rs)
 {
-  if (rs->batch_open && CapRecipientHas(sptr, CAP_BATCH)) {
+  if (rs->batch_open && rs->batch_framed) {
     if (rs->outer_batch_open)
       sendrawto_one(sptr, "@batch=%s :%s " MSG_BATCH_CMD " -%s",
                     rs->outer_batch_id, cli_name(&me), rs->batch_id);
@@ -653,8 +653,8 @@ static void replay_close_outer_batch(struct Client *sptr, struct ReplayState *rs
 {
   if (!rs->outer_batch_open)
     return;
-  if (CapRecipientHas(sptr, CAP_BATCH))
-    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", rs->outer_batch_id);
+  /* Opened, so closed -- whatever the client's batch is now. */
+  sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", rs->outer_batch_id);
   rs->outer_batch_open = 0;
 }
 
@@ -668,13 +668,16 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
   const char *cmd;
   const char *batchid;
 
-  batchid = CapRecipientHas(sptr, CAP_BATCH) ? rs->batch_id : NULL;
+  /* The page's own decisions (replay_open_batch, the page's reader), not
+   * the client's capabilities now: a page is sent as it was opened. */
+  batchid = rs->batch_framed ? rs->batch_id : NULL;
 
   while (rs->current) {
     struct HistoryMessage *msg = rs->current;
 
-    /* Filter events based on event-playback capability */
-    if (!should_send_message_type(sptr, msg->type)) {
+    /* Only the row types the page was read with (event-playback and the
+     * other per-type capabilities, as they were then). */
+    if (rs->type_mask && !(rs->type_mask & (1u << msg->type))) {
       rs->current = msg->next;
       continue;
     }
@@ -831,9 +834,10 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
       rs->is_last_page = (flags & REPLAY_COMPLETE) && !rs->is_partial;
     }
 
-    /* Set up new batch */
+    /* Set up new batch, with the type mask the leg was just read with */
     rs->messages = messages;
     rs->current = messages;
+    rs->type_mask = chathistory_type_mask(sptr);
     ircd_strncpy(rs->target, channame, sizeof(rs->target));
     rs->other_nick[0] = '\0';
     rs->is_pm = 0;
@@ -882,6 +886,7 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
      * be populated BEFORE this call — replay_set_target_from_storage
      * derives the display nick from the message stream. */
     rs->messages = messages;
+    rs->type_mask = chathistory_type_mask(sptr);   /* read just now */
     rs->current = messages;
     if (!replay_set_target_from_storage(sptr, rs, tgt->target)) {
       /* Nobody to name the page after (the other half is a session id
@@ -1112,7 +1117,7 @@ static void replay_name_after_request(struct ReplayState *rs, const char *reques
 void replay_start_batch(struct Client *sptr, const char *target,
                          struct HistoryMessage *messages, int count,
                          int ops_override, const char *label, int complete,
-                         const char *requested)
+                         const char *requested, unsigned int type_mask)
 {
   struct ReplayState *rs;
   /* Translate `target` (may be a PM storage key "nick1:nick2") to the
@@ -1202,9 +1207,11 @@ void replay_start_batch(struct Client *sptr, const char *target,
   }
 
   rs = MyCalloc(1, sizeof(struct ReplayState));
+  rs->framed = CapRecipientHas(sptr, CAP_BATCH) ? 1 : 0;
   rs->resume = suspended;
   rs->messages = messages;
   rs->current = messages;
+  rs->type_mask = type_mask;   /* what the page was read with */
   replay_set_target_from_storage(sptr, rs, target);
   replay_name_after_request(rs, requested);
   rs->ops_override = ops_override;
@@ -1292,7 +1299,8 @@ void replay_start_bouncer_at(struct Client *sptr, const char *since_timestamp,
    * tolerated by the batch spec; clients that understand the type
    * use it for grouping semantics, others process inner messages
    * normally. */
-  rs->wants_outer_batch = CapRecipientHas(sptr, CAP_BATCH);
+  rs->framed = CapRecipientHas(sptr, CAP_BATCH) ? 1 : 0;
+  rs->wants_outer_batch = rs->framed;
   rs->replay_limit = (limit > 0) ? limit : feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
   if (rs->replay_limit <= 0)
     rs->replay_limit = 100;
@@ -1349,7 +1357,8 @@ void replay_start_catchup(struct Client *sptr, time_t since_time, int limit)
 }
 
 void replay_leg_done(struct Client *sptr, unsigned long seq, const char *target,
-                     struct HistoryMessage *msgs, int count, int flags)
+                     struct HistoryMessage *msgs, int count, int flags,
+                     unsigned int type_mask)
 {
   struct ReplayState *rs = NULL;
 
@@ -1371,6 +1380,7 @@ void replay_leg_done(struct Client *sptr, unsigned long seq, const char *target,
      * rows and no open batch). */
     rs->messages = msgs;
     rs->current = msgs;
+    rs->type_mask = type_mask;   /* the leg's request's, not today's */
     ircd_strncpy(rs->target, target, sizeof(rs->target));
     rs->other_nick[0] = '\0';
     rs->is_pm = 0;
@@ -1408,6 +1418,23 @@ void replay_forget(struct Client *sptr)
     if (rs->pm_targets)
       history_free_targets(rs->pm_targets);
     MyFree(rs);
+  }
+}
+
+void replay_batch_drop(struct Client *sptr)
+{
+  struct ReplayState *rs;
+
+  for (rs = cli_replay(sptr); rs; rs = rs->resume) {
+    if (rs->batch_open && rs->batch_framed) {
+      replay_close_batch(sptr, rs);   /* tagged with the outer, if open */
+      rs->batch_open = 1;             /* the page goes on, unframed */
+    }
+    rs->batch_framed = 0;
+    if (rs->outer_batch_open)
+      replay_close_outer_batch(sptr, rs);
+    rs->framed = 0;
+    rs->wants_outer_batch = 0;
   }
 }
 

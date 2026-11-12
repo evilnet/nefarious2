@@ -80,6 +80,20 @@ struct ReplayState {
   char label[64];                     /**< Labeled-response label (first batch only) */
   int label_used;                     /**< Whether label was applied */
   int is_last_page;                   /**< True if query returned fewer results than limit */
+  /** The page's framing and contents, decided once and kept for the whole
+   * page (a sendQ pause can leave it half sent across CAP changes): its
+   * chathistory batch is sent when batch_framed (batch was active when it
+   * opened), and its rows are filtered by type_mask, the row types the
+   * page was READ with (chathistory_type_mask(): 0 = every type) -- so
+   * what is sent matches what was counted for the page and its end tag. */
+  int batch_framed;
+  unsigned int type_mask;
+  /** Whether this replay's pages are batch-framed at all: decided once,
+   * when the state starts (the client holds batch), and cleared when the
+   * client drops batch (replay_batch_drop()); a page's batch_framed
+   * follows it, so a multi-page replay never sends a later page bare
+   * inside a still-open outer batch. */
+  int framed;
   int is_partial;                     /**< evilnet.github.io/chathistory-partial on the opener */
 
   /** A bouncer catch-up waiting for a federated channel leg (W5 Push F,
@@ -134,7 +148,7 @@ extern void replay_start_batch(struct Client *sptr, const char *target,
                                 struct HistoryMessage *messages, int count,
                                 int ops_override, const char *label,
                                 int complete,
-                               const char *requested);
+                               const char *requested, unsigned int type_mask);
 
 /** Start async bouncer auto-replay across all channels + PMs.
  * Builds channel name list from current memberships, starts replaying
@@ -171,6 +185,13 @@ extern void replay_cancel(struct Client *sptr);
  * socket, bounce_revive()). */
 extern void replay_forget(struct Client *sptr);
 
+/** @a sptr drops batch (a CAP change, before its ACK): every history
+ * batch its replays have open is ended now, innermost first -- the page's,
+ * then the outer bouncer-replay batch, then those of a suspended catch-up
+ * -- and the rest of each page, and every later page, goes out unframed
+ * (chathistory's no-batch form), with the row types already decided. */
+extern void replay_batch_drop(struct Client *sptr);
+
 /** A federated catch-up leg's page arrived (m_chathistory.c's
  * complete_replay_leg; W5 Push F, I-2): @a msgs (@a count rows, owned from
  * here; NULL/0 for none) for channel @a target with @a flags
@@ -180,7 +201,14 @@ extern void replay_forget(struct Client *sptr);
  * a local leg, and the catch-up goes on.  Freed when no such catch-up is
  * waiting (cancelled, replaced). */
 extern void replay_leg_done(struct Client *sptr, unsigned long seq, const char *target,
-                            struct HistoryMessage *msgs, int count, int flags);
+                            struct HistoryMessage *msgs, int count, int flags,
+                            unsigned int type_mask);
+
+/** The row types a history page read now for @a sptr may carry, as a bit
+ * mask over enum HistoryMessageType (0 = every type): the mask the walk
+ * filters with (m_chathistory.c).  A page keeps the mask it was read with
+ * (ReplayState.type_mask). */
+extern unsigned int chathistory_type_mask(struct Client *sptr);
 
 /** Name the other party of the PM pair key @a pair_key for @a sptr: the
  * live client on the other half's account, else the newest row's sender

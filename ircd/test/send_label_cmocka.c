@@ -640,6 +640,40 @@ static void test_label_inert_without_batch(void **state)
   assert_true(has_tag(sent[0].text, "label"));
 }
 
+/* The forwarded-label batch override (s_numeric.c sets it for one
+ * relayed numeric) is consumed by the line it was set for, whether or not
+ * that recipient could take it: sent to a client without batch, it must
+ * not ride on the NEXT line formatted for another client that has batch
+ * -- that client never saw the batch. */
+static void test_fwd_batch_override_consumed(void **state)
+{
+  char v[64];
+
+  (void)state;
+  FlagClr(cli_active_own(&other), CAP_BATCH);
+  FlagClr(cli_active(&other), CAP_BATCH);
+
+  sendcmdto_set_fwd_batch("fwd9");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &other, "%C :to a client without batch", &other);
+  assert_non_null(line_to(&other));
+  assert_false(has_tag(line_to(&other), "batch"));
+
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :the next line, to a client with batch", &asker);
+  assert_non_null(line_to(&asker));
+  assert_false(has_tag(line_to(&asker), "batch"));
+
+  /* Used where it is set for a client with batch: there, once. */
+  n_sent = 0;
+  memset(sent, 0, sizeof(sent));
+  sendcmdto_set_fwd_batch("fwd10");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :in the forwarded batch", &asker);
+  assert_string_equal(tag_value(line_to(&asker), "batch", v, sizeof(v)), "fwd10");
+  n_sent = 0;
+  memset(sent, 0, sizeof(sent));
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :after it", &asker);
+  assert_false(has_tag(line_to(&asker), "batch"));
+}
+
 /* ---- nested batches (send.c's nesting model) ---- */
 
 static void reset_sent(void)
@@ -899,6 +933,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_batch_depth_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_async_and_unrelated_labeled, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_fwd_batch_override_consumed, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),

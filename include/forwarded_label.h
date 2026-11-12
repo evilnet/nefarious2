@@ -95,4 +95,9 @@ void fwd_label_expire_all(void);
  */
 void fwd_label_cleanup(struct Client *cptr);
 
+/** labeled-response is going inert on @a cptr (a CAP change): end every
+ * forwarded-label batch it was sent the start of (when @a send_end: it
+ * held batch until now), and forget every entry. */
+void fwd_label_drop_all(struct Client *cptr, int send_end);
+
 #endif /* INCLUDED_forwarded_label_h */

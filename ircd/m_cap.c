@@ -778,6 +778,7 @@ cap_req(struct Client *sptr, const char *caplist)
   }
 
   /* Notify client of accepted changes and copy over results. */
+  cap_dependents_drop(sptr, cli_active_own(sptr), &as);   /* before the ACK */
   send_caplist(sptr, &set, &rem, "ACK");
   *cli_capab(sptr) = cs;
   *cli_active_own(sptr) = as;
@@ -801,6 +802,7 @@ cap_ack(struct Client *sptr, const char *caplist)
   const char *cl = caplist;
   struct capabilities *cap;
   int neg;
+  struct CapSet before = *cli_active_own(sptr);
 
   /* Coming from the client, this generally indicates that the client
    * is using a new backwards-incompatible protocol feature.  As such,
@@ -831,6 +833,7 @@ cap_ack(struct Client *sptr, const char *caplist)
     }
   }
 
+  cap_dependents_drop(sptr, &before, cli_active_own(sptr));
   bounce_recompute_session_caps(sptr);
   bounce_emit_alias_caps(sptr);
   return 0;
@@ -842,6 +845,7 @@ cap_clear(struct Client *sptr, const char *caplist)
   struct CapSet cleared;
   struct capabilities *cap;
   unsigned int ii;
+  struct CapSet before = *cli_active_own(sptr);
 
   /* XXX: If we ever add a capab list sorted by capab value, it would
    * be good cache-wise to use it here. */
@@ -862,6 +866,7 @@ cap_clear(struct Client *sptr, const char *caplist)
       metadata_sub_free(sptr);
     }
   }
+  cap_dependents_drop(sptr, &before, cli_active_own(sptr));   /* before the ACK */
   send_caplist(sptr, 0, &cleared, "ACK");
   bounce_recompute_session_caps(sptr);
   bounce_emit_alias_caps(sptr);

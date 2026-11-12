@@ -715,6 +715,11 @@ static unsigned int requester_type_mask(struct Client *sptr)
   return mask == all ? 0 : mask;
 }
 
+unsigned int chathistory_type_mask(struct Client *sptr)
+{
+  return requester_type_mask(sptr);
+}
+
 /** The row filter for a local requester's walk: the presence hook when
  * strict presence opened one (@a pf), else the caller's @a bare filter,
  * either way carrying the requester's type mask.  Never NULL. */
@@ -1238,7 +1243,7 @@ void send_gap_marker(struct Client *sptr, const char *target,
 static void send_history_batch(struct Client *sptr, const char *target,
                                 struct HistoryMessage *messages, int count,
                                 int ops_override, const char *label,
-                                int complete)
+                                int complete, unsigned int type_mask)
 {
   struct HistoryMessage *msg;
   char batchid[BATCH_ID_LEN];
@@ -1274,8 +1279,10 @@ static void send_history_batch(struct Client *sptr, const char *target,
 
   /* Send each message */
   for (msg = messages; msg; msg = msg->next) {
-    /* Filter events based on event-playback capability */
-    if (!should_send_message_type(sptr, msg->type))
+    /* The row types the page was requested with (@a type_mask, 0 = all):
+     * the storage servers filtered with the same mask, so what is sent is
+     * what was counted -- not a filter with today's capabilities. */
+    if (type_mask && !(type_mask & (1u << msg->type)))
       continue;
 
     /* Skip typing-only TAGMSGs (legacy data stored before typing filter fix).
@@ -1353,6 +1360,14 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *label, int complete,
                                        const char *requested,
                                        const struct hm_idset *extra);
+static int presence_filter_and_replay_mask(struct Client *sptr,
+                                       const char *target,
+                                       struct HistoryMessage **head,
+                                       int count, int ops_override,
+                                       const char *label, int complete,
+                                       const char *requested,
+                                       const struct hm_idset *extra,
+                                       unsigned int type_mask);
 static int open_query_presence(struct Client *sptr, const char *lookup_target,
                                int ops_override,
                                struct PresenceQueryFilter **pf_out);
@@ -2199,6 +2214,8 @@ static int redact_filter_messages(const char *target,
   return count;
 }
 
+/** A page read just now: its rows were filtered with the requester's
+ * type mask as it is now. */
 static int presence_filter_and_replay(struct Client *sptr,
                                        const char *target,
                                        struct HistoryMessage **head,
@@ -2206,6 +2223,24 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *label, int complete,
                                        const char *requested,
                                        const struct hm_idset *extra)
+{
+  return presence_filter_and_replay_mask(sptr, target, head, count,
+                                         ops_override, label, complete,
+                                         requested, extra,
+                                         requester_type_mask(sptr));
+}
+
+/** A page whose rows were read with @a type_mask (a federated page: the
+ * mask of its request, sent to the storage servers too).  The page keeps
+ * it (replay_start_batch), so what is sent is what was counted. */
+static int presence_filter_and_replay_mask(struct Client *sptr,
+                                       const char *target,
+                                       struct HistoryMessage **head,
+                                       int count, int ops_override,
+                                       const char *label, int complete,
+                                       const char *requested,
+                                       const struct hm_idset *extra,
+                                       unsigned int type_mask)
 {
   /* `complete` is REPLAY_COMPLETE | REPLAY_PARTIAL flags (plain 0/1
    * from older callers still means complete/not). */
@@ -2221,7 +2256,7 @@ static int presence_filter_and_replay(struct Client *sptr,
   count = redact_filter_messages(target, head, count, extra);
   count = presence_filter_messages(sptr, target, head, count, real_override);
   replay_start_batch(sptr, target, *head, count, real_override, label,
-                     complete, requested);
+                     complete, requested, type_mask);
   return count;
 }
 
@@ -2940,6 +2975,11 @@ struct FedCtxPair {
 
 struct FedRequest {
   char reqid[32];                     /**< Request ID */
+  /** The row types the request reads (requester_type_mask at its start):
+   * the local walk, the CH Q to the storage servers and the page sent at
+   * completion all use this one decision, whatever CAP changes come in
+   * between. */
+  unsigned int type_mask;
   char target[CHANNELLEN + 1];        /**< Target channel */
   char requested[CHANNELLEN + 1];     /**< Target as the client typed it (batch name) */
   char client_yxx[6];                 /**< Client numeric (YXX) for safe lookup */
@@ -6228,9 +6268,10 @@ static void send_fed_response(struct FedRequest *req)
     flags = ((total < req->limit && !req->fed_truncated
               && !req->local_incomplete) ? REPLAY_COMPLETE : 0)
             | ((req->cut || req->partial) ? REPLAY_PARTIAL : 0);
-  total = presence_filter_and_replay(client, req->target, &merged, total,
-                                     req->ops_override, req->label, flags,
-                                     req->requested, &req->leg.side);
+  total = presence_filter_and_replay_mask(client, req->target, &merged, total,
+                                          req->ops_override, req->label, flags,
+                                          req->requested, &req->leg.side,
+                                          req->type_mask);
 }
 
 /** Complete a federation request - sends response and triggers cleanup.
@@ -6615,6 +6656,7 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
                 cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
   req->local_msgs = local_msgs;
   req->local_count = local_count;
+  req->type_mask = requester_type_mask(sptr);   /* as the local walk read */
   req->leg.derive = 1;   /* a page: F-3's fallback may apply */
   req->servers_pending = server_count;
   req->start_time = CurrentTime;
@@ -6698,7 +6740,7 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
    */
   {
     int si;
-    unsigned int mask = requester_type_mask(sptr);
+    unsigned int mask = req->type_mask;
     char token = ops_override ? 'F' : 'P';
     char kreqid[sizeof(req->reqid) + 1] = "";
     size_t room = 0;
@@ -7197,6 +7239,9 @@ struct AutoReplayContext {
   time_t since_time;               /**< Baseline timestamp (for read marker comparison) */
   char timestamp[HISTORY_TIMESTAMP_LEN]; /**< Formatted baseline ts */
   int incomplete;                  /**< A channel was skipped (no fed slot) */
+  /** The row types this replay reads and sends, decided at its start
+   * (requester_type_mask): every channel's CH Q and every page use it. */
+  unsigned int type_mask;
 };
 
 /** Process the next channel in the auto-replay chain.
@@ -7318,7 +7363,7 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
         sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s L %s %d %s %s * P%s %x",
                       channame, ctx->timestamp[0] ? ctx->timestamp : "*",
                       ctx->limit, reqid, dest_yxx, ctx->client_yxx,
-                      requester_type_mask(sptr));
+                      ctx->type_mask);
       }
     }
 
@@ -7465,7 +7510,8 @@ static void complete_autoreplay_channel(struct FedRequest *req)
        * send_fed_response's rule had missed (fix round 1). */
       send_history_batch(sptr, req->target, merged, total, 0, NULL,
                          total < req->limit && !req->fed_truncated
-                         && !req->local_incomplete && !req->cut);
+                         && !req->local_incomplete && !req->cut,
+                         ctx->type_mask);
       ctx->total_replayed += total;
       ctx->chan_count++;
     }
@@ -7512,7 +7558,8 @@ static void complete_replay_leg(struct FedRequest *req)
   flags = ((merged < req->limit && !req->fed_truncated && !req->local_incomplete
             && !req->cut) ? REPLAY_COMPLETE : 0)
           | ((req->cut || req->partial) ? REPLAY_PARTIAL : 0);
-  replay_leg_done(sptr, ctx->seq, req->target, page, total, flags);
+  replay_leg_done(sptr, ctx->seq, req->target, page, total, flags,
+                  req->type_mask);
 }
 
 int chathistory_replay_channel_leg(struct Client *sptr, const char *channame, int limit,
@@ -7629,6 +7676,7 @@ int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time, int limi
                 cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
   ctx->cursor = cli_user(sptr)->channel;
   ctx->limit = limit;
+  ctx->type_mask = requester_type_mask(sptr);
   ctx->total_replayed = 0;
   ctx->chan_count = 0;
   ctx->since_time = since_time;

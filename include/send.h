@@ -468,6 +468,13 @@ struct BatchSave;
 extern void batch_save(struct Client *to, struct BatchSave *save);
 extern void batch_restore(struct Client *to, const struct BatchSave *save);
 
+struct CapSet;
+/** A CAP change from @a before to @a after: undo what labeled-response,
+ * draft/multiline and an open batch leave on @a cptr when they go inert
+ * (send.c).  Called before the CAP ACK. */
+extern void cap_dependents_drop(struct Client *cptr, const struct CapSet *before,
+                                const struct CapSet *after);
+
 /* Check if a client has a batch open on its current answer */
 extern int has_active_batch(struct Client *cptr);
 

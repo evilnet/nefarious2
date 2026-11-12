@@ -30,6 +30,7 @@
 #include "channel.h"
 #include "class.h"
 #include "crdt_hlc.h"
+#include "forwarded_label.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -38,12 +39,14 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
+#include "m_batch.h"
 #include "match.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "parse.h"
 #include "persistence_profile.h"
+#include "replay.h"
 #include "querycmds.h"
 #include "s_bsd.h"
 #include "s_conf.h"
@@ -954,10 +957,19 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
                   !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
-  int use_fwd_batch = fwd_batch_id_override[0] && feature_bool(FEAT_CAP_batch) &&
-                      CapOwnHas(to, CAP_BATCH);
+  int use_fwd_batch;
   int use_msgid = msgid && *msgid && CapOwnHas(to, CAP_MSGTAGS);
   int pos = 0;
+  char fwd_batch[sizeof(fwd_batch_id_override)];
+
+  /* The forwarded-label batch override is for the ONE line it was set
+   * for: consumed here whether used or not.  Left set when the recipient
+   * could not take it (no batch), it went onto the next line formatted
+   * for ANY client with batch -- a batch that client never saw. */
+  memcpy(fwd_batch, fwd_batch_id_override, sizeof(fwd_batch));
+  fwd_batch_id_override[0] = '\0';
+  use_fwd_batch = fwd_batch[0] && feature_bool(FEAT_CAP_batch) &&
+                  CapOwnHas(to, CAP_BATCH);
 
   if (!use_time && !use_account && !use_label && !use_batch && !use_fwd_batch && !use_msgid
       && !use_oper)
@@ -970,8 +982,7 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
    * This prevents forwarded numerics from leaking into LIST/chathistory batches.
    */
   if (use_fwd_batch) {
-    pos += snprintf(buf + pos, buflen - pos, "batch=%s", fwd_batch_id_override);
-    fwd_batch_id_override[0] = '\0';  /* auto-clear */
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", fwd_batch);
   } else if (use_batch) {
     pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
   } else if (use_label) {
@@ -4895,6 +4906,54 @@ void batch_restore(struct Client *to, const struct BatchSave *save)
   con->con_batch_depth = save->depth;
   con->con_batch_over = save->over;
   con->con_labeled_batch = save->labeled;
+}
+
+/** A connection's capabilities go from @a before to @a after (CAP REQ,
+ * CAP ACK, CAP CLEAR).  labeled-response and draft/multiline are a no-op
+ * without batch, and so is an open batch without batch: whatever they
+ * left on the connection is undone here, AT the change -- not at the next
+ * use.  The caller runs this before its CAP ACK (CAP ACK from the client
+ * has none), so every batch the client was sent the start of is ended
+ * while it still reads batches -- the BATCH - lines are sent whatever the
+ * connection's set already is -- innermost first, each tagged with its
+ * parent; nothing after the ACK carries a batch the client no longer has.
+ *  - labeled-response going inert (it or batch dropped): the
+ *    forwarded-label batches are ended and the pending forwarded labels
+ *    forgotten (fwd_label_drop_all()); an asynchronous LIST's labeled
+ *    batch is ended and the LIST goes on plain;
+ *  - batch going away: every batch open on the answer being sent (the
+ *    connection's stack) is ended, innermost first; every history batch
+ *    a replay has open is ended (the page's, then the outer, then a
+ *    suspended catch-up's) and the replay goes on unframed, its row types
+ *    as decided (replay_batch_drop());
+ *  - draft/multiline going inert: the open client batch is discarded
+ *    silently (multiline_discard_batch()).
+ * Labels saved by requests still in flight are not cleared here: each is
+ * used only under LabeledResponseInUse() when its answer is sent. */
+void cap_dependents_drop(struct Client *cptr, const struct CapSet *before,
+                         const struct CapSet *after)
+{
+  if (!cptr || !MyConnect(cptr))
+    return;
+
+  if (CapHas(before, CAP_BATCH) && !CapHas(after, CAP_BATCH))
+    batch_end_all(cptr, 1);   /* the current line's batches, innermost first */
+
+  if (CapSetLabeledResponseInUse(before) && !CapSetLabeledResponseInUse(after)) {
+    fwd_label_drop_all(cptr, 1);   /* before: labels in use, so batch held */
+    if (cli_listing(cptr) && cli_listing(cptr)->batch_id[0]) {
+      send_batch_marker(cptr, '-', cli_listing(cptr)->batch_id, NULL, NULL,
+                        NULL, NULL);
+      cli_listing(cptr)->batch_id[0] = '\0';   /* LIST goes on plain */
+    }
+  }
+
+  if (CapHas(before, CAP_BATCH) && !CapHas(after, CAP_BATCH))
+    replay_batch_drop(cptr);
+
+  if (CapHas(before, CAP_DRAFT_MULTILINE) && CapHas(before, CAP_BATCH)
+      && !(CapHas(after, CAP_DRAFT_MULTILINE) && CapHas(after, CAP_BATCH)))
+    multiline_discard_batch(cptr);
 }
 
 /**

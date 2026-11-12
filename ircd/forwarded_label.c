@@ -171,12 +171,13 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
      * every correlatable reply carries its msgid. */
     if (msgid && msgid[0] && fl->fl_msgid[0]
         && ircd_strcmp(fl->fl_msgid, msgid) == 0) {
-      /* The client dropped batch before the first line of the answer
-       * came: labeled-response is inert now (LabeledResponseInUse), so
-       * no labeled batch is opened -- the answer goes out as it would to
-       * a client without labeled-response.  A batch already open is
-       * left to finish. */
-      if (fl->fl_state == FWD_LABEL_PENDING && !LabeledResponseInUse(acptr)) {
+      /* labeled-response is inert now (LabeledResponseInUse: the client
+       * dropped batch or labeled-response): the entry is forgotten and
+       * the answer goes out as it would to a client without
+       * labeled-response -- never into a batch the client cannot have.
+       * (A CAP change that makes labels inert closes or forgets every
+       * entry at once, fwd_label_drop_all(); this is the backstop.) */
+      if (!LabeledResponseInUse(acptr)) {
         memset(fl, 0, sizeof(*fl));
         return NULL;
       }
@@ -221,7 +222,10 @@ void fwd_label_close_batch(struct Client *acptr, struct ForwardedLabel *fl)
   if (!acptr || !fl)
     return;
 
-  if (fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING)
+  /* BATCH - only to a client that holds batch (one that dropped it is
+   * sent no batch lines; its entry is just forgotten). */
+  if ((fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING)
+      && MyConnect(acptr) && CapOwnHas(acptr, CAP_BATCH))
     send_batch_marker(acptr, '-', fl->fl_batch_id, NULL, NULL, NULL, NULL);
 
   memset(fl, 0, sizeof(*fl));
@@ -265,8 +269,13 @@ struct ForwardedLabel *fwd_label_find_draining(struct Client *acptr,
 
     /* Exact msgid correlation only (see fwd_label_find). */
     if (msgid && msgid[0] && fl->fl_msgid[0]
-        && ircd_strcmp(fl->fl_msgid, msgid) == 0)
+        && ircd_strcmp(fl->fl_msgid, msgid) == 0) {
+      if (!LabeledResponseInUse(acptr)) {   /* inert: see fwd_label_find */
+        memset(fl, 0, sizeof(*fl));
+        return NULL;
+      }
       return fl;
+    }
   }
 
   return NULL;
@@ -315,6 +324,27 @@ void fwd_label_close_draining(struct Client *acptr)
     if (fl->fl_state == FWD_LABEL_DRAINING)
       fwd_label_close_batch(acptr, fl);
   }
+}
+
+void fwd_label_drop_all(struct Client *cptr, int send_end)
+{
+  int i;
+
+  if (!cptr || !MyConnect(cptr))
+    return;
+
+  /* cap_dependents_drop(), before the CAP ACK: a batch the client was sent
+   * the start of is ended now (@a send_end: it held batch until this
+   * change), so it is never left open.  The rest (PENDING: nothing sent
+   * yet) is forgotten. */
+  for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
+    struct ForwardedLabel *fl = &cli_fwd_labels(cptr)[i];
+    if (send_end && (fl->fl_state == FWD_LABEL_ACTIVE
+                     || fl->fl_state == FWD_LABEL_DRAINING))
+      sendrawto_one(cptr, ":%s " MSG_BATCH_CMD " -%s",
+                    cli_name(&me), fl->fl_batch_id);
+  }
+  fwd_label_cleanup(cptr);
 }
 
 void fwd_label_cleanup(struct Client *cptr)
