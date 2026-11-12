@@ -76,11 +76,16 @@ extern void gitsync_stop_timer(void);
 extern void gitsync_restart_timer(void);
 
 /** Trigger a gitsync
+ * @param cptr Connection whose line asked for the sync (&me for the
+ *   timer); the sync's rehash can K-line it, as m_rehash's can
  * @param sptr Client triggering the sync (NULL for timer)
  * @param force Force sync even if interval not elapsed
- * @return GITSYNC_OK on success, error code otherwise
+ * @return CPTR_KILLED when the sync's rehash exited \a cptr (a handler
+ *   returns it to its parser and touches nothing more), else 0; the sync's
+ *   own status is gitsync_get_stats()->last_status
  */
-extern enum GitsyncStatus gitsync_trigger(struct Client *sptr, int force);
+extern int gitsync_trigger(struct Client *cptr, struct Client *sptr,
+                           int force);
 
 /** Get gitsync status as string
  * @param status Status code

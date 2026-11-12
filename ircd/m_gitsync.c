@@ -33,6 +33,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "s_conf.h"
+#include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
 
@@ -447,16 +448,15 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* Handle local action */
   if (is_force) {
-    enum GitsyncStatus status;
-
     if (!feature_bool(FEAT_GITSYNC_ENABLE)) {
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync is disabled", sptr);
       return 0;
     }
 
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Triggering GitSync...", sptr);
-    /* gitsync_trigger sends its own success/failure messages */
-    gitsync_trigger(sptr, 1);
+    /* gitsync_trigger sends its own success/failure messages.  The new
+     * configuration can K-line the oper who asked: CPTR_KILLED then. */
+    return gitsync_trigger(cptr, sptr, 1);
   } else if (is_status) {
     const struct GitsyncStats *stats = gitsync_get_stats();
     char timebuf[64];
@@ -755,7 +755,10 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    gitsync_trigger(sptr, 1);
+    /* cptr is the server link, which a K-line never matches; handed to
+     * the rehash as ms_rehash does. */
+    if (gitsync_trigger(cptr, sptr, 1) == CPTR_KILLED)
+      return CPTR_KILLED;
 
     if (IsOper(sptr)) {
       const struct GitsyncStats *stats = gitsync_get_stats();

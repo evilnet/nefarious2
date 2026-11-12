@@ -740,10 +740,16 @@ gitsync_hash_content(const char *content, size_t len, char *hash, size_t hashlen
  * If rehash fails, restores from backup.
  * @param content Configuration content
  * @param len Content length
+ * @param cptr The connection whose line asked for the sync (&me for the
+ *   timer), handed to rehash() as m_rehash does: the new configuration
+ *   can K-line it.
+ * @param[out] killed Set to CPTR_KILLED when a rehash exited \a cptr;
+ *   nothing may touch it then.
  * @return GITSYNC_OK on success, error code otherwise
  */
 static enum GitsyncStatus
-gitsync_apply(const char *content, size_t len)
+gitsync_apply(const char *content, size_t len, struct Client *cptr,
+              int *killed)
 {
   const char *conf_file;
   FILE *fp;
@@ -823,8 +829,11 @@ gitsync_apply(const char *content, size_t len)
                        "GitSync: Wrote %zu bytes to %s (commit %.8s), rehashing",
                        len, conf_file, gitsync_stats.last_commit);
 
-  /* Trigger a rehash to load the new configuration */
-  rehash(&me, 0);
+  /* Trigger a rehash to load the new configuration.  Its K-line pass can
+   * exit the oper who asked (cptr): it says so only when told which
+   * connection that is. */
+  if (rehash(cptr, 0) == CPTR_KILLED)
+    *killed = CPTR_KILLED;
 
   /* Check if config parsing failed */
   if (conf_get_error_flag()) {
@@ -834,8 +843,10 @@ gitsync_apply(const char *content, size_t len)
               "GitSync: Config parse error, restoring %s from backup", conf_file);
 
     if (had_backup && rename(bak_file, conf_file) == 0) {
-      /* Rehash again with restored config */
-      rehash(&me, 0);
+      /* Rehash again with restored config (never handing it a cptr the
+       * first one exited) */
+      if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
+        *killed = CPTR_KILLED;
       ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                     "Config parse error - restored from backup");
     } else {
@@ -1129,7 +1140,7 @@ static void
 gitsync_timer_callback(struct Event *ev)
 {
   if (ev_type(ev) == ET_EXPIRE) {
-    gitsync_trigger(NULL, 0);
+    gitsync_trigger(&me, NULL, 0);
   }
 }
 
@@ -1208,8 +1219,16 @@ gitsync_restart_timer(void)
   gitsync_start_timer();
 }
 
+/** Run a sync.
+ * @param cptr The connection whose line asked for it (&me for the timer).
+ * @param sptr The oper who asked (NULL for the timer), told how it went.
+ * @param force Sync even if the interval has not elapsed.
+ * @param[out] killed Set to CPTR_KILLED when the sync's rehash exited
+ *   \a cptr; nothing may touch it (or \a sptr, the same client then).
+ * @return The sync's status.
+ */
 static enum GitsyncStatus
-gitsync_run(struct Client *sptr, int force)
+gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
 {
   const char *repo_url;
   const char *branch;
@@ -1365,8 +1384,10 @@ gitsync_run(struct Client *sptr, int force)
   }
 
   /* Apply configuration */
-  status = gitsync_apply(content, len);
+  status = gitsync_apply(content, len, cptr, killed);
   MyFree(content);
+  if (*killed && sptr == cptr)
+    sptr = NULL;   /* its own ban exited it: nobody to tell */
 
   if (status == GITSYNC_OK) {
     gitsync_stats.last_sync = now;
@@ -1389,10 +1410,12 @@ gitsync_run(struct Client *sptr, int force)
   return status;
 }
 
-enum GitsyncStatus
-gitsync_trigger(struct Client *sptr, int force)
+int
+gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
 {
-  enum GitsyncStatus status = gitsync_run(sptr, force);
+  int killed = 0;
+
+  gitsync_run(cptr, sptr, force, &killed);
 
   /* libssh2 runs on OpenSSL's libcrypto and leaves errors on this
    * thread's queue: it reads an OpenSSH-format key through OpenSSL's PEM
@@ -1402,7 +1425,7 @@ gitsync_trigger(struct Client *sptr, int force)
    * the chathistory purge, whose stall makes that backlog
    * (ssl_clear_errors() in ssl.c).  Leave nothing behind. */
   ERR_clear_error();
-  return status;
+  return killed;
 }
 
 const char *
