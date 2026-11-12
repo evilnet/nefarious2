@@ -344,19 +344,22 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
   /* Format into scratch buffer first to determine actual size */
   len = ircd_vsnprintf(dest, fmt_scratch, sizeof(fmt_scratch) - 1, format, vl);
 
-  /* IRC RFC 1459: messages must fit in 512 bytes including \r\n.
-   * Tagged messages (starting with @) can use up to FULL_MSG_SIZE.
-   * A non-tagged message to a client is truncated to BUFSIZE-2 (510)
-   * before \r\n.  A line for another server (or &me, which stands in
-   * for one on the sending side) only gets the scratch-buffer safety
-   * cap here: its body cut is ircd_line_body_clamp()'s, below. */
-  if (fmt_scratch[0] == '@' || s2s) {
-    if (len > (int)sizeof(fmt_scratch) - 3)
-      len = (int)sizeof(fmt_scratch) - 3;
-  } else {
-    if (len > BUFSIZE - 2)
-      len = BUFSIZE - 2;
-  }
+  /* Scratch-buffer safety cap.  The body cuts are below, one for each
+   * kind of line, both ircd_line_body_clamp()'s. */
+  if (len > (int)sizeof(fmt_scratch) - 3)
+    len = (int)sizeof(fmt_scratch) - 3;
+
+  /* A line for a client: IRC RFC 1459's 512 bytes including \r\n, for
+   * the whole of an untagged line and for the rest of a tagged one --
+   * the message-tags spec moves the tag region out of that limit, not
+   * the message ("The size limit for the rest of the message remains
+   * unchanged at 512 bytes").  A relayed PRIVMSG gains its source's
+   * nick!user@host on the way out, so a full-length line from a client
+   * comes back longer than it went in; cut, it reads the same to a
+   * client with message-tags as to one without, and is cut at a UTF-8
+   * boundary for both. */
+  if (!s2s)
+    len = (int)ircd_line_body_clamp(fmt_scratch, (size_t)len, BUFSIZE - 2);
 
   /* S2S wire hygiene (audit 0.1): every line bound for another server
    * keeps its body within the receiving server's cap -- 512 for a
