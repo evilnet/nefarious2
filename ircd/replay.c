@@ -490,6 +490,76 @@ int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
   return found;
 }
 
+struct PmNickEntry {
+  char name[NICKLEN + 1];
+  char pair[CHANNELLEN + 1];
+};
+
+struct PmNickMap {
+  int n;
+  struct PmNickEntry *e;
+};
+
+struct PmNickMap *replay_pm_nick_map(struct Client *sptr)
+{
+  struct PmNickMap *map = (struct PmNickMap *)MyCalloc(1, sizeof(*map));
+  struct HistoryTarget *list = NULL, *t;
+  char identity[S2S_SESSID_BUFSIZE];
+  int max = 0, i;
+
+  /* replay_pm_pair_for_nick's walk, every name kept: the newest pair per
+   * name (ircd_strcmp), so a find answers what that function would. */
+  history_pm_identity(sptr, identity, sizeof(identity));
+  if (history_identity_pm_targets(identity, 0, UINT64_MAX, /*include_newer=*/1,
+                                  REPLAY_PM_TARGETS_MAX, &list, NULL, NULL) <= 0
+      || !list)
+    return map;
+  for (t = list; t; t = t->next)
+    max++;
+  map->e = (struct PmNickEntry *)MyCalloc((size_t)max, sizeof(*map->e));
+  for (t = list; t; t = t->next) {
+    char name[NICKLEN + 1];
+    if (!is_pm_target_for_client(t->target, sptr))
+      continue;
+    if (!replay_pm_display_nick(sptr, t->target, name, sizeof(name)))
+      continue;
+    for (i = 0; i < map->n; i++)
+      if (ircd_strcmp(map->e[i].name, name) == 0)
+        break;
+    if (i < map->n)
+      continue;   /* an older pair with a name already taken */
+    ircd_strncpy(map->e[map->n].name, name, sizeof(map->e[0].name));
+    ircd_strncpy(map->e[map->n].pair, t->target, sizeof(map->e[0].pair));
+    map->n++;
+  }
+  history_free_targets(list);
+  return map;
+}
+
+int replay_pm_nick_map_find(const struct PmNickMap *map, const char *nick,
+                            char *out, size_t outsz)
+{
+  int i;
+
+  if (!map || !nick || !*nick || !out || outsz == 0)
+    return 0;
+  for (i = 0; i < map->n; i++)
+    if (ircd_strcmp(map->e[i].name, nick) == 0) {
+      ircd_strncpy(out, map->e[i].pair, outsz);
+      return 1;
+    }
+  return 0;
+}
+
+void replay_pm_nick_map_free(struct PmNickMap *map)
+{
+  if (!map)
+    return;
+  if (map->e)
+    MyFree(map->e);
+  MyFree(map);
+}
+
 /** Lazily emit the outer evilnet.github.io/bouncer-replay batch on first
  * inner-batch open.  Only relevant when wants_outer_batch is set.
  * Suppressed for empty replays because no inner batch ever opens.

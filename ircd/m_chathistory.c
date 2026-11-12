@@ -1368,7 +1368,8 @@ int chathistory_page_since(struct Client *sptr, const char *target, int limit,
  * @return 0 on success, -1 on error (invalid nick, user not found, etc.)
  */
 static int normalize_pm_target(struct Client *sptr, const char *target,
-                                char *normalized, size_t buflen)
+                                char *normalized, size_t buflen,
+                                const struct PmNickMap *names)
 {
   const char *nick1, *nick2;
   const char *colon = strchr(target, ':');
@@ -1425,7 +1426,8 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
        * (audit 2026-09-06 #19). */
       if (history_has_channel(normalized) == 0) {
         char pair[PM_PAIRKEY_BUFSIZE];
-        if (replay_pm_pair_for_nick(sptr, target, pair, sizeof(pair)))
+        if (names ? replay_pm_nick_map_find(names, target, pair, sizeof(pair))
+                  : replay_pm_pair_for_nick(sptr, target, pair, sizeof(pair)))
           ircd_strncpy(normalized, pair, buflen);
       }
     }
@@ -1445,8 +1447,23 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
  *            (this also covers the smaller NICKLEN*2+2 PM case).
  * @return 0 if allowed, -1 if not.
  */
+static int check_history_access_ex(struct Client *sptr, const char *target,
+                                    char *normalized_target, size_t normalized_len,
+                                    const struct PmNickMap *names);
+
 static int check_history_access(struct Client *sptr, const char *target,
                                  char *normalized_target, size_t normalized_len)
+{
+  return check_history_access_ex(sptr, target, normalized_target, normalized_len, NULL);
+}
+
+/** check_history_access(), with @a names (replay_pm_nick_map, or NULL)
+ * standing in for replay_pm_pair_for_nick() when a nick is resolved to a
+ * stored pair: the same answer, without a walk of the stored pairs per
+ * call (TARGETS asks it once per ring pair; review A4, issue 215). */
+static int check_history_access_ex(struct Client *sptr, const char *target,
+                                    char *normalized_target, size_t normalized_len,
+                                    const struct PmNickMap *names)
 {
   struct Channel *chptr;
 
@@ -1509,13 +1526,13 @@ static int check_history_access(struct Client *sptr, const char *target,
      *     current session.  Disconnect = lose access.  By design — if
      *     persistent identity is needed, register an account. */
     if (IsAccount(sptr)) {
-      if (normalize_pm_target(sptr, target, normalized_target, normalized_len) != 0)
+      if (normalize_pm_target(sptr, target, normalized_target, normalized_len, names) != 0)
         return -1;
       return 0;
     }
     if (cli_session_id(sptr)[0]) {
       char canonical[PM_PAIRKEY_BUFSIZE];
-      if (normalize_pm_target(sptr, target, canonical, sizeof(canonical)) != 0)
+      if (normalize_pm_target(sptr, target, canonical, sizeof(canonical), names) != 0)
         return -1;
       /* Two sources for ephemerals:
        *   - LMDB records bearing our sessid tag (Phase 5a — applies
@@ -3185,9 +3202,18 @@ static int targets_federation_wanted(struct Client *sptr, struct HistoryTarget *
  * unauthenticated party is weaker identity than an account: a nick can
  * pass to someone else, and the ring is keyed by session ids, so the
  * listing follows LATEST rather than any name the ring remembers. */
+/** targets_eligible's context: the requester, and the names of its stored
+ * PM pairs, built at the first ring pair that needs them (one walk of the
+ * stored pairs per TARGETS answer, not one per ring pair: review A4). */
+struct TargetsEligible {
+  struct Client *sptr;
+  struct PmNickMap *names;
+};
+
 static int targets_eligible(const struct HistoryTarget *t, void *ctx)
 {
-  struct Client *sptr = (struct Client *)ctx;
+  struct TargetsEligible *te = (struct TargetsEligible *)ctx;
+  struct Client *sptr = te->sptr;
 
   if (!targets_own(sptr, t->target))
     return 0;
@@ -3216,7 +3242,9 @@ static int targets_eligible(const struct HistoryTarget *t, void *ctx)
        * exactly it: not when another conversation answers to that name
        * (normalize_pm_target's stored-pair fallback) or access is refused. */
       char lookup[CHANNELLEN + 1];
-      if (check_history_access(sptr, name, lookup, sizeof(lookup)) != 0
+      if (!te->names)
+        te->names = replay_pm_nick_map(sptr);
+      if (check_history_access_ex(sptr, name, lookup, sizeof(lookup), te->names) != 0
           || ircd_strcmp(lookup, t->target) != 0)
         return 0;
     }
@@ -3326,8 +3354,12 @@ static void targets_answer(struct Client *sptr, struct HistoryTarget *list,
                            const struct hm_targets_resp *resp, int nresp)
 {
   int more = 0;
+  struct TargetsEligible te;
 
-  hm_targets_page(&list, first_ms, second_ms, limit, targets_eligible, sptr, &more);
+  te.sptr = sptr;
+  te.names = NULL;
+  hm_targets_page(&list, first_ms, second_ms, limit, targets_eligible, &te, &more);
+  replay_pm_nick_map_free(te.names);
   if (resp && hm_targets_cut_partial(resp, nresp, first_ms, second_ms, list, more))
     partial = 1;
   /* The end tag (I8): nothing eligible beyond the page in its direction,

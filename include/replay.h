@@ -193,6 +193,18 @@ extern int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
 extern int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
                                    char *out, size_t outsz);
 
+/** replay_pm_pair_for_nick() for many nicks at once: the names of
+ * @a sptr's newest stored PM pairs (the same REPLAY_PM_TARGETS_MAX, the
+ * same order, the first pair per name), built once -- one page read per
+ * pair -- instead of once per nick looked up.  Never NULL. */
+struct PmNickMap;
+extern struct PmNickMap *replay_pm_nick_map(struct Client *sptr);
+/** The pair @a map names @a nick, as replay_pm_pair_for_nick() would.
+ * @return 1 and the pair key in @a out, else 0. */
+extern int replay_pm_nick_map_find(const struct PmNickMap *map, const char *nick,
+                                   char *out, size_t outsz);
+extern void replay_pm_nick_map_free(struct PmNickMap *map);
+
 /** Check if sendQ has room for more replay messages.
  * Uses FEAT_REPLAY_SENDQ_THRESHOLD (default 50% of limit).
  * Also used by federation replay paths and multiline echo.
