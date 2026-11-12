@@ -115,6 +115,12 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
   assert(0 != cptr);
   assert(0 != sptr);
 
+  /* A server's burst ends: from anything else this is nothing to act on
+   * or relay, and nothing to announce. */
+  if (!IsServer(sptr))
+    return protocol_violation(sptr, "END_OF_BURST from non-server %s",
+                              cli_name(sptr));
+
   sendto_opmask_butone(0, SNO_NETWORK, "Completed net.burst from %C.", 
   	sptr);
   sendcmdto_serv_butone(sptr, CMD_END_OF_BURST, cptr, "");
@@ -148,7 +154,8 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
 int ms_end_of_burst_ack(struct Client *cptr, struct Client *sptr, int parc, char **parv)
 {
   if (!IsServer(sptr))
-    return 0;
+    return protocol_violation(sptr, "END_OF_BURST_ACK from non-server %s",
+                              cli_name(sptr));
 
   sendto_opmask_butone(0, SNO_NETWORK, "%C acknowledged end of net.burst.",
 		       sptr);
