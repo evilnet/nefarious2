@@ -38,6 +38,11 @@ struct UserStatistics {
   unsigned int announced_clients;           /**< Network-wide N-announced users. */
   unsigned int announced_clients_max;       /**< Maximum number of network-wide announced users. */
 
+  /* Bouncer devices (aliases) of ours, live sockets all: kept by the same
+   * rule as the counts above (bouncer_count.h).  Lets a walk of the local
+   * clients for a user's devices be skipped when there are none. */
+  unsigned int local_aliases;
+
   /* Global user mode changes: */
   unsigned int inv_clients;     /**< Registered invisible users. */
   unsigned int opers;           /**< Registered IRC operators. */
@@ -208,7 +213,8 @@ void count_unknowns_underflow(const char *file, int line, const char *what);
     if (!IsBouncerAlias(cptr)) { \
       --UserStats.local_announced_clients; \
       --UserStats.announced_clients; \
-    } \
+    } else \
+      --UserStats.local_aliases; \
     if (!IsNoLcDecrement(cptr) \
         && match(feature_str(FEAT_DOMAINNAME), cli_sockhost(cptr)) == 0) \
       --current_load.local_count; \

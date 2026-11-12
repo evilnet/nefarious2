@@ -51,6 +51,8 @@ struct Client his;
 /* bump_sentalong()'s (the common-channels fan-out) */
 int HighestFd;
 struct Client *LocalClientArray[MAXCONNECTIONS];
+/* UserStats.local_aliases gates the device walk of the session form. */
+struct UserStatistics UserStats;
 int log_inassert;
 time_t CurrentTime;
 static struct ServerStatistics server_stats;
@@ -180,9 +182,9 @@ void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
 /* The clients                                                         */
 /* ------------------------------------------------------------------ */
 
-static struct Client src, rcpt;
-static struct Connection src_con, rcpt_con;
-static struct User src_user, rcpt_user;
+static struct Client src, rcpt, dev1, dev2;
+static struct Connection src_con, rcpt_con, dev1_con, dev2_con;
+static struct User src_user, rcpt_user, dev1_user, dev2_user;
 static struct Channel *chan;
 static struct Membership m_src, m_rcpt;
 static char long_name[128];
@@ -191,6 +193,8 @@ static struct Client *sendq_owner(struct MsgQ *mq)
 {
   if (mq == &cli_sendQ(&src)) return &src;
   if (mq == &cli_sendQ(&rcpt)) return &rcpt;
+  if (mq == &cli_sendQ(&dev1)) return &dev1;
+  if (mq == &cli_sendQ(&dev2)) return &dev2;
   return NULL;
 }
 
@@ -222,6 +226,15 @@ static int setup(void **state)
 
   fixture_client(&src, &src_con, &src_user, "src", 5);
   fixture_client(&rcpt, &rcpt_con, &rcpt_user, "rcpt", 6);
+  fixture_client(&dev1, &dev1_con, &dev1_user, "src", 7);
+  fixture_client(&dev2, &dev2_con, &dev2_user, "src", 8);
+  memset(LocalClientArray, 0, sizeof(LocalClientArray));
+  LocalClientArray[5] = &src;
+  LocalClientArray[6] = &rcpt;
+  LocalClientArray[7] = &dev1;
+  LocalClientArray[8] = &dev2;
+  HighestFd = 8;
+  memset(&UserStats, 0, sizeof(UserStats));
 
   chan = calloc(1, sizeof(*chan) + 8);
   assert_non_null(chan);
@@ -346,11 +359,163 @@ static void test_long_oper_name_every_tag(void **state)
   }
 }
 
+/* ---- the session form: the user's own connections (#220) ---- */
+
+static int count_to(struct Client *c)
+{
+  int i, n = 0;
+
+  for (i = 0; i < n_sent; i++)
+    if (sent[i].to == c)
+      n++;
+  return n;
+}
+
+static const char *untagged(const char *l)
+{
+  const char *sp = (l && l[0] == '@') ? strchr(l, ' ') : NULL;
+  return sp ? sp + 1 : l;
+}
+
+/** @a d a bouncer device of ours of @a primary. */
+static void make_device(struct Client *d, struct Client *primary)
+{
+  SetFlag(d, FLAG_BOUNCER_ALIAS);
+  cli_user(d)->alias_primary = primary;
+  UserStats.local_aliases++;
+}
+
+/* In one channel with an observer: the user gets the observer's line, once,
+ * with the tags it negotiated (it is not left untagged for want of a
+ * member with the same tag set). */
+static void test_session_form_tells_the_user_once(void **state)
+{
+  (void)state;
+  m_src.next_channel = NULL;
+  cli_user(&src)->channel = &m_src;
+  FlagSet(cli_active_own(&src), CAP_ACCNOTIFY);
+  FlagSet(cli_active(&src), CAP_ACCNOTIFY);
+  FlagSet(cli_active_own(&src), CAP_SERVERTIME);
+  FlagSet(cli_active_own(&rcpt), CAP_ACCNOTIFY);
+  FlagSet(cli_active(&rcpt), CAP_ACCNOTIFY);
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "zed");
+  assert_int_equal(count_to(&src), 1);
+  assert_int_equal(count_to(&rcpt), 1);
+  assert_string_equal(untagged(line_to(&src)), untagged(line_to(&rcpt)));
+  assert_string_equal(untagged(line_to(&src)), ":src!u@h.example ACCOUNT zed");
+  assert_non_null(strstr(line_to(&src), "time="));
+  /* The skip form leaves the user out, as before. */
+  n_sent = 0;
+  sendcmdto_common_channels_capab_butone(&src, CMD_ACCOUNT, &src, CAP_ACCNOTIFY,
+                                         CAP_NONE, "%s", "zed");
+  assert_int_equal(count_to(&src), 0);
+  assert_int_equal(count_to(&rcpt), 1);
+}
+
+/* In no channel: the user still gets it, and a user without the cap not. */
+static void test_session_form_no_channel(void **state)
+{
+  (void)state;
+  cli_user(&src)->channel = NULL;
+  FlagSet(cli_active_own(&src), CAP_ACCNOTIFY);
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "*");
+  assert_int_equal(count_to(&src), 1);
+  assert_string_equal(line_to(&src), ":src!u@h.example ACCOUNT *");
+  assert_int_equal(count_to(&rcpt), 0);
+  n_sent = 0;
+  FlagClr(cli_active_own(&src), CAP_ACCNOTIFY);
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "*");
+  assert_int_equal(n_sent, 0);
+}
+
+/* The devices: one in the channel (reached by the walk) and one not, both
+ * with the cap: once each; a device without the cap: nothing; the walk of
+ * the local clients is skipped when the server counts no device, and a
+ * device already leaving is skipped. */
+static void test_session_form_devices(void **state)
+{
+  struct Membership m_dev1;
+  (void)state;
+  memset(&m_dev1, 0, sizeof(m_dev1));
+  m_dev1.user = &dev1;
+  m_dev1.channel = chan;
+  m_src.next_member = &m_dev1;               /* rcpt, src, dev1 */
+  m_src.next_channel = NULL;
+  cli_user(&src)->channel = &m_src;
+  make_device(&dev1, &src);
+  make_device(&dev2, &src);
+  FlagSet(cli_active_own(&src), CAP_ACCNOTIFY);
+  FlagSet(cli_active_own(&dev1), CAP_ACCNOTIFY);
+  FlagSet(cli_active(&dev1), CAP_ACCNOTIFY);
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "zed");
+  assert_int_equal(count_to(&src), 1);
+  assert_int_equal(count_to(&dev1), 1);
+  assert_int_equal(count_to(&dev2), 0);
+
+  /* dev2 gets the cap; out of the channel, only the walk finds it */
+  FlagSet(cli_active_own(&dev2), CAP_ACCNOTIFY);
+  n_sent = 0;
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "zed");
+  assert_int_equal(count_to(&dev1), 1);
+  assert_int_equal(count_to(&dev2), 1);
+
+  SetFlag(&dev2, FLAG_CLOSING);
+  n_sent = 0;
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "zed");
+  assert_int_equal(count_to(&dev2), 0);
+  ClrFlag(&dev2, FLAG_CLOSING);
+
+  UserStats.local_aliases = 0;               /* no device counted: no walk */
+  n_sent = 0;
+  sendcmdto_common_channels_capab_session(&src, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                          "%s", "zed");
+  assert_int_equal(count_to(&dev2), 0);
+  assert_int_equal(count_to(&dev1), 1);      /* the channel walk's */
+  m_src.next_member = NULL;
+}
+
+/* away_notify_common()'s star (m_away.c): a first send for draft/pre-away
+ * clients with ":*", a second for the rest with the text.  The sender's
+ * own copy -- a session primary of ours told of an away decided
+ * elsewhere (one == NULL) -- takes the same filters as the members: one
+ * line, the form its own caps ask for (it used to get both). */
+static void test_away_star_sender_copy(void **state)
+{
+  int pre;
+  (void)state;
+  cli_user(&src)->channel = NULL;
+  for (pre = 0; pre < 2; pre++) {
+    memset(cli_active_own(&src), 0, sizeof(*cli_active_own(&src)));
+    FlagSet(cli_active_own(&src), CAP_AWAYNOTIFY);
+    if (pre)
+      FlagSet(cli_active_own(&src), CAP_DRAFT_PREAWAY);
+    n_sent = 0;
+    sendcmdto_set_extra_withcap(CAP_DRAFT_PREAWAY);
+    sendcmdto_common_channels_capab_butone(&src, CMD_AWAY, NULL, CAP_AWAYNOTIFY,
+                                           CAP_NONE, ":*");
+    sendcmdto_common_channels_capab_butone(&src, CMD_AWAY, NULL, CAP_AWAYNOTIFY,
+                                           CAP_DRAFT_PREAWAY, ":%s", "Away");
+    assert_int_equal(count_to(&src), 1);
+    assert_string_equal(line_to(&src), pre ? ":src!u@h.example AWAY :*"
+                                           : ":src!u@h.example AWAY :Away");
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup_teardown(test_account_tag_only_no_account, setup, teardown),
     cmocka_unit_test_setup_teardown(test_long_oper_name_every_tag, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_session_form_tells_the_user_once, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_session_form_no_channel, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_session_form_devices, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_away_star_sender_copy, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -5111,6 +5111,10 @@ static void bounce_count_converted(struct Client *c,
              "local_announced_clients", c, site);
   count_move(&UserStats.announced_clients, &UserStats.announced_clients_max,
              d.announced, "announced_clients", c, site);
+  if (d.local_aliases < 0)        /* no maximum kept for this one */
+    count_dec(&UserStats.local_aliases, "local_aliases", c, site);
+  else if (d.local_aliases > 0)
+    ++UserStats.local_aliases;
   /* Its server's count: given up on the server it had, taken on the one it
    * has (the same server unless it moved). */
   if (was->server_clients && was_server && was_server != &me

@@ -391,6 +391,7 @@ static void bouncer_status_recount(struct Client *sptr)
   struct Client *srv;
   struct bounce_counts held;
   unsigned long r_clients = 0, r_local = 0, r_local_ann = 0, r_ann = 0;
+  unsigned long r_alias = 0;
   unsigned long servers_drift = 0;
   unsigned int servers_off = 0;
   char buf[400];
@@ -404,6 +405,7 @@ static void bouncer_status_recount(struct Client *sptr)
     r_local += held.local_clients;
     r_local_ann += held.local_announced;
     r_ann += held.announced;
+    r_alias += held.local_aliases;
   }
 
   for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
@@ -444,6 +446,12 @@ static void bouncer_status_recount(struct Client *sptr)
                 UserStats.clients, r_clients, UserStats.local_clients, r_local,
                 UserStats.local_announced_clients, r_local_ann,
                 UserStats.announced_clients, r_ann);
+  send_note(sptr, "BOUNCER", "STATUS", "recount", buf);
+
+  ircd_snprintf(0, buf, sizeof(buf), "recount local_aliases_drift=%ld "
+                "(local_aliases=%u/%lu)",
+                (long)UserStats.local_aliases - (long)r_alias,
+                UserStats.local_aliases, r_alias);
   send_note(sptr, "BOUNCER", "STATUS", "recount", buf);
 }
 

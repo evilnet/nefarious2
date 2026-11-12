@@ -44,6 +44,7 @@
 #include "numnicks.h"
 #include "parse.h"
 #include "persistence_profile.h"
+#include "querycmds.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -3106,8 +3107,10 @@ void sendcmdto_set_extra_withcap(int cap)
 
 /** Whether @a to, a connection the channel walk did not pick -- the
  * sender itself or one of its bouncer devices -- takes a channel-capab
- * send: the same three filters as the walk, read from the connection's OWN
- * caps (a primary's cli_active is its session's union). */
+ * send: the same three filters as the walk, read from the connection's
+ * own caps (CapOwnHas(), as send_buffer()'s CapRouteContext check does).
+ * Each connection, a bouncer device included, has its own caps; a local
+ * client's cli_active mirrors them (bounce_recompute_session_caps()). */
 static int capab_own_wants(struct Client *to, int withcap, int skipcap,
                            int extracap)
 {
@@ -3218,15 +3221,20 @@ common_channels_capab_vsend(struct Client *from, const char *cmd,
    * changed (an account change) or whose sessions they have just ended (a
    * logout).  A device of another server is that server's: the same line
    * reaches it there.  A device sharing a channel with from was reached
-   * by the walk already (sentalong). */
-  if (devices) {
+   * by the walk already (sentalong).  The walk costs a pass over the
+   * local clients, skipped when this server has no device at all
+   * (UserStats.local_aliases, kept by the bouncer's count rule); a device
+   * already leaving (FLAG_CLOSING) is skipped, as the session end's walk
+   * skips it. */
+  if (devices && UserStats.local_aliases) {
     int i;
 
     for (i = 0; i <= HighestFd; i++) {
       struct Client *dev = LocalClientArray[i];
 
       if (!dev || dev == from || dev == one || !IsUser(dev)
-          || !IsBouncerAlias(dev) || cli_alias_primary(dev) != from
+          || !IsBouncerAlias(dev) || HasFlag(dev, FLAG_CLOSING)
+          || cli_alias_primary(dev) != from
           || cli_sentalong(dev) == sentalong_marker
           || !capab_own_wants(dev, withcap, skipcap, extracap))
         continue;

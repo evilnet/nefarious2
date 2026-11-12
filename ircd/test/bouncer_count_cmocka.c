@@ -119,6 +119,7 @@ static void add(struct bounce_counts *acc, const struct bounce_counts *c, int si
   acc->server_clients += sign * c->server_clients;
   acc->local_announced += sign * c->local_announced;
   acc->announced += sign * c->announced;
+  acc->local_aliases += sign * c->local_aliases;
 }
 
 static void a_life_releases_what_it_took(void **s)
@@ -143,6 +144,7 @@ static void a_life_releases_what_it_took(void **s)
       add(&acc, &d, +1);
       add(&acc, &b, -1);
       expect_counts(&acc, 0, 0, 0, 0, 0);
+      assert_int_equal(acc.local_aliases, 0);
     }
 
   /* The merge of two primaries, on each server: the converted one ends
@@ -160,6 +162,27 @@ static void a_life_releases_what_it_took(void **s)
   expect_counts(&acc, 0, 0, 0, 0, 0);
 }
 
+/* UserStats.local_aliases (the account-notify device walk is skipped when
+ * it is 0): one for each bouncer device of ours, live or not -- an alias
+ * always has its socket -- and none for anything else; a conversion into
+ * or out of a device of ours moves it, and an exit gives it back. */
+static void local_aliases_follow(void **s)
+{
+  struct bounce_counts c, d;
+  int local, alias, socket;
+  (void)s;
+  for (local = 0; local < 2; local++)
+    for (alias = 0; alias < 2; alias++)
+      for (socket = 0; socket < 2; socket++) {
+        held_by(local, alias, socket, &c);
+        assert_int_equal(c.local_aliases, local && alias);
+      }
+  move(f_live, f_alias, &d);  assert_int_equal(d.local_aliases, +1);  /* demote, setup */
+  move(f_alias, f_live, &d);  assert_int_equal(d.local_aliases, -1);  /* promote */
+  move(f_held, f_live, &d);   assert_int_equal(d.local_aliases, 0);   /* revive */
+  move(f_ruser, f_ralias, &d); assert_int_equal(d.local_aliases, 0);  /* BX C convert */
+}
+
 static void null_safe(void **s)
 {
   struct bounce_counts c;
@@ -169,6 +192,7 @@ static void null_safe(void **s)
   memset(&c, 0x55, sizeof(c));
   bounce_count_delta(NULL, NULL, &c);
   expect_counts(&c, 0, 0, 0, 0, 0);
+  assert_int_equal(c.local_aliases, 0);
 }
 
 int main(void)
@@ -178,6 +202,7 @@ int main(void)
     cmocka_unit_test(each_role_holds),
     cmocka_unit_test(each_conversion_moves),
     cmocka_unit_test(a_life_releases_what_it_took),
+    cmocka_unit_test(local_aliases_follow),
     cmocka_unit_test(null_safe),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

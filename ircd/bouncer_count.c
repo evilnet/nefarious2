@@ -25,6 +25,7 @@ void bounce_count_held(int local, int alias, int socket_counted,
     out->local_clients = socket_counted ? 1 : 0;
     out->local_announced = alias ? 0 : 1;
     out->announced = alias ? 0 : 1;
+    out->local_aliases = alias ? 1 : 0;
   } else if (!alias) {
     /* Count_remoteclientquits */
     out->clients = 1;
@@ -48,4 +49,5 @@ void bounce_count_delta(const struct bounce_counts *from,
   out->server_clients = to->server_clients - from->server_clients;
   out->local_announced = to->local_announced - from->local_announced;
   out->announced = to->announced - from->announced;
+  out->local_aliases = to->local_aliases - from->local_aliases;
 }

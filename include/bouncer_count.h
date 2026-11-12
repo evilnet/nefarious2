@@ -12,7 +12,7 @@
  *  - a client of ours (MyConnect): Count_clientdisconnects releases one
  *    registered user, one live socket unless FLAG_NO_LC_DECREMENT says
  *    its socket already went (a held ghost), and one locally announced
- *    user unless it is an alias;
+ *    user unless it is an alias -- one local alias if it is;
  *  - another server's client that is not an alias (introduced by N):
  *    Count_remoteclientquits releases one registered user, one in its
  *    server's count, and one announced user;
@@ -37,6 +37,8 @@ struct bounce_counts {
                          *   ours the network knows by N */
   int announced;        /**< UserStats.announced_clients: a user the
                          *   network knows by N */
+  int local_aliases;    /**< UserStats.local_aliases: a bouncer device
+                         *   (alias) of ours */
 };
 
 /** What a registered user holds, from the facts its exit reads.
