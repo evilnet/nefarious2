@@ -103,7 +103,7 @@
  * NOTE: this function may modify user and message, so they
  * must be mutable.
  */
-static int user_set_away(struct User* user, char* message)
+int user_set_away(struct User* user, char* message)
 {
   char* away;
   assert(0 != user);
