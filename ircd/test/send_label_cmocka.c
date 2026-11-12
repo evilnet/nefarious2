@@ -127,10 +127,13 @@ int feature_int(enum Feature feat) { (void)feat; return 0; }
 const char *feature_str(enum Feature feat) { (void)feat; return ""; }
 unsigned int get_sendq(struct Client *cptr) { (void)cptr; return 1u << 30; }
 void update_write(struct Client *cptr) { (void)cptr; }
+/* The member a persistence profile hides the channel from, if any. */
+static struct Client *profile_hidden;
+
 int persistence_channel_visible(struct Client *cptr, const char *chname)
 {
-  (void)cptr; (void)chname;
-  return 1;
+  (void)chname;
+  return cptr != profile_hidden;
 }
 
 /* Kept by the linker for send_buffer()'s other branches; never reached:
@@ -213,6 +216,8 @@ static void fixture_client(struct Client *c, struct Connection *con,
   FlagSet(cli_active_own(c), CAP_BATCH);
   FlagSet(cli_active_own(c), CAP_MSGTAGS);
   FlagSet(cli_active_own(c), CAP_SERVERTIME);
+  /* A client outside a bouncer session: its union caps are its own. */
+  *cli_active(c) = *cli_active_own(c);
 }
 
 /** A labeled command is being handled for @a c. */
@@ -262,6 +267,7 @@ static int setup(void **state)
 
   memset(sent, 0, sizeof(sent));
   n_sent = 0;
+  profile_hidden = NULL;
   sendcmdto_set_client_msgid(NULL);
   return 0;
 }
@@ -534,6 +540,83 @@ static void test_delivery_no_tags_at_all(void **state)
   assert_string_equal(line_to(&other), ":nick!u@h.example PRIVMSG other :plain");
 }
 
+/* ------------------------------------------------------------------ */
+/* The asker's copy when there is nothing to answer, and when it gets  */
+/* none                                                                */
+/* ------------------------------------------------------------------ */
+
+/* An asker with no label pending -- an unlabeled command, or a client
+ * whose command is not the one running -- gets byte for byte the copy
+ * the plain fan-out gives a member with the same caps. */
+static void test_respond_no_label_is_the_plain_copy(void **state)
+{
+  char plain[8192];
+
+  (void)state;
+  sendcmdto_set_client_event("MSGID00000003", 1700000000789ULL);
+  sendcmdto_channel_butserv_butone(&sibling, CMD_PART, chan, NULL, 0,
+                                   "%H :%s", chan, "x");
+  snprintf(plain, sizeof(plain), "%s", line_to(&asker));
+  n_sent = 0;
+  sendcmdto_channel_butserv_respond(&sibling, CMD_PART, chan, &asker, 0,
+                                    "%H :%s", chan, "x");
+  sendcmdto_set_client_msgid(NULL);
+  assert_string_equal(line_to(&asker), plain);
+  assert_string_equal(line_to(&other), plain);
+}
+
+/* A label already answered (or left from an earlier command) is never
+ * taken again; nor does it open a labeled batch. */
+static void test_respond_answered_label_is_not_taken(void **state)
+{
+  (void)state;
+  label_pending(&asker, "OLD2");
+  cli_label_responded(&asker) = 1;
+  sendcmdto_channel_butserv_respond(&asker, CMD_PART, chan, &asker, 0,
+                                    ":%H", chan);
+  assert_false(has_tag(line_to(&asker), "label"));
+  assert_int_equal(labeled_batch_start(&asker), 0);
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+}
+
+/* The fan-out's own rules decide whether the asker gets a copy at all:
+ * a zombie member, a channel its profile hides, a skip mask that rules
+ * it out -- no copy, and the label stays pending for the ACK. */
+static void test_respond_follows_the_fanout_rules(void **state)
+{
+  (void)state;
+  label_pending(&asker, "L30");
+
+  SetZombie(&m_asker);
+  sendcmdto_channel_butserv_respond(&sibling, CMD_PART, chan, &asker, 0,
+                                    ":%H", chan);
+  assert_null(line_to(&asker));
+  assert_int_equal(cli_label_responded(&asker), 0);
+  m_asker.status = 0;
+
+  n_sent = 0;
+  profile_hidden = &asker;
+  sendcmdto_channel_butserv_respond(&sibling, CMD_PART, chan, &asker, 0,
+                                    ":%H", chan);
+  assert_null(line_to(&asker));
+  assert_non_null(line_to(&other));
+  assert_int_equal(cli_label_responded(&asker), 0);
+  profile_hidden = NULL;
+
+  /* SKIP_NONOPS: only chanops are sent the line. */
+  n_sent = 0;
+  sendcmdto_channel_butserv_respond(&sibling, CMD_MODE, chan, &asker,
+                                    SKIP_NONOPS, "%H +m", chan);
+  assert_int_equal(n_sent, 0);
+  assert_int_equal(cli_label_responded(&asker), 0);
+  m_asker.status = CHFL_CHANOP;
+  sendcmdto_channel_butserv_respond(&sibling, CMD_MODE, chan, &asker,
+                                    SKIP_NONOPS, "%H +m", chan);
+  assert_int_equal(n_sent, 1);
+  assert_true(has_tag(line_to(&asker), "label"));
+  assert_int_equal(cli_label_responded(&asker), 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -543,6 +626,9 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_respond_fanout_asker_not_member, setup, teardown),
     cmocka_unit_test_setup_teardown(test_plain_fanout_labels_no_one, setup, teardown),
     cmocka_unit_test_setup_teardown(test_one_event_respond_label_once, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_respond_no_label_is_the_plain_copy, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_respond_answered_label_is_not_taken, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_respond_follows_the_fanout_rules, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),

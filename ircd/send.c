@@ -4503,7 +4503,8 @@ void send_batch_start(struct Client *to, const char *type)
   /* Build message tags - include label if this is for labeled-response */
   tagbuf[0] = '\0';
   if (feature_bool(FEAT_CAP_labeled_response) &&
-      CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0]) {
+      CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0] &&
+      !cli_label_responded(to)) {   /* an answered label goes on no batch */
     tagbuf[0] = '@';
     pos = 1;
     pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
@@ -5130,7 +5131,9 @@ int labeled_batch_start(struct Client *sptr)
 {
   if (!MyConnect(sptr))
     return 0;
-  if (!cli_label(sptr)[0])
+  /* Only for a label still waiting for its answer: one already answered
+   * (or left by an earlier command) opens nothing. */
+  if (!cli_label(sptr)[0] || cli_label_responded(sptr))
     return 0;
   if (!feature_bool(FEAT_CAP_labeled_response) || !CapActive(sptr, CAP_LABELEDRESP))
     return 0;

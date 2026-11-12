@@ -127,6 +127,8 @@ int ms_svsjoin(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   joinbuf_init(&join, acptr, acptr, JOINBUF_TYPE_JOIN, 0, 0);
   joinbuf_init(&create, acptr, acptr, JOINBUF_TYPE_CREATE, 0, TStime());
+  /* services' JOIN: no command of acptr's is answered */
+  join.jb_asker = create.jb_asker = NULL;
 
   chanlist = last0(acptr, acptr, parv[2]); /* find last "JOIN 0" */
 

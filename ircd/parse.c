@@ -1417,17 +1417,40 @@ int unregister_mapping(struct s_map *map)
   return 1;
 }
 
+static int parse_client_line(struct Client *cptr, char *buffer, char *bufend);
+
 /** Parse a line of data from a user.
  * NOTE: parse_*() should not be called recursively by any other
  * functions!
+ *
+ * A labeled-response label belongs to the line that carried it: when the
+ * line is done -- its handler has run, its labeled batch is closed and
+ * any ACK sent, or it was refused before reaching one -- the label is
+ * forgotten, so nothing sent to the client later (another client's
+ * event, a numeric relayed from a server, a timer's notice) can carry
+ * it.  A command whose answer comes after it returns keeps the label it
+ * needs itself (a multiline batch's con_ml_label, a forwarded label's
+ * entry, a chathistory request's req->label).
  * @param[in] cptr Client that sent the data.
  * @param[in] buffer Start of input line.
  * @param[in] bufend End of input line.
  * @return 0 on success, -1 on parse error, or CPTR_KILLED if message
  * handler returns it.
  */
-int
-parse_client(struct Client *cptr, char *buffer, char *bufend)
+int parse_client(struct Client *cptr, char *buffer, char *bufend)
+{
+  int result = parse_client_line(cptr, buffer, bufend);
+
+  if (result != CPTR_KILLED) {
+    cli_label(cptr)[0] = '\0';
+    cli_label_responded(cptr) = 0;
+  }
+  return result;
+}
+
+/** The body of parse_client(): one line from a user. */
+static int
+parse_client_line(struct Client *cptr, char *buffer, char *bufend)
 {
   struct Client*  from = cptr;
   char*           ch;

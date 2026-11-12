@@ -137,6 +137,7 @@ int ms_svspart(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   joinbuf_init(&parts, acptr, acptr, JOINBUF_TYPE_PART,
 	       (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0,
 	       0);
+  parts.jb_asker = NULL;   /* services' PART: no command of acptr's answered */
 
   /* scan through channel list */
   for (name = ircd_strtok(&p, parv[2], ","); name;

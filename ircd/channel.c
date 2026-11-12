@@ -5657,6 +5657,9 @@ joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
   jbuf->jb_create = create;
   jbuf->jb_count = 0;
   jbuf->jb_alias_source = NULL;
+  /* A local user's own JOIN/PART: connect is the connection that sent it
+   * (the user, or a bouncer device of the session's primary). */
+  jbuf->jb_asker = MyUser(connect) ? connect : NULL;
   memset(jbuf->jb_msgids, 0, sizeof(jbuf->jb_msgids));
   jbuf->jb_msgid_time_ms = 0;
   jbuf->jb_strlen = (((type == JOINBUF_TYPE_JOIN ||
@@ -5726,13 +5729,12 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       jbuf->jb_msgid_time_ms = part_ms;
 
       /* Send notification to channel.  The parting connection's own copy
-       * (jb_connect: the user, or the bouncer device that typed the PART
+       * (jb_asker: the user, or the bouncer device that typed the PART
        * for its primary) is the answer to its PART: it carries the PART's
        * label, or the labeled batch m_part/m_join opened. */
       if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
         sendcmdto_channel_butserv_respond(jbuf->jb_source, CMD_PART, chan,
-                                          (jbuf->jb_connect && MyUser(jbuf->jb_connect))
-                                          ? jbuf->jb_connect : NULL, 0,
+                                          jbuf->jb_asker, 0,
                                           (flags & CHFL_BANNED || !jbuf->jb_comment) ?
                                           ":%H" : "%H :%s", chan, jbuf->jb_comment);
       else if (MyUser(jbuf->jb_source))

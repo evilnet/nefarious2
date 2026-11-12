@@ -75,6 +75,7 @@ static struct {
   int last_numeric;
   int do_numeric;          /* do_numeric() */
   int kills;               /* sendcmdto_one() (the unknown-numeric KILL) */
+  char label[64];          /* the label the PING handler saw */
 } seen;
 
 static void record_handler(const char *cmd, int parc, char *parv[])
@@ -87,7 +88,9 @@ static void record_handler(const char *cmd, int parc, char *parv[])
 
 static int h_ping(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-  (void)cptr; (void)sptr;
+  (void)sptr;
+  snprintf(seen.label, sizeof(seen.label), "%s",
+           IsServer(cptr) ? "" : cli_label(cptr));
   record_handler("PING", parc, parv);
   return 0;
 }
@@ -233,8 +236,7 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
 
 int feature_bool(enum Feature feat)
 {
-  (void)feat;
-  return 0;
+  return feat == FEAT_CAP_labeled_response;
 }
 
 int feature_int(enum Feature feat)
@@ -714,6 +716,32 @@ static void client_ordinary_lines(void **state)
   expect_handler("@x :pfx PING :hello", &o, "PING", "hello");
 }
 
+/* labeled-response: the label belongs to its line.  The handler sees it;
+ * once parse_client() returns -- the line handled, or refused before a
+ * handler -- it is gone, so nothing sent to the client afterwards (a
+ * numeric relayed from a server, another client's event) can carry it. */
+static void client_label_ends_with_its_line(void **state)
+{
+  char buf[64];
+
+  (void)state;
+  CapSet(cli_active(&user), CAP_LABELEDRESP);
+
+  memset(&seen, 0, sizeof(seen));
+  strcpy(buf, "@label=L1 PING :hello");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.label, "L1");
+  assert_string_equal(cli_label(&user), "");
+  assert_int_equal(cli_label_responded(&user), 0);
+
+  /* Refused before any handler (unknown command): gone too. */
+  strcpy(buf, "@label=L2 NOSUCHCMD x");
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
+  assert_string_equal(cli_label(&user), "");
+
+  CapClr(cli_active(&user), CAP_LABELEDRESP);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -724,6 +752,7 @@ int main(void)
     cmocka_unit_test(server_ordinary_lines),
     cmocka_unit_test(server_spaces_only),
     cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
+    cmocka_unit_test(client_label_ends_with_its_line),
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
   };
