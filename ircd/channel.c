@@ -5737,10 +5737,26 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                                           jbuf->jb_asker, 0,
                                           (flags & CHFL_BANNED || !jbuf->jb_comment) ?
                                           ":%H" : "%H :%s", chan, jbuf->jb_comment);
-      else if (MyUser(jbuf->jb_source))
-        sendcmdto_one_tags(jbuf->jb_source, CMD_PART, jbuf->jb_source,
-                           (flags & CHFL_BANNED || !jbuf->jb_comment) ?
-                           ":%H" : "%H :%s", chan, jbuf->jb_comment);
+      else {
+        /* Hidden (+D, or a zombie): the channel never saw the JOIN, so
+         * only the parter's own local connections hear of the PART -- the
+         * user, and the session's devices here, which leave with their
+         * primary (bounce_sync_alias_part()).  The parting connection's
+         * copy answers its PART (jb_asker). */
+        struct Membership *pm;
+
+        for (pm = chan->members; pm; pm = pm->next_member) {
+          struct Client *to = pm->user;
+
+          if (!MyUser(to) || (to != jbuf->jb_source
+                              && !(IsBouncerAlias(to)
+                                   && cli_alias_primary(to) == jbuf->jb_source)))
+            continue;
+          sendcmdto_one_event(jbuf->jb_source, CMD_PART, to, to == jbuf->jb_asker,
+                              (flags & CHFL_BANNED || !jbuf->jb_comment) ?
+                              ":%H" : "%H :%s", chan, jbuf->jb_comment);
+        }
+      }
 
 #ifdef USE_ROCKSDB
       /* Store PART event in history -- receiver-side like the message
