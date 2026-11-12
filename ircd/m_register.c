@@ -332,9 +332,11 @@ static void register_complete_success(struct Client *acptr,
   if (IsAccount(acptr)) {
     char text[200];
 
+    /* A logged-in client's login cannot change account (#223): the new
+     * account is for another connection. */
     ircd_snprintf(0, text, sizeof(text), "Account %s was created, but you are "
-                  "already logged in as %s; log in to %s with SASL to use it",
-                  account, held, account);
+                  "already logged in as %s; log in to %s on a new connection "
+                  "to use it", account, held, account);
     reg_answer_begin(acptr, ctx, &st, 0);
     send_warn(acptr, "REGISTER", "ALREADY_AUTHENTICATED", account, text);
     reg_answer_end(acptr, &st);

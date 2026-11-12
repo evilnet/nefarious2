@@ -125,6 +125,27 @@ extern void sasl_identity_set(struct Client *cptr, const char *account,
                               time_t acc_create, const char *kc_id,
                               int id_live);
 
+/** Is \a cptr logged in, for the rule that a re-authentication never
+ *  changes the account: the ircd has applied an account to it -- after
+ *  registration, or by registration that has passed its auth stage (a
+ *  login waiting for burst convergence, a revived or attached connection).
+ *  A login before that is what registration will apply, and a later login
+ *  may replace it.
+ */
+extern int sasl_logged_in(struct Client *cptr);
+
+/** The rule: a login of \a sptr as \a account (Keycloak id \a kc_id, NULL
+ *  or invalid for none) when \a sptr is logged in (sasl_logged_in()) must
+ *  be its own account -- the same name as the ircd compares account names
+ *  and, when both sides carry a Keycloak id, the same id (its bouncer
+ *  session's when it is in one).  Otherwise the client is told (FAIL
+ *  AUTHENTICATE ALREADY_AUTHENTICATED with standard-replies, then 904), the
+ *  refusal is logged (accounts only) and the opers told, and 1 is returned:
+ *  the caller ends its exchange and applies nothing.  0: not refused.
+ */
+extern int sasl_reauth_refused(struct Client *sptr, const char *account,
+                               const char *kc_id);
+
 /** Complete a successful SASL login.  Shared between local and P10 paths
  *  (and, through sasl_register_login(), REGISTER's success).
  *  Handles: account set, RPL_SASLSUCCESS, metadata load, account-notify,

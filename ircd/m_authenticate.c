@@ -127,7 +127,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec) */
   if (parv[1][0] == '*' && parv[1][1] == '\0') {
     /* Only abort if there's an active session: a cookie whose exchange has
-     * not completed -- a REGISTER login meanwhile completes no exchange
+     * not completed -- a REGISTER login meanwhile, or the completed login a
+     * logged-in client's re-authentication keeps, completes no exchange
      * (IsSASLExchangeDone()). */
     if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr)) {
       /* Local SASL session takes priority */
@@ -154,17 +155,26 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     return 0;
   }
 
-  /* A client that already has an account -- SASL completed, or an account
-   * set by services -- may re-authenticate only with a token-based
-   * mechanism: OAUTHBEARER supports token refresh and a change of account.
-   * Other mechanisms (PLAIN, EXTERNAL, SCRAM-*) get ERR_SASLALREADY per the
-   * IRCv3 spec.  Testing the account too keeps the rule after a failed
-   * OAUTHBEARER attempt, which clears the SASL-complete flag below.  A
-   * registered client with no account may authenticate with any mechanism.
-   * The rule applies when an exchange starts, not to the data lines of one
-   * in progress (a local session, or a cookie for the IAuth and P10 tiers;
-   * both are cleared when the exchange completes or is aborted).
+  /* A client that already has an account or a completed login -- SASL
+   * completed, or an account set by services -- may authenticate again only
+   * with a token-based mechanism, OAUTHBEARER, so that it can refresh a
+   * token about to expire.  Other mechanisms (PLAIN, EXTERNAL, SCRAM-*) get
+   * ERR_SASLALREADY per the IRCv3 spec.  A registered client with no
+   * account may authenticate with any mechanism.  The rule applies when an
+   * exchange starts, not to the data lines of one in progress (a local
+   * session, or a cookie for the IAuth and P10 tiers; both are cleared when
+   * the exchange completes or is aborted).
+   *
+   * A re-authentication never changes the account of a client that is
+   * logged in (sasl_logged_in(): the ircd has applied its account): a login
+   * that names another account, or the same name under another Keycloak
+   * id, is refused when it completes, in every tier (sasl_login_apply()
+   * step 0; a services answer already at its L, ms_sasl()), and the client
+   * keeps its login exactly as it was.  Before registration has applied a
+   * login, a client may authenticate again as anyone (SASL 3.1).
    */
+  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr))
+    ClearSASLReauth(cptr);    /* a new exchange: a re-authentication if set below */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
       && (IsSASLComplete(cptr) || IsAccount(cptr))) {
     /* Only allow re-authentication for token-based mechanisms */
@@ -174,14 +184,26 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
                   "You have already completed SASL authentication");
       return send_reply(cptr, ERR_SASLALREADY);
     }
-    /* Clear the SASLComplete flag to allow token refresh, and the identity
-     * the completed login left with it (sasl_identity_set()): before
-     * registration that identity is what registration applies, and a
-     * refresh that fails or is aborted leaves no login behind -- nothing
-     * of it may be applied with another login's name (a REGISTER). */
-    ClearSASLComplete(cptr);
-    ClrFlag(cptr, FLAG_REGLOGIN);
-    sasl_identity_set(cptr, NULL, 0, NULL, 0);
+    if (sasl_logged_in(cptr)) {
+      /* A refresh: the login stands -- its account, its record, its
+       * SASL-complete flag -- until the exchange ends; a refusal, a failure
+       * or an abort leaves it as it is, and only a login for the same
+       * account rewrites the record (a REGISTER login's mark,
+       * FLAG_REGLOGIN, included).  The re-authentication mark tells the
+       * exchange's abort and timeout that it is in flight beside the
+       * completed login (IsSASLExchangeDone()). */
+      SetSASLReauth(cptr);
+    } else {
+      /* Before registration has applied it: clear the SASLComplete flag
+       * and the identity the completed login left with it
+       * (sasl_identity_set()).  That identity is what registration
+       * applies, and a login that fails or is aborted leaves no login
+       * behind -- nothing of it may be applied with another login's name
+       * (a REGISTER). */
+      ClearSASLComplete(cptr);
+      ClrFlag(cptr, FLAG_REGLOGIN);
+      sasl_identity_set(cptr, NULL, 0, NULL, 0);
+    }
     /* Clear old SASL session state */
     if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))
       cli_saslagentref(cli_saslagent(cptr))--;

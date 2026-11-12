@@ -120,7 +120,34 @@ struct fake {
   char raw[600];              /**< the last raw line sent to it */
   char fail_code[64];         /**< the code of the last FAIL sent to it */
   char warn[160];             /**< the last WARN sent to it */
+  char fail_context[64];      /**< that FAIL's context parameter */
+  char saslfail[200];         /**< the reason of the last ERR_SASLFAIL */
 };
+
+/** What a login announces beyond the client itself: the aliases told, the
+ * network told (AC), the channels told (account-notify), and the rest of
+ * step 7.  A re-authentication that is refused changes none of them. */
+struct effects {
+  int alias_updates;          /**< bounce_emit_alias_update() */
+  int alias_syncs;            /**< bounce_sync_alias_identity() */
+  int adopts;                 /**< bounce_session_adopt_kc_id() */
+  int broadcasts;             /**< sendcmdto_serv_butone(): AC */
+  int notifies;               /**< account-notify to common channels */
+  int metadata_loads;         /**< metadata_load_account() */
+  int mode_syncs;             /**< metadata_mode_sync_restore() */
+  int hostmasks;              /**< hide_hostmask() */
+  int account_adjusts;        /**< channel_account_adjust() */
+  int anchors;                /**< presence_anchor_transfer() */
+  int oper_notices;           /**< sendto_opmask_butone_ratelimited() */
+};
+static struct effects fx;
+
+/** A bouncer session for the cases that need one: its members (a primary
+ * and aliases) and the Keycloak id it is bound to. */
+static struct fake_session {
+  struct Client *members[4];
+  char kc_id[ACCOUNT_ID_LEN + 1];
+} fsess;
 
 #define NFAKE 8
 static struct fake fakes[NFAKE];
@@ -418,6 +445,13 @@ int send_reply(struct Client *to, int reply, ...)
   } else
     tlog_add("%03d %s", reply & ~SND_EXPLICIT, tname(to));
   tlog_label(label_take(to));
+  if (f && !f->freed && (reply & ~SND_EXPLICIT) == ERR_SASLFAIL) {
+    const char *reason;
+    va_start(vl, reply);
+    reason = va_arg(vl, const char *);
+    va_end(vl);
+    ircd_strncpy(f->saslfail, reason ? reason : "", sizeof(f->saslfail));
+  }
   return 0;
 }
 
@@ -439,8 +473,10 @@ void send_fail(struct Client *to, const char *command, const char *code,
 {
   struct fake *f = fake_of(to);
   touch(to);
-  if (f && !f->freed)
+  if (f && !f->freed) {
     ircd_strncpy(f->fail_code, code, sizeof(f->fail_code));
+    ircd_strncpy(f->fail_context, context ? context : "", sizeof(f->fail_context));
+  }
   tlog_add("FAIL %s %s %s", command, code, context ? context : "");
   tlog_label(label_take(to));
 }
@@ -480,6 +516,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
   char buf[TLOG_LEN];
   va_list vl;
   touch(from);
+  fx.broadcasts++;
   va_start(vl, pattern);
   fmt_ircd(buf, sizeof(buf), pattern, vl);
   va_end(vl);
@@ -493,11 +530,15 @@ void sendcmdto_common_channels_capab_butone(struct Client *from,
   char buf[TLOG_LEN];
   va_list vl;
   touch(from);
+  fx.notifies++;
   va_start(vl, pattern);
   fmt_ircd(buf, sizeof(buf), pattern, vl);
   va_end(vl);
   tlog_add("channels %s %s %s", tname(from), cmd, buf);
 }
+void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
+                                      time_t *rate, const char *pattern, ...)
+{ fx.oper_notices++; }
 void send_cap_notify(const char *capname, int available, const char *value) {}
 void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
@@ -579,32 +620,43 @@ void debug(int level, const char *form, ...) {}
  * here. */
 struct Client *find_match_server(char *mask) { return NULL; }
 unsigned int ircrandom(void) { static unsigned int r = 12345; return r += 7919; }
-struct BouncerSession *bounce_get_session(struct Client *cptr) { touch(cptr); return NULL; }
-const char *bounce_session_kc_id(struct BouncerSession *s) { return ""; }
-void bounce_session_adopt_kc_id(struct BouncerSession *s, const char *id) {}
+/* The bouncer: a client is in the fake session when the case put it there;
+ * bounce_rebind_kc_conflict() is the real one (bouncer_rebind_auth.o). */
+struct BouncerSession *bounce_get_session(struct Client *cptr)
+{
+  int i;
+  touch(cptr);
+  for (i = 0; i < 4; i++)
+    if (fsess.members[i] && fsess.members[i] == cptr)
+      return (struct BouncerSession *)&fsess;
+  return NULL;
+}
+const char *bounce_session_kc_id(struct BouncerSession *s)
+{ return s ? ((struct fake_session *)s)->kc_id : ""; }
+void bounce_session_adopt_kc_id(struct BouncerSession *s, const char *id) { fx.adopts++; }
 int bounce_account_kc_conflict(const char *account, const char *kc_id) { return 0; }
-int bounce_rebind_kc_conflict(const char *ghost_id, const char *incoming_id) { return 0; }
 void bounce_emit_alias_update(struct Client *primary, const char *field,
                               const char *value)
-{ touch(primary); tlog_add("alias update %s %s %s", tname(primary), field, value); }
+{ touch(primary); fx.alias_updates++; tlog_add("alias update %s %s %s", tname(primary), field, value); }
 void bounce_sync_alias_identity(struct Client *primary)
-{ touch(primary); tlog_add("alias sync %s", tname(primary)); }
+{ touch(primary); fx.alias_syncs++; tlog_add("alias sync %s", tname(primary)); }
 void channel_account_adjust(struct Client *cptr, int delta)
-{ touch(cptr); tlog_add("channel account count %s %+d", tname(cptr), delta); }
+{ touch(cptr); fx.account_adjusts++; tlog_add("channel account count %s %+d", tname(cptr), delta); }
 void presence_anchor_transfer(struct Client *cptr, const char *old_anchor,
                               int old_is_session, const char *new_anchor,
                               int new_is_session)
 {
   touch(cptr);
+  fx.anchors++;
   tlog_add("presence %s %s/%d -> %s/%d", tname(cptr), old_anchor,
            old_is_session, new_anchor, new_is_session);
 }
 int hide_hostmask(struct Client *cptr)
-{ touch(cptr); tlog_add("hide_hostmask %s", tname(cptr)); return 0; }
+{ touch(cptr); fx.hostmasks++; tlog_add("hide_hostmask %s", tname(cptr)); return 0; }
 void metadata_load_account(struct Client *cptr, const char *account)
-{ touch(cptr); tlog_add("metadata load %s %s", tname(cptr), account); }
+{ touch(cptr); fx.metadata_loads++; tlog_add("metadata load %s %s", tname(cptr), account); }
 void metadata_mode_sync_restore(struct Client *cptr, int live)
-{ touch(cptr); tlog_add("mode restore %s %d", tname(cptr), live); }
+{ touch(cptr); fx.mode_syncs++; tlog_add("mode restore %s %d", tname(cptr), live); }
 enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
                                             time_t now, int limit, int period,
                                             int global_limit)
@@ -655,6 +707,13 @@ static struct pending pend[NPEND];
 
 static const char *TEST_SUB = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
 static void user_sub(const char *user, char *out, size_t size);
+
+/** Whose token the client's OAUTHBEARER line carries, as each validation
+ * strategy reads it: the local check (kc_jwt_validate_local()) and the
+ * introspection answer.  A sub of NULL is a token without one. */
+static char *jwt_user, *jwt_sub;
+static char *intro_user, *intro_sub;
+static char tok_user[32], tok_sub[40];
 static char user_pem[600];            /**< ECDSA public key a lookup returns */
 static char scram_salt[64], scram_stored[64], scram_server[64];
 static int scram_iters;
@@ -709,8 +768,8 @@ static void pend_deliver_at(int i, int res)
   }
   memset(&info, 0, sizeof(info));
   info.active = true;
-  info.username = "ian";
-  info.sub = (char *)TEST_SUB;
+  info.username = intro_user;
+  info.sub = intro_sub;
 
   switch (p.kind) {
   case P_TOKEN:
@@ -864,8 +923,9 @@ int kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
   return 1;
 }
 
-/** OAUTHBEARER's local check: any token is carol's, unless the test says
- * the check cannot decide (introspection then). */
+/** OAUTHBEARER's local check: any token is jwt_user's (carol's unless the
+ * case says otherwise), unless the test says the check cannot decide
+ * (introspection then). */
 static int jwt_local_undecided;
 int kc_jwt_validate_local(struct kc_realm realm, const char *token,
                           struct kc_token_info **info_out)
@@ -875,8 +935,8 @@ int kc_jwt_validate_local(struct kc_realm realm, const char *token,
     return KC_ERROR;
   info = calloc(1, sizeof(*info));
   info->active = true;
-  info->username = strdup("carol");
-  info->sub = strdup(TEST_SUB);
+  info->username = strdup(jwt_user);
+  info->sub = jwt_sub ? strdup(jwt_sub) : NULL;
   *info_out = info;
   return KC_SUCCESS;
 }
@@ -1005,7 +1065,13 @@ static int setup(void **state)
   next_user[0] = '\0';
   mail_id[0] = '\0';
   user_pem[0] = scram_salt[0] = '\0';
+  jwt_user = "carol";
+  jwt_sub = (char *)TEST_SUB;
+  intro_user = "ian";
+  intro_sub = (char *)TEST_SUB;
 #endif
+  memset(&fx, 0, sizeof(fx));
+  memset(&fsess, 0, sizeof(fsess));
   return 0;
 }
 
@@ -1840,7 +1906,12 @@ static void flow_verify_then_other_account(void **state)
  * identity whole in every outcome. */
 
 /** REGISTER's answer lands while a SASL exchange is in flight, which then
- * succeeds: the SASL account with its id. */
+ * succeeds.  Before registration nothing is applied yet: the SASL account
+ * with its id.  After registration REGISTER SUCCESS logged the client in
+ * to the new account, and a login cannot change the account of a client
+ * logged in (#223): the SASL login is refused (904) and the REGISTER
+ * account stands -- as the first login stands when REGISTER's answer comes
+ * second (flow_sasl_then_register_answer). */
 static void flow_register_answer_mid_sasl_then_success(void **state)
 {
   int post;
@@ -1848,6 +1919,7 @@ static void flow_register_answer_mid_sasl_then_success(void **state)
   sasl_init_once();
   for (post = 0; post < 2; post++) {
     struct Client *c = post ? new_registered(67, "fd2") : new_client(66, "fd1", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
     char id[ACCOUNT_ID_LEN + 1], rid[ACCOUNT_ID_LEN + 1];
     const char *acct = post ? "nd2" : "nd1", *user = post ? "dan2" : "dan1";
 
@@ -1857,8 +1929,13 @@ static void flow_register_answer_mid_sasl_then_success(void **state)
     plain_pending(c, user, "danpw");
     pend_deliver_kind(P_CREATED, KC_SUCCESS);        /* REGISTER SUCCESS */
     assert_identity(c, acct, user_id(acct, rid), 1);
-    pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* then 903 */
-    assert_identity(c, user, user_id(user, id), 1);
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* then the grant */
+    if (post) {
+      assert_true(has_numeric(f, ERR_SASLFAIL));
+      assert_false(has_numeric(f, RPL_SASLSUCCESS));
+      assert_identity(c, acct, rid, 1);
+    } else
+      assert_identity(c, user, user_id(user, id), 1);
   }
 }
 
@@ -2744,6 +2821,558 @@ static void refused_request_fails_at_once(void **state)
       }
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* A logged-in client's re-authentication never changes its account    */
+/* ------------------------------------------------------------------ */
+
+/* OAUTHBEARER after registration exists so that a client can refresh a
+ * token about to expire.  A token naming another account -- or the same
+ * name under another Keycloak id -- is refused (904) and the login stays
+ * exactly as it was; a token for the same account refreshes it.  "Logged
+ * in" is an account the ircd has applied (registration did, or a login
+ * after it), not a login still waiting for registration to apply it:
+ * before registration a client may authenticate again, as anyone. */
+
+/** A client registered and logged in to \a account with Keycloak id \a
+ * kc_id ("" for none): through SASL before registration when \a by_sasl
+ * (the SASL-complete flag and that login's own record, its id confirmed by
+ * Keycloak, as registration leaves them), else through services (the
+ * account with X3's timestamp, no SASL record).  standard-replies on. */
+static struct Client *new_logged_in(int fd, const char *nick,
+                                    const char *account, const char *kc_id,
+                                    int by_sasl)
+{
+  struct Client *c = new_registered(fd, nick);
+
+  ircd_strncpy(cli_user(c)->account, account, sizeof(cli_user(c)->account));
+  ircd_strncpy(cli_user(c)->kc_id, kc_id, sizeof(cli_user(c)->kc_id));
+  cli_user(c)->acc_create = by_sasl ? 0 : 1700000000;
+  SetAccount(c);
+  SetHiddenHost(c);
+  if (by_sasl) {
+    sasl_identity_set(c, account, 0, kc_id, 1);
+    SetSASLComplete(c);
+  }
+  CapSet(cli_active(c), CAP_STANDARDREPLIES);
+  return c;
+}
+
+/** Everything a login is: the account with its timestamp and Keycloak id,
+ * the login's own record (name, timestamp, id, id-live), and the flags. */
+struct login_snap {
+  int registered, is_account, sasl_complete, hidden;
+  char account[ACCOUNTLEN + 1], kc_id[ACCOUNT_ID_LEN + 1];
+  time_t acc_create;
+  char saslaccount[ACCOUNTLEN + 1], saslkcid[ACCOUNT_ID_LEN + 1];
+  time_t saslacccreate;
+  int saslkcidlive;
+};
+
+static void snap(struct Client *c, struct login_snap *s)
+{
+  memset(s, 0, sizeof(*s));
+  s->registered = IsRegistered(c) ? 1 : 0;
+  s->is_account = IsAccount(c) ? 1 : 0;
+  s->sasl_complete = IsSASLComplete(c) ? 1 : 0;
+  s->hidden = IsHiddenHost(c) ? 1 : 0;
+  ircd_strncpy(s->account, cli_user(c)->account, sizeof(s->account));
+  ircd_strncpy(s->kc_id, cli_user(c)->kc_id, sizeof(s->kc_id));
+  s->acc_create = cli_user(c)->acc_create;
+  ircd_strncpy(s->saslaccount, cli_saslaccount(c), sizeof(s->saslaccount));
+  ircd_strncpy(s->saslkcid, cli_saslkcid(c), sizeof(s->saslkcid));
+  s->saslacccreate = cli_saslacccreate(c);
+  s->saslkcidlive = cli_saslkcidlive(c);
+}
+
+static void assert_login_unchanged(struct Client *c, const struct login_snap *was)
+{
+  struct login_snap now;
+
+  snap(c, &now);
+  assert_int_equal(now.registered, was->registered);
+  assert_int_equal(now.is_account, was->is_account);
+  assert_int_equal(now.sasl_complete, was->sasl_complete);
+  assert_int_equal(now.hidden, was->hidden);
+  assert_string_equal(now.account, was->account);
+  assert_string_equal(now.kc_id, was->kc_id);
+  assert_int_equal(now.acc_create, was->acc_create);
+  assert_string_equal(now.saslaccount, was->saslaccount);
+  assert_string_equal(now.saslkcid, was->saslkcid);
+  assert_int_equal(now.saslacccreate, was->saslacccreate);
+  assert_int_equal(now.saslkcidlive, was->saslkcidlive);
+}
+
+/** Nothing was announced since \a was: no alias, server or channel told,
+ * no metadata, modes, host or presence touched, no id adopted. */
+static void assert_nothing_announced(const struct effects *was)
+{
+  assert_int_equal(fx.alias_updates, was->alias_updates);
+  assert_int_equal(fx.alias_syncs, was->alias_syncs);
+  assert_int_equal(fx.adopts, was->adopts);
+  assert_int_equal(fx.broadcasts, was->broadcasts);
+  assert_int_equal(fx.notifies, was->notifies);
+  assert_int_equal(fx.metadata_loads, was->metadata_loads);
+  assert_int_equal(fx.mode_syncs, was->mode_syncs);
+  assert_int_equal(fx.hostmasks, was->hostmasks);
+  assert_int_equal(fx.account_adjusts, was->account_adjusts);
+  assert_int_equal(fx.anchors, was->anchors);
+}
+
+/** The next OAUTHBEARER token is \a user's, its sub the Keycloak id of \a
+ * sub_of (NULL: a token without one), for both validation strategies. */
+static void token_for(const char *user, const char *sub_of)
+{
+  ircd_strncpy(tok_user, user, sizeof(tok_user));
+  jwt_user = intro_user = tok_user;
+  if (sub_of) {
+    user_sub(sub_of, tok_sub, sizeof(tok_sub));
+    jwt_sub = intro_sub = tok_sub;
+  } else
+    jwt_sub = intro_sub = NULL;
+}
+
+/** How the token is checked: OAUTHBEARER's local check (the exchange ends
+ * inside the client's line), or introspection (Keycloak answers it active,
+ * from the event loop). */
+enum strategy { LOCAL, INTROSPECT };
+
+static void oauth_exchange(struct Client *c, enum strategy how)
+{
+  const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+  char data[300];
+
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  jwt_local_undecided = (how == INTROSPECT);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  if (how == INTROSPECT) {
+    pend_deliver_kind(P_INTRO, KC_SUCCESS);
+    run_event_loop();
+  }
+}
+
+/** \a c's re-authentication was refused: 904 with \a reason, the FAIL
+ * naming its account, no 900/903, the exchange over, the login exactly
+ * \a was, nothing announced, the opers told; and the gate still stands
+ * (PLAIN: 907, the login untouched). */
+static void assert_refused(struct Client *c, const struct login_snap *was,
+                           const struct effects *fx_was, const char *reason)
+{
+  struct fake *f = fake_of(c);
+
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_false(has_numeric(f, RPL_LOGGEDIN));
+  assert_false(has_numeric(f, RPL_SASLSUCCESS));
+  assert_non_null(strstr(f->saslfail, reason));
+  assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+  assert_string_equal(f->fail_context, was->account);
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_login_unchanged(c, was);
+  assert_nothing_announced(fx_was);
+  assert_true(fx.oper_notices > fx_was->oper_notices);
+  assert_int_equal(f->registered, 0);           /* no registration ran */
+
+  f->n_numerics = 0;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_true(has_numeric(f, ERR_SASLALREADY));
+  assert_login_unchanged(c, was);
+}
+
+/** \a c's re-authentication refreshed its login: 900 and 903, the account
+ * and its id as before, nothing announced to anyone. */
+static void assert_refreshed(struct Client *c, const struct login_snap *was,
+                             const struct effects *fx_was)
+{
+  struct fake *f = fake_of(c);
+
+  assert_true(has_numeric(f, RPL_LOGGEDIN));
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_false(has_numeric(f, ERR_SASLFAIL));
+  assert_true(IsAccount(c));
+  assert_true(IsSASLComplete(c));
+  assert_string_equal(cli_user(c)->account, was->account);
+  assert_int_equal(cli_user(c)->acc_create, was->acc_create);
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_int_equal(fx.alias_updates, fx_was->alias_updates);
+  assert_int_equal(fx.broadcasts, fx_was->broadcasts);
+  assert_int_equal(fx.notifies, fx_was->notifies);
+  assert_int_equal(fx.metadata_loads, fx_was->metadata_loads);
+  assert_int_equal(fx.account_adjusts, fx_was->account_adjusts);
+}
+
+/** #223: logged in as xavier, a valid token for yvonne -- by either
+ * strategy -- is refused and changes nothing; a refresh for xavier still
+ * works after it. */
+static void reauth_other_account_refused(void **state)
+{
+  enum strategy how;
+
+  sasl_init_once();
+  for (how = LOCAL; how <= INTROSPECT; how++) {
+    char xid[ACCOUNT_ID_LEN + 1];
+    struct Client *c = new_logged_in(80 + how, "xav", "xavier",
+                                     user_id("xavier", xid), 1);
+    struct fake *f = fake_of(c);
+    struct login_snap was;
+    struct effects fx_was;
+
+    snap(c, &was);
+    fx_was = fx;
+    token_for("yvonne", "yvonne");
+    oauth_exchange(c, how);
+    assert_refused(c, &was, &fx_was, "logged in as xavier");
+
+    f->n_numerics = 0;                     /* then a refresh of its own */
+    token_for("xavier", "xavier");
+    oauth_exchange(c, how);
+    assert_refreshed(c, &was, &fx_was);
+    assert_string_equal(cli_user(c)->kc_id, xid);
+  }
+}
+
+/** The same name under another Keycloak id (the account deleted and made
+ * again) is not the same account: refused, by either strategy. */
+static void reauth_same_name_other_id_refused(void **state)
+{
+  enum strategy how;
+
+  sasl_init_once();
+  for (how = LOCAL; how <= INTROSPECT; how++) {
+    char xid[ACCOUNT_ID_LEN + 1];
+    struct Client *c = new_logged_in(82 + how, "xav", "xavier",
+                                     user_id("xavier", xid), 1);
+    struct login_snap was;
+    struct effects fx_was;
+
+    snap(c, &was);
+    fx_was = fx;
+    token_for("xavier", "xavier-recreated");
+    oauth_exchange(c, how);
+    assert_refused(c, &was, &fx_was, "previous Keycloak user");
+  }
+}
+
+/** A token for the same account refreshes the login, by either strategy;
+ * the name is compared as the ircd compares account names (letter case
+ * folded), and the account keeps its own spelling. */
+static void reauth_same_account_refreshes(void **state)
+{
+  enum strategy how;
+
+  sasl_init_once();
+  for (how = LOCAL; how <= INTROSPECT; how++) {
+    char xid[ACCOUNT_ID_LEN + 1];
+    struct Client *c = new_logged_in(84 + how, "xav", "xavier",
+                                     user_id("xavier", xid), 1);
+    struct fake *f = fake_of(c);
+    struct login_snap was;
+    struct effects fx_was;
+
+    snap(c, &was);
+    fx_was = fx;
+    token_for("xavier", "xavier");
+    oauth_exchange(c, how);
+    assert_refreshed(c, &was, &fx_was);
+    assert_string_equal(cli_user(c)->kc_id, xid);
+
+    f->n_numerics = 0;
+    token_for("XAVIER", "xavier");
+    oauth_exchange(c, how);
+    assert_refreshed(c, &was, &fx_was);
+    assert_string_equal(cli_user(c)->account, "xavier");
+  }
+}
+
+/** The names decide whenever either side has no Keycloak id, and a
+ * missing id is never a way to another account:
+ *   current id  token id   same name   other name
+ *   known       present    ids decide  refused
+ *   known       absent     refresh     refused
+ *   unknown     present    refresh     refused   (refresh adopts the id)
+ *   unknown     absent     refresh     refused
+ * (the first row's cases are above). */
+static void reauth_id_table(void **state)
+{
+  static const struct {
+    int cur_id;                 /**< the login carries an id (SASL) or not
+                                     (services) */
+    int tok_id;                 /**< the token carries a sub */
+    int same;                   /**< the token names the same account */
+  } rows[] = {
+    { 1, 0, 1 }, { 1, 0, 0 },
+    { 0, 1, 1 }, { 0, 1, 0 },
+    { 0, 0, 1 }, { 0, 0, 0 },
+  };
+  size_t i;
+
+  sasl_init_once();
+  for (i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+    char xid[ACCOUNT_ID_LEN + 1];
+    struct Client *c;
+    struct login_snap was;
+    struct effects fx_was;
+    const char *name = rows[i].same ? "xavier" : "yvonne";
+
+    user_id("xavier", xid);
+    c = new_logged_in(86 + (int)(i % 2), "xav", "xavier",
+                      rows[i].cur_id ? xid : "", rows[i].cur_id);
+    snap(c, &was);
+    fx_was = fx;
+    token_for(name, rows[i].tok_id ? name : NULL);
+    oauth_exchange(c, LOCAL);
+    if (!rows[i].same) {
+      assert_refused(c, &was, &fx_was, "logged in as xavier");
+      continue;
+    }
+    assert_refreshed(c, &was, &fx_was);
+    if (rows[i].cur_id)
+      assert_string_equal(cli_user(c)->kc_id, xid);   /* kept */
+    else if (rows[i].tok_id) {
+      assert_string_equal(cli_user(c)->kc_id, xid);   /* adopted */
+      assert_int_equal(fx.alias_syncs, fx_was.alias_syncs + 1);
+    } else
+      assert_string_equal(cli_user(c)->kc_id, "");
+  }
+}
+
+/** #218 and #219: a bouncer session's alias and its primary are logged in
+ * like any client.  A token for another account is refused for either, and
+ * neither the session nor its other members hear of it; the session's
+ * Keycloak id speaks for a member whose own is unknown; a refresh for the
+ * session's account works for both and announces nothing, as before. */
+static void reauth_session_members(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *p, *a, *who[2];
+  int m;
+
+  sasl_init_once();
+  user_id("xavier", xid);
+  p = new_logged_in(88, "nn", "xavier", xid, 1);
+  a = new_logged_in(89, "nn", "xavier", xid, 1);
+  fsess.members[0] = p;
+  fsess.members[1] = a;
+  ircd_strncpy(fsess.kc_id, xid, sizeof(fsess.kc_id));
+  who[0] = a;                                 /* #218: the alias */
+  who[1] = p;                                 /* #219: the primary */
+
+  for (m = 0; m < 2; m++) {
+    struct Client *c = who[m];
+    struct fake *f = fake_of(c);
+    struct login_snap was;
+    struct effects fx_was;
+
+    snap(c, &was);
+    fx_was = fx;
+    token_for("yvonne", "yvonne");
+    oauth_exchange(c, m ? INTROSPECT : LOCAL);
+    assert_refused(c, &was, &fx_was, "logged in as xavier");
+
+    f->n_numerics = 0;
+    fx_was = fx;
+    token_for("xavier", "xavier");
+    oauth_exchange(c, m ? LOCAL : INTROSPECT);
+    assert_refreshed(c, &was, &fx_was);
+    assert_int_equal(fx.adopts, fx_was.adopts);
+  }
+
+  {                     /* the alias knows no id of its own: the session's */
+    struct login_snap was;
+    struct effects fx_was;
+
+    fake_of(a)->n_numerics = 0;
+    cli_user(a)->kc_id[0] = '\0';
+    snap(a, &was);
+    fx_was = fx;
+    token_for("xavier", "xavier-recreated");
+    oauth_exchange(a, LOCAL);
+    assert_refused(a, &was, &fx_was, "previous Keycloak user");
+  }
+}
+
+/** A login registration has applied, waiting before registration is done
+ * (a bouncer login held for burst convergence): logged in already.  Its
+ * record stays whole -- a refused introspection's Keycloak-confirmed id
+ * must not be what registration then reads (it lets a login end another
+ * user's held session). */
+static void reauth_while_registration_waits(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *c;
+  int other;
+
+  sasl_init_once();
+  user_id("xavier", xid);
+  for (other = 0; other < 2; other++) {
+    struct login_snap was;
+    struct effects fx_was;
+
+    c = new_client(90 + other, "wai", 1, REG_KEEPS);
+    cli_auth(c) = NULL;                     /* auth_complete_sasl() ran */
+    ircd_strncpy(cli_user(c)->account, "xavier", sizeof(cli_user(c)->account));
+    ircd_strncpy(cli_user(c)->kc_id, xid, sizeof(cli_user(c)->kc_id));
+    SetAccount(c);
+    sasl_identity_set(c, "xavier", 0, xid, 0);   /* a cached login */
+    SetSASLComplete(c);
+    CapSet(cli_active(c), CAP_STANDARDREPLIES);
+    assert_false(IsRegistered(c));
+
+    snap(c, &was);
+    fx_was = fx;
+    if (other)
+      token_for("yvonne", "yvonne");
+    else
+      token_for("xavier", "xavier-recreated");
+    oauth_exchange(c, INTROSPECT);
+    assert_refused(c, &was, &fx_was, other ? "logged in as xavier"
+                                           : "previous Keycloak user");
+    assert_int_equal(cli_saslkcidlive(c), 0);
+  }
+}
+
+/** A client logged in through services (no SASL record, no id): another
+ * account is refused, and its state stays: no SASL-complete flag, X3's
+ * timestamp. */
+static void reauth_after_services_login_refused(void **state)
+{
+  struct Client *c;
+  struct login_snap was;
+  struct effects fx_was;
+
+  sasl_init_once();
+  c = new_logged_in(92, "svc", "xavier", "", 0);
+  snap(c, &was);
+  fx_was = fx;
+  token_for("yvonne", "yvonne");
+  oauth_exchange(c, INTROSPECT);
+  assert_refused(c, &was, &fx_was, "logged in as xavier");
+  assert_false(IsSASLComplete(c));
+  assert_int_equal(cli_user(c)->acc_create, 1700000000);
+}
+
+/** A re-authentication that ends without a login -- aborted, or a token
+ * Keycloak refuses -- leaves the login as it was, the SASL-complete flag
+ * and the record included; the gate still stands after it. */
+static void reauth_failed_or_aborted_keeps_login(void **state)
+{
+  const char msg[] = "n,,\001auth=Bearer opaque-token\001\001";
+  char xid[ACCOUNT_ID_LEN + 1], data[300];
+  struct Client *c;
+  struct fake *f;
+  struct login_snap was;
+  struct effects fx_was;
+
+  sasl_init_once();
+  user_id("xavier", xid);
+
+  c = new_logged_in(93, "xav", "xavier", xid, 1);    /* aborted */
+  f = fake_of(c);
+  snap(c, &was);
+  fx_was = fx;
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  assert_int_equal(authenticate(c, "*"), 0);
+  assert_true(has_numeric(f, ERR_SASLABORTED));
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_login_unchanged(c, &was);
+  assert_nothing_announced(&fx_was);
+  f->n_numerics = 0;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_true(has_numeric(f, ERR_SASLALREADY));
+
+  c = new_logged_in(94, "xav", "xavier", xid, 1);    /* refused by Keycloak */
+  f = fake_of(c);
+  snap(c, &was);
+  fx_was = fx;
+  jwt_local_undecided = 1;
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver_kind(P_INTRO, KC_FORBIDDEN);          /* the error challenge */
+  assert_int_equal(authenticate(c, "AQ=="), 0);
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_login_unchanged(c, &was);
+  assert_nothing_announced(&fx_was);
+  f->n_numerics = 0;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_true(has_numeric(f, ERR_SASLALREADY));
+}
+
+/** A REGISTER login is a login like a SASL one (draft/account-
+ * registration: "as if it used SASL").  After registration a client
+ * logged in by REGISTER SUCCESS refreshes with OAUTHBEARER like any other,
+ * and a token for another account is refused -- the REGISTER login, its
+ * REGISTER mark (FLAG_REGLOGIN) included, stays as it was.  Before
+ * registration nothing is applied yet: OAUTHBEARER for another account
+ * replaces the REGISTER login, as a second SASL login would. */
+static void reauth_after_register_login(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    const char *acct = post ? "regb" : "rega";
+    struct Client *c = post ? new_registered(96, "rg") : new_client(96, "rg", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char rid[ACCOUNT_ID_LEN + 1], yid[ACCOUNT_ID_LEN + 1];
+    struct login_snap was;
+    struct effects fx_was;
+
+    CapSet(cli_active(c), CAP_STANDARDREPLIES);
+    register_through(c, acct, "*");
+    assert_identity(c, acct, user_id(acct, rid), 1);
+    assert_true(HasFlag(c, FLAG_REGLOGIN));
+    snap(c, &was);
+    fx_was = fx;
+    f->n_numerics = 0;
+    token_for("yvonne", "yvonne");
+    oauth_exchange(c, post ? LOCAL : INTROSPECT);
+    if (!post) {
+      assert_true(has_numeric(f, RPL_SASLSUCCESS));
+      assert_identity(c, "yvonne", user_id("yvonne", yid), 1);
+      assert_false(HasFlag(c, FLAG_REGLOGIN));
+      continue;
+    }
+    assert_refused(c, &was, &fx_was, "logged in as regb");
+    assert_true(HasFlag(c, FLAG_REGLOGIN));
+
+    f->n_numerics = 0;                     /* its own account: a refresh */
+    token_for(acct, acct);
+    oauth_exchange(c, LOCAL);
+    assert_refreshed(c, &was, &fx_was);
+    assert_string_equal(cli_user(c)->kc_id, rid);
+    assert_false(HasFlag(c, FLAG_REGLOGIN));   /* now a SASL login's */
+  }
+}
+
+/** Before registration a login is not applied yet: a client may log in
+ * again with OAUTHBEARER, as another account, and registration takes the
+ * last login (SASL 3.1; the REGISTER cases above pin the rest). */
+static void pre_registration_switch_allowed(void **state)
+{
+  const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+  char yid[ACCOUNT_ID_LEN + 1], data[300];
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = login_then_restart(95);              /* liz, then OAUTHBEARER */
+  f = fake_of(c);
+  token_for("yvonne", "yvonne");
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  assert_int_equal(authenticate(c, data), 0);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_identity(c, "yvonne", user_id("yvonne", yid), 0);   /* a local check */
+  f->cap_done = 1;                         /* CAP END: it registers as yvonne */
+  assert_int_equal(auth_sasl_done(cli_auth(c)), 0);
+  assert_int_equal(f->registered, 1);
+}
 #endif /* USE_LIBKC */
 
 int main(void)
@@ -2793,6 +3422,16 @@ int main(void)
     cmocka_unit_test_setup(register_refuses_names_the_casemapping_folds, setup),
     cmocka_unit_test_setup(register_tells_why_keycloak_refused, setup),
     cmocka_unit_test_setup(register_answer_carries_its_own_label, setup),
+    cmocka_unit_test_setup(reauth_other_account_refused, setup),
+    cmocka_unit_test_setup(reauth_same_name_other_id_refused, setup),
+    cmocka_unit_test_setup(reauth_same_account_refreshes, setup),
+    cmocka_unit_test_setup(reauth_id_table, setup),
+    cmocka_unit_test_setup(reauth_session_members, setup),
+    cmocka_unit_test_setup(reauth_while_registration_waits, setup),
+    cmocka_unit_test_setup(reauth_after_services_login_refused, setup),
+    cmocka_unit_test_setup(reauth_failed_or_aborted_keeps_login, setup),
+    cmocka_unit_test_setup(pre_registration_switch_allowed, setup),
+    cmocka_unit_test_setup(reauth_after_register_login, setup),
 #endif
   };
 

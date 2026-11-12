@@ -104,6 +104,28 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
+/** End a relayed exchange that did not log \a acptr in (services failed
+ * or aborted it, or its answer was refused): its agent, cookie and timer
+ * go, and registration, if the exchange held it, goes on.  Its result
+ * (whether acptr survived registration) is not for the caller: the line
+ * came from a server link, which must not be told CPTR_KILLED, and nothing
+ * may touch acptr afterwards. */
+static void sasl_relay_end(struct Client *acptr)
+{
+  cli_saslnamed(acptr)[0] = '\0';
+  cli_saslnamedts(acptr) = 0;
+  if ((cli_saslagent(acptr) != NULL) && cli_saslagentref(cli_saslagent(acptr)))
+    cli_saslagentref(cli_saslagent(acptr))--;
+  cli_saslagent(acptr) = NULL;
+  cli_saslcookie(acptr) = 0;
+  cli_saslstart(acptr) = 0;
+  if (t_active(&cli_sasltimeout(acptr)))
+    timer_del(&cli_sasltimeout(acptr));
+
+  if (cli_auth(acptr))
+    auth_sasl_done(cli_auth(acptr));
+}
+
 int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
@@ -252,6 +274,16 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     return 0;
   } else if (reply[0] == 'L') {
+    /* A logged-in client's re-authentication that services answer with
+     * another account is refused here, as soon as the account is known and
+     * before anything of it is kept: the client keeps its login and its
+     * record (sasl_reauth_refused(), the rule sasl_login_apply() applies to
+     * every tier).  The exchange ends; the D S that follows finds no
+     * cookie and reaches nobody, and services announce nothing for it. */
+    if (sasl_reauth_refused(acptr, data, NULL)) {
+      sasl_relay_end(acptr);
+      return 0;
+    }
     /* The account (and creation time) services name for this exchange,
      * kept for its D S (sasl_complete_login()).  Not the login identity
      * yet: that is the success's to set, and a REGISTER login landing
@@ -285,21 +317,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       send_reply(acptr, ERR_SASLABORTED);
     }
     /* Cleanup for failure/abort cases (success cleanup is in sasl_complete_login) */
-    cli_saslnamed(acptr)[0] = '\0';
-    cli_saslnamedts(acptr) = 0;
-    if ((cli_saslagent(acptr) != NULL) && cli_saslagentref(cli_saslagent(acptr)))
-      cli_saslagentref(cli_saslagent(acptr))--;
-    cli_saslagent(acptr) = NULL;
-    cli_saslcookie(acptr) = 0;
-    cli_saslstart(acptr) = 0;
-    if (t_active(&cli_sasltimeout(acptr)))
-      timer_del(&cli_sasltimeout(acptr));
-
-    /* Unblock registration if SASL was holding it.  The result says
-     * whether acptr survived registration; cptr is the server link,
-     * so it must not be returned from here. */
-    if (cli_auth(acptr))
-      auth_sasl_done(cli_auth(acptr));
+    sasl_relay_end(acptr);
     return 0;
   } else if (reply[0] == 'M')
     return send_reply(acptr, ERR_SASLMECHS, data);

@@ -22,6 +22,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
 #include "msg.h"
@@ -788,6 +789,90 @@ static const char *sasl_conn_kc_id(struct Client *sptr)
   return id[0] ? id : cli_user(sptr)->kc_id;
 }
 
+/* ---- A logged-in client's re-authentication never changes its account ---- */
+
+int sasl_logged_in(struct Client *cptr)
+{
+  /* The account is applied once registration has passed its auth stage
+   * (auth_complete_sasl(), then the request goes: cli_auth() is NULL from
+   * there on) or a login after registration applied it; a services login,
+   * a bouncer revive or an alias attach leaves the same state.  Before
+   * that, a login is only what registration will apply (cli_saslaccount()
+   * with the SASL-complete flag) and a later one replaces it, as SASL 3.1
+   * allows; an account given before registration by WEBIRC or a services
+   * login-on-connect is replaced the same way, as it always was. */
+  return cli_user(cptr) && IsAccount(cptr) && cli_user(cptr)->account[0]
+         && (IsRegistered(cptr) || !cli_auth(cptr));
+}
+
+int sasl_reauth_refused(struct Client *sptr, const char *account,
+                        const char *kc_id)
+{
+  static time_t notice_rate;
+  const char *current;
+  const char *conn_id;
+  int other_id;
+
+  if (!sasl_logged_in(sptr))
+    return 0;
+  current = cli_user(sptr)->account;
+  conn_id = sasl_conn_kc_id(sptr);
+
+  /* The same account: the same name as the ircd compares account names
+   * (ircd_strcmp(), its casemapping: sessions, history and metadata are
+   * keyed the same way), and, when both sides carry a Keycloak id, the
+   * same id -- the connection's session's when it is in one (a primary or
+   * an alias), else its own.  A side without an id leaves the name to
+   * decide (a token minted without the basic scope has no sub; a login
+   * through services carries none): the name still has to be the same, so
+   * a missing id never reaches another account. */
+  if (!EmptyString(account) && 0 == ircd_strcmp(current, account)) {
+    if (!kc_id || !account_id_valid(kc_id)
+        || !bounce_rebind_kc_conflict(conn_id, kc_id))
+      return 0;
+    other_id = 1;
+  } else
+    other_id = 0;
+
+  if (other_id) {
+    /* The account was deleted and made again under the same name: this
+     * connection -- with the bouncer session it belongs to -- is the
+     * previous user's, and is never tied to the new id (user, 2026-10-23). */
+    log_write(LS_USER, L_NOTICE, 0,
+              "SASL: %C, logged in as %s with Keycloak id %s, proved %s with "
+              "Keycloak id %s: re-authentication refused", sptr, current,
+              conn_id, account, kc_id);
+    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate,
+                                     "SASL: %C (logged in as %s) proved the "
+                                     "account under another Keycloak id: "
+                                     "re-authentication refused", sptr, current);
+    if (CapActive(sptr, CAP_STANDARDREPLIES))
+      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", current,
+                "This connection belongs to the account's previous Keycloak user");
+    send_reply(sptr, ERR_SASLFAIL,
+               ": this connection belongs to the account's previous Keycloak user");
+  } else {
+    char reason[ACCOUNTLEN + 80];
+
+    log_write(LS_USER, L_NOTICE, 0,
+              "SASL: %C, logged in as %s, re-authenticated as %s: refused, a "
+              "re-authentication cannot change the account", sptr, current,
+              EmptyString(account) ? "(no account)" : account);
+    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate,
+                                     "SASL: %C (logged in as %s) re-authenticated "
+                                     "as %s: refused", sptr, current,
+                                     EmptyString(account) ? "(no account)" : account);
+    if (CapActive(sptr, CAP_STANDARDREPLIES))
+      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", current,
+                "A re-authentication cannot change the account");
+    ircd_snprintf(0, reason, sizeof(reason),
+                  ": you are logged in as %s; a re-authentication cannot "
+                  "change the account", current);
+    send_reply(sptr, ERR_SASLFAIL, reason);
+  }
+  return 1;
+}
+
 /** What proved a login.  draft/account-registration: after REGISTER
  * SUCCESS the client "is assumed to be authenticated to the <account> as
  * if it used SASL", so a REGISTER's success is a login like any other
@@ -803,8 +888,9 @@ enum sasl_login_proof {
  *  P10 relay path (ms_sasl D/S handler) and a REGISTER's success
  *  (sasl_register_login()).  It performs (the step numbers are the
  *  comments' below):
- *   0. Refuse a registered connection proving its account under another
- *      Keycloak id (nothing else happens then)
+ *   0. Refuse a logged-in client's re-authentication that names another
+ *      account, or its account under another Keycloak id
+ *      (sasl_reauth_refused(); nothing else happens then)
  *   1. The login's identity as a whole: account, timestamp, Keycloak id
  *      (sasl_identity_set())
  *   2. Send RPL_LOGGEDIN to client (a REGISTER: REGISTER SUCCESS first)
@@ -842,27 +928,27 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
                              time_t acc_create, const char *kc_id, int id_live,
                              enum sasl_login_proof by)
 {
-  /* 0. A connection logged in to this account under one Keycloak id proves
-   * the same name under another: the account was deleted and recreated,
-   * and this connection -- with the bouncer session it belongs to -- is
-   * the previous user's.  It is never tied to the new id (user,
-   * 2026-10-23): the login fails before anything is announced, and the
-   * connection keeps what it had. */
-  if (IsRegistered(sptr) && cli_user(sptr) && IsAccount(sptr)
-      && 0 == ircd_strcmp(cli_user(sptr)->account, account)
-      && kc_id && account_id_valid(kc_id)
-      && bounce_rebind_kc_conflict(sasl_conn_kc_id(sptr), kc_id)) {
-    log_write(LS_USER, L_INFO, 0,
-              "SASL: %C proved account %s with Keycloak id %s; the connection "
-              "belongs to %s: login refused", sptr, account, kc_id,
-              sasl_conn_kc_id(sptr));
-    send_reply(sptr, ERR_SASLFAIL,
-               ": this connection belongs to the account's previous Keycloak user");
+  /* 0. A client already logged in (sasl_logged_in()) re-authenticates to
+   * refresh its login, never to change it (owner's ruling, #223): a login
+   * that names another account, or this account under another Keycloak id
+   * (deleted and made again: the connection, with the bouncer session it
+   * belongs to, is the previous user's; user, 2026-10-23), is refused here
+   * for every tier -- each local mechanism, a services answer (D S) --
+   * before anything is applied or announced.  The client keeps its login
+   * exactly as it was: the re-authentication touched neither its record
+   * nor its SASL-complete flag (m_authenticate()), and nothing below runs.
+   * The exchange ends; registration (step 9, the caller's) has nothing to
+   * wait for: a logged-in client has no auth request.  A REGISTER never
+   * gets here for a client holding an account: it is answered before
+   * (register_complete_success(), m_register.c), and an exchange in flight
+   * beside it is not this login's to end. */
+  if (by == LOGIN_BY_SASL && sasl_reauth_refused(sptr, account, kc_id)) {
     if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
       cli_saslagentref(cli_saslagent(sptr))--;
     cli_saslagent(sptr) = NULL;
     cli_saslcookie(sptr) = 0;
     cli_saslstart(sptr) = 0;
+    ClearSASLReauth(sptr);
     if (t_active(&cli_sasltimeout(sptr)))
       timer_del(&cli_sasltimeout(sptr));
     sasl_session_free(sptr);
@@ -951,7 +1037,11 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   } else
     SetFlag(sptr, FLAG_REGLOGIN);
 
-  /* 7. Post-registration account update (reauth or if already registered) */
+  /* 7. Post-registration account update: a registered client's first
+   * login ('R'), or a re-authentication of a logged-in client, which step 0
+   * let through only for its own account (the same name: the branch below
+   * that announces a change is the first login's; an 'M' from here would
+   * be an account change, which step 0 refuses). */
   if (IsRegistered(sptr) && cli_user(sptr) && cli_saslaccount(sptr)[0]) {
     char type = IsAccount(sptr) ? 'M' : 'R';
 
@@ -1037,6 +1127,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   cli_saslagent(sptr) = NULL;
   cli_saslcookie(sptr) = 0;
   cli_saslstart(sptr) = 0;
+  ClearSASLReauth(sptr);
   if (t_active(&cli_sasltimeout(sptr)))
     timer_del(&cli_sasltimeout(sptr));
 

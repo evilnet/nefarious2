@@ -78,6 +78,7 @@ static time_t logged_ts[MAXREC];
 static int nlogins;
 static int sasl_dones;                  /* auth_sasl_done() calls */
 static int auth_result;                 /* what it returns */
+static int refusals;                    /* sasl_reauth_refused() said so */
 
 static void tell(struct Client *to)
 {
@@ -213,6 +214,7 @@ static int world_setup(void **state)
   (void)state;
 
   ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
+  refusals = 0;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
 
@@ -437,6 +439,22 @@ void sasl_identity_set(struct Client *cptr, const char *account,
   ircd_strncpy(cli_saslkcid(cptr), kc_id ? kc_id : "",
                sizeof(cli_saslkcid(cptr)));
   cli_saslkcidlive(cptr) = id_live;
+}
+
+/* The account rule's verdict (sasl_auth.c, not linked; its own cases are
+ * in sasl_handler_cmocka): a client the ircd has logged in to an account
+ * may not be logged in to another.  The real one also tells the client and
+ * the log; the exchange is the caller's to end. */
+int sasl_reauth_refused(struct Client *sptr, const char *account,
+                        const char *kc_id)
+{
+  (void)kc_id;
+  if (!IsAccount(sptr) || cli_auth(sptr)
+      || 0 == ircd_strcmp(cli_user(sptr)->account, account))
+    return 0;
+  refusals++;
+  tell(sptr);
+  return 1;
 }
 
 int auth_sasl_done(struct AuthRequest *auth)
@@ -735,6 +753,53 @@ static void test_sasl_relay_exchange_times_out_after_register_login(void **state
   assert_int_equal(cli_saslcookie(c), 778);
 }
 
+/* #223 through services: a logged-in client's re-authentication that
+ * services answer with ANOTHER account.  The L reply is refused before
+ * anything of it is kept -- the login's own record (name, timestamp,
+ * Keycloak id and its live mark) stays, and nothing is named for the
+ * exchange -- and the exchange ends there: no cookie, no agent, so the D S
+ * after it reaches nobody.  An L for the client's own account goes on as
+ * before. */
+static void test_sasl_reauth_other_account_refused_at_L(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("xav", 7, 0);
+  ircd_strncpy(cli_user(c)->account, "xavier", ACCOUNTLEN + 1);
+  SetAccount(c);
+  sasl_identity_set(c, "xavier", 0, "AAAAAAAAAAAAAAAAAAAAAA", 1);
+  SetSASLComplete(c);
+  cli_saslcookie(c) = 777;
+  cli_saslstart(c) = CurrentTime;
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 C :+");
+  assert_ptr_equal(cli_saslagent(c), svs);
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 L yvonne 1700000000");
+  assert_int_equal(refusals, 1);
+  assert_string_equal(cli_saslnamed(c), "");
+  assert_string_equal(cli_saslaccount(c), "xavier");
+  assert_int_equal(cli_saslacccreate(c), 0);
+  assert_string_equal(cli_saslkcid(c), "AAAAAAAAAAAAAAAAAAAAAA");
+  assert_int_equal(cli_saslkcidlive(c), 1);
+  assert_true(IsSASLComplete(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_null(cli_saslagent(c));
+  assert_int_equal(cli_saslagentref(svs), 0);
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 D S");
+  assert_int_equal(nlogins, 0);
+
+  cli_saslcookie(c) = 778;                 /* a refresh of its own */
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.778 L xavier 1700000000");
+  assert_int_equal(refusals, 1);
+  assert_string_equal(cli_saslnamed(c), "xavier");
+  deliver(ms_sasl, svs, svs, "AB AB!7.778 D S");
+  assert_int_equal(nlogins, 1);
+  assert_string_equal(logged_as[0], "xavier");
+  assert_int_equal(logged_ts[0], 1700000000);
+}
+
 /* ====================================================================
  * Login-on-connect: which client a reply reaches
  * ==================================================================== */
@@ -806,6 +871,7 @@ int main(void)
     T(test_sasl_legitimate_exchange),
     T(test_sasl_relay_exchange_times_out_after_register_login),
     T(test_sasl_relay_success_is_the_account_services_named),
+    T(test_sasl_reauth_other_account_refused_at_L),
     T(test_loc_cookie_0_request_not_sent),
     T(test_loc_cookie_0_server_port),
     T(test_loc_cookie_0_deny),

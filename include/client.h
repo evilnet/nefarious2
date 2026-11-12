@@ -351,6 +351,11 @@ enum Flag
                                      *   (draft/account-registration), not by a SASL exchange:
                                      *   an exchange in flight has not completed
                                      *   (IsSASLExchangeDone()) */
+    FLAG_SASLREAUTH,                /**< The SASL exchange in flight is a logged-in
+                                     *   client's re-authentication (sasl_logged_in()):
+                                     *   its completed login stands until the exchange
+                                     *   ends, and the exchange has not completed
+                                     *   (IsSASLExchangeDone()) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -1443,11 +1448,16 @@ struct Client {
 /** Has the SASL exchange the connection's cookie belongs to completed?
  * The SASL-complete flag says the connection holds a completed login; a
  * REGISTER login (draft/account-registration) sets it too, possibly while
- * a SASL exchange is still in flight (FLAG_REGLOGIN), and that exchange
- * has not completed: it stays abortable and times out.  (An IAuth
- * success, the one completion that leaves its cookie, sets the flag as an
- * exchange does.) */
-#define IsSASLExchangeDone(x)   (IsSASLComplete(x) && !HasFlag(x, FLAG_REGLOGIN))
+ * a SASL exchange is still in flight (FLAG_REGLOGIN), and a logged-in
+ * client's re-authentication keeps it while its exchange runs
+ * (FLAG_SASLREAUTH): either way that exchange has not completed, stays
+ * abortable and times out.  (An IAuth success, the one completion that
+ * leaves its cookie, sets the flag as an exchange does.) */
+#define IsSASLExchangeDone(x)   (IsSASLComplete(x) && !HasFlag(x, FLAG_REGLOGIN) \
+                                 && !HasFlag(x, FLAG_SASLREAUTH))
+/** Return non-zero if the client's SASL exchange is a logged-in client's
+ * re-authentication (sasl_logged_in()). */
+#define IsSASLReauth(x)         HasFlag(x, FLAG_SASLREAUTH)
 /** Return non-zero if the client has been marked. */
 #define IsMarked(x)             HasFlag(x, FLAG_MARKED)
 /** Return non-zero if the client cannot join channels. */
@@ -1604,6 +1614,8 @@ struct Client {
 #define SetNotIPCheckExempt(x)  SetFlag(x, FLAG_IPCNOTEXEMPT)
 /** Mark a client as having completed SASL authentication. */
 #define SetSASLComplete(x)      SetFlag(x, FLAG_SASLCOMPLETE)
+/** Mark the client's SASL exchange as a logged-in client's re-authentication. */
+#define SetSASLReauth(x)        SetFlag(x, FLAG_SASLREAUTH)
 /** Mark a client as having been marked.. */
 #define SetMarked(x)            SetFlag(x, FLAG_MARKED)
 /** Mark a client as not being allowed to join channels. */
@@ -1753,6 +1765,8 @@ struct Client {
 #define ClearAccount(x)         ClrFlag(x, FLAG_ACCOUNT)
 /** Clear the client's SASL authentication complete flag. */
 #define ClearSASLComplete(x)    ClrFlag(x, FLAG_SASLCOMPLETE)
+/** Clear the client's re-authentication mark. */
+#define ClearSASLReauth(x)      ClrFlag(x, FLAG_SASLREAUTH)
 
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */
