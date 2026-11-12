@@ -117,6 +117,8 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   unsigned int flags = 0;
   char *p = 0;
   char *name;
+  char *part_comment;   /* the PART's comment, as the client sent it */
+  char *comment;        /* the one a channel's PART carries */
   struct Client *alias_source = NULL;
 
   /* Alias PART means the user is leaving — rewrite to primary so
@@ -150,9 +152,8 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* init join/part buffer */
-  joinbuf_init(&parts, sptr, cptr, JOINBUF_TYPE_PART,
-	       (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0,
-	       0);
+  part_comment = (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0;
+  joinbuf_init(&parts, sptr, cptr, JOINBUF_TYPE_PART, part_comment, 0);
   if (alias_source && !MyConnect(sptr))
     parts.jb_alias_source = alias_source;
 
@@ -174,26 +175,44 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     assert(!IsZombie(member)); /* Local users should never zombie */
 
+    /* What this channel's PART carries is this channel's alone: its flags
+     * and its comment start afresh for each channel of the list, as in
+     * ms_part().  Carried over, one channel's +D made every later one's
+     * PART hidden from its local members, one channel's ban or +Q took
+     * the comment off every later one. */
+    flags = 0;
+    comment = part_comment;
+
     if (!member_can_send_to_channel(member, 0))
     {
       flags |= CHFL_BANNED;
       /* Remote clients don't want to see a comment either. */
-      parts.jb_comment = 0;
+      comment = 0;
     }
 
     /* Strip PART message if required */
     if (chptr->mode.exmode & EXMODE_NOQUITPARTS)
-      parts.jb_comment = 0;
+      comment = 0;
 
     /* Strip PART message if color blocked and has color */
-    if ((chptr->mode.exmode & EXMODE_NOCOLOR) && parts.jb_comment && HasColor(parts.jb_comment))
-      parts.jb_comment = 0;
+    if ((chptr->mode.exmode & EXMODE_NOCOLOR) && comment && HasColor(comment))
+      comment = 0;
 
     /* Strip color from PART message */
-    if ((chptr->mode.exmode & EXMODE_STRIPCOLOR) && (parts.jb_comment != 0)) {
-      parts.jb_comment = (char*)StripColor(parts.jb_comment);
-      if (EmptyString(parts.jb_comment))
-        parts.jb_comment = 0;
+    if ((chptr->mode.exmode & EXMODE_STRIPCOLOR) && (comment != 0)) {
+      comment = (char*)StripColor(comment);
+      if (EmptyString(comment))
+        comment = 0;
+    }
+
+    /* The channels queued for the servers share one PART line and its
+     * comment: send them before this channel's comment differs. */
+    if (!(comment == parts.jb_comment
+          || (comment && parts.jb_comment && !strcmp(comment, parts.jb_comment)))) {
+      if (parts.jb_count)
+        joinbuf_flush(&parts);
+      parts.jb_comment = comment;
+      parts.jb_strlen = STARTJOINLEN + (comment ? strlen(comment) + 2 : 0);
     }
 
     if (IsDelayedJoin(member))
