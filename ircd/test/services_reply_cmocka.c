@@ -79,6 +79,13 @@ static time_t logged_ts[MAXREC];
 static int nlogins;
 static int sasl_dones;                  /* auth_sasl_done() calls */
 static int auth_result;                 /* what it returns */
+/* account-notify sends: who the line was about, and whether that user's
+ * own connections were among the recipients.  The channel walk with
+ * one == from leaves the user out; the session form includes it (send.c). */
+static struct Client *notified[MAXREC];
+static int notified_self[MAXREC];
+static int nnotified;
+
 /* The last RPL_SASLMECHS (908) sent, and its mechanism list. */
 static struct Client *mechs_to;
 static char mechs_sent[128];
@@ -220,6 +227,7 @@ static int world_setup(void **state)
   (void)state;
 
   ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
+  nnotified = 0;
   mechs_to = NULL;
   mechs_sent[0] = '\0';
   cap_mechs = NULL;
@@ -318,14 +326,33 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
   (void)from; (void)cmd; (void)tok; (void)one; (void)pattern;
 }
 
+static void record_notify(struct Client *from, int withcap, int self)
+{
+  if (withcap != CAP_ACCNOTIFY)
+    return;
+  assert_true(nnotified < MAXREC);
+  notified[nnotified] = from;
+  notified_self[nnotified] = self;
+  nnotified++;
+}
+
 void sendcmdto_common_channels_capab_butone(struct Client *from,
                                             const char *cmd, const char *tok,
                                             struct Client *one, int withcap,
                                             int skipcap,
                                             const char *pattern, ...)
 {
-  (void)from; (void)cmd; (void)tok; (void)one; (void)withcap; (void)skipcap;
-  (void)pattern;
+  (void)cmd; (void)tok; (void)skipcap; (void)pattern;
+  record_notify(from, withcap, one != from);
+}
+
+void sendcmdto_common_channels_capab_session(struct Client *from,
+                                             const char *cmd, const char *tok,
+                                             int withcap,
+                                             const char *pattern, ...)
+{
+  (void)cmd; (void)tok; (void)pattern;
+  record_notify(from, withcap, 1);
 }
 
 void sendcmdto_set_client_msgid(const char *msgid)
@@ -979,6 +1006,95 @@ static void test_loc_cookie_0_deny(void **state)
   assert_false(was_told(c));
 }
 
+/* ====================================================================
+ * ACCOUNT R / M / U: account-notify reaches the user itself (#220)
+ * ==================================================================== */
+
+/** A registered local user with a numeric, in no channel. */
+static struct Client *registered_user(const char *name, int fd)
+{
+  struct Client *c = local_client(name, fd, 0);
+
+  cli_from(c) = c;
+  assert_true(SetLocalNumNick(c));
+  return c;
+}
+
+/** One account-notify send about @a c, and it included @a c's own
+ * connections ("including themselves"). */
+static void assert_self_notified_once(struct Client *c)
+{
+  assert_int_equal(nnotified, 1);
+  assert_ptr_equal(notified[0], c);
+  assert_true(notified_self[0]);
+}
+
+/* Services log a registered user in (AUTH to AuthServ): the user is told,
+ * not only the members of its channels. */
+static void test_account_r_tells_the_user(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("uuu", 9);
+
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+
+  assert_true(IsAccount(c));
+  assert_string_equal(cli_user(c)->account, "zed");
+  assert_self_notified_once(c);
+}
+
+/* An account change: the same. */
+static void test_account_m_tells_the_user(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("uuu", 9);
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+  nnotified = 0;
+
+  deliver(ms_account, svs, svs, "%s%s M zed2 1700000000", NumNick(c));
+
+  assert_string_equal(cli_user(c)->account, "zed2");
+  assert_self_notified_once(c);
+}
+
+/* A logout: ACCOUNT * to the user too. */
+static void test_account_u_tells_the_user(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("uuu", 9);
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+  nnotified = 0;
+
+  deliver(ms_account, svs, svs, "%s%s U", NumNick(c));
+
+  assert_self_notified_once(c);
+}
+
+/* The same account again changes nothing and tells nobody. */
+static void test_account_r_same_tells_nobody(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("uuu", 9);
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+  nnotified = 0;
+
+  deliver(ms_account, svs, svs, "%s%s M zed 1700000000", NumNick(c));
+
+  assert_int_equal(nnotified, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1003,6 +1119,10 @@ int main(void)
     T(test_loc_cookie_0_request_not_sent),
     T(test_loc_cookie_0_server_port),
     T(test_loc_cookie_0_deny),
+    T(test_account_r_tells_the_user),
+    T(test_account_m_tells_the_user),
+    T(test_account_u_tells_the_user),
+    T(test_account_r_same_tells_nobody),
 #undef T
   };
 

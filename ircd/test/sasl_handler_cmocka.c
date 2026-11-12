@@ -547,6 +547,20 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
   va_end(vl);
   tlog_add("servers %s %s", tok, buf);
 }
+/* account-notify sends (#220): about whom, and whether that user's own
+ * connections were among the recipients (the walk with one == from leaves
+ * the user out; the session form includes it).  Both forms also count as
+ * fx.notifies, so "nothing announced" covers the user itself. */
+static struct Client *an_about[16];
+static int an_self[16];
+static int n_an;
+static void an_record(struct Client *from, int cap, int self)
+{
+  if (cap != CAP_ACCNOTIFY || n_an >= 16)
+    return;
+  an_about[n_an] = from;
+  an_self[n_an++] = self;
+}
 void sendcmdto_common_channels_capab_butone(struct Client *from,
                                             const char *cmd, const char *tok,
                                             struct Client *one, int require,
@@ -556,6 +570,21 @@ void sendcmdto_common_channels_capab_butone(struct Client *from,
   va_list vl;
   touch(from);
   fx.notifies++;
+  an_record(from, require, one != from);
+  va_start(vl, pattern);
+  fmt_ircd(buf, sizeof(buf), pattern, vl);
+  va_end(vl);
+  tlog_add("channels %s %s %s", tname(from), cmd, buf);
+}
+void sendcmdto_common_channels_capab_session(struct Client *from,
+                                             const char *cmd, const char *tok,
+                                             int require, const char *pattern, ...)
+{
+  char buf[TLOG_LEN];
+  va_list vl;
+  touch(from);
+  fx.notifies++;
+  an_record(from, require, 1);
   va_start(vl, pattern);
   fmt_ircd(buf, sizeof(buf), pattern, vl);
   va_end(vl);
@@ -1122,6 +1151,7 @@ static int setup(void **state)
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
   in_kc_call = in_login = local_off = 0;
   abort_reply = -1;
+  n_an = 0;
   iauth_on = iauth_starts = iauth_datas = iauth_aborts = 0;
   bed_features = 0;
   ntlog = 0;
@@ -3894,6 +3924,65 @@ static void star_abort_services_exchange(void **state)
   assert_int_equal(abort_reply, SASL_ABORT_REPLY_ABORTED);
   assert_no_exchange(c);
 }
+
+/** e. account-notify (#220): a login after connection registration -- a
+ * SASL PLAIN, a REGISTER -- tells the user itself ("including
+ * themselves"), once; before registration nothing is sent (the
+ * registration burst says who the client is). */
+static void flow_login_tells_the_user(void **state)
+{
+  int post;
+
+  sasl_init_once();
+  for (post = 0; post < 2; post++) {
+    struct Client *c = post ? new_registered(69, "fe2") : new_client(68, "fe1", 0, REG_KEEPS);
+    struct Client *r = post ? new_registered(71, "ff2") : new_client(70, "ff1", 0, REG_KEEPS);
+
+    n_an = 0;
+    plain_pending(c, post ? "eve2" : "eve1", "evepw");
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    register_through(r, post ? "nf2" : "nf1", "*");
+    assert_non_null(strstr(fake_of(r)->raw, "REGISTER SUCCESS"));
+    if (!post) {
+      assert_int_equal(n_an, 0);
+      continue;
+    }
+    assert_int_equal(n_an, 2);
+    assert_ptr_equal(an_about[0], c);
+    assert_true(an_self[0]);
+    assert_ptr_equal(an_about[1], r);
+    assert_true(an_self[1]);
+  }
+}
+
+/** #220 with #223: a logged-in client's re-authentication that is
+ * REFUSED (another account) changes no account, so no account-notify goes
+ * to anyone -- the user included (the session form would reach it); a
+ * same-account refresh changes nothing either, and says nothing. */
+static void reauth_tells_nobody_account(void **state)
+{
+  enum strategy how;
+
+  sasl_init_once();
+  for (how = LOCAL; how <= INTROSPECT; how++) {
+    char xid[ACCOUNT_ID_LEN + 1];
+    struct Client *c = new_logged_in(86 + how, "xav", "xavier",
+                                     user_id("xavier", xid), 1);
+
+    n_an = 0;
+    token_for("yvonne", "yvonne");
+    oauth_exchange(c, how);
+    assert_false(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_string_equal(cli_user(c)->account, "xavier");
+    assert_int_equal(n_an, 0);
+
+    token_for("xavier", "xavier");
+    oauth_exchange(c, how);
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_int_equal(n_an, 0);
+  }
+}
 #endif /* USE_LIBKC */
 
 int main(void)
@@ -3960,6 +4049,8 @@ int main(void)
     cmocka_unit_test_setup(reauth_casemapping_only_names_refused, setup),
     cmocka_unit_test_setup(reauth_refresh_keeps_minus_x, setup),
     cmocka_unit_test_setup(reauth_relayed_exchange_takes_no_local_exchange, setup),
+    cmocka_unit_test_setup(flow_login_tells_the_user, setup),
+    cmocka_unit_test_setup(reauth_tells_nobody_account, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

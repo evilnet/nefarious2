@@ -206,8 +206,10 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
               generate_msgid(ac_msgid, sizeof(ac_msgid));
             sendcmdto_set_client_msgid(ac_msgid);
           }
-          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
-                                                 "*");
+          /* account-notify: the observers, and the user's own
+           * connections ("including themselves"). */
+          sendcmdto_common_channels_capab_session(acptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                                  "*");
           sendcmdto_set_client_msgid(NULL);
 
           /* Set S2S tags before relay so downstream servers reuse this msgid */
@@ -322,8 +324,12 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
               generate_msgid(ac_msgid, sizeof(ac_msgid));
             sendcmdto_set_client_msgid(ac_msgid);
           }
-          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
-                                                 "%s", cli_user(acptr)->account);
+          /* account-notify: the observers, and the user's own
+           * connections ("including themselves"), before the host
+           * changes below -- the line every one of them gets is the
+           * same. */
+          sendcmdto_common_channels_capab_session(acptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                                  "%s", cli_user(acptr)->account);
           sendcmdto_set_client_msgid(NULL);
 
           if (ac_msgid[0]) {
@@ -503,8 +509,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           generate_msgid(ac_msgid, sizeof(ac_msgid));
         sendcmdto_set_client_msgid(ac_msgid);
       }
-      sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
-                                             "%s", cli_user(acptr)->account);
+      sendcmdto_common_channels_capab_session(acptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                              "%s", cli_user(acptr)->account);
       sendcmdto_set_client_msgid(NULL);
 
       if (ac_msgid[0]) {

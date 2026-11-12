@@ -199,9 +199,9 @@ static void deauth_client(struct Client *cptr, const char *reason)
    * destroy, metadata clear, authusers, presence anchor, account clear. */
   exit_ghost = bounce_account_deauth_apply(cptr);
 
-  /* Notify channel members with account-notify capability. */
-  sendcmdto_common_channels_capab_butone(cptr, CMD_ACCOUNT, cptr,
-                                          CAP_ACCNOTIFY, CAP_NONE, "*");
+  /* account-notify: channel members, and the user's own connections
+   * ("including themselves"). */
+  sendcmdto_common_channels_capab_session(cptr, CMD_ACCOUNT, CAP_ACCNOTIFY, "*");
 
   /* Propagate the account clear.  "AC <numeric> U" is EXTENDED_ACCOUNTS
    * syntax; the legacy AC grammar has no unregister form at all (a

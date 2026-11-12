@@ -1144,9 +1144,9 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
       bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 
-      /* Notify channel members with account-notify capability */
-      sendcmdto_common_channels_capab_butone(sptr, CMD_ACCOUNT, sptr,
-                                              CAP_ACCNOTIFY, CAP_NONE,
+      /* account-notify: channel members, and this user's own
+       * connections ("including themselves") */
+      sendcmdto_common_channels_capab_session(sptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
                                               "%s", cli_user(sptr)->account);
 
       /* Propagate to other servers */

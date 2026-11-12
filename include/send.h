@@ -291,6 +291,17 @@ extern void sendcmdto_common_channels_capab_butone(struct Client *from,
                                              int skipcap,
                                              const char *pattern, ...);
 
+/* The same to every local member of @a from's channels with @a withcap,
+ * and to @a from's own connections with it: @a from itself when it is
+ * ours, and each of its bouncer devices on this server, whether or not it
+ * shares a channel -- each connection once.  For a change the user is told
+ * of as well as its observers (account-notify: "including themselves"). */
+extern void sendcmdto_common_channels_capab_session(struct Client *from,
+                                                    const char *cmd,
+                                                    const char *tok,
+                                                    int withcap,
+                                                    const char *pattern, ...);
+
 /* Send command to all channel users on this server */
 extern void sendcmdto_channel_butserv_butone(struct Client *from,
 					     const char *cmd,

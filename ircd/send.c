@@ -3104,8 +3104,9 @@ void sendcmdto_set_extra_withcap(int cap)
   sendcmdto_extra_withcap = cap;
 }
 
-/** Whether @a to, a connection the channel walk did not pick (the
- * sender itself) takes a channel-capab send: the same three filters as the walk, read from the connection's OWN
+/** Whether @a to, a connection the channel walk did not pick -- the
+ * sender itself or one of its bouncer devices -- takes a channel-capab
+ * send: the same three filters as the walk, read from the connection's OWN
  * caps (a primary's cli_active is its session's union). */
 static int capab_own_wants(struct Client *to, int withcap, int skipcap,
                            int extracap)
@@ -3141,17 +3142,19 @@ static void capab_send_tagged(struct Client *to, struct Client *from,
   send_buffer(to, (flags && mb_cache[flags]) ? mb_cache[flags] : mb, 0);
 }
 
-/** The body of sendcmdto_common_channels_capab_butone(): @a from's line
- * to the local members of its channels that pass the capability filters,
- * each once, except @a one, and to @a from itself when it is ours, not
- * @a one, and passes the same filters on its own caps.  Every copy
- * carries the tags its recipient negotiated -- @a from's own too, which
- * used to go untagged unless a member with the same tag set had been sent
- * one first. */
+/** The body of sendcmdto_common_channels_capab_butone() and
+ * sendcmdto_common_channels_capab_session(): @a from's line to the local
+ * members of its channels that pass the capability filters, each once,
+ * except @a one; to @a from itself when it is ours and not @a one; and,
+ * with @a devices, to every local bouncer device of @a from (an alias
+ * whose primary it is), whether or not it shares a channel with it.
+ * Every copy carries the tags its recipient negotiated -- @a from's own
+ * too, which used to go untagged unless a member with the same tag set
+ * had been sent one first. */
 static void
 common_channels_capab_vsend(struct Client *from, const char *cmd,
                             struct Client *one, int withcap, int skipcap,
-                            const char *pattern, va_list ap)
+                            int devices, const char *pattern, va_list ap)
 {
   struct VarData vd;
   struct MsgBuf *mb;
@@ -3209,6 +3212,29 @@ common_channels_capab_vsend(struct Client *from, const char *cmd,
       && capab_own_wants(from, withcap, skipcap, extracap))
     capab_send_tagged(from, from, cmd, mb, mb_cache, pattern, ap);
 
+  /* The devices of from's bouncer session on this server, found by their
+   * primary pointer rather than through the session record: the record is
+   * filed under the account, which the callers of this form have just
+   * changed (an account change) or whose sessions they have just ended (a
+   * logout).  A device of another server is that server's: the same line
+   * reaches it there.  A device sharing a channel with from was reached
+   * by the walk already (sentalong). */
+  if (devices) {
+    int i;
+
+    for (i = 0; i <= HighestFd; i++) {
+      struct Client *dev = LocalClientArray[i];
+
+      if (!dev || dev == from || dev == one || !IsUser(dev)
+          || !IsBouncerAlias(dev) || cli_alias_primary(dev) != from
+          || cli_sentalong(dev) == sentalong_marker
+          || !capab_own_wants(dev, withcap, skipcap, extracap))
+        continue;
+      cli_sentalong(dev) = sentalong_marker;
+      capab_send_tagged(dev, from, cmd, mb, mb_cache, pattern, ap);
+    }
+  }
+
   /* Clear cap route context */
   cap_route_ctx.stc_active = 0;
   cap_route_ctx.stc_withcap = CAP_NONE;
@@ -3231,7 +3257,21 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 
   (void)tok;
   va_start(ap, pattern);
-  common_channels_capab_vsend(from, cmd, one, withcap, skipcap, pattern, ap);
+  common_channels_capab_vsend(from, cmd, one, withcap, skipcap, 0, pattern, ap);
+  va_end(ap);
+}
+
+/** See include/send.h. */
+void sendcmdto_common_channels_capab_session(struct Client *from,
+                                             const char *cmd, const char *tok,
+                                             int withcap,
+                                             const char *pattern, ...)
+{
+  va_list ap;
+
+  (void)tok;
+  va_start(ap, pattern);
+  common_channels_capab_vsend(from, cmd, NULL, withcap, CAP_NONE, 1, pattern, ap);
   va_end(ap);
 }
 
