@@ -1585,8 +1585,12 @@ process_multiline_batch(struct Client *sptr)
                        batch_time_ms, batch_base_msgid);
           first = 0;
         }
+        /* The end line carries the paste URL, as a channel batch's does:
+         * a server further on that relays this batch toward a legacy
+         * link has stored nothing a URL of its own could serve. */
         ml_send_line(sptr, target_server, '-', s2s_batch_id,
-                     cli_name(acptr), NULL, "",
+                     cli_name(acptr), NULL,
+                     batch_paste_url ? batch_paste_url : "",
                      batch_time_ms, batch_base_msgid);
       } else {
         /* Send fallback PRIVMSGs to legacy server.  Wire is BOUNDED
@@ -2435,6 +2439,83 @@ add_s2s_multiline_message(struct S2SMultilineBatch *batch, const char *text, int
   batch->total_bytes += (unsigned int)len;
 }
 
+/** Relay a completed DM batch toward its target over a legacy link.
+ *
+ * ms_multiline passes a DM batch's ML lines only to multiline links and
+ * leaves legacy ones to the fallback at batch end.  This is that
+ * fallback for a DM: the same bounded preview and truncation NOTICE the
+ * originating server sends when the legacy link is its own
+ * (process_multiline_batch).  Without it a DM to a user behind a legacy
+ * link of a relaying server (fork -> fork -> legacy) reaches no one, and
+ * its sender, who saw the full echo, is never told.
+ *
+ * Only the server on the way to the target sends it: when the target is
+ * back toward \a link_in this server is off the batch's path, and when
+ * the next hop is a multiline link the batch went there whole.
+ *
+ * The paste URL is only ever the originating server's, carried on the
+ * end line: nothing here stored the batch, so a URL minted here would
+ * lead nowhere.
+ *
+ * @param[in] batch      Completed batch (DM).
+ * @param[in] link_in    Link the batch arrived on.
+ * @param[in] acptr      The batch's target, a remote user.
+ * @param[in] base_msgid The batch's msgid.
+ */
+static void
+relay_dm_fallback(struct S2SMultilineBatch *batch, struct Client *link_in,
+                  struct Client *acptr, const char *base_msgid)
+{
+  struct Client *server = cli_from(acptr);
+  struct Client *from = batch->sender;
+  const char *paste_url = batch->paste_url[0] ? batch->paste_url : NULL;
+  int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+  int total_lines = batch->msg_count;
+  int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+  int sent = 0;
+  struct SLink *lp;
+
+  if (server == cli_from(link_in) || IsMultiline(server))
+    return;
+
+  /* Bouncer invariant #10: a legacy peer never saw the alias's BX C, so
+   * the lines go out as the primary -- except toward the primary's own
+   * direction, where the primary's numeric would be a fake direction. */
+  if (IsBouncerAlias(from) && cli_user(from)->alias_primary) {
+    struct Client *prim = cli_user(from)->alias_primary;
+    if (MyUser(prim) || cli_from(prim) != server)
+      from = prim;
+  }
+
+  for (lp = batch->messages; lp && sent < lines_to_send; lp = lp->next) {
+    const char *text = lp->value.cp + 1;
+    if (*text == '\0')
+      continue;
+    if (sent == 0)
+      sendcmdto_set_s2s_tags(batch->time_ms, base_msgid);
+    if (batch->is_notice)
+      sendcmdto_one(from, CMD_NOTICE, server, "%C :%s", acptr, text);
+    else
+      sendcmdto_one(from, CMD_PRIVATE, server, "%C :%s", acptr, text);
+    sent++;
+  }
+
+  /* DM truncation NOTICE, sourced from the sender as on the originating
+   * server, so it lands in the conversation window. */
+  if (total_lines > max_preview) {
+    int remaining = total_lines - sent;
+    char trunc_msgid[S2S_MSGID_BUFSIZE];
+    generate_msgid(trunc_msgid, sizeof(trunc_msgid));
+    if (paste_url)
+      sendcmdto_one_tags_ext(from, CMD_NOTICE, server, trunc_msgid,
+          "%C :[%d more lines] %s", acptr, remaining, paste_url);
+    else
+      sendcmdto_one_tags_ext(from, CMD_NOTICE, server, trunc_msgid,
+          "%C :[%d more lines - connect to a multiline-capable server to view]",
+          acptr, remaining);
+  }
+}
+
 /** Deliver a completed S2S multiline batch to local clients */
 static void
 deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr)
@@ -2460,6 +2541,26 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   else
     generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
+  is_channel = IsChannelName(batch->target);
+
+  /* Validate target */
+  if (is_channel) {
+    chptr = FindChannel(batch->target);
+    if (!chptr)
+      return;  /* Channel doesn't exist locally */
+  } else {
+    acptr = FindUser(batch->target);
+    if (!acptr)
+      return;  /* User doesn't exist */
+    if (!MyConnect(acptr)) {
+      /* Not ours: the batch is only passing through.  A multiline link
+       * toward the user already has it (ms_multiline); a legacy one
+       * gets the fallback here, or nothing would reach the user. */
+      relay_dm_fallback(batch, cptr, acptr, batch_base_msgid);
+      return;
+    }
+  }
+
   /* Pre-compute paste URL for fallback paths.
    * Prefer forwarded URL from originating server, fall back to local generation. */
   char s2s_paste_secret[12] = "";
@@ -2474,19 +2575,6 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       ircd_strncpy(s2s_paste_url_buf, url, sizeof(s2s_paste_url_buf) - 1);
       s2s_paste_url = s2s_paste_url_buf;
     }
-  }
-
-  is_channel = IsChannelName(batch->target);
-
-  /* Validate target */
-  if (is_channel) {
-    chptr = FindChannel(batch->target);
-    if (!chptr)
-      return;  /* Channel doesn't exist locally */
-  } else {
-    acptr = FindUser(batch->target);
-    if (!acptr || !MyConnect(acptr))
-      return;  /* User doesn't exist or isn't local */
   }
 
   /* Deliver to local recipients */
