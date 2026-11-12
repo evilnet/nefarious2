@@ -89,41 +89,239 @@
  * but not introduce any IsOper/IsUser/MyUser/IsServer etc. stuff.
  */
 
-/**
- * Check and optionally sanitize text for UTF-8 validity (UTF8ONLY enforcement).
- *
- * When UTF8ONLY is enabled:
- * - In strict mode: sends FAIL INVALID_UTF8 and returns 0 (reject message)
- * - In warn mode: sanitizes text, sends WARN INVALID_UTF8, returns 1 (proceed)
- *
- * When UTF8ONLY is disabled, always returns 1.
- *
- * @param[in] sptr Client sending the message.
- * @param[in,out] text Message text (may be modified in warn mode).
- * @param[in] command Command name for standard reply (e.g., "PRIVMSG").
- * @return 1 if message should proceed (possibly modified), 0 if rejected.
+/** UTF8ONLY, for a local user's message text: is it valid UTF-8, and if
+ * not, is it refused (UTF8ONLY_STRICT) or sanitised?  Sends nothing:
+ * relay_utf8_answer() gives the sender the answer, so a multiline batch
+ * can test every line and answer once.
+ * @param[in] text The text as the user sent it.
+ * @param[out] buf Room for the sanitised copy (RELAY_UTF8_SANITISED).
+ * @param[in] bufsize Size of @a buf.
+ * @return RELAY_UTF8_OK (valid, or UTF8ONLY off), RELAY_UTF8_REFUSED
+ *         (strict mode), or RELAY_UTF8_SANITISED (@a buf holds the copy
+ *         with each invalid byte replaced by U+FFFD).
  */
-static int check_utf8_text(struct Client *sptr, char *text, const char *command)
+int relay_utf8_check(const char *text, char *buf, size_t bufsize)
 {
-  if (!feature_bool(FEAT_UTF8ONLY))
-    return 1;
+  if (!feature_bool(FEAT_UTF8ONLY) || string_is_valid_utf8(text))
+    return RELAY_UTF8_OK;
+  if (feature_bool(FEAT_UTF8ONLY_STRICT))
+    return RELAY_UTF8_REFUSED;
+  ircd_strncpy(buf, text, bufsize - 1);
+  buf[bufsize - 1] = '\0';
+  string_sanitize_utf8(buf);
+  return RELAY_UTF8_SANITISED;
+}
 
-  if (string_is_valid_utf8(text))
-    return 1;
-
-  /* Invalid UTF-8 detected */
-  if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
-    /* Strict mode: reject the message */
-    send_fail(sptr, command, "INVALID_UTF8", NULL,
+/** The sender's answer to a relay_utf8_check() result: FAIL <cmd>
+ * INVALID_UTF8 for a refused text, WARN <cmd> INVALID_UTF8 for a
+ * sanitised one, nothing for valid text.
+ * @param[in] sptr The sender.
+ * @param[in] cmd "PRIVMSG" or "NOTICE".
+ * @param[in] result What relay_utf8_check() returned. */
+void relay_utf8_answer(struct Client *sptr, const char *cmd, int result)
+{
+  if (result == RELAY_UTF8_REFUSED)
+    send_fail(sptr, cmd, "INVALID_UTF8", NULL,
               "Message contains invalid UTF-8 and was rejected");
-    return 0;
+  else if (result == RELAY_UTF8_SANITISED)
+    send_warn(sptr, cmd, "INVALID_UTF8", NULL,
+              "Message contained invalid UTF-8 and was sanitized");
+}
+
+/** The checks a local user's PRIVMSG or NOTICE to a channel passes that
+ * do not depend on its text, in the order the relay makes them: the
+ * sender may speak there (client_can_send_to_channel: membership with
+ * +n, +m and voice, bans, +M, +r, +O, +a, +Z by the sender's own
+ * connection), the target limit of a +n channel, and for a NOTICE, +N.
+ * Made once per message -- once per multiline batch.
+ *
+ * Refused, a PRIVMSG is answered ERR_CANNOTSENDTOCHAN (or the target
+ * limit's ERR_TARGETTOOFAST); a NOTICE is dropped silently.
+ *
+ * @param[in] sptr The local sender.
+ * @param[in] chptr The channel.
+ * @param[in] is_notice Non-zero for a NOTICE.
+ * @return 0 when the message may go on, non-zero when it is refused.
+ */
+int relay_channel_refused(struct Client *sptr, struct Channel *chptr,
+                          int is_notice)
+{
+  /*
+   * This first: Almost never a server/service
+   */
+  if (!client_can_send_to_channel(sptr, chptr, 0)) {
+    if (!is_notice)
+      send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return 1;
+  }
+  if ((chptr->mode.mode & MODE_NOPRIVMSGS) &&
+      check_target_limit(sptr, chptr, chptr->chname, 0))
+    return 1;
+  if (is_notice && (chptr->mode.exmode & EXMODE_NONOTICES))
+    return 1;
+  return 0;
+}
+
+/** The checks a local user's PRIVMSG or NOTICE to a channel passes that
+ * depend on its text, and the transform it gets, in the order the relay
+ * makes them: +C (no CTCP but ACTION; a NOTICE, no CTCP at all), +T and
+ * the NOMULTITARGETS feature (one target), +c (no colour), then +S
+ * (colours stripped; nothing left refuses the message).  A multiline
+ * batch makes them line by line.
+ *
+ * Refused, a PRIVMSG is answered ERR_CANNOTSENDTOCHAN, or
+ * ERR_NOTEXTTOSEND when +S leaves nothing; a NOTICE is dropped silently.
+ *
+ * @param[in] sptr The local sender.
+ * @param[in] chptr The channel.
+ * @param[in] text The text as the user sent it (the checks read it).
+ * @param[in] mytext The text after the UTF-8 sanitiser (+S strips it).
+ * @param[in] targets Number of targets of the command.
+ * @param[in] is_notice Non-zero for a NOTICE.
+ * @return The text to send -- @a mytext, or StripColor()'s static copy
+ *         of it -- or NULL when the message is refused.
+ */
+const char *relay_channel_text(struct Client *sptr, struct Channel *chptr,
+                               const char *text, const char *mytext,
+                               int targets, int is_notice)
+{
+  const char *ch;
+
+  if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01') &&
+      (is_notice || ircd_strncmp(text+1, "ACTION", 6))) {
+    if (!is_notice)
+      send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return NULL;
   }
 
-  /* Warn mode: sanitize and proceed */
-  string_sanitize_utf8(text);
-  send_warn(sptr, command, "INVALID_UTF8", NULL,
-            "Message contained invalid UTF-8 and was sanitized");
-  return 1;
+  if (((chptr->mode.exmode & EXMODE_NOMULTITARG) ||
+       feature_bool(FEAT_NOMULTITARGETS)) && (targets > 1)) {
+    if (!is_notice)
+      send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return NULL;
+  }
+
+  if (chptr->mode.exmode & EXMODE_NOCOLOR)
+    for (ch=text;*ch;ch++)
+      if (*ch==COLOR_COLOR || *ch==27 || *ch==COLOR_REVERSE) {
+        if (!is_notice)
+          send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+        return NULL;
+      }
+
+  if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
+    mytext = StripColor(mytext);
+    if (EmptyString(mytext)) {
+      if (!is_notice)
+        send_reply(sptr, ERR_NOTEXTTOSEND);
+      return NULL;
+    }
+  }
+  return mytext;
+}
+
+/** The checks a local user's PRIVMSG or NOTICE to another user passes,
+ * in the order the relay makes them: the sender's target limit (not
+ * toward a channel service), the target's SILENCE list, +R (account-only:
+ * the sender must be logged in or an oper), +D (private-deaf: opers
+ * only), +q (common channels only) and the sender's own restriction to
+ * common channels.  A message to oneself passes +R, +D and +q.  Made
+ * once per message -- once per multiline batch, about the target user
+ * (its devices are served after, not checked again).
+ *
+ * Refused by the target limit (ERR_TARGETTOOFAST, from
+ * check_target_limit) or SILENCE (no answer) alike for both commands;
+ * by +R, +D or +q, answered ERR_ACCOUNTONLY, ERR_PRIVDEAF or
+ * ERR_COMMONCHANSONLY naming @a is_notice's command, as before.
+ *
+ * @param[in] sptr The local sender.
+ * @param[in] acptr The target user.
+ * @param[in] is_notice Non-zero for a NOTICE.
+ * @return 0 when the message may go on, non-zero when it is refused.
+ */
+int relay_private_refused(struct Client *sptr, struct Client *acptr,
+                          int is_notice)
+{
+  const char *cmd = is_notice ? "NOTICE" : "PRIVMSG";
+
+  if ((!IsChannelService(acptr) &&
+       check_target_limit(sptr, acptr, cli_name(acptr), 0)) ||
+      is_silenced(sptr, acptr, 0))
+    return 1;
+
+  /*
+   * +R check, if target is +R and we're not +r (or opered) then
+   * deny the message.
+   */
+  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), cmd, cli_name(acptr));
+    return 1;
+  }
+
+  /*
+   * +D check, if target is +D and we're not opered then deny
+   * the message.
+   */
+  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), cmd, cli_name(acptr));
+    return 1;
+  }
+
+  if ((IsRestrictPrivMsg(sptr) || IsCommonChansOnly(acptr)) && !IsAnOper(sptr) &&
+      !common_chan_count(acptr, sptr, 1) && (sptr != acptr)) {
+    send_reply(sptr, ERR_COMMONCHANSONLY, cli_name(acptr), cmd);
+    return 1;
+  }
+  return 0;
+}
+
+/** What a local user's accepted PRIVMSG or NOTICE to another user does
+ * before it is delivered: a PRIVMSG to an away user is answered RPL_AWAY
+ * (a NOTICE is not), and a local target may answer the sender without
+ * spending a target (add_target).  Once per message -- once per batch.
+ * @param[in] sptr The local sender.
+ * @param[in] acptr The target user.
+ * @param[in] is_notice Non-zero for a NOTICE. */
+void relay_private_accepted(struct Client *sptr, struct Client *acptr,
+                            int is_notice)
+{
+  /*
+   * send away message if user away
+   */
+  if (!is_notice && cli_user(acptr) && cli_user(acptr)->away)
+    send_reply(sptr, RPL_AWAY, cli_name(acptr), away_text_for(sptr, cli_user(acptr)->away));
+  /*
+   * deliver the message
+   */
+  if (MyUser(acptr))
+    add_target(acptr, sptr);
+}
+
+/** May a channel PRIVMSG or NOTICE that came from another server be
+ * delivered here?  The sender (an alias already taken as its primary)
+ * may speak by this server's view of the channel
+ * (client_can_send_to_channel, revealing a delayed join: a remote member
+ * may, a non-member -- a zombie included -- is held to +n, +m, the bans
+ * and the other off-channel modes); a NOTICE also needs the channel not
+ * +N, unless a server sends it; a channel service always may.
+ * @param[in] sptr The sender (a user, a server or a service).
+ * @param[in] chptr The channel.
+ * @param[in] is_notice Non-zero for a NOTICE.
+ * @return Non-zero when it may be delivered. */
+int server_relay_channel_allowed(struct Client *sptr, struct Channel *chptr,
+                                 int is_notice)
+{
+  if (!is_notice)
+    return client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr);
+  /*
+   * IsServer bypass for +N: server-source NOTICEs are system signals
+   * (multiline truncation, etc.), not user speech.  client_can_send_to_channel
+   * already exempts IsServer from +n/+m/+M/+R/+Z/+O, so exempting +N keeps
+   * +N consistent with the other gating modes.
+   */
+  return (client_can_send_to_channel(sptr, chptr, 1) &&
+          (!(chptr->mode.exmode & EXMODE_NONOTICES) || IsServer(sptr)))
+         || IsChannelService(sptr);
 }
 
 /** Length of the longest "nick!user@host" a message from @a sptr is
@@ -748,26 +946,19 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 {
   struct Channel* chptr;
   const char* mytext = text;
-  const char* ch;
   char utf8buf[BUFSIZE];
   char cutbuf[BUFSIZE];
+  int utf8;
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
 
   /* UTF8ONLY enforcement */
-  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
-    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
-      send_fail(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
-                "Message contains invalid UTF-8 and was rejected");
+  if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
+    relay_utf8_answer(sptr, "PRIVMSG", utf8);
+    if (utf8 == RELAY_UTF8_REFUSED)
       return;
-    }
-    /* Warn mode: copy, sanitize, and use sanitized version */
-    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
-    utf8buf[sizeof(utf8buf) - 1] = '\0';
-    string_sanitize_utf8(utf8buf);
-    send_warn(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
-              "Message contained invalid UTF-8 and was sanitized");
+    /* Warn mode: use the sanitized copy */
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -779,43 +970,10 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     send_reply(sptr, ERR_NOSUCHCHANNEL, name);
     return;
   }
-  /*
-   * This first: Almost never a server/service
-   */
-  if (!client_can_send_to_channel(sptr, chptr, 0)) {
-    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+  if (relay_channel_refused(sptr, chptr, 0))
     return;
-  }
-  if ((chptr->mode.mode & MODE_NOPRIVMSGS) &&
-      check_target_limit(sptr, chptr, chptr->chname, 0))
+  if (!(mytext = relay_channel_text(sptr, chptr, text, mytext, targets, 0)))
     return;
-
-  if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01') &&
-      ircd_strncmp(text+1, "ACTION", 6)) {
-    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
-    return;
-  }
-
-  if (((chptr->mode.exmode & EXMODE_NOMULTITARG) ||
-       feature_bool(FEAT_NOMULTITARGETS)) && (targets > 1)) {
-    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
-    return;
-  }
-
-  if (chptr->mode.exmode & EXMODE_NOCOLOR)
-    for (ch=text;*ch;ch++)
-      if (*ch==COLOR_COLOR || *ch==27 || *ch==COLOR_REVERSE) {
-        send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
-        return;
-      }
-
-  if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
-    mytext = StripColor(mytext);
-    if (EmptyString(mytext)) {
-      send_reply(sptr, ERR_NOTEXTTOSEND);
-      return;
-    }
-  }
 
   /* Cut once, here, to what ":nick!user@host PRIVMSG <chname> :" leaves
    * of 510: the message every member, the echo, other servers and the
@@ -936,26 +1094,19 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 {
   struct Channel* chptr;
   const char* mytext = text;
-  const char* ch;
   char utf8buf[BUFSIZE];
   char cutbuf[BUFSIZE];
+  int utf8;
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
 
   /* UTF8ONLY enforcement */
-  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
-    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
-      send_fail(sptr, "NOTICE", "INVALID_UTF8", NULL,
-                "Message contains invalid UTF-8 and was rejected");
+  if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
+    relay_utf8_answer(sptr, "NOTICE", utf8);
+    if (utf8 == RELAY_UTF8_REFUSED)
       return;
-    }
-    /* Warn mode: copy, sanitize, and use sanitized version */
-    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
-    utf8buf[sizeof(utf8buf) - 1] = '\0';
-    string_sanitize_utf8(utf8buf);
-    send_warn(sptr, "NOTICE", "INVALID_UTF8", NULL,
-              "Message contained invalid UTF-8 and was sanitized");
+    /* Warn mode: use the sanitized copy */
     mytext = utf8buf;
     if (EmptyString(mytext))
       return;
@@ -963,36 +1114,10 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   if (0 == (chptr = FindChannel(name)))
     return;
-  /*
-   * This first: Almost never a server/service
-   */
-  if (!client_can_send_to_channel(sptr, chptr, 0))
+  if (relay_channel_refused(sptr, chptr, 1))
     return;
-
-  if ((chptr->mode.mode & MODE_NOPRIVMSGS) &&
-      check_target_limit(sptr, chptr, chptr->chname, 0))
+  if (!(mytext = relay_channel_text(sptr, chptr, text, mytext, targets, 1)))
     return;
-
-  if (chptr->mode.exmode & EXMODE_NONOTICES)
-    return;
-
-  if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01'))
-    return;
-
-  if (((chptr->mode.exmode & EXMODE_NOMULTITARG) ||
-       feature_bool(FEAT_NOMULTITARGETS)) && (targets > 1))
-    return;
-
-  if (chptr->mode.exmode & EXMODE_NOCOLOR)
-    for (ch=text;*ch;ch++)
-      if (*ch==COLOR_COLOR || *ch==27 || *ch==COLOR_REVERSE)
-        return;
-
-  if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
-    mytext = StripColor(mytext);
-    if (EmptyString(mytext))
-      return;
-  }
 
   /* Cut once, here (see relay_channel_message). */
   mytext = relay_cut_text(sptr, MSG_NOTICE, strlen(chptr->chname), 0,
@@ -1155,11 +1280,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
   stext = relay_store_cut(sptr, MSG_PRIVATE, strlen(chptr->chname), text,
                           storebuf, sizeof(storebuf));
 
-  /*
-   * This first: Almost never a server/service
-   * Servers may have channel services, need to check for it here
-   */
-  if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
+  if (server_relay_channel_allowed(sptr, chptr, 0)) {
     /* Set client msgid override so local clients get msgid tag.
      * Use S2S msgid if available, otherwise generate one. */
     char relay_msgid[64] = "";
@@ -1267,18 +1388,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
   stext = relay_store_cut(sptr, MSG_NOTICE, strlen(chptr->chname), text,
                           storebuf, sizeof(storebuf));
 
-  /*
-   * This first: Almost never a server/service
-   * Servers may have channel services, need to check for it here.
-   *
-   * IsServer bypass for +N: server-source NOTICEs are system signals
-   * (multiline truncation, etc.), not user speech.  client_can_send_to_channel
-   * already exempts IsServer from +n/+m/+M/+R/+Z/+O, so exempting +N keeps
-   * +N consistent with the other gating modes.
-   */
-  if ((client_can_send_to_channel(sptr, chptr, 1) &&
-       (!(chptr->mode.exmode & EXMODE_NONOTICES) || IsServer(sptr)))
-      || IsChannelService(sptr)) {
+  if (server_relay_channel_allowed(sptr, chptr, 1)) {
     /* Set client msgid override so local clients get msgid tag. */
     char relay_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
@@ -1573,24 +1683,18 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   char cutbuf[BUFSIZE];
   char pm_msgid[64];
   char pm_timestamp[32];
+  int utf8;
 
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
 
   /* UTF8ONLY enforcement */
-  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
-    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
-      send_fail(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
-                "Message contains invalid UTF-8 and was rejected");
+  if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
+    relay_utf8_answer(sptr, "PRIVMSG", utf8);
+    if (utf8 == RELAY_UTF8_REFUSED)
       return;
-    }
-    /* Warn mode: copy, sanitize, and use sanitized version */
-    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
-    utf8buf[sizeof(utf8buf) - 1] = '\0';
-    string_sanitize_utf8(utf8buf);
-    send_warn(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
-              "Message contained invalid UTF-8 and was sanitized");
+    /* Warn mode: use the sanitized copy */
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -1602,45 +1706,9 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     send_reply(sptr, ERR_NOSUCHNICK, name);
     return;
   }
-  if ((!IsChannelService(acptr) &&
-       check_target_limit(sptr, acptr, cli_name(acptr), 0)) ||
-      is_silenced(sptr, acptr, 0))
+  if (relay_private_refused(sptr, acptr, 0))
     return;
-
-  /*
-   * +R check, if target is +R and we're not +r (or opered) then
-   * deny the message.
-   */
-  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "PRIVMSG", cli_name(acptr));
-    return;
-  }
-
-  /*
-   * +D check, if target is +D and we're not opered then deny
-   * the message.
-   */
-  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "PRIVMSG", cli_name(acptr));
-    return;
-  }
-
-  if ((IsRestrictPrivMsg(sptr) || IsCommonChansOnly(acptr)) && !IsAnOper(sptr) &&
-      !common_chan_count(acptr, sptr, 1) && (sptr != acptr)) {
-    send_reply(sptr, ERR_COMMONCHANSONLY, cli_name(acptr), "PRIVMSG");
-    return;
-  }
-
-  /*
-   * send away message if user away
-   */
-  if (cli_user(acptr) && cli_user(acptr)->away)
-    send_reply(sptr, RPL_AWAY, cli_name(acptr), away_text_for(sptr, cli_user(acptr)->away));
-  /*
-   * deliver the message
-   */
-  if (MyUser(acptr))
-    add_target(acptr, sptr);
+  relay_private_accepted(sptr, acptr, 0);
 
   /* Generate shared msgid + timestamp for alias forwarding, echo, and history */
   pm_msgid[0] = '\0';
@@ -1844,24 +1912,18 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   char cutbuf[BUFSIZE];
   char pm_msgid[64];
   char pm_timestamp[32];
+  int utf8;
 
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
 
   /* UTF8ONLY enforcement */
-  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
-    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
-      send_fail(sptr, "NOTICE", "INVALID_UTF8", NULL,
-                "Message contains invalid UTF-8 and was rejected");
+  if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
+    relay_utf8_answer(sptr, "NOTICE", utf8);
+    if (utf8 == RELAY_UTF8_REFUSED)
       return;
-    }
-    /* Warn mode: copy, sanitize, and use sanitized version */
-    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
-    utf8buf[sizeof(utf8buf) - 1] = '\0';
-    string_sanitize_utf8(utf8buf);
-    send_warn(sptr, "NOTICE", "INVALID_UTF8", NULL,
-              "Message contained invalid UTF-8 and was sanitized");
+    /* Warn mode: use the sanitized copy */
     mytext = utf8buf;
     if (EmptyString(mytext))
       return;
@@ -1869,40 +1931,9 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
   if (0 == (acptr = FindUser(name)))
     return;
-  if ((!IsChannelService(acptr) && 
-       check_target_limit(sptr, acptr, cli_name(acptr), 0)) ||
-      is_silenced(sptr, acptr, 0))
+  if (relay_private_refused(sptr, acptr, 1))
     return;
-
-  /*
-   * +R check, if target is +R and we're not +r (or opered) then
-   * deny the message.
-   */
-  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "NOTICE", cli_name(acptr));
-    return;
-  }
-
-  /*
-   * +D check, if target is +D and we're not opered then deny
-   * the message.
-   */
-  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "NOTICE", cli_name(acptr));
-    return;
-  }
-
-  if ((IsRestrictPrivMsg(sptr) || IsCommonChansOnly(acptr)) && !IsAnOper(sptr) &&
-      !common_chan_count(acptr, sptr, 1) && (sptr != acptr)) {
-    send_reply(sptr, ERR_COMMONCHANSONLY, cli_name(acptr), "NOTICE");
-    return;
-  }
-
-  /*
-   * deliver the message
-   */
-  if (MyUser(acptr))
-    add_target(acptr, sptr);
+  relay_private_accepted(sptr, acptr, 1);
 
   /* Generate shared msgid + timestamp for alias forwarding, echo, and history */
   pm_msgid[0] = '\0';

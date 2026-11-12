@@ -3838,6 +3838,31 @@ void sendcmdto_channel_serv_butone_v3(struct Client *from, const char *cmd,
 }
 
 
+/** Whether a channel message from \a from skips \a member: a zombie (no
+ * longer a reader), a member the \a skip flags leave out (SKIP_DEAF: +d;
+ * SKIP_BURST: behind a server still bursting; SKIP_NONOPS / NONHOPS /
+ * NONVOICES), or one whose SILENCE list matches \a from when
+ * SILENCE_CHANMSGS is on.  The member filter of sendcmdto_channel_butone()
+ * and sendcmdto_channel_butone_with_client_tags(), the channel relay's
+ * sends; multiline delivery (m_batch.c) uses it too, so a batch reaches
+ * the members a single line reaches.
+ * @param[in] from The message's source (the face: an alias's primary).
+ * @param[in] member The channel member.
+ * @param[in] skip Bitmask of SKIP_* flags.
+ * @return Non-zero when the member does not get the message.
+ */
+int channel_member_skipped(struct Client *from, struct Membership *member,
+                           unsigned int skip)
+{
+  return IsZombie(member) ||
+         (skip & SKIP_DEAF && IsDeaf(member->user)) ||
+         (skip & SKIP_NONOPS && !IsChanOp(member)) ||
+         (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member)) ||
+         (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
+         (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
+         (is_silenced(from, member->user, 1));
+}
+
 /** Send a (prefixed) command to all users on this channel, except for
  * \a one and those matching \a skip.
  * @warning \a pattern must not contain %v.
@@ -3960,13 +3985,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   bump_sentalong(one);
   for (member = to->members; member; member = member->next_member) {
     /* skip one, zombies, and deaf users... */
-    if (IsZombie(member) ||
-        (skip & SKIP_DEAF && IsDeaf(member->user)) ||
-        (skip & SKIP_NONOPS && !IsChanOp(member)) ||
-        (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member)) ||
-        (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
-        (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
-        (is_silenced(from, member->user, 1)) ||
+    if (channel_member_skipped(from, member, skip) ||
         (cli_fd(cli_from(member->user)) < 0 && !MyConnect(member->user)) ||
         cli_sentalong(member->user) == sentalong_marker)
       continue;
@@ -4203,13 +4222,7 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   bump_sentalong(one);
   for (member = to->members; member; member = member->next_member) {
     /* skip one, zombies, and deaf users... */
-    if (IsZombie(member) ||
-        (skip & SKIP_DEAF && IsDeaf(member->user)) ||
-        (skip & SKIP_NONOPS && !IsChanOp(member)) ||
-        (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member)) ||
-        (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
-        (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
-        (is_silenced(from, member->user, 1)) ||
+    if (channel_member_skipped(from, member, skip) ||
         (cli_fd(cli_from(member->user)) < 0 && !MyConnect(member->user)) ||
         cli_sentalong(member->user) == sentalong_marker)
       continue;

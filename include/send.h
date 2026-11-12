@@ -19,6 +19,7 @@
 
 struct Channel;
 struct Client;
+struct Membership;
 struct DBuf;
 struct MsgBuf;
 
@@ -384,6 +385,12 @@ extern void sendcmdto_channel_butone_with_client_tags(struct Client *from,
 #define SKIP_NONHOPS	0x10	/**< skip users that aren't halfopped (includes
                                    chanops) */
 #define SKIP_CHGHOST	0x20	/**< skip users that have chghost capability */
+
+/* Whether a channel message from a user skips this member (zombie, \a skip
+ * flags, SILENCE on channel messages): the filter of the channel relay's
+ * sendcmdto_channel_butone*, shared with multiline delivery (m_batch.c). */
+extern int channel_member_skipped(struct Client *from, struct Membership *member,
+                                  unsigned int skip);
 
 /* Send command to all users having a particular flag set */
 extern void sendwallto_group_butone(struct Client *from, int type, 

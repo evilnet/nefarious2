@@ -32,6 +32,7 @@
                                   so it cannot rely on a later header for this. */
 
 struct Client;
+struct Channel;
 
 extern void relay_channel_message(struct Client* sptr, const char* name, const char* text, int targets);
 extern void relay_channel_notice(struct Client* sptr, const char* name, const char* text, int targets);
@@ -48,6 +49,26 @@ extern void server_relay_masked_message(struct Client* sptr, const char* mask, c
 extern void server_relay_masked_notice(struct Client* sptr, const char* mask, const char* text);
 extern void server_relay_private_message(struct Client* sptr, const char* name, const char* text);
 extern void server_relay_private_notice(struct Client* sptr, const char* name, const char* text);
+
+/* The send checks of a local user's PRIVMSG / NOTICE, one place for the
+ * single-line relay and a multiline batch (m_batch.c) alike, so the two
+ * cannot drift apart: each answers the sender as its command answers. */
+#define RELAY_UTF8_OK        0   /**< valid UTF-8, or UTF8ONLY off */
+#define RELAY_UTF8_SANITISED 1   /**< invalid, sanitised copy made (warn mode) */
+#define RELAY_UTF8_REFUSED   2   /**< invalid, refused (UTF8ONLY_STRICT) */
+extern int relay_utf8_check(const char *text, char *buf, size_t bufsize);
+extern void relay_utf8_answer(struct Client *sptr, const char *cmd, int result);
+extern int relay_channel_refused(struct Client *sptr, struct Channel *chptr,
+                                 int is_notice);
+extern const char *relay_channel_text(struct Client *sptr, struct Channel *chptr,
+                                      const char *text, const char *mytext,
+                                      int targets, int is_notice);
+extern int relay_private_refused(struct Client *sptr, struct Client *acptr,
+                                 int is_notice);
+extern void relay_private_accepted(struct Client *sptr, struct Client *acptr,
+                                   int is_notice);
+extern int server_relay_channel_allowed(struct Client *sptr, struct Channel *chptr,
+                                        int is_notice);
 
 /* A local user's message is cut once, at its origin, to what the line
  * its recipients get (":nick!user@host <cmd> <target> :<text>", 510
