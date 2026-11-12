@@ -988,6 +988,23 @@ static void sasl_complete_login_from_kc(struct Client *acptr,
 
 #ifdef USE_LIBKC
 
+/** A Keycloak request for \a sptr's exchange could not be started: libkc
+ * then never calls back, so the callback context is the caller's and the
+ * exchange would wait for the SASL timeout.  Free the context and fail the
+ * exchange now; the -1 has sasl_continue() abort it (and let registration
+ * go on, with the result to the parser).
+ * @return -1. */
+static int sasl_kc_not_started(struct Client *sptr, struct sasl_cb_ctx *ctx,
+                               const char *mech)
+{
+  MyFree(ctx);
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "SASL %s: could not start the Keycloak request for %C",
+            mech, sptr);
+  send_reply(sptr, ERR_SASLFAIL, ": authentication service unavailable");
+  return -1;
+}
+
 /* Is this deployment's REGISTER policy "account is unusable until the
  * e-mailed verification link is clicked"?  When it is, a Keycloak
  * pending-required-action grant failure is a genuine "not verified yet"
@@ -1214,7 +1231,8 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL PLAIN: Verifying credentials for %s via Keycloak (client %C)",
             authcid_str, sptr);
-  kc_user_verify_password(authcid_str, password_str, sasl_plain_cb, ctx);
+  if (kc_user_verify_password(authcid_str, password_str, sasl_plain_cb, ctx) != 0)
+    return sasl_kc_not_started(sptr, ctx, "PLAIN");
 
   return 0;
 }
@@ -1324,7 +1342,8 @@ static int sasl_handle_external(struct Client *sptr, const unsigned char *decode
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL EXTERNAL: Searching for fingerprint %s (client %C)",
             fingerprint, sptr);
-  kc_user_search(query, true, sasl_external_cb, ctx);
+  if (kc_user_search(query, true, sasl_external_cb, ctx) != 0)
+    return sasl_kc_not_started(sptr, ctx, "EXTERNAL");
 
   return 0;
 }
@@ -1924,7 +1943,8 @@ static int sasl_scram_client_first(struct Client *sptr,
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL SCRAM: Fetching credentials for %s (client %C)",
             username, sptr);
-  kc_user_get(username, sasl_scram_creds_cb, ctx);
+  if (kc_user_get(username, sasl_scram_creds_cb, ctx) != 0)
+    return sasl_kc_not_started(sptr, ctx, "SCRAM");
 
   return 0;
 }
@@ -2176,7 +2196,8 @@ static int sasl_ecdsa_client_first(struct Client *sptr,
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL ECDSA: Fetching public key for %s (client %C)",
             session->authcid, sptr);
-  kc_user_get(session->authcid, sasl_ecdsa_key_cb, ctx);
+  if (kc_user_get(session->authcid, sasl_ecdsa_key_cb, ctx) != 0)
+    return sasl_kc_not_started(sptr, ctx, "ECDSA");
 
   return 0;
 }

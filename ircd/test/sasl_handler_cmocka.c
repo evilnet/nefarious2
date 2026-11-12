@@ -405,9 +405,11 @@ static enum {
   KC_LATER,          /**< the test answers it later: the event loop */
   KC_INLINE_OK,      /**< answered (success) before the call returns */
   KC_INLINE_FAIL,    /**< answered (a failure) before the call returns */
-  KC_REAP            /**< first delivers the pending answer of an earlier
+  KC_REAP,          /**< first delivers the pending answer of an earlier
                           request (as kc_http_request()'s timeout action and
                           finished-transfer reap do), then waits itself */
+  KC_REFUSE          /**< the call cannot start the request: non-zero, and
+                          the callback never runs */
 } kc_mode;
 /** What a reaped pending answer says. */
 static int reap_ok;
@@ -498,6 +500,8 @@ static void pend_deliver(int ok)
 static int kc_request(enum pend_kind kind, void *cb, void *data)
 {
   kc_requests++;
+  if (kc_mode == KC_REFUSE)
+    return -1;
   in_kc_call++;
   if (kc_mode == KC_REAP)
     pend_deliver(reap_ok);
@@ -1228,6 +1232,58 @@ static void authenticate_reaps_pending_register_answer(void **state)
   assert_true(f->freed);
   assert_int_equal(f->touched_after_free, 0);
 }
+
+/* ------------------------------------------------------------------ */
+/* A request that cannot be started                                    */
+/* ------------------------------------------------------------------ */
+
+/** A Keycloak request libkc refuses to start (it never calls back) fails
+ * the exchange at once -- ERR_SASLFAIL, the exchange gone -- instead of
+ * leaving it to the SASL timeout; registration goes on there, in the
+ * line, with the result to the parser. */
+static void refused_request_fails_at_once(void **state)
+{
+  static const char *const mechs[4] = {
+    "PLAIN", "EXTERNAL", "SCRAM-SHA-256", "ECDSA-NIST256P-CHALLENGE"
+  };
+  int m, keeps;
+
+  sasl_init_once();
+  for (keeps = 0; keeps < 2; keeps++)
+    for (m = 0; m < 4; m++) {
+      struct Client *c = new_client(51 + m, "rae", 1,
+                                    keeps ? REG_KEEPS : REG_EXITS);
+      struct fake *f = fake_of(c);
+      char data[300];
+      int requests;
+
+      ircd_strncpy(cli_sslclifp(c), "ab12cd34", sizeof(cli_sslclifp(c)));
+      kc_mode = KC_LATER;
+      assert_int_equal(authenticate(c, mechs[m]), 0);
+      if (m == 0)
+        plain_b64("rae", keeps ? "raepw2" : "raepw", data);
+      else if (m == 1)
+        strcpy(data, "+");
+      else if (m == 2)
+        b64((const unsigned char *)"n,,n=rae,r=nonce", 16, data);
+      else
+        b64((const unsigned char *)"rae", 3, data);
+      kc_mode = KC_REFUSE;
+      requests = kc_requests;
+      assert_int_equal(authenticate(c, data), keeps ? 0 : CPTR_KILLED);
+      assert_int_equal(kc_requests, requests + 1);
+      assert_int_equal(pend[0].kind, P_NONE);        /* nothing to answer */
+      if (keeps) {
+        assert_true(has_numeric(f, ERR_SASLFAIL));
+        assert_null(cli_saslsession(c));
+        assert_int_equal(cli_saslcookie(c), 0);
+        assert_int_equal(f->registered, 1);
+      } else {
+        assert_true(f->freed);
+        assert_int_equal(f->touched_after_free, 0);
+      }
+    }
+}
 #endif /* USE_LIBKC */
 
 int main(void)
@@ -1254,6 +1310,7 @@ int main(void)
     cmocka_unit_test_setup(another_clients_answer_inside_the_call, setup),
     cmocka_unit_test_setup(register_reaps_pending_sasl_answer, setup),
     cmocka_unit_test_setup(authenticate_reaps_pending_register_answer, setup),
+    cmocka_unit_test_setup(refused_request_fails_at_once, setup),
 #endif
   };
 
