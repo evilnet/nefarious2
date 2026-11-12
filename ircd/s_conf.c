@@ -1202,6 +1202,190 @@ attach_conf_uworld(struct Client *cptr)
     attach_conf_uworld(lp->value.cptr);
 }
 
+/** Whether two Connect blocks name the same peer address: the same host
+ * and the same from mask. */
+static int conf_same_peer(const struct ConfItem *a, const struct ConfItem *b)
+{
+  if (ircd_strcmp(a->host, b->host))
+    return 0;
+  if (!a->from_host || !b->from_host)
+    return a->from_host == b->from_host;
+  return 0 == ircd_strcmp(a->from_host, b->from_host);
+}
+
+/** Find the Connect block of the configuration just read under which a
+ * registered server link would be admitted if it linked now: chosen as
+ * conf_check_server() chooses one for the link's name -- by the host the
+ * link was recorded under at connect time, else by its address -- and
+ * checked as mr_server() checks it, for the SSL fingerprint.  A block
+ * that names the same peer address as the one the link holds admits the
+ * link as that one did (no address of the link has changed, and the new
+ * block's own DNS lookup may still be pending).  The password is not
+ * checked: the link proved it at its handshake and it is not kept.
+ * @param[in] cptr Registered server link.
+ * @param[in] old The Connect block the link holds.
+ * @param[out] why Why no block admits the link, when none does.
+ * @return The block, or NULL.
+ */
+static struct ConfItem *rehash_find_connect(struct Client *cptr,
+                                            const struct ConfItem *old,
+                                            const char **why)
+{
+  struct SLink *named = NULL, *lp;
+  struct ConfItem *tmp, *found;
+
+  /* the blocks attach_confs_byname() would attach, in its order */
+  for (tmp = GlobalConfList; tmp; tmp = tmp->next) {
+    if (!(tmp->status & CONF_SERVER) || IsIllegal(tmp))
+      continue;
+    if (0 == match(tmp->name, cli_name(cptr))
+        || 0 == ircd_strcmp(tmp->name, cli_name(cptr))) {
+      lp = make_link();
+      lp->value.aconf = tmp;
+      lp->next = named;
+      named = lp;
+    }
+  }
+
+  if (!(found = find_conf_byhost(named, cli_sockhost(cptr), CONF_SERVER))
+      && !(found = find_conf_byip(named, &cli_ip(cptr), CONF_SERVER)))
+    for (lp = named; lp && !found; lp = lp->next)
+      if (conf_same_peer(lp->value.aconf, old))
+        found = lp->value.aconf;
+
+  if (!named)
+    *why = "its Connect block was removed";
+  else if (!found)
+    *why = "the new Connect block does not admit it (host or address)";
+  else if (!verify_sslclifp(cptr, found)) {
+    *why = "the new Connect block does not admit it (SSL fingerprint)";
+    found = NULL;
+  }
+
+  while ((lp = named)) {
+    named = lp->next;
+    free_link(lp);
+  }
+  return found;
+}
+
+/** Name the servers behind \a sptr that a link holding \a aconf could not
+ * introduce now: beyond its maxhops, or outside its hub mask -- the tests
+ * check_loop_and_lh() makes of a new server.
+ * @param[in] aconf Connect block of the link.
+ * @param[in] sptr Server whose servers below are checked.
+ * @param[in,out] buf Names, space-separated, as far as they fit.
+ * @param[in] size Size of \a buf.
+ * @param[in,out] count Number found.
+ */
+static void rehash_out_of_limits(const struct ConfItem *aconf,
+                                 struct Client *sptr, char *buf, size_t size,
+                                 unsigned int *count)
+{
+  struct DLink *lp;
+  struct Client *acptr;
+  size_t len;
+
+  for (lp = cli_serv(sptr)->down; lp; lp = lp->next) {
+    acptr = lp->value.cptr;
+    if ((unsigned int) cli_hopcount(acptr) > aconf->maximum
+        || (aconf->hub_limit && match(aconf->hub_limit, cli_name(acptr)))) {
+      len = strlen(buf);
+      if (len + strlen(cli_name(acptr)) + 6 < size)
+        ircd_snprintf(0, buf + len, size - len, "%s%s", len ? " " : "",
+                      cli_name(acptr));
+      else if (len + 5 < size && !strstr(buf, " ..."))
+        ircd_snprintf(0, buf + len, size - len, " ...");
+      (*count)++;
+    }
+    rehash_out_of_limits(aconf, acptr, buf, size, count);
+  }
+}
+
+/** After a rehash, put a registered server link under the Connect block
+ * of the new configuration that admits it (rehash_find_connect()), so the
+ * hub mask and maxhops apply to every server it introduces from now on,
+ * and its connection class (ping frequency, SendQ) is that block's.  The
+ * new block is attached before the old one is detached, so the link always
+ * holds one; the old one, illegal, is freed with its last holder.  Servers
+ * already behind the link stay, even those the new limits would refuse:
+ * operators are told which.  When no block admits the link -- its block
+ * was removed, or now names another address or fingerprint -- the link
+ * keeps the one it linked under, as it has always done, until it drops;
+ * operators are told that too.  A rehash never drops a link.
+ * @param[in] cptr Registered server link.
+ */
+static void rehash_reattach_server(struct Client *cptr)
+{
+  struct ConfItem *old, *aconf;
+  const char *why = NULL;
+  char changes[BUFSIZE], behind[BUFSIZE];
+  unsigned int count = 0;
+  size_t len;
+
+  if (!(old = find_conf_byname(cli_confs(cptr), cli_name(cptr), CONF_SERVER))
+      || !IsIllegal(old))
+    return;
+
+  if (!(aconf = rehash_find_connect(cptr, old, &why))) {
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash: %s keeps the Connect block "
+                         "it linked under (hub mask %s, maxhops %u, class "
+                         "%s) until it drops: %s", cli_name(cptr),
+                         old->hub_limit ? old->hub_limit : "none",
+                         old->maximum, ConfClass(old), why);
+    return;
+  }
+
+  /* what changes for the link, said before the old block can be freed */
+  changes[0] = '\0';
+  if ((old->hub_limit || aconf->hub_limit)
+      && (!old->hub_limit || !aconf->hub_limit
+          || strcmp(old->hub_limit, aconf->hub_limit))) {
+    len = strlen(changes);
+    ircd_snprintf(0, changes + len, sizeof(changes) - len, ", hub mask %s -> %s",
+                  old->hub_limit ? old->hub_limit : "none",
+                  aconf->hub_limit ? aconf->hub_limit : "none");
+  }
+  if (old->maximum != aconf->maximum) {
+    len = strlen(changes);
+    ircd_snprintf(0, changes + len, sizeof(changes) - len,
+                  ", maxhops %u -> %u", old->maximum, aconf->maximum);
+  }
+  if (old->conn_class != aconf->conn_class) {
+    len = strlen(changes);
+    ircd_snprintf(0, changes + len, sizeof(changes) - len, ", class %s -> %s",
+                  ConfClass(old), ConfClass(aconf));
+  }
+  if (strcmp(old->passwd, aconf->passwd)) {
+    len = strlen(changes);
+    ircd_snprintf(0, changes + len, sizeof(changes) - len, ", password "
+                  "changed (it proved the old one; the new one applies "
+                  "when it next links)");
+  }
+
+  if (ACR_OK != attach_conf(cptr, aconf))
+    return;
+  detach_conf(cptr, old);
+  /* the SendQ and RecvQ limits are cached per connection: the new class's
+   * apply from now on (the ping frequency is read from it every time) */
+  cli_max_sendq(cptr) = 0;
+  cli_max_recvq(cptr) = 0;
+
+  if (changes[0])
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash: %s is now under its new "
+                         "Connect block: %s", cli_name(cptr), changes + 2);
+
+  behind[0] = '\0';
+  rehash_out_of_limits(aconf, cptr, behind, sizeof(behind) - 64, &count);
+  if (count)
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash: %u server%s behind %s %s "
+                         "outside its new Connect block's hub mask or maxhops "
+                         "and stay%s linked (SQUIT to remove): %s", count,
+                         count == 1 ? "" : "s", cli_name(cptr),
+                         count == 1 ? "is" : "are", count == 1 ? "s" : "",
+                         behind);
+}
+
 /** Free all memory associated with service mapping \a smap.
  * @param smap[in] The mapping to free.
  */
@@ -1321,8 +1505,22 @@ int rehash(struct Client *cptr, int sig)
   for (i = 0; i <= HighestFd; i++) {
     if ((acptr = LocalClientArray[i])) {
       assert(!IsMe(acptr));
-      if (IsServer(acptr))
+      /* A registered server's UWorld blocks are detached here, and
+       * attach_conf_uworld() below attaches the new ones.  Its Connect
+       * block is replaced by the new configuration's block that admits the
+       * link, if one does (rehash_reattach_server()): check_loop_and_lh()
+       * (m_server.c) reads the hub mask and maxhops for every server the
+       * link introduces from that block, and the link's connection class
+       * is that block's.  If none does, the link keeps the block it linked
+       * under, flagged illegal, until it drops.  Every other conf stays
+       * attached where it is, flagged illegal if it was in use: a client
+       * keeps its Client and Operator blocks, and a link that is still
+       * connecting keeps everything (conf_check_server() refuses an
+       * illegal Connect block when its SERVER arrives). */
+      if (IsServer(acptr)) {
         det_confs_butmask(acptr, ~(CONF_UWORLD | CONF_ILLEGAL));
+        rehash_reattach_server(acptr);
+      }
       /* Because admin's are getting so uppity about people managing to
        * get past K/G's etc, we'll "fix" the bug by actually explaining
        * whats going on.
@@ -1340,6 +1538,9 @@ int rehash(struct Client *cptr, int sig)
       }
     }
   }
+
+  /* Free the classes that only a link now under a new block still held. */
+  class_delete_marked();
 
   attach_conf_uworld(&me);
 
@@ -1558,9 +1759,11 @@ int conf_check_server(struct Client *cptr)
     c_conf = find_conf_byip(lp, &cli_ip(cptr), CONF_SERVER);
   /*
    * A rehash during the handshake marks the old Connect block illegal
-   * and leaves it attached only to this link (rehash detaches confs from
-   * registered servers alone); the detach below would free it, and
-   * attach_conf() would then use the freed block.  Treat it as gone.
+   * and leaves it attached to this link: rehash() moves only registered
+   * servers to a new block (rehash_reattach_server()), and detaches
+   * nothing else from a link that is still connecting.  The detach below
+   * would free it, and attach_conf() would then use the freed block.
+   * Treat it as gone.
    */
   if (c_conf && IsIllegal(c_conf))
     c_conf = NULL;
