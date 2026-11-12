@@ -2297,8 +2297,13 @@ void metadata_burst_self_to_client(struct Client *to)
   if (!CapActive(to, CAP_DRAFT_METADATA2))
     return;
 
+  /* draft/metadata-2: "If none exists, the server MUST send an empty
+   * batch instead."  The batch carries the target, so a client can tell
+   * "nothing set" from "not sent".  The spec requires batch for the cap;
+   * a client that took the cap without it gets no empty batch (nothing
+   * to say), and its metadata in the form it always had. */
   md = metadata_list_client(to);
-  if (!md)
+  if (!md && !CapActive(to, CAP_BATCH))
     return;
 
   /* Manual batch open with target parameter (send_batch_start doesn't

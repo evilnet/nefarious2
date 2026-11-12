@@ -820,6 +820,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
         if (CapActive(ghost, CAP_DRAFT_PERSISTENCE) && IsAccount(ghost))
           persistence_send_status(ghost);
 
+        /* IRCv3 draft/metadata-2: mirror of the normal path's self-
+         * metadata batch, before the MOTD end, so a reviving client sees
+         * its persisted keys (or an empty batch) in its registration
+         * burst.  See project_bouncer_revive_alias_emit_gaps.md. */
+        metadata_burst_self_to_client(ghost);
+
         motd_signon(ghost);
         /* Post-registration fakelag credit: modern clients burst init
          * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
@@ -836,12 +842,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
           if (grace > 0 && IsAccount(ghost))
             cli_lagcredit(ghost) = grace;
         }
-
-        /* IRCv3 draft/metadata-2: mirror the normal-path self-metadata
-         * BATCH so a reviving client sees its persisted keys at attach
-         * time rather than waiting for an explicit METADATA SUB.  See
-         * project_bouncer_revive_alias_emit_gaps.md. */
-        metadata_burst_self_to_client(ghost);
 
         /* Notify client if their nick changed (ghost had different nick) */
         if (ircd_strcmp(original_nick, cli_name(ghost)) != 0) {
@@ -1115,6 +1115,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (CapActive(sptr, CAP_DRAFT_PERSISTENCE) && IsAccount(sptr))
       persistence_send_status(sptr);
 
+    /* IRCv3 draft/metadata-2: the client's own metadata, in a metadata
+     * batch with its nick as target (empty when it has none), "as part of
+     * the registration burst, i.e. before RPL_ENDOFMOTD or ERR_NOMOTD".
+     * The account's rows were loaded above (metadata_load_account(), at
+     * the top).  Mirrored on both bouncer fast paths (invariant #4). */
+    metadata_burst_self_to_client(sptr);
+
     motd_signon(sptr);
     /* Post-registration fakelag credit: modern clients burst init
      * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
@@ -1131,12 +1138,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (grace > 0 && IsAccount(sptr))
         cli_lagcredit(sptr) = grace;
     }
-
-    /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
-     * Spec requires METADATA commands in a metadata batch with target param.
-     * Same helper is invoked from the bouncer-revive and alias-setup fast
-     * paths so all three registration tails stay in sync. */
-    metadata_burst_self_to_client(sptr);
 
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);

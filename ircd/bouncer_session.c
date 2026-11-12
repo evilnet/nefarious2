@@ -13892,6 +13892,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   if (CapActive(sptr, CAP_DRAFT_PERSISTENCE) && IsAccount(sptr))
     persistence_send_status(sptr);
 
+  /* IRCv3 draft/metadata-2: mirror of the normal path's self-metadata
+   * batch, before the MOTD end.  Aliases inherit the primary's
+   * account-scoped metadata at attach time, so the new local socket
+   * learns its keys without an explicit METADATA SUB round-trip. */
+  metadata_burst_self_to_client(sptr);
+
   motd_signon(sptr);
 
   /* Post-registration fakelag credit: modern clients burst init
@@ -13909,12 +13915,6 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     if (grace > 0 && IsAccount(sptr))
       cli_lagcredit(sptr) = grace;
   }
-
-  /* IRCv3 draft/metadata-2: mirror normal-path self-burst.  Aliases
-   * inherit the primary's account-scoped metadata at attach time, so
-   * the new local socket should learn its keys without an explicit
-   * METADATA SUB round-trip. */
-  metadata_burst_self_to_client(sptr);
 
   /* Step 3 copied the primary's user modes, privileges and snomask onto
    * the alias; tell its client what it is attached as, the way
