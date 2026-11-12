@@ -155,7 +155,14 @@ static __inline__ NTL_HDR_strCasediff { NTL_SRC_strCasediff }
 #endif /* FORCEINLINE */
 
 
+/** The mint time a msgid carries (ms since epoch), or 0 when the string
+ * is not exactly the form generate_msgid() mints (see ircd_string.c). */
 extern uint64_t msgid_decode_time_ms(const char *msgid);
+/** msgid_decode_time_ms(), also 0 when that time is more than
+ * @a max_ahead_ms past @a now_ms (0 = no such bound): for ids clients
+ * hand back as references. */
+extern uint64_t msgid_decode_ref_time_ms(const char *msgid, uint64_t now_ms,
+                                         uint64_t max_ahead_ms);
 /** Decode a msgid's full HLC stamp (physical ms + logical counter).
  * Returns 1 on success; 0 for a legacy/foreign msgid. */
 extern int msgid_decode_hlc(const char *msgid, uint64_t *ms_out, uint16_t *logical_out);

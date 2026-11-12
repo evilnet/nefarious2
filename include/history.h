@@ -593,13 +593,33 @@ extern void history_free_messages(struct HistoryMessage *list);
  */
 extern void history_free_targets(struct HistoryTarget *list);
 
-/** Get timestamp for a given message ID.
- * Useful for converting msgid references to timestamps.
+/** Get timestamp for a given message ID, in whatever target the store
+ * holds it, else the time the id itself carries.  For cursors that are
+ * not about one target (a bouncer ATTACH cursor); a CHATHISTORY selector
+ * is resolved against its target with history_msgid_ref_timestamp().
  * @param[in] msgid Message ID to look up.
  * @param[out] timestamp Buffer for timestamp (at least HISTORY_TIMESTAMP_LEN).
  * @return 0 on success, -1 if not found.
  */
 extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
+
+/** Resolve a msgid REFERENCE on @a target (a CHATHISTORY selector) to the
+ * key timestamp a walk is positioned at -- the one rule every subcommand
+ * and both BETWEEN bounds follow (#214):
+ *   - a row of @a target's history: that row's stamp (the walk then
+ *     positions on the row itself, the msgid breaking same-ms ties);
+ *   - not a row of @a target's, but an id of exactly the form this server
+ *     family mints (msgid_decode_ref_time_ms): the time the id carries --
+ *     it reveals no more than the id itself says, whichever conversation
+ *     it came from;
+ *   - anything else (a legacy id this target does not hold, garbage): no
+ *     timestamp -- the caller answers FAIL ... Unknown message id.
+ * @param[in] target Store key (channel, or PM pair key).
+ * @param[in] msgid The reference's msgid.
+ * @param[out] timestamp Buffer of HISTORY_TIMESTAMP_LEN.
+ * @return 0 a row of @a target, 1 the id's own time, -1 unknown. */
+extern int history_msgid_ref_timestamp(const char *target, const char *msgid,
+                                       char *timestamp);
 
 /** Check whether any PM record under @a target carries
  * `+evilnet.github.io/sid=<sessid>` in its client_tags (legacy

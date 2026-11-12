@@ -1429,11 +1429,90 @@ static void test_msgid_decode_rejects(void **state)
   }
 }
 
+/* #214: only exactly the form generate_msgid() mints decodes. */
+static void test_msgid_decode_strict_form(void **state)
+{
+  char id[40], t7[8];
+  const unsigned long long now = 1794500000000ULL;   /* 2026-11 */
+  (void)state;
+
+  msgid_encode7(t7, now);
+  snprintf(id, sizeof(id), "AB" "AAa" "%s" "LK", t7);
+  assert_int_equal((unsigned long long)msgid_decode_time_ms(id), now);
+
+  /* The ids from the #214 report: a real one, and two strings that are
+   * not msgids -- "zzzz-unknown" (12 characters, its chars 5..11 happen
+   * to read as a 2070 time) used to decode. */
+  assert_true(msgid_decode_time_ms("ABAAAaHQReh6LK") != 0);
+  assert_int_equal(msgid_decode_time_ms("zzzz-unknown"), 0);
+  assert_int_equal(msgid_decode_time_ms("zzzz-not-a-msgid-0000"), 0);
+
+  /* Too short / too long: a minted id with junk appended or cut. */
+  snprintf(id, sizeof(id), "AB" "AAa" "%s" "L", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+  snprintf(id, sizeof(id), "AB" "AAa" "%s" "LK" "ZZZZZZZZ", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+  snprintf(id, sizeof(id), "AB" "AAa" "%s" "LKZ", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+
+  /* A character outside the alphabet anywhere, not just in the time. */
+  snprintf(id, sizeof(id), "A-" "AAa" "%s" "LK", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+  snprintf(id, sizeof(id), "AB" "A-a" "%s" "LK", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+  snprintf(id, sizeof(id), "AB" "AAa" "%s" "L-", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+  assert_int_equal(msgid_decode_hlc("zzzz-unknown", NULL, NULL), 0);
+
+  /* The logical counter is 16 bits: 3 chars hold 18, so a first logical
+   * char past 'P' (value 15) was never minted. */
+  snprintf(id, sizeof(id), "AB" "P[[" "%s" "LK", t7);
+  assert_int_equal((unsigned long long)msgid_decode_time_ms(id), now);
+  snprintf(id, sizeof(id), "AB" "QAA" "%s" "LK", t7);
+  assert_int_equal(msgid_decode_time_ms(id), 0);
+}
+
+/* #214: a reference id stamped further ahead of now than the HLC's own
+ * forward slack was not minted by this server family. */
+static void test_msgid_decode_ref_time_bound(void **state)
+{
+  char id[16], t7[8];
+  const unsigned long long now = 1794500000000ULL;
+  (void)state;
+
+  msgid_encode7(t7, now + 60000ULL);
+  snprintf(id, sizeof(id), "ABAAB%sAc", t7);
+  assert_int_equal((unsigned long long)msgid_decode_ref_time_ms(id, now, 60000ULL),
+                   now + 60000ULL);   /* at the slack: kept */
+  msgid_encode7(t7, now + 60001ULL);
+  snprintf(id, sizeof(id), "ABAAB%sAc", t7);
+  assert_int_equal(msgid_decode_ref_time_ms(id, now, 60000ULL), 0);
+  /* 0 = the feature's "unbounded": only the decoder's own window. */
+  assert_int_equal((unsigned long long)msgid_decode_ref_time_ms(id, now, 0),
+                   now + 60001ULL);
+  /* The past is never bounded (ids outlive their rows: the point of
+   * decoding them). */
+  msgid_encode7(t7, 1600000000000ULL);
+  snprintf(id, sizeof(id), "ABAAB%sAc", t7);
+  assert_int_equal((unsigned long long)msgid_decode_ref_time_ms(id, now, 60000ULL),
+                   1600000000000ULL);
+  /* "ABAABxDxaWtnAF"-style: well-formed, ~50 years ahead. */
+  msgid_encode7(t7, now + 50ULL * 365 * 86400 * 1000);
+  snprintf(id, sizeof(id), "ABAAB%sAF", t7);
+  assert_true(msgid_decode_time_ms(id) != 0);
+  assert_int_equal(msgid_decode_ref_time_ms(id, now, 60000ULL), 0);
+  /* Malformed stays malformed. */
+  assert_int_equal(msgid_decode_ref_time_ms("zzzz-unknown", now, 60000ULL), 0);
+  assert_int_equal(msgid_decode_ref_time_ms(NULL, now, 60000ULL), 0);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_msgid_decode_roundtrip),
     cmocka_unit_test(test_msgid_decode_rejects),
+    cmocka_unit_test(test_msgid_decode_strict_form),
+    cmocka_unit_test(test_msgid_decode_ref_time_bound),
         /* ircd_strncpy */
         cmocka_unit_test(test_ircd_strncpy_normal),
         cmocka_unit_test(test_ircd_strncpy_truncation),

@@ -1801,8 +1801,25 @@ int valid_hostname(const char* name) {
 static const char msgid_b64_alphabet[65] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]";
 
+/** Length of every msgid generate_msgid() mints: node 2 + logical 3 +
+ * time 7 + counter 2.  The layout before the 2026-09 repack (node 2 +
+ * logical 3 + counter 9) had the same length; the one before that
+ * ("<yxx>-<startup>-<counter>") carried no time at all. */
+#define MSGID_HLC_LEN 14
+
+/** Value of one msgid character, or -1 when it is not in the alphabet
+ * (strchr() would match the terminating NUL, so test it first). */
+static int msgid_b64_value(char c)
+{
+  const char *pos;
+  if (c == '\0')
+    return -1;
+  pos = strchr(msgid_b64_alphabet, c);
+  return pos ? (int)(pos - msgid_b64_alphabet) : -1;
+}
+
 /** Decode the intrinsic mint-time from a msgid.
- * @param[in] msgid The message id (>= 12 chars examined).
+ * @param[in] msgid The message id.
  * @return Milliseconds since epoch, or 0 if the id is not a
  *         time-carrying msgid (legacy format, malformed, or the
  *         decoded value falls outside 2020..2100). */
@@ -1815,13 +1832,9 @@ int msgid_decode_hlc(const char *msgid, uint64_t *ms_out, uint16_t *logical_out)
   if (!ms)
     return 0;
   /* <node_2><logical_3><time_7><counter_2>: the logical counter sits in
-   * chars 2..4 (see generate_msgid). */
-  for (i = 2; i < 5; i++) {
-    const char *pos = strchr(msgid_b64_alphabet, msgid[i]);
-    if (!pos)
-      return 0;
-    logical = (logical << 6) | (uint64_t)(pos - msgid_b64_alphabet);
-  }
+   * chars 2..4 (see generate_msgid); msgid_decode_time_ms checked them. */
+  for (i = 2; i < 5; i++)
+    logical = (logical << 6) | (uint64_t)msgid_b64_value(msgid[i]);
   if (ms_out)
     *ms_out = ms;
   if (logical_out)
@@ -1829,27 +1842,56 @@ int msgid_decode_hlc(const char *msgid, uint64_t *ms_out, uint16_t *logical_out)
   return 1;
 }
 
+/** Only a string with exactly the form generate_msgid() mints decodes:
+ * MSGID_HLC_LEN characters, every one of them in the alphabet, a logical
+ * counter that fits the HLC's 16 bits, and a time inside 2020..2100.
+ * Anything else -- a shorter or longer id (an id with junk appended used
+ * to decode, as did "zzzz-unknown", 12 characters), a character outside
+ * the alphabet anywhere, the pre-repack layout (its counter padding
+ * decodes to ~0) -- is not a time and decodes to 0 (#214). */
 uint64_t msgid_decode_time_ms(const char *msgid)
 {
-  uint64_t ms = 0;
-  int i;
+  uint64_t ms = 0, logical = 0;
+  int i, v;
 
   if (!msgid)
     return 0;
-  for (i = 0; i < 12; i++)
-    if (!msgid[i])
-      return 0;   /* shorter than <node2><logical3><time7> */
+  for (i = 0; i < MSGID_HLC_LEN; i++)
+    if (msgid_b64_value(msgid[i]) < 0)
+      return 0;   /* too short, or a character no msgid carries */
+  if (msgid[MSGID_HLC_LEN] != '\0')
+    return 0;     /* too long */
+
+  for (i = 2; i < 5; i++)
+    logical = (logical << 6) | (uint64_t)msgid_b64_value(msgid[i]);
+  if (logical > 0xFFFF)
+    return 0;     /* struct HLC's logical is 16 bits */
 
   for (i = 5; i < 12; i++) {
-    const char *pos = strchr(msgid_b64_alphabet, msgid[i]);
-    if (!pos)
-      return 0;
-    ms = (ms << 6) | (uint64_t)(pos - msgid_b64_alphabet);
+    v = msgid_b64_value(msgid[i]);
+    ms = (ms << 6) | (uint64_t)v;
   }
 
   /* Sanity: accept 2020-01-01 .. 2100-01-01 only.  Legacy msgids
    * decode to near-zero here (counter high padding). */
   if (ms < 1577836800000ULL || ms > 4102444800000ULL)
+    return 0;
+  return ms;
+}
+
+/** msgid_decode_time_ms() for an id a client hands back as a reference
+ * (a CHATHISTORY selector, an ATTACH cursor): also 0 when the id says it
+ * was minted more than @a max_ahead_ms after @a now_ms.  That is the
+ * forward slack the HLC itself allows (FEAT_HLC_MAX_FORWARD_MS: a clock
+ * reading further ahead of the wall clock is refused, so no server of
+ * this family stamps one), so such an id was not minted here.
+ * @a max_ahead_ms 0 means unbounded (the feature's own meaning). */
+uint64_t msgid_decode_ref_time_ms(const char *msgid, uint64_t now_ms,
+                                  uint64_t max_ahead_ms)
+{
+  uint64_t ms = msgid_decode_time_ms(msgid);
+
+  if (ms && max_ahead_ms && ms > now_ms && ms - now_ms > max_ahead_ms)
     return 0;
   return ms;
 }

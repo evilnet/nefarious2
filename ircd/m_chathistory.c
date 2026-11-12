@@ -597,22 +597,27 @@ static const char *ch_fail_ctx(const char *subcmd, const char *target)
   return buf;
 }
 
-/** #73: an anchor msgid the store cannot place (not indexed, not
- * time-decodable -- a legacy id or garbage) used to produce an EMPTY
- * page stamped chathistory-end, which reads as "no more history".
- * BEFORE/AFTER/AROUND/BETWEEN answer FAIL MESSAGE_ERROR naming the
- * msgid so the client falls back to a timestamp; LATEST stays tolerant
- * (the anchor only bounds, see the handler).  Returns 1 when it sent
- * the FAIL. */
+/** A msgid selector the store cannot place on @a lookup_target (#73,
+ * #214): not a row of that target and not an id of the form this server
+ * family mints, so it carries no time either (a legacy id held elsewhere
+ * or nowhere, garbage).  One answer for every subcommand -- LATEST too
+ * (it used to answer as if the reference were "*") and either BETWEEN
+ * bound: FAIL CHATHISTORY MESSAGE_ERROR <sub> <target> <msgid> :Unknown
+ * message id, so the client falls back to a timestamp.  A well-formed id
+ * the target does not hold is a time (history_msgid_ref_timestamp).
+ * Called after the access check, on the target's store key: whether an
+ * id resolves must not be learnt about a target the requester cannot
+ * read.  Returns 1 when it sent the FAIL. */
 static int fail_unknown_msgid(struct Client *sptr, const char *subcmd,
-                              const char *target, enum HistoryRefType ref_type,
+                              const char *target, const char *lookup_target,
+                              enum HistoryRefType ref_type,
                               const char *ref_value)
 {
   char ts[HISTORY_TIMESTAMP_LEN];
   static char ctx[CHANNELLEN + HISTORY_MSGID_LEN + 40];
   if (ref_type != HISTORY_REF_MSGID || !ref_value)
     return 0;
-  if (history_msgid_to_timestamp(ref_value, ts) == 0)
+  if (history_msgid_ref_timestamp(lookup_target, ref_value, ts) >= 0)
     return 0;
   ircd_snprintf(0, ctx, sizeof(ctx), "%s %s %s", subcmd,
                 (target && *target) ? target : "*", ref_value);
@@ -1746,14 +1751,15 @@ static int store_away_now(void)
   return history_recv_peer_missing();
 }
 
-/** Unix seconds of a client reference (0 = unresolvable). */
-static time_t ref_unix_secs(enum HistoryRefType t, const char *v)
+/** Unix seconds of a client reference on @a target's store key (0 =
+ * unresolvable). */
+static time_t ref_unix_secs(const char *target, enum HistoryRefType t, const char *v)
 {
   char buf[HISTORY_TIMESTAMP_LEN];
   if (!v || !*v)
     return 0;
   if (t == HISTORY_REF_MSGID) {
-    if (history_msgid_to_timestamp(v, buf) != 0)
+    if (history_msgid_ref_timestamp(target, v, buf) < 0)
       return 0;
     return (time_t)strtoul(buf, NULL, 10);
   }
@@ -1995,7 +2001,7 @@ static int federation_wanted(const char *target, enum fed_page page,
                              enum HistoryRefType t2, const char *v2,
                              int *partial)
 {
-  time_t r1 = ref_unix_secs(t1, v1), r2 = ref_unix_secs(t2, v2), lo, hi;
+  time_t r1 = ref_unix_secs(target, t1, v1), r2 = ref_unix_secs(target, t2, v2), lo, hi;
   int desc = 0, open_hit = 0, absent, why;
 
   if (page == FP_BETWEEN) {
@@ -2211,18 +2217,6 @@ static int chathistory_latest(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
-  /* #73: LATEST's anchor only bounds the page ("messages after it");
-   * an anchor the store cannot place bounds nothing, so answer the
-   * plain latest page rather than an empty one stamped complete. */
-  if (ref_type == HISTORY_REF_MSGID && ref_value) {
-    char ts[HISTORY_TIMESTAMP_LEN];
-    if (history_msgid_to_timestamp(ref_value, ts) != 0) {
-      ref_type = HISTORY_REF_NONE;
-      ref_value = NULL;
-      ref_str = "*";   /* the federation query must not carry it either */
-    }
-  }
-
   /* Parse and validate limit */
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -2237,6 +2231,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
               "No access to target");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "LATEST", target, lookup_target, ref_type, ref_value))
+    return 0;
 
   /* Query local history using normalized target.  Presence-aware
    * paging: the walk skips rows outside the caller's presence without
@@ -2348,8 +2344,6 @@ static int chathistory_before(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
-  if (fail_unknown_msgid(sptr, "BEFORE", target, ref_type, ref_value))
-    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -2363,6 +2357,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
               "No access to target");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "BEFORE", target, lookup_target, ref_type, ref_value))
+    return 0;
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -2451,8 +2447,6 @@ static int chathistory_after(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
-  if (fail_unknown_msgid(sptr, "AFTER", target, ref_type, ref_value))
-    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -2466,6 +2460,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
               "No access to target");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "AFTER", target, lookup_target, ref_type, ref_value))
+    return 0;
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -2554,8 +2550,6 @@ static int chathistory_around(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
-  if (fail_unknown_msgid(sptr, "AROUND", target, ref_type, ref_value))
-    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -2569,6 +2563,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
               "No access to target");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "AROUND", target, lookup_target, ref_type, ref_value))
+    return 0;
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -2665,9 +2661,6 @@ static int chathistory_between(struct Client *sptr, const char *target,
               "Invalid second message reference");
     return 0;
   }
-  if (fail_unknown_msgid(sptr, "BETWEEN", target, ref_type1, ref_value1)
-      || fail_unknown_msgid(sptr, "BETWEEN", target, ref_type2, ref_value2))
-    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -2681,6 +2674,9 @@ static int chathistory_between(struct Client *sptr, const char *target,
               "No access to target");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "BETWEEN", target, lookup_target, ref_type1, ref_value1)
+      || fail_unknown_msgid(sptr, "BETWEEN", target, lookup_target, ref_type2, ref_value2))
+    return 0;
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
@@ -6198,9 +6194,10 @@ static int count_storage_servers(const char *target, time_t query_time)
  * Only queries servers that have advertised chathistory storage (CH A S)
  * and whose retention window covers the query timeframe.
  */
-/** Resolve a client reference (ISO timestamp, msgid, or *) to a Unix
- * "sec.mmm" string for BETWEEN direction comparison; empty on failure. */
-static void fed_ref_to_unix(const char *ref, char *out, size_t n)
+/** Resolve a client reference (ISO timestamp, msgid, or *) on @a target's
+ * store key to a Unix "sec.mmm" string for BETWEEN direction comparison;
+ * empty on failure. */
+static void fed_ref_to_unix(const char *target, const char *ref, char *out, size_t n)
 {
   enum HistoryRefType t;
   const char *v;
@@ -6211,7 +6208,7 @@ static void fed_ref_to_unix(const char *ref, char *out, size_t n)
     if (history_iso_to_unix(v, out, n) != 0)
       ircd_strncpy(out, v, n - 1), out[n-1] = '\0';
   } else if (t == HISTORY_REF_MSGID) {
-    if (history_msgid_to_timestamp(v, out) != 0)
+    if (history_msgid_ref_timestamp(target, v, out) < 0)
       out[0] = '\0';
   }
   /* HISTORY_REF_NONE ("*"): leave empty -> no direction preference. */
@@ -6437,8 +6434,8 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
       req->keep_oldest = !desc;
     } else {
       char u1[HISTORY_TIMESTAMP_LEN], u2[HISTORY_TIMESTAMP_LEN];
-      fed_ref_to_unix(ref, u1, sizeof(u1));
-      fed_ref_to_unix(ref2, u2, sizeof(u2));
+      fed_ref_to_unix(target, ref, u1, sizeof(u1));
+      fed_ref_to_unix(target, ref2, u2, sizeof(u2));
       req->keep_oldest = (u1[0] && u2[0] && strcmp(u1, u2) <= 0) ? 1 : 0;
     }
   } else {
@@ -6452,7 +6449,7 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
       && ref_value) {
     char ts[HISTORY_TIMESTAMP_LEN];
     if (ref_type == HISTORY_REF_MSGID
-        && history_msgid_to_timestamp(ref_value, ts) == 0) {
+        && history_msgid_ref_timestamp(target, ref_value, ts) >= 0) {
       req->around_ms = history_parse_ms(ts);
       ircd_strncpy(req->around_msgid, ref_value, sizeof(req->around_msgid));
     } else if (ref_type == HISTORY_REF_TIMESTAMP) {

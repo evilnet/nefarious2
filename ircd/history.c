@@ -2355,8 +2355,8 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
    * (audit 2026-09-06). */
   if (ref_type == HISTORY_REF_MSGID) {
     msgid = reference;
-    if (history_msgid_to_timestamp(reference, timestamp) != 0)
-      return 0; /* msgid not found, return empty */
+    if (history_msgid_ref_timestamp(target, reference, timestamp) < 0)
+      return 0; /* not a msgid this target holds or this family mints */
     reference = timestamp;
   } else if (ref_type == HISTORY_REF_TIMESTAMP) {
     /* Client sends ISO 8601, convert to Unix for lookup */
@@ -2396,7 +2396,7 @@ int history_query_after(const char *target, enum HistoryRefType ref_type,
    * (audit 2026-09-06). */
   if (ref_type == HISTORY_REF_MSGID) {
     msgid = reference;
-    if (history_msgid_to_timestamp(reference, timestamp) != 0)
+    if (history_msgid_ref_timestamp(target, reference, timestamp) < 0)
       return 0;
     reference = timestamp;
   } else if (ref_type == HISTORY_REF_TIMESTAMP) {
@@ -2441,7 +2441,7 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
   /* Convert reference to Unix timestamp format */
   if (ref_type == HISTORY_REF_MSGID) {
     msgid = reference;   /* floor is the ROW: same-ms rows after it stay */
-    if (history_msgid_to_timestamp(reference, timestamp) != 0)
+    if (history_msgid_ref_timestamp(target, reference, timestamp) < 0)
       return 0;
     reference = timestamp;
   } else if (ref_type == HISTORY_REF_TIMESTAMP) {
@@ -2910,7 +2910,7 @@ static int between_build_keys(const char *target,
 
   if (ref_type1 == HISTORY_REF_MSGID) {
     msgid1 = reference1;
-    if (history_msgid_to_timestamp(reference1, timestamp1) != 0)
+    if (history_msgid_ref_timestamp(target, reference1, timestamp1) < 0)
       return 1;
     ref1 = timestamp1;
   } else if (ref_type1 == HISTORY_REF_TIMESTAMP) {
@@ -2924,7 +2924,7 @@ static int between_build_keys(const char *target,
 
   if (ref_type2 == HISTORY_REF_MSGID) {
     msgid2 = reference2;
-    if (history_msgid_to_timestamp(reference2, timestamp2) != 0)
+    if (history_msgid_ref_timestamp(target, reference2, timestamp2) < 0)
       return 1;
     ref2 = timestamp2;
   } else if (ref_type2 == HISTORY_REF_TIMESTAMP) {
@@ -4465,6 +4465,48 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
   return found;
 }
 
+/** The mint time a msgid handed back by a client carries, as a key
+ * timestamp ("sec.mmm"): only an id of exactly the form this server family
+ * mints, stamped no further ahead of now than the HLC's own forward slack
+ * (msgid_decode_ref_time_ms).
+ * @return 0 (@a timestamp filled), or -1: not a time. */
+static int msgid_ref_mint_timestamp(const char *msgid, char *timestamp)
+{
+  uint64_t ms = msgid_decode_ref_time_ms(msgid, hlc_wall_clock_ms(),
+                                         hlc_max_forward_ms());
+  if (!ms)
+    return -1;
+  ircd_snprintf(0, timestamp, HISTORY_TIMESTAMP_LEN, "%llu.%03llu",
+                (unsigned long long)(ms / 1000),
+                (unsigned long long)(ms % 1000));
+  return 0;
+}
+
+int history_msgid_ref_timestamp(const char *target, const char *msgid,
+                                char *timestamp)
+{
+  char held[CHANNELLEN + PM_PAIRKEY_BUFSIZE + 2];
+  int rc;
+
+  if (!history_available || !target || !*target || !msgid || !*msgid)
+    return -1;
+
+  /* A row of @a target: its own index row (msgid\0target), or a legacy
+   * bare-msgid row whose value names this target.  Never another target's
+   * row -- its stamp would say when a message the requester may not see
+   * was stored, and a legacy id (no time inside) would resolve only
+   * because some other conversation holds it (#214). */
+  rc = msgid_index_resolve(msgid, target, NULL, timestamp, held, sizeof(held));
+  if (rc == 0 && ircd_strcmp(held, target) == 0)
+    return 0;
+
+  /* Not this target's (never stored here, aged out, another target's):
+   * the id's own mint time, when it is an id this family mints. */
+  if (msgid_ref_mint_timestamp(msgid, timestamp) == 0)
+    return 1;
+  return -1;
+}
+
 int history_msgid_to_timestamp(const char *msgid, char *timestamp)
 {
   struct db_val val = { NULL, 0 };
@@ -4484,13 +4526,8 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
      * it so cursors and refs degrade to a time anchor instead of
      * failing.  Legacy/garbage ids decode to 0 and keep the old
      * failure path. */
-    uint64_t ms = msgid_decode_time_ms(msgid);
-    if (ms != 0) {
-      ircd_snprintf(0, timestamp, HISTORY_TIMESTAMP_LEN, "%llu.%03llu",
-                    (unsigned long long)(ms / 1000),
-                    (unsigned long long)(ms % 1000));
+    if (msgid_ref_mint_timestamp(msgid, timestamp) == 0)
       return 0;
-    }
     log_write(LS_SYSTEM, L_INFO, 0,
               "history_msgid_to_timestamp: msgid=%s NOT FOUND in cf_msgid index "
               "and not time-decodable (legacy format)", msgid);
