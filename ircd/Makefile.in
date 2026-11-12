@@ -296,6 +296,7 @@ IRCD_SRC = \
 	m_zline.c \
 	match.c \
 	ml_content.c \
+	ml_fallback.c \
 	ml_route.c \
 	memdebug.c \
 	motd.c \

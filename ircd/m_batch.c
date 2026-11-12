@@ -64,6 +64,7 @@
 #include "history.h"
 #include "history_trim_codec.h"
 #include "ml_content.h"
+#include "ml_fallback.h"
 #include "ml_route.h"
 #include "paste_listener.h"
 #include "webpush.h"
@@ -425,32 +426,26 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
                               const char *paste_url_str,
                               const char *client_tags, int is_notice)
 {
-  struct SLink *lp;
-  int lines_to_send;
-  int send_notice;
-  int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+  const struct SLink *lp;
+  int shown, remaining, units = 0;
   const char *msg_str = is_notice ? MSG_NOTICE : MSG_PRIVATE;
 
-  /* Configurable preview budget */
-  if (total_lines <= max_preview) {
-    lines_to_send = total_lines;
-    send_notice = 0;
-  } else {
-    lines_to_send = max_preview;
-    send_notice = 1;
-  }
+  /* The preview and "[N more lines]" by the one rule (ml_fallback.h):
+   * blank lines neither shown nor counted.  total_lines is not needed:
+   * the count comes from the lines themselves. */
+  (void)total_lines;
+  ml_fallback_plan(messages, feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES),
+                   &shown, &remaining);
 
   /* Send preview lines with server tags (time, msgid) for IRCv3 compliance.
    * Per multiline spec, only the FIRST fallback line carries msgid to avoid
    * duplicate history entries in receiving clients.
    * Client-only tags from BATCH open are included on each fallback line. */
-  int sent = 0;
   int msgid_sent = 0;
   int use_ctags = (client_tags && *client_tags && CapActive(to, CAP_MSGTAGS));
-  for (lp = messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
-    char *text = lp->value.cp + 1;
-    if (*text == '\0')
-      continue;  /* Skip blank lines in fallback per IRCv3 spec */
+  for (lp = ml_fallback_next(messages, &units, shown); lp;
+       lp = ml_fallback_next(lp->next, &units, shown)) {
+    const char *text = lp->value.cp + 1;
     const char *line_msgid = (!msgid_sent) ? msgid : NULL;
     msgid_sent = 1;
     if (use_ctags) {
@@ -479,10 +474,8 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
     }
   }
 
-  if (!send_notice)
+  if (remaining <= 0)
     return;
-
-  int remaining = total_lines - sent;
 
   /* Truncation NOTICE: fresh msgid (system-generated, not part of user
    * content), tag-aware send so it carries msgid/time.  Source is &me
@@ -1022,9 +1015,8 @@ ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
                     const char *paste_url)
 {
   struct Client *from = sptr;
-  struct SLink *lp;
-  int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-  int with_text = 0;
+  const struct SLink *lp;
+  int shown, left, units = 0;
   int sent = 0;
 
   if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
@@ -1033,15 +1025,12 @@ ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
       from = sptr;
   }
 
-  for (lp = messages; lp; lp = lp->next)
-    if (lp->value.cp[1] != '\0')
-      with_text++;
-
-  for (lp = messages; lp && sent < max_preview; lp = lp->next) {
+  ml_fallback_plan(messages, feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES),
+                   &shown, &left);
+  for (lp = ml_fallback_next(messages, &units, shown); lp;
+       lp = ml_fallback_next(lp->next, &units, shown)) {
     const char *text = lp->value.cp + 1;
 
-    if (*text == '\0')
-      continue;
     if (sent == 0)
       sendcmdto_set_s2s_tags(time_ms, msgid);
     sendcmdto_set_s2s_fallback(msgid);
@@ -1056,7 +1045,7 @@ ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
     sent++;
   }
 
-  if (with_text > sent) {
+  if (left > 0) {
     /* Truncation NOTICE: an event of its own (fresh msgid, its mint
      * time), sourced from the sender so it lands in the conversation. */
     char trunc_msgid[S2S_MSGID_BUFSIZE];
@@ -1068,12 +1057,12 @@ ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
       /* URL outside the bracket so linkifiers don't grab the ']'. */
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr, trunc_msgid,
                                      NULL, "%C :[%d more lines] %s",
-                                     acptr, with_text - sent, paste_url);
+                                     acptr, left, paste_url);
     else
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr, trunc_msgid,
                                      NULL,
                                      "%C :[%d more lines - connect to a multiline-capable server to view]",
-                                     acptr, with_text - sent);
+                                     acptr, left);
   }
 }
 
@@ -1743,13 +1732,16 @@ process_multiline_batch(struct Client *sptr)
    */
   if (is_channel && chptr) {
     char s2s_batch_id[16];
-    int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-    int total_lines = con_ml_msg_count(con);
+    int fb_shown, fb_left;   /* the fallback's preview (ml_fallback.h) */
     int max_links = ml_down_count();
     struct Client **links = max_links
         ? (struct Client **)MyMalloc(sizeof(*links) * max_links) : NULL;
     int nlinks = ml_channel_links(chptr, NULL, links, max_links);
     int li;
+
+    ml_fallback_plan(con_ml_messages(con),
+                     feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES),
+                     &fb_shown, &fb_left);
 
     ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
                   cli_yxx(sptr), (unsigned long)CurrentTime);
@@ -1793,13 +1785,12 @@ process_multiline_batch(struct Client *sptr)
          * so this does not suppress the discount halving — anti-flood
          * semantics stay intact even though the legacy peer's local
          * users see truncated content. */
-        int sent = 0;
-        int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+        const struct SLink *fl;
+        int sent = 0, units = 0;
 
-        for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
-          char *text = lp->value.cp + 1;
-          if (*text == '\0')
-            continue;
+        for (fl = ml_fallback_next(con_ml_messages(con), &units, fb_shown); fl;
+             fl = ml_fallback_next(fl->next, &units, fb_shown)) {
+          const char *text = fl->value.cp + 1;
           if (sent == 0)
             sendcmdto_set_s2s_tags(batch_time_ms, batch_base_msgid);
           if (is_notice)
@@ -1811,8 +1802,8 @@ process_multiline_batch(struct Client *sptr)
 
         /* Channel truncation NOTICE: server source (channel system signal).
          * Fresh msgid + tag-aware send so the notice carries msgid/time. */
-        if (total_lines > max_preview) {
-          int remaining = total_lines - sent;
+        if (fb_left > 0) {
+          int remaining = fb_left;
           char trunc_msgid[S2S_MSGID_BUFSIZE];
           generate_msgid(trunc_msgid, sizeof(trunc_msgid));
           if (batch_paste_url) {
@@ -2716,13 +2707,15 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
    * users in the channel but don't support multiline (ms_multiline only
    * propagates ML tokens to IsMultiline servers). */
   if (is_channel && chptr) {
-    int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-    int total_lines = batch->msg_count;
+    int fb_shown, fb_left;   /* the fallback's preview (ml_fallback.h) */
     int max_links = ml_down_count();
     struct Client **links = max_links
         ? (struct Client **)MyMalloc(sizeof(*links) * max_links) : NULL;
     int nlinks = ml_channel_links(chptr, cli_from(cptr), links, max_links);
     int li;
+
+    ml_fallback_plan(batch->messages, feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES),
+                     &fb_shown, &fb_left);
 
     /* Each link with a member behind it, once, never back toward the
      * source (ml_channel_links). */
@@ -2735,13 +2728,12 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       /* Send fallback PRIVMSGs to legacy server.
        * Set S2S tags on first line for unified msgid. */
       {
-        int sent = 0;
-        int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+        const struct SLink *fl;
+        int sent = 0, units = 0;
 
-        for (lp = batch->messages; lp && sent < lines_to_send; lp = lp->next) {
-          char *ftext = lp->value.cp + 1;
-          if (*ftext == '\0')
-            continue;
+        for (fl = ml_fallback_next(batch->messages, &units, fb_shown); fl;
+             fl = ml_fallback_next(fl->next, &units, fb_shown)) {
+          const char *ftext = fl->value.cp + 1;
           if (sent == 0)
             sendcmdto_set_s2s_tags(batch->time_ms, batch_base_msgid);
           if (is_notice)
@@ -2751,8 +2743,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           sent++;
         }
 
-        if (total_lines > max_preview) {
-          int remaining = total_lines - sent;
+        if (fb_left > 0) {
+          int remaining = fb_left;
           char trunc_msgid[S2S_MSGID_BUFSIZE];
           generate_msgid(trunc_msgid, sizeof(trunc_msgid));
           if (s2s_paste_url) {

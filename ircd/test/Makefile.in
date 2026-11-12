@@ -50,6 +50,7 @@ CMOCKA_TESTPROGS = \
 	pm_pair_index_cmocka \
 	recv_classify_cmocka \
 	ml_route_cmocka \
+	ml_fallback_cmocka \
 	register_throttle_cmocka \
 	ipcheck_refund_cmocka \
 	ipcheck_cmocka \
@@ -128,6 +129,7 @@ DEP_SRC = \
 	pm_pair_index_cmocka.c \
 	recv_classify_cmocka.c \
 	ml_route_cmocka.c \
+	ml_fallback_cmocka.c \
 	register_throttle_cmocka.c \
 	ipcheck_refund_cmocka.c \
 	ipcheck_cmocka.c \
@@ -366,6 +368,13 @@ recv_classify_cmocka: $(RECV_CLASSIFY_CMOCKA_OBJS)
 ML_ROUTE_CMOCKA_OBJS = ml_route_cmocka.o ../ml_route.o
 ml_route_cmocka: $(ML_ROUTE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ML_ROUTE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ml_fallback tests - the one rule for a multiline fallback's preview and
+# its "[N more lines]" count (blank lines neither shown nor counted).
+# Links the REAL ../ml_fallback.o only (pure).
+ML_FALLBACK_CMOCKA_OBJS = ml_fallback_cmocka.o ../ml_fallback.o
+ml_fallback_cmocka: $(ML_FALLBACK_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(ML_FALLBACK_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # register_throttle tests - the module is recompiled with a 1-bucket,
 # 4-slot table so eviction is reachable without hash-collision gymnastics.
