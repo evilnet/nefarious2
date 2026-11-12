@@ -506,7 +506,8 @@ void free_client(struct Client* cptr)
              * free_client() of the server being torn down, and
              * registration broadcasts to the network and may exit
              * clients. */
-            sasl_resume_registration_later(acptr);
+            if (cli_auth(acptr))
+              auth_recheck_later(cli_auth(acptr));
           }
           cli_saslagent(acptr) = NULL;
         }

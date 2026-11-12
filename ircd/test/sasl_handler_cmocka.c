@@ -1,27 +1,37 @@
 /*
  * sasl_handler_cmocka.c - what AUTHENTICATE answers its parser when the
- * SASL exchange ends inside it.
+ * SASL exchange ends inside it, and where a Keycloak answer lets
+ * registration go on.
  *
  * Registration waits on a SASL exchange in flight (AR_SASL_PENDING).  A
  * client that sends CAP END before its last AUTHENTICATE line has its
- * registration run when the exchange ends, and some exchanges end inside
- * that line's own handler: a cached credential (positive or negative),
- * OAUTHBEARER's local token check, the last step of SCRAM and of ECDSA,
- * an abort (AUTHENTICATE *, data that is not base64, the line after a
- * failure).  Registration can then exit the client (a K-line, a
- * SASL-required class) or free it (a bouncer revive moves its socket onto
- * the held session), and the handler must hand the parser CPTR_KILLED:
- * anything else and parse_client() reads the freed client's Connection.
+ * registration run when the exchange ends, and registration can exit the
+ * client (a K-line, a SASL-required class) or free it (a bouncer revive
+ * moves its socket onto the held session).
  *
- * The REAL sasl_auth.o and m_authenticate.o are linked (with ircd_string.o,
- * ircd_alloc.o, account_id.o and webpush_keyring.o, and OpenSSL).  Around
- * them a fake world: the registration machinery is the AR_SASL_PENDING
- * hold plus CAP END, modelled on check_auth_finished() (a check with the
- * hold on or CAP not ended keeps waiting; otherwise the client registers,
- * and an exiting registration frees it as free_client() does, then
- * poisons it, so any later use of it crashes the test); libkc answers
- * when the test says so, as the event loop would.  Every stub that takes
- * a client counts a call for a client registration freed.
+ * - An exchange that ends inside the client's own AUTHENTICATE line -- a
+ *   cached credential, OAUTHBEARER's local token check, the last step of
+ *   SCRAM and of ECDSA, an abort -- hands the parser that result:
+ *   CPTR_KILLED when registration exited or freed the client.
+ * - An answer from Keycloak (a libkc completion) never runs registration
+ *   in its own stack: libkc can deliver it inside ANY request call
+ *   (kc_http_request() drives the transfers and reaps finished ones before
+ *   it returns), so inside some handler -- the client's own AUTHENTICATE
+ *   or REGISTER, or another client's.  It ends the exchange and leaves the
+ *   registration check to the event loop (auth_recheck_later()).
+ *
+ * The REAL sasl_auth.o, m_authenticate.o and m_register.o are linked (with
+ * ircd_string.o, ircd_alloc.o, account_id.o, webpush_keyring.o and
+ * OpenSSL).  Around them a fake world: the registration machinery is the
+ * AR_SASL_PENDING hold plus CAP END, modelled on check_auth_finished() (a
+ * check with the hold on or CAP not ended keeps waiting; otherwise the
+ * client registers, and an exiting registration frees it as free_client()
+ * does, then poisons it, so any later use of it crashes the test); the
+ * event loop is run_event_loop(), which runs the queued registration
+ * checks; libkc answers when the test says so -- later (the event loop),
+ * before the request call returns, or by delivering an earlier request's
+ * pending answer inside a new request call.  Every stub that takes a
+ * client counts a call for a client registration freed.
  *
  * The Keycloak cases are #ifdef USE_LIBKC: without it sasl_auth.c has no
  * local mechanisms and only the shared login completion is tested.
@@ -54,6 +64,7 @@
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
+#include "register_throttle.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_misc.h"
@@ -61,13 +72,16 @@
 #include "send.h"
 
 #ifdef USE_LIBKC
+#include <kc/kc_cred_derive.h>
 #include <kc/kc_keycloak.h>
 #include <kc/kc_jwt.h>
 #endif
 
-/* m_authenticate.c's handler (not in a header). */
+/* The handlers (not in a header). */
 extern int m_authenticate(struct Client *cptr, struct Client *sptr,
                           int parc, char *parv[]);
+extern int m_register(struct Client *cptr, struct Client *sptr,
+                      int parc, char *parv[]);
 
 /* ------------------------------------------------------------------ */
 /* The fake world                                                      */
@@ -92,9 +106,12 @@ struct fake {
   int fd;
   int hold;                   /**< AR_SASL_PENDING */
   int cap_done;               /**< CAP END was sent (no AR_CAP_PENDING) */
+  int recheck_queued;         /**< a registration check waits for the loop */
   enum reg_outcome outcome;   /**< what registration does to it */
   int registered;             /**< registration ran and kept it */
   int freed;                  /**< registration ran and exited it */
+  int runs_inside_kc;         /**< registrations run while a libkc request
+                                   call was running */
   int checks_unheld_in_login; /**< checks from auth_set_account() with no
                                    hold, inside sasl_complete_login() */
   int touched_after_free;     /**< a stub was handed it once freed */
@@ -105,6 +122,7 @@ struct fake {
 
 #define NFAKE 8
 static struct fake fakes[NFAKE];
+static int in_kc_call;        /**< a libkc request call is running */
 static int in_login;          /**< inside sasl_complete_login() (test 1) */
 
 static struct fake *fake_of(const struct Client *cptr)
@@ -172,6 +190,8 @@ static int registration_check(struct fake *f)
 {
   if (f->hold || !f->cap_done)
     return 0;
+  if (in_kc_call)
+    f->runs_inside_kc++;
   cli_auth(&f->cli) = NULL;              /* destroy_auth_request() */
   if (f->outcome == REG_KEEPS) {
     f->registered++;
@@ -184,6 +204,23 @@ static int registration_check(struct fake *f)
   memset(&f->user, 0xA5, sizeof(f->user));
   return CPTR_KILLED;
 }
+
+#ifdef USE_LIBKC
+/** The event loop: run the registration checks a Keycloak answer left to
+ * it (auth_recheck_later()). */
+static void run_event_loop(void)
+{
+  int i;
+  for (i = 0; i < NFAKE; i++) {
+    struct fake *f = &fakes[i];
+    if (f->in_use && !f->freed && f->recheck_queued) {
+      f->recheck_queued = 0;
+      if (cli_auth(&f->cli))
+        registration_check(f);
+    }
+  }
+}
+#endif
 
 /* s_auth.c */
 void auth_sasl_start(struct AuthRequest *auth)
@@ -209,6 +246,16 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
   if (in_login && !f->hold)
     f->checks_unheld_in_login++;
   return registration_check(f);
+}
+
+void auth_recheck_later(struct AuthRequest *auth)
+{
+  fake_of_auth(auth)->recheck_queued = 1;
+}
+
+void auth_set_account_later(struct AuthRequest *auth, const char *account)
+{
+  fake_of_auth(auth)->recheck_queued = 1;
 }
 
 int auth_iauth_handles_sasl(void) { return 0; }
@@ -258,6 +305,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from,
                                             int forbid, const char *pattern, ...)
 { touch(from); }
 void send_cap_notify(const char *capname, int available, const char *value) {}
+void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
 int exit_client(struct Client *cptr, struct Client *victim,
                 struct Client *killer, const char *comment)
@@ -279,6 +327,7 @@ int feature_bool(enum Feature feat)
   switch (feat) {
   case FEAT_SASL_LOCAL:
   case FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION:
+  case FEAT_CAP_draft_account_registration:
     return 1;
   default:
     return 0;
@@ -321,7 +370,8 @@ void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...) {}
 void debug(int level, const char *form, ...) {}
 
-/* Everything else a login reaches, none of which matters here. */
+/* Everything else a login or a REGISTER reaches, none of which matters
+ * here. */
 struct Client *find_match_server(char *mask) { return NULL; }
 unsigned int ircrandom(void) { static unsigned int r = 12345; return r += 7919; }
 struct BouncerSession *bounce_get_session(struct Client *cptr) { touch(cptr); return NULL; }
@@ -339,11 +389,28 @@ void presence_anchor_transfer(struct Client *cptr, const char *old_anchor,
 int hide_hostmask(struct Client *cptr) { touch(cptr); return 0; }
 void metadata_load_account(struct Client *cptr, const char *account) { touch(cptr); }
 void metadata_mode_sync_restore(struct Client *cptr, int live) { touch(cptr); }
+enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
+                                            time_t now, int limit, int period,
+                                            int global_limit)
+{ return REG_THROTTLE_OK; }
+
 /* ------------------------------------------------------------------ */
-/* libkc: answers when the test says so                                */
+/* libkc: answers later, before the request call returns, or delivers  */
+/* an earlier request's answer inside a new request call               */
 /* ------------------------------------------------------------------ */
 
 #ifdef USE_LIBKC
+/** How the next request call answers. */
+static enum {
+  KC_LATER,          /**< the test answers it later: the event loop */
+  KC_INLINE_OK,      /**< answered (success) before the call returns */
+  KC_INLINE_FAIL,    /**< answered (a failure) before the call returns */
+  KC_REAP            /**< first delivers the pending answer of an earlier
+                          request (as kc_http_request()'s timeout action and
+                          finished-transfer reap do), then waits itself */
+} kc_mode;
+/** What a reaped pending answer says. */
+static int reap_ok;
 static int kc_requests;               /**< request calls made */
 
 /** An answer libkc owes (one request at a time is enough here). */
@@ -427,11 +494,17 @@ static void pend_deliver(int ok)
   }
 }
 
-/** One request call: the answer comes later (pend_deliver()). */
+/** One request call: answer per #kc_mode. */
 static int kc_request(enum pend_kind kind, void *cb, void *data)
 {
   kc_requests++;
+  in_kc_call++;
+  if (kc_mode == KC_REAP)
+    pend_deliver(reap_ok);
   pend_push(kind, cb, data);
+  if (kc_mode == KC_INLINE_OK || kc_mode == KC_INLINE_FAIL)
+    pend_deliver(kc_mode == KC_INLINE_OK);
+  in_kc_call--;
   return 0;
 }
 
@@ -444,6 +517,11 @@ int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data)
 { return kc_request(P_USERS, (void *)cb, data); }
 int kc_token_introspect(const char *token, kc_introspect_cb cb, void *data)
 { return kc_request(P_INTRO, (void *)cb, data); }
+int kc_user_create_full(const struct kc_user_create_req *req,
+                        kc_result_cb cb, void *data)
+{ return kc_request(P_RESULT, (void *)cb, data); }
+int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
+{ return kc_request(P_RESULT, (void *)cb, data); }
 int kc_token_ensure(kc_token_cb cb, void *data) { return 0; }
 int kc_jwt_prime_cache(struct kc_realm realm) { return KC_SUCCESS; }
 
@@ -479,6 +557,22 @@ void kc_jwt_token_info_free(struct kc_token_info *info)
   free(info);
 }
 
+/* REGISTER's credential derivation: not under test. */
+int scram_sha256_derive_random(const char *password,
+                               struct scram_sha256_creds *out)
+{
+  memset(out, 0, sizeof(*out));
+  out->iterations = 4096;
+  return 0;
+}
+
+int kc_pbkdf2_cred_build(const char *password, char **cred_data,
+                         char **secret_data)
+{
+  *cred_data = strdup("{}");
+  *secret_data = strdup("{}");
+  return 0;
+}
 #endif /* USE_LIBKC */
 
 /* ------------------------------------------------------------------ */
@@ -506,6 +600,21 @@ static int authenticate(struct Client *cptr, const char *arg)
   parv[1] = buf;
   parv[2] = NULL;
   return m_authenticate(cptr, cptr, 2, parv);
+}
+
+/** "REGISTER * * <password>" from \a cptr, through the real handler. */
+static int register_line(struct Client *cptr, const char *password)
+{
+  char a[8] = "*", e[8] = "*", p[64];
+  char *parv[5];
+
+  ircd_strncpy(p, password, sizeof(p));
+  parv[0] = cli_name(cptr);
+  parv[1] = a;
+  parv[2] = e;
+  parv[3] = p;
+  parv[4] = NULL;
+  return m_register(cptr, cptr, 4, parv);
 }
 
 static void b64(const unsigned char *in, size_t len, char *out)
@@ -537,8 +646,10 @@ static int setup(void **state)
 {
   memset(fakes, 0, sizeof(fakes));
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
-  in_login = 0;
+  in_kc_call = in_login = 0;
 #ifdef USE_LIBKC
+  kc_mode = KC_LATER;
+  reap_ok = 0;
   kc_requests = 0;
   memset(pend, 0, sizeof(pend));
   jwt_local_undecided = 0;
@@ -600,9 +711,11 @@ static void first_login(int fd, const char *user, const char *pass, int ok)
   char data[300];
 
   plain_b64(user, pass, data);
+  kc_mode = KC_LATER;
   assert_int_equal(authenticate(c, "PLAIN"), 0);
   assert_int_equal(authenticate(c, data), 0);
   pend_deliver(ok);                       /* the event loop */
+  run_event_loop();
   assert_true(has_numeric(f, ok ? RPL_SASLSUCCESS : ERR_SASLFAIL));
   f->in_use = 0;
   LocalClientArray[fd] = NULL;
@@ -723,7 +836,8 @@ static void ecdsa_response_registration_exits(void **state)
   assert_int_equal(authenticate(c, "ECDSA-NIST256P-CHALLENGE"), 0);
   b64((const unsigned char *)"dave", 4, data);
   assert_int_equal(authenticate(c, data), 0);
-  pend_deliver(1);                        /* the key lookup */
+  pend_deliver(1);                        /* the key lookup: the event loop */
+  run_event_loop();
   assert_false(f->freed);
 
   sp = strchr(f->raw, ' ');                /* "AUTHENTICATE <challenge>" */
@@ -778,7 +892,8 @@ static void scram_ack_registration_exits(void **state)
   snprintf(msg, sizeof(msg), "n,,%s", first_bare);
   b64((const unsigned char *)msg, strlen(msg), data);
   assert_int_equal(authenticate(c, data), 0);
-  pend_deliver(1);                        /* the credentials */
+  pend_deliver(1);                        /* the credentials: the event loop */
+  run_event_loop();
   assert_false(f->freed);
 
   sp = strchr(f->raw, ' ');                /* "AUTHENTICATE <server-first>" */
@@ -856,7 +971,8 @@ static void failed_state_abort_registration_exits(void **state)
   b64((const unsigned char *)msg, sizeof(msg) - 1, data);
   assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
   assert_int_equal(authenticate(c, data), 0);
-  pend_deliver(0);                         /* inactive */
+  pend_deliver(0);                         /* inactive: the event loop */
+  run_event_loop();
   assert_false(f->freed);                  /* the error challenge only */
   assert_int_equal(authenticate(c, "AQ=="), CPTR_KILLED);
   assert_true(has_numeric(f, ERR_SASLFAIL));
@@ -864,6 +980,254 @@ static void failed_state_abort_registration_exits(void **state)
   assert_int_equal(f->touched_after_free, 0);
 }
 
+/* ------------------------------------------------------------------ */
+/* Keycloak answers: registration from the event loop, never inline    */
+/* ------------------------------------------------------------------ */
+
+/** An answer from the event loop: the callback ends the exchange and the
+ * registration check runs from the loop. */
+static void later_answer_registers_from_the_event_loop(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+
+  sasl_init_once();
+  c = new_client(40, "gus", 1, REG_EXITS);
+  f = fake_of(c);
+  plain_b64("gus", "guspw", data);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver(1);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_false(f->freed);                  /* not in the callback's stack */
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** libkc fails the grant before kc_user_verify_password() returns: the
+ * handler returns with the client alive, and registration runs from the
+ * event loop. */
+static void inline_failure_registers_from_the_event_loop(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+
+  sasl_init_once();
+  c = new_client(41, "eve", 1, REG_EXITS);
+  f = fake_of(c);
+  plain_b64("eve", "evepw-inline-fail", data);
+  kc_mode = KC_INLINE_FAIL;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_int_equal(f->runs_inside_kc, 0);
+  assert_false(f->freed);
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** The same for a grant that succeeds before the call returns. */
+static void inline_success_registers_from_the_event_loop(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+
+  sasl_init_once();
+  c = new_client(42, "fay", 1, REG_EXITS);
+  f = fake_of(c);
+  plain_b64("fay", "faypw-inline-ok", data);
+  kc_mode = KC_INLINE_OK;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_int_equal(f->runs_inside_kc, 0);
+  assert_false(f->freed);
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** SCRAM's and ECDSA's credential lookups answered (a failure: no such
+ * credentials) before kc_user_get() returns. */
+static void inline_lookup_failures_register_from_the_event_loop(void **state)
+{
+  static const char *const mechs[2] = { "SCRAM-SHA-256", "ECDSA-NIST256P-CHALLENGE" };
+  static const char *const firsts[2] = { "n,,n=lou,r=nonce", "lou" };
+  int m;
+
+  sasl_init_once();
+  for (m = 0; m < 2; m++) {
+    struct Client *c = new_client(43 + m, "lou", 1, REG_EXITS);
+    struct fake *f = fake_of(c);
+    char data[300];
+
+    kc_mode = KC_LATER;
+    assert_int_equal(authenticate(c, mechs[m]), 0);
+    b64((const unsigned char *)firsts[m], strlen(firsts[m]), data);
+    kc_mode = KC_INLINE_FAIL;
+    assert_int_equal(authenticate(c, data), 0);
+    assert_true(has_numeric(f, ERR_SASLFAIL));
+    assert_int_equal(f->runs_inside_kc, 0);
+    assert_false(f->freed);
+    run_event_loop();
+    assert_true(f->freed);
+    assert_int_equal(f->touched_after_free, 0);
+  }
+}
+
+/** EXTERNAL's fingerprint search answered (a match) before kc_user_search()
+ * returns. */
+static void inline_external_registers_from_the_event_loop(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(45, "xen", 1, REG_EXITS);
+  f = fake_of(c);
+  ircd_strncpy(cli_sslclifp(c), "ab12cd34", sizeof(cli_sslclifp(c)));
+  assert_int_equal(authenticate(c, "EXTERNAL"), 0);
+  kc_mode = KC_INLINE_OK;
+  assert_int_equal(authenticate(c, "+"), 0);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_int_equal(f->runs_inside_kc, 0);
+  assert_false(f->freed);
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** OAUTHBEARER's introspection answered (active) before
+ * kc_token_introspect() returns. */
+static void inline_introspection_registers_from_the_event_loop(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  const char msg[] = "n,,\001auth=Bearer opaque-token\001\001";
+  char data[300];
+
+  sasl_init_once();
+  c = new_client(46, "ian", 1, REG_EXITS);
+  f = fake_of(c);
+  jwt_local_undecided = 1;
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  kc_mode = KC_INLINE_OK;
+  assert_int_equal(authenticate(c, data), 0);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_int_equal(f->runs_inside_kc, 0);
+  assert_false(f->freed);
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** Another client's pending answer delivered inside this client's request
+ * call: the other client's registration does not run there either (the
+ * handler holds pointers; registration exits and frees clients). */
+static void another_clients_answer_inside_the_call(void **state)
+{
+  struct Client *a, *b;
+  struct fake *fa, *fb;
+  char data[300];
+
+  sasl_init_once();
+  a = new_client(47, "abe", 1, REG_EXITS);
+  fa = fake_of(a);
+  b = new_client(48, "ben", 0, REG_KEEPS);
+  fb = fake_of(b);
+
+  plain_b64("abe", "abepw", data);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(a, "PLAIN"), 0);
+  assert_int_equal(authenticate(a, data), 0);           /* a's grant pending */
+
+  plain_b64("ben", "benpw", data);
+  assert_int_equal(authenticate(b, "PLAIN"), 0);
+  kc_mode = KC_REAP;
+  reap_ok = 1;
+  assert_int_equal(authenticate(b, data), 0);           /* reaps a's answer */
+  assert_true(has_numeric(fa, RPL_SASLSUCCESS));
+  assert_int_equal(fa->runs_inside_kc, 0);
+  assert_false(fa->freed);
+  run_event_loop();
+  assert_true(fa->freed);
+  assert_int_equal(fa->touched_after_free, 0);
+  assert_false(fb->freed);
+}
+
+/** The review's chain: a client's pending SASL answer (here a refusal; on a
+ * stalled Keycloak, the grant's timeout) delivered inside its own REGISTER
+ * line's lookup.  REGISTER returns with the client alive; registration runs
+ * from the event loop. */
+static void register_reaps_pending_sasl_answer(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+
+  sasl_init_once();
+  c = new_client(49, "rex", 1, REG_EXITS);
+  f = fake_of(c);
+  plain_b64("rex", "rexpw", data);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);           /* grant pending */
+
+  kc_mode = KC_REAP;
+  reap_ok = 0;
+  assert_int_equal(register_line(c, "longpassword"), 0); /* lookup reaps it */
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_int_equal(f->runs_inside_kc, 0);
+  assert_false(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+
+  kc_mode = KC_LATER;
+  pend_deliver(1);                 /* REGISTER's lookup: its client is gone */
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** The mirror: a pending REGISTER (the account created) delivered inside a
+ * later AUTHENTICATE's request.  It leaves the check to the event loop, and
+ * the AUTHENTICATE exchange's own hold keeps registration waiting. */
+static void authenticate_reaps_pending_register_answer(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+
+  sasl_init_once();
+  c = new_client(50, "ray", 1, REG_EXITS);
+  f = fake_of(c);
+  kc_mode = KC_LATER;
+  assert_int_equal(register_line(c, "longpassword"), 0); /* lookup pending */
+  pend_deliver(0);                 /* not found: the create goes out */
+  assert_false(f->freed);
+
+  plain_b64("ray", "raypw", data);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  kc_mode = KC_REAP;
+  reap_ok = 1;
+  assert_int_equal(authenticate(c, data), 0);           /* reaps the create */
+  assert_int_equal(f->runs_inside_kc, 0);
+  assert_false(f->freed);
+  run_event_loop();
+  assert_false(f->freed);          /* the PLAIN exchange holds registration */
+
+  kc_mode = KC_LATER;
+  pend_deliver(0);                 /* the grant: refused */
+  run_event_loop();
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
 #endif /* USE_LIBKC */
 
 int main(void)
@@ -881,6 +1245,15 @@ int main(void)
     cmocka_unit_test_setup(star_abort_registration_exits, setup),
     cmocka_unit_test_setup(bad_base64_abort_registration_exits, setup),
     cmocka_unit_test_setup(failed_state_abort_registration_exits, setup),
+    cmocka_unit_test_setup(later_answer_registers_from_the_event_loop, setup),
+    cmocka_unit_test_setup(inline_failure_registers_from_the_event_loop, setup),
+    cmocka_unit_test_setup(inline_success_registers_from_the_event_loop, setup),
+    cmocka_unit_test_setup(inline_lookup_failures_register_from_the_event_loop, setup),
+    cmocka_unit_test_setup(inline_external_registers_from_the_event_loop, setup),
+    cmocka_unit_test_setup(inline_introspection_registers_from_the_event_loop, setup),
+    cmocka_unit_test_setup(another_clients_answer_inside_the_call, setup),
+    cmocka_unit_test_setup(register_reaps_pending_sasl_answer, setup),
+    cmocka_unit_test_setup(authenticate_reaps_pending_register_answer, setup),
 #endif
   };
 

@@ -469,14 +469,15 @@ rename_handlers_cmocka: $(RENAME_HANDLERS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(RENAME_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # sasl_handler tests - what AUTHENTICATE answers its parser when the SASL
-# exchange ends inside it: the REAL sasl_auth.o and m_authenticate.o, with
-# the registration hold, the send layer and libkc faked in the test (the
-# Keycloak cases are #ifdef USE_LIBKC).  SSL_LIBS for the real SCRAM and
-# ECDSA checks.  Defines its own log_write()/me, so test_stub.o is not
-# linked.
+# exchange ends inside it, and where a Keycloak answer lets registration go
+# on: the REAL sasl_auth.o, m_authenticate.o and m_register.o, with the
+# registration hold, the event loop, the send layer and libkc faked in the
+# test (the Keycloak cases are #ifdef USE_LIBKC).  SSL_LIBS for the real
+# SCRAM and ECDSA checks.  Defines its own log_write()/me, so test_stub.o
+# is not linked.
 SASL_HANDLER_CMOCKA_OBJS = sasl_handler_cmocka.o ../sasl_auth.o \
-	../m_authenticate.o ../ircd_string.o ../ircd_alloc.o ../account_id.o \
-	../webpush_keyring.o
+	../m_authenticate.o ../m_register.o ../ircd_string.o ../ircd_alloc.o \
+	../account_id.o ../webpush_keyring.o
 sasl_handler_cmocka: $(SASL_HANDLER_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(SASL_HANDLER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 

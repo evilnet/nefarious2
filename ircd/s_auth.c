@@ -104,6 +104,7 @@ enum AuthRequestFlag {
     AR_LOC_DONE,        /**< loc messages have been sent */
     AR_DNSBL_PENDING,   /**< native DNSBL check pending */
     AR_CAP_DONE,        /**< CAP negotiation completed (CAP END received) */
+    AR_RECHECK,         /**< on #auth_recheck_list: a check is owed from the event loop */
     AR_NUM_FLAGS
 };
 
@@ -124,6 +125,7 @@ struct AuthRequest {
   unsigned short      port;       /**< client's remote port number */
   struct DNSBLRequest *dnsbl_request; /**< native DNSBL check request */
   char deferred_nick[NICKLEN + 1]; /**< nick deferred due to bouncer ghost collision */
+  struct AuthRequest* recheck_next; /**< next on #auth_recheck_list */
 };
 
 /** Array of AUTH status message texts (CRLF is added by msgq).
@@ -247,6 +249,11 @@ struct IAuth {
 static struct IAuth *iauth;
 /** Freelist of AuthRequest structures. */
 static struct AuthRequest *auth_freelist;
+/** Auth requests owed a registration check from the event loop
+ * (auth_recheck_later()), linked by AuthRequest::recheck_next. */
+static struct AuthRequest *auth_recheck_list;
+/** Runs the checks on #auth_recheck_list, in this pass of the event loop. */
+static struct Timer auth_recheck_timer;
 
 static void iauth_sock_callback(struct Event *ev);
 static void iauth_stderr_callback(struct Event *ev);
@@ -824,6 +831,76 @@ static int check_auth_finished(struct AuthRequest *auth)
   return res;
 }
 
+/* ---- Registration checks owed from the event loop ---- */
+
+/* A Keycloak answer (a libkc completion: SASL's and REGISTER's callbacks)
+ * never runs registration in its own stack.  libkc can deliver it inside
+ * any request call -- kc_http_request() drives the transfers (curl's
+ * timeout action) and reaps every finished one before it returns, and
+ * kc_token_ensure() answers some failures at once -- so inside whatever
+ * handler made that request: the client's own AUTHENTICATE or REGISTER,
+ * or another client's PRIVMSG sending a web push.  Registration there can
+ * exit or free the client whose line is being handled, or one the handler
+ * holds a pointer to.  The answer ends what it ends (the exchange, the
+ * hold) and owes a check: auth_recheck_later() queues it, and the check
+ * runs from the event loop's timer pass (a 0-second timer: the pass that
+ * follows the current dispatch), where no handler is in progress.  A
+ * check found satisfied meanwhile (the client's own CAP END registered it,
+ * or it left) has nothing left to do. */
+
+/** Take \a auth off #auth_recheck_list, if it is queued. */
+static void auth_recheck_unlink(struct AuthRequest *auth)
+{
+  struct AuthRequest **pp;
+
+  if (!FlagHas(&auth->flags, AR_RECHECK))
+    return;
+  for (pp = &auth_recheck_list; *pp; pp = &(*pp)->recheck_next)
+    if (*pp == auth) {
+      *pp = auth->recheck_next;
+      break;
+    }
+  auth->recheck_next = NULL;
+  FlagClr(&auth->flags, AR_RECHECK);
+}
+
+/** Run the owed checks.  A check can register, exit or free its client
+ * (and so destroy its auth request), and could queue another: each request
+ * is taken off the list before its check, and the list is drained. */
+static void auth_recheck_callback(struct Event *ev)
+{
+  struct AuthRequest *auth;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  while ((auth = auth_recheck_list)) {
+    auth_recheck_list = auth->recheck_next;
+    auth->recheck_next = NULL;
+    FlagClr(&auth->flags, AR_RECHECK);
+    if (auth->client)
+      check_auth_finished(auth);
+  }
+}
+
+/** Owe \a auth a registration check from the event loop.  For a Keycloak
+ * answer that has just released what held registration (see above); never
+ * for a handler's own synchronous path, which checks at once and returns
+ * the result to its parser.
+ * @param[in] auth Authorization request of a client.
+ */
+void auth_recheck_later(struct AuthRequest *auth)
+{
+  assert(auth != NULL);
+  if (FlagHas(&auth->flags, AR_RECHECK))
+    return;
+  FlagSet(&auth->flags, AR_RECHECK);
+  auth->recheck_next = auth_recheck_list;
+  auth_recheck_list = auth;
+  if (!t_active(&auth_recheck_timer))
+    timer_add(timer_init(&auth_recheck_timer), auth_recheck_callback, NULL,
+              TT_RELATIVE, 0);
+}
+
 /** Verify that a hostname is valid, i.e., only contains characters
  * valid for a hostname and that a hostname is not too long.
  * @param host Hostname to check.
@@ -1134,6 +1211,8 @@ void destroy_auth_request(struct AuthRequest* auth)
 {
   Debug((DEBUG_INFO, "Deleting auth request for %p", auth->client));
 
+  auth_recheck_unlink(auth);
+
   if (FlagHas(&auth->flags, AR_DNS_PENDING)) {
     delete_resolver_queries(auth);
   }
@@ -1184,8 +1263,10 @@ void destroy_auth_request(struct AuthRequest* auth)
  */
 void auth_detach_client(struct AuthRequest *auth)
 {
-  if (auth)
+  if (auth) {
+    auth_recheck_unlink(auth);
     auth->client = NULL;
+  }
 }
 
 /** Called when DNSBL lookup completes for a client.
@@ -1742,6 +1823,19 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
   if (IAuthHas(iauth, IAUTH_ACCOUNT))
     sendto_iauth(auth->client, "R %s", account);
   return check_auth_finished(auth);
+}
+
+/** Forward a clients account name from a Keycloak answer (REGISTER's), and
+ * owe it a registration check from the event loop (auth_recheck_later()).
+ * @param[in] auth Authorization request for client.
+ * @param[in] account Account name applied to the client.
+ */
+void auth_set_account_later(struct AuthRequest *auth, const char *account)
+{
+  assert(auth != NULL);
+  if (IAuthHas(iauth, IAUTH_ACCOUNT))
+    sendto_iauth(auth->client, "R %s", account);
+  auth_recheck_later(auth);
 }
 
 /** Updates a client's original IP.

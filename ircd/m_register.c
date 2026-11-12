@@ -278,8 +278,11 @@ static void register_complete_success(struct Client *acptr, const char *account)
   } else {
     ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);
     SetSASLComplete(acptr);
+    /* A Keycloak answer: registration is checked from the event loop,
+     * never here (auth_recheck_later() in s_auth.c says why), so acptr is
+     * still there for the reply. */
     if (cli_auth(acptr))
-      auth_set_account(cli_auth(acptr), account);
+      auth_set_account_later(cli_auth(acptr), account);
     sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
   }
 }
