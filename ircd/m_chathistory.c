@@ -748,14 +748,54 @@ static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
   return ircd_strip_reserved_vendor_tags(in, out, outsz);
 }
 
-/** Client line budget for the message body: 512 bytes for everything
- * after the tags (":<sender> <cmd> <target> :" + body + CRLF), the
- * tag section being separately bounded by message-tags. */
+/** Client line budget for the message body: 510 bytes for everything
+ * after the tags (":<sender> <cmd> <target> :" + body; CRLF is the other
+ * two of 512), the tag section being separately bounded by message-tags.
+ * The same room the live relay cut the text to (ircd_relay_text_room),
+ * so a row stored after that cut replays as the one line it was
+ * delivered as.  (It used to take two more bytes off for a CRLF the 510
+ * already excludes, and a 510-byte live line came back as two.) */
 static size_t history_line_budget(const char *sender, const char *cmd,
                                   const char *target)
 {
-  size_t head = 1 + strlen(sender) + 1 + strlen(cmd) + 1 + strlen(target) + 2;
-  return head + 2 < 510 ? 510 - head - 2 : 1;
+  size_t room = ircd_relay_text_room(strlen(sender), strlen(cmd),
+                                     strlen(target), BUFSIZE - 2);
+  return room ? room : 1;
+}
+
+/** Copy a replay tag list ("batch=X;time=T;msgid=M;...") to @a rest
+ * without its msgid, for the lines after a message's first: the live
+ * fallback (send_multiline_fallback) puts the msgid on the first line
+ * only, and repeating it made msgid-deduping clients keep one line of
+ * every multiline in history and broke the one-msgid-per-event rule
+ * (audit 2026-09-06 #14). */
+static void history_tags_without_msgid(const char *tags, char *rest,
+                                       size_t restsize)
+{
+  const char *m = strstr(tags, "msgid=");
+
+  rest[0] = '\0';
+  if (!m) {
+    ircd_strncpy(rest, tags, restsize);
+    return;
+  }
+  {
+    const char *e = strchr(m, ';');
+    size_t pre = (size_t)(m - tags);
+
+    if (pre >= restsize)
+      pre = restsize - 1;
+    /* drop "msgid=...;" or a trailing ";msgid=..." */
+    if (e) {
+      memcpy(rest, tags, pre);
+      ircd_strncpy(rest + pre, e + 1, restsize - pre);
+    } else {
+      if (pre > 0 && tags[pre - 1] == ';')
+        pre--;
+      memcpy(rest, tags, pre);
+      rest[pre] = '\0';
+    }
+  }
 }
 
 /** Longest prefix of @a line (@a len bytes) that fits @a budget,
@@ -785,7 +825,7 @@ static void send_split_line(struct Client *sptr, const char *pfx_first,
   while (1) {
     const char *body = (pfx[0] == '@') ? strchr(pfx, ' ') : pfx;
     size_t head = body ? strlen(body + (pfx[0] == '@' ? 1 : 0)) : strlen(pfx);
-    size_t budget = head + 2 < 510 ? 510 - head - 2 : 1;
+    size_t budget = head < BUFSIZE - 2 ? BUFSIZE - 2 - head : 1;
     size_t n = history_split_point(line, len, budget);
     sendrawto_one(sptr, "%s%.*s", pfx, (int)n, line);
     if (n >= len)
@@ -1020,30 +1060,9 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     int first = 1;
     char rest[sizeof(tags)];
 
-    /* Subsequent lines: the batch/time tags but NOT the msgid.  The
-     * live fallback (send_multiline_fallback) puts the msgid on the
-     * first line only; repeating it here made msgid-deduping clients
-     * keep one line of every multiline in history and broke the
-     * one-msgid-per-event rule (audit 2026-09-06 #14). */
-    rest[0] = '\0';
-    if (tpos) {
-      const char *m = strstr(tags, "msgid=");
-      if (m) {
-        const char *e = strchr(m, ';');
-        size_t pre = (size_t)(m - tags);
-        /* drop "msgid=...;" or a trailing ";msgid=..." */
-        if (e) {
-          memcpy(rest, tags, pre);
-          ircd_strncpy(rest + pre, e + 1, sizeof(rest) - pre - 1);
-        } else {
-          if (pre > 0 && tags[pre - 1] == ';')
-            pre--;
-          memcpy(rest, tags, pre);
-          rest[pre] = '\0';
-        }
-      } else
-        ircd_strncpy(rest, tags, sizeof(rest) - 1);
-    }
+    /* Subsequent lines: the batch/time tags but NOT the msgid (see
+     * history_tags_without_msgid). */
+    history_tags_without_msgid(tpos ? tags : "", rest, sizeof(rest));
     if (rest[0])
       ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), "@%s :%s %s %s :",
                     rest, msg->sender, cmd, target);
@@ -1073,6 +1092,7 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     /* Tier 3: No chathistory batch or no separators - the first logical
      * line only, re-split if it is over the wire. */
     size_t len = separator ? (size_t)(separator - content) : strlen(content);
+    char rest[sizeof(tags)];
 
     if (tpos)
       ircd_snprintf(0, pfx_first, sizeof(pfx_first), "@%s%s :%s %s %s :",
@@ -1080,8 +1100,17 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     else
       ircd_snprintf(0, pfx_first, sizeof(pfx_first), ":%s %s %s :",
                     msg->sender, cmd, target);
-    ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), ":%s %s %s :",
-                  msg->sender, cmd, target);
+    /* A continuation part is still a line of the chathistory batch, at
+     * the message's time: it keeps @batch and @time (a line inside a
+     * batch with no batch tag is outside it), and only the msgid stays
+     * on the first part -- one msgid per message. */
+    history_tags_without_msgid(tpos ? tags : "", rest, sizeof(rest));
+    if (rest[0])
+      ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), "@%s :%s %s %s :",
+                    rest, msg->sender, cmd, target);
+    else
+      ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), ":%s %s %s :",
+                    msg->sender, cmd, target);
     send_split_line(sptr, pfx_first, pfx_cont, content, len);
   }
   } /* end prefix scope */
