@@ -3614,6 +3614,14 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
 {
   send_reply(cli, ERR_SASLFAIL, EmptyString(params[0]) ? "" : params[0]);
 
+  /* The exchange is over, as when services fail one (ms_sasl(), D F):
+   * the next AUTHENTICATE starts a new exchange, and this one's timer
+   * goes with it. */
+  if (t_active(&cli_sasltimeout(cli)))
+    timer_del(&cli_sasltimeout(cli));
+  cli_saslcookie(cli) = 0;
+  cli_saslstart(cli) = 0;
+
   /* Unblock registration if SASL was holding it */
   if (cli_auth(cli))
     return auth_sasl_done(cli_auth(cli));
