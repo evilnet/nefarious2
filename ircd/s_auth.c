@@ -3687,17 +3687,24 @@ static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
                                         int parc, char **params)
 {
-  const char *old_mechs = iauth->i_sasl_mechs[0] ? iauth->i_sasl_mechs : NULL;
+  /* IAuth's previous list, copied: i_sasl_mechs is rewritten below, and
+   * the global list is IAuth's only while it still equals that list. */
+  char old_mechs[sizeof(iauth->i_sasl_mechs)];
+  const char *current = get_sasl_mechanisms();
+  int iauth_set_it;
+
+  ircd_strncpy(old_mechs, iauth->i_sasl_mechs, sizeof(old_mechs));
+  iauth_set_it = old_mechs[0] && current && strcmp(current, old_mechs) == 0;
 
   if (EmptyString(params[0])) {
     iauth->i_sasl_mechs[0] = '\0';
 
     /* If IAUTH was the active mechanism source, clear global mechs.
      * Compare against what's currently advertised to avoid clearing
-     * mechanisms that services set. */
-    if (old_mechs) {
-      const char *current = get_sasl_mechanisms();
-      if (current && strcmp(current, old_mechs) == 0) {
+     * mechanisms that services set.  (The comparison used to read the
+     * list just cleared, so it never matched.) */
+    if (old_mechs[0]) {
+      if (iauth_set_it) {
         log_write(LS_SYSTEM, L_INFO, 0,
                   "IAuth SASL mechanisms withdrawn (no healthy providers)");
         set_sasl_mechanisms(NULL);
@@ -3711,8 +3718,11 @@ static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
 
   log_write(LS_SYSTEM, L_INFO, 0, "IAuth SASL mechanisms: %s", iauth->i_sasl_mechs);
 
-  /* If services hasn't set mechanisms yet, use IAUTH's list for CAP LS */
-  if (!get_sasl_mechanisms())
+  /* IAuth's list becomes the global one (CAP LS, 908) when none is set,
+   * and replaces it when the one set is IAuth's earlier list -- never a
+   * list services set.  A changed value is announced (CAP NEW sasl=,
+   * set_sasl_mechanisms()). */
+  if (!current || iauth_set_it)
     set_sasl_mechanisms(iauth->i_sasl_mechs);
 
   return 0;
