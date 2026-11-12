@@ -2019,7 +2019,8 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
 
   /* Optionally notify operators. */
   if (i_debug(iauth) > 0)
-    sendto_opmask_butone(NULL, SNO_AUTH, "iauth options: %s", params[0]);
+    sendto_opmask_butone(NULL, SNO_AUTH, "iauth options: %s",
+                         parc > 0 ? params[0] : "");
   return 0;
 }
 
@@ -2545,7 +2546,7 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_usermode(struct IAuth *iauth, struct Client *cli,
                               int parc, char **params)
 {
-  if (params[0][0] == '+')
+  if (parc > 0 && params[0][0] == '+')
   {
     set_user_mode(cli, cli, parc + 2, params - 2, ALLOWMODES_ANY);
   }
@@ -2748,11 +2749,16 @@ static void iauth_parse(struct IAuth *iauth, char *message)
   struct AuthRequest *auth;
   struct Client *cli;
   int has_cli;
-  int id;
+  int min = 0;  /* parameters the handler reads, after <id> <ip> <port> */
+  char cmd;
+
+  /* An empty line is not a command (and has no character after it). */
+  if (!*message)
+    return;
 
   /* Find command handler... */
-  switch (*(message++)) {
-  case '>': handler = iauth_cmd_snotice; has_cli = 0; break;
+  switch (cmd = *(message++)) {
+  case '>': handler = iauth_cmd_snotice; has_cli = 0; min = 1; break;
   case 'G': handler = iauth_cmd_debuglevel; has_cli = 0; break;
   case 'O': handler = iauth_cmd_policy; has_cli = 0; break;
   case 'V': handler = iauth_cmd_version; has_cli = 0; break;
@@ -2760,18 +2766,18 @@ static void iauth_parse(struct IAuth *iauth, char *message)
   case 'A': handler = iauth_cmd_config; has_cli = 0; break;
   case 's': handler = iauth_cmd_newstats; has_cli = 0; break;
   case 'S': handler = iauth_cmd_stats; has_cli = 0; break;
-  case 'X': handler = iauth_cmd_xquery; has_cli = 0; break;
+  case 'X': handler = iauth_cmd_xquery; has_cli = 0; min = 3; break;
   case 'o': handler = iauth_cmd_username_forced; has_cli = 1; break;
   case 'U': handler = iauth_cmd_username_good; has_cli = 1; break;
   case 'u': handler = iauth_cmd_username_bad; has_cli = 1; break;
-  case 'N': handler = iauth_cmd_hostname; has_cli = 1; break;
-  case 'I': handler = iauth_cmd_ip_address; has_cli = 1; break;
-  case 'm': handler = iauth_cmd_mark; has_cli = 1; break;
-  case 'M': handler = iauth_cmd_usermode; has_cli = 1; break;
+  case 'N': handler = iauth_cmd_hostname; has_cli = 1; min = 1; break;
+  case 'I': handler = iauth_cmd_ip_address; has_cli = 1; min = 1; break;
+  case 'm': handler = iauth_cmd_mark; has_cli = 1; min = 2; break;
+  case 'M': handler = iauth_cmd_usermode; has_cli = 1; min = 1; break;
   case 'C': handler = iauth_cmd_challenge; has_cli = 1; break;
   case 'd': handler = iauth_cmd_soft_done; has_cli = 1; break;
   case 'D': handler = iauth_cmd_done_client; has_cli = 1; break;
-  case 'R': handler = iauth_cmd_done_account; has_cli = 1; break;
+  case 'R': handler = iauth_cmd_done_account; has_cli = 1; min = 1; break;
   case 'k': /* The 'k' command indicates the user should be booted
 	     * off without telling opers.  There is no way to
 	     * signal that to exit_client(), so we fall through to
@@ -2781,7 +2787,7 @@ static void iauth_parse(struct IAuth *iauth, char *message)
   case 'r': /* we handle termination directly */ return;
   /* SASL-related commands from IAuth */
   case 'c': handler = iauth_cmd_sasl_challenge; has_cli = 2; break;
-  case 'L': handler = iauth_cmd_sasl_loggedin; has_cli = 2; break;
+  case 'L': handler = iauth_cmd_sasl_loggedin; has_cli = 2; min = 1; break;
   case 'f': handler = iauth_cmd_sasl_fail; has_cli = 2; break;
   case 'l': handler = iauth_cmd_sasl_mechs; has_cli = 2; break;
   case 'Z': handler = iauth_cmd_sasl_done; has_cli = 2; break;
@@ -2810,17 +2816,28 @@ static void iauth_parse(struct IAuth *iauth, char *message)
 
   params[parc] = NULL; /* terminate the parameter list */
 
+  /* Every handler may read the parameters it needs without checking:
+   * a line with fewer is refused here. */
+  if (has_cli && parc < 3) {
+    sendto_iauth(NULL, "E Missing :Need <id> <ip> <port>");
+    return;
+  }
+  if (parc - (has_cli ? 3 : 0) < min) {
+    sendto_iauth(NULL, "E Missing :[%c] needs %d parameter%s", cmd, min,
+                 min == 1 ? "" : "s");
+    return;
+  }
+
   /* Check to see if the command specifies a client... */
   if (!has_cli) {
     /* Handler does not need a client. */
     handler(iauth, NULL, parc, params);
   } else {
-    /* Try to find the client associated with the request. */
-    /* params[0] is NULL when the line has no parameters. */
-    id = (parc >= 3) ? strtol(params[0], NULL, 10) : 0;
-    if (parc < 3)
-      sendto_iauth(NULL, "E Missing :Need <id> <ip> <port>");
-    else if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id]))
+    /* Try to find the client associated with the request.  The id is
+     * range-checked as parsed (a long), before it can be narrowed. */
+    long id = strtol(params[0], NULL, 10);
+
+    if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id]))
       /* Client no longer exists (or never existed). */
       sendto_iauth(NULL, "E Gone :[%s %s %s]", params[0], params[1],
 		   params[2]);
@@ -2837,11 +2854,16 @@ static void iauth_parse(struct IAuth *iauth, char *message)
       res = ipmask_parse(params[1], &addr.addr, NULL);
       addr.port = strtol(params[2], NULL, 10);
 
-      /* Check IP address and port number against expected. */
+      /* Check IP address and port number against expected: the
+       * client's address, or the one it connected from when that was
+       * replaced (an unset connect address, all zeros, matches nothing),
+       * and its remote port -- after registration, when the auth
+       * request is gone, the connection's. */
       if (0 == res ||
 	  (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
-           irc_in_addr_cmp(&addr.addr, &cli_connectip(cli))) ||
-	  (auth && addr.port != auth->port))
+           (irc_in_addr_unspec(&cli_connectip(cli)) ||
+            irc_in_addr_cmp(&addr.addr, &cli_connectip(cli)))) ||
+	  addr.port != (auth ? auth->port : cli_port(cli)))
 	/* Report mismatch to iauth. */
 	sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
 		     ircd_ntoa(&cli_ip(cli)));
