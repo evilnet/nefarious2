@@ -92,6 +92,8 @@ enum AuthRequestFlag {
     AR_IAUTH_SOFT_DONE, /**< iauth has no objection to client */
     AR_PASSWORD_CHECKED, /**< client password already checked */
     AR_LOC_DONE,        /**< loc messages have been sent */
+    AR_IAUTH_RELEASED,  /**< iauth went away while checking; registration
+                         * resumes from iauth_release_callback() */
     AR_NUM_FLAGS
 };
 
@@ -971,8 +973,20 @@ int auth_ping_timeout(struct Client *cptr)
       sendheader(cptr, REPORT_FAIL_IAUTH);
       return exit_client_msg(cptr, cptr, &me, "Authorization Timeout");
     }
+    /* A T that cannot be written releases this client, and any other the
+     * program was checking (iauth_disconnect()); this one is finished
+     * here, as it would have been. */
     sendto_iauth(cptr, "T");
     FlagClr(&auth->flags, AR_IAUTH_PENDING);
+    return check_auth_finished(auth);
+  }
+
+  /* Released by an IAuth program that went away, and the check owed from
+   * the event loop (iauth_release_callback()) has not run yet: a T line
+   * for another client that failed in this same pass of check_pings(), or
+   * a release just before it.  The check runs now. */
+  if (FlagHas(&auth->flags, AR_IAUTH_RELEASED)) {
+    FlagClr(&auth->flags, AR_IAUTH_RELEASED);
     return check_auth_finished(auth);
   }
 
@@ -1845,11 +1859,55 @@ void auth_mark_closing(void)
     IAuthSet(iauth, IAUTH_CLOSING);
 }
 
+/** Finishes the registration of clients released by iauth_disconnect(). */
+static struct Timer iauth_release_timer;
+
+/** Finish the registration of the clients an %IAuth instance was still
+ * checking when it went away (#AR_IAUTH_RELEASED): each continues as a
+ * client that never had IAuth, and registers if nothing else holds it.
+ * This runs from the event loop, outside whatever closed the instance.
+ * @param[in] ev Timer event.
+ */
+static void iauth_release_callback(struct Event *ev)
+{
+  struct AuthRequest *auth;
+  struct Client *cli;
+  int ii;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  for (ii = 0; ii <= HighestFd; ii++) {
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
+        || !FlagHas(&auth->flags, AR_IAUTH_RELEASED))
+      continue;
+    FlagClr(&auth->flags, AR_IAUTH_RELEASED);
+    check_auth_finished(auth);
+  }
+}
+
+/** Run iauth_release_callback() from the event loop, as soon as it can. */
+static void iauth_release_soon(void)
+{
+  if (!t_active(&iauth_release_timer))
+    timer_add(timer_init(&iauth_release_timer), iauth_release_callback,
+              NULL, TT_RELATIVE, 0);
+  else if (iauth_release_timer.t_header.gh_flags & GEN_MARKED)
+    /* Inside the callback itself: it may have passed a client released
+     * now, so it runs again. */
+    timer_chg(&iauth_release_timer, TT_RELATIVE, 1);
+  /* (Otherwise it is due and will see every released client.) */
+}
+
 /** Complete disconnection of an %IAuth connection.
  * @param[in] iauth %Connection to fully close.
  */
 static void iauth_disconnect(struct IAuth *iauth)
 {
+  struct AuthRequest *auth;
+  struct Client *cli;
+  int released = 0;
+  int ii;
+
   if (iauth == NULL)
     return;
 
@@ -1874,14 +1932,56 @@ static void iauth_disconnect(struct IAuth *iauth)
     if (i_socket(iauth)->s_header.gh_flags & GEN_DESTROY)
       s_fd(i_socket(iauth)) = -1;
   }
+
+  /* Release the clients this instance was still checking.  A client that
+   * connects while no IAuth program runs registers without one
+   * (start_iauth_query()); these do the same, and the next instance is
+   * not told about them.  Left pending, they waited for an answer that
+   * could not come until the registration timeout, which refused them
+   * under the R policy.  Their registration is finished from the event
+   * loop: a failed write to IAuth brings us here from inside a client's
+   * own registration step, where registering (or exiting) that client or
+   * another one would pull it from under its caller. */
+  for (ii = 0; ii <= HighestFd; ii++) {
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
+        || !FlagHas(&auth->flags, AR_IAUTH_PENDING))
+      continue;
+    FlagClr(&auth->flags, AR_IAUTH_PENDING);
+    FlagSet(&auth->flags, AR_IAUTH_RELEASED);
+    released++;
+  }
+  if (released) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: released %d "
+              "pending client%s", released, released == 1 ? "" : "s");
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth disconnected: released %d "
+                         "pending client%s", released,
+                         released == 1 ? "" : "s");
+    iauth_release_soon();
+  }
 }
 
 /** Close all %IAuth connections marked as closing. */
 void auth_close_unused(void)
 {
   if (IAuthHas(iauth, IAUTH_CLOSING)) {
+    struct SLink *node, *next;
     int ii;
+
     iauth_disconnect(iauth);
+    /* Output still queued for the program goes with the instance, and so
+     * does what the program told us. */
+    MsgQClear(i_sendQ(iauth));
+    MyFree(iauth->i_version);
+    for (node = iauth->i_config; node; node = next) {
+      next = node->next;
+      MyFree(node->value.cp);
+      free_link(node);
+    }
+    for (node = iauth->i_stats; node; node = next) {
+      next = node->next;
+      MyFree(node->value.cp);
+      free_link(node);
+    }
     if (iauth->i_argv) {
       for (ii = 0; iauth->i_argv[ii]; ++ii)
         MyFree(iauth->i_argv[ii]);
