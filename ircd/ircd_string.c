@@ -1879,12 +1879,19 @@ uint64_t msgid_decode_time_ms(const char *msgid)
   return ms;
 }
 
-/** msgid_decode_time_ms() for an id a client hands back as a reference
- * (a CHATHISTORY selector, an ATTACH cursor): also 0 when the id says it
- * was minted more than @a max_ahead_ms after @a now_ms.  That is the
- * forward slack the HLC itself allows (FEAT_HLC_MAX_FORWARD_MS: a clock
- * reading further ahead of the wall clock is refused, so no server of
- * this family stamps one), so such an id was not minted here.
+/** msgid_decode_time_ms() for an id a client hands back as a CHATHISTORY
+ * selector: also 0 when the id says it was minted more than @a max_ahead_ms
+ * after @a now_ms.  The caller passes as @a now_ms the later of the wall
+ * clock and its own HLC's physical time, and as @a max_ahead_ms the HLC's
+ * forward slack (FEAT_HLC_MAX_FORWARD_MS).  That slack only stops this
+ * server ADOPTING a peer's reading further ahead (hlc_receive_bounded); a
+ * server mints at its own clock (hlc_local_event), and after its clock
+ * steps back its HLC stays pinned ahead of the wall clock -- hence the
+ * HLC's time, not the wall clock, as "now".  An id further ahead than
+ * that was minted by a server whose clock is off by more than the network
+ * tolerates; as a reference to a message the target does not hold it is
+ * refused rather than read as a time.  Ids the server reads back itself
+ * (stored rows, ATTACH cursors) are decoded without this bound.
  * @a max_ahead_ms 0 means unbounded (the feature's own meaning). */
 uint64_t msgid_decode_ref_time_ms(const char *msgid, uint64_t now_ms,
                                   uint64_t max_ahead_ms)

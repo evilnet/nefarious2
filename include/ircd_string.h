@@ -160,7 +160,8 @@ static __inline__ NTL_HDR_strCasediff { NTL_SRC_strCasediff }
 extern uint64_t msgid_decode_time_ms(const char *msgid);
 /** msgid_decode_time_ms(), also 0 when that time is more than
  * @a max_ahead_ms past @a now_ms (0 = no such bound): for ids clients
- * hand back as references. */
+ * hand back as CHATHISTORY selectors.  @a now_ms is the later of the
+ * wall clock and the local HLC (hlc_reference_now_ms). */
 extern uint64_t msgid_decode_ref_time_ms(const char *msgid, uint64_t now_ms,
                                          uint64_t max_ahead_ms);
 /** Decode a msgid's full HLC stamp (physical ms + logical counter).

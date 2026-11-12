@@ -860,7 +860,7 @@ webpush_line_cmocka: $(WEBPUSH_LINE_CMOCKA_OBJS)
 # crdt_hlc tests - the HLC_MAX_FORWARD_MS bound on hlc_receive_bounded.
 # Links the real crdt_hlc.o (built by the top-level `make` before this
 # runs); test_stub.o supplies log_write for the overflow warning path.
-CRDT_HLC_CMOCKA_OBJS = crdt_hlc_cmocka.o test_stub.o ../crdt_hlc.o
+CRDT_HLC_CMOCKA_OBJS = crdt_hlc_cmocka.o test_stub.o ../crdt_hlc.o ../ircd_string.o
 crdt_hlc_cmocka: $(CRDT_HLC_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CRDT_HLC_CMOCKA_OBJS) $(CMOCKA_LIBS)
 

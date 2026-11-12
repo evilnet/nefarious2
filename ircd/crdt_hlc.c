@@ -160,6 +160,13 @@ int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
   return rejected;
 }
 
+uint64_t hlc_reference_now_ms(const struct HLC *local, uint64_t wall_ms)
+{
+  if (local && local->physical_ms > wall_ms)
+    return local->physical_ms;
+  return wall_ms;
+}
+
 uint64_t hlc_max_forward_ms(void)
 {
   int configured = feature_int(FEAT_HLC_MAX_FORWARD_MS);

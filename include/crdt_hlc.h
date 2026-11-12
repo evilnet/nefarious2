@@ -90,6 +90,14 @@ struct HLC hlc_global_event(void);
 int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms,
                         uint64_t *ahead_ms);
 
+/** @brief "Now" for judging how far ahead a stamp reads: the later of
+ *  @a wall_ms and @a local's physical time.  After the wall clock steps
+ *  back the HLC stays pinned ahead (hlc_local_event keeps the larger
+ *  physical time), and every stamp this server mints meanwhile carries
+ *  the HLC's time, not the wall clock's.
+ */
+uint64_t hlc_reference_now_ms(const struct HLC *local, uint64_t wall_ms);
+
 /** @brief Read FEAT_HLC_MAX_FORWARD_MS, normalised for hlc_global_receive /
  *  md_stamp_ahead: a negative configured value has no sane bounded
  *  meaning and is treated as 0 (unbounded) rather than sign-extended

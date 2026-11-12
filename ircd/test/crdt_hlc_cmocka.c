@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <stdint.h>
+#include <string.h>
 #include <cmocka.h>
 
 #include "../../include/crdt_hlc.h"
@@ -23,6 +24,62 @@ int feature_int(int feat)
 {
   (void)feat;
   return 60000;  /* matches ircd_features.c's F_I(HLC_MAX_FORWARD_MS) default */
+}
+
+/* ircd_string.c (linked for the reference-bound tests below). */
+extern uint64_t msgid_decode_ref_time_ms(const char *msgid, uint64_t now_ms,
+                                         uint64_t max_ahead_ms);
+
+/** A msgid of generate_msgid()'s form minted at @a ms. */
+static void mint_id(char *out, uint64_t ms)
+{
+  static const char b64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]";
+  int i;
+  memcpy(out, "ABAAB", 5);
+  for (i = 11; i >= 5; i--) {
+    out[i] = b64[ms & 63];
+    ms >>= 6;
+  }
+  memcpy(out + 12, "Ac", 3);
+}
+
+/* Review A1 (#214): after the wall clock steps back 120 s the HLC stays
+ * pinned ahead and the ids this server mints carry the HLC's time.  Judged
+ * against the wall clock alone such an id read as "120 s in the future" --
+ * past the 60 s forward slack -- and a CHATHISTORY reference to it that
+ * the queried target does not hold was refused.  "Now" for the bound is
+ * the later of the wall clock and the HLC. */
+static void test_reference_now_follows_pinned_hlc(void **state)
+{
+  uint64_t wall = hlc_wall_clock_ms();
+  struct HLC local = { wall + 120000, 7, 1 };   /* minted before the step */
+  struct HLC r;
+  char id[16];
+  (void)state;
+
+  /* The step back: the next local event stays at the HLC's time. */
+  r = hlc_local_event(&local);
+  assert_true(r.physical_ms >= wall + 120000);
+  mint_id(id, r.physical_ms);
+
+  assert_true(hlc_reference_now_ms(&local, wall) == local.physical_ms);
+  assert_true(msgid_decode_ref_time_ms(id, hlc_reference_now_ms(&local, wall), 60000)
+              == r.physical_ms);
+  /* What the wall clock alone said (the defect). */
+  assert_true(msgid_decode_ref_time_ms(id, wall, 60000) == 0);
+  /* An id further ahead than the slack past the HLC is still refused. */
+  mint_id(id, local.physical_ms + 60001);
+  assert_true(msgid_decode_ref_time_ms(id, hlc_reference_now_ms(&local, wall), 60000) == 0);
+}
+
+/* The HLC behind the wall clock (the normal case): the wall clock is now. */
+static void test_reference_now_wall_ahead(void **state)
+{
+  struct HLC local = { 5000, 0, 1 };
+  (void)state;
+  assert_true(hlc_reference_now_ms(&local, 9000) == 9000);
+  assert_true(hlc_reference_now_ms(NULL, 9000) == 9000);
 }
 
 static void test_within_bound_adopts(void **state)
@@ -200,6 +257,8 @@ int main(void)
     cmocka_unit_test(test_huge_max_remote_behind_unchanged),
     cmocka_unit_test(test_local_overflow_carries),
     cmocka_unit_test(test_receive_overflow_carries),
+    cmocka_unit_test(test_reference_now_follows_pinned_hlc),
+    cmocka_unit_test(test_reference_now_wall_ahead),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

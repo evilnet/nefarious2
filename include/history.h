@@ -600,8 +600,11 @@ extern void history_free_messages(struct HistoryMessage *list);
 extern void history_free_targets(struct HistoryTarget *list);
 
 /** Get timestamp for a given message ID, in whatever target the store
- * holds it, else the time the id itself carries.  For cursors that are
- * not about one target (a bouncer ATTACH cursor); a CHATHISTORY selector
+ * holds it, else the time the id itself carries (decoded without the
+ * forward bound selectors get: an id this server minted while its clock
+ * ran ahead is still that message's time).  For this server's own reads
+ * that are not about one target (a bouncer ATTACH cursor, a stored
+ * REDACT's target); a CHATHISTORY selector
  * is resolved against its target with history_msgid_ref_timestamp().
  * @param[in] msgid Message ID to look up.
  * @param[out] timestamp Buffer for timestamp (at least HISTORY_TIMESTAMP_LEN).

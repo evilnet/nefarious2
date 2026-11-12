@@ -4478,14 +4478,19 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
   return found;
 }
 
-/** The mint time a msgid handed back by a client carries, as a key
- * timestamp ("sec.mmm"): only an id of exactly the form this server family
- * mints, stamped no further ahead of now than the HLC's own forward slack
- * (msgid_decode_ref_time_ms).
+/** The mint time a msgid a client handed back as a CHATHISTORY selector
+ * carries, as a key timestamp ("sec.mmm"): only an id of exactly the form
+ * this server family mints, stamped no further ahead than the HLC's
+ * forward slack past the later of the wall clock and this server's own
+ * HLC (msgid_decode_ref_time_ms, hlc_reference_now_ms: after a clock step
+ * back the HLC stays ahead, and the ids this server mints meanwhile with
+ * it).
  * @return 0 (@a timestamp filled), or -1: not a time. */
 static int msgid_ref_mint_timestamp(const char *msgid, char *timestamp)
 {
-  uint64_t ms = msgid_decode_ref_time_ms(msgid, hlc_wall_clock_ms(),
+  uint64_t ms = msgid_decode_ref_time_ms(msgid,
+                                         hlc_reference_now_ms(hlc_global(),
+                                                              hlc_wall_clock_ms()),
                                          hlc_max_forward_ms());
   if (!ms)
     return -1;
@@ -4538,9 +4543,17 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
      * itself carries its mint time since the 2026-09 repack -- decode
      * it so cursors and refs degrade to a time anchor instead of
      * failing.  Legacy/garbage ids decode to 0 and keep the old
-     * failure path. */
-    if (msgid_ref_mint_timestamp(msgid, timestamp) == 0)
+     * failure path.  No forward bound here: the callers are this
+     * server's own reads (an ATTACH cursor naming the last message the
+     * client saw, a stored REDACT's target), and an id minted while
+     * this server's clock ran ahead is still that message's time. */
+    uint64_t ms = msgid_decode_time_ms(msgid);
+    if (ms) {
+      ircd_snprintf(0, timestamp, HISTORY_TIMESTAMP_LEN, "%llu.%03llu",
+                    (unsigned long long)(ms / 1000),
+                    (unsigned long long)(ms % 1000));
       return 0;
+    }
     log_write(LS_SYSTEM, L_INFO, 0,
               "history_msgid_to_timestamp: msgid=%s NOT FOUND in cf_msgid index "
               "and not time-decodable (legacy format)", msgid);
