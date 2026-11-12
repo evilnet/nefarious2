@@ -3582,6 +3582,35 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
     return 0;
   }
 
+  /* No exchange (it failed, was aborted or timed out, or none began: no
+   * cookie): nothing to log in. */
+  if (!cli_saslcookie(cli))
+    return 0;
+
+  /* A logged-in client's re-authentication never changes its account
+   * (sasl_reauth_refused(), the rule every tier applies): refused before
+   * anything is named for the exchange, which ends here, so the Z that
+   * follows finds none.  (IAuth serves a client only while its own checks
+   * are pending, before registration: no logged-in client gets here
+   * through m_authenticate(); the rule holds for any line naming one.) */
+  {
+    char account[ACCOUNTLEN + 1];
+
+    memcpy(account, params[0], len);
+    account[len] = '\0';
+    if (sasl_reauth_refused(cli, account, NULL)) {
+      if (t_active(&cli_sasltimeout(cli)))
+        timer_del(&cli_sasltimeout(cli));
+      cli_saslcookie(cli) = 0;
+      cli_saslstart(cli) = 0;
+      cli_saslnamed(cli)[0] = '\0';
+      cli_saslnamedts(cli) = 0;
+      if (cli_auth(cli))
+        return auth_sasl_done(cli_auth(cli));
+      return 0;
+    }
+  }
+
   /* The account IAuth names for this exchange (without a ":<timestamp>"
    * suffix) and its timestamp when IAuth gives one, kept for the success
    * (iauth_cmd_sasl_done()), which sets the login's identity from it as a
@@ -3697,6 +3726,11 @@ static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
                                int parc, char **params)
 {
+  /* No exchange (its L was refused, or it failed, was aborted or timed
+   * out: no cookie): no success to give. */
+  if (!cli_saslcookie(cli))
+    return 0;
+
   /* The login's identity as a whole (sasl_identity_set()), from what the
    * exchange's L named: no Keycloak id -- IAuth carries none, and none may
    * be left from an earlier login on this connection.  With no L, the
@@ -3715,7 +3749,13 @@ static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
   /* Send success to client */
   send_reply(cli, RPL_SASLSUCCESS);
 
-  /* Cancel SASL timeout */
+  /* The exchange is over, as when services complete one: its cookie and
+   * timer go.  A cookie left behind would read as an exchange still in
+   * flight -- the next AUTHENTICATE taken for its data, past the check
+   * that allows a client with a login only OAUTHBEARER (m_authenticate()). */
+  cli_saslcookie(cli) = 0;
+  cli_saslstart(cli) = 0;
+  ClearSASLReauth(cli);
   if (t_active(&cli_sasltimeout(cli)))
     timer_del(&cli_sasltimeout(cli));
 

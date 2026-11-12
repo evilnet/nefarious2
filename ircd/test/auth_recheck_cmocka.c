@@ -199,7 +199,13 @@ int exit_client(struct Client *cptr, struct Client *victim,
 { fail_msg("exit_client: %s", comment); return 0; }
 int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...) { if (len) buf[0] = '\0'; return 0; }
-int send_reply(struct Client *to, int reply, ...) { return 0; }
+static int successes;          /**< RPL_SASLSUCCESS sent */
+int send_reply(struct Client *to, int reply, ...)
+{
+  if ((reply & ~SND_EXPLICIT) == RPL_SASLSUCCESS)
+    successes++;
+  return 0;
+}
 void sendrawto_one(struct Client *to, const char *pattern, ...) {}
 void send_fail(struct Client *to, const char *command, const char *code,
                const char *context, const char *description) {}
@@ -217,6 +223,26 @@ void msgq_delete(struct MsgQ *mq, unsigned int length) {}
 IOResult os_sendv_nonb(int fd, struct MsgQ *buf, unsigned int *len_in,
                        unsigned int *len_out) { return IO_FAILURE; }
 
+/* sasl_auth.c (not linked): the login record IAuth's L writes, and the
+ * account rule's verdict -- a client the ircd has logged in may not be
+ * logged in to another account (its own cases: sasl_handler_cmocka). */
+static int identity_sets, refusals;
+void sasl_identity_set(struct Client *cptr, const char *account,
+                       time_t acc_create, const char *kc_id, int id_live)
+{
+  identity_sets++;
+  ircd_strncpy(cli_saslaccount(cptr), account ? account : "", ACCOUNTLEN + 1);
+}
+int sasl_reauth_refused(struct Client *sptr, const char *account,
+                        const char *kc_id)
+{
+  if (!IsAccount(sptr) || cli_auth(sptr)
+      || 0 == ircd_strcmp(cli_user(sptr)->account, account))
+    return 0;
+  refusals++;
+  return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Cases                                                               */
 /* ------------------------------------------------------------------ */
@@ -226,6 +252,7 @@ static int setup(void **state)
   memset(fakes, 0, sizeof(fakes));
   timer_arms = 0;
   in_dispatch = ran_in_dispatch = 0;
+  successes = identity_sets = refusals = 0;
   CurrentTime = time(NULL);
   return 0;
 }
@@ -369,6 +396,83 @@ static void check_runs_in_the_same_engine_pass(void **state)
   close(sv[1]);
 }
 
+/* IAuth's SASL answers: L (logged in as) and Z (done). */
+
+static int iauth_line(int (*handler)(struct IAuth *, struct Client *, int, char **),
+                      struct fake *f, const char *arg)
+{
+  char buf[64];
+  char *params[2];
+
+  ircd_strncpy(buf, arg ? arg : "", sizeof(buf));
+  params[0] = buf;
+  params[1] = NULL;
+  return handler(NULL, &f->cli, arg ? 1 : 0, params);
+}
+
+/** Z ends the exchange: success, and no cookie left -- one left behind
+ * reads as an exchange still in flight, and the client's next AUTHENTICATE
+ * goes to IAuth as its data, past the check that lets a client with a
+ * login use only OAUTHBEARER. */
+static void iauth_done_ends_the_exchange(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);     /* registration waits */
+  cli_saslcookie(&a->cli) = 9;
+  iauth_line(iauth_cmd_sasl_loggedin, a, "alice:1700000000");
+  assert_string_equal(cli_saslnamed(&a->cli), "alice");
+  iauth_line(iauth_cmd_sasl_done, a, NULL);
+  assert_int_equal(identity_sets, 1);        /* the success sets it */
+  assert_string_equal(cli_saslaccount(&a->cli), "alice");
+  assert_true(IsSASLComplete(&a->cli));
+  assert_int_equal(successes, 1);
+  assert_int_equal(cli_saslcookie(&a->cli), 0);
+  destroy_auth_request(a->auth);
+}
+
+/** An L or Z with no exchange in flight (it failed, was aborted, timed
+ * out) logs nobody in and tells the client nothing. */
+static void iauth_answers_without_an_exchange_are_dropped(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);
+  iauth_line(iauth_cmd_sasl_loggedin, a, "alice");
+  assert_string_equal(cli_saslnamed(&a->cli), "");
+  iauth_line(iauth_cmd_sasl_done, a, NULL);
+  assert_int_equal(identity_sets, 0);
+  assert_false(IsSASLComplete(&a->cli));
+  assert_int_equal(successes, 0);
+  destroy_auth_request(a->auth);
+}
+
+/** #223 through IAuth: an L naming another account for a client the ircd
+ * has logged in is refused before anything of it is stored, the exchange
+ * ends, and the Z after it gives no success. */
+static void iauth_login_of_a_logged_in_client_refused(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  destroy_auth_request(a->auth);               /* registered */
+  cli_status(&a->cli) = STAT_USER;
+  ircd_strncpy(a->user.account, "xavier", sizeof(a->user.account));
+  SetAccount(&a->cli);
+  ircd_strncpy(cli_saslaccount(&a->cli), "xavier", ACCOUNTLEN + 1);
+  SetSASLComplete(&a->cli);
+  cli_saslcookie(&a->cli) = 5;
+
+  iauth_line(iauth_cmd_sasl_loggedin, a, "yvonne");
+  assert_int_equal(refusals, 1);
+  assert_string_equal(cli_saslnamed(&a->cli), "");
+  assert_int_equal(identity_sets, 0);
+  assert_string_equal(cli_saslaccount(&a->cli), "xavier");
+  assert_int_equal(cli_saslcookie(&a->cli), 0);
+  iauth_line(iauth_cmd_sasl_done, a, NULL);
+  assert_int_equal(successes, 0);
+  assert_string_equal(a->user.account, "xavier");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -378,6 +482,9 @@ int main(void)
     cmocka_unit_test_setup(a_check_that_exits_another_queued_client, setup),
     cmocka_unit_test_setup(queued_during_the_pass_runs_in_it, setup),
     cmocka_unit_test_setup(check_runs_in_the_same_engine_pass, setup),
+    cmocka_unit_test_setup(iauth_done_ends_the_exchange, setup),
+    cmocka_unit_test_setup(iauth_answers_without_an_exchange_are_dropped, setup),
+    cmocka_unit_test_setup(iauth_login_of_a_logged_in_client_refused, setup),
   };
 
   event_init(64);

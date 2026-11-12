@@ -1451,8 +1451,8 @@ struct Client {
  * a SASL exchange is still in flight (FLAG_REGLOGIN), and a logged-in
  * client's re-authentication keeps it while its exchange runs
  * (FLAG_SASLREAUTH): either way that exchange has not completed, stays
- * abortable and times out.  (An IAuth success, the one completion that
- * leaves its cookie, sets the flag as an exchange does.) */
+ * abortable and times out.  (Every completion drops its cookie; an IAuth
+ * success sets the flag as an exchange does.) */
 #define IsSASLExchangeDone(x)   (IsSASLComplete(x) && !HasFlag(x, FLAG_REGLOGIN) \
                                  && !HasFlag(x, FLAG_SASLREAUTH))
 /** Return non-zero if the client's SASL exchange is a logged-in client's

@@ -957,7 +957,8 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
   /* A REGISTER replacing a completed login (before registration, its answer
    * after a completed exchange): a cookie left with no local session is that
-   * exchange's (an IAuth success keeps it), not one in flight -- clear it,
+   * exchange's, not one in flight (every completion drops its cookie now,
+   * an IAuth success included; kept as a guard) -- clear it,
    * or the REGISTER login (which completes no exchange, IsSASLExchangeDone())
    * would leave it looking like one, aborted at registration. */
   if (by == LOGIN_BY_REGISTER && IsSASLExchangeDone(sptr)
@@ -975,8 +976,9 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
    * (auth_set_account()), and it must not run before the steps below have
    * set what it reads, nor free sptr under them.  The hold is normally on
    * already (auth_sasl_start() when the exchange began), but an exchange
-   * begun while an earlier one's cookie was still set never took it (an
-   * IAuth success or failure leaves the cookie).  A REGISTER takes no hold:
+   * begun while an earlier one's cookie was still set never took it (a
+   * local exchange started over another tier's still in flight).  A
+   * REGISTER takes no hold:
    * its step 3 checks nothing here (see above). */
   if (by == LOGIN_BY_SASL && cli_auth(sptr))
     auth_sasl_start(cli_auth(sptr));
