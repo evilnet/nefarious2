@@ -309,24 +309,16 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
       from = prim;
   }
 
-  /* Save label and generate compact tag for forwarded labeled commands.
-   * Must happen before sendcmdto_one which picks up the s2s overrides.
-   *
-   * Only toward an IRCv3-aware destination: the label is correlated to
-   * the reply by the compact msgid, which a legacy server neither
-   * receives (send.c gates the @A prefix on IsIRCv3Aware) nor echoes.
-   * With no possible correlation the honest outcome is the plain
-   * labeled ACK now and untagged numerics when they arrive. */
-  if (MyConnect(from) && cli_label(from)[0] &&
-      feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
-      IsIRCv3Aware(acptr)) {
+  /* Record how the reply will find its way back to a labeled response:
+   * by the compact msgid over a route that carries S2S tags, by the link
+   * and the send order over one with a legacy server on it
+   * (fwd_label_forward).  Must happen before sendcmdto_one, which picks
+   * up the s2s overrides. */
+  {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if (fwd_label_save(from, cmd, msgid, &time_ms)) {
-      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
-        sendcmdto_set_s2s_tags(time_ms, msgid);
-    }
+    if (fwd_label_forward(from, cmd, acptr, msgid, &time_ms))
+      sendcmdto_set_s2s_tags(time_ms, msgid);
   }
 
   sendcmdto_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
@@ -411,18 +403,12 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
       from = prim;
   }
 
-  /* Save label and generate compact tag for forwarded labeled commands.
-   * IRCv3-aware destinations only -- see hunt_server_cmd. */
-  if (MyConnect(from) && cli_label(from)[0] &&
-      feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
-      IsIRCv3Aware(acptr)) {
+  /* Labeled-response correlation -- see hunt_server_cmd. */
+  {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if (fwd_label_save(from, cmd, msgid, &time_ms)) {
-      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
-        sendcmdto_set_s2s_tags(time_ms, msgid);
-    }
+    if (fwd_label_forward(from, cmd, acptr, msgid, &time_ms))
+      sendcmdto_set_s2s_tags(time_ms, msgid);
   }
 
   sendcmdto_prio_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],

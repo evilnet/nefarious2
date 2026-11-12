@@ -181,16 +181,24 @@ int ms_lusers(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   send_reply(sptr, RPL_CURRENT_LOCAL, UserStats.local_announced_clients,
              UserStats.local_announced_clients_max);
+  /* To a remote requester the NOTICE goes before RPL_CURRENT_GLOBAL:
+   * that numeric is LUSERS' terminal, and the requester's server closes
+   * the forwarded labeled-response batch on it -- a NOTICE after it fell
+   * outside. */
+  if (!MyUser(sptr)) {
+    /* Echo compact tag for labeled-response correlation */
+    if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_s2s_msgid(cli_from(sptr))[0])
+      sendcmdto_set_s2s_tags(cli_s2s_time_ms(cli_from(sptr)), cli_s2s_msgid(cli_from(sptr)));
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Highest connection count: "
+                  "%d (%d clients)", sptr, max_connection_count,
+                  max_client_count);
+  }
   send_reply(sptr, RPL_CURRENT_GLOBAL, UserStats.announced_clients,
              UserStats.announced_clients_max);
-
-  /* Echo compact tag for labeled-response correlation */
-  if (!MyUser(sptr) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
-      cli_s2s_msgid(cli_from(sptr))[0])
-    sendcmdto_set_s2s_tags(cli_s2s_time_ms(cli_from(sptr)), cli_s2s_msgid(cli_from(sptr)));
-  sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Highest connection count: "
-		"%d (%d clients)", sptr, max_connection_count,
-		max_client_count);
+  if (MyUser(sptr))
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Highest connection count: "
+                  "%d (%d clients)", sptr, max_connection_count,
+                  max_client_count);
 
   if (lb) labeled_batch_end(sptr);
   return 0;

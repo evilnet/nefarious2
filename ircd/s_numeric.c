@@ -138,6 +138,28 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
 
       /* Numeric with different/no msgid: close any DRAINING batches */
       fwd_label_close_draining(acptr);
+
+      /* No msgid at all: a reply over a route with a legacy server on
+       * it, matched by the link it came over and the order the client's
+       * commands went out in (fwd_label_find_order). */
+      if (!incoming_msgid[0] && (fl = fwd_label_find_order(acptr, sptr))) {
+        int done = fwd_label_order_done(fl, numeric);
+
+        if (!fl->fl_plain) {
+          if (fl->fl_state == FWD_LABEL_PENDING)
+            fwd_label_open_batch(acptr, fl);
+          sendcmdto_set_fwd_batch(fl->fl_batch_id);
+          sendcmdto_one_tags(from, num, num, acptr, "%C %s", acptr, parv[2]);
+          if (done)
+            fwd_label_close_batch(acptr, fl);
+          return 0;
+        }
+        /* An unlabeled command's reply, held only to keep the order:
+         * it goes out plain, below.  Its entry never opened a batch, so
+         * closing it only frees the slot. */
+        if (done)
+          fwd_label_close_batch(acptr, fl);
+      }
     } else {
       /* Remote client: relay numeric, preserving compact tag for correlation */
       if (cli_s2s_msgid(cptr)[0] && cli_s2s_time_ms(cptr))

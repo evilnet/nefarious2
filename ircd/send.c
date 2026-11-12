@@ -5208,7 +5208,11 @@ int labeled_batch_start(struct Client *sptr)
 }
 
 /** End a labeled-response batch started by labeled_batch_start().
- * Closes the batch and clears the cli_labeled_batch flag.
+ * Closes the batch and clears the cli_labeled_batch flag -- unless a
+ * forwarded label took the batch over (cli_labeled_batch 2, see
+ * fwd_label_take()): the forwarded reply is still to come, and the
+ * batch closes with it.  The handler is done with it, so it is only
+ * forgotten here.
  * @param[in] sptr Local client to end batch for.
  */
 void labeled_batch_end(struct Client *sptr)
@@ -5218,7 +5222,10 @@ void labeled_batch_end(struct Client *sptr)
   if (!cli_labeled_batch(sptr))
     return;
 
-  send_batch_end(sptr);
+  if (cli_labeled_batch(sptr) == 2)
+    cli_batch_id(sptr)[0] = '\0';
+  else
+    send_batch_end(sptr);
   cli_labeled_batch(sptr) = 0;
 }
 

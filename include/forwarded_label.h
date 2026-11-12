@@ -29,17 +29,76 @@ struct ForwardedLabel;
 int fwd_label_save(struct Client *from, const char *cmd,
                    char *msgid, uint64_t *time_out);
 
-/** Find a ForwardedLabel entry matching the given msgid.
- * If msgid is non-empty, searches by exact match (compact tag correlation).
- * If msgid is empty, returns the first non-empty entry (FIFO fallback for
- * legacy servers that strip compact tags).
+/** Record how the replies to a command hunt_server_cmd forwards will be
+ * matched to it, just before it is forwarded.
+ *
+ * Over a route that carries S2S tags to and from \a dest, a labeled
+ * command is saved by fwd_label_save() and matched by its msgid; an
+ * unlabeled one carries a msgid too, with nothing saved, so that no
+ * reply over a tagged route comes back without one.  Over a route with
+ * a legacy server on it no msgid comes back: the command -- labeled or
+ * not, for a client with labeled-response -- is recorded with its link,
+ * destination and send order, and its replies are matched by the link
+ * and the order (fwd_label_find_order).  A command that cannot be
+ * recorded there marks the client so that no label is created on such
+ * a route until its replies have had time to arrive.
+ *
+ * @param[in] from     Local client sending the command.
+ * @param[in] cmd      Command name (e.g., "WHOIS").
+ * @param[in] dest     Server the command is forwarded to.
+ * @param[out] msgid   As fwd_label_save().
+ * @param[out] time_out As fwd_label_save().
+ * @return 1 if the caller must arm the S2S tags with \a msgid and
+ *         \a time_out (a tagged route), else 0.
+ */
+int fwd_label_forward(struct Client *from, const char *cmd,
+                      struct Client *dest, char *msgid, uint64_t *time_out);
+
+/** Find a ForwardedLabel entry matching the given msgid exactly
+ * (compact tag correlation).  An empty msgid matches nothing: a reply
+ * without one comes over an order route (fwd_label_find_order).
  * Entries past timeout are cleaned up (batch closed if active).
  *
  * @param[in] acptr   Local client to search.
- * @param[in] msgid   Msgid from incoming compact tag, or empty string for FIFO.
+ * @param[in] msgid   Msgid from incoming compact tag.
  * @return Matching ForwardedLabel, or NULL.
  */
 struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid);
+
+/** Find the order-route entry a reply without a msgid belongs to: the
+ * oldest one recorded for the link the reply came over.  Every forwarded
+ * command of a labeled-response client over a tagged route carries a
+ * msgid, so its reply does too; on an order route the unlabeled ones are
+ * recorded as well, and one destination per link is tracked at a time
+ * -- the server asked answers in the order it was asked, so the oldest
+ * entry is the one being answered.
+ * Entries past timeout are cleaned up (batch closed if active).
+ *
+ * @param[in] acptr   Local client the reply is for.
+ * @param[in] source  Server the reply names as its source.
+ * @return Matching ForwardedLabel, or NULL.
+ */
+struct ForwardedLabel *fwd_label_find_order(struct Client *acptr,
+                                            struct Client *source);
+
+/** Whether \a numeric ends the reply an order-route entry tracks: its
+ * terminal, or an error the command's reply does not go on past.
+ *
+ * @param[in] fl       Order-route entry.
+ * @param[in] numeric  Numeric received.
+ * @return Non-zero if the reply is complete.
+ */
+int fwd_label_order_done(struct ForwardedLabel *fl, int numeric);
+
+/** Whether \a msgid is one this server minted -- on an S2S line, the
+ * compact msgid of a command we forwarded, echoed by the server that
+ * answers it (fwd_label_forward tags every one over a tagged route).
+ * It names the command, not the reply line that carries it.
+ *
+ * @param[in] msgid  Msgid from an incoming compact tag.
+ * @return Non-zero if it is ours.
+ */
+int fwd_label_is_echo(const char *msgid);
 
 /** Open a labeled-response batch for a forwarded label entry.
  * Sends BATCH +<batch_id> labeled-response with @label=<label> to the client.

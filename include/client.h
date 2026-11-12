@@ -378,13 +378,26 @@ enum ForwardedLabelState {
 
 /** Tracks a labeled command forwarded to a remote server via hunt_server_cmd.
  * Stored in a per-connection FIFO array on the Connection struct.
+ *
+ * A command whose route carries S2S tags is correlated by fl_msgid.  One
+ * whose route has a legacy server on it is correlated by order instead:
+ * its replies come back without a msgid over fl_link, the server asked
+ * (fl_server) answers a client's commands in the order they were sent,
+ * and fl_seq is that order.  On such a route an unlabeled command is
+ * tracked too (fl_plain), with no batch, so that its replies are never
+ * taken for a later labeled one's.
  */
 struct ForwardedLabel {
   char                     fl_label[64];   /**< Saved client label */
   char                     fl_batch_id[16]; /**< Batch ID for labeled-response batch */
   char                     fl_msgid[16];   /**< Compact tag msgid for correlation */
+  char                     fl_server[4];   /**< Order route: destination server's numeric ("" on a tagged route) */
+  char                     fl_link[4];     /**< Order route: numeric of our link toward it (replies are matched by it) */
+  unsigned long            fl_seq;         /**< Order route: send order, oldest answered first */
+  unsigned char            fl_plain;       /**< Order route: unlabeled command, held for the order only (no batch) */
   unsigned short           fl_terminal;    /**< Primary terminal numeric */
   unsigned short           fl_terminal2;   /**< Alternate terminal (0 = none) */
+  unsigned short           fl_cont;        /**< Order route: an error the reply goes on past (0 = none) */
   time_t                   fl_created;     /**< For timeout cleanup */
   enum ForwardedLabelState fl_state;       /**< Current state */
 };
@@ -534,8 +547,9 @@ struct Connection
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
-  unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch */
+  unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch; 2 once a forwarded label took it over */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
+  time_t              con_fwd_untracked; /**< Last command routed over a legacy hop that could not be tracked */
   /* WebSocket state for RFC 6455 compliance */
   unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */
@@ -800,6 +814,8 @@ struct Client {
 #define cli_labeled_batch(cli)	con_labeled_batch(cli_connect(cli))
 /** Get forwarded label FIFO array. */
 #define cli_fwd_labels(cli)	con_fwd_labels(cli_connect(cli))
+/** Get the time of the last untracked command routed over a legacy hop. */
+#define cli_fwd_untracked(cli)	con_fwd_untracked(cli_connect(cli))
 /** Get WebSocket partial frame buffer. */
 #define cli_ws_frame_buf(cli)	con_ws_frame_buf(cli_connect(cli))
 /** Get WebSocket partial frame buffer length. */
@@ -1156,6 +1172,8 @@ struct Client {
 #define con_labeled_batch(con)	((con)->con_labeled_batch)
 /** Get the forwarded label FIFO array. */
 #define con_fwd_labels(con)	((con)->con_fwd_labels)
+/** Get the time of the last untracked command routed over a legacy hop. */
+#define con_fwd_untracked(con)	((con)->con_fwd_untracked)
 /** Get WebSocket partial frame buffer. */
 #define con_ws_frame_buf(con)	((con)->con_ws_frame_buf)
 /** Get WebSocket partial frame buffer length. */
