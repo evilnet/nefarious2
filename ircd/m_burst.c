@@ -99,6 +99,7 @@
 #include "s_misc.h"
 #include "send.h"
 #include "struct.h"
+#include "sys.h"
 #include "ircd_snprintf.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -158,6 +159,234 @@ netride_exmodes(int parc, char **parv, const char *curr_key)
     }
   }
   return result;
+}
+
+/** The BURST lines ms_burst() relays for the one it received, in two
+ * forms: with op-levels for the peers that have them, and with "o" for
+ * the others.  What is relayed can be longer than what came in -- a short
+ * ban mask is expanded ("a" becomes "a!*@*"), a member's mode field can
+ * grow -- so it goes on as many lines as it needs, split as
+ * send_channel_modes() splits a channel's own BURST: each line starts
+ * "<source> B <channel> <timestamp>", the modes go on the first one, and
+ * members and bans continue on the next.  Each buffer holds at most one
+ * line, so no input overruns it. */
+struct BurstRelay {
+  struct Client *sptr;          /**< Source of the BURST. */
+  struct Client *cptr;          /**< The link it came from: not sent back. */
+  struct Channel *chptr;        /**< The channel. */
+  int room;                     /**< Bytes a line has after its prefix. */
+  int excepts;                  /**< Ban exceptions are relayed (EXCEPTS). */
+  int modes_pending;            /**< The modes are not on a line yet. */
+  int lines;                    /**< Lines sent so far. */
+  int nickpos, nickposo, banpos, expos;
+  char modestr[BUFSIZE], modestro[BUFSIZE];  /**< " +modes params" or "" */
+  char nickstr[BUFSIZE], nickstro[BUFSIZE];  /**< " nick[:mode],..." or "" */
+  char banstr[BUFSIZE];         /**< " :%ban ban" (and the separator
+                                 *   before the exceptions) or "" */
+  char exstr[BUFSIZE];          /**< "~ except except" or "" */
+};
+
+/** Start the relay of a BURST of @a chptr from @a sptr, received on
+ * @a cptr.  Called once the channel has its final timestamp. */
+static void burst_relay_init(struct BurstRelay *rl, struct Client *sptr,
+                             struct Client *cptr, struct Channel *chptr)
+{
+  char ts[24];
+  int prefix;
+
+  rl->sptr = sptr;
+  rl->cptr = cptr;
+  rl->chptr = chptr;
+  rl->excepts = feature_bool(FEAT_EXCEPTS);
+  rl->modes_pending = rl->lines = 0;
+  rl->nickpos = rl->nickposo = rl->banpos = rl->expos = 0;
+  rl->modestr[0] = rl->modestro[0] = '\0';
+  ircd_snprintf(0, ts, sizeof(ts), "%Tu", chptr->creationtime);
+  /* "<source> B <channel> <ts>", the source a numnick of at most
+   * NUMNICKLEN characters; a line is at most BUFSIZE - 2 before CR LF. */
+  prefix = NUMNICKLEN + 3 + strlen(chptr->chname) + 1 + strlen(ts);
+  rl->room = IRCD_MAX(BUFSIZE - 2 - prefix, 0);
+}
+
+/** Whether the line being built has nothing on it. */
+static int burst_relay_empty(const struct BurstRelay *rl)
+{
+  return !rl->modes_pending && !rl->nickpos && !rl->nickposo
+    && !rl->banpos && !rl->expos;
+}
+
+/** Bytes the line being built takes, in its longer form. */
+static int burst_relay_used(const struct BurstRelay *rl)
+{
+  int used = 0;
+
+  if (rl->modes_pending)
+    used += IRCD_MAX(strlen(rl->modestr), strlen(rl->modestro));
+  used += IRCD_MAX(rl->nickpos, rl->nickposo) + rl->banpos;
+  if (rl->excepts)
+    used += rl->expos;
+  return used;
+}
+
+/** Send the line built so far, in both forms, and start an empty one. */
+static void burst_relay_send(struct BurstRelay *rl)
+{
+  const char *modes = rl->modes_pending ? rl->modestr : "";
+  const char *modeso = rl->modes_pending ? rl->modestro : "";
+
+  rl->nickstr[rl->nickpos] = '\0';
+  rl->nickstro[rl->nickposo] = '\0';
+  rl->banstr[rl->banpos] = '\0';
+  rl->exstr[rl->expos] = '\0';
+
+  /* Send oplevels to servers with oplevels support. */
+  sendcmdto_flag_serv_butone(rl->sptr, CMD_BURST, rl->cptr, FLAG_OPLEVELS,
+                             FLAG_LAST_FLAG, "%H %Tu%s%s%s%s", rl->chptr,
+                             rl->chptr->creationtime, modes, rl->nickstr,
+                             rl->banstr, rl->excepts ? rl->exstr : "");
+  /* Send mode o to servers without oplevels support. */
+  sendcmdto_flag_serv_butone(rl->sptr, CMD_BURST, rl->cptr, FLAG_LAST_FLAG,
+                             FLAG_OPLEVELS, "%H %Tu%s%s%s%s", rl->chptr,
+                             rl->chptr->creationtime, modeso, rl->nickstro,
+                             rl->banstr, rl->excepts ? rl->exstr : "");
+
+  rl->modes_pending = 0;
+  rl->nickpos = rl->nickposo = rl->banpos = rl->expos = 0;
+  rl->lines++;
+}
+
+/** Make room for @a len more bytes on the line being built: when they do
+ * not fit, send the line and start a new one.
+ * @return Non-zero when a new line was started. */
+static int burst_relay_need(struct BurstRelay *rl, int len)
+{
+  if (burst_relay_empty(rl) || burst_relay_used(rl) + len <= rl->room)
+    return 0;
+  burst_relay_send(rl);
+  return 1;
+}
+
+/** Take the modes the BURST has set so far (@a mbuf) for the relay.
+ * They go on the next line sent; normally that is the first, as the mode
+ * parameters come before the members and bans. */
+static void burst_relay_modes(struct BurstRelay *rl, struct ModeBuf *mbuf)
+{
+  char modes[BUFSIZE], modeso[BUFSIZE];
+
+  modebuf_extract(mbuf, modes + 1, 1);
+  modebuf_extract(mbuf, modeso + 1, 0);
+  modes[0] = modes[1] ? ' ' : '\0';
+  modeso[0] = modeso[1] ? ' ' : '\0';
+  if (!strcmp(modes, rl->modestr) && !strcmp(modeso, rl->modestro))
+    return;
+  ircd_strncpy(rl->modestr, modes, sizeof(rl->modestr));
+  ircd_strncpy(rl->modestro, modeso, sizeof(rl->modestro));
+  rl->modes_pending = (modes[0] != '\0');
+}
+
+/** Relay a ban (@a except: a ban exception) the BURST added. */
+static void burst_relay_ban(struct BurstRelay *rl, const char *ban, int except)
+{
+  int len = strlen(ban);
+
+  if (except && !rl->excepts)
+    return;             /* not relayed without EXCEPTS */
+
+  /* " :%" opens the list, a space separates; an exception puts its
+   * separator in banstr and itself in exstr, after the "~ " that ends the
+   * bans. */
+  burst_relay_need(rl, (rl->banpos ? 1 : 3)
+                   + (except ? (rl->expos ? 1 : 2) : 0) + len);
+  if (rl->banpos + 3 + len >= (int)sizeof(rl->banstr)
+      || rl->expos + 2 + len >= (int)sizeof(rl->exstr))
+    return;             /* longer than a line: cannot happen */
+
+  if (!rl->banpos) {
+    memcpy(rl->banstr, " :%", 3);
+    rl->banpos = 3;
+  } else
+    rl->banstr[rl->banpos++] = ' ';
+
+  if (except) {
+    if (!rl->expos) {
+      memcpy(rl->exstr, "~ ", 2);
+      rl->expos = 2;
+    } else
+      rl->exstr[rl->expos++] = ' ';
+    memcpy(rl->exstr + rl->expos, ban, len);
+    rl->expos += len;
+  } else {
+    memcpy(rl->banstr + rl->banpos, ban, len);
+    rl->banpos += len;
+  }
+}
+
+/** Relay a member the BURST named: @a ent in the op-level form, @a ento
+ * in the "o" form, each with its separator, both from
+ * burst_member_entry().  The caller has made room with
+ * burst_relay_need(). */
+static void burst_relay_member(struct BurstRelay *rl, const char *ent,
+                               const char *ento)
+{
+  int len = strlen(ent), leno = strlen(ento);
+
+  if (rl->nickpos + len >= (int)sizeof(rl->nickstr)
+      || rl->nickposo + leno >= (int)sizeof(rl->nickstro))
+    return;             /* longer than a line: cannot happen */
+  memcpy(rl->nickstr + rl->nickpos, ent, len);
+  rl->nickpos += len;
+  memcpy(rl->nickstro + rl->nickposo, ento, leno);
+  rl->nickposo += leno;
+}
+
+/** Size of a member's relay entry: a separator, the numnick, and a mode
+ * field (':', 'v', 'h', and an op-level of up to ten digits). */
+#define BURST_ENTRY_LEN (1 + NUMNICKLEN + 3 + 10 + 1)
+
+/** A member's entry in the relayed member list, in both forms: the
+ * separator (@a first: ' ', else ','), @a nick, and a ":<mode>" field
+ * when its mode (@a mode, @a oplevel) is not the one the previous entry
+ * left (@a last_mode, @a last_oplevel), which are updated.  @a nick is a
+ * numnick findNUser() resolved, so at most NUMNICKLEN characters. */
+static void burst_member_entry(char *ent, char *ento, int first,
+                               const char *nick, int mode, int oplevel,
+                               int *last_mode, int *last_oplevel)
+{
+  char num[16];
+  int pos = 0, poso = 0;
+
+  ent[pos++] = ento[poso++] = first ? ' ' : ',';
+  for (; *nick && pos < 1 + NUMNICKLEN; nick++)
+    ent[pos++] = ento[poso++] = *nick;
+
+  if (mode != *last_mode) { /* if mode changed... */
+    *last_mode = mode;
+    *last_oplevel = oplevel;
+
+    ent[pos++] = ento[poso++] = ':'; /* add a specifier */
+    if (mode & CHFL_VOICE)
+      ent[pos++] = ento[poso++] = 'v';
+    if (mode & CHFL_HALFOP)
+      ent[pos++] = ento[poso++] = 'h';
+    if (mode & CHFL_CHANOP) {
+      if (oplevel != MAXOPLEVEL) {
+        ircd_snprintf(0, num, sizeof(num), "%u", oplevel);
+        memcpy(ent + pos, num, strlen(num));
+        pos += strlen(num);
+      } else
+        ent[pos++] = 'o';
+      ento[poso++] = 'o';
+    }
+  } else if (mode & CHFL_CHANOP && oplevel != *last_oplevel) {
+    /* if just op level changed... */
+    ent[pos++] = ento[poso++] = ':'; /* add a specifier */
+    ircd_snprintf(0, num, sizeof(num), "%u", oplevel - *last_oplevel);
+    memcpy(ent + pos, num, strlen(num));
+    pos += strlen(num);
+    ento[poso++] = 'o';
+    *last_oplevel = oplevel;
+  }
+  ent[pos] = ento[poso] = '\0';
 }
 
 /*
@@ -235,9 +464,8 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct Membership *member, *nmember;
   struct Ban *lp, **lp_p;
   unsigned int parse_flags = (MODE_PARSE_FORCE | MODE_PARSE_BURST);
-  int param, nickpos = 0, nickposo = 0, banpos = 0, expos = 0;
-  char modestr[BUFSIZE], modestro[BUFSIZE], nickstr[BUFSIZE];
-  char nickstro[BUFSIZE], banstr[BUFSIZE], exstr[BUFSIZE];
+  int param, banned = 0, excepted = 0;
+  struct BurstRelay relay;
 
   if (parc < 3)
     return protocol_violation(sptr,"Too few parameters for BURST");
@@ -392,17 +620,21 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     parse_flags |= MODE_PARSE_SET; /* set new modes */
   }
 
+  burst_relay_init(&relay, sptr, cptr, chptr);
+
   param = 3; /* parse parameters */
   while (param < parc) {
     switch (*parv[param]) {
     case '+': /* parameter introduces a mode string */
       param += mode_parse(mbuf, cptr, sptr, chptr, parc - param,
 			  parv + param, parse_flags, NULL);
+      if (parse_flags & MODE_PARSE_SET)
+        burst_relay_modes(&relay, mbuf);
       break;
 
     case '%': /* parameter contains bans */
       if (parse_flags & MODE_PARSE_SET) {
-	char *banlist = parv[param] + 1, *p = 0, *ban, *ptr;
+	char *banlist = parv[param] + 1, *p = 0, *ban;
 	struct Ban *newban;
         int excepts = 0;
 
@@ -443,27 +675,11 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	  }
 
 	  if (ban) { /* add the new ban to the end of the list */
-	    /* Build ban buffer */
-	    if (!banpos) {
-	      banstr[banpos++] = ' ';
-	      banstr[banpos++] = ':';
-	      banstr[banpos++] = '%';
-	    } else
-	      banstr[banpos++] = ' ';
-
-            if (excepts) {
-              if (!expos) {
-                exstr[expos++] = '~';
-                exstr[expos++] = ' ';
-              } else
-                exstr[expos++] = ' ';
-
-              for (ptr = ban; *ptr; ptr++) /* add ban exception to buffer */
-                exstr[expos++] = *ptr;
-            } else {
-              for (ptr = ban; *ptr; ptr++) /* add ban to buffer */
-                banstr[banpos++] = *ptr;
-            }
+	    /* Relay it: a ban that does not fit the line goes on the next. */
+	    burst_relay_ban(&relay, ban, excepts);
+	    banned = 1;
+	    if (excepts)
+	      excepted = 1;
 
 	    newban = make_ban(ban); /* create new ban */
             strcpy(newban->who, "*");
@@ -584,45 +800,24 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	  if (!(acptr = findNUser(nick)) || cli_from(acptr) != cptr)
 	    continue; /* ignore this client */
 
-	  /* Build nick buffer */
-	  nickstr[nickpos] = nickpos ? ',' : ' '; /* first char */
-          nickstro[nickposo] = nickposo ? ',' : ' '; /* first char */
-	  nickpos++;
-          nickposo++;
+	  /* Relay the member.  One that does not fit the line goes on the
+	   * next, and states its mode there: a receiver reads each line's
+	   * mode fields from scratch. */
+	  {
+	    char ent[BURST_ENTRY_LEN], ento[BURST_ENTRY_LEN];
+	    int entry_mode = last_mode, entry_oplevel = last_oplevel;
 
-	  for (ptr = nick; *ptr; ptr++) { /* store nick */
-	    nickstr[nickpos++] = *ptr;
-            nickstro[nickposo++] = *ptr;
-          }
-
-	  if (current_mode != last_mode) { /* if mode changed... */
-	    last_mode = current_mode;
-	    last_oplevel = oplevel;
-
-	    nickstr[nickpos++] = ':'; /* add a specifier */
-            nickstro[nickposo++] = ':'; /* add a specifier */
-	    if (current_mode & CHFL_VOICE) {
-	      nickstr[nickpos++] = 'v';
-              nickstro[nickposo++] = 'v';
-            }
-            if (current_mode & CHFL_HALFOP) {
-              nickstr[nickpos++] = 'h';
-              nickstro[nickposo++] = 'h';
-            }
-	    if (current_mode & CHFL_CHANOP)
-            {
-              if (oplevel != MAXOPLEVEL)
-	        nickpos += ircd_snprintf(0, nickstr + nickpos, sizeof(nickstr) - nickpos, "%u", oplevel);
-              else
-                nickstr[nickpos++] = 'o';
-              nickstro[nickposo++] = 'o';
-            }
-	  } else if (current_mode & CHFL_CHANOP && oplevel != last_oplevel) { /* if just op level changed... */
-	    nickstr[nickpos++] = ':'; /* add a specifier */
-            nickstro[nickposo++] = ':'; /* add a specifier */
-	    nickpos += ircd_snprintf(0, nickstr + nickpos, sizeof(nickstr) - nickpos, "%u", oplevel - last_oplevel);
-            nickstro[nickposo++] = 'o';
-            last_oplevel = oplevel;
+	    burst_member_entry(ent, ento, !relay.nickpos, nick, current_mode,
+	                       oplevel, &entry_mode, &entry_oplevel);
+	    if (burst_relay_need(&relay, IRCD_MAX(strlen(ent), strlen(ento)))) {
+	      entry_mode = base_mode;
+	      entry_oplevel = 0;
+	      burst_member_entry(ent, ento, 1, nick, current_mode, oplevel,
+	                         &entry_mode, &entry_oplevel);
+	    }
+	    burst_relay_member(&relay, ent, ento);
+	    last_mode = entry_mode;
+	    last_oplevel = entry_oplevel;
 	  }
 
 	  if (!(member = find_member_link(chptr, acptr)))
@@ -662,33 +857,16 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     } /* switch (*parv[param]) */
   } /* while (param < parc) */
 
-  nickstr[nickpos] = '\0';
-  nickstro[nickposo] = '\0';
-  banstr[banpos] = '\0';
-  exstr[expos] = '\0';
+  /* Send the relay's last line (its only one, unless it was split; an
+   * empty BURST is relayed as one). */
+  if (parse_flags & MODE_PARSE_SET)
+    burst_relay_modes(&relay, mbuf);
+  if (!burst_relay_empty(&relay) || !relay.lines)
+    burst_relay_send(&relay);
 
-  if (parse_flags & MODE_PARSE_SET) {
-    modebuf_extract(mbuf, modestr + 1, 1); /* for sending BURST onward */
-    modebuf_extract(mbuf, modestro + 1, 0); /* for sending BURST onward */
-    modestr[0] = modestr[1] ? ' ' : '\0';
-    modestro[0] = modestro[1] ? ' ' : '\0';
-  } else {
-    modestr[0] = '\0';
-    modestro[0] = '\0';
-  }
-
-  /* Send oplevels to servers with oplevels support. */
-  sendcmdto_flag_serv_butone(sptr, CMD_BURST, cptr, FLAG_OPLEVELS, FLAG_LAST_FLAG,
-                             "%H %Tu%s%s%s%s", chptr, chptr->creationtime, modestr,
-                             nickstr, banstr, feature_bool(FEAT_EXCEPTS) ? exstr : "");
-  /* Send mode o to servers without oplevels support. */
-  sendcmdto_flag_serv_butone(sptr, CMD_BURST, cptr, FLAG_LAST_FLAG, FLAG_OPLEVELS,
-                             "%H %Tu%s%s%s%s", chptr, chptr->creationtime, modestro,
-                             nickstro, banstr, feature_bool(FEAT_EXCEPTS) ? exstr : "");
-
-  if (parse_flags & MODE_PARSE_WIPEOUT || banpos)
+  if (parse_flags & MODE_PARSE_WIPEOUT || banned)
     mode_ban_invalidate(chptr);
-  if (parse_flags & MODE_PARSE_WIPEOUT || expos)
+  if (parse_flags & MODE_PARSE_WIPEOUT || excepted)
     mode_except_invalidate(chptr);
 
   if (parse_flags & MODE_PARSE_SET) { /* any modes changed? */
