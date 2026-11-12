@@ -1298,6 +1298,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
                  ? (char *)"*" : con_pre_away_msg(cli_connect(sptr)),
                0);
 
+  /* draft/metadata-2: the keys a metadata-aware client set before
+   * registration (kept by the registration check in the welcome block
+   * above, held in its memory until now) go to the network here, after
+   * the N for the same reason as the AWAY above. */
+  if (MyUser(sptr))
+    metadata_announce_registered(sptr);
+
   clear_privs(sptr);
 
   /* Send user mode to client */

@@ -2287,6 +2287,28 @@ struct MetadataEntry *metadata_list_client(struct Client *cptr)
   return cli_metadata(cptr);
 }
 
+/** See include/metadata.h. */
+int metadata_registration_check(struct Client *cptr)
+{
+  if (!cptr || !MyConnect(cptr))
+    return 0;
+  if (MetadataAware(cptr))
+    return 1;
+  /* It never became metadata-aware: what it set before registration goes
+   * -- it was kept in this client's memory only (metadata_client_write()),
+   * never stored, announced or sent to a peer.  A client with an account
+   * holds the account's rows instead (register_user()'s
+   * metadata_load_account() replaced whatever it set before registration:
+   * the owner's open question, unchanged), and those stay. */
+  if (!cli_user(cptr) || !cli_user(cptr)->account[0]) {
+    free_entry_list(cli_metadata(cptr));
+    cli_metadata(cptr) = NULL;
+  }
+  /* ... and so do its subscriptions. */
+  metadata_sub_free(cptr);
+  return 0;
+}
+
 void metadata_burst_self_to_client(struct Client *to)
 {
   struct MetadataEntry *md;
@@ -2294,10 +2316,9 @@ void metadata_burst_self_to_client(struct Client *to)
 
   if (!to || !MyConnect(to))
     return;
-  /* Only a metadata-aware client (MetadataAware(): the cap and batch,
-   * both active now); one with the cap alone is treated as one without
-   * it, and gets no burst at all. */
-  if (!MetadataAware(to))
+  /* The registration check: only a metadata-aware client gets the burst
+   * (and keeps what it set before registration). */
+  if (!metadata_registration_check(to))
     return;
 
   /* "If none exists, the server MUST send an empty batch instead."  The

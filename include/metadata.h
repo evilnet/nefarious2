@@ -30,23 +30,42 @@
 #ifndef INCLUDED_metadata_lww_h
 #include "metadata_lww.h"
 
-/** @a cli is a metadata-aware client: draft/metadata-2 AND batch both
- * active on its connection.  "This specification depends on the batch
- * capability which MUST be negotiated to use draft/metadata-2"; the owner's
- * reading (2026-11-12): negotiating draft/metadata-2 is a no-op until batch
- * is negotiated too -- the proposed draft/metadata-3 (ircv3-specifications
- * PR #613) words the same rule: "A metadata-aware client is a client who
- * has negotiated both the draft/metadata-3 capability and the batch
- * capability."  The cap is ACKed alone (the order of negotiation is never
- * enforced) and stays inert -- the client is treated exactly as one without
- * it -- until batch is there, in either order, during or after
- * registration, and again whenever batch is dropped (which, like dropping
- * the cap, clears its subscriptions: m_cap.c).  Per connection: a bouncer
- * device's own caps.  Every reader of the metadata-2 capability goes
- * through this (the caller includes client.h and capab.h). */
-#define MetadataAware(cli) (CapActive((cli), CAP_DRAFT_METADATA2) \
-                            && CapActive((cli), CAP_BATCH))
 #endif
+
+/* The metadata capability half of "metadata-aware": draft/metadata-2
+ * today.  The owner (2026-11-12): draft/metadata-3 will not replace it,
+ * "it's just another layer; we'll ultimately have to handle both" -- a
+ * second capability is OR'd in here (and in MetadataCapIn()), every site
+ * asks MetadataAware() / MetadataCapActive(), and version-specific
+ * differences stay at the edges.  The caller includes client.h and
+ * capab.h. */
+#define MetadataCapActive(cli)  CapActive((cli), CAP_DRAFT_METADATA2)
+/* A CapSet (a CAP REQ's removals, say) names the metadata capability. */
+#define MetadataCapIn(set)      CapHas((set), CAP_DRAFT_METADATA2)
+/* A capability is the metadata capability, or batch: the two that make a
+ * client metadata-aware. */
+#define MetadataAwareCap(cap)   ((cap) == CAP_DRAFT_METADATA2 || (cap) == CAP_BATCH)
+
+/** @a cli is a metadata-aware client: the metadata capability AND batch
+ * both active on its connection.  "This specification depends on the
+ * batch capability which MUST be negotiated to use draft/metadata-2"; the
+ * owner's reading (2026-11-12): negotiating draft/metadata-2 is a no-op
+ * until batch is negotiated too -- the proposed draft/metadata-3
+ * (ircv3-specifications PR #613) words the same rule: "A metadata-aware
+ * client is a client who has negotiated both the draft/metadata-3
+ * capability and the batch capability."  The cap is ACKed alone (the order
+ * of negotiation is never enforced).  After registration a client that is
+ * not metadata-aware is treated exactly as one without the cap, until
+ * batch is there, and again whenever either is dropped (which clears its
+ * subscriptions: m_cap.c).  During registration negotiation is still in
+ * progress, and batch is judged when it ends (owner, 2026-11-12, "the
+ * order of capability negotiation is not significant and MUST NOT be
+ * enforced"): a client with the metadata capability may SET, SUB and
+ * UNSUB before batch arrives (their replies are not batches), and
+ * metadata_burst_self_to_client() decides once, at registration
+ * (metadata_registration_check()).  Per connection: a bouncer device's
+ * own caps. */
+#define MetadataAware(cli) (MetadataCapActive(cli) && CapActive((cli), CAP_BATCH))
 
 struct Client;
 struct Channel;
@@ -255,8 +274,9 @@ extern struct MetadataEntry *metadata_list_client(struct Client *cptr);
 
 /** Emit the draft/metadata-2 self-metadata BATCH to @a to.
  *
- * Caller-side cap/account gating is folded in: if @a to does not
- * have CAP_DRAFT_METADATA2 active, this is a no-op.  Used by
+ * The registration check is folded in (metadata_registration_check()):
+ * a client that is not metadata-aware when it runs gets nothing, and loses
+ * what it set before registration.  Used by
  * register_user (normal path) and the bouncer-revive / alias-setup
  * fast paths so each emit point doesn't have to repeat the BATCH
  * open / METADATA loop / batch end sequence.
@@ -264,6 +284,28 @@ extern struct MetadataEntry *metadata_list_client(struct Client *cptr);
  * @param[in] to Client receiving the burst (must be local).
  */
 extern void metadata_burst_self_to_client(struct Client *to);
+
+/** The registration check (owner, 2026-11-12): whether batch was
+ * negotiated is judged once, when registration ends -- the point the
+ * registration burst goes out, on each path (register_user(), the bouncer
+ * revive, a device attach; metadata_burst_self_to_client() runs it).
+ * A metadata-aware client keeps what it set before registration.  One that
+ * is not never became metadata-aware: its own keys (a client with no
+ * account: everything it set before registration) and its subscriptions
+ * are dropped, and it is inert from then on.
+ * @param[in] cptr A local client completing registration.
+ * @return Non-zero if it is metadata-aware.
+ */
+extern int metadata_registration_check(struct Client *cptr);
+
+/** Announce to the network the keys a client of ours set before
+ * registration and kept (a metadata-aware client with no account): run by
+ * register_user() after the client's N, since a peer drops a line for a
+ * client it does not know.  The keys were kept in memory only until then
+ * (metadata_client_write()).
+ * @param[in] cptr A local client that has just been introduced.
+ */
+extern void metadata_announce_registered(struct Client *cptr);
 
 /** Clear all metadata for a client.
  * @param[in] cptr Client to clear.

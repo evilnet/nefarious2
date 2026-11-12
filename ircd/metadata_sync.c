@@ -229,28 +229,13 @@ int metadata_session_addressable(struct Client *target)
          && cli_session_id(target)[0];
 }
 
-int metadata_client_write(struct Client *src, struct Client *target,
-                          const char *key, const char *value, int vis)
+/** The network half of a key write for @a target with no account: by
+ * session id (metadata_session_addressable()), else by nick. */
+static void md_client_emit(struct Client *src, struct Client *target,
+                           const char *key, const char *value, int vis)
 {
   const char *vis_tok = (vis == METADATA_VIS_PRIVATE) ? "P" : "*";
 
-  if (!src || !target || !key || !cli_user(target))
-    return -1;
-
-  if (cli_user(target)->account[0])
-    return metadata_account_write(src, cli_user(target)->account, key,
-                                  value, vis);
-
-  /* No account: this client's own memory (metadata_set_client writes
-   * no store row without one) and its subscribers. */
-  if (metadata_set_client(target, key, value, vis) < 0)
-    return -1;
-  metadata_notify_subscribers(cli_name(target), key, value, vis);
-
-  /* Addressed by session id (metadata_session_addressable), else the
-   * nick form -- which the receiver accepts only from the target's own
-   * server, the target itself, an alias of it or an oper
-   * (md_sender_owns_client), so @a src must be one of those. */
   if (metadata_session_addressable(target)) {
     if (value)
       sendcmdto_serv_butone_v3(src, CMD_METADATA, NULL, "!%s %s %s :%s",
@@ -266,6 +251,48 @@ int metadata_client_write(struct Client *src, struct Client *target,
       sendcmdto_serv_butone_v3(src, CMD_METADATA, NULL, "%s %s",
                                cli_name(target), key);
   }
+}
+
+/** See include/metadata.h. */
+void metadata_announce_registered(struct Client *cptr)
+{
+  struct MetadataEntry *md;
+
+  if (!cptr || !MyUser(cptr) || !cli_user(cptr) || cli_user(cptr)->account[0])
+    return;
+  for (md = metadata_list_client(cptr); md; md = md->next)
+    md_client_emit(cptr, cptr, md->key, md->value, md->visibility);
+}
+
+int metadata_client_write(struct Client *src, struct Client *target,
+                          const char *key, const char *value, int vis)
+{
+  if (!src || !target || !key || !cli_user(target))
+    return -1;
+
+  /* A client of ours still registering (before-connect): its own memory
+   * only.  Nobody can see it yet, no peer knows it, and whether its keys
+   * stand is decided at registration (metadata_registration_check():
+   * discarded unless it ends metadata-aware); the keys that stand are
+   * announced after its N (metadata_announce_registered()). */
+  if (MyConnect(target) && !IsRegistered(target))
+    return metadata_set_client(target, key, value, vis) < 0 ? -1 : 0;
+
+  if (cli_user(target)->account[0])
+    return metadata_account_write(src, cli_user(target)->account, key,
+                                  value, vis);
+
+  /* No account: this client's own memory (metadata_set_client writes
+   * no store row without one) and its subscribers. */
+  if (metadata_set_client(target, key, value, vis) < 0)
+    return -1;
+  metadata_notify_subscribers(cli_name(target), key, value, vis);
+
+  /* Addressed by session id (metadata_session_addressable), else the
+   * nick form -- which the receiver accepts only from the target's own
+   * server, the target itself, an alias of it or an oper
+   * (md_sender_owns_client), so @a src must be one of those. */
+  md_client_emit(src, target, key, value, vis);
   return 0;
 }
 

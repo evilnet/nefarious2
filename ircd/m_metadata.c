@@ -1538,9 +1538,19 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *subcmd;
 
-  /* Only a metadata-aware client (the cap and batch, MetadataAware());
-   * with the cap alone the client gets what one without it gets. */
-  if (!MetadataAware(sptr)) {
+  /* A metadata-aware client (the cap and batch, MetadataAware()), or one
+   * still registering with the metadata capability: negotiation is not
+   * over, and batch is judged when it ends (MetadataAware()'s note).  Such
+   * a client may SET, SUB and UNSUB -- their replies (761, 770, 771) are
+   * not batches; GET, LIST, CLEAR, SUBS and SYNC answer with a batch,
+   * which does not exist before batch is negotiated, so they get what a
+   * client without the capability gets (421), as does everything once
+   * registered without batch. */
+  if (!MetadataAware(sptr)
+      && (IsRegistered(sptr) || !MetadataCapActive(sptr) || parc < 3
+          || EmptyString(parv[2])
+          || (ircd_strcmp(parv[2], "SET") && ircd_strcmp(parv[2], "SUB")
+              && ircd_strcmp(parv[2], "UNSUB")))) {
     return send_reply(sptr, ERR_UNKNOWNCOMMAND, "METADATA");
   }
 
