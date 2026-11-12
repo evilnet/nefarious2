@@ -175,6 +175,13 @@ int fwd_label_save(struct Client *from, const char *cmd,
   return 1;
 }
 
+int fwd_label_is_echo(const char *msgid)
+{
+  size_t n = strlen(cli_yxx(&me));
+
+  return msgid && n && !strncmp(msgid, cli_yxx(&me), n);
+}
+
 struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
 {
   int i;
@@ -286,39 +293,6 @@ int fwd_label_is_terminal(struct ForwardedLabel *fl, int numeric)
     return 1;
 
   return 0;
-}
-
-struct ForwardedLabel *fwd_label_find_draining(struct Client *acptr,
-                                                const char *msgid)
-{
-  int i;
-
-  if (!acptr || !MyConnect(acptr))
-    return NULL;
-
-  for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
-    struct ForwardedLabel *fl = &cli_fwd_labels(acptr)[i];
-    if (fl->fl_state != FWD_LABEL_DRAINING)
-      continue;
-
-    /* Timeout check */
-    if (CurrentTime - fl->fl_created > FWD_TIMEOUT_DRAIN) {
-      fwd_label_close_batch(acptr, fl);
-      continue;
-    }
-
-    /* Exact msgid correlation only (see fwd_label_find). */
-    if (msgid && msgid[0] && fl->fl_msgid[0]
-        && ircd_strcmp(fl->fl_msgid, msgid) == 0) {
-      if (!LabeledResponseInUse(acptr)) {   /* inert: see fwd_label_find */
-        memset(fl, 0, sizeof(*fl));
-        return NULL;
-      }
-      return fl;
-    }
-  }
-
-  return NULL;
 }
 
 /** Periodic expiry sweep (timer-driven).  The lazy checks inside

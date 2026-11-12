@@ -41,6 +41,15 @@ int fwd_label_save(struct Client *from, const char *cmd,
  */
 struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid);
 
+/** Whether \a msgid is one this server minted -- on an S2S line, the
+ * compact msgid of a command we forwarded, echoed by the server that
+ * answers it.  It names the command, not the reply line that carries it.
+ *
+ * @param[in] msgid  Msgid from an incoming compact tag.
+ * @return Non-zero if it is ours.
+ */
+int fwd_label_is_echo(const char *msgid);
+
 /** Open a labeled-response batch for a forwarded label entry.
  * Sends BATCH +<batch_id> labeled-response with @label=<label> to the client.
  * Sets fl_state to FWD_LABEL_ACTIVE.
@@ -66,16 +75,6 @@ void fwd_label_close_batch(struct Client *acptr, struct ForwardedLabel *fl);
  * @return Non-zero if terminal.
  */
 int fwd_label_is_terminal(struct ForwardedLabel *fl, int numeric);
-
-/** Find a DRAINING entry matching the given msgid.
- * Only matches entries in FWD_LABEL_DRAINING state.
- *
- * @param[in] acptr   Local client.
- * @param[in] msgid   Msgid from incoming compact tag, or empty string.
- * @return Matching ForwardedLabel in DRAINING state, or NULL.
- */
-struct ForwardedLabel *fwd_label_find_draining(struct Client *acptr,
-                                                const char *msgid);
 
 /** Close all DRAINING batches for a client.
  * Called before processing a new client command and when a numeric
