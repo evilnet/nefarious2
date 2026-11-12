@@ -1452,14 +1452,18 @@ static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Start metadata batch */
-  send_batch_start(sptr, "metadata");
-
-  /* If no active batch (client doesn't support batch), send later */
-  if (!cli_batch_id(sptr)[0]) {
+  /* The reply is a metadata batch (its METADATA lines carry @batch=):
+   * decided up front on the client's batch capability, not on whatever
+   * cli_batch_id holds -- a batch id left behind by an earlier unclosed
+   * batch would have the lines tagged with it and never closed.  A client
+   * without batch gets RPL_METADATASYNCLATER, as before. */
+  if (!feature_bool(FEAT_CAP_batch) || !CapActive(sptr, CAP_BATCH)) {
     send_reply(sptr, RPL_METADATASYNCLATER, target);
     return 0;
   }
+
+  /* Start metadata batch */
+  send_batch_start(sptr, "metadata");
 
   if (is_channel) {
     /* Sync channel metadata */

@@ -2294,17 +2294,20 @@ void metadata_burst_self_to_client(struct Client *to)
 
   if (!to || !MyConnect(to))
     return;
-  if (!CapActive(to, CAP_DRAFT_METADATA2))
+  /* draft/metadata-2: "This specification depends on the batch
+   * capability which MUST be negotiated to use draft/metadata-2."  The
+   * cap is never refused for want of batch (the order of negotiation "MUST
+   * NOT be enforced"), so a client can hold metadata-2 without batch; it
+   * gets none of this batch-framed output -- not the keys, not the empty
+   * batch.  (It used to get BATCH + and @batch= lines with no BATCH -:
+   * send_batch_end() sends nothing to a client without batch.) */
+  if (!CapActive(to, CAP_DRAFT_METADATA2) || !CapActive(to, CAP_BATCH))
     return;
 
-  /* draft/metadata-2: "If none exists, the server MUST send an empty
-   * batch instead."  The batch carries the target, so a client can tell
-   * "nothing set" from "not sent".  The spec requires batch for the cap;
-   * a client that took the cap without it gets no empty batch (nothing
-   * to say), and its metadata in the form it always had. */
+  /* "If none exists, the server MUST send an empty batch instead."  The
+   * batch carries the target, so a client can tell "nothing set" from
+   * "not sent". */
   md = metadata_list_client(to);
-  if (!md && !CapActive(to, CAP_BATCH))
-    return;
 
   /* Manual batch open with target parameter (send_batch_start doesn't
    * support the per-batch-type target arg the metadata spec requires). */
