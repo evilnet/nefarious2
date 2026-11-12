@@ -1209,18 +1209,18 @@ ml_check_channel_text(const char *text, void *v)
  *  1. UTF8ONLY, line by line (relay_utf8_check): one invalid line refuses
  *     the batch in strict mode (FAIL <cmd> INVALID_UTF8, once); in warn
  *     mode each invalid line is sanitised, and the one WARN goes out when
- *     the batch is accepted (*\a utf8_warn).
- *  2. The target exists: ERR_NOSUCHCHANNEL / ERR_NOSUCHNICK for a PRIVMSG
+ *     the batch is accepted (*\a utf8_warn), under the batch's label.
+ *  2. Sanitised lines can grow the batch: it is held to
+ *     MULTILINE_MAX_BYTES again here, before any check with a side effect.
+ *  3. The target exists: ERR_NOSUCHCHANNEL / ERR_NOSUCHNICK for a PRIVMSG
  *     batch; a NOTICE batch is dropped silently, as NOTICE is.
- *  3. A channel: relay_channel_refused() (may speak there -- +n, +m,
+ *  4. A channel: relay_channel_refused() (may speak there -- +n, +m,
  *     voice, bans, +M, +r, +O, +a, +Z by this connection; the target
  *     limit; +N), then relay_channel_text() line by line (+C, +c; +S
  *     strips the line, and a line +S leaves empty refuses the batch).
  *     A blank line is no message of its own and is not tested.
  *     A user: relay_private_refused() (target limit, SILENCE, +R, +D,
  *     +q), about the target user; its devices are served after.
- *  4. The transforms can change the batch's size: it is counted again
- *     and held to MULTILINE_MAX_BYTES, as at acceptance.
  * One refused line refuses the whole batch: nothing of it goes anywhere.
  * The refusal is the numeric (or FAIL) the single-line path sends, once
  * for the batch, carrying the batch's label (the caller arms it,
@@ -1258,12 +1258,32 @@ ml_batch_refused(struct Client *sptr, int is_channel, struct Channel **chptr_p,
 
   /* 1. UTF8ONLY, line by line. */
   if (ml_lines_check(con_ml_messages(con), ml_check_utf8, &ctx) < 0) {
-    relay_utf8_answer(sptr, cmd, RELAY_UTF8_REFUSED);
+    relay_utf8_answer(sptr, cmd, RELAY_UTF8_REFUSED, NULL);
     return -1;
   }
   *utf8_warn = (ctx.utf8 == RELAY_UTF8_SANITISED);
 
-  /* 2. The target. */
+  /* 2. The size, before anything with a side effect (the target limit,
+   * SILENCE's mask sent back): only the sanitiser can grow a batch (each
+   * invalid byte becomes a 3-byte U+FFFD; +S strips, which only shrinks),
+   * and a batch past MULTILINE_MAX_BYTES once sanitised is refused, as at
+   * acceptance.  A single line in that case is cut to fit instead; a batch
+   * cannot be: past the limit, the servers it is relayed to drop its
+   * lines past the network maximum (add_s2s_multiline_message), so it
+   * would arrive partial.  The FAIL says why the sent size was not the
+   * one held to the limit. */
+  if (ctx.utf8 == RELAY_UTF8_SANITISED) {
+    con_ml_total_bytes(con) = ml_lines_bytes(con_ml_messages(con));
+    if (con_ml_total_bytes(con) > feature_int(FEAT_MULTILINE_MAX_BYTES)) {
+      send_fail_ctx(sptr, "BATCH", "MULTILINE_MAX_BYTES",
+                    "Multiline batch max-bytes exceeded once its invalid "
+                    "UTF-8 was replaced", "%d",
+                    feature_int(FEAT_MULTILINE_MAX_BYTES));
+      return -1;
+    }
+  }
+
+  /* 3. The target. */
   if (is_channel) {
     if (!(*chptr_p = FindChannel(target))) {
       if (!is_notice)
@@ -1276,7 +1296,7 @@ ml_batch_refused(struct Client *sptr, int is_channel, struct Channel **chptr_p,
     return -1;
   }
 
-  /* 3. The send checks. */
+  /* 4. The send checks. */
   if (is_channel) {
     struct Channel *chptr = *chptr_p;
 
@@ -1288,14 +1308,8 @@ ml_batch_refused(struct Client *sptr, int is_channel, struct Channel **chptr_p,
   } else if (relay_private_refused(sptr, *acptr_p, is_notice))
     return -1;
 
-  /* 4. The transforms changed the size: hold it to the limit again. */
+  /* +S may have shrunk lines: the count the echo and the cooldown use. */
   con_ml_total_bytes(con) = ml_lines_bytes(con_ml_messages(con));
-  if (con_ml_total_bytes(con) > feature_int(FEAT_MULTILINE_MAX_BYTES)) {
-    send_fail_ctx(sptr, "BATCH", "MULTILINE_MAX_BYTES",
-                  "Multiline batch max-bytes exceeded", "%d",
-                  feature_int(FEAT_MULTILINE_MAX_BYTES));
-    return -1;
-  }
   return 0;
 }
 
@@ -1414,8 +1428,9 @@ process_multiline_batch(struct Client *sptr)
    * message); for a user, RPL_AWAY (PRIVMSG) and the target's free reply
    * (relay_private_accepted). */
   ml_label_disarm(sptr, label_armed);
-  if (utf8_warn)
-    relay_utf8_answer(sptr, cmd_str, RELAY_UTF8_SANITISED);
+  if (utf8_warn)   /* under the batch's label, as the fallback WARN */
+    relay_utf8_answer(sptr, cmd_str, RELAY_UTF8_SANITISED,
+                      con_ml_label(con)[0] ? con_ml_label(con) : NULL);
   if (is_channel)
     RevealDelayedJoinIfNeeded(sptr, chptr);
   else
@@ -2809,6 +2824,10 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
      * that the next message is refused at the origin. */
     if (is_silenced(face, acptr, 0))
       return;
+    /* The target may answer without spending a target, as for a single
+     * line (server_relay_private_message). */
+    if (MyUser(acptr))
+      add_target(acptr, face);
   }
 
   /* Deliver to local recipients */

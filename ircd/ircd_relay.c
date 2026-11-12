@@ -117,15 +117,20 @@ int relay_utf8_check(const char *text, char *buf, size_t bufsize)
  * sanitised one, nothing for valid text.
  * @param[in] sptr The sender.
  * @param[in] cmd "PRIVMSG" or "NOTICE".
- * @param[in] result What relay_utf8_check() returned. */
-void relay_utf8_answer(struct Client *sptr, const char *cmd, int result)
+ * @param[in] result What relay_utf8_check() returned.
+ * @param[in] label The label the WARN carries when it answers an earlier
+ *            line (a multiline batch's, saved from its BATCH +), or NULL:
+ *            the line being parsed has its own, if any. */
+void relay_utf8_answer(struct Client *sptr, const char *cmd, int result,
+                       const char *label)
 {
   if (result == RELAY_UTF8_REFUSED)
     send_fail(sptr, cmd, "INVALID_UTF8", NULL,
               "Message contains invalid UTF-8 and was rejected");
   else if (result == RELAY_UTF8_SANITISED)
-    send_warn(sptr, cmd, "INVALID_UTF8", NULL,
-              "Message contained invalid UTF-8 and was sanitized");
+    send_warn_with_label(sptr, cmd, "INVALID_UTF8", NULL,
+                         "Message contained invalid UTF-8 and was sanitized",
+                         label);
 }
 
 /** The checks a local user's PRIVMSG or NOTICE to a channel passes that
@@ -955,7 +960,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "PRIVMSG", utf8);
+    relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
     if (utf8 == RELAY_UTF8_REFUSED)
       return;
     /* Warn mode: use the sanitized copy */
@@ -1103,7 +1108,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "NOTICE", utf8);
+    relay_utf8_answer(sptr, "NOTICE", utf8, NULL);
     if (utf8 == RELAY_UTF8_REFUSED)
       return;
     /* Warn mode: use the sanitized copy */
@@ -1691,7 +1696,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "PRIVMSG", utf8);
+    relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
     if (utf8 == RELAY_UTF8_REFUSED)
       return;
     /* Warn mode: use the sanitized copy */
@@ -1920,7 +1925,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "NOTICE", utf8);
+    relay_utf8_answer(sptr, "NOTICE", utf8, NULL);
     if (utf8 == RELAY_UTF8_REFUSED)
       return;
     /* Warn mode: use the sanitized copy */
