@@ -968,7 +968,8 @@ int exit_client(struct Client *cptr,
 
     /* iauth's "<fd> D" goes from close_connection() below, which every
      * close of a user socket runs through (a bouncer hold and BX X's
-     * close do not come here). */
+     * close do not come here; a hold ends a SASL exchange itself,
+     * bounce_hold_session()). */
     if (IsUser(victim) || IsUserPort(victim)) {
       sasl_session_free(victim);  /* Clean up local SASL session if present */
       abort_sasl(victim, 0);

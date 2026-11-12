@@ -83,6 +83,7 @@
 #include "s_misc.h"
 #include "s_serv.h"
 #include "s_user.h"
+#include "sasl_auth.h"
 #include "msgq.h"
 #include "struct.h"
 #include "motd.h"
@@ -9143,6 +9144,17 @@ static int bounce_hold_session(struct Client *cptr,
    * grant restores after a restart. */
   session->hs_snomask = HasFlag(cptr, FLAG_SERVNOTICE) ? cli_snomask(cptr) : 0;
   session->hs_snomask_known = 1;
+
+  /* A SASL exchange in flight (a re-authentication) ends with the socket,
+   * as exit_client() ends it -- the hold does not go through there: the
+   * local exchange's session goes and abort_sasl() drops the cookie (a
+   * late Keycloak answer, keyed by descriptor and cookie, then reaches
+   * nobody, even on a revived connection that got the same descriptor),
+   * deletes the exchange's timer and tells services.  Left in flight, the
+   * revived connection's first AUTHENTICATE was taken as the dead
+   * exchange's data, and its timeout answered the new device. */
+  sasl_session_free(cptr);
+  abort_sasl(cptr, 0);
 
   /* Close the socket but keep the client structure alive.
    * Note: We do NOT call exit_client() here - that would destroy the client.
