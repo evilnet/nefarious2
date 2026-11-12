@@ -130,7 +130,11 @@ check_loop_and_lh(struct Client* cptr, struct Client *sptr, time_t *ghost, const
     *ghost = 0;
 
   /*
-   * Calculate type of connect limit and applicable config item.
+   * Calculate type of connect limit and applicable config item.  This is
+   * the link's Connect block: the one it registered under or, after a
+   * rehash, the new configuration's block that admits it; when none does,
+   * the old one, flagged illegal, until the link drops
+   * (rehash_reattach_server() in s_conf.c).
    */
   lhconf = find_conf_byname(cli_confs(cptr), cli_name(cptr), CONF_SERVER);
   assert(lhconf != NULL);
