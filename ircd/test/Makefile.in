@@ -84,6 +84,7 @@ CMOCKA_TESTPROGS = \
 	db_api_rocksdb_cmocka \
 	ssl_teardown_cmocka \
 	close_connection_cmocka \
+	send_tags_cmocka \
 	log_async_cmocka \
 	parse_line_cmocka \
 	conf_reattach_cmocka
@@ -166,6 +167,7 @@ DEP_SRC = \
 	ircd_events_cmocka.c \
 	paste_listener_cmocka.c \
 	close_connection_cmocka.c \
+	send_tags_cmocka.c \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -618,6 +620,20 @@ close_connection_cmocka.o: ${srcdir}/close_connection_cmocka.c ../s_bsd.c
 
 close_connection_cmocka: close_connection_cmocka.o
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections close_connection_cmocka.o $(CMOCKA_LIBS)
+
+# send_tags tests - the tag region a channel fan-out builds for each member
+# (format_message_tags_ex() into 128 bytes) is well formed and stays in its
+# buffer: no "@ " region when no tag applies (account-tag only, a source
+# with no account), every tag whole or not at all, and a long draft/oper
+# value falls back to the bare tag.  Includes ../send.c, compiled with
+# -ffunction-sections and linked with --gc-sections; every line sent is
+# captured at msgq_add().
+send_tags_cmocka.o: ${srcdir}/send_tags_cmocka.c ../send.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/send_tags_cmocka.c
+
+SEND_TAGS_CMOCKA_OBJS = send_tags_cmocka.o ../ircd_snprintf.o ../ircd_string.o
+send_tags_cmocka: $(SEND_TAGS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SEND_TAGS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # parse_line tests - a line that ends after its tags or its source prefix
 # ("@x ", "@A<time><msgid> ", ":prefix ", "AC ") is parsed from its own

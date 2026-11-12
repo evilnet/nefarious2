@@ -528,16 +528,47 @@ static int oper_tag_eligible(struct Client *from)
       && HasPriv(from, PRIV_DISPLAY) && !IsHideOper(from);
 }
 
+/** Append one tag to a tag region being built in @a buf: a ';' first
+ * unless it is the region's first tag (@a pos 1, just past the '@'), then
+ * the tag -- whole, or not at all.  Room is always left for the region's
+ * trailing space and NUL, so a region built only with this stays inside
+ * @a buf whatever its tags' lengths.
+ * @param[in,out] buf The region ("@" and the tags so far).
+ * @param[in] buflen Size of @a buf.
+ * @param[in,out] pos Length of the region so far; advanced past the tag.
+ * @param[in] fmt Format of the tag.
+ * @return Non-zero if the tag went in. */
+static int tag_put(char *buf, size_t buflen, int *pos, const char *fmt, ...)
+{
+  va_list vl;
+  int sep = *pos > 1;
+  int n;
+
+  /* pos, a separator, the tag, then a space and the NUL */
+  if (*pos < 1 || (size_t)*pos + sep + 2 >= buflen)
+    return 0;
+  if (sep)
+    buf[*pos] = ';';
+  va_start(vl, fmt);
+  n = vsnprintf(buf + *pos + sep, buflen - *pos - sep - 1, fmt, vl);
+  va_end(vl);
+  if (n <= 0 || (size_t)(*pos + sep + n) >= buflen - 1) {
+    buf[*pos] = '\0';   /* it did not fit: leave the region as it was */
+    return 0;
+  }
+  *pos += sep + n;
+  return 1;
+}
+
 static int append_oper_tag(char *buf, size_t buflen, int pos, struct Client *from)
 {
   const char *name = feature_bool(FEAT_OPERTAG_VALUE)
       ? cli_user(from)->opername : NULL;
-  if (pos > 1 && pos < (int)buflen - 1)
-    buf[pos++] = ';';
-  if (name && *name && !strpbrk(name, "; "))
-    pos += snprintf(buf + pos, buflen - pos, "draft/oper=%s", name);
-  else
-    pos += snprintf(buf + pos, buflen - pos, "draft/oper");
+  /* The name as its value when it fits; the bare tag otherwise (a long
+   * Operator block name), which still says the line is an oper's. */
+  if (!(name && *name && !strpbrk(name, "; ")
+        && tag_put(buf, buflen, &pos, "draft/oper=%s", name)))
+    tag_put(buf, buflen, &pos, "draft/oper");
   return pos;
 }
 
@@ -562,7 +593,7 @@ static int append_oper_tag(char *buf, size_t buflen, int pos, struct Client *fro
  */
 static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *from, int flags)
 {
-  int pos = 0;
+  int pos;
   int use_time = flags & TAGS_TIME;
   int use_account = flags & TAGS_ACCOUNT;
   int use_batch = (flags & TAGS_BATCH) && active_network_batch_id[0];
@@ -572,56 +603,52 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
 
   if (!use_time && !use_account && !use_batch && !use_bot && !use_msgid && !use_oper)
     return NULL;
+  if (buflen < 4)
+    return NULL;
 
+  /* Each tag goes in whole or not at all (tag_put()), in this order, so
+   * the region never outgrows buf: the fan-outs build it into 128 bytes,
+   * and the draft/oper value is an Operator block name of any length. */
   buf[0] = '@';
+  buf[1] = '\0';
   pos = 1;
 
   /* @batch tag first (most important for batched messages) */
-  if (use_batch) {
-    pos += snprintf(buf + pos, buflen - pos, "batch=%s", active_network_batch_id);
-  }
+  if (use_batch)
+    tag_put(buf, buflen, &pos, "batch=%s", active_network_batch_id);
 
   if (use_time) {
     struct timeval tv;
     struct tm tm;
-    if (pos > 1 && pos < (int)buflen - 1)
-      buf[pos++] = ';';
     client_tag_tv(&tv);
     gmtime_r(&tv.tv_sec, &tm);
-    pos += snprintf(buf + pos, buflen - pos,
-                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+    tag_put(buf, buflen, &pos,
+            "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+            tm.tm_hour, tm.tm_min, tm.tm_sec,
+            (long)(tv.tv_usec / 1000));
   }
 
-  if (use_msgid) {
-    if (pos > 1 && pos < (int)buflen - 1)
-      buf[pos++] = ';';
-    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", client_msgid_override);
-  }
+  if (use_msgid)
+    tag_put(buf, buflen, &pos, "msgid=%s", client_msgid_override);
 
-  if (use_account && from && cli_user(from) && IsAccount(from)) {
-    if (pos > 1 && pos < (int)buflen - 1)
-      buf[pos++] = ';';
-    pos += snprintf(buf + pos, buflen - pos, "account=%s", cli_user(from)->account);
-  }
+  if (use_account && from && cli_user(from) && IsAccount(from))
+    tag_put(buf, buflen, &pos, "account=%s", cli_user(from)->account);
 
   if (use_oper)
     pos = append_oper_tag(buf, buflen, pos, from);
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
-  if (use_bot) {
-    if (pos > 1 && pos < (int)buflen - 1)
-      buf[pos++] = ';';
-    pos += snprintf(buf + pos, buflen - pos, "bot");
-  }
+  if (use_bot)
+    tag_put(buf, buflen, &pos, "bot");
 
-  if (pos < (int)buflen - 1) {
-    buf[pos++] = ' ';
-    buf[pos] = '\0';
-  }
+  /* No tag went in -- account-tag for a source with no account: "@ " is
+   * no tag region, and the line goes without one. */
+  if (pos == 1)
+    return NULL;
 
+  buf[pos++] = ' ';
+  buf[pos] = '\0';
   return buf;
 }
 
