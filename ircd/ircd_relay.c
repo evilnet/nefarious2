@@ -282,6 +282,33 @@ size_t relay_dm_text_budget(struct Client *sptr, const char *cmd,
   return room;
 }
 
+/** Cut, for a message that came from another server, the copy this
+ * server STORES (history row, web push) to what its own clients are
+ * delivered: the line ":<from> <cmd> <target> :<text>" with @a from's
+ * face exactly as %#C shows it (nick!user@host), 510 bytes after the tags.
+ * The delivery itself keeps the text it was given and is cut by the msgq
+ * backstop at the same byte (the backstop's cut is ircd_utf8_cut_len on
+ * the same line), so the row equals the live line.  The onward relay
+ * keeps the text verbatim: another server can show the source with a
+ * different host (its host-hiding config, a login in flight) and must
+ * cut by its own view, not ours.  A text a patched origin cut already
+ * fits (its room was computed with the longest face) and is untouched.
+ * A server or service source is left alone. */
+static const char *relay_store_cut(struct Client *from, const char *cmd,
+                                   size_t target_len, const char *text,
+                                   char *buf, size_t bufsize)
+{
+  size_t face;
+
+  if (!IsUser(from) || !cli_user(from) || IsServiceClient(from))
+    return text;
+  face = ircd_relay_face_len(cli_name(from), cli_user(from)->username,
+                             cli_user(from)->host, NULL);
+  return relay_cut_to(text, ircd_relay_text_room(face, strlen(cmd), target_len,
+                                                 BUFSIZE - 2),
+                      buf, bufsize);
+}
+
 /* Effective DM-history identity: account when authenticated, else the
  * per-connection session id.  NEVER the nick — a nick is reusable and
  * keying on it lets a later holder read the prior holder's DM history
@@ -1078,6 +1105,8 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
   struct Channel* chptr;
   struct Client *one;
   const char *client_tags;
+  const char *stext;
+  char storebuf[BUFSIZE];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1118,6 +1147,14 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
     sptr = cli_user(sptr)->alias_primary;
   }
 
+  /* The copy this server stores is the line its clients are delivered
+   * (relay_store_cut): a message from a legacy origin -- or a fork
+   * origin from before the origin cut -- arrives whole, is cut for every
+   * local client by the msgq backstop, and used to be stored whole and
+   * replay a tail nobody saw live.  The relay below keeps it verbatim. */
+  stext = relay_store_cut(sptr, MSG_PRIVATE, strlen(chptr->chname), text,
+                          storebuf, sizeof(storebuf));
+
   /*
    * This first: Almost never a server/service
    * Servers may have channel services, need to check for it here
@@ -1144,7 +1181,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       char fwd_ts[32];
 
       history_format_ms(fwd_ts, sizeof(fwd_ts), history_event_time_ms(one));
-      forward_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, fwd_ts,
+      forward_channel_history(sptr, chptr, stext, HISTORY_PRIVMSG, relay_msgid, fwd_ts,
                               (client_tags && *client_tags) ? client_tags : NULL);
     }
 #endif
@@ -1170,7 +1207,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       char timestamp[32];
 
       history_format_ms(timestamp, sizeof(timestamp), history_event_time_ms(one));
-      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp,
+      store_channel_history(sptr, chptr, stext, HISTORY_PRIVMSG, relay_msgid, timestamp,
                              (client_tags && *client_tags) ? client_tags : NULL);
     }
 #endif
@@ -1191,6 +1228,8 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
   struct Channel* chptr;
   struct Client *one;
   const char *client_tags;
+  const char *stext;
+  char storebuf[BUFSIZE];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1219,6 +1258,14 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       sendcmdto_set_alias_source(sptr);
     sptr = cli_user(sptr)->alias_primary;
   }
+
+  /* The copy this server stores is the line its clients are delivered
+   * (relay_store_cut): a message from a legacy origin -- or a fork
+   * origin from before the origin cut -- arrives whole, is cut for every
+   * local client by the msgq backstop, and used to be stored whole and
+   * replay a tail nobody saw live.  The relay below keeps it verbatim. */
+  stext = relay_store_cut(sptr, MSG_NOTICE, strlen(chptr->chname), text,
+                          storebuf, sizeof(storebuf));
 
   /*
    * This first: Almost never a server/service
@@ -1252,7 +1299,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       char fwd_ts[32];
 
       history_format_ms(fwd_ts, sizeof(fwd_ts), history_event_time_ms(one));
-      forward_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, fwd_ts,
+      forward_channel_history(sptr, chptr, stext, HISTORY_NOTICE, relay_msgid, fwd_ts,
                               (client_tags && *client_tags) ? client_tags : NULL);
     }
 #endif
@@ -1276,7 +1323,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       char timestamp[32];
 
       history_format_ms(timestamp, sizeof(timestamp), history_event_time_ms(one));
-      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp,
+      store_channel_history(sptr, chptr, stext, HISTORY_NOTICE, relay_msgid, timestamp,
                              (client_tags && *client_tags) ? client_tags : NULL);
     }
 #endif
@@ -1972,6 +2019,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   struct Client* from;
   const char *client_tags;
   char pm_msgid[64];
+  char storebuf[BUFSIZE];  /* the stored copy, as delivered here (relay_store_cut) */
   char pm_timestamp[32];
   char fallback_of[S2S_MSGID_BUFSIZE];
 
@@ -2088,7 +2136,11 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 #ifdef USE_ROCKSDB
   /* Store server-relayed private message in history database (if enabled) */
   if (pm_msgid[0])
-    store_relayed_pm(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
+    store_relayed_pm(from, acptr,
+                     IsServiceClient(acptr) ? text
+                     : relay_store_cut(from, MSG_PRIVATE, strlen(cli_name(acptr)),
+                                       text, storebuf, sizeof(storebuf)),
+                     HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
                      client_tags, fallback_of);
 #endif
 }
@@ -2106,6 +2158,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   struct Client* from;
   const char *client_tags;
   char pm_msgid[64];
+  char storebuf[BUFSIZE];  /* the stored copy, as delivered here (relay_store_cut) */
   char pm_timestamp[32];
   char fallback_of[S2S_MSGID_BUFSIZE];
 
@@ -2230,7 +2283,11 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 #ifdef USE_ROCKSDB
   /* Store server-relayed private notice in history database (if enabled) */
   if (pm_msgid[0])
-    store_relayed_pm(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp,
+    store_relayed_pm(from, acptr,
+                     IsServiceClient(acptr) ? text
+                     : relay_store_cut(from, MSG_NOTICE, strlen(cli_name(acptr)),
+                                       text, storebuf, sizeof(storebuf)),
+                     HISTORY_NOTICE, pm_msgid, pm_timestamp,
                      client_tags, fallback_of);
 #endif
 }
