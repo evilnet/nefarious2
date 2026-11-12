@@ -73,6 +73,7 @@ CMOCKA_TESTPROGS = \
 	account_id_cmocka \
 	rename_proto_cmocka \
 	rename_handlers_cmocka \
+	sasl_handler_cmocka \
 	webhook_eventlog_cmocka \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
@@ -149,6 +150,7 @@ DEP_SRC = \
 	account_id_cmocka.c \
 	rename_proto_cmocka.c \
 	rename_handlers_cmocka.c \
+	sasl_handler_cmocka.c \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
@@ -465,6 +467,18 @@ RENAME_HANDLERS_CMOCKA_OBJS = rename_handlers_cmocka.o ../m_rename.o \
 	../ircd_alloc.o ../match.o
 rename_handlers_cmocka: $(RENAME_HANDLERS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(RENAME_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# sasl_handler tests - what AUTHENTICATE answers its parser when the SASL
+# exchange ends inside it: the REAL sasl_auth.o and m_authenticate.o, with
+# the registration hold, the send layer and libkc faked in the test (the
+# Keycloak cases are #ifdef USE_LIBKC).  SSL_LIBS for the real SCRAM and
+# ECDSA checks.  Defines its own log_write()/me, so test_stub.o is not
+# linked.
+SASL_HANDLER_CMOCKA_OBJS = sasl_handler_cmocka.o ../sasl_auth.o \
+	../m_authenticate.o ../ircd_string.o ../ircd_alloc.o ../account_id.o \
+	../webpush_keyring.o
+sasl_handler_cmocka: $(SASL_HANDLER_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SASL_HANDLER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 
 # webhook_subject tests - the pure webhook subject decision over real
 # Keycloak admin-event shapes (fixtures/webhook); links no ircd objects

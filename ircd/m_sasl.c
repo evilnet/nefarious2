@@ -247,7 +247,10 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ircd_strncpy(cli_saslaccount(acptr), data, ACCOUNTLEN + 1);
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
-      /* Success — use shared login completion function */
+      /* Success — use shared login completion function.  Its result says
+       * whether acptr survived the registration it resumed; cptr is the
+       * server link, so it must not be returned from here, and nothing
+       * touches acptr after it. */
       sasl_complete_login(acptr, cli_saslaccount(acptr), cli_saslacccreate(acptr), NULL, 0);   /* the wire from X3 carries no id */
       return 0;
     } else if (data[0] == 'F') {

@@ -187,7 +187,10 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   /* Path 1: Local Keycloak-based SASL (highest priority) */
   if (sasl_local_available()) {
     if (cli_saslsession(cptr)) {
-      /* Continuation of an existing local SASL session */
+      /* Continuation of an existing local SASL session.  The exchange can
+       * end in this call (a cached credential, a locally checked token,
+       * the last step of SCRAM or ECDSA) and resume registration, which
+       * may exit or free cptr: CPTR_KILLED then, returned as is. */
       return sasl_continue(cptr, parv[1]);
     }
     /* New session — sasl_start() returns 0 on success, -1 if mechanism

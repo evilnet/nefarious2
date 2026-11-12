@@ -100,12 +100,16 @@ struct sasl_cb_ctx {
 extern int sasl_start(struct Client *sptr, const char *mechanism);
 
 /** Process AUTHENTICATE data (may be chunked).
- *  @return 0 on success.
+ *  @return 0 on success; -1 when there is no local exchange to continue or
+ *  it is not in a state that takes client data (the line is ignored); or
+ *  CPTR_KILLED when the exchange ended (or was aborted) inside this call
+ *  and the registration it resumed exited or freed \a sptr; the
+ *  AUTHENTICATE handler returns it to the parser.
  */
 extern int sasl_continue(struct Client *sptr, const char *data);
 
-/** Abort and clean up a local SASL session.
- *  @return 0.
+/** Abort and clean up a local SASL session, and let registration go on.
+ *  @return CPTR_KILLED when registration exited or freed \a sptr, else 0.
  */
 extern int sasl_abort_local(struct Client *sptr);
 
@@ -115,10 +119,15 @@ extern void sasl_session_free(struct Client *sptr);
 /** Complete a successful SASL login.  Shared between local and P10 paths.
  *  Handles: account set, RPL_SASLSUCCESS, metadata load, account-notify,
  *  AC broadcast, hidden host, bouncer alias update, auth_sasl_done.
+ *  @return CPTR_KILLED when the registration it resumes last exited or
+ *  freed \a sptr (a K-line, a SASL-required class, a bouncer revive), else
+ *  0.  The AUTHENTICATE handler returns it to the parser; a caller handling
+ *  another connection's line ignores it.  Nothing may touch \a sptr after
+ *  CPTR_KILLED.
  */
-extern void sasl_complete_login(struct Client *sptr, const char *account,
-                                time_t acc_create, const char *kc_id,
-                                int id_live);
+extern int sasl_complete_login(struct Client *sptr, const char *account,
+                               time_t acc_create, const char *kc_id,
+                               int id_live);
 
 /** Broadcast an ACCOUNT (AC) message to other servers for a client whose
  *  account just changed.  Holds the four FEAT_EXTENDED_ACCOUNTS x ts/id

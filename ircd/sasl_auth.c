@@ -76,6 +76,34 @@ static const char *sasl_resolve_login_identity(struct SASLSession *session,
   return verified_id;
 }
 
+/* ==================================================================
+ * The end of an exchange: registration goes on
+ * ================================================================== */
+
+/** The exchange no longer holds registration: let it go on, here.
+ * Registration waits while an exchange is in flight (AR_SASL_PENDING), so
+ * a client that sent CAP END before its last AUTHENTICATE line registers
+ * when the exchange ends, and registration can exit it (a K-line, a
+ * SASL-required class, a full class) or free it (a bouncer revive moves
+ * its socket onto the held session's ghost; register_user() answers
+ * CPTR_KILLED for both).  An exchange that ends inside the client's own
+ * AUTHENTICATE line -- a cached credential, OAUTHBEARER's local token
+ * check, the last step of SCRAM or ECDSA, an abort -- must hand that
+ * result to the parser, or parse_client() and read_packet() go on reading
+ * the freed client.
+ * @param[in] sptr Local client whose exchange ended.
+ * @return CPTR_KILLED when registration exited or freed \a sptr, else 0.
+ * A caller handling \a sptr's own line returns it to the parser; any other
+ * caller ignores it.  Either way nothing may touch \a sptr after a
+ * non-zero result.
+ */
+static int sasl_hold_release(struct Client *sptr)
+{
+  if (!cli_auth(sptr))
+    return 0;
+  return auth_sasl_done(cli_auth(sptr));
+}
+
 /* ---- Health tracking ---- */
 
 /** Whether the Keycloak SASL backend is currently healthy. */
@@ -699,20 +727,6 @@ void sasl_broadcast_account(struct Client *cptr, char type)
 
 /* ---- sasl_complete_login: shared between local and P10 paths ---- */
 
-/** Complete a successful SASL login.
- *
- *  This is the shared function called by both the local Keycloak SASL path
- *  and the P10 relay path (ms_sasl D/S handler).  It performs:
- *   1. Set cli_saslaccount
- *   2. Send RPL_LOGGEDIN to client
- *   3. auth_set_account (pre-registration)
- *   4. SetHiddenHost (pre-registration, if configured)
- *   5. SetSASLComplete + RPL_SASLSUCCESS
- *   6. For registered users: metadata_load_account, account update,
- *      bounce_emit_alias_update, account-notify, AC broadcast, hide_hostmask
- *   7. auth_sasl_done to unblock registration
- *   8. Clean up SASL session state and timer
- */
 /** The Keycloak id a logged-in connection belongs to: its bouncer
  * session's when it has one (a primary or an alias), else its own. */
 static const char *sasl_conn_kc_id(struct Client *sptr)
@@ -723,8 +737,33 @@ static const char *sasl_conn_kc_id(struct Client *sptr)
   return id[0] ? id : cli_user(sptr)->kc_id;
 }
 
-void sasl_complete_login(struct Client *sptr, const char *account,
-                         time_t acc_create, const char *kc_id, int id_live)
+/** Complete a successful SASL login.
+ *
+ *  This is the shared function called by both the local Keycloak SASL path
+ *  and the P10 relay path (ms_sasl D/S handler).  It performs (the step
+ *  numbers are the comments' below):
+ *   0. Refuse a registered connection proving its account under another
+ *      Keycloak id (nothing else happens then)
+ *   1. Set cli_saslaccount
+ *   2. Send RPL_LOGGEDIN to client
+ *   3. auth_set_account (pre-registration: tells IAuth)
+ *   4. The account timestamp and Keycloak id
+ *   5. SetHiddenHost (pre-registration, if configured)
+ *   6. SetSASLComplete + RPL_SASLSUCCESS
+ *   7. For registered users: metadata_load_account, account update,
+ *      bounce_emit_alias_update, account-notify, AC broadcast, hide_hostmask
+ *   8. Clean up SASL session state and timer
+ *   9. Release the exchange's hold on registration (auth_sasl_done)
+ *
+ *  Registration is held until step 9 (it reads the account and the SASL
+ *  flag set here, and it may free sptr), and the result says whether sptr
+ *  survived it: CPTR_KILLED when registration exited or freed it, else 0.
+ *  The AUTHENTICATE handler returns that to its parser; a caller handling
+ *  another connection's line (ms_sasl, a Keycloak callback) ignores it.
+ *  Nothing may touch sptr after CPTR_KILLED.
+ */
+int sasl_complete_login(struct Client *sptr, const char *account,
+                        time_t acc_create, const char *kc_id, int id_live)
 {
   /* 0. A connection logged in to this account under one Keycloak id proves
    * the same name under another: the account was deleted and recreated,
@@ -750,8 +789,17 @@ void sasl_complete_login(struct Client *sptr, const char *account,
     if (t_active(&cli_sasltimeout(sptr)))
       timer_del(&cli_sasltimeout(sptr));
     sasl_session_free(sptr);
-    return;
+    return 0;
   }
+
+  /* Registration waits for step 9.  Step 3 checks it too
+   * (auth_set_account()), and it must not run before the steps below have
+   * set what it reads, nor free sptr under them.  The hold is normally on
+   * already (auth_sasl_start() when the exchange began), but an exchange
+   * begun while an earlier one's cookie was still set never took it (an
+   * IAuth success or failure leaves the cookie). */
+  if (cli_auth(sptr))
+    auth_sasl_start(cli_auth(sptr));
 
   /* 1. Set account name */
   ircd_strncpy(cli_saslaccount(sptr), account, ACCOUNTLEN + 1);
@@ -763,7 +811,7 @@ void sasl_complete_login(struct Client *sptr, const char *account,
              (!cli_user(sptr) || BadPtr(cli_user(sptr)->host)) ? "*" : cli_user(sptr)->host,
              cli_saslaccount(sptr), cli_saslaccount(sptr));
 
-  /* 3. Set account in auth request (pre-registration) */
+  /* 3. Set account in auth request (pre-registration); held, see above */
   if (cli_auth(sptr))
     auth_set_account(cli_auth(sptr), cli_saslaccount(sptr));
 
@@ -887,9 +935,9 @@ void sasl_complete_login(struct Client *sptr, const char *account,
   /* Free local SASL session if present */
   sasl_session_free(sptr);
 
-  /* 9. Unblock registration */
-  if (cli_auth(sptr))
-    auth_sasl_done(cli_auth(sptr));
+  /* 9. Unblock registration.  It may exit or free sptr; the result says
+   * so, and nothing here touches sptr after it. */
+  return sasl_hold_release(sptr);
 }
 
 /* ---- PLAIN mechanism handler ---- */
@@ -957,6 +1005,8 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL PLAIN: Successful authentication for %s (client %C)",
               login_as, acptr);
+    /* May resume registration, which may free acptr: nothing below
+     * touches it. */
     sasl_complete_login(acptr, login_as,
                         0,
                         sasl_id_for(login_as, session->authcid, kcid), 1);  /* the grant */
@@ -1001,8 +1051,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
-    if (cli_auth(acptr))
-      auth_sasl_done(cli_auth(acptr));
+    sasl_hold_release(acptr);   /* may free acptr; nothing follows */
   }
 }
 
@@ -1083,9 +1132,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
       if (t_active(&cli_sasltimeout(sptr)))
         timer_del(&cli_sasltimeout(sptr));
       sasl_session_free(sptr);
-      if (cli_auth(sptr))
-        auth_sasl_done(cli_auth(sptr));
-      return 0;
+      return sasl_hold_release(sptr);   /* CPTR_KILLED: sptr is gone */
     }
 
     /* 2. Positive cache — accept known-good credentials immediately */
@@ -1102,10 +1149,9 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
-        sasl_complete_login(sptr, login_as, 0,
-                            sasl_id_for(login_as, cached_account, cached_kcid),
-                            0);  /* a cached answer */
-        return 0;
+        return sasl_complete_login(sptr, login_as, 0,
+                                   sasl_id_for(login_as, cached_account, cached_kcid),
+                                   0);  /* a cached answer */
       }
     }
 
@@ -1182,8 +1228,7 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
-    if (cli_auth(acptr))
-      auth_sasl_done(cli_auth(acptr));
+    sasl_hold_release(acptr);   /* may free acptr; nothing follows */
   } else {
     /* Distinguish connectivity errors from "user not found" */
     if (result != KC_SUCCESS && result != KC_NOT_FOUND)
@@ -1198,8 +1243,7 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
-    if (cli_auth(acptr))
-      auth_sasl_done(cli_auth(acptr));
+    sasl_hold_release(acptr);   /* may free acptr; nothing follows */
   }
 }
 
@@ -1437,6 +1481,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
   struct kc_realm realm;
   struct kc_token_info *info = NULL;
   int rc;
+  int res;
 
   /* Parse OAUTHBEARER format */
   if (oauthbearer_parse(decoded, len, authzid, sizeof(authzid),
@@ -1500,11 +1545,11 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
                 "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
                 login_as, sptr);
       MyFree(token_nul);
-      sasl_complete_login(sptr, login_as, 0,
-                          sasl_id_for(login_as, info->username, kcid),
-                          0);  /* a token checked locally */
+      res = sasl_complete_login(sptr, login_as, 0,
+                                sasl_id_for(login_as, info->username, kcid),
+                                0);  /* a token checked locally */
       kc_jwt_token_info_free(info);
-      return 0;
+      return res;   /* CPTR_KILLED: sptr is gone */
     }
   }
 
@@ -1645,8 +1690,7 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
-    if (cli_auth(acptr))
-      auth_sasl_done(cli_auth(acptr));
+    sasl_hold_release(acptr);   /* may free acptr; nothing follows */
     return;
   }
 
@@ -1671,8 +1715,7 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
     sasl_session_free(acptr);
-    if (cli_auth(acptr))
-      auth_sasl_done(cli_auth(acptr));
+    sasl_hold_release(acptr);   /* may free acptr; nothing follows */
     return;
   }
 
@@ -1984,11 +2027,10 @@ static int sasl_scram_complete(struct Client *sptr)
   log_write(LS_SYSTEM, L_INFO, 0,
             "SASL SCRAM: Successful authentication for %s (client %C)",
             login_as, sptr);
-  sasl_complete_login(sptr, login_as,
-                      0,
-                      sasl_id_for(login_as, session->authcid, session->kc_id),
-                      1);  /* the credentials were read from Keycloak */
-  return 0;
+  return sasl_complete_login(sptr, login_as,
+                             0,
+                             sasl_id_for(login_as, session->authcid, session->kc_id),
+                             1);  /* the credentials were read from Keycloak */
 }
 
 /* ---- ECDSA-NIST256P-CHALLENGE mechanism handler ---- */
@@ -2166,11 +2208,10 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL ECDSA: Successful authentication for %s (client %C)",
               login_as, sptr);
-    sasl_complete_login(sptr, login_as,
-                        0,
-                        sasl_id_for(login_as, session->authcid, session->kc_id),
-                        1);  /* the key was read from Keycloak */
-    return 0;
+    return sasl_complete_login(sptr, login_as,
+                               0,
+                               sasl_id_for(login_as, session->authcid, session->kc_id),
+                               1);  /* the key was read from Keycloak */
   }
 
   log_write(LS_SYSTEM, L_INFO, 0,
@@ -2390,11 +2431,15 @@ int sasl_continue(struct Client *sptr, const char *data)
   }
 
 dispatch:
-  /* We have all the data — decode base64 and dispatch to mechanism handler */
+  /* We have all the data — decode base64 and dispatch to mechanism handler.
+   * A handler answers 0 to go on, -1 to have the exchange aborted here, or
+   * CPTR_KILLED when the exchange ended inside it and the registration it
+   * resumed exited or freed sptr: that goes to the parser, and nothing
+   * here touches sptr (no abort: the exchange is over). */
   {
     unsigned char decoded[SASL_DATA_MAX];
     size_t decoded_len = 0;
-    int rc;
+    int rc = 0;
 
     if (session->accumulated_data && session->data_len > 0) {
       if (!sasl_base64_decode(session->accumulated_data, decoded,
@@ -2410,39 +2455,28 @@ dispatch:
 #ifdef USE_LIBKC
       case SASL_MECH_PLAIN:
         rc = sasl_handle_plain(sptr, decoded, decoded_len);
-        if (rc < 0) {
-          return sasl_abort_local(sptr);
-        }
         break;
       case SASL_MECH_EXTERNAL:
         rc = sasl_handle_external(sptr, decoded, decoded_len);
-        if (rc < 0) {
-          return sasl_abort_local(sptr);
-        }
         break;
       case SASL_MECH_OAUTHBEARER:
         rc = sasl_handle_oauthbearer(sptr, decoded, decoded_len);
-        if (rc < 0) {
-          return sasl_abort_local(sptr);
-        }
         break;
       case SASL_MECH_SCRAM_SHA256:
         rc = sasl_handle_scram(sptr, decoded, decoded_len);
-        if (rc < 0) {
-          return sasl_abort_local(sptr);
-        }
         break;
       case SASL_MECH_ECDSA:
         rc = sasl_handle_ecdsa(sptr, decoded, decoded_len);
-        if (rc < 0) {
-          return sasl_abort_local(sptr);
-        }
         break;
 #endif
       default:
         send_reply(sptr, ERR_SASLFAIL, ": unsupported mechanism");
         return sasl_abort_local(sptr);
     }
+    if (rc == CPTR_KILLED)
+      return CPTR_KILLED;
+    if (rc < 0)
+      return sasl_abort_local(sptr);
   }
 
   return 0;
@@ -2465,12 +2499,9 @@ int sasl_abort_local(struct Client *sptr)
   sasl_session_free(sptr);
 
   /* Unblock registration.  The result is whether sptr survived it
-   * (CPTR_KILLED when registration exits the client); a handler that
-   * returns this to the parser must not touch sptr afterwards. */
-  if (cli_auth(sptr))
-    return auth_sasl_done(cli_auth(sptr));
-
-  return 0;
+   * (CPTR_KILLED when registration exits or frees the client); a handler
+   * that returns this to the parser must not touch sptr afterwards. */
+  return sasl_hold_release(sptr);
 }
 
 /* ---- Timeout callback for local SASL ---- */
