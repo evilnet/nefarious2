@@ -106,6 +106,46 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
+/** Send an oper the versions of the libraries we were built with.
+ *
+ * To a remote oper each NOTICE carries the compact msgid of the VERSION
+ * it answers, as the numerics do (reply_tags()), so the oper's server
+ * can put it in the forwarded labeled-response batch; armed once, only
+ * the first NOTICE carried it, and the others went out under msgids of
+ * their own.
+ * @param[in] sptr Oper to send them to.
+ */
+static void version_notices(struct Client *sptr)
+{
+  int tag = !MyUser(sptr) && feature_bool(FEAT_P10_MESSAGE_TAGS)
+            && cli_s2s_msgid(cli_from(sptr))[0];
+#define VERSION_NOTICE_TAG() \
+  do { \
+    if (tag) \
+      sendcmdto_set_s2s_tags(cli_s2s_time_ms(cli_from(sptr)), \
+                             cli_s2s_msgid(cli_from(sptr))); \
+  } while (0)
+
+#ifdef USE_SSL
+#ifdef DEBUGMODE
+  VERSION_NOTICE_TAG();
+  sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Headers: %s", sptr, OPENSSL_VERSION_TEXT);
+#endif
+  VERSION_NOTICE_TAG();
+  sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Library: %s", sptr, SSLeay_version(SSLEAY_VERSION));
+#endif
+#ifdef USE_GEOIP
+  VERSION_NOTICE_TAG();
+  sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GeoIP %s", sptr, geoip_version());
+#endif
+#ifdef USE_MMDB
+  VERSION_NOTICE_TAG();
+  sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :MaxMindDB %s", sptr, geoip_libmmdb_version());
+#endif
+#undef VERSION_NOTICE_TAG
+  (void)tag;
+}
+
 /*
  * m_version - generic message handler
  *
@@ -155,18 +195,7 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     int lb = labeled_batch_start(sptr);
     send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
-#ifdef USE_SSL
-#ifdef DEBUGMODE
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Headers: %s", sptr, OPENSSL_VERSION_TEXT);
-#endif
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Library: %s", sptr, SSLeay_version(SSLEAY_VERSION));
-#endif
-#ifdef USE_GEOIP
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GeoIP %s", sptr, geoip_version());
-#endif
-#ifdef USE_MMDB
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :MaxMindDB %s", sptr, geoip_libmmdb_version());
-#endif
+    version_notices(sptr);
     send_supported(sptr);
     if (lb) labeled_batch_end(sptr);
   }
@@ -198,27 +227,15 @@ int ms_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       HUNTED_ISME)
   {
     int lb = labeled_batch_start(sptr);
+    /* A remote oper's NOTICEs go before RPL_VERSION: that numeric is
+     * VERSION's terminal, and the oper's server closes the forwarded
+     * labeled-response batch on it -- NOTICEs after it fell outside. */
+    if (IsAnOper(sptr) && !MyUser(sptr))
+      version_notices(sptr);
     send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
-    if (IsAnOper(sptr))
-    {
-      /* Echo compact tag for labeled-response correlation */
-      if (!MyUser(sptr) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
-          cli_s2s_msgid(cli_from(sptr))[0])
-        sendcmdto_set_s2s_tags(cli_s2s_time_ms(cli_from(sptr)), cli_s2s_msgid(cli_from(sptr)));
-#ifdef USE_SSL
-#ifdef DEBUGMODE
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Headers: %s", sptr, OPENSSL_VERSION_TEXT);
-#endif
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Library: %s", sptr, SSLeay_version(SSLEAY_VERSION));
-#endif
-#ifdef USE_GEOIP
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GeoIP %s", sptr, geoip_version());
-#endif
-#ifdef USE_MMDB
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :MaxMindDB %s", sptr, geoip_libmmdb_version());
-#endif
-    }
+    if (IsAnOper(sptr) && MyUser(sptr))
+      version_notices(sptr);
     if (lb) labeled_batch_end(sptr);
   }
 

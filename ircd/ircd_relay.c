@@ -1902,22 +1902,36 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
         && cli_from(send_from) == cli_from(acptr))
       send_from = sptr;
 
+    /* A NOTICE that answers a forwarded command (VERSION's library lines
+     * and LUSERS' connection count, to a remote requester) carries that
+     * command's compact msgid.  A labeled command's goes in the
+     * command's batch, opened here when it comes first (the answering
+     * server sends them before the terminal numeric), and held open
+     * when the batch is DRAINING.  The compact msgid names the command,
+     * not this NOTICE, and every NOTICE of the reply carries it: each
+     * gets a msgid of its own, labeled or not. */
+    struct ForwardedLabel *fl = NULL;
+    if (MyConnect(acptr) && feature_bool(FEAT_CAP_labeled_response)) {
+      const char *incoming_msgid = (cli_from(sptr) && cli_s2s_msgid(cli_from(sptr))[0])
+                                    ? cli_s2s_msgid(cli_from(sptr)) : "";
+      fl = fwd_label_find(acptr, incoming_msgid);
+      if ((fl || (IsServer(sptr) && fwd_label_is_echo(incoming_msgid)))
+          && pm_msgid[0])
+        generate_msgid(pm_msgid, sizeof(pm_msgid));
+    }
+
     /* Set client msgid so local client gets @msgid= tag */
     if (pm_msgid[0])
       sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
-    /* Check for forwarded label batch in DRAINING state */
-    if (MyConnect(acptr) && feature_bool(FEAT_CAP_labeled_response)) {
-      const char *incoming_msgid = (cli_from(sptr) && cli_s2s_msgid(cli_from(sptr))[0])
-                                    ? cli_s2s_msgid(cli_from(sptr)) : "";
-      struct ForwardedLabel *fl = fwd_label_find_draining(acptr, incoming_msgid);
-      if (fl) {
-        sendcmdto_set_fwd_batch(fl->fl_batch_id);
-        sendcmdto_one_tags_ext(send_from, CMD_NOTICE, acptr, pm_msgid,
-                               "%C :%s", acptr, text);
-        /* Stay DRAINING -- more trailing messages may follow */
-        delivered = 1;
-      }
+    if (fl) {
+      if (fl->fl_state == FWD_LABEL_PENDING)
+        fwd_label_open_batch(acptr, fl);
+      sendcmdto_set_fwd_batch(fl->fl_batch_id);
+      sendcmdto_one_tags_ext(send_from, CMD_NOTICE, acptr, pm_msgid,
+                             "%C :%s", acptr, text);
+      /* The batch stays as it is -- the terminal numeric closes it */
+      delivered = 1;
     }
 
     if (!delivered) {
