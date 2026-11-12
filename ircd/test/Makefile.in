@@ -87,7 +87,8 @@ CMOCKA_TESTPROGS = \
 	send_tags_cmocka \
 	log_async_cmocka \
 	parse_line_cmocka \
-	conf_reattach_cmocka
+	conf_reattach_cmocka \
+	send_label_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -170,6 +171,7 @@ DEP_SRC = \
 	send_tags_cmocka.c \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
+	send_label_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -665,6 +667,22 @@ CONF_REATTACH_CMOCKA_OBJS = conf_reattach_cmocka.o ../ircd_string.o ../match.o \
 	../ircd_snprintf.o
 conf_reattach_cmocka: $(CONF_REATTACH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CONF_REATTACH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# send_label tests - labeled-response (issue #216): a channel event a
+# client's own command caused (its PART, TOPIC, KICK, MODE) carries the
+# command's label, or its labeled batch, on that client's copy alone --
+# not on a bouncer sibling's; a message a client sent itself is delivered
+# without the label and outside the batch.  Includes ../send.c, compiled
+# with -ffunction-sections and linked with --gc-sections: the program
+# keeps the functions under test and what they call, so only those are
+# stubbed in the test, and every line sent is captured at msgq_add().
+# ../ircd_snprintf.o formats the lines (%C, %H, %v).
+send_label_cmocka.o: ${srcdir}/send_label_cmocka.c ../send.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/send_label_cmocka.c
+
+SEND_LABEL_CMOCKA_OBJS = send_label_cmocka.o ../ircd_snprintf.o ../ircd_string.o
+send_label_cmocka: $(SEND_LABEL_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SEND_LABEL_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

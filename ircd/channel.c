@@ -5721,11 +5721,16 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                     sizeof(jbuf->jb_msgids[0]));
       jbuf->jb_msgid_time_ms = part_ms;
 
-      /* Send notification to channel */
+      /* Send notification to channel.  The parting connection's own copy
+       * (jb_connect: the user, or the bouncer device that typed the PART
+       * for its primary) is the answer to its PART: it carries the PART's
+       * label, or the labeled batch m_part/m_join opened. */
       if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
-        sendcmdto_channel_butserv_butone(jbuf->jb_source, CMD_PART, chan, NULL, 0,
-                                         (flags & CHFL_BANNED || !jbuf->jb_comment) ?
-                                         ":%H" : "%H :%s", chan, jbuf->jb_comment);
+        sendcmdto_channel_butserv_respond(jbuf->jb_source, CMD_PART, chan,
+                                          (jbuf->jb_connect && MyUser(jbuf->jb_connect))
+                                          ? jbuf->jb_connect : NULL, 0,
+                                          (flags & CHFL_BANNED || !jbuf->jb_comment) ?
+                                          ":%H" : "%H :%s", chan, jbuf->jb_comment);
       else if (MyUser(jbuf->jb_source))
         sendcmdto_one_tags(jbuf->jb_source, CMD_PART, jbuf->jb_source,
                            (flags & CHFL_BANNED || !jbuf->jb_comment) ?

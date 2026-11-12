@@ -1799,6 +1799,71 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   msgq_clean(mb);
 }
 
+/** Tag one event's line for one local client, as a channel fan-out tags
+ * it: the msgid and @time the caller armed (sendcmdto_set_client_event),
+ * @account, the oper and bot tags, each on the recipient's own caps --
+ * never a batch the recipient has open nor its label.  With @a respond
+ * the line answers the recipient's own command and leads with that
+ * command's labeled-response @batch (the one labeled_batch_start()
+ * opened), else its pending @label, which it consumes (no ACK follows).
+ * @a client_tags, a delivered message's client-only tags, lead the
+ * region for a recipient with message-tags.
+ * @param[out] buf Buffer for the tag region, trailing space included.
+ * @param[in] buflen Size of \a buf.
+ * @param[in] from Client the event comes from.
+ * @param[in] to Local client the line is for.
+ * @param[in] respond Non-zero when the line answers \a to's own command.
+ * @param[in] client_tags Client-only tags to lead with, or NULL.
+ * @return \a buf, or NULL when the line carries no tags.
+ */
+static char *event_tags(char *buf, size_t buflen, struct Client *from,
+                        struct Client *to, int respond, const char *client_tags)
+{
+  char head[96];
+  char rest[256];
+  int flags;
+  int pos;
+
+  if (!MyConnect(to))
+    return NULL;
+
+  head[0] = '\0';
+  if (respond) {
+    if (cli_labeled_batch(to) && cli_batch_id(to)[0]
+        && feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH))
+      snprintf(head, sizeof(head), "batch=%s", cli_batch_id(to));
+    else if (feature_bool(FEAT_CAP_labeled_response) && CapOwnHas(to, CAP_LABELEDRESP)
+             && cli_label(to)[0] && !cli_label_responded(to)) {
+      snprintf(head, sizeof(head), "label=%s", cli_label(to));
+      cli_label_responded(to) = 1;   /* answered: no ACK (send_labeled_ack) */
+    }
+  }
+
+  /* format_message_tags_ex writes "@ " when its only flag found nothing
+   * to say (account-tag, from no account): that is no tags. */
+  flags = get_client_tag_flags(to, from, 0);
+  if (!flags || !format_message_tags_ex(rest, sizeof(rest), from, flags)
+      || rest[1] == ' ')
+    rest[0] = '\0';
+  if (!client_tags || !*client_tags || !CapOwnHas(to, CAP_MSGTAGS)
+      || strlen(client_tags) + sizeof(head) + sizeof(rest) + 4 > buflen)
+    client_tags = NULL;
+
+  if (!client_tags && !head[0] && !rest[0])
+    return NULL;
+
+  /* Each part fits: head and rest by their sizes, client_tags by the
+   * check above. */
+  pos = snprintf(buf, buflen, "@%s", client_tags ? client_tags : "");
+  if (head[0])
+    pos += snprintf(buf + pos, buflen - pos, "%s%s", pos > 1 ? ";" : "", head);
+  if (rest[0])   /* rest = "@...; " */
+    snprintf(buf + pos, buflen - pos, "%s%s", pos > 1 ? ";" : "", rest + 1);
+  else
+    snprintf(buf + pos, buflen - pos, " ");
+  return buf;
+}
+
 /** Send one event's line to a single local client, tagged as a channel
  * fan-out tags it: the msgid and @time the caller armed
  * (sendcmdto_set_client_event), @account, the oper and bot tags, each on
@@ -1822,11 +1887,8 @@ void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  char head[96];
-  char rest[256];
   char tagbuf[512];
-  const char *tags = NULL;
-  int flags;
+  const char *tags;
   int prio;
 
   to = cli_from(to);
@@ -1834,32 +1896,7 @@ void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
 
-  head[0] = '\0';
-  if (respond && MyConnect(to)) {
-    if (cli_labeled_batch(to) && cli_batch_id(to)[0]
-        && feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH))
-      snprintf(head, sizeof(head), "batch=%s", cli_batch_id(to));
-    else if (feature_bool(FEAT_CAP_labeled_response) && CapOwnHas(to, CAP_LABELEDRESP)
-             && cli_label(to)[0] && !cli_label_responded(to)) {
-      snprintf(head, sizeof(head), "label=%s", cli_label(to));
-      cli_label_responded(to) = 1;   /* answered: no ACK (send_labeled_ack) */
-    }
-  }
-
-  /* format_message_tags_ex writes "@ " when its only flag found nothing
-   * to say (account-tag, from no account): that is no tags. */
-  flags = MyConnect(to) ? get_client_tag_flags(to, from, 0) : 0;
-  if (flags && format_message_tags_ex(rest, sizeof(rest), from, flags)
-      && rest[1] != ' ') {
-    if (head[0]) {
-      snprintf(tagbuf, sizeof(tagbuf), "@%s;%s", head, rest + 1);   /* rest = "@...; " */
-      tags = tagbuf;
-    } else
-      tags = rest;
-  } else if (head[0]) {
-    snprintf(tagbuf, sizeof(tagbuf), "@%s ", head);
-    tags = tagbuf;
-  }
+  tags = event_tags(tagbuf, sizeof(tagbuf), from, to, respond, NULL);
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -3085,19 +3122,16 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   sendcmdto_extra_withcap = CAP_NONE;
 }
 
-/** Send a (prefixed) command to all local users on a channel.
- * @param[in] from Client originating the command.
- * @param[in] cmd Long name of command.
- * @param[in] tok Short name of command (ignored).
- * @param[in] to Destination channel.
- * @param[in] one Client direction to skip (or NULL).
- * @param[in] skip Bitmask of SKIP_DEAF, SKIP_NONOPS, SKIP_NONVOICES indicating which clients to skip.
- * @param[in] pattern Format string for command arguments.
- */
-void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
-				      const char *tok, struct Channel *to,
-				      struct Client *one, unsigned int skip,
-                                      const char *pattern, ...)
+/** The body of sendcmdto_channel_butserv_butone() and
+ * sendcmdto_channel_butserv_respond(): @a from's line to the local
+ * members of @a to, except @a one and those @a skip rules out.  The copy
+ * to @a asker, when it is one of them, answers its command
+ * (event_tags(): its labeled-response @batch or pending @label).
+ * @a pattern's arguments come as @a ap, copied for each buffer built. */
+static void
+channel_butserv_vsend(struct Client *from, const char *cmd, struct Channel *to,
+                      struct Client *one, struct Client *asker,
+                      unsigned int skip, const char *pattern, va_list ap)
 {
   struct VarData vd;
   struct MsgBuf *mb;
@@ -3108,7 +3142,7 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   int flags;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
-  va_start(vd.vd_args, pattern);
+  va_copy(vd.vd_args, ap);
 
   /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
@@ -3131,12 +3165,27 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
         || !persistence_channel_visible(member->user, to->chname))
         continue;
+    if (member->user == asker) {
+      /* The asker's own copy: its tags for itself, never the cache's. */
+      char atags[512];
+      struct MsgBuf *amb;
+
+      va_copy(vd.vd_args, ap);
+      if (event_tags(atags, sizeof(atags), from, asker, 1, NULL))
+        amb = msgq_make(0, "%s%:#C %s %v", atags, from, cmd, &vd);
+      else
+        amb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
+      va_end(vd.vd_args);
+      send_buffer(asker, amb, 0);
+      msgq_clean(amb);
+      continue;
+    }
     flags = get_client_tag_flags(member->user, from, 0);
     if (flags) {
       /* Build cached message buffer for this flag combination if needed */
       if (!mb_cache[flags]) {
         if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
-          va_start(vd.vd_args, pattern);
+          va_copy(vd.vd_args, ap);
           mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
           va_end(vd.vd_args);
         }
@@ -3158,6 +3207,58 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
+}
+
+/** Send a (prefixed) command to all local users on a channel.
+ * @param[in] from Client originating the command.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (ignored).
+ * @param[in] to Destination channel.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] skip Bitmask of SKIP_DEAF, SKIP_NONOPS, SKIP_NONVOICES indicating which clients to skip.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
+				      const char *tok, struct Channel *to,
+				      struct Client *one, unsigned int skip,
+                                      const char *pattern, ...)
+{
+  va_list ap;
+
+  va_start(ap, pattern);
+  channel_butserv_vsend(from, cmd, to, one, NULL, skip, pattern, ap);
+  va_end(ap);
+}
+
+/** Send a channel event a client's own command caused to all local users
+ * on the channel, as sendcmdto_channel_butserv_butone() does (skipping
+ * nobody), the copy to @a asker answering that command: it carries the
+ * command's labeled-response @batch, or its pending @label (consumed, so
+ * no ACK follows).  The other members' copies, a bouncer sibling of
+ * @a asker's included, are tagged as before.
+ * @param[in] from Client originating the event.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (ignored).
+ * @param[in] to Destination channel.
+ * @param[in] asker The local connection whose command this answers, or
+ *   NULL (then the same as sendcmdto_channel_butserv_butone()).
+ * @param[in] skip Bitmask of SKIP_* flags, as for
+ *   sendcmdto_channel_butserv_butone().
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_butserv_respond(struct Client *from, const char *cmd,
+                                       const char *tok, struct Channel *to,
+                                       struct Client *asker, unsigned int skip,
+                                       const char *pattern, ...)
+{
+  va_list ap;
+
+  (void)tok;
+  va_start(ap, pattern);
+  channel_butserv_vsend(from, cmd, to, NULL,
+                        (asker && MyConnect(asker)) ? asker : NULL, skip,
+                        pattern, ap);
+  va_end(ap);
 }
 
 /** Send a (prefixed) command to all local users on a channel with or without

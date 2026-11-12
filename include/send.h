@@ -288,6 +288,17 @@ extern void sendcmdto_channel_butserv_butone(struct Client *from,
                                              unsigned int skip,
 					     const char *pattern, ...);
 
+/* The same, for an event a client's own command caused: the copy to
+ * @a asker (that command's connection) carries its @label or
+ * labeled-response @batch. */
+extern void sendcmdto_channel_butserv_respond(struct Client *from,
+                                              const char *cmd,
+                                              const char *tok,
+                                              struct Channel *to,
+                                              struct Client *asker,
+                                              unsigned int skip,
+                                              const char *pattern, ...);
+
 /* Send command to all channel users on this server with or without a specified capbility */
 extern void sendcmdto_channel_capab_butserv_butone(struct Client *from,
                                             const char *cmd,

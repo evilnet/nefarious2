@@ -120,6 +120,8 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char *part_comment;   /* the PART's comment, as the client sent it */
   char *comment;        /* the one a channel's PART carries */
   struct Client *alias_source = NULL;
+  int lb = 0;
+  int ret;
 
   /* Alias PART means the user is leaving — rewrite to primary so
    * joinbuf removes the primary (triggering bounce_sync_alias_part to
@@ -133,23 +135,35 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   ClrFlag(sptr, FLAG_TS8);
 
+  /* Every answer goes to cptr, the connection that sent the PART: for a
+   * bouncer device that is not sptr (now its session primary), and the
+   * PART's label is cptr's.  The PART lines themselves reach it through
+   * joinbuf_join(), as jb_connect. */
+
   /* check number of arguments */
   if (parc < 2 || parv[1][0] == '\0')
-    return need_more_params(sptr, "PART");
+    return need_more_params(cptr, "PART");
 
   /* UTF8ONLY enforcement on part message */
   if (parc > 2 && !EmptyString(parv[parc - 1]) &&
       feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(parv[parc - 1])) {
     if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
-      send_fail(sptr, "PART", "INVALID_UTF8", NULL,
+      send_fail(cptr, "PART", "INVALID_UTF8", NULL,
                 "Part message contains invalid UTF-8 and was rejected");
       return 0;
     }
     /* Warn mode: sanitize the part message */
     string_sanitize_utf8(parv[parc - 1]);
-    send_warn(sptr, "PART", "INVALID_UTF8", NULL,
+    send_warn(cptr, "PART", "INVALID_UTF8", NULL,
               "Part message contained invalid UTF-8 and was sanitized");
   }
+
+  /* A PART of more than one channel answers with a line per channel (its
+   * PART, or the error for it): a labeled one gets them in a
+   * labeled-response batch.  A PART of one channel is answered by one
+   * line, which carries the label itself. */
+  if (strchr(parv[1], ','))
+    lb = labeled_batch_start(cptr);
 
   /* init join/part buffer */
   part_comment = (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0;
@@ -164,12 +178,12 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     chptr = get_channel(sptr, name, CGT_NO_CREATE); /* look up channel */
 
     if (!chptr) { /* complain if there isn't such a channel */
-      send_reply(sptr, ERR_NOSUCHCHANNEL, name);
+      send_reply(cptr, ERR_NOSUCHCHANNEL, name);
       continue;
     }
 
     if (!(member = find_member_link(chptr, sptr))) { /* complain if not on */
-      send_reply(sptr, ERR_NOTONCHANNEL, chptr->chname);
+      send_reply(cptr, ERR_NOTONCHANNEL, chptr->chname);
       continue;
     }
 
@@ -333,7 +347,10 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
-  return joinbuf_flush(&parts); /* flush channel parts */
+  ret = joinbuf_flush(&parts); /* flush channel parts */
+  if (lb)
+    labeled_batch_end(cptr);
+  return ret;
 }
 
 /*
