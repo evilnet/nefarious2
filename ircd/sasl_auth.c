@@ -791,6 +791,26 @@ static const char *sasl_conn_kc_id(struct Client *sptr)
 
 /* ---- A logged-in client's re-authentication never changes its account ---- */
 
+/** Are \a a and \a b the same account name, letter case aside?  ASCII
+ * letters only: names the ircd's casemapping folds together otherwise
+ * (rfc1459: [\]^ with {|}~; ToLower() beyond ASCII) are different names
+ * to Keycloak, whose usernames fold letter case only, so to the rule they
+ * are different accounts whatever their ids say. */
+static int sasl_same_name(const char *a, const char *b)
+{
+  for (; *a && *b; a++, b++) {
+    unsigned char x = (unsigned char)*a, y = (unsigned char)*b;
+
+    if (x >= 'A' && x <= 'Z')
+      x += 'a' - 'A';
+    if (y >= 'A' && y <= 'Z')
+      y += 'a' - 'A';
+    if (x != y)
+      return 0;
+  }
+  return *a == *b;
+}
+
 int sasl_logged_in(struct Client *cptr)
 {
   /* The account is applied once registration has passed its auth stage
@@ -821,15 +841,19 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
   current = cli_user(sptr)->account;
   conn_id = sasl_conn_kc_id(sptr);
 
-  /* The same account: the same name as the ircd compares account names
-   * (ircd_strcmp(), its casemapping: sessions, history and metadata are
-   * keyed the same way), and, when both sides carry a Keycloak id, the
+  /* The same account: the same name -- equal as the ircd compares account
+   * names (ircd_strcmp(), its casemapping: sessions, history and metadata
+   * are keyed the same way) AND equal but for ASCII letter case, the only
+   * folding Keycloak's usernames share (sasl_same_name()): a[b and a{b are
+   * one name to the ircd and two users to Keycloak, so they are refused
+   * whatever the ids say -- and, when both sides carry a Keycloak id, the
    * same id -- the connection's session's when it is in one (a primary or
    * an alias), else its own.  A side without an id leaves the name to
    * decide (a token minted without the basic scope has no sub; a login
    * through services carries none): the name still has to be the same, so
    * a missing id never reaches another account. */
-  if (!EmptyString(account) && 0 == ircd_strcmp(current, account)) {
+  if (!EmptyString(account) && 0 == ircd_strcmp(current, account)
+      && sasl_same_name(current, account)) {
     if (!kc_id || !account_id_valid(kc_id)
         || !bounce_rebind_kc_conflict(conn_id, kc_id))
       return 0;
@@ -837,6 +861,10 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
   } else
     other_id = 0;
 
+  /* The reply: 904 is SASL's own answer to a failed exchange (3.1/3.2
+   * define numerics only).  The FAIL before it, for standard-replies
+   * clients, is the fork's addition, the same code and form (no context)
+   * m_authenticate() sends with its 907. */
   if (other_id) {
     /* The account was deleted and made again under the same name: this
      * connection -- with the bouncer session it belongs to -- is the
@@ -850,7 +878,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
                                      "account under another Keycloak id: "
                                      "re-authentication refused", sptr, current);
     if (CapActive(sptr, CAP_STANDARDREPLIES))
-      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", current,
+      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
                 "This connection belongs to the account's previous Keycloak user");
     send_reply(sptr, ERR_SASLFAIL,
                ": this connection belongs to the account's previous Keycloak user");
@@ -865,12 +893,12 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
                                      "SASL: %C (logged in as %s) re-authenticated "
                                      "as %s: refused", sptr, current,
                                      EmptyString(account) ? "(no account)" : account);
-    if (CapActive(sptr, CAP_STANDARDREPLIES))
-      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", current,
-                "A re-authentication cannot change the account");
     ircd_snprintf(0, reason, sizeof(reason),
                   ": you are logged in as %s; a re-authentication cannot "
                   "change the account", current);
+    if (CapActive(sptr, CAP_STANDARDREPLIES))
+      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
+                reason + 2);              /* "you are logged in as ..." */
     send_reply(sptr, ERR_SASLFAIL, reason);
   }
   return 1;
@@ -931,6 +959,8 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
                              time_t acc_create, const char *kc_id, int id_live,
                              enum sasl_login_proof by)
 {
+  int refresh;
+
   /* 0. A client already logged in (sasl_logged_in()) re-authenticates to
    * refresh its login, never to change it (owner's ruling, #223): a login
    * that names another account, or this account under another Keycloak id
@@ -983,6 +1013,9 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   if (by == LOGIN_BY_SASL && cli_auth(sptr))
     auth_sasl_start(cli_auth(sptr));
 
+  /* A logged-in client that passed step 0 refreshes its own login. */
+  refresh = by == LOGIN_BY_SASL && sasl_logged_in(sptr);
+
   /* 1. The login's identity, as a whole (sasl_identity_set()): the account
    * name; the account timestamp, which is X3's registration date when the
    * SASL exchange was relayed through X3 (m_sasl.c hands back what X3 sent)
@@ -993,8 +1026,34 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
    * Keycloak confirmed it in this login rather than a cache or a locally
    * checked token: only such a login may end the previous user's leftover
    * bouncer session (user, 2026-10-23).  Set on every login, never
-   * inherited from a previous one on the same connection. */
-  sasl_identity_set(sptr, account, acc_create, kc_id, id_live);
+   * inherited from a previous one on the same connection.
+   *
+   * A refresh (step 0 let it through: the client's own account) proves
+   * the login the client holds, and its record is that login's: the
+   * client's account name as the client has it (not the token's
+   * spelling), its timestamp unless this login brings one (X3's stamp on
+   * the relay path), its Keycloak id -- the token's only when the login
+   * had none (the transition; step 7 adopts it) -- and the id-live mark
+   * kept: a later token checked locally never clears a confirmation
+   * Keycloak gave for that id, and Keycloak confirming it now (a grant,
+   * introspection) sets it.  Nothing a refresh does downgrades the record
+   * (a known id to none, a known timestamp to 0). */
+  if (refresh) {
+    const char *have = cli_user(sptr)->kc_id[0] ? cli_user(sptr)->kc_id
+                                                : cli_saslkcid(sptr);
+    const char *id = have[0] ? have
+                     : ((kc_id && account_id_valid(kc_id)) ? kc_id : "");
+    int live = (cli_saslkcidlive(sptr) && id[0]
+                && 0 == strcmp(cli_saslkcid(sptr), id))
+               || (id_live && id[0] && kc_id && 0 == strcmp(kc_id, id));
+    char name[ACCOUNTLEN + 1];
+
+    ircd_strncpy(name, cli_user(sptr)->account, sizeof(name));
+    sasl_identity_set(sptr, name,
+                      acc_create ? acc_create : cli_user(sptr)->acc_create,
+                      id, live);
+  } else
+    sasl_identity_set(sptr, account, acc_create, kc_id, id_live);
   Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
          kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
@@ -1019,8 +1078,9 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
       auth_set_account_later(cli_auth(sptr), cli_saslaccount(sptr));
   }
 
-  /* 5. Pre-registration hidden host setup */
-  if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+  /* 5. Pre-registration hidden host setup (not on a refresh: the client's
+   * host is as it chose it -- a -x stays) */
+  if (!refresh && ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
        (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
       feature_bool(FEAT_SASL_AUTOHIDEHOST)) {
     SetHiddenHost(sptr);

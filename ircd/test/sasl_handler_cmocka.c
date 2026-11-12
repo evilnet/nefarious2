@@ -122,6 +122,7 @@ struct fake {
   char warn[160];             /**< the last WARN sent to it */
   char fail_context[64];      /**< that FAIL's context parameter */
   char saslfail[200];         /**< the reason of the last ERR_SASLFAIL */
+  char loggedin_as[32];       /**< the account the last 900 named */
 };
 
 /** What a login announces beyond the client itself: the aliases told, the
@@ -443,6 +444,8 @@ int send_reply(struct Client *to, int reply, ...)
     account = va_arg(vl, const char *);
     va_end(vl);
     tlog_add("900 %s %s!%s@%s %s", tname(to), nick, user, host, account);
+    if (f && !f->freed)
+      ircd_strncpy(f->loggedin_as, account, sizeof(f->loggedin_as));
   } else
     tlog_add("%03d %s", reply & ~SND_EXPLICIT, tname(to));
   tlog_label(label_take(to));
@@ -3014,7 +3017,7 @@ static void assert_refused(struct Client *c, const struct login_snap *was,
   assert_false(has_numeric(f, RPL_SASLSUCCESS));
   assert_non_null(strstr(f->saslfail, reason));
   assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
-  assert_string_equal(f->fail_context, was->account);
+  assert_string_equal(f->fail_context, "");    /* as with 907: no context */
   assert_null(cli_saslsession(c));
   assert_int_equal(cli_saslcookie(c), 0);
   assert_login_unchanged(c, was);
@@ -3043,6 +3046,9 @@ static void assert_refreshed(struct Client *c, const struct login_snap *was,
   assert_true(IsSASLComplete(c));
   assert_string_equal(cli_user(c)->account, was->account);
   assert_int_equal(cli_user(c)->acc_create, was->acc_create);
+  assert_string_equal(f->loggedin_as, was->account);   /* its own spelling */
+  assert_string_equal(cli_saslaccount(c), was->account);
+  assert_int_equal(IsHiddenHost(c) ? 1 : 0, was->hidden);
   assert_null(cli_saslsession(c));
   assert_int_equal(cli_saslcookie(c), 0);
   assert_int_equal(fx.alias_updates, fx_was->alias_updates);
@@ -3471,6 +3477,121 @@ static void reauth_ds_without_l_refused(void **state)
   assert_refused(c, &was, &fx_was, "logged in as xavier");
 }
 
+/** A refresh's login record is the login it refreshes, never downgraded
+ * by the token: the client's own spelling (in the 900 too), the id kept
+ * when the token has none, the timestamp kept unless the login brings one
+ * (X3's stamp), the id-live mark kept when the token was only checked
+ * locally and set when Keycloak confirms the same id now; an id the login
+ * lacked is taken from the token (the transition). */
+static void reauth_refresh_record(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  user_id("xavier", xid);
+
+  /* SASL login, id confirmed (live): a token in another letter case,
+   * checked locally, then one without a sub. */
+  c = new_logged_in(100, "xav", "xavier", xid, 1);
+  f = fake_of(c);
+  token_for("XAVIER", "xavier");
+  oauth_exchange(c, LOCAL);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_string_equal(f->loggedin_as, "xavier");
+  assert_string_equal(cli_saslaccount(c), "xavier");
+  assert_string_equal(cli_saslkcid(c), xid);
+  assert_int_equal(cli_saslkcidlive(c), 1);          /* not cleared */
+  assert_int_equal(cli_saslacccreate(c), 0);
+  f->n_numerics = 0;
+  token_for("xavier", NULL);
+  oauth_exchange(c, LOCAL);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_string_equal(cli_saslkcid(c), xid);         /* not downgraded */
+  assert_int_equal(cli_saslkcidlive(c), 1);
+  assert_string_equal(cli_user(c)->kc_id, xid);
+
+  /* A cached login (not live): Keycloak confirming the same id now sets
+   * the mark; X3's stamp on a relayed refresh is taken, its missing id
+   * is not a downgrade. */
+  c = new_logged_in(101, "xav", "xavier", xid, 1);
+  f = fake_of(c);
+  cli_saslkcidlive(c) = 0;
+  token_for("xavier", "xavier");
+  oauth_exchange(c, INTROSPECT);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_int_equal(cli_saslkcidlive(c), 1);
+  cli_saslcookie(c) = 4343;                         /* a relayed refresh */
+  SetSASLReauth(c);
+  assert_int_equal(sasl_complete_login(c, "xavier", 1600000000, NULL, 0), 0);
+  assert_int_equal(cli_saslacccreate(c), 1600000000);
+  assert_string_equal(cli_saslkcid(c), xid);
+  assert_int_equal(cli_saslkcidlive(c), 1);
+  assert_int_equal(cli_user(c)->acc_create, 0);      /* the login's own, as before */
+
+  /* A services login (X3's spelling and stamp, no id): a token in
+   * Keycloak's letter case refreshes it, keeps the name and the stamp,
+   * and adopts the token's id, confirmed by introspection. */
+  c = new_logged_in(102, "svc", "Xavier", "", 0);
+  f = fake_of(c);
+  token_for("xavier", "xavier");
+  oauth_exchange(c, INTROSPECT);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_string_equal(f->loggedin_as, "Xavier");
+  assert_string_equal(cli_user(c)->account, "Xavier");
+  assert_string_equal(cli_saslaccount(c), "Xavier");
+  assert_int_equal(cli_saslacccreate(c), 1700000000);
+  assert_string_equal(cli_saslkcid(c), xid);
+  assert_int_equal(cli_saslkcidlive(c), 1);
+  assert_string_equal(cli_user(c)->kc_id, xid);       /* adopted, as before */
+}
+
+/** Names the ircd's casemapping folds together but Keycloak does not
+ * (rfc1459: [ and {) are different accounts: refused whatever the ids
+ * say, and no id is adopted onto the login or its session. */
+static void reauth_casemapping_only_names_refused(void **state)
+{
+  char aid[ACCOUNT_ID_LEN + 1];
+  int with_id;
+
+  sasl_init_once();
+  user_id("a[b", aid);
+  for (with_id = 0; with_id < 2; with_id++) {
+    struct Client *c = new_logged_in(103 + with_id, "ab", "a[b",
+                                     with_id ? aid : "", with_id);
+    struct login_snap was;
+    struct effects fx_was;
+
+    snap(c, &was);
+    fx_was = fx;
+    /* the token's sub: a{b's own, or (with ids) the very same id */
+    token_for("a{b", with_id ? "a[b" : "a{b");
+    oauth_exchange(c, with_id ? LOCAL : INTROSPECT);
+    assert_refused(c, &was, &fx_was, "logged in as a[b");
+    assert_string_equal(cli_user(c)->kc_id, with_id ? aid : "");
+    assert_int_equal(fx.alias_syncs, fx_was.alias_syncs);
+  }
+}
+
+/** A refresh leaves the host as the client has it: a client that did -x
+ * keeps its real host (the login's hidden-host step is a first login's). */
+static void reauth_refresh_keeps_minus_x(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *c;
+
+  sasl_init_once();
+  bed_features = 1;                        /* host hiding style 1, autohide */
+  c = new_logged_in(105, "xav", "xavier", user_id("xavier", xid), 1);
+  ClearHiddenHost(c);                      /* MODE -x */
+  token_for("xavier", "xavier");
+  oauth_exchange(c, LOCAL);
+  assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+  assert_false(IsHiddenHost(c));
+  bed_features = 0;
+}
+
 /** Before registration a login is not applied yet: a client may log in
  * again with OAUTHBEARER, as another account, and registration takes the
  * last login (SASL 3.1; the REGISTER cases above pin the rest). */
@@ -3555,6 +3676,9 @@ int main(void)
     cmocka_unit_test_setup(reauth_timeout_keeps_login, setup),
     cmocka_unit_test_setup(reauth_notice_rates_apart, setup),
     cmocka_unit_test_setup(reauth_ds_without_l_refused, setup),
+    cmocka_unit_test_setup(reauth_refresh_record, setup),
+    cmocka_unit_test_setup(reauth_casemapping_only_names_refused, setup),
+    cmocka_unit_test_setup(reauth_refresh_keeps_minus_x, setup),
 #endif
   };
 

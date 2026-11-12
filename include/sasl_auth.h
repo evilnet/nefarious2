@@ -137,9 +137,11 @@ extern int sasl_logged_in(struct Client *cptr);
 /** The rule: a login of \a sptr as \a account (Keycloak id \a kc_id, NULL
  *  or invalid for none) when \a sptr is logged in (sasl_logged_in()) must
  *  be its own account -- the same name as the ircd compares account names
- *  and, when both sides carry a Keycloak id, the same id (its bouncer
- *  session's when it is in one).  Otherwise the client is told (FAIL
- *  AUTHENTICATE ALREADY_AUTHENTICATED with standard-replies, then 904), the
+ *  and equal but for ASCII letter case (names only the ircd's casemapping
+ *  folds together are different accounts) and, when both sides carry a
+ *  Keycloak id, the same id (its bouncer session's when it is in one).
+ *  Otherwise the client is told (FAIL AUTHENTICATE ALREADY_AUTHENTICATED,
+ *  no context, with standard-replies -- the fork's addition -- then 904), the
  *  refusal is logged (accounts only) and the opers told, and 1 is returned:
  *  the caller ends its exchange and applies nothing.  0: not refused.
  */
