@@ -1941,6 +1941,17 @@ too, in either order: until then the client can neither send multiline
 batches (its BATCH and batch tags are handled as for a client without
 draft/multiline) nor is sent them.
 
+CAP_draft_event_playback
+ * Type: boolean
+ * Default: FALSE
+
+Enables announcement of the 'draft/event-playback' client capability:
+history (CHATHISTORY, the bouncer replay) includes the stored events
+(JOIN, PART, QUIT, KICK, MODE, NICK, TOPIC) in its batches.  The
+capability depends on 'batch' and is a no-op until 'batch' is negotiated
+too, in either order: until then the client is sent the history a client
+without draft/event-playback gets.
+
 UPING_ENABLE
  * Type: boolean
  * Default: TRUE

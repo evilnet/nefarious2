@@ -626,7 +626,8 @@ static int fail_unknown_msgid(struct Client *sptr, const char *subcmd,
 }
 
 /** Check if message type should be sent to client.
- * Without draft/event-playback, only PRIVMSG and NOTICE are sent.
+ * Without draft/event-playback in use (EventPlaybackInUse: the capability
+ * and batch), only the message-like rows are sent.
  * @param[in] sptr Client to check.
  * @param[in] type Message type.
  * @return 1 if should send, 0 if should skip.
@@ -653,12 +654,19 @@ int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
   if (type == HISTORY_REDACT)
     return CapRecipientHas(sptr, CAP_DRAFT_REDACT);
 
-  /* Other events (JOIN, PART, QUIT, KICK, MODE, NICK) require event-playback.
-   * The CONNECTION's own caps decide (CapRecipientHas), like every tag
-   * emission does -- CapActive is the bouncer session's UNION, which let a
-   * sibling's event-playback deliver JOIN/PART rows to a connection that
-   * never negotiated it (audit 2026-09-06). */
-  return CapRecipientHas(sptr, CAP_DRAFT_EVENTPLAYBACK);
+  /* Other events (JOIN, PART, QUIT, KICK, MODE, NICK, TOPIC) require
+   * event-playback IN USE: the capability puts them "in its history
+   * batches", and it depends on batch, which "MUST be negotiated to use"
+   * it.  Without batch it is a no-op -- the rows would arrive unbatched,
+   * indistinguishable from live state changes -- so such a client gets
+   * what a client without event-playback gets.  The CONNECTION's own caps
+   * decide, like every tag emission does -- CapActive is the bouncer
+   * session's UNION, which let a sibling's event-playback deliver
+   * JOIN/PART rows to a connection that never negotiated it (audit
+   * 2026-09-06).  This one test also builds the walk's type mask
+   * (requester_type_mask: local pages, SEARCH, federation's CH Q, the
+   * bouncer replay), so paging and the end tag agree with the rows sent. */
+  return EventPlaybackInUse(sptr);
 }
 
 /** A stored TAGMSG whose client tags are ALL +typing (legacy rows from
