@@ -7,6 +7,7 @@
 
 #include <kc/kc_http.h>
 #include <kc/kc.h>
+#include <kc/kc_url.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +50,7 @@ struct kc_request_ctx {
     size_t response_buf_alloc;
     unsigned long start_time;
     struct curl_slist *owned_headers;  /* Headers owned by this request */
+    struct kc_location_capture location; /* The response's Location header */
 };
 
 /* --- Forward declarations --- */
@@ -61,6 +63,7 @@ static void timer_fired_cb(void *data);
 static void check_multi_info(void);
 static void process_pending_cleanup(void);
 static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata);
+static size_t header_callback(char *ptr, size_t size, size_t nmemb, void *userdata);
 static void request_ctx_free(struct kc_request_ctx *ctx);
 
 /* --- Timer handle --- */
@@ -222,6 +225,10 @@ int kc_http_request(const struct kc_http_request *req,
     /* Response buffer */
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(easy, CURLOPT_WRITEDATA, ctx);
+
+    /* Response headers: only Location is kept (header_callback) */
+    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, header_callback);
+    curl_easy_setopt(easy, CURLOPT_HEADERDATA, ctx);
 
     /* Store context for retrieval in check_multi_info */
     curl_easy_setopt(easy, CURLOPT_PRIVATE, ctx);
@@ -428,6 +435,7 @@ static void check_multi_info(void)
             ctx->response.status_code = status_code;
             ctx->response.body = ctx->response_buf;
             ctx->response.body_len = ctx->response_buf_len;
+            ctx->response.location = ctx->location.value;
 
             if (msg->data.result != CURLE_OK) {
                 ctx->response.status_code = 0;
@@ -525,6 +533,21 @@ static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdat
 }
 
 /*
+ * curl header callback: libcurl hands over every header line, status lines,
+ * the empty line and trailers included; the final response's Location is
+ * kept (kc_location_capture_line(), kc_url.c: one per block, never from a
+ * trailer).
+ */
+static size_t header_callback(char *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    struct kc_request_ctx *ctx = (struct kc_request_ctx *)userdata;
+    size_t total = size * nmemb;
+
+    kc_location_capture_line(&ctx->location, ptr, total);
+    return total;
+}
+
+/*
  * Free a request context and its curl handle.
  */
 static void request_ctx_free(struct kc_request_ctx *ctx)
@@ -535,6 +558,7 @@ static void request_ctx_free(struct kc_request_ctx *ctx)
         curl_easy_cleanup(ctx->easy);
     if (ctx->owned_headers)
         curl_slist_free_all(ctx->owned_headers);
+    kc_location_capture_free(&ctx->location);
     free(ctx->response_buf);
     free(ctx);
 }

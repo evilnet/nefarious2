@@ -1950,7 +1950,9 @@ already-verified account and logs the client in immediately, exactly as a
 SASL login of that account would ("as if it used SASL", in the
 specification's words): REGISTER SUCCESS, then RPL_LOGGEDIN (900), the
 hidden host under SASL_AUTOHIDEHOST, and the account announced to the
-network -- only RPL_SASLSUCCESS (903) is not sent.
+network with its Keycloak id (from Keycloak's answer to the create, or one
+lookup when that answer names none; without one if the lookup fails) --
+only RPL_SASLSUCCESS (903) is not sent.
 
 Both SASL PLAIN and SASL SCRAM-SHA-256 gate on the same signal: a
 pending VERIFY_EMAIL required action on the Keycloak account (PLAIN via

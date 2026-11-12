@@ -43,6 +43,7 @@
  */
 #include "config.h"
 
+#include "account_id.h"
 #include "capab.h"
 #include "client.h"
 #include "hash.h"
@@ -68,6 +69,7 @@
 #ifdef USE_LIBKC
 #include <kc/kc_cred_derive.h>
 #include <kc/kc_keycloak.h>
+#include <kc/kc_url.h>
 #endif
 
 #include <stdlib.h>
@@ -146,7 +148,8 @@ extern struct Client* LocalClientArray[];
 struct reg_ctx {
   int fd;                          /**< Connection fd at REGISTER time. */
   unsigned int cookie;             /**< cli_regcookie() at REGISTER time. */
-  int stage;                       /**< 0=search, 1=create, 2=verify-email. */
+  int stage;                       /**< 0=search, 1=create, 2=verify-email,
+                                        3=the new user's id. */
   int verify_email;                /**< Policy snapshot at REGISTER time. */
   char account[ACCOUNTLEN + 1];    /**< Account being created. */
   char email[201];                 /**< E-mail, or "" for none. */
@@ -218,17 +221,30 @@ static void reg_ctx_free(struct reg_ctx *ctx)
  * the account's metadata and modes, account-notify, the AC, the bouncer
  * aliases -- with REGISTER SUCCESS where a SASL login sends 903.
  *
+ * The login carries the account's Keycloak id, as Keycloak gave it in this
+ * registration (the create's answer, or the lookup after it), confirmed as
+ * a grant's is; without one -- the lookup failed, or the id is not a UUID,
+ * as for a grant whose ID token names none -- it goes ahead without, and
+ * the account is no less created.  No timestamp, as for every local
+ * Keycloak login.
+ *
  * A registered client that logged in meanwhile (a SASL login finished while
  * the REGISTER was in flight) keeps that login, and is not told anything.
  *
  * @param[in] acptr Client to log in.
  * @param[in] account Account name that was created.
+ * @param[in] id The new user's Keycloak id (a UUID), or NULL.
  */
-static void register_complete_success(struct Client *acptr, const char *account)
+static void register_complete_success(struct Client *acptr, const char *account,
+                                      const char *id)
 {
+  char kcid[ACCOUNT_ID_LEN + 1] = "";
+
   if (IsAccount(acptr))
     return;
-  sasl_register_login(acptr, account, NULL);
+  if (id && !account_id_from_uuid(id, kcid))
+    kcid[0] = '\0';                     /* the callers pass UUIDs only */
+  sasl_register_login(acptr, account, kcid[0] ? kcid : NULL);
 }
 
 /** Stage 2 result: the verification mail was (or was not) triggered.
@@ -259,6 +275,16 @@ static void reg_email_cb(int result, void *data)
   reg_ctx_free(ctx);
 }
 
+/** A Keycloak user id from an answer, if it is a UUID (8-4-4-4-12 hex):
+ * the only form put into a request's URL path, logged, or carried by a
+ * login.  Anything else from the wire is no id.
+ * @param[in] id The id as Keycloak's answer gives it, or NULL.
+ * @return \a id, or NULL. */
+static const char *reg_uuid_or_null(const char *id)
+{
+  return (id && kc_url_is_uuid(id, strlen(id))) ? id : NULL;
+}
+
 /** Stage 2 lookup: fetch the new account's Keycloak id for send-verify-email.
  * @param[in] result KC_SUCCESS or a kc_error code.
  * @param[in] user The user record (borrowed), or NULL.
@@ -269,7 +295,11 @@ static void reg_verify_lookup_cb(int result, const struct kc_user *user,
 {
   struct reg_ctx *ctx = (struct reg_ctx *)data;
 
-  if (result != KC_SUCCESS || !user || !user->id) {
+  if (result != KC_SUCCESS || !user || !reg_uuid_or_null(user->id)) {
+    if (result == KC_SUCCESS && user)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "REGISTER: the lookup of %s answered an id that is not a "
+                "UUID; no verification mail is asked for", ctx->account);
     reg_email_cb(KC_ERROR, ctx);        /* non-fatal; frees ctx */
     return;
   }
@@ -278,11 +308,47 @@ static void reg_verify_lookup_cb(int result, const struct kc_user *user,
     reg_email_cb(KC_ERROR, ctx);        /* non-fatal; frees ctx */
 }
 
-/** Stage 1 result: the account create either landed or did not.
- * @param[in] result KC_SUCCESS, KC_CONFLICT, or another kc_error code.
+/** Stage 3 result: the new account's Keycloak id, asked for because the
+ * create's answer named none.  The account exists whatever this says: a
+ * lookup that fails logs the client in without an id, and never turns the
+ * registration into a failure.
+ * @param[in] result KC_SUCCESS or a kc_error code.
+ * @param[in] user The user record (borrowed), or NULL.
  * @param[in] data The struct reg_ctx.
  */
-static void reg_create_cb(int result, void *data)
+static void reg_id_lookup_cb(int result, const struct kc_user *user,
+                             void *data)
+{
+  struct reg_ctx *ctx = (struct reg_ctx *)data;
+  struct Client *acptr = reg_ctx_client(ctx);
+  const char *id = NULL;
+
+  if (result != KC_SUCCESS || !user)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "REGISTER: %s was created, but looking up its Keycloak id "
+              "failed (result %d); logged in without one", ctx->account,
+              result);
+  else if (!user->username || 0 != ircd_strcmp(user->username, ctx->account))
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "REGISTER: %s was created, but the lookup for its Keycloak id "
+              "answered another user's record; logged in without one",
+              ctx->account);
+  else if (!(id = reg_uuid_or_null(user->id)))
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "REGISTER: %s was created, but the id the lookup answered is "
+              "not a UUID; logged in without one", ctx->account);
+
+  if (acptr)
+    register_complete_success(acptr, ctx->account, id);
+  reg_ctx_free(ctx);
+}
+
+/** Stage 1 result: the account create either landed or did not.
+ * @param[in] result KC_SUCCESS, KC_CONFLICT, or another kc_error code.
+ * @param[in] id The new user's Keycloak id as the answer names it, or NULL.
+ * @param[in] data The struct reg_ctx.
+ */
+static void reg_create_cb(int result, const char *id, void *data)
 {
   struct reg_ctx *ctx = (struct reg_ctx *)data;
   struct Client *acptr = reg_ctx_client(ctx);
@@ -300,17 +366,42 @@ static void reg_create_cb(int result, void *data)
     return;
   }
 
+  id = reg_uuid_or_null(id);           /* libkc gives UUIDs only; still */
+
   if (ctx->verify_email) {
-    /* send-verify-email is addressed by user id, which the create response
-     * does not give us -- look the account up by its (exact) username. */
+    /* send-verify-email is addressed by user id: the one the create's
+     * answer names, else the one a lookup by the (exact) username finds.
+     * Sent whether or not the client is still here: the mail is the
+     * account's. */
     ctx->stage = 2;
-    if (kc_user_get(ctx->account, reg_verify_lookup_cb, ctx) != 0)
+    if (id) {
+      if (kc_user_send_verify_email(id, reg_email_cb, ctx) != 0)
+        reg_email_cb(KC_ERROR, ctx);    /* non-fatal; frees ctx */
+    } else if (kc_user_get(ctx->account, reg_verify_lookup_cb, ctx) != 0)
       reg_email_cb(KC_ERROR, ctx);      /* non-fatal; frees ctx */
     return;
   }
 
-  if (acptr)
-    register_complete_success(acptr, ctx->account);
+  if (!acptr) {                         /* gone: no one to log in */
+    reg_ctx_free(ctx);
+    return;
+  }
+
+  if (!id) {
+    /* The answer named no user (Keycloak names it in the 201's Location;
+     * something on the way dropped it): ask once, by the exact name.
+     * REGISTER SUCCESS waits for that answer, bounded by libkc's request
+     * timeout, so that the login -- the 900, the N or AC its peers get --
+     * is made once and whole, never announced and then changed. */
+    ctx->stage = 3;
+    if (kc_user_get(ctx->account, reg_id_lookup_cb, ctx) == 0)
+      return;
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "REGISTER: %s was created, but its Keycloak id could not be "
+              "looked up; logged in without one", ctx->account);
+  }
+
+  register_complete_success(acptr, ctx->account, id);
   reg_ctx_free(ctx);
 }
 

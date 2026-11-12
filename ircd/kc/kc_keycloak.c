@@ -551,6 +551,7 @@ struct kc_op_ctx {
         kc_token_cb token;
         kc_groups_cb groups;
         kc_introspect_cb introspect;
+        kc_create_cb create;
     } cb;
     void *cb_data;
 
@@ -702,19 +703,33 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
 
     case OP_CREATE_USER: {
         if (!resp || resp->status_code == 0) {
-            ctx->cb.result(KC_ERROR, ctx->cb_data);
+            ctx->cb.create(KC_ERROR, NULL, ctx->cb_data);
             break;
         }
         if (resp->status_code == 201) {
-            /* Extract user ID from Location header if available */
-            /* TODO: capture Location header from response */
-            ctx->cb.result(KC_SUCCESS, ctx->cb_data);
+            /* The new user's id: the 201's Location header names it, at
+             * the users URL the create went to (ctx->url), as a UUID --
+             * anything else is no id (kc_url_location_user_id()).  An
+             * answer without one is still a create. */
+            char id[40];
+            if (kc_url_location_user_id(resp->location, ctx->url, id, sizeof(id))) {
+                if (ctx->username)
+                    userid_cache_put(ctx->username, id);
+                ctx->cb.create(KC_SUCCESS, id, ctx->cb_data);
+            } else {
+                char shown[128];
+                kc_url_log_safe(resp->location, shown, sizeof(shown));
+                kc_log_warning("kc_keycloak: user created, but the answer's "
+                               "Location (%s) names no user at %s",
+                               shown, ctx->url ? ctx->url : "?");
+                ctx->cb.create(KC_SUCCESS, NULL, ctx->cb_data);
+            }
         } else if (resp->status_code == 409) {
             /* username/email already exists — kc_user_create_full and its
              * thin-wrapper kc_user_create share this dispatch arm. */
-            ctx->cb.result(KC_CONFLICT, ctx->cb_data);
+            ctx->cb.create(KC_CONFLICT, NULL, ctx->cb_data);
         } else {
-            ctx->cb.result(KC_ERROR, ctx->cb_data);
+            ctx->cb.create(KC_ERROR, NULL, ctx->cb_data);
         }
         break;
     }
@@ -902,6 +917,9 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
         case OP_GET_USER:
             ctx->cb.user(KC_TOKEN_ERROR, NULL, ctx->cb_data);
             break;
+        case OP_CREATE_USER:
+            ctx->cb.create(KC_TOKEN_ERROR, NULL, ctx->cb_data);
+            break;
         case OP_SEARCH_USERS:
             ctx->cb.users(KC_TOKEN_ERROR, NULL, 0, ctx->cb_data);
             break;
@@ -938,6 +956,9 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
         switch (ctx->op) {
         case OP_GET_USER:
             ctx->cb.user(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        case OP_CREATE_USER:
+            ctx->cb.create(KC_ERROR, NULL, ctx->cb_data);
             break;
         case OP_SEARCH_USERS:
             ctx->cb.users(KC_ERROR, NULL, 0, ctx->cb_data);
@@ -1129,7 +1150,7 @@ int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data)
 }
 
 int kc_user_create_full(const struct kc_user_create_req *req,
-                        kc_result_cb cb, void *data)
+                        kc_create_cb cb, void *data)
 {
     json_t *user_repr;
     size_t i;
@@ -1204,7 +1225,7 @@ int kc_user_create_full(const struct kc_user_create_req *req,
     }
 
     ctx->op = OP_CREATE_USER;
-    ctx->cb.result = cb;
+    ctx->cb.create = cb;
     ctx->cb_data = data;
     ctx->url = kc_url_users(get_realm());
     ctx->method = "POST";
@@ -1217,7 +1238,7 @@ int kc_user_create_full(const struct kc_user_create_req *req,
 
 int kc_user_create(const char *username, const char *email,
                    const char *cred_data, const char *secret_data,
-                   kc_result_cb cb, void *data)
+                   kc_create_cb cb, void *data)
 {
     struct kc_user_create_req req;
 

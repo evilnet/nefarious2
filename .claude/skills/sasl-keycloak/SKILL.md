@@ -25,6 +25,11 @@ The local handlers all live in `sasl_auth.c` and are dispatched by `sasl_start()
 - **SCRAM-SHA-256** — fully implemented in SASL_LOCAL (`sasl_scram_*`, HMAC-SHA256 ClientProof verification against Keycloak-stored creds, read with `kc_user_get`). Off by default.
 - **ECDSA-NIST256P-CHALLENGE** — fully implemented in SASL_LOCAL (`sasl_handle_ecdsa`, 32-byte challenge + `EVP_DigestVerify`; public key read with `kc_user_get`). Off by default.
 
+## REGISTER (draft/account-registration) is a login
+
+- A successful REGISTER (e-mail verification off) logs the client in through the SASL login's own completion: `sasl_register_login()` -> `sasl_login_apply(..., LOGIN_BY_REGISTER)`. Same identity, 900, hidden host, metadata/modes, account-notify, AC, bouncer aliases; REGISTER SUCCESS replaces 903 and comes before the 900 (the spec's example). It takes and releases no registration hold and leaves an in-flight SASL exchange alone (REGISTER and SASL may overlap); the registration check goes to the event loop (`auth_set_account_later()`). Do not add steps to one path only.
+- The new account's Keycloak id comes from the create's 201 `Location` header (`kc_http` keeps the final block's single Location, never a trailer's, in `kc_http_response.location`; `kc_url_location_user_id()` accepts only `<users URL the create went to>/<UUID>`; `kc_user_create_full()`'s `kc_create_cb` hands it over). No Location: one `kc_user_get` by name, REGISTER SUCCESS after it; a failed lookup, another user's record or a non-UUID id logs in without an id. An id from Keycloak is used (URL path, log, login) only once it is a UUID; raw wire values are logged through `kc_url_log_safe()`. The id counts as Keycloak-confirmed (`id_live`). Verification on: no login, the mail goes to that id.
+
 ## Caches & Cross-Server Coherence
 
 - Auth caches: SipHash-2-4 negative/positive; webhook handler with deauth via `AC U`.

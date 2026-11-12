@@ -130,6 +130,10 @@ typedef void (*kc_users_cb)(int result, const struct kc_user *users, int count, 
 typedef void (*kc_result_cb)(int result, void *data);
 typedef void (*kc_groups_cb)(int result, const struct kc_group *groups, int count, void *data);
 typedef void (*kc_introspect_cb)(int result, const struct kc_token_info *info, void *data);
+/* A user create's answer.  On KC_SUCCESS, id is the new user's Keycloak id
+ * as the answer's Location header names it (borrowed, valid during the
+ * call), or NULL when the answer named none; NULL on any other result. */
+typedef void (*kc_create_cb)(int result, const char *id, void *data);
 
 /*
  * Initialize Keycloak subsystem. Called after kc_init().
@@ -186,7 +190,7 @@ int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data);
  * call kc_user_create_full() directly (it still requires credentials). */
 int kc_user_create(const char *username, const char *email,
                    const char *cred_data, const char *secret_data,
-                   kc_result_cb cb, void *data);
+                   kc_create_cb cb, void *data);
 
 /* Full user-create request: pre-hashed credential (Task 1
  * kc_pbkdf2_cred_build output) plus optional emailVerified/requiredActions
@@ -207,9 +211,11 @@ struct kc_user_create_req {
  * req->cred_data, and req->secret_data are all REQUIRED (see the struct's
  * field comments) — NULL in any of them (or a NULL req/cb) returns -1
  * without making a request; there is no credential-less create path.
- * Result callback receives KC_CONFLICT (not KC_USER_EXISTS) on HTTP 409. */
+ * The callback receives KC_CONFLICT (not KC_USER_EXISTS) on HTTP 409, and
+ * on success the new user's id from the 201's Location header (no extra
+ * request), or NULL if the answer named none. */
 int kc_user_create_full(const struct kc_user_create_req *req,
-                        kc_result_cb cb, void *data);
+                        kc_create_cb cb, void *data);
 
 /* Delete user by ID */
 int kc_user_delete(const char *id, kc_result_cb cb, void *data);

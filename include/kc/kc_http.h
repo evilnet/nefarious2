@@ -36,6 +36,9 @@ struct kc_http_response {
     size_t body_len;              /* Length of body */
     json_t *json;                 /* Parsed JSON if Content-Type is application/json, else NULL */
     const char *error;            /* Error message if status_code == 0, else NULL */
+    const char *location;         /* The final response's one Location header (a
+                                   * create's 201 names the new resource), or NULL;
+                                   * raw from the wire: validate before use */
 };
 
 /* Callback invoked when an async HTTP request completes */
