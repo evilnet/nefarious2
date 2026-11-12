@@ -74,6 +74,7 @@ CMOCKA_TESTPROGS = \
 	rename_proto_cmocka \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
+	auth_recheck_cmocka \
 	webhook_eventlog_cmocka \
 	crdt_hlc_cmocka \
 	db_api_fake_cmocka \
@@ -151,6 +152,7 @@ DEP_SRC = \
 	rename_proto_cmocka.c \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
+	auth_recheck_cmocka.c \
 	webhook_subject_cmocka.c \
 	kc_webhook_sig_cmocka.c \
 	ircd_events_cmocka.c \
@@ -480,6 +482,24 @@ SASL_HANDLER_CMOCKA_OBJS = sasl_handler_cmocka.o ../sasl_auth.o \
 	../account_id.o ../webpush_keyring.o
 sasl_handler_cmocka: $(SASL_HANDLER_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(SASL_HANDLER_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# auth_recheck tests - the registration checks a Keycloak answer owes run
+# from the event loop's timer pass, once, for requests still there.  The
+# test includes the real s_auth.c, compiled with -ffunction-sections and
+# linked with --gc-sections (the program keeps what the queue's code
+# reaches; that world is stubbed in the test), with the real event core
+# and this build's engines (@ENGINE_C@), so the timer pass and the engine
+# loop's order are the server's own.  -Wno-address: s_auth.c tests array
+# members against NULL, which -Wall reports (the ircd's own build has no
+# -Wall).  timer_add is wrapped to count the queue timer's arms.
+AUTH_RECHECK_ENGINE_OBJS = $(patsubst %.c,../%.o,@ENGINE_C@)
+AUTH_RECHECK_CMOCKA_OBJS = auth_recheck_cmocka.o ../ircd_events.o \
+	$(AUTH_RECHECK_ENGINE_OBJS) ../ircd_alloc.o ../ircd_string.o
+auth_recheck_cmocka.o: ${srcdir}/auth_recheck_cmocka.c ../s_auth.c
+	${CC} ${CFLAGS} -Wno-address -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/auth_recheck_cmocka.c
+
+auth_recheck_cmocka: $(AUTH_RECHECK_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=timer_add $(AUTH_RECHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webhook_subject tests - the pure webhook subject decision over real
 # Keycloak admin-event shapes (fixtures/webhook); links no ircd objects
