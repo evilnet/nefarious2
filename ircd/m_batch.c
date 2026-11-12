@@ -64,6 +64,7 @@
 #include "history.h"
 #include "history_trim_codec.h"
 #include "ml_content.h"
+#include "ml_route.h"
 #include "paste_listener.h"
 #include "webpush.h"
 #include "webpush_store.h"
@@ -970,6 +971,104 @@ ml_send_line(struct Client *from, struct Client *server, char flag,
   }
 }
 
+/** Send a multiline DM to a remote user, from its originating server, as
+ * the single-line fallback: the batch's lines with text, at most
+ * MULTILINE_LEGACY_MAX_LINES of them, then -- when lines with text are
+ * left -- one truncation NOTICE saying how many, with the paste URL.
+ *
+ * Used whenever the way to the target's server does not carry ML
+ * (ml_route_carries_multiline): a legacy server next to us, or further
+ * along behind a server that would take the batch and then have nowhere
+ * to pass it.  The lines are ordinary PRIVMSG/NOTICE lines routed toward
+ * the target like any single-line DM, so every server on the way, of any
+ * version, forwards them.  Sent the way relay_private_message sends a
+ * DM: the client tags and, on the first line, the batch's msgid and time
+ * ride in the S2S tag region toward an IRCv3-aware next hop; a legacy
+ * next hop gets the bare line (sendcmdto_one_tags_with_client).  The
+ * other lines and the NOTICE take their own msgids.
+ *
+ * - NOTICE stays NOTICE: \a is_notice picks the command of every line.
+ * - Blank lines are not sent (the fallback skips them, as the client
+ *   fallback does) and so are not counted either: neither in the preview
+ *   budget nor in "[N more lines]", which counts the lines with text that
+ *   were not sent.  No lines left, no NOTICE.
+ * - An alias sender is sent as its primary (bouncer invariant #10: a
+ *   server that does not know aliases drops a line from one), except
+ *   toward the primary's own direction, where the primary's numeric would
+ *   come back to the server it lives on (relay_private_message's rule).
+ *
+ * The caller disarms the client event time after its S2S sends
+ * (sendcmdto_set_s2s_tags also arms the client @time).
+ *
+ * @param[in] sptr Sender (local).
+ * @param[in] acptr Target (remote user).
+ * @param[in] messages The batch's lines (flag byte + text).
+ * @param[in] client_tags The batch's client-only tags, or NULL.
+ * @param[in] is_notice Non-zero for a NOTICE batch.
+ * @param[in] time_ms The batch's event time (epoch ms).
+ * @param[in] msgid The batch's msgid.
+ * @param[in] paste_url The batch's paste URL, or NULL.
+ */
+static void
+ml_send_dm_fallback(struct Client *sptr, struct Client *acptr,
+                    struct SLink *messages, const char *client_tags,
+                    int is_notice, uint64_t time_ms, const char *msgid,
+                    const char *paste_url)
+{
+  struct Client *from = sptr;
+  struct SLink *lp;
+  int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+  int with_text = 0;
+  int sent = 0;
+
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    from = cli_alias_primary(sptr);
+    if (!MyUser(from) && cli_from(from) == cli_from(acptr))
+      from = sptr;
+  }
+
+  for (lp = messages; lp; lp = lp->next)
+    if (lp->value.cp[1] != '\0')
+      with_text++;
+
+  for (lp = messages; lp && sent < max_preview; lp = lp->next) {
+    const char *text = lp->value.cp + 1;
+
+    if (*text == '\0')
+      continue;
+    if (sent == 0)
+      sendcmdto_set_s2s_tags(time_ms, msgid);
+    if (is_notice)
+      sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr,
+                                     sent == 0 ? msgid : NULL, client_tags,
+                                     "%C :%s", acptr, text);
+    else
+      sendcmdto_one_tags_with_client(from, CMD_PRIVATE, acptr,
+                                     sent == 0 ? msgid : NULL, client_tags,
+                                     "%C :%s", acptr, text);
+    sent++;
+  }
+
+  if (with_text > sent) {
+    /* Truncation NOTICE: an event of its own (fresh msgid, its mint
+     * time), sourced from the sender so it lands in the conversation. */
+    char trunc_msgid[S2S_MSGID_BUFSIZE];
+
+    generate_msgid(trunc_msgid, sizeof(trunc_msgid));
+    sendcmdto_set_s2s_tags(history_event_time_ms(NULL), trunc_msgid);
+    if (paste_url)
+      /* URL outside the bracket so linkifiers don't grab the ']'. */
+      sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr, trunc_msgid,
+                                     NULL, "%C :[%d more lines] %s",
+                                     acptr, with_text - sent, paste_url);
+    else
+      sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr, trunc_msgid,
+                                     NULL,
+                                     "%C :[%d more lines - connect to a multiline-capable server to view]",
+                                     acptr, with_text - sent);
+  }
+}
+
 /** The number of direct server links (cli_serv(&me)->down): the most
  * distinct links ml_channel_links() can return. */
 static int
@@ -1562,14 +1661,21 @@ process_multiline_batch(struct Client *sptr)
       }
     }
 
-    /* Capability-aware S2S relay for private messages to remote users */
+    /* A remote target: the batch goes as ML lines only when the whole
+     * way to the target's server carries ML (ml_route_carries_multiline).
+     * Every server forwards ML only to a link that announced it, so a
+     * batch handed to a multiline next hop with a legacy hop -- or a fork
+     * server with its cap off -- further on stopped there, and the target
+     * got nothing.  Otherwise this server sends the fallback itself, as
+     * single-line DMs every server forwards (ml_send_dm_fallback): the
+     * same code for a legacy server next to us and for one further on. */
     if (!MyConnect(acptr)) {
-      struct Client *target_server = cli_from(acptr);
-      char s2s_batch_id[16];
-      ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
-                    cli_yxx(sptr), (unsigned long)CurrentTime);
+      if (ml_route_carries_multiline(cli_user(acptr)->server)) {
+        struct Client *target_server = cli_from(acptr);
+        char s2s_batch_id[16];
 
-      if (IsServer(target_server) && IsMultiline(target_server)) {
+        ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
+                      cli_yxx(sptr), (unsigned long)CurrentTime);
         /* Send ML tokens to capable server.  Every line carries the
          * batch's msgid (unified delivery) and, toward a tag-carrying
          * link, its framing in the tag region (ml_send_line). */
@@ -1589,47 +1695,10 @@ process_multiline_batch(struct Client *sptr)
                      cli_name(acptr), NULL, "",
                      batch_time_ms, batch_base_msgid);
       } else {
-        /* Send fallback PRIVMSGs to legacy server.  Wire is BOUNDED
-         * by max_preview + 1 NOTICE, so this does not suppress the
-         * discount halving — anti-flood semantics stay intact even
-         * though the legacy peer's local users see truncated content. */
-        int sent = 0;
-        int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-        int total_lines = con_ml_msg_count(con);
-        int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-
-        for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
-          char *text = lp->value.cp + 1;
-          if (*text == '\0')
-            continue;
-          if (sent == 0)
-            sendcmdto_set_s2s_tags(batch_time_ms, batch_base_msgid);
-          if (is_notice)
-            sendcmdto_one(sptr, CMD_NOTICE, target_server, "%C :%s", acptr, text);
-          else
-            sendcmdto_one(sptr, CMD_PRIVATE, target_server, "%C :%s", acptr, text);
-          sent++;
-        }
-
-        /* DM truncation NOTICE: source = sptr so the notice routes to
-         * the conversation window in the recipient's client, not status.
-         * Fresh msgid via the tag-aware send so the notice carries
-         * msgid/time tags like the preview lines do. */
-        if (total_lines > max_preview) {
-          int remaining = total_lines - sent;
-          char trunc_msgid[S2S_MSGID_BUFSIZE];
-          generate_msgid(trunc_msgid, sizeof(trunc_msgid));
-          if (batch_paste_url) {
-            /* URL outside the bracket so linkifiers don't grab the ']'. */
-            sendcmdto_one_tags_ext(sptr, CMD_NOTICE, target_server, trunc_msgid,
-                "%C :[%d more lines] %s",
-                acptr, remaining, batch_paste_url);
-          } else {
-            sendcmdto_one_tags_ext(sptr, CMD_NOTICE, target_server, trunc_msgid,
-                "%C :[%d more lines - connect to a multiline-capable server to view]",
-                acptr, remaining);
-          }
-        }
+        ml_send_dm_fallback(sptr, acptr, con_ml_messages(con),
+                            con_ml_client_tags(con), is_notice,
+                            batch_time_ms, batch_base_msgid,
+                            batch_paste_url);
       }
     }
   }
@@ -1741,6 +1810,13 @@ process_multiline_batch(struct Client *sptr)
     if (links)
       MyFree(links);
   }
+
+  /* The S2S sends above stamp their lines with the batch's msgid and
+   * time through sendcmdto_set_s2s_tags, which also arms the client-facing
+   * event time; no send here consumes it.  Left armed, it would be the
+   * @time of the next client line anything sends with only a client msgid
+   * armed -- an AWAY change, minutes later.  Disarm it with the sends. */
+  sendcmdto_set_client_event(NULL, 0);
 
   /* Notify sender about fallback if they support standard-replies */
   if (fallback_count > 0 && feature_bool(FEAT_MULTILINE_FALLBACK_NOTIFY)
