@@ -2576,7 +2576,10 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         send_mb_alias = mb_alias;
       }
 
-      if (send_mb_alias && lp->value.cptr == primary_dir)
+      /* Never an alias numeric toward a legacy link (see
+       * sendcmdto_serv_butone()). */
+      if (send_mb_alias && lp->value.cptr == primary_dir
+          && IsIRCv3Aware(lp->value.cptr))
         send_buffer(lp->value.cptr, send_mb_alias, 0);
       else
         send_buffer(lp->value.cptr, send_mb, 0);
@@ -3035,7 +3038,11 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
       continue;
     if (IsBurstGated(lp->value.cptr))
       continue;
-    if (mb_alias && lp->value.cptr == primary_dir)
+    /* Every link here is legacy: it never learned the alias (BX C is
+     * fork-only) and KILLs an unknown numeric on N.  The primary's own
+     * numeric only. */
+    if (mb_alias && lp->value.cptr == primary_dir
+        && IsIRCv3Aware(lp->value.cptr))
       send_buffer(lp->value.cptr, mb_alias, 0);
     else
       send_buffer(lp->value.cptr, mb, 0);
@@ -3774,7 +3781,8 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
       continue;
     cli_sentalong(member->user) = sentalong_marker;
-    if (serv_mb_alias && cli_from(member->user) == primary_dir)
+    if (serv_mb_alias && cli_from(member->user) == primary_dir
+        && IsIRCv3Aware(cli_from(member->user)))
       send_buffer(member->user, serv_mb_alias, 0);
     else
       send_buffer(member->user, serv_mb, 0);
@@ -4143,7 +4151,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       struct Client *link = cli_from(member->user);
       if (serv_mb_legacy && !IsIRCv3Aware(link))
         send_buffer(member->user, serv_mb_legacy, 0);
-      else if (serv_mb_alias && link == primary_dir)
+      else if (serv_mb_alias && link == primary_dir && IsIRCv3Aware(link))
         send_buffer(member->user, serv_mb_alias, 0);
       else
         send_buffer(member->user, serv_mb, 0);
@@ -4433,7 +4441,9 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
       int is_v3 = IsIRCv3Aware(peer_link);
       if (serv_mb_legacy && !is_v3) {
         send_buffer(member->user, serv_mb_legacy, 0);
-      } else if (peer_link == primary_dir) {
+      } else if (peer_link == primary_dir && is_v3) {
+        /* (A legacy link here -- tags off, so no legacy buffer was built
+         * -- takes the primary's numeric below, never the alias's.) */
         if (is_v3 && serv_mb_alias_v3)
           send_buffer(member->user, serv_mb_alias_v3, 0);
         else if (serv_mb_alias)
