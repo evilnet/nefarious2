@@ -189,35 +189,29 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
 
 void fwd_label_open_batch(struct Client *acptr, struct ForwardedLabel *fl)
 {
-  char tagbuf[256];
-  int pos = 0;
+  char timebuf[48];
 
   if (!acptr || !fl)
     return;
 
-  /* Build @label=xxx tag, optionally with ;time=xxx */
-  tagbuf[0] = '@';
-  pos = 1;
-  pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", fl->fl_label);
-
+  /* @label=xxx, optionally with time=xxx.  A forwarded command's batch is
+   * its own (the answer comes on later turns), never nested: written by
+   * the one BATCH line writer, send_batch_marker(). */
+  timebuf[0] = '\0';
   if (feature_bool(FEAT_CAP_server_time) && CapActive(acptr, CAP_SERVERTIME)) {
     struct timeval tv;
     struct tm tm;
-    if (pos < (int)sizeof(tagbuf) - 1)
-      tagbuf[pos++] = ';';
     gettimeofday(&tv, NULL);
     gmtime_r(&tv.tv_sec, &tm);
-    pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
-                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    (long)(tv.tv_usec / 1000));
+    snprintf(timebuf, sizeof(timebuf),
+             "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             (long)(tv.tv_usec / 1000));
   }
 
-  tagbuf[pos] = '\0';
-
-  sendrawto_one(acptr, "%s :%s " MSG_BATCH_CMD " +%s labeled-response",
-                tagbuf, cli_name(&me), fl->fl_batch_id);
+  send_batch_marker(acptr, '+', fl->fl_batch_id, NULL, "labeled-response",
+                    fl->fl_label, timebuf);
 
   fl->fl_state = FWD_LABEL_ACTIVE;
 }
@@ -227,10 +221,8 @@ void fwd_label_close_batch(struct Client *acptr, struct ForwardedLabel *fl)
   if (!acptr || !fl)
     return;
 
-  if (fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING) {
-    sendrawto_one(acptr, ":%s " MSG_BATCH_CMD " -%s",
-                  cli_name(&me), fl->fl_batch_id);
-  }
+  if (fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING)
+    send_batch_marker(acptr, '-', fl->fl_batch_id, NULL, NULL, NULL, NULL);
 
   memset(fl, 0, sizeof(*fl));
 }

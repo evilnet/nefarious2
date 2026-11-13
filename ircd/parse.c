@@ -1828,9 +1828,12 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
 
   {
     int result = (*handler) (cptr, from, i, para);
-    /* IRCv3 labeled-response: close any batch opened by labeled_batch_start */
-    if (result != CPTR_KILLED && cli_labeled_batch(cptr))
-      labeled_batch_end(cptr);
+    /* End every batch the line's answer left open, innermost first --
+     * the labeled-response batch labeled_batch_start() opened, and any
+     * batch nested in it (send.c: the nesting model) -- so none outlives
+     * its line; an asynchronous owner (LIST) has detached its own. */
+    if (result != CPTR_KILLED)
+      batch_end_line(cptr);
     /* IRCv3 labeled-response: send ACK if command produced no response */
     if (result != CPTR_KILLED)
       send_labeled_ack(cptr);

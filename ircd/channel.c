@@ -6006,7 +6006,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
        * skip it in the channel send and send it a separate tagged message.
        * The channel send functions use format_message_tags_ex() which only
        * supports network batches, not per-client labeled-response batches
-       * (cli_batch_id). */
+       * (cli_batch_id: the batch open on the joiner's current answer). */
       struct Client *skip_one = NULL;
       if (jbuf->jb_asker && has_active_batch(jbuf->jb_asker))
         skip_one = jbuf->jb_asker;

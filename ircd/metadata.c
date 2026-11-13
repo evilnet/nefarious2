@@ -2312,7 +2312,7 @@ int metadata_registration_check(struct Client *cptr)
 void metadata_burst_self_to_client(struct Client *to)
 {
   struct MetadataEntry *md;
-  unsigned int seq;
+  char type[NICKLEN + 16];
 
   if (!to || !MyConnect(to))
     return;
@@ -2326,20 +2326,20 @@ void metadata_burst_self_to_client(struct Client *to)
    * "not sent". */
   md = metadata_list_client(to);
 
-  /* Manual batch open with target parameter (send_batch_start doesn't
-   * support the per-batch-type target arg the metadata spec requires). */
-  seq = con_batch_seq(cli_connect(to))++;
-  ircd_snprintf(NULL, cli_batch_id(to),
-                sizeof(con_batch_id(cli_connect(to))),
-                "%s%u", cli_yxx(to), seq);
-
-  sendrawto_one(to, ":%s BATCH +%s metadata %s",
-                cli_name(&me), cli_batch_id(to), cli_name(to));
+  /* The batch type carries the target ("metadata <nick>"), as the spec
+   * asks.  It nests in whatever batch is open on the answer (the labeled
+   * registration batch): send.c's nesting model. */
+  ircd_snprintf(0, type, sizeof(type), "metadata %s", cli_name(to));
+  send_batch_start(to, type);
   while (md) {
-    sendrawto_one(to, "@batch=%s :%s METADATA %s %s %s :%s",
-                  cli_batch_id(to), cli_name(&me),
-                  cli_name(to), md->key,
-                  get_visibility_str(md), md->value);
+    if (cli_batch_id(to)[0])
+      sendrawto_one(to, "@batch=%s :%s METADATA %s %s %s :%s",
+                    cli_batch_id(to), cli_name(&me),
+                    cli_name(to), md->key,
+                    get_visibility_str(md), md->value);
+    else
+      sendrawto_one(to, ":%s METADATA %s %s %s :%s", cli_name(&me),
+                    cli_name(to), md->key, get_visibility_str(md), md->value);
     md = md->next;
   }
   send_batch_end(to);

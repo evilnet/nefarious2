@@ -451,6 +451,10 @@ void list_next_channels(struct Client *cptr)
   struct ListingArgs *args;
   struct Channel *chptr;
 
+  /* The LIST's own batch (none: "") is the innermost while it sends, and
+   * only then (send.c's nesting model: batch_resume/batch_suspend). */
+  batch_resume(cptr, cli_listing(cptr)->batch_id);
+
   /* Walk consecutive buckets until we hit the end. */
   for (args = cli_listing(cptr); args->bucket < HASHSIZE; args->bucket++)
   {
@@ -501,15 +505,14 @@ void list_next_channels(struct Client *cptr)
   /* If we did all buckets, clean the client and send RPL_LISTEND. */
   if (args->bucket >= HASHSIZE)
   {
-    char saved_batch[16];
-    ircd_strncpy(saved_batch, args->batch_id, sizeof(saved_batch));
     MyFree(cli_listing(cptr));
     cli_listing(cptr) = NULL;
     send_reply(cptr, RPL_LISTEND);
     /* Close the labeled-response batch opened in m_list for async LIST */
-    if (saved_batch[0] && has_active_batch(cptr))
-      send_batch_end(cptr);
+    send_batch_end(cptr);
+    return;
   }
+  batch_suspend(cptr);
 }
 
 /** Prepend a watch's nick  to the appropriate hash bucket.

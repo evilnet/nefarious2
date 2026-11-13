@@ -383,9 +383,12 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (cli_listing(sptr))            /* Already listing ? */
   {
-    /* Close any labeled-response batch from the previous LIST */
-    if (cli_listing(sptr)->batch_id[0] && has_active_batch(sptr))
+    /* Close any labeled-response batch from the previous LIST (its own,
+     * detached from the stack: send.c's nesting model) */
+    if (cli_listing(sptr)->batch_id[0]) {
+      batch_resume(sptr, cli_listing(sptr)->batch_id);
       send_batch_end(sptr);
+    }
     MyFree(cli_listing(sptr));
     cli_listing(sptr) = 0;
     send_reply(sptr, RPL_LISTEND);
@@ -424,14 +427,18 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_listing(sptr) = (struct ListingArgs*) MyMalloc(sizeof(struct ListingArgs));
       assert(0 != cli_listing(sptr));
       memcpy(cli_listing(sptr), &args, sizeof(struct ListingArgs));
-      /* Open labeled-response batch for async LIST — stays open across event loop iterations */
+      /* Open labeled-response batch for async LIST — stays open across
+       * event loop iterations.  It is the LIST's own: taken off the
+       * connection's stack once opened (batch_detach) and put back only
+       * while list_next_channels() sends into it, so a later line is
+       * never nested in it nor disturbs it (send.c's nesting model). */
       cli_listing(sptr)->batch_id[0] = '\0';
       if (MyConnect(sptr) && cli_label(sptr)[0] &&
           feature_bool(FEAT_CAP_labeled_response) &&
           LabeledResponseInUse(sptr) &&
           feature_bool(FEAT_CAP_batch)) {
         send_batch_start(sptr, "labeled-response");
-        ircd_strncpy(cli_listing(sptr)->batch_id, cli_batch_id(sptr),
+        batch_detach(sptr, cli_listing(sptr)->batch_id,
                      sizeof(cli_listing(sptr)->batch_id));
       }
       list_next_channels(sptr);

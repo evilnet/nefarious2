@@ -434,9 +434,40 @@ int labeled_batch_start(struct Client *sptr)
     return 0;
   tlog_add("BATCH + labeled-response %s [label=%s]", tname(sptr), cli_label(sptr));
   cli_label_responded(sptr) = 1;
+  ircd_strncpy(cli_connect(sptr)->con_batch[0].id, "lrb",
+               sizeof(cli_connect(sptr)->con_batch[0].id));
+  cli_connect(sptr)->con_batch[0].parent[0] = '\0';
+  cli_connect(sptr)->con_batch_depth = 1;
   cli_labeled_batch(sptr) = 1;
-  ircd_strncpy(cli_batch_id(sptr), "lrb", sizeof(cli_batch_id(sptr)));
   return 1;
+}
+
+/* send.c's batch_save()/batch_restore(): set the open batches aside for
+ * an asynchronous answer and put them back. */
+void batch_save(struct Client *to, struct BatchSave *save)
+{
+  struct Connection *con = cli_connect(to);
+  memcpy(save->frames, con->con_batch, sizeof(save->frames));
+  save->depth = con->con_batch_depth;
+  save->over = con->con_batch_over;
+  save->labeled = con->con_labeled_batch;
+  con->con_batch_depth = con->con_batch_over = con->con_labeled_batch = 0;
+}
+
+void batch_restore(struct Client *to, const struct BatchSave *save)
+{
+  struct Connection *con = cli_connect(to);
+  memcpy(con->con_batch, save->frames, sizeof(con->con_batch));
+  con->con_batch_depth = save->depth;
+  con->con_batch_over = save->over;
+  con->con_labeled_batch = save->labeled;
+}
+
+/* send.c's batch_current_id(): the innermost open batch. */
+const char *batch_current_id(struct Client *cli)
+{
+  struct Connection *con = cli_connect(cli);
+  return con->con_batch_depth ? con->con_batch[con->con_batch_depth - 1].id : "";
 }
 
 void labeled_batch_end(struct Client *sptr)
@@ -445,7 +476,7 @@ void labeled_batch_end(struct Client *sptr)
     return;
   tlog_add("BATCH - %s", tname(sptr));
   cli_labeled_batch(sptr) = 0;
-  cli_batch_id(sptr)[0] = '\0';
+  cli_connect(sptr)->con_batch_depth = 0;
 }
 
 /* The send layer: records what reaches a client. */

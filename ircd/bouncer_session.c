@@ -18018,14 +18018,13 @@ void bounce_send_channel_state(struct Client *cptr)
    * negotiate `draft/persistence` know to treat the batch contents as
    * restoration rather than live activity; clients with only `batch`
    * still benefit from the grouping signal.
-   * cli_batch_id is expected to be clear here (callers run during
-   * registration before any other batch could be open);
-   * send_batch_start would overwrite it otherwise. */
+   * Inside another batch open on the answer (a labeled registration
+   * line's labeled-response batch) it is nested in it (send.c's nesting
+   * model), never left out. */
   wrap_in_persistence_batch =
       MyConnect(cptr)
       && CapRecipientHas(cptr, CAP_BATCH)
-      && cli_user(cptr)->channel != NULL
-      && cli_batch_id(cptr)[0] == '\0';
+      && cli_user(cptr)->channel != NULL;
 
   if (wrap_in_persistence_batch)
     send_batch_start(cptr, "draft/persistence");

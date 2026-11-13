@@ -406,6 +406,23 @@ struct ForwardedLabel {
  * This contains a lot of stuff irrelevant to server connections, but
  * those are so rare as to not be worth special-casing.
  */
+/** Batches nested on one connection's answer: at most this many open at
+ * once (labeled-response > metadata or authtoken or persistence > one more
+ * level); a start past it opens nothing (send_batch_start()). */
+#define BATCH_NEST_MAX 4
+/** One open batch: its reference and the batch its own BATCH +/- lines are
+ * tagged with ("" = top level).  An id of "" is a frame with nothing on
+ * the wire (the client does not hold batch). */
+struct BatchFrame {
+  char id[16];
+  char parent[16];
+};
+/** A connection's open batches set aside (batch_save()/batch_restore()). */
+struct BatchSave {
+  struct BatchFrame frames[BATCH_NEST_MAX];
+  unsigned char depth, over, labeled;
+};
+
 struct Connection
 {
   unsigned long       con_magic;     /**< magic number */
@@ -488,7 +505,11 @@ struct Connection
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
   char                con_label[64]; /**< Current command label for labeled-response */
   unsigned char       con_label_responded; /**< Whether a response was sent for current label */
-  char                con_batch_id[16]; /**< Current batch reference ID */
+  /** The batches open on this connection's current answer, outermost
+   * first (send.c, send_batch_start(): the nesting model). */
+  struct BatchFrame   con_batch[BATCH_NEST_MAX];
+  unsigned char       con_batch_depth; /**< Frames in use in con_batch */
+  unsigned char       con_batch_over;  /**< Starts past BATCH_NEST_MAX, each still to be ended */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
   unsigned int        con_token_auth; /**< draft/authtoken: service slots this connection's PASS may validate */
   char                con_client_tags[4096]; /**< Client-only tags (+tag=value) for TAGMSG relay (IRCv3: 4094 max) */
@@ -546,7 +567,7 @@ struct Connection
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
-  unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch */
+  unsigned char       con_labeled_batch; /**< Depth (1-based) of the frame labeled_batch_start() opened, 0 = none */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
   /* WebSocket state for RFC 6455 compliance */
   unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
@@ -743,8 +764,10 @@ struct Client {
 #define cli_label(cli)		con_label(cli_connect(cli))
 /** Check if labeled response was sent for this command */
 #define cli_label_responded(cli)	con_label_responded(cli_connect(cli))
-/** Get current batch reference ID */
-#define cli_batch_id(cli)	con_batch_id(cli_connect(cli))
+/** The innermost batch open on the client's current answer ("" = none):
+ * the batch its lines are tagged with.  Read-only; batches are opened and
+ * ended only by send_batch_start()/send_batch_end() (send.c). */
+#define cli_batch_id(cli)	batch_current_id(cli)
 /** Get batch sequence number */
 #define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
 #define cli_token_auth(cli)	con_token_auth(cli_connect(cli))
@@ -809,7 +832,7 @@ struct Client {
 #define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
 /** Get current message concat flag. */
 #define cli_msg_concat(cli)	con_msg_concat(cli_connect(cli))
-/** Get labeled batch flag (1 if labeled_batch_start opened a batch). */
+/** Depth of the labeled-response batch labeled_batch_start() opened (0 = none). */
 #define cli_labeled_batch(cli)	con_labeled_batch(cli_connect(cli))
 /** Get forwarded label FIFO array. */
 #define cli_fwd_labels(cli)	con_fwd_labels(cli_connect(cli))
@@ -1097,7 +1120,6 @@ struct Client {
 /** Check if labeled response was sent for this command. */
 #define con_label_responded(con)	((con)->con_label_responded)
 /** Get the current batch reference ID. */
-#define con_batch_id(con)	((con)->con_batch_id)
 /** Get the batch sequence number. */
 #define con_batch_seq(con)	((con)->con_batch_seq)
 #define con_token_auth(con)	((con)->con_token_auth)
@@ -1911,6 +1933,8 @@ struct Client {
 #define SHOW_IP 1 /**< Show ident and IP address in get_client_name() */
 
 extern const char* get_client_name(const struct Client* sptr, int showip);
+/* The innermost batch open on @a cli's current answer, "" if none (send.c). */
+extern const char *batch_current_id(struct Client *cli);
 extern const char* client_get_default_umode(const struct Client* sptr);
 extern int client_get_hidehostcomponents(const struct Client* sptr);
 extern int client_get_ping(const struct Client* local_client);

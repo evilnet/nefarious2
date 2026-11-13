@@ -166,8 +166,7 @@ struct reg_ctx {
 struct reg_label_state {
   char label[64];
   unsigned char responded;
-  unsigned char labeled_batch;
-  char batch_id[16];
+  struct BatchSave batches;        /**< the connection's open batches, set aside */
   int batch;                       /**< a batch was opened for the answer */
 };
 
@@ -187,12 +186,9 @@ static void reg_answer_begin(struct Client *acptr, const struct reg_ctx *ctx,
 {
   memcpy(st->label, cli_label(acptr), sizeof(st->label));
   st->responded = cli_label_responded(acptr);
-  st->labeled_batch = cli_labeled_batch(acptr);
-  memcpy(st->batch_id, cli_batch_id(acptr), sizeof(st->batch_id));
+  batch_save(acptr, &st->batches);   /* this answer is not the current line's */
   ircd_strncpy(cli_label(acptr), ctx->label, sizeof(st->label));
   cli_label_responded(acptr) = 0;
-  cli_labeled_batch(acptr) = 0;
-  cli_batch_id(acptr)[0] = '\0';
   st->batch = (lines && ctx->label[0]) ? labeled_batch_start(acptr) : 0;
 }
 
@@ -201,10 +197,9 @@ static void reg_answer_end(struct Client *acptr, struct reg_label_state *st)
 {
   if (st->batch)
     labeled_batch_end(acptr);
+  batch_restore(acptr, &st->batches);   /* ends anything the answer left open */
   memcpy(cli_label(acptr), st->label, sizeof(st->label));
   cli_label_responded(acptr) = st->responded;
-  cli_labeled_batch(acptr) = st->labeled_batch;
-  memcpy(cli_batch_id(acptr), st->batch_id, sizeof(st->batch_id));
 }
 
 /** An asynchronous FAIL REGISTER, under the REGISTER's label. */

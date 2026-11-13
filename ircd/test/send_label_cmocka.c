@@ -51,6 +51,23 @@
 
 struct Client me;
 static struct Connection me_con;
+
+/* generate_msgid()'s world (sendcmdto_one_tags() mints a msgid). */
+unsigned long MsgIdCounter;
+struct HLC hlc_global_event(void)
+{
+  struct HLC h;
+  memset(&h, 0, sizeof(h));
+  return h;
+}
+const char *inttobase64_64(char *buf, uint64_t v, unsigned int count)
+{
+  unsigned int i;
+  for (i = 0; i < count; i++)
+    buf[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]"[(v >> (6 * (count - 1 - i))) & 63];
+  buf[count] = '\0';
+  return buf;
+}
 struct Client his;
 int log_inassert;
 time_t CurrentTime;
@@ -230,7 +247,10 @@ static void label_pending(struct Client *c, const char *label)
 /** The labeled batch labeled_batch_start() opens for @a c. */
 static void batch_open(struct Client *c, const char *id)
 {
-  ircd_strncpy(cli_batch_id(c), id, sizeof(cli_batch_id(c)));
+  struct Connection *con = cli_connect(c);
+  ircd_strncpy(con->con_batch[0].id, id, sizeof(con->con_batch[0].id));
+  con->con_batch[0].parent[0] = '\0';
+  con->con_batch_depth = 1;
   cli_labeled_batch(c) = 1;
 }
 
@@ -620,6 +640,180 @@ static void test_label_inert_without_batch(void **state)
   assert_true(has_tag(sent[0].text, "label"));
 }
 
+/* ---- nested batches (send.c's nesting model) ---- */
+
+static void reset_sent(void)
+{
+  n_sent = 0;
+  memset(sent, 0, sizeof(sent));
+}
+
+/** The batch id a "BATCH +<id> ..." line opens. */
+static const char *opened_id(const char *line, char *buf, size_t len)
+{
+  const char *p = strstr(line, "BATCH +");
+  assert_non_null(p);
+  snprintf(buf, len, "%s", p + 7);
+  if (strchr(buf, ' '))
+    *strchr(buf, ' ') = '\0';
+  return buf;
+}
+
+/* An inner batch's start AND end lines carry @batch=<outer>; lines sent
+ * meanwhile carry the innermost; after the inner end the outer is the
+ * innermost again; the outer's own lines carry no batch tag. */
+static void test_batch_nesting_tags(void **state)
+{
+  char outer[32], inner[32], v[64];
+
+  (void)state;
+  reset_sent();
+  assert_int_equal(send_batch_start(&asker, "outer-type"), 1);
+  assert_int_equal(send_batch_start(&asker, "inner-type"), 1);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :inside", &asker);
+  send_batch_end(&asker);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :after the inner", &asker);
+  send_batch_end(&asker);
+  assert_int_equal(n_sent, 6);
+
+  opened_id(sent[0].text, outer, sizeof(outer));
+  assert_false(has_tag(sent[0].text, "batch"));
+  opened_id(sent[1].text, inner, sizeof(inner));
+  assert_string_equal(tag_value(sent[1].text, "batch", v, sizeof(v)), outer);
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), inner);
+  assert_non_null(strstr(sent[3].text, "BATCH -"));
+  assert_non_null(strstr(sent[3].text, inner));
+  assert_string_equal(tag_value(sent[3].text, "batch", v, sizeof(v)), outer);
+  assert_string_equal(tag_value(sent[4].text, "batch", v, sizeof(v)), outer);
+  assert_non_null(strstr(sent[5].text, "BATCH -"));
+  assert_non_null(strstr(sent[5].text, outer));
+  assert_false(has_tag(sent[5].text, "batch"));
+  assert_string_equal(cli_batch_id(&asker), "");
+}
+
+/* A pending label goes on the outermost BATCH + only. */
+static void test_batch_label_on_outermost(void **state)
+{
+  char v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "LB1");
+  assert_int_equal(labeled_batch_start(&asker), 1);
+  send_batch_start(&asker, "metadata x");
+  send_batch_end(&asker);
+  labeled_batch_end(&asker);
+  assert_int_equal(n_sent, 4);
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "LB1");
+  assert_false(has_tag(sent[1].text, "label"));
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+  assert_string_equal(cli_batch_id(&asker), "");
+}
+
+/* labeled_batch_end() and batch_end_line() end what is still open inside,
+ * innermost first, each end line tagged with its own parent. */
+static void test_batch_end_line_closes_inner_first(void **state)
+{
+  char outer[32], inner[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "LB2");
+  labeled_batch_start(&asker);
+  send_batch_start(&asker, "draft/authtoken *");   /* never ended by its opener */
+  batch_end_line(&asker);
+  assert_int_equal(n_sent, 4);
+  opened_id(sent[0].text, outer, sizeof(outer));
+  opened_id(sent[1].text, inner, sizeof(inner));
+  assert_non_null(strstr(sent[2].text, inner));
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), outer);
+  assert_non_null(strstr(sent[3].text, outer));
+  assert_false(has_tag(sent[3].text, "batch"));
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+}
+
+/* Past BATCH_NEST_MAX a start opens nothing (its lines stay in the
+ * innermost batch) and its end ends nothing: the pairing holds. */
+static void test_batch_depth_cap(void **state)
+{
+  char deepest[32], v[64];
+  int i, starts = 0, ends = 0;
+
+  (void)state;
+  reset_sent();
+  for (i = 0; i < BATCH_NEST_MAX; i++)
+    assert_int_equal(send_batch_start(&asker, "t"), 1);
+  opened_id(sent[BATCH_NEST_MAX - 1].text, deepest, sizeof(deepest));
+  assert_int_equal(send_batch_start(&asker, "t"), 0);       /* over the cap */
+  assert_string_equal(cli_batch_id(&asker), deepest);
+  for (i = 0; i <= BATCH_NEST_MAX; i++)
+    send_batch_end(&asker);
+  for (i = 0; i < n_sent; i++) {
+    if (strstr(sent[i].text, "BATCH +")) starts++;
+    if (strstr(sent[i].text, "BATCH -")) ends++;
+  }
+  assert_int_equal(starts, BATCH_NEST_MAX);
+  assert_int_equal(ends, BATCH_NEST_MAX);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+  assert_int_equal(cli_connect(&asker)->con_batch_over, 0);
+  (void)v;
+}
+
+/* An asynchronous batch (LIST's) is detached from the stack when its line
+ * is done: a later labeled line's batch is NOT nested in it and does not
+ * disturb it; the LIST's lines, sent while it is resumed, carry its id;
+ * both end, each untagged (top level). */
+static void test_batch_async_and_unrelated_labeled(void **state)
+{
+  char list[16], lab[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "LIST1");
+  send_batch_start(&asker, "labeled-response");
+  batch_detach(&asker, list, sizeof(list));
+  assert_true(list[0] != '\0');
+  assert_string_equal(cli_batch_id(&asker), "");
+
+  /* a later line: labeled WHOIS */
+  label_pending(&asker, "WHOIS1");
+  assert_int_equal(labeled_batch_start(&asker), 1);
+  opened_id(sent[1].text, lab, sizeof(lab));
+  assert_false(has_tag(sent[1].text, "batch"));          /* not inside LIST */
+  assert_string_equal(tag_value(sent[1].text, "label", v, sizeof(v)), "WHOIS1");
+  batch_end_line(&asker);
+  assert_false(has_tag(sent[2].text, "batch"));
+
+  /* the LIST goes on */
+  batch_resume(&asker, list);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :a LIST line", &asker);
+  assert_string_equal(tag_value(sent[3].text, "batch", v, sizeof(v)), list);
+  batch_suspend(&asker);
+  assert_string_equal(cli_batch_id(&asker), "");
+  batch_resume(&asker, list);
+  send_batch_end(&asker);
+  assert_non_null(strstr(sent[4].text, "BATCH -"));
+  assert_non_null(strstr(sent[4].text, list));
+  assert_false(has_tag(sent[4].text, "batch"));
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+}
+
+/* A client without batch: frames with no id, nothing on the wire, the
+ * pairing kept. */
+static void test_batch_without_batch_cap(void **state)
+{
+  (void)state;
+  reset_sent();
+  FlagClr(cli_active_own(&other), CAP_BATCH);
+  FlagClr(cli_active(&other), CAP_BATCH);
+  assert_int_equal(send_batch_start(&other, "t"), 0);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &other, "%C :plain", &other);
+  send_batch_end(&other);
+  assert_int_equal(n_sent, 1);
+  assert_false(has_tag(sent[0].text, "batch"));
+  assert_int_equal(cli_connect(&other)->con_batch_depth, 0);
+}
+
 /* The fan-out's own rules decide whether the asker gets a copy at all:
  * a zombie member, a channel its profile hides, a skip mask that rules
  * it out -- no copy, and the label stays pending for the ACK. */
@@ -675,7 +869,7 @@ static void test_batch_for_two_or_more_targets(void **state)
     n_sent = 0;
     label_pending(&asker, "L31");
     cli_labeled_batch(&asker) = 0;
-    cli_batch_id(&asker)[0] = '\0';
+    cli_connect(&asker)->con_batch_depth = 0;
     assert_int_equal(labeled_batch_start_list(&asker, cases[i].list) != 0,
                      cases[i].batch);
     assert_int_equal(n_sent, cases[i].batch);
@@ -699,6 +893,12 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_respond_answered_label_is_not_taken, setup, teardown),
     cmocka_unit_test_setup_teardown(test_respond_follows_the_fanout_rules, setup, teardown),
     cmocka_unit_test_setup_teardown(test_label_inert_without_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_nesting_tags, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_label_on_outermost, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_end_line_closes_inner_first, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_depth_cap, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_async_and_unrelated_labeled, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),

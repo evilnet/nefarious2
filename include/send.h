@@ -436,13 +436,39 @@ extern void sendto_mode_butone(struct Client *one, struct Client *from, const ch
 extern void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
                            const char *pattern, va_list vl);
 
-/* Start a batch for a client (labeled-response integration) */
-extern void send_batch_start(struct Client *to, const char *type);
+/* Batches on a client connection, nested (send.c: the nesting model).
+ * Open one inside the innermost open batch; 1 if a BATCH + line went out.
+ * Every call is paired with send_batch_end(). */
+extern int send_batch_start(struct Client *to, const char *type);
 
-/* End a batch for a client */
+/* End the innermost open batch (BATCH - tagged with its parent). */
 extern void send_batch_end(struct Client *to);
 
-/* Check if a client has an active batch */
+/* Write one BATCH +/- line of a client batch (sign '+' or '-'), tagged
+ * @batch=<parent> when nested, with @a label / @a extra tags if given. */
+extern void send_batch_marker(struct Client *to, char sign, const char *id,
+                              const char *parent, const char *type,
+                              const char *label, const char *extra);
+
+/* End every batch the current line left open, innermost first. */
+extern void batch_end_line(struct Client *to);
+
+/* End every open batch innermost first; BATCH - lines only while @a wire. */
+extern void batch_end_all(struct Client *to, int wire);
+
+/* An asynchronous owner (LIST) takes the innermost, top-level batch off
+ * the stack when its line is done, puts it back while it sends into it,
+ * and takes it off again (or ends it with send_batch_end()). */
+extern void batch_detach(struct Client *to, char *id, size_t idlen);
+extern void batch_resume(struct Client *to, const char *id);
+extern void batch_suspend(struct Client *to);
+
+/* Set aside / put back every open batch (an asynchronous answer). */
+struct BatchSave;
+extern void batch_save(struct Client *to, struct BatchSave *save);
+extern void batch_restore(struct Client *to, const struct BatchSave *save);
+
+/* Check if a client has a batch open on its current answer */
 extern int has_active_batch(struct Client *cptr);
 
 /* S2S batch functions for netjoin/netsplit coordination */

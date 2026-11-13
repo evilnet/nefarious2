@@ -333,6 +333,11 @@ int get_lag_factor(struct Client *cptr)
   return test_lagfactor;
 }
 
+void batch_end_line(struct Client *cptr)
+{
+  (void)cptr;
+}
+
 void labeled_batch_end(struct Client *cptr)
 {
   (void)cptr;

@@ -4465,8 +4465,6 @@ int
 send_supported_batched(struct Client *cptr)
 {
   struct SLink *line;
-  char batchid[12];
-  static unsigned long isupport_batch_counter = 0;
 
   if (isupport && !isupport_lines)
     build_isupport_lines();
@@ -4480,17 +4478,15 @@ send_supported_batched(struct Client *cptr)
     return 0;
   }
 
-  /* Generate unique batch ID */
-  ircd_snprintf(0, batchid, sizeof(batchid), "%s%lu",
-                cli_yxx(&me), ++isupport_batch_counter);
-
-  /* Start batch: BATCH +id draft/isupport */
-  sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "+%s draft/isupport", batchid);
+  /* Start batch: BATCH +id draft/isupport -- through the connection's
+   * batch helper, so a labeled ISUPPORT's label goes on it and it nests in
+   * any batch open on the answer (send.c's nesting model). */
+  send_batch_start(cptr, "draft/isupport");
 
   /* Send each ISUPPORT line with batch tag */
   for (line = isupport_lines; line; line = line->next) {
     sendrawto_one(cptr, "@batch=%s :%s 005 %s %s :are supported by this server",
-                  batchid, cli_name(&me),
+                  cli_batch_id(cptr), cli_name(&me),
                   IsRegistered(cptr) ? cli_name(cptr) : "*",
                   line->value.cp);
   }
@@ -4501,12 +4497,12 @@ send_supported_batched(struct Client *cptr)
     if (cclass && FlagHas(&cclass->restrictflags, CRFLAG_REQUIRE_SASL))
       sendrawto_one(cptr, "@batch=%s :%s 005 %s draft/ACCOUNTREQUIRED "
                     ":are supported by this server",
-                    batchid, cli_name(&me),
+                    cli_batch_id(cptr), cli_name(&me),
                     IsRegistered(cptr) ? cli_name(cptr) : "*");
   }
 
   /* End batch: BATCH -id */
-  sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "-%s", batchid);
+  send_batch_end(cptr);
 
   webpush_note_key_seen(cptr);
 

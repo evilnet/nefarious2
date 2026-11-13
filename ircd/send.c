@@ -4637,89 +4637,274 @@ static char *generate_batch_id(struct Client *cptr, char *buf, size_t buflen)
   return buf;
 }
 
-/**
- * Start a batch for a client.
- * Sends BATCH +refid type to the client and stores the batch ID.
- * @param[in] to Client to start batch for.
- * @param[in] type Batch type (e.g., "labeled-response", "netjoin").
+/* ------------------------------------------------------------------ */
+/* Batches on a client connection: the nesting model                    */
+/* ------------------------------------------------------------------ */
+/*
+ * A connection keeps a small stack of the batches open on the answer it is
+ * being sent (con_batch[], at most BATCH_NEST_MAX deep).  The batch spec
+ * lets one batch nest in another: "Start and end messages of one batch MAY
+ * refer to another batch.  If they do, they both MUST have batch tag, and
+ * they MUST refer to the same batch."  So:
+ *  - send_batch_start() opens a batch INSIDE the innermost one open: its
+ *    "BATCH +<id>" line is tagged @batch=<parent> when there is one, the
+ *    parent is recorded with it, and it becomes the innermost;
+ *  - every line sent to the client meanwhile is tagged with the INNERMOST
+ *    open batch (cli_batch_id(): reply_tags, the tag formatters, ...);
+ *  - send_batch_end() ends the innermost: "BATCH -<id>" tagged with the
+ *    SAME parent its start was, and the parent is innermost again.
+ * The stack belongs to the line being answered: parse_client() ends
+ * whatever that line left open, innermost first (batch_end_line()), so it
+ * is empty between lines.  A batch that outlives its line -- an
+ * asynchronous LIST's labeled batch -- is not on the stack then: its owner
+ * takes it off when its line is done (batch_detach()) and puts it back only
+ * while it sends into it (batch_resume() .. batch_suspend(), or
+ * send_batch_end() for the last time).  So a later, unrelated line never
+ * nests in it, and never disturbs it.  (Chathistory and replay pages, the
+ * SEARCH batch and forwarded-label batches carry ids of their own, kept by
+ * their owners; netjoin/netsplit use the server batch, send_s2s_batch_*.)
+ * A client that does not hold batch gets frames with no id: nothing on the
+ * wire, the pairing kept.  A start past BATCH_NEST_MAX opens nothing (its
+ * lines stay in the innermost batch) and its end ends nothing
+ * (con_batch_over).
  */
-void send_batch_start(struct Client *to, const char *type)
+
+const char *batch_current_id(struct Client *cli)
+{
+  struct Connection *con;
+
+  if (!cli || !MyConnect(cli))
+    return "";
+  con = cli_connect(cli);
+  return con->con_batch_depth ? con->con_batch[con->con_batch_depth - 1].id : "";
+}
+
+/** Whether @a to can be sent batch lines now. */
+static int batch_wire(struct Client *to)
+{
+  return feature_bool(FEAT_CAP_batch) && CapRecipientHas(to, CAP_BATCH);
+}
+
+/** Send one BATCH +/- line: @a sign '+' or '-', the batch @a id, tagged
+ * @batch=<parent> when @a parent names one, plus @a label on a start and
+ * any @a extra tags ("time=..." etc).  The one place a BATCH line of a
+ * client's batches opened through this file is written (the connection's
+ * stack, and a forwarded-label batch: forwarded_label.c). */
+void send_batch_marker(struct Client *to, char sign, const char *id,
+                       const char *parent, const char *type, const char *label,
+                       const char *extra)
 {
   struct MsgBuf *mb;
   char tagbuf[256];
   int pos = 0;
 
-  if (!feature_bool(FEAT_CAP_batch) || !CapRecipientHas(to, CAP_BATCH) || !MyConnect(to))
-    return;
-
-  /* Generate a new batch ID */
-  generate_batch_id(to, cli_batch_id(to), sizeof(con_batch_id(cli_connect(to))));
-
-  /* Build message tags - include label if this is for labeled-response */
   tagbuf[0] = '\0';
-  if (feature_bool(FEAT_CAP_labeled_response) &&
-      LabeledResponseInUse(to) && cli_label(to)[0] &&
-      !cli_label_responded(to)) {   /* an answered label goes on no batch */
-    tagbuf[0] = '@';
-    pos = 1;
-    pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
-    if (pos < (int)sizeof(tagbuf) - 1) {
-      tagbuf[pos++] = ' ';
-      tagbuf[pos] = '\0';
-    }
-    /* Mark that batch start counts as labeled response (for ACK mechanism) */
-    cli_label_responded(to) = 1;
+  if (parent && parent[0])
+    pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "@batch=%s", parent);
+  if (label && label[0])
+    pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "%slabel=%s",
+                         pos ? ";" : "@", label);
+  if (extra && extra[0])
+    pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "%s%s",
+                         pos ? ";" : "@", extra);
+  if (pos && pos < (int)sizeof(tagbuf) - 1) {
+    tagbuf[pos++] = ' ';
+    tagbuf[pos] = '\0';
   }
-
-  /* Send BATCH +refid type */
-  if (tagbuf[0])
+  if (sign == '+')
     mb = msgq_make(cli_from(to), "%s:%s " MSG_BATCH_CMD " +%s %s",
-                   tagbuf, cli_name(&me), cli_batch_id(to), type);
+                   tagbuf, cli_name(&me), id, type);
   else
-    mb = msgq_make(cli_from(to), ":%s " MSG_BATCH_CMD " +%s %s",
-                   cli_name(&me), cli_batch_id(to), type);
-
+    mb = msgq_make(cli_from(to), "%s:%s " MSG_BATCH_CMD " -%s",
+                   tagbuf, cli_name(&me), id);
   send_buffer(to, mb, 0);
   msgq_clean(mb);
 }
 
 /**
- * End the current batch for a client.
- * Sends BATCH -refid to the client and clears the batch ID.
+ * Open a batch on @a to's current answer, nested in the innermost one open
+ * (see the model above).  A pending, unanswered label of the line goes on
+ * its BATCH + line and the label is answered.
+ * @param[in] to Client to start batch for.
+ * @param[in] type Batch type (e.g., "labeled-response", "metadata").
+ * @return 1 if a BATCH + line was sent, else 0 (the client does not hold
+ *   batch, or BATCH_NEST_MAX is reached); send_batch_end() is paired with
+ *   every call either way.
+ */
+int send_batch_start(struct Client *to, const char *type)
+{
+  struct Connection *con;
+  struct BatchFrame *f;
+  const char *label = NULL;
+
+  if (!to || !MyConnect(to))
+    return 0;
+  con = cli_connect(to);
+  if (con->con_batch_depth >= BATCH_NEST_MAX) {
+    con->con_batch_over++;
+    return 0;
+  }
+  f = &con->con_batch[con->con_batch_depth];
+  ircd_strncpy(f->parent, batch_current_id(to), sizeof(f->parent));
+  f->id[0] = '\0';
+  con->con_batch_depth++;
+  if (!batch_wire(to))
+    return 0;
+
+  generate_batch_id(to, f->id, sizeof(f->id));
+  if (feature_bool(FEAT_CAP_labeled_response) &&
+      LabeledResponseInUse(to) && cli_label(to)[0] &&
+      !cli_label_responded(to)) {   /* an answered label goes on no batch */
+    label = cli_label(to);
+    cli_label_responded(to) = 1;   /* the BATCH + line answers it: no ACK */
+  }
+  send_batch_marker(to, '+', f->id, f->parent, type, label, NULL);
+  return 1;
+}
+
+/** End the innermost frame; with @a wire, send its BATCH - line (whatever
+ * the client's capabilities are now: the caller decides). */
+static void batch_pop(struct Client *to, int wire)
+{
+  struct Connection *con = cli_connect(to);
+  struct BatchFrame *f;
+
+  if (con->con_batch_over) {
+    con->con_batch_over--;
+    return;
+  }
+  if (!con->con_batch_depth)
+    return;
+  f = &con->con_batch[con->con_batch_depth - 1];
+  if (wire && f->id[0])
+    send_batch_marker(to, '-', f->id, f->parent, NULL, NULL, NULL);
+  con->con_batch_depth--;
+  if (con->con_labeled_batch > con->con_batch_depth)
+    con->con_labeled_batch = 0;
+}
+
+/**
+ * End the innermost batch open on @a to's answer: "BATCH -<id>", tagged
+ * with the parent its start was, and the parent is the innermost again.
  * @param[in] to Client to end batch for.
  */
 void send_batch_end(struct Client *to)
 {
-  struct MsgBuf *mb;
-
-  if (!feature_bool(FEAT_CAP_batch) || !CapRecipientHas(to, CAP_BATCH) || !MyConnect(to))
+  if (!to || !MyConnect(to))
     return;
+  batch_pop(to, batch_wire(to));
+}
 
-  /* Only end if there's an active batch */
-  if (!cli_batch_id(to)[0])
+/** End every batch the line being answered left open, innermost first
+ * (parse_client(), after each line). */
+void batch_end_line(struct Client *to)
+{
+  if (!to || !MyConnect(to))
     return;
+  while (cli_connect(to)->con_batch_over || cli_connect(to)->con_batch_depth)
+    send_batch_end(to);
+}
 
-  /* Send BATCH -refid */
-  mb = msgq_make(cli_from(to), ":%s " MSG_BATCH_CMD " -%s",
-                 cli_name(&me), cli_batch_id(to));
+/** End every open batch innermost first, sending each BATCH - line while
+ * @a wire (the client held batch until now: cap_dependents_drop(), before
+ * the CAP ACK). */
+void batch_end_all(struct Client *to, int wire)
+{
+  if (!to || !MyConnect(to))
+    return;
+  while (cli_connect(to)->con_batch_over || cli_connect(to)->con_batch_depth)
+    batch_pop(to, wire);
+}
 
-  send_buffer(to, mb, 0);
-  msgq_clean(mb);
+/** The innermost batch outlives the line that opened it (an asynchronous
+ * LIST): take it off the stack, nothing on the wire, and hand its id to
+ * its owner (@a id, "" when nothing was opened).  Only a batch opened at
+ * the top level is detached (its BATCH - will carry no parent). */
+void batch_detach(struct Client *to, char *id, size_t idlen)
+{
+  struct Connection *con;
 
-  /* Clear the batch ID */
-  cli_batch_id(to)[0] = '\0';
+  id[0] = '\0';
+  if (!to || !MyConnect(to))
+    return;
+  con = cli_connect(to);
+  if (con->con_batch_over) {
+    con->con_batch_over--;
+    return;
+  }
+  if (!con->con_batch_depth)
+    return;
+  if (!con->con_batch[con->con_batch_depth - 1].parent[0])
+    ircd_strncpy(id, con->con_batch[con->con_batch_depth - 1].id, idlen);
+  con->con_batch_depth--;
+  if (con->con_labeled_batch > con->con_batch_depth)
+    con->con_labeled_batch = 0;
+}
+
+/** The owner of a detached batch sends into it: put it back as the
+ * innermost (nothing on the wire) until batch_suspend() -- or
+ * send_batch_end(), which ends it.  An id of "" resumes a frame with
+ * nothing on the wire, so the pairing holds either way. */
+void batch_resume(struct Client *to, const char *id)
+{
+  struct Connection *con;
+  struct BatchFrame *f;
+
+  if (!to || !MyConnect(to))
+    return;
+  con = cli_connect(to);
+  if (con->con_batch_depth >= BATCH_NEST_MAX) {
+    con->con_batch_over++;
+    return;
+  }
+  f = &con->con_batch[con->con_batch_depth++];
+  ircd_strncpy(f->id, (id && batch_wire(to)) ? id : "", sizeof(f->id));
+  f->parent[0] = '\0';
+}
+
+/** Take a resumed batch off again, nothing on the wire. */
+void batch_suspend(struct Client *to)
+{
+  char dummy[16];
+
+  batch_detach(to, dummy, sizeof(dummy));
+}
+
+/** Set aside every frame open on @a to (nothing on the wire) for an
+ * answer that is not the current line's -- an asynchronous REGISTER or
+ * OPER answer -- and put them back after with batch_restore(). */
+void batch_save(struct Client *to, struct BatchSave *save)
+{
+  struct Connection *con = cli_connect(to);
+
+  memcpy(save->frames, con->con_batch, sizeof(save->frames));
+  save->depth = con->con_batch_depth;
+  save->over = con->con_batch_over;
+  save->labeled = con->con_labeled_batch;
+  con->con_batch_depth = 0;
+  con->con_batch_over = 0;
+  con->con_labeled_batch = 0;
+}
+
+void batch_restore(struct Client *to, const struct BatchSave *save)
+{
+  struct Connection *con = cli_connect(to);
+
+  batch_end_line(to);   /* the answer's own batches end with it */
+  memcpy(con->con_batch, save->frames, sizeof(con->con_batch));
+  con->con_batch_depth = save->depth;
+  con->con_batch_over = save->over;
+  con->con_labeled_batch = save->labeled;
 }
 
 /**
- * Check if a client has an active batch.
+ * Check if a client has a batch open on its current answer.
  * @param[in] cptr Client to check.
- * @return Non-zero if batch is active, zero otherwise.
+ * @return Non-zero if a batch is open (one with a reference), zero otherwise.
  */
 int has_active_batch(struct Client *cptr)
 {
-  if (!MyConnect(cptr))
-    return 0;
-  return cli_batch_id(cptr)[0] != '\0';
+  return batch_current_id(cptr)[0] != '\0';
 }
 
 /**
@@ -5295,8 +5480,11 @@ int labeled_batch_start(struct Client *sptr)
   if (!feature_bool(FEAT_CAP_batch))
     return 0;
 
-  send_batch_start(sptr, "labeled-response");
-  cli_labeled_batch(sptr) = 1;
+  if (!send_batch_start(sptr, "labeled-response")) {
+    send_batch_end(sptr);   /* nothing opened: unpair it */
+    return 0;
+  }
+  cli_labeled_batch(sptr) = cli_connect(sptr)->con_batch_depth;
   return 1;
 }
 
@@ -5311,7 +5499,13 @@ void labeled_batch_end(struct Client *sptr)
   if (!cli_labeled_batch(sptr))
     return;
 
-  send_batch_end(sptr);
+  /* Batches still open inside it end first, innermost first. */
+  {
+    unsigned int at = cli_labeled_batch(sptr);
+    while (cli_connect(sptr)->con_batch_over
+           || cli_connect(sptr)->con_batch_depth >= at)
+      send_batch_end(sptr);
+  }
   cli_labeled_batch(sptr) = 0;
 }
 
