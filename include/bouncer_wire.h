@@ -1990,7 +1990,10 @@ enum nick_request_action {
  * server, over the device's direction, and names another server's
  * device; a returned one (R) travels toward the device and is applied
  * only by the device's own server, for a session primary of ours that
- * itself asked for that very nick at that TS. */
+ * itself asked for that very nick at that TS.  A return naming a session
+ * primary of ours that does not match its last request (superseded, or
+ * past the window) is a race: dropped quietly.  A return naming a client
+ * of ours that no session names as its primary is a violation. */
 extern enum nick_request_action
 nick_request_action(const struct nick_request_facts *f);
 

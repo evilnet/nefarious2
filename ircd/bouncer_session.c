@@ -15377,6 +15377,9 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
                     parv[2], parv[3], parv[4]);
     return 0;
   case NICK_REQUEST_RETURN:
+    log_write(LS_USER, L_INFO, 0, "Bouncer: BX W for %s (%s) from %s "
+              "returned: the device was promoted on that side", parv[2],
+              parv[3], cli_name(sptr));
     /* Sourced from us: the sender is on that side, so its own prefix
      * coming back to it would be a fake direction. */
     sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "W %s %s %s R",
@@ -15397,7 +15400,9 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
               "dropped: %s", f.is_return ? " R" : "", parv[2], parv[3],
               cli_name(sptr),
               !dev ? "no such device here"
-                   : "its primary is back the way it came (crossed promote)");
+              : (f.is_return && f.device_ours && !f.is_alias)
+                ? "not its last request, or too late (superseded or delayed)"
+              : "its primary is back the way it came (crossed promote)");
     return 0;
   }
 }

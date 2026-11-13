@@ -204,9 +204,14 @@ static void test_return(void **state)
   f.found = 1; f.is_return = 1; f.device_ours = 1;
   f.session_primary_ours = 1; f.asked_here = 1;
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_WRITE_OWN);
-  f.asked_here = 0;                  /* a return we never asked for */
+  /* Our own session primary, a request it superseded (two in flight
+   * when it was promoted: both come back) or one past the window: a race,
+   * dropped quietly -- never a violation (audit A1). */
+  f.asked_here = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  f.asked_here = 1; f.session_primary_ours = 0;  /* no session's primary */
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
-  f.asked_here = 1; f.session_primary_ours = 0;  /* no session primary */
+  f.asked_here = 0;                              /* nor without a request */
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
   f.session_primary_ours = 1; f.is_alias = 1;    /* not promoted here */
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
