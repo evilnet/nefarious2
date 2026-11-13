@@ -4521,11 +4521,10 @@ send_supported_batched(struct Client *cptr)
    * (as the batch stack decides, send.c's batch_wire()), never the bouncer
    * session's union -- a device without batch is sent no batch. */
   if (!feature_bool(FEAT_CAP_batch) || !CapOwnHas(cptr, CAP_BATCH)) {
-    /* No batch support, fall back to regular ISUPPORT */
-    for (line = isupport_lines; line; line = line->next)
-      send_reply(cptr, RPL_ISUPPORT, line->value.cp);
-    webpush_note_key_seen(cptr);
-    return 0;
+    /* No batch support: the plain 005 lines, the same tokens as the
+     * batch below sends (draft/ACCOUNTREQUIRED included), and the key
+     * note -- send_supported() does all of it. */
+    return send_supported(cptr);
   }
 
   /* Start batch: BATCH +id draft/isupport -- through the connection's
