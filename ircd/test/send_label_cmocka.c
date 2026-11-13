@@ -1484,6 +1484,124 @@ static void test_cap_dependents_drop_order(void **state)
   cli_listing(&asker) = NULL;
 }
 
+/* sendrawto_one_answer(): a raw line answering the line being handled --
+ * bare with no label and no batch (sendrawto_one()'s bytes), the label
+ * when it is pending (answered once), the innermost batch when one is
+ * open, and counted in a deferred labeled batch. */
+static void test_sendrawto_one_answer(void **state)
+{
+  char v[64], outer[32], inner[32];
+
+  (void)state;
+  reset_sent();
+  sendrawto_one_answer(&asker, ":%s PERSISTENCE STATUS ON ON", cli_name(&me));
+  assert_string_equal(sent[0].text, ":hub.test PERSISTENCE STATUS ON ON");
+
+  label_pending(&asker, "RA1");
+  sendrawto_one_answer(&asker, "NOTICE * :one");
+  assert_string_equal(sent[1].text, "@label=RA1 NOTICE * :one");
+  assert_int_equal(cli_label_responded(&asker), 1);
+  sendrawto_one_answer(&asker, "NOTICE * :two");
+  assert_string_equal(sent[2].text, "NOTICE * :two");       /* answered */
+
+  reset_sent();
+  label_pending(&asker, "RA2");
+  labeled_batch_start(&asker);
+  send_batch_start(&asker, "metadata");
+  opened_id(sent[0].text, outer, sizeof(outer));
+  opened_id(sent[1].text, inner, sizeof(inner));
+  sendrawto_one_answer(&asker, ":%s 782 nick :x", cli_name(&me));
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), inner);
+  assert_false(has_tag(sent[2].text, "label"));
+  batch_end_line(&asker);
+
+  /* the one line of a deferred answer: labeled when it resolves */
+  reset_sent();
+  label_pending(&asker, "RA3");
+  labeled_batch_defer(&asker);
+  sendrawto_one_answer(&asker, ":%s 782 nick :y", cli_name(&me));
+  assert_int_equal(n_sent, 0);
+  batch_end_line(&asker);
+  assert_int_equal(n_sent, 1);
+  assert_string_equal(sent[0].text, "@label=RA3 :hub.test 782 nick :y");
+  (void)outer;
+}
+
+/* The exit path (s_misc.c, exit_one_client(): batch_end_all(victim, 1)
+ * before the ERROR) with a deferred batch open: its held lines go out,
+ * resolved -- the one answer line labeled -- and nothing stays held. */
+static void test_end_all_resolves_a_deferred_batch(void **state)
+{
+  char v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "EX1");
+  labeled_batch_defer(&asker);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :held", &asker);
+  assert_int_equal(n_sent, 0);
+  batch_end_all(&asker, 1);
+  assert_int_equal(n_sent, 1);
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "EX1");
+  assert_null(con_batch_hold(&asker_con));
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+}
+
+/* A deferred batch detached (it outlives its line: batch_detach()) is
+ * opened first -- its BATCH + with the label and its held lines -- and
+ * resumes and ends as any detached batch. */
+static void test_detach_opens_a_deferred_batch(void **state)
+{
+  char id[16], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "DT1");
+  labeled_batch_defer(&asker);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :held", &asker);
+  batch_detach(&asker, id, sizeof(id));
+  assert_int_equal(n_sent, 2);
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "DT1");
+  assert_non_null(strstr(sent[0].text, "BATCH +"));
+  assert_string_equal(tag_value(sent[1].text, "batch", v, sizeof(v)), id);
+  assert_null(con_batch_hold(&asker_con));
+  batch_resume(&asker, id);
+  send_batch_end(&asker);
+  assert_true(ends(2, id));
+}
+
+/* A deferred batch set aside for an asynchronous answer (batch_save()):
+ * nothing is opened; the answer goes out at once, untagged by it; the
+ * deferred batch comes back with batch_restore() and resolves at the end
+ * of its line -- one held line, labeled. */
+static void test_save_sets_a_deferred_batch_aside(void **state)
+{
+  struct BatchSave save;
+  char v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "SV1");
+  labeled_batch_defer(&asker);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :the line's", &asker);
+  assert_int_equal(n_sent, 0);
+  batch_save(&asker, &save);
+  assert_null(con_batch_hold(&asker_con));
+  cli_label(&asker)[0] = '\0';
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :the async answer", &asker);
+  assert_int_equal(n_sent, 1);
+  assert_false(has_tag(sent[0].text, "batch"));
+  assert_false(has_tag(sent[0].text, "label"));
+  label_pending(&asker, "SV1");
+  cli_label_responded(&asker) = 1;
+  batch_restore(&asker, &save);
+  assert_non_null(con_batch_hold(&asker_con));
+  batch_end_line(&asker);
+  assert_int_equal(n_sent, 2);
+  assert_string_equal(tag_value(sent[1].text, "label", v, sizeof(v)), "SV1");
+  assert_string_equal(body_of(sent[1].text), ":hub.test NOTICE nick :the line's");
+}
+
 /* The fan-out's own rules decide whether the asker gets a copy at all:
  * a zombie member, a channel its profile hides, a skip mask that rules
  * it out -- no copy, and the label stays pending for the ACK. */
@@ -1573,6 +1691,10 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_fwd_batch_override_consumed, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_sendrawto_one_answer, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_end_all_resolves_a_deferred_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_detach_opens_a_deferred_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_save_sets_a_deferred_batch_aside, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_save_restore_with_frames_open, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_resume_at_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_mixed_over_under, setup, teardown),
