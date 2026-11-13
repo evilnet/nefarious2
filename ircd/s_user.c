@@ -60,6 +60,7 @@
 #include "motd.h"
 #include "msg.h"
 #include "msgq.h"
+#include "nick_delay.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "parse.h"
@@ -1599,25 +1600,14 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
        * an alias-source NICK was rewritten to its local primary (see
        * m_nick.c:401), or under SVSNICK / oper-forced rename paths.
        */
-      {
-        int nick_delay = feature_int(FEAT_NICKDELAY);
-        if (nick_delay > 0 && CurrentTime < cli_nextnick(sptr))
-        {
-          cli_nextnick(sptr) += 2;
-          send_reply(sptr, ERR_NICKTOOFAST, parv[1],
-                     cli_nextnick(sptr) - CurrentTime);
-          /* Send error message */
-          sendcmdto_one(sptr, CMD_NICK, sptr, "%s", cli_name(sptr));
-          /* bounce NICK to user */
-          return 0;                /* ignore nick change! */
-        }
-        else if (nick_delay > 0) {
-          /* Limit total to 1 change per NICKDELAY seconds: */
-          cli_nextnick(sptr) += nick_delay;
-          /* However allow _maximal_ 1 extra consecutive nick change: */
-          if (cli_nextnick(sptr) < CurrentTime)
-            cli_nextnick(sptr) = CurrentTime;
-        }
+      if (nick_delay_refuses(&cli_nextnick(sptr), CurrentTime,
+                             feature_int(FEAT_NICKDELAY))) {
+        send_reply(sptr, ERR_NICKTOOFAST, parv[1],
+                   cli_nextnick(sptr) - CurrentTime);
+        /* Send error message */
+        sendcmdto_one(sptr, CMD_NICK, sptr, "%s", cli_name(sptr));
+        /* bounce NICK to user */
+        return 0;                /* ignore nick change! */
       }
       /* Invalidate all bans against the user so we check them again */
       for (member = (cli_user(sptr))->channel; member;
