@@ -1700,6 +1700,20 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
         ClearExceptValidQuiet(member);
       }
     }
+    else if (device && MyUser(device)) {
+      /* A device of ours asks for its primary's rename, and the primary is
+       * on another server, which judges it (bans, its own NICKDELAY) and
+       * answers (nick_request_answer()).  The device's own connection
+       * still has a NICKDELAY here -- its own, never the primary's: the
+       * primary's Connection on this server is its link's. */
+      if (nick_delay_refuses(&cli_nextnick(device), CurrentTime,
+                             feature_int(FEAT_NICKDELAY))) {
+        send_reply(device, ERR_NICKTOOFAST, parv[1],
+                   cli_nextnick(device) - CurrentTime);
+        sendcmdto_one(device, CMD_NICK, device, "%s", cli_name(device));
+        return 0;
+      }
+    }
     /*
      * Also set 'lastnick' to current time, if changed.
      */
