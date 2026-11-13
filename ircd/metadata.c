@@ -2708,25 +2708,30 @@ static void prereg_clear_keys(void *arg, const struct md_stamp *st,
   }
 }
 
-/** No store (b2): the session's keys are what its connections hold in
- * memory -- the merging client's own, and for a device its primary's (a
- * device attaching here loaded nothing: metadata_load_account() needs the
- * store). */
-static struct Client *nostore_holder(struct Client *cptr, const char *key)
+/** No store (b2): the session's keys are what its OTHER connections hold
+ * in memory -- a revived ghost's (its memory is the session's), a device's
+ * primary.  Never the registering client's own memory (review a2): with no
+ * store metadata_load_account() does not replace it, so it holds the
+ * client's own before-connect values, and every note would compare equal
+ * to itself.  A fresh registration has no other holder: every key reads
+ * as no row. */
+static struct Client *nostore_holder(struct prereg_merge_ctx *c)
 {
-  struct Client *p = IsBouncerAlias(cptr) ? cli_alias_primary(cptr) : NULL;
-
-  if (memory_entry(cptr, key) || !p)
-    return cptr;
-  return p;
+  if (c->revive)
+    return c->cptr;
+  if (IsBouncerAlias(c->cptr) && cli_alias_primary(c->cptr)
+      && cli_alias_primary(c->cptr) != c->cptr)
+    return cli_alias_primary(c->cptr);
+  return NULL;
 }
 
 static int nostore_row(void *arg, const char *key, struct md_version *out,
                        char *valbuf, size_t vlen)
 {
   struct prereg_merge_ctx *c = arg;
+  struct Client *h = nostore_holder(c);
 
-  return memory_row(nostore_holder(c->cptr, key), key, out, valbuf, vlen);
+  return h ? memory_row(h, key, out, valbuf, vlen) : 1;
 }
 
 static void nostore_clear_keys(void *arg, const struct md_stamp *st,
@@ -2735,12 +2740,13 @@ static void nostore_clear_keys(void *arg, const struct md_stamp *st,
                                void *each_arg)
 {
   struct prereg_merge_ctx *c = arg;
-  struct Client *p = IsBouncerAlias(c->cptr) ? cli_alias_primary(c->cptr) : NULL;
+  struct Client *h = nostore_holder(c);
 
   (void)st;   /* no store: no floor */
-  prereg_clear_memory(c->cptr, NULL, each, each_arg);
-  if (p && p != c->cptr)
-    prereg_clear_memory(p, NULL, each, each_arg);
+  /* The other holder's memory only: the registering client's own holds
+   * what it set after the CLEAR, which the notes after it apply. */
+  if (h)
+    prereg_clear_memory(h, NULL, each, each_arg);
 }
 
 static int prereg_no_row_is_state(void *arg, const char *key)
