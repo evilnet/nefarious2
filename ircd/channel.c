@@ -1406,6 +1406,28 @@ static int device_can_send_to_channel(struct Client *device,
   return nonmember_speak_rules(primary, NULL, chptr);
 }
 
+/** Forget every ban verdict cached on @a cptr's memberships (all six:
+ * plain, ~n and ~q bans and their exceptions), so the next check matches
+ * its bans afresh.  For a change of what a ban can match that does not go
+ * through the paths that already clear them (set_nick_name(), the host
+ * hiding, the alias face).
+ * @param[in] cptr A user. */
+void member_ban_cache_clear(struct Client *cptr)
+{
+  struct Membership *m;
+
+  if (!cli_user(cptr))
+    return;
+  for (m = cli_user(cptr)->channel; m; m = m->next_channel) {
+    ClearBanValid(m);
+    ClearBanValidNick(m);
+    ClearBanValidQuiet(m);
+    ClearExceptValid(m);
+    ClearExceptValidNick(m);
+    ClearExceptValidQuiet(m);
+  }
+}
+
 /** Can this member send to a channel
  *
  * A user can speak on a channel iff the member rules allow it

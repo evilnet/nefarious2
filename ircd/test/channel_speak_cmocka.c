@@ -568,6 +568,33 @@ static void remote_apass_manager_divergence(void **state)
   assert_int_equal(pm->banflags, 0);
 }
 
+/** A client promoted from alias to primary: its memberships kept the ban
+ * verdicts it cached as a primary before a demote, under its old nick, and
+ * its nick changed while it was an alias without a clear.  Read again as a
+ * primary, the stale verdict lets it speak under a banned nick until
+ * member_ban_cache_clear() (alias_set_primary() calls it at every
+ * promote). */
+static void promote_forgets_ban_cache(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#promo");
+  struct Membership *m;
+
+  fake_init(&u, "oldnick", "u.host", "uacct", 1, 0);
+  m = join(ch, &u, 0);
+  add_ban(&ch->banlist, "newnick!*@*", 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);   /* cached: not banned */
+  assert_true(m->banflags & MBFL_BANVALID_QUIET);
+  /* demoted, renamed as an alias (no clear), promoted */
+  ircd_strncpy(cli_name(&u.cli), "newnick", sizeof(cli_name(&u.cli)));
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);   /* the stale verdict */
+  member_ban_cache_clear(&u.cli);
+  assert_int_equal(m->banflags & (MBFL_BANVALID | MBFL_BANVALID_NICK
+                                  | MBFL_BANVALID_QUIET | MBFL_EXCEPTVALID
+                                  | MBFL_EXCEPTVALID_NICK | MBFL_EXCEPTVALID_QUIET), 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -583,6 +610,7 @@ int main(void)
     cmocka_unit_test(alias_of_alias_primary),
     cmocka_unit_test(zombie_device_membership),
     cmocka_unit_test(remote_apass_manager_divergence),
+    cmocka_unit_test(promote_forgets_ban_cache),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -133,6 +133,7 @@ static void orphan_arm(void);
  * hang on that pointer cannot be missed:
  * - a pointer made non-NULL, or a client that is no longer an alias (a
  *   promote), ends any hold of its input (s_bsd.c client_input_wake());
+ *   a promote also forgets its memberships' cached ban verdicts;
  * - a local alias left with none is an orphan: the orphan sweep is armed,
  *   which re-points or exits it within its window.  Before, only two of
  *   the five NULL writes armed it, and a device the D.2 demote left
@@ -142,6 +143,13 @@ static void orphan_arm(void);
 static void alias_set_primary(struct Client *a, struct Client *p)
 {
   cli_user(a)->alias_primary = p;
+  /* A promote (the client is no longer an alias): the ban verdicts its
+   * memberships cached were made under another face -- a primary that
+   * the D.2 demote or the reconcile made an alias kept them, and its nick
+   * was rewritten since without a clear (the alias face, orphan_follow(),
+   * the session rename) -- and are read again from now on. */
+  if (!p && !IsBouncerAlias(a))
+    member_ban_cache_clear(a);
   if (p || !IsBouncerAlias(a))
     client_input_wake(a);
   else if (MyConnect(a))

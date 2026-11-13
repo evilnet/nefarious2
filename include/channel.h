@@ -642,6 +642,7 @@ int number_of_zombies(struct Channel *chptr);
 extern const char* find_no_nickchange_channel(struct Client* cptr);
 extern struct Membership* find_channel_member(struct Client* cptr, struct Channel* chptr);
 extern int member_can_send_to_channel(struct Membership* member, int reveal);
+extern void member_ban_cache_clear(struct Client *cptr);
 extern int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int reveal);
 
 extern void remove_user_from_channel(struct Client *sptr, struct Channel *chptr);
