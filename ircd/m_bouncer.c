@@ -217,6 +217,11 @@ static int bouncer_resume(struct Client *sptr, const char *token)
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
 
+  /* The line's answer ends here (its deferred labeled batch, m_bouncer()):
+   * the catch-up below is not part of it, and its pages may pause on the
+   * sendQ and outlive the line -- as on the registration and attach paths. */
+  labeled_batch_end(sptr);
+
   /* Async auto-replay for clients without draft/chathistory, gated
    * by PERSISTENCE REPLAY (account-global or active-profile). */
   if ((!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)

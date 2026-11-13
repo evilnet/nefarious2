@@ -1343,6 +1343,13 @@ void replay_start_catchup(struct Client *sptr, time_t since_time, int limit)
 {
   const char *cursor = cli_attach_cursor(sptr);
 
+  /* The catch-up is not the answer of the line that starts it, and its
+   * pages may pause on the sendQ and outlive that line: a labeled batch
+   * still open on the answer (a deferred one included, which would count
+   * and hold the replay's lines) ends here, before the first replay line.
+   * Every caller ends it already; this keeps a new one from forgetting. */
+  labeled_batch_end(sptr);
+
   if (cursor[0]) {
     char ts[HISTORY_TIMESTAMP_LEN];
 
