@@ -262,7 +262,9 @@ enum hm_admit {
   HM_ADMIT_CONTEXT,  /**< a context child, counted against its own cap */
   HM_DROP_CONTEXT,   /**< a context child past its cap: dropped; context
                       *   loss is never partial */
-  HM_DROP_ROW        /**< a row past the row cap: dropped, the page is cut */
+  HM_DROP_ROW,       /**< a row past the row cap: dropped, the page is cut */
+  HM_DROP_INVALID    /**< a row whose type this server does not know (a
+                      *   peer's): dropped, counted nowhere */
 };
 
 /** Take one row (@a is_context: a declared or derived context child) against

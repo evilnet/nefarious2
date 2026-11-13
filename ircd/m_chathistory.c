@@ -1282,7 +1282,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
     /* The row types the page was requested with (@a type_mask, 0 = all):
      * the storage servers filtered with the same mask, so what is sent is
      * what was counted -- not a filter with today's capabilities. */
-    if (type_mask && !(type_mask & (1u << msg->type)))
+    if (!history_type_wanted(type_mask, msg->type))
       continue;
 
     /* Skip typing-only TAGMSGs (legacy data stored before typing filter fix).
@@ -5931,6 +5931,12 @@ static void add_fed_child(struct FedRequest *req, const char *msgid,
   char parent[HISTORY_MSGID_LEN] = "";
   char dtags[sizeof(req->k_decl[0].tags)] = "";
   int i;
+
+  /* A type out of range (CH R / B carry it as a number) is never taken. */
+  if (!history_type_valid(type)) {
+    fed_children_dropped++;
+    return;
+  }
 
   for (i = 0; i < req->k_decl_count; i++) {
     if (strcmp(req->k_decl[i].child, msgid) == 0) {

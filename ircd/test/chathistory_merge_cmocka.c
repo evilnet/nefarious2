@@ -1027,6 +1027,41 @@ static struct HistoryMessage *bare_tag(const char *msgid, const char *ts)
   return typed(msgid, ts, HISTORY_TAGMSG, NULL);
 }
 
+/* A row type comes from a peer as a number (CH R / B): one this server
+ * does not know -- negative, or at or past HISTORY_TYPE_COUNT, where a
+ * shift by it would be undefined and a type >= 32 would slip past a type
+ * mask -- is dropped as it comes in, counted nowhere, and no filter lets
+ * one through. */
+static void test_leg_drops_out_of_range_type(void **s)
+{
+  static const int bad[] = { -1, HISTORY_TYPE_COUNT, 31, 32, 33, 64, 1000 };
+  struct hm_page_leg leg;
+  struct HistoryMessage *m;
+  size_t i;
+  unsigned int all = (1u << HISTORY_TYPE_COUNT) - 1;
+
+  (void)s;
+  memset(&leg, 0, sizeof(leg));
+  for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    m = row("X", "1.000", "");
+    m->type = (enum HistoryMessageType)bad[i];
+    assert_int_equal(hm_leg_add(&leg, m, NULL, 500, 500), HM_DROP_INVALID);
+    assert_null(leg.msgs);
+    assert_int_equal(leg.rows, 0);
+    assert_int_equal(leg.ctx, 0);
+    /* and no filter passes it: not the "every type" mask, not a full one */
+    assert_false(history_type_wanted(0, bad[i]));
+    assert_false(history_type_wanted(all, bad[i]));
+    assert_false(history_type_wanted(0xffffffffu, bad[i]));
+  }
+  /* a known type still goes in, and passes the masks that name it */
+  assert_int_equal(hm_leg_add(&leg, row("P", "1.000", ""), NULL, 500, 500), HM_ADMIT_ROW);
+  assert_true(history_type_wanted(0, HISTORY_PRIVMSG));
+  assert_true(history_type_wanted(1u << HISTORY_PRIVMSG, HISTORY_PRIVMSG));
+  assert_false(history_type_wanted(1u << HISTORY_NOTICE, HISTORY_PRIVMSG));
+  hm_leg_free(&leg);
+}
+
 /* Remove-on-match: a responder sends each CH C right before its row, so
  * the 65th and later declarations are honoured exactly -- 70 children of
  * one row, each declared then sent, all context, the table never full.
@@ -2133,6 +2168,7 @@ int main(void)
     cmocka_unit_test(test_trim_around_same_ms),
     cmocka_unit_test(test_trim_around_under_limit),
     cmocka_unit_test(test_context_parent),
+    cmocka_unit_test(test_leg_drops_out_of_range_type),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

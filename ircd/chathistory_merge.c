@@ -916,6 +916,13 @@ enum hm_admit hm_leg_add(struct hm_page_leg *leg, struct HistoryMessage *msg,
   struct HistoryMessage **tp;
   enum hm_admit a;
 
+  /* A type out of range (a peer's) is never taken: nothing downstream
+   * filters, shifts or indexes by it. */
+  if (!history_type_valid(msg->type)) {
+    history_free_messages(msg);
+    return HM_DROP_INVALID;
+  }
+
   if (hm_leg_take_decl(leg, msg->msgid, parent, sizeof(parent), tags, sizeof(tags))) {
     msg->is_context = 1;
     ircd_strncpy(msg->ctx_parent, parent, sizeof(msg->ctx_parent));

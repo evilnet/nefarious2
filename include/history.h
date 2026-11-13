@@ -119,6 +119,22 @@ enum HistoryMessageType {
   ,HISTORY_TYPE_COUNT       /**< one past the last type (for masks) */
 };
 
+/** Is @a type a row type this server knows?  A row's type can come from
+ * another server (CH R / B) or from stored data: it is checked where a
+ * row comes in (hm_leg_add(), add_fed_child(), the record decoder) and
+ * before it is ever used as a shift count or an index. */
+static inline int history_type_valid(int type)
+{
+  return (unsigned int)type < (unsigned int)HISTORY_TYPE_COUNT;
+}
+
+/** Does a row of @a type pass the type mask @a mask (0 = every type)?  A
+ * type out of range never does -- shifting by it is undefined. */
+static inline int history_type_wanted(unsigned int mask, int type)
+{
+  return history_type_valid(type) && (!mask || (mask & (1u << type)));
+}
+
 /** Stored message for chathistory retrieval.
  * This structure is used both for storage and for returning
  * query results to the caller.

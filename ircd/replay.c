@@ -677,7 +677,7 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
 
     /* Only the row types the page was read with (event-playback and the
      * other per-type capabilities, as they were then). */
-    if (rs->type_mask && !(rs->type_mask & (1u << msg->type))) {
+    if (!history_type_wanted(rs->type_mask, msg->type)) {
       rs->current = msg->next;
       continue;
     }
