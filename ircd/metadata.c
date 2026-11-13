@@ -2376,14 +2376,11 @@ int metadata_prereg_record(struct Client *cptr, const char *key,
   return 0;
 }
 
-/** See include/metadata.h. */
-int metadata_prereg_clear_fits(struct Client *cptr, const char *const *keys,
-                               int n)
+/** Free one before-connect note. */
+static void prereg_note_free(struct MetadataPrereg *w)
 {
-  if (!cptr || !MyConnect(cptr) || IsRegistered(cptr))
-    return 1;
-  return md_prereg_deletes_fit(cli_metadata_prereg(cptr), keys, n,
-                               feature_int(FEAT_METADATA_MAX_KEYS));
+  MyFree(w->value);
+  MyFree(w);
 }
 
 /** Free a before-connect write list. */
@@ -2393,8 +2390,67 @@ static void prereg_list_free(struct MetadataPrereg *w)
 
   for (; w; w = next) {
     next = w->next;
-    MyFree(w->value);
-    MyFree(w);
+    prereg_note_free(w);
+  }
+}
+
+/** See include/metadata.h. */
+int metadata_prereg_record_clear(struct Client *cptr, const struct md_stamp *st)
+{
+  struct MetadataPrereg *marker;
+
+  if (!cptr || !st)
+    return -1;
+  marker = (struct MetadataPrereg *)MyMalloc(sizeof(struct MetadataPrereg));
+  if (!marker)
+    return -1;
+  memset(marker, 0, sizeof(*marker));
+  marker->st = *st;
+  md_prereg_note_clear(&cli_metadata_prereg(cptr), marker, prereg_note_free);
+  return 0;
+}
+
+/** A key metadata_account_clear_keys() collected. */
+struct clear_key {
+  struct clear_key *next;
+  int vis;
+  char key[1];   /* allocated to fit */
+};
+
+/** metadata_account_foreach_version() callback: a live user key. */
+static int clear_key_cb(const char *key, const struct md_version *v, void *arg)
+{
+  struct clear_key **head = arg, *k;
+
+  if (v->tombstone || metadata_key_is_server_managed(key)
+      || !md_key_replicable(key))
+    return 0;
+  k = (struct clear_key *)MyMalloc(sizeof(*k) + strlen(key));
+  if (!k)
+    return 0;
+  strcpy(k->key, key);
+  k->vis = v->vis;
+  k->next = *head;
+  *head = k;
+  return 0;
+}
+
+/** See include/metadata.h. */
+void metadata_account_clear_keys(const char *account,
+                                 void (*each)(void *arg, const char *key, int vis),
+                                 void *arg)
+{
+  struct clear_key *keys = NULL, *k, *next;
+
+  if (!account || !each || !metadata_lmdb_is_available())
+    return;
+  /* Collected first: the walk's iterator must not see each's writes. */
+  metadata_account_foreach_version(account, clear_key_cb, &keys);
+  for (k = keys; k; k = k->next)
+    each(arg, k->key, k->vis);
+  for (k = keys; k; k = next) {
+    next = k->next;
+    MyFree(k);
   }
 }
 
@@ -2486,6 +2542,16 @@ static void prereg_refuse(void *arg, const char *key, enum md_prereg_verdict why
   }
 }
 
+static void prereg_clear_keys(void *arg,
+                              void (*each)(void *each_arg, const char *key,
+                                           int vis),
+                              void *each_arg)
+{
+  struct prereg_merge_ctx *c = arg;
+
+  metadata_account_clear_keys(c->account, each, each_arg);
+}
+
 static int prereg_no_row_is_state(void *arg, const char *key)
 {
   (void)arg;
@@ -2509,8 +2575,12 @@ static int prereg_no_row_is_state(void *arg, const char *key)
  * peers (mdsync_on_attach()) must not bring back an older write this
  * server missed.  A write that no longer fits the account (its key cap, a
  * value limit lowered since) is refused with the standard reply SET would
- * have given, before the registration burst that shows what stands.  Keys
- * the client did not write stay as the account has them
+ * have given, before the registration burst that shows what stands.  A
+ * CLEAR noted before registration (metadata_prereg_record_clear()) voids
+ * the notes before it and deletes every live user key of the account
+ * (metadata_account_clear_keys()) under its own stamp, each told and sent
+ * as a CLEAR right after login would, before the notes after it apply.
+ * Otherwise keys the client did not write stay as the account has them
  * (register_user()'s metadata_load_account() loaded them).
  *
  * On the path that introduces the client by N after the burst
@@ -2523,11 +2593,11 @@ static void metadata_prereg_merge(struct Client *cptr, int on_network)
 {
   static const struct md_prereg_ops store_ops = {
     prereg_row, prereg_store, prereg_apply, prereg_send, prereg_refuse,
-    prereg_no_row_is_state
+    prereg_no_row_is_state, prereg_clear_keys
   };
   static const struct md_prereg_ops nostore_ops = {
     NULL, NULL, prereg_apply, prereg_send, prereg_refuse,
-    prereg_no_row_is_state
+    prereg_no_row_is_state, NULL
   };
   struct MetadataPrereg *list = cli_metadata_prereg(cptr);
   struct prereg_merge_ctx c;

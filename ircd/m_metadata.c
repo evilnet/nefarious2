@@ -1120,12 +1120,15 @@ static void md_clear_key_free(struct md_clear_key *head)
  * residue: every live row that is not draft/persistence/ and not an
  * internal key (md_key_replicable: last_present, a key the wire
  * validator refuses -- push-2 final fix wave, M-2). */
-static int md_clear_residue_cb(const char *key, const struct md_version *v, void *arg)
+/** metadata_account_clear_keys() callback for a user CLEAR's store
+ * residue: delete the row, stamped, everywhere (metadata_account_write). */
+struct md_clear_residue { struct Client *sptr; const char *account; };
+
+static void md_clear_residue_one(void *arg, const char *key, int vis)
 {
-  if (!v->tombstone && !metadata_key_is_server_managed(key)
-      && md_key_replicable(key))
-    md_clear_key_push((struct md_clear_key **)arg, key, v->vis);
-  return 0;
+  struct md_clear_residue *r = arg;
+
+  metadata_account_write(r->sptr, r->account, key, NULL, vis);
 }
 
 /** METADATA CLEAR on a user: delete each of its keys the way SET deletes
@@ -1158,54 +1161,47 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
             || md_key_replicable(entry->key)))
       md_clear_key_push(&keys, entry->key, entry->visibility);
 
-  /* Before registration the deletes are noted, under a bound
-   * (metadata_prereg_record()).  A CLEAR is noted in full or refused
-   * whole, before anything is answered: after registration a CLEAR always
-   * deletes every key it lists. */
-  {
-    const char **names = NULL;
-    int n = 0, fits;
-
-    for (k = keys; k; k = k->next)
-      n++;
-    if (n && MyConnect(target_client) && !IsRegistered(target_client)) {
-      names = (const char **)MyMalloc(n * sizeof(*names));
-      n = 0;
-      for (k = keys; k; k = k->next)
-        names[n++] = k->key;
-    }
-    fits = !names || metadata_prereg_clear_fits(target_client, names, n);
-    MyFree(names);
-    if (!fits) {
-      send_fail(sptr, "METADATA", "LIMIT_REACHED", display_target,
-                "Too many metadata changes before registration");
-      md_clear_key_free(keys);
-      return;
-    }
-  }
-
   send_batch_start(sptr, "metadata");
   for (k = keys; k; k = k->next)
     send_reply(sptr, RPL_KEYNOTSET, display_target, k->key);
   send_batch_end(sptr);
 
+  /* Before registration (owner, 2026-11-13: a CLEAR before registration
+   * clears it all, as the spec says CLEAR does).  The answer above names
+   * the keys the client has in memory -- all it may be told of: the keys
+   * it set, and for a client that already carries an account, what LIST
+   * would show it now; never the account's other keys, for which it may
+   * not be authenticated yet.  They leave its memory; the CLEAR itself is
+   * noted, stamped now (metadata_prereg_record_clear()), and voids every
+   * earlier note.  When registration ends logged in and metadata-aware,
+   * it deletes every live user key of the account, as a CLEAR right after
+   * login would, before the notes made after it apply; without a login,
+   * the client's own keys were all it meant. */
+  if (MyConnect(target_client) && !IsRegistered(target_client)) {
+    struct md_stamp st = metadata_stamp_now();
+
+    for (k = keys; k; k = k->next)
+      metadata_client_memory_set(target_client, k->key, NULL, k->vis);
+    md_clear_key_free(keys);
+    if (metadata_prereg_record_clear(target_client, &st) < 0)
+      send_fail(sptr, "METADATA", "INTERNAL_ERROR", display_target,
+                "Failed to clear metadata");
+    return;
+  }
+
   for (k = keys; k; k = k->next)
     metadata_client_write(sptr, target_client, k->key, NULL, k->vis);
   md_clear_key_free(keys);
 
-  /* The account's other rows: only once registered.  Before, a client
-   * that already carries an account (a trusted WEBIRC gateway's) would
-   * delete them before it is known whether it ends metadata-aware; its
-   * CLEAR deletes the keys it sees, noted like any before-connect write. */
-  if (cli_user(target_client)->account[0] && metadata_lmdb_is_available()
-      && (!MyConnect(target_client) || IsRegistered(target_client))) {
-    const char *account = cli_user(target_client)->account;
+  /* The account's other rows: every live user key in the store that no
+   * client here held in memory (metadata_account_clear_keys(), the set a
+   * before-connect CLEAR deletes at the merge too). */
+  if (cli_user(target_client)->account[0] && metadata_lmdb_is_available()) {
+    struct md_clear_residue r;
 
-    keys = NULL;
-    metadata_account_foreach_version(account, md_clear_residue_cb, &keys);
-    for (k = keys; k; k = k->next)
-      metadata_account_write(sptr, account, k->key, NULL, k->vis);
-    md_clear_key_free(keys);
+    r.sptr = sptr;
+    r.account = cli_user(target_client)->account;
+    metadata_account_clear_keys(r.account, md_clear_residue_one, &r);
   }
 }
 

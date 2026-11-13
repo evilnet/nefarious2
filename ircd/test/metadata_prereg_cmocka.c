@@ -166,11 +166,29 @@ static int f_no_row_is_state(void *ctx, const char *key)
   return f->mode_key && !strcmp(f->mode_key, key);
 }
 
+/* Every live key, collected first (the ircd's walk does the same). */
+static void f_clear_keys(void *ctx, void (*each)(void *arg, const char *key, int vis),
+                         void *arg)
+{
+  struct fake *f = ctx;
+  char keys[ACCT_MAX][MD_PREREG_KEY_LEN];
+  int vis[ACCT_MAX];
+  int i, n = 0;
+
+  for (i = 0; i < ACCT_MAX; i++)
+    if (f->rows[i].used && !f->rows[i].v.tombstone) {
+      strcpy(keys[n], f->rows[i].key);
+      vis[n++] = f->rows[i].v.vis;
+    }
+  for (i = 0; i < n; i++)
+    each(arg, keys[i], vis[i]);
+}
+
 static const struct md_prereg_ops store_ops = {
-  f_row, f_store, f_apply, f_send, f_refuse, f_no_row_is_state
+  f_row, f_store, f_apply, f_send, f_refuse, f_no_row_is_state, f_clear_keys
 };
 static const struct md_prereg_ops nostore_ops = {
-  NULL, NULL, f_apply, f_send, f_refuse, f_no_row_is_state
+  NULL, NULL, f_apply, f_send, f_refuse, f_no_row_is_state, NULL
 };
 
 static int live_keys(const struct fake *f)
@@ -218,6 +236,13 @@ static void note(struct notes *ns, const char *key, const char *value, uint64_t 
   if (ns->count)
     ns->n[ns->count - 1].next = p;
   ns->count++;
+}
+
+/* A CLEAR noted in place (a hand-built list may put notes before it). */
+static void note_clear(struct notes *ns, uint64_t ms)
+{
+  note(ns, "", NULL, ms);
+  ns->n[ns->count - 1].clear = 1;
 }
 
 /* The ircd's merge, the ircd's way: the account's live key count, the cap. */
@@ -554,9 +579,6 @@ static void test_no_store(void **state)
 static void test_note_bound(void **state)
 {
   struct notes ns;
-  const char *clear2[] = { "s1", "s2" };
-  const char *clear3[] = { "s1", "s2", "x" };
-
   (void)state;
   memset(&ns, 0, sizeof(ns));
   assert_true(md_prereg_fits(NULL, "a", 0, 2));
@@ -571,11 +593,166 @@ static void test_note_bound(void **state)
   assert_true(md_prereg_fits(&ns.n[0], "S1", 1, 2));    /* s1 becomes a delete */
   assert_true(md_prereg_fits(&ns.n[0], "d1", 1, 1));    /* d1 replaced */
   assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1));
-  /* A CLEAR: all of its deletes, or none. */
-  assert_true(md_prereg_deletes_fit(&ns.n[0], clear2, 2, 3));
-  assert_false(md_prereg_deletes_fit(&ns.n[0], clear2, 2, 2));
-  assert_false(md_prereg_deletes_fit(&ns.n[0], clear3, 3, 3));
-  assert_true(md_prereg_deletes_fit(NULL, clear3, 3, 3));
+  /* A CLEAR is not a delete note: it does not count. */
+  memset(&ns, 0, sizeof(ns));
+  note_clear(&ns, 1);
+  note(&ns, "d1", NULL, 2);
+  assert_true(md_prereg_fits(&ns.n[0], "d2", 1, 2));
+  assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1));
+}
+
+/* --- A CLEAR before registration (owner, 2026-11-13: it clears it all) --- */
+
+static int released;
+static void count_release(struct MetadataPrereg *n) { (void)n; released++; }
+
+/* Noting a CLEAR voids every earlier note; a second CLEAR replaces the
+ * first. */
+static void test_note_clear(void **state)
+{
+  struct notes ns;
+  struct MetadataPrereg *list, m1, m2;
+
+  (void)state;
+  memset(&ns, 0, sizeof(ns));
+  memset(&m1, 0, sizeof(m1));
+  memset(&m2, 0, sizeof(m2));
+  note(&ns, "a", "1", 1);
+  note(&ns, "b", NULL, 2);
+  list = &ns.n[0];
+  released = 0;
+  m1.st.ms = 3;
+  md_prereg_note_clear(&list, &m1, count_release);
+  assert_int_equal(released, 2);
+  assert_ptr_equal(list, &m1);
+  assert_true(m1.clear);
+  assert_null(m1.next);
+  m2.st.ms = 4;
+  md_prereg_note_clear(&list, &m2, count_release);
+  assert_int_equal(released, 3);
+  assert_ptr_equal(list, &m2);
+}
+
+/* A CLEAR then a set: every live key of the account is deleted under the
+ * CLEAR's stamp (told and sent), then the set applies -- including a set
+ * of a key the CLEAR just deleted. */
+static void test_clear_then_set(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "x", VIS_PUBLIC);  row_put(&f, "a", &v);
+  v = live(100, "y", VIS_PRIVATE); row_put(&f, "b", &v);
+  v = tomb(100);                   row_put(&f, "c", &v);
+  note_clear(&ns, 200);
+  note(&ns, "b", "new", 201);
+  assert_int_equal(merge(&f, &ns, 20), 3);   /* a, b deleted; b set */
+  assert_null(value_of(&f, "a"));
+  assert_true(row_find(&f, "a")->v.st.ms == 200);
+  assert_string_equal(value_of(&f, "b"), "new");
+  assert_true(row_find(&f, "b")->v.st.ms == 201);
+  assert_true(row_find(&f, "c")->v.st.ms == 100);   /* already gone: untouched */
+  assert_true(logged(f.applied, f.napplied, "a"));
+  assert_true(logged(f.sent, f.nsent, "a"));
+  assert_int_equal(f.nsent, 3);
+}
+
+/* Notes before a CLEAR never apply (a hand-built list: the ircd voids them
+ * when the CLEAR is noted, the merge as well); with two CLEARs only the
+ * last counts. */
+static void test_set_then_clear_and_two_clears(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "x", VIS_PUBLIC); row_put(&f, "a", &v);
+  note(&ns, "early", "1", 200);
+  note_clear(&ns, 201);
+  note(&ns, "mid", "2", 202);
+  note_clear(&ns, 203);
+  note(&ns, "late", "3", 204);
+  merge(&f, &ns, 20);
+  assert_null(row_find(&f, "early"));
+  assert_null(row_find(&f, "mid"));
+  assert_string_equal(value_of(&f, "late"), "3");
+  assert_null(value_of(&f, "a"));
+  assert_true(row_find(&f, "a")->v.st.ms == 203);   /* the last CLEAR's stamp */
+}
+
+/* A row written after the CLEAR (another device, another server) stands. */
+static void test_clear_newer_row_survives(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(300, "later", VIS_PUBLIC); row_put(&f, "a", &v);
+  v = live(100, "old", VIS_PUBLIC);   row_put(&f, "b", &v);
+  note_clear(&ns, 200);
+  assert_int_equal(merge(&f, &ns, 20), 1);
+  assert_string_equal(value_of(&f, "a"), "later");
+  assert_false(logged(f.sent, f.nsent, "a"));
+  assert_null(value_of(&f, "b"));
+}
+
+/* The CLEAR frees places: an account at its cap takes as many new keys
+ * after it; without it the first new key is refused. */
+static void test_clear_and_the_cap(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "a", VIS_PUBLIC); row_put(&f, "k1", &v); row_put(&f, "k2", &v);
+  note_clear(&ns, 200);
+  note(&ns, "n1", "1", 201);
+  note(&ns, "n2", "2", 202);
+  assert_int_equal(merge(&f, &ns, 2), 4);
+  assert_int_equal(f.nrefused, 0);
+  assert_int_equal(live_keys(&f), 2);
+  assert_string_equal(value_of(&f, "n2"), "2");
+
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  row_put(&f, "k1", &v); row_put(&f, "k2", &v);
+  note(&ns, "n1", "1", 201);
+  merge(&f, &ns, 2);
+  assert_int_equal(f.nrefused, 1);
+  assert_int_equal(f.refused_why[0], MD_PREREG_LIMIT_KEYS);
+}
+
+/* A CLEAR with no store deletes nothing of the account's; and no merge at
+ * all without a login or for a client that is not metadata-aware (the
+ * ircd asks md_prereg_should_merge() first: the CLEAR then meant the
+ * client's own keys, already gone from its memory). */
+static void test_clear_without_store_or_merge(void **state)
+{
+  struct fake f;
+  struct notes ns;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  note_clear(&ns, 200);
+  note(&ns, "a", "1", 201);
+  assert_int_equal(md_prereg_merge(&ns.n[0], 0, INT_MAX, 300, &nostore_ops, &f), 1);
+  assert_int_equal(f.nsent, 1);
+  assert_false(md_prereg_should_merge(0, 1));
+  assert_false(md_prereg_should_merge(1, 0));
 }
 
 /* No login, or not metadata-aware when registration ends: the account is
@@ -605,6 +782,12 @@ int main(void)
     cmocka_unit_test(test_store_keeps_its_row),
     cmocka_unit_test(test_no_store),
     cmocka_unit_test(test_note_bound),
+    cmocka_unit_test(test_note_clear),
+    cmocka_unit_test(test_clear_then_set),
+    cmocka_unit_test(test_set_then_clear_and_two_clears),
+    cmocka_unit_test(test_clear_newer_row_survives),
+    cmocka_unit_test(test_clear_and_the_cap),
+    cmocka_unit_test(test_clear_without_store_or_merge),
     cmocka_unit_test(test_no_merge_without_login_or_awareness),
   };
 

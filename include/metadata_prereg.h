@@ -49,10 +49,18 @@
  * login during registration replaces with the account's rows) until
  * registration ends. */
 struct MetadataPrereg {
-  char key[MD_PREREG_KEY_LEN];          /**< Key name */
+  char key[MD_PREREG_KEY_LEN];          /**< Key name ("" for a CLEAR) */
   char *value;                          /**< Value, or NULL: a delete */
   int visibility;                       /**< Visibility level of a set */
-  struct md_stamp st;                   /**< When its SET was accepted */
+  int clear;                            /**< A CLEAR (owner, 2026-11-13: a
+                                         *   CLEAR before registration
+                                         *   clears it all): every note
+                                         *   before it is void; at the merge
+                                         *   it deletes every live user key
+                                         *   of the account, under its own
+                                         *   stamp, before the notes after
+                                         *   it apply */
+  struct md_stamp st;                   /**< When its SET (CLEAR) was accepted */
   struct MetadataPrereg *next;          /**< Next write */
 };
 
@@ -136,6 +144,13 @@ struct md_prereg_ops {
   /** Non-zero when @a key's having no row is a state of its own
    * (md_prereg_decide()'s no_row_is_state).  NULL: never. */
   int (*no_row_is_state)(void *ctx, const char *key);
+  /** Call @a each with every live user key of the account in the store
+   * (and its visibility) -- the keys a CLEAR after login deletes from the
+   * store -- once the walk is over, so @a each may write the store.  NULL:
+   * no store (a CLEAR deletes nothing of the account's). */
+  void (*clear_keys)(void *ctx,
+                     void (*each)(void *arg, const char *key, int vis),
+                     void *arg);
 };
 
 /** Merge the before-connect writes @a list into the account: each write
@@ -143,6 +158,10 @@ struct md_prereg_ops {
  * store + apply + send, for STAMP store + send, for a refusal refuse.  A
  * store that fails, or keeps its own row (it read otherwise than the
  * decision did), is refused as MD_PREREG_ERROR; nothing is told or sent.
+ * A CLEAR voids every note before it (only the last CLEAR counts) and
+ * becomes a delete, under its own stamp, of each key ops->clear_keys
+ * names -- each through the same decision, so a row written after the
+ * CLEAR stands.
  * @param[in] list The writes.
  * @param[in] user_keys The account's user-managed key count.
  * @param[in] max_keys METADATA_MAX_KEYS (INT_MAX: no cap to apply).
@@ -159,7 +178,8 @@ extern int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
  * is refused when the notes of its kind -- sets, or deletes -- already
  * number @a max_keys.  The account never holds more than METADATA_MAX_KEYS
  * user keys, so no more sets or deletes than that can matter; the bound on
- * what a registering client can make us keep.
+ * what a registering client can make us keep.  A CLEAR is not counted:
+ * there is never more than one (md_prereg_note_clear()).
  * @param[in] list The notes.
  * @param[in] key The key written.
  * @param[in] is_delete Non-zero for a delete.
@@ -168,11 +188,15 @@ extern int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
 extern int md_prereg_fits(const struct MetadataPrereg *list, const char *key,
                           int is_delete, int max_keys);
 
-/** Whether deletes of all @a n keys @a keys (distinct) fit at once, under
- * md_prereg_fits()'s bound -- a CLEAR before registration, recorded in
- * full or not at all.
- * @return non-zero if they fit. */
-extern int md_prereg_deletes_fit(const struct MetadataPrereg *list,
-                                 const char *const *keys, int n, int max_keys);
+/** Note a CLEAR: every note in @a *list goes (@a release frees each; it
+ * may be NULL when the caller owns none), and @a marker -- the caller's,
+ * its clear flag and stamp set -- becomes the list's only note.  A second
+ * CLEAR replaces the first the same way.
+ * @param[in,out] list The notes.
+ * @param[in] marker The CLEAR note.
+ * @param[in] release Frees a note, or NULL. */
+extern void md_prereg_note_clear(struct MetadataPrereg **list,
+                                 struct MetadataPrereg *marker,
+                                 void (*release)(struct MetadataPrereg *));
 
 #endif /* INCLUDED_metadata_prereg_h */

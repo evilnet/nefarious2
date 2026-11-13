@@ -93,64 +93,135 @@ enum md_prereg_verdict md_prereg_decide(const struct md_version *stored,
   return MD_PREREG_APPLY;
 }
 
+/** md_prereg_merge()'s state across the writes. */
+struct merge_state {
+  const struct md_prereg_ops *ops;
+  void *ctx;
+  int user_keys;
+  int max_keys;
+  size_t max_value_bytes;
+  int applied;
+  struct md_stamp clear_st;   /* the CLEAR's stamp, for clear_one() */
+};
+
+/** One write @a w of @a key: decide, then store, tell and send. */
+static void merge_one(struct merge_state *m, const char *key,
+                      const struct md_version *w)
+{
+  const struct md_prereg_ops *ops = m->ops;
+  struct md_version stored;
+  char valbuf[MD_PREREG_VALUE_LEN];
+  enum md_prereg_verdict v;
+  int rc = 1;
+
+  if (ops->row && (rc = ops->row(m->ctx, key, &stored, valbuf,
+                                 sizeof(valbuf))) < 0) {
+    ops->refuse(m->ctx, key, MD_PREREG_ERROR);
+    return;
+  }
+  v = md_prereg_decide(rc == 0 ? &stored : NULL, w,
+                       ops->no_row_is_state
+                         && ops->no_row_is_state(m->ctx, key),
+                       &m->user_keys, m->max_keys, m->max_value_bytes);
+  switch (v) {
+  case MD_PREREG_APPLY:
+  case MD_PREREG_STAMP:
+    break;
+  case MD_PREREG_LIMIT_KEYS:
+  case MD_PREREG_LIMIT_VALUE:
+    ops->refuse(m->ctx, key, v);
+    return;
+  default:
+    return;             /* SAME, ABSENT, SUPERSEDED: the row stands */
+  }
+
+  if (ops->store) {
+    /* The store merges by the same LWW rule the decision just applied
+     * to the same row, so it takes the write: a store that keeps its own
+     * row (0) disagrees with what it was read as, and the write is lost
+     * -- reported like a store error, as a SET's failed write is. */
+    rc = ops->store(m->ctx, key, w);
+    if (rc != 1) {
+      ops->refuse(m->ctx, key, MD_PREREG_ERROR);
+      return;
+    }
+  }
+  if (v == MD_PREREG_APPLY) {
+    ops->apply(m->ctx, key, w);
+    m->applied++;
+  }
+  ops->send(m->ctx, key, w);
+}
+
+/** A CLEAR's delete of one of the account's keys, under the CLEAR's
+ * stamp, the key's own visibility (it scopes the notification). */
+static void clear_one(void *arg, const char *key, int vis)
+{
+  struct merge_state *m = arg;
+  struct md_version w;
+
+  w.st = m->clear_st;
+  w.tombstone = 1;
+  w.vis = vis;
+  w.value = NULL;
+  w.vlen = 0;
+  merge_one(m, key, &w);
+}
+
 int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
                     int max_keys, size_t max_value_bytes,
                     const struct md_prereg_ops *ops, void *ctx)
 {
-  const struct MetadataPrereg *n;
-  int applied = 0;
+  const struct MetadataPrereg *n, *from = list;
+  struct merge_state m;
 
-  for (n = list; n; n = n->next) {
-    struct md_version w, stored;
-    char valbuf[MD_PREREG_VALUE_LEN];
-    enum md_prereg_verdict v;
-    int rc = 1;
+  m.ops = ops;
+  m.ctx = ctx;
+  m.user_keys = user_keys;
+  m.max_keys = max_keys;
+  m.max_value_bytes = max_value_bytes;
+  m.applied = 0;
 
+  /* Only the last CLEAR counts, and nothing noted before it. */
+  for (n = list; n; n = n->next)
+    if (n->clear)
+      from = n;
+
+  for (n = from; n; n = n->next) {
+    struct md_version w;
+
+    if (n->clear) {
+      m.clear_st = n->st;
+      if (ops->clear_keys)
+        ops->clear_keys(ctx, clear_one, &m);
+      continue;
+    }
     w.st = n->st;
     w.tombstone = (n->value == NULL);
     w.vis = n->visibility;
     w.value = n->value;
     w.vlen = n->value ? strlen(n->value) : 0;
-
-    if (ops->row && (rc = ops->row(ctx, n->key, &stored, valbuf,
-                                   sizeof(valbuf))) < 0) {
-      ops->refuse(ctx, n->key, MD_PREREG_ERROR);
-      continue;
-    }
-    v = md_prereg_decide(rc == 0 ? &stored : NULL, &w,
-                         ops->no_row_is_state
-                           && ops->no_row_is_state(ctx, n->key),
-                         &user_keys, max_keys, max_value_bytes);
-    switch (v) {
-    case MD_PREREG_APPLY:
-    case MD_PREREG_STAMP:
-      break;
-    case MD_PREREG_LIMIT_KEYS:
-    case MD_PREREG_LIMIT_VALUE:
-      ops->refuse(ctx, n->key, v);
-      continue;
-    default:
-      continue;         /* SAME, ABSENT, SUPERSEDED: the row stands */
-    }
-
-    if (ops->store) {
-      /* The store merges by the same LWW rule the decision just applied
-       * to the same row, so it takes the write: a store that keeps its own
-       * row (0) disagrees with what it was read as, and the write is lost
-       * -- reported like a store error, as a SET's failed write is. */
-      rc = ops->store(ctx, n->key, &w);
-      if (rc != 1) {
-        ops->refuse(ctx, n->key, MD_PREREG_ERROR);
-        continue;
-      }
-    }
-    if (v == MD_PREREG_APPLY) {
-      ops->apply(ctx, n->key, &w);
-      applied++;
-    }
-    ops->send(ctx, n->key, &w);
+    merge_one(&m, n->key, &w);
   }
-  return applied;
+  return m.applied;
+}
+
+void md_prereg_note_clear(struct MetadataPrereg **list,
+                          struct MetadataPrereg *marker,
+                          void (*release)(struct MetadataPrereg *))
+{
+  struct MetadataPrereg *n, *next;
+
+  for (n = *list; n; n = next) {
+    next = n->next;
+    if (release)
+      release(n);
+  }
+  marker->clear = 1;
+  marker->key[0] = '\0';
+  marker->value = NULL;
+  marker->next = NULL;
+  *list = marker;
 }
 
 /** Count @a list's notes by kind, leaving out the one for @a except. */
@@ -159,7 +230,7 @@ static void count_notes(const struct MetadataPrereg *list, const char *except,
 {
   *sets = *deletes = 0;
   for (; list; list = list->next) {
-    if (except && key_eq(list->key, except))
+    if (list->clear || (except && key_eq(list->key, except)))
       continue;
     if (list->value)
       (*sets)++;
@@ -177,25 +248,4 @@ int md_prereg_fits(const struct MetadataPrereg *list, const char *key,
     max_keys = 0;
   count_notes(list, key, &sets, &deletes);
   return (is_delete ? deletes : sets) < max_keys;
-}
-
-int md_prereg_deletes_fit(const struct MetadataPrereg *list,
-                          const char *const *keys, int n, int max_keys)
-{
-  const struct MetadataPrereg *p;
-  int deletes = n, i;
-
-  if (max_keys < 0)
-    max_keys = 0;
-  /* The deletes noted for keys other than these, plus one per key. */
-  for (p = list; p; p = p->next) {
-    if (p->value)
-      continue;
-    for (i = 0; i < n; i++)
-      if (key_eq(p->key, keys[i]))
-        break;
-    if (i == n)
-      deletes++;
-  }
-  return deletes <= max_keys;
 }

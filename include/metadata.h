@@ -325,12 +325,26 @@ extern int metadata_prereg_record(struct Client *cptr, const char *key,
                                   const char *value, int visibility,
                                   const struct md_stamp *st);
 
-/** Whether a CLEAR before registration can be noted in full: deletes of
- * all @a n keys @a keys (md_prereg_deletes_fit()).  A client not
- * registering always fits.
- * @return non-zero if they fit. */
-extern int metadata_prereg_clear_fits(struct Client *cptr,
-                                      const char *const *keys, int n);
+/** Note a before-connect CLEAR of @a cptr, stamped @a st (the time it
+ * was accepted): every earlier note goes, and the CLEAR is the only note
+ * until later writes are noted after it (md_prereg_note_clear()).
+ * @return 0, or -1 on allocation failure (nothing changed). */
+extern int metadata_prereg_record_clear(struct Client *cptr,
+                                        const struct md_stamp *st);
+
+/** Call @a each with every live user key of @a account in the store and
+ * its visibility -- not a server-managed key (draft/persistence/), not an
+ * internal one (md_key_replicable(): last_present) -- once the walk is
+ * over, so @a each may write the store.  The set a CLEAR deletes beyond
+ * the keys its client held in memory, and all a before-connect CLEAR
+ * deletes at the merge.
+ * @param[in] account Account name.
+ * @param[in] each Called per key.
+ * @param[in] arg Passed to @a each. */
+extern void metadata_account_clear_keys(const char *account,
+                                        void (*each)(void *arg, const char *key,
+                                                     int vis),
+                                        void *arg);
 
 /** Drop @a cptr's before-connect writes. */
 extern void metadata_prereg_free(struct Client *cptr);
