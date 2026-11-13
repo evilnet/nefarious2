@@ -15366,11 +15366,21 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
     /* The nick this device asked for, as it asked: never the returning
      * peer's text (exact match above; a peer cannot change the case). */
     ircd_strncpy(asked, cli_nickask(dev), sizeof(asked));
+    time_t next;
+    int rc;
     cli_nickask_ts(dev) = 0;
     own[0] = cli_name(dev);
     own[1] = asked;
     own[2] = NULL;
-    return m_nick(dev, dev, 2, own);
+    /* NICKDELAY was charged on this device's own Connection when it asked
+     * (nick_device_ask()); applying the request does not charge it again.
+     * Its budget comes out exactly as the asking left it: no rename is
+     * ever free, none is paid twice. */
+    next = cli_nextnick(dev);
+    cli_nextnick(dev) = 0;
+    rc = m_nick(dev, dev, 2, own);
+    cli_nextnick(dev) = next;
+    return rc;
   }
   case NICK_REQUEST_FORWARD:
     if (f.is_return)
