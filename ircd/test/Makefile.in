@@ -81,6 +81,7 @@ CMOCKA_TESTPROGS = \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
 	auth_recheck_cmocka \
+	channel_speak_cmocka \
 	s2s_handlers_cmocka \
 	services_reply_cmocka \
 	webhook_eventlog_cmocka \
@@ -171,6 +172,7 @@ DEP_SRC = \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
 	auth_recheck_cmocka.c \
+	channel_speak_cmocka.c \
 	s2s_handlers_cmocka.c \
 	services_reply_cmocka.c \
 	webhook_subject_cmocka.c \
@@ -572,6 +574,21 @@ auth_recheck_cmocka.o: ${srcdir}/auth_recheck_cmocka.c ../s_auth.c
 
 auth_recheck_cmocka: $(AUTH_RECHECK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=timer_add $(AUTH_RECHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# channel_speak tests - may a bouncer device of ours speak in a channel
+# (by its primary's face and membership; +Z by its own connection): the
+# REAL predicates.  The test includes channel.c, compiled with
+# -ffunction-sections and linked with --gc-sections, so the program keeps
+# client_can_send_to_channel(), member_can_send_to_channel(), find_ban(),
+# make_ban() and what they call; the rest of the ircd they reach is
+# stubbed in the test.  -Wno-address as for auth_recheck.
+CHANNEL_SPEAK_CMOCKA_OBJS = channel_speak_cmocka.o ../match.o ../ircd_string.o \
+	../ircd_snprintf.o ../ircd_alloc.o
+channel_speak_cmocka.o: ${srcdir}/channel_speak_cmocka.c ../channel.c
+	${CC} ${CFLAGS} -Wno-address -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/channel_speak_cmocka.c
+
+channel_speak_cmocka: $(CHANNEL_SPEAK_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHANNEL_SPEAK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
 # s2s_handlers tests - server-to-server handlers against a fake network:
 # the REAL m_burst.o, m_destruct.o, m_endburst.o, m_svsnick.o, m_svsquit.o
 # and m_topic.o, with numnicks.o, match.o and the ircd's printf (so the lines asserted are the lines that go on the wire);

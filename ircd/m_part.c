@@ -196,7 +196,13 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     flags = 0;
     comment = part_comment;
 
-    if (!member_can_send_to_channel(member, 0))
+    /* The comment is speech: a device's is judged as the device's speech
+     * (client_can_send_to_channel(): by its primary's face and
+     * membership, a remote primary's included, and +Z by the device's
+     * own connection), not as the primary's -- member here is the
+     * primary's, and a remote primary is never judged by this server. */
+    if (!(alias_source ? client_can_send_to_channel(alias_source, chptr, 0)
+                       : member_can_send_to_channel(member, 0)))
     {
       flags |= CHFL_BANNED;
       /* Remote clients don't want to see a comment either. */

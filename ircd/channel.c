@@ -1238,18 +1238,180 @@ int has_voice(struct Client* cptr, struct Channel* chptr)
   return 0;
 }
 
-/** Can this member send to a channel
- *
- * A user can speak on a channel iff:
+/** Is @a cptr silenced in @a chptr by a ban, judged by a scan of the ban
+ * and exception lists (no cache): a plain ban, or an extended ban of the
+ * quiet kind or of no activity, with no exception.  Reads only the
+ * client's own user fields, so @a cptr may be another server's client
+ * (it reads no Connection), and writes nothing.
+ * @param[in] cptr The client whose identity is matched.
+ * @param[in] chptr The channel.
+ * @return Non-zero when a ban silences @a cptr there. */
+static int client_quiet_banned(struct Client *cptr, struct Channel *chptr)
+{
+  struct Ban *ban;
+  int isbanned = 0;
+
+  if ((ban = find_ban(cptr, chptr->banlist, EBAN_QUIET, 0))) {
+    if (ban->flags & BAN_EXTENDED) {
+      if ((ban->extban.flags & EBAN_QUIET) || !(ban->extban.flags & EBAN_ACTIVITY))
+        isbanned = 1;
+    } else
+      isbanned = 1;
+  }
+  return isbanned && !find_ban(cptr, chptr->exceptlist, EBAN_QUIET | EBAN_EXCEPTLIST, 0);
+}
+
+/** The speak rules for a member of a channel:
  * <ol>
  *  <li> They didn't use the Apass to gain ops.
  *  <li> They are op'd or voice'd.
- *  <li> You aren't banned.
- *  <li> The channel isn't +m
- *  <li> The channel isn't +n or you are on the channel.
- *  <li> The channel isn't +Z, or your own connection is TLS (per
- *       connection: a bouncer session's other devices do not count).
+ *  <li> The channel isn't +m.
+ *  <li> The channel isn't +M, +a, +O or +r, or they qualify.
+ *  <li> The channel isn't +Z, or @a tls (the connection whose transport
+ *       counts) is TLS; with @a tls NULL the caller has judged +Z.
+ *  <li> They aren't banned (quiet), or an exception lets them.
  * </ol>
+ * @param[in] member The membership judged: its status, its user's
+ *            identity.
+ * @param[in] tls The connection +Z is judged by, or NULL.
+ * @param[in] cached Non-zero to read and keep the membership's ban cache
+ *            (a member of ours: the cache is maintained only for local
+ *            members), zero to scan the lists and write nothing.
+ * @return Non-zero when the member may speak. */
+static int member_speak_rules(struct Membership *member, struct Client *tls,
+                              int cached)
+{
+  struct Client *who = member->user;
+  struct Channel *chptr = member->channel;
+
+  /* Discourage using the Apass to get op.  They should use the Upass. */
+  if (IsChannelManager(member) && chptr->mode.apass[0] &&
+      !feature_bool(FEAT_APASS_CANSEND))
+    return 0;
+
+  /* If you have voice or ops, you can speak. */
+  if (IsVoicedOrOpped(member))
+    return 1;
+
+  /*
+   * If it's moderated, and you aren't a privileged user, you can't
+   * speak.
+   */
+  if (chptr->mode.mode & MODE_MODERATED)
+    return 0;
+
+  /* Same as above but includes logged in users as priviledged too */
+  if (chptr->mode.exmode & EXMODE_REGMODERATED && !IsAccount(who))
+    return 0;
+
+  /* If only IRC admins may join and you're not one, you can't speak. */
+  if (chptr->mode.exmode & EXMODE_ADMINONLY && !IsAdmin(who))
+    return 0;
+
+  /* If only IRC operators may join and you're not one, you can't speak. */
+  if (chptr->mode.exmode & EXMODE_OPERONLY && !IsAnOper(who))
+    return 0;
+
+  /* If only SSL users may join and you're not one, you can't speak.
+   * Judged by the connection's own transport (+Z per device, user
+   * 2026-11-06): a TLS primary speaks whatever its devices use; its
+   * plaintext device is kept out of the channel (bouncer invariant #17)
+   * and refused by its own connection when it is a member anyway
+   * (device_can_send_to_channel()). */
+  if (tls && (chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(tls))
+    return 0;
+
+  /* If only logged in users may join and you're not one, you can't speak. */
+  if (chptr->mode.mode & MODE_REGONLY && !IsAccount(who))
+    return 0;
+
+  /* If you're banned then you can't speak either. */
+  if (cached ? (is_banned(member, EBAN_QUIET) && !is_excepted(member, EBAN_QUIET))
+             : client_quiet_banned(who, chptr))
+    return 0;
+
+  return 1;
+}
+
+/** The speak rules for a client that is not a member of a channel: +n
+ * and +m refuse; +a, +O, +M and +r by @a who's identity; +Z by @a tls's
+ * transport (NULL: judged by the caller); bans and exceptions by a scan
+ * against @a who (no cache: there is no membership to keep one on).
+ * @param[in] who The client whose identity is judged.
+ * @param[in] tls The connection +Z is judged by, or NULL.
+ * @param[in] chptr The channel.
+ * @return Non-zero when @a who may speak there. */
+static int nonmember_speak_rules(struct Client *who, struct Client *tls,
+                                 struct Channel *chptr)
+{
+  if ((chptr->mode.mode & (MODE_NOPRIVMSGS|MODE_MODERATED)) ||
+      ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(who)) ||
+      ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(who)) ||
+      ((chptr->mode.exmode & EXMODE_REGMODERATED) && !IsAccount(who)) ||
+      (tls && (chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(tls)) ||
+      ((chptr->mode.mode & MODE_REGONLY) && !IsAccount(who)))
+    return 0;
+  return !client_quiet_banned(who, chptr);
+}
+
+/** May a bouncer device of ours speak in a channel?  A device speaks
+ * where, and only where, its primary may: everyone else sees only the
+ * primary's face (nick, user, host, account), and the device's own host
+ * is seen by nobody, so no ban could be written to match it; and its
+ * mirrored membership is not kept in step with the primary's status
+ * everywhere.  So every identity check is the primary's, at the device's
+ * own server:
+ *
+ * - +Z is the device's own (a plaintext device does not speak in a +Z
+ *   channel, voiced or not; a TLS device of a plaintext primary does);
+ * - a device with no primary (an orphan: a promote or the session's end
+ *   is on its way) does not speak -- its input is held while it is one
+ *   (s_bsd.c), so this answers only past that hold's bound;
+ * - a device that is a member, of a primary that is a member here (not a
+ *   zombie): the member rules on the PRIMARY's membership -- its Apass
+ *   rule, voice and ops, +m, +M, +a, +O, +r, its bans and exceptions --
+ *   with the primary's ban cache when the primary is ours (a held ghost
+ *   too: what it would be told if it spoke itself), and a scan that
+ *   writes nothing when it is another server's (the cache is kept only
+ *   for local members);
+ * - otherwise -- the device is not in the channel (a profile filter, a
+ *   +Z channel it was kept out of, a channel its primary was hidden in at
+ *   attach), or the primary is not (or is a zombie): the non-member
+ *   rules, with the primary's identity.
+ *
+ * Pure: reveals no delayed join (the callers reveal the sender's own
+ * membership, as before), writes no cache of another server's client,
+ * reads no Connection but the device's own, and never removes a member
+ * or exits anyone (bouncer invariant #21).
+ *
+ * @param[in] device The local alias that is speaking.
+ * @param[in] dmember Its membership in @a chptr, or NULL (not a member,
+ *            or a zombie).
+ * @param[in] chptr The channel.
+ * @return Non-zero when the device may speak there. */
+static int device_can_send_to_channel(struct Client *device,
+                                      struct Membership *dmember,
+                                      struct Channel *chptr)
+{
+  struct Client *primary = cli_alias_primary(device);
+  struct Membership *pmember;
+
+  if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(device))
+    return 0;
+  if (!primary || !cli_user(primary))
+    return 0;
+  pmember = find_member_link(chptr, primary);
+  if (dmember && pmember && !IsZombie(pmember))
+    return member_speak_rules(pmember, NULL, MyUser(primary));
+  return nonmember_speak_rules(primary, NULL, chptr);
+}
+
+/** Can this member send to a channel
+ *
+ * A user can speak on a channel iff the member rules allow it
+ * (member_speak_rules(): Apass, voice/op, +m, +M, +a, +O, +Z by the
+ * member's own connection, +r, bans); a bouncer device of ours is judged
+ * by its primary (device_can_send_to_channel()).
  *
  * This function will optionally reveal a user on a delayed join channel if
  * they are allowed to send to the channel.  It has no other side effect:
@@ -1278,57 +1440,13 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
     return 1;
   }
 
-  /* Alias inherits primary's send rights — same trust as remote users.
-   * Except +Z, judged by each connection's own TLS (per device, user
-   * 2026-11-06): a plaintext device that is a member of a +Z channel
-   * (one that went +Z after it attached) does not speak there. */
+  /* A device of ours speaks where its primary may; only +Z is its own. */
   if (IsBouncerAlias(member->user))
-    return !((member->channel->mode.exmode & EXMODE_SSLONLY)
-             && !IsSSL(member->user));
+    return device_can_send_to_channel(member->user,
+                                      IsZombie(member) ? NULL : member,
+                                      member->channel);
 
-  /* Discourage using the Apass to get op.  They should use the Upass. */
-  if (IsChannelManager(member) && member->channel->mode.apass[0] &&
-      !feature_bool(FEAT_APASS_CANSEND))
-    return 0;
-
-  /* If you have voice or ops, you can speak. */
-  if (IsVoicedOrOpped(member))
-    return 1;
-
-  /*
-   * If it's moderated, and you aren't a privileged user, you can't
-   * speak.
-   */
-  if (member->channel->mode.mode & MODE_MODERATED)
-    return 0;
-
-  /* Same as above but includes logged in users as priviledged too */
-  if (member->channel->mode.exmode & EXMODE_REGMODERATED && !IsAccount(member->user))
-    return 0;
-
-  /* If only IRC admins may join and you're not one, you can't speak. */
-  if (member->channel->mode.exmode & EXMODE_ADMINONLY && !IsAdmin(member->user))
-    return 0;
-
-  /* If only IRC operators may join and you're not one, you can't speak. */
-  if (member->channel->mode.exmode & EXMODE_OPERONLY && !IsAnOper(member->user))
-    return 0;
-
-  /* If only SSL users may join and you're not one, you can't speak.
-   * Judged by the member's own connection (+Z per device, user
-   * 2026-11-06): a TLS primary speaks whatever its devices use; its
-   * plaintext device is kept out of the channel (bouncer invariant #17)
-   * and refused here by its own connection when it is a member anyway
-   * (the alias branch above). */
-  if ((member->channel->mode.exmode & EXMODE_SSLONLY) && !IsSSL(member->user))
-    return 0;
-
-  /* If only logged in users may join and you're not one, you can't speak. */
-  if (member->channel->mode.mode & MODE_REGONLY && !IsAccount(member->user))
-    return 0;
-
-  /* If you're banned then you can't speak either. */
-  if (is_banned(member, EBAN_QUIET) && !is_excepted(member, EBAN_QUIET))
+  if (!member_speak_rules(member, member->user, 1))
     return 0;
 
   if (IsDelayedJoin(member) && reveal)
@@ -1364,31 +1482,18 @@ int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int r
 
   member = find_channel_member(cptr, chptr);
 
+  /* A device of ours speaks where its primary may, a member or not (a
+   * device that is not in the channel is held to the non-member rules,
+   * with its primary's identity); only +Z is its own. */
+  if (IsBouncerAlias(cptr) && MyUser(cptr))
+    return device_can_send_to_channel(cptr, member, chptr);
+
   /*
    * You can't speak if you're off channel, and it is +n (no external messages)
    * or +m (moderated).
    */
-  if (!member) {
-    if ((chptr->mode.mode & (MODE_NOPRIVMSGS|MODE_MODERATED)) ||
-        ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(cptr)) ||
-        ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(cptr)) ||
-        ((chptr->mode.exmode & EXMODE_REGMODERATED) && !IsAccount(cptr)) ||
-        ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(cptr)) ||
-	((chptr->mode.mode & MODE_REGONLY) && !IsAccount(cptr)))
-      return 0;
-    else {
-      struct Ban *ban = NULL;
-      int isbanned = 0;
-      if ((ban = find_ban(cptr, chptr->banlist, EBAN_QUIET, 0))) {
-        if (ban->flags & BAN_EXTENDED) {
-          if ((ban->extban.flags & EBAN_QUIET) || !(ban->extban.flags & EBAN_ACTIVITY))
-            isbanned = 1;
-        } else
-          isbanned = 1;
-      }
-      return !(isbanned && !find_ban(cptr, chptr->exceptlist, EBAN_QUIET | EBAN_EXCEPTLIST, 0));
-    }
-  }
+  if (!member)
+    return nonmember_speak_rules(cptr, cptr, chptr);
   return member_can_send_to_channel(member, reveal);
 }
 
