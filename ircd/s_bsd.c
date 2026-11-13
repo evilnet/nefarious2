@@ -1437,6 +1437,12 @@ static int input_held(struct Client *cptr)
     dbuf_delete(&(cli_recvQ(cptr)), off);
     return 0;
   }
+  /* A long hold: a server PING now and then, so that a client whose
+   * keepalive needs inbound traffic hears something (input_hold_ping_due()).
+   * Not check_pings()'s: PingSent stays as it is (liveness is still every
+   * read), and the PONG is parsed in order at the release (m_pong()). */
+  if (input_hold_ping_due(&con_input_hold(cli_connect(cptr)), CurrentTime))
+    sendrawto_one(cptr, MSG_PING " :%s", cli_name(&me));
   return 1;
 }
 

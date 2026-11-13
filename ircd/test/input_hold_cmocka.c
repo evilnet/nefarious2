@@ -163,6 +163,52 @@ static void cleared(void **state)
   assert_int_equal(h.boost, 0);
 }
 
+/** The server PING to a held client: none before INPUT_HOLD_PING, then
+ * one every INPUT_HOLD_PING while held (at the bound too), none after the
+ * release or for a client that is not held, and a new hold starts its own
+ * clock. */
+static void ping_due(void **state)
+{
+  struct InputHold h;
+  time_t t;
+  int sent = 0;
+
+  memset(&h, 0, sizeof h);
+  assert_int_equal(input_hold_ping_due(&h, T0 + 100), 0);       /* not held */
+  step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
+  assert_int_equal(input_hold_ping_due(&h, T0), 0);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_PING - 1), 0);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_PING), 1);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_PING), 0);   /* once */
+  assert_int_equal(input_hold_ping_due(&h, T0 + 2 * INPUT_HOLD_PING - 1), 0);
+  assert_int_equal(input_hold_ping_due(&h, T0 + 2 * INPUT_HOLD_PING), 1);
+  /* polled every 2 s, as the process timer does, to the ceiling: never a
+   * gap over INPUT_HOLD_PING + 2 */
+  for (t = T0 + 2 * INPUT_HOLD_PING, sent = 0; t <= T0 + INPUT_HOLD_CEILING; t += 2) {
+    enum input_hold_event ev;
+    enum input_hold_action a = input_hold_step(&h, 1, t, 0, &ev);
+
+    if (a == INPUT_HOLD_PARSE)
+      break;
+    if (input_hold_ping_due(&h, t))
+      sent++;
+    assert_true(t - h.pinged <= INPUT_HOLD_PING + 2);
+  }
+  assert_true(sent >= 3);
+  /* released at the ceiling: nothing more */
+  step(&h, 1, T0 + INPUT_HOLD_CEILING + 1, 0, INPUT_HOLD_EV_CEILING);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_CEILING + 10), 0);
+  /* a hold that ends: nothing after; a new hold counts from its start */
+  memset(&h, 0, sizeof h);
+  step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_PING), 1);
+  step(&h, 0, T0 + INPUT_HOLD_PING + 1, 0, INPUT_HOLD_EV_ENDED);
+  assert_int_equal(input_hold_ping_due(&h, T0 + 3 * INPUT_HOLD_PING), 0);
+  step(&h, 1, T0 + 50, 0, INPUT_HOLD_EV_BEGAN);
+  assert_int_equal(input_hold_ping_due(&h, T0 + 50 + INPUT_HOLD_PING - 1), 0);
+  assert_int_equal(input_hold_ping_due(&h, T0 + 50 + INPUT_HOLD_PING), 1);
+}
+
 static void is_quit(void **state)
 {
   static const struct { const char *line; int quit; } rows[] = {
@@ -202,6 +248,7 @@ int main(void)
     cmocka_unit_test(ceiling),
     cmocka_unit_test(cap),
     cmocka_unit_test(cleared),
+    cmocka_unit_test(ping_due),
     cmocka_unit_test(is_quit),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

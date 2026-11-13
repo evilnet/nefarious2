@@ -49,12 +49,14 @@ enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
     h->asked = 0;
     h->gen = 0;
     h->released = 0;
+    h->pinged = 0;
     return INPUT_HOLD_PARSE;
   }
   if (h->released)
     return INPUT_HOLD_PARSE;
   if (!h->since) {
     h->since = now;
+    h->pinged = 0;
     *ev = INPUT_HOLD_EV_BEGAN;
     return INPUT_HOLD_WAIT;
   }
@@ -73,8 +75,31 @@ enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
     return INPUT_HOLD_WAIT;
   /* released while still an orphan */
   h->released = 1;
+  h->pinged = 0;
   h->boost = now + INPUT_HOLD_GRACE;
   return INPUT_HOLD_PARSE;
+}
+
+/** Is a server PING due to the held client now?  While a hold lasts
+ * (begun, not released), one every INPUT_HOLD_PING seconds, the first that
+ * long after the hold began: it gives a client whose keepalive needs
+ * inbound traffic something to hear while its own lines (its PING among
+ * them) wait.  Its PONG waits in the queue like any line and is parsed in
+ * order at the release.  Nothing for a connection that is not held.
+ * @param[in,out] h The connection's hold (the send is recorded).
+ * @param[in] now The time.
+ * @return Non-zero when the caller is to send the PING now. */
+int input_hold_ping_due(struct InputHold *h, time_t now)
+{
+  time_t last;
+
+  if (!h->since || h->released)
+    return 0;
+  last = h->pinged ? h->pinged : h->since;
+  if (now - last < INPUT_HOLD_PING)
+    return 0;
+  h->pinged = now;
+  return 1;
 }
 
 /** Forget a connection's hold and allowance (its socket closed: a held

@@ -27,6 +27,14 @@
 /** How long at most the doubled receive allowance outlives the release of
  * a hold (less once the queue is back under the usual cap). */
 #define INPUT_HOLD_GRACE    15
+/** While a hold lasts, the held client is sent a server PING every this
+ * many seconds (the first this long after the hold began), so a client
+ * that drops a socket with no inbound traffic for 10 s (Seance's
+ * keepalive) hears something: the hold is noticed at reads and at the
+ * 2-second process timer, so the gap between two lines it receives is at
+ * most this plus about two seconds, and its own PING, held, began or
+ * joined the hold no earlier than the hold's start. */
+#define INPUT_HOLD_PING     4
 
 /** A connection's hold, kept on its Connection (zero: none). */
 struct InputHold {
@@ -35,6 +43,7 @@ struct InputHold {
   unsigned int gen;       /**< the sweep count when it was asked */
   int          released;  /**< released while still an orphan: not held again until it stops being one */
   time_t       boost;     /**< the doubled allowance lasts until then; 0: none */
+  time_t       pinged;    /**< when the hold last sent the client a PING; 0: not yet */
 };
 
 /** What the read path does with a connection's queued lines. */
@@ -57,6 +66,7 @@ enum input_hold_event {
 extern enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
                                               time_t now, unsigned int sweeps,
                                               enum input_hold_event *ev);
+extern int input_hold_ping_due(struct InputHold *h, time_t now);
 extern void input_hold_clear(struct InputHold *h);
 extern unsigned int input_hold_cap(struct InputHold *h, unsigned int cap,
                                    unsigned int queued, time_t now);
