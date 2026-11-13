@@ -90,6 +90,9 @@ struct SASLSession {
 struct sasl_cb_ctx {
   unsigned int fd;      /**< Client file descriptor */
   unsigned int cookie;  /**< SASL session cookie for FD-reuse protection */
+  unsigned int line;    /**< cli_line_seq() of the line that made the request:
+                         *   its answer, if it comes inside a LATER line, is
+                         *   not that line's (sasl_kc_answer_begin()) */
 };
 
 /* ---- Public API ---- */

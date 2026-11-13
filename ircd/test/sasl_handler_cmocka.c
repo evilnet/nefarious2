@@ -1375,6 +1375,58 @@ static void inline_success_answers_in_one_labeled_batch(void **state)
   assert_true(!strncmp(tlog[0], "900 anne2 ", 10));
 }
 
+/** A Keycloak answer is the answer to the line that made its request.  It
+ * can come inside a LATER line of the same client (libkc reaps finished
+ * transfers inside any request call: a web push from a labeled PRIVMSG):
+ * there it takes none of that line's label and opens no batch under it,
+ * and that line's label is left as it was.  Inside the asking line it is
+ * that line's, labeled. */
+static void later_answer_inside_another_line_takes_none_of_its_label(void **state)
+{
+  struct Client *c;
+  char data[300];
+  int i;
+
+  sasl_init_once();
+  kc_mode = KC_LATER;
+
+  /* the request's line A1; the answer comes inside a later line P9 */
+  c = new_client(106, "kai", 1, REG_KEEPS);
+  plain_b64("kai", "kaipw", data);
+  cli_line_seq(c)++;
+  next_line(c, "");
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  cli_line_seq(c)++;
+  next_line(c, "A1");
+  assert_int_equal(authenticate(c, data), 0);
+  cli_line_seq(c)++;
+  next_line(c, "P9");
+  ntlog = 0;
+  pend_deliver(1);
+  assert_true(ntlog >= 2);
+  for (i = 0; i < ntlog; i++) {
+    assert_null(strstr(tlog[i], "[label="));
+    assert_null(strstr(tlog[i], "BATCH +"));
+  }
+  assert_true(tlog_has("903 kai"));
+  assert_string_equal(cli_label(c), "P9");          /* the later line's, kept */
+  assert_int_equal(cli_label_responded(c), 0);
+  assert_int_equal(cli_labeled_batch(c), 0);
+
+  /* the same answer inside the asking line: that line's label */
+  c = new_client(107, "kim", 1, REG_KEEPS);
+  plain_b64("kim", "kimpw", data);
+  cli_line_seq(c)++;
+  next_line(c, "");
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  cli_line_seq(c)++;
+  next_line(c, "A2");
+  assert_int_equal(authenticate(c, data), 0);
+  ntlog = 0;
+  pend_deliver(1);
+  assert_string_equal(tlog[0], "BATCH + labeled-response kim [label=A2]");
+}
+
 /** A negative-cache hit fails the exchange inside AUTHENTICATE; registration
  * runs there (a SASL-required class, a K-line) and exits the client. */
 static void negcache_hit_registration_exits(void **state)
@@ -4076,6 +4128,7 @@ int main(void)
     cmocka_unit_test_setup(poscache_hit_registration_exits, setup),
     cmocka_unit_test_setup(poscache_hit_registration_keeps, setup),
     cmocka_unit_test_setup(inline_success_answers_in_one_labeled_batch, setup),
+    cmocka_unit_test_setup(later_answer_inside_another_line_takes_none_of_its_label, setup),
     cmocka_unit_test_setup(negcache_hit_registration_exits, setup),
     cmocka_unit_test_setup(oauthbearer_local_check_registration_exits, setup),
     cmocka_unit_test_setup(ecdsa_response_registration_exits, setup),

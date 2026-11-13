@@ -1281,8 +1281,61 @@ static int register_verify_email_policy(void)
   return feature_bool(FEAT_REGISTER_VERIFY_EMAIL);
 }
 
+/* ---- A Keycloak answer inside another line ---- */
+
+/* libkc delivers an answer inside whatever request call reaps it
+ * (kc_http_request() drives every transfer and reaps the finished ones;
+ * s_auth.c, "Registration checks owed from the event loop"): inside the
+ * AUTHENTICATE line that made the request, or the event loop, or a LATER
+ * line -- this client's own labeled PRIVMSG sending a web push, say.  An
+ * answer is the answer to the line that made its request: in that line it
+ * goes under that line's label as any reply does; inside a later line it
+ * must not take that line's label, nor go in its batches (a deferred one
+ * would count it).  There it is sent as between lines -- no label (the
+ * asking line was answered when it ended), no batch -- with the later
+ * line's label and batches set aside around it (batch_save()), as the
+ * asynchronous REGISTER and OPER answers set them aside. */
+struct sasl_kc_answer {
+  struct Client *cptr;           /**< the client set aside, or NULL */
+  char label[64];
+  unsigned char responded;
+  struct BatchSave batches;
+};
+
+static void sasl_kc_answer_begin(const void *data, struct sasl_kc_answer *st)
+{
+  const struct sasl_cb_ctx *ctx = (const struct sasl_cb_ctx *)data;
+  struct Client *acptr;
+
+  st->cptr = NULL;
+  if (!ctx || ctx->fd >= MAXCONNECTIONS)
+    return;
+  acptr = LocalClientArray[ctx->fd];
+  if (!acptr || !MyConnect(acptr) || cli_saslcookie(acptr) != ctx->cookie)
+    return;                       /* the callback drops it */
+  if (cli_line_seq(acptr) == ctx->line)
+    return;                       /* the asking line, or no line since */
+  st->cptr = acptr;
+  memcpy(st->label, cli_label(acptr), sizeof(st->label));
+  st->responded = cli_label_responded(acptr);
+  batch_save(acptr, &st->batches);
+  cli_label(acptr)[0] = '\0';
+  cli_label_responded(acptr) = 0;
+}
+
+static void sasl_kc_answer_end(struct sasl_kc_answer *st)
+{
+  if (!st->cptr)
+    return;
+  /* The answer never frees its client (registration is owed to the event
+   * loop: sasl_hold_release_from_kc()). */
+  batch_restore(st->cptr, &st->batches);
+  memcpy(cli_label(st->cptr), st->label, sizeof(st->label));
+  cli_label_responded(st->cptr) = st->responded;
+}
+
 /** Callback from kc_user_verify_password(). */
-static void sasl_plain_cb(int result, const struct kc_access_token *token, void *data)
+static void sasl_plain_answer(int result, const struct kc_access_token *token, void *data)
 {
   struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
   struct Client *acptr;
@@ -1378,6 +1431,17 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
     sasl_session_free(acptr);
     sasl_hold_release_from_kc(acptr);
   }
+}
+
+/** sasl_plain_answer()'s answer, set apart from a later line it may come inside
+ * (sasl_kc_answer_begin()). */
+static void sasl_plain_cb(int result, const struct kc_access_token *token, void *data)
+{
+  struct sasl_kc_answer st;
+
+  sasl_kc_answer_begin(data, &st);
+  sasl_plain_answer(result, token, data);
+  sasl_kc_answer_end(&st);
 }
 
 /** Handle decoded PLAIN data: authzid\0authcid\0password */
@@ -1491,6 +1555,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
   ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
   ctx->fd = cli_fd(sptr);
   ctx->cookie = cli_saslcookie(sptr);
+  ctx->line = cli_line_seq(sptr);
 
   /* Fire async Keycloak password verification */
   log_write(LS_SYSTEM, L_DEBUG, 0,
@@ -1505,7 +1570,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
 /* ---- EXTERNAL mechanism handler ---- */
 
 /** Callback from kc_user_search() for fingerprint lookup. */
-static void sasl_external_cb(int result, const struct kc_user *users, int count, void *data)
+static void sasl_external_answer(int result, const struct kc_user *users, int count, void *data)
 {
   struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
   struct Client *acptr;
@@ -1570,6 +1635,17 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
   }
 }
 
+/** sasl_external_answer()'s answer, set apart from a later line it may come inside
+ * (sasl_kc_answer_begin()). */
+static void sasl_external_cb(int result, const struct kc_user *users, int count, void *data)
+{
+  struct sasl_kc_answer st;
+
+  sasl_kc_answer_begin(data, &st);
+  sasl_external_answer(result, users, count, data);
+  sasl_kc_answer_end(&st);
+}
+
 /** Handle EXTERNAL mechanism — lookup client certificate fingerprint in Keycloak. */
 static int sasl_handle_external(struct Client *sptr, const unsigned char *decoded, size_t len)
 {
@@ -1599,6 +1675,7 @@ static int sasl_handle_external(struct Client *sptr, const unsigned char *decode
   ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
   ctx->fd = cli_fd(sptr);
   ctx->cookie = cli_saslcookie(sptr);
+  ctx->line = cli_line_seq(sptr);
 
   /* Search Keycloak for user with matching x509_fingerprints attribute */
   snprintf(query, sizeof(query), "x509_fingerprints:%s", fingerprint);
@@ -1685,7 +1762,7 @@ static int oauth_token_policy_ok(const struct kc_token_info *info,
                                  struct Client *sptr);
 
 /** Callback from kc_token_introspect() for OAUTHBEARER fallback. */
-static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *info, void *data)
+static void sasl_oauth_introspect_answer(int result, const struct kc_token_info *info, void *data)
 {
   struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
   struct Client *acptr;
@@ -1755,6 +1832,17 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
                   "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
     session->state = SASL_STATE_FAILED;
   }
+}
+
+/** sasl_oauth_introspect_answer()'s answer, set apart from a later line it may come inside
+ * (sasl_kc_answer_begin()). */
+static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *info, void *data)
+{
+  struct sasl_kc_answer st;
+
+  sasl_kc_answer_begin(data, &st);
+  sasl_oauth_introspect_answer(result, info, data);
+  sasl_kc_answer_end(&st);
 }
 
 /** F-K3: enforce the deployment-specific OAUTHBEARER token policy after a
@@ -1908,6 +1996,8 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
     struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
     ctx->fd = cli_fd(sptr);
     ctx->cookie = cli_saslcookie(sptr);
+    ctx->line = cli_line_seq(sptr);
+  ctx->line = cli_line_seq(sptr);
 
     if (kc_token_introspect(token_nul, sasl_oauth_introspect_cb, ctx) != 0) {
       MyFree(ctx);
@@ -1971,7 +2061,7 @@ static int sha256_hash(const unsigned char *data, size_t len, unsigned char *out
 }
 
 /** Callback from kc_user_get() — received SCRAM credentials. */
-static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *data)
+static void sasl_scram_creds_answer(int result, const struct kc_user *user, void *data)
 {
   struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
   struct Client *acptr;
@@ -2132,6 +2222,17 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
             session->authcid, acptr);
 }
 
+/** sasl_scram_creds_answer()'s answer, set apart from a later line it may come inside
+ * (sasl_kc_answer_begin()). */
+static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *data)
+{
+  struct sasl_kc_answer st;
+
+  sasl_kc_answer_begin(data, &st);
+  sasl_scram_creds_answer(result, user, data);
+  sasl_kc_answer_end(&st);
+}
+
 /** Handle SCRAM client-first message: n,,n=<user>,r=<nonce>
  *  Parses username and client nonce, then async-fetches SCRAM creds from KC.
  */
@@ -2200,6 +2301,7 @@ static int sasl_scram_client_first(struct Client *sptr,
   ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
   ctx->fd = cli_fd(sptr);
   ctx->cookie = cli_saslcookie(sptr);
+  ctx->line = cli_line_seq(sptr);
 
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL SCRAM: Fetching credentials for %s (client %C)",
@@ -2359,7 +2461,7 @@ static int sasl_scram_complete(struct Client *sptr)
 /* ---- ECDSA-NIST256P-CHALLENGE mechanism handler ---- */
 
 /** Callback from kc_user_get() — received ECDSA public key. */
-static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data)
+static void sasl_ecdsa_key_answer(int result, const struct kc_user *user, void *data)
 {
   struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
   struct Client *acptr;
@@ -2433,6 +2535,17 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
   }
 }
 
+/** sasl_ecdsa_key_answer()'s answer, set apart from a later line it may come inside
+ * (sasl_kc_answer_begin()). */
+static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data)
+{
+  struct sasl_kc_answer st;
+
+  sasl_kc_answer_begin(data, &st);
+  sasl_ecdsa_key_answer(result, user, data);
+  sasl_kc_answer_end(&st);
+}
+
 /** Handle ECDSA client-first: just the authcid (username). */
 static int sasl_ecdsa_client_first(struct Client *sptr,
                                     const unsigned char *decoded, size_t len)
@@ -2453,6 +2566,7 @@ static int sasl_ecdsa_client_first(struct Client *sptr,
   ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
   ctx->fd = cli_fd(sptr);
   ctx->cookie = cli_saslcookie(sptr);
+  ctx->line = cli_line_seq(sptr);
 
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL ECDSA: Fetching public key for %s (client %C)",

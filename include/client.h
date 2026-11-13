@@ -424,6 +424,7 @@ struct BatchHold;
 struct BatchSave {
   struct BatchFrame frames[BATCH_NEST_MAX];
   unsigned char depth, over, labeled;
+  struct BatchHold *hold;   /**< a deferred labeled batch's held lines, set aside */
 };
 
 struct Connection
@@ -514,6 +515,9 @@ struct Connection
   unsigned char       con_batch_depth; /**< Frames in use in con_batch */
   unsigned char       con_batch_over;  /**< Starts past BATCH_NEST_MAX, each still to be ended */
   struct BatchHold   *con_batch_hold;  /**< A deferred labeled batch's held lines, or NULL (send.c) */
+  unsigned int        con_line_seq;    /**< Lines from this client parsed so far (parse_client()):
+                                            an asynchronous answer tells the line that asked
+                                            from a later one by it (sasl_auth.c) */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
   unsigned int        con_token_auth; /**< draft/authtoken: service slots this connection's PASS may validate */
   char                con_client_tags[4096]; /**< Client-only tags (+tag=value) for TAGMSG relay (IRCv3: 4094 max) */
@@ -1128,6 +1132,10 @@ struct Client {
 #define con_batch_seq(con)	((con)->con_batch_seq)
 /** Get the held lines of a connection's deferred labeled batch. */
 #define con_batch_hold(con)	((con)->con_batch_hold)
+/** Get the number of lines parsed from a connection's client. */
+#define con_line_seq(con)	((con)->con_line_seq)
+/** Get the number of lines parsed from a client. */
+#define cli_line_seq(cli)	con_line_seq(cli_connect(cli))
 #define con_token_auth(con)	((con)->con_token_auth)
 /** Get the client-only tags buffer for TAGMSG relay. */
 #define con_client_tags(con)	((con)->con_client_tags)

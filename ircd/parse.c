@@ -1439,7 +1439,10 @@ static int parse_client_line(struct Client *cptr, char *buffer, char *bufend);
  */
 int parse_client(struct Client *cptr, char *buffer, char *bufend)
 {
-  int result = parse_client_line(cptr, buffer, bufend);
+  int result;
+
+  cli_line_seq(cptr)++;   /* a new line: see con_line_seq */
+  result = parse_client_line(cptr, buffer, bufend);
 
   if (result != CPTR_KILLED) {
     cli_label(cptr)[0] = '\0';

@@ -5207,13 +5207,17 @@ void batch_save(struct Client *to, struct BatchSave *save)
 {
   struct Connection *con = cli_connect(to);
 
-  if (con_batch_hold(con))
-    batch_hold_materialize(to);   /* set aside: it must exist on the wire */
 
   memcpy(save->frames, con->con_batch, sizeof(save->frames));
   save->depth = con->con_batch_depth;
   save->over = con->con_batch_over;
   save->labeled = con->con_labeled_batch;
+  /* A deferred labeled batch (the line's, labeled_batch_defer()) is set
+   * aside with its held lines, still undecided: the answer sent meanwhile
+   * goes straight out, and the line's answer is resolved when its frame
+   * ends, after batch_restore(). */
+  save->hold = con_batch_hold(con);
+  con_batch_hold(con) = NULL;
   con->con_batch_depth = 0;
   con->con_batch_over = 0;
   con->con_labeled_batch = 0;
@@ -5228,6 +5232,10 @@ void batch_restore(struct Client *to, const struct BatchSave *save)
   con->con_batch_depth = save->depth;
   con->con_batch_over = save->over;
   con->con_labeled_batch = save->labeled;
+  if (save->hold) {
+    batch_hold_free(con);   /* none: an answer opens no deferred batch */
+    con_batch_hold(con) = save->hold;
+  }
 }
 
 /** A connection's capabilities go from @a before to @a after (CAP REQ,
