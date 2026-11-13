@@ -1880,6 +1880,14 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
       }
       }
       add_history(sptr, 1);
+      /* Another server's device asked for another server's user (we are
+       * a middle server on a route without BX W, its server renamed
+       * already): toward the primary the line keeps the device's
+       * numeric, so the primary's server judges it as a device's request
+       * (under the primary's numeric it is dropped there as a fake
+       * direction); elsewhere the primary's. */
+      if (device && !MyConnect(device) && !MyUser(sptr))
+        sendcmdto_set_alias_source(device);
       sendcmdto_serv_butone(sptr, CMD_NICK, cptr, "%s %Tu", nick,
                             cli_lastnick(sptr));
 

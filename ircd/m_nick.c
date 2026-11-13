@@ -93,7 +93,9 @@
 #include "account_id.h"
 #include "ircd_string.h"
 #include "msg.h"
+#include "nick_delay.h"
 #include "nick_request.h"
+#include "nick_route.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "s_conf.h"
@@ -142,6 +144,51 @@ int do_nick_name(char* nick)
   *ch = '\0';
 
   return (ch - nick);
+}
+
+/** Whether a device's nick request is refused at once while the link
+ * toward its primary's server is burst-gated (our lines to it are held,
+ * and the request could be lost silently).  1 (the owner's default):
+ * refused with 438.  0: sent anyway. */
+#define NICK_REQUEST_GATED_REFUSE 1
+
+/** A bouncer device of ours asks for its session user's rename, the user
+ * being on another server that is the one writer of its nick
+ * (nick_writer_route()).  Nothing is renamed here: the request goes to
+ * that server as BX W, which relays an accepted rename to every link (we
+ * apply it then, and the device pass tells the device once) or sends the
+ * device the refusal numeric.  Here only what a local NICK is refused for
+ * at once: the nick held here by a registered client or a server (433;
+ * our unregistered connection holding it is met when the rename comes
+ * back), a gated link (438), and the device's own NICKDELAY (on its own
+ * Connection, never the primary's: that is its link's here).
+ * @param[in] device The device, ours.
+ * @param[in] primary Its primary, another server's.
+ * @param[in] nick The nick asked for, checked valid and not juped.
+ * @return Zero.
+ */
+static int nick_device_ask(struct Client *device, struct Client *primary,
+                           const char *nick)
+{
+  struct Client *acptr = SeekClient(nick);
+
+  if (acptr == primary) {
+    if (0 == strcmp(cli_name(primary), nick))
+      return 0;                     /* already so named: nothing to ask */
+  } else if (acptr && !(IsUnknown(acptr) && MyConnect(acptr)))
+    return send_reply(device, ERR_NICKNAMEINUSE, nick);
+  if (NICK_REQUEST_GATED_REFUSE && IsBurstGated(cli_from(primary)))
+    return send_reply(device, ERR_NICKTOOFAST, nick, 5);
+  if (nick_delay_refuses(&cli_nextnick(device), CurrentTime,
+                         feature_int(FEAT_NICKDELAY))) {
+    send_reply(device, ERR_NICKTOOFAST, nick,
+               (int)(cli_nextnick(device) - CurrentTime));
+    sendcmdto_one(device, CMD_NICK, device, "%s", cli_name(device));
+    return 0;
+  }
+  sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cli_from(primary), "W %s%s %s %Tu",
+                cli_yxx(&me), cli_yxx(device), nick, TStime());
+  return 0;
 }
 
 /*
@@ -227,6 +274,9 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
     struct Client *alias_source = sptr;
     sptr = cli_alias_primary(sptr);
+    /* Single writer: the primary's server renames, we only ask. */
+    if (!MyUser(sptr) && nick_writer_route(cli_user(sptr)->server))
+      return nick_device_ask(alias_source, sptr, nick);
     /* Synthesize parv[2] timestamp so set_nick_name's
      * cli_lastnick(sptr) = (sptr == cptr) ? TStime() : atoi(parv[2])
      * path produces a sane lastnick when sptr is the (possibly remote)
