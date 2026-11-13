@@ -143,14 +143,24 @@ static int format_batch_open_tags(char *buf, size_t buflen,
   int has_ctags = (ctags && *ctags && use_tags);
   int has_account = (use_tags && from && IsUser(from) && IsAccount(from)
                      && CapOwnHas(to, CAP_ACCOUNTTAG));
+  /* A batch opened inside another open on @a to's answer (the echo inside
+   * the labeled-response batch of the multiline batch's answer) is nested
+   * in it: its BATCH + line carries @batch=<that batch> (send.c's
+   * nesting model).  Only the sender's own connection has one open here. */
+  const char *parent = (MyConnect(to) && CapOwnHas(to, CAP_BATCH))
+                       ? cli_batch_id(to) : "";
 
-  if (!use_tags && !has_label)
+  if (!use_tags && !has_label && !parent[0])
     return 0;
 
   buf[0] = '\0';
   str_appendf(buf, buflen, &pos, "@");
-  if (has_label)
+  if (parent[0])
+    str_appendf(buf, buflen, &pos, "batch=%s", parent);
+  if (has_label) {
+    if (pos > 1) str_appendf(buf, buflen, &pos, ";");
     str_appendf(buf, buflen, &pos, "label=%s", label);
+  }
   if (use_tags && timebuf && *timebuf) {
     if (pos > 1) str_appendf(buf, buflen, &pos, ";");
     str_appendf(buf, buflen, &pos, "time=%s", timebuf);
@@ -236,7 +246,13 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
   if (MultilineInUse(route_to)) {
     /* Proper draft/multiline BATCH wrapper preserves concat semantics. */
     char batchid[16];
-    const char *label = preserve_label ? con_ml_label(con) : NULL;
+    /* The echo to the sender is the answer's: the label it carries is the
+     * answer's own (armed from the batch's), and only when it is the one
+     * line of the answer -- inside the answer's labeled-response batch it
+     * carries that batch instead (format_batch_open_tags). */
+    const char *label = (preserve_label && !cli_labeled_batch(route_to)
+                         && cli_label(route_to)[0] && !cli_label_responded(route_to))
+                        ? cli_label(route_to) : NULL;
 
     ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                   NumNick(sptr), con_batch_seq(cli_connect(route_to))++);
@@ -247,6 +263,8 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
                      batch_timebuf, batch_base_msgid,
                      (label && label[0]) ? label : NULL,
                      con_ml_client_tags(con));
+      if (label && label[0])
+        cli_label_responded(route_to) = 1;   /* the echo answers the label */
       /* Per IRCv3 multiline spec, the BATCH +id opener uses the user
        * as source, not the server — clients use the wrapper's source
        * to route the batch to the correct conversation window. */
@@ -748,6 +766,9 @@ void multiline_discard_batch(struct Client *cptr)
   con_ml_dead_batch_id(con)[0] = '\0';
 }
 
+static int ml_label_arm(struct Client *sptr);
+static void ml_label_disarm(struct Client *sptr, int armed);
+
 /** Check for and handle client batch timeout.
  * Called periodically from check_pings().
  * @param[in] cptr Client to check.
@@ -773,9 +794,15 @@ check_client_batch_timeout(struct Client *cptr)
   if (CurrentTime - con_ml_batch_start(con) < timeout)
     return 0; /* Not timed out yet */
 
-  /* Batch has timed out - send FAIL and clear */
-  send_fail(cptr, "BATCH", "TIMEOUT", con_ml_batch_id(con),
-            "Batch timed out");
+  /* Batch has timed out - send FAIL and clear.  The FAIL is the batch's
+   * answer: it carries the batch's label (armed for it: no line is being
+   * handled now). */
+  {
+    int armed = ml_label_arm(cptr);
+    send_fail(cptr, "BATCH", "TIMEOUT", con_ml_batch_id(con),
+              "Batch timed out");
+    ml_label_disarm(cptr, armed);
+  }
   clear_multiline_batch(con);
   return 1;
 }
@@ -796,6 +823,7 @@ multiline_add_message(struct Client *sptr, const char *target,
   struct SLink *lp;
   int len;
   char *msgcopy;
+  int armed;
 
   /* PRIVMSG/NOTICE pass NULL when the line has no text parameter; it is
    * an empty line, and it was copied with strcpy(.., NULL) below. */
@@ -804,6 +832,11 @@ multiline_add_message(struct Client *sptr, const char *target,
 
   if (!con_ml_batch_id(con)[0])
     return 0;  /* No active batch */
+
+  /* A FAIL below ends the batch: it answers the batch's label (the line it
+   * is sent on has none of its own) -- disarmed again when the line is
+   * taken. */
+  armed = ml_label_arm(sptr);
 
   /* IRCv3 multiline spec: target must match batch target */
   if (target && con_ml_target(con)[0] &&
@@ -884,6 +917,7 @@ multiline_add_message(struct Client *sptr, const char *target,
   con_ml_total_bytes(con) += len
       + ((con_ml_msg_count(con) > 1 && !concat) ? 1 : 0);
 
+  ml_label_disarm(sptr, armed);
   return 0;
 }
 
@@ -1332,6 +1366,75 @@ ml_batch_refused(struct Client *sptr, int is_channel, struct Channel **chptr_p,
 }
 
 /** Process and deliver a completed multiline batch */
+/** Whether the batch's echo goes to the sender: echo-message, and -- the
+ * sendQ protection -- only when it fits the remaining sendQ (the echo is
+ * the size of the client's own input, so it almost always does). */
+static int ml_echo_wanted(struct Client *sptr)
+{
+  struct Connection *con = cli_connect(sptr);
+
+  if (!feature_bool(FEAT_CAP_echo_message) || !CapActive(sptr, CAP_ECHOMSG))
+    return 0;
+  if (MyConnect(sptr)
+      && MsgQLength(&(cli_sendQ(sptr))) + con_ml_total_bytes(con) > get_sendq(sptr))
+    return 0;
+  return 1;
+}
+
+/** The echo of a channel batch to its sender (ml_echo_wanted() said so):
+ * one draft/multiline batch under the user's own prefix.  Inside the
+ * answer's labeled-response batch it is nested in it (its BATCH + and
+ * BATCH - lines tagged with it); alone it carries the label. */
+static void ml_echo_channel(struct Client *sptr, struct Channel *chptr,
+                            const char *cmd_str, int is_notice,
+                            const char *batch_timebuf,
+                            const char *batch_base_msgid,
+                            const char *batch_paste_url)
+{
+  struct Connection *con = cli_connect(sptr);
+  struct SLink *lp;
+
+  if (MultilineInUse(sptr)) {
+    char batchid[16];
+    const char *label = cli_labeled_batch(sptr) ? NULL
+        : ((cli_label(sptr)[0] && !cli_label_responded(sptr)) ? cli_label(sptr) : NULL);
+
+    ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+                  NumNick(sptr), con_batch_seq(con)++);
+    {
+      char tagbuf[512];
+      int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), sptr, sptr,
+                     batch_timebuf, batch_base_msgid,
+                     label, con_ml_client_tags(con));
+      if (label)
+        cli_label_responded(sptr) = 1;
+      /* User-source BATCH opener per IRCv3 multiline spec. */
+      if (taglen)
+        sendrawto_one(sptr, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                      tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                      get_displayed_host(sptr), batchid, chptr->chname);
+      else
+        sendcmdto_one(sptr, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+                      batchid, chptr->chname);
+    }
+    for (lp = con_ml_messages(con); lp; lp = lp->next) {
+      int concat = lp->value.cp[0];
+      char *text = lp->value.cp + 1;
+
+      sendrawto_one(sptr, "@batch=%s%s :%s!%s@%s %s %s :%s",
+                    batchid, concat ? ";draft/multiline-concat" : "",
+                    cli_name(sptr), cli_user(sptr)->username,
+                    get_displayed_host(sptr), cmd_str, chptr->chname, text);
+    }
+    sendcmdto_one(sptr, CMD_BATCH_CMD, sptr, "-%s", batchid);
+  } else {
+    /* Sender doesn't have multiline - preview + truncation fallback */
+    send_multiline_fallback(sptr, sptr, NULL, batch_base_msgid,
+                            con_ml_messages(con), con_ml_msg_count(con),
+                            1, chptr, batch_paste_url, con_ml_client_tags(con), is_notice);
+  }
+}
+
 static int
 process_multiline_batch(struct Client *sptr)
 {
@@ -1349,6 +1452,8 @@ process_multiline_batch(struct Client *sptr)
   const char *cmd_str = is_notice ? "NOTICE" : "PRIVMSG";
   int label_armed;
   int utf8_warn = 0;
+  int echo_wanted = 0;      /* the echo goes out with the answer (ml_answer) */
+  int away_reply = 0;       /* RPL_AWAY goes out with the answer */
 
   if (!con_ml_batch_id(con)[0])
     return 0;  /* No active batch */
@@ -1445,14 +1550,16 @@ process_multiline_batch(struct Client *sptr)
    * reveal a delayed-join sender (members see its JOIN before the
    * message); for a user, RPL_AWAY (PRIVMSG) and the target's free reply
    * (relay_private_accepted). */
-  ml_label_disarm(sptr, label_armed);
-  if (utf8_warn)   /* under the batch's label, as the fallback WARN */
-    relay_utf8_answer(sptr, cmd_str, RELAY_UTF8_SANITISED,
-                      con_ml_label(con)[0] ? con_ml_label(con) : NULL);
+  /* The batch's label stays armed: the whole answer -- the WARN, RPL_AWAY,
+   * the echo, the fallback WARN, or an ACK -- goes out under it, at the end
+   * (ml_answer), when every line of it is known. */
   if (is_channel)
     RevealDelayedJoinIfNeeded(sptr, chptr);
-  else
-    relay_private_accepted(sptr, acptr, is_notice);
+  else {
+    away_reply = !is_notice && cli_user(acptr) && cli_user(acptr)->away;
+    if (MyUser(acptr))
+      add_target(acptr, sptr);
+  }
 
   /* ONE time for the whole batch: the msgid's own mint time, read right
    * after the mint (the truncation notices mint again later).  Row, live
@@ -1586,81 +1693,12 @@ process_multiline_batch(struct Client *sptr)
 
     }
 
-    /* Echo to sender if they have echo-message capability.
-     *
-     * With aliases, each connection is a separate Client with its own channel
-     * membership and capabilities. Aliases receive messages through normal
-     * channel delivery above. PM echo for aliases is handled by
-     * bounce_echo_pm_to_session.
-     *
-     * Echo protection: skip echo only when it literally won't fit in
-     * the remaining sendQ space.  Since echo size equals the user's
-     * own input size, this is predictable and almost always delivers.
-     */
-    {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
-      int skip_echo = 0;
-
-      /* SendQ protection: skip echo only if it literally won't fit */
-      if (MyConnect(sptr)) {
-        unsigned int echo_bytes = con_ml_total_bytes(con);
-        unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
-        unsigned int sendq_limit = get_sendq(sptr);
-        if (current_sendq + echo_bytes > sendq_limit)
-          skip_echo = 1;
-      }
-
-      if (!skip_echo && need_echo) {
-        if (MultilineInUse(sptr)) {
-          /* Sender has multiline - send batch echo */
-          char batchid[16];
-          int use_tags = CapActive(sptr, CAP_MSGTAGS);
-          int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
-
-          ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                        NumNick(sptr), con_batch_seq(con)++);
-
-          /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
-           * client-only tags go on the BATCH + opener. Label included for echo. */
-          {
-            char tagbuf[512];
-            int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), sptr, sptr,
-                           batch_timebuf, batch_base_msgid,
-                           con_ml_label(con), con_ml_client_tags(con));
-            /* User-source BATCH opener per IRCv3 multiline spec. */
-            if (taglen)
-              sendrawto_one(sptr, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
-                            tagbuf, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), batchid, chptr->chname);
-            else
-              sendcmdto_one(sptr, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
-                            batchid, chptr->chname);
-          }
-
-          for (lp = con_ml_messages(con); lp; lp = lp->next) {
-            int concat = lp->value.cp[0];
-            char *text = lp->value.cp + 1;
-
-            if (concat) {
-              sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), cmd_str, chptr->chname, text);
-            } else {
-              sendrawto_one(sptr, "@batch=%s :%s!%s@%s %s %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), cmd_str, chptr->chname, text);
-            }
-          }
-
-          sendcmdto_one(sptr, CMD_BATCH_CMD, sptr, "-%s", batchid);
-        } else {
-          /* Sender doesn't have multiline - preview + truncation fallback */
-          send_multiline_fallback(sptr, sptr, NULL, batch_base_msgid,
-                                   con_ml_messages(con), con_ml_msg_count(con),
-                                   1, chptr, batch_paste_url, con_ml_client_tags(con), is_notice);
-        }
-      }
-    }
+    /* The echo to the sender (echo-message) is part of the batch's
+     * answer, sent with the rest of it at the end (ml_answer): every line
+     * of the answer is known only then.  Aliases receive the message
+     * through channel delivery above; PM echo for aliases is handled by
+     * bounce_echo_pm_to_session. */
+    echo_wanted = ml_echo_wanted(sptr);
   } else {
     /* Private message to user.
      *
@@ -1886,29 +1924,9 @@ process_multiline_batch(struct Client *sptr)
       }
     }
 
-    /* Echo to sender if they have echo-message capability.  Label is
-     * preserved here (and only here) so labeled-response correlates
-     * with the sender's own request.  SendQ protection: drop echo only
-     * if the message literally won't fit. */
-    {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
-      int skip_dm_echo = 0;
-
-      if (MyConnect(sptr)) {
-        unsigned int echo_bytes = con_ml_total_bytes(con);
-        unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
-        unsigned int sendq_limit = get_sendq(sptr);
-        if (current_sendq + echo_bytes > sendq_limit)
-          skip_dm_echo = 1;
-      }
-
-      if (!skip_dm_echo && need_echo) {
-        deliver_multiline_dm_to_one(sptr, sptr, acptr,
-                                    batch_base_msgid, batch_timebuf,
-                                    batch_paste_url, is_notice, cmd_str,
-                                    1 /* preserve @label on echo */);
-      }
-    }
+    /* The echo to the sender (echo-message) is part of the batch's
+     * answer, sent with the rest of it at the end (ml_answer). */
+    echo_wanted = ml_echo_wanted(sptr);
 
     /* A remote target: the batch goes as ML lines only when the whole
      * way to the target's server carries ML (ml_route_carries_multiline).
@@ -2073,16 +2091,48 @@ process_multiline_batch(struct Client *sptr)
    * armed -- an AWAY change, minutes later.  Disarm it with the sends. */
   sendcmdto_set_client_event(NULL, 0);
 
-  /* Notify sender about fallback if they support standard-replies */
-  if (fallback_count > 0 && feature_bool(FEAT_MULTILINE_FALLBACK_NOTIFY)
-      && CapActive(sptr, CAP_STANDARDREPLIES)) {
-    char desc[128];
-    ircd_snprintf(0, desc, sizeof(desc), "Message truncated for %d legacy recipient%s",
-                  fallback_count, fallback_count == 1 ? "" : "s");
-    /* Use saved label from BATCH +id for labeled-response correlation */
-    send_warn_with_label(sptr, "BATCH", "MULTILINE_FALLBACK",
-                         is_channel ? chptr->chname : cli_name(acptr), desc,
-                         con_ml_label(con)[0] ? con_ml_label(con) : NULL);
+  /* The sender's answer to the accepted batch, every line of it now known:
+   * the sanitiser's WARN, RPL_AWAY (a PRIVMSG batch to an away user), the
+   * echo (echo-message; itself one draft/multiline batch), the fallback
+   * WARN (legacy recipients got a preview).  labeled-response: one line
+   * or one batch -- two or more lines are one labeled-response batch, the
+   * echo batch nested in it; one takes the label (the echo batch's BATCH +
+   * line carries it); none is a labeled ACK.  The label is the batch's,
+   * armed since the send checks (ml_label_arm). */
+  {
+    int fallback_warn = fallback_count > 0
+        && feature_bool(FEAT_MULTILINE_FALLBACK_NOTIFY)
+        && CapActive(sptr, CAP_STANDARDREPLIES);
+    int lines = utf8_warn + away_reply + echo_wanted + fallback_warn;
+
+    if (lines > 1)
+      labeled_batch_start(sptr);
+    if (utf8_warn)
+      relay_utf8_answer(sptr, cmd_str, RELAY_UTF8_SANITISED, NULL);
+    if (away_reply)
+      send_reply(sptr, RPL_AWAY, cli_name(acptr),
+                 away_text_for(sptr, cli_user(acptr)->away));
+    if (echo_wanted) {
+      if (is_channel)
+        ml_echo_channel(sptr, chptr, cmd_str, is_notice, batch_timebuf,
+                        batch_base_msgid, batch_paste_url);
+      else
+        deliver_multiline_dm_to_one(sptr, sptr, acptr,
+                                    batch_base_msgid, batch_timebuf,
+                                    batch_paste_url, is_notice, cmd_str,
+                                    1 /* the answer's label */);
+    }
+    if (fallback_warn) {
+      char desc[128];
+      ircd_snprintf(0, desc, sizeof(desc), "Message truncated for %d legacy recipient%s",
+                    fallback_count, fallback_count == 1 ? "" : "s");
+      send_warn_with_label(sptr, "BATCH", "MULTILINE_FALLBACK",
+                           is_channel ? chptr->chname : cli_name(acptr), desc, NULL);
+    }
+    if (lines == 0)
+      send_labeled_ack(sptr);   /* #225: the batch was answered by nothing */
+    labeled_batch_end(sptr);
+    ml_label_disarm(sptr, label_armed);
   }
 
   /* Store multiline batch to history with the base msgid.
