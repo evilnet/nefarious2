@@ -16084,7 +16084,7 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
    * which is server-source-safe (renders &me as the source, no cli_user deref). */
   if (IsUser(from) && MultilineInUse(alias)) {
     char alias_batchid[16];
-    ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%u",
+    ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%s%u",
                   NumNick(from), con_batch_seq(cli_connect(alias))++);
 
     /* BATCH +id draft/multiline <target_nick> opener.  Per IRCv3

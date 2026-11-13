@@ -254,7 +254,7 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
                          && cli_label(route_to)[0] && !cli_label_responded(route_to))
                         ? cli_label(route_to) : NULL;
 
-    ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+    ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
                   NumNick(sptr), con_batch_seq(cli_connect(route_to))++);
 
     {
@@ -1399,7 +1399,7 @@ static void ml_echo_channel(struct Client *sptr, struct Channel *chptr,
     const char *label = cli_labeled_batch(sptr) ? NULL
         : ((cli_label(sptr)[0] && !cli_label_responded(sptr)) ? cli_label(sptr) : NULL);
 
-    ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+    ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
                   NumNick(sptr), con_batch_seq(con)++);
     {
       char tagbuf[512];
@@ -1628,7 +1628,7 @@ process_multiline_batch(struct Client *sptr)
         char batchid[16];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
-        ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+        ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
                       NumNick(sptr), con_batch_seq(cli_connect(to))++);
 
         /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
@@ -2924,7 +2924,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         char timebuf[32];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
-        ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+        ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
                       NumNick(sptr), con_batch_seq(cli_connect(to))++);
 
         /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
@@ -2978,7 +2978,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       char timebuf[32];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
 
-      ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+      ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
                     NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
 
       /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
