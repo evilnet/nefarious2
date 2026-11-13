@@ -2540,12 +2540,45 @@ struct prereg_merge_ctx {
   int mode_keys;              /**< A mode-synced key was applied */
 };
 
+/** @a cptr's own in-memory entry for @a key, no store lookup (unlike
+ * metadata_get_client()'s lazy fill). */
+static struct MetadataEntry *memory_entry(struct Client *cptr, const char *key)
+{
+  struct MetadataEntry *e;
+
+  for (e = cli_metadata(cptr); e; e = e->next)
+    if (ircd_strcmp(e->key, key) == 0)
+      return e;
+  return NULL;
+}
+
+/** A key the merging client holds in memory with no row in the store (a
+ * revived session's ghost can: a value it was given that never became the
+ * account's row) reads as a live row never stamped (0.0.0): it is what
+ * the client and those who see it hold, so a delete of it -- a CLEAR's --
+ * removes it and is told, and any write beats it. */
+static int memory_row(struct Client *cptr, const char *key,
+                      struct md_version *out, char *valbuf, size_t vlen)
+{
+  struct MetadataEntry *e = memory_entry(cptr, key);
+
+  if (!e || !e->value)
+    return 1;
+  memset(out, 0, sizeof(*out));
+  ircd_strncpy(valbuf, e->value, vlen);
+  out->vis = e->visibility;
+  out->value = valbuf;
+  out->vlen = strlen(valbuf);
+  return 0;
+}
+
 static int prereg_row(void *arg, const char *key, struct md_version *out,
                       char *valbuf, size_t vlen)
 {
   struct prereg_merge_ctx *c = arg;
+  int rc = metadata_account_get_version(c->account, key, out, valbuf, vlen);
 
-  return metadata_account_get_version(c->account, key, out, valbuf, vlen);
+  return rc == 1 ? memory_row(c->cptr, key, out, valbuf, vlen) : rc;
 }
 
 static int prereg_store(void *arg, const char *key, const struct md_version *w)
@@ -2603,6 +2636,43 @@ static void prereg_refuse(void *arg, const char *key, enum md_prereg_verdict why
   }
 }
 
+/** Call @a each for every key a CLEAR deletes that @a cptr holds in
+ * memory with no row in @a account's store (@a account NULL: no store,
+ * every key in memory), the keys copied out first: @a each edits the
+ * list. */
+static void prereg_clear_memory(struct Client *cptr, const char *account,
+                                void (*each)(void *each_arg, const char *key,
+                                             int vis),
+                                void *each_arg)
+{
+  struct clear_key *keys = NULL, *k, *next;
+  struct MetadataEntry *e;
+
+  for (e = cli_metadata(cptr); e; e = e->next) {
+    struct md_version v;
+    char valbuf[METADATA_VALUE_LEN];
+
+    if (!e->value || !metadata_key_clearable(e->key))
+      continue;
+    if (account && metadata_account_get_version(account, e->key, &v, valbuf,
+                                                sizeof(valbuf)) != 1)
+      continue;   /* a row: the store's walk had it, or it is newer */
+    k = (struct clear_key *)MyMalloc(sizeof(*k) + strlen(e->key));
+    if (!k)
+      continue;
+    strcpy(k->key, e->key);
+    k->vis = e->visibility;
+    k->next = keys;
+    keys = k;
+  }
+  for (k = keys; k; k = k->next)
+    each(each_arg, k->key, k->vis);
+  for (k = keys; k; k = next) {
+    next = k->next;
+    MyFree(k);
+  }
+}
+
 static void prereg_clear_keys(void *arg, const struct md_stamp *st,
                               void (*each)(void *each_arg, const char *key,
                                            int vis),
@@ -2614,6 +2684,10 @@ static void prereg_clear_keys(void *arg, const struct md_stamp *st,
    * login's pull with (or bursts later) is taken as a tombstone at it. */
   metadata_account_floor_raise(c->account, st);
   metadata_account_clear_keys(c->account, each, each_arg);
+  /* Then what the client holds in memory with no row in the store (a
+   * revived ghost's), as a CLEAR after registration deletes its memory's
+   * keys too (prereg_row() reads them as unstamped live rows). */
+  prereg_clear_memory(c->cptr, c->account, each, each_arg);
 }
 
 static int prereg_no_row_is_state(void *arg, const char *key)
