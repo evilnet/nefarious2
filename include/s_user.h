@@ -86,6 +86,10 @@ extern int set_nick_name(struct Client* cptr, struct Client* sptr,
 extern int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                                 struct Client* device, const char* nick,
                                 int parc, char* parv[], int svsnick);
+/* Refuse that request because another client holds the nick here: 433 to
+ * the user and the device, the user's nick back toward @a cptr. */
+extern int set_nick_name_refused(struct Client *cptr, struct Client *sptr,
+                                 struct Client *device, const char *nick);
 /* One-shot: the next register_user() of a remote client relays its N to
  * IRCv3-aware links only (legacy links learn that user some other way,
  * e.g. a BX P renumbering a face they already hold).  Every

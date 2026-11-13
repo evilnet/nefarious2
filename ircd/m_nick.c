@@ -93,6 +93,7 @@
 #include "account_id.h"
 #include "ircd_string.h"
 #include "msg.h"
+#include "nick_request.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "s_conf.h"
@@ -914,6 +915,17 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
   }
+  /* A bouncer device on another server asked for its session user's
+   * rename, the user is ours, and someone else holds the nick here (taken
+   * an instant before the request reached us, so the device's server had
+   * not heard): we are the authority for our user's nick, so the request
+   * is refused as a ban or NICKDELAY refuses it, and the device's server
+   * is answered.  The classic rules below would KILL our own user and
+   * end its session (#6) -- with asserts on, assert(!MyConnect(sptr))
+   * aborts the server first.  The holder is untouched. */
+  if (!IsServer(sptr)
+      && nick_change_meets(MyUser(sptr), 0) == NICK_MEET_REFUSE)
+    return set_nick_name_refused(cptr, sptr, device, nick);
   /*
    * Decide, we really have a nick collision and deal with it
    */

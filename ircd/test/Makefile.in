@@ -59,6 +59,7 @@ CMOCKA_TESTPROGS = \
 	ipcheck_cmocka \
 	fakelag_cmocka \
 	nick_delay_cmocka \
+	nick_request_cmocka \
 	iauth_respawn_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
@@ -147,6 +148,7 @@ DEP_SRC = \
 	ipcheck_cmocka.c \
 	fakelag_cmocka.c \
 	nick_delay_cmocka.c \
+	nick_request_cmocka.c \
 	iauth_respawn_cmocka.c \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
@@ -464,6 +466,11 @@ fakelag_cmocka: $(FAKELAG_CMOCKA_OBJS)
 NICK_DELAY_CMOCKA_OBJS = nick_delay_cmocka.o
 nick_delay_cmocka: $(NICK_DELAY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(NICK_DELAY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# nick change meeting a holder: header-only (include/nick_request.h)
+NICK_REQUEST_CMOCKA_OBJS = nick_request_cmocka.o
+nick_request_cmocka: $(NICK_REQUEST_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(NICK_REQUEST_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # IAuth respawn backoff: header-only (include/iauth_respawn.h)
 IAUTH_RESPAWN_CMOCKA_OBJS = iauth_respawn_cmocka.o
