@@ -343,8 +343,7 @@ void fwd_label_drop_all(struct Client *cptr, int send_end)
     struct ForwardedLabel *fl = &cli_fwd_labels(cptr)[i];
     if (send_end && (fl->fl_state == FWD_LABEL_ACTIVE
                      || fl->fl_state == FWD_LABEL_DRAINING))
-      sendrawto_one(cptr, ":%s " MSG_BATCH_CMD " -%s",
-                    cli_name(&me), fl->fl_batch_id);
+      send_batch_marker(cptr, '-', fl->fl_batch_id, NULL, NULL, NULL, NULL);
   }
   fwd_label_cleanup(cptr);
 }
