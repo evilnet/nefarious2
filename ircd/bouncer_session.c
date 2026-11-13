@@ -9212,6 +9212,14 @@ static int bounce_hold_session(struct Client *cptr,
   sasl_session_free(cptr);
   abort_sasl(cptr, 0);
 
+  /* An asynchronous OPER check in flight ends with the socket too: its
+   * answer was that socket's.  Its completion (m_oper.c,
+   * oper_password_verified()) finds no client pending with its cookie and
+   * drops the result -- on a revived connection given the same descriptor
+   * as well -- and the ghost is not left "already in progress". */
+  ClearOperPending(cptr);
+  cli_opercookie(cptr) = 0;
+
   /* Close the socket but keep the client structure alive.
    * Note: We do NOT call exit_client() here - that would destroy the client.
    * We only want to close the socket connection.
@@ -9500,6 +9508,12 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   batch_end_all(ghost, 0);
   cli_label(ghost)[0] = '\0';
   cli_label_responded(ghost) = 0;
+  /* An asynchronous OPER check of the old socket (the hold ends it too:
+   * this covers a ghost that skipped it, the relay-only case): its
+   * completion must not oper the new connection nor answer it under the
+   * old line's label, and the ghost must not stay "already in progress". */
+  ClearOperPending(ghost);
+  cli_opercookie(ghost) = 0;
 
 #ifdef USE_SSL
   /* Gate: Refuse revival if ghost is in +Z channels and temp is plaintext.
