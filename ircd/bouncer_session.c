@@ -125,6 +125,29 @@ static struct AccountSessions *accountHash[BOUNCE_ACCOUNT_HASHSIZE];
 static int bounce_db_put(struct BouncerSession *session);
 static int bounce_db_del(const char *sessid);
 
+static void orphan_arm(void);
+
+/** Set the primary an alias follows.  Every write of a LOCAL alias's
+ * alias_primary goes through here (the BX C filings of another server's
+ * alias set theirs directly: no socket, no sweep), so the two things that
+ * hang on that pointer cannot be missed:
+ * - a pointer made non-NULL, or a client that is no longer an alias (a
+ *   promote), ends any hold of its input (s_bsd.c client_input_wake());
+ * - a local alias left with none is an orphan: the orphan sweep is armed,
+ *   which re-points or exits it within its window.  Before, only two of
+ *   the five NULL writes armed it, and a device the D.2 demote left
+ *   without a primary (its finish refused) waited for an unrelated orphan.
+ * @param[in] a The client (an alias, or one just promoted from one).
+ * @param[in] p Its primary, or NULL. */
+static void alias_set_primary(struct Client *a, struct Client *p)
+{
+  cli_user(a)->alias_primary = p;
+  if (p || !IsBouncerAlias(a))
+    client_input_wake(a);
+  else if (MyConnect(a))
+    orphan_arm();
+}
+
 /* ---------------------------------------------------------------- */
 /* Connection stats accumulation helpers                              */
 /* ---------------------------------------------------------------- */
@@ -2416,8 +2439,7 @@ static void bounce_alias_take_face(struct Client *x, struct Client *p,
   else if (live)
     ClearHiddenHost(x);
   cli_lastnick(x) = cli_lastnick(p);
-  user->alias_primary = p;
-  client_input_wake(x);   /* an orphan's held input (s_bsd.c) */
+  alias_set_primary(x, p);
 
   if (!live)
     return;
@@ -2586,8 +2608,7 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
                                MyConnect(c));
     if (take == BOUNCE_REPOINT_SKIP)
       continue;
-    cli_user(c)->alias_primary = new_primary;
-    client_input_wake(c);   /* an orphan's held input (s_bsd.c) */
+    alias_set_primary(c, new_primary);
     if (mode != BOUNCE_REPOINT_ANNOUNCE)
       continue;
     if (take == BOUNCE_REPOINT_REMOTE) {
@@ -4380,6 +4401,7 @@ void bounce_legacy_face_change(struct Client *face, struct BouncerSession *sess,
 static struct Timer orphan_sweep_timer;
 static time_t orphan_first;   /**< when the oldest unswept orphan was made */
 static time_t orphan_due;     /**< the latest orphan's grace ends */
+static unsigned int orphan_sweeps;  /**< sweeps run (bounce_orphan_sweep_count()) */
 #define ORPHAN_GRACE     BOUNCE_ORPHAN_GRACE
 #define ORPHAN_WAIT_MAX  BOUNCE_ORPHAN_WAIT_MAX
 
@@ -4428,8 +4450,7 @@ static void orphan_follow(struct BouncerSession *s, struct Client *alias)
   struct Membership *member;
   char full[6];
 
-  cli_user(alias)->alias_primary = p;
-  client_input_wake(alias);   /* its held input (s_bsd.c) */
+  alias_set_primary(alias, p);
   if (0 != ircd_strcmp(cli_name(alias), cli_name(p))) {
     sendcmdto_one(alias, CMD_NICK, alias, "%s", cli_name(p));
     ircd_strncpy(cli_name(alias), cli_name(p), NICKLEN + 1);
@@ -4511,6 +4532,31 @@ static void bounce_orphan_alias_sweep(struct Event *ev)
       break;
     }
   }
+  orphan_sweeps++;
+  /* An orphan made inside this pass (an exit above left the devices that
+   * followed the exited one with no primary) armed nothing: the timer is
+   * the one running.  It comes back for them after their grace. */
+  if (orphan_first)
+    timer_chg(&orphan_sweep_timer, TT_RELATIVE, ORPHAN_GRACE);
+}
+
+/** See include/bouncer_session.h. */
+unsigned int bounce_orphan_sweep_count(void)
+{
+  return orphan_sweeps;
+}
+
+/** See include/bouncer_session.h. */
+void bounce_orphan_sweep_now(void)
+{
+  if (!orphan_first)
+    orphan_first = CurrentTime;
+  orphan_due = CurrentTime;     /* the pass runs, grace or not */
+  if (!t_active(&orphan_sweep_timer))
+    timer_add(timer_init(&orphan_sweep_timer), bounce_orphan_alias_sweep,
+              NULL, TT_RELATIVE, 0);
+  else if (t_onqueue(&orphan_sweep_timer))
+    timer_chg(&orphan_sweep_timer, TT_ABSOLUTE, CurrentTime);
 }
 
 /** A device of ours was left without a primary: the sweep decides for it
@@ -4530,7 +4576,6 @@ static void orphan_arm(void)
 void bounce_null_alias_primary_pointing_at(struct Client *gone)
 {
   struct Client *cptr;
-  int orphaned_here = 0;
 
   if (!gone)
     return;
@@ -4538,14 +4583,9 @@ void bounce_null_alias_primary_pointing_at(struct Client *gone)
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!IsBouncerAlias(cptr) || !cli_user(cptr))
       continue;
-    if (cli_user(cptr)->alias_primary == gone) {
-      cli_user(cptr)->alias_primary = NULL;
-      if (MyConnect(cptr))
-        orphaned_here = 1;
-    }
+    if (cli_user(cptr)->alias_primary == gone)
+      alias_set_primary(cptr, NULL);   /* ours: arms the sweep */
   }
-  if (orphaned_here)
-    orphan_arm();
 }
 
 void bounce_null_hs_client_pointing_at(struct Client *cli)
@@ -7106,9 +7146,8 @@ static void bounce_end_here(struct BouncerSession *s, struct Client *caller,
        * command: with no primary, the orphan sweep ends it once the
        * command is done (unless the command exits it first). */
       session_roster_leave(s, a);
-      cli_user(a)->alias_primary = NULL;
+      alias_set_primary(a, NULL);   /* arms the sweep */
       bounce_give_own_sessid(a, ended);
-      orphan_arm();
       continue;
     }
     log_write(LS_USER, L_INFO, 0, "Bouncer: %s's session %s ends here (%s); "
@@ -8560,8 +8599,7 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
      * BX C nowhere (it is that server's user now, in its count). */
     bounce_count_converted(alias, &was, cli_user(alias)->server, "promote");
   }
-  cli_user(alias)->alias_primary = NULL;
-  client_input_wake(alias);   /* a primary now: any held input (s_bsd.c) */
+  alias_set_primary(alias, NULL);   /* a primary now */
 
   /* Preserve cli_lastnick across the promote.  Earlier this site reset
    * cli_lastnick to CurrentTime under the rationale "ensures promoted
@@ -8667,8 +8705,7 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   for (j = 0; j < session->hs_alias_count; j++) {
     struct Client *sibling = findNUser(session->hs_aliases[j].ba_numeric);
     if (sibling && IsBouncerAlias(sibling)) {
-      cli_user(sibling)->alias_primary = alias;
-      client_input_wake(sibling);   /* an orphan's held input (s_bsd.c) */
+      alias_set_primary(sibling, alias);
     }
   }
 
@@ -10200,8 +10237,7 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
   for (i = 0; i < session->hs_alias_count; i++) {
     struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
     if (alias && IsBouncerAlias(alias)) {
-      cli_user(alias)->alias_primary = ghost;
-      client_input_wake(alias);   /* an orphan's held input (s_bsd.c) */
+      alias_set_primary(alias, ghost);
     }
   }
 
@@ -10907,7 +10943,9 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
      * alias, releases the rest. */
     bounce_count_converted(acptr, &was, &me, "demote");
   }
-  cli_user(acptr)->alias_primary = NULL;
+  /* Arms the orphan sweep: should the finish refuse (its eligibility bar,
+   * the checked install), the sweep re-points or ends this device. */
+  alias_set_primary(acptr, NULL);
   hRemClient(acptr);
 
   /* Session moves to peer's authority.  hs_origin → introducing
@@ -13390,8 +13428,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       bounce_count_converted(new_client, &was, cli_user(new_client)->server,
                              "BX P");
     }
-    cli_user(new_client)->alias_primary = NULL;
-    client_input_wake(new_client);   /* a primary now: any held input (s_bsd.c) */
+    alias_set_primary(new_client, NULL);   /* a primary now */
     /* C1: Add promoted alias to nick hash (aliases aren't in nick hash) */
     hAddClient(new_client);
     /* Reconcile opers/inv counting: ClearBouncerAlias made new_client an eligible

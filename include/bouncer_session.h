@@ -2670,4 +2670,13 @@ extern void bounce_null_alias_primary_pointing_at(struct Client *gone);
 #define BOUNCE_ORPHAN_GRACE     2
 #define BOUNCE_ORPHAN_WAIT_MAX  10
 
+/** How many orphan sweep passes have run (a held device's input asks
+ * whether one has run since it asked for one). */
+extern unsigned int bounce_orphan_sweep_count(void);
+
+/** Run the orphan sweep at the next timer pass, its grace or not (a held
+ * device's input reached its bound): never inline, so a caller inside a
+ * read is never re-entered by an exit. */
+extern void bounce_orphan_sweep_now(void);
+
 #endif /* INCLUDED_bouncer_session_h */
