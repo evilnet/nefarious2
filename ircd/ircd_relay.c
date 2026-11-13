@@ -2154,7 +2154,8 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing PM to other members of the sender's bouncer session */
-  bounce_echo_pm_to_session(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
+  bounce_echo_pm_to_session(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid,
+                            cli_client_tags(sptr));
 
   /* Echo private message back to sender if they have echo-message cap */
 #ifdef USE_ROCKSDB
@@ -2371,7 +2372,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing notice to other members of the sender's bouncer session */
-  bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
+  bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid, NULL);
 
   /* Echo private notice back to sender if they have echo-message cap */
 #ifdef USE_ROCKSDB
