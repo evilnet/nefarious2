@@ -1124,12 +1124,36 @@ static void test_row_unchanged(void **state)
   assert_int_equal(0, md_row_unchanged(&live, NULL));
 }
 
+/* The owner's rule for a local write (2026-11-13: "it should be silent,
+ * nothing changed"): md_row_unchanged() of the row before and the write. */
+static void test_local_write_unchanged(void **state)
+{
+  struct md_version stored, set_same, set_other, set_private, unset;
+
+  (void)state;
+  memset(&stored, 0, sizeof(stored));
+  stored.value = "v"; stored.vlen = 1; stored.st.ms = 100;
+  set_same = stored; set_same.st.ms = 200;
+  set_other = set_same; set_other.value = "w";
+  set_private = set_same; set_private.vis = 1;
+  memset(&unset, 0, sizeof(unset));
+  unset.tombstone = 1; unset.st.ms = 200;
+  assert_int_equal(1, md_row_unchanged(&stored, &set_same));     /* same value: silent */
+  assert_int_equal(0, md_row_unchanged(&stored, &set_other));    /* another value: told */
+  assert_int_equal(0, md_row_unchanged(&stored, &set_private));  /* visibility only: told */
+  assert_int_equal(1, md_row_unchanged(NULL, &unset));           /* unset of no row: silent */
+  stored.tombstone = 1; stored.value = NULL; stored.vlen = 0;
+  assert_int_equal(1, md_row_unchanged(&stored, &unset));        /* unset of a deleted key */
+  assert_int_equal(0, md_row_unchanged(NULL, &set_same));        /* a first value: told */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_stamp_roundtrip),
     cmocka_unit_test(test_same_content),
     cmocka_unit_test(test_row_unchanged),
+    cmocka_unit_test(test_local_write_unchanged),
     cmocka_unit_test(test_stamp_parse_rejects),
     cmocka_unit_test(test_stamp_parse_ms_overflow_rejected),
     cmocka_unit_test(test_stamp_cmp_order),

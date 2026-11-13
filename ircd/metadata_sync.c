@@ -183,32 +183,53 @@ int metadata_account_write(struct Client *src, const char *account,
 {
   struct md_stamp st;
   struct md_version v;
+  int unchanged = 0;
 
   if (!src || !account || !account[0] || !key)
     return -1;
 
   st = metadata_stamp_now();
+  v.st = st;
+  v.tombstone = (value == NULL);
+  v.vis = vis;
+  v.value = value;
+  v.vlen = value ? strlen(value) : 0;
 
   /* Store first, and nothing else when the store refuses the write: a
    * row peers keep under a stamp this server never stored would be
    * undone here by the next pull.  With no store at all (storage not
    * configured), memory and peers still get it, as metadata_set_client
    * plus the account-form broadcast used to. */
-  if (metadata_lmdb_is_available()
-      && metadata_account_put_versioned(account, key, value, vis, &st) < 0) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "metadata_account_write: store refused %s/%s - not applied, "
-              "not sent", account, key);
-    return -1;
+  if (metadata_lmdb_is_available()) {
+    struct md_version old;
+    char valbuf[METADATA_VALUE_LEN];
+    int rc = metadata_account_get_version(account, key, &old, valbuf,
+                                          sizeof(valbuf));
+
+    /* The owner (2026-11-13): a write that leaves the row saying what it
+     * said -- the same value and visibility, or a delete of a key with no
+     * live value -- is silent: "nothing changed so we shouldn't act like
+     * something did".  md_row_unchanged(), the rule a fork peer applies to
+     * the same row.  It is still stored and sent under the new stamp (the
+     * writer said "this, now": a peer's older, different value must not
+     * win later), and the writer still gets its reply (761 / 766, the
+     * caller's). */
+    if (rc == 0 || rc == 1)
+      unchanged = md_row_unchanged(rc == 0 ? &old : NULL, &v);
+    if (metadata_account_put_versioned(account, key, value, vis, &st) < 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "metadata_account_write: store refused %s/%s - not applied, "
+                "not sent", account, key);
+      return -1;
+    }
   }
 
-  metadata_account_apply_memory(account, key, value, vis);
+  /* Memory and mode flags whatever the row said before (a mode already so
+   * changes nothing and is not echoed: umode_sync_apply()); a METADATA
+   * line only for a change. */
+  metadata_account_apply_memory_ex(account, key, value, vis, NULL, NULL,
+                                   !unchanged);
 
-  v.st = st;
-  v.tombstone = (value == NULL);
-  v.vis = vis;
-  v.value = value;
-  v.vlen = value ? strlen(value) : 0;
   metadata_emit_versioned(src, NULL, NULL, account, key, &v);
   return 0;
 }
@@ -296,10 +317,32 @@ int metadata_client_write(struct Client *src, struct Client *target,
                                   value, vis);
 
   /* No account: this client's own memory (metadata_set_client writes
-   * no store row without one) and its subscribers. */
-  if (metadata_set_client(target, key, value, vis) < 0)
-    return -1;
-  metadata_notify_subscribers(cli_name(target), key, value, vis);
+   * no store row without one) and its subscribers -- told only of a
+   * change (the same rule as an account's row, against its memory entry:
+   * there is no stamped row; owner, 2026-11-13). */
+  {
+    struct MetadataEntry *old = metadata_get_client(target, key);
+    struct md_version was, now;
+    int unchanged;
+
+    memset(&was, 0, sizeof(was));
+    if (old) {
+      was.vis = old->visibility;
+      was.value = old->value;
+      was.vlen = old->value ? strlen(old->value) : 0;
+    }
+    memset(&now, 0, sizeof(now));
+    now.tombstone = (value == NULL);
+    now.vis = vis;
+    now.value = value;
+    now.vlen = value ? strlen(value) : 0;
+    unchanged = md_row_unchanged(old ? &was : NULL, &now);
+
+    if (metadata_set_client(target, key, value, vis) < 0)
+      return -1;
+    if (!unchanged)
+      metadata_notify_subscribers(cli_name(target), key, value, vis);
+  }
 
   /* Addressed by session id (metadata_session_addressable), else the
    * nick form -- which the receiver accepts only from the target's own
