@@ -2753,7 +2753,13 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         send_mb_alias = mb_alias;
       }
 
-      if (send_mb_alias && lp->value.cptr == primary_dir)
+      /* The alias's numeric only toward an IRCv3-aware link: a legacy
+       * server never learned the alias (BX C is fork-only) and answers a
+       * NICK from an unknown numeric with a KILL of it (parse.c), which
+       * ends the session.  Toward a legacy link the primary's own
+       * numeric goes instead (a desync at worst, never a KILL). */
+      if (send_mb_alias && lp->value.cptr == primary_dir
+          && IsIRCv3Aware(lp->value.cptr))
         send_buffer(lp->value.cptr, send_mb_alias, 0);
       else
         send_buffer(lp->value.cptr, send_mb, 0);
