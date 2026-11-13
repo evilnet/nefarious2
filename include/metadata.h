@@ -637,9 +637,10 @@ extern int metadata_account_get_version(const char *account, const char *key,
  * @param[in] account Account name.
  * @param[in] key Metadata key.
  * @param[in] in Incoming version to merge.
- * @return 1 (taken), 2 (taken, saying the same as the row it replaced:
- *   md_version_same_content() -- only the stamp moved), 0 (kept the local
- *   version), -1 (error).
+ * @return 1 (taken), 2 (taken, changing nothing a subscriber has seen:
+ *   md_row_unchanged() -- the same content, only the stamp moved, or a
+ *   tombstone where there was no row), 0 (kept the local version), -1
+ *   (error).
  */
 extern int metadata_account_merge(const char *account, const char *key,
                                   const struct md_version *in);

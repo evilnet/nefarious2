@@ -198,6 +198,16 @@ int md_version_same_content(const struct md_version *a,
          && (a->vlen == 0 || memcmp(a->value, b->value, a->vlen) == 0);
 }
 
+int md_row_unchanged(const struct md_version *local,
+                     const struct md_version *in)
+{
+  if (!in)
+    return 0;
+  if (!local)
+    return in->tombstone;
+  return md_version_same_content(local, in);
+}
+
 int md_lww_take(const struct md_version *local,
                  const struct md_version *incoming)
 {

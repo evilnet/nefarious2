@@ -1116,10 +1116,6 @@ static void md_clear_key_free(struct md_clear_key *head)
   }
 }
 
-/** metadata_account_foreach_version callback for a user CLEAR's store
- * residue: every live row that is not draft/persistence/ and not an
- * internal key (md_key_replicable: last_present, a key the wire
- * validator refuses -- push-2 final fix wave, M-2). */
 /** metadata_account_clear_keys() callback for a user CLEAR's store
  * residue: delete the row, stamped, everywhere (metadata_account_write). */
 struct md_clear_residue { struct Client *sptr; const char *account; };
@@ -2021,13 +2017,17 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   if (merge_rc != 1 && merge_rc != 2)
     return 0;   /* kept the local version (0), or a store error (-1): no relay */
 
-  /* Taken.  A row that says what the replaced one said (2: the same value
-   * and visibility, or tombstone over tombstone -- a SET of an unchanged
-   * value elsewhere, a pull answer or burst row that only moves the
-   * stamp) changes nothing anyone here sees: memory and flags are applied
-   * as always (a mode already so is a no-op), the newer stamp is stored
-   * and relayed, but no subscriber or connection of the account is told
-   * (owner, 2026-11-13: fork peers skip the announcement). */
+  /* Taken.  A row that changes nothing a subscriber has seen (2: the same
+   * value and visibility, tombstone over tombstone -- a SET of an
+   * unchanged value elsewhere, a pull answer or burst row that only moves
+   * the stamp -- or a tombstone where there was no row: nobody here ever
+   * saw a value to lose) is stored and relayed, memory and mode flags
+   * applied as always, but no METADATA line goes to a subscriber or a
+   * connection of the account (owner, 2026-11-13: fork peers skip the
+   * announcement).  A mode-synced key's flag is not part of that: a
+   * tombstone over no row turns a default mode off, and that change is
+   * applied and echoed as a MODE (metadata_account_apply_memory_ex ->
+   * umode_sync_apply_butone, whatever tell says). */
   metadata_account_apply_memory_ex(account_name, wire_key,
                                    tombstone ? NULL : chunk->value, vis,
                                    NULL, NULL, merge_rc == 1);

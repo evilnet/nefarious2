@@ -811,7 +811,7 @@ int metadata_account_merge(const char *account, const char *key,
 
   if (!md_lww_take(local_rc == 1 ? NULL : &local, in))
     return 0;
-  same = local_rc == 0 && md_version_same_content(&local, in);
+  same = md_row_unchanged(local_rc == 1 ? NULL : &local, in);
 
   remote_hlc.physical_ms = in->st.ms;
   remote_hlc.logical = in->st.logical;

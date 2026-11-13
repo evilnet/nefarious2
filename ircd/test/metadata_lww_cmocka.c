@@ -1102,11 +1102,34 @@ static void test_same_content(void **state)
   assert_int_equal(0, md_version_same_content(NULL, &b));
 }
 
+/* For the notification only (third review): a row taken over no row
+ * changes nothing a subscriber saw when it is a tombstone, and is news
+ * when it is live; over a row, the same content is no news. */
+static void test_row_unchanged(void **state)
+{
+  struct md_version live, live2, tomb;
+
+  (void)state;
+  memset(&live, 0, sizeof(live));
+  memset(&tomb, 0, sizeof(tomb));
+  live.value = "v"; live.vlen = 1; live.st.ms = 1;
+  live2 = live; live2.st.ms = 2;
+  tomb.tombstone = 1; tomb.st.ms = 3;
+  assert_int_equal(1, md_row_unchanged(NULL, &tomb));    /* absent -> tombstone */
+  assert_int_equal(0, md_row_unchanged(NULL, &live));    /* absent -> live: news */
+  assert_int_equal(0, md_row_unchanged(&live, &tomb));   /* live -> tombstone: news */
+  assert_int_equal(1, md_row_unchanged(&live, &live2));  /* same content */
+  assert_int_equal(1, md_row_unchanged(&tomb, &tomb));   /* tombstone over tombstone */
+  assert_int_equal(0, md_row_unchanged(&tomb, &live));   /* tombstone -> live: news */
+  assert_int_equal(0, md_row_unchanged(&live, NULL));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_stamp_roundtrip),
     cmocka_unit_test(test_same_content),
+    cmocka_unit_test(test_row_unchanged),
     cmocka_unit_test(test_stamp_parse_rejects),
     cmocka_unit_test(test_stamp_parse_ms_overflow_rejected),
     cmocka_unit_test(test_stamp_cmp_order),

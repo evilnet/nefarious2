@@ -132,6 +132,16 @@ extern int md_lww_take(const struct md_version *local,
 extern int md_version_same_content(const struct md_version *a,
                                    const struct md_version *b);
 
+/** Whether a row @a in taken over @a local (NULL: no row) changes nothing a
+ * subscriber has seen: the same content (md_version_same_content()), or a
+ * tombstone where there was no row -- nobody ever saw a value to lose.
+ * Only the METADATA notification depends on it: memory and mode flags are
+ * applied whatever it says (for a mode-synced key a tombstone over no row
+ * turns a default mode off, and that change is applied and echoed).
+ * @return 1 if nothing changed for a subscriber, else 0. */
+extern int md_row_unchanged(const struct md_version *local,
+                            const struct md_version *in);
+
 /** Encode @a s/@a tombstone as the wire clock token "L<stamp>" (live) or
  * "D<stamp>" (tombstone) into @a buf (capacity @a len, NUL-terminated on
  * success).
