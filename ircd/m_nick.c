@@ -1257,7 +1257,16 @@ int nick_device_request(struct Client *link, struct Client *sptr,
   if (!do_nick_name(nick) || strcmp(nick, asked))
     return set_nick_name_refused(cptr, sptr, device, ERR_ERRONEUSNICKNAME,
                                  asked);
-  if (isNickJuped(nick))
+  /* What a local NICK of the user would be refused for here, whatever
+   * the device's server checked: our own NICKLEN (432; a local NICK is
+   * cut to it, a request is not ours to change), a juped nick and the
+   * CTCP versioning nick (433). */
+  if (strlen(nick) > (size_t)feature_int(FEAT_NICKLEN))
+    return set_nick_name_refused(cptr, sptr, device, ERR_ERRONEUSNICKNAME,
+                                 nick);
+  if (isNickJuped(nick)
+      || (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK))
+          && !ircd_strcmp(nick, feature_str(FEAT_CTCP_VERSIONING_NICK))))
     return set_nick_name_refused(cptr, sptr, device, ERR_NICKNAMEINUSE, nick);
 
   /* A BX W request's TS is the writer's: stamped now.  An alias-numeric
@@ -1278,6 +1287,11 @@ int nick_device_request(struct Client *link, struct Client *sptr,
       return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
     return 0;                             /* already so named */
   }
+  /* A login whose registration the bouncer deferred keeps its nick
+   * against a local NICK (433, I-4); so it does against a request. */
+  if (IsUnknown(acptr) && MyConnect(acptr)
+      && bounce_is_pending_registration(acptr))
+    return set_nick_name_refused(cptr, sptr, device, ERR_NICKNAMEINUSE, nick);
   if (IsUnknown(acptr) && MyConnect(acptr))
     return nick_meets_unregistered(link, cptr, sptr, acptr, device, nick,
                                    parc, parv);
