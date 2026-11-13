@@ -1570,11 +1570,15 @@ void relay_channel_statusmsg(struct Client *sptr, char status, const char *name,
 
   statusmsg_wall(status, &wcmd, &wtok, &wskip);
 
-  /* UTF8ONLY enforcement (as relay_channel_message) */
+  /* UTF8ONLY enforcement (as relay_channel_message): a refused text is
+   * answered now and alone; a sanitised one is sent as its copy, and the
+   * WARN is part of the answer to the ACCEPTED message
+   * (relay_answer_begin, below) -- never sent for one refused later. */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
-    if (utf8 == RELAY_UTF8_REFUSED)
+    if (utf8 == RELAY_UTF8_REFUSED) {
+      relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
       return;
+    }
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -1591,7 +1595,9 @@ void relay_channel_statusmsg(struct Client *sptr, char status, const char *name,
   if (!(mytext = relay_channel_text(sptr, chptr, text, mytext, targets, 0)))
     return;
 
-  /* Cut once, to the smaller room of the two client forms (above). */
+  /* Cut once, to the smaller room of the two client forms (above); a
+   * line with no room left is the last refusal, so it comes before the
+   * answer begins. */
   room = relay_text_budget(sptr, MSG_PRIVATE, 1 + strlen(chptr->chname), 0);
   nroom = relay_text_budget(sptr, MSG_NOTICE, 1 + strlen(chptr->chname), 2);
   if (nroom < room)
@@ -1601,6 +1607,11 @@ void relay_channel_statusmsg(struct Client *sptr, char status, const char *name,
     send_reply(sptr, ERR_NOTEXTTOSEND);
     return;
   }
+
+  /* Accepted: the answer begins -- one labeled batch when it is more than
+   * one line (the WARN and the echo), the WARN out now (#224). */
+  relay_answer_begin(sptr, "PRIVMSG", utf8, 0,
+                     feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG));
   /* The relayed text: the lead, then the text (the wall form's). */
   ircd_snprintf(0, wallbuf, sizeof(wallbuf), "%c %s", status, mytext);
 
