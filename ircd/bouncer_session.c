@@ -15350,7 +15350,7 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
       f.session_primary_ours = (s && s->hs_client == dev);
       f.asked_here = cli_nickask_ts(dev)
                      && cli_nickask_ts(dev) == (time_t)strtoul(parv[4], NULL, 10)
-                     && 0 == ircd_strcmp(cli_nickask(dev), parv[3])
+                     && 0 == strcmp(cli_nickask(dev), parv[3])
                      && TStime() - cli_nickask_ts(dev) <= NICK_ASK_RETURN_WINDOW;
     }
   }
@@ -15362,9 +15362,13 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
     /* Our own device's request, back after it was promoted here: its own
      * NICK, with every check a local NICK gets. */
     char *own[3];
+    char asked[NICKLEN + 1];
+    /* The nick this device asked for, as it asked: never the returning
+     * peer's text (exact match above; a peer cannot change the case). */
+    ircd_strncpy(asked, cli_nickask(dev), sizeof(asked));
     cli_nickask_ts(dev) = 0;
     own[0] = cli_name(dev);
-    own[1] = parv[3];
+    own[1] = asked;
     own[2] = NULL;
     return m_nick(dev, dev, 2, own);
   }
