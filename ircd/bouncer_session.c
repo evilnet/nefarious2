@@ -13753,6 +13753,15 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     return -1;
   }
 
+  /* labeled-response: a labeled registration line is answered as on the
+   * fresh path (register_user()): one labeled batch over everything sent
+   * from here -- the IPcheck notice, the +Z notices, the welcome burst --
+   * ended before the catch-up replay (Step 10).  Opened here, after the
+   * one step that can fail: a failure return sends nothing, and
+   * register_user() exits the client with no batch open.  A failure
+   * return added below must end it (batch_end_line()) before returning. */
+  labeled_batch_start(sptr);
+
   /* --- Step 0: Complete IPcheck connect ---
    * The alias keeps its own real socket IP (not overwritten from primary),
    * so IPcheck_connect_succeeded() can find the registry entry normally.
@@ -13952,10 +13961,8 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   } /* end YYXXX numeric scope */
 
   /* --- Step 9: Send welcome sequence to the alias client ---
-   * The client expects 001-005 + MOTD on connect.  A labeled
-   * registration line is answered as on the fresh path (register_user()):
-   * one labeled batch over the burst, ended before the catch-up replay. */
-  labeled_batch_start(sptr);
+   * The client expects 001-005 + MOTD on connect (inside the
+   * registration line's labeled batch, opened before Step 0). */
   send_reply(sptr, RPL_WELCOME,
              feature_str(FEAT_NETWORK),
              feature_str(FEAT_PROVIDER) ? " via " : "",

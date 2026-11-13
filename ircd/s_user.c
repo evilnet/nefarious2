@@ -913,11 +913,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
          || auto_resumed == BOUNCE_RESUME_ALIAS_LOCAL) && auto_session) {
       int alias_result;
 
-      /* The registration line's labeled batch opens before anything is
-       * sent on this path (the IPcheck notice in the alias setup), as on
-       * the fresh path; bounce_setup_local_alias() ends it before its
-       * catch-up replay. */
-      labeled_batch_start(sptr);
+      /* The registration line's labeled batch is opened inside the alias
+       * setup, once nothing in it can fail (before its IPcheck notice),
+       * and ended there before its catch-up replay: a setup that fails
+       * below has sent nothing, and its exit leaves no batch open. */
       alias_result = bounce_setup_local_alias(sptr, auto_session);
       if (alias_result == 0)
         return 0;  /* Alias setup complete — client is alive */
