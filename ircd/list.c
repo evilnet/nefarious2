@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "list.h"
+#include "m_batch.h"
 #include "capab.h"
 #include "client.h"
 #include "ircd.h"
@@ -291,6 +292,8 @@ static void dealloc_connection(struct Connection* con)
   /* Lines held for a deferred labeled batch (a client freed in the
    * middle of the command that deferred it) */
   batch_hold_free(con);
+  /* A client multiline batch still open (its lines; m_batch.c) */
+  multiline_free_connection(con);
   /* Pending partial outbound WS frame (socket is gone with it) */
   if (con_ws_txrem(con)) {
     MyFree(con_ws_txrem(con));

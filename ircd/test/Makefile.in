@@ -96,7 +96,8 @@ CMOCKA_TESTPROGS = \
 	log_async_cmocka \
 	parse_line_cmocka \
 	conf_reattach_cmocka \
-	send_label_cmocka
+	send_label_cmocka \
+	ml_discard_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -188,6 +189,7 @@ DEP_SRC = \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
 	send_label_cmocka.c \
+	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -778,6 +780,17 @@ send_label_cmocka.o: ${srcdir}/send_label_cmocka.c ../send.c
 SEND_LABEL_CMOCKA_OBJS = send_label_cmocka.o ../ircd_snprintf.o ../ircd_string.o
 send_label_cmocka: $(SEND_LABEL_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SEND_LABEL_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ml_discard tests - an open client multiline batch never ended: its label
+# answered when draft/multiline goes inert, its lines freed with the
+# Connection.  Includes ../m_batch.c, compiled with -ffunction-sections and
+# linked with --gc-sections (as send_label_cmocka does with send.c).
+ml_discard_cmocka.o: ${srcdir}/ml_discard_cmocka.c ../m_batch.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/ml_discard_cmocka.c
+
+ML_DISCARD_CMOCKA_OBJS = ml_discard_cmocka.o ../ircd_string.o
+ml_discard_cmocka: $(ML_DISCARD_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(ML_DISCARD_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

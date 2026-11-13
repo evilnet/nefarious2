@@ -792,6 +792,16 @@ void multiline_discard_answer(struct Client *cptr)
   cli_label_responded(cptr) = responded;
 }
 
+/** A Connection is freed (list.c, dealloc_connection()): the lines of a
+ * client multiline batch it still had open go with it.  Nothing is sent
+ * (the client is gone); without this they leaked -- a client that quit, or
+ * was killed, between its BATCH + and BATCH - lines. */
+void multiline_free_connection(struct Connection *con)
+{
+  if (con && con_ml_messages(con))
+    clear_multiline_batch(con);
+}
+
 static int ml_label_arm(struct Client *sptr);
 static void ml_label_disarm(struct Client *sptr, int armed);
 
