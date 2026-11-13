@@ -4517,8 +4517,10 @@ send_supported_batched(struct Client *cptr)
   if (isupport && !isupport_lines)
     build_isupport_lines();
 
-  /* Check if we should use batch wrapping */
-  if (!CapActive(cptr, CAP_BATCH)) {
+  /* Check if we should use batch wrapping: this connection's own batch
+   * (as the batch stack decides, send.c's batch_wire()), never the bouncer
+   * session's union -- a device without batch is sent no batch. */
+  if (!feature_bool(FEAT_CAP_batch) || !CapOwnHas(cptr, CAP_BATCH)) {
     /* No batch support, fall back to regular ISUPPORT */
     for (line = isupport_lines; line; line = line->next)
       send_reply(cptr, RPL_ISUPPORT, line->value.cp);
@@ -4531,22 +4533,35 @@ send_supported_batched(struct Client *cptr)
    * any batch open on the answer (send.c's nesting model). */
   send_batch_start(cptr, "draft/isupport");
 
-  /* Send each ISUPPORT line with batch tag */
+  /* Send each ISUPPORT line with batch tag -- the innermost open batch
+   * (draft/isupport, or the one it is nested in past the depth cap); with
+   * none, untagged: never an empty "@batch=". */
   for (line = isupport_lines; line; line = line->next) {
-    sendrawto_one(cptr, "@batch=%s :%s 005 %s %s :are supported by this server",
-                  cli_batch_id(cptr), cli_name(&me),
-                  IsRegistered(cptr) ? cli_name(cptr) : "*",
-                  line->value.cp);
+    if (cli_batch_id(cptr)[0])
+      sendrawto_one(cptr, "@batch=%s :%s 005 %s %s :are supported by this server",
+                    cli_batch_id(cptr), cli_name(&me),
+                    IsRegistered(cptr) ? cli_name(cptr) : "*",
+                    line->value.cp);
+    else
+      sendrawto_one(cptr, ":%s 005 %s %s :are supported by this server",
+                    cli_name(&me), IsRegistered(cptr) ? cli_name(cptr) : "*",
+                    line->value.cp);
   }
 
   /* Per-connection draft/ACCOUNTREQUIRED (see send_supported) */
   {
     struct ConnectionClass *cclass = get_client_class_conf(cptr);
-    if (cclass && FlagHas(&cclass->restrictflags, CRFLAG_REQUIRE_SASL))
-      sendrawto_one(cptr, "@batch=%s :%s 005 %s draft/ACCOUNTREQUIRED "
-                    ":are supported by this server",
-                    cli_batch_id(cptr), cli_name(&me),
-                    IsRegistered(cptr) ? cli_name(cptr) : "*");
+    if (cclass && FlagHas(&cclass->restrictflags, CRFLAG_REQUIRE_SASL)) {
+      if (cli_batch_id(cptr)[0])
+        sendrawto_one(cptr, "@batch=%s :%s 005 %s draft/ACCOUNTREQUIRED "
+                      ":are supported by this server",
+                      cli_batch_id(cptr), cli_name(&me),
+                      IsRegistered(cptr) ? cli_name(cptr) : "*");
+      else
+        sendrawto_one(cptr, ":%s 005 %s draft/ACCOUNTREQUIRED "
+                      ":are supported by this server",
+                      cli_name(&me), IsRegistered(cptr) ? cli_name(cptr) : "*");
+    }
   }
 
   /* End batch: BATCH -id */
@@ -4569,7 +4584,10 @@ send_isupport_update(void)
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
       continue;
-    if (!CapActive(cptr, CAP_DRAFT_EXTISUPPORT))
+    /* This connection's own capability, not the bouncer session's union:
+     * a device that never negotiated draft/extended-isupport is sent no
+     * unsolicited 005 lines because a sibling did. */
+    if (!CapOwnHas(cptr, CAP_DRAFT_EXTISUPPORT))
       continue;
     send_supported_batched(cptr);
   }
