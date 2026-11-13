@@ -2180,6 +2180,12 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         }
         if (pm_msgid[0])
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";msgid=%s", pm_msgid);
+        /* The sender's account, as on every other line it is sent: a client
+         * matches its own edit to the line it edits by account. */
+        if (feature_bool(FEAT_CAP_account_tag) && CapOwnHas(sptr, CAP_ACCOUNTTAG)
+            && IsAccount(sptr))
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";account=%s",
+                           cli_user(sptr)->account);
         if (feature_bool(FEAT_CAP_server_time) && CapActive(sptr, CAP_SERVERTIME)) {
           /* The echo carries the message's one time (the stored row's),
            * not the wall clock at send. */
