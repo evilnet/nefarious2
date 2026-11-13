@@ -135,8 +135,8 @@ extern int metadata_session_addressable(struct Client *target);
  * carries: what becomes of it is decided when registration ends.
  * @param[in] vis METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
  * @return 0 on success, -1 when nothing was applied, -2 when a
- *   registering client's delete is over the bound on what it may make us
- *   keep (refused: LIMIT_REACHED).
+ *   registering client's write is over the bound on what it may make us
+ *   keep (metadata_prereg_record(); refused: LIMIT_REACHED).
  */
 extern int metadata_client_write(struct Client *src, struct Client *target,
                                  const char *key, const char *value, int vis);

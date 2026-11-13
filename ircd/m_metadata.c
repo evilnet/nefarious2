@@ -990,8 +990,8 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   if (!is_channel) {
     rc = metadata_client_write(sptr, target_client, key, value, visibility);
     if (rc == -2) {
-      /* Before registration: more deletes than the account could hold
-       * keys for (metadata_prereg_record()). */
+      /* Before registration: more sets or deletes noted than the account
+       * could hold keys for (metadata_prereg_record()). */
       send_fail(sptr, "METADATA", "LIMIT_REACHED", key,
                 "Maximum number of metadata keys reached");
       return 0;
@@ -1158,17 +1158,39 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
             || md_key_replicable(entry->key)))
       md_clear_key_push(&keys, entry->key, entry->visibility);
 
+  /* Before registration the deletes are noted, under a bound
+   * (metadata_prereg_record()).  A CLEAR is noted in full or refused
+   * whole, before anything is answered: after registration a CLEAR always
+   * deletes every key it lists. */
+  {
+    const char **names = NULL;
+    int n = 0, fits;
+
+    for (k = keys; k; k = k->next)
+      n++;
+    if (n && MyConnect(target_client) && !IsRegistered(target_client)) {
+      names = (const char **)MyMalloc(n * sizeof(*names));
+      n = 0;
+      for (k = keys; k; k = k->next)
+        names[n++] = k->key;
+    }
+    fits = !names || metadata_prereg_clear_fits(target_client, names, n);
+    MyFree(names);
+    if (!fits) {
+      send_fail(sptr, "METADATA", "LIMIT_REACHED", display_target,
+                "Too many metadata changes before registration");
+      md_clear_key_free(keys);
+      return;
+    }
+  }
+
   send_batch_start(sptr, "metadata");
   for (k = keys; k; k = k->next)
     send_reply(sptr, RPL_KEYNOTSET, display_target, k->key);
   send_batch_end(sptr);
 
   for (k = keys; k; k = k->next)
-    if (metadata_client_write(sptr, target_client, k->key, NULL, k->vis) == -2)
-      /* Before registration, over the bound on noted deletes
-       * (metadata_prereg_record()): not deleted, and said so. */
-      send_fail(sptr, "METADATA", "LIMIT_REACHED", k->key,
-                "Maximum number of metadata keys reached");
+    metadata_client_write(sptr, target_client, k->key, NULL, k->vis);
   md_clear_key_free(keys);
 
   /* The account's other rows: only once registered.  Before, a client
@@ -1221,7 +1243,10 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
   }
 
   if (!is_channel) {
-    metadata_clear_user(sptr, (target[0] == '*' && !target[1])
+    /* "*" is the client's nick once it has one; before registration it
+     * stays "*" (an empty parameter would break every line it is in). */
+    metadata_clear_user(sptr, (target[0] == '*' && !target[1]
+                               && cli_name(target_client)[0])
                               ? cli_name(target_client) : target,
                         target_client);
     return 0;

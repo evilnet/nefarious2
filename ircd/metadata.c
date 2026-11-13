@@ -2320,26 +2320,24 @@ int metadata_prereg_record(struct Client *cptr, const char *key,
 {
   struct MetadataPrereg *w, *prev = NULL, *found = NULL, *found_prev = NULL;
   char *copy = NULL;
-  int deletes = 0;
-  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
 
   if (!cptr || !key || !st)
     return -1;
-  if (max_keys < 0)
-    max_keys = 0;
+
+  /* The bound on what a registering client can make us keep, of its own
+   * (not the in-memory key count's): METADATA_MAX_KEYS sets and as many
+   * deletes -- an account holds no more user keys than that. */
+  if (!md_prereg_fits(cli_metadata_prereg(cptr), key, value == NULL,
+                      feature_int(FEAT_METADATA_MAX_KEYS)))
+    return -2;
 
   for (w = cli_metadata_prereg(cptr); w; prev = w, w = w->next) {
-    if (!found && ircd_strcmp(w->key, key) == 0) {
+    if (ircd_strcmp(w->key, key) == 0) {
       found = w;
       found_prev = prev;
-    } else if (!w->value)
-      deletes++;
+      break;
+    }
   }
-  /* A delete names a key the account may hold; it holds at most
-   * METADATA_MAX_KEYS user keys, so no more deletes than that can matter
-   * -- the bound on what a registering client can make us keep. */
-  if (!value && deletes >= max_keys)
-    return -2;
 
   if (value) {
     copy = (char *)MyMalloc(strlen(value) + 1);
@@ -2376,6 +2374,16 @@ int metadata_prereg_record(struct Client *cptr, const char *key,
     w->next = found;
   }
   return 0;
+}
+
+/** See include/metadata.h. */
+int metadata_prereg_clear_fits(struct Client *cptr, const char *const *keys,
+                               int n)
+{
+  if (!cptr || !MyConnect(cptr) || IsRegistered(cptr))
+    return 1;
+  return md_prereg_deletes_fit(cli_metadata_prereg(cptr), keys, n,
+                               feature_int(FEAT_METADATA_MAX_KEYS));
 }
 
 /** Free a before-connect write list. */

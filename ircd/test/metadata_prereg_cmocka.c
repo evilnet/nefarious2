@@ -497,6 +497,35 @@ static void test_no_store(void **state)
   assert_int_equal(f.nsent, 2);
 }
 
+/* The note list's own bound: METADATA_MAX_KEYS sets and as many deletes;
+ * a key already noted is replaced, counted in its new kind. */
+static void test_note_bound(void **state)
+{
+  struct notes ns;
+  const char *clear2[] = { "s1", "s2" };
+  const char *clear3[] = { "s1", "s2", "x" };
+
+  (void)state;
+  memset(&ns, 0, sizeof(ns));
+  assert_true(md_prereg_fits(NULL, "a", 0, 2));
+  assert_false(md_prereg_fits(NULL, "a", 0, 0));
+  assert_false(md_prereg_fits(NULL, "a", 1, -1));
+  note(&ns, "s1", "1", 1);
+  note(&ns, "s2", "2", 2);
+  note(&ns, "d1", NULL, 3);
+  assert_false(md_prereg_fits(&ns.n[0], "s3", 0, 2));   /* a third set */
+  assert_true(md_prereg_fits(&ns.n[0], "s1", 0, 2));    /* a set replaced */
+  assert_true(md_prereg_fits(&ns.n[0], "d2", 1, 2));    /* a second delete */
+  assert_true(md_prereg_fits(&ns.n[0], "S1", 1, 2));    /* s1 becomes a delete */
+  assert_true(md_prereg_fits(&ns.n[0], "d1", 1, 1));    /* d1 replaced */
+  assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1));
+  /* A CLEAR: all of its deletes, or none. */
+  assert_true(md_prereg_deletes_fit(&ns.n[0], clear2, 2, 3));
+  assert_false(md_prereg_deletes_fit(&ns.n[0], clear2, 2, 2));
+  assert_false(md_prereg_deletes_fit(&ns.n[0], clear3, 3, 3));
+  assert_true(md_prereg_deletes_fit(NULL, clear3, 3, 3));
+}
+
 /* No login, or not metadata-aware when registration ends: the account is
  * not touched at all (metadata.c asks md_prereg_should_merge() first). */
 static void test_no_merge_without_login_or_awareness(void **state)
@@ -521,6 +550,7 @@ int main(void)
     cmocka_unit_test(test_value_limit),
     cmocka_unit_test(test_store_error),
     cmocka_unit_test(test_no_store),
+    cmocka_unit_test(test_note_bound),
     cmocka_unit_test(test_no_merge_without_login_or_awareness),
   };
 

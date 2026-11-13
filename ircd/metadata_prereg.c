@@ -13,6 +13,24 @@
 
 #include <string.h>
 
+/** Keys compare without regard to ASCII letter case.  A key is letters,
+ * digits and - _ . / (m_metadata.c is_valid_key()), where the ircd's
+ * casemapping (ircd_strcmp()) folds exactly the ASCII letters. */
+static int key_eq(const char *a, const char *b)
+{
+  for (; *a && *b; a++, b++) {
+    char x = *a, y = *b;
+
+    if (x >= 'A' && x <= 'Z')
+      x += 'a' - 'A';
+    if (y >= 'A' && y <= 'Z')
+      y += 'a' - 'A';
+    if (x != y)
+      return 0;
+  }
+  return *a == *b;
+}
+
 int md_prereg_should_merge(int logged_in, int metadata_aware)
 {
   return logged_in && metadata_aware;
@@ -127,4 +145,51 @@ int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
     ops->send(ctx, n->key, &w);
   }
   return applied;
+}
+
+/** Count @a list's notes by kind, leaving out the one for @a except. */
+static void count_notes(const struct MetadataPrereg *list, const char *except,
+                        int *sets, int *deletes)
+{
+  *sets = *deletes = 0;
+  for (; list; list = list->next) {
+    if (except && key_eq(list->key, except))
+      continue;
+    if (list->value)
+      (*sets)++;
+    else
+      (*deletes)++;
+  }
+}
+
+int md_prereg_fits(const struct MetadataPrereg *list, const char *key,
+                   int is_delete, int max_keys)
+{
+  int sets, deletes;
+
+  if (max_keys < 0)
+    max_keys = 0;
+  count_notes(list, key, &sets, &deletes);
+  return (is_delete ? deletes : sets) < max_keys;
+}
+
+int md_prereg_deletes_fit(const struct MetadataPrereg *list,
+                          const char *const *keys, int n, int max_keys)
+{
+  const struct MetadataPrereg *p;
+  int deletes = n, i;
+
+  if (max_keys < 0)
+    max_keys = 0;
+  /* The deletes noted for keys other than these, plus one per key. */
+  for (p = list; p; p = p->next) {
+    if (p->value)
+      continue;
+    for (i = 0; i < n; i++)
+      if (key_eq(p->key, keys[i]))
+        break;
+    if (i == n)
+      deletes++;
+  }
+  return deletes <= max_keys;
 }

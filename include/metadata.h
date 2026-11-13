@@ -316,14 +316,21 @@ extern int metadata_registration_check(struct Client *cptr, int on_network);
 /** Note a before-connect write of @a cptr (a client of ours still
  * registering) to itself: the last write per key is kept, with @a st, the
  * time its SET was accepted, until registration ends
- * (cli_metadata_prereg).  Deletes are capped at METADATA_MAX_KEYS -- an
- * account never holds more user keys than that, so no more of them can
- * matter.
- * @return 0, -1 on allocation failure, -2 when a delete is over the cap
+ * (cli_metadata_prereg).  Sets and deletes are each capped at
+ * METADATA_MAX_KEYS (md_prereg_fits()): an account never holds more user
+ * keys than that, so no more of either can matter.
+ * @return 0, -1 on allocation failure, -2 when the note is over its cap
  *   (the SET is to be refused: LIMIT_REACHED). */
 extern int metadata_prereg_record(struct Client *cptr, const char *key,
                                   const char *value, int visibility,
                                   const struct md_stamp *st);
+
+/** Whether a CLEAR before registration can be noted in full: deletes of
+ * all @a n keys @a keys (md_prereg_deletes_fit()).  A client not
+ * registering always fits.
+ * @return non-zero if they fit. */
+extern int metadata_prereg_clear_fits(struct Client *cptr,
+                                      const char *const *keys, int n);
 
 /** Drop @a cptr's before-connect writes. */
 extern void metadata_prereg_free(struct Client *cptr);

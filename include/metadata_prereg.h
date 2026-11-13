@@ -147,4 +147,25 @@ extern int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
                            int max_keys, size_t max_value_bytes,
                            const struct md_prereg_ops *ops, void *ctx);
 
+/** Whether one more note fits: a new note for @a key (one not noted yet;
+ * a key already noted is replaced, which may move it from sets to deletes)
+ * is refused when the notes of its kind -- sets, or deletes -- already
+ * number @a max_keys.  The account never holds more than METADATA_MAX_KEYS
+ * user keys, so no more sets or deletes than that can matter; the bound on
+ * what a registering client can make us keep.
+ * @param[in] list The notes.
+ * @param[in] key The key written.
+ * @param[in] is_delete Non-zero for a delete.
+ * @param[in] max_keys METADATA_MAX_KEYS (negative: 0).
+ * @return non-zero if it fits. */
+extern int md_prereg_fits(const struct MetadataPrereg *list, const char *key,
+                          int is_delete, int max_keys);
+
+/** Whether deletes of all @a n keys @a keys (distinct) fit at once, under
+ * md_prereg_fits()'s bound -- a CLEAR before registration, recorded in
+ * full or not at all.
+ * @return non-zero if they fit. */
+extern int md_prereg_deletes_fit(const struct MetadataPrereg *list,
+                                 const char *const *keys, int n, int max_keys);
+
 #endif /* INCLUDED_metadata_prereg_h */
