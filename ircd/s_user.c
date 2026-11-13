@@ -1566,8 +1566,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
 	   member = member->next_channel) {
         ClearBanValid(member);
         ClearBanValidNick(member);
+        ClearBanValidQuiet(member);
         ClearExceptValid(member);
         ClearExceptValidNick(member);
+        ClearExceptValidQuiet(member);
       }
     }
     /*
