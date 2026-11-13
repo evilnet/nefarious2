@@ -9503,6 +9503,11 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     cli_listing(ghost) = NULL;
   }
   replay_forget(ghost);
+  /* Federated history requests the old socket left in flight, found by
+   * the numeric the ghost keeps: the queries and the old catch-up's legs
+   * dropped, a REDACT's label dropped (it still applies).  The revive's
+   * own catch-up starts after this block. */
+  chathistory_forget_client(ghost);
   fwd_label_cleanup(ghost);
   multiline_discard_batch(ghost);
   batch_end_all(ghost, 0);

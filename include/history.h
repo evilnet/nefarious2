@@ -942,4 +942,9 @@ extern int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
 extern int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time,
                                        int limit);
 
+/** A bouncer revive replaces @a sptr's socket: its federated requests in
+ * flight (keyed by its numeric) go with the old one -- the queries and the
+ * catch-up legs dropped, a REDACT's label dropped (m_chathistory.c). */
+extern void chathistory_forget_client(struct Client *sptr);
+
 #endif /* INCLUDED_history_h */

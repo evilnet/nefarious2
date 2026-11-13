@@ -5768,6 +5768,49 @@ static struct FedRequest *find_fed_request(const char *reqid)
   return NULL;
 }
 
+static void complete_redact_fed(struct FedRequest *req);
+
+/** @a sptr's connection is being replaced: a bouncer revive puts a new
+ * socket on the held ghost (bounce_revive()), which keeps the numeric
+ * every request below finds its client by (req->client_yxx), so an
+ * answer to the OLD socket's request would go to the new one -- under the
+ * old line's label.  Each request in flight for it:
+ *  - a query -- a CHATHISTORY page (send_fed_response), TARGETS
+ *    (complete_targets_fed), SEARCH (complete_search_fed) -- is the old
+ *    socket's alone: the new connection never asked, and a history batch it
+ *    did not ask for could be taken for the answer to its own next query.
+ *    Dropped: it runs to its end as one whose client left (its numeric
+ *    cleared -- findNUser() finds nobody), nothing is sent;
+ *  - the storeless auto-replay chain (complete_autoreplay_channel, its
+ *    AutoReplayContext) and a store's catch-up leg (complete_replay_leg)
+ *    belong to the old socket's catch-up, which the revive replaces with
+ *    its own, started after this (replay_forget() dropped the catch-up the
+ *    leg reports to): dropped the same way -- the chain's context is freed
+ *    at that completion and goes no further;
+ *  - a REDACT (complete_redact_fed) is an action the user took: it still
+ *    applies (its REDACT reaches the channel's members, the new connection
+ *    among them), but its answer is not the new connection's line's -- the
+ *    label goes, so a FAIL is sent unlabeled.
+ * Nothing is sent here. */
+void chathistory_forget_client(struct Client *sptr)
+{
+  char yxx[6];
+  int i;
+
+  if (!sptr || !IsUser(sptr) || !cli_user(sptr) || !cli_user(sptr)->server)
+    return;
+  ircd_snprintf(0, yxx, sizeof(yxx), "%s%s", NumNick(sptr));
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    struct FedRequest *req = fed_requests[i];
+
+    if (!req || req->response_sent || strcmp(req->client_yxx, yxx) != 0)
+      continue;
+    req->label[0] = '\0';
+    if (req->completion_cb != complete_redact_fed)
+      req->client_yxx[0] = '\0';   /* findNUser("") finds nobody */
+  }
+}
+
 /** The request a reply's reqid belongs to, and its leg: the page leg's
  * reqid exactly, else the children leg's, <reqid>K (W5 Task 14; a minted
  * reqid ends in a digit, so the two never collide).
