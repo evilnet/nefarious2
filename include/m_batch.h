@@ -35,6 +35,10 @@ extern void s2s_multiline_cleanup_link(struct Client *link);
 /** Discard @a cptr's open client multiline batch silently (m_batch.c). */
 extern void multiline_discard_batch(struct Client *cptr);
 
+/** Answer the label of @a cptr's open client multiline batch (a labeled
+ * ACK) before it is discarded for draft/multiline going inert (m_batch.c). */
+extern void multiline_discard_answer(struct Client *cptr);
+
 /** Free any S2S multiline batches whose original sender is exiting.
  * Called from exit_one_client for every exiting user, so a batch whose
  * sender QUITs mid-stream doesn't leave batch->sender dangling for

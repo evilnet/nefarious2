@@ -766,6 +766,32 @@ void multiline_discard_batch(struct Client *cptr)
   con_ml_dead_batch_id(con)[0] = '\0';
 }
 
+/** The open client multiline batch of @a cptr is about to be discarded
+ * because draft/multiline went inert (cap_dependents_drop(), before the
+ * CAP ACK), while labeled-response stays in use: a labeled batch (its
+ * label parked in con_ml_label from its BATCH + line) still gets its one
+ * answer -- a labeled ACK, nothing having been delivered.  The CAP line's
+ * own label is put back after.  No-op without an open labeled batch. */
+void multiline_discard_answer(struct Client *cptr)
+{
+  struct Connection *con;
+  char saved[sizeof(((struct Connection *)0)->con_label)];
+  unsigned char responded;
+
+  if (!cptr || !MyConnect(cptr))
+    return;
+  con = cli_connect(cptr);
+  if (!con_ml_batch_id(con)[0] || !con_ml_label(con)[0])
+    return;
+  memcpy(saved, cli_label(cptr), sizeof(saved));
+  responded = cli_label_responded(cptr);
+  ircd_strncpy(cli_label(cptr), con_ml_label(con), sizeof(saved));
+  cli_label_responded(cptr) = 0;
+  send_labeled_ack(cptr);
+  memcpy(cli_label(cptr), saved, sizeof(saved));
+  cli_label_responded(cptr) = responded;
+}
+
 static int ml_label_arm(struct Client *sptr);
 static void ml_label_disarm(struct Client *sptr, int armed);
 

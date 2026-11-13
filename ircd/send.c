@@ -4962,7 +4962,9 @@ void batch_restore(struct Client *to, const struct BatchSave *save)
  *    suspended catch-up's) and the replay goes on unframed, its row types
  *    as decided (replay_batch_drop());
  *  - draft/multiline going inert: the open client batch is discarded
- *    silently (multiline_discard_batch()).
+ *    (multiline_discard_batch()), nothing delivered; a labeled one is
+ *    answered by a labeled ACK first when labeled-response stays in use
+ *    (multiline_discard_answer()) -- else its label is inert with it.
  * Labels saved by requests still in flight are not cleared here: each is
  * used only under LabeledResponseInUse() when its answer is sent. */
 void cap_dependents_drop(struct Client *cptr, const struct CapSet *before,
@@ -4987,8 +4989,13 @@ void cap_dependents_drop(struct Client *cptr, const struct CapSet *before,
     replay_batch_drop(cptr);
 
   if (CapHas(before, CAP_DRAFT_MULTILINE) && CapHas(before, CAP_BATCH)
-      && !(CapHas(after, CAP_DRAFT_MULTILINE) && CapHas(after, CAP_BATCH)))
+      && !(CapHas(after, CAP_DRAFT_MULTILINE) && CapHas(after, CAP_BATCH))) {
+    /* A labeled batch still answered while labels stay in use (only
+     * draft/multiline dropped): its labeled ACK, before the CAP ACK. */
+    if (CapSetLabeledResponseInUse(after))
+      multiline_discard_answer(cptr);
     multiline_discard_batch(cptr);
+  }
 }
 
 /**
