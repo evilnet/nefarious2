@@ -1942,7 +1942,7 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                  * (bouncer-design-intent.md §"Nick lockstep invariant"). */
                 sendcmdto_one_event(sib_alias, CMD_NICK, sib_alias,
                                     sib_alias == device, ":%s", nick);
-                ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
+                ircd_strncpy(cli_name(sib_alias), nick, NICKLEN + 1);
                 cli_name(sib_alias)[NICKLEN] = '\0';
               } else if (sib_alias && IsBouncerAlias(sib_alias)
                          && cli_alias_primary(sib_alias) == sptr) {
@@ -1953,7 +1953,7 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                  * while every other server had the new one.  (The BX N
                  * handler does the same on the other servers; BX N is
                  * never sent back to the primary's own server.) */
-                ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
+                ircd_strncpy(cli_name(sib_alias), nick, NICKLEN + 1);
                 cli_name(sib_alias)[NICKLEN] = '\0';
               }
             }
