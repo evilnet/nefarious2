@@ -1517,6 +1517,12 @@ static const struct UserMode {
 /** Nasty global buffer used for communications with umode_str() and others. */
 static char umodeBuf[BUFSIZE];
 
+/** Whether the session user is told of a refusal of its bouncer device's
+ * nick request (437/438/433/432 and the NICKDELAY bounce NICK).  0 (the
+ * owner's default for single writer): only the device that asked is told
+ * -- the user did not ask.  1: the user is told as well, as before. */
+#define NICK_REFUSAL_TELLS_PRIMARY 0
+
 /** Tell the server a bouncer device's nick request came from what the
  * session user's nick now is, after this server -- the primary's, the one
  * authority for it -- accepted or refused the request.
@@ -1591,7 +1597,8 @@ int set_nick_name_refused(struct Client *cptr, struct Client *sptr,
                           struct Client *device, int reply,
                           const char *nick)
 {
-  send_reply(sptr, reply, nick);
+  if (!device || NICK_REFUSAL_TELLS_PRIMARY)
+    send_reply(sptr, reply, nick);
   nick_refusal_to_device(device, reply, nick, 0);
   nick_request_answer(cptr, sptr);
   return 0;
@@ -1685,7 +1692,8 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
       struct Membership *member;
       if ((channel_name = find_no_nickchange_channel(sptr))
           && !IsXtraOp(sptr) && !svsnick) {
-        send_reply(sptr, ERR_BANNICKCHANGE, channel_name);
+        if (!device || NICK_REFUSAL_TELLS_PRIMARY)
+          send_reply(sptr, ERR_BANNICKCHANGE, channel_name);
         nick_refusal_to_device(device, ERR_BANNICKCHANGE, channel_name, 0);
         nick_request_answer(cptr, sptr);
         return 0;
@@ -1705,13 +1713,19 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
        */
       if (nick_delay_refuses(&cli_nextnick(sptr), CurrentTime,
                              feature_int(FEAT_NICKDELAY))) {
-        send_reply(sptr, ERR_NICKTOOFAST, parv[1],
-                   cli_nextnick(sptr) - CurrentTime);
-        /* Send error message */
-        sendcmdto_one(sptr, CMD_NICK, sptr, "%s", cli_name(sptr));
-        /* bounce NICK to user */
+        if (!device || NICK_REFUSAL_TELLS_PRIMARY) {
+          send_reply(sptr, ERR_NICKTOOFAST, parv[1],
+                     cli_nextnick(sptr) - CurrentTime);
+          /* Send error message */
+          sendcmdto_one(sptr, CMD_NICK, sptr, "%s", cli_name(sptr));
+          /* bounce NICK to user */
+        }
         nick_refusal_to_device(device, ERR_NICKTOOFAST, parv[1],
                                cli_nextnick(sptr) - CurrentTime);
+        /* The bounce NICK goes to the device that asked, when it is ours
+         * (a NICK line cannot be sent to another server's client). */
+        if (device && MyUser(device))
+          sendcmdto_one(device, CMD_NICK, device, "%s", cli_name(device));
         nick_request_answer(cptr, sptr);
         return 0;                /* ignore nick change! */
       }
