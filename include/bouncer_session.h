@@ -1168,10 +1168,12 @@ extern void bounce_sync_alias_identity(struct Client *primary);
  * @param[in] tok     Short command token (e.g. "P").
  * @param[in] text    Message text.
  * @param[in] msgid   Message ID for tags (may be NULL or empty).
+ * @param[in] client_tags Sender's client-only tags, or NULL (see the definition).
  */
 extern void bounce_echo_pm_to_session(struct Client *sender,
     struct Client *target, const char *cmd, const char *tok,
-    const char *text, const char *msgid);
+    const char *text, const char *msgid,
+    const char *client_tags);
 
 /** Prepare bouncer sessions for SQUIT promotion.
  * Called BEFORE exit_downlinks(). Marks the sessions whose primary is a
