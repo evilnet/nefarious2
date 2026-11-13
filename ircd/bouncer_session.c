@@ -11576,8 +11576,12 @@ static void bounce_live_join(struct BouncerSession *s, struct Client *j,
 
   /* 5. Its socket. */
   bounce_send_channel_state(j);
-  sendrawto_one(j, ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s "
-                "as alias on %s", cli_name(&me), s->hs_sessid, cli_name(&me));
+  /* Part of the answer to the line that joined it (BOUNCER SET HOLD on,
+   * PERSISTENCE SET ON: j is the asker, its answer deferred), so in that
+   * answer's batch or under its label; bare for a j that is not answering
+   * a line (an oper's MODE +b on another user). */
+  sendrawto_one_answer(j, ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s "
+                       "as alias on %s", cli_name(&me), s->hs_sessid, cli_name(&me));
   if (tell_status && CapActive(j, CAP_DRAFT_PERSISTENCE) && IsAccount(j))
     persistence_send_status(j);
 
