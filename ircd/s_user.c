@@ -789,6 +789,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
         ircd_strncpy(cli_label(ghost), cli_label(sptr), sizeof(cli_label(ghost)));
         cli_label_responded(ghost) = cli_label_responded(sptr);
 
+        /* draft/metadata-2: what the reviving connection wrote to itself
+         * before registration (before-connect) goes with it: merged into
+         * the account at the burst below, as the session's SET. */
+        metadata_prereg_move(ghost, sptr);
+
         /* Free the temp client (no network messages) */
         bounce_free_temp_client(sptr);
 
@@ -834,8 +839,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* IRCv3 draft/metadata-2: mirror of the normal path's self-
          * metadata batch, before the MOTD end, so a reviving client sees
          * its persisted keys (or an empty batch) in its registration
-         * burst.  See project_bouncer_revive_alias_emit_gaps.md. */
-        metadata_burst_self_to_client(ghost);
+         * burst.  See project_bouncer_revive_alias_emit_gaps.md.  The
+         * ghost is known to the network: a before-connect write merged
+         * here goes out as the session's SET would. */
+        metadata_burst_self_to_client(ghost, 1);
 
         motd_signon(ghost);
         /* Post-registration fakelag credit: modern clients burst init
@@ -1157,8 +1164,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * batch with its nick as target (empty when it has none), "as part of
      * the registration burst, i.e. before RPL_ENDOFMOTD or ERR_NOMOTD".
      * The account's rows were loaded above (metadata_load_account(), at
-     * the top).  Mirrored on both bouncer fast paths (invariant #4). */
-    metadata_burst_self_to_client(sptr);
+     * the top), and what the client wrote before registration is merged
+     * into them here when it is logged in (metadata_registration_check():
+     * before the N below, so silently for this client).  Mirrored on both
+     * bouncer fast paths (invariant #4). */
+    metadata_burst_self_to_client(sptr, 0);
 
     motd_signon(sptr);
     /* Post-registration fakelag credit: modern clients burst init

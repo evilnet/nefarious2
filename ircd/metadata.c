@@ -50,6 +50,7 @@
 #include "ircd_string.h"
 #include "metadata.h"
 #include "metadata_lww.h"
+#include "metadata_prereg.h"
 #include "metadata_sync.h"
 #include "msg.h"
 #include "numeric.h"
@@ -59,6 +60,7 @@
 #include "send.h"
 #include "struct.h"
 
+#include <limits.h>
 #include <string.h>
 
 #include "ircd_compress.h"
@@ -2192,6 +2194,14 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
 void metadata_account_apply_memory(const char *account, const char *key,
                                    const char *value, int vis)
 {
+  metadata_account_apply_memory_ex(account, key, value, vis, NULL, NULL);
+}
+
+void metadata_account_apply_memory_ex(const char *account, const char *key,
+                                      const char *value, int vis,
+                                      struct Client *quiet,
+                                      struct Client *butone)
+{
   struct Client *cptr, *next;
   int private_notified = 0;
   const char *notified_nicks[64];
@@ -2211,6 +2221,16 @@ void metadata_account_apply_memory(const char *account, const char *key,
       continue;
     if (ircd_strcmp(cli_user(cptr)->account, account) != 0)
       continue;
+
+    if (cptr == quiet) {
+      /* A client of ours whose N has not gone out yet (its before-connect
+       * write merged at registration): its list entry only, and nothing
+       * said to or about it -- it shares no channel yet and its burst
+       * carries the key.  A mode-synced key's flag is the caller's
+       * (metadata_mode_sync_restore(), before the N). */
+      metadata_apply_entry_list(cptr, key, value, vis);
+      continue;
+    }
 
     if (ms >= 0) {
       /* A mode-synced key (W4 Task 8 fix round 2, user decision
@@ -2256,7 +2276,8 @@ void metadata_account_apply_memory(const char *account, const char *key,
 
     if (vis == METADATA_VIS_PRIVATE) {
       if (!private_notified) {
-        metadata_notify_subscribers(cli_name(cptr), key, value, vis);
+        metadata_notify_subscribers_butone(cli_name(cptr), key, value, vis,
+                                           butone);
         private_notified = 1;
       }
     } else {
@@ -2268,7 +2289,8 @@ void metadata_account_apply_memory(const char *account, const char *key,
         }
       }
       if (!already) {
-        metadata_notify_subscribers(cli_name(cptr), key, value, vis);
+        metadata_notify_subscribers_butone(cli_name(cptr), key, value, vis,
+                                           butone);
         if (notified_count < (int)(sizeof(notified_nicks) / sizeof(notified_nicks[0])))
           notified_nicks[notified_count++] = cli_name(cptr);
       }
@@ -2288,18 +2310,225 @@ struct MetadataEntry *metadata_list_client(struct Client *cptr)
 }
 
 /** See include/metadata.h. */
-int metadata_registration_check(struct Client *cptr)
+int metadata_prereg_record(struct Client *cptr, const char *key,
+                           const char *value, int visibility,
+                           const struct md_stamp *st)
+{
+  struct MetadataPrereg *w, *prev = NULL, *found = NULL, *found_prev = NULL;
+  char *copy = NULL;
+  int deletes = 0;
+  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+
+  if (!cptr || !key || !st)
+    return -1;
+  if (max_keys < 0)
+    max_keys = 0;
+
+  for (w = cli_metadata_prereg(cptr); w; prev = w, w = w->next) {
+    if (!found && ircd_strcmp(w->key, key) == 0) {
+      found = w;
+      found_prev = prev;
+    } else if (!w->value)
+      deletes++;
+  }
+  /* A delete names a key the account may hold; it holds at most
+   * METADATA_MAX_KEYS user keys, so no more deletes than that can matter
+   * -- the bound on what a registering client can make us keep. */
+  if (!value && deletes >= max_keys)
+    return -2;
+
+  if (value) {
+    copy = (char *)MyMalloc(strlen(value) + 1);
+    if (!copy)
+      return -1;
+    strcpy(copy, value);
+  }
+  if (found) {
+    /* The last write per key, in the order of the last writes. */
+    if (found_prev)
+      found_prev->next = found->next;
+    else
+      cli_metadata_prereg(cptr) = found->next;
+    MyFree(found->value);
+  } else {
+    found = (struct MetadataPrereg *)MyMalloc(sizeof(struct MetadataPrereg));
+    if (!found) {
+      MyFree(copy);
+      return -1;
+    }
+    memset(found, 0, sizeof(*found));
+    ircd_strncpy(found->key, key, sizeof(found->key));
+  }
+  found->value = copy;
+  found->visibility = visibility;
+  found->st = *st;
+  found->next = NULL;
+
+  if (!cli_metadata_prereg(cptr))
+    cli_metadata_prereg(cptr) = found;
+  else {
+    for (w = cli_metadata_prereg(cptr); w->next; w = w->next)
+      ;
+    w->next = found;
+  }
+  return 0;
+}
+
+/** Free a before-connect write list. */
+static void prereg_list_free(struct MetadataPrereg *w)
+{
+  struct MetadataPrereg *next;
+
+  for (; w; w = next) {
+    next = w->next;
+    MyFree(w->value);
+    MyFree(w);
+  }
+}
+
+/** See include/metadata.h. */
+void metadata_prereg_free(struct Client *cptr)
+{
+  if (!cptr)
+    return;
+  prereg_list_free(cli_metadata_prereg(cptr));
+  cli_metadata_prereg(cptr) = NULL;
+}
+
+/** See include/metadata.h. */
+void metadata_prereg_move(struct Client *to, struct Client *from)
+{
+  if (!to || !from || to == from)
+    return;
+  metadata_prereg_free(to);
+  cli_metadata_prereg(to) = cli_metadata_prereg(from);
+  cli_metadata_prereg(from) = NULL;
+}
+
+/** Merge a metadata-aware client's before-connect writes into the account
+ * it is logged in to as registration ends (owner, 2026-11-13; the rule is
+ * metadata_prereg.h's): each write, in the order the client sent them, as
+ * if it had sent the same METADATA SET right after logging in -- the
+ * account's row (stamped with the time the SET was accepted, merged by the
+ * cross-server LWW rule), every client of the account here and the
+ * subscribers who may see the key, every fork peer (MD =account) -- unless
+ * the account holds exactly that already, or a write made after the SET.
+ * A write that no longer fits the account (its key cap, a value limit
+ * lowered since) is refused with the standard reply SET would have given,
+ * before the registration burst that shows what stands.  Keys the client
+ * did not write stay as the account has them (register_user()'s
+ * metadata_load_account() loaded them).
+ *
+ * On the path that introduces the client by N after the burst
+ * (@a on_network 0) nobody knows it yet: its own entry and mode flag are
+ * set silently (the N carries the flag) and the rows go out from this
+ * server.  Revived and attached clients are known: they change as a SET
+ * would change them.  The client itself is told nothing: its burst
+ * carries every key.
+ */
+static void metadata_prereg_merge(struct Client *cptr, int on_network)
+{
+  struct MetadataPrereg *list = cli_metadata_prereg(cptr), *w;
+  const char *account;
+  int store = metadata_lmdb_is_available();
+  int user_keys, max_keys;
+  int max_value = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
+  int mode_keys = 0;
+
+  cli_metadata_prereg(cptr) = NULL;
+  if (!list)
+    return;
+  if (!md_prereg_should_merge(IsAccount(cptr) && cli_user(cptr)
+                              && cli_user(cptr)->account[0],
+                              MetadataAware(cptr))) {
+    prereg_list_free(list);
+    return;
+  }
+  account = cli_user(cptr)->account;
+
+  /* The account's key budget as a SET after login would meet it: the
+   * client's list is the account's rows here.  With no store the list
+   * still holds what the client set (metadata_load_account() loads
+   * nothing), already within the cap: no cap to apply again. */
+  user_keys = metadata_count_client(cptr);
+  max_keys = store ? feature_int(FEAT_METADATA_MAX_KEYS) : INT_MAX;
+  if (max_value < 0)
+    max_value = 0;
+
+  for (w = list; w; w = w->next) {
+    struct md_version in, stored;
+    char valbuf[METADATA_VALUE_LEN];
+    char why[METADATA_KEY_LEN + 64];
+    int rc = 1;
+
+    in.st = w->st;
+    in.tombstone = (w->value == NULL);
+    in.vis = w->visibility;
+    in.value = w->value;
+    in.vlen = w->value ? strlen(w->value) : 0;
+
+    if (store && (rc = metadata_account_get_version(account, w->key, &stored,
+                                                    valbuf, sizeof(valbuf))) < 0) {
+      send_fail(cptr, "METADATA", "INTERNAL_ERROR", w->key, "Failed to set metadata");
+      continue;
+    }
+
+    switch (md_prereg_decide(rc == 0 ? &stored : NULL, &in, &user_keys,
+                             max_keys, (size_t)max_value)) {
+    case MD_PREREG_APPLY:
+      break;
+    case MD_PREREG_LIMIT_KEYS:
+      /* The same reply a SET over the cap gets. */
+      send_fail(cptr, "METADATA", "LIMIT_REACHED", w->key,
+                "Maximum number of metadata keys reached");
+      continue;
+    case MD_PREREG_LIMIT_VALUE:
+      /* VALUE_INVALID carries no key: the text names it. */
+      ircd_snprintf(0, why, sizeof(why), "value of %s is too long", w->key);
+      send_fail(cptr, "METADATA", "VALUE_INVALID", NULL, why);
+      continue;
+    default:
+      /* SAME, ABSENT, SUPERSEDED: the account's row stands as loaded. */
+      continue;
+    }
+
+    if (store && metadata_account_merge(account, w->key, &in) != 1) {
+      send_fail(cptr, "METADATA", "INTERNAL_ERROR", w->key, "Failed to set metadata");
+      continue;
+    }
+    metadata_account_apply_memory_ex(account, w->key, w->value, w->visibility,
+                                     on_network ? NULL : cptr, cptr);
+    metadata_emit_versioned(&me, NULL, NULL, account, w->key, &in);
+    if (metadata_mode_sync_index(w->key) >= 0)
+      mode_keys = 1;
+  }
+  prereg_list_free(list);
+
+  /* Before the N: a merged mode-synced key sets the flag silently, with
+   * the rules registration applies to the account's other modes. */
+  if (mode_keys && !on_network)
+    metadata_mode_sync_restore(cptr, 0);
+}
+
+/** See include/metadata.h. */
+int metadata_registration_check(struct Client *cptr, int on_network)
 {
   if (!cptr || !MyConnect(cptr))
     return 0;
-  if (MetadataAware(cptr))
+  if (MetadataAware(cptr)) {
+    /* Logged in: its before-connect writes go to the account.  Not: they
+     * are its own keys, already in its list (announced after its N,
+     * metadata_announce_registered()), and the notes go. */
+    metadata_prereg_merge(cptr, on_network);
     return 1;
+  }
   /* It never became metadata-aware: what it set before registration goes
    * -- it was kept in this client's memory only (metadata_client_write()),
    * never stored, announced or sent to a peer.  A client with an account
    * holds the account's rows instead (register_user()'s
-   * metadata_load_account() replaced whatever it set before registration:
-   * the owner's open question, unchanged), and those stay. */
+   * metadata_load_account() replaced whatever it set before registration),
+   * and those stay. */
+  metadata_prereg_free(cptr);
   if (!cli_user(cptr) || !cli_user(cptr)->account[0]) {
     free_entry_list(cli_metadata(cptr));
     cli_metadata(cptr) = NULL;
@@ -2309,7 +2538,7 @@ int metadata_registration_check(struct Client *cptr)
   return 0;
 }
 
-void metadata_burst_self_to_client(struct Client *to)
+void metadata_burst_self_to_client(struct Client *to, int on_network)
 {
   struct MetadataEntry *md;
   char type[NICKLEN + 16];
@@ -2317,8 +2546,9 @@ void metadata_burst_self_to_client(struct Client *to)
   if (!to || !MyConnect(to))
     return;
   /* The registration check: only a metadata-aware client gets the burst
-   * (and keeps what it set before registration). */
-  if (!metadata_registration_check(to))
+   * (and keeps what it set before registration, merged into its account
+   * when it is logged in). */
+  if (!metadata_registration_check(to, on_network))
     return;
 
   /* "If none exists, the server MUST send an empty batch instead."  The
@@ -2475,6 +2705,7 @@ void metadata_free_client(struct Client *cptr)
   free_entry_list(cli_metadata(cptr));
   cli_metadata(cptr) = NULL;
   metadata_sub_free(cptr);
+  metadata_prereg_free(cptr);
 }
 
 /** Get metadata for a channel.

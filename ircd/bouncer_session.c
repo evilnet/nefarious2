@@ -14001,8 +14001,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   /* IRCv3 draft/metadata-2: mirror of the normal path's self-metadata
    * batch, before the MOTD end.  Aliases inherit the primary's
    * account-scoped metadata at attach time, so the new local socket
-   * learns its keys without an explicit METADATA SUB round-trip. */
-  metadata_burst_self_to_client(sptr);
+   * learns its keys without an explicit METADATA SUB round-trip.  The
+   * device is known to the network (BX C above): what it wrote before
+   * registration is merged into the account as the device's SET. */
+  metadata_burst_self_to_client(sptr, 1);
 
   motd_signon(sptr);
 

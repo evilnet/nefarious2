@@ -72,6 +72,7 @@ CMOCKA_TESTPROGS = \
 	bouncer_transplant_cmocka \
 	sessid_index_cmocka \
 	metadata_lww_cmocka \
+	metadata_prereg_cmocka \
 	bouncer_record_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
@@ -158,6 +159,7 @@ DEP_SRC = \
 	bouncer_transplant_cmocka.c \
 	sessid_index_cmocka.c \
 	metadata_lww_cmocka.c \
+	metadata_prereg_cmocka.c \
 	bouncer_record_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
@@ -958,6 +960,15 @@ metadata_lww_test.o: ../metadata_lww.c ../../include/metadata_lww.h
 METADATA_LWW_CMOCKA_OBJS = metadata_lww_cmocka.o metadata_lww_test.o
 metadata_lww_cmocka: $(METADATA_LWW_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(METADATA_LWW_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# metadata_prereg tests - the before-connect merge rule; pure, on top of
+# the pure LWW rule
+metadata_prereg_test.o: ../metadata_prereg.c ../../include/metadata_prereg.h ../../include/metadata_lww.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../metadata_prereg.c
+
+METADATA_PREREG_CMOCKA_OBJS = metadata_prereg_cmocka.o metadata_prereg_test.o metadata_lww_test.o
+metadata_prereg_cmocka: $(METADATA_PREREG_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(METADATA_PREREG_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # bouncer_record tests - the record decoder calls nothing in the ircd
 bouncer_record_test.o: ../bouncer_record.c ../../include/bouncer_record.h ../../include/bouncer_session.h

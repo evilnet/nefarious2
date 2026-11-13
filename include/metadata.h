@@ -89,6 +89,20 @@ struct MetadataEntry {
   struct MetadataEntry *next;           /**< Next entry in list */
 };
 
+/** One METADATA write a client of ours made to itself before registration
+ * (before-connect): the last write per key, in the order of those last
+ * writes (cli_metadata_prereg).  Kept beside its in-memory list (which a
+ * login during registration replaces with the account's rows) until
+ * registration ends, when a metadata-aware client logged in by then has
+ * them merged into its account (metadata_prereg.h's rule). */
+struct MetadataPrereg {
+  char key[METADATA_KEY_LEN];           /**< Key name */
+  char *value;                          /**< Value, or NULL: a delete */
+  int visibility;                       /**< Visibility level of a set */
+  struct md_stamp st;                   /**< When its SET was accepted */
+  struct MetadataPrereg *next;          /**< Next write */
+};
+
 /** Metadata subscription for a client */
 struct MetadataSub {
   char key[METADATA_KEY_LEN];           /**< Key being subscribed to */
@@ -282,21 +296,48 @@ extern struct MetadataEntry *metadata_list_client(struct Client *cptr);
  * open / METADATA loop / batch end sequence.
  *
  * @param[in] to Client receiving the burst (must be local).
+ * @param[in] on_network Non-zero when @a to is already known to the
+ *   network (a revived session, a device attached to one); zero on the
+ *   path that introduces it by N after the burst.
  */
-extern void metadata_burst_self_to_client(struct Client *to);
+extern void metadata_burst_self_to_client(struct Client *to, int on_network);
 
 /** The registration check (owner, 2026-11-12): whether batch was
  * negotiated is judged once, when registration ends -- the point the
  * registration burst goes out, on each path (register_user(), the bouncer
  * revive, a device attach; metadata_burst_self_to_client() runs it).
- * A metadata-aware client keeps what it set before registration.  One that
- * is not never became metadata-aware: its own keys (a client with no
- * account: everything it set before registration) and its subscriptions
- * are dropped, and it is inert from then on.
+ * A metadata-aware client keeps what it set before registration -- and
+ * when it is logged in by then, those writes are merged into its account
+ * (owner, 2026-11-13: metadata_prereg.h's rule, metadata_prereg_merge()).
+ * One that is not never became metadata-aware: its own keys (a client
+ * with no account: everything it set before registration), its
+ * before-connect writes and its subscriptions are dropped, and it is
+ * inert from then on.
  * @param[in] cptr A local client completing registration.
+ * @param[in] on_network As for metadata_burst_self_to_client().
  * @return Non-zero if it is metadata-aware.
  */
-extern int metadata_registration_check(struct Client *cptr);
+extern int metadata_registration_check(struct Client *cptr, int on_network);
+
+/** Note a before-connect write of @a cptr (a client of ours still
+ * registering) to itself: the last write per key is kept, with @a st, the
+ * time its SET was accepted, until registration ends
+ * (cli_metadata_prereg).  Deletes are capped at METADATA_MAX_KEYS -- an
+ * account never holds more user keys than that, so no more of them can
+ * matter.
+ * @return 0, -1 on allocation failure, -2 when a delete is over the cap
+ *   (the SET is to be refused: LIMIT_REACHED). */
+extern int metadata_prereg_record(struct Client *cptr, const char *key,
+                                  const char *value, int visibility,
+                                  const struct md_stamp *st);
+
+/** Drop @a cptr's before-connect writes. */
+extern void metadata_prereg_free(struct Client *cptr);
+
+/** Hand @a from's before-connect writes to @a to (a bouncer revive: the
+ * connection that registered becomes the held session's client), dropping
+ * any @a to had. */
+extern void metadata_prereg_move(struct Client *to, struct Client *from);
 
 /** Announce to the network the keys a client of ours set before
  * registration and kept (a metadata-aware client with no account): run by
@@ -495,6 +536,13 @@ extern void metadata_send_join_notifications(struct Client *joiner, struct Chann
 extern void metadata_notify_subscribers(const char *target, const char *key,
                                         const char *value, int visibility);
 
+/** metadata_notify_subscribers(), telling everyone but @a butone (NULL:
+ * everyone) -- a client whose registration burst carries the change.
+ */
+extern void metadata_notify_subscribers_butone(const char *target, const char *key,
+                                               const char *value, int visibility,
+                                               struct Client *butone);
+
 /** Change one key of @a cptr's in-memory metadata and its mode-sync flag
  * (metadata_mode_sync[]) only: no store row, no notification, nothing
  * sent.  For a server that learns a user's mode-synced key from another
@@ -611,6 +659,19 @@ extern int metadata_account_foreach_version(const char *account,
  */
 extern void metadata_account_apply_memory(const char *account, const char *key,
                                           const char *value, int vis);
+
+/** metadata_account_apply_memory() for a client's before-connect write
+ * merged into its account at registration (metadata_prereg_merge()):
+ * @a quiet, when not NULL, is that client on the path that introduces it
+ * by N after the burst -- nobody knows it yet, so its own list entry and
+ * mode flag are set silently (the N carries the flag), as at
+ * metadata_mode_sync_restore(..., 0); @a butone, when not NULL, is told
+ * nothing (its registration burst carries the change).
+ */
+extern void metadata_account_apply_memory_ex(const char *account, const char *key,
+                                             const char *value, int vis,
+                                             struct Client *quiet,
+                                             struct Client *butone);
 
 /* X3 dependency removed - Nefarious is now authoritative for metadata */
 

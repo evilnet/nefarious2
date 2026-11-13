@@ -270,13 +270,26 @@ int metadata_client_write(struct Client *src, struct Client *target,
   if (!src || !target || !key || !cli_user(target))
     return -1;
 
-  /* A client of ours still registering (before-connect): its own memory
-   * only.  Nobody can see it yet, no peer knows it, and whether its keys
-   * stand is decided at registration (metadata_registration_check():
-   * discarded unless it ends metadata-aware); the keys that stand are
-   * announced after its N (metadata_announce_registered()). */
-  if (MyConnect(target) && !IsRegistered(target))
-    return metadata_set_client(target, key, value, vis) < 0 ? -1 : 0;
+  /* A client of ours still registering (before-connect): its own memory,
+   * and a note of the write with the time it was accepted -- nothing else,
+   * whatever account it may already carry (a trusted WEBIRC gateway's, an
+   * IAuth's: such a write used to go straight into the account's store,
+   * unannounced, whether or not the client ended metadata-aware).  Nobody
+   * can see it yet, no peer knows it, and what becomes of it is decided at
+   * registration (metadata_registration_check()): discarded unless the
+   * client ends metadata-aware; merged into its account, as a SET right
+   * after logging in, when it is logged in by then (the memory a login
+   * replaces is why the note is kept apart); else its own keys, announced
+   * after its N (metadata_announce_registered()). */
+  if (MyConnect(target) && !IsRegistered(target)) {
+    struct md_stamp st = metadata_stamp_now();
+    int rc = metadata_prereg_record(target, key, value, vis, &st);
+
+    if (rc < 0)
+      return rc;
+    metadata_client_memory_set(target, key, value, vis);
+    return 0;
+  }
 
   if (cli_user(target)->account[0])
     return metadata_account_write(src, cli_user(target)->account, key,

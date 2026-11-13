@@ -76,6 +76,7 @@ struct Privs;
 struct AuthRequest;
 struct MetadataEntry;
 struct MetadataSub;
+struct MetadataPrereg;
 struct SASLSession;
 
 /*
@@ -681,6 +682,7 @@ struct Client {
   /* IRCv3 Metadata */
   struct MetadataEntry* cli_metadata;    /**< Client metadata key-value pairs */
   struct MetadataSub*   cli_metadatasub; /**< Client metadata subscriptions */
+  struct MetadataPrereg* cli_metadata_prereg; /**< Before-connect writes to itself, until registration ends (metadata.h) */
   time_t                cli_metadata_lastcmd;  /**< Time of last metadata command */
   int                   cli_metadata_cmdcnt;   /**< Metadata commands this second */
 
@@ -933,6 +935,8 @@ struct Client {
 #define cli_metadata(cli)        ((cli)->cli_metadata)
 /** Get client metadata subscriptions. */
 #define cli_metadatasub(cli)     ((cli)->cli_metadatasub)
+/** Get the client's before-connect METADATA writes (registration only). */
+#define cli_metadata_prereg(cli) ((cli)->cli_metadata_prereg)
 /** Get time of last metadata command. */
 #define cli_metadata_lastcmd(cli) ((cli)->cli_metadata_lastcmd)
 /** Get metadata command count for current second. */

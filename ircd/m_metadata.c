@@ -220,6 +220,13 @@ static int md_sender_owns_client(struct Client *sptr, struct Client *target_clie
 void metadata_notify_subscribers(const char *target, const char *key,
                                  const char *value, int visibility)
 {
+  metadata_notify_subscribers_butone(target, key, value, visibility, NULL);
+}
+
+void metadata_notify_subscribers_butone(const char *target, const char *key,
+                                        const char *value, int visibility,
+                                        struct Client *butone)
+{
   struct Client *acptr;
   struct Client *target_cli = NULL;
   struct Channel *target_chptr = NULL;
@@ -255,7 +262,7 @@ void metadata_notify_subscribers(const char *target, const char *key,
   for (fd = HighestFd; fd >= 0; --fd) {
     if (!(acptr = LocalClientArray[fd]))
       continue;
-    if (!IsUser(acptr))
+    if (acptr == butone || !IsUser(acptr))
       continue;
     if (!MetadataAware(acptr))
       continue;
@@ -981,7 +988,15 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
    * peer -- for an account, every client of it, here and there).  W4
    * Task 8: never by nick unless no session id crosses (tags off). */
   if (!is_channel) {
-    if (metadata_client_write(sptr, target_client, key, value, visibility) < 0) {
+    rc = metadata_client_write(sptr, target_client, key, value, visibility);
+    if (rc == -2) {
+      /* Before registration: more deletes than the account could hold
+       * keys for (metadata_prereg_record()). */
+      send_fail(sptr, "METADATA", "LIMIT_REACHED", key,
+                "Maximum number of metadata keys reached");
+      return 0;
+    }
+    if (rc < 0) {
       send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
                 "Failed to set metadata");
       return 0;
@@ -1149,10 +1164,19 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
   send_batch_end(sptr);
 
   for (k = keys; k; k = k->next)
-    metadata_client_write(sptr, target_client, k->key, NULL, k->vis);
+    if (metadata_client_write(sptr, target_client, k->key, NULL, k->vis) == -2)
+      /* Before registration, over the bound on noted deletes
+       * (metadata_prereg_record()): not deleted, and said so. */
+      send_fail(sptr, "METADATA", "LIMIT_REACHED", k->key,
+                "Maximum number of metadata keys reached");
   md_clear_key_free(keys);
 
-  if (cli_user(target_client)->account[0] && metadata_lmdb_is_available()) {
+  /* The account's other rows: only once registered.  Before, a client
+   * that already carries an account (a trusted WEBIRC gateway's) would
+   * delete them before it is known whether it ends metadata-aware; its
+   * CLEAR deletes the keys it sees, noted like any before-connect write. */
+  if (cli_user(target_client)->account[0] && metadata_lmdb_is_available()
+      && (!MyConnect(target_client) || IsRegistered(target_client))) {
     const char *account = cli_user(target_client)->account;
 
     keys = NULL;

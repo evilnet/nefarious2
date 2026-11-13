@@ -130,8 +130,13 @@ extern int metadata_session_addressable(struct Client *target);
  * @param[in] target The user whose metadata changes.
  * @param[in] key Metadata key.
  * @param[in] value New value, or NULL to delete.
+ * A client of ours still registering writes its own memory and a note
+ * of the write only (metadata_prereg_record()), whatever account it
+ * carries: what becomes of it is decided when registration ends.
  * @param[in] vis METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
- * @return 0 on success, -1 when nothing was applied.
+ * @return 0 on success, -1 when nothing was applied, -2 when a
+ *   registering client's delete is over the bound on what it may make us
+ *   keep (refused: LIMIT_REACHED).
  */
 extern int metadata_client_write(struct Client *src, struct Client *target,
                                  const char *key, const char *value, int vis);
