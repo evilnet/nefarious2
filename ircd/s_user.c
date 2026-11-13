@@ -1517,6 +1517,60 @@ static const struct UserMode {
 /** Nasty global buffer used for communications with umode_str() and others. */
 static char umodeBuf[BUFSIZE];
 
+/** Tell the server a bouncer device's nick request came from what the
+ * session user's nick now is, after this server -- the primary's, the one
+ * authority for it -- accepted or refused the request.
+ *
+ * The device's server renamed the user before asking (m_nick()), and so
+ * did every server on its side that the rename reached; all of them are in
+ * @a cptr's direction.  A refusal (a ban, NICKDELAY) sends the current nick
+ * back, a correction; an acceptance sends the new one: a no-op where it
+ * already matches, and the tie-breaker when the primary's own rename
+ * crossed the device's on the link.  It is a plain N from the user, a nick
+ * change every server, stock ones too, applies.  It carries a msgid and
+ * time of its own: where it changes the nick it is a new event (the
+ * request's msgid is already stored on the device's side).
+ * @param[in] cptr The server link the request came from.
+ * @param[in] sptr The session user, ours.
+ */
+static void nick_request_answer(struct Client *cptr, struct Client *sptr)
+{
+  char msgid[64];
+
+  if (!MyUser(sptr) || !IsServer(cptr))
+    return;
+  if (feature_bool(FEAT_MSGID)) {
+    generate_msgid(msgid, sizeof(msgid));
+    sendcmdto_set_s2s_tags(history_event_time_ms(NULL), msgid);
+  }
+  sendcmdto_one(sptr, CMD_NICK, cptr, "%s %Tu", cli_name(sptr),
+                cli_lastnick(sptr));
+  /* sendcmdto_set_s2s_tags() also armed the client-facing event time;
+   * no client line belongs to this event here. */
+  sendcmdto_set_client_msgid(NULL);
+}
+
+/** Send a refusal of a nick change to the bouncer device that asked for
+ * it, as well as to the user: a device of ours, or another server's
+ * device whose request reached us over an IRCv3-aware link (a numeric
+ * addressed to a device's numeric means nothing to a legacy server).
+ * @param[in] device The device that asked, or NULL.
+ * @param[in] reply The numeric.
+ * @param[in] arg Its argument (a channel name, or the nick asked for).
+ * @param[in] secs ERR_NICKTOOFAST's wait; unused otherwise.
+ */
+static void nick_refusal_to_device(struct Client *device, int reply,
+                                   const char *arg, time_t secs)
+{
+  if (!device || !IsUser(device)
+      || !(MyConnect(device) || IsIRCv3Aware(cli_from(device))))
+    return;
+  if (reply == ERR_NICKTOOFAST)
+    send_reply(device, reply, arg, secs);
+  else
+    send_reply(device, reply, arg);
+}
+
 /** Try to set a user's nickname.
  * If \a sptr is a server, the client is being introduced for the first time.
  * @param[in] cptr Client to set nickname.
@@ -1530,6 +1584,26 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
                   const char* nick, int parc, char* parv[],
                   int svsnick)
 {
+  return set_nick_name_device(cptr, sptr, NULL, nick, parc, parv, svsnick);
+}
+
+/** set_nick_name() for a nick change a bouncer device asked its session
+ * user for.
+ * @param[in] device The device whose NICK this is, when it is another
+ * server's (ms_nick() rewrote its request to our primary, and @a cptr is
+ * the link it came over).  A device of ours is @a cptr itself and is found
+ * without it (m_nick() rewrote its request to the primary, here or not).
+ */
+int set_nick_name_device(struct Client* cptr, struct Client* sptr,
+                         struct Client* device, const char* nick,
+                         int parc, char* parv[], int svsnick)
+{
+  /* The device that asked: given, or our connection the NICK came from
+   * when the rename is its primary's (cptr == sptr for the user's own
+   * NICK, and for SVSNICK). */
+  if (!device && cptr != sptr && MyUser(cptr))
+    device = cptr;
+
   if (IsServer(sptr)) {
 
     /*
@@ -1585,7 +1659,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       struct Membership *member;
       if ((channel_name = find_no_nickchange_channel(sptr))
           && !IsXtraOp(sptr) && !svsnick) {
-        return send_reply(sptr, ERR_BANNICKCHANGE, channel_name);
+        send_reply(sptr, ERR_BANNICKCHANGE, channel_name);
+        nick_refusal_to_device(device, ERR_BANNICKCHANGE, channel_name, 0);
+        nick_request_answer(cptr, sptr);
+        return 0;
       }
       /*
        * Refuse nick change if the last nick change was less
@@ -1607,6 +1684,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
         /* Send error message */
         sendcmdto_one(sptr, CMD_NICK, sptr, "%s", cli_name(sptr));
         /* bounce NICK to user */
+        nick_refusal_to_device(device, ERR_NICKTOOFAST, parv[1],
+                               cli_nextnick(sptr) - CurrentTime);
+        nick_request_answer(cptr, sptr);
         return 0;                /* ignore nick change! */
       }
       /* Invalidate all bans against the user so we check them again */
@@ -1651,8 +1731,11 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
          * the target user as cptr, and its stash is the target's link's
          * last line, wherever the SVSNICK came from: another event,
          * whose msgid and time the NICK went out and was stored under.
-         * Without such a source, mint, as for a local change. */
-        struct Client *tag_src = (!MyUser(sptr)
+         * Without such a source, mint, as for a local change.  Our own
+         * user renamed from a link is another server's bouncer device's
+         * request (ms_nick()): the device's server stored and relayed it
+         * under the tags it sent, so this side does too. */
+        struct Client *tag_src = ((!MyUser(sptr) || IsServer(cptr))
                                   && sendcmdto_stash_is_current(cptr)
                                   && cli_s2s_msgid(cptr)[0]) ? cptr : NULL;
         uint64_t nick_ms;
@@ -1813,6 +1896,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
     if (!case_only_change && !IsBouncerAlias(sptr))
       check_status_watch(sptr, RPL_LOGON);
     } /* end case_only_change scope */
+
+    /* A device's request from another server: the answer goes back. */
+    nick_request_answer(cptr, sptr);
   }
   else {
     /* Local client setting NICK the first time */

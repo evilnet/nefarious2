@@ -376,6 +376,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client *acptr;
+  struct Client *device = NULL;   /* the bouncer device that asked */
   char nick[NICKLEN + 2];
   time_t lastnick = 0;
   int differ = 1;
@@ -438,9 +439,12 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * server (it may be local or remote, both paths handle correctly),
    * broadcasts NICK + (when primary is local-MyUser) BX N for sibling
    * alias sync. Local aliases are renamed in set_nick_name's local-alias
-   * pass. */
-  if (!IsServer(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+   * pass.  When the primary is ours, this server decides the rename and
+   * answers the device's side (set_nick_name_device()). */
+  if (!IsServer(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    device = sptr;
     sptr = cli_alias_primary(sptr);
+  }
 
   /*
    * If do_nick_name() returns a null name OR if the server sent a nick
@@ -482,7 +486,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Check against nick name collisions. */
   if ((acptr = SeekClient(nick)) == NULL)
     /* No collisions, all clear... */
-    return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+    return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
 
   /*
    * If acptr == sptr, then we have a client doing a nick
@@ -494,7 +498,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     if (strcmp(cli_name(acptr), nick) != 0)
       /* Allows change of case in his/her nick */
-      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+      return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
     else
       /* Setting their nick to what it already is? Ignore it. */
       return 0;
@@ -1132,5 +1136,5 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   if (sptr == NULL)
     return 0;
-  return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+  return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
 }

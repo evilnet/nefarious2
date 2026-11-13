@@ -80,6 +80,12 @@ extern void         user_count_memory(size_t* count_out, size_t* bytes_out);
 extern int set_nick_name(struct Client* cptr, struct Client* sptr,
                          const char* nick, int parc, char* parv[],
                          int svsnick);
+/* set_nick_name() for a nick change another server's bouncer device asked
+ * its session user, our client, for: the refusal numerics also go to
+ * @a device, and the user's resulting nick goes back toward @a cptr. */
+extern int set_nick_name_device(struct Client* cptr, struct Client* sptr,
+                                struct Client* device, const char* nick,
+                                int parc, char* parv[], int svsnick);
 /* One-shot: the next register_user() of a remote client relays its N to
  * IRCv3-aware links only (legacy links learn that user some other way,
  * e.g. a BX P renumbering a face they already hold).  Every
