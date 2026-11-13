@@ -960,6 +960,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
                              enum sasl_login_proof by)
 {
   int refresh;
+  int lb = 0;   /* a labeled batch opened for 900 + 903 */
 
   /* 0. A client already logged in (sasl_logged_in()) re-authenticates to
    * refresh its login, never to change it (owner's ruling, #223): a login
@@ -1057,6 +1058,15 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
          kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
+  /* labeled-response: a login completed inside its labeled AUTHENTICATE
+   * line (a cached answer, a token checked locally, EXTERNAL) is answered
+   * by 900 and 903, two lines: one labeled batch around them, opened only
+   * then (no label is pending when a services or Keycloak answer completes
+   * it later) and ended after the 903.  A REGISTER's answer has its own
+   * batch (m_register.c). */
+  if (by == LOGIN_BY_SASL)
+    lb = labeled_batch_start(sptr);
+
   /* 2. Send RPL_LOGGEDIN; a REGISTER's own reply comes first, as the spec's
    * example has it ("VERIFY SUCCESS ...", then "900 ..."). */
   if (by == LOGIN_BY_REGISTER)
@@ -1098,6 +1108,8 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     send_reply(sptr, RPL_SASLSUCCESS);
   } else
     SetFlag(sptr, FLAG_REGLOGIN);
+  if (lb)
+    labeled_batch_end(sptr);   /* the answer is 900 + 903 */
 
   /* 7. Post-registration account update: a registered client's first
    * login ('R'), or a re-authentication of a logged-in client, which step 0

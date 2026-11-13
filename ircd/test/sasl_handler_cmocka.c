@@ -1324,6 +1324,57 @@ static void poscache_hit_registration_keeps(void **state)
   assert_false(f->freed);
 }
 
+static int tlog_has(const char *entry);
+static void next_line(struct Client *c, const char *label);
+
+/** labeled-response: a login completed inside its labeled AUTHENTICATE
+ * line (here a positive-cache hit) is answered by 900 and 903 -- two
+ * lines, so one labeled batch: the batch's start carries the label, the
+ * numerics carry none, and the batch ends after the 903 (before the
+ * registration the login lets run). */
+static void inline_success_answers_in_one_labeled_batch(void **state)
+{
+  struct Client *c;
+  char data[300];
+
+  sasl_init_once();
+  first_login(102, "anna", "annapw", 1);
+  c = new_client(103, "anna2", 1, REG_KEEPS);
+  plain_b64("anna", "annapw", data);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  next_line(c, "S1");
+  ntlog = 0;
+  assert_int_equal(authenticate(c, data), 0);
+  {
+    int i, i900 = -1, i903 = -1, iend = -1;
+
+    assert_true(ntlog >= 4);
+    assert_string_equal(tlog[0], "BATCH + labeled-response anna2 [label=S1]");
+    for (i = 1; i < ntlog; i++) {
+      if (!strncmp(tlog[i], "900 anna2 ", 10))
+        i900 = i;
+      else if (!strcmp(tlog[i], "903 anna2"))
+        i903 = i;
+      else if (!strcmp(tlog[i], "BATCH - anna2"))
+        iend = i;
+      assert_null(strstr(tlog[i], "[label="));   /* only the batch's start */
+    }
+    assert_true(i900 > 0 && i903 > i900 && iend == i903 + 1);
+  }
+  assert_int_equal(cli_labeled_batch(c), 0);
+
+  /* Unlabeled: no batch, the numerics bare. */
+  first_login(104, "anne", "annepw", 1);
+  c = new_client(105, "anne2", 1, REG_KEEPS);
+  plain_b64("anne", "annepw", data);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  next_line(c, "");
+  ntlog = 0;
+  assert_int_equal(authenticate(c, data), 0);
+  assert_false(tlog_has("BATCH - anne2"));
+  assert_true(!strncmp(tlog[0], "900 anne2 ", 10));
+}
+
 /** A negative-cache hit fails the exchange inside AUTHENTICATE; registration
  * runs there (a SASL-required class, a K-line) and exits the client. */
 static void negcache_hit_registration_exits(void **state)
@@ -4024,6 +4075,7 @@ int main(void)
 #ifdef USE_LIBKC
     cmocka_unit_test_setup(poscache_hit_registration_exits, setup),
     cmocka_unit_test_setup(poscache_hit_registration_keeps, setup),
+    cmocka_unit_test_setup(inline_success_answers_in_one_labeled_batch, setup),
     cmocka_unit_test_setup(negcache_hit_registration_exits, setup),
     cmocka_unit_test_setup(oauthbearer_local_check_registration_exits, setup),
     cmocka_unit_test_setup(ecdsa_response_registration_exits, setup),
