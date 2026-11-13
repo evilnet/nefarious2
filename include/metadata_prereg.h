@@ -22,6 +22,10 @@
  * the store and to every fork peer under the SET's stamp, as the SET after
  * login would: a peer may hold an older write this server missed, and the
  * login's own pull of the account's rows would otherwise bring it back.
+ * Nobody on this server is told of such a row (nothing changed here);
+ * the fork peers that take it announce it to their subscribers as they do
+ * for any SET's row (ms_metadata_stamped() -> metadata_account_apply_memory(),
+ * which does not ask whether the value changed).
  *
  * No ircd dependencies, so the cmocka suite
  * (ircd/test/metadata_prereg_cmocka.c) compiles it standalone, the merge
@@ -60,8 +64,9 @@ enum md_prereg_verdict {
   MD_PREREG_STAMP,        /**< the account here already reads this (the same
                            *   value; a delete of a key it does not hold) under
                            *   an older stamp or none: stored and sent under
-                           *   the SET's stamp, nobody told (nothing changed
-                           *   for anyone here) */
+                           *   the SET's stamp; nobody on this server is told
+                           *   (nothing changed here), peers announce it as
+                           *   for any SET's row */
   MD_PREREG_SAME,         /**< the account holds exactly this under a stamp
                            *   no older than the SET's: nothing */
   MD_PREREG_ABSENT,       /**< a delete of a key already deleted here, no
@@ -73,7 +78,8 @@ enum md_prereg_verdict {
   MD_PREREG_LIMIT_VALUE,  /**< the value is over METADATA_MAX_VALUE_BYTES
                            *   (lowered by a rehash since the SET): refused,
                            *   reported */
-  MD_PREREG_ERROR         /**< the store failed: reported */
+  MD_PREREG_ERROR         /**< the store failed, or kept its own row:
+                           *   reported */
 };
 
 /** Whether a client's before-connect writes are merged into its account
@@ -90,8 +96,9 @@ extern int md_prereg_should_merge(int logged_in, int metadata_aware);
  * per key), so @a user_keys -- the account's user-managed key count,
  * updated here for each APPLY that adds or removes a live key -- carries
  * from one to the next, as a SET after another would see it.
- * Order of the checks: what the account here already reads (STAMP when
- * the SET is the newer, else nothing), then the LWW rule, then the limits.
+ * Order of the checks: for a set, the value limit (as a SET checks it
+ * first); then what the account here already reads (STAMP when the SET is
+ * the newer, else nothing); then the LWW rule; then the key cap.
  * @param[in] stored The account's row, or NULL.
  * @param[in] w The write, its stamp the time its SET was accepted.
  * @param[in] no_row_is_state Non-zero for a key whose having no row is a
@@ -124,7 +131,7 @@ struct md_prereg_ops {
   /** Every fork peer: the row (APPLY and STAMP). */
   void (*send)(void *ctx, const char *key, const struct md_version *w);
   /** The client: the write was refused (LIMIT_KEYS, LIMIT_VALUE) or the
-   * store failed (ERROR). */
+   * store failed or kept its own row (ERROR). */
   void (*refuse)(void *ctx, const char *key, enum md_prereg_verdict why);
   /** Non-zero when @a key's having no row is a state of its own
    * (md_prereg_decide()'s no_row_is_state).  NULL: never. */
@@ -134,8 +141,8 @@ struct md_prereg_ops {
 /** Merge the before-connect writes @a list into the account: each write
  * in order, md_prereg_decide() against ops->row, then for APPLY
  * store + apply + send, for STAMP store + send, for a refusal refuse.  A
- * store that keeps its own row (another write landed since the decision)
- * sends and tells nothing.
+ * store that fails, or keeps its own row (it read otherwise than the
+ * decision did), is refused as MD_PREREG_ERROR; nothing is told or sent.
  * @param[in] list The writes.
  * @param[in] user_keys The account's user-managed key count.
  * @param[in] max_keys METADATA_MAX_KEYS (INT_MAX: no cap to apply).

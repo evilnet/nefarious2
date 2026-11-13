@@ -2504,7 +2504,8 @@ static int prereg_no_row_is_state(void *arg, const char *key)
  * peer (MD =account) -- unless a write made after the SET stands.  What
  * the account here already reads (the same value, a delete of a key it
  * lacks) is still stored and sent under the SET's stamp when that is the
- * newer, telling nobody: the login's pull of the account's rows from the
+ * newer, telling nobody on this server (the fork peers announce the row
+ * as they do any SET's): the login's pull of the account's rows from the
  * peers (mdsync_on_attach()) must not bring back an older write this
  * server missed.  A write that no longer fits the account (its key cap, a
  * value limit lowered since) is refused with the standard reply SET would

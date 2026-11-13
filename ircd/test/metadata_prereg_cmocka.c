@@ -49,6 +49,7 @@ struct acct_row { char key[MD_PREREG_KEY_LEN]; char value[64]; struct md_version
 struct fake {
   struct acct_row rows[ACCT_MAX];
   int store_fails;                    /* row() and store() fail */
+  int store_keeps;                    /* store() keeps its own row (0) */
   const char *mode_key;               /* the one key whose no-row is a state */
   int napplied, nsent, nrefused;
   char applied[LOG_MAX][MD_PREREG_KEY_LEN];
@@ -126,6 +127,8 @@ static int f_store(void *ctx, const char *key, const struct md_version *w)
 
   if (f->store_fails)
     return -1;
+  if (f->store_keeps)
+    return 0;
   return lww_merge(f, key, w);
 }
 
@@ -267,7 +270,8 @@ static void test_prereg_wins_per_key_untouched_from_account(void **state)
   assert_int_equal(f.nrefused, 0);
 }
 
-/* An identical value tells nobody.  Under an older stamp it is still
+/* An identical value tells nobody on this server (the peers that take its
+ * row announce it as for any SET).  Under an older stamp it is still
  * stored and sent under the SET's (review a1: the login's pull would
  * otherwise bring back a peer's write this server missed); under a newer
  * or equal one, nothing at all.  The same value at another visibility is
@@ -294,7 +298,7 @@ static void test_identical_value(void **state)
 
 /* Review a1, the scenario: this server holds k=v@100, a peer k=w@150 this
  * server missed during a split; the client's SET k v is @200.  The merge
- * stores and sends v@200 and tells nobody; the login's pull then brings
+ * stores and sends v@200 and tells nobody here; the login's pull then brings
  * w@150, which loses. */
 static void test_same_value_survives_the_pull(void **state)
 {
@@ -319,7 +323,7 @@ static void test_same_value_survives_the_pull(void **state)
 }
 
 /* A delete: of a stored key, applied (one key fewer); of a key with no row
- * here, a tombstone stored and sent under the SET's stamp, nobody told --
+ * here, a tombstone stored and sent under the SET's stamp, nobody here told --
  * a peer's older row then loses; of a key already deleted here, the same
  * when the SET is newer, else nothing. */
 static void test_delete(void **state)
@@ -479,6 +483,54 @@ static void test_store_error(void **state)
   assert_int_equal(f.napplied + f.nsent, 0);
 }
 
+/* Review 2, item 1: the value limit comes before the identical-value test.
+ * After a rehash lowers METADATA_MAX_VALUE_BYTES, a value identical to the
+ * account's (now over the limit) is refused, as a SET is -- not re-stamped
+ * and sent to peers whose limit refuses it. */
+static void test_value_limit_before_identical(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version stored = live(100, "0123456789", VIS_PUBLIC);
+  struct md_version w = live(200, "0123456789", VIS_PUBLIC);
+  int keys = 1;
+
+  (void)state;
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 9), MD_PREREG_LIMIT_VALUE);
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 10), MD_PREREG_STAMP);
+
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  row_put(&f, "k", &stored);
+  note(&ns, "k", "0123456789", 200);
+  assert_int_equal(md_prereg_merge(&ns.n[0], 1, 20, 9, &store_ops, &f), 0);
+  assert_int_equal(f.nrefused, 1);
+  assert_int_equal(f.refused_why[0], MD_PREREG_LIMIT_VALUE);
+  assert_int_equal(f.nsent + f.napplied, 0);
+  assert_true(row_find(&f, "k")->v.st.ms == 100);
+}
+
+/* Review 2, item 2: a store that keeps its own row although the decision
+ * read the write as the newer -- the write is lost: reported as an error
+ * (as 523f91c3 did), nothing told or sent. */
+static void test_store_keeps_its_row(void **state)
+{
+  struct fake f;
+  struct notes ns;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  f.store_keeps = 1;
+  note(&ns, "k", "v", 200);
+  note(&ns, "gone", NULL, 201);
+  assert_int_equal(merge(&f, &ns, 20), 0);
+  assert_int_equal(f.nrefused, 2);
+  assert_int_equal(f.refused_why[0], MD_PREREG_ERROR);
+  assert_int_equal(f.refused_why[1], MD_PREREG_ERROR);
+  assert_int_equal(f.napplied + f.nsent, 0);
+}
+
 /* No store: every key reads as no row -- a set is applied and sent, a
  * delete sent only. */
 static void test_no_store(void **state)
@@ -549,6 +601,8 @@ int main(void)
     cmocka_unit_test(test_negative_cap_is_zero),
     cmocka_unit_test(test_value_limit),
     cmocka_unit_test(test_store_error),
+    cmocka_unit_test(test_value_limit_before_identical),
+    cmocka_unit_test(test_store_keeps_its_row),
     cmocka_unit_test(test_no_store),
     cmocka_unit_test(test_note_bound),
     cmocka_unit_test(test_no_merge_without_login_or_awareness),

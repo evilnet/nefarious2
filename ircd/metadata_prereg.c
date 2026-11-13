@@ -66,8 +66,15 @@ enum md_prereg_verdict md_prereg_decide(const struct md_version *stored,
     return no_row_is_state ? MD_PREREG_APPLY : MD_PREREG_STAMP;
   }
 
-  /* The same value at the same visibility: nothing changes here; the row
-   * still takes the SET's stamp when it is the newer. */
+  /* The value limit first, as a SET checks it before anything else: a
+   * value over it (lowered by a rehash since the SET) is refused even when
+   * the account holds the same one -- re-stamped and sent, it would go to
+   * peers whose limit refuses it too. */
+  if (w->vlen > max_value_bytes)
+    return MD_PREREG_LIMIT_VALUE;
+
+  /* The same value at the same visibility: nothing changes on this server;
+   * the row still takes the SET's stamp when it is the newer (STAMP). */
   if (stored_live && stored->vis == w->vis && stored->vlen == w->vlen
       && (w->vlen == 0 || !memcmp(stored->value, w->value, w->vlen)))
     return md_lww_take(stored, w) ? MD_PREREG_STAMP : MD_PREREG_SAME;
@@ -75,9 +82,6 @@ enum md_prereg_verdict md_prereg_decide(const struct md_version *stored,
   /* A write made after the client's SET (its stamp the newer) stands. */
   if (stored && !md_lww_take(stored, w))
     return MD_PREREG_SUPERSEDED;
-
-  if (w->vlen > max_value_bytes)
-    return MD_PREREG_LIMIT_VALUE;
 
   /* A new live key needs a place; an update of one the account holds
    * does not (as metadata_check_limits() rules for a SET). */
@@ -130,13 +134,15 @@ int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
     }
 
     if (ops->store) {
+      /* The store merges by the same LWW rule the decision just applied
+       * to the same row, so it takes the write: a store that keeps its own
+       * row (0) disagrees with what it was read as, and the write is lost
+       * -- reported like a store error, as a SET's failed write is. */
       rc = ops->store(ctx, n->key, &w);
-      if (rc < 0) {
+      if (rc != 1) {
         ops->refuse(ctx, n->key, MD_PREREG_ERROR);
         continue;
       }
-      if (rc == 0)
-        continue;       /* a newer row landed meanwhile: it stands */
     }
     if (v == MD_PREREG_APPLY) {
       ops->apply(ctx, n->key, &w);
