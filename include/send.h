@@ -436,6 +436,13 @@ extern void sendto_mode_butone(struct Client *one, struct Client *from, const ch
 extern void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
                            const char *pattern, va_list vl);
 
+/* A batch reference for a client (letters, digits and hyphen only, as the
+ * batch spec requires): the numeric's value and the receiving connection's
+ * sequence (con_batch_seq), in hex.  BATCH_REF_SIZE holds any of them. */
+#define BATCH_REF_SIZE 24
+extern char *batch_ref_make(char *buf, size_t buflen, const char *server_yxx,
+                            const char *client_yxx, unsigned int seq);
+
 /* Batches on a client connection, nested (send.c: the nesting model).
  * Open one inside the innermost open batch; 1 if a BATCH + line went out.
  * Every call is paired with send_batch_end(). */

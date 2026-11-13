@@ -68,6 +68,21 @@ const char *inttobase64_64(char *buf, uint64_t v, unsigned int count)
   buf[count] = '\0';
   return buf;
 }
+/* numnicks.c's decoder (batch_ref_make()): the numeric alphabet, '[' and
+ * ']' included. */
+unsigned int base64toint(const char *s)
+{
+  static const char alpha[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]";
+  unsigned int i = 0;
+
+  while (*s) {
+    const char *p = strchr(alpha, *s++);
+    assert_non_null(p);
+    i = (i << 6) + (unsigned int)(p - alpha);
+  }
+  return i;
+}
 struct Client his;
 int log_inassert;
 time_t CurrentTime;
@@ -693,6 +708,65 @@ static const char *opened_id(const char *line, char *buf, size_t len)
   return buf;
 }
 
+/** Whether @a ref is a legal batch reference: "Reference tag MUST contain
+ * only ASCII letters, numbers, and/or hyphen" (batch spec). */
+static int legal_ref(const char *ref)
+{
+  const char *p;
+
+  if (!ref[0])
+    return 0;
+  for (p = ref; *p; p++)
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+          || (*p >= '0' && *p <= '9') || *p == '-'))
+      return 0;
+  return 1;
+}
+
+/* A numeric with '[' or ']' (the numeric alphabet's last two characters)
+ * names a batch by its value: the reference is letters, digits and hyphen
+ * only, fits BATCH_REF_SIZE at its longest, and two sequences give two
+ * references. */
+static void test_batch_ref_legal_for_any_numeric(void **state)
+{
+  static const char *servers[] = { "A[", "]]", "[A", "AB", "", NULL };
+  static const char *clients[] = { "]]]", "A[B", "[[[", "AAA", "]", "" };
+  static const unsigned int seqs[] = { 0, 7, 0xffffffffu };
+  char ref[BATCH_REF_SIZE], other[BATCH_REF_SIZE], v[64];
+  size_t s, c, q;
+
+  (void)state;
+  for (s = 0; s < sizeof(servers) / sizeof(servers[0]); s++)
+    for (c = 0; c < sizeof(clients) / sizeof(clients[0]); c++)
+      for (q = 0; q < sizeof(seqs) / sizeof(seqs[0]); q++) {
+        memset(ref, 'x', sizeof(ref));
+        batch_ref_make(ref, sizeof(ref), servers[s], clients[c], seqs[q]);
+        assert_true(strlen(ref) < sizeof(ref));
+        assert_true(legal_ref(ref));
+        assert_null(strchr(ref, '['));
+        assert_null(strchr(ref, ']'));
+      }
+
+  /* The value, not the characters: "A[" is 62, "]]]" is 0x3ffff. */
+  assert_string_equal(batch_ref_make(ref, sizeof(ref), "A[", "]]]", 7), "fbffff-7");
+  assert_string_equal(batch_ref_make(ref, sizeof(ref), "]]", "]]]", 0xffffffffu),
+                      "3fffffff-ffffffff");
+  batch_ref_make(other, sizeof(other), "A[", "]]]", 8);
+  assert_string_not_equal(ref, other);
+
+  /* A connection's own batch, its client numeric "]A[": the BATCH + line
+   * names it legally, and the lines inside carry the same reference. */
+  reset_sent();
+  ircd_strncpy(cli_yxx(&asker), "]A[", sizeof(cli_yxx(&asker)));
+  assert_int_equal(send_batch_start(&asker, "t"), 1);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :inside", &asker);
+  send_batch_end(&asker);
+  opened_id(sent[0].text, ref, sizeof(ref));
+  assert_true(legal_ref(ref));
+  assert_string_equal(tag_value(sent[1].text, "batch", v, sizeof(v)), ref);
+  assert_non_null(strstr(sent[2].text, ref));
+}
+
 /* An inner batch's start AND end lines carry @batch=<outer>; lines sent
  * meanwhile carry the innermost; after the inner end the outer is the
  * innermost again; the outer's own lines carry no batch tag. */
@@ -927,6 +1001,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_respond_answered_label_is_not_taken, setup, teardown),
     cmocka_unit_test_setup_teardown(test_respond_follows_the_fanout_rules, setup, teardown),
     cmocka_unit_test_setup_teardown(test_label_inert_without_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_ref_legal_for_any_numeric, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_nesting_tags, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_label_on_outermost, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_end_line_closes_inner_first, setup, teardown),

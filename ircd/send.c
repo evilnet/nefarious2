@@ -4634,9 +4634,45 @@ void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mo
   msgq_clean(mb);
 }
 
+/** A batch reference for a client: "<numeric>-<seq>", both in lowercase
+ * hex.  The batch spec: "Reference tag MUST contain only ASCII letters,
+ * numbers, and/or hyphen" -- a P10 numeric's alphabet has '[' and ']'
+ * (numnicks.c), so the numeric goes as its value (base64toint() of the
+ * server part and the client part, the server's above the client's),
+ * never as its characters.  @a seq is the receiving connection's
+ * con_batch_seq, drawn by every reference made for that connection (its
+ * own batches, generate_batch_id(), and the multiline batches it is sent),
+ * so the references a connection gets are unique whatever numeric they
+ * name.  At most 8 + 1 + 8 characters with a server part (BATCH_REF_SIZE
+ * with the NUL), 5 + 1 + 8 without one (a BatchFrame's 16 bytes).
+ * @param[out] buf Buffer for the reference.
+ * @param[in] buflen Size of @a buf (BATCH_REF_SIZE is enough).
+ * @param[in] server_yxx Server part of the numeric ("" or NULL for none).
+ * @param[in] client_yxx Client part of the numeric ("" for none).
+ * @param[in] seq The receiving connection's sequence number.
+ * @return @a buf. */
+char *batch_ref_make(char *buf, size_t buflen, const char *server_yxx,
+                     const char *client_yxx, unsigned int seq)
+{
+  unsigned int value = 0;
+  size_t clen = client_yxx ? strlen(client_yxx) : 0;
+
+  /* 6 bits a character: a 2-character server and a 3-character client
+   * numeric are 30 bits together. */
+  if (server_yxx && server_yxx[0] && clen <= 3)
+    value = base64toint(server_yxx) << (6 * clen);
+  if (clen)
+    value |= base64toint(client_yxx);
+  ircd_snprintf(NULL, buf, buflen, "%x-%x", value, seq);
+  return buf;
+}
+
 /**
- * Generate a unique batch reference ID.
- * @param[in] cptr Client to generate batch ID for.
+ * Generate a unique batch reference ID for a batch on @a cptr's own
+ * connection (batch_ref_make(): letters, digits and hyphen only; the
+ * client's own numeric, "" before registration, and its sequence -- at
+ * most 14 characters, a BatchFrame's id).
+ * @param[in] cptr Local client to generate batch ID for.
  * @param[out] buf Buffer to store the generated ID.
  * @param[in] buflen Size of the buffer.
  * @return Pointer to the buffer.
@@ -4644,8 +4680,7 @@ void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mo
 static char *generate_batch_id(struct Client *cptr, char *buf, size_t buflen)
 {
   unsigned int seq = con_batch_seq(cli_connect(cptr))++;
-  ircd_snprintf(NULL, buf, buflen, "%s%u", cli_yxx(cptr), seq);
-  return buf;
+  return batch_ref_make(buf, buflen, NULL, cli_yxx(cptr), seq);
 }
 
 /* ------------------------------------------------------------------ */
@@ -4983,8 +5018,11 @@ void send_s2s_batch_start(struct Client *sptr, const char *type,
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
     return;
 
-  /* Generate unique batch ID using server numeric + timestamp + counter */
-  generate_batch_id(sptr, batch_id, sizeof(batch_id));
+  /* Generate unique batch ID: server numeric + counter.  An S2S id, kept
+   * as it was (generate_batch_id() is for a client's own batches); no
+   * caller sends one today. */
+  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "%s%u", cli_yxx(sptr),
+                con_batch_seq(cli_connect(sptr))++);
 
   /* Send to all servers */
   if (server1 && server2) {
@@ -5113,9 +5151,9 @@ void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
   if (!server || !cli_serv(server))
     return;
 
-  /* Generate unique batch ID */
-  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "NJ%s%lu",
-                cli_yxx(&me), netjoin_seq++);
+  /* Generate unique batch ID: a reference for clients (letters and
+   * digits only, never the server numeric's '[' or ']'). */
+  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "NJ%lu", netjoin_seq++);
 
   /* Store on server struct */
   ircd_strncpy(cli_serv(server)->batch_id, batch_id,
@@ -5199,9 +5237,9 @@ void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
   if (!batch_id_out || batch_id_len < 16)
     return;
 
-  /* Generate unique batch ID */
-  ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%s%lu",
-                cli_yxx(&me), netsplit_seq++);
+  /* Generate unique batch ID: a reference for clients (letters and
+   * digits only, never the server numeric's '[' or ']'). */
+  ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%lu", netsplit_seq++);
 
   /* Send batch start to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {

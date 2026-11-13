@@ -110,9 +110,11 @@ int fwd_label_save(struct Client *from, const char *cmd,
   /* Copy label */
   ircd_strncpy(fl->fl_label, cli_label(from), sizeof(fl->fl_label));
 
-  /* Generate batch ID: fwd<counter><server_yxx> */
-  snprintf(fl->fl_batch_id, sizeof(fl->fl_batch_id), "fwd%lu%s",
-           ++fwd_batch_counter, cli_yxx(&me));
+  /* Generate batch ID: fwd<counter> -- a reference for the client alone
+   * (letters and digits only: the server numeric it carried could put a
+   * '[' or ']' in it); the counter is unique in this server. */
+  snprintf(fl->fl_batch_id, sizeof(fl->fl_batch_id), "fwd%lu",
+           ++fwd_batch_counter);
 
   /* Generate HLC msgid for compact tag correlation */
   hlc = hlc_global_event();

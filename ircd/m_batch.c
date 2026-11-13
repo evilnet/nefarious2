@@ -245,7 +245,7 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
 
   if (MultilineInUse(route_to)) {
     /* Proper draft/multiline BATCH wrapper preserves concat semantics. */
-    char batchid[16];
+    char batchid[BATCH_REF_SIZE];
     /* The echo to the sender is the answer's: the label it carries is the
      * answer's own (armed from the batch's), and only when it is the one
      * line of the answer -- inside the answer's labeled-response batch it
@@ -254,8 +254,8 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
                          && cli_label(route_to)[0] && !cli_label_responded(route_to))
                         ? cli_label(route_to) : NULL;
 
-    ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
-                  NumNick(sptr), con_batch_seq(cli_connect(route_to))++);
+    batch_ref_make(batchid, sizeof(batchid), cli_yxx(cli_user(sptr)->server),
+                  cli_yxx(sptr), con_batch_seq(cli_connect(route_to))++);
 
     {
       char tagbuf[512];
@@ -1395,12 +1395,12 @@ static void ml_echo_channel(struct Client *sptr, struct Channel *chptr,
   struct SLink *lp;
 
   if (MultilineInUse(sptr)) {
-    char batchid[16];
+    char batchid[BATCH_REF_SIZE];
     const char *label = cli_labeled_batch(sptr) ? NULL
         : ((cli_label(sptr)[0] && !cli_label_responded(sptr)) ? cli_label(sptr) : NULL);
 
-    ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
-                  NumNick(sptr), con_batch_seq(con)++);
+    batch_ref_make(batchid, sizeof(batchid), cli_yxx(cli_user(sptr)->server),
+                  cli_yxx(sptr), con_batch_seq(con)++);
     {
       char tagbuf[512];
       int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), sptr, sptr,
@@ -1625,11 +1625,11 @@ process_multiline_batch(struct Client *sptr)
        * CapActive checks the client's own capabilities directly. */
       if (MultilineInUse(to)) {
         /* Send as batch to supporting client */
-        char batchid[16];
+        char batchid[BATCH_REF_SIZE];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
-        ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
-                      NumNick(sptr), con_batch_seq(cli_connect(to))++);
+        batch_ref_make(batchid, sizeof(batchid), cli_yxx(cli_user(sptr)->server),
+                      cli_yxx(sptr), con_batch_seq(cli_connect(to))++);
 
         /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
          * client-only tags go on the BATCH + opener, not inner messages. */
@@ -2920,12 +2920,12 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
       if (MultilineInUse(to)) {
         /* Send as batch to supporting clients */
-        char batchid[16];
+        char batchid[BATCH_REF_SIZE];
         char timebuf[32];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
-        ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
-                      NumNick(sptr), con_batch_seq(cli_connect(to))++);
+        batch_ref_make(batchid, sizeof(batchid), cli_yxx(cli_user(sptr)->server),
+                      cli_yxx(sptr), con_batch_seq(cli_connect(to))++);
 
         /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
          * client-only tags go on the BATCH + opener. */
@@ -2974,12 +2974,12 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   } else if (acptr && MyConnect(acptr)) {
     /* Private message to local user */
     if (MultilineInUse(acptr)) {
-      char batchid[16];
+      char batchid[BATCH_REF_SIZE];
       char timebuf[32];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
 
-      ircd_snprintf(0, batchid, sizeof(batchid), "%s%s%u",
-                    NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
+      batch_ref_make(batchid, sizeof(batchid), cli_yxx(cli_user(sptr)->server),
+                    cli_yxx(sptr), con_batch_seq(cli_connect(acptr))++);
 
       /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
        * client-only tags go on the BATCH + opener. */

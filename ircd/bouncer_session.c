@@ -16083,9 +16083,9 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
    * IsUser(from); a vanished sender falls through to send_multiline_fallback,
    * which is server-source-safe (renders &me as the source, no cli_user deref). */
   if (IsUser(from) && MultilineInUse(alias)) {
-    char alias_batchid[16];
-    ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%s%u",
-                  NumNick(from), con_batch_seq(cli_connect(alias))++);
+    char alias_batchid[BATCH_REF_SIZE];
+    batch_ref_make(alias_batchid, sizeof(alias_batchid), cli_yxx(cli_user(from)->server),
+                  cli_yxx(from), con_batch_seq(cli_connect(alias))++);
 
     /* BATCH +id draft/multiline <target_nick> opener.  Per IRCv3
      * multiline spec, the opener uses the user as source so the
