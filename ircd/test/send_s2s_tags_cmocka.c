@@ -83,6 +83,29 @@ struct MsgBuf *msgq_make(struct Client *dest, const char *format, ...)
   return dummy;
 }
 void msgq_clean(struct MsgBuf *mb) { (void)mb; }
+/* send_buffer()'s deferred labeled batch (send.c, labeled_batch_defer())
+ * holds lines through these; no case here defers one, so none is reached. */
+void msgq_buf_data(struct MsgBuf *mb, const char **data, unsigned int *len)
+{
+  (void)mb;
+  *data = "";
+  *len = 0;
+  fail();
+}
+void *DoMalloc(size_t len, const char *type, const char *file, int line)
+{
+  (void)len; (void)type; (void)file; (void)line;
+  fail();
+  return NULL;
+}
+/* ...and its BATCH + line (send_batch_marker()), the same. */
+int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
+                  const char *format, ...)
+{
+  (void)dest; (void)buf; (void)buf_len; (void)format;
+  fail();
+  return 0;
+}
 void msgq_add(struct MsgQ *mq, struct MsgBuf *mb, int prio) { (void)mq; (void)mb; (void)prio; }
 void msgq_delete(struct MsgQ *mq, unsigned int length) { (void)mq; (void)length; }
 void dbuf_delete(struct DBuf *dyn, unsigned int length) { (void)dyn; (void)length; }

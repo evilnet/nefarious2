@@ -288,6 +288,9 @@ static void dealloc_connection(struct Connection* con)
     con_ws_hs_buf(con) = NULL;
     con_ws_hs_len(con) = 0;
   }
+  /* Lines held for a deferred labeled batch (a client freed in the
+   * middle of the command that deferred it) */
+  batch_hold_free(con);
   /* Pending partial outbound WS frame (socket is gone with it) */
   if (con_ws_txrem(con)) {
     MyFree(con_ws_txrem(con));

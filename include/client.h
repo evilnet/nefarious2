@@ -417,6 +417,9 @@ struct BatchFrame {
   char id[16];
   char parent[16];
 };
+/** A labeled-response batch whose BATCH + line waits until the answer is
+ * known to need it (send.c, labeled_batch_defer()). */
+struct BatchHold;
 /** A connection's open batches set aside (batch_save()/batch_restore()). */
 struct BatchSave {
   struct BatchFrame frames[BATCH_NEST_MAX];
@@ -510,6 +513,7 @@ struct Connection
   struct BatchFrame   con_batch[BATCH_NEST_MAX];
   unsigned char       con_batch_depth; /**< Frames in use in con_batch */
   unsigned char       con_batch_over;  /**< Starts past BATCH_NEST_MAX, each still to be ended */
+  struct BatchHold   *con_batch_hold;  /**< A deferred labeled batch's held lines, or NULL (send.c) */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
   unsigned int        con_token_auth; /**< draft/authtoken: service slots this connection's PASS may validate */
   char                con_client_tags[4096]; /**< Client-only tags (+tag=value) for TAGMSG relay (IRCv3: 4094 max) */
@@ -1122,6 +1126,8 @@ struct Client {
 /** Get the current batch reference ID. */
 /** Get the batch sequence number. */
 #define con_batch_seq(con)	((con)->con_batch_seq)
+/** Get the held lines of a connection's deferred labeled batch. */
+#define con_batch_hold(con)	((con)->con_batch_hold)
 #define con_token_auth(con)	((con)->con_token_auth)
 /** Get the client-only tags buffer for TAGMSG relay. */
 #define con_client_tags(con)	((con)->con_client_tags)

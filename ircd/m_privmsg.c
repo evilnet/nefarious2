@@ -161,10 +161,12 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
 
-  /* Multi-target PRIVMSG with echo-message produces multiple echoes;
-   * wrap them in a labeled-response batch if applicable */
-  if (count > 1 && feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG))
-    labeled_batch_start(sptr);
+  /* labeled-response: the answer to several targets is each target's
+   * lines -- an echo, an away reply, a refusal, a WARN -- known only as each
+   * is relayed: a deferred labeled batch, opened only if a second message
+   * comes; one message carries the label itself, none is ACKed. */
+  if (count > 1)
+    labeled_batch_defer(sptr);
 
   for (i = 0; i < count; ++i) {
     name = vector[i];
@@ -266,6 +268,10 @@ int mo_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
+
+  /* Several targets: one labeled answer (see m_privmsg). */
+  if (count > 1)
+    labeled_batch_defer(sptr);
 
   for (i = 0; i < count; ++i) {
     name = vector[i];

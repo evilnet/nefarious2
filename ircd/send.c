@@ -33,6 +33,7 @@
 #include "forwarded_label.h"
 #include "client.h"
 #include "hash.h"
+#include "ircd_alloc.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -1545,6 +1546,8 @@ void client_reconcile_sendq(struct Client *to)
   update_write(to);
 }
 
+static int batch_hold_take(struct Client *to, struct MsgBuf *mb);
+
 /** Try to send a buffer to a client, queueing it if needed.
  * @param[in,out] to Client to send message to.
  * @param[in] buf Message to send.
@@ -1601,6 +1604,9 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
           && CapOwnHas(to, cap_route_ctx.stc_skipcap))
         suppress_primary = 1;
     }
+    if (!suppress_primary && MyConnect(to) && con_batch_hold(cli_connect(to))
+        && batch_hold_take(to, buf))
+      return;   /* held for a deferred labeled batch (labeled_batch_defer()) */
     if (!suppress_primary) {
       msgq_add(&(cli_sendQ(to)), buf, prio);
       client_add_sendq(cli_connect(to), &send_queues);
@@ -4767,6 +4773,249 @@ void send_batch_marker(struct Client *to, char sign, const char *id,
   msgq_clean(mb);
 }
 
+/* ------------------------------------------------------------------ */
+/* A deferred labeled-response batch                                    */
+/* ------------------------------------------------------------------ */
+/*
+ * "If a response consists of more than one message, a batch MUST be used
+ * to group them into a single logical response" -- and a single message
+ * carries the label itself, none is an ACK.  Some commands cannot count
+ * their answer before sending it (PRIVMSG to several targets: an away
+ * reply, an echo, a refusal per target, each decided as its target is
+ * relayed).  For them labeled_batch_defer() opens the labeled batch's
+ * frame WITHOUT its BATCH + line: every line of the answer is formatted
+ * as inside it (tagged @batch=<id>, as any labeled batch's), and every
+ * line sent to the connection meanwhile is held, in order
+ * (batch_hold_take(), from send_buffer()).  The answer's logical messages
+ * are counted as they come: a line tagged with the frame is one, a batch
+ * nested in it is one (its BATCH + line; its BATCH - is not counted).
+ *  - a second one: the batch is needed -- its BATCH + line (with the
+ *    label) goes out, then the held lines, and the frame is an ordinary
+ *    one from there on (batch_hold_materialize());
+ *  - the frame ends with one: the held lines go out with the frame's tag
+ *    taken off, the first line of that message carrying the label in its
+ *    place -- a bare labeled line, or a nested batch whose BATCH + line
+ *    carries the label, as if no batch had been asked for;
+ *  - the frame ends with none: the held lines go out unchanged (lines that
+ *    are not the answer: a message delivered to oneself) and the label is
+ *    answered by ACK.
+ * The hold is bounded (BATCH_HOLD_MAX lines; past it the batch is opened
+ * -- a labeled batch around one message is legal).
+ */
+#define BATCH_HOLD_MAX 64
+
+struct BatchHold {
+  unsigned char depth;        /**< The deferred frame's depth (1-based) */
+  int logical;                /**< The answer's logical messages held so far */
+  int n;                      /**< Lines held */
+  char label[64];             /**< The label the answer is for */
+  char *lines[BATCH_HOLD_MAX];/**< The held lines, without their CR LF */
+};
+
+/** Where the tag region of @a line ends (its space), or NULL: no tags. */
+static const char *hold_tags_end(const char *line)
+{
+  return line[0] == '@' ? strchr(line, ' ') : NULL;
+}
+
+/** Whether @a line's tags hold "batch=<id>". */
+static int hold_tagged(const char *line, const char *id)
+{
+  const char *end = hold_tags_end(line), *p = line + 1;
+  size_t n = strlen(id);
+
+  if (!end)
+    return 0;
+  while (p < end) {
+    const char *semi = memchr(p, ';', end - p);
+    const char *tok_end = semi ? semi : end;
+
+    if ((size_t)(tok_end - p) == 6 + n && !strncmp(p, "batch=", 6)
+        && !strncmp(p + 6, id, n))
+      return 1;
+    p = tok_end + 1;
+  }
+  return 0;
+}
+
+/** Whether @a line is a BATCH - line. */
+static int hold_is_batch_end(const char *line)
+{
+  const char *p = hold_tags_end(line);
+
+  p = p ? p + 1 : line;
+  if (*p == ':' && !(p = strchr(p, ' ')))
+    return 0;
+  if (*p == ' ')
+    p++;
+  return !strncmp(p, MSG_BATCH_CMD " -", sizeof(MSG_BATCH_CMD " -") - 1);
+}
+
+/** Send @a line (no CR LF) to @a to as it is. */
+static void hold_send_line(struct Client *to, const char *line)
+{
+  struct MsgBuf *mb = msgq_make(cli_from(to), "%s", line);
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
+/** Send @a line with its "batch=<id>" tag replaced by @a repl ("" or NULL:
+ * dropped; a tag region left empty goes with it). */
+static void hold_send_retagged(struct Client *to, const char *line,
+                               const char *id, const char *repl)
+{
+  const char *end = hold_tags_end(line), *p = line + 1;
+  size_t n = strlen(id);
+  char tags[IRCV3_TAG_MAX + 1];
+  int pos = 0;
+
+  if (!end) {
+    hold_send_line(to, line);
+    return;
+  }
+  tags[0] = '\0';
+  while (p < end) {
+    const char *semi = memchr(p, ';', end - p);
+    const char *tok_end = semi ? semi : end;
+    int len = (int)(tok_end - p);
+
+    if ((size_t)len == 6 + n && !strncmp(p, "batch=", 6) && !strncmp(p + 6, id, n)) {
+      if (repl && repl[0])
+        pos += ircd_snprintf(NULL, tags + pos, sizeof(tags) - pos, "%s%s",
+                             pos ? ";" : "", repl);
+    } else
+      pos += ircd_snprintf(NULL, tags + pos, sizeof(tags) - pos, "%s%.*s",
+                           pos ? ";" : "", len, p);
+    if (pos >= (int)sizeof(tags) - 1)
+      pos = (int)sizeof(tags) - 1;
+    p = tok_end + 1;
+  }
+  {
+    struct MsgBuf *mb = pos
+        ? msgq_make(cli_from(to), "@%s %s", tags, end + 1)
+        : msgq_make(cli_from(to), "%s", end + 1);
+    send_buffer(to, mb, 0);
+    msgq_clean(mb);
+  }
+}
+
+/** Free what a deferred labeled batch holds (a connection freed with one,
+ * list.c). */
+void batch_hold_free(struct Connection *con)
+{
+  struct BatchHold *h;
+  int i;
+
+  if (!con || !(h = con_batch_hold(con)))
+    return;
+  con_batch_hold(con) = NULL;
+  for (i = 0; i < h->n; i++)
+    MyFree(h->lines[i]);
+  MyFree(h);
+}
+
+/** The deferred labeled batch of @a to is needed: its BATCH + line (the
+ * label on it), then every held line, and the frame is an ordinary one. */
+static void batch_hold_materialize(struct Client *to)
+{
+  struct Connection *con = cli_connect(to);
+  struct BatchHold *h = con_batch_hold(con);
+  struct BatchFrame *f;
+  int i;
+
+  if (!h)
+    return;
+  con_batch_hold(con) = NULL;   /* the lines below go to the queue */
+  f = &con->con_batch[h->depth - 1];
+  send_batch_marker(to, '+', f->id, f->parent, "labeled-response", h->label,
+                    NULL);
+  for (i = 0; i < h->n; i++) {
+    hold_send_line(to, h->lines[i]);
+    MyFree(h->lines[i]);
+  }
+  MyFree(h);
+}
+
+/** send_buffer(): a line for @a to while its labeled batch is deferred --
+ * held, in order, and the answer's messages counted.
+ * @return 1 when the line was taken (held, or sent by the batch opening). */
+static int batch_hold_take(struct Client *to, struct MsgBuf *mb)
+{
+  struct Connection *con = cli_connect(to);
+  struct BatchHold *h = con_batch_hold(con);
+  const char *data;
+  unsigned int len;
+  char *line;
+
+  if (!h || h->depth > con->con_batch_depth)
+    return 0;
+  msgq_buf_data(mb, &data, &len);
+  if (len >= 2 && data[len - 2] == '\r' && data[len - 1] == '\n')
+    len -= 2;
+  line = (char *)MyMalloc(len + 1);
+  memcpy(line, data, len);
+  line[len] = '\0';
+  if (hold_tagged(line, con->con_batch[h->depth - 1].id) && !hold_is_batch_end(line))
+    h->logical++;
+  h->lines[h->n++] = line;
+  if (h->logical >= 2 || h->n >= BATCH_HOLD_MAX)
+    batch_hold_materialize(to);
+  return 1;
+}
+
+/** The deferred frame of @a to ends with its batch never needed (one
+ * logical message, or none): the held lines go out without the frame's
+ * tag -- the first line of the one message carrying the label instead --
+ * and an answer of none is ACKed.  Then the frame itself is popped with
+ * nothing on the wire (batch_pop()). */
+static void batch_hold_resolve(struct Client *to)
+{
+  struct Connection *con = cli_connect(to);
+  struct BatchHold *h = con_batch_hold(con);
+  struct BatchFrame *f;
+  char labeled[IRCV3_TAG_MAX];
+  int i, first = 1;
+
+  if (!h)
+    return;
+  con_batch_hold(con) = NULL;
+  f = &con->con_batch[h->depth - 1];
+  /* The one message's first line: tagged as the frame's own start would
+   * have been -- its parent, and the label. */
+  if (f->parent[0])
+    ircd_snprintf(NULL, labeled, sizeof(labeled), "batch=%s;label=%s",
+                  f->parent, h->label);
+  else
+    ircd_snprintf(NULL, labeled, sizeof(labeled), "label=%s", h->label);
+  for (i = 0; i < h->n; i++) {
+    if (hold_tagged(h->lines[i], f->id)) {
+      char parent[sizeof(f->parent) + 6];
+      int opens = first && h->logical == 1 && !hold_is_batch_end(h->lines[i]);
+
+      ircd_snprintf(NULL, parent, sizeof(parent), "batch=%s", f->parent);
+      hold_send_retagged(to, h->lines[i], f->id,
+                         opens ? labeled : (f->parent[0] ? parent : NULL));
+      if (opens)
+        first = 0;
+    } else
+      hold_send_line(to, h->lines[i]);
+    MyFree(h->lines[i]);
+  }
+  if (!h->logical && LabeledResponseInUse(to)) {
+    char saved[sizeof(con->con_label)];
+    unsigned char responded = cli_label_responded(to);
+
+    memcpy(saved, cli_label(to), sizeof(saved));
+    ircd_strncpy(cli_label(to), h->label, sizeof(saved));
+    cli_label_responded(to) = 0;
+    send_labeled_ack(to);
+    memcpy(cli_label(to), saved, sizeof(saved));
+    cli_label_responded(to) = responded;
+  }
+  MyFree(h);
+}
+
 /**
  * Open a batch on @a to's current answer, nested in the innermost one open
  * (see the model above).  A pending, unanswered label of the line goes on
@@ -4822,7 +5071,9 @@ static void batch_pop(struct Client *to, int wire)
   if (!con->con_batch_depth)
     return;
   f = &con->con_batch[con->con_batch_depth - 1];
-  if (wire && f->id[0])
+  if (con_batch_hold(con) && con_batch_hold(con)->depth == con->con_batch_depth)
+    batch_hold_resolve(to);   /* a deferred labeled batch never opened */
+  else if (wire && f->id[0])
     send_batch_marker(to, '-', f->id, f->parent, NULL, NULL, NULL);
   con->con_batch_depth--;
   if (con->con_labeled_batch > con->con_batch_depth)
@@ -4880,6 +5131,8 @@ void batch_detach(struct Client *to, char *id, size_t idlen)
   }
   if (!con->con_batch_depth)
     return;
+  if (con_batch_hold(con))
+    batch_hold_materialize(to);   /* it outlives the line: it must exist */
   if (!con->con_batch[con->con_batch_depth - 1].parent[0])
     ircd_strncpy(id, con->con_batch[con->con_batch_depth - 1].id, idlen);
   con->con_batch_depth--;
@@ -4922,6 +5175,9 @@ void batch_suspend(struct Client *to)
 void batch_save(struct Client *to, struct BatchSave *save)
 {
   struct Connection *con = cli_connect(to);
+
+  if (con_batch_hold(con))
+    batch_hold_materialize(to);   /* set aside: it must exist on the wire */
 
   memcpy(save->frames, con->con_batch, sizeof(save->frames));
   save->depth = con->con_batch_depth;
@@ -5610,6 +5866,46 @@ int labeled_batch_start(struct Client *sptr)
     return 0;
   }
   cli_labeled_batch(sptr) = cli_connect(sptr)->con_batch_depth;
+  return 1;
+}
+
+/** Open a DEFERRED labeled-response batch for an answer that cannot be
+ * counted before it is sent (see "A deferred labeled-response batch"
+ * above): its frame opens with nothing on the wire, the label is taken,
+ * and the lines that follow are held until the answer needs the batch (a
+ * second message) or ends (one message: it carries the label; none: ACK).
+ * Ended as a labeled batch is (labeled_batch_end(), parse_client()).
+ * @param[in] sptr Local client whose labeled line is being answered.
+ * @return 1 if the frame was opened, 0 otherwise (no label pending, labels
+ *   not in use, or the depth cap: labeled_batch_start()'s answer then). */
+int labeled_batch_defer(struct Client *sptr)
+{
+  struct Connection *con;
+  struct BatchFrame *f;
+  struct BatchHold *h;
+
+  if (!MyConnect(sptr))
+    return 0;
+  if (!cli_label(sptr)[0] || cli_label_responded(sptr))
+    return 0;
+  if (!feature_bool(FEAT_CAP_labeled_response) || !LabeledResponseInUse(sptr))
+    return 0;
+  if (!feature_bool(FEAT_CAP_batch) || !batch_wire(sptr))
+    return 0;
+  con = cli_connect(sptr);
+  if (con_batch_hold(con) || con->con_batch_depth >= BATCH_NEST_MAX)
+    return labeled_batch_start(sptr);
+
+  f = &con->con_batch[con->con_batch_depth];
+  ircd_strncpy(f->parent, batch_current_id(sptr), sizeof(f->parent));
+  generate_batch_id(sptr, f->id, sizeof(f->id));
+  con->con_batch_depth++;
+  h = (struct BatchHold *)MyCalloc(1, sizeof(*h));
+  h->depth = con->con_batch_depth;
+  ircd_strncpy(h->label, cli_label(sptr), sizeof(h->label));
+  con_batch_hold(con) = h;
+  cli_label_responded(sptr) = 1;   /* the deferred batch has it */
+  cli_labeled_batch(sptr) = con->con_batch_depth;
   return 1;
 }
 

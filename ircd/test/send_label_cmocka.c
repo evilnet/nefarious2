@@ -95,7 +95,7 @@ struct MsgBuf {
   int refs;
 };
 
-#define MAX_SENT 16
+#define MAX_SENT 128
 static struct {
   struct Client *to;
   char text[8192];
@@ -123,6 +123,30 @@ struct MsgBuf *msgq_make(struct Client *dest, const char *format, ...)
   mb = msgq_vmake(dest, format, vl);
   va_end(vl);
   return mb;
+}
+
+void msgq_buf_data(struct MsgBuf *mb, const char **data, unsigned int *len)
+{
+  *data = mb->text;
+  *len = (unsigned int)strlen(mb->text);
+}
+
+/* ircd_alloc.c's, without its out-of-memory handler. */
+void *DoMalloc(size_t len, const char *type, const char *file, int line)
+{
+  void *p = malloc(len);
+
+  (void)type; (void)file; (void)line;
+  assert_non_null(p);
+  return p;
+}
+void *DoMallocZero(size_t len, const char *type, const char *file, int line)
+{
+  void *p = calloc(1, len);
+
+  (void)type; (void)file; (void)line;
+  assert_non_null(p);
+  return p;
 }
 
 void msgq_clean(struct MsgBuf *mb)
@@ -310,6 +334,7 @@ static int setup(void **state)
 static int teardown(void **state)
 {
   (void)state;
+  batch_hold_free(&asker_con);
   free(chan);
   chan = NULL;
   return 0;
@@ -959,6 +984,202 @@ static void test_batch_without_batch_cap(void **state)
   assert_int_equal(cli_connect(&other)->con_batch_depth, 0);
 }
 
+/* ---- a deferred labeled batch (labeled_batch_defer()) ---- */
+
+/** Lines in sent[] carrying a label tag. */
+static int labels_sent(void)
+{
+  int i, n = 0;
+
+  for (i = 0; i < n_sent; i++)
+    if (has_tag(sent[i].text, "label"))
+      n++;
+  return n;
+}
+
+/* An answer of no message: nothing goes out while the line runs; at its
+ * end the lines that are not the answer (a message delivered to oneself)
+ * go out as they were, then the label's ACK.  No BATCH line. */
+static void test_deferred_none_is_ack(void **state)
+{
+  char v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "D0");
+  assert_int_equal(labeled_batch_defer(&asker), 1);
+  assert_int_equal(cli_label_responded(&asker), 1);
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%s", &asker, "self");
+  assert_int_equal(n_sent, 0);                /* held */
+  batch_end_line(&asker);
+  send_labeled_ack(&asker);                   /* parse_client()'s: nothing */
+  assert_int_equal(n_sent, 2);
+  assert_string_equal(body_of(sent[0].text), ":nick!u@h.example PRIVMSG nick :self");
+  assert_false(has_tag(sent[0].text, "label"));
+  assert_false(has_tag(sent[0].text, "batch"));
+  assert_string_equal(body_of(sent[1].text), ":hub.test ACK");
+  assert_string_equal(tag_value(sent[1].text, "label", v, sizeof(v)), "D0");
+  assert_null(con_batch_hold(&asker_con));
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+}
+
+/* An answer of one line: it goes out bare, the label in place of the
+ * batch tag; no BATCH line, no ACK. */
+static void test_deferred_one_line_takes_label(void **state)
+{
+  char v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "D1");
+  labeled_batch_defer(&asker);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :the one reply", &asker);
+  assert_int_equal(n_sent, 0);
+  batch_end_line(&asker);
+  send_labeled_ack(&asker);
+  assert_int_equal(n_sent, 1);
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "D1");
+  assert_false(has_tag(sent[0].text, "batch"));
+  assert_true(has_tag(sent[0].text, "time"));       /* the other tags kept */
+  assert_string_equal(body_of(sent[0].text), ":hub.test NOTICE nick :the one reply");
+}
+
+/* A second message opens the batch at once: its BATCH + line with the
+ * label, the held lines, then the rest as they come, and BATCH - at the
+ * end; lines not in the answer keep their place, untagged. */
+static void test_deferred_second_message_opens_batch(void **state)
+{
+  char id[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "D2");
+  labeled_batch_defer(&asker);
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%s", &asker, "self");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :first", &asker);
+  assert_int_equal(n_sent, 0);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :second", &asker);
+  assert_int_equal(n_sent, 4);                       /* opened */
+  opened_id(sent[0].text, id, sizeof(id));
+  assert_true(legal_ref(id));
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "D2");
+  assert_non_null(strstr(sent[0].text, "BATCH +"));
+  assert_non_null(strstr(sent[0].text, " labeled-response"));
+  assert_false(has_tag(sent[1].text, "batch"));       /* the delivery */
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), id);
+  assert_string_equal(tag_value(sent[3].text, "batch", v, sizeof(v)), id);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :third", &asker);
+  assert_int_equal(n_sent, 5);                       /* no longer held */
+  batch_end_line(&asker);
+  send_labeled_ack(&asker);
+  assert_int_equal(n_sent, 6);
+  assert_non_null(strstr(sent[5].text, "BATCH -"));
+  assert_non_null(strstr(sent[5].text, id));
+  assert_int_equal(labels_sent(), 1);
+}
+
+/* An answer that is one typed batch (a metadata batch nested in the
+ * deferred one): as if no labeled batch had been asked for -- the label on
+ * the typed batch's BATCH + line, its BATCH - untagged, its lines tagged
+ * with it. */
+static void test_deferred_one_nested_batch(void **state)
+{
+  char inner[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "D3");
+  labeled_batch_defer(&asker);
+  send_batch_start(&asker, "metadata");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :inside", &asker);
+  send_batch_end(&asker);
+  assert_int_equal(n_sent, 0);
+  labeled_batch_end(&asker);
+  assert_int_equal(n_sent, 3);
+  opened_id(sent[0].text, inner, sizeof(inner));
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "D3");
+  assert_false(has_tag(sent[0].text, "batch"));
+  assert_string_equal(tag_value(sent[1].text, "batch", v, sizeof(v)), inner);
+  {
+    char want[64];
+    snprintf(want, sizeof(want), ":hub.test BATCH -%s", inner);
+    assert_string_equal(sent[2].text, want);       /* untagged */
+  }
+  assert_int_equal(labels_sent(), 1);
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+}
+
+/* A typed batch AND another line (a FAIL beside the metadata batch): two
+ * messages, so the labeled batch opens, the typed one nested in it. */
+static void test_deferred_nested_batch_and_line(void **state)
+{
+  char outer[32], inner[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "D4");
+  labeled_batch_defer(&asker);
+  send_batch_start(&asker, "metadata");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :inside", &asker);
+  send_batch_end(&asker);
+  assert_int_equal(n_sent, 0);
+  send_fail(&asker, "METADATA", "KEY_INVALID", "k", "Invalid key");
+  assert_int_equal(n_sent, 5);
+  opened_id(sent[0].text, outer, sizeof(outer));
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "D4");
+  opened_id(sent[1].text, inner, sizeof(inner));
+  assert_string_equal(tag_value(sent[1].text, "batch", v, sizeof(v)), outer);
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), inner);
+  assert_string_equal(tag_value(sent[3].text, "batch", v, sizeof(v)), outer);
+  assert_string_equal(tag_value(sent[4].text, "batch", v, sizeof(v)), outer);
+  assert_non_null(strstr(sent[4].text, "FAIL METADATA KEY_INVALID"));
+  batch_end_line(&asker);
+  assert_int_equal(n_sent, 6);
+  assert_non_null(strstr(sent[5].text, outer));
+  assert_int_equal(labels_sent(), 1);
+}
+
+/* The hold is bounded: past BATCH_HOLD_MAX lines the batch is opened (a
+ * labeled batch around one message is legal), nothing is lost, the order
+ * is kept. */
+static void test_deferred_hold_bounded(void **state)
+{
+  int i;
+  char v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "D5");
+  labeled_batch_defer(&asker);
+  for (i = 0; i < 70; i++)
+    sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%d", &asker, i);
+  assert_int_equal(n_sent, 1 + 70);
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "D5");
+  for (i = 0; i < 70; i++) {
+    char want[64];
+    snprintf(want, sizeof(want), ":nick!u@h.example PRIVMSG nick :%d", i);
+    assert_string_equal(body_of(sent[1 + i].text), want);
+  }
+  batch_end_line(&asker);
+  assert_non_null(strstr(sent[71].text, "BATCH -"));
+}
+
+/* A client that has not negotiated labels, or no label pending: nothing
+ * deferred, nothing held. */
+static void test_deferred_needs_a_label(void **state)
+{
+  (void)state;
+  reset_sent();
+  assert_int_equal(labeled_batch_defer(&asker), 0);
+  label_pending(&asker, "D6");
+  FlagClr(cli_active_own(&asker), CAP_LABELEDRESP);
+  assert_int_equal(labeled_batch_defer(&asker), 0);
+  assert_null(con_batch_hold(&asker_con));
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :x", &asker);
+  assert_int_equal(n_sent, 1);
+}
+
+
 /* The fan-out's own rules decide whether the asker gets a copy at all:
  * a zombie member, a channel its profile hides, a skip mask that rules
  * it out -- no copy, and the label stays pending for the ACK. */
@@ -1048,6 +1269,13 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_fwd_batch_override_consumed, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_none_is_ack, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_one_line_takes_label, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_second_message_opens_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_one_nested_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_nested_batch_and_line, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_hold_bounded, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_deferred_needs_a_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_takes_no_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),

@@ -94,6 +94,21 @@ struct MsgBuf *msgq_make(struct Client *dest, const char *format, ...)
   return mb;
 }
 
+/* send_buffer()'s deferred labeled batch (send.c, labeled_batch_defer())
+ * holds lines through these; no case here defers one, so none is reached. */
+void msgq_buf_data(struct MsgBuf *mb, const char **data, unsigned int *len)
+{
+  (void)mb;
+  *data = "";
+  *len = 0;
+  fail();
+}
+void *DoMalloc(size_t len, const char *type, const char *file, int line)
+{
+  (void)len; (void)type; (void)file; (void)line;
+  fail();
+  return NULL;
+}
 void msgq_clean(struct MsgBuf *mb)
 {
   if (mb && --mb->refs == 0)

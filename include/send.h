@@ -535,6 +535,16 @@ extern void send_labeled_ack(struct Client *to);
  */
 extern int labeled_batch_start(struct Client *sptr);
 
+/* A labeled-response batch for an answer not countable before it is sent
+ * (PRIVMSG/NOTICE to several targets): no BATCH + line until a second
+ * message needs it; one message carries the label itself, none is ACKed.
+ * Ended like labeled_batch_start()'s.  1 if opened. */
+extern int labeled_batch_defer(struct Client *sptr);
+
+/* Free a connection's held deferred-batch lines (list.c). */
+struct Connection;
+extern void batch_hold_free(struct Connection *con);
+
 /* End a labeled-response batch started by labeled_batch_start(). */
 extern void labeled_batch_end(struct Client *sptr);
 

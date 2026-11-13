@@ -287,6 +287,13 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
 
+  /* labeled-response: the answer to several targets is each target's
+   * lines (an echo, a refusal, a WARN), known only as each is relayed: a
+   * deferred labeled batch, opened only if a second message comes; one
+   * message carries the label itself, none is ACKed. */
+  if (count > 1)
+    labeled_batch_defer(sptr);
+
   for (i = 0; i < count; ++i) {
     name = vector[i];
     /*
@@ -402,6 +409,13 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
+
+  /* labeled-response: the answer to several targets is each target's
+   * lines (an echo, a refusal, a WARN), known only as each is relayed: a
+   * deferred labeled batch, opened only if a second message comes; one
+   * message carries the label itself, none is ACKed. */
+  if (count > 1)
+    labeled_batch_defer(sptr);
 
   for (i = 0; i < count; ++i) {
     name = vector[i];
