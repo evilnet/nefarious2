@@ -21,9 +21,16 @@
  * (BOUNCE_ORPHAN_WAIT_MAX 10) plus its grace (2) and a margin for
  * one-second timers. */
 #define INPUT_HOLD_MAX      15
-/** The absolute ceiling: past it the input is released whatever the sweep
- * did (a sweep that never runs cannot hold a client's input for good). */
+/** The ceiling: the input is released whatever the sweep did once
+ * INPUT_HOLD_CEILING - INPUT_HOLD_MAX seconds have passed since the sweep
+ * was asked for (a sweep that never runs cannot hold a client's input for
+ * good).  Measured from the request, not from the hold's start: a hold
+ * first looked at past its bound (after a main-loop stall) always asks
+ * for a pass and waits for it first -- the I/O of a loop iteration runs
+ * before its timers, so a release at that first look would parse the
+ * lines before a pass already due. */
 #define INPUT_HOLD_CEILING  25
+#define INPUT_HOLD_AFTER_ASK  (INPUT_HOLD_CEILING - INPUT_HOLD_MAX)
 /** How long at most the doubled receive allowance outlives the release of
  * a hold (less once the queue is back under the usual cap). */
 #define INPUT_HOLD_GRACE    15

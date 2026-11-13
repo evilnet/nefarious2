@@ -24,9 +24,12 @@
  * - An orphan: held from the first time it is asked (EV_BEGAN).  Past
  *   INPUT_HOLD_MAX the orphan sweep is asked to run now (ASK_SWEEP, once,
  *   with the sweep count then); still held until a sweep has run since,
- *   and only then, if it is still an orphan, released (EV_SWEPT).  Past
- *   INPUT_HOLD_CEILING it is released whatever happened (EV_CEILING).  A
- *   released orphan is not held again until it stops being one.
+ *   and only then, if it is still an orphan, released (EV_SWEPT).  A hold
+ *   first looked at long past the bound (a stall) asks all the same: the
+ *   request always comes first.  INPUT_HOLD_AFTER_ASK seconds after the
+ *   request it is released whatever happened (EV_CEILING): at the latest
+ *   INPUT_HOLD_CEILING seconds into a hold looked at on time.  A released
+ *   orphan is not held again until it stops being one.
  *
  * @param[in,out] h The connection's hold.
  * @param[in] orphan Non-zero while the connection is a holdable orphan (a
@@ -60,18 +63,22 @@ enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
     *ev = INPUT_HOLD_EV_BEGAN;
     return INPUT_HOLD_WAIT;
   }
-  if (now - h->since > INPUT_HOLD_CEILING) {
-    *ev = INPUT_HOLD_EV_CEILING;
-  } else if (h->asked && sweeps != h->gen) {
-    *ev = INPUT_HOLD_EV_SWEPT;
-  } else if (h->asked) {
+  if (!h->asked) {
+    /* Past the bound -- however far past, after a stall -- the sweep is
+     * asked for first, and the lines wait for its pass. */
+    if (now - h->since > INPUT_HOLD_MAX) {
+      h->asked = now;
+      h->gen = sweeps;
+      *ev = INPUT_HOLD_EV_ASKED;
+      return INPUT_HOLD_ASK_SWEEP;
+    }
     return INPUT_HOLD_WAIT;
-  } else if (now - h->since > INPUT_HOLD_MAX) {
-    h->asked = now;
-    h->gen = sweeps;
-    *ev = INPUT_HOLD_EV_ASKED;
-    return INPUT_HOLD_ASK_SWEEP;
-  } else
+  }
+  if (sweeps != h->gen)
+    *ev = INPUT_HOLD_EV_SWEPT;
+  else if (now - h->asked > INPUT_HOLD_AFTER_ASK)
+    *ev = INPUT_HOLD_EV_CEILING;
+  else
     return INPUT_HOLD_WAIT;
   /* released while still an orphan */
   h->released = 1;

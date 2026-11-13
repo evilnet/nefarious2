@@ -1321,9 +1321,11 @@ static int ws_frag_feed(struct Client *cptr, int opcode, int is_fin,
  * Bounded (the pure rules: input_hold.c): at INPUT_HOLD_MAX the orphan
  * sweep is asked to run at once (never inline) and the lines wait for that
  * pass; only if the device is still an orphan after it are they parsed as
- * an orphan's (the speak check refuses it); at INPUT_HOLD_CEILING they are
- * parsed whatever happened.  The queue may grow to twice the usual cap
- * while held and for at most INPUT_HOLD_GRACE seconds after the release
+ * an orphan's (the speak check refuses it); INPUT_HOLD_AFTER_ASK seconds
+ * after that request (the ceiling) they are parsed whatever happened -- the
+ * request always comes first, however late the hold is looked at.  The
+ * queue may grow to twice the usual cap while held and for at most
+ * INPUT_HOLD_GRACE seconds after the release
  * (less once it is back under the usual cap), once per hold; then the
  * usual cap applies whatever the backlog -- a time limit, not "until
  * drained", which a client that keeps sending would keep for good, nor

@@ -97,24 +97,61 @@ static void bound_then_resolved(void **state)
   assert_int_equal(step(&h, 0, t, 1, INPUT_HOLD_EV_ENDED), INPUT_HOLD_PARSE);
 }
 
-/** A sweep that never runs: the ceiling releases it. */
+/** A sweep that never runs: the ceiling releases it, INPUT_HOLD_AFTER_ASK
+ * after the request (INPUT_HOLD_CEILING into a hold looked at on time). */
 static void ceiling(void **state)
 {
   struct InputHold h;
+  time_t ask = T0 + INPUT_HOLD_MAX + 1;
 
   memset(&h, 0, sizeof h);
   step(&h, 1, T0, 4, INPUT_HOLD_EV_BEGAN);
-  step(&h, 1, T0 + INPUT_HOLD_MAX + 1, 4, INPUT_HOLD_EV_ASKED);
-  assert_int_equal(step(&h, 1, T0 + INPUT_HOLD_CEILING, 4, INPUT_HOLD_EV_NONE),
+  step(&h, 1, ask, 4, INPUT_HOLD_EV_ASKED);
+  assert_int_equal(step(&h, 1, ask + INPUT_HOLD_AFTER_ASK, 4, INPUT_HOLD_EV_NONE),
                    INPUT_HOLD_WAIT);
-  assert_int_equal(step(&h, 1, T0 + INPUT_HOLD_CEILING + 1, 4,
+  assert_int_equal(step(&h, 1, ask + INPUT_HOLD_AFTER_ASK + 1, 4,
                         INPUT_HOLD_EV_CEILING), INPUT_HOLD_PARSE);
   assert_int_equal(h.released, 1);
-  /* a stall past both at the first look after the bound: the ceiling */
-  memset(&h, 0, sizeof h);
-  step(&h, 1, T0, 4, INPUT_HOLD_EV_BEGAN);
-  assert_int_equal(step(&h, 1, T0 + INPUT_HOLD_CEILING + 5, 4,
-                        INPUT_HOLD_EV_CEILING), INPUT_HOLD_PARSE);
+  assert_true(ask + INPUT_HOLD_AFTER_ASK + 1 - T0 <= INPUT_HOLD_CEILING + 2);
+}
+
+/** A stall: the first look after the hold began comes long past the bound
+ * and past the ceiling (the server was stopped).  The sweep is asked for
+ * all the same, and the lines wait for its pass -- the I/O of a loop runs
+ * before its timers, so releasing at this look would parse them before a
+ * pass already due.  Then the pass resolves it (an end), or leaves an
+ * orphan (released, SWEPT), or never runs (the ceiling, from the
+ * request). */
+static void long_stall_asks_first(void **state)
+{
+  static const int stalls[] = { INPUT_HOLD_CEILING + 1, INPUT_HOLD_CEILING + 5,
+                                INPUT_HOLD_CEILING * 4 };
+  size_t i;
+
+  for (i = 0; i < sizeof(stalls) / sizeof(stalls[0]); i++) {
+    struct InputHold h;
+    time_t t = T0 + stalls[i];
+
+    /* the pass leaves an orphan */
+    memset(&h, 0, sizeof h);
+    step(&h, 1, T0, 9, INPUT_HOLD_EV_BEGAN);
+    assert_int_equal(step(&h, 1, t, 9, INPUT_HOLD_EV_ASKED), INPUT_HOLD_ASK_SWEEP);
+    assert_int_equal(step(&h, 1, t, 9, INPUT_HOLD_EV_NONE), INPUT_HOLD_WAIT);
+    assert_int_equal(step(&h, 1, t, 10, INPUT_HOLD_EV_SWEPT), INPUT_HOLD_PARSE);
+    /* the pass resolves it */
+    memset(&h, 0, sizeof h);
+    step(&h, 1, T0, 9, INPUT_HOLD_EV_BEGAN);
+    step(&h, 1, t, 9, INPUT_HOLD_EV_ASKED);
+    assert_int_equal(step(&h, 0, t, 10, INPUT_HOLD_EV_ENDED), INPUT_HOLD_PARSE);
+    /* no pass ever: the ceiling, from the request */
+    memset(&h, 0, sizeof h);
+    step(&h, 1, T0, 9, INPUT_HOLD_EV_BEGAN);
+    step(&h, 1, t, 9, INPUT_HOLD_EV_ASKED);
+    assert_int_equal(step(&h, 1, t + INPUT_HOLD_AFTER_ASK, 9, INPUT_HOLD_EV_NONE),
+                     INPUT_HOLD_WAIT);
+    assert_int_equal(step(&h, 1, t + INPUT_HOLD_AFTER_ASK + 1, 9,
+                          INPUT_HOLD_EV_CEILING), INPUT_HOLD_PARSE);
+  }
 }
 
 /** The queue's cap: twice while held and after the release until the
@@ -145,10 +182,11 @@ static void cap(void **state)
   /* released while still an orphan: the allowance, then the usual cap */
   memset(&h, 0, sizeof h);
   step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
-  step(&h, 1, T0 + INPUT_HOLD_CEILING + 1, 0, INPUT_HOLD_EV_CEILING);
-  assert_int_equal(input_hold_cap(&h, c, 1500, T0 + INPUT_HOLD_CEILING + 2), 2 * c);
+  step(&h, 1, T0 + INPUT_HOLD_MAX + 1, 0, INPUT_HOLD_EV_ASKED);
+  step(&h, 1, T0 + INPUT_HOLD_MAX + 2, 1, INPUT_HOLD_EV_SWEPT);
+  assert_int_equal(input_hold_cap(&h, c, 1500, T0 + INPUT_HOLD_MAX + 3), 2 * c);
   assert_int_equal(input_hold_cap(&h, c, 1500,
-                                  T0 + INPUT_HOLD_CEILING + 1 + INPUT_HOLD_GRACE), c);
+                                  T0 + INPUT_HOLD_MAX + 2 + INPUT_HOLD_GRACE), c);
 }
 
 /** input_hold_clear(): a closed socket forgets the hold and allowance. */
@@ -184,7 +222,7 @@ static void ping_due(void **state)
   assert_int_equal(input_hold_ping_due(&h, T0 + 2 * INPUT_HOLD_PING), 1);
   /* polled every 2 s, as the process timer does, to the ceiling: never a
    * gap over INPUT_HOLD_PING + 2 */
-  for (t = T0 + 2 * INPUT_HOLD_PING, sent = 0; t <= T0 + INPUT_HOLD_CEILING; t += 2) {
+  for (t = T0 + 2 * INPUT_HOLD_PING, sent = 0; t <= T0 + INPUT_HOLD_CEILING + 2; t += 2) {
     enum input_hold_event ev;
     enum input_hold_action a = input_hold_step(&h, 1, t, 0, &ev);
 
@@ -195,9 +233,10 @@ static void ping_due(void **state)
     assert_true(t - h.pinged <= INPUT_HOLD_PING + 2);
   }
   assert_true(sent >= 3);
-  /* released at the ceiling: nothing more */
-  step(&h, 1, T0 + INPUT_HOLD_CEILING + 1, 0, INPUT_HOLD_EV_CEILING);
-  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_CEILING + 10), 0);
+  /* released at the ceiling (from the request): nothing more */
+  assert_true(h.asked != 0);
+  step(&h, 1, h.asked + INPUT_HOLD_AFTER_ASK + 1, 0, INPUT_HOLD_EV_CEILING);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_CEILING + 20), 0);
   /* a hold that ends: nothing after; a new hold counts from its start */
   memset(&h, 0, sizeof h);
   step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
@@ -246,6 +285,7 @@ int main(void)
     cmocka_unit_test(bound_asks_the_sweep),
     cmocka_unit_test(bound_then_resolved),
     cmocka_unit_test(ceiling),
+    cmocka_unit_test(long_stall_asks_first),
     cmocka_unit_test(cap),
     cmocka_unit_test(cleared),
     cmocka_unit_test(ping_due),
