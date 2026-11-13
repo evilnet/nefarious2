@@ -1682,7 +1682,9 @@ void relay_channel_statusmsg(struct Client *sptr, char status, const char *name,
  *
  * Handled as server_relay_channel_message handles a channel PRIVMSG (an
  * alias sender taken as its primary, the origin's msgid and time, the
- * client-only tags), never stored, and delivered to local members with
+ * client-only tags) -- except that a refusal (404) answers the device
+ * that sent the line, not its primary -- never stored, and delivered to
+ * local members with
  * the status as ":<from> PRIVMSG <status><chan> :<text less the lead>";
  * relayed on unchanged -- the lead in the text, ,P re-armed toward
  * IRCv3-aware links, the bare line toward legacy ones.
@@ -1698,6 +1700,7 @@ int server_relay_channel_statusmsg(struct Client *sptr, const char *name,
 {
   struct Channel *chptr;
   struct Client *one;
+  struct Client *sender;
   const char *client_tags;
   const char *ptext;
   const char *wcmd, *wtok;
@@ -1724,15 +1727,29 @@ int server_relay_channel_statusmsg(struct Client *sptr, const char *name,
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && !cli_s2s_msgid(one)[0])
     s2s_mint_link_event(one);
 
-  /* Alias source rewriting (see server_relay_channel_message) */
-  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
-    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
-    if (!MyUser(cli_user(sptr)->alias_primary))
-      sendcmdto_set_alias_source(sptr);
+  /* A device's line is judged and relayed as its primary's (see
+   * server_relay_channel_message), but a refusal answers the client that
+   * sent the line -- the device, back along the link it came from, as the
+   * wall commands answer it (ms_wallchops): the primary never sent it.
+   * An alias reaches us only from a link that knows it (BX C), so the
+   * answer never names an alias toward a legacy link.  The alias source
+   * is armed only once the line is accepted. */
+  sender = sptr;
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
     sptr = cli_user(sptr)->alias_primary;
+
+  if (!server_relay_channel_allowed(sptr, chptr, 0)) {
+    send_reply(sender, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return 1;
   }
 
-  if (server_relay_channel_allowed(sptr, chptr, 0)) {
+  if (sender != sptr) {
+    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
+    if (!MyUser(sptr))
+      sendcmdto_set_alias_source(sender);
+  }
+
+  {
     char relay_msgid[64] = "";
 
     if (feature_bool(FEAT_MSGID)) {
@@ -1753,8 +1770,6 @@ int server_relay_channel_statusmsg(struct Client *sptr, const char *name,
 
     sendcmdto_set_client_msgid(NULL);
   }
-  else
-    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
   return 1;
 }
 
