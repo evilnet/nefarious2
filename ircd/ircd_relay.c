@@ -1234,6 +1234,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
 {
   struct Channel* chptr;
   struct Client *one;
+  struct Client *sender;
   const char *client_tags;
   const char *stext;
   char storebuf[BUFSIZE];
@@ -1266,16 +1267,19 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
     s2s_mint_link_event(one);
 
-  /* Alias source rewriting: use primary's P10 numeric for S2S.
-   * The alias numeric (from BX C) is only known to BX-aware servers.
-   * The primary numeric (from N token) is universally known.
-   * Keep 'one' = alias's server link for echo suppression. */
-  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
-    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
-    if (!MyUser(cli_user(sptr)->alias_primary))
-      sendcmdto_set_alias_source(sptr);
+  /* A device's line is judged and relayed as its primary's: the
+   * primary's P10 numeric for S2S (the alias numeric, from BX C, is known
+   * only to BX-aware servers; the primary's, from N, to every server),
+   * 'one' kept as the alias's server link for echo suppression.  But a
+   * refusal answers the client that sent the line -- the device, back
+   * along the link it came from, as the wall commands answer it
+   * (ms_wallchops): the primary never sent it.  An alias reaches us only
+   * from a link that knows it (BX C), so the answer never names an alias
+   * toward a legacy link (bouncer invariant #10).  The alias overrides
+   * are armed only once the line is accepted. */
+  sender = sptr;
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
     sptr = cli_user(sptr)->alias_primary;
-  }
 
   /* The copy this server stores is the line its clients are delivered
    * (relay_store_cut): a message from a legacy origin -- or a fork
@@ -1285,7 +1289,16 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
   stext = relay_store_cut(sptr, MSG_PRIVATE, strlen(chptr->chname), text,
                           storebuf, sizeof(storebuf));
 
-  if (server_relay_channel_allowed(sptr, chptr, 0)) {
+  if (!server_relay_channel_allowed(sptr, chptr, 0)) {
+    send_reply(sender, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return;
+  }
+  if (sender != sptr) {
+    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
+    if (!MyUser(sptr))
+      sendcmdto_set_alias_source(sender);
+  }
+  {
     /* Set client msgid override so local clients get msgid tag.
      * Use S2S msgid if available, otherwise generate one. */
     char relay_msgid[64] = "";
@@ -1338,8 +1351,6 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
     }
 #endif
   }
-  else
-    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
 }
 
 /** Relay a notice to a channel.

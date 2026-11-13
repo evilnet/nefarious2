@@ -3333,8 +3333,8 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
        * Refused, the batch goes nowhere from here -- not relayed on (the
        * route is emptied before the start line goes out), not delivered,
        * stored or pushed -- and the sender is answered as a single line's
-       * is.  The S2S batch carries no NOTICE bit, so it is answered as a
-       * PRIVMSG.  An older origin's batch and a desync are what this
+       * is -- the device that sent it, not its primary.  The S2S batch
+       * carries no NOTICE bit, so it is answered as a PRIVMSG.  An older origin's batch and a desync are what this
        * catches: an origin that checks refuses first. */
       {
         struct Channel *chptr = FindChannel(target);
@@ -3344,7 +3344,10 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
         if (chptr && !server_relay_channel_allowed(face, chptr, 0)) {
           batch->refused = 1;
           batch->route_count = 0;
-          send_reply(face, ERR_CANNOTSENDTOCHAN, chptr->chname);
+          /* The client that sent the batch -- a device, back along the
+           * link it came from, not its primary, which never sent it (as
+           * server_relay_channel_message answers). */
+          send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
         }
       }
     }
