@@ -2690,6 +2690,41 @@ static void prereg_clear_keys(void *arg, const struct md_stamp *st,
   prereg_clear_memory(c->cptr, c->account, each, each_arg);
 }
 
+/** No store (b2): the session's keys are what its connections hold in
+ * memory -- the merging client's own, and for a device its primary's (a
+ * device attaching here loaded nothing: metadata_load_account() needs the
+ * store). */
+static struct Client *nostore_holder(struct Client *cptr, const char *key)
+{
+  struct Client *p = IsBouncerAlias(cptr) ? cli_alias_primary(cptr) : NULL;
+
+  if (memory_entry(cptr, key) || !p)
+    return cptr;
+  return p;
+}
+
+static int nostore_row(void *arg, const char *key, struct md_version *out,
+                       char *valbuf, size_t vlen)
+{
+  struct prereg_merge_ctx *c = arg;
+
+  return memory_row(nostore_holder(c->cptr, key), key, out, valbuf, vlen);
+}
+
+static void nostore_clear_keys(void *arg, const struct md_stamp *st,
+                               void (*each)(void *each_arg, const char *key,
+                                            int vis),
+                               void *each_arg)
+{
+  struct prereg_merge_ctx *c = arg;
+  struct Client *p = IsBouncerAlias(c->cptr) ? cli_alias_primary(c->cptr) : NULL;
+
+  (void)st;   /* no store: no floor */
+  prereg_clear_memory(c->cptr, NULL, each, each_arg);
+  if (p && p != c->cptr)
+    prereg_clear_memory(p, NULL, each, each_arg);
+}
+
 static int prereg_no_row_is_state(void *arg, const char *key)
 {
   (void)arg;
@@ -2733,9 +2768,12 @@ static void metadata_prereg_merge(struct Client *cptr, int on_network)
     prereg_row, prereg_store, prereg_apply, prereg_send, prereg_refuse,
     prereg_no_row_is_state, prereg_clear_keys
   };
+  /* No store (b2): rows read from the session's memory, nothing stored,
+   * a CLEAR deletes what that memory holds -- as a CLEAR after
+   * registration deletes the requester's memory's keys there. */
   static const struct md_prereg_ops nostore_ops = {
-    NULL, NULL, prereg_apply, prereg_send, prereg_refuse,
-    prereg_no_row_is_state, NULL
+    nostore_row, NULL, prereg_apply, prereg_send, prereg_refuse,
+    prereg_no_row_is_state, nostore_clear_keys
   };
   struct MetadataPrereg *list = cli_metadata_prereg(cptr);
   struct prereg_merge_ctx c;
