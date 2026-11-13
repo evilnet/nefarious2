@@ -1229,6 +1229,26 @@ static void test_floor_no_loop(void **state)
   assert_int_equal(1, md_lww_take(&row, &a));         /* the later floor's tombstone wins */
 }
 
+/* A delete is announced as the row it replaces was visible: a tombstone
+ * carries none ("D"), and an unset need not name it. */
+static void test_notify_vis(void **state)
+{
+  struct md_version priv, pub, tomb, set;
+
+  (void)state;
+  memset(&priv, 0, sizeof(priv));
+  priv.value = "v"; priv.vlen = 1; priv.vis = 1;
+  pub = priv; pub.vis = 0;
+  memset(&tomb, 0, sizeof(tomb));
+  tomb.tombstone = 1;
+  set = pub; set.vis = 0;
+  assert_int_equal(1, md_notify_vis(&priv, &tomb, 0));   /* private row deleted: private */
+  assert_int_equal(0, md_notify_vis(&pub, &tomb, 1));    /* public row deleted: public */
+  assert_int_equal(0, md_notify_vis(NULL, &tomb, 0));    /* no row: the write's */
+  assert_int_equal(0, md_notify_vis(&tomb, &tomb, 0));   /* already deleted: the write's */
+  assert_int_equal(0, md_notify_vis(&priv, &set, 0));    /* a live write: its own */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1237,6 +1257,7 @@ int main(void)
     cmocka_unit_test(test_row_unchanged),
     cmocka_unit_test(test_local_write_unchanged),
     cmocka_unit_test(test_clear_floor),
+    cmocka_unit_test(test_notify_vis),
     cmocka_unit_test(test_floor_margin),
     cmocka_unit_test(test_floor_no_loop),
     cmocka_unit_test(test_stamp_parse_rejects),

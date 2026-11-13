@@ -140,14 +140,20 @@ static void merge_one(struct merge_state *m, const char *key,
      * to the same row, so it takes the write: a store that keeps its own
      * row (0) disagrees with what it was read as, and the write is lost
      * -- reported like a store error, as a SET's failed write is. */
-    rc = ops->store(m->ctx, key, w);
-    if (rc != 1) {
+    int src = ops->store(m->ctx, key, w);
+
+    if (src != 1) {
       ops->refuse(m->ctx, key, MD_PREREG_ERROR);
       return;
     }
   }
   if (v == MD_PREREG_APPLY) {
-    ops->apply(m->ctx, key, w);
+    /* A delete is announced as the row it replaces was visible
+     * (md_notify_vis()); the row sent and stored are the write's. */
+    struct md_version told = *w;
+
+    told.vis = md_notify_vis(rc == 0 ? &stored : NULL, w, w->vis);
+    ops->apply(m->ctx, key, &told);
     m->applied++;
   }
   ops->send(m->ctx, key, w);

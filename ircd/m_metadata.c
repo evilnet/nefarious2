@@ -2019,16 +2019,22 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
     struct md_stamp floor;
 
     if (metadata_floor_converts(account_name, wire_key, &in, &floor)) {
-      struct md_version t;
+      struct md_version t, old;
+      char oldbuf[METADATA_VALUE_LEN];
+      int old_rc = metadata_account_get_version(account_name, wire_key, &old,
+                                                oldbuf, sizeof(oldbuf));
+      int nvis;
 
       t.st = floor;
       t.tombstone = 1;
       t.vis = vis;
       t.value = NULL;
       t.vlen = 0;
+      /* Announced as the row it replaces was visible (md_notify_vis()). */
+      nvis = md_notify_vis(old_rc == 0 ? &old : NULL, &t, vis);
       merge_rc = metadata_account_merge(account_name, wire_key, &t);
       if (merge_rc == 1 || merge_rc == 2) {
-        metadata_account_apply_memory_ex(account_name, wire_key, NULL, vis,
+        metadata_account_apply_memory_ex(account_name, wire_key, NULL, nvis,
                                          NULL, NULL, merge_rc == 1);
         metadata_emit_versioned(&me, NULL, NULL, account_name, wire_key, &t);
       } else if (merge_rc == 0) {
@@ -2061,6 +2067,18 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
       metadata_emit_versioned(sptr, NULL, cptr, account_name, wire_key, &in);
       return 0;
     }
+  }
+
+  /* A tombstone carries no visibility ("D": md_flags_parse() leaves it
+   * public): its delete is announced as the row it replaces was visible --
+   * a private key's only to the account's own sessions (md_notify_vis()). */
+  if (tombstone) {
+    struct md_version old;
+    char oldbuf[METADATA_VALUE_LEN];
+
+    if (metadata_account_get_version(account_name, wire_key, &old, oldbuf,
+                                     sizeof(oldbuf)) == 0)
+      vis = md_notify_vis(&old, &in, vis);
   }
 
   merge_rc = metadata_account_merge(account_name, wire_key, &in);

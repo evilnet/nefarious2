@@ -208,6 +208,14 @@ int md_row_unchanged(const struct md_version *local,
   return md_version_same_content(local, in);
 }
 
+int md_notify_vis(const struct md_version *old, const struct md_version *in,
+                  int vis)
+{
+  if (in && in->tombstone && old && !old->tombstone)
+    return old->vis;
+  return vis;
+}
+
 int md_floor_in_force(const struct md_stamp *floor, uint64_t now_s,
                       uint64_t ttl_s)
 {

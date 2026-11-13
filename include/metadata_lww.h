@@ -142,6 +142,16 @@ extern int md_version_same_content(const struct md_version *a,
 extern int md_row_unchanged(const struct md_version *local,
                             const struct md_version *in);
 
+/** The visibility a delete is announced with: the row it replaces (@a old,
+ * NULL: no row), not the tombstone's -- a tombstone carries no visibility
+ * on the wire ("D"), and a client's unset need not name it.  A private
+ * key's delete is told only to the account's own sessions, a public one's
+ * as its value was.  For a live write, or a delete with no live row
+ * before it (which nobody is told of anyway), @a vis.
+ * @return the visibility to scope the notification by. */
+extern int md_notify_vis(const struct md_version *old,
+                         const struct md_version *in, int vis);
+
 /** The CLEAR floor (owner, 2026-11-13): an account cleared at Tc keeps
  * "cleared at Tc" in its store, and an incoming live row older than Tc is
  * taken as a tombstone at Tc instead -- a value written before the CLEAR,

@@ -184,6 +184,7 @@ int metadata_account_write(struct Client *src, const char *account,
   struct md_stamp st;
   struct md_version v;
   int unchanged = 0;
+  int nvis = vis;
 
   if (!src || !account || !account[0] || !key)
     return -1;
@@ -214,8 +215,12 @@ int metadata_account_write(struct Client *src, const char *account,
      * writer said "this, now": a peer's older, different value must not
      * win later), and the writer still gets its reply (761 / 766, the
      * caller's). */
-    if (rc == 0 || rc == 1)
+    if (rc == 0 || rc == 1) {
       unchanged = md_row_unchanged(rc == 0 ? &old : NULL, &v);
+      /* A delete is announced as the row it replaces was visible (an
+       * unset need not say "private"): md_notify_vis(). */
+      nvis = md_notify_vis(rc == 0 ? &old : NULL, &v, vis);
+    }
     if (metadata_account_put_versioned(account, key, value, vis, &st) < 0) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "metadata_account_write: store refused %s/%s - not applied, "
@@ -227,7 +232,7 @@ int metadata_account_write(struct Client *src, const char *account,
   /* Memory and mode flags whatever the row said before (a mode already so
    * changes nothing and is not echoed: umode_sync_apply()); a METADATA
    * line only for a change. */
-  metadata_account_apply_memory_ex(account, key, value, vis, NULL, NULL,
+  metadata_account_apply_memory_ex(account, key, value, nvis, NULL, NULL,
                                    !unchanged);
 
   metadata_emit_versioned(src, NULL, NULL, account, key, &v);
@@ -341,7 +346,8 @@ int metadata_client_write(struct Client *src, struct Client *target,
     if (metadata_set_client(target, key, value, vis) < 0)
       return -1;
     if (!unchanged)
-      metadata_notify_subscribers(cli_name(target), key, value, vis);
+      metadata_notify_subscribers(cli_name(target), key, value,
+                                  md_notify_vis(old ? &was : NULL, &now, vis));
   }
 
   /* Addressed by session id (metadata_session_addressable), else the

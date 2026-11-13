@@ -54,6 +54,7 @@ struct fake {
   const char *mode_key;               /* the one key whose no-row is a state */
   int napplied, nsent, nrefused;
   char applied[LOG_MAX][MD_PREREG_KEY_LEN];
+  int applied_vis[LOG_MAX];
   char sent[LOG_MAX][MD_PREREG_KEY_LEN];
   struct md_stamp sent_st[LOG_MAX];
   char refused[LOG_MAX][MD_PREREG_KEY_LEN];
@@ -137,8 +138,8 @@ static void f_apply(void *ctx, const char *key, const struct md_version *w)
 {
   struct fake *f = ctx;
 
-  (void)w;
   assert_true(f->napplied < LOG_MAX);
+  f->applied_vis[f->napplied] = w->vis;
   strcpy(f->applied[f->napplied++], key);
 }
 
@@ -579,6 +580,35 @@ static void test_no_store(void **state)
   assert_int_equal(f.nsent, 2);
 }
 
+/* A delete -- a note's or a CLEAR's -- is told as the row it replaces was
+ * visible: a private key's only to the account's own sessions. */
+static void test_delete_told_as_the_row_was(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "p@x", VIS_PRIVATE); row_put(&f, "email", &v);
+  v = live(100, "pub", VIS_PUBLIC);  row_put(&f, "url", &v);
+  note(&ns, "email", NULL, 200);           /* an unset that does not say "private" */
+  note(&ns, "url", NULL, 201);
+  assert_int_equal(merge(&f, &ns, 20), 2);
+  assert_string_equal(f.applied[0], "email");
+  assert_int_equal(f.applied_vis[0], VIS_PRIVATE);
+  assert_int_equal(f.applied_vis[1], VIS_PUBLIC);
+
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "p@x", VIS_PRIVATE); row_put(&f, "email", &v);
+  note_clear(&ns, 200);
+  merge(&f, &ns, 20);
+  assert_int_equal(f.napplied, 1);
+  assert_int_equal(f.applied_vis[0], VIS_PRIVATE);
+}
+
 /* The note list's own bound: METADATA_MAX_KEYS sets and as many deletes;
  * a key already noted is replaced, counted in its new kind. */
 static void test_note_bound(void **state)
@@ -787,6 +817,7 @@ int main(void)
     cmocka_unit_test(test_value_limit_before_identical),
     cmocka_unit_test(test_store_keeps_its_row),
     cmocka_unit_test(test_no_store),
+    cmocka_unit_test(test_delete_told_as_the_row_was),
     cmocka_unit_test(test_note_bound),
     cmocka_unit_test(test_note_clear),
     cmocka_unit_test(test_clear_then_set),
