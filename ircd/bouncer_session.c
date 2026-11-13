@@ -142,7 +142,7 @@ static void orphan_arm(void);
  * @param[in] p Its primary, or NULL. */
 static void alias_set_primary(struct Client *a, struct Client *p)
 {
-  cli_user(a)->alias_primary = p;
+  cli_user(a)->alias_primary = p;   /* alias-primary-write: allowed (the setter) */
   /* A promote (the client is no longer an alias): the ban verdicts its
    * memberships cached were made under another face -- a primary that
    * the D.2 demote or the reconcile made an alias kept them, and its nick
@@ -14484,7 +14484,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
                 cli_alias_primary(alias) ? cli_name(cli_alias_primary(alias)) : "none",
                 primary_numeric, cli_name(primary),
                 target ? target->hs_sessid : "no record of ours");
-      cli_user(alias)->alias_primary = primary;
+      cli_user(alias)->alias_primary = primary;   /* alias-primary-write: allowed (BX C, another server's alias) */
       /* Not ours (it is behind the line's link): no socket to tell of the
        * nick, and an alias is in no nick hash. */
       if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
@@ -14623,7 +14623,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
       user->acc_create = cli_user(primary)->acc_create;
       ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
-      user->alias_primary = primary;
+      user->alias_primary = primary;   /* alias-primary-write: allowed (BX C, another server's alias) */
       memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
       ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
       ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
@@ -14667,7 +14667,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   user->acc_create = cli_user(primary)->acc_create;
   ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
   user->server = alias_server;
-  user->alias_primary = primary;
+  user->alias_primary = primary;   /* alias-primary-write: allowed (BX C, another server's alias) */
 
   /* Copy IP and cloaked/fake host from primary */
   memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));

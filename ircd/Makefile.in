@@ -437,7 +437,25 @@ check-kc-boundary:
 		exit 1; \
 	fi
 
-build: check-kc-boundary ircd convert-conf
+# check-alias-primary: every write of a client's alias_primary goes
+# through alias_set_primary() (bouncer_session.c), which ends an orphan's
+# input hold when the pointer is set and arms the orphan sweep when a local
+# device is left without one (bouncer invariant #23).  Allowed: the
+# setter's own write and the BX C filings of another server's alias (no
+# socket, no sweep), each marked "alias-primary-write: allowed" on its
+# line.  Any other assignment in ircd/*.c or include/*.h fails the build;
+# the test suites (ircd/test/) are not looked at.
+check-alias-primary:
+	@bad=`grep -n 'alias_primary[[:space:]]*=[^=]' ${srcdir}/*.c ${top_srcdir}/include/*.h \
+	      | grep -v 'alias-primary-write: allowed'`; \
+	if [ -n "$$bad" ]; then \
+		echo "alias_primary written outside alias_set_primary():"; \
+		echo "$$bad"; \
+		echo "Use alias_set_primary() (bouncer_session.c); see check-alias-primary in ircd/Makefile.in."; \
+		exit 1; \
+	fi
+
+build: check-kc-boundary check-alias-primary ircd convert-conf
 
 ircd: ${OBJS} ../include/patchlevel.h version.o
 	${PURIFY} ${CC} ${OBJS} version.o ${RINGLOG_O} ${LDFLAGS} ${LIBS} \
@@ -447,7 +465,7 @@ ircd: ${OBJS} ../include/patchlevel.h version.o
 convert-conf: ${CONVERT_CONF_OBJS}
 	${PURIFY} ${CC} ${CONVERT_CONF_OBJS} ${LDFLAGS} -o convert-conf
 
-.PHONY: version.c check-kc-boundary
+.PHONY: version.c check-kc-boundary check-alias-primary
 version.c: version.c.SH ${top_srcdir}/include/patchlist.h umkpasswd
 	${SHELL} ${srcdir}/version.c.SH ${top_srcdir}
 
