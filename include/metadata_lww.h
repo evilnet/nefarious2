@@ -154,10 +154,26 @@ extern int md_row_unchanged(const struct md_version *local,
 extern int md_floor_in_force(const struct md_stamp *floor, uint64_t now_s,
                              uint64_t ttl_s);
 
+/** How much older than the floor a row must be before the floor converts
+ * it (review c1): the clock skew the tree accepts between servers.  A
+ * stamp more than FEAT_HLC_MAX_FORWARD_MS (default 60000) ahead of a
+ * receiver's clock is refused (md_stamp_ahead(), ms_metadata_stamped()),
+ * so servers that exchange rows run within that of each other; a server
+ * whose clock lags by up to that much, and has seen no newer stamp, can
+ * stamp a write made just AFTER the CLEAR below the CLEAR's stamp.  Rows
+ * from a split -- what the floor is for -- are far older.  What it gives
+ * up: a key this server never held, written on another server within
+ * this margin BEFORE the CLEAR, survives the CLEAR (a key this server
+ * held is deleted by the CLEAR's own tombstone, which any older row
+ * loses to).  A constant, not the feature: the floor's decision must not
+ * move with a REHASH. */
+#define MD_FLOOR_MARGIN_MS 60000
+
 /** Does the floor turn @a in into a tombstone at the floor's stamp?  Only
  * a live row (a tombstone is never converted), only a key a CLEAR deletes
  * (@a clearable: not a server-managed or internal key), only one older
- * than the floor (a row written after the CLEAR stands), only a floor in
+ * than the floor by more than MD_FLOOR_MARGIN_MS (a row written after the
+ * CLEAR stands, even from a server whose clock lags), only a floor in
  * force (md_floor_in_force()).
  * @return 1 to convert. */
 extern int md_floor_converts(const struct md_stamp *floor,

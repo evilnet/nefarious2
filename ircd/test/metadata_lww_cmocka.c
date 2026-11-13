@@ -1156,7 +1156,7 @@ static void test_clear_floor(void **state)
 
   (void)state;
   memset(&older, 0, sizeof(older));
-  older.value = "v"; older.vlen = 1; older.st.ms = 999000;
+  older.value = "v"; older.vlen = 1; older.st.ms = 900000;   /* 100 s before */
   newer = older; newer.st.ms = 1001000;
   equal = older; equal.st = floor;
   tomb = older; tomb.tombstone = 1; tomb.value = NULL; tomb.vlen = 0;
@@ -1182,9 +1182,35 @@ static void test_clear_floor(void **state)
   assert_int_equal(0, md_floor_raises(&floor, &floor));
 }
 
+/* Review c1: the margin.  A row older than the floor by more than
+ * MD_FLOOR_MARGIN_MS is converted; one within it (a write just after the
+ * CLEAR on a server whose clock lags, or one just before it) is not; a
+ * floor nearer the epoch than the margin converts nothing. */
+static void test_floor_margin(void **state)
+{
+  struct md_stamp floor = { 1000000, 0, 1 };
+  struct md_stamp tiny = { 30000, 0, 1 };
+  struct md_version row;
+
+  (void)state;
+  memset(&row, 0, sizeof(row));
+  row.value = "v"; row.vlen = 1;
+  row.st.ms = 1000000 - MD_FLOOR_MARGIN_MS - 1;       /* just past the margin */
+  assert_int_equal(1, md_floor_converts(&floor, &row, 1, 1500, 0));
+  row.st.ms = 1000000 - MD_FLOOR_MARGIN_MS;           /* on the edge: kept */
+  assert_int_equal(0, md_floor_converts(&floor, &row, 1, 1500, 0));
+  row.st.ms = 1000000 - 5000;                          /* a lagging clock's "after" */
+  assert_int_equal(0, md_floor_converts(&floor, &row, 1, 1500, 0));
+  row.st.ms = 0;
+  assert_int_equal(0, md_floor_converts(&tiny, &row, 1, 100, 0));
+}
+
 /* No loop: a floor tombstone arriving over an equal-stamp tombstone (its
  * own echo, or another server's conversion of the same CLEAR) is kept,
- * not taken -- so not relayed; between two floors the later one wins. */
+ * not taken -- so not relayed; between two floors the later one wins.
+ * Stamps order by ms, then the logical counter, then the node
+ * (md_stamp_cmp()); only a stamp equal in all three is a tie, and an equal
+ * pair of tombstones keeps the one held (md_lww_take()). */
 static void test_floor_no_loop(void **state)
 {
   struct md_version a, b, row;
@@ -1194,8 +1220,8 @@ static void test_floor_no_loop(void **state)
   a.tombstone = 1; a.st.ms = 1000; a.st.node = 1;
   b = a;
   assert_int_equal(0, md_lww_take(&a, &b));          /* equal tombstones: kept */
-  b.st.node = 2;                                       /* the same ms, another node */
-  assert_int_equal(1, md_lww_take(&a, &b));           /* taken once, then equal */
+  b.st.node = 2;                                       /* same ms and logical, a higher node */
+  assert_int_equal(1, md_lww_take(&a, &b));           /* ordered by the node: taken, then equal */
   assert_int_equal(0, md_lww_take(&b, &b));
   memset(&row, 0, sizeof(row));
   row.value = "v"; row.vlen = 1; row.st.ms = 1500;   /* between floors 1000 and 2000 */
@@ -1211,6 +1237,7 @@ int main(void)
     cmocka_unit_test(test_row_unchanged),
     cmocka_unit_test(test_local_write_unchanged),
     cmocka_unit_test(test_clear_floor),
+    cmocka_unit_test(test_floor_margin),
     cmocka_unit_test(test_floor_no_loop),
     cmocka_unit_test(test_stamp_parse_rejects),
     cmocka_unit_test(test_stamp_parse_ms_overflow_rejected),

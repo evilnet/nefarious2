@@ -224,7 +224,12 @@ int md_floor_converts(const struct md_stamp *floor,
     return 0;
   if (!md_floor_in_force(floor, now_s, ttl_s))
     return 0;
-  return md_stamp_cmp(&in->st, floor) < 0;
+  /* Older than the CLEAR by more than the accepted clock skew (review c1;
+   * MD_FLOOR_MARGIN_MS).  A floor nearer the epoch than the margin
+   * converts nothing. */
+  if (floor->ms < MD_FLOOR_MARGIN_MS)
+    return 0;
+  return in->st.ms < floor->ms - MD_FLOOR_MARGIN_MS;
 }
 
 int md_floor_raises(const struct md_stamp *floor, const struct md_stamp *tc)
