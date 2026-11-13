@@ -69,7 +69,8 @@ static void send_generate_reply(struct Client *sptr, const char *service, const 
   char type[AUTHTOKEN_KEYLEN + 32];
 
   if (overhead + len <= 510) {
-    sendcmdto_one(&me, CMD_TOKEN, sptr, "GENERATE %s :%s", service, token);
+    /* One line: the answer, labeled (sendcmdto_one_tags()). */
+    sendcmdto_one_tags(&me, CMD_TOKEN, sptr, "GENERATE %s :%s", service, token);
     return;
   }
   ircd_snprintf(0, type, sizeof(type), "draft/authtoken %s", service);

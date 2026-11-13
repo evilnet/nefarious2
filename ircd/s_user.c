@@ -982,10 +982,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
       int again = bounce_is_draining_registration(sptr);
       if (bounce_defer_registration(sptr) == 0) {
         register_user_unwind(sptr, pre_status, pre_handler, !again);
-        if (!again)
-          sendrawto_one(sptr,
-                        "NOTICE * :*** Bouncer: waiting for peer session "
-                        "announcement to settle before registering");
+        if (!again)   /* the registration line's answer: its label */
+          sendrawto_one_answer(sptr,
+                               "NOTICE * :*** Bouncer: waiting for peer session "
+                               "announcement to settle before registering");
         return 0;
       }
       /* defer failed (OOM?) — fall through to create as best-effort */
