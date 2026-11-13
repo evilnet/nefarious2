@@ -1072,10 +1072,41 @@ static void test_key_replicable(void **state)
   assert_int_equal(0, md_key_replicable(longkey));
 }
 
+/* A taken row that says what the replaced one said (owner 2026-11-13:
+ * fork peers skip the announcement for an unchanged row): same value and
+ * visibility, or tombstone over tombstone, stamps aside. */
+static void test_same_content(void **state)
+{
+  struct md_version a, b;
+
+  (void)state;
+  memset(&a, 0, sizeof(a));
+  memset(&b, 0, sizeof(b));
+  a.st.ms = 1; b.st.ms = 2;
+  a.value = "same"; a.vlen = 4;
+  b.value = "same"; b.vlen = 4;
+  assert_int_equal(1, md_version_same_content(&a, &b));
+  b.vis = 1;                                   /* another visibility */
+  assert_int_equal(0, md_version_same_content(&a, &b));
+  b.vis = 0;
+  b.value = "samf";                            /* another value */
+  assert_int_equal(0, md_version_same_content(&a, &b));
+  b.value = "same!"; b.vlen = 5;               /* a longer one */
+  assert_int_equal(0, md_version_same_content(&a, &b));
+  a.value = ""; a.vlen = 0; b.value = ""; b.vlen = 0;   /* both empty */
+  assert_int_equal(1, md_version_same_content(&a, &b));
+  b.tombstone = 1; b.value = NULL;             /* live vs tombstone */
+  assert_int_equal(0, md_version_same_content(&a, &b));
+  a.tombstone = 1; a.value = NULL;             /* two tombstones */
+  assert_int_equal(1, md_version_same_content(&a, &b));
+  assert_int_equal(0, md_version_same_content(NULL, &b));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_stamp_roundtrip),
+    cmocka_unit_test(test_same_content),
     cmocka_unit_test(test_stamp_parse_rejects),
     cmocka_unit_test(test_stamp_parse_ms_overflow_rejected),
     cmocka_unit_test(test_stamp_cmp_order),

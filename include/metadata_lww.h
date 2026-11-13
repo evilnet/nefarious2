@@ -123,6 +123,15 @@ struct md_version {
 extern int md_lww_take(const struct md_version *local,
                         const struct md_version *incoming);
 
+/** Whether two versions of one row say the same thing, stamps aside: both
+ * tombstones, or both live with the same visibility and value bytes.  A
+ * taken row that says the same as the one it replaces changes nothing
+ * anyone sees: its stamp is stored and relayed, nobody is told
+ * (ms_metadata_stamped(), owner 2026-11-13).
+ * @return 1 if they say the same, 0 if not (or either is NULL). */
+extern int md_version_same_content(const struct md_version *a,
+                                   const struct md_version *b);
+
 /** Encode @a s/@a tombstone as the wire clock token "L<stamp>" (live) or
  * "D<stamp>" (tombstone) into @a buf (capacity @a len, NUL-terminated on
  * success).

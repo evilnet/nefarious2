@@ -22,10 +22,10 @@
  * the store and to every fork peer under the SET's stamp, as the SET after
  * login would: a peer may hold an older write this server missed, and the
  * login's own pull of the account's rows would otherwise bring it back.
- * Nobody on this server is told of such a row (nothing changed here);
- * the fork peers that take it announce it to their subscribers as they do
- * for any SET's row (ms_metadata_stamped() -> metadata_account_apply_memory(),
- * which does not ask whether the value changed).
+ * Nobody on this server is told of such a row (nothing changed here); a
+ * fork peer that takes it announces it only where it changes what that
+ * peer held (ms_metadata_stamped(): a row saying what the replaced one
+ * said only moves the stamp, as for any server's row).
  *
  * No ircd dependencies, so the cmocka suite
  * (ircd/test/metadata_prereg_cmocka.c) compiles it standalone, the merge
@@ -73,8 +73,8 @@ enum md_prereg_verdict {
                            *   value; a delete of a key it does not hold) under
                            *   an older stamp or none: stored and sent under
                            *   the SET's stamp; nobody on this server is told
-                           *   (nothing changed here), peers announce it as
-                           *   for any SET's row */
+                           *   (nothing changed here), a peer only where it
+                           *   changes what the peer held */
   MD_PREREG_SAME,         /**< the account holds exactly this under a stamp
                            *   no older than the SET's: nothing */
   MD_PREREG_ABSENT,       /**< a delete of a key already deleted here, no

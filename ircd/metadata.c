@@ -800,6 +800,7 @@ int metadata_account_merge(const char *account, const char *key,
   int local_rc;
   struct HLC remote_hlc;
   int put_rc;
+  int same;
 
   if (!account || !key || !in)
     return -1;
@@ -810,6 +811,7 @@ int metadata_account_merge(const char *account, const char *key,
 
   if (!md_lww_take(local_rc == 1 ? NULL : &local, in))
     return 0;
+  same = local_rc == 0 && md_version_same_content(&local, in);
 
   remote_hlc.physical_ms = in->st.ms;
   remote_hlc.logical = in->st.logical;
@@ -819,7 +821,9 @@ int metadata_account_merge(const char *account, const char *key,
   put_rc = metadata_account_put_versioned(account, key,
                                           in->tombstone ? NULL : in->value,
                                           in->vis, &in->st);
-  return (put_rc == 0) ? 1 : -1;
+  if (put_rc != 0)
+    return -1;
+  return same ? 2 : 1;
 }
 
 /** Visit every live row and every tombstone stored for @a account.
@@ -2194,13 +2198,13 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
 void metadata_account_apply_memory(const char *account, const char *key,
                                    const char *value, int vis)
 {
-  metadata_account_apply_memory_ex(account, key, value, vis, NULL, NULL);
+  metadata_account_apply_memory_ex(account, key, value, vis, NULL, NULL, 1);
 }
 
 void metadata_account_apply_memory_ex(const char *account, const char *key,
                                       const char *value, int vis,
                                       struct Client *quiet,
-                                      struct Client *butone)
+                                      struct Client *butone, int tell)
 {
   struct Client *cptr, *next;
   int private_notified = 0;
@@ -2275,7 +2279,7 @@ void metadata_account_apply_memory_ex(const char *account, const char *key,
     } else
       metadata_apply_client_memory(cptr, key, value, vis);
 
-    if (IsBouncerAlias(cptr))
+    if (IsBouncerAlias(cptr) || !tell)
       continue;
 
     if (vis == METADATA_VIS_PRIVATE) {
@@ -2492,8 +2496,10 @@ static int prereg_row(void *arg, const char *key, struct md_version *out,
 static int prereg_store(void *arg, const char *key, const struct md_version *w)
 {
   struct prereg_merge_ctx *c = arg;
+  int rc = metadata_account_merge(c->account, key, w);
 
-  return metadata_account_merge(c->account, key, w);
+  /* Taken saying the same (2: a STAMP's re-stamped row) is taken. */
+  return rc == 2 ? 1 : rc;
 }
 
 static void prereg_apply(void *arg, const char *key, const struct md_version *w)
@@ -2506,7 +2512,7 @@ static void prereg_apply(void *arg, const char *key, const struct md_version *w)
    * a mode. */
   metadata_account_apply_memory_ex(c->account, key,
                                    w->tombstone ? NULL : w->value, w->vis,
-                                   c->on_network ? NULL : c->cptr, c->cptr);
+                                   c->on_network ? NULL : c->cptr, c->cptr, 1);
   if (metadata_mode_sync_index(key) >= 0)
     c->mode_keys = 1;
 }
@@ -2570,8 +2576,8 @@ static int prereg_no_row_is_state(void *arg, const char *key)
  * peer (MD =account) -- unless a write made after the SET stands.  What
  * the account here already reads (the same value, a delete of a key it
  * lacks) is still stored and sent under the SET's stamp when that is the
- * newer, telling nobody on this server (the fork peers announce the row
- * as they do any SET's): the login's pull of the account's rows from the
+ * newer, telling nobody on this server (a fork peer announces it only
+ * where it changes what that peer held): the login's pull of the account's rows from the
  * peers (mdsync_on_attach()) must not bring back an older write this
  * server missed.  A write that no longer fits the account (its key cap, a
  * value limit lowered since) is refused with the standard reply SET would

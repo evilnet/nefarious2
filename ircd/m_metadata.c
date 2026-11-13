@@ -2018,11 +2018,19 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   }
 
   merge_rc = metadata_account_merge(account_name, wire_key, &in);
-  if (merge_rc != 1)
+  if (merge_rc != 1 && merge_rc != 2)
     return 0;   /* kept the local version (0), or a store error (-1): no relay */
 
-  metadata_account_apply_memory(account_name, wire_key,
-                                tombstone ? NULL : chunk->value, vis);
+  /* Taken.  A row that says what the replaced one said (2: the same value
+   * and visibility, or tombstone over tombstone -- a SET of an unchanged
+   * value elsewhere, a pull answer or burst row that only moves the
+   * stamp) changes nothing anyone here sees: memory and flags are applied
+   * as always (a mode already so is a no-op), the newer stamp is stored
+   * and relayed, but no subscriber or connection of the account is told
+   * (owner, 2026-11-13: fork peers skip the announcement). */
+  metadata_account_apply_memory_ex(account_name, wire_key,
+                                   tombstone ? NULL : chunk->value, vis,
+                                   NULL, NULL, merge_rc == 1);
   metadata_emit_versioned(sptr, NULL, cptr, account_name, wire_key, &in);
   return 0;
 }

@@ -187,6 +187,17 @@ int md_stamp_ahead(const struct md_stamp *s, uint64_t now_ms,
 /* LWW rule                                                             */
 /* ------------------------------------------------------------------ */
 
+int md_version_same_content(const struct md_version *a,
+                            const struct md_version *b)
+{
+  if (!a || !b)
+    return 0;
+  if (a->tombstone || b->tombstone)
+    return a->tombstone && b->tombstone;
+  return a->vis == b->vis && a->vlen == b->vlen
+         && (a->vlen == 0 || memcmp(a->value, b->value, a->vlen) == 0);
+}
+
 int md_lww_take(const struct md_version *local,
                  const struct md_version *incoming)
 {

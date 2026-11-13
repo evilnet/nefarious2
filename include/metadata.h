@@ -637,7 +637,9 @@ extern int metadata_account_get_version(const char *account, const char *key,
  * @param[in] account Account name.
  * @param[in] key Metadata key.
  * @param[in] in Incoming version to merge.
- * @return 1 (taken), 0 (kept the local version), -1 (error).
+ * @return 1 (taken), 2 (taken, saying the same as the row it replaced:
+ *   md_version_same_content() -- only the stamp moved), 0 (kept the local
+ *   version), -1 (error).
  */
 extern int metadata_account_merge(const char *account, const char *key,
                                   const struct md_version *in);
@@ -684,12 +686,15 @@ extern void metadata_account_apply_memory(const char *account, const char *key,
  * nothing: its registration burst carries the key, and a mode-synced key
  * changes its flag (as the account's connection, or as a device through
  * its primary's session mirror) without a MODE line -- its sign-on mode
- * line says it (umode_sync_apply_butone()).
+ * line says it (umode_sync_apply_butone()).  @a tell 0: no METADATA
+ * notification to anyone -- a taken row that says what the replaced one
+ * said (ms_metadata_stamped(), metadata_account_merge() 2); memory and
+ * mode flags are still applied (a mode already so changes nothing).
  */
 extern void metadata_account_apply_memory_ex(const char *account, const char *key,
                                              const char *value, int vis,
                                              struct Client *quiet,
-                                             struct Client *butone);
+                                             struct Client *butone, int tell);
 
 /* X3 dependency removed - Nefarious is now authoritative for metadata */
 

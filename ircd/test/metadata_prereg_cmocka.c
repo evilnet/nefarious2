@@ -295,8 +295,9 @@ static void test_prereg_wins_per_key_untouched_from_account(void **state)
   assert_int_equal(f.nrefused, 0);
 }
 
-/* An identical value tells nobody on this server (the peers that take its
- * row announce it as for any SET).  Under an older stamp it is still
+/* An identical value tells nobody on this server (a peer that takes its
+ * row announces it only where it changes what the peer held).  Under an
+ * older stamp it is still
  * stored and sent under the SET's (review a1: the login's pull would
  * otherwise bring back a peer's write this server missed); under a newer
  * or equal one, nothing at all.  The same value at another visibility is
