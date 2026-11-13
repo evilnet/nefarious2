@@ -877,7 +877,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         hRemClient(acptr);
         cli_name(acptr)[0] = '\0';
       }
-      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+      return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
     }
     /* Post-SASL but pre-register_user: bounce_defer_registration
      * queued this client because a peer link was mid-burst at SASL
@@ -901,7 +901,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         hRemClient(acptr);
         cli_name(acptr)[0] = '\0';
       }
-      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+      return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
     }
     ServerStats->is_ref++;
     /* Whether the accept counted it is IsIPChecked(), not an except
@@ -912,7 +912,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (IsIPChecked(acptr))
       IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
-    return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+    return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
   }
   /*
    * Decide, we really have a nick collision and deal with it
