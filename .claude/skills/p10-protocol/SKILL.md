@@ -107,6 +107,13 @@ The numeric is derived from the server's position in the network and uses a base
 | `EB` | END_OF_BURST | End of netburst |
 | `EA` | EOB_ACK | End of burst acknowledgment |
 
+## Bouncer nick requests: `BX W` and SERVER flag `N`
+
+- **SERVER flag `N`** (`FLAG_NICKWRITER`): the server is the one writer of its session users' nicks and handles `BX W`.  Announced unconditionally in our own SERVER line (`+...vF[H]N`) and repeated when relaying another server's SERVER line; a legacy server never repeats it, so every server behind a legacy or older fork hop is seen without it.  `nick_writer_route(home)` = every server from `home` up to our link is IRCv3-aware and has `N`.
+- **`<DS> BX W <device YYXXX> <nick> <ts>`** — a bouncer device on DS asks its primary's server for a rename; sent only on an all-`N` route, toward `cli_from(primary)`, by `sendcmdto_one`.  The primary's server answers an accepted rename with an ordinary `<P> N <nick> <ts>` to EVERY link (the request's included), a refusal with the numeric (432/433/437/438) addressed to the device's numeric.  Never sent to a legacy server.
+- **`<S> BX W <device> <nick> <ts> R`** — a returned request: the device was promoted on the request's side while it was in flight; sourced by the server returning it (a line under DS's own prefix coming back to DS is a fake direction).
+- Receivers accept a request only from the device's own server over the device's direction and never for a client of their own; a forged line is a protocol violation (DESYNCH wallops).  Older fork servers forward an unknown BX subcommand cut to its letter (`BX W` alone), which is why the route needs `N` on every hop.
+
 ## SASL P10 Protocol
 
 ### Message Format
