@@ -52,6 +52,7 @@ CMOCKA_TESTPROGS = \
 	pm_pair_index_cmocka \
 	recv_classify_cmocka \
 	ml_route_cmocka \
+	nick_route_cmocka \
 	ml_fallback_cmocka \
 	send_s2s_tags_cmocka \
 	register_throttle_cmocka \
@@ -141,6 +142,7 @@ DEP_SRC = \
 	pm_pair_index_cmocka.c \
 	recv_classify_cmocka.c \
 	ml_route_cmocka.c \
+	nick_route_cmocka.c \
 	ml_fallback_cmocka.c \
 	send_s2s_tags_cmocka.c \
 	register_throttle_cmocka.c \
@@ -402,6 +404,12 @@ recv_classify_cmocka: $(RECV_CLASSIFY_CMOCKA_OBJS)
 ML_ROUTE_CMOCKA_OBJS = ml_route_cmocka.o ../ml_route.o
 ml_route_cmocka: $(ML_ROUTE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ML_ROUTE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# nick_route tests - the BX W route walk, linked as it is, and the pure
+# rules beside it in bouncer_wire.c
+NICK_ROUTE_CMOCKA_OBJS = nick_route_cmocka.o ../nick_route.o bouncer_wire_test.o
+nick_route_cmocka: $(NICK_ROUTE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(NICK_ROUTE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # ml_fallback tests - the one rule for a multiline fallback's preview and
 # its "[N more lines]" count (blank lines neither shown nor counted).

@@ -233,6 +233,15 @@ enum Flag
                                          announcement, so our trust in the
                                          marks arriving over this link asks
                                          it too (bounce_hold_marks_trusted). */
+    FLAG_NICKWRITER,                /**< server is the one writer of its
+                                         session users' nicks: a bouncer
+                                         device elsewhere asks it (BX W)
+                                         instead of renaming the user
+                                         itself.  Advertised via 'N' in
+                                         SERVER flags, unconditionally; a
+                                         route is trusted only when every
+                                         server on it announced it
+                                         (nick_writer_route()). */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -1434,6 +1443,7 @@ struct Client {
 #define IsHoldMark(x)           HasFlag(x, FLAG_HOLDMARK)
 /** Return non-zero if our SERVER line to this link announced 'H'. */
 #define IsHoldMarkSent(x)       HasFlag(x, FLAG_HOLDMARK_SENT)
+#define IsNickWriter(x)         HasFlag(x, FLAG_NICKWRITER)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -1613,6 +1623,7 @@ struct Client {
 #define SetHoldMark(x)          SetFlag(x, FLAG_HOLDMARK)
 /** Record that our SERVER line to this link announced 'H'. */
 #define SetHoldMarkSent(x)      SetFlag(x, FLAG_HOLDMARK_SENT)
+#define SetNickWriter(x)        SetFlag(x, FLAG_NICKWRITER)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */

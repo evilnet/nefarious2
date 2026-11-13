@@ -1095,3 +1095,32 @@ enum bounce_away_merge_action bounce_away_merge_step(enum bounce_away_merge_even
     return BOUNCE_AWAY_MERGE_NOTHING;
   }
 }
+
+int nick_writer_route_path(int hops, int hops_ok, int reached_us)
+{
+  /* Every hop must carry BX W and the primary's server must write: an
+   * older fork server forwards an unknown BX subcommand cut to its letter,
+   * a legacy one drops it. */
+  return reached_us && hops > 0 && hops_ok == hops;
+}
+
+enum nick_request_action nick_request_action(int found, int is_alias,
+                                             int primary_ours,
+                                             int device_ours,
+                                             int next_is_link)
+{
+  if (!found)
+    return NICK_REQUEST_DROP;
+  if (is_alias) {
+    if (primary_ours)
+      return NICK_REQUEST_WRITE;
+    /* The primary is the way the request came from: the sender thought
+     * otherwise (a crossed promote).  Bouncing it back would loop. */
+    return next_is_link ? NICK_REQUEST_DROP : NICK_REQUEST_FORWARD;
+  }
+  /* Promoted: the device is now the session's primary, and its own
+   * server is the writer. */
+  if (device_ours)
+    return NICK_REQUEST_WRITE;
+  return next_is_link ? NICK_REQUEST_RETURN : NICK_REQUEST_FORWARD;
+}

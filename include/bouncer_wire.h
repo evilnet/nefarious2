@@ -1938,4 +1938,45 @@ enum bounce_away_role {
  * @param[in] primary_is_ours The session's primary is a client of ours. */
 extern enum bounce_away_role bounce_away_role(int primary_is_ours);
 
+/* ---- One writer of a session user's nick (BX W, SERVER flag N) ---- */
+
+/** Whether a route carries a device's nick request (BX W) to the
+ * primary's server: every server from the primary's (included) to our
+ * own link announced flag N, and the walk reached us.
+ * @param[in] hops       Servers walked, the primary's included.
+ * @param[in] hops_ok    Of those, IRCv3-aware ones that announced N.
+ * @param[in] reached_us The walk ended at our own link (no broken tree).
+ * @return 1 when BX W may be sent, else 0 (the device's server then
+ *   renames at once and sends the alias-numeric N, the fallback). */
+extern int nick_writer_route_path(int hops, int hops_ok, int reached_us);
+
+/** What a server does with a device's nick request (BX W). */
+enum nick_request_action {
+  NICK_REQUEST_DROP,    /**< unknown device, or the request would go back
+                         *   where it came from while the primary is not
+                         *   there (a crossed promote): drop and log */
+  NICK_REQUEST_WRITE,   /**< we are the writer: the device's primary is
+                         *   ours (a held ghost included), or the device
+                         *   was promoted and is ours (its own NICK) */
+  NICK_REQUEST_FORWARD, /**< forward toward the writer, away from the
+                         *   link it came over */
+  NICK_REQUEST_RETURN   /**< send it back over the link it came over: the
+                         *   device was promoted and is now the primary on
+                         *   that side (once: its server writes) */
+};
+
+/** Decide a BX W.
+ * @param[in] found        The device numeric names a user here.
+ * @param[in] is_alias     It is still a bouncer device with a primary.
+ * @param[in] primary_ours That primary is ours (only read for a device).
+ * @param[in] device_ours  The device itself is ours (read once promoted).
+ * @param[in] next_is_link The writer's direction (the primary's server for
+ *   a device, the device's own for a promoted one) is the link the
+ *   request came over.
+ */
+extern enum nick_request_action nick_request_action(int found, int is_alias,
+                                                    int primary_ours,
+                                                    int device_ours,
+                                                    int next_is_link);
+
 #endif /* INCLUDED_bouncer_wire_h */
