@@ -135,25 +135,90 @@ static void test_path_rule(void **state)
 }
 
 /* ---- what a server does with a BX W ---- */
-static void test_request_action(void **state)
+
+/* A well-formed request from the device's own server, over its link. */
+static struct nick_request_facts req(void)
 {
+  struct nick_request_facts f;
+  memset(&f, 0, sizeof(f));
+  f.found = 1;
+  f.is_alias = 1;
+  f.device_dir_is_link = 1;
+  f.source_is_device_server = 1;
+  return f;
+}
+
+static void test_request_write_forward_drop(void **state)
+{
+  struct nick_request_facts f;
   (void)state;
-  /* unknown device (it left; the session ended) */
-  assert_int_equal(nick_request_action(0, 1, 1, 0, 0), NICK_REQUEST_DROP);
-  /* the device's primary is ours (live or a held ghost): write */
-  assert_int_equal(nick_request_action(1, 1, 1, 0, 1), NICK_REQUEST_WRITE);
-  /* a middle server: forward toward the primary */
-  assert_int_equal(nick_request_action(1, 1, 0, 0, 0), NICK_REQUEST_FORWARD);
-  /* loop: the primary is back the way it came (a crossed promote) */
-  assert_int_equal(nick_request_action(1, 1, 0, 0, 1), NICK_REQUEST_DROP);
-  /* promoted and ours (the return arrived at the device's server):
-   * write it as the device's own NICK */
-  assert_int_equal(nick_request_action(1, 0, 0, 1, 1), NICK_REQUEST_WRITE);
-  assert_int_equal(nick_request_action(1, 0, 1, 1, 0), NICK_REQUEST_WRITE);
-  /* promoted and on the side it came from: return it, once */
-  assert_int_equal(nick_request_action(1, 0, 0, 0, 1), NICK_REQUEST_RETURN);
-  /* promoted and elsewhere: forward toward it */
-  assert_int_equal(nick_request_action(1, 0, 0, 0, 0), NICK_REQUEST_FORWARD);
+  f = req(); f.primary_ours = 1;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_WRITE_DEVICE);
+  f = req();                                   /* a middle server */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_FORWARD);
+  f = req(); f.primary_dir_is_link = 1;        /* loop: crossed promote */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  f = req(); f.found = 0;                      /* the device left */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  f = req(); f.is_alias = 0;                   /* promoted on that side */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_RETURN);
+}
+
+/* Security review 1: nobody asks us to rename a client of ours. */
+static void test_request_naming_ours_rejected(void **state)
+{
+  struct nick_request_facts f;
+  (void)state;
+  f = req(); f.device_ours = 1; f.is_alias = 0;      /* an ordinary user */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f = req(); f.device_ours = 1; f.is_alias = 0;      /* even a primary */
+  f.session_primary_ours = 1; f.asked_here = 1;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f = req(); f.device_ours = 1; f.primary_ours = 1;  /* our own device */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+}
+
+/* Security review 2: only the device's own server, over its direction. */
+static void test_request_wrong_origin_rejected(void **state)
+{
+  struct nick_request_facts f;
+  (void)state;
+  f = req(); f.primary_ours = 1; f.source_is_device_server = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f = req(); f.primary_ours = 1; f.device_dir_is_link = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f = req(); f.source_is_device_server = 0;          /* not forwarded either */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f = req(); f.is_alias = 0; f.device_dir_is_link = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+}
+
+/* A returned request (R): applied only by the device's own server, for a
+ * session primary of ours that itself asked for it; elsewhere it travels
+ * toward the device. */
+static void test_return(void **state)
+{
+  struct nick_request_facts f;
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  f.found = 1; f.is_return = 1; f.device_ours = 1;
+  f.session_primary_ours = 1; f.asked_here = 1;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_WRITE_OWN);
+  f.asked_here = 0;                  /* a return we never asked for */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f.asked_here = 1; f.session_primary_ours = 0;  /* no session primary */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f.session_primary_ours = 1; f.is_alias = 1;    /* not promoted here */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  memset(&f, 0, sizeof(f));          /* a middle server, toward the device */
+  f.found = 1; f.is_return = 1;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_FORWARD);
+  f.device_dir_is_link = 1;          /* "returned" from the device's side */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f.device_dir_is_link = 0; f.is_alias = 1;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  f.found = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
 }
 
 int main(void)
@@ -166,7 +231,10 @@ int main(void)
     cmocka_unit_test_setup(test_old_or_legacy_middle, setup),
     cmocka_unit_test_setup(test_broken_trees, setup),
     cmocka_unit_test(test_path_rule),
-    cmocka_unit_test(test_request_action),
+    cmocka_unit_test(test_request_write_forward_drop),
+    cmocka_unit_test(test_request_naming_ours_rejected),
+    cmocka_unit_test(test_request_wrong_origin_rejected),
+    cmocka_unit_test(test_return),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -1104,23 +1104,40 @@ int nick_writer_route_path(int hops, int hops_ok, int reached_us)
   return reached_us && hops > 0 && hops_ok == hops;
 }
 
-enum nick_request_action nick_request_action(int found, int is_alias,
-                                             int primary_ours,
-                                             int device_ours,
-                                             int next_is_link)
+enum nick_request_action
+nick_request_action(const struct nick_request_facts *f)
 {
-  if (!found)
+  if (!f->found)
     return NICK_REQUEST_DROP;
-  if (is_alias) {
-    if (primary_ours)
-      return NICK_REQUEST_WRITE;
-    /* The primary is the way the request came from: the sender thought
-     * otherwise (a crossed promote).  Bouncing it back would loop. */
-    return next_is_link ? NICK_REQUEST_DROP : NICK_REQUEST_FORWARD;
+  if (!f->is_return) {
+    /* A request: its sender is the device's own server, on the device's
+     * side.  Nobody asks us for a device of ours. */
+    if (f->device_ours || !f->device_dir_is_link
+        || !f->source_is_device_server)
+      return NICK_REQUEST_REJECT;
+    if (f->is_alias) {
+      if (f->primary_ours)
+        return NICK_REQUEST_WRITE_DEVICE;
+      /* The primary is back the way it came: the sender thought
+       * otherwise (a crossed promote).  Bouncing it back would loop. */
+      return f->primary_dir_is_link ? NICK_REQUEST_DROP
+                                    : NICK_REQUEST_FORWARD;
+    }
+    /* Promoted on the way: it is the primary now, on the side the
+     * request came from, and its own server writes. */
+    return NICK_REQUEST_RETURN;
   }
-  /* Promoted: the device is now the session's primary, and its own
-   * server is the writer. */
-  if (device_ours)
-    return NICK_REQUEST_WRITE;
-  return next_is_link ? NICK_REQUEST_RETURN : NICK_REQUEST_FORWARD;
+  /* Returned: it travels toward the device. */
+  if (f->device_ours) {
+    if (f->is_alias)
+      return NICK_REQUEST_DROP;      /* not promoted here: crossed */
+    if (f->session_primary_ours && f->asked_here)
+      return NICK_REQUEST_WRITE_OWN;
+    return NICK_REQUEST_REJECT;      /* we never asked for this */
+  }
+  if (f->device_dir_is_link)
+    return NICK_REQUEST_REJECT;      /* a return goes toward the device */
+  if (f->is_alias)
+    return NICK_REQUEST_DROP;
+  return NICK_REQUEST_FORWARD;
 }

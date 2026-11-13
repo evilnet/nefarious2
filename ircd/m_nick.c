@@ -186,8 +186,13 @@ static int nick_device_ask(struct Client *device, struct Client *primary,
     sendcmdto_one(device, CMD_NICK, device, "%s", cli_name(device));
     return 0;
   }
+  /* Kept on the device's own Connection: if the device is promoted while
+   * the request is in flight, the request comes back to us (marked R),
+   * and only a request this device really made may be applied then. */
+  cli_nickask_ts(device) = TStime();
+  ircd_strncpy(cli_nickask(device), nick, sizeof(cli_nickask(device)));
   sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cli_from(primary), "W %s%s %s %Tu",
-                cli_yxx(&me), cli_yxx(device), nick, TStime());
+                cli_yxx(&me), cli_yxx(device), nick, cli_nickask_ts(device));
   return 0;
 }
 

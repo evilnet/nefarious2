@@ -1950,33 +1950,48 @@ extern enum bounce_away_role bounce_away_role(int primary_is_ours);
  *   renames at once and sends the alias-numeric N, the fallback). */
 extern int nick_writer_route_path(int hops, int hops_ok, int reached_us);
 
-/** What a server does with a device's nick request (BX W). */
-enum nick_request_action {
-  NICK_REQUEST_DROP,    /**< unknown device, or the request would go back
-                         *   where it came from while the primary is not
-                         *   there (a crossed promote): drop and log */
-  NICK_REQUEST_WRITE,   /**< we are the writer: the device's primary is
-                         *   ours (a held ghost included), or the device
-                         *   was promoted and is ours (its own NICK) */
-  NICK_REQUEST_FORWARD, /**< forward toward the writer, away from the
-                         *   link it came over */
-  NICK_REQUEST_RETURN   /**< send it back over the link it came over: the
-                         *   device was promoted and is now the primary on
-                         *   that side (once: its server writes) */
+/** What a server knows about a BX W it is handed (nick_request_action()). */
+struct nick_request_facts {
+  int found;          /**< the device numeric names a user here */
+  int is_return;      /**< the line carries the return mark (R) */
+  int device_ours;    /**< that user is ours */
+  int is_alias;       /**< it is a bouncer device with a primary */
+  int primary_ours;   /**< (a device) its primary is ours */
+  int primary_dir_is_link; /**< (a device) its primary is behind the link
+                            *   the line came over */
+  int device_dir_is_link;  /**< the user is behind the link the line came
+                            *   over */
+  int source_is_device_server; /**< the line's source is the server the user
+                                *   is on */
+  int session_primary_ours;    /**< (ours) a session record names it as
+                                *   the session's primary */
+  int asked_here;     /**< (ours) its own last request, still recent,
+                       *   names the same nick and TS */
 };
 
-/** Decide a BX W.
- * @param[in] found        The device numeric names a user here.
- * @param[in] is_alias     It is still a bouncer device with a primary.
- * @param[in] primary_ours That primary is ours (only read for a device).
- * @param[in] device_ours  The device itself is ours (read once promoted).
- * @param[in] next_is_link The writer's direction (the primary's server for
- *   a device, the device's own for a promoted one) is the link the
- *   request came over.
- */
-extern enum nick_request_action nick_request_action(int found, int is_alias,
-                                                    int primary_ours,
-                                                    int device_ours,
-                                                    int next_is_link);
+/** What a server does with a device's nick request (BX W). */
+enum nick_request_action {
+  NICK_REQUEST_DROP,         /**< a race (the device is gone, the primary is
+                              *   back the way it came): drop and log */
+  NICK_REQUEST_REJECT,       /**< not a request this link can make: a
+                              *   protocol violation, dropped, opers told */
+  NICK_REQUEST_WRITE_DEVICE, /**< the device's primary is ours: judge it */
+  NICK_REQUEST_WRITE_OWN,    /**< our own device's request came back: it was
+                              *   promoted meanwhile and is ours; its own
+                              *   NICK */
+  NICK_REQUEST_FORWARD,      /**< pass it on toward the writer (or, a
+                              *   returned one, toward the device) */
+  NICK_REQUEST_RETURN        /**< send it back over the link it came by,
+                              *   marked R: the device was promoted and is
+                              *   now the primary on that side */
+};
+
+/** Decide a BX W.  A request (no R) must come from the device's own
+ * server, over the device's direction, and names another server's
+ * device; a returned one (R) travels toward the device and is applied
+ * only by the device's own server, for a session primary of ours that
+ * itself asked for that very nick at that TS. */
+extern enum nick_request_action
+nick_request_action(const struct nick_request_facts *f);
 
 #endif /* INCLUDED_bouncer_wire_h */

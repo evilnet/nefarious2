@@ -15294,73 +15294,108 @@ forward:
 /* BX W: a device's nick request, to the one writer                  */
 /* ---------------------------------------------------------------- */
 
+/** How long a returned request (BX W ... R) may take to come back to the
+ * device that made it and still be applied. */
+#define NICK_ASK_RETURN_WINDOW 60
+
 /** Handle BX W (a bouncer device's nick request).
  *
  * Wire format: <device's server> BX W <device YYXXX> <nick> <ts>
+ *              <returning server> BX W <device YYXXX> <nick> <ts> R
  *
  * The primary's server is the one writer of its session user's nick.  A
- * device's server sends this toward the primary only when every server
- * on the way announced SERVER flag N (nick_writer_route()), and renames
- * nothing itself.  Here (nick_request_action()):
- *  - WRITE: the device's primary is ours (a held ghost included): judge
- *    it with our own rules (nick_device_request()); an accepted rename is
- *    an ordinary N to every link, the asking one included, and a refusal
- *    is the numeric to the device.  Or the device was promoted and is
- *    ours: it is the device's own NICK.
- *  - FORWARD: toward the writer, unchanged.
- *  - RETURN: back over the link it came by, once -- the device was
- *    promoted while the request was in flight and is now the primary on
- *    that side; its server writes.  Sourced from us: the sender is on
- *    that side, so a line under its prefix would be a fake direction.
- *  - DROP: the device is gone, or the primary is back the way the request
- *    came (the two sides disagree after a crossed promote).
+ * device's server sends the request toward the primary only when every
+ * server on the way announced SERVER flag N (nick_writer_route()), and
+ * renames nothing itself.  What a linked server can cause with it: a
+ * rename of a session primary of ours, asked for by one of that
+ * session's own devices on the sending server (its own numeric, behind
+ * the link the line came over), judged by every rule a NICK of that
+ * primary meets here (bans, its NICKDELAY, a nick held, juped or invalid
+ * here: refused, never a KILL); or, marked R, the return of a request one
+ * of OUR devices made itself (its nick and TS, kept on its own
+ * Connection, recent) after that device was promoted -- applied as its
+ * own NICK.  It cannot rename any other client: a request naming a client
+ * of ours, a device of another server or one behind another link, or a
+ * return we never asked for, is a protocol violation, dropped and
+ * reported to opers (nick_request_action()).
  */
 static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
                                int parc, char *parv[])
 {
-  struct Client *dev, *primary = NULL, *next = NULL;
-  int is_alias;
+  struct nick_request_facts f;
+  struct Client *dev, *primary = NULL;
+  struct BouncerSession *s;
 
   if (parc < 5)
     return protocol_violation(sptr, "BX W requires 3 parameters");
 
+  memset(&f, 0, sizeof(f));
   dev = bx_find_user_strict(parv[2]);
-  if (dev && !IsUser(dev))
+  if (dev && (!IsUser(dev) || !cli_user(dev)))
     dev = NULL;
-  is_alias = dev && IsBouncerAlias(dev) && cli_alias_primary(dev);
-  if (is_alias) {
-    primary = cli_alias_primary(dev);
-    next = cli_from(primary);
-  } else if (dev)
-    next = cli_from(dev);
-
-  switch (nick_request_action(dev != NULL, is_alias,
-                              is_alias && MyUser(primary),
-                              dev && MyUser(dev), next == cptr)) {
-  case NICK_REQUEST_WRITE:
-    if (is_alias)
-      return nick_device_request(cptr, primary, dev, parv[3], parv[4], 1);
-    else {
-      /* Promoted to the primary here: its own NICK, with every check a
-       * local NICK gets (its own NICKDELAY, on its own Connection). */
-      char *own[3];
-      own[0] = cli_name(dev);
-      own[1] = parv[3];
-      own[2] = NULL;
-      return m_nick(dev, dev, 2, own);
+  f.found = (dev != NULL);
+  f.is_return = (parc > 5 && 0 == strcmp(parv[5], "R"));
+  if (dev) {
+    f.device_ours = MyUser(dev);
+    f.is_alias = IsBouncerAlias(dev) && cli_alias_primary(dev);
+    if (f.is_alias) {
+      primary = cli_alias_primary(dev);
+      f.primary_ours = MyUser(primary);
+      f.primary_dir_is_link = (cli_from(primary) == cptr);
     }
+    f.device_dir_is_link = (cli_from(dev) == cptr);
+    f.source_is_device_server = IsServer(sptr) && cli_user(dev)->server == sptr;
+    if (f.device_ours) {
+      s = bounce_get_session(dev);
+      f.session_primary_ours = (s && s->hs_client == dev);
+      f.asked_here = cli_nickask_ts(dev)
+                     && cli_nickask_ts(dev) == (time_t)strtoul(parv[4], NULL, 10)
+                     && 0 == ircd_strcmp(cli_nickask(dev), parv[3])
+                     && TStime() - cli_nickask_ts(dev) <= NICK_ASK_RETURN_WINDOW;
+    }
+  }
+
+  switch (nick_request_action(&f)) {
+  case NICK_REQUEST_WRITE_DEVICE:
+    return nick_device_request(cptr, primary, dev, parv[3], parv[4], 1);
+  case NICK_REQUEST_WRITE_OWN: {
+    /* Our own device's request, back after it was promoted here: its own
+     * NICK, with every check a local NICK gets. */
+    char *own[3];
+    cli_nickask_ts(dev) = 0;
+    own[0] = cli_name(dev);
+    own[1] = parv[3];
+    own[2] = NULL;
+    return m_nick(dev, dev, 2, own);
+  }
   case NICK_REQUEST_FORWARD:
-    sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, next, "W %s %s %s",
-                  parv[2], parv[3], parv[4]);
+    if (f.is_return)
+      sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, cli_from(dev), "W %s %s %s R",
+                    parv[2], parv[3], parv[4]);
+    else
+      sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, cli_from(primary), "W %s %s %s",
+                    parv[2], parv[3], parv[4]);
     return 0;
   case NICK_REQUEST_RETURN:
-    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, next, "W %s %s %s",
+    /* Sourced from us: the sender is on that side, so its own prefix
+     * coming back to it would be a fake direction. */
+    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "W %s %s %s R",
                   parv[2], parv[3], parv[4]);
     return 0;
+  case NICK_REQUEST_REJECT:
+    log_write(LS_USER, L_WARNING, 0, "Bouncer: BX W%s from %s via %s for %s "
+              "(%s) to %s rejected: not a request that link can make",
+              f.is_return ? " R" : "", cli_name(sptr), cli_name(cptr),
+              parv[2], dev ? cli_name(dev) : "?", parv[3]);
+    return protocol_violation(cptr, "BX W%s from %s for %s (%s) to %s: not "
+                              "a device of the sender's or not ours to apply",
+                              f.is_return ? " R" : "", cli_name(sptr), parv[2],
+                              dev ? cli_name(dev) : "?", parv[3]);
   case NICK_REQUEST_DROP:
   default:
-    log_write(LS_USER, L_INFO, 0, "Bouncer: BX W for %s (%s) from %C "
-              "dropped: %s", parv[2], parv[3], cptr,
+    log_write(LS_USER, L_INFO, 0, "Bouncer: BX W%s for %s (%s) from %s "
+              "dropped: %s", f.is_return ? " R" : "", parv[2], parv[3],
+              cli_name(sptr),
               !dev ? "no such device here"
                    : "its primary is back the way it came (crossed promote)");
     return 0;
