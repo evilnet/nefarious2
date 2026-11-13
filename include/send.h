@@ -65,6 +65,10 @@ extern void sendrawto_one(struct Client *to, const char *pattern, ...);
  * source prefix keeps it that way; a client with no tag capability gets
  * exactly what sendrawto_one() sends. */
 extern void sendrawto_one_tags(struct Client *to, const char *pattern, ...);
+/* A raw line (own prefix, no tags) that is part of the answer to the line
+ * a local client is sending: tagged with the batch open on that answer,
+ * else with the pending label, else bare. */
+extern void sendrawto_one_answer(struct Client *to, const char *pattern, ...);
 
 /** Send a BATCH command to a client if it has CAP_BATCH.
  * Checks per-connection caps (CapOwnHas) to decide delivery.

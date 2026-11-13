@@ -1571,6 +1571,13 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   subcmd = parv[2];
 
+  /* labeled-response: one labeled answer, whatever the subcommand sends
+   * -- a typed metadata batch alone keeps the label on its BATCH + line;
+   * a batch and a FAIL (GET with an invalid key), or several lines (SUB,
+   * UNSUB with several keys), are one labeled batch; nothing is ACKed.
+   * The count is made as the lines go out (labeled_batch_defer()). */
+  labeled_batch_defer(sptr);
+
   if (ircd_strcmp(subcmd, "GET") == 0) {
     return metadata_cmd_get(sptr, parc, parv);
   } else if (ircd_strcmp(subcmd, "SET") == 0) {

@@ -160,15 +160,15 @@ static const char *persistence_state_keyword(struct Client *cptr)
  *
  * Wire form: `:<server> PERSISTENCE <what> <state>`
  *
- * Uses sendrawto_one because PERSISTENCE has no S2S token registered
- * in msg.h yet — Phase 1 is client-facing only.
+ * Raw (PERSISTENCE has no S2S token registered in msg.h yet -- Phase 1
+ * is client-facing only), as part of the answer: sendrawto_one_answer().
  */
 static void send_persistence_reply(struct Client *to, const char *what,
                                    const char *state)
 {
   if (!to || !MyConnect(to))
     return;
-  sendrawto_one(to, ":%s PERSISTENCE %s %s",
+  sendrawto_one_answer(to, ":%s PERSISTENCE %s %s",
                 cli_name(&me), what, state);
 }
 
@@ -221,14 +221,11 @@ void persistence_send_status(struct Client *to)
   if (!to || !MyConnect(to))
     return;
   persistence_client_setting(to, client_setting, sizeof(client_setting));
-  if (cli_batch_id(to)[0])   /* inside the answer's batch (registration's) */
-    sendrawto_one(to, "@batch=%s :%s PERSISTENCE STATUS %s %s",
-                  cli_batch_id(to), cli_name(&me), client_setting,
-                  persistence_state_keyword(to));
-  else
-    sendrawto_one(to, ":%s PERSISTENCE STATUS %s %s",
-                  cli_name(&me), client_setting,
-                  persistence_state_keyword(to));
+  /* inside the answer's batch (registration's, or the PERSISTENCE
+   * command's: sendrawto_one_answer()) */
+  sendrawto_one_answer(to, ":%s PERSISTENCE STATUS %s %s",
+                       cli_name(&me), client_setting,
+                       persistence_state_keyword(to));
 }
 
 /** Send the STATUS of a hold turned off: client-setting OFF, effective
@@ -238,7 +235,7 @@ static void persistence_send_status_off(struct Client *to)
 {
   if (!to || !MyConnect(to))
     return;
-  sendrawto_one(to, ":%s PERSISTENCE STATUS OFF OFF", cli_name(&me));
+  sendrawto_one_answer(to, ":%s PERSISTENCE STATUS OFF OFF", cli_name(&me));
 }
 
 /** Handle STATUS / GET subcommand.  Both report the effective state. */
@@ -368,10 +365,10 @@ static void persistence_list_cb(const char *name, const char *parent, void *cook
 {
   struct persistence_list_ctx *ctx = (struct persistence_list_ctx *)cookie;
   if (parent && parent[0])
-    sendrawto_one(ctx->to, ":%s PERSISTENCE PROFILE %s parent=%s",
+    sendrawto_one_answer(ctx->to, ":%s PERSISTENCE PROFILE %s parent=%s",
                   cli_name(&me), name, parent);
   else
-    sendrawto_one(ctx->to, ":%s PERSISTENCE PROFILE %s",
+    sendrawto_one_answer(ctx->to, ":%s PERSISTENCE PROFILE %s",
                   cli_name(&me), name);
   ctx->count++;
 }
@@ -387,7 +384,7 @@ static int persistence_cmd_profile_list(struct Client *sptr)
               "Failed to enumerate profiles");
     return 0;
   }
-  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE ENDOFLIST",
+  sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE ENDOFLIST",
                 cli_name(&me));
   return 0;
 }
@@ -425,7 +422,7 @@ static int persistence_cmd_profile_create(struct Client *sptr,
                   "PROFILE CREATE %s", name);
     return 0;
   }
-  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE CREATED %s parent=%s",
+  sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE CREATED %s parent=%s",
                 cli_name(&me), name,
                 (parent && parent[0]) ? parent : PERSISTENCE_PROFILE_DEFAULT);
   return 0;
@@ -459,7 +456,7 @@ static int persistence_cmd_profile_delete(struct Client *sptr,
                   "PROFILE DELETE %s", name);
     return 0;
   }
-  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE DELETED %s",
+  sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE DELETED %s",
                 cli_name(&me), name);
   return 0;
 }
@@ -497,7 +494,7 @@ static int persistence_cmd_profile_rename(struct Client *sptr,
                   "PROFILE RENAME %s %s", old_name, new_name);
     return 0;
   }
-  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE RENAMED %s %s",
+  sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE RENAMED %s %s",
                 cli_name(&me), old_name, new_name);
   return 0;
 }
@@ -540,10 +537,10 @@ static int persistence_cmd_profile_get(struct Client *sptr,
       return 0;
     }
     if (value[0])
-      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
+      sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
                     cli_name(&me), name, key, value);
     else
-      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s",
+      sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s %s",
                     cli_name(&me), name, key);
     return 0;
   }
@@ -557,10 +554,10 @@ static int persistence_cmd_profile_get(struct Client *sptr,
     return 0;
   }
   if (rc == 0)
-    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
+    sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
                   cli_name(&me), name, key, value);
   else
-    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s",
+    sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s %s",
                   cli_name(&me), name, key);
   return 0;
 }
@@ -624,10 +621,10 @@ static int persistence_cmd_profile_set(struct Client *sptr,
       return 0;
     }
     if (value)
-      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s channels %s",
+      sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s channels %s",
                     cli_name(&me), name, value);
     else
-      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s channels",
+      sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s channels",
                     cli_name(&me), name);
     return 0;
   }
@@ -639,10 +636,10 @@ static int persistence_cmd_profile_set(struct Client *sptr,
     return 0;
   }
   if (value)
-    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
+    sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
                   cli_name(&me), name, key, value);
   else
-    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s",
+    sendrawto_one_answer(sptr, ":%s PERSISTENCE PROFILE %s %s",
                   cli_name(&me), name, key);
   return 0;
 }
@@ -701,7 +698,7 @@ static void persistence_send_replay_status(struct Client *to)
     return;
   persistence_replay_client_setting(to, client_setting, sizeof(client_setting));
   eff = persistence_effective_replay(to) ? "ON" : "OFF";
-  sendrawto_one(to, ":%s PERSISTENCE REPLAY STATUS %s %s",
+  sendrawto_one_answer(to, ":%s PERSISTENCE REPLAY STATUS %s %s",
                 cli_name(&me), client_setting, eff);
 }
 
@@ -996,11 +993,11 @@ static int persistence_cmd_list(struct Client *sptr)
                     sess->hs_chancount == 1 ? "" : "s",
                     (i < sess->hs_chancount) ? " (list truncated)" : "");
 
-    sendrawto_one(sptr, ":%s PERSISTENCE SESSION %s %s %s %s :%s",
+    sendrawto_one_answer(sptr, ":%s PERSISTENCE SESSION %s %s %s %s :%s",
                   cli_name(&me), sess->hs_sessid, state, nick,
                   used ? chanbuf : "*", info);
   }
-  sendrawto_one(sptr, ":%s PERSISTENCE ENDOFLIST", cli_name(&me));
+  sendrawto_one_answer(sptr, ":%s PERSISTENCE ENDOFLIST", cli_name(&me));
   return 0;
 }
 
@@ -1016,6 +1013,13 @@ int m_persistence(struct Client *cptr, struct Client *sptr,
   }
 
   sub = parv[1];
+
+  /* labeled-response: one labeled answer, whatever the subcommand sends
+   * (SET is answered by its reply and the STATUS; a hold turned on may
+   * join the account's session and send its channel state): one line
+   * carries the label, several are one labeled batch, none is ACKed --
+   * counted as they go out (labeled_batch_defer()). */
+  labeled_batch_defer(sptr);
 
   if (0 == ircd_strcmp(sub, "STATUS") || 0 == ircd_strcmp(sub, "GET"))
     return persistence_cmd_status(sptr);

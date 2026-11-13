@@ -105,7 +105,7 @@ static int bouncer_token(struct Client *sptr)
   bounce_broadcast(session, 'A', cli_yxx(sptr));
 
   /* Send token to client */
-  sendrawto_one(sptr, ":%s %d %s %s :%s",
+  sendrawto_one_answer(sptr, ":%s %d %s %s :%s",
                 cli_name(&me), RPL_BOUNCETOKEN, cli_name(sptr),
                 session->hs_sessid, session->hs_token);
 
@@ -273,7 +273,7 @@ static void bouncer_listsessions_emit(struct Client *sptr,
                   s->hs_alias_count);
   }
 
-  sendrawto_one(sptr, ":%s %d %s %s",
+  sendrawto_one_answer(sptr, ":%s %d %s %s",
                 cli_name(&me), RPL_BOUNCERSESSION, cli_name(sptr),
                 info);
 }
@@ -313,7 +313,7 @@ static int bouncer_listsessions(struct Client *sptr, int parc, char *parv[])
       return 0;
     }
     bounce_walk_sessions(bouncer_listsessions_walker, sptr);
-    sendrawto_one(sptr, ":%s %d %s :End of session list (all sessions)",
+    sendrawto_one_answer(sptr, ":%s %d %s :End of session list (all sessions)",
                   cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr));
     return 0;
   }
@@ -326,7 +326,7 @@ static int bouncer_listsessions(struct Client *sptr, int parc, char *parv[])
 
   as = bounce_find_by_account(cli_account(sptr));
   if (!as || as->as_count == 0) {
-    sendrawto_one(sptr, ":%s %d %s :No active sessions",
+    sendrawto_one_answer(sptr, ":%s %d %s :No active sessions",
                   cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr));
     return 0;
   }
@@ -973,7 +973,7 @@ static int bouncer_settings(struct Client *sptr)
 
   count = bounce_count(cli_account(sptr));
 
-  sendrawto_one(sptr, ":%s %d %s :hold=%s(%s) sessions=%d max=%d hold_time=%d",
+  sendrawto_one_answer(sptr, ":%s %d %s :hold=%s(%s) sessions=%d max=%d hold_time=%d",
                 cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr),
                 hold ? "on" : "off", hold_src,
                 count,
@@ -1136,7 +1136,7 @@ static int bouncer_info(struct Client *sptr)
                       s->hs_sessid);
       }
 
-      sendrawto_one(sptr, ":%s %d %s :%s",
+      sendrawto_one_answer(sptr, ":%s %d %s :%s",
                     cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr),
                     info);
     }
@@ -1146,7 +1146,7 @@ static int bouncer_info(struct Client *sptr)
     ircd_snprintf(0, info, sizeof(info),
                   "state=none hold=%s(%s)",
                   hold ? "on" : "off", hold_src);
-    sendrawto_one(sptr, ":%s %d %s :%s",
+    sendrawto_one_answer(sptr, ":%s %d %s :%s",
                   cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr),
                   info);
   }
@@ -1372,6 +1372,14 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   subcmd = parv[1];
+
+  /* labeled-response: one labeled answer, whatever the subcommand sends
+   * (INFO, LISTCLIENTS, HISTORY and HELP answer with several NOTEs; SET
+   * HOLD on may join the account's session and send its channel state --
+   * a draft/persistence batch among other lines; RESUME the same): one
+   * line carries the label, several are one labeled batch, none is ACKed
+   * -- counted as they go out (labeled_batch_defer()). */
+  labeled_batch_defer(sptr);
 
   /* --- User-facing commands --- */
 

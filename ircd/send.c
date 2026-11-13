@@ -1694,6 +1694,37 @@ void sendrawto_one_tags(struct Client *to, const char *pattern, ...)
   msgq_clean(mb);
 }
 
+/** Send a raw line (@a pattern carries its own prefix, and no tags) to a
+ * local client as part of the answer to the line it is handling: tagged
+ * with the innermost batch open on that answer -- the labeled batch
+ * (deferred or not: labeled_batch_defer()), or a typed batch nested in it
+ * -- else with the line's label while it is still to be answered (this
+ * line answers it), else bare.  A line sent outside any labeled answer
+ * goes out byte for byte as sendrawto_one() would send it.
+ * @param[in] to Client to send to.
+ * @param[in] pattern Format string for the line. */
+void sendrawto_one_answer(struct Client *to, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[128];
+
+  tagbuf[0] = '\0';
+  if (MyConnect(to) && batch_current_id(to)[0])
+    ircd_snprintf(NULL, tagbuf, sizeof(tagbuf), "@batch=%s ", batch_current_id(to));
+  else if (MyConnect(to) && cli_label(to)[0] && !cli_label_responded(to)
+           && feature_bool(FEAT_CAP_labeled_response) && LabeledResponseInUse(to)) {
+    ircd_snprintf(NULL, tagbuf, sizeof(tagbuf), "@label=%s ", cli_label(to));
+    cli_label_responded(to) = 1;
+  }
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  mb = msgq_make(cli_from(to), "%s%v", tagbuf, &vd);
+  va_end(vd.vd_args);
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to a single client.
  * @param[in] from Client sending the command.
  * @param[in] cmd Long name of command (used if \a to is a user).
@@ -4802,7 +4833,7 @@ void send_batch_marker(struct Client *to, char sign, const char *id,
  * The hold is bounded (BATCH_HOLD_MAX lines; past it the batch is opened
  * -- a labeled batch around one message is legal).
  */
-#define BATCH_HOLD_MAX 64
+#define BATCH_HOLD_MAX 256
 
 struct BatchHold {
   unsigned char depth;        /**< The deferred frame's depth (1-based) */

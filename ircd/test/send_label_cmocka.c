@@ -95,7 +95,7 @@ struct MsgBuf {
   int refs;
 };
 
-#define MAX_SENT 128
+#define MAX_SENT 320
 static struct {
   struct Client *to;
   char text[8192];
@@ -1151,17 +1151,20 @@ static void test_deferred_hold_bounded(void **state)
   reset_sent();
   label_pending(&asker, "D5");
   labeled_batch_defer(&asker);
-  for (i = 0; i < 70; i++)
+  for (i = 0; i < BATCH_HOLD_MAX - 1; i++)
     sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%d", &asker, i);
-  assert_int_equal(n_sent, 1 + 70);
+  assert_int_equal(n_sent, 0);                       /* all held */
+  for (; i < BATCH_HOLD_MAX + 6; i++)
+    sendcmdto_one_delivery(&asker, CMD_PRIVATE, &asker, NULL, "%C :%d", &asker, i);
+  assert_int_equal(n_sent, 1 + BATCH_HOLD_MAX + 6);
   assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "D5");
-  for (i = 0; i < 70; i++) {
+  for (i = 0; i < BATCH_HOLD_MAX + 6; i++) {
     char want[64];
     snprintf(want, sizeof(want), ":nick!u@h.example PRIVMSG nick :%d", i);
     assert_string_equal(body_of(sent[1 + i].text), want);
   }
   batch_end_line(&asker);
-  assert_non_null(strstr(sent[71].text, "BATCH -"));
+  assert_non_null(strstr(sent[1 + BATCH_HOLD_MAX + 6].text, "BATCH -"));
 }
 
 /* A client that has not negotiated labels, or no label pending: nothing
