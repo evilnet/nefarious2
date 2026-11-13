@@ -99,6 +99,12 @@ extern void clear_nick_relay_withhold_legacy(void);
  * @param[in] on Nonzero to set it, zero to clear it.
  */
 extern void umode_sync_apply(struct Client *cptr, int flag, int on);
+/** umode_sync_apply(), except that @a untold -- @a cptr itself or a device
+ * of its session, still in its registration burst -- is not told: its flag
+ * changes silently and its sign-on mode line (send_umode_signon()) says
+ * it, once.  NULL: as umode_sync_apply(). */
+extern void umode_sync_apply_butone(struct Client *cptr, int flag, int on,
+                                    struct Client *untold);
 extern void send_umode_out(struct Client* cptr, struct Client* sptr,
                           struct Flags* old, int prop);
 extern int whisper(struct Client* source, const char* nick,

@@ -1158,6 +1158,14 @@ struct Flags;
 extern void bounce_sync_session_umodes(struct Client *source,
                                        const struct Flags *source_before,
                                        struct Client *told);
+/** bounce_sync_session_umodes(), with one more connection copied but not
+ * told: @a untold, a connection still in its registration burst, which
+ * hears its modes once, from its sign-on mode line (send_umode_signon()).
+ * NULL: as bounce_sync_session_umodes(). */
+extern void bounce_sync_session_umodes_butone(struct Client *source,
+                                              const struct Flags *source_before,
+                                              struct Client *told,
+                                              struct Client *untold);
 extern void bounce_sync_session_snomask(struct Client *source);
 extern void bounce_sync_alias_identity(struct Client *primary);
 

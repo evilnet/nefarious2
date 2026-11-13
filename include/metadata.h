@@ -666,7 +666,10 @@ extern void metadata_account_apply_memory(const char *account, const char *key,
  * by N after the burst -- nobody knows it yet, so its own list entry and
  * mode flag are set silently (the N carries the flag), as at
  * metadata_mode_sync_restore(..., 0); @a butone, when not NULL, is told
- * nothing (its registration burst carries the change).
+ * nothing: its registration burst carries the key, and a mode-synced key
+ * changes its flag (as the account's connection, or as a device through
+ * its primary's session mirror) without a MODE line -- its sign-on mode
+ * line says it (umode_sync_apply_butone()).
  */
 extern void metadata_account_apply_memory_ex(const char *account, const char *key,
                                              const char *value, int vis,

@@ -2249,7 +2249,11 @@ void metadata_account_apply_memory_ex(const char *account, const char *key,
 
         metadata_apply_entry_list(cptr, key, value, vis);
         if (!IsBouncerAlias(cptr))
-          umode_sync_apply(cptr, metadata_mode_sync[ms].flag, want);
+          /* butone: a connection whose registration burst carries the
+           * change (a revive, a device attach) hears its mode from its
+           * sign-on mode line, not from here. */
+          umode_sync_apply_butone(cptr, metadata_mode_sync[ms].flag, want,
+                                  butone);
         else if (!bounce_umode_flag_synced(metadata_mode_sync[ms].flag)) {
           /* A flag the session mirror does not carry (+y
            * FLAG_PM_OPTOUT, +b FLAG_BNC_HOLDPREF -- umode_sync_flags[]):

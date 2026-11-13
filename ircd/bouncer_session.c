@@ -13036,6 +13036,14 @@ void bounce_sync_session_umodes(struct Client *source,
                                 const struct Flags *source_before,
                                 struct Client *told)
 {
+  bounce_sync_session_umodes_butone(source, source_before, told, NULL);
+}
+
+void bounce_sync_session_umodes_butone(struct Client *source,
+                                       const struct Flags *source_before,
+                                       struct Client *told,
+                                       struct Client *untold)
+{
   struct BouncerSession *sess;
   struct Client *primary;
   /* The other live local members, as they were before the copy: each is
@@ -13105,13 +13113,13 @@ void bounce_sync_session_umodes(struct Client *source,
    * Here, not between a send_umode() and a read of its umodeBuf. */
   for (i = 0; i < nbefore; i++) {
     struct Client *m = before[i].c;
-    if (m == told || !MyConnect(m) || IsDead(m))
+    if (m == told || m == untold || !MyConnect(m) || IsDead(m))
       continue;
     send_umode(m, m, &before[i].flags, ALL_UMODES);
     if (cli_snomask(m) && cli_snomask(m) != before[i].mask)
       send_reply(m, RPL_SNOMASK, cli_snomask(m), cli_snomask(m));
   }
-  if (source_before && source != told && MyConnect(source)
+  if (source_before && source != told && source != untold && MyConnect(source)
       && !IsBouncerHold(source) && !IsDead(source))
     send_umode(source, source, (struct Flags *)source_before, ALL_UMODES);
 }
