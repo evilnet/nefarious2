@@ -1492,6 +1492,272 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
   }
 }
 
+/** The wall command a status message travels as between servers:
+ * WALLCHOPS for '@', WALLHOPS for '%', WALLVOICES for '+', with the
+ * member filter that goes with it. */
+static void statusmsg_wall(char status, const char **cmd, const char **tok,
+                           unsigned int *skip)
+{
+  switch (status) {
+  case '%':
+    *cmd = MSG_WALLHOPS;
+    *tok = TOK_WALLHOPS;
+    *skip = SKIP_NONHOPS;
+    break;
+  case '+':
+    *cmd = MSG_WALLVOICES;
+    *tok = TOK_WALLVOICES;
+    *skip = SKIP_NONVOICES;
+    break;
+  default:
+    *cmd = MSG_WALLCHOPS;
+    *tok = TOK_WALLCHOPS;
+    *skip = SKIP_NONOPS;
+    break;
+  }
+}
+
+/** Relay a local user's PRIVMSG to a status target, "@#chan", "%#chan"
+ * or "+#chan" (#226): to the channel's members with that status or
+ * higher, as a PRIVMSG.
+ *
+ * The checks are an ordinary channel PRIVMSG's, made by the same helpers
+ * (UTF8ONLY, relay_channel_refused: may speak there, +n's target limit;
+ * relay_channel_text: +C with ACTION allowed, +T, +c, +S), answered as
+ * for a PRIVMSG; there is no rule for the sender's own status (ircu has
+ * none: whoever may speak in the channel may address its ops).
+ *
+ * Between servers it is the wall line a NOTICE to the same target sends,
+ * "<from> WC <chan> :@ <text>" (WH "% ", WV "+ "), so legacy servers and
+ * their users get exactly what they get for that NOTICE; toward an
+ * IRCv3-aware link the line also carries the compact tag mark ,P, and a
+ * server that reads it delivers the PRIVMSG form to its own users
+ * (server_relay_channel_statusmsg).  Local members get
+ * ":<from> PRIVMSG <status><chan> :<text>", with the message's one msgid
+ * and time; the sender its echo-message echo in the same form.
+ *
+ * The text is cut once, here, to fit both client forms of it -- the
+ * PRIVMSG form and the NOTICE form legacy servers show, ":<from> NOTICE
+ * <status><chan> :<status> <text>", which is one byte longer and binds --
+ * so every server and recipient gets the same text.
+ *
+ * Not stored in history (a message for the channel's ops must not be
+ * replayed to everyone who can read its history), as the NOTICE is not;
+ * no web push.
+ *
+ * @param[in] sptr The local sender.
+ * @param[in] status '@', '%' or '+'.
+ * @param[in] name The channel name (the target less its status).
+ * @param[in] text The message text.
+ * @param[in] targets Number of targets of the PRIVMSG.
+ */
+void relay_channel_statusmsg(struct Client *sptr, char status, const char *name,
+                             const char *text, int targets)
+{
+  struct Channel *chptr;
+  const char *mytext = text;
+  const char *wcmd, *wtok;
+  unsigned int wskip;
+  char utf8buf[BUFSIZE];
+  char cutbuf[BUFSIZE];
+  char wallbuf[BUFSIZE];
+  size_t room, nroom;
+  int utf8;
+
+  assert(0 != sptr);
+  assert(0 != name);
+  assert(0 != text);
+
+  statusmsg_wall(status, &wcmd, &wtok, &wskip);
+
+  /* UTF8ONLY enforcement (as relay_channel_message) */
+  if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
+    relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
+    if (utf8 == RELAY_UTF8_REFUSED)
+      return;
+    mytext = utf8buf;
+    if (EmptyString(mytext)) {
+      send_reply(sptr, ERR_NOTEXTTOSEND);
+      return;
+    }
+  }
+
+  if (0 == (chptr = FindChannel(name))) {
+    send_reply(sptr, ERR_NOSUCHCHANNEL, name);
+    return;
+  }
+  if (relay_channel_refused(sptr, chptr, 0))
+    return;
+  if (!(mytext = relay_channel_text(sptr, chptr, text, mytext, targets, 0)))
+    return;
+
+  /* Cut once, to the smaller room of the two client forms (above). */
+  room = relay_text_budget(sptr, MSG_PRIVATE, 1 + strlen(chptr->chname), 0);
+  nroom = relay_text_budget(sptr, MSG_NOTICE, 1 + strlen(chptr->chname), 2);
+  if (nroom < room)
+    room = nroom;
+  mytext = relay_cut_to(mytext, room, cutbuf, sizeof(cutbuf));
+  if (EmptyString(mytext)) {
+    send_reply(sptr, ERR_NOTEXTTOSEND);
+    return;
+  }
+  /* The relayed text: the lead, then the text (the wall form's). */
+  ircd_snprintf(0, wallbuf, sizeof(wallbuf), "%c %s", status, mytext);
+
+  RevealDelayedJoinIfNeeded(sptr, chptr);
+
+  {
+    char msgid[64] = "";
+    char timestamp[32] = "";
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
+
+#ifdef USE_ROCKSDB
+    if (feature_bool(FEAT_MSGID)) {
+      uint64_t event_ms;
+      /* msgid first, then its mint time (see relay_channel_message) */
+      generate_msgid(msgid, sizeof(msgid));
+      event_ms = history_event_time_ms(NULL);
+      history_format_ms(timestamp, sizeof(timestamp), event_ms);
+      sendcmdto_set_s2s_tags(event_ms, msgid);
+    }
+#endif
+
+    if (msgid[0])
+      sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
+
+    /* No forward_channel_history / store_channel_history: not stored. */
+
+    /* Alias source rewriting (see relay_channel_message) */
+    {
+      struct Client *from = sptr;
+      const char *client_tags = cli_client_tags(sptr);
+
+      if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+        if (!MyUser(cli_user(sptr)->alias_primary))
+          sendcmdto_set_alias_source(sptr);
+        from = cli_user(sptr)->alias_primary;
+      }
+
+      sendcmdto_set_statusmsg_privmsg(mytext);
+      sendcmdto_channel_butone_with_client_tags(from, wcmd, wtok, chptr,
+                         cli_from(sptr), SKIP_DEAF | SKIP_BURST | wskip, '\0',
+                         (client_tags && *client_tags) ? client_tags : NULL,
+                         "%H :%s", chptr, wallbuf);
+    }
+
+    sendcmdto_set_client_msgid(NULL);
+
+    /* Echo, as relay_channel_message's, to "<status><chan>" */
+    if (need_echo) {
+      const char *echo_ctags = cli_client_tags(sptr);
+      if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
+        if (msgid[0])
+          sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
+        sendcmdto_one_client_tags(sptr, MSG_PRIVATE, sptr, echo_ctags,
+                                  "%c%H :%s", status, chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
+      } else {
+#ifdef USE_ROCKSDB
+        if (msgid[0])
+          sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
+        sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, msgid,
+                               "%c%H :%s", status, chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
+#else
+        sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%c%H :%s", status, chptr,
+                           mytext);
+#endif
+      }
+    }
+  }
+}
+
+/** Deliver a wall line from another server as a status-message PRIVMSG
+ * (#226), when it is one: the line carried the compact tag mark ,P and
+ * its text starts with exactly the lead the origin added for \a status
+ * ("@ " / "% " / "+ ", ircd_statusmsg_unlead) with text after it.
+ * Otherwise nothing is done and the caller handles the line as the wall
+ * command it is (the NOTICE form) -- a mark on a line without its lead
+ * is not trusted.
+ *
+ * Handled as server_relay_channel_message handles a channel PRIVMSG (an
+ * alias sender taken as its primary, the origin's msgid and time, the
+ * client-only tags), never stored, and delivered to local members with
+ * the status as ":<from> PRIVMSG <status><chan> :<text less the lead>";
+ * relayed on unchanged -- the lead in the text, ,P re-armed toward
+ * IRCv3-aware links, the bare line toward legacy ones.
+ *
+ * @param[in] sptr The sender (a remote user).
+ * @param[in] name The channel name.
+ * @param[in] status '@', '%' or '+' (the wall command's).
+ * @param[in] text The relayed text.
+ * @return 1 when the line was handled here, 0 when the caller handles it.
+ */
+int server_relay_channel_statusmsg(struct Client *sptr, const char *name,
+                                   char status, const char *text)
+{
+  struct Channel *chptr;
+  struct Client *one;
+  const char *client_tags;
+  const char *ptext;
+  const char *wcmd, *wtok;
+  unsigned int wskip;
+
+  assert(0 != sptr);
+  assert(0 != name);
+  assert(0 != text);
+
+  one = cli_from(sptr);
+  if (!one || !cli_s2s_statusmsg(one)
+      || !(ptext = ircd_statusmsg_unlead(status, text))
+      || IsLocalChannel(name) || 0 == (chptr = FindChannel(name)))
+    return 0;
+
+  statusmsg_wall(status, &wcmd, &wtok, &wskip);
+
+  {
+    const char *s2s_tags = cli_s2s_client_tags(one);
+    client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+  }
+
+  /* Unified msgid (see server_relay_channel_message) */
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS) && !cli_s2s_msgid(one)[0])
+    s2s_mint_link_event(one);
+
+  /* Alias source rewriting (see server_relay_channel_message) */
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
+    if (!MyUser(cli_user(sptr)->alias_primary))
+      sendcmdto_set_alias_source(sptr);
+    sptr = cli_user(sptr)->alias_primary;
+  }
+
+  if (server_relay_channel_allowed(sptr, chptr, 0)) {
+    char relay_msgid[64] = "";
+
+    if (feature_bool(FEAT_MSGID)) {
+      const char *s2s_mid = (feature_bool(FEAT_P10_MESSAGE_TAGS)
+                             && cli_s2s_msgid(one)[0]) ? cli_s2s_msgid(one) : NULL;
+      if (s2s_mid)
+        ircd_strncpy(relay_msgid, s2s_mid, sizeof(relay_msgid));
+      else
+        generate_msgid(relay_msgid, sizeof(relay_msgid));
+      sendcmdto_set_client_event(relay_msgid, history_event_time_ms(one));
+    }
+
+    sendcmdto_set_statusmsg_privmsg(ptext);
+    sendcmdto_channel_butone_with_client_tags(sptr, wcmd, wtok, chptr, one,
+                       SKIP_DEAF | SKIP_BURST | wskip, '\0',
+                       (client_tags && *client_tags) ? client_tags : NULL,
+                       "%H :%s", chptr, text);
+
+    sendcmdto_set_client_msgid(NULL);
+  }
+  else
+    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+  return 1;
+}
+
 /** Relay a directed message.
  * Generates an error if the named server does not exist, if it is not
  * a services server, or if \a name names a local user and a hostmask

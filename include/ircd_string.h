@@ -50,6 +50,8 @@ extern size_t ircd_relay_text_room(size_t source_len, size_t cmd_len,
 #define BX_M_ID_MAX 15
 extern size_t ircd_relay_face_len(const char *nick, const char *user,
                                   const char *host, const char *realhost);
+extern char ircd_statusmsg_prefix(const char *target);
+extern const char *ircd_statusmsg_unlead(char status, const char *text);
 extern size_t ircd_bx_echo_text_room(size_t nick_len, size_t msgid_len,
                                      size_t ctags_len, int multiline,
                                      size_t body_max);

@@ -1881,6 +1881,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_ml(cptr)[0] = '\0';
   cli_s2s_fallback(cptr)[0] = '\0';
   cli_s2s_held(cptr) = '\0';
+  cli_s2s_statusmsg(cptr) = 0;
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1935,6 +1936,8 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
            *   S — bouncer session-identity hint
            *   H — bouncer hold mark of the N's client (one of h, p, n)
            *   M — multiline framing, <flag><batchref> (ML lines only)
+           *   F — multiline fallback mark, <msgid> (P/O lines)
+           *   P — status-message PRIVMSG mark, no data (WC/WH/WV lines)
            *   C — client-only tags (literal IRCv3 client-tag string)
            * Unknown markers are silently skipped (forward-compatible
            * for future segments).
@@ -2048,6 +2051,18 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
                 cli_s2s_fallback(cptr)[0] = '?';
                 cli_s2s_fallback(cptr)[1] = '\0';
               }
+              break;
+            }
+            case 'P': {
+              /* Status-message PRIVMSG mark (#226): the line, a
+               * WALLCHOPS / WALLHOPS / WALLVOICES whose text starts with
+               * the "<status> " lead, is a PRIVMSG to "<status><chan>",
+               * which a server that reads the mark delivers to its own
+               * users as one (ms_wallchops & co).  It carries no data; a
+               * ,P with data is a later version's segment, not this one,
+               * and is skipped like any unknown segment. */
+              if (seg_end == seg_data)
+                cli_s2s_statusmsg(cptr) = 1;
               break;
             }
             default:

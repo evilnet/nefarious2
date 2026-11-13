@@ -154,6 +154,11 @@ int ms_wallhops(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
   if (parc < 3 || !IsUser(sptr))
     return 0;
 
+  /* A PRIVMSG to "%<chan>" (the line marked ,P, #226): delivered here
+   * as one, relayed on as this line. */
+  if (server_relay_channel_statusmsg(sptr, parv[1], '%', parv[parc - 1]))
+    return 0;
+
   if (!IsLocalChannel(parv[1]) && (chptr = FindChannel(parv[1]))) {
     if (client_can_send_to_channel(sptr, chptr, 1)) {
       sendcmdto_channel_butone(sptr, CMD_WALLHOPS, chptr, cptr,

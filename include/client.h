@@ -537,6 +537,7 @@ struct Connection
   char                con_s2s_ml[S2S_ML_BUFSIZE]; /**< S2S compact-tag ,M<flag><batchref> segment (multiline framing, audit 0.1); empty when absent */
   char                con_s2s_fallback[S2S_MSGID_BUFSIZE]; /**< S2S compact-tag ,F<msgid> segment: the line is a multiline fallback line rendering message <msgid> (only its target's server stores it); empty when absent */
   char                con_s2s_held;  /**< S2S compact-tag ,H<x> segment: the bouncer hold mark of the N's client (BOUNCE_HOLD_MARK_*), 0 when absent or invalid */
+  char                con_s2s_statusmsg; /**< S2S compact-tag ,P segment (#226): 1 when the line (a WALLCHOPS/WALLHOPS/WALLVOICES) is a PRIVMSG to a status target, delivered here in the PRIVMSG form; 0 when absent */
   struct Client*      con_burst_stamp_link; /**< Local client: the server link our last burst N for it went to with a hold mark (compared only, never dereferenced) */
   char                con_burst_stamp; /**< Local client: the hold mark (BOUNCE_HOLD_MARK_*) that N carried, 0 when none */
   unsigned long       con_burst_stamp_serial; /**< Local client: that link's link_serial when the N went (struct Server) */
@@ -797,6 +798,7 @@ struct Client {
 #define cli_s2s_held(cli)        con_s2s_held(cli_connect(cli))
 /** Get the multiline-fallback mark (,F<msgid>) of the incoming S2S message ("" = none) */
 #define cli_s2s_fallback(cli)    con_s2s_fallback(cli_connect(cli))
+#define cli_s2s_statusmsg(cli)   con_s2s_statusmsg(cli_connect(cli))
 /** Get the link our last burst N for a local client carried a hold mark to */
 #define cli_burst_stamp_link(cli) con_burst_stamp_link(cli_connect(cli))
 /** Get the hold mark that burst N carried (0 = none) */
@@ -1155,6 +1157,7 @@ struct Client {
 #define con_s2s_held(con)        ((con)->con_s2s_held)
 /** Get the multiline-fallback mark from compact-tag ,F segment of incoming S2S message. */
 #define con_s2s_fallback(con)    ((con)->con_s2s_fallback)
+#define con_s2s_statusmsg(con)   ((con)->con_s2s_statusmsg)
 /** Get the link our last burst N for this local client carried a hold mark to. */
 #define con_burst_stamp_link(con) ((con)->con_burst_stamp_link)
 /** Get the hold mark that burst N carried. */

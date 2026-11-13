@@ -45,6 +45,12 @@ extern void relay_private_notice(struct Client* sptr, const char* name, const ch
 
 extern void server_relay_channel_message(struct Client* sptr, const char* name, const char* text);
 extern void server_relay_channel_notice(struct Client* sptr, const char* name, const char* text);
+/* PRIVMSG to a status target "@#chan" / "%#chan" / "+#chan" (#226) */
+extern void relay_channel_statusmsg(struct Client *sptr, char status,
+                                    const char *name, const char *text,
+                                    int targets);
+extern int server_relay_channel_statusmsg(struct Client *sptr, const char *name,
+                                          char status, const char *text);
 extern void server_relay_masked_message(struct Client* sptr, const char* mask, const char* text);
 extern void server_relay_masked_notice(struct Client* sptr, const char* mask, const char* text);
 extern void server_relay_private_message(struct Client* sptr, const char* name, const char* text);

@@ -687,6 +687,38 @@ size_t ircd_relay_face_len(const char *nick, const char *user,
   return (nick ? strlen(nick) : 0) + 1 + (user ? strlen(user) : 0) + 1 + hlen;
 }
 
+/** The status a STATUSMSG message target names (#226): '@', '%' or '+'
+ * when \a target is exactly one of them followed by a channel name
+ * ("@#chan", "%&local"), else 0.  Combined prefixes ("@+#chan") are not
+ * status targets here.
+ * @param[in] target A message target as the client wrote it.
+ * @return The status character, or 0. */
+char ircd_statusmsg_prefix(const char *target)
+{
+  if (!target || (target[0] != '@' && target[0] != '%' && target[0] != '+'))
+    return 0;
+  return IsChannelPrefix(target[1]) ? target[0] : 0;
+}
+
+/** The text a status-message PRIVMSG is delivered with (#226): the
+ * relayed wall text less EXACTLY the lead the origin put ahead of it for
+ * that status -- "@ " (WALLCHOPS), "% " (WALLHOPS), "+ " (WALLVOICES) --
+ * and nothing more; legacy servers show the relayed text whole, in the
+ * NOTICE form.
+ * @param[in] status '@', '%' or '+' (the wall command's).
+ * @param[in] text The relayed text.
+ * @return The text after the lead, or NULL when \a text does not start
+ *         with that lead or nothing follows it (the caller delivers the
+ *         NOTICE form). */
+const char *ircd_statusmsg_unlead(char status, const char *text)
+{
+  if (!text || (status != '@' && status != '%' && status != '+'))
+    return NULL;
+  if (text[0] != status || text[1] != ' ' || text[2] == '\0')
+    return NULL;
+  return text + 2;
+}
+
 /** Bytes a bouncer session echo frame leaves for a DM's text within
  * \a body_max (510: S2S lines are cut there, ircd_line_body_clamp()).  A
  * DM from a session with other devices reaches a device on another fork
