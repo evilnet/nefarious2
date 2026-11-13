@@ -725,6 +725,65 @@ static void server_fallback_segment(void **state)
   assert_string_equal(cli_s2s_client_tags(&leaf), "+x=a,FAAAAAAAAAAAAAB");
 }
 
+/* The status-message PRIVMSG mark ,P (#226): no data; kept for the line
+ * it came on, gone with the next; read in any position before ,C, with
+ * every other segment intact; inside ,C it is text; with data it is not
+ * this version's mark (a later extension) and is ignored. */
+static void server_statusmsg_segment(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P AC G :hello");
+  expect_handler("mark", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 1);
+  o = parse_every_way(parse_server, &leaf, COMPACT " AC G :hello");
+  expect_handler("no mark", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+
+  /* every segment, documented order */
+  o = parse_every_way(parse_server, &leaf,
+      COMPACT ",Sabc,Hp,M+ref1,FAAAAAAAAAAAAAB,P,Cfoo=bar AC G :hello");
+  expect_handler("all segments", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 1);
+  assert_string_equal(cli_s2s_sessid(&leaf), "abc");
+  assert_int_equal(cli_s2s_held(&leaf), 'p');
+  assert_string_equal(cli_s2s_ml(&leaf), "+ref1");
+  assert_string_equal(cli_s2s_fallback(&leaf), "AAAAAAAAAAAAAB");
+  assert_string_equal(cli_s2s_client_tags(&leaf), "foo=bar");
+
+  /* first segment, and among unknown ones */
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P,Sabc,Cfoo=bar AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 1);
+  assert_string_equal(cli_s2s_sessid(&leaf), "abc");
+  assert_string_equal(cli_s2s_client_tags(&leaf), "foo=bar");
+  o = parse_every_way(parse_server, &leaf, COMPACT ",Qzz,P,Q AC G :hello");
+  expect_handler("among unknown", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 1);
+
+  /* with data: not this version's mark */
+  o = parse_every_way(parse_server, &leaf, COMPACT ",Pzz,Cfoo=bar AC G :hello");
+  expect_handler("mark with data", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+  assert_string_equal(cli_s2s_client_tags(&leaf), "foo=bar");
+
+  /* inside ,C it is text */
+  o = parse_every_way(parse_server, &leaf, COMPACT ",C+x=a,P AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+  assert_string_equal(cli_s2s_client_tags(&leaf), "+x=a,P");
+}
+
+/* A client cannot set the status mark either. */
+static void client_cannot_set_statusmsg_mark(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_client, &user, "@,P;+x=a,P PING :hello");
+  expect_handler("client status mark", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&user), 0);
+}
+
 /* A client cannot set the mark: client lines never fill the S2S stash. */
 static void client_cannot_set_fallback_mark(void **state)
 {
@@ -1028,6 +1087,8 @@ int main(void)
     cmocka_unit_test(server_spaces_only),
     cmocka_unit_test(server_unknown_segment_is_skipped),
     cmocka_unit_test(server_fallback_segment),
+    cmocka_unit_test(server_statusmsg_segment),
+    cmocka_unit_test(client_cannot_set_statusmsg_mark),
     cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
     cmocka_unit_test(client_label_ends_with_its_line),
     cmocka_unit_test(client_label_needs_batch),

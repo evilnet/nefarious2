@@ -1435,6 +1435,86 @@ static void test_relay_text_room_line_is_510(void **state)
   assert_int_equal(510, strlen(line));
 }
 
+/* --- ircd_statusmsg_prefix / ircd_statusmsg_unlead (#226) --- */
+
+/* A STATUSMSG target is ONE of @ % + followed by a channel name; the
+ * answer is the status, or 0 for anything else. */
+static void test_statusmsg_prefix(void **state)
+{
+  (void)state;
+  assert_int_equal('@', ircd_statusmsg_prefix("@#chan"));
+  assert_int_equal('%', ircd_statusmsg_prefix("%#chan"));
+  assert_int_equal('+', ircd_statusmsg_prefix("+#chan"));
+  assert_int_equal('@', ircd_statusmsg_prefix("@&local"));
+  /* not a status target */
+  assert_int_equal(0, ircd_statusmsg_prefix("#chan"));
+  assert_int_equal(0, ircd_statusmsg_prefix("nick"));
+  assert_int_equal(0, ircd_statusmsg_prefix("@nick"));
+  assert_int_equal(0, ircd_statusmsg_prefix("nick@server"));
+  assert_int_equal(0, ircd_statusmsg_prefix("@"));
+  assert_int_equal(0, ircd_statusmsg_prefix(""));
+  assert_int_equal(0, ircd_statusmsg_prefix(NULL));
+  /* combined prefixes are not built (out of scope): not a status target */
+  assert_int_equal(0, ircd_statusmsg_prefix("@+#chan"));
+  assert_int_equal(0, ircd_statusmsg_prefix("+@#chan"));
+  assert_int_equal(0, ircd_statusmsg_prefix("@@#chan"));
+  /* other characters are not statuses */
+  assert_int_equal(0, ircd_statusmsg_prefix("~#chan"));
+  assert_int_equal(0, ircd_statusmsg_prefix("$#chan"));
+}
+
+/* The PRIVMSG form's text is the relayed text less EXACTLY the lead the
+ * wall form carries for that status -- "<status> " -- and nothing else;
+ * a missing or different lead, or nothing after it, is not a PRIVMSG
+ * form (NULL: the caller delivers the NOTICE form). */
+static void test_statusmsg_unlead(void **state)
+{
+  const char *t;
+  (void)state;
+  t = "@ hello";
+  assert_ptr_equal(t + 2, ircd_statusmsg_unlead('@', t));
+  t = "% hello";
+  assert_ptr_equal(t + 2, ircd_statusmsg_unlead('%', t));
+  t = "+ hello";
+  assert_ptr_equal(t + 2, ircd_statusmsg_unlead('+', t));
+  /* a CTCP ACTION keeps its delimiters */
+  t = "@ \001ACTION waves\001";
+  assert_string_equal("\001ACTION waves\001", ircd_statusmsg_unlead('@', t));
+  /* only the one lead: text that itself starts with "@ " keeps it */
+  t = "@ @ hi";
+  assert_string_equal("@ hi", ircd_statusmsg_unlead('@', t));
+  /* a space after the lead is text */
+  t = "@  two spaces";
+  assert_string_equal(" two spaces", ircd_statusmsg_unlead('@', t));
+  /* the lead of another status is not this one's */
+  assert_null(ircd_statusmsg_unlead('@', "% hello"));
+  assert_null(ircd_statusmsg_unlead('%', "@ hello"));
+  assert_null(ircd_statusmsg_unlead('+', "@ hello"));
+  /* no lead, a lead without its space, nothing after the lead */
+  assert_null(ircd_statusmsg_unlead('@', "hello"));
+  assert_null(ircd_statusmsg_unlead('@', "@hello"));
+  assert_null(ircd_statusmsg_unlead('@', "@ "));
+  assert_null(ircd_statusmsg_unlead('@', "@"));
+  assert_null(ircd_statusmsg_unlead('@', ""));
+  assert_null(ircd_statusmsg_unlead('@', NULL));
+  /* not a status */
+  assert_null(ircd_statusmsg_unlead('#', "# hello"));
+  assert_null(ircd_statusmsg_unlead('\0', " hello"));
+}
+
+/* The origin cut for a status message: both client forms of the text fit
+ * 510 bytes, ":src PRIVMSG @#c :<text>" and ":src NOTICE @#c :@ <text>"
+ * (what legacy servers show) -- the NOTICE form is one byte longer and
+ * binds. */
+static void test_statusmsg_room_notice_form_binds(void **state)
+{
+  size_t src = strlen("sender!u@127.0.0.1"), tgt = strlen("@#t");
+  size_t priv = ircd_relay_text_room(src, 7, tgt, 510);
+  size_t note = ircd_relay_text_room(src, 6, tgt, 510) - 2;
+  (void)state;
+  assert_int_equal(priv - 1, note);
+}
+
 /* --- string_is_valid_utf8 / string_sanitize_utf8 --- */
 
 /* A line as an IRC client actually sends it: CTCP delimiters and the mIRC
@@ -1899,6 +1979,11 @@ int main(void)
         cmocka_unit_test(test_keyvalue_line_len),
         cmocka_unit_test(test_relay_text_room_none_left),
         cmocka_unit_test(test_relay_text_room_line_is_510),
+
+        /* ircd_statusmsg_prefix / ircd_statusmsg_unlead (#226) */
+        cmocka_unit_test(test_statusmsg_prefix),
+        cmocka_unit_test(test_statusmsg_unlead),
+        cmocka_unit_test(test_statusmsg_room_notice_form_binds),
 
         /* ircd_text_mentions */
         cmocka_unit_test(test_mentions_basic_and_case),

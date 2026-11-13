@@ -239,9 +239,101 @@ static void test_reset_clears_mark(void **state)
   assert_null(strstr(buf, ",F"));
 }
 
+/* --- The status-message PRIVMSG mark ,P (#226) --------------------- */
+
+/* ,P carries no data, comes after ,F and before the terminal ,C, and is
+ * consumed by the format that places it. */
+static void test_statusmsg_mark_placed_and_consumed(void **state)
+{
+  char buf[512];
+  (void)state;
+  sendcmdto_set_statusmsg_privmsg("hello");
+  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, "+x=a,b",
+                                              NULL, 0));
+  assert_non_null(strstr(buf, ",P,C+x=a,b "));
+  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL,
+                                              NULL, 0));
+  assert_null(strstr(buf, ",P"));
+}
+
+/* Without client tags it ends the region. */
+static void test_statusmsg_mark_alone(void **state)
+{
+  char buf[512];
+  (void)state;
+  sendcmdto_set_statusmsg_privmsg("hello");
+  assert_non_null(format_s2s_tags(buf, sizeof(buf), NULL, NULL, 0));
+  assert_int_equal(0, strcmp(buf + strlen(buf) - 3, ",P "));
+}
+
+/* Every segment at once, in the documented order:
+ * ,S<sessid>,H<mark>,M<flag><ref>,F<msgid>,P,C<client tags>. */
+static void test_statusmsg_mark_order_with_every_segment(void **state)
+{
+  char buf[512];
+  (void)state;
+  sendcmdto_set_s2s_sessid("sess1");
+  sendcmdto_set_s2s_held('p');
+  sendcmdto_set_s2s_ml('+', "ref1");
+  sendcmdto_set_s2s_fallback("ABAAAaHRNCiimg");
+  sendcmdto_set_statusmsg_privmsg("hello");
+  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, "+x=a",
+                                              NULL, 0));
+  assert_non_null(strstr(buf, ",Ssess1,Hp,M+ref1,FABAAAaHRNCiimg,P,C+x=a "));
+}
+
+static void test_no_statusmsg_mark_unless_armed(void **state)
+{
+  char buf[512];
+  (void)state;
+  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, "+x=a",
+                                              NULL, 0));
+  assert_null(strstr(buf, ",P"));
+  sendcmdto_set_statusmsg_privmsg(NULL);               /* NULL disarms */
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, ",P"));
+  sendcmdto_set_statusmsg_privmsg("");                 /* so does "" */
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, ",P"));
+}
+
+/* A line toward one link (the DM path) never carries it: armed for a
+ * channel send only, and cleared by a send that does not use it. */
+static void test_one_send_clears_statusmsg_mark(void **state)
+{
+  char buf[512];
+  (void)state;
+  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_one_tags_with_client(&user, "PRIVMSG", "P", &link_legacy, NULL, NULL,
+                                 "%s :%s", "x", "hello");
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, ",P"));
+}
+
+/* The end-of-line reset clears it, with P10_MESSAGE_TAGS off too (the
+ * format returns before consuming anything then). */
+static void test_reset_clears_statusmsg_mark(void **state)
+{
+  char buf[512];
+  (void)state;
+  tags_on = 0;
+  sendcmdto_set_statusmsg_privmsg("hello");
+  assert_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0));
+  tags_on = 1;
+  sendcmdto_reset_s2s_overrides();
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, ",P"));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test_setup(test_statusmsg_mark_placed_and_consumed, setup),
+    cmocka_unit_test_setup(test_statusmsg_mark_alone, setup),
+    cmocka_unit_test_setup(test_statusmsg_mark_order_with_every_segment, setup),
+    cmocka_unit_test_setup(test_no_statusmsg_mark_unless_armed, setup),
+    cmocka_unit_test_setup(test_one_send_clears_statusmsg_mark, setup),
+    cmocka_unit_test_setup(test_reset_clears_statusmsg_mark, setup),
     cmocka_unit_test_setup(test_format_places_and_consumes_mark, setup),
     cmocka_unit_test_setup(test_no_mark_unless_armed, setup),
     cmocka_unit_test_setup(test_send_to_v3_link_carries_mark, setup),
