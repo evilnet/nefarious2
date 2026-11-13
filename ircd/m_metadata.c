@@ -300,14 +300,21 @@ void metadata_notify_subscribers_butone(const char *target, const char *key,
         continue;
     }
 
-    /* Send notification: METADATA <target> <key> <visibility> [:<value>] */
+    /* Send notification: METADATA <target> <key> <visibility> [:<value>].
+     * The spec's Visibility: "an asterisk (*) for keys visible to
+     * everyone, or an implementation-defined value which describes the
+     * key's visibility status" -- "private" here, as RPL_KEYVALUE and the
+     * registration burst say it (get_visibility_str()). */
     if (value && *value) {
-      sendrawto_one(acptr, ":%s METADATA %s %s * :%s",
-                    cli_name(&me), target, key, value);
+      sendrawto_one(acptr, ":%s METADATA %s %s %s :%s",
+                    cli_name(&me), target, key,
+                    visibility == METADATA_VIS_PRIVATE ? "private" : "*",
+                    value);
     } else {
       /* Unset: no value parameter */
-      sendrawto_one(acptr, ":%s METADATA %s %s *",
-                    cli_name(&me), target, key);
+      sendrawto_one(acptr, ":%s METADATA %s %s %s",
+                    cli_name(&me), target, key,
+                    visibility == METADATA_VIS_PRIVATE ? "private" : "*");
     }
   }
 }
