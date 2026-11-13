@@ -383,6 +383,8 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (cli_listing(sptr))            /* Already listing ? */
   {
+    int abort_only = (parc < 2 || 0 == ircd_strcmp("STOP", parv[1]));
+
     /* Close any labeled-response batch from the previous LIST (its own,
      * detached from the stack: send.c's nesting model) */
     if (cli_listing(sptr)->batch_id[0]) {
@@ -391,9 +393,16 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
     MyFree(cli_listing(sptr));
     cli_listing(sptr) = 0;
+    /* This line's answer starts with the abort's RPL_LISTEND.  LIST or
+     * LIST STOP: that one line, labeled.  A new LIST: the abort's 323 and
+     * the whole new listing, one labeled batch -- opened before the 323,
+     * which would otherwise take the label and leave the listing unlabeled
+     * and unbatched (labeled_batch_start() below is then a no-op). */
+    if (!abort_only)
+      labeled_batch_start(sptr);
     send_reply(sptr, RPL_LISTEND);
     update_write(sptr);
-    if (parc < 2 || 0 == ircd_strcmp("STOP", parv[1]))
+    if (abort_only)
       return 0;                 /* Let LIST or LIST STOP abort a listing. */
   }
 
