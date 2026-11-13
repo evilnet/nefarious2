@@ -609,6 +609,43 @@ static int mdsync_marker_cb(const char *target, const char *ts, void *arg)
   return 0;
 }
 
+/** Minimum gap between two attach-triggered pulls for the SAME account
+ * (W4 plan Bounds: "MDSYNC_PULL_INTERVAL"). */
+#define MDSYNC_PULL_INTERVAL 60
+
+static void mdsync_pull_key(char *out, const char *account);
+static void mdsync_send_pull(struct Client *link, unsigned long seq,
+                             char scope, const char * const *accounts, int n);
+
+/** Review b4: may this server pull @a account back from @a link now --
+ * not pulled back from it within MDSYNC_PULL_INTERVAL?  Records it when
+ * so.  Per link, not the attach-pull table: an attach pull of the account
+ * that never reached this link (it was split off) must not stand in for
+ * the pull back that brings its stale rows.  Two servers that both hold a
+ * floor for the account each pull back once and stop: the second pull
+ * back finds the first recorded. */
+static int mdsync_pullback_due(struct Client *link, const char *account)
+{
+  struct MdSyncLink *st = mdsync_link_state(link);
+  char key[ACCOUNTLEN + 1];
+  unsigned int i;
+
+  if (!st)
+    return 0;
+  mdsync_pull_key(key, account);
+  for (i = 0; i < MDSYNC_PULLBACK_RING; i++)
+    if (st->pullback[i].account[0] && !strcmp(st->pullback[i].account, key)) {
+      if ((CurrentTime - st->pullback[i].at) < MDSYNC_PULL_INTERVAL)
+        return 0;
+      st->pullback[i].at = CurrentTime;
+      return 1;
+    }
+  i = st->pullback_next++ % MDSYNC_PULLBACK_RING;
+  ircd_strncpy(st->pullback[i].account, key, sizeof(st->pullback[i].account));
+  st->pullback[i].at = CurrentTime;
+  return 1;
+}
+
 void mdsync_answer_pull(struct Client *link, unsigned long seq, char scope,
                         char *accounts[], int n)
 {
@@ -692,11 +729,29 @@ void mdsync_answer_pull(struct Client *link, unsigned long seq, char scope,
   }
 
   sendcmdto_one(&me, CMD_METADATA, link, ". %lu", seq);
+
+  /* Review b4: the CLEAR floor converts only stale rows that reach this
+   * server, and pulls flow one way -- a peer pulling an account we
+   * cleared learns our rows, but the stale ones it holds (written before
+   * the CLEAR, during a split) never come here.  For an account whose
+   * floor is in force, pull it back from the asking link, rows only: its
+   * stale rows arrive, are converted (ms_metadata_stamped()) and their
+   * tombstones go back.  Deduplicated by the attach-pull window
+   * (MDSYNC_PULL_INTERVAL), so two servers that both hold floors for the
+   * account exchange at most one pull each way per window; the asking
+   * server noted its own pull, so it does not pull back again.  A peer
+   * without this answers the pull as any other. */
+  for (i = 0; i < n; i++) {
+    const char *one[1];
+
+    if (!metadata_account_floor_in_force(accounts[i])
+        || !mdsync_pullback_due(link, accounts[i]))
+      continue;
+    one[0] = accounts[i];
+    mdsync_send_pull(link, 0, 'R', one, 1);
+  }
 }
 
-/** Minimum gap between two attach-triggered pulls for the SAME account
- * (W4 plan Bounds: "MDSYNC_PULL_INTERVAL"). */
-#define MDSYNC_PULL_INTERVAL 60
 
 /** Size of the attach-pull dedup table (W4 plan Bounds: "a 4096-entry
  * table; a full table is cleared").  Open-addressed, no per-entry

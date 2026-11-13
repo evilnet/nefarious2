@@ -34,6 +34,9 @@ struct MdSyncEobEntry {
  * struct, not an opaque buffer, so that addition is a field, not a
  * redesign.
  */
+/** Size of a link's pull-back ring (MdSyncLink.pullback). */
+#define MDSYNC_PULLBACK_RING 64
+
 struct MdSyncLink {
   struct md_chunk chunk;  /**< reassembly state for a `+`-continued row */
   time_t limit_notice_last;  /**< CurrentTime of the last SNO_NETWORK
@@ -56,6 +59,17 @@ struct MdSyncLink {
                                         *   sequence number, 0 = none */
   unsigned int eob_requests_sent;  /**< "MD ?" batches sent so far this
                                       *   sweep, for the completion log line */
+
+  /** Review b4: the accounts this server pulled back from this link after
+   * answering its pull of an account we hold a CLEAR floor for, with when
+   * -- one pull back per account per link per MDSYNC_PULL_INTERVAL, so two
+   * servers that both hold floors stop after one pull each way.  A ring;
+   * the casefolded account name ("" = free). */
+  struct {
+    char account[ACCOUNTLEN + 1];
+    time_t at;
+  } pullback[MDSYNC_PULLBACK_RING];
+  unsigned int pullback_next;      /**< the ring's next slot to reuse */
 };
 
 /** Return this link's chunk-reassembly state, lazily allocating

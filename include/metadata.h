@@ -353,6 +353,9 @@ extern int metadata_account_floor_get(const char *account, struct md_stamp *out)
 extern void metadata_account_floor_raise(const char *account,
                                          const struct md_stamp *tc);
 
+/** Whether @a account has a CLEAR floor in force (md_floor_in_force()). */
+extern int metadata_account_floor_in_force(const char *account);
+
 /** Does the account's floor turn the incoming row @a in for @a key into a
  * tombstone (md_floor_converts(): a live row of a key a CLEAR deletes,
  * older than a floor in force)?

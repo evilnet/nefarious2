@@ -2465,6 +2465,24 @@ void metadata_account_floor_raise(const char *account, const struct md_stamp *tc
               "metadata: could not record the CLEAR floor of %s", account);
 }
 
+/** The floor's life: the tombstones' (METADATA_TOMBSTONE_TTL; 0 or less:
+ * forever, as the purge reads it). */
+static uint64_t floor_ttl(void)
+{
+  int ttl = feature_int(FEAT_METADATA_TOMBSTONE_TTL);
+
+  return ttl > 0 ? (uint64_t)ttl : 0;
+}
+
+/** See include/metadata.h. */
+int metadata_account_floor_in_force(const char *account)
+{
+  struct md_stamp floor;
+
+  return metadata_account_floor_get(account, &floor)
+         && md_floor_in_force(&floor, (uint64_t)CurrentTime, floor_ttl());
+}
+
 /** See include/metadata.h. */
 int metadata_floor_converts(const char *account, const char *key,
                             const struct md_version *in, struct md_stamp *floor)
@@ -2472,9 +2490,7 @@ int metadata_floor_converts(const char *account, const char *key,
   if (!in || in->tombstone || !metadata_key_clearable(key)
       || !metadata_account_floor_get(account, floor))
     return 0;
-  return md_floor_converts(floor, in, 1, (uint64_t)CurrentTime,
-                           (uint64_t)(feature_int(FEAT_METADATA_TOMBSTONE_TTL) > 0
-                                      ? feature_int(FEAT_METADATA_TOMBSTONE_TTL) : 0));
+  return md_floor_converts(floor, in, 1, (uint64_t)CurrentTime, floor_ttl());
 }
 
 /** metadata_account_foreach_version() callback: a live user key. */
