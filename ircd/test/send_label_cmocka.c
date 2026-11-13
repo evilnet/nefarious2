@@ -867,6 +867,43 @@ static void test_batch_depth_cap(void **state)
   (void)v;
 }
 
+/* A labeled batch asked for at the depth cap opens nothing: the label is
+ * answered there and then, once, by a labeled ACK outside every batch, and
+ * the answer's lines go out in the innermost batch unlabeled; no ACK
+ * follows them, and the pairing holds. */
+static void test_labeled_batch_at_cap_answers_once(void **state)
+{
+  char deepest[32], v[64];
+  int i, labels = 0;
+
+  (void)state;
+  reset_sent();
+  for (i = 0; i < BATCH_NEST_MAX; i++)
+    send_batch_start(&asker, "t");
+  opened_id(sent[BATCH_NEST_MAX - 1].text, deepest, sizeof(deepest));
+  label_pending(&asker, "CAP1");
+  assert_int_equal(labeled_batch_start(&asker), 0);
+  assert_int_equal(n_sent, BATCH_NEST_MAX + 1);
+  assert_string_equal(body_of(sent[BATCH_NEST_MAX].text), ":hub.test ACK");
+  assert_string_equal(tag_value(sent[BATCH_NEST_MAX].text, "label", v, sizeof(v)), "CAP1");
+  assert_false(has_tag(sent[BATCH_NEST_MAX].text, "batch"));
+  assert_int_equal(cli_label_responded(&asker), 1);
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :a line of the answer", &asker);
+  assert_string_equal(tag_value(sent[BATCH_NEST_MAX + 1].text, "batch", v, sizeof(v)),
+                      deepest);
+  send_labeled_ack(&asker);                  /* parse_client()'s: nothing */
+  batch_end_line(&asker);
+  for (i = 0; i < n_sent; i++)
+    if (has_tag(sent[i].text, "label"))
+      labels++;
+  assert_int_equal(labels, 1);
+  assert_int_equal(n_sent, BATCH_NEST_MAX + 2 + BATCH_NEST_MAX);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+  assert_int_equal(cli_connect(&asker)->con_batch_over, 0);
+}
+
 /* An asynchronous batch (LIST's) is detached from the stack when its line
  * is done: a later labeled line's batch is NOT nested in it and does not
  * disturb it; the LIST's lines, sent while it is resumed, carry its id;
@@ -1006,6 +1043,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_batch_label_on_outermost, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_end_line_closes_inner_first, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_depth_cap, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_labeled_batch_at_cap_answers_once, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_async_and_unrelated_labeled, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_fwd_batch_override_consumed, setup, teardown),

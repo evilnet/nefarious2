@@ -5598,7 +5598,15 @@ int labeled_batch_start(struct Client *sptr)
     return 0;
 
   if (!send_batch_start(sptr, "labeled-response")) {
-    send_batch_end(sptr);   /* nothing opened: unpair it */
+    /* Nothing opened: BATCH_NEST_MAX batches are open already (the checks
+     * above leave no other way).  The answer's lines will go out in the
+     * innermost of them, which is not this label's: the label is answered
+     * now, once, by a labeled ACK, and rides on none of them (left
+     * pending, the first reply would carry it inside that unrelated
+     * batch, or parse_client() would ACK after the lines).  No path opens
+     * a labeled batch that deep today. */
+    send_batch_end(sptr);   /* unpair it */
+    send_labeled_ack(sptr);
     return 0;
   }
   cli_labeled_batch(sptr) = cli_connect(sptr)->con_batch_depth;
