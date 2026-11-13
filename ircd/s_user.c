@@ -1944,6 +1944,17 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                                     sib_alias == device, ":%s", nick);
                 ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
                 cli_name(sib_alias)[NICKLEN] = '\0';
+              } else if (sib_alias && IsBouncerAlias(sib_alias)
+                         && cli_alias_primary(sib_alias) == sptr) {
+                /* Another server's device: no socket here to tell, but
+                 * its name must follow too.  A promote of it here puts
+                 * that name in our nick hash and on the wire (BX P);
+                 * left stale, the promoted user kept its old nick here
+                 * while every other server had the new one.  (The BX N
+                 * handler does the same on the other servers; BX N is
+                 * never sent back to the primary's own server.) */
+                ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
+                cli_name(sib_alias)[NICKLEN] = '\0';
               }
             }
           }
