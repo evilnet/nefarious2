@@ -634,6 +634,10 @@ static int fail_unknown_msgid(struct Client *sptr, const char *subcmd,
  */
 int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
 {
+  /* A type this server does not know is never sent (it would fall to the
+   * event-playback branch below and go out to such a client). */
+  if (!history_type_valid(type))
+    return 0;
   /* PRIVMSG, NOTICE, GAP markers, and TAGMSG are always sent.
    * TAGMSG is included without event-playback per chathistory ratification
    * discussion — reactions are message-like content, not events.
@@ -1333,7 +1337,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
       continue;
     }
 
-    cmd = (msg->type <= HISTORY_MULTILINE) ? msg_type_cmd[msg->type] : "PRIVMSG";
+    cmd = history_type_valid(msg->type) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
     /* Send message, handling multiline content if present */
     send_history_message(sptr, msg, target,
@@ -2364,7 +2368,7 @@ static int ring_answer(struct Client *sptr, const char *subcmd,
     return 0;
   }
   for (pp = &rows; (m = *pp); ) {
-    if ((mask && !(mask & (1u << m->type))) || history_row_is_typing_only(m)) {
+    if (!history_type_wanted(mask, m->type) || history_row_is_typing_only(m)) {
       *pp = m->next;
       m->next = NULL;
       history_free_messages(m);
@@ -8214,7 +8218,7 @@ static int fed_children_answer(struct Client *to, const char *target, const char
    * final fixes, M-1). */
   for (pp = &stubs; (m = *pp); ) {
     if (m->is_context && m->type != HISTORY_REDACT
-        && ((mask && !(mask & (1u << m->type)))
+        && (!history_type_wanted(mask, m->type)
             || history_row_is_typing_only(m) || kept >= cap)) {
       *pp = m->next;
       m->next = NULL;

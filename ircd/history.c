@@ -2061,7 +2061,7 @@ static int history_filter_row(struct HistoryRowFilter *filter,
     return 1;
 
   filter->scanned++;
-  if (filter->type_mask && !(filter->type_mask & (1u << msg->type)))
+  if (!history_type_wanted(filter->type_mask, msg->type))
     verdict = 0;   /* type the requester cannot receive: skip, uncounted */
   else if (filter->veto && filter->veto(msg, filter->veto_ctx))
     verdict = 0;   /* content the requester never sees: skip, uncounted */
@@ -2664,7 +2664,7 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
         int64_t skip_to = 0;
         int keep = 1;
         filter->scanned++;
-        if (filter->type_mask && !(filter->type_mask & (1u << ref_msg->type)))
+        if (!history_type_wanted(filter->type_mask, ref_msg->type))
           keep = 0;
         else if (filter->veto && filter->veto(ref_msg, filter->veto_ctx))
           keep = 0;

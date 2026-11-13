@@ -733,7 +733,7 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
     } else {
       const char *per_msg_target = rs->target;
 
-      cmd = (msg->type <= HISTORY_MULTILINE) ? msg_type_cmd[msg->type] : "PRIVMSG";
+      cmd = history_type_valid(msg->type) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
       /* For PM batches the wire target follows the row's DIRECTION, in
        * today's nicks: the replaying client's own rows go to the other
