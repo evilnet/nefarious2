@@ -87,6 +87,7 @@
 #include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
+#include "random.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -140,8 +141,11 @@ static void oper_password_verified(int result, void *arg)
 
   sptr = LocalClientArray[ctx->fd];
 
-  /* Verify client still exists and matches our cookie */
-  if (!sptr || IsDead(sptr) || !IsOperPending(sptr)) {
+  /* Verify client still exists and matches our cookie: the fd alone may
+   * have been reused by another client since, with an OPER of its own
+   * pending -- it must not receive this check's result. */
+  if (!sptr || IsDead(sptr) || !IsOperPending(sptr)
+      || !ctx->cookie || cli_opercookie(sptr) != ctx->cookie) {
     Debug((DEBUG_DEBUG, "oper_password_verified: client gone or not pending "
            "(fd %d)", ctx->fd));
     MyFree(ctx);
@@ -150,6 +154,7 @@ static void oper_password_verified(int result, void *arg)
 
   /* Clear pending flag */
   ClearOperPending(sptr);
+  cli_opercookie(sptr) = 0;
 
   if (result == CRYPT_VERIFY_MATCH) {
     /* Password matched - complete OPER */
@@ -442,11 +447,13 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     ctx->fd = cli_fd(sptr);
     ctx->aconf = aconf;
     ircd_strncpy(ctx->name, name, NICKLEN + 1);
+    ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
 
     if (ircd_crypt_verify_async(password, aconf->passwd,
                                  oper_password_verified, ctx) == 0) {
       /* Async verification started */
       SetOperPending(sptr);
+      cli_opercookie(sptr) = ctx->cookie;
       Debug((DEBUG_INFO, "can_oper: started async verification for %s",
              cli_name(sptr)));
       *_aconf = aconf;
