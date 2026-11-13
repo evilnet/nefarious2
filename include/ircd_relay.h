@@ -57,6 +57,10 @@ extern void server_relay_private_notice(struct Client* sptr, const char* name, c
 #define RELAY_UTF8_SANITISED 1   /**< invalid, sanitised copy made (warn mode) */
 #define RELAY_UTF8_REFUSED   2   /**< invalid, refused (UTF8ONLY_STRICT) */
 extern int relay_utf8_check(const char *text, char *buf, size_t bufsize);
+/* The answer to an accepted single-line message: one labeled batch when it
+ * is more than one line (WARN, RPL_AWAY, echo); sends the WARN (#224). */
+extern void relay_answer_begin(struct Client *sptr, const char *cmd, int utf8,
+                               int away, int echo);
 extern void relay_utf8_answer(struct Client *sptr, const char *cmd, int result,
                               const char *label);
 extern int relay_channel_refused(struct Client *sptr, struct Channel *chptr,

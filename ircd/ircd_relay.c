@@ -133,6 +133,34 @@ void relay_utf8_answer(struct Client *sptr, const char *cmd, int result,
                          label);
 }
 
+/** The answer to a local user's ACCEPTED single-line PRIVMSG or NOTICE,
+ * before it is delivered: everything the sender gets back for it.
+ * labeled-response: "If a response consists of more than one message, a
+ * batch MUST be used to group them into a single logical response."  So
+ * the lines are counted before the first goes out -- the sanitiser's
+ * WARN (@a utf8 RELAY_UTF8_SANITISED), RPL_AWAY (@a away), the
+ * echo-message echo (@a echo) -- and two or more are one labeled batch
+ * (labeled_batch_start(), ended by parse_client() with the line); one line
+ * takes the label itself (a bare labeled echo, a bare WARN).  Then the
+ * WARN goes out: inside the batch, or labeled when it is alone.  A
+ * refused message gets its refusal alone -- no WARN about a text that was
+ * not sent.
+ * @param[in] sptr The local sender.
+ * @param[in] cmd "PRIVMSG" or "NOTICE".
+ * @param[in] utf8 relay_utf8_check()'s result for the text.
+ * @param[in] away Non-zero when RPL_AWAY will follow.
+ * @param[in] echo Non-zero when the echo will follow. */
+void relay_answer_begin(struct Client *sptr, const char *cmd, int utf8,
+                        int away, int echo)
+{
+  int lines = (utf8 == RELAY_UTF8_SANITISED) + (away != 0) + (echo != 0);
+
+  if (lines > 1)
+    labeled_batch_start(sptr);
+  if (utf8 == RELAY_UTF8_SANITISED)
+    relay_utf8_answer(sptr, cmd, utf8, NULL);
+}
+
 /** The checks a local user's PRIVMSG or NOTICE to a channel passes that
  * do not depend on its text, in the order the relay makes them: the
  * sender may speak there (client_can_send_to_channel: membership with
@@ -960,10 +988,12 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
-    if (utf8 == RELAY_UTF8_REFUSED)
+    if (utf8 == RELAY_UTF8_REFUSED) {
+      relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
       return;
-    /* Warn mode: use the sanitized copy */
+    }
+    /* Warn mode: use the sanitized copy; the WARN is part of the answer
+     * to the accepted message (relay_answer_begin) */
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -979,6 +1009,8 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     return;
   if (!(mytext = relay_channel_text(sptr, chptr, text, mytext, targets, 0)))
     return;
+  relay_answer_begin(sptr, "PRIVMSG", utf8, 0,
+                     feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG));
 
   /* Cut once, here, to what ":nick!user@host PRIVMSG <chname> :" leaves
    * of 510: the message every member, the echo, other servers and the
@@ -1108,10 +1140,12 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "NOTICE", utf8, NULL);
-    if (utf8 == RELAY_UTF8_REFUSED)
+    if (utf8 == RELAY_UTF8_REFUSED) {
+      relay_utf8_answer(sptr, "NOTICE", utf8, NULL);
       return;
-    /* Warn mode: use the sanitized copy */
+    }
+    /* Warn mode: use the sanitized copy; the WARN is part of the answer
+     * to the accepted message (relay_answer_begin) */
     mytext = utf8buf;
     if (EmptyString(mytext))
       return;
@@ -1123,6 +1157,8 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
     return;
   if (!(mytext = relay_channel_text(sptr, chptr, text, mytext, targets, 1)))
     return;
+  relay_answer_begin(sptr, "NOTICE", utf8, 0,
+                     feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG));
 
   /* Cut once, here (see relay_channel_message). */
   mytext = relay_cut_text(sptr, MSG_NOTICE, strlen(chptr->chname), 0,
@@ -1707,10 +1743,12 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
-    if (utf8 == RELAY_UTF8_REFUSED)
+    if (utf8 == RELAY_UTF8_REFUSED) {
+      relay_utf8_answer(sptr, "PRIVMSG", utf8, NULL);
       return;
-    /* Warn mode: use the sanitized copy */
+    }
+    /* Warn mode: use the sanitized copy; the WARN is part of the answer
+     * to the accepted message (relay_answer_begin) */
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -1724,6 +1762,9 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   }
   if (relay_private_refused(sptr, acptr, 0))
     return;
+  relay_answer_begin(sptr, "PRIVMSG", utf8,
+                     cli_user(acptr) && cli_user(acptr)->away,
+                     feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG));
   relay_private_accepted(sptr, acptr, 0);
 
   /* Generate shared msgid + timestamp for alias forwarding, echo, and history */
@@ -1838,8 +1879,10 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         tpos = 1;
         /* Client tags first */
         tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, "%s", echo_client_tags);
-        /* Then server tags: label, msgid, time */
-        if (cli_label(sptr)[0] && LabeledResponseInUse(sptr) && !cli_label_responded(sptr)) {
+        /* Then server tags: the answer's batch or label, msgid, time */
+        if (cli_labeled_batch(sptr) && cli_batch_id(sptr)[0])
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";batch=%s", cli_batch_id(sptr));
+        else if (cli_label(sptr)[0] && LabeledResponseInUse(sptr) && !cli_label_responded(sptr)) {
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";label=%s", cli_label(sptr));
           cli_label_responded(sptr) = 1;
         }
@@ -1882,7 +1925,9 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         echo_tagbuf[0] = '@';
         tpos = 1;
         tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, "%s", echo_client_tags);
-        if (cli_label(sptr)[0] && LabeledResponseInUse(sptr) && !cli_label_responded(sptr)) {
+        if (cli_labeled_batch(sptr) && cli_batch_id(sptr)[0])
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";batch=%s", cli_batch_id(sptr));
+        else if (cli_label(sptr)[0] && LabeledResponseInUse(sptr) && !cli_label_responded(sptr)) {
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";label=%s", cli_label(sptr));
           cli_label_responded(sptr) = 1;
         }
@@ -1936,10 +1981,12 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
   /* UTF8ONLY enforcement */
   if ((utf8 = relay_utf8_check(text, utf8buf, sizeof(utf8buf))) != RELAY_UTF8_OK) {
-    relay_utf8_answer(sptr, "NOTICE", utf8, NULL);
-    if (utf8 == RELAY_UTF8_REFUSED)
+    if (utf8 == RELAY_UTF8_REFUSED) {
+      relay_utf8_answer(sptr, "NOTICE", utf8, NULL);
       return;
-    /* Warn mode: use the sanitized copy */
+    }
+    /* Warn mode: use the sanitized copy; the WARN is part of the answer
+     * to the accepted message (relay_answer_begin) */
     mytext = utf8buf;
     if (EmptyString(mytext))
       return;
@@ -1949,6 +1996,8 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     return;
   if (relay_private_refused(sptr, acptr, 1))
     return;
+  relay_answer_begin(sptr, "NOTICE", utf8, 0,
+                     feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG));
   relay_private_accepted(sptr, acptr, 1);
 
   /* Generate shared msgid + timestamp for alias forwarding, echo, and history */
