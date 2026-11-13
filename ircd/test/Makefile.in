@@ -82,6 +82,7 @@ CMOCKA_TESTPROGS = \
 	sasl_handler_cmocka \
 	auth_recheck_cmocka \
 	channel_speak_cmocka \
+	dbuf_find_line_cmocka \
 	s2s_handlers_cmocka \
 	services_reply_cmocka \
 	webhook_eventlog_cmocka \
@@ -173,6 +174,7 @@ DEP_SRC = \
 	sasl_handler_cmocka.c \
 	auth_recheck_cmocka.c \
 	channel_speak_cmocka.c \
+	dbuf_find_line_cmocka.c \
 	s2s_handlers_cmocka.c \
 	services_reply_cmocka.c \
 	webhook_subject_cmocka.c \
@@ -588,6 +590,16 @@ channel_speak_cmocka.o: ${srcdir}/channel_speak_cmocka.c ../channel.c
 
 channel_speak_cmocka: $(CHANNEL_SPEAK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHANNEL_SPEAK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# dbuf_find_line tests - a receive queue's first complete line a matcher
+# accepts, found without removing anything (the orphan hold's QUIT scan):
+# the REAL dbuf.c, included, with the pool, allocator and flusher stubbed.
+DBUF_FIND_LINE_CMOCKA_OBJS = dbuf_find_line_cmocka.o ../ircd_alloc.o ../ircd_string.o
+dbuf_find_line_cmocka.o: ${srcdir}/dbuf_find_line_cmocka.c ../dbuf.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/dbuf_find_line_cmocka.c
+
+dbuf_find_line_cmocka: $(DBUF_FIND_LINE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DBUF_FIND_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # s2s_handlers tests - server-to-server handlers against a fake network:
 # the REAL m_burst.o, m_destruct.o, m_endburst.o, m_svsnick.o, m_svsquit.o

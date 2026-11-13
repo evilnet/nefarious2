@@ -2661,4 +2661,13 @@ extern int bounce_account_deauth_apply(struct Client *acptr);
  */
 extern void bounce_null_alias_primary_pointing_at(struct Client *gone);
 
+/** An alias of ours left without a primary (an orphan) is given at least
+ * BOUNCE_ORPHAN_GRACE seconds for a session end or a promote on its way to
+ * reach it; the orphan sweep then re-points it or exits it, never later
+ * than BOUNCE_ORPHAN_WAIT_MAX seconds after the oldest unswept orphan was
+ * made (bounce_orphan_alias_sweep()).  Its input is held meanwhile
+ * (s_bsd.c input_held()), within a bound derived from these. */
+#define BOUNCE_ORPHAN_GRACE     2
+#define BOUNCE_ORPHAN_WAIT_MAX  10
+
 #endif /* INCLUDED_bouncer_session_h */

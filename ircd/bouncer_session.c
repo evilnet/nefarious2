@@ -2417,6 +2417,7 @@ static void bounce_alias_take_face(struct Client *x, struct Client *p,
     ClearHiddenHost(x);
   cli_lastnick(x) = cli_lastnick(p);
   user->alias_primary = p;
+  client_input_wake(x);   /* an orphan's held input (s_bsd.c) */
 
   if (!live)
     return;
@@ -2586,6 +2587,7 @@ static void bounce_repoint_aliases(struct Client *old, struct Client *new_primar
     if (take == BOUNCE_REPOINT_SKIP)
       continue;
     cli_user(c)->alias_primary = new_primary;
+    client_input_wake(c);   /* an orphan's held input (s_bsd.c) */
     if (mode != BOUNCE_REPOINT_ANNOUNCE)
       continue;
     if (take == BOUNCE_REPOINT_REMOTE) {
@@ -4378,8 +4380,8 @@ void bounce_legacy_face_change(struct Client *face, struct BouncerSession *sess,
 static struct Timer orphan_sweep_timer;
 static time_t orphan_first;   /**< when the oldest unswept orphan was made */
 static time_t orphan_due;     /**< the latest orphan's grace ends */
-#define ORPHAN_GRACE     2
-#define ORPHAN_WAIT_MAX  10
+#define ORPHAN_GRACE     BOUNCE_ORPHAN_GRACE
+#define ORPHAN_WAIT_MAX  BOUNCE_ORPHAN_WAIT_MAX
 
 /** The record of @a alias's session: the one that lists it, else the one
  * of its session id; NULL when none. */
@@ -4427,6 +4429,7 @@ static void orphan_follow(struct BouncerSession *s, struct Client *alias)
   char full[6];
 
   cli_user(alias)->alias_primary = p;
+  client_input_wake(alias);   /* its held input (s_bsd.c) */
   if (0 != ircd_strcmp(cli_name(alias), cli_name(p))) {
     sendcmdto_one(alias, CMD_NICK, alias, "%s", cli_name(p));
     ircd_strncpy(cli_name(alias), cli_name(p), NICKLEN + 1);
@@ -8558,6 +8561,7 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
     bounce_count_converted(alias, &was, cli_user(alias)->server, "promote");
   }
   cli_user(alias)->alias_primary = NULL;
+  client_input_wake(alias);   /* a primary now: any held input (s_bsd.c) */
 
   /* Preserve cli_lastnick across the promote.  Earlier this site reset
    * cli_lastnick to CurrentTime under the rationale "ensures promoted
@@ -8662,8 +8666,10 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
    * bounce_sync_alias_part() finds no aliases pointing to old_primary. */
   for (j = 0; j < session->hs_alias_count; j++) {
     struct Client *sibling = findNUser(session->hs_aliases[j].ba_numeric);
-    if (sibling && IsBouncerAlias(sibling))
+    if (sibling && IsBouncerAlias(sibling)) {
       cli_user(sibling)->alias_primary = alias;
+      client_input_wake(sibling);   /* an orphan's held input (s_bsd.c) */
+    }
   }
 
   /* A0b/A3: Broadcast BX P + BS T to all servers.
@@ -10193,8 +10199,10 @@ static void rebind_ghost(struct BouncerSession *session, struct Client *ghost,
    * with stale state). */
   for (i = 0; i < session->hs_alias_count; i++) {
     struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
-    if (alias && IsBouncerAlias(alias))
+    if (alias && IsBouncerAlias(alias)) {
       cli_user(alias)->alias_primary = ghost;
+      client_input_wake(alias);   /* an orphan's held input (s_bsd.c) */
+    }
   }
 
   /* Persisted record represented a HOLDING ghost held here; it is
@@ -13383,6 +13391,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
                              "BX P");
     }
     cli_user(new_client)->alias_primary = NULL;
+    client_input_wake(new_client);   /* a primary now: any held input (s_bsd.c) */
     /* C1: Add promoted alias to nick hash (aliases aren't in nick hash) */
     hAddClient(new_client);
     /* Reconcile opers/inv counting: ClearBouncerAlias made new_client an eligible

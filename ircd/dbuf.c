@@ -387,3 +387,56 @@ unsigned int dbuf_getmsg(struct DBuf *dyn, char *buf, unsigned int length)
   }
   return 0;
 }
+
+/** Find the first complete line of a data buffer that @a match accepts,
+ * without removing anything.  Each line (its bytes up to the end of line,
+ * at most @a length - 1 of them, NUL-terminated) is copied to @a buf and
+ * handed to @a match; empty lines (the second byte of a CR LF) are
+ * skipped, and a last line with no end of line yet is not a line.
+ * @param[in] dyn Data buffer to search.
+ * @param[out] buf Scratch buffer for one line.
+ * @param[in] length Size of @a buf (non-zero).
+ * @param[in] match Non-zero for the line wanted.
+ * @param[in] ctx Passed to @a match.
+ * @param[out] offset The offset of that line's first byte in @a dyn.
+ * @return Non-zero when a line was found.
+ */
+int dbuf_find_line(const struct DBuf *dyn, char *buf, unsigned int length,
+                   int (*match)(const char *line, void *ctx), void *ctx,
+                   unsigned int *offset)
+{
+  const struct DBufBuffer *db;
+  const char *p;
+  unsigned int pos = 0;
+  unsigned int start = 0;
+  unsigned int used = 0;
+  int any = 0;
+
+  assert(0 != dyn);
+  assert(0 != buf);
+  assert(0 != length);
+  assert(0 != match);
+
+  for (db = dyn->head; db; db = db->next) {
+    for (p = db->start; p < db->end; p++, pos++) {
+      if (IsEol(*p)) {
+        if (any) {
+          buf[used] = '\0';
+          if (match(buf, ctx)) {
+            if (offset)
+              *offset = start;
+            return 1;
+          }
+        }
+        used = 0;
+        any = 0;
+        start = pos + 1;
+      } else {
+        any = 1;
+        if (used < length - 1)
+          buf[used++] = *p;
+      }
+    }
+  }
+  return 0;
+}
