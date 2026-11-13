@@ -232,6 +232,18 @@ void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   (void)subsys; (void)severity; (void)flags; (void)fmt;
 }
 
+/* cap_dependents_drop()'s callees outside send.c: each notes its call in
+ * the transcript (a line to its client, "<name>"), so a case sees the
+ * order they run in among the BATCH - lines. */
+static void note_call(struct Client *c, const char *name);
+void fwd_label_drop_all(struct Client *cptr, int send_end)
+{
+  note_call(cptr, send_end ? "<fwd_label_drop_all 1>" : "<fwd_label_drop_all 0>");
+}
+void replay_batch_drop(struct Client *sptr) { note_call(sptr, "<replay_batch_drop>"); }
+void multiline_discard_answer(struct Client *cptr) { note_call(cptr, "<multiline_discard_answer>"); }
+void multiline_discard_batch(struct Client *cptr) { note_call(cptr, "<multiline_discard_batch>"); }
+
 /* ------------------------------------------------------------------ */
 /* The clients                                                         */
 /* ------------------------------------------------------------------ */
@@ -274,6 +286,14 @@ static void fixture_client(struct Client *c, struct Connection *con,
   FlagSet(cli_active_own(c), CAP_SERVERTIME);
   /* A client outside a bouncer session: its union caps are its own. */
   *cli_active(c) = *cli_active_own(c);
+}
+
+static void note_call(struct Client *c, const char *name)
+{
+  assert_true(n_sent < MAX_SENT);
+  sent[n_sent].to = c;
+  snprintf(sent[n_sent].text, sizeof(sent[n_sent].text), "%s", name);
+  n_sent++;
 }
 
 /** A labeled command is being handled for @a c. */
@@ -1183,6 +1203,287 @@ static void test_deferred_needs_a_label(void **state)
 }
 
 
+/* ---- the stack's other operations ---- */
+
+/** Whether sent[i] is "BATCH -<id>". */
+static int ends(int i, const char *id)
+{
+  char want[64];
+  const char *b = body_of(sent[i].text);
+  snprintf(want, sizeof(want), ":hub.test BATCH -%s", id);
+  return !strcmp(b, want);
+}
+
+/* batch_save() with frames open (a labeled batch and one nested in it)
+ * sets them aside: an asynchronous answer's labeled batch opens at the top
+ * level (not nested in them), carries its own label, and batch_restore()
+ * ends it before putting the saved ones back; the line's frames then go on
+ * and end innermost first, as if nothing had happened. */
+static void test_batch_save_restore_with_frames_open(void **state)
+{
+  struct BatchSave save;
+  char outer[32], inner[32], async[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "LINE");
+  labeled_batch_start(&asker);
+  send_batch_start(&asker, "metadata");
+  opened_id(sent[0].text, outer, sizeof(outer));
+  opened_id(sent[1].text, inner, sizeof(inner));
+
+  batch_save(&asker, &save);                       /* an async answer */
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+  assert_string_equal(cli_batch_id(&asker), "");
+  label_pending(&asker, "ASYNC");
+  assert_int_equal(labeled_batch_start(&asker), 1);
+  opened_id(sent[2].text, async, sizeof(async));
+  assert_false(has_tag(sent[2].text, "batch"));    /* top level */
+  assert_string_equal(tag_value(sent[2].text, "label", v, sizeof(v)), "ASYNC");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :async line", &asker);
+  assert_string_equal(tag_value(sent[3].text, "batch", v, sizeof(v)), async);
+  batch_restore(&asker, &save);
+  assert_true(ends(4, async));
+  assert_false(has_tag(sent[4].text, "batch"));
+
+  /* the line's frames are back as they were */
+  assert_string_equal(cli_batch_id(&asker), inner);
+  assert_int_equal(cli_labeled_batch(&asker), 1);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :line again", &asker);
+  assert_string_equal(tag_value(sent[5].text, "batch", v, sizeof(v)), inner);
+  batch_end_line(&asker);
+  assert_true(ends(6, inner));
+  assert_string_equal(tag_value(sent[6].text, "batch", v, sizeof(v)), outer);
+  assert_true(ends(7, outer));
+  assert_int_equal(n_sent, 8);
+}
+
+/* batch_resume() at the depth cap opens nothing (counted over the cap):
+ * its lines stay in the innermost batch, batch_suspend() takes nothing
+ * off, and the stack is as it was. */
+static void test_batch_resume_at_cap(void **state)
+{
+  char deepest[32], v[64];
+  int i;
+
+  (void)state;
+  reset_sent();
+  for (i = 0; i < BATCH_NEST_MAX; i++)
+    send_batch_start(&asker, "t");
+  opened_id(sent[BATCH_NEST_MAX - 1].text, deepest, sizeof(deepest));
+  batch_resume(&asker, "LISTID");
+  assert_int_equal(cli_connect(&asker)->con_batch_over, 1);
+  assert_string_equal(cli_batch_id(&asker), deepest);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :x", &asker);
+  assert_string_equal(tag_value(sent[BATCH_NEST_MAX].text, "batch", v, sizeof(v)), deepest);
+  batch_suspend(&asker);
+  assert_int_equal(cli_connect(&asker)->con_batch_over, 0);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, BATCH_NEST_MAX);
+  assert_int_equal(n_sent, BATCH_NEST_MAX + 1);    /* nothing on the wire */
+  batch_end_line(&asker);
+  assert_int_equal(n_sent, 2 * BATCH_NEST_MAX + 1);
+}
+
+/* Starts and ends over and under the cap, mixed: every start is paired
+ * with one end, the over-cap ones end first and send nothing, the stack
+ * ends empty with as many BATCH - lines as BATCH + lines. */
+static void test_batch_mixed_over_under(void **state)
+{
+  int i, starts = 0, endl = 0;
+
+  (void)state;
+  reset_sent();
+  for (i = 0; i < BATCH_NEST_MAX - 1; i++)
+    send_batch_start(&asker, "t");
+  assert_int_equal(send_batch_start(&asker, "t"), 1);     /* the last one */
+  assert_int_equal(send_batch_start(&asker, "t"), 0);     /* over */
+  assert_int_equal(send_batch_start(&asker, "t"), 0);     /* over */
+  send_batch_end(&asker);                                 /* an over one */
+  assert_int_equal(cli_connect(&asker)->con_batch_over, 1);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, BATCH_NEST_MAX);
+  send_batch_end(&asker);                                 /* the other */
+  send_batch_end(&asker);                                 /* a real one */
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, BATCH_NEST_MAX - 1);
+  assert_int_equal(send_batch_start(&asker, "t"), 1);     /* room again */
+  assert_int_equal(send_batch_start(&asker, "t"), 0);     /* over again */
+  batch_end_line(&asker);
+  for (i = 0; i < n_sent; i++) {
+    if (strstr(sent[i].text, "BATCH +")) starts++;
+    if (strstr(sent[i].text, "BATCH -")) endl++;
+  }
+  assert_int_equal(starts, BATCH_NEST_MAX + 1);
+  assert_int_equal(endl, BATCH_NEST_MAX + 1);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+  assert_int_equal(cli_connect(&asker)->con_batch_over, 0);
+}
+
+/* A client gaining batch with a frame open (opened without an id): a
+ * batch opened now is a top-level one on the wire (its parent sent
+ * nothing), and the frame without an id ends with nothing.  A client
+ * losing batch with frames open: send_batch_end() sends nothing more
+ * (cap_dependents_drop() ends them on the wire before the CAP ACK). */
+static void test_batch_client_gains_and_loses_batch(void **state)
+{
+  char id[32];
+
+  (void)state;
+  reset_sent();
+  FlagClr(cli_active_own(&asker), CAP_BATCH);
+  FlagClr(cli_active(&asker), CAP_BATCH);
+  assert_int_equal(send_batch_start(&asker, "t"), 0);     /* no id */
+  FlagSet(cli_active_own(&asker), CAP_BATCH);
+  FlagSet(cli_active(&asker), CAP_BATCH);
+  assert_int_equal(send_batch_start(&asker, "u"), 1);
+  opened_id(sent[0].text, id, sizeof(id));
+  assert_false(has_tag(sent[0].text, "batch"));          /* parent had none */
+  send_batch_end(&asker);
+  assert_true(ends(1, id));
+  assert_false(has_tag(sent[1].text, "batch"));
+  send_batch_end(&asker);                                 /* the id-less one */
+  assert_int_equal(n_sent, 2);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+
+  /* losing it with one open */
+  assert_int_equal(send_batch_start(&asker, "t"), 1);
+  FlagClr(cli_active_own(&asker), CAP_BATCH);
+  FlagClr(cli_active(&asker), CAP_BATCH);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :plain", &asker);
+  assert_false(has_tag(sent[3].text, "batch"));
+  send_batch_end(&asker);
+  assert_int_equal(n_sent, 4);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+}
+
+/* A standard reply answering the labeled line goes in its labeled batch
+ * -- not in a typed batch nested in it -- and, with no labeled batch, takes
+ * the label when no line has taken it; else it goes untagged. */
+static void test_standard_reply_goes_to_the_labeled_frame(void **state)
+{
+  char outer[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "SR1");
+  labeled_batch_start(&asker);
+  opened_id(sent[0].text, outer, sizeof(outer));
+  send_batch_start(&asker, "metadata");
+  send_fail(&asker, "METADATA", "KEY_INVALID", "k", "Invalid key");
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), outer);
+  assert_false(has_tag(sent[2].text, "label"));
+  batch_end_line(&asker);
+
+  /* a typed batch took the label: a FAIL after it carries neither */
+  reset_sent();
+  label_pending(&asker, "SR2");
+  send_batch_start(&asker, "metadata");
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "SR2");
+  send_fail(&asker, "METADATA", "KEY_INVALID", "k", "Invalid key");
+  assert_false(has_tag(sent[1].text, "label"));
+  assert_false(has_tag(sent[1].text, "batch"));
+  batch_end_line(&asker);
+
+  /* nothing took it: the FAIL does */
+  reset_sent();
+  label_pending(&asker, "SR3");
+  send_fail(&asker, "X", "Y", NULL, "z");
+  assert_string_equal(tag_value(sent[0].text, "label", v, sizeof(v)), "SR3");
+  assert_int_equal(cli_label_responded(&asker), 1);
+}
+
+/* The send side of a LIST sent while an asynchronous LIST runs (m_list.c,
+ * "Already listing"): the old LIST's detached batch is resumed and ended
+ * (BATCH -, untagged), and a new labeled batch opens at the top level
+ * after it, carrying the new line's label; the abort's 323 and the new
+ * listing go in it.  (The handler itself is not linked here.) */
+static void test_already_listing_sequence(void **state)
+{
+  char old[16], neu[32], v[64];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "LIST1");
+  labeled_batch_start(&asker);
+  batch_detach(&asker, old, sizeof(old));
+  batch_end_line(&asker);                         /* the first line ends */
+  assert_int_equal(n_sent, 1);
+
+  label_pending(&asker, "LIST2");
+  batch_resume(&asker, old);                      /* the abort */
+  send_batch_end(&asker);
+  assert_true(ends(1, old));
+  assert_false(has_tag(sent[1].text, "batch"));
+  assert_int_equal(labeled_batch_start(&asker), 1);
+  opened_id(sent[2].text, neu, sizeof(neu));
+  assert_false(has_tag(sent[2].text, "batch"));
+  assert_string_equal(tag_value(sent[2].text, "label", v, sizeof(v)), "LIST2");
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :323 of the abort", &asker);
+  assert_string_equal(tag_value(sent[3].text, "batch", v, sizeof(v)), neu);
+  batch_end_line(&asker);
+  assert_true(ends(4, neu));
+}
+
+/* cap_dependents_drop(): everything a dropped capability leaves is undone
+ * in order, before the CAP ACK -- the line's open batches ended innermost
+ * first (each tagged with its parent), then the forwarded labels, the
+ * asynchronous LIST's batch, the replay's batches, and the multiline
+ * batch; a labeled multiline batch is answered first only while labels
+ * stay in use. */
+static void test_cap_dependents_drop_order(void **state)
+{
+  struct CapSet before, after;
+  struct ListingArgs listing;
+  char outer[32], inner[32], v[64];
+
+  (void)state;
+  reset_sent();
+  memset(&listing, 0, sizeof(listing));
+  strcpy(listing.batch_id, "LISTB");
+  cli_listing(&asker) = &listing;
+  FlagSet(cli_active_own(&asker), CAP_DRAFT_MULTILINE);
+  before = *cli_active_own(&asker);
+  memset(&after, 0, sizeof(after));
+
+  label_pending(&asker, "CD1");
+  labeled_batch_start(&asker);
+  send_batch_start(&asker, "metadata");
+  opened_id(sent[0].text, outer, sizeof(outer));
+  opened_id(sent[1].text, inner, sizeof(inner));
+  cap_dependents_drop(&asker, &before, &after);   /* CAP CLEAR */
+  assert_true(ends(2, inner));
+  assert_string_equal(tag_value(sent[2].text, "batch", v, sizeof(v)), outer);
+  assert_true(ends(3, outer));
+  assert_string_equal(sent[4].text, "<fwd_label_drop_all 1>");
+  assert_true(ends(5, "LISTB"));
+  assert_string_equal(listing.batch_id, "");
+  assert_string_equal(sent[6].text, "<replay_batch_drop>");
+  assert_string_equal(sent[7].text, "<multiline_discard_batch>");   /* no answer: labels go too */
+  assert_int_equal(n_sent, 8);
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+
+  /* draft/multiline alone: the multiline batch answered, then discarded;
+   * nothing else touched */
+  reset_sent();
+  after = before;
+  FlagClr(&after, CAP_DRAFT_MULTILINE);
+  strcpy(listing.batch_id, "LISTB");
+  cap_dependents_drop(&asker, &before, &after);
+  assert_int_equal(n_sent, 2);
+  assert_string_equal(sent[0].text, "<multiline_discard_answer>");
+  assert_string_equal(sent[1].text, "<multiline_discard_batch>");
+  assert_string_equal(listing.batch_id, "LISTB");
+
+  /* labeled-response alone: forwarded labels and the LIST's batch */
+  reset_sent();
+  after = before;
+  FlagClr(&after, CAP_LABELEDRESP);
+  cap_dependents_drop(&asker, &before, &after);
+  assert_int_equal(n_sent, 2);
+  assert_string_equal(sent[0].text, "<fwd_label_drop_all 1>");
+  assert_true(ends(1, "LISTB"));
+  cli_listing(&asker) = NULL;
+}
+
 /* The fan-out's own rules decide whether the asker gets a copy at all:
  * a zombie member, a channel its profile hides, a skip mask that rules
  * it out -- no copy, and the label stays pending for the ACK. */
@@ -1272,6 +1573,13 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_fwd_batch_override_consumed, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_save_restore_with_frames_open, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_resume_at_cap, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_mixed_over_under, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_batch_client_gains_and_loses_batch, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_standard_reply_goes_to_the_labeled_frame, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_already_listing_sequence, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_cap_dependents_drop_order, setup, teardown),
     cmocka_unit_test_setup_teardown(test_deferred_none_is_ack, setup, teardown),
     cmocka_unit_test_setup_teardown(test_deferred_one_line_takes_label, setup, teardown),
     cmocka_unit_test_setup_teardown(test_deferred_second_message_opens_batch, setup, teardown),
