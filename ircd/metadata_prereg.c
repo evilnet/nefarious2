@@ -20,6 +20,7 @@ int md_prereg_should_merge(int logged_in, int metadata_aware)
 
 enum md_prereg_verdict md_prereg_decide(const struct md_version *stored,
                                         const struct md_version *w,
+                                        int no_row_is_state,
                                         int *user_keys, int max_keys,
                                         size_t max_value_bytes)
 {
@@ -29,19 +30,29 @@ enum md_prereg_verdict md_prereg_decide(const struct md_version *stored,
     max_keys = 0;
 
   if (w->tombstone) {
-    /* A delete: nothing to do unless the account holds the key. */
-    if (!stored_live)
-      return MD_PREREG_ABSENT;
-    if (!md_lww_take(stored, w))
-      return MD_PREREG_SUPERSEDED;
-    (*user_keys)--;
-    return MD_PREREG_APPLY;
+    if (stored_live) {
+      /* A delete of a key the account holds. */
+      if (!md_lww_take(stored, w))
+        return MD_PREREG_SUPERSEDED;
+      (*user_keys)--;
+      return MD_PREREG_APPLY;
+    }
+    if (stored)
+      /* Deleted here already: the row and the peers take the SET's stamp
+       * when it is the newer (md_lww_take: newer stamp; two tombstones of
+       * one stamp keep the existing). */
+      return md_lww_take(stored, w) ? MD_PREREG_STAMP : MD_PREREG_ABSENT;
+    /* No row here: a peer may hold one this server missed.  For a key
+     * whose absence is a state of its own, the tombstone also changes
+     * the account's connections (their default mode turned off). */
+    return no_row_is_state ? MD_PREREG_APPLY : MD_PREREG_STAMP;
   }
 
-  /* The same value at the same visibility: the account already says it. */
+  /* The same value at the same visibility: nothing changes here; the row
+   * still takes the SET's stamp when it is the newer. */
   if (stored_live && stored->vis == w->vis && stored->vlen == w->vlen
       && (w->vlen == 0 || !memcmp(stored->value, w->value, w->vlen)))
-    return MD_PREREG_SAME;
+    return md_lww_take(stored, w) ? MD_PREREG_STAMP : MD_PREREG_SAME;
 
   /* A write made after the client's SET (its stamp the newer) stands. */
   if (stored && !md_lww_take(stored, w))
@@ -58,4 +69,62 @@ enum md_prereg_verdict md_prereg_decide(const struct md_version *stored,
     (*user_keys)++;
   }
   return MD_PREREG_APPLY;
+}
+
+int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
+                    int max_keys, size_t max_value_bytes,
+                    const struct md_prereg_ops *ops, void *ctx)
+{
+  const struct MetadataPrereg *n;
+  int applied = 0;
+
+  for (n = list; n; n = n->next) {
+    struct md_version w, stored;
+    char valbuf[MD_PREREG_VALUE_LEN];
+    enum md_prereg_verdict v;
+    int rc = 1;
+
+    w.st = n->st;
+    w.tombstone = (n->value == NULL);
+    w.vis = n->visibility;
+    w.value = n->value;
+    w.vlen = n->value ? strlen(n->value) : 0;
+
+    if (ops->row && (rc = ops->row(ctx, n->key, &stored, valbuf,
+                                   sizeof(valbuf))) < 0) {
+      ops->refuse(ctx, n->key, MD_PREREG_ERROR);
+      continue;
+    }
+    v = md_prereg_decide(rc == 0 ? &stored : NULL, &w,
+                         ops->no_row_is_state
+                           && ops->no_row_is_state(ctx, n->key),
+                         &user_keys, max_keys, max_value_bytes);
+    switch (v) {
+    case MD_PREREG_APPLY:
+    case MD_PREREG_STAMP:
+      break;
+    case MD_PREREG_LIMIT_KEYS:
+    case MD_PREREG_LIMIT_VALUE:
+      ops->refuse(ctx, n->key, v);
+      continue;
+    default:
+      continue;         /* SAME, ABSENT, SUPERSEDED: the row stands */
+    }
+
+    if (ops->store) {
+      rc = ops->store(ctx, n->key, &w);
+      if (rc < 0) {
+        ops->refuse(ctx, n->key, MD_PREREG_ERROR);
+        continue;
+      }
+      if (rc == 0)
+        continue;       /* a newer row landed meanwhile: it stands */
+    }
+    if (v == MD_PREREG_APPLY) {
+      ops->apply(ctx, n->key, &w);
+      applied++;
+    }
+    ops->send(ctx, n->key, &w);
+  }
+  return applied;
 }

@@ -2409,35 +2409,121 @@ void metadata_prereg_move(struct Client *to, struct Client *from)
   cli_metadata_prereg(from) = NULL;
 }
 
+/** metadata_prereg_merge()'s context for md_prereg_merge()'s calls. */
+struct prereg_merge_ctx {
+  struct Client *cptr;        /**< The client registering */
+  const char *account;        /**< Its account */
+  int on_network;             /**< Known to the network already */
+  int mode_keys;              /**< A mode-synced key was applied */
+};
+
+static int prereg_row(void *arg, const char *key, struct md_version *out,
+                      char *valbuf, size_t vlen)
+{
+  struct prereg_merge_ctx *c = arg;
+
+  return metadata_account_get_version(c->account, key, out, valbuf, vlen);
+}
+
+static int prereg_store(void *arg, const char *key, const struct md_version *w)
+{
+  struct prereg_merge_ctx *c = arg;
+
+  return metadata_account_merge(c->account, key, w);
+}
+
+static void prereg_apply(void *arg, const char *key, const struct md_version *w)
+{
+  struct prereg_merge_ctx *c = arg;
+
+  /* On the path that introduces the client by N after the burst nobody
+   * knows it yet: its own entry silently (quiet).  It is told nothing
+   * either way (butone): its burst carries the key, its sign-on mode line
+   * a mode. */
+  metadata_account_apply_memory_ex(c->account, key,
+                                   w->tombstone ? NULL : w->value, w->vis,
+                                   c->on_network ? NULL : c->cptr, c->cptr);
+  if (metadata_mode_sync_index(key) >= 0)
+    c->mode_keys = 1;
+}
+
+static void prereg_send(void *arg, const char *key, const struct md_version *w)
+{
+  struct prereg_merge_ctx *c = arg;
+
+  /* From this server: on the N path the client has no numeric on the
+   * network yet; a receiver merges an account row whoever sends it. */
+  metadata_emit_versioned(&me, NULL, NULL, c->account, key, w);
+}
+
+static void prereg_refuse(void *arg, const char *key, enum md_prereg_verdict why)
+{
+  struct prereg_merge_ctx *c = arg;
+  char text[METADATA_KEY_LEN + 64];
+
+  switch (why) {
+  case MD_PREREG_LIMIT_KEYS:
+    /* The reply a SET over the cap gets. */
+    send_fail(c->cptr, "METADATA", "LIMIT_REACHED", key,
+              "Maximum number of metadata keys reached");
+    break;
+  case MD_PREREG_LIMIT_VALUE:
+    /* VALUE_INVALID carries no key: the text names it. */
+    ircd_snprintf(0, text, sizeof(text), "value of %s is too long", key);
+    send_fail(c->cptr, "METADATA", "VALUE_INVALID", NULL, text);
+    break;
+  default:
+    send_fail(c->cptr, "METADATA", "INTERNAL_ERROR", key, "Failed to set metadata");
+    break;
+  }
+}
+
+static int prereg_no_row_is_state(void *arg, const char *key)
+{
+  (void)arg;
+  /* A mode-synced key: no row leaves a connection's default mode, a
+   * tombstone turns the mode off (metadata_mode_sync_restore()). */
+  return metadata_mode_sync_index(key) >= 0;
+}
+
 /** Merge a metadata-aware client's before-connect writes into the account
- * it is logged in to as registration ends (owner, 2026-11-13; the rule is
- * metadata_prereg.h's): each write, in the order the client sent them, as
- * if it had sent the same METADATA SET right after logging in -- the
- * account's row (stamped with the time the SET was accepted, merged by the
- * cross-server LWW rule), every client of the account here and the
- * subscribers who may see the key, every fork peer (MD =account) -- unless
- * the account holds exactly that already, or a write made after the SET.
- * A write that no longer fits the account (its key cap, a value limit
- * lowered since) is refused with the standard reply SET would have given,
- * before the registration burst that shows what stands.  Keys the client
- * did not write stay as the account has them (register_user()'s
- * metadata_load_account() loaded them).
+ * it is logged in to as registration ends (owner, 2026-11-13; the rule and
+ * the loop are metadata_prereg.h's, md_prereg_merge()): each write, in the
+ * order the client sent them, as if it had sent the same METADATA SET
+ * right after logging in -- the account's row (stamped with the time the
+ * SET was accepted, merged by the cross-server LWW rule), every client of
+ * the account here and the subscribers who may see the key, every fork
+ * peer (MD =account) -- unless a write made after the SET stands.  What
+ * the account here already reads (the same value, a delete of a key it
+ * lacks) is still stored and sent under the SET's stamp when that is the
+ * newer, telling nobody: the login's pull of the account's rows from the
+ * peers (mdsync_on_attach()) must not bring back an older write this
+ * server missed.  A write that no longer fits the account (its key cap, a
+ * value limit lowered since) is refused with the standard reply SET would
+ * have given, before the registration burst that shows what stands.  Keys
+ * the client did not write stay as the account has them
+ * (register_user()'s metadata_load_account() loaded them).
  *
  * On the path that introduces the client by N after the burst
- * (@a on_network 0) nobody knows it yet: its own entry and mode flag are
- * set silently (the N carries the flag) and the rows go out from this
- * server.  Revived and attached clients are known: they change as a SET
- * would change them.  The client itself is told nothing: its burst
- * carries every key.
+ * (@a on_network 0) its own entry and mode flag are set silently (the N
+ * carries the flag).  Revived and attached clients are known: they change
+ * as a SET would change them, except that the registering connection is
+ * told nothing beyond its burst and its sign-on mode line.
  */
 static void metadata_prereg_merge(struct Client *cptr, int on_network)
 {
-  struct MetadataPrereg *list = cli_metadata_prereg(cptr), *w;
-  const char *account;
+  static const struct md_prereg_ops store_ops = {
+    prereg_row, prereg_store, prereg_apply, prereg_send, prereg_refuse,
+    prereg_no_row_is_state
+  };
+  static const struct md_prereg_ops nostore_ops = {
+    NULL, NULL, prereg_apply, prereg_send, prereg_refuse,
+    prereg_no_row_is_state
+  };
+  struct MetadataPrereg *list = cli_metadata_prereg(cptr);
+  struct prereg_merge_ctx c;
   int store = metadata_lmdb_is_available();
-  int user_keys, max_keys;
   int max_value = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
-  int mode_keys = 0;
 
   cli_metadata_prereg(cptr) = NULL;
   if (!list)
@@ -2448,69 +2534,25 @@ static void metadata_prereg_merge(struct Client *cptr, int on_network)
     prereg_list_free(list);
     return;
   }
-  account = cli_user(cptr)->account;
+  c.cptr = cptr;
+  c.account = cli_user(cptr)->account;
+  c.on_network = on_network;
+  c.mode_keys = 0;
+  if (max_value < 0)
+    max_value = 0;
 
   /* The account's key budget as a SET after login would meet it: the
    * client's list is the account's rows here.  With no store the list
    * still holds what the client set (metadata_load_account() loads
    * nothing), already within the cap: no cap to apply again. */
-  user_keys = metadata_count_client(cptr);
-  max_keys = store ? feature_int(FEAT_METADATA_MAX_KEYS) : INT_MAX;
-  if (max_value < 0)
-    max_value = 0;
-
-  for (w = list; w; w = w->next) {
-    struct md_version in, stored;
-    char valbuf[METADATA_VALUE_LEN];
-    char why[METADATA_KEY_LEN + 64];
-    int rc = 1;
-
-    in.st = w->st;
-    in.tombstone = (w->value == NULL);
-    in.vis = w->visibility;
-    in.value = w->value;
-    in.vlen = w->value ? strlen(w->value) : 0;
-
-    if (store && (rc = metadata_account_get_version(account, w->key, &stored,
-                                                    valbuf, sizeof(valbuf))) < 0) {
-      send_fail(cptr, "METADATA", "INTERNAL_ERROR", w->key, "Failed to set metadata");
-      continue;
-    }
-
-    switch (md_prereg_decide(rc == 0 ? &stored : NULL, &in, &user_keys,
-                             max_keys, (size_t)max_value)) {
-    case MD_PREREG_APPLY:
-      break;
-    case MD_PREREG_LIMIT_KEYS:
-      /* The same reply a SET over the cap gets. */
-      send_fail(cptr, "METADATA", "LIMIT_REACHED", w->key,
-                "Maximum number of metadata keys reached");
-      continue;
-    case MD_PREREG_LIMIT_VALUE:
-      /* VALUE_INVALID carries no key: the text names it. */
-      ircd_snprintf(0, why, sizeof(why), "value of %s is too long", w->key);
-      send_fail(cptr, "METADATA", "VALUE_INVALID", NULL, why);
-      continue;
-    default:
-      /* SAME, ABSENT, SUPERSEDED: the account's row stands as loaded. */
-      continue;
-    }
-
-    if (store && metadata_account_merge(account, w->key, &in) != 1) {
-      send_fail(cptr, "METADATA", "INTERNAL_ERROR", w->key, "Failed to set metadata");
-      continue;
-    }
-    metadata_account_apply_memory_ex(account, w->key, w->value, w->visibility,
-                                     on_network ? NULL : cptr, cptr);
-    metadata_emit_versioned(&me, NULL, NULL, account, w->key, &in);
-    if (metadata_mode_sync_index(w->key) >= 0)
-      mode_keys = 1;
-  }
+  md_prereg_merge(list, metadata_count_client(cptr),
+                  store ? feature_int(FEAT_METADATA_MAX_KEYS) : INT_MAX,
+                  (size_t)max_value, store ? &store_ops : &nostore_ops, &c);
   prereg_list_free(list);
 
   /* Before the N: a merged mode-synced key sets the flag silently, with
    * the rules registration applies to the account's other modes. */
-  if (mode_keys && !on_network)
+  if (c.mode_keys && !on_network)
     metadata_mode_sync_restore(cptr, 0);
 }
 

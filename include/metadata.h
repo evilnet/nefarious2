@@ -31,6 +31,9 @@
 #include "metadata_lww.h"
 
 #endif
+#ifndef INCLUDED_metadata_prereg_h
+#include "metadata_prereg.h"
+#endif
 
 /* The metadata capability half of "metadata-aware": draft/metadata-2
  * today.  The owner (2026-11-12): draft/metadata-3 will not replace it,
@@ -89,19 +92,10 @@ struct MetadataEntry {
   struct MetadataEntry *next;           /**< Next entry in list */
 };
 
-/** One METADATA write a client of ours made to itself before registration
- * (before-connect): the last write per key, in the order of those last
- * writes (cli_metadata_prereg).  Kept beside its in-memory list (which a
- * login during registration replaces with the account's rows) until
- * registration ends, when a metadata-aware client logged in by then has
- * them merged into its account (metadata_prereg.h's rule). */
-struct MetadataPrereg {
-  char key[METADATA_KEY_LEN];           /**< Key name */
-  char *value;                          /**< Value, or NULL: a delete */
-  int visibility;                       /**< Visibility level of a set */
-  struct md_stamp st;                   /**< When its SET was accepted */
-  struct MetadataPrereg *next;          /**< Next write */
-};
+/* struct MetadataPrereg -- a before-connect write, cli_metadata_prereg --
+ * is metadata_prereg.h's, which sizes it with these two limits. */
+typedef char metadata_prereg_key_len_check[(MD_PREREG_KEY_LEN == METADATA_KEY_LEN) ? 1 : -1];
+typedef char metadata_prereg_value_len_check[(MD_PREREG_VALUE_LEN == METADATA_VALUE_LEN) ? 1 : -1];
 
 /** Metadata subscription for a client */
 struct MetadataSub {

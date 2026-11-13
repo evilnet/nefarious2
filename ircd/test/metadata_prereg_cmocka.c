@@ -1,12 +1,16 @@
 /* cmocka suite for the before-connect merge rule (include/metadata_prereg.h):
  * what a client's METADATA writes made before registration do to the
- * account it logs in to during registration. */
+ * account it logs in to during registration.  The merge loop under test is
+ * the ircd's own (md_prereg_merge()); only its outward calls -- the store,
+ * telling the account's connections, sending to peers, refusing -- are the
+ * suite's fakes, over a small in-memory account. */
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 #include <cmocka.h>
 
 #include "../../include/metadata_prereg.h"
@@ -38,73 +42,186 @@ static struct md_version tomb(uint64_t ms)
   return v;
 }
 
-/* --- A tiny account: the rows a store holds, and the merge applied to it
- * the way metadata.c applies it (decide each write in order, write the
- * APPLY ones).  Lets the suite state the rule over a whole account. */
+/* --- The fake account (a store's rows), and what the merge told whom --- */
 #define ACCT_MAX 16
-struct acct_row { const char *key; struct md_version v; int used; };
-struct acct { struct acct_row rows[ACCT_MAX]; };
-struct pre { const char *key; struct md_version w; };
+#define LOG_MAX 32
+struct acct_row { char key[MD_PREREG_KEY_LEN]; char value[64]; struct md_version v; int used; };
+struct fake {
+  struct acct_row rows[ACCT_MAX];
+  int store_fails;                    /* row() and store() fail */
+  const char *mode_key;               /* the one key whose no-row is a state */
+  int napplied, nsent, nrefused;
+  char applied[LOG_MAX][MD_PREREG_KEY_LEN];
+  char sent[LOG_MAX][MD_PREREG_KEY_LEN];
+  struct md_stamp sent_st[LOG_MAX];
+  char refused[LOG_MAX][MD_PREREG_KEY_LEN];
+  enum md_prereg_verdict refused_why[LOG_MAX];
+};
 
-static struct acct_row *acct_find(struct acct *a, const char *key)
+static struct acct_row *row_find(struct fake *f, const char *key)
 {
   int i;
 
   for (i = 0; i < ACCT_MAX; i++)
-    if (a->rows[i].used && !strcmp(a->rows[i].key, key))
-      return &a->rows[i];
+    if (f->rows[i].used && !strcmp(f->rows[i].key, key))
+      return &f->rows[i];
   return NULL;
 }
 
-static void acct_put(struct acct *a, const char *key, struct md_version v)
+static void row_put(struct fake *f, const char *key, const struct md_version *v)
 {
-  struct acct_row *r = acct_find(a, key);
+  struct acct_row *r = row_find(f, key);
   int i;
 
   if (!r)
     for (i = 0; i < ACCT_MAX && !r; i++)
-      if (!a->rows[i].used)
-        r = &a->rows[i];
+      if (!f->rows[i].used)
+        r = &f->rows[i];
   assert_non_null(r);
-  r->key = key;
-  r->v = v;
+  strcpy(r->key, key);
+  r->v = *v;
+  if (!v->tombstone) {
+    assert_true(v->vlen < sizeof(r->value));
+    memcpy(r->value, v->value, v->vlen);
+    r->value[v->vlen] = '\0';
+    r->v.value = r->value;
+  } else
+    r->v.value = NULL;
   r->used = 1;
 }
 
-static int acct_live_keys(const struct acct *a)
+/* The receiving end of a peer's row (ms_metadata_stamped): LWW. */
+static int lww_merge(struct fake *f, const char *key, const struct md_version *in)
+{
+  struct acct_row *r = row_find(f, key);
+
+  if (!md_lww_take(r ? &r->v : NULL, in))
+    return 0;
+  row_put(f, key, in);
+  return 1;
+}
+
+static int f_row(void *ctx, const char *key, struct md_version *out,
+                 char *valbuf, size_t vlen)
+{
+  struct fake *f = ctx;
+  struct acct_row *r = row_find(f, key);
+
+  if (f->store_fails)
+    return -1;
+  if (!r)
+    return 1;
+  *out = r->v;
+  if (!r->v.tombstone) {
+    assert_true(r->v.vlen < vlen);
+    memcpy(valbuf, r->value, r->v.vlen + 1);
+    out->value = valbuf;
+  }
+  return 0;
+}
+
+static int f_store(void *ctx, const char *key, const struct md_version *w)
+{
+  struct fake *f = ctx;
+
+  if (f->store_fails)
+    return -1;
+  return lww_merge(f, key, w);
+}
+
+static void f_apply(void *ctx, const char *key, const struct md_version *w)
+{
+  struct fake *f = ctx;
+
+  (void)w;
+  assert_true(f->napplied < LOG_MAX);
+  strcpy(f->applied[f->napplied++], key);
+}
+
+static void f_send(void *ctx, const char *key, const struct md_version *w)
+{
+  struct fake *f = ctx;
+
+  assert_true(f->nsent < LOG_MAX);
+  f->sent_st[f->nsent] = w->st;
+  strcpy(f->sent[f->nsent++], key);
+}
+
+static void f_refuse(void *ctx, const char *key, enum md_prereg_verdict why)
+{
+  struct fake *f = ctx;
+
+  assert_true(f->nrefused < LOG_MAX);
+  f->refused_why[f->nrefused] = why;
+  strcpy(f->refused[f->nrefused++], key);
+}
+
+static int f_no_row_is_state(void *ctx, const char *key)
+{
+  struct fake *f = ctx;
+
+  return f->mode_key && !strcmp(f->mode_key, key);
+}
+
+static const struct md_prereg_ops store_ops = {
+  f_row, f_store, f_apply, f_send, f_refuse, f_no_row_is_state
+};
+static const struct md_prereg_ops nostore_ops = {
+  NULL, NULL, f_apply, f_send, f_refuse, f_no_row_is_state
+};
+
+static int live_keys(const struct fake *f)
 {
   int i, n = 0;
 
   for (i = 0; i < ACCT_MAX; i++)
-    if (a->rows[i].used && !a->rows[i].v.tombstone)
+    if (f->rows[i].used && !f->rows[i].v.tombstone)
       n++;
   return n;
 }
 
-/* Merge @a pre (n writes, in client order) into @a a; verdicts out. */
-static void merge(struct acct *a, const struct pre *pre, int n, int logged_in,
-                  int aware, int max_keys, enum md_prereg_verdict *out)
+static const char *value_of(struct fake *f, const char *key)
 {
-  int i, user_keys = acct_live_keys(a);
+  struct acct_row *r = row_find(f, key);
 
-  if (!md_prereg_should_merge(logged_in, aware))
-    return;
-  for (i = 0; i < n; i++) {
-    struct acct_row *r = acct_find(a, pre[i].key);
-
-    out[i] = md_prereg_decide(r ? &r->v : NULL, &pre[i].w, &user_keys,
-                              max_keys, 300);
-    if (out[i] == MD_PREREG_APPLY)
-      acct_put(a, pre[i].key, pre[i].w);
-  }
-  assert_int_equal(user_keys, acct_live_keys(a));
+  return (r && !r->v.tombstone) ? r->value : NULL;
 }
 
-static const char *acct_value(struct acct *a, const char *key)
+static int logged(char log[][MD_PREREG_KEY_LEN], int n, const char *key)
 {
-  struct acct_row *r = acct_find(a, key);
+  int i;
 
-  return (r && !r->v.tombstone) ? r->v.value : NULL;
+  for (i = 0; i < n; i++)
+    if (!strcmp(log[i], key))
+      return 1;
+  return 0;
+}
+
+/* --- The client's notes ------------------------------------------------- */
+#define NOTES_MAX 8
+struct notes { struct MetadataPrereg n[NOTES_MAX]; int count; };
+
+static void note(struct notes *ns, const char *key, const char *value, uint64_t ms)
+{
+  struct MetadataPrereg *p = &ns->n[ns->count];
+
+  assert_true(ns->count < NOTES_MAX);
+  memset(p, 0, sizeof(*p));
+  strcpy(p->key, key);
+  p->value = (char *)value;
+  p->visibility = VIS_PUBLIC;
+  p->st.ms = ms;
+  p->st.node = 2;
+  if (ns->count)
+    ns->n[ns->count - 1].next = p;
+  ns->count++;
+}
+
+/* The ircd's merge, the ircd's way: the account's live key count, the cap. */
+static int merge(struct fake *f, struct notes *ns, int max_keys)
+{
+  return md_prereg_merge(ns->count ? &ns->n[0] : NULL, live_keys(f), max_keys,
+                         300, &store_ops, f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -118,38 +235,44 @@ static void test_should_merge(void **state)
   assert_false(md_prereg_should_merge(0, 0));
 }
 
-/* The before-connect value wins for its key; every other key is the
- * account's, untouched. */
+/* The before-connect value wins for its key, is stored, told and sent;
+ * every other key is the account's, untouched. */
 static void test_prereg_wins_per_key_untouched_from_account(void **state)
 {
-  struct acct a;
-  struct pre pre[2];
-  enum md_prereg_verdict v[2];
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
 
   (void)state;
-  memset(&a, 0, sizeof(a));
-  acct_put(&a, "display-name", live(100, "stored", VIS_PUBLIC));
-  acct_put(&a, "pronouns", live(100, "they", VIS_PUBLIC));
-  acct_put(&a, "url", live(100, "http://x", VIS_PRIVATE));
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "stored", VIS_PUBLIC); row_put(&f, "display-name", &v);
+  v = live(100, "they", VIS_PUBLIC);   row_put(&f, "pronouns", &v);
+  v = live(100, "http://x", VIS_PRIVATE); row_put(&f, "url", &v);
 
-  pre[0].key = "display-name"; pre[0].w = live(200, "mine", VIS_PUBLIC);
-  pre[1].key = "status";       pre[1].w = live(201, "here", VIS_PUBLIC);
-  merge(&a, pre, 2, 1, 1, 20, v);
+  note(&ns, "display-name", "mine", 200);
+  note(&ns, "status", "here", 201);
+  assert_int_equal(merge(&f, &ns, 20), 2);
 
-  assert_int_equal(v[0], MD_PREREG_APPLY);
-  assert_int_equal(v[1], MD_PREREG_APPLY);
-  assert_string_equal(acct_value(&a, "display-name"), "mine");
-  assert_string_equal(acct_value(&a, "status"), "here");
-  assert_string_equal(acct_value(&a, "pronouns"), "they");
-  assert_string_equal(acct_value(&a, "url"), "http://x");
-  assert_int_equal(acct_find(&a, "url")->v.vis, VIS_PRIVATE);
-  assert_int_equal(acct_live_keys(&a), 4);
+  assert_string_equal(value_of(&f, "display-name"), "mine");
+  assert_true(row_find(&f, "display-name")->v.st.ms == 200);   /* the SET's time */
+  assert_string_equal(value_of(&f, "status"), "here");
+  assert_string_equal(value_of(&f, "pronouns"), "they");
+  assert_string_equal(value_of(&f, "url"), "http://x");
+  assert_int_equal(row_find(&f, "url")->v.vis, VIS_PRIVATE);
+  assert_int_equal(f.napplied, 2);
+  assert_int_equal(f.nsent, 2);
+  assert_false(logged(f.applied, f.napplied, "pronouns"));
+  assert_false(logged(f.sent, f.nsent, "pronouns"));
+  assert_int_equal(f.nrefused, 0);
 }
 
-/* An identical value (and visibility) changes nothing and announces
- * nothing, however new its stamp; the same value at another visibility is
+/* An identical value tells nobody.  Under an older stamp it is still
+ * stored and sent under the SET's (review a1: the login's pull would
+ * otherwise bring back a peer's write this server missed); under a newer
+ * or equal one, nothing at all.  The same value at another visibility is
  * a change. */
-static void test_identical_value_is_a_noop(void **state)
+static void test_identical_value(void **state)
 {
   struct md_version stored = live(100, "same", VIS_PUBLIC);
   struct md_version w = live(500, "same", VIS_PUBLIC);
@@ -157,30 +280,106 @@ static void test_identical_value_is_a_noop(void **state)
   int keys = 3;
 
   (void)state;
-  assert_int_equal(md_prereg_decide(&stored, &w, &keys, 20, 300), MD_PREREG_SAME);
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 300), MD_PREREG_STAMP);
   assert_int_equal(keys, 3);
-  assert_int_equal(md_prereg_decide(&stored, &wp, &keys, 20, 300), MD_PREREG_APPLY);
+  assert_int_equal(md_prereg_decide(&stored, &wp, 0, &keys, 20, 300), MD_PREREG_APPLY);
   assert_int_equal(keys, 3);
-  /* identical even when the account's row is the newer one */
   stored.st.ms = 900;
-  assert_int_equal(md_prereg_decide(&stored, &w, &keys, 20, 300), MD_PREREG_SAME);
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 300), MD_PREREG_SAME);
+  stored.st.ms = 500;
+  stored.st.node = 2;
+  w.st.node = 2;
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 300), MD_PREREG_SAME);
 }
 
-/* A delete: of a stored key, applied (one key fewer); of a key the
- * account does not hold or already deleted, nothing. */
-static void test_delete(void **state)
+/* Review a1, the scenario: this server holds k=v@100, a peer k=w@150 this
+ * server missed during a split; the client's SET k v is @200.  The merge
+ * stores and sends v@200 and tells nobody; the login's pull then brings
+ * w@150, which loses. */
+static void test_same_value_survives_the_pull(void **state)
 {
-  struct md_version stored = live(100, "x", VIS_PUBLIC);
-  struct md_version gone = tomb(100);
-  struct md_version del = tomb(200);
-  int keys = 2;
+  struct fake f;
+  struct notes ns;
+  struct md_version v = live(100, "v", VIS_PUBLIC);
+  struct md_version peer = live(150, "w", VIS_PUBLIC);
 
   (void)state;
-  assert_int_equal(md_prereg_decide(&stored, &del, &keys, 20, 300), MD_PREREG_APPLY);
-  assert_int_equal(keys, 1);
-  assert_int_equal(md_prereg_decide(NULL, &del, &keys, 20, 300), MD_PREREG_ABSENT);
-  assert_int_equal(md_prereg_decide(&gone, &del, &keys, 20, 300), MD_PREREG_ABSENT);
-  assert_int_equal(keys, 1);
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  row_put(&f, "k", &v);
+  note(&ns, "k", "v", 200);
+  assert_int_equal(merge(&f, &ns, 20), 0);
+  assert_int_equal(f.napplied, 0);              /* nothing changed here */
+  assert_int_equal(f.nsent, 1);
+  assert_true(f.sent_st[0].ms == 200);
+  assert_true(row_find(&f, "k")->v.st.ms == 200);
+
+  assert_int_equal(lww_merge(&f, "k", &peer), 0);   /* the pull's answer */
+  assert_string_equal(value_of(&f, "k"), "v");
+}
+
+/* A delete: of a stored key, applied (one key fewer); of a key with no row
+ * here, a tombstone stored and sent under the SET's stamp, nobody told --
+ * a peer's older row then loses; of a key already deleted here, the same
+ * when the SET is newer, else nothing. */
+static void test_delete(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v = live(100, "x", VIS_PUBLIC);
+  struct md_version gone_old = tomb(50);
+  struct md_version gone_new = tomb(900);
+  struct md_version peer = live(150, "w", VIS_PUBLIC);
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  row_put(&f, "held", &v);
+  row_put(&f, "old", &gone_old);
+  row_put(&f, "new", &gone_new);
+  note(&ns, "held", NULL, 200);
+  note(&ns, "nowhere", NULL, 201);
+  note(&ns, "old", NULL, 202);
+  note(&ns, "new", NULL, 203);
+  assert_int_equal(merge(&f, &ns, 20), 1);
+
+  assert_null(value_of(&f, "held"));
+  assert_true(logged(f.applied, f.napplied, "held"));
+  assert_int_equal(f.napplied, 1);
+  assert_true(logged(f.sent, f.nsent, "held"));
+  assert_true(logged(f.sent, f.nsent, "nowhere"));
+  assert_true(logged(f.sent, f.nsent, "old"));
+  assert_false(logged(f.sent, f.nsent, "new"));
+  assert_true(row_find(&f, "nowhere")->v.tombstone);
+  assert_true(row_find(&f, "nowhere")->v.st.ms == 201);
+  assert_true(row_find(&f, "old")->v.st.ms == 202);
+  assert_true(row_find(&f, "new")->v.st.ms == 900);
+
+  assert_int_equal(lww_merge(&f, "nowhere", &peer), 0);   /* the pull's answer */
+  assert_null(value_of(&f, "nowhere"));
+}
+
+/* A delete of a mode-synced key with no row: a tombstone turns the mode
+ * off where no row left the default -- the account's connections change,
+ * so it is applied (told), not only stamped. */
+static void test_delete_of_a_mode_key_without_row(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  int keys = 0;
+  struct md_version d = tomb(200);
+
+  (void)state;
+  assert_int_equal(md_prereg_decide(NULL, &d, 1, &keys, 20, 300), MD_PREREG_APPLY);
+  assert_int_equal(keys, 0);
+
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  f.mode_key = "umode.invisible";
+  note(&ns, "umode.invisible", NULL, 200);
+  assert_int_equal(merge(&f, &ns, 20), 1);
+  assert_true(logged(f.applied, f.napplied, "umode.invisible"));
+  assert_true(row_find(&f, "umode.invisible")->v.tombstone);
 }
 
 /* The account's row written after the client's SET (a newer stamp) stands,
@@ -197,45 +396,46 @@ static void test_newer_account_row_stands(void **state)
 
   (void)state;
   legacy.st.node = 0;
-  assert_int_equal(md_prereg_decide(&stored, &w, &keys, 20, 300), MD_PREREG_SUPERSEDED);
-  assert_int_equal(md_prereg_decide(&stored, &del, &keys, 20, 300), MD_PREREG_SUPERSEDED);
-  assert_int_equal(md_prereg_decide(&later_delete, &w, &keys, 20, 300), MD_PREREG_SUPERSEDED);
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 300), MD_PREREG_SUPERSEDED);
+  assert_int_equal(md_prereg_decide(&stored, &del, 0, &keys, 20, 300), MD_PREREG_SUPERSEDED);
+  assert_int_equal(md_prereg_decide(&later_delete, &w, 0, &keys, 20, 300), MD_PREREG_SUPERSEDED);
   assert_int_equal(keys, 1);
-  assert_int_equal(md_prereg_decide(&legacy, &w, &keys, 20, 300), MD_PREREG_APPLY);
+  assert_int_equal(md_prereg_decide(&legacy, &w, 0, &keys, 20, 300), MD_PREREG_APPLY);
   assert_int_equal(keys, 1);
 }
 
-/* Over the key cap at the merge: a new key is refused (and reported by
- * the caller), an update of a key the account holds fits, and a delete
- * the client sent earlier frees a place for a later new key. */
+/* Over the key cap at the merge: a new key is refused (LIMIT_KEYS, before
+ * anything is stored for it), an update of a key the account holds fits,
+ * and a delete the client sent earlier frees a place for a later new key. */
 static void test_over_cap(void **state)
 {
-  struct acct a;
-  struct pre pre[4];
-  enum md_prereg_verdict v[4];
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
 
   (void)state;
-  memset(&a, 0, sizeof(a));
-  acct_put(&a, "k1", live(100, "a", VIS_PUBLIC));
-  acct_put(&a, "k2", live(100, "b", VIS_PUBLIC));
-  acct_put(&a, "k3", live(100, "c", VIS_PUBLIC));
-  acct_put(&a, "k4", live(100, "d", VIS_PUBLIC));
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "a", VIS_PUBLIC); row_put(&f, "k1", &v);
+  v = live(100, "b", VIS_PUBLIC); row_put(&f, "k2", &v);
+  v = live(100, "c", VIS_PUBLIC); row_put(&f, "k3", &v);
+  v = live(100, "d", VIS_PUBLIC); row_put(&f, "k4", &v);
 
-  pre[0].key = "k5"; pre[0].w = live(200, "new", VIS_PUBLIC);
-  pre[1].key = "k1"; pre[1].w = live(201, "changed", VIS_PUBLIC);
-  pre[2].key = "k2"; pre[2].w = tomb(202);
-  pre[3].key = "k6"; pre[3].w = live(203, "fits", VIS_PUBLIC);
-  merge(&a, pre, 4, 1, 1, 4, v);
+  note(&ns, "k5", "new", 200);
+  note(&ns, "k1", "changed", 201);
+  note(&ns, "k2", NULL, 202);
+  note(&ns, "k6", "fits", 203);
+  assert_int_equal(merge(&f, &ns, 4), 3);
 
-  assert_int_equal(v[0], MD_PREREG_LIMIT_KEYS);
-  assert_int_equal(v[1], MD_PREREG_APPLY);
-  assert_int_equal(v[2], MD_PREREG_APPLY);
-  assert_int_equal(v[3], MD_PREREG_APPLY);
-  assert_null(acct_value(&a, "k5"));
-  assert_string_equal(acct_value(&a, "k1"), "changed");
-  assert_null(acct_value(&a, "k2"));
-  assert_string_equal(acct_value(&a, "k6"), "fits");
-  assert_int_equal(acct_live_keys(&a), 4);
+  assert_int_equal(f.nrefused, 1);
+  assert_string_equal(f.refused[0], "k5");
+  assert_int_equal(f.refused_why[0], MD_PREREG_LIMIT_KEYS);
+  assert_null(row_find(&f, "k5"));
+  assert_false(logged(f.sent, f.nsent, "k5"));
+  assert_string_equal(value_of(&f, "k1"), "changed");
+  assert_null(value_of(&f, "k2"));
+  assert_string_equal(value_of(&f, "k6"), "fits");
+  assert_int_equal(live_keys(&f), 4);
 }
 
 /* A negative METADATA_MAX_KEYS is 0, as metadata_check_limits() reads it. */
@@ -245,7 +445,7 @@ static void test_negative_cap_is_zero(void **state)
   int keys = 0;
 
   (void)state;
-  assert_int_equal(md_prereg_decide(NULL, &w, &keys, -1, 300), MD_PREREG_LIMIT_KEYS);
+  assert_int_equal(md_prereg_decide(NULL, &w, 0, &keys, -1, 300), MD_PREREG_LIMIT_KEYS);
   assert_int_equal(keys, 0);
 }
 
@@ -257,29 +457,53 @@ static void test_value_limit(void **state)
   int keys = 1;
 
   (void)state;
-  assert_int_equal(md_prereg_decide(&stored, &w, &keys, 20, 9), MD_PREREG_LIMIT_VALUE);
-  assert_int_equal(md_prereg_decide(&stored, &w, &keys, 20, 10), MD_PREREG_APPLY);
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 9), MD_PREREG_LIMIT_VALUE);
+  assert_int_equal(md_prereg_decide(&stored, &w, 0, &keys, 20, 10), MD_PREREG_APPLY);
   assert_int_equal(keys, 1);
 }
 
-/* No login, or not metadata-aware when registration ends: the account is
- * not touched at all. */
-static void test_no_merge_without_login_or_awareness(void **state)
+/* A store that fails: the write is reported, nothing told or sent. */
+static void test_store_error(void **state)
 {
-  struct acct a;
-  struct pre pre[1];
-  enum md_prereg_verdict v[1] = { MD_PREREG_SAME };
+  struct fake f;
+  struct notes ns;
 
   (void)state;
-  memset(&a, 0, sizeof(a));
-  acct_put(&a, "display-name", live(100, "stored", VIS_PUBLIC));
-  pre[0].key = "display-name"; pre[0].w = live(200, "mine", VIS_PUBLIC);
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  f.store_fails = 1;
+  note(&ns, "k", "v", 200);
+  assert_int_equal(merge(&f, &ns, 20), 0);
+  assert_int_equal(f.nrefused, 1);
+  assert_int_equal(f.refused_why[0], MD_PREREG_ERROR);
+  assert_int_equal(f.napplied + f.nsent, 0);
+}
 
-  merge(&a, pre, 1, 0, 1, 20, v);       /* no login */
-  assert_string_equal(acct_value(&a, "display-name"), "stored");
-  merge(&a, pre, 1, 1, 0, 20, v);       /* not metadata-aware */
-  assert_string_equal(acct_value(&a, "display-name"), "stored");
-  assert_int_equal(v[0], MD_PREREG_SAME);   /* never decided */
+/* No store: every key reads as no row -- a set is applied and sent, a
+ * delete sent only. */
+static void test_no_store(void **state)
+{
+  struct fake f;
+  struct notes ns;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  note(&ns, "a", "1", 200);
+  note(&ns, "b", NULL, 201);
+  assert_int_equal(md_prereg_merge(&ns.n[0], 0, INT_MAX, 300, &nostore_ops, &f), 1);
+  assert_true(logged(f.applied, f.napplied, "a"));
+  assert_false(logged(f.applied, f.napplied, "b"));
+  assert_int_equal(f.nsent, 2);
+}
+
+/* No login, or not metadata-aware when registration ends: the account is
+ * not touched at all (metadata.c asks md_prereg_should_merge() first). */
+static void test_no_merge_without_login_or_awareness(void **state)
+{
+  (void)state;
+  assert_false(md_prereg_should_merge(0, 1));
+  assert_false(md_prereg_should_merge(1, 0));
 }
 
 int main(void)
@@ -287,12 +511,16 @@ int main(void)
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_should_merge),
     cmocka_unit_test(test_prereg_wins_per_key_untouched_from_account),
-    cmocka_unit_test(test_identical_value_is_a_noop),
+    cmocka_unit_test(test_identical_value),
+    cmocka_unit_test(test_same_value_survives_the_pull),
     cmocka_unit_test(test_delete),
+    cmocka_unit_test(test_delete_of_a_mode_key_without_row),
     cmocka_unit_test(test_newer_account_row_stands),
     cmocka_unit_test(test_over_cap),
     cmocka_unit_test(test_negative_cap_is_zero),
     cmocka_unit_test(test_value_limit),
+    cmocka_unit_test(test_store_error),
+    cmocka_unit_test(test_no_store),
     cmocka_unit_test(test_no_merge_without_login_or_awareness),
   };
 
