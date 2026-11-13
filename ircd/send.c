@@ -5445,9 +5445,12 @@ void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
   if (!server || !cli_serv(server))
     return;
 
-  /* Generate unique batch ID: a reference for clients (letters and
-   * digits only, never the server numeric's '[' or ']'). */
-  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "NJ%lu", netjoin_seq++);
+  /* Generate unique batch ID: a reference for clients -- letters, digits
+   * and hyphen only, so this server's numeric goes as its value in hex,
+   * never as its characters ('[' and ']'); with it the reference is unique
+   * on the network, not only here (a peer's relayed one cannot equal it). */
+  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "NJ%x-%lu",
+                base64toint(cli_yxx(&me)), netjoin_seq++);
 
   /* Store on server struct */
   ircd_strncpy(cli_serv(server)->batch_id, batch_id,
@@ -5531,9 +5534,10 @@ void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
   if (!batch_id_out || batch_id_len < 16)
     return;
 
-  /* Generate unique batch ID: a reference for clients (letters and
-   * digits only, never the server numeric's '[' or ']'). */
-  ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%lu", netsplit_seq++);
+  /* Generate unique batch ID: as the netjoin one (send_netjoin_batch_start()):
+   * this server's numeric in hex, then the counter. */
+  ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%x-%lu",
+                base64toint(cli_yxx(&me)), netsplit_seq++);
 
   /* Send batch start to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
