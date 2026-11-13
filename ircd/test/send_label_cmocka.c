@@ -85,6 +85,10 @@ unsigned int base64toint(const char *s)
 }
 struct Client his;
 int log_inassert;
+/* bump_sentalong()'s, for the common-channel walk (none are ever reset:
+ * the marker never wraps here). */
+int HighestFd;
+struct Client *LocalClientArray[MAXCONNECTIONS];
 time_t CurrentTime;
 static struct ServerStatistics server_stats;
 struct ServerStatistics *ServerStats = &server_stats;
@@ -1668,6 +1672,52 @@ static void test_batch_for_two_or_more_targets(void **state)
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* A nick change: the user's own devices are told by the device pass   */
+/* ------------------------------------------------------------------ */
+
+/* The channel walk of a nick change skips the user's own bouncer devices
+ * (each gets its one NICK from set_nick_name()'s device pass, in a channel
+ * or not); every other member and the user itself get theirs. */
+static void test_common_channels_but_devices(void **state)
+{
+  char v[64];
+
+  (void)state;
+  asker_user.channel = &m_asker;
+  SetBouncerAlias(&sibling);
+  sibling_user.alias_primary = &asker;
+  sendcmdto_set_client_event("MSGID00000009", 1700000000999ULL);
+  sendcmdto_common_channels_but_devices(&asker, CMD_NICK, NULL, ":%s", "new");
+  assert_non_null(line_to(&asker));
+  assert_non_null(line_to(&other));
+  assert_null(line_to(&sibling));
+  assert_string_equal(body_of(line_to(&other)), ":nick!u@h.example NICK :new");
+  assert_string_equal(tag_value(line_to(&other), "msgid", v, sizeof(v)), "MSGID00000009");
+
+  /* The device pass: one line, the same event's msgid and time, and the
+   * label only for the device whose own command it answers. */
+  label_pending(&sibling, "N1");
+  sendcmdto_one_event(&sibling, CMD_NICK, &sibling, 1, ":%s", "new");
+  sendcmdto_set_client_msgid(NULL);
+  assert_string_equal(body_of(line_to(&sibling)), ":nick!u@h.example NICK :new");
+  assert_string_equal(tag_value(line_to(&sibling), "msgid", v, sizeof(v)), "MSGID00000009");
+  assert_string_equal(tag_value(line_to(&sibling), "label", v, sizeof(v)), "N1");
+
+  /* With one = the user (its labeled echo went first): not the user. */
+  n_sent = 0;
+  sendcmdto_common_channels_but_devices(&asker, CMD_NICK, &asker, ":%s", "new");
+  assert_null(line_to(&asker));
+  assert_null(line_to(&sibling));
+  assert_non_null(line_to(&other));
+
+  /* A device of ANOTHER user is a member like any other. */
+  n_sent = 0;
+  sibling_user.alias_primary = &other;
+  sendcmdto_common_channels_but_devices(&asker, CMD_NICK, NULL, ":%s", "new");
+  assert_non_null(line_to(&sibling));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1713,6 +1763,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_no_tags_at_all, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_common_channels_but_devices, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

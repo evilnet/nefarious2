@@ -3171,6 +3171,20 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 }
 
 /** See include/send.h. */
+void sendcmdto_common_channels_but_devices(struct Client *from,
+                                           const char *cmd, const char *tok,
+                                           struct Client *one,
+                                           const char *pattern, ...)
+{
+  va_list ap;
+
+  (void)tok;
+  va_start(ap, pattern);
+  common_channels_vsend(from, cmd, one, 1, pattern, ap);
+  va_end(ap);
+}
+
+/** See include/send.h. */
 void sendcmdto_common_channels_but_session(struct Client *from,
                                            const char *cmd, const char *tok,
                                            const char *pattern, ...)

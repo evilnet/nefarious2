@@ -15331,8 +15331,12 @@ static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr,
          * overwrite cli_name — same lockstep echo as the local-rename
          * pass in set_nick_name (s_user.c).  Without this, an alias
          * whose remote primary rules over the rename sees no signal of
-         * its own nick change and the client UI drifts. */
-        if (MyConnect(alias))
+         * its own nick change and the client UI drifts.  Only when it is
+         * not already so named: the primary's N comes first on the same
+         * link, and set_nick_name()'s device pass has renamed and told it
+         * then -- a second NICK here was a duplicate (from the new nick
+         * to itself). */
+        if (MyConnect(alias) && strcmp(cli_name(alias), new_nick) != 0)
           sendcmdto_one(alias, CMD_NICK, alias, ":%s", new_nick);
         ircd_strncpy(cli_name(alias), new_nick, NICKLEN + 1);
       }

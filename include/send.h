@@ -283,6 +283,16 @@ extern void sendcmdto_common_channels_butone(struct Client *from,
 					     struct Client *one,
 					     const char *pattern, ...);
 
+/* As sendcmdto_common_channels_butone(), but never to @a from's own bouncer
+ * devices on this server (aliases whose primary it is): the caller tells
+ * each of them itself, once, whether or not it shares a channel -- the
+ * nick change's device pass (set_nick_name()). */
+extern void sendcmdto_common_channels_but_devices(struct Client *from,
+                                                  const char *cmd,
+                                                  const char *tok,
+                                                  struct Client *one,
+                                                  const char *pattern, ...);
+
 /* Send command to the local members of every channel @a from is on, except
  * @a from and its own bouncer aliases: its devices share its nick, so a
  * line from that nick -- the QUIT of a face leaving the network while its

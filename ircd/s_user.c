@@ -1729,6 +1729,11 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
     {
     int case_only_change = IsUser(sptr) && (ircd_strcmp(cli_name(sptr), nick) == 0);
     if (IsUser(sptr)) {
+      /* The event's msgid and time: the live NICK, the stored rows, the
+       * relay and the device pass below all carry them. */
+      char nick_msgid[64] = "";
+      uint64_t nick_ms;
+
       /* Notify exit user — skip for case-only nick changes (same nick per
        * RFC1459) and for aliases (which share the primary's nick; the
        * primary's own NICK handling fires the LOGOFF for this nick). */
@@ -1737,7 +1742,6 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
 
       /* Generate msgid for NICK change so clients get @msgid tag */
       {
-        char nick_msgid[64] = "";
         /* The event's ONE msgid and time, from one source.  A remote
          * nick change reuses the tags its NICK line carried (cptr's
          * stash), so all servers share one id -- but only while cptr's
@@ -1752,7 +1756,6 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
         struct Client *tag_src = ((!MyUser(sptr) || IsServer(cptr))
                                   && sendcmdto_stash_is_current(cptr)
                                   && cli_s2s_msgid(cptr)[0]) ? cptr : NULL;
-        uint64_t nick_ms;
 
         if (feature_bool(FEAT_MSGID)) {
           if (tag_src)
@@ -1768,12 +1771,21 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
           sendcmdto_set_client_event(nick_msgid, nick_ms);
 
         /* If sender has a labeled-response label, send them a labeled NICK
-         * echo first, then skip them in the broadcast to other members. */
+         * echo first, then skip them in the broadcast to other members.
+         * The user's own bouncer devices here are left to the device pass
+         * below, which tells each of them once, in a channel or not (a
+         * device is a member of its primary's channels, and was told
+         * twice). */
         if (MyConnect(sptr) && cli_label(sptr)[0]
             && feature_bool(FEAT_CAP_labeled_response)
             && LabeledResponseInUse(sptr)) {
           sendcmdto_one_tags(sptr, CMD_NICK, sptr, ":%s", nick);
-          sendcmdto_common_channels_butone(sptr, CMD_NICK, sptr, ":%s", nick);
+          if (IsAccount(sptr))
+            sendcmdto_common_channels_but_devices(sptr, CMD_NICK, sptr, ":%s", nick);
+          else
+            sendcmdto_common_channels_butone(sptr, CMD_NICK, sptr, ":%s", nick);
+        } else if (IsAccount(sptr)) {
+          sendcmdto_common_channels_but_devices(sptr, CMD_NICK, NULL, ":%s", nick);
         } else {
           sendcmdto_common_channels_butone(sptr, CMD_NICK, NULL, ":%s", nick);
         }
@@ -1853,10 +1865,15 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
        *      the primary's home-server BX N triggered when it
        *      processes our NICK relay.  Either way, our local aliases
        *      need their cli_name updated here.
-       * Aliases are not in the nick hash, so no hRemClient/hAddClient. */
+       * Aliases are not in the nick hash, so no hRemClient/hAddClient.
+       * This is each local device's one NICK line (the channel walk above
+       * skipped them), with the event's msgid and time, and the label of
+       * the device whose own NICK this answers. */
       if (IsAccount(sptr) && IsUser(sptr)) {
         struct AccountSessions *as_sib =
             bounce_find_by_account(cli_user(sptr)->account);
+        if (nick_msgid[0])
+          sendcmdto_set_client_event(nick_msgid, nick_ms);
         if (as_sib) {
           struct BouncerSession *sib_session;
           for (sib_session = as_sib->as_sessions; sib_session;
@@ -1875,13 +1892,15 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                  * though the server's cli_name is already up to date —
                  * violating the lockstep invariant from the alias's POV
                  * (bouncer-design-intent.md §"Nick lockstep invariant"). */
-                sendcmdto_one(sib_alias, CMD_NICK, sib_alias, ":%s", nick);
+                sendcmdto_one_event(sib_alias, CMD_NICK, sib_alias,
+                                    sib_alias == device, ":%s", nick);
                 ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
                 cli_name(sib_alias)[NICKLEN] = '\0';
               }
             }
           }
         }
+        sendcmdto_set_client_msgid(NULL);
       }
     }
     else
