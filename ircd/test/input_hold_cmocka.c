@@ -248,6 +248,54 @@ static void ping_due(void **state)
   assert_int_equal(input_hold_ping_due(&h, T0 + 50 + INPUT_HOLD_PING), 1);
 }
 
+/** The PONGs to the hold's own PINGs are not charged fake lag: only a
+ * PONG whose one parameter is exactly our name, within INPUT_HOLD_GRACE of
+ * the release, and no more of them than the PINGs that hold sent. */
+static void pong_free(void **state)
+{
+  struct InputHold h;
+  const char *me = "a.test";
+  time_t rel = T0 + 10;
+
+  memset(&h, 0, sizeof h);
+  assert_int_equal(input_hold_pong_free(&h, T0, ":a.test", me), 0);   /* no hold */
+  step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
+  assert_int_equal(input_hold_ping_due(&h, T0 + INPUT_HOLD_PING), 1);
+  assert_int_equal(input_hold_ping_due(&h, T0 + 2 * INPUT_HOLD_PING), 1);
+  /* still held: not parsed in practice, and not free */
+  assert_int_equal(input_hold_pong_free(&h, T0 + 9, ":a.test", me), 0);
+  step(&h, 0, rel, 0, INPUT_HOLD_EV_ENDED);
+  /* another argument, two parameters, a prefix of our name: charged */
+  assert_int_equal(input_hold_pong_free(&h, rel, ":b.test", me), 0);
+  assert_int_equal(input_hold_pong_free(&h, rel, "a.test :a.test", me), 0);
+  assert_int_equal(input_hold_pong_free(&h, rel, ":a.tes", me), 0);
+  assert_int_equal(input_hold_pong_free(&h, rel, ":a.testx", me), 0);
+  assert_int_equal(input_hold_pong_free(&h, rel, NULL, me), 0);
+  /* ours, with or without the colon: free, as many as were sent */
+  assert_int_equal(input_hold_pong_free(&h, rel, ":a.test", me), 1);
+  assert_int_equal(input_hold_pong_free(&h, rel + 1, "a.test ", me), 1);
+  assert_int_equal(input_hold_pong_free(&h, rel + 1, ":a.test", me), 0);   /* one more */
+  /* outside the allowance: charged */
+  memset(&h, 0, sizeof h);
+  step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
+  input_hold_ping_due(&h, T0 + INPUT_HOLD_PING);
+  step(&h, 0, rel, 0, INPUT_HOLD_EV_ENDED);
+  assert_int_equal(input_hold_pong_free(&h, rel + INPUT_HOLD_GRACE, ":a.test", me), 0);
+  assert_int_equal(input_hold_pong_free(&h, rel + INPUT_HOLD_GRACE - 1, ":a.test", me), 1);
+  /* released at the bound while an orphan: free too */
+  memset(&h, 0, sizeof h);
+  step(&h, 1, T0, 0, INPUT_HOLD_EV_BEGAN);
+  input_hold_ping_due(&h, T0 + INPUT_HOLD_PING);
+  step(&h, 1, T0 + INPUT_HOLD_MAX + 1, 0, INPUT_HOLD_EV_ASKED);
+  step(&h, 1, T0 + INPUT_HOLD_MAX + 1, 1, INPUT_HOLD_EV_SWEPT);
+  assert_int_equal(input_hold_pong_free(&h, T0 + INPUT_HOLD_MAX + 2, ":a.test", me), 1);
+  /* a new hold starts afresh: none free before it sends a PING */
+  step(&h, 0, T0 + 40, 0, INPUT_HOLD_EV_NONE);
+  step(&h, 1, T0 + 50, 0, INPUT_HOLD_EV_BEGAN);
+  step(&h, 0, T0 + 51, 0, INPUT_HOLD_EV_ENDED);
+  assert_int_equal(input_hold_pong_free(&h, T0 + 51, ":a.test", me), 0);
+}
+
 static void is_quit(void **state)
 {
   static const struct { const char *line; int quit; } rows[] = {
@@ -289,6 +337,7 @@ int main(void)
     cmocka_unit_test(cap),
     cmocka_unit_test(cleared),
     cmocka_unit_test(ping_due),
+    cmocka_unit_test(pong_free),
     cmocka_unit_test(is_quit),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

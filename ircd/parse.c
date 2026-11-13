@@ -1703,7 +1703,13 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
      * full bypass of general flood accounting.  See
      * .claude/para/projects/multiline-cooldown.md.
      */
-    if (!cli_ml_batch_id(cptr)[0])
+    /* The PONG to a server PING an orphan hold sent (s_bsd.c): a line
+     * the server caused, parsed with the held lines at the release --
+     * not charged, within the bounds input_hold_pong_free() keeps. */
+    if (!cli_ml_batch_id(cptr)[0]
+        && !(0 == strcmp(mptr->cmd, MSG_PONG) && cli_connect(cptr)
+             && input_hold_pong_free(&con_input_hold(cli_connect(cptr)),
+                                     CurrentTime, s, cli_name(&me))))
       cli_since(cptr) += fakelag_charge(&cli_lagcredit(cptr), lag);
   }
   /*

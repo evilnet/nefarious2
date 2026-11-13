@@ -47,6 +47,7 @@ enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
     if (h->since && !h->released) {
       *ev = INPUT_HOLD_EV_ENDED;
       h->boost = now + INPUT_HOLD_GRACE;
+      h->free_until = now + INPUT_HOLD_GRACE;
     }
     h->since = 0;
     h->asked = 0;
@@ -60,6 +61,9 @@ enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
   if (!h->since) {
     h->since = now;
     h->pinged = 0;
+    h->pings = 0;
+    h->pongs = 0;
+    h->free_until = 0;
     *ev = INPUT_HOLD_EV_BEGAN;
     return INPUT_HOLD_WAIT;
   }
@@ -84,6 +88,7 @@ enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
   h->released = 1;
   h->pinged = 0;
   h->boost = now + INPUT_HOLD_GRACE;
+  h->free_until = now + INPUT_HOLD_GRACE;
   return INPUT_HOLD_PARSE;
 }
 
@@ -106,6 +111,42 @@ int input_hold_ping_due(struct InputHold *h, time_t now)
   if (now - last < INPUT_HOLD_PING)
     return 0;
   h->pinged = now;
+  h->pings++;
+  return 1;
+}
+
+/** Is this PONG free of fake lag?  The server PINGs a hold sent are lines
+ * the server caused: their PONGs, parsed with the held lines at the
+ * release, would each charge the client a PONG's fake lag (MFLG_SLOW) and
+ * delay its real backlog.  Free: a PONG whose only parameter is exactly
+ * @a server (with or without the colon), parsed within INPUT_HOLD_GRACE
+ * of the hold's release, and no more of them than the PINGs that hold
+ * sent -- so it is no free-line allowance.  Anything else is charged.
+ * @param[in,out] h The connection's hold (a free PONG is counted).
+ * @param[in] now The time.
+ * @param[in] args The PONG's parameters as the client sent them (NULL:
+ *            none).
+ * @param[in] server This server's name.
+ * @return Non-zero when the PONG is not to be charged. */
+int input_hold_pong_free(struct InputHold *h, time_t now, const char *args,
+                         const char *server)
+{
+  size_t n, len;
+
+  if (!args || !server || !h->free_until || now >= h->free_until
+      || h->pongs >= h->pings)
+    return 0;
+  while (*args == ' ')
+    args++;
+  if (*args == ':')
+    args++;
+  len = strlen(server);
+  n = strlen(args);
+  while (n > 0 && args[n - 1] == ' ')
+    n--;
+  if (n != len || 0 != strncmp(args, server, len))
+    return 0;
+  h->pongs++;
   return 1;
 }
 

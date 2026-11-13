@@ -51,6 +51,9 @@ struct InputHold {
   int          released;  /**< released while still an orphan: not held again until it stops being one */
   time_t       boost;     /**< the doubled allowance lasts until then; 0: none */
   time_t       pinged;    /**< when the hold last sent the client a PING; 0: not yet */
+  unsigned int pings;     /**< server PINGs this hold sent (kept after its release) */
+  unsigned int pongs;     /**< PONGs to them parsed free of fake lag */
+  time_t       free_until; /**< those PONGs are free until then (the release + INPUT_HOLD_GRACE) */
 };
 
 /** What the read path does with a connection's queued lines. */
@@ -74,6 +77,8 @@ extern enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
                                               time_t now, unsigned int sweeps,
                                               enum input_hold_event *ev);
 extern int input_hold_ping_due(struct InputHold *h, time_t now);
+extern int input_hold_pong_free(struct InputHold *h, time_t now,
+                                const char *args, const char *server);
 extern void input_hold_clear(struct InputHold *h);
 extern unsigned int input_hold_cap(struct InputHold *h, unsigned int cap,
                                    unsigned int queued, time_t now);

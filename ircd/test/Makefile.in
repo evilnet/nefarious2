@@ -743,7 +743,8 @@ send_tags_cmocka: $(SEND_TAGS_CMOCKA_OBJS)
 parse_line_cmocka.o: ${srcdir}/parse_line_cmocka.c ../parse.c
 	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/parse_line_cmocka.c
 
-PARSE_LINE_CMOCKA_OBJS = parse_line_cmocka.o ../ircd_string.o
+# The orphan hold's pure rules (parse_client() asks whether a PONG is free).
+PARSE_LINE_CMOCKA_OBJS = parse_line_cmocka.o ../ircd_string.o input_hold_test.o
 parse_line_cmocka: $(PARSE_LINE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(PARSE_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
