@@ -991,6 +991,12 @@ int exit_client(struct Client *cptr,
      * Include IsUserPort to cover pre-registration rejections (e.g.,
      * SASL required) where SetUser has not been called yet. */
     if ((IsUser(victim) || IsUserPort(victim)) && !IsConnecting(victim) && !IsDead(victim)) {
+      /* The batches open on the answer being sent end before the ERROR
+       * ("For every started batch, server MUST end that batch"), and the
+       * lines a deferred labeled batch holds go out with them
+       * (labeled_batch_defer()), rather than with the connection. */
+      if (MyConnect(victim))
+        batch_end_all(victim, 1);
       sendrawto_one(victim, MSG_ERROR " :Closing Link: %s by %s (%s)",
                     cli_name(victim) && *cli_name(victim) ? cli_name(victim) : "*",
                     cli_name(IsServer(killer) ? &his : killer),
