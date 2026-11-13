@@ -13197,6 +13197,7 @@ void bounce_sync_session_snomask(struct Client *source)
  *   BX P <old> <new> <sessid> <nick>                       -- Promote/transfer
  *   BX N <primary> <new_nick> <ts>                         -- Nick sync
  *   BX U <alias> <field>=<value>                           -- Identity update
+ *   BX W <device> <nick> <ts>                              -- Nick request
  */
 
 /* Forward declarations for BX subcommand handlers */
@@ -13209,6 +13210,7 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr, int parc,
 static int bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_nick_request(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 /* BX R / BX F / BX J retired in Phase 5 (cluster-B coordination protocol
  * removed per redesign D.3 — deterministic convergence supersedes it).
  * Receivers drop silently; we no longer emit them. */
@@ -13266,6 +13268,8 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
     return bounce_alias_snomask(cptr, sptr, parc, parv);
   case 'V':
     return bounce_alias_visibility(cptr, sptr, parc, parv);
+  case 'W':
+    return bounce_nick_request(cptr, sptr, parc, parv);
   case 'R': /* retired Phase 5 — silent drop */
   case 'J': /* retired Phase 5 — silent drop */
   case 'F': /* retired Phase 5 — silent drop */
@@ -15284,6 +15288,83 @@ forward:
   sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
                         "X %s", target_numeric);
   return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX W: a device's nick request, to the one writer                  */
+/* ---------------------------------------------------------------- */
+
+/** Handle BX W (a bouncer device's nick request).
+ *
+ * Wire format: <device's server> BX W <device YYXXX> <nick> <ts>
+ *
+ * The primary's server is the one writer of its session user's nick.  A
+ * device's server sends this toward the primary only when every server
+ * on the way announced SERVER flag N (nick_writer_route()), and renames
+ * nothing itself.  Here (nick_request_action()):
+ *  - WRITE: the device's primary is ours (a held ghost included): judge
+ *    it with our own rules (nick_device_request()); an accepted rename is
+ *    an ordinary N to every link, the asking one included, and a refusal
+ *    is the numeric to the device.  Or the device was promoted and is
+ *    ours: it is the device's own NICK.
+ *  - FORWARD: toward the writer, unchanged.
+ *  - RETURN: back over the link it came by, once -- the device was
+ *    promoted while the request was in flight and is now the primary on
+ *    that side; its server writes.  Sourced from us: the sender is on
+ *    that side, so a line under its prefix would be a fake direction.
+ *  - DROP: the device is gone, or the primary is back the way the request
+ *    came (the two sides disagree after a crossed promote).
+ */
+static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
+                               int parc, char *parv[])
+{
+  struct Client *dev, *primary = NULL, *next = NULL;
+  int is_alias;
+
+  if (parc < 5)
+    return protocol_violation(sptr, "BX W requires 3 parameters");
+
+  dev = bx_find_user_strict(parv[2]);
+  if (dev && !IsUser(dev))
+    dev = NULL;
+  is_alias = dev && IsBouncerAlias(dev) && cli_alias_primary(dev);
+  if (is_alias) {
+    primary = cli_alias_primary(dev);
+    next = cli_from(primary);
+  } else if (dev)
+    next = cli_from(dev);
+
+  switch (nick_request_action(dev != NULL, is_alias,
+                              is_alias && MyUser(primary),
+                              dev && MyUser(dev), next == cptr)) {
+  case NICK_REQUEST_WRITE:
+    if (is_alias)
+      return nick_device_request(cptr, primary, dev, parv[3], parv[4], 1);
+    else {
+      /* Promoted to the primary here: its own NICK, with every check a
+       * local NICK gets (its own NICKDELAY, on its own Connection). */
+      char *own[3];
+      own[0] = cli_name(dev);
+      own[1] = parv[3];
+      own[2] = NULL;
+      return m_nick(dev, dev, 2, own);
+    }
+  case NICK_REQUEST_FORWARD:
+    sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, next, "W %s %s %s",
+                  parv[2], parv[3], parv[4]);
+    return 0;
+  case NICK_REQUEST_RETURN:
+    sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, next, "W %s %s %s",
+                  parv[2], parv[3], parv[4]);
+    return 0;
+  case NICK_REQUEST_DROP:
+  default:
+    log_write(LS_USER, L_INFO, 0, "Bouncer: BX W for %s (%s) from %C "
+              "dropped: %s", parv[2], parv[3], cptr,
+              !dev ? "no such device here"
+                   : "its primary is back the way it came (crossed promote)");
+    return 0;
+  }
 }
 
 /* ---------------------------------------------------------------- */

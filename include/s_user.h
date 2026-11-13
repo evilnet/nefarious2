@@ -86,10 +86,19 @@ extern int set_nick_name(struct Client* cptr, struct Client* sptr,
 extern int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                                 struct Client* device, const char* nick,
                                 int parc, char* parv[], int svsnick);
-/* Refuse that request because another client holds the nick here: 433 to
- * the user and the device, the user's nick back toward @a cptr. */
+/* Refuse that request before set_nick_name()'s checks (@a reply: 433 for a
+ * nick held or juped here, 432 for one invalid here): the user and the
+ * device told, the user's nick back toward @a cptr when it is a link. */
 extern int set_nick_name_refused(struct Client *cptr, struct Client *sptr,
-                                 struct Client *device, const char *nick);
+                                 struct Client *device, int reply,
+                                 const char *nick);
+/* A device's rename request for our session user @a sptr, judged here,
+ * the primary's server: from BX W (@a from_bxw, nothing renamed yet: an
+ * accepted rename goes to every link), or from an alias-numeric N of a
+ * device's server that renamed already (@a link answered). */
+extern int nick_device_request(struct Client *link, struct Client *sptr,
+                               struct Client *device, const char *asked,
+                               const char *ts, int from_bxw);
 /* One-shot: the next register_user() of a remote client relays its N to
  * IRCv3-aware links only (legacy links learn that user some other way,
  * e.g. a BX P renumbering a face they already hold).  Every

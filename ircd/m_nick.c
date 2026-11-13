@@ -355,6 +355,73 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 }
 
 
+/** A rename or an introduction from a server meets our unregistered
+ * connection holding the nick: it gives way (the "dormant nick"), or waits
+ * for its SASL or its registration's drain and is answered later.
+ * @param[in] link The server link the line came over.
+ * @param[in] cptr What set_nick_name_device() takes as the source link
+ *   (&me for a BX W request: its rename goes to every link).
+ * @param[in] sptr The client being named (a server for an introduction).
+ * @param[in] acptr Our unregistered connection holding @a nick.
+ * @param[in] device The bouncer device that asked, or NULL.
+ */
+static int nick_meets_unregistered(struct Client *link, struct Client *cptr,
+                                   struct Client *sptr, struct Client *acptr,
+                                   struct Client *device, const char *nick,
+                                   int parc, char *parv[])
+{
+  /* Mid-SASL bouncer-class client?  Defer rather than kill —
+   * remote N may turn out to be the same account we're SASLing
+   * into, in which case the bouncer alias path takes over after
+   * SASL completes.  Otherwise check_auth_finished sends late 433. */
+  if (cli_auth(acptr) && bounce_enabled_for(acptr)) {
+    sendto_opmask_butone(0, SNO_OLDSNO,
+                         "Bouncer: deferring mid-auth %C on incoming "
+                         "%s from %C (nick %s, awaiting SASL)",
+                         acptr, parv[parc - 2], link, nick);
+    auth_defer_nick(cli_auth(acptr), nick);
+    if (cli_name(acptr)[0]) {
+      hRemClient(acptr);
+      cli_name(acptr)[0] = '\0';
+    }
+    return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
+  }
+  /* Post-SASL but pre-register_user: bounce_defer_registration
+   * queued this client because a peer link was mid-burst at SASL
+   * completion.  cli_auth has been destroyed but registration
+   * hasn't run yet — the client is still IsUnknown.  An incoming
+   * peer N reaching us before the EOB drain must NOT override-kill
+   * this client; let the deferred registration settle and the
+   * standard bouncer alias-attach path handle the same-account
+   * collision when register_user runs. */
+  if (bounce_is_pending_registration(acptr)) {
+    sendto_opmask_butone(0, SNO_OLDSNO,
+                         "Bouncer: deferring incoming %s from %C "
+                         "while %C waits for burst-settle drain "
+                         "(nick %s)",
+                         parv[parc - 2], link, acptr, nick);
+    if (cli_name(acptr)[0]) {
+      /* Its queue entry keeps the nick: the drain resolves it, as
+       * check_auth_finished() resolves a deferred nick (W3 12c-2b fix
+       * round 3, I-2). */
+      bounce_pending_registration_nick_taken(acptr);
+      hRemClient(acptr);
+      cli_name(acptr)[0] = '\0';
+    }
+    return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
+  }
+  ServerStats->is_ref++;
+  /* Whether the accept counted it is IsIPChecked(), not an except
+   * looked up now: the block may have gone in a REHASH (or a WEBIRC or
+   * IAuth address may match another), and IPcheck_connect_fail()
+   * asserts the flag (upstream 57aad727 fixed the same in the exit and
+   * registration paths). */
+  if (IsIPChecked(acptr))
+    IPcheck_connect_fail(acptr, 0);
+  exit_client(link, acptr, &me, "Overridden by other sign on");
+  return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
+}
+
 /*
  * ms_nick - server message handler for nicks
  * parv[0] = sender prefix
@@ -445,6 +512,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!IsServer(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
     device = sptr;
     sptr = cli_alias_primary(sptr);
+    /* Our own user: a device's server that renamed already (no BX W on
+     * its route, or an older build).  Judged here, as a BX W is. */
+    if (MyUser(sptr))
+      return nick_device_request(cptr, sptr, device, parv[1], parv[2], 0);
   }
 
   /*
@@ -863,58 +934,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * "dormant nick" way of generating collisions...
    */
   if (IsUnknown(acptr) && MyConnect(acptr))
-  {
-    /* Mid-SASL bouncer-class client?  Defer rather than kill —
-     * remote N may turn out to be the same account we're SASLing
-     * into, in which case the bouncer alias path takes over after
-     * SASL completes.  Otherwise check_auth_finished sends late 433. */
-    if (cli_auth(acptr) && bounce_enabled_for(acptr)) {
-      sendto_opmask_butone(0, SNO_OLDSNO,
-                           "Bouncer: deferring mid-auth %C on incoming "
-                           "%s from %C (nick %s, awaiting SASL)",
-                           acptr, parv[parc - 2], cptr, nick);
-      auth_defer_nick(cli_auth(acptr), nick);
-      if (cli_name(acptr)[0]) {
-        hRemClient(acptr);
-        cli_name(acptr)[0] = '\0';
-      }
-      return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
-    }
-    /* Post-SASL but pre-register_user: bounce_defer_registration
-     * queued this client because a peer link was mid-burst at SASL
-     * completion.  cli_auth has been destroyed but registration
-     * hasn't run yet — the client is still IsUnknown.  An incoming
-     * peer N reaching us before the EOB drain must NOT override-kill
-     * this client; let the deferred registration settle and the
-     * standard bouncer alias-attach path handle the same-account
-     * collision when register_user runs. */
-    if (bounce_is_pending_registration(acptr)) {
-      sendto_opmask_butone(0, SNO_OLDSNO,
-                           "Bouncer: deferring incoming %s from %C "
-                           "while %C waits for burst-settle drain "
-                           "(nick %s)",
-                           parv[parc - 2], cptr, acptr, nick);
-      if (cli_name(acptr)[0]) {
-        /* Its queue entry keeps the nick: the drain resolves it, as
-         * check_auth_finished() resolves a deferred nick (W3 12c-2b fix
-         * round 3, I-2). */
-        bounce_pending_registration_nick_taken(acptr);
-        hRemClient(acptr);
-        cli_name(acptr)[0] = '\0';
-      }
-      return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
-    }
-    ServerStats->is_ref++;
-    /* Whether the accept counted it is IsIPChecked(), not an except
-     * looked up now: the block may have gone in a REHASH (or a WEBIRC or
-     * IAuth address may match another), and IPcheck_connect_fail()
-     * asserts the flag (upstream 57aad727 fixed the same in the exit and
-     * registration paths). */
-    if (IsIPChecked(acptr))
-      IPcheck_connect_fail(acptr, 0);
-    exit_client(cptr, acptr, &me, "Overridden by other sign on");
-    return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
-  }
+    return nick_meets_unregistered(cptr, cptr, sptr, acptr, device, nick,
+                                   parc, parv);
   /* A bouncer device on another server asked for its session user's
    * rename, the user is ours, and someone else holds the nick here (taken
    * an instant before the request reached us, so the device's server had
@@ -925,7 +946,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * aborts the server first.  The holder is untouched. */
   if (!IsServer(sptr)
       && nick_change_meets(MyUser(sptr), 0) == NICK_MEET_REFUSE)
-    return set_nick_name_refused(cptr, sptr, device, nick);
+    return set_nick_name_refused(cptr, sptr, device, ERR_NICKNAMEINUSE,
+                                 nick);
   /*
    * Decide, we really have a nick collision and deal with it
    */
@@ -1149,4 +1171,62 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (sptr == NULL)
     return 0;
   return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
+}
+
+/** See include/s_user.h.
+ *
+ * The primary's server is the one writer of its session user's nick.  It
+ * judges a device's request by its own rules: a nick invalid or juped here
+ * (432/433), held here by someone else (433, never the classic collision:
+ * it would KILL our own user), our unregistered connection holding it
+ * (it gives way, as for any rename), then set_nick_name()'s bans and the
+ * user's NICKDELAY.  A refusal goes to the device; an accepted rename is
+ * stamped here (the TS, and the event's msgid and time, minted here).
+ */
+int nick_device_request(struct Client *link, struct Client *sptr,
+                        struct Client *device, const char *asked,
+                        const char *ts, int from_bxw)
+{
+  struct Client *cptr = from_bxw ? &me : link;
+  struct Client *acptr;
+  char nick[NICKLEN + 2];
+  char ts_buf[20];
+  char *parv[4];
+  int parc = 3;
+
+  assert(MyUser(sptr));
+  ircd_strncpy(nick, asked, NICKLEN + 1);
+  nick[NICKLEN] = '\0';
+  if (!do_nick_name(nick) || strcmp(nick, asked))
+    return set_nick_name_refused(cptr, sptr, device, ERR_ERRONEUSNICKNAME,
+                                 asked);
+  if (isNickJuped(nick))
+    return set_nick_name_refused(cptr, sptr, device, ERR_NICKNAMEINUSE, nick);
+
+  /* A BX W request's TS is the writer's: stamped now.  An alias-numeric
+   * N keeps the TS its server already applied. */
+  if (from_bxw || !ts)
+    ircd_snprintf(0, ts_buf, sizeof(ts_buf), "%Tu", TStime());
+  else
+    ircd_strncpy(ts_buf, ts, sizeof(ts_buf));
+  parv[0] = cli_name(sptr);
+  parv[1] = nick;
+  parv[2] = ts_buf;
+  parv[3] = NULL;
+
+  if (!(acptr = SeekClient(nick)))
+    return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
+  if (acptr == sptr) {
+    if (strcmp(cli_name(acptr), nick))   /* a change of case */
+      return set_nick_name_device(cptr, sptr, device, nick, parc, parv, 0);
+    return 0;                             /* already so named */
+  }
+  if (IsUnknown(acptr) && MyConnect(acptr))
+    return nick_meets_unregistered(link, cptr, sptr, acptr, device, nick,
+                                   parc, parv);
+  /* Held here by someone else: a user here or elsewhere, a held ghost of
+   * another session, a client on its way out. */
+  if (nick_change_meets(MyUser(sptr), 0) == NICK_MEET_REFUSE)
+    return set_nick_name_refused(cptr, sptr, device, ERR_NICKNAMEINUSE, nick);
+  return 0;
 }

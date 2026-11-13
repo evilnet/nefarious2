@@ -1572,22 +1572,27 @@ static void nick_refusal_to_device(struct Client *device, int reply,
 }
 
 /** Refuse a nick change another server's bouncer device asked its session
- * user, our client, for, because the nick is held here by someone else
- * (ms_nick(): nick_change_meets() says NICK_MEET_REFUSE).  As a ban or
- * NICKDELAY refuses it: the user and the device that asked are told
- * (433), the user keeps its nick, nobody is killed, and the device's
- * server is answered with the user's nick (the correction).
- * @param[in] cptr The server link the request came from.
+ * user, our client, for, before set_nick_name()'s own checks: the nick is
+ * held here by someone else (433, nick_change_meets() says
+ * NICK_MEET_REFUSE), juped here (433), or not a valid nick here (432).
+ * As a ban or NICKDELAY refuses it: the user and the device that asked
+ * are told, the user keeps its nick, nobody is killed, and a device's
+ * server that renamed already (an alias-numeric N, @a cptr a link) is
+ * answered with the user's nick (the correction).  A BX W request
+ * (@a cptr is &me) renamed nothing and needs no answer.
+ * @param[in] cptr The server link the request came from, or &me.
  * @param[in] sptr The session user, ours.
  * @param[in] device The device that asked, or NULL.
+ * @param[in] reply ERR_NICKNAMEINUSE or ERR_ERRONEUSNICKNAME.
  * @param[in] nick The nick asked for.
  * @return Zero.
  */
 int set_nick_name_refused(struct Client *cptr, struct Client *sptr,
-                          struct Client *device, const char *nick)
+                          struct Client *device, int reply,
+                          const char *nick)
 {
-  send_reply(sptr, ERR_NICKNAMEINUSE, nick);
-  nick_refusal_to_device(device, ERR_NICKNAMEINUSE, nick, 0);
+  send_reply(sptr, reply, nick);
+  nick_refusal_to_device(device, reply, nick, 0);
   nick_request_answer(cptr, sptr);
   return 0;
 }
