@@ -14012,7 +14012,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * learns its keys without an explicit METADATA SUB round-trip.  The
    * device is known to the network (BX C above): what it wrote before
    * registration is merged into the account as the device's SET. */
-  metadata_burst_self_to_client(sptr, 1);
+  metadata_burst_self_to_client(sptr, MD_REG_ATTACH);
 
   motd_signon(sptr);
 

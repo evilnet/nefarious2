@@ -290,11 +290,17 @@ extern struct MetadataEntry *metadata_list_client(struct Client *cptr);
  * open / METADATA loop / batch end sequence.
  *
  * @param[in] to Client receiving the burst (must be local).
- * @param[in] on_network Non-zero when @a to is already known to the
- *   network (a revived session, a device attached to one); zero on the
- *   path that introduces it by N after the burst.
+ * @param[in] path Which registration: MD_REG_FRESH (introduced by N after
+ *   the burst), MD_REG_ATTACH (a device attached to a session: known to
+ *   the network), MD_REG_REVIVE (a held session's client revived: known
+ *   to the network, its memory the session's own).
  */
-extern void metadata_burst_self_to_client(struct Client *to, int on_network);
+extern void metadata_burst_self_to_client(struct Client *to, int path);
+
+/** metadata_burst_self_to_client()'s registration paths. */
+#define MD_REG_FRESH  0   /**< register_user()'s own: the N follows */
+#define MD_REG_ATTACH 1   /**< a device attaching (bounce_setup_local_alias()) */
+#define MD_REG_REVIVE 2   /**< a held session revived (register_user()) */
 
 /** The registration check (owner, 2026-11-12): whether batch was
  * negotiated is judged once, when registration ends -- the point the
@@ -308,10 +314,10 @@ extern void metadata_burst_self_to_client(struct Client *to, int on_network);
  * before-connect writes and its subscriptions are dropped, and it is
  * inert from then on.
  * @param[in] cptr A local client completing registration.
- * @param[in] on_network As for metadata_burst_self_to_client().
+ * @param[in] path As for metadata_burst_self_to_client().
  * @return Non-zero if it is metadata-aware.
  */
-extern int metadata_registration_check(struct Client *cptr, int on_network);
+extern int metadata_registration_check(struct Client *cptr, int path);
 
 /** Note a before-connect write of @a cptr (a client of ours still
  * registering) to itself: the last write per key is kept, with @a st, the

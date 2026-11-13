@@ -2537,6 +2537,10 @@ struct prereg_merge_ctx {
   struct Client *cptr;        /**< The client registering */
   const char *account;        /**< Its account */
   int on_network;             /**< Known to the network already */
+  int revive;                 /**< A held session's client, revived */
+  int memory_rows;            /**< Read a key with no store row from memory
+                               *   (a revive CLEAR's walk of the ghost's
+                               *   memory only) */
   int mode_keys;              /**< A mode-synced key was applied */
 };
 
@@ -2578,7 +2582,14 @@ static int prereg_row(void *arg, const char *key, struct md_version *out,
   struct prereg_merge_ctx *c = arg;
   int rc = metadata_account_get_version(c->account, key, out, valbuf, vlen);
 
-  return rc == 1 ? memory_row(c->cptr, key, out, valbuf, vlen) : rc;
+  /* Memory stands in for the store only inside a revive CLEAR's walk of
+   * the ghost's memory (review a1): elsewhere a key with no store row can
+   * be in memory without being the account's -- register_user()'s class
+   * default modes are noted in memory (umode_md_note()) and written
+   * nowhere -- and a note must decide against the store, as a SET after
+   * login does (metadata_account_write()). */
+  return (rc == 1 && c->memory_rows)
+         ? memory_row(c->cptr, key, out, valbuf, vlen) : rc;
 }
 
 static int prereg_store(void *arg, const char *key, const struct md_version *w)
@@ -2684,10 +2695,17 @@ static void prereg_clear_keys(void *arg, const struct md_stamp *st,
    * login's pull with (or bursts later) is taken as a tombstone at it. */
   metadata_account_floor_raise(c->account, st);
   metadata_account_clear_keys(c->account, each, each_arg);
-  /* Then what the client holds in memory with no row in the store (a
-   * revived ghost's), as a CLEAR after registration deletes its memory's
-   * keys too (prereg_row() reads them as unstamped live rows). */
-  prereg_clear_memory(c->cptr, c->account, each, each_arg);
+  /* Then, on a revive only, what the ghost holds in memory with no row in
+   * the store: its memory is the session's, as a CLEAR after registration
+   * deletes its memory's keys too (prereg_row() reads them as unstamped
+   * live rows during this walk).  A fresh registration's or a device's
+   * memory is the store's rows plus register_user()'s class default modes,
+   * which are not the account's (review a1). */
+  if (c->revive) {
+    c->memory_rows = 1;
+    prereg_clear_memory(c->cptr, c->account, each, each_arg);
+    c->memory_rows = 0;
+  }
 }
 
 /** No store (b2): the session's keys are what its connections hold in
@@ -2757,12 +2775,12 @@ static int prereg_no_row_is_state(void *arg, const char *key)
  * (register_user()'s metadata_load_account() loaded them).
  *
  * On the path that introduces the client by N after the burst
- * (@a on_network 0) its own entry and mode flag are set silently (the N
+ * (@a path MD_REG_FRESH) its own entry and mode flag are set silently (the N
  * carries the flag).  Revived and attached clients are known: they change
  * as a SET would change them, except that the registering connection is
  * told nothing beyond its burst and its sign-on mode line.
  */
-static void metadata_prereg_merge(struct Client *cptr, int on_network)
+static void metadata_prereg_merge(struct Client *cptr, int path)
 {
   static const struct md_prereg_ops store_ops = {
     prereg_row, prereg_store, prereg_apply, prereg_send, prereg_refuse,
@@ -2791,7 +2809,9 @@ static void metadata_prereg_merge(struct Client *cptr, int on_network)
   }
   c.cptr = cptr;
   c.account = cli_user(cptr)->account;
-  c.on_network = on_network;
+  c.on_network = (path != MD_REG_FRESH);
+  c.revive = (path == MD_REG_REVIVE);
+  c.memory_rows = 0;
   c.mode_keys = 0;
   if (max_value < 0)
     max_value = 0;
@@ -2807,12 +2827,12 @@ static void metadata_prereg_merge(struct Client *cptr, int on_network)
 
   /* Before the N: a merged mode-synced key sets the flag silently, with
    * the rules registration applies to the account's other modes. */
-  if (c.mode_keys && !on_network)
+  if (c.mode_keys && !c.on_network)
     metadata_mode_sync_restore(cptr, 0);
 }
 
 /** See include/metadata.h. */
-int metadata_registration_check(struct Client *cptr, int on_network)
+int metadata_registration_check(struct Client *cptr, int path)
 {
   if (!cptr || !MyConnect(cptr))
     return 0;
@@ -2820,7 +2840,7 @@ int metadata_registration_check(struct Client *cptr, int on_network)
     /* Logged in: its before-connect writes go to the account.  Not: they
      * are its own keys, already in its list (announced after its N,
      * metadata_announce_registered()), and the notes go. */
-    metadata_prereg_merge(cptr, on_network);
+    metadata_prereg_merge(cptr, path);
     return 1;
   }
   /* It never became metadata-aware: what it set before registration goes
@@ -2839,7 +2859,7 @@ int metadata_registration_check(struct Client *cptr, int on_network)
   return 0;
 }
 
-void metadata_burst_self_to_client(struct Client *to, int on_network)
+void metadata_burst_self_to_client(struct Client *to, int path)
 {
   struct MetadataEntry *md;
   char type[NICKLEN + 16];
@@ -2849,7 +2869,7 @@ void metadata_burst_self_to_client(struct Client *to, int on_network)
   /* The registration check: only a metadata-aware client gets the burst
    * (and keeps what it set before registration, merged into its account
    * when it is logged in). */
-  if (!metadata_registration_check(to, on_network))
+  if (!metadata_registration_check(to, path))
     return;
 
   /* "If none exists, the server MUST send an empty batch instead."  The

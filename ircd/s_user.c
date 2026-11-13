@@ -842,7 +842,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
          * burst.  See project_bouncer_revive_alias_emit_gaps.md.  The
          * ghost is known to the network: a before-connect write merged
          * here goes out as the session's SET would. */
-        metadata_burst_self_to_client(ghost, 1);
+        metadata_burst_self_to_client(ghost, MD_REG_REVIVE);
 
         motd_signon(ghost);
         /* Post-registration fakelag credit: modern clients burst init
@@ -1168,7 +1168,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * into them here when it is logged in (metadata_registration_check():
      * before the N below, so silently for this client).  Mirrored on both
      * bouncer fast paths (invariant #4). */
-    metadata_burst_self_to_client(sptr, 0);
+    metadata_burst_self_to_client(sptr, MD_REG_FRESH);
 
     motd_signon(sptr);
     /* Post-registration fakelag credit: modern clients burst init
