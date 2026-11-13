@@ -15348,6 +15348,7 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
     if (f.device_ours) {
       s = bounce_get_session(dev);
       f.session_primary_ours = (s && s->hs_client == dev);
+      f.return_link_ok = (0 == strcmp(cli_nickask_link(dev), cli_yxx(cptr)));
       f.asked_here = cli_nickask_ts(dev)
                      && cli_nickask_ts(dev) == (time_t)strtoul(parv[4], NULL, 10)
                      && 0 == strcmp(cli_nickask(dev), parv[3])

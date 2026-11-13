@@ -191,6 +191,8 @@ static int nick_device_ask(struct Client *device, struct Client *primary,
    * and only a request this device really made may be applied then. */
   cli_nickask_ts(device) = TStime();
   ircd_strncpy(cli_nickask(device), nick, sizeof(cli_nickask(device)));
+  ircd_strncpy(cli_nickask_link(device), cli_yxx(cli_from(primary)),
+               sizeof(cli_nickask_link(device)));
   sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cli_from(primary), "W %s%s %s %Tu",
                 cli_yxx(&me), cli_yxx(device), nick, cli_nickask_ts(device));
   return 0;

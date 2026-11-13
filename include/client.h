@@ -452,6 +452,9 @@ struct Connection
   time_t              con_nickask_ts; /**< TS of this bouncer device's last
                                           nick request (BX W), 0 if none */
   char                con_nickask[NICKLEN + 1]; /**< the nick it asked for */
+  char                con_nickask_link[4]; /**< numeric of the server link
+                                          the request went out on: a
+                                          return is taken only over it */
   time_t              con_nexttarget;/**< Next time a target change is allowed */
   time_t              con_nextaway;  /**< Next time an AWAY change is allowed */
   time_t              con_lasttime;  /**< Last time data read from socket */
@@ -974,6 +977,7 @@ struct Client {
 #define cli_nextnick(cli)	con_nextnick(cli_connect(cli))
 #define cli_nickask_ts(cli)	con_nickask_ts(cli_connect(cli))
 #define cli_nickask(cli)	con_nickask(cli_connect(cli))
+#define cli_nickask_link(cli)	con_nickask_link(cli_connect(cli))
 /** Get next time a target change is allowed for the client. */
 #define cli_nexttarget(cli)	con_nexttarget(cli_connect(cli))
 /** Get next time an AWAY change is allowed for the client. */
@@ -1067,6 +1071,7 @@ struct Client {
 #define con_nextnick(con)	((con)->con_nextnick)
 #define con_nickask_ts(con)	((con)->con_nickask_ts)
 #define con_nickask(con)	((con)->con_nickask)
+#define con_nickask_link(con)	((con)->con_nickask_link)
 /** Get next new target time for connection. */
 #define con_nexttarget(con)	((con)->con_nexttarget)
 /** Get next AWAY change time for connection. */

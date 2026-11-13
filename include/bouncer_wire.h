@@ -1965,8 +1965,10 @@ struct nick_request_facts {
                                 *   is on */
   int session_primary_ours;    /**< (ours) a session record names it as
                                 *   the session's primary */
-  int asked_here;     /**< (ours) its own last request, still recent,
-                       *   names the same nick and TS */
+  int asked_here;     /**< (ours) its own last request, not yet answered
+                       *   and still recent, names the same nick and TS */
+  int return_link_ok; /**< (ours) the line came over the link that request
+                       *   went out on */
 };
 
 /** What a server does with a device's nick request (BX W). */

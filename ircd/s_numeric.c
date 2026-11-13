@@ -33,6 +33,7 @@
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_snprintf.h"
+#include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
 #include "struct.h"
@@ -100,6 +101,14 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
 
     if (MyConnect(acptr)) {
       const char *incoming_msgid = cli_s2s_msgid(cptr);
+
+      /* The primary's server refused a bouncer device's nick request
+       * (BX W): that request is answered, and a return of it can no
+       * longer be applied. */
+      if ((numeric == ERR_ERRONEUSNICKNAME || numeric == ERR_NICKNAMEINUSE
+           || numeric == ERR_BANNICKCHANGE || numeric == ERR_NICKTOOFAST)
+          && IsBouncerAlias(acptr))
+        cli_nickask_ts(acptr) = 0;
 
       /* Check for forwarded label batch wrapping */
       struct ForwardedLabel *fl = fwd_label_find(acptr, incoming_msgid);

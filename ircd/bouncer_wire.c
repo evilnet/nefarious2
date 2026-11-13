@@ -1131,13 +1131,17 @@ nick_request_action(const struct nick_request_facts *f)
   if (f->device_ours) {
     if (f->is_alias)
       return NICK_REQUEST_DROP;      /* not promoted here: crossed */
-    if (!f->session_primary_ours)
-      return NICK_REQUEST_REJECT;    /* no session's primary: never ours to ask */
-    /* Our own session primary, but not its last request, or too late: a
-     * request it superseded (two in flight when it was promoted: both
-     * come back, and only the last is kept), or one delayed past the
-     * window.  A race, not a violation. */
-    return f->asked_here ? NICK_REQUEST_WRITE_OWN : NICK_REQUEST_DROP;
+    /* Not its last request, already answered, superseded by its own
+     * NICK, or too late; or no session names it its primary any more (the
+     * session ended meanwhile): a race, or a guess -- applied never,
+     * alarmed never. */
+    if (!f->session_primary_ours || !f->asked_here)
+      return NICK_REQUEST_DROP;
+    /* Its real, unanswered request, back over a link it never went out
+     * on: the sender forged it. */
+    if (!f->return_link_ok)
+      return NICK_REQUEST_REJECT;
+    return NICK_REQUEST_WRITE_OWN;
   }
   if (f->device_dir_is_link)
     return NICK_REQUEST_REJECT;      /* a return goes toward the device */

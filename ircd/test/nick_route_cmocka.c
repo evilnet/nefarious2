@@ -202,17 +202,25 @@ static void test_return(void **state)
   (void)state;
   memset(&f, 0, sizeof(f));
   f.found = 1; f.is_return = 1; f.device_ours = 1;
-  f.session_primary_ours = 1; f.asked_here = 1;
+  f.session_primary_ours = 1; f.asked_here = 1; f.return_link_ok = 1;
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_WRITE_OWN);
+  /* Its real request, over another link: forged (review S1). */
+  f.return_link_ok = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  f.return_link_ok = 1;
   /* Our own session primary, a request it superseded (two in flight
    * when it was promoted: both come back) or one past the window: a race,
    * dropped quietly -- never a violation (audit A1). */
   f.asked_here = 0;
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
-  f.asked_here = 1; f.session_primary_ours = 0;  /* no session's primary */
-  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
-  f.asked_here = 0;                              /* nor without a request */
-  assert_int_equal(nick_request_action(&f), NICK_REQUEST_REJECT);
+  /* No session names it its primary (the session ended meanwhile, or an
+   * ordinary client): nothing to apply, nothing to alarm (review S4). */
+  f.asked_here = 1; f.session_primary_ours = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  f.asked_here = 0;
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
+  f.return_link_ok = 0;                          /* even over another link */
+  assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
   f.session_primary_ours = 1; f.is_alias = 1;    /* not promoted here */
   assert_int_equal(nick_request_action(&f), NICK_REQUEST_DROP);
   memset(&f, 0, sizeof(f));          /* a middle server, toward the device */

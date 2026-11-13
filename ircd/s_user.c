@@ -1942,6 +1942,11 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                  * (bouncer-design-intent.md §"Nick lockstep invariant"). */
                 sendcmdto_one_event(sib_alias, CMD_NICK, sib_alias,
                                     sib_alias == device, ":%s", nick);
+                /* Its own request (BX W) for this nick is answered: a
+                 * return of it can no longer be applied. */
+                if (cli_nickask_ts(sib_alias)
+                    && 0 == strcmp(cli_nickask(sib_alias), nick))
+                  cli_nickask_ts(sib_alias) = 0;
                 ircd_strncpy(cli_name(sib_alias), nick, NICKLEN + 1);
                 cli_name(sib_alias)[NICKLEN] = '\0';
               } else if (sib_alias && IsBouncerAlias(sib_alias)
@@ -1982,6 +1987,10 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
       hRemClient(sptr);
     strcpy(cli_name(sptr), nick);
     hAddClient(sptr);
+    /* A connection of ours renamed: any request it made as a device
+     * (BX W) is overtaken -- a late return of it must not undo this. */
+    if (MyConnect(sptr))
+      cli_nickask_ts(sptr) = 0;
 
     /* Notify change nick local/remote user — skip for case-only changes
      * and for aliases (shared primary nick — see RPL_LOGOFF site above). */
