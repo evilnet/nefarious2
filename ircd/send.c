@@ -4245,6 +4245,11 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
     sm_text = NULL;
   else if (sm_text)
     usercmd = MSG_PRIVATE;
+  /* No status-message PRIVMSG here (no wall status filter, or nothing
+   * armed): the S2S line must not carry its ,P mark either -- an arm
+   * paired with an ordinary channel send would otherwise mark a P line. */
+  if (!sm_text)
+    s2s_statusmsg_override = 0;
 
   if (sm_text)
     user_mb = msgq_make(0, "%:#C %s %c%s :%s", from, usercmd, sm_status,

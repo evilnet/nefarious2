@@ -38,6 +38,7 @@ int log_inassert;
 static int tags_on = 1;
 static char last_tags[8192];
 static int lines_made;
+static char all_tags[16384];      /* every tag region msgq_make saw, ' | '-joined */
 static struct HLC hlc = { 1700000000000ULL, 1, 1 };
 
 int feature_bool(enum Feature feat)
@@ -78,6 +79,10 @@ struct MsgBuf *msgq_make(struct Client *dest, const char *format, ...)
     ircd_strncpy(last_tags, va_arg(ap, const char *), sizeof(last_tags));
     va_end(ap);
   }
+  if (last_tags[0] && strlen(all_tags) + strlen(last_tags) + 4 < sizeof(all_tags)) {
+    strcat(all_tags, last_tags);
+    strcat(all_tags, " | ");
+  }
   if (!dummy)
     dummy = calloc(1, 256);
   return dummy;
@@ -98,14 +103,8 @@ void *DoMalloc(size_t len, const char *type, const char *file, int line)
   fail();
   return NULL;
 }
-/* ...and its BATCH + line (send_batch_marker()), the same. */
-int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
-                  const char *format, ...)
-{
-  (void)dest; (void)buf; (void)buf_len; (void)format;
-  fail();
-  return 0;
-}
+/* ...and its BATCH + line (send_batch_marker()), the same: ircd_snprintf()
+ * below fails every format but the channel send's user prefix. */
 void msgq_add(struct MsgQ *mq, struct MsgBuf *mb, int prio) { (void)mq; (void)mb; (void)prio; }
 void msgq_delete(struct MsgQ *mq, unsigned int length) { (void)mq; (void)length; }
 void dbuf_delete(struct DBuf *dyn, unsigned int length) { (void)dyn; (void)length; }
@@ -121,6 +120,35 @@ void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
 { (void)subsys; (void)severity; (void)flags; (void)fmt; }
 struct ConfItem *find_conf_byhost(struct SLink *lp, const char *host, int statmask)
 { (void)lp; (void)host; (void)statmask; return NULL; }
+/* For the channel send (the ,P hardening cases): a channel with no
+ * members reaches only these. */
+struct Client *LocalClientArray[MAXCONNECTIONS];
+int HighestFd = -1;
+int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg)
+{ (void)sptr; (void)acptr; (void)ischanmsg; return 0; }
+int persistence_channel_visible(struct Client *cptr, const char *chname)
+{ (void)cptr; (void)chname; return 1; }
+struct Client *hSeekClient(const char *name, int TMask)
+{ (void)name; (void)TMask; return NULL; }
+int ircd_snprintf(struct Client *dest, char *buf, size_t buf_len,
+                  const char *format, ...)
+{
+  /* The channel send's user-format prefix ("%%s%s", the ,P hardening
+   * cases) is formatted; any other format -- a deferred labeled batch's
+   * BATCH + line (send_batch_marker()), which no case here reaches --
+   * still fails the case, as before. */
+  va_list ap;
+  int n;
+  (void)dest;
+  if (strcmp(format, "%%s%s") != 0) {
+    fail();
+    return 0;
+  }
+  va_start(ap, format);
+  n = vsnprintf(buf, buf_len, format, ap);
+  va_end(ap);
+  return n;
+}
 
 /* ------------------------------------------------------------------ */
 /* A link and a client behind us                                        */
@@ -158,6 +186,7 @@ static int setup(void **state)
   cli_user(&user) = &user_user;
   strcpy(cli_name(&user), "u");
   tags_on = 1;
+  all_tags[0] = '\0';
   sendcmdto_reset_s2s_overrides();
   return 0;
 }
@@ -325,9 +354,56 @@ static void test_reset_clears_statusmsg_mark(void **state)
   assert_null(strstr(buf, ",P"));
 }
 
+/* A channel send with no wall status filter never carries ,P, even with
+ * the status-message PRIVMSG armed (hardening: today both arm sites sit
+ * right before a wall send).  The control: the same arm with the wall's
+ * SKIP_NONOPS does mark the S2S line, so the capture is live. */
+static void test_ordinary_channel_send_drops_statusmsg_mark(void **state)
+{
+  static struct Channel chan;
+  char buf[512];
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_channel_butone_with_client_tags(&user, "PRIVMSG", "P", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST, '\0', NULL,
+                                            "%s :%s", "#c", "hello");
+  assert_non_null(strstr(all_tags, "@A"));          /* a tag region was built */
+  assert_null(strstr(all_tags, ",P"));
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, ",P"));                   /* and nothing left armed */
+
+  all_tags[0] = '\0';
+  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLCHOPS", "WC", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONOPS,
+                                            '\0', NULL, "%s :%s", "#c", "@ hello");
+  assert_non_null(strstr(all_tags, ",P "));
+}
+
+/* The same through the variant with client tags: ,C stays, ,P does not. */
+static void test_ordinary_channel_send_with_ctags_drops_statusmsg_mark(void **state)
+{
+  static struct Channel chan;
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_channel_butone_with_client_tags(&user, "PRIVMSG", "P", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST, '\0', "+x=a",
+                                            "%s :%s", "#c", "hello");
+  assert_non_null(strstr(all_tags, ",C+x=a"));
+  assert_null(strstr(all_tags, ",P"));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test_setup(test_ordinary_channel_send_drops_statusmsg_mark, setup),
+    cmocka_unit_test_setup(test_ordinary_channel_send_with_ctags_drops_statusmsg_mark, setup),
     cmocka_unit_test_setup(test_statusmsg_mark_placed_and_consumed, setup),
     cmocka_unit_test_setup(test_statusmsg_mark_alone, setup),
     cmocka_unit_test_setup(test_statusmsg_mark_order_with_every_segment, setup),
