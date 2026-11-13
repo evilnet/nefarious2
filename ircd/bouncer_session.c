@@ -15298,6 +15298,61 @@ forward:
  * device that made it and still be applied. */
 #define NICK_ASK_RETURN_WINDOW 60
 
+/** Seconds between two reports of BX W violations from one link. */
+#define NICK_REQUEST_ALARM_GAP 60
+
+/** Whether a BX W line is well formed: a five-character device numeric,
+ * a nick that is a valid nick here as it stands (no space, not cut), a TS
+ * of digits only, and nothing after it but an optional "R".  Checked
+ * before the line is judged or forwarded, so a line that would split
+ * differently at the next hop never travels. */
+static int nick_request_well_formed(int parc, char *parv[])
+{
+  char nick[NICKLEN + 2];
+  const char *p;
+
+  if (parc > 6 || (parc == 6 && strcmp(parv[5], "R")))
+    return 0;
+  if (strlen(parv[2]) != 5 || strchr(parv[2], ' '))
+    return 0;
+  if (!*parv[3] || strlen(parv[3]) > NICKLEN || strchr(parv[3], ' '))
+    return 0;
+  ircd_strncpy(nick, parv[3], sizeof(nick));
+  if (!do_nick_name(nick) || strcmp(nick, parv[3]))
+    return 0;
+  if (!*parv[4])
+    return 0;
+  for (p = parv[4]; *p; p++)
+    if (!IsDigit(*p))
+      return 0;
+  return 1;
+}
+
+/** Report a BX W violation by the server behind @a link: always to the
+ * log, to opers (DESYNCH) at most once a minute per link, with the count
+ * of those left unreported since. */
+static void nick_request_violation(struct Client *link, const char *what)
+{
+  struct Server *sv = cli_serv(link);
+
+  log_write(LS_USER, L_WARNING, 0, "Bouncer: %s (via %s)", what,
+            cli_name(link));
+  if (!sv)
+    return;
+  if (sv->nickreq_alarm && CurrentTime - sv->nickreq_alarm < NICK_REQUEST_ALARM_GAP) {
+    sv->nickreq_quiet++;
+    return;
+  }
+  if (sv->nickreq_quiet)
+    protocol_violation(link, "%s (and %u more BX W violation%s from this "
+                       "link since the last report)", what, sv->nickreq_quiet,
+                       sv->nickreq_quiet == 1 ? "" : "s");
+  else
+    protocol_violation(link, "%s", what);
+  sv->nickreq_alarm = CurrentTime;
+  sv->nickreq_quiet = 0;
+}
+
 /** Handle BX W (a bouncer device's nick request).
  *
  * Wire format: <device's server> BX W <device YYXXX> <nick> <ts>
@@ -15326,8 +15381,21 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
   struct Client *dev, *primary = NULL;
   struct BouncerSession *s;
 
-  if (parc < 5)
-    return protocol_violation(sptr, "BX W requires 3 parameters");
+  /* Cut short: an older fork server forwards an unknown BX subcommand
+   * as its letter alone.  Nothing to judge, nothing to alarm. */
+  if (parc < 5) {
+    log_write(LS_USER, L_INFO, 0, "Bouncer: BX W with %d parameter(s) from "
+              "%s dropped", parc - 2, cli_name(sptr));
+    return 0;
+  }
+  if (!nick_request_well_formed(parc, parv)) {
+    char what[BUFSIZE];
+    ircd_snprintf(0, what, sizeof(what), "malformed BX W from %s (%s %s %s%s%s)",
+                  cli_name(sptr), parv[2], parv[3], parv[4],
+                  parc > 5 ? " " : "", parc > 5 ? parv[5] : "");
+    nick_request_violation(cptr, what);
+    return 0;
+  }
 
   memset(&f, 0, sizeof(f));
   dev = bx_find_user_strict(parv[2]);
@@ -15400,15 +15468,15 @@ static int bounce_nick_request(struct Client *cptr, struct Client *sptr,
     sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "W %s %s %s R",
                   parv[2], parv[3], parv[4]);
     return 0;
-  case NICK_REQUEST_REJECT:
-    log_write(LS_USER, L_WARNING, 0, "Bouncer: BX W%s from %s via %s for %s "
-              "(%s) to %s rejected: not a request that link can make",
-              f.is_return ? " R" : "", cli_name(sptr), cli_name(cptr),
-              parv[2], dev ? cli_name(dev) : "?", parv[3]);
-    return protocol_violation(cptr, "BX W%s from %s for %s (%s) to %s: not "
-                              "a device of the sender's or not ours to apply",
-                              f.is_return ? " R" : "", cli_name(sptr), parv[2],
-                              dev ? cli_name(dev) : "?", parv[3]);
+  case NICK_REQUEST_REJECT: {
+    char what[BUFSIZE];
+    ircd_snprintf(0, what, sizeof(what), "BX W%s from %s for %s (%s) to %s "
+                  "rejected: not a device of the sender's, or not ours to "
+                  "apply", f.is_return ? " R" : "", cli_name(sptr), parv[2],
+                  dev ? cli_name(dev) : "?", parv[3]);
+    nick_request_violation(cptr, what);
+    return 0;
+  }
   case NICK_REQUEST_DROP:
   default:
     log_write(LS_USER, L_INFO, 0, "Bouncer: BX W%s for %s (%s) from %s "

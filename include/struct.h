@@ -85,6 +85,9 @@ struct Server {
   struct MdSyncLink *mdsync;    /**< W4 stamped account-metadata sync state
                                      for this direct link (metadata_sync.h);
                                      lazily allocated, freed with the link */
+  time_t          nickreq_alarm; /**< last BX W violation this direct link
+                                     was reported for (one per minute) */
+  unsigned int    nickreq_quiet; /**< violations not reported since */
 };
 
 /** Describes a user on the network. */
