@@ -445,6 +445,129 @@ static void remote_device_unchanged(void **state)
   assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 1);
 }
 
+/** A ban that matches only the device's own identity (its nick and host
+ * here; nobody can see them to write one) does not silence it: the
+ * primary's identity is the one judged, member or not. */
+static void device_only_ban_lets_it_speak(void **state)
+{
+  int member;
+
+  for (member = 0; member < 2; member++) {
+    struct fake_client prim, dev;
+    struct Channel *ch = chan_new("#devban");
+
+    fake_init(&prim, "prim", "prim.host", "pacct", 1, 0);
+    fake_init(&dev, "devnick", "dev.host", "dacct", 1, 0);
+    SetFlag(&dev.cli, FLAG_BOUNCER_ALIAS);
+    dev.user.alias_primary = &prim.cli;
+    join(ch, &prim, 0);
+    if (member)
+      join(ch, &dev, CHFL_ALIAS);
+    add_ban(&ch->banlist, "devnick!*@*", 0);
+    add_ban(&ch->banlist, "*!*@dev.host", 0);
+    add_ban(&ch->banlist, "~a:dacct", 0);
+    if (client_can_send_to_channel(&dev.cli, ch, 0) != 1)
+      fail_msg("device %s: silenced by a ban on its own identity",
+               member ? "a member" : "not a member");
+  }
+}
+
+/** A held ghost of ours as the primary: ours (MyUser), so its ban cache
+ * is read and kept, as when it speaks itself; its voice lets the device
+ * speak. */
+static void held_ghost_primary(void **state)
+{
+  struct fake_client prim, dev;
+  struct Channel *ch = chan_new("#ghost");
+  struct Membership *pm;
+
+  fake_init(&prim, "prim", "prim.host", "pacct", 1, 0);
+  SetFlag(&prim.cli, FLAG_BOUNCER_HOLD);
+  fake_init(&dev, "devnick", "dev.host", "dacct", 1, 0);
+  SetFlag(&dev.cli, FLAG_BOUNCER_ALIAS);
+  dev.user.alias_primary = &prim.cli;
+  pm = join(ch, &prim, 0);
+  join(ch, &dev, CHFL_ALIAS);
+  add_ban(&ch->banlist, "prim!*@*", 0);
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 0);
+  assert_true(pm->banflags & MBFL_BANVALID_QUIET);
+  pm->status |= CHFL_VOICE;
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 1);
+}
+
+/** The state a refused D.2 demote finish leaves: a device whose "primary"
+ * is itself an alias (the demoted connection, with no primary of its
+ * own).  Pinned: no recursion -- that alias's membership and identity are
+ * judged as a primary's would be. */
+static void alias_of_alias_primary(void **state)
+{
+  struct fake_client mid, dev;
+  struct Channel *ch = chan_new("#aoa");
+  struct Membership *mm;
+
+  fake_init(&mid, "mid", "mid.host", "pacct", 1, 0);
+  SetFlag(&mid.cli, FLAG_BOUNCER_ALIAS);          /* no primary of its own */
+  fake_init(&dev, "devnick", "dev.host", "pacct", 1, 0);
+  SetFlag(&dev.cli, FLAG_BOUNCER_ALIAS);
+  dev.user.alias_primary = &mid.cli;
+  mm = join(ch, &mid, CHFL_ALIAS);
+  join(ch, &dev, CHFL_ALIAS);
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 1);
+  ch->mode.mode = MODE_MODERATED;
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 0);
+  ch->mode.mode = 0;
+  add_ban(&ch->banlist, "mid!*@*", 0);
+  mm->banflags = 0;          /* a new ban invalidates the cache (mode.c) */
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 0);
+}
+
+/** A device's zombie membership is no membership: the non-member rules
+ * (+n refuses though the primary is a voiced member). */
+static void zombie_device_membership(void **state)
+{
+  struct fake_client prim, dev;
+  struct Channel *ch = chan_new("#zomb");
+  struct Membership *dm;
+
+  fake_init(&prim, "prim", "prim.host", "pacct", 1, 0);
+  fake_init(&dev, "devnick", "dev.host", "pacct", 1, 0);
+  SetFlag(&dev.cli, FLAG_BOUNCER_ALIAS);
+  dev.user.alias_primary = &prim.cli;
+  join(ch, &prim, CHFL_VOICE);
+  dm = join(ch, &dev, CHFL_ALIAS | CHFL_ZOMBIE);
+  ch->mode.mode = MODE_NOPRIVMSGS;
+  assert_int_equal(member_can_send_to_channel(dm, 0), 0);
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 0);
+  ch->mode.mode = 0;
+  assert_int_equal(member_can_send_to_channel(dm, 0), 1);
+}
+
+/** Another server's primary that is the channel's manager (it joined with
+ * the Apass there).  CHFL_CHANNEL_MANAGER is set only by the server the
+ * join happened on (m_join), so here its membership shows just the op:
+ * the device speaks, where the primary itself is refused at its own
+ * server (APASS_CANSEND off).  Pinned divergence; were the flag ever
+ * carried, the rule would apply. */
+static void remote_apass_manager_divergence(void **state)
+{
+  struct fake_client prim, dev;
+  struct Channel *ch = chan_new("#rapass");
+  struct Membership *pm;
+
+  fake_init(&prim, "prim", "prim.host", "pacct", 0, 0);
+  fake_init(&dev, "devnick", "dev.host", "pacct", 1, 0);
+  SetFlag(&dev.cli, FLAG_BOUNCER_ALIAS);
+  dev.user.alias_primary = &prim.cli;
+  pm = join(ch, &prim, CHFL_CHANOP);       /* as this server knows it */
+  join(ch, &dev, CHFL_ALIAS);
+  strcpy(ch->mode.apass, "secret");
+  feat_apass_cansend = 0;
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 1);
+  pm->status |= CHFL_CHANNEL_MANAGER;      /* not carried today */
+  assert_int_equal(client_can_send_to_channel(&dev.cli, ch, 0), 0);
+  assert_int_equal(pm->banflags, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -455,6 +578,11 @@ int main(void)
     cmocka_unit_test(nonmember_device_and_plus_n),
     cmocka_unit_test(stock_member_unchanged),
     cmocka_unit_test(remote_device_unchanged),
+    cmocka_unit_test(device_only_ban_lets_it_speak),
+    cmocka_unit_test(held_ghost_primary),
+    cmocka_unit_test(alias_of_alias_primary),
+    cmocka_unit_test(zombie_device_membership),
+    cmocka_unit_test(remote_apass_manager_divergence),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
