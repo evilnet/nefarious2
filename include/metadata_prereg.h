@@ -144,11 +144,13 @@ struct md_prereg_ops {
   /** Non-zero when @a key's having no row is a state of its own
    * (md_prereg_decide()'s no_row_is_state).  NULL: never. */
   int (*no_row_is_state)(void *ctx, const char *key);
-  /** Call @a each with every live user key of the account in the store
-   * (and its visibility) -- the keys a CLEAR after login deletes from the
-   * store -- once the walk is over, so @a each may write the store.  NULL:
-   * no store (a CLEAR deletes nothing of the account's). */
-  void (*clear_keys)(void *ctx,
+  /** A CLEAR at @a st: call @a each with every live user key of the
+   * account in the store (and its visibility) -- the keys a CLEAR after
+   * login deletes from the store -- once the walk is over, so @a each may
+   * write the store.  The ircd also records the account's CLEAR floor at
+   * @a st here.  NULL: no store (a CLEAR deletes nothing of the
+   * account's). */
+  void (*clear_keys)(void *ctx, const struct md_stamp *st,
                      void (*each)(void *arg, const char *key, int vis),
                      void *arg);
 };

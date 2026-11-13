@@ -208,6 +208,32 @@ int md_row_unchanged(const struct md_version *local,
   return md_version_same_content(local, in);
 }
 
+int md_floor_in_force(const struct md_stamp *floor, uint64_t now_s,
+                      uint64_t ttl_s)
+{
+  if (!floor)
+    return 0;
+  return ttl_s == 0 || floor->ms / 1000 + ttl_s >= now_s;
+}
+
+int md_floor_converts(const struct md_stamp *floor,
+                      const struct md_version *in, int clearable,
+                      uint64_t now_s, uint64_t ttl_s)
+{
+  if (!in || in->tombstone || !clearable)
+    return 0;
+  if (!md_floor_in_force(floor, now_s, ttl_s))
+    return 0;
+  return md_stamp_cmp(&in->st, floor) < 0;
+}
+
+int md_floor_raises(const struct md_stamp *floor, const struct md_stamp *tc)
+{
+  if (!tc)
+    return 0;
+  return !floor || md_stamp_cmp(tc, floor) > 0;
+}
+
 int md_lww_take(const struct md_version *local,
                  const struct md_version *incoming)
 {

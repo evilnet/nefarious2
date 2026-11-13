@@ -142,6 +142,34 @@ extern int md_version_same_content(const struct md_version *a,
 extern int md_row_unchanged(const struct md_version *local,
                             const struct md_version *in);
 
+/** The CLEAR floor (owner, 2026-11-13): an account cleared at Tc keeps
+ * "cleared at Tc" in its store, and an incoming live row older than Tc is
+ * taken as a tombstone at Tc instead -- a value written before the CLEAR,
+ * held by a server this one did not reach, does not come back.
+ *
+ * Is @a floor (NULL: none) in force at @a now_s?  It expires with the
+ * tombstones (METADATA_TOMBSTONE_TTL, @a ttl_s; 0: never), measured from
+ * its own time, as the tombstone purge measures them.
+ * @return 1 if in force. */
+extern int md_floor_in_force(const struct md_stamp *floor, uint64_t now_s,
+                             uint64_t ttl_s);
+
+/** Does the floor turn @a in into a tombstone at the floor's stamp?  Only
+ * a live row (a tombstone is never converted), only a key a CLEAR deletes
+ * (@a clearable: not a server-managed or internal key), only one older
+ * than the floor (a row written after the CLEAR stands), only a floor in
+ * force (md_floor_in_force()).
+ * @return 1 to convert. */
+extern int md_floor_converts(const struct md_stamp *floor,
+                             const struct md_version *in, int clearable,
+                             uint64_t now_s, uint64_t ttl_s);
+
+/** Does a CLEAR at @a tc raise the floor @a floor (NULL: none)?  It only
+ * ever goes up.
+ * @return 1 to write @a tc. */
+extern int md_floor_raises(const struct md_stamp *floor,
+                           const struct md_stamp *tc);
+
 /** Encode @a s/@a tombstone as the wire clock token "L<stamp>" (live) or
  * "D<stamp>" (tombstone) into @a buf (capacity @a len, NUL-terminated on
  * success).

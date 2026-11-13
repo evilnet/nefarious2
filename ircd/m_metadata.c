@@ -1185,6 +1185,16 @@ static void metadata_clear_user(struct Client *sptr, const char *display_target,
     return;
   }
 
+  /* The account's CLEAR floor, stamped before the deletes below (owner,
+   * 2026-11-13): a value written before this CLEAR that reaches this server
+   * later -- a pull answer, a burst, a relay from a server the deletes did
+   * not reach -- is taken as a tombstone at it (ms_metadata_stamped()). */
+  if (cli_user(target_client)->account[0] && metadata_lmdb_is_available()) {
+    struct md_stamp tc = metadata_stamp_now();
+
+    metadata_account_floor_raise(cli_user(target_client)->account, &tc);
+  }
+
   for (k = keys; k; k = k->next)
     metadata_client_write(sptr, target_client, k->key, NULL, k->vis);
   md_clear_key_free(keys);
@@ -1995,6 +2005,46 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   in.vis = vis;
   in.value = tombstone ? NULL : chunk->value;
   in.vlen = tombstone ? 0 : chunk->len;
+
+  /* The account's CLEAR floor (owner, 2026-11-13): a live row of a key a
+   * CLEAR deletes, older than the account's latest CLEAR, was written
+   * before it -- a value a server held that the CLEAR's deletes did not
+   * reach (a split, a pull answer or burst arriving after the CLEAR).  It
+   * is taken as a tombstone at the floor's stamp instead, and that
+   * tombstone goes to every link, the sender included; the live row is
+   * not relayed.  A tombstone is never converted, a row written after
+   * the CLEAR stands.  Nobody here is told unless this server held the
+   * key live (metadata_account_merge() 1). */
+  {
+    struct md_stamp floor;
+
+    if (metadata_floor_converts(account_name, wire_key, &in, &floor)) {
+      struct md_version t;
+
+      t.st = floor;
+      t.tombstone = 1;
+      t.vis = vis;
+      t.value = NULL;
+      t.vlen = 0;
+      merge_rc = metadata_account_merge(account_name, wire_key, &t);
+      if (merge_rc == 1 || merge_rc == 2) {
+        metadata_account_apply_memory_ex(account_name, wire_key, NULL, vis,
+                                         NULL, NULL, merge_rc == 1);
+        metadata_emit_versioned(&me, NULL, NULL, account_name, wire_key, &t);
+      } else if (merge_rc == 0) {
+        /* This server already holds the key under a stamp no older than
+         * the floor (the CLEAR's own delete, or a later write): that row
+         * beats the sender's, so the sender gets it. */
+        struct md_version cur;
+        char valbuf[METADATA_VALUE_LEN];
+
+        if (metadata_account_get_version(account_name, wire_key, &cur, valbuf,
+                                         sizeof(valbuf)) == 0)
+          metadata_emit_versioned(&me, cptr, NULL, account_name, wire_key, &cur);
+      }
+      return 0;
+    }
+  }
 
   /* Apply this server's full limits (value bytes + key count, via
    * metadata_check_account_limits -- Task 5, W4 plan 1.8, extends what

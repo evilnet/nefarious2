@@ -50,6 +50,7 @@ struct fake {
   struct acct_row rows[ACCT_MAX];
   int store_fails;                    /* row() and store() fail */
   int store_keeps;                    /* store() keeps its own row (0) */
+  struct md_stamp floor_st;           /* the stamp clear_keys() was given */
   const char *mode_key;               /* the one key whose no-row is a state */
   int napplied, nsent, nrefused;
   char applied[LOG_MAX][MD_PREREG_KEY_LEN];
@@ -167,11 +168,14 @@ static int f_no_row_is_state(void *ctx, const char *key)
 }
 
 /* Every live key, collected first (the ircd's walk does the same). */
-static void f_clear_keys(void *ctx, void (*each)(void *arg, const char *key, int vis),
+static void f_clear_keys(void *ctx, const struct md_stamp *st,
+                         void (*each)(void *arg, const char *key, int vis),
                          void *arg)
 {
   struct fake *f = ctx;
   char keys[ACCT_MAX][MD_PREREG_KEY_LEN];
+
+  f->floor_st = *st;
   int vis[ACCT_MAX];
   int i, n = 0;
 
@@ -686,6 +690,7 @@ static void test_set_then_clear_and_two_clears(void **state)
   assert_string_equal(value_of(&f, "late"), "3");
   assert_null(value_of(&f, "a"));
   assert_true(row_find(&f, "a")->v.st.ms == 203);   /* the last CLEAR's stamp */
+  assert_true(f.floor_st.ms == 203);                /* ... and the floor's */
 }
 
 /* A row written after the CLEAR (another device, another server) stands. */

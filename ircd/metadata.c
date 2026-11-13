@@ -2421,13 +2421,68 @@ struct clear_key {
   char key[1];   /* allocated to fit */
 };
 
+/** See include/metadata.h. */
+int metadata_key_clearable(const char *key)
+{
+  return key && !metadata_key_is_server_managed(key) && md_key_replicable(key);
+}
+
+/** The account's CLEAR floor: an internal key, never on the wire
+ * (md_key_replicable() refuses '$'), never listed or lazily loaded (its
+ * row is a clock-CF tombstone, no value row), purged with the tombstones
+ * (metadata_account_purge_old_tombstones()). */
+#define MD_KEY_CLEAR_FLOOR "$cleared"
+
+/** See include/metadata.h. */
+int metadata_account_floor_get(const char *account, struct md_stamp *out)
+{
+  struct md_version v;
+  char valbuf[8];
+
+  if (!account || !out || !metadata_lmdb_is_available())
+    return 0;
+  if (metadata_account_get_version(account, MD_KEY_CLEAR_FLOOR, &v, valbuf,
+                                   sizeof(valbuf)) != 0 || !v.tombstone)
+    return 0;
+  *out = v.st;
+  return 1;
+}
+
+/** See include/metadata.h. */
+void metadata_account_floor_raise(const char *account, const struct md_stamp *tc)
+{
+  struct md_stamp floor;
+  int have;
+
+  if (!account || !tc || !metadata_lmdb_is_available())
+    return;
+  have = metadata_account_floor_get(account, &floor);
+  if (!md_floor_raises(have ? &floor : NULL, tc))
+    return;
+  if (metadata_account_put_versioned(account, MD_KEY_CLEAR_FLOOR, NULL,
+                                     METADATA_VIS_PUBLIC, tc) < 0)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "metadata: could not record the CLEAR floor of %s", account);
+}
+
+/** See include/metadata.h. */
+int metadata_floor_converts(const char *account, const char *key,
+                            const struct md_version *in, struct md_stamp *floor)
+{
+  if (!in || in->tombstone || !metadata_key_clearable(key)
+      || !metadata_account_floor_get(account, floor))
+    return 0;
+  return md_floor_converts(floor, in, 1, (uint64_t)CurrentTime,
+                           (uint64_t)(feature_int(FEAT_METADATA_TOMBSTONE_TTL) > 0
+                                      ? feature_int(FEAT_METADATA_TOMBSTONE_TTL) : 0));
+}
+
 /** metadata_account_foreach_version() callback: a live user key. */
 static int clear_key_cb(const char *key, const struct md_version *v, void *arg)
 {
   struct clear_key **head = arg, *k;
 
-  if (v->tombstone || metadata_key_is_server_managed(key)
-      || !md_key_replicable(key))
+  if (v->tombstone || !metadata_key_clearable(key))
     return 0;
   k = (struct clear_key *)MyMalloc(sizeof(*k) + strlen(key));
   if (!k)
@@ -2548,13 +2603,16 @@ static void prereg_refuse(void *arg, const char *key, enum md_prereg_verdict why
   }
 }
 
-static void prereg_clear_keys(void *arg,
+static void prereg_clear_keys(void *arg, const struct md_stamp *st,
                               void (*each)(void *each_arg, const char *key,
                                            int vis),
                               void *each_arg)
 {
   struct prereg_merge_ctx *c = arg;
 
+  /* The floor first: a row older than the CLEAR that a peer answers the
+   * login's pull with (or bursts later) is taken as a tombstone at it. */
+  metadata_account_floor_raise(c->account, st);
   metadata_account_clear_keys(c->account, each, each_arg);
 }
 

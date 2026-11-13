@@ -193,7 +193,7 @@ int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
     if (n->clear) {
       m.clear_st = n->st;
       if (ops->clear_keys)
-        ops->clear_keys(ctx, clear_one, &m);
+        ops->clear_keys(ctx, &n->st, clear_one, &m);
       continue;
     }
     w.st = n->st;

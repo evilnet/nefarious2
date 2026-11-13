@@ -332,6 +332,29 @@ extern int metadata_prereg_record(struct Client *cptr, const char *key,
 extern int metadata_prereg_record_clear(struct Client *cptr,
                                         const struct md_stamp *st);
 
+/** A key a CLEAR deletes: not server-managed (draft/persistence/), not
+ * internal (md_key_replicable(): last_present, the CLEAR floor). */
+extern int metadata_key_clearable(const char *key);
+
+/** The account's CLEAR floor (owner, 2026-11-13): the stamp of its latest
+ * CLEAR, kept in its store as an internal tombstone row, purged with the
+ * tombstones (METADATA_TOMBSTONE_TTL).
+ * @return 1 and @a out set when there is one. */
+extern int metadata_account_floor_get(const char *account, struct md_stamp *out);
+
+/** Record a CLEAR of @a account at @a tc: the floor goes up to @a tc, never
+ * down (md_floor_raises()). */
+extern void metadata_account_floor_raise(const char *account,
+                                         const struct md_stamp *tc);
+
+/** Does the account's floor turn the incoming row @a in for @a key into a
+ * tombstone (md_floor_converts(): a live row of a key a CLEAR deletes,
+ * older than a floor in force)?
+ * @return 1 and @a floor set to the floor's stamp when it does. */
+extern int metadata_floor_converts(const char *account, const char *key,
+                                   const struct md_version *in,
+                                   struct md_stamp *floor);
+
 /** Call @a each with every live user key of @a account in the store and
  * its visibility -- not a server-managed key (draft/persistence/), not an
  * internal one (md_key_replicable(): last_present) -- once the walk is
