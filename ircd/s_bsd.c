@@ -28,6 +28,7 @@
 #include "capab.h"
 #include "client.h"
 #include "IPcheck.h"
+#include "input_hold.h"
 #include "channel.h"
 #include "class.h"
 #include "gline.h"
@@ -911,6 +912,10 @@ void close_connection(struct Client *cptr)
   MsgQClear(&(cli_sendQ(cptr)));
   client_drop_sendq(cli_connect(cptr));
   DBufClear(&(cli_recvQ(cptr)));
+  /* The queue a hold kept is gone with the socket: so is the hold, and its
+   * allowance (a held ghost keeps its Connection; a revive onto it must
+   * find neither). */
+  input_hold_clear(&con_input_hold(cli_connect(cptr)));
   memset(cli_passwd(cptr), 0, sizeof(cli_passwd(cptr)));
   set_snomask(cptr, 0, SNO_SET);
 
@@ -1306,123 +1311,123 @@ static int ws_frag_feed(struct Client *cptr, int opcode, int is_fin,
  * liveness a read gives check_pings(), are seen at once), the lines stay
  * there in order, and once it has a primary again (or is a primary
  * itself) they are parsed as if they had just arrived -- woken at once
- * (client_input_wake(), from every place the bouncer ends an orphan), and
- * by the 2-second process timer read_packet() keeps armed while lines
- * wait.  A QUIT in the queue ends the connection promptly: the lines
- * before it are dropped with it, as an EOF drops what is queued.  The
- * hold changes nothing of the session and nothing of when the orphan is
- * resolved.  Bounded: it lasts at most INPUT_HOLD_MAX seconds (the sweep
- * resolves every orphan of ours before that; past it the lines are parsed
- * as any orphan's, which the speak check refuses), and the queue may grow
- * to twice the usual cap while held and for at most INPUT_HOLD_GRACE
- * seconds after (less once it is back under the usual cap): the lines it
- * let in are parsed at the fake-lag pace, as lines that arrived together
- * always are, and when the grace ends the usual cap applies whatever the
- * queue holds -- a client that kept its queue over it is the excess flood
- * it always was.  The allowance is time-limited, not "until drained":
- * that would let a client that keeps sending keep it for good.  Nor is
- * the socket left unread while a backlog drains: a read is the liveness
- * check_pings() goes by, and the client's PONG must still reach us.
+ * (client_input_wake(), from bouncer_session.c's alias_set_primary(),
+ * through which every write of a local alias's primary goes), and by the
+ * 2-second process timer read_packet() keeps armed while lines wait.  A
+ * QUIT in the queue ends the connection promptly: the lines before it are
+ * dropped with it, as an EOF drops what is queued.  The hold changes
+ * nothing of the session and nothing of when the orphan is resolved.
+ *
+ * Bounded (the pure rules: input_hold.c): at INPUT_HOLD_MAX the orphan
+ * sweep is asked to run at once (never inline) and the lines wait for that
+ * pass; only if the device is still an orphan after it are they parsed as
+ * an orphan's (the speak check refuses it); at INPUT_HOLD_CEILING they are
+ * parsed whatever happened.  The queue may grow to twice the usual cap
+ * while held and for at most INPUT_HOLD_GRACE seconds after the release
+ * (less once it is back under the usual cap), once per hold; then the
+ * usual cap applies whatever the backlog -- a time limit, not "until
+ * drained", which a client that keeps sending would keep for good, nor
+ * "leave the socket unread while it drains", which would stop the reads
+ * check_pings() goes by.  Released lines are charged fake lag as they are
+ * parsed, as lines that arrived together always are.
  */
-
-/** The longest a connection's input is held: the orphan sweep's longest
- * wait, plus a grace's worth and a margin for one-second timers. */
-#define INPUT_HOLD_MAX   (BOUNCE_ORPHAN_WAIT_MAX + BOUNCE_ORPHAN_GRACE + 3)
-/** How long at most the held allowance outlives a hold. */
-#define INPUT_HOLD_GRACE INPUT_HOLD_MAX
+#if INPUT_HOLD_MAX <= BOUNCE_ORPHAN_WAIT_MAX + BOUNCE_ORPHAN_GRACE
+#error "INPUT_HOLD_MAX must outlast the orphan sweep's window"
+#endif
 
 /** One queued line of a held connection, for the QUIT scan. */
 static char heldscan[FULL_MSG_SIZE];
 
-/** Is @a line (tags and a source prefix allowed) a QUIT?
- * @param[in] line One line, NUL-terminated.
- * @param[in] ctx Unused.
- * @return Non-zero for a QUIT. */
+/** dbuf_find_line()'s matcher: a QUIT (input_hold_is_quit()). */
 static int line_is_quit(const char *line, void *ctx)
 {
-  const char *p = line;
-
   (void)ctx;
-  if (*p == '@')
-    while (*p && *p != ' ')
-      p++;
-  while (*p == ' ')
-    p++;
-  if (*p == ':') {
-    while (*p && *p != ' ')
-      p++;
-    while (*p == ' ')
-      p++;
-  }
-  return 0 == ircd_strncmp(p, "QUIT", 4) && (p[4] == '\0' || p[4] == ' ');
+  return input_hold_is_quit(line);
 }
 
 /** How much a user connection's receive queue may hold before it is an
- * excess flood: its class's recvq plus one message of the largest size,
- * and twice that while its input is held and, after a hold, until
- * INPUT_HOLD_GRACE seconds have passed or the queue is back under the
- * usual cap, whichever is first.
+ * excess flood (input_hold_cap(): its class's recvq plus one message of
+ * the largest size; twice that while held and a while after).
  * @param[in] cptr A local client.
  * @return The cap in bytes. */
 static unsigned int recvq_cap(struct Client *cptr)
 {
-  struct Connection *con = cli_connect(cptr);
-  unsigned int cap = get_recvq(cptr) + FULL_MSG_SIZE;
-
-  if (con_input_boost(con)
-      && (CurrentTime >= con_input_boost(con)
-          || DBufLength(&(cli_recvQ(cptr))) <= cap))
-    con_input_boost(con) = 0;
-  if (con_input_held(con) > 0 || con_input_boost(con))
-    return 2 * cap;
-  return cap;
+  return input_hold_cap(&con_input_hold(cli_connect(cptr)),
+                        get_recvq(cptr) + FULL_MSG_SIZE,
+                        DBufLength(&(cli_recvQ(cptr))), CurrentTime);
 }
 
-/** Is @a cptr's input held (its lines not parsed now)?  Yes while it is a
- * bouncer device of ours with no primary, within INPUT_HOLD_MAX, and no
- * QUIT is queued.  Keeps the hold's state on the Connection
- * (con_input_held: when it began, -1 past the bound; con_input_boost: the
- * allowance after it).  A QUIT found in the queue ends the hold with the
- * lines before it dropped, so that the QUIT is the next line parsed.
- * Reads no bouncer state but the client's own alias flag and pointer.
- * @param[in] cptr A local client whose queue holds a complete line.
+/** Is @a cptr a holdable orphan: a registered bouncer device of ours with
+ * no primary, not on its way out? */
+static int input_orphan(struct Client *cptr)
+{
+  return IsUser(cptr) && IsBouncerAlias(cptr) && !cli_alias_primary(cptr)
+         && !HasFlag(cptr, FLAG_CLOSING) && !HasFlag(cptr, FLAG_KILLED);
+}
+
+/** Run the hold's rule for @a cptr (input_hold_step()), and log what
+ * changed.
+ * @param[in] cptr A local client.
+ * @return What to do with its queued lines. */
+static enum input_hold_action input_hold_run(struct Client *cptr)
+{
+  struct InputHold *h = &con_input_hold(cli_connect(cptr));
+  time_t since = h->since;
+  enum input_hold_event ev;
+  enum input_hold_action act;
+
+  act = input_hold_step(h, input_orphan(cptr), CurrentTime,
+                        bounce_orphan_sweep_count(), &ev);
+  switch (ev) {
+  case INPUT_HOLD_EV_NONE:
+    break;
+  case INPUT_HOLD_EV_BEGAN:
+    log_write(LS_USER, L_INFO, 0, "Bouncer: device %s%s (%s) has no primary: "
+              "its input is held", cli_yxx(&me), cli_yxx(cptr), cli_name(cptr));
+    break;
+  case INPUT_HOLD_EV_ENDED:
+    log_write(LS_USER, L_INFO, 0, "Bouncer: device %s%s (%s) %s after %d s: "
+              "its %u queued bytes are parsed now",
+              cli_yxx(&me), cli_yxx(cptr), cli_name(cptr),
+              (HasFlag(cptr, FLAG_CLOSING) || HasFlag(cptr, FLAG_KILLED))
+                ? "is leaving"
+                : !IsBouncerAlias(cptr) ? "is a primary now"
+                                        : "has a primary again",
+              (int)(CurrentTime - since), DBufLength(&(cli_recvQ(cptr))));
+    break;
+  case INPUT_HOLD_EV_ASKED:
+    log_write(LS_USER, L_NOTICE, 0, "Bouncer: device %s%s (%s) still has no "
+              "primary after %d s: the orphan sweep is asked to run now",
+              cli_yxx(&me), cli_yxx(cptr), cli_name(cptr),
+              (int)(CurrentTime - since));
+    bounce_orphan_sweep_now();
+    break;
+  case INPUT_HOLD_EV_SWEPT:
+    log_write(LS_USER, L_NOTICE, 0, "Bouncer: device %s%s (%s) is still an "
+              "orphan after the sweep: its input is parsed as an orphan's",
+              cli_yxx(&me), cli_yxx(cptr), cli_name(cptr));
+    break;
+  case INPUT_HOLD_EV_CEILING:
+    log_write(LS_USER, L_WARNING, 0, "Bouncer: device %s%s (%s) still has no "
+              "primary after %d s and no orphan sweep has run: its input is "
+              "released at the hold's ceiling", cli_yxx(&me), cli_yxx(cptr),
+              cli_name(cptr), (int)(CurrentTime - since));
+    break;
+  }
+  return act;
+}
+
+/** Is @a cptr's input held (its lines not parsed now)?  input_hold_run(),
+ * and, while held, a QUIT found in the queue: the lines before it are
+ * dropped so that the QUIT is the next line parsed.
+ * @param[in] cptr A local client whose queue holds a line.
  * @return Non-zero when its lines must wait. */
 static int input_held(struct Client *cptr)
 {
-  struct Connection *con = cli_connect(cptr);
   unsigned int off = 0;
 
-  if (!IsUser(cptr) || !IsBouncerAlias(cptr) || cli_alias_primary(cptr)
-      || HasFlag(cptr, FLAG_CLOSING) || HasFlag(cptr, FLAG_KILLED)) {
-    if (con_input_held(con)) {
-      if (con_input_held(con) > 0)
-        log_write(LS_USER, L_INFO, 0, "Bouncer: device %s%s (%s) %s after "
-                  "%d s: its %u queued bytes are parsed now",
-                  cli_yxx(&me), cli_yxx(cptr), cli_name(cptr),
-                  IsBouncerAlias(cptr) ? "has a primary again"
-                                       : "is a primary now",
-                  (int)(CurrentTime - con_input_held(con)),
-                  DBufLength(&(cli_recvQ(cptr))));
-      con_input_held(con) = 0;
-      con_input_boost(con) = CurrentTime + INPUT_HOLD_GRACE;
-    }
+  if (input_hold_run(cptr) == INPUT_HOLD_PARSE)
     return 0;
-  }
-  if (con_input_held(con) < 0)
-    return 0;   /* past the bound: parsed as any orphan's */
-  if (!con_input_held(con)) {
-    con_input_held(con) = CurrentTime;
-    log_write(LS_USER, L_INFO, 0, "Bouncer: device %s%s (%s) has no primary: "
-              "its input is held", cli_yxx(&me), cli_yxx(cptr), cli_name(cptr));
-  } else if (CurrentTime - con_input_held(con) > INPUT_HOLD_MAX) {
-    log_write(LS_USER, L_NOTICE, 0, "Bouncer: device %s%s (%s) still has no "
-              "primary after %d s: its input is no longer held",
-              cli_yxx(&me), cli_yxx(cptr), cli_name(cptr),
-              (int)(CurrentTime - con_input_held(con)));
-    con_input_held(con) = -1;
-    con_input_boost(con) = CurrentTime + INPUT_HOLD_GRACE;
-    return 0;
-  }
   if (dbuf_find_line(&(cli_recvQ(cptr)), heldscan, sizeof(heldscan),
                      line_is_quit, NULL, &off)) {
     if (off)
@@ -1436,16 +1441,19 @@ static int input_held(struct Client *cptr)
 }
 
 /** A connection whose input was held may have its lines parsed again (a
- * device of ours has a primary again, or became one): process its queue
- * at the event loop's next timer pass -- never here, inside whatever line
- * of another connection ended the orphan.  A no-op for a connection that
- * is not held.
+ * device of ours has a primary again, or became one): the hold ends now
+ * (its allowance starts), and its queue is processed at the event loop's
+ * next timer pass -- never here, inside whatever line of another
+ * connection ended the orphan.  A no-op for a connection that is not
+ * held or is still an orphan.
  * @param[in] cptr A client (any; only a local held one is woken). */
 void client_input_wake(struct Client *cptr)
 {
   if (!cptr || !MyConnect(cptr) || !cli_connect(cptr)
-      || con_input_held(cli_connect(cptr)) <= 0
-      || (IsBouncerAlias(cptr) && !cli_alias_primary(cptr)))
+      || !con_input_hold(cli_connect(cptr)).since || input_orphan(cptr))
+    return;
+  (void)input_hold_run(cptr);   /* ends the hold: logged, allowance set */
+  if (!DBufLength(&(cli_recvQ(cptr))))
     return;
   if (t_onqueue(&(cli_proc(cptr))))
     timer_chg(&(cli_proc(cptr)), TT_ABSOLUTE, CurrentTime);
@@ -1860,8 +1868,8 @@ ssl_read_again:
      * active.  Multiline batches are budgeted at the parser layer
      * (FEAT_MULTILINE_MAX_BYTES in m_batch.c) — recv path stays out.
      * A connection whose input is held (input_held()) may queue twice
-     * that while held and for at most INPUT_HOLD_GRACE seconds after
-     * (recvq_cap()).
+     * that while held and for at most INPUT_HOLD_GRACE seconds after its
+     * release (recvq_cap()).
      */
     {
       if (DBufLength(&(cli_recvQ(cptr))) > recvq_cap(cptr))

@@ -122,6 +122,21 @@ static void long_line_is_cut_not_overrun(void **state)
   DBufClear(&q);
 }
 
+/** Bare CR ends a line, as for dbuf_getmsg() (IsEol). */
+static void cr_only_line_ends(void **state)
+{
+  struct DBuf q = { 0, 0, 0 };
+  char buf[64];
+  unsigned int off = 0;
+  int calls = 0;
+
+  put(&q, "PRIVMSG #a :x\rQUIT\r");
+  assert_int_equal(dbuf_find_line(&q, buf, sizeof(buf), is_quit, &calls, &off), 1);
+  assert_int_equal(off, 14);
+  assert_int_equal(calls, 2);
+  DBufClear(&q);
+}
+
 static void empty_queue(void **state)
 {
   struct DBuf q = { 0, 0, 0 };
@@ -139,6 +154,7 @@ int main(void)
     cmocka_unit_test(across_buffers),
     cmocka_unit_test(incomplete_line_is_not_a_line),
     cmocka_unit_test(long_line_is_cut_not_overrun),
+    cmocka_unit_test(cr_only_line_ends),
     cmocka_unit_test(empty_queue),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

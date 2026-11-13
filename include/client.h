@@ -35,6 +35,9 @@
 #ifndef INCLUDED_dbuf_h
 #include "dbuf.h"
 #endif
+#ifndef INCLUDED_input_hold_h
+#include "input_hold.h"      /* struct InputHold */
+#endif
 #ifndef INCLUDED_msgq_h
 #include "msgq.h"
 #endif
@@ -422,14 +425,10 @@ struct Connection
   int                 con_lagcredit; /**< Fake-lag seconds still to be
                                         absorbed before con_since is
                                         charged (post-registration grace) */
-  time_t              con_input_held; /**< When this connection's input
-                                        began to be held, unparsed (a
-                                        bouncer device of ours with no
-                                        primary: s_bsd.c input_held()),
-                                        or 0 */
-  time_t              con_input_boost; /**< Until when the receive queue
-                                        keeps the held allowance after a
-                                        hold (recvq_cap()), or 0 */
+  struct InputHold    con_input_hold; /**< The orphan hold of this
+                                        connection's input (a bouncer
+                                        device of ours with no primary:
+                                        s_bsd.c input_held()) */
   struct MsgQ         con_sendQ;     /**< Outgoing message queue */
   struct DBuf         con_recvQ;     /**< Incoming data yet to be parsed */
   unsigned int        con_sendM;     /**< Stats: protocol messages sent */
@@ -1020,10 +1019,8 @@ struct Client {
 #define con_since(con)          ((con)->con_since)
 /** Get the connection's unspent fake-lag credit. */
 #define con_lagcredit(con)      ((con)->con_lagcredit)
-/** Get when the connection's input began to be held (0: it is not). */
-#define con_input_held(con)     ((con)->con_input_held)
-/** Get until when the connection keeps the held receive allowance. */
-#define con_input_boost(con)    ((con)->con_input_boost)
+/** Get the connection's orphan hold (input_hold.h). */
+#define con_input_hold(con)     ((con)->con_input_hold)
 /** Get SendQ for connection. */
 #define con_sendQ(con)		((con)->con_sendQ)
 /** Get RecvQ for connection. */

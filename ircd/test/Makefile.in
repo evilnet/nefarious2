@@ -83,6 +83,7 @@ CMOCKA_TESTPROGS = \
 	auth_recheck_cmocka \
 	channel_speak_cmocka \
 	dbuf_find_line_cmocka \
+	input_hold_cmocka \
 	s2s_handlers_cmocka \
 	services_reply_cmocka \
 	webhook_eventlog_cmocka \
@@ -175,6 +176,7 @@ DEP_SRC = \
 	auth_recheck_cmocka.c \
 	channel_speak_cmocka.c \
 	dbuf_find_line_cmocka.c \
+	input_hold_cmocka.c \
 	s2s_handlers_cmocka.c \
 	services_reply_cmocka.c \
 	webhook_subject_cmocka.c \
@@ -601,6 +603,14 @@ dbuf_find_line_cmocka.o: ${srcdir}/dbuf_find_line_cmocka.c ../dbuf.c
 dbuf_find_line_cmocka: $(DBUF_FIND_LINE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DBUF_FIND_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
+# input_hold tests - the orphan hold's pure rules (ircd/input_hold.c):
+# hold, the bound's sweep request, release, the receive allowance, QUIT.
+INPUT_HOLD_CMOCKA_OBJS = input_hold_cmocka.o input_hold_test.o
+input_hold_test.o: ../input_hold.c
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../input_hold.c
+input_hold_cmocka: $(INPUT_HOLD_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(INPUT_HOLD_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
 # s2s_handlers tests - server-to-server handlers against a fake network:
 # the REAL m_burst.o, m_destruct.o, m_endburst.o, m_svsnick.o, m_svsquit.o
 # and m_topic.o, with numnicks.o, match.o and the ircd's printf (so the lines asserted are the lines that go on the wire);
@@ -702,8 +712,10 @@ ssl_teardown_cmocka: $(SSL_TEARDOWN_CMOCKA_OBJS)
 close_connection_cmocka.o: ${srcdir}/close_connection_cmocka.c ../s_bsd.c
 	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/close_connection_cmocka.c
 
-close_connection_cmocka: close_connection_cmocka.o
-	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections close_connection_cmocka.o $(CMOCKA_LIBS)
+# The orphan hold's pure rules (close_connection() forgets a hold) are
+# the real ones.
+close_connection_cmocka: close_connection_cmocka.o input_hold_test.o
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections close_connection_cmocka.o input_hold_test.o $(CMOCKA_LIBS)
 
 # send_tags tests - the tag region a channel fan-out builds for each member
 # (format_message_tags_ex() into 128 bytes) is well formed and stays in its

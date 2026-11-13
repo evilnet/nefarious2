@@ -136,6 +136,7 @@ IRCD_SRC = \
 	ircd_kc_adapter.c \
 	ircd_log.c \
 	ircd_log_async.c \
+	input_hold.c \
 	ircd_relay.c \
 	ircd_reply.c \
 	ircd_res.c \
