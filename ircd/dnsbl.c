@@ -503,7 +503,9 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
 
     /* Format the query based on IP version */
     if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {
-      unsigned int ipv4 = (ntohs(cli_ip(cptr).in6_16[6]) << 16) |
+      /* The high group is shifted as unsigned: ntohs() promotes to int,
+       * and a group of 0x8000 or more shifted by 16 overflows it. */
+      unsigned int ipv4 = ((unsigned int)ntohs(cli_ip(cptr).in6_16[6]) << 16) |
                           ntohs(cli_ip(cptr).in6_16[7]);
       dnsbl_format_ipv4(ipv4, server->domain, query, sizeof(query));
     } else {
