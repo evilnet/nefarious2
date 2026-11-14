@@ -212,6 +212,68 @@ static void test_ip_base64_roundtrip(void **state)
     assert_int_equal(original.in6_16[7], decoded.in6_16[7]);
 }
 
+/* Addresses whose 32-bit value has its top bit set (every IPv4 address
+ * from 128.0.0.0 up, the 6to4 and Teredo forms that carry one) encode to
+ * exactly these strings.  iptobase64() shifted the high 16 bits as a
+ * (signed) int, undefined behaviour for a high group of 0x8000 or more;
+ * the encoded value must not change with the fix.  Each expected string
+ * is the address's 32 bits read as six 6-bit digits of the numnick
+ * alphabet (A-Z a-z 0-9 [ ]), the top 4 bits zero; the IPv6 forms are
+ * one 3-digit group per 16 bits with '_' for the longest zero run. */
+static void test_iptobase64_high_bit(void **state)
+{
+    (void)state;
+    static const struct {
+        unsigned short a[8];
+        const char *v4;         /* v6_ok == 0 */
+        const char *v6;         /* v6_ok == 1 */
+        unsigned short back[8]; /* what base64toip(v6) yields */
+    } cases[] = {
+        /* ::ffff:128.0.0.0 = 0x80000000 -> 000010 000000 ... */
+        { { 0, 0, 0, 0, 0, 0xffff, 0x8000, 0x0000 }, "CAAAAA", "CAAAAA",
+          { 0, 0, 0, 0, 0, 0xffff, 0x8000, 0x0000 } },
+        /* ::ffff:192.168.1.1 = 0xc0a80101 -> 3 0 42 0 4 1 */
+        { { 0, 0, 0, 0, 0, 0xffff, 0xc0a8, 0x0101 }, "DAqAEB", "DAqAEB",
+          { 0, 0, 0, 0, 0, 0xffff, 0xc0a8, 0x0101 } },
+        /* ::ffff:200.0.0.1 = 0xc8000001 -> 3 8 0 0 0 1 */
+        { { 0, 0, 0, 0, 0, 0xffff, 0xc800, 0x0001 }, "DIAAAB", "DIAAAB",
+          { 0, 0, 0, 0, 0, 0xffff, 0xc800, 0x0001 } },
+        /* ::ffff:255.255.255.255 -> 3 63 63 63 63 63 */
+        { { 0, 0, 0, 0, 0, 0xffff, 0xffff, 0xffff }, "D]]]]]", "D]]]]]",
+          { 0, 0, 0, 0, 0, 0xffff, 0xffff, 0xffff } },
+        /* IPv4-compatible ::200.0.0.1 (group 5 zero): the same 6 digits,
+         * decoded back as the IPv4-mapped form. */
+        { { 0, 0, 0, 0, 0, 0, 0xc800, 0x0001 }, "DIAAAB", "DIAAAB",
+          { 0, 0, 0, 0, 0, 0xffff, 0xc800, 0x0001 } },
+        /* 6to4 2002:c800:1::1: a v4-only peer gets 200.0.0.1 */
+        { { 0x2002, 0xc800, 0x0001, 0, 0, 0, 0, 0x0001 },
+          "DIAAAB", "CACMgAAAB_AAB",
+          { 0x2002, 0xc800, 0x0001, 0, 0, 0, 0, 0x0001 } },
+        /* Teredo 2001:0:4136:e378:8000:63bf:3fff:fdd2: client is the
+         * inverted last 32 bits, 0xc000022d = 192.0.2.45 -> 3 0 0 0 8 45 */
+        { { 0x2001, 0, 0x4136, 0xe378, 0x8000, 0x63bf, 0x3fff, 0xfdd2 },
+          "DAAAIt", "CAB_EE2ON4IAAGO]D]]P3S",
+          { 0x2001, 0, 0x4136, 0xe378, 0x8000, 0x63bf, 0x3fff, 0xfdd2 } },
+    };
+    size_t i, j;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct irc_in_addr addr, decoded, want;
+        char buf[32];
+
+        for (j = 0; j < 8; j++) {
+            addr.in6_16[j] = htons(cases[i].a[j]);
+            want.in6_16[j] = htons(cases[i].back[j]);
+        }
+        iptobase64(buf, &addr, sizeof(buf), 0);
+        assert_string_equal(cases[i].v4, buf);
+        iptobase64(buf, &addr, sizeof(buf), 1);
+        assert_string_equal(cases[i].v6, buf);
+        assert_int_equal(0, base64toip(buf, &decoded));
+        assert_memory_equal(&want, &decoded, sizeof(want));
+    }
+}
+
 /* IPv6 addresses round-trip through the '_' zero-run encoding. */
 static void test_ip_base64_roundtrip_ipv6(void **state)
 {
@@ -442,6 +504,7 @@ int main(void)
         cmocka_unit_test(test_iptobase64_ipv4),
         cmocka_unit_test(test_iptobase64_ipv6),
         cmocka_unit_test(test_ip_base64_roundtrip),
+        cmocka_unit_test(test_iptobase64_high_bit),
         cmocka_unit_test(test_ip_base64_roundtrip_ipv6),
         cmocka_unit_test(test_base64toip_rejects_malformed),
 
