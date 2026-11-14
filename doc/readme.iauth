@@ -34,7 +34,8 @@ block, and without an iauth instance clients are admitted unchecked).
 The server and iauth instance communicate over the iauth instance's
 stdin and stdout; lines it writes to stderr are logged and relayed to
 interested operators.  The server stops an instance by closing those
-sockets, so an instance must exit when it reads end of file.
+sockets and then sending its process SIGTERM, so an instance should
+exit when it reads end of file, and must exit on SIGTERM.
 
 An instance that exits on its own is started again: at once if it had
 run for at least five seconds, otherwise after 5 seconds, a delay that
@@ -45,14 +46,38 @@ schedule.  Interested operators are told of each failure and of the
 recovery.  A rehash that starts the program afresh, or "REHASH a",
 cancels a pending retry.
 
-While no iauth instance is running, clients register without iauth,
-whatever policy the last instance set.  Clients still waiting for an
-instance when it exits, is replaced, is restarted or is removed are
-released at that moment: they register without iauth, and the next
-instance is not told about them.  A SASL exchange a client is making
-through the iauth instance (the S policy) fails at that moment too
-(904), and so does one whose AUTHENTICATE cannot be passed to an
-instance; registration then goes on.
+While no iauth instance is running, clients that connect register
+without iauth, whatever policy the last instance set.
+
+Clients still waiting for an instance when it exits, is replaced, is
+restarted or is removed are held: they do not register while the
+server decides what becomes of them, which it does as soon as it
+returns to its event loop.  If an instance is running by then -- one
+started in the same step ("REHASH a", a changed program) or a program
+restarted at once after a good run -- each held client is handed to
+it: the new instance is told about the client again, with the latest
+line of each kind the departed instance was told about it (C first,
+then N or d, u, U, n, P, W, w, R, F, H, ... in the order they were
+last told; never a SASL exchange, T, or an E answering the departed
+instance), and the client waits for the new instance as for any other,
+until it answers or the registration timeout ends the wait.  If no
+instance is running (the program is missing, failed too soon and waits
+out its retry delay, or its block was removed), a client whose check
+was required is refused, with the exit reason "Authorization
+Unavailable".  Required means the departed instance had announced the
+R policy and had not tentatively accepted the client (d); a client
+handed to an instance that went away before announcing a policy keeps
+what it had.
+Any other held client is released and registers without iauth.
+Interested operators are told how many were handed over, refused and
+released.
+
+A SASL exchange a client is making through the iauth instance (the S
+policy) cannot be resumed on another instance: it fails when the
+instance goes away (904, and the client may start a new exchange),
+and so does one whose AUTHENTICATE cannot be passed to an instance;
+registration then goes on, held as above if the client was waiting
+for the instance.
 
 Every message from the server to the iauth instance is a single line.
 The line starts with an integer client identifier.  This may be -1 to
@@ -403,8 +428,11 @@ Comments: Sets policy options for the iauth conversation.  Old policy
    R - Require clients to be approved before registering them.
        When this policy is in effect, it affects the behavior
        of a registration timeout; for details, see the documentation
-       for the T server message.  It applies only while an iauth
-       instance is running (see STARTING IAUTH).
+       for the T server message.  Clients that connect while no
+       iauth instance is running register without iauth; clients
+       an instance was checking when it went away are handed to
+       the next instance or, with none, refused (see STARTING
+       IAUTH).
    T - When the R policy is in effect and the iauth service does not
        respond for a client, this causes the server to count the number
        of clients refused, to send a warning message to interested
