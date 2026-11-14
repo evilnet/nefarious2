@@ -117,6 +117,9 @@ enum AuthRequestFlag {
                          * (auth_recheck_callback()) hands it over,
                          * refuses or releases it */
     AR_IAUTH_HELD_REQ,  /**< the check of the held client was required */
+    AR_IAUTH_HURRY_LATE, /**< hurried before the policy that decides its
+                          * extra wait (W) was known: decided when it is
+                          * (iauth_said_flush()) */
     AR_NUM_FLAGS
 };
 
@@ -139,6 +142,8 @@ struct AuthRequest {
   char deferred_nick[NICKLEN + 1]; /**< nick deferred due to bouncer ghost collision */
   struct AuthRequest* recheck_next; /**< next on #auth_recheck_list */
   struct IAuthSaid*   iauth_said; /**< what IAuth was told of the client */
+  char*               iauth_user_arg; /**< the client's USER argument as
+                                       * given: the short U line's */
   unsigned int        handed_pass; /**< the decision pass that handed it
                                     * over (#iauth_held_pass), or 0 */
 };
@@ -147,6 +152,8 @@ struct AuthRequest {
  * that a later instance can be told the same (iauth_hand_over()). */
 struct IAuthSaid {
   struct IAuthSaid*   next;       /**< later line */
+  char                untold;     /**< not told to the current instance yet:
+                                   * kept for its policy (iauth_said_flush()) */
   char                text[1];    /**< the line; allocated to its length */
 };
 
@@ -290,14 +297,48 @@ static struct Timer auth_recheck_timer;
 static unsigned int iauth_held_pass = 1;
 /** What the held clients' decisions since the last report did. */
 static int iauth_held_handed, iauth_held_refused, iauth_held_released;
+/** Set while sendto_iauth() sends a line that is not the one kept for
+ * its kind (the short U: auth_set_user()). */
+static int iauth_unkept;
+
+/** Whether the policy that decides what \a auth's client is told is known:
+ * not while the client is held (between instances), nor while the
+ * running instance has not announced one (its O line: a program just
+ * started).  With no instance running, nothing is told anyway.
+ * @param[in] auth Auth request of a client, or NULL.
+ * @return Non-zero when the policy is known.
+ */
+static int iauth_policy_known(struct AuthRequest *auth)
+{
+  if (auth && FlagHas(&auth->flags, AR_IAUTH_HELD))
+    return 0;
+  return !i_GetConnected(iauth) || IAuthHas(iauth, IAUTH_ANNOUNCED);
+}
+
+/** Whether a line told only under policy option \a flag is built for
+ * \a auth's client: when the policy asks for it, and whenever the policy
+ * is not known yet -- the line is then kept untold, and told or forgotten
+ * when it is (sendto_iauth(), iauth_said_flush()).
+ * @param[in] auth Auth request of a client.
+ * @param[in] flag Policy option the line is told under.
+ * @return Non-zero if the line is built.
+ */
+static int iauth_asks(struct AuthRequest *auth, enum IAuthFlag flag)
+{
+  return !iauth_policy_known(auth) || IAuthHas(iauth, flag);
+}
 
 static void iauth_sock_callback(struct Event *ev);
 static void iauth_stderr_callback(struct Event *ev);
 static int sendto_iauth(struct Client *cptr, const char *format, ...);
 static int preregister_user(struct Client *cptr);
 static void iauth_said_free(struct AuthRequest *auth);
+static void iauth_said_record(struct AuthRequest *auth, const char *line,
+                              int untold);
 static void iauth_held_decide(struct AuthRequest *auth);
 static void iauth_held_report(void);
+static int iauth_asks(struct AuthRequest *auth, enum IAuthFlag flag);
+static int iauth_policy_known(struct AuthRequest *auth);
 typedef int (*iauth_cmd_handler)(struct IAuth *iauth, struct Client *cli,
 				 int parc, char **params);
 
@@ -770,11 +811,14 @@ static int check_auth_finished(struct AuthRequest *auth)
       FlagSet(&auth->flags, AR_IAUTH_HURRY);
 
       /* If iauth wants it, send notification. */
-      if (IAuthHas(iauth, IAUTH_UNDERNET))
+      if (iauth_asks(auth, IAUTH_UNDERNET))
         sendto_iauth(auth->client, "H %s", get_client_class(auth->client));
 
-      /* If iauth wants it, give client more time. */
-      if (IAuthHas(iauth, IAUTH_EXTRAWAIT))
+      /* If iauth wants it, give client more time -- once the policy that
+       * says so is known, if it is not yet (iauth_said_flush()). */
+      if (!iauth_policy_known(auth))
+        FlagSet(&auth->flags, AR_IAUTH_HURRY_LATE);
+      else if (IAuthHas(iauth, IAUTH_EXTRAWAIT))
         cli_firsttime(auth->client) = CurrentTime;
     }
 
@@ -1203,7 +1247,7 @@ static void read_auth_reply(struct AuthRequest* auth)
     if (IsUserPort(auth->client))
       sendheader(auth->client, REPORT_FAIL_ID);
     ++ServerStats->is_abad;
-    if (IAuthHas(iauth, IAUTH_UNDERNET))
+    if (iauth_asks(auth, IAUTH_UNDERNET))
       sendto_iauth(auth->client, "u");
   } else {
     if (IsUserPort(auth->client))
@@ -1213,7 +1257,7 @@ static void read_auth_reply(struct AuthRequest* auth)
       ircd_strncpy(cli_username(auth->client), username, USERLEN + 1);
       SetGotId(auth->client);
     }
-    if (IAuthHas(iauth, IAUTH_UNDERNET))
+    if (iauth_asks(auth, IAUTH_UNDERNET))
       sendto_iauth(auth->client, "u %s", username);
   }
 
@@ -1302,6 +1346,7 @@ void destroy_auth_request(struct AuthRequest* auth)
     return; /* Don't corrupt the freelist further */
   }
   iauth_said_free(auth);
+  MyFree(auth->iauth_user_arg);
   auth->prev = AUTH_FREELIST_MARKER;
 
   auth->next = auth_freelist;
@@ -1651,7 +1696,7 @@ static void start_iauth_query(struct AuthRequest *auth)
     return;
   }
 
-  if (IAuthHas(iauth, IAUTH_SSLFP) && cli_sslclifp(auth->client) && !EmptyString(cli_sslclifp(auth->client)))
+  if (iauth_asks(auth, IAUTH_SSLFP) && cli_sslclifp(auth->client) && !EmptyString(cli_sslclifp(auth->client)))
     sendto_iauth(auth->client, "F %s", cli_sslclifp(auth->client));
 }
 
@@ -1799,10 +1844,26 @@ int auth_set_user(struct AuthRequest *auth, const char *username, const char *ho
   ircd_strncpy(cli_info(cptr), userinfo, REALLEN + 1);
   clean_username(cli_user(cptr)->username, username);
   ircd_strncpy(cli_user(cptr)->host, cli_sockhost(cptr), HOSTLEN + 1);
-  if (IAuthHas(iauth, IAUTH_UNDERNET))
+  /* The full form is the one kept, whatever form is told: an instance the
+   * client is handed to, or whose policy is not known yet, is told the
+   * form its own policy asks for (iauth_line_asked()).  The short form
+   * carries the USER argument as given, kept here for it. */
+  MyFree(auth->iauth_user_arg);
+  DupString(auth->iauth_user_arg, username);
+  if (iauth_asks(auth, IAUTH_UNDERNET))
     sendto_iauth(cptr, "U %s %s %s :%s", cli_user(cptr)->username, hostname, servername, userinfo);
-  else if (IAuthHas(iauth, IAUTH_ADDLINFO))
-    sendto_iauth(cptr, "U %s", username);
+  else if (iauth_asks(auth, IAUTH_ADDLINFO)) {
+    char full[BUFSIZE];
+    int told;
+
+    ircd_snprintf(0, full, sizeof(full), "U %s %s %s :%s",
+                  cli_user(cptr)->username, hostname, servername, userinfo);
+    iauth_unkept = 1;
+    told = sendto_iauth(cptr, "U %s", username);
+    iauth_unkept = 0;
+    if (told)
+      iauth_said_record(auth, full, 0);
+  }
   return check_auth_finished(auth);
 }
 
@@ -1834,7 +1895,7 @@ int auth_set_nick(struct AuthRequest *auth, const char *nickname)
     sendrawto_one(auth->client, "PING :%u", auth->cookie);
     FlagSet(&auth->flags, AR_NEEDS_PONG);
   }
-  if (IAuthHas(iauth, IAUTH_UNDERNET))
+  if (iauth_asks(auth, IAUTH_UNDERNET))
     sendto_iauth(auth->client, "n %s", nickname);
   return check_auth_finished(auth);
 }
@@ -1861,7 +1922,7 @@ int auth_defer_nick(struct AuthRequest *auth, const char *nickname)
     FlagSet(&auth->flags, AR_NEEDS_PONG);
   }
 
-  if (IAuthHas(iauth, IAUTH_UNDERNET))
+  if (iauth_asks(auth, IAUTH_UNDERNET))
     sendto_iauth(auth->client, "n %s", nickname);
 
   return check_auth_finished(auth);
@@ -1875,7 +1936,7 @@ int auth_defer_nick(struct AuthRequest *auth, const char *nickname)
 int auth_set_password(struct AuthRequest *auth, const char *password)
 {
   assert(auth != NULL);
-  if (IAuthHas(iauth, IAUTH_ADDLINFO))
+  if (iauth_asks(auth, IAUTH_ADDLINFO))
     sendto_iauth(auth->client, "P :%s", password);
   return check_auth_finished(auth);
 }
@@ -1910,7 +1971,7 @@ int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *
 int auth_set_account(struct AuthRequest *auth, const char *account)
 {
   assert(auth != NULL);
-  if (IAuthHas(iauth, IAUTH_ACCOUNT))
+  if (iauth_asks(auth, IAUTH_ACCOUNT))
     sendto_iauth(auth->client, "R %s", account);
   return check_auth_finished(auth);
 }
@@ -1923,7 +1984,7 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
 void auth_set_account_later(struct AuthRequest *auth, const char *account)
 {
   assert(auth != NULL);
-  if (IAuthHas(iauth, IAUTH_ACCOUNT))
+  if (iauth_asks(auth, IAUTH_ACCOUNT))
     sendto_iauth(auth->client, "R %s", account);
   auth_recheck_later(auth);
 }
@@ -2910,8 +2971,11 @@ static void iauth_said_free(struct AuthRequest *auth)
  * repeats a command.
  * @param[in] auth Auth request of the client.
  * @param[in] line The line, without the client id.
+ * @param[in] untold Non-zero when the current instance is not told it now
+ *   (the policy that decides is not known yet: iauth_said_flush()).
  */
-static void iauth_said_record(struct AuthRequest *auth, const char *line)
+static void iauth_said_record(struct AuthRequest *auth, const char *line,
+                              int untold)
 {
   struct IAuthSaid **pp, *said;
   size_t len;
@@ -2928,13 +2992,132 @@ static void iauth_said_record(struct AuthRequest *auth, const char *line)
   len = strlen(line);
   said = (struct IAuthSaid *) MyMalloc(sizeof(*said) + len);
   said->next = NULL;
+  said->untold = untold ? 1 : 0;
   memcpy(said->text, line, len + 1);
   *pp = said;
 }
 
+/** Whether a line told about a client is told only under a policy option
+ * (H, n, u: U; U: U or A; P: A; F: F; R: r).  Such a line is kept untold
+ * while the policy is not known.  Every other kept line (C, N, d, and the
+ * WEBIRC lines, whose callers decide by the policy they see) is told at
+ * once.
+ * @param[in] cmd The line's command letter.
+ * @return Non-zero if the line is told only under a policy option.
+ */
+static int iauth_line_gated(char cmd)
+{
+  switch (cmd) {
+  case 'H': case 'n': case 'u': case 'U': case 'P': case 'F': case 'R':
+    return 1;
+  }
+  return 0;
+}
+
+/** The form of a kept policy line that the current instance's announced
+ * policy asks for.  U is always kept in the full form (U option, the
+ * username as cleaned); a policy with A but not U is told the short form,
+ * "U <USER argument as given>" -- the same line a client checked under
+ * that policy is told at once (auth_set_user()).
+ * @param[in] auth Auth request of the client.
+ * @param[in] text The kept line.
+ * @param[out] buf Room for the short form.
+ * @param[in] len Size of \a buf.
+ * @return The line to tell, or NULL if the policy does not ask for it.
+ */
+static const char *iauth_line_asked(struct AuthRequest *auth,
+                                    const char *text, char *buf, size_t len)
+{
+  size_t n;
+
+  switch (text[0]) {
+  case 'H': case 'n': case 'u':
+    return IAuthHas(iauth, IAUTH_UNDERNET) ? text : NULL;
+  case 'U':
+    if (IAuthHas(iauth, IAUTH_UNDERNET))
+      return text;
+    if (!IAuthHas(iauth, IAUTH_ADDLINFO))
+      return NULL;
+    if (auth->iauth_user_arg) {
+      ircd_snprintf(0, buf, len, "U %s", auth->iauth_user_arg);
+      return buf;
+    }
+    /* (A kept U always has its argument: auth_set_user().) */
+    n = 2 + strcspn(text + 2, " ");
+    if (n >= len)
+      n = len - 1;
+    memcpy(buf, text, n);
+    buf[n] = '\0';
+    return buf;
+  case 'P':
+    return IAuthHas(iauth, IAUTH_ADDLINFO) ? text : NULL;
+  case 'F':
+    return IAuthHas(iauth, IAUTH_SSLFP) ? text : NULL;
+  case 'R':
+    return IAuthHas(iauth, IAUTH_ACCOUNT) ? text : NULL;
+  }
+  return text;
+}
+
+/** Tell the current (running) %IAuth instance what it has not been told
+ * of a client it is checking, in the order kept: a line that is not a
+ * policy line at once; a policy line once the instance has announced its
+ * policy -- in the form it asks for, or forgotten if it does not ask for
+ * it -- and until then kept untold.  A client that hurried before the
+ * policy was known gets the extra wait W gives then.  A write that fails
+ * takes the instance away (iauth_disconnect()), which holds the client
+ * again with every line kept: nothing of the client may be relied on
+ * after this returns but its auth request.
+ * @param[in] cli Client pending on the current instance.
+ * @param[in] auth Its auth request.
+ */
+static void iauth_said_flush(struct Client *cli, struct AuthRequest *auth)
+{
+  struct IAuthSaid **pp, *said;
+  struct MsgBuf *mb;
+  const char *text;
+  char buf[BUFSIZE];
+  int announced = IAuthHas(iauth, IAUTH_ANNOUNCED);
+  int queued = 0;
+
+  if (announced && FlagHas(&auth->flags, AR_IAUTH_HURRY_LATE)) {
+    FlagClr(&auth->flags, AR_IAUTH_HURRY_LATE);
+    if (IAuthHas(iauth, IAUTH_EXTRAWAIT))
+      cli_firsttime(cli) = CurrentTime;
+  }
+  for (pp = &auth->iauth_said; (said = *pp); ) {
+    if (!said->untold) {
+      pp = &said->next;
+      continue;
+    }
+    text = said->text;
+    if (iauth_line_gated(text[0])) {
+      if (!announced) {
+        pp = &said->next;
+        continue;
+      }
+      if (!(text = iauth_line_asked(auth, said->text, buf, sizeof(buf)))) {
+        *pp = said->next;
+        iauth_said_free_one(said);
+        continue;
+      }
+    }
+    mb = msgq_make(NULL, "%d %s", cli_fd(cli), text);
+    ++iauth->i_sendM;
+    msgq_add(i_sendQ(iauth), mb, 0);
+    msgq_clean(mb);
+    said->untold = 0;
+    queued++;
+    pp = &said->next;
+  }
+  if (queued)
+    iauth_write(iauth);
+}
+
 /** Hand a held client to the running %IAuth instance: introduce it again
  * with every line the departed instance was told (iauth_said_record()),
- * in the order kept, and make it pending on the new instance.  If the new
+ * in the order kept -- the policy lines once the new instance's policy
+ * asks for them (iauth_said_flush()) -- and make it pending on it.  If the new
  * instance goes away while it is told, iauth_disconnect() holds the
  * client again (and its owed check decides it again).
  * @param[in] cli Held client.
@@ -2945,7 +3128,6 @@ static void iauth_said_record(struct AuthRequest *auth, const char *line)
 static int iauth_hand_over(struct Client *cli, struct AuthRequest *auth)
 {
   struct IAuthSaid *said;
-  struct MsgBuf *mb;
 
   if (!auth->iauth_said || auth->iauth_said->text[0] != 'C')
     return 0;
@@ -2956,13 +3138,11 @@ static int iauth_hand_over(struct Client *cli, struct AuthRequest *auth)
   FlagSet(&auth->flags, AR_IAUTH_PENDING);
   auth->handed_pass = iauth_held_pass;
   iauth_held_handed++;
-  for (said = auth->iauth_said; said; said = said->next) {
-    mb = msgq_make(NULL, "%d %s", cli_fd(cli), said->text);
-    ++iauth->i_sendM;
-    msgq_add(i_sendQ(iauth), mb, 0);
-    msgq_clean(mb);
-  }
-  iauth_write(iauth);
+  /* Nothing has been told to this instance: the lines that are not policy
+   * lines go at once (C first), the policy lines when its policy asks. */
+  for (said = auth->iauth_said; said; said = said->next)
+    said->untold = 1;
+  iauth_said_flush(cli, auth);
   return 1;
 }
 
@@ -3039,7 +3219,7 @@ static int sendto_iauth(struct Client *cptr, const char *format, ...)
     va_start(vl, format);
     ircd_vsnprintf(0, line, sizeof(line), format, vl);
     va_end(vl);
-    iauth_said_record(auth, line);
+    iauth_said_record(auth, line, 1);
     iauth_line_wipe(line, sizeof(line));
     return 1;
   }
@@ -3063,8 +3243,17 @@ static int sendto_iauth(struct Client *cptr, const char *format, ...)
     va_start(vl, format);
     ircd_vsnprintf(0, line, sizeof(line), format, vl);
     va_end(vl);
-    if (auth && (format[0] != 'D'))
-      iauth_said_record(auth, line);
+    /* A policy line built before the instance announced its policy is
+     * kept untold, and told or forgotten when it does
+     * (iauth_cmd_policy(), iauth_said_flush()). */
+    if (auth && (format[0] != 'D') && iauth_line_gated(line[0])
+        && !IAuthHas(iauth, IAUTH_ANNOUNCED)) {
+      iauth_said_record(auth, line, 1);
+      iauth_line_wipe(line, sizeof(line));
+      return 1;
+    }
+    if (auth && (format[0] != 'D') && !iauth_unkept)
+      iauth_said_record(auth, line, 0);
     mb = msgq_make(NULL, "%d %s", cli_fd(cptr), line);
     iauth_line_wipe(line, sizeof(line));
   }
@@ -3139,7 +3328,9 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
 			    int parc, char **params)
 {
   enum IAuthFlag flag;
+  struct AuthRequest *auth;
   char *p;
+  int ii;
 
   /* Erase old policy first. */
   for (flag = IAUTH_FIRST_OPTION; flag < IAUTH_LAST_FLAG; ++flag)
@@ -3165,6 +3356,19 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
   if (i_debug(iauth) > 0)
     sendto_opmask_butone(NULL, SNO_AUTH, "iauth options: %s",
                          parc > 0 ? params[0] : "");
+
+  /* The policy is known now: each client this instance is checking is
+   * told what was kept for it untold until now, if the policy asks for it
+   * (the rest is forgotten), in the order kept.  A write that fails takes
+   * the instance away and holds its clients (iauth_disconnect()): the walk
+   * ends there, and they are decided from the event loop.  A later O finds
+   * nothing untold. */
+  for (ii = 0; ii <= HighestFd && i_GetConnected(iauth); ii++) {
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
+        || !FlagHas(&auth->flags, AR_IAUTH_PENDING))
+      continue;
+    iauth_said_flush(cli, auth);
+  }
   return 0;
 }
 

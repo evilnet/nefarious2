@@ -54,6 +54,24 @@ cancels a pending retry.
 While no iauth instance is running, clients that connect register
 without iauth, whatever policy the last instance set.
 
+The lines a policy option asks for (H, n and u with U; U with U, or
+its short form with A; P with A; F with F; R with r) wait for an
+instance's policy: until a newly started instance has sent its O line,
+such a line about a client it is checking is kept, not sent, and when
+the O line arrives each client's kept lines are sent in the order
+kept if the policy asks for them, and forgotten if it does not.  The
+U line is always kept in its full form; a policy with A but not U is
+sent the short form, "U <username>" with the USER argument as the
+client gave it, whenever it is told.  A client that reached the hurry
+point (H) before the O line gets the extra time of the W policy when
+the O line asks for it.  C, N and d are sent at once.  A WEBIRC
+command in that time is handled by the server itself, as when the
+instance does not ask for WEBIRC; W and w lines kept from an earlier
+instance are told at a hand-over (below).  A program
+restarted after a crash keeps the policy of its predecessor until it
+sends a new one; a program that never sends an O line is never sent
+these lines.
+
 Clients still waiting for an instance when it exits, is replaced, is
 restarted or is removed are held: they do not register while the
 server decides what becomes of them, which it does as soon as it
@@ -61,10 +79,14 @@ returns to its event loop.  If an instance is running by then -- one
 started in the same step ("REHASH a", a changed program) or a program
 restarted at once after a good run -- each held client is handed to
 it: the new instance is told about the client again, with the latest
-line of each kind the departed instance was told about it (C first,
-then N or d, u, U, n, H, P, W, w, R, F, ... in the order they were
-last told; never a SASL exchange, T, or an E answering the departed
-instance), and the client waits for the new instance as for any other,
+line of each kind the departed instance was told about it, or the
+client said while it was held, in the order they were last told (never
+a SASL exchange, T, or an E answering the departed instance).  C goes
+first, at once, with the other lines that are not policy lines (N or
+d, W, w); the policy lines (u, U, n, H, P, R, F) go once the new
+instance's policy asks for them, as above, so an instance is told only
+what its own policy asks for.  The client waits for the new instance
+as for any other,
 until it answers or the registration timeout ends the wait.  If no
 instance is running (the program is missing, failed too soon and waits
 out its retry delay, or its block was removed), a client whose check

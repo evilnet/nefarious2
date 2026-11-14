@@ -535,9 +535,9 @@ static void tentatively_accepted_is_released(void **state)
 
 /** An instance running by the time the server decides (REHASH a, a changed
  * program, a restart after a good run) is told about the client again: C
- * first, then the latest line of each kind in the order last told, never
- * the SASL exchange; the client waits for it, and registers when it
- * approves. */
+ * at once, then -- once it has announced its policy -- the latest line of
+ * each kind in the order last told, never the SASL exchange; the client
+ * waits for it, and registers when it approves. */
 static void handed_to_the_new_instance(void **state)
 {
   struct IAuth *old = new_instance(), *ia;
@@ -569,6 +569,8 @@ static void handed_to_the_new_instance(void **state)
   assert_string_equal(f->exited, "");
   c = told_index(mark, "10 C 192.0.2.1 40000 ");
   assert_int_equal(c, mark);                     /* introduced first */
+  assert_int_equal(ntold - mark, 1);             /* the rest waits for O */
+  announce(ia, "RAU");
   assert_true(told_index(mark, "10 H class") > c);   /* its hurry-up */
   assert_true(told_index(mark, "10 n nick1") > told_index(mark, "10 H class"));
   assert_true(told_index(mark, "10 P :second") > told_index(mark, "10 n nick1"));
@@ -580,7 +582,6 @@ static void handed_to_the_new_instance(void **state)
     assert_true(0 == strncmp(told[i], "10 ", 3));
   /* it is pending on the new instance: told what it says next */
   ircd_snprintf(0, line, sizeof(line), "10 n nick2");
-  IAuthSet(ia, IAUTH_UNDERNET);
   auth_set_nick(f->auth, "nick2");
   assert_true(told_index(mark, line) > c);
   answer(ia, f, iauth_cmd_done_client);         /* the new instance's D */
@@ -605,12 +606,13 @@ static void a_line_while_held_is_kept(void **state)
   ia = new_instance();
   iauth = ia;
   run_instance(ia);
-  IAuthSet(ia, IAUTH_ADDLINFO);
   mark = ntold;
   auth_set_password(f->auth, "late");           /* PASS in the window */
   assert_int_equal(ntold, mark);                /* sent to no one */
   timer_run();
   assert_true(told_index(mark, "10 C ") >= 0);
+  assert_int_equal(told_index(mark, "10 P :late"), -1);  /* no policy yet */
+  announce(ia, "A");
   assert_true(told_index(mark, "10 P :late") > told_index(mark, "10 C "));
   free(old);
   drop_instance(ia);
@@ -766,6 +768,251 @@ static void an_open_circuit_breaker_releases(void **state)
 }
 
 /* ------------------------------------------------------------------ */
+/* Cases: lines told before an instance announces its policy           */
+/* ------------------------------------------------------------------ */
+
+/** A client's USER, hurry, NICK and PASS, as the client gives them. */
+static void client_lines(struct fake *f)
+{
+  assert_int_equal(auth_set_user(f->auth, "rawuser", "h", "s", "info"), 0);
+  assert_int_equal(auth_set_nick(f->auth, "nick"), 0);
+  assert_int_equal(auth_set_password(f->auth, "pw"), 0);
+}
+
+/** Lines between \a from and the end told for client "10 ", in order. */
+static int told_count(int from, const char *text)
+{
+  int i, n = 0;
+  for (i = from; i < ntold; i++)
+    if (0 == strncmp(told[i], text, strlen(text)))
+      n++;
+  return n;
+}
+
+/** A client that connects to an instance that has not announced its
+ * policy yet: its C goes at once; F, U, H and n are kept untold, and told
+ * in the order kept when the O line asks for them -- once: a second O
+ * tells nothing again.  P is forgotten (no A). */
+static void lines_before_the_policy_are_told_at_it(void **state)
+{
+  struct IAuth *ia = new_instance();
+  struct fake *f;
+  int mark, iF, iU, iH, in;
+
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  f = new_client(0);
+  ircd_strncpy(cli_sslclifp(&f->cli), "ABCD", BUFSIZE + 1);
+  start_iauth_query(f->auth);
+  client_lines(f);
+  assert_int_equal(ntold - mark, 1);             /* only its C */
+  assert_int_equal(told_index(mark, "10 C "), mark);
+  announce(ia, "UF");
+  iF = told_index(mark, "10 F ABCD");
+  iU = told_index(mark, "10 U rawuser h s :info");
+  iH = told_index(mark, "10 H class");
+  in = told_index(mark, "10 n nick");
+  assert_true(iF > mark);
+  assert_true(iU > iF);
+  assert_true(iH > iU);
+  assert_true(in > iH);
+  assert_int_equal(told_index(mark, "10 P"), -1);
+  assert_int_equal(ntold - mark, 5);
+  announce(ia, "UFA");                           /* again: nothing more */
+  assert_int_equal(ntold - mark, 5);
+  auth_set_password(f->auth, "pw2");             /* now told at once */
+  assert_int_equal(told_index(mark, "10 P :pw2"), mark + 5);
+  drop_instance(ia);
+}
+
+/** A policy that does not ask for a kept line forgets it: a later policy
+ * that does is not told it. */
+static void lines_not_asked_for_are_forgotten(void **state)
+{
+  struct IAuth *ia = new_instance();
+  struct fake *f;
+  int mark;
+
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  f = pending_client(0);
+  client_lines(f);
+  announce(ia, "R");
+  assert_int_equal(ntold - mark, 1);
+  announce(ia, "RUA");
+  assert_int_equal(ntold - mark, 1);
+  assert_null(f->auth->iauth_said->next);        /* only C is kept */
+  drop_instance(ia);
+}
+
+/** A policy with A but not U is told the short USER line (the cleaned
+ * username: the full form was kept) and the password, not n or H. */
+static void addlinfo_only_gets_short_user_and_password(void **state)
+{
+  struct IAuth *ia = new_instance();
+  struct fake *f;
+  int mark;
+
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  f = pending_client(0);
+  client_lines(f);
+  announce(ia, "A");
+  assert_int_equal(told_index(mark, "10 U rawuser"), mark + 1);
+  assert_string_equal(told[mark + 1], "10 U rawuser");
+  assert_int_equal(told_index(mark, "10 P :pw"), mark + 2);
+  assert_int_equal(ntold - mark, 3);
+  drop_instance(ia);
+}
+
+/** A client handed to an instance that has not announced: only its C (and
+ * the DNS line) at once; the policy's lines at O, by the NEW policy. */
+static void handed_to_an_unannounced_instance(void **state)
+{
+  struct IAuth *old = new_instance(), *ia;
+  struct fake *f;
+  int mark;
+
+  iauth = old;
+  run_instance(old);
+  announce(old, "UA");
+  f = pending_client(0);
+  sendto_iauth(&f->cli, "d");                    /* no DNS name */
+  client_lines(f);
+  assert_int_equal(told_count(0, "10 "), 6);     /* C d U H n P, as asked */
+  instance_goes_away(old);
+  ia = new_instance();
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  timer_run();
+  assert_int_equal(ntold - mark, 2);
+  assert_int_equal(told_index(mark, "10 C "), mark);
+  assert_int_equal(told_index(mark, "10 d"), mark + 1);
+  announce(ia, "U");
+  assert_int_equal(told_index(mark, "10 U rawuser h s :info"), mark + 2);
+  assert_int_equal(told_index(mark, "10 H class"), mark + 3);
+  assert_int_equal(told_index(mark, "10 n nick"), mark + 4);
+  assert_int_equal(told_index(mark, "10 P"), -1);   /* no A now */
+  assert_int_equal(ntold - mark, 5);
+  free(old);
+  drop_instance(ia);
+}
+
+/** The write of the lines O lets go fails: the instance goes away under
+ * its clients, which are held, each line queued once; the walk stops
+ * there, and their owed checks decide them. */
+static void the_flush_write_fails(void **state)
+{
+  struct IAuth *ia = new_instance();
+  struct fake *f, *g;
+  int mark;
+
+  iauth = ia;
+  run_instance(ia);
+  f = pending_client(0);
+  g = pending_client(1);
+  client_lines(f);
+  client_lines(g);
+  mark = ntold;
+  write_fails = 1;
+  announce(ia, "U");
+  assert_false(i_GetConnected(ia));
+  assert_true(FlagHas(&f->auth->flags, AR_IAUTH_HELD));
+  assert_true(FlagHas(&g->auth->flags, AR_IAUTH_HELD));
+  assert_int_equal(told_count(mark, "10 U "), 1);
+  assert_int_equal(told_count(mark, "11 U "), 0) ;  /* not reached */
+  timer_run();                                   /* no instance, no R */
+  assert_int_equal(f->registered, 1);
+  assert_int_equal(g->registered, 1);
+  drop_instance(ia);
+}
+
+/** A client that reached the hurry point before the policy gets the extra
+ * wait (W) when the policy arrives, as it would have then -- with or
+ * without U. */
+static void hurry_in_the_window_gets_the_extra_wait(void **state)
+{
+  struct IAuth *ia = new_instance();
+  struct fake *f;
+
+  iauth = ia;
+  run_instance(ia);
+  f = pending_client(0);
+  cli_firsttime(&f->cli) = CurrentTime - 30;
+  client_lines(f);
+  assert_true(FlagHas(&f->auth->flags, AR_IAUTH_HURRY));
+  assert_int_equal(cli_firsttime(&f->cli), CurrentTime - 30);
+  announce(ia, "W");
+  assert_int_equal(cli_firsttime(&f->cli), CurrentTime);
+  cli_firsttime(&f->cli) = CurrentTime - 30;
+  announce(ia, "W");                             /* once */
+  assert_int_equal(cli_firsttime(&f->cli), CurrentTime - 30);
+  drop_instance(ia);
+}
+
+/** A client checked under A (not U) is told the short USER line at once,
+ * and the full one is kept: an instance it is handed to whose policy has
+ * U is told the full form. */
+static void a_successor_with_u_gets_the_full_user_line(void **state)
+{
+  struct IAuth *old = new_instance(), *ia;
+  struct fake *f;
+  int mark;
+
+  iauth = old;
+  run_instance(old);
+  announce(old, "RA");
+  f = pending_client(0);
+  client_lines(f);
+  assert_true(told_index(0, "10 U rawuser") >= 0);
+  assert_int_equal(told_index(0, "10 U rawuser h"), -1);   /* short, at once */
+  instance_goes_away(old);
+  ia = new_instance();
+  iauth = ia;
+  run_instance(ia);
+  timer_run();
+  mark = ntold;
+  announce(ia, "RAU");
+  assert_true(told_index(mark, "10 U rawuser h s :info") >= 0);
+  free(old);
+  drop_instance(ia);
+}
+
+/** The short USER line told to a later A-only instance is the one the
+ * client's own instance was told: its USER argument as given, however
+ * long. */
+static void a_successor_without_u_gets_the_same_short_line(void **state)
+{
+  struct IAuth *old = new_instance(), *ia;
+  struct fake *f;
+  int mark;
+
+  iauth = old;
+  run_instance(old);
+  announce(old, "A");
+  f = pending_client(0);
+  assert_int_equal(auth_set_user(f->auth, "averyveryverylongusername", "h", "s",
+                                 "info"), 0);
+  assert_true(told_index(0, "10 U averyveryverylongusername") >= 0);
+  instance_goes_away(old);
+  ia = new_instance();
+  iauth = ia;
+  run_instance(ia);
+  timer_run();
+  mark = ntold;
+  announce(ia, "A");
+  assert_true(told_index(mark, "10 U ") >= 0);
+  assert_string_equal(told[told_index(mark, "10 U ")],
+                      "10 U averyveryverylongusername");
+  free(old);
+  drop_instance(ia);
+}
+
+/* ------------------------------------------------------------------ */
 /* Cases: the rule (include/iauth_held.h) and the kept lines           */
 /* ------------------------------------------------------------------ */
 
@@ -808,22 +1055,22 @@ static void kept_lines_are_bounded(void **state)
   int i, n;
 
   memset(&auth, 0, sizeof(auth));
-  iauth_said_record(&auth, "C 192.0.2.1 1 192.0.2.2 2");
-  iauth_said_record(&auth, "n a");
-  iauth_said_record(&auth, "U u 0 * :r");
+  iauth_said_record(&auth, "C 192.0.2.1 1 192.0.2.2 2", 0);
+  iauth_said_record(&auth, "n a", 0);
+  iauth_said_record(&auth, "U u 0 * :r", 0);
   for (i = 0; i < 10; i++) {
     char pw[16];
     ircd_snprintf(0, pw, sizeof(pw), "P :pw%d", i);
-    iauth_said_record(&auth, pw);
+    iauth_said_record(&auth, pw, 0);
   }
-  iauth_said_record(&auth, "n b");
-  iauth_said_record(&auth, "A S :PLAIN");
-  iauth_said_record(&auth, "a :AAAA");
-  iauth_said_record(&auth, "T");
-  iauth_said_record(&auth, "D");
-  iauth_said_record(&auth, "E Done :x");
-  iauth_said_record(&auth, "n c");
-  iauth_said_record(&auth, "P :pw9");
+  iauth_said_record(&auth, "n b", 0);
+  iauth_said_record(&auth, "A S :PLAIN", 0);
+  iauth_said_record(&auth, "a :AAAA", 0);
+  iauth_said_record(&auth, "T", 0);
+  iauth_said_record(&auth, "D", 0);
+  iauth_said_record(&auth, "E Done :x", 0);
+  iauth_said_record(&auth, "n c", 0);
+  iauth_said_record(&auth, "P :pw9", 0);
   for (n = 0, said = auth.iauth_said; said; said = said->next, n++) {
     assert_true(n < 4);
     assert_string_equal(said->text, want[n]);
@@ -862,6 +1109,14 @@ int main(void)
     cmocka_unit_test_setup(a_held_client_times_out, setup),
     cmocka_unit_test_setup(handed_client_times_out_by_the_old_policy, setup),
     cmocka_unit_test_setup(an_open_circuit_breaker_releases, setup),
+    cmocka_unit_test_setup(lines_before_the_policy_are_told_at_it, setup),
+    cmocka_unit_test_setup(lines_not_asked_for_are_forgotten, setup),
+    cmocka_unit_test_setup(addlinfo_only_gets_short_user_and_password, setup),
+    cmocka_unit_test_setup(handed_to_an_unannounced_instance, setup),
+    cmocka_unit_test_setup(the_flush_write_fails, setup),
+    cmocka_unit_test_setup(hurry_in_the_window_gets_the_extra_wait, setup),
+    cmocka_unit_test_setup(a_successor_with_u_gets_the_full_user_line, setup),
+    cmocka_unit_test_setup(a_successor_without_u_gets_the_same_short_line, setup),
     cmocka_unit_test(the_rule),
     cmocka_unit_test(kept_lines_are_bounded),
     cmocka_unit_test(a_line_is_wiped),
