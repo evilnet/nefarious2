@@ -3736,6 +3736,22 @@ static void bx_event_region_without_tags_gives_none(void **s)
   assert_int_equal(ev.time_ms, T_A);
 }
 
+/* A region with no ,C (the session echo's sender sends one for every
+ * compact msgid, tags or not): its time, no tags -- and its time, not
+ * the msgid's, when the two differ (the receiving server replaced a
+ * peer time too far ahead with its own clock, #163). */
+static void bx_event_tagless_region_time_wins(void **s)
+{
+  struct bounce_bx_event ev;
+  (void)s;
+  bounce_bx_event_pick(1, ID_A, T_A - 600000, "", ID_A, T_A, &ev);
+  assert_int_equal(ev.time_ms, T_A - 600000);
+  assert_null(ev.client_tags);
+  bounce_bx_event_pick(1, ID_A, T_A - 600000, NULL, ID_A, T_A, &ev);
+  assert_int_equal(ev.time_ms, T_A - 600000);
+  assert_null(ev.client_tags);
+}
+
 static void bx_event_other_lines_region_is_not_used(void **s)
 {
   struct bounce_bx_event ev;
@@ -3844,6 +3860,7 @@ int main(void)
     cmocka_unit_test(bx_event_region_time_wins_over_the_decode),
     cmocka_unit_test(bx_event_region_without_time_takes_the_decode),
     cmocka_unit_test(bx_event_region_without_tags_gives_none),
+    cmocka_unit_test(bx_event_tagless_region_time_wins),
     cmocka_unit_test(bx_event_other_lines_region_is_not_used),
     cmocka_unit_test(bx_event_stale_stash_is_not_used),
     cmocka_unit_test(bx_event_no_region_from_an_older_sender),

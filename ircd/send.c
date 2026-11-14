@@ -2272,6 +2272,52 @@ void sendcmdto_one_ctags(struct Client *from, const char *cmd, const char *tok,
   va_end(vd.vd_args);
 }
 
+/** Send a bouncer session copy toward a server link with its own time
+ * and msgid in the compact tag region, always: @A<time_ms><msgid>, and
+ * ,C<client_tags> behind it when there are any.  For BX E, the BX M
+ * start line, and a middle hop relaying either on.
+ *
+ * sendcmdto_one_ctags() builds the region only for a line that has
+ * client tags; a copy without them went out bare, and its receiver took
+ * the message's time from the msgid.  The msgid's time is the origin's
+ * clock, which the receiver never checks: when that clock runs too far
+ * ahead, every other line of the message has its time replaced on
+ * arrival (parse_server, #163) and the copy alone kept the peer's.  With
+ * the region on every copy, the copy's time goes through that same
+ * check.
+ *
+ * As there: a compact msgid (14 bytes) arms the S2S msgid/time overrides
+ * for one sendcmdto_one_tags_with_client call, which builds the region
+ * only when send_s2s_tags_on(to) and clears the overrides either way; a
+ * line without such a msgid ("*", none) is the plain sendcmdto_one line.
+ * @param[in] from Client sending the command.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (the one a server link gets).
+ * @param[in] to Destination: a client behind a server link, or the link.
+ * @param[in] time_ms The message's time (epoch ms; 0 = the HLC's).
+ * @param[in] msgid The message's msgid.
+ * @param[in] client_tags The sender's client-only tags (NULL/empty = none).
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_region(struct Client *from, const char *cmd, const char *tok,
+                          struct Client *to, uint64_t time_ms, const char *msgid,
+                          const char *client_tags, const char *pattern, ...)
+{
+  struct VarData vd;
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  if (msgid && strlen(msgid) == 14) {
+    s2s_time_override = time_ms;
+    ircd_strncpy(s2s_msgid_override, msgid, sizeof(s2s_msgid_override));
+    sendcmdto_one_tags_with_client(from, cmd, tok, to, msgid,
+                                   (client_tags && *client_tags)
+                                   ? client_tags : NULL, "%v", &vd);
+  } else
+    sendcmdto_one(from, cmd, tok, to, "%v", &vd);
+  va_end(vd.vd_args);
+}
+
 /** Send a (prefixed) command to a single local client with message tags,
  * returning the generated msgid.
  * @param[in] from Client originating the message.

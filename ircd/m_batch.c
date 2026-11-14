@@ -431,14 +431,14 @@ static void emit_bxm_to_remote_member(struct Client *member,
                                     NumNick(sender_primary), bx_tok,
                                     cli_name(acptr), msgid, ctags, text));
       if (body_ctags) {
-        sendcmdto_one_ctags(&me, CMD_BOUNCER_TRANSFER, member,
+        sendcmdto_one_region(&me, CMD_BOUNCER_TRANSFER, member,
                             batch_time_ms, msgid, ctags,
                             BXM_START_CTAGS_FMT,
                             bxm_batch_id, member_numeric,
                             NumNick(sender_primary), bx_tok,
                             cli_name(acptr), msgid, ctags, text);
       } else {
-        sendcmdto_one_ctags(&me, CMD_BOUNCER_TRANSFER, member,
+        sendcmdto_one_region(&me, CMD_BOUNCER_TRANSFER, member,
                             batch_time_ms, msgid, ctags,
                             "M +%s %s %s%s %s %s %s :%s",
                             bxm_batch_id, member_numeric,
@@ -1952,7 +1952,7 @@ process_multiline_batch(struct Client *sptr)
               char *text = lp->value.cp + 1;
               if (*text == '\0')
                 continue;
-              sendcmdto_one_ctags(&me, CMD_BOUNCER_TRANSFER, sender_primary,
+              sendcmdto_one_region(&me, CMD_BOUNCER_TRANSFER, sender_primary,
                   batch_time_ms, first_line ? batch_base_msgid : "*",
                   first_line ? con_ml_client_tags(con) : NULL,
                   "E %s %s%s %s %s %s :%s",
@@ -2007,7 +2007,7 @@ process_multiline_batch(struct Client *sptr)
                 char *text = lp->value.cp + 1;
                 if (*text == '\0')
                   continue;
-                sendcmdto_one_ctags(&me, CMD_BOUNCER_TRANSFER, member,
+                sendcmdto_one_region(&me, CMD_BOUNCER_TRANSFER, member,
                     batch_time_ms, first_line ? batch_base_msgid : "*",
                     first_line ? con_ml_client_tags(con) : NULL,
                     "E %s %s%s %s %s %s :%s",

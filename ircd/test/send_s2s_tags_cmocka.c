@@ -471,6 +471,89 @@ static void test_bx_ctags_without_tags_is_bare(void **state)
   assert_string_equal(last_tags, "");
 }
 
+/* sendcmdto_one_region(): the session echo's sender (BX E, the BX M
+ * start line, their middle-hop forwards).  The region goes whenever the
+ * link takes S2S tags and the msgid is a compact one -- with or without
+ * client tags -- so the receiver reads the line's time from the region
+ * (its own clock's correction, #163) and never from the msgid.  ,C only
+ * with tags. */
+static void test_bx_region_without_tags_toward_v3_link(void **state)
+{
+  char want[128], tb[8];
+  (void)state;
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, BXE_ID, NULL,
+                       "E %s :%s", "BzAAC", "hi");
+  inttobase64_64(tb, 1763000000123ULL, 7);
+  snprintf(want, sizeof(want), "@A%s%s ", tb, BXE_ID);
+  assert_string_equal(last_tags, want);
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, BXE_ID, "",
+                       "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, want);
+}
+
+static void test_bx_region_with_tags_as_ctags(void **state)
+{
+  char want[128], tb[8];
+  (void)state;
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, BXE_ID, "+draft/reply=x;+e=a,b",
+                       "E %s :%s", "BzAAC", "hi");
+  inttobase64_64(tb, 1763000000123ULL, 7);
+  snprintf(want, sizeof(want), "@A%s%s,C+draft/reply=x;+e=a,b ", tb, BXE_ID);
+  assert_string_equal(last_tags, want);
+}
+
+/* Toward a legacy link, with tags off, or for a "*" msgid: the bare
+ * line, and nothing left armed for the next one. */
+static void test_bx_region_bare_cases(void **state)
+{
+  char buf[512];
+  (void)state;
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_legacy,
+                       1763000000123ULL, BXE_ID, NULL, "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, "");
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_legacy,
+                       1763000000123ULL, BXE_ID, "+x", "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, "");
+  tags_on = 0;
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, BXE_ID, NULL, "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, "");
+  tags_on = 1;
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, "*", NULL, "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, "");
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, "*", "+x", "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, "");
+  sendcmdto_one_region(&me, "BOUNCER_TRANSFER", "BX", &link_v3,
+                       1763000000123ULL, NULL, NULL, "E %s :%s", "BzAAC", "hi");
+  assert_string_equal(last_tags, "");
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, BXE_ID));
+}
+
+/* The federated history line (CH R, and its middle hop) keeps
+ * sendcmdto_one_ctags(): no client tags, no region -- unchanged by the
+ * session echo's sender. */
+static void test_ch_r_without_tags_stays_bare(void **state)
+{
+  char want[128], tb[8];
+  (void)state;
+  sendcmdto_one_ctags(&me, "CHATHISTORY", "CH", &link_v3,
+                      1763000000123ULL, BXE_ID, NULL,
+                      "R %s %s :%s", "#c", BXE_ID, "row");
+  assert_string_equal(last_tags, "");
+  sendcmdto_one_ctags(&me, "CHATHISTORY", "CH", &link_v3,
+                      1763000000123ULL, BXE_ID, "+x=1",
+                      "R %s %s :%s", "#c", BXE_ID, "row");
+  inttobase64_64(tb, 1763000000123ULL, 7);
+  snprintf(want, sizeof(want), "@A%s%s,C+x=1 ", tb, BXE_ID);
+  assert_string_equal(last_tags, want);
+}
+
 /* The session echo's sends sit inside an armed client event (the local
  * members' copies, the sender's own echo): a BX line between them must
  * leave it armed. */
@@ -535,6 +618,10 @@ int main(void)
     cmocka_unit_test_setup(test_bx_ctags_toward_legacy_link_is_bare, setup),
     cmocka_unit_test_setup(test_bx_ctags_without_tags_is_bare, setup),
     cmocka_unit_test_setup(test_bx_ctags_keeps_the_client_event, setup),
+    cmocka_unit_test_setup(test_bx_region_without_tags_toward_v3_link, setup),
+    cmocka_unit_test_setup(test_bx_region_with_tags_as_ctags, setup),
+    cmocka_unit_test_setup(test_bx_region_bare_cases, setup),
+    cmocka_unit_test_setup(test_ch_r_without_tags_stays_bare, setup),
     cmocka_unit_test_setup(test_bx_ctags_full_size_is_whole, setup),
     cmocka_unit_test_setup(test_ordinary_channel_send_drops_statusmsg_mark, setup),
     cmocka_unit_test_setup(test_ordinary_channel_send_with_ctags_drops_statusmsg_mark, setup),

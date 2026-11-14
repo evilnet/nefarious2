@@ -276,6 +276,17 @@ extern void sendcmdto_one_ctags(struct Client *from, const char *cmd,
                                 const char *client_tags,
                                 const char *pattern, ...);
 
+/* A bouncer session copy (BX E, the BX M start line, their forwards):
+ * as sendcmdto_one_ctags, but the @A<time><msgid> region goes with or
+ * without client tags, so the receiver reads the copy's time from the
+ * region -- through its check of a peer's clock -- and not from the
+ * msgid. */
+extern void sendcmdto_one_region(struct Client *from, const char *cmd,
+                                 const char *tok, struct Client *to,
+                                 uint64_t time_ms, const char *msgid,
+                                 const char *client_tags,
+                                 const char *pattern, ...);
+
 /* Send command to all channels user is on */
 extern void sendcmdto_common_channels_butone(struct Client *from,
 					     const char *cmd,

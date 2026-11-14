@@ -12219,7 +12219,7 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
     } else {
       char nn[6];
       ircd_snprintf(0, nn, sizeof(nn), "%s%s", NumNick(primary));
-      sendcmdto_one_ctags(&me, CMD_BOUNCER_TRANSFER, primary,
+      sendcmdto_one_region(&me, CMD_BOUNCER_TRANSFER, primary,
           event_ms, msgid, client_tags,
           "E %s %s%s %s %s %s :%s",
           nn, NumNick(primary), tok, cli_name(target),
@@ -12241,7 +12241,7 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
       if (sess->hs_aliases[i].ba_caps_known
           && !(sess->hs_aliases[i].ba_caps & BX_CAP_ECHO_MESSAGE))
         continue;
-      sendcmdto_one_ctags(&me, CMD_BOUNCER_TRANSFER, alias,
+      sendcmdto_one_region(&me, CMD_BOUNCER_TRANSFER, alias,
           event_ms, msgid, client_tags,
           "E %s %s%s %s %s %s :%s",
           sess->hs_aliases[i].ba_numeric,
@@ -15834,7 +15834,7 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
   /* Forward if target is not on this server, keeping the region (a
    * link that takes S2S tags gets it; any other the bare line). */
   if (!MyConnect(target)) {
-    sendcmdto_one_ctags(sptr, CMD_BOUNCER_TRANSFER, target,
+    sendcmdto_one_region(sptr, CMD_BOUNCER_TRANSFER, target,
         ev.time_ms, parv[6], ev.client_tags,
         "E %s %s %s %s %s :%s",
         parv[2], parv[3], parv[4], parv[5], parv[6], parv[7]);
@@ -16526,7 +16526,7 @@ forward_bxm_line(struct Client *sptr, struct Client *next_hop,
   case 9:
     /* The start line (+<bid> ... <msgid> :<line>): it keeps its tag
      * region toward a link that takes one (#229). */
-    sendcmdto_one_ctags(sptr, CMD_BOUNCER_TRANSFER, next_hop,
+    sendcmdto_one_region(sptr, CMD_BOUNCER_TRANSFER, next_hop,
                         ev ? ev->time_ms : 0, parv[7],
                         ev ? ev->client_tags : NULL,
                         "M %s %s %s %s %s %s :%s",
@@ -16537,7 +16537,7 @@ forward_bxm_line(struct Client *sptr, struct Client *next_hop,
     /* The start line with its body "@<ctags>" parameter.  It used to be
      * dropped here, and with it the whole batch for the device behind
      * us (its continuation and end lines found no batch). */
-    sendcmdto_one_ctags(sptr, CMD_BOUNCER_TRANSFER, next_hop,
+    sendcmdto_one_region(sptr, CMD_BOUNCER_TRANSFER, next_hop,
                         ev ? ev->time_ms : 0, parv[7],
                         ev ? ev->client_tags : NULL,
                         "M %s %s %s %s %s %s %s :%s",
