@@ -199,6 +199,12 @@ int exit_client(struct Client *cptr, struct Client *victim,
 { fail_msg("exit_client: %s", comment); return 0; }
 int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...) { if (len) buf[0] = '\0'; return 0; }
+int ircd_vsnprintf(struct Client *dest, char *buf, size_t len,
+                   const char *format, va_list args) { if (len) buf[0] = '\0'; return 0; }
+int exit_client_msg(struct Client *cptr, struct Client *bcptr,
+                    struct Client *sptr, const char *pattern, ...)
+{ fail_msg("exit_client_msg: %s", pattern); return 0; }
+void send_queued(struct Client *to) {}
 static int successes;          /**< RPL_SASLSUCCESS sent */
 static int failures;           /**< ERR_SASLFAIL sent */
 int send_reply(struct Client *to, int reply, ...)
