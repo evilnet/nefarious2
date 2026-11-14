@@ -10,6 +10,11 @@
  * instance that announced none (it went away before its O line) leaves
  * the client as required as it was.
  *
+ * A line about a client that only a policy option asks for (H, n, u, U,
+ * P, F, R) is kept untold while the instance it would go to has not
+ * announced its policy, and told or forgotten once it has; lines no
+ * option gates (C, N, d, W, w) are told at once.
+ *
  * A failed assertion prints where and what; the program exits non-zero
  * if any did.
  */
@@ -72,8 +77,87 @@ static void no_announced_policy_keeps_what_the_client_carried(void)
   assert_int_equal(iauth_held_required(0, 0, 0), 0);
 }
 
+#define ASKS_ALL (IAUTH_ASKS_ADDLINFO | IAUTH_ASKS_UNDERNET | IAUTH_ASKS_SSLFP \
+                  | IAUTH_ASKS_ACCOUNT)
+
+static void lines_no_option_gates_are_told_at_once(void)
+{
+  static const char ungated[] = "CNdWw";
+  const char *c;
+
+  for (c = ungated; *c; c++) {
+    assert_int_equal(iauth_line_verdict(*c, 0, 0), IAUTH_LINE_TELL);
+    assert_int_equal(iauth_line_verdict(*c, 1, 0), IAUTH_LINE_TELL);
+    assert_int_equal(iauth_line_verdict(*c, 1, ASKS_ALL), IAUTH_LINE_TELL);
+  }
+}
+
+static void before_the_policy_gated_lines_are_kept(void)
+{
+  static const char gated[] = "HnuUPFR";
+  const char *c;
+
+  /* whatever policy bits a struct carries before its O line */
+  for (c = gated; *c; c++) {
+    assert_int_equal(iauth_line_verdict(*c, 0, 0), IAUTH_LINE_KEEP);
+    assert_int_equal(iauth_line_verdict(*c, 0, ASKS_ALL), IAUTH_LINE_KEEP);
+  }
+}
+
+static void policy_u_asks_for_nick_ident_user_and_hurry(void)
+{
+  assert_int_equal(iauth_line_verdict('n', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('u', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('U', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('H', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('P', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_FORGET);
+  assert_int_equal(iauth_line_verdict('F', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_FORGET);
+  assert_int_equal(iauth_line_verdict('R', 1, IAUTH_ASKS_UNDERNET), IAUTH_LINE_FORGET);
+}
+
+static void policy_a_alone_asks_for_password_and_short_user(void)
+{
+  assert_int_equal(iauth_line_verdict('P', 1, IAUTH_ASKS_ADDLINFO), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('U', 1, IAUTH_ASKS_ADDLINFO), IAUTH_LINE_TELL_SHORT);
+  assert_int_equal(iauth_line_verdict('n', 1, IAUTH_ASKS_ADDLINFO), IAUTH_LINE_FORGET);
+  assert_int_equal(iauth_line_verdict('u', 1, IAUTH_ASKS_ADDLINFO), IAUTH_LINE_FORGET);
+  assert_int_equal(iauth_line_verdict('H', 1, IAUTH_ASKS_ADDLINFO), IAUTH_LINE_FORGET);
+}
+
+static void policy_a_and_u_tell_the_full_user_line(void)
+{
+  unsigned int au = IAUTH_ASKS_ADDLINFO | IAUTH_ASKS_UNDERNET;
+
+  assert_int_equal(iauth_line_verdict('U', 1, au), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('P', 1, au), IAUTH_LINE_TELL);
+}
+
+static void policy_f_and_r_ask_for_fingerprint_and_account(void)
+{
+  assert_int_equal(iauth_line_verdict('F', 1, IAUTH_ASKS_SSLFP), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('R', 1, IAUTH_ASKS_ACCOUNT), IAUTH_LINE_TELL);
+  assert_int_equal(iauth_line_verdict('F', 1, IAUTH_ASKS_ACCOUNT), IAUTH_LINE_FORGET);
+  assert_int_equal(iauth_line_verdict('R', 1, IAUTH_ASKS_SSLFP), IAUTH_LINE_FORGET);
+}
+
+static void an_empty_policy_forgets_every_gated_line(void)
+{
+  static const char gated[] = "HnuUPFR";
+  const char *c;
+
+  for (c = gated; *c; c++)
+    assert_int_equal(iauth_line_verdict(*c, 1, 0), IAUTH_LINE_FORGET);
+}
+
 int main(void)
 {
+  lines_no_option_gates_are_told_at_once();
+  before_the_policy_gated_lines_are_kept();
+  policy_u_asks_for_nick_ident_user_and_hurry();
+  policy_a_alone_asks_for_password_and_short_user();
+  policy_a_and_u_tell_the_full_user_line();
+  policy_f_and_r_ask_for_fingerprint_and_account();
+  an_empty_policy_forgets_every_gated_line();
   a_running_instance_takes_every_held_client();
   without_one_a_required_check_refuses();
   without_one_a_tentative_accept_is_released();

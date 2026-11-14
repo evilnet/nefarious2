@@ -49,6 +49,21 @@ cancels a pending retry.
 While no iauth instance is running, clients that connect register
 without iauth, whatever policy the last instance set.
 
+Until an instance sends its policy (the O message), it is told C, N or
+d, T and D as usual, but not what only a policy option asks for.  A
+WEBIRC request is not passed to it (the w policy) and the server
+handles it itself, as for an instance without that policy; the other
+lines -- H, n and u (U policy), U (U or A), P (A), F (F) and R (r) --
+are kept for each client it is checking, and when the O message
+arrives they are sent, in the order they were kept, if the policy asks
+for them, and forgotten if it does not.  Under A without U a kept U
+line is sent as "U <username>" with the username as the server cleaned
+it (a U line sent at once under A without U carries the username as
+the client gave it).  A client that reached the hurry point (H)
+meanwhile is given the extra time of the W policy, if the policy has
+it, when the O message arrives.  A later O message sends none of them
+again, and an instance that never sends one is never sent them.
+
 Clients still waiting for an instance when it exits, is replaced, is
 restarted or is removed are held: they do not register while the
 server decides what becomes of them, which it does as soon as it
@@ -56,10 +71,15 @@ returns to its event loop.  If an instance is running by then -- one
 started in the same step ("REHASH a", a changed program) or a program
 restarted at once after a good run -- each held client is handed to
 it: the new instance is told about the client again, with the latest
-line of each kind the departed instance was told about it (C first,
-then N or d, u, U, n, P, W, w, R, F, H, ... in the order they were
-last told; never a SASL exchange, T, or an E answering the departed
-instance), and the client waits for the new instance as for any other,
+line of each kind the departed instance was told, or would have been
+told, about it (C first, then N or d, u, U, n, P, W, w, R, F, H, ...
+in the order they were last told; never a SASL exchange, T, or an E
+answering the departed instance).  C, N or d, W and w are told at
+once; u, U, n, P, R, F and H are told at once only if the new instance
+has already announced a policy that asks for them (a program restarted
+in place keeps its policy), and otherwise wait for its O message, as
+above, so that an instance is not told these unless its own policy
+asks for them.  The client waits for the new instance as for any other,
 until it answers or the registration timeout ends the wait.  If no
 instance is running (the program is missing, failed too soon and waits
 out its retry delay, or its block was removed), a client whose check
@@ -422,7 +442,9 @@ Syntax: O <options>
 Example: O RTAWU
 Notify: yes
 Comments: Sets policy options for the iauth conversation.  Old policy
-  options should be forgotten.  Valid policy options are:
+  options should be forgotten.  What the server would have sent a
+  client's check under these options before the first O message is
+  sent when it arrives (see STARTING IAUTH).  Valid policy options are:
    A - Send username and password information.
        This causes the server to send the U and P messages.
    R - Require clients to be approved before registering them.
