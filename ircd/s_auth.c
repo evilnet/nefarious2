@@ -39,6 +39,7 @@
 #include "class.h"
 #include "client.h"
 #include "hash.h"
+#include "iauth_held.h"
 #include "iauth_respawn.h"
 #include "IPcheck.h"
 #include "ircd.h"
@@ -98,6 +99,10 @@ enum AuthRequestFlag {
     AR_IAUTH_RELEASED,  /**< iauth went away while checking; registration
                          * resumes from iauth_release_callback() */
     AR_IAUTH_SASL,      /**< the SASL exchange in progress is iauth's */
+    AR_IAUTH_HELD,      /**< iauth went away while checking; held (not
+                         * registering) until iauth_release_callback()
+                         * hands it over, refuses or releases it */
+    AR_IAUTH_HELD_REQ,  /**< the check of the held client was required */
     AR_NUM_FLAGS
 };
 
@@ -116,6 +121,14 @@ struct AuthRequest {
   struct AuthRequestFlags flags;  /**< current state of request */
   unsigned int        cookie;     /**< cookie the user must PONG */
   unsigned short      port;       /**< client's remote port number */
+  struct IAuthSaid*   iauth_said; /**< what IAuth was told of the client */
+};
+
+/** A line IAuth was told about a client (without the client id), kept so
+ * that a later instance can be told the same (iauth_hand_over()). */
+struct IAuthSaid {
+  struct IAuthSaid*   next;       /**< later line */
+  char                text[1];    /**< the line; allocated to its length */
 };
 
 /** Array of message text (with length) pairs for AUTH status
@@ -168,6 +181,8 @@ enum IAuthFlag
   IAUTH_CLOSING,                        /**< candidate to be disposed */
   IAUTH_SPAWN_UNDO,                     /**< a failed spawn is deleting its
                                          * sockets: no automatic respawn */
+  IAUTH_ANNOUNCED,                      /**< the program has sent a policy
+                                         * (O) line */
   /* The following flags are controlled by iauth's "O" options command. */
   IAUTH_ADDLINFO,                       /**< Send additional info
                                          * (password and username). */
@@ -243,6 +258,8 @@ static void iauth_sock_callback(struct Event *ev);
 static void iauth_stderr_callback(struct Event *ev);
 static int sendto_iauth(struct Client *cptr, const char *format, ...);
 static int preregister_user(struct Client *cptr);
+static void iauth_said_free(struct AuthRequest *auth);
+static void iauth_write(struct IAuth *iauth);
 typedef int (*iauth_cmd_handler)(struct IAuth *iauth, struct Client *cli,
 				 int parc, char **params);
 
@@ -582,8 +599,11 @@ static int check_auth_finished(struct AuthRequest *auth)
     FlagSet(&auth->flags, AR_PASSWORD_CHECKED);
   }
 
-  /* Check if iauth is done. */
-  if (FlagHas(&auth->flags, AR_IAUTH_PENDING))
+  /* Check if iauth is done.  A held client waits as a pending one does:
+   * for the instance it is handed to, or to be refused or released
+   * (iauth_release_callback()). */
+  if (FlagHas(&auth->flags, AR_IAUTH_PENDING)
+      || FlagHas(&auth->flags, AR_IAUTH_HELD))
   {
     /* Switch auth request to hurry-up state. */
     if (!FlagHas(&auth->flags, AR_IAUTH_HURRY))
@@ -939,6 +959,7 @@ void destroy_auth_request(struct AuthRequest* auth)
   if (t_active(&auth->loctimeout))
     timer_del(&auth->loctimeout);
 
+  iauth_said_free(auth);
   cli_auth(auth->client) = NULL;
   auth->next = auth_freelist;
   auth_freelist = auth;
@@ -977,18 +998,39 @@ int auth_ping_timeout(struct Client *cptr)
     }
   }
 
-  /* Check for iauth timeout. */
+  /* Check for iauth timeout.  A client handed over from an instance that
+   * went away (iauth_hand_over()) stays as required as it was while the
+   * new instance has announced no policy. */
   if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
-    if (IAuthHas(iauth, IAUTH_REQUIRED)
+    if ((IAuthHas(iauth, IAUTH_REQUIRED)
+         || (!IAuthHas(iauth, IAUTH_ANNOUNCED)
+             && FlagHas(&auth->flags, AR_IAUTH_HELD_REQ)))
         && !FlagHas(&auth->flags, AR_IAUTH_SOFT_DONE)) {
       sendheader(cptr, REPORT_FAIL_IAUTH);
       return exit_client_msg(cptr, cptr, &me, "Authorization Timeout");
     }
-    /* A T that cannot be written releases this client, and any other the
-     * program was checking (iauth_disconnect()); this one is finished
-     * here, as it would have been. */
+    /* A T that cannot be written takes the program away under this client
+     * and every other it was checking (iauth_disconnect()), which holds
+     * them for the next instance.  This one's wait is over either way: it
+     * is finished here, as it would have been, not held. */
     sendto_iauth(cptr, "T");
     FlagClr(&auth->flags, AR_IAUTH_PENDING);
+    FlagClr(&auth->flags, AR_IAUTH_HELD);
+    return check_auth_finished(auth);
+  }
+
+  /* Held after its IAuth instance went away, and the decision owed from
+   * the event loop (iauth_release_callback()) has not been made yet: the
+   * registration timeout decides as it does for a pending client, by the
+   * departed instance's policy -- refused if the check was required and
+   * IAuth had not tentatively accepted it, otherwise let through. */
+  if (FlagHas(&auth->flags, AR_IAUTH_HELD)) {
+    FlagClr(&auth->flags, AR_IAUTH_HELD);
+    if (FlagHas(&auth->flags, AR_IAUTH_HELD_REQ)
+        && !FlagHas(&auth->flags, AR_IAUTH_SOFT_DONE)) {
+      sendheader(cptr, REPORT_FAIL_IAUTH);
+      return exit_client_msg(cptr, cptr, &me, "Authorization Timeout");
+    }
     return check_auth_finished(auth);
   }
 
@@ -2082,29 +2124,99 @@ void auth_mark_closing(void)
     IAuthSet(iauth, IAUTH_CLOSING);
 }
 
-/** Finishes the registration of clients released by iauth_disconnect(). */
+/** Decides the clients held by iauth_disconnect() and finishes the
+ * registration of the ones it released. */
 static struct Timer iauth_release_timer;
 
-/** Finish the registration of the clients an %IAuth instance was still
- * checking when it went away (#AR_IAUTH_RELEASED): each continues as a
- * client that never had IAuth, and registers if nothing else holds it.
- * This runs from the event loop, outside whatever closed the instance.
+/** Hand a held client to the running %IAuth instance: introduce it again
+ * with every line the departed instance was told (iauth_said_record()),
+ * in the order kept, and make it pending on the new instance.  If the new
+ * instance goes away while it is told, iauth_disconnect() holds the
+ * client again.
+ * @param[in] cli Held client.
+ * @param[in] auth Its auth request.
+ * @return Non-zero if handed over; zero if nothing introduces it (no C
+ *   line was kept), and it cannot be.
+ */
+static int iauth_hand_over(struct Client *cli, struct AuthRequest *auth)
+{
+  struct IAuthSaid *said;
+  struct MsgBuf *mb;
+
+  if (!auth->iauth_said || auth->iauth_said->text[0] != 'C')
+    return 0;
+  FlagClr(&auth->flags, AR_IAUTH_HELD);
+  /* The new instance judges afresh: a tentative accept (d) was the
+   * departed one's. */
+  FlagClr(&auth->flags, AR_IAUTH_SOFT_DONE);
+  FlagSet(&auth->flags, AR_IAUTH_PENDING);
+  for (said = auth->iauth_said; said; said = said->next) {
+    mb = msgq_make(NULL, "%d %s", cli_fd(cli), said->text);
+    ++iauth->i_sendM;
+    msgq_add(i_sendQ(iauth), mb, 0);
+    msgq_clean(mb);
+  }
+  iauth_write(iauth);
+  return 1;
+}
+
+/** Decide the clients an %IAuth instance was still checking when it went
+ * away (#AR_IAUTH_HELD), now that it is known whether another instance
+ * took its place (iauth_held.h): each is handed to a running instance;
+ * with none, refused when its check was required, and otherwise
+ * released -- it continues as a client that never had IAuth, and
+ * registers if nothing else holds it.  Clients whose IAuth SASL exchange
+ * failed (#AR_IAUTH_RELEASED) have their registration checked.  This runs
+ * from the event loop, outside whatever closed the instance.
  * @param[in] ev Timer event.
  */
 static void iauth_release_callback(struct Event *ev)
 {
   struct AuthRequest *auth;
   struct Client *cli;
+  int handed = 0, refused = 0, released = 0;
   int ii;
 
   if (ev_type(ev) != ET_EXPIRE)
     return;
   for (ii = 0; ii <= HighestFd; ii++) {
-    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli))
-        || !FlagHas(&auth->flags, AR_IAUTH_RELEASED))
+    if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli)))
+      continue;
+    if (FlagHas(&auth->flags, AR_IAUTH_HELD)) {
+      int running = i_GetConnected(iauth) && !IAuthHas(iauth, IAUTH_CLOSING);
+
+      if (running && iauth_hand_over(cli, auth)) {
+        handed++;
+        continue;
+      }
+      FlagClr(&auth->flags, AR_IAUTH_HELD);
+      if (IAUTH_HELD_REFUSE ==
+          iauth_held_fate(0, FlagHas(&auth->flags, AR_IAUTH_HELD_REQ),
+                          FlagHas(&auth->flags, AR_IAUTH_SOFT_DONE))) {
+        refused++;
+        ++ServerStats->is_ref;
+        sendheader(cli, REPORT_FAIL_IAUTH);
+        exit_client_msg(cli, cli, &me, "Authorization Unavailable");
+      } else {
+        released++;
+        check_auth_finished(auth);
+      }
+      continue;
+    }
+    if (!FlagHas(&auth->flags, AR_IAUTH_RELEASED))
       continue;
     FlagClr(&auth->flags, AR_IAUTH_RELEASED);
     check_auth_finished(auth);
+  }
+  if (handed || refused || released) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth: of the clients held when an "
+              "instance went away, %d handed to the new instance, %d "
+              "refused (IAuth required), %d released", handed, refused,
+              released);
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth: of the clients held when "
+                         "an instance went away, %d handed to the new "
+                         "instance, %d refused (IAuth required), %d released",
+                         handed, refused, released);
   }
 }
 
@@ -2129,17 +2241,21 @@ static void iauth_disconnect(struct IAuth *iauth)
   struct AuthRequest *auth;
   struct Client *cli;
   pid_t pid;
-  int released = 0;
+  int announced, required;
+  int held = 0, held_req = 0;
   int sasl = 0;
   int ii;
 
   if (iauth == NULL)
     return;
 
-  /* The program being let go, taken before the sockets close: a respawn
-   * from their teardown (below) records its own child in i_pid. */
+  /* The program being let go, and its policy, taken before the sockets
+   * close: a respawn from their teardown (below) records its own child in
+   * i_pid. */
   pid = iauth->i_pid;
   iauth->i_pid = 0;
+  announced = IAuthHas(iauth, IAUTH_ANNOUNCED);
+  required = IAuthHas(iauth, IAUTH_REQUIRED);
 
   /* Close both sockets.  A socket_del() can respawn IAuth: when the other
    * socket is no longer active and we are not closing, the ET_DESTROY
@@ -2172,37 +2288,51 @@ static void iauth_disconnect(struct IAuth *iauth)
   if (pid > 0)
     kill(pid, SIGTERM);
 
-  /* Release the clients this instance was still checking.  A client that
-   * connects while no IAuth program runs registers without one
-   * (start_iauth_query()); these do the same, and the next instance is
-   * not told about them.  Left pending, they waited for an answer that
-   * could not come until the registration timeout, which refused them
-   * under the R policy.  Their registration is finished from the event
-   * loop: a failed write to IAuth brings us here from inside a client's
+  /* Hold the clients this instance was still checking.  A held client
+   * does not register; it is told nothing more (what it would be told is
+   * kept: sendto_iauth()), and the decision is made from the event loop
+   * (iauth_release_callback()), once it is known whether a new instance
+   * took this one's place -- one started in this same step (REHASH a, a
+   * changed program, a restart at once after a good run) is running by
+   * then and the client is handed to it.  With none, a client whose check
+   * was required is refused and any other released (iauth_held.h).
+   * Required is this instance's announced policy (R); an instance that
+   * went away before announcing one leaves each client as it was (one
+   * handed to it keeps the departed one's).  The decision is not made
+   * here: a failed write to IAuth brings us here from inside a client's
    * own registration step, where registering (or exiting) that client or
    * another one would pull it from under its caller.
-   * A SASL exchange with the program can never be answered now either: it
-   * fails at once, and the client's registration is checked from the
-   * event loop the same way (the exchange no longer holds it). */
+   * A SASL exchange with the program can never be answered now: it fails
+   * at once (904; the client may start another), and the registration of
+   * a client that is not held is checked from the event loop the same way
+   * (the exchange no longer holds it). */
   for (ii = 0; ii <= HighestFd; ii++) {
     if (!(cli = LocalClientArray[ii]) || !(auth = cli_auth(cli)))
       continue;
-    if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
-      FlagClr(&auth->flags, AR_IAUTH_PENDING);
-      FlagSet(&auth->flags, AR_IAUTH_RELEASED);
-      released++;
-    }
     if (FlagHas(&auth->flags, AR_IAUTH_SASL) && auth_iauth_sasl_fail(cli)) {
-      FlagSet(&auth->flags, AR_IAUTH_RELEASED);
+      if (!FlagHas(&auth->flags, AR_IAUTH_PENDING))
+        FlagSet(&auth->flags, AR_IAUTH_RELEASED);
       sasl++;
     }
+    if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
+      FlagClr(&auth->flags, AR_IAUTH_PENDING);
+      FlagSet(&auth->flags, AR_IAUTH_HELD);
+      if (iauth_held_required(announced, required,
+                              FlagHas(&auth->flags, AR_IAUTH_HELD_REQ))) {
+        FlagSet(&auth->flags, AR_IAUTH_HELD_REQ);
+        held_req++;
+      } else
+        FlagClr(&auth->flags, AR_IAUTH_HELD_REQ);
+      held++;
+    }
   }
-  if (released) {
-    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: released %d "
-              "pending client%s", released, released == 1 ? "" : "s");
-    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth disconnected: released %d "
-                         "pending client%s", released,
-                         released == 1 ? "" : "s");
+  if (held) {
+    log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: holding %d "
+              "pending client%s (%d required)", held, held == 1 ? "" : "s",
+              held_req);
+    sendto_opmask_butone(NULL, SNO_AUTH, "IAuth disconnected: holding %d "
+                         "pending client%s (%d required)", held,
+                         held == 1 ? "" : "s", held_req);
   }
   if (sasl) {
     log_write(LS_IAUTH, L_NOTICE, 0, "IAuth disconnected: failed %d SASL "
@@ -2210,7 +2340,7 @@ static void iauth_disconnect(struct IAuth *iauth)
     sendto_opmask_butone(NULL, SNO_AUTH, "IAuth disconnected: failed %d "
                          "SASL exchange%s", sasl, sasl == 1 ? "" : "s");
   }
-  if (released || sasl)
+  if (held || sasl)
     iauth_release_soon();
 }
 
@@ -2280,6 +2410,84 @@ static void iauth_write(struct IAuth *iauth)
   socket_events(i_socket(iauth), SOCK_ACTION_DEL | SOCK_EVENT_WRITABLE);
 }
 
+/** Whether a line told to IAuth about a client is kept for a later
+ * instance (iauth_hand_over()).  A SASL exchange (A, a) cannot be resumed
+ * on another instance, T ends the wait, D is sent when the client is
+ * gone, and E answers a line of the departed instance's that the next one
+ * never sent; everything else is part of the picture an instance builds.
+ * @param[in] cmd The line's command letter.
+ * @return Non-zero if the line is kept.
+ */
+static int iauth_said_kept(char cmd)
+{
+  return cmd != 'A' && cmd != 'a' && cmd != 'T' && cmd != 'D' && cmd != 'E';
+}
+
+/** Overwrite a line that may carry a password (P, W, w) with zeroes, in
+ * a way the compiler may not drop as a store to memory about to go away.
+ * @param[in] text Buffer to wipe.
+ * @param[in] len Number of bytes to wipe.
+ */
+static void iauth_line_wipe(char *text, size_t len)
+{
+  volatile char *p = text;
+
+  while (len--)
+    *p++ = 0;
+}
+
+/** Forget one kept line, wiping it first (P carries a password).
+ * @param[in] said Line to free.
+ */
+static void iauth_said_free_one(struct IAuthSaid *said)
+{
+  iauth_line_wipe(said->text, strlen(said->text));
+  MyFree(said);
+}
+
+/** Forget every line kept for \a auth.
+ * @param[in] auth Auth request.
+ */
+static void iauth_said_free(struct AuthRequest *auth)
+{
+  struct IAuthSaid *said;
+
+  while ((said = auth->iauth_said)) {
+    auth->iauth_said = said->next;
+    iauth_said_free_one(said);
+  }
+}
+
+/** Keep a line IAuth is told about a client, for a later instance.  A line
+ * replaces any earlier one of the same command, which a later one of the
+ * same kind supersedes (a new nick, password or user line), and goes
+ * last: an instance is told the latest of each kind in the order they
+ * were last told, and what is kept stays bounded however often a client
+ * repeats a command.
+ * @param[in] auth Auth request of the client.
+ * @param[in] line The line, without the client id.
+ */
+static void iauth_said_record(struct AuthRequest *auth, const char *line)
+{
+  struct IAuthSaid **pp, *said;
+  size_t len;
+
+  if (!iauth_said_kept(line[0]))
+    return;
+  for (pp = &auth->iauth_said; (said = *pp); ) {
+    if (said->text[0] == line[0]) {
+      *pp = said->next;
+      iauth_said_free_one(said);
+    } else
+      pp = &said->next;
+  }
+  len = strlen(line);
+  said = (struct IAuthSaid *) MyMalloc(sizeof(*said) + len);
+  said->next = NULL;
+  memcpy(said->text, line, len + 1);
+  *pp = said;
+}
+
 /** Send a message to iauth.
  * @param[in] cptr Optional client context for message.
  * @param[in] format Format string for message.
@@ -2287,26 +2495,47 @@ static void iauth_write(struct IAuth *iauth)
  */
 static int sendto_iauth(struct Client *cptr, const char *format, ...)
 {
-  struct VarData vd;
+  struct AuthRequest *auth = cptr ? cli_auth(cptr) : NULL;
   struct MsgBuf *mb;
+  char line[BUFSIZE];
+  va_list vl;
 
+  /* A held client is between instances: what it would be told is kept for
+   * the one it is handed to, and nothing is sent.  A line that is not kept
+   * (a SASL exchange, which cannot be resumed; T; E) is refused, as when no
+   * instance runs. */
+  if (auth && (format[0] != 'D') && FlagHas(&auth->flags, AR_IAUTH_HELD)) {
+    if (!iauth_said_kept(format[0]))
+      return 0;
+    va_start(vl, format);
+    ircd_vsnprintf(0, line, sizeof(line), format, vl);
+    va_end(vl);
+    iauth_said_record(auth, line);
+    iauth_line_wipe(line, sizeof(line));
+    return 1;
+  }
   /* Do not send requests when we have no iauth. */
   if (!i_GetConnected(iauth))
     return 0;
   /* Do not send for clients in the NORMAL state. */
   if (cptr
       && (format[0] != 'D')
-      && (!cli_auth(cptr) || !FlagHas(&cli_auth(cptr)->flags, AR_IAUTH_PENDING)))
+      && (!auth || !FlagHas(&auth->flags, AR_IAUTH_PENDING)))
     return 0;
 
-  /* Build the message buffer. */
-  vd.vd_format = format;
-  va_start(vd.vd_args, format);
+  /* Build the message buffer, keeping a client's line for a later
+   * instance. */
+  va_start(vl, format);
+  ircd_vsnprintf(0, line, sizeof(line), format, vl);
+  va_end(vl);
   if (0 == cptr)
-    mb = msgq_make(NULL, "-1 %v", &vd);
-  else
-    mb = msgq_make(NULL, "%d %v", cli_fd(cptr), &vd);
-  va_end(vd.vd_args);
+    mb = msgq_make(NULL, "-1 %s", line);
+  else {
+    if (auth && (format[0] != 'D'))
+      iauth_said_record(auth, line);
+    mb = msgq_make(NULL, "%d %s", cli_fd(cptr), line);
+  }
+  iauth_line_wipe(line, sizeof(line));
 
   /* Tack it onto the iauth sendq and try to write it. */
   ++iauth->i_sendM;
@@ -2375,6 +2604,7 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
   /* Erase old policy first. */
   for (flag = IAUTH_FIRST_OPTION; flag < IAUTH_LAST_FLAG; ++flag)
     IAuthClr(iauth, flag);
+  IAuthSet(iauth, IAUTH_ANNOUNCED);
 
   if (parc > 0) /* only try to parse if we were given a policy string */
     /* Parse new policy set. */
