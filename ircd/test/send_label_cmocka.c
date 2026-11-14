@@ -624,6 +624,43 @@ static void test_delivery_no_tags_at_all(void **state)
   assert_string_equal(line_to(&other), ":nick!u@h.example PRIVMSG other :plain");
 }
 
+/* The copy of a private message sent to another device of the sender's
+ * bouncer session (bounce_echo_pm_to_session): the sender's client-only
+ * tags and the message's msgid and time lead it, and it joins no batch
+ * that device has open -- a batch on its stack that is not a labeled
+ * batch (an async LIST's own is detached between its lines, send.c's
+ * nesting model; this guards the entry point should one ever be left
+ * there) -- nor takes the label its own command left pending
+ * (sendcmdto_one_tags_with_client, used before, stamps the innermost
+ * batch whatever it is). */
+static void test_delivery_session_echo_outside_open_batch(void **state)
+{
+  struct Connection *con = cli_connect(&sibling);
+  const char *s;
+  char v[64];
+
+  (void)state;
+  label_pending(&sibling, "SIB1");   /* the device's own command, not this one */
+  ircd_strncpy(con->con_batch[0].id, "LISTB", sizeof(con->con_batch[0].id));
+  con->con_batch[0].parent[0] = '\0';
+  con->con_batch_depth = 1;          /* open on the device's stack ... */
+  cli_labeled_batch(&sibling) = 0;   /* ... and not a labeled batch */
+  assert_string_equal(cli_batch_id(&sibling), "LISTB");
+  sendcmdto_set_client_event("MSGID00000009", 1700000000789ULL);
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &sibling, "+seance/edit=MSGID00000001",
+                         "%s :%s", "other", "edited");
+  s = line_to(&sibling);
+  assert_non_null(s);
+  assert_string_equal(tag_value(s, "+seance/edit", v, sizeof(v)), "MSGID00000001");
+  assert_string_equal(tag_value(s, "msgid", v, sizeof(v)), "MSGID00000009");
+  assert_string_equal(tag_value(s, "time", v, sizeof(v)), "2023-11-14T22:13:20.789Z");
+  assert_false(has_tag(s, "batch"));
+  assert_false(has_tag(s, "label"));
+  assert_int_equal(cli_label_responded(&sibling), 0);
+  assert_string_equal(body_of(s), ":nick!u@h.example PRIVMSG other :edited");
+  sendcmdto_set_client_msgid(NULL);
+}
+
 /* ------------------------------------------------------------------ */
 /* The asker's copy when there is nothing to answer, and when it gets  */
 /* none                                                                */
@@ -1763,6 +1800,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_no_tags_at_all, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delivery_session_echo_outside_open_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_common_channels_but_devices, setup, teardown),
   };
 
