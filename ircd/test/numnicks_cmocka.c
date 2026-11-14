@@ -453,6 +453,38 @@ static void test_find_rejects_short_numnicks(void **state)
 }
 
 
+/* findNUser() checks only the length: a character outside the numnick
+ * alphabet decodes as 0, the value of 'A', so a five-character numeric
+ * with one resolves to the user whose numeric has an 'A' there.  A
+ * caller that must not act on a malformed numeric checks it first
+ * (ValidUserNumNick(), the BX handlers' bounce_bx_numeric_ok()). */
+static void test_find_reads_a_foreign_character_as_A(void **state)
+{
+    (void)state;
+    static struct Client server, user;
+    static struct Server serv;
+    static struct Client *clients[64];
+
+    memset(&server, 0, sizeof(server));
+    memset(&serv, 0, sizeof(serv));
+    memset(clients, 0, sizeof(clients));
+    cli_serv(&server) = &serv;
+    serv.client_list = clients;
+    serv.nn_mask = 63;
+    SetYXXServerName(&server, 0);                /* "AA" */
+    clients[0] = &user;
+
+    assert_ptr_equal(&user, findNUser("AAAAA"));
+    assert_ptr_equal(&user, findNUser("AA_AA"));
+    assert_ptr_equal(&user, findNUser("AA.AA"));
+    assert_ptr_equal(&user, findNUser("AAA\001A"));
+    assert_ptr_equal(&user, findNUser("A{AAA"));     /* server "A{" is "AA" */
+    assert_false(ValidUserNumNick("AA_AA"));
+
+    ClearServerYXX(&server);
+}
+
+
 /* ========== Edge cases ========== */
 
 /* An empty string decodes to 0 without reading past its terminator.
@@ -513,6 +545,7 @@ int main(void)
         cmocka_unit_test(test_valid_server_numnick),
         cmocka_unit_test(test_user_numnick_fits_its_server),
         cmocka_unit_test(test_find_rejects_short_numnicks),
+        cmocka_unit_test(test_find_reads_a_foreign_character_as_A),
 
         /* Edge cases */
         cmocka_unit_test(test_base64_empty_string),

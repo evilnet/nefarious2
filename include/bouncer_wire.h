@@ -1173,7 +1173,8 @@ enum bounce_bxp_unknown {
  *                                 not ours, introduced by the line's
  *                                 direction, and the primary of a record
  *                                 of ours.
- * @param[in] new_numeric_ok       The new numeric is a full YYXXX.
+ * @param[in] new_numeric_ok       The new numeric is a full YYXXX
+ *                                 (bounce_bx_numeric_ok()).
  * @param[in] old_is_crossed_face  The old numeric is the face noted for a
  *                                 record of ours.
  */
@@ -1183,17 +1184,29 @@ extern enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known,
                                                          int new_numeric_ok,
                                                          int old_is_crossed_face);
 
+/** Is @a numeric a full user numeric as a BX line must carry it: exactly
+ * five characters (YYXXX), every one of the numnick alphabet (A-Z a-z 0-9
+ * [ ])?  findNUser() checks only the length, and reads a character
+ * outside the alphabet as 'A': "AB_AA" would name ABAAA.  Every numeric
+ * a server assigns or accepts (SetLocalNumNick(), an N or BX C checked by
+ * ValidUserNumNick()) passes, so only a malformed line is refused.
+ *
+ * @param[in] numeric A numeric from the line (NULL: not one).
+ * @return 1 when well formed, else 0.
+ */
+extern int bounce_bx_numeric_ok(const char *numeric);
+
 /** May a BX P that names a client this server does not know be passed
- * on?  Only when both numerics are full five-character YYXXX ones.  A
- * stock server reads a shorter one as a one-character server and a
- * two-character client: an older fork peer's oper RESUME sent a BX P of
- * three-character numerics, and a stock receiver could renumber an
- * unrelated user.  Such a line is dropped here, never forwarded (W3 final
- * fix wave, lens-1 M2).
+ * on?  Only when both numerics are full YYXXX ones (bounce_bx_numeric_ok()).
+ * A stock server reads a shorter one as a one-character server and a
+ * two-character client, and a character outside the alphabet as 'A': an
+ * older fork peer's oper RESUME sent a BX P of three-character numerics,
+ * and a stock receiver could renumber an unrelated user.  Such a line is
+ * dropped here, never forwarded (W3 final fix wave, lens-1 M2).
  *
  * @param[in] old_numeric The line's old numeric (NULL: not forwardable).
  * @param[in] new_numeric The line's new numeric (NULL: not forwardable).
- * @return 1 when both are five characters long, else 0.
+ * @return 1 when both are well formed, else 0.
  */
 extern int bounce_bxp_forwardable(const char *old_numeric,
                                   const char *new_numeric);

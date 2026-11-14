@@ -13336,13 +13336,15 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
 }
 
 /** Resolve a wire numeric to a user ONLY if it is a syntactically
- * valid 5-char P10 user numeric.  findNUser()'s non-5-char else-branch
- * mis-resolves short/malformed numerics to an arbitrary client_list
- * slot, so every BX handler that mutates/converts/exits the resolved
- * Client must gate on exact length first (F-BW2). */
+ * valid 5-char P10 user numeric (bounce_bx_numeric_ok()).  findNUser()
+ * resolves a 3-character numeric as a one-character server and a
+ * two-character client, and reads a character outside the numnick
+ * alphabet as 'A' ("AB_AA" is ABAAA), so every BX handler that
+ * mutates/converts/exits the resolved Client must gate on the whole
+ * numeric first (F-BW2). */
 static struct Client *bx_find_user_strict(const char *numeric)
 {
-  if (!numeric || strlen(numeric) != 5)
+  if (!bounce_bx_numeric_ok(numeric))
     return NULL;
   return findNUser(numeric);
 }
@@ -13409,7 +13411,8 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     /* The device's server's side of a promote that crossed its device's
      * exit (user, 2026-10-27: clean up and accept the loss). */
     switch (bounce_bxp_unknown_action(old_client != NULL, new_client != NULL,
-                                      os != NULL, strlen(new_numeric) == 5,
+                                      os != NULL,
+                                      bounce_bx_numeric_ok(new_numeric),
                                       cs != NULL)) {
     case BOUNCE_BXP_HOLD_OLD:
       /* The new face already left here: its own exit (BX X) crossed this
@@ -13466,15 +13469,16 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       break;
     case BOUNCE_BXP_FORWARD:
       /* Never passed on with a numeric that is not a full YYXXX: a stock
-       * server reads a shorter one as a server and a client and may
-       * renumber an unrelated user (an older fork peer's oper RESUME sent
+       * server reads a shorter one as a server and a client, and a
+       * character outside the numnick alphabet as 'A', and may renumber
+       * an unrelated user (an older fork peer's oper RESUME sent
        * three-character ones).  Dropped here (W3 final fix wave, lens-1
        * M2; receiver-only). */
       if (!bounce_bxp_forwardable(old_numeric, new_numeric)) {
         log_write(LS_USER, L_INFO, 0, "BX P: %s names %s as the new face of "
-                  "%s (%s, session %s): not five-character numerics; dropped, "
-                  "not forwarded", cli_name(sptr), new_numeric, old_numeric,
-                  nick, sessid);
+                  "%s (%s, session %s): not well-formed five-character "
+                  "numerics; dropped, not forwarded", cli_name(sptr),
+                  new_numeric, old_numeric, nick, sessid);
         return 0;
       }
       if (!new_client)

@@ -530,10 +530,25 @@ enum bounce_bxp_unknown bounce_bxp_unknown_action(int old_known, int new_known,
   return BOUNCE_BXP_FORWARD;
 }
 
+int bounce_bx_numeric_ok(const char *numeric)
+{
+  int i;
+
+  if (!numeric)
+    return 0;
+  for (i = 0; i < 5; i++) {
+    char c = numeric[i];
+
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+          || (c >= '0' && c <= '9') || c == '[' || c == ']'))
+      return 0;
+  }
+  return numeric[5] == '\0';
+}
+
 int bounce_bxp_forwardable(const char *old_numeric, const char *new_numeric)
 {
-  return old_numeric && new_numeric
-         && strlen(old_numeric) == 5 && strlen(new_numeric) == 5;
+  return bounce_bx_numeric_ok(old_numeric) && bounce_bx_numeric_ok(new_numeric);
 }
 
 enum bounce_crossed_note bounce_crossed_note_state(int noted, int slot_is_kept)

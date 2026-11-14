@@ -1967,6 +1967,49 @@ static void bxp_with_a_short_numeric_is_never_forwarded(void **s)
   assert_int_equal(bounce_bxp_forwardable("BjAAB", NULL), 0);
 }
 
+static void bxp_with_a_character_outside_the_alphabet_is_never_forwarded(void **s)
+{
+  (void)s;
+  /* Five characters, one of them not in the numnick alphabet (A-Z a-z
+   * 0-9 [ ]): findNUser() reads such a character as 'A', so "AB_AA" is
+   * ABAAA to every receiver -- a stock one renumbers or exits that user. */
+  assert_int_equal(bounce_bxp_forwardable("AB_AA", "ACAAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", "AB.AA"), 0);
+  assert_int_equal(bounce_bxp_forwardable("AB\001AA", "ACAAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", "AB\303AA"), 0);
+  assert_int_equal(bounce_bxp_forwardable("AB{AA", "ACAAC"), 0);
+  assert_int_equal(bounce_bxp_forwardable("BjAAB", "ACAA}"), 0);
+  /* Every character of the alphabet still goes on. */
+  assert_int_equal(bounce_bxp_forwardable("Az09[", "]AzZa"), 1);
+}
+
+static void bx_numeric_is_five_characters_of_the_alphabet(void **s)
+{
+  (void)s;
+  assert_int_equal(bounce_bx_numeric_ok("ABAAA"), 1);
+  assert_int_equal(bounce_bx_numeric_ok("Az09["), 1);
+  assert_int_equal(bounce_bx_numeric_ok("]]]]]"), 1);
+  /* Wrong length. */
+  assert_int_equal(bounce_bx_numeric_ok(NULL), 0);
+  assert_int_equal(bounce_bx_numeric_ok(""), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AAA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("ABAA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("ABAAAA"), 0);
+  /* A character outside the alphabet, anywhere. */
+  assert_int_equal(bounce_bx_numeric_ok("_BAAA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB_AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB.AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("ABAA:"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB\001AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB\303AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB{AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB|AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB}AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB@AA"), 0);
+  assert_int_equal(bounce_bx_numeric_ok("AB\\AA"), 0);
+}
+
 static void bxp_with_both_clients_known_is_the_usual_path(void **s)
 {
   int f, n, c;
@@ -4016,6 +4059,8 @@ int main(void)
     cmocka_unit_test(bxp_from_a_crossed_face_follows_the_kept_primary),
     cmocka_unit_test(bxp_double_cross_renumbers_the_noted_face),
     cmocka_unit_test(bxp_with_a_short_numeric_is_never_forwarded),
+    cmocka_unit_test(bxp_with_a_character_outside_the_alphabet_is_never_forwarded),
+    cmocka_unit_test(bx_numeric_is_five_characters_of_the_alphabet),
     cmocka_unit_test(bxp_with_both_clients_known_is_the_usual_path),
     cmocka_unit_test(crossed_note_absent_is_none),
     cmocka_unit_test(crossed_note_on_the_kept_primary_acts),
