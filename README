@@ -93,9 +93,9 @@ On every start the container writes these values into
 /home/nefarious/ircd/base.conf. A value the configuration file cannot hold
 is refused: the container logs which variable is at fault and exits without
 starting the server. That is the case for a value that contains a double
-quote (") or a line break, for a variable that is set but empty (leave it
-unset to get the default), and for a numeric that is not a number from 1 to
-4095.
+quote (") or a line break, and for a numeric that is not a number from 1 to
+4095. A variable that is set but empty gets its default, as an unset one
+does.
 
 A base.conf the container has generated begins with a marker comment and is
 generated afresh on each start. A base.conf without that marker is taken to

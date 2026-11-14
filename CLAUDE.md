@@ -57,7 +57,7 @@ Nefarious uses a hierarchical configuration file (`ircd.conf`) with block-based 
 For Docker deployments, the configuration uses environment variable templating:
 1. Template file: `tools/docker/base.conf-dist` contains `%VARIABLE_NAME%` placeholders
 2. Entry point script: `tools/docker/dockerentrypoint.sh` substitutes the environment variables (in the shell, one pass over the template)
-3. Final config is written at container startup to `base.conf`; if a value cannot be written (it contains `"` or a line break, is set but empty, or the numeric is out of range) or a placeholder has no value, the script exits non-zero and the ircd is not started
+3. Final config is written at container startup to `base.conf`; if a value cannot be written (it contains `"` or a line break, or the numeric is out of range) or a placeholder has no value (unset, or set but empty when the variable has no default), the script exits non-zero and the ircd is not started. A variable with a default that is set but empty gets the default
 
 Required environment variables (with defaults in dockerentrypoint.sh):
 - `IRCD_GENERAL_NAME` - Server name (default: localhost.localdomain)
