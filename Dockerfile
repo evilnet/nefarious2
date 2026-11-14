@@ -76,7 +76,7 @@ RUN --mount=type=cache,target=/root/.ccache \
 # make install no longer auto-generates a cert (the makepem call was
 # removed from ircd/Makefile.in — admins supply their own or run the
 # tool manually).  Docker's entrypoint handles cert generation if the
-# file is missing at container start.
+# file is missing or empty at container start.
 RUN make install
 
 # --- Build iauthd-ts (npm install cached unless package.json changes) ---
