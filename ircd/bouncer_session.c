@@ -12148,12 +12148,14 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
  * @param[in] cmd     Long command name (e.g. "PRIVMSG").
  * @param[in] tok     Short command token (e.g. "P").
  * @param[in] text    Message text.
- * @param[in] msgid   Message ID for tags (may be NULL or empty).
+ * @param[in] msgid   Message ID for the BX E copies (may be NULL or empty).
+ *                    Local members are tagged from the client event the
+ *                    caller armed (sendcmdto_set_client_event), as a
+ *                    delivered message is (sendcmdto_one_delivery): its
+ *                    msgid and time, never a label or a batch they have open.
  * @param[in] client_tags Sender's client-only tags (+reply, an edit tag), or
  *                        NULL. Local members get them; BX E does not carry
- *                        them. With tags, a copy's msgid and time come from
- *                        the client event the caller armed
- *                        (sendcmdto_set_client_event), not from @a msgid.
+ *                        them.
  */
 void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
                                const char *cmd, const char *tok,
@@ -12203,8 +12205,8 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
   if (sender != primary) {
     if (MyConnect(primary)) {
       if (CapActive(primary, CAP_ECHOMSG))
-        sendcmdto_one_tags_with_client(primary, cmd, tok, primary, msgid, client_tags,
-                                       "%s :%s", cli_name(target), text);
+        sendcmdto_one_delivery(primary, cmd, tok, primary, client_tags,
+                               "%s :%s", cli_name(target), text);
     } else {
       char nn[6];
       ircd_snprintf(0, nn, sizeof(nn), "%s%s", NumNick(primary));
@@ -12223,8 +12225,8 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
 
     if (MyConnect(alias)) {
       if (CapActive(alias, CAP_ECHOMSG))
-        sendcmdto_one_tags_with_client(primary, cmd, tok, alias, msgid, client_tags,
-                                       "%s :%s", cli_name(target), text);
+        sendcmdto_one_delivery(primary, cmd, tok, alias, client_tags,
+                               "%s :%s", cli_name(target), text);
     } else {
       if (sess->hs_aliases[i].ba_caps_known
           && !(sess->hs_aliases[i].ba_caps & BX_CAP_ECHO_MESSAGE))
