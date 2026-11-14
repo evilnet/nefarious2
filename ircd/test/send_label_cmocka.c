@@ -540,6 +540,37 @@ static void test_delivery_no_tags_at_all(void **state)
   assert_string_equal(line_to(&other), ":nick!u@h.example PRIVMSG other :plain");
 }
 
+/* The copy of a private message sent to another device of the sender's
+ * bouncer session (bounce_echo_pm_to_session): the sender's client-only
+ * tags and the message's msgid and time lead it, and it joins no batch
+ * that device has open -- an async LIST keeps cli_batch_id set across
+ * event-loop turns without being a labeled batch -- nor takes the label
+ * its own command left pending (sendcmdto_one_tags_with_client, used
+ * before, stamped that batch). */
+static void test_delivery_session_echo_outside_open_batch(void **state)
+{
+  const char *s;
+  char v[64];
+
+  (void)state;
+  label_pending(&sibling, "SIB1");   /* the device's own command, not this one */
+  ircd_strncpy(cli_batch_id(&sibling), "LISTB", sizeof(cli_batch_id(&sibling)));
+  cli_labeled_batch(&sibling) = 0;   /* m_list.c's async LIST batch */
+  sendcmdto_set_client_event("MSGID00000009", 1700000000789ULL);
+  sendcmdto_one_delivery(&asker, CMD_PRIVATE, &sibling, "+seance/edit=MSGID00000001",
+                         "%s :%s", "other", "edited");
+  s = line_to(&sibling);
+  assert_non_null(s);
+  assert_string_equal(tag_value(s, "+seance/edit", v, sizeof(v)), "MSGID00000001");
+  assert_string_equal(tag_value(s, "msgid", v, sizeof(v)), "MSGID00000009");
+  assert_string_equal(tag_value(s, "time", v, sizeof(v)), "2023-11-14T22:13:20.789Z");
+  assert_false(has_tag(s, "batch"));
+  assert_false(has_tag(s, "label"));
+  assert_int_equal(cli_label_responded(&sibling), 0);
+  assert_string_equal(body_of(s), ":nick!u@h.example PRIVMSG other :edited");
+  sendcmdto_set_client_msgid(NULL);
+}
+
 /* ------------------------------------------------------------------ */
 /* The asker's copy when there is nothing to answer, and when it gets  */
 /* none                                                                */
@@ -662,6 +693,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_delivery_outside_labeled_batch, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_client_tags, setup, teardown),
     cmocka_unit_test_setup_teardown(test_delivery_no_tags_at_all, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delivery_session_echo_outside_open_batch, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
