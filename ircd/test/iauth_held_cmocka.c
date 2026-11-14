@@ -312,11 +312,18 @@ static void run_instance(struct IAuth *ia)
 }
 
 /** Let instance \a ia go and free it, after the case's checks: the case's
- * clients are forgotten first, so that none is held by it. */
+ * clients' requests are destroyed first (and what was kept for them freed),
+ * so that none is held by it. */
 static void drop_instance(struct IAuth *ia)
 {
+  int i;
+
   if (iauth == ia)
     iauth = NULL;
+  for (i = 0; i < NFAKE; i++)
+    if (!fakes[i].freed && cli_magic(&fakes[i].cli) == CLIENT_MAGIC
+        && cli_auth(&fakes[i].cli))
+      destroy_auth_request(cli_auth(&fakes[i].cli));
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
   iauth_disconnect(ia);
   if (peer_fd >= 0)
