@@ -84,6 +84,7 @@ static int is_ulined_server(struct Client *server);
 int has_chathistory_advertisement(struct Client *server);
 void broadcast_channel_advertisement(const char *channel);
 #include <string.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <openssl/evp.h>
@@ -9612,9 +9613,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * `;`), as soju reads it.  The older form, one `key=value` per parameter
  * with a trailing last one, is still accepted when there are two or more.
  *
- * Answered with a batch of type `soju.im/search`, as soju sends it: the matching PRIVMSG / NOTICE
- * rows in ascending time order, each with msgid and time, or an empty
- * batch.  Malformed selectors get FAIL SEARCH INVALID_PARAMS.
+ * Answered with a batch of type `soju.im/search`, as soju sends it: the
+ * matching PRIVMSG / NOTICE rows in ascending time order, each with msgid
+ * and time, or an empty batch.  Malformed selectors get FAIL SEARCH
+ * INVALID_PARAMS; of a repeated attribute only the last counts.
  *
  * Ours is a brute scan of the store: the same walk CHATHISTORY BEFORE
  * uses, from `before` (default now) back towards `after`, keeping the
@@ -9646,6 +9648,8 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   int limit = 0, max_limit;
   int budget = SEARCH_SCAN_MAX;
   char *cur, *next;
+  const char *v_in = NULL, *v_from = NULL, *v_text = NULL;
+  const char *v_after = NULL, *v_before = NULL, *v_limit = NULL;
   int tagform;
   int i;
 
@@ -9670,7 +9674,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   next = parc > 1 ? parv[1] : NULL;
   for (i = 1; (cur = next); ) {
     char *eq;
-    const char *key, *val;
+    const char *val;
 
     if (tagform) {
       char *semi = strchr(cur, ';');
@@ -9687,7 +9691,6 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     eq = strchr(cur, '=');
-    key = cur;
     if (eq == cur || (!eq && !tagform)) {
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "*", "Selectors are key=value");
       return 0;
@@ -9705,32 +9708,61 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    if (ircd_strcmp(key, "in") == 0) {
-      ircd_strncpy(in, val, sizeof(in));
-    } else if (ircd_strcmp(key, "from") == 0) {
-      ircd_strncpy(sm.from, val, sizeof(sm.from));
-    } else if (ircd_strcmp(key, "text") == 0) {
-      /* The last text wins, an empty one too: text=a;text= searches
-       * for nothing in particular, as an unrepeated text= does. */
-      sm.text = val[0] ? val : NULL;
-    } else if (ircd_strcmp(key, "after") == 0) {
-      if (!val[0] || history_iso_to_unix(val, after_unix, sizeof(after_unix)) != 0) {
-        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "after", "Invalid timestamp");
-        return 0;
-      }
-    } else if (ircd_strcmp(key, "before") == 0) {
-      if (!val[0] || history_iso_to_unix(val, before_unix, sizeof(before_unix)) != 0) {
-        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "before", "Invalid timestamp");
-        return 0;
-      }
-    } else if (ircd_strcmp(key, "limit") == 0) {
-      limit = atoi(val);
-      if (limit <= 0) {
-        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "limit", "Invalid limit");
-        return 0;
-      }
-    }
+    /* The last of a repeated attribute wins, as in a tag list: only
+     * the values kept are checked, below. */
+    if (ircd_strcmp(cur, "in") == 0)
+      v_in = val;
+    else if (ircd_strcmp(cur, "from") == 0)
+      v_from = val;
+    else if (ircd_strcmp(cur, "text") == 0)
+      v_text = val;
+    else if (ircd_strcmp(cur, "after") == 0)
+      v_after = val;
+    else if (ircd_strcmp(cur, "before") == 0)
+      v_before = val;
+    else if (ircd_strcmp(cur, "limit") == 0)
+      v_limit = val;
     /* Unknown selectors are ignored (the spec leaves room for more). */
+  }
+
+  /* A value too long for its field would silently search for a
+   * different one (a shorter nick, another channel): refuse it. */
+  if (v_in) {
+    if (strlen(v_in) >= sizeof(in)) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "in", "No access to target");
+      return 0;
+    }
+    ircd_strncpy(in, v_in, sizeof(in));
+  }
+  if (v_from) {
+    if (strlen(v_from) >= sizeof(sm.from)) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "from", "Invalid nick");
+      return 0;
+    }
+    ircd_strncpy(sm.from, v_from, sizeof(sm.from));
+  }
+  sm.text = v_text && v_text[0] ? v_text : NULL;
+  if (v_after && (!v_after[0]
+                  || history_iso_to_unix(v_after, after_unix, sizeof(after_unix)) != 0)) {
+    send_fail(sptr, "SEARCH", "INVALID_PARAMS", "after", "Invalid timestamp");
+    return 0;
+  }
+  if (v_before && (!v_before[0]
+                   || history_iso_to_unix(v_before, before_unix, sizeof(before_unix)) != 0)) {
+    send_fail(sptr, "SEARCH", "INVALID_PARAMS", "before", "Invalid timestamp");
+    return 0;
+  }
+  if (v_limit) {
+    char *end;
+    long l;
+
+    errno = 0;
+    l = strtol(v_limit, &end, 10);
+    if (!IsDigit(*v_limit) || *end || errno || l <= 0) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "limit", "Invalid limit");
+      return 0;
+    }
+    limit = l > INT_MAX ? INT_MAX : (int)l;
   }
 
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
