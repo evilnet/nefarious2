@@ -1,7 +1,7 @@
 # A shared budget for the connect burst
 
-Status: v5, implemented on this branch, 2026-11-06. Base: evilnet
-`ircv3.2-upgrade` @ 5725812e. All features are off by default.
+Status: v5, implemented on this branch, 2026-11-06; ported onto evilnet
+`ircv3.2-upgrade` @ 7f53d940. All features are off by default.
 
 v5 takes the review on #158: guaranteed per-class shares of one parent pool,
 only the connect-time catch-up commands borrow (not PRIVMSG or NOTICE), both
@@ -15,16 +15,15 @@ Every non-oper command from a registered client is charged
 `lag = lagmin + len / lagfactor` seconds (defaults 2 and 120; `len` counts from
 the first parameter when there is one, so tags and the command token are
 usually free) onto `cli_since`
-(`ircd/parse.c` L1658-1671). `read_packet()` parses the next line only while
-`cli_since - CurrentTime < 10` (`ircd/s_bsd.c` L1693), and that check comes
-before the charge. Each socket read with data pulls `cli_since` up to now
-(L1313-1314), so idle time never banks; leftover lines are retried on a 2 s
-timer (L1746). In practice: about 5 short commands at once, then one every 2 s.
+(`parse_client_line()` in `ircd/parse.c`). `read_packet()` (`ircd/s_bsd.c`)
+parses the next line only while `cli_since - CurrentTime < 10`, and that check
+comes before the charge. Each socket read with data pulls `cli_since` up to
+now, so idle time never banks; leftover lines are retried on a 2 s timer. In practice: about 5 short commands at once, then one every 2 s.
 
 Lines before 001 are free: a fresh `Connection` is zeroed, so the cached
-`con_lag_factor` is 0 and `get_lag_factor()` returns it (`class.c` L388), and
-`parse.c` L1658 requires `lagfactor > 0`. `register_user` resets the cache to -2
-(`s_user.c` L626-627), so charging starts at 001 with the clock at about now.
+`con_lag_factor` is 0 and `get_lag_factor()` (`class.c`) returns it, and the
+charge in `parse.c` requires `lagfactor > 0`. `register_user()` resets the cache
+to -2, so charging starts at 001 with the clock at about now.
 
 `POSTREG_GRACE` (default 20) gives a logged-in connection a one-shot credit at
 registration (`con_lagcredit`), which `fakelag_charge()` (`include/fakelag.h`)
@@ -103,11 +102,15 @@ static inline int fakelag_spend(int *credit, time_t until, time_t now,
 }
 ```
 
-The charge site keeps its single-statement shape under the existing multiline
-guard (`parse.c`):
+The charge site keeps its single-statement shape; only the call changes, and
+the exemptions in front of it stay as they are (`parse.c`: the lines of the
+client's own open multiline batch and the `BATCH -` that ends it, and the PONG
+that answers the server's PING during a bouncer device's input hold,
+`input_hold_pong_free()`):
 
 ```c
-    if (!cli_ml_batch_id(cptr)[0])
+    if (!(/* a line of the client's own open multiline batch, or its end */)
+        && !(/* the PONG to an input hold's own PING */))
       cli_since(cptr) += fakelag_charge_client(cptr, mptr->cmd, lag);
 ```
 
@@ -162,7 +165,7 @@ shares.
 
 ## Tests
 
-`ircd/test/fakelag_cmocka.c`, 54 cases. `fakelag_spend()` needs only a fake
+`ircd/test/fakelag_cmocka.c`, 55 cases. `fakelag_spend()` needs only a fake
 `take`; the `fakelag.c` cases stub `CurrentTime`, the features,
 `get_lag_factor()` and two classes.
 
@@ -175,7 +178,8 @@ shares.
   clamps, off lends nothing.
 - Shares: a class's share survives another class draining the unreserved
   part; unreserved is the pool minus the shares; share first, then
-  unreserved; a removed class frees its share; shares over the pool; the
+  unreserved; a removed class frees its share, and its clients draw on the
+  unreserved part only; shares over the pool; the
   pool off silences the shares; the account budget spans classes.
 - Commands: the `borrowers[]` table; PRIVMSG and NOTICE spend the grace but
   never the pool.
@@ -277,8 +281,10 @@ so it stays out of this change until the pool proves itself.
 - **Registration only.** A client that logs in after 001 gets neither the
   grace (as today) nor an allowance.
 - **Not every line is charged.** Unknown and shunned commands skip the charge,
-  and so do lines inside a multiline batch, while a multiline close charges the
-  clock directly (`m_batch.c`).
+  and so do the lines of the client's own open multiline batch and the
+  `BATCH -` that ends it, while a multiline close charges the clock directly
+  (`m_batch.c`); so does the PONG that answers the server's PING during a
+  bouncer device's input hold. None of them draws on the pool.
 - **A clock step back still freezes clients.** That happens today too: their
   `cli_since` is left in the future. The buckets' own handling only keeps them
   from locking up.
