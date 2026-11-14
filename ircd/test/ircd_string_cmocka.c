@@ -1058,6 +1058,29 @@ static void test_utf8_strcasestr_no_false_hits_from_bytes(void **state)
   assert_misses("\xE3\xA3\x80", "\xC3\xA3");
 }
 
+/* Every byte from 0x80 to 0xFF ahead of an ASCII needle: the byte scan
+ * reads each one through ToLower, whose table is indexed from CHAR_MIN
+ * (run under -fsanitize=address, a cast to unsigned char reads past it). */
+static void test_utf8_strcasestr_ascii_needle_high_bytes(void **state)
+{
+  char hay[128 + 3];
+  int i;
+
+  (void)state;
+  for (i = 0; i < 128; i++)
+    hay[i] = (char)(0x80 + i);
+  memcpy(hay + 128, "Xy", 3);
+  assert_ptr_equal(hay + 128, ircd_utf8_strcasestr(hay, "xY"));
+  assert_ptr_equal(hay + 128, ircd_utf8_strcasestr(hay, "X"));
+  assert_null(ircd_utf8_strcasestr(hay, "z"));
+  /* No high byte folds onto an ASCII one. */
+  hay[128] = '\0';
+  for (i = 1; i < 128; i++) {
+    char needle[2] = { (char)i, '\0' };
+    assert_null(ircd_utf8_strcasestr(hay, needle));
+  }
+}
+
 static void test_utf8_strcasestr_edges(void **state)
 {
   const char *hay = "ab\xD0\xBF";
@@ -2112,6 +2135,7 @@ int main(void)
         cmocka_unit_test(test_utf8_strcasestr_folds_scripts),
         cmocka_unit_test(test_utf8_strcasestr_ignores_what_does_not_fold),
         cmocka_unit_test(test_utf8_strcasestr_no_false_hits_from_bytes),
+        cmocka_unit_test(test_utf8_strcasestr_ascii_needle_high_bytes),
         cmocka_unit_test(test_utf8_strcasestr_edges),
     };
 
