@@ -85,6 +85,7 @@ CMOCKA_TESTPROGS = \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
 	auth_recheck_cmocka \
+	iauth_held_cmocka \
 	channel_speak_cmocka \
 	dbuf_find_line_cmocka \
 	input_hold_cmocka \
@@ -183,6 +184,7 @@ DEP_SRC = \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
 	auth_recheck_cmocka.c \
+	iauth_held_cmocka.c \
 	channel_speak_cmocka.c \
 	dbuf_find_line_cmocka.c \
 	input_hold_cmocka.c \
@@ -612,6 +614,20 @@ auth_recheck_cmocka.o: ${srcdir}/auth_recheck_cmocka.c ../s_auth.c
 
 auth_recheck_cmocka: $(AUTH_RECHECK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=timer_add $(AUTH_RECHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# iauth_held tests - what becomes of an IAuth instance's program and of the
+# clients it was checking when it goes away.  Built as auth_recheck is: the
+# real s_auth.c, included and garbage-collected, with the real event core
+# and engines; the queue to the program records what it is told, and
+# kill() is wrapped to see which process is signalled.
+IAUTH_HELD_CMOCKA_OBJS = iauth_held_cmocka.o ../ircd_events.o \
+	$(AUTH_RECHECK_ENGINE_OBJS) ../ircd_alloc.o ../ircd_string.o \
+	../ircd_snprintf.o
+iauth_held_cmocka.o: ${srcdir}/iauth_held_cmocka.c ../s_auth.c
+	${CC} ${CFLAGS} -Wno-address -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/iauth_held_cmocka.c
+
+iauth_held_cmocka: $(IAUTH_HELD_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=kill $(IAUTH_HELD_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # channel_speak tests - may a bouncer device of ours speak in a channel
 # (by its primary's face and membership; +Z by its own connection): the
 # REAL predicates.  The test includes channel.c, compiled with

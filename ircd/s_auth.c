@@ -53,6 +53,7 @@
 #include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_osdep.h"
+#include "ircd_signal.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -75,6 +76,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -231,6 +233,9 @@ struct IAuth {
   int i_circuit_open;                   /**< 1 if circuit breaker is tripped (bypassing IAUTH_REQUIRED) */
   struct IAuthRespawn i_backoff;        /**< failure streak of the program */
   struct Timer i_respawn;               /**< next start, or end of a streak */
+  pid_t i_pid;                          /**< the program's process while it
+                                         * is ours to signal; 0 once it has
+                                         * been signalled or reaped */
 };
 
 /** Return whether flag \a flag is set on \a iauth. */
@@ -2098,6 +2103,18 @@ int auth_send_sasl_abort(struct Client *cptr)
   return sendto_iauth(cptr, "A X");
 }
 
+/** The server reaped a child process: if it is the program of the current
+ * instance, that program is no longer ours to signal.
+ * @param[in] child Process that was reaped.
+ * @param[in] datum Unused.
+ * @param[in] status Its exit status (unused).
+ */
+static void iauth_child_reaped(pid_t child, void *datum, int status)
+{
+  if (iauth && iauth->i_pid == child)
+    iauth->i_pid = 0;
+}
+
 /** Attempt to spawn the process for an IAuth instance.  When to try
  * (again) is the callers' business: iauth_start().
  * @param[in] iauth IAuth descriptor.
@@ -2180,6 +2197,12 @@ static int iauth_do_spawn(struct IAuth *iauth)
     /* We are the parent process.  Close the child's sockets. */
     close(s_io[1]);
     close(s_err[1]);
+    /* Remember the process, to stop it when this instance is closed;
+     * forget it once it is reaped, so a number the kernel has given to
+     * another process is never signalled.  Before the first line goes: a
+     * write that fails closes the instance (iauth_disconnect()). */
+    iauth->i_pid = cpid;
+    register_child(cpid, iauth_child_reaped, NULL);
     /* Send our server name (supposedly for proxy checking purposes)
      * and maximum number of connections (for allocation hints).
      * Need to use conf_get_local() since &me may not be fully
@@ -2577,9 +2600,15 @@ static void iauth_disconnect(struct IAuth *iauth)
   int sasl = 0;
   struct Client *cli;
   struct AuthRequest *auth;
+  pid_t pid;
 
   if (iauth == NULL)
     return;
+
+  /* The program being let go, taken before the sockets close: a respawn
+   * from their teardown (below) records its own child in i_pid. */
+  pid = iauth->i_pid;
+  iauth->i_pid = 0;
 
   /* Close both sockets.  A socket_del() can respawn IAuth: when the other
    * socket is no longer active and we are not closing, the ET_DESTROY
@@ -2603,6 +2632,14 @@ static void iauth_disconnect(struct IAuth *iauth)
     if (i_socket(iauth)->s_header.gh_flags & GEN_DESTROY)
       s_fd(i_socket(iauth)) = -1;
   }
+
+  /* Closing its sockets tells the program to exit; one that does not
+   * read them (or ignores end of file) is told with SIGTERM, so that a
+   * program replaced or removed never stays running beside the next one.
+   * A program that went away on its own is a zombie here, or already
+   * reaped (pid 0): the signal reaches nothing else. */
+  if (pid > 0)
+    kill(pid, SIGTERM);
 
   /* Release the clients this instance was still checking: nothing can
    * answer for them now.  Each goes on as a client that connected while no
