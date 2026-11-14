@@ -2056,12 +2056,24 @@ P10_MESSAGE_TAGS
  * Type: boolean
  * Default: TRUE
 
-Whether this server announces message tags (the H flag) to its server
-links and sends compact @time/@msgid tags to the peers that announce
-them too.  A legacy peer never gets tags, whatever this is set to.
+Whether this server sends the compact S2S tag region (the message's
+time and msgid, and the session id, hold mark and client-only tags
+that ride with it) on its server links, and keeps the origin's msgid
+for the PRIVMSG, NOTICE and TAGMSG lines it relays.  The region goes
+only to a peer that announced the IRCv3 SERVER flag v.  Every fork
+server announces v whatever this is set to, and reads a region it is
+sent, so a fork peer with this FALSE still receives tags; a legacy peer
+(a stock ircu server, X3) never gets them.  While this is TRUE the
+SERVER line also announces flag H (the bouncer hold marks); H is sent
+only in the SERVER line, so after changing this at runtime, SQUIT and
+relink.
 
 Upgrade note: before this default changed, a server with no
-P10_MESSAGE_TAGS line announced nothing.  It now announces H, so a link
-between an upgraded server and an older one can carry tags one way
-only.  Upgrade fork servers together, or pin the line to the value you
-want on every server.
+P10_MESSAGE_TAGS line sent no tags and announced no H.  It now does
+both, so a link between an upgraded server and an older one with no
+line carries tags one way only: the older server reads the upgraded
+one's region (time, client tags, session ids, the session echo's
+tags) but re-mints the msgid of each PRIVMSG/NOTICE it relays, and
+sends no region back, so the upgraded server re-mints the older one's
+msgids and times and loses their client tags.  Upgrade fork servers
+together, or pin the line to the value you want on every server.
