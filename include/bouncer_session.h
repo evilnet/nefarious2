@@ -1167,7 +1167,9 @@ extern void bounce_sync_alias_identity(struct Client *primary);
  * @param[in] cmd     Long command name (e.g. "PRIVMSG").
  * @param[in] tok     Short command token (e.g. "P").
  * @param[in] text    Message text.
- * @param[in] msgid   Message ID for tags (may be NULL or empty).
+ * @param[in] msgid   Message ID for the BX E copies (may be NULL or empty);
+ *                    local members are tagged from the armed event (see
+ *                    the definition).
  * @param[in] client_tags Sender's client-only tags, or NULL (see the definition).
  */
 extern void bounce_echo_pm_to_session(struct Client *sender,
