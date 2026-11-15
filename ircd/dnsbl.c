@@ -64,6 +64,12 @@ static struct DNSBLStats dnsbl_stats;
 /** Timer for cache expiration */
 static struct Timer dnsbl_cache_timer;
 
+/** Timer for the lookups' own timeout (dnsbl_timeout_sweep()) */
+static struct Timer dnsbl_timeout_timer;
+
+/** The lookups in flight (DNSBLRequest.next) */
+static struct DNSBLRequest *dnsbl_active;
+
 /** Timer callback for cache expiration
  * @param ev Timer event
  */
@@ -150,6 +156,14 @@ dnsbl_entry_matches(const struct DNSBLServer *server, unsigned int value)
   return server->has_bitmask && (server->bitmask & value) != 0;
 }
 
+/** Timer callback for the lookups' timeout */
+static void
+dnsbl_timeout_timer_callback(struct Event *ev)
+{
+  if (ev_type(ev) == ET_EXPIRE)
+    dnsbl_timeout_sweep();
+}
+
 void
 dnsbl_init(void)
 {
@@ -159,6 +173,9 @@ dnsbl_init(void)
   /* Set up cache expiration timer - run every 5 minutes */
   timer_add(timer_init(&dnsbl_cache_timer), dnsbl_cache_timer_callback,
             NULL, TT_PERIODIC, 300);
+  /* and the lookups' timeout, looked at each second */
+  timer_add(timer_init(&dnsbl_timeout_timer), dnsbl_timeout_timer_callback,
+            NULL, TT_PERIODIC, 1);
 }
 
 static unsigned long long dnsbl_entry_ident(const struct DNSBLServer *server);
@@ -501,6 +518,23 @@ dnsbl_live_server(const struct DNSBLQueryContext *ctx)
 }
 
 /** Free a DNSBL request and all its resources */
+/** Take \a req off the list of lookups in flight. */
+static void
+dnsbl_active_unlink(struct DNSBLRequest *req)
+{
+  struct DNSBLRequest **pp;
+
+  if (!req->active)
+    return;
+  for (pp = &dnsbl_active; *pp; pp = &(*pp)->next)
+    if (*pp == req) {
+      *pp = req->next;
+      break;
+    }
+  req->next = NULL;
+  req->active = 0;
+}
+
 static void
 dnsbl_request_free(struct DNSBLRequest *req)
 {
@@ -508,6 +542,8 @@ dnsbl_request_free(struct DNSBLRequest *req)
 
   if (!req)
     return;
+
+  dnsbl_active_unlink(req);
 
   if (req->mark)
     MyFree(req->mark);
@@ -708,6 +744,11 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
     return;
   }
 
+  /* Given up already (dnsbl_timeout_sweep()): the client went on without
+   * this answer; it is not judged, and nothing is cached. */
+  if (req->gave_up)
+    return;
+
   if (addr) {
     /* We got a response: every A record of it is a listing, its value the
      * record's last octet -- read as the address's last BYTE (network
@@ -744,6 +785,7 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
 
   /* Check if all lookups are complete */
   if (req->pending_count == 0) {
+    dnsbl_active_unlink(req);
     /* Cache the answers (not the verdict: a later hit judges them by the
      * entries in force then), under the address that was asked about --
      * the client's may have changed since (WEBIRC, IAuth) -- all of them
@@ -838,6 +880,14 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
     started++;
   }
 
+  /* In flight: given up after FEAT_DNSBL_TIMEOUT (0: never) */
+  if (started > 0 && feature_int(FEAT_DNSBL_TIMEOUT) > 0) {
+    req->deadline = CurrentTime + feature_int(FEAT_DNSBL_TIMEOUT);
+    req->next = dnsbl_active;
+    dnsbl_active = req;
+    req->active = 1;
+  }
+
   /* If no queries started, clean up the request */
   if (started == 0) {
     MyFree(req);
@@ -862,12 +912,38 @@ dnsbl_cancel(struct DNSBLRequest *request)
    */
   request->cancelled = 1;
   request->client = NULL;
+  dnsbl_active_unlink(request);
 
   /* If no queries are pending, we can free immediately */
   if (request->pending_count == 0) {
     dnsbl_request_free(request);
   }
   /* Otherwise, the last callback will free it */
+}
+
+void
+dnsbl_timeout_sweep(void)
+{
+  struct DNSBLRequest *req;
+
+  /* One at a time, from the head again after each: going on with a client
+   * can register or exit clients, which cancels (unlinks) other
+   * requests. */
+  for (;;) {
+    for (req = dnsbl_active; req; req = req->next)
+      if (req->deadline <= CurrentTime && req->pending_count > 0
+          && !req->cancelled && !req->gave_up)
+        break;
+    if (!req)
+      return;
+    dnsbl_active_unlink(req);
+    req->gave_up = 1;
+    req->unknown = 1;               /* nothing of it is cached */
+    Debug((DEBUG_DNS, "DNSBL: Gave up %d lookup(s) for client %p",
+           req->pending_count, req->client));
+    if (req->client && cli_auth(req->client))
+      auth_dnsbl_complete(cli_auth(req->client));
+  }
 }
 
 int

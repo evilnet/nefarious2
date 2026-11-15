@@ -89,7 +89,11 @@ struct DNSBLCacheEntry {
 /** DNSBL lookup request tracking */
 struct DNSBLRequest {
   struct Client *client;         /**< Associated client */
-  struct DNSBLRequest *next;     /**< Next pending request */
+  struct DNSBLRequest *next;     /**< Next on the list of lookups in flight
+                                      (dnsbl_timeout_sweep()) */
+  int active;                    /**< On that list */
+  time_t deadline;               /**< FEAT_DNSBL_TIMEOUT: given up then */
+  int gave_up;                   /**< Given up: later answers are ignored */
   int pending_count;             /**< Number of pending lookups */
   unsigned int result;           /**< Answers that matched their entry */
   int whitelisted;               /**< Set if whitelist hit */
@@ -144,6 +148,12 @@ extern struct DNSBLServer *dnsbl_add_server(const char *domain, const char *inde
 /** Is \a mark usable as a DNSBL entry's mark: one word (no blanks), 1 to
  * DNSBL_MARKLEN characters? */
 extern int dnsbl_valid_mark(const char *mark);
+
+/** Give up the lookups in flight whose FEAT_DNSBL_TIMEOUT has passed: an
+ * unanswered list counts as not listing the client, as one that fails
+ * does, nothing of the lookup is cached, and the client goes on (run each
+ * second from a timer; exported for the tests). */
+extern void dnsbl_timeout_sweep(void);
 
 /** Remove all DNSBL server configurations */
 extern void dnsbl_clear_servers(void);

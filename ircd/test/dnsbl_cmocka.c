@@ -183,6 +183,7 @@ static int setup(void **state)
   (void)state;
   cache_reset();
   dnsbl_clear_servers();
+  dnsbl_active = NULL;                     /* (earlier cases' requests leak) */
   nqueries = completes = 0;
   CurrentTime = 1000;
   memset(&client, 0, sizeof(client));
@@ -695,6 +696,30 @@ static void cache_bounded_oldest_first(void **state)
   memcpy(&cli_ip(&client), &first, sizeof(first));
 }
 
+/** A list that does not answer within FEAT_DNSBL_TIMEOUT is given up:
+ * the client goes on, judged by the answers in (here another list's
+ * listing), a late answer is ignored, and nothing is cached. */
+static void unanswered_list_given_up(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_add_server("bl2.test", NULL, NULL, DNSBL_ACT_MARK, "two", 0);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  answer(0, 1, 2);                         /* bl2.test: listed (mark) */
+  dnsbl_timeout_sweep();                   /* not yet */
+  assert_int_equal(completes, 0);
+  CurrentTime += 3600;                     /* the stub's DNSBL_TIMEOUT */
+  dnsbl_timeout_sweep();
+  assert_int_equal(completes, 1);          /* the client goes on */
+  assert_int_equal(req->action, DNSBL_ACT_MARK);
+  answer(1, 1, 2);                         /* bl.test, late: ignored */
+  assert_int_equal(req->action, DNSBL_ACT_MARK);
+  assert_int_equal(completes, 1);
+  dnsbl_cancel(req);
+  dnsbl_cancel(again(0));                  /* not cached: asked again */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -710,6 +735,7 @@ int main(void)
     cmocka_unit_test_setup(every_record_of_an_answer_judged, setup),
     cmocka_unit_test_setup(mark_entry_mark_bounded, setup),
     cmocka_unit_test_setup(cache_bounded_oldest_first, setup),
+    cmocka_unit_test_setup(unanswered_list_given_up, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),
