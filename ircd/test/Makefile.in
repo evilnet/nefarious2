@@ -82,6 +82,7 @@ CMOCKA_TESTPROGS = \
 	websocket_cmocka \
 	db_casefold_cmocka \
 	account_id_cmocka \
+	cap_version_cmocka \
 	rename_proto_cmocka \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
@@ -189,6 +190,7 @@ DEP_SRC = \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
 	account_id_cmocka.c \
+	cap_version_cmocka.c \
 	rename_proto_cmocka.c \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
@@ -583,6 +585,12 @@ db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
 ACCOUNT_ID_CMOCKA_OBJS = account_id_cmocka.o ../account_id.o ../webpush_keyring.o
 account_id_cmocka: $(ACCOUNT_ID_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ACCOUNT_ID_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# cap_version tests - a connection's CAP version is the highest it ever
+# sent in CAP LS (cap_version_after_ls(), capab.h; pure)
+CAP_VERSION_CMOCKA_OBJS = cap_version_cmocka.o
+cap_version_cmocka: $(CAP_VERSION_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CAP_VERSION_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # rename_proto tests - the argument-only parts of channel RENAME: the
 # services query cookie codec ("<numeric>.<n>") and the rules a rename's

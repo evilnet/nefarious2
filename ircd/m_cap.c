@@ -726,12 +726,12 @@ cap_ls(struct Client *sptr, const char *caplist)
   if (IsUnknown(sptr) && cli_auth(sptr)) /* registration hasn't completed; suspend it... */
     auth_cap_start(cli_auth(sptr));
 
-  /* Parse CAP version from CAP LS 302 */
-  if (caplist && *caplist) {
-    int version = atoi(caplist);
-    if (version > 0)
-      cli_capab_version(sptr) = version;
-  }
+  /* The CAP version: the highest this connection ever sent.  A client that
+   * sent CAP LS 302 stays a 302 client for the life of the connection (the
+   * capability-negotiation spec); a later CAP LS with no version or a lower
+   * one does not make it an older client again. */
+  cli_capab_version(sptr) = cap_version_after_ls(cli_capab_version(sptr),
+                                                 caplist);
 
   return send_caplist(sptr, 0, 0, "LS"); /* send list of capabilities */
 }

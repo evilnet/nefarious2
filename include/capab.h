@@ -131,6 +131,34 @@ DECLARE_FLAGSET(CapSet, _CAP_LAST_CAP);
       (dst)->bits[_i] |= (src)->bits[_i]; \
   } while (0)
 
+/** The CAP version from which a connection gets CAP 302's features: cap
+ * values, cap-notify implied, SASL 3.2 (AUTHENTICATE after registration). */
+#define CAP_VERSION_302 302
+
+/** A connection's CAP version once it has sent "CAP LS [<version>]" with
+ * \a arg as its version (NULL or "": none), when it was \a current: the
+ * highest version it ever sent.  The capability-negotiation spec presumes a
+ * client that sent CAP LS 302 supports 302's features for the life of the
+ * connection, so a later CAP LS with no version, a lower one or one that is
+ * not a positive number leaves it as it was.  The number is read as atoi()
+ * reads it (an optional '+', then digits; what follows them is ignored),
+ * and one past the field's range is its highest value, never one that
+ * wrapped around. */
+static inline unsigned short cap_version_after_ls(unsigned short current,
+                                                  const char *arg)
+{
+  unsigned long v = 0;
+
+  if (!arg)
+    return current;
+  if (*arg == '+')
+    arg++;
+  for (; *arg >= '0' && *arg <= '9'; arg++)
+    if ((v = v * 10 + (unsigned long)(*arg - '0')) > 65535)
+      v = 65535;
+  return v > current ? (unsigned short)v : current;
+}
+
 extern void client_check_caps(struct Client *client, struct Client *replyto);
 extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *flags_out);
 
