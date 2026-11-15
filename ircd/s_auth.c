@@ -111,6 +111,8 @@ enum AuthRequestFlag {
     AR_PASSWORD_CHECKED, /**< client password already checked */
     AR_LOC_DONE,        /**< loc messages have been sent */
     AR_DNSBL_PENDING,   /**< native DNSBL check pending */
+    AR_IAUTH_CLASS,     /**< IAuth's D gave the client a class: the native
+                         * DNSBL's class= does not replace it */
     AR_DNSBL_APPLIED,   /**< the native DNSBL verdict (marks, exemption) is
                          * applied: a later address change undoes it
                          * (auth_dnsbl_restart()) */
@@ -854,8 +856,12 @@ static int check_auth_finished(struct AuthRequest *auth)
     FlagSet(&auth->flags, AR_DNSBL_APPLIED);
 
     /* class= of the last matching entry that gives one: the class, as
-     * IAuth's D line would give it (auth_assign_class()). */
+     * IAuth's D line would give it (auth_assign_class()) -- unless IAuth's
+     * D gave one: when both run with the same lists they agree, and when
+     * they do not, IAuth's (the scripts', which alone decide the class
+     * there) stands. */
     if (dnsbl_class(auth->dnsbl_request)
+        && !FlagHas(&auth->flags, AR_IAUTH_CLASS)
         && auth_assign_class(auth->client, dnsbl_class(auth->dnsbl_request),
                              "DNSBL", &auth->dnsbl_conf) == CPTR_KILLED)
       return CPTR_KILLED;
@@ -3882,6 +3888,10 @@ static int auth_assign_class(struct Client *cli, const char *name,
       if (attached)
         *attached = aconf;
       break;
+    case ACR_ALREADY_AUTHORIZED:
+      /* Already in that class (IAuth and the native DNSBL named the same
+       * one): nothing to do. */
+      break;
     case ACR_TOO_MANY_IN_CLASS:
       ++ServerStats->is_ref;
       return exit_client(cli, cli, &me,
@@ -3949,9 +3959,11 @@ static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
   }
 
   /* If a connection class was specified (and usable), assign the client to it. */
-  if (!EmptyString(params[0])
-      && auth_assign_class(cli, params[0], "iauth", NULL) == CPTR_KILLED)
-    return CPTR_KILLED;
+  if (!EmptyString(params[0])) {
+    if (auth_assign_class(cli, params[0], "iauth", NULL) == CPTR_KILLED)
+      return CPTR_KILLED;
+    FlagSet(&cli_auth(cli)->flags, AR_IAUTH_CLASS);
+  }
 
   return 1;
 }

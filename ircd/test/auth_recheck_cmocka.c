@@ -49,8 +49,13 @@ struct Client me;
 static struct ServerStatistics server_stats;
 struct ServerStatistics *ServerStats = &server_stats;
 
+static int errors_logged;      /**< log_write() at L_ERROR */
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
-               const char *fmt, ...) {}
+               const char *fmt, ...)
+{
+  if (severity == L_ERROR)
+    errors_logged++;
+}
 void debug(int level, const char *form, ...) {}
 int feature_int(enum Feature feat) { return 20; }   /* FEAT_POLLS_PER_LOOP */
 int feature_bool(enum Feature feat) { return 0; }
@@ -237,10 +242,12 @@ struct ConfItem *make_conf(int type)
   vip_conf.status = type;
   return &vip_conf;
 }
+static enum AuthorizationCheckResult attach_result = ACR_OK;
 enum AuthorizationCheckResult attach_conf(struct Client *cptr, struct ConfItem *aconf)
 {
-  attached_conf = aconf;
-  return ACR_OK;
+  if (attach_result == ACR_OK)
+    attached_conf = aconf;
+  return attach_result;
 }
 static int detached;
 void conf_detach(struct Client *cptr, struct ConfItem *aconf)
@@ -349,6 +356,8 @@ static int setup(void **state)
   verdict_class = NULL;
   attached_conf = NULL;
   detached = 0;
+  attach_result = ACR_OK;
+  errors_logged = 0;
   vip_class.valid = 1;
   expect_exit = NULL;
   CurrentTime = time(NULL);
@@ -870,6 +879,37 @@ static void address_change_detaches_the_dnsbl_class(void **state)
   destroy_auth_request(a->auth);
 }
 
+/** The DNSBL's class= names the class the client is in already: no
+ * error, registration goes on. */
+static void dnsbl_class_already_held_is_no_error(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  verdict_blocked = 0;
+  verdict_action = DNSBL_ACT_MARK;
+  verdict_class = "vip";
+  attach_result = ACR_ALREADY_AUTHORIZED;
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_int_equal(errors_logged, 0);
+  assert_int_equal(a->registered, 1);
+}
+
+/** IAuth's D gave a class: the native DNSBL's class= does not replace it. */
+static void iauth_class_stands_over_dnsbl_class(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  FlagSet(&a->auth->flags, AR_IAUTH_CLASS);
+  verdict_blocked = 0;
+  verdict_action = DNSBL_ACT_MARK;
+  verdict_class = "vip";
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_null(attached_conf);
+  assert_int_equal(a->registered, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -896,6 +936,8 @@ int main(void)
     cmocka_unit_test_setup(dnsbl_class_assigned_as_iauth_does, setup),
     cmocka_unit_test_setup(dnsbl_class_follows_the_final_address, setup),
     cmocka_unit_test_setup(address_change_detaches_the_dnsbl_class, setup),
+    cmocka_unit_test_setup(dnsbl_class_already_held_is_no_error, setup),
+    cmocka_unit_test_setup(iauth_class_stands_over_dnsbl_class, setup),
   };
 
   event_init(64);
