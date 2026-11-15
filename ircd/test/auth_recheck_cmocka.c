@@ -725,6 +725,52 @@ static void address_change_undoes_an_applied_verdict(void **state)
   destroy_auth_request(a->auth);
 }
 
+/* IAuth kills (k / K) and the native DNSBL whitelist: a native whitelist
+ * hit overrides native DNSBL blocks only.  An IAuth program that checks
+ * DNSBLs (the iauthd scripts) has applied its own whitelist before it
+ * kills; its kill is carried out at once. */
+
+static int iauth_kill_line(struct fake *f, const char *reason)
+{
+  char buf[64];
+  char *params[2];
+
+  ircd_strncpy(buf, reason, sizeof(buf));
+  params[0] = buf;
+  params[1] = NULL;
+  return iauth_cmd_kill(NULL, &f->cli, 1, params);
+}
+
+/** An IAuth kill for a client the native DNSBL whitelists (its verdict
+ * in, or still to come): the client is exited at once. */
+static void iauth_kill_of_a_natively_whitelisted_client_at_once(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  FlagSet(&a->auth->flags, AR_IAUTH_PENDING);
+  SetDNSBLExempt(&a->cli);
+  expect_exit = "rbl listed";
+  assert_int_equal(iauth_kill_line(a, "rbl listed"), 0);
+  assert_int_equal(exits, 1);
+  assert_int_equal(a->registered, 0);
+  destroy_auth_request(a->auth);
+}
+
+/** A native whitelist hit, whatever native block also matched (the
+ * verdict says whitelisted, not blocked): admitted. */
+static void native_whitelist_admits(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  verdict_blocked = 0;
+  verdict_action = DNSBL_ACT_WHITELIST;
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_int_equal(exits, 0);
+  assert_int_equal(a->registered, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -746,6 +792,8 @@ int main(void)
     cmocka_unit_test_setup(dnsbl_verdict_waits_for_iauth, setup),
     cmocka_unit_test_setup(late_iauth_address_gateway_marks_never_applied, setup),
     cmocka_unit_test_setup(address_change_undoes_an_applied_verdict, setup),
+    cmocka_unit_test_setup(iauth_kill_of_a_natively_whitelisted_client_at_once, setup),
+    cmocka_unit_test_setup(native_whitelist_admits, setup),
   };
 
   event_init(64);

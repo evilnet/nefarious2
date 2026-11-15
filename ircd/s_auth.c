@@ -812,7 +812,8 @@ static int check_auth_finished(struct AuthRequest *auth)
 
     if (action == DNSBL_ACT_WHITELIST)
     {
-      /* Native DNSBL whitelist hit - exempt client from all connection blocks */
+      /* Native DNSBL whitelist hit: no native DNSBL block applies (the
+       * flag records it; IAuth's kills are IAuth's own decision) */
       SetDNSBLExempt(auth->client);
       Debug((DEBUG_DNS, "DNSBL: Client %s whitelisted, setting exempt flag",
              cli_name(auth->client)));
@@ -3975,19 +3976,13 @@ static int iauth_cmd_done_account(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_kill(struct IAuth *iauth, struct Client *cli,
 			  int parc, char **params)
 {
-  /* Check if client is exempt due to native DNSBL whitelist */
-  if (IsDNSBLExempt(cli))
-  {
-    Debug((DEBUG_INFO, "IAuth kill for %s blocked by DNSBL whitelist exemption",
-           cli_name(cli)));
-    sendto_opmask_butone(0, SNO_AUTH,
-      "IAuth kill for %s blocked (DNSBL whitelisted)",
-      cli_name(cli));
-    if (cli_auth(cli))
-      FlagClr(&cli_auth(cli)->flags, AR_IAUTH_PENDING);
-    return 0;
-  }
-
+  /* Carried out at once, whitelisted by the native DNSBL or not: a native
+   * whitelist hit overrides native DNSBL blocks only.  An IAuth program
+   * that checks DNSBLs (the iauthd scripts: their only kill is a DNSBL
+   * refusal) applies its own whitelist before it kills -- "listed users
+   * wont be blocked by any rbl" -- so with the same lists on both sides
+   * the native exemption has nothing to add; with different lists, its
+   * whitelist belongs in its own configuration (doc/example.conf). */
   if (cli_auth(cli))
     FlagClr(&cli_auth(cli)->flags, AR_IAUTH_PENDING);
   if (EmptyString(params[0]))
