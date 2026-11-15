@@ -341,6 +341,20 @@ check_resolver_timeout(time_t when)
     timer_add(&res_timeout, timeout_resolver, NULL, TT_ABSOLUTE, when);
 }
 
+/** What the callback being called now reports (res_last_outcome()). */
+static enum ResOutcome res_outcome;
+
+/** The outcome of the lookup whose callback is running: whether a call
+ * with no address means "no such name" (NXDOMAIN) or a failure (timeout,
+ * SERVFAIL...).  Meaningful only inside a dns_callback_f.
+ * @return The outcome.
+ */
+enum ResOutcome
+res_last_outcome(void)
+{
+  return res_outcome;
+}
+
 /** Drop pending DNS lookups which have timed out.
  * @param[in] ev Timer event data (ignored).
  */
@@ -366,6 +380,7 @@ timeout_resolver(struct Event *ev)
       if (--request->retries <= 0)
       {
         Debug((DEBUG_DNS, "Request %p out of retries; destroying", request));
+        res_outcome = RES_OUT_FAILURE;
         (*request->callback)(request->callback_ctx, NULL, NULL);
         rem_request(request);
         continue;
@@ -845,6 +860,7 @@ res_readreply(struct Event *ev)
          * send any more (no retries granted).
          */
         Debug((DEBUG_DNS, "Request %p has bad response (state %d type %d rcode %d)", request, request->state, request->type, header->rcode));
+        res_outcome = (NXDOMAIN == header->rcode) ? RES_OUT_NXDOMAIN : RES_OUT_FAILURE;
         (*request->callback)(request->callback_ctx, NULL, NULL);
 	rem_request(request);
     }
@@ -888,6 +904,7 @@ res_readreply(struct Event *ev)
          * don't bother trying again, the client address doesn't resolve
          */
         Debug((DEBUG_DNS, "Request %p PTR had empty name", request));
+        res_outcome = RES_OUT_FAILURE;
         (*request->callback)(request->callback_ctx, NULL, NULL);
         rem_request(request);
         return;
@@ -911,6 +928,7 @@ res_readreply(struct Event *ev)
       /*
        * got a name and address response, client resolved
        */
+      res_outcome = RES_OUT_ANSWER;
       (*request->callback)(request->callback_ctx, &request->addr, request->name);
       Debug((DEBUG_DNS, "Request %p got forward resolution", request));
       rem_request(request);

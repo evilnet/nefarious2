@@ -70,6 +70,16 @@ struct irc_sockaddr
 /** DNS callback function signature. */
 typedef void (*dns_callback_f)(void *vptr, const struct irc_in_addr *addr, const char *h_name);
 
+/** What a lookup's callback reports when it is called with no address:
+ * a definite "no such name" from a server (NXDOMAIN), or a failure that
+ * says nothing about the name (a timeout, SERVFAIL, an unusable reply).
+ * Read with res_last_outcome() from inside the callback. */
+enum ResOutcome {
+  RES_OUT_ANSWER,     /**< An address (the callback has it) */
+  RES_OUT_NXDOMAIN,   /**< A server answered: the name does not exist */
+  RES_OUT_FAILURE     /**< Timeout, SERVFAIL or another error: unknown */
+};
+
 /** DNS query and response header. */
 typedef struct
 {
@@ -117,6 +127,7 @@ extern void delete_resolver_queries(const void *vptr);
 extern void report_dns_servers(struct Client *source_p, const struct StatDesc *sd, char *param);
 extern void gethost_byname(const char *name, dns_callback_f callback, void *ctx);
 extern void gethost_byaddr(const struct irc_in_addr *addr, dns_callback_f callback, void *ctx);
+extern enum ResOutcome res_last_outcome(void);
 
 /** Evaluate to non-zero if \a ADDR is an unspecified (all zeros) address. */
 #define irc_in_addr_unspec(ADDR) (((ADDR)->in6_16[0] == 0) \

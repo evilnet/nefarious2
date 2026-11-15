@@ -61,6 +61,19 @@ void gethost_byname(const char *name, dns_callback_f callback, void *ctx)
   nqueries++;
 }
 
+/** What the resolver says a call without an address means (a server's
+ * NXDOMAIN unless a case says the lookup failed). */
+static enum ResOutcome outcome = RES_OUT_NXDOMAIN;
+enum ResOutcome res_last_outcome(void) { return outcome; }
+
+/** Query \a i failed: a timeout (or SERVFAIL) -- no address, no answer. */
+static void answer_failed(int i)
+{
+  outcome = RES_OUT_FAILURE;
+  queries[i].cb(queries[i].ctx, NULL, NULL);
+  outcome = RES_OUT_NXDOMAIN;
+}
+
 /** Answer query \a i: listed (127.0.\a third.\a last) or not (NULL).  The
  * address as the resolver hands it over: IPv4-mapped, network byte order. */
 static void answer_addr(int i, int listed, int third, int last)
@@ -362,7 +375,8 @@ static void cached_listing_blocks_again(void **state)
   dnsbl_cancel(req);
 }
 
-/** Found not listed: a second connection is let in, without a lookup. */
+/** Found not listed (a server's NXDOMAIN): a second connection is let in
+ * from the cache, without a lookup. */
 static void cached_clean_lets_in(void **state)
 {
   struct DNSBLRequest *req;
@@ -466,6 +480,39 @@ static void cache_keyed_by_the_address_asked_about(void **state)
   }
 }
 
+/** The lookup timed out (or failed): the client is judged as today -- not
+ * listed there, let in -- but nothing is cached: the next connection asks
+ * again. */
+static void failed_lookup_not_cached(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  answer_failed(0);
+  assert_int_equal(req->pending_count, 0);
+  assert_int_equal(req->action, DNSBL_ACT_NONE);
+  assert_int_equal(completes, 1);
+  dnsbl_cancel(req);
+  dnsbl_cancel(again(0));
+}
+
+/** One entry listed the address, another's lookup failed: the verdict
+ * stands (blocked), but the address is not cached -- asked again. */
+static void one_failed_lookup_caches_nothing(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  answer(0, 1, 2);
+  answer_failed(1);
+  assert_int_equal(req->action, DNSBL_ACT_BLOCK_ALL);
+  dnsbl_cancel(req);
+  dnsbl_cancel(again(0));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -483,6 +530,8 @@ int main(void)
     cmocka_unit_test_setup(rehash_adding_or_changing_an_entry_makes_it_stale, setup),
     cmocka_unit_test_setup(removed_entry_cached_answer_ignored, setup),
     cmocka_unit_test_setup(cache_keyed_by_the_address_asked_about, setup),
+    cmocka_unit_test_setup(failed_lookup_not_cached, setup),
+    cmocka_unit_test_setup(one_failed_lookup_caches_nothing, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

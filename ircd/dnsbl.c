@@ -625,20 +625,29 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
      * on a little-endian host). */
     result_byte = ((const unsigned char *) addr)[sizeof(*addr) - 1];
   }
-  if (server) {
+  /* Only a definite answer is kept for the cache: an address (listed),
+   * or a server's NXDOMAIN (not listed).  A failure -- a timeout, SERVFAIL,
+   * an unusable reply -- says nothing about the address: the client is
+   * judged without that entry as before (not listed), but nothing of this
+   * lookup is cached, and the next connection asks again. */
+  if (!addr && res_last_outcome() != RES_OUT_NXDOMAIN)
+    req->unknown = 1;
+  else if (server)
     dnsbl_note_answer(req, server, addr != NULL, result_byte);
-    if (addr)
-      dnsbl_judge(req, server, result_byte);
-  }
+  if (addr && server)
+    dnsbl_judge(req, server, result_byte);
 
   /* Check if all lookups are complete */
   if (req->pending_count == 0) {
     /* Cache the answers (not the verdict: a later hit judges them by the
      * entries in force then), under the address that was asked about --
-     * the client's may have changed since (WEBIRC, IAuth) */
-    dnsbl_cache_add(&req->addr, req->answers, req->nanswers);
-    req->answers = NULL;
-    req->nanswers = 0;
+     * the client's may have changed since (WEBIRC, IAuth) -- all of them
+     * definite, or nothing */
+    if (!req->unknown) {
+      dnsbl_cache_add(&req->addr, req->answers, req->nanswers);
+      req->answers = NULL;
+      req->nanswers = 0;
+    }
 
     /* Signal auth to continue */
     if (cli_auth(req->client))

@@ -94,6 +94,8 @@ struct DNSBLRequest {
   struct irc_in_addr addr;       /**< The address asked about (the cache key) */
   struct DNSBLAnswer *answers;   /**< The answers so far (for the cache) */
   int nanswers;                  /**< How many */
+  int unknown;                   /**< A lookup failed (timeout, SERVFAIL):
+                                      its result is not cached */
 };
 
 /** Global DNSBL statistics */
