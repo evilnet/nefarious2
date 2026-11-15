@@ -1122,7 +1122,9 @@ gitsync_first_clone(const char *repo_url, const char *repo_path,
  * without the checkout's url.<base>.insteadOf rewriting
  * (GIT_REMOTE_CREATE_SKIP_INSTEADOF) and without a proxy
  * (GIT_PROXY_NONE): whatever the checkout's .git/config says about
- * "origin", insteadOf or proxies does not redirect it.  The commit is
+ * "origin", insteadOf or proxies does not redirect it.  The tip is what
+ * this fetch wrote to refs/remotes/origin/<branch> (cleared first): a
+ * repository without the branch fails the sync.  The commit is
  * checked (gitsync_check_commit()), and when something untracked is in
  * the way the checkout's untracked files go to its git stash
  * (gitsync_clear_the_way()); a refusal from either changes nothing.  Then a hard
@@ -1144,7 +1146,7 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
   git_fetch_options fetch_opts;
   git_reference *ref = NULL;
   git_object *target = NULL;
-  char refspec[600];
+  char refspec[1200], tracking[600];
   char *specs[1];
   git_strarray refspecs;
   int error;
@@ -1171,8 +1173,27 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
     return GITSYNC_FETCH_ERROR;
   }
 
+  /* The tip is what THIS fetch brings: a tracking ref left by an earlier
+   * one (another repository, or a branch since deleted) goes first, so a
+   * repository without the branch fails the sync instead of resetting to
+   * a stale commit.  The checkout itself (HEAD) is not touched. */
+  ircd_snprintf(0, tracking, sizeof(tracking), "refs/remotes/origin/%s", branch);
+  if (git_reference_lookup(&ref, repo, tracking) == 0) {
+    error = git_reference_delete(ref);
+    git_reference_free(ref);
+    ref = NULL;
+    if (error < 0) {
+      const git_error *e = git_error_last();
+      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                    "Cannot clear %s before the fetch: %s", tracking,
+                    e ? e->message : "unknown error");
+      git_remote_free(remote);
+      return GITSYNC_FETCH_ERROR;
+    }
+  }
+
   ircd_snprintf(0, refspec, sizeof(refspec),
-                "+refs/heads/%s:refs/remotes/origin/%s", branch, branch);
+                "+refs/heads/%s:%s", branch, tracking);
   specs[0] = refspec;
   refspecs.strings = specs;
   refspecs.count = 1;
@@ -1187,9 +1208,13 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
     return gitsync_transfer_error("Fetch", error) ? GITSYNC_SSH_ERROR
       : GITSYNC_FETCH_ERROR;
 
-  /* Get reference to origin/branch */
-  ircd_snprintf(0, refspec, sizeof(refspec), "refs/remotes/origin/%s", branch);
-  error = git_reference_lookup(&ref, repo, refspec);
+  /* Get reference to origin/branch, as this fetch wrote it */
+  error = git_reference_lookup(&ref, repo, tracking);
+  if (error == GIT_ENOTFOUND) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "branch %s not found in %s; not applied", branch, repo_url);
+    return GITSYNC_FETCH_ERROR;
+  }
   if (error < 0) {
     const git_error *e = git_error_last();
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
