@@ -45,7 +45,8 @@ enum GitsyncStatus {
   GITSYNC_CHECKOUT_ERROR,  /**< Git checkout failed */
   GITSYNC_SSH_ERROR,       /**< SSH authentication error */
   GITSYNC_VALIDATION_ERROR,/**< Content validation failed */
-  GITSYNC_APPLY_ERROR      /**< Failed to apply config */
+  GITSYNC_APPLY_ERROR,     /**< Failed to apply config */
+  GITSYNC_REFUSED          /**< Content refused before, unchanged: skipped */
 };
 
 /** GitSync statistics */

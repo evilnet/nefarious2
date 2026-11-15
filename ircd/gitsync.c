@@ -89,7 +89,8 @@ static const char *status_strings[] = {
   "Checkout error",
   "SSH authentication error",
   "Validation error",
-  "Apply error"
+  "Apply error",
+  "Content refused, waiting for a change"
 };
 
 /** Validate a file path contains only safe characters.
@@ -729,22 +730,29 @@ gitsync_validate_content(const char *content, size_t len)
  */
 static char gitsync_last_content_hash[GITSYNC_HASHLEN];
 
+/** The hash of the content refused last (it did not parse and the backup
+ * was restored): a periodic sync does not apply it again until it
+ * changes; a forced one does. */
+static char gitsync_refused_content_hash[GITSYNC_HASHLEN];
+
 /** Apply downloaded configuration
  * Writes to gitsync.conf and triggers a rehash only if content changed.
  * Uses safe write: writes to .new, backs up old to .bak, then renames.
  * If rehash fails, restores from backup.
  * @param content Configuration content
  * @param len Content length
+ * @param force Non-zero to apply content refused before as well.
  * @param cptr The connection whose line asked for the sync (&me for the
  *   timer), handed to rehash() as m_rehash does: the new configuration
  *   can K-line it.
  * @param[out] killed Set to CPTR_KILLED when a rehash exited \a cptr;
  *   nothing may touch it then.
- * @return GITSYNC_OK on success, error code otherwise
+ * @return GITSYNC_OK on success (or unchanged content), GITSYNC_REFUSED
+ *   for content refused before and not forced, an error code otherwise
  */
 static enum GitsyncStatus
-gitsync_apply(const char *content, size_t len, struct Client *cptr,
-              int *killed)
+gitsync_apply(const char *content, size_t len, int force,
+              struct Client *cptr, int *killed)
 {
   const char *conf_file;
   FILE *fp;
@@ -759,10 +767,17 @@ gitsync_apply(const char *content, size_t len, struct Client *cptr,
 
   /* Check if content has changed */
   gitsync_content_hash(content, len, content_hash, sizeof(content_hash));
-  if (gitsync_last_content_hash[0] &&
-      strcmp(content_hash, gitsync_last_content_hash) == 0) {
+  switch (gitsync_content_verdict(content_hash, gitsync_last_content_hash,
+                                  gitsync_refused_content_hash, force)) {
+  case GITSYNC_CONTENT_UNCHANGED:
     Debug((DEBUG_INFO, "GitSync: Content unchanged, skipping write"));
     return GITSYNC_OK;
+  case GITSYNC_CONTENT_REFUSED:
+    /* Reported when it was refused; GITSYNC status still says so. */
+    Debug((DEBUG_INFO, "GitSync: Content refused before, skipping write"));
+    return GITSYNC_REFUSED;
+  case GITSYNC_CONTENT_APPLY:
+    break;
   }
 
   /* Build temp and backup filenames */
@@ -841,17 +856,25 @@ gitsync_apply(const char *content, size_t len, struct Client *cptr,
       if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
         *killed = CPTR_KILLED;
       ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                    "Config parse error - restored from backup");
+                    "Config parse error in commit %.8s - restored from "
+                    "backup; not applied again until the content changes",
+                    gitsync_stats.last_commit);
     } else {
       ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                    "Config parse error - no backup to restore");
+                    "Config parse error in commit %.8s - no backup to "
+                    "restore; not applied again until the content changes",
+                    gitsync_stats.last_commit);
     }
+    /* Not written and rehashed again by every periodic sync. */
+    ircd_strncpy(gitsync_refused_content_hash, content_hash,
+                 sizeof(gitsync_refused_content_hash));
     return GITSYNC_VALIDATION_ERROR;
   }
 
   /* Success - remember hash and clean up backup */
   ircd_strncpy(gitsync_last_content_hash, content_hash,
                sizeof(gitsync_last_content_hash) - 1);
+  gitsync_refused_content_hash[0] = '\0';
 
   /* Keep backup for safety, but could optionally delete it here */
   /* unlink(bak_file); */
@@ -1355,12 +1378,18 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
   }
 
   /* Apply configuration */
-  status = gitsync_apply(content, len, cptr, killed);
+  status = gitsync_apply(content, len, force, cptr, killed);
   MyFree(content);
   if (*killed && sptr == cptr)
     sptr = NULL;   /* its own ban exited it: nobody to tell */
 
-  if (status == GITSYNC_OK) {
+  if (status == GITSYNC_REFUSED) {
+    /* The content refused before, unchanged: not a new failure.  The
+     * error that refused it stands in GITSYNC status. */
+    if (sptr)
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync: %s", sptr,
+                    gitsync_stats.last_error);
+  } else if (status == GITSYNC_OK) {
     gitsync_stats.last_sync = now;
     gitsync_stats.syncs++;
     gitsync_stats.last_error[0] = '\0';

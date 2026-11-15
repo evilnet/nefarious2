@@ -4,6 +4,12 @@
  * gitsync_content_hash() tells GitSync whether the content it pulled is
  * the content it applied last (then nothing is written or rehashed): it
  * must change when any byte does, wherever it is.
+ *
+ * gitsync_content_verdict() decides: content applied last is left alone;
+ * content refused last (it did not parse, the backup was restored) is
+ * left alone too, until it changes, unless the sync was forced (an
+ * operator's GITSYNC force, or GitSync starting); anything else is
+ * applied.
  */
 #include "config.h"
 
@@ -95,9 +101,56 @@ static void different_length(void **state)
   free(a);
 }
 
+/* ------------------------------------------------------------------ */
+/* The verdict                                                          */
+/* ------------------------------------------------------------------ */
+
+/** Nothing applied or refused yet (a first sync): apply. */
+static void first_content_is_applied(void **state)
+{
+  (void)state;
+  assert_int_equal(GITSYNC_CONTENT_APPLY, gitsync_content_verdict("a", "", "", 0));
+  assert_int_equal(GITSYNC_CONTENT_APPLY, gitsync_content_verdict("a", "", "", 1));
+}
+
+/** The content applied last: nothing, forced or not. */
+static void applied_content_is_unchanged(void **state)
+{
+  (void)state;
+  assert_int_equal(GITSYNC_CONTENT_UNCHANGED, gitsync_content_verdict("a", "a", "", 0));
+  assert_int_equal(GITSYNC_CONTENT_UNCHANGED, gitsync_content_verdict("a", "a", "b", 1));
+}
+
+/** The content refused last: a periodic sync leaves it alone. */
+static void refused_content_is_skipped(void **state)
+{
+  (void)state;
+  assert_int_equal(GITSYNC_CONTENT_REFUSED, gitsync_content_verdict("b", "a", "b", 0));
+  assert_int_equal(GITSYNC_CONTENT_REFUSED, gitsync_content_verdict("b", "", "b", 0));
+}
+
+/** A forced sync (GITSYNC force, GitSync starting) tries it again. */
+static void forced_sync_retries_refused_content(void **state)
+{
+  (void)state;
+  assert_int_equal(GITSYNC_CONTENT_APPLY, gitsync_content_verdict("b", "a", "b", 1));
+}
+
+/** Content that changed since it was refused is applied. */
+static void changed_content_is_applied(void **state)
+{
+  (void)state;
+  assert_int_equal(GITSYNC_CONTENT_APPLY, gitsync_content_verdict("c", "a", "b", 0));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(first_content_is_applied),
+    cmocka_unit_test(applied_content_is_unchanged),
+    cmocka_unit_test(refused_content_is_skipped),
+    cmocka_unit_test(forced_sync_retries_refused_content),
+    cmocka_unit_test(changed_content_is_applied),
     cmocka_unit_test(same_content_same_hash),
     cmocka_unit_test(change_at_start),
     cmocka_unit_test(change_past_first_kilobyte),

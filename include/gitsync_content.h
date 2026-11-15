@@ -27,7 +27,18 @@
 /** Size of a buffer for gitsync_content_hash(). */
 #define GITSYNC_HASHLEN 64
 
+/** What a sync does with content it pulled. */
+enum GitsyncContentVerdict {
+  GITSYNC_CONTENT_APPLY,       /**< Write it and rehash. */
+  GITSYNC_CONTENT_UNCHANGED,   /**< It is what was applied last: nothing. */
+  GITSYNC_CONTENT_REFUSED      /**< It is what was refused last: nothing. */
+};
+
 extern void gitsync_content_hash(const char *content, size_t len,
                                  char *hash, size_t hashlen);
+
+extern enum GitsyncContentVerdict
+gitsync_content_verdict(const char *hash, const char *applied,
+                        const char *refused, int force);
 
 #endif /* INCLUDED_gitsync_content_h */

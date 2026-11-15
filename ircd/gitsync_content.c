@@ -26,6 +26,7 @@
 #include "gitsync_content.h"
 
 #include <stdio.h>
+#include <string.h>
 
 /** Hash content for change detection: its length and the 64-bit FNV-1a
  * hash of every byte.  Not a defence against anyone choosing content (the
@@ -48,4 +49,26 @@ gitsync_content_hash(const char *content, size_t len, char *hash,
     h *= 1099511628211ULL;                             /* FNV prime */
   }
   snprintf(hash, hashlen, "%lx-%016llx", (unsigned long) len, h);
+}
+
+/** What a sync does with the content it pulled.
+ * @param[in] hash gitsync_content_hash() of the content.
+ * @param[in] applied The hash of the content applied last ("" for none).
+ * @param[in] refused The hash of the content refused last -- it did not
+ *   parse and the backup was restored -- ("" for none).
+ * @param[in] force Non-zero for a forced sync (an operator's GITSYNC
+ *   force, or the first sync after GitSync starts).
+ * @return GITSYNC_CONTENT_UNCHANGED for the content applied last, forced
+ *   or not; GITSYNC_CONTENT_REFUSED for the content refused last, unless
+ *   forced; GITSYNC_CONTENT_APPLY otherwise.
+ */
+enum GitsyncContentVerdict
+gitsync_content_verdict(const char *hash, const char *applied,
+                        const char *refused, int force)
+{
+  if (applied[0] && 0 == strcmp(hash, applied))
+    return GITSYNC_CONTENT_UNCHANGED;
+  if (!force && refused[0] && 0 == strcmp(hash, refused))
+    return GITSYNC_CONTENT_REFUSED;
+  return GITSYNC_CONTENT_APPLY;
 }
