@@ -103,6 +103,14 @@ struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgi
  */
 void fwd_label_note_untracked(struct Client *cptr, unsigned int bits);
 
+/** A server is leaving the network: every forwarded command sent to it,
+ * or out over the link it was, is given up now -- its label answered (an
+ * ACK, or the end of its batch: "the remote server is unavailable") --
+ * rather than at its deadline.
+ * @param[in] server The departing server.
+ */
+void fwd_label_server_gone(struct Client *server);
+
 /** Whether \a msgid is one this server minted -- on an S2S line, the
  * compact msgid of a command we forwarded, echoed by the server that
  * answers it.  It names the command, not the reply line that carries it.

@@ -396,6 +396,10 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   struct SLink *lp;
   struct Ban *bp;
 
+  /* Forwarded commands sent to it, or out over the link it was, will
+   * not be answered: their labels are answered now (forwarded_label.c). */
+  if (IsServer(bcptr))
+    fwd_label_server_gone(bcptr);
   if (cli_serv(bcptr) && cli_serv(bcptr)->client_list) {  /* Was SetServerYXX called ? */
     ClearServerYXX(bcptr);      /* Removes server from server_list[] */
     clear_server_ad(bcptr);     /* Clear chathistory advertisement */

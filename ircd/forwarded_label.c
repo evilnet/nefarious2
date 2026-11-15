@@ -713,6 +713,26 @@ void fwd_label_drop_all(struct Client *cptr, int send_end)
   fwd_mark_untracked(cptr, FWD_UNTRACKED_ALL);
 }
 
+void fwd_label_server_gone(struct Client *server)
+{
+  const char *yxx;
+  int fd, i;
+
+  if (!server || !IsServer(server) || !*(yxx = cli_yxx(server)))
+    return;
+  for (fd = HighestFd; fd >= 0; fd--) {
+    struct Client *acptr = LocalClientArray[fd];
+    if (!acptr || !cli_connect(acptr) || !IsUser(acptr))
+      continue;
+    for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
+      struct ForwardedLabel *fl = &cli_fwd_labels(acptr)[i];
+      if (fl->fl_state != FWD_LABEL_EMPTY && fl->fl_family
+          && (!strcmp(fl->fl_dest, yxx) || !strcmp(fl->fl_link, yxx)))
+        fwd_label_give_up(acptr, fl);
+    }
+  }
+}
+
 void fwd_label_cleanup(struct Client *cptr)
 {
   if (!cptr || !MyConnect(cptr))
