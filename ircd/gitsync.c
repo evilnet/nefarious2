@@ -254,6 +254,43 @@ gitsync_generate_ssh_key(const char *key_path)
  * provided credentials, there's no point retrying with the same key. */
 static int gitsync_cred_attempts;
 
+/** Why the credential callback gave up, for the failure it causes:
+ * libgit2 reports a callback's refusal with no message of its own ("no
+ * error").  Empty when it did not. */
+static char gitsync_cred_failure[256];
+
+/** The key and user the credential callback offered last. */
+static char gitsync_cred_key[200];
+static char gitsync_cred_user[64];
+
+/** Write the failure of a libgit2 transfer into gitsync_stats.last_error:
+ * the credential callback's reason when it gave up, else libgit2's
+ * message, else its error code.
+ * @param what "Clone" or "Fetch".
+ * @param error The libgit2 return code.
+ * @return Non-zero if it was an SSH authentication failure.
+ */
+static int
+gitsync_transfer_error(const char *what, int error)
+{
+  const git_error *e = git_error_last();
+
+  if (gitsync_cred_failure[0]) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "%s failed: %s", what, gitsync_cred_failure);
+    return 1;
+  }
+  if (e && e->klass != GIT_ERROR_NONE && e->message && *e->message) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "%s failed: %s", what, e->message);
+    return strstr(e->message, "authentication") || strstr(e->message, "SSH")
+      || strstr(e->message, "key");
+  }
+  ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                "%s failed: libgit2 error %d, no message", what, error);
+  return 0;
+}
+
 static int
 gitsync_cred_callback(git_credential **out, const char *url,
                       const char *username_from_url,
@@ -272,6 +309,11 @@ gitsync_cred_callback(git_credential **out, const char *url,
   /* If we already provided credentials and they failed, stop retrying */
   if (gitsync_cred_attempts > 0) {
     Debug((DEBUG_INFO, "GitSync: SSH auth failed, not retrying"));
+    if (!gitsync_cred_failure[0])
+      ircd_snprintf(0, gitsync_cred_failure, sizeof(gitsync_cred_failure),
+                    "SSH authentication refused by the remote for user %s "
+                    "with the key at %s", gitsync_cred_user,
+                    gitsync_cred_key);
     return GIT_EUSER;
   }
   gitsync_cred_attempts++;
@@ -283,8 +325,8 @@ gitsync_cred_callback(git_credential **out, const char *url,
       /* Key file doesn't exist - generate it using ssh-keygen */
       Debug((DEBUG_INFO, "GitSync: SSH key %s not found, generating...", ssh_key));
       if (!gitsync_generate_ssh_key(ssh_key)) {
-        ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                      "Failed to generate SSH key at %s", ssh_key);
+        ircd_snprintf(0, gitsync_cred_failure, sizeof(gitsync_cred_failure),
+                      "cannot generate the SSH key at %s", ssh_key);
         return GIT_EAUTH;
       }
     }
@@ -299,6 +341,10 @@ gitsync_cred_callback(git_credential **out, const char *url,
   pubkey_path = NULL;
 
   Debug((DEBUG_INFO, "GitSync: Using SSH key from %s", ssh_key));
+  /* Named if the remote refuses it (the callback is called again). */
+  ircd_strncpy(gitsync_cred_key, ssh_key, sizeof(gitsync_cred_key));
+  ircd_strncpy(gitsync_cred_user, username_from_url ? username_from_url
+               : "git", sizeof(gitsync_cred_user));
 
   return git_credential_ssh_key_new(out,
                                     username_from_url ? username_from_url : "git",
@@ -470,19 +516,11 @@ gitsync_clone(const char *repo_url, const char *local_path, git_repository **rep
   Debug((DEBUG_INFO, "GitSync: Cloning %s to %s", repo_url, local_path));
 
   gitsync_cred_attempts = 0;
+  gitsync_cred_failure[0] = '\0';
   error = git_clone(repo, repo_url, local_path, &clone_opts);
-  if (error < 0) {
-    const git_error *e = git_error_last();
-    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "Clone failed: %s", e ? e->message : "unknown error");
-
-    if (e && (strstr(e->message, "authentication") ||
-              strstr(e->message, "SSH") ||
-              strstr(e->message, "key"))) {
-      return GITSYNC_SSH_ERROR;
-    }
-    return GITSYNC_CLONE_ERROR;
-  }
+  if (error < 0)
+    return gitsync_transfer_error("Clone", error) ? GITSYNC_SSH_ERROR
+      : GITSYNC_CLONE_ERROR;
 
   return GITSYNC_OK;
 }
@@ -522,21 +560,13 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
   /* Fetch from origin with tags */
   Debug((DEBUG_INFO, "GitSync: Fetching from origin (with tags)"));
   gitsync_cred_attempts = 0;
+  gitsync_cred_failure[0] = '\0';
   error = git_remote_fetch(remote, NULL, &fetch_opts, "gitsync fetch");
   git_remote_free(remote);
 
-  if (error < 0) {
-    const git_error *e = git_error_last();
-    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "Fetch failed: %s", e ? e->message : "unknown error");
-
-    if (e && (strstr(e->message, "authentication") ||
-              strstr(e->message, "SSH") ||
-              strstr(e->message, "key"))) {
-      return GITSYNC_SSH_ERROR;
-    }
-    return GITSYNC_FETCH_ERROR;
-  }
+  if (error < 0)
+    return gitsync_transfer_error("Fetch", error) ? GITSYNC_SSH_ERROR
+      : GITSYNC_FETCH_ERROR;
 
   /* Get reference to origin/branch */
   ircd_snprintf(0, refspec, sizeof(refspec), "refs/remotes/origin/%s", branch);
