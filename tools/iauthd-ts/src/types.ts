@@ -95,9 +95,11 @@ export interface ClientState {
   hits: Map<number, boolean>;
   /** SASL authentication state */
   sasl?: SASLState;
+  /** Bumped when a trusted WEBIRC changes the address: lookups started
+   * for an earlier generation no longer count */
+  generation: number;
 }
 
-/** DNSBL cache entry */
 /** The outcome of one DNSBL lookup */
 export interface DNSBLAnswer {
   /** A records returned by the list ([] = not listed, or the lookup failed) */
@@ -110,6 +112,7 @@ export interface DNSBLAnswer {
   error?: string;
 }
 
+/** DNSBL cache entry */
 export interface CacheEntry {
   /** DNS lookup results (IP addresses); [] = not listed */
   result: string[];
