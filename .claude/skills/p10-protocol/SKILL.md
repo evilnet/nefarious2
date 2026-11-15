@@ -186,7 +186,9 @@ Client              Nefarious                    X3
 
 ### SASL Flow - Post-Registration (REAUTHENTICATE)
 
-For token refresh after the user is already registered (introduced via `N`). Only a client that sent `CAP LS 302` (SASL 3.2) gets here; any other registered client's AUTHENTICATE is answered 462 by the ircd and nothing goes to services. The account cannot change (#223): an `L` naming another account than the client's is refused at once (907, the exchange ends, the `D S` after it reaches nobody); a client that had no account may log in for the first time (`AC R`).
+Re-authentication after the user is already registered (introduced via `N`). Only a client that sent `CAP LS 302` (SASL 3.2) gets here; any other registered client's AUTHENTICATE is answered 462 by the ircd and nothing goes to services. What it may prove is `SASL_REAUTH`'s (sasl-keycloak skill): under `refresh`/`same` an `L` naming another account than the client's is refused at once (907, the exchange ends, the `D S` after it reaches nobody); under `any` (the default) the `D S` changes the account and the ircd announces `AC <user> M <account> <ts>` (X3's ts from the `L`) -- except for a bouncer session's connection (907). A client that had no account may log in for the first time (`AC R`). An `M` reply (908) ends the exchange at once with 904.
+
+`AC <user> M` has two senders: X3's RENAME (`irc_rename()`, from X3's server, no ts) and the user's own server after a SASL account change (ts slot always present, "0" when unknown). Relays keep the source, so a receiver tells them apart by it (rename: the strict-presence window carries over; switch: it does not).
 
 ```
 Client              Nefarious                    X3

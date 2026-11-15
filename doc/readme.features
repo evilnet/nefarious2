@@ -1283,6 +1283,51 @@ as the authenticated authcid. Matching is case-insensitive and exact (no
 prefix match). Leave this empty unless you operate a trusted service that
 must impersonate users.
 
+SASL_REAUTH
+  * Type: string
+  * Default: any
+
+**Deploy note: the default is any -- a logged-in client may switch to
+another account on the same connection.  A network whose policy is one
+account per connection sets "refresh".**
+
+What a client that is already logged in may do with AUTHENTICATE.  It
+applies only to a connection that sent CAP LS with a version of 302 or more
+(SASL 3.2; requesting cap-notify alone does not count, and a later CAP LS
+with a lower version or none does not undo it).  A connection that never
+did is a SASL 3.1 client whatever this says: after registration every
+AUTHENTICATE gets 462 (ERR_ALREADYREGISTRED); before registration, once it
+has a login, every further AUTHENTICATE gets 907 (ERR_SASLALREADY); a
+failed or aborted exchange may always be retried.
+
+For a registered, logged-in SASL 3.2 client:
+  refresh  only OAUTHBEARER may start (any other mechanism: 907), and only
+           to refresh the client's own account (another account: 907).
+  same     any mechanism may start; its own account is a refresh (900 and
+           903, nothing announced, the login kept); another account: 907.
+  any      any mechanism; its own account is a refresh; another account
+           CHANGES the client's account: 900 and 903, the network told
+           "AC <user> M <account> <ts> [<id>]", account-notify to the
+           client's channels and its own connections, the new account's
+           metadata loaded and its hidden host applied, its strict-presence
+           window opened at the change.  Not for a connection of a bouncer
+           session (primary or device: 907), nor without EXTENDED_ACCOUNTS
+           (an account change cannot be carried: 907).
+Under every setting the account's name under another Keycloak id (the
+account was deleted and made again) is refused with 904, and a
+re-authentication that fails leaves the login as it was.  With
+standard-replies a refusal is preceded by FAIL AUTHENTICATE
+ALREADY_AUTHENTICATED.  Before registration a SASL 3.2 client with a login
+may start again with OAUTHBEARER only under refresh and with any mechanism
+under same and any, and may then log in as anyone.
+
+The setting is read when an exchange starts and again when it completes:
+after a REHASH in between, the new value decides.  Values are not case
+sensitive; any other value is refused (a bad feature value) and the
+previous one stays.  Nothing of it is advertised to clients.  Every fork
+server should run with an account change understood: an older fork server
+keeps the old account's chathistory presence window for the new account.
+
 KEYCLOAK_ISSUER
   * Type: string
   * Default: (none)
