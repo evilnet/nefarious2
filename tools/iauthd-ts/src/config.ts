@@ -102,7 +102,8 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
 
   const content = readFileSync(filePath, 'utf-8');
 
-  for (const line of content.split('\n')) {
+  const lines = content.split('\n');
+  for (const [index, line] of lines.entries()) {
     const match = line.match(/^#IAUTH\s+(\w+)(?:\s+(.+))?$/);
     if (!match) continue;
 
@@ -164,6 +165,13 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
         if (authConfig) {
           config.authProviders.push(authConfig);
         }
+        break;
+
+      default:
+        // Skipped as before, but a misspelling (CACHETIMEOUT for
+        // CACHETIME) must not vanish without a word
+        console.error(`Ignoring unknown #IAUTH directive ${directive} ` +
+          `(${filePath} line ${index + 1}: ${line.trim()})`);
         break;
     }
   }

@@ -236,4 +236,33 @@ General { name = "test"; };
       err.mockRestore();
     });
   });
+
+  // A misspelt directive (CACHETIMEOUT for CACHETIME) used to vanish without
+  // a trace, leaving the default in force.
+  describe('unknown directives', () => {
+    it('reports an unknown directive with its line, and otherwise ignores it', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, '#IAUTH POLICY RTAWUwFr\n#IAUTH CACHETIMEOUT 21600\n');
+      const { config, configLines } = readConfigFile(configPath);
+      expect(config.cacheTime).toBe(86400);
+      expect(config.policy).toBe('RTAWUwFr');
+      expect(configLines).toHaveLength(2);
+      expect(err).toHaveBeenCalledTimes(1);
+      expect(err).toHaveBeenCalledWith(expect.stringMatching(/unknown #IAUTH directive CACHETIMEOUT.*line 2.*CACHETIMEOUT 21600/));
+      err.mockRestore();
+    });
+
+    it('says nothing about any directive it knows', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, [
+        '#IAUTH POLICY RTAWUwFr', '#IAUTH DNSBL server=a.example index=2', '#IAUTH DEBUG',
+        '#IAUTH DNSTIMEOUT 5', '#IAUTH BLOCKMSG go away', '#IAUTH CACHETIME 3600',
+        '#IAUTH SASLDB /nonexistent/users', '#IAUTH SASLFAILMSG no', '#IAUTH AUTH provider=file path=/nonexistent/users',
+        '',
+      ].join('\n'));
+      readConfigFile(configPath);
+      expect(err).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
+  });
 });

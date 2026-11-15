@@ -87,6 +87,10 @@ Only that one file is read: `include` lines in it are not followed. If your `#IA
 
 ### Directives
 
+An `#IAUTH` line naming a directive the script does not know (a misspelling
+such as `CACHETIMEOUT`) is skipped and reported on stderr, which the IRCd
+writes to its IAuth log.
+
 #### POLICY
 ```
 #IAUTH POLICY RTAWUwFr
