@@ -110,24 +110,27 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
           && IsBouncerAlias(acptr))
         cli_nickask_ts(acptr) = 0;
 
-      /* Check for forwarded label batch wrapping */
-      struct ForwardedLabel *fl = fwd_label_find(acptr, incoming_msgid);
+      /* Check for forwarded label batch wrapping.  The command may be a
+       * bouncer device's, sent on under this primary's numeric: its
+       * entry, and its labeled answer, are the device's (owner). */
+      struct Client *owner = NULL;
+      struct ForwardedLabel *fl = fwd_label_find_for(acptr, incoming_msgid, &owner);
       if (fl && fl->fl_plain) {
         /* An unlabeled command's reply, matched by its msgid: it goes out
          * plain, below; its end frees the entry. */
         if (fwd_label_is_terminal(fl, numeric))
-          fwd_label_close_batch(acptr, fl);
+          fwd_label_close_batch(owner, fl);
         fl = NULL;
       } else if (fl) {
         if (fl->fl_state == FWD_LABEL_PENDING)
-          fwd_label_open_batch(acptr, fl);
+          fwd_label_open_batch(owner, fl);
 
         /* DRAINING → ACTIVE: more messages arrived with same msgid */
         if (fl->fl_state == FWD_LABEL_DRAINING)
           fl->fl_state = FWD_LABEL_ACTIVE;
 
         sendcmdto_set_fwd_batch(fl->fl_batch_id);
-        sendcmdto_one_tags(from, num, num, acptr, "%C %s", acptr, parv[2]);
+        sendcmdto_one_tags(from, num, num, owner, "%C %s", acptr, parv[2]);
 
         if (fwd_label_is_terminal(fl, numeric)) {
           if ((numeric == 401 || numeric == 402)
@@ -145,7 +148,7 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
              * command: a client silently awaiting its reply buffered
              * the whole batched response until its next PONG (~90s)
              * and saw only ACK in the meantime. */
-            fwd_label_close_batch(acptr, fl);
+            fwd_label_close_batch(owner, fl);
           }
         }
         return 0;
@@ -157,7 +160,6 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
        * it arrives (fwd_label_match()); one that matches no command of
        * the asker's, or cannot be told apart, goes out plain, below. */
       else if (!incoming_msgid[0]) {
-        struct Client *owner;
         int fit;
 
         if ((fl = fwd_label_match(acptr, numeric, parv[2], cptr, sptr,

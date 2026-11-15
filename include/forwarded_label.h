@@ -81,6 +81,18 @@ int fwd_label_reply_ends(struct Client *owner, struct ForwardedLabel *fl, int fi
  */
 struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid);
 
+/** As fwd_label_find(), for a reply addressed to \a acptr: among the
+ * entries of \a acptr and -- for a bouncer session's primary -- of its
+ * devices on this server, whose commands went out under the primary's
+ * numeric.
+ * @param[in] acptr   Local client the reply is addressed to.
+ * @param[in] msgid   Msgid from the incoming compact tag.
+ * @param[out] owner  The connection whose command it answers.
+ * @return Matching ForwardedLabel, or NULL.
+ */
+struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgid,
+                                          struct Client **owner);
+
 /** Whether \a msgid is one this server minted -- on an S2S line, the
  * compact msgid of a command we forwarded, echoed by the server that
  * answers it.  It names the command, not the reply line that carries it.

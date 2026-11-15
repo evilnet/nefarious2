@@ -2567,10 +2567,11 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
      * not this NOTICE, and every NOTICE of the reply carries it: each
      * gets a msgid of its own, labeled or not. */
     struct ForwardedLabel *fl = NULL;
+    struct Client *owner = acptr;
     if (MyConnect(acptr) && feature_bool(FEAT_CAP_labeled_response)) {
       const char *incoming_msgid = (cli_from(sptr) && cli_s2s_msgid(cli_from(sptr))[0])
                                     ? cli_s2s_msgid(cli_from(sptr)) : "";
-      fl = fwd_label_find(acptr, incoming_msgid);
+      fl = fwd_label_find_for(acptr, incoming_msgid, &owner);
       if ((fl || (IsServer(sptr) && fwd_label_is_echo(incoming_msgid)))
           && pm_msgid[0])
         generate_msgid(pm_msgid, sizeof(pm_msgid));
@@ -2583,10 +2584,11 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
       sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
     if (fl) {
+      /* (a bouncer device's command: its entry and its answer, owner) */
       if (fl->fl_state == FWD_LABEL_PENDING)
-        fwd_label_open_batch(acptr, fl);
+        fwd_label_open_batch(owner, fl);
       sendcmdto_set_fwd_batch(fl->fl_batch_id);
-      sendcmdto_one_tags_ext(send_from, CMD_NOTICE, acptr, pm_msgid,
+      sendcmdto_one_tags_ext(send_from, CMD_NOTICE, owner, pm_msgid,
                              "%C :%s", acptr, text);
       /* The batch stays as it is -- the terminal numeric closes it */
       delivered = 1;

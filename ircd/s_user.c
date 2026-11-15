@@ -274,7 +274,7 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
                     struct Client *one, int MustBeOper, const char *pattern,
                     int server, int parc, char *parv[])
 {
-  struct Client *acptr;
+  struct Client *acptr, *asker;
   char *to;
 
   /* Assume it's me, if no server or an unregistered client */
@@ -327,6 +327,7 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
    * knows the alias (and where a primary-sourced line would be a fake
    * direction).  Replies then arrive addressed to the primary; the
    * numeric relay mirrors them to the session's local aliases. */
+  asker = from;
   if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
     struct Client *prim = cli_user(from)->alias_primary;
     if (MyUser(prim) || cli_from(prim) != cli_from(acptr))
@@ -340,14 +341,20 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
    * prefix on IsIRCv3Aware) answers without one, and the reply is
    * matched by what it names (fwd_label_match()).  On the way for
    * another server's user, the command keeps the msgid it came with. */
-  if (MyConnect(from)) {
+  if (MyConnect(asker)) {
+    /* The label, and so the entry, is the connection's that sent the
+     * command -- a bouncer device's own, though the command goes out
+     * under its primary's numeric.  A device's command sent on under a
+     * primary on another server is answered there, not here: it is not
+     * tracked (its label is ACKed now). */
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if (fwd_label_forward(from, cmd, acptr, parc, parv, msgid, &time_ms)
+    if ((asker == from || MyConnect(from))
+        && fwd_label_forward(asker, cmd, acptr, parc, parv, msgid, &time_ms)
         && feature_bool(FEAT_P10_MESSAGE_TAGS))
       sendcmdto_set_s2s_tags(time_ms, msgid);
   } else
-    hunt_relay_msgid(from);
+    hunt_relay_msgid(asker);
 
   sendcmdto_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
                 parv[4], parv[5], parv[6], parv[7], parv[8]);
@@ -380,7 +387,7 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
 			 const char *pattern, int server, int parc,
 			 char *parv[])
 {
-  struct Client *acptr;
+  struct Client *acptr, *asker;
   char *to;
 
   /* Assume it's me, if no server or an unregistered client */
@@ -425,6 +432,7 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
    * knows the alias (and where a primary-sourced line would be a fake
    * direction).  Replies then arrive addressed to the primary; the
    * numeric relay mirrors them to the session's local aliases. */
+  asker = from;
   if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
     struct Client *prim = cli_user(from)->alias_primary;
     if (MyUser(prim) || cli_from(prim) != cli_from(acptr))
@@ -433,14 +441,20 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
 
   /* Labeled-response tracking and the compact msgid -- see
    * hunt_server_cmd. */
-  if (MyConnect(from)) {
+  if (MyConnect(asker)) {
+    /* The label, and so the entry, is the connection's that sent the
+     * command -- a bouncer device's own, though the command goes out
+     * under its primary's numeric.  A device's command sent on under a
+     * primary on another server is answered there, not here: it is not
+     * tracked (its label is ACKed now). */
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if (fwd_label_forward(from, cmd, acptr, parc, parv, msgid, &time_ms)
+    if ((asker == from || MyConnect(from))
+        && fwd_label_forward(asker, cmd, acptr, parc, parv, msgid, &time_ms)
         && feature_bool(FEAT_P10_MESSAGE_TAGS))
       sendcmdto_set_s2s_tags(time_ms, msgid);
   } else
-    hunt_relay_msgid(from);
+    hunt_relay_msgid(asker);
 
   sendcmdto_prio_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
 		     parv[4], parv[5], parv[6], parv[7], parv[8]);

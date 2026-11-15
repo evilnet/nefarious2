@@ -12,6 +12,7 @@
 #include "config.h"
 
 #include "forwarded_label.h"
+#include "bouncer_session.h"
 #include "client.h"
 #include "crdt_hlc.h"
 #include "ircd.h"
@@ -333,6 +334,37 @@ int fwd_label_is_echo(const char *msgid)
   return msgid && n && !strncmp(msgid, cli_yxx(&me), n);
 }
 
+/** Most connections whose forwarded commands a reply to one client can
+ * answer (fwd_label_owners()): a session's primary and its devices. */
+#define FWD_OWNERS_MAX (1 + BOUNCER_MAX_ALIASES)
+
+/** The local connections whose forwarded commands a reply addressed to
+ * \a acptr may answer: \a acptr's own, and -- for a bouncer session's
+ * primary -- its devices on this server.  hunt_server_cmd() sends a
+ * device's command on under the primary's numeric (bouncer invariant
+ * #10: legacy servers do not know the device), so its replies come back
+ * addressed to the primary; the device's own Connection holds the entry,
+ * for the label is the connection's that sent the command.
+ * @return How many were put in \a owners. */
+static int fwd_label_owners(struct Client *acptr, struct Client **owners, int max)
+{
+  struct BouncerSession *bs;
+  int n = 0, ai;
+
+  if (max < 1)
+    return 0;
+  owners[n++] = acptr;
+  if (IsBouncerAlias(acptr) || !(bs = bounce_get_session(acptr)))
+    return n;
+  for (ai = 0; ai < bs->hs_alias_count && n < max; ai++) {
+    struct Client *alias = findNUser(bs->hs_aliases[ai].ba_numeric);
+    if (alias && alias != acptr && MyConnect(alias) && IsBouncerAlias(alias)
+        && cli_user(alias) && cli_user(alias)->alias_primary == acptr)
+      owners[n++] = alias;
+  }
+  return n;
+}
+
 struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
 {
   int i;
@@ -383,19 +415,23 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
   return NULL;
 }
 
-/** Most connections whose forwarded commands a reply to one client can
- * answer (fwd_label_owners()). */
-#define FWD_OWNERS_MAX 1
-
-/** The local connections whose forwarded commands a reply addressed to
- * \a acptr may answer: \a acptr's own.
- * @return How many were put in \a owners. */
-static int fwd_label_owners(struct Client *acptr, struct Client **owners, int max)
+struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgid,
+                                          struct Client **owner)
 {
-  if (max < 1)
-    return 0;
-  owners[0] = acptr;
-  return 1;
+  struct Client *owners[FWD_OWNERS_MAX];
+  struct ForwardedLabel *fl;
+  int no, o;
+
+  *owner = NULL;
+  if (!acptr || !MyConnect(acptr) || !msgid || !msgid[0])
+    return NULL;
+  no = fwd_label_owners(acptr, owners, FWD_OWNERS_MAX);
+  for (o = 0; o < no; o++)
+    if ((fl = fwd_label_find(owners[o], msgid))) {
+      *owner = owners[o];
+      return fl;
+    }
+  return NULL;
 }
 
 struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
