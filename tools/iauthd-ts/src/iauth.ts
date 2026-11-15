@@ -374,6 +374,15 @@ export class IAuthDaemon {
       }
 
       const { results, definite, error } = await answer;
+
+      // The client left (D) or was replaced (trusted WEBIRC) while the
+      // lookup ran.  The ircd reuses ids (they are fds): acting now would
+      // decide for, or delete, whoever holds the id by now.
+      if (this.clients.get(client.id) !== client) {
+        this.debug(`Dropping the answer for ${query}: client ${client.id} (${client.ip}) is gone`);
+        return;
+      }
+
       if (!definite) {
         // No answer from the list: not listed for this client only. Nothing
         // is cached, so the next connection from the address asks again.
