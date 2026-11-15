@@ -146,6 +146,11 @@ void fwd_label_close_batch(struct Client *acptr, struct ForwardedLabel *fl);
  */
 int fwd_label_is_terminal(struct ForwardedLabel *fl, int numeric);
 
+/** fwd_label_is_terminal() for a reply matched by its msgid, counting
+ * NAMES' channels: a multi-channel NAMES ends at its last 366.
+ * @return Non-zero if the command's answer is complete. */
+int fwd_label_exact_ends(struct ForwardedLabel *fl, int numeric);
+
 /** Close all DRAINING batches for a client.
  * Called before processing a new client command and when a numeric
  * with a different msgid arrives.

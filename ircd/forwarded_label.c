@@ -646,6 +646,19 @@ int fwd_label_is_terminal(struct ForwardedLabel *fl, int numeric)
   return 0;
 }
 
+int fwd_label_exact_ends(struct ForwardedLabel *fl, int numeric)
+{
+  if (!fwd_label_is_terminal(fl, numeric))
+    return 0;
+  /* NAMES of several channels: a 366 each, the last one ends it. */
+  if (fl->fl_family == FWD_FAM_NAMES && numeric == fl->fl_terminal
+      && fl->fl_remaining > 1) {
+    fl->fl_remaining--;
+    return 0;
+  }
+  return 1;
+}
+
 /** Periodic expiry sweep (timer-driven).  The lazy checks inside
  * fwd_label_find*() only run when a numeric or client command arrives
  * -- an idle client's stale entries otherwise live forever: a
