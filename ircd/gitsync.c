@@ -447,7 +447,9 @@ gitsync_format_fingerprint(const unsigned char *hash, size_t hash_len,
  * @param valid Validity flag from libgit2
  * @param host Host being accessed
  * @param payload User payload
- * @return 0 to accept, -1 to reject
+ * @return 0 to accept an SSH host key, -1 to reject it; GIT_PASSTHROUGH
+ *   (a negative code) for any other certificate, so that libgit2's own
+ *   verification decides
  */
 static int
 gitsync_cert_callback(git_cert *cert, int valid, const char *host, void *payload)
@@ -1463,7 +1465,9 @@ gitsync_apply(const char *content, size_t len, int force,
                       "Config parse error in commit %.8s - %s; not applied "
                       "again until the content changes",
                       gitsync_stats.last_commit, had_backup
-                      ? "restored from backup" : "removed (no previous file)");
+                      ? "restored from backup"
+                      : "taken back (there was no previous file; the include "
+                        "now reads as empty)");
         ircd_strncpy(gitsync_refused_content_hash, content_hash,
                      sizeof(gitsync_refused_content_hash));
       } else {
@@ -1474,7 +1478,8 @@ gitsync_apply(const char *content, size_t len, int force,
                       "Config parse error with commit %.8s, and with %s too: "
                       "the configuration has errors of its own; retried at "
                       "the next sync", gitsync_stats.last_commit, had_backup
-                      ? "the backup restored" : "it removed (no previous file)");
+                      ? "the backup restored"
+                      : "it taken back (there was no previous file)");
       }
     } else {
       ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
