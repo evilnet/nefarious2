@@ -55,7 +55,7 @@ While no iauth instance is running, clients that connect register
 without iauth, whatever policy the last instance set.
 
 The lines a policy option asks for (H, n and u with U; U with U, or
-its short form with A; P with A; F with F; R with r) wait for an
+its short form with A; P with A; F with F; R with r; w with w) wait for an
 instance's policy: until a newly started instance has sent its O line,
 such a line about a client it is checking is kept, not sent, and when
 the O line arrives each client's kept lines are sent in the order
@@ -66,8 +66,11 @@ client gave it, whenever it is told.  A client that reached the hurry
 point (H) before the O line gets the extra time of the W policy when
 the O line asks for it.  C, N and d are sent at once.  A WEBIRC
 command in that time is handled by the server itself, as when the
-instance does not ask for WEBIRC; W and w lines kept from an earlier
-instance are told at a hand-over (below).  A program
+instance does not ask for WEBIRC: one a WebIRC block accepts is
+applied, and its w line kept like the lines above (so that an instance
+asking for w judges the client's real address, not the gateway's), and
+one no block accepts is refused.  A W line kept from an earlier
+instance is told at a hand-over (below).  A program
 restarted after a crash keeps the policy of its predecessor until it
 sends a new one; a program that never sends an O line is never sent
 these lines.

@@ -2103,7 +2103,10 @@ void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr
 int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip, const char *opts)
 {
   assert(auth != NULL);
-  if (IAuthHas(iauth, IAUTH_WEBIRC)) {
+  /* A policy line: kept untold while the policy is not known (a new
+   * instance before its O line, a held client), and told then if it asks
+   * for w -- else the instance would judge the gateway's address. */
+  if (iauth_asks(auth, IAUTH_WEBIRC)) {
     if (opts != NULL)
       sendto_iauth(auth->client, "w %s %s %s %s :%s", password, username, hostname, ip, opts);
     else
@@ -3089,10 +3092,10 @@ static void iauth_said_record(struct AuthRequest *auth, const char *line,
 }
 
 /** Whether a line told about a client is told only under a policy option
- * (H, n, u: U; U: U or A; P: A; F: F; R: r).  Such a line is kept untold
- * while the policy is not known.  Every other kept line (C, N, d, and the
- * WEBIRC lines, whose callers decide by the policy they see) is told at
- * once.
+ * (H, n, u: U; U: U or A; P: A; F: F; R: r; w: w).  Such a line is kept
+ * untold while the policy is not known.  Every other kept line (C, N, d,
+ * and the untrusted W, whose caller decides by the policy it sees) is
+ * told at once.
  * @param[in] cmd The line's command letter.
  * @return Non-zero if the line is told only under a policy option.
  */
@@ -3100,6 +3103,7 @@ static int iauth_line_gated(char cmd)
 {
   switch (cmd) {
   case 'H': case 'n': case 'u': case 'U': case 'P': case 'F': case 'R':
+  case 'w':
     return 1;
   }
   return 0;
@@ -3146,6 +3150,8 @@ static const char *iauth_line_asked(struct AuthRequest *auth,
     return IAuthHas(iauth, IAUTH_SSLFP) ? text : NULL;
   case 'R':
     return IAuthHas(iauth, IAUTH_ACCOUNT) ? text : NULL;
+  case 'w':
+    return IAuthHas(iauth, IAUTH_WEBIRC) ? text : NULL;
   }
   return text;
 }

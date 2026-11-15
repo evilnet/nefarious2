@@ -1096,6 +1096,81 @@ static void a_line_is_wiped(void **state)
     assert_int_equal(buf[i], 0);
 }
 
+/** A WEBIRC applied (the trusted w line) before a newly started instance
+ * has announced its policy is kept, and told at its O line when the policy
+ * asks for WEBIRC lines (w): in the order kept, after the C and before the
+ * hurry-up.  A policy without w forgets it. */
+static void trusted_webirc_before_the_policy_is_told_at_it(void **state)
+{
+  struct IAuth *ia = new_instance();
+  struct fake *f;
+  int mark, w;
+
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  f = pending_client(0);
+  auth_set_webirc_trusted(f->auth, "pw", "gw", "real.example", "192.0.2.77",
+                          NULL);
+  client_lines(f);
+  assert_int_equal(ntold - mark, 1);             /* only its C */
+  announce(ia, "Uw");
+  w = told_index(mark, "10 w pw gw real.example 192.0.2.77");
+  assert_true(w > told_index(mark, "10 C "));
+  assert_true(told_index(mark, "10 H class") > w);
+  assert_int_equal(told_count(mark, "10 w "), 1);
+  announce(ia, "Uw");                            /* again: nothing more */
+  assert_int_equal(told_count(mark, "10 w "), 1);
+  drop_instance(ia);
+
+  setup(state);                                  /* no w: forgotten */
+  ia = new_instance();
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  f = pending_client(0);
+  auth_set_webirc_trusted(f->auth, "pw", "gw", "real.example", "192.0.2.77",
+                          NULL);
+  announce(ia, "U");
+  assert_int_equal(told_count(mark, "10 w "), 0);
+  announce(ia, "Uw");
+  assert_int_equal(told_count(mark, "10 w "), 0);
+  drop_instance(ia);
+}
+
+/** The WEBIRC check of a held client finishes between instances ("REHASH
+ * a"): the w line is kept, and told to the instance the client is handed
+ * to once its policy asks for it -- that instance judges the real address,
+ * not the gateway's its C line names. */
+static void trusted_webirc_while_held_is_handed_over(void **state)
+{
+  struct IAuth *old = new_instance(), *ia;
+  struct fake *f;
+  int mark, c, w;
+
+  iauth = old;
+  run_instance(old);
+  announce(old, "RUw");
+  f = pending_client(0);
+  instance_goes_away(old);
+  ia = new_instance();
+  iauth = ia;
+  run_instance(ia);
+  mark = ntold;
+  auth_set_webirc_trusted(f->auth, "pw", "gw", "real.example", "192.0.2.77",
+                          "secure");
+  assert_int_equal(ntold, mark);                 /* sent to no one */
+  timer_run();
+  c = told_index(mark, "10 C ");
+  assert_true(c >= mark);
+  assert_int_equal(told_count(mark, "10 w "), 0);   /* no policy yet */
+  announce(ia, "RUw");
+  w = told_index(mark, "10 w pw gw real.example 192.0.2.77 :secure");
+  assert_true(w > c);
+  free(old);
+  drop_instance(ia);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1121,6 +1196,8 @@ int main(void)
     cmocka_unit_test_setup(hurry_in_the_window_gets_the_extra_wait, setup),
     cmocka_unit_test_setup(a_successor_with_u_gets_the_full_user_line, setup),
     cmocka_unit_test_setup(a_successor_without_u_gets_the_same_short_line, setup),
+    cmocka_unit_test_setup(trusted_webirc_before_the_policy_is_told_at_it, setup),
+    cmocka_unit_test_setup(trusted_webirc_while_held_is_handed_over, setup),
     cmocka_unit_test(the_rule),
     cmocka_unit_test(kept_lines_are_bounded),
     cmocka_unit_test(a_line_is_wiped),
