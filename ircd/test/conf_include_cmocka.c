@@ -376,8 +376,9 @@ static void second_include_same_name(void **state)
   assert_int_equal(1, nlogs);
 }
 
-/** The name as written: "./gitsync.conf" is not "gitsync.conf". */
-static void name_compared_as_written(void **state)
+/** The same path spelt another way: "./gitsync.conf" is GitSync's
+ * "gitsync.conf" (the tip accepted it when the Features came first). */
+static void dot_slash_name_is_empty(void **state)
 {
   static const struct step steps[] = {
     { SET_ENABLE, NULL, 3 },
@@ -387,11 +388,65 @@ static void name_compared_as_written(void **state)
 
   (void)state;
   run(steps);
+  assert_int_equal(0, conf_get_error_flag());
+  assert_null(notice_with("Config parse error"));
+  assert_true(exists("gitsync.conf"));
+}
+
+/** The absolute path of the working directory's file is the same file. */
+static void absolute_name_is_empty(void **state)
+{
+  static char abs_name[1200];
+  struct step steps[] = {
+    { SET_ENABLE, NULL, 3 },
+    { INCLUDE_ABSENT, abs_name, 6 },
+    { END, NULL, 0 }
+  };
+  char cwd[1024];
+
+  (void)state;
+  assert_non_null(getcwd(cwd, sizeof(cwd)));
+  snprintf(abs_name, sizeof(abs_name), "%s//gitsync.conf", cwd);
+  run(steps);
+  assert_int_equal(0, conf_get_error_flag());
+  assert_true(exists("gitsync.conf"));
+}
+
+/** ".." is not resolved: "sub/../gitsync.conf" is another name, and a
+ * missing include. */
+static void dot_dot_name_fails(void **state)
+{
+  static const struct step steps[] = {
+    { SET_ENABLE, NULL, 3 },
+    { INCLUDE_ABSENT, "sub/../gitsync.conf", 6 },
+    { END, NULL, 0 }
+  };
+
+  (void)state;
+  run(steps);
   assert_int_equal(1, conf_get_error_flag());
-  assert_non_null(notice_with("Config parse error in file ircd.conf on line 6: "
-                              "Cannot include ./gitsync.conf: No such file or "
-                              "directory"));
+  assert_non_null(notice_with("on line 6: Cannot include sub/../gitsync.conf: "
+                              "No such file or directory"));
   assert_false(exists("gitsync.conf"));
+}
+
+/** The comparison itself, against a fixed working directory. */
+static void same_path_rules(void **state)
+{
+  static const char *cwd = "/srv/ircd";
+
+  (void)state;
+  assert_true(conf_same_path("gitsync.conf", "gitsync.conf", cwd));
+  assert_true(conf_same_path("./gitsync.conf", "gitsync.conf", cwd));
+  assert_true(conf_same_path("gitsync.conf", ".//./gitsync.conf", cwd));
+  assert_true(conf_same_path("/srv/ircd/gitsync.conf", "gitsync.conf", cwd));
+  assert_true(conf_same_path("//srv//ircd/./gitsync.conf", "./gitsync.conf", cwd));
+  assert_true(conf_same_path("gitsync/gitsync.conf", "./gitsync//gitsync.conf", cwd));
+  assert_false(conf_same_path("sub/../gitsync.conf", "gitsync.conf", cwd));
+  assert_false(conf_same_path("/srv/other/gitsync.conf", "gitsync.conf", cwd));
+  assert_false(conf_same_path("other.conf", "gitsync.conf", cwd));
+  assert_false(conf_same_path("gitsync.conf.bak", "gitsync.conf", cwd));
+  assert_false(conf_same_path("Gitsync.conf", "gitsync.conf", cwd));
 }
 
 /** Case C on the tip: the default name with another one configured is a
@@ -490,7 +545,10 @@ int main(void)
     cmocka_unit_test_setup_teardown(configured_name_is_empty, setup, teardown),
     cmocka_unit_test_setup_teardown(configured_name_after_include_is_empty, setup, teardown),
     cmocka_unit_test_setup_teardown(second_include_same_name, setup, teardown),
-    cmocka_unit_test_setup_teardown(name_compared_as_written, setup, teardown),
+    cmocka_unit_test_setup_teardown(dot_slash_name_is_empty, setup, teardown),
+    cmocka_unit_test_setup_teardown(absolute_name_is_empty, setup, teardown),
+    cmocka_unit_test_setup_teardown(dot_dot_name_fails, setup, teardown),
+    cmocka_unit_test(same_path_rules),
     cmocka_unit_test_setup_teardown(default_name_with_other_configured_fails, setup, teardown),
 #endif
     cmocka_unit_test_setup_teardown(other_missing_include_fails, setup, teardown),

@@ -71,6 +71,7 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1322,17 +1323,89 @@ static const char *conf_gitsync_file(void)
   return NULL;
 }
 
+/** Spell \a name as an absolute path: a relative name is taken against
+ * \a cwd, and "." components and repeated slashes are dropped.  ".." and
+ * symbolic links are left as they are.
+ * @param[in] name A file name.
+ * @param[in] cwd The working directory, absolute.
+ * @param[out] buf Where to write the path.
+ * @param[in] size Size of \a buf.
+ * @return \a buf, or NULL if the path does not fit.
+ */
+static const char *conf_path_spell(const char *name, const char *cwd,
+                                   char *buf, size_t size)
+{
+  const char *parts[2];
+  size_t len = 0;
+  int i;
+
+  parts[0] = (name[0] == '/') ? "" : cwd;
+  parts[1] = name;
+  for (i = 0; i < 2; i++) {
+    const char *p = parts[i];
+
+    while (*p) {
+      const char *q;
+      size_t n;
+
+      while (*p == '/')
+        p++;
+      for (q = p; *q && *q != '/'; q++)
+        ;
+      n = q - p;
+      if (n && !(n == 1 && p[0] == '.')) {
+        if (len + 1 + n + 1 > size)
+          return NULL;
+        buf[len++] = '/';
+        memcpy(buf + len, p, n);
+        len += n;
+      }
+      p = q;
+    }
+  }
+  if (len + 2 > size)
+    return NULL;
+  if (len == 0)
+    buf[len++] = '/';
+  buf[len] = '\0';
+  return buf;
+}
+
+/** Whether two file names name the same path: equal once each is spelt
+ * by conf_path_spell() ("gitsync.conf", "./gitsync.conf" and the absolute
+ * path in the working directory are one file; "sub/../gitsync.conf" is
+ * not, nor is a symbolic link to it).  Names too long to spell are
+ * compared as written.
+ * @param a A file name.
+ * @param b Another.
+ * @param cwd The working directory, absolute.
+ * @return Non-zero if they are the same path.
+ */
+static int conf_same_path(const char *a, const char *b, const char *cwd)
+{
+  static char pa[PATH_MAX], pb[PATH_MAX];
+
+  if (!conf_path_spell(a, cwd, pa, sizeof(pa)) ||
+      !conf_path_spell(b, cwd, pb, sizeof(pb)))
+    return 0 == strcmp(a, b);
+  return 0 == strcmp(pa, pb);
+}
+
 /** Whether an include whose file does not exist is read as an empty file
- * rather than reported: it names GitSync's configuration file, exactly as
- * GITSYNC_CONF_FILE spells it ("./gitsync.conf" is not "gitsync.conf";
- * an absolute path matches only the same absolute path).
+ * rather than reported: it names GitSync's configuration file.
  * @param name The file name as the include wrote it.
  * @param gitsync_file conf_gitsync_file(): NULL when GitSync is off.
  * @return Non-zero to read the include as an empty file.
  */
 static int conf_include_absent_ok(const char *name, const char *gitsync_file)
 {
-  return gitsync_file && 0 == strcmp(name, gitsync_file);
+  char cwd[PATH_MAX];
+
+  if (!gitsync_file)
+    return 0;
+  if (!getcwd(cwd, sizeof(cwd)))
+    return 0 == strcmp(name, gitsync_file);
+  return conf_same_path(name, gitsync_file, cwd);
 }
 
 /** GitSync's configuration file is included but does not exist yet (a
