@@ -13,6 +13,7 @@ import {
   matchesDNSBL,
   parseQuery,
   lookupDNSBL,
+  queryDNSBL,
 } from '../src/dnsbl.js';
 import type { DNSBLConfig } from '../src/types.js';
 
@@ -111,13 +112,13 @@ describe('DNSBL Functions', () => {
       expect(getCacheSize()).toBeGreaterThanOrEqual(initialSize);
     });
 
-    it('should handle null results (pending lookups)', () => {
-      const query = 'test-cache-null.dnsbl.example.com';
-      setCacheEntry(query, null);
+    it('should store a definite "not listed" as an empty result', () => {
+      const query = 'test-cache-empty.dnsbl.example.com';
+      setCacheEntry(query, []);
 
       const entry = getCacheEntry(query, 3600);
       expect(entry).not.toBeNull();
-      expect(entry?.result).toBeNull();
+      expect(entry?.result).toEqual([]);
     });
   });
 
@@ -275,6 +276,89 @@ describe('DNSBL Functions', () => {
       expect(Date.now() - t0).toBeLessThan(1000);
       expect(answer.results).toEqual([]);
       expect(answer.definite).toBe(false);
+    });
+  });
+
+  describe('queryDNSBL (cache and lookups in flight)', () => {
+    let n = 0;
+    /** A reversed IP no other test has used: the cache is module-wide */
+    const freshIp = () => `${++n}.0.77.10`;
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('a second query while the first is in flight shares its lookup and its answer', async () => {
+      const spy = vi.spyOn(dnsPromises, 'resolve4').mockImplementation(
+        () => new Promise(r => setTimeout(() => r(['127.0.0.2']), 300)) as never);
+      const ip = freshIp();
+
+      const first = queryDNSBL(ip, 'bl.example', 1, 3600);
+      const second = queryDNSBL(ip, 'bl.example', 1, 3600);
+      expect(first.source).toBe('lookup');
+      expect(second.source).toBe('shared');
+
+      expect(await second.answer).toEqual({ results: ['127.0.0.2'], definite: true });
+      expect(await first.answer).toEqual({ results: ['127.0.0.2'], definite: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('nothing is cached while a lookup is in flight', () => {
+      vi.spyOn(dnsPromises, 'resolve4').mockReturnValue(new Promise(() => {}) as never);
+      const ip = freshIp();
+      queryDNSBL(ip, 'bl.example', 0.1, 3600);
+      expect(getCacheEntry(`${ip}.bl.example`, 3600)).toBeNull();
+    });
+
+    it('a definite answer is cached: the next query does not ask again', async () => {
+      const spy = vi.spyOn(dnsPromises, 'resolve4').mockRejectedValue(dnsError('ENOTFOUND'));
+      const ip = freshIp();
+
+      expect(await queryDNSBL(ip, 'bl.example', 1, 3600).answer).toEqual({ results: [], definite: true });
+      const again = queryDNSBL(ip, 'bl.example', 1, 3600);
+      expect(again.source).toBe('cache');
+      expect(await again.answer).toEqual({ results: [], definite: true });
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('a failed shared lookup gives every waiter "not listed, not definite" and leaves nothing behind', async () => {
+      const spy = vi.spyOn(dnsPromises, 'resolve4')
+        .mockImplementationOnce(() => new Promise((_, rej) =>
+          setTimeout(() => rej(dnsError('ESERVFAIL')), 100)) as never)
+        .mockResolvedValue(['127.0.0.2'] as never);
+      const ip = freshIp();
+
+      const a = queryDNSBL(ip, 'bl.example', 1, 3600);
+      const b = queryDNSBL(ip, 'bl.example', 1, 3600);
+      for (const q of [a, b]) {
+        const answer = await q.answer;
+        expect(answer.results).toEqual([]);
+        expect(answer.definite).toBe(false);
+      }
+      expect(getCacheEntry(`${ip}.bl.example`, 3600)).toBeNull();
+
+      // Neither a cache entry nor the finished lookup is reused: ask again.
+      const c = queryDNSBL(ip, 'bl.example', 1, 3600);
+      expect(c.source).toBe('lookup');
+      expect(await c.answer).toEqual({ results: ['127.0.0.2'], definite: true });
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it('waiters on a lookup that never answers are released by the same timeout', async () => {
+      vi.spyOn(dnsPromises, 'resolve4').mockReturnValue(new Promise(() => {}) as never);
+      const ip = freshIp();
+      const t0 = Date.now();
+
+      const a = queryDNSBL(ip, 'bl.example', 0.3, 3600);
+      await new Promise(r => setTimeout(r, 100));
+      const b = queryDNSBL(ip, 'bl.example', 0.3, 3600);
+      expect(b.source).toBe('shared');
+      const [ra, rb] = await Promise.all([a.answer, b.answer]);
+
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(ra.definite).toBe(false);
+      expect(rb.definite).toBe(false);
+      expect(rb.results).toEqual([]);
     });
   });
 });

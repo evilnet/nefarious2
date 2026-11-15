@@ -106,8 +106,8 @@ export interface DNSBLAnswer {
 }
 
 export interface CacheEntry {
-  /** DNS lookup results (IP addresses) */
-  result: string[] | null;
+  /** DNS lookup results (IP addresses); [] = not listed */
+  result: string[];
   /** Timestamp when cached */
   ts: number;
 }
