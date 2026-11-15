@@ -850,28 +850,48 @@ gitsync_apply(const char *content, size_t len, int force,
   /* Check if config parsing failed */
   if (conf_get_error_flag()) {
     sendto_opmask_butone(0, SNO_OLDSNO,
-                         "GitSync: Config parse error detected, restoring backup");
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Config parse error, restoring %s from backup", conf_file);
+                         "GitSync: Config parse error detected, %s",
+                         had_backup ? "restoring backup"
+                         : "removing the new file (no previous file)");
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: Config parse error, %s %s%s",
+              had_backup ? "restoring" : "removing", conf_file,
+              had_backup ? " from backup" : " (no previous file)");
 
-    if (had_backup && rename(bak_file, conf_file) == 0) {
+    /* Back to the configuration as it was: the backup, or no file at all
+     * when there was none (an include of it then reads as empty). */
+    if (had_backup ? 0 == rename(bak_file, conf_file)
+                   : 0 == unlink(conf_file)) {
       /* Rehash again with restored config (never handing it a cptr the
        * first one exited) */
       if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
         *killed = CPTR_KILLED;
-      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                    "Config parse error in commit %.8s - restored from "
-                    "backup; not applied again until the content changes",
-                    gitsync_stats.last_commit);
+      if (!conf_get_error_flag()) {
+        /* Clean without the content: the content is what failed.  Not
+         * written and rehashed again by every periodic sync. */
+        ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                      "Config parse error in commit %.8s - %s; not applied "
+                      "again until the content changes",
+                      gitsync_stats.last_commit, had_backup
+                      ? "restored from backup" : "removed (no previous file)");
+        ircd_strncpy(gitsync_refused_content_hash, content_hash,
+                     sizeof(gitsync_refused_content_hash));
+      } else {
+        /* The configuration fails without the content too (a local
+         * error, ircd.conf or another include): the content is not shown
+         * to be at fault, and the next sync tries it again. */
+        ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                      "Config parse error with commit %.8s, and with %s too: "
+                      "the configuration has errors of its own; retried at "
+                      "the next sync", gitsync_stats.last_commit, had_backup
+                      ? "the backup restored" : "it removed (no previous file)");
+      }
     } else {
       ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                    "Config parse error in commit %.8s - no backup to "
-                    "restore; not applied again until the content changes",
-                    gitsync_stats.last_commit);
+                    "Config parse error with commit %.8s - cannot %s %s: %s; "
+                    "retried at the next sync", gitsync_stats.last_commit,
+                    had_backup ? "restore the backup of" : "remove", conf_file,
+                    strerror(errno));
     }
-    /* Not written and rehashed again by every periodic sync. */
-    ircd_strncpy(gitsync_refused_content_hash, content_hash,
-                 sizeof(gitsync_refused_content_hash));
     return GITSYNC_VALIDATION_ERROR;
   }
 
