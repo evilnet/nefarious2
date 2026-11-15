@@ -105,6 +105,7 @@ CMOCKA_TESTPROGS = \
 	sethost_verify_cmocka \
 	webirc_verify_cmocka \
 	dnsbl_rehash_cmocka \
+	conf_include_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
 
@@ -206,6 +207,7 @@ DEP_SRC = \
 	sethost_verify_cmocka.c \
 	webirc_verify_cmocka.c \
 	dnsbl_rehash_cmocka.c \
+	conf_include_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -871,6 +873,20 @@ dnsbl_rehash_cmocka.o: ${srcdir}/dnsbl_rehash_cmocka.c ../dnsbl.c
 
 dnsbl_rehash_cmocka: $(DNSBL_REHASH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DNSBL_REHASH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# conf_include tests - an include whose file does not exist is decided
+# once the configuration has been read: GitSync's file with GitSync
+# enabled is empty until the first sync (a placeholder is written, not
+# under ircd -k); any other missing include is the error it was, at its
+# own file and line, before the IAuth step reads the error flag.  Includes
+# ../s_conf.c with --gc-sections, as conf_reattach does; the parse is a
+# stub.
+conf_include_cmocka.o: ${srcdir}/conf_include_cmocka.c ../s_conf.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/conf_include_cmocka.c
+
+CONF_INCLUDE_CMOCKA_OBJS = conf_include_cmocka.o ../ircd_string.o ../match.o \
+	../ircd_snprintf.o
+conf_include_cmocka: $(CONF_INCLUDE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CONF_INCLUDE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # send_label tests - labeled-response (issue #216): a channel event a
 # client's own command caused (its PART, TOPIC, KICK, MODE) carries the

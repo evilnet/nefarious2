@@ -35,6 +35,7 @@
 #include "ircd_features.h"
 #include "ircd_geoip.h"
 #include "fileio.h"
+#include "gitsync.h"
 #include "gline.h"
 #include "hash.h"
 #include "ircd.h"
@@ -1260,9 +1261,155 @@ void clear_quarantines(void)
 static int conf_error;
 /** When non-zero, indicates that the configuration file was loaded at least once. */
 static int conf_already_read;
+/** When non-zero, this is a configuration check (ircd -k): nothing is
+ * written. */
+static int conf_checking;
 extern void yyparse(void);
 extern int init_lexer(void);
 extern void deinit_lexer(void);
+
+/** An include whose file did not exist when the lexer reached it. */
+struct AbsentInclude {
+  struct AbsentInclude *next;   /**< The next one, in the order read. */
+  char *name;                   /**< The file name as the include wrote it. */
+  char *file;                   /**< The configuration file holding it. */
+  int line;                     /**< Its line in that file. */
+};
+
+/** This pass's includes whose file did not exist, in the order read. */
+static struct AbsentInclude *absent_includes;
+/** Where the next one is linked. */
+static struct AbsentInclude **absent_includes_tail = &absent_includes;
+
+static void conf_error_at(const char *file, int line, const char *msg);
+
+/** Mark this run as a configuration check (ircd -k): a pass writes no
+ * file. */
+void conf_set_check_only(void)
+{
+  conf_checking = 1;
+}
+
+/** Note an include whose file does not exist (the lexer's fopen() failed
+ * with ENOENT).  It is read as nothing for now and decided by
+ * conf_settle_absent_includes() once the whole configuration has been
+ * read, when the features have their final values: the order of the
+ * include and the Features lines that make it GitSync's file does not
+ * matter.  Any other reason a file cannot be included is reported at once.
+ * @param name The file name as the include wrote it.
+ */
+void conf_include_absent(const char *name)
+{
+  struct AbsentInclude *ai = (struct AbsentInclude *) MyCalloc(1, sizeof(*ai));
+
+  DupString(ai->name, name);
+  DupString(ai->file, linefile ? linefile : "");
+  ai->line = lineno;
+  *absent_includes_tail = ai;
+  absent_includes_tail = &ai->next;
+}
+
+/** The file GitSync writes the configuration it pulls into: its
+ * GITSYNC_CONF_FILE, when GitSync is built in and enabled.
+ * @return The name, or NULL when GitSync is not built in or not enabled.
+ */
+static const char *conf_gitsync_file(void)
+{
+#ifdef USE_LIBGIT2
+  if (feature_bool(FEAT_GITSYNC_ENABLE))
+    return gitsync_conf_file();
+#endif
+  return NULL;
+}
+
+/** Whether an include whose file does not exist is read as an empty file
+ * rather than reported: it names GitSync's configuration file, exactly as
+ * GITSYNC_CONF_FILE spells it ("./gitsync.conf" is not "gitsync.conf";
+ * an absolute path matches only the same absolute path).
+ * @param name The file name as the include wrote it.
+ * @param gitsync_file conf_gitsync_file(): NULL when GitSync is off.
+ * @return Non-zero to read the include as an empty file.
+ */
+static int conf_include_absent_ok(const char *name, const char *gitsync_file)
+{
+  return gitsync_file && 0 == strcmp(name, gitsync_file);
+}
+
+/** GitSync's configuration file is included but does not exist yet (a
+ * first start, or it was removed): it is read as empty, and an empty
+ * placeholder is written under its name -- the backup GitSync's apply
+ * restores when the first content it writes does not parse.  A
+ * configuration check (ircd -k) writes nothing.  One log line (LS_CONFIG:
+ * the operators see it too; on the first read also on stderr, as a parse
+ * error is) says so.
+ */
+static void conf_gitsync_placeholder(const struct AbsentInclude *ai)
+{
+  static const char text[] = "# GitSync configuration placeholder\n"
+    "# This file will be populated when gitsync runs\n";
+  static char msg[1024];
+  struct stat st;
+  int fd;
+  int level = L_NOTICE;
+  const char *what = "";
+
+  if (0 == stat(ai->name, &st))
+    return;     /* written for an earlier include of the same name */
+
+  if (conf_checking)
+    what = " (configuration check: not written)";
+  /* O_EXCL: never replace a file that appeared since the include was
+   * read. */
+  else if ((fd = open(ai->name, O_WRONLY | O_CREAT | O_EXCL, 0666)) >= 0) {
+    if (write(fd, text, sizeof(text) - 1) != (ssize_t) (sizeof(text) - 1)) {
+      level = L_WARNING;
+      what = strerror(errno);
+    } else
+      what = ", placeholder written";
+    close(fd);
+  } else {
+    level = L_WARNING;
+    what = strerror(errno);
+  }
+
+  ircd_snprintf(0, msg, sizeof(msg), "Included file %s (%s line %d) is "
+                "GitSync's configuration file and does not exist yet: read "
+                "as empty%s%s; GitSync's first sync writes it", ai->name,
+                ai->file, ai->line, level == L_WARNING
+                ? ", cannot write a placeholder: " : "", what);
+  log_write(LS_CONFIG, level, 0, "%s", msg);
+  if (!conf_already_read)
+    fprintf(stderr, "%s\n", msg);
+}
+
+/** Decide this pass's includes whose file did not exist, now that the
+ * features have their final values: GitSync's configuration file, with
+ * GitSync enabled, is an empty file until the first sync writes it; any
+ * other is the error it always was ("Cannot include <file>: No such file
+ * or directory"), reported at the include's own file and line.  Runs
+ * before anything reads the error flag of the pass.
+ */
+static void conf_settle_absent_includes(void)
+{
+  static char msg[1024];
+  struct AbsentInclude *ai;
+  const char *gitsync_file = conf_gitsync_file();
+
+  while ((ai = absent_includes)) {
+    absent_includes = ai->next;
+    if (conf_include_absent_ok(ai->name, gitsync_file))
+      conf_gitsync_placeholder(ai);
+    else {
+      ircd_snprintf(0, msg, sizeof(msg), "Cannot include %s: %s", ai->name,
+                    strerror(ENOENT));
+      conf_error_at(ai->file, ai->line, msg);
+    }
+    MyFree(ai->name);
+    MyFree(ai->file);
+    MyFree(ai);
+  }
+  absent_includes_tail = &absent_includes;
+}
 
 /** Read configuration file.
  * @return Zero on failure, non-zero on success. */
@@ -1279,11 +1426,29 @@ int read_configuration_file(void)
   yyparse();
   deinit_lexer();
   feature_mark(); /* reset unmarked features */
+  conf_settle_absent_includes(); /* GitSync's file, or the error */
   sasl_conf_apply(); /* push pending Webhook{}/Keycloak{} into libkc */
   authtoken_conf_apply(); /* diff Authtoken{} services: TOKEN NEW/DEL */
   auth_conf_apply();      /* spawn (or keep) the last IAuth{} block's program */
   conf_already_read = 1;
   return 1;
+}
+
+/** Report an error message about the configuration file, at a file and
+ * line of it.
+ * @param file The configuration file.
+ * @param line The line in it.
+ * @param msg The error to report.
+ */
+static void conf_error_at(const char *file, int line, const char *msg)
+{
+ sendto_opmask_butone(0, SNO_ALL, "Config parse error in file %s on line %d: %s",
+                      file, line, msg);
+ log_write(LS_CONFIG, L_ERROR, 0, "Config parse error in file %s on line %d: %s",
+           file, line, msg);
+ if (!conf_already_read)
+   fprintf(stderr, "Config parse error in file %s on line %d: %s\n", file, line, msg);
+ conf_error = 1;
 }
 
 /** Report an error message about the configuration file.
@@ -1292,13 +1457,7 @@ int read_configuration_file(void)
 void
 yyerror(const char *msg)
 {
- sendto_opmask_butone(0, SNO_ALL, "Config parse error in file %s on line %d: %s",
-                      linefile, lineno, msg);
- log_write(LS_CONFIG, L_ERROR, 0, "Config parse error in file %s on line %d: %s",
-           linefile, lineno, msg);
- if (!conf_already_read)
-   fprintf(stderr, "Config parse error in file %s on line %d: %s\n", linefile, lineno, msg);
- conf_error = 1;
+  conf_error_at(linefile, lineno, msg);
 }
 
 /** Get the configuration error flag.

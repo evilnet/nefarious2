@@ -59,6 +59,10 @@ struct GitsyncStats {
   char last_commit[64];     /**< Last synced commit hash */
 };
 
+/** The file GitSync writes its configuration to (GITSYNC_CONF_FILE, or
+ * "gitsync.conf"). */
+extern const char *gitsync_conf_file(void);
+
 /** Initialize gitsync subsystem */
 extern void gitsync_init(void);
 

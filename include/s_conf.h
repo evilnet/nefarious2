@@ -313,4 +313,7 @@ extern void clear_sslcert_confs(void);
 
 extern int conf_get_error_flag(void);
 
+extern void conf_include_absent(const char *name);
+extern void conf_set_check_only(void);
+
 #endif /* INCLUDED_s_conf_h */

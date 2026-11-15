@@ -400,9 +400,19 @@ init_lexer_file(char* file)
 
   if (lexer_input == NULL)
   {
-    snprintf((char *)&error_buffer, 1024, "Cannot include %s: %s", file, strerror(errno));
-    yyerror(error_buffer);
+    int err = errno;
+
     lexer_input = include_stack[--include_stack_ptr].lexer_input;
+    /* A file that does not exist is decided once the whole configuration
+     * has been read (GitSync's file is empty until its first sync); any
+     * other reason is an error here. */
+    if (err == ENOENT)
+    {
+      conf_include_absent(file);
+      return 0;
+    }
+    snprintf((char *)&error_buffer, 1024, "Cannot include %s: %s", file, strerror(err));
+    yyerror(error_buffer);
     return 0;
   }
   /* Read the included file through a buffer of its own.  The rest of the

@@ -760,9 +760,7 @@ gitsync_apply(const char *content, size_t len, struct Client *cptr,
   struct stat st;
   int had_backup = 0;
 
-  conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
-  if (!conf_file || !*conf_file)
-    conf_file = "gitsync.conf";
+  conf_file = gitsync_conf_file();
 
   /* Check if content has changed */
   gitsync_hash_content(content, len, content_hash, sizeof(content_hash));
@@ -1144,6 +1142,19 @@ gitsync_timer_callback(struct Event *ev)
   }
 }
 
+/** The file GitSync writes the configuration it pulls into (and the
+ * operator's ircd.conf includes): GITSYNC_CONF_FILE, or "gitsync.conf"
+ * when that is empty.
+ * @return The name, as configured.
+ */
+const char *
+gitsync_conf_file(void)
+{
+  const char *conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
+
+  return (conf_file && *conf_file) ? conf_file : "gitsync.conf";
+}
+
 void
 gitsync_init(void)
 {
@@ -1159,9 +1170,6 @@ void
 gitsync_start_timer(void)
 {
   int interval;
-  const char *conf_file;
-  struct stat st;
-  FILE *fp;
 
   if (!feature_bool(FEAT_GITSYNC_ENABLE))
     return;
@@ -1172,21 +1180,9 @@ gitsync_start_timer(void)
   if (t_active(&gitsync_timer))
     return;
 
-  /* Ensure gitsync.conf exists so include directive doesn't fail */
-  conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
-  if (!conf_file || !*conf_file)
-    conf_file = "gitsync.conf";
-
-  if (stat(conf_file, &st) != 0) {
-    /* File doesn't exist, create empty placeholder */
-    fp = fopen(conf_file, "w");
-    if (fp) {
-      fprintf(fp, "# GitSync configuration placeholder\n");
-      fprintf(fp, "# This file will be populated when gitsync runs\n");
-      fclose(fp);
-      Debug((DEBUG_INFO, "GitSync: Created empty %s", conf_file));
-    }
-  }
+  /* An include of the configuration file that does not exist yet is read
+   * as empty, and its placeholder written, by the configuration pass that
+   * reads it (s_conf.c conf_settle_absent_includes()). */
 
   interval = feature_int(FEAT_GITSYNC_INTERVAL);
   if (interval < 60)

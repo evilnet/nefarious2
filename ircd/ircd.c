@@ -1117,9 +1117,12 @@ int main(int argc, char **argv) {
 
   motd_init();
 
-  /* A configuration check reads the IAuth{} block but runs no program. */
-  if (thisServer.bootopt & BOOT_CHKCONF)
+  /* A configuration check reads the IAuth{} block but runs no program,
+   * and writes no file (GitSync's placeholder). */
+  if (thisServer.bootopt & BOOT_CHKCONF) {
     auth_conf_check_only();
+    conf_set_check_only();
+  }
 
   if (!init_conf()) {
     log_write(LS_SYSTEM, L_CRIT, 0, "Failed to read configuration file %s",
