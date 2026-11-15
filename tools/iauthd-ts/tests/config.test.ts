@@ -2,7 +2,7 @@
  * Unit tests for configuration parser
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -186,5 +186,54 @@ General { name = "test"; };
     expect(config.dnsbls[0].cfgNum).toBe(2);
     expect(config.dnsbls[1].cfgNum).toBe(3);
     expect(config.dnsbls[2].cfgNum).toBe(4);
+  });
+
+  // A cache time that is not a whole number of seconds is ignored (with a
+  // complaint on stderr, which the ircd logs) rather than read as NaN --
+  // which never expired -- or as 0.
+  describe('bad cache times', () => {
+    for (const bad of ['abc', '10x', '1.5', '-', '--5']) {
+      it(`ignores cachetime=${bad} on a DNSBL line: the global CACHETIME applies`, () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        writeFileSync(configPath, `#IAUTH DNSBL server=dnsbl.example.com cachetime=${bad}\n`);
+        const { config } = readConfigFile(configPath);
+        expect(config.dnsbls[0].cacheTime).toBeUndefined();
+        expect(err).toHaveBeenCalledWith(expect.stringMatching(/cachetime.*dnsbl\.example\.com/i));
+        err.mockRestore();
+      });
+    }
+
+    for (const bad of ['abc', '']) {
+      it(`ignores "CACHETIME${bad ? ' ' + bad : ''}": the default applies`, () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        writeFileSync(configPath, `#IAUTH CACHETIME${bad ? ' ' + bad : ''}\n`);
+        const { config } = readConfigFile(configPath);
+        expect(config.cacheTime).toBe(86400);
+        expect(err).toHaveBeenCalledWith(expect.stringMatching(/CACHETIME/));
+        err.mockRestore();
+      });
+    }
+
+    // A negative cache time has always meant "not reused" (here and in
+    // iauthd.pl): it is read as 0, silently.
+    it('a negative cachetime on a DNSBL line or CACHETIME means 0 (not reused), silently', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, '#IAUTH CACHETIME -1\n#IAUTH DNSBL server=a.example cachetime=-5\n');
+      const { config } = readConfigFile(configPath);
+      expect(config.cacheTime).toBe(0);
+      expect(config.dnsbls[0].cacheTime).toBe(0);
+      expect(err).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
+
+    it('a good cachetime says nothing', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, '#IAUTH CACHETIME 0\n#IAUTH DNSBL server=a.example cachetime=0\n');
+      const { config } = readConfigFile(configPath);
+      expect(config.cacheTime).toBe(0);
+      expect(config.dnsbls[0].cacheTime).toBe(0);
+      expect(err).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
   });
 });

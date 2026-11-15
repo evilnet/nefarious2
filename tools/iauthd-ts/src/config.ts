@@ -14,6 +14,16 @@ const DEFAULT_POLICY = 'RTAWUwFr';
 const DEFAULT_SASL_FAIL_MSG = 'SASL authentication failed';
 
 /**
+ * Parse a cache time: a whole number of seconds.  0 or a negative number
+ * means answers are not reused (as it always has, here and in iauthd.pl)
+ * and gives 0.  Anything else gives undefined (the caller falls back and
+ * says so).
+ */
+function parseCacheTime(value: string): number | undefined {
+  return /^-?\d+$/.test(value) ? Math.max(0, parseInt(value, 10)) : undefined;
+}
+
+/**
  * Parse a DNSBL configuration line
  * Format: server=dnsbl.sorbs.net index=2,3,4 mark=sorbs block=anonymous
  */
@@ -48,9 +58,17 @@ function parseDNSBLConfig(args: string, cfgNum: number): DNSBLConfig {
         case 'class':
           config.class = value;
           break;
-        case 'cachetime':
-          config.cacheTime = parseInt(value, 10);
+        case 'cachetime': {
+          const seconds = parseCacheTime(value);
+          if (seconds === undefined) {
+            // Not NaN (which never expired): the global CACHETIME applies
+            console.error(`Ignoring bad cachetime=${value} on DNSBL ${args.trim()}: ` +
+              'not a whole number of seconds; the global CACHETIME applies');
+          } else {
+            config.cacheTime = seconds;
+          }
           break;
+        }
         case 'whitelist':
           config.whitelist = true;
           break;
@@ -120,8 +138,14 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
 
       case 'CACHETIME': {
         // 0 is a value (answers are not reused), not "unset"
-        const seconds = parseInt(args.trim(), 10);
-        config.cacheTime = Number.isNaN(seconds) ? DEFAULT_CACHE_TIME : seconds;
+        const seconds = parseCacheTime(args.trim());
+        if (seconds === undefined) {
+          console.error(`Ignoring bad CACHETIME '${args.trim()}': not a whole number of seconds; ` +
+            `using ${DEFAULT_CACHE_TIME}`);
+          config.cacheTime = DEFAULT_CACHE_TIME;
+        } else {
+          config.cacheTime = seconds;
+        }
         break;
       }
 
