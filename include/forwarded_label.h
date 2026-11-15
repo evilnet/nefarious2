@@ -93,6 +93,16 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid);
 struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgid,
                                           struct Client **owner);
 
+/** \a cptr sent a command that is not forwarded through
+ * hunt_server_cmd() but can be answered by a numeric a forwarded
+ * command's reply has (INVITE of a user on another server: 401 when the
+ * user is gone there).  For FWD_DEADLINE no such reply is labeled.
+ * @param[in] cptr Local client.
+ * @param[in] bits Untracked bits (fwd_match.h: 1 << enum FwdFamily,
+ *   FWD_UNTRACKED_GENERIC, FWD_UNTRACKED_NOSUCHNICK).
+ */
+void fwd_label_note_untracked(struct Client *cptr, unsigned int bits);
+
 /** Whether \a msgid is one this server minted -- on an S2S line, the
  * compact msgid of a command we forwarded, echoed by the server that
  * answers it.  It names the command, not the reply line that carries it.

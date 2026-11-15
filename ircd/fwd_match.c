@@ -428,10 +428,11 @@ int fwd_reply_fit(int fam, const char *subject, int numeric, const char *params)
 
 int fwd_pick(const struct FwdView *v, int n, int numeric,
              const char *params, const char *link, const char *source,
-             int source_true, unsigned char *cand, int *fit, int *ambiguous)
+             int source_true, unsigned int untracked,
+             unsigned char *cand, int *fit, int *ambiguous)
 {
   int generic = fwd_numeric_generic(numeric);
-  int i, pick = -1, ncand = 0, nsrc = 0, hops = 0, same = 1;
+  int i, pick = -1, ncand = 0, nsrc = 0, hops = 0, same = 1, tainted = 0;
   const char *dest = NULL;
 
   *fit = FWD_FIT_NO;
@@ -452,6 +453,13 @@ int fwd_pick(const struct FwdView *v, int n, int numeric,
   }
   if (!ncand)
     return -1;
+
+  /* A refusal while a command of unknown replies is out may be its. */
+  if (generic && (untracked & FWD_UNTRACKED_GENERIC)) {
+    for (i = 0; i < n; i++)
+      cand[i] = 0;
+    return -1;
+  }
 
   /* An oper's reply names its true origin: only a command sent there can
    * be the one answered -- when no other server could have sent the line
@@ -474,7 +482,18 @@ int fwd_pick(const struct FwdView *v, int n, int numeric,
     if (pick < 0 || v[i].seq < v[pick].seq)
       pick = i;
   }
-  *ambiguous = (ncand > 1 && !same);
+  /* An untracked command whose family has this numeric may be answered
+   * by it (WHOIS's 401 also answers an INVITE's target gone; WHOWAS
+   * shares 312 with WHOIS). */
+  if (!generic)
+    for (i = 1; i < FWD_FAM_COUNT; i++)
+      if (((untracked >> i) & 1) && fam_num(i, numeric))
+        tainted = 1;
+  if (numeric == 401 && (untracked & FWD_UNTRACKED_NOSUCHNICK))
+    tainted = 1;
+  /* Ambiguous: candidates sent to different servers; or a command of
+   * that family went out untracked and this may be its reply. */
+  *ambiguous = (ncand > 1 && !same) || tainted;
   *fit = generic ? FWD_FIT_END
                  : fwd_reply_fit(v[pick].fam, v[pick].subject, numeric, params);
   return pick;

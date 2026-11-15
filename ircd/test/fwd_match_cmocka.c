@@ -165,7 +165,9 @@ static int setup(void **state)
 }
 
 #define PICK(num, params, link, src, src_true) \
-  fwd_pick(v, nv, num, params, link, src, src_true, cand, &fit, &amb)
+  fwd_pick(v, nv, num, params, link, src, src_true, 0, cand, &fit, &amb)
+#define PICKU(num, params, link, src, src_true, untracked) \
+  fwd_pick(v, nv, num, params, link, src, src_true, untracked, cand, &fit, &amb)
 
 /* A reply to a command the asker never had tracked (an unlabeled one
  * from before, a stray numeric) matches nothing: it goes out plain. */
@@ -342,6 +344,68 @@ static void test_pick_names_elements(void **state)
   assert_int_equal(PICK(366, "#q :End of /NAMES list.", "Bb", "Bb", 0), -1);
 }
 
+/* (review M1, S1, N1) A command the asker's connection -- or another
+ * connection of its bouncer session -- sent untracked (no labeled-response
+ * then, a full FIFO, INVITE's 401) may be answered by any reply of its
+ * family: a labeled command of that family pending on the link is not
+ * the reply's for sure.  B1: the primary (no labeled-response) asked
+ * MOTD m.test, its device @label=d1 MOTD o.test; m.test's 372 reached
+ * d1's batch. */
+static void test_pick_untracked_same_family_is_ambiguous(void **state)
+{
+  int fit, amb, i;
+
+  (void)state;
+  add(FWD_FAM_MOTD, "o.test", "Oo", "Bb", 2);          /* the device's d1 */
+  i = PICKU(372, ":- remote motd of m.test", "Bb", "Bb", 0, 1u << FWD_FAM_MOTD);
+  assert_int_equal(i, 0);
+  assert_true(amb);
+  /* a reply of another family is unaffected */
+  setup(NULL);
+  add(FWD_FAM_WHOIS, "muser", "Mm", "Bb", 2);
+  PICKU(311, "muser ~m h * :M", "Bb", "Bb", 0, 1u << FWD_FAM_MOTD);
+  assert_false(amb);
+  /* ... unless the untracked family has the numeric: WHOWAS shares 312 */
+  PICKU(312, "muser m.test :x", "Bb", "Bb", 0, 1u << FWD_FAM_WHOWAS);
+  assert_true(amb);
+  /* INVITE's target gone (review N1, B3): its 401 is not told from the
+   * WHOIS's; the rest of the WHOIS is */
+  PICKU(401, "muser :No such nick", "Bb", "Bb", 0, FWD_UNTRACKED_NOSUCHNICK);
+  assert_true(amb);
+  PICKU(311, "muser ~m h * :M", "Bb", "Bb", 0, FWD_UNTRACKED_NOSUCHNICK);
+  assert_false(amb);
+}
+
+/* (review M1) Once the primary's command is tracked too (unlabeled, an
+ * entry of its own), the 375 that names m.test is the primary's and the
+ * device's batch takes nothing of it; the lines that name nothing are
+ * ambiguous between two servers. */
+static void test_pick_session_members_both_tracked(void **state)
+{
+  int fit, amb;
+
+  (void)state;
+  add(FWD_FAM_MOTD, "m.test", "Mm", "Bb", 1);          /* primary, plain */
+  add(FWD_FAM_MOTD, "o.test", "Oo", "Bb", 2);          /* device d1 */
+  assert_int_equal(PICK(375, ":- m.test Message of the Day - ", "Bb", "Bb", 0), 0);
+  assert_false(amb);
+  PICK(372, ":- remote motd of m.test", "Bb", "Bb", 0);
+  assert_true(amb);
+}
+
+/* (review N2) A 402/481 while a command of unknown replies (CONNECT,
+ * RPING, ...) is outstanding may be that command's: it ends no label. */
+static void test_pick_generic_with_untracked_unknown(void **state)
+{
+  int fit, amb;
+
+  (void)state;
+  add(FWD_FAM_STATS, "k", "Mm", "Bb", 1);
+  assert_int_equal(PICKU(481, ":Permission Denied", "Bb", "Bb", 0, FWD_UNTRACKED_GENERIC), -1);
+  assert_int_equal(PICKU(219, "k :End of /STATS report", "Bb", "Bb", 0, FWD_UNTRACKED_GENERIC), 0);
+  assert_false(amb);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -360,6 +424,9 @@ int main(void)
     cmocka_unit_test_setup(test_pick_overlapping_families, setup),
     cmocka_unit_test_setup(test_pick_generic_errors, setup),
     cmocka_unit_test_setup(test_pick_names_elements, setup),
+    cmocka_unit_test_setup(test_pick_untracked_same_family_is_ambiguous, setup),
+    cmocka_unit_test_setup(test_pick_session_members_both_tracked, setup),
+    cmocka_unit_test_setup(test_pick_generic_with_untracked_unknown, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -84,6 +84,8 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "forwarded_label.h"
+#include "fwd_match.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -210,6 +212,9 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     add_invite(acptr, chptr);
     sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H", cli_name(acptr), chptr);
   } else if (!IsLocalChannel(chptr->chname)) {
+    /* The user's server answers ERR_NOSUCHNICK if the user is gone: no
+     * labeled WHOIS reply naming the nick is told from that meanwhile. */
+    fwd_label_note_untracked(sptr, FWD_UNTRACKED_NOSUCHNICK);
     sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
                   chptr->creationtime);
   }

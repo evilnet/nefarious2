@@ -121,19 +121,32 @@ struct FwdView {
   long age;                 /**< seconds since it was sent */
 };
 
+/** Bit of an fwd_pick() \a untracked mask: a command whose replies are
+ * not known (CONNECT, RPING, REHASH, ...) is outstanding -- it can be
+ * refused with ERR_NOSUCHSERVER or ERR_NOPRIVILEGES. */
+#define FWD_UNTRACKED_GENERIC (1u << 31)
+
+/** Bit of an fwd_pick() \a untracked mask: a command that a remote
+ * server may answer with ERR_NOSUCHNICK (INVITE of a user there) is
+ * outstanding -- a 401 naming that nick is not told from a WHOIS's. */
+#define FWD_UNTRACKED_NOSUCHNICK (1u << 30)
+
 /** Pick the pending command a reply without a msgid answers.
  *
  * Candidates are the commands sent out over \a link, no longer ago than
- * FWD_DEADLINE, whose family and
- * subject the reply fits (an fwd_numeric_generic() error fits every
- * command on \a link).  When the reply's source is its true origin
- * (\a source_true: the asker is an oper, whose replies no server relays
- * under its own name), candidates sent to another server than \a source
- * are dropped -- unless a candidate's family has lines from the hops on
- * the way, or the reply is a generic error, either of which a server
- * other than the destination can send.  Of what is left, the oldest is
- * picked; if they were not all sent to the same server, the reply is
- * \a ambiguous: the caller must label it for none of them.
+ * FWD_DEADLINE, whose family and subject the reply fits (an
+ * fwd_numeric_generic() error fits every command on \a link).  When the
+ * reply's source is its true origin (\a source_true: the asker is an
+ * oper, whose replies no server relays under its own name), candidates
+ * sent to another server than \a source are dropped -- unless a
+ * candidate's family has lines from the hops on the way, or the reply is
+ * a generic error, either of which a server other than the destination
+ * can send.  Of what is left, the oldest is picked; the reply is
+ * \a ambiguous -- the caller must label it for none of them -- if they
+ * were not all sent to the same server, or if a command of a family that
+ * has this numeric is not tracked and may be answered by it
+ * (\a untracked).  A generic error while a command of unknown
+ * replies is outstanding (FWD_UNTRACKED_GENERIC) is nobody's.
  *
  * @param[in] v The asker's pending commands.
  * @param[in] n Number of them.
@@ -142,6 +155,9 @@ struct FwdView {
  * @param[in] link Numeric of the link the reply came over.
  * @param[in] source Numeric of the server the reply names as its source.
  * @param[in] source_true Whether \a source is the reply's origin.
+ * @param[in] untracked Families (1 << enum FwdFamily) of which a command
+ *   the asker sent is not tracked and may still be answered,
+ *   FWD_UNTRACKED_GENERIC and FWD_UNTRACKED_NOSUCHNICK.
  * @param[out] cand cand[i] set to 1 for every candidate, else 0 (n entries).
  * @param[out] fit How the reply fits the picked command (enum FwdFit).
  * @param[out] ambiguous Set to 1 if the candidates could not be told apart.
@@ -149,7 +165,7 @@ struct FwdView {
  */
 extern int fwd_pick(const struct FwdView *v, int n, int numeric,
                     const char *params, const char *link, const char *source,
-                    int source_true, unsigned char *cand, int *fit,
-                    int *ambiguous);
+                    int source_true, unsigned int untracked,
+                    unsigned char *cand, int *fit, int *ambiguous);
 
 #endif /* INCLUDED_fwd_match_h */
