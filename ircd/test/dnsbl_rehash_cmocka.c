@@ -186,6 +186,49 @@ static void cancelled_request_freed_by_last_answer(void **state)
   assert_int_equal(completes, 0);
 }
 
+/** Two entries for one domain whose indexes the parser drops (250 and
+ * 251 are past the 0-31 reply values: both match every value) share
+ * domain and bitmask; each query's answer is still judged by its own
+ * entry -- and after a rehash that removes the first, the second's
+ * answers go to the second. */
+static void same_domain_entries_keep_their_own_answers(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+
+  dnsbl_clear_servers();
+  dnsbl_add_server("bl.test", "250", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl.test", "251", 0, DNSBL_ACT_MARK, "listed", 0);
+  /* the list: 251 (added last) first, then 250 */
+  dnsbl_check(&client, &req);
+  assert_int_equal(nqueries, 2);
+  answer(0, 1, 2);                         /* the 251 entry: listed */
+  answer(1, 0, 0);                         /* the 250 entry: not */
+  assert_int_equal(req->action, DNSBL_ACT_MARK);
+  dnsbl_cancel(req);
+
+  req = NULL;
+  nqueries = 0;
+  memset(dnsbl_cache, 0, sizeof(dnsbl_cache));   /* (not served from it) */
+  dnsbl_check(&client, &req);
+  answer(0, 0, 0);                         /* 251: not */
+  answer(1, 1, 2);                         /* 250: listed */
+  assert_int_equal(req->action, DNSBL_ACT_BLOCK_ALL);
+  dnsbl_cancel(req);
+
+  req = NULL;
+  nqueries = 0;
+  memset(dnsbl_cache, 0, sizeof(dnsbl_cache));   /* (not served from it) */
+  dnsbl_check(&client, &req);
+  dnsbl_clear_servers();                   /* the rehash drops 250 */
+  dnsbl_add_server("bl.test", "251", 0, DNSBL_ACT_MARK, "listed", 0);
+  answer(1, 1, 2);                         /* 250's answer: ignored */
+  assert_int_equal(req->action, DNSBL_ACT_NONE);
+  answer(0, 1, 2);                         /* 251's: its own entry */
+  assert_int_equal(req->action, DNSBL_ACT_MARK);
+  assert_int_equal(dnsbl_first_server()->hits, 1);
+  dnsbl_cancel(req);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -194,6 +237,7 @@ int main(void)
     cmocka_unit_test_setup(kept_entry_judges_by_its_live_action, setup),
     cmocka_unit_test_setup(changed_index_answer_ignored, setup),
     cmocka_unit_test_setup(cancelled_request_freed_by_last_answer, setup),
+    cmocka_unit_test_setup(same_domain_entries_keep_their_own_answers, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
