@@ -10,6 +10,7 @@ import {
   isIPv4,
   getCacheEntry,
   setCacheEntry,
+  deleteCacheEntry,
   getCacheSize,
   lookupDNSBL,
   matchesDNSBL,
@@ -382,8 +383,16 @@ export class IAuthDaemon {
         // Start new lookup
         this.debug(`Starting DNS lookup for ${query}`);
         setCacheEntry(query, null); // Mark as pending
-        results = await lookupDNSBL(reversedIp, dnsbl.server, this.config.dnsTimeout);
-        setCacheEntry(query, results);
+        const answer = await lookupDNSBL(reversedIp, dnsbl.server, this.config.dnsTimeout);
+        results = answer.results;
+        if (answer.definite) {
+          setCacheEntry(query, results);
+        } else {
+          // No answer from the list: not listed for this client only. Cache
+          // nothing, so the next connection from the address asks again.
+          deleteCacheEntry(query);
+          this.debug(`DNS lookup for ${query} failed (${answer.error}); not cached`);
+        }
       }
 
       // Process results

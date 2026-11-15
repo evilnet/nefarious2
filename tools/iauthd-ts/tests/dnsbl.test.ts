@@ -2,7 +2,8 @@
  * Unit tests for DNSBL functions
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { promises as dnsPromises } from 'node:dns';
 import {
   reverseIPv4,
   isIPv4,
@@ -11,6 +12,7 @@ import {
   getCacheSize,
   matchesDNSBL,
   parseQuery,
+  lookupDNSBL,
 } from '../src/dnsbl.js';
 import type { DNSBLConfig } from '../src/types.js';
 
@@ -223,6 +225,56 @@ describe('DNSBL Functions', () => {
       expect(parseQuery('invalid')).toBeNull();
       expect(parseQuery('dnsbl.example.com')).toBeNull();
       expect(parseQuery('')).toBeNull();
+    });
+  });
+
+  /** A rejection as node's dns.resolve4 gives it (err.code as seen against a real server) */
+  function dnsError(code: string): Error {
+    return Object.assign(new Error(`queryA ${code} x`), { code });
+  }
+
+  describe('lookupDNSBL', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('returns the A records as a definite answer', async () => {
+      vi.spyOn(dnsPromises, 'resolve4').mockResolvedValue(['127.0.0.2'] as never);
+      const answer = await lookupDNSBL('1.0.0.10', 'bl.example', 1);
+      expect(answer).toEqual({ results: ['127.0.0.2'], definite: true });
+      expect(dnsPromises.resolve4).toHaveBeenCalledWith('1.0.0.10.bl.example');
+    });
+
+    // NXDOMAIN and NODATA: the list says the address is not on it.
+    for (const code of ['ENOTFOUND', 'ENODATA']) {
+      it(`treats ${code} as a definite "not listed"`, async () => {
+        vi.spyOn(dnsPromises, 'resolve4').mockRejectedValue(dnsError(code));
+        const answer = await lookupDNSBL('1.0.0.10', 'bl.example', 1);
+        expect(answer.results).toEqual([]);
+        expect(answer.definite).toBe(true);
+      });
+    }
+
+    // SERVFAIL, REFUSED, c-ares timeout, server unreachable, anything else:
+    // no answer from the list -- "not listed" for now, but not definite.
+    for (const code of ['ESERVFAIL', 'EREFUSED', 'ETIMEOUT', 'ECONNREFUSED', 'EBADRESP', undefined]) {
+      it(`treats ${code ?? 'an error without a code'} as a failed lookup, not a definite answer`, async () => {
+        const err = code ? dnsError(code) : new Error('boom');
+        vi.spyOn(dnsPromises, 'resolve4').mockRejectedValue(err);
+        const answer = await lookupDNSBL('1.0.0.10', 'bl.example', 1);
+        expect(answer.results).toEqual([]);
+        expect(answer.definite).toBe(false);
+        expect(answer.error).toBeTruthy();
+      });
+    }
+
+    it('gives up after the timeout with a failed (not definite) answer', async () => {
+      vi.spyOn(dnsPromises, 'resolve4').mockReturnValue(new Promise(() => {}) as never);
+      const t0 = Date.now();
+      const answer = await lookupDNSBL('1.0.0.10', 'bl.example', 0.2);
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(answer.results).toEqual([]);
+      expect(answer.definite).toBe(false);
     });
   });
 });
