@@ -360,6 +360,16 @@ const char* conf_eval_crule(const char* name, int mask)
   return 0;
 }
 
+/** Detach one conf from a client (the class a DNSBL verdict gave, when
+ * the verdict is undone: s_auth.c auth_dnsbl_restart()).
+ * @param cptr Client to operate on.
+ * @param aconf The conf to detach.
+ */
+void conf_detach(struct Client *cptr, struct ConfItem *aconf)
+{
+  detach_conf(cptr, aconf);
+}
+
 /** Remove all conf entries from the client except those which match
  * the status field mask.
  * @param cptr Client to operate on.

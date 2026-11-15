@@ -242,6 +242,13 @@ enum AuthorizationCheckResult attach_conf(struct Client *cptr, struct ConfItem *
   attached_conf = aconf;
   return ACR_OK;
 }
+static int detached;
+void conf_detach(struct Client *cptr, struct ConfItem *aconf)
+{
+  if (aconf == attached_conf)
+    attached_conf = NULL;
+  detached++;
+}
 char *get_client_class(struct Client *acptr) { return "class"; }
 const char *get_client_name(const struct Client *sptr, int showip) { return "name"; }
 int hAddClient(struct Client *cptr) { return 0; }
@@ -341,6 +348,7 @@ static int setup(void **state)
   verdicts = marks_applied = marks_unapplied = 0;
   verdict_class = NULL;
   attached_conf = NULL;
+  detached = 0;
   vip_class.valid = 1;
   expect_exit = NULL;
   CurrentTime = time(NULL);
@@ -812,6 +820,56 @@ static void dnsbl_class_assigned_as_iauth_does(void **state)
   assert_int_equal(a->registered, 1);
 }
 
+/** The gateway listed on a class= entry, IAuth's I to a clean address
+ * (after the gateway's verdict was in, before IAuth's D): the client is
+ * not put in that class.  The reverse -- a clean gateway, a listed client
+ * address -- puts it there. */
+static void dnsbl_class_follows_the_final_address(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+  char ip[] = "192.0.2.99";
+  char *params[] = { ip, NULL };
+  int listed_gateway;
+
+  for (listed_gateway = 1; listed_gateway >= 0; listed_gateway--) {
+    a = new_client(0, KEEPS);
+    attached_conf = NULL;
+    a->auth->dnsbl_request = &dnsbl_reqs[0];          /* the gateway's */
+    FlagSet(&a->auth->flags, AR_IAUTH_PENDING);
+    verdict_blocked = 0;
+    verdict_action = DNSBL_ACT_MARK;
+    verdict_class = listed_gateway ? "vip" : NULL;
+    assert_int_equal(check_auth_finished(a->auth), 0);
+    assert_null(attached_conf);                       /* not yet */
+    iauth_cmd_ip_address(NULL, &a->cli, 1, params);   /* the I line */
+    verdict_class = listed_gateway ? NULL : "vip";    /* the new address's */
+    FlagClr(&a->auth->flags, AR_DNSBL_PENDING);
+    FlagClr(&a->auth->flags, AR_IAUTH_PENDING);
+    assert_int_equal(check_auth_finished(a->auth), 0);
+    if (listed_gateway)
+      assert_null(attached_conf);
+    else
+      assert_non_null(attached_conf);
+  }
+}
+
+/** A class a verdict already attached is detached when the address
+ * changes anyway (auth_dnsbl_restart()), with the marks. */
+static void address_change_detaches_the_dnsbl_class(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  FlagSet(&a->auth->flags, AR_DNSBL_APPLIED);
+  attached_conf = &vip_conf;
+  a->auth->dnsbl_conf = &vip_conf;
+  auth_dnsbl_restart(a->auth);
+  assert_int_equal(detached, 1);
+  assert_null(attached_conf);
+  assert_null(a->auth->dnsbl_conf);
+  destroy_auth_request(a->auth);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -836,6 +894,8 @@ int main(void)
     cmocka_unit_test_setup(iauth_kill_of_a_natively_whitelisted_client_at_once, setup),
     cmocka_unit_test_setup(native_whitelist_admits, setup),
     cmocka_unit_test_setup(dnsbl_class_assigned_as_iauth_does, setup),
+    cmocka_unit_test_setup(dnsbl_class_follows_the_final_address, setup),
+    cmocka_unit_test_setup(address_change_detaches_the_dnsbl_class, setup),
   };
 
   event_init(64);

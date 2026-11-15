@@ -278,6 +278,7 @@ extern struct ConfItem* find_conf_byname(struct SLink* lp, const char *name, int
 extern struct ConfItem* conf_find_server(const char* name);
 
 extern void det_confs_butmask(struct Client *cptr, int mask);
+extern void conf_detach(struct Client *cptr, struct ConfItem *aconf);
 extern enum AuthorizationCheckResult attach_conf(struct Client *cptr, struct ConfItem *aconf);
 extern struct ConfItem* find_conf_exact(const char* name, struct Client *cptr, int statmask);
 extern enum AuthorizationCheckResult conf_check_client(struct Client *cptr);

@@ -242,6 +242,7 @@ int add_mark(struct Client *sptr, const char *dnsbl) { return 0; }
 void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request) {}
 void dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request) {}
 const char *dnsbl_class(const struct DNSBLRequest *request) { return NULL; }
+void conf_detach(struct Client *cptr, struct ConfItem *aconf) {}
 char *get_client_class(struct Client *acptr) { return "class"; }
 const char *get_client_name(const struct Client *sptr, int showip) { return "name"; }
 int hAddClient(struct Client *cptr) { return 0; }

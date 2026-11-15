@@ -144,6 +144,8 @@ struct AuthRequest {
   unsigned int        cookie;     /**< cookie the user must PONG */
   unsigned short      port;       /**< client's remote port number */
   struct DNSBLRequest *dnsbl_request; /**< native DNSBL check request */
+  struct ConfItem    *dnsbl_conf; /**< the class conf its verdict attached
+                                   * (class=), undone with the verdict */
   char deferred_nick[NICKLEN + 1]; /**< nick deferred due to bouncer ghost collision */
   struct AuthRequest* recheck_next; /**< next on #auth_recheck_list */
   struct IAuthSaid*   iauth_said; /**< what IAuth was told of the client */
@@ -338,7 +340,7 @@ static void iauth_stderr_callback(struct Event *ev);
 static int sendto_iauth(struct Client *cptr, const char *format, ...);
 static int preregister_user(struct Client *cptr);
 static int auth_assign_class(struct Client *cli, const char *name,
-                             const char *who);
+                             const char *who, struct ConfItem **attached);
 static void iauth_said_free(struct AuthRequest *auth);
 static void iauth_said_record(struct AuthRequest *auth, const char *line,
                               int untold);
@@ -855,7 +857,7 @@ static int check_auth_finished(struct AuthRequest *auth)
      * IAuth's D line would give it (auth_assign_class()). */
     if (dnsbl_class(auth->dnsbl_request)
         && auth_assign_class(auth->client, dnsbl_class(auth->dnsbl_request),
-                             "DNSBL") == CPTR_KILLED)
+                             "DNSBL", &auth->dnsbl_conf) == CPTR_KILLED)
       return CPTR_KILLED;
   }
 
@@ -1415,11 +1417,15 @@ void auth_dnsbl_restart(struct AuthRequest *auth)
     return;
   if (auth->dnsbl_request) {
     /* What a verdict on the old address gave the client goes with it:
-     * its marks and the whitelist's exemption (a refusal would have
-     * exited it). */
+     * its marks, the whitelist's exemption and its class (a refusal would
+     * have exited it). */
     if (FlagHas(&auth->flags, AR_DNSBL_APPLIED)) {
       dnsbl_unapply_marks(auth->client, auth->dnsbl_request);
       ClearDNSBLExempt(auth->client);
+      if (auth->dnsbl_conf) {             /* its class= */
+        conf_detach(auth->client, auth->dnsbl_conf);
+        auth->dnsbl_conf = NULL;
+      }
       FlagClr(&auth->flags, AR_DNSBL_APPLIED);
     }
     dnsbl_cancel(auth->dnsbl_request);
@@ -3855,11 +3861,12 @@ static struct ConfItem *auth_find_class_conf(const char *class_name)
  * @param[in] name The class.
  * @param[in] who Who asked ("iauth", "DNSBL"), for the notice when there
  *   is no such class.
+ * @param[out] attached If not NULL, the conf attached (or NULL).
  * @return CPTR_KILLED if the client was exited (its class is full, or it
  *   needs SASL that is not available), else zero.
  */
 static int auth_assign_class(struct Client *cli, const char *name,
-                             const char *who)
+                             const char *who, struct ConfItem **attached)
 {
   static time_t warn_time;
   struct ConfItem *aconf;
@@ -3872,6 +3879,8 @@ static int auth_assign_class(struct Client *cli, const char *name,
     switch (acr) {
     case ACR_OK:
       /* There should maybe be some way to set FLAG_DOID here.. */
+      if (attached)
+        *attached = aconf;
       break;
     case ACR_TOO_MANY_IN_CLASS:
       ++ServerStats->is_ref;
@@ -3941,7 +3950,7 @@ static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
 
   /* If a connection class was specified (and usable), assign the client to it. */
   if (!EmptyString(params[0])
-      && auth_assign_class(cli, params[0], "iauth") == CPTR_KILLED)
+      && auth_assign_class(cli, params[0], "iauth", NULL) == CPTR_KILLED)
     return CPTR_KILLED;
 
   return 1;
