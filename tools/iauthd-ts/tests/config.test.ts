@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readConfigFile } from '../src/config.js';
@@ -18,9 +18,7 @@ describe('Config Parser', () => {
   });
 
   afterAll(() => {
-    try {
-      unlinkSync(configPath);
-    } catch {}
+    rmSync(tempDir, { recursive: true, force: true });
   });
 
   it('should parse POLICY directive', () => {

@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { spawn, ChildProcess } from 'node:child_process';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
@@ -118,9 +118,7 @@ describe('IAuth Protocol Integration', () => {
   });
 
   afterAll(() => {
-    try {
-      unlinkSync(configPath);
-    } catch {}
+    rmSync(tempDir, { recursive: true, force: true });
   });
 
   describe('Startup Messages', () => {

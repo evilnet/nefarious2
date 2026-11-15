@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn, ChildProcess } from 'node:child_process';
-import { writeFileSync, unlinkSync, mkdtempSync, readFileSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
@@ -306,7 +306,7 @@ describe('DNSBL Integration Tests', () => {
       }
     } finally {
       await h?.close();
-      try { unlinkSync(configPath); } catch {}
+      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 

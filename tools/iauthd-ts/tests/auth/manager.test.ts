@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AuthManager } from '../../src/auth/manager.js';
@@ -27,6 +27,7 @@ describe('AuthManager', () => {
     } catch {
       // Ignore if files don't exist
     }
+    rmSync(tempDir, { recursive: true, force: true });
   });
 
   describe('initialization', () => {
