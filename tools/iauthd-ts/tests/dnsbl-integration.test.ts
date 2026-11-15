@@ -18,12 +18,29 @@ import { createInterface } from 'node:readline';
  * Mock DNS responses for testing
  * Maps reversed-IP.dnsbl-server to response IP(s)
  */
-const mockDnsResponses: Map<string, string[]> = new Map();
+const mockDnsResponses: Map<string, string[] | MockDnsSpec> = new Map();
+
+/**
+ * One answer of a scripted mock: A records, an error code (as node's
+ * dns.resolve4 reports it: ENOTFOUND, ENODATA, ESERVFAIL, ETIMEOUT, ...),
+ * or no answer at all (hang), optionally after delayMs.
+ */
+interface MockDnsStep {
+  answers?: string[];
+  code?: string;
+  hang?: boolean;
+  delayMs?: number;
+}
+
+/** A scripted mock: the n-th query of the name gets steps[n-1] (the last step repeats). */
+interface MockDnsSpec {
+  steps: MockDnsStep[];
+}
 
 /**
  * Set up a mock DNS response
  */
-function mockDns(clientIp: string, dnsblServer: string, responses: string[]): void {
+function mockDns(clientIp: string, dnsblServer: string, responses: string[] | MockDnsSpec): void {
   const reversed = clientIp.split('.').reverse().join('.');
   const query = `${reversed}.${dnsblServer}`;
   mockDnsResponses.set(query, responses);
@@ -39,6 +56,8 @@ function clearMockDns(): void {
 interface TestHarness {
   proc: ChildProcess;
   output: string[];
+  /** Every name the daemon asked the mock DNS for, in order */
+  dnsQueries: string[];
   send: (line: string) => void;
   waitFor: (pattern: RegExp, timeout?: number) => Promise<string>;
   getMarks: (clientId: number) => string[];
@@ -65,8 +84,23 @@ const mockResponses = new Map(${mockResponses});
 
 // Override dns.resolve4
 const originalResolve4 = dns.resolve4.bind(dns);
+const queryCounts = new Map();
 dns.resolve4 = async (hostname) => {
   const mock = mockResponses.get(hostname);
+  const n = (queryCounts.get(hostname) ?? 0) + 1;
+  queryCounts.set(hostname, n);
+  process.stderr.write('mockdns-query ' + hostname + '\\n');
+  if (mock !== undefined && !Array.isArray(mock)) {
+    const step = mock.steps[Math.min(n, mock.steps.length) - 1];
+    if (step.delayMs) await new Promise((r) => setTimeout(r, step.delayMs));
+    if (step.hang) return new Promise(() => {});
+    if (step.code) {
+      const err = new Error('queryA ' + step.code + ' ' + hostname);
+      err.code = step.code;
+      throw err;
+    }
+    return step.answers ?? [];
+  }
   if (mock !== undefined) {
     if (mock.length === 0) {
       const err = new Error('NXDOMAIN');
@@ -94,9 +128,13 @@ import('${join(import.meta.dirname, '..', 'src', 'index.ts').replace(/\\/g, '/')
   const rl = createInterface({ input: proc.stdout! });
   rl.on('line', (line) => output.push(line));
 
-  proc.stderr?.on('data', (data) => {
+  const dnsQueries: string[] = [];
+  const errRl = createInterface({ input: proc.stderr! });
+  errRl.on('line', (line) => {
+    const m = line.match(/^mockdns-query (\S+)/);
+    if (m) dnsQueries.push(m[1]);
     // Uncomment for debugging:
-    // console.error('stderr:', data.toString());
+    // else console.error('stderr:', line);
   });
 
   const send = (line: string) => {
@@ -168,7 +206,7 @@ import('${join(import.meta.dirname, '..', 'src', 'index.ts').replace(/\\/g, '/')
   await waitFor(/^S iauthd-ts/);
   await new Promise(r => setTimeout(r, 100));
 
-  return { proc, output, send, waitFor, getMarks, wasAccepted, wasRejected, close };
+  return { proc, output, dnsQueries, send, waitFor, getMarks, wasAccepted, wasRejected, close };
 }
 
 /**
@@ -636,6 +674,89 @@ describe('DNSBL Integration Tests', () => {
       // Check the D message includes the class
       const acceptLine = harness.output.find(l => l.startsWith('D 0 '));
       expect(acceptLine).toContain('Trusted');
+    });
+  });
+
+  // Only a definite answer (A records, NXDOMAIN, NODATA) is cached.  A lookup
+  // that times out or fails counts as "not listed" for that one client and is
+  // asked again for the next connection from the address.
+  describe('Failed lookups are not cached', () => {
+    beforeEach(async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSTIMEOUT 1
+#IAUTH CACHETIME 3600
+#IAUTH DNSBL server=wl.dnsbl index=2 whitelist
+#IAUTH DNSBL server=block.dnsbl index=2 block=all
+`);
+    });
+
+    for (const code of ['ESERVFAIL', 'EREFUSED', 'ECONNREFUSED', 'ETIMEOUT']) {
+      it(`a block list failing once (${code}) passes that client only; the next connection is asked again`, async () => {
+        mockDns('10.1.0.1', 'block.dnsbl', { steps: [{ code }, { answers: ['127.0.0.2'] }] });
+        harness = await createHarness(configPath);
+
+        await connectClient(harness, 0, '10.1.0.1');
+        expect(harness.wasAccepted(0)).toBe(true);
+
+        await connectClient(harness, 1, '10.1.0.1');
+        expect(harness.wasRejected(1)).toBe(true);
+        expect(harness.dnsQueries.filter(q => q === '1.0.1.10.block.dnsbl')).toHaveLength(2);
+      });
+    }
+
+    it('a block list that never answers passes the client in bounded time; the next connection is asked again', async () => {
+      mockDns('10.1.0.2', 'block.dnsbl', { steps: [{ hang: true }, { answers: ['127.0.0.2'] }] });
+      harness = await createHarness(configPath);
+
+      const t0 = Date.now();
+      await connectClient(harness, 0, '10.1.0.2');
+      expect(harness.wasAccepted(0)).toBe(true);
+      expect(Date.now() - t0).toBeLessThan(2500);
+
+      await connectClient(harness, 1, '10.1.0.2');
+      expect(harness.wasRejected(1)).toBe(true);
+    });
+
+    it('a whitelist slow once does not refuse the whitelisted address for CACHETIME', async () => {
+      mockDns('10.1.0.3', 'wl.dnsbl', { steps: [{ hang: true }, { answers: ['127.0.0.2'] }] });
+      mockDns('10.1.0.3', 'block.dnsbl', ['127.0.0.2']);
+      harness = await createHarness(configPath);
+
+      // The whitelist did not answer in time: for this client it is not listed.
+      await connectClient(harness, 0, '10.1.0.3');
+      expect(harness.wasRejected(0)).toBe(true);
+
+      // The next connection asks the whitelist again and is let in.
+      await connectClient(harness, 1, '10.1.0.3');
+      expect(harness.wasAccepted(1)).toBe(true);
+      expect(harness.wasRejected(1)).toBe(false);
+    });
+
+    for (const code of ['ENOTFOUND', 'ENODATA']) {
+      it(`a definite "not listed" (${code}) is cached`, async () => {
+        mockDns('10.1.0.4', 'block.dnsbl', { steps: [{ code }, { answers: ['127.0.0.2'] }] });
+        harness = await createHarness(configPath);
+
+        await connectClient(harness, 0, '10.1.0.4');
+        await connectClient(harness, 1, '10.1.0.4');
+
+        expect(harness.wasAccepted(0)).toBe(true);
+        expect(harness.wasAccepted(1)).toBe(true);
+        expect(harness.dnsQueries.filter(q => q === '4.0.1.10.block.dnsbl')).toHaveLength(1);
+      });
+    }
+
+    it('a listed answer is cached', async () => {
+      mockDns('10.1.0.5', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'] }, { code: 'ENOTFOUND' }] });
+      harness = await createHarness(configPath);
+
+      await connectClient(harness, 0, '10.1.0.5');
+      await connectClient(harness, 1, '10.1.0.5');
+
+      expect(harness.wasRejected(0)).toBe(true);
+      expect(harness.wasRejected(1)).toBe(true);
+      expect(harness.dnsQueries.filter(q => q === '5.0.1.10.block.dnsbl')).toHaveLength(1);
     });
   });
 });

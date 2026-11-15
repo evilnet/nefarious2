@@ -3,7 +3,7 @@
  */
 
 import { promises as dns } from 'node:dns';
-import type { CacheEntry, DNSBLConfig } from './types.js';
+import type { CacheEntry, DNSBLAnswer, DNSBLConfig } from './types.js';
 
 /** Global DNSBL result cache */
 const cache = new Map<string, CacheEntry>();
@@ -66,33 +66,54 @@ export function getCacheSize(): number {
 }
 
 /**
+ * Delete a cache entry
+ */
+export function deleteCacheEntry(query: string): void {
+  cache.delete(query);
+}
+
+/**
+ * Error codes from dns.resolve4 that are a definite "not listed": the list's
+ * server answered NXDOMAIN (ENOTFOUND) or NODATA (ENODATA).  Every other
+ * failure -- SERVFAIL (ESERVFAIL), REFUSED (EREFUSED), the resolver's own
+ * timeout (ETIMEOUT), an unreachable server (ECONNREFUSED), our DNSTIMEOUT --
+ * says nothing about the address.
+ */
+const NOT_LISTED_CODES = new Set(['ENOTFOUND', 'ENODATA']);
+
+/**
  * Perform a DNSBL lookup
- * Returns array of result IPs or empty array if not listed
+ * Returns the result IPs ([] if not listed).  definite is false when the
+ * lookup failed or timed out: the address then counts as not listed for the
+ * client at hand, but the answer must not be cached.
  */
 export async function lookupDNSBL(
   reversedIp: string,
   dnsblServer: string,
   timeout: number
-): Promise<string[]> {
+): Promise<DNSBLAnswer> {
   const query = `${reversedIp}.${dnsblServer}`;
+  let timer: NodeJS.Timeout | undefined;
 
   try {
-    // Create a DNS resolver with timeout
-    const resolver = new dns.Resolver();
-    resolver.setServers(['8.8.8.8', '8.8.4.4']); // Use Google DNS as fallback
-
     // Race against timeout
     const timeoutPromise = new Promise<string[]>((_, reject) => {
-      setTimeout(() => reject(new Error('DNS timeout')), timeout * 1000);
+      timer = setTimeout(() => reject(new Error('DNS timeout')), timeout * 1000);
     });
 
     const lookupPromise = dns.resolve4(query);
-    const result = await Promise.race([lookupPromise, timeoutPromise]);
+    const results = await Promise.race([lookupPromise, timeoutPromise]);
 
-    return result;
+    return { results, definite: true };
   } catch (err) {
-    // NXDOMAIN or timeout = not listed
-    return [];
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code && NOT_LISTED_CODES.has(code)) {
+      return { results: [], definite: true };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return { results: [], definite: false, error: code ?? message };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
