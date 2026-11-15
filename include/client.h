@@ -369,6 +369,10 @@ enum Flag
                                      *   its completed login stands until the exchange
                                      *   ends, and the exchange has not completed
                                      *   (IsSASLExchangeDone()) */
+    FLAG_WEBIRC_BADPASS,            /**< A WEBIRC from this connection failed the
+                                     *   WebIRC block's password and was handed to
+                                     *   IAuth (m_webirc.c): no later WEBIRC is
+                                     *   checked */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -1457,6 +1461,8 @@ struct Client {
 #define IsOperPending(x)        HasFlag(x, FLAG_OPER_PENDING)
 /** Return non-zero if the client has pending async WEBIRC verification. */
 #define IsWebIRCPending(x)      HasFlag(x, FLAG_WEBIRC_PENDING)
+/** Return non-zero if a WEBIRC from the client failed a block's password. */
+#define IsWebIRCBadPass(x)      HasFlag(x, FLAG_WEBIRC_BADPASS)
 /** Return non-zero if the client has pending async SETHOST verification. */
 #define IsSetHostPending(x)     HasFlag(x, FLAG_SETHOST_PENDING)
 /** Return non-zero if the client has an active UDP ping request. */
@@ -1648,6 +1654,8 @@ struct Client {
 #define SetOperPending(x)       SetFlag(x, FLAG_OPER_PENDING)
 /** Mark a client as having pending async WEBIRC verification. */
 #define SetWebIRCPending(x)     SetFlag(x, FLAG_WEBIRC_PENDING)
+/** Mark a client whose WEBIRC failed a block's password (handed to IAuth). */
+#define SetWebIRCBadPass(x)     SetFlag(x, FLAG_WEBIRC_BADPASS)
 /** Mark a client as having pending async SETHOST verification. */
 #define SetSetHostPending(x)    SetFlag(x, FLAG_SETHOST_PENDING)
 /** Mark a client as having a pending UDP ping. */

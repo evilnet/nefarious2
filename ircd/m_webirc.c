@@ -154,8 +154,13 @@ static int webirc_unmatched(struct Client *cptr, int res, const char *found,
 {
   if (cli_auth(cptr)
       && !auth_set_webirc(cli_auth(cptr), password, username, hostname,
-                          ipaddr, options))
+                          ipaddr, options)) {
+    /* A wrong password kept the connection: it does not get another
+     * guess at the block's (m_webirc()). */
+    if (res == 1)
+      SetWebIRCBadPass(cptr);
     return 0;
+  }
   if (found) {
     sendto_opmask_butone_global(&me, SNO_WEBIRC,
                                 "WEBIRC Attempt from %s [%s]: %s when the "
@@ -433,6 +438,16 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Already pending async verification? */
   if (IsWebIRCPending(cptr))
     return 0;
+
+  /* One guess at a block's password per connection: a wrong one handed to
+   * IAuth (webirc_unmatched()) left the connection up, and any later WEBIRC
+   * on it is refused as a wrong password is without IAuth, unchecked. */
+  if (IsWebIRCBadPass(cptr)) {
+    sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                "WEBIRC Attempt with invalid password from %s [%s]",
+                                cli_sockhost(sptr), cli_sock_ip(sptr));
+    return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
+  }
 
   /* These shouldn't be empty, but just in case... */
   if (!EmptyString(parv[1]))

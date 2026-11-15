@@ -490,6 +490,53 @@ static void no_block_handed_to_iauth_or_refused(void **state)
   assert_int_equal(untrusted_told, 0);
 }
 
+/** One guess per connection: a wrong password handed to IAuth (w) keeps
+ * the connection, and a later WEBIRC on it is refused as a wrong password
+ * is without w -- nothing is checked again, whatever it carries. */
+static void iauth_w_one_password_guess_per_connection(void **state)
+{
+  iauth_w = 1;
+  webirc("wrong");
+  finish_check(CRYPT_VERIFY_NOMATCH);
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 1);
+
+  last_sno[0] = '\0';
+  webirc("pw");
+  assert_int_equal(submitted, 1);                 /* no second check */
+  assert_int_equal(sync_checks, 0);
+  assert_string_equal(exit_reason, "WEBIRC Password invalid for your host");
+  assert_non_null(strstr(last_sno, "WEBIRC Attempt with invalid password"));
+  assert_int_equal(untrusted_told, 1);
+  assert_false(IsWebIRC(&client));
+  assert_string_equal(cli_sock_ip(&client), "127.0.0.1");
+
+  setup(state);                    /* the same without the thread pool */
+  iauth_w = 1;
+  async_available = 0;
+  webirc("wrong");
+  assert_null(exit_reason);
+  assert_int_equal(sync_checks, 1);
+  webirc("pw");
+  assert_int_equal(sync_checks, 1);
+  assert_string_equal(exit_reason, "WEBIRC Password invalid for your host");
+  assert_false(IsWebIRC(&client));
+}
+
+/** No block matches the gateway: there is no password here to guess, and
+ * each WEBIRC is handed to IAuth (w) as stock master does. */
+static void iauth_w_unmatched_host_handed_each_time(void **state)
+{
+  have_block = 0;
+  iauth_w = 1;
+  webirc("pw");
+  webirc("pw2");
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 2);
+  assert_int_equal(submitted, 0);
+  assert_int_equal(sync_checks, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -507,6 +554,8 @@ int main(void)
     cmocka_unit_test_setup(iauth_w_wrong_password_handed_to_iauth, setup),
     cmocka_unit_test_setup(iauth_w_rehash_refusal_handed_to_iauth, setup),
     cmocka_unit_test_setup(no_block_handed_to_iauth_or_refused, setup),
+    cmocka_unit_test_setup(iauth_w_one_password_guess_per_connection, setup),
+    cmocka_unit_test_setup(iauth_w_unmatched_host_handed_each_time, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
