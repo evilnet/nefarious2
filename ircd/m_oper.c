@@ -120,10 +120,54 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
 struct oper_verify_ctx {
   int fd;                         /**< Client file descriptor */
   unsigned int cookie;            /**< Unique cookie to verify client identity */
-  char name[NICKLEN + 1];         /**< Oper name for logging */
-  struct ConfItem *aconf;         /**< Oper config block */
+  char *name;                     /**< The Operator block's name */
+  char *passwd;                   /**< The password (hash) it was checked
+                                       against.  No pointer to the block
+                                       itself: a rehash during the check
+                                       frees or replaces it. */
   char label[64];                 /**< The OPER line's label ("" = none) */
 };
+
+/** Free an OPER check's context. */
+static void oper_ctx_free(struct oper_verify_ctx *ctx)
+{
+  MyFree(ctx->name);
+  MyFree(ctx->passwd);
+  MyFree(ctx);
+}
+
+/** The Operator block an OPER whose password check has finished is judged
+ * by: the one the configuration in force NOW gives the client for \a name
+ * (find_conf_exact(): name, and user@host or IP), still with the password
+ * the check was made against and the client's SSL fingerprint.  A rehash
+ * during the check may have removed the block, narrowed its hosts or
+ * changed its password: then there is none.  Its class and privileges are
+ * the live block's.
+ * @param[in] sptr The client.
+ * @param[in] name The block's name, as the OPER gave it.
+ * @param[in] passwd The password (hash) that was verified.
+ * @param[out] why Why there is none (for the failure notice).
+ * @return The live block, or NULL.
+ */
+static struct ConfItem *oper_live_block(struct Client *sptr, const char *name,
+                                        const char *passwd, const char **why)
+{
+  struct ConfItem *aconf = find_conf_exact(name, sptr, CONF_OPERATOR);
+
+  if (!aconf || IsIllegal(aconf)) {
+    *why = "no operator block";
+    return NULL;
+  }
+  if (!aconf->passwd || strcmp(aconf->passwd, passwd)) {
+    *why = "password mis-match";
+    return NULL;
+  }
+  if (!verify_sslclifp(sptr, aconf)) {
+    *why = "SSL fingerprint mismatch";
+    return NULL;
+  }
+  return aconf;
+}
 
 /** labeled-response for the asynchronous answer: the OPER line was not
  * ACKed (its label was kept in the context); its answer -- several lines
@@ -169,10 +213,12 @@ static void oper_password_verified(int result, void *arg)
   struct oper_verify_ctx *ctx = arg;
   struct Client *sptr;
   struct oper_label_state st;
+  struct ConfItem *aconf = NULL;
+  const char *why = "";
 
   /* Look up client by fd */
   if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
-    MyFree(ctx);
+    oper_ctx_free(ctx);
     return;
   }
 
@@ -185,7 +231,7 @@ static void oper_password_verified(int result, void *arg)
       || !ctx->cookie || cli_opercookie(sptr) != ctx->cookie) {
     Debug((DEBUG_DEBUG, "oper_password_verified: client gone or not pending "
            "(fd %d)", ctx->fd));
-    MyFree(ctx);
+    oper_ctx_free(ctx);
     return;
   }
 
@@ -194,21 +240,31 @@ static void oper_password_verified(int result, void *arg)
   cli_opercookie(sptr) = 0;
 
   oper_answer_begin(sptr, ctx->label, &st);
-  if (result == CRYPT_VERIFY_MATCH) {
-    /* Password matched - complete OPER */
+  if (result == CRYPT_VERIFY_MATCH
+      && !(aconf = oper_live_block(sptr, ctx->name, ctx->passwd, &why))) {
+    /* The password matched the block as it was; the configuration in force
+     * now has no such block for this client (a rehash during the check). */
+    send_reply(sptr, strcmp(why, "password mis-match") ? ERR_NOOPERHOST
+               : ERR_PASSWDMISMATCH);
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP,
+        "Failed OPER attempt by %s (%s@%s) (%s after a rehash during the "
+        "password check)", cli_name(sptr), cli_user(sptr)->username,
+        cli_user(sptr)->realhost, why);
+  } else if (result == CRYPT_VERIFY_MATCH) {
+    /* Password matched - complete OPER, under the live block */
     if (MyUser(sptr)) {
-      int attach_result = attach_conf(sptr, ctx->aconf);
+      int attach_result = attach_conf(sptr, aconf);
       if ((ACR_OK != attach_result) && (ACR_ALREADY_AUTHORIZED != attach_result)) {
         send_reply(sptr, ERR_NOOPERHOST);
         sendto_opmask_butone_global(&me, SNO_OLDREALOP,
             "Failed OPER attempt by %s (%s@%s) (attach failed after async)",
             cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost);
         oper_answer_end(sptr, &st);
-        MyFree(ctx);
+        oper_ctx_free(ctx);
         return;
       }
     }
-    do_oper(sptr, sptr, ctx->aconf, 0);
+    do_oper(sptr, sptr, aconf, 0);
     SetOperedLocal(sptr);
     ClearOperedRemote(sptr);
     Debug((DEBUG_INFO, "oper_password_verified: OPER success for %s",
@@ -224,7 +280,7 @@ static void oper_password_verified(int result, void *arg)
   }
   oper_answer_end(sptr, &st);
 
-  MyFree(ctx);
+  oper_ctx_free(ctx);
 }
 
 /** Copy @a modes into @a buf (of @a size) without any 'b'.  b is the
@@ -485,8 +541,8 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
 
     ctx = (struct oper_verify_ctx *)MyMalloc(sizeof(struct oper_verify_ctx));
     ctx->fd = cli_fd(sptr);
-    ctx->aconf = aconf;
-    ircd_strncpy(ctx->name, name, NICKLEN + 1);
+    DupString(ctx->passwd, aconf->passwd);
+    DupString(ctx->name, name);
     ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
     ctx->label[0] = '\0';
 
@@ -507,7 +563,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     }
 
     /* Async failed to start, fall back to sync */
-    MyFree(ctx);
+    oper_ctx_free(ctx);
     Debug((DEBUG_DEBUG, "can_oper: async failed, falling back to sync for %s",
            cli_name(sptr)));
   }

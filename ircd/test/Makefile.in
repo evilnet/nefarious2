@@ -101,6 +101,7 @@ CMOCKA_TESTPROGS = \
 	log_async_cmocka \
 	parse_line_cmocka \
 	conf_reattach_cmocka \
+	oper_verify_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
 
@@ -198,6 +199,7 @@ DEP_SRC = \
 	send_tags_cmocka.c \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
+	oper_verify_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -812,6 +814,17 @@ CONF_REATTACH_CMOCKA_OBJS = conf_reattach_cmocka.o ../ircd_string.o ../match.o \
 	../ircd_snprintf.o
 conf_reattach_cmocka: $(CONF_REATTACH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CONF_REATTACH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# oper_verify tests - an OPER whose password check finishes after a REHASH
+# is judged by the Operator block the configuration in force then gives
+# the client (name, host, same password, SSL fingerprint), never by the
+# block it started with.  Includes ../m_oper.c with --gc-sections; the
+# conf lookups are stubs.
+oper_verify_cmocka.o: ${srcdir}/oper_verify_cmocka.c ../m_oper.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/oper_verify_cmocka.c
+
+oper_verify_cmocka: oper_verify_cmocka.o
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections oper_verify_cmocka.o $(CMOCKA_LIBS)
 
 # send_label tests - labeled-response (issue #216): a channel event a
 # client's own command caused (its PART, TOPIC, KICK, MODE) carries the
