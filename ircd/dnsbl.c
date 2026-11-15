@@ -321,11 +321,38 @@ dnsbl_cache_expire(void)
 /** Per-query context for DNSBL DNS lookups
  * Each DNS query gets its own context to avoid race conditions
  * with the server pointer being overwritten.
+ *
+ * It names the DNSBL entry the query was made for (domain and the reply
+ * values it matches), never points at it: a rehash during the lookup
+ * frees every entry (dnsbl_clear_servers()), and the answer is judged by
+ * the entry the configuration in force when it arrives has under that
+ * name (dnsbl_live_server()).
  */
 struct DNSBLQueryContext {
   struct DNSBLRequest *request;  /**< Parent request */
-  struct DNSBLServer *server;    /**< Server this query is for */
+  char *domain;                  /**< The entry's domain */
+  unsigned int bitmask;          /**< The reply values it matched */
 };
+
+/** The entry an answer for \a domain, asked for an entry matching
+ * \a bitmask, is judged by: the configured entry with that domain and
+ * that bitmask now.  None (the rehash removed the entry, or changed which
+ * reply values it matches) means the answer is ignored.  Action and mark
+ * are the live entry's.
+ * @param[in] domain The entry's domain.
+ * @param[in] bitmask The reply values it matched when the query was made.
+ * @return The live entry, or NULL.
+ */
+static struct DNSBLServer *
+dnsbl_live_server(const char *domain, unsigned int bitmask)
+{
+  struct DNSBLServer *server;
+
+  for (server = dnsbl_servers; server; server = server->next)
+    if (server->bitmask == bitmask && !ircd_strcmp(server->domain, domain))
+      return server;
+  return NULL;
+}
 
 /** Free a DNSBL request and all its resources */
 static void
@@ -353,9 +380,13 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   }
 
   req = ctx->request;
-  server = ctx->server;
+  server = addr ? dnsbl_live_server(ctx->domain, ctx->bitmask) : NULL;
+  if (addr && !server)
+    Debug((DEBUG_DNS, "DNSBL: Answer from %s ignored: no such entry since a rehash",
+           ctx->domain));
 
   /* Free the per-query context */
+  MyFree(ctx->domain);
   MyFree(ctx);
 
   if (!req) {
@@ -499,7 +530,8 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
       continue;
 
     ctx->request = req;
-    ctx->server = server;
+    DupString(ctx->domain, server->domain);
+    ctx->bitmask = server->bitmask;
 
     /* Format the query based on IP version */
     if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {

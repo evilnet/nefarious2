@@ -103,6 +103,7 @@ CMOCKA_TESTPROGS = \
 	conf_reattach_cmocka \
 	oper_verify_cmocka \
 	sethost_verify_cmocka \
+	dnsbl_rehash_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
 
@@ -202,6 +203,7 @@ DEP_SRC = \
 	conf_reattach_cmocka.c \
 	oper_verify_cmocka.c \
 	sethost_verify_cmocka.c \
+	dnsbl_rehash_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -840,6 +842,18 @@ sethost_verify_cmocka.o: ${srcdir}/sethost_verify_cmocka.c ../m_sethost.c
 
 sethost_verify_cmocka: $(SETHOST_VERIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SETHOST_VERIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# dnsbl_rehash tests - a native DNSBL answer that arrives after a REHASH
+# is judged by the entry the configuration in force then has under its
+# name (or ignored), never read from the freed one.  Includes ../dnsbl.c
+# with --gc-sections; the resolver is a stub the cases answer.
+DNSBL_REHASH_CMOCKA_OBJS = dnsbl_rehash_cmocka.o ../ircd_alloc.o ../ircd_string.o \
+	../ircd_snprintf.o
+dnsbl_rehash_cmocka.o: ${srcdir}/dnsbl_rehash_cmocka.c ../dnsbl.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/dnsbl_rehash_cmocka.c
+
+dnsbl_rehash_cmocka: $(DNSBL_REHASH_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DNSBL_REHASH_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # send_label tests - labeled-response (issue #216): a channel event a
 # client's own command caused (its PART, TOPIC, KICK, MODE) carries the
