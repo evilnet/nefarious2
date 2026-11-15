@@ -169,6 +169,22 @@ static struct ConfItem *oper_live_block(struct Client *sptr, const char *name,
   return aconf;
 }
 
+/** The reply a refusal by oper_live_block() gets: what the synchronous
+ * path (can_oper()) answers for the same reason -- ERR_SSLCLIFP for a
+ * fingerprint, ERR_PASSWDMISMATCH for a password, ERR_NOOPERHOST for no
+ * block.
+ * @param[in] why The reason oper_live_block() gave.
+ * @return The numeric.
+ */
+static int oper_live_reply(const char *why)
+{
+  if (!strcmp(why, "SSL fingerprint mismatch"))
+    return ERR_SSLCLIFP;
+  if (!strcmp(why, "password mis-match"))
+    return ERR_PASSWDMISMATCH;
+  return ERR_NOOPERHOST;
+}
+
 /** labeled-response for the asynchronous answer: the OPER line was not
  * ACKed (its label was kept in the context); its answer -- several lines
  * on success, one on failure -- goes out under that label, in a
@@ -245,8 +261,7 @@ static void oper_password_verified(int result, void *arg)
     /* The password matched the block as it was; the configuration in force
      * now has no such block for this client: a rehash during the check, or
      * the block's class filled up meanwhile, or the client's host changed. */
-    send_reply(sptr, strcmp(why, "password mis-match") ? ERR_NOOPERHOST
-               : ERR_PASSWDMISMATCH);
+    send_reply(sptr, oper_live_reply(why));
     sendto_opmask_butone_global(&me, SNO_OLDREALOP,
         "Failed OPER attempt by %s (%s@%s) (%s when the password check "
         "finished)", cli_name(sptr), cli_user(sptr)->username,

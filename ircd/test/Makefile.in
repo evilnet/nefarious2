@@ -827,8 +827,10 @@ conf_reattach_cmocka: $(CONF_REATTACH_CMOCKA_OBJS)
 oper_verify_cmocka.o: ${srcdir}/oper_verify_cmocka.c ../m_oper.c
 	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/oper_verify_cmocka.c
 
-oper_verify_cmocka: oper_verify_cmocka.o
-	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections oper_verify_cmocka.o $(CMOCKA_LIBS)
+OPER_VERIFY_CMOCKA_OBJS = oper_verify_cmocka.o ../ircd_alloc.o ../ircd_string.o \
+	../ircd_snprintf.o
+oper_verify_cmocka: $(OPER_VERIFY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(OPER_VERIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # sethost_verify tests - SETHOST's asynchronous password check: judged by
 # the Spoofhost block in force when it finishes, refused while a WEBIRC
