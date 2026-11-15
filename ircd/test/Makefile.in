@@ -103,6 +103,7 @@ CMOCKA_TESTPROGS = \
 	conf_reattach_cmocka \
 	oper_verify_cmocka \
 	sethost_verify_cmocka \
+	webirc_verify_cmocka \
 	dnsbl_rehash_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
@@ -203,6 +204,7 @@ DEP_SRC = \
 	conf_reattach_cmocka.c \
 	oper_verify_cmocka.c \
 	sethost_verify_cmocka.c \
+	webirc_verify_cmocka.c \
 	dnsbl_rehash_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
@@ -844,6 +846,19 @@ sethost_verify_cmocka.o: ${srcdir}/sethost_verify_cmocka.c ../m_sethost.c
 
 sethost_verify_cmocka: $(SETHOST_VERIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SETHOST_VERIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webirc_verify tests - WEBIRC's asynchronous password check: registration
+# held until it finishes, the real address applied before the hold ends,
+# judged by the WebIRC block in force then, a refusal never registered.
+# Includes ../m_webirc.c with --gc-sections; the conf lookups, the auth
+# request calls and the thread pool are stubs.
+WEBIRC_VERIFY_CMOCKA_OBJS = webirc_verify_cmocka.o ../ircd_alloc.o ../ircd_string.o \
+	../ircd_snprintf.o ../match.o
+webirc_verify_cmocka.o: ${srcdir}/webirc_verify_cmocka.c ../m_webirc.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/webirc_verify_cmocka.c
+
+webirc_verify_cmocka: $(WEBIRC_VERIFY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(WEBIRC_VERIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # dnsbl_rehash tests - a native DNSBL answer that arrives after a REHASH
 # is judged by the entry the configuration in force then has under its
