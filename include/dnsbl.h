@@ -112,6 +112,10 @@ struct DNSBLStats {
   unsigned long total_whitelists;/**< Total whitelist hits */
 };
 
+/** The longest mark a DNSBL entry may give (MARK tags are single words;
+ * they are shown in WHOIS and sent to every server and to services). */
+#define DNSBL_MARKLEN 64
+
 /* Function prototypes */
 
 /** Initialize the DNSBL subsystem */
@@ -131,6 +135,10 @@ extern void dnsbl_init(void);
 extern struct DNSBLServer *dnsbl_add_server(const char *domain, const char *index,
                                             unsigned int bitmask, enum DNSBLAction action,
                                             const char *mark, int score);
+
+/** Is \a mark usable as a DNSBL entry's mark: one word (no blanks), 1 to
+ * DNSBL_MARKLEN characters? */
+extern int dnsbl_valid_mark(const char *mark);
 
 /** Remove all DNSBL server configurations */
 extern void dnsbl_clear_servers(void);

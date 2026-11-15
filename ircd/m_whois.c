@@ -143,14 +143,19 @@ void client_whois_marks(struct Client *client, struct Client *replyto, const cha
   memset(&markbufp, 0, BUFSIZE);
 
   for (dp = cli_marks(client); dp; dp = dp->next) {
-    if (strlen(markbufp) + strlen(dp->value.cp) + 4 > 70) {
+    size_t used;
+
+    if (markbufp[0] && strlen(markbufp) + strlen(dp->value.cp) + 4 > 70) {
       send_reply(replyto, RPL_WHOISMARKS, name, markbufp);
       memset(&markbufp, 0, BUFSIZE);
     }
 
-    if (markbufp[0])
-      strcat(markbufp, ", ");
-    strcat(markbufp, dp->value.cp);
+    /* Bounded: a mark comes from the configuration (a DNSBL mark), IAuth
+     * or another server; one longer than the line is cut, never written
+     * past the buffer. */
+    used = strlen(markbufp);
+    ircd_snprintf(0, markbufp + used, BUFSIZE - used, "%s%s",
+                  used ? ", " : "", dp->value.cp);
   }
 
   if (markbufp[0]) {

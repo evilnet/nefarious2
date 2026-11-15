@@ -642,6 +642,24 @@ static void every_record_of_an_answer_judged(void **state)
   }
 }
 
+/** A mark entry's mark is one word of at most DNSBL_MARKLEN characters
+ * (marks go into WHOIS and to every server and services); a longer one,
+ * or one with blanks, is refused. */
+static void mark_entry_mark_bounded(void **state)
+{
+  char longmark[DNSBL_MARKLEN + 2];
+
+  memset(longmark, 'm', sizeof(longmark) - 1);
+  longmark[sizeof(longmark) - 1] = '\0';
+  assert_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_MARK, longmark, 0));
+  assert_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_MARK, "two words", 0));
+  longmark[DNSBL_MARKLEN] = '\0';
+  assert_non_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_MARK, longmark, 0));
+  /* a block entry's reason is no mark: not bounded here */
+  assert_non_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_BLOCK_ALL,
+                                   "a long refusal text, several words", 0));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -655,6 +673,7 @@ int main(void)
     cmocka_unit_test_setup(junk_index_refused, setup),
     cmocka_unit_test_setup(every_matching_mark_entry_marks, setup),
     cmocka_unit_test_setup(every_record_of_an_answer_judged, setup),
+    cmocka_unit_test_setup(mark_entry_mark_bounded, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

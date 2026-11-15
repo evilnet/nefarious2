@@ -161,6 +161,14 @@ dnsbl_init(void)
             NULL, TT_PERIODIC, 300);
 }
 
+int
+dnsbl_valid_mark(const char *mark)
+{
+  size_t len = mark ? strlen(mark) : 0;
+
+  return len > 0 && len <= DNSBL_MARKLEN && !strpbrk(mark, " \t,");
+}
+
 struct DNSBLServer *
 dnsbl_add_server(const char *domain, const char *index,
                  unsigned int bitmask, enum DNSBLAction action,
@@ -175,7 +183,8 @@ dnsbl_add_server(const char *domain, const char *index,
   if (!server)
     return NULL;
 
-  if (index && *index && dnsbl_parse_index(index, server->index_set)) {
+  if ((index && *index && dnsbl_parse_index(index, server->index_set))
+      || (action == DNSBL_ACT_MARK && mark && *mark && !dnsbl_valid_mark(mark))) {
     MyFree(server);
     return NULL;                  /* the parser reports it */
   }

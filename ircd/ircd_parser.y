@@ -2025,6 +2025,10 @@ dnsblblock: DNSBL
 {
   if (dnsbl_domain == NULL)
     parse_error("Missing name in DNSBL block");
+  else if (dnsbl_action == DNSBL_ACT_MARK && dnsbl_mark && *dnsbl_mark
+           && !dnsbl_valid_mark(dnsbl_mark))
+    parse_error("Invalid mark in DNSBL block for %s (one word, at most %d "
+                "characters); the block is ignored", dnsbl_domain, DNSBL_MARKLEN);
   else if (!dnsbl_add_server(dnsbl_domain, dnsbl_index, dnsbl_bitmask,
                               dnsbl_action, dnsbl_mark, dnsbl_score))
     parse_error("Invalid index \"%s\" in DNSBL block for %s (reply values "
