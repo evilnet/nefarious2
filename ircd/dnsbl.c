@@ -347,6 +347,22 @@ dnsbl_cache_entry_free(struct DNSBLCacheEntry *entry)
 
 static void dnsbl_cache_drop(struct DNSBLCacheEntry *stale);
 
+/** How long \a server's answers are cached: its cachetime, else
+ * FEAT_DNSBL_CACHETIME. */
+static long
+dnsbl_entry_cachetime(const struct DNSBLServer *server)
+{
+  return server->has_cachetime ? (long) server->cachetime
+    : feature_int(FEAT_DNSBL_CACHETIME);
+}
+
+void
+dnsbl_server_cachetime(struct DNSBLServer *server, unsigned int seconds)
+{
+  server->has_cachetime = 1;
+  server->cachetime = seconds;
+}
+
 /** Add a lookup's answers to the DNSBL cache, under the address the
  * lookup asked about; the cache takes the answers over. */
 static void
@@ -355,6 +371,18 @@ dnsbl_cache_add(const struct irc_in_addr *addr, struct DNSBLAnswer *answers,
 {
   unsigned int hash = dnsbl_hash_addr(addr);
   struct DNSBLCacheEntry *entry;
+  struct DNSBLServer *server;
+  long lifetime = 0;
+
+  /* It lives as long as its longest-lived entry's answer; each entry's
+   * own lifetime is checked when it is used (dnsbl_cache_replay()). */
+  for (server = dnsbl_servers; server; server = server->next)
+    if (dnsbl_entry_cachetime(server) > lifetime)
+      lifetime = dnsbl_entry_cachetime(server);
+  if (lifetime <= 0) {
+    dnsbl_answers_free(answers, nanswers);
+    return;
+  }
 
   entry = (struct DNSBLCacheEntry *)MyCalloc(1, sizeof(struct DNSBLCacheEntry));
   if (!entry) {
@@ -363,7 +391,8 @@ dnsbl_cache_add(const struct irc_in_addr *addr, struct DNSBLAnswer *answers,
   }
 
   memcpy(&entry->addr, addr, sizeof(struct irc_in_addr));
-  entry->expire = CurrentTime + feature_int(FEAT_DNSBL_CACHETIME);
+  entry->created = CurrentTime;
+  entry->expire = CurrentTime + lifetime;
   entry->answers = answers;
   entry->nanswers = nanswers;
 
@@ -675,8 +704,11 @@ dnsbl_cache_replay(struct Client *cptr, struct DNSBLCacheEntry *cached)
   const struct DNSBLAnswer *a;
 
   for (server = dnsbl_servers; server; server = server->next)
-    if (!dnsbl_cached_answer(cached, server)) {
-      Debug((DEBUG_DNS, "DNSBL: Cached result stale (%s not asked)",
+    if (!dnsbl_cached_answer(cached, server)
+        || CurrentTime - cached->created >= dnsbl_entry_cachetime(server)) {
+      /* Not asked, or its answer older than the entry's own lifetime (the
+       * scripts check each line's cachetime against its zone's answer). */
+      Debug((DEBUG_DNS, "DNSBL: Cached result stale for %s",
              server->domain));
       dnsbl_cache_drop(cached);
       return NULL;

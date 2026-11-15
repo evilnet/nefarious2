@@ -47,6 +47,9 @@ struct DNSBLServer {
   char *domain;              /**< DNSBL domain (e.g., "dnsbl.dronebl.org") */
   char *index;               /**< Comma-separated indexes as written (e.g., "2,3,5,6"), or NULL */
   unsigned char index_set[32]; /**< The reply values (0-255) the index lists, one bit each */
+  int has_cachetime;         /**< cachetime was given */
+  unsigned int cachetime;    /**< How long its answers are cached (seconds;
+                                  else FEAT_DNSBL_CACHETIME; 0: not cached) */
   int has_bitmask;           /**< A bitmask was given (bitmask = 0 matches nothing) */
   unsigned int bitmask;      /**< Matches a reply value v when v & bitmask */
   unsigned long long ident;  /**< The entry's name, kept across a rehash
@@ -81,7 +84,9 @@ struct DNSBLCacheEntry {
   struct DNSBLCacheEntry *older; /**< The age list (oldest first) */
   struct DNSBLCacheEntry *newer;
   struct irc_in_addr addr;       /**< The address the lookup asked about */
-  time_t expire;                 /**< Expiration timestamp */
+  time_t created;                /**< When the lookup answered */
+  time_t expire;                 /**< When the longest-lived entry's answer
+                                      expires (each entry's own: at replay) */
   struct DNSBLAnswer *answers;   /**< One per entry asked */
   int nanswers;                  /**< How many */
 };
@@ -154,6 +159,14 @@ extern int dnsbl_valid_mark(const char *mark);
  * does, nothing of the lookup is cached, and the client goes on (run each
  * second from a timer; exported for the tests). */
 extern void dnsbl_timeout_sweep(void);
+
+/** Give an entry its own cache lifetime (the scripts' cachetime=): its
+ * answers are used from the cache for that long instead of
+ * FEAT_DNSBL_CACHETIME (0: never).
+ * @param server The entry dnsbl_add_server() returned
+ * @param seconds The lifetime
+ */
+extern void dnsbl_server_cachetime(struct DNSBLServer *server, unsigned int seconds);
 
 /** Remove all DNSBL server configurations */
 extern void dnsbl_clear_servers(void);

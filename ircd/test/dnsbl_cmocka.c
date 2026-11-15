@@ -720,6 +720,27 @@ static void unanswered_list_given_up(void **state)
   dnsbl_cancel(again(0));                  /* not cached: asked again */
 }
 
+/** An entry's own cachetime: its answer is used from the cache for that
+ * long, then the address is asked again (the global lifetime is longer
+ * here); cachetime 0 on the only entry: nothing cached. */
+static void entry_cachetime_honoured(void **state)
+{
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_server_cachetime(dnsbl_first_server(), 10);
+  dnsbl_cancel(lookup(1));
+  CurrentTime += 5;
+  dnsbl_cancel(again(1));                  /* within its 10 s */
+  CurrentTime += 6;
+  dnsbl_cancel(again(0));                  /* past them: asked again */
+
+  cache_reset();
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_server_cachetime(dnsbl_first_server(), 0);
+  dnsbl_cancel(lookup(1));
+  assert_int_equal(dnsbl_stats.cache_size, 0);
+  dnsbl_cancel(again(0));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -736,6 +757,7 @@ int main(void)
     cmocka_unit_test_setup(mark_entry_mark_bounded, setup),
     cmocka_unit_test_setup(cache_bounded_oldest_first, setup),
     cmocka_unit_test_setup(unanswered_list_given_up, setup),
+    cmocka_unit_test_setup(entry_cachetime_honoured, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),
