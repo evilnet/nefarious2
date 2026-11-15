@@ -56,12 +56,14 @@
 #include "account_id.h"
 #include "capab.h"
 #include "client.h"
+#include "handlers.h"
 #include "ircd.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "msg.h"
 #include "numeric.h"
 #include "register_throttle.h"
@@ -381,7 +383,10 @@ static int iauth_on, iauth_starts, iauth_datas, iauth_aborts;
 int auth_iauth_handles_sasl(void) { return iauth_on; }
 int auth_send_sasl_start(struct Client *c, const char *m, const char *f)
 { if (iauth_on) iauth_starts++; return iauth_on; }
-int auth_send_sasl_host(struct Client *c, const char *u, const char *h, const char *i) { return iauth_on; }
+/** The address the IAuth tier was told when an exchange started. */
+static char iauth_host_ip[64];
+int auth_send_sasl_host(struct Client *c, const char *u, const char *h, const char *i)
+{ ircd_strncpy(iauth_host_ip, i, sizeof(iauth_host_ip)); return iauth_on; }
 int auth_send_sasl_data(struct Client *c, const char *d)
 { if (iauth_on) iauth_datas++; return iauth_on; }
 int auth_send_sasl_abort(struct Client *c)
@@ -655,6 +660,7 @@ static int bed_features;      /**< the bed's account and host-hiding features:
                                    EXTENDED_ACCOUNTS, SASL_AUTOHIDEHOST and
                                    HOST_HIDING_STYLE 1 (off: all three 0) */
 
+static int sendhost_on;     /**< FEAT_SASL_SENDHOST */
 int feature_bool(enum Feature feat)
 {
   switch (feat) {
@@ -665,6 +671,8 @@ int feature_bool(enum Feature feat)
     return bed_features;
   case FEAT_SASL_LOCAL:
     return !local_off;
+  case FEAT_SASL_SENDHOST:
+    return sendhost_on;
   case FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION:
   case FEAT_CAP_draft_account_registration:
     return 1;
@@ -1184,6 +1192,8 @@ static int setup(void **state)
   abort_reply = -1;
   n_an = 0;
   iauth_on = iauth_starts = iauth_datas = iauth_aborts = 0;
+  iauth_host_ip[0] = '\0';
+  sendhost_on = 0;
   bed_features = 0;
   ntlog = 0;
 #ifdef USE_LIBKC
@@ -4119,6 +4129,65 @@ static void reauth_tells_nobody_account(void **state)
 }
 #endif /* USE_LIBKC */
 
+/* ------------------------------------------------------------------ */
+/* A WEBIRC check out: no exchange starts on the gateway's address     */
+/* ------------------------------------------------------------------ */
+
+/* list.c: the held lines' links. */
+struct SLink *make_link(void) { return calloc(1, sizeof(struct SLink)); }
+void free_link(struct SLink *lp) { free(lp); }
+
+/** While the check is out, AUTHENTICATE and its data are held (nothing
+ * reaches any tier, no exchange); replayed when the check has applied the
+ * real address, they start the exchange there, told that address. */
+static void held_during_webirc_check_then_replayed(void **state)
+{
+  struct Client *c;
+
+  local_off = 1;
+  iauth_on = 1;
+  sendhost_on = 1;
+  c = new_client(60, "wb", 1, REG_KEEPS);
+  ircd_strncpy(cli_sock_ip(c), "127.0.0.1", SOCKIPLEN + 1);   /* the gateway */
+  SetWebIRCPending(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, "AGFjY3QAcHc="), 0);
+  assert_int_equal(iauth_starts + iauth_datas, 0);
+  assert_no_exchange(c);
+  assert_non_null(cli_saslheld(c));
+
+  ClearWebIRCPending(c);                                       /* the check */
+  ircd_strncpy(cli_sock_ip(c), "192.0.2.77", SOCKIPLEN + 1);
+  assert_int_equal(authenticate_replay(c), 0);
+  assert_null(cli_saslheld(c));
+  assert_int_equal(iauth_starts, 1);
+  assert_int_equal(iauth_datas, 1);
+  assert_string_equal(iauth_host_ip, "192.0.2.77");
+  assert_true(cli_saslcookie(c) != 0);
+}
+
+/** AUTHENTICATE * while lines are held drops them and answers 906; the
+ * replay then starts nothing. */
+static void abort_during_webirc_check_drops_held_lines(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  local_off = 1;
+  iauth_on = 1;
+  c = new_client(61, "wa", 1, REG_KEEPS);
+  f = fake_of(c);
+  SetWebIRCPending(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, "*"), 0);
+  assert_null(cli_saslheld(c));
+  assert_true(has_numeric(f, ERR_SASLABORTED));
+  ClearWebIRCPending(c);
+  assert_int_equal(authenticate_replay(c), 0);
+  assert_int_equal(iauth_starts, 0);
+  assert_no_exchange(c);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -4197,6 +4266,8 @@ int main(void)
     cmocka_unit_test_setup(star_abort_services_exchange, setup),
     cmocka_unit_test_setup(toolong_ends_iauth_exchange, setup),
 #endif
+    cmocka_unit_test_setup(held_during_webirc_check_then_replayed, setup),
+    cmocka_unit_test_setup(abort_during_webirc_check_drops_held_lines, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

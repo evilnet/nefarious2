@@ -126,6 +126,18 @@ static struct User user, other_user;
 /** Any non-NULL request: the stubs above never look inside. */
 static struct AuthRequest *const the_auth = (struct AuthRequest *) &con;
 
+/* m_authenticate.c: the AUTHENTICATE lines held for the check, replayed
+ * (an exchange starts) -- after the real address, before registration. */
+static int replays, replay_kills;
+static char ip_at_replay[SOCKIPLEN + 1];
+int authenticate_replay(struct Client *cptr)
+{
+  assert_int_equal(releases, 0);
+  replays++;
+  ircd_strncpy(ip_at_replay, cli_sock_ip(cptr), sizeof(ip_at_replay));
+  return replay_kills ? CPTR_KILLED : 0;
+}
+
 void auth_webirc_release_later(struct AuthRequest *auth)
 {
   assert_ptr_equal(auth, the_auth);
@@ -165,6 +177,8 @@ static int setup(void **state)
   have_block = 1;
   holds = releases = dnsbl_restarts = iauth_told = sync_checks = submitted = 0;
   ip_at_release[0] = '\0';
+  ip_at_replay[0] = '\0';
+  replays = replay_kills = 0;
   last_sno[0] = '\0';
   exit_reason = NULL;
   pending_cb = NULL;
@@ -276,6 +290,30 @@ static void no_auth_request_checks_synchronously(void **state)
   assert_string_equal(cli_sock_ip(&client), "192.0.2.77");
 }
 
+/** AUTHENTICATE lines held for the check start their exchange when it
+ * finishes: on the real address, before registration goes on.  A replay
+ * that exits the client ends the completion there (no release). */
+static void held_authenticate_replayed_on_the_real_address(void **state)
+{
+  webirc("pw");
+  finish_check(CRYPT_VERIFY_MATCH);
+  assert_int_equal(replays, 1);
+  assert_string_equal(ip_at_replay, "192.0.2.77");
+  assert_int_equal(releases, 1);
+
+  setup(state);
+  replay_kills = 1;
+  webirc("pw");
+  finish_check(CRYPT_VERIFY_MATCH);
+  assert_int_equal(replays, 1);
+  assert_int_equal(releases, 0);
+
+  setup(state);                            /* a refused check: no replay */
+  webirc("wrong");
+  finish_check(CRYPT_VERIFY_NOMATCH);
+  assert_int_equal(replays, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -286,6 +324,7 @@ int main(void)
     cmocka_unit_test_setup(another_connection_gets_nothing, setup),
     cmocka_unit_test_setup(second_webirc_ignored, setup),
     cmocka_unit_test_setup(no_auth_request_checks_synchronously, setup),
+    cmocka_unit_test_setup(held_authenticate_replayed_on_the_real_address, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

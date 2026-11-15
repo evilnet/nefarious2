@@ -514,6 +514,10 @@ struct Connection
   struct Timer        con_proc;      /**< process latent messages from
                                       client */
   struct Timer        con_sasltimeout; /**< timeout timer for SASL */
+  struct SLink*       con_saslheld;  /**< AUTHENTICATE lines held while a
+                                          WEBIRC check is out (value.cp,
+                                          in arrival order;
+                                          m_authenticate.c) */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) — for bouncer
                                         sessions this becomes the union of all
@@ -943,6 +947,8 @@ struct Client {
 #define cli_saslstart(cli)      ((cli)->cli_saslstart)
 /** Get Timer for SASL timeout. */
 #define cli_sasltimeout(cli)     con_sasltimeout(cli_connect(cli))
+/** AUTHENTICATE lines held while a WEBIRC check is out (m_authenticate.c). */
+#define cli_saslheld(cli)        con_saslheld(cli_connect(cli))
 /** Get local SASL session (may be NULL). */
 #define cli_saslsession(cli)     ((cli)->cli_saslsession)
 /** Get the REGISTER in-flight cookie (nonzero => a chain is outstanding). */
@@ -1152,6 +1158,8 @@ struct Client {
 #define con_proc(con)		((con)->con_proc)
 /** Get the SASL timeout timer for the connection. */
 #define con_sasltimeout(con)	((con)->con_sasltimeout)
+/** Get the AUTHENTICATE lines held for a WEBIRC check. */
+#define con_saslheld(con)	((con)->con_saslheld)
 /** Get the peer's capabilities for the connection. */
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection (union for bouncer sessions). */

@@ -89,10 +89,13 @@
 
 struct Channel;
 struct Client;
+struct Connection;
 struct StatDesc;
 
 extern int m_admin(struct Client*, struct Client*, int, char*[]);
 extern int m_authenticate(struct Client*, struct Client*, int, char*[]);
+extern int authenticate_replay(struct Client *cptr);
+extern void authenticate_held_free(struct Connection *con);
 extern int m_away(struct Client*, struct Client*, int, char*[]);
 extern int mu_away(struct Client*, struct Client*, int, char*[]);
 extern int m_cap(struct Client*, struct Client*, int, char*[]);

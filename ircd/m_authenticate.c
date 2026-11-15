@@ -84,7 +84,9 @@
 
 #include "capab.h"
 #include "client.h"
+#include "handlers.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -104,6 +106,80 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 static void sasl_timeout_callback(struct Event* ev);
+
+/** The most AUTHENTICATE lines held for one WEBIRC check (a mechanism and
+ * its data: a long token takes a few 400-byte lines). */
+#define SASL_HELD_MAX 16
+
+/** Free the AUTHENTICATE lines held on @a con (its client is going, or
+ * the client aborted them). */
+void authenticate_held_free(struct Connection *con)
+{
+  struct SLink *lp;
+
+  while ((lp = con_saslheld(con))) {
+    con_saslheld(con) = lp->next;
+    MyFree(lp->value.cp);
+    free_link(lp);
+  }
+}
+
+/** Hold an AUTHENTICATE line while a WEBIRC check is out (m_webirc.c).
+ * Until it finishes, the client's address and host are the gateway's, and
+ * every tier an exchange starts in is told them -- services in the SASL H
+ * line, IAuth in its H line, Keycloak -- and services judge the login by
+ * them (an account's allowed hostmasks).  So no exchange starts: the lines
+ * are kept, in order, and replayed when the check has applied the real
+ * address (authenticate_replay()).  A failed check exits the client, and
+ * the lines go with it; the registration timeout bounds the wait.
+ * @return Zero.
+ */
+static int authenticate_hold(struct Client *cptr, const char *line)
+{
+  struct SLink **pp;
+  struct SLink *lp;
+  int n = 0;
+
+  for (pp = &cli_saslheld(cptr); *pp; pp = &(*pp)->next)
+    n++;
+  if (n >= SASL_HELD_MAX) {
+    /* More than any exchange's start: it fails as one would. */
+    authenticate_held_free(cli_connect(cptr));
+    return send_reply(cptr, ERR_SASLFAIL, "");
+  }
+  lp = make_link();
+  DupString(lp->value.cp, line);
+  lp->next = NULL;
+  *pp = lp;
+  return 0;
+}
+
+/** Replay the AUTHENTICATE lines held while @a cptr's WEBIRC check was out
+ * (authenticate_hold()): the check has applied the real address, and the
+ * exchange starts now, in whichever tier, with it.  Called from the
+ * check's completion, before registration is let go on.
+ * @return CPTR_KILLED if a line exited the client (nothing may touch it
+ * then), else zero.
+ */
+int authenticate_replay(struct Client *cptr)
+{
+  struct SLink *lp;
+  char *parv[3];
+  int res;
+
+  while ((lp = cli_saslheld(cptr))) {
+    cli_saslheld(cptr) = lp->next;      /* off the list before it runs */
+    parv[0] = cli_name(cptr);
+    parv[1] = lp->value.cp;
+    parv[2] = NULL;
+    res = m_authenticate(cptr, cptr, 2, parv);
+    MyFree(lp->value.cp);
+    free_link(lp);
+    if (res == CPTR_KILLED)
+      return res;
+  }
+  return 0;
+}
 
 /** End @a cptr's SASL exchange in progress, in the tier that holds it --
  * the local Keycloak session, IAuth, or services over P10 -- and let
@@ -179,9 +255,21 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   }
 
   /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec); only an
-   * exchange in progress is aborted. */
-  if (parv[1][0] == '*' && parv[1][1] == '\0')
+   * exchange in progress is aborted -- or lines held for a WEBIRC check
+   * (authenticate_hold()), which are dropped: the exchange they would have
+   * started is aborted. */
+  if (parv[1][0] == '*' && parv[1][1] == '\0') {
+    if (cli_saslheld(cptr)) {
+      authenticate_held_free(cli_connect(cptr));
+      return send_reply(cptr, ERR_SASLABORTED);
+    }
     return authenticate_end(cptr, 1);
+  }
+
+  /* A WEBIRC check still out: no exchange starts on the gateway's address
+   * (authenticate_hold()).  One begun before the WEBIRC goes on. */
+  if (IsWebIRCPending(cptr) && !cli_saslsession(cptr) && !cli_saslcookie(cptr))
+    return authenticate_hold(cptr, parv[1]);
 
   /* A client that already has an account or a completed login -- SASL
    * completed, or an account set by services -- may authenticate again only

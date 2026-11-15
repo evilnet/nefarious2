@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "list.h"
+#include "handlers.h"
 #include "m_batch.h"
 #include "capab.h"
 #include "client.h"
@@ -294,6 +295,8 @@ static void dealloc_connection(struct Connection* con)
   batch_hold_free(con);
   /* A client multiline batch still open (its lines; m_batch.c) */
   multiline_free_connection(con);
+  /* AUTHENTICATE lines held for a WEBIRC check (m_authenticate.c) */
+  authenticate_held_free(con);
   /* Pending partial outbound WS frame (socket is gone with it) */
   if (con_ws_txrem(con)) {
     MyFree(con_ws_txrem(con));

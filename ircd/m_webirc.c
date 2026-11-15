@@ -82,6 +82,7 @@
 #include "config.h"
 
 #include "client.h"
+#include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -321,6 +322,13 @@ static void webirc_password_verified(int result, void *arg)
       else
         auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
                                 ctx->ipaddr, NULL);
+
+      /* AUTHENTICATE lines held for the check (m_authenticate.c) start
+       * their exchange now, on the real address; one may exit the client. */
+      if (authenticate_replay(cptr) == CPTR_KILLED) {
+        webirc_ctx_free(ctx);
+        return;
+      }
 
       /* Registration waited for this (auth_webirc_hold()): it goes on now,
        * with the real address in place. */
