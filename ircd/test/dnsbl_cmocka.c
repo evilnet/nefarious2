@@ -523,11 +523,11 @@ static void one_failed_lookup_caches_nothing(void **state)
   dnsbl_cancel(again(0));
 }
 
-/** Every matching entry marks a client that stays -- two mark entries,
- * and the reason of a block_anon entry the client is not refused by
- * (logged in) -- as the scripts mark the clients they pass; an entry that
- * does not match marks nothing. */
-static void every_matching_entry_marks(void **state)
+/** Every matching entry whose action is mark marks a client that stays --
+ * both mark entries; the reason of a block_anon entry the client is not
+ * refused by (logged in), or of a whitelist entry, is no mark; an entry
+ * that does not match marks nothing. */
+static void every_matching_mark_entry_marks(void **state)
 {
   struct DNSBLRequest *req = NULL;
   enum DNSBLAction action;
@@ -538,7 +538,7 @@ static void every_matching_entry_marks(void **state)
   dnsbl_add_server("uce.test", "2", 0, DNSBL_ACT_MARK, "uce-2", 0);
   dnsbl_add_server("cbl.test", "2", 0, DNSBL_ACT_MARK, "cbl", 0);
   dnsbl_add_server("sorbs.test", "2,3", 0, DNSBL_ACT_BLOCK_ANON, "sorbs", 0);
-  dnsbl_add_server("tor.test", "4", 0, DNSBL_ACT_BLOCK_ANON, "tor", 0);
+  dnsbl_add_server("tor.test", "4", 0, DNSBL_ACT_MARK, "tor", 0);
   assert_int_equal(dnsbl_check(&client, &req), 1);
   for (i = 0; i < nqueries; i++)
     answer(i, 1, 2);
@@ -546,11 +546,27 @@ static void every_matching_entry_marks(void **state)
   assert_int_equal(action, DNSBL_ACT_BLOCK_ANON);
   nmarks_given = 0;
   dnsbl_apply_marks(&client, req);           /* logged in: it stays */
-  assert_int_equal(nmarks_given, 3);
+  assert_int_equal(nmarks_given, 2);
   for (i = 0; i < nmarks_given; i++)
-    assert_true(!strcmp(marks_given[i], "uce-2") || !strcmp(marks_given[i], "cbl")
-                || !strcmp(marks_given[i], "sorbs"));
+    assert_true(!strcmp(marks_given[i], "uce-2") || !strcmp(marks_given[i], "cbl"));
   assert_true(IsMarked(&client));
+  dnsbl_cancel(req);
+
+  /* A whitelist entry's reason is no mark either. */
+  req = NULL;
+  nqueries = 0;
+  cache_reset();
+  ClrFlag(&client, FLAG_MARKED);
+  dnsbl_clear_servers();
+  dnsbl_add_server("wl.test", "2", 0, DNSBL_ACT_WHITELIST, "whitelist", 0);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  answer(0, 1, 2);
+  assert_int_equal(dnsbl_result(&client, req, &action, &mark), 0);
+  assert_int_equal(action, DNSBL_ACT_WHITELIST);
+  nmarks_given = 0;
+  dnsbl_apply_marks(&client, req);
+  assert_int_equal(nmarks_given, 0);
+  assert_false(IsMarked(&client));
   dnsbl_cancel(req);
 }
 
@@ -565,7 +581,7 @@ int main(void)
     cmocka_unit_test_setup(same_domain_entries_keep_their_own_answers, setup),
     cmocka_unit_test_setup(reply_values_match_as_the_scripts_do, setup),
     cmocka_unit_test_setup(junk_index_refused, setup),
-    cmocka_unit_test_setup(every_matching_entry_marks, setup),
+    cmocka_unit_test_setup(every_matching_mark_entry_marks, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

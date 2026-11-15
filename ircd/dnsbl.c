@@ -481,9 +481,11 @@ dnsbl_judge(struct DNSBLRequest *req, struct DNSBLServer *server,
   server->hits++;
   req->result++;
 
-  /* Every matching entry marks the client (if it stays), whatever its
-   * action: the scripts' marks{} (iauthd.pl, iauthd-ts) */
-  if (server->mark)
+  /* Every matching mark entry marks the client (if it stays), as the
+   * scripts' marks{} (iauthd.pl, iauthd-ts) collect every mark= of the
+   * lines that matched.  The reason of a block or whitelist entry is its
+   * refusal text, no mark. */
+  if (server->action == DNSBL_ACT_MARK && server->mark)
     dnsbl_note_mark(req, server->mark);
 
   /* Process the action based on priority */
