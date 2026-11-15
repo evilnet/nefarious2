@@ -1021,18 +1021,22 @@ void presence_backfill_now(void)
  * visibility after deauth) and the new anchor shows no presence at
  * all for the current window.
  *
- * The open-interval START carries over on auth (session->account and
- * account rename) so the member's continuous physical presence stays
- * one window; the old anchor's interval is closed at now.  Closed
+ * With @a carry the open-interval START carries over (session->account
+ * at a login, account rename by services, account->session at a logout)
+ * so the member's continuous physical presence stays one window; without
+ * it (a SWITCH to a different account: a re-authentication) the new
+ * anchor opens at now, so the new account is never shown present before
+ * it logged in.  Either way the old anchor's interval is closed at now.  Closed
  * historical intervals are NOT migrated (documented residue: presence
  * recorded while unauthed stays queryable only... under the account
  * they later authed to?  No -- it ages out unqueried; acceptable).
  *
  * Skips CHFL_ALIAS memberships and respects same-anchor siblings on
  * the closing side. */
-void presence_anchor_transfer(struct Client *cptr,
-                              const char *old_anchor, int old_is_session,
-                              const char *new_anchor, int new_is_session)
+void presence_anchor_move(struct Client *cptr,
+                          const char *old_anchor, int old_is_session,
+                          const char *new_anchor, int new_is_session,
+                          int carry)
 {
   struct Membership *m;
 
@@ -1050,15 +1054,15 @@ void presence_anchor_transfer(struct Client *cptr,
       continue;
 
     /* Carry the open-interval start across the transition when the
-     * old anchor holds one. */
+     * old anchor holds one and the transition carries (not a switch). */
     if (old_anchor && *old_anchor) {
-      if (old_is_session) {
+      if (carry && old_is_session) {
         struct presence_session_entry *e =
             session_find(old_anchor, chptr->chname);
         if (e && e->record.open_since != 0
             && e->record.open_since < start)
           start = e->record.open_since;
-      } else {
+      } else if (carry) {
         struct presence_record r;
         if (acct_load(old_anchor, chptr->chname, &r) == 0
             && r.open_since != 0 && r.open_since < start)
@@ -1073,6 +1077,14 @@ void presence_anchor_transfer(struct Client *cptr,
 
     presence_record_join(new_anchor, new_is_session, chptr->chname, start);
   }
+}
+
+void presence_anchor_transfer(struct Client *cptr,
+                              const char *old_anchor, int old_is_session,
+                              const char *new_anchor, int new_is_session)
+{
+  presence_anchor_move(cptr, old_anchor, old_is_session, new_anchor,
+                       new_is_session, 1);
 }
 
 /* ---------------------------------------------------------------- */

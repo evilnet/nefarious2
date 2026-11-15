@@ -786,6 +786,17 @@ void bounce_sync_alias_identity(struct Client *primary)
 { touch(primary); fx.alias_syncs++; tlog_add("alias sync %s", tname(primary)); }
 void channel_account_adjust(struct Client *cptr, int delta)
 { touch(cptr); fx.account_adjusts++; tlog_add("channel account count %s %+d", tname(cptr), delta); }
+/* An account change's presence move: a switch carries nothing. */
+void presence_anchor_move(struct Client *cptr, const char *old_anchor,
+                          int old_is_session, const char *new_anchor,
+                          int new_is_session, int carry)
+{
+  touch(cptr);
+  fx.anchors++;
+  tlog_add("presence %s %s/%d -> %s/%d%s", tname(cptr), old_anchor,
+           old_is_session, new_anchor, new_is_session,
+           carry ? "" : " (no carry)");
+}
 void presence_anchor_transfer(struct Client *cptr, const char *old_anchor,
                               int old_is_session, const char *new_anchor,
                               int new_is_session)

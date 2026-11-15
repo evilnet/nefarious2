@@ -213,6 +213,17 @@ extern void presence_burst_sync_link_gone(struct Client *link);
 extern void presence_apply_close(const char *anchor, int anchor_is_session,
                                  const char *channel, int64_t start,
                                  int64_t end);
+/** Move @a cptr's open presence from @a old_anchor to @a new_anchor at an
+ *  account-state transition: the old anchor's interval closes now, the new
+ *  one opens -- at the old interval's start when @a carry (a login, a
+ *  rename of the account by services, a logout: the same person stays),
+ *  at now when not (a switch to a different account by re-authentication:
+ *  the new account was not there before). */
+extern void presence_anchor_move(struct Client *cptr,
+                                 const char *old_anchor, int old_is_session,
+                                 const char *new_anchor, int new_is_session,
+                                 int carry);
+/** presence_anchor_move() with the start carried. */
 extern void presence_anchor_transfer(struct Client *cptr,
                                      const char *old_anchor,
                                      int old_is_session,

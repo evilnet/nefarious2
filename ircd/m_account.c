@@ -277,14 +277,25 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           if (!was_account)
             channel_account_adjust(acptr, +1);
 
-          /* Strict-presence anchor transfer: R = session->account,
-           * M = account rename. */
+          /* Strict-presence anchor transfer: R = session->account, with
+           * the open interval's start.  An M is one of two things, told
+           * apart by the line's SOURCE, which every relay keeps (this
+           * function's and stock master's both relay with sptr): services
+           * RENAMING the account (X3's RENAME, irc_rename(), from its own
+           * server) -- the same owner, so the start carries over -- or the
+           * user's OWN server announcing that the user re-authenticated to
+           * a DIFFERENT account (sasl_broadcast_account()) -- the new
+           * account was not there before, so it is present from now on,
+           * never earlier.  Only the user's server can announce its
+           * re-authentication; a services server is never a user's
+           * server. */
           if (!was_account)
             presence_anchor_transfer(acptr, cli_session_id(acptr), 1,
                                      cli_user(acptr)->account, 0);
           else
-            presence_anchor_transfer(acptr, presence_old_acct, 0,
-                                     cli_user(acptr)->account, 0);
+            presence_anchor_move(acptr, presence_old_acct, 0,
+                                 cli_user(acptr)->account, 0,
+                                 sptr != cli_user(acptr)->server);
         }
 
         if (parc > 4) {

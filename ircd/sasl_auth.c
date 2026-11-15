@@ -1150,13 +1150,17 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
       /* Strict-presence anchor transfer (self-gated on the feature):
        * 'R' moves session->account carrying the open-interval start;
-       * 'M' renames account->account. */
+       * 'M' here is a re-authentication to a DIFFERENT account, never a
+       * rename (services rename through AC M, m_account.c): the new
+       * account opens at now and is not shown present before it logged
+       * in.  Every other server tells the M it receives for a switch by
+       * its source, this server (ms_account()). */
       if (type == 'R')
         presence_anchor_transfer(sptr, cli_session_id(sptr), 1,
                                  cli_user(sptr)->account, 0);
       else
-        presence_anchor_transfer(sptr, presence_old_acct, 0,
-                                 cli_user(sptr)->account, 0);
+        presence_anchor_move(sptr, presence_old_acct, 0,
+                             cli_user(sptr)->account, 0, 0);
 
       /* X3's stamp on the relay path, 0 for a local login (step 4 above);
        * a re-authentication drops whatever the previous account carried.

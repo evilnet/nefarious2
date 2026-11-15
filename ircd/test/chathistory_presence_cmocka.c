@@ -66,6 +66,9 @@
 #include "chathistory_presence.h"
 #include "crdt_hlc.h"
 #include "ircd_events.h"
+#include "channel.h"
+#include "client.h"
+#include "struct.h"
 
 /* ------------------------------------------------------------------ */
 /* Link-time stubs for chathistory_presence.c's other dependencies.   */
@@ -95,10 +98,13 @@ int feature_int(enum Feature feat)
   return test_max_intervals;
 }
 
+/** FEAT_CHATHISTORY_STRICT_PRESENCE, which gates the account-state
+ * transfers (presence_anchor_move()); off unless a case turns it on. */
+static int strict_on;
+
 int feature_bool(enum Feature feat)
 {
-  (void)feat;
-  return 0;
+  return feat == FEAT_CHATHISTORY_STRICT_PRESENCE ? strict_on : 0;
 }
 
 struct db_env *history_get_env(void)
@@ -725,6 +731,97 @@ static void test_presence_millisecond_edges(void **state)
   presence_purge_session(anchor);
 }
 
+/** A connection's open presence moves to another anchor at an account
+ * transition (presence_anchor_move()).  A RENAME of the account (services:
+ * same owner) carries the open interval's start, so the member's
+ * continuous presence stays one window; a SWITCH to a different account
+ * (a re-authentication) does not: the new anchor is present from the
+ * switch on, never before it -- else the new account reads history from
+ * before it was there.  Either way the old anchor's interval closes at the
+ * switch.  Session anchors (in memory) stand in for the account anchors:
+ * the carry rule is the same code for both. */
+static void test_presence_move_carries_only_a_rename(void **state)
+{
+  const char *chan = "#move-test";
+  int carry;
+
+  (void)state;
+  strict_on = 1;
+  for (carry = 0; carry < 2; carry++) {
+    const char *old_a = carry ? "mv-old-rename" : "mv-old-switch";
+    const char *new_a = carry ? "mv-new-rename" : "mv-new-switch";
+    int64_t t0 = BASE_MS + SEC(5000000), t1 = t0 + SEC(600);
+    struct Client cli;
+    struct User user;
+    struct Membership m;
+    struct Channel *ch = calloc(1, sizeof(struct Channel) + strlen(chan) + 1);
+
+    assert_non_null(ch);
+    memset(&cli, 0, sizeof(cli));
+    memset(&user, 0, sizeof(user));
+    memset(&m, 0, sizeof(m));
+    strcpy(ch->chname, chan);
+    cli_user(&cli) = &user;
+    user.channel = &m;
+    m.user = &cli;
+    m.channel = ch;
+    ch->members = &m;
+
+    presence_purge_session(old_a);
+    presence_purge_session(new_a);
+    presence_record_join(old_a, 1, chan, t0);
+
+    presence_set_event_time(t1);                 /* the account change */
+    presence_anchor_move(&cli, old_a, 1, new_a, 1, carry);
+    presence_set_event_time(0);
+
+    /* The old anchor: [t0, t1], closed. */
+    assert_true(presence_was_present(old_a, 1, chan, t0));
+    assert_true(presence_was_present(old_a, 1, chan, t1));
+    assert_false(presence_was_present(old_a, 1, chan, t1 + SEC(1)));
+    /* The new anchor: open from t1 on -- and from t0 only for a rename. */
+    assert_true(presence_was_present(new_a, 1, chan, t1));
+    assert_true(presence_was_present(new_a, 1, chan, t1 + SEC(60)));
+    assert_int_equal(presence_was_present(new_a, 1, chan, t0) ? 1 : 0, carry);
+    assert_int_equal(presence_was_present(new_a, 1, chan, t1 - MS(1)) ? 1 : 0,
+                     carry);
+
+    presence_purge_session(old_a);
+    presence_purge_session(new_a);
+    free(ch);
+  }
+
+  /* presence_anchor_transfer() is the carrying move (logins, renames,
+   * logouts: unchanged). */
+  {
+    struct Client cli;
+    struct User user;
+    struct Membership m;
+    struct Channel *ch = calloc(1, sizeof(struct Channel) + strlen(chan) + 1);
+    int64_t t0 = BASE_MS + SEC(6000000), t1 = t0 + SEC(600);
+
+    assert_non_null(ch);
+    memset(&cli, 0, sizeof(cli));
+    memset(&user, 0, sizeof(user));
+    memset(&m, 0, sizeof(m));
+    strcpy(ch->chname, chan);
+    cli_user(&cli) = &user;
+    user.channel = &m;
+    m.user = &cli;
+    m.channel = ch;
+    ch->members = &m;
+    presence_record_join("tr-old", 1, chan, t0);
+    presence_set_event_time(t1);
+    presence_anchor_transfer(&cli, "tr-old", 1, "tr-new", 1);
+    presence_set_event_time(0);
+    assert_true(presence_was_present("tr-new", 1, chan, t0));
+    presence_purge_session("tr-old");
+    presence_purge_session("tr-new");
+    free(ch);
+  }
+  strict_on = 0;
+}
+
 /* The msgid's embedded HLC is the row's presence time when it agrees
  * with the row's millisecond stamp; a foreign/legacy msgid, or one that
  * disagrees, falls back to (row ms, logical 0). */
@@ -797,6 +894,7 @@ int main(void)
     cmocka_unit_test(test_presence_event_time_from_msgid),
     cmocka_unit_test(test_presence_coalesce_window_ms),
     cmocka_unit_test(test_presence_norm_ms),
+    cmocka_unit_test(test_presence_move_carries_only_a_rename),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

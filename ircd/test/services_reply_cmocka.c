@@ -92,6 +92,7 @@ static char mechs_sent[128];
 /* The sasl capability's value (m_cap.c); NULL: none. */
 static const char *cap_mechs;
 static int refusals;                    /* sasl_reauth_refused() said so */
+static int nmoved;                      /* presence_anchor_move() calls */
 
 static void tell(struct Client *to)
 {
@@ -232,6 +233,7 @@ static int world_setup(void **state)
   mechs_sent[0] = '\0';
   cap_mechs = NULL;
   refusals = 0;
+  nmoved = 0;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
 
@@ -410,12 +412,33 @@ void channel_account_adjust(struct Client *cptr, int delta)
   (void)cptr; (void)delta;
 }
 
+/* The presence moves an account change makes: about whom, from which
+ * anchor to which, and whether the open interval's start carried over
+ * (a rename) or not (a switch to another account). */
+static struct Client *moved[MAXREC];
+static char moved_from[MAXREC][ACCOUNTLEN + 1];
+static char moved_to[MAXREC][ACCOUNTLEN + 1];
+static int moved_carry[MAXREC];
+
+void presence_anchor_move(struct Client *cptr, const char *old_anchor,
+                          int old_is_session, const char *new_anchor,
+                          int new_is_session, int carry)
+{
+  (void)old_is_session; (void)new_is_session;
+  assert_true(nmoved < MAXREC);
+  moved[nmoved] = cptr;
+  ircd_strncpy(moved_from[nmoved], old_anchor ? old_anchor : "", ACCOUNTLEN + 1);
+  ircd_strncpy(moved_to[nmoved], new_anchor ? new_anchor : "", ACCOUNTLEN + 1);
+  moved_carry[nmoved] = carry;
+  nmoved++;
+}
+
 void presence_anchor_transfer(struct Client *cptr, const char *old_anchor,
                               int old_is_session, const char *new_anchor,
                               int new_is_session)
 {
-  (void)cptr; (void)old_anchor; (void)old_is_session; (void)new_anchor;
-  (void)new_is_session;
+  presence_anchor_move(cptr, old_anchor, old_is_session, new_anchor,
+                       new_is_session, 1);
 }
 
 void bounce_emit_alias_update(struct Client *primary, const char *field,
@@ -1095,6 +1118,118 @@ static void test_account_r_same_tells_nobody(void **state)
   assert_int_equal(nnotified, 0);
 }
 
+/* ====================================================================
+ * ACCOUNT M: a rename by services, or the user's own server's switch
+ * ==================================================================== */
+
+/* The same "AC <user> M <account> ..." line means two things.  Services
+ * send it when they RENAME the account (X3 nickserv RENAME, irc_rename(),
+ * from its own server): the same owner, so the presence window carries
+ * over.  The user's own server sends it when the user re-authenticated to
+ * a DIFFERENT account (sasl_broadcast_account()): the new account was not
+ * there before, so nothing carries.  A relay keeps the line's source (the
+ * fork's and master's ms_account() relay with sptr), so every server tells
+ * them apart by it: from the user's own server, a switch; from any other,
+ * a rename. */
+
+/** Another fork server, linked to this one. */
+static struct Client *leaf_link(const char *name, const char *yxx)
+{
+  struct Client *c = fake_client(name, STAT_SERVER);
+
+  cli_serv(c) = calloc(1, sizeof(struct Server));
+  assert_non_null(cli_serv(c));
+  SetServerYXX(c, c, yxx);
+  cli_serv(c)->up = &me;
+  cli_from(c) = c;
+  return c;
+}
+
+/** A user on @a server, numeric @a yxx, logged in to @a account. */
+static struct Client *remote_user(const char *name, struct Client *server,
+                                  const char *yxx, const char *account)
+{
+  struct Client *c = fake_client(name, STAT_USER);
+
+  cli_user(c) = calloc(1, sizeof(struct User));
+  assert_non_null(cli_user(c));
+  cli_user(c)->server = server;
+  cli_from(c) = server;
+  SetRemoteNumNick(c, yxx);
+  deliver(ms_account, server, server, "%s R %s 1700000000", yxx, account);
+  assert_true(IsAccount(c));
+  nmoved = 0;
+  return c;
+}
+
+static void test_account_m_rename_carries_presence(void **state)
+{
+  struct Client *svs, *leaf, *c;
+  (void)state;
+
+  svs = services_link();
+  leaf = leaf_link("leaf.test", "AC]]]");
+  c = remote_user("ren", leaf, "ACAAB", "zed");
+
+  /* Services rename the account; the line reaches us through the leaf,
+   * still services' (the relay keeps the source). */
+  deliver(ms_account, leaf, svs, "ACAAB M zed2");
+  assert_string_equal(cli_user(c)->account, "zed2");
+  assert_int_equal(nmoved, 1);
+  assert_string_equal(moved_from[0], "zed");
+  assert_string_equal(moved_to[0], "zed2");
+  assert_int_equal(moved_carry[0], 1);
+
+  /* ... and straight from services. */
+  deliver(ms_account, svs, svs, "ACAAB M zed3");
+  assert_int_equal(nmoved, 2);
+  assert_int_equal(moved_carry[1], 1);
+}
+
+static void test_account_m_switch_carries_no_presence(void **state)
+{
+  struct Client *svs, *leaf, *hub2, *c;
+  (void)state;
+
+  svs = services_link();
+  leaf = leaf_link("leaf.test", "AC]]]");
+  hub2 = leaf_link("hub2.test", "AD]]]");
+  c = remote_user("sw", leaf, "ACAAC", "xavier");
+
+  /* The user's own server announces the switch. */
+  deliver(ms_account, leaf, leaf, "ACAAC M yvonne 0");
+  assert_string_equal(cli_user(c)->account, "yvonne");
+  assert_int_equal(nmoved, 1);
+  assert_string_equal(moved_from[0], "xavier");
+  assert_string_equal(moved_to[0], "yvonne");
+  assert_int_equal(moved_carry[0], 0);
+
+  /* Relayed by another server (a legacy hop keeps the source too). */
+  deliver(ms_account, hub2, leaf, "ACAAC M zoe 0");
+  assert_int_equal(nmoved, 2);
+  assert_int_equal(moved_carry[1], 0);
+  (void)svs;
+}
+
+/* A first login (R) moves the session's presence to the account, with
+ * its start, as before. */
+static void test_account_r_carries_presence(void **state)
+{
+  struct Client *leaf, *c;
+  (void)state;
+
+  leaf = leaf_link("leaf.test", "AC]]]");
+  c = fake_client("first", STAT_USER);
+  cli_user(c) = calloc(1, sizeof(struct User));
+  assert_non_null(cli_user(c));
+  cli_user(c)->server = leaf;
+  cli_from(c) = leaf;
+  SetRemoteNumNick(c, "ACAAD");
+  deliver(ms_account, leaf, leaf, "ACAAD R xavier 0");
+  assert_int_equal(nmoved, 1);
+  assert_int_equal(moved_carry[0], 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1123,6 +1258,9 @@ int main(void)
     T(test_account_m_tells_the_user),
     T(test_account_u_tells_the_user),
     T(test_account_r_same_tells_nobody),
+    T(test_account_m_rename_carries_presence),
+    T(test_account_m_switch_carries_no_presence),
+    T(test_account_r_carries_presence),
 #undef T
   };
 
