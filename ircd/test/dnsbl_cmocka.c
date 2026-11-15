@@ -42,7 +42,13 @@ void debug(int level, const char *form, ...) {}
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...) {}
 int feature_bool(enum Feature feat) { return 1; }      /* FEAT_NATIVE_DNSBL */
-int feature_int(enum Feature feat) { return 3600; }    /* FEAT_DNSBL_CACHETIME */
+static int cache_max = 16384;
+int feature_int(enum Feature feat)
+{
+  if (feat == FEAT_DNSBL_CACHEMAX)
+    return cache_max;
+  return 3600;                                         /* FEAT_DNSBL_CACHETIME */
+}
 
 /** The resolver: the queries made, for the case to answer. */
 struct query {
@@ -159,6 +165,8 @@ static void rehash_to(const char *domain, enum DNSBLAction action, const char *m
 static void cache_reset(void)
 {
   memset(dnsbl_cache, 0, sizeof(dnsbl_cache));
+  dnsbl_cache_oldest = dnsbl_cache_newest = NULL;
+  dnsbl_stats.cache_size = 0;
 }
 
 /** Start a lookup for the client (one must start), unanswered. */
@@ -291,7 +299,7 @@ static void same_domain_entries_keep_their_own_answers(void **state)
 
   req = NULL;
   nqueries = 0;
-  memset(dnsbl_cache, 0, sizeof(dnsbl_cache));   /* (not served from it) */
+  cache_reset();                           /* (not served from it) */
   dnsbl_check(&client, &req);
   answer(0, 0, 0);                         /* 251: not */
   answer(1, 1, 250);                       /* 250: listed */
@@ -300,7 +308,7 @@ static void same_domain_entries_keep_their_own_answers(void **state)
 
   req = NULL;
   nqueries = 0;
-  memset(dnsbl_cache, 0, sizeof(dnsbl_cache));   /* (not served from it) */
+  cache_reset();                           /* (not served from it) */
   dnsbl_check(&client, &req);
   dnsbl_clear_servers();                   /* the rehash drops 250 */
   dnsbl_add_server("bl.test", "251", 0, DNSBL_ACT_MARK, "listed", 0);
@@ -334,7 +342,7 @@ static void reply_values_match_as_the_scripts_do(void **state)
     for (a = 0; a < sizeof(ans) / sizeof(ans[0]); a++) {
       struct DNSBLRequest *req = NULL;
 
-      memset(dnsbl_cache, 0, sizeof(dnsbl_cache));
+      cache_reset();
       dnsbl_clear_servers();
       assert_non_null(dnsbl_add_server("bl.test", entries[e].index,
                                        entries[e].bitmask,
@@ -660,6 +668,29 @@ static void mark_entry_mark_bounded(void **state)
                                    "a long refusal text, several words", 0));
 }
 
+/** The cache holds at most FEAT_DNSBL_CACHEMAX addresses: past it the
+ * oldest goes. */
+static void cache_bounded_oldest_first(void **state)
+{
+  struct irc_in_addr first;
+  int k;
+
+  cache_max = 2;
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  memcpy(&first, &cli_ip(&client), sizeof(first));
+  for (k = 0; k < 3; k++) {
+    cli_ip(&client).in6_16[7] = htons(0x0201 + k);   /* 192.0.2.1, .2, .3 */
+    dnsbl_cancel(lookup(1));
+  }
+  assert_int_equal(dnsbl_stats.cache_size, 2);
+  cli_ip(&client).in6_16[7] = htons(0x0201);         /* the oldest: gone */
+  dnsbl_cancel(again(0));
+  cli_ip(&client).in6_16[7] = htons(0x0203);         /* the newest: kept */
+  dnsbl_cancel(again(1));
+  cache_max = 16384;
+  memcpy(&cli_ip(&client), &first, sizeof(first));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -674,6 +705,7 @@ int main(void)
     cmocka_unit_test_setup(every_matching_mark_entry_marks, setup),
     cmocka_unit_test_setup(every_record_of_an_answer_judged, setup),
     cmocka_unit_test_setup(mark_entry_mark_bounded, setup),
+    cmocka_unit_test_setup(cache_bounded_oldest_first, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

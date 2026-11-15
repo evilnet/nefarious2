@@ -1500,6 +1500,7 @@ static struct FeatureDesc {
   F_B(NATIVE_DNSBL, 0, 0, 0),
   F_I(DNSBL_TIMEOUT, 0, 5, 0),
   F_I(DNSBL_CACHETIME, 0, 86400, 0),
+  F_I(DNSBL_CACHEMAX, 0, 16384, 0),
   F_S(DNSBL_BLOCKMSG, 0, "Your IP is listed in a DNS blacklist", 0),
 
 #ifdef USE_LIBGIT2

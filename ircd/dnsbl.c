@@ -161,6 +161,8 @@ dnsbl_init(void)
             NULL, TT_PERIODIC, 300);
 }
 
+static unsigned long long dnsbl_entry_ident(const struct DNSBLServer *server);
+
 int
 dnsbl_valid_mark(const char *mark)
 {
@@ -200,6 +202,7 @@ dnsbl_add_server(const char *domain, const char *index,
   server->score = score;
 
   /* Add to list */
+  server->ident = dnsbl_entry_ident(server);
   server->next = dnsbl_servers;
   dnsbl_servers = server;
 
@@ -298,23 +301,31 @@ dnsbl_cache_lookup(const struct irc_in_addr *addr)
 static void
 dnsbl_answers_free(struct DNSBLAnswer *answers, int n)
 {
-  int i;
-
-  for (i = 0; i < n; i++) {
-    MyFree(answers[i].domain);
-    MyFree(answers[i].index);
-  }
+  (void)n;
   MyFree(answers);
 }
 
 /** Free a cache entry. */
+/** The cache's age list: the oldest entry first, the newest last. */
+static struct DNSBLCacheEntry *dnsbl_cache_oldest, *dnsbl_cache_newest;
+
 static void
 dnsbl_cache_entry_free(struct DNSBLCacheEntry *entry)
 {
+  if (entry->older)
+    entry->older->newer = entry->newer;
+  else
+    dnsbl_cache_oldest = entry->newer;
+  if (entry->newer)
+    entry->newer->older = entry->older;
+  else
+    dnsbl_cache_newest = entry->older;
   dnsbl_answers_free(entry->answers, entry->nanswers);
   MyFree(entry);
   dnsbl_stats.cache_size--;
 }
+
+static void dnsbl_cache_drop(struct DNSBLCacheEntry *stale);
 
 /** Add a lookup's answers to the DNSBL cache, under the address the
  * lookup asked about; the cache takes the answers over. */
@@ -336,8 +347,21 @@ dnsbl_cache_add(const struct irc_in_addr *addr, struct DNSBLAnswer *answers,
   entry->answers = answers;
   entry->nanswers = nanswers;
 
+  /* Bounded: past FEAT_DNSBL_CACHEMAX addresses the oldest goes (a flood
+   * from many addresses -- an IPv6 /64 -- does not grow it without end). */
+  while (dnsbl_cache_oldest
+         && (long) dnsbl_stats.cache_size >= feature_int(FEAT_DNSBL_CACHEMAX))
+    dnsbl_cache_drop(dnsbl_cache_oldest);
+
   entry->next = dnsbl_cache[hash];
   dnsbl_cache[hash] = entry;
+  entry->older = dnsbl_cache_newest;
+  entry->newer = NULL;
+  if (dnsbl_cache_newest)
+    dnsbl_cache_newest->newer = entry;
+  else
+    dnsbl_cache_oldest = entry;
+  dnsbl_cache_newest = entry;
   dnsbl_stats.cache_size++;
 }
 
@@ -388,60 +412,88 @@ dnsbl_cache_expire(void)
  * rehash during the lookup frees every entry (dnsbl_clear_servers()), and
  * the answer is judged by the entry the configuration in force when it
  * arrives has under that name (dnsbl_live_server()).  The name is the
- * entry's block as written -- domain, index text, reply values -- and,
- * as several blocks can be written alike (or differ only in an index the
- * parser drops: "250" and "251" both match every value), its place among
- * those alike.
+ * entry's ident: its block as written -- domain, index text, bitmask --
+ * and, as several blocks can be written alike, its place among those
+ * alike (dnsbl_entry_ident()).
  */
 struct DNSBLQueryContext {
   struct DNSBLRequest *request;  /**< Parent request */
-  char *domain;                  /**< The entry's domain */
-  char *index;                   /**< Its index as written (NULL: none) */
-  unsigned int bitmask;          /**< The reply values it matched */
-  int nth;                       /**< Its place among the entries alike */
+  unsigned long long ident;      /**< The entry's ident */
 };
 
-/** Is \a server the entry written as \a domain, \a index, \a bitmask? */
+/** Are \a a and \a b written alike (domain, index text, bitmask)? */
 static int
-dnsbl_entry_is(const struct DNSBLServer *server, const char *domain,
-               const char *index, unsigned int bitmask)
+dnsbl_entries_alike(const struct DNSBLServer *a, const struct DNSBLServer *b)
 {
-  return server->bitmask == bitmask
-    && !ircd_strcmp(server->domain, domain)
-    && ((!server->index && !index)
-        || (server->index && index && !strcmp(server->index, index)));
+  return a->bitmask == b->bitmask
+    && !ircd_strcmp(a->domain, b->domain)
+    && ((!a->index && !b->index)
+        || (a->index && b->index && !strcmp(a->index, b->index)));
 }
 
-/** \a server's place among the configured entries written alike. */
-static int
-dnsbl_entry_nth(const struct DNSBLServer *server)
+/** FNV-1a, 64 bits, over \a len bytes, continuing \a h. */
+static unsigned long long
+dnsbl_fnv(unsigned long long h, const void *data, size_t len)
+{
+  const unsigned char *p = data;
+
+  while (len--) {
+    h ^= *p++;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+/** \a server's ident: a hash of its block as written (domain folded,
+ * index text, bitmask) and its place among the entries written alike
+ * that the configuration has before it -- the same for the same block at
+ * the same place after a rehash.  Called when it is added (the list then
+ * holds exactly the entries before it in the file). */
+static unsigned long long
+dnsbl_entry_ident(const struct DNSBLServer *server)
 {
   const struct DNSBLServer *s;
+  unsigned long long h = 14695981039346656037ULL;
+  const char *d;
   int nth = 0;
 
-  for (s = dnsbl_servers; s && s != server; s = s->next)
-    if (dnsbl_entry_is(s, server->domain, server->index, server->bitmask))
+  for (s = dnsbl_servers; s; s = s->next)
+    if (s != server && dnsbl_entries_alike(s, server))
       nth++;
-  return nth;
+  for (d = server->domain; *d; d++) {
+    char c = ToLower(*d);
+    h = dnsbl_fnv(h, &c, 1);
+  }
+  h = dnsbl_fnv(h, "\1", 1);
+  if (server->index)
+    h = dnsbl_fnv(h, server->index, strlen(server->index));
+  h = dnsbl_fnv(h, "\1", 1);
+  h = dnsbl_fnv(h, &server->bitmask, sizeof(server->bitmask));
+  return dnsbl_fnv(h, &nth, sizeof(nth));
 }
 
-/** The entry an answer is judged by: the configured entry written as the
- * query's was (domain, index text, reply values), at the same place among
- * those alike.  None (the rehash removed or changed it) means the answer
- * is ignored.  Action and mark are the live entry's.
+/** The configured entry with \a ident, or NULL (the rehash removed or
+ * changed it). */
+static struct DNSBLServer *
+dnsbl_server_by_ident(unsigned long long ident)
+{
+  struct DNSBLServer *server;
+
+  for (server = dnsbl_servers; server; server = server->next)
+    if (server->ident == ident)
+      return server;
+  return NULL;
+}
+
+/** The entry an answer is judged by: the configured entry with the
+ * query's ident.  None (the rehash removed or changed it) means the
+ * answer is ignored.  Action and mark are the live entry's.
  * @return The live entry, or NULL.
  */
 static struct DNSBLServer *
 dnsbl_live_server(const struct DNSBLQueryContext *ctx)
 {
-  struct DNSBLServer *server;
-  int nth = 0;
-
-  for (server = dnsbl_servers; server; server = server->next)
-    if (dnsbl_entry_is(server, ctx->domain, ctx->index, ctx->bitmask)
-        && nth++ == ctx->nth)
-      return server;
-  return NULL;
+  return dnsbl_server_by_ident(ctx->ident);
 }
 
 /** Free a DNSBL request and all its resources */
@@ -548,29 +600,21 @@ dnsbl_note_answer(struct DNSBLRequest *req, struct DNSBLServer *server,
   req->answers = (struct DNSBLAnswer *)MyRealloc(req->answers,
                    (req->nanswers + 1) * sizeof(*req->answers));
   a = &req->answers[req->nanswers++];
-  DupString(a->domain, server->domain);
-  a->index = NULL;
-  if (server->index)
-    DupString(a->index, server->index);
-  a->bitmask = server->bitmask;
-  a->nth = dnsbl_entry_nth(server);
+  a->ident = server->ident;
   a->listed = listed;
   memcpy(a->values, values, sizeof(a->values));
 }
 
 /** The answer \a cached holds for the configured entry \a server (same
- * name: domain, index text, bitmask, place among those alike), or NULL. */
+ * ident), or NULL. */
 static const struct DNSBLAnswer *
 dnsbl_cached_answer(const struct DNSBLCacheEntry *cached,
                     const struct DNSBLServer *server)
 {
-  int nth = dnsbl_entry_nth(server);
   int i;
 
   for (i = 0; i < cached->nanswers; i++)
-    if (cached->answers[i].nth == nth
-        && dnsbl_entry_is(server, cached->answers[i].domain,
-                          cached->answers[i].index, cached->answers[i].bitmask))
+    if (cached->answers[i].ident == server->ident)
       return &cached->answers[i];
   return NULL;
 }
@@ -631,12 +675,10 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   req = ctx->request;
   server = dnsbl_live_server(ctx);
   if (addr && !server)
-    Debug((DEBUG_DNS, "DNSBL: Answer from %s ignored: no such entry since a rehash",
-           ctx->domain));
+    Debug((DEBUG_DNS, "DNSBL: Answer for %s ignored: no such entry since a rehash",
+           h ? h : "?"));
 
   /* Free the per-query context */
-  MyFree(ctx->domain);
-  MyFree(ctx->index);
   MyFree(ctx);
 
   if (!req) {
@@ -768,11 +810,7 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
       continue;
 
     ctx->request = req;
-    DupString(ctx->domain, server->domain);
-    if (server->index)
-      DupString(ctx->index, server->index);
-    ctx->bitmask = server->bitmask;
-    ctx->nth = dnsbl_entry_nth(server);
+    ctx->ident = server->ident;
 
     /* Format the query based on IP version */
     if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {

@@ -48,6 +48,10 @@ struct DNSBLServer {
   char *index;               /**< Comma-separated indexes as written (e.g., "2,3,5,6"), or NULL */
   unsigned char index_set[32]; /**< The reply values (0-255) the index lists, one bit each */
   unsigned int bitmask;      /**< Matches a reply value v when v & bitmask (0: none) */
+  unsigned long long ident;  /**< The entry's name, kept across a rehash
+                                  that does not change its block: a hash of
+                                  domain, index text, bitmask and its place
+                                  among the entries written alike (dnsbl.c) */
   enum DNSBLAction action;   /**< Action to take on match */
   char *mark;                /**< Mark string (for DNSBL_ACT_MARK) */
   int score;                 /**< Score value (for scoring mode) */
@@ -59,13 +63,9 @@ struct DNSBLServer {
 
 /** One DNSBL entry's answer about an address: what a lookup learned,
  * kept so that a verdict can be judged again by the entries in force
- * later.  The entry is named as a query names it (dnsbl.c: domain, index
- * text, bitmask, place among the entries written alike). */
+ * later.  The entry is named by its ident (no strings are copied). */
 struct DNSBLAnswer {
-  char *domain;                  /**< The entry's domain */
-  char *index;                   /**< Its index as written (NULL: none) */
-  unsigned int bitmask;          /**< Its bitmask */
-  int nth;                       /**< Its place among the entries alike */
+  unsigned long long ident;      /**< The entry asked (DNSBLServer.ident) */
   int listed;                    /**< The address is listed there */
   unsigned char values[32];      /**< If so, the reply values (last octets
                                       of every A record), one bit each */
@@ -73,9 +73,12 @@ struct DNSBLAnswer {
 
 /** Structure for caching DNSBL lookup results: the answers, not a verdict
  * (dnsbl_cache_replay() judges them by the entries in force), under the
- * address that was asked about. */
+ * address that was asked about.  At most FEAT_DNSBL_CACHEMAX of them; the
+ * oldest goes first. */
 struct DNSBLCacheEntry {
   struct DNSBLCacheEntry *next;  /**< Hash table chain */
+  struct DNSBLCacheEntry *older; /**< The age list (oldest first) */
+  struct DNSBLCacheEntry *newer;
   struct irc_in_addr addr;       /**< The address the lookup asked about */
   time_t expire;                 /**< Expiration timestamp */
   struct DNSBLAnswer *answers;   /**< One per entry asked */
