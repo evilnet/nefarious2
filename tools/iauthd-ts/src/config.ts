@@ -118,9 +118,12 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
         config.blockMsg = args.trim();
         break;
 
-      case 'CACHETIME':
-        config.cacheTime = parseInt(args.trim(), 10) || DEFAULT_CACHE_TIME;
+      case 'CACHETIME': {
+        // 0 is a value (answers are not reused), not "unset"
+        const seconds = parseInt(args.trim(), 10);
+        config.cacheTime = Number.isNaN(seconds) ? DEFAULT_CACHE_TIME : seconds;
         break;
+      }
 
       case 'SASLDB':
         // Legacy support: convert to file auth provider
