@@ -390,13 +390,17 @@ gitsync_cert_callback(git_cert *cert, int valid, const char *host, void *payload
   const char *configured_fp;
   const char *trusted_fp;
 
-  (void)valid;
+  (void)valid;   /* used by Debug() only */
   (void)payload;
 
-  /* Only handle SSH host keys */
+  /* Only handle SSH host keys.  Any other certificate (an HTTPS remote's
+   * X.509) is libgit2's to judge: GIT_PASSTHROUGH honours its own
+   * verification.  (0 here meant "proceed" whatever that said: any
+   * certificate was accepted.) */
   if (cert->cert_type != GIT_CERT_HOSTKEY_LIBSSH2) {
-    Debug((DEBUG_INFO, "GitSync: Non-SSH certificate type %d", cert->cert_type));
-    return 0;  /* Accept non-SSH certs (e.g., HTTPS) */
+    Debug((DEBUG_INFO, "GitSync: Non-SSH certificate type %d (%s by libgit2)",
+           cert->cert_type, valid ? "valid" : "not valid"));
+    return GIT_PASSTHROUGH;
   }
 
   hostkey = (git_cert_hostkey *)cert;
@@ -1279,6 +1283,35 @@ gitsync_set_timeouts(void)
 #endif
 }
 
+/** The CA file loaded into libgit2 last ("" for none). */
+static char gitsync_ca_loaded[512];
+
+/** Load GITSYNC_CA_FILE as the certificate authorities an HTTPS remote's
+ * certificate may be signed by, when it is set and changed.  libgit2's
+ * TLS backend decides what that means: with mbedTLS (Debian's build) the
+ * file replaces the system's list (SSL_CERT_FILE and SSL_CERT_DIR are
+ * not read), with OpenSSL it adds to it.  Emptying the feature again
+ * keeps the file loaded until a restart. */
+static void
+gitsync_set_ca_file(void)
+{
+  const char *ca = feature_str(FEAT_GITSYNC_CA_FILE);
+
+  if (!ca || !*ca || !strcmp(ca, gitsync_ca_loaded))
+    return;
+  if (git_libgit2_opts(GIT_OPT_SET_SSL_CERT_LOCATIONS, ca, NULL) < 0) {
+    const git_error *e = git_error_last();
+
+    log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: cannot load the CA file "
+              "%s: %s", ca, e && e->message ? e->message : "unknown error");
+    sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: cannot load the CA file "
+                         "%s: %s", ca, e && e->message ? e->message
+                         : "unknown error");
+    return;
+  }
+  ircd_strncpy(gitsync_ca_loaded, ca, sizeof(gitsync_ca_loaded));
+}
+
 /** Run a sync.
  * @param cptr The connection whose line asked for it (&me for the timer).
  * @param sptr The oper who asked (NULL for the timer), told how it went.
@@ -1348,6 +1381,7 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
   }
 
   gitsync_set_timeouts();
+  gitsync_set_ca_file();
 
   /* Clone or open repository */
   if (!dir_exists(repo_path)) {
