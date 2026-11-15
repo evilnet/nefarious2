@@ -107,7 +107,9 @@ connection from the address asks the list again.
 #IAUTH CACHETIME 86400
 ```
 Seconds to cache DNSBL results. Default: 86400 (24 hours). `0`: answers are
-not reused -- every connection asks the lists again. Only definite
+not reused -- every connection asks the lists again; a negative value means
+the same. A value that is not a whole number of seconds is ignored (the default applies) and reported on
+stderr, which the IRCd logs. Only definite
 answers are cached: the list's records, or its "no such name" / "no data"
 (NXDOMAIN / NODATA) answer. Timeouts and failed lookups are never cached.
 
@@ -151,7 +153,7 @@ Options:
 | `block=anonymous` | Block matching clients unless SASL authenticated |
 | `class=<name>` | Assign matching clients to this connection class |
 | `whitelist` | Matching clients are exempt from all blocks |
-| `cachetime=<n>` | Override cache time for this DNSBL |
+| `cachetime=<n>` | Override cache time for this DNSBL (seconds; `0` or negative = answers not reused; a bad value is ignored and reported, the global `CACHETIME` applies) |
 
 ### Example Configuration
 

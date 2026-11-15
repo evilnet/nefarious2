@@ -901,6 +901,22 @@ describe('DNSBL Integration Tests', () => {
   });
 
   describe('CACHETIME 0', () => {
+    it('a negative cachetime on the list means the same: asked again every time', async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSBL server=block.dnsbl index=2 block=all cachetime=-1
+`);
+      mockDns('10.4.0.2', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'] }, { code: 'ENOTFOUND' }] });
+      harness = await createHarness(configPath);
+
+      await connectClient(harness, 0, '10.4.0.2');
+      await connectClient(harness, 1, '10.4.0.2');
+
+      expect(harness.wasRejected(0)).toBe(true);
+      expect(harness.wasAccepted(1)).toBe(true);
+      expect(harness.dnsQueries.filter(q => q === '2.0.4.10.block.dnsbl')).toHaveLength(2);
+    });
+
     it('asks the list again for every connection', async () => {
       writeFileSync(configPath, `
 #IAUTH POLICY RTAWUwFr
