@@ -287,47 +287,61 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
 
   /* A client that already has an account or a completed login -- SASL
    * completed, or an account set by services, WEBIRC or a REGISTER -- gets
-   * ERR_SASLALREADY (907) for any further AUTHENTICATE, as SASL 3.1 says.
-   * A SASL 3.2 client (CAP LS 302) may authenticate again with a
-   * token-based mechanism, OAUTHBEARER, so that it can refresh a token
-   * about to expire; other mechanisms (PLAIN, EXTERNAL, SCRAM-*) get 907
-   * there too.  A 3.1 client gets 907 for every mechanism (before
-   * registration: after it, 462 above).  A registered 3.2 client with no
+   * ERR_SASLALREADY (907) for any further AUTHENTICATE, as SASL 3.1 says,
+   * unless it is a SASL 3.2 client (CAP LS 302; a 3.1 client after
+   * registration got 462 above).  A 3.2 client may authenticate again as
+   * SASL_REAUTH allows (sasl_auth.c): logged in (sasl_logged_in(): the ircd
+   * has applied its account), with OAUTHBEARER only under refresh -- to
+   * refresh a token about to expire -- and with any mechanism under same
+   * and any; before registration has applied a login, likewise
+   * (sasl_restart_mechanism_allowed()).  A registered 3.2 client with no
    * account may authenticate with any mechanism.  A failed or aborted
    * exchange completes nothing: the client may retry.  The rule applies
    * when an exchange starts, not to the data lines of one in progress (a
    * local session, or a cookie for the IAuth and P10 tiers; both are
    * cleared when the exchange completes or is aborted).
    *
-   * A re-authentication never changes the account of a client that is
-   * logged in (sasl_logged_in(): the ircd has applied its account): a login
-   * that names another account, or the same name under another Keycloak
-   * id, is refused when it completes, in every tier (sasl_login_apply()
-   * step 0; a services answer already at its L, ms_sasl()), and the client
-   * keeps its login exactly as it was.  Before registration has applied a
-   * login, a 3.2 client may authenticate again with OAUTHBEARER as anyone.
+   * What a logged-in client's re-authentication may prove is decided when
+   * it completes, in every tier (sasl_reauth_refused(): sasl_login_apply()
+   * step 0; a services or IAuth answer already at its L), SASL_REAUTH read
+   * again then: its own account (a refresh), another one only under any
+   * and never for a bouncer session's connection, the same name under
+   * another Keycloak id never.  A refused one leaves the login exactly as
+   * it was.  Before registration has applied a login, a 3.2 client that
+   * may start again may log in as anyone.
    */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr))
     EndSASLExchange(cptr);    /* a new exchange: a re-authentication if set below */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
       && (IsSASLComplete(cptr) || IsAccount(cptr))) {
-    /* Only a 3.2 client, and only with a token-based mechanism */
-    if (cli_capab_version(cptr) < CAP_VERSION_302
-        || ircd_strcmp(parv[1], "OAUTHBEARER") != 0) {
+    int token = !ircd_strcmp(parv[1], "OAUTHBEARER");
+    int allowed;
+
+    if (cli_capab_version(cptr) < CAP_VERSION_302)
+      allowed = 0;                            /* SASL 3.1 */
+    else if (sasl_logged_in(cptr))
+      allowed = sasl_reauth_mechanism_allowed(token);
+    else
+      allowed = sasl_restart_mechanism_allowed(token);
+    if (!allowed) {
       if (CapActive(cptr, CAP_STANDARDREPLIES))
         send_fail(cptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
                   "You have already completed SASL authentication");
       return send_reply(cptr, ERR_SASLALREADY);
     }
     if (sasl_logged_in(cptr)) {
-      /* A refresh: the login stands -- its account, its record, its
-       * SASL-complete flag -- until the exchange ends; a refusal, a failure
-       * or an abort leaves it as it is, and only a login for the same
-       * account rewrites the record (a REGISTER login's mark,
+      /* A re-authentication: the login stands -- its account, its
+       * record, its SASL-complete flag -- until the exchange ends; a
+       * refusal, a failure or an abort leaves it as it is, and only a login
+       * step 0 lets through rewrites the record (a REGISTER login's mark,
        * FLAG_REGLOGIN, included).  The re-authentication mark tells the
        * exchange's abort and timeout that it is in flight beside the
-       * completed login (IsSASLExchangeDone()). */
+       * completed login (IsSASLExchangeDone()).  Whether it began with a
+       * token mechanism is kept for its completion, which reads
+       * SASL_REAUTH again (refresh: a token's refresh only). */
       SetSASLReauth(cptr);
+      if (token)
+        SetFlag(cptr, FLAG_SASLREAUTHTOKEN);
     } else {
       /* Before registration has applied it: clear the SASLComplete flag
        * and the identity the completed login left with it

@@ -834,6 +834,74 @@ int sasl_logged_in(struct Client *cptr)
          && (IsRegistered(cptr) || !cli_auth(cptr));
 }
 
+enum sasl_reauth_mode sasl_reauth_mode(void)
+{
+  const char *v = feature_str(FEAT_SASL_REAUTH);
+
+  /* The feature takes only these three (F_SC, ircd_features.c); anything
+   * else -- none, in a test world -- is the default. */
+  if (v && !ircd_strcmp(v, "refresh"))
+    return SASL_REAUTH_REFRESH;
+  if (v && !ircd_strcmp(v, "same"))
+    return SASL_REAUTH_SAME;
+  return SASL_REAUTH_ANY;
+}
+
+int sasl_reauth_mechanism_allowed(int token)
+{
+  /* refresh: a logged-in client re-authenticates only to refresh a token;
+   * same and any: with any mechanism (what it proves is judged when the
+   * exchange completes, sasl_reauth_refused()). */
+  return token || sasl_reauth_mode() != SASL_REAUTH_REFRESH;
+}
+
+int sasl_restart_mechanism_allowed(int token)
+{
+  /* A SASL 3.2 client BEFORE registration that has a login on this
+   * connection (nothing of it is on the network yet).  refresh: as before,
+   * only OAUTHBEARER may go again; same and any: any mechanism -- and,
+   * either way, it may log in as anyone (the start clears the login,
+   * m_authenticate()).  This row is the orchestrator's choice, not an owner
+   * ruling (2026-11-15): kept to this one function so a different decision
+   * is one change here. */
+  return token || sasl_reauth_mode() != SASL_REAUTH_REFRESH;
+}
+
+/** May logged-in \a sptr's re-authentication CHANGE its account to \a
+ * account (SASL_REAUTH any, already checked)?  Only a registered client
+ * that is not part of a bouncer session -- a primary, an alias, a held
+ * ghost: bounce_get_session() finds the session from any of them, and an
+ * alias whose session is going is still an alias -- for a name the ircd
+ * tells apart from its own (a name only the casemapping folds together
+ * with it is the same key to sessions, history and metadata, and an
+ * "AC M" naming it is dropped by every server as no change), and only
+ * where the change can be carried: an account change is "AC <user> M",
+ * which needs EXTENDED_ACCOUNTS (the old form names a first login only;
+ * a stock server refuses it for a user who has an account).  A client
+ * registration has not yet applied stays as it is (a bouncer login held
+ * for burst convergence: not on the network as a user yet). */
+static int sasl_switch_allowed(struct Client *sptr, const char *account)
+{
+  return IsRegistered(sptr) && !EmptyString(account)
+         && !bounce_get_session(sptr) && !IsBouncerAlias(sptr)
+         && !IsBouncerHold(sptr)
+         && 0 != ircd_strcmp(cli_user(sptr)->account, account)
+         && feature_bool(FEAT_EXTENDED_ACCOUNTS);
+}
+
+/** Is \a account the account logged-in \a sptr holds: the same name as
+ * the ircd compares account names (ircd_strcmp(), its casemapping:
+ * sessions, history and metadata are keyed the same way) AND equal but for
+ * ASCII letter case, the only folding Keycloak's usernames share
+ * (sasl_same_name()).  a[b and a{b are one name to the ircd and two users
+ * to Keycloak: not the same account. */
+static int sasl_same_account(struct Client *sptr, const char *account)
+{
+  return !EmptyString(account)
+         && 0 == ircd_strcmp(cli_user(sptr)->account, account)
+         && sasl_same_name(cli_user(sptr)->account, account);
+}
+
 int sasl_reauth_refused(struct Client *sptr, const char *account,
                         const char *kc_id)
 {
@@ -841,60 +909,70 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
    * name-reuse signal, and a client repeating the other kind with a token
    * of its own must not keep it from the opers. */
   static time_t notice_rate_other, notice_rate_id;
+  enum sasl_reauth_mode mode;
   const char *current;
   const char *conn_id;
-  int other_id;
 
   if (!sasl_logged_in(sptr))
     return 0;
+  /* SASL_REAUTH as it is now: a REHASH between the start and the end of
+   * the exchange is decided by this reading. */
+  mode = sasl_reauth_mode();
   current = cli_user(sptr)->account;
   conn_id = sasl_conn_kc_id(sptr);
 
-  /* The same account: the same name -- equal as the ircd compares account
-   * names (ircd_strcmp(), its casemapping: sessions, history and metadata
-   * are keyed the same way) AND equal but for ASCII letter case, the only
-   * folding Keycloak's usernames share (sasl_same_name()): a[b and a{b are
-   * one name to the ircd and two users to Keycloak, so they are refused
-   * whatever the ids say -- and, when both sides carry a Keycloak id, the
-   * same id -- the connection's session's when it is in one (a primary or
-   * an alias), else its own.  A side without an id leaves the name to
-   * decide (a token minted without the basic scope has no sub; a login
-   * through services carries none): the name still has to be the same, so
-   * a missing id never reaches another account. */
-  if (!EmptyString(account) && 0 == ircd_strcmp(current, account)
-      && sasl_same_name(current, account)) {
-    if (!kc_id || !account_id_valid(kc_id)
-        || !bounce_rebind_kc_conflict(conn_id, kc_id))
-      return 0;
-    other_id = 1;
-  } else
-    other_id = 0;
+  /* The same account -- and, when both sides carry a Keycloak id, the same
+   * id: the connection's session's when it is in one (a primary or an
+   * alias), else its own.  A side without an id leaves the name to decide
+   * (a token minted without the basic scope has no sub; a login through
+   * services carries none): the name still has to be the same, so a
+   * missing id never reaches another account. */
+  if (sasl_same_account(sptr, account)) {
+    if (kc_id && account_id_valid(kc_id)
+        && bounce_rebind_kc_conflict(conn_id, kc_id)) {
+      /* The account was deleted and made again under the same name: this
+       * connection -- with the bouncer session it belongs to -- is the
+       * previous user's, and is never tied to the new id (user,
+       * 2026-10-23), whatever SASL_REAUTH says.  904: the proof is not
+       * this account's. */
+      log_write(LS_USER, L_NOTICE, 0,
+                "SASL: %C, logged in as %s with Keycloak id %s, proved %s with "
+                "Keycloak id %s: re-authentication refused", sptr, current,
+                conn_id, account, kc_id);
+      sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate_id,
+                                       "SASL: %C (logged in as %s) proved the "
+                                       "account under another Keycloak id: "
+                                       "re-authentication refused", sptr, current);
+      if (CapActive(sptr, CAP_STANDARDREPLIES))
+        send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
+                  "This connection belongs to the account's previous Keycloak user");
+      send_reply(sptr, ERR_SASLFAIL,
+                 ": this connection belongs to the account's previous Keycloak user");
+      return 1;
+    }
+    /* A refresh.  Under refresh only a token mechanism may refresh: an
+     * exchange begun with another while the setting allowed it, and
+     * completing after a REHASH to refresh, is refused as its start would
+     * be now (907). */
+    if (mode == SASL_REAUTH_REFRESH && !HasFlag(sptr, FLAG_SASLREAUTHTOKEN)) {
+      if (CapActive(sptr, CAP_STANDARDREPLIES))
+        send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
+                  "You have already completed SASL authentication");
+      send_reply(sptr, ERR_SASLALREADY);
+      return 1;
+    }
+    return 0;
+  }
 
-  /* The reply (SASL defines numerics only): another account is 907, the
-   * client is already authenticated -- SASL's answer to an AUTHENTICATE
-   * after a successful one; the same name under another Keycloak id is 904,
-   * a failed exchange: the proof is not this account's.  The FAIL before
-   * either, for standard-replies clients, is the fork's addition, the same
-   * code and form (no context) m_authenticate() sends with its 907. */
-  if (other_id) {
-    /* The account was deleted and made again under the same name: this
-     * connection -- with the bouncer session it belongs to -- is the
-     * previous user's, and is never tied to the new id (user, 2026-10-23). */
-    log_write(LS_USER, L_NOTICE, 0,
-              "SASL: %C, logged in as %s with Keycloak id %s, proved %s with "
-              "Keycloak id %s: re-authentication refused", sptr, current,
-              conn_id, account, kc_id);
-    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &notice_rate_id,
-                                     "SASL: %C (logged in as %s) proved the "
-                                     "account under another Keycloak id: "
-                                     "re-authentication refused", sptr, current);
-    if (CapActive(sptr, CAP_STANDARDREPLIES))
-      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
-                "This connection belongs to the account's previous Keycloak user");
-    send_reply(sptr, ERR_SASLFAIL,
-               ": this connection belongs to the account's previous Keycloak user");
-  } else {
-    char reason[ACCOUNTLEN + 80];
+  /* Another account: SASL_REAUTH any changes the account of a client that
+   * may change it (sasl_switch_allowed()); everything else is refused. */
+  if (mode == SASL_REAUTH_ANY && sasl_switch_allowed(sptr, account))
+    return 0;
+
+  {
+    char reason[ACCOUNTLEN + 96];
+    int member = bounce_get_session(sptr) || IsBouncerAlias(sptr)
+                 || IsBouncerHold(sptr);
 
     log_write(LS_USER, L_NOTICE, 0,
               "SASL: %C, logged in as %s, re-authenticated as %s: refused, a "
@@ -904,12 +982,20 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
                                      "SASL: %C (logged in as %s) re-authenticated "
                                      "as %s: refused", sptr, current,
                                      EmptyString(account) ? "(no account)" : account);
-    ircd_snprintf(0, reason, sizeof(reason),
-                  ": you are logged in as %s; a re-authentication cannot "
-                  "change the account", current);
+    if (mode == SASL_REAUTH_ANY && member)
+      ircd_snprintf(0, reason, sizeof(reason),
+                    "you are logged in as %s; a connection of a bouncer "
+                    "session cannot change the account", current);
+    else
+      ircd_snprintf(0, reason, sizeof(reason),
+                    "you are logged in as %s; a re-authentication cannot "
+                    "change the account", current);
+    /* 907: the client is already authenticated -- SASL's answer to an
+     * authentication after a successful one.  The FAIL before it, for
+     * standard-replies clients, is the fork's addition, the same code and
+     * form (no context) m_authenticate() sends with its 907. */
     if (CapActive(sptr, CAP_STANDARDREPLIES))
-      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
-                reason + 2);              /* "you are logged in as ..." */
+      send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL, reason);
     send_reply(sptr, ERR_SASLALREADY);
   }
   return 1;
@@ -970,7 +1056,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
                              time_t acc_create, const char *kc_id, int id_live,
                              enum sasl_login_proof by)
 {
-  int refresh;
+  int refresh, switching;
   int lb = 0;   /* a labeled batch opened for 900 + 903 */
 
   /* 0. A client already logged in (sasl_logged_in()) re-authenticates to
@@ -1025,8 +1111,13 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   if (by == LOGIN_BY_SASL && cli_auth(sptr))
     auth_sasl_start(cli_auth(sptr));
 
-  /* A logged-in client that passed step 0 refreshes its own login. */
-  refresh = by == LOGIN_BY_SASL && sasl_logged_in(sptr);
+  /* A logged-in client that passed step 0 refreshes its own login, or --
+   * SASL_REAUTH any, a client that may change it -- changes to another
+   * account: a switch, a new login in every way but the hidden-host step
+   * (step 5) and the announcement (step 7, 'M'). */
+  switching = by == LOGIN_BY_SASL && sasl_logged_in(sptr)
+              && !sasl_same_account(sptr, account);
+  refresh = by == LOGIN_BY_SASL && sasl_logged_in(sptr) && !switching;
 
   /* 1. The login's identity, as a whole (sasl_identity_set()): the account
    * name; the account timestamp, which is X3's registration date when the
@@ -1099,9 +1190,10 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
       auth_set_account_later(cli_auth(sptr), cli_saslaccount(sptr));
   }
 
-  /* 5. Pre-registration hidden host setup (not on a refresh: the client's
-   * host is as it chose it -- a -x stays) */
-  if (!refresh && ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+  /* 5. Pre-registration hidden host setup (not on a refresh or a switch:
+   * the client's host is as it chose it -- a -x stays; a hidden host is
+   * recomputed for the new account in step 7, as an AC M does) */
+  if (!refresh && !switching && ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
        (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
       feature_bool(FEAT_SASL_AUTOHIDEHOST)) {
     SetHiddenHost(sptr);
@@ -1124,9 +1216,8 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
   /* 7. Post-registration account update: a registered client's first
    * login ('R'), or a re-authentication of a logged-in client, which step 0
-   * let through only for its own account (the same name: the branch below
-   * that announces a change is the first login's; an 'M' from here would
-   * be an account change, which step 0 refuses). */
+   * let through for its own account (the same name: nothing is announced)
+   * or -- SASL_REAUTH any -- for another: an account change, 'M'. */
   if (IsRegistered(sptr) && cli_user(sptr) && cli_saslaccount(sptr)[0]) {
     char type = IsAccount(sptr) ? 'M' : 'R';
 
@@ -1134,6 +1225,12 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
       char presence_old_acct[ACCOUNTLEN + 1];
       ircd_strncpy(presence_old_acct, cli_user(sptr)->account,
                    sizeof(presence_old_acct));
+
+      if (type == 'M')
+        log_write(LS_USER, L_NOTICE, 0,
+                  "SASL: %C, logged in as %s, re-authenticated as %s: account "
+                  "changed (SASL_REAUTH any)", sptr, presence_old_acct,
+                  cli_saslaccount(sptr));
 
       /* Load account-linked metadata BEFORE setting account flag */
       metadata_load_account(sptr, cli_saslaccount(sptr));

@@ -666,6 +666,9 @@ static int bed_features;      /**< the bed's account and host-hiding features:
                                    HOST_HIDING_STYLE 1 (off: all three 0) */
 
 static int sendhost_on;     /**< FEAT_SASL_SENDHOST */
+/** FEAT_SASL_REAUTH.  The cases written before the setting existed pin
+ * what is now "refresh" (setup()); the setting's own cases set it. */
+static const char *reauth_setting = "refresh";
 int feature_bool(enum Feature feat)
 {
   switch (feat) {
@@ -707,6 +710,7 @@ const char *feature_str(enum Feature feat)
   case FEAT_KEYCLOAK_CLIENT_ID: return "ircd";
   case FEAT_KEYCLOAK_CLIENT_SECRET: return "secret";
   case FEAT_SASL_SERVER: return "*";
+  case FEAT_SASL_REAUTH: return reauth_setting;
   default: return "";
   }
 }
@@ -1211,6 +1215,7 @@ static int setup(void **state)
   iauth_host_ip[0] = '\0';
   sendhost_on = 0;
   bed_features = 0;
+  reauth_setting = "refresh";
   ntlog = 0;
 #ifdef USE_LIBKC
   kc_mode = KC_LATER;
@@ -3303,13 +3308,22 @@ static void assert_refused(struct Client *c, const struct login_snap *was,
   assert_int_equal(cli_saslcookie(c), 0);
   assert_login_unchanged(c, was);
   assert_nothing_announced(fx_was);
-  assert_true(fx.oper_notices_tried > fx_was->oper_notices_tried);
+  if (!strstr(reason, "already completed"))     /* a change of account */
+    assert_true(fx.oper_notices_tried > fx_was->oper_notices_tried);
   assert_false(IsSASLReauth(c));                /* the exchange's mark went */
   assert_int_equal(f->registered, 0);           /* no registration ran */
 
+  /* The gate still stands: under refresh PLAIN is 907 at once; under same
+   * and any it starts (and is ended here). */
   f->n_numerics = 0;
   assert_int_equal(authenticate(c, "PLAIN"), 0);
-  assert_true(has_numeric(f, ERR_SASLALREADY));
+  if (sasl_reauth_mode() == SASL_REAUTH_REFRESH)
+    assert_true(has_numeric(f, ERR_SASLALREADY));
+  else {
+    assert_non_null(cli_saslsession(c));
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_null(cli_saslsession(c));
+  }
   assert_login_unchanged(c, was);
 }
 
@@ -3806,6 +3820,7 @@ static void reauth_refresh_record(void **state)
   assert_int_equal(cli_saslkcidlive(c), 1);
   cli_saslcookie(c) = 4343;                         /* a relayed refresh */
   SetSASLReauth(c);
+  SetFlag(c, FLAG_SASLREAUTHTOKEN);                 /* begun with OAUTHBEARER */
   assert_int_equal(sasl_complete_login(c, "xavier", 1600000000, NULL, 0), 0);
   assert_int_equal(cli_saslacccreate(c), 1600000000);
   assert_string_equal(cli_saslkcid(c), xid);
@@ -4599,6 +4614,469 @@ static void sasl31_retry_after_failure_then_907(void **state)
     assert_string_equal(cli_saslaccount(c), "liz");
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* SASL_REAUTH: refresh, same, any                                      */
+/* ------------------------------------------------------------------ */
+
+/* For a REGISTERED, LOGGED-IN SASL 3.2 client (owner's rulings,
+ * 2026-11-15):
+ *   setting  mechanism    proves            outcome
+ *   refresh  not a token  --                907 at the start
+ *   refresh  OAUTHBEARER  its own account   a refresh
+ *   refresh  OAUTHBEARER  another account   907
+ *   same     any          its own account   a refresh
+ *   same     any          another account   907
+ *   any      any          its own account   a refresh
+ *   any      any          another account   the account CHANGES -- not for
+ *                                           a bouncer session's connection
+ *   every    any          its name, another Keycloak id   904
+ *   every    any          (fails)           the login stands
+ * The setting is read at the start and again at the completion (a REHASH
+ * between: the completion decides). */
+
+static const char *const settings[] = { "refresh", "same", "any" };
+
+/** A registered client logged in to xavier (its Keycloak id), CAP 302,
+ * standard-replies, in no bouncer session, on a server with the bed's
+ * account features (EXTENDED_ACCOUNTS: an account change is carried). */
+static struct Client *xavier_client(int fd)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *c = new_logged_in(fd, "xav", "xavier", user_id("xavier", xid), 1);
+
+  bed_features = 1;
+  fake_of(c)->n_numerics = 0;
+  fake_of(c)->fail_code[0] = fake_of(c)->fail_desc[0] = '\0';
+  ntlog = 0;
+  return c;
+}
+
+/** A PLAIN re-authentication of \a c as \a user, Keycloak answering it (a
+ * fresh password each time: no cache).  0 when the start was refused. */
+static int plain_exchange(struct Client *c, const char *user, int ok)
+{
+  static int n;
+  char data[300], pw[24];
+
+  snprintf(pw, sizeof(pw), "ra%d", ++n);
+  plain_b64(user, pw, data);
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  if (!cli_saslsession(c))
+    return 0;
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver_kind(P_TOKEN, ok ? KC_SUCCESS : KC_ERROR);
+  run_event_loop();
+  return 1;
+}
+
+/** One re-authentication of \a c, by \a mech, proving \a user (Keycloak
+ * id of \a sub_of). */
+static int reauth_as(struct Client *c, const char *mech, const char *user,
+                     const char *sub_of)
+{
+  if (!strcmp(mech, "PLAIN")) {
+    assert_string_equal(user, sub_of);      /* a grant's id is the user's */
+    return plain_exchange(c, user, 1);
+  }
+  token_for(user, sub_of);
+  oauth_exchange(c, LOCAL);
+  return 1;
+}
+
+/** \a c's account changed from \a was to \a account (Keycloak id of
+ * \a account): 900/903, the network told "AC <nick> M <account> 0 <id>"
+ * (the slot always there), the channels and the user told, the new
+ * account's metadata loaded, presence moved without carrying the old
+ * window, the hidden host recomputed, the record the new login's. */
+static void assert_switched(struct Client *c, const struct login_snap *was,
+                            const struct effects *fx_was, const char *account)
+{
+  struct fake *f = fake_of(c);
+  char id[ACCOUNT_ID_LEN + 1], line[TLOG_LEN], meta[TLOG_LEN], pres[TLOG_LEN];
+
+  user_id(account, id);
+  assert_true(has_numeric(f, RPL_LOGGEDIN));
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_false(has_numeric(f, ERR_SASLFAIL));
+  assert_false(has_numeric(f, ERR_SASLALREADY));
+  assert_string_equal(f->loggedin_as, account);
+  assert_true(IsAccount(c));
+  assert_string_equal(cli_user(c)->account, account);
+  assert_string_equal(cli_user(c)->kc_id, id);
+  assert_int_equal(cli_user(c)->acc_create, 0);
+  assert_string_equal(cli_saslaccount(c), account);
+  assert_string_equal(cli_saslkcid(c), id);
+  assert_true(IsSASLComplete(c));
+  assert_false(IsSASLReauth(c));
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_saslcookie(c), 0);
+  snprintf(line, sizeof(line), "servers AC %s M %s 0 %s", cli_name(c), account, id);
+  assert_true(tlog_has(line));
+  snprintf(meta, sizeof(meta), "metadata load %s %s", cli_name(c), account);
+  assert_true(tlog_has(meta));
+  snprintf(pres, sizeof(pres), "presence %s %s/0 -> %s/0 (no carry)", cli_name(c),
+           was->account, account);
+  assert_true(tlog_has(pres));
+  assert_int_equal(fx.notifies, fx_was->notifies + 1);
+  assert_int_equal(fx.broadcasts, fx_was->broadcasts + 1);
+  assert_int_equal(fx.hostmasks, fx_was->hostmasks + (was->hidden ? 1 : 0));
+  assert_int_equal(fx.account_adjusts, fx_was->account_adjusts);  /* counted */
+  assert_int_equal(IsHiddenHost(c) ? 1 : 0, was->hidden);
+}
+
+/** The whole table for a registered, logged-in client not in a session:
+ * {refresh, same, any} x {PLAIN, OAUTHBEARER} x {its own account,
+ * another}. */
+static void reauth_setting_table(void **state)
+{
+  int s, m, other, fd = 130;
+  const char *mechs[2] = { "PLAIN", "OAUTHBEARER" };
+
+  sasl_init_once();
+  for (s = 0; s < 3; s++)
+    for (m = 0; m < 2; m++)
+      for (other = 0; other < 2; other++) {
+        struct Client *c;
+        struct login_snap was;
+        struct effects fx_was;
+        int started;
+
+        reauth_setting = settings[s];
+        c = xavier_client(fd);
+        fd = fd < 137 ? fd + 1 : 130;
+        print_message("  SASL_REAUTH %s / %s / %s\n", settings[s], mechs[m],
+                      other ? "another account" : "its own account");
+        snap(c, &was);
+        fx_was = fx;
+        started = reauth_as(c, mechs[m], other ? "yvonne" : "xavier",
+                            other ? "yvonne" : "xavier");
+        if (s == 0 && m == 0) {             /* refresh, PLAIN: refused at the start */
+          assert_false(started);
+          assert_int_equal(fake_of(c)->n_numerics, 1);
+          assert_int_equal(fake_of(c)->numerics[0], ERR_SASLALREADY);
+          assert_string_equal(fake_of(c)->fail_code, "ALREADY_AUTHENTICATED");
+          assert_login_unchanged(c, &was);
+          assert_nothing_announced(&fx_was);
+          continue;
+        }
+        if (!other) {
+          assert_refreshed(c, &was, &fx_was);
+          assert_false(tlog_has_prefix("servers AC"));   /* no AC line */
+          assert_string_equal(cli_user(c)->kc_id, was.kc_id);
+          continue;
+        }
+        if (s < 2) {
+          assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
+          continue;
+        }
+        assert_switched(c, &was, &fx_was, "yvonne");
+      }
+}
+
+/** The same name under ANOTHER Keycloak id is refused with 904 under every
+ * setting, by either mechanism; a re-authentication that fails leaves the
+ * login as it was under every setting. */
+static void reauth_setting_other_id_and_failure(void **state)
+{
+  int s;
+
+  sasl_init_once();
+  for (s = 0; s < 3; s++) {
+    struct Client *c;
+    struct login_snap was;
+    struct effects fx_was;
+    char oid[ACCOUNT_ID_LEN + 1];
+
+    reauth_setting = settings[s];
+    c = xavier_client(140);               /* OAUTHBEARER, xavier made again */
+    snap(c, &was);
+    fx_was = fx;
+    token_for("xavier", "xavier-recreated");
+    oauth_exchange(c, LOCAL);
+    assert_refused(c, &was, &fx_was, ERR_SASLFAIL, "previous Keycloak user");
+
+    if (s > 0) {                          /* PLAIN, the same (refresh: no PLAIN) */
+      c = new_logged_in(141, "xav", "xavier", user_id("xavier-old", oid), 1);
+      fake_of(c)->n_numerics = 0;
+      ntlog = 0;
+      snap(c, &was);
+      fx_was = fx;
+      assert_int_equal(plain_exchange(c, "xavier", 1), 1);
+      assert_refused(c, &was, &fx_was, ERR_SASLFAIL, "previous Keycloak user");
+    }
+
+    c = xavier_client(142);               /* a failure: Keycloak refuses */
+    snap(c, &was);
+    fx_was = fx;
+    if (s > 0)
+      assert_int_equal(plain_exchange(c, "yvonne", 0), 1);
+    else {
+      const char msg[] = "n,,\001auth=Bearer opaque-token\001\001";
+      char data[300];
+
+      jwt_local_undecided = 1;
+      b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+      assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+      assert_int_equal(authenticate(c, data), 0);
+      pend_deliver_kind(P_INTRO, KC_FORBIDDEN);
+      assert_int_equal(authenticate(c, "AQ=="), 0);
+    }
+    assert_true(has_numeric(fake_of(c), ERR_SASLFAIL));
+    assert_false(has_numeric(fake_of(c), RPL_LOGGEDIN));
+    assert_null(cli_saslsession(c));
+    assert_int_equal(cli_saslcookie(c), 0);
+    assert_false(IsSASLReauth(c));
+    assert_login_unchanged(c, &was);
+    assert_nothing_announced(&fx_was);
+  }
+}
+
+/** A connection of a bouncer session -- the primary or an alias -- never
+ * changes the account, under any either (907, its FAIL saying why); its
+ * own account refreshes as for anyone. */
+static void reauth_setting_bouncer_member(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1];
+  struct Client *p, *a, *who[2];
+  int i;
+
+  sasl_init_once();
+  reauth_setting = "any";
+  bed_features = 1;
+  user_id("xavier", xid);
+  p = new_logged_in(143, "nn", "xavier", xid, 1);
+  a = new_logged_in(144, "nn", "xavier", xid, 1);
+  fsess.members[0] = p;
+  fsess.members[1] = a;
+  ircd_strncpy(fsess.kc_id, xid, sizeof(fsess.kc_id));
+  who[0] = p;
+  who[1] = a;
+  for (i = 0; i < 2; i++) {
+    struct Client *c = who[i];
+    struct login_snap was;
+    struct effects fx_was;
+
+    fake_of(c)->n_numerics = 0;
+    snap(c, &was);
+    fx_was = fx;
+    assert_int_equal(plain_exchange(c, "yvonne", 1), 1);
+    assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "bouncer session");
+
+    fake_of(c)->n_numerics = 0;
+    fx_was = fx;
+    assert_int_equal(plain_exchange(c, "xavier", 1), 1);
+    assert_refreshed(c, &was, &fx_was);
+  }
+}
+
+/** The setting is read again when the exchange completes: a REHASH in
+ * between decides by its new value. */
+static void reauth_setting_rehash_between(void **state)
+{
+  static const struct {
+    const char *start, *end, *mech, *user;
+    int outcome;                  /* 0 refresh, 1 refused 907, 2 switched */
+  } rows[] = {
+    { "any",     "refresh", "PLAIN",       "xavier", 1 },  /* PLAIN no longer refreshes */
+    { "any",     "same",    "PLAIN",       "yvonne", 1 },
+    { "same",    "any",     "PLAIN",       "yvonne", 2 },
+    { "refresh", "any",     "OAUTHBEARER", "yvonne", 2 },
+    { "any",     "refresh", "OAUTHBEARER", "yvonne", 1 },
+    { "any",     "refresh", "OAUTHBEARER", "xavier", 0 },
+  };
+  size_t i;
+
+  sasl_init_once();
+  for (i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+    struct Client *c;
+    struct login_snap was;
+    struct effects fx_was;
+    char data[300];
+
+    reauth_setting = rows[i].start;
+    c = xavier_client(145 + (int)(i % 2));
+    snap(c, &was);
+    fx_was = fx;
+    kc_mode = KC_LATER;
+    if (!strcmp(rows[i].mech, "PLAIN")) {
+      char pw[16];
+
+      snprintf(pw, sizeof(pw), "rb%d", (int)i);
+      plain_b64(rows[i].user, pw, data);
+      assert_int_equal(authenticate(c, "PLAIN"), 0);
+      assert_int_equal(authenticate(c, data), 0);
+      reauth_setting = rows[i].end;                 /* the REHASH */
+      pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+      run_event_loop();
+    } else {
+      const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+
+      token_for(rows[i].user, rows[i].user);
+      jwt_local_undecided = 1;                      /* introspected: later */
+      b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+      assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+      assert_int_equal(authenticate(c, data), 0);
+      reauth_setting = rows[i].end;                 /* the REHASH */
+      pend_deliver_kind(P_INTRO, KC_SUCCESS);
+      run_event_loop();
+    }
+    if (rows[i].outcome == 0)
+      assert_refreshed(c, &was, &fx_was);
+    else if (rows[i].outcome == 1)
+      assert_refused(c, &was, &fx_was, ERR_SASLALREADY,
+                     strcmp(rows[i].user, "xavier") ? "logged in as xavier"
+                                                    : "already completed");
+    else
+      assert_switched(c, &was, &fx_was, "yvonne");
+  }
+}
+
+/** Under any, what an account change cannot be: a client registration
+ * has not applied yet (a login held for burst convergence), a name only
+ * the casemapping tells apart, a network without EXTENDED_ACCOUNTS (an AC M
+ * cannot be sent).  Each is refused as before (907). */
+static void reauth_setting_any_not_a_change(void **state)
+{
+  char xid[ACCOUNT_ID_LEN + 1], aid[ACCOUNT_ID_LEN + 1];
+  struct Client *c;
+  struct login_snap was;
+  struct effects fx_was;
+
+  sasl_init_once();
+  reauth_setting = "any";
+  user_id("xavier", xid);
+
+  c = new_client(147, "wai", 1, REG_KEEPS);          /* registration waits */
+  cli_auth(c) = NULL;
+  ircd_strncpy(cli_user(c)->account, "xavier", sizeof(cli_user(c)->account));
+  ircd_strncpy(cli_user(c)->kc_id, xid, sizeof(cli_user(c)->kc_id));
+  SetAccount(c);
+  sasl_identity_set(c, "xavier", 0, xid, 0);
+  SetSASLComplete(c);
+  CapSet(cli_active(c), CAP_STANDARDREPLIES);
+  bed_features = 1;
+  snap(c, &was);
+  fx_was = fx;
+  assert_int_equal(plain_exchange(c, "yvonne", 1), 1);
+  assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
+
+  user_id("a[b", aid);                                /* a[b -> a{b */
+  c = new_logged_in(148, "ab", "a[b", aid, 1);
+  bed_features = 1;
+  snap(c, &was);
+  fx_was = fx;
+  token_for("a{b", "a{b");
+  oauth_exchange(c, LOCAL);
+  assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as a[b");
+
+  c = xavier_client(149);                             /* no EXTENDED_ACCOUNTS */
+  bed_features = 0;
+  snap(c, &was);
+  fx_was = fx;
+  assert_int_equal(plain_exchange(c, "yvonne", 1), 1);
+  assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
+}
+
+/** Through services (D S after an L): the account changes under any, with
+ * X3's timestamp on the AC M; under same it is refused. */
+static void reauth_setting_services_switch(void **state)
+{
+  int s;
+
+  sasl_init_once();
+  for (s = 1; s < 3; s++) {
+    struct Client *c;
+    struct login_snap was;
+    struct effects fx_was;
+
+    reauth_setting = settings[s];
+    c = xavier_client(150 + s);
+    snap(c, &was);
+    fx_was = fx;
+    cli_saslcookie(c) = 4646;                /* the relayed exchange */
+    cli_saslstart(c) = CurrentTime;
+    SetSASLReauth(c);
+    assert_int_equal(sasl_complete_login(c, "yvonne", 1600000000, NULL, 0), 0);
+    if (s == 1) {
+      assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
+      continue;
+    }
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_string_equal(cli_user(c)->account, "yvonne");
+    assert_int_equal(cli_user(c)->acc_create, 1600000000);
+    assert_string_equal(cli_user(c)->kc_id, "");      /* X3's wire has no id */
+    assert_true(tlog_has("servers AC xav M yvonne 1600000000"));
+  }
+}
+
+/** A SASL 3.2 client BEFORE registration that already logged in: under
+ * refresh only OAUTHBEARER may go again (as before); under same and any
+ * any mechanism may, and may log in as anyone -- registration then applies
+ * the last login.  (The orchestrator's choice: sasl_restart_mechanism_
+ * allowed().) */
+static void reauth_setting_before_registration(void **state)
+{
+  int s;
+
+  sasl_init_once();
+  for (s = 0; s < 3; s++) {
+    struct Client *c = new_client(153, "pre", 0, REG_KEEPS);
+    struct fake *f = fake_of(c);
+    char data[300], yid[ACCOUNT_ID_LEN + 1], pw[16];
+
+    reauth_setting = settings[s];
+    CapSet(cli_active(c), CAP_STANDARDREPLIES);
+    snprintf(pw, sizeof(pw), "t32pw%d", s);
+    plain_pending(c, "liz", pw);
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    run_event_loop();
+    assert_true(IsSASLComplete(c));
+    f->n_numerics = 0;
+    snprintf(pw, sizeof(pw), "t32yv%d", s);
+    plain_b64("yvonne", pw, data);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    if (s == 0) {
+      assert_int_equal(f->n_numerics, 1);
+      assert_int_equal(f->numerics[0], ERR_SASLALREADY);
+      assert_string_equal(cli_saslaccount(c), "liz");
+      assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);   /* as before */
+      assert_non_null(cli_saslsession(c));
+      assert_int_equal(authenticate(c, "*"), 0);
+      continue;
+    }
+    assert_non_null(cli_saslsession(c));
+    assert_int_equal(authenticate(c, data), 0);
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    run_event_loop();
+    assert_true(has_numeric(f, RPL_SASLSUCCESS));
+    assert_identity(c, "yvonne", user_id("yvonne", yid), 1);
+    f->cap_done = 1;                                 /* CAP END */
+    assert_int_equal(auth_sasl_done(cli_auth(c)), 0);
+    assert_int_equal(f->registered, 1);
+  }
+}
+
+/** A registered 3.2 client with no account: a first login, any mechanism,
+ * under every setting (unchanged). */
+static void reauth_setting_first_login_unchanged(void **state)
+{
+  int s;
+
+  sasl_init_once();
+  for (s = 0; s < 3; s++) {
+    struct Client *c = new_registered(154 + s, "nolog");
+
+    reauth_setting = settings[s];
+    bed_features = 1;
+    ntlog = 0;
+    assert_int_equal(plain_exchange(c, "zoe", 1), 1);
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_string_equal(cli_user(c)->account, "zoe");
+    assert_true(tlog_has_prefix("servers AC nolog R zoe"));
+  }
+}
 #endif /* USE_LIBKC */
 
 /* ------------------------------------------------------------------ */
@@ -4734,6 +5212,14 @@ int main(void)
     cmocka_unit_test_setup(sasl31_registered_other_tiers, setup),
     cmocka_unit_test_setup(sasl31_pre_registration_account_held, setup),
     cmocka_unit_test_setup(sasl31_retry_after_failure_then_907, setup),
+    cmocka_unit_test_setup(reauth_setting_table, setup),
+    cmocka_unit_test_setup(reauth_setting_other_id_and_failure, setup),
+    cmocka_unit_test_setup(reauth_setting_bouncer_member, setup),
+    cmocka_unit_test_setup(reauth_setting_rehash_between, setup),
+    cmocka_unit_test_setup(reauth_setting_any_not_a_change, setup),
+    cmocka_unit_test_setup(reauth_setting_services_switch, setup),
+    cmocka_unit_test_setup(reauth_setting_before_registration, setup),
+    cmocka_unit_test_setup(reauth_setting_first_login_unchanged, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

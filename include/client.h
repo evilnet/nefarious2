@@ -369,6 +369,9 @@ enum Flag
                                      *   its completed login stands until the exchange
                                      *   ends, and the exchange has not completed
                                      *   (IsSASLExchangeDone()) */
+    FLAG_SASLREAUTHTOKEN,           /**< That re-authentication began with a token
+                                     *   mechanism (OAUTHBEARER): what SASL_REAUTH
+                                     *   refresh allows, read again when it completes */
     FLAG_WEBIRC_BADPASS,            /**< A WEBIRC from this connection failed the
                                      *   WebIRC block's password and was handed to
                                      *   IAuth (m_webirc.c): no later WEBIRC is
@@ -1594,7 +1597,8 @@ struct Client {
 #define EndSASLExchange(x)      do { cli_saslcookie(x) = 0; cli_saslstart(x) = 0; \
                                      cli_saslnamed(x)[0] = '\0'; \
                                      cli_saslnamedts(x) = 0; \
-                                     ClearSASLReauth(x); } while (0)
+                                     ClearSASLReauth(x); \
+                                     ClrFlag(x, FLAG_SASLREAUTHTOKEN); } while (0)
 /** Return non-zero if the client has been marked. */
 #define IsMarked(x)             HasFlag(x, FLAG_MARKED)
 /** Return non-zero if the client cannot join channels. */

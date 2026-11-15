@@ -271,12 +271,14 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     return 0;
   } else if (reply[0] == 'L') {
-    /* A logged-in client's re-authentication that services answer with
-     * another account is refused here, as soon as the account is known and
-     * before anything of it is kept: the client keeps its login and its
-     * record (sasl_reauth_refused(), the rule sasl_login_apply() applies to
-     * every tier).  The exchange ends; the D S that follows finds no
-     * cookie and reaches nobody, and services announce nothing for it. */
+    /* A logged-in client's re-authentication that services answer with an
+     * account it may not take (SASL_REAUTH: another account under refresh
+     * or same, or for a bouncer session's connection) is refused here, as
+     * soon as the account is known and before anything of it is kept: the
+     * client keeps its login and its record (sasl_reauth_refused(), the
+     * rule sasl_login_apply() applies to every tier, and applies again at
+     * the D S).  The exchange ends; the D S that follows finds no cookie
+     * and reaches nobody, and services announce nothing for it. */
     if (sasl_reauth_refused(acptr, data, NULL)) {
       sasl_relay_end(acptr);
       return 0;

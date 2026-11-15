@@ -128,26 +128,52 @@ extern void sasl_identity_set(struct Client *cptr, const char *account,
                               time_t acc_create, const char *kc_id,
                               int id_live);
 
-/** Is \a cptr logged in, for the rule that a re-authentication never
- *  changes the account: the ircd has applied an account to it -- after
- *  registration, or by registration that has passed its auth stage (a
- *  login waiting for burst convergence, a revived or attached connection).
- *  A login before that is what registration will apply, and a later login
- *  may replace it.
+/** Is \a cptr logged in, for the re-authentication rules (SASL_REAUTH):
+ *  the ircd has applied an account to it -- after registration, or by
+ *  registration that has passed its auth stage (a login waiting for burst
+ *  convergence, a revived or attached connection).  A login before that is
+ *  what registration will apply, and a later login may replace it.
  */
 extern int sasl_logged_in(struct Client *cptr);
 
-/** The rule: a login of \a sptr as \a account (Keycloak id \a kc_id, NULL
- *  or invalid for none) when \a sptr is logged in (sasl_logged_in()) must
- *  be its own account -- the same name as the ircd compares account names
- *  and equal but for ASCII letter case (names only the ircd's casemapping
- *  folds together are different accounts) and, when both sides carry a
- *  Keycloak id, the same id (its bouncer session's when it is in one).
- *  Otherwise the client is told (FAIL AUTHENTICATE ALREADY_AUTHENTICATED,
- *  no context, with standard-replies -- the fork's addition -- then 907 for
- *  another account, 904 for the same name under another Keycloak id), the
- *  refusal is logged (accounts only) and the opers told, and 1 is returned:
- *  the caller ends its exchange and applies nothing.  0: not refused.
+/** SASL_REAUTH: what a logged-in SASL 3.2 (CAP LS 302) client's
+ *  re-authentication may do.  A client that never sent CAP LS 302 cannot
+ *  re-authenticate at all (m_authenticate()). */
+enum sasl_reauth_mode {
+  SASL_REAUTH_REFRESH,  /**< only OAUTHBEARER, only to its own account */
+  SASL_REAUTH_SAME,     /**< any mechanism, only to its own account */
+  SASL_REAUTH_ANY       /**< any mechanism, to any account (the default);
+                             a bouncer session's connection: its own only */
+};
+
+/** The SASL_REAUTH setting now: read when an exchange starts and again
+ *  when it completes (a REHASH between: the completion's reading decides). */
+extern enum sasl_reauth_mode sasl_reauth_mode(void);
+
+/** May a logged-in client start a re-authentication with a token
+ *  mechanism (\a token: OAUTHBEARER) or another? */
+extern int sasl_reauth_mechanism_allowed(int token);
+
+/** May a SASL 3.2 client with a login BEFORE registration start another
+ *  exchange with a token mechanism (\a token) or another?  (Kept apart:
+ *  the orchestrator's choice, not an owner ruling.) */
+extern int sasl_restart_mechanism_allowed(int token);
+
+/** The rule a logged-in \a sptr's re-authentication completes under (its
+ *  login proves \a account, Keycloak id \a kc_id, NULL or invalid for
+ *  none), SASL_REAUTH as it is now: the same name under ANOTHER Keycloak id
+ *  is refused whatever the setting (904); its own account is a refresh --
+ *  under refresh only after a token mechanism (else 907); another account
+ *  is an account change under any, for a registered client that is not
+ *  part of a bouncer session, where EXTENDED_ACCOUNTS carries it, and is
+ *  refused otherwise (907).  "Own account": the same name as the ircd
+ *  compares account names and equal but for ASCII letter case (names only
+ *  the casemapping folds together are different accounts, and never an
+ *  account change either).  A refusal tells the client (FAIL AUTHENTICATE
+ *  ALREADY_AUTHENTICATED, no context, with standard-replies -- the fork's
+ *  addition -- then the numeric), is logged and told the opers (another
+ *  account, another id), and returns 1: the caller ends its exchange and
+ *  applies nothing.  0: go on.
  */
 extern int sasl_reauth_refused(struct Client *sptr, const char *account,
                                const char *kc_id);

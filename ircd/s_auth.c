@@ -4223,10 +4223,10 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
   if (!cli_saslcookie(cli))
     return 0;
 
-  /* A logged-in client's re-authentication never changes its account
-   * (sasl_reauth_refused(), the rule every tier applies): refused before
-   * anything is named for the exchange, which ends here, so the Z that
-   * follows finds none.  (IAuth serves a client only while its own checks
+  /* A logged-in client's re-authentication takes only an account
+   * SASL_REAUTH allows it (sasl_reauth_refused(), the rule every tier
+   * applies): another is refused before anything is named for the
+   * exchange, which ends here, so the Z that follows finds none.  (IAuth serves a client only while its own checks
    * are pending, before registration: no logged-in client gets here
    * through m_authenticate(); the rule holds for any line naming one.) */
   {

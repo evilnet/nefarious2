@@ -933,6 +933,19 @@ typedef void (*feat_report_call)(struct Client* sptr, int marked);
 
 #define FEAT_READ   0x1000	/**< feature is read-only (for now, perhaps?) */
 
+/** SASL_REAUTH: what a logged-in SASL 3.2 client's re-authentication may
+ * do (sasl_reauth_mode(), sasl_auth.c). */
+static const char *const sasl_reauth_choices[] = { "any", "same", "refresh", NULL };
+
+/** Is \a value one of \a choices (case aside)? */
+static int feature_choice_ok(const char *const *choices, const char *value)
+{
+  for (; *choices; choices++)
+    if (!ircd_strcmp(*choices, value))
+      return 1;
+  return 0;
+}
+
 /** Declare a feature with custom behavior. */
 #define F_N(type, flags, set, reset, get, notify, unmark, mark, report)	      \
   { FEAT_ ## type, #type, FEAT_NONE | (flags), 0, 0, 0, 0,		      \
@@ -949,6 +962,13 @@ typedef void (*feat_report_call)(struct Client* sptr, int marked);
 #define F_S(type, flags, v_str, notify)					      \
   { FEAT_ ## type, #type, FEAT_STR | (flags), 0, 0, 0, (v_str),		      \
     0, 0, 0, (notify), 0, 0, 0 }
+/** Declare a feature that takes one of a fixed set of string values
+ * (\a choices, NULL-terminated, compared without regard to case); any
+ * other value is refused as a bad value and the feature keeps the one it
+ * had. */
+#define F_SC(type, flags, v_str, notify, choices)			      \
+  { FEAT_ ## type, #type, FEAT_STR | (flags), 0, 0, 0, (v_str),		      \
+    0, 0, 0, (notify), 0, 0, 0, (choices) }
 /** Declare a feature as an alias for another feature. */
 #define F_A(type, alias)                                                      \
   { FEAT_ ## type, #type, FEAT_ALIAS, 0, FEAT_ ## alias, 0, 0,                \
@@ -970,6 +990,8 @@ static struct FeatureDesc {
   feat_unmark_call unmark;  /**< unmark all feature change values */
   feat_mark_call   mark;    /**< reset to defaults all unchanged features */
   feat_report_call report;  /**< report feature values */
+  const char *const *choices; /**< the values a string may take (F_SC),
+                                   NULL for any */
 } features[] = {
   /* Misc. features */
   F_N(LOG, FEAT_MYOPER, feature_log_set, feature_log_reset, feature_log_get,
@@ -1166,6 +1188,7 @@ static struct FeatureDesc {
   F_B(SASL_LOCAL, 0, 0, 0),
   F_S(SASL_LOCAL_MECHANISMS, 0, "PLAIN,OAUTHBEARER", 0),
   F_S(SASL_TRUSTED_AUTHZID, FEAT_NULL, 0, 0),
+  F_SC(SASL_REAUTH, 0, "any", 0, sasl_reauth_choices),
   F_S(KEYCLOAK_URL, 0, "", 0),
   F_S(KEYCLOAK_REALM, 0, "master", 0),
   F_S(KEYCLOAK_CLIENT_ID, 0, "", 0),
@@ -1682,6 +1705,19 @@ feature_set(struct Client* from, const char* const* fields, int count)
 		    feat->type);
 	  return 0;
 	}
+      }
+
+      /* One of a fixed set of values (F_SC): anything else is refused and
+       * the feature keeps the value it had -- at a rehash too, where an
+       * unmarked feature would fall back to its default (feature_mark()). */
+      if (t_str && feat->choices && !feature_choice_ok(feat->choices, t_str)) {
+	if (feat->v_str != feat->def_str)
+	  feat->flags |= FEAT_MARK;
+	if (from)
+	  return send_reply(from, ERR_BADFEATVALUE, t_str, feat->type);
+	log_write(LS_CONFIG, L_ERROR, 0, "Bad value \"%s\" for feature %s",
+		  t_str, feat->type);
+	return 0;
       }
 
       if (t_str == feat->def_str ||
