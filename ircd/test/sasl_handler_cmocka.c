@@ -1263,6 +1263,53 @@ static void complete_login_keeps(void **state)
   assert_false(f->freed);
 }
 
+/* ------------------------------------------------------------------ */
+/* AC on an account change keeps its timestamp slot                     */
+/* ------------------------------------------------------------------ */
+
+/** The AC line \a c's account \a type sends the network. */
+static const char *ac_line(struct Client *c, char type)
+{
+  int i;
+
+  ntlog = 0;
+  sasl_broadcast_account(c, type);
+  for (i = 0; i < ntlog; i++)
+    if (!strncmp(tlog[i], "servers AC ", 11))
+      return tlog[i] + 11;
+  fail_msg("no AC line");
+  return "";
+}
+
+/** An account change ('M') always carries the timestamp slot, "0" when
+ * the login brings none: a stock server keeps the PREVIOUS account's
+ * timestamp on an M without one (m_account.c, master), where the fork
+ * sets 0 -- the two would hold different values for the same user.  A
+ * first login ('R') has no previous value and keeps its short form. */
+static void ac_change_carries_the_timestamp_slot(void **state)
+{
+  struct Client *c = new_client(12, "xav", 1, REG_KEEPS);
+
+  bed_features = 1;                         /* EXTENDED_ACCOUNTS */
+  cli_status(c) = STAT_USER;
+  ircd_strncpy(cli_user(c)->account, "yvonne", sizeof(cli_user(c)->account));
+  SetAccount(c);
+
+  cli_user(c)->acc_create = 0;              /* a local Keycloak login */
+  cli_user(c)->kc_id[0] = '\0';
+  assert_string_equal(ac_line(c, 'M'), "xav M yvonne 0");
+  assert_string_equal(ac_line(c, 'R'), "xav R yvonne");
+
+  cli_user(c)->acc_create = 1600000000;     /* X3's stamp, relayed */
+  assert_string_equal(ac_line(c, 'M'), "xav M yvonne 1600000000");
+
+  cli_user(c)->acc_create = 0;              /* with an id: as before */
+  ircd_strncpy(cli_user(c)->kc_id, "AAAAAAAAAAAAAAAAAAAAAA",
+               sizeof(cli_user(c)->kc_id));
+  assert_string_equal(ac_line(c, 'M'), "xav M yvonne 0 AAAAAAAAAAAAAAAAAAAAAA");
+  bed_features = 0;
+}
+
 #ifdef USE_LIBKC
 /* ------------------------------------------------------------------ */
 /* Exchanges that end inside the client's own AUTHENTICATE line        */
@@ -4607,6 +4654,7 @@ int main(void)
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup(complete_login_holds_registration_to_its_end, setup),
     cmocka_unit_test_setup(complete_login_keeps, setup),
+    cmocka_unit_test_setup(ac_change_carries_the_timestamp_slot, setup),
 #ifdef USE_LIBKC
     cmocka_unit_test_setup(poscache_hit_registration_exits, setup),
     cmocka_unit_test_setup(poscache_hit_registration_keeps, setup),

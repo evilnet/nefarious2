@@ -714,6 +714,15 @@ static const char *sasl_id_for(const char *login_as, const char *verified,
  * variants, unchanged from SASL step 7 (which a REGISTER's success reaches
  * too: sasl_register_login()).
  *
+ * An account change ('M') always carries the timestamp slot, "0" when the
+ * login brings none (a local Keycloak login stamps none: step 1): a stock
+ * server keeps the PREVIOUS account's timestamp on an M without one, where
+ * this server sets 0, and the two would then disagree about the user.  With
+ * the slot, every server holds what was sent: master and the fork store
+ * atoi() of it, and X3 binds "account:0" without comparing a timestamp
+ * (handle_account(): only a non-zero one is checked).  A first login ('R')
+ * has no previous value and keeps its short form.
+ *
  * @param[in] cptr Client whose account just changed.
  * @param[in] type 'R' (register/first login) or 'M' (modify).
  */
@@ -726,7 +735,7 @@ void sasl_broadcast_account(struct Client *cptr, char type)
       sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu %s",
                             cptr, type, cli_user(cptr)->account,
                             cli_user(cptr)->acc_create, cli_user(cptr)->kc_id);
-    } else if (cli_user(cptr)->acc_create) {
+    } else if (cli_user(cptr)->acc_create || type == 'M') {
       sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
                             cptr, type, cli_user(cptr)->account,
                             cli_user(cptr)->acc_create);
