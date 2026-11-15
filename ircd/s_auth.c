@@ -4261,6 +4261,29 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
   return 0;
 }
 
+/** End \a cli's IAuth exchange as failed: 904 (with \a reason, "" for
+ * none), no cookie, its timer gone, registration let go on.
+ * @return What letting registration go on returned (CPTR_KILLED: \a cli
+ * is gone), else zero.
+ */
+static int iauth_sasl_end_failed(struct Client *cli, const char *reason)
+{
+  send_reply(cli, ERR_SASLFAIL, reason);
+
+  /* The exchange is over, as when services fail one (ms_sasl(), D F):
+   * the next AUTHENTICATE starts a new exchange, and this one's timer
+   * goes with it. */
+  if (t_active(&cli_sasltimeout(cli)))
+    timer_del(&cli_sasltimeout(cli));
+  EndSASLExchange(cli);
+
+  /* Unblock registration if SASL was holding it */
+  if (cli_auth(cli))
+    return auth_sasl_done(cli_auth(cli));
+
+  return 0;
+}
+
 /** Handle SASL authentication failure from IAuth.
  * @param[in] iauth Active IAuth session.
  * @param[in] cli Client referenced by command.
@@ -4277,20 +4300,7 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
   if (!cli_saslcookie(cli))
     return 0;
 
-  send_reply(cli, ERR_SASLFAIL, EmptyString(params[0]) ? "" : params[0]);
-
-  /* The exchange is over, as when services fail one (ms_sasl(), D F):
-   * the next AUTHENTICATE starts a new exchange, and this one's timer
-   * goes with it. */
-  if (t_active(&cli_sasltimeout(cli)))
-    timer_del(&cli_sasltimeout(cli));
-  EndSASLExchange(cli);
-
-  /* Unblock registration if SASL was holding it */
-  if (cli_auth(cli))
-    return auth_sasl_done(cli_auth(cli));
-
-  return 0;
+  return iauth_sasl_end_failed(cli, EmptyString(params[0]) ? "" : params[0]);
 }
 
 /** Handle SASL mechanism list from IAuth.
@@ -4298,7 +4308,7 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
  * @param[in] cli Client referenced by command.
  * @param[in] parc Number of parameters (1).
  * @param[in] params Mechanism list.
- * @return Zero.
+ * @return Zero, or what ending the exchange returned (CPTR_KILLED: gone).
  */
 static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
                                 int parc, char **params)
@@ -4312,6 +4322,14 @@ static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
    * services' list in ms_sasl()), IAuth's own only when it has none. */
   mechs = cap_sasl_mechanisms();
   send_reply(cli, ERR_SASLMECHS, mechs ? mechs : params[0]);
+
+  /* A 908 answers a mechanism IAuth does not offer: the exchange cannot go
+   * on, and IAuth sends nothing after it (iauthd-ts: l alone).  It ends
+   * now with its 904, as an f ends it, not at the SASL timeout with
+   * registration held all that time.  With no exchange in flight the list
+   * is all there is to tell. */
+  if (cli_saslcookie(cli))
+    return iauth_sasl_end_failed(cli, "");
   return 0;
 }
 

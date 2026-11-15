@@ -291,14 +291,21 @@ int exit_client_msg(struct Client *cptr, struct Client *bcptr,
 void send_queued(struct Client *to) {}
 static int successes;          /**< RPL_SASLSUCCESS sent */
 static int failures;           /**< ERR_SASLFAIL sent */
+static int mechlists;          /**< ERR_SASLMECHS sent */
+static int last_reply;         /**< the last numeric sent */
 int send_reply(struct Client *to, int reply, ...)
 {
   if ((reply & ~SND_EXPLICIT) == RPL_SASLSUCCESS)
     successes++;
   if ((reply & ~SND_EXPLICIT) == ERR_SASLFAIL)
     failures++;
+  if ((reply & ~SND_EXPLICIT) == ERR_SASLMECHS)
+    mechlists++;
+  last_reply = reply & ~SND_EXPLICIT;
   return 0;
 }
+/* m_cap.c: what the sasl capability advertises (none here). */
+const char *cap_sasl_mechanisms(void) { return NULL; }
 void sendrawto_one(struct Client *to, const char *pattern, ...) {}
 void send_fail(struct Client *to, const char *command, const char *code,
                const char *context, const char *description) {}
@@ -346,6 +353,7 @@ static int setup(void **state)
   timer_arms = 0;
   in_dispatch = ran_in_dispatch = 0;
   successes = failures = identity_sets = refusals = 0;
+  mechlists = last_reply = 0;
   expect_exit_msg = NULL;
   exits = 0;
   dnsbl_checks = dnsbl_cancels = 0;
@@ -604,6 +612,30 @@ static void iauth_fail_ends_clear_the_reauth_mark(void **state)
   assert_int_equal(auth_iauth_sasl_fail(&a->cli), 1);
   assert_int_equal(cli_saslcookie(&a->cli), 0);
   assert_false(IsSASLReauth(&a->cli));
+  destroy_auth_request(a->auth);
+}
+
+/** IAuth's l (908: the mechanism is not offered) ends the exchange at once
+ * with its 904, as f does -- no cookie, registration let go on -- rather
+ * than at the SASL timeout (iauthd-ts sends l and nothing after it).  An l
+ * with no exchange tells the list only. */
+static void iauth_mechs_end_the_exchange(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);     /* registration waits */
+  cli_saslcookie(&a->cli) = 13;
+  auth_sasl_start(a->auth);                    /* the exchange's hold */
+  iauth_line(iauth_cmd_sasl_mechs, a, "PLAIN");
+  assert_int_equal(mechlists, 1);
+  assert_int_equal(failures, 1);
+  assert_int_equal(last_reply, ERR_SASLFAIL);  /* 908, then 904 */
+  assert_int_equal(cli_saslcookie(&a->cli), 0);
+  assert_false(FlagHas(&a->auth->flags, AR_SASL_PENDING));  /* let go on */
+
+  iauth_line(iauth_cmd_sasl_mechs, a, "PLAIN");  /* no exchange now */
+  assert_int_equal(mechlists, 2);
+  assert_int_equal(failures, 1);
   destroy_auth_request(a->auth);
 }
 
@@ -923,6 +955,7 @@ int main(void)
     cmocka_unit_test_setup(iauth_answers_without_an_exchange_are_dropped, setup),
     cmocka_unit_test_setup(iauth_login_of_a_logged_in_client_refused, setup),
     cmocka_unit_test_setup(iauth_fail_ends_clear_the_reauth_mark, setup),
+    cmocka_unit_test_setup(iauth_mechs_end_the_exchange, setup),
     cmocka_unit_test_setup(webirc_check_holds_registration, setup),
     cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),

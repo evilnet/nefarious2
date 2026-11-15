@@ -93,6 +93,8 @@ static char mechs_sent[128];
 static const char *cap_mechs;
 static int refusals;                    /* sasl_reauth_refused() said so */
 static int nmoved;                      /* presence_anchor_move() calls */
+static int replies[MAXREC];             /* every numeric sent, in order */
+static int nreplies;
 
 static void tell(struct Client *to)
 {
@@ -234,6 +236,7 @@ static int world_setup(void **state)
   cap_mechs = NULL;
   refusals = 0;
   nmoved = 0;
+  nreplies = 0;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
 
@@ -466,6 +469,8 @@ const char *cap_sasl_mechanisms(void)
 int send_reply(struct Client *to, int reply, ...)
 {
   tell(to);
+  if (nreplies < MAXREC)
+    replies[nreplies++] = reply & ~SND_EXPLICIT;
   if (reply == ERR_SASLMECHS) {
     va_list vl;
     va_start(vl, reply);
@@ -958,6 +963,59 @@ static void test_sasl_mechs_lists_the_cap_value(void **state)
   assert_string_equal(mechs_sent, "PLAIN,OAUTHBEARER,SCRAM-SHA-256");
 }
 
+/* A 908 answers a mechanism services do not offer: the exchange cannot go
+ * on, and ends at once with its 904 (908, then 904), as a D F would end
+ * it -- no cookie, no agent, registration let go on -- rather than at the
+ * SASL timeout.  The D F services send after it reaches nobody. */
+static void test_sasl_mechs_ends_the_exchange(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslcookie(c) = 777;
+  cli_saslstart(c) = CurrentTime;
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 M :PLAIN");
+
+  assert_int_equal(nreplies, 2);
+  assert_int_equal(replies[0], ERR_SASLMECHS);
+  assert_int_equal(replies[1], ERR_SASLFAIL);
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_null(cli_saslagent(c));
+  assert_int_equal(cli_saslagentref(svs), 0);
+  assert_int_equal(sasl_dones, 1);
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.777 D F");
+  assert_int_equal(nreplies, 2);              /* no second 904 */
+  assert_int_equal(sasl_dones, 1);
+}
+
+/* ... and a logged-in client's re-authentication: ended, its login kept. */
+static void test_sasl_mechs_ends_a_reauth(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("xav", 7, 0);
+  ircd_strncpy(cli_user(c)->account, "xavier", ACCOUNTLEN + 1);
+  SetAccount(c);
+  sasl_identity_set(c, "xavier", 0, NULL, 0);
+  SetSASLComplete(c);
+  cli_saslcookie(c) = 778;
+  cli_saslstart(c) = CurrentTime;
+  SetSASLReauth(c);
+
+  deliver(ms_sasl, svs, svs, "AB AB!7.778 M :PLAIN");
+
+  assert_int_equal(nreplies, 2);
+  assert_int_equal(replies[1], ERR_SASLFAIL);
+  assert_int_equal(cli_saslcookie(c), 0);
+  assert_false(IsSASLReauth(c));
+  assert_true(IsSASLComplete(c));
+  assert_string_equal(cli_user(c)->account, "xavier");
+}
+
 /* ... and services' own list when the capability has no value. */
 static void test_sasl_mechs_services_list_without_cap_value(void **state)
 {
@@ -1246,6 +1304,8 @@ int main(void)
     T(test_sasl_legitimate_exchange),
     T(test_sasl_mechs_lists_the_cap_value),
     T(test_sasl_mechs_services_list_without_cap_value),
+    T(test_sasl_mechs_ends_the_exchange),
+    T(test_sasl_mechs_ends_a_reauth),
     T(test_sasl_relay_exchange_times_out_after_register_login),
     T(test_sasl_relay_success_is_the_account_services_named),
     T(test_sasl_reauth_other_account_refused_at_L),

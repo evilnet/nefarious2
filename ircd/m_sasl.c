@@ -325,7 +325,15 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * client that rebuilds its list from 908 would drop working
      * mechanisms.  Services' list only when the capability has none. */
     const char *mechs = cap_sasl_mechanisms();
-    return send_reply(acptr, ERR_SASLMECHS, mechs ? mechs : data);
+    send_reply(acptr, ERR_SASLMECHS, mechs ? mechs : data);
+    /* A 908 answers a mechanism services do not offer: the exchange
+     * cannot go on.  It ends now, with its 904, as a D F ends it -- not at
+     * the SASL timeout, which a services implementation that sends M
+     * alone would leave it to (registration held all that time).  The D F
+     * services send after it finds no cookie and reaches nobody. */
+    send_reply(acptr, ERR_SASLFAIL, "");
+    sasl_relay_end(acptr);
+    return 0;
   }
 
   return 0;
