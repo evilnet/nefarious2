@@ -392,9 +392,14 @@ States: REGISTER
 Next State: -
 Comments: Used to forward a WEBIRC request from the client to iauthd
   for validation and application. This message is enabled by requesting
-  the 'w' policy. The options argument is always forwarded in this
-  context if supplied by the client as there is no WebIRC confguration
-  available to decide whether or not to allow options at this stage.
+  the 'w' policy, and is sent only for a WEBIRC request that no WebIRC
+  block of the server accepts: none matches the client's host, or the
+  password is wrong. The client keeps the address it connected from
+  unless iauthd changes it. A request a block accepts is applied by the
+  server and sent as w (below). The options argument is always
+  forwarded in this context if supplied by the client as there is no
+  WebIRC confguration available to decide whether or not to allow
+  options at this stage.
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not send it.
 

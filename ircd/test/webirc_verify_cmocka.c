@@ -7,7 +7,10 @@
  * refind cookie; webirc_password_verified() runs a loop pass or more later,
  * judges the result by the configuration in force then, applies the real
  * address BEFORE it ends the hold (auth_webirc_release_later()), or exits
- * the client.
+ * the client.  A block that matches the gateway is checked here even when
+ * IAuth asks for WEBIRC lines (policy w): IAuth is told the trusted w once
+ * it is applied, and is handed the untrusted W only where no block matches
+ * or the password is wrong (as stock ircu/Nefarious master does).
  *
  * This includes the real m_webirc.c, compiled with -ffunction-sections and
  * linked with --gc-sections; the conf lookups, the auth request calls, the
@@ -70,9 +73,22 @@ int exit_client(struct Client *cptr, struct Client *victim,
  * address when its hold ended. */
 static int holds, releases, dnsbl_restarts, iauth_told, sync_checks;
 static char ip_at_release[SOCKIPLEN + 1];
+/* IAuth's policy has w (it is sent WEBIRC lines); the untrusted W it was
+ * handed, if any. */
+static int iauth_w, untrusted_told;
+static char untrusted_line[256];
 int auth_set_webirc(struct AuthRequest *auth, const char *password,
                     const char *username, const char *hostname,
-                    const char *ip, const char *opts) { return -1; }
+                    const char *ip, const char *opts)
+{
+  if (!iauth_w)
+    return -1;
+  untrusted_told++;
+  snprintf(untrusted_line, sizeof(untrusted_line), "W %s %s %s %s%s%s",
+           password, username, hostname, ip, opts ? " :" : "",
+           opts ? opts : "");
+  return 0;
+}
 int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password,
                             const char *username, const char *hostname,
                             const char *ip, const char *opts)
@@ -83,10 +99,10 @@ void auth_webirc_release_later(struct AuthRequest *auth);
 void auth_dnsbl_restart(struct AuthRequest *auth) { dnsbl_restarts++; }
 
 /* The thread pool: a submitted check finishes when the case says so. */
-static int submitted;
+static int submitted, async_available;
 static crypt_verify_callback pending_cb;
 static void *pending_ctx;
-int ircd_crypt_async_available(void) { return 1; }
+int ircd_crypt_async_available(void) { return async_available; }
 int ircd_crypt_verify_async(const char *password, const char *hash,
                             crypt_verify_callback callback, void *ctx)
 {
@@ -112,8 +128,16 @@ struct WebIRCConf *find_webirc_conf_by_host(struct Client *cptr)
 struct WebIRCConf *find_webirc_conf(struct Client *cptr, char *passwd, int *status)
 {
   sync_checks++;
-  *status = have_block ? 0 : 2;
-  return have_block ? &block : NULL;
+  if (!have_block) {
+    *status = 2;
+    return NULL;
+  }
+  if (block.passwd && strcmp(passwd, "pw")) {    /* "$X$pw" is "pw"'s */
+    *status = 1;
+    return NULL;
+  }
+  *status = 0;
+  return &block;
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,6 +203,9 @@ static int setup(void **state)
   ip_at_release[0] = '\0';
   ip_at_replay[0] = '\0';
   replays = replay_kills = 0;
+  iauth_w = untrusted_told = 0;
+  untrusted_line[0] = '\0';
+  async_available = 1;
   last_sno[0] = '\0';
   exit_reason = NULL;
   pending_cb = NULL;
@@ -314,6 +341,155 @@ static void held_authenticate_replayed_on_the_real_address(void **state)
   assert_int_equal(replays, 0);
 }
 
+/** IAuth asks for WEBIRC lines (w), and a block matches the gateway: the
+ * password is checked here (IAuth is not handed an untrusted W, which the
+ * shipped scripts ignore), and once the real address is applied IAuth is
+ * told the trusted w. */
+static void iauth_w_matching_block_checked_here(void **state)
+{
+  iauth_w = 1;
+  webirc("pw");
+  assert_int_equal(untrusted_told, 0);
+  assert_int_equal(submitted, 1);
+  assert_int_equal(holds, 1);
+  assert_true(IsWebIRCPending(&client));
+
+  finish_check(CRYPT_VERIFY_MATCH);
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 0);
+  assert_int_equal(iauth_told, 1);
+  assert_int_equal(releases, 1);
+  assert_string_equal(ip_at_release, "192.0.2.77");
+  assert_true(IsWebIRC(&client));
+}
+
+/** The same with a block that has no password: applied at once. */
+static void iauth_w_passwordless_block_applied_at_once(void **state)
+{
+  iauth_w = 1;
+  block.passwd = NULL;
+  webirc("anything");
+  assert_int_equal(untrusted_told, 0);
+  assert_int_equal(submitted, 0);
+  assert_int_equal(holds, 0);
+  assert_null(exit_reason);
+  assert_string_equal(cli_sock_ip(&client), "192.0.2.77");
+  assert_true(IsWebIRC(&client));
+  assert_int_equal(iauth_told, 1);
+}
+
+/** The same without the thread pool (the check made at once): a right
+ * password is applied, IAuth told w; a wrong one is handed to IAuth as
+ * the untrusted W, the client kept on the gateway's address. */
+static void iauth_w_synchronous_check(void **state)
+{
+  iauth_w = 1;
+  async_available = 0;
+  webirc("pw");
+  assert_int_equal(submitted, 0);
+  assert_int_equal(sync_checks, 1);
+  assert_int_equal(untrusted_told, 0);
+  assert_null(exit_reason);
+  assert_string_equal(cli_sock_ip(&client), "192.0.2.77");
+  assert_int_equal(iauth_told, 1);
+
+  setup(state);
+  iauth_w = 1;
+  async_available = 0;
+  webirc("wrong");
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 1);
+  assert_string_equal(untrusted_line, "W wrong gateway spoofed.example 192.0.2.77");
+  assert_string_equal(cli_sock_ip(&client), "127.0.0.1");
+  assert_false(IsWebIRC(&client));
+  assert_int_equal(iauth_told, 0);
+}
+
+/** A wrong password while IAuth asks for WEBIRC lines: IAuth is handed
+ * the untrusted W when the check finishes (it may know the gateway), not
+ * refused; the hold ends with the gateway's address, and AUTHENTICATE
+ * lines held meanwhile go on.  Without w the client is refused
+ * (wrong_password_refused). */
+static void iauth_w_wrong_password_handed_to_iauth(void **state)
+{
+  char *parv[] = { "*", "wrong", "gateway", "spoofed.example", "192.0.2.77",
+                   "secure", NULL };
+
+  iauth_w = 1;
+  m_webirc(&client, &client, 6, parv);
+  assert_int_equal(submitted, 1);
+  assert_int_equal(untrusted_told, 0);          /* not while it is checked */
+
+  finish_check(CRYPT_VERIFY_NOMATCH);
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 1);
+  assert_string_equal(untrusted_line,
+                      "W wrong gateway spoofed.example 192.0.2.77 :secure");
+  assert_int_equal(iauth_told, 0);
+  assert_int_equal(replays, 1);
+  assert_string_equal(ip_at_replay, "127.0.0.1");
+  assert_int_equal(releases, 1);
+  assert_string_equal(ip_at_release, "127.0.0.1");
+  assert_false(IsWebIRC(&client));
+  assert_false(IsWebIRCPending(&client));
+  assert_int_equal(cli_checkcookie(&client), 0);
+  assert_int_equal(dnsbl_restarts, 0);
+
+  setup(state);                    /* a replay that exits: no release */
+  iauth_w = 1;
+  replay_kills = 1;
+  webirc("wrong");
+  finish_check(CRYPT_VERIFY_NOMATCH);
+  assert_int_equal(untrusted_told, 1);
+  assert_int_equal(replays, 1);
+  assert_int_equal(releases, 0);
+}
+
+/** A rehash during the check removed the block, or changed its password:
+ * judged as a WEBIRC arriving now would be -- handed to IAuth when it asks
+ * for WEBIRC lines. */
+static void iauth_w_rehash_refusal_handed_to_iauth(void **state)
+{
+  iauth_w = 1;
+  webirc("pw");
+  have_block = 0;
+  finish_check(CRYPT_VERIFY_MATCH);
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 1);
+  assert_int_equal(releases, 1);
+  assert_false(IsWebIRC(&client));
+
+  setup(state);
+  iauth_w = 1;
+  webirc("pw");
+  block.passwd = "$X$new";
+  finish_check(CRYPT_VERIFY_MATCH);
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 1);
+  assert_int_equal(releases, 1);
+  assert_false(IsWebIRC(&client));
+}
+
+/** No block matches the gateway: IAuth is handed the untrusted W at once
+ * when it asks for WEBIRC lines; else the client is refused. */
+static void no_block_handed_to_iauth_or_refused(void **state)
+{
+  have_block = 0;
+  iauth_w = 1;
+  webirc("pw");
+  assert_null(exit_reason);
+  assert_int_equal(untrusted_told, 1);
+  assert_int_equal(submitted, 0);
+  assert_int_equal(holds, 0);
+  assert_string_equal(cli_sock_ip(&client), "127.0.0.1");
+
+  setup(state);
+  have_block = 0;
+  webirc("pw");
+  assert_string_equal(exit_reason, "WEBIRC Not authorized from your host");
+  assert_int_equal(untrusted_told, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -325,6 +501,12 @@ int main(void)
     cmocka_unit_test_setup(second_webirc_ignored, setup),
     cmocka_unit_test_setup(no_auth_request_checks_synchronously, setup),
     cmocka_unit_test_setup(held_authenticate_replayed_on_the_real_address, setup),
+    cmocka_unit_test_setup(iauth_w_matching_block_checked_here, setup),
+    cmocka_unit_test_setup(iauth_w_passwordless_block_applied_at_once, setup),
+    cmocka_unit_test_setup(iauth_w_synchronous_check, setup),
+    cmocka_unit_test_setup(iauth_w_wrong_password_handed_to_iauth, setup),
+    cmocka_unit_test_setup(iauth_w_rehash_refusal_handed_to_iauth, setup),
+    cmocka_unit_test_setup(no_block_handed_to_iauth_or_refused, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

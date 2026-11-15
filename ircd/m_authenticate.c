@@ -131,7 +131,9 @@ void authenticate_held_free(struct Connection *con)
  * them (an account's allowed hostmasks).  So no exchange starts: the lines
  * are kept, in order, and replayed when the check has applied the real
  * address (authenticate_replay()).  A failed check exits the client, and
- * the lines go with it; the registration timeout bounds the wait.
+ * the lines go with it -- unless IAuth is handed the WEBIRC instead
+ * (policy w, m_webirc.c), when they are replayed on the gateway's address,
+ * which the client keeps; the registration timeout bounds the wait.
  * @return Zero.
  */
 static int authenticate_hold(struct Client *cptr, const char *line)

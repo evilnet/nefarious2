@@ -112,6 +112,9 @@ struct webirc_verify_ctx {
   char *passwd;                     /**< The password (hash) checked against.
                                          No pointer to the block: a rehash
                                          during the check frees it. */
+  char *given;                      /**< The password the gateway gave: what
+                                         IAuth is handed if the check fails
+                                         (webirc_unmatched()) */
   char username[USERLEN + 1];       /**< WEBIRC username */
   char hostname[HOSTLEN + 1];       /**< WEBIRC hostname */
   char ipaddr[SOCKIPLEN + 1];       /**< WEBIRC IP address */
@@ -119,11 +122,58 @@ struct webirc_verify_ctx {
   struct irc_in_addr addr;          /**< Parsed IP address */
 };
 
-/** Free a WEBIRC check's context. */
+/** Free a WEBIRC check's context, wiping the password the gateway gave. */
 static void webirc_ctx_free(struct webirc_verify_ctx *ctx)
 {
+  volatile char *p;
+
+  for (p = ctx->given; p && *p; p++)
+    *p = '\0';
+  MyFree(ctx->given);
   MyFree(ctx->passwd);
   MyFree(ctx);
+}
+
+/** A WEBIRC that no block here accepts: no block matches the gateway
+ * (\a res 2), or the password is wrong (\a res 1).  When IAuth's policy
+ * asks for WEBIRC lines (w), IAuth is handed it as an untrusted W -- it
+ * may know the gateway by a password of its own, and apply the address
+ * itself -- and the client is kept, with the gateway's address meanwhile;
+ * else the client is refused.  A block that matches and accepts the
+ * password is never handed over: IAuth is told the trusted w once the
+ * address is applied.
+ * @param[in] found For a check that finished after a rehash: what was
+ *   found then ("no WebIRC block", "password changed"), for the notice;
+ *   else NULL.
+ * @return Zero if handed to IAuth, else exit_client()'s result.
+ */
+static int webirc_unmatched(struct Client *cptr, int res, const char *found,
+                            const char *password, const char *username,
+                            const char *hostname, const char *ipaddr,
+                            const char *options)
+{
+  if (cli_auth(cptr)
+      && !auth_set_webirc(cli_auth(cptr), password, username, hostname,
+                          ipaddr, options))
+    return 0;
+  if (found) {
+    sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                "WEBIRC Attempt from %s [%s]: %s when the "
+                                "password check finished",
+                                cli_sockhost(cptr), cli_sock_ip(cptr), found);
+    return exit_client(cptr, cptr, &me, res == 2 ? "WEBIRC Not authorized from your host"
+                       : "WEBIRC Password invalid for your host");
+  }
+  if (res == 1) {
+    sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                "WEBIRC Attempt with invalid password from %s [%s]",
+                                cli_sockhost(cptr), cli_sock_ip(cptr));
+    return exit_client(cptr, cptr, &me, "WEBIRC Password invalid for your host");
+  }
+  sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                              "WEBIRC Attempt unauthorized from %s [%s]",
+                              cli_sockhost(cptr), cli_sock_ip(cptr));
+  return exit_client(cptr, cptr, &me, "WEBIRC Not authorized from your host");
 }
 
 /**
@@ -264,6 +314,8 @@ static void webirc_password_verified(int result, void *arg)
   struct webirc_verify_ctx *ctx = arg;
   struct Client *cptr;
   struct WebIRCConf *wconf = NULL;
+  int res = 1;                   /* refused: as find_webirc_conf()'s status */
+  const char *found = NULL;
 
   /* Look up client by fd */
   if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
@@ -293,55 +345,57 @@ static void webirc_password_verified(int result, void *arg)
    * the connection now, with the password that was checked. */
   if (result == CRYPT_VERIFY_MATCH) {
     wconf = find_webirc_conf_by_host(cptr);
-    if (!wconf || !wconf->passwd || strcmp(wconf->passwd, ctx->passwd)) {
-      sendto_opmask_butone_global(&me, SNO_WEBIRC,
-                                  "WEBIRC Attempt from %s [%s]: %s when the "
-                                  "password check finished",
-                                  cli_sockhost(cptr), cli_sock_ip(cptr),
-                                  wconf ? "password changed" : "no WebIRC block");
-      exit_client(cptr, cptr, &me, wconf ? "WEBIRC Password invalid for your host"
-                  : "WEBIRC Not authorized from your host");
+    if (!wconf)
+      res = 2, found = "no WebIRC block";
+    else if (!wconf->passwd || strcmp(wconf->passwd, ctx->passwd))
+      found = "password changed";
+    else
+      res = 0;
+  }
+
+  if (res) {
+    /* Not accepted here (a wrong password, or the block gone or changed):
+     * as a WEBIRC arriving now would be.  Handed to IAuth (policy w), the
+     * client goes on with the gateway's address: the AUTHENTICATE lines
+     * held for the check start their exchange (one may exit the client),
+     * and registration is let go on.  Else it has been refused. */
+    Debug((DEBUG_INFO, "webirc_password_verified: WEBIRC not accepted for %s [%s]",
+           cli_sockhost(cptr), cli_sock_ip(cptr)));
+    if (!webirc_unmatched(cptr, res, found, ctx->given, ctx->username,
+                          ctx->hostname, ctx->ipaddr,
+                          ctx->options[0] ? ctx->options : NULL)
+        && authenticate_replay(cptr) != CPTR_KILLED)
+      auth_webirc_release_later(cli_auth(cptr));
+    webirc_ctx_free(ctx);
+    return;
+  }
+
+  /* Password matched - apply WEBIRC changes */
+  Debug((DEBUG_INFO, "webirc_password_verified: WEBIRC success for %s [%s]",
+         cli_sockhost(cptr), cli_sock_ip(cptr)));
+
+  apply_webirc_changes(cptr, wconf, ctx->hostname, ctx->ipaddr,
+                       &ctx->addr, ctx->options[0] ? ctx->options : NULL);
+
+  /* Forward to IAuth if configured */
+  if (cli_auth(cptr)) {
+    if (FlagHas(&wconf->flags, WFLAG_USEOPTIONS))
+      auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
+                              ctx->ipaddr, ctx->options[0] ? ctx->options : NULL);
+    else
+      auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
+                              ctx->ipaddr, NULL);
+
+    /* AUTHENTICATE lines held for the check (m_authenticate.c) start
+     * their exchange now, on the real address; one may exit the client. */
+    if (authenticate_replay(cptr) == CPTR_KILLED) {
       webirc_ctx_free(ctx);
       return;
     }
-  }
 
-  if (result == CRYPT_VERIFY_MATCH) {
-    /* Password matched - apply WEBIRC changes */
-    Debug((DEBUG_INFO, "webirc_password_verified: WEBIRC success for %s [%s]",
-           cli_sockhost(cptr), cli_sock_ip(cptr)));
-
-    apply_webirc_changes(cptr, wconf, ctx->hostname, ctx->ipaddr,
-                         &ctx->addr, ctx->options[0] ? ctx->options : NULL);
-
-    /* Forward to IAuth if configured */
-    if (cli_auth(cptr)) {
-      if (FlagHas(&wconf->flags, WFLAG_USEOPTIONS))
-        auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
-                                ctx->ipaddr, ctx->options[0] ? ctx->options : NULL);
-      else
-        auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
-                                ctx->ipaddr, NULL);
-
-      /* AUTHENTICATE lines held for the check (m_authenticate.c) start
-       * their exchange now, on the real address; one may exit the client. */
-      if (authenticate_replay(cptr) == CPTR_KILLED) {
-        webirc_ctx_free(ctx);
-        return;
-      }
-
-      /* Registration waited for this (auth_webirc_hold()): it goes on now,
-       * with the real address in place. */
-      auth_webirc_release_later(cli_auth(cptr));
-    }
-  } else {
-    /* Password didn't match */
-    sendto_opmask_butone_global(&me, SNO_WEBIRC,
-                                "WEBIRC Attempt with invalid password from %s [%s]",
-                                cli_sockhost(cptr), cli_sock_ip(cptr));
-    exit_client(cptr, cptr, &me, "WEBIRC Password invalid for your host");
-    Debug((DEBUG_INFO, "webirc_password_verified: WEBIRC failed for %s [%s]",
-           cli_sockhost(cptr), cli_sock_ip(cptr)));
+    /* Registration waited for this (auth_webirc_hold()): it goes on now,
+     * with the real address in place. */
+    auth_webirc_release_later(cli_auth(cptr));
   }
 
   webirc_ctx_free(ctx);
@@ -365,7 +419,6 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char* password = NULL;
   char* options = NULL;
   int res = 0;
-  int ares = 0;
   struct WebIRCConf *wconf;
 
   if (IsServerPort(cptr))
@@ -417,27 +470,14 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return exit_client(cptr, sptr, &me, "WEBIRC Invalid host name");
   }
 
-  /* Find matching WebIRC block by host (without password check) */
+  /* Find matching WebIRC block by host (the password is checked below).
+   * A block that matches is judged here, whatever IAuth's policy: IAuth
+   * (w) is handed the WEBIRC only when no block accepts it
+   * (webirc_unmatched()), and is told the trusted w when one does. */
   wconf = find_webirc_conf_by_host(cptr);
-  if (!wconf) {
-    /* No matching host - check if IAuth can handle it */
-    if (cli_auth(cptr)) {
-      ares = auth_set_webirc(cli_auth(cptr), password, username, hostname, ipaddr, options);
-      if (!ares)
-        return 0;  /* IAuth is handling it */
-    }
-    sendto_opmask_butone_global(&me, SNO_WEBIRC,
-                                "WEBIRC Attempt unauthorized from %s [%s]",
-                                cli_sockhost(sptr), cli_sock_ip(sptr));
-    return exit_client(cptr, sptr, &me, "WEBIRC Not authorized from your host");
-  }
-
-  /* If IAuth handles WEBIRC, let it (it might use different password database) */
-  if (cli_auth(cptr)) {
-    ares = auth_set_webirc(cli_auth(cptr), password, username, hostname, ipaddr, options);
-    if (!ares)
-      return 0;  /* IAuth is handling it */
-  }
+  if (!wconf)
+    return webirc_unmatched(cptr, 2, NULL, password, username, hostname,
+                            ipaddr, options);
 
   /* Check if password is required */
   if (EmptyString(wconf->passwd)) {
@@ -465,6 +505,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ctx->fd = cli_fd(cptr);
     ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
     DupString(ctx->passwd, wconf->passwd);
+    DupString(ctx->given, password);
     memcpy(&ctx->addr, &addr, sizeof(ctx->addr));
     ircd_strncpy(ctx->username, username, USERLEN + 1);
     ircd_strncpy(ctx->hostname, hostname, HOSTLEN + 1);
@@ -492,21 +533,9 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   res = 0;
   wconf = find_webirc_conf(cptr, password, &res);
 
-  if (res == 1) {
-    /* Password mismatch */
-    sendto_opmask_butone_global(&me, SNO_WEBIRC,
-                                "WEBIRC Attempt with invalid password from %s [%s]",
-                                cli_sockhost(sptr), cli_sock_ip(sptr));
-    return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
-  }
-
-  if (res == 2 || !wconf) {
-    /* No matching config */
-    sendto_opmask_butone_global(&me, SNO_WEBIRC,
-                                "WEBIRC Attempt unauthorized from %s [%s]",
-                                cli_sockhost(sptr), cli_sock_ip(sptr));
-    return exit_client(cptr, sptr, &me, "WEBIRC Not authorized from your host");
-  }
+  if (res || !wconf)
+    return webirc_unmatched(cptr, res == 1 ? 1 : 2, NULL, password, username,
+                            hostname, ipaddr, options);
 
   /* Password verified - apply changes */
   apply_webirc_changes(cptr, wconf, hostname, ipaddr, &addr, options);
