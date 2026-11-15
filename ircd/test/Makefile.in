@@ -31,6 +31,7 @@ CMOCKA_TESTPROGS = \
 	@EPOLL_CMOCKA_TESTPROGS@ \
 	ircd_chattr_cmocka \
 	ircd_match_cmocka \
+	fwd_match_cmocka \
 	ircd_string_cmocka \
 	msgq_cmocka \
 	ml_split_cmocka \
@@ -129,6 +130,7 @@ DEP_SRC = \
 	ircd_string_t.c \
 	ircd_chattr_cmocka.c \
 	ircd_match_cmocka.c \
+	fwd_match_cmocka.c \
 	ircd_string_cmocka.c \
 	msgq_cmocka.c \
 	ml_split_cmocka.c \
@@ -263,6 +265,11 @@ ircd_chattr_cmocka: $(IRCD_CHATTR_CMOCKA_OBJS)
 IRCD_MATCH_CMOCKA_OBJS = ircd_match_cmocka.o test_stub.o ../ircd_string.o ../match.o
 ircd_match_cmocka: $(IRCD_MATCH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_MATCH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# Forwarded-reply matching (fwd_match.c): pure, ircd_string only
+FWD_MATCH_CMOCKA_OBJS = fwd_match_cmocka.o test_stub.o ../ircd_string.o ../fwd_match.o
+fwd_match_cmocka: $(FWD_MATCH_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(FWD_MATCH_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 IRCD_STRING_CMOCKA_OBJS = ircd_string_cmocka.o test_stub.o ../ircd_string.o
 ircd_string_cmocka: $(IRCD_STRING_CMOCKA_OBJS)

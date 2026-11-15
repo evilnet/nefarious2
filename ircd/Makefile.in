@@ -111,6 +111,7 @@ IRCD_SRC = \
 	fakelag.c \
 	fileio.c \
 	forwarded_label.c \
+	fwd_match.c \
 	gline.c \
 	gitsync.c \
 	gitsync_content.c \
