@@ -964,14 +964,16 @@ gitsync_clear_the_way(git_repository *repo, git_object *commit,
     return -1;
   }
   log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: %s%s (%d) in the way of commit "
-            "%.8s: ALL untracked files in %s were moved to its git stash -- "
+            "%.8s: ALL untracked and ignored files in %s were moved to its "
+            "git stash -- "
             "\"git -C %s stash list\" shows them, \"git -C %s stash pop\" "
             "puts them back", w.paths, w.n > 3 ? " ..." : "", w.n,
             git_oid_tostr_s(git_object_id(commit)), checkout, checkout,
             checkout);
   sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: %s%s (%d) in the way of "
-                       "commit %.8s: ALL untracked files in %s were moved to "
-                       "its git stash -- \"git -C %s stash pop\" puts them "
+                       "commit %.8s: ALL untracked and ignored files in %s "
+                       "were moved to its git stash -- \"git -C %s stash "
+                       "pop\" puts them "
                        "back", w.paths, w.n > 3 ? " ..." : "", w.n,
                        git_oid_tostr_s(git_object_id(commit)), checkout,
                        checkout);
