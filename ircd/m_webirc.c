@@ -294,8 +294,8 @@ static void webirc_password_verified(int result, void *arg)
     wconf = find_webirc_conf_by_host(cptr);
     if (!wconf || !wconf->passwd || strcmp(wconf->passwd, ctx->passwd)) {
       sendto_opmask_butone_global(&me, SNO_WEBIRC,
-                                  "WEBIRC Attempt from %s [%s]: %s after a "
-                                  "rehash during the password check",
+                                  "WEBIRC Attempt from %s [%s]: %s when the "
+                                  "password check finished",
                                   cli_sockhost(cptr), cli_sock_ip(cptr),
                                   wconf ? "password changed" : "no WebIRC block");
       exit_client(cptr, cptr, &me, wconf ? "WEBIRC Password invalid for your host"

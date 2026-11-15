@@ -243,12 +243,13 @@ static void oper_password_verified(int result, void *arg)
   if (result == CRYPT_VERIFY_MATCH
       && !(aconf = oper_live_block(sptr, ctx->name, ctx->passwd, &why))) {
     /* The password matched the block as it was; the configuration in force
-     * now has no such block for this client (a rehash during the check). */
+     * now has no such block for this client: a rehash during the check, or
+     * the block's class filled up meanwhile, or the client's host changed. */
     send_reply(sptr, strcmp(why, "password mis-match") ? ERR_NOOPERHOST
                : ERR_PASSWDMISMATCH);
     sendto_opmask_butone_global(&me, SNO_OLDREALOP,
-        "Failed OPER attempt by %s (%s@%s) (%s after a rehash during the "
-        "password check)", cli_name(sptr), cli_user(sptr)->username,
+        "Failed OPER attempt by %s (%s@%s) (%s when the password check "
+        "finished)", cli_name(sptr), cli_user(sptr)->username,
         cli_user(sptr)->realhost, why);
   } else if (result == CRYPT_VERIFY_MATCH) {
     /* Password matched - complete OPER, under the live block */
