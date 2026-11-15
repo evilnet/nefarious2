@@ -64,6 +64,15 @@ struct GitsyncStats {
  * "gitsync.conf"). */
 extern const char *gitsync_conf_file(void);
 
+/** Forget the hash of the content applied last: the next sync writes. */
+extern void gitsync_forget_applied(void);
+
+/** Non-zero while a sync runs. */
+extern int gitsync_busy(void);
+
+/** GitSync's file was replaced by a placeholder: sync soon. */
+extern void gitsync_conf_file_lost(void);
+
 /** Initialize gitsync subsystem */
 extern void gitsync_init(void);
 

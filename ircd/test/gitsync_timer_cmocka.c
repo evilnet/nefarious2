@@ -91,12 +91,26 @@ int feature_int(enum Feature feat)
 
 /** What a sync does besides syncing, as the content it applies would. */
 static enum { SYNC_PLAIN, SYNC_REHASH, SYNC_NEW_INTERVAL, SYNC_DISABLES,
-              SYNC_OFF_AND_ON } sync_does;
+              SYNC_OFF_AND_ON, SYNC_LOSES_FILE } sync_does;
 
 /** The syncs run: their force flag, and when. */
 static int nsyncs;
 static int sync_force[16];
 static time_t sync_time[16];
+
+/** gitsync.c's: the applied hash dropped, and whether a sync runs. */
+static int nforgets;
+static int busy;
+
+void gitsync_forget_applied(void)
+{
+  nforgets++;
+}
+
+int gitsync_busy(void)
+{
+  return busy;
+}
 
 int gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
 {
@@ -105,6 +119,7 @@ int gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
   assert_true(nsyncs < 16);
   sync_force[nsyncs] = force;
   sync_time[nsyncs++] = CurrentTime;
+  busy = 1;
 
   switch (sync_does) {
   case SYNC_PLAIN:
@@ -127,7 +142,11 @@ int gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
     f_enable = 1;
     gitsync_start_timer();
     break;
+  case SYNC_LOSES_FILE:         /* its rehash writes the placeholder (no */
+    gitsync_conf_file_lost();   /* previous file, the new one removed) */
+    break;
   }
+  busy = 0;
   return 0;
 }
 
@@ -143,6 +162,8 @@ static int setup(void **state)
   f_interval = 300;
   sync_does = SYNC_PLAIN;
   nsyncs = 0;
+  nforgets = 0;
+  busy = 0;
   return 0;
 }
 
@@ -398,6 +419,82 @@ static void periodic_sync_off_and_on(void **state)
   assert_int_equal(0, sync_force[2]);
 }
 
+/** Starting GitSync forgets what was applied before: its first sync
+ * writes the file whatever it holds now. */
+static void start_forgets_applied(void **state)
+{
+  (void)state;
+  gitsync_start_timer();
+  assert_int_equal(1, nforgets);
+  gitsync_start_timer();        /* already starting: nothing */
+  pass(1);
+  gitsync_start_timer();        /* running: nothing */
+  assert_int_equal(1, nforgets);
+}
+
+/** The file was replaced by a placeholder (removed, and a REHASH read
+ * it as empty): forgotten, and a sync a second later, forced; the
+ * periodic one stays where it was. */
+static void lost_file_syncs_soon(void **state)
+{
+  (void)state;
+  gitsync_start_timer();
+  pass(1);
+  pass(100);                    /* 1101 */
+  gitsync_conf_file_lost();
+  assert_int_equal(2, nforgets);
+  gitsync_conf_file_lost();     /* again before it runs: one sync */
+  pass(1);
+  assert_int_equal(2, nsyncs);
+  assert_int_equal(1, sync_force[1]);
+  assert_int_equal(1102, sync_time[1]);
+  pass(198);
+  assert_int_equal(2, nsyncs);
+  pass(1);                      /* 1301 */
+  assert_int_equal(3, nsyncs);
+  assert_int_equal(0, sync_force[2]);
+}
+
+/** A sync's own rehash writing the placeholder schedules nothing: no
+ * loop. */
+static void lost_file_in_own_sync(void **state)
+{
+  (void)state;
+  sync_does = SYNC_LOSES_FILE;
+  gitsync_start_timer();
+  pass(1);
+  assert_int_equal(1, nsyncs);
+  pass(10);
+  assert_int_equal(1, nsyncs);
+  pass(290);
+  assert_int_equal(2, nsyncs);  /* the periodic one */
+  pass(10);
+  assert_int_equal(2, nsyncs);
+}
+
+/** Lost while the first sync is pending: still one sync. */
+static void lost_file_first_pending(void **state)
+{
+  (void)state;
+  gitsync_start_timer();
+  gitsync_conf_file_lost();
+  pass(1);
+  assert_int_equal(1, nsyncs);
+  pass(10);
+  assert_int_equal(1, nsyncs);
+}
+
+/** GitSync off: nothing scheduled. */
+static void lost_file_disabled(void **state)
+{
+  (void)state;
+  f_enable = 0;
+  gitsync_conf_file_lost();
+  pass(400);
+  assert_int_equal(0, nsyncs);
+  assert_false(t_active(&gitsync_first_timer));
+}
+
 /** An interval under a minute is a minute. */
 static void interval_at_least_a_minute(void **state)
 {
@@ -428,6 +525,11 @@ int main(void)
     cmocka_unit_test_setup_teardown(interval_at_least_a_minute, setup, teardown),
     cmocka_unit_test_setup_teardown(first_sync_off_and_on, setup, teardown),
     cmocka_unit_test_setup_teardown(periodic_sync_off_and_on, setup, teardown),
+    cmocka_unit_test_setup_teardown(start_forgets_applied, setup, teardown),
+    cmocka_unit_test_setup_teardown(lost_file_syncs_soon, setup, teardown),
+    cmocka_unit_test_setup_teardown(lost_file_in_own_sync, setup, teardown),
+    cmocka_unit_test_setup_teardown(lost_file_first_pending, setup, teardown),
+    cmocka_unit_test_setup_teardown(lost_file_disabled, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

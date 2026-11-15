@@ -114,6 +114,14 @@ int feature_bool(enum Feature feat)
 }
 
 #ifdef USE_LIBGIT2
+/** gitsync_timer.c's: told each time a placeholder is written. */
+static int nlost;
+
+void gitsync_conf_file_lost(void)
+{
+  nlost++;
+}
+
 /** gitsync.c's: the configured GITSYNC_CONF_FILE, "gitsync.conf" when
  * empty. */
 const char *gitsync_conf_file(void)
@@ -202,6 +210,9 @@ static int setup(void **state)
   auth_apply_saw_error = -1;
   conf_already_read = 1;     /* nothing to stderr */
   conf_checking = 0;
+#ifdef USE_LIBGIT2
+  nlost = 0;
+#endif
   assert_non_null(getcwd(olddir, sizeof(olddir)));
   strcpy(testdir, "conf_include_test.XXXXXX");
   assert_non_null(mkdtemp(testdir));
@@ -285,6 +296,7 @@ static void include_before_enable_is_empty(void **state)
   assert_non_null(log_with("gitsync.conf"));
   assert_non_null(log_with("does not exist yet"));
   assert_int_equal(L_NOTICE, log_levels[0]);
+  assert_int_equal(1, nlost);   /* GitSync told: sync soon */
 }
 
 /** Case B: enabled first, then the include. */
@@ -355,6 +367,7 @@ static void check_only_writes_nothing(void **state)
   assert_false(exists("gitsync.conf"));
   assert_int_equal(1, nlogs);
   assert_non_null(log_with("does not exist yet"));
+  assert_int_equal(0, nlost);
 }
 
 /** A file that appears between the include and the decision (an earlier
@@ -374,6 +387,7 @@ static void second_include_same_name(void **state)
   assert_int_equal(0, conf_get_error_flag());
   assert_true(exists("gitsync.conf"));
   assert_int_equal(1, nlogs);
+  assert_int_equal(1, nlost);
 }
 
 /** The same path spelt another way: "./gitsync.conf" is GitSync's

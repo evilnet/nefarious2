@@ -1424,7 +1424,9 @@ static void conf_gitsync_placeholder(const struct AbsentInclude *ai)
   struct stat st;
   int fd;
   int level = L_NOTICE;
-  const char *what = "";
+  const char *state = "does not exist yet";
+  const char *what = ", placeholder written";
+  const char *why = "";
 
   if (0 == stat(ai->name, &st))
     return;     /* written for an earlier include of the same name */
@@ -1432,27 +1434,39 @@ static void conf_gitsync_placeholder(const struct AbsentInclude *ai)
   if (conf_checking)
     what = " (configuration check: not written)";
   /* O_EXCL: never replace a file that appeared since the include was
-   * read. */
+   * read, nor follow a symbolic link. */
   else if ((fd = open(ai->name, O_WRONLY | O_CREAT | O_EXCL, 0666)) >= 0) {
     if (write(fd, text, sizeof(text) - 1) != (ssize_t) (sizeof(text) - 1)) {
       level = L_WARNING;
-      what = strerror(errno);
-    } else
-      what = ", placeholder written";
+      what = ", no placeholder: ";
+      why = strerror(errno);
+    }
     close(fd);
+  } else if (errno == EEXIST && 0 == lstat(ai->name, &st) &&
+             S_ISLNK(st.st_mode)) {
+    level = L_WARNING;
+    state = "is a symbolic link to a file that does not exist";
+    what = ", no placeholder written over the link";
   } else {
     level = L_WARNING;
-    what = strerror(errno);
+    what = ", no placeholder: ";
+    why = strerror(errno);
   }
 
   ircd_snprintf(0, msg, sizeof(msg), "Included file %s (%s line %d) is "
-                "GitSync's configuration file and does not exist yet: read "
-                "as empty%s%s; GitSync's first sync writes it", ai->name,
-                ai->file, ai->line, level == L_WARNING
-                ? ", cannot write a placeholder: " : "", what);
+                "GitSync's configuration file and %s: read as empty%s%s; "
+                "GitSync's first sync writes it", ai->name, ai->file,
+                ai->line, state, what, why);
   log_write(LS_CONFIG, level, 0, "%s", msg);
   if (!conf_already_read)
     fprintf(stderr, "%s\n", msg);
+
+#ifdef USE_LIBGIT2
+  /* Whatever GitSync applied is gone from the live configuration: it
+   * forgets it and syncs soon (not from its own rehash). */
+  if (!conf_checking)
+    gitsync_conf_file_lost();
+#endif
 }
 
 /** Decide this pass's includes whose file did not exist, now that the

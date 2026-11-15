@@ -735,9 +735,15 @@ static char gitsync_last_content_hash[GITSYNC_HASHLEN];
  * changes; a forced one does. */
 static char gitsync_refused_content_hash[GITSYNC_HASHLEN];
 
+/** The file the content of gitsync_last_content_hash was written to. */
+static char gitsync_last_content_file[512];
+
 /** Set by gitsync_apply() when the sync in progress wrote new content
  * and rehashed with it. */
 static int gitsync_applied;
+
+/** Non-zero while gitsync_trigger() runs a sync. */
+static int gitsync_running;
 
 /** Apply downloaded configuration
  * Writes to gitsync.conf and triggers a rehash only if content changed.
@@ -768,6 +774,11 @@ gitsync_apply(const char *content, size_t len, int force,
   int had_backup = 0;
 
   conf_file = gitsync_conf_file();
+
+  /* What was applied last counts only for the file it was written to,
+   * and only while that file is there. */
+  if (strcmp(conf_file, gitsync_last_content_file) || stat(conf_file, &st))
+    gitsync_last_content_hash[0] = '\0';
 
   /* Check if content has changed */
   gitsync_content_hash(content, len, content_hash, sizeof(content_hash));
@@ -898,6 +909,8 @@ gitsync_apply(const char *content, size_t len, int force,
   /* Success - remember hash and clean up backup */
   ircd_strncpy(gitsync_last_content_hash, content_hash,
                sizeof(gitsync_last_content_hash) - 1);
+  ircd_strncpy(gitsync_last_content_file, conf_file,
+               sizeof(gitsync_last_content_file));
   gitsync_refused_content_hash[0] = '\0';
   gitsync_applied = 1;
 
@@ -1442,16 +1455,19 @@ gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
   int killed = 0;
   enum GitsyncStatus status;
 
+  gitsync_running = 1;
   status = gitsync_run(cptr, sptr, force, &killed);
+  gitsync_running = 0;
 
-  /* A sync nobody asked for -- the first one after GitSync starts, or a
-   * periodic one -- says what it did in the log: new content applied
+  /* A sync nobody asked for -- the immediate one when GitSync starts or
+   * its file was replaced by a placeholder, or a periodic one -- says
+   * what it did in the log: new content applied
    * (operators were told "Wrote ..., rehashing"), or a failure and why
    * (operators are told too, as the oper who asks for one is).  Nothing
    * for unchanged content, for content refused before, or when it was
    * not yet time. */
   if (!sptr) {
-    const char *kind = force ? "First sync after start" : "Periodic sync";
+    const char *kind = force ? "Immediate sync" : "Periodic sync";
 
     if (status == GITSYNC_OK) {
       if (gitsync_applied)
@@ -1476,6 +1492,22 @@ gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
    * (ssl_clear_errors() in ssl.c).  Leave nothing behind. */
   ERR_clear_error();
   return killed;
+}
+
+/** Forget the content applied last: the next sync writes and rehashes
+ * whatever it pulls (GitSync starting again, or its file replaced by a
+ * placeholder). */
+void
+gitsync_forget_applied(void)
+{
+  gitsync_last_content_hash[0] = '\0';
+}
+
+/** @return Non-zero while a sync runs (its rehash among it). */
+int
+gitsync_busy(void)
+{
+  return gitsync_running;
 }
 
 const char *

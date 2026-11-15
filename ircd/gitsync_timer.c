@@ -140,6 +140,9 @@ gitsync_start_timer(void)
    * as empty, and its placeholder written, by the configuration pass that
    * reads it (s_conf.c conf_settle_absent_includes()). */
 
+  /* Starting (again): whatever was applied before, the first sync
+   * writes the file. */
+  gitsync_forget_applied();
   timer_add(timer_init(&gitsync_first_timer), gitsync_first_callback,
             NULL, TT_RELATIVE, GITSYNC_FIRST_DELAY);
 
@@ -174,6 +177,26 @@ gitsync_restart_timer(void)
   }
   timer_del(&gitsync_timer);
   gitsync_arm_periodic();
+}
+
+/** GitSync's configuration file was replaced by a placeholder (it was
+ * removed, or GITSYNC_CONF_FILE names a new one, and a configuration pass
+ * read it as empty): the content is gone from the live configuration.
+ * What was applied is forgotten, and a sync runs a second from now, as
+ * when GitSync starts -- unless one is already scheduled, or this is a
+ * sync's own rehash (no loop).
+ */
+void
+gitsync_conf_file_lost(void)
+{
+  gitsync_forget_applied();
+  if (!feature_bool(FEAT_GITSYNC_ENABLE) || gitsync_busy() ||
+      t_active(&gitsync_first_timer))
+    return;
+  timer_add(timer_init(&gitsync_first_timer), gitsync_first_callback,
+            NULL, TT_RELATIVE, GITSYNC_FIRST_DELAY);
+  Debug((DEBUG_INFO, "GitSync: configuration file replaced by a "
+         "placeholder, sync in %d seconds", GITSYNC_FIRST_DELAY));
 }
 
 #endif /* USE_LIBGIT2 */
