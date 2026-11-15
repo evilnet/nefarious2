@@ -899,4 +899,23 @@ describe('DNSBL Integration Tests', () => {
       expect(harness.output.filter(l => /^[Dkm] 41 10\.3\.0\.3 /.test(l))).toEqual([]);
     });
   });
+
+  describe('CACHETIME 0', () => {
+    it('asks the list again for every connection', async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH CACHETIME 0
+#IAUTH DNSBL server=block.dnsbl index=2 block=all
+`);
+      mockDns('10.4.0.1', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'] }, { code: 'ENOTFOUND' }] });
+      harness = await createHarness(configPath);
+
+      await connectClient(harness, 0, '10.4.0.1');
+      await connectClient(harness, 1, '10.4.0.1');
+
+      expect(harness.wasRejected(0)).toBe(true);
+      expect(harness.wasAccepted(1)).toBe(true);
+      expect(harness.dnsQueries.filter(q => q === '1.0.4.10.block.dnsbl')).toHaveLength(2);
+    });
+  });
 });

@@ -35,6 +35,12 @@ describe('Config Parser', () => {
     expect(config.cacheTime).toBe(3600);
   });
 
+  it('CACHETIME 0 means answers are not reused (not the default)', () => {
+    writeFileSync(configPath, '#IAUTH CACHETIME 0\n');
+    const { config } = readConfigFile(configPath);
+    expect(config.cacheTime).toBe(0);
+  });
+
   it('should parse DNSTIMEOUT directive', () => {
     writeFileSync(configPath, '#IAUTH DNSTIMEOUT 10\n');
     const { config } = readConfigFile(configPath);
