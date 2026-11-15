@@ -52,6 +52,7 @@ extern void auth_recheck_later(struct AuthRequest *auth);
 extern void auth_webirc_hold(struct AuthRequest *auth);
 extern void auth_webirc_release_later(struct AuthRequest *auth);
 extern void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr);
+extern void auth_dnsbl_restart(struct AuthRequest *auth);
 extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);
 extern void auth_sasl_start(struct AuthRequest *auth);

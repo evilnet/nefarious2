@@ -247,6 +247,11 @@ static void apply_webirc_changes(struct Client *cptr, struct WebIRCConf *wconf,
     ircd_strncpy(cli_username(cptr), wconf->ident, USERLEN + 1);
     SetGotId(cptr);
   }
+
+  /* The native DNSBL lookup started at connect asked about the gateway's
+   * address: ask about the client's. */
+  if (cli_auth(cptr))
+    auth_dnsbl_restart(cli_auth(cptr));
 }
 
 /**

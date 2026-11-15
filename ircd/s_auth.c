@@ -1385,6 +1385,27 @@ void auth_dnsbl_complete(struct AuthRequest *auth)
   check_auth_finished(auth);
 }
 
+/** Start the native DNSBL lookup again, for the client's address as it is
+ * now: a WEBIRC has replaced the gateway's address the connect-time lookup
+ * asked about.  A lookup still in flight is cancelled (its answers are
+ * dropped, not cached) and a finished one's result discarded.
+ * @param[in] auth The auth request of an unregistered client.
+ */
+void auth_dnsbl_restart(struct AuthRequest *auth)
+{
+  if (!auth || !auth->client || !IsUserPort(auth->client))
+    return;
+  if (auth->dnsbl_request) {
+    dnsbl_cancel(auth->dnsbl_request);
+    auth->dnsbl_request = NULL;
+  }
+  FlagClr(&auth->flags, AR_DNSBL_PENDING);
+  if (dnsbl_check(auth->client, &auth->dnsbl_request)) {
+    Debug((DEBUG_DNS, "DNSBL: Restarted check for client %p", auth->client));
+    FlagSet(&auth->flags, AR_DNSBL_PENDING);
+  }
+}
+
 /** Handle a 'ping' (authorization) timeout for a client.
  * @param[in] cptr The client whose session authorization has timed out.
  * @return Zero if client is kept, CPTR_KILLED if client rejected.

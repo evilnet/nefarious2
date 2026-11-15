@@ -184,7 +184,20 @@ int bounce_has_sessions(const char *account) { return 0; }
 enum AuthorizationCheckResult conf_check_client(struct Client *cptr) { return ACR_OK; }
 int verify_sslclifp(struct Client *cptr, struct ConfItem *aconf) { return 1; }
 void delete_resolver_queries(const void *vptr) {}
-void dnsbl_cancel(struct DNSBLRequest *request) {}
+/* The native DNSBL: lookups started and cancelled, by request. */
+static struct DNSBLRequest dnsbl_reqs[4];
+static int dnsbl_checks, dnsbl_cancels;
+static struct DNSBLRequest *dnsbl_cancelled;
+void dnsbl_cancel(struct DNSBLRequest *request)
+{
+  dnsbl_cancels++;
+  dnsbl_cancelled = request;
+}
+int dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
+{
+  *request = &dnsbl_reqs[++dnsbl_checks % 4];
+  return 1;
+}
 int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
                  enum DNSBLAction *action, const char **mark) { fail(); return 0; }
 int add_mark(struct Client *sptr, const char *dnsbl) { return 0; }
@@ -273,6 +286,8 @@ static int setup(void **state)
   successes = failures = identity_sets = refusals = 0;
   expect_exit_msg = NULL;
   exits = 0;
+  dnsbl_checks = dnsbl_cancels = 0;
+  dnsbl_cancelled = NULL;
   CurrentTime = time(NULL);
   return 0;
 }
@@ -572,6 +587,29 @@ static void webirc_hold_ends_at_the_registration_timeout(void **state)
   destroy_auth_request(a->auth);
 }
 
+/** A WEBIRC applied (its real address in place): the DNSBL lookup made at
+ * connect, for the gateway's address, is cancelled and one made for the
+ * client's; registration waits for that one. */
+static void webirc_restarts_the_dnsbl_lookup(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+  struct DNSBLRequest *gateway_req = &dnsbl_reqs[0];
+
+  a->auth->dnsbl_request = gateway_req;          /* answered or not */
+  auth_dnsbl_restart(a->auth);
+  assert_int_equal(dnsbl_cancels, 1);
+  assert_ptr_equal(dnsbl_cancelled, gateway_req);
+  assert_int_equal(dnsbl_checks, 1);
+  assert_ptr_not_equal(a->auth->dnsbl_request, gateway_req);
+  assert_true(FlagHas(&a->auth->flags, AR_DNSBL_PENDING));
+
+  auth_recheck_later(a->auth);
+  timer_run();
+  assert_int_equal(a->checks, 0);                /* waits for the new one */
+  destroy_auth_request(a->auth);
+  assert_int_equal(dnsbl_cancels, 2);            /* the new one goes too */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -588,6 +626,7 @@ int main(void)
     cmocka_unit_test_setup(webirc_check_holds_registration, setup),
     cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),
+    cmocka_unit_test_setup(webirc_restarts_the_dnsbl_lookup, setup),
   };
 
   event_init(64);
