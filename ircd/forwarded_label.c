@@ -175,6 +175,39 @@ int fwd_label_save(struct Client *from, const char *cmd,
   return 1;
 }
 
+/** Send \a acptr a labeled ACK for \a label (a forwarded command's,
+ * not the line being handled: the connection's own label state is set
+ * aside around it). */
+static void fwd_label_ack(struct Client *acptr, const char *label)
+{
+  char saved[sizeof(cli_label(acptr))];
+  unsigned char responded = cli_label_responded(acptr);
+
+  if (!label[0])
+    return;
+  memcpy(saved, cli_label(acptr), sizeof(saved));
+  ircd_strncpy(cli_label(acptr), label, sizeof(saved));
+  cli_label_responded(acptr) = 0;
+  send_labeled_ack(acptr);
+  memcpy(cli_label(acptr), saved, sizeof(saved));
+  cli_label_responded(acptr) = responded;
+}
+
+/** A forwarded command's answer did not come in time: its label is
+ * answered now and the entry freed.  "The local server notices that the
+ * remote server is unavailable and sends a labeled ACK" -- a PENDING
+ * entry (nothing of the answer sent) is ACKed, an ACTIVE one has its
+ * batch ended ("the batched response ends early").  Freed without an
+ * answer, the label taken from the client at forwarding was never
+ * answered at all.  Anything of the answer that comes later goes out
+ * as it would without labeled-response. */
+static void fwd_label_give_up(struct Client *acptr, struct ForwardedLabel *fl)
+{
+  if (fl->fl_state == FWD_LABEL_PENDING && MyConnect(acptr))
+    fwd_label_ack(acptr, fl->fl_label);
+  fwd_label_close_batch(acptr, fl);
+}
+
 int fwd_label_is_echo(const char *msgid)
 {
   size_t n = strlen(cli_yxx(&me));
@@ -201,10 +234,7 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
         continue;
       }
     } else if (CurrentTime - fl->fl_created > FWD_TIMEOUT_NORMAL) {
-      if (fl->fl_state == FWD_LABEL_ACTIVE)
-        fwd_label_close_batch(acptr, fl);
-      else
-        memset(fl, 0, sizeof(*fl));
+      fwd_label_give_up(acptr, fl);
       continue;
     }
 
@@ -316,12 +346,8 @@ void fwd_label_expire_all(void)
       if (fl->fl_state == FWD_LABEL_DRAINING) {
         if (CurrentTime - fl->fl_created > FWD_TIMEOUT_DRAIN)
           fwd_label_close_batch(acptr, fl);
-      } else if (CurrentTime - fl->fl_created > FWD_TIMEOUT_NORMAL) {
-        if (fl->fl_state == FWD_LABEL_ACTIVE)
-          fwd_label_close_batch(acptr, fl);
-        else
-          memset(fl, 0, sizeof(*fl));
-      }
+      } else if (CurrentTime - fl->fl_created > FWD_TIMEOUT_NORMAL)
+        fwd_label_give_up(acptr, fl);
     }
   }
 }
