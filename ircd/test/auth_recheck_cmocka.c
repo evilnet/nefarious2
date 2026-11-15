@@ -201,9 +201,18 @@ int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...) { if (len) buf[0] = '\0'; return 0; }
 int ircd_vsnprintf(struct Client *dest, char *buf, size_t len,
                    const char *format, va_list args) { if (len) buf[0] = '\0'; return 0; }
+/** The exit a case expects (exit_client_msg()'s pattern), or NULL: any
+ * other exit fails the case. */
+static const char *expect_exit_msg;
+static int exits;
 int exit_client_msg(struct Client *cptr, struct Client *bcptr,
                     struct Client *sptr, const char *pattern, ...)
-{ fail_msg("exit_client_msg: %s", pattern); return 0; }
+{
+  if (!expect_exit_msg || strcmp(pattern, expect_exit_msg))
+    fail_msg("exit_client_msg: %s", pattern);
+  exits++;
+  return CPTR_KILLED;
+}
 void send_queued(struct Client *to) {}
 static int successes;          /**< RPL_SASLSUCCESS sent */
 static int failures;           /**< ERR_SASLFAIL sent */
@@ -262,6 +271,8 @@ static int setup(void **state)
   timer_arms = 0;
   in_dispatch = ran_in_dispatch = 0;
   successes = failures = identity_sets = refusals = 0;
+  expect_exit_msg = NULL;
+  exits = 0;
   CurrentTime = time(NULL);
   return 0;
 }
@@ -509,6 +520,58 @@ static void iauth_fail_ends_clear_the_reauth_mark(void **state)
   destroy_auth_request(a->auth);
 }
 
+/* A WEBIRC password check out (m_webirc.c): registration waits for it --
+ * the client's address is the gateway's until it finishes. */
+
+/** Held, a client with nothing else outstanding is not registered by any
+ * check; the check's end owes one from the event loop (not in the
+ * completion's own stack), and that registers it. */
+static void webirc_check_holds_registration(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  auth_webirc_hold(a->auth);
+  assert_int_equal(check_auth_finished(a->auth), 0);   /* NICK/USER/CAP END */
+  auth_recheck_later(a->auth);                         /* any owed check */
+  timer_run();
+  assert_int_equal(a->checks, 0);
+  assert_non_null(cli_auth(&a->cli));
+
+  auth_webirc_release_later(a->auth);                  /* the completion */
+  assert_int_equal(a->checks, 0);                      /* not in its stack */
+  assert_true(FlagHas(&a->auth->flags, AR_RECHECK));
+  timer_run();
+  assert_int_equal(a->checks, 1);
+  assert_int_equal(a->registered, 1);
+}
+
+/** The end of a hold that is not there (a second completion, a client
+ * whose check was never held) owes nothing. */
+static void webirc_release_without_hold_owes_nothing(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);
+  auth_webirc_release_later(a->auth);
+  assert_false(FlagHas(&a->auth->flags, AR_RECHECK));
+  assert_int_equal(timer_arms, 0);
+  destroy_auth_request(a->auth);
+}
+
+/** The registration timeout bounds the wait: a client still held when it
+ * fires is refused (Registration Timeout), never registered. */
+static void webirc_hold_ends_at_the_registration_timeout(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  auth_webirc_hold(a->auth);
+  expect_exit_msg = "Registration Timeout";
+  assert_int_equal(auth_ping_timeout(&a->cli), CPTR_KILLED);
+  assert_int_equal(exits, 1);
+  assert_int_equal(a->checks, 0);
+  destroy_auth_request(a->auth);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -522,6 +585,9 @@ int main(void)
     cmocka_unit_test_setup(iauth_answers_without_an_exchange_are_dropped, setup),
     cmocka_unit_test_setup(iauth_login_of_a_logged_in_client_refused, setup),
     cmocka_unit_test_setup(iauth_fail_ends_clear_the_reauth_mark, setup),
+    cmocka_unit_test_setup(webirc_check_holds_registration, setup),
+    cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
+    cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),
   };
 
   event_init(64);

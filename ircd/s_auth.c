@@ -100,7 +100,9 @@ enum AuthRequestFlag {
     AR_NEEDS_USER,      /**< user must send USER command */
     AR_NEEDS_NICK,      /**< user must send NICK command */
     AR_SASL_PENDING,    /**< SASL authentication in progress */
-    AR_LAST_SCAN = AR_SASL_PENDING, /**< maximum flag to scan through */
+    AR_WEBIRC_PENDING,  /**< a WEBIRC password check is out (m_webirc.c):
+                         * the client's address is not known yet */
+    AR_LAST_SCAN = AR_WEBIRC_PENDING, /**< maximum flag to scan through */
     AR_IAUTH_PENDING,   /**< iauth request sent, waiting for response */
     AR_IAUTH_HURRY,     /**< we told iauth to hurry up */
     AR_IAUTH_USERNAME,  /**< iauth sent a username (preferred or forced) */
@@ -630,7 +632,8 @@ static int check_auth_finished(struct AuthRequest *auth)
        * from here with one of the AR_* PENDING flags still set.
        * Promote to INFO when the auth has been alive >5s so we see it
        * under minimal logging.  flag values: 0=AUTH(ident), 1=DNS,
-       * 2=CAP, 3=NEEDS_PONG, 4=NEEDS_USER, 5=NEEDS_NICK, 6=SASL. */
+       * 2=CAP, 3=NEEDS_PONG, 4=NEEDS_USER, 5=NEEDS_NICK, 6=SASL,
+       * 7=WEBIRC. */
       if (cli_firsttime(cptr) > 0
           && CurrentTime - cli_firsttime(cptr) > 5) {
         log_write(LS_USER, L_INFO, 0,
@@ -1986,6 +1989,35 @@ void auth_set_account_later(struct AuthRequest *auth, const char *account)
   assert(auth != NULL);
   if (iauth_asks(auth, IAUTH_ACCOUNT))
     sendto_iauth(auth->client, "R %s", account);
+  auth_recheck_later(auth);
+}
+
+/** Hold registration while a WEBIRC password check is out.  Until it
+ * finishes the client's address is the gateway's, and everything
+ * registration decides by address -- K-, G- and Z-lines, the connection
+ * class, IPcheck, the host the network is told -- would be decided by
+ * that.  The registration timeout still bounds the wait.
+ * @param[in] auth Authorization request for client.
+ */
+void auth_webirc_hold(struct AuthRequest *auth)
+{
+  assert(auth != NULL);
+  FlagSet(&auth->flags, AR_WEBIRC_PENDING);
+}
+
+/** End the WEBIRC hold: the check has finished and its result (the
+ * client's real address, host and ident) is applied.  Called from the
+ * check's completion (a thread-pool callback, which also runs while the
+ * pool shuts down), so registration is owed from the event loop
+ * (auth_recheck_later()), not run here.
+ * @param[in] auth Authorization request for client.
+ */
+void auth_webirc_release_later(struct AuthRequest *auth)
+{
+  assert(auth != NULL);
+  if (!FlagHas(&auth->flags, AR_WEBIRC_PENDING))
+    return;
+  FlagClr(&auth->flags, AR_WEBIRC_PENDING);
   auth_recheck_later(auth);
 }
 

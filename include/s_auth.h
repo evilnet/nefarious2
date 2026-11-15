@@ -49,6 +49,8 @@ extern void auth_send_event(const char *event, const char *paramstring);
 extern int auth_set_account(struct AuthRequest *auth, const char *account);
 extern void auth_set_account_later(struct AuthRequest *auth, const char *account);
 extern void auth_recheck_later(struct AuthRequest *auth);
+extern void auth_webirc_hold(struct AuthRequest *auth);
+extern void auth_webirc_release_later(struct AuthRequest *auth);
 extern void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr);
 extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);

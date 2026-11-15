@@ -316,6 +316,10 @@ static void webirc_password_verified(int result, void *arg)
       else
         auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
                                 ctx->ipaddr, NULL);
+
+      /* Registration waited for this (auth_webirc_hold()): it goes on now,
+       * with the real address in place. */
+      auth_webirc_release_later(cli_auth(cptr));
     }
   } else {
     /* Password didn't match */
@@ -437,8 +441,11 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
 
-  /* Password required - try async verification if available */
-  if (ircd_crypt_async_available()) {
+  /* Password required - try async verification if available.  Only while
+   * registration can still wait for it (the client has its auth request):
+   * the check's result is the client's address, which registration must
+   * not be decided without. */
+  if (ircd_crypt_async_available() && cli_auth(cptr)) {
     struct webirc_verify_ctx *ctx;
 
     ctx = (struct webirc_verify_ctx *)MyMalloc(sizeof(struct webirc_verify_ctx));
@@ -453,9 +460,10 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     if (ircd_crypt_verify_async(password, wconf->passwd,
                                  webirc_password_verified, ctx) == 0) {
-      /* Async verification started */
+      /* Async verification started; registration waits for it */
       SetWebIRCPending(cptr);
       cli_checkcookie(cptr) = ctx->cookie;
+      auth_webirc_hold(cli_auth(cptr));
       Debug((DEBUG_INFO, "m_webirc: started async verification for %s [%s]",
              cli_sockhost(cptr), cli_sock_ip(cptr)));
       return 0;
