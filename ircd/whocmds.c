@@ -280,25 +280,29 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
 
     if (IsMarked(acptr)) {
       char markbuf[128];
-      char *p2 = (char *)&markbuf;
-      int len = 0;
+      char *p2;
+      size_t used = 0;
       struct SLink* dp = NULL;
 
+      /* The marks, comma-separated, written within markbuf and terminated;
+       * "*ManyMarks*" when they do not all fit (one mark too, whatever its
+       * length).  (The old copy advanced past what strncpy() had not
+       * written, and the reply carried those stack bytes.) */
+      markbuf[0] = '\0';
       for (dp = cli_marks(acptr); dp; dp = dp->next) {
-        len += strlen(dp->value.cp) + 1;
-        if (len > 128)
-          break;
-        strncpy(p2, dp->value.cp, 128-len);
-        p2 += strlen(dp->value.cp);
-        *p2++ = ',';
-      }
-      if (p2 > (char *)&markbuf)
-        *--p2 = '\0';  /* Replace trailing comma with null */
-      else
-        *p2 = '\0';    /* Empty string if no marks */
+        size_t l = strlen(dp->value.cp);
 
-      if (len > 128)
-        strncpy((char *)&markbuf, "*ManyMarks*", 12);
+        if (used + (used ? 1 : 0) + l >= sizeof(markbuf)) {
+          ircd_strncpy(markbuf, "*ManyMarks*", sizeof(markbuf));
+          used = 0;
+          break;
+        }
+        if (used)
+          markbuf[used++] = ',';
+        memcpy(markbuf + used, dp->value.cp, l);
+        used += l;
+        markbuf[used] = '\0';
+      }
 
       p2 = (char *)&markbuf;
       while ((*p2) && (*(p1++) = *(p2++)));

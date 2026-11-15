@@ -558,9 +558,13 @@ void client_check_marks(struct Client *client, struct Client *replyto)
       memset(&markbufp, 0, BUFSIZE);
     }
 
-    if (markbufp[0])
-      strcat(markbufp, ", ");
-    strcat(markbufp, dp->value.cp);
+    /* Bounded by what is left of the buffer (an over-long mark is cut). */
+    {
+      size_t used = strlen(markbufp);
+
+      ircd_snprintf(0, markbufp + used, BUFSIZE - used, "%s%s",
+                    used ? ", " : "", dp->value.cp);
+    }
   }
 
   if (markbufp[0]) {
