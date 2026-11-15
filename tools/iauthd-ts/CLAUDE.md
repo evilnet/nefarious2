@@ -81,7 +81,12 @@ DNSBLs return `127.0.0.X` addresses where X indicates the listing reason:
 DNS results are cached globally in `dnsbl.ts` (`queryDNSBL`). Cache entries store:
 - Query string (reversed IP + server)
 - Result IPs ([] = not listed)
-- Timestamp for expiration
+- Timestamp, and the time to keep the entry (the longest `cachetime` among
+  the DNSBL lines that asked; answers for lines with cache time 0 are not stored)
+
+Expired entries are swept out on insert (`sweepCache`, once the inserts since
+the last sweep reach the size after it, at least 256), so the cache holds about
+the answers stored within the longest cache time, at most twice that plus 256.
 
 Only definite answers are cached (A records, NXDOMAIN, NODATA); a timeout or
 failed lookup is "not listed" for the client at hand and is never cached. A

@@ -112,6 +112,9 @@ the same. A value that is not a whole number of seconds is ignored (the default 
 stderr, which the IRCd logs. Only definite
 answers are cached: the list's records, or its "no such name" / "no data"
 (NXDOMAIN / NODATA) answer. Timeouts and failed lookups are never cached.
+Answers are kept no longer than their cache time and expired ones are swept
+out as new answers come in, so the cache holds roughly the answers of the
+last CACHETIME seconds (a list with cache time 0 stores nothing).
 
 #### BLOCKMSG
 ```

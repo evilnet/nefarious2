@@ -14,6 +14,7 @@ import {
   parseQuery,
   lookupDNSBL,
   queryDNSBL,
+  sweepCache,
 } from '../src/dnsbl.js';
 import type { DNSBLConfig } from '../src/types.js';
 
@@ -83,7 +84,7 @@ describe('DNSBL Functions', () => {
 
     it('should store and retrieve cache entries', () => {
       const query = 'test-cache-1.dnsbl.example.com';
-      setCacheEntry(query, ['127.0.0.2']);
+      setCacheEntry(query, ['127.0.0.2'], 3600);
 
       const entry = getCacheEntry(query, 3600);
       expect(entry).not.toBeNull();
@@ -97,7 +98,7 @@ describe('DNSBL Functions', () => {
 
     it('should expire old entries', () => {
       const query = 'test-cache-expire.dnsbl.example.com';
-      setCacheEntry(query, ['127.0.0.2']);
+      setCacheEntry(query, ['127.0.0.2'], 3600);
 
       // With cacheTime of 0, entry should be expired
       const entry = getCacheEntry(query, 0);
@@ -107,14 +108,14 @@ describe('DNSBL Functions', () => {
     it('should track cache size', () => {
       const initialSize = getCacheSize();
       const query = `test-cache-size-${Date.now()}.dnsbl.example.com`;
-      setCacheEntry(query, ['127.0.0.2']);
+      setCacheEntry(query, ['127.0.0.2'], 3600);
 
       expect(getCacheSize()).toBeGreaterThanOrEqual(initialSize);
     });
 
     it('should store a definite "not listed" as an empty result', () => {
       const query = 'test-cache-empty.dnsbl.example.com';
-      setCacheEntry(query, []);
+      setCacheEntry(query, [], 3600);
 
       const entry = getCacheEntry(query, 3600);
       expect(entry).not.toBeNull();
@@ -359,6 +360,85 @@ describe('DNSBL Functions', () => {
       expect(ra.definite).toBe(false);
       expect(rb.definite).toBe(false);
       expect(rb.results).toEqual([]);
+    });
+  });
+
+  // The cache holds only what may be reused, and expired answers do not
+  // stay in it until the same address asks again.
+  describe('cache growth', () => {
+    let n = 0;
+    const freshIp = () => `${++n}.0.88.10`;
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    it('an answer for a list with cache time 0 is not stored', async () => {
+      vi.spyOn(dnsPromises, 'resolve4').mockResolvedValue(['127.0.0.2'] as never);
+      const ip = freshIp();
+      const size = getCacheSize();
+
+      await queryDNSBL(ip, 'bl.example', 1, 0).answer;
+
+      expect(getCacheSize()).toBe(size);
+      expect(getCacheEntry(`${ip}.bl.example`, 3600)).toBeNull();
+    });
+
+    it('a shared lookup is stored when any line asking for it keeps answers', async () => {
+      vi.spyOn(dnsPromises, 'resolve4').mockImplementation(
+        () => new Promise(r => setTimeout(() => r(['127.0.0.2']), 50)) as never);
+      const ip = freshIp();
+
+      const a = queryDNSBL(ip, 'bl.example', 1, 0);      // cachetime=0 line starts it
+      const b = queryDNSBL(ip, 'bl.example', 1, 3600);   // another line keeps answers
+      expect(b.source).toBe('shared');
+      await Promise.all([a.answer, b.answer]);
+
+      expect(getCacheEntry(`${ip}.bl.example`, 3600)?.result).toEqual(['127.0.0.2']);
+    });
+
+    it('an entry lives no longer than the cache time it was stored for', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const q = `${freshIp()}.bl.example`;
+      setCacheEntry(q, ['127.0.0.2'], 1);
+      vi.setSystemTime(Date.now() + 2000);
+      // a reader with a longer cache time does not revive it
+      expect(getCacheEntry(q, 3600)).toBeNull();
+    });
+
+    it('a reader with cache time 0 does not throw away an answer another line keeps', () => {
+      const q = `${freshIp()}.bl.example`;
+      setCacheEntry(q, ['127.0.0.2'], 3600);
+      expect(getCacheEntry(q, 0)).toBeNull();
+      expect(getCacheEntry(q, 3600)?.result).toEqual(['127.0.0.2']);
+    });
+
+    it('sweepCache removes expired entries and keeps live ones', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const short = Array.from({ length: 10 }, () => `${freshIp()}.bl.example`);
+      const long = `${freshIp()}.bl.example`;
+      for (const q of short) setCacheEntry(q, [], 1);
+      setCacheEntry(long, [], 3600);
+      const size = getCacheSize();
+
+      vi.setSystemTime(Date.now() + 2000);
+      expect(sweepCache()).toBeGreaterThanOrEqual(10);
+
+      expect(getCacheSize()).toBe(size - 10);
+      expect(getCacheEntry(long, 3600)).not.toBeNull();
+    });
+
+    it('inserting sweeps by itself: expired entries do not pile up', () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      for (let i = 0; i < 10; i++) setCacheEntry(`${freshIp()}.bl.example`, [], 1);
+      const size = getCacheSize();
+
+      vi.setSystemTime(Date.now() + 2000);
+      for (let i = 0; i < 600; i++) setCacheEntry(`${freshIp()}.bl.example`, [], 3600);
+
+      // the 10 expired ones are gone without anybody reading them
+      expect(getCacheSize()).toBe(size - 10 + 600);
     });
   });
 });
