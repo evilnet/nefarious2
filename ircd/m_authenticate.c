@@ -238,6 +238,18 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   char realhost[HOSTLEN + 3];
   char *hoststr = (cli_sockhost(cptr) ? cli_sockhost(cptr) : cli_sock_ip(cptr));
 
+  /* SASL 3.1: AUTHENTICATE "MUST be used before registration is complete"
+   * and is not specified in registered state; re-authentication after
+   * registration is SASL 3.2's, which is SASL on CAP 302.  A connection
+   * that never sent CAP LS with a version of 302 or more is a 3.1 client
+   * (cap_version_after_ls(): a later CAP LS never lowers the version), and
+   * once registered it gets stock master's answer -- whose command table
+   * sends AUTHENTICATE from a registered client to m_registered() -- for
+   * every line: 462, before anything else is looked at.  No tier is told,
+   * nothing of the client changes, no exchange starts. */
+  if (IsRegistered(cptr) && cli_capab_version(cptr) < CAP_VERSION_302)
+    return m_registered(cptr, sptr, parc, parv);
+
   if (!CapActive(cptr, CAP_SASL))
     return 0;
 
@@ -274,14 +286,18 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     return authenticate_hold(cptr, parv[1]);
 
   /* A client that already has an account or a completed login -- SASL
-   * completed, or an account set by services -- may authenticate again only
-   * with a token-based mechanism, OAUTHBEARER, so that it can refresh a
-   * token about to expire.  Other mechanisms (PLAIN, EXTERNAL, SCRAM-*) get
-   * ERR_SASLALREADY per the IRCv3 spec.  A registered client with no
-   * account may authenticate with any mechanism.  The rule applies when an
-   * exchange starts, not to the data lines of one in progress (a local
-   * session, or a cookie for the IAuth and P10 tiers; both are cleared when
-   * the exchange completes or is aborted).
+   * completed, or an account set by services, WEBIRC or a REGISTER -- gets
+   * ERR_SASLALREADY (907) for any further AUTHENTICATE, as SASL 3.1 says.
+   * A SASL 3.2 client (CAP LS 302) may authenticate again with a
+   * token-based mechanism, OAUTHBEARER, so that it can refresh a token
+   * about to expire; other mechanisms (PLAIN, EXTERNAL, SCRAM-*) get 907
+   * there too.  A 3.1 client gets 907 for every mechanism (before
+   * registration: after it, 462 above).  A registered 3.2 client with no
+   * account may authenticate with any mechanism.  A failed or aborted
+   * exchange completes nothing: the client may retry.  The rule applies
+   * when an exchange starts, not to the data lines of one in progress (a
+   * local session, or a cookie for the IAuth and P10 tiers; both are
+   * cleared when the exchange completes or is aborted).
    *
    * A re-authentication never changes the account of a client that is
    * logged in (sasl_logged_in(): the ircd has applied its account): a login
@@ -289,14 +305,15 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * id, is refused when it completes, in every tier (sasl_login_apply()
    * step 0; a services answer already at its L, ms_sasl()), and the client
    * keeps its login exactly as it was.  Before registration has applied a
-   * login, a client may authenticate again as anyone (SASL 3.1).
+   * login, a 3.2 client may authenticate again with OAUTHBEARER as anyone.
    */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr))
     EndSASLExchange(cptr);    /* a new exchange: a re-authentication if set below */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
       && (IsSASLComplete(cptr) || IsAccount(cptr))) {
-    /* Only allow re-authentication for token-based mechanisms */
-    if (ircd_strcmp(parv[1], "OAUTHBEARER") != 0) {
+    /* Only a 3.2 client, and only with a token-based mechanism */
+    if (cli_capab_version(cptr) < CAP_VERSION_302
+        || ircd_strcmp(parv[1], "OAUTHBEARER") != 0) {
       if (CapActive(cptr, CAP_STANDARDREPLIES))
         send_fail(cptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
                   "You have already completed SASL authentication");

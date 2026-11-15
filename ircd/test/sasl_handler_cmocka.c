@@ -270,7 +270,9 @@ static const char *tname(const struct Client *cptr)
   return (f && f->freed) ? "(freed)" : cli_name(cptr);
 }
 
-/** A connecting client on \a fd, past NICK and USER, CAP sasl active. */
+/** A connecting client on \a fd, past NICK and USER, CAP sasl active.  It
+ * sent CAP LS 302, as the bed's clients do: SASL 3.2, re-authentication
+ * included (the SASL 3.1 cases below lower the version themselves). */
 static struct Client *new_client(int fd, const char *nick, int cap_done,
                                  enum reg_outcome outcome)
 {
@@ -293,6 +295,7 @@ static struct Client *new_client(int fd, const char *nick, int cap_done,
   ircd_strncpy(f->user.host, "host.test", sizeof(f->user.host));
   ircd_strncpy(cli_sockhost(&f->cli), "host.test", sizeof(cli_sockhost(&f->cli)));
   CapSet(cli_active(&f->cli), CAP_SASL);
+  cli_capab_version(&f->cli) = CAP_VERSION_302;
   cli_auth(&f->cli) = (struct AuthRequest *)&f->auth;
   LocalClientArray[fd] = &f->cli;
   return &f->cli;
@@ -2923,6 +2926,16 @@ static int tlog_has(const char *entry)
   return 0;
 }
 
+/** An entry of the transcript begins with \a prefix. */
+static int tlog_has_prefix(const char *prefix)
+{
+  int i;
+  for (i = 0; i < ntlog; i++)
+    if (!strncmp(tlog[i], prefix, strlen(prefix)))
+      return 1;
+  return 0;
+}
+
 /** A REGISTER's answer comes from Keycloak, after its line: the REGISTER
  * is not ACKed meanwhile, and the answer goes out under its own label --
  * never the label of the line the client is on by then, nor none for a
@@ -4127,6 +4140,394 @@ static void reauth_tells_nobody_account(void **state)
     assert_int_equal(n_an, 0);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* SASL 3.1 for a connection that never sent CAP LS 302                */
+/* ------------------------------------------------------------------ */
+
+/* sasl-3.1: AUTHENTICATE "MUST be used before registration is complete",
+ * and after a successful authentication the server "MUST reject it with a
+ * 907 numeric".  SASL 3.2 (SASL on CAP 302) adds re-authentication at any
+ * time.  A connection is a 3.2 client only once it has sent CAP LS with a
+ * version of 302 or more (a later CAP LS never lowers it,
+ * cap_version_after_ls()); any other gets stock master's 3.1 answers:
+ *   after registration: 462 for every line, as master's command table
+ *     answers (m_registered()) -- logged in or not, every mechanism,
+ *     nothing reaches any tier and nothing changes;
+ *   before registration, after a login (903, or an account it holds):
+ *     907 for every mechanism, OAUTHBEARER included;
+ *   before registration with nothing done: an exchange starts. */
+
+/** The CAP LS lines a connection sent. */
+enum cap_row { ROW_NO_LS, ROW_LS, ROW_LS301, ROW_LS302, ROW_LS302_THEN_LS, NROWS };
+
+static const char *const row_name[NROWS] = {
+  "no CAP LS", "CAP LS", "CAP LS 301", "CAP LS 302", "CAP LS 302, then CAP LS"
+};
+
+/** \a c, a new connection, sends the CAP LS lines of \a row: its
+ * version, as cap_ls() keeps it. */
+static void cap_ls_lines(struct Client *c, enum cap_row row)
+{
+  cli_capab_version(c) = 0;                    /* none sent yet */
+  switch (row) {
+  case ROW_NO_LS:
+    break;
+  case ROW_LS:
+    cli_capab_version(c) = cap_version_after_ls(cli_capab_version(c), NULL);
+    break;
+  case ROW_LS301:
+    cli_capab_version(c) = cap_version_after_ls(cli_capab_version(c), "301");
+    break;
+  case ROW_LS302:
+    cli_capab_version(c) = cap_version_after_ls(cli_capab_version(c), "302");
+    break;
+  case ROW_LS302_THEN_LS:
+    cli_capab_version(c) = cap_version_after_ls(cli_capab_version(c), "302");
+    cli_capab_version(c) = cap_version_after_ls(cli_capab_version(c), NULL);
+    break;
+  default:
+    fail();
+  }
+}
+
+/** The state the connection is in when it sends AUTHENTICATE. */
+enum sasl_col { COL_PRE_NOTHING, COL_PRE_AFTER_903, COL_POST_LOGGED_IN,
+                COL_POST_NO_LOGIN, NCOLS };
+
+static const char *const col_name[NCOLS] = {
+  "before registration, nothing done", "before registration, after 903",
+  "after registration, logged in", "after registration, not logged in"
+};
+
+/** A connection on \a fd in state \a col, having sent \a row's CAP LS
+ * lines, standard-replies on. */
+static struct Client *sasl31_client(int fd, enum cap_row row, enum sasl_col col)
+{
+  static int pwn;
+  struct Client *c = NULL;
+  char data[300], pw[16], xid[ACCOUNT_ID_LEN + 1];
+
+  switch (col) {
+  case COL_PRE_NOTHING:
+    c = new_client(fd, "tc", 0, REG_KEEPS);
+    break;
+  case COL_PRE_AFTER_903:
+    c = new_client(fd, "tc", 0, REG_KEEPS);
+    cap_ls_lines(c, row);
+    snprintf(pw, sizeof(pw), "t31pw%d", ++pwn);   /* uncached: Keycloak answers */
+    plain_b64("liz", pw, data);
+    kc_mode = KC_LATER;
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, data), 0);
+    pend_deliver(1);
+    run_event_loop();
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_true(IsSASLComplete(c));
+    assert_false(IsRegistered(c));
+    break;
+  case COL_POST_LOGGED_IN:
+    c = new_logged_in(fd, "tc", "xavier", user_id("xavier", xid), 1);
+    break;
+  case COL_POST_NO_LOGIN:
+    c = new_registered(fd, "tc");
+    break;
+  default:
+    fail();
+  }
+  CapSet(cli_active(c), CAP_STANDARDREPLIES);
+  if (col != COL_PRE_AFTER_903)
+    cap_ls_lines(c, row);
+  fake_of(c)->n_numerics = 0;
+  fake_of(c)->fail_code[0] = '\0';
+  fake_of(c)->raw[0] = '\0';
+  return c;
+}
+
+/** What one AUTHENTICATE <mechanism> got. */
+enum sasl_answer { ANS_STARTED, ANS_907, ANS_462 };
+
+/** What \a row x \a col x \a mech must get. */
+static enum sasl_answer sasl31_expected(enum cap_row row, enum sasl_col col,
+                                        int oauth)
+{
+  int v302 = (row == ROW_LS302 || row == ROW_LS302_THEN_LS);
+
+  switch (col) {
+  case COL_PRE_NOTHING:
+    return ANS_STARTED;
+  case COL_PRE_AFTER_903:
+    return (v302 && oauth) ? ANS_STARTED : ANS_907;
+  case COL_POST_LOGGED_IN:
+    if (!v302)
+      return ANS_462;
+    return oauth ? ANS_STARTED : ANS_907;
+  case COL_POST_NO_LOGIN:
+  default:
+    return v302 ? ANS_STARTED : ANS_462;
+  }
+}
+
+/** The whole matrix: every CAP LS row, every state, PLAIN and
+ * OAUTHBEARER, through the local tier. */
+static void sasl31_matrix(void **state)
+{
+  int row, col, oauth, fd = 110;
+
+  sasl_init_once();
+  for (row = 0; row < NROWS; row++)
+    for (col = 0; col < NCOLS; col++)
+      for (oauth = 0; oauth < 2; oauth++) {
+        const char *mech = oauth ? "OAUTHBEARER" : "PLAIN";
+        enum sasl_answer want = sasl31_expected(row, col, oauth);
+        struct Client *c = sasl31_client(fd, row, col);
+        struct fake *f = fake_of(c);
+        struct login_snap was;
+        struct effects fx_was;
+        int requests = kc_requests, ntimers_was;
+
+        fd = fd < 117 ? fd + 1 : 110;
+        print_message("  %s / %s / %s\n", row_name[row], col_name[col], mech);
+        ntlog = 0;
+        snap(c, &was);
+        fx_was = fx;
+        ntimers_was = t_active(&cli_sasltimeout(c)) ? 1 : 0;
+        assert_int_equal(authenticate(c, mech), 0);
+        assert_int_equal(kc_requests, requests);       /* none at a start */
+        switch (want) {
+        case ANS_STARTED:
+          assert_int_equal(f->n_numerics, 0);
+          assert_non_null(cli_saslsession(c));
+          assert_true(cli_saslcookie(c) != 0);
+          assert_string_equal(f->raw, "AUTHENTICATE +");
+          assert_int_equal(IsSASLReauth(c) ? 1 : 0,
+                           col == COL_POST_LOGGED_IN);
+          /* end it, so the next case starts clean */
+          assert_int_equal(authenticate(c, "*"), 0);
+          assert_true(has_numeric(f, ERR_SASLABORTED));
+          assert_null(cli_saslsession(c));
+          break;
+        case ANS_907:
+          assert_int_equal(f->n_numerics, 1);
+          assert_int_equal(f->numerics[0], ERR_SASLALREADY);
+          assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+          assert_null(cli_saslsession(c));
+          assert_int_equal(cli_saslcookie(c), 0);
+          assert_false(IsSASLReauth(c));
+          assert_login_unchanged(c, &was);
+          assert_nothing_announced(&fx_was);
+          break;
+        case ANS_462:
+          assert_int_equal(f->n_numerics, 1);
+          assert_int_equal(f->numerics[0], ERR_ALREADYREGISTRED);
+          assert_string_equal(f->fail_code, "");     /* master sends no FAIL */
+          assert_string_equal(f->raw, "");
+          assert_null(cli_saslsession(c));
+          assert_int_equal(cli_saslcookie(c), 0);
+          assert_false(IsSASLReauth(c));
+          assert_int_equal(t_active(&cli_sasltimeout(c)) ? 1 : 0, ntimers_was);
+          assert_login_unchanged(c, &was);
+          assert_nothing_announced(&fx_was);
+          break;
+        }
+      }
+}
+
+/** After registration a non-302 connection gets 462 for every line --
+ * the mechanism, its data, "*", a line with no parameter, a line from a
+ * connection that never negotiated sasl -- and nothing reaches any tier:
+ * not Keycloak (a whole same-account OAUTHBEARER refresh), not IAuth, not
+ * services. */
+static void sasl31_registered_every_line_462(void **state)
+{
+  const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+  char xid[ACCOUNT_ID_LEN + 1], data[300];
+  char *parv[2];
+  struct Client *c;
+  struct fake *f;
+  struct login_snap was;
+  struct effects fx_was;
+  int tier, requests, i;
+
+  sasl_init_once();
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  for (tier = 0; tier < 3; tier++) {          /* local, IAuth, services */
+    local_off = tier > 0;
+    iauth_on = tier == 1;
+    iauth_starts = iauth_datas = iauth_aborts = 0;
+    c = new_logged_in(120 + tier, "xav", "xavier", user_id("xavier", xid), 1);
+    f = fake_of(c);
+    cap_ls_lines(c, ROW_LS);
+    snap(c, &was);
+    fx_was = fx;
+    requests = kc_requests;
+    ntlog = 0;
+    token_for("xavier", "xavier");              /* its own account */
+    jwt_local_undecided = 0;
+    kc_mode = KC_LATER;
+    assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+    assert_int_equal(authenticate(c, data), 0);
+    assert_int_equal(authenticate(c, "+"), 0);
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    parv[0] = cli_name(c);
+    parv[1] = NULL;
+    assert_int_equal(m_authenticate(c, c, 1, parv), 0);  /* no parameter */
+    CapClr(cli_active(c), CAP_SASL);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);       /* no sasl cap */
+
+    assert_int_equal(f->n_numerics, 7);
+    for (i = 0; i < 7; i++)
+      assert_int_equal(f->numerics[i], ERR_ALREADYREGISTRED);
+    assert_string_equal(f->fail_code, "");
+    assert_int_equal(kc_requests, requests);     /* Keycloak never asked */
+    assert_int_equal(iauth_starts + iauth_datas + iauth_aborts, 0);
+    assert_false(tlog_has_prefix("servers"));    /* nothing to services */
+    assert_null(cli_saslsession(c));
+    assert_int_equal(cli_saslcookie(c), 0);
+    assert_false(IsSASLReauth(c));
+    assert_login_unchanged(c, &was);
+    assert_nothing_announced(&fx_was);
+    assert_int_equal(fx.oper_notices_tried, fx_was.oper_notices_tried);
+  }
+  local_off = iauth_on = 0;
+}
+
+/** The same through the IAuth and services tiers, not logged in: 462, no
+ * exchange started anywhere.  A 302 connection there starts one, as
+ * before. */
+static void sasl31_registered_other_tiers(void **state)
+{
+  int tier, v302;
+
+  for (tier = 1; tier < 3; tier++)
+    for (v302 = 0; v302 < 2; v302++) {
+      struct Client *c = new_registered(124 + 2 * (tier - 1) + v302, "rr");
+      struct fake *f = fake_of(c);
+
+      local_off = 1;
+      iauth_on = tier == 1;
+      iauth_starts = 0;
+      ntlog = 0;
+      cap_ls_lines(c, v302 ? ROW_LS302 : ROW_LS301);
+      assert_int_equal(authenticate(c, "PLAIN"), 0);
+      if (!v302) {
+        assert_int_equal(f->n_numerics, 1);
+        assert_int_equal(f->numerics[0], ERR_ALREADYREGISTRED);
+        assert_int_equal(iauth_starts, 0);
+        assert_false(tlog_has_prefix("servers"));
+        assert_int_equal(cli_saslcookie(c), 0);
+        continue;
+      }
+      assert_int_equal(f->n_numerics, 0);
+      assert_true(cli_saslcookie(c) != 0);       /* the exchange started */
+      if (tier == 1)
+        assert_int_equal(iauth_starts, 1);
+      else
+        assert_true(tlog_has_prefix("servers SASL"));
+      assert_int_equal(authenticate(c, "*"), 0);  /* ended */
+      assert_int_equal(cli_saslcookie(c), 0);
+    }
+  local_off = iauth_on = 0;
+}
+
+/** Before registration, a non-302 connection that holds an account
+ * without a SASL login -- an account set before registration (WEBIRC, a
+ * services login-on-connect) or a REGISTER login -- gets 907 for
+ * OAUTHBEARER too; a 302 connection may still start one, as before. */
+static void sasl31_pre_registration_account_held(void **state)
+{
+  int how, v302;
+
+  sasl_init_once();
+  for (how = 0; how < 2; how++)
+    for (v302 = 0; v302 < 2; v302++) {
+      struct Client *c = new_client(126 + 2 * how + v302, "ah", 0, REG_KEEPS);
+      struct fake *f = fake_of(c);
+      char rid[ACCOUNT_ID_LEN + 1];
+
+      CapSet(cli_active(c), CAP_STANDARDREPLIES);
+      cap_ls_lines(c, v302 ? ROW_LS302 : ROW_NO_LS);
+      if (how == 0) {                        /* an account given before */
+        ircd_strncpy(cli_user(c)->account, "webacct", sizeof(cli_user(c)->account));
+        SetAccount(c);
+      } else {                               /* REGISTER SUCCESS */
+        register_through(c, "rga", "*");
+        assert_identity(c, "rga", user_id("rga", rid), 1);
+      }
+      f->n_numerics = 0;
+      f->fail_code[0] = '\0';
+      assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+      if (!v302) {
+        assert_int_equal(f->n_numerics, 1);
+        assert_int_equal(f->numerics[0], ERR_SASLALREADY);
+        assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+        assert_null(cli_saslsession(c));
+        assert_int_equal(cli_saslcookie(c), 0);
+        if (how == 0)
+          assert_true(IsAccount(c));
+        else
+          assert_identity(c, "rga", rid, 1);  /* the login untouched */
+        continue;
+      }
+      assert_int_equal(f->n_numerics, 0);
+      assert_non_null(cli_saslsession(c));
+      assert_int_equal(authenticate(c, "*"), 0);
+      assert_null(cli_saslsession(c));
+    }
+}
+
+/** sasl-3.1: "If authentication fails, a 904 or 905 numeric will be sent
+ * and the client MAY retry".  A non-302 connection whose exchange failed
+ * (904) or was aborted (906) starts another; once one succeeds (903), any
+ * further AUTHENTICATE is 907. */
+static void sasl31_retry_after_failure_then_907(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+  const char *mechs[2] = { "PLAIN", "OAUTHBEARER" };
+  int m;
+
+  sasl_init_once();
+  c = new_client(127, "rt", 0, REG_KEEPS);
+  f = fake_of(c);
+  cap_ls_lines(c, ROW_LS);
+
+  plain_b64("liz", "t31bad", data);           /* 904 */
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver(0);
+  run_event_loop();
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_false(IsSASLComplete(c));
+
+  f->n_numerics = 0;                          /* a retry, then 906 */
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(f->n_numerics, 0);
+  assert_non_null(cli_saslsession(c));
+  assert_int_equal(authenticate(c, "*"), 0);
+  assert_true(has_numeric(f, ERR_SASLABORTED));
+
+  f->n_numerics = 0;                          /* another retry: 903 */
+  plain_b64("liz", "t31good", data);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(f->n_numerics, 0);
+  assert_int_equal(authenticate(c, data), 0);
+  pend_deliver(1);
+  run_event_loop();
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+
+  for (m = 0; m < 2; m++) {                   /* then 907, any mechanism */
+    f->n_numerics = 0;
+    assert_int_equal(authenticate(c, mechs[m]), 0);
+    assert_int_equal(f->n_numerics, 1);
+    assert_int_equal(f->numerics[0], ERR_SASLALREADY);
+    assert_true(IsSASLComplete(c));
+    assert_string_equal(cli_saslaccount(c), "liz");
+  }
+}
 #endif /* USE_LIBKC */
 
 /* ------------------------------------------------------------------ */
@@ -4256,6 +4657,11 @@ int main(void)
     cmocka_unit_test_setup(reauth_relayed_exchange_takes_no_local_exchange, setup),
     cmocka_unit_test_setup(flow_login_tells_the_user, setup),
     cmocka_unit_test_setup(reauth_tells_nobody_account, setup),
+    cmocka_unit_test_setup(sasl31_matrix, setup),
+    cmocka_unit_test_setup(sasl31_registered_every_line_462, setup),
+    cmocka_unit_test_setup(sasl31_registered_other_tiers, setup),
+    cmocka_unit_test_setup(sasl31_pre_registration_account_held, setup),
+    cmocka_unit_test_setup(sasl31_retry_after_failure_then_907, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

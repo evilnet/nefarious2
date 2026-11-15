@@ -4403,7 +4403,8 @@ static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
   /* The exchange is over, as when services complete one: its cookie and
    * timer go.  A cookie left behind would read as an exchange still in
    * flight -- the next AUTHENTICATE taken for its data, past the check
-   * that allows a client with a login only OAUTHBEARER (m_authenticate()). */
+   * that allows a client with a login only OAUTHBEARER, and only on CAP
+   * 302 (m_authenticate()). */
   EndSASLExchange(cli);
   if (t_active(&cli_sasltimeout(cli)))
     timer_del(&cli_sasltimeout(cli));
