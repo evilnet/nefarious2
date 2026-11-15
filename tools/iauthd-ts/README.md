@@ -97,13 +97,18 @@ Sets the IAuth policy flags. See `doc/readme.iauth` for details.
 ```
 #IAUTH DNSTIMEOUT 5
 ```
-Seconds to wait for DNSBL lookups. Default: 5
+Seconds to wait for DNSBL lookups. Default: 5. A list that has not answered
+by then (or whose lookup fails: SERVFAIL, REFUSED, server unreachable) counts
+as "not listed" for that client only; the failure is not cached, so the next
+connection from the address asks the list again.
 
 #### CACHETIME
 ```
 #IAUTH CACHETIME 86400
 ```
-Seconds to cache DNSBL results. Default: 86400 (24 hours)
+Seconds to cache DNSBL results. Default: 86400 (24 hours). Only definite
+answers are cached: the list's records, or its "no such name" / "no data"
+(NXDOMAIN / NODATA) answer. Timeouts and failed lookups are never cached.
 
 #### BLOCKMSG
 ```
