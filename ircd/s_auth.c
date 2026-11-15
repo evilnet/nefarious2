@@ -337,6 +337,8 @@ static void iauth_sock_callback(struct Event *ev);
 static void iauth_stderr_callback(struct Event *ev);
 static int sendto_iauth(struct Client *cptr, const char *format, ...);
 static int preregister_user(struct Client *cptr);
+static int auth_assign_class(struct Client *cli, const char *name,
+                             const char *who);
 static void iauth_said_free(struct AuthRequest *auth);
 static void iauth_said_record(struct AuthRequest *auth, const char *line,
                               int untold);
@@ -848,6 +850,13 @@ static int check_auth_finished(struct AuthRequest *auth)
      * the iauthd scripts mark the clients they pass. */
     dnsbl_apply_marks(auth->client, auth->dnsbl_request);
     FlagSet(&auth->flags, AR_DNSBL_APPLIED);
+
+    /* class= of the last matching entry that gives one: the class, as
+     * IAuth's D line would give it (auth_assign_class()). */
+    if (dnsbl_class(auth->dnsbl_request)
+        && auth_assign_class(auth->client, dnsbl_class(auth->dnsbl_request),
+                             "DNSBL") == CPTR_KILLED)
+      return CPTR_KILLED;
   }
 
 
@@ -3840,6 +3849,50 @@ static struct ConfItem *auth_find_class_conf(const char *class_name)
   return aconf;
 }
 
+/** Put a client in the connection class \a name, as IAuth's D line does
+ * (and the native DNSBL's class=, the scripts' class= on their side).
+ * @param[in] cli The client.
+ * @param[in] name The class.
+ * @param[in] who Who asked ("iauth", "DNSBL"), for the notice when there
+ *   is no such class.
+ * @return CPTR_KILLED if the client was exited (its class is full, or it
+ *   needs SASL that is not available), else zero.
+ */
+static int auth_assign_class(struct Client *cli, const char *name,
+                             const char *who)
+{
+  static time_t warn_time;
+  struct ConfItem *aconf;
+
+  aconf = auth_find_class_conf(name);
+  if (aconf) {
+    enum AuthorizationCheckResult acr;
+
+    acr = attach_conf(cli, aconf);
+    switch (acr) {
+    case ACR_OK:
+      /* There should maybe be some way to set FLAG_DOID here.. */
+      break;
+    case ACR_TOO_MANY_IN_CLASS:
+      ++ServerStats->is_ref;
+      return exit_client(cli, cli, &me,
+                         "Sorry, your connection class is full - try "
+                         "again later or try another server");
+    case ACR_SASL_UNAVAILABLE:
+      ++ServerStats->is_ref;
+      return exit_client(cli, cli, &me,
+                         "SASL authentication required but temporarily unavailable - try again later");
+    default:
+      log_write(LS_IAUTH, L_ERROR, 0, "IAuth: Unexpected AuthorizationCheckResult %d from attach_conf()", acr);
+      break;
+    }
+  } else
+    sendto_opmask_butone_ratelimited(NULL, SNO_AUTH, &warn_time,
+                                     "%s tried to use undefined class [%s]",
+                                     who, name);
+  return 0;
+}
+
 /** Tentatively accept a client in IAuth.
  * @param[in] iauth Active IAuth session.
  * @param[in] cli Client referenced by command.
@@ -3866,8 +3919,6 @@ static int iauth_cmd_soft_done(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
 				 int parc, char **params)
 {
-  static time_t warn_time;
-
   Debug((DEBUG_INFO, "iauth_cmd_done_client: cli=%p fd=%d cli_name='%s'",
          (void*)cli, cli_fd(cli), cli_name(cli)));
 
@@ -3889,36 +3940,9 @@ static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
   }
 
   /* If a connection class was specified (and usable), assign the client to it. */
-  if (!EmptyString(params[0])) {
-    struct ConfItem *aconf;
-
-    aconf = auth_find_class_conf(params[0]);
-    if (aconf) {
-      enum AuthorizationCheckResult acr;
-
-      acr = attach_conf(cli, aconf);
-      switch (acr) {
-      case ACR_OK:
-        /* There should maybe be some way to set FLAG_DOID here.. */
-        break;
-      case ACR_TOO_MANY_IN_CLASS:
-        ++ServerStats->is_ref;
-        return exit_client(cli, cli, &me,
-                           "Sorry, your connection class is full - try "
-                           "again later or try another server");
-      case ACR_SASL_UNAVAILABLE:
-        ++ServerStats->is_ref;
-        return exit_client(cli, cli, &me,
-                           "SASL authentication required but temporarily unavailable - try again later");
-      default:
-        log_write(LS_IAUTH, L_ERROR, 0, "IAuth: Unexpected AuthorizationCheckResult %d from attach_conf()", acr);
-        break;
-      }
-    } else
-      sendto_opmask_butone_ratelimited(NULL, SNO_AUTH, &warn_time,
-                                       "iauth tried to use undefined class [%s]",
-                                       params[0]);
-  }
+  if (!EmptyString(params[0])
+      && auth_assign_class(cli, params[0], "iauth") == CPTR_KILLED)
+    return CPTR_KILLED;
 
   return 1;
 }

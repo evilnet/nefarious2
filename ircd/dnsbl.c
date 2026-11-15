@@ -222,6 +222,10 @@ dnsbl_add_server(const char *domain, const char *index,
   server->score = score;
 
   /* Add to list */
+  {
+    static int dnsbl_order;
+    server->order = ++dnsbl_order;
+  }
   server->ident = dnsbl_entry_ident(server);
   server->next = dnsbl_servers;
   dnsbl_servers = server;
@@ -244,6 +248,7 @@ dnsbl_clear_servers(void)
       MyFree(server->index);
     if (server->mark)
       MyFree(server->mark);
+    MyFree(server->conn_class);
     MyFree(server);
   }
   dnsbl_servers = NULL;
@@ -354,6 +359,20 @@ dnsbl_entry_cachetime(const struct DNSBLServer *server)
 {
   return server->has_cachetime ? (long) server->cachetime
     : feature_int(FEAT_DNSBL_CACHETIME);
+}
+
+void
+dnsbl_server_class(struct DNSBLServer *server, const char *name)
+{
+  MyFree(server->conn_class);
+  if (name && *name)
+    DupString(server->conn_class, name);
+}
+
+const char *
+dnsbl_class(const struct DNSBLRequest *request)
+{
+  return request ? request->conn_class : NULL;
 }
 
 void
@@ -576,6 +595,7 @@ dnsbl_request_free(struct DNSBLRequest *req)
 
   if (req->mark)
     MyFree(req->mark);
+  MyFree(req->conn_class);
   for (i = 0; i < req->nmarks; i++)
     MyFree(req->marks[i]);        /* (a macro: no side effects in its argument) */
   MyFree(req->marks);
@@ -611,6 +631,15 @@ dnsbl_judge(struct DNSBLRequest *req, struct DNSBLServer *server,
     return;
   server->hits++;
   req->result++;
+
+  /* class=: the last matching entry in file order that gives one (the
+   * scripts let the last hit set it) */
+  if (server->conn_class
+      && (!req->conn_class || server->order > req->class_order)) {
+    MyFree(req->conn_class);
+    DupString(req->conn_class, server->conn_class);
+    req->class_order = server->order;
+  }
 
   /* Every matching mark entry marks the client (if it stays), as the
    * scripts' marks{} (iauthd.pl, iauthd-ts) collect every mark= of the

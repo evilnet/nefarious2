@@ -741,6 +741,31 @@ static void entry_cachetime_honoured(void **state)
   dnsbl_cancel(again(0));
 }
 
+/** class=: a matched client gets the class of the last matching entry (in
+ * file order) that gives one; an entry that does not match gives none. */
+static void entry_class_last_matching_wins(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+  struct DNSBLServer *e;
+  int i;
+
+  dnsbl_clear_servers();
+  e = dnsbl_add_server("a.test", "2", NULL, DNSBL_ACT_MARK, "a", 0);
+  dnsbl_server_class(e, "first");
+  e = dnsbl_add_server("b.test", "2", NULL, DNSBL_ACT_MARK, "b", 0);
+  dnsbl_server_class(e, "second");
+  e = dnsbl_add_server("c.test", "4", NULL, DNSBL_ACT_MARK, "c", 0);
+  dnsbl_server_class(e, "third");            /* does not match .2 */
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  for (i = nqueries - 1; i >= 0; i--)        /* answers in any order */
+    answer(i, 1, 2);
+  assert_string_equal(dnsbl_class(req), "second");
+  dnsbl_cancel(req);
+  req = again(1);                            /* the cache: the same */
+  assert_string_equal(dnsbl_class(req), "second");
+  dnsbl_cancel(req);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -758,6 +783,7 @@ int main(void)
     cmocka_unit_test_setup(cache_bounded_oldest_first, setup),
     cmocka_unit_test_setup(unanswered_list_given_up, setup),
     cmocka_unit_test_setup(entry_cachetime_honoured, setup),
+    cmocka_unit_test_setup(entry_class_last_matching_wins, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

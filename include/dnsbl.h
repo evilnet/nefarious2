@@ -47,6 +47,9 @@ struct DNSBLServer {
   char *domain;              /**< DNSBL domain (e.g., "dnsbl.dronebl.org") */
   char *index;               /**< Comma-separated indexes as written (e.g., "2,3,5,6"), or NULL */
   unsigned char index_set[32]; /**< The reply values (0-255) the index lists, one bit each */
+  char *conn_class;          /**< class=: the connection class a matched,
+                                  staying client is given, or NULL */
+  int order;                 /**< Its place in the configuration (file order) */
   int has_cachetime;         /**< cachetime was given */
   unsigned int cachetime;    /**< How long its answers are cached (seconds;
                                   else FEAT_DNSBL_CACHETIME; 0: not cached) */
@@ -105,6 +108,9 @@ struct DNSBLRequest {
   int cancelled;                 /**< Set if request was cancelled (client disconnected) */
   enum DNSBLAction action;       /**< Highest priority action */
   char *mark;                    /**< Mark string to apply */
+  char *conn_class;              /**< The class of the last matching entry
+                                      (in file order) that gives one */
+  int class_order;               /**< That entry's place */
   char **marks;                  /**< Every matching mark entry's mark (its reason) */
   int nmarks;                    /**< How many */
   struct irc_in_addr addr;       /**< The address asked about (the cache key) */
@@ -167,6 +173,17 @@ extern void dnsbl_timeout_sweep(void);
  * @param seconds The lifetime
  */
 extern void dnsbl_server_cachetime(struct DNSBLServer *server, unsigned int seconds);
+
+/** Give an entry a connection class (the scripts' class=): a client it
+ * matches, if it stays, is put in that class as IAuth's D line would.
+ * @param server The entry dnsbl_add_server() returned
+ * @param name The class name
+ */
+extern void dnsbl_server_class(struct DNSBLServer *server, const char *name);
+
+/** The connection class a completed DNSBL check gives its client: the last
+ * matching entry's (in file order) that has one, or NULL. */
+extern const char *dnsbl_class(const struct DNSBLRequest *request);
 
 /** Remove all DNSBL server configurations */
 extern void dnsbl_clear_servers(void);

@@ -107,6 +107,7 @@ extern int init_lexer_file(char* file);
   unsigned int dnsbl_bitmask;
   int dnsbl_has_bitmask;
   int dnsbl_cachetime;        /* -1: none given */
+  char *dnsbl_classname;
   int dnsbl_action, dnsbl_score;
 
 static void parse_error(char *pattern,...) {
@@ -2020,7 +2021,7 @@ exceptlistdelay: LISTDELAY '=' YES ';'
 
 dnsblblock: DNSBL
 {
-  dnsbl_domain = dnsbl_index = dnsbl_mark = NULL;
+  dnsbl_domain = dnsbl_index = dnsbl_mark = dnsbl_classname = NULL;
   dnsbl_bitmask = 0;
   dnsbl_has_bitmask = 0;
   dnsbl_cachetime = -1;
@@ -2043,9 +2044,15 @@ dnsblblock: DNSBL
       parse_error("Invalid index \"%s\" in DNSBL block for %s (reply values "
                   "0-255, comma-separated); the block is ignored",
                   dnsbl_index ? dnsbl_index : "", dnsbl_domain);
-    else if (dnsbl_cachetime >= 0)
-      dnsbl_server_cachetime(dnsbl_entry, dnsbl_cachetime);
+    else {
+      if (dnsbl_cachetime >= 0)
+        dnsbl_server_cachetime(dnsbl_entry, dnsbl_cachetime);
+      if (dnsbl_classname)
+        dnsbl_server_class(dnsbl_entry, dnsbl_classname);
+    }
   }
+  MyFree(dnsbl_classname);
+  dnsbl_classname = NULL;
   MyFree(dnsbl_domain);
   MyFree(dnsbl_index);
   MyFree(dnsbl_mark);
@@ -2058,7 +2065,7 @@ dnsblblock: DNSBL
 };
 dnsblitems: dnsblitem dnsblitems | dnsblitem;
 dnsblitem: dnsblname | dnsblindex | dnsblbitmask | dnsblaction | dnsblmark | dnsblscore
-         | dnsblcachetime;
+         | dnsblcachetime | dnsblclass;
 dnsblname: NAME '=' QSTRING ';'
 {
   MyFree(dnsbl_domain);
@@ -2101,6 +2108,11 @@ dnsblscore: SCORE '=' expr ';'
 dnsblcachetime: CACHETIME '=' timespec ';'
 {
   dnsbl_cachetime = $3;
+};
+dnsblclass: CLASS '=' QSTRING ';'
+{
+  MyFree(dnsbl_classname);
+  dnsbl_classname = $3;
 };
 
 include: INCLUDE QSTRING ';'

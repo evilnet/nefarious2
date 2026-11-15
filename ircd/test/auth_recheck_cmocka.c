@@ -220,6 +220,28 @@ void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request)
 { marks_applied++; }
 void dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request)
 { marks_unapplied++; }
+/* class= of the verdict, and the connection class it puts the client in
+ * (auth_assign_class(), as IAuth's D line). */
+static const char *verdict_class;
+const char *dnsbl_class(const struct DNSBLRequest *request) { return verdict_class; }
+static struct ConnectionClass vip_class;
+static struct ConfItem vip_conf, *attached_conf;
+struct ConfItem *GlobalConfList;
+struct ConnectionClass *do_find_class(const char *name, int extras)
+{
+  return strcmp(name, "vip") ? NULL : &vip_class;
+}
+struct ConfItem *make_conf(int type)
+{
+  memset(&vip_conf, 0, sizeof(vip_conf));
+  vip_conf.status = type;
+  return &vip_conf;
+}
+enum AuthorizationCheckResult attach_conf(struct Client *cptr, struct ConfItem *aconf)
+{
+  attached_conf = aconf;
+  return ACR_OK;
+}
 char *get_client_class(struct Client *acptr) { return "class"; }
 const char *get_client_name(const struct Client *sptr, int showip) { return "name"; }
 int hAddClient(struct Client *cptr) { return 0; }
@@ -317,6 +339,9 @@ static int setup(void **state)
   verdict_blocked = -1;
   verdict_action = DNSBL_ACT_NONE;
   verdicts = marks_applied = marks_unapplied = 0;
+  verdict_class = NULL;
+  attached_conf = NULL;
+  vip_class.valid = 1;
   expect_exit = NULL;
   CurrentTime = time(NULL);
   return 0;
@@ -771,6 +796,22 @@ static void native_whitelist_admits(void **state)
   assert_int_equal(a->registered, 1);
 }
 
+/** A verdict with class=: the client is put in that connection class, by
+ * the code IAuth's D line uses, before it registers. */
+static void dnsbl_class_assigned_as_iauth_does(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  verdict_blocked = 0;
+  verdict_action = DNSBL_ACT_MARK;
+  verdict_class = "vip";
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_non_null(attached_conf);
+  assert_ptr_equal(attached_conf->conn_class, &vip_class);
+  assert_int_equal(a->registered, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -794,6 +835,7 @@ int main(void)
     cmocka_unit_test_setup(address_change_undoes_an_applied_verdict, setup),
     cmocka_unit_test_setup(iauth_kill_of_a_natively_whitelisted_client_at_once, setup),
     cmocka_unit_test_setup(native_whitelist_admits, setup),
+    cmocka_unit_test_setup(dnsbl_class_assigned_as_iauth_does, setup),
   };
 
   event_init(64);
