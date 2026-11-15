@@ -231,6 +231,28 @@ struct Client *next_client(struct Client *next, const char* ch)
   return next;
 }
 
+/** A command forwarded on for another server's user (we are a hop on
+ * its way) keeps the compact msgid it arrived with: the asker's server
+ * matches the replies to the command by it, and the destination echoes
+ * the msgid of the line it receives (reply_tags()).  Without it a
+ * command over two fork hops reached its destination untagged, and its
+ * replies came back with no msgid.  Only the line being handled is
+ * relayed (its link's stash is current); send.c drops the tag toward a
+ * legacy peer, as for any line.
+ * @param[in] from The command's source, a remote user (anything else is
+ *   left alone). */
+static void hunt_relay_msgid(struct Client *from)
+{
+  struct Client *link;
+
+  if (MyConnect(from) || !IsUser(from) || !feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return;
+  link = cli_from(from);
+  if (!sendcmdto_stash_is_current(link) || !cli_s2s_msgid(link)[0])
+    return;
+  sendcmdto_set_s2s_tags(cli_s2s_time_ms(link), cli_s2s_msgid(link));
+}
+
 /** Find the destination server for a command, and forward it if that is not us.
  *
  * \a server may be a nickname, server name, server mask (if \a from
@@ -329,7 +351,8 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
       if (feature_bool(FEAT_P10_MESSAGE_TAGS))
         sendcmdto_set_s2s_tags(time_ms, msgid);
     }
-  }
+  } else
+    hunt_relay_msgid(from);
 
   sendcmdto_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
                 parv[4], parv[5], parv[6], parv[7], parv[8]);
@@ -425,7 +448,8 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
       if (feature_bool(FEAT_P10_MESSAGE_TAGS))
         sendcmdto_set_s2s_tags(time_ms, msgid);
     }
-  }
+  } else
+    hunt_relay_msgid(from);
 
   sendcmdto_prio_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
 		     parv[4], parv[5], parv[6], parv[7], parv[8]);
