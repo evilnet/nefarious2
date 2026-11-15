@@ -56,6 +56,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 /** Maximum size of linesync.data file (1 MB) */
 #define GITSYNC_MAX_SIZE (1024 * 1024)
@@ -505,7 +506,8 @@ dir_exists(const char *path)
  * @return GITSYNC_OK on success, error code otherwise
  */
 static enum GitsyncStatus
-gitsync_clone(const char *repo_url, const char *local_path, git_repository **repo)
+gitsync_clone(const char *repo_url, const char *local_path, const char *branch,
+              git_repository **repo)
 {
   git_clone_options clone_opts;
   int error;
@@ -516,6 +518,13 @@ gitsync_clone(const char *repo_url, const char *local_path, git_repository **rep
 
   clone_opts.fetch_opts.callbacks.credentials = gitsync_cred_callback;
   clone_opts.fetch_opts.callbacks.certificate_check = gitsync_cert_callback;
+  /* The configured branch, not the remote's default: the first sync
+   * reads what a later fetch-and-reset would. */
+  clone_opts.checkout_branch = branch;
+  /* Nothing written to the working tree yet: the commit is checked first
+   * (gitsync_first_clone()). */
+  clone_opts.checkout_opts.checkout_strategy = GIT_CHECKOUT_NONE;
+  clone_opts.fetch_opts.proxy_opts.type = GIT_PROXY_NONE;
 
   Debug((DEBUG_INFO, "GitSync: Cloning %s to %s", repo_url, local_path));
 
@@ -529,19 +538,426 @@ gitsync_clone(const char *repo_url, const char *local_path, git_repository **rep
   return GITSYNC_OK;
 }
 
-/** Fetch and reset to remote branch
- * @param repo Repository
- * @param branch Branch name
- * @return GITSYNC_OK on success, error code otherwise
+/** The file inside a checkout that says GitSync cloned or adopted it and
+ * may fetch into it and reset it; it holds the repository URL. */
+#define GITSYNC_MARK ".git/gitsync-checkout"
+
+/** Whether the checkout at \a path carries GitSync's mark: GitSync
+ * cloned it, or adopted it with the configured origin, and may re-point
+ * it when GITSYNC_REPOSITORY changes. */
+static int
+gitsync_checkout_marked(const char *path)
+{
+  char mark[1100];
+  struct stat st;
+
+  ircd_snprintf(0, mark, sizeof(mark), "%s/" GITSYNC_MARK, path);
+  return 0 == lstat(mark, &st) && S_ISREG(st.st_mode);
+}
+
+/** Mark the checkout at \a path as GitSync's ("cloned <url>" for one its
+ * clone made, "adopted <url>" for an existing checkout of the configured
+ * repository it fetched into; the word is for the reader).
+ * @return 0, or -1 (errno set). */
+static int
+gitsync_checkout_mark(const char *path, const char *word, const char *url)
+{
+  char mark[1100];
+  int fd;
+  ssize_t n = (ssize_t) strlen(url);
+  ssize_t w = (ssize_t) strlen(word);
+
+  ircd_snprintf(0, mark, sizeof(mark), "%s/" GITSYNC_MARK, path);
+  fd = open(mark, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return -1;
+  if (write(fd, word, w) != w || write(fd, " ", 1) != 1
+      || write(fd, url, n) != n || write(fd, "\n", 1) != 1) {
+    close(fd);
+    return -1;
+  }
+  return close(fd);
+}
+
+/** Make the checkout directory \a path 0700 -- the directory itself,
+ * never what a link there points to.  It holds the configuration GitSync
+ * pulls (and may hold the server's SSH key). */
+static void
+gitsync_checkout_private(const char *path)
+{
+  int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+
+  if (fd < 0 || fchmod(fd, 0700) != 0)
+    log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: cannot make the checkout "
+              "%s 0700: %s", path, strerror(errno));
+  if (fd >= 0)
+    close(fd);
+}
+
+/** Remove \a path and, when it is a directory, what is in it: each entry
+ * lstat()ed, a symbolic link unlinked, never followed.  A path that would
+ * not fit the buffer stops the removal there (logged), never a cut one.
+ * @return 0, or -1 if something stayed. */
+static int
+gitsync_remove_tree_at(const char *path)
+{
+  struct stat st;
+  struct dirent *d;
+  DIR *dir;
+  char sub[1200];
+  int ret = 0;
+
+  if (lstat(path, &st) != 0)
+    return errno == ENOENT ? 0 : -1;
+  if (!S_ISDIR(st.st_mode))
+    return unlink(path);
+  if (!(dir = opendir(path)))
+    return -1;
+  while ((d = readdir(dir)))
+    if (strcmp(d->d_name, ".") && strcmp(d->d_name, "..")) {
+      if ((size_t) snprintf(sub, sizeof(sub), "%s/%s", path, d->d_name)
+          >= sizeof(sub)) {
+        log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: not removing %s/%s: "
+                  "path too long", path, d->d_name);
+        ret = -1;
+        continue;
+      }
+      if (gitsync_remove_tree_at(sub) != 0)
+        ret = -1;
+    }
+  closedir(dir);
+  return rmdir(path) != 0 ? -1 : ret;
+}
+
+/** Remove the temporary directory a first clone made in THIS sync:
+ * \a tmp_path, which mkdtemp() made as "<repo_path>.clone-XXXXXX" -- never
+ * the checkout itself, nothing that existed before the sync. */
+static void
+gitsync_remove_clone_tmp(const char *repo_path, const char *tmp_path)
+{
+  size_t n = strlen(repo_path);
+
+  assert(0 == strncmp(tmp_path, repo_path, n)
+         && 0 == strncmp(tmp_path + n, ".clone-", 7));
+  if (gitsync_remove_tree_at(tmp_path) != 0)
+    log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: could not remove all of "
+              "%s", tmp_path);
+}
+
+/** Whether directory \a path is empty. */
+static int
+gitsync_dir_empty(const char *path)
+{
+  struct dirent *d;
+  DIR *dir = opendir(path);
+  int empty = 1;
+
+  if (!dir)
+    return 0;
+  while ((d = readdir(dir)))
+    if (strcmp(d->d_name, ".") && strcmp(d->d_name, "..")) {
+      empty = 0;
+      break;
+    }
+  closedir(dir);
+  return empty;
+}
+
+/** Payload of gitsync_mode_walk(). */
+struct gitsync_mode_walk {
+  char path[512];               /**< The first entry refused. */
+  unsigned int mode;
+};
+
+/** git_tree_walk() callback: stop at the first entry that is not a
+ * regular file or a tree. */
+static int
+gitsync_mode_walk(const char *root, const git_tree_entry *entry, void *payload)
+{
+  struct gitsync_mode_walk *w = payload;
+  unsigned int mode = (unsigned int) git_tree_entry_filemode(entry);
+
+  if (gitsync_filemode_allowed(mode))
+    return 0;
+  ircd_snprintf(0, w->path, sizeof(w->path), "%s%s", root,
+                git_tree_entry_name(entry));
+  w->mode = mode;
+  return -1;
+}
+
+/** Refuse a commit whose tree holds anything but regular files
+ * (100644/100755) and trees -- a symbolic link, a submodule: the
+ * configuration repository needs none, and a link could make a checkout
+ * write, or a read, go outside the tree.  The whole tree is walked.
+ * @return 0, or -1 with gitsync_stats.last_error set. */
+static int
+gitsync_check_commit(git_object *commit)
+{
+  struct gitsync_mode_walk walk;
+  git_tree *tree = NULL;
+
+  if (git_commit_tree(&tree, (git_commit *) commit) < 0) {
+    const git_error *e = git_error_last();
+
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Cannot read the commit's tree: %s",
+                  e && e->message ? e->message : "unknown error");
+    return -1;
+  }
+  walk.path[0] = '\0';
+  git_tree_walk(tree, GIT_TREEWALK_PRE, gitsync_mode_walk, &walk);
+  git_tree_free(tree);
+  if (walk.path[0]) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "the repository contains %s at %s; not applied",
+                  walk.mode == 0120000 ? "a symbolic link"
+                  : walk.mode == 0160000 ? "a submodule"
+                  : "an entry that is not a regular file", walk.path);
+    return -1;
+  }
+  return 0;
+}
+
+/** Payload of gitsync_way_cb(). */
+struct gitsync_in_the_way {
+  int n;                        /**< Paths found. */
+  char paths[300];              /**< The first few. */
+  int nreplaced;                /**< Directories turned to files. */
+  char replaced[16][512];
+};
+
+static void
+gitsync_way_add(struct gitsync_in_the_way *w, const char *path)
+{
+  if (w->n < 3)
+    ircd_snprintf(0, w->paths + strlen(w->paths),
+                  sizeof(w->paths) - strlen(w->paths), "%s%s",
+                  w->n ? ", " : "", path);
+  w->n++;
+}
+
+/** Notify callback of the dry run.  libgit2 reports as a CONFLICT with no
+ * baseline every untracked (and, with DONT_OVERWRITE_IGNORED, ignored)
+ * path the commit would write over -- a directory where it needs a file,
+ * or a file where it needs a directory, included.  A tracked directory
+ * the commit turns into a file is reported UPDATED and untracked files in
+ * it UNTRACKED: those are in the way too.  A CONFLICT with a baseline is a
+ * tracked file modified locally: GitSync's own, reset as before. */
+static int
+gitsync_way_cb(git_checkout_notify_t why, const char *path,
+               const git_diff_file *baseline, const git_diff_file *target,
+               const git_diff_file *workdir, void *payload)
+{
+  struct gitsync_in_the_way *w = payload;
+  int i;
+
+  (void)workdir;
+  if (why == GIT_CHECKOUT_NOTIFY_CONFLICT && !baseline)
+    gitsync_way_add(w, path);
+  else if (why == GIT_CHECKOUT_NOTIFY_UPDATED && baseline && target
+           && baseline->mode == GIT_FILEMODE_TREE
+           && target->mode != GIT_FILEMODE_TREE) {
+    if (w->nreplaced < 16)
+      ircd_strncpy(w->replaced[w->nreplaced], path, sizeof(w->replaced[0]));
+    else
+      gitsync_way_add(w, path);         /* too many to follow: refuse */
+    w->nreplaced++;
+  } else if (why == GIT_CHECKOUT_NOTIFY_UNTRACKED)
+    for (i = 0; i < w->nreplaced && i < 16; i++)
+      if (gitsync_path_under(path, w->replaced[i])) {
+        gitsync_way_add(w, path);
+        break;
+      }
+  return 0;
+}
+
+/** A sync never destroys a file it did not put there: a dry run of a SAFE
+ * checkout of \a commit (GIT_CHECKOUT_SAFE | GIT_CHECKOUT_DRY_RUN |
+ * GIT_CHECKOUT_DONT_OVERWRITE_IGNORED) finds what is in the way -- an
+ * untracked or ignored file or directory the update would overwrite or
+ * remove (gitsync_way_cb()) -- and any such path refuses the sync whole,
+ * naming it.  (libgit2's stash cannot move just those paths aside: given
+ * a pathspec, git_stash_save_with_opts() still stashes, and removes, every
+ * untracked file.)  The hard reset that follows has only tracked files --
+ * GitSync's -- to update.
+ * @return 0, or -1 with gitsync_stats.last_error set. */
+static int
+gitsync_check_in_the_way(git_repository *repo, git_object *commit,
+                         const char *checkout)
+{
+  git_checkout_options opts;
+  struct gitsync_in_the_way w;
+  int error;
+
+  memset(&w, 0, sizeof(w));
+  git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
+  opts.checkout_strategy = GIT_CHECKOUT_SAFE | GIT_CHECKOUT_DRY_RUN
+    | GIT_CHECKOUT_DONT_OVERWRITE_IGNORED;
+  opts.notify_flags = GIT_CHECKOUT_NOTIFY_CONFLICT | GIT_CHECKOUT_NOTIFY_UPDATED
+    | GIT_CHECKOUT_NOTIFY_UNTRACKED;
+  opts.notify_cb = gitsync_way_cb;
+  opts.notify_payload = &w;
+  error = git_checkout_tree(repo, commit, &opts);
+  if (w.n) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "commit %.8s would overwrite or remove %s%s in %s, which "
+                  "GitSync did not put there; not applied -- move %s away",
+                  git_oid_tostr_s(git_object_id(commit)), w.paths,
+                  w.n > 3 ? " and more" : "", checkout,
+                  w.n == 1 ? "it" : "them");
+    return -1;
+  }
+  if (error < 0 && error != GIT_ECONFLICT) {
+    const git_error *e = git_error_last();
+
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Checkout check failed: %s",
+                  e && e->message ? e->message : "unknown error");
+    return -1;
+  }
+  return 0;
+}
+
+/** The checkout's origin URL as its configuration spells it
+ * (remote.origin.url, without url.<base>.insteadOf rewriting), copied
+ * into \a buf ("" when it has none). */
+static void
+gitsync_origin_url(git_repository *repo, char *buf, size_t size)
+{
+  git_config *cfg = NULL;
+  git_config *snap = NULL;
+  const char *url = NULL;
+
+  buf[0] = '\0';
+  if (git_repository_config(&cfg, repo) < 0)
+    return;
+  if (git_config_snapshot(&snap, cfg) == 0
+      && git_config_get_string(&url, snap, "remote.origin.url") == 0 && url)
+    ircd_strncpy(buf, url, size);
+  git_config_free(snap);
+  git_config_free(cfg);
+}
+
+/** Note the checkout's HEAD commit as the commit synced. */
+static void
+gitsync_note_head(git_repository *repo)
+{
+  git_reference *head_ref = NULL;
+  git_object *head_obj = NULL;
+
+  if (git_repository_head(&head_ref, repo) == 0 &&
+      git_reference_peel(&head_obj, head_ref, GIT_OBJECT_COMMIT) == 0) {
+    git_oid_tostr(gitsync_stats.last_commit, sizeof(gitsync_stats.last_commit),
+                  git_object_id(head_obj));
+    git_object_free(head_obj);
+  }
+  if (head_ref)
+    git_reference_free(head_ref);
+}
+
+/** First clone of \a repo_url for the checkout \a repo_path (resolved),
+ * which does not exist or is an empty directory of the server's own:
+ * into a fresh "<checkout>.clone-XXXXXX" (mkdtemp(), 0700) without
+ * writing the working tree; the commit is checked (gitsync_check_commit())
+ * and only then checked out (SAFE), the directory marked and renamed into
+ * place (rename() replaces an empty directory).  A failed clone removes
+ * only that temporary directory, made in this sync.
+ * @param[out] repo The new checkout, open.
+ * @return GITSYNC_OK, or an error (gitsync_stats.last_error set). */
+static enum GitsyncStatus
+gitsync_first_clone(const char *repo_url, const char *repo_path,
+                    const char *branch, git_repository **repo)
+{
+  char tmp_path[1100];
+  git_repository *fresh = NULL;
+  git_object *head = NULL;
+  git_checkout_options copts;
+  enum GitsyncStatus status;
+  int error;
+
+  ircd_snprintf(0, tmp_path, sizeof(tmp_path), "%s.clone-XXXXXX", repo_path);
+  if (!mkdtemp(tmp_path)) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Cannot make a directory beside %s to clone into: %s",
+                  repo_path, strerror(errno));
+    return GITSYNC_CLONE_ERROR;
+  }
+  status = gitsync_clone(repo_url, tmp_path, branch, &fresh);
+  if (status != GITSYNC_OK) {
+    gitsync_remove_clone_tmp(repo_path, tmp_path);         /* made in this sync */
+    return status;
+  }
+  if (git_revparse_single(&head, fresh, "HEAD") < 0
+      || gitsync_check_commit(head) != 0) {
+    if (!head)
+      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                    "The clone has no HEAD");
+    git_object_free(head);
+    git_repository_free(fresh);
+    gitsync_remove_clone_tmp(repo_path, tmp_path);
+    return GITSYNC_CHECKOUT_ERROR;
+  }
+  git_checkout_options_init(&copts, GIT_CHECKOUT_OPTIONS_VERSION);
+  copts.checkout_strategy = GIT_CHECKOUT_SAFE;
+  error = git_checkout_tree(fresh, head, &copts);
+  git_object_free(head);
+  git_repository_free(fresh);
+  if (error < 0) {
+    const git_error *e = git_error_last();
+
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Checkout failed: %s", e && e->message ? e->message : "unknown error");
+    gitsync_remove_clone_tmp(repo_path, tmp_path);
+    return GITSYNC_CHECKOUT_ERROR;
+  }
+  gitsync_checkout_private(tmp_path);
+  if (gitsync_checkout_mark(tmp_path, "cloned", repo_url) != 0
+      || rename(tmp_path, repo_path) != 0) {      /* replaces an empty dir */
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Cannot put the new checkout in place at %s: %s", repo_path,
+                  strerror(errno));
+    gitsync_remove_clone_tmp(repo_path, tmp_path);
+    return GITSYNC_CLONE_ERROR;
+  }
+  error = git_repository_open(repo, repo_path);
+  if (error < 0) {
+    const git_error *e = git_error_last();
+
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Cannot open repository: %s", e ? e->message : "unknown error");
+    return GITSYNC_CLONE_ERROR;
+  }
+  return GITSYNC_OK;
+}
+
+/** Fetch GITSYNC_REPOSITORY's branch into the checkout and reset to it.
+ * The fetch goes to \a repo_url itself, through an anonymous remote made
+ * without the checkout's url.<base>.insteadOf rewriting
+ * (GIT_REMOTE_CREATE_SKIP_INSTEADOF) and without a proxy
+ * (GIT_PROXY_NONE): whatever the checkout's .git/config says about
+ * "origin", insteadOf or proxies does not redirect it.  The commit is
+ * checked (gitsync_check_commit()), and a file in the way that GitSync
+ * did not put there (gitsync_check_in_the_way()) refuses the sync before
+ * anything changes.  Then a hard
+ * reset: tracked files (GitSync's) are updated, other untracked ones stay
+ * -- no clean ever runs; objects left behind stay in .git (no gc).
+ * @param repo The checkout.
+ * @param repo_url GITSYNC_REPOSITORY.
+ * @param branch GITSYNC_BRANCH.
+ * @param checkout Its directory, resolved.
  */
 static enum GitsyncStatus
-gitsync_fetch_and_reset(git_repository *repo, const char *branch)
+gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
+                        const char *branch, const char *checkout)
 {
   git_remote *remote = NULL;
+  git_remote_create_options ropts;
   git_fetch_options fetch_opts;
   git_reference *ref = NULL;
   git_object *target = NULL;
-  char refspec[256];
+  char refspec[600];
+  char *specs[1];
+  git_strarray refspecs;
   int error;
 
   /* Initialize fetch options - use runtime init for ABI compatibility */
@@ -549,23 +965,33 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
 
   fetch_opts.callbacks.credentials = gitsync_cred_callback;
   fetch_opts.callbacks.certificate_check = gitsync_cert_callback;
+  fetch_opts.proxy_opts.type = GIT_PROXY_NONE;
   /* Fetch all tags (equivalent to git fetch --tags) */
   fetch_opts.download_tags = GIT_REMOTE_DOWNLOAD_TAGS_ALL;
 
-  /* Get origin remote */
-  error = git_remote_lookup(&remote, repo, "origin");
+  git_remote_create_options_init(&ropts, GIT_REMOTE_CREATE_OPTIONS_VERSION);
+  ropts.repository = repo;
+  ropts.name = NULL;            /* anonymous: nothing read from the config */
+  ropts.flags = GIT_REMOTE_CREATE_SKIP_INSTEADOF
+    | GIT_REMOTE_CREATE_SKIP_DEFAULT_FETCHSPEC;
+  error = git_remote_create_with_opts(&remote, repo_url, &ropts);
   if (error < 0) {
     const git_error *e = git_error_last();
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "Remote lookup failed: %s", e ? e->message : "unknown error");
+                  "Remote setup failed: %s", e ? e->message : "unknown error");
     return GITSYNC_FETCH_ERROR;
   }
 
-  /* Fetch from origin with tags */
-  Debug((DEBUG_INFO, "GitSync: Fetching from origin (with tags)"));
+  ircd_snprintf(0, refspec, sizeof(refspec),
+                "+refs/heads/%s:refs/remotes/origin/%s", branch, branch);
+  specs[0] = refspec;
+  refspecs.strings = specs;
+  refspecs.count = 1;
+
+  Debug((DEBUG_INFO, "GitSync: Fetching %s (with tags)", branch));
   gitsync_cred_attempts = 0;
   gitsync_cred_failure[0] = '\0';
-  error = git_remote_fetch(remote, NULL, &fetch_opts, "gitsync fetch");
+  error = git_remote_fetch(remote, &refspecs, &fetch_opts, "gitsync fetch");
   git_remote_free(remote);
 
   if (error < 0)
@@ -593,13 +1019,20 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
     return GITSYNC_CHECKOUT_ERROR;
   }
 
-  /* Store commit hash */
-  git_oid_tostr(gitsync_stats.last_commit, sizeof(gitsync_stats.last_commit),
-                git_object_id(target));
+  /* Nothing of the commit reaches the checkout before it is checked, and
+   * a sync never overwrites a file it did not put there. */
+  if (gitsync_check_commit(target)
+      || gitsync_check_in_the_way(repo, target, checkout)) {
+    git_object_free(target);
+    return GITSYNC_CHECKOUT_ERROR;
+  }
 
-  /* Hard reset to origin/branch */
-  Debug((DEBUG_INFO, "GitSync: Resetting to %s", gitsync_stats.last_commit));
+  /* Hard reset to origin/branch (unrelated histories too: no merge) */
+  Debug((DEBUG_INFO, "GitSync: Resetting to %s", git_oid_tostr_s(git_object_id(target))));
   error = git_reset(repo, target, GIT_RESET_HARD, NULL);
+  if (error >= 0)
+    git_oid_tostr(gitsync_stats.last_commit, sizeof(gitsync_stats.last_commit),
+                  git_object_id(target));
   git_object_free(target);
 
   if (error < 0) {
@@ -612,6 +1045,33 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
   return GITSYNC_OK;
 }
 
+/** Open the regular file \a rel of the checkout \a checkout (resolved)
+ * for reading: it must resolve (realpath()) to a path inside the checkout
+ * -- an untracked symbolic link put in place of a file or directory on the
+ * way is not followed out of it -- and is opened with O_NOFOLLOW and
+ * fstat()ed to be a regular file.
+ * @param[out] st Its fstat().
+ * @return The descriptor, or -1. */
+static int
+gitsync_open_in_checkout(const char *checkout, const char *rel,
+                         struct stat *st)
+{
+  char path[1200], real[PATH_MAX];
+  int fd;
+
+  ircd_snprintf(0, path, sizeof(path), "%s/%s", checkout, rel);
+  if (!realpath(path, real) || !gitsync_path_under(real, checkout)
+      || !strcmp(real, checkout))
+    return -1;
+  if ((fd = open(real, O_RDONLY | O_NOFOLLOW)) < 0)
+    return -1;
+  if (fstat(fd, st) != 0 || !S_ISREG(st->st_mode)) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
 /** Read linesync.data file from repository
  * @param repo_path Path to repository
  * @param[out] content Content buffer (caller must free)
@@ -621,43 +1081,37 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
 static enum GitsyncStatus
 gitsync_read_data(const char *repo_path, char **content, size_t *len)
 {
-  char filepath[512];
-  FILE *fp;
   struct stat st;
   char *buf;
+  ssize_t n;
+  int fd;
 
-  ircd_snprintf(0, filepath, sizeof(filepath), "%s/linesync.data", repo_path);
-
-  if (stat(filepath, &st) != 0) {
+  fd = gitsync_open_in_checkout(repo_path, "linesync.data", &st);
+  if (fd < 0) {
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "linesync.data not found in repository");
+                  "linesync.data not found in repository (or not a regular "
+                  "file there)");
     return GITSYNC_VALIDATION_ERROR;
   }
 
   if (st.st_size > GITSYNC_MAX_SIZE) {
+    close(fd);
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                   "linesync.data too large (%ld bytes)", (long)st.st_size);
     return GITSYNC_VALIDATION_ERROR;
   }
 
-  fp = fopen(filepath, "r");
-  if (!fp) {
+  buf = (char *)MyMalloc(st.st_size + 1);
+  n = read(fd, buf, st.st_size);
+  close(fd);
+  if (n < 0) {
+    MyFree(buf);
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "Cannot open linesync.data");
+                  "Cannot read linesync.data: %s", strerror(errno));
     return GITSYNC_VALIDATION_ERROR;
   }
 
-  buf = (char *)MyMalloc(st.st_size + 1);
-  if (!buf) {
-    fclose(fp);
-    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "Memory allocation failed");
-    return GITSYNC_APPLY_ERROR;
-  }
-
-  *len = fread(buf, 1, st.st_size, fp);
-  fclose(fp);
-
+  *len = (size_t) n;
   buf[*len] = '\0';
   *content = buf;
 
@@ -1220,42 +1674,39 @@ gitsync_update_cert(git_repository *repo, const char *tag_name)
 static int
 gitsync_update_cert_from_file(const char *repo_path, const char *cert_path)
 {
-  char full_path[512];
-  FILE *fp;
   struct stat st;
   char *content;
+  ssize_t n;
   size_t nread;
   char source_desc[128];
   int result;
+  int fd;
 
-  ircd_snprintf(0, full_path, sizeof(full_path), "%s/%s", repo_path, cert_path);
-
-  if (stat(full_path, &st) != 0 || st.st_size == 0) {
+  fd = gitsync_open_in_checkout(repo_path, cert_path, &st);
+  if (fd < 0 || st.st_size == 0) {
+    if (fd >= 0)
+      close(fd);
     Debug((DEBUG_INFO, "GitSync: Cert file %s not found in repo", cert_path));
     return 0;
   }
 
   if ((size_t)st.st_size > GITSYNC_MAX_SIZE) {
+    close(fd);
     log_write(LS_SYSTEM, L_ERROR, 0,
               "GitSync: Cert file %s too large (%ld bytes)", cert_path, (long)st.st_size);
     return 0;
   }
 
-  fp = fopen(full_path, "r");
-  if (!fp) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Cannot open cert file %s: %s", full_path, strerror(errno));
-    return 0;
-  }
-
   content = (char *)MyMalloc(st.st_size + 1);
-  if (!content) {
-    fclose(fp);
+  n = read(fd, content, st.st_size);
+  close(fd);
+  if (n < 0) {
+    MyFree(content);
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: Cannot read cert file %s: %s",
+              cert_path, strerror(errno));
     return 0;
   }
-
-  nread = fread(content, 1, st.st_size, fp);
-  fclose(fp);
+  nread = (size_t) n;
   content[nread] = '\0';
 
   ircd_snprintf(0, source_desc, sizeof(source_desc), "file %s", cert_path);
@@ -1370,12 +1821,14 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
 {
   const char *repo_url;
   const char *branch;
-  char repo_path[512];
+  char repo_path[1024];
   git_repository *repo = NULL;
   char *content = NULL;
   size_t len = 0;
-  enum GitsyncStatus status;
+  enum GitsyncStatus status = GITSYNC_OK;
   time_t now = CurrentTime;
+  char local_path[512];
+  const char *why;
   int interval;
   int error;
 
@@ -1413,8 +1866,23 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
                          "GitSync triggered by %s", cli_name(sptr));
   }
 
-  /* Get paths */
-  gitsync_get_repo_path(repo_path, sizeof(repo_path));
+  /* Get paths: the checkout directory, resolved (symbolic links
+   * followed) and judged before anything touches it; everything below
+   * uses the resolved path.  (Between this check and libgit2's use of the
+   * path, a component an attacker could write to could still be swapped
+   * for a link: the parents of GITSYNC_LOCAL_PATH must be the server's.) */
+  gitsync_get_repo_path(local_path, sizeof(local_path));
+  if ((why = gitsync_local_path_check(local_path, repo_path,
+                                      sizeof(repo_path)))) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "GITSYNC_LOCAL_PATH %s %s: refused", local_path, why);
+    gitsync_stats.failures++;
+    gitsync_stats.last_status = GITSYNC_CLONE_ERROR;
+    if (sptr)
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync failed: %s",
+                    sptr, gitsync_stats.last_error);
+    return GITSYNC_CLONE_ERROR;
+  }
   branch = feature_str(FEAT_GITSYNC_BRANCH);
   if (!branch || !*branch)
     branch = "master";
@@ -1428,56 +1896,95 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
   gitsync_set_timeouts();
   gitsync_set_ca_file();
 
-  /* Clone or open repository (the checkout holds the same content as
-   * the configuration file: the server's user's only) */
-  if (!dir_exists(repo_path)) {
-    /* Need to clone */
-    status = gitsync_clone(repo_url, repo_path, &repo);
-    if (status == GITSYNC_OK)
-      chmod(repo_path, 0700);
-    if (status != GITSYNC_OK) {
-      gitsync_stats.failures++;
-      gitsync_stats.last_status = status;
-      if (sptr) {
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync failed: %s",
-                      sptr, gitsync_stats.last_error);
-      }
-      return status;
-    }
-    /* Get HEAD commit hash after clone */
-    {
-      git_reference *head_ref = NULL;
-      git_object *head_obj = NULL;
-      if (git_repository_head(&head_ref, repo) == 0 &&
-          git_reference_peel(&head_obj, head_ref, GIT_OBJECT_COMMIT) == 0) {
-        git_oid_tostr(gitsync_stats.last_commit, sizeof(gitsync_stats.last_commit),
-                      git_object_id(head_obj));
-        git_object_free(head_obj);
-      }
-      if (head_ref)
-        git_reference_free(head_ref);
-    }
-  } else {
-    /* Open existing repository */
-    chmod(repo_path, 0700);
-    error = git_repository_open(&repo, repo_path);
-    if (error < 0) {
-      const git_error *e = git_error_last();
-      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                    "Cannot open repository: %s", e ? e->message : "unknown error");
-      gitsync_stats.failures++;
-      gitsync_stats.last_status = GITSYNC_CLONE_ERROR;
-      if (sptr) {
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync failed: %s",
-                      sptr, gitsync_stats.last_error);
-      }
-      return GITSYNC_CLONE_ERROR;
-    }
+  /* The checkout.  GitSync never deletes or replaces an existing
+   * directory: a missing or empty one gets a first clone; a git
+   * repository is fetched into and reset (a changed GITSYNC_REPOSITORY
+   * re-points it in place) when its origin is the configured repository
+   * or it is marked as GitSync's, and is left alone otherwise; anything
+   * else is refused.  (libgit2's owner validation, on by default, refuses
+   * to open a repository another user owns.) */
+  {
+    struct stat st;
+    int exists = (0 == lstat(repo_path, &st));
 
-    /* Fetch and reset */
-    status = gitsync_fetch_and_reset(repo, branch);
+    if (exists && !S_ISDIR(st.st_mode)) {
+      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                    "%s exists and is not a directory; not touched", repo_path);
+      status = GITSYNC_CLONE_ERROR;
+    } else if (!exists || gitsync_dir_empty(repo_path)) {
+      status = gitsync_first_clone(repo_url, repo_path, branch, &repo);
+      if (status == GITSYNC_OK)
+        gitsync_note_head(repo);
+    } else if (git_repository_open_ext(&repo, repo_path,
+                                       GIT_REPOSITORY_OPEN_NO_SEARCH,
+                                       NULL) < 0) {
+      const git_error *e = git_error_last();
+
+      repo = NULL;
+      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                    "%s exists and is not a GitSync checkout (%s); not "
+                    "touched", repo_path,
+                    e && e->message ? e->message : "not a git repository");
+      status = GITSYNC_CLONE_ERROR;
+    } else {
+      char old_url[512];
+
+      gitsync_origin_url(repo, old_url, sizeof(old_url));
+      switch (gitsync_checkout_action(0 == strcmp(old_url, repo_url),
+                                      gitsync_checkout_marked(repo_path))) {
+      case GITSYNC_CHECKOUT_FETCH:
+        gitsync_checkout_private(repo_path);
+        status = gitsync_fetch_and_reset(repo, repo_url, branch, repo_path);
+        break;
+      case GITSYNC_CHECKOUT_FETCH_ADOPT:
+        status = gitsync_fetch_and_reset(repo, repo_url, branch, repo_path);
+        if (status == GITSYNC_OK
+            && gitsync_checkout_mark(repo_path, "adopted", repo_url) == 0)
+          gitsync_checkout_private(repo_path);
+        break;
+      case GITSYNC_CHECKOUT_REPOINT:
+        /* GITSYNC_REPOSITORY changed: point origin at it (for the record;
+         * the fetch goes to the configured URL anyway), fetch, reset -- in
+         * place; untracked files stay.  On any failure the old URL goes
+         * back and the working tree is as it was. */
+        if (git_remote_set_url(repo, "origin", repo_url) < 0) {
+          const git_error *e = git_error_last();
+
+          ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                        "Cannot set origin: %s", e ? e->message : "unknown error");
+          status = GITSYNC_FETCH_ERROR;
+          break;
+        }
+        status = gitsync_fetch_and_reset(repo, repo_url, branch, repo_path);
+        if (status != GITSYNC_OK) {
+          git_remote_set_url(repo, "origin", old_url);
+          ircd_snprintf(0, gitsync_stats.last_error + strlen(gitsync_stats.last_error),
+                        sizeof(gitsync_stats.last_error) - strlen(gitsync_stats.last_error),
+                        " (GITSYNC_REPOSITORY changed: origin put back; the "
+                        "checkout and the configuration in force are "
+                        "unchanged)");
+        } else {
+          gitsync_checkout_mark(repo_path, "cloned", repo_url);
+          gitsync_checkout_private(repo_path);
+          log_write(LS_SYSTEM, L_NOTICE, 0, "GitSync: GITSYNC_REPOSITORY "
+                    "changed: the checkout %s now follows it", repo_path);
+          sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: GITSYNC_REPOSITORY "
+                               "changed: the checkout %s now follows it",
+                               repo_path);
+        }
+        break;
+      case GITSYNC_CHECKOUT_REFUSE_FOREIGN:
+        ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                      "%s is not a GitSync checkout (a repository of another "
+                      "origin); not touched -- move it away or point "
+                      "GITSYNC_LOCAL_PATH elsewhere", repo_path);
+        status = GITSYNC_CLONE_ERROR;
+        break;
+      }
+    }
     if (status != GITSYNC_OK) {
-      git_repository_free(repo);
+      if (repo)
+        git_repository_free(repo);
       gitsync_stats.failures++;
       gitsync_stats.last_status = status;
       if (sptr) {

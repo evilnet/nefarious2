@@ -41,4 +41,33 @@ extern enum GitsyncContentVerdict
 gitsync_content_verdict(const char *hash, const char *applied,
                         const char *refused, int force);
 
+/** What a sync does with an existing checkout (a git repository at
+ * GITSYNC_LOCAL_PATH).  Nothing is ever deleted or replaced. */
+enum GitsyncCheckoutAction {
+  GITSYNC_CHECKOUT_FETCH,          /**< GitSync's, origin as configured:
+                                        fetch and reset. */
+  GITSYNC_CHECKOUT_FETCH_ADOPT,    /**< Unmarked, origin as configured (a
+                                        checkout an older build or the
+                                        operator made): fetch, reset, mark. */
+  GITSYNC_CHECKOUT_REPOINT,        /**< GitSync's, another origin
+                                        (GITSYNC_REPOSITORY changed): set
+                                        origin, fetch, reset -- in place. */
+  GITSYNC_CHECKOUT_REFUSE_FOREIGN  /**< Unmarked, another origin: someone
+                                        else's repository; touch nothing. */
+};
+
+extern int gitsync_path_spell(const char *name, const char *cwd, char *buf,
+                              size_t size);
+extern int gitsync_path_under(const char *path, const char *dir);
+extern int gitsync_path_resolve(const char *name, char *out, size_t size);
+extern const char *gitsync_local_path_refusal(const char *local_path,
+                                              const char *resolved,
+                                              const char *cwd);
+extern const char *gitsync_local_path_check(const char *local_path,
+                                            char *resolved, size_t size);
+extern enum GitsyncCheckoutAction
+gitsync_checkout_action(int origin_matches, int marked);
+
+extern int gitsync_filemode_allowed(unsigned int mode);
+
 #endif /* INCLUDED_gitsync_content_h */
