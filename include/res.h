@@ -128,6 +128,11 @@ extern void report_dns_servers(struct Client *source_p, const struct StatDesc *s
 extern void gethost_byname(const char *name, dns_callback_f callback, void *ctx);
 extern void gethost_byaddr(const struct irc_in_addr *addr, dns_callback_f callback, void *ctx);
 extern enum ResOutcome res_last_outcome(void);
+extern void gethost_byname_a(const char *name, dns_callback_f callback, void *ctx);
+extern int res_last_addrs(const struct irc_in_addr **addrs);
+
+/** The most A records of one answer gethost_byname_a() keeps. */
+#define RES_MAXADDRS 16
 
 /** Evaluate to non-zero if \a ADDR is an unspecified (all zeros) address. */
 #define irc_in_addr_unspec(ADDR) (((ADDR)->in6_16[0] == 0) \

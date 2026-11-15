@@ -67,7 +67,8 @@ struct DNSBLAnswer {
   unsigned int bitmask;          /**< Its bitmask */
   int nth;                       /**< Its place among the entries alike */
   int listed;                    /**< The address is listed there */
-  unsigned int value;            /**< If so, the reply value (last octet) */
+  unsigned char values[32];      /**< If so, the reply values (last octets
+                                      of every A record), one bit each */
 };
 
 /** Structure for caching DNSBL lookup results: the answers, not a verdict

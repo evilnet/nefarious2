@@ -52,7 +52,7 @@ struct query {
 };
 static struct query queries[8];
 static int nqueries;
-void gethost_byname(const char *name, dns_callback_f callback, void *ctx)
+void gethost_byname_a(const char *name, dns_callback_f callback, void *ctx)
 {
   assert_true(nqueries < 8);
   ircd_strncpy(queries[nqueries].name, name, sizeof(queries[nqueries].name));
@@ -88,6 +88,41 @@ static void answer_addr(int i, int listed, int third, int last)
   b[14] = (unsigned char) third;
   b[15] = (unsigned char) last;
   queries[i].cb(queries[i].ctx, listed ? &addr : NULL, listed ? queries[i].name : NULL);
+}
+
+/* (the lookup any address type: the resolver's other entry point, the
+ * same queue -- the DNSBL must not use it) */
+void gethost_byname(const char *name, dns_callback_f callback, void *ctx)
+{
+  fail_msg("DNSBL lookup through gethost_byname() (AAAA first) for %s", name);
+}
+
+/** The resolver's list of the answer's A records (res_last_addrs()):
+ * empty unless a case answers with several. */
+static struct irc_in_addr multi[4];
+static int nmulti;
+int res_last_addrs(const struct irc_in_addr **addrs)
+{
+  *addrs = multi;
+  return nmulti;
+}
+
+/** Answer query \a i with several A records 127.0.0.<last[k]>. */
+static void answer_many(int i, const int *last, int n)
+{
+  int k;
+
+  for (k = 0; k < n; k++) {
+    unsigned char *b = (unsigned char *) &multi[k];
+
+    memset(&multi[k], 0, sizeof(multi[k]));
+    b[10] = b[11] = 0xff;
+    b[12] = 127;
+    b[15] = (unsigned char) last[k];
+  }
+  nmulti = n;
+  queries[i].cb(queries[i].ctx, &multi[0], queries[i].name);
+  nmulti = 0;
 }
 
 static void answer(int i, int listed, int last)
@@ -570,6 +605,43 @@ static void every_matching_mark_entry_marks(void **state)
   dnsbl_cancel(req);
 }
 
+/** Several A records in one answer: each is judged, against each entry
+ * of the zone, whatever their order -- [.2, .250] and [.250, .2] with a
+ * whitelist entry for 2 and a block entry for 250 both whitelist (as the
+ * scripts do: whitelist overrides); an index-250 entry matches when .250
+ * is any of the records; a cache hit judges them all again. */
+static void every_record_of_an_answer_judged(void **state)
+{
+  static const int ab[2] = { 2, 250 }, ba[2] = { 250, 2 };
+  const int *orders[2] = { ab, ba };
+  int o;
+
+  for (o = 0; o < 2; o++) {
+    struct DNSBLRequest *req = NULL;
+    enum DNSBLAction action;
+    const char *mark;
+    int i;
+
+    cache_reset();
+    nqueries = 0;
+    dnsbl_clear_servers();
+    dnsbl_add_server("bl.test", "2", 0, DNSBL_ACT_WHITELIST, NULL, 0);
+    dnsbl_add_server("bl.test", "250", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+    assert_int_equal(dnsbl_check(&client, &req), 1);
+    for (i = 0; i < nqueries; i++)
+      answer_many(i, orders[o], 2);
+    assert_int_equal(dnsbl_result(&client, req, &action, &mark), 0);
+    assert_int_equal(action, DNSBL_ACT_WHITELIST);
+    assert_int_equal(req->result, 2);        /* both entries matched */
+    dnsbl_cancel(req);
+    req = again(1);                          /* the cache: both again */
+    assert_int_equal(dnsbl_result(&client, req, &action, &mark), 0);
+    assert_int_equal(action, DNSBL_ACT_WHITELIST);
+    assert_int_equal(req->result, 2);
+    dnsbl_cancel(req);
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -582,6 +654,7 @@ int main(void)
     cmocka_unit_test_setup(reply_values_match_as_the_scripts_do, setup),
     cmocka_unit_test_setup(junk_index_refused, setup),
     cmocka_unit_test_setup(every_matching_mark_entry_marks, setup),
+    cmocka_unit_test_setup(every_record_of_an_answer_judged, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

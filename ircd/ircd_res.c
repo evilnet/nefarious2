@@ -123,7 +123,15 @@ struct reslist
   char *name;              /**< Hostname for this request. */
   dns_callback_f callback; /**< Callback function on completion. */
   void *callback_ctx;      /**< Context pointer for callback. */
+  char want_all;           /**< gethost_byname_a(): A records only, every one */
+  int naddrs;              /**< The A records of the answer (want_all) */
+  struct irc_in_addr addrs[RES_MAXADDRS]; /**< ...the first RES_MAXADDRS */
 };
+
+/** The addresses of the answer whose callback is running
+ * (res_last_addrs()); none outside a callback of gethost_byname_a(). */
+static const struct irc_in_addr *res_addrs;
+static int res_naddrs;
 
 /** Base of request list. */
 static struct dlink request_list;
@@ -509,6 +517,40 @@ find_id(int id)
   return(NULL);
 }
 
+/** Look up the IPv4 addresses of a name: A records only (no AAAA query),
+ * and every A record of the answer -- the first in the callback's
+ * address, all of them in res_last_addrs() during the callback.  For a
+ * DNSBL, which answers in A records, one per listing, and whose AAAA
+ * answers (if any) mean nothing.
+ * @param[in] name Name to look up.
+ * @param[in] callback Callback function.
+ * @param[in] ctx Callback context.
+ */
+void
+gethost_byname_a(const char *name, dns_callback_f callback, void *ctx)
+{
+  struct reslist *request = make_request(callback, ctx);
+
+  request->want_all = 1;
+  DupString(request->name, name);
+  request->state = REQ_A;
+  request->type = T_A;
+  Debug((DEBUG_DNS, "Requesting DNS A (all) %s as %p", name, request));
+  query_name(request->name, C_IN, T_A, request);
+}
+
+/** The A records of the answer whose gethost_byname_a() callback is
+ * running.
+ * @param[out] addrs Set to the addresses (IPv4-mapped).
+ * @return How many (0 outside such a callback, or for a failure).
+ */
+int
+res_last_addrs(const struct irc_in_addr **addrs)
+{
+  *addrs = res_addrs;
+  return res_naddrs;
+}
+
 /** Try to look up address for a hostname, trying IPv6 (T_AAAA) first.
  * @param[in] name Hostname to look up.
  * @param[in] query Callback information.
@@ -772,6 +814,21 @@ proc_answer(struct reslist *request, HEADER* header, char* buf, char* eob)
          */
         if (rd_length != sizeof(struct in_addr))
           return(0);
+        if (request->want_all) {
+          /* Every A record (a DNSBL answers with one per listing); the
+           * first is the request's address as for any lookup. */
+          if (request->naddrs < RES_MAXADDRS) {
+            struct irc_in_addr *a = &request->addrs[request->naddrs++];
+
+            memset(a, 0, sizeof(*a));
+            a->in6_16[5] = 0xffff;
+            memcpy(&a->in6_16[6], current, sizeof(struct in_addr));
+            if (request->naddrs == 1)
+              memcpy(&request->addr, a, sizeof(request->addr));
+          }
+          current += rd_length;
+          break;
+        }
         memset(&request->addr, 0, sizeof(request->addr));
         memcpy(&request->addr.in6_16[6], current, sizeof(struct in_addr));
         return(1);
@@ -830,7 +887,8 @@ proc_answer(struct reslist *request, HEADER* header, char* buf, char* eob)
     }
   }
 
-  return(1);
+  /* A gethost_byname_a() answer counts only with an A record in it. */
+  return request->want_all ? request->naddrs > 0 : 1;
 }
 
 /** Read a DNS reply from the nameserver and process it.
@@ -954,7 +1012,11 @@ res_readreply(struct Event *ev)
        * got a name and address response, client resolved
        */
       res_outcome = RES_OUT_ANSWER;
+      res_addrs = request->addrs;
+      res_naddrs = request->want_all ? request->naddrs : 0;
       (*request->callback)(request->callback_ctx, &request->addr, request->name);
+      res_addrs = NULL;
+      res_naddrs = 0;
       Debug((DEBUG_DNS, "Request %p got forward resolution", request));
       rem_request(request);
     }

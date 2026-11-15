@@ -532,7 +532,7 @@ dnsbl_judge(struct DNSBLRequest *req, struct DNSBLServer *server,
 /** Keep \a server's answer on \a req, for the cache. */
 static void
 dnsbl_note_answer(struct DNSBLRequest *req, struct DNSBLServer *server,
-                  int listed, unsigned int value)
+                  int listed, const unsigned char values[32])
 {
   struct DNSBLAnswer *a;
 
@@ -546,7 +546,7 @@ dnsbl_note_answer(struct DNSBLRequest *req, struct DNSBLServer *server,
   a->bitmask = server->bitmask;
   a->nth = dnsbl_entry_nth(server);
   a->listed = listed;
-  a->value = value;
+  memcpy(a->values, values, sizeof(a->values));
 }
 
 /** The answer \a cached holds for the configured entry \a server (same
@@ -594,8 +594,13 @@ dnsbl_cache_replay(struct Client *cptr, struct DNSBLCacheEntry *cached)
   req->action = DNSBL_ACT_NONE;
   memcpy(&req->addr, &cached->addr, sizeof(req->addr));
   for (server = dnsbl_servers; server; server = server->next)
-    if ((a = dnsbl_cached_answer(cached, server)) && a->listed)
-      dnsbl_judge(req, server, a->value);
+    if ((a = dnsbl_cached_answer(cached, server)) && a->listed) {
+      unsigned int v;
+
+      for (v = 0; v < 256; v++)
+        if (a->values[v >> 3] & (1 << (v & 7)))
+          dnsbl_judge(req, server, v);
+    }
   return req;
 }
 
@@ -607,7 +612,9 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   struct DNSBLRequest *req;
   struct DNSBLServer *server;
   unsigned int result_byte = 0;
+  unsigned char values[32];
 
+  memset(values, 0, sizeof(values));
   if (!ctx) {
     return;
   }
@@ -647,11 +654,21 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   }
 
   if (addr) {
-    /* We got a response - extract the last octet as the result.  The
-     * address is in network byte order: its last BYTE is the octet, read
-     * as bytes (the low half of in6_16[7] in host order is the third octet
-     * on a little-endian host). */
-    result_byte = ((const unsigned char *) addr)[sizeof(*addr) - 1];
+    /* We got a response: every A record of it is a listing, its value the
+     * record's last octet -- read as the address's last BYTE (network
+     * byte order; the low half of in6_16[7] in host order is the third
+     * octet on a little-endian host).  The scripts judge each record. */
+    const struct irc_in_addr *all;
+    int i, n = res_last_addrs(&all);
+
+    if (n <= 0) {
+      all = addr;
+      n = 1;
+    }
+    for (i = 0; i < n; i++) {
+      result_byte = ((const unsigned char *) &all[i])[sizeof(all[i]) - 1];
+      values[result_byte >> 3] |= (unsigned char)(1 << (result_byte & 7));
+    }
   }
   /* Only a definite answer is kept for the cache: an address (listed),
    * or a server's NXDOMAIN (not listed).  A failure -- a timeout, SERVFAIL,
@@ -661,9 +678,14 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   if (!addr && res_last_outcome() != RES_OUT_NXDOMAIN)
     req->unknown = 1;
   else if (server)
-    dnsbl_note_answer(req, server, addr != NULL, result_byte);
-  if (addr && server)
-    dnsbl_judge(req, server, result_byte);
+    dnsbl_note_answer(req, server, addr != NULL, values);
+  if (addr && server) {
+    unsigned int v;
+
+    for (v = 0; v < 256; v++)
+      if (values[v >> 3] & (1 << (v & 7)))
+        dnsbl_judge(req, server, v);
+  }
 
   /* Check if all lookups are complete */
   if (req->pending_count == 0) {
@@ -761,7 +783,7 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
     dnsbl_stats.total_lookups++;
 
     /* Start the DNS lookup with per-query context */
-    gethost_byname(query, dnsbl_dns_callback, ctx);
+    gethost_byname_a(query, dnsbl_dns_callback, ctx);   /* A only, every record */
     started++;
   }
 
