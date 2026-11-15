@@ -24,6 +24,7 @@
 #ifdef USE_LIBGIT2
 
 #include "gitsync.h"
+#include "gitsync_content.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -723,22 +724,10 @@ gitsync_validate_content(const char *content, size_t len)
 }
 
 /** Check if content matches last applied content
- * We store a hash of the last applied content to detect changes.
+ * We store a hash of the last applied content (gitsync_content_hash():
+ * every byte) to detect changes.
  */
-static char gitsync_last_content_hash[64];
-
-/** Simple hash of content for change detection */
-static void
-gitsync_hash_content(const char *content, size_t len, char *hash, size_t hashlen)
-{
-  /* Simple checksum - just use first 8 bytes of content + length */
-  unsigned long h = len;
-  size_t i;
-  for (i = 0; i < len && i < 1024; i++) {
-    h = h * 31 + (unsigned char)content[i];
-  }
-  ircd_snprintf(0, hash, hashlen, "%08lx%08lx", (unsigned long)len, h);
-}
+static char gitsync_last_content_hash[GITSYNC_HASHLEN];
 
 /** Apply downloaded configuration
  * Writes to gitsync.conf and triggers a rehash only if content changed.
@@ -760,7 +749,7 @@ gitsync_apply(const char *content, size_t len, struct Client *cptr,
   const char *conf_file;
   FILE *fp;
   size_t written;
-  char content_hash[64];
+  char content_hash[GITSYNC_HASHLEN];
   char new_file[512];
   char bak_file[512];
   struct stat st;
@@ -769,7 +758,7 @@ gitsync_apply(const char *content, size_t len, struct Client *cptr,
   conf_file = gitsync_conf_file();
 
   /* Check if content has changed */
-  gitsync_hash_content(content, len, content_hash, sizeof(content_hash));
+  gitsync_content_hash(content, len, content_hash, sizeof(content_hash));
   if (gitsync_last_content_hash[0] &&
       strcmp(content_hash, gitsync_last_content_hash) == 0) {
     Debug((DEBUG_INFO, "GitSync: Content unchanged, skipping write"));

@@ -107,6 +107,7 @@ CMOCKA_TESTPROGS = \
 	dnsbl_rehash_cmocka \
 	conf_include_cmocka \
 	gitsync_timer_cmocka \
+	gitsync_content_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
 
@@ -210,6 +211,7 @@ DEP_SRC = \
 	dnsbl_rehash_cmocka.c \
 	conf_include_cmocka.c \
 	gitsync_timer_cmocka.c \
+	gitsync_content_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -901,6 +903,15 @@ gitsync_timer_cmocka.o: ${srcdir}/gitsync_timer_cmocka.c ../ircd_events.c ../git
 
 gitsync_timer_cmocka: gitsync_timer_cmocka.o
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections gitsync_timer_cmocka.o $(CMOCKA_LIBS)
+
+# gitsync_content tests - what a sync does with the content it pulled:
+# the change hash covers every byte.  Links the pure ../gitsync_content.c.
+gitsync_content_test.o: ../gitsync_content.c ../../include/gitsync_content.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../gitsync_content.c
+
+GITSYNC_CONTENT_CMOCKA_OBJS = gitsync_content_cmocka.o gitsync_content_test.o
+gitsync_content_cmocka: $(GITSYNC_CONTENT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(GITSYNC_CONTENT_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # send_label tests - labeled-response (issue #216): a channel event a
 # client's own command caused (its PART, TOPIC, KICK, MODE) carries the
