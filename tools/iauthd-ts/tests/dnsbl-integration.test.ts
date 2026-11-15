@@ -848,4 +848,55 @@ describe('DNSBL Integration Tests', () => {
       expect(harness.wasRejected(2)).toBe(true);
     });
   });
+
+  // The ircd uses the connection's fd as the IAuth client id, so an id comes
+  // back as soon as a client has gone.  A lookup that finishes after its
+  // client has gone must not act on whoever holds the id by then.
+  describe('Lookups that finish after their client has gone', () => {
+    beforeEach(async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSTIMEOUT 2
+#IAUTH DNSBL server=block.dnsbl index=2 block=all
+`);
+    });
+
+    const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    it('a departed client\'s late answer leaves the id\'s new owner alone', async () => {
+      mockDns('10.3.0.1', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'], delayMs: 600 }] });
+      // 10.3.0.2 is not listed (NXDOMAIN at once)
+      harness = await createHarness(configPath);
+
+      // A (id 40) is hurried while its list is slow, then disconnects.
+      harness.send('40 C 10.3.0.1 10040 10.0.0.1 6667');
+      await pause(50);
+      harness.send('40 H Users');
+      await pause(50);
+      harness.send('40 D');
+      await pause(50);
+      // B gets the same id; A's list answers while B is being checked.
+      harness.send('40 C 10.3.0.2 20040 10.0.0.1 6667');
+      await pause(1000);
+      harness.send('40 H Users');
+
+      await harness.waitFor(/^D 40 10\.3\.0\.2 20040/, 3000);
+      expect(harness.output.filter(l => /^[Dkm] 40 10\.3\.0\.1 /.test(l))).toEqual([]);
+        }, 10000);
+
+    it('the lookup for the address a trusted WEBIRC replaced sends nothing when it finishes', async () => {
+      mockDns('10.3.0.3', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'], delayMs: 600 }] });
+      harness = await createHarness(configPath);
+
+      harness.send('41 C 10.3.0.3 10041 10.0.0.1 6667');
+      await pause(50);
+      harness.send('41 H Users');
+      await pause(50);
+      harness.send('41 w pass user host.example 10.3.0.4');
+
+      await harness.waitFor(/^D 41 10\.3\.0\.4 10041/, 3000);
+      await pause(1000); // the gateway address's answer arrives
+      expect(harness.output.filter(l => /^[Dkm] 41 10\.3\.0\.3 /.test(l))).toEqual([]);
+    });
+  });
 });
