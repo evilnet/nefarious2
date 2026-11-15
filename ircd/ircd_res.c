@@ -700,6 +700,10 @@ query_name(const char *name, int query_class, int type,
     request->sent += send_res_msg(buf, request_len, request->sends);
     check_resolver_timeout(request->sentat + request->timeout);
   }
+  else
+    /* A name the query cannot hold: nothing is sent (never a cut name),
+     * and the request fails when its time is up, as an unanswered one. */
+    check_resolver_timeout(request->sentat + request->timeout);
 }
 
 /** Send a failed DNS lookup request again.
@@ -717,7 +721,14 @@ resend_query(struct reslist *request)
       do_query_number(NULL, NULL, &request->addr, request);
       break;
     case T_A:
-      do_query_name(NULL, NULL, request->name, request, request->type);
+      /* A gethost_byname_a() request asks again with its whole name, as
+       * the first time: do_query_name() would cut it at HOSTLEN (an IPv6
+       * DNSBL name is about 80 characters and more) and append the local
+       * domain. */
+      if (request->want_all)
+        query_name(request->name, C_IN, T_A, request);
+      else
+        do_query_name(NULL, NULL, request->name, request, request->type);
       break;
     case T_AAAA:
       /* didn't work, try A */
