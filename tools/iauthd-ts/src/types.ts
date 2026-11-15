@@ -115,6 +115,9 @@ export interface CacheEntry {
   result: string[];
   /** Timestamp when cached */
   ts: number;
+  /** Seconds the entry is kept (the longest cache time among the lines
+   * that asked for it); swept out after that */
+  ttl: number;
 }
 
 /** Parsed server message */

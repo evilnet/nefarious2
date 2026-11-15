@@ -8,8 +8,21 @@ import type { CacheEntry, DNSBLAnswer, DNSBLConfig } from './types.js';
 /** Global DNSBL result cache: definite answers only */
 const cache = new Map<string, CacheEntry>();
 
-/** Lookups in flight, by query: a later asker shares the same lookup */
-const inflight = new Map<string, Promise<DNSBLAnswer>>();
+/** Lookups in flight, by query: a later asker shares the same lookup.
+ * ttl: the longest cache time among the askers -- what the answer is
+ * stored for (0: not stored). */
+const inflight = new Map<string, { answer: Promise<DNSBLAnswer>; ttl: number }>();
+
+/**
+ * Expired entries are swept out on insert, once the inserts since the last
+ * sweep reach the size the cache had after it (at least SWEEP_MIN): the
+ * cost per insert stays constant, and the cache never holds more than twice
+ * its size after the last sweep (the answers stored within the longest
+ * cache time) plus SWEEP_MIN.
+ */
+const SWEEP_MIN = 256;
+let insertsSinceSweep = 0;
+let sizeAfterSweep = 0;
 
 /**
  * Reverse an IPv4 address for DNSBL lookup
@@ -33,18 +46,28 @@ export function isIPv4(ip: string): boolean {
   return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip);
 }
 
+/** Has \a entry outlived \a seconds? (<= 0: always) */
+function olderThan(entry: CacheEntry, seconds: number, now: number): boolean {
+  return seconds <= 0 || entry.ts <= now - seconds * 1000;
+}
+
 /**
- * Get cache entry if valid
+ * Get cache entry if valid for a reader whose cache time is \a cacheTime
+ * (and the entry has not outlived the cache time it was stored for)
  */
 export function getCacheEntry(query: string, cacheTime: number): CacheEntry | null {
   const entry = cache.get(query);
   if (!entry) return null;
 
   const now = Date.now();
-  // cacheTime <= 0 means always expired, otherwise check age
-  if (cacheTime <= 0 || entry.ts <= now - cacheTime * 1000) {
-    // Cache expired
+  if (olderThan(entry, entry.ttl, now)) {
+    // Expired for everybody
     cache.delete(query);
+    return null;
+  }
+  if (olderThan(entry, cacheTime, now)) {
+    // Too old for this reader (cachetime=0, or shorter than another line
+    // naming the same list): it may still serve the others
     return null;
   }
 
@@ -52,13 +75,36 @@ export function getCacheEntry(query: string, cacheTime: number): CacheEntry | nu
 }
 
 /**
- * Set cache entry
+ * Set cache entry, kept for \a ttl seconds (<= 0: not stored)
  */
-export function setCacheEntry(query: string, result: string[]): void {
+export function setCacheEntry(query: string, result: string[], ttl: number): void {
+  if (!(ttl > 0)) return;
   cache.set(query, {
     result,
     ts: Date.now(),
+    ttl,
   });
+  if (++insertsSinceSweep >= Math.max(SWEEP_MIN, sizeAfterSweep)) {
+    sweepCache();
+  }
+}
+
+/**
+ * Remove every entry that has outlived the cache time it was stored for.
+ * Returns how many were removed.
+ */
+export function sweepCache(): number {
+  const now = Date.now();
+  let removed = 0;
+  for (const [query, entry] of cache) {
+    if (olderThan(entry, entry.ttl, now)) {
+      cache.delete(query);
+      removed++;
+    }
+  }
+  insertsSinceSweep = 0;
+  sizeAfterSweep = cache.size;
+  return removed;
 }
 
 /**
@@ -138,7 +184,8 @@ export function queryDNSBL(
 
   const pending = inflight.get(query);
   if (pending) {
-    return { source: 'shared', answer: pending };
+    pending.ttl = Math.max(pending.ttl, cacheTime);
+    return { source: 'shared', answer: pending.answer };
   }
 
   const answer = lookupDNSBL(reversedIp, dnsblServer, timeout)
@@ -148,11 +195,12 @@ export function queryDNSBL(
       // definite answer is in the cache for the next asker.
       inflight.delete(query);
       if (result.definite) {
-        setCacheEntry(query, result.results);
+        setCacheEntry(query, result.results, record.ttl);
       }
       return result;
     });
-  inflight.set(query, answer);
+  const record = { answer, ttl: cacheTime };
+  inflight.set(query, record);
   return { source: 'lookup', answer };
 }
 
