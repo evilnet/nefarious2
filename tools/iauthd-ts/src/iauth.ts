@@ -359,10 +359,16 @@ export class IAuthDaemon {
     // to a new address (and generation) while they run.
     const generation = client.generation;
 
+    // Every list is pending before any answer is looked at: an answer that
+    // is at hand (cached) must not let a hurried client be decided while
+    // the lists after it have not been asked yet.
+    for (const dnsbl of this.config.dnsbls) {
+      client.lookups.set(dnsbl.cfgNum, true);
+    }
+
     // Start all lookups concurrently
     const lookupPromises = this.config.dnsbls.map(async (dnsbl) => {
       const query = `${reversedIp}.${dnsbl.server}`;
-      client.lookups.set(dnsbl.cfgNum, true); // Mark as pending
 
       this.debug(`Looking up client ${client.id}: ${query}`);
 
