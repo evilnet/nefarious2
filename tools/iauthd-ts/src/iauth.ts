@@ -334,6 +334,7 @@ export class IAuthDaemon {
       hurry: false,
       lookups: new Map(),
       hits: new Map(),
+      generation: 0,
     };
 
     this.clients.set(id, client);
@@ -353,6 +354,10 @@ export class IAuthDaemon {
 
     const reversedIp = reverseIPv4(client.ip);
     if (!reversedIp) return;
+
+    // The address these lookups are for: a trusted WEBIRC moves the client
+    // to a new address (and generation) while they run.
+    const generation = client.generation;
 
     // Start all lookups concurrently
     const lookupPromises = this.config.dnsbls.map(async (dnsbl) => {
@@ -375,11 +380,16 @@ export class IAuthDaemon {
 
       const { results, definite, error } = await answer;
 
-      // The client left (D) or was replaced (trusted WEBIRC) while the
-      // lookup ran.  The ircd reuses ids (they are fds): acting now would
-      // decide for, or delete, whoever holds the id by now.
+      // The client left (D) while the lookup ran: the ircd reuses ids (they
+      // are fds), so acting now would decide for, or delete, whoever holds
+      // the id by now.  Or a trusted WEBIRC moved it to another address:
+      // only the lookups for that address count.
       if (this.clients.get(client.id) !== client) {
-        this.debug(`Dropping the answer for ${query}: client ${client.id} (${client.ip}) is gone`);
+        this.debug(`Dropping the answer for ${query}: client ${client.id} is gone`);
+        return;
+      }
+      if (client.generation !== generation) {
+        this.debug(`Dropping the answer for ${query}: client ${client.id} is now ${client.ip}`);
         return;
       }
 
@@ -521,28 +531,22 @@ export class IAuthDaemon {
       return;
     }
 
-    // Save state
-    const wasHurry = client.hurry;
+    // The same client at a new address: its login, SASL exchange and
+    // hurry stay; everything the old address's lists said goes, and the
+    // lookups still running for the old address no longer count.
+    client.generation++;
+    client.ip = newIp;
+    client.whitelist = false;
+    client.block = false;
+    client.class = undefined;
+    client.marks = new Map();
+    client.hits = new Map();
+    client.lookups = new Map();
 
-    // Delete and recreate with new IP
-    this.clients.delete(id);
-
-    const newClient: ClientState = {
-      id,
-      ip: newIp,
-      port: client.port,
-      serverIp: client.serverIp,
-      serverPort: client.serverPort,
-      whitelist: false,
-      block: false,
-      marks: new Map(),
-      hurry: wasHurry,
-      lookups: new Map(),
-      hits: new Map(),
-    };
-
-    this.clients.set(id, newClient);
-    this.startDNSBLLookups(newClient);
+    this.startDNSBLLookups(client);
+    // Hurried already and nothing to wait for (an address not checked, or
+    // no lists): decide now -- no lookup will.
+    this.handleClientUpdate(client);
   }
 
   /**
@@ -640,6 +644,7 @@ export class IAuthDaemon {
         hurry: false,
         lookups: new Map(),
         hits: new Map(),
+        generation: 0,
         sasl: { started: false },
       };
       this.clients.set(id, client);

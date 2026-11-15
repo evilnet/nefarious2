@@ -58,6 +58,8 @@ interface TestHarness {
   output: string[];
   /** Every name the daemon asked the mock DNS for, in order */
   dnsQueries: string[];
+  /** Lines sent to the daemon ('in') and read from it ('out'), in order */
+  events: Array<{ dir: 'in' | 'out'; line: string }>;
   send: (line: string) => void;
   waitFor: (pattern: RegExp, timeout?: number) => Promise<string>;
   getMarks: (clientId: number) => string[];
@@ -125,8 +127,12 @@ import('${join(import.meta.dirname, '..', 'src', 'index.ts').replace(/\\/g, '/')
     env: { ...process.env },
   });
 
+  const events: Array<{ dir: 'in' | 'out'; line: string }> = [];
   const rl = createInterface({ input: proc.stdout! });
-  rl.on('line', (line) => output.push(line));
+  rl.on('line', (line) => {
+    output.push(line);
+    events.push({ dir: 'out', line });
+  });
 
   const dnsQueries: string[] = [];
   const errRl = createInterface({ input: proc.stderr! });
@@ -138,6 +144,7 @@ import('${join(import.meta.dirname, '..', 'src', 'index.ts').replace(/\\/g, '/')
   });
 
   const send = (line: string) => {
+    events.push({ dir: 'in', line });
     proc.stdin!.write(line + '\n');
   };
 
@@ -206,7 +213,36 @@ import('${join(import.meta.dirname, '..', 'src', 'index.ts').replace(/\\/g, '/')
   await waitFor(/^S iauthd-ts/);
   await new Promise(r => setTimeout(r, 100));
 
-  return { proc, output, dnsQueries, send, waitFor, getMarks, wasAccepted, wasRejected, close };
+  return { proc, output, dnsQueries, events, send, waitFor, getMarks, wasAccepted, wasRejected, close };
+}
+
+/**
+ * Verdict lines (D = pass, k = kill) the daemon sent that it should not have:
+ * a second one for the same connection (an id between its C and its D), or
+ * one for an id with no connection open (it has gone).  A trusted WEBIRC (w)
+ * does not open a new connection: the client still gets one verdict.
+ */
+function verdictProblems(harness: TestHarness): string[] {
+  const open = new Map<string, number>();
+  const problems: string[] = [];
+  for (const { dir, line } of harness.events) {
+    const p = line.split(' ');
+    if (dir === 'in') {
+      if (p[1] === 'C') open.set(p[0], 0);
+      else if (p[1] === 'D') open.delete(p[0]);
+      continue;
+    }
+    if ((p[0] === 'D' || p[0] === 'k') && /^\d+$/.test(p[1] ?? '')) {
+      const count = open.get(p[1]);
+      if (count === undefined) {
+        problems.push(`verdict for id ${p[1]}, which has no connection open: ${line}`);
+      } else {
+        open.set(p[1], count + 1);
+        if (count + 1 > 1) problems.push(`verdict #${count + 1} for id ${p[1]}: ${line}`);
+      }
+    }
+  }
+  return problems;
 }
 
 /**
@@ -933,5 +969,94 @@ describe('DNSBL Integration Tests', () => {
       expect(harness.wasAccepted(1)).toBe(true);
       expect(harness.dnsQueries.filter(q => q === '1.0.4.10.block.dnsbl')).toHaveLength(2);
     });
+  });
+
+  // A trusted WEBIRC (w) changes the client's address: from then on only the
+  // lookups for the new address count, and the client gets one verdict.
+  describe('Trusted WEBIRC after lookups started', () => {
+    const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    beforeEach(async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSTIMEOUT 2
+#IAUTH DNSBL server=block.dnsbl index=2 block=all
+#IAUTH DNSBL server=banon.dnsbl index=2 block=anonymous
+`);
+    });
+
+    it('a listed real address is refused even when the gateway\'s clean answer comes in later', async () => {
+      mockDns('10.5.0.1', 'block.dnsbl', { steps: [{ code: 'ENOTFOUND', delayMs: 600 }] });
+      mockDns('10.5.0.2', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'], delayMs: 1200 }] });
+      harness = await createHarness(configPath);
+
+      harness.send('50 C 10.5.0.1 10050 10.0.0.1 6667');
+      await pause(50);
+      harness.send('50 H Users');
+      await pause(50);
+      harness.send('50 w pass user host.example 10.5.0.2');
+
+      await harness.waitFor(/^k 50 10\.5\.0\.2 10050/, 3000);
+      await pause(300);
+      expect(harness.output.filter(l => /^[Dk] 50 /.test(l))).toHaveLength(1);
+      expect(verdictProblems(harness)).toEqual([]);
+    }, 10000);
+
+    // While the real address is still being checked, the gateway's answer
+    // must not count for anything: not as a mark, not as "this list has
+    // answered".
+    it('the gateway\'s answer arriving while the real address is checked counts for nothing', async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSTIMEOUT 2
+#IAUTH DNSBL server=mark.dnsbl index=2 mark=gwmark
+`);
+      mockDns('10.5.0.6', 'mark.dnsbl', { steps: [{ answers: ['127.0.0.2'], delayMs: 400 }] });
+      mockDns('10.5.0.7', 'mark.dnsbl', { steps: [{ code: 'ENOTFOUND', delayMs: 1000 }] });
+      harness = await createHarness(configPath);
+
+      harness.send('53 C 10.5.0.6 10053 10.0.0.1 6667');
+      await pause(50);
+      harness.send('53 H Users');
+      await pause(50);
+      harness.send('53 w pass user host.example 10.5.0.7');
+
+      const t0 = Date.now();
+      await harness.waitFor(/^D 53 /, 3000);
+      // decided on the real address's own answer (~1 s), not on the gateway's (~0.3 s)
+      expect(Date.now() - t0).toBeGreaterThan(700);
+      expect(harness.getMarks(53)).toEqual([]);
+      expect(harness.output.filter(l => /^D 53 /.test(l))).toEqual(['D 53 10.5.0.7 10053']);
+    }, 10000);
+
+    it('a login before the WEBIRC still counts for block=anonymous', async () => {
+      mockDns('10.5.0.4', 'banon.dnsbl', ['127.0.0.2']);
+      harness = await createHarness(configPath);
+
+      harness.send('51 C 10.5.0.3 10051 10.0.0.1 6667');
+      harness.send('51 R someaccount');
+      harness.send('51 w pass user host.example 10.5.0.4');
+      await pause(50);
+      harness.send('51 H Users');
+
+      await harness.waitFor(/^[Dk] 51 /, 3000);
+      expect(harness.wasAccepted(51)).toBe(true);
+      expect(verdictProblems(harness)).toEqual([]);
+    });
+
+    it('a hurried client whose WEBIRC address is IPv6 (not checked) is passed at once', async () => {
+      mockDns('10.5.0.5', 'block.dnsbl', { steps: [{ code: 'ENOTFOUND', delayMs: 600 }] });
+      harness = await createHarness(configPath);
+
+      harness.send('52 C 10.5.0.5 10052 10.0.0.1 6667');
+      await pause(50);
+      harness.send('52 H Users');
+      await pause(50);
+      harness.send('52 w pass user host.example 2001:db8::52');
+
+      await harness.waitFor(/^D 52 2001:db8::52 10052/, 3000);
+      await pause(800); // the gateway's answer comes in: nothing more is sent
+      expect(verdictProblems(harness)).toEqual([]);
+    }, 10000);
   });
 });
