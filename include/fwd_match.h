@@ -141,11 +141,13 @@ struct FwdView {
  * sent to another server than \a source are dropped -- unless a
  * candidate's family has lines from the hops on the way, or the reply is
  * a generic error, either of which a server other than the destination
- * can send.  Of what is left, the oldest is picked; the reply is
+ * can send; and a reply from a server none of them went to is none of
+ * theirs.  Of what is left, the oldest is picked; the reply is
  * \a ambiguous -- the caller must label it for none of them -- if they
- * were not all sent to the same server, or if a command of a family that
- * has this numeric is not tracked and may be answered by it
- * (\a untracked).  A generic error while a command of unknown
+ * were not all sent to the same server, if their family has lines from
+ * the hops (one hop's line cannot be told from another command's), or if
+ * a command of a candidate's family that is not tracked may be answered
+ * by it (\a untracked).  A generic error while a command of unknown
  * replies is outstanding (FWD_UNTRACKED_GENERIC) is nobody's.
  *
  * @param[in] v The asker's pending commands.

@@ -463,7 +463,13 @@ int fwd_pick(const struct FwdView *v, int n, int numeric,
 
   /* An oper's reply names its true origin: only a command sent there can
    * be the one answered -- when no other server could have sent the line
-   * (a hop's TRACE line, a hop's refusal). */
+   * (a hop's TRACE line, a hop's refusal); one from a server none of them
+   * went to is none of theirs. */
+  if (source_true && source && !hops && !generic && !nsrc) {
+    for (i = 0; i < n; i++)
+      cand[i] = 0;
+    return -1;
+  }
   if (source_true && source && nsrc && nsrc < ncand && !hops && !generic) {
     for (i = 0; i < n; i++)
       if (cand[i] && strcmp(v[i].dest, source)) {
@@ -491,9 +497,11 @@ int fwd_pick(const struct FwdView *v, int n, int numeric,
         tainted = 1;
   if (numeric == 401 && (untracked & FWD_UNTRACKED_NOSUCHNICK))
     tainted = 1;
-  /* Ambiguous: candidates sent to different servers; or a command of
-   * that family went out untracked and this may be its reply. */
-  *ambiguous = (ncand > 1 && !same) || tainted;
+  /* Ambiguous: candidates sent to different servers; or more than one
+   * of a family whose hops add lines (a hop's line for the later command
+   * comes before the destination's answer to the earlier); or a command
+   * of that family went out untracked and this may be its reply. */
+  *ambiguous = (ncand > 1 && (!same || hops)) || tainted;
   *fit = generic ? FWD_FIT_END
                  : fwd_reply_fit(v[pick].fam, v[pick].subject, numeric, params);
   return pick;

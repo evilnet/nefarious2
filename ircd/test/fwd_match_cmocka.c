@@ -235,9 +235,8 @@ static void test_pick_subjectless_two_servers_is_ambiguous(void **state)
   assert_int_equal(PICK(372, ":- line", "Bb", "Ff", 1), 1);
   assert_false(amb);
   assert_int_equal(cand[0], 0);
-  /* ... but not a source that is neither (a renaming hop) */
-  PICK(372, ":- line", "Bb", "Bb", 1);
-  assert_true(amb);
+  /* ... and a source that is neither is no answer of theirs (review N5) */
+  assert_int_equal(PICK(372, ":- line", "Bb", "Bb", 1), -1);
 }
 
 /* TRACE lines come from the hops too: the source tells nothing. */
@@ -406,6 +405,37 @@ static void test_pick_generic_with_untracked_unknown(void **state)
   assert_false(amb);
 }
 
+/* (review N3) Two TRACEs to one server behind a legacy hop: the hop's 200
+ * for the second comes before the destination's answer to the first --
+ * hop lines cannot be ordered, so two pending TRACEs are ambiguous. */
+static void test_pick_two_traces_same_server(void **state)
+{
+  int fit, amb;
+
+  (void)state;
+  add(FWD_FAM_TRACE, "", "Mm", "Bb", 1);
+  add(FWD_FAM_TRACE, "", "Mm", "Bb", 2);
+  PICK(200, "Link u2.10 m.test m.test", "Bb", "Bb", 0);
+  assert_true(amb);
+  setup(NULL);
+  add(FWD_FAM_TRACE, "", "Mm", "Bb", 1);
+  PICK(200, "Link u2.10 m.test m.test", "Bb", "Bb", 0);
+  assert_false(amb);
+}
+
+/* (review N5) An oper's reply from a server none of the candidates went
+ * to (and not a hop's TRACE line or refusal) is none of theirs. */
+static void test_pick_oper_reply_from_elsewhere(void **state)
+{
+  int fit, amb;
+
+  (void)state;
+  add(FWD_FAM_MOTD, "m.test", "Mm", "Bb", 1);
+  assert_int_equal(PICK(372, ":- line", "Bb", "Qq", 1), -1);
+  assert_int_equal(PICK(372, ":- line", "Bb", "Mm", 1), 0);
+  assert_int_equal(PICK(372, ":- line", "Bb", "Qq", 0), 0);   /* non-oper: renamed */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -427,6 +457,8 @@ int main(void)
     cmocka_unit_test_setup(test_pick_untracked_same_family_is_ambiguous, setup),
     cmocka_unit_test_setup(test_pick_session_members_both_tracked, setup),
     cmocka_unit_test_setup(test_pick_generic_with_untracked_unknown, setup),
+    cmocka_unit_test_setup(test_pick_two_traces_same_server, setup),
+    cmocka_unit_test_setup(test_pick_oper_reply_from_elsewhere, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
