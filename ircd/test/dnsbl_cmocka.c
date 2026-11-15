@@ -158,7 +158,7 @@ static void rehash_to(const char *domain, enum DNSBLAction action, const char *m
 {
   dnsbl_clear_servers();
   if (domain)
-    dnsbl_add_server(domain, NULL, 0, action, mark, 0);
+    dnsbl_add_server(domain, NULL, NULL, action, mark, 0);
 }
 
 /** Forget every cached result (the entries leak: a test). */
@@ -253,10 +253,10 @@ static void changed_index_answer_ignored(void **state)
   struct DNSBLRequest *req = NULL;
 
   dnsbl_clear_servers();
-  dnsbl_add_server("bl.test", "2", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl.test", "2", NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   dnsbl_check(&client, &req);
   dnsbl_clear_servers();
-  dnsbl_add_server("bl.test", "3", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl.test", "3", NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   answer(0, 1, 2);
   assert_int_equal(req->action, DNSBL_ACT_NONE);
   dnsbl_cancel(req);
@@ -269,7 +269,7 @@ static void cancelled_request_freed_by_last_answer(void **state)
   struct DNSBLRequest *req = NULL;
 
   rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
-  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl2.test", NULL, NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   dnsbl_check(&client, &req);
   assert_int_equal(nqueries, 2);
   dnsbl_cancel(req);
@@ -287,8 +287,8 @@ static void same_domain_entries_keep_their_own_answers(void **state)
   struct DNSBLRequest *req = NULL;
 
   dnsbl_clear_servers();
-  dnsbl_add_server("bl.test", "250", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
-  dnsbl_add_server("bl.test", "251", 0, DNSBL_ACT_MARK, "listed", 0);
+  dnsbl_add_server("bl.test", "250", NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl.test", "251", NULL, DNSBL_ACT_MARK, "listed", 0);
   /* the list: 251 (added last) first, then 250 */
   dnsbl_check(&client, &req);
   assert_int_equal(nqueries, 2);
@@ -311,7 +311,7 @@ static void same_domain_entries_keep_their_own_answers(void **state)
   cache_reset();                           /* (not served from it) */
   dnsbl_check(&client, &req);
   dnsbl_clear_servers();                   /* the rehash drops 250 */
-  dnsbl_add_server("bl.test", "251", 0, DNSBL_ACT_MARK, "listed", 0);
+  dnsbl_add_server("bl.test", "251", NULL, DNSBL_ACT_MARK, "listed", 0);
   answer(1, 1, 250);                       /* 250's answer: ignored */
   assert_int_equal(req->action, DNSBL_ACT_NONE);
   answer(0, 1, 251);                       /* 251's: its own entry */
@@ -327,14 +327,17 @@ static void reply_values_match_as_the_scripts_do(void **state)
   static const struct { int third, last; } ans[] = {
     { 0, 2 }, { 0, 4 }, { 0, 100 }, { 0, 250 }, { 0, 251 }, { 0, 255 }, { 1, 2 }
   };
-  static const struct { const char *index; unsigned int bitmask;
+  static const unsigned int four = 4, zero = 0;
+  static const struct { const char *index; const unsigned int *bitmask;
                         const char *want; } entries[] = {
-    { "2",               0, "Y.....Y" },
-    { "2,3,4,5,6,7,9",   0, "YY....Y" },
-    { "250",             0, "...Y..." },
-    { "251",             0, "....Y.." },
-    { NULL,              4, ".YY..Y." },
-    { NULL,              0, "YYYYYYY" },
+    { "2",               NULL,  "Y.....Y" },
+    { "2,3,4,5,6,7,9",   NULL,  "YY....Y" },
+    { "250",             NULL,  "...Y..." },
+    { "251",             NULL,  "....Y.." },
+    { NULL,              &four, ".YY..Y." },
+    { NULL,              NULL,  "YYYYYYY" },
+    { "2",               &four, "YYY..YY" },   /* either matches */
+    { NULL,              &zero, "......." },   /* a bitmask of 0: nothing */
   };
   size_t e, a;
 
@@ -351,8 +354,9 @@ static void reply_values_match_as_the_scripts_do(void **state)
       assert_int_equal(dnsbl_check(&client, &req), 1);
       answer_addr(0, 1, ans[a].third, ans[a].last);
       if ((entries[e].want[a] == 'Y') != (req->action == DNSBL_ACT_BLOCK_ALL))
-        fail_msg("index %s bitmask %u, answer 127.0.%d.%d: %s",
-                 entries[e].index ? entries[e].index : "-", entries[e].bitmask,
+        fail_msg("index %s bitmask %d, answer 127.0.%d.%d: %s",
+                 entries[e].index ? entries[e].index : "-",
+                 entries[e].bitmask ? (int) *entries[e].bitmask : -1,
                  ans[a].third, ans[a].last,
                  entries[e].want[a] == 'Y' ? "not matched" : "matched");
       dnsbl_cancel(req);
@@ -368,10 +372,10 @@ static void junk_index_refused(void **state)
   size_t i;
 
   for (i = 0; i < sizeof(junk) / sizeof(junk[0]); i++)
-    if (dnsbl_add_server("bl.test", junk[i], 0, DNSBL_ACT_BLOCK_ALL, NULL, 0))
+    if (dnsbl_add_server("bl.test", junk[i], NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0))
       fail_msg("index \"%s\" accepted", junk[i]);
   assert_null(dnsbl_first_server());
-  assert_non_null(dnsbl_add_server("bl.test", " 2, 3 ,255", 0,
+  assert_non_null(dnsbl_add_server("bl.test", " 2, 3 ,255", NULL,
                                    DNSBL_ACT_BLOCK_ALL, NULL, 0));
 }
 
@@ -470,7 +474,7 @@ static void rehash_adding_or_changing_an_entry_makes_it_stale(void **state)
 
   rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
   dnsbl_cancel(lookup(0));
-  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl2.test", NULL, NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   req = again(0);
   answer(nqueries - 2, 0, 0);
   answer(nqueries - 1, 1, 2);
@@ -479,8 +483,8 @@ static void rehash_adding_or_changing_an_entry_makes_it_stale(void **state)
   dnsbl_cancel(again(1));                  /* the fresh answers are cached */
 
   dnsbl_clear_servers();
-  dnsbl_add_server("bl.test", "3", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
-  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl.test", "3", NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl2.test", NULL, NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   req = again(0);                          /* bl.test's index changed */
   dnsbl_cancel(req);
 }
@@ -492,7 +496,7 @@ static void removed_entry_cached_answer_ignored(void **state)
   struct DNSBLRequest *req = NULL;
 
   rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
-  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl2.test", NULL, NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   assert_int_equal(dnsbl_check(&client, &req), 1);
   answer(0, 1, 2);                         /* bl2.test (added last, first) */
   answer(1, 0, 0);                         /* bl.test */
@@ -557,7 +561,7 @@ static void one_failed_lookup_caches_nothing(void **state)
   struct DNSBLRequest *req = NULL;
 
   rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
-  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl2.test", NULL, NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
   assert_int_equal(dnsbl_check(&client, &req), 1);
   answer(0, 1, 2);
   answer_failed(1);
@@ -578,10 +582,10 @@ static void every_matching_mark_entry_marks(void **state)
   int i;
 
   dnsbl_clear_servers();
-  dnsbl_add_server("uce.test", "2", 0, DNSBL_ACT_MARK, "uce-2", 0);
-  dnsbl_add_server("cbl.test", "2", 0, DNSBL_ACT_MARK, "cbl", 0);
-  dnsbl_add_server("sorbs.test", "2,3", 0, DNSBL_ACT_BLOCK_ANON, "sorbs", 0);
-  dnsbl_add_server("tor.test", "4", 0, DNSBL_ACT_MARK, "tor", 0);
+  dnsbl_add_server("uce.test", "2", NULL, DNSBL_ACT_MARK, "uce-2", 0);
+  dnsbl_add_server("cbl.test", "2", NULL, DNSBL_ACT_MARK, "cbl", 0);
+  dnsbl_add_server("sorbs.test", "2,3", NULL, DNSBL_ACT_BLOCK_ANON, "sorbs", 0);
+  dnsbl_add_server("tor.test", "4", NULL, DNSBL_ACT_MARK, "tor", 0);
   assert_int_equal(dnsbl_check(&client, &req), 1);
   for (i = 0; i < nqueries; i++)
     answer(i, 1, 2);
@@ -601,7 +605,7 @@ static void every_matching_mark_entry_marks(void **state)
   cache_reset();
   ClrFlag(&client, FLAG_MARKED);
   dnsbl_clear_servers();
-  dnsbl_add_server("wl.test", "2", 0, DNSBL_ACT_WHITELIST, "whitelist", 0);
+  dnsbl_add_server("wl.test", "2", NULL, DNSBL_ACT_WHITELIST, "whitelist", 0);
   assert_int_equal(dnsbl_check(&client, &req), 1);
   answer(0, 1, 2);
   assert_int_equal(dnsbl_result(&client, req, &action, &mark), 0);
@@ -633,8 +637,8 @@ static void every_record_of_an_answer_judged(void **state)
     cache_reset();
     nqueries = 0;
     dnsbl_clear_servers();
-    dnsbl_add_server("bl.test", "2", 0, DNSBL_ACT_WHITELIST, NULL, 0);
-    dnsbl_add_server("bl.test", "250", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+    dnsbl_add_server("bl.test", "2", NULL, DNSBL_ACT_WHITELIST, NULL, 0);
+    dnsbl_add_server("bl.test", "250", NULL, DNSBL_ACT_BLOCK_ALL, NULL, 0);
     assert_int_equal(dnsbl_check(&client, &req), 1);
     for (i = 0; i < nqueries; i++)
       answer_many(i, orders[o], 2);
@@ -659,12 +663,12 @@ static void mark_entry_mark_bounded(void **state)
 
   memset(longmark, 'm', sizeof(longmark) - 1);
   longmark[sizeof(longmark) - 1] = '\0';
-  assert_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_MARK, longmark, 0));
-  assert_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_MARK, "two words", 0));
+  assert_null(dnsbl_add_server("bl.test", NULL, NULL, DNSBL_ACT_MARK, longmark, 0));
+  assert_null(dnsbl_add_server("bl.test", NULL, NULL, DNSBL_ACT_MARK, "two words", 0));
   longmark[DNSBL_MARKLEN] = '\0';
-  assert_non_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_MARK, longmark, 0));
+  assert_non_null(dnsbl_add_server("bl.test", NULL, NULL, DNSBL_ACT_MARK, longmark, 0));
   /* a block entry's reason is no mark: not bounded here */
-  assert_non_null(dnsbl_add_server("bl.test", NULL, 0, DNSBL_ACT_BLOCK_ALL,
+  assert_non_null(dnsbl_add_server("bl.test", NULL, NULL, DNSBL_ACT_BLOCK_ALL,
                                    "a long refusal text, several words", 0));
 }
 

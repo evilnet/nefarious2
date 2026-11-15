@@ -47,7 +47,8 @@ struct DNSBLServer {
   char *domain;              /**< DNSBL domain (e.g., "dnsbl.dronebl.org") */
   char *index;               /**< Comma-separated indexes as written (e.g., "2,3,5,6"), or NULL */
   unsigned char index_set[32]; /**< The reply values (0-255) the index lists, one bit each */
-  unsigned int bitmask;      /**< Matches a reply value v when v & bitmask (0: none) */
+  int has_bitmask;           /**< A bitmask was given (bitmask = 0 matches nothing) */
+  unsigned int bitmask;      /**< Matches a reply value v when v & bitmask */
   unsigned long long ident;  /**< The entry's name, kept across a rehash
                                   that does not change its block: a hash of
                                   domain, index text, bitmask and its place
@@ -127,8 +128,9 @@ extern void dnsbl_init(void);
 /** Add a DNSBL server configuration
  * @param domain DNSBL domain name
  * @param index Comma-separated reply values (0-255) to match exactly (or NULL)
- * @param bitmask A reply value v matches when v & bitmask (0: none).  With
- *   neither, every answer matches; with both, either does (iauthd).
+ * @param bitmask A reply value v matches when v & *bitmask (NULL: no
+ *   bitmask; a bitmask of 0 matches nothing).  With neither index nor
+ *   bitmask, every answer matches; with both, either does (iauthd-ts).
  * @param action Action to take on match
  * @param mark Mark string (for DNSBL_ACT_MARK)
  * @param score Score value (for scoring mode)
@@ -136,7 +138,7 @@ extern void dnsbl_init(void);
  *   or an index that is not a list of 0-255 values)
  */
 extern struct DNSBLServer *dnsbl_add_server(const char *domain, const char *index,
-                                            unsigned int bitmask, enum DNSBLAction action,
+                                            const unsigned int *bitmask, enum DNSBLAction action,
                                             const char *mark, int score);
 
 /** Is \a mark usable as a DNSBL entry's mark: one word (no blanks), 1 to

@@ -143,11 +143,11 @@ dnsbl_parse_index(const char *index, unsigned char set[32])
 static int
 dnsbl_entry_matches(const struct DNSBLServer *server, unsigned int value)
 {
-  if (!server->index && !server->bitmask)
+  if (!server->index && !server->has_bitmask)
     return 1;
   if (server->index && (server->index_set[value >> 3] & (1 << (value & 7))))
     return 1;
-  return (server->bitmask & value) != 0;
+  return server->has_bitmask && (server->bitmask & value) != 0;
 }
 
 void
@@ -173,7 +173,7 @@ dnsbl_valid_mark(const char *mark)
 
 struct DNSBLServer *
 dnsbl_add_server(const char *domain, const char *index,
-                 unsigned int bitmask, enum DNSBLAction action,
+                 const unsigned int *bitmask, enum DNSBLAction action,
                  const char *mark, int score)
 {
   struct DNSBLServer *server;
@@ -194,7 +194,10 @@ dnsbl_add_server(const char *domain, const char *index,
   DupString(server->domain, domain);
   if (index && *index)
     DupString(server->index, index);
-  server->bitmask = bitmask;
+  if (bitmask) {
+    server->has_bitmask = 1;
+    server->bitmask = *bitmask;
+  }
 
   server->action = action;
   if (mark && *mark)
@@ -425,7 +428,7 @@ struct DNSBLQueryContext {
 static int
 dnsbl_entries_alike(const struct DNSBLServer *a, const struct DNSBLServer *b)
 {
-  return a->bitmask == b->bitmask
+  return a->has_bitmask == b->has_bitmask && a->bitmask == b->bitmask
     && !ircd_strcmp(a->domain, b->domain)
     && ((!a->index && !b->index)
         || (a->index && b->index && !strcmp(a->index, b->index)));
@@ -468,6 +471,7 @@ dnsbl_entry_ident(const struct DNSBLServer *server)
   if (server->index)
     h = dnsbl_fnv(h, server->index, strlen(server->index));
   h = dnsbl_fnv(h, "\1", 1);
+  h = dnsbl_fnv(h, &server->has_bitmask, sizeof(server->has_bitmask));
   h = dnsbl_fnv(h, &server->bitmask, sizeof(server->bitmask));
   return dnsbl_fnv(h, &nth, sizeof(nth));
 }

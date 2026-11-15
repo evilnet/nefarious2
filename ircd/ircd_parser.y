@@ -105,6 +105,7 @@ extern int init_lexer_file(char* file);
   /* DNSBL block parsing globals */
   char *dnsbl_domain, *dnsbl_index, *dnsbl_mark;
   unsigned int dnsbl_bitmask;
+  int dnsbl_has_bitmask;
   int dnsbl_action, dnsbl_score;
 
 static void parse_error(char *pattern,...) {
@@ -2019,6 +2020,7 @@ dnsblblock: DNSBL
 {
   dnsbl_domain = dnsbl_index = dnsbl_mark = NULL;
   dnsbl_bitmask = 0;
+  dnsbl_has_bitmask = 0;
   dnsbl_action = DNSBL_ACT_MARK;
   dnsbl_score = 0;
 } '{' dnsblitems '}' ';'
@@ -2029,7 +2031,8 @@ dnsblblock: DNSBL
            && !dnsbl_valid_mark(dnsbl_mark))
     parse_error("Invalid mark in DNSBL block for %s (one word, at most %d "
                 "characters); the block is ignored", dnsbl_domain, DNSBL_MARKLEN);
-  else if (!dnsbl_add_server(dnsbl_domain, dnsbl_index, dnsbl_bitmask,
+  else if (!dnsbl_add_server(dnsbl_domain, dnsbl_index,
+                              dnsbl_has_bitmask ? &dnsbl_bitmask : NULL,
                               dnsbl_action, dnsbl_mark, dnsbl_score))
     parse_error("Invalid index \"%s\" in DNSBL block for %s (reply values "
                 "0-255, comma-separated); the block is ignored",
@@ -2039,6 +2042,7 @@ dnsblblock: DNSBL
   MyFree(dnsbl_mark);
   dnsbl_domain = dnsbl_index = dnsbl_mark = NULL;
   dnsbl_bitmask = 0;
+  dnsbl_has_bitmask = 0;
   dnsbl_action = DNSBL_ACT_MARK;
   dnsbl_score = 0;
 };
@@ -2058,6 +2062,7 @@ dnsblindex: HOST '=' QSTRING ';'
 dnsblbitmask: BITMASK '=' expr ';'
 {
   dnsbl_bitmask = $3;
+  dnsbl_has_bitmask = 1;
 };
 dnsblaction: ACTION '=' MARK ';'
 {
