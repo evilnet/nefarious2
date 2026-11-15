@@ -2025,10 +2025,11 @@ dnsblblock: DNSBL
 {
   if (dnsbl_domain == NULL)
     parse_error("Missing name in DNSBL block");
-  else {
-    dnsbl_add_server(dnsbl_domain, dnsbl_index, dnsbl_bitmask,
-                     dnsbl_action, dnsbl_mark, dnsbl_score);
-  }
+  else if (!dnsbl_add_server(dnsbl_domain, dnsbl_index, dnsbl_bitmask,
+                              dnsbl_action, dnsbl_mark, dnsbl_score))
+    parse_error("Invalid index \"%s\" in DNSBL block for %s (reply values "
+                "0-255, comma-separated); the block is ignored",
+                dnsbl_index ? dnsbl_index : "", dnsbl_domain);
   MyFree(dnsbl_domain);
   MyFree(dnsbl_index);
   MyFree(dnsbl_mark);

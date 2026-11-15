@@ -105,7 +105,7 @@ CMOCKA_TESTPROGS = \
 	oper_verify_cmocka \
 	sethost_verify_cmocka \
 	webirc_verify_cmocka \
-	dnsbl_rehash_cmocka \
+	dnsbl_cmocka \
 	conf_include_cmocka \
 	gitsync_timer_cmocka \
 	gitsync_content_cmocka \
@@ -210,7 +210,7 @@ DEP_SRC = \
 	oper_verify_cmocka.c \
 	sethost_verify_cmocka.c \
 	webirc_verify_cmocka.c \
-	dnsbl_rehash_cmocka.c \
+	dnsbl_cmocka.c \
 	conf_include_cmocka.c \
 	gitsync_timer_cmocka.c \
 	gitsync_content_cmocka.c \
@@ -873,17 +873,19 @@ webirc_verify_cmocka.o: ${srcdir}/webirc_verify_cmocka.c ../m_webirc.c
 webirc_verify_cmocka: $(WEBIRC_VERIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(WEBIRC_VERIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-# dnsbl_rehash tests - a native DNSBL answer that arrives after a REHASH
-# is judged by the entry the configuration in force then has under its
-# name (or ignored), never read from the freed one.  Includes ../dnsbl.c
-# with --gc-sections; the resolver is a stub the cases answer.
-DNSBL_REHASH_CMOCKA_OBJS = dnsbl_rehash_cmocka.o ../ircd_alloc.o ../ircd_string.o \
+# dnsbl tests - the native DNSBL, modelled on the iauthd scripts: the reply
+# value (an answer's last octet, on every host) against an entry's index
+# (exact values 0-255) or bitmask (value & mask), and an answer that
+# arrives after a REHASH judged by the entry in force then, never read
+# from the freed one.  Includes ../dnsbl.c with --gc-sections; the
+# resolver is a stub the cases answer.
+DNSBL_CMOCKA_OBJS = dnsbl_cmocka.o ../ircd_alloc.o ../ircd_string.o \
 	../ircd_snprintf.o
-dnsbl_rehash_cmocka.o: ${srcdir}/dnsbl_rehash_cmocka.c ../dnsbl.c
-	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/dnsbl_rehash_cmocka.c
+dnsbl_cmocka.o: ${srcdir}/dnsbl_cmocka.c ../dnsbl.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/dnsbl_cmocka.c
 
-dnsbl_rehash_cmocka: $(DNSBL_REHASH_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DNSBL_REHASH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+dnsbl_cmocka: $(DNSBL_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DNSBL_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # conf_include tests - an include whose file does not exist is decided
 # once the configuration has been read: GitSync's file with GitSync
 # enabled is empty until the first sync (a placeholder is written, not

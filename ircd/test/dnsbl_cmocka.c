@@ -1,13 +1,19 @@
 /*
- * dnsbl_rehash_cmocka.c - a native DNSBL answer that arrives after a
- * REHASH is judged by the configuration in force then
+ * dnsbl_cmocka.c - the native DNSBL, modelled on the iauthd scripts
+ *
+ * An answer is an address 127.0.0.<n>; <n>, its LAST octet, is the reply
+ * value, read from the address bytes whatever the host's byte order.  An
+ * entry with an index matches when the value equals one of the listed
+ * values (any of 0-255); with a bitmask when value & bitmask is not zero;
+ * with neither, any answer matches (tools/iauthd-ts/src/dnsbl.ts
+ * matchesDNSBL()).  An index that is not a list of 0-255 values is a
+ * configuration error.
  *
  * dnsbl_check() starts one DNS query per configured DNSBL entry; the
  * answers arrive a loop pass or more later (dnsbl_dns_callback()).  A
  * rehash in between frees every entry (dnsbl_clear_servers()) and parses
- * the new ones.  The query names its entry (domain, matched reply values),
- * and the answer is judged by the live entry of that name: gone or
- * changed, the answer is ignored.
+ * the new ones.  The query names its entry, and the answer is judged by
+ * the live entry of that name: gone or changed, the answer is ignored.
  *
  * This includes the real dnsbl.c, compiled with -ffunction-sections and
  * linked with --gc-sections; the resolver (gethost_byname()) keeps the
@@ -55,16 +61,25 @@ void gethost_byname(const char *name, dns_callback_f callback, void *ctx)
   nqueries++;
 }
 
-/** Answer query \a i: listed (127.0.0.\a last) or not (NULL). */
-static void answer(int i, int listed, int last)
+/** Answer query \a i: listed (127.0.\a third.\a last) or not (NULL).  The
+ * address as the resolver hands it over: IPv4-mapped, network byte order. */
+static void answer_addr(int i, int listed, int third, int last)
 {
   struct irc_in_addr addr;
+  unsigned char *b = (unsigned char *) &addr;
 
   memset(&addr, 0, sizeof(addr));
-  addr.in6_16[5] = 0xffff;
-  addr.in6_16[6] = htons(0x7f00);
-  addr.in6_16[7] = (unsigned short)last;   /* as dnsbl.c reads the last octet */
+  b[10] = b[11] = 0xff;
+  b[12] = 127;
+  b[13] = 0;
+  b[14] = (unsigned char) third;
+  b[15] = (unsigned char) last;
   queries[i].cb(queries[i].ctx, listed ? &addr : NULL, listed ? queries[i].name : NULL);
+}
+
+static void answer(int i, int listed, int last)
+{
+  answer_addr(i, listed, 0, last);
 }
 
 static int completes;
@@ -186,11 +201,9 @@ static void cancelled_request_freed_by_last_answer(void **state)
   assert_int_equal(completes, 0);
 }
 
-/** Two entries for one domain whose indexes the parser drops (250 and
- * 251 are past the 0-31 reply values: both match every value) share
- * domain and bitmask; each query's answer is still judged by its own
- * entry -- and after a rehash that removes the first, the second's
- * answers go to the second. */
+/** Two entries for one domain (index 250 and 251) each judge their own
+ * query's answer -- and after a rehash that removes the first, the
+ * second's answers still go to the second. */
 static void same_domain_entries_keep_their_own_answers(void **state)
 {
   struct DNSBLRequest *req = NULL;
@@ -201,7 +214,7 @@ static void same_domain_entries_keep_their_own_answers(void **state)
   /* the list: 251 (added last) first, then 250 */
   dnsbl_check(&client, &req);
   assert_int_equal(nqueries, 2);
-  answer(0, 1, 2);                         /* the 251 entry: listed */
+  answer(0, 1, 251);                       /* the 251 entry: listed */
   answer(1, 0, 0);                         /* the 250 entry: not */
   assert_int_equal(req->action, DNSBL_ACT_MARK);
   dnsbl_cancel(req);
@@ -211,7 +224,7 @@ static void same_domain_entries_keep_their_own_answers(void **state)
   memset(dnsbl_cache, 0, sizeof(dnsbl_cache));   /* (not served from it) */
   dnsbl_check(&client, &req);
   answer(0, 0, 0);                         /* 251: not */
-  answer(1, 1, 2);                         /* 250: listed */
+  answer(1, 1, 250);                       /* 250: listed */
   assert_int_equal(req->action, DNSBL_ACT_BLOCK_ALL);
   dnsbl_cancel(req);
 
@@ -221,12 +234,67 @@ static void same_domain_entries_keep_their_own_answers(void **state)
   dnsbl_check(&client, &req);
   dnsbl_clear_servers();                   /* the rehash drops 250 */
   dnsbl_add_server("bl.test", "251", 0, DNSBL_ACT_MARK, "listed", 0);
-  answer(1, 1, 2);                         /* 250's answer: ignored */
+  answer(1, 1, 250);                       /* 250's answer: ignored */
   assert_int_equal(req->action, DNSBL_ACT_NONE);
-  answer(0, 1, 2);                         /* 251's: its own entry */
+  answer(0, 1, 251);                       /* 251's: its own entry */
   assert_int_equal(req->action, DNSBL_ACT_MARK);
   assert_int_equal(dnsbl_first_server()->hits, 1);
   dnsbl_cancel(req);
+}
+
+/** The model table: which answers each entry matches, as iauthd-ts's
+ * matchesDNSBL() decides for the same configuration (tools/iauthd-ts). */
+static void reply_values_match_as_the_scripts_do(void **state)
+{
+  static const struct { int third, last; } ans[] = {
+    { 0, 2 }, { 0, 4 }, { 0, 100 }, { 0, 250 }, { 0, 251 }, { 0, 255 }, { 1, 2 }
+  };
+  static const struct { const char *index; unsigned int bitmask;
+                        const char *want; } entries[] = {
+    { "2",               0, "Y.....Y" },
+    { "2,3,4,5,6,7,9",   0, "YY....Y" },
+    { "250",             0, "...Y..." },
+    { "251",             0, "....Y.." },
+    { NULL,              4, ".YY..Y." },
+    { NULL,              0, "YYYYYYY" },
+  };
+  size_t e, a;
+
+  for (e = 0; e < sizeof(entries) / sizeof(entries[0]); e++)
+    for (a = 0; a < sizeof(ans) / sizeof(ans[0]); a++) {
+      struct DNSBLRequest *req = NULL;
+
+      memset(dnsbl_cache, 0, sizeof(dnsbl_cache));
+      dnsbl_clear_servers();
+      assert_non_null(dnsbl_add_server("bl.test", entries[e].index,
+                                       entries[e].bitmask,
+                                       DNSBL_ACT_BLOCK_ALL, NULL, 0));
+      nqueries = 0;
+      assert_int_equal(dnsbl_check(&client, &req), 1);
+      answer_addr(0, 1, ans[a].third, ans[a].last);
+      if ((entries[e].want[a] == 'Y') != (req->action == DNSBL_ACT_BLOCK_ALL))
+        fail_msg("index %s bitmask %u, answer 127.0.%d.%d: %s",
+                 entries[e].index ? entries[e].index : "-", entries[e].bitmask,
+                 ans[a].third, ans[a].last,
+                 entries[e].want[a] == 'Y' ? "not matched" : "matched");
+      dnsbl_cancel(req);
+    }
+}
+
+/** An index that is not a comma-separated list of 0-255 values is
+ * refused (the configuration error is reported by the parser), never
+ * taken as match-all. */
+static void junk_index_refused(void **state)
+{
+  static const char *junk[] = { "abc", "300", "2,x", ",", "-1", "2,,3x" };
+  size_t i;
+
+  for (i = 0; i < sizeof(junk) / sizeof(junk[0]); i++)
+    if (dnsbl_add_server("bl.test", junk[i], 0, DNSBL_ACT_BLOCK_ALL, NULL, 0))
+      fail_msg("index \"%s\" accepted", junk[i]);
+  assert_null(dnsbl_first_server());
+  assert_non_null(dnsbl_add_server("bl.test", " 2, 3 ,255", 0,
+                                   DNSBL_ACT_BLOCK_ALL, NULL, 0));
 }
 
 int main(void)
@@ -238,6 +306,8 @@ int main(void)
     cmocka_unit_test_setup(changed_index_answer_ignored, setup),
     cmocka_unit_test_setup(cancelled_request_freed_by_last_answer, setup),
     cmocka_unit_test_setup(same_domain_entries_keep_their_own_answers, setup),
+    cmocka_unit_test_setup(reply_values_match_as_the_scripts_do, setup),
+    cmocka_unit_test_setup(junk_index_refused, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

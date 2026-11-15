@@ -45,8 +45,9 @@ enum DNSBLAction {
 struct DNSBLServer {
   struct DNSBLServer *next;  /**< Linked list next */
   char *domain;              /**< DNSBL domain (e.g., "dnsbl.dronebl.org") */
-  char *index;               /**< Comma-separated indexes (e.g., "2,3,5,6") */
-  unsigned int bitmask;      /**< Bitmask of reply values to match (alternative to index) */
+  char *index;               /**< Comma-separated indexes as written (e.g., "2,3,5,6"), or NULL */
+  unsigned char index_set[32]; /**< The reply values (0-255) the index lists, one bit each */
+  unsigned int bitmask;      /**< Matches a reply value v when v & bitmask (0: none) */
   enum DNSBLAction action;   /**< Action to take on match */
   char *mark;                /**< Mark string (for DNSBL_ACT_MARK) */
   int score;                 /**< Score value (for scoring mode) */
@@ -72,7 +73,7 @@ struct DNSBLRequest {
   struct Client *client;         /**< Associated client */
   struct DNSBLRequest *next;     /**< Next pending request */
   int pending_count;             /**< Number of pending lookups */
-  unsigned int result;           /**< Accumulated result */
+  unsigned int result;           /**< Answers that matched their entry */
   int whitelisted;               /**< Set if whitelist hit */
   int cancelled;                 /**< Set if request was cancelled (client disconnected) */
   enum DNSBLAction action;       /**< Highest priority action */
@@ -97,12 +98,14 @@ extern void dnsbl_init(void);
 
 /** Add a DNSBL server configuration
  * @param domain DNSBL domain name
- * @param index Comma-separated reply indexes to match (or NULL)
- * @param bitmask Bitmask of reply values (alternative to index)
+ * @param index Comma-separated reply values (0-255) to match exactly (or NULL)
+ * @param bitmask A reply value v matches when v & bitmask (0: none).  With
+ *   neither, every answer matches; with both, either does (iauthd).
  * @param action Action to take on match
  * @param mark Mark string (for DNSBL_ACT_MARK)
  * @param score Score value (for scoring mode)
- * @return Pointer to created server config, or NULL on error
+ * @return Pointer to created server config, or NULL on error (no domain,
+ *   or an index that is not a list of 0-255 values)
  */
 extern struct DNSBLServer *dnsbl_add_server(const char *domain, const char *index,
                                             unsigned int bitmask, enum DNSBLAction action,

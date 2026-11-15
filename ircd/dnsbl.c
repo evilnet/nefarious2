@@ -94,35 +94,58 @@ dnsbl_addr_equal(const struct irc_in_addr *a, const struct irc_in_addr *b)
   return memcmp(a, b, sizeof(struct irc_in_addr)) == 0;
 }
 
-/** Parse a comma-separated index string into a bitmask
- * @param index String like "2,3,5,6"
- * @return Bitmask of indexes
+/** Parse an index: comma-separated reply values, each 0-255, as the
+ * iauthd scripts take them (index=2,3,5,6).  Blanks around a value are
+ * allowed.
+ * @param[in] index The index as written.
+ * @param[out] set One bit per value listed.
+ * @return Zero, or -1 if \a index is not such a list (empty, a value out
+ *   of range, anything else in it).
  */
-static unsigned int
-dnsbl_parse_index(const char *index)
+static int
+dnsbl_parse_index(const char *index, unsigned char set[32])
 {
-  unsigned int mask = 0;
   const char *p = index;
-  char *endp;
-  long val;
+  int n = 0;
 
-  if (!index || !*index)
-    return 0xFFFFFFFF; /* match all by default */
+  memset(set, 0, 32);
+  for (;;) {
+    long val = 0;
+    int digits = 0;
 
-  while (*p) {
-    while (*p && (isspace((unsigned char)*p) || *p == ','))
+    while (*p == ' ' || *p == '\t')
       p++;
-    if (!*p)
+    while (*p >= '0' && *p <= '9' && digits < 4) {
+      val = val * 10 + (*p++ - '0');
+      digits++;
+    }
+    while (*p == ' ' || *p == '\t')
+      p++;
+    if (!digits || val > 255 || (*p != ',' && *p != '\0'))
+      return -1;
+    set[val >> 3] |= (unsigned char)(1 << (val & 7));
+    n++;
+    if (*p == '\0')
       break;
-
-    val = strtol(p, &endp, 10);
-    if (val >= 0 && val < 32)
-      mask |= (1 << val);
-
-    p = endp;
+    p++;                                  /* the comma */
   }
+  return n ? 0 : -1;
+}
 
-  return mask ? mask : 0xFFFFFFFF;
+/** Does reply value \a value match \a server?  As the iauthd scripts
+ * decide (iauthd-ts matchesDNSBL()): the index lists it, or it shares a
+ * bit with the bitmask; an entry with neither matches every answer.
+ * @param[in] server A configured entry.
+ * @param[in] value An answer's last octet.
+ */
+static int
+dnsbl_entry_matches(const struct DNSBLServer *server, unsigned int value)
+{
+  if (!server->index && !server->bitmask)
+    return 1;
+  if (server->index && (server->index_set[value >> 3] & (1 << (value & 7))))
+    return 1;
+  return (server->bitmask & value) != 0;
 }
 
 void
@@ -150,16 +173,15 @@ dnsbl_add_server(const char *domain, const char *index,
   if (!server)
     return NULL;
 
-  DupString(server->domain, domain);
-
-  if (index && *index) {
-    DupString(server->index, index);
-    server->bitmask = dnsbl_parse_index(index);
-  } else if (bitmask) {
-    server->bitmask = bitmask;
-  } else {
-    server->bitmask = 0xFFFFFFFF; /* match all */
+  if (index && *index && dnsbl_parse_index(index, server->index_set)) {
+    MyFree(server);
+    return NULL;                  /* the parser reports it */
   }
+
+  DupString(server->domain, domain);
+  if (index && *index)
+    DupString(server->index, index);
+  server->bitmask = bitmask;
 
   server->action = action;
   if (mark && *mark)
@@ -170,8 +192,8 @@ dnsbl_add_server(const char *domain, const char *index,
   server->next = dnsbl_servers;
   dnsbl_servers = server;
 
-  Debug((DEBUG_DNS, "DNSBL: Added server %s action=%d bitmask=0x%x",
-         domain, action, server->bitmask));
+  Debug((DEBUG_DNS, "DNSBL: Added server %s index=%s bitmask=0x%x action=%d",
+         domain, server->index ? server->index : "-", server->bitmask, action));
 
   return server;
 }
@@ -442,21 +464,19 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   }
 
   if (addr && server) {
-    /* We got a response - extract the last octet as the result */
-    result_byte = addr->in6_16[7] & 0xFF;
+    /* We got a response - extract the last octet as the result.  The
+     * address is in network byte order: its last BYTE is the octet, read
+     * as bytes (the low half of in6_16[7] in host order is the third octet
+     * on a little-endian host). */
+    result_byte = ((const unsigned char *) addr)[sizeof(*addr) - 1];
+    {
+      Debug((DEBUG_DNS, "DNSBL: Got response for %s, result byte=%u",
+             server->domain, result_byte));
 
-    /* Clamp result_byte to valid bitmask range (0-31) to avoid UB */
-    if (result_byte >= 32) {
-      Debug((DEBUG_DNS, "DNSBL: Result byte %u from %s out of bitmask range, ignoring",
-             result_byte, server->domain));
-    } else {
-      Debug((DEBUG_DNS, "DNSBL: Got response for %s, result byte=%u, bitmask=0x%x",
-             server->domain, result_byte, server->bitmask));
-
-      /* Check if this result matches our bitmask */
-      if (server->bitmask & (1U << result_byte)) {
+      /* Check if this result matches the entry */
+      if (dnsbl_entry_matches(server, result_byte)) {
         server->hits++;
-        req->result |= (1U << result_byte);
+        req->result++;
 
         /* Process the action based on priority */
         switch (server->action) {
