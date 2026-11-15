@@ -964,6 +964,44 @@ static void test_batch_label_on_outermost(void **state)
   assert_string_equal(cli_batch_id(&asker), "");
 }
 
+/* A labeled batch a forwarded label took over (con_fwd_adopted: TRACE
+ * and WHOWAS open theirs before they forward) outlives its line: the
+ * handler's end of it, and parse_client()'s, take it off the stack with
+ * nothing on the wire -- its BATCH - comes with the forwarded reply --
+ * and a batch nested in it still ends.  The next line starts clean. */
+static int ends(int i, const char *id);
+
+static void test_adopted_labeled_batch_outlives_its_line(void **state)
+{
+  char outer[32], inner[32];
+
+  (void)state;
+  reset_sent();
+  label_pending(&asker, "TR1");
+  assert_int_equal(labeled_batch_start(&asker), 1);
+  opened_id(sent[0].text, outer, sizeof(outer));
+  cli_fwd_adopted(&asker) = cli_labeled_batch(&asker);
+  sendcmdto_one_tags(&me, CMD_NOTICE, &asker, "%C :own line", &asker);
+  send_batch_start(&asker, "metadata");
+  opened_id(sent[2].text, inner, sizeof(inner));
+  labeled_batch_end(&asker);
+  assert_int_equal(n_sent, 4);
+  assert_true(ends(3, inner));        /* the nested one ends ... */
+  batch_end_line(&asker);
+  assert_int_equal(n_sent, 4);        /* ... the adopted one does not */
+  assert_int_equal(cli_connect(&asker)->con_batch_depth, 0);
+  assert_int_equal(cli_labeled_batch(&asker), 0);
+  assert_int_equal(cli_fwd_adopted(&asker), 0);
+  assert_string_equal(cli_batch_id(&asker), "");
+
+  /* a later batch at the same depth is an ordinary one */
+  label_pending(&asker, "NEXT");
+  assert_int_equal(labeled_batch_start(&asker), 1);
+  labeled_batch_end(&asker);
+  assert_int_equal(n_sent, 6);
+  (void)outer;
+}
+
 /* labeled_batch_end() and batch_end_line() end what is still open inside,
  * innermost first, each end line tagged with its own parent. */
 static void test_batch_end_line_closes_inner_first(void **state)
@@ -1837,6 +1875,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_batch_async_and_unrelated_labeled, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_without_batch_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_fwd_batch_override_consumed, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_adopted_labeled_batch_outlives_its_line, setup, teardown),
     cmocka_unit_test_setup_teardown(test_batch_for_two_or_more_targets, setup, teardown),
     cmocka_unit_test_setup_teardown(test_sendrawto_one_answer, setup, teardown),
     cmocka_unit_test_setup_teardown(test_end_all_resolves_a_deferred_batch, setup, teardown),

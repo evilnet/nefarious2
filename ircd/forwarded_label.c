@@ -57,6 +57,23 @@ static unsigned long fwd_batch_counter = 0;
 /** Timeout in seconds for DRAINING entries. */
 #define FWD_TIMEOUT_DRAIN   5
 
+/** Whether the labeled batch \a from's handler opened can be taken over
+ * by a forwarded label: it is the innermost frame, at the top level (its
+ * BATCH - will need no parent tag, and nothing encloses it to end first),
+ * on the wire, and not deferred.  Only then can it outlive its line. */
+static int fwd_label_adoptable(struct Client *from)
+{
+  struct Connection *con = cli_connect(from);
+  unsigned int at = con->con_labeled_batch;
+
+  if (!at || at != con->con_batch_depth || con->con_batch_over
+      || con->con_fwd_adopted)
+    return 0;
+  if (con->con_batch[at - 1].parent[0] || !con->con_batch[at - 1].id[0])
+    return 0;
+  return !con_batch_hold(con);
+}
+
 int fwd_label_save(struct Client *from, const char *cmd,
                    char *msgid, uint64_t *time_out)
 {
@@ -74,6 +91,14 @@ int fwd_label_save(struct Client *from, const char *cmd,
   if (!feature_bool(FEAT_CAP_labeled_response) || !LabeledResponseInUse(from))
     return 0;
   if (!feature_bool(FEAT_CAP_batch))
+    return 0;
+
+  /* A label already answered -- by the BATCH + of the labeled batch its
+   * handler opened before forwarding (TRACE, which answers a line of its
+   * own, and WHOWAS) -- gets no second answer: the forwarded reply joins
+   * that batch if it can be taken over (fwd_label_adoptable()), else it
+   * goes out plain. */
+  if (cli_label_responded(from) && !fwd_label_adoptable(from))
     return 0;
 
   /* Look up command in terminal table */
@@ -110,11 +135,24 @@ int fwd_label_save(struct Client *from, const char *cmd,
   /* Copy label */
   ircd_strncpy(fl->fl_label, cli_label(from), sizeof(fl->fl_label));
 
-  /* Generate batch ID: fwd<counter> -- a reference for the client alone
-   * (letters and digits only: the server numeric it carried could put a
-   * '[' or ']' in it); the counter is unique in this server. */
-  snprintf(fl->fl_batch_id, sizeof(fl->fl_batch_id), "fwd%lu",
-           ++fwd_batch_counter);
+  if (cli_label_responded(from)) {
+    /* The handler's labeled batch: the forwarded reply joins it.  The
+     * entry takes it over -- its id, ACTIVE (its BATCH + is out) -- and
+     * con_fwd_adopted marks the frame, so the handler's end of it (and
+     * parse_client()'s) only takes it off the stack: it ends with the
+     * forwarded reply, fwd_label_close_batch(). */
+    struct Connection *con = cli_connect(from);
+
+    ircd_strncpy(fl->fl_batch_id, con->con_batch[con->con_labeled_batch - 1].id,
+                 sizeof(fl->fl_batch_id));
+    con->con_fwd_adopted = con->con_labeled_batch;
+  } else {
+    /* Generate batch ID: fwd<counter> -- a reference for the client alone
+     * (letters and digits only: the server numeric it carried could put a
+     * '[' or ']' in it); the counter is unique in this server. */
+    snprintf(fl->fl_batch_id, sizeof(fl->fl_batch_id), "fwd%lu",
+             ++fwd_batch_counter);
+  }
 
   /* Generate HLC msgid for compact tag correlation */
   hlc = hlc_global_event();
@@ -127,7 +165,7 @@ int fwd_label_save(struct Client *from, const char *cmd,
   ircd_strncpy(msgid, fl->fl_msgid, 15);
   *time_out = hlc_global()->physical_ms;
 
-  fl->fl_state = FWD_LABEL_PENDING;
+  fl->fl_state = cli_label_responded(from) ? FWD_LABEL_ACTIVE : FWD_LABEL_PENDING;
   fl->fl_created = CurrentTime;
 
   /* Suppress ACK and clear label from client */

@@ -433,7 +433,7 @@ struct BatchHold;
 /** A connection's open batches set aside (batch_save()/batch_restore()). */
 struct BatchSave {
   struct BatchFrame frames[BATCH_NEST_MAX];
-  unsigned char depth, over, labeled;
+  unsigned char depth, over, labeled, adopted;
   struct BatchHold *hold;   /**< a deferred labeled batch's held lines, set aside */
 };
 
@@ -599,6 +599,7 @@ struct Connection
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
   unsigned char       con_labeled_batch; /**< Depth (1-based) of the frame labeled_batch_start() opened, 0 = none */
+  unsigned char       con_fwd_adopted; /**< Depth (1-based) of the labeled batch a forwarded label took over (it outlives the line), 0 = none */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
   /* WebSocket state for RFC 6455 compliance */
   unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
@@ -870,6 +871,8 @@ struct Client {
 #define cli_msg_concat(cli)	con_msg_concat(cli_connect(cli))
 /** Depth of the labeled-response batch labeled_batch_start() opened (0 = none). */
 #define cli_labeled_batch(cli)	con_labeled_batch(cli_connect(cli))
+/** Get the depth of the labeled batch a forwarded label took over. */
+#define cli_fwd_adopted(cli)	con_fwd_adopted(cli_connect(cli))
 /** Get forwarded label FIFO array. */
 #define cli_fwd_labels(cli)	con_fwd_labels(cli_connect(cli))
 /** Get WebSocket partial frame buffer. */
@@ -1257,6 +1260,8 @@ struct Client {
 #define con_msg_concat(con)	((con)->con_msg_concat)
 /** Get the labeled batch flag (1 if labeled_batch_start opened a batch). */
 #define con_labeled_batch(con)	((con)->con_labeled_batch)
+/** Get the depth of the labeled batch a forwarded label took over. */
+#define con_fwd_adopted(con)	((con)->con_fwd_adopted)
 /** Get the forwarded label FIFO array. */
 #define con_fwd_labels(con)	((con)->con_fwd_labels)
 /** Get WebSocket partial frame buffer. */

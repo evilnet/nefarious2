@@ -5272,11 +5272,16 @@ static void batch_pop(struct Client *to, int wire)
   f = &con->con_batch[con->con_batch_depth - 1];
   if (con_batch_hold(con) && con_batch_hold(con)->depth == con->con_batch_depth)
     batch_hold_resolve(to);   /* a deferred labeled batch never opened */
+  else if (con->con_fwd_adopted == con->con_batch_depth)
+    ;   /* a forwarded label took it over: it ends with the forwarded
+         * reply (forwarded_label.c), not with its line */
   else if (wire && f->id[0])
     send_batch_marker(to, '-', f->id, f->parent, NULL, NULL, NULL);
   con->con_batch_depth--;
   if (con->con_labeled_batch > con->con_batch_depth)
     con->con_labeled_batch = 0;
+  if (con->con_fwd_adopted > con->con_batch_depth)
+    con->con_fwd_adopted = 0;
 }
 
 /**
@@ -5337,6 +5342,8 @@ void batch_detach(struct Client *to, char *id, size_t idlen)
   con->con_batch_depth--;
   if (con->con_labeled_batch > con->con_batch_depth)
     con->con_labeled_batch = 0;
+  if (con->con_fwd_adopted > con->con_batch_depth)
+    con->con_fwd_adopted = 0;
 }
 
 /** The owner of a detached batch sends into it: put it back as the
@@ -5380,6 +5387,7 @@ void batch_save(struct Client *to, struct BatchSave *save)
   save->depth = con->con_batch_depth;
   save->over = con->con_batch_over;
   save->labeled = con->con_labeled_batch;
+  save->adopted = con->con_fwd_adopted;
   /* A deferred labeled batch (the line's, labeled_batch_defer()) is set
    * aside with its held lines, still undecided: the answer sent meanwhile
    * goes straight out, and the line's answer is resolved when its frame
@@ -5389,6 +5397,7 @@ void batch_save(struct Client *to, struct BatchSave *save)
   con->con_batch_depth = 0;
   con->con_batch_over = 0;
   con->con_labeled_batch = 0;
+  con->con_fwd_adopted = 0;
 }
 
 void batch_restore(struct Client *to, const struct BatchSave *save)
@@ -5400,6 +5409,7 @@ void batch_restore(struct Client *to, const struct BatchSave *save)
   con->con_batch_depth = save->depth;
   con->con_batch_over = save->over;
   con->con_labeled_batch = save->labeled;
+  con->con_fwd_adopted = save->adopted;
   if (save->hold) {
     batch_hold_free(con);   /* none: an answer opens no deferred batch */
     con_batch_hold(con) = save->hold;
