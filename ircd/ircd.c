@@ -1414,7 +1414,8 @@ int main(int argc, char **argv) {
     webpush_setup();
 
 #ifdef USE_LIBGIT2
-  /* Start gitsync timer after config is loaded */
+  /* Start GitSync after config is loaded (if the feature notify has not
+   * already): its first sync runs a second from now, from the event loop */
   gitsync_start_timer();
 #endif
 

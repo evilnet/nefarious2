@@ -106,6 +106,7 @@ CMOCKA_TESTPROGS = \
 	webirc_verify_cmocka \
 	dnsbl_rehash_cmocka \
 	conf_include_cmocka \
+	gitsync_timer_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
 
@@ -208,6 +209,7 @@ DEP_SRC = \
 	webirc_verify_cmocka.c \
 	dnsbl_rehash_cmocka.c \
 	conf_include_cmocka.c \
+	gitsync_timer_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -887,6 +889,18 @@ CONF_INCLUDE_CMOCKA_OBJS = conf_include_cmocka.o ../ircd_string.o ../match.o \
 	../ircd_snprintf.o
 conf_include_cmocka: $(CONF_INCLUDE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CONF_INCLUDE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# gitsync_timer tests - GitSync's first sync runs a second after GitSync
+# starts, from the event loop, once (a rehash while it runs schedules none,
+# off then on schedules one again), and arms the periodic timer; interval
+# changes re-arm only that, from inside its own expiry too.  Includes the
+# real ../ircd_events.c (the timer queue) and ../gitsync_timer.c with
+# --gc-sections; the sync itself is a stub.  Empty without libgit2.
+gitsync_timer_cmocka.o: ${srcdir}/gitsync_timer_cmocka.c ../ircd_events.c ../gitsync_timer.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/gitsync_timer_cmocka.c
+
+gitsync_timer_cmocka: gitsync_timer_cmocka.o
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections gitsync_timer_cmocka.o $(CMOCKA_LIBS)
 
 # send_label tests - labeled-response (issue #216): a channel event a
 # client's own command caused (its PART, TOPIC, KICK, MODE) carries the

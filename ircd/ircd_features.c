@@ -866,8 +866,9 @@ feature_notify_sasl_health_interval(void)
 #endif /* USE_LIBKC */
 
 #ifdef USE_LIBGIT2
-/** Handle FEAT_GITSYNC_ENABLE change — start or stop the periodic
- * gitsync timer to match the new value.
+/** Handle FEAT_GITSYNC_ENABLE change — start GitSync (its first sync a
+ * second later, from the event loop, then the periodic timer) or stop it
+ * to match the new value.  Starting a running GitSync does nothing.
  */
 static void
 feature_notify_gitsync_enable(void)

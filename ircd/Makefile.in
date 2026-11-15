@@ -113,6 +113,7 @@ IRCD_SRC = \
 	forwarded_label.c \
 	gline.c \
 	gitsync.c \
+	gitsync_timer.c \
 	hash.c \
 	history.c \
 	history_trim_codec.c \

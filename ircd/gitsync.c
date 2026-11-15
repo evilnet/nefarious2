@@ -62,9 +62,6 @@
 /** Global gitsync statistics */
 static struct GitsyncStats gitsync_stats;
 
-/** Timer for periodic gitsync */
-static struct Timer gitsync_timer;
-
 /** libgit2 initialized flag */
 static int git_initialized = 0;
 
@@ -1131,17 +1128,6 @@ gitsync_update_cert_from_file(const char *repo_path, const char *cert_path)
 }
 #endif /* USE_SSL */
 
-/** Timer callback for periodic gitsync
- * @param ev Timer event
- */
-static void
-gitsync_timer_callback(struct Event *ev)
-{
-  if (ev_type(ev) == ET_EXPIRE) {
-    gitsync_trigger(&me, NULL, 0);
-  }
-}
-
 /** The file GitSync writes the configuration it pulls into (and the
  * operator's ircd.conf includes): GITSYNC_CONF_FILE, or "gitsync.conf"
  * when that is empty.
@@ -1164,55 +1150,6 @@ gitsync_init(void)
     git_libgit2_init();
     git_initialized = 1;
   }
-}
-
-void
-gitsync_start_timer(void)
-{
-  int interval;
-
-  if (!feature_bool(FEAT_GITSYNC_ENABLE))
-    return;
-
-  /* Idempotent: skip if timer is already armed.  Notify callbacks may
-   * fire during init_conf() before ircd.c calls us at boot, and may
-   * also fire on a runtime feature change while we're already running. */
-  if (t_active(&gitsync_timer))
-    return;
-
-  /* An include of the configuration file that does not exist yet is read
-   * as empty, and its placeholder written, by the configuration pass that
-   * reads it (s_conf.c conf_settle_absent_includes()). */
-
-  interval = feature_int(FEAT_GITSYNC_INTERVAL);
-  if (interval < 60)
-    interval = 60; /* Minimum 1 minute */
-
-  timer_add(timer_init(&gitsync_timer), gitsync_timer_callback,
-            NULL, TT_PERIODIC, interval);
-
-  Debug((DEBUG_INFO, "GitSync: Timer started with interval %d seconds", interval));
-}
-
-void
-gitsync_stop_timer(void)
-{
-  if (t_active(&gitsync_timer))
-    timer_del(&gitsync_timer);
-}
-
-void
-gitsync_restart_timer(void)
-{
-  /* Only restart if the timer is already armed — during boot the notify
-   * callback fires from init_conf() before gitsync_start_timer() runs,
-   * and we don't want to start the timer ahead of the rest of the boot
-   * sequence.  The boot path will start it with the (already-up-to-date)
-   * interval value. */
-  if (!t_active(&gitsync_timer))
-    return;
-  timer_del(&gitsync_timer);
-  gitsync_start_timer();
 }
 
 /** Run a sync.
