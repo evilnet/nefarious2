@@ -943,6 +943,18 @@ struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* stat
  */
 struct WebIRCConf* find_webirc_conf_by_host(struct Client *cptr)
 {
+  return find_webirc_conf_by_host_nth(cptr, 0);
+}
+
+/** Find the \a n th (from 0) WebIRC block matching \a cptr by host/IP, in
+ * the order find_webirc_conf() tries them: an asynchronous check tries
+ * each one's password in turn, as find_webirc_conf() does at once.
+ * @param[in] cptr Client to match WebIRC configuration against.
+ * @param[in] n Number of matching blocks to pass over.
+ * @return Matching WebIRCConf or NULL if there are not that many.
+ */
+struct WebIRCConf* find_webirc_conf_by_host_nth(struct Client *cptr, int n)
+{
   struct WebIRCConf *wconf;
 
   for (wconf = webircConfList; wconf; wconf = wconf->next) {
@@ -954,8 +966,9 @@ struct WebIRCConf* find_webirc_conf_by_host(struct Client *cptr)
     } else if (wconf->hostmask && match(wconf->hostmask, cli_sockhost(cptr)))
       continue;
 
-    /* Found a matching host/IP - return it (password check deferred) */
-    return wconf;
+    /* Found a matching host/IP (password check deferred) */
+    if (n-- <= 0)
+      return wconf;
   }
 
   return NULL;

@@ -292,6 +292,7 @@ extern struct ConfItem *conf_debug_iline(const char *client);
 extern void free_mapping(struct s_map *smap);
 extern struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* status);
 extern struct WebIRCConf* find_webirc_conf_by_host(struct Client *cptr);
+extern struct WebIRCConf* find_webirc_conf_by_host_nth(struct Client *cptr, int n);
 extern struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd, int *status);
 extern struct SHostConf* find_shost_conf_by_host(struct Client *cptr, const char *host);
 extern int get_except_flags(struct Client *cptr);

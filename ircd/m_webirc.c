@@ -105,6 +105,12 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
+/** A password (hash) a WEBIRC line has been checked against. */
+struct webirc_tried {
+  struct webirc_tried *next;        /**< Checked before it */
+  char hash[1];                     /**< The hash; allocated to its length */
+};
+
 /** Context for async WEBIRC password verification */
 struct webirc_verify_ctx {
   int fd;                           /**< Client fd for lookup */
@@ -121,18 +127,64 @@ struct webirc_verify_ctx {
   char ipaddr[SOCKIPLEN + 1];       /**< WEBIRC IP address */
   char options[256];                /**< WEBIRC options */
   struct irc_in_addr addr;          /**< Parsed IP address */
+  struct webirc_tried *tried;       /**< The blocks' passwords checked for
+                                         this line so far, the last first */
 };
 
 /** Free a WEBIRC check's context, wiping the password the gateway gave. */
 static void webirc_ctx_free(struct webirc_verify_ctx *ctx)
 {
   volatile char *p;
+  struct webirc_tried *t;
 
   for (p = ctx->given; p && *p; p++)
     *p = '\0';
   MyFree(ctx->given);
   MyFree(ctx->passwd);
+  while ((t = ctx->tried)) {
+    ctx->tried = t->next;
+    MyFree(t);
+  }
   MyFree(ctx);
+}
+
+/** Note that the line has been checked against password (hash) \a hash
+ * (NULL: a block without one). */
+static void webirc_tried_add(struct webirc_verify_ctx *ctx, const char *hash)
+{
+  struct webirc_tried *t;
+
+  if (!hash)
+    hash = "";
+  t = (struct webirc_tried *) MyMalloc(sizeof(*t) + strlen(hash));
+  strcpy(t->hash, hash);
+  t->next = ctx->tried;
+  ctx->tried = t;
+}
+
+/** The first block matching \a cptr now, in find_webirc_conf()'s order,
+ * whose password the line has not been checked against yet.  By the
+ * password, not the place in the list: a rehash between two checks may
+ * remove, add or reorder blocks, and the line is still checked against
+ * each password of a block that matches once and only once (two blocks
+ * with the same hash give the same answer).
+ * @return The block, or NULL when every one has been tried.
+ */
+static struct WebIRCConf *webirc_untried(struct Client *cptr,
+                                         struct webirc_verify_ctx *ctx)
+{
+  struct WebIRCConf *wconf;
+  struct webirc_tried *t;
+  int n;
+
+  for (n = 0; (wconf = find_webirc_conf_by_host_nth(cptr, n)); n++) {
+    for (t = ctx->tried; t; t = t->next)
+      if (!strcmp(t->hash, wconf->passwd ? wconf->passwd : ""))
+        break;
+    if (!t)
+      return wconf;
+  }
+  return NULL;
 }
 
 /** A WEBIRC that no block here accepts: no block matches the gateway
@@ -311,6 +363,68 @@ static void apply_webirc_changes(struct Client *cptr, struct WebIRCConf *wconf,
     auth_dnsbl_restart(cli_auth(cptr));
 }
 
+static void webirc_password_verified(int result, void *arg);
+
+/** Start checking the password the gateway gave against \a wconf's on the
+ * thread pool; the client's WEBIRC is pending on it until it finishes.
+ * @return Zero if the check started; else nothing has changed.
+ */
+static int webirc_check_start(struct Client *cptr,
+                              struct webirc_verify_ctx *ctx,
+                              struct WebIRCConf *wconf)
+{
+  MyFree(ctx->passwd);
+  DupString(ctx->passwd, wconf->passwd);
+  if (ircd_crypt_verify_async(ctx->given, ctx->passwd,
+                              webirc_password_verified, ctx) != 0)
+    return -1;
+  SetWebIRCPending(cptr);
+  cli_checkcookie(cptr) = ctx->cookie;
+  Debug((DEBUG_INFO, "m_webirc: started async verification for %s [%s]",
+         cli_sockhost(cptr), cli_sock_ip(cptr)));
+  return 0;
+}
+
+/** Check the line against the next block for the gateway not tried yet,
+ * as find_webirc_conf() tries each in turn: on the thread pool (one hash
+ * at a time), or at once when the pool refuses the task (its queue is
+ * full).  When the pool is not running the server is shutting down (DIE,
+ * RESTART: the pool stops before it delivers its last results): nothing
+ * more is hashed, on the main thread least of all, and the line is not
+ * accepted.
+ * @param[out] pwconf The block that accepts, when one does.
+ * @return 0 if a check is out (the WEBIRC is pending again), 1 if a block
+ *   accepts, -1 if none does.
+ */
+static int webirc_chain_next(struct Client *cptr, struct webirc_verify_ctx *ctx,
+                             struct WebIRCConf **pwconf)
+{
+  struct WebIRCConf *wconf;
+  char *crypted;
+  int ok;
+
+  while ((wconf = webirc_untried(cptr, ctx))) {
+    webirc_tried_add(ctx, wconf->passwd);
+    if (EmptyString(wconf->passwd)) {
+      *pwconf = wconf;
+      return 1;
+    }
+    if (!ircd_crypt_async_available())
+      break;
+    if (!webirc_check_start(cptr, ctx, wconf))
+      return 0;
+    crypted = ircd_crypt(ctx->given, wconf->passwd);
+    ok = crypted && !strcmp(crypted, wconf->passwd);
+    MyFree(crypted);
+    if (ok) {
+      *pwconf = wconf;
+      return 1;
+    }
+  }
+  *pwconf = NULL;
+  return -1;
+}
+
 /**
  * Callback invoked when async WEBIRC password verification completes.
  * Called in main thread context via thread_pool_poll().
@@ -321,6 +435,7 @@ static void webirc_password_verified(int result, void *arg)
   struct Client *cptr;
   struct WebIRCConf *wconf = NULL;
   int res = 1;                   /* refused: as find_webirc_conf()'s status */
+  int n;
   const char *found = NULL;
 
   /* Look up client by fd */
@@ -347,16 +462,44 @@ static void webirc_password_verified(int result, void *arg)
   cli_checkcookie(cptr) = 0;
 
   /* Judged by the configuration in force now (a rehash during the check
-   * may have removed or re-passworded the block): the block that matches
-   * the connection now, with the password that was checked. */
+   * may have removed or re-passworded the block): the first block that
+   * matches the connection now with the password that was checked.  When
+   * none holds it any more, the blocks whose passwords have not been
+   * checked yet are (a rehash may have stored the same password under
+   * another hash); when none accepts, it is refused for what was found. */
   if (result == CRYPT_VERIFY_MATCH) {
-    wconf = find_webirc_conf_by_host(cptr);
-    if (!wconf)
-      res = 2, found = "no WebIRC block";
-    else if (!wconf->passwd || strcmp(wconf->passwd, ctx->passwd))
-      found = "password changed";
-    else
+    for (n = 0; (wconf = find_webirc_conf_by_host_nth(cptr, n)); n++)
+      if (wconf->passwd && !strcmp(wconf->passwd, ctx->passwd))
+        break;
+    if (wconf)
       res = 0;
+    else {
+      switch (webirc_chain_next(cptr, ctx, &wconf)) {
+      case 0:
+        return;
+      case 1:
+        res = 0;
+        break;
+      default:
+        if (find_webirc_conf_by_host(cptr))
+          found = "password changed";
+        else
+          res = 2, found = "no WebIRC block";
+      }
+    }
+  } else {
+    /* Not this block's password -- a mismatch, or an error: an untagged
+     * hash (raw bcrypt, crypt(3)) that does not match makes the hash
+     * fail, and a check the pool discarded reports one -- so, as
+     * find_webirc_conf() does, the next block for the gateway not tried
+     * yet is.  The hold on registration stays while a check is out. */
+    switch (webirc_chain_next(cptr, ctx, &wconf)) {
+    case 0:
+      return;
+    case 1:
+      res = 0;
+      break;
+    }
   }
 
   if (res) {
@@ -522,7 +665,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ctx = (struct webirc_verify_ctx *)MyMalloc(sizeof(struct webirc_verify_ctx));
     ctx->fd = cli_fd(cptr);
     ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
-    DupString(ctx->passwd, wconf->passwd);
+    ctx->passwd = NULL;
+    ctx->tried = NULL;
     DupString(ctx->given, password);
     memcpy(&ctx->addr, &addr, sizeof(ctx->addr));
     ircd_strncpy(ctx->username, username, USERLEN + 1);
@@ -530,14 +674,12 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ircd_strncpy(ctx->ipaddr, ipaddr, SOCKIPLEN + 1);
     ircd_strncpy(ctx->options, options ? options : "", sizeof(ctx->options) - 1);
 
-    if (ircd_crypt_verify_async(password, wconf->passwd,
-                                 webirc_password_verified, ctx) == 0) {
+    /* The first block for the gateway; a mismatch tries the next one
+     * (webirc_password_verified()). */
+    webirc_tried_add(ctx, wconf->passwd);
+    if (webirc_check_start(cptr, ctx, wconf) == 0) {
       /* Async verification started; registration waits for it */
-      SetWebIRCPending(cptr);
-      cli_checkcookie(cptr) = ctx->cookie;
       auth_webirc_hold(cli_auth(cptr));
-      Debug((DEBUG_INFO, "m_webirc: started async verification for %s [%s]",
-             cli_sockhost(cptr), cli_sock_ip(cptr)));
       return 0;
     }
 
