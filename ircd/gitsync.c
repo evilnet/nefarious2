@@ -839,43 +839,27 @@ gitsync_way_cb(git_checkout_notify_t why, const char *path,
   return 0;
 }
 
-/** A sync never destroys a file it did not put there: a dry run of a SAFE
- * checkout of \a commit (GIT_CHECKOUT_SAFE | GIT_CHECKOUT_DRY_RUN |
- * GIT_CHECKOUT_DONT_OVERWRITE_IGNORED) finds what is in the way -- an
- * untracked or ignored file or directory the update would overwrite or
- * remove (gitsync_way_cb()) -- and any such path refuses the sync whole,
- * naming it.  (libgit2's stash cannot move just those paths aside: given
- * a pathspec, git_stash_save_with_opts() still stashes, and removes, every
- * untracked file.)  The hard reset that follows has only tracked files --
- * GitSync's -- to update.
+/** Dry-run a SAFE checkout of \a commit (GIT_CHECKOUT_SAFE |
+ * GIT_CHECKOUT_DRY_RUN | GIT_CHECKOUT_DONT_OVERWRITE_IGNORED) and gather
+ * what is in the way (gitsync_way_cb()) into \a w.
  * @return 0, or -1 with gitsync_stats.last_error set. */
 static int
-gitsync_check_in_the_way(git_repository *repo, git_object *commit,
-                         const char *checkout)
+gitsync_dry_run(git_repository *repo, git_object *commit,
+                struct gitsync_in_the_way *w)
 {
   git_checkout_options opts;
-  struct gitsync_in_the_way w;
   int error;
 
-  memset(&w, 0, sizeof(w));
+  memset(w, 0, sizeof(*w));
   git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
   opts.checkout_strategy = GIT_CHECKOUT_SAFE | GIT_CHECKOUT_DRY_RUN
     | GIT_CHECKOUT_DONT_OVERWRITE_IGNORED;
   opts.notify_flags = GIT_CHECKOUT_NOTIFY_CONFLICT | GIT_CHECKOUT_NOTIFY_UPDATED
     | GIT_CHECKOUT_NOTIFY_UNTRACKED;
   opts.notify_cb = gitsync_way_cb;
-  opts.notify_payload = &w;
+  opts.notify_payload = w;
   error = git_checkout_tree(repo, commit, &opts);
-  if (w.n) {
-    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "commit %.8s would overwrite or remove %s%s in %s, which "
-                  "GitSync did not put there; not applied -- move %s away",
-                  git_oid_tostr_s(git_object_id(commit)), w.paths,
-                  w.n > 3 ? " and more" : "", checkout,
-                  w.n == 1 ? "it" : "them");
-    return -1;
-  }
-  if (error < 0 && error != GIT_ECONFLICT) {
+  if (error < 0 && error != GIT_ECONFLICT && !w->n) {
     const git_error *e = git_error_last();
 
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
@@ -883,6 +867,90 @@ gitsync_check_in_the_way(git_repository *repo, git_object *commit,
                   e && e->message ? e->message : "unknown error");
     return -1;
   }
+  return 0;
+}
+
+/** A sync never destroys a file it did not put there: when a dry run finds
+ * something untracked or ignored in the way of the update, the checkout's
+ * untracked (and ignored) files -- all of them -- are moved to its git
+ * stash (one entry, as "GitSync"), and the update proceeds.  If they
+ * cannot be stashed, or something is still in the way afterwards, the
+ * sync is refused and nothing changes.  The hard reset that follows has
+ * only tracked files -- GitSync's -- to update.
+ * @return 0, or -1 with gitsync_stats.last_error set. */
+static int
+gitsync_clear_the_way(git_repository *repo, git_object *commit,
+                      const char *checkout)
+{
+  struct gitsync_in_the_way w;
+  git_signature *sig = NULL;
+  git_oid oid;
+  char msg[200], when[32];
+  time_t now = time(NULL);
+  int error;
+
+  if (gitsync_dry_run(repo, commit, &w))
+    return -1;
+  if (!w.n)
+    return 0;                   /* a normal sync touches nothing untracked */
+
+  strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S UTC", gmtime(&now));
+  ircd_snprintf(0, msg, sizeof(msg), "GitSync: files in the way of commit "
+                "%.8s, %s", git_oid_tostr_s(git_object_id(commit)), when);
+  error = git_signature_now(&sig, "GitSync", "gitsync@localhost");
+  if (error == 0)
+    error = git_stash_save(&oid, repo, sig, msg, GIT_STASH_INCLUDE_UNTRACKED
+                           | GIT_STASH_INCLUDE_IGNORED);
+  git_signature_free(sig);
+  if (error < 0) {
+    const git_error *e = git_error_last();
+
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "commit %.8s would overwrite or remove %s%s in %s, which "
+                  "GitSync did not put there, and the checkout cannot be "
+                  "stashed (%s); not applied",
+                  git_oid_tostr_s(git_object_id(commit)), w.paths,
+                  w.n > 3 ? " and more" : "", checkout,
+                  e && e->message ? e->message : "unknown error");
+    return -1;
+  }
+  log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: %s%s (%d) in the way of commit "
+            "%.8s: ALL untracked files in %s were moved to its git stash -- "
+            "\"git -C %s stash list\" shows them, \"git -C %s stash pop\" "
+            "puts them back", w.paths, w.n > 3 ? " ..." : "", w.n,
+            git_oid_tostr_s(git_object_id(commit)), checkout, checkout,
+            checkout);
+  sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: %s%s (%d) in the way of "
+                       "commit %.8s: ALL untracked files in %s were moved to "
+                       "its git stash -- \"git -C %s stash pop\" puts them "
+                       "back", w.paths, w.n > 3 ? " ..." : "", w.n,
+                       git_oid_tostr_s(git_object_id(commit)), checkout,
+                       checkout);
+
+  /* Still in the way (a case the stash does not clear): refuse, never
+   * force. */
+  if (gitsync_dry_run(repo, commit, &w))
+    return -1;
+  if (w.n) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "commit %.8s would still overwrite or remove %s%s in %s "
+                  "after stashing; not applied",
+                  git_oid_tostr_s(git_object_id(commit)), w.paths,
+                  w.n > 3 ? " and more" : "", checkout);
+    return -1;
+  }
+  return 0;
+}
+
+/** git_stash_foreach() callback: count. */
+static int
+gitsync_stash_count_cb(size_t index, const char *message,
+                       const git_oid *stash_id, void *payload)
+{
+  (void)index;
+  (void)message;
+  (void)stash_id;
+  ++*(unsigned long *) payload;
   return 0;
 }
 
@@ -1004,9 +1072,9 @@ gitsync_first_clone(const char *repo_url, const char *repo_path,
  * (GIT_REMOTE_CREATE_SKIP_INSTEADOF) and without a proxy
  * (GIT_PROXY_NONE): whatever the checkout's .git/config says about
  * "origin", insteadOf or proxies does not redirect it.  The commit is
- * checked (gitsync_check_commit()), and a file in the way that GitSync
- * did not put there (gitsync_check_in_the_way()) refuses the sync before
- * anything changes.  Then a hard
+ * checked (gitsync_check_commit()), and when something untracked is in
+ * the way the checkout's untracked files go to its git stash
+ * (gitsync_clear_the_way()); a refusal from either changes nothing.  Then a hard
  * reset: tracked files (GitSync's) are updated, other untracked ones stay
  * -- no clean ever runs; objects left behind stay in .git (no gc).
  * @param repo The checkout.
@@ -1090,7 +1158,7 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
   /* Nothing of the commit reaches the checkout before it is checked, and
    * a sync never overwrites a file it did not put there. */
   if (gitsync_check_commit(target)
-      || gitsync_check_in_the_way(repo, target, checkout)) {
+      || gitsync_clear_the_way(repo, target, checkout)) {
     git_object_free(target);
     return GITSYNC_CHECKOUT_ERROR;
   }
@@ -2081,6 +2149,8 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
 
   /* Read linesync.data */
   status = gitsync_read_data(repo_path, &content, &len);
+  gitsync_stats.stash_entries = 0;
+  git_stash_foreach(repo, gitsync_stash_count_cb, &gitsync_stats.stash_entries);
   git_repository_free(repo);
 
   if (status != GITSYNC_OK) {

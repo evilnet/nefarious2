@@ -521,6 +521,10 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                     sptr, stats->last_commit);
     }
 
+    if (stats->stash_entries)
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Stash entries: %lu (git "
+                    "stash list in the checkout)", sptr, stats->stash_entries);
+
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Last status: %s",
                   sptr, gitsync_status_str(stats->last_status));
 

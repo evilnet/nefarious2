@@ -58,6 +58,7 @@ struct GitsyncStats {
   enum GitsyncStatus last_status; /**< Status of last sync */
   char last_error[256];     /**< Last error message */
   char last_commit[64];     /**< Last synced commit hash */
+  unsigned long stash_entries; /**< Entries in the checkout's git stash */
 };
 
 /** The file GitSync writes its configuration to (GITSYNC_CONF_FILE, or
