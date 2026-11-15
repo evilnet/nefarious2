@@ -735,6 +735,10 @@ static char gitsync_last_content_hash[GITSYNC_HASHLEN];
  * changes; a forced one does. */
 static char gitsync_refused_content_hash[GITSYNC_HASHLEN];
 
+/** Set by gitsync_apply() when the sync in progress wrote new content
+ * and rehashed with it. */
+static int gitsync_applied;
+
 /** Apply downloaded configuration
  * Writes to gitsync.conf and triggers a rehash only if content changed.
  * Uses safe write: writes to .new, backs up old to .bak, then renames.
@@ -875,6 +879,7 @@ gitsync_apply(const char *content, size_t len, int force,
   ircd_strncpy(gitsync_last_content_hash, content_hash,
                sizeof(gitsync_last_content_hash) - 1);
   gitsync_refused_content_hash[0] = '\0';
+  gitsync_applied = 1;
 
   /* Keep backup for safety, but could optionally delete it here */
   /* unlink(bak_file); */
@@ -1234,6 +1239,7 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
   int error;
 
   gitsync_stats.last_attempt = now;
+  gitsync_applied = 0;
 
   /* Check if enabled */
   if (!feature_bool(FEAT_GITSYNC_ENABLE)) {
@@ -1414,8 +1420,32 @@ int
 gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
 {
   int killed = 0;
+  enum GitsyncStatus status;
 
-  gitsync_run(cptr, sptr, force, &killed);
+  status = gitsync_run(cptr, sptr, force, &killed);
+
+  /* A sync nobody asked for -- the first one after GitSync starts, or a
+   * periodic one -- says what it did in the log: new content applied
+   * (operators were told "Wrote ..., rehashing"), or a failure and why
+   * (operators are told too, as the oper who asks for one is).  Nothing
+   * for unchanged content, for content refused before, or when it was
+   * not yet time. */
+  if (!sptr) {
+    const char *kind = force ? "First sync after start" : "Periodic sync";
+
+    if (status == GITSYNC_OK) {
+      if (gitsync_applied)
+        log_write(LS_SYSTEM, L_NOTICE, 0, "GitSync: %s applied commit "
+                  "%.8s to %s", kind, gitsync_stats.last_commit,
+                  gitsync_conf_file());
+    } else if (status != GITSYNC_REFUSED && status != GITSYNC_DISABLED) {
+      log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: %s failed (%s): %s",
+                kind, gitsync_status_str(status), gitsync_stats.last_error);
+      sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: %s failed (%s): %s",
+                           kind, gitsync_status_str(status),
+                           gitsync_stats.last_error);
+    }
+  }
 
   /* libssh2 runs on OpenSSL's libcrypto and leaves errors on this
    * thread's queue: it reads an OpenSSH-format key through OpenSSL's PEM
