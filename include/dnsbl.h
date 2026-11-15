@@ -91,6 +91,8 @@ struct DNSBLRequest {
   int cancelled;                 /**< Set if request was cancelled (client disconnected) */
   enum DNSBLAction action;       /**< Highest priority action */
   char *mark;                    /**< Mark string to apply */
+  char **marks;                  /**< Every matching entry's mark (its reason) */
+  int nmarks;                    /**< How many */
   struct irc_in_addr addr;       /**< The address asked about (the cache key) */
   struct DNSBLAnswer *answers;   /**< The answers so far (for the cache) */
   int nanswers;                  /**< How many */
@@ -159,6 +161,13 @@ extern int dnsbl_complete(struct DNSBLRequest *request);
  */
 extern int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
                         enum DNSBLAction *action, const char **mark);
+
+/** Give a client that stays every mark its DNSBL check found: each
+ * matching entry's (as the iauthd scripts mark a client they pass).
+ * @param cptr The client
+ * @param request Its completed DNSBL request
+ */
+extern void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request);
 
 /** Format an IPv4 address for DNSBL lookup
  * @param addr IPv4 address (last 32 bits of irc_in_addr)

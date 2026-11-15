@@ -95,6 +95,16 @@ static void answer(int i, int listed, int last)
   answer_addr(i, listed, 0, last);
 }
 
+/* s_conf.c: the marks given to the client. */
+static char marks_given[8][32];
+static int nmarks_given;
+int add_mark(struct Client *sptr, const char *mark)
+{
+  assert_true(nmarks_given < 8);
+  ircd_strncpy(marks_given[nmarks_given++], mark, sizeof(marks_given[0]));
+  return 0;
+}
+
 static int completes;
 void auth_dnsbl_complete(struct AuthRequest *auth) { completes++; }
 
@@ -513,6 +523,37 @@ static void one_failed_lookup_caches_nothing(void **state)
   dnsbl_cancel(again(0));
 }
 
+/** Every matching entry marks a client that stays -- two mark entries,
+ * and the reason of a block_anon entry the client is not refused by
+ * (logged in) -- as the scripts mark the clients they pass; an entry that
+ * does not match marks nothing. */
+static void every_matching_entry_marks(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+  enum DNSBLAction action;
+  const char *mark;
+  int i;
+
+  dnsbl_clear_servers();
+  dnsbl_add_server("uce.test", "2", 0, DNSBL_ACT_MARK, "uce-2", 0);
+  dnsbl_add_server("cbl.test", "2", 0, DNSBL_ACT_MARK, "cbl", 0);
+  dnsbl_add_server("sorbs.test", "2,3", 0, DNSBL_ACT_BLOCK_ANON, "sorbs", 0);
+  dnsbl_add_server("tor.test", "4", 0, DNSBL_ACT_BLOCK_ANON, "tor", 0);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  for (i = 0; i < nqueries; i++)
+    answer(i, 1, 2);
+  assert_int_equal(dnsbl_result(&client, req, &action, &mark), 1);
+  assert_int_equal(action, DNSBL_ACT_BLOCK_ANON);
+  nmarks_given = 0;
+  dnsbl_apply_marks(&client, req);           /* logged in: it stays */
+  assert_int_equal(nmarks_given, 3);
+  for (i = 0; i < nmarks_given; i++)
+    assert_true(!strcmp(marks_given[i], "uce-2") || !strcmp(marks_given[i], "cbl")
+                || !strcmp(marks_given[i], "sorbs"));
+  assert_true(IsMarked(&client));
+  dnsbl_cancel(req);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -524,6 +565,7 @@ int main(void)
     cmocka_unit_test_setup(same_domain_entries_keep_their_own_answers, setup),
     cmocka_unit_test_setup(reply_values_match_as_the_scripts_do, setup),
     cmocka_unit_test_setup(junk_index_refused, setup),
+    cmocka_unit_test_setup(every_matching_entry_marks, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

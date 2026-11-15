@@ -35,6 +35,7 @@
 #include "res.h"
 #include "s_auth.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "s_stats.h"
 #include "send.h"
@@ -437,13 +438,32 @@ dnsbl_live_server(const struct DNSBLQueryContext *ctx)
 static void
 dnsbl_request_free(struct DNSBLRequest *req)
 {
+  int i;
+
   if (!req)
     return;
 
   if (req->mark)
     MyFree(req->mark);
+  for (i = 0; i < req->nmarks; i++)
+    MyFree(req->marks[i]);        /* (a macro: no side effects in its argument) */
+  MyFree(req->marks);
   dnsbl_answers_free(req->answers, req->nanswers);
   MyFree(req);
+}
+
+/** Keep \a mark for the client of \a req (once). */
+static void
+dnsbl_note_mark(struct DNSBLRequest *req, const char *mark)
+{
+  int i;
+
+  for (i = 0; i < req->nmarks; i++)
+    if (!strcmp(req->marks[i], mark))
+      return;
+  req->marks = (char **)MyRealloc(req->marks, (req->nmarks + 1) * sizeof(char *));
+  DupString(req->marks[req->nmarks], mark);
+  req->nmarks++;
 }
 
 /** Judge one entry's answer for \a req: \a value is the reply value (the
@@ -460,6 +480,11 @@ dnsbl_judge(struct DNSBLRequest *req, struct DNSBLServer *server,
     return;
   server->hits++;
   req->result++;
+
+  /* Every matching entry marks the client (if it stays), whatever its
+   * action: the scripts' marks{} (iauthd.pl, iauthd-ts) */
+  if (server->mark)
+    dnsbl_note_mark(req, server->mark);
 
   /* Process the action based on priority */
   switch (server->action) {
@@ -799,6 +824,18 @@ dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
     *mark = NULL;
 
   return 0;
+}
+
+void
+dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request)
+{
+  int i;
+
+  if (!request || !request->nmarks)
+    return;
+  for (i = 0; i < request->nmarks; i++)
+    add_mark(cptr, request->marks[i]);
+  SetMarked(cptr);
 }
 
 const struct DNSBLStats *

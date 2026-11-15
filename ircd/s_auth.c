@@ -793,12 +793,10 @@ static int check_auth_finished(struct AuthRequest *auth)
                  ":%s (Log in to connect)", feature_str(FEAT_DNSBL_BLOCKMSG));
       return exit_client(auth->client, auth->client, &me, "DNSBL blocked (anonymous)");
     }
-    else if (action == DNSBL_ACT_MARK && mark)
-    {
-      /* Apply the mark to the client */
-      add_mark(auth->client, mark);
-      SetMarked(auth->client);
-    }
+    /* The client stays (not listed, whitelisted, marked, or blocked as
+     * anonymous but logged in): every matching entry's mark applies, as
+     * the iauthd scripts mark the clients they pass. */
+    dnsbl_apply_marks(auth->client, auth->dnsbl_request);
   }
 
   /* Check if iauth is done.  A held client waits as a pending one does:

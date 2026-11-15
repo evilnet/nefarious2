@@ -201,6 +201,7 @@ int dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
 int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
                  enum DNSBLAction *action, const char **mark) { fail(); return 0; }
 int add_mark(struct Client *sptr, const char *dnsbl) { return 0; }
+void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request) {}
 char *get_client_class(struct Client *acptr) { return "class"; }
 const char *get_client_name(const struct Client *sptr, int showip) { return "name"; }
 int hAddClient(struct Client *cptr) { return 0; }
