@@ -206,6 +206,8 @@ const char *get_client_name(const struct Client *sptr, int showip) { return "nam
 int hAddClient(struct Client *cptr) { return 0; }
 struct Client *hSeekClient(const char *name, int TMask) { return NULL; }
 void IPcheck_connect_fail(const struct Client *cptr, int disconnect) {}
+int IPcheck_remote_connect(struct Client *cptr, int is_burst) { return 1; }
+int find_except_conf(struct Client *cptr, int flags) { return 0; }
 unsigned int ircrandom(void) { return 4; }
 int exit_client(struct Client *cptr, struct Client *victim,
                 struct Client *killer, const char *comment)
@@ -610,6 +612,26 @@ static void webirc_restarts_the_dnsbl_lookup(void **state)
   assert_int_equal(dnsbl_cancels, 2);            /* the new one goes too */
 }
 
+/** IAuth gives the client another address (its I line): the DNSBL lookup
+ * made for the old one is cancelled and one made for the new one, which
+ * registration waits for -- as a WEBIRC does (auth_dnsbl_restart()). */
+static void iauth_new_address_restarts_the_dnsbl_lookup(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+  struct DNSBLRequest *old_req = &dnsbl_reqs[0];
+  char ip[] = "192.0.2.99";
+  char *params[] = { ip, NULL };
+
+  a->auth->dnsbl_request = old_req;
+  assert_int_equal(iauth_cmd_ip_address(NULL, &a->cli, 1, params), 0);
+  assert_int_equal(dnsbl_cancels, 1);
+  assert_ptr_equal(dnsbl_cancelled, old_req);
+  assert_int_equal(dnsbl_checks, 1);
+  assert_true(FlagHas(&a->auth->flags, AR_DNSBL_PENDING));
+  assert_string_equal(ircd_ntoa(&cli_ip(&a->cli)), "192.0.2.99");
+  destroy_auth_request(a->auth);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -627,6 +649,7 @@ int main(void)
     cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),
     cmocka_unit_test_setup(webirc_restarts_the_dnsbl_lookup, setup),
+    cmocka_unit_test_setup(iauth_new_address_restarts_the_dnsbl_lookup, setup),
   };
 
   event_init(64);

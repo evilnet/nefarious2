@@ -3772,6 +3772,10 @@ static int iauth_cmd_ip_address(struct IAuth *iauth, struct Client *cli,
   if (!find_except_conf(cli, EFLAG_IPCHECK))
     IPcheck_remote_connect(cli, 0);
 
+  /* The native DNSBL lookup made at connect asked about the old address:
+   * ask about the new one (as a local WEBIRC does). */
+  auth_dnsbl_restart(auth);
+
   return 0;
 }
 
