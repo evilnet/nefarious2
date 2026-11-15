@@ -1431,7 +1431,11 @@ static void conf_gitsync_placeholder(const struct AbsentInclude *ai)
   if (0 == stat(ai->name, &st))
     return;     /* written for an earlier include of the same name */
 
-  if (conf_checking)
+  if (0 == lstat(ai->name, &st) && S_ISLNK(st.st_mode)) {
+    level = L_WARNING;
+    state = "is a symbolic link to a file that does not exist";
+    what = conf_checking ? "" : ", no placeholder written over the link";
+  } else if (conf_checking)
     what = " (configuration check: not written)";
   /* O_EXCL: never replace a file that appeared since the include was
    * read, nor follow a symbolic link. */
@@ -1442,11 +1446,6 @@ static void conf_gitsync_placeholder(const struct AbsentInclude *ai)
       why = strerror(errno);
     }
     close(fd);
-  } else if (errno == EEXIST && 0 == lstat(ai->name, &st) &&
-             S_ISLNK(st.st_mode)) {
-    level = L_WARNING;
-    state = "is a symbolic link to a file that does not exist";
-    what = ", no placeholder written over the link";
   } else {
     level = L_WARNING;
     what = ", no placeholder: ";
