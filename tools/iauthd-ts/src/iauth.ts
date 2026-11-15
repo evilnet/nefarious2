@@ -23,6 +23,8 @@ const VERSION = '1.0.0';
 
 export class IAuthDaemon {
   private config: Config;
+  /** The #IAUTH lines as last loaded, shown to the ircd (A * iauthd-ts) */
+  private configLines: string[];
   private configPath: string;
   private options: CLIOptions;
   private clients = new Map<number, ClientState>();
@@ -40,8 +42,10 @@ export class IAuthDaemon {
   constructor(options: CLIOptions) {
     this.options = options;
     this.configPath = options.config;
-    const { config } = readConfigFile(options.config);
+    // One parse per load: it is also where bad lines are reported
+    const { config, configLines } = readConfigFile(options.config);
     this.config = config;
+    this.configLines = configLines;
 
     // Initialize DNSBL counters
     for (const dnsbl of this.config.dnsbls) {
@@ -192,8 +196,7 @@ export class IAuthDaemon {
     this.send('a');
     this.send(`A * version :Nefarious iauthd-ts ${VERSION}`);
 
-    const { configLines } = readConfigFile(this.configPath);
-    for (const line of configLines) {
+    for (const line of this.configLines) {
       this.send(`A * iauthd-ts :${line}`);
     }
   }
@@ -316,8 +319,9 @@ export class IAuthDaemon {
       case 'e': // Event
         if (args === 'rehash') {
           this.debug('Got a rehash. Rereading config file');
-          const { config } = readConfigFile(this.configPath);
+          const { config, configLines } = readConfigFile(this.configPath);
           this.config = config;
+          this.configLines = configLines;
           // Reinitialize auth providers
           if (this.authManager) {
             this.authManager.reload().catch(err => {
