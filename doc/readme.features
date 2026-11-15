@@ -1930,6 +1930,26 @@ too, in either order: until then the label tag is ignored (the command
 still runs), and the client is answered exactly as one without
 labeled-response.
 
+A command answered by another server -- remote WHOIS (WHOIS nick nick),
+WHOWAS, VERSION, TIME, ADMIN, MOTD, RULES, OPERMOTD, LUSERS, INFO, LINKS,
+STATS, TRACE and NAMES with a server -- gets its label on the reply when
+the reply can be told to be that command's.  A fork server echoes the
+command's compact msgid in its reply.  A legacy server (stock Nefarious,
+X3) echoes none: its reply is matched by what it names, never by when it
+arrives -- a numeric of the command's family (the WHOIS numerics for a
+WHOIS ...) naming the command's subject (the nick, the server, the STATS
+letter, the channel), coming in over the link the command went out on.
+Lines that name nothing (MOTD's text, LUSERS' counts, INFO, TRACE) are
+the command's when no other command of that family is waiting on that
+link for another server; when one is, they are delivered unlabeled and
+both labels are answered at once (an ACK, or the end of a batch already
+open).  A reply that matches no command goes out unlabeled.  A command
+whose reply never comes (a server split away, services that do not
+answer TIME or MOTD, X3's ADMIN with fewer than three lines) has its
+label answered after 60 seconds: an ACK, or the end of its batch.  A
+legacy server's NOTICEs (VERSION's library lines and LUSERS' connection
+count for an oper) follow the reply and are not labeled.
+
 CAP_draft_multiline
  * Type: boolean
  * Default: TRUE

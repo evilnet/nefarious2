@@ -2574,6 +2574,8 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
       if ((fl || (IsServer(sptr) && fwd_label_is_echo(incoming_msgid)))
           && pm_msgid[0])
         generate_msgid(pm_msgid, sizeof(pm_msgid));
+      if (fl && fl->fl_plain)
+        fl = NULL;   /* an unlabeled command's: delivered as usual */
     }
 
     /* Set client msgid so local client gets @msgid= tag */

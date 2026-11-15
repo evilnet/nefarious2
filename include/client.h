@@ -381,10 +381,11 @@ DECLARE_FLAGSET(Privs, PRIV_LAST_PRIV);
 DECLARE_FLAGSET(Flags, FLAG_LAST_FLAG);
 
 #include "capab.h" /* client capabilities */
+#include "fwd_match.h" /* FWD_SUBJECT_MAX */
 #include "webpush_keyring.h" /* WEBPUSH_KEY_ID_LEN */
 
 /** Maximum number of concurrent forwarded label entries per connection. */
-#define MAX_FORWARDED_LABELS 4
+#define MAX_FORWARDED_LABELS 8
 
 /** State of a forwarded label entry in the FIFO queue. */
 enum ForwardedLabelState {
@@ -394,13 +395,27 @@ enum ForwardedLabelState {
   FWD_LABEL_DRAINING      /**< Terminal seen, draining trailing messages */
 };
 
-/** Tracks a labeled command forwarded to a remote server via hunt_server_cmd.
- * Stored in a per-connection FIFO array on the Connection struct.
+/** Tracks a command forwarded to a remote server via hunt_server_cmd(),
+ * for a client using labeled-response.  Stored in a per-connection FIFO
+ * array on the Connection struct.
+ *
+ * Replies that echo fl_msgid (from fork servers) are matched by it;
+ * replies without a msgid (a legacy server answered) by the command's
+ * family and subject, over the link it went out on (fwd_match.h).  An
+ * unlabeled command is tracked too (fl_plain: no label, no batch), so
+ * that its replies are never taken for a labeled one's.
  */
 struct ForwardedLabel {
-  char                     fl_label[64];   /**< Saved client label */
+  char                     fl_label[64];   /**< Saved client label ("" for fl_plain) */
   char                     fl_batch_id[16]; /**< Batch ID for labeled-response batch */
   char                     fl_msgid[16];   /**< Compact tag msgid for correlation */
+  char                     fl_subject[FWD_SUBJECT_MAX]; /**< What it asked about (fwd_match.h) */
+  char                     fl_dest[4];     /**< Numeric of the server it was sent to */
+  char                     fl_link[4];     /**< Numeric of our link it went out on */
+  unsigned long            fl_seq;         /**< Send order (oldest answered first) */
+  unsigned char            fl_family;      /**< enum FwdFamily */
+  unsigned char            fl_plain;       /**< No label to answer: tracked to keep its replies apart */
+  unsigned char            fl_remaining;   /**< NAMES: channels whose 366 is still to come */
   unsigned short           fl_terminal;    /**< Primary terminal numeric */
   unsigned short           fl_terminal2;   /**< Alternate terminal (0 = none) */
   time_t                   fl_created;     /**< For timeout cleanup */
@@ -601,6 +616,8 @@ struct Connection
   unsigned char       con_labeled_batch; /**< Depth (1-based) of the frame labeled_batch_start() opened, 0 = none */
   unsigned char       con_fwd_adopted; /**< Depth (1-based) of the labeled batch a forwarded label took over (it outlives the line), 0 = none */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
+  unsigned int        con_fwd_untracked; /**< Families (1 << enum FwdFamily) of a forwarded command left untracked, since con_fwd_untracked_at */
+  time_t              con_fwd_untracked_at; /**< When the last of them went out */
   /* WebSocket state for RFC 6455 compliance */
   unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */

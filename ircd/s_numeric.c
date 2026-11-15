@@ -112,7 +112,13 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
 
       /* Check for forwarded label batch wrapping */
       struct ForwardedLabel *fl = fwd_label_find(acptr, incoming_msgid);
-      if (fl) {
+      if (fl && fl->fl_plain) {
+        /* An unlabeled command's reply, matched by its msgid: it goes out
+         * plain, below; its end frees the entry. */
+        if (fwd_label_is_terminal(fl, numeric))
+          fwd_label_close_batch(acptr, fl);
+        fl = NULL;
+      } else if (fl) {
         if (fl->fl_state == FWD_LABEL_PENDING)
           fwd_label_open_batch(acptr, fl);
 
@@ -145,8 +151,32 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
         return 0;
       }
 
+      /* No msgid: a legacy server answered (or a fork hop on the way
+       * dropped it).  The reply is matched by what it names -- its
+       * family and subject, over the link it came in on -- never by when
+       * it arrives (fwd_label_match()); one that matches no command of
+       * the asker's, or cannot be told apart, goes out plain, below. */
+      else if (!incoming_msgid[0]) {
+        struct Client *owner;
+        int fit;
+
+        if ((fl = fwd_label_match(acptr, numeric, parv[2], cptr, sptr,
+                                  &owner, &fit))) {
+          if (!fl->fl_plain) {
+            if (fl->fl_state == FWD_LABEL_PENDING)
+              fwd_label_open_batch(owner, fl);
+            sendcmdto_set_fwd_batch(fl->fl_batch_id);
+            sendcmdto_one_tags(from, num, num, owner, "%C %s", acptr, parv[2]);
+            fwd_label_reply_ends(owner, fl, fit);
+            return 0;
+          }
+          fwd_label_reply_ends(owner, fl, fit);
+        }
+      }
+
       /* Numeric with different/no msgid: close any DRAINING batches */
-      fwd_label_close_draining(acptr);
+      if (!fl)
+        fwd_label_close_draining(acptr);
     } else {
       /* Remote client: relay numeric, preserving compact tag for correlation */
       if (cli_s2s_msgid(cptr)[0] && cli_s2s_time_ms(cptr))

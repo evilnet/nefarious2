@@ -333,24 +333,19 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
       from = prim;
   }
 
-  /* Save label and generate compact tag for forwarded labeled commands.
-   * Must happen before sendcmdto_one which picks up the s2s overrides.
-   *
-   * Only toward an IRCv3-aware destination: the label is correlated to
-   * the reply by the compact msgid, which a legacy server neither
-   * receives (send.c gates the @A prefix on IsIRCv3Aware) nor echoes.
-   * With no possible correlation the honest outcome is the plain
-   * labeled ACK now and untagged numerics when they arrive. */
-  if (MyConnect(from) && cli_label(from)[0] &&
-      feature_bool(FEAT_CAP_labeled_response) &&
-      LabeledResponseInUse(from) &&
-      IsIRCv3Aware(acptr)) {
+  /* Track the command for the asker's labeled-response, and arm its
+   * compact msgid -- before sendcmdto_one, which picks up the s2s
+   * overrides.  A fork server answers with the msgid, and the reply is
+   * matched to the command by it; a legacy server (send.c gates the @A
+   * prefix on IsIRCv3Aware) answers without one, and the reply is
+   * matched by what it names (fwd_label_match()).  On the way for
+   * another server's user, the command keeps the msgid it came with. */
+  if (MyConnect(from)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if (fwd_label_save(from, cmd, msgid, &time_ms)) {
-      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
-        sendcmdto_set_s2s_tags(time_ms, msgid);
-    }
+    if (fwd_label_forward(from, cmd, acptr, parc, parv, msgid, &time_ms)
+        && feature_bool(FEAT_P10_MESSAGE_TAGS))
+      sendcmdto_set_s2s_tags(time_ms, msgid);
   } else
     hunt_relay_msgid(from);
 
@@ -436,18 +431,14 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
       from = prim;
   }
 
-  /* Save label and generate compact tag for forwarded labeled commands.
-   * IRCv3-aware destinations only -- see hunt_server_cmd. */
-  if (MyConnect(from) && cli_label(from)[0] &&
-      feature_bool(FEAT_CAP_labeled_response) &&
-      LabeledResponseInUse(from) &&
-      IsIRCv3Aware(acptr)) {
+  /* Labeled-response tracking and the compact msgid -- see
+   * hunt_server_cmd. */
+  if (MyConnect(from)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if (fwd_label_save(from, cmd, msgid, &time_ms)) {
-      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
-        sendcmdto_set_s2s_tags(time_ms, msgid);
-    }
+    if (fwd_label_forward(from, cmd, acptr, parc, parv, msgid, &time_ms)
+        && feature_bool(FEAT_P10_MESSAGE_TAGS))
+      sendcmdto_set_s2s_tags(time_ms, msgid);
   } else
     hunt_relay_msgid(from);
 

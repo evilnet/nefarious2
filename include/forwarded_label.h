@@ -15,19 +15,59 @@
 struct Client;
 struct ForwardedLabel;
 
-/** Save a client's label for a forwarded command.
- * Looks up the command in the terminal numeric table, finds an empty slot
- * in the client's ForwardedLabel FIFO, generates a batch ID and msgid,
- * and saves all state. Sets cli_label_responded to suppress ACK.
+/** Track a command hunt_server_cmd() forwards for a local client using
+ * labeled-response, just before it goes out: its family and subject
+ * (fwd_match.h), the server it goes to and the link it goes out on, and
+ * -- for a labeled command -- its label, which the reply is to carry (no
+ * ACK at the end of the line; a label already answered by the handler's
+ * own labeled batch has that batch taken over).  An unlabeled command is
+ * tracked too (fl_plain), so that its replies are never taken for a
+ * labeled one's.  Every tracked command gets a compact msgid for the
+ * caller to arm: a fork server's reply echoes it and is matched exactly.
  *
- * @param[in] from    Local client whose label is being saved.
- * @param[in] cmd     Command name (e.g., "WHOIS", "STATS").
- * @param[out] msgid  Buffer to receive the generated HLC msgid (for S2S compact tag).
+ * A command of a family we do not know is not tracked.  One that cannot
+ * be (no free slot, a subject too long) is not either, and then no
+ * command of its family is labeled until its replies can no longer come.
+ *
+ * @param[in] from     Local client sending the command.
+ * @param[in] cmd      Command name (e.g., "WHOIS", "STATS").
+ * @param[in] dest     Server the command is forwarded to.
+ * @param[in] parc     Its parameter count (hunt_server_cmd()'s).
+ * @param[in] parv     Its parameters.
+ * @param[out] msgid   Receives the msgid (for the S2S compact tag).
  * @param[out] time_out Receives the HLC physical_ms for compact tag time.
- * @return 1 if label was saved, 0 if not (unknown command, no empty slot, etc.).
+ * @return 1 if the command is tracked (arm \a msgid), else 0.
  */
-int fwd_label_save(struct Client *from, const char *cmd,
-                   char *msgid, uint64_t *time_out);
+int fwd_label_forward(struct Client *from, const char *cmd, struct Client *dest,
+                      int parc, char *parv[], char *msgid, uint64_t *time_out);
+
+/** Find the tracked forwarded command a reply WITHOUT a msgid answers:
+ * by its family and subject, over the link it came in on
+ * (fwd_match.h, fwd_pick()).  When the candidates cannot be told apart
+ * none of them is labeled from then on (their labels are answered: an
+ * ACK, or the end of the batch) and the oldest is returned unlabeled
+ * (fl_plain) for counting.  Entries past their deadline are given up.
+ *
+ * @param[in] acptr   Local client the reply is addressed to.
+ * @param[in] numeric The reply's numeric.
+ * @param[in] params  Its parameters after the target.
+ * @param[in] link    The link it came in on.
+ * @param[in] source  The server it names as its source.
+ * @param[out] owner  The connection whose command it answers.
+ * @param[out] fit    How it fits (enum FwdFit).
+ * @return The entry, or NULL: the reply goes out as it would without
+ *   labeled-response.
+ */
+struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
+                                       const char *params, struct Client *link,
+                                       struct Client *source,
+                                       struct Client **owner, int *fit);
+
+/** Account for a reply fwd_label_match() matched: an end frees the entry
+ * (ending its batch if one is open); NAMES' 366 ends it at its last
+ * channel.
+ * @return 1 if the entry was freed. */
+int fwd_label_reply_ends(struct Client *owner, struct ForwardedLabel *fl, int fit);
 
 /** Find a ForwardedLabel entry matching the given msgid.
  * If msgid is non-empty, searches by exact match (compact tag correlation).
