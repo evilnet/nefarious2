@@ -73,6 +73,16 @@ extern int gitsync_busy(void);
 /** GitSync's file was replaced by a placeholder: sync soon. */
 extern void gitsync_conf_file_lost(void);
 
+/** ssh-keygen as found on PATH (before a fork), or NULL. */
+extern const char *gitsync_ssh_keygen_path(void);
+
+/** Before fork(): the descriptor limit gitsync_child_close_fds() needs. */
+extern int gitsync_fd_limit(void);
+
+/** In a child, between fork() and exec(): close every descriptor above
+ * stderr.  Async-signal-safe. */
+extern void gitsync_child_close_fds(int limit);
+
 /** Initialize gitsync subsystem */
 extern void gitsync_init(void);
 

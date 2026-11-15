@@ -92,12 +92,19 @@ static int
 run_ssh_keygen_pubkey(const char *key_path, char *output, size_t output_size)
 {
   pid_t pid;
+  const char *keygen;
+  int fd_limit;
   int pipefd[2];
   int status;
   ssize_t total = 0;
 
   if (!validate_safe_path(key_path))
     return -1;
+
+  /* Everything the child needs is ready before the fork. */
+  if (!(keygen = gitsync_ssh_keygen_path()))
+    return -1;
+  fd_limit = gitsync_fd_limit();
 
   if (pipe(pipefd) < 0)
     return -1;
@@ -134,7 +141,8 @@ run_ssh_keygen_pubkey(const char *key_path, char *output, size_t output_size)
       close(devnull);
     }
 
-    execlp("ssh-keygen", "ssh-keygen", "-y", "-f", key_path, (char *)NULL);
+    gitsync_child_close_fds(fd_limit);
+    execl(keygen, "ssh-keygen", "-y", "-f", key_path, (char *)NULL);
     _exit(127);
   }
 
@@ -181,6 +189,8 @@ extract_pubkey_from_pem(const char *pem_path, char *output, size_t output_size)
   char tmpfile[256];
   int tmpfd = -1;
   pid_t pid;
+  const char *keygen;
+  int fd_limit;
   int pipefd[2];
   int status;
   ssize_t total = 0;
@@ -247,7 +257,13 @@ extract_pubkey_from_pem(const char *pem_path, char *output, size_t output_size)
   close(tmpfd);
   tmpfd = -1;
 
-  /* Run ssh-keygen to convert to SSH format */
+  /* Run ssh-keygen to convert to SSH format (everything the child needs
+   * is ready before the fork) */
+  if (!(keygen = gitsync_ssh_keygen_path())) {
+    unlink(tmpfile);
+    goto cleanup;
+  }
+  fd_limit = gitsync_fd_limit();
   if (pipe(pipefd) < 0) {
     unlink(tmpfile);
     goto cleanup;
@@ -283,7 +299,8 @@ extract_pubkey_from_pem(const char *pem_path, char *output, size_t output_size)
       close(devnull);
     }
 
-    execlp("ssh-keygen", "ssh-keygen", "-i", "-m", "PKCS8", "-f", tmpfile, (char *)NULL);
+    gitsync_child_close_fds(fd_limit);
+    execl(keygen, "ssh-keygen", "-i", "-m", "PKCS8", "-f", tmpfile, (char *)NULL);
     _exit(127);
   }
 

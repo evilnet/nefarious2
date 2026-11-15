@@ -117,6 +117,63 @@ validate_safe_path(const char *path)
   return 1;
 }
 
+/** Find ssh-keygen on PATH, in the parent before a fork(): the child
+ * then runs it with execv(), which is async-signal-safe (execlp()'s PATH
+ * search is not).
+ * @return Its path (a static buffer), or NULL if it is not on PATH.
+ */
+const char *
+gitsync_ssh_keygen_path(void)
+{
+  static char path[1024];
+  const char *env = getenv("PATH");
+  const char *p, *q;
+
+  if (!env || !*env)
+    env = "/usr/bin:/bin";
+  for (p = env; ; p = q + 1) {
+    q = strchr(p, ':');
+    if (!q)
+      q = p + strlen(p);
+    if (q > p) {
+      ircd_snprintf(0, path, sizeof(path), "%.*s/ssh-keygen", (int)(q - p), p);
+      if (0 == access(path, X_OK))
+        return path;
+    }
+    if (!*q)
+      return NULL;
+  }
+}
+
+/** The descriptor limit, computed before a fork() for
+ * gitsync_child_close_fds()'s fallback loop. */
+int
+gitsync_fd_limit(void)
+{
+  long n = sysconf(_SC_OPEN_MAX);
+
+  return (n <= 0 || n > 1048576) ? 1048576 : (int) n;
+}
+
+/** In a child between fork() and exec(): close every descriptor above
+ * stderr -- listeners, client sockets, database files, the log -- so
+ * ssh-keygen gets none of the server's.  Async-signal-safe: closefrom()
+ * where the C library has it, else close() on each up to \a limit.
+ * @param limit gitsync_fd_limit(), from before the fork. */
+void
+gitsync_child_close_fds(int limit)
+{
+#ifdef HAVE_CLOSEFROM
+  (void) limit;
+  closefrom(STDERR_FILENO + 1);
+#else
+  int fd;
+
+  for (fd = STDERR_FILENO + 1; fd < limit; fd++)
+    close(fd);
+#endif
+}
+
 /** Generate an Ed25519 SSH key for GitSync authentication using ssh-keygen
  * Uses fork/exec to avoid shell command injection vulnerabilities.
  * Uses atomic file creation to prevent TOCTOU race conditions.
@@ -133,6 +190,8 @@ gitsync_generate_ssh_key(const char *key_path)
   int status;
   int fd;
   struct stat st;
+  const char *keygen;
+  int fd_limit;
 
   /* Validate path contains only safe characters */
   if (!validate_safe_path(key_path)) {
@@ -178,7 +237,13 @@ gitsync_generate_ssh_key(const char *key_path)
   close(fd);
   unlink(key_path);
 
-  /* Use fork/exec to run ssh-keygen safely without shell */
+  /* Use fork/exec to run ssh-keygen safely without shell.  Everything
+   * the child needs is ready before the fork. */
+  if (!(keygen = gitsync_ssh_keygen_path())) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: ssh-keygen not found on PATH");
+    return 0;
+  }
+  fd_limit = gitsync_fd_limit();
   pid = fork();
   if (pid < 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
@@ -198,13 +263,14 @@ gitsync_generate_ssh_key(const char *key_path)
         close(devnull);
     }
 
-    execlp("ssh-keygen", "ssh-keygen",
-           "-t", "ed25519",
-           "-f", key_path,
-           "-N", "",
-           "-C", "gitsync@nefarious",
-           "-q",
-           (char *)NULL);
+    gitsync_child_close_fds(fd_limit);
+    execl(keygen, "ssh-keygen",
+          "-t", "ed25519",
+          "-f", key_path,
+          "-N", "",
+          "-C", "gitsync@nefarious",
+          "-q",
+          (char *)NULL);
 
     /* If exec fails, exit with error */
     _exit(127);
