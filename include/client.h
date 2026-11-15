@@ -1804,6 +1804,8 @@ struct Client {
 #define ClearWebIRCPending(x)   ClrFlag(x, FLAG_WEBIRC_PENDING)
 /** Clear the client's pending async SETHOST verification flag. */
 #define ClearSetHostPending(x)  ClrFlag(x, FLAG_SETHOST_PENDING)
+/** Clear the native DNSBL whitelist exemption. */
+#define ClearDNSBLExempt(x)     ClrFlag(x, FLAG_DNSBL_EXEMPT)
 /** Clear the client's pending UDP ping flag. */
 #define ClearUPing(x)           ClrFlag(x, FLAG_UPING)
 /** Remove mode +w (wallops) from the client. */

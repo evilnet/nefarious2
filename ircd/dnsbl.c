@@ -30,6 +30,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "msg.h"
 #include "numeric.h"
 #include "res.h"
@@ -838,6 +839,27 @@ dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request)
   for (i = 0; i < request->nmarks; i++)
     add_mark(cptr, request->marks[i]);
   SetMarked(cptr);
+}
+
+void
+dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request)
+{
+  struct SLink **pp, *lp;
+  int i;
+
+  if (!request || !request->nmarks)
+    return;
+  for (i = 0; i < request->nmarks; i++)
+    for (pp = &cli_marks(cptr); *pp; pp = &(*pp)->next)
+      if (!strcmp((*pp)->value.cp, request->marks[i])) {
+        lp = *pp;
+        *pp = lp->next;
+        MyFree(lp->value.cp);
+        free_link(lp);
+        break;
+      }
+  if (!cli_marks(cptr))
+    ClrFlag(cptr, FLAG_MARKED);
 }
 
 const struct DNSBLStats *

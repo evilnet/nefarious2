@@ -170,6 +170,13 @@ extern int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
  */
 extern void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request);
 
+/** Take back the marks dnsbl_apply_marks() gave (the client's address
+ * changed: the verdict was the old address's).
+ * @param cptr The client
+ * @param request The DNSBL request whose marks were applied
+ */
+extern void dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request);
+
 /** Format an IPv4 address for DNSBL lookup
  * @param addr IPv4 address (last 32 bits of irc_in_addr)
  * @param domain DNSBL domain

@@ -198,10 +198,28 @@ int dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
   *request = &dnsbl_reqs[++dnsbl_checks % 4];
   return 1;
 }
+static int exits;             /**< exits the cases expected */
+
+/* The native DNSBL's verdict, as a case sets it (-1: none expected), and
+ * what was applied of it. */
+static int verdict_blocked = -1;
+static enum DNSBLAction verdict_action;
+static int verdicts, marks_applied, marks_unapplied;
 int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
-                 enum DNSBLAction *action, const char **mark) { fail(); return 0; }
+                 enum DNSBLAction *action, const char **mark)
+{
+  if (verdict_blocked < 0)
+    fail_msg("dnsbl_result: no verdict expected");
+  verdicts++;
+  *action = verdict_action;
+  *mark = NULL;
+  return verdict_blocked;
+}
 int add_mark(struct Client *sptr, const char *dnsbl) { return 0; }
-void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request) {}
+void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request)
+{ marks_applied++; }
+void dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request)
+{ marks_unapplied++; }
 char *get_client_class(struct Client *acptr) { return "class"; }
 const char *get_client_name(const struct Client *sptr, int showip) { return "name"; }
 int hAddClient(struct Client *cptr) { return 0; }
@@ -210,9 +228,15 @@ void IPcheck_connect_fail(const struct Client *cptr, int disconnect) {}
 int IPcheck_remote_connect(struct Client *cptr, int is_burst) { return 1; }
 int find_except_conf(struct Client *cptr, int flags) { return 0; }
 unsigned int ircrandom(void) { return 4; }
+static const char *expect_exit;   /**< the exit_client() a case expects */
 int exit_client(struct Client *cptr, struct Client *victim,
                 struct Client *killer, const char *comment)
-{ fail_msg("exit_client: %s", comment); return 0; }
+{
+  if (!expect_exit || strcmp(comment, expect_exit))
+    fail_msg("exit_client: %s", comment);
+  exits++;
+  return CPTR_KILLED;
+}
 int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...) { if (len) buf[0] = '\0'; return 0; }
 int ircd_vsnprintf(struct Client *dest, char *buf, size_t len,
@@ -220,7 +244,6 @@ int ircd_vsnprintf(struct Client *dest, char *buf, size_t len,
 /** The exit a case expects (exit_client_msg()'s pattern), or NULL: any
  * other exit fails the case. */
 static const char *expect_exit_msg;
-static int exits;
 int exit_client_msg(struct Client *cptr, struct Client *bcptr,
                     struct Client *sptr, const char *pattern, ...)
 {
@@ -291,6 +314,10 @@ static int setup(void **state)
   exits = 0;
   dnsbl_checks = dnsbl_cancels = 0;
   dnsbl_cancelled = NULL;
+  verdict_blocked = -1;
+  verdict_action = DNSBL_ACT_NONE;
+  verdicts = marks_applied = marks_unapplied = 0;
+  expect_exit = NULL;
   CurrentTime = time(NULL);
   return 0;
 }
@@ -633,6 +660,71 @@ static void iauth_new_address_restarts_the_dnsbl_lookup(void **state)
   destroy_auth_request(a->auth);
 }
 
+/** While IAuth is still checking the client, the DNSBL verdict is not
+ * acted on: IAuth may still give the client another address (an
+ * IAuth-handled WEBIRC).  Once IAuth is done, the verdict is. */
+static void dnsbl_verdict_waits_for_iauth(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  FlagSet(&a->auth->flags, AR_IAUTH_PENDING);
+  verdict_blocked = 1;
+  verdict_action = DNSBL_ACT_BLOCK_ALL;
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_int_equal(verdicts, 0);
+  assert_int_equal(exits, 0);
+
+  FlagClr(&a->auth->flags, AR_IAUTH_PENDING);              /* IAuth's D */
+  expect_exit = "DNSBL blocked";
+  assert_int_equal(check_auth_finished(a->auth), CPTR_KILLED);
+  assert_int_equal(verdicts, 1);
+  assert_int_equal(exits, 1);
+  destroy_auth_request(a->auth);
+}
+
+/** IAuth gives another address after the gateway's lookup finished (but
+ * before its D): the gateway's marks are never applied; the new
+ * address's verdict is, once. */
+static void late_iauth_address_gateway_marks_never_applied(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+  char ip[] = "192.0.2.99";
+  char *params[] = { ip, NULL };
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];          /* the gateway's, done */
+  FlagSet(&a->auth->flags, AR_IAUTH_PENDING);
+  verdict_blocked = 0;
+  verdict_action = DNSBL_ACT_MARK;
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_int_equal(marks_applied, 0);
+  iauth_cmd_ip_address(NULL, &a->cli, 1, params);   /* the I line, late */
+  assert_int_equal(marks_unapplied, 0);              /* nothing to undo */
+  FlagClr(&a->auth->flags, AR_DNSBL_PENDING);        /* the new answer */
+  FlagClr(&a->auth->flags, AR_IAUTH_PENDING);        /* D */
+  assert_int_equal(check_auth_finished(a->auth), 0);
+  assert_int_equal(marks_applied, 1);
+  assert_int_equal(a->registered, 1);
+}
+
+/** A verdict already applied when the address changes (a WEBIRC on a
+ * client whose registration waits elsewhere) is undone: its marks and
+ * the whitelist's exemption go before the new address is looked up. */
+static void address_change_undoes_an_applied_verdict(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  a->auth->dnsbl_request = &dnsbl_reqs[0];
+  FlagSet(&a->auth->flags, AR_DNSBL_APPLIED);
+  SetDNSBLExempt(&a->cli);
+  auth_dnsbl_restart(a->auth);
+  assert_int_equal(marks_unapplied, 1);
+  assert_false(IsDNSBLExempt(&a->cli));
+  assert_false(FlagHas(&a->auth->flags, AR_DNSBL_APPLIED));
+  assert_int_equal(dnsbl_checks, 1);
+  destroy_auth_request(a->auth);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -651,6 +743,9 @@ int main(void)
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),
     cmocka_unit_test_setup(webirc_restarts_the_dnsbl_lookup, setup),
     cmocka_unit_test_setup(iauth_new_address_restarts_the_dnsbl_lookup, setup),
+    cmocka_unit_test_setup(dnsbl_verdict_waits_for_iauth, setup),
+    cmocka_unit_test_setup(late_iauth_address_gateway_marks_never_applied, setup),
+    cmocka_unit_test_setup(address_change_undoes_an_applied_verdict, setup),
   };
 
   event_init(64);

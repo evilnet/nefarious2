@@ -111,6 +111,9 @@ enum AuthRequestFlag {
     AR_PASSWORD_CHECKED, /**< client password already checked */
     AR_LOC_DONE,        /**< loc messages have been sent */
     AR_DNSBL_PENDING,   /**< native DNSBL check pending */
+    AR_DNSBL_APPLIED,   /**< the native DNSBL verdict (marks, exemption) is
+                         * applied: a later address change undoes it
+                         * (auth_dnsbl_restart()) */
     AR_CAP_DONE,        /**< CAP negotiation completed (CAP END received) */
     AR_RECHECK,         /**< on #auth_recheck_list: a check is owed from the event loop */
     AR_IAUTH_SASL,      /**< the SASL exchange in progress is iauth's */
@@ -754,7 +757,53 @@ static int check_auth_finished(struct AuthRequest *auth)
     return 0;
   }
 
-  /* Check DNSBL result and reject if blocked. */
+  /* Check if iauth is done.  A held client waits as a pending one does:
+   * for the instance it is handed to, or to be refused or released (its
+   * owed check, iauth_held_decide()). */
+  if (FlagHas(&auth->flags, AR_IAUTH_PENDING)
+      || FlagHas(&auth->flags, AR_IAUTH_HELD))
+  {
+    /* Switch auth request to hurry-up state. */
+    if (!FlagHas(&auth->flags, AR_IAUTH_HURRY))
+    {
+      /* Set "hurry" flag in auth request. */
+      FlagSet(&auth->flags, AR_IAUTH_HURRY);
+
+      /* If iauth wants it, send notification. */
+      if (iauth_asks(auth, IAUTH_UNDERNET))
+        sendto_iauth(auth->client, "H %s", get_client_class(auth->client));
+
+      /* If iauth wants it, give client more time -- once the policy that
+       * says so is known, if it is not yet (iauth_said_flush()). */
+      if (!iauth_policy_known(auth))
+        FlagSet(&auth->flags, AR_IAUTH_HURRY_LATE);
+      else if (IAuthHas(iauth, IAUTH_EXTRAWAIT))
+        cli_firsttime(auth->client) = CurrentTime;
+    }
+
+    Debug((DEBUG_INFO, "Auth %p [%d] still has flag %d", auth,
+           cli_fd(auth->client), AR_IAUTH_PENDING));
+    if (cli_firsttime(cptr) > 0 && CurrentTime - cli_firsttime(cptr) > 5) {
+      log_write(LS_USER, L_INFO, 0,
+                "check_auth_finished: auth %p BLOCKED on AR_IAUTH_PENDING "
+                "after %ds (fd %d, nick=%s, acct=%s) — SASL-stall diag",
+                (void*)auth, (int)(CurrentTime - cli_firsttime(cptr)),
+                cli_fd(cptr),
+                cli_name(cptr)[0] ? cli_name(cptr) : "*",
+                (cli_user(cptr) && cli_user(cptr)->account[0])
+                  ? cli_user(cptr)->account : "*");
+    }
+    return 0;
+  }
+  else
+    FlagSet(&auth->flags, AR_IAUTH_HURRY);
+
+  /* Check DNSBL result and reject if blocked -- only now, after IAuth:
+   * while an IAuth check is out it can still give the client another
+   * address (its I line: an IAuth-handled WEBIRC), and the verdict is the
+   * new address's (the lookup restarts, auth_dnsbl_restart()).  Applied
+   * before, a verdict on the gateway (a cached one at once) refused,
+   * marked or exempted the client for its gateway's listing. */
   if (IsUserPort(auth->client) && auth->dnsbl_request)
   {
     enum DNSBLAction action;
@@ -797,48 +846,9 @@ static int check_auth_finished(struct AuthRequest *auth)
      * anonymous but logged in): every matching entry's mark applies, as
      * the iauthd scripts mark the clients they pass. */
     dnsbl_apply_marks(auth->client, auth->dnsbl_request);
+    FlagSet(&auth->flags, AR_DNSBL_APPLIED);
   }
 
-  /* Check if iauth is done.  A held client waits as a pending one does:
-   * for the instance it is handed to, or to be refused or released (its
-   * owed check, iauth_held_decide()). */
-  if (FlagHas(&auth->flags, AR_IAUTH_PENDING)
-      || FlagHas(&auth->flags, AR_IAUTH_HELD))
-  {
-    /* Switch auth request to hurry-up state. */
-    if (!FlagHas(&auth->flags, AR_IAUTH_HURRY))
-    {
-      /* Set "hurry" flag in auth request. */
-      FlagSet(&auth->flags, AR_IAUTH_HURRY);
-
-      /* If iauth wants it, send notification. */
-      if (iauth_asks(auth, IAUTH_UNDERNET))
-        sendto_iauth(auth->client, "H %s", get_client_class(auth->client));
-
-      /* If iauth wants it, give client more time -- once the policy that
-       * says so is known, if it is not yet (iauth_said_flush()). */
-      if (!iauth_policy_known(auth))
-        FlagSet(&auth->flags, AR_IAUTH_HURRY_LATE);
-      else if (IAuthHas(iauth, IAUTH_EXTRAWAIT))
-        cli_firsttime(auth->client) = CurrentTime;
-    }
-
-    Debug((DEBUG_INFO, "Auth %p [%d] still has flag %d", auth,
-           cli_fd(auth->client), AR_IAUTH_PENDING));
-    if (cli_firsttime(cptr) > 0 && CurrentTime - cli_firsttime(cptr) > 5) {
-      log_write(LS_USER, L_INFO, 0,
-                "check_auth_finished: auth %p BLOCKED on AR_IAUTH_PENDING "
-                "after %ds (fd %d, nick=%s, acct=%s) — SASL-stall diag",
-                (void*)auth, (int)(CurrentTime - cli_firsttime(cptr)),
-                cli_fd(cptr),
-                cli_name(cptr)[0] ? cli_name(cptr) : "*",
-                (cli_user(cptr) && cli_user(cptr)->account[0])
-                  ? cli_user(cptr)->account : "*");
-    }
-    return 0;
-  }
-  else
-    FlagSet(&auth->flags, AR_IAUTH_HURRY);
 
   if (IsUserPort(auth->client))
   {
@@ -1394,6 +1404,14 @@ void auth_dnsbl_restart(struct AuthRequest *auth)
   if (!auth || !auth->client || !IsUserPort(auth->client))
     return;
   if (auth->dnsbl_request) {
+    /* What a verdict on the old address gave the client goes with it:
+     * its marks and the whitelist's exemption (a refusal would have
+     * exited it). */
+    if (FlagHas(&auth->flags, AR_DNSBL_APPLIED)) {
+      dnsbl_unapply_marks(auth->client, auth->dnsbl_request);
+      ClearDNSBLExempt(auth->client);
+      FlagClr(&auth->flags, AR_DNSBL_APPLIED);
+    }
     dnsbl_cancel(auth->dnsbl_request);
     auth->dnsbl_request = NULL;
   }
