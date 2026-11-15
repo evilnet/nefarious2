@@ -229,8 +229,11 @@ int m_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2)
     return need_more_params(sptr, "SETHOST");
 
-  /* Already pending async verification? */
-  if (IsSetHostPending(sptr))
+  /* Already pending async verification?  A WEBIRC check still out holds
+   * the same refind cookie (cli_checkcookie()); registration waits for it,
+   * so a client cannot get here with one -- refused all the same, rather
+   * than overwrite the cookie and lose that check's result. */
+  if (IsSetHostPending(sptr) || IsWebIRCPending(sptr))
     return 0;
 
   /* Back up the flags first */
@@ -324,8 +327,11 @@ int mo_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2)
     return need_more_params(sptr, "SETHOST");
 
-  /* Already pending async verification? */
-  if (IsSetHostPending(sptr))
+  /* Already pending async verification?  A WEBIRC check still out holds
+   * the same refind cookie (cli_checkcookie()); registration waits for it,
+   * so a client cannot get here with one -- refused all the same, rather
+   * than overwrite the cookie and lose that check's result. */
+  if (IsSetHostPending(sptr) || IsWebIRCPending(sptr))
     return 0;
 
   /* Back up the flags first */

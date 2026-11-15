@@ -102,6 +102,7 @@ CMOCKA_TESTPROGS = \
 	parse_line_cmocka \
 	conf_reattach_cmocka \
 	oper_verify_cmocka \
+	sethost_verify_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka
 
@@ -200,6 +201,7 @@ DEP_SRC = \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
 	oper_verify_cmocka.c \
+	sethost_verify_cmocka.c \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	crdt_hlc_cmocka.c \
@@ -825,6 +827,19 @@ oper_verify_cmocka.o: ${srcdir}/oper_verify_cmocka.c ../m_oper.c
 
 oper_verify_cmocka: oper_verify_cmocka.o
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections oper_verify_cmocka.o $(CMOCKA_LIBS)
+
+# sethost_verify tests - SETHOST's asynchronous password check: judged by
+# the Spoofhost block in force when it finishes, refused while a WEBIRC
+# check holds the shared cookie, and its result for nobody once the
+# descriptor is another connection's.  Includes ../m_sethost.c with
+# --gc-sections; the conf lookups and the thread pool are stubs.
+SETHOST_VERIFY_CMOCKA_OBJS = sethost_verify_cmocka.o ../ircd_alloc.o ../ircd_string.o \
+	../ircd_snprintf.o
+sethost_verify_cmocka.o: ${srcdir}/sethost_verify_cmocka.c ../m_sethost.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/sethost_verify_cmocka.c
+
+sethost_verify_cmocka: $(SETHOST_VERIFY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SETHOST_VERIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # send_label tests - labeled-response (issue #216): a channel event a
 # client's own command caused (its PART, TOPIC, KICK, MODE) carries the
