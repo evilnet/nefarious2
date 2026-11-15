@@ -139,12 +139,31 @@ static void answer(int i, int listed, int last)
 /* s_conf.c: the marks given to the client. */
 static char marks_given[8][32];
 static int nmarks_given;
+int find_mark(struct Client *sptr, const char *mark);
 int add_mark(struct Client *sptr, const char *mark)
 {
+  struct SLink *lp;
+
   assert_true(nmarks_given < 8);
   ircd_strncpy(marks_given[nmarks_given++], mark, sizeof(marks_given[0]));
+  if (find_mark(sptr, mark))                /* as s_conf.c: once each */
+    return 0;
+  lp = calloc(1, sizeof(*lp));
+  lp->value.cp = strdup(mark);
+  lp->next = cli_marks(sptr);
+  cli_marks(sptr) = lp;
   return 0;
 }
+int find_mark(struct Client *sptr, const char *mark)
+{
+  struct SLink *lp;
+
+  for (lp = cli_marks(sptr); lp; lp = lp->next)
+    if (!strcmp(lp->value.cp, mark))
+      return 1;
+  return 0;
+}
+void free_link(struct SLink *lp) { free(lp); }
 
 static int completes;
 void auth_dnsbl_complete(struct AuthRequest *auth) { completes++; }
@@ -766,6 +785,30 @@ static void entry_class_last_matching_wins(void **state)
   dnsbl_cancel(req);
 }
 
+/** Undoing a verdict takes back only the marks it added: one the client
+ * had already (IAuth's, an oper's) stays. */
+static void unapply_takes_back_only_added_marks(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+  int i;
+
+  cli_marks(&client) = NULL;
+  add_mark(&client, "uce-2");                /* IAuth's, before */
+  dnsbl_clear_servers();
+  dnsbl_add_server("uce.test", "2", NULL, DNSBL_ACT_MARK, "uce-2", 0);
+  dnsbl_add_server("cbl.test", "2", NULL, DNSBL_ACT_MARK, "cbl", 0);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  for (i = 0; i < nqueries; i++)
+    answer(i, 1, 2);
+  dnsbl_apply_marks(&client, req);
+  assert_true(find_mark(&client, "cbl"));
+  dnsbl_unapply_marks(&client, req);
+  assert_false(find_mark(&client, "cbl"));
+  assert_true(find_mark(&client, "uce-2"));  /* the client's own stays */
+  dnsbl_cancel(req);
+  cli_marks(&client) = NULL;
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -784,6 +827,7 @@ int main(void)
     cmocka_unit_test_setup(unanswered_list_given_up, setup),
     cmocka_unit_test_setup(entry_cachetime_honoured, setup),
     cmocka_unit_test_setup(entry_class_last_matching_wins, setup),
+    cmocka_unit_test_setup(unapply_takes_back_only_added_marks, setup),
     cmocka_unit_test_setup(cached_listing_blocks_again, setup),
     cmocka_unit_test_setup(cached_clean_lets_in, setup),
     cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),

@@ -113,6 +113,9 @@ struct DNSBLRequest {
   int class_order;               /**< That entry's place */
   char **marks;                  /**< Every matching mark entry's mark (its reason) */
   int nmarks;                    /**< How many */
+  unsigned char *marks_added;    /**< Which of them dnsbl_apply_marks() added
+                                      (the client did not have it): only
+                                      those are taken back */
   struct irc_in_addr addr;       /**< The address asked about (the cache key) */
   struct DNSBLAnswer *answers;   /**< The answers so far (for the cache) */
   int nanswers;                  /**< How many */
@@ -222,10 +225,11 @@ extern int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
  * @param cptr The client
  * @param request Its completed DNSBL request
  */
-extern void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request);
+extern void dnsbl_apply_marks(struct Client *cptr, struct DNSBLRequest *request);
 
-/** Take back the marks dnsbl_apply_marks() gave (the client's address
- * changed: the verdict was the old address's).
+/** Take back the marks dnsbl_apply_marks() gave -- those it added, not one
+ * the client had from elsewhere (IAuth, an oper) -- the client's address
+ * changed: the verdict was the old address's.
  * @param cptr The client
  * @param request The DNSBL request whose marks were applied
  */

@@ -599,6 +599,7 @@ dnsbl_request_free(struct DNSBLRequest *req)
   for (i = 0; i < req->nmarks; i++)
     MyFree(req->marks[i]);        /* (a macro: no side effects in its argument) */
   MyFree(req->marks);
+  MyFree(req->marks_added);
   dnsbl_answers_free(req->answers, req->nanswers);
   MyFree(req);
 }
@@ -1040,14 +1041,19 @@ dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
 }
 
 void
-dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request)
+dnsbl_apply_marks(struct Client *cptr, struct DNSBLRequest *request)
 {
   int i;
 
   if (!request || !request->nmarks)
     return;
+  MyFree(request->marks_added);
+  request->marks_added = (unsigned char *)MyCalloc(request->nmarks, 1);
   for (i = 0; i < request->nmarks; i++)
-    add_mark(cptr, request->marks[i]);
+    if (!find_mark(cptr, request->marks[i])) {
+      add_mark(cptr, request->marks[i]);
+      request->marks_added[i] = 1;
+    }
   SetMarked(cptr);
 }
 
@@ -1060,7 +1066,9 @@ dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request)
   if (!request || !request->nmarks)
     return;
   for (i = 0; i < request->nmarks; i++)
-    for (pp = &cli_marks(cptr); *pp; pp = &(*pp)->next)
+    for (pp = &cli_marks(cptr);
+         request->marks_added && request->marks_added[i] && *pp;
+         pp = &(*pp)->next)
       if (!strcmp((*pp)->value.cp, request->marks[i])) {
         lp = *pp;
         *pp = lp->next;

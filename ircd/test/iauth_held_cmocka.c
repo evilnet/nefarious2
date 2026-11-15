@@ -239,7 +239,7 @@ void dnsbl_cancel(struct DNSBLRequest *request) {}
 int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
                  enum DNSBLAction *action, const char **mark) { fail(); return 0; }
 int add_mark(struct Client *sptr, const char *dnsbl) { return 0; }
-void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request) {}
+void dnsbl_apply_marks(struct Client *cptr, struct DNSBLRequest *request) {}
 void dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request) {}
 const char *dnsbl_class(const struct DNSBLRequest *request) { return NULL; }
 void conf_detach(struct Client *cptr, struct ConfItem *aconf) {}

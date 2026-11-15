@@ -221,7 +221,7 @@ int dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
   return verdict_blocked;
 }
 int add_mark(struct Client *sptr, const char *dnsbl) { return 0; }
-void dnsbl_apply_marks(struct Client *cptr, const struct DNSBLRequest *request)
+void dnsbl_apply_marks(struct Client *cptr, struct DNSBLRequest *request)
 { marks_applied++; }
 void dnsbl_unapply_marks(struct Client *cptr, const struct DNSBLRequest *request)
 { marks_unapplied++; }
