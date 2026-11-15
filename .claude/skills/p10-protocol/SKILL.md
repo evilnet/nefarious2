@@ -178,7 +178,7 @@ Client              Nefarious                    X3
   |                     |                         |
   |                     |<--SASL src tgt L acct---|  (login info)
   |                     |<--SASL src tgt D S------|  (done, success)
-  |<--904 LOGGEDIN------|                         |
+  |<--900 LOGGEDIN------|                         |
   |<--903 SASLSUCCESS---|                         |
   |--CAP END----------->|                         |
   |                     |                         |
@@ -186,7 +186,7 @@ Client              Nefarious                    X3
 
 ### SASL Flow - Post-Registration (REAUTHENTICATE)
 
-For token refresh after the user is already registered (introduced via `N`). The account cannot change (#223): an `L` naming another account than the client's is refused at once (904, the exchange ends, the `D S` after it reaches nobody); a client that had no account may log in for the first time (`AC R`).
+For token refresh after the user is already registered (introduced via `N`). Only a client that sent `CAP LS 302` (SASL 3.2) gets here; any other registered client's AUTHENTICATE is answered 462 by the ircd and nothing goes to services. The account cannot change (#223): an `L` naming another account than the client's is refused at once (907, the exchange ends, the `D S` after it reaches nobody); a client that had no account may log in for the first time (`AC R`).
 
 ```
 Client              Nefarious                    X3
