@@ -759,4 +759,93 @@ describe('DNSBL Integration Tests', () => {
       expect(harness.dnsQueries.filter(q => q === '5.0.1.10.block.dnsbl')).toHaveLength(1);
     });
   });
+
+  // A second connection from an address whose lookup is still in flight
+  // waits for that same lookup and is judged by its answer.
+  describe('Lookups in flight are shared', () => {
+    /** Introduce several clients at once, then hurry them all and wait for every decision. */
+    async function connectTogether(clients: Array<[number, string]>): Promise<void> {
+      for (const [id, ip] of clients) {
+        harness.send(`${id} C ${ip} ${10000 + id} 10.0.0.1 6667`);
+        await new Promise(r => setTimeout(r, 20));
+      }
+      for (const [id] of clients) harness.send(`${id} H Users`);
+      for (const [id] of clients) await harness.waitFor(new RegExp(`^[Dk] ${id} `), 3000);
+    }
+
+    beforeEach(async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSTIMEOUT 1
+#IAUTH CACHETIME 3600
+#IAUTH DNSBL server=block.dnsbl index=2 block=all
+#IAUTH DNSBL server=mark.dnsbl index=2 mark=mk
+#IAUTH DNSBL server=multi.dnsbl index=2 whitelist
+#IAUTH DNSBL server=multi.dnsbl index=250 block=anonymous
+`);
+    });
+
+    it('two simultaneous connections from a block-listed address are both refused, with one lookup', async () => {
+      mockDns('10.2.0.1', 'block.dnsbl', { steps: [{ answers: ['127.0.0.2'], delayMs: 500 }] });
+      harness = await createHarness(configPath);
+
+      await connectTogether([[0, '10.2.0.1'], [1, '10.2.0.1']]);
+
+      expect(harness.wasRejected(0)).toBe(true);
+      expect(harness.wasRejected(1)).toBe(true);
+      expect(harness.dnsQueries.filter(q => q === '1.0.2.10.block.dnsbl')).toHaveLength(1);
+    });
+
+    it('two simultaneous connections from a mark-listed address are both marked', async () => {
+      mockDns('10.2.0.2', 'mark.dnsbl', { steps: [{ answers: ['127.0.0.2'], delayMs: 500 }] });
+      harness = await createHarness(configPath);
+
+      await connectTogether([[0, '10.2.0.2'], [1, '10.2.0.2']]);
+
+      expect(harness.wasAccepted(0)).toBe(true);
+      expect(harness.wasAccepted(1)).toBe(true);
+      expect(harness.getMarks(0)).toContain('mk');
+      expect(harness.getMarks(1)).toContain('mk');
+    });
+
+    it('two lines for one list (AfterNET pattern) both see a slow answer', async () => {
+      // One query serves both lines; the answer matches the second line.
+      mockDns('10.2.0.3', 'multi.dnsbl', { steps: [{ answers: ['127.0.0.250'], delayMs: 400 }] });
+      harness = await createHarness(configPath);
+
+      await connectClient(harness, 0, '10.2.0.3');
+
+      expect(harness.wasRejected(0)).toBe(true);
+      expect(harness.dnsQueries.filter(q => q === '3.0.2.10.multi.dnsbl')).toHaveLength(1);
+    });
+
+    it('a shared lookup that fails passes every waiting client and is asked again next time', async () => {
+      mockDns('10.2.0.4', 'block.dnsbl', {
+        steps: [{ code: 'ESERVFAIL', delayMs: 300 }, { answers: ['127.0.0.2'] }],
+      });
+      harness = await createHarness(configPath);
+
+      await connectTogether([[0, '10.2.0.4'], [1, '10.2.0.4']]);
+      expect(harness.wasAccepted(0)).toBe(true);
+      expect(harness.wasAccepted(1)).toBe(true);
+
+      await connectClient(harness, 2, '10.2.0.4');
+      expect(harness.wasRejected(2)).toBe(true);
+      expect(harness.dnsQueries.filter(q => q === '4.0.2.10.block.dnsbl')).toHaveLength(2);
+    });
+
+    it('clients waiting on a shared lookup that never answers are all let through by the timeout', async () => {
+      mockDns('10.2.0.5', 'block.dnsbl', { steps: [{ hang: true }, { answers: ['127.0.0.2'] }] });
+      harness = await createHarness(configPath);
+
+      const t0 = Date.now();
+      await connectTogether([[0, '10.2.0.5'], [1, '10.2.0.5']]);
+      expect(Date.now() - t0).toBeLessThan(2500);
+      expect(harness.wasAccepted(0)).toBe(true);
+      expect(harness.wasAccepted(1)).toBe(true);
+
+      await connectClient(harness, 2, '10.2.0.5');
+      expect(harness.wasRejected(2)).toBe(true);
+    });
+  });
 });

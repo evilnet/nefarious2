@@ -5,8 +5,11 @@
 import { promises as dns } from 'node:dns';
 import type { CacheEntry, DNSBLAnswer, DNSBLConfig } from './types.js';
 
-/** Global DNSBL result cache */
+/** Global DNSBL result cache: definite answers only */
 const cache = new Map<string, CacheEntry>();
+
+/** Lookups in flight, by query: a later asker shares the same lookup */
+const inflight = new Map<string, Promise<DNSBLAnswer>>();
 
 /**
  * Reverse an IPv4 address for DNSBL lookup
@@ -51,7 +54,7 @@ export function getCacheEntry(query: string, cacheTime: number): CacheEntry | nu
 /**
  * Set cache entry
  */
-export function setCacheEntry(query: string, result: string[] | null): void {
+export function setCacheEntry(query: string, result: string[]): void {
   cache.set(query, {
     result,
     ts: Date.now(),
@@ -63,13 +66,6 @@ export function setCacheEntry(query: string, result: string[] | null): void {
  */
 export function getCacheSize(): number {
   return cache.size;
-}
-
-/**
- * Delete a cache entry
- */
-export function deleteCacheEntry(query: string): void {
-  cache.delete(query);
 }
 
 /**
@@ -115,6 +111,49 @@ export async function lookupDNSBL(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Where queryDNSBL's answer comes from */
+export type DNSBLAnswerSource = 'cache' | 'shared' | 'lookup';
+
+/**
+ * Answer a DNSBL query from the cache, from the lookup of the same query
+ * already in flight, or from a new lookup.  A definite answer is cached when
+ * the lookup ends; a failed one is not, and every client that waited on it
+ * gets the same "not listed, not definite" answer.  A waiter never waits
+ * longer than the lookup it shares, which gives up after \a timeout seconds.
+ */
+export function queryDNSBL(
+  reversedIp: string,
+  dnsblServer: string,
+  timeout: number,
+  cacheTime: number
+): { source: DNSBLAnswerSource; answer: Promise<DNSBLAnswer> } {
+  const query = `${reversedIp}.${dnsblServer}`;
+
+  const cached = getCacheEntry(query, cacheTime);
+  if (cached) {
+    return { source: 'cache', answer: Promise.resolve({ results: cached.result, definite: true }) };
+  }
+
+  const pending = inflight.get(query);
+  if (pending) {
+    return { source: 'shared', answer: pending };
+  }
+
+  const answer = lookupDNSBL(reversedIp, dnsblServer, timeout)
+    .catch((err): DNSBLAnswer => ({ results: [], definite: false, error: String(err) }))
+    .then((result) => {
+      // Before any waiter sees the answer: the lookup is over, and a
+      // definite answer is in the cache for the next asker.
+      inflight.delete(query);
+      if (result.definite) {
+        setCacheEntry(query, result.results);
+      }
+      return result;
+    });
+  inflight.set(query, answer);
+  return { source: 'lookup', answer };
 }
 
 /**

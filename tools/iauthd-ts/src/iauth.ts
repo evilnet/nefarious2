@@ -8,11 +8,8 @@ import { readConfigFile } from './config.js';
 import {
   reverseIPv4,
   isIPv4,
-  getCacheEntry,
-  setCacheEntry,
-  deleteCacheEntry,
   getCacheSize,
-  lookupDNSBL,
+  queryDNSBL,
   matchesDNSBL,
 } from './dnsbl.js';
 import {
@@ -424,35 +421,23 @@ export class IAuthDaemon {
 
       this.debug(`Looking up client ${client.id}: ${query}`);
 
-      // Check cache
+      // From the cache, from the same lookup already in flight for another
+      // client (or another line naming the same list), or from a new lookup
       const cacheTime = dnsbl.cacheTime ?? this.config.cacheTime;
-      const cached = getCacheEntry(query, cacheTime);
-
-      let results: string[];
-      if (cached && cached.result !== null) {
+      const { source, answer } = queryDNSBL(reversedIp, dnsbl.server, this.config.dnsTimeout, cacheTime);
+      if (source === 'cache') {
         this.debug(`Found dnsbl cache entry for ${query}`);
-        results = cached.result;
-      } else if (cached) {
-        // Cache entry exists but result is null (pending)
-        this.debug(`Cache pending... on ${query}`);
-        // Wait a bit and retry from cache
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const retryCache = getCacheEntry(query, cacheTime);
-        results = retryCache?.result ?? [];
+      } else if (source === 'shared') {
+        this.debug(`Waiting on the lookup in flight for ${query}`);
       } else {
-        // Start new lookup
         this.debug(`Starting DNS lookup for ${query}`);
-        setCacheEntry(query, null); // Mark as pending
-        const answer = await lookupDNSBL(reversedIp, dnsbl.server, this.config.dnsTimeout);
-        results = answer.results;
-        if (answer.definite) {
-          setCacheEntry(query, results);
-        } else {
-          // No answer from the list: not listed for this client only. Cache
-          // nothing, so the next connection from the address asks again.
-          deleteCacheEntry(query);
-          this.debug(`DNS lookup for ${query} failed (${answer.error}); not cached`);
-        }
+      }
+
+      const { results, definite, error } = await answer;
+      if (!definite) {
+        // No answer from the list: not listed for this client only. Nothing
+        // is cached, so the next connection from the address asks again.
+        this.debug(`DNS lookup for ${query} failed (${error}); not listed for client ${client.id}, not cached`);
       }
 
       // Process results
