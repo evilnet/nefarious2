@@ -57,15 +57,28 @@ struct DNSBLServer {
   unsigned long blocks;      /**< Total blocks performed */
 };
 
-/** Structure for caching DNSBL lookup results */
+/** One DNSBL entry's answer about an address: what a lookup learned,
+ * kept so that a verdict can be judged again by the entries in force
+ * later.  The entry is named as a query names it (dnsbl.c: domain, index
+ * text, bitmask, place among the entries written alike). */
+struct DNSBLAnswer {
+  char *domain;                  /**< The entry's domain */
+  char *index;                   /**< Its index as written (NULL: none) */
+  unsigned int bitmask;          /**< Its bitmask */
+  int nth;                       /**< Its place among the entries alike */
+  int listed;                    /**< The address is listed there */
+  unsigned int value;            /**< If so, the reply value (last octet) */
+};
+
+/** Structure for caching DNSBL lookup results: the answers, not a verdict
+ * (dnsbl_cache_replay() judges them by the entries in force), under the
+ * address that was asked about. */
 struct DNSBLCacheEntry {
   struct DNSBLCacheEntry *next;  /**< Hash table chain */
-  struct irc_in_addr addr;       /**< IP address */
+  struct irc_in_addr addr;       /**< The address the lookup asked about */
   time_t expire;                 /**< Expiration timestamp */
-  unsigned int result;           /**< Cached result bitmask */
-  char *server;                  /**< Which DNSBL server */
-  enum DNSBLAction action;       /**< Action determined */
-  char *mark;                    /**< Mark string if applicable */
+  struct DNSBLAnswer *answers;   /**< One per entry asked */
+  int nanswers;                  /**< How many */
 };
 
 /** DNSBL lookup request tracking */
@@ -78,6 +91,9 @@ struct DNSBLRequest {
   int cancelled;                 /**< Set if request was cancelled (client disconnected) */
   enum DNSBLAction action;       /**< Highest priority action */
   char *mark;                    /**< Mark string to apply */
+  struct irc_in_addr addr;       /**< The address asked about (the cache key) */
+  struct DNSBLAnswer *answers;   /**< The answers so far (for the cache) */
+  int nanswers;                  /**< How many */
 };
 
 /** Global DNSBL statistics */

@@ -283,30 +283,65 @@ dnsbl_cache_lookup(const struct irc_in_addr *addr)
   return NULL;
 }
 
-/** Add a result to the DNSBL cache */
+/** Free a list of answers. */
 static void
-dnsbl_cache_add(const struct irc_in_addr *addr, const char *server,
-                unsigned int result, enum DNSBLAction action, const char *mark)
+dnsbl_answers_free(struct DNSBLAnswer *answers, int n)
+{
+  int i;
+
+  for (i = 0; i < n; i++) {
+    MyFree(answers[i].domain);
+    MyFree(answers[i].index);
+  }
+  MyFree(answers);
+}
+
+/** Free a cache entry. */
+static void
+dnsbl_cache_entry_free(struct DNSBLCacheEntry *entry)
+{
+  dnsbl_answers_free(entry->answers, entry->nanswers);
+  MyFree(entry);
+  dnsbl_stats.cache_size--;
+}
+
+/** Add a lookup's answers to the DNSBL cache, under the address the
+ * lookup asked about; the cache takes the answers over. */
+static void
+dnsbl_cache_add(const struct irc_in_addr *addr, struct DNSBLAnswer *answers,
+                int nanswers)
 {
   unsigned int hash = dnsbl_hash_addr(addr);
   struct DNSBLCacheEntry *entry;
 
   entry = (struct DNSBLCacheEntry *)MyCalloc(1, sizeof(struct DNSBLCacheEntry));
-  if (!entry)
+  if (!entry) {
+    dnsbl_answers_free(answers, nanswers);
     return;
+  }
 
   memcpy(&entry->addr, addr, sizeof(struct irc_in_addr));
   entry->expire = CurrentTime + feature_int(FEAT_DNSBL_CACHETIME);
-  entry->result = result;
-  entry->action = action;
-  if (server)
-    DupString(entry->server, server);
-  if (mark)
-    DupString(entry->mark, mark);
+  entry->answers = answers;
+  entry->nanswers = nanswers;
 
   entry->next = dnsbl_cache[hash];
   dnsbl_cache[hash] = entry;
   dnsbl_stats.cache_size++;
+}
+
+/** Drop \a stale from the cache (a newer lookup replaces it). */
+static void
+dnsbl_cache_drop(struct DNSBLCacheEntry *stale)
+{
+  struct DNSBLCacheEntry **pp;
+
+  for (pp = &dnsbl_cache[dnsbl_hash_addr(&stale->addr)]; *pp; pp = &(*pp)->next)
+    if (*pp == stale) {
+      *pp = stale->next;
+      dnsbl_cache_entry_free(stale);
+      return;
+    }
 }
 
 void
@@ -326,13 +361,7 @@ dnsbl_cache_expire(void)
           prev->next = next;
         else
           dnsbl_cache[i] = next;
-
-        if (entry->server)
-          MyFree(entry->server);
-        if (entry->mark)
-          MyFree(entry->mark);
-        MyFree(entry);
-        dnsbl_stats.cache_size--;
+        dnsbl_cache_entry_free(entry);
       } else {
         prev = entry;
       }
@@ -413,7 +442,133 @@ dnsbl_request_free(struct DNSBLRequest *req)
 
   if (req->mark)
     MyFree(req->mark);
+  dnsbl_answers_free(req->answers, req->nanswers);
   MyFree(req);
+}
+
+/** Judge one entry's answer for \a req: \a value is the reply value (the
+ * answer's last octet); the entry's index or bitmask says whether it
+ * counts (dnsbl_entry_matches()), its action what it does. */
+static void
+dnsbl_judge(struct DNSBLRequest *req, struct DNSBLServer *server,
+            unsigned int value)
+{
+  Debug((DEBUG_DNS, "DNSBL: Got response for %s, result byte=%u",
+         server->domain, value));
+
+  if (!dnsbl_entry_matches(server, value))
+    return;
+  server->hits++;
+  req->result++;
+
+  /* Process the action based on priority */
+  switch (server->action) {
+  case DNSBL_ACT_WHITELIST:
+    req->whitelisted = 1;
+    dnsbl_stats.total_whitelists++;
+    Debug((DEBUG_DNS, "DNSBL: Whitelist hit from %s", server->domain));
+    break;
+
+  case DNSBL_ACT_BLOCK_ALL:
+    if (req->action < DNSBL_ACT_BLOCK_ALL && !req->whitelisted) {
+      req->action = DNSBL_ACT_BLOCK_ALL;
+      server->blocks++;
+      dnsbl_stats.total_blocks++;
+    }
+    break;
+
+  case DNSBL_ACT_BLOCK_ANON:
+    if (req->action < DNSBL_ACT_BLOCK_ANON && !req->whitelisted) {
+      req->action = DNSBL_ACT_BLOCK_ANON;
+      server->blocks++;
+    }
+    break;
+
+  case DNSBL_ACT_MARK:
+    if (req->action < DNSBL_ACT_MARK && !req->whitelisted) {
+      req->action = DNSBL_ACT_MARK;
+      if (server->mark) {
+        if (req->mark)
+          MyFree(req->mark);
+        DupString(req->mark, server->mark);
+      }
+      dnsbl_stats.total_marks++;
+    }
+    break;
+
+  default:
+    break;
+  }
+}
+
+/** Keep \a server's answer on \a req, for the cache. */
+static void
+dnsbl_note_answer(struct DNSBLRequest *req, struct DNSBLServer *server,
+                  int listed, unsigned int value)
+{
+  struct DNSBLAnswer *a;
+
+  req->answers = (struct DNSBLAnswer *)MyRealloc(req->answers,
+                   (req->nanswers + 1) * sizeof(*req->answers));
+  a = &req->answers[req->nanswers++];
+  DupString(a->domain, server->domain);
+  a->index = NULL;
+  if (server->index)
+    DupString(a->index, server->index);
+  a->bitmask = server->bitmask;
+  a->nth = dnsbl_entry_nth(server);
+  a->listed = listed;
+  a->value = value;
+}
+
+/** The answer \a cached holds for the configured entry \a server (same
+ * name: domain, index text, bitmask, place among those alike), or NULL. */
+static const struct DNSBLAnswer *
+dnsbl_cached_answer(const struct DNSBLCacheEntry *cached,
+                    const struct DNSBLServer *server)
+{
+  int nth = dnsbl_entry_nth(server);
+  int i;
+
+  for (i = 0; i < cached->nanswers; i++)
+    if (cached->answers[i].nth == nth
+        && dnsbl_entry_is(server, cached->answers[i].domain,
+                          cached->answers[i].index, cached->answers[i].bitmask))
+      return &cached->answers[i];
+  return NULL;
+}
+
+/** A cached lookup's verdict, judged by the entries in force now: each
+ * configured entry's cached answer, under that entry's index, bitmask,
+ * action and mark (as the scripts judge their cached answers).  An entry
+ * with no cached answer (added, or changed, since the lookup) makes the
+ * cache entry stale: it is dropped, and NULL says to look up again.
+ * Answers of entries removed since are ignored.
+ * @return A completed request (nothing pending), or NULL.
+ */
+static struct DNSBLRequest *
+dnsbl_cache_replay(struct Client *cptr, struct DNSBLCacheEntry *cached)
+{
+  struct DNSBLServer *server;
+  struct DNSBLRequest *req;
+  const struct DNSBLAnswer *a;
+
+  for (server = dnsbl_servers; server; server = server->next)
+    if (!dnsbl_cached_answer(cached, server)) {
+      Debug((DEBUG_DNS, "DNSBL: Cached result stale (%s not asked)",
+             server->domain));
+      dnsbl_cache_drop(cached);
+      return NULL;
+    }
+
+  req = (struct DNSBLRequest *)MyCalloc(1, sizeof(struct DNSBLRequest));
+  req->client = cptr;
+  req->action = DNSBL_ACT_NONE;
+  memcpy(&req->addr, &cached->addr, sizeof(req->addr));
+  for (server = dnsbl_servers; server; server = server->next)
+    if ((a = dnsbl_cached_answer(cached, server)) && a->listed)
+      dnsbl_judge(req, server, a->value);
+  return req;
 }
 
 /** Callback for DNSBL DNS lookup completion */
@@ -423,14 +578,14 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
   struct DNSBLQueryContext *ctx = (struct DNSBLQueryContext *)vptr;
   struct DNSBLRequest *req;
   struct DNSBLServer *server;
-  unsigned int result_byte;
+  unsigned int result_byte = 0;
 
   if (!ctx) {
     return;
   }
 
   req = ctx->request;
-  server = addr ? dnsbl_live_server(ctx) : NULL;
+  server = dnsbl_live_server(ctx);
   if (addr && !server)
     Debug((DEBUG_DNS, "DNSBL: Answer from %s ignored: no such entry since a rehash",
            ctx->domain));
@@ -463,67 +618,27 @@ dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
     return;
   }
 
-  if (addr && server) {
+  if (addr) {
     /* We got a response - extract the last octet as the result.  The
      * address is in network byte order: its last BYTE is the octet, read
      * as bytes (the low half of in6_16[7] in host order is the third octet
      * on a little-endian host). */
     result_byte = ((const unsigned char *) addr)[sizeof(*addr) - 1];
-    {
-      Debug((DEBUG_DNS, "DNSBL: Got response for %s, result byte=%u",
-             server->domain, result_byte));
-
-      /* Check if this result matches the entry */
-      if (dnsbl_entry_matches(server, result_byte)) {
-        server->hits++;
-        req->result++;
-
-        /* Process the action based on priority */
-        switch (server->action) {
-        case DNSBL_ACT_WHITELIST:
-          req->whitelisted = 1;
-          dnsbl_stats.total_whitelists++;
-          Debug((DEBUG_DNS, "DNSBL: Whitelist hit from %s", server->domain));
-          break;
-
-        case DNSBL_ACT_BLOCK_ALL:
-          if (req->action < DNSBL_ACT_BLOCK_ALL && !req->whitelisted) {
-            req->action = DNSBL_ACT_BLOCK_ALL;
-            server->blocks++;
-            dnsbl_stats.total_blocks++;
-          }
-          break;
-
-        case DNSBL_ACT_BLOCK_ANON:
-          if (req->action < DNSBL_ACT_BLOCK_ANON && !req->whitelisted) {
-            req->action = DNSBL_ACT_BLOCK_ANON;
-            server->blocks++;
-          }
-          break;
-
-        case DNSBL_ACT_MARK:
-          if (req->action < DNSBL_ACT_MARK && !req->whitelisted) {
-            req->action = DNSBL_ACT_MARK;
-            if (server->mark) {
-              if (req->mark)
-                MyFree(req->mark);
-              DupString(req->mark, server->mark);
-            }
-            dnsbl_stats.total_marks++;
-          }
-          break;
-
-        default:
-          break;
-        }
-      }
-    }
+  }
+  if (server) {
+    dnsbl_note_answer(req, server, addr != NULL, result_byte);
+    if (addr)
+      dnsbl_judge(req, server, result_byte);
   }
 
   /* Check if all lookups are complete */
   if (req->pending_count == 0) {
-    /* Cache the result */
-    dnsbl_cache_add(&cli_ip(req->client), NULL, req->result, req->action, req->mark);
+    /* Cache the answers (not the verdict: a later hit judges them by the
+     * entries in force then), under the address that was asked about --
+     * the client's may have changed since (WEBIRC, IAuth) */
+    dnsbl_cache_add(&req->addr, req->answers, req->nanswers);
+    req->answers = NULL;
+    req->nanswers = 0;
 
     /* Signal auth to continue */
     if (cli_auth(req->client))
@@ -550,12 +665,17 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
   if (!cptr)
     return 0;
 
-  /* Check cache first */
+  /* Check cache first: a hit gives a completed request, judged by the
+   * entries in force now; nothing is pending (0), the verdict is the
+   * request's (dnsbl_result()).  A stale entry is looked up again. */
   cached = dnsbl_cache_lookup(&cli_ip(cptr));
-  if (cached) {
-    /* Use cached result */
+  if (cached && (req = dnsbl_cache_replay(cptr, cached))) {
     Debug((DEBUG_DNS, "DNSBL: Cache hit for client"));
-    return 0; /* Already have result, no lookup needed */
+    if (request)
+      *request = req;
+    else
+      dnsbl_request_free(req);
+    return 0;
   }
 
   /* Create request structure */
@@ -566,6 +686,7 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
   req->client = cptr;
   req->action = DNSBL_ACT_NONE;
   req->cancelled = 0;
+  memcpy(&req->addr, &cli_ip(cptr), sizeof(req->addr));   /* asked about */
 
   /* Return the request to the caller */
   if (request)
@@ -652,9 +773,8 @@ int
 dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
              enum DNSBLAction *action, const char **mark)
 {
-  struct DNSBLCacheEntry *cached;
-
-  /* Check if we have a pending request with results */
+  /* The request holds the verdict, a fresh lookup's or a cached one's
+   * (dnsbl_check()) */
   if (request) {
     if (action)
       *action = request->whitelisted ? DNSBL_ACT_WHITELIST : request->action;
@@ -662,19 +782,6 @@ dnsbl_result(struct Client *cptr, struct DNSBLRequest *request,
       *mark = request->mark;
 
     return request->action >= DNSBL_ACT_BLOCK_ANON && !request->whitelisted;
-  }
-
-  /* Check cache */
-  if (cptr) {
-    cached = dnsbl_cache_lookup(&cli_ip(cptr));
-    if (cached) {
-      if (action)
-        *action = cached->action;
-      if (mark)
-        *mark = cached->mark;
-
-      return cached->action >= DNSBL_ACT_BLOCK_ANON;
-    }
   }
 
   if (action)

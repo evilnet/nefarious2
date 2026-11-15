@@ -97,13 +97,25 @@ static void rehash_to(const char *domain, enum DNSBLAction action, const char *m
     dnsbl_add_server(domain, NULL, 0, action, mark, 0);
 }
 
+/** Forget every cached result (the entries leak: a test). */
+static void cache_reset(void)
+{
+  memset(dnsbl_cache, 0, sizeof(dnsbl_cache));
+}
+
+/** Start a lookup for the client (one must start), unanswered. */
+static struct DNSBLRequest *lookup_started(void)
+{
+  struct DNSBLRequest *req = NULL;
+
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  return req;
+}
+
 static int setup(void **state)
 {
-  int i;
-
   (void)state;
-  for (i = 0; i < DNSBL_CACHE_SIZE; i++)
-    dnsbl_cache[i] = NULL;                /* (the entries leak: a test) */
+  cache_reset();
   dnsbl_clear_servers();
   nqueries = completes = 0;
   CurrentTime = 1000;
@@ -297,6 +309,163 @@ static void junk_index_refused(void **state)
                                    DNSBL_ACT_BLOCK_ALL, NULL, 0));
 }
 
+/* ------------------------------------------------------------------ */
+/* The cache: a second connection from the address within CACHETIME   */
+/* ------------------------------------------------------------------ */
+
+/** Look the client up and answer every query: listed (127.0.0.2) or
+ * not.  Returns the request, completed. */
+static struct DNSBLRequest *lookup(int listed)
+{
+  struct DNSBLRequest *req = NULL;
+  int i, first = nqueries;
+
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  for (i = first; i < nqueries; i++)
+    answer(i, listed, 2);
+  return req;
+}
+
+/** The verdict a second connection gets: from the cache (no query) when
+ * \a from_cache, else NULL after checking a lookup was started. */
+static struct DNSBLRequest *again(int from_cache)
+{
+  struct DNSBLRequest *req = NULL;
+  int before = nqueries;
+  int started = dnsbl_check(&client, &req);
+
+  if (from_cache) {
+    assert_int_equal(started, 0);
+    assert_int_equal(nqueries, before);
+    assert_non_null(req);               /* a verdict to act on */
+    assert_int_equal(req->pending_count, 0);
+  } else {
+    assert_int_equal(started, 1);
+    assert_true(nqueries > before);
+  }
+  return req;
+}
+
+/** Found listed (block): a second connection within the cache time is
+ * blocked too, without a lookup. */
+static void cached_listing_blocks_again(void **state)
+{
+  struct DNSBLRequest *req;
+  enum DNSBLAction action;
+  const char *mark;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_cancel(lookup(1));
+  req = again(1);
+  assert_int_equal(dnsbl_result(&client, req, &action, &mark), 1);
+  assert_int_equal(action, DNSBL_ACT_BLOCK_ALL);
+  dnsbl_cancel(req);
+}
+
+/** Found not listed: a second connection is let in, without a lookup. */
+static void cached_clean_lets_in(void **state)
+{
+  struct DNSBLRequest *req;
+  enum DNSBLAction action;
+  const char *mark;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_cancel(lookup(0));
+  req = again(1);
+  assert_int_equal(dnsbl_result(&client, req, &action, &mark), 0);
+  assert_int_equal(action, DNSBL_ACT_NONE);
+  dnsbl_cancel(req);
+}
+
+/** A rehash kept the entry and changed its action: the cached answer is
+ * judged by the live action (mark, with the live mark). */
+static void cached_listing_judged_by_live_action(void **state)
+{
+  struct DNSBLRequest *req;
+  enum DNSBLAction action;
+  const char *mark;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_cancel(lookup(1));
+  rehash_to("bl.test", DNSBL_ACT_MARK, "listed");
+  req = again(1);
+  assert_int_equal(dnsbl_result(&client, req, &action, &mark), 0);
+  assert_int_equal(action, DNSBL_ACT_MARK);
+  assert_string_equal(mark, "listed");
+  dnsbl_cancel(req);
+}
+
+/** A rehash added an entry, or changed an entry's index: the cache has no
+ * answer for it -- stale, looked up again (and the fresh answers cached). */
+static void rehash_adding_or_changing_an_entry_makes_it_stale(void **state)
+{
+  struct DNSBLRequest *req;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_cancel(lookup(0));
+  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  req = again(0);
+  answer(nqueries - 2, 0, 0);
+  answer(nqueries - 1, 1, 2);
+  assert_int_equal(req->action, DNSBL_ACT_BLOCK_ALL);
+  dnsbl_cancel(req);
+  dnsbl_cancel(again(1));                  /* the fresh answers are cached */
+
+  dnsbl_clear_servers();
+  dnsbl_add_server("bl.test", "3", 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  req = again(0);                          /* bl.test's index changed */
+  dnsbl_cancel(req);
+}
+
+/** A rehash removed the entry that listed the address: its cached answer
+ * no longer counts; the remaining entry's does. */
+static void removed_entry_cached_answer_ignored(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  dnsbl_add_server("bl2.test", NULL, 0, DNSBL_ACT_BLOCK_ALL, NULL, 0);
+  assert_int_equal(dnsbl_check(&client, &req), 1);
+  answer(0, 1, 2);                         /* bl2.test (added last, first) */
+  answer(1, 0, 0);                         /* bl.test */
+  dnsbl_cancel(req);
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  req = again(1);
+  assert_int_equal(req->action, DNSBL_ACT_NONE);
+  dnsbl_cancel(req);
+}
+
+/** The cache key is the address the lookup ASKED about: a client whose
+ * address changes during the lookup (an IAuth I line, a WEBIRC) leaves the
+ * answer under the old one.  A listed gateway: its listing is not cached
+ * for the client's address.  A clean gateway: "clean" is not cached for
+ * the client's address either. */
+static void cache_keyed_by_the_address_asked_about(void **state)
+{
+  struct DNSBLRequest *req = NULL;
+  struct irc_in_addr gateway, real;
+  int listed;
+
+  rehash_to("bl.test", DNSBL_ACT_BLOCK_ALL, NULL);
+  memcpy(&gateway, &cli_ip(&client), sizeof(gateway));        /* 192.0.2.77 */
+  memcpy(&real, &gateway, sizeof(real));
+  real.in6_16[7] = htons(0x0263);                             /* 192.0.2.99 */
+  for (listed = 1; listed >= 0; listed--) {
+    cache_reset();
+    memcpy(&cli_ip(&client), &gateway, sizeof(gateway));
+    req = lookup_started();
+    memcpy(&cli_ip(&client), &real, sizeof(real));            /* I / WEBIRC */
+    answer(nqueries - 1, listed, 2);
+    dnsbl_cancel(req);
+    dnsbl_cancel(again(0));                                   /* real: asked */
+    memcpy(&cli_ip(&client), &gateway, sizeof(gateway));
+    req = again(1);                                           /* gateway: cached */
+    assert_int_equal(req->action, listed ? DNSBL_ACT_BLOCK_ALL : DNSBL_ACT_NONE);
+    dnsbl_cancel(req);
+  }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -308,6 +477,12 @@ int main(void)
     cmocka_unit_test_setup(same_domain_entries_keep_their_own_answers, setup),
     cmocka_unit_test_setup(reply_values_match_as_the_scripts_do, setup),
     cmocka_unit_test_setup(junk_index_refused, setup),
+    cmocka_unit_test_setup(cached_listing_blocks_again, setup),
+    cmocka_unit_test_setup(cached_clean_lets_in, setup),
+    cmocka_unit_test_setup(cached_listing_judged_by_live_action, setup),
+    cmocka_unit_test_setup(rehash_adding_or_changing_an_entry_makes_it_stale, setup),
+    cmocka_unit_test_setup(removed_entry_cached_answer_ignored, setup),
+    cmocka_unit_test_setup(cache_keyed_by_the_address_asked_about, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
