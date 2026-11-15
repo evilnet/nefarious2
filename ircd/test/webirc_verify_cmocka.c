@@ -89,10 +89,17 @@ int auth_set_webirc(struct AuthRequest *auth, const char *password,
            opts ? opts : "");
   return 0;
 }
+static char trusted_line[256];   /* the w line IAuth was told, as sent */
 int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password,
                             const char *username, const char *hostname,
                             const char *ip, const char *opts)
-{ iauth_told++; return 0; }
+{
+  iauth_told++;
+  snprintf(trusted_line, sizeof(trusted_line), "w %s %s %s %s%s%s",
+           password, username, hostname, ip, opts ? " :" : "",
+           opts ? opts : "");
+  return 0;
+}
 void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr) {}
 void auth_webirc_hold(struct AuthRequest *auth) { holds++; }
 void auth_webirc_release_later(struct AuthRequest *auth);
@@ -102,11 +109,14 @@ void auth_dnsbl_restart(struct AuthRequest *auth) { dnsbl_restarts++; }
 static int submitted, async_available;
 static crypt_verify_callback pending_cb;
 static void *pending_ctx;
+static char sub_pass[64], sub_hash[64];   /* the last check submitted */
 int ircd_crypt_async_available(void) { return async_available; }
 int ircd_crypt_verify_async(const char *password, const char *hash,
                             crypt_verify_callback callback, void *ctx)
 {
   submitted++;
+  snprintf(sub_pass, sizeof(sub_pass), "%s", password);
+  snprintf(sub_hash, sizeof(sub_hash), "%s", hash);
   pending_cb = callback;
   pending_ctx = ctx;
   return 0;
@@ -119,25 +129,47 @@ static void finish_check(int result)
   pending_cb = NULL;
   cb(result, pending_ctx);
 }
+/** Finish the check submitted last by what it checked: "$X$<pw>" is
+ * <pw>'s hash. */
+static void finish_check_by_password(void)
+{
+  finish_check(strcmp(sub_pass, sub_hash + 3) ? CRYPT_VERIFY_NOMATCH
+               : CRYPT_VERIFY_MATCH);
+}
 
-/* The WebIRC blocks in force (a rehash replaces them): one, or none. */
-static struct WebIRCConf block;
-static int have_block;
+/* The WebIRC blocks in force (a rehash replaces them), all matching the
+ * gateway, in order: block, then block2 -- each when present. */
+static struct WebIRCConf block, block2;
+static int have_block, have_block2;
+struct WebIRCConf *find_webirc_conf_by_host_nth(struct Client *cptr, int n)
+{
+  struct WebIRCConf *list[2];
+  int k = 0;
+
+  if (have_block)
+    list[k++] = &block;
+  if (have_block2)
+    list[k++] = &block2;
+  return n >= 0 && n < k ? list[n] : NULL;
+}
 struct WebIRCConf *find_webirc_conf_by_host(struct Client *cptr)
-{ return have_block ? &block : NULL; }
+{ return find_webirc_conf_by_host_nth(cptr, 0); }
+/** Every block in turn, as s_conf.c's: "$X$<pw>" is <pw>'s hash. */
 struct WebIRCConf *find_webirc_conf(struct Client *cptr, char *passwd, int *status)
 {
+  struct WebIRCConf *w;
+  int n;
+
   sync_checks++;
-  if (!have_block) {
-    *status = 2;
-    return NULL;
-  }
-  if (block.passwd && strcmp(passwd, "pw")) {    /* "$X$pw" is "pw"'s */
+  *status = 2;
+  for (n = 0; (w = find_webirc_conf_by_host_nth(cptr, n)); n++) {
     *status = 1;
-    return NULL;
+    if (!w->passwd || !strcmp(passwd, w->passwd + 3)) {
+      *status = 0;
+      return w;
+    }
   }
-  *status = 0;
-  return &block;
+  return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -199,6 +231,12 @@ static int setup(void **state)
   block.ident = "gwident";
   block.description = "gw";
   have_block = 1;
+  memset(&block2, 0, sizeof(block2));          /* a second gateway behind */
+  block2.passwd = "$X$pw2";                    /* the same address */
+  block2.ident = "gw2ident";
+  block2.description = "gw2";
+  have_block2 = 0;
+  trusted_line[0] = sub_pass[0] = sub_hash[0] = '\0';
   holds = releases = dnsbl_restarts = iauth_told = sync_checks = submitted = 0;
   ip_at_release[0] = '\0';
   ip_at_replay[0] = '\0';
@@ -537,6 +575,32 @@ static void iauth_w_unmatched_host_handed_each_time(void **state)
   assert_int_equal(sync_checks, 0);
 }
 
+/** The w line IAuth is told when a check that ran on the thread pool
+ * accepts is the one a check made at once sends (and master): the
+ * password given, and the options only from a block that enables them. */
+static void trusted_line_same_on_both_paths(void **state)
+{
+  char *parv[] = { "*", "pw", "gateway", "spoofed.example", "192.0.2.77",
+                   "secure", NULL };
+  int opts, async;
+
+  for (opts = 0; opts < 2; opts++)
+    for (async = 0; async < 2; async++) {
+      setup(state);
+      async_available = async;
+      if (opts)
+        FlagSet(&block.flags, WFLAG_USEOPTIONS);
+      m_webirc(&client, &client, 6, parv);
+      if (async)
+        finish_check(CRYPT_VERIFY_MATCH);
+      assert_null(exit_reason);
+      assert_int_equal(iauth_told, 1);
+      assert_string_equal(trusted_line, opts
+                          ? "w pw gateway spoofed.example 192.0.2.77 :secure"
+                          : "w pw gateway spoofed.example 192.0.2.77");
+    }
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -556,6 +620,7 @@ int main(void)
     cmocka_unit_test_setup(no_block_handed_to_iauth_or_refused, setup),
     cmocka_unit_test_setup(iauth_w_one_password_guess_per_connection, setup),
     cmocka_unit_test_setup(iauth_w_unmatched_host_handed_each_time, setup),
+    cmocka_unit_test_setup(trusted_line_same_on_both_paths, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

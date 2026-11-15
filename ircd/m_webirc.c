@@ -113,7 +113,8 @@ struct webirc_verify_ctx {
                                          No pointer to the block: a rehash
                                          during the check frees it. */
   char *given;                      /**< The password the gateway gave: what
-                                         IAuth is handed if the check fails
+                                         IAuth is told in the w line, or
+                                         handed in the W if the check fails
                                          (webirc_unmatched()) */
   char username[USERLEN + 1];       /**< WEBIRC username */
   char hostname[HOSTLEN + 1];       /**< WEBIRC hostname */
@@ -382,14 +383,16 @@ static void webirc_password_verified(int result, void *arg)
   apply_webirc_changes(cptr, wconf, ctx->hostname, ctx->ipaddr,
                        &ctx->addr, ctx->options[0] ? ctx->options : NULL);
 
-  /* Forward to IAuth if configured */
+  /* Forward to IAuth if configured: the line a check made at once sends
+   * (the password given, and the options only if the block enables them) */
   if (cli_auth(cptr)) {
     if (FlagHas(&wconf->flags, WFLAG_USEOPTIONS))
-      auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
-                              ctx->ipaddr, ctx->options[0] ? ctx->options : NULL);
+      auth_set_webirc_trusted(cli_auth(cptr), ctx->given, ctx->username,
+                              ctx->hostname, ctx->ipaddr,
+                              ctx->options[0] ? ctx->options : NULL);
     else
-      auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
-                              ctx->ipaddr, NULL);
+      auth_set_webirc_trusted(cli_auth(cptr), ctx->given, ctx->username,
+                              ctx->hostname, ctx->ipaddr, NULL);
 
     /* AUTHENTICATE lines held for the check (m_authenticate.c) start
      * their exchange now, on the real address; one may exit the client. */
