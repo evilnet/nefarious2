@@ -1511,6 +1511,8 @@ static struct FeatureDesc {
   F_B(GITSYNC_ENABLE, 0, 0, 0),
   F_I(GITSYNC_INTERVAL, 0, 300, 0),
 #endif
+  F_I(GITSYNC_CONNECT_TIMEOUT, 0, 5, 0),  /* seconds to connect; 0 = system */
+  F_I(GITSYNC_TIMEOUT, 0, 10, 0),         /* seconds a read/write may wait */
   F_S(GITSYNC_REPOSITORY, 0, "", 0),
   F_S(GITSYNC_BRANCH, 0, "master", 0),
   F_S(GITSYNC_SSH_KEY, 0, "", 0),

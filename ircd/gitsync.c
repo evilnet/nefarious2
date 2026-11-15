@@ -62,6 +62,15 @@
 /** Global gitsync statistics */
 static struct GitsyncStats gitsync_stats;
 
+/** The libgit2 version built against, as major * 100 + minor. */
+#if defined(LIBGIT2_VERSION_MAJOR)
+#define GITSYNC_GIT2_VERSION (LIBGIT2_VERSION_MAJOR * 100 + LIBGIT2_VERSION_MINOR)
+#elif defined(LIBGIT2_VER_MAJOR)
+#define GITSYNC_GIT2_VERSION (LIBGIT2_VER_MAJOR * 100 + LIBGIT2_VER_MINOR)
+#else
+#define GITSYNC_GIT2_VERSION 0
+#endif
+
 /** libgit2 initialized flag */
 static int git_initialized = 0;
 
@@ -1152,6 +1161,44 @@ gitsync_init(void)
   }
 }
 
+/** Feature \a feat, in seconds, as libgit2's milliseconds: 0 (the system
+ * default) for 0 or less, at most a day. */
+static int
+gitsync_timeout_ms(enum Feature feat)
+{
+  int secs = feature_int(feat);
+
+  if (secs <= 0)
+    return 0;
+  if (secs > 86400)
+    secs = 86400;
+  return secs * 1000;
+}
+
+/** Bound what a sync may wait for the remote: GITSYNC_CONNECT_TIMEOUT
+ * for a connection, GITSYNC_TIMEOUT for each read or write.  The sync
+ * runs in the main loop; without them a remote that accepts and never
+ * answers, or drops the connection attempt, holds the server for as long
+ * as the system lets it (minutes) or for ever.  libgit2 1.7 and later
+ * only; older libraries keep their defaults.
+ *
+ * Not bounded: an SSH server that accepts and never answers.  libgit2
+ * (1.9, libssh2 transport) hands the I/O timeout to libssh2, whose
+ * handshake gives up after it, but calls the handshake again while it
+ * reports a timeout, so the sync waits for as long as the server holds
+ * the connection.  Only running the sync outside the main loop bounds
+ * that. */
+static void
+gitsync_set_timeouts(void)
+{
+#if GITSYNC_GIT2_VERSION >= 107
+  git_libgit2_opts(GIT_OPT_SET_SERVER_CONNECT_TIMEOUT,
+                   gitsync_timeout_ms(FEAT_GITSYNC_CONNECT_TIMEOUT));
+  git_libgit2_opts(GIT_OPT_SET_SERVER_TIMEOUT,
+                   gitsync_timeout_ms(FEAT_GITSYNC_TIMEOUT));
+#endif
+}
+
 /** Run a sync.
  * @param cptr The connection whose line asked for it (&me for the timer).
  * @param sptr The oper who asked (NULL for the timer), told how it went.
@@ -1218,6 +1265,8 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
     git_libgit2_init();
     git_initialized = 1;
   }
+
+  gitsync_set_timeouts();
 
   /* Clone or open repository */
   if (!dir_exists(repo_path)) {
