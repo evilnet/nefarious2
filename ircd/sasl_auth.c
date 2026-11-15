@@ -861,10 +861,12 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
   } else
     other_id = 0;
 
-  /* The reply: 904 is SASL's own answer to a failed exchange (3.1/3.2
-   * define numerics only).  The FAIL before it, for standard-replies
-   * clients, is the fork's addition, the same code and form (no context)
-   * m_authenticate() sends with its 907. */
+  /* The reply (SASL defines numerics only): another account is 907, the
+   * client is already authenticated -- SASL's answer to an AUTHENTICATE
+   * after a successful one; the same name under another Keycloak id is 904,
+   * a failed exchange: the proof is not this account's.  The FAIL before
+   * either, for standard-replies clients, is the fork's addition, the same
+   * code and form (no context) m_authenticate() sends with its 907. */
   if (other_id) {
     /* The account was deleted and made again under the same name: this
      * connection -- with the bouncer session it belongs to -- is the
@@ -899,7 +901,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
     if (CapActive(sptr, CAP_STANDARDREPLIES))
       send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
                 reason + 2);              /* "you are logged in as ..." */
-    send_reply(sptr, ERR_SASLFAIL, reason);
+    send_reply(sptr, ERR_SASLALREADY);
   }
   return 1;
 }

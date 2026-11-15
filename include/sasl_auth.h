@@ -144,7 +144,8 @@ extern int sasl_logged_in(struct Client *cptr);
  *  folds together are different accounts) and, when both sides carry a
  *  Keycloak id, the same id (its bouncer session's when it is in one).
  *  Otherwise the client is told (FAIL AUTHENTICATE ALREADY_AUTHENTICATED,
- *  no context, with standard-replies -- the fork's addition -- then 904), the
+ *  no context, with standard-replies -- the fork's addition -- then 907 for
+ *  another account, 904 for the same name under another Keycloak id), the
  *  refusal is logged (accounts only) and the opers told, and 1 is returned:
  *  the caller ends its exchange and applies nothing.  0: not refused.
  */

@@ -124,6 +124,7 @@ struct fake {
   char fail_code[64];         /**< the code of the last FAIL sent to it */
   char warn[160];             /**< the last WARN sent to it */
   char fail_context[64];      /**< that FAIL's context parameter */
+  char fail_desc[200];        /**< that FAIL's description */
   char saslfail[200];         /**< the reason of the last ERR_SASLFAIL */
   char loggedin_as[32];       /**< the account the last 900 named */
 };
@@ -540,6 +541,7 @@ void send_fail(struct Client *to, const char *command, const char *code,
   if (f && !f->freed) {
     ircd_strncpy(f->fail_code, code, sizeof(f->fail_code));
     ircd_strncpy(f->fail_context, context ? context : "", sizeof(f->fail_context));
+    ircd_strncpy(f->fail_desc, description ? description : "", sizeof(f->fail_desc));
   }
   tlog_add("FAIL %s %s %s", command, code, context ? context : "");
   tlog_label(label_take(to));
@@ -2160,7 +2162,7 @@ static void flow_verify_then_other_account(void **state)
  * succeeds.  Before registration nothing is applied yet: the SASL account
  * with its id.  After registration REGISTER SUCCESS logged the client in
  * to the new account, and a login cannot change the account of a client
- * logged in (#223): the SASL login is refused (904) and the REGISTER
+ * logged in (#223): the SASL login is refused (907) and the REGISTER
  * account stands -- as the first login stands when REGISTER's answer comes
  * second (flow_sasl_then_register_answer). */
 static void flow_register_answer_mid_sasl_then_success(void **state)
@@ -2182,7 +2184,8 @@ static void flow_register_answer_mid_sasl_then_success(void **state)
     assert_identity(c, acct, user_id(acct, rid), 1);
     pend_deliver_kind(P_TOKEN, KC_SUCCESS);         /* then the grant */
     if (post) {
-      assert_true(has_numeric(f, ERR_SASLFAIL));
+      assert_true(has_numeric(f, ERR_SASLALREADY));
+      assert_false(has_numeric(f, ERR_SASLFAIL));
       assert_false(has_numeric(f, RPL_SASLSUCCESS));
       assert_identity(c, acct, rid, 1);
     } else
@@ -3087,10 +3090,11 @@ static void refused_request_fails_at_once(void **state)
 /* A logged-in client's re-authentication never changes its account    */
 /* ------------------------------------------------------------------ */
 
-/* OAUTHBEARER after registration exists so that a client can refresh a
- * token about to expire.  A token naming another account -- or the same
- * name under another Keycloak id -- is refused (904) and the login stays
- * exactly as it was; a token for the same account refreshes it.  "Logged
+/* OAUTHBEARER after registration exists so that a CAP 302 client can
+ * refresh a token about to expire.  A token naming another account is
+ * refused with 907 (the client is already authenticated), the same name
+ * under another Keycloak id with 904, and the login stays exactly as it
+ * was; a token for the same account refreshes it.  "Logged
  * in" is an account the ircd has applied (registration did, or a login
  * after it), not a login still waiting for registration to apply it:
  * before registration a client may authenticate again, as anyone. */
@@ -3214,19 +3218,27 @@ static void oauth_exchange(struct Client *c, enum strategy how)
   }
 }
 
-/** \a c's re-authentication was refused: 904 with \a reason, the FAIL
- * naming its account, no 900/903, the exchange over, the login exactly
- * \a was, nothing announced, the opers told; and the gate still stands
- * (PLAIN: 907, the login untouched). */
+/** \a c's re-authentication was refused with \a numeric -- 907 for
+ * another account, 904 (its reason \a reason) for the same name under
+ * another Keycloak id -- and not the other one; the FAIL before it, as
+ * ever, with \a reason in its description; no 900/903, the exchange over,
+ * the login exactly \a was, nothing announced, the opers told; and the
+ * gate still stands (PLAIN: 907, the login untouched). */
 static void assert_refused(struct Client *c, const struct login_snap *was,
-                           const struct effects *fx_was, const char *reason)
+                           const struct effects *fx_was, int numeric,
+                           const char *reason)
 {
   struct fake *f = fake_of(c);
 
-  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_true(numeric == ERR_SASLALREADY || numeric == ERR_SASLFAIL);
+  assert_true(has_numeric(f, numeric));
+  assert_false(has_numeric(f, numeric == ERR_SASLFAIL ? ERR_SASLALREADY
+                                                      : ERR_SASLFAIL));
   assert_false(has_numeric(f, RPL_LOGGEDIN));
   assert_false(has_numeric(f, RPL_SASLSUCCESS));
-  assert_non_null(strstr(f->saslfail, reason));
+  if (numeric == ERR_SASLFAIL)
+    assert_non_null(strstr(f->saslfail, reason));
+  assert_non_null(strstr(f->fail_desc, reason));
   assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
   assert_string_equal(f->fail_context, "");    /* as with 907: no context */
   assert_null(cli_saslsession(c));
@@ -3289,7 +3301,7 @@ static void reauth_other_account_refused(void **state)
     fx_was = fx;
     token_for("yvonne", "yvonne");
     oauth_exchange(c, how);
-    assert_refused(c, &was, &fx_was, "logged in as xavier");
+    assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
 
     f->n_numerics = 0;                     /* then a refresh of its own */
     token_for("xavier", "xavier");
@@ -3317,7 +3329,7 @@ static void reauth_same_name_other_id_refused(void **state)
     fx_was = fx;
     token_for("xavier", "xavier-recreated");
     oauth_exchange(c, how);
-    assert_refused(c, &was, &fx_was, "previous Keycloak user");
+    assert_refused(c, &was, &fx_was, ERR_SASLFAIL, "previous Keycloak user");
   }
 }
 
@@ -3390,7 +3402,7 @@ static void reauth_id_table(void **state)
     token_for(name, rows[i].tok_id ? name : NULL);
     oauth_exchange(c, LOCAL);
     if (!rows[i].same) {
-      assert_refused(c, &was, &fx_was, "logged in as xavier");
+      assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
       continue;
     }
     assert_refreshed(c, &was, &fx_was);
@@ -3435,7 +3447,7 @@ static void reauth_session_members(void **state)
     fx_was = fx;
     token_for("yvonne", "yvonne");
     oauth_exchange(c, m ? INTROSPECT : LOCAL);
-    assert_refused(c, &was, &fx_was, "logged in as xavier");
+    assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
 
     f->n_numerics = 0;
     fx_was = fx;
@@ -3455,7 +3467,7 @@ static void reauth_session_members(void **state)
     fx_was = fx;
     token_for("xavier", "xavier-recreated");
     oauth_exchange(a, LOCAL);
-    assert_refused(a, &was, &fx_was, "previous Keycloak user");
+    assert_refused(a, &was, &fx_was, ERR_SASLFAIL, "previous Keycloak user");
   }
 }
 
@@ -3493,8 +3505,9 @@ static void reauth_while_registration_waits(void **state)
     else
       token_for("xavier", "xavier-recreated");
     oauth_exchange(c, INTROSPECT);
-    assert_refused(c, &was, &fx_was, other ? "logged in as xavier"
-                                           : "previous Keycloak user");
+    assert_refused(c, &was, &fx_was,
+                   other ? ERR_SASLALREADY : ERR_SASLFAIL,
+                   other ? "logged in as xavier" : "previous Keycloak user");
     assert_int_equal(cli_saslkcidlive(c), 0);
   }
 }
@@ -3514,7 +3527,7 @@ static void reauth_after_services_login_refused(void **state)
   fx_was = fx;
   token_for("yvonne", "yvonne");
   oauth_exchange(c, INTROSPECT);
-  assert_refused(c, &was, &fx_was, "logged in as xavier");
+  assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
   assert_false(IsSASLComplete(c));
   assert_int_equal(cli_user(c)->acc_create, 1700000000);
 }
@@ -3606,7 +3619,7 @@ static void reauth_after_register_login(void **state)
       assert_false(HasFlag(c, FLAG_REGLOGIN));
       continue;
     }
-    assert_refused(c, &was, &fx_was, "logged in as regb");
+    assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as regb");
     assert_true(HasFlag(c, FLAG_REGLOGIN));
 
     f->n_numerics = 0;                     /* its own account: a refresh */
@@ -3685,7 +3698,7 @@ static void reauth_ds_without_l_refused(void **state)
   cli_saslstart(c) = CurrentTime;
   SetSASLReauth(c);
   assert_int_equal(sasl_complete_login(c, cli_saslaccount(c), 0, NULL, 0), 0);
-  assert_refused(c, &was, &fx_was, "logged in as xavier");
+  assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as xavier");
 }
 
 /** A refresh's login record is the login it refreshes, never downgraded
@@ -3779,7 +3792,7 @@ static void reauth_casemapping_only_names_refused(void **state)
     /* the token's sub: a{b's own, or (with ids) the very same id */
     token_for("a{b", with_id ? "a[b" : "a{b");
     oauth_exchange(c, with_id ? LOCAL : INTROSPECT);
-    assert_refused(c, &was, &fx_was, "logged in as a[b");
+    assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "logged in as a[b");
     assert_string_equal(cli_user(c)->kc_id, with_id ? aid : "");
     assert_int_equal(fx.alias_syncs, fx_was.alias_syncs);
   }
