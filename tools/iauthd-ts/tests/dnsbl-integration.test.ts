@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn, ChildProcess } from 'node:child_process';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
@@ -66,6 +66,9 @@ interface TestHarness {
   wasAccepted: (clientId: number) => boolean;
   wasRejected: (clientId: number) => boolean;
   close: () => Promise<void>;
+  /** How long a lookup started now can still take to finish (the slowest
+   * scripted answer, or DNSTIMEOUT for one that never comes) */
+  settleMs: number;
 }
 
 /**
@@ -73,6 +76,16 @@ interface TestHarness {
  */
 async function createHarness(configPath: string): Promise<TestHarness> {
   const output: string[] = [];
+
+  const dnsTimeoutMatch = readFileSync(configPath, 'utf-8').match(/^#IAUTH DNSTIMEOUT (\d+)/m);
+  const dnsTimeoutMs = (dnsTimeoutMatch ? parseInt(dnsTimeoutMatch[1], 10) : 5) * 1000;
+  let settleMs = 0;
+  for (const mock of mockDnsResponses.values()) {
+    if (Array.isArray(mock)) continue;
+    for (const step of mock.steps) {
+      settleMs = Math.max(settleMs, step.hang ? dnsTimeoutMs : (step.delayMs ?? 0));
+    }
+  }
 
   // Create a wrapper script that injects our mock DNS module
   const wrapperPath = join(tmpdir(), `dns-mock-${Date.now()}.mjs`);
@@ -213,7 +226,7 @@ import('${join(import.meta.dirname, '..', 'src', 'index.ts').replace(/\\/g, '/')
   await waitFor(/^S iauthd-ts/);
   await new Promise(r => setTimeout(r, 100));
 
-  return { proc, output, dnsQueries, events, send, waitFor, getMarks, wasAccepted, wasRejected, close };
+  return { proc, output, dnsQueries, events, settleMs, send, waitFor, getMarks, wasAccepted, wasRejected, close };
 }
 
 /**
@@ -281,8 +294,20 @@ describe('DNSBL Integration Tests', () => {
   });
 
   afterEach(async () => {
-    await harness?.close();
-    try { unlinkSync(configPath); } catch {}
+    const h: TestHarness | undefined = harness;
+    harness = undefined!;
+    try {
+      if (h) {
+        // Every test: at most one verdict per connection, none for a gone
+        // client -- counted once every lookup a test may have left running
+        // has finished, while the daemon still runs (it exits at EOF).
+        await new Promise(r => setTimeout(r, h.settleMs + 200));
+        expect(verdictProblems(h)).toEqual([]);
+      }
+    } finally {
+      await h?.close();
+      try { unlinkSync(configPath); } catch {}
+    }
   });
 
   describe('Index Matching', () => {
@@ -1057,6 +1082,43 @@ describe('DNSBL Integration Tests', () => {
       await harness.waitFor(/^D 52 2001:db8::52 10052/, 3000);
       await pause(800); // the gateway's answer comes in: nothing more is sent
       expect(verdictProblems(harness)).toEqual([]);
+    }, 10000);
+  });
+
+  // The verdict waits for every configured list, however the answers come
+  // (cache, shared lookup, new lookup), and is sent once.
+  describe('One verdict, after every list', () => {
+    const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    it('a hurried client with one answer cached and one still out gets one verdict, after both', async () => {
+      writeFileSync(configPath, `
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSTIMEOUT 2
+#IAUTH DNSBL server=cached.dnsbl index=2 block=all
+#IAUTH DNSBL server=slow.dnsbl index=2 block=all cachetime=0
+`);
+      // 10.6.0.2: cached.dnsbl clean (and cached by client 60); slow.dnsbl
+      // asked every time (cachetime=0): clean first, then listed, slowly.
+      mockDns('10.6.0.2', 'slow.dnsbl', { steps: [{ code: 'ENOTFOUND' }, { answers: ['127.0.0.2'], delayMs: 400 }] });
+      mockDns('10.6.0.1', 'slow.dnsbl', { steps: [{ code: 'ENOTFOUND', delayMs: 600 }] });
+      harness = await createHarness(configPath);
+
+      await connectClient(harness, 60, '10.6.0.2');
+      expect(harness.wasAccepted(60)).toBe(true);
+
+      // Client 61 is already hurried when its lookups start: it came through
+      // a trusted WEBIRC gateway (10.6.0.1) after registering.
+      harness.send('61 C 10.6.0.1 10061 10.0.0.1 6667');
+      await pause(50);
+      harness.send('61 H Users');
+      await pause(50);
+      harness.send('61 w pass user host.example 10.6.0.2');
+
+      await harness.waitFor(/^[Dk] 61 /, 3000);
+      await pause(1000);
+      expect(harness.output.filter(l => /^[Dk] 61 /.test(l))).toEqual([
+        expect.stringMatching(/^k 61 10\.6\.0\.2 10061 /),
+      ]);
     }, 10000);
   });
 });
