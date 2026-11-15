@@ -134,7 +134,8 @@ static void apply_sethost_changes(struct Client *sptr, const char *hostmask,
 {
   /* Apply the spoofhost */
   if (strchr(hostmask, '@') != NULL)
-    ircd_strncpy(cli_user(sptr)->sethost, hostmask, HOSTLEN + 1);
+    ircd_strncpy(cli_user(sptr)->sethost, hostmask,
+                 sizeof(cli_user(sptr)->sethost));
   else
     ircd_snprintf(0, cli_user(sptr)->sethost, USERLEN + HOSTLEN + 1, "%s@%s",
                   cli_user(sptr)->username, hostmask);

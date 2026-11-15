@@ -219,6 +219,25 @@ static void refused_while_webirc_check_pending(void **state)
   assert_true(IsWebIRCPending(&client));
 }
 
+/** The oper form's user@host, as long as mo_sethost() takes it (a whole
+ * USERLEN user and a host near HOSTLEN, past HOSTLEN together): applied
+ * whole when the check finishes, as the synchronous path applies it. */
+static void long_user_at_host_applied_whole(void **state)
+{
+  char host[HOSTLEN + 1], want[USERLEN + HOSTLEN + 2];
+  char *parv[] = { "nick", "abcdefghij", host, "pw", NULL };
+
+  memset(host, 'h', HOSTLEN - 10);
+  strcpy(host + HOSTLEN - 10, ".example");   /* HOSTLEN - 2 */
+  add_block(host, "$X$pw");
+  snprintf(want, sizeof(want), "abcdefghij@%s", host);
+  assert_true(strlen(want) > HOSTLEN);
+  mo_sethost(&client, &client, 4, parv);
+  assert_int_equal(submitted, 1);
+  finish_check(CRYPT_VERIFY_MATCH);
+  assert_string_equal(user.sethost, want);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -227,6 +246,7 @@ int main(void)
     cmocka_unit_test_setup(changed_password_refused, setup),
     cmocka_unit_test_setup(another_connection_gets_nothing, setup),
     cmocka_unit_test_setup(refused_while_webirc_check_pending, setup),
+    cmocka_unit_test_setup(long_user_at_host_applied_whole, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
