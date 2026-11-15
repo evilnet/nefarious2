@@ -106,7 +106,8 @@ connection from the address asks the list again.
 ```
 #IAUTH CACHETIME 86400
 ```
-Seconds to cache DNSBL results. Default: 86400 (24 hours). Only definite
+Seconds to cache DNSBL results. Default: 86400 (24 hours). `0`: answers are
+not reused -- every connection asks the lists again. Only definite
 answers are cached: the list's records, or its "no such name" / "no data"
 (NXDOMAIN / NODATA) answer. Timeouts and failed lookups are never cached.
 
