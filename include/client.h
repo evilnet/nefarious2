@@ -694,6 +694,7 @@ struct Client {
 
   /* IRCv3 draft/account-registration */
   unsigned int cli_opercookie;      /**< Nonzero while an async OPER check is out; its refind key (m_oper.c) */
+  unsigned int cli_checkcookie;     /**< Nonzero while an async WEBIRC (unregistered) or SETHOST (registered) password check is out; its refind key */
   unsigned int cli_regcookie;       /**< Nonzero exactly while a REGISTER async chain is outstanding on this connection; doubles as that chain's client-refind key and as the one-in-flight guard. Deliberately NOT cli_saslcookie, which SASL zeroes on its own failure paths. See m_register.c */
 
   /* IRCv3 Metadata */
@@ -950,6 +951,11 @@ struct Client {
  * this client: the check's refind key (m_oper.c).  alloc_client() zeroes
  * it, so a connection that only reused the fd never matches. */
 #define cli_opercookie(cli)      ((cli)->cli_opercookie)
+/** Nonzero exactly while an asynchronous WEBIRC password check (before
+ * registration) or SETHOST password check (after) is out for this
+ * client: the check's refind key (m_webirc.c, m_sethost.c).  Zero in a
+ * new client, so a connection that only reused the fd never matches. */
+#define cli_checkcookie(cli)     ((cli)->cli_checkcookie)
 /** Get client metadata list. */
 #define cli_metadata(cli)        ((cli)->cli_metadata)
 /** Get client metadata subscriptions. */

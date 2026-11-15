@@ -93,6 +93,7 @@
 #include "ircd_string.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "random.h"
 #include "send.h"
 #include "s_auth.h"
 #include "s_bsd.h"
@@ -106,13 +107,23 @@
 /** Context for async WEBIRC password verification */
 struct webirc_verify_ctx {
   int fd;                           /**< Client fd for lookup */
+  unsigned int cookie;              /**< cli_checkcookie() at WEBIRC time */
+  char *passwd;                     /**< The password (hash) checked against.
+                                         No pointer to the block: a rehash
+                                         during the check frees it. */
   char username[USERLEN + 1];       /**< WEBIRC username */
   char hostname[HOSTLEN + 1];       /**< WEBIRC hostname */
   char ipaddr[SOCKIPLEN + 1];       /**< WEBIRC IP address */
   char options[256];                /**< WEBIRC options */
   struct irc_in_addr addr;          /**< Parsed IP address */
-  struct WebIRCConf *wconf;         /**< Matched config block */
 };
+
+/** Free a WEBIRC check's context. */
+static void webirc_ctx_free(struct webirc_verify_ctx *ctx)
+{
+  MyFree(ctx->passwd);
+  MyFree(ctx);
+}
 
 /**
  * Apply WEBIRC changes to a client after password verification succeeds.
@@ -246,37 +257,60 @@ static void webirc_password_verified(int result, void *arg)
 {
   struct webirc_verify_ctx *ctx = arg;
   struct Client *cptr;
+  struct WebIRCConf *wconf = NULL;
 
   /* Look up client by fd */
   if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
-    MyFree(ctx);
+    webirc_ctx_free(ctx);
     return;
   }
 
   cptr = LocalClientArray[ctx->fd];
 
-  /* Verify client still exists and is pending verification */
-  if (!cptr || IsDead(cptr) || !IsWebIRCPending(cptr)) {
+  /* Verify client still exists and is pending verification -- this one's:
+   * the fd may have been reused since by a connection with a WEBIRC of
+   * its own pending. */
+  if (!cptr || IsDead(cptr) || !IsWebIRCPending(cptr)
+      || cli_checkcookie(cptr) != ctx->cookie) {
     Debug((DEBUG_DEBUG, "webirc_password_verified: client gone or not pending "
            "(fd %d)", ctx->fd));
-    MyFree(ctx);
+    webirc_ctx_free(ctx);
     return;
   }
 
   /* Clear pending flag */
   ClearWebIRCPending(cptr);
+  cli_checkcookie(cptr) = 0;
+
+  /* Judged by the configuration in force now (a rehash during the check
+   * may have removed or re-passworded the block): the block that matches
+   * the connection now, with the password that was checked. */
+  if (result == CRYPT_VERIFY_MATCH) {
+    wconf = find_webirc_conf_by_host(cptr);
+    if (!wconf || !wconf->passwd || strcmp(wconf->passwd, ctx->passwd)) {
+      sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                  "WEBIRC Attempt from %s [%s]: %s after a "
+                                  "rehash during the password check",
+                                  cli_sockhost(cptr), cli_sock_ip(cptr),
+                                  wconf ? "password changed" : "no WebIRC block");
+      exit_client(cptr, cptr, &me, wconf ? "WEBIRC Password invalid for your host"
+                  : "WEBIRC Not authorized from your host");
+      webirc_ctx_free(ctx);
+      return;
+    }
+  }
 
   if (result == CRYPT_VERIFY_MATCH) {
     /* Password matched - apply WEBIRC changes */
     Debug((DEBUG_INFO, "webirc_password_verified: WEBIRC success for %s [%s]",
            cli_sockhost(cptr), cli_sock_ip(cptr)));
 
-    apply_webirc_changes(cptr, ctx->wconf, ctx->hostname, ctx->ipaddr,
+    apply_webirc_changes(cptr, wconf, ctx->hostname, ctx->ipaddr,
                          &ctx->addr, ctx->options[0] ? ctx->options : NULL);
 
     /* Forward to IAuth if configured */
     if (cli_auth(cptr)) {
-      if (FlagHas(&ctx->wconf->flags, WFLAG_USEOPTIONS))
+      if (FlagHas(&wconf->flags, WFLAG_USEOPTIONS))
         auth_set_webirc_trusted(cli_auth(cptr), "", ctx->username, ctx->hostname,
                                 ctx->ipaddr, ctx->options[0] ? ctx->options : NULL);
       else
@@ -293,7 +327,7 @@ static void webirc_password_verified(int result, void *arg)
            cli_sockhost(cptr), cli_sock_ip(cptr)));
   }
 
-  MyFree(ctx);
+  webirc_ctx_free(ctx);
 }
 
 /*
@@ -409,7 +443,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     ctx = (struct webirc_verify_ctx *)MyMalloc(sizeof(struct webirc_verify_ctx));
     ctx->fd = cli_fd(cptr);
-    ctx->wconf = wconf;
+    ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
+    DupString(ctx->passwd, wconf->passwd);
     memcpy(&ctx->addr, &addr, sizeof(ctx->addr));
     ircd_strncpy(ctx->username, username, USERLEN + 1);
     ircd_strncpy(ctx->hostname, hostname, HOSTLEN + 1);
@@ -420,13 +455,14 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                  webirc_password_verified, ctx) == 0) {
       /* Async verification started */
       SetWebIRCPending(cptr);
+      cli_checkcookie(cptr) = ctx->cookie;
       Debug((DEBUG_INFO, "m_webirc: started async verification for %s [%s]",
              cli_sockhost(cptr), cli_sock_ip(cptr)));
       return 0;
     }
 
     /* Async failed to start, fall back to sync */
-    MyFree(ctx);
+    webirc_ctx_free(ctx);
     Debug((DEBUG_DEBUG, "m_webirc: async failed, falling back to sync for %s [%s]",
            cli_sockhost(cptr), cli_sock_ip(cptr)));
   }
