@@ -115,6 +115,8 @@ Tests use Vitest with mocked DNS resolution:
 - **`tests/dnsbl.test.ts`** - IP functions, caching, matching
 - **`tests/dnsbl-integration.test.ts`** - Full DNSBL pipeline with mock DNS
 - **`tests/iauth.test.ts`** - Protocol integration tests
+- **`tests/verdict.test.ts`** - In-process verdict accounting (one verdict, after every list)
+- **`tests/daemon-config.test.ts`** - In-process config loading (one parse per start/rehash)
 - **`tests/sasl.test.ts`** - SASL authentication utilities
 - **`tests/auth/config.test.ts`** - AUTH directive parsing
 - **`tests/auth/file.test.ts`** - FileAuthProvider tests
