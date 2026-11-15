@@ -870,17 +870,65 @@ gitsync_dry_run(git_repository *repo, git_object *commit,
   return 0;
 }
 
+/** git_stash_foreach() callback: the newest entry's id. */
+static int
+gitsync_stash_top_cb(size_t index, const char *message,
+                     const git_oid *stash_id, void *payload)
+{
+  (void)message;
+  if (index == 0)
+    git_oid_cpy(payload, stash_id);
+  return 1;                     /* the newest only */
+}
+
+/** A sync refused after it stashed the checkout's untracked files: put
+ * them back (git_stash_pop() of entry 0, once it is checked to be the one
+ * this sync made, \a stashed).  If they cannot be put back, the stash is
+ * kept and the refusal says so, in the status and to the operators. */
+static void
+gitsync_unstash(git_repository *repo, const git_oid *stashed,
+                const char *checkout)
+{
+  const git_error *e;
+  const char *why = "it is no longer the newest stash entry";
+  char reason[sizeof(gitsync_stats.last_error)];
+  git_oid top;
+
+  memset(&top, 0, sizeof(top));
+  git_stash_foreach(repo, gitsync_stash_top_cb, &top);
+  if (git_oid_equal(&top, stashed)) {
+    if (git_stash_pop(repo, 0, NULL) == 0)
+      return;
+    e = git_error_last();
+    why = (e && e->message) ? e->message : "unknown error";
+  }
+  /* What to do first, the refusal's own reason after it. */
+  ircd_strncpy(reason, gitsync_stats.last_error, sizeof(reason));
+  ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                "the update was not applied; the files moved to the stash "
+                "could not be put back: run \"git -C %s stash pop\" (%s) -- %s",
+                checkout, why, reason);
+  log_write(LS_SYSTEM, L_WARNING, 0, "GitSync: the update was not applied; "
+            "the files moved to the stash could not be put back: run "
+            "\"git -C %s stash pop\" (%s) -- %s", checkout, why, reason);
+  sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: the update was not applied; "
+                       "the files moved to the stash of %s could not be put "
+                       "back: run \"git -C %s stash pop\"", checkout, checkout);
+}
+
 /** A sync never destroys a file it did not put there: when a dry run finds
  * something untracked or ignored in the way of the update, the checkout's
  * untracked (and ignored) files -- all of them -- are moved to its git
  * stash (one entry, as "GitSync"), and the update proceeds.  If they
- * cannot be stashed, or something is still in the way afterwards, the
- * sync is refused and nothing changes.  The hard reset that follows has
- * only tracked files -- GitSync's -- to update.
+ * cannot be stashed, or something is still in the way afterwards (the
+ * stash is then put back, gitsync_unstash()), the sync is refused and
+ * nothing changes.  The hard reset that follows has only tracked files --
+ * GitSync's -- to update.
+ * @param[out] stashed The stash entry made, or all zero for none.
  * @return 0, or -1 with gitsync_stats.last_error set. */
 static int
 gitsync_clear_the_way(git_repository *repo, git_object *commit,
-                      const char *checkout)
+                      const char *checkout, git_oid *stashed)
 {
   struct gitsync_in_the_way w;
   git_signature *sig = NULL;
@@ -889,6 +937,7 @@ gitsync_clear_the_way(git_repository *repo, git_object *commit,
   time_t now = time(NULL);
   int error;
 
+  memset(stashed, 0, sizeof(*stashed));
   if (gitsync_dry_run(repo, commit, &w))
     return -1;
   if (!w.n)
@@ -927,19 +976,21 @@ gitsync_clear_the_way(git_repository *repo, git_object *commit,
                        git_oid_tostr_s(git_object_id(commit)), checkout,
                        checkout);
 
+  git_oid_cpy(stashed, &oid);
+
   /* Still in the way (a case the stash does not clear): refuse, never
-   * force. */
-  if (gitsync_dry_run(repo, commit, &w))
-    return -1;
-  if (w.n) {
+   * force -- with the stash put back. */
+  if (gitsync_dry_run(repo, commit, &w) == 0) {
+    if (!w.n)
+      return 0;
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                   "commit %.8s would still overwrite or remove %s%s in %s "
                   "after stashing; not applied",
                   git_oid_tostr_s(git_object_id(commit)), w.paths,
                   w.n > 3 ? " and more" : "", checkout);
-    return -1;
   }
-  return 0;
+  gitsync_unstash(repo, stashed, checkout);
+  return -1;
 }
 
 /** git_stash_foreach() callback: count. */
@@ -1087,6 +1138,8 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
                         const char *branch, const char *checkout)
 {
   git_remote *remote = NULL;
+  git_object *before = NULL;
+  git_oid stashed;
   git_remote_create_options ropts;
   git_fetch_options fetch_opts;
   git_reference *ref = NULL;
@@ -1158,13 +1211,15 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
   /* Nothing of the commit reaches the checkout before it is checked, and
    * a sync never overwrites a file it did not put there. */
   if (gitsync_check_commit(target)
-      || gitsync_clear_the_way(repo, target, checkout)) {
+      || gitsync_clear_the_way(repo, target, checkout, &stashed)) {
     git_object_free(target);
     return GITSYNC_CHECKOUT_ERROR;
   }
 
   /* Hard reset to origin/branch (unrelated histories too: no merge) */
   Debug((DEBUG_INFO, "GitSync: Resetting to %s", git_oid_tostr_s(git_object_id(target))));
+  if (git_revparse_single(&before, repo, "HEAD") < 0)
+    before = NULL;
   error = git_reset(repo, target, GIT_RESET_HARD, NULL);
   if (error >= 0)
     git_oid_tostr(gitsync_stats.last_commit, sizeof(gitsync_stats.last_commit),
@@ -1175,9 +1230,18 @@ gitsync_fetch_and_reset(git_repository *repo, const char *repo_url,
     const git_error *e = git_error_last();
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                   "Reset failed: %s", e ? e->message : "unknown error");
+    /* After a stash, the checkout as it was found: its tracked files back
+     * from a reset that failed half way, then the stash on top of them. */
+    if (!git_oid_is_zero(&stashed)) {
+      if (before)
+        git_reset(repo, before, GIT_RESET_HARD, NULL);
+      gitsync_unstash(repo, &stashed, checkout);
+    }
+    git_object_free(before);
     return GITSYNC_CHECKOUT_ERROR;
   }
 
+  git_object_free(before);
   return GITSYNC_OK;
 }
 
