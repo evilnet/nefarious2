@@ -239,7 +239,13 @@ restart_resolver(void)
                     "Resolver UDPv6 socket", AF_INET6);
 #endif
 
-  if (s_active(&res_socket_v4) || s_active(&res_socket_v6))
+  /* The timeout timer is armed by the first lookup (check_resolver_timeout())
+   * and stays queued: a restart (every REHASH but -s) must not
+   * timer_init() it then -- gen_init() would zero the flags, callback and
+   * queue links of a timer still on the queue.  A timer never added, or
+   * destroyed since (GEN_ACTIVE clear), is initialised. */
+  if ((s_active(&res_socket_v4) || s_active(&res_socket_v6))
+      && !t_active(&res_timeout))
     timer_init(&res_timeout);
 }
 
@@ -332,12 +338,19 @@ check_resolver_timeout(time_t when)
   if (when > CurrentTime + AR_TTL)
     when = CurrentTime + AR_TTL;
   /* TODO after 2.10.12: Rewrite the timer API because there should be
-   * no need for clients to know this kind of implementation detail. */
-  if (when > t_expire(&res_timeout))
-    /* do nothing */;
-  else if (t_onqueue(&res_timeout) && !(res_timeout.t_header.gh_flags & GEN_MARKED))
-    timer_chg(&res_timeout, TT_ABSOLUTE, when);
-  else
+   * no need for clients to know this kind of implementation detail.
+   *
+   * Queued (and not running its own expiry): moved earlier if need be.
+   * Anything else -- never added (its t_expire is 0), destroyed after it
+   * last fired (its t_expire is in the past), or running its expiry now
+   * (GEN_MARKED: timer_add() re-queues it after the callback) -- is
+   * added.  The test used to be "when > t_expire" first, which held for
+   * a timer that was not queued at all: the timer was never armed, and no
+   * lookup ever timed out or was resent. */
+  if (t_onqueue(&res_timeout) && !(res_timeout.t_header.gh_flags & GEN_MARKED)) {
+    if (when < t_expire(&res_timeout))
+      timer_chg(&res_timeout, TT_ABSOLUTE, when);
+  } else
     timer_add(&res_timeout, timeout_resolver, NULL, TT_ABSOLUTE, when);
 }
 
@@ -379,10 +392,19 @@ timeout_resolver(struct Event *ev)
     {
       if (--request->retries <= 0)
       {
+        dns_callback_f callback = request->callback;
+        void *ctx = request->callback_ctx;
+
         Debug((DEBUG_DNS, "Request %p out of retries; destroying", request));
-        res_outcome = RES_OUT_FAILURE;
-        (*request->callback)(request->callback_ctx, NULL, NULL);
+        /* Off the list before its callback runs: the callback can
+         * register or exit clients, which can start or delete other
+         * lookups (delete_resolver_queries()), next_ptr among them.  The
+         * walk starts again after it; the requests already looked at have
+         * a deadline ahead of them now, and are only counted again. */
         rem_request(request);
+        res_outcome = RES_OUT_FAILURE;
+        (*callback)(ctx, NULL, NULL);
+        next_ptr = request_list.next;
         continue;
       }
       else
@@ -390,6 +412,9 @@ timeout_resolver(struct Event *ev)
         request->sentat = CurrentTime;
         request->timeout += request->timeout;
         resend_query(request);
+        /* Its next deadline, not the one that has just passed (that
+         * would leave the timer an AR_TTL away below). */
+        timeout = request->sentat + request->timeout;
       }
     }
 
