@@ -1439,7 +1439,7 @@ static void conf_gitsync_placeholder(const struct AbsentInclude *ai)
     what = " (configuration check: not written)";
   /* O_EXCL: never replace a file that appeared since the include was
    * read, nor follow a symbolic link. */
-  else if ((fd = open(ai->name, O_WRONLY | O_CREAT | O_EXCL, 0666)) >= 0) {
+  else if ((fd = open(ai->name, O_WRONLY | O_CREAT | O_EXCL, 0600)) >= 0) {
     if (write(fd, text, sizeof(text) - 1) != (ssize_t) (sizeof(text) - 1)) {
       level = L_WARNING;
       what = ", no placeholder: ";

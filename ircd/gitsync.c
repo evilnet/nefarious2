@@ -779,6 +779,30 @@ static int gitsync_applied;
 /** Non-zero while gitsync_trigger() runs a sync. */
 static int gitsync_running;
 
+/** Open \a path for writing a file only the server's user may read:
+ * created 0600, and an existing one truncated and made 0600 (fchmod, so
+ * the umask does not matter and a looser file is tightened); a symbolic
+ * link is not followed.
+ * @return The open stream, or NULL (errno set).
+ */
+static FILE *
+gitsync_open_private(const char *path)
+{
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+  FILE *fp;
+
+  if (fd < 0)
+    return NULL;
+  if (fchmod(fd, 0600) < 0 || !(fp = fdopen(fd, "w"))) {
+    int err = errno;
+
+    close(fd);
+    errno = err;
+    return NULL;
+  }
+  return fp;
+}
+
 /** Apply downloaded configuration
  * Writes to gitsync.conf and triggers a rehash only if content changed.
  * Uses safe write: writes to .new, backs up old to .bak, then renames.
@@ -835,8 +859,9 @@ gitsync_apply(const char *content, size_t len, int force,
 
   Debug((DEBUG_INFO, "GitSync: Writing %zu bytes to %s", len, conf_file));
 
-  /* Write content to temp file first */
-  fp = fopen(new_file, "w");
+  /* Write content to temp file first: the content holds link passwords,
+   * so it (and the file it becomes) is the server's user's only. */
+  fp = gitsync_open_private(new_file);
   if (!fp) {
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                   "Cannot open %s for writing: %s", new_file, strerror(errno));
@@ -867,6 +892,7 @@ gitsync_apply(const char *content, size_t len, int force,
     unlink(bak_file);  /* Remove old backup */
     if (rename(conf_file, bak_file) == 0) {
       had_backup = 1;
+      chmod(bak_file, 0600);   /* whatever mode the old file had */
       Debug((DEBUG_INFO, "GitSync: Backed up %s to %s", conf_file, bak_file));
     }
   }
@@ -955,6 +981,20 @@ gitsync_apply(const char *content, size_t len, int force,
 }
 
 #ifdef USE_SSL
+/** Whether PEM content holds a private key ("-----BEGIN ... PRIVATE KEY"). */
+static int
+gitsync_pem_has_key(const char *content, size_t size)
+{
+  static const char marker[] = "PRIVATE KEY-----";
+  size_t n = sizeof(marker) - 1;
+  size_t i;
+
+  for (i = 0; i + n <= size; i++)
+    if (content[i] == 'P' && !memcmp(content + i, marker, n))
+      return 1;
+  return 0;
+}
+
 /** Validate that content looks like a PEM certificate.
  * Checks for BEGIN/END markers and reasonable size.
  * Does NOT do full X.509 parsing — that's OpenSSL's job during ssl_reinit().
@@ -1059,8 +1099,8 @@ gitsync_install_cert(const char *content, size_t size, const char *source_desc)
   ircd_snprintf(0, new_file, sizeof(new_file), "%s.new", cert_file);
   ircd_snprintf(0, bak_file, sizeof(bak_file), "%s.backup", cert_file);
 
-  /* Write to temp file */
-  fp = fopen(new_file, "w");
+  /* Write to temp file (0600 until its mode is settled below) */
+  fp = gitsync_open_private(new_file);
   if (!fp) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "GitSync: Cannot open %s for writing: %s", new_file, strerror(errno));
@@ -1076,14 +1116,19 @@ gitsync_install_cert(const char *content, size_t size, const char *source_desc)
   }
   fclose(fp);
 
-  /* Preserve permissions from existing cert (or 0600 default) */
-  chmod(new_file, old_mode);
+  /* Preserve permissions from existing cert (or 0600 default) -- but a
+   * PEM with a private key in it is never group or world readable. */
+  if (gitsync_pem_has_key(content, size))
+    old_mode &= 0700;
+  chmod(new_file, old_mode | 0600);
 
-  /* Backup existing cert */
+  /* Backup existing cert (it may hold the previous key: owner only) */
   if (stat(cert_file, &st) == 0) {
     unlink(bak_file);
-    if (rename(cert_file, bak_file) == 0)
+    if (rename(cert_file, bak_file) == 0) {
       had_backup = 1;
+      chmod(bak_file, 0600);
+    }
   }
 
   /* Atomic rename */
@@ -1383,10 +1428,13 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
   gitsync_set_timeouts();
   gitsync_set_ca_file();
 
-  /* Clone or open repository */
+  /* Clone or open repository (the checkout holds the same content as
+   * the configuration file: the server's user's only) */
   if (!dir_exists(repo_path)) {
     /* Need to clone */
     status = gitsync_clone(repo_url, repo_path, &repo);
+    if (status == GITSYNC_OK)
+      chmod(repo_path, 0700);
     if (status != GITSYNC_OK) {
       gitsync_stats.failures++;
       gitsync_stats.last_status = status;
@@ -1411,6 +1459,7 @@ gitsync_run(struct Client *cptr, struct Client *sptr, int force, int *killed)
     }
   } else {
     /* Open existing repository */
+    chmod(repo_path, 0700);
     error = git_repository_open(&repo, repo_path);
     if (error < 0) {
       const git_error *e = git_error_last();
