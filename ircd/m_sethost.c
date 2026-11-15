@@ -93,6 +93,7 @@
 #include "ircd_string.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "random.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -105,10 +106,21 @@
 /** Context for async SETHOST password verification */
 struct sethost_verify_ctx {
   int fd;                               /**< Client fd for lookup */
+  unsigned int cookie;                  /**< cli_checkcookie() at SETHOST time */
   char hostmask[USERLEN + HOSTLEN + 2]; /**< Requested user@host mask */
-  struct SHostConf *sconf;              /**< Matched config block */
+  char *passwd;                         /**< The password (hash) checked
+                                             against.  No pointer to the
+                                             block: a rehash during the
+                                             check frees it. */
   struct Flags setflags;                /**< Backed up client flags */
 };
+
+/** Free a SETHOST check's context. */
+static void sethost_ctx_free(struct sethost_verify_ctx *ctx)
+{
+  MyFree(ctx->passwd);
+  MyFree(ctx);
+}
 
 /**
  * Apply SETHOST changes to a client after password verification succeeds.
@@ -150,28 +162,46 @@ static void sethost_password_verified(int result, void *arg)
 
   /* Look up client by fd */
   if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
-    MyFree(ctx);
+    sethost_ctx_free(ctx);
     return;
   }
 
   sptr = LocalClientArray[ctx->fd];
 
-  /* Verify client still exists and is pending verification */
-  if (!sptr || IsDead(sptr) || !IsSetHostPending(sptr)) {
+  /* Verify client still exists and is pending verification -- this one's:
+   * the fd may have been reused since. */
+  if (!sptr || IsDead(sptr) || !IsSetHostPending(sptr)
+      || cli_checkcookie(sptr) != ctx->cookie) {
     Debug((DEBUG_DEBUG, "sethost_password_verified: client gone or not pending "
            "(fd %d)", ctx->fd));
-    MyFree(ctx);
+    sethost_ctx_free(ctx);
     return;
   }
 
   /* Clear pending flag */
   ClearSetHostPending(sptr);
+  cli_checkcookie(sptr) = 0;
+
+  /* Judged by the configuration in force now (a rehash during the check
+   * may have removed or re-passworded the Spoofhost block): the block that
+   * offers this host to this client now, with the password checked. */
+  if (result == CRYPT_VERIFY_MATCH) {
+    struct SHostConf *sconf = find_shost_conf_by_host(sptr, ctx->hostmask);
+
+    if (!sconf) {
+      send_reply(sptr, ERR_HOSTUNAVAIL, ctx->hostmask);
+      sethost_ctx_free(ctx);
+      return;
+    }
+    if (!sconf->passwd || strcmp(sconf->passwd, ctx->passwd))
+      result = CRYPT_VERIFY_NOMATCH;
+  }
 
   if (result == CRYPT_VERIFY_MATCH) {
     /* Password matched - apply SETHOST changes */
     Debug((DEBUG_INFO, "sethost_password_verified: SETHOST success for %s",
            cli_name(sptr)));
-    apply_sethost_changes(sptr, ctx->hostmask, ctx->sconf, &ctx->setflags);
+    apply_sethost_changes(sptr, ctx->hostmask, NULL, &ctx->setflags);
   } else {
     /* Password didn't match */
     send_reply(sptr, ERR_PASSWDMISMATCH);
@@ -179,7 +209,7 @@ static void sethost_password_verified(int result, void *arg)
            cli_name(sptr)));
   }
 
-  MyFree(ctx);
+  sethost_ctx_free(ctx);
 }
 
 /*
@@ -237,7 +267,8 @@ int m_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       ctx = (struct sethost_verify_ctx *)MyMalloc(sizeof(struct sethost_verify_ctx));
       ctx->fd = cli_fd(sptr);
-      ctx->sconf = sconf;
+      ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
+      DupString(ctx->passwd, sconf->passwd);
       ctx->setflags = setflags;
       ircd_strncpy(ctx->hostmask, parv[1], sizeof(ctx->hostmask) - 1);
 
@@ -245,13 +276,14 @@ int m_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                    sethost_password_verified, ctx) == 0) {
         /* Async verification started */
         SetSetHostPending(sptr);
+        cli_checkcookie(sptr) = ctx->cookie;
         Debug((DEBUG_INFO, "m_sethost: started async verification for %s",
                cli_name(sptr)));
         return 0;
       }
 
       /* Async failed to start, fall back to sync */
-      MyFree(ctx);
+      sethost_ctx_free(ctx);
       Debug((DEBUG_DEBUG, "m_sethost: async failed, falling back to sync for %s",
              cli_name(sptr)));
     }
@@ -350,7 +382,8 @@ int mo_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       ctx = (struct sethost_verify_ctx *)MyMalloc(sizeof(struct sethost_verify_ctx));
       ctx->fd = cli_fd(sptr);
-      ctx->sconf = sconf;
+      ctx->cookie = (ircrandom() & 0x7fffffff) | 1;   /* never 0 */
+      DupString(ctx->passwd, sconf->passwd);
       ctx->setflags = setflags;
       ircd_strncpy(ctx->hostmask, hostmask, sizeof(ctx->hostmask) - 1);
 
@@ -358,13 +391,14 @@ int mo_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                    sethost_password_verified, ctx) == 0) {
         /* Async verification started */
         SetSetHostPending(sptr);
+        cli_checkcookie(sptr) = ctx->cookie;
         Debug((DEBUG_INFO, "mo_sethost: started async verification for %s",
                cli_name(sptr)));
         return 0;
       }
 
       /* Async failed to start, fall back to sync */
-      MyFree(ctx);
+      sethost_ctx_free(ctx);
       Debug((DEBUG_DEBUG, "mo_sethost: async failed, falling back to sync for %s",
              cli_name(sptr)));
     }
