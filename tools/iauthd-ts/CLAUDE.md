@@ -78,10 +78,15 @@ DNSBLs return `127.0.0.X` addresses where X indicates the listing reason:
 
 ### Caching
 
-DNS results are cached globally in `dnsbl.ts`. Cache entries store:
+DNS results are cached globally in `dnsbl.ts` (`queryDNSBL`). Cache entries store:
 - Query string (reversed IP + server)
-- Result IPs or null (pending)
+- Result IPs ([] = not listed)
 - Timestamp for expiration
+
+Only definite answers are cached (A records, NXDOMAIN, NODATA); a timeout or
+failed lookup is "not listed" for the client at hand and is never cached. A
+lookup in flight is kept apart from the cache: a second client (or a second
+line naming the same list) asking for the same query awaits that same lookup.
 
 ### SASL Authentication
 
