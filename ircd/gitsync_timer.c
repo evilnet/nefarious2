@@ -101,11 +101,34 @@ gitsync_first_callback(struct Event *ev)
   gitsync_trigger(&me, NULL, 1);
 }
 
+/** Whether \a tim is inside its own expiry callback (timer_run() marks
+ * it): timer_del() then only stops a periodic timer being re-queued, and
+ * it must never be timer_init()ed. */
+#define t_running(tim) ((tim)->t_header.gh_flags & GEN_MARKED)
+
 void
 gitsync_start_timer(void)
 {
   if (!feature_bool(FEAT_GITSYNC_ENABLE))
     return;
+
+  /* A sync's rehash turned GitSync off and another (the restore's) on
+   * again, inside one expiry.  The periodic timer's own: timer_del() only
+   * cleared its re-queue; timer_add() without timer_init() sets it again,
+   * and timer_run() re-queues the timer at the interval when the callback
+   * returns.  The first sync's: the stop deleted the periodic timer armed
+   * just before it; arm it again. */
+  if (t_running(&gitsync_timer)) {
+    if (!(gitsync_timer.t_header.gh_flags & GEN_READD))
+      timer_add(&gitsync_timer, gitsync_timer_callback, NULL, TT_PERIODIC,
+                gitsync_interval());
+    return;
+  }
+  if (t_running(&gitsync_first_timer)) {
+    if (!t_active(&gitsync_timer))
+      gitsync_arm_periodic();
+    return;
+  }
 
   /* Idempotent: GitSync is running, or its first sync is scheduled.
    * Notify callbacks fire during init_conf() before ircd.c calls us at
@@ -145,7 +168,7 @@ gitsync_restart_timer(void)
    * the interval): timer_run() re-queues it after the callback, at its
    * value from then.  Deleting and re-adding it here would have it
    * destroyed after the callback while queued. */
-  if (gitsync_timer.t_header.gh_flags & GEN_MARKED) {
+  if (t_running(&gitsync_timer)) {
     gitsync_timer.t_value = gitsync_interval();
     return;
   }

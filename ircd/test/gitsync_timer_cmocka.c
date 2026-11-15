@@ -90,7 +90,8 @@ int feature_int(enum Feature feat)
 }
 
 /** What a sync does besides syncing, as the content it applies would. */
-static enum { SYNC_PLAIN, SYNC_REHASH, SYNC_NEW_INTERVAL, SYNC_DISABLES } sync_does;
+static enum { SYNC_PLAIN, SYNC_REHASH, SYNC_NEW_INTERVAL, SYNC_DISABLES,
+              SYNC_OFF_AND_ON } sync_does;
 
 /** The syncs run: their force flag, and when. */
 static int nsyncs;
@@ -119,6 +120,12 @@ int gitsync_trigger(struct Client *cptr, struct Client *sptr, int force)
   case SYNC_DISABLES:           /* the rehash turns GitSync off */
     f_enable = 0;
     gitsync_stop_timer();
+    break;
+  case SYNC_OFF_AND_ON:         /* content turning GitSync off does not */
+    f_enable = 0;               /* parse: the rehash turns it off, the */
+    gitsync_stop_timer();       /* restore's rehash on again */
+    f_enable = 1;
+    gitsync_start_timer();
     break;
   }
   return 0;
@@ -351,6 +358,46 @@ static void first_sync_disables(void **state)
   assert_int_equal(1, nsyncs);
 }
 
+/** The first sync turns GitSync off and on again (content that disables
+ * it and does not parse, then the backup restored): it keeps running --
+ * the periodic sync an interval later, no second immediate one. */
+static void first_sync_off_and_on(void **state)
+{
+  (void)state;
+  sync_does = SYNC_OFF_AND_ON;
+  gitsync_start_timer();
+  pass(1);
+  assert_int_equal(1, nsyncs);
+  sync_does = SYNC_PLAIN;
+  assert_true(t_active(&gitsync_timer));
+  pass(299);
+  assert_int_equal(1, nsyncs);
+  pass(1);
+  assert_int_equal(2, nsyncs);
+  assert_int_equal(0, sync_force[1]);
+  pass(300);
+  assert_int_equal(3, nsyncs);
+}
+
+/** A periodic sync turns GitSync off and on again: the periodic timer,
+ * inside its own expiry, keeps running. */
+static void periodic_sync_off_and_on(void **state)
+{
+  (void)state;
+  gitsync_start_timer();
+  pass(1);
+  sync_does = SYNC_OFF_AND_ON;
+  pass(300);
+  assert_int_equal(2, nsyncs);
+  sync_does = SYNC_PLAIN;
+  assert_true(t_active(&gitsync_timer));
+  pass(299);
+  assert_int_equal(2, nsyncs);
+  pass(1);
+  assert_int_equal(3, nsyncs);
+  assert_int_equal(0, sync_force[2]);
+}
+
 /** An interval under a minute is a minute. */
 static void interval_at_least_a_minute(void **state)
 {
@@ -379,6 +426,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(periodic_sync_changes_interval, setup, teardown),
     cmocka_unit_test_setup_teardown(first_sync_disables, setup, teardown),
     cmocka_unit_test_setup_teardown(interval_at_least_a_minute, setup, teardown),
+    cmocka_unit_test_setup_teardown(first_sync_off_and_on, setup, teardown),
+    cmocka_unit_test_setup_teardown(periodic_sync_off_and_on, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
