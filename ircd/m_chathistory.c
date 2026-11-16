@@ -451,7 +451,10 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
     return 0;
   }
 
-  if (strncmp(ref, "msgid=", 6) == 0) {
+  /* An empty msgid names no message: refused here, as an invalid
+   * reference, rather than looked up and answered "Unknown message id"
+   * with an empty parameter. */
+  if (strncmp(ref, "msgid=", 6) == 0 && ref[6]) {
     *ref_type = HISTORY_REF_MSGID;
     *value = ref + 6;
     return 0;
