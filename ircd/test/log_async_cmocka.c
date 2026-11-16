@@ -59,9 +59,12 @@ void debug(int level, const char *form, ...)
   (void)level; (void)form;
 }
 
+/** ASYNC_LOGGING's value; the cases that turn it off set it back. */
+static int async_logging = 1;
+
 int feature_bool(enum Feature feat)
 {
-  return feat == FEAT_ASYNC_LOGGING;
+  return feat == FEAT_ASYNC_LOGGING && async_logging;
 }
 
 int feature_int(enum Feature feat) { (void)feat; return 0; }
@@ -225,8 +228,21 @@ static int case_setup(void **state)
   completed = 0;
   at_gate = 0;
   gate_closed = 0;
+  async_logging = 1;
   temp_path(log_path, sizeof(log_path), "file");
   return log_async_init(8);
+}
+
+/** A case that starts the writer itself. */
+static int case_setup_stopped(void **state)
+{
+  (void)state;
+  completed = 0;
+  at_gate = 0;
+  gate_closed = 0;
+  async_logging = 1;
+  temp_path(log_path, sizeof(log_path), "file");
+  return log_async_available() ? -1 : 0;
 }
 
 static int case_teardown(void **state)
@@ -391,9 +407,75 @@ static void no_log_reopens_after_shutdown(void **state)
   assert_true(path_size(log_path) > size);
 }
 
+/** Before log_async_start() (startup: ircd.conf is still being read, or
+ * this is a configuration check), the feature turned on starts nothing;
+ * log_async_start() starts the writer.  Runs first: nothing undoes
+ * log_async_start(). */
+static void writer_waits_for_startup(void **state)
+{
+  (void)state;
+  log_feature_async_logging();
+  assert_false(log_async_available());
+
+  log_async_start();
+  assert_true(log_async_available());
+}
+
+/** After startup, a REHASH that turns ASYNC_LOGGING on starts the
+ * writer, and log lines go through it. */
+static void turning_it_on_starts_the_writer(void **state)
+{
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+
+  log_feature_async_logging();
+  assert_true(log_async_available());
+
+  gate_close();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "queued");
+  wait_at_gate();               /* the writer, not this thread */
+  gate_open();
+  wait_completed(1);
+}
+
+/** Turning ASYNC_LOGGING off writes what the writer still holds before
+ * the next line goes out synchronously: the queue never lands after
+ * newer lines. */
+static void turning_it_off_writes_the_queue_first(void **state)
+{
+  off_t size;
+  int i;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  gate_close();
+  for (i = 0; i < 3; i++)
+    log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "line %d", i);
+  wait_at_gate();
+  assert_int_equal(writes_completed(), 0);
+
+  async_logging = 0;
+  open_gate_soon();
+  log_feature_async_logging();
+  assert_int_equal(writes_completed(), 3);
+  opener_join();
+
+  /* A synchronous line is written here and now, by writev(). */
+  size = path_size(log_path);
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "synchronous");
+  assert_true(path_size(log_path) > size);
+  assert_int_equal(writes_completed(), 3);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test_setup_teardown(writer_waits_for_startup,
+                                    case_setup_stopped, case_teardown),
+    cmocka_unit_test_setup_teardown(turning_it_on_starts_the_writer,
+                                    case_setup_stopped, case_teardown),
+    cmocka_unit_test_setup_teardown(turning_it_off_writes_the_queue_first,
+                                    case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(flush_waits_for_the_write_in_flight,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(log_close_drains_before_it_closes,

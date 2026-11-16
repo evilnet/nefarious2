@@ -39,6 +39,9 @@
 /** Default number of worker threads */
 #define THREAD_POOL_SIZE_DEFAULT 4
 
+/** Most worker threads THREAD_POOL_SIZE may ask for. */
+#define THREAD_POOL_SIZE_MAX 64
+
 /** Maximum pending tasks before submit() blocks or fails */
 #define THREAD_POOL_MAX_PENDING 256
 

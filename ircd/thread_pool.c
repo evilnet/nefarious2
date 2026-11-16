@@ -175,6 +175,12 @@ int thread_pool_init(int num_threads)
   /* Use default if not specified */
   if (num_threads <= 0)
     num_threads = THREAD_POOL_SIZE_DEFAULT;
+  else if (num_threads > THREAD_POOL_SIZE_MAX) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "thread_pool: THREAD_POOL_SIZE %d is more than %d; using %d",
+              num_threads, THREAD_POOL_SIZE_MAX, THREAD_POOL_SIZE_MAX);
+    num_threads = THREAD_POOL_SIZE_MAX;
+  }
 
   /* Create signal pipe */
   if (pipe(pool.signal_pipe) < 0) {

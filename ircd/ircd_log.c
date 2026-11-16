@@ -385,6 +385,39 @@ log_resume(void)
   log_reopen();
 }
 
+/** Set by log_async_start(): startup is over and ASYNC_LOGGING applies. */
+static int log_async_started;
+
+/** ASYNC_LOGGING changed (the feature's notify callback), or startup is
+ * over (log_async_start()).  Turned on, it starts the writer thread if
+ * none runs.  Turned off, log lines go synchronous at once
+ * (log_vwrite() checks the feature); the writer stays, and the lines it
+ * still holds are written first, so they do not land after newer ones.
+ * Before log_async_start() it does nothing: the feature then holds the
+ * compiled default, or a configuration check (-k) is reading ircd.conf.
+ */
+void
+log_feature_async_logging(void)
+{
+  if (!log_async_started)
+    return;
+  if (!feature_bool(FEAT_ASYNC_LOGGING))
+    log_async_flush();
+  else if (!log_async_available() && log_async_init(0) < 0)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "Async logging init failed; logging will be synchronous");
+}
+
+/** Startup is over (main(), after ircd.conf is read and the PID file
+ * locked): from now on ASYNC_LOGGING applies, and if ircd.conf turned it
+ * on, the writer thread starts now. */
+void
+log_async_start(void)
+{
+  log_async_started = 1;
+  log_feature_async_logging();
+}
+
 /** Write a logging entry.
  * @param[in] subsys Target subsystem.
  * @param[in] severity Severity of message.

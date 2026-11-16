@@ -990,6 +990,25 @@ MAX_CHECK_OUTPUT
 
 Maximum number of records displayed in any CHECK query.
 
+THREAD_POOL_SIZE
+ * Type: integer
+ * Default: 4
+
+Worker threads for slow checks taken off the main loop (OPER, SETHOST
+and WEBIRC password hashes).  Read once at startup, after ircd.conf;
+a change takes effect at the next restart.  0 or less means the
+default; more than 64 means 64.
+
+ASYNC_LOGGING
+ * Type: boolean
+ * Default: FALSE
+
+Write log lines from a background thread instead of the main loop.
+Taken from ircd.conf at startup; turning it on with a REHASH starts the
+writer then.  Turning it off makes log writes synchronous again, once
+the lines already queued are written (the writer thread stays until the
+next restart).
+
 OPER_WHOIS_PARANOIA
  * Type: boolean
  * Default: FALSE
