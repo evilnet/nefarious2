@@ -1997,6 +1997,17 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
      * (BX W) is overtaken -- a late return of it must not undo this. */
     if (MyConnect(sptr))
       cli_nickask_ts(sptr) = 0;
+    /* A session's primary or held ghost renamed (its own NICK, an
+     * SVSNICK, a device's request): its stored record carries the nick
+     * it had when last written, and a crash-restore would bring the
+     * session back under that.  The next persist tick writes the new
+     * one; a session with no holder here clears the mark unwritten. */
+    {
+      struct BouncerSession *nick_sess = bounce_session_of_primary(sptr);
+
+      if (nick_sess && nick_sess->hs_client == sptr)
+        bounce_session_mark_dirty(nick_sess);
+    }
 
     /* Notify change nick local/remote user — skip for case-only changes
      * and for aliases (shared primary nick — see RPL_LOGOFF site above). */
