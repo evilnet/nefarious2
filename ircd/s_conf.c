@@ -1535,6 +1535,9 @@ int read_configuration_file(void)
   yyparse();
   deinit_lexer();
   feature_mark(); /* reset unmarked features */
+  /* ASYNC_LOGGING's callback runs only when the value changes: apply it
+   * once more, so a writer that failed to start is retried at REHASH. */
+  log_feature_async_logging();
   conf_settle_absent_includes(); /* GitSync's file, or the error */
   sasl_conf_apply(); /* push pending Webhook{}/Keycloak{} into libkc */
   authtoken_conf_apply(); /* diff Authtoken{} services: TOKEN NEW/DEL */

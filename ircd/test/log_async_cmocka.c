@@ -422,11 +422,15 @@ static void writer_waits_for_startup(void **state)
 }
 
 /** After startup, a REHASH that turns ASYNC_LOGGING on starts the
- * writer, and log lines go through it. */
+ * writer, and log lines go through it.  Starts up and stops the writer
+ * first, so it holds whichever case runs before it. */
 static void turning_it_on_starts_the_writer(void **state)
 {
   (void)state;
   assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  log_async_start();
+  log_async_shutdown();
+  assert_false(log_async_available());
 
   log_feature_async_logging();
   assert_true(log_async_available());
@@ -467,9 +471,52 @@ static void turning_it_off_writes_the_queue_first(void **state)
   assert_int_equal(writes_completed(), 3);
 }
 
+/** How many times @a needle occurs in the file at @a path. */
+static int occurrences(const char *path, const char *needle)
+{
+  char buf[8192], *p;
+  ssize_t n;
+  int fd, count = 0;
+
+  fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  assert_true(n >= 0);
+  buf[n] = '\0';
+  for (p = buf; (p = strstr(p, needle)); p += strlen(needle))
+    count++;
+  return count;
+}
+
+/** With the queue full, log_async_write() writes the line itself (it
+ * returns 1); log_vwrite() must not write it a second time. */
+static void a_line_the_full_queue_writes_is_written_once(void **state)
+{
+  int i;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  gate_close();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "first");
+  wait_at_gate();               /* the writer holds it; the ring is empty */
+  for (i = 0; i < 7; i++)       /* a ring of 8 holds 7 */
+    log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "fill %d", i);
+
+  open_gate_soon();             /* the fallback's own write() waits too */
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "overflow");
+  opener_join();
+  log_async_flush();
+
+  assert_int_equal(occurrences(log_path, "overflow"), 1);
+  assert_int_equal(occurrences(log_path, "fill"), 7);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test_setup_teardown(a_line_the_full_queue_writes_is_written_once,
+                                    case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(writer_waits_for_startup,
                                     case_setup_stopped, case_teardown),
     cmocka_unit_test_setup_teardown(turning_it_on_starts_the_writer,

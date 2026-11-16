@@ -75,7 +75,9 @@ void log_async_shutdown(void);
  * @param[in] syslog_priority Syslog priority (0 to skip syslog)
  * @param[in] message Pre-formatted log message
  * @param[in] len Length of message
- * @return 0 on success (queued), 1 if sync fallback was used, -1 on error
+ * @return 0 on success (queued), 1 if sync fallback was used (the line
+ *         is written: do not write it again), -1 when nothing was
+ *         written (no writer, or not accepting): the caller writes it
  */
 int log_async_write(int fd, int syslog_priority, const char *message, int len);
 
@@ -91,6 +93,14 @@ void log_async_flush(void);
  * @return 1 if async logging is active, 0 otherwise
  */
 int log_async_available(void);
+
+/**
+ * Start (1) or stop (0) queueing new entries.  Stopping waits until every
+ * queued entry is written; after it log_async_write() returns -1, once
+ * the queue is empty, so a line written synchronously never lands ahead
+ * of an older queued one.
+ */
+void log_async_set_accepting(int on);
 
 /**
  * Get async logging statistics.
@@ -109,6 +119,7 @@ void log_async_stats(unsigned long *queued, unsigned long *written,
 #define log_async_write(fd, prio, msg, len)     (-1)
 #define log_async_flush()                       do {} while (0)
 #define log_async_available()                   (0)
+#define log_async_set_accepting(on)             do {} while (0)
 #define log_async_stats(q, w, d)                do { if (q) *(q) = 0; if (w) *(w) = 0; if (d) *(d) = 0; } while (0)
 
 #endif /* HAVE_PTHREAD */
