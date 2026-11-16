@@ -103,9 +103,12 @@ static unsigned int sm_hash(const char *session_id, const char *target)
   h *= 16777619u;
   /* Fold with the ircd casemapping: sm_find compares with ircd_strcmp,
    * under which rfc1459's []\~ equal {}|^ -- an ASCII-only fold hashed
-   * such spellings to different buckets (case-fold audit 2026-09-02). */
+   * such spellings to different buckets (case-fold audit 2026-09-02).
+   * ToLower() indexes its table by (c) - CHAR_MIN, so it takes the plain
+   * char: an unsigned char >= 0x80 indexes past the end where char is
+   * signed. */
   for (p = target; *p; p++) {
-    h ^= (unsigned char)ToLower((unsigned char)*p);
+    h ^= (unsigned char)ToLower(*p);
     h *= 16777619u;
   }
   return h & SESSION_MR_HASH_MASK;
