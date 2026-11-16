@@ -46,6 +46,7 @@
 #include "config.h"
 
 #include "ircd_relay.h"
+#include "chathistory.h"
 #include "capab.h"
 #include "channel.h"
 #include "chathistory_ephemeral.h"

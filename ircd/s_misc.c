@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "s_misc.h"
+#include "chathistory.h"
 #include "bouncer_session.h"
 #include "m_batch.h"
 #include "IPcheck.h"

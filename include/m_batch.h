@@ -47,6 +47,11 @@ extern int format_batch_open_tags_delivered(char *buf, size_t buflen,
  * measures the text. */
 #define BXM_START_CTAGS_FMT "M +%s %s %s%s %s %s %s @%s :%s"
 
+/** Add a PRIVMSG/NOTICE line to @a sptr's open client multiline batch
+ * (m_batch.c). */
+extern int multiline_add_message(struct Client *sptr, const char *target,
+                                 const char *text, int concat, int is_notice);
+
 /** Free any S2S multiline batches buffered against \a link.
  * Called from exit_one_client when a directly-connected server exits,
  * so partially-accumulated batches whose terminating ML "-" token will

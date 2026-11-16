@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "replay.h"
+#include "chathistory.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
@@ -51,17 +52,6 @@
 
 #include <ctype.h>
 #include <string.h>
-
-/* These are defined in m_chathistory.c and made extern for replay use */
-extern void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
-                                  const char *target, const char *outer_batchid,
-                                  const char *time_str, const char *cmd);
-extern void generate_batch_id(char *buf, size_t buflen, struct Client *sptr);
-extern void send_gap_marker(struct Client *sptr, const char *target,
-                             const char *batchid, const char *time_str,
-                             const char *msgid, const char *sender,
-                             int count);
-extern const char *msg_type_cmd[];
 
 /** Check if a PM target name involves this client.
  * PM targets are stored as "nick1:nick2" in history.

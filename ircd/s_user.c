@@ -28,6 +28,7 @@
 #include "account_id.h"
 
 #include "s_user.h"
+#include "chathistory.h"
 #include "webpush.h"
 #include "bouncer_session.h"
 #include "bouncer_rebind_auth.h"

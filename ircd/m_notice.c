@@ -92,6 +92,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "m_batch.h"
 #include "mark.h"
 #include "match.h"
 #include "msg.h"
@@ -107,8 +108,6 @@
 #if !defined(XXX_BOGUS_TEMP_HACK)
 #include "handlers.h"
 #endif
-
-extern int multiline_add_message(struct Client *sptr, const char *target, const char *text, int concat, int is_notice);
 
 /*
  * mr_notice - Pre-registration message handler to catch CTCP VERSION reply

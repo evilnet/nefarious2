@@ -303,20 +303,7 @@ extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int m_search(struct Client*, struct Client*, int, char*[]);
 extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int m_history(struct Client*, struct Client*, int, char*[]);
-extern int has_chathistory_advertisement(struct Client*);
-extern int server_retention_days(struct Client*);
-extern int chathistory_retention_advertised(void);
-extern void chathistory_update_retention_isupport(int announce);
-extern void chathistory_coverage_changed(void);
-extern int server_retention_covers(struct Client*, time_t);
-extern void clear_server_ad(struct Client*);
-extern void chathistory_report_ads(struct Client*, const struct StatDesc*, char*);
-extern void chathistory_reflood_ads(struct Client *newpeer);
-extern void chathistory_server_eob(struct Client *server);
-extern void forward_history_write(struct Channel*, struct Client*, const char*, const char*, int, const char*);
-extern int send_channel_advertisements(struct Client*);
-extern void broadcast_channel_advertisement(const char*);
-extern void chathistory_init_callbacks(void);
+/* m_chathistory.c's other exports are in chathistory.h. */
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
 /* Apply a channel redaction that reached us from elsewhere: ONE REDACT row,

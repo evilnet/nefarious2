@@ -84,6 +84,7 @@
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
+#include "chathistory.h"
 #include "chathistory_presence.h"
 #include "sasl_webhook.h"
 #include "client.h"

@@ -91,6 +91,7 @@
 #include "ircd_relay.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "m_batch.h"
 #include "match.h"
 #include "msg.h"
 #include "numeric.h"
@@ -98,9 +99,6 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
-
-/* External function from m_batch.c for multiline message handling */
-extern int multiline_add_message(struct Client *sptr, const char *target, const char *text, int concat, int is_notice);
 
 /*
  * m_privmsg - generic message handler
