@@ -107,6 +107,7 @@ CMOCKA_TESTPROGS = \
 	sethost_verify_cmocka \
 	webirc_verify_cmocka \
 	dnsbl_cmocka \
+	persistence_profile_cmocka \
 	conf_include_cmocka \
 	gitsync_timer_cmocka \
 	gitsync_content_cmocka \
@@ -213,6 +214,7 @@ DEP_SRC = \
 	sethost_verify_cmocka.c \
 	webirc_verify_cmocka.c \
 	dnsbl_cmocka.c \
+	persistence_profile_cmocka.c \
 	conf_include_cmocka.c \
 	gitsync_timer_cmocka.c \
 	gitsync_content_cmocka.c \
@@ -896,6 +898,15 @@ dnsbl_cmocka.o: ${srcdir}/dnsbl_cmocka.c ../dnsbl.c
 
 dnsbl_cmocka: $(DNSBL_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(DNSBL_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# persistence_profile tests - profile delete, rename and listing reach
+# every stored profile key, including those of 64 bytes or more.
+PERSISTENCE_PROFILE_CMOCKA_OBJS = persistence_profile_cmocka.o \
+	../ircd_alloc.o ../ircd_string.o ../ircd_snprintf.o
+persistence_profile_cmocka.o: ${srcdir}/persistence_profile_cmocka.c ../persistence_profile.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/persistence_profile_cmocka.c
+
+persistence_profile_cmocka: $(PERSISTENCE_PROFILE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(PERSISTENCE_PROFILE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # conf_include tests - an include whose file does not exist is decided
 # once the configuration has been read: GitSync's file with GitSync
 # enabled is empty until the first sync (a placeholder is written, not
