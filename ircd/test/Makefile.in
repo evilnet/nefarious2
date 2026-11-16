@@ -107,6 +107,7 @@ CMOCKA_TESTPROGS = \
 	parse_line_cmocka \
 	conf_reattach_cmocka \
 	nickask_cmocka \
+	listener_rehash_cmocka \
 	oper_verify_cmocka \
 	sethost_verify_cmocka \
 	webirc_verify_cmocka \
@@ -218,6 +219,7 @@ DEP_SRC = \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
 	nickask_cmocka.c \
+	listener_rehash_cmocka.c \
 	oper_verify_cmocka.c \
 	sethost_verify_cmocka.c \
 	webirc_verify_cmocka.c \
@@ -886,6 +888,17 @@ nickask_cmocka.o: ${srcdir}/nickask_cmocka.c ../s_numeric.c
 NICKASK_CMOCKA_OBJS = nickask_cmocka.o ../ircd_string.o ../match.o
 nickask_cmocka: $(NICKASK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(NICKASK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# listener_rehash tests - a listener a REHASH leaves with no socket stays
+# linked (inactive) until close_listeners() or its last
+# release_listener() closes it, never freed while clients hold it.
+# Includes ../listener.c with --gc-sections; sockets, events and the
+# rest of the server are stubs, and free() is wrapped to watch it.
+listener_rehash_cmocka.o: ${srcdir}/listener_rehash_cmocka.c ../listener.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/listener_rehash_cmocka.c
+
+LISTENER_REHASH_CMOCKA_OBJS = listener_rehash_cmocka.o
+listener_rehash_cmocka: $(LISTENER_REHASH_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=free $(LISTENER_REHASH_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # oper_verify tests - an OPER whose password check finishes after a REHASH
 # is judged by the Operator block the configuration in force then gives
