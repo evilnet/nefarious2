@@ -2302,37 +2302,31 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
   /* Echo outgoing notice to other members of the sender's bouncer session,
-   * with the sender's client-only tags as a PRIVMSG's (#229; the sender's
-   * own echo below still has none). */
+   * with the sender's client-only tags as a PRIVMSG's (#229). */
   bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid,
                             history_parse_ms(pm_timestamp),
                             cli_client_tags(sptr));
 
-  /* Echo private notice back to sender if they have echo-message cap */
+  /* Echo private notice back to sender if they have echo-message cap,
+   * with its client-only tags as a PRIVMSG's echo (relay_private_message):
+   * the recipient, the history row and the session copies carry them. */
+  if (feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG)) {
+    const char *echo_client_tags = cli_client_tags(sptr);
+
+    if (echo_client_tags && *echo_client_tags && CapOwnHas(sptr, CAP_MSGTAGS))
+      sendcmdto_one_client_tags(sptr, MSG_NOTICE, sptr, echo_client_tags,
+                                "%C :%s", acptr, mytext);
+    else
+      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
+  }
+  sendcmdto_set_client_msgid(NULL);
+
 #ifdef USE_ROCKSDB
-  {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-
-    if (need_echo) {
-      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
-                             "%C :%s", acptr, mytext);
-    }
-    sendcmdto_set_client_msgid(NULL);
-
-    /* Store private notice in history database (if enabled) */
-    if (pm_msgid[0])
-      store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, pm_msgid, pm_timestamp,
-                            cli_client_tags(sptr));
-  }
-#else
-  {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-    if (need_echo) {
-      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
-                             "%C :%s", acptr, mytext);
-    }
-    sendcmdto_set_client_msgid(NULL);
-  }
+  /* Store private notice in history database (if enabled) */
+  if (pm_msgid[0])
+    store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, pm_msgid, pm_timestamp,
+                          cli_client_tags(sptr));
 #endif
 }
 
