@@ -221,7 +221,8 @@ extern void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      struct SLink *messages, int total_lines,
                                      int is_channel, struct Channel *chptr,
                                      const char *paste_url_str,
-                                     const char *client_tags, int is_notice);
+                                     const char *client_tags, int is_notice,
+                                     uint64_t time_ms);
 static const char *get_displayed_host(struct Client *sptr);
 static void emit_bxm_to_remote_member(struct Client *member,
                                        const char *member_numeric,
@@ -347,7 +348,7 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
     send_multiline_fallback(sptr, route_to, wire_target, batch_base_msgid,
                              con_ml_messages(con), con_ml_msg_count(con),
                              0, NULL, batch_paste_url,
-                             con_ml_client_tags(con), is_notice);
+                             con_ml_client_tags(con), is_notice, 0);
     return 1;
   }
 }
@@ -499,9 +500,11 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
                               struct SLink *messages, int total_lines,
                               int is_channel, struct Channel *chptr,
                               const char *paste_url_str,
-                              const char *client_tags, int is_notice)
+                              const char *client_tags, int is_notice,
+                              uint64_t time_ms)
 {
   const struct SLink *lp;
+  char timebuf[40], saved[40];
   int shown, remaining, units = 0;
   const char *msg_str = is_notice ? MSG_NOTICE : MSG_PRIVATE;
 
@@ -511,6 +514,14 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
   (void)total_lines;
   ml_fallback_plan(messages, feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES),
                    &shown, &remaining);
+
+  /* Every line, and the truncation notice, carries the batch's one time
+   * (as its BATCH opener would), over whatever override the caller has. */
+  ircd_strncpy(saved, sendcmdto_get_client_time(), sizeof(saved));
+  if (time_ms) {
+    ms_to_time_tag(timebuf, sizeof(timebuf), time_ms);
+    sendcmdto_set_client_time(timebuf);
+  }
 
   /* Send preview lines with server tags (time, msgid) for IRCv3 compliance.
    * Per multiline spec, only the FIRST fallback line carries msgid to avoid
@@ -550,7 +561,7 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
   }
 
   if (remaining <= 0)
-    return;
+    goto done;
 
   /* Truncation NOTICE: fresh msgid (system-generated, not part of user
    * content), tag-aware send so it carries msgid/time.  Source is &me
@@ -583,6 +594,9 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
                              acptr, remaining);
     }
   }
+
+done:
+  sendcmdto_set_client_time(saved[0] ? saved : NULL);
 }
 
 /*
@@ -1522,7 +1536,8 @@ static void ml_echo_channel(struct Client *sptr, struct Channel *chptr,
     /* Sender doesn't have multiline - preview + truncation fallback */
     send_multiline_fallback(sptr, sptr, NULL, batch_base_msgid,
                             con_ml_messages(con), con_ml_msg_count(con),
-                            1, chptr, batch_paste_url, con_ml_client_tags(con), is_notice);
+                            1, chptr, batch_paste_url, con_ml_client_tags(con), is_notice,
+                            0);
   }
 }
 
@@ -1778,7 +1793,8 @@ process_multiline_batch(struct Client *sptr)
           /* Preview + paste URL fallback for legacy clients */
           send_multiline_fallback(sptr, to, NULL, batch_base_msgid,
                                    con_ml_messages(con), total_lines, 1, chptr,
-                                   batch_paste_url, con_ml_client_tags(con), is_notice);
+                                   batch_paste_url, con_ml_client_tags(con), is_notice,
+                                   batch_time_ms);
         }
       }
 
@@ -3067,7 +3083,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         send_multiline_fallback(sptr, to, NULL, batch_base_msgid,
                                  batch->messages, batch->msg_count, 1, chptr,
                                  s2s_paste_url,
-                                 batch->client_tags[0] ? batch->client_tags : NULL, is_notice);
+                                 batch->client_tags[0] ? batch->client_tags : NULL, is_notice,
+                                 batch->time_ms);
       }
     }
   } else if (acptr && MyConnect(acptr)) {
@@ -3121,7 +3138,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       send_multiline_fallback(sptr, acptr, acptr, batch_base_msgid,
                                batch->messages, batch->msg_count, 0, NULL,
                                s2s_paste_url,
-                               batch->client_tags[0] ? batch->client_tags : NULL, is_notice);
+                               batch->client_tags[0] ? batch->client_tags : NULL, is_notice,
+                               batch->time_ms);
     }
   }
 

@@ -977,7 +977,8 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               char burst_msgid[64] = "";
               if (feature_bool(FEAT_MSGID)) {
                 generate_msgid(burst_msgid, sizeof(burst_msgid));
-                sendcmdto_set_client_msgid(burst_msgid);
+                /* its own time, the msgid's mint time */
+                sendcmdto_set_client_event(burst_msgid, history_event_time_ms(NULL));
               }
               sendcmdto_channel_capab_butserv_butone(acptr, CMD_JOIN, chptr, NULL, 0,
                                                      CAP_NONE, CAP_EXTJOIN, "%H", chptr);

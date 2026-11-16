@@ -211,10 +211,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
               ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
             else
               generate_msgid(ac_msgid, sizeof(ac_msgid));
-            /* The event's msgid and its time: the origin's, as the AC carried
-             * them (N067), or, from a peer that tagged none, minted here.  The
-             * lines below and the relay both carry them. */
-            ac_time = history_event_time_ms(cptr);
+            /* The event's one time: the link's with its msgid, else the
+             * minted msgid's. */
+            ac_time = history_event_time_ms(cli_s2s_msgid(cptr)[0] ? cptr : NULL);
             sendcmdto_set_client_event(ac_msgid, ac_time);
           }
           /* account-notify: the observers, and the user's own
@@ -372,10 +371,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
               ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
             else
               generate_msgid(ac_msgid, sizeof(ac_msgid));
-            /* The event's msgid and its time: the origin's, as the AC carried
-             * them (N067), or, from a peer that tagged none, minted here.  The
-             * lines below and the relay both carry them. */
-            ac_time = history_event_time_ms(cptr);
+            /* The event's one time: the link's with its msgid, else the
+             * minted msgid's. */
+            ac_time = history_event_time_ms(cli_s2s_msgid(cptr)[0] ? cptr : NULL);
             sendcmdto_set_client_event(ac_msgid, ac_time);
           }
           /* account-notify: the observers, and the user's own
@@ -559,10 +557,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
         else
           generate_msgid(ac_msgid, sizeof(ac_msgid));
-        /* The event's msgid and its time: the origin's, as the AC carried
-         * them (N067), or, from a peer that tagged none, minted here.  The
-         * lines below and the relay both carry them. */
-        ac_time = history_event_time_ms(cptr);
+        /* The event's one time: the link's with its msgid, else the
+         * minted msgid's. */
+        ac_time = history_event_time_ms(cli_s2s_msgid(cptr)[0] ? cptr : NULL);
         sendcmdto_set_client_event(ac_msgid, ac_time);
       }
       sendcmdto_common_channels_capab_session(acptr, CMD_ACCOUNT, CAP_ACCNOTIFY,

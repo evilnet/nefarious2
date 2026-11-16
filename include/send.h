@@ -91,6 +91,8 @@ extern void sendcmdto_set_client_msgid(const char *msgid);
 extern void sendcmdto_set_extra_withcap(int cap);
 /* Override server-time for client-side tag formatting (caller must clear after use) */
 extern void sendcmdto_set_client_time(const char *timestr);
+/** The @time override sendcmdto_set_client_time() set, or "". */
+extern const char *sendcmdto_get_client_time(void);
 /** Arm the client msgid AND the event's time (epoch ms) for the
  * client-facing @time tag; cleared by sendcmdto_set_client_msgid(NULL). */
 extern void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms);

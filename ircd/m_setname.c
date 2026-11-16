@@ -81,6 +81,7 @@
 
 #include "capab.h"
 #include "client.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -164,16 +165,15 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Generate msgid BEFORE S2S relay so all servers use the same one */
   {
     char sn_msgid[64] = "";
+    uint64_t sn_time = 0;
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(sn_msgid, sizeof(sn_msgid));
+      /* The event's one time, the msgid's mint time (the history/HLC
+       * clock every other event takes), for every copy. */
+      sn_time = history_event_time_ms(NULL);
 
       /* Set S2S tags so receiving servers reuse this msgid */
-      {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        sendcmdto_set_s2s_tags(
-          (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, sn_msgid);
-      }
+      sendcmdto_set_s2s_tags(sn_time, sn_msgid);
     }
 
     /* Propagate to other servers (with S2S tags).  Sourced as the typing
@@ -190,7 +190,7 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* Set client msgid for local broadcast */
     if (sn_msgid[0])
-      sendcmdto_set_client_msgid(sn_msgid);
+      sendcmdto_set_client_event(sn_msgid, sn_time);
 
     /* Echo SETNAME back to the sender per IRCv3 spec: the connection
      * that typed it, from the session's identity.  The echo answers the
@@ -255,26 +255,17 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Reuse incoming S2S msgid or generate new */
   {
     char sn_msgid[64] = "";
+    uint64_t sn_time = 0;
     if (feature_bool(FEAT_MSGID)) {
+      /* The event's one msgid and time: the link's, else minted here. */
       if (cli_s2s_msgid(cptr)[0]) {
         ircd_strncpy(sn_msgid, cli_s2s_msgid(cptr), sizeof(sn_msgid));
-        if (cli_s2s_time_ms(cptr))
-          sendcmdto_set_s2s_tags(cli_s2s_time_ms(cptr), sn_msgid);
-        else {
-          struct timeval tv;
-          gettimeofday(&tv, NULL);
-          sendcmdto_set_s2s_tags(
-            (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, sn_msgid);
-        }
+        sn_time = history_event_time_ms(cptr);
       } else {
         generate_msgid(sn_msgid, sizeof(sn_msgid));
-        {
-          struct timeval tv;
-          gettimeofday(&tv, NULL);
-          sendcmdto_set_s2s_tags(
-            (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, sn_msgid);
-        }
+        sn_time = history_event_time_ms(NULL);
       }
+      sendcmdto_set_s2s_tags(sn_time, sn_msgid);
     }
 
     /* Propagate to other servers (with S2S tags), sourced as the line
@@ -296,7 +287,7 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* Notify local channel members with setname capability */
     if (sn_msgid[0])
-      sendcmdto_set_client_msgid(sn_msgid);
+      sendcmdto_set_client_event(sn_msgid, sn_time);
 
     /* Skip the connection that sent it, not the primary: when a device of
      * the session on another server typed it, our local primary is told
