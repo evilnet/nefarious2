@@ -84,6 +84,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "history.h"
 #include "forwarded_label.h"
 #include "fwd_match.h"
 #include "hash.h"
@@ -223,7 +224,8 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     char inv_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(inv_msgid, sizeof(inv_msgid));
-      sendcmdto_set_client_msgid(inv_msgid);
+      /* its own time, the msgid's mint time */
+      sendcmdto_set_client_event(inv_msgid, history_event_time_ms(NULL));
     }
 
     /* Send invite-notify to LOCAL channel members with the capability */
@@ -362,7 +364,8 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     char inv_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(inv_msgid, sizeof(inv_msgid));
-      sendcmdto_set_client_msgid(inv_msgid);
+      /* its own time, the msgid's mint time */
+      sendcmdto_set_client_event(inv_msgid, history_event_time_ms(NULL));
     }
 
     /* Send invite-notify to LOCAL channel members with the capability */

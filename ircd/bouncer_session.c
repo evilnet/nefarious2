@@ -16491,26 +16491,15 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
     /* Bounded fallback: preview + truncation NOTICE.  route_to=alias,
      * wire_target=resolved target_nick so the truncated lines land in
      * the alias's correct query window.  The lines carry the batch's
-     * time (#229), as the origin's fallback does (its m_batch.c time
-     * override); the clock only when the batch has none. */
-    char timebuf[32] = "";
-    if (b->time_ms) {
-      char unix_ts[32];
-      history_format_ms(unix_ts, sizeof(unix_ts), b->time_ms);
-      if (history_unix_to_iso(unix_ts, timebuf, sizeof(timebuf)) != 0)
-        timebuf[0] = '\0';
-    }
-    if (timebuf[0])
-      sendcmdto_set_client_time(timebuf);
+     * time (#229), as the origin's fallback does; the clock only when
+     * the batch has none. */
     send_multiline_fallback(from, alias, wire_target,
                             b->msgid[0] ? b->msgid : NULL,
                             b->messages, b->msg_count,
                             0 /* not channel */, NULL /* chptr */,
                             b->paste_url[0] ? b->paste_url : NULL,
                             b->client_tags,
-                            b->is_notice);
-    if (timebuf[0])
-      sendcmdto_set_client_time(NULL);
+                            b->is_notice, b->time_ms);
   }
 }
 

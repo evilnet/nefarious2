@@ -2378,7 +2378,8 @@ hide_hostmask(struct Client *cptr)
     char hh_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(hh_msgid, sizeof(hh_msgid));
-      sendcmdto_set_client_msgid(hh_msgid);
+      /* its own time, the msgid's mint time */
+      sendcmdto_set_client_event(hh_msgid, history_event_time_ms(NULL));
     }
 
     /* For clients without chghost capability, use QUIT+JOIN if enabled */
@@ -2484,7 +2485,8 @@ unhide_hostmask(struct Client *cptr)
     char uh_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(uh_msgid, sizeof(uh_msgid));
-      sendcmdto_set_client_msgid(uh_msgid);
+      /* its own time, the msgid's mint time */
+      sendcmdto_set_client_event(uh_msgid, history_event_time_ms(NULL));
     }
 
     /* For clients without chghost capability, use QUIT+JOIN if enabled */

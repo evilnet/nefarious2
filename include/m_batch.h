@@ -26,7 +26,8 @@ extern void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      struct SLink *messages, int total_lines,
                                      int is_channel, struct Channel *chptr,
                                      const char *paste_url_str,
-                                     const char *client_tags, int is_notice);
+                                     const char *client_tags, int is_notice,
+                                     uint64_t time_ms);
 
 /** The BATCH + opener tags of a multiline batch delivered to \a to that
  * answers none of its commands (a BX M session echo): time, msgid,

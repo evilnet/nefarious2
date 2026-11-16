@@ -283,14 +283,24 @@ void sendcmdto_set_client_time(const char *timestr)
     client_time_override[0] = '\0';
 }
 
+const char *sendcmdto_get_client_time(void)
+{
+  return client_time_override;
+}
+
+/** Arm (or with NULL disarm) the client msgid of the lines sent next.
+ * A msgid armed here carries no event time: the lines take the clock
+ * (or a sendcmdto_set_client_time() override).  An event with a time
+ * arms both with sendcmdto_set_client_event() -- never this after
+ * something else armed a time, which would stamp the msgid with that
+ * other event's time. */
 void sendcmdto_set_client_msgid(const char *msgid)
 {
   if (msgid)
     ircd_strncpy(client_msgid_override, msgid, sizeof(client_msgid_override));
-  else {
+  else
     client_msgid_override[0] = '\0';
-    client_event_ms = 0;
-  }
+  client_event_ms = 0;
 }
 
 void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
@@ -505,6 +515,10 @@ void sendcmdto_reset_s2s_overrides(void)
   s2s_client_tags_override = NULL;
   s2s_raw_tags[0] = '\0';
   s2s_want_tags = 0;
+  /* sendcmdto_set_s2s_tags() also armed the client-facing time; with no
+   * client msgid armed it would wait for the next event that arms one. */
+  if (!client_msgid_override[0])
+    client_event_ms = 0;
 }
 
 /** Mint a fresh msgid into \a link's S2S stash for an event that

@@ -571,6 +571,41 @@ static void test_bx_ctags_keeps_the_client_event(void **state)
   sendcmdto_set_client_msgid(NULL);
 }
 
+/* N066: a msgid armed alone takes no other event's time.  An S2S relay
+ * arms its time for the client copies too; a later event that arms only
+ * a msgid (invite-notify after a relayed PM) must not inherit it, with or
+ * without the line's end in between. */
+static void test_bare_msgid_takes_no_stale_time(void **state)
+{
+  (void)state;
+  sendcmdto_set_s2s_tags(1763000000123ULL, BXE_ID);
+  sendcmdto_reset_s2s_overrides();
+  assert_true(client_event_ms == 0);
+  sendcmdto_set_client_msgid("OTHERMSGID0001");
+  assert_true(client_event_ms == 0);
+  sendcmdto_set_client_msgid(NULL);
+
+  sendcmdto_set_s2s_tags(1763000000123ULL, BXE_ID);
+  sendcmdto_set_client_msgid("OTHERMSGID0001");
+  assert_true(client_event_ms == 0);
+  sendcmdto_set_client_msgid(NULL);
+  sendcmdto_reset_s2s_overrides();
+}
+
+/* An event armed with its time keeps it across the line's S2S reset: the
+ * reset leaves the client overrides to their senders. */
+static void test_armed_event_survives_s2s_reset(void **state)
+{
+  (void)state;
+  sendcmdto_set_client_event(BXE_ID, 1763000000456ULL);
+  sendcmdto_set_s2s_tags(1763000000456ULL, BXE_ID);
+  sendcmdto_reset_s2s_overrides();
+  assert_string_equal(client_msgid_override, BXE_ID);
+  assert_true(client_event_ms == 1763000000456ULL);
+  sendcmdto_set_client_msgid(NULL);
+  assert_true(client_event_ms == 0);
+}
+
 /* 4094 bytes of client tags: the whole region, never cut. */
 static void test_bx_ctags_full_size_is_whole(void **state)
 {
@@ -622,6 +657,8 @@ int main(void)
     cmocka_unit_test_setup(test_bx_region_with_tags_as_ctags, setup),
     cmocka_unit_test_setup(test_bx_region_bare_cases, setup),
     cmocka_unit_test_setup(test_ch_r_without_tags_stays_bare, setup),
+    cmocka_unit_test_setup(test_bare_msgid_takes_no_stale_time, setup),
+    cmocka_unit_test_setup(test_armed_event_survives_s2s_reset, setup),
     cmocka_unit_test_setup(test_bx_ctags_full_size_is_whole, setup),
     cmocka_unit_test_setup(test_ordinary_channel_send_drops_statusmsg_mark, setup),
     cmocka_unit_test_setup(test_ordinary_channel_send_with_ctags_drops_statusmsg_mark, setup),
