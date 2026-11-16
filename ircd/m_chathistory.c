@@ -5782,6 +5782,22 @@ static struct FedRequest *find_fed_request(const char *reqid)
 }
 
 static void complete_redact_fed(struct FedRequest *req);
+static void complete_search_agg_part(struct FedRequest *req);
+/** The search one SEARCH without `in` answers with. */
+struct SearchAgg {
+  char client_yxx[6];        /**< the requester (cleared: it left) */
+  char label[64];            /**< the SEARCH line's label */
+  int limit;
+  int pending;               /**< parts not finished, plus m_search's hold */
+  struct HistoryMessage *rows; /**< every finished part's rows, unsorted */
+};
+
+/** One channel's request in a SearchAgg (its FedRequest's cb_data). */
+struct SearchAggPart {
+  struct SearchAgg *agg;
+  int done;
+};
+
 
 /** @a sptr's connection is being replaced: a bouncer revive puts a new
  * socket on the held ghost (bounce_revive()), which keeps the numeric
@@ -5821,6 +5837,13 @@ void chathistory_forget_client(struct Client *sptr)
     req->label[0] = '\0';
     if (req->completion_cb != complete_redact_fed)
       req->client_yxx[0] = '\0';   /* findNUser("") finds nobody */
+    /* A part of a SEARCH without `in`: the aggregate answers, so it
+     * forgets the client too. */
+    if (req->completion_cb == complete_search_agg_part && req->cb_data) {
+      struct SearchAgg *agg = ((struct SearchAggPart *)req->cb_data)->agg;
+      agg->client_yxx[0] = '\0';
+      agg->label[0] = '\0';
+    }
   }
 }
 
@@ -7849,6 +7872,10 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
  * 512-byte P10 body cap bounds them: SEARCH_SEL_MAX leaves room for the
  * fixed fields. */
 #define SEARCH_SEL_MAX 380
+/** The federation slots a SEARCH without `in` leaves free (N013): its
+ * per-channel parts stop there, and the remaining channels are searched
+ * on this server only. */
+#define SEARCH_FED_RESERVE (MAX_FED_REQUESTS / 4)
 
 static void search_sel_escape(const char *in, char *out, size_t n)
 {
@@ -8017,18 +8044,43 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
  * out or hit its scan cap is not signalled: the spec has no marker for a
  * cut scan, and the client narrows its window when a full limit comes
  * back, exactly as against a single server. */
-static void complete_search_fed(struct FedRequest *req)
+/** Sort @a head by time and keep its newest @a limit, ascending; frees
+ * the rest. */
+static struct HistoryMessage *search_keep_newest(struct HistoryMessage *head,
+                                                 int limit)
 {
-  struct Client *client;
-  struct HistoryMessage *merged, *m, **all;
+  struct HistoryMessage *m, **all, *out = NULL;
   int total = 0, k, keep;
 
-  if (!req || req->response_sent)
-    return;
-  req->response_sent = 1;
-  client = findNUser(req->client_yxx);
-  if (!client)
-    return;
+  for (m = head; m; m = m->next)
+    total++;
+  if (total == 0)
+    return NULL;
+  all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
+  for (k = 0, m = head; m; m = m->next)
+    all[k++] = m;
+  if (total > 1)
+    qsort(all, total, sizeof(*all), search_row_cmp);
+  keep = total < limit ? total : limit;
+  for (k = total - 1; k >= 0; k--) {
+    all[k]->next = NULL;
+    if (k < total - keep) {
+      history_free_messages(all[k]);
+      continue;
+    }
+    all[k]->next = out;
+    out = all[k];
+  }
+  MyFree(all);
+  return out;
+}
+
+/** A finished SEARCH request's rows: the responders' rows that pass this
+ * store's redaction check, merged with the local ones, newest limit kept,
+ * ascending.  Takes them out of the request. */
+static struct HistoryMessage *search_fed_rows(struct FedRequest *req)
+{
+  struct HistoryMessage *merged;
   /* A responder filters its own redacted matches (search_row_hook); an
    * older one does not, so the responders' rows pass the same check
    * against this store before the merge.  It finds what this store knows:
@@ -8054,34 +8106,81 @@ static void complete_search_fed(struct FedRequest *req)
                 req->target, unread);
   }
   /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
-   * the union is sorted and trimmed below. */
+   * the union is sorted and trimmed below.  hm_merge assumes sorted
+   * inputs; responders' rows arrive in reply order, hence the sort. */
   merged = hm_merge(req->local_msgs, req->leg.msgs, INT_MAX, 0);
-  for (m = merged; m; m = m->next)
-    total++;
-  if (total == 0) {
-    search_send(client, NULL, NULL, req->label[0] ? req->label : NULL);
+  req->local_msgs = NULL;
+  req->leg.msgs = NULL;
+  req->leg.rows = 0;
+  return search_keep_newest(merged, req->limit);
+}
+
+static void complete_search_fed(struct FedRequest *req)
+{
+  struct Client *client;
+  struct HistoryMessage *rows;
+
+  if (!req || req->response_sent)
     return;
+  req->response_sent = 1;
+  client = findNUser(req->client_yxx);
+  if (!client)
+    return;
+  rows = search_fed_rows(req);
+  search_send(client, rows, NULL, req->label[0] ? req->label : NULL);
+  history_free_messages(rows);
+}
+
+/* SEARCH without `in` (N013): one federated request per channel, each a
+ * part of one aggregate that answers with a single batch once the last
+ * part is in. */
+
+/** Add @a rows to @a agg and finish one part; the last one sends the
+ * newest limit overall and frees the aggregate. */
+static void search_agg_finish(struct SearchAgg *agg, struct HistoryMessage *rows)
+{
+  struct Client *client;
+  struct HistoryMessage *tail;
+
+  if (rows) {
+    for (tail = rows; tail->next; tail = tail->next)
+      ;
+    tail->next = agg->rows;
+    agg->rows = rows;
   }
-  /* hm_merge assumes sorted inputs; responders' rows arrive in
-   * reply order, so sort the union by time and keep the newest limit. */
-  all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
-  for (k = 0, m = merged; m; m = m->next)
-    all[k++] = m;
-  qsort(all, total, sizeof(*all), search_row_cmp);
-  keep = total < req->limit ? total : req->limit;
-  merged = NULL;
-  for (k = total - 1; k >= 0; k--) {
-    all[k]->next = NULL;
-    if (k < total - keep) {
-      history_free_messages(all[k]);
-      continue;
-    }
-    all[k]->next = merged;
-    merged = all[k];
+  if (--agg->pending > 0)
+    return;
+  rows = search_keep_newest(agg->rows, agg->limit);
+  agg->rows = NULL;
+  client = agg->client_yxx[0] ? findNUser(agg->client_yxx) : NULL;
+  if (client)
+    search_send(client, rows, NULL, agg->label[0] ? agg->label : NULL);
+  history_free_messages(rows);
+  MyFree(agg);
+}
+
+static void complete_search_agg_part(struct FedRequest *req)
+{
+  struct SearchAggPart *part = (struct SearchAggPart *)req->cb_data;
+
+  if (!req || req->response_sent || !part || part->done)
+    return;
+  req->response_sent = 1;
+  part->done = 1;
+  search_agg_finish(part->agg, search_fed_rows(req));
+}
+
+/** A part freed without completing still counts as finished, so the
+ * aggregate answers. */
+static void cleanup_search_agg_part(void *data)
+{
+  struct SearchAggPart *part = (struct SearchAggPart *)data;
+
+  if (!part->done) {
+    part->done = 1;
+    search_agg_finish(part->agg, NULL);
   }
-  MyFree(all);
-  search_send(client, merged, NULL, req->label[0] ? req->label : NULL);
-  history_free_messages(merged);
+  MyFree(part);
 }
 
 /** Fan a SEARCH out to every storage server for @a target.  Wire:
@@ -9823,7 +9922,8 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * can live on other storage servers (a store that was split holds
      * rows the others lack), and a page of the same window would fan
      * out to them -- so does a search, or users could not trust it.
-     * Private conversations and the no-`in` form stay local. */
+     * Private conversations stay local; the no-`in` form below
+     * federates per channel (N013). */
     if (IsChannelName(in)) {
       struct FedRequest *req = start_fed_search(sptr, lookup_target, in,
                                                 before_unix, after_unix,
@@ -9836,15 +9936,33 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* No `in`: every channel the requester is in, newest `limit` overall. */
+  /* No `in`: every channel the requester is in, newest `limit` overall.
+   * Each channel's rows can live on other storage servers, as with `in`
+   * (N013), so each channel with stores elsewhere is one federated
+   * request, a part of one aggregate that sends the single batch when the
+   * last part is in.  The parts are bounded so one search cannot take the
+   * slots every other page and search federates through: past
+   * SEARCH_FED_RESERVE free slots, a channel is searched here only. */
   {
     struct Membership *member;
-    struct HistoryMessage **all = NULL;
-    struct HistoryMessage *head = NULL, **tail = &head;
-    int total = 0, cap = 0, keep, k;
+    struct SearchAgg *agg;
+    int free_slots = 0;
+
+    for (i = 0; i < MAX_FED_REQUESTS; i++)
+      if (!fed_requests[i])
+        free_slots++;
+
+    agg = (struct SearchAgg *)MyCalloc(1, sizeof(*agg));
+    ircd_snprintf(0, agg->client_yxx, sizeof(agg->client_yxx), "%s%s",
+                  cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+    if (cli_label(sptr)[0])
+      ircd_strncpy(agg->label, cli_label(sptr), sizeof(agg->label));
+    agg->limit = limit;
+    agg->pending = 1;   /* held until every channel is started */
 
     for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
-      struct HistoryMessage *rows = NULL, *m;
+      struct HistoryMessage *rows = NULL;
+      struct FedRequest *req = NULL;
       int count;
 
       if (check_history_access(sptr, member->channel->chname, lookup_target,
@@ -9852,34 +9970,37 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         continue;
       count = search_one_target(sptr, lookup_target, before_unix, limit, &sm,
                                 &budget, &rows);
-      if (count <= 0) {
+      if (count < 0) {
         history_free_messages(rows);
-        continue;
+        rows = NULL;
+        count = 0;
       }
-      if (total + count > cap) {
-        cap = (total + count) * 2;
-        all = (struct HistoryMessage **)MyRealloc(all, cap * sizeof(*all));
+      if (free_slots > SEARCH_FED_RESERVE) {
+        req = start_fed_search(sptr, lookup_target, member->channel->chname,
+                               before_unix, after_unix, limit, &sm, rows, count);
       }
-      for (m = rows; m; m = m->next)
-        all[total++] = m;
-    }
+      if (req) {
+        struct SearchAggPart *part;
 
-    if (total > 1)
-      qsort(all, total, sizeof(*all), search_row_cmp);
-    keep = total < limit ? total : limit;
-    /* Ascending order; the newest `limit` are the tail of the sort. */
-    for (k = 0; k < total; k++) {
-      all[k]->next = NULL;
-      if (k < total - keep) {
-        history_free_messages(all[k]);
-        continue;
+        free_slots--;
+        part = (struct SearchAggPart *)MyCalloc(1, sizeof(*part));
+        part->agg = agg;
+        agg->pending++;
+        req->completion_cb = complete_search_agg_part;
+        req->cb_data = part;
+        req->cleanup_cb = cleanup_search_agg_part;
+        req->label[0] = '\0';   /* the aggregate answers under it */
+      } else {
+        /* Trimmed per channel, so the held rows stay bounded. */
+        rows = search_keep_newest(rows, limit);
+        if (rows) {
+          agg->pending++;
+          search_agg_finish(agg, rows);
+        }
       }
-      *tail = all[k];
-      tail = &all[k]->next;
     }
-    MyFree(all);
-    search_send(sptr, head, NULL, cli_label(sptr));
-    history_free_messages(head);
+    /* Release the hold: with no part in flight this sends now. */
+    search_agg_finish(agg, NULL);
   }
   return 0;
 }
