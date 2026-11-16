@@ -321,6 +321,21 @@ static void test_newer_build_record(void **state)
   memcpy(buf, &version, sizeof(version));
   assert_false(bounce_record_from_newer_build(buf, 14192));
   assert_false(bounce_record_from_newer_build(buf, 3));
+
+  /* "Newer" is bounded: a version past BOUNCER_DB_NEWER_SPAN builds
+   * ahead is no build's, but a corrupted record, and is evicted. */
+  version = BOUNCER_DB_VERSION + BOUNCER_DB_NEWER_SPAN;
+  memcpy(buf, &version, sizeof(version));
+  assert_true(bounce_record_from_newer_build(buf, 64));
+  assert_int_equal(bounce_record_decode(buf, 64, out, &version), BOUNCE_REC_NEWER);
+  version = BOUNCER_DB_VERSION + BOUNCER_DB_NEWER_SPAN + 1;
+  memcpy(buf, &version, sizeof(version));
+  assert_false(bounce_record_from_newer_build(buf, 64));
+  assert_int_equal(bounce_record_decode(buf, 64, out, &version), BOUNCE_REC_UNKNOWN);
+  version = 0xFFFFFFFFu;
+  memcpy(buf, &version, sizeof(version));
+  assert_false(bounce_record_from_newer_build(buf, 64));
+  assert_int_equal(bounce_record_decode(buf, 64, out, &version), BOUNCE_REC_UNKNOWN);
   free(buf);
   free(out);
 }
@@ -363,6 +378,7 @@ static struct bounce_restore_clock clock_at(int64_t last_alive)
   c.now = NOW;
   c.max_hold = MAX_HOLD;
   c.last_alive = last_alive;
+  c.last_alive_writer = last_alive ? BOUNCER_DB_VERSION : 0;
   c.hold = DEFAULT_RULE;
   return c;
 }
@@ -391,7 +407,7 @@ static enum BounceRestoreVerdict restore_time(int64_t disconnect_time,
 {
   struct bounce_restore_clock c = clock_at(last_alive);
   struct BounceSessionRecord *r = rec_with(disconnect_time, 0, 0, 0);
-  enum BounceRestoreVerdict v = bounce_record_restore(r, &c, since);
+  enum BounceRestoreVerdict v = bounce_record_restore(r, BOUNCER_DB_VERSION, &c, since);
 
   free(r);
   return v;
@@ -465,21 +481,21 @@ static void test_restore_marker_held_from_the_crash(void **state)
   (void)state;
   /* The previous run's last heartbeat is the crash. */
   r = rec_with(BOUNCE_REC_HELD_AT_RESTART, NOW - 3600, 0, 0);
-  assert_int_equal(bounce_record_restore(r, &c, &since),
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since),
                    BOUNCE_RESTORE_HELD_AT_CRASH);
   assert_true(since == NOW - 120);
   /* The session itself was seen live later than the last heartbeat. */
   r->bsr_last_active = NOW - 30;
-  assert_int_equal(bounce_record_restore(r, &c, &since),
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since),
                    BOUNCE_RESTORE_HELD_AT_CRASH);
   assert_true(since == NOW - 30);
   /* ... never after now (a clock that went back). */
   r->bsr_last_active = NOW + 500;
-  assert_int_equal(bounce_record_restore(r, &c, &since),
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since),
                    BOUNCE_RESTORE_HELD_AT_CRASH);
   assert_true(since == NOW);
   /* NULL out-parameter is allowed. */
-  assert_int_equal(bounce_record_restore(r, &c, NULL),
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL),
                    BOUNCE_RESTORE_HELD_AT_CRASH);
   free(r);
 }
@@ -505,17 +521,17 @@ static void test_restore_marker_outage_outlived_its_hold(void **state)
    * decayed hold never goes below base. */
   c = clock_at(NOW - BASE);
   r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 0, 0);
-  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
   c = clock_at(NOW - BASE - 1);
-  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL), BOUNCE_RESTORE_EXPIRED);
   free(r);
   /* Four connections: earned 8 h; decay from 4 h idle, a quarter (2 h)
    * per halving: after 6 h idle the hold is 4 h + 2 h = 6 h. */
   r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 4, 0);
   c = clock_at(NOW - 21600);
-  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
   c = clock_at(NOW - 21601);
-  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL), BOUNCE_RESTORE_EXPIRED);
   free(r);
 }
 
@@ -526,10 +542,10 @@ static void test_restore_marker_past_max_hold(void **state)
 
   (void)state;
   c.max_hold = 600;
-  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_EXPIRED);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL), BOUNCE_RESTORE_EXPIRED);
   c = clock_at(NOW - 600);
   c.max_hold = 600;
-  assert_int_equal(bounce_record_restore(r, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, NULL), BOUNCE_RESTORE_HELD_AT_CRASH);
   free(r);
 }
 
@@ -555,11 +571,11 @@ static void test_restore_real_time_is_todays_check(void **state)
   /* A real time is not read against its own hold: the restore arms the
    * hold timer, which ends it after the settling period (today). */
   r = rec_with(NOW - 20000, 0, 0, 0);
-  assert_int_equal(bounce_record_restore(r, &c, &since), BOUNCE_RESTORE_HELD);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since), BOUNCE_RESTORE_HELD);
   assert_true(since == NOW - 20000);
   /* Nor does the heartbeat move it. */
   c = clock_at(0);
-  assert_int_equal(bounce_record_restore(r, &c, &since), BOUNCE_RESTORE_HELD);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since), BOUNCE_RESTORE_HELD);
   assert_true(since == NOW - 20000);
   free(r);
 }
@@ -786,6 +802,26 @@ static void test_breaker(void **state)
   assert_int_equal(bounce_restore_breaker(BOUNCE_BOOT_RUNNING, 0, NOW - 60, NOW - 30, 600), 0);
 }
 
+/* What a start's first pass leaves of the boot record.  The start after
+ * a RUNNING one always consumes it, restoring or not: otherwise a run
+ * with the bouncer off would keep it while its own heartbeat ran on, and
+ * a later start would read that heartbeat as the crashed start's
+ * settle stand-in. */
+static void test_boot_record_after_first_pass(void **state)
+{
+  (void)state;
+  /* A restoring start: its own record, or none. */
+  assert_int_equal(bounce_boot_next(1, BOUNCE_BOOT_NONE, 2), BOUNCE_BOOT_WRITE);
+  assert_int_equal(bounce_boot_next(1, BOUNCE_BOOT_RUNNING, 1), BOUNCE_BOOT_WRITE);
+  assert_int_equal(bounce_boot_next(1, BOUNCE_BOOT_RUNNING, 0), BOUNCE_BOOT_DELETE);
+  assert_int_equal(bounce_boot_next(1, BOUNCE_BOOT_SETTLED, 0), BOUNCE_BOOT_DELETE);
+  /* A start that does not restore consumes a RUNNING record (the
+   * breaker decided on it) and leaves a settled one or none alone. */
+  assert_int_equal(bounce_boot_next(0, BOUNCE_BOOT_RUNNING, 0), BOUNCE_BOOT_DELETE);
+  assert_int_equal(bounce_boot_next(0, BOUNCE_BOOT_SETTLED, 0), BOUNCE_BOOT_KEEP);
+  assert_int_equal(bounce_boot_next(0, BOUNCE_BOOT_NONE, 0), BOUNCE_BOOT_KEEP);
+}
+
 static void test_boot_steps(void **state)
 {
   (void)state;
@@ -867,15 +903,101 @@ static void test_alive_record_codec(void **state)
 {
   unsigned char buf[BOUNCE_ALIVE_REC_SIZE + 1];
   int64_t t = 0;
+  uint32_t writer = 0, w;
 
   (void)state;
   bounce_alive_rec_encode(buf + 1, NOW - 7);
-  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t), 0);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), 0);
   assert_true(t == NOW - 7);
-  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE - 1, &t), -1);
-  assert_int_equal(bounce_alive_rec_decode(buf + 1, 8, &t), -1);
+  /* The heartbeat names the build that wrote it. */
+  assert_int_equal(writer, BOUNCER_DB_VERSION);
+  /* Its layout is unchanged: word 0 is still 1, 16 bytes, the time at 8. */
+  memcpy(&w, buf + 1, 4);
+  assert_int_equal(w, 1);
+  memcpy(&w, buf + 5, 4);
+  assert_int_equal(w, BOUNCER_DB_VERSION);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE - 1, &t, &writer), -1);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, 8, &t, &writer), -1);
   buf[1] ^= 0x40;
-  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t), -1);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), -1);
+  buf[1] ^= 0x40;
+
+  /* A tag below the first tagged build's is no build's: corrupted. */
+  w = BOUNCE_ALIVE_UNTAGGED_WRITER - 1;
+  memcpy(buf + 5, &w, 4);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), -1);
+  w = 1;
+  memcpy(buf + 5, &w, 4);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), -1);
+  /* A heartbeat of a build before the tag (pad 0) was written by v12. */
+  w = 0;
+  memcpy(buf + 5, &w, 4);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), 0);
+  assert_int_equal(writer, BOUNCE_ALIVE_UNTAGGED_WRITER);
+  assert_int_equal(BOUNCE_ALIVE_UNTAGGED_WRITER, 12);
+  /* A newer build's tag is read as written ... */
+  w = BOUNCER_DB_VERSION + BOUNCER_DB_NEWER_SPAN;
+  memcpy(buf + 5, &w, 4);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), 0);
+  assert_int_equal(writer, BOUNCER_DB_VERSION + BOUNCER_DB_NEWER_SPAN);
+  /* ... but one past any build's is a corrupted heartbeat. */
+  w = BOUNCER_DB_VERSION + BOUNCER_DB_NEWER_SPAN + 1;
+  memcpy(buf + 5, &w, 4);
+  assert_int_equal(bounce_alive_rec_decode(buf + 1, BOUNCE_ALIVE_REC_SIZE, &t, &writer), -1);
+}
+
+/* A restart marker is read against a heartbeat only when the build that
+ * wrote the record wrote that heartbeat.  An older build cannot read a
+ * newer build's records (BOUNCE_REC_NEWER), so it keeps them, but it does
+ * advance the heartbeat: after a roll-forward, the newer build's markers
+ * would read as live long after the crash.  A newer build that left an
+ * older build's marker unrewritten (its bouncer off: a migrated marker is
+ * rewritten only by the restore) dates it no better. */
+static void test_restore_marker_against_an_older_builds_heartbeat(void **state)
+{
+  struct bounce_restore_clock c = clock_at(NOW - 60);
+  struct BounceSessionRecord *r = rec_with(BOUNCE_REC_HELD_AT_RESTART, 0, 0, 0);
+  int64_t since = -5;
+
+  (void)state;
+  /* A newer build's marker, the heartbeat by this build: the crash time
+   * is not known.  Expired, even after a short outage. */
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION + 1, &c, &since),
+                   BOUNCE_RESTORE_EXPIRED);
+  assert_true(since == -5);
+  /* Same build: held from the heartbeat. */
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_true(since == NOW - 60);
+  /* An untagged heartbeat is v12's, and trusted for a v12 marker. */
+  c.last_alive_writer = BOUNCE_ALIVE_UNTAGGED_WRITER;
+  assert_int_equal(bounce_record_restore(r, 12, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  /* Nor is a heartbeat by a newer build than the record's: it ran on
+   * after the crash without restoring the marker. */
+  c.last_alive_writer = BOUNCER_DB_VERSION + 1;
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION, &c, &since),
+                   BOUNCE_RESTORE_EXPIRED);
+  c.last_alive_writer = BOUNCER_DB_VERSION;
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION - 1, &c, &since),
+                   BOUNCE_RESTORE_EXPIRED);
+  c.last_alive_writer = BOUNCER_DB_VERSION - 1;
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION - 1, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  /* No heartbeat: held from now, whoever wrote the record. */
+  c = clock_at(0);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION + 1, &c, &since),
+                   BOUNCE_RESTORE_HELD_AT_CRASH);
+  assert_true(since == NOW);
+  free(r);
+
+  /* Real disconnect times are never read against the heartbeat. */
+  c = clock_at(NOW - 60);
+  r = rec_with(NOW - 3600, 0, 0, 0);
+  assert_int_equal(bounce_record_restore(r, BOUNCER_DB_VERSION + 1, &c, &since),
+                   BOUNCE_RESTORE_HELD);
+  assert_true(since == NOW - 3600);
+  free(r);
 }
 
 int main(void)
@@ -912,8 +1034,10 @@ int main(void)
     cmocka_unit_test(test_breaker),
     cmocka_unit_test(test_breaker_lists_only_crash_restores),
     cmocka_unit_test(test_boot_steps),
+    cmocka_unit_test(test_boot_record_after_first_pass),
     cmocka_unit_test(test_boot_record_codec),
     cmocka_unit_test(test_alive_record_codec),
+    cmocka_unit_test(test_restore_marker_against_an_older_builds_heartbeat),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
