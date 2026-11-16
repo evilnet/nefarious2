@@ -118,6 +118,10 @@ static void none_and_empty(void **state)
   read_back("*", HISTORY_REF_NONE, "*");
   assert_int_equal(chathistory_parse_s2s_ref("", &t, &v), -1);
   assert_int_equal(chathistory_parse_s2s_ref(NULL, &t, &v), -1);
+  /* A marker with nothing after it names nothing: refused, as the
+   * client's parse_reference() refuses "msgid=". */
+  assert_int_equal(chathistory_parse_s2s_ref("msgid=", &t, &v), -1);
+  assert_int_equal(chathistory_parse_s2s_ref("timestamp=", &t, &v), -1);
 }
 
 /* ========== both sides ========== */
