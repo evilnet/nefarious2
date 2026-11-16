@@ -1154,6 +1154,9 @@ void clear_quarantines(void)
 static int conf_error;
 /** When non-zero, indicates that the configuration file was loaded at least once. */
 static int conf_already_read;
+/** When non-zero, this is a configuration check (ircd -k): no listener
+ * is opened. */
+static int conf_checking;
 extern void yyparse(void);
 extern int init_lexer(void);
 extern void deinit_lexer(void);
@@ -1198,6 +1201,22 @@ yyerror(const char *msg)
 int conf_get_error_flag(void)
 {
   return conf_error;
+}
+
+/** Mark this run as a configuration check (ircd -k): a pass opens no
+ * listener (conf_is_check_only()). */
+void conf_set_check_only(void)
+{
+  conf_checking = 1;
+}
+
+/** Is this run a configuration check (ircd -k)?  A check opens no
+ * listener (add_listener()).
+ * @return Non-zero under ircd -k.
+ */
+int conf_is_check_only(void)
+{
+  return conf_checking;
 }
 
 /** Attach CONF_UWORLD items to a server and everything attached to it. */

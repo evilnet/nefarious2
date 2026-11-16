@@ -284,6 +284,8 @@ extern struct ConfItem* get_client_conf(struct Client *acptr);
 
 extern void yyerror(const char *msg);
 extern int conf_get_error_flag(void);
+extern void conf_set_check_only(void);
+extern int conf_is_check_only(void);
 
 extern int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf);
 
