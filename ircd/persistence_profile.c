@@ -363,6 +363,14 @@ static int has_children(const char *account, const char *name)
   return found;
 }
 
+/** Lower-case @a buf in place, as the store folds every metadata key:
+ * a name typed with capitals has to match the rows stored for it. */
+static void fold_key(char *buf)
+{
+  for (; *buf; buf++)
+    *buf = ToLower(*buf);
+}
+
 int persistence_profile_delete(const char *account, const char *name)
 {
   struct ProfileRow *list, *e;
@@ -381,6 +389,7 @@ int persistence_profile_delete(const char *account, const char *name)
 
   ircd_snprintf(NULL, prefix, sizeof(prefix), "%s%s/",
                 PROFILE_KEY_PREFIX, name);
+  fold_key(prefix);
   prefix_len = strlen(prefix);
 
   list = collect_profile_rows(account);
@@ -421,6 +430,7 @@ int persistence_profile_rename(const char *account,
 
   ircd_snprintf(NULL, old_prefix, sizeof(old_prefix), "%s%s/",
                 PROFILE_KEY_PREFIX, old_name);
+  fold_key(old_prefix);
   old_prefix_len = strlen(old_prefix);
 
   list = collect_profile_rows(account);
