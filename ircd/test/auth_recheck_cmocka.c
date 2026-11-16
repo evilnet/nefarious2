@@ -639,6 +639,39 @@ static void iauth_mechs_end_the_exchange(void **state)
   destroy_auth_request(a->auth);
 }
 
+/** Before registration, a second exchange beside a completed login (the
+ * re-authentication mark, m_authenticate()) that IAuth ends without a
+ * success -- 908 (l), a failure (f), IAuth unreachable -- leaves the
+ * earlier login exactly as it was: the flag and the identity
+ * registration will apply.  Only Z replaces it. */
+static void iauth_failed_second_exchange_keeps_the_login(void **state)
+{
+  int how;
+
+  for (how = 0; how < 3; how++) {
+    struct fake *a = new_client(0, KEEPS);
+
+    FlagSet(&a->auth->flags, AR_NEEDS_USER);     /* registration waits */
+    ircd_strncpy(cli_saslaccount(&a->cli), "liz", ACCOUNTLEN + 1);
+    SetSASLComplete(&a->cli);
+    cli_saslcookie(&a->cli) = 20 + how;
+    SetSASLReauth(&a->cli);
+    auth_sasl_start(a->auth);
+    if (how == 0)
+      iauth_line(iauth_cmd_sasl_mechs, a, "PLAIN");
+    else if (how == 1)
+      iauth_line(iauth_cmd_sasl_fail, a, NULL);
+    else
+      assert_int_equal(auth_iauth_sasl_fail(&a->cli), 1);
+    assert_int_equal(cli_saslcookie(&a->cli), 0);
+    assert_false(IsSASLReauth(&a->cli));
+    assert_true(IsSASLComplete(&a->cli));
+    assert_string_equal(cli_saslaccount(&a->cli), "liz");
+    assert_int_equal(identity_sets, 0);
+    destroy_auth_request(a->auth);
+  }
+}
+
 /* A WEBIRC password check out (m_webirc.c): registration waits for it --
  * the client's address is the gateway's until it finishes. */
 
@@ -956,6 +989,7 @@ int main(void)
     cmocka_unit_test_setup(iauth_login_of_a_logged_in_client_refused, setup),
     cmocka_unit_test_setup(iauth_fail_ends_clear_the_reauth_mark, setup),
     cmocka_unit_test_setup(iauth_mechs_end_the_exchange, setup),
+    cmocka_unit_test_setup(iauth_failed_second_exchange_keeps_the_login, setup),
     cmocka_unit_test_setup(webirc_check_holds_registration, setup),
     cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),

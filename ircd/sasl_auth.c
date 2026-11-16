@@ -860,10 +860,11 @@ int sasl_restart_mechanism_allowed(int token)
   /* A SASL 3.2 client BEFORE registration that has a login on this
    * connection (nothing of it is on the network yet).  refresh: as before,
    * only OAUTHBEARER may go again; same and any: any mechanism -- and,
-   * either way, it may log in as anyone (the start clears the login,
-   * m_authenticate()).  This row is the orchestrator's choice, not an owner
-   * ruling (2026-11-15): kept to this one function so a different decision
-   * is one change here. */
+   * either way, it may log in as anyone.  The login it holds stands until
+   * that exchange succeeds (owner's ruling, 2026-11-15; m_authenticate()).
+   * Who may start again is the orchestrator's choice, not an owner ruling:
+   * kept to this one function so a different decision is one change
+   * here. */
   return token || sasl_reauth_mode() != SASL_REAUTH_REFRESH;
 }
 

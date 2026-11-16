@@ -2016,9 +2016,9 @@ static void register_after_completed_login_is_refused(void **state)
   assert_string_equal(cli_saslaccount(c), "liz");
 }
 
-/** Logs nina in as liz (PLAIN, 903), then starts over with OAUTHBEARER: the one
- * re-authentication allowed after 903, which clears the SASL-complete
- * flag. */
+/** Logs nina in as liz (PLAIN, 903), then starts over with OAUTHBEARER (a
+ * second exchange before registration: the login stands until it
+ * succeeds). */
 static struct Client *login_then_restart(int fd)
 {
   struct Client *c = new_client(fd, "nina", 0, REG_KEEPS);
@@ -2038,45 +2038,48 @@ static struct Client *login_then_restart(int fd)
   return c;
 }
 
-/** Undoing a completed login undoes its identity with the flag: account,
- * timestamp, Keycloak id and its live mark, all of them. */
-static void undoing_a_login_clears_its_identity(void **state)
+/** A second exchange before registration leaves the earlier login whole
+ * while it runs (owner's ruling, 2026-11-15; until then the start undid
+ * it): the flag, account, timestamp, Keycloak id and its live mark, with
+ * the exchange marked in flight beside it. */
+static void second_exchange_keeps_the_login(void **state)
 {
   struct Client *c;
+  char id[ACCOUNT_ID_LEN + 1];
 
   sasl_init_once();
   c = login_then_restart(56);
-  assert_false(IsSASLComplete(c));
-  assert_string_equal(cli_saslaccount(c), "");
-  assert_string_equal(cli_saslkcid(c), "");
-  assert_int_equal(cli_saslkcidlive(c), 0);
+  assert_true(IsSASLComplete(c));
+  assert_true(IsSASLReauth(c));
+  assert_false(IsSASLExchangeDone(c));
+  assert_string_equal(cli_saslaccount(c), "liz");
+  assert_string_equal(cli_saslkcid(c), user_id("liz", id));
+  assert_int_equal(cli_saslkcidlive(c), 1);
   assert_int_equal(cli_saslacccreate(c), 0);
 }
 
-/** The review's sequence: login, a re-authentication abandoned (here
- * AUTHENTICATE *), then REGISTER -- allowed, nothing is logged in -- and
- * the new account carries its own identity (the id Keycloak's create
- * answer names), never the abandoned login's id. */
-static void register_after_undone_login_carries_no_old_id(void **state)
+/** The review's sequence: login, a second exchange abandoned (here
+ * AUTHENTICATE *), then REGISTER -- refused: the earlier login stands
+ * (ALREADY_AUTHENTICATED), so no new account's name can be parked beside
+ * its id; Keycloak is asked nothing and the login is as it was. */
+static void register_after_abandoned_exchange_is_refused(void **state)
 {
   struct Client *c;
   struct fake *f;
-  char id[ACCOUNT_ID_LEN + 1], old_id[ACCOUNT_ID_LEN + 1];
+  char id[ACCOUNT_ID_LEN + 1];
+  int requests;
 
   sasl_init_once();
   c = login_then_restart(57);
   f = fake_of(c);
   assert_int_equal(authenticate(c, "*"), 0);
+  requests = kc_requests;
   assert_int_equal(register_line(c, "longpassword"), 0);
-  assert_string_equal(f->fail_code, "");
-  pend_deliver(0);                          /* the lookup: name free */
-  pend_deliver(1);                          /* the create: done */
+  assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+  assert_int_equal(kc_requests, requests);
   assert_true(IsSASLComplete(c));
-  assert_string_equal(cli_saslaccount(c), "nina");  /* "*": the nick */
-  assert_string_equal(cli_saslkcid(c), user_id("nina", id));
-  assert_string_not_equal(cli_saslkcid(c), user_id("liz", old_id));
-  assert_int_equal(cli_saslkcidlive(c), 1);
-  assert_int_equal(cli_saslacccreate(c), 0);
+  assert_string_equal(cli_saslaccount(c), "liz");
+  assert_string_equal(cli_saslkcid(c), user_id("liz", id));
 }
 
 /* ------------------------------------------------------------------ */
@@ -4408,8 +4411,9 @@ static void sasl31_matrix(void **state)
           assert_non_null(cli_saslsession(c));
           assert_true(cli_saslcookie(c) != 0);
           assert_string_equal(f->raw, "AUTHENTICATE +");
+          /* in flight beside a login it keeps until it succeeds */
           assert_int_equal(IsSASLReauth(c) ? 1 : 0,
-                           col == COL_POST_LOGGED_IN);
+                           col == COL_POST_LOGGED_IN || col == COL_PRE_AFTER_903);
           /* end it, so the next case starts clean */
           assert_int_equal(authenticate(c, "*"), 0);
           assert_true(has_numeric(f, ERR_SASLABORTED));
@@ -5139,6 +5143,198 @@ static void reauth_setting_first_login_unchanged(void **state)
     assert_true(tlog_has("ban cache nolog"));        /* account bans now match */
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Before registration, an earlier login stands until another succeeds */
+/* ------------------------------------------------------------------ */
+
+/* Owner's ruling (2026-11-15), uniform with registered clients: a SASL 3.2
+ * client before registration that holds a login -- a 903, a REGISTER
+ * login, an account from login-on-connect or WEBIRC -- and starts another
+ * exchange keeps that login, whole, until the new exchange SUCCEEDS; only
+ * then is it replaced, as a whole.  Every other end -- a mechanism the
+ * tier does not offer, bad credentials, an abort, the SASL timeout, the
+ * services agent going away, registration waiting on the exchange --
+ * leaves it exactly as it was, and registration applies it. */
+
+/** Everything an unregistered client's login is. */
+struct prereg_snap {
+  int complete, reglogin, is_account;
+  char account[ACCOUNTLEN + 1], saslaccount[ACCOUNTLEN + 1];
+  char saslkcid[ACCOUNT_ID_LEN + 1];
+  time_t saslacccreate;
+  int saslkcidlive;
+};
+
+static void prereg_snap_of(struct Client *c, struct prereg_snap *s)
+{
+  memset(s, 0, sizeof(*s));
+  s->complete = IsSASLComplete(c) ? 1 : 0;
+  s->reglogin = HasFlag(c, FLAG_REGLOGIN) ? 1 : 0;
+  s->is_account = IsAccount(c) ? 1 : 0;
+  ircd_strncpy(s->account, cli_user(c)->account, sizeof(s->account));
+  ircd_strncpy(s->saslaccount, cli_saslaccount(c), sizeof(s->saslaccount));
+  ircd_strncpy(s->saslkcid, cli_saslkcid(c), sizeof(s->saslkcid));
+  s->saslacccreate = cli_saslacccreate(c);
+  s->saslkcidlive = cli_saslkcidlive(c);
+}
+
+static void assert_prereg_unchanged(struct Client *c, const struct prereg_snap *was)
+{
+  struct prereg_snap now;
+
+  prereg_snap_of(c, &now);
+  assert_int_equal(now.complete, was->complete);
+  assert_int_equal(now.reglogin, was->reglogin);
+  assert_int_equal(now.is_account, was->is_account);
+  assert_string_equal(now.account, was->account);
+  assert_string_equal(now.saslaccount, was->saslaccount);
+  assert_string_equal(now.saslkcid, was->saslkcid);
+  assert_int_equal(now.saslacccreate, was->saslacccreate);
+  assert_int_equal(now.saslkcidlive, was->saslkcidlive);
+}
+
+/** How the earlier login came. */
+enum earlier { EARLIER_SASL, EARLIER_REGISTER, EARLIER_LOC, NEARLIER };
+static const char *const earlier_name[NEARLIER] = { "SASL", "REGISTER", "LOC/WEBIRC" };
+static const char *const earlier_acct[NEARLIER] = { "liz", "rega", "locacct" };
+
+/** An unregistered CAP 302 client on \a fd holding a login from \a how. */
+static struct Client *prereg_logged_in(int fd, enum earlier how)
+{
+  static int n;
+  struct Client *c = new_client(fd, "pr", 0, REG_KEEPS);
+  char pw[24], rid[ACCOUNT_ID_LEN + 1];
+
+  CapSet(cli_active(c), CAP_STANDARDREPLIES);
+  switch (how) {
+  case EARLIER_SASL:
+    snprintf(pw, sizeof(pw), "prpw%d", ++n);
+    plain_pending(c, "liz", pw);
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    run_event_loop();
+    assert_identity(c, "liz", user_id("liz", rid), 1);
+    break;
+  case EARLIER_REGISTER:
+    register_through(c, "rega", "*");
+    assert_identity(c, "rega", user_id("rega", rid), 1);
+    assert_true(HasFlag(c, FLAG_REGLOGIN));
+    break;
+  case EARLIER_LOC:                     /* login-on-connect / WEBIRC */
+    ircd_strncpy(cli_user(c)->account, "locacct", sizeof(cli_user(c)->account));
+    SetAccount(c);
+    break;
+  default:
+    fail();
+  }
+  assert_false(IsRegistered(c));
+  fake_of(c)->n_numerics = 0;
+  fake_of(c)->fail_code[0] = '\0';
+  return c;
+}
+
+/** The ways a second exchange can end. */
+enum second_end { END_UNSUPPORTED, END_BAD_CREDS, END_ABORT, END_TIMEOUT,
+                  END_AGENT_GONE, END_CAP_END_TIMEOUT, END_SAME, END_OTHER,
+                  NENDS };
+static const char *const end_name[NENDS] = {
+  "a mechanism the tier does not offer", "bad credentials", "abort",
+  "the SASL timeout", "the services agent gone", "CAP END, then the timeout",
+  "success as the same account", "success as another account"
+};
+
+/** The whole grid: every end of a second exchange x every earlier login. */
+static void prereg_earlier_login_stands(void **state)
+{
+  int how, end, fd = 160;
+
+  sasl_init_once();
+  reauth_setting = "any";
+  for (how = 0; how < NEARLIER; how++)
+    for (end = 0; end < NENDS; end++) {
+      static int n;
+      struct Client *c = prereg_logged_in(fd, (enum earlier)how);
+      struct fake *f = fake_of(c);
+      struct prereg_snap was;
+      char data[300], pw[24], id[ACCOUNT_ID_LEN + 1];
+      const char *acct = earlier_acct[how];
+
+      fd = fd < 167 ? fd + 1 : 160;
+      ntlog = 0;
+      print_message("  earlier %s / %s\n", earlier_name[how], end_name[end]);
+      prereg_snap_of(c, &was);
+      snprintf(pw, sizeof(pw), "pe%d", ++n);
+
+      if (end == END_UNSUPPORTED) {
+        /* Not a local mechanism: the exchange goes to services, which
+         * answer 908 and 904 and end it (ms_sasl() M, D F: their own
+         * suite); here the services end of it. */
+        local_off = 0;
+        assert_int_equal(authenticate(c, "FOOBAR-MECH"), 0);
+        assert_true(cli_saslcookie(c) != 0);
+        assert_true(IsSASLReauth(c));        /* in flight beside the login */
+        assert_prereg_unchanged(c, &was);
+        abort_sasl(c, SASL_ABORT_REPLY_NONE);
+      } else if (end == END_BAD_CREDS) {
+        plain_b64("yvonne", pw, data);
+        kc_mode = KC_LATER;
+        assert_int_equal(authenticate(c, "PLAIN"), 0);
+        assert_int_equal(authenticate(c, data), 0);
+        pend_deliver_kind(P_TOKEN, KC_ERROR);
+        run_event_loop();
+        assert_true(has_numeric(f, ERR_SASLFAIL));
+      } else if (end == END_ABORT) {
+        assert_int_equal(authenticate(c, "PLAIN"), 0);
+        assert_true(IsSASLReauth(c));
+        /* REGISTER stays refused while the earlier login stands */
+        f->fail_code[0] = '\0';
+        assert_int_equal(register_line(c, "longpassword"), 0);
+        assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+        assert_int_equal(authenticate(c, "*"), 0);
+        assert_true(has_numeric(f, ERR_SASLABORTED));
+        f->fail_code[0] = '\0';                 /* and after it failed */
+        assert_int_equal(register_line(c, "longpassword"), 0);
+        assert_string_equal(f->fail_code, "ALREADY_AUTHENTICATED");
+      } else if (end == END_TIMEOUT) {
+        assert_int_equal(authenticate(c, "PLAIN"), 0);
+        fire_timer(&cli_sasltimeout(c));
+        assert_true(has_numeric(f, ERR_SASLFAIL));
+      } else if (end == END_AGENT_GONE) {
+        local_off = 1;                           /* the services tier */
+        assert_int_equal(authenticate(c, "PLAIN"), 0);
+        assert_true(cli_saslcookie(c) != 0);
+        abort_sasl(c, SASL_ABORT_REPLY_NONE);    /* its agent split */
+        local_off = 0;
+      } else if (end == END_CAP_END_TIMEOUT) {
+        assert_int_equal(authenticate(c, "PLAIN"), 0);
+        f->cap_done = 1;                         /* CAP END: registration waits */
+        assert_int_equal(f->registered, 0);
+        fire_timer(&cli_sasltimeout(c));         /* then lets it go on */
+        assert_int_equal(f->registered, 1);
+      } else {
+        const char *as = end == END_SAME ? acct : "yvonne";
+
+        plain_b64(as, pw, data);
+        kc_mode = KC_LATER;
+        assert_int_equal(authenticate(c, "PLAIN"), 0);
+        assert_int_equal(authenticate(c, data), 0);
+        pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+        run_event_loop();
+        assert_true(has_numeric(f, RPL_SASLSUCCESS));
+        /* Replaced as a whole: the new login's name, id and mark, never
+         * one beside the other's. */
+        assert_identity(c, as, user_id(as, id), 1);
+        assert_false(HasFlag(c, FLAG_REGLOGIN));
+        assert_false(IsSASLReauth(c));
+        continue;
+      }
+      assert_null(cli_saslsession(c));
+      assert_int_equal(cli_saslcookie(c), 0);
+      assert_false(IsSASLReauth(c));
+      assert_prereg_unchanged(c, &was);
+    }
+  local_off = 0;
+}
 #endif /* USE_LIBKC */
 
 /* ------------------------------------------------------------------ */
@@ -5229,8 +5425,8 @@ int main(void)
     cmocka_unit_test_setup(authenticate_reaps_pending_register_answer, setup),
     cmocka_unit_test_setup(refused_request_fails_at_once, setup),
     cmocka_unit_test_setup(register_after_completed_login_is_refused, setup),
-    cmocka_unit_test_setup(undoing_a_login_clears_its_identity, setup),
-    cmocka_unit_test_setup(register_after_undone_login_carries_no_old_id, setup),
+    cmocka_unit_test_setup(second_exchange_keeps_the_login, setup),
+    cmocka_unit_test_setup(register_after_abandoned_exchange_is_refused, setup),
     cmocka_unit_test_setup(flow_register_logs_in, setup),
     cmocka_unit_test_setup(flow_verify_then_sasl, setup),
     cmocka_unit_test_setup(flow_verify_then_other_account, setup),
@@ -5283,6 +5479,7 @@ int main(void)
     cmocka_unit_test_setup(reauth_setting_services_switch, setup),
     cmocka_unit_test_setup(reauth_setting_before_registration, setup),
     cmocka_unit_test_setup(reauth_setting_first_login_unchanged, setup),
+    cmocka_unit_test_setup(prereg_earlier_login_stands, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

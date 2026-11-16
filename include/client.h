@@ -364,10 +364,12 @@ enum Flag
                                      *   (draft/account-registration), not by a SASL exchange:
                                      *   an exchange in flight has not completed
                                      *   (IsSASLExchangeDone()) */
-    FLAG_SASLREAUTH,                /**< The SASL exchange in flight is a logged-in
-                                     *   client's re-authentication (sasl_logged_in()):
-                                     *   its completed login stands until the exchange
-                                     *   ends, and the exchange has not completed
+    FLAG_SASLREAUTH,                /**< The SASL exchange in flight was started by a
+                                     *   client holding a login -- a logged-in client
+                                     *   (sasl_logged_in()), or before registration one
+                                     *   with a 903, a REGISTER login or an account:
+                                     *   that login stands until the exchange succeeds,
+                                     *   and the exchange has not completed
                                      *   (IsSASLExchangeDone()) */
     FLAG_SASLREAUTHTOKEN,           /**< That re-authentication began with a token
                                      *   mechanism (OAUTHBEARER): what SASL_REAUTH
@@ -1578,15 +1580,17 @@ struct Client {
 /** Has the SASL exchange the connection's cookie belongs to completed?
  * The SASL-complete flag says the connection holds a completed login; a
  * REGISTER login (draft/account-registration) sets it too, possibly while
- * a SASL exchange is still in flight (FLAG_REGLOGIN), and a logged-in
- * client's re-authentication keeps it while its exchange runs
- * (FLAG_SASLREAUTH): either way that exchange has not completed, stays
+ * a SASL exchange is still in flight (FLAG_REGLOGIN), and a client that
+ * starts another exchange beside its login -- after registration or
+ * before it -- keeps it while that exchange runs (FLAG_SASLREAUTH):
+ * either way that exchange has not completed, stays
  * abortable and times out.  (Every completion drops its cookie; an IAuth
  * success sets the flag as an exchange does.) */
 #define IsSASLExchangeDone(x)   (IsSASLComplete(x) && !HasFlag(x, FLAG_REGLOGIN) \
                                  && !IsSASLReauth(x))
-/** Return non-zero if the client's SASL exchange is a logged-in client's
- * re-authentication (sasl_logged_in()). */
+/** Return non-zero if the client's SASL exchange was started beside a login
+ * it holds (a logged-in client's re-authentication, or a second exchange
+ * before registration). */
 #define IsSASLReauth(x)         HasFlag(x, FLAG_SASLREAUTH)
 /** End the connection side of a SASL exchange, whatever ends it (a login,
  * a refusal, a failure, an abort, a timeout, an agent's split, a hold):

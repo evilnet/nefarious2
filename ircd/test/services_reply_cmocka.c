@@ -76,6 +76,8 @@ static int set_accounts;                /* auth_set_account() calls */
 static struct Client *logged_in[MAXREC];   /* sasl_complete_login() */
 static char logged_as[MAXREC][ACCOUNTLEN + 1];
 static time_t logged_ts[MAXREC];
+static char logged_id[MAXREC][ACCOUNT_ID_LEN + 1];
+static int logged_live[MAXREC];
 static int nlogins;
 static int sasl_dones;                  /* auth_sasl_done() calls */
 static int auth_result;                 /* what it returns */
@@ -534,10 +536,11 @@ void timer_del(struct Timer *timer)
 int sasl_complete_login(struct Client *sptr, const char *account,
                         time_t acc_create, const char *kc_id, int id_live)
 {
-  (void)kc_id; (void)id_live;
   assert_true(nlogins < MAXREC);
   logged_in[nlogins] = sptr;
   logged_ts[nlogins] = acc_create;
+  ircd_strncpy(logged_id[nlogins], kc_id ? kc_id : "", sizeof(logged_id[nlogins]));
+  logged_live[nlogins] = id_live;
   ircd_strncpy(logged_as[nlogins], account, sizeof(logged_as[nlogins]));
   nlogins++;
   return 0;
@@ -1071,6 +1074,39 @@ static void test_sasl_mechs_services_list_without_cap_value(void **state)
   assert_string_equal(mechs_sent, "PLAIN,EXTERNAL");
 }
 
+/* A services success with no L before it names no account: the login is
+ * the identity as it stands -- whole, with its Keycloak id and mark -- so a
+ * second exchange before registration that ends so leaves the earlier login
+ * exactly as it was (never its name and timestamp without its id), and a
+ * first exchange logs in as nothing, as before. */
+static void test_sasl_ds_without_l_keeps_the_identity_whole(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  sasl_identity_set(c, "xavier", 1600000000, "AAAAAAAAAAAAAAAAAAAAAA", 1);
+  SetSASLComplete(c);
+  SetSASLReauth(c);                        /* a second exchange */
+  cli_saslcookie(c) = 811;
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.811 D S");
+  assert_int_equal(nlogins, 1);
+  assert_string_equal(logged_as[0], "xavier");
+  assert_int_equal(logged_ts[0], 1600000000);
+  assert_string_equal(logged_id[0], "AAAAAAAAAAAAAAAAAAAAAA");
+  assert_int_equal(logged_live[0], 1);
+
+  /* with an L: that account, no id (X3's wire carries none) */
+  cli_saslcookie(c) = 812;
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.812 L yvonne 1700000000");
+  deliver(ms_sasl, svs, svs, "AB AB!7.812 D S");
+  assert_int_equal(nlogins, 2);
+  assert_string_equal(logged_as[1], "yvonne");
+  assert_string_equal(logged_id[1], "");
+}
+
 /* ====================================================================
  * Login-on-connect: which client a reply reaches
  * ==================================================================== */
@@ -1420,6 +1456,7 @@ int main(void)
     T(test_sasl_reauth_other_account_refused_at_L),
     T(test_sasl_relay_ends_clear_the_reauth_mark),
     T(test_sasl_relay_ds_without_l),
+    T(test_sasl_ds_without_l_keeps_the_identity_whole),
     T(test_loc_cookie_0_request_not_sent),
     T(test_loc_cookie_0_server_port),
     T(test_loc_cookie_0_deny),

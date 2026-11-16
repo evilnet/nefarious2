@@ -294,21 +294,30 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
       /* Success — use shared login completion function, as the account
-       * services named in L (else, with no L, the identity as it stands,
-       * as before).  Its result says whether acptr survived the
-       * registration it resumed; cptr is the server link, so it must not
-       * be returned from here, and nothing touches acptr after it. */
+       * services named in L (no id: the wire from X3 carries none), else,
+       * with no L, the identity as it stands, whole -- its name, timestamp,
+       * Keycloak id and its mark: a second exchange beside a login keeps
+       * that login exactly as it was, never its name without its id.  Its
+       * result says whether acptr survived the registration it resumed;
+       * cptr is the server link, so it must not be returned from here, and
+       * nothing touches acptr after it. */
       char named[ACCOUNTLEN + 1];
+      char named_id[ACCOUNT_ID_LEN + 1] = "";
       time_t named_ts = cli_saslnamedts(acptr);
+      int named_live = 0;
 
-      ircd_strncpy(named, cli_saslnamed(acptr)[0] ? cli_saslnamed(acptr)
-                                                  : cli_saslaccount(acptr),
-                   sizeof(named));
-      if (!cli_saslnamed(acptr)[0])
+      if (cli_saslnamed(acptr)[0])
+        ircd_strncpy(named, cli_saslnamed(acptr), sizeof(named));
+      else {
+        ircd_strncpy(named, cli_saslaccount(acptr), sizeof(named));
         named_ts = cli_saslacccreate(acptr);
+        ircd_strncpy(named_id, cli_saslkcid(acptr), sizeof(named_id));
+        named_live = cli_saslkcidlive(acptr);
+      }
       cli_saslnamed(acptr)[0] = '\0';
       cli_saslnamedts(acptr) = 0;
-      sasl_complete_login(acptr, named, named_ts, NULL, 0);   /* the wire from X3 carries no id */
+      sasl_complete_login(acptr, named, named_ts,
+                          named_id[0] ? named_id : NULL, named_live);
       return 0;
     } else if (data[0] == 'F') {
       send_reply(acptr, ERR_SASLFAIL, "");

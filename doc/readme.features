@@ -1328,7 +1328,10 @@ refresh.  A re-authentication that fails leaves the login as it was.  With
 standard-replies a refusal is preceded by FAIL AUTHENTICATE
 ALREADY_AUTHENTICATED.  Before registration a SASL 3.2 client with a login
 may start again with OAUTHBEARER only under refresh and with any mechanism
-under same and any, and may then log in as anyone.
+under same and any, and may then log in as anyone; the login it holds
+stands until that exchange succeeds -- a mechanism not offered, bad
+credentials, an abort or the timeout leave it, and registration applies
+it.
 
 The setting is read when an exchange starts and again when it completes:
 after a REHASH in between, the new value decides.  Values are not case

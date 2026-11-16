@@ -308,7 +308,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * and never for a bouncer session's connection, the same name under
    * another Keycloak id never.  A refused one leaves the login exactly as
    * it was.  Before registration has applied a login, a 3.2 client that
-   * may start again may log in as anyone.
+   * may start again may log in as anyone -- and keeps the login it holds
+   * until the new exchange succeeds (owner's ruling, 2026-11-15).
    */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr))
     EndSASLExchange(cptr);    /* a new exchange: a re-authentication if set below */
@@ -329,30 +330,25 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
                   "You have already completed SASL authentication");
       return send_reply(cptr, ERR_SASLALREADY);
     }
-    if (sasl_logged_in(cptr)) {
-      /* A re-authentication: the login stands -- its account, its
-       * record, its SASL-complete flag -- until the exchange ends; a
-       * refusal, a failure or an abort leaves it as it is, and only a login
-       * step 0 lets through rewrites the record (a REGISTER login's mark,
-       * FLAG_REGLOGIN, included).  The re-authentication mark tells the
-       * exchange's abort and timeout that it is in flight beside the
-       * completed login (IsSASLExchangeDone()).  Whether it began with a
-       * token mechanism is kept for its completion, which reads
-       * SASL_REAUTH again (refresh: a token's refresh only). */
-      SetSASLReauth(cptr);
-      if (token)
-        SetFlag(cptr, FLAG_SASLREAUTHTOKEN);
-    } else {
-      /* Before registration has applied it: clear the SASLComplete flag
-       * and the identity the completed login left with it
-       * (sasl_identity_set()).  That identity is what registration
-       * applies, and a login that fails or is aborted leaves no login
-       * behind -- nothing of it may be applied with another login's name
-       * (a REGISTER). */
-      ClearSASLComplete(cptr);
-      ClrFlag(cptr, FLAG_REGLOGIN);
-      sasl_identity_set(cptr, NULL, 0, NULL, 0);
-    }
+    /* The login stands -- after registration its account and record,
+     * before it the identity registration will apply (sasl_identity_set():
+     * name, timestamp, Keycloak id, id-confirmed), the SASL-complete flag,
+     * FLAG_REGLOGIN, or an account from login-on-connect or WEBIRC --
+     * until the new exchange SUCCEEDS: only a login that completes
+     * replaces it, as a whole (sasl_login_apply() step 1, or IAuth's Z).
+     * Every other end -- a mechanism the tier does not offer, a refusal, a
+     * failure, an abort, the timeout, the agent or IAuth going away --
+     * leaves it exactly as it is, and registration applies it
+     * (auth_complete_sasl(), which also aborts an exchange still in
+     * flight then).  The re-authentication mark tells every end of the
+     * exchange that it is in flight beside a completed login
+     * (IsSASLExchangeDone()), before registration as after it.  Whether
+     * it began with a token mechanism is kept for a logged-in client's
+     * completion, which reads SASL_REAUTH again (refresh: a token's
+     * refresh only). */
+    SetSASLReauth(cptr);
+    if (token && sasl_logged_in(cptr))
+      SetFlag(cptr, FLAG_SASLREAUTHTOKEN);
     /* Clear old SASL session state (no cookie here: the exchange's own
      * state was ended above) */
     if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))
