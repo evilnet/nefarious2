@@ -328,6 +328,11 @@ engine_loop(struct Generators* gen)
     /* set up the sleep time */
     wait.tv_sec = timer_next(gen) ? (timer_next(gen) - CurrentTime) : -1;
     wait.tv_nsec = 0;
+    /* kevent() below waits forever when tv_sec < 0, the no-timers
+     * sentinel; an overdue timer is negative too (see engine_epoll.c).
+     * Poll now. */
+    if (timer_next(gen) && wait.tv_sec < 0)
+      wait.tv_sec = 0;
 
     Debug((DEBUG_ENGINE, "kqueue: delay: %Tu (%Tu) %Tu", timer_next(gen),
 	   CurrentTime, wait.tv_sec));

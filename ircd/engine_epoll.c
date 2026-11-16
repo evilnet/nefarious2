@@ -283,6 +283,12 @@ engine_loop(struct Generators *gen)
     }
 
     wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
+    /* An overdue next timer gives a negative wait, and epoll_wait() takes
+     * every negative timeout as infinite: with no traffic the loop would
+     * sleep forever and no timer fire again (a slow boot of a quiet server
+     * is enough).  Overdue is "poll now"; -1 (no timers) stays infinite. */
+    if (wait < -1)
+      wait = 0;
     Debug((DEBUG_ENGINE, "epoll: delay: %d (%d) %d", timer_next(gen),
            CurrentTime, wait));
     events_used = epoll_wait(epoll_fd, events, events_count, wait);
