@@ -35,6 +35,7 @@
 #include "numeric.h"
 #include "s_stats.h"
 #include "send.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_string.h"
@@ -187,6 +188,8 @@ static int webhook_initialized = 0;
 static void deauth_client(struct Client *cptr, const char *reason)
 {
   int exit_ghost;
+  char ac_msgid[64] = "";
+  uint64_t ac_ms = 0;
 
   if (!IsAccount(cptr) || !cli_user(cptr))
     return;
@@ -204,8 +207,16 @@ static void deauth_client(struct Client *cptr, const char *reason)
     member_ban_cache_clear(cptr);
 
   /* account-notify: channel members, and the user's own connections
-   * ("including themselves"). */
+   * ("including themselves").  One event on every server (N067): minted
+   * here and carried on the AC U below, which every receiver
+   * (ms_account()) shows and relays under the same msgid and time. */
+  if (feature_bool(FEAT_MSGID)) {
+    generate_msgid(ac_msgid, sizeof(ac_msgid));
+    ac_ms = history_event_time_ms(NULL);
+    sendcmdto_set_client_event(ac_msgid, ac_ms);
+  }
   sendcmdto_common_channels_capab_session(cptr, CMD_ACCOUNT, CAP_ACCNOTIFY, "*");
+  sendcmdto_set_client_msgid(NULL);
 
   /* Propagate the account clear.  "AC <numeric> U" is EXTENDED_ACCOUNTS
    * syntax; the legacy AC grammar has no unregister form at all (a
@@ -214,7 +225,13 @@ static void deauth_client(struct Client *cptr, const char *reason)
    * refuses a deauth under legacy accounts before reaching here.
    * For a remote client this is what reaches its home server, which
    * runs the full receiver on the socket it owns. */
+  if (ac_msgid[0]) {
+    sendcmdto_set_s2s_tags(ac_ms, ac_msgid);
+    sendcmdto_want_s2s_tags(1);
+  }
   sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C U", cptr);
+  if (ac_msgid[0])
+    sendcmdto_set_client_msgid(NULL);   /* the time set_s2s_tags armed */
 
   wh_stats.sessions_killed++;
 

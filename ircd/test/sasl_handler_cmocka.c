@@ -690,9 +690,50 @@ static int sendhost_on;     /**< FEAT_SASL_SENDHOST */
 static const char *reauth_setting = "refresh";
 /** FEAT_SASL_MAX_FAILURES; 0 (no limit) unless a case sets it. */
 static int max_failures;
+/* N067: the account change's event -- the msgid armed for its
+ * account-notify lines, and the one armed for its AC relay. */
+static int msgid_on;
+
+void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
+{
+  (void)event_ms;
+  tlog_add("event %s", msgid ? msgid : "-");
+}
+
+void sendcmdto_set_client_msgid(const char *msgid)
+{
+  if (msgid)
+    tlog_add("event %s", msgid);
+}
+
+void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
+{
+  (void)time_ms;
+  tlog_add("s2s %s", msgid ? msgid : "-");
+}
+
+void sendcmdto_want_s2s_tags(int want)
+{
+  (void)want;
+}
+
+char *generate_msgid(char *buf, size_t buflen)
+{
+  ircd_strncpy(buf, "ABAAAAAAEVENT1", buflen);
+  return buf;
+}
+
+uint64_t history_event_time_ms(struct Client *link)
+{
+  (void)link;
+  return 1763000000000ULL;
+}
+
 int feature_bool(enum Feature feat)
 {
   switch (feat) {
+  case FEAT_MSGID:
+    return msgid_on;
   case FEAT_REGISTER_VERIFY_EMAIL:
     return verify_email_on;
   case FEAT_EXTENDED_ACCOUNTS:
@@ -1278,6 +1319,7 @@ static int setup(void **state)
   iauth_host_ip[0] = '\0';
   sendhost_on = 0;
   bed_features = 0;
+  msgid_on = 0;
   reauth_setting = "refresh";
   max_failures = 0;
   jwt_local_forbidden = 0;
@@ -5188,6 +5230,35 @@ static void reauth_setting_first_login_unchanged(void **state)
   }
 }
 
+/** N067: a login's account change is one event on every server: the
+ * account-notify lines go out under a msgid minted here, and the AC relay
+ * carries the same one, which every receiver (ms_account()) adopts. */
+static void login_account_change_is_one_event(void **state)
+{
+  struct Client *c;
+  int i, ev = -1, notify = -1, s2s = -1, ac = -1;
+
+  sasl_init_once();
+  c = new_registered(160, "evt");
+  bed_features = 1;
+  msgid_on = 1;
+  ntlog = 0;
+  assert_int_equal(plain_exchange(c, "zoe", 1), 1);
+  for (i = 0; i < ntlog; i++) {
+    if (ev < 0 && !strcmp(tlog[i], "event ABAAAAAAEVENT1"))
+      ev = i;
+    else if (notify < 0 && !strncmp(tlog[i], "channels evt AC", 15))
+      notify = i;
+    else if (s2s < 0 && !strcmp(tlog[i], "s2s ABAAAAAAEVENT1"))
+      s2s = i;
+    else if (ac < 0 && !strncmp(tlog[i], "servers AC evt R zoe", 20))
+      ac = i;
+  }
+  assert_true(ev >= 0 && notify > ev);   /* the notify under the event */
+  assert_true(s2s > notify && ac > s2s); /* the relay carries it */
+  msgid_on = 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Before registration, an earlier login stands until another succeeds */
 /* ------------------------------------------------------------------ */
@@ -6080,6 +6151,7 @@ int main(void)
     cmocka_unit_test_setup(reauth_setting_services_switch, setup),
     cmocka_unit_test_setup(reauth_setting_before_registration, setup),
     cmocka_unit_test_setup(reauth_setting_first_login_unchanged, setup),
+    cmocka_unit_test_setup(login_account_change_is_one_event, setup),
     cmocka_unit_test_setup(prereg_earlier_login_stands, setup),
     cmocka_unit_test_setup(max_failures_count_table, setup),
     cmocka_unit_test_setup(max_failures_before_registration, setup),
