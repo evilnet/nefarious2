@@ -143,7 +143,8 @@ int bounce_record_from_newer_build(const void *buf, size_t len)
   if (len < sizeof(version))
     return 0;
   memcpy(&version, buf, sizeof(version));
-  return version > BOUNCER_DB_VERSION;
+  return version > BOUNCER_DB_VERSION
+         && version - BOUNCER_DB_VERSION <= BOUNCER_DB_NEWER_SPAN;
 }
 
 enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
@@ -164,8 +165,12 @@ enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
   if (len < sizeof(uint32_t))
     return BOUNCE_REC_UNKNOWN;
   memcpy(version, buf, sizeof(*version));
-  if (*version > BOUNCER_DB_VERSION)
-    return BOUNCE_REC_NEWER;    /* its layout is the newer build's */
+  if (*version > BOUNCER_DB_VERSION) {
+    /* Its layout is the newer build's; far past ours it is no build's. */
+    if (*version - BOUNCER_DB_VERSION > BOUNCER_DB_NEWER_SPAN)
+      return BOUNCE_REC_UNKNOWN;
+    return BOUNCE_REC_NEWER;
+  }
 
   want = bounce_record_size(*version);
   if (!want)
@@ -295,6 +300,7 @@ int64_t bounce_hold_length(const struct bounce_hold_rule *r,
 
 enum BounceRestoreVerdict
 bounce_record_restore(const struct BounceSessionRecord *rec,
+                      uint32_t rec_version,
                       const struct bounce_restore_clock *c,
                       int64_t *held_since)
 {
@@ -302,6 +308,13 @@ bounce_record_restore(const struct BounceSessionRecord *rec,
   int64_t since, outage;
 
   if (d == BOUNCE_REC_HELD_AT_RESTART) {
+    /* A heartbeat by another build than the record's dates nothing: an
+     * older one kept the record unread (BOUNCE_REC_NEWER) and ran on
+     * after the crash; a newer one ran on with its bouncer off, which
+     * rewrites only current-version markers.  The outage is unknown: not
+     * held. */
+    if (c->last_alive > 0 && c->last_alive_writer != rec_version)
+      return BOUNCE_RESTORE_EXPIRED;
     /* Live when the server went: held from the crash, the latest time it
      * is known alive with the session live.  No heartbeat (a build that
      * kept none): from now. */
@@ -343,25 +356,35 @@ bounce_record_restore(const struct BounceSessionRecord *rec,
 
 void bounce_alive_rec_encode(void *buf, int64_t t)
 {
-  uint32_t v = BOUNCE_ALIVE_REC_VERSION, pad = 0;
+  uint32_t v = BOUNCE_ALIVE_REC_VERSION, writer = BOUNCER_DB_VERSION;
   unsigned char *b = buf;
 
   memcpy(b, &v, 4);
-  memcpy(b + 4, &pad, 4);
+  memcpy(b + 4, &writer, 4);   /* a zero pad before the tag */
   memcpy(b + 8, &t, 8);
 }
 
-int bounce_alive_rec_decode(const void *buf, size_t len, int64_t *t)
+int bounce_alive_rec_decode(const void *buf, size_t len, int64_t *t,
+                            uint32_t *writer)
 {
   const unsigned char *b = buf;
-  uint32_t v;
+  uint32_t v, w;
 
   if (len != BOUNCE_ALIVE_REC_SIZE)
     return -1;
   memcpy(&v, b, 4);
   if (v != BOUNCE_ALIVE_REC_VERSION)
     return -1;
+  memcpy(&w, b + 4, 4);
+  if (w == 0)
+    w = BOUNCE_ALIVE_UNTAGGED_WRITER;
+  else if (w < BOUNCE_ALIVE_UNTAGGED_WRITER)
+    return -1;                  /* no tagged build is older */
+  else if (w > BOUNCER_DB_VERSION
+           && w - BOUNCER_DB_VERSION > BOUNCER_DB_NEWER_SPAN)
+    return -1;
   memcpy(t, b + 8, 8);
+  *writer = w;
   return 0;
 }
 
@@ -432,6 +455,15 @@ int bounce_boot_lists(enum BounceRestoreVerdict v)
   return v == BOUNCE_RESTORE_HELD_AT_CRASH;
 }
 
+enum bounce_boot_next bounce_boot_next(int restoring,
+                                       enum bounce_boot_state prev,
+                                       uint32_t nlisted)
+{
+  if (restoring)
+    return nlisted ? BOUNCE_BOOT_WRITE : BOUNCE_BOOT_DELETE;
+  return prev == BOUNCE_BOOT_RUNNING ? BOUNCE_BOOT_DELETE : BOUNCE_BOOT_KEEP;
+}
+
 unsigned int bounce_boot_steps(int store_open, int persist_on, int bouncer_on)
 {
   if (!store_open)
@@ -449,7 +481,8 @@ int bounce_restore_breaker(enum bounce_boot_state prev, uint32_t listed,
   if (prev != BOUNCE_BOOT_RUNNING || listed == 0 || window <= 0)
     return 0;
   /* Known alive for its whole window: the settle mark was lost, not a
-   * start that died early. */
+   * start that died early.  The heartbeat is that start's: the next
+   * start consumes the record, so no later run's heartbeat stands in. */
   if (last_alive > 0 && last_alive - prev_start >= window)
     return 0;
   return 1;

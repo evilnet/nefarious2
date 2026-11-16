@@ -5407,21 +5407,27 @@ static int bounce_meta_write(struct db_writebatch *wb, const char *key,
   return 0;
 }
 
-/** The previous run's last heartbeat, or 0 when none is known. */
-static int64_t bounce_alive_read(void)
+/** The previous run's last heartbeat, or 0 when none is known.
+ * @param[out] writer The BOUNCER_DB_VERSION of the build that wrote it
+ *                    (0 with no heartbeat). */
+static int64_t bounce_alive_read(uint32_t *writer)
 {
   struct db_env *env = metadata_get_env();
   struct db_cf *mcf = bounce_meta_cf();
   struct db_val v = { NULL, 0 };
   int64_t t = 0;
+  uint32_t w = 0;
 
+  *writer = 0;
   if (!env || !mcf
       || db_get(env, mcf, BOUNCE_ALIVE_KEY, sizeof(BOUNCE_ALIVE_KEY) - 1,
                 NULL, &v) != DB_OK)
     return 0;
-  if (bounce_alive_rec_decode(v.base, v.len, &t) != 0 || t < 0)
+  if (bounce_alive_rec_decode(v.base, v.len, &t, &w) != 0 || t < 0)
     t = 0;
   db_val_free(&v);
+  if (t > 0)
+    *writer = w;
   return t;
 }
 
@@ -5600,8 +5606,10 @@ static void restore_marks_free(struct restore_marks *m)
  *  - This start's boot record, RUNNING, names every session it restores
  *    because it was live at the crash (bounce_boot_lists()); with none,
  *    the key is deleted: nothing to break (review m1).
- * Without it, the boot record is left as it is.  Everything is written in
- * one batch, durably; the decisions are left in @a plan (sorted).
+ * Without it the breaker still decides on a RUNNING boot record, and
+ * the record is consumed (bounce_boot_next()): its stand-in is never
+ * read against a later run's heartbeat.  Everything is written in one
+ * batch, durably; the decisions are left in @a plan (sorted).
  * @return Records the breaker dropped. */
 static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
                                   const struct bounce_restore_clock *clock,
@@ -5618,7 +5626,7 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
   int window = feature_int(FEAT_BOUNCER_RESTORE_CRASH_WINDOW);
   int breaker = 0, rc, skipped = 0, rewritten = 0, outlived = 0;
 
-  if (plan && mcf
+  if (mcf
       && db_get(env, mcf, BOUNCE_BOOT_KEY, sizeof(BOUNCE_BOOT_KEY) - 1,
                 NULL, &boot) == DB_OK
       && bounce_boot_rec_decode(boot.base, boot.len, &prev, &prev_start,
@@ -5629,9 +5637,8 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
     prev = BOUNCE_BOOT_NONE;
     prev_n = 0;
   }
-  if (plan)
-    breaker = bounce_restore_breaker(prev, prev_n, prev_start,
-                                     clock->last_alive, window);
+  breaker = bounce_restore_breaker(prev, prev_n, prev_start,
+                                   clock->last_alive, window);
   if (breaker) {
     log_write(LS_SYSTEM, L_CRIT, 0, "bouncer_persist: the last start (at %Tu, "
               "last alive %Tu) ended uncleanly within its crash window "
@@ -5670,6 +5677,22 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
     int64_t since;
 
     st = bounce_record_decode(vbuf, vlen, &rec, &version);
+    /* A newer build's record is kept for a roll-forward, unless that
+     * build's last start restored it and died within its crash window:
+     * it is skipped as that build would skip it.  Its key is its id. */
+    if (st == BOUNCE_REC_NEWER && breaker && klen < sizeof(id)) {
+      memcpy(id, kbuf, klen);
+      id[klen] = '\0';
+      if (restore_marks_find(&skip, id)) {
+        log_write(LS_SYSTEM, L_CRIT, 0, "bouncer_persist: deleting session "
+                  "%s (a v%u record, of a newer build): the last start "
+                  "restored it, live at the crash, and died within its "
+                  "crash window", id, version);
+        db_writebatch_del(wb, cf, kbuf, klen);
+        skipped++;
+      }
+      continue;
+    }
     /* v7 records get their id at the second pass; bad ones are not
      * restored (the eviction pass deletes them). */
     if (st != BOUNCE_REC_CURRENT && st != BOUNCE_REC_MIGRATED)
@@ -5681,20 +5704,28 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
                 "and died within its crash window", id, rec.bsr_account,
                 rec.bsr_nick);
       db_writebatch_del(wb, cf, kbuf, klen);
-      restore_marks_add(plan, id, RM_SKIP);
+      if (plan)
+        restore_marks_add(plan, id, RM_SKIP);
       skipped++;
       continue;
     }
-    v = bounce_record_restore(&rec, clock, &since);
+    v = bounce_record_restore(&rec, version, clock, &since);
     if (v == BOUNCE_RESTORE_EXPIRED) {
       /* A marker whose outage outlived its hold goes now: rewritten as a
        * real time, a later restore would hold it again until its hold
        * timer. */
       if (bounce_record_marked(&rec)) {
-        log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: session %s (%s) was "
-                  "live at an unclean exit (last alive %Tu), and the outage "
-                  "outlived its hold: not restored", id, rec.bsr_account,
-                  (time_t)clock->last_alive);
+        if (clock->last_alive > 0 && clock->last_alive_writer != version)
+          log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: session %s (%s) "
+                    "was live at an unclean exit of a v%u build, and the "
+                    "heartbeat since is another build's (v%u): the outage "
+                    "is unknown, not restored", id, rec.bsr_account,
+                    version, clock->last_alive_writer);
+        else
+          log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: session %s (%s) was "
+                    "live at an unclean exit (last alive %Tu), and the outage "
+                    "outlived its hold: not restored", id, rec.bsr_account,
+                    (time_t)clock->last_alive);
         if (db_writebatch_del(wb, cf, kbuf, klen) == DB_OK)
           outlived++;
       }
@@ -5720,9 +5751,12 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
   db_iter_close(it);
 
   /* This start's boot record: RUNNING, the sessions it restores because
-   * they were live at the crash; none, no record. */
-  if (plan && mcf) {
-    if (nlisted) {
+   * they were live at the crash; none, no record.  A start that does not
+   * restore consumes a RUNNING one (bounce_boot_next()). */
+  if (mcf) {
+    enum bounce_boot_next next = bounce_boot_next(plan != NULL, prev, nlisted);
+
+    if (next == BOUNCE_BOOT_WRITE) {
       size_t blen = bounce_boot_rec_size(nlisted);
       unsigned char *bbuf = (unsigned char *)MyMalloc(blen);
       uint32_t k = 0;
@@ -5734,7 +5768,7 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
           bounce_boot_rec_put_id(bbuf, k++, plan->v[j].id);
       (void)bounce_meta_write(wb, BOUNCE_BOOT_KEY, bbuf, blen, 0);
       MyFree(bbuf);
-    } else
+    } else if (next == BOUNCE_BOOT_DELETE)
       (void)bounce_meta_write(wb, BOUNCE_BOOT_KEY, NULL, 0, 0);
   }
   rc = db_writebatch_commit(wb, /*sync_durably=*/1);
@@ -5808,7 +5842,7 @@ int bounce_db_restore(void)
   memset(&clock, 0, sizeof(clock));
   clock.now = (int64_t)CurrentTime;
   clock.max_hold = feature_int(FEAT_BOUNCER_MAX_HOLD);
-  clock.last_alive = bounce_alive_read();
+  clock.last_alive = bounce_alive_read(&clock.last_alive_writer);
   clock.hold = bounce_hold_rule_now();
 
   /* Don't restore persisted sessions when the bouncer feature is globally
@@ -5921,7 +5955,7 @@ int bounce_db_restore(void)
      * session's record is expired unless it carries the restart marker,
      * which brings it back held from the crash (bounce_record_stamp(),
      * bounce_record_restore()). */
-    verdict = bounce_record_restore(rec, &clock, &held_since);
+    verdict = bounce_record_restore(rec, version, &clock, &held_since);
     if (verdict == BOUNCE_RESTORE_EXPIRED) {
       expired++;
       continue;
@@ -6154,7 +6188,7 @@ int bounce_db_restore(void)
             uint32_t ever;
             /* The restore's own rule, on an aligned copy. */
             if (bounce_record_decode(vbuf, vlen, &erec, &ever) != BOUNCE_REC_CURRENT
-                || bounce_record_restore(&erec, &clock, NULL)
+                || bounce_record_restore(&erec, ever, &clock, NULL)
                    == BOUNCE_RESTORE_EXPIRED)
               should_delete = 1;
           } else {

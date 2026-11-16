@@ -24,10 +24,18 @@ enum BounceRecordStatus {
   BOUNCE_REC_MIGRATED_V7,  /**< v7, migrated; bsr_sessid left empty for
                             *   the caller to mint (v7 ids were short) */
   BOUNCE_REC_BAD_SIZE,     /**< Known version, length is not its size */
-  BOUNCE_REC_UNKNOWN,      /**< Too short for a version, or unknown one */
-  BOUNCE_REC_NEWER         /**< Written by a newer build (version above
-                            *   BOUNCER_DB_VERSION): not read, and kept */
+  BOUNCE_REC_UNKNOWN,      /**< Too short for a version, or unknown one
+                            *   (above BOUNCER_DB_VERSION +
+                            *   BOUNCER_DB_NEWER_SPAN included) */
+  BOUNCE_REC_NEWER         /**< Written by a newer build (version in
+                            *   (BOUNCER_DB_VERSION, BOUNCER_DB_VERSION +
+                            *   BOUNCER_DB_NEWER_SPAN]): not read, and kept */
 };
+
+/** How far above BOUNCER_DB_VERSION a version may be and still be read as
+ * a newer build's (kept for a roll-forward).  Past it the version is no
+ * build's but a corrupted record's, and the record is evicted. */
+#define BOUNCER_DB_NEWER_SPAN 16
 
 /** On-disk size of a record version.
  * @param[in] version  Record version.
@@ -36,7 +44,7 @@ enum BounceRecordStatus {
 extern size_t bounce_record_size(uint32_t version);
 
 /** Did a newer build write this record (its version is above
- * BOUNCER_DB_VERSION)?  Such a record is neither restored nor evicted:
+ * BOUNCER_DB_VERSION, by at most BOUNCER_DB_NEWER_SPAN)?  Such a record is neither restored nor evicted:
  * after a rollback it waits on disk for the build that can read it.
  * @param[in] buf Record bytes (need not be aligned).
  * @param[in] len Record length.
@@ -48,7 +56,8 @@ extern int bounce_record_from_newer_build(const void *buf, size_t len);
  * @param[in] buf      Record bytes (need not be aligned).
  * @param[in] len      Record length.
  * @param[out] out     Current-layout record; valid unless the status is
- *                     BOUNCE_REC_BAD_SIZE or BOUNCE_REC_UNKNOWN.
+ *                     BOUNCE_REC_BAD_SIZE, BOUNCE_REC_UNKNOWN or
+ *                     BOUNCE_REC_NEWER.
  * @param[out] version The version the record carried (0 when too short).
  * @return What was done with the record.
  */
@@ -157,6 +166,8 @@ struct bounce_restore_clock {
   int64_t max_hold;    /**< FEAT_BOUNCER_MAX_HOLD */
   int64_t last_alive;  /**< the previous run's last heartbeat
                         *   (BOUNCE_ALIVE_KEY); 0 when unknown */
+  uint32_t last_alive_writer; /**< the BOUNCER_DB_VERSION of the build
+                               *   that wrote it; 0 when unknown */
   struct bounce_hold_rule hold;  /**< the adaptive hold's figures */
 };
 
@@ -180,10 +191,18 @@ enum BounceRestoreVerdict {
  *    the session's hold (bounce_hold_length() with its own connections and
  *    active time, idle for the outage) or BOUNCER_MAX_HOLD.  With no
  *    heartbeat known (a record of a build without one): held from now.
+ *    A heartbeat written by another build than the record's
+ *    (last_alive_writer != @a rec_version) dates nothing: an older one
+ *    could not read the record, kept it, and ran on after the crash; a
+ *    newer one ran on with its bouncer off, which leaves a migrated
+ *    marker unrewritten.  Expired.
  *  - Any other time: held from it, unless more than BOUNCER_MAX_HOLD has
  *    passed since (the hold timer ends a shorter hold that ran out: it is
  *    armed with a settling period at the restore).
  * @param[in]  rec        The record (current layout).
+ * @param[in]  rec_version The version the record carried on disk (the
+ *                        decode's, not rec->bsr_version, which a
+ *                        migration overwrites).
  * @param[in]  c          The clock.
  * @param[out] held_since When held: the session's hs_disconnect_time (may
  *                        be NULL).
@@ -191,6 +210,7 @@ enum BounceRestoreVerdict {
  */
 extern enum BounceRestoreVerdict
 bounce_record_restore(const struct BounceSessionRecord *rec,
+                      uint32_t rec_version,
                       const struct bounce_restore_clock *c,
                       int64_t *held_since);
 
@@ -205,15 +225,28 @@ bounce_record_restore(const struct BounceSessionRecord *rec,
  * the ones it restored because they were live at the crash. */
 #define BOUNCE_BOOT_KEY  "bouncer/boot"
 
-/** The heartbeat value's size (version, pad, time). */
+/** The heartbeat value's size (version 1, writer, time). */
 #define BOUNCE_ALIVE_REC_SIZE 16
 
-/** Encode the heartbeat @a t into @a buf (BOUNCE_ALIVE_REC_SIZE bytes). */
+/** The writer of a heartbeat whose writer word is 0: the builds before
+ * the tag, all of which wrote v12 records.  Frozen: never follow
+ * BOUNCER_DB_VERSION. */
+#define BOUNCE_ALIVE_UNTAGGED_WRITER 12
+
+/** Encode the heartbeat @a t into @a buf (BOUNCE_ALIVE_REC_SIZE bytes),
+ * tagged with this build's BOUNCER_DB_VERSION.  The tag sits in what was
+ * a zero pad word: a build before it reads the value unchanged. */
 extern void bounce_alive_rec_encode(void *buf, int64_t t);
 
 /** Decode a heartbeat value.
- * @return 0 and *t, or -1 when @a len or the version is not ours. */
-extern int bounce_alive_rec_decode(const void *buf, size_t len, int64_t *t);
+ * @param[out] t      Its time.
+ * @param[out] writer The BOUNCER_DB_VERSION of the build that wrote it
+ *                    (BOUNCE_ALIVE_UNTAGGED_WRITER for an untagged one).
+ * @return 0, or -1 when @a len or the version is not ours, or the writer
+ *         is below BOUNCE_ALIVE_UNTAGGED_WRITER or past
+ *         BOUNCER_DB_VERSION + BOUNCER_DB_NEWER_SPAN (no build's). */
+extern int bounce_alive_rec_decode(const void *buf, size_t len, int64_t *t,
+                                   uint32_t *writer);
 
 /** A start's boot record states. */
 enum bounce_boot_state {
@@ -260,6 +293,29 @@ extern const char *bounce_boot_rec_id(const void *buf, uint32_t i);
  * @return 1 to list it, else 0. */
 extern int bounce_boot_lists(enum BounceRestoreVerdict v);
 
+/** What a start's first pass does with the boot record. */
+enum bounce_boot_next {
+  BOUNCE_BOOT_KEEP,    /**< leave it as it is */
+  BOUNCE_BOOT_WRITE,   /**< write this start's, RUNNING */
+  BOUNCE_BOOT_DELETE   /**< delete the key */
+};
+
+/** The boot record a start's first pass leaves.  A restoring start
+ * writes its own, RUNNING, when it lists a session, else deletes the key
+ * (nothing to break).  A start that does not restore (the bouncer or
+ * persistence off) consumes a RUNNING record -- the breaker decided on
+ * it, and deleted what it names when it tripped -- and leaves any other
+ * alone.  So the start after a RUNNING one always consumes it, and the
+ * breaker's heartbeat stand-in is only ever read against the heartbeat of
+ * the start the record describes, never a later run's.
+ * @param[in] restoring Non-zero for a start that restores.
+ * @param[in] prev      The record's state as the start found it.
+ * @param[in] nlisted   The sessions this start lists.
+ * @return What to do with the key. */
+extern enum bounce_boot_next bounce_boot_next(int restoring,
+                                              enum bounce_boot_state prev,
+                                              uint32_t nlisted);
+
 /** The crash-loop breaker (user decision 2026-11-06).  A start that
  * restored sessions writes its boot record RUNNING, before it builds any
  * ghost, naming the sessions it restored because they were live at the
@@ -274,6 +330,9 @@ extern int bounce_boot_lists(enum BounceRestoreVerdict v);
  * @param[in] prev       The previous start's state.
  * @param[in] listed     The sessions its record names.
  * @param[in] prev_start When it started.
+ * The stand-in is read only against the heartbeat of the start the
+ * record describes: the start after it always consumes the record, the
+ * bouncer on or not (bounce_restore_prepare()).
  * @param[in] last_alive Its last heartbeat (0: unknown).
  * @param[in] window     BOUNCER_RESTORE_CRASH_WINDOW (0 or less: off).
  * @return 1 to skip what the previous start restored, else 0.
