@@ -2322,6 +2322,23 @@ void send_user_info(struct Client* sptr, char* names, int rpl, InfoFormatter fmt
   msgq_clean(mb);
 }
 
+/** Tell the clients that see \a cptr, and \a cptr itself, that its
+ * user@host becomes \a user@\a host: CHGHOST to the chghost clients in its
+ * channels and to its own connection if it negotiated chghost.  Call it
+ * before the new user@host is stored, so the line's prefix is the old one
+ * (the chghost spec's ":nick!olduser@oldhost CHGHOST newuser newhost").
+ * The caller arms the event's msgid; the user's own copy carries it, as an
+ * event's line (sendcmdto_one_event()), not as an answer to a command.
+ */
+static void send_chghost(struct Client *cptr, const char *user,
+                         const char *host)
+{
+  sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
+                CAP_CHGHOST, CAP_NONE, "%s %s", user, host);
+  if (MyConnect(cptr) && CapOwnHas(cptr, CAP_CHGHOST))
+    sendcmdto_one_event(cptr, CMD_CHGHOST, cptr, 0, "%s %s", user, host);
+}
+
 /** Set \a flag on \a cptr and possibly hide the client's hostmask.
  * @param[in,out] cptr User who is getting a new flag.
  * @param[in] flag Some flag that affects host-hiding (FLAG_HIDDENHOST, FLAG_ACCOUNT).
@@ -2414,16 +2431,17 @@ hide_hostmask(struct Client *cptr)
                     CAP_NONE, CAP_CHGHOST, ":%s",
                     feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
 
+    /* CHGHOST to clients with the chghost capability, under the
+     * user@host they know (the old one, as the spec has it), and to the
+     * user itself, which otherwise learns its new host only from 396. */
+    if (feature_bool(FEAT_CAP_chghost))
+      send_chghost(cptr, newuser[0] ? newuser : cli_user(cptr)->username,
+                   newhost);
+
     /* Finally copy the new host to the users current host. */
     ircd_strncpy(cli_user(cptr)->host, newhost, HOSTLEN + 1);
     if (newuser[0] != '\0')
       ircd_strncpy(cli_user(cptr)->username, newuser, USERLEN + 1);
-
-    /* Send CHGHOST to clients with the chghost capability */
-    if (feature_bool(FEAT_CAP_chghost))
-      sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
-                    CAP_CHGHOST, CAP_NONE, "%s %s",
-                    cli_user(cptr)->username, cli_user(cptr)->host);
 
     sendcmdto_set_client_msgid(NULL);
   }
@@ -2520,13 +2538,12 @@ unhide_hostmask(struct Client *cptr)
       sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
                     CAP_NONE, CAP_CHGHOST, ":%s",
                     feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
-    ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN + 1);
-
-    /* Send CHGHOST to clients with the chghost capability */
+    /* CHGHOST under the old user@host, to channel members and the user
+     * itself (see hide_hostmask()). */
     if (feature_bool(FEAT_CAP_chghost))
-      sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
-                    CAP_CHGHOST, CAP_NONE, "%s %s",
-                    cli_user(cptr)->username, cli_user(cptr)->host);
+      send_chghost(cptr, cli_user(cptr)->username, cli_user(cptr)->realhost);
+
+    ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN + 1);
 
     sendcmdto_set_client_msgid(NULL);
   }
