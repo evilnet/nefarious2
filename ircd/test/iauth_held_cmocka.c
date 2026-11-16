@@ -273,6 +273,8 @@ void sasl_identity_set(struct Client *cptr, const char *account,
                        time_t acc_create, const char *kc_id, int id_live) {}
 int sasl_reauth_refused(struct Client *sptr, const char *account,
                         const char *kc_id) { return 0; }
+void sasl_failure_count(struct Client *cptr) {}
+void sasl_exchange_abandoned(struct Client *cptr, int timeout) {}
 void register_child(pid_t child, SigChldCallBack call, void *datum) {}
 /* An approval naming a class (none does here). */
 struct ConfItem *GlobalConfList;

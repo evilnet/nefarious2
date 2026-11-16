@@ -1189,6 +1189,7 @@ static struct FeatureDesc {
   F_S(SASL_LOCAL_MECHANISMS, 0, "PLAIN,OAUTHBEARER", 0),
   F_S(SASL_TRUSTED_AUTHZID, FEAT_NULL, 0, 0),
   F_SC(SASL_REAUTH, 0, "any", 0, sasl_reauth_choices),
+  F_I(SASL_MAX_FAILURES, 0, 5, 0),
   F_S(KEYCLOAK_URL, 0, "", 0),
   F_S(KEYCLOAK_REALM, 0, "master", 0),
   F_S(KEYCLOAK_CLIENT_ID, 0, "", 0),

@@ -269,6 +269,9 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (reply[0] == 'C') {
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
+    /* services answered: the client's turn (SASL_MAX_FAILURES: a timeout
+     * from here is the client's) */
+    con_sasl_xflags(cli_connect(acptr)) |= SASLX_CLIENTTURN;
     return 0;
   } else if (reply[0] == 'L') {
     /* A logged-in client's re-authentication that services answer with an
@@ -320,6 +323,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                           named_id[0] ? named_id : NULL, named_live);
       return 0;
     } else if (data[0] == 'F') {
+      sasl_failure_count(acptr);       /* services failed it: counted */
       send_reply(acptr, ERR_SASLFAIL, "");
     } else if (data[0] == 'A') {
       send_reply(acptr, ERR_SASLABORTED);

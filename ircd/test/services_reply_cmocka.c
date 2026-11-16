@@ -103,6 +103,7 @@ static int notices_tried, notices_sent; /* rate-limited oper notices */
 static struct Client *session_member;   /* bounce_client_in_session() */
 static struct Client *ban_cleared[MAXREC];  /* member_ban_cache_clear() */
 static int nban_clears;
+static int sasl_failures_counted;       /* sasl_failure_count() calls */
 
 static void tell(struct Client *to)
 {
@@ -247,6 +248,7 @@ static int world_setup(void **state)
   nreplies = 0;
   nlogged = notices_tried = notices_sent = 0;
   nban_clears = 0;
+  sasl_failures_counted = 0;
   session_member = NULL;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
@@ -442,6 +444,14 @@ int account_id_valid(const char *id)
 {
   (void)id;
   return 0;
+}
+
+/* sasl_auth.c (not linked): a failed exchange counted toward
+ * SASL_MAX_FAILURES. */
+void sasl_failure_count(struct Client *cptr)
+{
+  (void)cptr;
+  sasl_failures_counted++;
 }
 
 /* channel.c: whose cached ban verdicts were forgotten. */
@@ -1058,6 +1068,47 @@ static void test_sasl_mechs_ends_a_reauth(void **state)
   assert_string_equal(cli_user(c)->account, "xavier");
 }
 
+/* A challenge from services makes it the client's turn (SASL_MAX_FAILURES:
+ * a timeout from then on is the client's). */
+static void test_sasl_challenge_is_the_clients_turn(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+  cli_saslcookie(c) = 813;
+  cli_saslstart(c) = CurrentTime;
+  assert_false(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
+  deliver(ms_sasl, svs, svs, "AB AB!7.813 C +");
+  assert_true(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
+}
+
+/* SASL_MAX_FAILURES: a services failure (D F) counts; their abort (D A)
+ * and an unsupported mechanism (M: 908 + 904) do not. */
+static void test_sasl_failures_counted_by_services(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("joiner", 7, 1);
+
+  cli_saslcookie(c) = 801;
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.801 D F");
+  assert_int_equal(sasl_failures_counted, 1);
+
+  cli_saslcookie(c) = 802;
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.802 D A");
+  assert_int_equal(sasl_failures_counted, 1);
+
+  cli_saslcookie(c) = 803;
+  cli_saslstart(c) = CurrentTime;
+  deliver(ms_sasl, svs, svs, "AB AB!7.803 M :PLAIN");
+  assert_int_equal(sasl_failures_counted, 1);
+  assert_int_equal(cli_saslcookie(c), 0);
+}
+
 /* ... and services' own list when the capability has no value. */
 static void test_sasl_mechs_services_list_without_cap_value(void **state)
 {
@@ -1450,6 +1501,8 @@ int main(void)
     T(test_sasl_mechs_lists_the_cap_value),
     T(test_sasl_mechs_services_list_without_cap_value),
     T(test_sasl_mechs_ends_the_exchange),
+    T(test_sasl_failures_counted_by_services),
+    T(test_sasl_challenge_is_the_clients_turn),
     T(test_sasl_mechs_ends_a_reauth),
     T(test_sasl_relay_exchange_times_out_after_register_login),
     T(test_sasl_relay_success_is_the_account_services_named),

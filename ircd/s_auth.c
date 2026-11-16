@@ -568,6 +568,11 @@ static void auth_complete_sasl(struct Client *client)
     SetAccount(client);
   }
 
+  /* An exchange still in flight is aborted here: the client went on to
+   * register mid-exchange.  One whose credentials went out counts
+   * (SASL_MAX_FAILURES; the limit is final then, and this registration
+   * goes on). */
+  sasl_exchange_abandoned(client, 0);
   abort_sasl(client, 0);
 }
 
@@ -629,6 +634,19 @@ static int check_auth_finished(struct AuthRequest *auth)
   int res;
   struct Client *acptr;
   struct Client *cptr = auth->client;
+
+  /* SASL_MAX_FAILURES reached before registration (sasl_failure_count()):
+   * the failure's numeric has gone, and the connection closes now, before
+   * anything else registration waits for -- but never under an exchange's
+   * hold (AR_SASL_PENDING): a login completing holds registration while
+   * it uses the client (sasl_login_apply() step 3 runs this check), and
+   * the exchange that reached the limit has released it.  Every end of an exchange runs
+   * this check or owes it to the event loop, and every caller already
+   * returns its CPTR_KILLED (SASL 3.2: the reason before the
+   * disconnection: the 904, then the ERROR line's). */
+  if (cptr && cli_connect(cptr) && con_sasl_limited(cli_connect(cptr))
+      && !FlagHas(&auth->flags, AR_SASL_PENDING))
+    return exit_client(cptr, cptr, &me, "Too many SASL failures");
 
   /* Check non-iauth registration blocking flags. */
   for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
@@ -4191,6 +4209,8 @@ static int iauth_cmd_sasl_challenge(struct IAuth *iauth, struct Client *cli,
 
   /* Forward challenge to client */
   sendrawto_one(cli, "AUTHENTICATE %s", params[0]);
+  /* IAuth answered: the client's turn (SASL_MAX_FAILURES) */
+  con_sasl_xflags(cli_connect(cli)) |= SASLX_CLIENTTURN;
   return 0;
 }
 
@@ -4262,12 +4282,17 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
 }
 
 /** End \a cli's IAuth exchange as failed: 904 (with \a reason, "" for
- * none), no cookie, its timer gone, registration let go on.
+ * none), no cookie, its timer gone, registration let go on; a failure the
+ * client caused (\a counted: IAuth's f) counts toward SASL_MAX_FAILURES,
+ * an unsupported mechanism (l) does not.
  * @return What letting registration go on returned (CPTR_KILLED: \a cli
  * is gone), else zero.
  */
-static int iauth_sasl_end_failed(struct Client *cli, const char *reason)
+static int iauth_sasl_end_failed(struct Client *cli, const char *reason,
+                                 int counted)
 {
+  if (counted)
+    sasl_failure_count(cli);           /* SASL_MAX_FAILURES */
   send_reply(cli, ERR_SASLFAIL, reason);
 
   /* The exchange is over, as when services fail one (ms_sasl(), D F):
@@ -4300,7 +4325,7 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
   if (!cli_saslcookie(cli))
     return 0;
 
-  return iauth_sasl_end_failed(cli, EmptyString(params[0]) ? "" : params[0]);
+  return iauth_sasl_end_failed(cli, EmptyString(params[0]) ? "" : params[0], 1);
 }
 
 /** Handle SASL mechanism list from IAuth.
@@ -4329,7 +4354,7 @@ static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
    * registration held all that time.  With no exchange in flight the list
    * is all there is to tell. */
   if (cli_saslcookie(cli))
-    return iauth_sasl_end_failed(cli, "");
+    return iauth_sasl_end_failed(cli, "", 0);
   return 0;
 }
 
@@ -4413,6 +4438,7 @@ static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
   /* Mark SASL as complete: an exchange's completion (not a REGISTER
    * login's, IsSASLExchangeDone()) */
   SetFlag(cli, FLAG_SASLCOMPLETE);
+  cli_sasl_failures(cli) = 0;          /* a login: SASL_MAX_FAILURES */
   ClrFlag(cli, FLAG_REGLOGIN);
 
   /* Send success to client */

@@ -820,6 +820,77 @@ static int sasl_same_name(const char *a, const char *b)
   return *a == *b;
 }
 
+void sasl_failure_count(struct Client *cptr)
+{
+  int limit;
+
+  if (!cptr || !MyConnect(cptr))
+    return;
+  /* Once per exchange: a refusal known early (an error challenge) and the
+   * end that follows it, or an abort and a late failure answer, are one
+   * failure. */
+  if (con_sasl_xflags(cli_connect(cptr)) & SASLX_COUNTED)
+    return;
+  con_sasl_xflags(cli_connect(cptr)) |= SASLX_COUNTED;
+  if (cli_sasl_failures(cptr) < 65535)
+    cli_sasl_failures(cptr)++;
+  /* SASL_MAX_FAILURES as it is now: a SET or REHASH applies from the next
+   * failure (and from the next new exchange, m_authenticate()).  Before
+   * registration the limit closes the connection -- at registration's
+   * next check, which every end of an exchange runs or owes the event
+   * loop (check_auth_finished()): the failure's own numeric goes first,
+   * and every caller already returns that check's CPTR_KILLED.  A client
+   * with no auth request any more (registered, or a login past
+   * registration's auth stage) is only refused new exchanges. */
+  limit = feature_int(FEAT_SASL_MAX_FAILURES);
+  if (limit > 0 && cli_sasl_failures(cptr) >= limit
+      && !con_sasl_limited(cli_connect(cptr))) {
+    /* Final for the connection: a later SET or REHASH that raises the
+     * limit never revives it (m_authenticate()). */
+    con_sasl_limited(cli_connect(cptr)) = 1;
+    log_write(LS_USER, L_INFO, 0, "SASL: %C: %d failed exchanges "
+              "(SASL_MAX_FAILURES %d): %s", cptr, cli_sasl_failures(cptr),
+              limit, (!IsRegistered(cptr) && cli_auth(cptr))
+                     ? "closing the connection" : "no further exchanges");
+  }
+}
+
+void sasl_exchange_abandoned(struct Client *cptr, int timeout)
+{
+  struct SASLSession *session;
+
+  if (!cptr || !MyConnect(cptr) || !cli_saslcookie(cptr)
+      || IsSASLExchangeDone(cptr)
+      || !(con_sasl_xflags(cli_connect(cptr)) & SASLX_SENT))
+    return;                    /* nothing went out to a backend */
+  /* Keycloak could not be asked (an error challenge for an unanswered
+   * introspection): the server's own unavailability, never counted --
+   * not when the client then lets the exchange time out either.  (Services
+   * and IAuth end an unavailable exchange at once -- D F/D A, IAuth
+   * unreachable -- so nothing of theirs is left to time out.) */
+  session = cli_saslsession(cptr);
+  if (session && session->fail_unavailable)
+    return;
+  if (timeout) {
+    /* A timeout counts only when it was the client's turn: a request
+     * still with the backend -- Keycloak not answered yet, services or
+     * IAuth not answered the credentials -- is the backend's, and a slow
+     * backend must not count against the client. */
+    if (session ? session->state == SASL_STATE_WAITING_KC
+                : !(con_sasl_xflags(cli_connect(cptr)) & SASLX_CLIENTTURN))
+      return;
+  }
+  sasl_failure_count(cptr);
+}
+
+/** A failure the client caused, answered with 904 (\a reason): counted
+ * (sasl_failure_count()), then answered. */
+static void sasl_fail_reply(struct Client *cptr, const char *reason)
+{
+  sasl_failure_count(cptr);
+  send_reply(cptr, ERR_SASLFAIL, reason);
+}
+
 int sasl_logged_in(struct Client *cptr)
 {
   /* The account is applied once registration has passed its auth stage
@@ -959,6 +1030,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
                   "This connection belongs to the account's previous Keycloak user");
       send_reply(sptr, ERR_SASLFAIL,
                  ": this connection belongs to the account's previous Keycloak user");
+      sasl_failure_count(sptr);   /* refused at the end: counted */
       return 1;
     }
     /* A refresh.  Under refresh only a token mechanism may refresh: an
@@ -970,6 +1042,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
         send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
                   "You have already completed SASL authentication");
       send_reply(sptr, ERR_SASLALREADY);
+      sasl_failure_count(sptr);   /* refused at the end: counted */
       return 1;
     }
     return 0;
@@ -1008,6 +1081,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
       send_fail(sptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL, reason);
     send_reply(sptr, ERR_SASLALREADY);
   }
+  sasl_failure_count(sptr);       /* refused at the end: counted */
   return 1;
 }
 
@@ -1048,6 +1122,9 @@ enum sasl_login_proof {
  *  returns that to its parser, ms_sasl (a services line) ignores it, and
  *  nothing may touch sptr after CPTR_KILLED; sasl_complete_login_from_kc(),
  *  for a Keycloak answer, leaves the check to the event loop.
+ *  sasl_login_apply() itself returns CPTR_KILLED should step 3's check
+ *  have closed sptr (it cannot under the hold step 3 runs in; honoured
+ *  all the same), else 0.
  *
  *  A REGISTER (\a by LOGIN_BY_REGISTER) is the same login with three
  *  differences, all because no SASL exchange proved it: REGISTER SUCCESS
@@ -1062,7 +1139,7 @@ enum sasl_login_proof {
  *  to a REGISTER: it only logs in a client holding no account
  *  (register_complete_success(), m_register.c).
  */
-static void sasl_login_apply(struct Client *sptr, const char *account,
+static int sasl_login_apply(struct Client *sptr, const char *account,
                              time_t acc_create, const char *kc_id, int id_live,
                              enum sasl_login_proof by)
 {
@@ -1091,7 +1168,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
     if (t_active(&cli_sasltimeout(sptr)))
       timer_del(&cli_sasltimeout(sptr));
     sasl_session_free(sptr);
-    return;
+    return 0;
   }
 
   /* A REGISTER replacing a completed login (before registration, its answer
@@ -1194,10 +1271,14 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
    * A REGISTER's comes from a Keycloak answer and holds nothing: the check
    * is owed to the event loop. */
   if (cli_auth(sptr)) {
-    if (by == LOGIN_BY_SASL)
-      auth_set_account(cli_auth(sptr), cli_saslaccount(sptr));
-    else
+    /* Under the exchange's hold the check registers and closes nothing;
+     * its result is honoured all the same: nothing touches sptr after a
+     * CPTR_KILLED. */
+    if (by != LOGIN_BY_SASL)
       auth_set_account_later(cli_auth(sptr), cli_saslaccount(sptr));
+    else if (auth_set_account(cli_auth(sptr), cli_saslaccount(sptr))
+             == CPTR_KILLED)
+      return CPTR_KILLED;
   }
 
   /* 5. Pre-registration hidden host setup (not on a refresh or a switch:
@@ -1217,6 +1298,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
    * flight stays abortable (IsSASLExchangeDone()). */
   SetSASLComplete(sptr);
   if (by == LOGIN_BY_SASL) {
+    cli_sasl_failures(sptr) = 0;       /* a login (or refresh): SASL_MAX_FAILURES */
     ClrFlag(sptr, FLAG_REGLOGIN);
     send_reply(sptr, RPL_SASLSUCCESS);
   } else
@@ -1331,7 +1413,7 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
   /* 8. Clean up SASL session state.  Not for a REGISTER: an exchange
    * still in flight is the client's own, and ends as it would have. */
   if (by == LOGIN_BY_REGISTER)
-    return;
+    return 0;
   if ((cli_saslagent(sptr) != NULL) && cli_saslagentref(cli_saslagent(sptr)))
     cli_saslagentref(cli_saslagent(sptr))--;
   cli_saslagent(sptr) = NULL;
@@ -1344,12 +1426,15 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
   /* 9 (registration) is the caller's: sasl_complete_login() releases the
    * hold here and now, sasl_complete_login_from_kc() for the event loop. */
+  return 0;
 }
 
 int sasl_complete_login(struct Client *sptr, const char *account,
                         time_t acc_create, const char *kc_id, int id_live)
 {
-  sasl_login_apply(sptr, account, acc_create, kc_id, id_live, LOGIN_BY_SASL);
+  if (sasl_login_apply(sptr, account, acc_create, kc_id, id_live,
+                       LOGIN_BY_SASL) == CPTR_KILLED)
+    return CPTR_KILLED;
   /* 9. Unblock registration.  It may exit or free sptr; the result says
    * so, and nothing here touches sptr after it. */
   return sasl_hold_release(sptr);
@@ -1364,7 +1449,9 @@ static void sasl_complete_login_from_kc(struct Client *acptr,
                                         time_t acc_create, const char *kc_id,
                                         int id_live)
 {
-  sasl_login_apply(acptr, account, acc_create, kc_id, id_live, LOGIN_BY_SASL);
+  if (sasl_login_apply(acptr, account, acc_create, kc_id, id_live,
+                       LOGIN_BY_SASL) == CPTR_KILLED)
+    return;
   sasl_hold_release_from_kc(acptr);
 }
 #endif
@@ -1384,7 +1471,8 @@ void sasl_register_login(struct Client *acptr, const char *account,
                          const char *kc_id)
 {
   /* No timestamp, as for every local Keycloak login (step 1). */
-  sasl_login_apply(acptr, account, 0, kc_id, kc_id != NULL, LOGIN_BY_REGISTER);
+  (void)sasl_login_apply(acptr, account, 0, kc_id, kc_id != NULL,
+                         LOGIN_BY_REGISTER);   /* closes nothing: no check */
 }
 
 /* ---- PLAIN mechanism handler ---- */
@@ -1558,7 +1646,11 @@ static void sasl_plain_answer(int result, const struct kc_access_token *token, v
                 "SASL PLAIN: Failed authentication for %s (client %C, result %d)",
                 session->authcid, acptr, result);
     }
-    /* Send failure and clean up */
+    /* Send failure and clean up.  Counted when the credentials failed
+     * (or policy refused the account), not when Keycloak could not be
+     * asked (SASL_MAX_FAILURES). */
+    if (result == KC_FORBIDDEN || result == KC_NOT_FOUND || result == KC_UNVERIFIED)
+      sasl_failure_count(acptr);
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
     EndSASLExchange(acptr);
@@ -1599,7 +1691,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
   /* Find first NUL — boundary between authzid and authcid */
   p = memchr(decoded, '\0', len);
   if (!p || p >= end - 1) {
-    send_reply(sptr, ERR_SASLFAIL, ": malformed PLAIN data");
+    sasl_fail_reply(sptr, ": malformed PLAIN data");
     return -1;
   }
   authcid_str = p + 1;
@@ -1607,20 +1699,20 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
   /* Find second NUL — boundary between authcid and password */
   p = memchr(authcid_str, '\0', end - authcid_str);
   if (!p || p >= end - 1) {
-    send_reply(sptr, ERR_SASLFAIL, ": malformed PLAIN data");
+    sasl_fail_reply(sptr, ": malformed PLAIN data");
     return -1;
   }
   password_str = p + 1;
 
   /* Validate authcid and password are non-empty */
   if (!*authcid_str || !*password_str) {
-    send_reply(sptr, ERR_SASLFAIL, ": empty username or password");
+    sasl_fail_reply(sptr, ": empty username or password");
     return -1;
   }
 
   /* Validate lengths */
   if (strlen(authcid_str) > ACCOUNTLEN) {
-    send_reply(sptr, ERR_SASLFAIL, ": username too long");
+    sasl_fail_reply(sptr, ": username too long");
     return -1;
   }
 
@@ -1628,7 +1720,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
   ircd_strncpy(session->authcid, authcid_str, sizeof(session->authcid));
   if (*authzid_str && ircd_strcmp(authzid_str, authcid_str) != 0) {
     if (strlen(authzid_str) > ACCOUNTLEN) {
-      send_reply(sptr, ERR_SASLFAIL, ": authzid too long");
+      sasl_fail_reply(sptr, ": authzid too long");
       return -1;
     }
     ircd_strncpy(session->authzid, authzid_str, sizeof(session->authzid));
@@ -1650,7 +1742,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
       log_write(LS_SYSTEM, L_DEBUG, 0,
                 "SASL PLAIN: Negative cache hit for %s (client %C)",
                 authcid_str, sptr);
-      send_reply(sptr, ERR_SASLFAIL, "");
+      sasl_fail_reply(sptr, "");
       session->state = SASL_STATE_FAILED;
       EndSASLExchange(sptr);
       if (t_active(&cli_sasltimeout(sptr)))
@@ -1761,6 +1853,8 @@ static void sasl_external_answer(int result, const struct kc_user *users, int co
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL EXTERNAL: No user found for fingerprint (client %C, result %d)",
               acptr, result);
+    if (result == KC_SUCCESS || result == KC_NOT_FOUND)
+      sasl_failure_count(acptr);              /* no such certificate: counted */
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
     EndSASLExchange(acptr);
@@ -1794,7 +1888,7 @@ static int sasl_handle_external(struct Client *sptr, const unsigned char *decode
   if (!fingerprint || !*fingerprint) {
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL EXTERNAL: No client certificate for %C", sptr);
-    send_reply(sptr, ERR_SASLFAIL, ": no client certificate");
+    sasl_fail_reply(sptr, ": no client certificate");
     return -1;
   }
 
@@ -1931,6 +2025,7 @@ static void sasl_oauth_introspect_answer(int result, const struct kc_token_info 
      * (like the local path), skipped only in insecure mode. */
     if (!feature_bool(FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION) &&
         !oauth_token_policy_ok(info, acptr)) {
+      sasl_failure_count(acptr);       /* refused by policy: counted now */
       sendrawto_one(acptr, MSG_AUTHENTICATE " "
                     "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
       session->state = SASL_STATE_FAILED;
@@ -1957,8 +2052,12 @@ static void sasl_oauth_introspect_answer(int result, const struct kc_token_info 
     }
   } else {
     /* Connectivity errors should degrade health; invalid/inactive tokens should not */
-    if (result != KC_SUCCESS && result != KC_FORBIDDEN)
+    if (result != KC_SUCCESS && result != KC_FORBIDDEN) {
       sasl_mark_unhealthy(result);
+      session->fail_unavailable = 1;   /* not the client's: not counted */
+    } else
+      sasl_failure_count(acptr);       /* refused: counted now, whatever
+                                        * the client does next */
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Introspect failed for %C (result %d, active=%d)",
               acptr, result, info ? info->active : 0);
@@ -2036,7 +2135,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
                         &token_str, &token_len) != 0 || !token_str || token_len == 0) {
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Malformed data from %C", sptr);
-    send_reply(sptr, ERR_SASLFAIL, ": malformed OAUTHBEARER data");
+    sasl_fail_reply(sptr, ": malformed OAUTHBEARER data");
     return -1;
   }
 
@@ -2065,7 +2164,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
         !oauth_token_policy_ok(info, sptr)) {
       MyFree(token_nul);
       kc_jwt_token_info_free(info);
-      send_reply(sptr, ERR_SASLFAIL, ": token rejected by server policy");
+      sasl_fail_reply(sptr, ": token rejected by server policy");
       return -1;
     }
 
@@ -2117,7 +2216,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
     MyFree(token_nul);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: token rejected by local validation for %C", sptr);
-    send_reply(sptr, ERR_SASLFAIL, ": invalid token");
+    sasl_fail_reply(sptr, ": invalid token");
     return -1;
   }
 
@@ -2233,6 +2332,8 @@ static void sasl_scram_creds_answer(int result, const struct kc_user *user, void
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL SCRAM: No SCRAM credentials for %s (client %C)",
               session->authcid, acptr);
+    if (result == KC_SUCCESS || result == KC_NOT_FOUND)
+      sasl_failure_count(acptr);              /* no such user or no creds */
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
     EndSASLExchange(acptr);
@@ -2254,6 +2355,7 @@ static void sasl_scram_creds_answer(int result, const struct kc_user *user, void
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL SCRAM: unverified account %s (client %C)",
               session->authcid, acptr);
+    sasl_failure_count(acptr);                /* refused by policy */
     send_fail(acptr, "AUTHENTICATE", "VERIFICATION_REQUIRED", NULL,
               "Your account email is not verified - check your email for "
               "the verification link, then try again");
@@ -2312,7 +2414,7 @@ static void sasl_scram_creds_answer(int result, const struct kc_user *user, void
     const char *r = strstr(session->scram_client_first_bare, ",r=");
     if (!r) {
       MyFree(nonce_b64);
-      send_reply(acptr, ERR_SASLFAIL, "");
+      sasl_fail_reply(acptr, "");             /* the client's first message */
       sasl_abort_from_kc(acptr);
       return;
     }
@@ -2419,7 +2521,7 @@ static int sasl_scram_client_first(struct Client *sptr,
   {
     size_t ulen = r_field - n_field - 2;
     if (ulen == 0 || ulen > ACCOUNTLEN) {
-      send_reply(sptr, ERR_SASLFAIL, ": invalid SCRAM username");
+      sasl_fail_reply(sptr, ": invalid SCRAM username");
       return -1;
     }
     memcpy(username, n_field + 2, ulen);
@@ -2473,7 +2575,7 @@ static int sasl_scram_client_final(struct Client *sptr,
   /* Find p=<proof> at end of message */
   p_field = strstr(msg, ",p=");
   if (!p_field) {
-    send_reply(sptr, ERR_SASLFAIL, ": malformed SCRAM client-final");
+    sasl_fail_reply(sptr, ": malformed SCRAM client-final");
     return -1;
   }
   proof_b64 = p_field + 3;
@@ -2482,14 +2584,14 @@ static int sasl_scram_client_final(struct Client *sptr,
   {
     const char *r_field = strstr(msg, ",r=");
     if (!r_field || r_field > p_field) {
-      send_reply(sptr, ERR_SASLFAIL, ": missing nonce in client-final");
+      sasl_fail_reply(sptr, ": missing nonce in client-final");
       return -1;
     }
     {
       size_t nonce_len = p_field - r_field - 3;
       if (nonce_len != strlen(session->scram_combined_nonce) ||
           strncmp(r_field + 3, session->scram_combined_nonce, nonce_len) != 0) {
-        send_reply(sptr, ERR_SASLFAIL, ": nonce mismatch");
+        sasl_fail_reply(sptr, ": nonce mismatch");
         return -1;
       }
     }
@@ -2498,7 +2600,7 @@ static int sasl_scram_client_final(struct Client *sptr,
   /* Decode client proof from base64 */
   if (!sasl_base64_decode(proof_b64, client_proof, sizeof(client_proof), &decoded_len) ||
       decoded_len != 32) {
-    send_reply(sptr, ERR_SASLFAIL, ": invalid client proof");
+    sasl_fail_reply(sptr, ": invalid client proof");
     return -1;
   }
 
@@ -2531,7 +2633,7 @@ static int sasl_scram_client_final(struct Client *sptr,
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL SCRAM: Proof verification failed for %s (client %C)",
               session->authcid, sptr);
-    send_reply(sptr, ERR_SASLFAIL, "");
+    sasl_fail_reply(sptr, "");
     return -1;
   }
 
@@ -2625,6 +2727,8 @@ static void sasl_ecdsa_key_answer(int result, const struct kc_user *user, void *
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL ECDSA: No ECDSA key for %s (client %C)",
               session->authcid, acptr);
+    if (result == KC_SUCCESS || result == KC_NOT_FOUND)
+      sasl_failure_count(acptr);              /* no such user or no key */
     send_reply(acptr, ERR_SASLFAIL, "");
     sasl_abort_from_kc(acptr);
     return;
@@ -2691,7 +2795,7 @@ static int sasl_ecdsa_client_first(struct Client *sptr,
   struct sasl_cb_ctx *ctx;
 
   if (len == 0 || len > ACCOUNTLEN) {
-    send_reply(sptr, ERR_SASLFAIL, ": invalid ECDSA username");
+    sasl_fail_reply(sptr, ": invalid ECDSA username");
     return -1;
   }
 
@@ -2791,7 +2895,7 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
   log_write(LS_SYSTEM, L_INFO, 0,
             "SASL ECDSA: Signature verification failed for %s (client %C)",
             session->authcid, sptr);
-  send_reply(sptr, ERR_SASLFAIL, "");
+  sasl_fail_reply(sptr, "");
   return -1;
 }
 
@@ -2944,6 +3048,8 @@ int sasl_continue(struct Client *sptr, const char *data)
   /* OAUTHBEARER §3.2.3: After server sends error challenge, client responds
    * with dummy data or "*".  Either way, we send ERR_SASLFAIL and clean up. */
   if (session->state == SASL_STATE_FAILED) {
+    if (!session->fail_unavailable)
+      sasl_failure_count(sptr);        /* a refused token: counted */
     send_reply(sptr, ERR_SASLFAIL, "");
     return sasl_abort_local(sptr);
   }
@@ -2986,6 +3092,7 @@ int sasl_continue(struct Client *sptr, const char *data)
     if (session->data_len + chunk_len >= session->data_alloc) {
       size_t new_alloc = session->data_len + chunk_len + 1;
       if (new_alloc > SASL_DATA_MAX) {
+        sasl_failure_count(sptr);
         send_reply(sptr, ERR_SASLTOOLONG);
         return sasl_abort_local(sptr);
       }
@@ -3005,6 +3112,13 @@ int sasl_continue(struct Client *sptr, const char *data)
   }
 
 dispatch:
+  /* The client's message goes to the mechanism, and through it to the
+   * backend (Keycloak, or the caches that stand for it): from here an end
+   * without a login the client brings about counts (SASL_MAX_FAILURES,
+   * sasl_exchange_abandoned()). */
+  con_sasl_xflags(cli_connect(sptr)) |= SASLX_SENT;
+  con_sasl_xflags(cli_connect(sptr)) &= ~SASLX_CLIENTTURN;
+
   /* We have all the data — decode base64 and dispatch to mechanism handler.
    * A handler answers 0 to go on, -1 to have the exchange aborted here, or
    * CPTR_KILLED when the exchange ended inside it and the registration it
@@ -3018,7 +3132,7 @@ dispatch:
     if (session->accumulated_data && session->data_len > 0) {
       if (!sasl_base64_decode(session->accumulated_data, decoded,
                               sizeof(decoded) - 1, &decoded_len)) {
-        send_reply(sptr, ERR_SASLFAIL, ": base64 decode failed");
+        sasl_fail_reply(sptr, ": base64 decode failed");
         return sasl_abort_local(sptr);
       }
     }
@@ -3124,6 +3238,7 @@ static void sasl_local_timeout_cb(struct Event *ev)
       /* Local SASL timeout */
       log_write(LS_SYSTEM, L_INFO, 0,
                 "SASL: Local session timeout for %C", cptr);
+      sasl_exchange_abandoned(cptr, 1);
       send_reply(cptr, ERR_SASLFAIL, ": request timed out");
       sasl_abort_local(cptr);
     }

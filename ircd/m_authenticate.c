@@ -205,13 +205,25 @@ static int authenticate_end(struct Client *cptr, int client_abort)
   if (!cli_saslcookie(cptr) || IsSASLExchangeDone(cptr))
     return 0;
 
+  /* The client abandons an exchange its credentials already went out for
+   * (SASL_MAX_FAILURES; once per exchange).  A refused token's end is
+   * counted below, and not at all when Keycloak could not be asked. */
+  if (client_abort && !(cli_saslsession(cptr)
+                        && cli_saslsession(cptr)->state == SASL_STATE_FAILED))
+    sasl_exchange_abandoned(cptr, 0);
+
   /* Local SASL session takes priority */
   if (cli_saslsession(cptr)) {
     if (client_abort) {
       /* RFC 7628 §3.2.3: after an error challenge, client sends "*"
        * to acknowledge failure — reply with SASLFAIL, not SASLABORTED. */
-      if (cli_saslsession(cptr)->state == SASL_STATE_FAILED)
+      if (cli_saslsession(cptr)->state == SASL_STATE_FAILED) {
+        /* The end of a refused token: counted, unless Keycloak could not
+         * be asked (SASL_MAX_FAILURES). */
+        if (!cli_saslsession(cptr)->fail_unavailable)
+          sasl_failure_count(cptr);
         send_reply(cptr, ERR_SASLFAIL, "");
+      }
       else
         send_reply(cptr, ERR_SASLABORTED);
     }
@@ -264,6 +276,10 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   if (strlen(parv[1]) > 400) {
     if (CapActive(cptr, CAP_STANDARDREPLIES))
       send_fail(cptr, "AUTHENTICATE", "TOO_LONG", NULL, "SASL message too long");
+    /* The response of an exchange in flight: a failure (SASL_MAX_FAILURES).
+     * A line with no exchange behind it ends none. */
+    if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr))
+      sasl_failure_count(cptr);
     send_reply(cptr, ERR_SASLTOOLONG);
     return authenticate_end(cptr, 0);
   }
@@ -311,8 +327,29 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * may start again may log in as anyone -- and keeps the login it holds
    * until the new exchange succeeds (owner's ruling, 2026-11-15).
    */
-  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr))
+  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)) {
+    int limit = feature_int(FEAT_SASL_MAX_FAILURES);
+
     EndSASLExchange(cptr);    /* a new exchange: a re-authentication if set below */
+    con_sasl_xflags(cli_connect(cptr)) = 0;   /* nothing sent, nothing counted */
+
+    /* SASL_MAX_FAILURES, as it is now (a lowered value applies here too).
+     * Before registration the connection is closed, as at the failure
+     * that reached the limit (registration's check, sasl_failure_count()).
+     * After it -- or once registration has applied a login -- no new
+     * exchange starts: 904 and why, nothing reaches any tier, nothing else
+     * changes.  A success resets the count and none can come now, so this
+     * lasts until the client reconnects. */
+    if (con_sasl_limited(cli_connect(cptr))
+        || (limit > 0 && cli_sasl_failures(cptr) >= limit)) {
+      /* The mark is final: a raised limit never revives the connection. */
+      con_sasl_limited(cli_connect(cptr)) = 1;
+      if (!IsRegistered(cptr) && cli_auth(cptr))
+        return exit_client(cptr, cptr, &me, "Too many SASL failures");
+      return send_reply(cptr, ERR_SASLFAIL,
+                        ": too many failed attempts on this connection");
+    }
+  }
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
       && (IsSASLComplete(cptr) || IsAccount(cptr))) {
     int token = !ircd_strcmp(parv[1], "OAUTHBEARER");
@@ -418,6 +455,10 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       /* Send SASL continuation data to IAuth */
       auth_iauth_sasl_fail(cptr);
       return cli_auth(cptr) ? auth_sasl_done(cli_auth(cptr)) : 0;
+    } else if (strcmp(parv[1], "*")) {
+      /* The client's data went out to IAuth (SASL_MAX_FAILURES) */
+      con_sasl_xflags(cli_connect(cptr)) |= SASLX_SENT;
+      con_sasl_xflags(cli_connect(cptr)) &= ~SASLX_CLIENTTURN;
     }
 
     /* The program went away as the line was sent: the exchange has
@@ -505,6 +546,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     } else {
       sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u C :%s", acptr, &me,
                     cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+      con_sasl_xflags(cli_connect(cptr)) |= SASLX_SENT;   /* to services */
+      con_sasl_xflags(cli_connect(cptr)) &= ~SASLX_CLIENTTURN;
     }
   } else {
     if (first) {
@@ -524,6 +567,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     } else {
       sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u C :%s", &me,
                             cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+      con_sasl_xflags(cli_connect(cptr)) |= SASLX_SENT;   /* to services */
+      con_sasl_xflags(cli_connect(cptr)) &= ~SASLX_CLIENTTURN;
     }
   }
 
@@ -564,6 +609,7 @@ static void sasl_timeout_callback(struct Event* ev)
     if (!con_freeflag(con) && !cptr)
       free_connection(con); /* client is being destroyed */
   } else if (cptr) {
+    sasl_exchange_abandoned(cptr, 1);   /* counted only on the client's turn */
     abort_sasl(cptr, 1);
     /* SASL no longer holds registration; let it continue.  This may
      * exit cptr; nothing below touches it. */

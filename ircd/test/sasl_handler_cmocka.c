@@ -127,6 +127,8 @@ struct fake {
   char fail_desc[200];        /**< that FAIL's description */
   char saslfail[200];         /**< the reason of the last ERR_SASLFAIL */
   char loggedin_as[32];       /**< the account the last 900 named */
+  char exit_reason[64];       /**< why it was closed (registration's check
+                                   or exit_client()), "" while open */
 };
 
 /** What a login announces beyond the client itself: the aliases told, the
@@ -309,6 +311,17 @@ static struct Client *new_client(int fd, const char *nick, int cap_done,
  * later use crashes the test rather than reading a stale client. */
 static int registration_check(struct fake *f)
 {
+  /* SASL_MAX_FAILURES reached before registration: the check closes the
+   * connection, whatever else it waits for (check_auth_finished()). */
+  if (con_sasl_limited(&f->con) && !f->hold) {   /* not under an exchange's hold */
+    ircd_strncpy(f->exit_reason, "Too many SASL failures", sizeof(f->exit_reason));
+    LocalClientArray[f->fd] = NULL;
+    f->freed = 1;
+    memset(&f->cli, 0xA5, sizeof(f->cli));
+    memset(&f->con, 0xA5, sizeof(f->con));
+    memset(&f->user, 0xA5, sizeof(f->user));
+    return CPTR_KILLED;
+  }
   if (f->hold || !f->cap_done)
     return 0;
   if (in_kc_call)
@@ -647,7 +660,13 @@ void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
 int exit_client(struct Client *cptr, struct Client *victim,
                 struct Client *killer, const char *comment)
-{ touch(victim); return cptr == victim ? CPTR_KILLED : 0; }
+{
+  struct fake *f = fake_of(victim);
+  touch(victim);
+  if (f && !f->freed)
+    ircd_strncpy(f->exit_reason, comment, sizeof(f->exit_reason));
+  return cptr == victim ? CPTR_KILLED : 0;
+}
 int ircd_snprintf(struct Client *dest, char *buf, size_t len,
                   const char *format, ...)
 {
@@ -669,6 +688,8 @@ static int sendhost_on;     /**< FEAT_SASL_SENDHOST */
 /** FEAT_SASL_REAUTH.  The cases written before the setting existed pin
  * what is now "refresh" (setup()); the setting's own cases set it. */
 static const char *reauth_setting = "refresh";
+/** FEAT_SASL_MAX_FAILURES; 0 (no limit) unless a case sets it. */
+static int max_failures;
 int feature_bool(enum Feature feat)
 {
   switch (feat) {
@@ -693,6 +714,7 @@ int feature_int(enum Feature feat)
 {
   switch (feat) {
   case FEAT_SASL_TIMEOUT: return 30;
+  case FEAT_SASL_MAX_FAILURES: return max_failures;
   case FEAT_SASL_NEGCACHE_TTL: return 60;
   case FEAT_SASL_POSCACHE_TTL: return 300;
   case FEAT_HOST_HIDING_STYLE: return bed_features ? 1 : 0;
@@ -965,8 +987,8 @@ static void pend_deliver_at(int i, int res)
                         ok ? 1 : 0, p.data);
     break;
   case P_INTRO:
-    ((kc_introspect_cb)p.cb)(ok ? KC_SUCCESS : KC_FORBIDDEN, ok ? &info : NULL,
-                             p.data);
+    ((kc_introspect_cb)p.cb)(ok ? KC_SUCCESS : res == KC_ERROR ? KC_FORBIDDEN : res,
+                             ok ? &info : NULL, p.data);
     break;
   case P_RESULT:
     ((kc_result_cb)p.cb)(ok ? KC_SUCCESS : KC_ERROR, p.data);
@@ -1050,7 +1072,24 @@ int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
   ircd_strncpy(mail_id, id, sizeof(mail_id));
   return kc_request(P_RESULT, (void *)cb, data);
 }
-int kc_token_ensure(kc_token_cb cb, void *data) { return 0; }
+/* The health check's token: answered at once, as the case says (a case
+ * that made Keycloak "unreachable" makes it reachable again with it). */
+static int token_ensure_ok;
+int kc_token_ensure(kc_token_cb cb, void *data)
+{
+  if (token_ensure_ok)
+    cb(KC_SUCCESS, NULL, data);
+  return 0;
+}
+
+/** Keycloak is reachable again (sasl_health_check()): after a case
+ * answered a request "unavailable", which takes the local tier away. */
+static void kc_healthy_again(void)
+{
+  token_ensure_ok = 1;
+  sasl_health_check();
+  token_ensure_ok = 0;
+}
 int kc_jwt_prime_cache(struct kc_realm realm) { return KC_SUCCESS; }
 
 /* kc_url.c's UUID check (8-4-4-4-12 hex), which m_register.c asks. */
@@ -1107,10 +1146,13 @@ int kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
  * case says otherwise), unless the test says the check cannot decide
  * (introspection then). */
 static int jwt_local_undecided;
+static int jwt_local_forbidden;   /**< the local check is sure: a bad token */
 int kc_jwt_validate_local(struct kc_realm realm, const char *token,
                           struct kc_token_info **info_out)
 {
   struct kc_token_info *info;
+  if (jwt_local_forbidden)
+    return KC_FORBIDDEN;
   if (jwt_local_undecided)
     return KC_ERROR;
   info = calloc(1, sizeof(*info));
@@ -1237,6 +1279,8 @@ static int setup(void **state)
   sendhost_on = 0;
   bed_features = 0;
   reauth_setting = "refresh";
+  max_failures = 0;
+  jwt_local_forbidden = 0;
   in_session_too = NULL;
   ntlog = 0;
 #ifdef USE_LIBKC
@@ -5335,6 +5379,563 @@ static void prereg_earlier_login_stands(void **state)
     }
   local_off = 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* SASL_MAX_FAILURES                                                   */
+/* ------------------------------------------------------------------ */
+
+/* Owner's rulings (2026-11-15): a connection counts its failed SASL
+ * exchanges -- one that reached a backend and ended without a login:
+ * bad credentials or a refused token (904), an over-long response (905),
+ * a services or IAuth failure answer, a proven account refused by policy
+ * at the end (907/904) -- and not a client abort (906), an unsupported
+ * mechanism (908 + 904), the server's own unavailability (service
+ * unavailable, the timeout, the agent or IAuth gone) or a refusal before
+ * an exchange starts.  A login resets it.  At SASL_MAX_FAILURES (0: no
+ * limit) before registration the failure that reaches it is answered,
+ * then the connection is closed ("Too many SASL failures"); after
+ * registration every new exchange is refused with 904. */
+
+/** The ends of an exchange this suite can drive, and whether each counts. */
+enum fail_end { FE_BAD_PASSWORD, FE_UNVERIFIED, FE_UNAVAILABLE, FE_NEGCACHE,
+                FE_MALFORMED, FE_TOOLONG, FE_BAD_TOKEN, FE_ERRCHAL_DATA,
+                FE_ERRCHAL_STAR, FE_INTRO_UNAVAIL, FE_INTRO_NOT_STARTED,
+                FE_ABORT, FE_TIMEOUT, FE_NOT_STARTED, FE_POLICY_END, NFE };
+static const struct { const char *name; int counted; } fe[NFE] = {
+  { "bad password (904)", 1 },
+  { "account not set up (904, policy)", 1 },
+  { "Keycloak unavailable (904)", 0 },
+  { "known-bad credentials, negative cache (904)", 1 },
+  { "malformed PLAIN data (904)", 1 },
+  { "over-long response (905)", 1 },
+  { "token refused by the local check (904)", 1 },
+  { "token refused by introspection, then data (904)", 1 },
+  { "token refused by introspection, then * (904)", 1 },
+  { "introspection unavailable, then * (904)", 0 },
+  { "introspection request not started (904)", 0 },
+  { "client abort (906)", 0 },
+  { "the SASL timeout (904)", 0 },
+  { "Keycloak request not started (904)", 0 },
+  { "another account refused at the end (907)", 1 },
+};
+
+/** Drive one exchange of \a c ending as \a end. */
+static void fail_exchange(struct Client *c, enum fail_end end)
+{
+  static int n;
+  const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+  char data[300], pw[24];
+
+  snprintf(pw, sizeof(pw), "fe%d", ++n);
+  kc_mode = KC_LATER;
+  switch (end) {
+  case FE_BAD_PASSWORD:
+  case FE_UNVERIFIED:
+  case FE_UNAVAILABLE:
+    plain_pending(c, "liz", pw);
+    pend_deliver_kind(P_TOKEN, end == FE_BAD_PASSWORD ? KC_FORBIDDEN
+                               : end == FE_UNVERIFIED ? KC_UNVERIFIED
+                               : KC_UNAVAILABLE);
+    run_event_loop();
+    if (end == FE_UNAVAILABLE)
+      kc_healthy_again();
+    break;
+  case FE_NEGCACHE:                           /* the same bad pair again */
+    plain_pending(c, "negu", "negpw");
+    if (pend[0].kind != P_NONE) {
+      pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);
+      run_event_loop();
+      cli_sasl_failures(c) = 0;               /* count the hit alone */
+      plain_pending(c, "negu", "negpw");      /* answered inline */
+    }
+    break;
+  case FE_MALFORMED:
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    b64((const unsigned char *)"nonuls", 6, data);
+    assert_int_equal(authenticate(c, data), 0);
+    break;
+  case FE_TOOLONG: {
+    char line[402];
+    memset(line, 'A', 401);
+    line[401] = '\0';
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, line), 0);
+    break;
+  }
+  case FE_BAD_TOKEN:
+    jwt_local_forbidden = 1;
+    b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+    assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+    assert_int_equal(authenticate(c, data), 0);
+    jwt_local_forbidden = 0;
+    break;
+  case FE_ERRCHAL_DATA:
+  case FE_ERRCHAL_STAR:
+  case FE_INTRO_UNAVAIL:
+    jwt_local_undecided = 1;
+    b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+    assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+    assert_int_equal(authenticate(c, data), 0);
+    pend_deliver_kind(P_INTRO, end == FE_INTRO_UNAVAIL ? KC_UNAVAILABLE
+                                                       : KC_FORBIDDEN);
+    assert_int_equal(authenticate(c, end == FE_ERRCHAL_DATA ? "AQ==" : "*"), 0);
+    jwt_local_undecided = 0;
+    if (end == FE_INTRO_UNAVAIL)
+      kc_healthy_again();
+    break;
+  case FE_INTRO_NOT_STARTED:
+    jwt_local_undecided = 1;
+    b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+    assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+    kc_mode = KC_REFUSE;
+    assert_int_equal(authenticate(c, data), 0);
+    jwt_local_undecided = 0;
+    break;
+  case FE_ABORT:
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "*"), 0);
+    break;
+  case FE_TIMEOUT:
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    fire_timer(&cli_sasltimeout(c));
+    break;
+  case FE_NOT_STARTED:
+    plain_b64("liz", pw, data);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    kc_mode = KC_REFUSE;
+    assert_int_equal(authenticate(c, data), 0);
+    break;
+  case FE_POLICY_END:                         /* registered, refresh */
+    token_for("yvonne", "yvonne");
+    oauth_exchange(c, LOCAL);
+    break;
+  default:
+    fail();
+  }
+  kc_mode = KC_LATER;
+}
+
+/** Each end x counted or not; and a login resets the count. */
+static void max_failures_count_table(void **state)
+{
+  int e, fd = 170;
+
+  sasl_init_once();
+  for (e = 0; e < NFE; e++) {
+    struct Client *c;
+    struct fake *f;
+
+    if (e == FE_POLICY_END)
+      c = xavier_client(fd);                  /* logged in, refresh */
+    else
+      c = new_client(fd, "fc", 0, REG_KEEPS);
+    fd = fd < 177 ? fd + 1 : 170;
+    f = fake_of(c);
+    print_message("  %s: %s\n", fe[e].name, fe[e].counted ? "counted" : "not counted");
+    fail_exchange(c, (enum fail_end)e);
+    assert_false(f->freed);
+    assert_null(cli_saslsession(c));
+    assert_int_equal(cli_saslcookie(c), 0);
+    assert_false(has_numeric(f, RPL_SASLSUCCESS));
+    assert_int_equal(cli_sasl_failures(c), fe[e].counted);
+  }
+
+  {                                           /* a login resets it */
+    struct Client *c = new_client(178, "rs", 0, REG_KEEPS);
+
+    cli_sasl_failures(c) = 3;
+    plain_pending(c, "liz", "resetpw");
+    pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+    run_event_loop();
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_int_equal(cli_sasl_failures(c), 0);
+  }
+  {                                           /* and so does a refresh */
+    struct Client *c = xavier_client(179);
+
+    cli_sasl_failures(c) = 3;
+    token_for("xavier", "xavier");
+    oauth_exchange(c, LOCAL);
+    assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
+    assert_int_equal(cli_sasl_failures(c), 0);
+  }
+}
+
+/** Before registration: the failure that reaches the limit is answered
+ * (904), then the connection is closed with the reason -- from the event
+ * loop after a Keycloak answer, inside the client's own line (the handler
+ * returns CPTR_KILLED) after an answer given at once.  Until then nothing
+ * closes it, and CAP END is not needed for it. */
+static void max_failures_before_registration(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int i;
+
+  sasl_init_once();
+  max_failures = 3;
+  c = new_client(180, "pre", 0, REG_KEEPS);
+  f = fake_of(c);
+  for (i = 0; i < 3; i++) {
+    assert_false(f->freed);
+    fail_exchange(c, FE_BAD_PASSWORD);
+  }
+  assert_true(f->freed);
+  assert_string_equal(f->exit_reason, "Too many SASL failures");
+  assert_int_equal(f->n_numerics, 3);
+  for (i = 0; i < 3; i++)
+    assert_int_equal(f->numerics[i], ERR_SASLFAIL);
+  assert_int_equal(f->touched_after_free, 0);
+
+  /* An answer given inside the line: the line's handler returns
+   * CPTR_KILLED, nothing touches the client after it. */
+  max_failures = 2;
+  c = new_client(181, "pre2", 0, REG_KEEPS);
+  f = fake_of(c);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  {
+    char data[300];
+    b64((const unsigned char *)"nonuls", 6, data);   /* malformed: at once */
+    assert_int_equal(authenticate(c, data), CPTR_KILLED);
+  }
+  assert_true(f->freed);
+  assert_string_equal(f->exit_reason, "Too many SASL failures");
+  assert_int_equal(f->touched_after_free, 0);
+
+  /* Not-counted ends never close it. */
+  max_failures = 2;
+  c = new_client(182, "pre3", 0, REG_KEEPS);
+  f = fake_of(c);
+  for (i = 0; i < 4; i++) {
+    fail_exchange(c, FE_ABORT);
+    fail_exchange(c, FE_UNAVAILABLE);     /* (Keycloak reachable again after) */
+  }
+  assert_false(f->freed);
+  assert_int_equal(cli_sasl_failures(c), 0);
+}
+
+/** After registration: no disconnect.  At the limit every AUTHENTICATE that
+ * would start a new exchange is refused with 904 and the reason, nothing
+ * reaches Keycloak, the login and everything else stay; a success before
+ * the limit resets the count. */
+static void max_failures_after_registration(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int requests, i;
+
+  sasl_init_once();
+  max_failures = 2;
+  reauth_setting = "any";
+  c = new_registered(183, "reg");
+  f = fake_of(c);
+  bed_features = 1;
+  fail_exchange(c, FE_BAD_PASSWORD);
+  assert_int_equal(cli_sasl_failures(c), 1);
+  plain_pending(c, "zoe", "zoepwreset");             /* a success: reset */
+  pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+  run_event_loop();
+  assert_string_equal(cli_user(c)->account, "zoe");
+  assert_int_equal(cli_sasl_failures(c), 0);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  assert_int_equal(cli_sasl_failures(c), 2);
+  assert_false(f->freed);
+
+  for (i = 0; i < 2; i++) {                           /* refused, each time */
+    f->n_numerics = 0;
+    requests = kc_requests;
+    assert_int_equal(authenticate(c, i ? "OAUTHBEARER" : "PLAIN"), 0);
+    assert_int_equal(f->n_numerics, 1);
+    assert_int_equal(f->numerics[0], ERR_SASLFAIL);
+    assert_non_null(strstr(f->saslfail, "too many failed attempts on this connection"));
+    assert_null(cli_saslsession(c));
+    assert_int_equal(cli_saslcookie(c), 0);
+    assert_false(IsSASLReauth(c));
+    assert_int_equal(kc_requests, requests);
+    assert_false(f->freed);
+    assert_string_equal(f->exit_reason, "");
+    assert_string_equal(cli_user(c)->account, "zoe");
+    assert_int_equal(cli_sasl_failures(c), 2);       /* a refusal is no failure */
+  }
+}
+
+/** SASL_MAX_FAILURES 0 is no limit; a lowered value applies from the
+ * next failure or the next new exchange; once reached, the mark is final
+ * (a raised value does not lift it). */
+static void max_failures_zero_and_changed(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int i;
+
+  sasl_init_once();
+  max_failures = 0;                                   /* no limit */
+  c = new_client(184, "nl", 0, REG_KEEPS);
+  f = fake_of(c);
+  for (i = 0; i < 7; i++)
+    fail_exchange(c, FE_BAD_PASSWORD);
+  assert_false(f->freed);
+  assert_int_equal(cli_sasl_failures(c), 7);
+
+  /* Lowered below the count: the next new exchange closes it. */
+  max_failures = 5;
+  assert_int_equal(authenticate(c, "PLAIN"), CPTR_KILLED);
+  assert_string_equal(f->exit_reason, "Too many SASL failures");
+
+  /* After registration: lowered, then raised again. */
+  max_failures = 5;
+  c = new_registered(185, "ch");
+  f = fake_of(c);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  max_failures = 2;                                   /* a SET / REHASH */
+  f->n_numerics = 0;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_non_null(strstr(f->saslfail, "too many failed attempts"));
+  assert_null(cli_saslsession(c));
+  max_failures = 3;                                   /* raised: the mark */
+  f->n_numerics = 0;                                  /* is final, refused */
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_non_null(strstr(f->saslfail, "too many failed attempts"));
+  assert_null(cli_saslsession(c));
+
+  /* Lowered, reached at the next failure: the count reaching the new
+   * value closes it then (before registration). */
+  max_failures = 10;
+  c = new_client(186, "lw", 0, REG_KEEPS);
+  f = fake_of(c);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);      /* under the limit */
+  max_failures = 3;
+  {
+    char data[300];
+    plain_b64("liz", "lowpw", data);
+    assert_int_equal(authenticate(c, data), 0);
+    pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);
+    run_event_loop();
+  }
+  assert_true(f->freed);
+  assert_string_equal(f->exit_reason, "Too many SASL failures");
+}
+
+/** An exchange whose request has gone out to a backend and that the client
+ * then ends without a login -- an abort, letting it time out, registering
+ * mid-exchange -- counts, once.  The reviewer's run: credentials and
+ * AUTHENTICATE * in one write, again and again: the fifth such guess
+ * closes the connection.  An abort before anything went out does not
+ * count. */
+static void max_failures_aborted_guesses_count(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  char data[300];
+  int i, requests;
+
+  sasl_init_once();
+  max_failures = 5;
+  c = new_client(187, "ab", 0, REG_KEEPS);
+  f = fake_of(c);
+  requests = kc_requests;
+  for (i = 0; i < 5; i++) {
+    char pw[16];
+    int rc;
+
+    snprintf(pw, sizeof(pw), "abg%d", i);
+    plain_b64("liz", pw, data);
+    kc_mode = KC_LATER;
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, data), 0);      /* the grant goes out */
+    rc = authenticate(c, "*");                        /* and is abandoned */
+    pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);         /* its late answer */
+    run_event_loop();                                 /* reaches nobody */
+    if (i < 4) {
+      assert_int_equal(rc, 0);
+      assert_int_equal(cli_sasl_failures(c), i + 1);
+    } else {
+      assert_int_equal(rc, CPTR_KILLED);              /* the fifth closes it */
+      assert_true(f->freed);
+      assert_string_equal(f->exit_reason, "Too many SASL failures");
+    }
+  }
+  assert_int_equal(kc_requests, requests + 5);        /* five grants went out */
+  assert_int_equal(f->touched_after_free, 0);
+
+  /* Aborted before anything went out: never counted. */
+  c = new_client(188, "ab2", 0, REG_KEEPS);
+  f = fake_of(c);
+  for (i = 0; i < 8; i++) {
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "*"), 0);
+  }
+  assert_false(f->freed);
+  assert_int_equal(cli_sasl_failures(c), 0);
+}
+
+/** A refused token is counted when the refusal is known (the error
+ * challenge), whatever the client does next -- data, *, nothing (the
+ * timeout) -- and only once.  A timeout while the request is still with
+ * the backend is the backend's, not the client's: not counted. */
+static void max_failures_refusal_known_and_timeouts(void **state)
+{
+  const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+  char data[300];
+  int how;
+
+  sasl_init_once();
+  max_failures = 0;
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  for (how = 0; how < 3; how++) {             /* then data, *, the timeout */
+    struct Client *c = new_client(189 + how, "tk", 0, REG_KEEPS);
+
+    jwt_local_undecided = 1;
+    assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+    assert_int_equal(authenticate(c, data), 0);
+    pend_deliver_kind(P_INTRO, KC_FORBIDDEN);   /* the error challenge */
+    assert_int_equal(cli_sasl_failures(c), 1);  /* known: counted now */
+    if (how == 0)
+      assert_int_equal(authenticate(c, "AQ=="), 0);
+    else if (how == 1)
+      assert_int_equal(authenticate(c, "*"), 0);
+    else
+      fire_timer(&cli_sasltimeout(c));
+    assert_int_equal(cli_sasl_failures(c), 1);  /* once */
+    jwt_local_undecided = 0;
+  }
+
+  {                     /* the grant still out at the timeout: not counted */
+    struct Client *c = new_client(193, "to", 0, REG_KEEPS);
+
+    plain_pending(c, "liz", "topw");
+    fire_timer(&cli_sasltimeout(c));
+    assert_int_equal(cli_sasl_failures(c), 0);
+  }
+  {                     /* services: the credentials out, no answer yet */
+    struct Client *c = new_client(194, "sv", 0, REG_KEEPS);
+
+    local_off = 1;
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "AGxpegBwdw=="), 0);
+    fire_timer(&cli_sasltimeout(c));
+    assert_int_equal(cli_sasl_failures(c), 0);
+    /* ... a challenge back from services: the client's turn, and its
+     * timeout counts */
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "AGxpegBwdw=="), 0);
+    con_sasl_xflags(cli_connect(c)) |= SASLX_CLIENTTURN;   /* ms_sasl() C */
+    fire_timer(&cli_sasltimeout(c));
+    assert_int_equal(cli_sasl_failures(c), 1);
+    /* ... and an abort after the credentials went out counts */
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "AGxpegBwdw=="), 0);
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_int_equal(cli_sasl_failures(c), 2);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);         /* before: not */
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_int_equal(cli_sasl_failures(c), 2);
+    local_off = 0;
+  }
+  {                     /* IAuth: the same */
+    struct Client *c = new_client(195, "ia", 0, REG_KEEPS);
+
+    local_off = 1;
+    iauth_on = 1;
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "AGxpegBwdw=="), 0);
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_int_equal(cli_sasl_failures(c), 1);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "*"), 0);
+    assert_int_equal(cli_sasl_failures(c), 1);
+    local_off = iauth_on = 0;
+  }
+}
+
+/** The limit's mark is final for the connection: raising SASL_MAX_FAILURES
+ * never revives it.  Before registration, a limit reached in a Keycloak
+ * answer closes the connection at the next check; a new exchange before
+ * that check closes it too, whatever the value is now.  After
+ * registration the refusal stays. */
+static void max_failures_mark_is_final(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  max_failures = 2;
+  c = new_client(196, "fi", 0, REG_KEEPS);
+  f = fake_of(c);
+  plain_pending(c, "liz", "fipw1");
+  pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);
+  run_event_loop();
+  plain_pending(c, "liz", "fipw2");
+  pend_deliver_kind(P_TOKEN, KC_FORBIDDEN);    /* the limit: marked ... */
+  assert_false(f->freed);                      /* ... the check not run yet */
+  max_failures = 10;                           /* a SET raises it */
+  assert_int_equal(authenticate(c, "PLAIN"), CPTR_KILLED);
+  assert_string_equal(f->exit_reason, "Too many SASL failures");
+  assert_null(cli_saslsession(c));
+
+  max_failures = 2;
+  c = new_registered(197, "fr");
+  f = fake_of(c);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  fail_exchange(c, FE_BAD_PASSWORD);
+  max_failures = 10;
+  f->n_numerics = 0;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_non_null(strstr(f->saslfail, "too many failed attempts"));
+  assert_null(cli_saslsession(c));
+  max_failures = 0;                            /* no limit: still refused */
+  f->n_numerics = 0;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_non_null(strstr(f->saslfail, "too many failed attempts"));
+}
+
+/** Keycloak could not be asked: the client gets an error challenge, and
+ * nothing it does next -- silence until the SASL timeout, an abort, the
+ * acknowledgement -- counts: the server's own unavailability.  A real
+ * refusal followed by silence still counts, once. */
+static void max_failures_unavailable_never_counts(void **state)
+{
+  const char msg[] = "n,,\001auth=Bearer some.jwt.token\001\001";
+  char data[300];
+  int how;
+
+  sasl_init_once();
+  max_failures = 0;
+  b64((const unsigned char *)msg, sizeof(msg) - 1, data);
+  for (how = 0; how < 4; how++) {     /* silence, *, data; then a refusal */
+    struct Client *c = new_client(198 + how, "un", 0, REG_KEEPS);
+
+    print_message("  %s\n", how == 0 ? "unavailable, then silence" :
+                  how == 1 ? "unavailable, then *" :
+                  how == 2 ? "unavailable, then the acknowledgement" :
+                  "refused, then silence");
+    jwt_local_undecided = 1;
+    assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+    assert_int_equal(authenticate(c, data), 0);
+    pend_deliver_kind(P_INTRO, how == 3 ? KC_FORBIDDEN : KC_UNAVAILABLE);
+    if (how == 1)
+      assert_int_equal(authenticate(c, "*"), 0);
+    else if (how == 2)
+      assert_int_equal(authenticate(c, "AQ=="), 0);
+    else
+      fire_timer(&cli_sasltimeout(c));
+    /* With Keycloak marked unreachable the local tier is not offered, and
+     * the acknowledgement does not reach the local session (it ends at
+     * the timeout): not counted either way. */
+    if (cli_saslsession(c))
+      fire_timer(&cli_sasltimeout(c));
+    assert_null(cli_saslsession(c));
+    assert_int_equal(cli_sasl_failures(c), how == 3 ? 1 : 0);
+    jwt_local_undecided = 0;
+    if (how < 3)
+      kc_healthy_again();
+  }
+}
 #endif /* USE_LIBKC */
 
 /* ------------------------------------------------------------------ */
@@ -5480,6 +6081,14 @@ int main(void)
     cmocka_unit_test_setup(reauth_setting_before_registration, setup),
     cmocka_unit_test_setup(reauth_setting_first_login_unchanged, setup),
     cmocka_unit_test_setup(prereg_earlier_login_stands, setup),
+    cmocka_unit_test_setup(max_failures_count_table, setup),
+    cmocka_unit_test_setup(max_failures_before_registration, setup),
+    cmocka_unit_test_setup(max_failures_after_registration, setup),
+    cmocka_unit_test_setup(max_failures_zero_and_changed, setup),
+    cmocka_unit_test_setup(max_failures_aborted_guesses_count, setup),
+    cmocka_unit_test_setup(max_failures_refusal_known_and_timeouts, setup),
+    cmocka_unit_test_setup(max_failures_mark_is_final, setup),
+    cmocka_unit_test_setup(max_failures_unavailable_never_counts, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

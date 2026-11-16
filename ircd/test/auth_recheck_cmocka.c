@@ -304,6 +304,13 @@ int send_reply(struct Client *to, int reply, ...)
   last_reply = reply & ~SND_EXPLICIT;
   return 0;
 }
+/* sasl_auth.c (not linked): a failed exchange counted toward
+ * SASL_MAX_FAILURES. */
+static int counted_failures;
+void sasl_failure_count(struct Client *cptr) { counted_failures++; }
+/* ... and an exchange the client abandoned (sasl_auth.c): whom. */
+static struct Client *abandoned;
+void sasl_exchange_abandoned(struct Client *cptr, int timeout) { abandoned = cptr; }
 /* m_cap.c: what the sasl capability advertises (none here). */
 const char *cap_sasl_mechanisms(void) { return NULL; }
 void sendrawto_one(struct Client *to, const char *pattern, ...) {}
@@ -354,6 +361,8 @@ static int setup(void **state)
   in_dispatch = ran_in_dispatch = 0;
   successes = failures = identity_sets = refusals = 0;
   mechlists = last_reply = 0;
+  counted_failures = 0;
+  abandoned = NULL;
   expect_exit_msg = NULL;
   exits = 0;
   dnsbl_checks = dnsbl_cancels = 0;
@@ -670,6 +679,56 @@ static void iauth_failed_second_exchange_keeps_the_login(void **state)
     assert_int_equal(identity_sets, 0);
     destroy_auth_request(a->auth);
   }
+}
+
+/** SASL_MAX_FAILURES on the IAuth tier: its f counts, its l (908) and
+ * IAuth unreachable do not, its Z (a login) resets the count; a
+ * connection that reached the limit before registration is closed by
+ * registration's check, before anything else it waits for. */
+static void iauth_sasl_failures_and_the_limit(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);     /* registration waits */
+  cli_saslcookie(&a->cli) = 31;
+  iauth_line(iauth_cmd_sasl_fail, a, NULL);
+  assert_int_equal(counted_failures, 1);
+  cli_saslcookie(&a->cli) = 32;
+  iauth_line(iauth_cmd_sasl_mechs, a, "PLAIN");
+  assert_int_equal(counted_failures, 1);
+  cli_saslcookie(&a->cli) = 33;
+  assert_int_equal(auth_iauth_sasl_fail(&a->cli), 1);
+  assert_int_equal(counted_failures, 1);
+
+  cli_sasl_failures(&a->cli) = 4;               /* a Z: a login */
+  cli_saslcookie(&a->cli) = 34;
+  iauth_line(iauth_cmd_sasl_loggedin, a, "alice");
+  iauth_line(iauth_cmd_sasl_done, a, NULL);
+  assert_int_equal(cli_sasl_failures(&a->cli), 0);
+  destroy_auth_request(a->auth);
+
+  a = new_client(1, KEEPS);                     /* the limit reached */
+  FlagSet(&a->auth->flags, AR_NEEDS_USER);      /* still waits for USER */
+  con_sasl_limited(cli_connect(&a->cli)) = 1;
+  /* never under an exchange's hold: a login completing holds it while it
+   * uses the client (sasl_login_apply() step 3 runs the check) */
+  auth_sasl_start(a->auth);
+  assert_int_equal(auth_set_account(a->auth, "alice"), 0);
+  expect_exit = "Too many SASL failures";
+  assert_int_equal(auth_sasl_done(a->auth), CPTR_KILLED);
+  expect_exit = NULL;
+}
+
+/** Registration completing with an exchange in flight aborts it: one whose
+ * credentials went out is abandoned by the client (counted). */
+static void registration_mid_exchange_is_abandoned(void **state)
+{
+  struct fake *a = new_client(0, KEEPS);
+
+  cli_saslcookie(&a->cli) = 41;
+  auth_complete_sasl(&a->cli);
+  assert_ptr_equal(abandoned, &a->cli);
+  destroy_auth_request(a->auth);
 }
 
 /* A WEBIRC password check out (m_webirc.c): registration waits for it --
@@ -990,6 +1049,8 @@ int main(void)
     cmocka_unit_test_setup(iauth_fail_ends_clear_the_reauth_mark, setup),
     cmocka_unit_test_setup(iauth_mechs_end_the_exchange, setup),
     cmocka_unit_test_setup(iauth_failed_second_exchange_keeps_the_login, setup),
+    cmocka_unit_test_setup(iauth_sasl_failures_and_the_limit, setup),
+    cmocka_unit_test_setup(registration_mid_exchange_is_abandoned, setup),
     cmocka_unit_test_setup(webirc_check_holds_registration, setup),
     cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),

@@ -79,6 +79,11 @@ struct SASLSession {
 
   /* Keycloak user id of the verified identity, compact ("" = not in hand) */
   char               kc_id[ACCOUNT_ID_LEN + 1];
+
+  /* The exchange failed because Keycloak could not be asked (an error
+   * challenge after an introspection that did not answer): its 904 is not
+   * counted (SASL_MAX_FAILURES). */
+  int                fail_unavailable;
 };
 
 /** Heap-allocated context for async Keycloak callbacks.
@@ -135,6 +140,25 @@ extern void sasl_identity_set(struct Client *cptr, const char *account,
  *  what registration will apply, and a later login may replace it.
  */
 extern int sasl_logged_in(struct Client *cptr);
+
+/** Count one failed SASL exchange of our connection \a cptr
+ *  (SASL_MAX_FAILURES): one that reached a backend and ended without a
+ *  login through the client -- bad credentials, a refused token, an
+ *  over-long response, a services or IAuth failure answer, an account
+ *  refused at the end.  Not an abort, an unsupported mechanism, or the
+ *  server's own unavailability.  Before registration, reaching the limit
+ *  marks the connection: registration's next check closes it. */
+extern void sasl_failure_count(struct Client *cptr);
+
+/** The client ended its exchange in flight without a login -- an abort
+ *  (\a timeout 0), letting it time out (\a timeout 1), registering
+ *  mid-exchange -- after its request went out to a backend (SASLX_SENT):
+ *  counted (sasl_failure_count(), once per exchange).  A timeout counts
+ *  only when it was the client's turn: a request still with the backend
+ *  (Keycloak not answered, services or IAuth not answered the
+ *  credentials) is the backend's.  Nothing for an exchange whose request
+ *  never went out. */
+extern void sasl_exchange_abandoned(struct Client *cptr, int timeout);
 
 /** SASL_REAUTH: what a logged-in SASL 3.2 (CAP LS 302) client's
  *  re-authentication may do.  A client that never sent CAP LS 302 cannot

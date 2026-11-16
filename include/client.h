@@ -551,6 +551,14 @@ struct Connection
                                         For bouncer primaries, tracks only this connection's
                                         own CAP REQ/ACK state (not the session union). */
   unsigned short      con_capab_version; /**< CAP version (0, 301, 302) */
+  unsigned short      con_sasl_failures; /**< SASL exchanges that failed on this
+                                              connection since its last login
+                                              (SASL_MAX_FAILURES) */
+  unsigned char       con_sasl_limited;  /**< SASL_MAX_FAILURES reached: final
+                                              for the connection (closed before
+                                              registration, refused after) */
+  unsigned char       con_sasl_xflags;   /**< the SASL exchange in flight, for
+                                              SASL_MAX_FAILURES (SASLX_*) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
   char                con_label[64]; /**< Current command label for labeled-response */
@@ -822,6 +830,8 @@ struct Client {
 #define cli_active_own(cli)	con_active_own(cli_connect(cli))
 /** Get CAP version for client (0, 301, 302) */
 #define cli_capab_version(cli)	con_capab_version(cli_connect(cli))
+/** Get the number of failed SASL exchanges since the client's last login. */
+#define cli_sasl_failures(cli)	con_sasl_failures(cli_connect(cli))
 /** Get current command label for labeled-response */
 #define cli_label(cli)		con_label(cli_connect(cli))
 /** Check if labeled response was sent for this command */
@@ -1197,6 +1207,19 @@ struct Client {
 #define con_active_own(con)     (&(con)->con_active_own)
 /** Get the CAP version for the connection (0, 301, 302). */
 #define con_capab_version(con)  ((con)->con_capab_version)
+/** Get the number of failed SASL exchanges since the connection's last login. */
+#define con_sasl_failures(con)  ((con)->con_sasl_failures)
+/** Get whether SASL_MAX_FAILURES was reached (final for the connection). */
+#define con_sasl_limited(con)   ((con)->con_sasl_limited)
+/** Get the SASLX_* marks of the connection's SASL exchange in flight. */
+#define con_sasl_xflags(con)    ((con)->con_sasl_xflags)
+/** The exchange's request has gone out to a backend (the client's
+ * credentials reached Keycloak, services or IAuth). */
+#define SASLX_SENT        0x01
+/** The exchange is counted already (SASL_MAX_FAILURES counts it once). */
+#define SASLX_COUNTED     0x02
+/** The backend answered with a challenge: the client's turn. */
+#define SASLX_CLIENTTURN  0x04
 /** Get the auth request for the connection. */
 #define con_auth(con)		((con)->con_auth)
 /** Get the current command label for labeled-response. */
