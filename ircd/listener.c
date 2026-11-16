@@ -348,6 +348,11 @@ void add_listener(int port, const char* vhost_ip, const char* mask,
       && !ircd_aton(&vaddr, vhost_ip))
       return;
 
+  /* A configuration check (ircd -k) reads the Port block but opens no
+   * socket: it may run beside the live server, whose ports are bound. */
+  if (conf_is_check_only())
+    return;
+
   listener = find_listener(port, &vaddr);
   if (!listener)
   {
