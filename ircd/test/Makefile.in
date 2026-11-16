@@ -12,6 +12,7 @@ TESTPROGS = \
 	ircd_chattr_t \
 	iauth_held_t \
 	iauth_respawn_t \
+	conf_precheck_t \
 	ircd_in_addr_t \
 	ircd_match_t \
 	ircd_string_t \
@@ -24,6 +25,7 @@ DEP_SRC = \
 	ircd_chattr_t.c \
 	iauth_held_t.c \
 	iauth_respawn_t.c \
+	conf_precheck_t.c \
 	ircd_in_addr_t.c \
 	ircd_match_t.c \
 	ircd_string_t.c \
@@ -65,6 +67,12 @@ iauth_held_t: $(IAUTH_HELD_T_OBJS)
 IAUTH_RESPAWN_T_OBJS = iauth_respawn_t.o
 iauth_respawn_t: $(IAUTH_RESPAWN_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IAUTH_RESPAWN_T_OBJS)
+
+# The REHASH precheck (a fresh "ircd -k"); a shell script stands in for
+# the binary.  Standalone.
+CONF_PRECHECK_T_OBJS = conf_precheck_t.o ../conf_precheck.o
+conf_precheck_t: $(CONF_PRECHECK_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CONF_PRECHECK_T_OBJS)
 
 IRCD_IN_ADDR_T_OBJS = ircd_in_addr_t.o test_stub.o ../ircd_alloc.o ../ircd_string.o ../match.o ../numnicks.o
 ircd_in_addr_t: $(IRCD_IN_ADDR_T_OBJS)
