@@ -1044,6 +1044,16 @@ portblock: PORT '{' portitems '}' ';' {
     hosts = link;
   }
   for (link = paste_invalid ? NULL : hosts; link != NULL; link = link->next) {
+    struct irc_in_addr vaddr;
+    /* A vhost without its own number takes the last one seen, so the
+     * number is carried over before a bad vhost is skipped. */
+    if (link->flags & 65535)
+      port = link->flags & 65535;
+    if (!EmptyString(link->value.cp) && strcmp(link->value.cp, "*")
+        && !ircd_aton(&vaddr, link->value.cp)) {
+      parse_error("Invalid virtual host '%s' in Port block.", link->value.cp);
+      continue;
+    }
     memcpy(&flags_here, &listen_flags, sizeof(flags_here));
     switch (link->flags & (USE_IPV4 | USE_IPV6)) {
     case USE_IPV4:
@@ -1057,8 +1067,6 @@ portblock: PORT '{' portitems '}' ';' {
       FlagSet(&flags_here, LISTEN_IPV6);
       break;
     }
-    if (link->flags & 65535)
-      port = link->flags & 65535;
     add_listener(port, link->value.cp, pass, &flags_here);
   }
   free_slist(&hosts);
