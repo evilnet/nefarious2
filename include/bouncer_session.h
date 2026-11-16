@@ -26,6 +26,11 @@
 #ifndef INCLUDED_bouncer_session_h
 #define INCLUDED_bouncer_session_h
 
+/** The batch type a held session's restored channel state is sent in
+ * (N027): the vendor cap's name, as the persistence draft defines no
+ * batch type.  Builds before it used "draft/persistence". */
+#define PERSISTENCE_RESTORE_BATCH "evilnet.github.io/persistence"
+
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif
