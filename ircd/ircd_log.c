@@ -570,7 +570,8 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
        * itself; -1: not queued, written below. */
       if (log_async_write(desc->file->fd,
                           (flags & LOG_DOSYSLOG) ? (ldata->syslog | desc->facility) : 0,
-                          async_buf, async_len) >= 0) {
+                          async_buf, async_len,
+                          (int)vector[0].iov_len) >= 0) {
         /* Written or queued - skip sync write and syslog */
         flags &= ~(LOG_DOFILELOG | LOG_DOSYSLOG);
       }

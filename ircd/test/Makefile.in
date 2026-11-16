@@ -771,7 +771,7 @@ paste_listener_cmocka: $(PASTE_LISTENER_CMOCKA_OBJS)
 LOG_ASYNC_CMOCKA_OBJS = log_async_cmocka.o ../ircd_log.o ../ircd_log_async.o \
 	../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o
 log_async_cmocka: $(LOG_ASYNC_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=write $(LOG_ASYNC_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=write -Wl,--wrap=syslog -Wl,--wrap=__syslog_chk -Wl,--wrap=pthread_cond_timedwait $(LOG_ASYNC_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
 
 # ssl_teardown tests - a TLS teardown writes only to a descriptor its
 # socket still owns (ssl_abort after an ET_ERROR EBADF dropped cli_fd) and

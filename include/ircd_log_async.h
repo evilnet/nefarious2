@@ -46,7 +46,8 @@
 /** Log entry for async queue */
 struct log_async_entry {
   int fd;                              /**< File descriptor to write to (-1 for syslog) */
-  int syslog_priority;                 /**< Syslog priority (if fd == -1) */
+  int syslog_priority;                 /**< Syslog priority (0: no syslog) */
+  int syslog_off;                      /**< Where syslog's text starts */
   int len;                             /**< Length of message */
   char message[LOG_ASYNC_MAX_ENTRY];   /**< Pre-formatted log message */
 };
@@ -75,11 +76,15 @@ void log_async_shutdown(void);
  * @param[in] syslog_priority Syslog priority (0 to skip syslog)
  * @param[in] message Pre-formatted log message
  * @param[in] len Length of message
+ * @param[in] syslog_off Offset in \a message where the syslog text starts:
+ *         syslog gets the line without the file's timestamp before it and
+ *         without the newline after it (syslog stamps its own)
  * @return 0 on success (queued), 1 if sync fallback was used (the line
  *         is written: do not write it again), -1 when nothing was
  *         written (no writer, or not accepting): the caller writes it
  */
-int log_async_write(int fd, int syslog_priority, const char *message, int len);
+int log_async_write(int fd, int syslog_priority, const char *message, int len,
+                    int syslog_off);
 
 /**
  * Flush all pending log entries.
@@ -116,7 +121,7 @@ void log_async_stats(unsigned long *queued, unsigned long *written,
 /* Stub implementations when pthreads is not available */
 #define log_async_init(s)                       (0)
 #define log_async_shutdown()                    do {} while (0)
-#define log_async_write(fd, prio, msg, len)     (-1)
+#define log_async_write(fd, prio, msg, len, off) (-1)
 #define log_async_flush()                       do {} while (0)
 #define log_async_available()                   (0)
 #define log_async_set_accepting(on)             do {} while (0)

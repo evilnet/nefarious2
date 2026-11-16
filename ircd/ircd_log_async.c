@@ -90,6 +90,20 @@ static inline unsigned int buffer_count(void)
   return log_async.size - log_async.tail + log_async.head;
 }
 
+/** Syslog @a message (a log file's line) as syslog wants it: from
+ * @a off, without the file's timestamp, and without the line's newline.
+ */
+static void syslog_line(int priority, const char *message, int len, int off)
+{
+  if (off < 0 || off > len)
+    off = 0;
+  message += off;
+  len -= off;
+  if (len > 0 && message[len - 1] == '\n')
+    len--;
+  syslog(priority, "%.*s", len, message);
+}
+
 /**
  * Check if buffer is full.
  * Must be called with mutex held.
@@ -153,11 +167,10 @@ static void *log_writer_thread(void *arg)
       (void)!write(entry->fd, entry->message, entry->len);
     }
 
-    if (entry->syslog_priority > 0) {
-      syslog(entry->syslog_priority, "%.*s",
-             entry->len > 0 ? entry->len : (int)strlen(entry->message),
-             entry->message);
-    }
+    if (entry->syslog_priority > 0)
+      syslog_line(entry->syslog_priority, entry->message,
+                  entry->len > 0 ? entry->len : (int)strlen(entry->message),
+                  entry->syslog_off);
 
     pthread_mutex_lock(&log_async.mutex);
     log_async.written++;
@@ -292,7 +305,8 @@ void log_async_shutdown(void)
 /**
  * Queue a log entry for async write.
  */
-int log_async_write(int fd, int syslog_priority, const char *message, int len)
+int log_async_write(int fd, int syslog_priority, const char *message, int len,
+                    int syslog_off)
 {
   struct log_async_entry *entry;
   int result = 0, cut = 0;
@@ -368,7 +382,8 @@ again:
             (void)!write(fd, message, len);
         }
         if (syslog_priority > 0)
-          syslog(syslog_priority, "%.*s", cut ? len - 1 : len, message);
+          syslog_line(syslog_priority, message, cut ? len - 1 : len,
+                      syslog_off);
 
         return 1;  /* Indicate sync fallback */
       }
@@ -379,6 +394,7 @@ again:
   entry = &log_async.entries[log_async.head];
   entry->fd = fd;
   entry->syslog_priority = syslog_priority;
+  entry->syslog_off = syslog_off;
   entry->len = len;
   memcpy(entry->message, message, len);
   if (cut)

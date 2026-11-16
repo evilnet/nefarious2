@@ -587,10 +587,108 @@ static void nothing_restarts_the_writer_after_stop(void **state)
   assert_false(log_async_available());
 }
 
+/* syslog() is wrapped (-Wl,--wrap=syslog, and --wrap=__syslog_chk for a
+ * fortified build): the text it was given. */
+static pthread_mutex_t syslog_mu = PTHREAD_MUTEX_INITIALIZER;
+static char syslogged[512];
+static int syslog_calls;
+
+void __wrap_syslog(int priority, const char *format, ...)
+{
+  va_list args;
+
+  (void)priority;
+  pthread_mutex_lock(&syslog_mu);
+  va_start(args, format);
+  vsnprintf(syslogged, sizeof(syslogged), format, args);
+  va_end(args);
+  syslog_calls++;
+  pthread_mutex_unlock(&syslog_mu);
+}
+
+/* A fortified build calls __syslog_chk() instead. */
+void __wrap___syslog_chk(int priority, int flag, const char *format, ...)
+{
+  va_list args;
+
+  (void)priority; (void)flag;
+  pthread_mutex_lock(&syslog_mu);
+  va_start(args, format);
+  vsnprintf(syslogged, sizeof(syslogged), format, args);
+  va_end(args);
+  syslog_calls++;
+  pthread_mutex_unlock(&syslog_mu);
+}
+
+/** A queued line goes to syslog as syslog wants it: without the log
+ * file's timestamp (syslog stamps its own) and without the newline. */
+static void syslog_gets_the_line_without_the_file_stamp(void **state)
+{
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  assert_int_equal(log_set_facility("SYSTEM", "LOCAL0"), 0);
+  syslog_calls = 0;
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSNOTICE, "to syslog");
+  log_async_flush();
+  log_set_facility("SYSTEM", NULL);
+
+  assert_int_equal(syslog_calls, 1);
+  assert_string_equal(syslogged, "SYSTEM [CRIT]: to syslog");
+}
+
+/* pthread_cond_timedwait() is wrapped (-Wl,--wrap=pthread_cond_timedwait):
+ * while spurious_waits is set, a wait on the thread that set it returns 0
+ * at once with nothing changed, as POSIX allows any wait to. */
+static int spurious_waits;
+static pthread_t spurious_thread;
+
+int __real_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu,
+                                  const struct timespec *until);
+
+int __wrap_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu,
+                                  const struct timespec *until)
+{
+  if (spurious_waits > 0 && pthread_equal(pthread_self(), spurious_thread)) {
+    spurious_waits--;
+    return 0;
+  }
+  return __real_pthread_cond_timedwait(cond, mu, until);
+}
+
+/** A full ring: a wakeup that leaves it full is not room.  The line goes
+ * the direct way, and every queued line is still written. */
+static void full_ring_spurious_wakeup_is_not_room(void **state)
+{
+  int i;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  gate_close();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "first");
+  wait_at_gate();               /* the writer holds it; the ring is empty */
+  for (i = 0; i < 7; i++)       /* a ring of 8 holds 7 */
+    log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "fill %d", i);
+
+  spurious_thread = pthread_self();
+  spurious_waits = 1;
+  /* No descriptor and no syslog: the fallback writes nothing (and does
+   * not wait at the gate), and only its return value tells. */
+  assert_int_equal(log_async_write(-1, 0, "overflow\n", -1, 0), 1);
+  assert_int_equal(spurious_waits, 0);
+
+  gate_open();
+  log_async_flush();
+  assert_int_equal(occurrences(log_path, "fill"), 7);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup_teardown(a_cut_line_still_ends_its_line,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(syslog_gets_the_line_without_the_file_stamp,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(full_ring_spurious_wakeup_is_not_room,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(
         a_cut_line_the_full_queue_writes_still_ends_its_line,
