@@ -1611,13 +1611,25 @@ gitsync_apply(const char *content, size_t len, int force,
 
     /* Back to the configuration as it was: the backup, or no file at all
      * when there was none (an include of it then reads as empty). */
+    int abandoned = conf_rehash_abandoned();
+    int clean = -1;
+
     if (had_backup ? 0 == rename(bak_file, conf_file)
                    : 0 == unlink(conf_file)) {
-      /* Rehash again with restored config (never handing it a cptr the
-       * first one exited) */
-      if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
-        *killed = CPTR_KILLED;
-      if (!conf_get_error_flag()) {
+      /* An abandoned rehash changed nothing: the running configuration
+       * is the one from before it, so there is nothing to reload -- only
+       * whether the configuration is clean without the content to learn,
+       * which the check tells without a second full rehash. */
+      if (abandoned)
+        clean = conf_file_check();
+      /* Otherwise, or if the check could not run, rehash again with the
+       * restored config (never handing it a cptr the first one exited) */
+      if (clean < 0) {
+        if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
+          *killed = CPTR_KILLED;
+        clean = !conf_get_error_flag();
+      }
+      if (clean) {
         /* Clean without the content: the content is what failed.  Not
          * written and rehashed again by every periodic sync. */
         ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
