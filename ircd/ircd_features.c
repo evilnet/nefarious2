@@ -1636,8 +1636,13 @@ feature_set(struct Client* from, const char* const* fields, int count)
 	  feat->flags |= FEAT_MARK;
 	else /* i < 0 */
 	  feat->flags &= ~FEAT_MARK;
+	break;
       }
-      break; /* never parse a custom feature's arguments as an integer */
+      /* A set handler that returns 0 falls through, as it always has.
+       * For "LOG" = "<subsystem>" ... lines that stores 0 in the unused
+       * v_int and clears LOG's mark, which log_feature_mark() depends on
+       * as it stands: changing either belongs with that function, not
+       * here.  Only a real integer feature's value is checked below. */
 
     case FEAT_INT: /* an integer value */
       tmp = feat->v_int; /* detect changes... */
@@ -1646,7 +1651,14 @@ feature_set(struct Client* from, const char* const* fields, int count)
 	feat->v_int = feat->def_int;
 	feat->flags &= ~FEAT_MARK;
       } else { /* ok, figure out the value and whether to mark it */
-	if (!ircd_strtoint(fields[1], &feat->v_int)) {
+	if ((feat->flags & FEAT_MASK) != FEAT_INT)
+	  feat->v_int = strtoul(fields[1], 0, 0); /* see FEAT_NONE above */
+	else if (!ircd_strtoint(fields[1], &feat->v_int)) {
+	  /* The value stays as it was.  Reading ircd.conf, feature_unmark()
+	   * has cleared every mark, and feature_mark() would put an unmarked
+	   * feature back to its default: keep the mark for a kept value. */
+	  if (feat->v_int != feat->def_int)
+	    feat->flags |= FEAT_MARK;
 	  if (from) /* report an error... */
 	    return send_reply(from, ERR_BADFEATVALUE, fields[1], feat->type);
 	  log_write(LS_CONFIG, L_ERROR, 0, "Bad value \"%s\" for feature %s",
