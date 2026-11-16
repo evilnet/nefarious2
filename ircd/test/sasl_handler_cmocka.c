@@ -779,6 +779,22 @@ struct BouncerSession *bounce_get_session(struct Client *cptr)
       return (struct BouncerSession *)&fsess;
   return NULL;
 }
+/* bounce_client_in_session(): every session, whatever its account -- the
+ * fake session's members, and a client a case files in a session that
+ * bounce_get_session() cannot find through the client's account (a
+ * primary services renamed: the session stays under the old name). */
+static struct Client *in_session_too;
+int bounce_client_in_session(struct Client *cptr)
+{
+  int i;
+  touch(cptr);
+  if (cptr && cptr == in_session_too)
+    return 1;
+  for (i = 0; i < 4; i++)
+    if (fsess.members[i] && fsess.members[i] == cptr)
+      return 1;
+  return 0;
+}
 const char *bounce_session_kc_id(struct BouncerSession *s)
 { return s ? ((struct fake_session *)s)->kc_id : ""; }
 void bounce_session_adopt_kc_id(struct BouncerSession *s, const char *id) { fx.adopts++; }
@@ -1216,6 +1232,7 @@ static int setup(void **state)
   sendhost_on = 0;
   bed_features = 0;
   reauth_setting = "refresh";
+  in_session_too = NULL;
   ntlog = 0;
 #ifdef USE_LIBKC
   kc_mode = KC_LATER;
@@ -4871,6 +4888,30 @@ static void reauth_setting_bouncer_member(void **state)
   }
 }
 
+/** A session's primary that services renamed (AC M from X3): its session
+ * stays filed under the old name, so bounce_get_session() -- which looks
+ * through the client's CURRENT account -- does not find it.  It is a
+ * session's connection all the same (bounce_client_in_session() walks
+ * every session): under any its re-authentication to another account is
+ * refused (907, the bouncer-session reason), nothing changes. */
+static void reauth_setting_renamed_primary(void **state)
+{
+  struct Client *c;
+  struct login_snap was;
+  struct effects fx_was;
+
+  sasl_init_once();
+  reauth_setting = "any";
+  c = xavier_client(158);
+  in_session_too = c;                       /* filed under a former name */
+  assert_null(bounce_get_session(c));
+  snap(c, &was);
+  fx_was = fx;
+  assert_int_equal(plain_exchange(c, "yvonne", 1), 1);
+  assert_refused(c, &was, &fx_was, ERR_SASLALREADY, "bouncer session");
+  assert_false(tlog_has_prefix("servers AC"));
+}
+
 /** The setting is read again when the exchange completes: a REHASH in
  * between decides by its new value. */
 static void reauth_setting_rehash_between(void **state)
@@ -5215,6 +5256,7 @@ int main(void)
     cmocka_unit_test_setup(reauth_setting_table, setup),
     cmocka_unit_test_setup(reauth_setting_other_id_and_failure, setup),
     cmocka_unit_test_setup(reauth_setting_bouncer_member, setup),
+    cmocka_unit_test_setup(reauth_setting_renamed_primary, setup),
     cmocka_unit_test_setup(reauth_setting_rehash_between, setup),
     cmocka_unit_test_setup(reauth_setting_any_not_a_change, setup),
     cmocka_unit_test_setup(reauth_setting_services_switch, setup),

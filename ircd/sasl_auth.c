@@ -867,11 +867,22 @@ int sasl_restart_mechanism_allowed(int token)
   return token || sasl_reauth_mode() != SASL_REAUTH_REFRESH;
 }
 
+/** Is \a sptr a connection of a bouncer session: an alias, the primary
+ * slot or a roster entry of ANY session (bounce_client_in_session(), the
+ * check BOUNCER RESUME makes), or a held ghost.  Not bounce_get_session():
+ * it looks a session up through the client's CURRENT account, and a
+ * primary whose account services renamed (AC M) stays in a session filed
+ * under the old name -- read as no member, its switch would leave that
+ * session's primary on another account than its devices (#219's shape). */
+static int sasl_session_member(struct Client *sptr)
+{
+  return bounce_client_in_session(sptr) || IsBouncerHold(sptr);
+}
+
 /** May logged-in \a sptr's re-authentication CHANGE its account to \a
  * account (SASL_REAUTH any, already checked)?  Only a registered client
- * that is not part of a bouncer session -- a primary, an alias, a held
- * ghost: bounce_get_session() finds the session from any of them, and an
- * alias whose session is going is still an alias -- for a name the ircd
+ * that is not part of a bouncer session (sasl_session_member()) -- for a
+ * name the ircd
  * tells apart from its own (a name only the casemapping folds together
  * with it is the same key to sessions, history and metadata, and an
  * "AC M" naming it is dropped by every server as no change), and only
@@ -883,8 +894,7 @@ int sasl_restart_mechanism_allowed(int token)
 static int sasl_switch_allowed(struct Client *sptr, const char *account)
 {
   return IsRegistered(sptr) && !EmptyString(account)
-         && !bounce_get_session(sptr) && !IsBouncerAlias(sptr)
-         && !IsBouncerHold(sptr)
+         && !sasl_session_member(sptr)
          && 0 != ircd_strcmp(cli_user(sptr)->account, account)
          && feature_bool(FEAT_EXTENDED_ACCOUNTS);
 }
@@ -971,8 +981,7 @@ int sasl_reauth_refused(struct Client *sptr, const char *account,
 
   {
     char reason[ACCOUNTLEN + 96];
-    int member = bounce_get_session(sptr) || IsBouncerAlias(sptr)
-                 || IsBouncerHold(sptr);
+    int member = sasl_session_member(sptr);
 
     log_write(LS_USER, L_NOTICE, 0,
               "SASL: %C, logged in as %s, re-authenticated as %s: refused, a "
