@@ -24,7 +24,9 @@ enum BounceRecordStatus {
   BOUNCE_REC_MIGRATED_V7,  /**< v7, migrated; bsr_sessid left empty for
                             *   the caller to mint (v7 ids were short) */
   BOUNCE_REC_BAD_SIZE,     /**< Known version, length is not its size */
-  BOUNCE_REC_UNKNOWN       /**< Too short for a version, or unknown one */
+  BOUNCE_REC_UNKNOWN,      /**< Too short for a version, or unknown one */
+  BOUNCE_REC_NEWER         /**< Written by a newer build (version above
+                            *   BOUNCER_DB_VERSION): not read, and kept */
 };
 
 /** On-disk size of a record version.
@@ -32,6 +34,15 @@ enum BounceRecordStatus {
  * @return Its size in bytes, or 0 when the version is not one we read.
  */
 extern size_t bounce_record_size(uint32_t version);
+
+/** Did a newer build write this record (its version is above
+ * BOUNCER_DB_VERSION)?  Such a record is neither restored nor evicted:
+ * after a rollback it waits on disk for the build that can read it.
+ * @param[in] buf Record bytes (need not be aligned).
+ * @param[in] len Record length.
+ * @return Non-zero for a newer build's record.
+ */
+extern int bounce_record_from_newer_build(const void *buf, size_t len);
 
 /** Decode a persisted record into the current layout.
  * @param[in] buf      Record bytes (need not be aligned).

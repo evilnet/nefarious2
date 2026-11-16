@@ -136,6 +136,16 @@ static void copy_str(char *dst, size_t dsize, const char *src, size_t ssize)
     COPY_ARRAY(d, s, bsr_channels, bsr_chancount); \
   } while (0)
 
+int bounce_record_from_newer_build(const void *buf, size_t len)
+{
+  uint32_t version;
+
+  if (len < sizeof(version))
+    return 0;
+  memcpy(&version, buf, sizeof(version));
+  return version > BOUNCER_DB_VERSION;
+}
+
 enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
                                              struct BounceSessionRecord *out,
                                              uint32_t *version)
@@ -154,6 +164,8 @@ enum BounceRecordStatus bounce_record_decode(const void *buf, size_t len,
   if (len < sizeof(uint32_t))
     return BOUNCE_REC_UNKNOWN;
   memcpy(version, buf, sizeof(*version));
+  if (*version > BOUNCER_DB_VERSION)
+    return BOUNCE_REC_NEWER;    /* its layout is the newer build's */
 
   want = bounce_record_size(*version);
   if (!want)

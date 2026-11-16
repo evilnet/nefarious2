@@ -297,6 +297,34 @@ static void test_wrong_size_and_unknown(void **state)
   free(out);
 }
 
+/* A record a newer build wrote: any size, a version above ours.  It is
+ * not read (its layout is unknown here) and not evicted: a roll-forward
+ * restores it. */
+static void test_newer_build_record(void **state)
+{
+  struct BounceSessionRecord *out = calloc(1, sizeof(*out));
+  unsigned char *buf = calloc(1, 16 * 1024);
+  uint32_t version = BOUNCER_DB_VERSION + 1;
+
+  (void)state;
+  memcpy(buf, &version, sizeof(version));
+  assert_int_equal(bounce_record_decode(buf, 15000, out, &version),
+                   BOUNCE_REC_NEWER);
+  assert_int_equal(version, BOUNCER_DB_VERSION + 1);
+  assert_true(bounce_record_from_newer_build(buf, 15000));
+  assert_true(bounce_record_from_newer_build(buf, sizeof(uint32_t)));
+
+  version = BOUNCER_DB_VERSION;
+  memcpy(buf, &version, sizeof(version));
+  assert_false(bounce_record_from_newer_build(buf, sizeof(struct BounceSessionRecord)));
+  version = 6;
+  memcpy(buf, &version, sizeof(version));
+  assert_false(bounce_record_from_newer_build(buf, 14192));
+  assert_false(bounce_record_from_newer_build(buf, 3));
+  free(buf);
+  free(out);
+}
+
 static void test_unterminated_strings_stay_bounded(void **state)
 {
   struct BounceSessionRecord_v8 *v8 = calloc(1, sizeof(*v8));
@@ -854,6 +882,7 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_layout_sizes),
+    cmocka_unit_test(test_newer_build_record),
     cmocka_unit_test(test_frozen_layout_offsets),
     cmocka_unit_test(test_v8_migrates),
     cmocka_unit_test(test_v8_alias_count_is_clamped),
