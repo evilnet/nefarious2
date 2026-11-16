@@ -3604,6 +3604,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       } else
 	cli_user(acptr)->kc_id[0] = '\0';   /* +r arrived without one */
       ircd_strncpy(cli_user(acptr)->account, account, len);
+      /* Account bans (~a:) match it now: a member of ours forgets its
+       * cached ban verdicts. */
+      if (MyConnect(acptr))
+        member_ban_cache_clear(acptr);
       /* P1 A3 residue: eager metadata load for a live client that just
        * attached an account via SVSMODE/server MODE +r.  Guarded on
        * IsRegistered so a client mid N-burst-intro (not yet registered —

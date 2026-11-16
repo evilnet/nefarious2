@@ -1246,6 +1246,9 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
       ircd_strncpy(cli_user(sptr)->account, cli_saslaccount(sptr), ACCOUNTLEN + 1);
       SetAccount(sptr);
+      /* Account bans (~a:) match by account: the verdicts cached on this
+       * member's channels are for the previous account (or none). */
+      member_ban_cache_clear(sptr);
 
       /* Chathistory gate: this is the post-registration attach the
        * authusers counter never saw (drift class: FLAG_ACCOUNT flip

@@ -27,6 +27,7 @@
 #include "sasl_webhook.h"
 #include "account_id.h"
 #include "sasl_auth.h"
+#include "channel.h"
 #include "client.h"
 #include "ircd_log.h"
 #include "msg.h"
@@ -198,6 +199,9 @@ static void deauth_client(struct Client *cptr, const char *reason)
   /* Shared with ms_account's AC U receiver: alias propagation, session
    * destroy, metadata clear, authusers, presence anchor, account clear. */
   exit_ghost = bounce_account_deauth_apply(cptr);
+  /* Account bans (~a:) no longer match: the cached verdicts go. */
+  if (MyConnect(cptr))
+    member_ban_cache_clear(cptr);
 
   /* account-notify: channel members, and the user's own connections
    * ("including themselves"). */

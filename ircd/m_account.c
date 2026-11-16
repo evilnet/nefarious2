@@ -196,6 +196,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         assert(0 != cli_user(acptr)->account[0]);
 
         exit_ghost = bounce_account_deauth_apply(acptr);
+        /* Account bans (~a:) no longer match: the verdicts cached for the
+         * removed account go (a member of ours; a remote one caches none
+         * here). */
+        if (MyConnect(acptr))
+          member_ban_cache_clear(acptr);
 
         {
           char ac_msgid[64] = "";
@@ -268,6 +273,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
           ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
           SetAccount(acptr);
+          /* Account bans (~a:) match by account: a member of ours forgets
+           * the verdicts cached for its previous account.  (A remote
+           * user's memberships cache nothing here.) */
+          if (MyConnect(acptr))
+            member_ban_cache_clear(acptr);
 
           /* Count this member's channels only on a false->true account
            * transition.  An account CHANGE ('M') arrives with the user
@@ -530,6 +540,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
+    if (MyConnect(acptr))
+      member_ban_cache_clear(acptr);   /* account bans match it now */
     /* Chathistory-gate parity with the EXTENDED_ACCOUNTS branch: count
      * the member's channels (the !IsAccount bail above guarantees this
      * is a false->true transition). */

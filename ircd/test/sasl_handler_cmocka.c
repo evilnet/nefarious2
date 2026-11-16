@@ -804,6 +804,9 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
 { touch(primary); fx.alias_updates++; tlog_add("alias update %s %s %s", tname(primary), field, value); }
 void bounce_sync_alias_identity(struct Client *primary)
 { touch(primary); fx.alias_syncs++; tlog_add("alias sync %s", tname(primary)); }
+/* channel.c: a member's cached ban verdicts forgotten. */
+void member_ban_cache_clear(struct Client *cptr)
+{ touch(cptr); tlog_add("ban cache %s", tname(cptr)); }
 void channel_account_adjust(struct Client *cptr, int delta)
 { touch(cptr); fx.account_adjusts++; tlog_add("channel account count %s %+d", tname(cptr), delta); }
 /* An account change's presence move: a switch carries nothing. */
@@ -4751,6 +4754,9 @@ static void assert_switched(struct Client *c, const struct login_snap *was,
    * account's. */
   snprintf(line, sizeof(line), "mode rederive %s", cli_name(c));
   assert_true(tlog_has(line));
+  /* What account bans (~a:) match changed: the cached verdicts go. */
+  snprintf(line, sizeof(line), "ban cache %s", cli_name(c));
+  assert_true(tlog_has(line));
   snprintf(line, sizeof(line), "mode restore %s 1", cli_name(c));
   assert_false(tlog_has(line));
   assert_string_equal(cli_active_profile(c), "");
@@ -4794,6 +4800,7 @@ static void reauth_setting_table(void **state)
         if (!other) {
           assert_refreshed(c, &was, &fx_was);
           assert_false(tlog_has_prefix("servers AC"));   /* no AC line */
+          assert_false(tlog_has_prefix("ban cache"));    /* nothing changed */
           assert_string_equal(cli_user(c)->kc_id, was.kc_id);
           continue;
         }
@@ -5129,6 +5136,7 @@ static void reauth_setting_first_login_unchanged(void **state)
     assert_true(has_numeric(fake_of(c), RPL_SASLSUCCESS));
     assert_string_equal(cli_user(c)->account, "zoe");
     assert_true(tlog_has_prefix("servers AC nolog R zoe"));
+    assert_true(tlog_has("ban cache nolog"));        /* account bans now match */
   }
 }
 #endif /* USE_LIBKC */

@@ -99,6 +99,8 @@ static char logged_fmt[4][160];         /* log lines at NOTICE or above */
 static int nlogged;
 static int notices_tried, notices_sent; /* rate-limited oper notices */
 static struct Client *session_member;   /* bounce_client_in_session() */
+static struct Client *ban_cleared[MAXREC];  /* member_ban_cache_clear() */
+static int nban_clears;
 
 static void tell(struct Client *to)
 {
@@ -242,6 +244,7 @@ static int world_setup(void **state)
   nmoved = 0;
   nreplies = 0;
   nlogged = notices_tried = notices_sent = 0;
+  nban_clears = 0;
   session_member = NULL;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
@@ -437,6 +440,13 @@ int account_id_valid(const char *id)
 {
   (void)id;
   return 0;
+}
+
+/* channel.c: whose cached ban verdicts were forgotten. */
+void member_ban_cache_clear(struct Client *cptr)
+{
+  assert_true(nban_clears < MAXREC);
+  ban_cleared[nban_clears++] = cptr;
 }
 
 void channel_account_adjust(struct Client *cptr, int delta)
@@ -1339,6 +1349,35 @@ static void test_account_m_switch_of_a_member_is_told(void **state)
   assert_int_equal(nlogged, 2);
 }
 
+/* Account bans (~a:) match by account: a LOCAL member's cached ban
+ * verdicts are forgotten whenever its account changes -- a login (R), a
+ * change (M: a services rename or the user's own server's switch), a
+ * logout (U) -- or it could keep speaking past a ban on its new account
+ * until the ban list changed.  A remote user's memberships cache nothing
+ * here (banflags are kept for local members only). */
+static void test_account_change_forgets_cached_bans(void **state)
+{
+  struct Client *svs, *leaf, *c, *r;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("loc", 9);
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+  assert_int_equal(nban_clears, 1);
+  assert_ptr_equal(ban_cleared[0], c);
+  deliver(ms_account, svs, svs, "%s%s M zed2", NumNick(c));
+  assert_int_equal(nban_clears, 2);
+  deliver(ms_account, svs, svs, "%s%s U", NumNick(c));
+  assert_int_equal(nban_clears, 3);
+
+  leaf = leaf_link("leaf.test", "AC]]]");
+  r = remote_user("rem", leaf, "ACAAF", "xavier");     /* R: nothing here */
+  deliver(ms_account, leaf, leaf, "ACAAF M yvonne 0");
+  deliver(ms_account, leaf, leaf, "ACAAF U");
+  assert_int_equal(nban_clears, 3);
+  (void)r;
+}
+
 /* A first login (R) moves the session's presence to the account, with
  * its start, as before. */
 static void test_account_r_carries_presence(void **state)
@@ -1392,6 +1431,7 @@ int main(void)
     T(test_account_m_switch_carries_no_presence),
     T(test_account_r_carries_presence),
     T(test_account_m_switch_of_a_member_is_told),
+    T(test_account_change_forgets_cached_bans),
 #undef T
   };
 
