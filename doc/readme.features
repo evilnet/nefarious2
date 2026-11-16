@@ -1338,6 +1338,46 @@ after a REHASH in between, the new value decides.  Values are not case
 sensitive; any other value is refused (a bad feature value) and the
 previous one stays.  Nothing of it is advertised to clients.
 
+SASL_MAX_FAILURES
+  * Type: integer
+  * Default: 5
+
+The number of failed SASL exchanges a connection may make; 0 means no
+limit.  A failed exchange is one that reached the authentication service
+and ended without a login through the client: wrong credentials or a
+refused token (904), an over-long response (905), a failure answered by
+services or IAuth, and an account the server refuses at the end of the
+exchange (another account under SASL_REAUTH refresh or same, a bouncer
+session's connection, the account's name under another Keycloak id).  Not
+counted: a mechanism that is not offered (908 and 904), the server's own
+unavailability (service unavailable, services or IAuth going away, a
+timeout while the request is still with the authentication service), an
+abort before the client's credentials were sent, and the refusals given
+before an exchange starts (907, 462).  An exchange whose credentials were
+sent is counted however the client ends it -- an abort (906), letting it
+time out when the service has answered, registering mid-exchange -- once.
+A successful login or refresh resets the count.
+
+When the count reaches the limit before registration, the failure's own
+numeric is sent and the connection is then closed ("Too many SASL
+failures").  After registration nothing is closed: every further
+AUTHENTICATE that would start a new exchange is refused with 904 (": too
+many failed attempts on this connection") and reaches no backend, and the
+login stays.  Since only a success resets the count and none can happen
+then, the refusal lasts until the client reconnects.  The count belongs to
+the connection (a bouncer revive onto a new socket starts at zero).  A SET
+or REHASH applies from the next failure or the next new exchange; once a
+connection has reached the limit, raising it does not lift that.
+
+Two consequences to know: under SASL_REAUTH refresh, five failed token
+refreshes in a row (for example expired tokens) lock that connection out
+of refreshing until it reconnects.  And the limit bounds failures, not
+their rate: a logged-in client under any or same can alternate a refresh
+of its own account (which resets the count) with guesses at another
+account, so only fake lag bounds how fast it guesses (12 guesses in 7.4
+seconds measured with fake lag off; with it on, roughly one guess every
+few seconds).
+
 After an account change the connection's mode-synced user modes (+i, +p,
 +q, +R, +D, +Y, +y, +b) are those of the new account's settings, else the
 connection class's default -- none is kept from the old account -- and a
