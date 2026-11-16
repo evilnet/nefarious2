@@ -30,6 +30,7 @@
 #include "numnicks.h"
 #include "random.h"
 #include "send.h"
+#include "history.h"
 #include "bouncer_session.h"
 #include "bouncer_rebind_auth.h"
 #include "s_auth.h"
@@ -1364,12 +1365,34 @@ static int sasl_login_apply(struct Client *sptr, const char *account,
       bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 
       /* account-notify: channel members, and this user's own
-       * connections ("including themselves") */
-      sendcmdto_common_channels_capab_session(sptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
-                                              "%s", cli_user(sptr)->account);
+       * connections ("including themselves").  One event on every server
+       * (N067): its msgid and time are minted here, carried on the AC
+       * below, and every receiver (ms_account()) shows and relays the
+       * change under them. */
+      {
+        char ac_msgid[64] = "";
+        uint64_t ac_ms = 0;
 
-      /* Propagate to other servers */
-      sasl_broadcast_account(sptr, type);
+        if (feature_bool(FEAT_MSGID)) {
+          generate_msgid(ac_msgid, sizeof(ac_msgid));
+          ac_ms = history_event_time_ms(NULL);
+          sendcmdto_set_client_event(ac_msgid, ac_ms);
+        }
+        sendcmdto_common_channels_capab_session(sptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
+                                                "%s", cli_user(sptr)->account);
+        sendcmdto_set_client_msgid(NULL);
+
+        /* Propagate to other servers */
+        if (ac_msgid[0]) {
+          sendcmdto_set_s2s_tags(ac_ms, ac_msgid);
+          sendcmdto_want_s2s_tags(1);
+        }
+        sasl_broadcast_account(sptr, type);
+        /* sendcmdto_set_s2s_tags() also armed the client-facing time; no
+         * client line of this event follows. */
+        if (ac_msgid[0])
+          sendcmdto_set_client_msgid(NULL);
+      }
 
       /* Apply hidden host if applicable */
       if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
