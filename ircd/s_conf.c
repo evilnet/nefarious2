@@ -1588,6 +1588,20 @@ conf_get_error_flag(void)
   return conf_error;
 }
 
+/** Set by rehash() when it returned without applying anything (the file
+ * could not be read, the check found errors, or it kept changing). */
+static int rehash_abandoned;
+
+/** Did the last rehash() stop before it discarded anything?  Then the
+ * running configuration is the one from before it: nothing to reload.
+ * @return Non-zero if the last rehash was abandoned.
+ */
+int
+conf_rehash_abandoned(void)
+{
+  return rehash_abandoned;
+}
+
 /** Attach CONF_UWORLD items to a server and everything attached to it. */
 static void
 attach_conf_uworld(struct Client *cptr)
@@ -1977,6 +1991,32 @@ static int rehash_precheck(void)
   return 0;
 }
 
+/** Check the configuration file as it is on disk now, in a fresh
+ * "ircd -k" (conf_precheck_run()), without loading it and without telling
+ * anyone: for GitSync, which after an abandoned rehash puts its file back
+ * and needs to know whether the configuration is clean without it.
+ * @return 1 if clean, 0 if it has errors (or crashed the check), -1 if
+ *   the check did not run.
+ */
+int conf_file_check(void)
+{
+  static char out[4096];
+  const char *exe = "/proc/self/exe";   /* the running binary */
+
+  if (access(exe, X_OK) != 0)
+    exe = SPATH;
+  switch (conf_precheck_run(exe, ".", configfile,
+                            CONF_PRECHECK_TIMEOUT_MS, out, sizeof(out))) {
+  case CONF_PRECHECK_OK:
+    return 1;
+  case CONF_PRECHECK_ERRORS:
+  case CONF_PRECHECK_CRASHED:
+    return 0;
+  default:
+    return -1;
+  }
+}
+
 /** Reload the configuration file.  A file that cannot be read at all
  * abandons the rehash before anything is discarded (rehash_open_conf()).
  * @param cptr Client that requested rehash (if a signal, &me).
@@ -2001,6 +2041,7 @@ int rehash(struct Client *cptr, int sig)
 
   /* A file that changed while it was checked (a deploy writing it) is
    * opened and checked again, a few times. */
+  rehash_abandoned = 1;         /* until the old configuration is discarded */
   for (tries = 0; ; tries++) {
     if (!rehash_open_conf())
       return 0;
@@ -2016,6 +2057,7 @@ int rehash(struct Client *cptr, int sig)
       return 0;
     }
   }
+  rehash_abandoned = 0;
 
   while ((tmp2 = *tmp)) {
     if (tmp2->clients) {
