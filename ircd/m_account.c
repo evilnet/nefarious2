@@ -296,6 +296,33 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
             presence_anchor_move(acptr, presence_old_acct, 0,
                                  cli_user(acptr)->account, 0,
                                  sptr != cli_user(acptr)->server);
+
+          /* A switch announced for a client this server holds as a
+           * connection of a bouncer session: the user's own server refuses
+           * those (sasl_reauth_refused()), so only an older build, a race
+           * or a bug sends it.  Applied all the same -- ignored, the
+           * account would differ here from everywhere else -- and told:
+           * the session and its devices stay on the old account.  No
+           * repair is attempted. */
+          if (was_account && sptr == cli_user(acptr)->server
+              && (bounce_client_in_session(acptr) || IsBouncerHold(acptr))) {
+            static time_t member_switch_rate;
+
+            log_write(LS_USER, L_WARNING, 0, "ACCOUNT: %s changed the account "
+                      "of %C, a connection of a bouncer session (%s), from %s "
+                      "to %s: the session keeps the old account",
+                      cli_name(sptr), acptr, cli_session_id(acptr),
+                      presence_old_acct, cli_user(acptr)->account);
+            sendto_opmask_butone_ratelimited(0, SNO_NETWORK, &member_switch_rate,
+                                             "ACCOUNT: %s changed the account of "
+                                             "%C, a connection of a bouncer "
+                                             "session (%s), from %s to %s: the "
+                                             "session keeps the old account",
+                                             cli_name(sptr), acptr,
+                                             cli_session_id(acptr),
+                                             presence_old_acct,
+                                             cli_user(acptr)->account);
+          }
         }
 
         if (parc > 4) {

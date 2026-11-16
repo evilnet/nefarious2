@@ -95,6 +95,10 @@ static int refusals;                    /* sasl_reauth_refused() said so */
 static int nmoved;                      /* presence_anchor_move() calls */
 static int replies[MAXREC];             /* every numeric sent, in order */
 static int nreplies;
+static char logged_fmt[4][160];         /* log lines at NOTICE or above */
+static int nlogged;
+static int notices_tried, notices_sent; /* rate-limited oper notices */
+static struct Client *session_member;   /* bounce_client_in_session() */
 
 static void tell(struct Client *to)
 {
@@ -237,6 +241,8 @@ static int world_setup(void **state)
   refusals = 0;
   nmoved = 0;
   nreplies = 0;
+  nlogged = notices_tried = notices_sent = 0;
+  session_member = NULL;
   auth_result = 0;
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
 
@@ -269,10 +275,33 @@ static int world_teardown(void **state)
  * Stubs
  * ==================================================================== */
 
+/* Log lines at NOTICE or above, their format kept (the pattern says which
+ * line it was). */
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...)
 {
-  (void)subsys; (void)severity; (void)flags; (void)fmt;
+  (void)subsys; (void)flags;
+  if (severity <= L_NOTICE && nlogged < 4)
+    ircd_strncpy(logged_fmt[nlogged++], fmt, sizeof(logged_fmt[0]));
+}
+
+/* Oper notices, rate-limited as the real ones are (30 s per rate). */
+void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
+                                      time_t *rate, const char *pattern, ...)
+{
+  (void)one; (void)mask; (void)pattern;
+  notices_tried++;
+  if (CurrentTime - *rate < 30)
+    return;
+  *rate = CurrentTime;
+  notices_sent++;
+}
+
+/* A connection of a bouncer session (bouncer_session.c), as a case files
+ * it. */
+int bounce_client_in_session(struct Client *c)
+{
+  return c && c == session_member;
 }
 
 void debug(int level, const char *form, ...)
@@ -1269,6 +1298,47 @@ static void test_account_m_switch_carries_no_presence(void **state)
   (void)svs;
 }
 
+/* The user's own server announced an account change (a switch) for a
+ * client this server holds as a connection of a bouncer session -- which
+ * that server refuses, so only an older build, a race or a bug sends it.
+ * It is applied as any M is (ignoring it would leave the account
+ * different here than everywhere else), and told: a log line and a
+ * rate-limited oper notice naming the client, both accounts and the
+ * session.  No repair.  A services rename of a member is not told. */
+static void test_account_m_switch_of_a_member_is_told(void **state)
+{
+  struct Client *svs, *leaf, *c;
+  (void)state;
+
+  svs = services_link();
+  leaf = leaf_link("leaf.test", "AC]]]");
+  c = remote_user("mem", leaf, "ACAAE", "xavier");
+  session_member = c;
+
+  deliver(ms_account, svs, svs, "ACAAE M xavier2");          /* a rename */
+  assert_string_equal(cli_user(c)->account, "xavier2");
+  assert_int_equal(notices_tried, 0);
+  assert_int_equal(nlogged, 0);
+
+  deliver(ms_account, leaf, leaf, "ACAAE M yvonne 0");       /* a switch */
+  assert_string_equal(cli_user(c)->account, "yvonne");       /* applied */
+  assert_int_equal(notices_tried, 1);
+  assert_int_equal(notices_sent, 1);
+  assert_int_equal(nlogged, 1);
+  assert_non_null(strstr(logged_fmt[0], "bouncer session"));
+
+  deliver(ms_account, leaf, leaf, "ACAAE M zoe 0");          /* again: rate */
+  assert_string_equal(cli_user(c)->account, "zoe");
+  assert_int_equal(notices_tried, 2);
+  assert_int_equal(notices_sent, 1);
+  assert_int_equal(nlogged, 2);
+
+  session_member = NULL;                                     /* not a member */
+  deliver(ms_account, leaf, leaf, "ACAAE M xavier 0");
+  assert_int_equal(notices_tried, 2);
+  assert_int_equal(nlogged, 2);
+}
+
 /* A first login (R) moves the session's presence to the account, with
  * its start, as before. */
 static void test_account_r_carries_presence(void **state)
@@ -1321,6 +1391,7 @@ int main(void)
     T(test_account_m_rename_carries_presence),
     T(test_account_m_switch_carries_no_presence),
     T(test_account_r_carries_presence),
+    T(test_account_m_switch_of_a_member_is_told),
 #undef T
   };
 
