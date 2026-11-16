@@ -266,6 +266,12 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,
                       cli_user(acptr)->swhois);
 
+      /* The user's away state.  The N carries none, so without this the
+       * far side shows every user it learns in this burst as present
+       * until the next AWAY change. */
+      if (!EmptyString(cli_user(acptr)->away))
+        sendcmdto_one(acptr, CMD_AWAY, cptr, ":%s", cli_user(acptr)->away);
+
       if (cli_version(acptr) && !EmptyString(cli_version(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_CVERSION, cli_version(acptr));
