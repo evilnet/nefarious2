@@ -313,7 +313,7 @@ engine_loop(struct Generators* gen)
       continue;
     }
 
-    for (i = 0; nfds && i <= highest_fd; i++) {
+    for (i = 0; running && nfds && i <= highest_fd; i++) {
       if (!(sock = sockList[i])) /* skip empty socket elements */
 	continue;
 
@@ -418,6 +418,12 @@ engine_loop(struct Generators* gen)
       gen_ref_dec(sock); /* we're done with it */
     }
 
+    /* server_die() closed every descriptor and cleared running: the rest
+     * of this batch, and the timers, would run handlers on closed numbers
+     * (an IAuth respawn on its socket's EOF, a teardown writing to a number
+     * a new open just took). */
+    if (!running)
+      break;
     timer_run(); /* execute any pending timers */
     thread_pool_poll(); /* process completed async tasks */
   }

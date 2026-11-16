@@ -481,6 +481,16 @@ static void queued_during_the_pass_runs_in_it(void **state)
  * check; the check runs after the callback returns, in the same pass. */
 static struct Socket handler_sock;
 static int handler_peer;
+static struct Timer stop_timer;
+
+/* Ends the loop after this pass's timers.  Not running = 0 from the
+ * callback: the engines take that as server_die() and run nothing more
+ * of the pass. */
+static void stop_after_timers(struct Event *ev)
+{
+  if (ev_type(ev) == ET_EXPIRE)
+    running = 0;
+}
 
 static void handler_cb(struct Event *ev)
 {
@@ -493,7 +503,8 @@ static void handler_cb(struct Event *ev)
     auth_recheck_later(f->auth);               /* a Keycloak answer, here */
     assert_int_equal(f->checks, 0);            /* not in this stack */
     in_dispatch = 0;
-    running = 0;                               /* this pass is the last */
+    timer_add(timer_init(&stop_timer), stop_after_timers, NULL,
+              TT_RELATIVE, 0);                 /* this pass is the last */
   }
 }
 
