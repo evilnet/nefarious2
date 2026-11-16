@@ -772,10 +772,13 @@ socket_del(struct Socket* sock)
   assert(0 != evInfo.engine);
   assert(0 != evInfo.engine->eng_closing);
 
-  socket_error_drop(sock); /* deleted: no error left to report */
-
   /* tell engine socket is going away */
   (*evInfo.engine->eng_closing)(sock);
+
+  /* Deleted: no error left to report.  After eng_closing, which can raise
+   * one itself (devpoll's POLLREMOVE write): left pending, it would stay
+   * counted on a socket that is about to leave the socket list. */
+  socket_error_drop(sock);
 
   sock->s_header.gh_flags |= GEN_DESTROY;
 
@@ -800,10 +803,11 @@ socket_del_keepfd(struct Socket* sock)
   assert(0 != evInfo.engine);
   assert(0 != evInfo.engine->eng_closing);
 
-  socket_error_drop(sock); /* deleted: no error left to report */
-
   /* Unregister from engine WITH valid fd so epoll_ctl(DEL, fd) runs. */
   (*evInfo.engine->eng_closing)(sock);
+
+  /* Deleted: no error left to report (after eng_closing, as socket_del). */
+  socket_error_drop(sock);
 
   /* Zero s_fd so the destroy callback's close() is skipped.  Caller
    * retains the kernel fd via the value they saved before this call. */

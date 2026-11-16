@@ -344,7 +344,7 @@ engine_loop(struct Generators* gen)
       continue;
     }
 
-    while (polls_used > 0) {
+    while (running && polls_used > 0) {
       pfd = &polls[--polls_used];
       assert(-1 < pfd->fd);
 
@@ -457,6 +457,12 @@ engine_loop(struct Generators* gen)
       gen_ref_dec(sock); /* we're done with it */
     }
 
+    /* server_die() closed every descriptor and cleared running: the rest
+     * of this batch, and the timers, would run handlers on closed numbers
+     * (an IAuth respawn on its socket's EOF, a teardown writing to a number
+     * a new open just took). */
+    if (!running)
+      break;
     timer_run(); /* execute any pending timers */
     thread_pool_poll(); /* process completed async tasks */
   }

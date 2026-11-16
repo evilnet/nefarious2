@@ -594,6 +594,52 @@ static void refused_signal_pipe_fails_startup(void **state)
   assert_non_null(strstr(out, "Failed to register signal pipe"));
 }
 
+/* An error the engine raises while it unregisters a socket (devpoll's
+ * POLLREMOVE write can fail) belongs to a socket that is going away: it is
+ * dropped with the socket, not left counted after the socket left the
+ * list, where socket_run_errors() found a count and no socket to deliver
+ * it to. */
+extern struct Engine engine_epoll;
+static void (*real_closing)(struct Socket *);
+
+static void closing_raises_error(struct Socket *sock)
+{
+  real_closing(sock);
+  socket_error(sock, EBADF);
+}
+
+static void error_raised_while_deleting_is_dropped(void **state)
+{
+  struct probe p;
+  char out[512];
+  FILE *tmp;
+  int saved, n;
+
+  (void)state;
+  probe_open(&p);
+  real_closing = engine_epoll.eng_closing;
+  engine_epoll.eng_closing = closing_raises_error;
+  probe_close(&p);
+  engine_epoll.eng_closing = real_closing;
+
+  /* Nothing left to deliver: no "pending engine errors" complaint. */
+  tmp = tmpfile();
+  assert_non_null(tmp);
+  fflush(stderr);
+  saved = dup(2);
+  dup2(fileno(tmp), 2);
+  socket_run_errors();
+  fflush(stderr);
+  dup2(saved, 2);
+  close(saved);
+  rewind(tmp);
+  n = fread(out, 1, sizeof(out) - 1, tmp);
+  out[n] = '\0';
+  fclose(tmp);
+  assert_null(strstr(out, "pending engine errors"));
+  assert_int_equal(p.calls, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest startup[] = {
@@ -610,6 +656,7 @@ int main(void)
     cmocka_unit_test(deleting_a_socket_never_added_does_nothing),
     cmocka_unit_test(reattach_starts_clean),
     cmocka_unit_test(errors_raised_while_delivering_are_delivered_too),
+    cmocka_unit_test(error_raised_while_deleting_is_dropped),
   };
 
   int failed = cmocka_run_group_tests_name("startup", startup, NULL, NULL);
