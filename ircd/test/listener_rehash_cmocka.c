@@ -62,6 +62,9 @@ void add_connection(struct Listener *l, int fd, void *ssl) { (void)l; (void)fd; 
 void ssl_add_connection(struct Listener *l, int fd) { (void)l; (void)fd; }
 void paste_accept_connection(struct Listener *l, int fd) { (void)l; (void)fd; }
 int feature_int(enum Feature feat) { (void)feat; return 0; }
+/* listener.c asks this once a configuration check opens no listener
+ * (#238); harmless before that. */
+int conf_is_check_only(void) { return 0; }
 int ipmask_check(const struct irc_in_addr *a, const struct irc_in_addr *m, unsigned char b)
 { (void)a; (void)m; (void)b; return 1; }
 int ipmask_parse(const char *in, struct irc_in_addr *mask, unsigned char *bits)
