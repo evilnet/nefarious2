@@ -18509,8 +18509,9 @@ void bounce_send_channel_state(struct Client *cptr)
    * whenever the client has negotiated `batch` and has at least one
    * channel to restore.  The cap gate is `batch` only — the batch
    * envelope is what requires client understanding, and unknown batch
-   * types are tolerated per the batch spec.  Clients that additionally
-   * negotiate `draft/persistence` know to treat the batch contents as
+   * types are tolerated per the batch spec.  Its type is the vendor
+   * cap's name (N027: the persistence draft defines no batch type).
+   * Clients that additionally negotiate the persistence caps know to treat the batch contents as
    * restoration rather than live activity; clients with only `batch`
    * still benefit from the grouping signal.
    * Inside another batch open on the answer (a labeled registration
@@ -18522,7 +18523,7 @@ void bounce_send_channel_state(struct Client *cptr)
       && cli_user(cptr)->channel != NULL;
 
   if (wrap_in_persistence_batch)
-    send_batch_start(cptr, "draft/persistence");
+    send_batch_start(cptr, PERSISTENCE_RESTORE_BATCH);
 
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
     struct Channel *chptr = member->channel;

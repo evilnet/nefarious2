@@ -2109,6 +2109,29 @@ capability depends on 'batch' and is a no-op until 'batch' is negotiated
 too, in either order: until then the client is sent the history a client
 without draft/event-playback gets.
 
+CAP_evilnet_persistence
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'evilnet.github.io/persistence' client
+capability: the PERSISTENCE extras that are not part of the
+draft/persistence specification (ATTACH, DETACH, LIST, PROFILE, REPLAY).
+Its value lists them as tokens (attach,detach,list,attach-cursor).  A held
+session's restored channel state is sent in a batch of this type.
+'draft/persistence' itself carries only the specification's STATUS, GET
+and SET.  The old feature name CAP_draft_bouncer is a deprecated alias:
+the 'draft/bouncer' capability it announced is gone.
+
+PERSISTENCE_DRAFT_EXTRAS
+ * Type: boolean
+ * Default: TRUE
+
+A transition for clients written before the PERSISTENCE extras moved to
+'evilnet.github.io/persistence': while TRUE, a client that negotiated
+'draft/persistence' alone may still use them.  Set it to FALSE once
+clients request the vendor capability; the extras are then unknown
+subcommands without it.
+
 UPING_ENABLE
  * Type: boolean
  * Default: TRUE

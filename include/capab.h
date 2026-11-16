@@ -105,7 +105,7 @@ enum Capab {
   _CAP(DRAFT_METADATA2, 0, "draft/metadata-2", 0),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", 0),
   _CAP(DRAFT_AUTHTOKEN, 0, "draft/authtoken", 0),
-  _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", 0),
+  _CAP(EVILNET_PERSISTENCE, 0, "evilnet.github.io/persistence", 0),
   _CAP(DRAFT_PERSISTENCE, 0, "draft/persistence", 0),
   _CAP(DRAFT_OPERTAG, 0, "draft/oper-tag", 0),
 #ifdef USE_SSL
