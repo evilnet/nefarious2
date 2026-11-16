@@ -83,6 +83,7 @@
 
 #include "client.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -110,6 +111,8 @@ int ms_svsnick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   struct Client* acptr2 = NULL;
   char		 nick[NICKLEN + 2];
   char*		 arg;
+  char		 ev_msgid[64] = "";
+  uint64_t	 ev_ms = 0;
 
   if (parc < 3)
     return need_more_params(sptr, "SVSNICK");
@@ -188,8 +191,34 @@ int ms_svsnick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  /* One NICK event on every server (N067).  Each server applies the
+   * SVSNICK itself, so the first fork server to do so mints the msgid and
+   * time and sends them on the SVSNICK it relays; a fork server further
+   * on takes them from the line.  (The NICK lines set_nick_name() relays
+   * carry the same ones, but never toward the target, whose server learns
+   * of the rename from the SVSNICK alone.)  Stock servers get the
+   * untagged line. */
+  if (feature_bool(FEAT_MSGID)) {
+    if (sendcmdto_stash_is_current(cptr) && cli_s2s_msgid(cptr)[0]) {
+      ircd_strncpy(ev_msgid, cli_s2s_msgid(cptr), sizeof(ev_msgid));
+      ev_ms = history_event_time_ms(cptr);
+    } else {
+      generate_msgid(ev_msgid, sizeof(ev_msgid));
+      ev_ms = history_event_time_ms(NULL);
+    }
+    set_nick_name_event(ev_msgid, ev_ms);
+  }
   set_nick_name(acptr, acptr, nick, parc, parv, 1);
+  set_nick_name_event(NULL, 0);
+  if (ev_msgid[0]) {
+    sendcmdto_set_s2s_tags(ev_ms, ev_msgid);
+    sendcmdto_want_s2s_tags(1);
+  }
   sendcmdto_serv_butone(sptr, CMD_SVSNICK, cptr, "%s %s", parv[1], nick);
+  /* sendcmdto_set_s2s_tags() also armed the client-facing event; no
+   * client line follows. */
+  if (ev_msgid[0])
+    sendcmdto_set_client_msgid(NULL);
   return 0;
 }
 
