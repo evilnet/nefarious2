@@ -2132,6 +2132,41 @@ void metadata_mode_sync_restore(struct Client *cptr, int live)
   }
 }
 
+void metadata_mode_sync_rederive(struct Client *cptr)
+{
+  const char *account;
+  int i;
+
+  /* Our own registered connection with an account; never a device. */
+  if (!cptr || !MyConnect(cptr) || !IsUser(cptr) || !cli_user(cptr)
+      || IsBouncerAlias(cptr) || !cli_user(cptr)->account[0])
+    return;
+  account = cli_user(cptr)->account;
+
+  for (i = 0; metadata_mode_sync[i].key; i++) {
+    struct md_version v;
+    char valbuf[METADATA_VALUE_LEN];
+    int want;
+
+    /* The account's row decides, as at a login; a key it has no row for
+     * is what a connection that registered without an account has: its
+     * class default -- never a flag the previous account's rows left
+     * (its +b above all: a later -b would write hold=0 into this
+     * account's row). */
+    if (metadata_lmdb_is_available()
+        && metadata_account_get_version(account, metadata_mode_sync[i].key,
+                                        &v, valbuf, sizeof(valbuf)) == 0)
+      want = metadata_mode_sync_want(i, v.tombstone ? NULL : v.value);
+    else
+      want = umode_class_default(cptr, metadata_mode_sync[i].flag) ? 1 : 0;
+    /* As a self MODE looks, only where it differs (umode_sync_apply():
+     * echo, counts, M line, the +p rule).  No row is written, and no
+     * hold-on planner runs: the account change joins and creates no
+     * session (owner's ruling). */
+    umode_sync_apply(cptr, metadata_mode_sync[i].flag, want);
+  }
+}
+
 /** Set metadata for a client.
  * For logged-in users, also persists to LMDB.
  * @param[in] cptr Client to set metadata on.

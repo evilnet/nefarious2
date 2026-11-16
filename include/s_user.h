@@ -118,6 +118,14 @@ extern void clear_nick_relay_withhold_legacy(void);
  * @param[in] on Nonzero to set it, zero to clear it.
  */
 extern void umode_sync_apply(struct Client *cptr, int flag, int on);
+/** Does the default user mode of @a cptr's connection class (the umode a
+ * Client block gives at registration) set @a flag?  The value of a
+ * mode-synced flag for a connection whose account has no row for it, as
+ * for a connection that registered without an account.
+ * @param[in] cptr Our connection.
+ * @param[in] flag The mode flag (enum Flag).
+ * @return Nonzero when the class default sets it. */
+extern int umode_class_default(struct Client *cptr, int flag);
 /** umode_sync_apply(), except that @a untold -- @a cptr itself or a device
  * of its session, still in its registration burst -- is not told: its flag
  * changes silently and its sign-on mode line (send_umode_signon()) says

@@ -616,6 +616,18 @@ extern void metadata_notify_subscribers_butone(const char *target, const char *k
  */
 extern void metadata_mode_sync_restore(struct Client *cptr, int live);
 
+/** Re-derive our connection's mode-synced flags (metadata_mode_sync[]) for
+ * the account it now holds, after a SASL account change: each key the
+ * account has a row for follows the row (as metadata_mode_sync_restore()
+ * with @a live); each key it has none for takes the connection class's
+ * default (umode_class_default()), what a connection that registered
+ * without an account has -- no flag survives from the previous account.
+ * Each change through umode_sync_apply() (echo, counts, M line, no row
+ * written); no hold-on planner, no session joined or made.  Not for a
+ * device (bouncer alias) or a remote copy.
+ * @param[in] cptr Our connection, a user with an account. */
+extern void metadata_mode_sync_rederive(struct Client *cptr);
+
 extern void metadata_client_memory_set(struct Client *cptr, const char *key,
                                        const char *value, int visibility);
 

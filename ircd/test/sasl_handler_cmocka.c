@@ -832,6 +832,8 @@ void metadata_load_account(struct Client *cptr, const char *account)
 { touch(cptr); fx.metadata_loads++; tlog_add("metadata load %s %s", tname(cptr), account); }
 void metadata_mode_sync_restore(struct Client *cptr, int live)
 { touch(cptr); fx.mode_syncs++; tlog_add("mode restore %s %d", tname(cptr), live); }
+void metadata_mode_sync_rederive(struct Client *cptr)
+{ touch(cptr); fx.mode_syncs++; tlog_add("mode rederive %s", tname(cptr)); }
 enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
                                             time_t now, int limit, int period,
                                             int global_limit)
@@ -4663,6 +4665,8 @@ static struct Client *xavier_client(int fd)
   struct Client *c = new_logged_in(fd, "xav", "xavier", user_id("xavier", xid), 1);
 
   bed_features = 1;
+  ircd_strncpy(cli_active_profile(c), "laptop",       /* PERSISTENCE ATTACH */
+               sizeof(con_active_profile(cli_connect(c))));
   fake_of(c)->n_numerics = 0;
   fake_of(c)->fail_code[0] = fake_of(c)->fail_desc[0] = '\0';
   ntlog = 0;
@@ -4741,6 +4745,15 @@ static void assert_switched(struct Client *c, const struct login_snap *was,
   assert_int_equal(fx.hostmasks, fx_was->hostmasks + (was->hidden ? 1 : 0));
   assert_int_equal(fx.account_adjusts, fx_was->account_adjusts);  /* counted */
   assert_int_equal(IsHiddenHost(c) ? 1 : 0, was->hidden);
+  /* The connection's mode-synced state is the new account's, derived as
+   * for a connection that had no account (no flag kept from the old
+   * account's rows), and its persistence profile is no longer the old
+   * account's. */
+  snprintf(line, sizeof(line), "mode rederive %s", cli_name(c));
+  assert_true(tlog_has(line));
+  snprintf(line, sizeof(line), "mode restore %s 1", cli_name(c));
+  assert_false(tlog_has(line));
+  assert_string_equal(cli_active_profile(c), "");
 }
 
 /** The whole table for a registered, logged-in client not in a session:

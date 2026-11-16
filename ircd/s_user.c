@@ -2607,6 +2607,25 @@ void userstats_count_clear(struct Client *cptr)
   }
 }
 
+int umode_class_default(struct Client *cptr, int flag)
+{
+  const char *m = cptr ? client_get_default_umode(cptr) : NULL;
+  int sign = 1, on = 0;
+  unsigned int i;
+
+  for (; m && *m; m++) {
+    if (*m == '+')
+      sign = 1;
+    else if (*m == '-')
+      sign = 0;
+    else
+      for (i = 0; i < USERMODELIST_SIZE; i++)
+        if (userModeList[i].c == *m && userModeList[i].flag == (unsigned int)flag)
+          on = sign;
+  }
+  return on;
+}
+
 void umode_sync_apply(struct Client *cptr, int flag, int on)
 {
   umode_sync_apply_butone(cptr, flag, on, NULL);

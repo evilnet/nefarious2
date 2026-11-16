@@ -1293,8 +1293,19 @@ static void sasl_login_apply(struct Client *sptr, const char *account,
 
       /* The account's modes: each one this connection lacks is set and
        * echoed, with its M line, after the AC above (push-2 final fix
-       * wave, I-1). */
-      metadata_mode_sync_restore(sptr, 1);
+       * wave, I-1).  After an account change ('M'), every mode-synced
+       * flag is derived for the new account as for a connection that had
+       * no account -- the new account's rows, else the class default, no
+       * flag kept from the old account's (its +b: a later -b would write
+       * hold=0 into the new account) -- and the persistence profile the
+       * connection attached under the old account (PERSISTENCE ATTACH,
+       * at registration) is dropped: a connection that registered without
+       * an account has none.  No session is joined or made. */
+      if (type == 'M') {
+        cli_active_profile(sptr)[0] = '\0';
+        metadata_mode_sync_rederive(sptr);
+      } else
+        metadata_mode_sync_restore(sptr, 1);
     } else if (!sasl_conn_kc_id(sptr)[0]
                && account_id_valid(cli_saslkcid(sptr))) {
       /* The same account name proved again, with a Keycloak id this
