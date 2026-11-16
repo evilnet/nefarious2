@@ -1600,6 +1600,22 @@ static void nick_refusal_to_device(struct Client *device, int reply,
  * @param[in] nick The nick asked for.
  * @return Zero.
  */
+/** The NICK event set_nick_name_event() armed (empty: none). */
+static char nick_event_msgid[64] = "";
+static uint64_t nick_event_ms = 0;
+
+/** See s_user.h. */
+void set_nick_name_event(const char *msgid, uint64_t time_ms)
+{
+  if (msgid && msgid[0]) {
+    ircd_strncpy(nick_event_msgid, msgid, sizeof(nick_event_msgid));
+    nick_event_ms = time_ms;
+  } else {
+    nick_event_msgid[0] = '\0';
+    nick_event_ms = 0;
+  }
+}
+
 int set_nick_name_refused(struct Client *cptr, struct Client *sptr,
                           struct Client *device, int reply,
                           const char *nick)
@@ -1804,16 +1820,25 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
                                   && sendcmdto_stash_is_current(cptr)
                                   && cli_s2s_msgid(cptr)[0]) ? cptr : NULL;
 
-        if (feature_bool(FEAT_MSGID)) {
-          if (tag_src)
-            ircd_strncpy(nick_msgid, cli_s2s_msgid(tag_src), sizeof(nick_msgid));
-          else
-            generate_msgid(nick_msgid, sizeof(nick_msgid));
+        /* An armed event (set_nick_name_event(): SVSNICK) wins: its
+         * caller chose it from the SVSNICK line, or minted it to send on
+         * the SVSNICK it relays. */
+        if (nick_event_msgid[0] && feature_bool(FEAT_MSGID)) {
+          ircd_strncpy(nick_msgid, nick_event_msgid, sizeof(nick_msgid));
+          nick_ms = nick_event_ms ? nick_event_ms : history_event_time_ms(NULL);
+        } else {
+          if (feature_bool(FEAT_MSGID)) {
+            if (tag_src)
+              ircd_strncpy(nick_msgid, cli_s2s_msgid(tag_src), sizeof(nick_msgid));
+            else
+              generate_msgid(nick_msgid, sizeof(nick_msgid));
+          }
+          /* After any mint: the origin's tag time for a reused msgid, the
+           * mint time for a minted one.  The live NICK, the stored rows
+           * and the relay all carry it. */
+          nick_ms = history_event_time_ms(tag_src);
         }
-        /* After any mint: the origin's tag time for a reused msgid, the
-         * mint time for a minted one.  The live NICK, the stored rows
-         * and the relay all carry it. */
-        nick_ms = history_event_time_ms(tag_src);
+        set_nick_name_event(NULL, 0);
         if (feature_bool(FEAT_MSGID))
           sendcmdto_set_client_event(nick_msgid, nick_ms);
 

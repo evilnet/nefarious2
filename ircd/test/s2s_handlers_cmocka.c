@@ -281,6 +281,14 @@ static int count_bans(struct Ban *list)
 static char renames[MAXREC][LINE];
 static int nrenames;
 
+/* --- the NICK event an SVSNICK arms (N067) --- */
+
+static int feat_msgid;              /* FEAT_MSGID */
+static int stash_current;           /* sendcmdto_stash_is_current() */
+static char nick_event[64];         /* set_nick_name_event()'s, now */
+static char rename_event[MAXREC][64]; /* ... as each rename saw it */
+static char s2s_armed[64];          /* sendcmdto_set_s2s_tags()'s last */
+
 /* --- features --- */
 
 static int feat_excepts;
@@ -345,6 +353,10 @@ static int world_setup(void **state)
   forget();
   nmade = nchannels = nexited = 0;
   nrenames = 0;
+  feat_msgid = 0;
+  stash_current = 0;
+  nick_event[0] = '\0';
+  s2s_armed[0] = '\0';
   forced_exits = 0;
   ban_invalidations = except_invalidations = 0;
   fake_modes = "";
@@ -464,6 +476,7 @@ int set_nick_name(struct Client *cptr, struct Client *sptr, const char *nick,
 {
   (void)cptr; (void)parc; (void)parv; (void)svsnick;
   assert_true(nrenames < MAXREC);
+  snprintf(rename_event[nrenames], sizeof(rename_event[0]), "%s", nick_event);
   snprintf(renames[nrenames++], LINE, "%s -> %s", cli_name(sptr), nick);
   ircd_strncpy(cli_name(sptr), nick, sizeof(sptr->cli_name));
   return 0;
@@ -489,6 +502,7 @@ int feature_bool(enum Feature feat)
 {
   switch (feat) {
   case FEAT_EXCEPTS: return feat_excepts;
+  case FEAT_MSGID: return feat_msgid;
   default: return 0;
   }
 }
@@ -636,7 +650,20 @@ void sendcmdto_set_client_msgid(const char *msgid)
 
 void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
 {
-  (void)time_ms; (void)msgid;
+  (void)time_ms;
+  snprintf(s2s_armed, sizeof(s2s_armed), "%s", msgid ? msgid : "");
+}
+
+int sendcmdto_stash_is_current(struct Client *cptr)
+{
+  (void)cptr;
+  return stash_current;
+}
+
+void set_nick_name_event(const char *msgid, uint64_t time_ms)
+{
+  (void)time_ms;
+  snprintf(nick_event, sizeof(nick_event), "%s", msgid ? msgid : "");
 }
 
 void sendcmdto_want_s2s_tags(int want)
@@ -1541,6 +1568,40 @@ static void test_svsnick_from_services(void **state)
   assert_int_equal(nviolations, 0);
 }
 
+/* N067: with msgids on, the first server to apply an SVSNICK mints the
+ * NICK event and sends it on the SVSNICK it relays ... */
+static void test_svsnick_mints_one_event(void **state)
+{
+  (void)state;
+  svsnick_world();
+  feat_msgid = 1;
+
+  deliver(ms_svsnick, svs, svs, "ABAAB fresh");
+
+  assert_int_equal(nrenames, 1);
+  assert_string_equal(rename_event[0], "ABAAAAAAAAAAAB");
+  assert_string_equal(s2s_armed, "ABAAAAAAAAAAAB");
+  assert_string_equal(nick_event, "");   /* disarmed after the rename */
+  assert_int_equal(sent_count_to(leaf), 1);
+}
+
+/* ... and a server further on takes it from the line. */
+static void test_svsnick_adopts_the_lines_event(void **state)
+{
+  (void)state;
+  svsnick_world();
+  feat_msgid = 1;
+  stash_current = 1;
+  ircd_strncpy(cli_s2s_msgid(svs), "AEAAAAAAAAAAZZ", sizeof(con_s2s_msgid(cli_connect(svs))));
+
+  deliver(ms_svsnick, svs, svs, "ABAAB fresh");
+
+  assert_int_equal(nrenames, 1);
+  assert_string_equal(rename_event[0], "AEAAAAAAAAAAZZ");
+  assert_string_equal(s2s_armed, "AEAAAAAAAAAAZZ");
+  assert_string_equal(nick_event, "");
+}
+
 /* (c) A nick another user holds: that user is killed (Nickname
  * Enforcement) and the target renamed. */
 static void test_svsnick_nick_of_another_user(void **state)
@@ -1815,6 +1876,8 @@ int main(void)
     T(test_burst_netride_redirect_other_key_kicks),
     T(test_burst_netride_every_parameter_letter),
     T(test_svsnick_from_services),
+    T(test_svsnick_mints_one_event),
+    T(test_svsnick_adopts_the_lines_event),
     T(test_svsnick_nick_of_another_user),
     T(test_svsnick_own_nick),
     T(test_svsnick_nick_of_its_source),

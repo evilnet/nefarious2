@@ -4,6 +4,7 @@
  */
 #ifndef INCLUDED_s_user_h
 #define INCLUDED_s_user_h
+#include <stdint.h>
 #ifndef INCLUDED_sys_types_h
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
@@ -80,6 +81,11 @@ extern void         user_count_memory(size_t* count_out, size_t* bytes_out);
 extern int set_nick_name(struct Client* cptr, struct Client* sptr,
                          const char* nick, int parc, char* parv[],
                          int svsnick);
+/* The msgid and time (epoch ms) the next set_nick_name() gives its NICK
+ * event, instead of minting or reading the link's tags: SVSNICK, which
+ * every server applies itself, so the first one's msgid travels on the
+ * relayed SVSNICK (N067).  Consumed by that call; NULL disarms. */
+extern void set_nick_name_event(const char *msgid, uint64_t time_ms);
 /* set_nick_name() for a nick change another server's bouncer device asked
  * its session user, our client, for: the refusal numerics also go to
  * @a device, and the user's resulting nick goes back toward @a cptr. */
