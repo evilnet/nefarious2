@@ -1286,7 +1286,7 @@ static int conf_error;
 /** When non-zero, indicates that the configuration file was loaded at least once. */
 static int conf_already_read;
 /** When non-zero, this is a configuration check (ircd -k): nothing is
- * written. */
+ * written and no listener is opened. */
 static int conf_checking;
 extern void yyparse(void);
 extern int init_lexer(void);
@@ -1308,10 +1308,19 @@ static struct AbsentInclude **absent_includes_tail = &absent_includes;
 static void conf_error_at(const char *file, int line, const char *msg);
 
 /** Mark this run as a configuration check (ircd -k): a pass writes no
- * file. */
+ * file and opens no listener (conf_is_check_only()). */
 void conf_set_check_only(void)
 {
   conf_checking = 1;
+}
+
+/** Is this run a configuration check (ircd -k)?  A check opens no
+ * listener (add_listener()) and writes no file.
+ * @return Non-zero under ircd -k.
+ */
+int conf_is_check_only(void)
+{
+  return conf_checking;
 }
 
 /** Note an include whose file does not exist (the lexer's fopen() failed

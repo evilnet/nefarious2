@@ -1103,7 +1103,7 @@ int main(int argc, char **argv) {
   motd_init();
 
   /* A configuration check reads the IAuth{} block but runs no program,
-   * and writes no file (GitSync's placeholder). */
+   * writes no file (GitSync's placeholder), and opens no listener. */
   if (thisServer.bootopt & BOOT_CHKCONF) {
     auth_conf_check_only();
     conf_set_check_only();
