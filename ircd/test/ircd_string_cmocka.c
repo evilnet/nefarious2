@@ -1957,6 +1957,55 @@ static void test_msgid_decode_ref_time_bound(void **state)
   assert_int_equal(msgid_decode_ref_time_ms(NULL, now, 60000ULL), 0);
 }
 
+/* ========== ircd_strtoint ========== */
+
+static void test_ircd_strtoint_accepts_ints(void **state)
+{
+    int v = -7;
+    (void)state;
+    assert_int_equal(ircd_strtoint("0", &v), 1);
+    assert_int_equal(v, 0);
+    assert_int_equal(ircd_strtoint("60000", &v), 1);
+    assert_int_equal(v, 60000);
+    assert_int_equal(ircd_strtoint("-1", &v), 1);
+    assert_int_equal(v, -1);
+    assert_int_equal(ircd_strtoint("0x10", &v), 1);
+    assert_int_equal(v, 16);
+    assert_int_equal(ircd_strtoint(" 42 ", &v), 1);
+    assert_int_equal(v, 42);
+    assert_int_equal(ircd_strtoint("2147483647", &v), 1);
+    assert_int_equal(v, 2147483647);
+    assert_int_equal(ircd_strtoint("-2147483648", &v), 1);
+    assert_int_equal(v, -2147483647 - 1);
+}
+
+static void test_ircd_strtoint_refuses_out_of_range(void **state)
+{
+    int v = 5;
+    (void)state;
+    /* strtoul into an int made these 0, 1 and -2147483648 */
+    assert_int_equal(ircd_strtoint("4294967296", &v), 0);
+    assert_int_equal(ircd_strtoint("-4294967295", &v), 0);
+    assert_int_equal(ircd_strtoint("2147483648", &v), 0);
+    assert_int_equal(ircd_strtoint("-2147483649", &v), 0);
+    assert_int_equal(ircd_strtoint("99999999999999999999999", &v), 0);
+    assert_int_equal(v, 5);
+}
+
+static void test_ircd_strtoint_refuses_junk(void **state)
+{
+    int v = 5;
+    (void)state;
+    assert_int_equal(ircd_strtoint("", &v), 0);
+    assert_int_equal(ircd_strtoint("   ", &v), 0);
+    assert_int_equal(ircd_strtoint("abc", &v), 0);
+    assert_int_equal(ircd_strtoint("12abc", &v), 0);
+    assert_int_equal(ircd_strtoint("1 2", &v), 0);
+    assert_int_equal(ircd_strtoint("TRUE", &v), 0);
+    assert_int_equal(ircd_strtoint(NULL, &v), 0);
+    assert_int_equal(v, 5);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -2029,6 +2078,9 @@ int main(void)
         cmocka_unit_test(test_ctd_spaces_and_empty_entries_ignored),
         cmocka_unit_test(test_ctd_tag_without_plus_never_denied),
         cmocka_unit_test(test_ctd_empty_or_null_list_denies_nothing),
+        cmocka_unit_test(test_ircd_strtoint_accepts_ints),
+        cmocka_unit_test(test_ircd_strtoint_refuses_out_of_range),
+        cmocka_unit_test(test_ircd_strtoint_refuses_junk),
         cmocka_unit_test(test_ctd_value_bearing_tag_matches_by_name),
         cmocka_unit_test(test_ctd_plus_star_is_deny_all),
 

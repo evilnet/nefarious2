@@ -35,6 +35,7 @@ extern int str_appendf(char* buf, size_t buflen, size_t* pos,
                        const char* fmt, ...);
 extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);
+extern int         ircd_strtoint(const char *str, int *value);
 extern int csv_contains_token(const char* csv, const char* token);
 extern int ircd_clienttagdeny_match(const char *deny_list, const char *tag, size_t tag_len);
 extern const char *ircd_clienttagdeny_isupport(const char *in, char *out, size_t outsz);
