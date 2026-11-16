@@ -6154,8 +6154,11 @@ int bounce_db_restore(void)
    * successfully migrated — the next bounce_db_put for the session
    * (e.g., on next persist sweep) overwrites them with the v8 form
    * keyed by the new UUID sessid; the old v7 key remains until cleaned
-   * up explicitly.  Below loop also evicts those stale v7 keys. */
-  if (expired > 0 || migrated_v7 > 0) {
+   * up explicitly.  Below loop also evicts those stale v7 keys, and the
+   * records the restore loop rejected (unknown version, wrong size, a
+   * version past BOUNCER_DB_NEWER_SPAN): without this pass they would
+   * stay, logged at every start. */
+  if (expired > 0 || migrated_v7 > 0 || rejected > 0) {
     struct db_iter *eit = db_iter_open(env, cf, /*snap=*/NULL);
     struct db_writebatch *ewb = db_writebatch_new(env);
     if (eit && ewb) {
