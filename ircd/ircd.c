@@ -358,6 +358,9 @@ int is_client_tag_denied(const char *tag, size_t tag_len)
 static void shutdown_stores(void)
 {
   stop_listeners();          /* refuse new connections before the slow part */
+  paste_listener_shutdown(); /* in-flight paste connections: TLS close_notify
+                              * and socket_del() while their numbers are
+                              * still theirs */
   bounce_db_shutdown();      /* persist bouncer sessions (metadata env) */
   history_shutdown();        /* history, multiline content, presence state:
                               * the presence CF lives on the metadata env,

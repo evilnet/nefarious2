@@ -231,7 +231,6 @@ void paste_parse_filename_hint(const char *content, size_t len,
   const char *p = content;
   const char *end = content + len;
   const char *colon = NULL;
-  const char *newline = NULL;
   size_t fname_len;
 
   filename[0] = '\0';
