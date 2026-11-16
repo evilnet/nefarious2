@@ -172,9 +172,24 @@ struct Client *LocalClientArray[MAXCONNECTIONS];
 static int fake_file;
 FBFILE *lexer_open_config(void) { return (FBFILE *)&fake_file; }
 void lexer_close_config(void) { }
+/* The REHASH precheck ("ircd -k" in a process of its own) is not what
+ * these tests are about: it passes. */
+enum conf_precheck_result
+conf_precheck_run(const char *exe, const char *dpath, const char *conf,
+                  int timeout_ms, char *out, size_t outlen)
+{
+  (void)exe; (void)dpath; (void)conf; (void)timeout_ms;
+  if (outlen)
+    out[0] = '\0';
+  return CONF_PRECHECK_OK;
+}
 int fbstat(struct stat *sb, FBFILE *fb)
 {
   (void)fb;
+  /* A test that rehashes points configfile at a real file, which the
+   * rehash's own stat() of the name must find the same. */
+  if (!stat(configfile, sb))
+    return 0;
   memset(sb, 0, sizeof(*sb));
   sb->st_mode = S_IFREG;
   sb->st_size = 1;
@@ -645,7 +660,19 @@ static void rehash_tells_sasl_once_after_iauth_close(void **state)
   assert_int_equal(0, ntells);
 
   parse_steps = steps;
-  rehash(&me, 0);
+  {
+    char conf[] = "/tmp/conf_include_cmocka.XXXXXX";
+    char *was = configfile;
+    int fd = mkstemp(conf);
+
+    assert_true(fd >= 0);
+    assert_int_equal(1, write(fd, "\n", 1));
+    close(fd);
+    configfile = conf;
+    rehash(&me, 0);
+    configfile = was;
+    unlink(conf);
+  }
   assert_int_equal(1, ntells);
   assert_string_equal(rehash_order, "close tell ");
 }

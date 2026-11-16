@@ -128,6 +128,7 @@ IRCD_SRC = \
 	chathistory_presence.c \
 	chathistory_ref.c \
 	chathistory_recv.c \
+	conf_precheck.c \
 	pm_pair_index.c \
 	ircd.c \
 	ircd_alloc.c \
