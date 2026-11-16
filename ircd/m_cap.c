@@ -140,6 +140,51 @@ static int cap_batch_add(const char *capname, int available, const char *value)
   return 1;
 }
 
+/** Whether \a cptr takes CAP 302's additions in CAP NEW/DEL: values
+ * (sasl=PLAIN,EXTERNAL) and the sts capability, as CAP LS gives them
+ * only to a CAP LS 302 client.  A client with cap-notify from a plain
+ * CAP LS gets bare names and no sts.
+ * @param[in] cptr Local client.
+ * @return Non-zero for a CAP 302 client. */
+static int
+cap_notify_v302(struct Client *cptr)
+{
+  return cli_capab_version(cptr) >= 302;
+}
+
+/** Build the space-separated list of batched changes for one CAP line.
+ * @param[out] buf    Where to write it (empty if nothing applies).
+ * @param[in] buflen  Size of \a buf.
+ * @param[in] available 1 for the NEW list, 0 for the DEL list.
+ * @param[in] values  Add "=value" where a capability has one.
+ * @param[in] sts     Include the sts capability. */
+static void
+cap_batch_line(char *buf, size_t buflen, int available, int values, int sts)
+{
+  int len = 0, i;
+
+  buf[0] = '\0';
+  for (i = 0; i < cap_batch.count; i++) {
+    struct cap_batch_entry *entry = &cap_batch.entries[i];
+
+    if (!entry->available != !available)
+      continue;
+    if (!sts && !strcmp(entry->capname, "sts"))
+      continue;
+    if (len > 0 && len < (int)buflen - 1) {
+      buf[len++] = ' ';
+      buf[len] = '\0';
+    }
+    if (len >= (int)buflen - 1)
+      break;
+    if (values && entry->value[0])
+      len += ircd_snprintf(0, buf + len, buflen - len, "%s=%s",
+                           entry->capname, entry->value);
+    else
+      len += ircd_snprintf(0, buf + len, buflen - len, "%s", entry->capname);
+  }
+}
+
 /** Flush batched CAP notifications.
  * Sends aggregated CAP NEW and CAP DEL messages to all clients with cap-notify.
  * Called at end of rehash/config reload.
@@ -147,10 +192,8 @@ static int cap_batch_add(const char *capname, int available, const char *value)
 void cap_notify_flush(void)
 {
   struct Client *cptr;
-  char new_buf[CAP_BATCH_BUFSIZE];
-  char del_buf[CAP_BATCH_BUFSIZE];
-  int new_len = 0, del_len = 0;
-  int i;
+  char new_buf[CAP_BATCH_BUFSIZE], new_old[CAP_BATCH_BUFSIZE];
+  char del_buf[CAP_BATCH_BUFSIZE], del_old[CAP_BATCH_BUFSIZE];
 
   if (!cap_batch.active) {
     cap_batch.count = 0;
@@ -162,48 +205,29 @@ void cap_notify_flush(void)
   if (cap_batch.count == 0)
     return;
 
-  /* Build aggregated NEW and DEL strings */
-  new_buf[0] = '\0';
-  del_buf[0] = '\0';
-
-  for (i = 0; i < cap_batch.count; i++) {
-    struct cap_batch_entry *entry = &cap_batch.entries[i];
-
-    if (entry->available) {
-      /* CAP NEW - include value if present */
-      if (new_len > 0 && new_len < (int)sizeof(new_buf) - 1) {
-        new_buf[new_len++] = ' ';
-        new_buf[new_len] = '\0';
-      }
-      if (entry->value[0]) {
-        new_len += ircd_snprintf(0, new_buf + new_len, sizeof(new_buf) - new_len,
-                                  "%s=%s", entry->capname, entry->value);
-      } else {
-        new_len += ircd_snprintf(0, new_buf + new_len, sizeof(new_buf) - new_len,
-                                  "%s", entry->capname);
-      }
-    } else {
-      /* CAP DEL - just cap name */
-      if (del_len > 0 && del_len < (int)sizeof(del_buf) - 1) {
-        del_buf[del_len++] = ' ';
-        del_buf[del_len] = '\0';
-      }
-      del_len += ircd_snprintf(0, del_buf + del_len, sizeof(del_buf) - del_len,
-                                "%s", entry->capname);
-    }
-  }
+  /* Build aggregated NEW and DEL strings: one set for CAP 302 clients,
+   * with values and sts, and one for older ones, with neither. */
+  cap_batch_line(new_buf, sizeof(new_buf), 1, 1, 1);
+  cap_batch_line(del_buf, sizeof(del_buf), 0, 1, 1);
+  cap_batch_line(new_old, sizeof(new_old), 1, 0, 0);
+  cap_batch_line(del_old, sizeof(del_old), 0, 0, 0);
 
   /* Send to all clients with cap-notify */
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    int v302;
+
     if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
       continue;
     if (!cap_notify_wanted(cptr))
       continue;
 
-    if (new_buf[0])
-      sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr), new_buf);
-    if (del_buf[0])
-      sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr), del_buf);
+    v302 = cap_notify_v302(cptr);
+    if ((v302 ? new_buf : new_old)[0])
+      sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr),
+                    v302 ? new_buf : new_old);
+    if ((v302 ? del_buf : del_old)[0])
+      sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr),
+                    v302 ? del_buf : del_old);
   }
 
   /* Log the aggregated changes */
@@ -310,10 +334,13 @@ void send_cap_notify(const char *capname, int available, const char *value)
       continue;
     if (!cap_notify_wanted(cptr))
       continue;
+    /* sts and values are CAP 302's (see cap_notify_v302()). */
+    if (!cap_notify_v302(cptr) && !strcmp(capname, "sts"))
+      continue;
 
     if (available) {
       /* CAP NEW with optional value */
-      if (value && *value)
+      if (value && *value && cap_notify_v302(cptr))
         sendrawto_one(cptr, "CAP %s NEW :%s=%s",
                       cli_name(cptr), capname, value);
       else

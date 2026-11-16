@@ -1618,8 +1618,13 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
         }
         /* Check for client-only tags (prefixed with +) */
         else if (*tag_name == '+') {
+          /* Only from a client that negotiated message-tags itself: one
+           * here for batch, labeled-response or server-time cannot
+           * receive tags, so it does not send them either. */
+          if (!CapOwnHas(cptr, CAP_MSGTAGS))
+            ; /* Not negotiated, silently drop it */
           /* IRCv3 CLIENTTAGDENY: check if this tag is blocked by operator config */
-          if (is_client_tag_denied(tag_name, tag_len))
+          else if (is_client_tag_denied(tag_name, tag_len))
             ; /* Tag is denied, silently drop it */
           /* Reserved vendor tags: a client must not squat the NAMES
            * the server itself writes and trusts --

@@ -244,6 +244,12 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return send_reply(sptr, ERR_NEEDMOREPARAMS, "TAGMSG");
   }
 
+  /* TAGMSG is message-tags' command: a client without it has no
+   * client-only tags to send (parse_client() drops them) and could not
+   * receive the echo. */
+  if (!CapOwnHas(sptr, CAP_MSGTAGS))
+    return 0;
+
   /* Get the client-only tags extracted from the message */
   client_tags = cli_client_tags(sptr);
 
