@@ -1289,7 +1289,14 @@ SASL_REAUTH
 
 **Deploy note: the default is any -- a logged-in client may switch to
 another account on the same connection.  A network whose policy is one
-account per connection sets "refresh".**
+account per connection sets "refresh".  Until EVERY fork server on the
+network runs a build with this setting, keep it at "refresh" or "same":
+an older fork server treats every account change it receives as a
+rename by services, carries the old account's chathistory presence
+window over to the new account, and sends that window to every server
+(PN) when the user parts or quits -- the new account can then read
+history from before it logged in, on every server, until retention ages
+it out.**
 
 What a client that is already logged in may do with AUTHENTICATE.  It
 applies only to a connection that sent CAP LS with a version of 302 or more
@@ -1314,8 +1321,10 @@ For a registered, logged-in SASL 3.2 client:
            session (primary or device: 907), nor without EXTENDED_ACCOUNTS
            (an account change cannot be carried: 907).
 Under every setting the account's name under another Keycloak id (the
-account was deleted and made again) is refused with 904, and a
-re-authentication that fails leaves the login as it was.  With
+account was deleted and made again) is refused with 904 -- where the
+login carries a Keycloak id: the local Keycloak tier.  A re-authentication
+relayed through services carries no id, and the same name there is a
+refresh.  A re-authentication that fails leaves the login as it was.  With
 standard-replies a refusal is preceded by FAIL AUTHENTICATE
 ALREADY_AUTHENTICATED.  Before registration a SASL 3.2 client with a login
 may start again with OAUTHBEARER only under refresh and with any mechanism
@@ -1324,9 +1333,13 @@ under same and any, and may then log in as anyone.
 The setting is read when an exchange starts and again when it completes:
 after a REHASH in between, the new value decides.  Values are not case
 sensitive; any other value is refused (a bad feature value) and the
-previous one stays.  Nothing of it is advertised to clients.  Every fork
-server should run with an account change understood: an older fork server
-keeps the old account's chathistory presence window for the new account.
+previous one stays.  Nothing of it is advertised to clients.
+
+After an account change the connection's mode-synced user modes (+i, +p,
++q, +R, +D, +Y, +y, +b) are those of the new account's settings, else the
+connection class's default -- none is kept from the old account -- and a
+persistence profile attached under the old account is dropped.  The
+change joins or makes no bouncer session.
 
 KEYCLOAK_ISSUER
   * Type: string
