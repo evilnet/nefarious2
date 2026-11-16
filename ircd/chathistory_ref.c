@@ -129,14 +129,20 @@ int chathistory_parse_s2s_ref(const char *ref, enum HistoryRefType *ref_type, co
     return 0;
   }
 
-  /* Handle IRC client format prefixes (X3 sends these) */
+  /* Handle IRC client format prefixes (X3 sends these).  A marker with
+   * nothing after it names nothing: refused, as the client's own
+   * reference parser refuses it. */
   if (strncmp(ref, "timestamp=", 10) == 0) {
+    if (!ref[10])
+      return -1;
     *ref_type = HISTORY_REF_TIMESTAMP;
     *value = ref + 10;
     return 0;
   }
 
   if (strncmp(ref, "msgid=", 6) == 0) {
+    if (!ref[6])
+      return -1;
     *ref_type = HISTORY_REF_MSGID;
     *value = ref + 6;
     return 0;
