@@ -465,7 +465,7 @@ static struct capabilities capab_list[] = {
   _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=20,max-value-bytes=300"),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
   _CAP(DRAFT_AUTHTOKEN, 0, "draft/authtoken", FEAT_CAP_draft_authtoken),
-  _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", FEAT_CAP_draft_bouncer),
+  _CAP(EVILNET_PERSISTENCE, 0, "evilnet.github.io/persistence", FEAT_CAP_evilnet_persistence),
   _CAP(DRAFT_PERSISTENCE, 0, "draft/persistence", FEAT_CAP_draft_persistence),
   _CAP(DRAFT_OPERTAG, 0, "draft/oper-tag", FEAT_CAP_oper_tag),
 #ifdef USE_SSL

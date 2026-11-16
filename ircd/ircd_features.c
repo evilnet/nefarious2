@@ -636,7 +636,7 @@ DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
 DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
 DEFINE_CAP_NOTIFY("evilnet.github.io/channel-relocate", evilnet_channel_relocate)
 DEFINE_CAP_NOTIFY("draft/metadata-2", draft_metadata_2)
-DEFINE_CAP_NOTIFY("draft/bouncer", draft_bouncer)
+DEFINE_CAP_NOTIFY("evilnet.github.io/persistence", evilnet_persistence)
 DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
 DEFINE_CAP_NOTIFY("tls", tls)
 
@@ -1525,7 +1525,9 @@ static struct FeatureDesc {
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, feature_notify_bouncer_persist_interval), /* periodic persist interval (seconds) */
   F_I(BOUNCER_RESTORE_CRASH_WINDOW, 0, 600, feature_notify_bouncer_restore_crash_window), /* a start that dies sooner after restoring sessions does not get them back at the next (seconds; 0: off) */
-  F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
+  F_B(CAP_evilnet_persistence, 0, 1, feature_notify_cap_evilnet_persistence),
+  F_A(CAP_draft_bouncer, CAP_evilnet_persistence),
+  F_B(PERSISTENCE_DRAFT_EXTRAS, 0, 1, 0),
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
