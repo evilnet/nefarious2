@@ -1078,11 +1078,13 @@ static void client_sock_callback(struct Event* ev)
   case ET_DESTROY:
     con_freeflag(con) &= ~FREEFLAG_SOCKET;
 
-    if (!con_freeflag(con) && !cptr)
-      free_connection(con);
 #ifdef USE_SSL
+    /* The TLS state first: the socket is inside the Connection, which
+     * free_connection() may free just below. */
     ssl_free(ev_socket(ev));
 #endif /* USE_SSL */
+    if (!con_freeflag(con) && !cptr)
+      free_connection(con);
     break;
 
   case ET_CONNECT: /* socket connection completed */
