@@ -519,6 +519,12 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
     end = (char *)d;
   }
 
+  /* Nothing may follow but the "Z" of UTC.  An offset ("+02:00") or
+   * anything else used to be ignored, so the time was read as UTC and
+   * came out wrong by the offset. */
+  if (!end || (*end == 'Z' ? end[1] != '\0' : *end != '\0'))
+    return -1;
+
   /* Convert to Unix time */
   t = timegm(&tm);
   if (t == (time_t)-1)
