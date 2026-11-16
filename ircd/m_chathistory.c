@@ -37,6 +37,7 @@
 #include "chathistory_ephemeral.h"
 #include "chathistory_merge.h"
 #include "chathistory_presence.h"
+#include "chathistory_ref.h"
 #include "client.h"
 #include "handlers.h"
 #include "hash.h"
@@ -322,56 +323,6 @@ const char *msg_type_cmd[] = {
   "PRIVMSG" /* MULTILINE rendered as PRIVMSG */
 };
 
-/** Validate a timestamp value.
- * Valid formats:
- *   - Unix timestamp: digits with optional decimal (e.g., "1234567890.123")
- *   - ISO 8601: "YYYY-MM-DDTHH:MM:SS.sssZ" or similar
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid, 0 if invalid.
- */
-static int validate_timestamp(const char *ts)
-{
-  const char *p;
-
-  if (!ts || !*ts)
-    return 0;
-
-  /* Check for Unix timestamp format: digits with optional decimal point */
-  if (IsDigit(*ts)) {
-    int has_decimal = 0;
-    for (p = ts; *p; p++) {
-      if (*p == '.') {
-        if (has_decimal)
-          return 0;  /* Multiple decimals */
-        has_decimal = 1;
-      } else if (*p == 'T' || *p == '-' || *p == ':' || *p == 'Z') {
-        /* This looks like ISO 8601 format - validate below */
-        break;
-      } else if (!IsDigit(*p)) {
-        return 0;  /* Invalid character */
-      }
-    }
-    if (!*p)
-      return 1;  /* Valid Unix timestamp */
-  }
-
-  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
-   * Relaxed validation - just check basic structure */
-  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
-    /* Check YYYY-MM-DD pattern at start */
-    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
-        ts[4] == '-' &&
-        IsDigit(ts[5]) && IsDigit(ts[6]) &&
-        ts[7] == '-' &&
-        IsDigit(ts[8]) && IsDigit(ts[9]) &&
-        ts[10] == 'T') {
-      return 1;  /* Valid ISO 8601 */
-    }
-  }
-
-  return 0;  /* Invalid format */
-}
-
 /** Validate a timestamp value in strict ISO 8601 format only.
  * Per IRCv3 chathistory spec, clients should send ISO 8601 timestamps.
  * Valid format: "YYYY-MM-DDTHH:MM:SS[.sss]Z"
@@ -411,7 +362,7 @@ static int validate_client_timestamp(const char *ts)
 {
   if (feature_bool(FEAT_CHATHISTORY_STRICT_TIMESTAMPS))
     return validate_iso_timestamp(ts);
-  return validate_timestamp(ts);
+  return chathistory_valid_timestamp(ts);
 }
 
 /** Parse a message reference (timestamp= or msgid=).
@@ -483,86 +434,6 @@ static const char *s2s_to_subcmd(char c)
     case 'S': return "SEARCH";
     default:  return NULL;
   }
-}
-
-/** Convert client reference to efficient S2S format.
- * Input:  "timestamp=1234.567" or "msgid=abc" or "*"
- * Output: "1234.567" or "AB-1234-5" or "*"
- * No prefix needed - timestamps start with digit, msgids don't.
- * @param[in] ref Client reference string.
- * @param[out] buf Buffer for S2S format.
- * @param[in] buflen Buffer size.
- * @return Pointer to buf, or NULL on error.
- */
-static char *ref_to_s2s(const char *ref, char *buf, size_t buflen)
-{
-  if (!ref || !buf || buflen < 2)
-    return NULL;
-
-  if (*ref == '*') {
-    buf[0] = '*';
-    buf[1] = '\0';
-    return buf;
-  }
-
-  if (strncmp(ref, "timestamp=", 10) == 0) {
-    ircd_strncpy(buf, ref + 10, buflen - 1);
-    buf[buflen - 1] = '\0';
-    return buf;
-  }
-
-  if (strncmp(ref, "msgid=", 6) == 0) {
-    ircd_strncpy(buf, ref + 6, buflen - 1);
-    buf[buflen - 1] = '\0';
-    return buf;
-  }
-
-  return NULL;
-}
-
-/** Parse S2S reference format.
- * Input:  "1234.567" (timestamp) or "AB-1234-5" (msgid) or "*" (none)
- * Timestamps always start with a digit, msgids never do (they start with server numeric).
- * @param[in] ref S2S reference string.
- * @param[out] ref_type Type of reference.
- * @param[out] value Pointer to value.
- * @return 0 on success, -1 on error.
- */
-static int parse_s2s_reference(const char *ref, enum HistoryRefType *ref_type, const char **value)
-{
-  if (!ref || !*ref)
-    return -1;
-
-  if (*ref == '*') {
-    *ref_type = HISTORY_REF_NONE;
-    *value = ref;
-    return 0;
-  }
-
-  /* Handle IRC client format prefixes (X3 sends these) */
-  if (strncmp(ref, "timestamp=", 10) == 0) {
-    *ref_type = HISTORY_REF_TIMESTAMP;
-    *value = ref + 10;
-    return 0;
-  }
-
-  if (strncmp(ref, "msgid=", 6) == 0) {
-    *ref_type = HISTORY_REF_MSGID;
-    *value = ref + 6;
-    return 0;
-  }
-
-  /* Timestamps start with a digit, msgids start with server numeric (letter) */
-  if (IsDigit(*ref)) {
-    *ref_type = HISTORY_REF_TIMESTAMP;
-    *value = ref;
-    return 0;
-  }
-
-  /* Anything else is a msgid */
-  *ref_type = HISTORY_REF_MSGID;
-  *value = ref;
-  return 0;
 }
 
 /** Generate a unique batch ID for chathistory response.
@@ -6617,8 +6488,8 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
   fed_start_capacity_miss = 0;
   fed_start_unasked = 0;
   char reqid[32];
-  char s2s_ref[64];
-  char s2s_ref2[64];
+  char s2s_ref[HISTORY_MSGID_LEN + 8];    /* msgid=<id> */
+  char s2s_ref2[HISTORY_MSGID_LEN + 8];
   char s2s_subcmd;
   int i, server_count;
   const char **kids = NULL;   /* the children request's msgids (W5 Task 14) */
@@ -6640,13 +6511,13 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
   if (s2s_subcmd == '?')
     return NULL;  /* Unknown subcmd */
 
-  if (!ref_to_s2s(ref, s2s_ref, sizeof(s2s_ref)))
+  if (!chathistory_ref_to_s2s(ref, s2s_ref, sizeof(s2s_ref)))
     return NULL;  /* Invalid reference */
 
   /* Optional second reference (BETWEEN/W): empty when absent. */
   s2s_ref2[0] = '\0';
   if (ref2 && ref2[0]) {
-    if (!ref_to_s2s(ref2, s2s_ref2, sizeof(s2s_ref2)))
+    if (!chathistory_ref_to_s2s(ref2, s2s_ref2, sizeof(s2s_ref2)))
       return NULL;  /* Invalid second reference */
   }
 
@@ -6754,8 +6625,8 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
     enum HistoryRefType t1, t2;
     const char *v1, *v2;
     int desc = -1;
-    if (parse_s2s_reference(ref, &t1, &v1) == 0
-        && parse_s2s_reference(ref2, &t2, &v2) == 0)
+    if (chathistory_parse_s2s_ref(ref, &t1, &v1) == 0
+        && chathistory_parse_s2s_ref(ref2, &t2, &v2) == 0)
       desc = history_between_descending(target, t1, v1, t2, v2);
     if (desc >= 0) {
       req->keep_oldest = !desc;
@@ -8450,8 +8321,8 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
     /* Same trailing shape as a page (ref2, requester token, type mask) so
      * the responder pages by the requester's presence; the selectors
      * are the trailing parameter. */
-    /* References ride bare on the wire (a unix "sec.ms" is a timestamp,
-     * a leading letter a msgid, "*" none -- parse_s2s_reference). */
+    /* The bounds are unix "sec.ms" timestamps, bare on the wire, or "*"
+     * for none (chathistory_parse_s2s_ref). */
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s S %s %d %s %s %s P%s %x :%s",
                   target, before_unix, limit, reqid, dest_yxx,
                   after_unix && after_unix[0] ? after_unix : "*",
@@ -8563,7 +8434,7 @@ static int fed_children_answer(struct Client *to, const char *target, const char
  * ms_chathistory - server message handler for S2S chathistory federation
  *
  * P10 Format (optimized for efficiency):
- *   [SERVER] CH Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid>   - Query
+ *   [SERVER] CH Q <target> <subcmd:1char> <ref: ts, msgid=<id> or *> <limit> <reqid>   - Query
  *   [SERVER] CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - Response
  *   [SERVER] CH Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_zstd> - Compressed response
  *   [SERVER] CH E <reqid> <count>   - End response
@@ -8637,7 +8508,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
   subcmd = parv[1];
 
   if (strcmp(subcmd, "Q") == 0) {
-    /* Query: Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid> [<dest_numeric>] */
+    /* Query: Q <target> <subcmd:1char> <ref: ts, msgid=<id> or *> <limit> <reqid> [<dest_numeric>] */
     char *target, *query_subcmd_str, *ref, *reqid;
     char *dest_numeric = NULL;
     char *ref2 = NULL;
@@ -8893,8 +8764,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Parse S2S reference format (T..., M..., *) */
-    if (parse_s2s_reference(ref, &ref_type, &ref_value) != 0) {
+    /* Parse the S2S reference (a timestamp, msgid=<id>, a bare msgid, or *) */
+    if (chathistory_parse_s2s_ref(ref, &ref_type, &ref_value) != 0) {
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
       return 0;
     }
@@ -8923,7 +8794,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       int unplaced = ref_type == HISTORY_REF_MSGID
                      && history_msgid_ref_timestamp(target, ref_value, ts) < 0;
       if (!unplaced && query_subcmd_char == 'W' && ref2
-          && parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_MSGID)
+          && chathistory_parse_s2s_ref(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_MSGID)
         unplaced = history_msgid_ref_timestamp(target, v2, ts) < 0;
       if (unplaced) {
         Debug((DEBUG_DEBUG, "CH Q %s %c: a selector this store cannot place: E U",
@@ -9001,7 +8872,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * param (after dest_numeric). */
       enum HistoryRefType ref_type2;
       const char *ref_value2;
-      if (!ref2 || parse_s2s_reference(ref2, &ref_type2, &ref_value2) != 0) {
+      if (!ref2 || chathistory_parse_s2s_ref(ref2, &ref_type2, &ref_value2) != 0) {
         presence_query_filter_close(fed_pf);
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
         return 0;
@@ -9059,7 +8930,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       if (ref2) {
         enum HistoryRefType t2;
         const char *v2;
-        if (parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_TIMESTAMP && v2)
+        if (chathistory_parse_s2s_ref(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_TIMESTAMP && v2)
           ssm->after_ms = (int64_t)history_parse_ms(v2);
       }
       if (parc >= 12 && parv[11])
@@ -9119,7 +8990,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       /* Exact message lookup by msgid -- used for federated REDACT.  The
        * reference is M<msgid> (start_redact_fed_query): the prefix keeps a
        * msgid whose server numeric starts with a digit from reading as a
-       * timestamp.  parse_s2s_reference does not strip it -- 80859cb2 took
+       * timestamp.  chathistory_parse_s2s_ref does not strip it -- 80859cb2 took
        * the T/M prefixes out of the page queries before X was added -- so
        * every X lookup used to look up "M<msgid>" and answer E 0: strip
        * it here.  Anything else is malformed. */
