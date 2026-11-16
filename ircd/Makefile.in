@@ -126,6 +126,7 @@ IRCD_SRC = \
 	chathistory_ephemeral.c \
 	chathistory_merge.c \
 	chathistory_presence.c \
+	chathistory_ref.c \
 	chathistory_recv.c \
 	pm_pair_index.c \
 	ircd.c \
