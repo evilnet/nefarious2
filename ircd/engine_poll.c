@@ -286,6 +286,10 @@ engine_loop(struct Generators* gen)
     socket_run_errors();
 
     wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
+    /* Overdue: poll() takes a negative timeout as infinite (see
+     * engine_epoll.c).  Poll now; -1 (no timers) stays infinite. */
+    if (wait < -1)
+      wait = 0;
 
     Debug((DEBUG_INFO, "poll: delay: %Tu (%Tu) %d", timer_next(gen),
 	   CurrentTime, wait));

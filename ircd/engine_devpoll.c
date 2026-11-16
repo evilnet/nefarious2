@@ -312,6 +312,10 @@ engine_loop(struct Generators* gen)
     /* calculate the proper timeout */
     dopoll.dp_timeout = timer_next(gen) ?
       (timer_next(gen) - CurrentTime) * 1000 : -1;
+    /* Overdue: /dev/poll takes a negative timeout as infinite (see
+     * engine_epoll.c).  Poll now; -1 (no timers) stays infinite. */
+    if (dopoll.dp_timeout < -1)
+      dopoll.dp_timeout = 0;
 
     Debug((DEBUG_ENGINE, "devpoll: delay: %Tu (%Tu) %d", timer_next(gen),
 	   CurrentTime, dopoll.dp_timeout));
