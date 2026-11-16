@@ -92,7 +92,7 @@ static struct {
 static int
 cap_notify_wanted(struct Client *cptr)
 {
-  return CapActive(cptr, CAP_CAPNOTIFY) || cli_capab_version(cptr) >= 302;
+  return CapOwnHas(cptr, CAP_CAPNOTIFY) || cli_capab_version(cptr) >= 302;
 }
 
 /** Begin batching CAP notify calls.
