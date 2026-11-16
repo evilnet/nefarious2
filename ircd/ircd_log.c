@@ -421,6 +421,16 @@ log_async_start(void)
   log_feature_async_logging();
 }
 
+/** The writers stop (DIE, RESTART, a fatal error after startup): the
+ * writer writes what it holds and exits, and nothing starts it again --
+ * a REHASH in the same event batch included. */
+void
+log_async_stop(void)
+{
+  log_async_started = 0;
+  log_async_shutdown();
+}
+
 /** Write a logging entry.
  * @param[in] subsys Target subsystem.
  * @param[in] severity Severity of message.

@@ -75,7 +75,7 @@ static struct {
   /* Statistics */
   unsigned long completed_count;    /**< Total tasks completed */
   unsigned int active_count;        /**< Tasks currently executing */
-} pool;
+} pool = { .signal_pipe = { -1, -1 } };  /* no pipe until init */
 
 /**
  * Set a file descriptor to non-blocking mode.
@@ -196,6 +196,7 @@ int thread_pool_init(int num_threads)
               strerror(errno));
     close(pool.signal_pipe[0]);
     close(pool.signal_pipe[1]);
+    pool.signal_pipe[0] = pool.signal_pipe[1] = -1;
     return -1;
   }
 
@@ -218,12 +219,17 @@ int thread_pool_init(int num_threads)
 
   /* Create worker threads */
   for (i = 0; i < num_threads; i++) {
-    if (pthread_create(&pool.workers[i], NULL, worker_thread, NULL) != 0) {
+    int err = pthread_create(&pool.workers[i], NULL, worker_thread, NULL);
+
+    if (err != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
-                "thread_pool: pthread_create() failed: %s", strerror(errno));
-      /* Shut down threads we did create */
+                "thread_pool: pthread_create() failed: %s", strerror(err));
+      /* Shut down threads we did create.  Under the lock: a worker
+       * between its check and its wait would miss the broadcast. */
+      pthread_mutex_lock(&pool.task_mutex);
       pool.running = 0;
       pthread_cond_broadcast(&pool.task_cond);
+      pthread_mutex_unlock(&pool.task_mutex);
       while (--i >= 0) {
         pthread_join(pool.workers[i], NULL);
       }
@@ -233,6 +239,9 @@ int thread_pool_init(int num_threads)
       pthread_cond_destroy(&pool.task_cond);
       close(pool.signal_pipe[0]);
       close(pool.signal_pipe[1]);
+      pool.signal_pipe[0] = pool.signal_pipe[1] = -1;
+      pool.workers = NULL;
+      pool.num_workers = 0;
       return -1;
     }
   }
