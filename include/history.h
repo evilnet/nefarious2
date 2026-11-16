@@ -792,6 +792,17 @@ extern int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_b
 extern int history_lookup_message(const char *target, const char *msgid,
                                    struct HistoryMessage **msg);
 
+/** history_lookup_message() for a row a client may act on: a row of the
+ * channel's previous incarnation (destroyed and created again) is hidden
+ * from every history walk, and is "not found" here too.  For CHATHISTORY
+ * AROUND's centre row, REDACT's lookup and the federated exact lookup
+ * (CH Q X).  A peer's redaction applied to the store still uses
+ * history_lookup_message().
+ * @return 0 on success, -1 on error, 1 if not found (or not live).
+ */
+extern int history_lookup_live_message(const char *target, const char *msgid,
+                                       struct HistoryMessage **msg);
+
 /** Callback type for channel enumeration.
  * @param[in] channel Channel name.
  * @param[in] data User data pointer.

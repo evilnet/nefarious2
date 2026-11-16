@@ -8795,7 +8795,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * it here.  Anything else is malformed. */
       if (ref[0] == 'M' && ref[1]) {
         struct HistoryMessage *single_msg = NULL;
-        int lrc = history_lookup_message(target, ref + 1, &single_msg);
+        /* A row of the channel's previous incarnation is not found. */
+        int lrc = history_lookup_live_message(target, ref + 1, &single_msg);
         if (lrc == 0 && single_msg) {
           /* The row first, then its context children, each after its
            * CH C: a REDACT among them tells the requester the message is

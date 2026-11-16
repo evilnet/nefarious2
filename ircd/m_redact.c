@@ -250,7 +250,9 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     char fail_ctx[BUFSIZE];
     ircd_snprintf(0, fail_ctx, sizeof(fail_ctx), "%s %s", target, msgid);
 
-    rc = history_lookup_message(target, msgid, &msg);
+    /* A row of the channel's previous incarnation is hidden from history,
+     * and is not this channel's to redact. */
+    rc = history_lookup_live_message(target, msgid, &msg);
     if (rc == 1) {
       /* Not in this store.  A server stores only what reached it -- a
        * channel message reaches only the servers with a member -- so the
