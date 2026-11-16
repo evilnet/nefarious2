@@ -208,17 +208,20 @@ int log_async_init(int buffer_size)
     return -1;
   }
 
-  /* Create writer thread */
-  log_async.running = 1;
-
+  /* Create the writer thread, and publish running only once it exists.
+   * Other threads may be logging already (a REHASH turns ASYNC_LOGGING
+   * on while thread-pool workers run): one that saw running set would
+   * queue into this buffer, which a failed create frees.  The writer
+   * starts by taking the mutex, so it sees running set. */
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
 
+  pthread_mutex_lock(&log_async.mutex);
   if (pthread_create(&log_async.writer_thread, &attr,
                      log_writer_thread, NULL) != 0) {
+    pthread_mutex_unlock(&log_async.mutex);
     Debug((DEBUG_ERROR, "log_async_init: thread create failed: %s",
            strerror(errno)));
-    log_async.running = 0;
     pthread_cond_destroy(&log_async.flushed);
     pthread_cond_destroy(&log_async.not_full);
     pthread_cond_destroy(&log_async.not_empty);
@@ -229,6 +232,8 @@ int log_async_init(int buffer_size)
     return -1;
   }
 
+  log_async.running = 1;
+  pthread_mutex_unlock(&log_async.mutex);
   pthread_attr_destroy(&attr);
 
   Debug((DEBUG_DEBUG, "log_async_init: initialized with buffer size %d",
