@@ -230,7 +230,10 @@ static int case_setup(void **state)
   gate_closed = 0;
   async_logging = 1;
   temp_path(log_path, sizeof(log_path), "file");
-  return log_async_init(8);
+  if (log_async_init(8) < 0)
+    return -1;
+  log_async_start();            /* startup is over */
+  return 0;
 }
 
 /** A case that starts the writer itself. */
@@ -249,7 +252,7 @@ static int case_teardown(void **state)
 {
   (void)state;
   gate_open();
-  log_async_shutdown();
+  log_async_stop();             /* back to before startup */
   log_resume();                 /* a case that failed while shut */
   log_close();                  /* and the syslog socket log_resume()
                                  * opened: each case starts with the same
@@ -409,8 +412,7 @@ static void no_log_reopens_after_shutdown(void **state)
 
 /** Before log_async_start() (startup: ircd.conf is still being read, or
  * this is a configuration check), the feature turned on starts nothing;
- * log_async_start() starts the writer.  Runs first: nothing undoes
- * log_async_start(). */
+ * log_async_start() starts the writer. */
 static void writer_waits_for_startup(void **state)
 {
   (void)state;
@@ -512,9 +514,89 @@ static void a_line_the_full_queue_writes_is_written_once(void **state)
   assert_int_equal(occurrences(log_path, "fill"), 7);
 }
 
+/** A line longer than a queue entry is cut short, but still ends its
+ * line: the next one starts on a line of its own. */
+static void a_cut_line_still_ends_its_line(void **state)
+{
+  char big[LOG_ASYNC_MAX_ENTRY + 100], buf[3 * LOG_ASYNC_MAX_ENTRY];
+  ssize_t n;
+  int fd;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  memset(big, 'x', sizeof(big) - 1);
+  big[sizeof(big) - 1] = '\0';
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "%s", big);
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "after");
+  log_async_flush();
+
+  fd = open(log_path, O_RDONLY);
+  assert_true(fd >= 0);
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  assert_true(n > 0);
+  buf[n] = '\0';
+  assert_int_equal(buf[n - 1], '\n');
+  assert_non_null(strstr(buf, "x\n["));   /* "after" has its own line */
+}
+
+/** The same, when the queue is full and the caller writes the line
+ * itself: the cut line still ends its line. */
+static void a_cut_line_the_full_queue_writes_still_ends_its_line(void **state)
+{
+  char big[LOG_ASYNC_MAX_ENTRY + 100], buf[8 * LOG_ASYNC_MAX_ENTRY];
+  ssize_t n;
+  int fd, i;
+  unsigned long dropped, dropped_after;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  gate_close();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "first");
+  wait_at_gate();
+  for (i = 0; i < 7; i++)               /* fill the ring */
+    log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "fill %d", i);
+  memset(big, 'x', sizeof(big) - 1);
+  big[sizeof(big) - 1] = '\0';
+  log_async_stats(NULL, NULL, &dropped);
+  open_gate_soon();                     /* long after the 1 ms wait */
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "%s", big);
+  log_async_stats(NULL, NULL, &dropped_after);
+  assert_int_equal(dropped_after, dropped + 1);   /* the caller wrote it */
+  opener_join();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "after");
+  log_async_flush();
+
+  fd = open(log_path, O_RDONLY);
+  assert_true(fd >= 0);
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  assert_true(n > 0);
+  buf[n] = '\0';
+  assert_non_null(strstr(buf, "xxxx\n"));
+  assert_null(strstr(buf, "x["));       /* nothing runs on from it */
+}
+
+/** After the writers stop (DIE), nothing starts the writer again. */
+static void nothing_restarts_the_writer_after_stop(void **state)
+{
+  (void)state;
+  log_async_stop();
+  assert_false(log_async_available());
+  log_feature_async_logging();
+  assert_false(log_async_available());
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test_setup_teardown(a_cut_line_still_ends_its_line,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+        a_cut_line_the_full_queue_writes_still_ends_its_line,
+        case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(nothing_restarts_the_writer_after_stop,
+                                    case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(a_line_the_full_queue_writes_is_written_once,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(writer_waits_for_startup,

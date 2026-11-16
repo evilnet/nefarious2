@@ -378,7 +378,7 @@ static void shutdown_stores(void)
 static void shutdown_writers(void)
 {
   thread_pool_shutdown();
-  log_async_shutdown();
+  log_async_stop();
   log_shutdown();
 }
 
@@ -1150,6 +1150,7 @@ int main(int argc, char **argv) {
 #ifdef USE_SSL
   if (ssl_init()) {
     Debug((DEBUG_FATAL, "Failed to initialize SSL contexts"));
+    shutdown_writers();         /* what ssl_init() logged is written */
     exit(1);
   }
 #endif
