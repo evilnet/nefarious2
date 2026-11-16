@@ -273,19 +273,77 @@ int persistence_profile_create(const char *account, const char *name,
                                   effective_parent);
 }
 
+/** One stored profile row, as collect_profile_rows() returns it. */
+struct ProfileRow {
+  struct ProfileRow *next;
+  char *key;                    /**< full key, any length */
+  char *value;                  /**< decoded, vis-stripped value */
+};
+
+static int collect_profile_row(const char *key, const struct md_version *v,
+                               void *arg)
+{
+  struct ProfileRow ***tail = (struct ProfileRow ***)arg;
+  struct ProfileRow *row;
+  size_t klen, vlen;
+
+  if (v->tombstone || strncmp(key, PROFILE_KEY_PREFIX,
+                              sizeof(PROFILE_KEY_PREFIX) - 1) != 0)
+    return 0;
+  klen = strlen(key);
+  vlen = v->value ? v->vlen : 0;
+  row = (struct ProfileRow *)MyMalloc(sizeof(*row) + klen + 1 + vlen + 1);
+  row->key = (char *)(row + 1);
+  memcpy(row->key, key, klen + 1);
+  row->value = row->key + klen + 1;
+  if (vlen)
+    memcpy(row->value, v->value, vlen);
+  row->value[vlen] = '\0';
+  row->next = NULL;
+  **tail = row;               /* in store order, as the listing shows them */
+  *tail = &row->next;
+  return 0;
+}
+
+/** Every live draft/persistence/profile/ row stored for @a account, keys
+ * of any length.  metadata_account_list() cannot hold a key of
+ * METADATA_KEY_LEN (64) bytes or more and skips it, and a profile key --
+ * the prefix, a name of up to PERSISTENCE_PROFILE_NAME_MAX characters and
+ * the setting -- often is that long: a delete or rename walking that list
+ * left those rows behind, and a listing missed such a profile.  The rows
+ * are collected first and acted on after the walk, so no write happens
+ * under the iterator.  Free with free_profile_rows().
+ */
+static struct ProfileRow *collect_profile_rows(const char *account)
+{
+  struct ProfileRow *head = NULL;
+  struct ProfileRow **tail = &head;
+
+  metadata_account_foreach_version(account, collect_profile_row, &tail);
+  return head;
+}
+
+static void free_profile_rows(struct ProfileRow *row)
+{
+  while (row) {
+    struct ProfileRow *next = row->next;
+    MyFree(row);
+    row = next;
+  }
+}
+
 /** Find profiles that have `name` as their parent.
- * metadata_account_list already returns the decoded, vis-stripped value
- * (TTL-decoded since fdf93a5, vis-stripped since the P1 A2 encoding work)
- * — e->value is used directly, no re-fetch needed.
+ * collect_profile_rows() returns the decoded, vis-stripped value: e->value
+ * is used directly, no re-fetch needed.
  */
 static int has_children(const char *account, const char *name)
 {
-  struct MetadataEntry *list, *e;
+  struct ProfileRow *list, *e;
   size_t prefix_len = strlen(PROFILE_KEY_PREFIX);
   size_t parent_suffix_len = strlen("/" PROFILE_PARENT_KEY);
   int found = 0;
 
-  list = metadata_account_list(account);
+  list = collect_profile_rows(account);
   for (e = list; e; e = e->next) {
     const char *k = e->key;
     size_t klen;
@@ -301,18 +359,13 @@ static int has_children(const char *account, const char *name)
       break;
     }
   }
-  /* metadata_account_list returns a fresh allocation we must free. */
-  while (list) {
-    struct MetadataEntry *next = list->next;
-    metadata_free_entry(list);
-    list = next;
-  }
+  free_profile_rows(list);
   return found;
 }
 
 int persistence_profile_delete(const char *account, const char *name)
 {
-  struct MetadataEntry *list, *e;
+  struct ProfileRow *list, *e;
   char prefix[64];
   size_t prefix_len;
   int rc = 0;
@@ -330,7 +383,7 @@ int persistence_profile_delete(const char *account, const char *name)
                 PROFILE_KEY_PREFIX, name);
   prefix_len = strlen(prefix);
 
-  list = metadata_account_list(account);
+  list = collect_profile_rows(account);
   for (e = list; e; e = e->next) {
     if (e->key && strncmp(e->key, prefix, prefix_len) == 0) {
       if (profile_write(account, e->key, NULL) < 0) {
@@ -339,11 +392,7 @@ int persistence_profile_delete(const char *account, const char *name)
       }
     }
   }
-  while (list) {
-    struct MetadataEntry *next = list->next;
-    metadata_free_entry(list);
-    list = next;
-  }
+  free_profile_rows(list);
   return rc;
 }
 
@@ -351,7 +400,7 @@ int persistence_profile_rename(const char *account,
                                 const char *old_name,
                                 const char *new_name)
 {
-  struct MetadataEntry *list, *e;
+  struct ProfileRow *list, *e;
   char old_prefix[64];
   char new_key[256];
   size_t old_prefix_len;
@@ -374,12 +423,11 @@ int persistence_profile_rename(const char *account,
                 PROFILE_KEY_PREFIX, old_name);
   old_prefix_len = strlen(old_prefix);
 
-  list = metadata_account_list(account);
+  list = collect_profile_rows(account);
 
-  /* Phase 1: copy old_name's keys to new_name.  metadata_account_list
-   * already returns the decoded, vis-stripped value (TTL-decoded since
-   * fdf93a5, vis-stripped since the P1 A2 encoding work) — e->value is
-   * the value to re-write, no re-fetch needed. Using the list snapshot
+  /* Phase 1: copy old_name's keys to new_name.  collect_profile_rows()
+   * returns the decoded, vis-stripped value -- e->value is the value to
+   * re-write, no re-fetch needed. Using the list snapshot
    * also drops a TOCTOU window against a concurrent delete of the same
    * key between the list scan and a since-removed per-key re-get. */
   for (e = list; e; e = e->next) {
@@ -425,11 +473,7 @@ int persistence_profile_rename(const char *account,
     }
   }
 
-  while (list) {
-    struct MetadataEntry *next = list->next;
-    metadata_free_entry(list);
-    list = next;
-  }
+  free_profile_rows(list);
   return rc;
 }
 
@@ -437,7 +481,7 @@ int persistence_profile_list(const char *account,
                               persistence_profile_list_cb cb,
                               void *cookie)
 {
-  struct MetadataEntry *list, *e;
+  struct ProfileRow *list, *e;
   size_t prefix_len = strlen(PROFILE_KEY_PREFIX);
   size_t parent_suffix_len = strlen("/" PROFILE_PARENT_KEY);
   int default_seen = 0;
@@ -445,7 +489,7 @@ int persistence_profile_list(const char *account,
   if (!cb)
     return -1;
 
-  list = metadata_account_list(account);
+  list = collect_profile_rows(account);
 
   for (e = list; e; e = e->next) {
     const char *k = e->key;
@@ -466,8 +510,8 @@ int persistence_profile_list(const char *account,
     name[name_len] = '\0';
     if (profile_name_eq(name, PERSISTENCE_PROFILE_DEFAULT))
       default_seen = 1; /* should not happen, but be safe */
-    /* metadata_account_list already returns the decoded, vis-stripped
-     * value — e->value is the parent name, no re-fetch needed. */
+    /* collect_profile_rows() returns the decoded, vis-stripped value:
+     * e->value is the parent name, no re-fetch needed. */
     cb(name, e->value ? e->value : "", cookie);
   }
 
@@ -475,11 +519,7 @@ int persistence_profile_list(const char *account,
   if (!default_seen)
     cb(PERSISTENCE_PROFILE_DEFAULT, "", cookie);
 
-  while (list) {
-    struct MetadataEntry *next = list->next;
-    metadata_free_entry(list);
-    list = next;
-  }
+  free_profile_rows(list);
   return 0;
 }
 
