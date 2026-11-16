@@ -7876,6 +7876,10 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
  * per-channel parts stop there, and the remaining channels are searched
  * on this server only. */
 #define SEARCH_FED_RESERVE (MAX_FED_REQUESTS / 4)
+/** The most channels one SEARCH without `in` federates (N013): each part
+ * asks every storage server for a scan of its own, so the parts are
+ * few; the remaining channels are searched on this server only. */
+#define SEARCH_FED_PARTS_MAX 8
 
 static void search_sel_escape(const char *in, char *out, size_t n)
 {
@@ -8161,9 +8165,12 @@ static void search_agg_finish(struct SearchAgg *agg, struct HistoryMessage *rows
 
 static void complete_search_agg_part(struct FedRequest *req)
 {
-  struct SearchAggPart *part = (struct SearchAggPart *)req->cb_data;
+  struct SearchAggPart *part;
 
-  if (!req || req->response_sent || !part || part->done)
+  if (!req || req->response_sent)
+    return;
+  part = (struct SearchAggPart *)req->cb_data;
+  if (!part || part->done)
     return;
   req->response_sent = 1;
   part->done = 1;
@@ -9941,20 +9948,28 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * (N013), so each channel with stores elsewhere is one federated
    * request, a part of one aggregate that sends the single batch when the
    * last part is in.  The parts are bounded so one search cannot take the
-   * slots every other page and search federates through: past
-   * SEARCH_FED_RESERVE free slots, a channel is searched here only. */
+   * slots every other page and search federates through, nor make every
+   * peer scan once per channel: at most SEARCH_FED_PARTS_MAX of them, one
+   * such search in flight per client, and never below SEARCH_FED_RESERVE
+   * free slots.  Past those, a channel is searched here only. */
   {
     struct Membership *member;
     struct SearchAgg *agg;
-    int free_slots = 0;
-
-    for (i = 0; i < MAX_FED_REQUESTS; i++)
-      if (!fed_requests[i])
-        free_slots++;
+    int free_slots = 0, parts_left = SEARCH_FED_PARTS_MAX;
 
     agg = (struct SearchAgg *)MyCalloc(1, sizeof(*agg));
     ircd_snprintf(0, agg->client_yxx, sizeof(agg->client_yxx), "%s%s",
                   cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+    for (i = 0; i < MAX_FED_REQUESTS; i++) {
+      if (!fed_requests[i])
+        free_slots++;
+      /* One such search in flight per client: a second one, before the
+       * first has answered, is searched here only. */
+      else if (fed_requests[i]->completion_cb == complete_search_agg_part
+               && !fed_requests[i]->response_sent
+               && !strcmp(fed_requests[i]->client_yxx, agg->client_yxx))
+        parts_left = 0;
+    }
     if (cli_label(sptr)[0])
       ircd_strncpy(agg->label, cli_label(sptr), sizeof(agg->label));
     agg->limit = limit;
@@ -9975,7 +9990,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         rows = NULL;
         count = 0;
       }
-      if (free_slots > SEARCH_FED_RESERVE) {
+      if (parts_left > 0 && free_slots > SEARCH_FED_RESERVE) {
         req = start_fed_search(sptr, lookup_target, member->channel->chname,
                                before_unix, after_unix, limit, &sm, rows, count);
       }
@@ -9983,6 +9998,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         struct SearchAggPart *part;
 
         free_slots--;
+        parts_left--;
         part = (struct SearchAggPart *)MyCalloc(1, sizeof(*part));
         part->agg = agg;
         agg->pending++;
