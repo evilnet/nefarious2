@@ -2657,15 +2657,10 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
    * BEFORE and AFTER both exclude the reference, but AROUND should include it.
    */
   if (ref_type == HISTORY_REF_MSGID) {
-    int rc = history_lookup_message(target, reference, &ref_msg);
     /* A row of the channel's previous incarnation is no centre: the
      * walks on either side skip such rows (row_incarnation_ok), and so
      * does this one, without counting it. */
-    if (rc == 0 && ref_msg
-        && !row_incarnation_ok(ref_msg, history_live_incarnation(target))) {
-      history_free_messages(ref_msg);
-      ref_msg = NULL;
-    }
+    int rc = history_lookup_live_message(target, reference, &ref_msg);
     if (rc == 0 && ref_msg) {
       /* The reference row is subject to the same visibility rules as
        * the rows around it: type mask, veto, then the presence hook. */
@@ -4600,6 +4595,21 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
     return -1;
   }
   return 0;
+}
+
+/** See include/history.h. */
+int history_lookup_live_message(const char *target, const char *msgid,
+                                struct HistoryMessage **msg)
+{
+  int rc = history_lookup_message(target, msgid, msg);
+
+  if (rc == 0 && *msg
+      && !row_incarnation_ok(*msg, history_live_incarnation(target))) {
+    history_free_messages(*msg);
+    *msg = NULL;
+    return 1;
+  }
+  return rc;
 }
 
 int history_lookup_message(const char *target, const char *msgid,
