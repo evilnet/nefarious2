@@ -365,6 +365,19 @@ static int validate_client_timestamp(const char *ts)
   return chathistory_valid_timestamp(ts);
 }
 
+/** Does an ISO 8601 timestamp convert (history_iso_to_unix())?  The
+ * validators check its shape only: an offset or other text after the
+ * seconds passed them, and the stores, which fall back to reading a
+ * timestamp that does not convert as unix, then built keys from the ISO
+ * text.  A unix "sec[.ms]" (no '-') needs no conversion. */
+static int iso_timestamp_converts(const char *ts)
+{
+  char unix_buf[HISTORY_TIMESTAMP_LEN];
+
+  return !strchr(ts, '-')
+      || history_iso_to_unix(ts, unix_buf, sizeof(unix_buf)) == 0;
+}
+
 /** Parse a message reference (timestamp= or msgid=).
  * @param[in] ref Reference string.
  * @param[out] ref_type Type of reference.
@@ -386,7 +399,7 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
     const char *ts = ref + 10;
     /* Validate the timestamp value per IRCv3 spec.
      * Uses validate_client_timestamp which respects STRICT_TIMESTAMPS config. */
-    if (!validate_client_timestamp(ts))
+    if (!validate_client_timestamp(ts) || !iso_timestamp_converts(ts))
       return -1;
     *ref_type = HISTORY_REF_TIMESTAMP;
     *value = ts;
@@ -7752,6 +7765,13 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
  * few; the remaining channels are searched on this server only. */
 #define SEARCH_FED_PARTS_MAX 8
 
+/** The most a federated search line (start_fed_search) takes besides its
+ * target and selectors: "<yy> CH Q " 8, " S " 3, before 19, limit 10,
+ * reqid 31, dest 2, after 19, " P<yyxxx>" 7, mask 8, " :" 2, and the
+ * separating spaces 5.  With the target and the selectors it has to fit
+ * the 510 bytes of a P10 line before its CR LF. */
+#define SEARCH_FED_FIXED 114
+
 static void search_sel_escape(const char *in, char *out, size_t n)
 {
   size_t o = 0;
@@ -8941,17 +8961,31 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         ircd_strncpy(sj->sel, parv[11], sizeof(sj->sel) - 1);
       {
         char *q = sj->sel, *tok;
+        int bad_from = 0;
         while ((tok = q) && *tok) {
           char *sp = strchr(tok, ' ');
           if (sp) { *sp = '\0'; q = sp + 1; } else q = tok + strlen(tok);
           if (0 == strncmp(tok, "from=", 5)) {
-            ircd_strncpy(ssm->from, tok + 5, sizeof(ssm->from));
-            search_sel_unescape(ssm->from);
+            /* Unescape in place first: the escaped form may be longer
+             * than a nick, and copying it first cut it. */
+            search_sel_unescape(tok + 5);
+            if (strlen(tok + 5) >= sizeof(ssm->from))
+              bad_from = 1;   /* cut, it would match a shorter nick */
+            else
+              ircd_strncpy(ssm->from, tok + 5, sizeof(ssm->from));
           } else if (0 == strncmp(tok, "text=", 5)) {
             search_sel_unescape(tok + 5);
             if (tok[5])
               ssm->text = tok + 5;
           }
+        }
+        /* A nick longer than ours: no row here can match it, as the
+         * requester's own check (m_search) would have said. */
+        if (bad_from) {
+          MyFree(sj);
+          presence_query_filter_close(fed_pf);
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+          return 0;
         }
       }
       Debug((DEBUG_DEBUG, "CH Q S: target %s before '%s' after %lld limit %d from '%s' text '%s' reftype %d",
@@ -9989,13 +10023,18 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (limit <= 0 || limit > max_limit)
     limit = max_limit;
   /* The selectors also travel S2S in one 512-byte P10 line; refuse an
-   * oversize text here so local and federated behaviour agree. */
+   * oversize text here so local and federated behaviour agree.  A search
+   * in a channel federates (start_fed_search), and its line carries the
+   * channel name too: a long name leaves less room for the text, and a
+   * line past the limit would be cut on the way out. */
   {
     char esc[BUFSIZE];
-    size_t n = 0;
+    size_t n = 0, line = 0;
     if (sm.from[0]) { search_sel_escape(sm.from, esc, sizeof(esc)); n += 5 + strlen(esc) + 1; }
     if (sm.text) { search_sel_escape(sm.text, esc, sizeof(esc)); n += 5 + strlen(esc); }
-    if (n > SEARCH_SEL_MAX) {
+    if (in[0] && IsChannelName(in))
+      line = SEARCH_FED_FIXED + strlen(in) + n;
+    if (n > SEARCH_SEL_MAX || line > BUFSIZE - 2) {
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text", "Selectors too long");
       return 0;
     }
