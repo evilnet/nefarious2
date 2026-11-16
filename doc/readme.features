@@ -2119,8 +2119,15 @@ draft/persistence specification (ATTACH, DETACH, LIST, PROFILE, REPLAY).
 Its value lists them as tokens (attach,detach,list,attach-cursor).  A held
 session's restored channel state is sent in a batch of this type.
 'draft/persistence' itself carries only the specification's STATUS, GET
-and SET.  The old feature name CAP_draft_bouncer is a deprecated alias:
-the 'draft/bouncer' capability it announced is gone.
+and SET.
+
+CAP_draft_bouncer
+ * Type: boolean
+ * Default: FALSE
+
+Obsolete.  It announced a 'draft/bouncer' capability that nothing read;
+the capability is gone, and the setting is accepted and ignored so
+existing configurations still load.
 
 PERSISTENCE_DRAFT_EXTRAS
  * Type: boolean

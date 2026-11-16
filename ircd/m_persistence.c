@@ -1021,10 +1021,12 @@ static int persistence_cmd_list(struct Client *sptr)
  * working. */
 static int persistence_extras_allowed(struct Client *sptr)
 {
-  if (CapActive(sptr, CAP_EVILNET_PERSISTENCE))
+  /* The connection's own caps: a session's union would let another
+   * device's vendor cap stand in for this one's. */
+  if (CapOwnHas(sptr, CAP_EVILNET_PERSISTENCE))
     return 1;
   return feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
-         && CapActive(sptr, CAP_DRAFT_PERSISTENCE);
+         && CapOwnHas(sptr, CAP_DRAFT_PERSISTENCE);
 }
 
 int m_persistence(struct Client *cptr, struct Client *sptr,
