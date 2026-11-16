@@ -3645,10 +3645,16 @@ static void iauth_parse(struct IAuth *iauth, char *message)
     handler(iauth, NULL, parc, params);
   } else {
     /* Try to find the client associated with the request.  The id is
-     * range-checked as parsed (a long), before it can be narrowed. */
-    long id = strtol(params[0], NULL, 10);
+     * range-checked as parsed (a long), before it can be narrowed, and
+     * must be a number and nothing else: "16x" is not client 16. */
+    char *endptr;
+    long id;
 
-    if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id]))
+    errno = 0;
+    id = strtol(params[0], &endptr, 10);
+    if (errno == ERANGE || endptr == params[0] || *endptr)
+      sendto_iauth(NULL, "E BadId :[%s] is not a valid client id", params[0]);
+    else if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id]))
       /* Client no longer exists (or never existed). */
       sendto_iauth(NULL, "E Gone :[%s %s %s]", params[0], params[1],
 		   params[2]);
@@ -3660,27 +3666,38 @@ static void iauth_parse(struct IAuth *iauth, char *message)
     else {
       struct irc_sockaddr addr;
       int res;
+      long port_val;
+      char *port_end;
 
-      /* Parse IP address and port number from parameters */
+      /* Parse IP address and port number from parameters.  The port is
+       * range-checked before it is narrowed to an unsigned short: 65536
+       * would otherwise wrap to 0 and could match another connection. */
       res = ipmask_parse(params[1], &addr.addr, NULL);
-      addr.port = strtol(params[2], NULL, 10);
+      errno = 0;
+      port_val = strtol(params[2], &port_end, 10);
+      if (errno == ERANGE || port_end == params[2] || *port_end
+          || port_val < 0 || port_val > 65535)
+        sendto_iauth(cli, "E BadPort :[%s] is not a valid port", params[2]);
+      else {
+        addr.port = (unsigned short)port_val;
 
-      /* Check IP address and port number against expected: the
-       * client's address, or the one it connected from when that was
-       * replaced (an unset connect address, all zeros, matches nothing),
-       * and its remote port -- after registration, when the auth
-       * request is gone, the connection's. */
-      if (0 == res ||
-	  (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
-           (irc_in_addr_unspec(&cli_connectip(cli)) ||
-            irc_in_addr_cmp(&addr.addr, &cli_connectip(cli)))) ||
-	  addr.port != (auth ? auth->port : cli_port(cli)))
-	/* Report mismatch to iauth. */
-	sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
-		     ircd_ntoa(&cli_ip(cli)));
-      else if (handler(iauth, cli, parc - 3, params + 3) > 0)
-	/* Handler indicated a possible state change. */
-	check_auth_finished(auth);
+        /* Check IP address and port number against expected: the
+         * client's address, or the one it connected from when that was
+         * replaced (an unset connect address, all zeros, matches nothing),
+         * and its remote port -- after registration, when the auth
+         * request is gone, the connection's. */
+        if (0 == res ||
+            (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
+             (irc_in_addr_unspec(&cli_connectip(cli)) ||
+              irc_in_addr_cmp(&addr.addr, &cli_connectip(cli)))) ||
+            addr.port != (auth ? auth->port : cli_port(cli)))
+          /* Report mismatch to iauth. */
+          sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
+                       ircd_ntoa(&cli_ip(cli)));
+        else if (handler(iauth, cli, parc - 3, params + 3) > 0)
+          /* Handler indicated a possible state change. */
+          check_auth_finished(auth);
+      }
     }
   }
 }
