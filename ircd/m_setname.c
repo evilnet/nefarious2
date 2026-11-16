@@ -155,8 +155,10 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     newname[REALLEN] = '\0';
   }
 
-  /* Check if realname actually changed */
-  if (ircd_strcmp(cli_info(sptr), newname) == 0)
+  /* Check if realname actually changed: only an identical one is a
+   * no-op -- a realname is text, and "John Smith" after "john smith" is
+   * a change (echoed, relayed, stored). */
+  if (strcmp(cli_info(sptr), newname) == 0)
     return 0;
 
   /* Update the realname */
@@ -245,8 +247,10 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (strlen(newname) > REALLEN)
     newname[REALLEN] = '\0';
 
-  /* Check if realname actually changed */
-  if (ircd_strcmp(cli_info(sptr), newname) == 0)
+  /* Check if realname actually changed: only an identical one is a
+   * no-op -- a realname is text, and "John Smith" after "john smith" is
+   * a change (echoed, relayed, stored). */
+  if (strcmp(cli_info(sptr), newname) == 0)
     return 0;
 
   /* Update the realname */
