@@ -290,6 +290,7 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
                int interactive)
 {
   int was_away = cli_user(sptr)->away != 0;
+  int same_text;
   int is_away;
   int is_away_star = 0;
   int throttle;
@@ -401,7 +402,11 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
 
   /* Non-aggregated path — used when there is no bouncer session for
    * this connection (including account users whose current connection
-   * isn't attached to a session). */
+   * isn't attached to a session).  A new message while already away is
+   * relayed too: the other servers kept the old one (WHOIS, RPL_AWAY
+   * and away-notify there).  The same message again is not. */
+  same_text = was_away && !EmptyString(away_message)
+              && 0 == strncmp(cli_user(sptr)->away, away_message, AWAYLEN);
   is_away = user_set_away(cli_user(sptr), away_message);
   {
     if (away_msgid[0])
@@ -409,10 +414,11 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
 
     if (is_away)
     {
-      if (!was_away) {
-        if (away_msgid[0])
+      if (!same_text) {
+        if (away_msgid[0]) {
           sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_want_s2s_tags(1);
+        }
         away_send_to_servers(sptr, cptr, away_message);
       }
       if (interactive)
@@ -420,9 +426,10 @@ int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
       away_notify_common(sptr, sptr, away_message);
     }
     else {
-      if (away_msgid[0])
+      if (away_msgid[0]) {
         sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
         sendcmdto_want_s2s_tags(1);
+      }
       away_send_to_servers(sptr, cptr, NULL);
       if (interactive)
         send_reply(sptr, RPL_UNAWAY);
@@ -573,9 +580,10 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
 
     /* Set S2S tags for downstream server relay */
-    if (away_msgid[0])
+    if (away_msgid[0]) {
       sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
       sendcmdto_want_s2s_tags(1);
+    }
 
     if (is_away) {
       if (is_away_star && !IsIRCv3Aware(cptr))
