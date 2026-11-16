@@ -32,6 +32,7 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory.h"
 #include "client.h"
 #include "handlers.h"
 #include "hash.h"

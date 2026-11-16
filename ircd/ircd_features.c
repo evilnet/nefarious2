@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "ircd_features.h"
+#include "chathistory.h"
 #include "handlers.h"
 #include "chathistory_presence.h"
 #include "capab.h"	/* send_cap_notify */

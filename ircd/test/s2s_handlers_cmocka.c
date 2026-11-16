@@ -27,6 +27,7 @@
 
 #include "bouncer_session.h"
 #include "channel.h"
+#include "chathistory.h"
 #include "client.h"
 #include "destruct_event.h"
 #include "handlers.h"

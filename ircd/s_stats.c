@@ -23,6 +23,7 @@
 
 #include "IPcheck.h"
 
+#include "chathistory.h"
 #include "class.h"
 #include "client.h"
 #include "gline.h"

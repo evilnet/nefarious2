@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "ircd.h"
+#include "chathistory.h"
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"

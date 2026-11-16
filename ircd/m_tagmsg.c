@@ -81,6 +81,7 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"

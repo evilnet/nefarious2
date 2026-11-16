@@ -669,7 +669,7 @@ hash.o: hash.c ../config.h ../include/hash.h ../include/client.h \
   ../include/send.h ../include/struct.h ../include/sys.h ../include/watch.h
 history.o: history.c ../config.h ../include/history.h ../include/ircd_alloc.h \
   ../include/ircd_log.h ../include/ircd_snprintf.h ../include/ircd_string.h \
-  ../include/s_debug.h
+  ../include/s_debug.h ../include/chathistory.h
 history_trim_codec.o: history_trim_codec.c ../config.h \
   ../include/history_trim_codec.h ../include/db_casefold.h ../include/res.h
 pm_pair_index.o: pm_pair_index.c ../config.h ../include/pm_pair_index.h \
@@ -693,7 +693,7 @@ ircd.o: ircd.c ../config.h ../include/ircd.h ../include/IPcheck.h \
   ../include/s_debug.h ../include/s_misc.h ../include/s_stats.h \
   ../include/s_user.h ../include/send.h ../include/ssl.h ../include/sys.h \
   ../include/uping.h ../include/userload.h ../include/version.h \
-  ../include/whowas.h ../include/querycmds.h
+  ../include/whowas.h ../include/querycmds.h ../include/chathistory.h
 ircd_alloc.o: ircd_alloc.c ../config.h ../include/ircd_alloc.h \
   ../include/ircd_log.h ../include/ircd_string.h ../include/s_debug.h
 ircd_cloaking.o: ircd_cloaking.c ../config.h ../include/ircd_chattr.h \
@@ -733,7 +733,7 @@ ircd_features.o: ircd_features.c ../config.h ../include/ircd_features.h \
   ../include/numnicks.h ../include/random.h ../include/s_bsd.h \
   ../include/s_debug.h ../include/s_misc.h ../include/s_stats.h \
   ../include/s_user.h ../include/send.h ../include/struct.h \
-  ../include/sys.h ../include/whowas.h
+  ../include/sys.h ../include/whowas.h ../include/chathistory.h
 ircd_geoip.o: ircd_geoip.c ../include/client.h ../include/ircd_geoip.h \
   ../include/ircd_features.h ../include/ircd_string.h ../include/res.h \
   ../config.h
@@ -749,7 +749,7 @@ ircd_relay.o: ircd_relay.c ../config.h ../include/ircd_relay.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
   ../include/match.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/s_debug.h ../include/s_misc.h \
-  ../include/s_user.h ../include/send.h
+  ../include/s_user.h ../include/send.h ../include/chathistory.h
 ircd_reply.o: ircd_reply.c ../config.h ../include/ircd_reply.h \
   ../include/client.h ../include/ircd.h ../include/ircd_log.h \
   ../include/ircd_snprintf.h ../include/msg.h ../include/msgq.h \
@@ -846,7 +846,8 @@ m_chathistory.o: m_chathistory.c ../config.h ../include/capab.h \
   ../include/history.h ../include/ircd.h ../include/ircd_alloc.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
-  ../include/numeric.h ../include/numnicks.h ../include/send.h
+  ../include/numeric.h ../include/numnicks.h ../include/send.h \
+  ../include/chathistory.h
 m_check.o: m_check.c ../include/channel.h \
   ../include/class.h ../include/client.h ../include/destruct_event.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
@@ -901,7 +902,7 @@ m_endburst.o: m_endburst.c ../config.h ../include/channel.h \
   ../include/client.h ../include/hash.h ../include/history.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
-  ../include/numnicks.h ../include/send.h
+  ../include/numnicks.h ../include/send.h ../include/chathistory.h
 m_error.o: m_error.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_alloc.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/numeric.h \
@@ -1048,7 +1049,8 @@ m_notice.o: m_notice.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd_log.h ../include/ircd_relay.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/mark.h ../include/match.h \
   ../include/msg.h ../include/numeric.h ../include/send.h \
-  ../include/s_conf.h ../include/s_misc.h ../include/handlers.h
+  ../include/s_conf.h ../include/s_misc.h ../include/handlers.h \
+  ../include/m_batch.h
 m_oper.o: m_oper.c ../config.h ../include/class.h ../include/client.h \
   ../include/handlers.h ../include/hash.h ../include/ircd.h \
   ../include/ircd_alloc.h ../include/ircd_features.h ../include/ircd_log.h \
@@ -1090,7 +1092,7 @@ m_privmsg.o: m_privmsg.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_chattr.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_relay.h ../include/ircd_reply.h ../include/ircd_string.h \
   ../include/match.h ../include/msg.h ../include/numeric.h \
-  ../include/send.h
+  ../include/send.h ../include/m_batch.h
 m_privs.o: m_privs.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
@@ -1268,7 +1270,8 @@ m_tagmsg.o: m_tagmsg.c ../config.h ../include/capab.h ../include/channel.h \
   ../include/client.h ../include/hash.h ../include/ircd.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
-  ../include/numnicks.h ../include/send.h ../include/s_user.h
+  ../include/numnicks.h ../include/send.h ../include/s_user.h \
+  ../include/chathistory.h
 m_time.o: m_time.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
@@ -1496,7 +1499,7 @@ s_misc.o: s_misc.c ../config.h ../include/s_misc.h ../include/IPcheck.h \
   ../include/s_auth.h ../include/s_bsd.h ../include/s_conf.h \
   ../include/s_debug.h ../include/s_stats.h ../include/s_user.h \
   ../include/send.h ../include/struct.h ../include/sys.h ../include/uping.h \
-  ../include/userload.h ../include/watch.h
+  ../include/userload.h ../include/watch.h ../include/chathistory.h
 s_numeric.o: s_numeric.c ../config.h ../include/s_numeric.h \
   ../include/channel.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_snprintf.h \
@@ -1524,7 +1527,8 @@ s_stats.o: s_stats.c ../config.h ../include/class.h ../include/client.h \
   ../include/s_bsd.h ../include/s_conf.h ../include/s_debug.h \
   ../include/s_misc.h ../include/s_serv.h ../include/s_stats.h \
   ../include/s_user.h ../include/send.h ../include/shun.h \
-  ../include/struct.h ../include/userload.h ../include/zline.h
+  ../include/struct.h ../include/userload.h ../include/zline.h \
+  ../include/chathistory.h
 s_user.o: s_user.c ../config.h ../include/s_user.h ../include/IPcheck.h \
   ../include/channel.h ../include/class.h ../include/client.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
@@ -1539,7 +1543,7 @@ s_user.o: s_user.c ../config.h ../include/s_user.h ../include/IPcheck.h \
   ../include/send.h ../include/shun.h ../include/ssl.h ../include/struct.h \
   ../include/supported.h ../include/sys.h ../include/userload.h \
   ../include/version.h ../include/watch.h ../include/whowas.h \
-  ../include/handlers.h
+  ../include/handlers.h ../include/chathistory.h
 send.o: send.c ../config.h ../include/send.h ../include/channel.h \
   ../include/class.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \

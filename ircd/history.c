@@ -31,6 +31,7 @@
  */
 #include "config.h"
 
+#include "chathistory.h"
 #include "chathistory_presence.h"
 #include "chathistory_recv.h"
 #include "db_cursor.h"

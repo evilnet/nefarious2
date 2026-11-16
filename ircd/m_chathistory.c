@@ -33,24 +33,16 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory.h"
 #include "chathistory_ephemeral.h"
 #include "chathistory_merge.h"
 #include "chathistory_presence.h"
 #include "client.h"
+#include "handlers.h"
 #include "hash.h"
 #include "history.h"
 #include "history_trim_codec.h"
 #include "redact_index.h"   /* redaction catch-up query (design B) */
-/* m_redact.c (handlers.h cannot be included here -- forward_history_write prototype nit) */
-extern int redact_apply_row(struct Client *src, struct Channel *chptr, const char *msgid,
-                            const char *redact_msgid, uint64_t time_ms, const char *reason,
-                            const char *sender_str, const char *account_str, int show_always);
-extern int redact_row_judge(const char *target, const char *msgid);
-extern void redact_announce_local(struct Client *src, struct Channel *chptr,
-                                  const char *msgid, const char *redact_msgid,
-                                  uint64_t time_ms, const char *reason);
-extern void redact_echo_requester(struct Client *sptr, const char *target,
-                                  const char *msgid, const char *reason);
 static void redact_catchup_kick(unsigned int store_num);   /* design B trigger (defined with the catch-up) */
 static void rdx_retry_reset(int idx);    /* the catch-up retry (W5 Push F, I-3), with it */
 static void rdx_retry_cancel(int idx);
@@ -81,8 +73,6 @@ static void rdx_retry_cancel(int idx);
 
 /* Forward declarations for functions used before definition */
 static int is_ulined_server(struct Client *server);
-int has_chathistory_advertisement(struct Client *server);
-void broadcast_channel_advertisement(const char *channel);
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
@@ -633,7 +623,7 @@ static int fail_unknown_msgid(struct Client *sptr, const char *subcmd,
  * @param[in] type Message type.
  * @return 1 if should send, 0 if should skip.
  */
-int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
+static int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
 {
   /* A type this server does not know is never sent (it would fall to the
    * event-playback branch below and go out to such a client). */
@@ -1988,8 +1978,6 @@ void chathistory_fed_report(struct Client *to)
              fed_children_asked, fed_children_lines, fed_children_rows,
              fed_children_dropped, fed_children_unanswered);
 }
-
-int chathistory_retention_advertised(void);   /* below; handlers.h */
 
 /** The part of a channel page's claimed span [@a lo, @a hi] (unix seconds,
  * 0 = open; claim_span) that anyone can be asked about, in epoch ms,
