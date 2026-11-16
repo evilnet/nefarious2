@@ -36,6 +36,8 @@
 #include "s_conf.h"
 #include "s_user.h"
 
+#include <string.h>
+
 
 /*
  * ms_svsinfo - server message handler
@@ -56,7 +58,9 @@ int ms_svsinfo(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!(acptr = findNUser(parv[1])))
     return 0; /* Ignore SVSINFO for a user that has quit */
 
-  if (ircd_strcmp(acptr->cli_info, parv[parc-1]) == 0)
+  /* Only an identical line is no change: a case-only one is applied and
+   * relayed (strcmp, as SETNAME does). */
+  if (strcmp(acptr->cli_info, parv[parc-1]) == 0)
     return 0; /* New info already the same as current one */
 
   /* Set the info line, if the length is over REALLEN then it will
