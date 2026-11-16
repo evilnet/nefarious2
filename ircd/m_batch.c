@@ -517,7 +517,7 @@ void send_multiline_fallback(struct Client *sptr, struct Client *to,
    * duplicate history entries in receiving clients.
    * Client-only tags from BATCH open are included on each fallback line. */
   int msgid_sent = 0;
-  int use_ctags = (client_tags && *client_tags && CapActive(to, CAP_MSGTAGS));
+  int use_ctags = (client_tags && *client_tags && CapOwnHas(to, CAP_MSGTAGS));
   for (lp = ml_fallback_next(messages, &units, shown); lp;
        lp = ml_fallback_next(lp->next, &units, shown)) {
     const char *text = lp->value.cp + 1;
