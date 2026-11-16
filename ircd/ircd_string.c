@@ -29,6 +29,9 @@
 #include "res.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -337,6 +340,33 @@ int ircd_strncmp(const char *a, const char *b, size_t n)
       ++rb;
   }
   return (ToLower(*ra) - ToLower(*rb));
+}
+
+/** Parse a whole string as an int.
+ * Accepts what strtol() with base 0 accepts (decimal, 0x hex, leading-0
+ * octal, an optional sign), with optional white space around it.
+ * @param[in] str String to parse.
+ * @param[out] value Receives the number; left alone on failure.
+ * @return 1 on success, 0 if \a str is empty, has anything after the
+ * number, or is outside the range of an int.
+ */
+int ircd_strtoint(const char *str, int *value)
+{
+  char *end;
+  long n;
+
+  if (!str)
+    return 0;
+  errno = 0;
+  n = strtol(str, &end, 0);
+  if (end == str || errno == ERANGE || n < INT_MIN || n > INT_MAX)
+    return 0;
+  while (IsSpace(*end))
+    ++end;
+  if (*end)
+    return 0;
+  *value = (int)n;
+  return 1;
 }
 
 /** Fill a vector of distinct names from a delimited input list.

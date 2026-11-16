@@ -888,8 +888,8 @@ feature_set(struct Client* from, const char* const* fields, int count)
 	  feat->flags |= FEAT_MARK;
 	else /* i < 0 */
 	  feat->flags &= ~FEAT_MARK;
-	break;
       }
+      break; /* never parse a custom feature's arguments as an integer */
 
     case FEAT_INT: /* an integer value */
       tmp = feat->v_int; /* detect changes... */
@@ -898,7 +898,13 @@ feature_set(struct Client* from, const char* const* fields, int count)
 	feat->v_int = feat->def_int;
 	feat->flags &= ~FEAT_MARK;
       } else { /* ok, figure out the value and whether to mark it */
-	feat->v_int = strtoul(fields[1], 0, 0);
+	if (!ircd_strtoint(fields[1], &feat->v_int)) {
+	  if (from) /* report an error... */
+	    return send_reply(from, ERR_BADFEATVALUE, fields[1], feat->type);
+	  log_write(LS_CONFIG, L_ERROR, 0, "Bad value \"%s\" for feature %s",
+		    fields[1], feat->type);
+	  return 0;
+	}
 	if (feat->v_int == feat->def_int)
 	  feat->flags &= ~FEAT_MARK;
 	else
