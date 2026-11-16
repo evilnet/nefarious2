@@ -648,6 +648,17 @@ void sendcmdto_set_client_msgid(const char *msgid)
   (void)msgid;
 }
 
+void sendcmdto_set_extra_withcap(int cap)
+{
+  (void)cap;
+}
+
+const char *away_text_for(struct Client *viewer, const char *away)
+{
+  (void)viewer;
+  return away;
+}
+
 void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
 {
   (void)time_ms;

@@ -489,6 +489,25 @@ int server_finish_burst(struct Client *cptr)
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,
                       cli_user(acptr)->swhois);
 
+      /* The user's away state.  The N carries none, so without this the
+       * far side shows every user it learns in this burst as present
+       * until the next AWAY change (and m_burst's away-notify on the
+       * netjoin never fires).  A user in a bouncer session is left out
+       * (aliases never reach here): the session's away is decided and
+       * sent by the server holding it, which restates it to its own links
+       * at their away barrier (bounce_away_restate_to()).  A session held
+       * elsewhere and learned through this burst is therefore not told
+       * to this link, as before.  The pre-away star goes as a star to an
+       * IRCv3-aware link and as the configured text to a legacy one, as
+       * away_send_to_servers() does for a fork user's star. */
+      if (!EmptyString(cli_user(acptr)->away) && !bounce_get_session(acptr)) {
+        const char *away = cli_user(acptr)->away;
+
+        if (away[0] == '*' && away[1] == '\0' && !IsIRCv3Aware(cptr))
+          away = away_text_for(NULL, away);
+        sendcmdto_one(acptr, CMD_AWAY, cptr, ":%s", away);
+      }
+
       if (cli_version(acptr) && !EmptyString(cli_version(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_CVERSION, cli_version(acptr));

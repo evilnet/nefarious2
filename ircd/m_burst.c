@@ -101,6 +101,7 @@
 #include "s_conf.h"
 #include "s_misc.h"
 #include "send.h"
+#include "s_user.h"
 #include "struct.h"
 #include "sys.h"
 #include "ircd_snprintf.h"
@@ -986,10 +987,24 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                                                      CAP_EXTJOIN, CAP_NONE, "%H %s :%s",
                                                      chptr, IsAccount(acptr) ? cli_account(acptr) : "*",
                                                      cli_info(acptr));
-              if (cli_user(acptr)->away)
-                sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
-                                                       CAP_AWAYNOTIFY, CAP_NONE, ":%s",
-                                                       cli_user(acptr)->away);
+              if (cli_user(acptr)->away) {
+                const char *away = cli_user(acptr)->away;
+
+                /* The pre-away star as a star to draft/pre-away clients
+                 * and as the configured text to the rest, as
+                 * away_notify_channel() does (which skips chghost
+                 * clients, as its callers need; a netjoin skips no one). */
+                if (away[0] == '*' && away[1] == '\0') {
+                  sendcmdto_set_extra_withcap(CAP_DRAFT_PREAWAY);
+                  sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
+                                                         CAP_AWAYNOTIFY, CAP_NONE, ":*");
+                  sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
+                                                         CAP_AWAYNOTIFY, CAP_DRAFT_PREAWAY,
+                                                         ":%s", away_text_for(NULL, away));
+                } else
+                  sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
+                                                         CAP_AWAYNOTIFY, CAP_NONE, ":%s", away);
+              }
               sendcmdto_set_client_msgid(NULL);
             }
 	  }
