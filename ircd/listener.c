@@ -398,9 +398,17 @@ void add_listener(int port, const char* vhost_ip, const char* mask,
     listener->fd_v4 = -1;
   }
 
-  if (!okay)
-    free_listener(listener);
-  else if (new_listener) {
+  if (!okay) {
+    /* No socket could be opened.  A listener this Port block created is
+     * not linked anywhere yet; one an earlier configuration made is on
+     * ListenerPollList and may still be held by clients, so it is only
+     * marked inactive: close_listeners() or its last release_listener()
+     * closes it. */
+    if (new_listener)
+      free_listener(listener);
+    else
+      FlagClr(&listener->flags, LISTEN_ACTIVE);
+  } else if (new_listener) {
     listener->next   = ListenerPollList;
     ListenerPollList = listener;
   }
