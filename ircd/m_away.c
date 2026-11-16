@@ -155,13 +155,18 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char* away_message = parv[1];
   int was_away = cli_user(sptr)->away != 0;
+  int same_text;
 
   assert(0 != cptr);
   assert(cptr == sptr);
 
+  /* A new message while already away goes to the other servers too:
+   * they kept the old one.  The same message again does not. */
+  same_text = was_away && !EmptyString(away_message)
+              && 0 == strncmp(cli_user(sptr)->away, away_message, AWAYLEN);
   if (user_set_away(cli_user(sptr), away_message))
   {
-    if (!was_away)    
+    if (!same_text)
       sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
     send_reply(sptr, RPL_NOWAWAY);
     sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE,
@@ -185,6 +190,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char* away_message = parv[1];
+  int was_away, unchanged;
 
   assert(0 != cptr);
   assert(0 != sptr);
@@ -194,10 +200,26 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsServer(sptr))
     return protocol_violation(sptr,"Server trying to set itself away");
 
-  if (user_set_away(cli_user(sptr), away_message))
+  /* Local members of a common channel with away-notify hear of a remote
+   * user's change of state or message; a repeat of the state they
+   * already have is not news. */
+  was_away = cli_user(sptr)->away != 0;
+  unchanged = EmptyString(away_message)
+              ? !was_away
+              : was_away && 0 == strncmp(cli_user(sptr)->away, away_message,
+                                         AWAYLEN);
+  if (user_set_away(cli_user(sptr), away_message)) {
     sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
-  else
+    if (!unchanged)
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                             CAP_AWAYNOTIFY, CAP_NONE,
+                                             ":%s", away_message);
+  } else {
     sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+    if (!unchanged)
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                             CAP_AWAYNOTIFY, CAP_NONE, "");
+  }
   return 0;
 }
 
