@@ -5787,6 +5787,7 @@ int bounce_db_restore(void)
   int migrated_v7 = 0;
   int migrated = 0;   /* v8..v11 records read through a frozen layout */
   int rejected = 0;   /* wrong size for their version, or unknown version */
+  int newer = 0;      /* written by a newer build: kept, not restored */
   int restarted = 0;  /* live when an unclean exit took this server down */
   int skipped = 0;    /* the crash-loop breaker's */
   unsigned int steps;
@@ -5896,6 +5897,15 @@ int bounce_db_restore(void)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "bouncer_persist: skipping record of %zu bytes with "
                 "unknown version %u", vlen, version);
+      continue;
+    case BOUNCE_REC_NEWER:
+      /* A newer build wrote it (this one was rolled back, or the store
+       * moved): not restored, and left on disk for a roll-forward. */
+      newer++;
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "bouncer_persist: not restoring a v%u record written by a "
+                "newer build (this build reads up to v%d); it stays on disk",
+                version, BOUNCER_DB_VERSION);
       continue;
     }
     rec = &rec_buf;
@@ -6126,6 +6136,9 @@ int bounce_db_restore(void)
         int should_delete = 0;
         if (vlen < sizeof(uint32_t)) {
           should_delete = 1;
+        } else if (bounce_record_from_newer_build(vbuf, vlen)) {
+          /* A newer build's record: kept for a roll-forward. */
+          should_delete = 0;
         } else {
           memcpy(&version, vbuf, sizeof(version));
           if (version == 7 && vlen == sizeof(struct BounceSessionRecord_v7)) {
@@ -6194,9 +6207,11 @@ int bounce_db_restore(void)
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "bouncer_persist: restored %d sessions (%d migrated from v7, "
-            "%d from v8-v11, %d unreadable, %d live at an unclean exit, "
-            "%d dropped by the crash-loop breaker)",
-            restored, migrated_v7, migrated, rejected, restarted, skipped);
+            "%d from v8-v11, %d unreadable, %d from a newer build kept, "
+            "%d live at an unclean exit, %d dropped by the crash-loop "
+            "breaker)",
+            restored, migrated_v7, migrated, rejected, newer, restarted,
+            skipped);
   restore_marks_free(&plan);
   /* The heartbeat and this start's settle mark (the breaker). */
   bounce_boot_timers_start();
