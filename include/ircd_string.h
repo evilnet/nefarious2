@@ -30,6 +30,7 @@ extern int string_character_structure_is_sane(const char* str);
 extern char*       ircd_strncpy(char* dest, const char* src, size_t len);
 extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);
+extern int         ircd_strtoint(const char *str, int *value);
 extern int         unique_name_vector(char* names, char token,
                                       char** vector, int size);
 extern int         token_vector(char* names, char token,
