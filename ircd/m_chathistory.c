@@ -8147,10 +8147,9 @@ static void search_fed_selectors(const struct SearchMatch *sm, char *sel,
  * responder a shorter selector than the user asked for, so it would
  * answer rows that do not match.  Measured as sent (every destination
  * numeric is two characters, the next request id), against the same
- * "<YY> CH " prefix and safety margin as the other CH lines.  m_search
- * refuses a query that does not fit for a channel it searches, whether
- * or not another store is linked, so a search answers alike on one
- * server and on many. */
+ * "<YY> CH " prefix and safety margin as the other CH lines.  A query
+ * that does not fit is not federated (start_fed_search()): that channel
+ * is searched on this server only. */
 static int search_fed_line_fits(struct Client *sptr, const char *target,
                                 const char *before_unix,
                                 const char *after_unix, int limit,
@@ -8200,7 +8199,7 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
   if (i >= MAX_FED_REQUESTS)
     return NULL;
 
-  /* m_search refused a query whose line cannot fit; never sent cut. */
+  /* Never sent cut: a line that cannot fit is not federated. */
   if (!search_fed_line_fits(sptr, target, before_unix, after_unix, limit, sm))
     return NULL;
   search_fed_selectors(sm, sel, sizeof(sel));
@@ -9891,16 +9890,6 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "in", "No access to target");
       return 0;
     }
-    /* A channel's search goes to the other stores in one line: one that
-     * cannot fit is refused, here as with any number of servers linked,
-     * not answered from this store alone (search_fed_line_fits()). */
-    if (IsChannelName(in)
-        && !search_fed_line_fits(sptr, lookup_target, before_unix, after_unix,
-                                 limit, &sm)) {
-      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
-                "Selectors too long for this channel");
-      return 0;
-    }
     if (!IsChannelName(in))
       pm_other = in;
 
@@ -9934,9 +9923,9 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * request, a part of one aggregate that sends the single batch when the
    * last part is in.  The parts are bounded so one search cannot take the
    * slots every other page and search federates through, nor make every
-   * peer scan once per channel: at most SEARCH_FED_PARTS_MAX of them, one
-   * such search in flight per client, and never below SEARCH_FED_RESERVE
-   * free slots.  Past those, a channel is searched here only. */
+   * peer scan once per channel: at most SEARCH_FED_PARTS_MAX of them, and
+   * never below SEARCH_FED_RESERVE free slots.  Past those, a channel is
+   * searched here only. */
   {
     struct Membership *member;
     struct SearchAgg *agg;
@@ -9948,32 +9937,10 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     for (i = 0; i < MAX_FED_REQUESTS; i++) {
       if (!fed_requests[i])
         free_slots++;
-      /* One such search in flight per client: a second one, before the
-       * first has answered, is searched here only. */
-      else if (fed_requests[i]->completion_cb == complete_search_agg_part
-               && !fed_requests[i]->response_sent
-               && !strcmp(fed_requests[i]->client_yxx, agg->client_yxx))
-        parts_left = 0;
     }
     if (cli_label(sptr)[0])
       ircd_strncpy(agg->label, cli_label(sptr), sizeof(agg->label));
     hm_search_agg_init(&agg->core, limit);   /* held until every channel is started */
-
-    /* Any channel whose line cannot fit refuses the search, as with
-     * `in`: answering that channel from this store alone would drop its
-     * other stores' rows without a word (search_fed_line_fits()). */
-    for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
-      if (check_history_access(sptr, member->channel->chname, lookup_target,
-                               sizeof(lookup_target)) != 0)
-        continue;
-      if (!search_fed_line_fits(sptr, lookup_target, before_unix, after_unix,
-                                limit, &sm)) {
-        MyFree(agg);
-        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
-                  "Selectors too long for one of your channels");
-        return 0;
-      }
-    }
 
     for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
       struct HistoryMessage *rows = NULL;
