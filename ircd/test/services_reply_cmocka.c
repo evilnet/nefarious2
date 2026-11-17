@@ -131,6 +131,13 @@ static struct Connection me_con;
 static struct Server me_serv;
 static char auth_storage[MAXOBJ][64];   /* stand-ins for AuthRequests */
 
+static int msgid_on;            /* FEAT_MSGID */
+
+/* The event armed for client lines (send.c's override), what the
+ * account-notify lines went out under, and what the relay carried. */
+static char armed_msgid[64], notify_msgid[64], relay_msgid[64];
+static uint64_t armed_ms, notify_ms, relay_ms;
+
 static struct Client *fake_client(const char *name, int status)
 {
   struct Client *c = calloc(1, sizeof(*c));
@@ -240,6 +247,9 @@ static int world_setup(void **state)
 
   ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
   nnotified = 0;
+  msgid_on = 0;
+  armed_msgid[0] = notify_msgid[0] = relay_msgid[0] = '\0';
+  armed_ms = notify_ms = relay_ms = 0;
   mechs_to = NULL;
   mechs_sent[0] = '\0';
   cap_mechs = NULL;
@@ -326,7 +336,7 @@ int exit_client(struct Client *cptr, struct Client *victim,
 
 int feature_bool(enum Feature feat)
 {
-  return feat == FEAT_EXTENDED_ACCOUNTS;
+  return feat == FEAT_EXTENDED_ACCOUNTS || (feat == FEAT_MSGID && msgid_on);
 }
 
 int feature_int(enum Feature feat)
@@ -394,16 +404,40 @@ void sendcmdto_common_channels_capab_session(struct Client *from,
 {
   (void)cmd; (void)tok; (void)pattern;
   record_notify(from, withcap, 1);
+  ircd_strncpy(notify_msgid, armed_msgid, sizeof(notify_msgid));
+  notify_ms = armed_ms;
 }
 
 void sendcmdto_set_client_msgid(const char *msgid)
 {
-  (void)msgid;
+  if (msgid)
+    ircd_strncpy(armed_msgid, msgid, sizeof(armed_msgid));
+  else {
+    armed_msgid[0] = '\0';
+    armed_ms = 0;
+  }
+}
+
+void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
+{
+  sendcmdto_set_client_msgid(msgid);
+  armed_ms = msgid ? event_ms : 0;
 }
 
 void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
 {
-  (void)time_ms; (void)msgid;
+  relay_ms = time_ms;
+  ircd_strncpy(relay_msgid, msgid ? msgid : "", sizeof(relay_msgid));
+}
+
+/** The clock behind a minted event; a tagged peer's time when it sent one
+ * (history.c). */
+#define NOW_MS 1763000009999ULL
+uint64_t history_event_time_ms(struct Client *link)
+{
+  if (link && cli_s2s_time_ms(link))
+    return cli_s2s_time_ms(link);
+  return NOW_MS;
 }
 
 void sendcmdto_want_s2s_tags(int want)
@@ -1270,6 +1304,47 @@ static void test_account_m_tells_the_user(void **state)
   assert_self_notified_once(c);
 }
 
+/* N067: an account change that arrives tagged is the origin's event:
+ * the user's and the observers' lines carry its msgid and its time, and
+ * so does the relay -- not this server's clock. */
+static void test_account_r_keeps_the_origin_time(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("uuu", 9);
+  msgid_on = 1;
+  ircd_strncpy(cli_s2s_msgid(svs), "AEAAAAAAORIGIN", S2S_MSGID_BUFSIZE);
+  cli_s2s_time_ms(svs) = 1762999990123ULL;
+
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+
+  assert_self_notified_once(c);
+  assert_string_equal(notify_msgid, "AEAAAAAAORIGIN");
+  assert_true(notify_ms == 1762999990123ULL);
+  assert_string_equal(relay_msgid, "AEAAAAAAORIGIN");
+  assert_true(relay_ms == 1762999990123ULL);
+}
+
+/* An untagged one is minted here, msgid and time together. */
+static void test_account_r_untagged_mints_one_event(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+
+  svs = services_link();
+  c = registered_user("uuu", 9);
+  msgid_on = 1;
+
+  deliver(ms_account, svs, svs, "%s%s R zed 1700000000", NumNick(c));
+
+  assert_string_equal(notify_msgid, "ABAAAAAAAAAAAB");
+  assert_true(notify_ms == NOW_MS);
+  assert_string_equal(relay_msgid, "ABAAAAAAAAAAAB");
+  assert_true(relay_ms == NOW_MS);
+}
+
 /* A logout: ACCOUNT * to the user too. */
 static void test_account_u_tells_the_user(void **state)
 {
@@ -1515,6 +1590,8 @@ int main(void)
     T(test_loc_cookie_0_deny),
     T(test_account_r_tells_the_user),
     T(test_account_m_tells_the_user),
+    T(test_account_r_keeps_the_origin_time),
+    T(test_account_r_untagged_mints_one_event),
     T(test_account_u_tells_the_user),
     T(test_account_r_same_tells_nobody),
     T(test_account_m_rename_carries_presence),
