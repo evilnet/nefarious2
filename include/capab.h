@@ -159,6 +159,16 @@ static inline unsigned short cap_version_after_ls(unsigned short current,
   return v > current ? (unsigned short)v : current;
 }
 
+/** Whether a connection at CAP \a version may not turn \a cap off: the
+ * capability-negotiation spec enables cap-notify implicitly for a client
+ * that sent CAP LS 302, and that client cannot disable it.  CAP REQ
+ * :-cap-notify is refused (NAK), and CAP CLEAR leaves it, as for a sticky
+ * capability. */
+static inline int cap_kept_on(int cap, unsigned short version)
+{
+  return cap == CAP_CAPNOTIFY && version >= CAP_VERSION_302;
+}
+
 extern void client_check_caps(struct Client *client, struct Client *replyto);
 extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *flags_out);
 

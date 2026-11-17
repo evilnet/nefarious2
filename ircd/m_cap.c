@@ -781,7 +781,8 @@ cap_req(struct Client *sptr, const char *caplist)
   while (cl) { /* walk through the capabilities list... */
     if (!(cap = find_cap(&cl, &neg)) /* look up capability... */
         || (!neg && (cap->flags & CAPFL_PROHIBIT)) /* is it prohibited? */
-        || (neg && (cap->flags & CAPFL_STICKY))) { /* is it sticky? */
+        || (neg && ((cap->flags & CAPFL_STICKY)   /* is it sticky? */
+                    || cap_kept_on(cap->cap, cli_capab_version(sptr))))) {
       static char nak[1][BUFSIZE];
       ircd_snprintf(0, nak[0], BUFSIZE, MSG_CAP " %s NAK :%s",
                     BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), caplist);
@@ -841,7 +842,8 @@ cap_ack(struct Client *sptr, const char *caplist)
       continue;
 
     if (neg) { /* set or clear the active capability... */
-      if (cap->flags & CAPFL_STICKY)
+      if ((cap->flags & CAPFL_STICKY)
+          || cap_kept_on(cap->cap, cli_capab_version(sptr)))
         continue; /* but don't clear sticky capabilities */
       CapClr(cli_active_own(sptr), cap->cap);
 
@@ -880,7 +882,8 @@ cap_clear(struct Client *sptr, const char *caplist)
   for (ii = 0; ii < CAPAB_LIST_LEN; ++ii) {
     cap = &capab_list[ii];
     /* Only clear active non-sticky capabilities. */
-    if (!HasCap(sptr, cap->cap) || (cap->flags & CAPFL_STICKY))
+    if (!HasCap(sptr, cap->cap) || (cap->flags & CAPFL_STICKY)
+        || cap_kept_on(cap->cap, cli_capab_version(sptr)))
       continue;
     CapSet(&cleared, cap->cap);
     CapClr(cli_capab(sptr), cap->cap);
