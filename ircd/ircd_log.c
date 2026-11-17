@@ -57,6 +57,9 @@
 int log_inassert = 0;
 
 #define LOG_BUFSIZE 2048 /**< Maximum length for a log message. */
+#if LOG_ASYNC_MAX_ENTRY < LOG_BUFSIZE + 64
+#error "LOG_ASYNC_MAX_ENTRY must hold the line log_vwrite() queues"
+#endif
 
 /** Select default log level cutoff. */
 #ifdef DEBUGMODE
@@ -387,6 +390,8 @@ log_resume(void)
 
 /** Set by log_async_start(): startup is over and ASYNC_LOGGING applies. */
 static int log_async_started;
+/** Lines are queued (as log_feature_async_logging() last left it). */
+static int log_async_on;
 
 /** ASYNC_LOGGING changed (the feature's notify callback), or startup is
  * over (log_async_start()).  Turned on, it starts the writer thread if
@@ -400,15 +405,29 @@ static int log_async_started;
 void
 log_feature_async_logging(void)
 {
+  int was_on = log_async_on;
+
   if (!log_async_started)
     return;
-  if (!feature_bool(FEAT_ASYNC_LOGGING))
+  if (!feature_bool(FEAT_ASYNC_LOGGING)) {
     log_async_set_accepting(0);
-  else if (log_async_available())
+    log_async_on = 0;
+  } else if (log_async_available()) {
     log_async_set_accepting(1);
-  else if (log_async_init(0) < 0)
+    log_async_on = 1;
+  } else if (log_async_init(0) < 0)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "Async logging init failed; logging will be synchronous");
+  else
+    log_async_on = 1;
+
+  /* Say so when it changes: a crash with it on loses what is queued,
+   * the lines nearest the crash. */
+  if (log_async_on && !was_on)
+    log_write(LS_CONFIG, L_INFO, 0, "Async logging on: a crash loses the "
+              "lines still queued");
+  else if (!log_async_on && was_on)
+    log_write(LS_CONFIG, L_INFO, 0, "Async logging off (queue drained)");
 }
 
 /** Startup is over (main(), after ircd.conf is read and the PID file
@@ -427,7 +446,12 @@ log_async_start(void)
 void
 log_async_stop(void)
 {
+  /* It destroys the queue's mutex: every other thread that logs (the
+   * pool's workers) is gone by now (shutdown_writers()).  No fork child
+   * may log through the queue before its exec either: the writer thread
+   * is not in the child. */
   log_async_started = 0;
+  log_async_on = 0;
   log_async_shutdown();
 }
 
@@ -566,8 +590,7 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                                                      "%s%s\n", timebuf, buf),
                                        sizeof(async_buf));
 
-      /* 0: queued; 1: the queue was full and log_async_write() wrote it
-       * itself; -1: not queued, written below. */
+      /* 0: queued; -1: not queued, written below. */
       if (log_async_write(desc->file->fd,
                           (flags & LOG_DOSYSLOG) ? (ldata->syslog | desc->facility) : 0,
                           async_buf, async_len,

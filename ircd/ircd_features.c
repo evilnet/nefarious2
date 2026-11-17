@@ -59,6 +59,7 @@
 #include "gitsync.h"
 #include "bouncer_session.h"
 #include "sasl_auth.h"
+#include "thread_pool.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -904,6 +905,24 @@ typedef int  (*feat_set_call)(struct Client* from, const char* const* fields, in
 typedef void (*feat_get_call)(struct Client* from, const char* const* fields, int count);
 /** Callback to notify of a feature's change. */
 typedef void (*feat_notify_call)(void);
+
+/** THREAD_POOL_SIZE changed (REHASH, SET): the pool reads it only when it
+ * starts, so say the new value waits for a restart, rather than leave
+ * GET showing a size that is not in force. */
+static void feature_notify_thread_pool_size(void)
+{
+  int running = thread_pool_size();
+  int want = feature_int(FEAT_THREAD_POOL_SIZE);
+
+  if (want <= 0)
+    want = THREAD_POOL_SIZE_DEFAULT;
+  else if (want > THREAD_POOL_SIZE_MAX)
+    want = THREAD_POOL_SIZE_MAX;
+  if (running && want != running)
+    log_write(LS_CONFIG, L_WARNING, 0,
+              "THREAD_POOL_SIZE %d takes effect at restart (running %d workers)",
+              want, running);
+}
 /** Unmarks all sub-feature values prior to reading .conf. */
 typedef void (*feat_unmark_call)(void);
 /** Resets to defaults all currently unmarked values.
@@ -1060,7 +1079,7 @@ static struct FeatureDesc {
   F_I(TOS_SERVER, 0, 0x08, 0),
   F_I(TOS_CLIENT, 0, 0x08, 0),
   F_I(POLLS_PER_LOOP, 0, 200, 0),
-  F_I(THREAD_POOL_SIZE, 0, 4, 0),
+  F_I(THREAD_POOL_SIZE, 0, 4, feature_notify_thread_pool_size),
   F_B(ASYNC_LOGGING, 0, 0, log_feature_async_logging),
   F_I(IRCD_RES_RETRIES, 0, 2, 0),
   F_I(IRCD_RES_TIMEOUT, 0, 4, 0),

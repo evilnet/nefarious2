@@ -996,8 +996,10 @@ THREAD_POOL_SIZE
 
 Worker threads for slow checks taken off the main loop (OPER, SETHOST
 and WEBIRC password hashes).  Read once at startup, after ircd.conf;
-a change takes effect at the next restart.  0 or less means the
-default; more than 64 means 64.
+a change takes effect at the next restart (a REHASH or SET that
+changes it logs so).  0 or less means the default; more than 64 means
+64.  If the system refuses some of the threads, the ones it started
+run.
 
 ASYNC_LOGGING
  * Type: boolean
@@ -1007,7 +1009,10 @@ Write log lines from a background thread instead of the main loop.
 Taken from ircd.conf at startup; turning it on with a REHASH starts the
 writer then.  Turning it off makes log writes synchronous again, once
 the lines already queued are written (the writer thread stays until the
-next restart).
+next restart).  Turning it on or off is logged (CONFIG).  A line that
+finds the queue (4096 lines) full waits for room, so lines stay in
+order.  A crash (abort, a fatal signal, an OOM kill) loses the lines
+still queued, the ones nearest the crash; the queue takes about 8.6 MB.
 
 OPER_WHOIS_PARANOIA
  * Type: boolean

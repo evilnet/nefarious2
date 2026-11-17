@@ -25,7 +25,7 @@
  * from the main event loop. The design prioritizes:
  *
  * 1. Minimal main thread impact - only atomic operations and memcpy
- * 2. Graceful degradation - falls back to sync if buffer full
+ * 2. Order kept - a line that finds the buffer full waits for room
  * 3. Reliable delivery - flush ensures all entries written
  * 4. Clean shutdown - drains buffer before exit
  */
@@ -69,7 +69,7 @@ static struct {
 
   /* Statistics */
   unsigned long written;            /**< Total entries written */
-  unsigned long dropped;            /**< Entries dropped due to full buffer */
+  unsigned long dropped;            /**< Lines that found the buffer full and waited */
 } log_async;
 
 /* running is read without the mutex (log_async_write(), the
@@ -285,6 +285,7 @@ void log_async_shutdown(void)
   SET_RUNNING(0);
   pthread_cond_signal(&log_async.not_empty);
   pthread_cond_broadcast(&log_async.flushed);
+  pthread_cond_broadcast(&log_async.not_full);  /* producers waiting for room */
   pthread_mutex_unlock(&log_async.mutex);
 
   /* Wait for writer thread to finish */
@@ -298,7 +299,7 @@ void log_async_shutdown(void)
   MyFree(log_async.entries);
   log_async.entries = NULL;
 
-  Debug((DEBUG_DEBUG, "log_async_shutdown: completed, %lu written, %lu dropped",
+  Debug((DEBUG_DEBUG, "log_async_shutdown: completed, %lu written, %lu waited for room",
          log_async.written, log_async.dropped));
 }
 
@@ -326,6 +327,12 @@ int log_async_write(int fd, int syslog_priority, const char *message, int len,
   pthread_mutex_lock(&log_async.mutex);
 
 again:
+  /* The writer stopped (log_async_shutdown()): the caller writes it. */
+  if (!RUNNING()) {
+    pthread_mutex_unlock(&log_async.mutex);
+    return -1;
+  }
+
   /* Not accepting (ASYNC_LOGGING turned off): the caller writes this
    * line itself, but only once every line queued before it is written,
    * so no thread's synchronous line lands ahead of an older queued one.
@@ -342,52 +349,22 @@ again:
     }
   }
 
-  /* Full: wait up to 1 ms for room.  Recheck after every wake -- a wake
-   * may be spurious, or another producer may have taken the slot -- and
-   * never write into a full ring: advancing head onto tail would make it
-   * look empty and overwrite the entry the writer is on. */
-  if (buffer_full()) {
-    struct timespec timeout;
-    clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_nsec += 1000000;  /* 1ms wait */
-    if (timeout.tv_nsec >= 1000000000) {
-      timeout.tv_sec++;
-      timeout.tv_nsec -= 1000000000;
-    }
-
-    while (buffer_full()) {
-      int rc = pthread_cond_timedwait(&log_async.not_full, &log_async.mutex,
-                                      &timeout);
-
-      /* Turned off while it waited: the line goes after the queued ones,
-       * as any thread's would (the drain wait above). */
-      if (!log_async.accepting)
-        goto again;
-      if (rc != 0 && buffer_full()) {
-        /* Still full after wait - fall back to sync write */
-        log_async.dropped++;
-        pthread_mutex_unlock(&log_async.mutex);
-
-        /* Sync fallback: write directly.  The caller must not write it
-         * again: it treats any return but -1 as written. */
-        if (fd >= 0 && len > 0) {
-          if (cut) {
-            struct iovec iov[2];
-            iov[0].iov_base = (void *)message;
-            iov[0].iov_len = len - 1;
-            iov[1].iov_base = (void *)"\n";
-            iov[1].iov_len = 1;
-            (void)!writev(fd, iov, 2);
-          } else
-            (void)!write(fd, message, len);
-        }
-        if (syslog_priority > 0)
-          syslog_line(syslog_priority, message, cut ? len - 1 : len,
-                      syslog_off);
-
-        return 1;  /* Indicate sync fallback */
-      }
-    }
+  /* Full: wait for the writer to free a slot.  Writing the line here
+   * instead would put it ahead of every older queued line, its own
+   * thread's included, and costs the caller the same blocking write the
+   * writer is doing.  Recheck after every wake -- a wake may be spurious,
+   * or another producer may have taken the slot -- and never write into a
+   * full ring: advancing head onto tail would make it look empty and
+   * overwrite the entry the writer is on. */
+  if (buffer_full())
+    log_async.dropped++;          /* counts lines that waited (stats) */
+  while (buffer_full()) {
+    pthread_cond_signal(&log_async.not_empty);
+    pthread_cond_wait(&log_async.not_full, &log_async.mutex);
+    /* Turned off, or the writer stopped, while it waited: the drain wait
+     * above, or the caller's own write. */
+    if (!log_async.accepting || !RUNNING())
+      goto again;
   }
 
   /* Add entry to buffer */
@@ -456,6 +433,8 @@ void log_async_set_accepting(int on)
   /* Wake threads waiting to write past a drain, so they queue instead. */
   if (on)
     pthread_cond_broadcast(&log_async.flushed);
+  else   /* and those waiting for room, so they wait for the drain */
+    pthread_cond_broadcast(&log_async.not_full);
   pthread_mutex_unlock(&log_async.mutex);
   if (!on)
     log_async_flush();
