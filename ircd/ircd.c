@@ -106,7 +106,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#ifdef USE_ROCKSDB
+#if defined(USE_ROCKSDB) || defined(HAVE_PTHREAD)
 #include <pthread.h>
 #endif
 
@@ -390,8 +390,9 @@ static void thread_pool_wake_event(struct Event *ev)
 }
 
 /** Stop the threads that write to log and pipe descriptors, then close the
- * logs for good.  Producers before the consumer: the crypt workers (which
- * log, and signal the main loop through a pipe) are joined first, then the
+ * logs for good.  Producers before the consumer: the pool's workers (which
+ * signal the main loop through a pipe; their callbacks log) are joined
+ * and their tasks delivered first, then the
  * async log writer drains its queue and exits -- a worker logging after
  * the writer stopped would lock its destroyed mutex.  The pool's store
  * jobs (store_job.h) are answered here too, the stores already closed:
@@ -502,8 +503,39 @@ void server_restart(const char *message)
 /*----------------------------------------------------------------------------
  * outofmemory:  Handler for out of memory conditions...
  *--------------------------------------------------------------------------*/
-/** Handle out-of-memory condition. */
+#ifdef HAVE_PTHREAD
+/** The thread main() runs on, once @a main_thread_known. */
+static pthread_t main_thread;
+static int main_thread_known;
+#endif
+
+/** Handle out-of-memory condition.
+ *
+ * On the main thread: restart.  On any other thread -- a thread pool
+ * worker hashing a password or scanning the history store, a store's init
+ * thread -- the process exits at once, as server_panic() does and for its
+ * reasons.  server_restart() is main-thread work from end to end: it
+ * sends notices, stops the listeners, persists the bouncer sessions and
+ * closes the stores while the main thread is still running the same
+ * structures, and history_shutdown() would then wait for the store jobs
+ * under way, one of which is the caller: a hang with the listeners
+ * closed.  Nor can the allocation be failed back to the caller instead:
+ * MyMalloc() promises its callers a block, and the store code under a
+ * scan does not check.  _exit() runs no destructor and closes nothing by
+ * number, so no descriptor is reused under a live thread; every committed
+ * write is in the WAL.  The server does not re-exec itself on this path:
+ * whatever supervises it restarts it. */
 static void outofmemory(void) {
+#ifdef HAVE_PTHREAD
+  if (main_thread_known && !pthread_equal(pthread_self(), main_thread)) {
+    static const char msg[] = "ircd: out of memory off the main thread, exiting\n";
+
+    if (write(2, msg, sizeof(msg) - 1) < 0) {
+      /* nowhere left to say it */
+    }
+    _exit(1);
+  }
+#endif
   Debug((DEBUG_FATAL, "Out of memory: restarting server..."));
   server_restart("Out of Memory");
 }
@@ -1116,6 +1148,10 @@ int main(int argc, char **argv) {
 
   init_isupport(); /* initialize RPL_ISUPPORT... */
   log_init(*argv);
+#ifdef HAVE_PTHREAD
+  main_thread = pthread_self();
+  main_thread_known = 1;
+#endif
   set_nomem_handler(outofmemory);
 
   initload();

@@ -27,7 +27,11 @@
  * SEARCH responder's scan), which keeps its own count of the jobs it has
  * in the pool so the password checks always find a worker.  A work
  * function runs beside the main thread: it may touch only what it was
- * handed and what is documented as safe off the main thread.
+ * handed and what is documented as safe off the main thread.  It cannot
+ * log: the pool mutes its workers (log_thread_mute), so what a task has
+ * to report goes back in its result and is logged from its callback.  And
+ * an allocation that fails on a worker ends the process (ircd.c
+ * outofmemory): there is no restart from off the main thread.
  *
  * Usage:
  * 1. Call thread_pool_init() at startup
