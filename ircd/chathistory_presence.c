@@ -27,6 +27,7 @@
 #include "crdt_hlc.h"
 #include "hash.h"
 #include "history.h"
+#include "history_rename.h"
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
@@ -1451,6 +1452,209 @@ void presence_purge_session(const char *session_id)
   }
 }
 
+/* ---------------------------------------------------------------- */
+/* A renamed channel (history_rename.h)                               */
+/* ---------------------------------------------------------------- */
+
+/* Presence is kept by channel NAME, and a channel that was renamed has
+ * its history under more than one: the rows from before a rename stay
+ * under the old name and are returned as the new name's.  Presence
+ * follows the same way.  Nothing is moved: the intervals a member had
+ * before the rename stay under the old name (a RENAME closes the open
+ * ones there, presence_on_channel_rename), and a row is checked against
+ * the record of the name it is STORED under -- the name the channel had
+ * when it was said.  Checking the current name's record instead would
+ * hide from members everything from before the rename, and show it to
+ * whoever was at that time in some other channel that had the name. */
+
+/** One anchor's presence in a channel under every name the channel has
+ * had: one snapshot for a whole page. */
+struct presence_view {
+  struct presence_record own;        /**< under the current name */
+  int nseg;
+  struct presence_view_seg {
+    char name[CHANNELLEN + 1];       /**< an earlier name, folded */
+    int64_t since;                   /**< when the channel took it, its
+                                      *   latest stay (0: at its creation) */
+    int64_t until;                   /**< when the channel left it (the end
+                                      *   of that millisecond) */
+    struct presence_record rec;
+  } seg[HREN_MAX_SEGS];              /**< the name left last first */
+};
+
+/** @a anchor's record for @a channel into @a out: zeroed when there is
+ * none (nothing is visible). */
+static void anchor_record(const char *anchor, int anchor_is_session,
+                          const char *channel, struct presence_record *out)
+{
+  memset(out, 0, sizeof(*out));
+  if (anchor_is_session) {
+    struct presence_session_entry *e = session_find(anchor, channel);
+    if (e)
+      *out = e->record;
+  } else if (acct_load(anchor, channel, out) != 0) {
+    memset(out, 0, sizeof(*out));
+  }
+}
+
+/** Fill @a v for @a anchor in @a channel.
+ * @return 0, or -1 when the channel's earlier names cannot be read (the
+ *         caller shows nothing). */
+static int view_load(struct presence_view *v, const char *anchor,
+                     int anchor_is_session, const char *channel)
+{
+  struct hren_span span;
+  int i;
+
+  v->nseg = 0;
+  anchor_record(anchor, anchor_is_session, channel, &v->own);
+  if (history_rename_names(channel, &span) < 0)
+    return -1;
+  for (i = 0; i < span.count && i < HREN_MAX_SEGS; i++) {
+    struct presence_view_seg *seg = &v->seg[v->nseg++];
+    ircd_strncpy(seg->name, span.seg[i].name, sizeof(seg->name));
+    seg->since = PRESENCE_TIME_FROM_MS((int64_t)span.seg[i].since_ms);
+    seg->until = PRESENCE_TIME_FROM_MS_LATE((int64_t)span.seg[i].until_ms);
+    anchor_record(anchor, anchor_is_session, seg->name, &seg->rec);
+  }
+  return 0;
+}
+
+/** The record a row of @a channel at presence time @a t is checked
+ * against: the one of the name it is stored under (@a stored_as) -- and
+ * for a row not read from this store (@a stored_as empty or NULL: a
+ * federated row, a listing's last-activity stamp), of the name the
+ * channel had at @a t: the earlier name whose stay holds @a t, else the
+ * current one for a time after the last rename.  NULL: no record covers
+ * it and nothing is visible -- a name the row is not the channel's
+ * under, or a time in an earlier stay under a name the channel had more
+ * than once (the record keeps the latest stay of each: which name it was
+ * then is not known, and presence under the wrong one must not count). */
+static const struct presence_record *view_record(const struct presence_view *v,
+                                                 const char *channel,
+                                                 const char *stored_as,
+                                                 int64_t t)
+{
+  int i;
+
+  if (stored_as && stored_as[0]) {
+    if (0 == ircd_strcmp(stored_as, channel))
+      return &v->own;
+    for (i = 0; i < v->nseg; i++)
+      if (0 == ircd_strcmp(v->seg[i].name, stored_as))
+        return t <= v->seg[i].until ? &v->seg[i].rec : NULL;
+    return NULL;
+  }
+  for (i = v->nseg - 1; i >= 0; i--)
+    if (t >= v->seg[i].since && t <= v->seg[i].until)
+      return &v->seg[i].rec;
+  if (v->nseg == 0 || t > v->seg[0].until)
+    return &v->own;
+  return NULL;
+}
+
+static int view_was_present(const struct presence_view *v, const char *channel,
+                            const char *stored_as, int64_t t)
+{
+  const struct presence_record *r = view_record(v, channel, stored_as, t);
+  return r && record_was_present(r, t);
+}
+
+/** record_next_visible over every name: the nearest presence time at or
+ * after (@a reverse 0) / at or before (1) @a t under any of them, an
+ * earlier name counting only up to when the channel left it.  -1: none. */
+static int64_t view_next_visible(const struct presence_view *v, int64_t t,
+                                 int reverse)
+{
+  int64_t best = record_next_visible(&v->own, t, reverse);
+  int i;
+
+  for (i = 0; i < v->nseg; i++) {
+    const struct presence_view_seg *seg = &v->seg[i];
+    int64_t c;
+
+    if (!reverse) {
+      c = record_next_visible(&seg->rec, t, 0);
+      if (c > seg->until)
+        c = -1;
+      if (c >= 0 && (best < 0 || c < best))
+        best = c;
+    } else {
+      c = record_next_visible(&seg->rec, t < seg->until ? t : seg->until, 1);
+      if (c > best)
+        best = c;
+    }
+  }
+  return best;
+}
+
+int presence_was_present_renamed(const char *anchor, int anchor_is_session,
+                                 const char *channel, int64_t t)
+{
+  struct presence_view *v;
+  int present;
+
+  if (!anchor || !*anchor || !channel || !*channel)
+    return 0;
+  v = (struct presence_view *)MyCalloc(1, sizeof(*v));
+  present = view_load(v, anchor, anchor_is_session, channel) == 0
+            && view_was_present(v, channel, NULL, t);
+  MyFree(v);
+  return present;
+}
+
+/** Is the folded form of @a a the folded form of @a b: one presence key? */
+static int same_presence_name(const char *a, const char *b)
+{
+  return 0 == ircd_strcmp(a, b);
+}
+
+void presence_on_channel_rename(struct Channel *chptr, const char *oldname)
+{
+  struct Membership *m;
+  int64_t when;
+
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return;
+  if (!chptr || !chptr->chname[0] || !oldname || !*oldname
+      || same_presence_name(oldname, chptr->chname))
+    return;
+
+  when = presence_now_time();
+  for (m = chptr->members; m; m = m->next_member) {
+    const char *anchor;
+    int is_session = 0;
+
+    /* As at a JOIN: an alias membership opens nothing of its own. */
+    if (!m->user || IsMemberAlias(m))
+      continue;
+    anchor = presence_anchor_for(m->user, &is_session);
+    if (!anchor)
+      continue;
+
+    /* Close under the old name.  No PN: every server executes the
+     * rename and closes its own (presence_record_part would flood one
+     * line per member from each of them). */
+    if (is_session) {
+      struct presence_session_entry *e = session_find(anchor, oldname);
+      if (e)
+        record_apply_part(&e->record, when);
+    } else {
+      struct presence_record r;
+      if (acct_load(anchor, oldname, &r) == 0 && r.open_since != 0) {
+        record_apply_part(&r, when);
+        (void)acct_store(anchor, oldname, &r);
+      }
+    }
+    /* Open under the new one.  Not for a kicked member whose PART has
+     * not arrived (a zombie): its presence ended with the KICK, and the
+     * removal still to come closes under the new name, where nothing is
+     * open. */
+    if (!IsZombie(m))
+      presence_record_join(anchor, is_session, chptr->chname, when);
+  }
+}
+
 /** A history row's presence time: its msgid's HLC stamp (validated
  * against the row's millisecond stamp), else (row ms, 0).  0 when the
  * stamp is unparseable. */
@@ -1472,6 +1676,7 @@ int presence_filter_messages(struct Client *requestor,
   const char *anchor;
   int is_session = 0;
   struct HistoryMessage **pp;
+  struct presence_view *view;
   int kept = 0, dropped = 0;
 
   if (!head || !*head || count_in <= 0)
@@ -1499,24 +1704,25 @@ int presence_filter_messages(struct Client *requestor,
     return 0;
   }
 
-  /* One record snapshot for the whole page: presence_was_present loads
-   * the ~4 KB account record from the store on EVERY call, and a
-   * 100-row page (200 with redaction inheritance) was 100-200 reads
-   * (re-review 2026-09-07 R22).  The query-time filter already
-   * snapshots once.  No record at all => nothing is visible. */
+  /* One snapshot for the whole page -- the anchor's record under the
+   * channel's name and under each earlier name of a renamed channel:
+   * presence_was_present loads the ~4 KB account record from the store
+   * on EVERY call, and a 100-row page (200 with redaction inheritance)
+   * was 100-200 reads (re-review 2026-09-07 R22).  No record at all =>
+   * nothing is visible; earlier names that cannot be read => nothing
+   * is. */
+  view = (struct presence_view *)MyCalloc(1, sizeof(*view));
+  if (view_load(view, anchor, is_session, target) != 0) {
+    MyFree(view);
+    history_free_messages(*head);
+    *head = NULL;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence_filter_messages: target=%s: its earlier names cannot "
+              "be read -- dropping %d message(s) (fail-closed)", target,
+              count_in);
+    return 0;
+  }
   {
-    const struct presence_record *rp = NULL;
-    struct presence_record snap;
-    if (is_session) {
-      struct presence_session_entry *e = session_find(anchor, target);
-      if (e)
-        rp = &e->record;
-    } else if (acct_load(anchor, target, &snap) == 0) {
-      rp = &snap;
-    }
-    if (!rp)
-      memset(&snap, 0, sizeof(snap)), rp = &snap;
-
   pp = head;
   while (*pp) {
     struct HistoryMessage *m = *pp;
@@ -1525,7 +1731,8 @@ int presence_filter_messages(struct Client *requestor,
      * server-generated, but federated rows arrive over the wire --
      * visible-if-unparseable was the wrong default for a security
      * gate. */
-    int visible = (mtime != 0) && record_was_present(rp, mtime);
+    int visible = (mtime != 0)
+                  && view_was_present(view, target, m->stored_as, mtime);
 
     /* Redaction inheritance: a HISTORY_REDACT entry's visibility is
      * the visibility of its target message, not its own timestamp.
@@ -1551,7 +1758,10 @@ int presence_filter_messages(struct Client *requestor,
       if (target_msgid[0]
           && history_msgid_to_timestamp(target_msgid, ts_buf) == 0) {
         int64_t parent_time = presence_event_time(target_msgid, history_parse_ms(ts_buf));
-        if (parent_time != 0 && record_was_present(rp, parent_time))
+        /* (where the original is stored is not looked up: the name the
+         * channel had at its time decides) */
+        if (parent_time != 0
+            && view_was_present(view, target, NULL, parent_time))
           visible = 1;
       }
     }
@@ -1567,6 +1777,7 @@ int presence_filter_messages(struct Client *requestor,
     }
   }
   }
+  MyFree(view);
   /* Diagnostic: when a full sweep drops everything, the user sees an
    * empty batch and has no way to tell strict-presence apart from
    * msgid-not-found.  Log the breakdown once per call so prod can
@@ -1586,8 +1797,10 @@ int presence_filter_messages(struct Client *requestor,
 struct PresenceQueryFilter {
   struct HistoryRowFilter hook;     /**< handed to history_query_*() */
   char channel[CHANNELLEN + 1];
-  struct presence_record rec;       /**< ONE snapshot of the anchor's record
-                                     *   (the post-filter re-loads per row) */
+  struct presence_view view;        /**< ONE snapshot of the anchor's record
+                                     *   (the post-filter re-loads per row),
+                                     *   and of its record under each earlier
+                                     *   name of a renamed channel */
 };
 
 /** history.c row hook.  Presence is HLC-granular (packed ms<<16 |
@@ -1605,9 +1818,12 @@ static int presence_row_hook(const struct HistoryMessage *msg, int reverse,
    * post-filter). */
   if (t == 0)
     return 0;
-  if (record_was_present(&pf->rec, t))
+  if (view_was_present(&pf->view, pf->channel, msg->stored_as, t))
     return 1;
-  next = record_next_visible(&pf->rec, t, reverse);
+  /* The nearest boundary under any name.  One the walk cannot use -- the
+   * row's own time, when the anchor was present then under a name this
+   * row is not stored under -- makes it step instead of seek. */
+  next = view_next_visible(&pf->view, t, reverse);
   if (next < 0)
     return -1;              /* nothing further visible this way: stop */
   *skip_to = PRESENCE_TIME_MS(next);   /* the walk seeks by millisecond */
@@ -1649,15 +1865,18 @@ struct PresenceQueryFilter *presence_query_filter_open(
 
   pf = (struct PresenceQueryFilter *)MyCalloc(1, sizeof(*pf));
   ircd_strncpy(pf->channel, target, sizeof(pf->channel));
-  if (is_session) {
-    struct presence_session_entry *e = session_find(anchor, target);
-    if (e)
-      pf->rec = e->record;
-    /* else: zero record -- no presence at all, nothing visible */
-  } else if (acct_load(anchor, target, &pf->rec) != 0) {
-    /* Store unavailable or no record: a zero record hides everything,
-     * exactly as presence_was_present() answers 0 here. */
-    memset(&pf->rec, 0, sizeof(pf->rec));
+  /* No record (or the store unavailable) is a zero record: it hides
+   * everything, exactly as presence_was_present() answers 0 there. */
+  if (view_load(&pf->view, anchor, is_session, target) != 0) {
+    /* A renamed channel whose earlier names cannot be read: which rows
+     * are whose cannot be told.  Fail CLOSED, as for no anchor. */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence_query_filter_open: target=%s: its earlier names "
+              "cannot be read -- failing closed", target);
+    MyFree(pf);
+    if (rc_out)
+      *rc_out = -1;
+    return NULL;
   }
   pf->hook.fn = presence_row_hook;
   pf->hook.ctx = pf;

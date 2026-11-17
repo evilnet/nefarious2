@@ -63,6 +63,7 @@
 #include "db_cursor.h"
 #include "db_txn.h"
 #include "history.h"
+#include "history_rename.h"
 #include "chathistory_presence.h"
 #include "crdt_hlc.h"
 #include "ircd_events.h"
@@ -258,6 +259,23 @@ uint64_t history_parse_ms(const char *ts)
     while (digits < 3) { ms *= 10; digits++; }
   }
   return sec * 1000ULL + ms;
+}
+
+/* history.c's answer for a renamed channel's earlier names
+ * (history_rename_names): what the case under test says. */
+static struct hren_span test_span;
+static char test_span_of[CHANNELLEN + 1];
+static int test_span_rc;   /* -1: the record cannot be read */
+
+int history_rename_names(const char *target, struct hren_span *span)
+{
+  span->count = 0;
+  if (test_span_rc < 0)
+    return -1;
+  if (strcmp(target, test_span_of) != 0)
+    return 0;
+  *span = test_span;
+  return span->count;
 }
 
 struct Channel *hSeekChannel(const char *name)
@@ -822,6 +840,268 @@ static void test_presence_move_carries_only_a_rename(void **state)
   strict_on = 0;
 }
 
+/* ---- A renamed channel (history_rename.h) ----
+ *
+ * #old was renamed to #new at RT.  Rows from before RT are stored under
+ * #old and returned as #new's; presence is kept by name. */
+#define RT_MS   ((int64_t)1700000000 * 1000 + 9000000)
+#define RT      PRESENCE_TIME_FROM_MS(RT_MS)
+
+static void renamed_world(void)
+{
+  memset(&test_span, 0, sizeof(test_span));
+  test_span.count = 1;
+  strcpy(test_span.seg[0].name, "#old");
+  test_span.seg[0].incarnation = 1700000000;
+  test_span.seg[0].until_ms = (uint64_t)RT_MS;
+  strcpy(test_span_of, "#new");
+  test_span_rc = 0;
+}
+
+static struct HistoryMessage *row_at(struct HistoryMessage *m, int64_t ms,
+                                     const char *stored_as)
+{
+  memset(m, 0, sizeof(*m));
+  snprintf(m->timestamp, sizeof(m->timestamp), "%lu.%03u",
+           (unsigned long)(ms / 1000), (unsigned int)(ms % 1000) % 1000u);
+  strcpy(m->target, "#new");
+  strcpy(m->msgid, "not-an-hlc-msgid");
+  if (stored_as)
+    strcpy(m->stored_as, stored_as);
+  m->type = HISTORY_PRIVMSG;
+  return m;
+}
+
+/* A RENAME moves every member's open presence to the new name: closed
+ * under the old one at the rename, open under the new one from it. */
+static void test_presence_rename_moves_open_intervals(void **state)
+{
+  struct Client mem, kicked, alias;
+  struct Membership m1, m2, m3;
+  struct Channel *ch = calloc(1, sizeof(struct Channel) + 16);
+  int64_t t0 = RT - SEC(600);
+  (void)state;
+
+  assert_non_null(ch);
+  memset(&mem, 0, sizeof(mem));
+  memset(&kicked, 0, sizeof(kicked));
+  memset(&alias, 0, sizeof(alias));
+  memset(&m1, 0, sizeof(m1));
+  memset(&m2, 0, sizeof(m2));
+  memset(&m3, 0, sizeof(m3));
+  strcpy(cli_session_id(&mem), "rn-member");
+  strcpy(cli_session_id(&kicked), "rn-kicked");
+  strcpy(cli_session_id(&alias), "rn-alias");
+  m1.user = &mem;    m1.channel = ch; m1.next_member = &m2;
+  m2.user = &kicked; m2.channel = ch; m2.next_member = &m3;
+  m2.status = CHFL_ZOMBIE;
+  m3.user = &alias;  m3.channel = ch; m3.status = CHFL_ALIAS;
+  ch->members = &m1;
+  strcpy(ch->chname, "#new");            /* rename_channel has renamed it */
+
+  presence_record_join("rn-member", 1, "#old", t0);
+  presence_record_join("rn-kicked", 1, "#old", t0);
+
+  /* off: nothing moves */
+  presence_set_event_time(RT);
+  presence_on_channel_rename(ch, "#old");
+  assert_true(presence_was_present("rn-member", 1, "#old", RT + SEC(5)));
+  assert_false(presence_was_present("rn-member", 1, "#new", RT + SEC(5)));
+
+  strict_on = 1;
+  presence_on_channel_rename(ch, "#old");
+  presence_set_event_time(0);
+
+  /* the member: [t0, RT] under #old, open from RT under #new */
+  assert_true(presence_was_present("rn-member", 1, "#old", t0));
+  assert_true(presence_was_present("rn-member", 1, "#old", RT));
+  assert_false(presence_was_present("rn-member", 1, "#old", RT + 1));
+  assert_false(presence_was_present("rn-member", 1, "#new", RT - 1));
+  assert_true(presence_was_present("rn-member", 1, "#new", RT));
+  assert_true(presence_was_present("rn-member", 1, "#new", RT + SEC(3600)));
+  /* a kicked member whose PART has not come: closed under the old name
+   * (the removal will look under the new one and find nothing to
+   * close), never opened under the new one */
+  assert_true(presence_was_present("rn-kicked", 1, "#old", RT - SEC(1)));
+  assert_false(presence_was_present("rn-kicked", 1, "#old", RT + 1));
+  assert_false(presence_was_present("rn-kicked", 1, "#new", RT + SEC(1)));
+  /* an alias membership opens nothing, as at a JOIN */
+  assert_false(presence_was_present("rn-alias", 1, "#new", RT + SEC(1)));
+
+  /* two spellings of one name: nothing to move */
+  strcpy(ch->chname, "#NEW");
+  presence_set_event_time(RT + SEC(100));
+  presence_on_channel_rename(ch, "#new");
+  presence_set_event_time(0);
+  assert_true(presence_was_present("rn-member", 1, "#new", RT + SEC(3600)));
+  assert_true(presence_was_present("rn-member", 1, "#new", RT + SEC(50)));
+
+  strict_on = 0;
+  presence_purge_session("rn-member");
+  presence_purge_session("rn-kicked");
+  free(ch);
+}
+
+/* The page filter checks a row from before the rename against the
+ * presence recorded under the name it is stored under.  A member of the
+ * renamed channel sees what it saw; someone who was in ANOTHER channel
+ * called #new at that time does not see the renamed channel's rows. */
+static void test_presence_filter_follows_rename(void **state)
+{
+  struct Client member, stranger, late;
+  struct PresenceQueryFilter *pf;
+  struct HistoryRowFilter *hook;
+  struct HistoryMessage m;
+  int64_t skip;
+  int rc;
+  (void)state;
+
+  strict_on = 1;
+  renamed_world();
+  memset(&member, 0, sizeof(member));
+  memset(&stranger, 0, sizeof(stranger));
+  memset(&late, 0, sizeof(late));
+  strcpy(cli_session_id(&member), "fr-member");
+  strcpy(cli_session_id(&stranger), "fr-stranger");
+  strcpy(cli_session_id(&late), "fr-late");
+
+  /* the member: in #old from RT-600 s, moved to #new by the rename */
+  presence_record_join("fr-member", 1, "#old", RT - SEC(600));
+  presence_record_part("fr-member", 1, "#old", RT);
+  presence_record_join("fr-member", 1, "#new", RT);
+  /* the stranger: in a dead channel that was called #new, RT-900 s to
+   * RT-100 s; never in the renamed channel */
+  presence_record_join("fr-stranger", 1, "#new", RT - SEC(900));
+  presence_record_part("fr-stranger", 1, "#new", RT - SEC(100));
+  /* a latecomer: joined #new after the rename */
+  presence_record_join("fr-late", 1, "#new", RT + SEC(60));
+
+  /* the member */
+  pf = presence_query_filter_open(&member, "#new", 0, &rc);
+  assert_int_equal(rc, 1);
+  hook = presence_query_filter_hook(pf);
+  skip = 0;
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 300000, "#old"), 1, hook->ctx, &skip), 1);
+  assert_int_equal(hook->fn(row_at(&m, RT_MS + 5000, "#new"), 1, hook->ctx, &skip), 1);
+  /* before it joined #old: hidden, nothing earlier to seek to */
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 700000, "#old"), 1, hook->ctx, &skip), -1);
+  /* ... and walking forwards from there, the walk is sent to its join */
+  skip = 0;
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 700000, "#old"), 0, hook->ctx, &skip), 0);
+  assert_true(skip == RT_MS - 600000);
+  presence_query_filter_close(pf);
+
+  /* the stranger: its presence under the NAME #new covers RT-300 s, but
+   * the row of that time is the renamed channel's, stored under #old */
+  pf = presence_query_filter_open(&stranger, "#new", 0, &rc);
+  assert_int_equal(rc, 1);
+  hook = presence_query_filter_hook(pf);
+  assert_int_not_equal(hook->fn(row_at(&m, RT_MS - 300000, "#old"), 1, hook->ctx, &skip), 1);
+  assert_int_not_equal(hook->fn(row_at(&m, RT_MS + 5000, "#new"), 1, hook->ctx, &skip), 1);
+  /* a row not read from this store (a federated one): the name the
+   * channel had at its time decides, and that was #old */
+  assert_int_not_equal(hook->fn(row_at(&m, RT_MS - 300000, NULL), 1, hook->ctx, &skip), 1);
+  presence_query_filter_close(pf);
+  assert_false(presence_was_present_renamed("fr-stranger", 1, "#new",
+                                            RT - SEC(300)));
+  assert_true(presence_was_present("fr-stranger", 1, "#new", RT - SEC(300)));
+
+  /* the latecomer: only what was said since it joined; a reverse walk
+   * from an old row has nothing further back, a forward one seeks */
+  pf = presence_query_filter_open(&late, "#new", 0, &rc);
+  hook = presence_query_filter_hook(pf);
+  assert_int_equal(hook->fn(row_at(&m, RT_MS + 61000, "#new"), 0, hook->ctx, &skip), 1);
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 300000, "#old"), 1, hook->ctx, &skip), -1);
+  skip = 0;
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 300000, "#old"), 0, hook->ctx, &skip), 0);
+  assert_true(skip == RT_MS + 60000);
+  presence_query_filter_close(pf);
+
+  /* the listing's check (TARGETS): the member's last sight of the
+   * channel may be from before the rename */
+  assert_true(presence_was_present_renamed("fr-member", 1, "#new", RT - SEC(300)));
+  assert_true(presence_was_present_renamed("fr-member", 1, "#new", RT + SEC(5)));
+  assert_false(presence_was_present_renamed("fr-member", 1, "#new", RT - SEC(700)));
+  assert_false(presence_was_present_renamed("fr-late", 1, "#new", RT - SEC(300)));
+
+  /* the earlier names cannot be read: nothing is shown */
+  test_span_rc = -1;
+  pf = presence_query_filter_open(&member, "#new", 0, &rc);
+  assert_null(pf);
+  assert_int_equal(rc, -1);
+  assert_false(presence_was_present_renamed("fr-member", 1, "#new", RT + SEC(5)));
+  test_span_rc = 0;
+
+  strict_on = 0;
+  test_span.count = 0;
+  presence_purge_session("fr-member");
+  presence_purge_session("fr-stranger");
+  presence_purge_session("fr-late");
+}
+
+/* #a -> #b -> #a -> #new: the record keeps #a's later stay.  A row from
+ * its first stay that this store does not hold (a federated one) has a
+ * time and no name: the channel's name then is not known, and presence
+ * under a name that only may have been it -- here #b, which was another
+ * channel's at that time -- does not count. */
+static void test_presence_unknown_name_fails_closed(void **state)
+{
+  struct Client stranger, member;
+  struct PresenceQueryFilter *pf;
+  struct HistoryRowFilter *hook;
+  struct HistoryMessage m;
+  int64_t skip = 0;
+  int rc;
+  (void)state;
+
+  strict_on = 1;
+  memset(&test_span, 0, sizeof(test_span));
+  test_span.count = 2;
+  strcpy(test_span.seg[0].name, "#a");             /* second stay */
+  test_span.seg[0].since_ms = (uint64_t)RT_MS - 200000;
+  test_span.seg[0].until_ms = (uint64_t)RT_MS;
+  strcpy(test_span.seg[1].name, "#b");
+  test_span.seg[1].since_ms = (uint64_t)RT_MS - 400000;
+  test_span.seg[1].until_ms = (uint64_t)RT_MS - 200000;
+  strcpy(test_span_of, "#new");
+  test_span_rc = 0;
+  memset(&stranger, 0, sizeof(stranger));
+  memset(&member, 0, sizeof(member));
+  strcpy(cli_session_id(&stranger), "un-stranger");
+  strcpy(cli_session_id(&member), "un-member");
+
+  /* in another channel called #b while ours was #a the first time */
+  presence_record_join("un-stranger", 1, "#b", RT - SEC(900));
+  presence_record_part("un-stranger", 1, "#b", RT - SEC(500));
+  /* in ours all along */
+  presence_record_join("un-member", 1, "#a", RT - SEC(900));
+  presence_record_part("un-member", 1, "#a", RT - SEC(400));
+  presence_record_join("un-member", 1, "#b", RT - SEC(400));
+  presence_record_part("un-member", 1, "#b", RT - SEC(200));
+
+  pf = presence_query_filter_open(&stranger, "#new", 0, &rc);
+  hook = presence_query_filter_hook(pf);
+  assert_int_not_equal(hook->fn(row_at(&m, RT_MS - 600000, NULL), 1, hook->ctx, &skip), 1);
+  presence_query_filter_close(pf);
+  assert_false(presence_was_present_renamed("un-stranger", 1, "#new",
+                                            RT - SEC(600)));
+
+  pf = presence_query_filter_open(&member, "#new", 0, &rc);
+  hook = presence_query_filter_hook(pf);
+  /* read from this store, the row says where it is: seen */
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 600000, "#a"), 1, hook->ctx, &skip), 1);
+  /* a time with a known name: seen, stored here or not */
+  assert_int_equal(hook->fn(row_at(&m, RT_MS - 300000, NULL), 1, hook->ctx, &skip), 1);
+  /* the unknown stay, not stored here: hidden (the safe side) */
+  assert_int_not_equal(hook->fn(row_at(&m, RT_MS - 600000, NULL), 1, hook->ctx, &skip), 1);
+  presence_query_filter_close(pf);
+
+  strict_on = 0;
+  test_span.count = 0;
+  presence_purge_session("un-stranger");
+  presence_purge_session("un-member");
+}
+
 /* The msgid's embedded HLC is the row's presence time when it agrees
  * with the row's millisecond stamp; a foreign/legacy msgid, or one that
  * disagrees, falls back to (row ms, logical 0). */
@@ -891,6 +1171,9 @@ int main(void)
     cmocka_unit_test(test_presence_part_coalesce_keeps_earlier_open),
     cmocka_unit_test(test_presence_next_visible_boundaries),
     cmocka_unit_test(test_presence_millisecond_edges),
+    cmocka_unit_test(test_presence_rename_moves_open_intervals),
+    cmocka_unit_test(test_presence_filter_follows_rename),
+    cmocka_unit_test(test_presence_unknown_name_fails_closed),
     cmocka_unit_test(test_presence_event_time_from_msgid),
     cmocka_unit_test(test_presence_coalesce_window_ms),
     cmocka_unit_test(test_presence_norm_ms),

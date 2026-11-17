@@ -163,6 +163,38 @@ extern void presence_on_channel_add(struct Client *who, struct Channel *chptr);
  * if FEAT_CHATHISTORY_STRICT_PRESENCE is disabled. */
 extern void presence_on_channel_remove(struct Client *who, struct Channel *chptr);
 
+/** Hook for rename_channel(): @a chptr, until now @a oldname, has its
+ * new name.  Presence is kept by channel NAME, so every member's open
+ * interval is closed under the old name and opened under the new one, at
+ * the rename's time: what is said in the channel from here on is stored
+ * under the new name and checked against the presence recorded there,
+ * and nobody is left "present" under the old name, which may be another
+ * channel's next.  (A relocation needs none of this: its members leave
+ * the old channel and join the new one, through the ordinary hooks.)
+ *
+ * Nothing is moved or copied: a member's closed intervals from before
+ * the rename stay under the old name, where the rows from before the
+ * rename are stored too, and the filters below read them there.  Every
+ * server runs this as it executes the rename; no PN is sent.  A rename
+ * between two spellings of one name is nothing.  Cheap early-out if
+ * FEAT_CHATHISTORY_STRICT_PRESENCE is disabled. */
+extern void presence_on_channel_rename(struct Channel *chptr,
+                                       const char *oldname);
+
+/** Was @a anchor present in the channel now called @a channel at
+ * presence time @a t, under whatever name the channel had then?  For a
+ * channel that was never renamed this is presence_was_present().  For a
+ * renamed one (history_rename.h) the presence recorded under the name
+ * the channel had at @a t is what counts -- the earlier name whose stay
+ * holds @a t, else the current one after the last rename -- never the
+ * presence the anchor had in some other channel that was called
+ * @a channel then.  Fails closed (0) when the channel's earlier names
+ * cannot be read, and for a time at which its name is not known (an
+ * earlier stay under a name it had more than once). */
+extern int presence_was_present_renamed(const char *anchor,
+                                        int anchor_is_session,
+                                        const char *channel, int64_t t);
+
 /** Sweep presence records: prune intervals fully older than the
  * configured chathistory retention; truncate the leading edge of any
  * interval that straddles the retention boundary.  Drops in-memory
@@ -254,8 +286,13 @@ struct PresenceQueryFilter;
  * *@a rc_out (may be NULL) receives 0 when no filtering applies (feature
  * off, PM target, +H channel, or @a effective_override set) and NULL is
  * returned; 1 when a filter was armed (returned); -1 when the request
- * must fail CLOSED (no resolvable anchor) and NULL is returned -- the
- * caller answers an empty, complete page. */
+ * must fail CLOSED (no resolvable anchor, or a renamed channel whose
+ * earlier names cannot be read) and NULL is returned -- the caller
+ * answers an empty, complete page.
+ *
+ * A row is checked against the presence recorded under the name it is
+ * stored under (HistoryMessage.stored_as): for a renamed channel, a row
+ * from before the rename against the old name's record. */
 extern struct PresenceQueryFilter *presence_query_filter_open(
     struct Client *requestor, const char *target, int effective_override,
     int *rc_out);

@@ -3325,8 +3325,11 @@ static int targets_eligible(const struct HistoryTarget *t, void *ctx)
          * as the end of that millisecond so activity in the join's own
          * millisecond counts as witnessed. */
         int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(t->last_timestamp));
+        /* (a renamed channel's last activity may be from before the
+         * rename, witnessed under the name it had then) */
         if (!p_anchor || act == 0
-            || !presence_was_present(p_anchor, p_is_session, t->target, act))
+            || !presence_was_present_renamed(p_anchor, p_is_session,
+                                             t->target, act))
           return 0;
       }
     }
