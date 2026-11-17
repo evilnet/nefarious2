@@ -173,6 +173,9 @@ static history_coverage_cb coverage_callback = NULL;
 /* Forward declarations */
 static void history_retire_quotas(struct db_cf *meta);
 static uint64_t history_trim_clock(void);
+static int history_trim_renamed_parent(const char *target, const char *ts,
+                                       const char *msgid, const char *parent,
+                                       char *ptarget, char *pts);
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count);
 static void recv_alive_write(void);
@@ -276,19 +279,84 @@ static struct {
   struct hren_span span;
 } history_rename_cache;
 
+/** Names whose renames record this run could neither rewrite nor delete
+ * when a channel arrived at them (history_channel_renamed): what the
+ * record holds may be a dead channel's, so no earlier names are read for
+ * them until a later rename rewrites the record or the server restarts.
+ * Folded.  More names than fit: every name (the last flag). */
+#define HISTORY_RENAME_DISTRUST_MAX 8
+static char history_rename_distrust[HISTORY_RENAME_DISTRUST_MAX][CHANNELLEN + 1];
+static int history_rename_distrust_all;
+
+static int history_rename_distrusted(const char *name)
+{
+  char folded[CHANNELLEN + 1];
+  size_t len = strlen(name);
+  int i;
+
+  if (history_rename_distrust_all)
+    return 1;
+  if (len > CHANNELLEN)
+    return 0;
+  db_casefold_bytes(folded, name, len);
+  folded[len] = '\0';
+  for (i = 0; i < HISTORY_RENAME_DISTRUST_MAX; i++)
+    if (history_rename_distrust[i][0]
+        && !strcmp(history_rename_distrust[i], folded))
+      return 1;
+  return 0;
+}
+
+/** Set (@a on) or clear @a name's distrust. */
+static void history_rename_distrust_set(const char *name, int on)
+{
+  char folded[CHANNELLEN + 1];
+  size_t len = strlen(name);
+  int i, free_slot = -1;
+
+  if (len > CHANNELLEN)
+    return;
+  db_casefold_bytes(folded, name, len);
+  folded[len] = '\0';
+  for (i = 0; i < HISTORY_RENAME_DISTRUST_MAX; i++) {
+    if (!history_rename_distrust[i][0]) {
+      if (free_slot < 0)
+        free_slot = i;
+    } else if (!strcmp(history_rename_distrust[i], folded)) {
+      if (!on)
+        history_rename_distrust[i][0] = '\0';
+      return;
+    }
+  }
+  if (!on)
+    return;
+  if (free_slot < 0)
+    history_rename_distrust_all = 1;
+  else
+    strcpy(history_rename_distrust[free_slot], folded);
+}
+
 /** The earlier names of @a target, a channel of incarnation @a live (0:
  * no live channel -- every incarnation's, as its own rows are all shown),
  * whose rows CHATHISTORY returns as @a target's own: "this channel has
- * always been this name".  None for a PM pair, for a channel never
- * renamed, and when the record cannot be read (the channel's own rows are
- * still answered).
- * @return The count; @a span is always filled. */
+ * always been this name".  None for a PM pair and for a channel never
+ * renamed.
+ *
+ * A record that cannot be read is an ERROR, not "never renamed": the
+ * caller fails its query (or answers "unknown" where it has such an
+ * answer) as it does for any other read that failed, instead of serving
+ * a page that silently lacks the rows from before the rename and the
+ * redactions stored with them.
+ * @return The count, or -1 on a read error; @a span is always filled
+ *         (empty on an error). */
 static int history_rename_span(const char *target, time_t live,
                                struct hren_span *span)
 {
   span->count = 0;
   if (!history_available || !history_cf_renames || !target
       || !IsChannelName(target) || strlen(target) > CHANNELLEN)
+    return 0;
+  if (history_rename_distrusted(target))
     return 0;
   if (history_rename_cache.valid && history_rename_cache.incarnation == live
       && ircd_strcmp(history_rename_cache.name, target) == 0) {
@@ -299,7 +367,7 @@ static int history_rename_span(const char *target, time_t live,
                   live > 0 ? (uint64_t)live : 0, history_live_floor_ms(),
                   span) < 0) {
     span->count = 0;
-    return 0;   /* not cached: the next walk reads it again */
+    return -1;   /* not cached: the next walk reads it again */
   }
   ircd_strncpy(history_rename_cache.name, target,
                sizeof(history_rename_cache.name));
@@ -307,6 +375,16 @@ static int history_rename_span(const char *target, time_t live,
   history_rename_cache.span = *span;
   history_rename_cache.valid = 1;
   return span->count;
+}
+
+int history_rename_names(const char *target, struct hren_span *span)
+{
+  if (!span)
+    return -1;
+  span->count = 0;
+  if (!target)
+    return 0;
+  return history_rename_span(target, history_live_incarnation(target), span);
 }
 
 /** The incarnation a stored row carries, for the walk over a renamed
@@ -323,18 +401,32 @@ static uint64_t history_row_incarnation(const void *val, size_t vlen)
   return (uint64_t)m.incarnation;
 }
 
+/** Note on a row read from this store the name it is stored under
+ * (HistoryMessage.stored_as): @a seg's for a row of an earlier name,
+ * else @a target's own. */
+static void history_row_stored_as(struct HistoryMessage *msg,
+                                  const char *target,
+                                  const struct hren_seg *seg)
+{
+  ircd_strncpy(msg->stored_as, seg ? seg->name : target,
+               sizeof(msg->stored_as));
+}
+
 /** A walk over @a target's rows in the messages CF: its own keys only
  * (bounded as history_prefix_iter bounds them), and for a renamed channel
  * of incarnation @a live the rows of its earlier names merged in, each
  * presented under @a target's key (hren_iter_open).  Every page walk of
  * one target goes through here.
- * @return the walk, or NULL. */
+ * @return the walk, or NULL (also when the channel's renames record
+ *         cannot be read: the query fails rather than answer without the
+ *         rows from before the rename). */
 static struct hren_iter *history_target_iter(struct db_snapshot *snap,
                                              const char *target, time_t live)
 {
   struct hren_span span;
 
-  history_rename_span(target, live, &span);
+  if (history_rename_span(target, live, &span) < 0)
+    return NULL;   /* the earlier names cannot be read: no partial page */
   return hren_iter_open(history_db_env, history_cf_messages, snap, target,
                         &span, history_row_incarnation);
 }
@@ -743,6 +835,7 @@ int history_init(const char *dbpath)
     }
     /* A per-owner eviction clips the channel's receive windows (Q1). */
     htrim_set_owner_trimmed_cb(history_recv_owner_trimmed);
+    htrim_set_renamed_parent_cb(history_trim_renamed_parent);
   }
 
   /* Strict-presence init moved to ircd.c: the account records now live
@@ -808,6 +901,8 @@ void history_shutdown(void)
   history_cf_pm_pairs = NULL;
   history_cf_renames = NULL;
   history_rename_cache.valid = 0;
+  memset(history_rename_distrust, 0, sizeof(history_rename_distrust));
+  history_rename_distrust_all = 0;
   history_pm_index_ok = 0;
   history_available = 0;
 
@@ -2383,6 +2478,7 @@ static int history_query_internal(const char *target,
       rc = reverse ? hren_iter_prev(it) : hren_iter_next(it);
       continue;
     }
+    history_row_stored_as(msg, target, hren_iter_seg(it));
 
     /* Resolve multiline content from ml_content store if needed.
      * Reads through the same snapshot as this iterator for a coherent
@@ -3011,15 +3107,28 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
 {
   struct htrim_slice *s;
   struct hren_span span;
-  int deleted, skipped = 0, rc, i;
+  int deleted, skipped = 0, rc, i, span_unread = 0;
 
   if (!history_available || !channel || !IsChannelName(channel) || incarnation <= 0)
     return 0;
 
   span.count = 0;
-  if (history_cf_renames && strlen(channel) <= CHANNELLEN)
-    (void)hren_lookup(history_db_env, history_cf_renames, NULL, channel,
-                      (uint64_t)incarnation, 0, &span);
+  if (history_cf_renames && strlen(channel) <= CHANNELLEN
+      && hren_lookup(history_db_env, history_cf_renames, NULL, channel,
+                     (uint64_t)incarnation, 0, &span) < 0) {
+    /* The losing incarnation's rows under its earlier names cannot be
+     * found to prune.  Its entries are dropped below all the same, so no
+     * read reaches those rows through this name (they age out where they
+     * are). */
+    span.count = 0;
+    span_unread = 1;
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history_purge_incarnation: %s: the renames record cannot be "
+              "read (%s): the rows of incarnation %lu under its earlier names "
+              "are not pruned", channel,
+              db_env_last_error(history_db_env) ? db_env_last_error(history_db_env) : "?",
+              (unsigned long)incarnation);
+  }
 
   s = htrim_slice_begin(0);
   if (!s)
@@ -3044,10 +3153,20 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
               db_env_last_error(history_db_env) ? db_env_last_error(history_db_env) : "?");
     return -1;
   }
-  if (span.count > 0) {
-    /* The rows the entries named are gone. */
-    (void)hren_forget(history_db_env, history_cf_renames, channel,
-                      (uint64_t)incarnation);
+  if (span.count > 0 || span_unread) {
+    /* The rows the entries named are gone -- or could not be looked for,
+     * and then must not be reached.  When the entries cannot be dropped
+     * either, the name's record is not read again this run. */
+    if (hren_forget(history_db_env, history_cf_renames, channel,
+                    (uint64_t)incarnation) != 0
+        && hren_drop(history_db_env, history_cf_renames, channel) != 0) {
+      history_rename_distrust_set(channel, 1);
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "history_purge_incarnation: %s: the renames record cannot be "
+                "rewritten (%s): its earlier names are not read until it is",
+                channel,
+                db_env_last_error(history_db_env) ? db_env_last_error(history_db_env) : "?");
+    }
     history_rename_cache.valid = 0;
   }
   if (deleted > 0 || skipped > 0)
@@ -3248,6 +3367,7 @@ int history_query_between(const char *target,
       rc = hren_iter_next(it);
       continue;
     }
+    history_row_stored_as(msg, target, hren_iter_seg(it));
 
     /* Resolve multiline content via the snapshot for coherent reads. */
     ml_content_resolve(snap, msg);
@@ -3316,28 +3436,37 @@ int history_target_latest(const char *target, char *ts, size_t tslen)
 {
   struct hren_span span;
   struct HistoryMessage *m = NULL;
-  int rc;
+  int rc, n;
 
   if (!history_available || !target || !ts || tslen == 0)
     return -1;
   rc = target_stamp_get(target, ts, tslen);
-  if (rc != 1)
+  if (rc < 0)
     return rc;
-  /* Nothing stored under the name itself.  A renamed channel nobody has
-   * spoken in since still has its rows, under its earlier names
-   * (history_rename.h): its latest is the newest of those -- the newest
-   * row a page of it would show, not the earlier name's stamp, which a
-   * later channel of that name moves on. */
-  if (!history_rename_span(target, history_live_incarnation(target), &span))
-    return 1;
-  rc = history_query_latest(target, HISTORY_REF_NONE, NULL, 1, &m, NULL);
-  if (rc == 1 && m && strlen(m->timestamp) < tslen) {
-    ircd_strncpy(ts, m->timestamp, tslen);
+  /* A renamed channel's latest row may be under an earlier name
+   * (history_rename.h): nobody has spoken in it since the rename (no
+   * stamp of its own at all), or it was renamed away and back (#a -> #b
+   * -> #a: its own stamp is from before it left, and what was said as #b
+   * is newer).  Its latest is then the newest row a page of it shows --
+   * not the earlier name's stamp, which a later channel of that name
+   * moves on.  The name's own stamp stands when it is the later one. */
+  n = history_rename_span(target, history_live_incarnation(target), &span);
+  if (n < 0)
+    return -1;
+  if (n == 0)
+    return rc;
+  n = history_query_latest(target, HISTORY_REF_NONE, NULL, 1, &m, NULL);
+  if (n < 0) {
     history_free_messages(m);
-    return 0;
+    return -1;
+  }
+  if (n == 1 && m && strlen(m->timestamp) < tslen
+      && (rc == 1 || history_parse_ms(m->timestamp) > history_parse_ms(ts))) {
+    ircd_strncpy(ts, m->timestamp, tslen);
+    rc = 0;
   }
   history_free_messages(m);
-  return rc < 0 ? -1 : 1;
+  return rc;
 }
 
 /** history_identity_pm_targets' walk state. */
@@ -4283,33 +4412,134 @@ void history_recv_rename(struct Channel *chptr, const char *oldname)
   history_recv_update(chptr);                   /* open under the new name */
 }
 
+/** When the channel left @a oldname, as its rows are stamped: now -- or
+ * the old name's newest stamp, when that is ahead of this clock (a
+ * relayed row stamped by a server whose clock is): every row there now
+ * is from before the rename, whatever it says. */
+static uint64_t history_rename_until(const char *oldname)
+{
+  char ts[HISTORY_TIMESTAMP_LEN];
+  uint64_t until = history_recv_now_ms();
+
+  if (target_stamp_get(oldname, ts, sizeof(ts)) == 0
+      && history_parse_ms(ts) > until)
+    until = history_parse_ms(ts);
+  return until;
+}
+
+/** The record of @a newname was just written for the channel that
+ * arrived there (@a rc from hren_note / hren_handover, @a dropped the
+ * names its cap removed): log what an operator must know, and when it
+ * could not be written make sure nothing stale is read in its place. */
+static void history_rename_recorded(const char *oldname, const char *newname,
+                                    int rc, int dropped)
+{
+  history_rename_cache.valid = 0;
+  if (rc >= 0) {
+    history_rename_distrust_set(newname, 0);
+    if (dropped > 0)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: %s has been renamed more than %d times inside the "
+                "retention window: its %d earliest name(s) are no longer "
+                "followed, and CHATHISTORY of %s does not return the rows "
+                "stored under them (they age out where they are)",
+                newname, HREN_MAX_SEGS, dropped, newname);
+    if (rc == 1 && oldname)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: the renames record of %s could not be read (%s) "
+                "when it was renamed to %s: the names it had before are no "
+                "longer followed",
+                oldname,
+                db_env_last_error(history_db_env)
+                  ? db_env_last_error(history_db_env) : "no backend detail",
+                newname);
+    return;
+  }
+  /* Not written.  The record the name already has stays, and it may hold
+   * a dead channel's entries of this very incarnation (history_rename.h:
+   * a same-second creation): delete it, or stop reading it. */
+  if (hren_drop(history_db_env, history_cf_renames, newname) != 0)
+    history_rename_distrust_set(newname, 1);
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: the rename of %s to %s could not be recorded (%s): "
+            "CHATHISTORY of %s will not return the rows stored under %s",
+            oldname ? oldname : "?", newname,
+            db_env_last_error(history_db_env)
+              ? db_env_last_error(history_db_env) : "no backend detail",
+            newname, oldname ? oldname : "its earlier names");
+}
+
 void history_channel_renamed(const char *oldname, const char *newname,
                              time_t incarnation)
 {
-  char ts[HISTORY_TIMESTAMP_LEN];
-  uint64_t until;
+  int rc, dropped = 0;
 
   if (!history_available || !history_cf_renames || !oldname || !newname
       || incarnation <= 0)
     return;
-  /* The rows the channel has under the old name are those stored up to
-   * now -- or up to the old name's newest stamp, when that is ahead of
-   * this clock (a relayed row stamped by a server whose clock is): every
-   * row there now is from before the rename, whatever it says. */
-  until = history_recv_now_ms();
-  if (target_stamp_get(oldname, ts, sizeof(ts)) == 0
-      && history_parse_ms(ts) > until)
-    until = history_parse_ms(ts);
-  history_rename_cache.valid = 0;
-  if (hren_note(history_db_env, history_cf_renames, oldname, newname,
-                (uint64_t)incarnation, until, history_live_floor_ms()) != 0)
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "history: the rename of %s to %s could not be recorded (%s): "
-              "CHATHISTORY of %s will not return the rows stored under %s",
-              oldname, newname,
-              db_env_last_error(history_db_env)
-                ? db_env_last_error(history_db_env) : "no backend detail",
-              newname, oldname);
+  rc = hren_note(history_db_env, history_cf_renames, oldname, newname,
+                 (uint64_t)incarnation, history_rename_until(oldname),
+                 history_live_floor_ms(), &dropped);
+  history_rename_recorded(oldname, newname, rc, dropped);
+}
+
+void history_channel_rename_crossed(const char *oldname, const char *losername,
+                                    const char *winnername, time_t incarnation)
+{
+  int rc, dropped = 0;
+
+  if (!history_available || !history_cf_renames || !oldname || !losername
+      || !winnername || incarnation <= 0)
+    return;
+  rc = hren_handover(history_db_env, history_cf_renames, oldname, losername,
+                     winnername, (uint64_t)incarnation,
+                     history_live_floor_ms(), &dropped);
+  if (rc == 0) {
+    /* The loser's record has nothing of the old channel (never written,
+     * or aged out): the winner's relocation is recorded as a first one. */
+    history_channel_renamed(oldname, winnername, incarnation);
+    return;
+  }
+  history_rename_recorded(oldname, winnername, rc < 0 ? -1 : 0, dropped);
+}
+
+/** The trim engine's renamed-parent callback (history_trim.h): the
+ * original a REDACT row being deleted redacts, stored under another name
+ * the same channel has had (hren_find_parent). */
+static int history_trim_renamed_parent(const char *target, const char *ts,
+                                       const char *msgid, const char *parent,
+                                       char *ptarget, char *pts)
+{
+  char mk[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char name[CHANNELLEN + 1];
+  struct db_val v = { NULL, 0 };
+  uint64_t inc;
+  int mkl, rc;
+
+  if (!history_cf_renames || !target || !IsChannelName(target)
+      || strlen(target) > CHANNELLEN)
+    return 0;
+  /* The REDACT row's incarnation, from the row itself (its delete is
+   * staged, not committed: it is still there to read). */
+  mkl = build_key(mk, sizeof(mk), target, ts, msgid);
+  if (mkl < 0)
+    return 0;
+  rc = db_get(history_db_env, history_cf_messages, mk, mkl, NULL, &v);
+  if (rc == DB_NOTFOUND)
+    return 0;
+  if (rc != DB_OK)
+    return -1;
+  inc = history_row_incarnation(v.base, v.len);
+  db_val_free(&v);
+  if (!inc)
+    return 0;
+  rc = hren_find_parent(history_db_env, history_cf_renames,
+                        history_cf_msgid, history_cf_messages,
+                        history_row_incarnation, target, history_parse_ms(ts),
+                        inc, parent, name, pts, HTC_TS_MAX);
+  if (rc == 1)
+    ircd_strncpy(ptarget, name, HTC_TARGET_MAX);
+  return rc;
 }
 
 /** history_recv_covers for one name's record: @a open_since is this
@@ -4359,7 +4589,8 @@ int history_recv_covers(const char *chname, uint64_t lo_ms, uint64_t hi_ms)
    * channel made under the name since had the record reset when it took
    * its TS, history_recv_reset: its windows start after the rename and
    * hold no such span.) */
-  history_rename_span(chname, chptr ? chptr->creationtime : 0, &span);
+  if (history_rename_span(chname, chptr ? chptr->creationtime : 0, &span) < 0)
+    return 0;   /* unreadable: not known to be covered */
   for (i = 0; i < span.count; i++)
     if (hi_ms <= span.seg[i].until_ms
         && recv_record_covers(span.seg[i].name, 0, lo_ms, hi_ms))
@@ -4757,8 +4988,9 @@ static int history_rename_find_msgid(const char *target, const char *msgid,
   struct hren_span span;
   int i, failed = 0;
 
-  if (!history_rename_span(target, history_live_incarnation(target), &span))
-    return 1;
+  i = history_rename_span(target, history_live_incarnation(target), &span);
+  if (i <= 0)
+    return i < 0 ? -1 : 1;
   for (i = 0; i < span.count; i++) {
     const struct hren_seg *seg = &span.seg[i];
     char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
@@ -4880,6 +5112,7 @@ int history_lookup_message(const char *target, const char *msgid,
   struct db_val val = { NULL, 0 };
   struct HistoryMessage *m;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char stored_as[CHANNELLEN + 1];
   char timestamp[HISTORY_TIMESTAMP_LEN];
   int keylen;
   int rc;
@@ -4931,8 +5164,10 @@ int history_lookup_message(const char *target, const char *msgid,
   /* Not under the target's own name: a renamed channel's row may be
    * under an earlier one (history_rename.h); it is returned as the
    * target's, like every row of a page. */
+  ircd_strncpy(stored_as, target, sizeof(stored_as));
   if (rc != DB_OK)
-    rc = history_rename_find_msgid(target, msgid, snap, timestamp, NULL, &val);
+    rc = history_rename_find_msgid(target, msgid, snap, timestamp, stored_as,
+                                   &val);
   if (rc != 0) {
     db_snapshot_destroy(snap);
     return rc < 0 ? -1 : 1; /* a read error, or not found */
@@ -4960,6 +5195,7 @@ int history_lookup_message(const char *target, const char *msgid,
   ircd_strncpy(m->msgid, msgid, sizeof(m->msgid));
   ircd_strncpy(m->target, target, sizeof(m->target));
   ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp));
+  ircd_strncpy(m->stored_as, stored_as, sizeof(m->stored_as));
   m->next = NULL;
 
   /* Resolve multiline content via the same snapshot. */
@@ -5004,7 +5240,14 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
    * after the rename to a message from before it is indexed under the
    * new name, one sent before it under the old.  Each parent's children
    * are looked for under the target and under every earlier name. */
-  history_rename_span(target, history_live_incarnation(target), &span);
+  if (history_rename_span(target, history_live_incarnation(target), &span) < 0) {
+    /* The earlier names cannot be read, so neither can the children
+     * stored under them: any row may have a REDACT there.  Fail closed,
+     * as for a child that cannot be read. */
+    for (msg = messages; msg; msg = msg->next)
+      if (!msg->is_context)
+        msg->ctx_unread = 1;
+  }
 
   /* One iterator per message, bounded to exactly that message's
    * children (history_prefix_iter): most messages have none, and an
@@ -5137,6 +5380,7 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
           ircd_strncpy(ctx->target, target, sizeof(ctx->target));
           ircd_strncpy(ctx->timestamp, child_ts, sizeof(ctx->timestamp));
           ircd_strncpy(ctx->msgid, child_mid, sizeof(ctx->msgid));
+          ircd_strncpy(ctx->stored_as, name, sizeof(ctx->stored_as));
           ctx->is_context = 1;
 
           /* Splice in after the parent AND after the context already hung
@@ -5331,7 +5575,7 @@ static int message_is_redacted_under(struct db_snapshot *snap, const char *targe
  * message from before the rename is stored under the name the channel
  * had when it was sent).
  * @return 1 yes, 0 no, -1 unknown (no walk said yes and one could not
- *         say). */
+ *         say, or the earlier names could not be read). */
 static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
                                   const char *msgid, int max_children)
 {
@@ -5339,8 +5583,12 @@ static int message_is_redacted_in(struct db_snapshot *snap, const char *target,
   int r, i, unknown;
 
   r = message_is_redacted_under(snap, target, NULL, msgid, max_children);
-  if (r == 1
-      || !history_rename_span(target, history_live_incarnation(target), &span))
+  if (r == 1)
+    return 1;
+  i = history_rename_span(target, history_live_incarnation(target), &span);
+  if (i < 0)
+    return -1;   /* a REDACT under an earlier name could not be looked for */
+  if (i == 0)
     return r;
   unknown = r < 0;
   for (i = 0; i < span.count; i++) {

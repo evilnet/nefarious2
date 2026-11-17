@@ -641,6 +641,24 @@ void history_channel_renamed(const char *oldname, const char *newname,
   hist_ts = incarnation;
 }
 
+/* ... and its record of a crossing: the store executed the losing
+ * relocation first and hands what the loser's record took from the old
+ * channel over to the winner's (relocate_again()). */
+static int hist_crossed;
+static char hist_x_old[CHANNELLEN + 1], hist_x_loser[CHANNELLEN + 1],
+            hist_x_winner[CHANNELLEN + 1];
+static time_t hist_x_ts;
+
+void history_channel_rename_crossed(const char *oldname, const char *losername,
+                                    const char *winnername, time_t incarnation)
+{
+  hist_crossed++;
+  snprintf(hist_x_old, sizeof(hist_x_old), "%s", oldname);
+  snprintf(hist_x_loser, sizeof(hist_x_loser), "%s", losername);
+  snprintf(hist_x_winner, sizeof(hist_x_winner), "%s", winnername);
+  hist_x_ts = incarnation;
+}
+
 /* What the real rename_channel() (channel.c) promises its callers: -1 for
  * a name too long, -2 for a name in use, otherwise the channel -- possibly
  * a NEW struct -- under the new name. */
@@ -4048,6 +4066,7 @@ static void crossing_relocations_winner_first(void **state)
   (void)state;
 
   crossing_world(&w);
+  hist_renames = hist_crossed = 0;
   vic_relocates(&w);
   forget();
   uma_relocates(&w);
@@ -4062,11 +4081,14 @@ static void crossing_relocations_winner_first(void **state)
                       ":uma!user@host.example PART #old :Moved to #y");
   assert_int_equal(sent_count_to(w.carol), 1);
   assert_int_equal(nopnotices, 0);
-  /* #old's chathistory went to the winner when it was made, and the
-   * loser's relocation did not take it away */
+  /* #old's chathistory went to the winner when it was made -- once --
+   * and the loser's relocation did not take it away: the loser's
+   * channel gets no record of it at all */
+  assert_int_equal(hist_renames, 1);
   assert_string_equal(hist_old, "#old");
   assert_string_equal(hist_new, "#x");
   assert_int_equal(hist_ts, 500000);
+  assert_int_equal(hist_crossed, 0);
 
   assert_crossing_end_state(&w);
 }
@@ -4079,6 +4101,7 @@ static void crossing_relocations_loser_first(void **state)
   (void)state;
 
   crossing_world(&w);
+  hist_renames = hist_crossed = 0;
   uma_relocates(&w);
   assert_string_equal(w.old->mode.redir, "#y");
   assert_int_equal(channel_named("#y")->mode.limit, 5);
@@ -4095,10 +4118,21 @@ static void crossing_relocations_loser_first(void **state)
   assert_int_equal(sent_count_to(w.carol), 2);
   assert_int_equal(nopnotices, 0);
   /* #old's chathistory is the winner's here too (history_rename.h), as
-   * on a server that heard the winner first */
+   * on a server that heard the winner first.  It was recorded for the
+   * loser when its relocation ran (once: the time #old was left); the
+   * winner's is not recorded as one more rename of #old -- that would
+   * leave the names #old had before with the loser, and give the winner
+   * #old up to now, the tombstone's rows since included -- but as the
+   * crossing it is: the loser's record hands over what it took. */
+  assert_int_equal(hist_renames, 1);
   assert_string_equal(hist_old, "#old");
-  assert_string_equal(hist_new, "#x");
+  assert_string_equal(hist_new, "#y");
   assert_int_equal(hist_ts, 500000);
+  assert_int_equal(hist_crossed, 1);
+  assert_string_equal(hist_x_old, "#old");
+  assert_string_equal(hist_x_loser, "#y");
+  assert_string_equal(hist_x_winner, "#x");
+  assert_int_equal(hist_x_ts, 500000);
 
   assert_crossing_end_state(&w);
 }

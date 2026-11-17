@@ -34,10 +34,10 @@
 #include <string.h>
 
 /** The record's version byte. */
-#define HREN_VERSION 0x01
+#define HREN_VERSION 0x02
 
-/** One encoded entry without its name: two be64 and the length byte. */
-#define HREN_ENT_FIXED 17
+/** One encoded entry without its name: three be64 and the length byte. */
+#define HREN_ENT_FIXED 25
 
 /** Room for a whole record. */
 #define HREN_VAL_MAX (1 + HREN_REC_MAX * (HREN_ENT_FIXED + CHANNELLEN))
@@ -106,12 +106,13 @@ static int rec_decode(const void *val, size_t vlen, struct hren_seg *ents)
 
     if ((size_t)(end - p) < HREN_ENT_FIXED)
       return 0;
-    nl = p[16];
+    nl = p[HREN_ENT_FIXED - 1];
     if (nl == 0 || nl > CHANNELLEN || (size_t)(end - p) < HREN_ENT_FIXED + nl)
       return 0;
     if (n < HREN_REC_MAX) {
       ents[n].incarnation = get_be64(p);
       ents[n].until_ms = get_be64(p + 8);
+      ents[n].since_ms = get_be64(p + 16);
       memcpy(ents[n].name, p + HREN_ENT_FIXED, nl);
       ents[n].name[nl] = '\0';
       n++;
@@ -133,7 +134,8 @@ static size_t rec_encode(unsigned char *buf, const struct hren_seg *ents, int n)
     size_t nl = strlen(ents[i].name);
     put_be64(p, ents[i].incarnation);
     put_be64(p + 8, ents[i].until_ms);
-    p[16] = (unsigned char)nl;
+    put_be64(p + 16, ents[i].since_ms);
+    p[HREN_ENT_FIXED - 1] = (unsigned char)nl;
     memcpy(p + HREN_ENT_FIXED, ents[i].name, nl);
     p += HREN_ENT_FIXED + nl;
   }
@@ -186,14 +188,14 @@ static int ent_cmp(const void *a, const void *b)
   return strcmp(x->name, y->name);
 }
 
-/** Add (@a name, @a incarnation, @a until_ms) to the @a n entries of the
- * record of @a self: not an entry for the record's own name, not one
- * behind @a floor_ms, and one name once per incarnation (the later
- * time).
+/** Add (@a name, @a incarnation, @a since_ms to @a until_ms) to the
+ * @a n entries of the record of @a self: not an entry for the record's
+ * own name, not one behind @a floor_ms, and one name once per
+ * incarnation (the later stay).
  * @return The new count. */
 static int ent_add(struct hren_seg *ents, int n, int max, const char *self,
-                   const char *name, uint64_t incarnation, uint64_t until_ms,
-                   uint64_t floor_ms)
+                   const char *name, uint64_t incarnation, uint64_t since_ms,
+                   uint64_t until_ms, uint64_t floor_ms)
 {
   int i;
 
@@ -201,8 +203,10 @@ static int ent_add(struct hren_seg *ents, int n, int max, const char *self,
     return n;
   for (i = 0; i < n; i++) {
     if (ents[i].incarnation == incarnation && !strcmp(ents[i].name, name)) {
-      if (until_ms > ents[i].until_ms)
+      if (until_ms > ents[i].until_ms) {
         ents[i].until_ms = until_ms;
+        ents[i].since_ms = since_ms;
+      }
       return n;
     }
   }
@@ -212,6 +216,7 @@ static int ent_add(struct hren_seg *ents, int n, int max, const char *self,
   strcpy(ents[n].name, name);
   ents[n].incarnation = incarnation;
   ents[n].until_ms = until_ms;
+  ents[n].since_ms = since_ms;
   return n + 1;
 }
 
@@ -229,9 +234,54 @@ static int ents_floor(struct hren_seg *ents, int n, uint64_t floor_ms)
   return k;
 }
 
+/** Start the record a channel of @a incarnation arrives at with what the
+ * name's record held (@a have): the other incarnations' entries.  Those
+ * of the arriving incarnation are not this channel's -- its own are in
+ * the record of the name it leaves -- but a dead channel's with the same
+ * creation second, and are not inherited.
+ * @return The entry count. */
+static int ents_arrive(struct hren_seg *ents, int max, const char *self,
+                       const struct hren_seg *have, int nhave,
+                       uint64_t incarnation, uint64_t floor_ms)
+{
+  int i, n = 0;
+
+  for (i = 0; i < nhave; i++)
+    if (have[i].incarnation != incarnation)
+      n = ent_add(ents, n, max, self, have[i].name, have[i].incarnation,
+                  have[i].since_ms, have[i].until_ms, floor_ms);
+  return n;
+}
+
+/** The caps: @a incarnation's HREN_MAX_SEGS latest entries, then the
+ * record's HREN_REC_MAX latest.  Sorts @a ents.
+ * @param[out] dropped Entries of @a incarnation that went; may be NULL.
+ * @return The new count. */
+static int ents_cap(struct hren_seg *ents, int n, uint64_t incarnation,
+                    int *dropped)
+{
+  int i, k, kept, lost = 0;
+
+  qsort(ents, (size_t)n, sizeof ents[0], ent_cmp);
+  for (i = 0, k = 0, kept = 0; i < n; i++) {
+    if (ents[i].incarnation == incarnation && ++kept > HREN_MAX_SEGS) {
+      lost++;
+      continue;
+    }
+    ents[k++] = ents[i];
+  }
+  for (i = HREN_REC_MAX; i < k; i++)
+    if (ents[i].incarnation == incarnation)
+      lost++;
+  if (dropped)
+    *dropped = lost;
+  return k < HREN_REC_MAX ? k : HREN_REC_MAX;
+}
+
 int hren_note(struct db_env *env, struct db_cf *cf,
               const char *oldname, const char *newname,
-              uint64_t incarnation, uint64_t until_ms, uint64_t floor_ms)
+              uint64_t incarnation, uint64_t until_ms, uint64_t floor_ms,
+              int *dropped)
 {
   /* The new name's record, what the old name's held for this channel,
    * and the old name itself. */
@@ -239,8 +289,11 @@ int hren_note(struct db_env *env, struct db_cf *cf,
   struct hren_seg ents[2 * HREN_REC_MAX + 1];
   char oldkey[CHANNELLEN + 1], newkey[CHANNELLEN + 1];
   struct db_writebatch *wb;
-  int oldlen, newlen, nhave, nfrom, n = 0, kept, i, k, rc;
+  uint64_t since = 0;
+  int oldlen, newlen, nhave, nfrom, n, i, k, rc, lost_old = 0;
 
+  if (dropped)
+    *dropped = 0;
   if (!env || !cf || !incarnation)
     return -1;
   oldlen = fold_name(oldkey, oldname);
@@ -250,37 +303,45 @@ int hren_note(struct db_env *env, struct db_cf *cf,
   if (!strcmp(oldkey, newkey))
     return 0;   /* one key: the rows are where they were */
 
+  /* Towards showing less: a record of the new name that cannot be read
+   * is replaced (what it held is nobody's the arriving channel may
+   * show); when the old name's cannot be read, the names before it are
+   * lost to the channel and that record goes whole. */
   nhave = rec_read(env, cf, NULL, newkey, (size_t)newlen, have);
+  if (nhave < 0)
+    nhave = 0;
   nfrom = rec_read(env, cf, NULL, oldkey, (size_t)oldlen, from);
-  if (nhave < 0 || nfrom < 0)
-    return -1;
+  if (nfrom < 0) {
+    nfrom = 0;
+    lost_old = 1;
+  }
+  /* When the channel took the old name: when it left the one before, the
+   * latest time among its earlier names.  With none it was made under
+   * the old name (0) -- unless they could not be read: then nothing is
+   * known of the time before now (an empty stay). */
+  for (i = 0; i < nfrom; i++)
+    if (from[i].incarnation == incarnation && from[i].until_ms > since)
+      since = from[i].until_ms;
+  if (lost_old || since > until_ms)
+    since = until_ms;
 
-  /* The new name's record: what it held, the name just left, and the
-   * names this channel had before that one (they leave the old name's
-   * record: it describes whatever channel has that name next). */
-  for (i = 0; i < nhave; i++)
-    n = ent_add(ents, n, 2 * HREN_REC_MAX + 1, newkey, have[i].name,
-                have[i].incarnation, have[i].until_ms, floor_ms);
+  /* The new name's record: what it held for other incarnations, the name
+   * just left, and the names this channel had before that one (they
+   * leave the old name's record: it describes whatever channel has that
+   * name next). */
+  n = ents_arrive(ents, 2 * HREN_REC_MAX + 1, newkey, have, nhave,
+                  incarnation, floor_ms);
   n = ent_add(ents, n, 2 * HREN_REC_MAX + 1, newkey, oldkey, incarnation,
-              until_ms, floor_ms);
+              since, until_ms, floor_ms);
   for (i = 0, k = 0; i < nfrom; i++) {
     if (from[i].incarnation == incarnation)
       n = ent_add(ents, n, 2 * HREN_REC_MAX + 1, newkey, from[i].name,
-                  incarnation, from[i].until_ms, floor_ms);
+                  incarnation, from[i].since_ms, from[i].until_ms, floor_ms);
     else
       from[k++] = from[i];
   }
   nfrom = ents_floor(from, k, floor_ms);
-
-  /* The caps: this incarnation's HREN_MAX_SEGS latest, then the record's
-   * HREN_REC_MAX latest. */
-  qsort(ents, (size_t)n, sizeof ents[0], ent_cmp);
-  for (i = 0, k = 0, kept = 0; i < n; i++) {
-    if (ents[i].incarnation == incarnation && ++kept > HREN_MAX_SEGS)
-      continue;
-    ents[k++] = ents[i];
-  }
-  n = k < HREN_REC_MAX ? k : HREN_REC_MAX;
+  n = ents_cap(ents, n, incarnation, dropped);
 
   wb = db_writebatch_new(env);
   if (!wb)
@@ -291,7 +352,258 @@ int hren_note(struct db_env *env, struct db_cf *cf,
   if (rc == DB_OK)
     rc = db_writebatch_commit(wb, 0);
   db_writebatch_destroy(wb);
+  if (rc != DB_OK)
+    return -1;
+  return lost_old;
+}
+
+int hren_handover(struct db_env *env, struct db_cf *cf, const char *oldname,
+                  const char *losername, const char *winnername,
+                  uint64_t incarnation, uint64_t floor_ms, int *dropped)
+{
+  struct hren_seg have[HREN_REC_MAX], from[HREN_REC_MAX];
+  struct hren_seg ents[2 * HREN_REC_MAX + 1];
+  char oldkey[CHANNELLEN + 1], losekey[CHANNELLEN + 1], winkey[CHANNELLEN + 1];
+  struct db_writebatch *wb;
+  uint64_t left = 0;
+  int oldlen, loselen, winlen, nhave, nfrom, n, i, k, rc, found = 0;
+
+  if (dropped)
+    *dropped = 0;
+  if (!env || !cf || !incarnation)
+    return -1;
+  oldlen = fold_name(oldkey, oldname);
+  loselen = fold_name(losekey, losername);
+  winlen = fold_name(winkey, winnername);
+  if (oldlen < 0 || loselen < 0 || winlen < 0)
+    return -1;
+  if (!strcmp(losekey, winkey))
+    return 0;   /* one record: it has them */
+
+  nfrom = rec_read(env, cf, NULL, losekey, (size_t)loselen, from);
+  if (nfrom < 0)
+    return -1;
+  /* When the loser's relocation left the old name: that entry and all
+   * the incarnation has from before it are what the relocation moved. */
+  for (i = 0; i < nfrom; i++) {
+    if (from[i].incarnation == incarnation && !strcmp(from[i].name, oldkey)) {
+      left = from[i].until_ms;
+      found = 1;
+    }
+  }
+  if (!found)
+    return 0;
+  nhave = rec_read(env, cf, NULL, winkey, (size_t)winlen, have);
+  if (nhave < 0)
+    return -1;
+
+  n = ents_arrive(ents, 2 * HREN_REC_MAX + 1, winkey, have, nhave,
+                  incarnation, floor_ms);
+  for (i = 0, k = 0; i < nfrom; i++) {
+    if (from[i].incarnation == incarnation && from[i].until_ms <= left)
+      n = ent_add(ents, n, 2 * HREN_REC_MAX + 1, winkey, from[i].name,
+                  incarnation, from[i].since_ms, from[i].until_ms, floor_ms);
+    else
+      from[k++] = from[i];
+  }
+  nfrom = ents_floor(from, k, floor_ms);
+  n = ents_cap(ents, n, incarnation, dropped);
+
+  wb = db_writebatch_new(env);
+  if (!wb)
+    return -1;
+  rc = rec_stage(wb, cf, winkey, (size_t)winlen, ents, n);
+  if (rc == DB_OK)
+    rc = rec_stage(wb, cf, losekey, (size_t)loselen, from, nfrom);
+  if (rc == DB_OK)
+    rc = db_writebatch_commit(wb, 0);
+  db_writebatch_destroy(wb);
+  return rc == DB_OK ? 1 : -1;
+}
+
+int hren_drop(struct db_env *env, struct db_cf *cf, const char *name)
+{
+  char key[CHANNELLEN + 1];
+  struct db_writebatch *wb;
+  int klen, rc;
+
+  if (!env || !cf)
+    return -1;
+  klen = fold_name(key, name);
+  if (klen < 0)
+    return -1;
+  wb = db_writebatch_new(env);
+  if (!wb)
+    return -1;
+  rc = db_writebatch_del(wb, cf, key, (size_t)klen);
+  if (rc == DB_OK)
+    rc = db_writebatch_commit(wb, 0);
+  db_writebatch_destroy(wb);
   return rc == DB_OK ? 0 : -1;
+}
+
+/** Does the record of @a key (@a n entries) take in a row under @a name
+ * stamped @a ms, of @a incarnation: under the record's own name, or
+ * under an entry of the incarnation that reaches the stamp? */
+static int rec_takes(const char *key, const struct hren_seg *ents, int n,
+                     const char *name, uint64_t ms, uint64_t incarnation)
+{
+  int i;
+
+  if (!strcmp(name, key))
+    return 1;
+  for (i = 0; i < n; i++)
+    if (ents[i].incarnation == incarnation && ms <= ents[i].until_ms
+        && !strcmp(ents[i].name, name))
+      return 1;
+  return 0;
+}
+
+int hren_same_channel(struct db_env *env, struct db_cf *cf, const char *aname,
+                      uint64_t a_ms, const char *bname, uint64_t b_ms,
+                      uint64_t incarnation)
+{
+  struct hren_seg ents[HREN_REC_MAX];
+  char akey[CHANNELLEN + 1], bkey[CHANNELLEN + 1];
+  struct db_iter *it;
+  int alen, blen, n, rc, yes = 0;
+
+  if (!env || !cf)
+    return -1;
+  if (!incarnation)
+    return 0;   /* rows from before the stamp are nobody's for sure */
+  alen = fold_name(akey, aname);
+  blen = fold_name(bkey, bname);
+  if (alen < 0 || blen < 0)
+    return 0;
+  if (!strcmp(akey, bkey))
+    return 1;
+
+  /* The usual case first: the channel still has one of the two names. */
+  n = rec_read(env, cf, NULL, akey, (size_t)alen, ents);
+  if (n < 0)
+    return -1;
+  if (rec_takes(akey, ents, n, bkey, b_ms, incarnation))
+    return 1;
+  n = rec_read(env, cf, NULL, bkey, (size_t)blen, ents);
+  if (n < 0)
+    return -1;
+  if (rec_takes(bkey, ents, n, akey, a_ms, incarnation))
+    return 1;
+
+  /* It moved on from both: the record is under whatever name it has now.
+   * A walk of the column family -- one small record per renamed channel
+   * -- asked only when a REDACT row's original turned up under another
+   * name (hren_find_parent). */
+  it = db_iter_open(env, cf, NULL);
+  if (!it)
+    return -1;
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it) && !yes;
+       rc = db_iter_next(it)) {
+    char key[CHANNELLEN + 1];
+    size_t klen, vlen;
+    const void *k = db_iter_key(it, &klen);
+    const void *v = db_iter_value(it, &vlen);
+
+    if (!k || klen == 0 || klen > CHANNELLEN)
+      continue;
+    memcpy(key, k, klen);
+    key[klen] = '\0';
+    n = rec_decode(v, vlen, ents);
+    yes = rec_takes(key, ents, n, akey, a_ms, incarnation)
+          && rec_takes(key, ents, n, bkey, b_ms, incarnation);
+  }
+  db_iter_close(it);
+  if (yes)
+    return 1;
+  return rc == DB_OK || rc == DB_NOTFOUND ? 0 : -1;
+}
+
+int hren_find_parent(struct db_env *env, struct db_cf *cf,
+                     struct db_cf *msgid_index, struct db_cf *messages,
+                     hren_row_inc_fn inc_fn, const char *child_name,
+                     uint64_t child_ms, uint64_t incarnation,
+                     const char *parent_msgid, char *name, char *ts, size_t tssz)
+{
+  char childkey[CHANNELLEN + 1];
+  char lo[HREN_TAIL_MAX + 2], hi[HREN_TAIL_MAX + 2];
+  struct db_iter *it;
+  size_t mlen;
+  int rc, failed = 0, found = 0;
+
+  if (!env || !cf || !msgid_index || !messages || !inc_fn || !name || !ts
+      || !tssz)
+    return -1;
+  if (!incarnation || !parent_msgid || !*parent_msgid
+      || fold_name(childkey, child_name) < 0)
+    return 0;
+  mlen = strlen(parent_msgid);
+  if (mlen > HREN_TAIL_MAX)
+    return 0;
+
+  /* Every name that holds the msgid: the index keys msgid \0 name. */
+  memcpy(lo, parent_msgid, mlen);
+  lo[mlen] = '\0';
+  memcpy(hi, parent_msgid, mlen);
+  hi[mlen] = '\x01';
+  it = db_iter_open_bounded(env, msgid_index, NULL, lo, mlen + 1, hi, mlen + 1);
+  if (!it)
+    return -1;
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it) && !found;
+       rc = db_iter_next(it)) {
+    char held[CHANNELLEN + 1], pts[HREN_TS_LEN];
+    char mk[CHANNELLEN + 2 + HREN_TAIL_MAX + HREN_TS_LEN];
+    struct db_val row = { NULL, 0 };
+    size_t klen, vlen, nlen;
+    const char *k = (const char *)db_iter_key(it, &klen);
+    const void *v = db_iter_value(it, &vlen);
+    uint64_t pms;
+    int mkl, grc, same;
+
+    if (!k || klen <= mlen + 1 || memcmp(k, lo, mlen + 1) != 0)
+      continue;
+    nlen = klen - mlen - 1;
+    if (nlen > CHANNELLEN || !v || vlen == 0 || vlen >= sizeof pts
+        || vlen >= tssz)
+      continue;   /* a PM pair's key, or no timestamp to go by */
+    memcpy(held, k + mlen + 1, nlen);
+    held[nlen] = '\0';
+    if (!strcmp(held, childkey))
+      continue;   /* the REDACT row's own name: the caller looked there */
+    memcpy(pts, v, vlen);
+    pts[vlen] = '\0';
+    pms = htc_parse_ms(pts);
+    mkl = htc_msg_key(mk, sizeof mk, held, pts, parent_msgid);
+    if (mkl <= 0)
+      continue;
+    grc = db_get(env, messages, mk, (size_t)mkl, NULL, &row);
+    if (grc != DB_OK) {
+      if (grc != DB_NOTFOUND)
+        failed = 1;
+      continue;
+    }
+    same = inc_fn(row.base, row.len) == incarnation;
+    db_val_free(&row);
+    if (!same)
+      continue;
+    same = hren_same_channel(env, cf, childkey, child_ms, held, pms,
+                             incarnation);
+    if (same < 0)
+      failed = 1;
+    if (same == 1) {
+      memcpy(name, held, nlen + 1);
+      memcpy(ts, pts, vlen + 1);
+      found = 1;
+    }
+  }
+  db_iter_close(it);
+  if (found)
+    return 1;
+  if (rc != DB_OK && rc != DB_NOTFOUND)
+    failed = 1;
+  return failed ? -1 : 0;
 }
 
 int hren_lookup(struct db_env *env, struct db_cf *cf, struct db_snapshot *snap,
@@ -780,3 +1092,4 @@ const struct hren_seg *hren_iter_seg(const struct hren_iter *it)
     return NULL;
   return it->sub[it->cur].seg;
 }
+

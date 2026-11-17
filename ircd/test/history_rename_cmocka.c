@@ -46,6 +46,7 @@
 static struct db_env *env;
 static struct db_cf  *ren;    /* the renames CF */
 static struct db_cf  *msgs;   /* the messages CF */
+static struct db_cf  *mids;   /* the msgid index CF */
 
 /* The renamed channel's creation timestamp, and a stranger's. */
 #define INC   1700000000ULL
@@ -81,6 +82,7 @@ static void open_cfs(void)
 {
   assert_int_equal(db_cf_open(env, "renames", NULL, &ren), DB_OK);
   assert_int_equal(db_cf_open(env, "messages", NULL, &msgs), DB_OK);
+  assert_int_equal(db_cf_open(env, "msgid_index", NULL, &mids), DB_OK);
 }
 
 static int test_setup(void **state)
@@ -113,7 +115,7 @@ static int test_teardown(void **state)
   fake_db_free(env);
 #endif
   env = NULL;
-  ren = msgs = NULL;
+  ren = msgs = mids = NULL;
   return 0;
 }
 
@@ -146,6 +148,23 @@ static void put_row(const char *name, uint64_t ms, const char *msgid,
   wb = db_writebatch_new(env);
   assert_non_null(wb);
   assert_int_equal(db_writebatch_put(wb, msgs, key, (size_t)kl, val, (size_t)vl), DB_OK);
+  assert_int_equal(db_writebatch_commit(wb, 0), DB_OK);
+  db_writebatch_destroy(wb);
+}
+
+/* The msgid index's row for it, as history.c stores one with each row. */
+static void put_mid(const char *name, uint64_t ms, const char *msgid)
+{
+  char key[HISTORY_MSGID_LEN + CHANNELLEN + 4], ts[HISTORY_TIMESTAMP_LEN];
+  struct db_writebatch *wb;
+  int kl;
+
+  fmt_ms(ts, sizeof ts, ms);
+  kl = htc_msgid_key(key, sizeof key, msgid, name);
+  assert_true(kl > 0);
+  wb = db_writebatch_new(env);
+  assert_non_null(wb);
+  assert_int_equal(db_writebatch_put(wb, mids, key, (size_t)kl, ts, strlen(ts)), DB_OK);
   assert_int_equal(db_writebatch_commit(wb, 0), DB_OK);
   db_writebatch_destroy(wb);
 }
@@ -274,7 +293,7 @@ static void test_note_and_lookup(void **state)
   (void)state;
 
   assert_int_equal(span_of("#new", INC, &span), 0);
-  assert_int_equal(hren_note(env, ren, "#Old[x]", "#New", INC, MS(5000), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#Old[x]", "#New", INC, MS(5000), 0, NULL), 0);
   /* Any spelling of the current name finds it; the earlier name is held
    * folded, as the rows' keys are. */
   assert_int_equal(span_of("#NEW", INC, &span), 1);
@@ -284,9 +303,9 @@ static void test_note_and_lookup(void **state)
   /* The old name has no earlier names of its own. */
   assert_int_equal(span_of("#old[x]", INC, &span), 0);
   /* Bad input writes nothing. */
-  assert_int_equal(hren_note(env, ren, "", "#new", INC, MS(1), 0), -1);
-  assert_int_equal(hren_note(env, ren, "#a", "#b", 0, MS(1), 0), -1);
-  assert_int_equal(hren_note(env, ren, "#a", NULL, INC, MS(1), 0), -1);
+  assert_int_equal(hren_note(env, ren, "", "#new", INC, MS(1), 0, NULL), -1);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", 0, MS(1), 0, NULL), -1);
+  assert_int_equal(hren_note(env, ren, "#a", NULL, INC, MS(1), 0, NULL), -1);
 }
 
 /* Two spellings of one name are one key: the rows are where they were. */
@@ -295,7 +314,7 @@ static void test_case_only_rename_is_nothing(void **state)
   struct hren_span span;
   (void)state;
 
-  assert_int_equal(hren_note(env, ren, "#Chan", "#chan", INC, MS(1), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#Chan", "#chan", INC, MS(1), 0, NULL), 0);
   assert_int_equal(span_of("#chan", INC, &span), 0);
 }
 
@@ -306,8 +325,8 @@ static void test_chain_is_flattened(void **state)
   struct hren_span span;
   (void)state;
 
-  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0), 0);
-  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(2000), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(2000), 0, NULL), 0);
   assert_int_equal(span_of("#c", INC, &span), 2);
   assert_string_equal(span.seg[0].name, "#b");
   assert_true(span.seg[0].until_ms == MS(2000));
@@ -326,11 +345,11 @@ static void test_loop_stays_bounded(void **state)
   (void)state;
 
   for (i = 0; i < 50; i++) {
-    assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000 + 2 * i), 0), 0);
+    assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000 + 2 * i), 0, NULL), 0);
     assert_int_equal(span_of("#b", INC, &span), 1);
     assert_string_equal(span.seg[0].name, "#a");
     assert_true(span.seg[0].until_ms == MS(1000 + 2 * i));
-    assert_int_equal(hren_note(env, ren, "#b", "#a", INC, MS(1001 + 2 * i), 0), 0);
+    assert_int_equal(hren_note(env, ren, "#b", "#a", INC, MS(1001 + 2 * i), 0, NULL), 0);
     assert_int_equal(span_of("#a", INC, &span), 1);
     assert_string_equal(span.seg[0].name, "#b");
     assert_true(span.seg[0].until_ms == MS(1001 + 2 * i));
@@ -349,7 +368,7 @@ static void test_cap_keeps_the_latest(void **state)
   for (i = 0; i < HREN_MAX_SEGS + 10; i++) {
     snprintf(from, sizeof from, "#n%d", i);
     snprintf(to, sizeof to, "#n%d", i + 1);
-    assert_int_equal(hren_note(env, ren, from, to, INC, MS(1000 + i), 0), 0);
+    assert_int_equal(hren_note(env, ren, from, to, INC, MS(1000 + i), 0, NULL), 0);
   }
   snprintf(to, sizeof to, "#n%d", HREN_MAX_SEGS + 10);
   assert_int_equal(span_of(to, INC, &span), HREN_MAX_SEGS);
@@ -367,8 +386,8 @@ static void test_incarnations_apart(void **state)
   struct hren_span span;
   (void)state;
 
-  assert_int_equal(hren_note(env, ren, "#a", "#x", INC, MS(1000), 0), 0);
-  assert_int_equal(hren_note(env, ren, "#q", "#x", INC2, MS(9999000), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#x", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#q", "#x", INC2, MS(9999000), 0, NULL), 0);
   assert_int_equal(span_of("#x", INC, &span), 1);
   assert_string_equal(span.seg[0].name, "#a");
   assert_int_equal(span_of("#x", INC2, &span), 1);
@@ -377,7 +396,7 @@ static void test_incarnations_apart(void **state)
   /* No live channel: every incarnation's. */
   assert_int_equal(span_of("#x", 0, &span), 2);
   /* The second incarnation moves on; the first one's entry stays. */
-  assert_int_equal(hren_note(env, ren, "#x", "#y", INC2, MS(9999500), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#x", "#y", INC2, MS(9999500), 0, NULL), 0);
   assert_int_equal(span_of("#y", INC2, &span), 2);
   assert_string_equal(span.seg[0].name, "#x");
   assert_string_equal(span.seg[1].name, "#q");
@@ -391,13 +410,13 @@ static void test_floor_drops_aged_entries(void **state)
   struct hren_span span;
   (void)state;
 
-  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0), 0);
-  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(2000), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(2000), 0, NULL), 0);
   assert_int_equal(hren_lookup(env, ren, NULL, "#c", INC, MS(1500), &span), 1);
   assert_string_equal(span.seg[0].name, "#b");
   assert_int_equal(hren_lookup(env, ren, NULL, "#c", INC, MS(2500), &span), 0);
   /* A rename with a floor drops what is behind it from the record. */
-  assert_int_equal(hren_note(env, ren, "#c", "#d", INC, MS(3000), MS(1500)), 0);
+  assert_int_equal(hren_note(env, ren, "#c", "#d", INC, MS(3000), MS(1500), NULL), 0);
   assert_int_equal(span_of("#d", INC, &span), 2);
   assert_string_equal(span.seg[0].name, "#c");
   assert_string_equal(span.seg[1].name, "#b");
@@ -415,8 +434,8 @@ static void test_forget(void **state)
   struct hren_span span;
   (void)state;
 
-  assert_int_equal(hren_note(env, ren, "#a", "#x", INC, MS(1000), 0), 0);
-  assert_int_equal(hren_note(env, ren, "#q", "#x", INC2, MS(9999000), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#x", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#q", "#x", INC2, MS(9999000), 0, NULL), 0);
   assert_int_equal(hren_forget(env, ren, "#X", INC), 0);
   assert_int_equal(span_of("#x", INC, &span), 0);
   assert_int_equal(span_of("#x", INC2, &span), 1);
@@ -438,9 +457,288 @@ static void test_unreadable_record(void **state)
   db_writebatch_destroy(wb);
   assert_int_equal(span_of("#z", INC, &span), 0);
   /* A rename onto it replaces it. */
-  assert_int_equal(hren_note(env, ren, "#y", "#z", INC, MS(1), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#y", "#z", INC, MS(1), 0, NULL), 0);
   assert_int_equal(span_of("#z", INC, &span), 1);
 }
+
+
+/* Each entry says when the channel took the name: the time it left the
+ * one before, 0 for the name it was made under, and for a name it had
+ * twice the later stay.  (Which name the channel had at a given time,
+ * for strict presence.) */
+static void test_since_is_when_the_name_was_taken(void **state)
+{
+  struct hren_span span;
+  (void)state;
+
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(2000), 0, NULL), 0);
+  assert_int_equal(span_of("#c", INC, &span), 2);
+  assert_string_equal(span.seg[0].name, "#b");
+  assert_true(span.seg[0].since_ms == MS(1000));
+  assert_true(span.seg[0].until_ms == MS(2000));
+  assert_string_equal(span.seg[1].name, "#a");
+  assert_true(span.seg[1].since_ms == 0);
+  /* back to #a and on to #d: #a's entry is its second stay, and its
+   * first (up to 1000) is in no entry */
+  assert_int_equal(hren_note(env, ren, "#c", "#a", INC, MS(3000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#d", INC, MS(4000), 0, NULL), 0);
+  assert_int_equal(span_of("#d", INC, &span), 3);
+  assert_string_equal(span.seg[0].name, "#a");
+  assert_true(span.seg[0].since_ms == MS(3000));
+  assert_true(span.seg[0].until_ms == MS(4000));
+  assert_string_equal(span.seg[1].name, "#c");
+  assert_true(span.seg[1].since_ms == MS(2000));
+  assert_string_equal(span.seg[2].name, "#b");
+  assert_true(span.seg[2].since_ms == MS(1000));
+  /* a crossing hands the times over as they are */
+  assert_int_equal(hren_note(env, ren, "#d", "#y", INC, MS(5000), 0, NULL), 0);
+  assert_int_equal(hren_handover(env, ren, "#d", "#y", "#x", INC, 0, NULL), 1);
+  assert_int_equal(span_of("#x", INC, &span), HREN_MAX_SEGS);
+  assert_string_equal(span.seg[0].name, "#d");
+  assert_true(span.seg[0].since_ms == MS(4000));
+  assert_true(span.seg[0].until_ms == MS(5000));
+}
+
+/* The cap says how many of the channel's names it dropped. */
+static void test_cap_reports_what_it_drops(void **state)
+{
+  char from[16], to[16];
+  int i, dropped;
+  (void)state;
+
+  for (i = 0; i < HREN_MAX_SEGS + 3; i++) {
+    snprintf(from, sizeof from, "#n%d", i);
+    snprintf(to, sizeof to, "#n%d", i + 1);
+    dropped = -1;
+    assert_int_equal(hren_note(env, ren, from, to, INC, MS(1000 + i), 0, &dropped), 0);
+    assert_int_equal(dropped, i < HREN_MAX_SEGS ? 0 : 1);
+  }
+}
+
+/* A channel renamed into a name does not inherit what that name's record
+ * holds for a dead channel created in the same second: the record's
+ * entries of the arriving incarnation are that other channel's (the
+ * arriving one's are all in the record of the name it leaves). */
+static void test_arrival_does_not_inherit_a_same_second_channel(void **state)
+{
+  struct hren_span span;
+  struct walked w;
+  (void)state;
+
+  /* the dead channel: #q -> #new, then gone */
+  put_row("#q", MS(500), "q1", INC);
+  assert_int_equal(hren_note(env, ren, "#q", "#new", INC, MS(1000), 0, NULL), 0);
+  /* another dead one, of another second: its entry may stay (no read of
+   * the arriving channel returns it) */
+  assert_int_equal(hren_note(env, ren, "#r", "#new", INC2, MS(9999000), 0, NULL), 0);
+  /* the live channel, created in the dead one's second, arrives */
+  put_row("#z", MS(4000), "z1", INC);
+  assert_int_equal(hren_note(env, ren, "#z", "#new", INC, MS(5000), 0, NULL), 0);
+
+  assert_int_equal(span_of("#new", INC, &span), 1);
+  assert_string_equal(span.seg[0].name, "#z");
+  walk_back("#new", INC, 0, 10, &w);
+  assert_walk(&w, "z1");
+  assert_int_equal(span_of("#new", INC2, &span), 1);
+  assert_string_equal(span.seg[0].name, "#r");
+}
+
+/* Two relocations of #old cross.  A store that recorded the winner (#x)
+ * first has #old and the names before it with #x.  One that recorded the
+ * loser (#y) first hands them over: the same record, with the time #old
+ * was left, and nothing of it left with #y. */
+static void test_crossing_ends_the_same_in_both_orders(void **state)
+{
+  struct hren_span win, span;
+  int dropped = -1;
+  (void)state;
+
+  /* winner first */
+  assert_int_equal(hren_note(env, ren, "#w-older", "#w-old", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#w-old", "#w-x", INC, MS(2000), 0, NULL), 0);
+  assert_int_equal(span_of("#w-x", INC, &win), 2);
+
+  /* loser first: the loser's relocation at 2000, the winner's heard at
+   * 2600 */
+  assert_int_equal(hren_note(env, ren, "#l-older", "#l-old", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#l-old", "#l-y", INC, MS(2000), 0, NULL), 0);
+  /* a dead channel of the same second once left an entry at the winner's
+   * name: not inherited */
+  assert_int_equal(hren_note(env, ren, "#dead", "#l-x", INC, MS(100), 0, NULL), 0);
+  assert_int_equal(hren_handover(env, ren, "#l-old", "#l-y", "#l-x", INC, 0, &dropped), 1);
+  assert_int_equal(dropped, 0);
+
+  assert_int_equal(span_of("#l-x", INC, &span), win.count);
+  assert_string_equal(span.seg[0].name, "#l-old");
+  assert_true(span.seg[0].until_ms == win.seg[0].until_ms);   /* 2000, not 2600 */
+  assert_string_equal(span.seg[1].name, "#l-older");
+  assert_true(span.seg[1].until_ms == win.seg[1].until_ms);
+  assert_int_equal(span_of("#l-y", INC, &span), 0);
+  assert_int_equal(span_of("#l-old", INC, &span), 0);
+  /* heard again: nothing left to hand over */
+  assert_int_equal(hren_handover(env, ren, "#l-old", "#l-y", "#l-x", INC, 0, NULL), 0);
+  assert_int_equal(span_of("#l-x", INC, &span), 2);
+}
+
+/* The loser's channel was renamed on before the winner was heard: what it
+ * gained since stays with it, as on a store that heard the winner first
+ * (there the loser never had the rest). */
+static void test_crossing_loser_keeps_its_own_later_names(void **state)
+{
+  struct hren_span span;
+  (void)state;
+
+  assert_int_equal(hren_note(env, ren, "#older", "#old", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#old", "#y", INC, MS(2000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#y", "#y2", INC, MS(2300), 0, NULL), 0);
+  assert_int_equal(hren_handover(env, ren, "#old", "#y2", "#x", INC, 0, NULL), 1);
+  assert_int_equal(span_of("#x", INC, &span), 2);
+  assert_string_equal(span.seg[0].name, "#old");
+  assert_true(span.seg[0].until_ms == MS(2000));
+  assert_string_equal(span.seg[1].name, "#older");
+  assert_int_equal(span_of("#y2", INC, &span), 1);
+  assert_string_equal(span.seg[0].name, "#y");
+  /* bad input */
+  assert_int_equal(hren_handover(env, ren, "#old", "#y2", "#x", 0, 0, NULL), -1);
+  assert_int_equal(hren_handover(env, ren, "#old", "", "#x", INC, 0, NULL), -1);
+}
+
+/* Which rows under two names are one channel's: what the trim engine
+ * asks before a REDACT row takes an original under another name with it. */
+static void test_same_channel(void **state)
+{
+  (void)state;
+
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#a", MS(500), INC), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_same_channel(env, ren, "#B", MS(1500), "#A", MS(500), INC), 1);
+  assert_int_equal(hren_same_channel(env, ren, "#a", MS(500), "#b", MS(1500), INC), 1);
+  /* a row under #a from after the channel left it is the next #a's */
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#a", MS(1200), INC), 0);
+  /* another incarnation, another name */
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#a", MS(500), INC2), 0);
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#c", MS(500), INC), 0);
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#a", MS(500), 0), 0);
+
+  /* The channel moved on: the record that joins #a and #b is #c's now. */
+  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(2000), 0, NULL), 0);
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#a", MS(500), INC), 1);
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(2500), "#a", MS(500), INC), 0);
+  assert_int_equal(hren_same_channel(env, ren, "#c", MS(2500), "#a", MS(500), INC), 1);
+  /* And back to #a: the record is #a's own, its rows of any time. */
+  assert_int_equal(hren_note(env, ren, "#c", "#a", INC, MS(3000), 0, NULL), 0);
+  assert_int_equal(hren_same_channel(env, ren, "#b", MS(1500), "#a", MS(500), INC), 1);
+  assert_int_equal(hren_same_channel(env, ren, "#a", MS(3500), "#b", MS(1500), INC), 1);
+  assert_int_equal(hren_same_channel(env, ren, "#a", MS(3500), "#b", MS(2500), INC), 0);
+}
+
+/* The original a REDACT row under the new name redacts, stored under the
+ * old one. */
+static void test_find_parent_under_an_earlier_name(void **state)
+{
+  char name[CHANNELLEN + 1], ts[HISTORY_TIMESTAMP_LEN], want[HISTORY_TIMESTAMP_LEN];
+  (void)state;
+
+  put_row("#old", MS(500), "p1", INC);
+  put_mid("#old", MS(500), "p1");
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(1000), 0, NULL), 0);
+  /* the same msgid under names that are not this channel's */
+  put_row("#evil", MS(400), "p1", INC);
+  put_mid("#evil", MS(400), "p1");
+
+  fmt_ms(want, sizeof want, MS(500));
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#New", MS(1500),
+                                    INC, "p1", name, ts, sizeof ts), 1);
+  assert_string_equal(name, "#old");
+  assert_string_equal(ts, want);
+
+  /* not for a REDACT row of another incarnation, or of a stranger */
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#new", MS(1500),
+                                    INC2, "p1", name, ts, sizeof ts), 0);
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#other", MS(1500),
+                                    INC, "p1", name, ts, sizeof ts), 0);
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#new", MS(1500),
+                                    INC, "nope", name, ts, sizeof ts), 0);
+  /* a row of the old name's NEXT channel (another incarnation) is not it */
+  put_row("#old", MS(1200), "p2", INC2);
+  put_mid("#old", MS(1200), "p2");
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#new", MS(1500),
+                                    INC, "p2", name, ts, sizeof ts), 0);
+  /* an index row whose message is gone */
+  put_mid("#old", MS(600), "p3");
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#new", MS(1500),
+                                    INC, "p3", name, ts, sizeof ts), 0);
+}
+
+static void test_drop(void **state)
+{
+  struct hren_span span;
+  (void)state;
+
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_drop(env, ren, "#B"), 0);
+  assert_int_equal(span_of("#b", 0, &span), 0);
+  assert_int_equal(hren_drop(env, ren, "#b"), 0);
+  assert_int_equal(hren_drop(env, ren, ""), -1);
+}
+
+#ifndef HREN_REAL
+/* A store that fails: every answer shows less, never another channel's
+ * rows.  (Injected faults: the in-memory store only.) */
+static void test_read_errors_fail_safe(void **state)
+{
+  struct hren_span span;
+  char name[CHANNELLEN + 1], ts[HISTORY_TIMESTAMP_LEN];
+  (void)state;
+
+  /* a dead same-second channel's entry at #new, and the live channel's
+   * earlier name */
+  assert_int_equal(hren_note(env, ren, "#q", "#new", INC, MS(1000), 0, NULL), 0);
+  assert_int_equal(hren_note(env, ren, "#older", "#old", INC, MS(2000), 0, NULL), 0);
+
+  /* a lookup that cannot read is an error, not "never renamed" */
+  fake_db_fail_get_at(env, 1);
+  assert_int_equal(span_of("#new", INC, &span), -1);
+  assert_int_equal(span.count, 0);
+  fake_db_fail_get_at(env, 1);
+  assert_int_equal(hren_same_channel(env, ren, "#new", MS(1), "#q", MS(1), INC), -1);
+  put_row("#q", MS(500), "p1", INC);
+  put_mid("#q", MS(500), "p1");
+  fake_db_fail_get_at(env, 1);
+  assert_int_equal(hren_find_parent(env, ren, mids, msgs, row_inc, "#new", MS(1500),
+                                    INC, "p1", name, ts, sizeof ts), -1);
+
+  /* the write failed: nothing changed */
+  fake_db_fail_next_commit(env);
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(3000), 0, NULL), -1);
+  assert_int_equal(span_of("#old", INC, &span), 1);
+
+  /* the new name's record cannot be read: replaced, the dead channel's
+   * entry with it */
+  fake_db_fail_get_at(env, 1);
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(3000), 0, NULL), 0);
+  assert_int_equal(span_of("#new", INC, &span), 2);
+  assert_string_equal(span.seg[0].name, "#old");
+  assert_string_equal(span.seg[1].name, "#older");
+
+  /* the old name's record cannot be read: the channel keeps the name it
+   * left, and the old name's record goes */
+  assert_int_equal(hren_note(env, ren, "#new", "#mid", INC, MS(4000), 0, NULL), 0);
+  fake_db_fail_get_at(env, 2);
+  assert_int_equal(hren_note(env, ren, "#mid", "#last", INC, MS(5000), 0, NULL), 1);
+  assert_int_equal(span_of("#last", INC, &span), 1);
+  assert_string_equal(span.seg[0].name, "#mid");
+  /* (when it took that name is not known: no time maps to it) */
+  assert_true(span.seg[0].since_ms == span.seg[0].until_ms);
+  assert_int_equal(span_of("#mid", 0, &span), 0);
+
+  /* a handover that cannot read changes nothing */
+  fake_db_fail_get_at(env, 1);
+  assert_int_equal(hren_handover(env, ren, "#mid", "#last", "#won", INC, 0, NULL), -1);
+  assert_int_equal(span_of("#last", INC, &span), 1);
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* The walk                                                            */
@@ -473,7 +771,7 @@ static void test_walk_follows_rename(void **state)
   put_row("#old", MS(100), "o1", INC);
   put_row("#old", MS(200), "o2", INC);
   put_row("#old", MS(300), "o3", INC);
-  assert_int_equal(hren_note(env, ren, "#old", "#New", INC, MS(400), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#old", "#New", INC, MS(400), 0, NULL), 0);
   put_row("#New", MS(500), "n1", INC);
   put_row("#New", MS(600), "n2", INC);
 
@@ -499,7 +797,7 @@ static void test_walk_limit_across_boundary(void **state)
   put_row("#old", MS(100), "o1", INC);
   put_row("#old", MS(200), "o2", INC);
   put_row("#old", MS(300), "o3", INC);
-  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(400), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(400), 0, NULL), 0);
   put_row("#new", MS(500), "n1", INC);
   put_row("#new", MS(600), "n2", INC);
 
@@ -538,7 +836,7 @@ static void test_walk_interleaved_and_turning(void **state)
   put_row("#old", MS(100), "o1", INC);
   put_row("#old", MS(300), "o3", INC);
   put_row("#old", MS(500), "o5", INC);
-  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(600), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(600), 0, NULL), 0);
   put_row("#new", MS(200), "n2", INC);
   put_row("#new", MS(400), "n4", INC);
   put_row("#new", MS(700), "n7", INC);
@@ -591,11 +889,11 @@ static void test_walk_chain(void **state)
 
   put_row("#a", MS(100), "a1", INC);
   put_row("#a", MS(200), "a2", INC);
-  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(300), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(300), 0, NULL), 0);
   put_row("#b", MS(400), "b1", INC);
   walk_back("#b", INC, 0, 10, &w);
   assert_walk(&w, "b1 a2 a1");
-  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(500), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(500), 0, NULL), 0);
   put_row("#c", MS(600), "c1", INC);
   put_row("#c", MS(700), "c2", INC);
 
@@ -617,9 +915,9 @@ static void test_walk_there_and_back(void **state)
   (void)state;
 
   put_row("#a", MS(100), "a1", INC);
-  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(200), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(200), 0, NULL), 0);
   put_row("#b", MS(300), "b1", INC);
-  assert_int_equal(hren_note(env, ren, "#b", "#a", INC, MS(400), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#b", "#a", INC, MS(400), 0, NULL), 0);
   put_row("#a", MS(500), "a2", INC);
   walk_back("#a", INC, 0, 10, &w);
   assert_walk(&w, "a2 b1 a1");
@@ -640,7 +938,7 @@ static void test_walk_excludes_recreated_old_name(void **state)
 
   put_row("#old", MS(100), "o1", INC);
   put_row("#old", MS(200), "o2", INC);
-  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(400), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(400), 0, NULL), 0);
   put_row("#new", MS(500), "n1", INC);
   /* The stranger's channel: created later, rows after the rename. */
   put_row("#old", (INC2 * 1000ULL) + 100, "s1", INC2);
@@ -668,7 +966,7 @@ static void test_walk_stops_at_rename_time(void **state)
 
   put_row("#old", MS(100), "o1", INC);
   put_row("#old", MS(400), "o2", INC);   /* stamped at the rename's ms */
-  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(400), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#old", "#new", INC, MS(400), 0, NULL), 0);
   put_row("#old", MS(401), "t1", INC);
   put_row("#old", MS(900), "t2", INC);
   put_row("#new", MS(500), "n1", INC);
@@ -691,9 +989,9 @@ static void test_survives_restart(void **state)
   (void)state;
 
   put_row("#a", MS(100), "a1", INC);
-  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(200), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#a", "#b", INC, MS(200), 0, NULL), 0);
   put_row("#b", MS(300), "b1", INC);
-  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(400), 0), 0);
+  assert_int_equal(hren_note(env, ren, "#b", "#c", INC, MS(400), 0, NULL), 0);
   put_row("#c", MS(500), "c1", INC);
 
 #ifdef HREN_REAL
@@ -721,6 +1019,17 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_floor_drops_aged_entries, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_forget, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_unreadable_record, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_since_is_when_the_name_was_taken, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_cap_reports_what_it_drops, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_arrival_does_not_inherit_a_same_second_channel, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_crossing_ends_the_same_in_both_orders, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_crossing_loser_keeps_its_own_later_names, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_same_channel, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_find_parent_under_an_earlier_name, test_setup, test_teardown),
+    cmocka_unit_test_setup_teardown(test_drop, test_setup, test_teardown),
+#ifndef HREN_REAL
+    cmocka_unit_test_setup_teardown(test_read_errors_fail_safe, test_setup, test_teardown),
+#endif
     cmocka_unit_test_setup_teardown(test_walk_without_rename, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_walk_follows_rename, test_setup, test_teardown),
     cmocka_unit_test_setup_teardown(test_walk_limit_across_boundary, test_setup, test_teardown),

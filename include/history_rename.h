@@ -34,6 +34,7 @@
  *   value a version byte, then one entry per earlier name:
  *           be64 incarnation   the channel's creation timestamp
  *           be64 until_ms      when it left that name
+ *           be64 since_ms      when it took it (0: at its creation)
  *           u8   length, the earlier name (folded)
  *
  * An entry is a SEGMENT: the rows under that earlier name which carry
@@ -50,8 +51,9 @@
  * at read time, so there is no chain to bound and no loop to detect.  An
  * entry that would name the record's own channel is dropped (#a -> #b ->
  * #a: #a's own rows are its own already), one name appears once per
- * incarnation (the later until_ms), an incarnation keeps at most
- * HREN_MAX_SEGS entries (the earliest leave first), and an entry whose
+ * incarnation (its later stay: the later until_ms), an incarnation keeps at most
+ * HREN_MAX_SEGS entries (the earliest leave first: hren_note says how
+ * many went), and an entry whose
  * until_ms is behind the retention floor is dropped wherever a record is
  * read or written: every row it could name has aged out.
  *
@@ -60,9 +62,81 @@
  * federated query needs nothing new on the wire: it names the current
  * name, and each store answers with what its own record says.
  *
+ * ARRIVING at a name.  The channel's own entries are all in the record of
+ * the name it leaves, so whatever the record of the name it arrives at
+ * holds for its incarnation is another channel's: a dead one created in
+ * the same second (the incarnation is a creation time in seconds) that
+ * was renamed into that name before.  Those entries are dropped at the
+ * arrival, never inherited; other incarnations' stay (no read of the
+ * arriving channel returns them).
+ *
+ * What the stamp cannot tell apart, here as before this file: rows the
+ * dead channel stored under the destination name ITSELF carry the same
+ * incarnation as the arriving channel's own rows there, and are shown
+ * with them.  It is the limit history.c already has for a channel that
+ * is destroyed and made again within one second; a rename widens it to
+ * "a dead channel of that name with the arriving channel's creation
+ * second".  Only the arrival time could separate them, and a floor there
+ * would hide the channel's own rows whenever a relayed message is
+ * stamped by a server whose clock is behind (the same reason until_ms is
+ * raised to the old name's newest stamp), so none is applied.
+ *
+ * CROSSING RELOCATIONS.  When two relocations of one channel cross, a
+ * server may execute the losing one first: the loser's name gets the
+ * record, and the server then makes the winner's channel.  hren_handover
+ * moves what the loser took -- the old name with the time it was left,
+ * and everything from before it -- to the winner, so both orders end
+ * with the same record and the loser with none of it.
+ *
+ * BOUNDS.  HREN_MAX_SEGS earlier names per incarnation: the price of a
+ * read (below) is linear in it, and anyone who may rename the channel
+ * sets it.  One rename more inside the retention window and the earliest
+ * name is no longer followed -- its rows stay where they are until they
+ * age out, unreachable through the current name -- which history.c logs
+ * (a warning naming the channel).  A read of a renamed channel opens one
+ * bounded iterator per name (1 + HREN_MAX_SEGS at most), and each row of
+ * a page has its redaction and its context looked for under each name
+ * (one bounded prefix seek each).
+ *
+ * FAILURES fail towards showing less.  A record that cannot be read
+ * fails the query that needed it (hren_lookup's -1: history.c answers as
+ * for any failed read, and a redaction lookup answers "unknown", which
+ * hides the row) instead of serving the page without the earlier names.
+ * A record that cannot be written leaves the channel without earlier
+ * names, and history.c deletes or stops reading whatever stale record
+ * the name had.
+ *
+ * REDACTIONS AND TRIMMING.  A REDACT sent after a rename for a message
+ * from before it is stored under the new name, its original under the
+ * old one; reads join them.  The trim engine deletes a redacted original
+ * together with its REDACT row (a redaction lives only in that row), and
+ * finds the original under the other name through hren_find_parent: the
+ * names that hold the msgid, narrowed to rows of the same incarnation
+ * that a record joins with the REDACT row (hren_same_channel).
+ *
+ * PRESENCE.  With CHATHISTORY_STRICT_PRESENCE a row is checked against
+ * the presence recorded under the name it is STORED under: a RENAME
+ * closes each member's open interval under the old name and opens one
+ * under the new (chathistory_presence.h, presence_on_channel_rename);
+ * nothing is copied.
+ *
+ * KNOWN GAPS.
+ *  - A server that did not execute the rename (down, or split from the
+ *    network at that moment) has no record: its rows under the old name
+ *    are not returned for the new one, by it or through it, and nothing
+ *    repairs that later.  The burst names a channel's current name only;
+ *    carrying its former names needs a wire change.
+ *  - Rows from before incarnations were stamped (2026-09-08) carry none
+ *    and belong to no segment.
+ *  - Read markers and channel metadata are keyed by name and do not
+ *    follow a rename.
+ *  - Two renames whose times are equal to the millisecond are ordered by
+ *    name when the cap chooses which entry to drop.
+ *
  * No ircd dependency beyond the db_* API, db_casefold and the key codec
  * (history_trim_codec.h): unit-tested on the in-memory store and on
- * RocksDB (ircd/test/history_rename_cmocka.c).
+ * RocksDB (ircd/test/history_rename_cmocka.c); history.c's use of it in
+ * ircd/test/history_read_cmocka.c.
  */
 #ifndef INCLUDED_history_rename_h
 #define INCLUDED_history_rename_h
@@ -83,8 +157,15 @@ struct db_env;
 struct db_cf;
 struct db_snapshot;
 
-/** Earlier names kept per channel incarnation. */
-#define HREN_MAX_SEGS 16
+/** Earlier names kept per channel incarnation: a read of the channel
+ * opens one iterator for its own name and one for each of these, and
+ * looks for a row's redaction and context under each, so this bounds
+ * what a chanop can make every page of the channel cost by renaming it
+ * over and over.  A channel renamed more often than this inside the
+ * retention window loses the reach to its earliest names: the rows stay
+ * (and age out) under them, the record's entries for them go, and
+ * history.c logs each name dropped. */
+#define HREN_MAX_SEGS 4
 
 /** Entries one record holds, every incarnation of the name together. */
 #define HREN_REC_MAX 64
@@ -95,6 +176,16 @@ struct hren_seg {
   char name[CHANNELLEN + 1];   /**< The earlier name, folded */
   uint64_t incarnation;        /**< The channel's creation timestamp */
   uint64_t until_ms;           /**< Rows stamped up to here count */
+  /** When the channel took the name -- the time it left the one before
+   * -- or 0: it was made under it.  Of its LATEST stay, for a name it
+   * had more than once (one entry per name).  Not a bound on the rows
+   * (a relayed row may be stamped by a clock that is behind, so a
+   * segment starts at the incarnation's creation): it says which name
+   * the channel had at a given time, for a caller that has a time and no
+   * row -- strict presence, for a row another server stored.  A time in
+   * no entry's [since_ms, until_ms] and not after the last until_ms is
+   * in an earlier stay under some name, which one is not known. */
+  uint64_t since_ms;
 };
 
 /** A channel's earlier names, the one it left last first. */
@@ -108,11 +199,61 @@ struct hren_span {
  * @a oldname's held for this incarnation), in one batch.  Entries behind
  * @a floor_ms (0 = none) are dropped from both.  Two spellings of one
  * name are one key: nothing to write.
- * @return 0, or -1 (a bad name, no incarnation, or the store failed). */
+ *
+ * The channel ARRIVES at @a newname: whatever that name's record held
+ * for this incarnation is not this channel's (its own entries are all in
+ * @a oldname's record) but a dead channel's with the same creation
+ * second, and is dropped, never inherited.  So this is called ONCE per
+ * rename.
+ *
+ * It fails towards showing less.  A record of @a newname that cannot be
+ * read is replaced, not kept; when @a oldname's cannot be read, the
+ * channel keeps only the name it just left, and @a oldname's record goes
+ * (the return is 1).
+ * @param[out] dropped Entries of this channel the caps removed (the
+ *   earliest names, whose rows no read returns any more); may be NULL.
+ * @return 0, 1 (written, the earlier names lost: see above), or -1 (a
+ *   bad name, no incarnation, or the write failed: nothing changed). */
 extern int hren_note(struct db_env *env, struct db_cf *cf,
                      const char *oldname, const char *newname,
                      uint64_t incarnation, uint64_t until_ms,
-                     uint64_t floor_ms);
+                     uint64_t floor_ms, int *dropped);
+
+/** Two relocations of the channel @a oldname crossed, this store recorded
+ * the losing one first (hren_note to @a losername), and the channel is at
+ * @a winnername after all: move what the loser's record took from
+ * @a oldname -- the entry for @a oldname, with the time it was left, and
+ * every entry of the incarnation no later than it -- to @a winnername's
+ * record.  The loser keeps what it gained since (a rename of its own).
+ * @a winnername is arrived at as in hren_note.  The end state is the one
+ * a store reaches that recorded the winning relocation first.
+ * @param[out] dropped As hren_note's.
+ * @return 1 moved; 0 the loser's record has no entry for @a oldname
+ *   (nothing written: the caller records the rename as a first one); -1
+ *   a bad name, a read or the write failed (nothing changed). */
+extern int hren_handover(struct db_env *env, struct db_cf *cf,
+                         const char *oldname, const char *losername,
+                         const char *winnername, uint64_t incarnation,
+                         uint64_t floor_ms, int *dropped);
+
+/** Delete @a name's record without reading it: what is left to do when
+ * its rewrite failed (the channel then has no earlier names, which shows
+ * less, never another channel's rows).
+ * @return 0, or -1. */
+extern int hren_drop(struct db_env *env, struct db_cf *cf, const char *name);
+
+/** Are a row under @a aname stamped @a a_ms and one under @a bname
+ * stamped @a b_ms, both carrying @a incarnation, rows of ONE channel --
+ * is there a record (of any name: the channel may have moved on since)
+ * that takes in both, each as the record's own name or as an entry of
+ * the incarnation that reaches its stamp?  The trim engine asks this
+ * before a REDACT row it evicts takes with it an original stored under
+ * another name (hren_find_parent).
+ * @return 1 yes, 0 no, -1 on a read error. */
+extern int hren_same_channel(struct db_env *env, struct db_cf *cf,
+                             const char *aname, uint64_t a_ms,
+                             const char *bname, uint64_t b_ms,
+                             uint64_t incarnation);
 
 /** The earlier names of the channel @a name of @a incarnation (0: of
  * every incarnation the name has a record for -- a name with no live
@@ -139,6 +280,29 @@ extern int hren_sweep(struct db_env *env, struct db_cf *cf, uint64_t floor_ms);
 /** The incarnation a stored messages row carries (history_record.h), or
  * 0 for a row that carries none or cannot be decoded. */
 typedef uint64_t (*hren_row_inc_fn)(const void *val, size_t vlen);
+
+/** The original a REDACT row redacts, when it is not stored under the
+ * REDACT row's own name: the REDACT row is under @a child_name, stamped
+ * @a child_ms, of @a incarnation, and names @a parent_msgid.  A REDACT
+ * sent in a renamed channel for a message from before the rename is
+ * stored under the new name, the message under the old one; the read
+ * side joins them (history.c walks every earlier name), and the trim
+ * engine, which deletes a redacted original with its REDACT row, must
+ * find it too or evicting the REDACT row would show the message again.
+ *
+ * Looked for through @a msgid_index (key: msgid \0 fold(name), value:
+ * the row's timestamp; htc_msgid_key): every other name that holds
+ * @a parent_msgid, whose @a messages row carries @a incarnation
+ * (@a inc_fn) and is of the same channel (hren_same_channel).
+ * @param[out] name The name it is stored under, folded (CHANNELLEN + 1).
+ * @param[out] ts Its key timestamp (@a tssz bytes).
+ * @return 1 found, 0 none, -1 on a read error. */
+extern int hren_find_parent(struct db_env *env, struct db_cf *cf,
+                            struct db_cf *msgid_index, struct db_cf *messages,
+                            hren_row_inc_fn inc_fn,
+                            const char *child_name, uint64_t child_ms,
+                            uint64_t incarnation, const char *parent_msgid,
+                            char *name, char *ts, size_t tssz);
 
 /** A walk over one channel's messages rows under its own name and every
  * segment of @a span, merged in key order (time, then msgid) -- what a

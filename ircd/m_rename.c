@@ -3097,8 +3097,17 @@ static void relocate_again(struct Client *sptr, struct RelocateTombstone *ts,
       /* The winner is the community's channel, here as on the servers
        * that heard the winning relocation first and ran
        * relocate_execute() for it: the old channel's rows are its
-       * chathistory on both (history_rename.h). */
-      history_channel_renamed(oldname, incoming, wchan->creationtime);
+       * chathistory on both (history_rename.h).  Here
+       * relocate_execute() recorded them for the loser, when this
+       * server's own relocation ran: that record -- the old name with
+       * the time it was left, and the names before it -- is handed over
+       * to the winner, by the loser's name (its channel may be gone, or
+       * a stranger's by now; the record is by name).  Not one more
+       * rename of the old channel: that would leave the earlier names
+       * with the loser and give the winner the tombstone's rows up to
+       * now, and the two orders would not end the same. */
+      history_channel_rename_crossed(oldname, current, incoming,
+                                     wchan->creationtime);
 
       relocate_move_issuer(sptr, oldchan, wchan, reason);
       ircd_strncpy(ts->issued, incoming, sizeof(ts->issued));

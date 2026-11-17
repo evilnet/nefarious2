@@ -171,6 +171,14 @@ struct HistoryMessage {
    * A channel recreated on the losing side of a split is a different
    * incarnation and its rows are not the surviving channel's history. */
   time_t incarnation;
+  /** The name the row is stored under in THIS server's store: @a target
+   * itself, or -- for a renamed channel's row from before the rename,
+   * returned as @a target's (history_rename.h) -- the earlier name,
+   * folded.  Empty when the row was not read from this store (a
+   * federated row).  In memory only.  Strict presence checks a row
+   * against the presence recorded under the name the channel had when
+   * the row was stored. */
+  char stored_as[CHANNELLEN + 1];
   /** Non-zero when the stored header was found shifted by a '|' an older
    * binary left raw in the nick or username (history_split_header):
    * the sender was re-split, or kept as read, and the account is empty
@@ -396,6 +404,27 @@ extern void history_recv_rename(struct Channel *chptr, const char *oldname);
  * rename. */
 extern void history_channel_renamed(const char *oldname, const char *newname,
                                     time_t incarnation);
+
+/** Two relocations of @a oldname crossed (m_rename.c's relocate_again):
+ * this server executed the losing one first -- history_channel_renamed()
+ * gave @a losername the old channel's rows -- and now makes the winner's
+ * channel @a winnername.  What the loser's record took from @a oldname
+ * (that name, with the time it was left, and every earlier one) moves to
+ * the winner's; the loser keeps none of it.  The record ends as on a
+ * server that executed the winning relocation first. */
+extern void history_channel_rename_crossed(const char *oldname,
+                                           const char *losername,
+                                           const char *winnername,
+                                           time_t incarnation);
+
+struct hren_span;
+/** The earlier names of the channel @a target whose rows are returned as
+ * its own (history_rename.h), the one left last first: for a caller that
+ * keeps something else by channel name -- strict presence -- and must
+ * follow a rename the same way.
+ * @return The count, or -1 when the record cannot be read (@a span is
+ *         then empty: the caller fails closed). */
+extern int history_rename_names(const char *target, struct hren_span *span);
 
 /** Did this server receive channel @a chname's traffic over the whole of
  * [@a lo_ms, @a hi_ms] (epoch ms)?  1 when one window holds it (a closed
