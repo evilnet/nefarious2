@@ -365,17 +365,22 @@ static int validate_client_timestamp(const char *ts)
   return chathistory_valid_timestamp(ts);
 }
 
-/** Does an ISO 8601 timestamp convert (history_iso_to_unix())?  The
- * validators check its shape only: an offset or other text after the
- * seconds passed them, and the stores, which fall back to reading a
- * timestamp that does not convert as unix, then built keys from the ISO
- * text.  A unix "sec[.ms]" (no '-') needs no conversion. */
-static int iso_timestamp_converts(const char *ts)
+/** Does a client's timestamp convert to a store key?  The validators
+ * check its shape only: an offset or other text after the seconds
+ * passed them, and the stores, which fall back to reading a timestamp
+ * that does not convert as unix, then built keys from the ISO text.  An
+ * ISO time must be the spec's form (history_iso_to_unix(), strict); a
+ * unix "sec[.ms]" (no '-', taken when STRICT_TIMESTAMPS is off) must be
+ * one the walks can key from (history_ref_to_unix(): no trailing dot,
+ * not too long), or it passed here and failed later as MESSAGE_ERROR
+ * instead of INVALID_PARAMS. */
+static int timestamp_converts(const char *ts)
 {
   char unix_buf[HISTORY_TIMESTAMP_LEN];
 
-  return !strchr(ts, '-')
-      || history_iso_to_unix(ts, unix_buf, sizeof(unix_buf)) == 0;
+  return strchr(ts, '-')
+      ? history_iso_to_unix(ts, unix_buf, sizeof(unix_buf)) == 0
+      : history_ref_to_unix(ts, unix_buf, sizeof(unix_buf)) == 0;
 }
 
 /** Parse a message reference (timestamp= or msgid=).
@@ -399,7 +404,7 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
     const char *ts = ref + 10;
     /* Validate the timestamp value per IRCv3 spec.
      * Uses validate_client_timestamp which respects STRICT_TIMESTAMPS config. */
-    if (!validate_client_timestamp(ts) || !iso_timestamp_converts(ts))
+    if (!validate_client_timestamp(ts) || !timestamp_converts(ts))
       return -1;
     *ref_type = HISTORY_REF_TIMESTAMP;
     *value = ts;
