@@ -4639,7 +4639,9 @@ void init_isupport(void)
      * not a permission: older requests are still answered honestly.
      * Storage servers only; federated peers may keep more or less.
      * Vendor-prefixed like draft/ICON (network-icon spec): fork-only
-     * tokens belong under evilnet/ (bare RELOCATE predates that rule;
+     * tokens take a DNS-name prefix, evilnet.github.io/, as vendor
+     * capability names must; the old evilnet/ name is advertised beside
+     * it for a transition release (bare RELOCATE predates the rule;
      * VAPID is draft/webpush's own).  See docs/features/chathistory.md. */
     chathistory_update_retention_isupport(0);   /* widest over the reachable stores */
   }
