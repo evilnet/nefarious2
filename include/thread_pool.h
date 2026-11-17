@@ -23,6 +23,12 @@
  * operations (like bcrypt/PBKDF2 password hashing) from the main event loop.
  * Results are delivered back to the main thread via callbacks.
  *
+ * Its other user is a long read of a store (store_job.h: the federated
+ * SEARCH responder's scan), which keeps its own count of the jobs it has
+ * in the pool so the password checks always find a worker.  A work
+ * function runs beside the main thread: it may touch only what it was
+ * handed and what is documented as safe off the main thread.
+ *
  * Usage:
  * 1. Call thread_pool_init() at startup
  * 2. Submit work with thread_pool_submit()
@@ -117,8 +123,8 @@ int thread_pool_get_signal_fd(void);
 int thread_pool_is_running(void);
 
 /**
- * How many workers run.
- * @return The worker count, 0 with no pool
+ * Get the number of worker threads.
+ * @return The pool's worker count, 0 if it is not running
  */
 int thread_pool_workers(void);
 

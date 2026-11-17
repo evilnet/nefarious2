@@ -336,6 +336,7 @@ IRCD_SRC = \
 	send.c \
 	shun.c \
 	ssl.c \
+	store_job.c \
 	thread_pool.c \
 	webpush.c \
 	webpush_store.c \

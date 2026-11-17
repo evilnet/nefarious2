@@ -329,6 +329,7 @@ int thread_pool_submit(thread_pool_work_func work, void *arg,
                        thread_pool_callback callback, void *ctx)
 {
   struct thread_task *task;
+  unsigned int pending;
 
   if (!pool.running) {
     Debug((DEBUG_ERROR, "thread_pool_submit: pool not running"));
@@ -367,12 +368,15 @@ int thread_pool_submit(thread_pool_work_func work, void *arg,
   } else {
     pool.task_head = pool.task_tail = task;
   }
-  pool.pending_count++;
+  pending = ++pool.pending_count;
   pthread_cond_signal(&pool.task_cond);
   pthread_mutex_unlock(&pool.task_mutex);
 
+  /* The count as it was under the lock: a worker may have taken the task
+   * by now, and it writes the count. */
   Debug((DEBUG_DEBUG, "thread_pool_submit: queued task (pending=%u)",
-         pool.pending_count));
+         pending));
+  (void)pending;
   return 0;
 }
 
@@ -437,11 +441,11 @@ int thread_pool_is_running(void)
 }
 
 /**
- * How many workers run (0 with no pool).
+ * Get the number of worker threads.
  */
 int thread_pool_workers(void)
 {
-  return pool.num_workers;
+  return pool.running ? pool.num_workers : 0;
 }
 
 /**
