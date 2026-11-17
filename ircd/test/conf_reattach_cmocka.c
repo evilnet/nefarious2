@@ -29,12 +29,7 @@
 #include <string.h>
 #include <cmocka.h>
 
-/* verify_sslclifp() tests cli_sslclifp(), an array, against NULL: -Wall's
- * -Waddress reports it; it is s_conf.c's, not ours. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Waddress"
 #include "../s_conf.c"
-#pragma GCC diagnostic pop
 
 /* ------------------------------------------------------------------ */
 /* The ircd around rehash_reattach_server()                            */
