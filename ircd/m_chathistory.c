@@ -6686,7 +6686,7 @@ static struct FedRequest *start_fed_query_ex(struct Client *sptr, const char *ta
    * Uses dest_numeric for multi-hop routing — intermediates forward
    * without processing, only the destination processes the query.
    *
-   * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid> <dest_numeric>
+   * CH Q <target> <subcmd:1char> <ref: ts, msgid=<id> or *> <limit> <reqid> <dest_numeric>
    */
   {
     int si;
@@ -8766,7 +8766,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Parse the S2S reference (a timestamp, msgid=<id>, a bare msgid, or *) */
     if (chathistory_parse_s2s_ref(ref, &ref_type, &ref_value) != 0) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      /* Malformed: nothing could be looked up, which is not "nothing here"
+       * -- the page is partial (U), as an empty msgid= used to answer. */
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
       return 0;
     }
 
