@@ -1599,80 +1599,70 @@ gitsync_apply(const char *content, size_t len, int force,
   if (rehash(cptr, 0) == CPTR_KILLED)
     *killed = CPTR_KILLED;
 
-  /* Check if config parsing failed */
-  if (conf_get_error_flag()) {
-    int abandoned = conf_rehash_abandoned();
-    int clean = -1;
-    const char *what = abandoned == CONF_ABANDON_OTHER
-        ? "Rehash abandoned with nothing known of the file"
-        : abandoned == CONF_ABANDON_CRASHED
-        ? "The configuration check crashed on the file"
-        : "Config parse error";
+  /* The rehash was abandoned before it discarded anything: the running
+   * configuration is the one from before it.  Put the file back.  Content
+   * the check found errors in is refused until it changes; for any other
+   * reason (the check crashed, timed out or could not run, or the file
+   * changed while it was checked) the next sync tries it again. */
+  if (conf_get_error_flag() && conf_rehash_abandoned()) {
+    int errors = conf_rehash_abandoned() == CONF_ABANDON_ERRORS;
 
-    sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: %s, %s", what,
+    sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: Rehash abandoned%s, %s",
+                         errors ? " (config errors)" : "",
                          had_backup ? "restoring backup"
                          : "removing the new file (no previous file)");
-    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s, %s %s%s", what,
+    if (!(had_backup ? 0 == rename(bak_file, conf_file)
+                     : 0 == unlink(conf_file)))
+      ircd_snprintf(0, gitsync_stats.last_error,
+                    sizeof(gitsync_stats.last_error),
+                    "Rehash with commit %.8s abandoned - cannot %s %s: %s; "
+                    "retried at the next sync", gitsync_stats.last_commit,
+                    had_backup ? "restore the backup of" : "remove",
+                    conf_file, strerror(errno));
+    else if (errors) {
+      ircd_snprintf(0, gitsync_stats.last_error,
+                    sizeof(gitsync_stats.last_error),
+                    "Config errors in commit %.8s - %s; not applied again "
+                    "until the content changes", gitsync_stats.last_commit,
+                    had_backup ? "restored from backup"
+                    : "taken back (there was no previous file)");
+      ircd_strncpy(gitsync_refused_content_hash, content_hash,
+                   sizeof(gitsync_refused_content_hash));
+    } else
+      ircd_snprintf(0, gitsync_stats.last_error,
+                    sizeof(gitsync_stats.last_error),
+                    "Rehash with commit %.8s abandoned (see the CONFIG log) - "
+                    "%s; retried at the next sync", gitsync_stats.last_commit,
+                    had_backup ? "restored from backup"
+                    : "taken back (there was no previous file)");
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
+    return GITSYNC_VALIDATION_ERROR;
+  }
+
+  /* Check if config parsing failed */
+  if (conf_get_error_flag()) {
+    sendto_opmask_butone(0, SNO_OLDSNO,
+                         "GitSync: Config parse error detected, %s",
+                         had_backup ? "restoring backup"
+                         : "removing the new file (no previous file)");
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: Config parse error, %s %s%s",
               had_backup ? "restoring" : "removing", conf_file,
               had_backup ? " from backup" : " (no previous file)");
 
     /* Back to the configuration as it was: the backup, or no file at all
      * when there was none (an include of it then reads as empty). */
-
-    if (abandoned == CONF_ABANDON_OTHER) {
-      /* The rehash learned nothing of the file: it could not be read, it
-       * kept changing while it was checked, or the check did not finish.
-       * Nothing is known of the content, so it is put back as for any
-       * rehash that did not apply and tried again at the next sync, never
-       * refused, and nothing is rehashed (a check that hung could hang
-       * the rehash too). */
-      if (had_backup ? 0 == rename(bak_file, conf_file)
-                     : 0 == unlink(conf_file))
-        ircd_snprintf(0, gitsync_stats.last_error,
-                      sizeof(gitsync_stats.last_error),
-                      "Rehash with commit %.8s abandoned with nothing known "
-                      "of the file (it could not be read, kept changing, or "
-                      "the check did not finish); %s; retried at the next "
-                      "sync", gitsync_stats.last_commit,
-                      had_backup ? "restored from backup"
-                      : "taken back (there was no previous file)");
-      else
-        ircd_snprintf(0, gitsync_stats.last_error,
-                      sizeof(gitsync_stats.last_error),
-                      "Rehash with commit %.8s abandoned - cannot %s %s: %s; "
-                      "retried at the next sync", gitsync_stats.last_commit,
-                      had_backup ? "restore the backup of" : "remove",
-                      conf_file, strerror(errno));
-    } else if (had_backup ? 0 == rename(bak_file, conf_file)
-                          : 0 == unlink(conf_file)) {
-      /* An abandoned rehash changed nothing: the running configuration
-       * is the one from before it, so there is nothing to reload -- only
-       * whether the configuration is clean without the content to learn,
-       * which the check tells without a second full rehash. */
-      if (abandoned)
-        clean = conf_file_check();
-      /* Otherwise, or if the check could not run, rehash again with the
-       * restored config (never handing it a cptr the first one exited).
-       * Not when it did not finish (-2): the rehash would wait as long
-       * again, and its own check time out too. */
-      if (clean == -1) {
-        if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
-          *killed = CPTR_KILLED;
-        clean = !conf_get_error_flag();
-      }
-      if (clean == -2) {
-        ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                      "%s with commit %.8s, and the check of %s did not "
-                      "finish: nothing is known of the content; retried at "
-                      "the next sync", what, gitsync_stats.last_commit,
-                      had_backup ? "the restored backup"
-                      : "the configuration without it");
-      } else if (clean) {
+    if (had_backup ? 0 == rename(bak_file, conf_file)
+                   : 0 == unlink(conf_file)) {
+      /* Rehash again with restored config (never handing it a cptr the
+       * first one exited) */
+      if (rehash(*killed ? &me : cptr, 0) == CPTR_KILLED)
+        *killed = CPTR_KILLED;
+      if (!conf_get_error_flag()) {
         /* Clean without the content: the content is what failed.  Not
          * written and rehashed again by every periodic sync. */
         ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                      "%s in commit %.8s - %s; not applied again until the "
-                      "content changes", what,
+                      "Config parse error in commit %.8s - %s; not applied "
+                      "again until the content changes",
                       gitsync_stats.last_commit, had_backup
                       ? "restored from backup"
                       : "taken back (there was no previous file; the include "
@@ -1684,9 +1674,9 @@ gitsync_apply(const char *content, size_t len, int force,
          * error, ircd.conf or another include): the content is not shown
          * to be at fault, and the next sync tries it again. */
         ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                      "%s with commit %.8s, and with %s too: the "
-                      "configuration has errors of its own; retried at the "
-                      "next sync", what, gitsync_stats.last_commit, had_backup
+                      "Config parse error with commit %.8s, and with %s too: "
+                      "the configuration has errors of its own; retried at "
+                      "the next sync", gitsync_stats.last_commit, had_backup
                       ? "the backup restored"
                       : "it taken back (there was no previous file)");
       }
