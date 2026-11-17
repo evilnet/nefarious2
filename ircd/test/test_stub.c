@@ -21,6 +21,12 @@ log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
     va_end(args);
 }
 
+int
+log_thread_muted(void)
+{
+    return 0;
+}
+
 void
 debug(int level, const char *form, ...)
 {

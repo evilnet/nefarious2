@@ -114,9 +114,14 @@ struct db_iter {
 /* Error tracking                                                       */
 /* -------------------------------------------------------------------- */
 
+/* A muted thread (a thread pool worker reading the store, see
+ * log_thread_mute) leaves last_error alone: the main thread writes and
+ * prints it unlocked, so a worker's write could tear it.  The worker's
+ * caller still sees the failure in the return code and reports it on the
+ * main thread. */
 static void env_record_error(struct db_env *env, const char *where, const char *errptr)
 {
-  if (!env)
+  if (!env || log_thread_muted())
     return;
   ircd_snprintf(NULL, env->last_error, sizeof env->last_error,
                 "%s: %s", where, errptr ? errptr : "(unknown)");

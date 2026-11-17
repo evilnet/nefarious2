@@ -80,6 +80,17 @@ extern void log_write(enum LogSys subsys, enum LogLevel severity,
 extern void log_vwrite(enum LogSys subsys, enum LogLevel severity,
 		       unsigned int flags, const char *fmt, va_list vl);
 
+/** Mute logging on the calling thread (@a on nonzero) or unmute it.  For
+ * a thread pool worker running code that logs on the main thread:
+ * log_vwrite() opens log files, stamps with localtime(), checks features
+ * and sends server notices -- none of it safe beside the main thread --
+ * so a muted thread's log_write() and Debug() lines are dropped, and the
+ * job hands what it must report back to the main thread instead.  Per
+ * thread: the main thread is never muted by a worker. */
+extern void log_thread_mute(int on);
+/** Is the calling thread muted (log_thread_mute)? */
+extern int log_thread_muted(void);
+
 extern void log_write_kill(const struct Client *victim,
 			   const struct Client *killer,
 			   const char	       *inpath,
