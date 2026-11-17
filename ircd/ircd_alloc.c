@@ -32,7 +32,7 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
-#include <unistd.h>
+#include <unistd.h>   /* _exit */
 #ifdef HAVE_PTHREAD
 #include <pthread.h>
 #endif
@@ -61,9 +61,25 @@ static pthread_t nomem_thread;
 static int nomem_thread_known;
 #endif
 
+/** Called on a thread other than the handler's before the process ends
+ * there, to say why; NULL says nothing. */
+static OutOfMemoryHandler noMemElsewhere;
+
 /** Set callback function for out-of-memory conditions.  The handler
  * belongs to the calling thread, the main thread: no other thread ever
- * runs it (alloc_failed). */
+ * runs it (alloc_failed).  @a elsewhere is called instead on a thread
+ * that is not this one, just before the process exits there: it reports
+ * and returns, and may be NULL.
+ */
+void
+set_nomem_handlers(OutOfMemoryHandler handler, OutOfMemoryHandler elsewhere)
+{
+  set_nomem_handler(handler);
+  noMemElsewhere = elsewhere;
+}
+
+/** Set callback function for out-of-memory conditions (the main
+ * thread's; see set_nomem_handlers). */
 void
 set_nomem_handler(OutOfMemoryHandler handler)
 {
@@ -88,8 +104,10 @@ set_nomem_handler(OutOfMemoryHandler handler)
  * closed, and one that every later DIE, SIGTERM or RESTART joined.  Nor
  * can the allocation be failed back to the caller instead: MyMalloc()
  * promises its callers a block, and the store code under a scan does
- * not check.  The line goes to stderr with write(), past the log (a
- * worker's log lines are dropped, log_thread_mute).  _exit() runs no
+ * not check.  What is said first is the other handler's to say
+ * (set_nomem_handlers; ircd.c uses log_dying_line(), since a worker's
+ * log lines are dropped and descriptor 2 is not always stderr).  _exit()
+ * runs no
  * destructor and closes nothing by number, so no descriptor is reused
  * under a live thread; every committed write is in the WAL.  The server
  * does not re-exec itself on this path: whatever supervises it restarts
@@ -99,11 +117,8 @@ alloc_failed(void)
 {
 #ifdef HAVE_PTHREAD
   if (nomem_thread_known && !pthread_equal(pthread_self(), nomem_thread)) {
-    static const char msg[] = "ircd: out of memory off the main thread, exiting\n";
-
-    if (write(2, msg, sizeof(msg) - 1) < 0) {
-      /* nowhere left to say it */
-    }
+    if (noMemElsewhere)
+      (*noMemElsewhere)();
     _exit(1);
   }
 #endif

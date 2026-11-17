@@ -23,6 +23,12 @@
  * thread's write() wrapped (-Wl,--wrap=write): a gate holds a write until
  * the test opens it, so a case can close a descriptor with a write in
  * flight, deterministically.
+ *
+ * Also here, with the same objects: the one line a muted thread does not
+ * lose.  A thread pool worker's log lines are dropped (log_thread_mute);
+ * the line assert() writes before abort() goes out through
+ * log_dying_line() instead -- descriptor 2 while it is the process's
+ * own, and syslog (wrapped too: --wrap=syslog, --wrap=__syslog_chk).
  */
 #include "config.h"
 
@@ -36,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 #include <cmocka.h>
@@ -87,9 +94,53 @@ static int completed;            /* writes done */
 
 ssize_t __real_write(int fd, const void *buf, size_t len);
 
+static char fd2_text[512];       /* what write(2, ...) was given */
+static int syslog_calls;
+static int syslog_priority;
+static char syslog_text[512];
+
+static void syslog_seen(int pri, const char *fmt, va_list vl)
+{
+  syslog_calls++;
+  syslog_priority = pri;
+  vsnprintf(syslog_text, sizeof(syslog_text), fmt, vl);
+}
+
+void __wrap_syslog(int pri, const char *fmt, ...)
+{
+  va_list vl;
+
+  va_start(vl, fmt);
+  syslog_seen(pri, fmt, vl);
+  va_end(vl);
+}
+
+void __wrap___syslog_chk(int pri, int flag, const char *fmt, ...)
+{
+  va_list vl;
+
+  (void)flag;
+  va_start(vl, fmt);
+  syslog_seen(pri, fmt, vl);
+  va_end(vl);
+}
+
 ssize_t __wrap_write(int fd, const void *buf, size_t len)
 {
   ssize_t rc;
+
+  /* Descriptor 2 is never a log file here: keep what it is given, and
+   * leave the gate and its counts to the log's own writes. */
+  if (fd == 2) {
+    size_t have = strlen(fd2_text);
+    size_t n = len;
+
+    if (n > sizeof(fd2_text) - 1 - have)
+      n = sizeof(fd2_text) - 1 - have;
+    memcpy(fd2_text + have, buf, n);
+    fd2_text[have + n] = '\0';
+    return (ssize_t)len;
+  }
 
   pthread_mutex_lock(&gate_mu);
   at_gate++;
@@ -222,6 +273,11 @@ static int case_setup(void **state)
   completed = 0;
   at_gate = 0;
   gate_closed = 0;
+  fd2_text[0] = '\0';
+  syslog_calls = 0;
+  syslog_text[0] = '\0';
+  log_inassert = 0;
+  log_stderr_is_ours(0);
   temp_path(log_path, sizeof(log_path), "file");
   return log_async_init(8) < 0 ? -1 : 0;
 }
@@ -640,6 +696,66 @@ static void a_muted_thread_logs_nothing(void **state)
   assert_true(path_size(log_path) > 0);
 }
 
+/** What assert() does when it fails (ircd_log.h), short of abort(). */
+static void *fail_an_assertion_muted(void *arg)
+{
+  (void)arg;
+  log_thread_mute(1);
+  log_inassert = 1;
+  log_write(LS_SYSTEM, L_CRIT, 0, "Assertion failure at %s:%d: \"%s\"",
+            "walk.c", 42, "0 != row");
+  return NULL;
+}
+
+/** A failed assert() on a muted thread still says which one: on
+ * descriptor 2 and to syslog, and nowhere in the log proper. */
+static void a_muted_thread_still_says_a_failed_assertion(void **state)
+{
+  pthread_t th;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  log_stderr_is_ours(1);
+  assert_int_equal(pthread_create(&th, NULL, fail_an_assertion_muted, NULL), 0);
+  pthread_join(th, NULL);
+  log_inassert = 0;
+  log_async_flush();
+
+  assert_string_equal(fd2_text,
+                      "ircd: Assertion failure at walk.c:42: \"0 != row\"\n");
+  assert_int_equal(syslog_calls, 1);
+  assert_int_equal(syslog_priority, LOG_CRIT);
+  assert_string_equal(syslog_text,
+                      "Assertion failure at walk.c:42: \"0 != row\"");
+  /* Not through the log: no line queued, no file opened. */
+  assert_int_equal(writes_completed(), 0);
+  assert_true(path_size(log_path) <= 0);
+}
+
+/** A daemon's descriptor 2 is closed and its number reused -- a client,
+ * a store's file: the line goes to syslog alone. */
+static void a_daemon_says_it_to_syslog_alone(void **state)
+{
+  pthread_t th;
+
+  (void)state;
+  log_stderr_is_ours(0);
+  assert_int_equal(pthread_create(&th, NULL, fail_an_assertion_muted, NULL), 0);
+  pthread_join(th, NULL);
+  log_inassert = 0;
+
+  assert_string_equal(fd2_text, "");
+  assert_int_equal(syslog_calls, 1);
+
+  /* And once the logs are shut for good, nowhere: descriptor 2 is
+   * closing and syslog is not reconnected. */
+  log_stderr_is_ours(1);
+  log_shutdown();
+  log_dying_line("after the logs shut");
+  assert_string_equal(fd2_text, "");
+  assert_int_equal(syslog_calls, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -653,6 +769,10 @@ int main(void)
         a_cut_line_the_full_queue_writes_still_ends_its_line,
         case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(a_line_past_a_full_queue_keeps_its_place,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(a_muted_thread_still_says_a_failed_assertion,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(a_daemon_says_it_to_syslog_alone,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(flush_waits_for_the_write_in_flight,
                                     case_setup, case_teardown),

@@ -31,6 +31,8 @@
 /** Type of handler for out-of-memory conditions. */
 typedef void (*OutOfMemoryHandler)(void);
 extern void set_nomem_handler(OutOfMemoryHandler handler);
+extern void set_nomem_handlers(OutOfMemoryHandler handler,
+                               OutOfMemoryHandler elsewhere);
 
 /* The mappings for the My* functions... */
 /** Helper macro for standard allocations. */
