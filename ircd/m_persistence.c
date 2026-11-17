@@ -1017,16 +1017,16 @@ static int persistence_cmd_list(struct Client *sptr)
 
 /** Whether @a sptr may use the PERSISTENCE extras (ATTACH, DETACH, LIST,
  * PROFILE, REPLAY): it negotiated evilnet.github.io/persistence, or
- * draft/persistence while PERSISTENCE_DRAFT_EXTRAS keeps the old names
- * working. */
+ * PERSISTENCE_DRAFT_EXTRAS keeps the old behaviour, in which any
+ * connection reached them (a client with draft/persistence, a script, an
+ * oper's /quote PERSISTENCE LIST). */
 static int persistence_extras_allowed(struct Client *sptr)
 {
   /* The connection's own caps: a session's union would let another
    * device's vendor cap stand in for this one's. */
   if (CapOwnHas(sptr, CAP_EVILNET_PERSISTENCE))
     return 1;
-  return feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
-         && CapOwnHas(sptr, CAP_DRAFT_PERSISTENCE);
+  return feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS);
 }
 
 int m_persistence(struct Client *cptr, struct Client *sptr,
@@ -1057,10 +1057,11 @@ int m_persistence(struct Client *cptr, struct Client *sptr,
 
   /* Everything below is ours, not the spec's (N027): it belongs to the
    * evilnet.github.io/persistence cap.  While PERSISTENCE_DRAFT_EXTRAS is
-   * on (the transition for clients written against the old names), a
-   * client with draft/persistence alone still reaches it.  Without
-   * either, these are unknown subcommands, as the spec's own server
-   * would answer. */
+   * on (the transition for clients written against the old names) every
+   * connection still reaches it, as before.  Otherwise, without the
+   * vendor cap, they are unknown subcommands, answered with a FAIL (the
+   * spec says a server SHOULD ignore unrecognized subcommands; this one
+   * has always answered them, so a client is not left waiting). */
   if (!persistence_extras_allowed(sptr))
     goto unknown;
 

@@ -18522,8 +18522,15 @@ void bounce_send_channel_state(struct Client *cptr)
       && CapRecipientHas(cptr, CAP_BATCH)
       && cli_user(cptr)->channel != NULL;
 
+  /* The vendor type to a connection that negotiated the vendor cap; the
+   * old one to any other while PERSISTENCE_DRAFT_EXTRAS keeps the old
+   * names working, so a client written against them (Seance before
+   * evilnet/seance#327) still recognises its restore. */
   if (wrap_in_persistence_batch)
-    send_batch_start(cptr, PERSISTENCE_RESTORE_BATCH);
+    send_batch_start(cptr, CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE)
+                           || !feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
+                           ? PERSISTENCE_RESTORE_BATCH
+                           : PERSISTENCE_RESTORE_BATCH_OLD);
 
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
     struct Channel *chptr = member->channel;

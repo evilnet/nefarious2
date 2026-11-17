@@ -1373,7 +1373,12 @@ int main(int argc, char **argv) {
    * static token inventory (clients MUST tolerate unknown tokens);
    * attach-cursor = ATTACH accepts the optional last-seen-msgid catch-up
    * anchor. */
-  cap_set_value(CAP_EVILNET_PERSISTENCE, "attach,detach,list,attach-cursor");
+  cap_set_value(CAP_EVILNET_PERSISTENCE, PERSISTENCE_EXTRAS_VALUE);
+  /* While PERSISTENCE_DRAFT_EXTRAS keeps the old names working,
+   * draft/persistence keeps the value too: clients written against them
+   * read attach-cursor there (feature_notify_persistence_draft_extras()). */
+  if (feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS))
+    cap_set_value(CAP_DRAFT_PERSISTENCE, PERSISTENCE_EXTRAS_VALUE);
 
   /* Restore persisted bouncer sessions (ghosts + channels) from MDBX.
    * Must run after bounce_init() and metadata_lmdb_init(), before event_loop().

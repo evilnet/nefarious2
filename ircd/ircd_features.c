@@ -640,6 +640,15 @@ DEFINE_CAP_NOTIFY("evilnet.github.io/persistence", evilnet_persistence)
 DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
 DEFINE_CAP_NOTIFY("tls", tls)
 
+/** PERSISTENCE_DRAFT_EXTRAS: draft/persistence carries the extras' value
+ * only while the old names are kept working (N027). */
+static void feature_notify_persistence_draft_extras(void)
+{
+  cap_set_value(CAP_DRAFT_PERSISTENCE,
+                feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
+                ? PERSISTENCE_EXTRAS_VALUE : NULL);
+}
+
 /** Notify clients when STS feature flag changes.
  * STS has parameters: port, duration, and optionally preload.
  */
@@ -1527,7 +1536,7 @@ static struct FeatureDesc {
   F_I(BOUNCER_RESTORE_CRASH_WINDOW, 0, 600, feature_notify_bouncer_restore_crash_window), /* a start that dies sooner after restoring sessions does not get them back at the next (seconds; 0: off) */
   F_B(CAP_evilnet_persistence, 0, 1, feature_notify_cap_evilnet_persistence),
   F_B(CAP_draft_bouncer, 0, 0, 0),   /* obsolete: draft/bouncer is gone (N027); nothing reads it */
-  F_B(PERSISTENCE_DRAFT_EXTRAS, 0, 1, 0),
+  F_B(PERSISTENCE_DRAFT_EXTRAS, 0, 1, feature_notify_persistence_draft_extras),
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
