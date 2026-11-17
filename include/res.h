@@ -128,8 +128,10 @@ extern void gethost_byaddr(const struct irc_in_addr *addr, dns_callback_f callba
                                   && ((ADDR)->in6_16[7] == 0) \
                                   && ((ADDR)->in6_16[5] == 0 \
                                       || (ADDR)->in6_16[5] == 65535))
-/** Evaluate to non-zero if \a ADDR is a valid address (not all 0s and not all 1s). */
-#define irc_in_addr_valid(ADDR) (((ADDR)->in6_16[0] && ~(ADDR)->in6_16[0]) \
+/** Evaluate to non-zero if \a ADDR is a valid address (not all 0s and not all 1s).
+ * in6_16[0] is compared with 0xFFFF, not tested with ~: ~ on the promoted
+ * unsigned short is an int, never 0, so all 1s passed as valid. */
+#define irc_in_addr_valid(ADDR) (((ADDR)->in6_16[0] && (ADDR)->in6_16[0] != 0xFFFF) \
                                  || (ADDR)->in6_16[1] != (ADDR)->in6_16[0] \
                                  || (ADDR)->in6_16[2] != (ADDR)->in6_16[0] \
                                  || (ADDR)->in6_16[3] != (ADDR)->in6_16[0] \
