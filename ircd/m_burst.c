@@ -990,10 +990,12 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                 const char *away = cli_user(acptr)->away;
 
                 /* The AWAY is an event of its own: it gets its own msgid,
-                 * not the JOIN's. */
+                 * not the JOIN's, and its time from the same clock the
+                 * JOIN's comes from, so it never sorts before it. */
                 if (burst_msgid[0]) {
                   generate_msgid(burst_msgid, sizeof(burst_msgid));
-                  sendcmdto_set_client_msgid(burst_msgid);
+                  sendcmdto_set_client_event(burst_msgid,
+                                             history_event_time_ms(NULL));
                 }
                 /* The pre-away star as a star to draft/pre-away clients
                  * and as the configured text to the rest, as
