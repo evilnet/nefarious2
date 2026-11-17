@@ -367,4 +367,48 @@ enum bounce_boot_step {
 extern unsigned int bounce_boot_steps(int store_open, int persist_on,
                                       int bouncer_on);
 
+/** A session a restoring start would bring back, for
+ * bounce_restore_select(). */
+struct bounce_restore_cand {
+  const char *id;        /**< bsr_sessid */
+  const char *account;   /**< bsr_account */
+  const char *nick;      /**< bsr_nick */
+  int64_t active;        /**< the later of bsr_last_active and the time it
+                          *   is held from: which of two to keep */
+  unsigned char drop;    /**< out: enum bounce_restore_drop */
+};
+
+/** Why bounce_restore_select() leaves a session out. */
+enum bounce_restore_drop {
+  BOUNCE_DROP_NONE = 0,      /**< restored */
+  BOUNCE_DROP_SAME_NICK,     /**< its account restores a later session
+                              *   under the same nick: its record goes */
+  BOUNCE_DROP_NICK_TAKEN,    /**< another account restores a later session
+                              *   under its nick: not restored this start,
+                              *   its record stays (its hold ends it) */
+  BOUNCE_DROP_OVER_MAX       /**< its account restores BOUNCER_MAX_SESSIONS
+                              *   later sessions: its record goes */
+};
+
+/** Which of the sessions a start would restore it may restore together.
+ * One store never held two held sessions under one nick, nor more for an
+ * account than BOUNCER_MAX_SESSIONS, while every record was readable: a
+ * held ghost holds its nick, and a new session is refused past the
+ * limit.  A build that kept a newer build's records unread
+ * (BOUNCE_REC_NEWER) breaks both: the user it could not restore
+ * reconnects and gets a second session, and the roll-forward finds two.
+ * Of sessions under one nick (by @a nickcmp) the one active latest is
+ * kept; then, per account (by @a acctcmp), the @a max_sessions active
+ * latest.  Ties go to the smaller id, so every start chooses alike.
+ * @param[in,out] c       The candidates; each one's drop is set.
+ * @param[in]     n       How many.
+ * @param[in]     max_sessions BOUNCER_MAX_SESSIONS (0 or less: no limit).
+ * @param[in]     nickcmp Nick comparison (the ircd's casemapping).
+ * @param[in]     acctcmp Account comparison.
+ * @return How many are dropped. */
+extern size_t bounce_restore_select(struct bounce_restore_cand *c, size_t n,
+                                    int max_sessions,
+                                    int (*nickcmp)(const char *, const char *),
+                                    int (*acctcmp)(const char *, const char *));
+
 #endif /* INCLUDED_bouncer_record_h */
