@@ -3318,8 +3318,9 @@ static void capab_send_tagged(struct Client *to, struct Client *from,
  * sendcmdto_common_channels_capab_session(): @a from's line to the local
  * members of its channels that pass the capability filters, each once,
  * except @a one; to @a from itself when it is ours and not @a one; and,
- * with @a devices, to every local bouncer device of @a from (an alias
- * whose primary it is), whether or not it shares a channel with it.
+ * with @a devices positive, to every local bouncer device of @a from (an
+ * alias whose primary it is), whether or not it shares a channel with it;
+ * with @a devices negative, to none of them, even in a channel.
  * Every copy carries the tags its recipient negotiated -- @a from's own
  * too, which used to go untagged unless a member with the same tag set
  * had been sent one first. */
@@ -3367,7 +3368,9 @@ common_channels_capab_vsend(struct Client *from, const char *cmd,
          member = member->next_member) {
       if (!MyConnect(member->user)
           || member->user == one
-          || cli_sentalong(member->user) == sentalong_marker)
+          || cli_sentalong(member->user) == sentalong_marker
+          || (devices < 0 && IsBouncerAlias(member->user)
+              && cli_alias_primary(member->user) == from))
         continue;
       if ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         continue;
@@ -3395,7 +3398,7 @@ common_channels_capab_vsend(struct Client *from, const char *cmd,
    * (UserStats.local_aliases, kept by the bouncer's count rule); a device
    * already leaving (FLAG_CLOSING) is skipped, as the session end's walk
    * skips it. */
-  if (devices && UserStats.local_aliases) {
+  if (devices > 0 && UserStats.local_aliases) {
     int i;
 
     for (i = 0; i <= HighestFd; i++) {
@@ -3435,6 +3438,22 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   (void)tok;
   va_start(ap, pattern);
   common_channels_capab_vsend(from, cmd, one, withcap, skipcap, 0, pattern, ap);
+  va_end(ap);
+}
+
+/** See include/send.h. */
+void sendcmdto_common_channels_capab_but_session(struct Client *from,
+                                                 const char *cmd,
+                                                 const char *tok,
+                                                 int withcap, int skipcap,
+                                                 const char *pattern, ...)
+{
+  va_list ap;
+
+  (void)tok;
+  va_start(ap, pattern);
+  common_channels_capab_vsend(from, cmd, from, withcap, skipcap, -1,
+                              pattern, ap);
   va_end(ap);
 }
 
@@ -3493,6 +3512,8 @@ channel_butserv_vsend(struct Client *from, const char *cmd, struct Channel *to,
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
         || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
+        || (skip & SKIP_SESSION && one && IsBouncerAlias(member->user)
+            && cli_alias_primary(member->user) == one)
         || !persistence_channel_visible(member->user, to->chname))
         continue;
     if (member->user == asker) {
@@ -3668,6 +3689,8 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
         || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
+        || (skip & SKIP_SESSION && one && IsBouncerAlias(member->user)
+            && cli_alias_primary(member->user) == one)
         || !persistence_channel_visible(member->user, to->chname))
         continue;
     if ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
