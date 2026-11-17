@@ -111,8 +111,10 @@ char *chathistory_ref_to_s2s(const char *ref, char *buf, size_t buflen)
  * senders put msgids on the wire bare, and a msgid minted by a server
  * whose numnick starts with a digit starts with a digit too, so the
  * first character does not tell them apart.  A 14-character msgid of
- * digits alone would still read as a timestamp; its other characters
- * are base64 with letters and brackets, so that is about one in 10^9.
+ * digits alone would still read as a timestamp, but none this tree
+ * mints can be one before 2083: characters 5-11 are the mint time in
+ * milliseconds, and character 5 (ms / 64^6) is a letter until 52 * 64^6
+ * ms.
  * @param[in] ref S2S reference string.
  * @param[out] ref_type Type of reference.
  * @param[out] value Pointer to value.
