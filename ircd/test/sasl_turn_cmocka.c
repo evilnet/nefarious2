@@ -94,6 +94,29 @@ static void line_ends_message(void **state)
   assert_true(sasl_line_ends_message(""));
 }
 
+/** What an exchange may start with: RFC 4422's mechanism names, up to
+ * ECDSA-NIST256P-CHALLENGE's 24 characters -- and not a client's base64
+ * response arriving after its exchange was aborted. */
+static void mechanism_names(void **state)
+{
+  (void)state;
+  assert_true(sasl_mechanism_name_ok("PLAIN"));
+  assert_true(sasl_mechanism_name_ok("EXTERNAL"));
+  assert_true(sasl_mechanism_name_ok("OAUTHBEARER"));
+  assert_true(sasl_mechanism_name_ok("SCRAM-SHA-256"));
+  assert_true(sasl_mechanism_name_ok("SCRAM-SHA-256-PLUS"));
+  assert_true(sasl_mechanism_name_ok("ECDSA-NIST256P-CHALLENGE"));
+  assert_true(sasl_mechanism_name_ok("X_TEST9"));
+  assert_false(sasl_mechanism_name_ok(""));
+  assert_false(sasl_mechanism_name_ok(NULL));
+  assert_false(sasl_mechanism_name_ok("ECDSA-NIST256P-CHALLENGEX"));  /* 25 */
+  assert_false(sasl_mechanism_name_ok("plain"));       /* RFC 4422: upper case */
+  assert_false(sasl_mechanism_name_ok("+"));
+  assert_false(sasl_mechanism_name_ok("AGFsaWNlAHNlY3JldA=="));  /* \0alice\0secret */
+  assert_false(sasl_mechanism_name_ok("AGFiAGNk"));    /* \0ab\0cd: lower case */
+  assert_false(sasl_mechanism_name_ok("PL AIN"));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -102,6 +125,7 @@ int main(void)
     cmocka_unit_test(remote_pipelined_credentials),
     cmocka_unit_test(remote_count_bounds),
     cmocka_unit_test(line_ends_message),
+    cmocka_unit_test(mechanism_names),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

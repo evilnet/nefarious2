@@ -111,6 +111,8 @@ struct fake {
   int hold;                   /**< AR_SASL_PENDING */
   int cap_done;               /**< CAP END was sent (no AR_CAP_PENDING) */
   int recheck_queued;         /**< a registration check waits for the loop */
+  int reg_otherwise_done;     /**< registration waits for the exchange
+                                   alone (sasl_challenge_would_abort()) */
   enum reg_outcome outcome;   /**< what registration does to it */
   int registered;             /**< registration ran and kept it */
   int freed;                  /**< registration ran and exited it */
@@ -399,6 +401,13 @@ void sasl_client_turn_check(struct Client *cptr)
 {
   if (cli_auth(cptr) && fake_of_auth(cli_auth(cptr))->hold)
     fake_of_auth(cli_auth(cptr))->recheck_queued = 1;
+}
+
+/* As s_auth.c: only the exchange's hold is left of registration. */
+int sasl_challenge_would_abort(struct Client *cptr)
+{
+  return cli_auth(cptr) && fake_of_auth(cli_auth(cptr))->hold
+         && fake_of_auth(cli_auth(cptr))->reg_otherwise_done;
 }
 
 void auth_set_account_later(struct AuthRequest *auth, const char *account)
@@ -774,6 +783,12 @@ int feature_int(enum Feature feat)
   case FEAT_HOST_HIDING_STYLE: return bed_features ? 1 : 0;
   default: return 0;
   }
+}
+
+/* m_cap.c: what the sasl capability advertises (RPL_SASLMECHS). */
+const char *cap_sasl_mechanisms(void)
+{
+  return "PLAIN,EXTERNAL,OAUTHBEARER,SCRAM-SHA-256,ECDSA-NIST256P-CHALLENGE";
 }
 
 const char *feature_str(enum Feature feat)
@@ -4359,6 +4374,75 @@ static void registration_aborts_services_exchange(void **state)
   assert_no_exchange(c);
 }
 
+/** A Keycloak answer that hands the turn to a client whose registration
+ * is otherwise complete (here ECDSA's challenge, after the key lookup) is
+ * not sent: the check it owes aborts the exchange (906) at once, and a
+ * client prompted for its response would send it after registration,
+ * where it would start an exchange of its own (sasl_challenge_would_abort();
+ * services_reply_cmocka has the services challenge). */
+static void keycloak_challenge_withheld_from_a_client_registration_aborts(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  EVP_PKEY *key = EVP_PKEY_Q_keygen(NULL, NULL, "EC", "P-256");
+  BIO *bio = BIO_new(BIO_s_mem());
+  char *pem_data, data[64];
+  long pem_len;
+
+  assert_non_null(key);
+  PEM_write_bio_PUBKEY(bio, key);
+  pem_len = BIO_get_mem_data(bio, &pem_data);
+  assert_true(pem_len < (long)sizeof(user_pem));
+  memcpy(user_pem, pem_data, pem_len);
+  user_pem[pem_len] = '\0';
+
+  sasl_init_once();
+  c = new_client(161, "rgl", 1, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "ECDSA-NIST256P-CHALLENGE"), 0);
+  b64((const unsigned char *)"rgl", 3, data);
+  assert_int_equal(authenticate(c, data), 0);
+  f->reg_otherwise_done = 1;
+  f->raw[0] = '\0';
+  pend_deliver(1);                        /* the key lookup answers */
+
+  assert_string_equal(f->raw, "");        /* no challenge */
+  assert_true(f->recheck_queued);
+  assert_true(sasl_exchange_awaits_client(c));
+
+  BIO_free(bio);
+  EVP_PKEY_free(key);
+}
+
+/** A line that starts an exchange and cannot be a mechanism name --
+ * here the base64 PLAIN credentials of an exchange a CAP END aborted --
+ * reaches no tier: 908 and 904, nothing counted, no exchange. */
+static void credentials_as_a_mechanism_reach_no_tier(void **state)
+{
+  int i;
+
+  for (i = 0; i < 2; i++) {             /* the local tier, then services */
+    struct Client *c;
+    struct fake *f;
+    char blob[128];
+
+    sasl_init_once();
+    local_off = i;
+    ntlog = 0;
+    c = new_client(162 + i, "rgm", 1, REG_KEEPS);
+    f = fake_of(c);
+    plain_b64("rgm", "secretpw", blob);
+
+    assert_int_equal(authenticate(c, blob), 0);
+
+    assert_true(has_numeric(f, ERR_SASLMECHS));
+    assert_true(has_numeric(f, ERR_SASLFAIL));
+    assert_int_equal(cli_sasl_failures(c), 0);
+    assert_no_exchange(c);
+    assert_false(tlog_has_prefix("servers"));   /* no SASL line went out */
+  }
+}
+
 /** An abort at registration is the server's, not the client's failure:
  * with the credentials already with services and their challenge back
  * (SCRAM's client-first), registering aborts the exchange without
@@ -6358,6 +6442,8 @@ int main(void)
     cmocka_unit_test_setup(registration_waits_for_keycloak, setup),
     cmocka_unit_test_setup(registration_aborts_services_exchange, setup),
     cmocka_unit_test_setup(registration_abort_is_not_a_failure, setup),
+    cmocka_unit_test_setup(keycloak_challenge_withheld_from_a_client_registration_aborts, setup),
+    cmocka_unit_test_setup(credentials_as_a_mechanism_reach_no_tier, setup),
     cmocka_unit_test_setup(no_exchange_awaits_nothing, setup),
     cmocka_unit_test_setup(pipelined_credentials_stay_with_services, setup),
     cmocka_unit_test_setup(completing_login_is_not_aborted, setup),

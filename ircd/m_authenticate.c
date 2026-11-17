@@ -341,6 +341,23 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     return authenticate_end(cptr, 1, 0);
   }
 
+  /* The line that starts an exchange names its mechanism, and anything
+   * that cannot be one (sasl_mechanism_name_ok()) goes to no tier: 908
+   * with the mechanisms on offer and 904, as for one that is not offered.
+   * Nothing is counted (SASL_MAX_FAILURES), and no exchange starts.
+   * What this catches is a client's response that outlived its exchange
+   * -- credentials pipelined behind a CAP END that aborted it (906) --
+   * which as a "mechanism" would go to IAuth, or to services (to every
+   * server when SASL_SERVER is "*"), in clear. */
+  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr) && !cli_saslheld(cptr)
+      && !sasl_mechanism_name_ok(parv[1])) {
+    const char *mechs = cap_sasl_mechanisms();
+
+    if (mechs)
+      send_reply(cptr, ERR_SASLMECHS, mechs);
+    return send_reply(cptr, ERR_SASLFAIL, "");
+  }
+
   /* A WEBIRC check still out: no exchange starts on the gateway's address
    * (authenticate_hold()).  One begun before the WEBIRC goes on. */
   if (IsWebIRCPending(cptr) && !cli_saslsession(cptr) && !cli_saslcookie(cptr))

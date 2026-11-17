@@ -19,6 +19,9 @@
  * A message is counted once, however many lines carry it: SASL splits
  * one of 400 bytes or more into 400-byte lines, ended by a shorter one
  * ("+" after an exact multiple), and the backend answers the whole.
+ *
+ * Also the shape of the line that starts an exchange: a mechanism name
+ * (sasl_mechanism_name_ok()).
  */
 #ifndef INCLUDED_sasl_turn_h
 #define INCLUDED_sasl_turn_h
@@ -74,6 +77,37 @@ static inline int sasl_turn_challenge_in(unsigned char *unanswered)
   if (*unanswered)
     (*unanswered)--;
   return *unanswered == 0;
+}
+
+/** The longest mechanism name an exchange may start with.  RFC 4422
+ * section 3.1 allows 20 characters, but ECDSA-NIST256P-CHALLENGE, which
+ * this ircd offers (as atheme does), has 24. */
+#define SASL_MECHANISM_NAME_MAX 24
+
+/** Whether \a name can be a SASL mechanism name, the parameter of the
+ * AUTHENTICATE that starts an exchange: RFC 4422 section 3.1's
+ * characters (upper-case letters, digits, '-' and '_'), 1 to
+ * #SASL_MECHANISM_NAME_MAX of them.  A line that is not one is not passed
+ * to any tier: it is most likely a client's response that arrived after
+ * its exchange ended -- base64 credentials (lower case, '+', '/', '=')
+ * pipelined behind a CAP END that aborted the exchange (906) -- and taken
+ * as a mechanism it would go to IAuth or services as one, in clear. */
+static inline int sasl_mechanism_name_ok(const char *name)
+{
+  unsigned int len = 0;
+
+  if (!name)
+    return 0;
+  for (; name[len]; len++) {
+    char c = name[len];
+
+    if (len >= SASL_MECHANISM_NAME_MAX)
+      return 0;
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+          || c == '-' || c == '_'))
+      return 0;
+  }
+  return len > 0;
 }
 
 #endif /* INCLUDED_sasl_turn_h */

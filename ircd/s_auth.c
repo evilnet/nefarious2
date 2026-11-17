@@ -620,6 +620,27 @@ static void auth_do_loc(struct Client *client, struct Client *service)
   }
 }
 
+/** Whether the SASL exchange's hold (#AR_SASL_PENDING) is all that
+ * \a auth's registration still waits for: the client has completed
+ * registration (CAP END, NICK, USER, ...) with the exchange in flight, so
+ * check_auth_finished() aborts the exchange (906) as soon as it is the
+ * client's turn.
+ * @param[in] auth Authorization request of a client.
+ * @return Non-zero when nothing but the exchange holds registration.
+ */
+static int auth_waits_only_for_sasl(const struct AuthRequest *auth)
+{
+  enum AuthRequestFlag flag;
+
+  if (!FlagHas(&auth->flags, AR_SASL_PENDING) || !auth->client
+      || !IsUserPort(auth->client))
+    return 0;
+  for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
+    if (flag != AR_SASL_PENDING && FlagHas(&auth->flags, flag))
+      return 0;
+  return 1;
+}
+
 /** Check whether an authorization request is complete.
  * This means that no flags from 0 to #AR_LAST_SCAN are set on \a auth.
  * If #AR_IAUTH_PENDING is set, optionally go into "hurry" state.  If
@@ -654,13 +675,8 @@ static int check_auth_finished(struct AuthRequest *auth)
    * register it without a login (SASL 3.1), instead of holding
    * registration until the exchange times out.  An exchange whose request
    * is with the backend still holds it: the answer comes on its own. */
-  if (FlagHas(&auth->flags, AR_SASL_PENDING) && cptr && IsUserPort(cptr)) {
-    for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
-      if (flag != AR_SASL_PENDING && FlagHas(&auth->flags, flag))
-        break;
-    if (flag > AR_LAST_SCAN && sasl_exchange_awaits_client(cptr))
-      return sasl_abort_for_registration(cptr);
-  }
+  if (auth_waits_only_for_sasl(auth) && sasl_exchange_awaits_client(cptr))
+    return sasl_abort_for_registration(cptr);
 
   /* Check non-iauth registration blocking flags. */
   for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
@@ -1054,6 +1070,25 @@ void sasl_client_turn_check(struct Client *cptr)
   if (cptr && MyConnect(cptr) && (auth = cli_auth(cptr))
       && FlagHas(&auth->flags, AR_SASL_PENDING))
     auth_recheck_later(auth);
+}
+
+/** Whether a challenge that hands \a cptr's exchange to the client would
+ * be answered by the registration check it owes (sasl_client_turn_check())
+ * aborting the exchange: the client has completed registration and only
+ * the exchange holds it (auth_waits_only_for_sasl()).  Such a challenge is
+ * not sent.  The client has usually sent its response already, behind its
+ * CAP END; that line arrives after the 906 and registration, where it
+ * would be read as the mechanism of a new exchange and its credentials
+ * passed on to IAuth or services as one.
+ * @param[in] cptr Client a challenge is for.
+ * @return Non-zero when the challenge is to be withheld.
+ */
+int sasl_challenge_would_abort(struct Client *cptr)
+{
+  struct AuthRequest *auth;
+
+  return cptr && MyConnect(cptr) && (auth = cli_auth(cptr))
+         && auth_waits_only_for_sasl(auth);
 }
 
 /** Owe \a auth a registration check from the event loop.  For a Keycloak
@@ -4237,15 +4272,9 @@ static int iauth_cmd_sasl_challenge(struct IAuth *iauth, struct Client *cli,
   if (EmptyString(params[0]))
     return 0;
 
-  /* Forward challenge to client */
-  sendrawto_one(cli, "AUTHENTICATE %s", params[0]);
-  /* IAuth answered: the client's turn (SASL_MAX_FAILURES) once no line
-   * of its is left unanswered, on a challenge's last line (sasl_turn.h) */
-  if (sasl_line_ends_message(params[0])
-      && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(cli)))) {
-    con_sasl_xflags(cli_connect(cli)) |= SASLX_CLIENTTURN;
-    sasl_client_turn_check(cli);
-  }
+  /* Forward challenge to client (sasl_relay_challenge(): whose turn it
+   * is, and no prompt to a client its registration is about to abort) */
+  sasl_relay_challenge(cli, params[0]);
   return 0;
 }
 

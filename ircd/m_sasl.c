@@ -269,18 +269,9 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   if (reply[0] == 'C') {
-    sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
-    /* services answered: the client's turn (SASL_MAX_FAILURES: a timeout
-     * from here is the client's) once no line of its is left unanswered
-     * -- a client that sent its response before this challenge (pipelined
-     * credentials) still waits for services' answer to it.  A challenge
-     * of 400 bytes or more comes in several lines: its last one hands
-     * the turn over */
-    if (sasl_line_ends_message(data)
-        && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(acptr)))) {
-      con_sasl_xflags(cli_connect(acptr)) |= SASLX_CLIENTTURN;
-      sasl_client_turn_check(acptr);
-    }
+    /* services answered (sasl_relay_challenge(): whose turn it is, and
+     * no prompt to a client its registration is about to abort) */
+    sasl_relay_challenge(acptr, data);
     return 0;
   } else if (reply[0] == 'L') {
     /* A logged-in client's re-authentication that services answer with an
@@ -359,6 +350,36 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   return 0;
+}
+
+/** Pass a challenge line from services (SASL ... C) or IAuth (its SASL
+ * challenge, s_auth.c) on to our client \a cptr.  The exchange is the
+ * client's turn (SASL_MAX_FAILURES: a timeout from here is the client's)
+ * once no line of its is left unanswered -- a client that sent its
+ * response before this challenge (pipelined credentials) still waits for
+ * the backend's answer to it.  A challenge of 400 bytes or more comes in
+ * several lines: its last one hands the turn over, and owes the
+ * registration check (sasl_client_turn_check()).
+ *
+ * A line that hands the turn to a client that has completed registration
+ * meanwhile is not sent (sasl_challenge_would_abort()): that check aborts
+ * the exchange with 906 at once, and a client prompted for its
+ * credentials sends them after registration, where they would begin a
+ * new exchange as its mechanism.
+ * @param[in] cptr Our client.
+ * @param[in] data The challenge line.
+ */
+void sasl_relay_challenge(struct Client *cptr, const char *data)
+{
+  int turn = sasl_line_ends_message(data)
+             && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(cptr)));
+
+  if (!turn || !sasl_challenge_would_abort(cptr))
+    sendrawto_one(cptr, MSG_AUTHENTICATE " %s", data);
+  if (turn) {
+    con_sasl_xflags(cli_connect(cptr)) |= SASLX_CLIENTTURN;
+    sasl_client_turn_check(cptr);
+  }
 }
 
 int abort_sasl(struct Client* cptr, int timeout) {

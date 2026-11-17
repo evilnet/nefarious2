@@ -175,6 +175,18 @@ extern int sasl_abort_for_registration(struct Client *cptr);
  *  (sasl_abort_for_registration()). */
 extern void sasl_client_turn_check(struct Client *cptr);
 
+/** Whether our client \a cptr has completed registration and only its
+ *  exchange holds it, so that a challenge handing the exchange to the
+ *  client would be answered by an abort (906) at once (s_auth.c): the
+ *  challenge is then not sent, and the client gets no prompt to send
+ *  credentials that would arrive after registration. */
+extern int sasl_challenge_would_abort(struct Client *cptr);
+
+/** Pass an IAuth or services challenge line on to our client \a cptr,
+ *  hand it the turn on a challenge's last line, and withhold a line its
+ *  registration is about to abort (m_sasl.c). */
+extern void sasl_relay_challenge(struct Client *cptr, const char *data);
+
 /** SASL_REAUTH: what a logged-in SASL 3.2 (CAP LS 302) client's
  *  re-authentication may do.  A client that never sent CAP LS 302 cannot
  *  re-authenticate at all (m_authenticate()). */

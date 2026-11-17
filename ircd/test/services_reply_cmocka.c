@@ -81,6 +81,7 @@ static int logged_live[MAXREC];
 static int nlogins;
 static int sasl_dones;                  /* auth_sasl_done() calls */
 static int turn_checks;                 /* sasl_client_turn_check() calls */
+static int would_abort;                 /* sasl_challenge_would_abort() */
 static int auth_result;                 /* what it returns */
 /* account-notify sends: who the line was about, and whether that user's
  * own connections were among the recipients.  The channel walk with
@@ -248,6 +249,7 @@ static int world_setup(void **state)
 
   ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
   turn_checks = 0;
+  would_abort = 0;
   nnotified = 0;
   msgid_on = 0;
   armed_msgid[0] = notify_msgid[0] = relay_msgid[0] = '\0';
@@ -634,6 +636,13 @@ void sasl_client_turn_check(struct Client *cptr)
 {
   (void)cptr;
   turn_checks++;
+}
+
+/* s_auth.c: the client registered meanwhile, only the exchange holds it */
+int sasl_challenge_would_abort(struct Client *cptr)
+{
+  (void)cptr;
+  return would_abort;
 }
 
 void auth_sasl_clear(struct AuthRequest *auth)
@@ -1129,6 +1138,44 @@ static void test_sasl_challenge_is_the_clients_turn(void **state)
   /* ... and owes a registration check (SASL 3.1: a client that
    * registered meanwhile has the exchange aborted) */
   assert_int_equal(turn_checks, 1);
+}
+
+/* A client that pipelined AUTHENTICATE PLAIN and CAP END has completed
+ * registration when services' "+" comes: the check that challenge owes
+ * aborts the exchange (906) at once, so the "+" is not relayed -- a
+ * client prompted by it sends its credentials after registration, where
+ * they would start an exchange of their own, as its mechanism. */
+static void test_sasl_challenge_withheld_when_registration_aborts(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("eager", 7, 1);
+  cli_saslcookie(c) = 816;
+  cli_saslstart(c) = CurrentTime;
+  con_sasl_unanswered(cli_connect(c)) = 1;      /* S PLAIN */
+  would_abort = 1;
+  deliver(ms_sasl, svs, svs, "AB AB!7.816 C +");
+  assert_false(was_told(c));                    /* no "AUTHENTICATE +" */
+  assert_true(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
+  assert_int_equal(turn_checks, 1);             /* the check that aborts */
+}
+
+/* ... but a line that does not hand the turn over (pipelined credentials
+ * still with services) is relayed: no abort follows it. */
+static void test_sasl_challenge_relayed_when_no_turn(void **state)
+{
+  struct Client *svs, *c;
+  (void)state;
+  svs = services_link();
+  c = local_client("eager2", 7, 1);
+  cli_saslcookie(c) = 817;
+  cli_saslstart(c) = CurrentTime;
+  con_sasl_unanswered(cli_connect(c)) = 2;      /* S PLAIN, C <creds> */
+  would_abort = 1;
+  deliver(ms_sasl, svs, svs, "AB AB!7.817 C +");
+  assert_true(was_told(c));
+  assert_int_equal(turn_checks, 0);
 }
 
 /* Pipelined credentials: the client's mechanism and credentials both went
@@ -1639,6 +1686,8 @@ int main(void)
     T(test_sasl_failures_counted_by_services),
     T(test_sasl_challenge_is_the_clients_turn),
     T(test_sasl_challenge_after_pipelined_credentials),
+    T(test_sasl_challenge_withheld_when_registration_aborts),
+    T(test_sasl_challenge_relayed_when_no_turn),
     T(test_sasl_chunked_challenge_turns_on_its_last_line),
     T(test_sasl_mechs_ends_a_reauth),
     T(test_sasl_relay_exchange_times_out_after_register_login),
