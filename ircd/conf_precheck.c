@@ -17,6 +17,9 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -34,13 +37,36 @@ static long elapsed_ms(const struct timespec *t0)
 
 /* In the child, between fork() and exec: async-signal-safe calls only.
  * Every signal is blocked on entry (conf_precheck_run()). */
-static void run_check(const char *exe, const char *dpath, const char *conf,
-                      int wfd)
+/* Close every descriptor from 3 up, in the child.  One close() per
+ * number up to the hard limit costs the server a blocked loop in
+ * proportion to it (300 ms and more at 524288); closefrom() or Linux's
+ * close_range() is one call. */
+static void close_from_3(void)
+{
+#ifdef HAVE_CLOSEFROM
+  closefrom(3);
+#else
+  int fd, max;
+
+#if defined(__linux__) && defined(SYS_close_range)
+  if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0)
+    return;
+#endif
+  max = (int)sysconf(_SC_OPEN_MAX);
+  if (max < 0 || max > 1048576)
+    max = 1048576;
+  for (fd = 3; fd < max; fd++)
+    close(fd);
+#endif
+}
+
+static void run_check(const char *exe, const char *argv0, const char *dpath,
+                      const char *conf, int wfd)
 {
   struct sigaction dfl;
   char *argv[7];
   sigset_t none;
-  int fd, max, sig;
+  int fd, sig;
 
   /* The server's handlers write to its signal pipe: none of them may run
    * here.  Then a process group of its own, so a timeout kills whatever
@@ -58,12 +84,8 @@ static void run_check(const char *exe, const char *dpath, const char *conf,
     _exit(127);
   /* Every descriptor of the server's goes: its sockets, its store, its
    * poll set.  Few are marked close-on-exec. */
-  max = (int)sysconf(_SC_OPEN_MAX);
-  if (max < 0 || max > 1048576)
-    max = 1048576;
-  for (fd = 3; fd < max; fd++)
-    close(fd);
-  argv[0] = (char *)exe;
+  close_from_3();
+  argv[0] = (char *)argv0;
   argv[1] = (char *)"-k";
   argv[2] = (char *)"-d";
   argv[3] = (char *)dpath;
@@ -91,12 +113,12 @@ static void note_end(char *out, size_t outlen, size_t used, const char *note)
 }
 
 static enum conf_precheck_result
-precheck_run(const char *exe, const char *dpath, const char *conf,
-             int timeout_ms, char *out, size_t outlen);
+precheck_run(const char *exe, const char *argv0, const char *dpath,
+             const char *conf, int timeout_ms, char *out, size_t outlen);
 
 enum conf_precheck_result
-conf_precheck_run(const char *exe, const char *dpath, const char *conf,
-                  int timeout_ms, char *out, size_t outlen)
+conf_precheck_run(const char *exe, const char *argv0, const char *dpath,
+                  const char *conf, int timeout_ms, char *out, size_t outlen)
 {
   struct sigaction chld, dfl;
   enum conf_precheck_result res;
@@ -113,37 +135,62 @@ conf_precheck_run(const char *exe, const char *dpath, const char *conf,
     sigemptyset(&dfl.sa_mask);
     restore = sigaction(SIGCHLD, &dfl, NULL) == 0;
   }
-  res = precheck_run(exe, dpath, conf, timeout_ms, out, outlen);
+  res = precheck_run(exe, argv0 ? argv0 : exe, dpath, conf, timeout_ms,
+                     out, outlen);
   if (restore)
     sigaction(SIGCHLD, &chld, NULL);
   return res;
 }
 
-static enum conf_precheck_result
-precheck_run(const char *exe, const char *dpath, const char *conf,
-             int timeout_ms, char *out, size_t outlen)
+/* Has @a pid exited?  It is left a zombie (WNOWAIT), so its pid, and the
+ * process group named after it, cannot be reused until it is reaped:
+ * the group kill below never reaches another process. */
+static int exited(pid_t pid, int *gone)
 {
-  struct timespec t0, reaped_at;
+  siginfo_t si;
+
+  memset(&si, 0, sizeof(si));
+  if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) < 0) {
+    if (errno != EINTR)
+      *gone = 1;                /* not ours to wait for, or to kill */
+    return 0;
+  }
+  return si.si_pid == pid;
+}
+
+static enum conf_precheck_result
+precheck_run(const char *exe, const char *argv0, const char *dpath,
+             const char *conf, int timeout_ms, char *out, size_t outlen)
+{
+  struct timespec t0, exited_at;
   size_t used = 0;
-  char note[64];
-  int p[2], status = 0, reaped = 0, eof = 0, gone = 0;
+  char note[160];
+  int p[2], status = 0, done = 0, eof = 0, gone = 0, i;
   sigset_t all, old;
   pid_t pid;
 
   out[0] = '\0';
-  if (pipe(p) < 0)
+  if (pipe(p) < 0) {
+    snprintf(note, sizeof(note), "it could not be started: pipe(): %s\n",
+             strerror(errno));
+    note_end(out, outlen, 0, note);
     return CONF_PRECHECK_UNAVAILABLE;
+  }
   /* No signal handler of the server's may run in the child before it
    * resets them. */
   sigfillset(&all);
   sigprocmask(SIG_BLOCK, &all, &old);
   pid = fork();
   if (pid == 0)
-    run_check(exe, dpath, conf, p[1]);
+    run_check(exe, argv0, dpath, conf, p[1]);
+  i = errno;
   sigprocmask(SIG_SETMASK, &old, NULL);
   if (pid < 0) {
     close(p[0]);
     close(p[1]);
+    snprintf(note, sizeof(note), "it could not be started: fork(): %s\n",
+             strerror(i));
+    note_end(out, outlen, 0, note);
     return CONF_PRECHECK_UNAVAILABLE;
   }
   close(p[1]);
@@ -152,7 +199,7 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
   /* Read its output to the end while it runs (a full pipe would stall
    * it), and reap it; both within the time allowed. */
   clock_gettime(CLOCK_MONOTONIC, &t0);
-  while (!reaped || !eof) {
+  while (!done || !eof) {
     long left = timeout_ms - elapsed_ms(&t0);
     char buf[1024];
     ssize_t n;
@@ -182,21 +229,16 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
 
       nanosleep(&ten, NULL);
     }
-    if (!reaped) {
-      pid_t r = waitpid(pid, &status, WNOHANG);
-
-      if (r == pid) {
-        reaped = 1;
-        clock_gettime(CLOCK_MONOTONIC, &reaped_at);
-      }
-      else if (r < 0 && errno != EINTR) {
-        gone = 1;               /* not ours to wait for, or to kill */
+    if (!done) {
+      if (exited(pid, &gone)) {
+        done = 1;
+        clock_gettime(CLOCK_MONOTONIC, &exited_at);
+      } else if (gone)
         break;
-      }
     }
-    /* Reaped with the pipe still open: something it started holds it.
+    /* Exited with the pipe still open: something it started holds it.
      * What the check said is in once it has exited. */
-    if (reaped && !eof && elapsed_ms(&reaped_at) >= 200)
+    if (done && !eof && elapsed_ms(&exited_at) >= 200)
       break;
   }
   out[used] = '\0';
@@ -205,16 +247,29 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
     note_end(out, outlen, used, "it was reaped elsewhere\n");
     return CONF_PRECHECK_UNAVAILABLE;
   }
-  kill(-pid, SIGKILL);          /* anything it left behind */
+  /* Anything it left behind, and the check itself if it is still
+   * running: its pid is not reaped yet, so the group is still its. */
+  kill(-pid, SIGKILL);
+  kill(pid, SIGKILL);
 
-  if (!reaped) {
-    kill(pid, SIGKILL);
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-      ;
+  if (!done) {
+    /* Reaped within a second, or left: a check stuck in uninterruptible
+     * sleep must not hold the server.  The event loop's SIGCHLD handling
+     * reaps it once it goes. */
+    for (i = 0; i < 100; i++) {
+      struct timespec ten = { 0, 10000000 };
+      pid_t r = waitpid(pid, &status, WNOHANG);
+
+      if (r == pid || (r < 0 && errno != EINTR))
+        break;
+      nanosleep(&ten, NULL);
+    }
     snprintf(note, sizeof(note), "it did not finish in %d ms\n", timeout_ms);
     note_end(out, outlen, used, note);
-    return CONF_PRECHECK_UNAVAILABLE;
+    return CONF_PRECHECK_TIMEOUT;
   }
+  while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+    ;                           /* a zombie: at once */
   if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
     return CONF_PRECHECK_OK;
   if (WIFEXITED(status) && WEXITSTATUS(status) == CHKCONF_ERRORS)
@@ -233,8 +288,12 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
       return CONF_PRECHECK_UNAVAILABLE;
     }
   }
-  snprintf(note, sizeof(note), "it exited with status %d\n",
-           WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
+    snprintf(note, sizeof(note), "it could not be run (%s: exit status "
+             "127)\n", argv0);
+  else
+    snprintf(note, sizeof(note), "it exited with status %d\n",
+             WIFEXITED(status) ? WEXITSTATUS(status) : -1);
   note_end(out, outlen, used, note);
   return CONF_PRECHECK_UNAVAILABLE;
 }

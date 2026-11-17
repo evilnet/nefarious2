@@ -185,7 +185,8 @@ static struct {
   int		  facility; /**< default facility */
   const char	 *procname; /**< process's name */
   struct LogFile *dbfile;   /**< debug file */
-} logInfo = { 0, 0, LOG_USER, "ircd", 0 };
+  int             quiet;    /**< no file or syslog output (log_quiet()) */
+} logInfo = { 0, 0, LOG_USER, "ircd", 0, 0 };
 
 /** Helper routine to open a log file if needed.
  * If the log file is already open, do nothing.
@@ -297,8 +298,19 @@ log_init(const char *process_name)
   if (!EmptyString(process_name))
     logInfo.procname = process_name;
 
-  /* ok, open syslog; default facility: LOG_USER */
-  openlog(logInfo.procname, LOG_PID | LOG_NDELAY, logInfo.facility);
+  /* ok, open syslog; default facility: LOG_USER; never in quiet mode */
+  if (!logInfo.quiet)
+    openlog(logInfo.procname, LOG_PID | LOG_NDELAY, logInfo.facility);
+}
+
+/** No log line goes to a file or to syslog from here on, only to server
+ * notices: a configuration check ("ircd -k"), which a REHASH runs in a
+ * process of its own, says what it found on stderr and writes nothing
+ * into the server's live logs. */
+void
+log_quiet(void)
+{
+  logInfo.quiet = 1;
 }
 
 /** Reopen log files (so admins can do things like rotate log files). */
@@ -413,13 +425,13 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
     return;
 
   /* figure out where all we need to log */
-  if (!(flags & LOG_NOFILELOG) && desc->file) {
+  if (!(flags & LOG_NOFILELOG) && desc->file && !logInfo.quiet) {
     log_open(desc->file);
     if (desc->file->fd >= 0) /* don't log to file if we can't open the file */
       flags |= LOG_DOFILELOG;
   }
 
-  if (!(flags & LOG_NOSYSLOG) && desc->facility >= 0)
+  if (!(flags & LOG_NOSYSLOG) && desc->facility >= 0 && !logInfo.quiet)
     flags |= LOG_DOSYSLOG; /* will syslog */
 
   if (!(flags & LOG_NOSNOTICE) && (desc->snomask != 0 || ldata->snomask != 0))
