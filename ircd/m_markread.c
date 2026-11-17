@@ -598,11 +598,11 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 }
 
 /** Send the MARKREAD that is one of a JOIN's replies.  It is tagged as
- * the TOPIC and NAMES around it are (sendrawto_one_answer()): with the
- * batch open on \a to -- the JOIN's labeled batch, or the
+ * the TOPIC and NAMES around it are (send_reply_line(), reply_tags()):
+ * with the batch open on \a to -- the JOIN's labeled batch, or the
  * draft/persistence batch of a session's replay, which
  * sendcmdto_one_event() would leave it out of -- else with the label of
- * \a to's own JOIN.
+ * \a to's own JOIN; and with @time when \a to has server-time.
  * @param[in] to Client to send to.
  * @param[in] target Channel name.
  * @param[in] unix_ts Unix timestamp, or "*" when none is known.
@@ -613,12 +613,12 @@ static void send_join_markread(struct Client *to, const char *target,
   char iso_ts[32];
 
   if (markread_ts_unknown(unix_ts))
-    sendrawto_one_answer(to, ":%s MARKREAD %s *", cli_name(&me), target);
+    send_reply_line(to, ":%s MARKREAD %s *", cli_name(&me), target);
   else
-    sendrawto_one_answer(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me),
-                         target,
-                         history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0
-                         ? iso_ts : unix_ts);
+    send_reply_line(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me),
+                    target,
+                    history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0
+                    ? iso_ts : unix_ts);
 }
 
 /** Send MARKREAD for a target to a client after JOIN.
@@ -657,4 +657,57 @@ void send_markread_on_join(struct Client *sptr, const char *target)
     send_join_markread(sptr, target, stored_ts);
   else
     send_join_markread(sptr, target, "*");
+}
+
+/** Carry a renamed channel's read markers to its new name.  Markers are
+ * keyed by target name, so after a rename every MARKREAD of the new name
+ * -- the one a PART/JOIN-fallback member gets with its JOIN, a client's
+ * get, a later JOIN -- would report `*` for a channel the client had read.
+ * Called from rename_channel(), which every server runs for a rename (its
+ * own, or an RN from a peer), so each server's store takes the same
+ * copies and no MR has to go out for them.
+ *
+ * Account markers: those of the accounts of the channel's members --
+ * the membership is the same on every server -- copied old to new with
+ * metadata_readmarker_set()'s keep-the-newer rule, so a marker already
+ * stored for the new name, or one an MR brings later, is never lowered.
+ * An account with no member in the channel at the rename keeps its
+ * marker under the old name only: the store is keyed account first, and
+ * finding every account's marker for one target would walk all of it.
+ * Session markers (clients without an account, this server's alone): all
+ * of the old name's, copied the same way.
+ * @param[in] chptr The channel, already under its new name.
+ * @param[in] oldname The name it had.
+ */
+void markread_channel_renamed(struct Channel *chptr, const char *oldname)
+{
+  struct Membership *member;
+  char ts[MARKREAD_TS_LEN];
+  unsigned int i;
+
+  if (!chptr || !oldname || !*oldname || !ircd_strcmp(oldname, chptr->chname))
+    return;
+
+  if (metadata_lmdb_is_available()) {
+    for (member = chptr->members; member; member = member->next_member) {
+      struct Client *acptr = member->user;
+
+      if (!cli_user(acptr) || !cli_user(acptr)->account[0])
+        continue;
+      if (metadata_readmarker_get(cli_user(acptr)->account, oldname, ts) == 0)
+        (void)metadata_readmarker_set(cli_user(acptr)->account,
+                                      chptr->chname, ts);
+    }
+  }
+
+  /* An entry set here goes under the new name, never the old one (the
+   * names differ under ircd_strcmp, checked above), so the walk cannot
+   * meet its own copies. */
+  for (i = 0; i < SESSION_MR_HASH_SIZE; i++) {
+    struct session_markread_entry *e;
+
+    for (e = sm_buckets[i]; e; e = e->hnext)
+      if (0 == ircd_strcmp(e->target, oldname))
+        (void)session_markread_set(e->session_id, chptr->chname, e->timestamp);
+  }
 }

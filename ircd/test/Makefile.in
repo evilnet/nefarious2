@@ -92,6 +92,7 @@ CMOCKA_TESTPROGS = \
 	cap_version_cmocka \
 	cap_notify_cmocka \
 	markread_wire_cmocka \
+	markread_join_cmocka \
 	rename_proto_cmocka \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
@@ -211,6 +212,7 @@ DEP_SRC = \
 	cap_version_cmocka.c \
 	cap_notify_cmocka.c \
 	markread_wire_cmocka.c \
+	markread_join_cmocka.c \
 	rename_proto_cmocka.c \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
@@ -645,6 +647,17 @@ cap_notify_cmocka: $(CAP_NOTIFY_CMOCKA_OBJS)
 MARKREAD_WIRE_CMOCKA_OBJS = markread_wire_cmocka.o
 markread_wire_cmocka: $(MARKREAD_WIRE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(MARKREAD_WIRE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# markread_join tests - the MARKREAD of a JOIN goes out as one of its
+# replies (send_reply_line(): tagged like the TOPIC and NAMES around it),
+# and a rename carries a channel's read markers to its new name
+# (markread_channel_renamed()): the REAL m_markread.o with the marker
+# store and the send layer stubbed in the test.  Defines its own
+# log_write()/me, so test_stub.o is not linked.
+MARKREAD_JOIN_CMOCKA_OBJS = markread_join_cmocka.o ../m_markread.o \
+	../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o
+markread_join_cmocka: $(MARKREAD_JOIN_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(MARKREAD_JOIN_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # rename_proto tests - the argument-only parts of channel RENAME: the
 # services query cookie codec ("<numeric>.<n>") and the rules a rename's
