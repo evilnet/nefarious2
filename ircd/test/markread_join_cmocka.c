@@ -406,6 +406,52 @@ static void rename_copies_session_markers(void **state)
                       ":irc.example MARKREAD #snew timestamp=iso(1735689600.000)");
 }
 
+/* ====================================================================
+ * Relocation
+ * ==================================================================== */
+
+/** A relocation copies from the old channel, still under its old name
+ * and holding every member: the mover's and the stayer's account
+ * markers, and the session markers, go to the new name; the old name
+ * keeps them (the tombstone lives on). */
+static void relocation_copies_the_old_channels_markers(void **state)
+{
+  struct Client *alice = local_user("alice", "alice", NULL);
+  struct Client *bob = local_user("bob", "bob", NULL);
+  struct Client *anon = local_user("anon", NULL, "sess-reloc");
+  struct Channel *ch = channel_named("#rold");
+  char *parv[] = { "anon", "#rold", "timestamp=2025-01-01T00:00:00.000Z", NULL };
+  char ts[32];
+
+  (void)state;
+  add_member(ch, alice);
+  add_member(ch, bob);
+  add_member(ch, anon);
+  metadata_readmarker_set("alice", "#rold", "1735689600.000");
+  metadata_readmarker_set("bob", "#rold", "1735689700.000");
+  m_markread(anon, anon, 3, parv);      /* session marker on #rold */
+
+  markread_channel_relocated(ch, "#rnew");
+
+  assert_int_equal(metadata_readmarker_get("alice", "#rnew", ts), 0);
+  assert_string_equal(ts, "1735689600.000");
+  assert_int_equal(metadata_readmarker_get("bob", "#rnew", ts), 0);
+  assert_string_equal(ts, "1735689700.000");
+  assert_int_equal(metadata_readmarker_get("alice", "#rold", ts), 0);
+
+  /* the mover's JOIN of the new name reports its marker, not `*` */
+  forget();
+  send_markread_on_join(alice, "#rnew");
+  assert_int_equal(nreplies, 1);
+  assert_string_equal(replies[0],
+                      ":irc.example MARKREAD #rnew timestamp=iso(1735689600.000)");
+  forget();
+  send_markread_on_join(anon, "#rnew");
+  assert_int_equal(nreplies, 1);
+  assert_string_equal(replies[0],
+                      ":irc.example MARKREAD #rnew timestamp=iso(1735689600.000)");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -415,6 +461,7 @@ int main(void)
     cmocka_unit_test_setup(rename_keeps_a_newer_marker, setup),
     cmocka_unit_test_setup(rename_without_store_touches_nothing, setup),
     cmocka_unit_test_setup(rename_copies_session_markers, setup),
+    cmocka_unit_test_setup(relocation_copies_the_old_channels_markers, setup),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

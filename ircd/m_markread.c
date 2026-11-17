@@ -659,33 +659,25 @@ void send_markread_on_join(struct Client *sptr, const char *target)
     send_join_markread(sptr, target, "*");
 }
 
-/** Carry a renamed channel's read markers to its new name.  Markers are
- * keyed by target name, so after a rename every MARKREAD of the new name
- * -- the one a PART/JOIN-fallback member gets with its JOIN, a client's
- * get, a later JOIN -- would report `*` for a channel the client had read.
- * Called from rename_channel(), which every server runs for a rename (its
- * own, or an RN from a peer), so each server's store takes the same
- * copies and no MR has to go out for them.
- *
- * Account markers: those of the accounts of the channel's members --
- * the membership is the same on every server -- copied old to new with
- * metadata_readmarker_set()'s keep-the-newer rule, so a marker already
- * stored for the new name, or one an MR brings later, is never lowered.
- * An account with no member in the channel at the rename keeps its
- * marker under the old name only: the store is keyed account first, and
- * finding every account's marker for one target would walk all of it.
- * Session markers (clients without an account, this server's alone): all
- * of the old name's, copied the same way.
- * @param[in] chptr The channel, already under its new name.
- * @param[in] oldname The name it had.
+/** Copy read markers from one channel name to another: the account
+ * markers of @a chptr's members, and every session marker of
+ * @a oldname.  Each copy goes through the store's keep-the-newer rule,
+ * so a marker already stored under @a newname, or one an MR brings
+ * later, is never lowered.  Markers under @a oldname stay where they are.
+ * @param[in] chptr Channel whose membership says whose account markers
+ *                  are copied.
+ * @param[in] oldname Name the markers are stored under.
+ * @param[in] newname Name they are copied to.
  */
-void markread_channel_renamed(struct Channel *chptr, const char *oldname)
+static void markread_copy_markers(struct Channel *chptr, const char *oldname,
+                                  const char *newname)
 {
   struct Membership *member;
   char ts[MARKREAD_TS_LEN];
   unsigned int i;
 
-  if (!chptr || !oldname || !*oldname || !ircd_strcmp(oldname, chptr->chname))
+  if (!chptr || !oldname || !*oldname || !newname || !*newname
+      || !ircd_strcmp(oldname, newname))
     return;
 
   if (metadata_lmdb_is_available()) {
@@ -695,8 +687,7 @@ void markread_channel_renamed(struct Channel *chptr, const char *oldname)
       if (!cli_user(acptr) || !cli_user(acptr)->account[0])
         continue;
       if (metadata_readmarker_get(cli_user(acptr)->account, oldname, ts) == 0)
-        (void)metadata_readmarker_set(cli_user(acptr)->account,
-                                      chptr->chname, ts);
+        (void)metadata_readmarker_set(cli_user(acptr)->account, newname, ts);
     }
   }
 
@@ -708,6 +699,52 @@ void markread_channel_renamed(struct Channel *chptr, const char *oldname)
 
     for (e = sm_buckets[i]; e; e = e->hnext)
       if (0 == ircd_strcmp(e->target, oldname))
-        (void)session_markread_set(e->session_id, chptr->chname, e->timestamp);
+        (void)session_markread_set(e->session_id, newname, e->timestamp);
   }
+}
+
+/** Carry a renamed channel's read markers to its new name.  Markers are
+ * keyed by target name, so after a rename every MARKREAD of the new name
+ * -- the one a PART/JOIN-fallback member gets with its JOIN, a client's
+ * get, a later JOIN -- would report `*` for a channel the client had read.
+ * Called from rename_channel(), which every server runs for a rename (its
+ * own, or an RN from a peer), so each server's store takes the same
+ * copies and no MR has to go out for them.
+ *
+ * Account markers: those of the accounts of the channel's members --
+ * the membership is the same on every server.  An account with no
+ * member in the channel at the rename keeps its marker under the old
+ * name only: the store is keyed account first, and finding every
+ * account's marker for one target would walk all of it.
+ * Session markers (clients without an account, this server's alone): all
+ * of the old name's.
+ * @param[in] chptr The channel, already under its new name.
+ * @param[in] oldname The name it had.
+ */
+void markread_channel_renamed(struct Channel *chptr, const char *oldname)
+{
+  if (chptr)
+    markread_copy_markers(chptr, oldname, chptr->chname);
+}
+
+/** Carry a relocated channel's read markers to the name it moves to.  A
+ * relocation (m_rename.c: relocate_execute(), relocate_move_issuer())
+ * does not go through rename_channel(): the old channel stays, as the
+ * tombstone, and a new one is made under the new name, so the movers'
+ * JOIN replies -- and the JOIN of a member who follows later out of the
+ * tombstone -- would report `*` for a channel they had read.
+ *
+ * Called on every server, before anyone is moved, with the old channel's
+ * whole membership: the movers, and the members who stay and may follow
+ * by their own JOIN.  Copying a stayer's marker is harmless: it is how
+ * far it had read the community, which is now at the new name, and the
+ * old name keeps its own marker for as long as the tombstone lives.
+ * @param[in] oldchan The channel being relocated, still holding every
+ *                    member and still under its old name.
+ * @param[in] newname The name the community moves to.
+ */
+void markread_channel_relocated(struct Channel *oldchan, const char *newname)
+{
+  if (oldchan)
+    markread_copy_markers(oldchan, oldchan->chname, newname);
 }

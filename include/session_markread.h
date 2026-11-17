@@ -11,8 +11,8 @@
  * (LMDB) and survive disconnect — unchanged.  This module exists
  * solely for the ephemeral path.
  *
- * It also carries the hook rename_channel() calls to move a channel's
- * markers, of both kinds, to its new name.
+ * It also carries the hooks rename_channel() and a relocation call to
+ * move a channel's markers, of both kinds, to the new name.
  */
 #ifndef INCLUDED_session_markread_h
 #define INCLUDED_session_markread_h
@@ -28,5 +28,12 @@ struct Channel;
  *  marker.  Called by rename_channel() on every server. */
 extern void markread_channel_renamed(struct Channel *chptr,
                                      const char *oldname);
+
+/** Copy the read markers of @a oldchan's name to @a newname, where a
+ *  relocation moves the channel's community (m_markread.c): its members'
+ *  account markers and every session marker.  Called by the relocation
+ *  paths in m_rename.c on every server, before anyone is moved. */
+extern void markread_channel_relocated(struct Channel *oldchan,
+                                       const char *newname);
 
 #endif /* INCLUDED_session_markread_h */
