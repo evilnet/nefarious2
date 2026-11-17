@@ -11,7 +11,7 @@
  *    (dealloc_connection() -> multiline_free_connection()): its lines are
  *    freed with it;
  *  - a line of the batch was too long (parse_client() ->
- *    multiline_fail_batch()): FAIL BATCH MULTILINE_INVALID <ref> under the
+ *    multiline_fail_batch()): FAIL BATCH MULTILINE_INVALID (no context) under the
  *    batch's label, not the cut line's, and the reference stays dead.
  *
  * This includes the real m_batch.c, compiled with -ffunction-sections and
@@ -181,8 +181,8 @@ static void test_free_connection_frees_the_lines(void **state)
   multiline_free_connection(NULL);
 }
 
-/* A labeled batch, one of its lines too long: the FAIL names the batch
- * and answers the batch's label -- not the cut line's own, which its 417
+/* A labeled batch, one of its lines too long: the FAIL (no context, as
+ * the multiline spec defines it) answers the batch's label -- not the cut line's own, which its 417
  * answered and which is left as it was. */
 static void test_fail_batch_answers_the_batch_label(void **state)
 {
@@ -193,7 +193,7 @@ static void test_fail_batch_answers_the_batch_label(void **state)
   multiline_fail_batch(&cli);
   assert_int_equal(failed.n, 1);
   assert_string_equal(failed.code, "MULTILINE_INVALID");
-  assert_string_equal(failed.context, "r4");
+  assert_string_equal(failed.context, "");
   assert_string_equal(failed.label, "m4");
   assert_string_equal(cli_label(&cli), "c4");
   assert_int_equal(cli_label_responded(&cli), 1);
@@ -215,7 +215,7 @@ static void test_fail_batch_unlabeled(void **state)
   cli_label_responded(&cli) = 1;
   multiline_fail_batch(&cli);
   assert_int_equal(failed.n, 1);
-  assert_string_equal(failed.context, "r5");
+  assert_string_equal(failed.context, "");
   assert_string_equal(failed.label, "");
   assert_string_equal(cli_label(&cli), "c5");
   assert_int_equal(links_freed, 1);
