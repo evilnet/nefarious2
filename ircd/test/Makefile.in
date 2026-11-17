@@ -103,6 +103,7 @@ CMOCKA_TESTPROGS = \
 	log_async_cmocka \
 	parse_line_cmocka \
 	conf_reattach_cmocka \
+	nickask_cmocka \
 	oper_verify_cmocka \
 	sethost_verify_cmocka \
 	webirc_verify_cmocka \
@@ -209,6 +210,7 @@ DEP_SRC = \
 	send_tags_cmocka.c \
 	parse_line_cmocka.c \
 	conf_reattach_cmocka.c \
+	nickask_cmocka.c \
 	oper_verify_cmocka.c \
 	sethost_verify_cmocka.c \
 	webirc_verify_cmocka.c \
@@ -843,6 +845,17 @@ CONF_REATTACH_CMOCKA_OBJS = conf_reattach_cmocka.o ../ircd_string.o ../match.o \
 	../ircd_snprintf.o
 conf_reattach_cmocka: $(CONF_REATTACH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CONF_REATTACH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# nickask tests - a refusal numeric answers a bouncer device's pending
+# NICK request only when its first word is the nick asked for last.
+# Includes ../s_numeric.c with --gc-sections; what do_numeric() calls
+# past that check is a stub.
+nickask_cmocka.o: ${srcdir}/nickask_cmocka.c ../s_numeric.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/nickask_cmocka.c
+
+NICKASK_CMOCKA_OBJS = nickask_cmocka.o ../ircd_string.o ../match.o
+nickask_cmocka: $(NICKASK_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(NICKASK_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # oper_verify tests - an OPER whose password check finishes after a REHASH
 # is judged by the Operator block the configuration in force then gives

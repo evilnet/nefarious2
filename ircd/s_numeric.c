@@ -24,6 +24,8 @@
  */
 #include "config.h"
 
+#include <string.h>
+
 #include "s_numeric.h"
 #include "bouncer_session.h"
 #include "channel.h"
@@ -104,11 +106,24 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
 
       /* The primary's server refused a bouncer device's nick request
        * (BX W): that request is answered, and a return of it can no
-       * longer be applied. */
+       * longer be applied.  Only a refusal of the nick the device asked
+       * for last answers it: a refusal of an earlier request must not
+       * cancel a later one still in flight.  437 names a channel, not
+       * the nick, so its request lapses at NICK_ASK_RETURN_WINDOW.  A
+       * numeric's parv[2] is the whole rest of the line ("x2 :Nickname
+       * is already in use."): its first word is the nick refused,
+       * echoed as asked.  The compare is exact: a request for "Bob"
+       * followed by one for "bob" is two requests, and a refusal of the
+       * first must not answer the second. */
       if ((numeric == ERR_ERRONEUSNICKNAME || numeric == ERR_NICKNAMEINUSE
-           || numeric == ERR_BANNICKCHANGE || numeric == ERR_NICKTOOFAST)
-          && IsBouncerAlias(acptr))
-        cli_nickask_ts(acptr) = 0;
+           || numeric == ERR_NICKTOOFAST)
+          && IsBouncerAlias(acptr) && parc > 2 && cli_nickask_ts(acptr)) {
+        size_t asked = strlen(cli_nickask(acptr));
+
+        if (asked && strcspn(parv[2], " ") == asked
+            && 0 == strncmp(cli_nickask(acptr), parv[2], asked))
+          cli_nickask_ts(acptr) = 0;
+      }
 
       /* Check for forwarded label batch wrapping.  The command may be a
        * bouncer device's, sent on under this primary's numeric: its
