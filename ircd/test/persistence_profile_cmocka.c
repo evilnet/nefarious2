@@ -345,6 +345,30 @@ static void rename_refuses_a_key_grown_too_long(void **state)
   assert_int_equal(count_prefix(PROFILE_KEY_PREFIX "lkk/"), 0);
 }
 
+/* Rows an older build left under a name with no parent row are not the
+ * settings of a new profile of that name: CREATE removes them, and so
+ * does a RENAME to that name. */
+static void create_and_rename_clear_leftover_rows(void **state)
+{
+  char val[128];
+
+  (void)state;
+  assert_int_equal(metadata_account_write(NULL, ACCT,
+                     PROFILE_KEY_PREFIX LONG_NAME "/channels", "#old", 0), 0);
+  assert_int_equal(persistence_profile_create(ACCT, LONG_NAME, NULL), 0);
+  assert_int_not_equal(persistence_profile_get_own(ACCT, LONG_NAME,
+                                                   "channels", val,
+                                                   sizeof(val)), 0);
+  assert_int_equal(count_prefix(PROFILE_KEY_PREFIX LONG_NAME "/"), 1);
+
+  assert_int_equal(metadata_account_write(NULL, ACCT,
+                     PROFILE_KEY_PREFIX "left/channels", "#old", 0), 0);
+  assert_int_equal(persistence_profile_rename(ACCT, LONG_NAME, "left"), 0);
+  assert_int_not_equal(persistence_profile_get_own(ACCT, "left", "channels",
+                                                   val, sizeof(val)), 0);
+  assert_int_equal(count_prefix(PROFILE_KEY_PREFIX "left/"), 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -356,6 +380,7 @@ int main(void)
     cmocka_unit_test_setup(delete_and_rename_fold_the_name, setup),
     cmocka_unit_test_setup(set_refuses_a_key_the_wire_refuses, setup),
     cmocka_unit_test_setup(rename_refuses_a_key_grown_too_long, setup),
+    cmocka_unit_test_setup(create_and_rename_clear_leftover_rows, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

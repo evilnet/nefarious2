@@ -259,6 +259,8 @@ int persistence_profile_set(const char *account, const char *profile,
   return profile_write(account, full_key, value);
 }
 
+static int delete_profile_rows(const char *account, const char *name);
+
 int persistence_profile_create(const char *account, const char *name,
                                 const char *parent)
 {
@@ -276,6 +278,11 @@ int persistence_profile_create(const char *account, const char *name,
     return -1;
   if (!persistence_profile_exists(account, effective_parent))
     return -1; /* parent must exist (default always does) */
+
+  /* Rows under a name with no parent row are leftovers (an older build's
+   * RENAME or DELETE moved the parent row and left the keys of 64 bytes
+   * or more behind): not this new profile's settings. */
+  (void)delete_profile_rows(account, name);
 
   return persistence_profile_set(account, name, PROFILE_PARENT_KEY,
                                   effective_parent);
@@ -378,13 +385,31 @@ static void fold_key(char *buf)
   db_casefold_bytes(buf, buf, strlen(buf));
 }
 
-int persistence_profile_delete(const char *account, const char *name)
+/** Remove every stored row under profile @a name, its parent row too.
+ * @return 0, or -1 when a row could not be removed (the rest still are). */
+static int delete_profile_rows(const char *account, const char *name)
 {
   struct ProfileRow *list, *e;
   char prefix[64];
   size_t prefix_len;
   int rc = 0;
 
+  ircd_snprintf(NULL, prefix, sizeof(prefix), "%s%s/",
+                PROFILE_KEY_PREFIX, name);
+  fold_key(prefix);
+  prefix_len = strlen(prefix);
+
+  list = collect_profile_rows(account);
+  for (e = list; e; e = e->next)
+    if (e->key && strncmp(e->key, prefix, prefix_len) == 0
+        && profile_write(account, e->key, NULL) < 0)
+      rc = -1;   /* keep going: best-effort cleanup */
+  free_profile_rows(list);
+  return rc;
+}
+
+int persistence_profile_delete(const char *account, const char *name)
+{
   if (!persistence_profile_name_valid(name))
     return -1;
   if (profile_name_eq(name, PERSISTENCE_PROFILE_DEFAULT))
@@ -394,22 +419,7 @@ int persistence_profile_delete(const char *account, const char *name)
   if (has_children(account, name))
     return -1; /* other profiles inherit from this one */
 
-  ircd_snprintf(NULL, prefix, sizeof(prefix), "%s%s/",
-                PROFILE_KEY_PREFIX, name);
-  fold_key(prefix);
-  prefix_len = strlen(prefix);
-
-  list = collect_profile_rows(account);
-  for (e = list; e; e = e->next) {
-    if (e->key && strncmp(e->key, prefix, prefix_len) == 0) {
-      if (profile_write(account, e->key, NULL) < 0) {
-        rc = -1;
-        /* keep going — best-effort cleanup */
-      }
-    }
-  }
-  free_profile_rows(list);
-  return rc;
+  return delete_profile_rows(account, name);
 }
 
 int persistence_profile_rename(const char *account,
@@ -434,6 +444,8 @@ int persistence_profile_rename(const char *account,
     return -1;
   if (persistence_profile_exists(account, new_name))
     return -1;
+
+  (void)delete_profile_rows(account, new_name);   /* leftovers, as at CREATE */
 
   ircd_snprintf(NULL, old_prefix, sizeof(old_prefix), "%s%s/",
                 PROFILE_KEY_PREFIX, old_name);
