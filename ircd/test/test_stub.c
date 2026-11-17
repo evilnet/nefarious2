@@ -28,6 +28,12 @@ log_thread_muted(void)
 }
 
 void
+log_thread_mute(int on)
+{
+    (void)on;
+}
+
+void
 debug(int level, const char *form, ...)
 {
     va_list args;

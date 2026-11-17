@@ -179,7 +179,9 @@ static void *job_work(void *arg)
   pthread_mutex_unlock(&job_mutex);
 
   /* The store code run() calls logs as it goes, and logging is the main
-   * thread's.  The worker goes back to the pool as it came. */
+   * thread's.  The pool mutes its workers already (thread_pool.c); a job
+   * says so itself rather than rest on who runs it, and leaves the
+   * thread as it came. */
   muted = log_thread_muted();
   log_thread_mute(1);
   job->ops->run(job);

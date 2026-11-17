@@ -73,6 +73,10 @@ void debug(int level, const char *form, ...)
   (void)level; (void)form;
 }
 
+/* The pool mutes its workers (thread_pool.c); nothing here logs. */
+void log_thread_mute(int on) { (void)on; }
+int log_thread_muted(void) { return 0; }
+
 /** Blocks the ircd code holds: DoMalloc() adds one, free() takes one.
  * The workers allocate and free too, hence the atomics. */
 static long live_blocks;

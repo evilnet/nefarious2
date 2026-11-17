@@ -96,7 +96,14 @@ static void *worker_thread(void *arg)
 {
   (void)arg; /* Unused */
 
-  Debug((DEBUG_INFO, "thread_pool: worker thread started"));
+  /* Logging is the main thread's: log_vwrite() opens files, stamps with
+   * localtime(), reads features and sends server notices, and vdebug()
+   * keeps a static guard.  A worker is muted for its whole life, so no
+   * work function can log beside the main thread by accident -- what a
+   * task has to say goes back in its result and is logged from its
+   * callback.  (This function used to announce its start and exit
+   * through Debug(), unmuted.) */
+  log_thread_mute(1);
 
   while (1) {
     struct thread_task *task;
@@ -156,7 +163,6 @@ static void *worker_thread(void *arg)
     }
   }
 
-  Debug((DEBUG_INFO, "thread_pool: worker thread exiting"));
   return NULL;
 }
 
@@ -343,10 +349,12 @@ int thread_pool_submit(thread_pool_work_func work, void *arg,
 
   /* Check queue limit */
   pthread_mutex_lock(&pool.task_mutex);
-  if (pool.pending_count >= THREAD_POOL_MAX_PENDING) {
+  pending = pool.pending_count;
+  if (pending >= THREAD_POOL_MAX_PENDING) {
     pthread_mutex_unlock(&pool.task_mutex);
+    /* The count as it was under the lock: the workers write it. */
     log_write(LS_SYSTEM, L_WARNING, 0,
-              "thread_pool: queue full (%u pending)", pool.pending_count);
+              "thread_pool: queue full (%u pending)", pending);
     return -1;
   }
   pthread_mutex_unlock(&pool.task_mutex);
