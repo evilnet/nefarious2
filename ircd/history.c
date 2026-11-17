@@ -282,8 +282,18 @@ static struct {
 /** Names whose renames record this run could neither rewrite nor delete
  * when a channel arrived at them (history_channel_renamed): what the
  * record holds may be a dead channel's, so no earlier names are read for
- * them until a later rename rewrites the record or the server restarts.
- * Folded.  More names than fit: every name (the last flag). */
+ * them until the record is rewritten (a later rename) or deleted -- which
+ * a read of the name tries again, at most once a second
+ * (history_rename_distrust_retry).  Folded.  More names than fit: every
+ * name (the last flag), until a restart.
+ *
+ * The list is in memory only.  A name is on it because two writes to the
+ * store in a row failed, the record's and then its delete; a marker kept
+ * in that store would be a third.  What is kept instead is the retry:
+ * the stale record is gone as soon as the store takes a write again, and
+ * a restart before that reads a record whose entries of this incarnation
+ * are, at worst, a channel's that was created in the same second -- the
+ * limit history_rename.h describes for the rows themselves. */
 #define HISTORY_RENAME_DISTRUST_MAX 8
 static char history_rename_distrust[HISTORY_RENAME_DISTRUST_MAX][CHANNELLEN + 1];
 static int history_rename_distrust_all;
@@ -336,6 +346,26 @@ static void history_rename_distrust_set(const char *name, int on)
     strcpy(history_rename_distrust[free_slot], folded);
 }
 
+/** A read of a distrusted @a name: try once more to delete the record
+ * that could not be deleted when the name was put on the list.
+ * @return 1 deleted (the name is trusted again, and has no record). */
+static int history_rename_distrust_retry(const char *name)
+{
+  static time_t last;
+
+  if (history_rename_distrust_all || last == CurrentTime)
+    return 0;
+  last = CurrentTime;
+  if (hren_drop(history_db_env, history_cf_renames, name) != 0)
+    return 0;
+  history_rename_distrust_set(name, 0);
+  history_rename_cache.valid = 0;
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "history: the stale renames record of %s is deleted now that "
+            "the store takes writes again", name);
+  return 1;
+}
+
 /** The earlier names of @a target, a channel of incarnation @a live (0:
  * no live channel -- every incarnation's, as its own rows are all shown),
  * whose rows CHATHISTORY returns as @a target's own: "this channel has
@@ -356,7 +386,8 @@ static int history_rename_span(const char *target, time_t live,
   if (!history_available || !history_cf_renames || !target
       || !IsChannelName(target) || strlen(target) > CHANNELLEN)
     return 0;
-  if (history_rename_distrusted(target))
+  if (history_rename_distrusted(target)
+      && !history_rename_distrust_retry(target))
     return 0;
   if (history_rename_cache.valid && history_rename_cache.incarnation == live
       && ircd_strcmp(history_rename_cache.name, target) == 0) {
