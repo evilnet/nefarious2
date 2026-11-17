@@ -460,9 +460,13 @@ engine_loop(struct Generators* gen)
     /* server_die() closed every descriptor and cleared running: the rest
      * of this batch, and the timers, would run handlers on closed numbers
      * (an IAuth respawn on its socket's EOF, a teardown writing to a number
-     * a new open just took). */
-    if (!running)
+     * a new open just took).  Forget the rest of the batch: a socket_del()
+     * after this loop (server_die()'s callers, the exit path) walks it in
+     * engine_delete(), and its array may be gone by then. */
+    if (!running) {
+      polls_used = 0;
       break;
+    }
     timer_run(); /* execute any pending timers */
     thread_pool_poll(); /* process completed async tasks */
   }
