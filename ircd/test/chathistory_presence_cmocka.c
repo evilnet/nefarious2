@@ -70,6 +70,9 @@
 #include "channel.h"
 #include "client.h"
 #include "struct.h"
+#ifdef PRESENCE_STORE
+#include "fake_db.h"
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Link-time stubs for chathistory_presence.c's other dependencies.   */
@@ -113,6 +116,7 @@ struct db_env *history_get_env(void)
   return NULL;
 }
 
+#ifndef PRESENCE_STORE   /* the store variant links fake_db.o */
 void db_val_free(struct db_val *v)
 {
   if (v) {
@@ -176,11 +180,13 @@ unsigned int db_writebatch_count(const struct db_writebatch *wb)
   return 0;
 }
 
+#endif
 const char *db_strerror(int rc)
 {
   (void)rc;
   return "stub";
 }
+#ifndef PRESENCE_STORE
 
 struct db_iter *db_iter_open(struct db_env *env, struct db_cf *cf,
                               struct db_snapshot *snap)
@@ -227,6 +233,8 @@ const void *db_iter_value(const struct db_iter *it, size_t *vlen)
     *vlen = 0;
   return NULL;
 }
+
+#endif /* !PRESENCE_STORE */
 
 void history_free_messages(struct HistoryMessage *list)
 {
@@ -305,7 +313,12 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
 {
   (void)from; (void)cmd; (void)tok; (void)one; (void)pattern;
 }
+#ifdef PRESENCE_STORE
+static struct db_env *store_env;
+struct db_env *metadata_get_env(void) { return store_env; }
+#else
 struct db_env *metadata_get_env(void) { return NULL; }
+#endif
 /* presence's fallback clock when no caller supplied an event time
  * (SQUIT teardown, backfill); this suite always passes explicit times. */
 static struct HLC test_hlc;
@@ -324,11 +337,13 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
  * before any of these while presence_persistence_ready stays 0, and
  * presence_shutdown's cancel-all finds no sync to cancel, but the
  * standalone link needs the symbols. */
+#ifndef PRESENCE_STORE
 int db_iter_seek(struct db_iter *it, const void *key, size_t klen)
 {
   (void)it; (void)key; (void)klen;
   return DB_NOTFOUND;
 }
+#endif
 struct Client *FindNServer(const char *numeric)
 {
   (void)numeric;
@@ -1159,6 +1174,107 @@ static void test_presence_norm_ms(void **state)
                    PRESENCE_TIME_FROM_MS(99999999999000LL));
 }
 
+#ifdef PRESENCE_STORE
+/* ---- Account anchors, on a store (the -DPRESENCE_STORE variant) ----
+ *
+ * An account's presence is a record per (account, channel name) in the
+ * metadata store.  A RENAME moves it in ONE write: closed under the old
+ * name and open under the new, or neither. */
+struct store_world {
+  struct Client cli;
+  struct User user;
+  struct Membership m;
+  struct Channel *ch;
+};
+
+static void store_world_make(struct store_world *w, const char *account)
+{
+  memset(w, 0, sizeof(*w));
+  w->ch = calloc(1, sizeof(struct Channel) + 16);
+  assert_non_null(w->ch);
+  cli_user(&w->cli) = &w->user;
+  strcpy(w->user.account, account);
+  SetAccount(&w->cli);
+  w->m.user = &w->cli;
+  w->m.channel = w->ch;
+  w->ch->members = &w->m;
+  strcpy(w->ch->chname, "#new");          /* rename_channel has renamed it */
+}
+
+static void test_store_rename_moves_account_presence(void **state)
+{
+  struct store_world w;
+  int64_t t0 = RT - SEC(600);
+  (void)state;
+
+  store_world_make(&w, "alice");
+  presence_record_join("alice", 0, "#old", t0);
+  strict_on = 1;
+  presence_set_event_time(RT);
+  presence_on_channel_rename(w.ch, "#old");
+  presence_set_event_time(0);
+
+  assert_true(presence_was_present("alice", 0, "#old", t0));
+  assert_true(presence_was_present("alice", 0, "#old", RT));
+  assert_false(presence_was_present("alice", 0, "#old", RT + SEC(5)));
+  assert_false(presence_was_present("alice", 0, "#new", RT - 1));
+  assert_true(presence_was_present("alice", 0, "#new", RT + SEC(5)));
+  strict_on = 0;
+  free(w.ch);
+}
+
+/* The write fails: the interval is not open under both names.  It stays
+ * where it was, and the next rename (or a rejoin) moves it. */
+static void test_store_rename_write_fails(void **state)
+{
+  struct store_world w;
+  int64_t t0 = RT - SEC(600);
+  (void)state;
+
+  store_world_make(&w, "bob");
+  presence_record_join("bob", 0, "#old", t0);
+  strict_on = 1;
+  presence_set_event_time(RT);
+  fake_db_fail_next_commit(store_env);
+  presence_on_channel_rename(w.ch, "#old");
+
+  assert_true(presence_was_present("bob", 0, "#old", RT + SEC(5)));
+  assert_false(presence_was_present("bob", 0, "#new", RT + SEC(5)));
+
+  /* the store is back */
+  presence_set_event_time(RT + SEC(10));
+  presence_on_channel_rename(w.ch, "#old");
+  presence_set_event_time(0);
+  assert_false(presence_was_present("bob", 0, "#old", RT + SEC(11)));
+  assert_true(presence_was_present("bob", 0, "#new", RT + SEC(11)));
+  strict_on = 0;
+  free(w.ch);
+}
+
+/* The old name's record cannot be read: it may be open, so nothing is
+ * opened under the new name. */
+static void test_store_rename_read_fails(void **state)
+{
+  struct store_world w;
+  int64_t t0 = RT - SEC(600);
+  (void)state;
+
+  store_world_make(&w, "carol");
+  presence_record_join("carol", 0, "#old", t0);
+  strict_on = 1;
+  presence_set_event_time(RT);
+  fake_db_fail_get_at(store_env, 1);
+  presence_on_channel_rename(w.ch, "#old");
+  presence_set_event_time(0);
+
+  assert_true(presence_was_present("carol", 0, "#old", RT + SEC(5)));
+  assert_false(presence_was_present("carol", 0, "#new", RT + SEC(5)));
+  strict_on = 0;
+  free(w.ch);
+}
+
+#endif /* PRESENCE_STORE */
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1178,7 +1294,17 @@ int main(void)
     cmocka_unit_test(test_presence_coalesce_window_ms),
     cmocka_unit_test(test_presence_norm_ms),
     cmocka_unit_test(test_presence_move_carries_only_a_rename),
+#ifdef PRESENCE_STORE
+    cmocka_unit_test(test_store_rename_moves_account_presence),
+    cmocka_unit_test(test_store_rename_write_fails),
+    cmocka_unit_test(test_store_rename_read_fails),
+#endif
   };
 
+#ifdef PRESENCE_STORE
+  store_env = fake_db_new();
+  if (!store_env || presence_init() != 0)
+    return 1;
+#endif
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

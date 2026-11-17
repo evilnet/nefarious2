@@ -250,7 +250,20 @@ static size_t build_acct_key(char *buf, size_t bufsz,
  * the stored record has an unexpected size (treats as missing). */
 static int record_norm_ms(struct presence_record *r);  /* defined with the time helpers */
 
+static int acct_read(const char *account, const char *channel,
+                     struct presence_record *out);
+
 static int acct_load(const char *account, const char *channel,
+                     struct presence_record *out)
+{
+  return acct_read(account, channel, out) == 0 ? 0 : -1;
+}
+
+/** acct_load, telling a record that is not there from one that could not
+ * be read.
+ * @return 0 loaded, 1 there is none (@a out zeroed), -1 unavailable or a
+ *   read error (@a out zeroed). */
+static int acct_read(const char *account, const char *channel,
                      struct presence_record *out)
 {
   struct db_env *env;
@@ -272,7 +285,7 @@ static int acct_load(const char *account, const char *channel,
   memset(&v, 0, sizeof(v));
   rc = db_get(env, presence_cf, keybuf, klen, NULL, &v);
   if (rc != DB_OK)
-    return -1;
+    return rc == DB_NOTFOUND ? 1 : -1;
   if (v.len == sizeof(*out)) {
     memcpy(out, v.base, sizeof(*out));
     record_norm_ms(out);   /* seconds-era record: read as milliseconds */
@@ -286,13 +299,31 @@ static int acct_load(const char *account, const char *channel,
 /** Store an account-anchored record.  Returns 0 on success.  If the
  * record has no closed intervals and no open marker, the row is
  * deleted instead of written — keeps the CF tidy. */
-static int acct_store(const char *account, const char *channel,
-                      const struct presence_record *r)
+/** Stage acct_store's write of one record on @a wb.  @return 0, or -1. */
+static int acct_stage(struct db_writebatch *wb, const char *account,
+                      const char *channel, const struct presence_record *r)
+{
+  char keybuf[ACCOUNTLEN + 1 + CHANNELLEN + 1];
+  size_t klen = build_acct_key(keybuf, sizeof(keybuf), account, channel);
+  int rc;
+
+  if (klen == 0)
+    return -1;
+  if (r->count == 0 && r->open_since == 0)
+    rc = db_writebatch_del(wb, presence_cf, keybuf, klen);
+  else
+    rc = db_writebatch_put(wb, presence_cf, keybuf, klen, r, sizeof(*r));
+  return rc == DB_OK ? 0 : -1;
+}
+
+/** Store one account-anchored record (@a channel2 NULL) or two in one
+ * write: both are stored, or neither.  @return 0, or -1. */
+static int acct_store2(const char *account, const char *channel,
+                       const struct presence_record *r, const char *channel2,
+                       const struct presence_record *r2)
 {
   struct db_env *env;
   struct db_writebatch *wb;
-  char keybuf[ACCOUNTLEN + 1 + CHANNELLEN + 1];
-  size_t klen;
   int rc;
 
   if (!presence_persistence_ready || !presence_cf)
@@ -300,22 +331,23 @@ static int acct_store(const char *account, const char *channel,
   env = metadata_get_env();
   if (!env)
     return -1;
-  klen = build_acct_key(keybuf, sizeof(keybuf), account, channel);
-  if (klen == 0)
-    return -1;
-
   wb = db_writebatch_new(env);
   if (!wb)
     return -1;
-
-  if (r->count == 0 && r->open_since == 0)
-    db_writebatch_del(wb, presence_cf, keybuf, klen);
-  else
-    db_writebatch_put(wb, presence_cf, keybuf, klen, r, sizeof(*r));
-
+  if (acct_stage(wb, account, channel, r) != 0
+      || (channel2 && acct_stage(wb, account, channel2, r2) != 0)) {
+    db_writebatch_destroy(wb);
+    return -1;
+  }
   rc = db_writebatch_commit(wb, /*sync_durably=*/0);
   db_writebatch_destroy(wb);
   return (rc == DB_OK) ? 0 : -1;
+}
+
+static int acct_store(const char *account, const char *channel,
+                      const struct presence_record *r)
+{
+  return acct_store2(account, channel, r, NULL, NULL);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1640,11 +1672,38 @@ void presence_on_channel_rename(struct Channel *chptr, const char *oldname)
       if (e)
         record_apply_part(&e->record, when);
     } else {
-      struct presence_record r;
-      if (acct_load(anchor, oldname, &r) == 0 && r.open_since != 0) {
-        record_apply_part(&r, when);
-        (void)acct_store(anchor, oldname, &r);
+      /* An account's two records are in the store, and move in ONE
+       * write: closed under the old name and open under the new, or
+       * neither.  When a record cannot be read or the write fails the
+       * interval stays open where it was, as after a PART whose write
+       * failed -- never open under both names, and nothing opened under
+       * the new name on top of an old record that may still be open. */
+      struct presence_record ro, rn;
+      int rco = acct_read(anchor, oldname, &ro);
+      int rcn = acct_read(anchor, chptr->chname, &rn);
+      int moved = 0;
+
+      if (rco >= 0 && rcn >= 0) {
+        int closes = ro.open_since != 0;
+        int opens = !IsZombie(m) && rn.open_since == 0;
+
+        record_apply_part(&ro, when);
+        if (opens)
+          record_apply_join(&rn, when);
+        moved = (!closes && !opens)
+                || acct_store2(anchor, closes ? oldname : chptr->chname,
+                               closes ? &ro : &rn,
+                               closes && opens ? chptr->chname : NULL,
+                               &rn) == 0;
       }
+      if (!moved)
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "presence: the presence of account %s could not be moved "
+                  "from %s to %s at the rename (a read or the write failed): "
+                  "it is still recorded under %s, and under %s only once the "
+                  "account rejoins",
+                  anchor, oldname, chptr->chname, oldname, chptr->chname);
+      continue;
     }
     /* Open under the new one.  Not for a kicked member whose PART has
      * not arrived (a zombie): its presence ended with the KICK, and the

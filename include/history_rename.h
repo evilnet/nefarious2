@@ -134,7 +134,9 @@
  * the presence recorded under the name it is STORED under: a RENAME
  * closes each member's open interval under the old name and opens one
  * under the new (chathistory_presence.h, presence_on_channel_rename);
- * nothing is copied.
+ * nothing is copied.  An account's two records change in one write, so
+ * a failed read or write leaves its interval where it was (logged),
+ * never open under both names.
  *
  * KNOWN GAPS.
  *  - A server that did not execute the rename (down, or split from the
