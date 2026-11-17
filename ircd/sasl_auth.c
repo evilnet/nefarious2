@@ -2057,9 +2057,8 @@ static void sasl_oauth_introspect_answer(int result, const struct kc_token_info 
     if (!feature_bool(FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION) &&
         !oauth_token_policy_ok(info, acptr)) {
       sasl_failure_count(acptr);       /* refused by policy: counted now */
-      if (!sasl_challenge_would_abort(acptr))   /* (see below) */
-        sendrawto_one(acptr, MSG_AUTHENTICATE " "
-                      "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
+      sendrawto_one(acptr, MSG_AUTHENTICATE " "
+                    "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
       session->state = SASL_STATE_FAILED;
       sasl_client_turn_check(acptr);   /* the client's turn again */
       return;
@@ -2095,13 +2094,9 @@ static void sasl_oauth_introspect_answer(int result, const struct kc_token_info 
               "SASL OAUTHBEARER: Introspect failed for %C (result %d, active=%d)",
               acptr, result, info ? info->active : 0);
     /* RFC 7628 §3.2.3: Send error challenge, then wait for client to send
-     * "*" (abort).  The abort triggers sasl_abort_local → ERR_SASLFAIL.
-     * Not to a client that completed registration meanwhile: the check
-     * owed below aborts the exchange at once, and the client's answer
-     * would arrive after registration (sasl_challenge_would_abort()). */
-    if (!sasl_challenge_would_abort(acptr))
-      sendrawto_one(acptr, MSG_AUTHENTICATE " "
-                    "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
+     * "*" (abort).  The abort triggers sasl_abort_local → ERR_SASLFAIL. */
+    sendrawto_one(acptr, MSG_AUTHENTICATE " "
+                  "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
     session->state = SASL_STATE_FAILED;
     sasl_client_turn_check(acptr);   /* the client's turn again */
   }
@@ -2477,10 +2472,7 @@ static void sasl_scram_creds_answer(int result, const struct kc_user *user, void
   {
     char sendbuf[600];
     snprintf(sendbuf, sizeof(sendbuf), "%s %s", MSG_AUTHENTICATE, server_first_b64);
-    /* Not to a client that completed registration meanwhile: the check
-     * owed below aborts the exchange (sasl_challenge_would_abort()). */
-    if (!sasl_challenge_would_abort(acptr))
-      sendrawto_one(acptr, sendbuf);
+    sendrawto_one(acptr, sendbuf);
   }
   MyFree(server_first_b64);
 
@@ -2703,8 +2695,7 @@ static int sasl_scram_client_final(struct Client *sptr,
     {
       char sendbuf[600];
       snprintf(sendbuf, sizeof(sendbuf), "%s %s", MSG_AUTHENTICATE, sf_b64);
-      if (!sasl_challenge_would_abort(sptr))   /* as for server-first */
-        sendrawto_one(sptr, sendbuf);
+      sendrawto_one(sptr, sendbuf);
     }
     MyFree(sf_b64);
   }
@@ -2802,10 +2793,7 @@ static void sasl_ecdsa_key_answer(int result, const struct kc_user *user, void *
   {
     char sendbuf[600];
     snprintf(sendbuf, sizeof(sendbuf), "%s %s", MSG_AUTHENTICATE, challenge_b64);
-    /* Not to a client that completed registration meanwhile: the check
-     * owed below aborts the exchange (sasl_challenge_would_abort()). */
-    if (!sasl_challenge_would_abort(acptr))
-      sendrawto_one(acptr, sendbuf);
+    sendrawto_one(acptr, sendbuf);
   }
   MyFree(challenge_b64);
 

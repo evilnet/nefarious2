@@ -269,8 +269,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   if (reply[0] == 'C') {
-    /* services answered (sasl_relay_challenge(): whose turn it is, and
-     * no prompt to a client its registration is about to abort) */
+    /* services answered (sasl_relay_challenge(): whose turn it is) */
     sasl_relay_challenge(acptr, data);
     return 0;
   } else if (reply[0] == 'L') {
@@ -360,23 +359,14 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  * the backend's answer to it.  A challenge of 400 bytes or more comes in
  * several lines: its last one hands the turn over, and owes the
  * registration check (sasl_client_turn_check()).
- *
- * A line that hands the turn to a client that has completed registration
- * meanwhile is not sent (sasl_challenge_would_abort()): that check aborts
- * the exchange with 906 at once, and a client prompted for its
- * credentials sends them after registration, where they would begin a
- * new exchange as its mechanism.
  * @param[in] cptr Our client.
  * @param[in] data The challenge line.
  */
 void sasl_relay_challenge(struct Client *cptr, const char *data)
 {
-  int turn = sasl_line_ends_message(data)
-             && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(cptr)));
-
-  if (!turn || !sasl_challenge_would_abort(cptr))
-    sendrawto_one(cptr, MSG_AUTHENTICATE " %s", data);
-  if (turn) {
+  sendrawto_one(cptr, MSG_AUTHENTICATE " %s", data);
+  if (sasl_line_ends_message(data)
+      && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(cptr)))) {
     con_sasl_xflags(cli_connect(cptr)) |= SASLX_CLIENTTURN;
     sasl_client_turn_check(cptr);
   }

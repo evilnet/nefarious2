@@ -1072,25 +1072,6 @@ void sasl_client_turn_check(struct Client *cptr)
     auth_recheck_later(auth);
 }
 
-/** Whether a challenge that hands \a cptr's exchange to the client would
- * be answered by the registration check it owes (sasl_client_turn_check())
- * aborting the exchange: the client has completed registration and only
- * the exchange holds it (auth_waits_only_for_sasl()).  Such a challenge is
- * not sent.  The client has usually sent its response already, behind its
- * CAP END; that line arrives after the 906 and registration, where it
- * would be read as the mechanism of a new exchange and its credentials
- * passed on to IAuth or services as one.
- * @param[in] cptr Client a challenge is for.
- * @return Non-zero when the challenge is to be withheld.
- */
-int sasl_challenge_would_abort(struct Client *cptr)
-{
-  struct AuthRequest *auth;
-
-  return cptr && MyConnect(cptr) && (auth = cli_auth(cptr))
-         && auth_waits_only_for_sasl(auth);
-}
-
 /** Owe \a auth a registration check from the event loop.  For a Keycloak
  * answer that has just released what held registration, and for a client
  * held by an IAuth program that went away (see above); never for a
@@ -4272,8 +4253,7 @@ static int iauth_cmd_sasl_challenge(struct IAuth *iauth, struct Client *cli,
   if (EmptyString(params[0]))
     return 0;
 
-  /* Forward challenge to client (sasl_relay_challenge(): whose turn it
-   * is, and no prompt to a client its registration is about to abort) */
+  /* Forward challenge to client (sasl_relay_challenge(): whose turn it is) */
   sasl_relay_challenge(cli, params[0]);
   return 0;
 }
