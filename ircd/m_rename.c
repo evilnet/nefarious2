@@ -50,6 +50,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "bouncer_session.h"
+#include "session_markread.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -2626,6 +2627,16 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                            expires);
   }
 
+  /* ---- 3b. Read markers ----
+   * They are keyed by channel name, and this is no rename_channel(), so
+   * nothing else carries them: without the copy every mover's JOIN reply
+   * (send_rename_to_member()) -- and the JOIN of each member who follows
+   * later out of the tombstone -- reports `*` for a channel it had read.
+   * Done while chptr still holds every member, so stayers' markers are
+   * waiting under the new name when they follow; every server runs it
+   * off the same marker, so no MR goes out for it. */
+  markread_channel_relocated(chptr, newname_buf);
+
   /* ---- 4. Move the movers ----
    * Two passes, and the split matters: the PART/JOIN fallback in
    * send_rename_to_member() ends in do_names() on the new channel, so
@@ -2800,6 +2811,10 @@ static int relocate_move_issuer(struct Client *sptr,
   status = member->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE
                              | CHFL_DELAYED);
   oplevel = OpLevel(member);
+
+  /* Its read markers go first, as in relocate_execute() step 3b, so its
+   * JOIN reply below reports them. */
+  markread_channel_relocated(from, to->chname);
 
   /* Before the add: add_user_to_channel() is what emits the alias JOIN
    * echo, so the alias's PART of the old name has to precede it. */

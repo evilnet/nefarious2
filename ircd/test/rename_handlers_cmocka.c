@@ -106,9 +106,26 @@ static const char *sent_to(struct Client *to, int nth)
   return "";
 }
 
+/* Every markread_channel_relocated() call: "<old> -> <new>", and how
+ * many lines had been sent when it was made. */
+static char relocated_markers[8][LINE];
+static int relocated_markers_at[8];
+static int nrelocated_markers;
+
+/** Index in sent[] of the @a nth line to @a to, or -1. */
+static int sent_index(struct Client *to, int nth)
+{
+  int i;
+  for (i = 0; i < nsent; i++)
+    if (sent[i].to == to && nth-- == 0)
+      return i;
+  return -1;
+}
+
 static void forget(void)
 {
   nsent = nviolations = nopnotices = ndebug = 0;
+  nrelocated_markers = 0;
 }
 
 /* ====================================================================
@@ -588,6 +605,15 @@ void send_markread_on_join(struct Client *sptr, const char *target)
 
   snprintf(buf, sizeof(buf), "(markread of %s)", target);
   record_sent(sptr, buf);
+}
+
+void markread_channel_relocated(struct Channel *oldchan, const char *newname)
+{
+  assert_true(nrelocated_markers < 8);
+  snprintf(relocated_markers[nrelocated_markers], LINE, "%s -> %s",
+           oldchan->chname, newname);
+  relocated_markers_at[nrelocated_markers] = nsent;
+  nrelocated_markers++;
 }
 
 void sendto_opmask_butone(struct Client *one, unsigned int mask,
@@ -4190,6 +4216,47 @@ static void same_relocation_twice_moves_the_second_issuer(void **state)
                       ":uma!user@host.example PART #old :Moved to #new");
 }
 
+/* A relocation carries the read markers of the old name to the new one
+ * (markread_channel_relocated()) before the mover's JOIN reply, whose
+ * MARKREAD would otherwise report `*`.  rename_channel() does it for a
+ * rename; a relocation makes a new channel and never calls it. */
+static void relocation_carries_read_markers_before_the_join(void **state)
+{
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  int at;
+  (void)state;
+
+  feat_rename_consent = 1;
+  add_member(channel_at("#old", 500000, alice), bob, 0);
+  forget();
+
+  client_rename(alice, "#old", "#new", "moving");
+
+  assert_int_equal(nrelocated_markers, 1);
+  assert_string_equal(relocated_markers[0], "#old -> #new");
+  /* the mover's PART/JOIN fallback, with its MARKREAD, comes after */
+  assert_string_equal(sent_to(alice, 2), "(markread of #new)");
+  at = sent_index(alice, 2);
+  assert_true(at >= relocated_markers_at[0]);
+}
+
+/* The second issuer of the same relocation is moved by
+ * relocate_move_issuer(): its markers are carried too. */
+static void same_relocation_twice_carries_read_markers(void **state)
+{
+  struct Crossing w;
+  (void)state;
+
+  crossing_world(&w);
+  server_relocate(w.pa, w.vic, "#old", "#new", "1000300", "");
+  forget();
+  server_relocate(w.pb, w.uma, "#old", "#NEW", "1000900", "");
+
+  assert_int_equal(nrelocated_markers, 1);
+  assert_string_equal(relocated_markers[0], "#old -> #new");
+}
+
 /* ... and an earlier deadline in the second does not shorten the first. */
 static void same_relocation_twice_keeps_the_later_deadline(void **state)
 {
@@ -7321,6 +7388,8 @@ int main(void)
     T(crossing_winner_on_its_own_server),
     T(same_relocation_twice_moves_the_second_issuer),
     T(same_relocation_twice_keeps_the_later_deadline),
+    T(relocation_carries_read_markers_before_the_join),
+    T(same_relocation_twice_carries_read_markers),
     T(merged_deadline_that_is_past_dissolves_through_the_timer),
     T(chain_is_not_a_crossing),
     T(crossing_carries_an_earlier_hop_to_the_winner),
