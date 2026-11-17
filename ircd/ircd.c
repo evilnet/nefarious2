@@ -1478,6 +1478,21 @@ int main(int argc, char **argv) {
    * DB::Open, bouncer restore, libkc/JWKS).  Now that all stored data
    * is loaded and we're about to enter event_loop(), it's safe to
    * start accepting. */
+  /* The thread pool's signal pipe joins the event engine here, apart
+   * from where the pool is started, so the two can move independently.
+   * A task finished before this point is delivered at the loop's first
+   * thread_pool_poll(). */
+  if (thread_pool_is_running()) {
+    if (socket_add(&thread_pool_wake, thread_pool_wake_event, 0,
+                   SS_NOTSOCK, SOCK_EVENT_READABLE,
+                   thread_pool_get_signal_fd()))
+      thread_pool_wake_on = 1;
+    else
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Thread pool: cannot register its signal pipe with the event "
+                "engine; finished tasks wait for the next timer or packet");
+  }
+
   server_boot_complete = 1;
   start_all_listeners();
 
