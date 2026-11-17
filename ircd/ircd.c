@@ -107,7 +107,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#if defined(USE_ROCKSDB) || defined(HAVE_PTHREAD)
+#ifdef USE_ROCKSDB
 #include <pthread.h>
 #endif
 
@@ -507,39 +507,10 @@ void server_restart(const char *message)
 /*----------------------------------------------------------------------------
  * outofmemory:  Handler for out of memory conditions...
  *--------------------------------------------------------------------------*/
-#ifdef HAVE_PTHREAD
-/** The thread main() runs on, once @a main_thread_known. */
-static pthread_t main_thread;
-static int main_thread_known;
-#endif
-
-/** Handle out-of-memory condition.
- *
- * On the main thread: restart.  On any other thread -- a thread pool
- * worker hashing a password or scanning the history store, a store's init
- * thread -- the process exits at once, as server_panic() does and for its
- * reasons.  server_restart() is main-thread work from end to end: it
- * sends notices, stops the listeners, persists the bouncer sessions and
- * closes the stores while the main thread is still running the same
- * structures, and history_shutdown() would then wait for the store jobs
- * under way, one of which is the caller: a hang with the listeners
- * closed.  Nor can the allocation be failed back to the caller instead:
- * MyMalloc() promises its callers a block, and the store code under a
- * scan does not check.  _exit() runs no destructor and closes nothing by
- * number, so no descriptor is reused under a live thread; every committed
- * write is in the WAL.  The server does not re-exec itself on this path:
- * whatever supervises it restarts it. */
+/** Handle out-of-memory condition: restart.  The main thread only: an
+ * allocation that fails on any other thread never gets here
+ * (ircd_alloc.c, alloc_failed). */
 static void outofmemory(void) {
-#ifdef HAVE_PTHREAD
-  if (main_thread_known && !pthread_equal(pthread_self(), main_thread)) {
-    static const char msg[] = "ircd: out of memory off the main thread, exiting\n";
-
-    if (write(2, msg, sizeof(msg) - 1) < 0) {
-      /* nowhere left to say it */
-    }
-    _exit(1);
-  }
-#endif
   Debug((DEBUG_FATAL, "Out of memory: restarting server..."));
   server_restart("Out of Memory");
 }
@@ -1152,11 +1123,7 @@ int main(int argc, char **argv) {
 
   init_isupport(); /* initialize RPL_ISUPPORT... */
   log_init(*argv);
-#ifdef HAVE_PTHREAD
-  main_thread = pthread_self();
-  main_thread_known = 1;
-#endif
-  set_nomem_handler(outofmemory);
+  set_nomem_handler(outofmemory);   /* this thread's, and no other's */
 
   initload();
   init_list();
