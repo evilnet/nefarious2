@@ -187,6 +187,68 @@ static void send_set_echo(struct Client *to, const char *state)
     send_persistence_reply(to, "SET", state);
 }
 
+/** draft/persistence's CAP 302 value: the extras' while
+ * PERSISTENCE_DRAFT_EXTRAS keeps the old names working, none otherwise
+ * (the spec defines none). */
+static const char *draft_persistence_capvalue(void)
+{
+  return feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
+         ? PERSISTENCE_EXTRAS_VALUE : NULL;
+}
+
+/** Feature-notify hook for FEAT_CAP_evilnet_persistence.  Replaces the
+ * generic DEFINE_CAP_NOTIFY hook, which sent CAP NEW with no value: the
+ * vendor cap's value is its inventory of extras, so enabling it must
+ * advertise it. */
+void feature_notify_cap_evilnet_persistence(void)
+{
+  cap_set_value(CAP_EVILNET_PERSISTENCE, PERSISTENCE_EXTRAS_VALUE);
+  if (feature_bool(FEAT_CAP_evilnet_persistence)) {
+    send_cap_notify("evilnet.github.io/persistence", 1,
+                    PERSISTENCE_EXTRAS_VALUE);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "evilnet.github.io/persistence: capability enabled, "
+              "sent CAP NEW to cap-notify clients");
+  } else {
+    send_cap_notify("evilnet.github.io/persistence", 0, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "evilnet.github.io/persistence: capability disabled, "
+              "sent CAP DEL to cap-notify clients");
+  }
+}
+
+/** Feature-notify hook for FEAT_CAP_draft_persistence: CAP NEW carries
+ * the value the cap has under PERSISTENCE_DRAFT_EXTRAS. */
+void feature_notify_cap_draft_persistence(void)
+{
+  cap_set_value(CAP_DRAFT_PERSISTENCE, draft_persistence_capvalue());
+  if (feature_bool(FEAT_CAP_draft_persistence)) {
+    send_cap_notify("draft/persistence", 1, draft_persistence_capvalue());
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "draft/persistence: capability enabled, "
+              "sent CAP NEW to cap-notify clients");
+  } else {
+    send_cap_notify("draft/persistence", 0, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "draft/persistence: capability disabled, "
+              "sent CAP DEL to cap-notify clients");
+  }
+}
+
+/** Feature-notify hook for FEAT_PERSISTENCE_DRAFT_EXTRAS (N027):
+ * draft/persistence carries the extras' value only while the old names
+ * are kept working.  cap_set_value() does not notify, so while the cap is
+ * advertised a flip also sends CAP NEW with the new value (or none), as
+ * m_register.c does for draft/account-registration.  During a rehash the
+ * notify batch deduplicates this against
+ * feature_notify_cap_draft_persistence(). */
+void feature_notify_persistence_draft_extras(void)
+{
+  cap_set_value(CAP_DRAFT_PERSISTENCE, draft_persistence_capvalue());
+  if (feature_bool(FEAT_CAP_draft_persistence))
+    send_cap_notify("draft/persistence", 1, draft_persistence_capvalue());
+}
+
 /** Public accessor for the resolved auto-replay state.  Used by
  * replay_start_bouncer call sites in s_user.c and bouncer_session.c
  * to gate the missed-message replay batch.
