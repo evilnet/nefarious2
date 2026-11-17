@@ -94,24 +94,24 @@ static void the_arguments(void **state)
   assert_string_equal(out, "5:-k:-d:/some/dir:-f:x.conf\n");
 }
 
-/* Any other end says nothing of the file: the check is unavailable, and
- * the rehash goes ahead as it did before the check existed. */
-static void other_ends_are_unavailable(void **state)
+/* Any other end is a failure (the rehash is abandoned), and a last line
+ * says how it ended. */
+static void other_ends_fail(void **state)
 {
   char out[512];
 
   (void)state;
   make_script("exit 4");          /* "ircd -k" could not reach a path */
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it exited with status 4"));
   make_script("kill -KILL $$");   /* the OOM killer, or an operator */
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it died of signal 9"));
   assert_int_equal(conf_precheck_run("/nonexistent/ircd", NULL, "/tmp", "c", 5000,
                                      out, sizeof(out)),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it could not be run (/nonexistent/ircd"));
 }
 
@@ -130,7 +130,7 @@ static void a_failed_fork_says_why(void **state)
   assert_int_equal(setrlimit(RLIMIT_NPROC, &none), 0);
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out,
                                      sizeof(out)),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   setrlimit(RLIMIT_NPROC, &old);
   assert_non_null(strstr(out, "it could not be started: fork(): "));
 }
@@ -166,37 +166,36 @@ static void a_large_descriptor_limit_is_quick(void **state)
   assert_true(t0 < 150);
 }
 
-/* A check that dies of a signal of its own crashed on the file: the
- * server's own parse would likely crash too.  Its output is kept, and a
- * last line says how it ended. */
-static void a_crash_is_reported(void **state)
+/* A check that dies of a signal fails.  Its output is kept, and a last
+ * line says how it ended. */
+static void a_crash_fails(void **state)
 {
   char out[512], small[24];
 
   (void)state;
   make_script("echo 'reading ircd.conf'; kill -SEGV $$");
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
-                   CONF_PRECHECK_CRASHED);
+                   CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "reading ircd.conf\nit died of signal 11"));
   make_script("kill -ABRT $$");   /* an assert() */
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
-                   CONF_PRECHECK_CRASHED);
+                   CONF_PRECHECK_FAILED);
   /* No room: the note goes over the tail of the output. */
   make_script("echo 0123456789012345678901234567890123456789; exit 4");
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, small,
                                      sizeof(small)),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   assert_int_equal(strlen(small), sizeof(small) - 1);
   assert_non_null(strstr(small, "status 4"));
   /* Room for the note: it starts a line of its own over the tail. */
   make_script("echo 01234567890123456789012345678901234567890123456789; exit 4");
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, 40),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   assert_int_equal(strlen(out), 39);
   assert_non_null(strstr(out, "\nit exited with status 4\n"));
-  make_script("kill -TERM $$");   /* a stop, not a fault */
+  make_script("kill -TERM $$");   /* a stop */
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
-                   CONF_PRECHECK_UNAVAILABLE);
+                   CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it died of signal 15"));
 }
 
@@ -221,8 +220,7 @@ static void sigchld_ignored_is_still_waited_for(void **state)
   sigaction(SIGCHLD, &ign, NULL);
 }
 
-/* A check that does not end in time is killed and reaped, and says so:
- * a timeout is not "did not run" (the rehash abandons on it). */
+/* A check that does not end in time is killed and reaped, and fails. */
 static void a_hung_check_is_killed(void **state)
 {
   char out[512];
@@ -233,14 +231,15 @@ static void a_hung_check_is_killed(void **state)
   make_script("exec sleep 30");
   t0 = now_ms();
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 300, out, sizeof(out)),
-                   CONF_PRECHECK_TIMEOUT);
+                   CONF_PRECHECK_FAILED);
   assert_true(now_ms() - t0 < 3000);
+  assert_non_null(strstr(out, "it did not finish in 300 ms"));
   assert_int_equal(waitpid(-1, &st, WNOHANG), -1);   /* nothing left */
   /* Closing its output does not end the wait early either. */
   make_script("exec >&- 2>&-; exec sleep 30");
   t0 = now_ms();
   assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 300, out, sizeof(out)),
-                   CONF_PRECHECK_TIMEOUT);
+                   CONF_PRECHECK_FAILED);
   assert_true(now_ms() - t0 < 3000);
   assert_int_equal(waitpid(-1, &st, WNOHANG), -1);
 }
@@ -299,10 +298,10 @@ int main(void)
     cmocka_unit_test_teardown(errors_are_reported, teardown),
     cmocka_unit_test_teardown(a_clean_file_passes, teardown),
     cmocka_unit_test_teardown(the_arguments, teardown),
-    cmocka_unit_test_teardown(other_ends_are_unavailable, teardown),
+    cmocka_unit_test_teardown(other_ends_fail, teardown),
     cmocka_unit_test_teardown(a_failed_fork_says_why, teardown),
     cmocka_unit_test_teardown(a_large_descriptor_limit_is_quick, teardown),
-    cmocka_unit_test_teardown(a_crash_is_reported, teardown),
+    cmocka_unit_test_teardown(a_crash_fails, teardown),
     cmocka_unit_test_teardown(sigchld_ignored_is_still_waited_for, teardown),
     cmocka_unit_test_teardown(a_hung_check_is_killed, teardown),
     cmocka_unit_test_teardown(a_leftover_process_does_not_hold_the_wait, teardown),

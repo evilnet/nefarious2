@@ -174,7 +174,7 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
     snprintf(note, sizeof(note), "it could not be started: pipe(): %s\n",
              strerror(errno));
     note_end(out, outlen, 0, note);
-    return CONF_PRECHECK_UNAVAILABLE;
+    return CONF_PRECHECK_FAILED;
   }
   /* No signal handler of the server's may run in the child before it
    * resets them. */
@@ -191,7 +191,7 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
     snprintf(note, sizeof(note), "it could not be started: fork(): %s\n",
              strerror(i));
     note_end(out, outlen, 0, note);
-    return CONF_PRECHECK_UNAVAILABLE;
+    return CONF_PRECHECK_FAILED;
   }
   close(p[1]);
   fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
@@ -245,7 +245,7 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
   close(p[0]);
   if (gone) {
     note_end(out, outlen, used, "it was reaped elsewhere\n");
-    return CONF_PRECHECK_UNAVAILABLE;
+    return CONF_PRECHECK_FAILED;
   }
   /* Anything it left behind, and the check itself if it is still
    * running: its pid is not reaped yet, so the group is still its. */
@@ -266,7 +266,7 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
     }
     snprintf(note, sizeof(note), "it did not finish in %d ms\n", timeout_ms);
     note_end(out, outlen, used, note);
-    return CONF_PRECHECK_TIMEOUT;
+    return CONF_PRECHECK_FAILED;
   }
   while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
     ;                           /* a zombie: at once */
@@ -274,26 +274,15 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
     return CONF_PRECHECK_OK;
   if (WIFEXITED(status) && WEXITSTATUS(status) == CHKCONF_ERRORS)
     return CONF_PRECHECK_ERRORS;
-  if (WIFSIGNALED(status)) {
+  if (WIFSIGNALED(status))
     snprintf(note, sizeof(note), "it died of signal %d (%s)\n",
              WTERMSIG(status), strsignal(WTERMSIG(status)));
-    note_end(out, outlen, used, note);
-    /* A fault is the parser's own; any other signal (SIGKILL from the
-     * OOM killer, SIGTERM from a stop) came from outside. */
-    switch (WTERMSIG(status)) {
-    case SIGSEGV: case SIGBUS: case SIGILL: case SIGFPE: case SIGABRT:
-    case SIGSYS: case SIGTRAP:
-      return CONF_PRECHECK_CRASHED;
-    default:
-      return CONF_PRECHECK_UNAVAILABLE;
-    }
-  }
-  if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
+  else if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
     snprintf(note, sizeof(note), "it could not be run (%s: exit status "
              "127)\n", argv0);
   else
     snprintf(note, sizeof(note), "it exited with status %d\n",
              WIFEXITED(status) ? WEXITSTATUS(status) : -1);
   note_end(out, outlen, used, note);
-  return CONF_PRECHECK_UNAVAILABLE;
+  return CONF_PRECHECK_FAILED;
 }
