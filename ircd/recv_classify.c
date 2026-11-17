@@ -17,6 +17,8 @@
 #include "client.h"
 #include "ircd_defs.h"
 
+#include <string.h>
+
 int
 recv_classify(struct Client *cptr, const char *buf, unsigned int len)
 {
@@ -85,4 +87,112 @@ recv_classify(struct Client *cptr, const char *buf, unsigned int len)
   }
 
   return overrun;
+}
+
+/** Client tag-region cap: '@' plus the 4094 bytes message-tags allows. */
+#define RECV_CLIENT_TAG_CAP 4095
+/** A client line this long (tags and body together) has stopped being an
+ * overlong message and become a flood: recv_clip() reports it. */
+#define RECV_CLIP_FATAL 65536
+
+/** Cut a client's overlong lines down as they arrive, in place.
+ *
+ * message-tags says a line whose tags are over the limit gets
+ * ERR_INPUTTOOLONG (417), and the client stays; a body over the 512-byte
+ * line is answered the same way.  recv_classify() can only report such a
+ * line, after which the client was dropped.  This keeps each region's
+ * bytes up to one past its cap and drops the rest, so the recvQ never
+ * holds more than a capped line, and the line still says it was too long:
+ * recv_line_overlong() sees the extra byte when the line is parsed, and
+ * the parser answers 417 instead of running it.
+ *
+ * State lives on the Connection, as for recv_classify(), so a line split
+ * over several reads is cut the same as one read whole.
+ *
+ * @param cptr Client (not a server or handshake) the bytes came from.
+ * @param buf Newly-read bytes; overwritten with the bytes kept.
+ * @param len In: bytes in @a buf.  Out: bytes kept.
+ * @return RECV_CLASSIFY_OK, or RECV_CLASSIFY_MSG_OVERRUN once one line has
+ *         run past RECV_CLIP_FATAL bytes (the caller drops the client).
+ */
+int
+recv_clip(struct Client *cptr, char *buf, unsigned int *len)
+{
+  struct Connection *con = cli_connect(cptr);
+  unsigned int i, out = 0;
+  int ret = RECV_CLASSIFY_OK;
+
+  for (i = 0; i < *len; i++) {
+    char c = buf[i];
+    int keep = 1;
+
+    if (c == '\n' || c == '\r') {
+      con_recv_state(con) = RECV_TAGS;
+      con_recv_tag_bytes(con) = 0;
+      con_recv_msg_bytes(con) = 0;
+    } else if (con_recv_state(con) == RECV_TAGS
+               && con_recv_tag_bytes(con) == 0 && c == '@') {
+      con_recv_tag_bytes(con) = 1;
+    } else if (con_recv_state(con) == RECV_TAGS
+               && con_recv_tag_bytes(con) != 0) {
+      if (c == ' ')
+        con_recv_state(con) = RECV_MSG;         /* the separator: kept */
+      else if (con_recv_tag_bytes(con) + con_recv_msg_bytes(con)
+               < RECV_CLIP_FATAL)
+        keep = ++con_recv_tag_bytes(con) <= RECV_CLIENT_TAG_CAP + 1;
+      else
+        keep = 0;
+    } else {
+      con_recv_state(con) = RECV_MSG;
+      if (con_recv_tag_bytes(con) + con_recv_msg_bytes(con)
+          < RECV_CLIP_FATAL)
+        keep = ++con_recv_msg_bytes(con) <= BUFSIZE + 1;
+      else
+        keep = 0;
+    }
+    if (con_recv_tag_bytes(con) + con_recv_msg_bytes(con) >= RECV_CLIP_FATAL)
+      ret = RECV_CLASSIFY_MSG_OVERRUN;
+    if (keep)
+      buf[out++] = c;
+  }
+  *len = out;
+  return ret;
+}
+
+/** Whether a client's line, as recv_clip() kept it, was too long: its tag
+ * region (the '@' included) is over RECV_CLIENT_TAG_CAP, or its body (all
+ * after the space that ends the tags, or the whole line without tags) over
+ * BUFSIZE.  The line has no CR or LF.
+ * @param cptr Client the line came from (unused; kept for symmetry).
+ * @param line Line bytes.
+ * @param len Bytes in @a line.
+ * @return Non-zero for a line to answer with ERR_INPUTTOOLONG.
+ */
+int
+recv_line_overlong(struct Client *cptr, const char *line, unsigned int len)
+{
+  const char *body = line;
+  const char *end = line + len;
+
+  (void)cptr;
+  if (len && *line == '@') {
+    const char *sp = memchr(line, ' ', len);
+
+    if (!sp)
+      return len > RECV_CLIENT_TAG_CAP;
+    if ((unsigned int)(sp - line) > RECV_CLIENT_TAG_CAP)
+      return 1;
+    body = sp + 1;
+  }
+  return (unsigned int)(end - body) > BUFSIZE;
+}
+
+/** Forget the line in progress on @a con: its recvQ was dropped or moved,
+ * and the counts were for those bytes. */
+void
+recv_classify_reset(struct Connection *con)
+{
+  con_recv_state(con) = RECV_TAGS;
+  con_recv_tag_bytes(con) = 0;
+  con_recv_msg_bytes(con) = 0;
 }

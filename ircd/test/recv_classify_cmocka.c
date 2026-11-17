@@ -399,6 +399,212 @@ static void test_property_random_splits(void **state)
     }
 }
 
+/* ========== recv_clip(): a client's overlong line is cut, not fatal ========== */
+
+/* Clip @a in (copied, since recv_clip() works in place) and return the
+ * kept bytes' length in *out_len. */
+static int
+clip_copy(struct Client *cli, const char *in, unsigned int len, char *out,
+          unsigned int *out_len)
+{
+    memcpy(out, in, len);
+    *out_len = len;
+    return recv_clip(cli, out, out_len);
+}
+
+static void test_clip_short_line_unchanged(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    const char line[] = "@a=b PRIVMSG #c :hi\r\nPING x\r\n";
+    char out[64];
+    unsigned int n;
+
+    setup_client(&cli, &con);
+    assert_int_equal(clip_copy(&cli, line, sizeof(line) - 1, out, &n),
+                     RECV_CLASSIFY_OK);
+    assert_int_equal(n, sizeof(line) - 1);
+    assert_memory_equal(out, line, n);
+}
+
+static void test_clip_body_keeps_one_over_cap(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char line[2000], out[2000];
+    unsigned int n;
+
+    setup_client(&cli, &con);
+    memset(line, 'A', 1000);
+    memcpy(line + 1000, "\r\nPING x\r\n", 10);
+    assert_int_equal(clip_copy(&cli, line, 1010, out, &n), RECV_CLASSIFY_OK);
+    /* 513 body bytes kept: one over the cap marks the line as overlong
+     * (recv_line_overlong()); the next line is whole. */
+    assert_int_equal(n, 513 + 10);
+    assert_memory_equal(out + 513, "\r\nPING x\r\n", 10);
+    assert_int_equal(recv_line_overlong(&cli, out, 513), 1);
+    assert_int_equal(recv_line_overlong(&cli, out + 515, 6), 0);
+}
+
+static void test_clip_tags_keep_one_over_cap(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char line[6000], out[6000];
+    unsigned int n;
+
+    setup_client(&cli, &con);
+    line[0] = '@';
+    memset(line + 1, 'x', 5000);
+    memcpy(line + 5001, " PRIVMSG #c :hi\n", 16);
+    assert_int_equal(clip_copy(&cli, line, 5017, out, &n), RECV_CLASSIFY_OK);
+    assert_int_equal(n, 4096 + 16);
+    assert_memory_equal(out + 4096, " PRIVMSG #c :hi\n", 16);
+    assert_int_equal(recv_line_overlong(&cli, out, n - 1), 1);
+}
+
+static void test_clip_split_feed_matches_whole(void **state)
+{
+    (void)state;
+    struct Client a, b;
+    struct Connection ca, cb;
+    static char line[3000], whole[3000], split[3000];
+    unsigned int n, i, m, total = 0;
+
+    setup_client(&a, &ca);
+    setup_client(&b, &cb);
+    memset(line, 'B', 2000);
+    memcpy(line + 2000, "\nPING y\n", 8);
+    assert_int_equal(clip_copy(&a, line, 2008, whole, &n), RECV_CLASSIFY_OK);
+    for (i = 0; i < 2008; i += 7) {
+        m = 2008 - i < 7 ? 2008 - i : 7;
+        memcpy(split + total, line + i, m);
+        assert_int_equal(recv_clip(&b, split + total, &m), RECV_CLASSIFY_OK);
+        total += m;
+    }
+    assert_int_equal(total, n);
+    assert_memory_equal(whole, split, n);
+}
+
+static void test_clip_at_cap_not_overlong(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char line[600], out[600];
+    unsigned int n;
+
+    setup_client(&cli, &con);
+    memset(line, 'A', 512);
+    line[512] = '\n';
+    assert_int_equal(clip_copy(&cli, line, 513, out, &n), RECV_CLASSIFY_OK);
+    assert_int_equal(n, 513);
+    assert_int_equal(recv_line_overlong(&cli, out, 512), 0);
+}
+
+static void test_clip_endless_line_is_fatal(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char chunk[4096];
+    unsigned int i, n;
+    int r = RECV_CLASSIFY_OK;
+
+    setup_client(&cli, &con);
+    memset(chunk, 'Z', sizeof(chunk));
+    /* A line that never ends is a flood, not a long message. */
+    for (i = 0; i < 64 && r == RECV_CLASSIFY_OK; i++) {
+        n = sizeof(chunk);
+        r = recv_clip(&cli, chunk, &n);
+    }
+    assert_int_equal(r, RECV_CLASSIFY_MSG_OVERRUN);
+}
+
+static void test_overlong_tag_only_line(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char line[4200];
+
+    setup_client(&cli, &con);
+    line[0] = '@';
+    memset(line + 1, 'x', 4095);
+    assert_int_equal(recv_line_overlong(&cli, line, 4096), 1);
+    assert_int_equal(recv_line_overlong(&cli, line, 4095), 0);
+}
+
+static void test_clip_split_inside_tags(void **state)
+{
+    (void)state;
+    struct Client a, b;
+    struct Connection ca, cb;
+    static char line[6000], whole[6000], split[6000];
+    unsigned int n, i, m, total = 0, step;
+
+    for (step = 1; step < 9; step++) {
+        setup_client(&a, &ca);
+        setup_client(&b, &cb);
+        total = 0;
+        line[0] = '@';
+        memset(line + 1, 't', 4500);
+        memcpy(line + 4501, " PRIVMSG #c :", 13);
+        memset(line + 4514, 'b', 700);
+        memcpy(line + 5214, "\r\nPING z\r\n", 10);
+        assert_int_equal(clip_copy(&a, line, 5224, whole, &n), RECV_CLASSIFY_OK);
+        /* 4096 tag bytes, the space, 513 body bytes, then the next line. */
+        assert_int_equal(n, 4096 + 1 + 513 + 10);
+        for (i = 0; i < 5224; i += m) {
+            m = 5224 - i < step * 997 ? 5224 - i : step * 997;
+            memcpy(split + total, line + i, m);
+            assert_int_equal(recv_clip(&b, split + total, &m), RECV_CLASSIFY_OK);
+            total += m;
+            m = 5224 - i < step * 997 ? 5224 - i : step * 997;
+        }
+        assert_int_equal(total, n);
+        assert_memory_equal(whole, split, n);
+    }
+}
+
+static void test_clip_fatal_boundary(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char chunk[65536];
+    unsigned int n;
+
+    setup_client(&cli, &con);
+    memset(chunk, 'Z', sizeof(chunk));
+    n = 65535;
+    assert_int_equal(recv_clip(&cli, chunk, &n), RECV_CLASSIFY_OK);
+    n = 1;
+    assert_int_equal(recv_clip(&cli, chunk, &n), RECV_CLASSIFY_MSG_OVERRUN);
+}
+
+static void test_reset_forgets_line(void **state)
+{
+    (void)state;
+    struct Client cli;
+    struct Connection con;
+    static char buf[1000];
+    unsigned int n = 600;
+
+    setup_client(&cli, &con);
+    memset(buf, 'Q', 600);
+    recv_clip(&cli, buf, &n);
+    recv_classify_reset(&con);
+    memcpy(buf, "PING a\n", 7);
+    n = 7;
+    assert_int_equal(recv_clip(&cli, buf, &n), RECV_CLASSIFY_OK);
+    assert_int_equal(n, 7);
+    assert_memory_equal(buf, "PING a\n", 7);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -426,6 +632,17 @@ int main(void)
         cmocka_unit_test(test_lone_cr),
 
         cmocka_unit_test(test_property_random_splits),
+
+        cmocka_unit_test(test_clip_short_line_unchanged),
+        cmocka_unit_test(test_clip_body_keeps_one_over_cap),
+        cmocka_unit_test(test_clip_tags_keep_one_over_cap),
+        cmocka_unit_test(test_clip_split_feed_matches_whole),
+        cmocka_unit_test(test_clip_at_cap_not_overlong),
+        cmocka_unit_test(test_clip_endless_line_is_fatal),
+        cmocka_unit_test(test_overlong_tag_only_line),
+        cmocka_unit_test(test_clip_split_inside_tags),
+        cmocka_unit_test(test_clip_fatal_boundary),
+        cmocka_unit_test(test_reset_forgets_line),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

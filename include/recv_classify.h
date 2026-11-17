@@ -40,4 +40,22 @@ struct Client;
  */
 extern int recv_classify(struct Client *cptr, const char *buf, unsigned int len);
 
+struct Connection;
+
+/* Forget the line in progress: for code that drops a connection's recvQ
+ * (STARTTLS) or moves it to another Connection (bouncer transplant). */
+extern void recv_classify_reset(struct Connection *con);
+
+/* Cut a client's overlong lines down in place, keeping one byte past each
+ * region's cap so that recv_line_overlong() can tell the line was too
+ * long; *len becomes the bytes kept.  Returns RECV_CLASSIFY_MSG_OVERRUN
+ * when a single line has become a flood (the caller drops the client),
+ * else RECV_CLASSIFY_OK.  Clients only: servers keep recv_classify(). */
+extern int recv_clip(struct Client *cptr, char *buf, unsigned int *len);
+
+/* Non-zero when a client line kept by recv_clip() was over a cap, and gets
+ * ERR_INPUTTOOLONG rather than being run. */
+extern int recv_line_overlong(struct Client *cptr, const char *line,
+                              unsigned int len);
+
 #endif /* INCLUDED_recv_classify_h */

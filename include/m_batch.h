@@ -60,6 +60,10 @@ extern int multiline_add_message(struct Client *sptr, const char *target,
  */
 extern void s2s_multiline_cleanup_link(struct Client *link);
 
+/** Fail @a cptr's open client multiline batch with FAIL BATCH
+ * MULTILINE_INVALID; its reference stays dead (m_batch.c). */
+extern void multiline_fail_batch(struct Client *cptr);
+
 /** Discard @a cptr's open client multiline batch silently (m_batch.c). */
 extern void multiline_discard_batch(struct Client *cptr);
 

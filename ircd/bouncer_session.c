@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "recv_classify.h"
 #include "bouncer_record.h"
 #include "bouncer_converge.h"
 #include "bouncer_wire.h"
@@ -9910,6 +9911,13 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   DBufClear(&con_recvQ(ghost_con));
   con_recvQ(ghost_con) = con_recvQ(temp_con);
   memset(&con_recvQ(temp_con), 0, sizeof(con_recvQ(temp_con)));
+  /* The recv classifier's line state counts the recvQ's bytes: it moves
+   * with them, or a line split over the transplant would be cut against
+   * the dead socket's count (recv_clip()). */
+  con_recv_state(ghost_con) = con_recv_state(temp_con);
+  con_recv_tag_bytes(ghost_con) = con_recv_tag_bytes(temp_con);
+  con_recv_msg_bytes(ghost_con) = con_recv_msg_bytes(temp_con);
+  recv_classify_reset(temp_con);
 
   /* WebSocket frame/fragment reassembly state rides with the recvQ:
    * a frame split across the transplant would otherwise be dropped

@@ -835,6 +835,25 @@ void multiline_discard_batch(struct Client *cptr)
   con_ml_dead_batch_id(con)[0] = '\0';
 }
 
+/** Fail @a cptr's open client multiline batch: one of its lines could not
+ * be read (parse_client(): a line too long, answered with
+ * ERR_INPUTTOOLONG).  The client hears FAIL BATCH MULTILINE_INVALID, and
+ * the batch's reference stays dead, so its later lines are ignored as for
+ * any failed batch.  No-op without an open batch. */
+void multiline_fail_batch(struct Client *cptr)
+{
+  struct Connection *con;
+
+  if (!cptr || !MyConnect(cptr))
+    return;
+  con = cli_connect(cptr);
+  if (!con_ml_batch_id(con)[0])
+    return;
+  send_fail(cptr, "BATCH", "MULTILINE_INVALID", NULL,
+            "A line of the multiline batch was too long");
+  clear_multiline_batch(con);
+}
+
 /** The open client multiline batch of @a cptr is about to be discarded
  * because draft/multiline went inert (cap_dependents_drop(), before the
  * CAP ACK), while labeled-response stays in use: a labeled batch (its
