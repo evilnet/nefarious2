@@ -325,64 +325,6 @@ static void is_quit(void **state)
                input_hold_is_quit(rows[i].line), rows[i].quit);
 }
 
-/** A command whose answer is computed off the main thread (OPER, SETHOST
- * password checks): the client's next lines wait for that answer, so
- * replies come back in the order the commands were sent. */
-static void await_holds_until_answer(void **state)
-{
-  struct InputHold h;
-
-  (void)state;
-  memset(&h, 0, sizeof h);
-  assert_int_equal(input_await_held(&h, 0, T0), 0);       /* nothing pending */
-  assert_int_equal(input_await_held(&h, 1, T0), 1);       /* pending: wait */
-  assert_int_equal(h.await_since, T0);
-  assert_int_equal(input_await_held(&h, 1, T0 + INPUT_AWAIT_MAX - 1), 1);
-  assert_int_equal(input_await_held(&h, 0, T0 + 1), 0);   /* answered */
-  assert_int_equal(h.await_since, 0);
-}
-
-/** An answer that never comes does not hold the client's input for good:
- * at INPUT_AWAIT_MAX the lines are parsed, out of order if need be. */
-static void await_is_bounded(void **state)
-{
-  struct InputHold h;
-
-  (void)state;
-  memset(&h, 0, sizeof h);
-  assert_int_equal(input_await_held(&h, 1, T0), 1);
-  assert_int_equal(input_await_held(&h, 1, T0 + INPUT_AWAIT_MAX), 0);
-  assert_int_equal(input_await_held(&h, 1, T0 + INPUT_AWAIT_MAX + 5), 0);
-}
-
-/** input_await_end() forgets the wait, so the next command's answer is
- * waited for in full. */
-static void await_end_resets(void **state)
-{
-  struct InputHold h;
-
-  (void)state;
-  memset(&h, 0, sizeof h);
-  assert_int_equal(input_await_held(&h, 1, T0), 1);
-  input_await_end(&h);
-  assert_int_equal(h.await_since, 0);
-  assert_int_equal(input_await_held(&h, 1, T0 + 100), 1);
-  assert_int_equal(h.await_since, T0 + 100);
-}
-
-/** The wait is not the orphan hold: it neither starts that hold nor
- * doubles the receive allowance. */
-static void await_is_not_a_hold(void **state)
-{
-  struct InputHold h;
-
-  (void)state;
-  memset(&h, 0, sizeof h);
-  assert_int_equal(input_await_held(&h, 1, T0), 1);
-  assert_int_equal(h.since, 0);
-  assert_int_equal(input_hold_cap(&h, 1000, 0, T0), 1000);
-}
-
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -397,10 +339,6 @@ int main(void)
     cmocka_unit_test(ping_due),
     cmocka_unit_test(pong_free),
     cmocka_unit_test(is_quit),
-    cmocka_unit_test(await_holds_until_answer),
-    cmocka_unit_test(await_is_bounded),
-    cmocka_unit_test(await_end_resets),
-    cmocka_unit_test(await_is_not_a_hold),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

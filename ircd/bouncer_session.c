@@ -9526,14 +9526,11 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * completion must not oper the new connection nor answer it under the
    * old line's label, and the ghost must not stay "already in progress".
    * The same for an asynchronous SETHOST check: its result was for the
-   * old socket.  The ghost's input waited for that answer
-   * (s_bsd.c input_awaits_answer()): the wait ends with it. */
+   * old socket. */
   ClearOperPending(ghost);
   cli_opercookie(ghost) = 0;
   ClearSetHostPending(ghost);
   cli_checkcookie(ghost) = 0;
-  if (cli_connect(ghost))
-    input_await_end(&con_input_hold(cli_connect(ghost)));
 
 #ifdef USE_SSL
   /* Gate: Refuse revival if ghost is in +Z channels and temp is plaintext.

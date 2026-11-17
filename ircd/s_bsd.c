@@ -1453,15 +1453,12 @@ static int input_held(struct Client *cptr)
  * of its that is being computed off the main thread (an OPER or SETHOST
  * password check, ircd_crypt_verify_async())?  Lines parsed meanwhile
  * would be answered first, and a client (or a test) that reads replies in
- * order would take them for the earlier command's.  Bounded:
- * input_await_held().
+ * order would take them for the earlier command's.
  * @param[in] cptr A local client whose queue holds a line.
  * @return Non-zero when its lines must wait. */
 static int input_awaits_answer(struct Client *cptr)
 {
-  return input_await_held(&con_input_hold(cli_connect(cptr)),
-                          IsOperPending(cptr) || IsSetHostPending(cptr),
-                          CurrentTime);
+  return IsOperPending(cptr) || IsSetHostPending(cptr);
 }
 
 /** The off-thread answer @a cptr's input waited for has been sent
@@ -1470,10 +1467,7 @@ static int input_awaits_answer(struct Client *cptr)
  * @param[in] cptr A local client. */
 void client_input_resume(struct Client *cptr)
 {
-  if (!cptr || !MyConnect(cptr) || !cli_connect(cptr))
-    return;
-  input_await_end(&con_input_hold(cli_connect(cptr)));
-  if (!DBufLength(&(cli_recvQ(cptr))))
+  if (!cptr || !MyConnect(cptr) || !DBufLength(&(cli_recvQ(cptr))))
     return;
   if (t_onqueue(&(cli_proc(cptr))))
     timer_chg(&(cli_proc(cptr)), TT_ABSOLUTE, CurrentTime);
