@@ -25,13 +25,14 @@
  *
  * Its other user is a long read of a store (store_job.h: the federated
  * SEARCH responder's scan), which keeps its own count of the jobs it has
- * in the pool so the password checks always find a worker.  A work
+ * in the pool so a password check waits behind a bounded number of them
+ * (store_jobs_cap), never behind every read asked for.  A work
  * function runs beside the main thread: it may touch only what it was
  * handed and what is documented as safe off the main thread.  It cannot
  * log: the pool mutes its workers (log_thread_mute), so what a task has
  * to report goes back in its result and is logged from its callback.  And
- * an allocation that fails on a worker ends the process (ircd.c
- * outofmemory): there is no restart from off the main thread.
+ * an allocation that fails on a worker ends the process (ircd_alloc.c
+ * alloc_failed): there is no restart from off the main thread.
  *
  * Usage:
  * 1. Call thread_pool_init() at startup
