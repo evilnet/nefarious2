@@ -8,7 +8,8 @@
  *  - no pool, or a pool that is not running: the job runs on the caller,
  *    unmuted, and is answered before store_job_start() returns;
  *  - a running pool: run() on a worker with its logging muted (and the
- *    worker handed back unmuted), done() on the main thread;
+ *    worker left as the pool keeps it: muted, like every pool worker),
+ *    done() on the main thread;
  *  - the cap: one worker stays free of reads, the jobs over the cap wait
  *    in order, and past STORE_JOBS_WAIT_MAX a job runs on the caller;
  *  - the link gone while a job waits, is queued in the pool, or runs: the
@@ -319,9 +320,10 @@ static void probe_done(void *result, void *ctx)
   pthread_mutex_unlock(&rec_mutex);
 }
 
-/** A running pool: run() on a worker, muted; done() on the main thread;
- * and the worker goes back to the pool unmuted (the next task on it may be
- * a password check, which logs as it always did). */
+/** A running pool: run() on a worker, muted; done() on the main thread.
+ * The pool mutes its workers for their whole life (thread_pool.c), so the
+ * worker is still muted for the task after the job, and the main thread
+ * never is. */
 static void with_a_pool_the_job_runs_on_a_muted_worker(void **state)
 {
   struct TJob t, probe;
@@ -344,7 +346,8 @@ static void with_a_pool_the_job_runs_on_a_muted_worker(void **state)
   tjob_init(&probe, NULL);
   assert_int_equal(thread_pool_submit(muted_probe, &muted, probe_done, &probe), 0);
   poll_until_done(&probe);
-  assert_int_equal(muted, 0);
+  assert_int_equal(muted, 1);
+  assert_int_equal(log_thread_muted(), 0);
 }
 
 /** The cap is one worker fewer than the pool has: with every place taken
