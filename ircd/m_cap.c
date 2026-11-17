@@ -28,6 +28,8 @@
 
 #include "bouncer_session.h"
 #include "capab.h"
+#include "cap_line.h"
+#include "s_debug.h"
 #include "authtoken.h"
 #include "client.h"
 #include "ircd.h"
@@ -618,14 +620,6 @@ int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *
   return 0;
 }
 
-/** Send a CAP \a subcmd list of capability changes to \a sptr.
- * If more than one line is necessary, each line before the last has
- * an added "*" parameter before that line's capability list (CAP 302).
- * @param[in] sptr Client receiving capability list.
- * @param[in] set Capabilities to show as set (with ack and sticky modifiers).
- * @param[in] rem Capabalities to show as removed (with no other modifier).
- * @param[in] subcmd Name of capability subcommand.
- */
 /** Send a CAP reply of @a n lines (@a lines, each "CAP <nick> <sub> ...")
  * as the answer to a labeled CAP line: one line carries the label itself;
  * several go in a labeled-response batch (while the client holds batch;
@@ -655,9 +649,15 @@ static void cap_reply(struct Client *sptr, char lines[][BUFSIZE], int n)
 
 #define CAP_REPLY_LINES 16
 
+/** Send a CAP reply listing capabilities (send_caplist()).
+ * @param[in] narrow Leave out the vendor and draft capabilities from an
+ * LS (cap_ls_left_out()).
+ * @return 0, or -1 when nothing was sent because an LS for a client
+ * that must get one line did not fit on it: send it again narrow.
+ */
 static int
-send_caplist(struct Client *sptr, const struct CapSet *set,
-             const struct CapSet *rem, const char *subcmd)
+send_caplist_lines(struct Client *sptr, const struct CapSet *set,
+                   const struct CapSet *rem, const char *subcmd, int narrow)
 {
   char capbuf[BUFSIZE] = "", pfx[16], valbuf[128];
   static char lines[CAP_REPLY_LINES][BUFSIZE];
@@ -666,6 +666,11 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
   int i, loc, len, flags, pfx_len, val_len;
   int cap_version = cli_capab_version(sptr);
   int is_ls = (ircd_strcmp(subcmd, "LS") == 0);
+  int ls_or_list = is_ls || (ircd_strcmp(subcmd, "LIST") == 0);
+  /* A client older than CAP 302 gets one LS or LIST line, with no room
+   * kept for the "* " marker it never sees (cap_line.h). */
+  int multiline = cap_reply_multiline(cap_version, ls_or_list);
+  int reserve = cap_line_reserve(cap_version, ls_or_list);
 
   /* set up the buffer for the final LS message... */
   mb = msgq_make(sptr, "%:#C " MSG_CAP " %s %s :", &me,
@@ -692,6 +697,11 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
      * SERVICELIST, TOKEN NEW/DEL) when a service exists; the TOKEN
      * command itself never needs the cap. */
     if (capab_list[i].cap == CAP_DRAFT_AUTHTOKEN && is_ls && !authtoken_service_count())
+      continue;
+
+    /* An LS that must fit one line and did not: the vendor and draft
+     * capabilities are left out (cap_line.h). */
+    if (is_ls && cap_ls_left_out(capab_list[i].name, narrow))
       continue;
 
 #ifdef USE_SSL
@@ -771,15 +781,27 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     }
 
     len = capab_list[i].namelen + pfx_len + val_len; /* how much we'd add... */
-    if (msgq_bufleft(mb) < loc + len + 2) { /* would add too much; must flush */
-      /* For CAP 302+, use * continuation marker */
+    if (msgq_bufleft(mb) < loc + len + reserve) { /* would add too much; must flush */
+      if (!multiline) {
+        /* One line only: an LS is sent again without the vendor and
+         * draft capabilities; past that (or for a LIST), the line ends
+         * with the last capability that fits. */
+        if (is_ls && !narrow) {
+          msgq_clean(mb);
+          return -1;
+        }
+        Debug((DEBUG_INFO, "CAP %s for %s: list cut to one line at %s",
+               subcmd, cli_name(sptr), capab_list[i].name));
+        break;
+      }
+      /* A 302 client's LS or LIST line is marked "* " to continue */
       if (nlines == CAP_REPLY_LINES - 1) {   /* cannot happen with today's list */
         cap_reply(sptr, lines, nlines);
         nlines = 0;
       }
       ircd_snprintf(0, lines[nlines++], BUFSIZE, MSG_CAP " %s %s %s:%s",
                     BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd,
-                    cap_version >= 302 ? "* " : "", capbuf);
+                    reserve ? "* " : "", capbuf);
       capbuf[(loc = 0)] = '\0'; /* re-terminate the buffer... */
     }
 
@@ -795,6 +817,25 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
                 BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd, capbuf);
   cap_reply(sptr, lines, nlines);   /* labeled: one line or one batch */
 
+  return 0;
+}
+
+/** Send a CAP \a subcmd list of capabilities to \a sptr.  A 302
+ * client's LS or LIST may take several lines, each before the last with
+ * an added "*" parameter before its capability list; any other client's
+ * LS or LIST is one line (cap_line.h).  Other replies split unmarked.
+ * @param[in] sptr Client receiving capability list.
+ * @param[in] set Capabilities to show as set (with ack and sticky modifiers).
+ * @param[in] rem Capabalities to show as removed (with no other modifier).
+ * @param[in] subcmd Name of capability subcommand.
+ * @return Zero.
+ */
+static int
+send_caplist(struct Client *sptr, const struct CapSet *set,
+             const struct CapSet *rem, const char *subcmd)
+{
+  if (send_caplist_lines(sptr, set, rem, subcmd, 0) < 0)
+    send_caplist_lines(sptr, set, rem, subcmd, 1);
   return 0; /* convenience return */
 }
 
