@@ -1397,6 +1397,23 @@ account, so only fake lag bounds how fast it guesses (12 guesses in 7.4
 seconds measured with fake lag off; with it on, roughly one guess every
 few seconds).
 
+THREAD_POOL_SIZE
+  * Type: integer
+  * Default: 4
+
+The number of worker threads the server starts for work that would
+otherwise hold up the main loop; 0 or less means the default.  Read once
+at start: a SET or REHASH does not resize the pool.  Two things run
+there.  Password checks (OPER, SETHOST, WEBIRC) are hashed on a worker.
+And a storage server's answer to another server's SEARCH is scanned
+there: each scan reads up to 50,000 history rows, and one SEARCH without
+`in=` asks for up to eight of them.  The scans take one worker fewer than
+the pool has (a pool of one: that one), at most eight, so a password check
+never waits behind a queue of scans; the scans over that number wait
+their turn, in order.  With no pool (it could not be started, or a build
+without threads) both run on the main loop as they did before: the answers
+are the same, and the server stalls for as long as each one takes.
+
 After an account change the connection's mode-synced user modes (+i, +p,
 +q, +R, +D, +Y, +y, +b) are those of the new account's settings, else the
 connection class's default -- none is kept from the old account -- and a
