@@ -302,7 +302,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     }
   }
 
-  /* evilnet/channel-relocate, "Status preservation": a member of the old
+  /* evilnet.github.io/channel-relocate, "Status preservation": a member of the old
    * channel's tombstone who follows -- this JOIN, of the channel the
    * tombstone redirects to -- takes the status it holds in the tombstone
    * right now into this channel and is parted from the tombstone

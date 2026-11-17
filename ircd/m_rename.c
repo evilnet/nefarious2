@@ -105,7 +105,7 @@ static void send_rename_to_member(struct Client *sptr, struct Client *acptr,
                                   struct Channel *chptr, const char *oldname,
                                   const char *reason);
 
-/* Relocation mode (evilnet/channel-relocate) -- implementation lives in the
+/* Relocation mode (evilnet.github.io/channel-relocate) -- implementation lives in the
  * "Relocation" section below; declared here because the pending-rename
  * completion path above it dispatches into relocation mode too. */
 struct RelocateTombstone;
@@ -1028,7 +1028,7 @@ static void send_rename_to_members(struct Client *sptr, struct Channel *chptr,
   }
 }
 
-/* ========== Relocation (evilnet/channel-relocate) ========== */
+/* ========== Relocation (evilnet.github.io/channel-relocate) ========== */
 
 /** Is this server running relocation mode?
  *
@@ -2300,7 +2300,7 @@ struct RelocateMover {
 };
 
 /** Tell one LOCAL member who stays in a tombstone that the channel has
- * moved: RELOCATE when its connection negotiated evilnet/channel-relocate,
+ * moved: RELOCATE when its connection negotiated evilnet.github.io/channel-relocate,
  * the fallback NOTICE otherwise.  It must NOT get a RENAME: that message
  * asserts "your membership now points at the new name" and would
  * desynchronise a client that honours it.
