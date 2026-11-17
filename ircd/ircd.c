@@ -511,6 +511,12 @@ static void outofmemory(void) {
   server_restart("Out of Memory");
 }
 
+/** An allocation failed on another thread, and the process exits when
+ * this returns: say so where that thread can (it cannot log). */
+static void outofmemory_elsewhere(void) {
+  log_dying_line("out of memory off the main thread, exiting");
+}
+
 
 /*----------------------------------------------------------------------------
  * write_pidfile
@@ -1111,6 +1117,11 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+  /* Descriptor 2 is stderr, or the debug log's (reserved just above),
+   * exactly when it was not closed: what log_dying_line() may write to.
+   * A daemon without -x has closed it, and the number is reused. */
+  log_stderr_is_ours((thisServer.bootopt
+                      & (BOOT_DEBUG | BOOT_TTY | BOOT_CHKCONF)) != 0);
 
   event_init(MAXCONNECTIONS);
 
@@ -1119,7 +1130,7 @@ int main(int argc, char **argv) {
 
   init_isupport(); /* initialize RPL_ISUPPORT... */
   log_init(*argv);
-  set_nomem_handler(outofmemory);   /* this thread's, and no other's */
+  set_nomem_handlers(outofmemory, outofmemory_elsewhere);
 
   initload();
   init_list();

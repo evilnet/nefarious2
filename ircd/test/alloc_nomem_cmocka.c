@@ -7,13 +7,14 @@
  * waiting for the caller's own store job, and took every later DIE,
  * SIGTERM and RESTART with it.  DoMalloc() and its siblings therefore
  * call the handler on the thread that set it and on no other; anywhere
- * else they write one line to stderr and _exit().
+ * else they call the other handler, which says why (ircd.c:
+ * log_dying_line), and _exit().
  *
  * Links the REAL ../ircd_alloc.o.  malloc() and realloc() are wrapped
  * (-Wl,--wrap) to fail on request, _exit() to record the status and end
- * the calling thread instead of the process, write() to keep what goes
- * to descriptor 2.  The handler set here stands for outofmemory(): it
- * counts its calls.
+ * the calling thread instead of the process.  The handlers set here
+ * stand for outofmemory() and outofmemory_elsewhere(): they count their
+ * calls.
  */
 #include "config.h"
 
@@ -41,7 +42,9 @@ static pthread_t handler_thread;
 static int exit_calls;          /**< _exit() was called ... */
 static int exit_status = -1;    /**< ... with this ... */
 static pthread_t exit_thread;   /**< ... on this thread */
-static char stderr_text[256];   /**< what write(2, ...) was given */
+static int elsewhere_calls;     /**< the other handler ran ... */
+static pthread_t elsewhere_thread;
+static int elsewhere_before_exit; /**< ... before _exit() */
 
 void *__real_malloc(size_t size);
 void *__wrap_malloc(size_t size)
@@ -65,19 +68,13 @@ void __wrap__exit(int status)
   pthread_exit(NULL);
 }
 
-ssize_t __real_write(int fd, const void *buf, size_t n);
-ssize_t __wrap_write(int fd, const void *buf, size_t n)
+/** outofmemory_elsewhere()'s stand-in: says why, and returns. */
+static void elsewhere(void)
 {
-  if (fd == 2) {
-    size_t have = strlen(stderr_text);
-
-    if (n > sizeof(stderr_text) - 1 - have)
-      n = sizeof(stderr_text) - 1 - have;
-    memcpy(stderr_text + have, buf, n);
-    stderr_text[have + n] = '\0';
-    return (ssize_t)n;
-  }
-  return __real_write(fd, buf, n);
+  elsewhere_calls++;
+  elsewhere_thread = pthread_self();
+  /* Still before the exit. */
+  elsewhere_before_exit = (exit_calls == 0);
 }
 
 /** outofmemory()'s stand-in.  The real one never returns to a caller
@@ -95,8 +92,8 @@ static int setup(void **state)
   handler_calls = 0;
   exit_calls = 0;
   exit_status = -1;
-  stderr_text[0] = '\0';
-  set_nomem_handler(handler);   /* this thread is the main thread */
+  elsewhere_calls = 0;
+  set_nomem_handlers(handler, elsewhere);   /* this thread is the main thread */
   return 0;
 }
 
@@ -162,7 +159,7 @@ static void a_failed_allocation_on_a_worker_never_runs_the_handler(void **state)
 
     exit_calls = 0;
     exit_status = -1;
-    stderr_text[0] = '\0';
+    elsewhere_calls = 0;
     fail_alloc = 1;
     run_worker(&w);
     fail_alloc = 0;
@@ -174,8 +171,10 @@ static void a_failed_allocation_on_a_worker_never_runs_the_handler(void **state)
     /* Nothing after the failure ran on the worker: no NULL block went
      * back to code that does not check for one. */
     assert_int_equal(w.returned, 0);
-    assert_string_equal(stderr_text,
-                        "ircd: out of memory off the main thread, exiting\n");
+    /* It said so first, on the worker. */
+    assert_int_equal(elsewhere_calls, 1);
+    assert_true(pthread_equal(elsewhere_thread, exit_thread));
+    assert_true(elsewhere_before_exit);
   }
 }
 
@@ -192,7 +191,7 @@ static void a_failed_allocation_on_the_main_thread_runs_the_handler(void **state
   assert_int_equal(handler_calls, 1);
   assert_true(pthread_equal(handler_thread, pthread_self()));
   assert_int_equal(exit_calls, 0);
-  assert_string_equal(stderr_text, "");
+  assert_int_equal(elsewhere_calls, 0);
 }
 
 /** And an allocation that succeeds on a worker is an allocation. */

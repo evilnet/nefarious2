@@ -56,6 +56,11 @@
 
 int log_inassert = 0;
 
+/** Is descriptor 2 the process's stderr or debug log still?  A daemon
+ * closes it (close_connections) and the number goes to whatever opens
+ * next -- a client, a listener, a store's file. */
+static int log_stderr_ours;
+
 /** Set on a thread whose log lines are dropped (log_thread_mute). */
 #ifdef HAVE_PTHREAD
 static __thread int log_muted;
@@ -384,6 +389,7 @@ log_shutdown(void)
 {
   log_close();
   logInfo.shut = 1;
+  log_stderr_ours = 0;
 }
 
 /** Undo log_shutdown() and reopen the logs: server_restart() when its
@@ -411,6 +417,46 @@ int
 log_thread_muted(void)
 {
   return log_muted;
+}
+
+void
+log_stderr_is_ours(int ours)
+{
+  log_stderr_ours = ours ? 1 : 0;
+}
+
+/** Say @a text as the process dies; any thread, muted or not.
+ *
+ * For the line that must not be lost and cannot go through log_vwrite():
+ * a failed assert() or a failed allocation on a thread pool worker,
+ * whose log lines are dropped because log_vwrite() is the main thread's
+ * (log_thread_mute).  This uses none of that: one write() to descriptor
+ * 2 while it is ours, and syslog(), which locks for itself and has its
+ * own socket.  After log_shutdown() neither: descriptor 2 is closed or
+ * about to be, and syslog is not reconnected.  (A thread that gets here
+ * while the main thread is inside log_shutdown() may still write once to
+ * a descriptor 2 that is closing; no number is reused before
+ * close_connections() returns.)
+ */
+void
+log_dying_line(const char *text)
+{
+  char line[LOG_BUFSIZE + 8];
+  int n;
+
+  if (logInfo.shut)
+    return;
+  if (log_stderr_ours) {
+    n = snprintf(line, sizeof(line), "ircd: %s\n", text);
+    if (n >= (int)sizeof(line)) {
+      n = sizeof(line) - 1;
+      line[n - 1] = '\n';
+    }
+    if (n > 0 && write(2, line, (size_t)n) < 0) {
+      /* nowhere left to say it */
+    }
+  }
+  syslog(LOG_CRIT, "%s", text);
 }
 
 /** Write a logging entry.
@@ -476,9 +522,21 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   assert(0 != fmt);
 
   /* A muted thread (a thread pool worker) never gets further: everything
-   * below belongs to the main thread (log_thread_mute). */
-  if (log_muted)
+   * below belongs to the main thread (log_thread_mute).  One line is not
+   * dropped with the rest: the one assert() writes before it aborts
+   * (ircd_log.h sets log_inassert first).  A worker that failed an
+   * assertion would otherwise leave a core and no word of which one. */
+  if (log_muted) {
+    if (log_inassert && severity == L_CRIT) {
+      va_list ap;
+
+      va_copy(ap, vl);
+      ircd_vsnprintf(0, buf, sizeof(buf), fmt, ap);
+      va_end(ap);
+      log_dying_line(buf);
+    }
     return;
+  }
 
   /* find the log data and the severity data */
   desc = &logDesc[subsys];

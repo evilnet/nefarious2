@@ -828,13 +828,13 @@ history_view_cmocka: $(HISTORY_VIEW_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_VIEW_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ROCKSDB_LIBS) $(ZSTD_LIBS)
 
 # alloc_nomem tests - an allocation that fails off the main thread never
-# runs the out-of-memory handler (the restart): one line to stderr and
-# _exit().  Links the real ../ircd_alloc.o; malloc() and realloc() are
-# wrapped to fail, _exit() to end the thread and record the status,
-# write() to keep the line.
+# runs the out-of-memory handler (the restart): the other handler says
+# so, then _exit().  Links the real ../ircd_alloc.o; malloc() and
+# realloc() are wrapped to fail, _exit() to end the thread and record
+# the status.
 ALLOC_NOMEM_CMOCKA_OBJS = alloc_nomem_cmocka.o ../ircd_alloc.o
 alloc_nomem_cmocka: $(ALLOC_NOMEM_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=malloc -Wl,--wrap=realloc -Wl,--wrap=_exit -Wl,--wrap=write $(ALLOC_NOMEM_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=malloc -Wl,--wrap=realloc -Wl,--wrap=_exit $(ALLOC_NOMEM_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
 
 # log_async tests - the async log writer never writes to a descriptor the
 # log has closed: log_close() and log_file_destroy() drain the queue first,
@@ -842,10 +842,13 @@ alloc_nomem_cmocka: $(ALLOC_NOMEM_CMOCKA_OBJS)
 # log_shutdown() nothing reopens a log until log_resume().  Links the real
 # ircd_log.o and ircd_log_async.o; the writer thread's write() is wrapped
 # (--wrap=write) behind a gate the cases open, to hold a write in flight.
+# Also the line a muted thread's failed assert() still gets out
+# (log_dying_line): descriptor 2 and syslog, both wrapped.
 LOG_ASYNC_CMOCKA_OBJS = log_async_cmocka.o ../ircd_log.o ../ircd_log_async.o \
 	../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o
 log_async_cmocka: $(LOG_ASYNC_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=write -Wl,--wrap=syslog -Wl,--wrap=__syslog_chk -Wl,--wrap=pthread_cond_wait $(LOG_ASYNC_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=write -Wl,--wrap=syslog -Wl,--wrap=__syslog_chk $(LOG_ASYNC_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
 
 # ssl_teardown tests - a TLS teardown writes only to a descriptor its
 # socket still owns (ssl_abort after an ET_ERROR EBADF dropped cli_fd) and

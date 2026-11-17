@@ -90,6 +90,15 @@ extern void log_vwrite(enum LogSys subsys, enum LogLevel severity,
 extern void log_thread_mute(int on);
 /** Is the calling thread muted (log_thread_mute)? */
 extern int log_thread_muted(void);
+/** Descriptor 2 is (@a ours nonzero) or is no longer the process's
+ * stderr or debug log: a daemon closes it, and the number is reused. */
+extern void log_stderr_is_ours(int ours);
+/** Say @a text as the process dies, from any thread, muted or not: the
+ * one line of a failed assert() or a failed allocation on a thread that
+ * may not log.  It goes to descriptor 2 while that is ours
+ * (log_stderr_is_ours) and to syslog, and touches nothing else of the
+ * log. */
+extern void log_dying_line(const char *text);
 
 extern void log_write_kill(const struct Client *victim,
 			   const struct Client *killer,

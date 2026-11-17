@@ -30,7 +30,8 @@
  * function runs beside the main thread: it may touch only what it was
  * handed and what is documented as safe off the main thread.  It cannot
  * log: the pool mutes its workers (log_thread_mute), so what a task has
- * to report goes back in its result and is logged from its callback.  And
+ * to report goes back in its result and is logged from its callback (a
+ * failed assert() still says which one: log_dying_line).  And
  * an allocation that fails on a worker ends the process (ircd_alloc.c
  * alloc_failed): there is no restart from off the main thread.
  *
