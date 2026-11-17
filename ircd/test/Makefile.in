@@ -51,6 +51,7 @@ CMOCKA_TESTPROGS = \
 	chathistory_merge_cmocka \
 	chathistory_recv_cmocka \
 	pm_pair_index_cmocka \
+	cap_line_cmocka \
 	recv_classify_cmocka \
 	ml_route_cmocka \
 	nick_route_cmocka \
@@ -151,6 +152,7 @@ DEP_SRC = \
 	chathistory_merge_cmocka.c \
 	chathistory_recv_cmocka.c \
 	pm_pair_index_cmocka.c \
+	cap_line_cmocka.c \
 	recv_classify_cmocka.c \
 	ml_route_cmocka.c \
 	nick_route_cmocka.c \
@@ -416,6 +418,12 @@ PM_PAIR_INDEX_CMOCKA_OBJS = pm_pair_index_cmocka.o test_stub.o ../pm_pair_index.
 	../db_casefold.o ../ircd_string.o fake_db.o
 pm_pair_index_cmocka: $(PM_PAIR_INDEX_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(PM_PAIR_INDEX_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# cap_line tests - how CAP LS / LIST replies are laid out in lines
+# (include/cap_line.h; header only).
+CAP_LINE_CMOCKA_OBJS = cap_line_cmocka.o test_stub.o
+cap_line_cmocka: $(CAP_LINE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CAP_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o
