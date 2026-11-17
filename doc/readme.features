@@ -2114,16 +2114,25 @@ CAP_evilnet_persistence
  * Default: TRUE
 
 Enables announcement of the 'evilnet.github.io/persistence' client
-capability: the PERSISTENCE extras that are not part of the
-draft/persistence specification (ATTACH, DETACH, LIST, PROFILE, REPLAY).
-Its value lists them as tokens (attach,detach,list,attach-cursor).  A held
-session's restored channel state is sent in a batch of this type to a
-connection that negotiated it (see PERSISTENCE_DRAFT_EXTRAS for the
-others).  'draft/persistence' itself carries only the specification's
-STATUS, GET and SET.  The account metadata keys keep their names
-(draft/persistence/hold, draft/persistence/auto-replay,
-draft/persistence/profile/*): renaming them would be a migration of the
-stores and of the server-to-server wire.
+capability: it tells a client that this server has the PERSISTENCE extras
+that are not part of the draft/persistence specification (ATTACH, DETACH,
+LIST, PROFILE, REPLAY).  Its value lists them as tokens
+(attach,detach,list,attach-cursor).  A held session's restored channel
+state is sent in a batch of this type to a connection that negotiated it
+(see PERSISTENCE_DRAFT_EXTRAS for the others).  'draft/persistence' itself
+is the specification's STATUS, GET and SET.
+
+The capability announces the extras; it does not gate them.  Like the
+specification's own subcommands they work on any connection, with or
+without a capability, so a bouncer user on a client that knows neither
+can still adjust the session by hand (/quote PERSISTENCE REPLAY SET OFF).
+Each requires the account and acts on that account's own sessions and
+settings only.  Setting this to FALSE stops the announcement and the
+vendor batch type, not the subcommands.
+
+The account metadata keys keep their names (draft/persistence/hold,
+draft/persistence/auto-replay, draft/persistence/profile/*): renaming them
+would be a migration of the stores and of the server-to-server wire.
 
 CAP_draft_bouncer
  * Type: boolean
@@ -2137,15 +2146,15 @@ PERSISTENCE_DRAFT_EXTRAS
  * Type: boolean
  * Default: TRUE
 
-A transition for clients written before the PERSISTENCE extras moved to
-'evilnet.github.io/persistence'.  While TRUE, the server behaves for them
-as before: every connection may use the extras, with or without a
-capability; 'draft/persistence' carries the extras' value too (where such
-clients read attach-cursor); and a connection that did not negotiate the
-vendor capability gets a held session's restore in a 'draft/persistence'
-batch.  Set it to FALSE once clients request the vendor capability: the
-extras are then unknown subcommands without it, 'draft/persistence' has no
-value, and every restore batch has the vendor type.
+A transition for clients written before the PERSISTENCE extras were
+announced by 'evilnet.github.io/persistence'.  While TRUE, such a client
+sees the names it was written against: 'draft/persistence' carries the
+extras' value too (where such clients read attach-cursor), and a
+connection that did not negotiate the vendor capability gets a held
+session's restore in a 'draft/persistence' batch.  Set it to FALSE once
+clients request the vendor capability: 'draft/persistence' then has no
+value and every restore batch has the vendor type.  The subcommands
+themselves do not depend on this setting (see CAP_evilnet_persistence).
 
 UPING_ENABLE
  * Type: boolean
