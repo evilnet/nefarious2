@@ -996,16 +996,16 @@ THREAD_POOL_SIZE
 
 Worker threads for slow checks taken off the main loop (OPER, SETHOST
 and WEBIRC password hashes).  Read once at startup, after ircd.conf;
-a change takes effect at the next restart.  0 or less means the
-default; more than 64 means 64.
+a change (REHASH, SET) is logged and takes effect at the next restart.
+0 or less means the default; more than 64 means 64.
 
 ASYNC_LOGGING
  * Type: boolean
  * Default: FALSE
 
 Write log lines from a background thread instead of the main loop.
-Read once at startup, after ircd.conf; a change takes effect at the
-next restart.  A line that finds the queue (4096 lines) full waits for
+Read once at startup, after ircd.conf; a change (REHASH, SET) is logged
+and takes effect at the next restart.  A line that finds the queue (4096 lines) full waits for
 room, so lines stay in order.  A crash (abort, a fatal signal, an OOM kill) loses the lines
 still queued, the ones nearest the crash; the queue takes about 8.6 MB.
 
