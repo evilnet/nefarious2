@@ -231,6 +231,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         }
 
         sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C U", acptr);
+        sendcmdto_set_client_msgid(NULL);   /* the time set_s2s_tags() armed */
 
         /* A local held ghost has nothing left to revive into once its
          * account is gone; it leaves now that the clear has been relayed
@@ -401,6 +402,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         else
           sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s",
                                 acptr, type, parv[3]);
+        sendcmdto_set_client_msgid(NULL);   /* the time set_s2s_tags() armed */
       }
 
       if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
@@ -582,6 +584,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                           cli_user(acptr)->acc_create ? "%C %s %Tu" : "%C %s",
                           acptr, cli_user(acptr)->account,
                           cli_user(acptr)->acc_create);
+    sendcmdto_set_client_msgid(NULL);   /* the time set_s2s_tags() armed */
     /* Our connection's login: the account's modes (push-2 final fix
      * wave, I-1), as the extended form above. */
     metadata_mode_sync_restore(acptr, 1);
