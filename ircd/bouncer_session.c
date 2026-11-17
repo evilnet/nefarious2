@@ -18521,16 +18521,17 @@ void bounce_send_channel_state(struct Client *cptr)
    * line's labeled-response batch) it is nested in it (send.c's nesting
    * model), never left out. */
   {
-    int vendor = CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE);
+    const char *batch_type = NULL;
 
-    wrap_in_persistence_batch =
-        MyConnect(cptr)
+    if (MyConnect(cptr)
         && CapRecipientHas(cptr, CAP_BATCH)
-        && cli_user(cptr)->channel != NULL
-        && (vendor || feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS));
+        && cli_user(cptr)->channel != NULL)
+      batch_type = persistence_restore_batch_type(
+          CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE),
+          feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS));
+    wrap_in_persistence_batch = batch_type != NULL;
     if (wrap_in_persistence_batch)
-      send_batch_start(cptr, vendor ? PERSISTENCE_RESTORE_BATCH
-                                    : PERSISTENCE_RESTORE_BATCH_OLD);
+      send_batch_start(cptr, batch_type);
   }
 
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {

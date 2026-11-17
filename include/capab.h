@@ -189,6 +189,13 @@ extern void cap_set_value(enum Capab cap, const char *value);
 extern void feature_notify_accountreg_capvalue(void);
 extern void feature_notify_cap_accountreg(void);
 
+/* Feature-notify hooks for evilnet.github.io/persistence, draft/persistence
+ * and PERSISTENCE_DRAFT_EXTRAS: each keeps the caps' CAP 302 values in step
+ * and tells cap-notify clients.  Defined in m_persistence.c. */
+extern void feature_notify_cap_evilnet_persistence(void);
+extern void feature_notify_cap_draft_persistence(void);
+extern void feature_notify_persistence_draft_extras(void);
+
 /* CAP notify batching for rehash - aggregates multiple CAP NEW/DEL into single messages */
 extern void cap_notify_begin_batch(void);
 extern void cap_notify_flush(void);

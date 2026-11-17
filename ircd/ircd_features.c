@@ -636,18 +636,11 @@ DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
 DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
 DEFINE_CAP_NOTIFY("evilnet.github.io/channel-relocate", evilnet_channel_relocate)
 DEFINE_CAP_NOTIFY("draft/metadata-2", draft_metadata_2)
-DEFINE_CAP_NOTIFY("evilnet.github.io/persistence", evilnet_persistence)
-DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
 DEFINE_CAP_NOTIFY("tls", tls)
 
-/** PERSISTENCE_DRAFT_EXTRAS: draft/persistence carries the extras' value
- * only while the old names are kept working (N027). */
-static void feature_notify_persistence_draft_extras(void)
-{
-  cap_set_value(CAP_DRAFT_PERSISTENCE,
-                feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
-                ? PERSISTENCE_EXTRAS_VALUE : NULL);
-}
+/* evilnet.github.io/persistence, draft/persistence and
+ * PERSISTENCE_DRAFT_EXTRAS: their hooks carry the caps' values, and are
+ * m_persistence.c's (capab.h). */
 
 /** Notify clients when STS feature flag changes.
  * STS has parameters: port, duration, and optionally preload.
