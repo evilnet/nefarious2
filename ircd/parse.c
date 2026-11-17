@@ -1440,7 +1440,8 @@ static void client_take_label(struct Client *cptr, const char *val, size_t len)
 /** The label of a line recv_clip() cut, read for its ERR_INPUTTOOLONG:
  * only when its tag region (the @ to the space) is whole, at most 4095
  * bytes -- the body was the part over its cap.  A cut tag region is not
- * read: its label may be the part cut.  Nothing but label= is read. */
+ * read: its label may be the part cut.  Nothing but label= is read, and
+ * of several the last wins, as on a line of legal length. */
 static void overlong_line_label(struct Client *cptr, const char *line,
                                 const char *end)
 {
@@ -1456,10 +1457,9 @@ static void overlong_line_label(struct Client *cptr, const char *line,
 
     if (!next_semi)
       next_semi = tag_end;
-    if (next_semi - scan >= 6 && strncmp(scan, "label=", 6) == 0) {
+    /* No early return: the last label= wins, as in parse_client(). */
+    if (next_semi - scan >= 6 && strncmp(scan, "label=", 6) == 0)
       client_take_label(cptr, scan + 6, next_semi - (scan + 6));
-      return;
-    }
     scan = next_semi + 1;
   }
 }

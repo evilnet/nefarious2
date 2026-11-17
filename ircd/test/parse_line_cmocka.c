@@ -1017,6 +1017,20 @@ static void client_overlong_line_417_label(void **state)
   assert_string_equal(seen.reply_label, "Q1");
   assert_string_equal(cli_label(&user), "");   /* gone with its line */
 
+  /* Two label= tags: the last wins, as on a line of legal length. */
+  strcpy(buf, "@label=a;label=b PING :");
+  n = strlen(buf);
+  memset(buf + n, 'x', 507);
+  buf[n + 507] = '\0';
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+  assert_string_equal(seen.reply_label, "b");
+  strcpy(buf, "@label=a;label=b PING :x");
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_string_equal(seen.label, "b");
+
   strcpy(buf, "@label=Q2 PING :");         /* 4096-byte tags: unlabeled */
   n = strlen("@label=Q2");
   buf[n] = ';';
