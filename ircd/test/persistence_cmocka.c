@@ -297,6 +297,29 @@ static void test_flag_does_not_gate(void **state)
   assert_int_equal(n_lines, 2);
 }
 
+/* SET DEFAULT is answered with its STATUS; the fork's "PERSISTENCE SET"
+ * line before it goes only while PERSISTENCE_DRAFT_EXTRAS is on (or to a
+ * connection with the vendor cap), never to a spec client otherwise. */
+static void test_set_echo_only_for_old_clients(void **state)
+{
+  (void)state;
+  log_in();
+
+  draft_extras = 0;
+  n_lines = 0;
+  run("SET", "DEFAULT", NULL);
+  assert_int_equal(n_fail, 0);
+  assert_int_equal(n_lines, 1);
+  assert_non_null(strstr(last_line, "PERSISTENCE STATUS"));
+
+  draft_extras = 1;
+  n_lines = 0;
+  run("SET", "DEFAULT", NULL);
+  assert_int_equal(n_lines, 2);
+  assert_non_null(strstr(last_line, "PERSISTENCE STATUS"));
+  draft_extras = 0;
+}
+
 /* A subcommand this server does not have is still answered, so a client
  * (or a person at /quote) is not left waiting. */
 static void test_unknown_subcommand_fails(void **state)
@@ -318,6 +341,7 @@ int main(void)
     cmocka_unit_test_setup(test_replay_set_without_cap, setup),
     cmocka_unit_test_setup(test_list_without_cap, setup),
     cmocka_unit_test_setup(test_flag_does_not_gate, setup),
+    cmocka_unit_test_setup(test_set_echo_only_for_old_clients, setup),
     cmocka_unit_test_setup(test_unknown_subcommand_fails, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

@@ -1101,7 +1101,7 @@ struct Message msgtab[] = {
      * during the SASL-success/pre-CAP-END window so clients can pin
      * an active profile before registration completes. */
     { m_persistence, m_persistence, m_ignore, m_persistence, m_ignore },
-    "STATUS|GET|SET|PROFILE|ATTACH - draft/persistence (profiles, hold, replay)"
+    "STATUS|GET|SET|ATTACH|DETACH|LIST|PROFILE|REPLAY - draft/persistence and its extras"
   },
   {
     MSG_BOUNCER_SESSION,
