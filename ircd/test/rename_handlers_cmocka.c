@@ -625,6 +625,22 @@ struct Membership *find_channel_member(struct Client *cptr,
   return NULL;
 }
 
+/* history.c's record of a rename (history_rename.h).  The real
+ * rename_channel() makes it for a classic rename; a relocation makes its
+ * own (relocate_execute()), noted here. */
+static int hist_renames;
+static char hist_old[CHANNELLEN + 1], hist_new[CHANNELLEN + 1];
+static time_t hist_ts;
+
+void history_channel_renamed(const char *oldname, const char *newname,
+                             time_t incarnation)
+{
+  hist_renames++;
+  snprintf(hist_old, sizeof(hist_old), "%s", oldname);
+  snprintf(hist_new, sizeof(hist_new), "%s", newname);
+  hist_ts = incarnation;
+}
+
 /* What the real rename_channel() (channel.c) promises its callers: -1 for
  * a name too long, -2 for a name in use, otherwise the channel -- possibly
  * a NEW struct -- under the new name. */
@@ -2877,6 +2893,31 @@ static void device_of_a_remote_primary_does_not_follow_here(void **state)
 /* A remote user's follow reaches this server as three ordinary lines from
  * its own server -- J, M, L -- and this server adds nothing of its own to
  * any of them. */
+/* Chathistory follows a relocation: the channel made under the new name
+ * is the old one's community with the old one's creation timestamp, and
+ * the rows stored under the old name are recorded as its history -- once,
+ * with that timestamp (the incarnation the rows carry). */
+static void relocation_records_the_history_rename(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  struct Client *carol = user_on(&me, "carol", "AAD");
+  struct Channel *oldch, *newch;
+  (void)state;
+
+  oldch = channel_at("#old", 500000, bob);
+  add_member(oldch, carol, 0);
+  hist_renames = 0;
+  server_relocate(peer, bob, "#old", "#new", "1000900", "");
+  newch = channel_named("#new");
+  assert_non_null(newch);
+  assert_int_equal(hist_renames, 1);
+  assert_string_equal(hist_old, "#old");
+  assert_string_equal(hist_new, "#new");
+  assert_int_equal(hist_ts, 500000);
+  assert_int_equal(newch->creationtime, 500000);
+}
+
 static void remote_follower_is_just_applied(void **state)
 {
   struct Client *peer = linked("peer.example", "Bj", "v");
@@ -4021,6 +4062,11 @@ static void crossing_relocations_winner_first(void **state)
                       ":uma!user@host.example PART #old :Moved to #y");
   assert_int_equal(sent_count_to(w.carol), 1);
   assert_int_equal(nopnotices, 0);
+  /* #old's chathistory went to the winner when it was made, and the
+   * loser's relocation did not take it away */
+  assert_string_equal(hist_old, "#old");
+  assert_string_equal(hist_new, "#x");
+  assert_int_equal(hist_ts, 500000);
 
   assert_crossing_end_state(&w);
 }
@@ -4048,6 +4094,11 @@ static void crossing_relocations_loser_first(void **state)
   assert_string_equal(sent_to(w.carol, 1), ":me.example MODE #old +L #x");
   assert_int_equal(sent_count_to(w.carol), 2);
   assert_int_equal(nopnotices, 0);
+  /* #old's chathistory is the winner's here too (history_rename.h), as
+   * on a server that heard the winner first */
+  assert_string_equal(hist_old, "#old");
+  assert_string_equal(hist_new, "#x");
+  assert_int_equal(hist_ts, 500000);
 
   assert_crossing_end_state(&w);
 }
@@ -7254,6 +7305,7 @@ int main(void)
     T(follower_with_a_bouncer_device),
     T(device_of_a_remote_primary_does_not_follow_here),
     T(remote_follower_is_just_applied),
+    T(relocation_records_the_history_rename),
     T(tombstone_admits_nobody_whatever_its_modes),
     T(ordinary_redirecting_channels_keep_the_ordinary_rule),
     T(stranger_in_the_tombstone_by_a_remote_join),

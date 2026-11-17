@@ -624,6 +624,32 @@ static void migrate_pm_pairs_cf(void **state)
   env_free(env);
 }
 
+static void migrate_renames_cf(void **state)
+{
+  /* The renames column family (history_rename.h) is keyed by the bare
+   * channel name, listed in history_init's migration with
+   * DB_CASEFOLD_ALL.  Records are written folded from birth (hren_note);
+   * one written unfolded by hand moves to the folded key, its value as
+   * it was. */
+  struct db_env *env = env_new();
+  struct db_cf *rn = cf_of(env, "renames");
+  struct db_casefold_cf cfs[] = { { NULL, "renames", DB_CASEFOLD_ALL } };
+  (void)state;
+  cfs[0].cf = rn;
+
+  seed(rn, B("#New[x]"), "rec-a");
+  seed(rn, B("#quiet"), "rec-b");
+
+  assert_int_equal(db_casefold_migrate(env, "t", cfs, 1), 0);
+
+  assert_int_equal(rn->n, 2);
+  assert_row(rn, B("#new{x}"), "rec-a");
+  assert_row(rn, B("#quiet"), "rec-b");
+  assert_no_row(rn, B("#New[x]"));
+
+  env_free(env);
+}
+
 static void migrate_folds_only_masked_components(void **state)
 {
   struct db_env *env = env_new();
@@ -764,6 +790,7 @@ int main(void)
     cmocka_unit_test(migrate_metadata_clock_cf),
     cmocka_unit_test(migrate_recv_windows_cf),
     cmocka_unit_test(migrate_pm_pairs_cf),
+    cmocka_unit_test(migrate_renames_cf),
     cmocka_unit_test(migrate_folds_only_masked_components),
     cmocka_unit_test(migrate_runs_once_per_env),
     cmocka_unit_test(migrate_handles_more_rows_than_one_batch),

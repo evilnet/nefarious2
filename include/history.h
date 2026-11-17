@@ -385,6 +385,18 @@ extern void history_recv_reset(struct Channel *chptr);
  * window and open the new name's. */
 extern void history_recv_rename(struct Channel *chptr, const char *oldname);
 
+/** The channel of creation timestamp @a incarnation was renamed from
+ * @a oldname to @a newname (channel.c's rename_channel), or relocated
+ * there (m_rename.c's relocate_execute: the channel made under @a newname
+ * takes the old one's timestamp).  Its rows stay under the old name; the
+ * renames record written here (history_rename.h) is what makes every read
+ * of @a newname -- CHATHISTORY pages, msgid selectors, context and
+ * redaction lookups, TARGETS -- return them as @a newname's own, on this
+ * server and, each from its own record, on every server that executes the
+ * rename. */
+extern void history_channel_renamed(const char *oldname, const char *newname,
+                                    time_t incarnation);
+
 /** Did this server receive channel @a chname's traffic over the whole of
  * [@a lo_ms, @a hi_ms] (epoch ms)?  1 when one window holds it (a closed
  * interval of the record, or this run's open window as memory has it:
