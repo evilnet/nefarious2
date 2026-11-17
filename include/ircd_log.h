@@ -74,9 +74,6 @@ extern void log_reopen(void);
 extern void log_close(void);
 extern void log_shutdown(void);
 extern void log_resume(void);
-extern void log_async_start(void);
-extern void log_async_stop(void);
-extern void log_feature_async_logging(void);
 
 extern void log_write(enum LogSys subsys, enum LogLevel severity,
 		      unsigned int flags, const char *fmt, ...);

@@ -61,9 +61,6 @@ static struct {
   int running;                      /**< 1 if writer thread active; read
                                      *   and written only through
                                      *   RUNNING() / SET_RUNNING() */
-  int accepting;                    /**< 1 while new entries are queued;
-                                     *   0 after log_async_set_accepting(0)
-                                     *   (mutex held) */
   int busy;                         /**< 1 while the writer is writing an
                                      *   entry it took off the buffer */
 
@@ -216,7 +213,6 @@ int log_async_init(int buffer_size)
   log_async.written = 0;
   log_async.dropped = 0;
   log_async.busy = 0;
-  log_async.accepting = 1;
 
   /* Initialize synchronization primitives */
   if (pthread_mutex_init(&log_async.mutex, NULL) != 0) {
@@ -237,8 +233,8 @@ int log_async_init(int buffer_size)
   }
 
   /* Create the writer thread, and publish running only once it exists.
-   * Other threads may be logging already (a REHASH turns ASYNC_LOGGING
-   * on while thread-pool workers run): one that saw running set would
+   * Other threads may be logging already (the thread-pool workers start
+   * first): one that saw running set would
    * queue into this buffer, which a failed create frees.  The writer
    * starts by taking the mutex, so it sees running set. */
   pthread_attr_init(&attr);
@@ -326,29 +322,6 @@ int log_async_write(int fd, int syslog_priority, const char *message, int len,
 
   pthread_mutex_lock(&log_async.mutex);
 
-again:
-  /* The writer stopped (log_async_shutdown()): the caller writes it. */
-  if (!RUNNING()) {
-    pthread_mutex_unlock(&log_async.mutex);
-    return -1;
-  }
-
-  /* Not accepting (ASYNC_LOGGING turned off): the caller writes this
-   * line itself, but only once every line queued before it is written,
-   * so no thread's synchronous line lands ahead of an older queued one.
-   * Queueing turned back on while it waits: queue the line instead. */
-  if (!log_async.accepting) {
-    while ((!buffer_empty() || log_async.busy) && RUNNING() &&
-           !log_async.accepting) {
-      pthread_cond_signal(&log_async.not_empty);
-      pthread_cond_wait(&log_async.flushed, &log_async.mutex);
-    }
-    if (!log_async.accepting || !RUNNING()) {
-      pthread_mutex_unlock(&log_async.mutex);
-      return -1;
-    }
-  }
-
   /* Full: wait for the writer to free a slot.  Writing the line here
    * instead would put it ahead of every older queued line, its own
    * thread's included, and costs the caller the same blocking write the
@@ -356,15 +329,17 @@ again:
    * or another producer may have taken the slot -- and never write into a
    * full ring: advancing head onto tail would make it look empty and
    * overwrite the entry the writer is on. */
-  if (buffer_full())
+  if (RUNNING() && buffer_full())
     log_async.dropped++;          /* counts lines that waited (stats) */
-  while (buffer_full()) {
+  while (RUNNING() && buffer_full()) {
     pthread_cond_signal(&log_async.not_empty);
     pthread_cond_wait(&log_async.not_full, &log_async.mutex);
-    /* Turned off, or the writer stopped, while it waited: the drain wait
-     * above, or the caller's own write. */
-    if (!log_async.accepting || !RUNNING())
-      goto again;
+  }
+
+  /* The writer stopped (log_async_shutdown()): the caller writes it. */
+  if (!RUNNING()) {
+    pthread_mutex_unlock(&log_async.mutex);
+    return -1;
   }
 
   /* Add entry to buffer */
@@ -415,29 +390,6 @@ void log_async_flush(void)
 int log_async_available(void)
 {
   return RUNNING();
-}
-
-/**
- * Start or stop queueing new entries (ASYNC_LOGGING turned on or off).
- * Stopping returns once every entry already queued is written; from
- * then on log_async_write() refuses, and its callers write themselves.
- * The writer thread stays.
- */
-void log_async_set_accepting(int on)
-{
-  if (!RUNNING())
-    return;
-
-  pthread_mutex_lock(&log_async.mutex);
-  log_async.accepting = on ? 1 : 0;
-  /* Wake threads waiting to write past a drain, so they queue instead. */
-  if (on)
-    pthread_cond_broadcast(&log_async.flushed);
-  else   /* and those waiting for room, so they wait for the drain */
-    pthread_cond_broadcast(&log_async.not_full);
-  pthread_mutex_unlock(&log_async.mutex);
-  if (!on)
-    log_async_flush();
 }
 
 /**
