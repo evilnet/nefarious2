@@ -88,6 +88,7 @@
 #include "forwarded_label.h"
 #include "fwd_match.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -102,6 +103,37 @@
 #include "struct.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+
+/** The invite's one msgid and time, for every copy of it: the
+ * invitee's INVITE, the invite-notify lines and the S2S INVITE lines.
+ * A relayed invite (\a cptr a server link with the origin's tags
+ * stashed) keeps the origin's; a local one mints.  Armed as the client
+ * event (sendcmdto_set_client_event) until invite_event_end(). */
+static void invite_event_start(struct Client *cptr, struct Client *sptr,
+                               char *msgid, size_t len, uint64_t *ms)
+{
+  int relayed = cptr && !MyUser(sptr);
+
+  msgid[0] = '\0';
+  *ms = 0;
+  if (!feature_bool(FEAT_MSGID))
+    return;
+  if (relayed && cli_s2s_msgid(cptr)[0])
+    ircd_strncpy(msgid, cli_s2s_msgid(cptr), len);
+  else
+    generate_msgid(msgid, len);
+  *ms = history_event_time_ms(relayed ? cptr : NULL);
+  sendcmdto_set_client_event(msgid, *ms);
+}
+
+/** Arm the next server-bound INVITE with the invite's tags.  Each send
+ * consumes them, so this precedes every one. */
+static void invite_s2s_tags(const char *msgid, uint64_t ms)
+{
+  if (msgid[0])
+    sendcmdto_set_s2s_tags(ms, msgid);
+  sendcmdto_want_s2s_tags(1);
+}
 
 /*
  * m_invite - generic message handler
@@ -209,22 +241,24 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (cli_user(acptr)->away)
     send_reply(sptr, RPL_AWAY, cli_name(acptr), away_text_for(sptr, cli_user(acptr)->away));
 
-  if (MyConnect(acptr)) {
-    add_invite(acptr, chptr);   /* told below, with the invite's msgid */
-  } else if (!IsLocalChannel(chptr->chname)) {
-    /* The user's server answers ERR_NOSUCHNICK if the user is gone: no
-     * labeled WHOIS reply naming the nick is told from that meanwhile. */
-    fwd_label_note_untracked(sptr, FWD_UNTRACKED_NOSUCHNICK);
-    sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
-                  chptr->creationtime);
-  }
-
   if (!IsLocalChannel(chptr->chname) || MyConnect(acptr)) {
-    char inv_msgid[64] = "";
-    if (feature_bool(FEAT_MSGID)) {
-      generate_msgid(inv_msgid, sizeof(inv_msgid));
-      /* its own time, the msgid's mint time */
-      sendcmdto_set_client_event(inv_msgid, history_event_time_ms(NULL));
+    char inv_msgid[64];
+    uint64_t inv_ms;
+
+    /* One msgid and time for every copy, the S2S lines included, so the
+     * invitee's server and every member's server tell the same event. */
+    invite_event_start(cptr, sptr, inv_msgid, sizeof(inv_msgid), &inv_ms);
+
+    if (MyConnect(acptr)) {
+      add_invite(acptr, chptr);   /* told below */
+    } else {
+      /* The user's server answers ERR_NOSUCHNICK if the user is gone: no
+       * labeled WHOIS reply naming the nick is told from that meanwhile. */
+      fwd_label_note_untracked(sptr, FWD_UNTRACKED_NOSUCHNICK);
+      if (inv_msgid[0])
+        sendcmdto_set_s2s_tags(inv_ms, inv_msgid);
+      sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
+                    chptr->creationtime);
     }
 
     /* The invitee's copy is an event from the inviter, tagged as one
@@ -254,6 +288,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * ms_invite will use to emit its own RPL_ISSUEDINVITE if
      * FEAT_ANNOUNCE_INVITES is enabled. */
     if (feature_bool(FEAT_CAP_invite_notify)) {
+      invite_s2s_tags(inv_msgid, inv_ms);
       sendcmdto_channel_servers_butone(sptr, NULL, TOK_INVITE, chptr, acptr, 0,
                                        "%s %H %Tu", cli_name(acptr),
                                        chptr, chptr->creationtime);
@@ -268,6 +303,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Only propagate the S2S INVITE here if the invite_notify path
        * above didn't already do a full fanout. */
       if (!feature_bool(FEAT_CAP_invite_notify)) {
+        invite_s2s_tags(inv_msgid, inv_ms);
         sendcmdto_channel_servers_butone(sptr, NULL, TOK_INVITE, chptr, acptr, SKIP_NONOPS,
                                          "%s %H %Tu", cli_name(acptr),
                                          chptr, chptr->creationtime);
@@ -364,19 +400,21 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (is_silenced(sptr, acptr, 0))
     return 0;
 
-  if (MyConnect(acptr)) {
-    add_invite(acptr, chptr);   /* told below, with the invite's msgid */
-  } else {
-    sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
-                  chptr->creationtime);
-  }
-
   {
-    char inv_msgid[64] = "";
-    if (feature_bool(FEAT_MSGID)) {
-      generate_msgid(inv_msgid, sizeof(inv_msgid));
-      /* its own time, the msgid's mint time */
-      sendcmdto_set_client_event(inv_msgid, history_event_time_ms(NULL));
+    char inv_msgid[64];
+    uint64_t inv_ms;
+
+    /* The origin's msgid and time (stashed from the S2S tags), for every
+     * copy and for the onward S2S lines. */
+    invite_event_start(cptr, sptr, inv_msgid, sizeof(inv_msgid), &inv_ms);
+
+    if (MyConnect(acptr)) {
+      add_invite(acptr, chptr);   /* told below */
+    } else {
+      if (inv_msgid[0])
+        sendcmdto_set_s2s_tags(inv_ms, inv_msgid);
+      sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
+                    chptr->creationtime);
     }
 
     /* The invitee's copy is an event from the inviter, tagged as one
@@ -400,6 +438,7 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * SKIP_NONOPS would drop servers whose only channel members are
      * non-ops with CAP_INVITENOTIFY. */
     if (feature_bool(FEAT_CAP_invite_notify)) {
+      invite_s2s_tags(inv_msgid, inv_ms);
       sendcmdto_channel_servers_butone(sptr, NULL, TOK_INVITE, chptr, acptr, 0,
                                        "%s %H %Tu", cli_name(acptr), chptr,
                                        chptr->creationtime);
@@ -414,6 +453,7 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Only propagate the SKIP_NONOPS variant if invite_notify isn't
        * already doing a full-servers broadcast above. */
       if (!feature_bool(FEAT_CAP_invite_notify)) {
+        invite_s2s_tags(inv_msgid, inv_ms);
         sendcmdto_channel_servers_butone(sptr, NULL, TOK_INVITE, chptr, acptr, SKIP_NONOPS,
                                          "%s %H %Tu", cli_name(acptr), chptr,
                                          chptr->creationtime);

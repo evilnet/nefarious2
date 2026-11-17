@@ -875,6 +875,76 @@ static void test_msgid_ahead_is_the_next_mint(void **state)
   generate_msgid(id, sizeof(id));
 }
 
+/* --- The channel-servers send (INVITE, #286) ------------------------ */
+
+#define INV_ID "AzAAEG7Hq2LmIN"
+
+/* With the tags wanted, the line toward IRCv3-aware links is built with
+ * the armed msgid; the bare line is built too, for legacy links. */
+static void test_channel_servers_carries_armed_tags(void **state)
+{
+  static struct Channel chan;
+  char buf[512];
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  lines_made = 0;
+  sendcmdto_set_s2s_tags(1700000000123ULL, INV_ID);
+  sendcmdto_want_s2s_tags(1);
+  sendcmdto_channel_servers_butone(&user, NULL, "I", &chan, NULL, 0,
+                                   "%s %s %u", "v", "#c", 1u);
+  assert_non_null(strstr(all_tags, "@A"));
+  assert_non_null(strstr(all_tags, INV_ID));
+  assert_int_equal(lines_made, 2);                  /* bare + tagged */
+
+  /* consumed: the next tag region is not this event's */
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, INV_ID));
+}
+
+/* Not wanted: one bare line, and an armed msgid does not outlive it. */
+static void test_channel_servers_bare_unless_wanted(void **state)
+{
+  static struct Channel chan;
+  char buf[512];
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  lines_made = 0;
+  sendcmdto_set_s2s_tags(1700000000123ULL, INV_ID);
+  sendcmdto_channel_servers_butone(&user, NULL, "I", &chan, NULL, 0,
+                                   "%s %s %u", "v", "#c", 1u);
+  assert_int_equal(lines_made, 1);
+  assert_string_equal(all_tags, "");
+  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
+  assert_null(strstr(buf, INV_ID));
+}
+
+/* Tags off: bare, and the want flag does not carry to a later send. */
+static void test_channel_servers_tags_off(void **state)
+{
+  static struct Channel chan;
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  tags_on = 0;
+  lines_made = 0;
+  sendcmdto_set_s2s_tags(1700000000123ULL, INV_ID);
+  sendcmdto_want_s2s_tags(1);
+  sendcmdto_channel_servers_butone(&user, NULL, "I", &chan, NULL, 0,
+                                   "%s %s %u", "v", "#c", 1u);
+  assert_int_equal(lines_made, 1);
+  tags_on = 1;
+  lines_made = 0;
+  sendcmdto_channel_servers_butone(&user, NULL, "I", &chan, NULL, 0,
+                                   "%s %s %u", "v", "#c", 1u);
+  assert_int_equal(lines_made, 1);
+  assert_string_equal(all_tags, "");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -910,6 +980,9 @@ int main(void)
     cmocka_unit_test_setup(test_tags_off_clears_mark, setup),
     cmocka_unit_test_setup(test_reset_clears_mark, setup),
     cmocka_unit_test_setup(test_msgid_ahead_is_the_next_mint, setup),
+    cmocka_unit_test_setup(test_channel_servers_carries_armed_tags, setup),
+    cmocka_unit_test_setup(test_channel_servers_bare_unless_wanted, setup),
+    cmocka_unit_test_setup(test_channel_servers_tags_off, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
