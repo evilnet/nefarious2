@@ -8025,7 +8025,9 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
  * the store and nothing else (search_walk).  search_job_done() sends the
  * answer from the main thread: the rows, then E with T when the budget
  * cut the scan short, or E 0 U when the store could not be read -- the
- * lines the synchronous responder sent, later.
+ * lines the synchronous responder sent, later.  One job holds at most
+ * MAX_FED_MESSAGES rows (the limit is cut to that when the line
+ * arrives), so the jobs in flight hold a bounded number between them.
  *
  * The asking server may have left by then: chathistory_fed_cleanup_link()
  * tells the jobs (store_jobs_link_gone), and one without a link sends
@@ -8037,7 +8039,8 @@ struct SearchJob {
   char *reqid;                    /**< owned */
   char *target;                   /**< owned */
   char before[HISTORY_TIMESTAMP_LEN];
-  int limit;
+  int limit;                      /**< at most MAX_FED_MESSAGES */
+  int clamped;                    /**< the asking server wanted more */
   char sel[BUFSIZE];              /**< the selectors; sm.text points into it */
   struct SearchMatch sm;
   struct PresenceQueryFilter *pf; /**< the requester's presence, or NULL */
@@ -8110,7 +8113,9 @@ static void search_job_done(struct StoreJob *job, int ran)
     } else {
       for (r = sj->rows; r; r = r->next)
         send_ch_response(origin, sj->reqid, r);
-      if (sj->truncated)
+      /* T: the budget cut the scan, or the limit was cut to what one
+       * answer may hold and was filled -- either way there may be more. */
+      if (sj->truncated || (sj->clamped && sj->count >= sj->limit))
         sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s %d T", sj->reqid, sj->count);
       else
         sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s %d", sj->reqid, sj->count);
@@ -9016,6 +9021,20 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       struct SearchJob *sj;
       struct SearchMatch *ssm;
       char before_buf[HISTORY_TIMESTAMP_LEN];
+      int clamped = 0;
+
+      /* The limit is the asking server's word, and every job holds its
+       * rows until it is answered: bound it by what a requester keeps for
+       * one request (add_fed_message drops a row past MAX_FED_MESSAGES).
+       * This server's CHATHISTORY_MAX is not the bound: the requester
+       * applied its own, and the two may differ.  A requester that asked
+       * for more gets the newest MAX_FED_MESSAGES matches and T -- before,
+       * it was sent them all, oldest first, and kept the first
+       * MAX_FED_MESSAGES to arrive. */
+      if (limit > MAX_FED_MESSAGES) {
+        limit = MAX_FED_MESSAGES;
+        clamped = 1;
+      }
 
       ircd_strncpy(before_buf, ref_type == HISTORY_REF_TIMESTAMP && ref_value ? ref_value : "",
                    sizeof(before_buf) - 1);
@@ -9067,6 +9086,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       DupString(sj->reqid, reqid);
       DupString(sj->target, target);
       sj->limit = limit;
+      sj->clamped = clamped;
       sj->pf = fed_pf;
       fed_pf = NULL;
       sj->base = *fed_hook;       /* hook and context, type mask, veto */
