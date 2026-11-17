@@ -210,8 +210,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     send_reply(sptr, RPL_AWAY, cli_name(acptr), away_text_for(sptr, cli_user(acptr)->away));
 
   if (MyConnect(acptr)) {
-    add_invite(acptr, chptr);
-    sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H", cli_name(acptr), chptr);
+    add_invite(acptr, chptr);   /* told below, with the invite's msgid */
   } else if (!IsLocalChannel(chptr->chname)) {
     /* The user's server answers ERR_NOSUCHNICK if the user is gone: no
      * labeled WHOIS reply naming the nick is told from that meanwhile. */
@@ -227,6 +226,16 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* its own time, the msgid's mint time */
       sendcmdto_set_client_event(inv_msgid, history_event_time_ms(NULL));
     }
+
+    /* The invitee's copy is an event from the inviter, tagged as one
+     * (sendcmdto_one_event(): @time, the invite's msgid, and @account
+     * under account-tag -- "the account tag MUST be added to all
+     * messages sent by the user"), never the invitee's own label or
+     * open batch.  Sent once the msgid is armed, so it carries the one
+     * the invite-notify copies carry. */
+    if (MyConnect(acptr))
+      sendcmdto_one_event(sptr, CMD_INVITE, acptr, 0, "%s %H",
+                          cli_name(acptr), chptr);
 
     /* Send invite-notify to LOCAL channel members with the capability */
     if (feature_bool(FEAT_CAP_invite_notify))
@@ -328,7 +337,10 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * allow invites to non existent channels, bleah
      * avoid JOIN, INVITE, PART abuse
      */
-    sendcmdto_one(sptr, CMD_INVITE, acptr, "%C :%s", acptr, parv[2]);
+    if (MyConnect(acptr))   /* an event for the invitee, as below */
+      sendcmdto_one_event(sptr, CMD_INVITE, acptr, 0, "%C :%s", acptr, parv[2]);
+    else
+      sendcmdto_one(sptr, CMD_INVITE, acptr, "%C :%s", acptr, parv[2]);
     return 0;
   }
 
@@ -353,8 +365,7 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
 
   if (MyConnect(acptr)) {
-    add_invite(acptr, chptr);
-    sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H", cli_name(acptr), chptr);
+    add_invite(acptr, chptr);   /* told below, with the invite's msgid */
   } else {
     sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
                   chptr->creationtime);
@@ -367,6 +378,16 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* its own time, the msgid's mint time */
       sendcmdto_set_client_event(inv_msgid, history_event_time_ms(NULL));
     }
+
+    /* The invitee's copy is an event from the inviter, tagged as one
+     * (sendcmdto_one_event(): @time, the invite's msgid, and @account
+     * under account-tag -- "the account tag MUST be added to all
+     * messages sent by the user"), never the invitee's own label or
+     * open batch.  Sent once the msgid is armed, so it carries the one
+     * the invite-notify copies carry. */
+    if (MyConnect(acptr))
+      sendcmdto_one_event(sptr, CMD_INVITE, acptr, 0, "%s %H",
+                          cli_name(acptr), chptr);
 
     /* Send invite-notify to LOCAL channel members with the capability */
     if (feature_bool(FEAT_CAP_invite_notify))
