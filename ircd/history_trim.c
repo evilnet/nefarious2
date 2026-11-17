@@ -450,6 +450,8 @@ static struct {
 static htrim_coverage_fn coverage_cb;
 /** The owner-trimmed callback (W5 Task 9): outside g, likewise. */
 static htrim_owner_trimmed_fn owner_trimmed_cb;
+/** The renamed-parent callback (history_rename.h): outside g, likewise. */
+static htrim_renamed_parent_fn renamed_parent_cb;
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -1727,7 +1729,9 @@ static int parent_ts(const char *target, const char *msgid, char *ts, size_t tsz
  * clock is behind the author's) -- the original goes too.
  *
  * The original is found through msgid_index (or its legacy bare-msgid
- * row), and its record taken from by_time.  An original with no readable
+ * row) under the REDACT row's own name -- or, for a renamed channel,
+ * under the name the renamed-parent callback gives -- and its record
+ * taken from by_time.  An original with no readable
  * by_time record (not indexed yet, or a record that does not parse) gets
  * one rebuilt from its messages row the way the backfill builds it, and
  * is counted only when its by_owner entry is there to say what it was
@@ -1737,14 +1741,30 @@ static int parent_ts(const char *target, const char *msgid, char *ts, size_t tsz
  * goes on hiding its own original.
  * @return 0, or -1 a read failed or the slice is poisoned. */
 static int delete_redacted_parent(struct htrim_slice *s, enum htrim_path path,
-                                  const char *target, const char *parent)
+                                  const char *target, const char *child_ts,
+                                  const char *child_msgid, const char *parent)
 {
   char ts[HTC_TS_MAX], bt[HTC_BT_KEY_MAX], mk[HTC_MSG_KEY_MAX], bo[HTC_BO_KEY_MAX];
+  char ptarget[HTC_TARGET_MAX];
   struct db_val v = { NULL, 0 };
   struct htc_rec prec;
   int btl, mkl, bol, rc, parsed = 0, counted = 1;
 
   rc = parent_ts(target, parent, ts, sizeof ts);
+  if (rc == 0 && renamed_parent_cb && child_msgid[0]) {
+    /* Not under the REDACT row's own name.  A renamed channel's original
+     * from before the rename is under the name the channel had then, and
+     * the read side joins the two (history_rename.h): it goes with the
+     * REDACT row all the same. */
+    ptarget[0] = ts[0] = '\0';
+    rc = renamed_parent_cb(target, child_ts, child_msgid, parent, ptarget, ts);
+    if (rc > 0) {
+      ptarget[sizeof ptarget - 1] = ts[sizeof ts - 1] = '\0';
+      if (!ptarget[0] || !ts[0])
+        return 0;
+      target = ptarget;
+    }
+  }
   if (rc <= 0)
     goto read_rc;
   btl = htc_bt_key(bt, sizeof bt, htc_parse_ms(ts), target, parent);
@@ -1958,7 +1978,8 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
    * other action of the losing side is undone. */
   if ((rec->flags & HTC_F_REDACT) && rec->redact_parent[0]
       && path != HTRIM_PATH_INCARNATION
-      && delete_redacted_parent(s, path, target, rec->redact_parent) != 0)
+      && delete_redacted_parent(s, path, target, rec->ts, msgid,
+                                rec->redact_parent) != 0)
     return -2;
   s->dup_hit = counted && !bo_new;   /* this row's bytes went already */
   return 0;
@@ -3922,6 +3943,11 @@ void htrim_set_coverage_cb(htrim_coverage_fn cb)
 void htrim_set_owner_trimmed_cb(htrim_owner_trimmed_fn cb)
 {
   owner_trimmed_cb = cb;
+}
+
+void htrim_set_renamed_parent_cb(htrim_renamed_parent_fn cb)
+{
+  renamed_parent_cb = cb;
 }
 
 uint64_t htrim_coverage_floor_ms(void)

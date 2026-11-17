@@ -3680,6 +3680,115 @@ static void test_evict_redact_scoped_to_target(void **state)
   assert_acct_matches_cf();
 }
 
+/* What history.c answers the engine for a renamed channel (the
+ * renamed-parent callback): REDACT row RDX of #new redacts ORIG, stored
+ * under #old at 1000 -- the channel's name when ORIG was sent. */
+static int renamed_calls, renamed_answer;
+static char renamed_child[128];
+
+static int renamed_parent_cb(const char *target, const char *ts,
+                             const char *msgid, const char *parent,
+                             char *ptarget, char *pts)
+{
+  renamed_calls++;
+  snprintf(renamed_child, sizeof renamed_child, "%s %s %s %s", target, ts,
+           msgid, parent);
+  if (renamed_answer == 1) {
+    strcpy(ptarget, "#old");
+    strcpy(pts, "1000.000");
+  }
+  return renamed_answer;
+}
+
+/* A redaction made after a RENAME of a message from before it: the REDACT
+ * row is under the new name, the original under the old one, and the read
+ * side joins them (history_rename.h).  Evicting the REDACT row takes the
+ * original with it all the same -- left behind, the message would show
+ * again, unredacted. */
+static void test_evict_redact_takes_original_under_earlier_name(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  renamed_calls = 0;
+  renamed_answer = 1;
+  htrim_set_renamed_parent_cb(renamed_parent_cb);
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#old", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#new", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  assert_int_equal(8700, total_now());
+
+  run_until_idle(&p);
+  htrim_set_renamed_parent_cb(NULL);
+  assert_int_equal(0, row_present("#new", 1001, "RDX"));
+  assert_int_equal(0, row_present("#old", 1000, "ORIG"));
+  assert_int_equal(0, redact_link("#new", "ORIG", 1001, "RDX"));
+  assert_true(renamed_calls >= 1);
+  assert_string_equal("#new 1001.000 RDX ORIG", renamed_child);
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_true(owner_of("a:mod") <= 1000);
+  assert_int_equal(5500, owner_of("-"));
+  assert_acct_matches_cf();
+}
+
+/* The original under the REDACT row's own name is found there: the
+ * callback is not asked.  And one that is under no name of the channel
+ * (the callback says none) stays, as before. */
+static void test_evict_redact_renamed_lookup_only_when_needed(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  renamed_calls = 0;
+  renamed_answer = 0;
+  htrim_set_renamed_parent_cb(renamed_parent_cb);
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#c", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#c", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_sized("#d", 1000, "OTHER", "a:carol", 100);
+  seed_redact("#e", 1002, "RDY", "a:mod", "OTHER", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+
+  run_until_idle(&p);
+  htrim_set_renamed_parent_cb(NULL);
+  assert_int_equal(0, row_present("#c", 1000, "ORIG"));
+  assert_int_equal(0, row_present("#e", 1002, "RDY"));
+  assert_int_equal(1, row_present("#d", 1000, "OTHER"));
+  assert_int_equal(1, renamed_calls);
+  assert_string_equal("#e 1002.000 RDY OTHER", renamed_child);
+  assert_acct_matches_cf();
+}
+
+/* The lookup could not read: the slice stages nothing it cannot finish --
+ * the REDACT row stays until its original can be found. */
+static void test_evict_redact_renamed_lookup_fails(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  FILE *tmp;
+  int i;
+  (void)state;
+
+  evict_ready();
+  renamed_answer = -1;
+  htrim_set_renamed_parent_cb(renamed_parent_cb);
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#old", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#new", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+
+  stderr_capture(&tmp);
+  for (i = 0; i < 20; i++)
+    htrim_run_slice(&p);
+  stderr_restore();
+  fclose(tmp);
+  htrim_set_renamed_parent_cb(NULL);
+  assert_int_equal(1, row_present("#new", 1001, "RDX"));
+  assert_int_equal(1, row_present("#old", 1000, "ORIG"));
+}
+
 /* The emergency path is a walk like any other: a REDACT row it takes takes
  * its original, even a newer one the walk has not reached. */
 static void test_emergency_redact_takes_original(void **state)
@@ -5897,6 +6006,9 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_evict_owner_share_redact_takes_original, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_oldest_skewed_redact_takes_original, setup, teardown),
     cmocka_unit_test_setup_teardown(test_ageout_skewed_redact_takes_original, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_takes_original_under_earlier_name, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_renamed_lookup_only_when_needed, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_renamed_lookup_fails, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_owner_self_redaction_once, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_redact_without_original, setup, teardown),
     cmocka_unit_test_setup_teardown(test_backfill_redact_takes_counted_original, setup, teardown),

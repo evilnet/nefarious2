@@ -290,6 +290,28 @@ typedef void (*htrim_owner_trimmed_fn)(const char *const *targets,
  * htrim_init / htrim_shutdown. */
 void htrim_set_owner_trimmed_cb(htrim_owner_trimmed_fn cb);
 
+/** Asked when a REDACT row being deleted -- folded @a target, key
+ * timestamp @a ts, @a msgid -- redacts @a parent and no row of that msgid
+ * is stored under @a target: is the original stored under another name
+ * the same channel has had?  A REDACT sent after a RENAME for a message
+ * from before it is stored under the new name and its original under the
+ * old one (history_rename.h); the original goes with the REDACT row there
+ * too, or evicting the REDACT row would show the message again.  The
+ * engine knows nothing of renames: history.c answers from the renames
+ * record.
+ * @param[out] ptarget The name the original is stored under, folded
+ *   (HTC_TARGET_MAX bytes).
+ * @param[out] pts Its key timestamp (HTC_TS_MAX bytes).
+ * @return 1 found, 0 none, -1 a read failed (the slice is abandoned). */
+typedef int (*htrim_renamed_parent_fn)(const char *target, const char *ts,
+                                       const char *msgid, const char *parent,
+                                       char *ptarget, char *pts);
+
+/** Register the renamed-parent callback (NULL = none: a REDACT row's
+ * original is looked for under its own name only).  It survives
+ * htrim_init / htrim_shutdown. */
+void htrim_set_renamed_parent_cb(htrim_renamed_parent_fn cb);
+
 /** @return non-zero while an eviction drain is under way. */
 int htrim_draining(void);
 
