@@ -581,8 +581,9 @@ feature_notify_cap_chathistory(void)
   }
 }
 
-/** Notify clients when a simple CAP feature flag changes (no parameters).
- * Helper macro to generate callbacks for caps without parameters.
+/** Notify clients when a simple CAP feature flag changes.
+ * Helper macro to generate callbacks for caps whose value, if any, is the
+ * stored one (send_cap_notify() adds it to CAP NEW).
  * Uses featname for C identifier (function name) and capname for the CAP string.
  */
 #define DEFINE_CAP_NOTIFY(capname, featname) \
@@ -641,12 +642,16 @@ DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
 DEFINE_CAP_NOTIFY("tls", tls)
 
 /** PERSISTENCE_DRAFT_EXTRAS: draft/persistence carries the extras' value
- * only while the old names are kept working (N027). */
+ * only while the old names are kept working (N027).  While the cap is
+ * offered, cap-notify clients are told its new value (or that it has
+ * none); the caps' own hooks above send the stored value as well. */
 static void feature_notify_persistence_draft_extras(void)
 {
   cap_set_value(CAP_DRAFT_PERSISTENCE,
                 feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
                 ? PERSISTENCE_EXTRAS_VALUE : NULL);
+  if (feature_bool(FEAT_CAP_draft_persistence))
+    send_cap_notify("draft/persistence", 1, NULL);
 }
 
 /** Notify clients when STS feature flag changes.

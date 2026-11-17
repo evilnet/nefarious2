@@ -352,7 +352,8 @@ sasl_server_available(void)
  *
  * @param[in] capname Name of the capability (e.g., "sasl").
  * @param[in] available 1 if capability is now available, 0 if removed.
- * @param[in] value Optional value for CAP NEW (e.g., mechanism list). NULL for no value.
+ * @param[in] value Value for CAP NEW (e.g., mechanism list).  NULL or ""
+ *   for the capability's stored one, if it has one (cap_new_value()).
  */
 void send_cap_notify(const char *capname, int available, const char *value)
 {
@@ -363,6 +364,11 @@ void send_cap_notify(const char *capname, int available, const char *value)
 
   if (cap && !available)
     CapClr(&cap_announced, cap->cap);
+
+  /* A caller need not know which capabilities have a value: given none,
+   * the stored one that CAP LS 302 lists (cap_set_value()). */
+  if (available && !(value && *value))
+    value = cap ? cap->value : NULL;
 
   /* If batching is active, buffer instead of sending immediately */
   if (cap_batch.active) {
