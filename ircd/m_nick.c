@@ -505,6 +505,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char nick[NICKLEN + 2];
   time_t lastnick = 0;
   int differ = 1;
+  int same_lastnick;
   const char *type;
 
   assert(0 != cptr);
@@ -1221,9 +1222,11 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   sendcmdto_serv_butone(&me, CMD_KILL, NULL, "%C :%s (%s)",
                         acptr, feature_str(FEAT_HIS_SERVERNAME),
                         type);
+  /* Read acptr before exit_client_msg() frees it. */
+  same_lastnick = (lastnick == cli_lastnick(acptr));
   exit_client_msg(cptr, acptr, &me, "Killed (%s (%s))",
                   feature_str(FEAT_HIS_SERVERNAME), type);
-  if (lastnick == cli_lastnick(acptr))
+  if (same_lastnick)
     return 0;
   if (sptr == NULL)
     return 0;
