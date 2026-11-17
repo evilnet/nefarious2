@@ -48,7 +48,6 @@ CMOCKA_TESTPROGS = \
 	history_trim_codec_cmocka \
 	history_trim_cmocka \
 	chathistory_presence_cmocka \
-	chathistory_presence_store_cmocka \
 	chathistory_merge_cmocka \
 	chathistory_recv_cmocka \
 	pm_pair_index_cmocka \
@@ -394,17 +393,6 @@ history_trim_cmocka: $(HISTORY_TRIM_CMOCKA_OBJS)
 CHATHISTORY_PRESENCE_CMOCKA_OBJS = chathistory_presence_cmocka.o test_stub.o ../chathistory_presence.o ../ircd_alloc.o ../ircd_string.o
 chathistory_presence_cmocka: $(CHATHISTORY_PRESENCE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_PRESENCE_CMOCKA_OBJS) $(CMOCKA_LIBS)
-
-# The same source compiled -DPRESENCE_STORE: account anchors, whose
-# records live in the metadata store, on the in-memory store (fake_db.o is
-# the whole db_* backend here, with its fault injection) -- what a RENAME
-# does to an account's presence when a read or the write fails.
-chathistory_presence_cmocka_store.o: ${srcdir}/chathistory_presence_cmocka.c
-	${CC} ${CFLAGS} ${CPPFLAGS} -DPRESENCE_STORE -c -o $@ ${srcdir}/chathistory_presence_cmocka.c
-
-CHATHISTORY_PRESENCE_STORE_CMOCKA_OBJS = chathistory_presence_cmocka_store.o fake_db.o test_stub.o ../chathistory_presence.o ../ircd_alloc.o ../ircd_string.o
-chathistory_presence_store_cmocka: $(CHATHISTORY_PRESENCE_STORE_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_PRESENCE_STORE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # chathistory_merge tests - the federated page merge (hm_merge: dedup,
 # tag adoption, same-ms msgid order, trim direction, the heap-content

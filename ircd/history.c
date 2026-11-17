@@ -173,9 +173,6 @@ static history_coverage_cb coverage_callback = NULL;
 /* Forward declarations */
 static void history_retire_quotas(struct db_cf *meta);
 static uint64_t history_trim_clock(void);
-static int history_trim_renamed_parent(const char *target, const char *ts,
-                                       const char *msgid, const char *parent,
-                                       char *ptarget, char *pts);
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count);
 static void recv_alive_write(void);
@@ -279,93 +276,6 @@ static struct {
   struct hren_span span;
 } history_rename_cache;
 
-/** Names whose renames record this run could neither rewrite nor delete
- * when a channel arrived at them (history_channel_renamed): what the
- * record holds may be a dead channel's, so no earlier names are read for
- * them until the record is rewritten (a later rename) or deleted -- which
- * a read of the name tries again, at most once a second
- * (history_rename_distrust_retry).  Folded.  More names than fit: every
- * name (the last flag), until a restart.
- *
- * The list is in memory only.  A name is on it because two writes to the
- * store in a row failed, the record's and then its delete; a marker kept
- * in that store would be a third.  What is kept instead is the retry:
- * the stale record is gone as soon as the store takes a write again, and
- * a restart before that reads a record whose entries of this incarnation
- * are, at worst, a channel's that was created in the same second -- the
- * limit history_rename.h describes for the rows themselves. */
-#define HISTORY_RENAME_DISTRUST_MAX 8
-static char history_rename_distrust[HISTORY_RENAME_DISTRUST_MAX][CHANNELLEN + 1];
-static int history_rename_distrust_all;
-
-static int history_rename_distrusted(const char *name)
-{
-  char folded[CHANNELLEN + 1];
-  size_t len = strlen(name);
-  int i;
-
-  if (history_rename_distrust_all)
-    return 1;
-  if (len > CHANNELLEN)
-    return 0;
-  db_casefold_bytes(folded, name, len);
-  folded[len] = '\0';
-  for (i = 0; i < HISTORY_RENAME_DISTRUST_MAX; i++)
-    if (history_rename_distrust[i][0]
-        && !strcmp(history_rename_distrust[i], folded))
-      return 1;
-  return 0;
-}
-
-/** Set (@a on) or clear @a name's distrust. */
-static void history_rename_distrust_set(const char *name, int on)
-{
-  char folded[CHANNELLEN + 1];
-  size_t len = strlen(name);
-  int i, free_slot = -1;
-
-  if (len > CHANNELLEN)
-    return;
-  db_casefold_bytes(folded, name, len);
-  folded[len] = '\0';
-  for (i = 0; i < HISTORY_RENAME_DISTRUST_MAX; i++) {
-    if (!history_rename_distrust[i][0]) {
-      if (free_slot < 0)
-        free_slot = i;
-    } else if (!strcmp(history_rename_distrust[i], folded)) {
-      if (!on)
-        history_rename_distrust[i][0] = '\0';
-      return;
-    }
-  }
-  if (!on)
-    return;
-  if (free_slot < 0)
-    history_rename_distrust_all = 1;
-  else
-    strcpy(history_rename_distrust[free_slot], folded);
-}
-
-/** A read of a distrusted @a name: try once more to delete the record
- * that could not be deleted when the name was put on the list.
- * @return 1 deleted (the name is trusted again, and has no record). */
-static int history_rename_distrust_retry(const char *name)
-{
-  static time_t last;
-
-  if (history_rename_distrust_all || last == CurrentTime)
-    return 0;
-  last = CurrentTime;
-  if (hren_drop(history_db_env, history_cf_renames, name) != 0)
-    return 0;
-  history_rename_distrust_set(name, 0);
-  history_rename_cache.valid = 0;
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "history: the stale renames record of %s is deleted now that "
-            "the store takes writes again", name);
-  return 1;
-}
-
 /** The earlier names of @a target, a channel of incarnation @a live (0:
  * no live channel -- every incarnation's, as its own rows are all shown),
  * whose rows CHATHISTORY returns as @a target's own: "this channel has
@@ -385,9 +295,6 @@ static int history_rename_span(const char *target, time_t live,
   span->count = 0;
   if (!history_available || !history_cf_renames || !target
       || !IsChannelName(target) || strlen(target) > CHANNELLEN)
-    return 0;
-  if (history_rename_distrusted(target)
-      && !history_rename_distrust_retry(target))
     return 0;
   if (history_rename_cache.valid && history_rename_cache.incarnation == live
       && ircd_strcmp(history_rename_cache.name, target) == 0) {
@@ -954,7 +861,6 @@ int history_init(const char *dbpath)
     }
     /* A per-owner eviction clips the channel's receive windows (Q1). */
     htrim_set_owner_trimmed_cb(history_recv_owner_trimmed);
-    htrim_set_renamed_parent_cb(history_trim_renamed_parent);
   }
 
   /* Strict-presence init moved to ircd.c: the account records now live
@@ -1020,8 +926,6 @@ void history_shutdown(void)
   history_cf_pm_pairs = NULL;
   history_cf_renames = NULL;
   history_rename_cache.valid = 0;
-  memset(history_rename_distrust, 0, sizeof(history_rename_distrust));
-  history_rename_distrust_all = 0;
   history_pm_index_ok = 0;
   history_available = 0;
 
@@ -3274,18 +3178,14 @@ int history_purge_incarnation(const char *channel, time_t incarnation)
   }
   if (span.count > 0 || span_unread) {
     /* The rows the entries named are gone -- or could not be looked for,
-     * and then must not be reached.  When the entries cannot be dropped
-     * either, the name's record is not read again this run. */
+     * and then must not be reached. */
     if (hren_forget(history_db_env, history_cf_renames, channel,
                     (uint64_t)incarnation) != 0
-        && hren_drop(history_db_env, history_cf_renames, channel) != 0) {
-      history_rename_distrust_set(channel, 1);
+        && hren_drop(history_db_env, history_cf_renames, channel) != 0)
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "history_purge_incarnation: %s: the renames record cannot be "
-                "rewritten (%s): its earlier names are not read until it is",
-                channel,
+                "rewritten (%s)", channel,
                 db_env_last_error(history_db_env) ? db_env_last_error(history_db_env) : "?");
-    }
     history_rename_cache.valid = 0;
   }
   if (deleted > 0 || skipped > 0)
@@ -4555,7 +4455,6 @@ static void history_rename_recorded(const char *oldname, const char *newname,
 {
   history_rename_cache.valid = 0;
   if (rc >= 0) {
-    history_rename_distrust_set(newname, 0);
     if (dropped > 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "history: %s has been renamed more than %d times inside the "
@@ -4576,9 +4475,8 @@ static void history_rename_recorded(const char *oldname, const char *newname,
   }
   /* Not written.  The record the name already has stays, and it may hold
    * a dead channel's entries of this very incarnation (history_rename.h:
-   * a same-second creation): delete it, or stop reading it. */
-  if (hren_drop(history_db_env, history_cf_renames, newname) != 0)
-    history_rename_distrust_set(newname, 1);
+   * a same-second creation): delete it. */
+  (void)hren_drop(history_db_env, history_cf_renames, newname);
   log_write(LS_SYSTEM, L_WARNING, 0,
             "history: the rename of %s to %s could not be recorded (%s): "
             "CHATHISTORY of %s will not return the rows stored under %s",
@@ -4620,45 +4518,6 @@ void history_channel_rename_crossed(const char *oldname, const char *losername,
     return;
   }
   history_rename_recorded(oldname, winnername, rc < 0 ? -1 : 0, dropped);
-}
-
-/** The trim engine's renamed-parent callback (history_trim.h): the
- * original a REDACT row being deleted redacts, stored under another name
- * the same channel has had (hren_find_parent). */
-static int history_trim_renamed_parent(const char *target, const char *ts,
-                                       const char *msgid, const char *parent,
-                                       char *ptarget, char *pts)
-{
-  char mk[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  char name[CHANNELLEN + 1];
-  struct db_val v = { NULL, 0 };
-  uint64_t inc;
-  int mkl, rc;
-
-  if (!history_cf_renames || !target || !IsChannelName(target)
-      || strlen(target) > CHANNELLEN)
-    return 0;
-  /* The REDACT row's incarnation, from the row itself (its delete is
-   * staged, not committed: it is still there to read). */
-  mkl = build_key(mk, sizeof(mk), target, ts, msgid);
-  if (mkl < 0)
-    return 0;
-  rc = db_get(history_db_env, history_cf_messages, mk, mkl, NULL, &v);
-  if (rc == DB_NOTFOUND)
-    return 0;
-  if (rc != DB_OK)
-    return -1;
-  inc = history_row_incarnation(v.base, v.len);
-  db_val_free(&v);
-  if (!inc)
-    return 0;
-  rc = hren_find_parent(history_db_env, history_cf_renames,
-                        history_cf_msgid, history_cf_messages,
-                        history_row_incarnation, target, history_parse_ms(ts),
-                        inc, parent, name, pts, HTC_TS_MAX);
-  if (rc == 1)
-    ircd_strncpy(ptarget, name, HTC_TARGET_MAX);
-  return rc;
 }
 
 /** history_recv_covers for one name's record: @a open_since is this
