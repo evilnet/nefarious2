@@ -221,15 +221,6 @@ int thread_pool_init(int num_threads)
   for (i = 0; i < num_threads; i++) {
     int err = pthread_create(&pool.workers[i], NULL, worker_thread, NULL);
 
-    if (err != 0 && i > 0) {
-      /* Some workers run: keep them.  Tearing them down would put every
-       * password hash, bcrypt included, back on the main loop. */
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "thread_pool: pthread_create() failed: %s; running %d of %d workers",
-                strerror(err), i, num_threads);
-      pool.num_workers = i;
-      return 0;
-    }
     if (err != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "thread_pool: pthread_create() failed: %s", strerror(err));
@@ -460,12 +451,6 @@ void thread_pool_stats(unsigned int *pending, unsigned long *completed,
 
   if (completed)
     *completed = pool.completed_count;
-}
-
-/** See include/thread_pool.h. */
-int thread_pool_size(void)
-{
-  return pool.running ? pool.num_workers : 0;
 }
 
 #endif /* HAVE_PTHREAD */

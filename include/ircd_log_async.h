@@ -83,7 +83,7 @@ void log_async_shutdown(void);
  *         syslog gets the line without the file's timestamp before it and
  *         without the newline after it (syslog stamps its own)
  * @return 0 on success (queued), -1 when nothing was written (no
- *         writer, or not accepting): the caller writes it
+ *         writer): the caller writes it
  */
 int log_async_write(int fd, int syslog_priority, const char *message, int len,
                     int syslog_off);
@@ -102,14 +102,6 @@ void log_async_flush(void);
 int log_async_available(void);
 
 /**
- * Start (1) or stop (0) queueing new entries.  Stopping waits until every
- * queued entry is written; after it log_async_write() returns -1, once
- * the queue is empty, so a line written synchronously never lands ahead
- * of an older queued one.
- */
-void log_async_set_accepting(int on);
-
-/**
  * Get async logging statistics.
  * @param[out] queued Current entries in queue
  * @param[out] written Total entries written since init
@@ -126,7 +118,6 @@ void log_async_stats(unsigned long *queued, unsigned long *written,
 #define log_async_write(fd, prio, msg, len, off) (-1)
 #define log_async_flush()                       do {} while (0)
 #define log_async_available()                   (0)
-#define log_async_set_accepting(on)             do {} while (0)
 #define log_async_stats(q, w, d)                do { if (q) *(q) = 0; if (w) *(w) = 0; if (d) *(d) = 0; } while (0)
 
 #endif /* HAVE_PTHREAD */

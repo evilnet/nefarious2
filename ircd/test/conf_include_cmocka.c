@@ -133,7 +133,6 @@ const char *gitsync_conf_file(void)
 
 void feature_unmark(void) { }
 void feature_mark(void) { }
-void log_feature_async_logging(void) { }
 void clear_nameservers(void) { }
 void sasl_conf_reset_pending(void) { }
 void sasl_conf_apply(void) { }

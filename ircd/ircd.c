@@ -378,7 +378,7 @@ static void shutdown_stores(void)
 static void shutdown_writers(void)
 {
   thread_pool_shutdown();
-  log_async_stop();
+  log_async_shutdown();
   log_shutdown();
 }
 
@@ -1136,14 +1136,18 @@ int main(int argc, char **argv) {
    * after init_conf(), so THREAD_POOL_SIZE and ASYNC_LOGGING from
    * ircd.conf are in force, and only once this process is the server:
    * a configuration check (-k) or a second copy refused the PID file
-   * starts no thread.  THREAD_POOL_SIZE is read here only; ASYNC_LOGGING
-   * turned on by a later REHASH starts the writer then
-   * (log_feature_async_logging). */
+   * starts no thread.  Both are read here only: a change takes effect
+   * at the next restart. */
   if (thread_pool_init(feature_int(FEAT_THREAD_POOL_SIZE)) < 0) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "Thread pool init failed; password verification will be synchronous");
   }
-  log_async_start();
+  if (feature_bool(FEAT_ASYNC_LOGGING)) {
+    if (log_async_init(0) < 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Async logging init failed; logging will be synchronous");
+    }
+  }
 
   init_server_identity();
 

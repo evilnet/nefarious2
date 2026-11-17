@@ -388,73 +388,6 @@ log_resume(void)
   log_reopen();
 }
 
-/** Set by log_async_start(): startup is over and ASYNC_LOGGING applies. */
-static int log_async_started;
-/** Lines are queued (as log_feature_async_logging() last left it). */
-static int log_async_on;
-
-/** ASYNC_LOGGING changed (the feature's notify callback), or startup is
- * over (log_async_start()).  Turned on, it starts the writer thread if
- * none runs, or lets the running one queue again.  Turned off, the
- * writer stops queueing and writes what it holds; every line after that
- * is written synchronously, by whichever thread logs it, and none lands
- * ahead of a queued one (log_async_set_accepting()).  The writer stays.
- * Before log_async_start() it does nothing: the feature then holds the
- * compiled default, or a configuration check (-k) is reading ircd.conf.
- */
-void
-log_feature_async_logging(void)
-{
-  int was_on = log_async_on;
-
-  if (!log_async_started)
-    return;
-  if (!feature_bool(FEAT_ASYNC_LOGGING)) {
-    log_async_set_accepting(0);
-    log_async_on = 0;
-  } else if (log_async_available()) {
-    log_async_set_accepting(1);
-    log_async_on = 1;
-  } else if (log_async_init(0) < 0)
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "Async logging init failed; logging will be synchronous");
-  else
-    log_async_on = 1;
-
-  /* Say so when it changes: a crash with it on loses what is queued,
-   * the lines nearest the crash. */
-  if (log_async_on && !was_on)
-    log_write(LS_CONFIG, L_INFO, 0, "Async logging on: a crash loses the "
-              "lines still queued");
-  else if (!log_async_on && was_on)
-    log_write(LS_CONFIG, L_INFO, 0, "Async logging off (queue drained)");
-}
-
-/** Startup is over (main(), after ircd.conf is read and the PID file
- * locked): from now on ASYNC_LOGGING applies, and if ircd.conf turned it
- * on, the writer thread starts now. */
-void
-log_async_start(void)
-{
-  log_async_started = 1;
-  log_feature_async_logging();
-}
-
-/** The writers stop (DIE, RESTART, a fatal error after startup): the
- * writer writes what it holds and exits, and nothing starts it again --
- * a REHASH in the same event batch included. */
-void
-log_async_stop(void)
-{
-  /* It destroys the queue's mutex: every other thread that logs (the
-   * pool's workers) is gone by now (shutdown_writers()).  No fork child
-   * may log through the queue before its exec either: the writer thread
-   * is not in the child. */
-  log_async_started = 0;
-  log_async_on = 0;
-  log_async_shutdown();
-}
-
 /** Write a logging entry.
  * @param[in] subsys Target subsystem.
  * @param[in] severity Severity of message.
@@ -577,9 +510,8 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
     vector[2].iov_base = (void*) "\n"; /* terminate lines with a \n */
     vector[2].iov_len = 1;
 
-    /* Try async logging while the writer runs.  Whether it queues is the
-     * writer's decision (log_async_set_accepting(), from the ASYNC_LOGGING
-     * callback), taken under its lock, so every thread sees one order. */
+    /* Try async logging while the writer runs (it starts at startup, when
+     * ASYNC_LOGGING is on, and runs until shutdown). */
     if (log_async_available()) {
       /* Build combined log entry for async write */
       char async_buf[LOG_BUFSIZE + 64];
