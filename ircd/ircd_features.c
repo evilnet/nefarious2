@@ -944,9 +944,13 @@ feature_set(struct Client* from, const char* const* fields, int count)
 		 (strlen(fields[1]) >= 2 &&
 		  !ircd_strncmp(fields[1], "OFF", strlen(fields[1]))))
 	  feat->v_int = 0;
-	else if (from) /* report an error... */
-	  return send_reply(from, ERR_BADFEATVALUE, fields[1], feat->type);
 	else {
+	  /* The value stays as it was, and keeps its mark, as for a refused
+	   * integer (FEAT_INT above). */
+	  if (feat->v_int != feat->def_int)
+	    feat->flags |= FEAT_MARK;
+	  if (from) /* report an error... */
+	    return send_reply(from, ERR_BADFEATVALUE, fields[1], feat->type);
 	  log_write(LS_CONFIG, L_ERROR, 0, "Bad value \"%s\" for feature %s",
 		    fields[1], feat->type);
 	  return 0;
