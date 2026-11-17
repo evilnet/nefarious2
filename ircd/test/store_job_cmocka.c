@@ -10,14 +10,18 @@
  *  - a running pool: run() on a worker with its logging muted (and the
  *    worker left as the pool keeps it: muted, like every pool worker),
  *    done() on the main thread;
- *  - the cap: one worker stays free of reads, the jobs over the cap wait
+ *  - the cap: one worker never runs a read, the jobs over the cap wait
  *    in order, and past STORE_JOBS_WAIT_MAX a job runs on the caller;
  *  - the link gone while a job waits, is queued in the pool, or runs: the
  *    job loses its link, and one no worker has started never runs;
  *  - the store closing (store_jobs_quiesce): waits for the job a worker is
  *    running, cancels the rest, and nothing runs afterwards;
  *  - the pool shutting down with a job still queued: abandoned and
- *    answered once, never run.
+ *    answered once, never run;
+ *  - and all of it at once, ungated: thousands of jobs whose link leaves
+ *    at a random moment, so a cancel meets the worker taking the job
+ *    (QUEUED -> RUNNING against QUEUED -> CANCELLED) however the
+ *    scheduler has it, with the store closing under the last of them.
  *
  * In every case: exactly one of run() and abandon(), then done() exactly
  * once.  Links the REAL ../store_job.o and ../thread_pool.o; the store is
@@ -26,6 +30,7 @@
 #include "config.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -99,6 +104,8 @@ struct TJob {
   int run_on_main, run_muted;
   int done_on_main;
   int handle;               /**< the "store handle": 1 while held */
+  int spin;                 /**< run() yields this often: a read's length */
+  int link_left;            /**< the stress case: its link left before done() */
 };
 
 static pthread_t main_thread;
@@ -106,6 +113,7 @@ static pthread_t main_thread;
 static void t_run(struct StoreJob *j)
 {
   struct TJob *t = (struct TJob *)j;
+  int spin;
 
   pthread_mutex_lock(&rec_mutex);
   t->runs++;
@@ -123,7 +131,10 @@ static void t_run(struct StoreJob *j)
     pthread_cond_wait(&rec_cond, &rec_mutex);
   running_now--;
   t->handle--;              /* run() gives the handle back */
+  spin = t->spin;
   pthread_mutex_unlock(&rec_mutex);
+  while (spin-- > 0)
+    sched_yield();
 }
 
 static void t_abandon(struct StoreJob *j)
@@ -352,7 +363,7 @@ static void with_a_pool_the_job_runs_on_a_muted_worker(void **state)
 
 /** The cap is one worker fewer than the pool has: with every place taken
  * the next jobs wait here, not in the pool and not on the main thread. */
-static void the_cap_leaves_a_worker_free(void **state)
+static void the_cap_bounds_the_jobs_in_the_pool(void **state)
 {
   struct TJob t[6];
   unsigned int in_pool, waiting;
@@ -641,6 +652,152 @@ static void a_pool_shutdown_frees_a_queued_job_once(void **state)
   assert_int_equal(blockers_done, 2);
 }
 
+/* ---- the stress case ---- */
+
+static unsigned int stress_rng;
+
+static unsigned int stress_rand(unsigned int n)
+{
+  stress_rng = stress_rng * 1103515245u + 12345u;
+  return (stress_rng >> 16) % n;
+}
+
+/** A task that is not a store job and takes no time: a password check
+ * between the reads, so a job is sometimes queued behind one. */
+static void *stress_other_work(void *arg)
+{
+  sched_yield();
+  return arg;
+}
+
+#define STRESS_JOBS 3000
+#define STRESS_LINKS 5
+
+/** One round: STRESS_JOBS jobs on a pool of four, the gate open.  After
+ * each start the main thread does one of: nothing, a poll, a "server
+ * left" for a random link (at once, or after a yield or two -- the
+ * window in which a worker takes the job), or an unrelated task.  The
+ * store closes with jobs still in flight.  Then every job, whatever
+ * became of it: one of run() and abandon(), done() once on the main
+ * thread, the handle back once, no link once its server left, and no
+ * run() after the close. */
+static void stress_round(unsigned int seed, int *ran_worker, int *ran_main,
+                         int *cancelled, int *ran_unlinked)
+{
+  static struct TJob jobs[STRESS_JOBS];
+  static int links[STRESS_LINKS];
+  static int token;
+  int i, k, first_open = 0, spins;
+
+  stress_rng = seed;
+  assert_int_equal(thread_pool_init(4), 0);
+  assert_int_equal(store_jobs_cap(), 3);
+  set_gate(1);
+
+  for (i = 0; i < STRESS_JOBS; i++) {
+    struct TJob *t = &jobs[i];
+    int *link = &links[stress_rand(STRESS_LINKS)];
+
+    tjob_init(t, link);
+    t->spin = (int)stress_rand(4);
+    store_job_start(&t->job);
+
+    switch (stress_rand(8)) {
+    case 0: case 1: case 2: {
+      const void *gone = &links[stress_rand(STRESS_LINKS)];
+
+      for (k = (int)stress_rand(3); k > 0; k--)
+        sched_yield();
+      /* Who loses the link: every job for it that is not answered yet.
+       * done() is the main thread's, so dones needs no lock to read
+       * here; first_open only skips the answered prefix. */
+      while (first_open <= i && jobs[first_open].dones)
+        first_open++;
+      for (k = first_open; k <= i; k++)
+        if (!jobs[k].dones && jobs[k].job.link == gone)
+          jobs[k].link_left = 1;
+      store_jobs_link_gone(gone);
+      break;
+    }
+    case 3: case 4:
+      thread_pool_poll();
+      break;
+    case 5:
+      (void)thread_pool_submit(stress_other_work, &token, blocker_done, NULL);
+      break;
+    default:
+      break;
+    }
+  }
+
+  /* The store closes under whatever is still in flight. */
+  store_jobs_quiesce();
+  pthread_mutex_lock(&rec_mutex);
+  store_closed = 1;
+  pthread_mutex_unlock(&rec_mutex);
+
+  for (i = 0, spins = 0; i < STRESS_JOBS; i++)
+    while (!jobs[i].dones) {
+      thread_pool_poll();
+      usleep(200);
+      assert_true(++spins < 100000);    /* 20 s: a job was lost */
+    }
+  thread_pool_shutdown();
+
+  pthread_mutex_lock(&rec_mutex);
+  assert_int_equal(ran_after_close, 0);
+  assert_true(running_max <= 3 + 1);    /* the cap, and one on the caller */
+  for (i = 0; i < STRESS_JOBS; i++) {
+    struct TJob *t = &jobs[i];
+
+    assert_int_equal(t->dones, 1);
+    assert_int_equal(t->runs + t->abandons, 1);
+    assert_int_equal(t->done_ran, t->runs);
+    assert_int_equal(t->handle, 0);
+    assert_true(t->done_on_main);
+    if (t->runs && !t->run_on_main)
+      assert_true(t->run_muted);
+    if (t->link_left)
+      assert_null(t->done_link);
+    if (t->link_left && t->runs && !t->run_on_main)
+      (*ran_unlinked)++;      /* the cancel came too late: a worker had it */
+    else if (t->runs)
+      assert_non_null(t->done_link);
+    if (t->abandons)
+      (*cancelled)++;
+    else if (t->run_on_main)
+      (*ran_main)++;
+    else
+      (*ran_worker)++;
+  }
+  pthread_mutex_unlock(&rec_mutex);
+}
+
+/** Exactly once, however a cancel and a worker meet. */
+static void a_cancel_racing_a_worker_is_still_exactly_once(void **state)
+{
+  static const unsigned int seeds[] = { 1, 20261117, 0xfeedu, 77 };
+  int ran_worker = 0, ran_main = 0, cancelled = 0, ran_unlinked = 0;
+  size_t i;
+
+  (void)state;
+  for (i = 0; i < sizeof(seeds) / sizeof(seeds[0]); i++) {
+    stress_round(seeds[i], &ran_worker, &ran_main, &cancelled,
+                 &ran_unlinked);
+    pthread_mutex_lock(&rec_mutex);
+    store_closed = 0;
+    running_max = 0;
+    pthread_mutex_unlock(&rec_mutex);
+  }
+  print_message("          stress: %d ran on a worker (%d of them with the "
+                "link gone), %d on the caller, %d cancelled\n",
+                ran_worker, ran_unlinked, ran_main, cancelled);
+  /* Both sides of the race happened, or the case raced nothing. */
+  assert_true(ran_worker > 0);
+  assert_true(ran_unlinked > 0);
+  assert_true(cancelled > 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -648,7 +805,7 @@ int main(void)
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(with_a_pool_the_job_runs_on_a_muted_worker,
                                     case_setup, case_teardown),
-    cmocka_unit_test_setup_teardown(the_cap_leaves_a_worker_free,
+    cmocka_unit_test_setup_teardown(the_cap_bounds_the_jobs_in_the_pool,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(waiting_jobs_run_in_order,
                                     case_setup, case_teardown),
@@ -663,6 +820,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(a_cancelled_job_survives_the_pool_shutdown,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(a_pool_shutdown_frees_a_queued_job_once,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(a_cancel_racing_a_worker_is_still_exactly_once,
                                     case_setup, case_teardown),
   };
 
