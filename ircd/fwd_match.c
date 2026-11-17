@@ -159,6 +159,18 @@ static const struct FwdNum fam_names[] = {
   { 0, 0, 0, 0 }
 };
 
+/* CHECK <server> <target> [-flags] (opers only; stock and fork alike):
+ * 286 heads each section, 287 per user of a channel, 290 for every other
+ * line, 291 once at the end.  292 alone when nothing matched; 517 alone
+ * when the destination refuses the command.  None names the target or
+ * the server -- but the asker is an oper, so the lines come under their
+ * origin's name and fwd_pick() tells two CHECKs apart by it. */
+static const struct FwdNum fam_check[] = {
+  { 286, 287, W_NONE, B }, { 290, 0, W_NONE, B }, { 291, 0, W_NONE, E },
+  { 292, 0, W_NONE, E }, { 517, 0, W_NONE, E },
+  { 0, 0, 0, 0 }
+};
+
 #undef B
 #undef E
 #undef EE
@@ -185,6 +197,7 @@ static const struct {
   { "STATS",    FWD_SUBJ_PARV1,  0, fam_stats },
   { "TRACE",    FWD_SUBJ_NONE,   1, fam_trace },
   { "NAMES",    FWD_SUBJ_PARV1,  0, fam_names },
+  { "CHECK",    FWD_SUBJ_NONE,   0, fam_check },
 };
 
 int fwd_family_of(const char *cmd)

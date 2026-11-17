@@ -45,12 +45,13 @@ enum FwdFamily {
   FWD_FAM_STATS,
   FWD_FAM_TRACE,
   FWD_FAM_NAMES,
+  FWD_FAM_CHECK,
   FWD_FAM_COUNT
 };
 
 /** Where a forwarded command's subject is taken from. */
 enum FwdSubjectFrom {
-  FWD_SUBJ_NONE = 0,   /**< its replies name nothing (LUSERS, INFO, TRACE) */
+  FWD_SUBJ_NONE = 0,   /**< its replies name nothing (LUSERS, INFO, TRACE, CHECK) */
   FWD_SUBJ_PARV1,      /**< parv[1] of the forwarded command (WHOWAS, STATS, NAMES) */
   FWD_SUBJ_PARV2,      /**< parv[2] (WHOIS's nick list, LINKS' mask) */
   FWD_SUBJ_SERVER      /**< the destination server's name (VERSION, TIME, ...) */

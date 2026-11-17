@@ -52,6 +52,7 @@ static const struct {
   { "OPERMOTD", 537, 0   },  /* RPL_ENDOFOMOTD */
   { "WHOWAS",   369, 0   },  /* RPL_ENDOFWHOWAS (406 precedes it on miss) */
   { "NAMES",    366, 0   },  /* RPL_ENDOFNAMES */
+  { "CHECK",    291, 292 },  /* RPL_ENDOFCHECK / ERR_SEARCHNOMATCH */
   { NULL, 0, 0 }
 };
 

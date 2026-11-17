@@ -24,6 +24,7 @@ static void test_families_by_command(void **state)
   assert_int_equal(fwd_family_of("whowas"), FWD_FAM_WHOWAS);
   assert_int_equal(fwd_family_of("STATS"), FWD_FAM_STATS);
   assert_int_equal(fwd_family_of("NAMES"), FWD_FAM_NAMES);
+  assert_int_equal(fwd_family_of("CHECK"), FWD_FAM_CHECK);
   assert_int_equal(fwd_family_of("CONNECT"), FWD_FAM_NONE);
   assert_int_equal(fwd_family_of("RPING"), FWD_FAM_NONE);
   assert_int_equal(fwd_family_of(NULL), FWD_FAM_NONE);
@@ -31,6 +32,7 @@ static void test_families_by_command(void **state)
   assert_int_equal(fwd_family_subject(FWD_FAM_WHOIS), FWD_SUBJ_PARV2);
   assert_int_equal(fwd_family_subject(FWD_FAM_TIME), FWD_SUBJ_SERVER);
   assert_int_equal(fwd_family_subject(FWD_FAM_LUSERS), FWD_SUBJ_NONE);
+  assert_int_equal(fwd_family_subject(FWD_FAM_CHECK), FWD_SUBJ_NONE);
   assert_true(fwd_family_hops_answer(FWD_FAM_TRACE));
   assert_false(fwd_family_hops_answer(FWD_FAM_WHOIS));
   assert_true(fwd_families_overlap(FWD_FAM_WHOIS, FWD_FAM_WHOWAS));
@@ -135,6 +137,33 @@ static void test_subjectless_and_listed_families(void **state)
     longp[sizeof(longp) - 1] = '\0';
     assert_int_equal(FIT(WHOIS, "x", 311, longp), FWD_FIT_NO);
   }
+}
+
+/* CHECK <server> <target> [-flags]: 286 heads a section, 287 lists a
+ * channel's user, 290 is every other line and 291 the end; 292 alone when
+ * nothing matched, 517 alone when the destination refuses it.  None of
+ * them names the target or the server. */
+static void test_check_family(void **state)
+{
+  (void)state;
+  assert_int_equal(FIT(CHECK, "", 286, ":Information for user muser"), FWD_FIT_BODY);
+  assert_int_equal(FIT(CHECK, "", 287, ": @ muser (~m@host)   (acct) "), FWD_FIT_BODY);
+  assert_int_equal(FIT(CHECK, "", 290, ":           Nick:: muser (BbAAA)"), FWD_FIT_BODY);
+  assert_int_equal(FIT(CHECK, "", 290, ": "), FWD_FIT_BODY);
+  assert_int_equal(FIT(CHECK, "", 291, ": "), FWD_FIT_END);
+  assert_int_equal(FIT(CHECK, "", 292, ":CHECK nobody No matching record(s) found"), FWD_FIT_END);
+  assert_int_equal(FIT(CHECK, "", 517, "CHECK :Command disabled."), FWD_FIT_END);
+  /* 288 and 289 are not CHECK's, nor is another command's end */
+  assert_int_equal(FIT(CHECK, "", 288, ":x"), FWD_FIT_NO);
+  assert_int_equal(FIT(CHECK, "", 289, ":x"), FWD_FIT_NO);
+  assert_int_equal(FIT(CHECK, "", 318, "muser :End of /WHOIS list."), FWD_FIT_NO);
+  assert_int_equal(FIT(WHOIS, "muser", 291, ": "), FWD_FIT_NO);
+  /* 517 is also how RULES and OPERMOTD are refused */
+  assert_true(fwd_families_overlap(FWD_FAM_CHECK, FWD_FAM_RULES));
+  assert_true(fwd_families_overlap(FWD_FAM_CHECK, FWD_FAM_OPERMOTD));
+  assert_false(fwd_families_overlap(FWD_FAM_CHECK, FWD_FAM_WHOIS));
+  assert_false(fwd_families_overlap(FWD_FAM_CHECK, FWD_FAM_STATS));
+  assert_false(fwd_family_hops_answer(FWD_FAM_CHECK));
 }
 
 /* ---- fwd_pick(): one reply, several pending commands ---- */
@@ -436,6 +465,38 @@ static void test_pick_oper_reply_from_elsewhere(void **state)
   assert_int_equal(PICK(372, ":- line", "Bb", "Qq", 0), 0);   /* non-oper: renamed */
 }
 
+/* CHECK is an oper's command, so its replies come under their origin's
+ * name: that tells two CHECKs sent to different servers apart, though
+ * nothing in the lines does.  Two to the same server are answered in the
+ * order sent. */
+static void test_pick_check_by_source(void **state)
+{
+  int fit, amb;
+
+  (void)state;
+  add(FWD_FAM_CHECK, "", "Mm", "Bb", 1);
+  add(FWD_FAM_CHECK, "", "Ff", "Bb", 2);
+  assert_int_equal(PICK(290, ":           Nick:: muser", "Bb", "Ff", 1), 1);
+  assert_false(amb);
+  assert_int_equal(fit, FWD_FIT_BODY);
+  assert_int_equal(cand[0], 0);
+  assert_int_equal(PICK(291, ": ", "Bb", "Mm", 1), 0);
+  assert_false(amb);
+  assert_int_equal(fit, FWD_FIT_END);
+  assert_int_equal(PICK(292, ":CHECK nobody No matching record(s) found", "Bb", "Ff", 1), 1);
+  assert_int_equal(fit, FWD_FIT_END);
+  /* a server neither was sent to */
+  assert_int_equal(PICK(290, ": ", "Bb", "Qq", 1), -1);
+  /* both to one server: the older one is being answered */
+  v[1].dest = "Mm";
+  assert_int_equal(PICK(290, ": ", "Bb", "Mm", 1), 0);
+  assert_false(amb);
+  /* a RULES to the same server is refused with 517 too: the older of the two */
+  v[1].fam = FWD_FAM_RULES;
+  v[1].subject = "m.test";
+  assert_int_equal(PICK(517, "RULES :Command disabled.", "Bb", "Mm", 1), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -443,6 +504,7 @@ int main(void)
     cmocka_unit_test(test_whois_subject_and_terminal),
     cmocka_unit_test(test_server_named_families),
     cmocka_unit_test(test_subjectless_and_listed_families),
+    cmocka_unit_test(test_check_family),
     cmocka_unit_test_setup(test_pick_untracked_reply_matches_nothing, setup),
     cmocka_unit_test_setup(test_pick_same_family_other_subject, setup),
     cmocka_unit_test_setup(test_pick_identical_pending_oldest_first, setup),
@@ -459,6 +521,7 @@ int main(void)
     cmocka_unit_test_setup(test_pick_generic_with_untracked_unknown, setup),
     cmocka_unit_test_setup(test_pick_two_traces_same_server, setup),
     cmocka_unit_test_setup(test_pick_oper_reply_from_elsewhere, setup),
+    cmocka_unit_test_setup(test_pick_check_by_source, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
