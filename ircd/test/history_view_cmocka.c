@@ -259,10 +259,20 @@ static void redact_row(int i)
 /* The walk, as the search does it                                     */
 /* ------------------------------------------------------------------ */
 
+/** Where a worker's walk and the main thread meet: the walk stops at its
+ * first row, its iterator open, until the main thread has written. */
+struct Meet {
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int inside;               /**< the walk is at its first row, waiting */
+  int go;                   /**< the main thread has written: walk on */
+};
+
 struct Match {
   const char *text;
   struct HistoryView *view; /**< the walk's view, or NULL */
   int slow_us;              /**< sleep per row examined (the shutdown case) */
+  struct Meet *meet;        /**< stop at the first row for this, or NULL */
   int rows_seen;
 };
 
@@ -274,8 +284,17 @@ static int match_hook(const struct HistoryMessage *msg, int reverse, void *ctx,
   struct Match *m = (struct Match *)ctx;
 
   (void)reverse; (void)skip_to;
-  if (m->rows_seen++ == 0)
+  if (m->rows_seen++ == 0) {
     __atomic_add_fetch(&started_walks, 1, __ATOMIC_SEQ_CST);
+    if (m->meet) {
+      pthread_mutex_lock(&m->meet->mutex);
+      m->meet->inside = 1;
+      pthread_cond_broadcast(&m->meet->cond);
+      while (!m->meet->go)
+        pthread_cond_wait(&m->meet->cond, &m->meet->mutex);
+      pthread_mutex_unlock(&m->meet->mutex);
+    }
+  }
   if (m->slow_us)
     usleep(m->slow_us);
   if (msg->type != HISTORY_PRIVMSG && msg->type != HISTORY_NOTICE)
@@ -537,17 +556,40 @@ static void a_trimmed_redaction_still_hides_in_the_view(void **state)
   history_free_messages(after.rows);
 }
 
+/** Is the walk at its first row?  (And, while it is, nothing else.) */
+static int meet_inside(struct Meet *meet)
+{
+  int inside;
+
+  pthread_mutex_lock(&meet->mutex);
+  inside = meet->inside;
+  pthread_mutex_unlock(&meet->mutex);
+  return inside;
+}
+
+static void meet_go(struct Meet *meet)
+{
+  pthread_mutex_lock(&meet->mutex);
+  meet->go = 1;
+  pthread_cond_broadcast(&meet->cond);
+  pthread_mutex_unlock(&meet->mutex);
+}
+
 /** The walk a worker runs returns what the main thread's walk returned
  * through the same view, while the main thread goes on storing rows
  * (needles among them), redacting old rows no walk here reaches, and
- * moving its clock.  Some walks hit their scan budget: the truncation and
- * the rows examined match too. */
+ * moving its clock.  The overlap is forced, not hoped for: every walk
+ * stops at its first row, its iterator open, until the main thread has
+ * made that round's writes, and scans the rest after them (and beside
+ * the next round's).  Some walks hit their scan budget: the truncation
+ * and the rows examined match too. */
 #define ROUNDS 40
 static void a_worker_walk_returns_what_the_main_thread_walk_did(void **state)
 {
   static struct WalkJob jobs[ROUNDS];
   static struct Walk expect[ROUNDS];
-  int i, on_workers = 0;
+  static struct Meet meets[ROUNDS];
+  int i, on_workers = 0, spins;
 
   (void)state;
   assert_int_equal(thread_pool_init(4), 0);
@@ -562,14 +604,30 @@ static void a_worker_walk_returns_what_the_main_thread_walk_did(void **state)
     assert_true(expect[i].count > 0);
 
     wj_init(&jobs[i], view, limit, scan_max);
+    pthread_mutex_init(&meets[i].mutex, NULL);
+    pthread_cond_init(&meets[i].cond, NULL);
+    meets[i].inside = meets[i].go = 0;
+    jobs[i].walk.match.meet = &meets[i];
     store_job_start(&jobs[i].job);
 
-    /* The main loop goes on beside the walk. */
+    /* Wait for the worker to be inside the walk.  The poll lets a job
+     * over the cap into the pool as the earlier walks finish. */
+    for (spins = 0; !meet_inside(&meets[i]); spins++) {
+      thread_pool_poll();
+      usleep(200);
+      assert_true(spins < 100000);
+    }
+    assert_int_equal(jobs[i].done, 0);
+
+    /* The main loop goes on, and the walk is in the middle of its scan:
+     * these writes land under its open iterator. */
     store_rows(25);
     redact_row(i * 3);
     CurrentTime++;
     TSoffset = i;
     test_hlc.physical_ms += 25;
+    assert_int_equal(jobs[i].done, 0);
+    meet_go(&meets[i]);
     thread_pool_poll();
   }
 
