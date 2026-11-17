@@ -535,8 +535,6 @@ feature_notify_compress_level(void)
 /* Forward declarations for mutual dependency */
 static void feature_notify_chathistory_caps(void);
 static void feature_notify_multiline(void);
-static void multiline_cap_new(int value_only);
-static void chathistory_cap_new(int value_only);
 
 /** Notify clients when CAP_draft_multiline feature flag changes.
  * Sends CAP NEW with parameters when enabled, CAP DEL when disabled.
@@ -546,7 +544,7 @@ feature_notify_cap_multiline(void)
 {
   if (feature_bool(FEAT_CAP_draft_multiline)) {
     /* Cap enabled - send CAP NEW with current parameters */
-    multiline_cap_new(0);
+    feature_notify_multiline();
   } else {
     /* Cap disabled - send CAP DEL */
     send_cap_notify("draft/multiline", 0, NULL);
@@ -563,7 +561,7 @@ feature_notify_cap_chathistory(void)
 {
   if (feature_bool(FEAT_CAP_draft_chathistory)) {
     /* Cap enabled - send CAP NEW with current parameters */
-    chathistory_cap_new(0);
+    feature_notify_chathistory_caps();
   } else {
     /* Cap disabled - send CAP DEL */
     send_cap_notify("draft/chathistory", 0, NULL);
@@ -753,15 +751,6 @@ feature_notify_chathistory_retention(void)
 static void
 feature_notify_multiline(void)
 {
-  multiline_cap_new(1);
-}
-
-/** The CAP NEW of draft/multiline with its current parameters: a value
- * change only (@a value_only: CAP 302 clients only), or the capability
- * turned on (every cap-notify client). */
-static void
-multiline_cap_new(int value_only)
-{
   char valbuf[64];
 
   /* Only notify if multiline capability is enabled */
@@ -772,10 +761,7 @@ multiline_cap_new(int value_only)
                 feature_int(FEAT_MULTILINE_MAX_BYTES),
                 feature_int(FEAT_MULTILINE_MAX_LINES));
 
-  if (value_only)
-    send_cap_value_notify("draft/multiline", valbuf);
-  else
-    send_cap_notify("draft/multiline", 1, valbuf);
+  send_cap_notify("draft/multiline", 1, valbuf);
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "multiline: parameters changed to %s, notified cap-notify clients",
@@ -789,13 +775,6 @@ multiline_cap_new(int value_only)
 static void
 feature_notify_chathistory_caps(void)
 {
-  chathistory_cap_new(1);
-}
-
-/** The CAP NEW of draft/chathistory (see multiline_cap_new()). */
-static void
-chathistory_cap_new(int value_only)
-{
   char valbuf[64];
   int retention_days;
 
@@ -806,10 +785,7 @@ chathistory_cap_new(int value_only)
   ircd_snprintf(0, valbuf, sizeof(valbuf), "%d",
                 feature_int(FEAT_CHATHISTORY_MAX));
 
-  if (value_only)
-    send_cap_value_notify("draft/chathistory", valbuf);
-  else
-    send_cap_notify("draft/chathistory", 1, valbuf);
+  send_cap_notify("draft/chathistory", 1, valbuf);
 
   /* Keep ISUPPORT CHATHISTORY (and the fork's CHATHISTORYRETENTION,
    * seconds, storage servers only) in sync and push to clients with
