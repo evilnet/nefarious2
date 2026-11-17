@@ -37,8 +37,10 @@
 #include "config.h"
 #endif
 
-/** Maximum size of a single log entry */
-#define LOG_ASYNC_MAX_ENTRY 2048
+/** Maximum size of a single log entry: the line log_vwrite() builds,
+ * LOG_BUFSIZE (2048, ircd_log.c) of message plus the file's timestamp
+ * and the newline, so a long line is not cut shorter when queued. */
+#define LOG_ASYNC_MAX_ENTRY (2048 + 64)
 
 /** Default number of entries in the ring buffer */
 #define LOG_ASYNC_BUFFER_SIZE_DEFAULT 4096
@@ -70,7 +72,8 @@ void log_async_shutdown(void);
 
 /**
  * Queue a log entry for async write.
- * If the buffer is full, this will block briefly or fall back to sync write.
+ * If the buffer is full, this waits for the writer to free a slot, so
+ * lines stay in the order they were logged.
  *
  * @param[in] fd File descriptor to write to (-1 for syslog only)
  * @param[in] syslog_priority Syslog priority (0 to skip syslog)
@@ -79,9 +82,8 @@ void log_async_shutdown(void);
  * @param[in] syslog_off Offset in \a message where the syslog text starts:
  *         syslog gets the line without the file's timestamp before it and
  *         without the newline after it (syslog stamps its own)
- * @return 0 on success (queued), 1 if sync fallback was used (the line
- *         is written: do not write it again), -1 when nothing was
- *         written (no writer, or not accepting): the caller writes it
+ * @return 0 on success (queued), -1 when nothing was written (no
+ *         writer, or not accepting): the caller writes it
  */
 int log_async_write(int fd, int syslog_priority, const char *message, int len,
                     int syslog_off);
@@ -111,7 +113,7 @@ void log_async_set_accepting(int on);
  * Get async logging statistics.
  * @param[out] queued Current entries in queue
  * @param[out] written Total entries written since init
- * @param[out] dropped Total entries dropped due to full buffer
+ * @param[out] dropped Lines that found the buffer full and waited for room
  */
 void log_async_stats(unsigned long *queued, unsigned long *written,
                      unsigned long *dropped);

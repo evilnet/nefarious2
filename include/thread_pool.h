@@ -125,6 +125,13 @@ int thread_pool_is_running(void);
 void thread_pool_stats(unsigned int *pending, unsigned long *completed,
                        unsigned int *active);
 
+/**
+ * The number of worker threads running: what THREAD_POOL_SIZE was when
+ * the pool started (it is read only then), or fewer when the system
+ * refused some of them; 0 before the pool starts or after it stops.
+ */
+int thread_pool_size(void);
+
 #else /* !HAVE_PTHREAD */
 
 /* Stub implementations when pthreads is not available */
@@ -135,6 +142,7 @@ void thread_pool_stats(unsigned int *pending, unsigned long *completed,
 #define thread_pool_get_signal_fd()                 (-1)
 #define thread_pool_is_running()                    (0)
 #define thread_pool_stats(p, c, a)                  do { if (p) *(p) = 0; if (c) *(c) = 0; if (a) *(a) = 0; } while (0)
+#define thread_pool_size()                          (0)
 
 #endif /* HAVE_PTHREAD */
 

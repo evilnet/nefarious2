@@ -491,9 +491,27 @@ static int occurrences(const char *path, const char *needle)
   return count;
 }
 
-/** With the queue full, log_async_write() writes the line itself (it
- * returns 1); log_vwrite() must not write it a second time. */
-static void a_line_the_full_queue_writes_is_written_once(void **state)
+/** Where @a needle first occurs in the file at @a path (-1: nowhere). */
+static long position(const char *path, const char *needle)
+{
+  char buf[8192], *p;
+  ssize_t n;
+  int fd;
+
+  fd = open(path, O_RDONLY);
+  assert_true(fd >= 0);
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  assert_true(n >= 0);
+  buf[n] = '\0';
+  p = strstr(buf, needle);
+  return p ? (long)(p - buf) : -1;
+}
+
+/** With the queue full, the line waits for room and is queued: written
+ * once, after every line logged before it (it used to be written at once,
+ * ahead of the queued ones). */
+static void a_line_past_a_full_queue_keeps_its_place(void **state)
 {
   int i;
 
@@ -505,13 +523,15 @@ static void a_line_the_full_queue_writes_is_written_once(void **state)
   for (i = 0; i < 7; i++)       /* a ring of 8 holds 7 */
     log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "fill %d", i);
 
-  open_gate_soon();             /* the fallback's own write() waits too */
+  open_gate_soon();             /* the line waits for the writer */
   log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "overflow");
   opener_join();
   log_async_flush();
 
   assert_int_equal(occurrences(log_path, "overflow"), 1);
   assert_int_equal(occurrences(log_path, "fill"), 7);
+  assert_true(position(log_path, "first") < position(log_path, "fill 0"));
+  assert_true(position(log_path, "fill 6") < position(log_path, "overflow"));
 }
 
 /** A line longer than a queue entry is cut short, but still ends its
@@ -540,8 +560,8 @@ static void a_cut_line_still_ends_its_line(void **state)
   assert_non_null(strstr(buf, "x\n["));   /* "after" has its own line */
 }
 
-/** The same, when the queue is full and the caller writes the line
- * itself: the cut line still ends its line. */
+/** The same, when the line waits for room in a full queue: the cut line
+ * still ends its line. */
 static void a_cut_line_the_full_queue_writes_still_ends_its_line(void **state)
 {
   char big[LOG_ASYNC_MAX_ENTRY + 100], buf[8 * LOG_ASYNC_MAX_ENTRY];
@@ -559,10 +579,10 @@ static void a_cut_line_the_full_queue_writes_still_ends_its_line(void **state)
   memset(big, 'x', sizeof(big) - 1);
   big[sizeof(big) - 1] = '\0';
   log_async_stats(NULL, NULL, &dropped);
-  open_gate_soon();                     /* long after the 1 ms wait */
+  open_gate_soon();                     /* the line waits for room */
   log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "%s", big);
   log_async_stats(NULL, NULL, &dropped_after);
-  assert_int_equal(dropped_after, dropped + 1);   /* the caller wrote it */
+  assert_int_equal(dropped_after, dropped + 1);   /* it waited */
   opener_join();
   log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "after");
   log_async_flush();
@@ -636,27 +656,26 @@ static void syslog_gets_the_line_without_the_file_stamp(void **state)
   assert_string_equal(syslogged, "SYSTEM [CRIT]: to syslog");
 }
 
-/* pthread_cond_timedwait() is wrapped (-Wl,--wrap=pthread_cond_timedwait):
- * while spurious_waits is set, a wait on the thread that set it returns 0
- * at once with nothing changed, as POSIX allows any wait to. */
+/* pthread_cond_wait() is wrapped (-Wl,--wrap=pthread_cond_wait): while
+ * spurious_waits is set, a wait on the thread that set it returns 0 at
+ * once with nothing changed, as POSIX allows any wait to. */
 static int spurious_waits;
 static pthread_t spurious_thread;
 
-int __real_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu,
-                                  const struct timespec *until);
+int __real_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mu);
 
-int __wrap_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu,
-                                  const struct timespec *until)
+int __wrap_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mu)
 {
   if (spurious_waits > 0 && pthread_equal(pthread_self(), spurious_thread)) {
     spurious_waits--;
     return 0;
   }
-  return __real_pthread_cond_timedwait(cond, mu, until);
+  return __real_pthread_cond_wait(cond, mu);
 }
 
-/** A full ring: a wakeup that leaves it full is not room.  The line goes
- * the direct way, and every queued line is still written. */
+/** A full ring: a wakeup that leaves it full is not room.  The line
+ * waits on, is queued once the writer frees a slot, and lands after every
+ * line queued before it. */
 static void full_ring_spurious_wakeup_is_not_room(void **state)
 {
   int i;
@@ -671,14 +690,14 @@ static void full_ring_spurious_wakeup_is_not_room(void **state)
 
   spurious_thread = pthread_self();
   spurious_waits = 1;
-  /* No descriptor and no syslog: the fallback writes nothing (and does
-   * not wait at the gate), and only its return value tells. */
-  assert_int_equal(log_async_write(-1, 0, "overflow\n", -1, 0), 1);
+  open_gate_soon();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "overflow");
   assert_int_equal(spurious_waits, 0);
-
-  gate_open();
+  opener_join();
   log_async_flush();
   assert_int_equal(occurrences(log_path, "fill"), 7);
+  assert_int_equal(occurrences(log_path, "overflow"), 1);
+  assert_true(position(log_path, "fill 6") < position(log_path, "overflow"));
 }
 
 int main(void)
@@ -695,7 +714,7 @@ int main(void)
         case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(nothing_restarts_the_writer_after_stop,
                                     case_setup, case_teardown),
-    cmocka_unit_test_setup_teardown(a_line_the_full_queue_writes_is_written_once,
+    cmocka_unit_test_setup_teardown(a_line_past_a_full_queue_keeps_its_place,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(writer_waits_for_startup,
                                     case_setup_stopped, case_teardown),
