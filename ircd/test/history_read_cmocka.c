@@ -824,6 +824,30 @@ static void test_trim_redact_after_the_channel_moved_on(void **state)
   assert_string_equal(latest("#new", 50), "a1");
 }
 
+/* A REDACT that reached the store before its original (it is kept for a
+ * message that comes later), with a rename between the two: the REDACT
+ * row is under the old name with no link, the original under the new.
+ * Trimming the REDACT row takes the original with it all the same. */
+static void test_trim_redact_stored_before_its_original(void **state)
+{
+  struct HistoryMessage *m = NULL;
+  (void)state;
+
+  retention_days = 7;
+  chan_make("#old", now_s - 20 * 86400);
+  say("#old", ago(3 * 86400, 0), "a1");
+  redact("#old", ago(8 * 86400, 0), "r1", "a2");
+  rename_chan("#old", "#new");
+  say("#new", ago(2 * 86400, 0), "a2");
+  assert_int_equal(history_message_is_redacted("#new", "a2"), 1);
+
+  trim_until_idle();
+
+  assert_int_equal(history_lookup_message("#new", "r1", &m), 1);
+  assert_int_equal(history_lookup_message("#new", "a2", &m), 1);
+  assert_string_equal(latest("#new", 50), "a1");
+}
+
 /* Trimming does not undo it either.  The REDACT row is past retention
  * and its original is not (as above), and by now no record joins #b,
  * where the REDACT row is, to #a: the original still goes with it. */
@@ -872,6 +896,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_redact_survives_the_names_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_redact_reaches_the_relocation_tombstone, setup, teardown),
     cmocka_unit_test_setup_teardown(test_trim_does_not_undo_a_redact_across_the_rename, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_trim_redact_stored_before_its_original, setup, teardown),
     cmocka_unit_test_setup_teardown(test_trim_redact_past_the_names_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_trim_redact_after_the_channel_moved_on, setup, teardown),
     cmocka_unit_test_setup_teardown(test_purge_incarnation_follows_the_rename, setup, teardown),

@@ -123,8 +123,9 @@
  * row (a redaction lives only in that row), and finds the original and
  * the second entry there with no record to consult.  A REDACT row whose
  * entry names nothing (its original was not on this store when it was
- * stored) is still joined by the reads that walk the earlier names; the
- * trim engine looks for its original under its own name only.
+ * stored, and came later, after a rename) is still joined by the reads
+ * that walk the earlier names, and by hren_find_parent at trim (the
+ * engine's renamed-parent callback): the original goes with it.
  *   The link runs one way.  What a relocation's old channel stores after
  * the move is its own, REDACT rows included: one sent there for a
  * message from before the move hides it in the old channel and not in

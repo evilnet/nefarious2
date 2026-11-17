@@ -173,6 +173,9 @@ static history_coverage_cb coverage_callback = NULL;
 /* Forward declarations */
 static void history_retire_quotas(struct db_cf *meta);
 static uint64_t history_trim_clock(void);
+static int history_trim_renamed_parent(const char *target, const char *ts,
+                                       const char *msgid, const char *parent,
+                                       char *ptarget, char *pts);
 static void history_recv_owner_trimmed(const char *const *targets,
                                        const uint64_t *newest_ms, int count);
 static void recv_alive_write(void);
@@ -861,6 +864,7 @@ int history_init(const char *dbpath)
     }
     /* A per-owner eviction clips the channel's receive windows (Q1). */
     htrim_set_owner_trimmed_cb(history_recv_owner_trimmed);
+    htrim_set_renamed_parent_cb(history_trim_renamed_parent);
   }
 
   /* Strict-presence init moved to ircd.c: the account records now live
@@ -4518,6 +4522,45 @@ void history_channel_rename_crossed(const char *oldname, const char *losername,
     return;
   }
   history_rename_recorded(oldname, winnername, rc < 0 ? -1 : 0, dropped);
+}
+
+/** The trim engine's renamed-parent callback (history_trim.h): the
+ * original a REDACT row being deleted redacts, stored under another name
+ * the same channel has had (hren_find_parent). */
+static int history_trim_renamed_parent(const char *target, const char *ts,
+                                       const char *msgid, const char *parent,
+                                       char *ptarget, char *pts)
+{
+  char mk[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char name[CHANNELLEN + 1];
+  struct db_val v = { NULL, 0 };
+  uint64_t inc;
+  int mkl, rc;
+
+  if (!history_cf_renames || !target || !IsChannelName(target)
+      || strlen(target) > CHANNELLEN)
+    return 0;
+  /* The REDACT row's incarnation, from the row itself (its delete is
+   * staged, not committed: it is still there to read). */
+  mkl = build_key(mk, sizeof(mk), target, ts, msgid);
+  if (mkl < 0)
+    return 0;
+  rc = db_get(history_db_env, history_cf_messages, mk, mkl, NULL, &v);
+  if (rc == DB_NOTFOUND)
+    return 0;
+  if (rc != DB_OK)
+    return -1;
+  inc = history_row_incarnation(v.base, v.len);
+  db_val_free(&v);
+  if (!inc)
+    return 0;
+  rc = hren_find_parent(history_db_env, history_cf_renames,
+                        history_cf_msgid, history_cf_messages,
+                        history_row_incarnation, target, history_parse_ms(ts),
+                        inc, parent, name, pts, HTC_TS_MAX);
+  if (rc == 1)
+    ircd_strncpy(ptarget, name, HTC_TARGET_MAX);
+  return rc;
 }
 
 /** history_recv_covers for one name's record: @a open_since is this
