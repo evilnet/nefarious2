@@ -51,6 +51,8 @@ CMOCKA_TESTPROGS = \
 	chathistory_merge_cmocka \
 	chathistory_recv_cmocka \
 	pm_pair_index_cmocka \
+	history_rename_cmocka \
+	history_rename_rocksdb_cmocka \
 	recv_classify_cmocka \
 	ml_route_cmocka \
 	nick_route_cmocka \
@@ -151,6 +153,7 @@ DEP_SRC = \
 	chathistory_merge_cmocka.c \
 	chathistory_recv_cmocka.c \
 	pm_pair_index_cmocka.c \
+	history_rename_cmocka.c \
 	recv_classify_cmocka.c \
 	ml_route_cmocka.c \
 	nick_route_cmocka.c \
@@ -416,6 +419,30 @@ PM_PAIR_INDEX_CMOCKA_OBJS = pm_pair_index_cmocka.o test_stub.o ../pm_pair_index.
 	../db_casefold.o ../ircd_string.o fake_db.o
 pm_pair_index_cmocka: $(PM_PAIR_INDEX_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(PM_PAIR_INDEX_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# history_rename tests - chathistory follows a channel RENAME: the renames
+# record (chains flattened, loops, the per-incarnation cap, the retention
+# floor) and the walk over a channel's rows under every name it has had
+# (one time order across the rename, a recreated old name left out, the
+# rename time as the segment's end).  One source, two backends, as the
+# db_api tests: history_rename_cmocka links the REAL ../history_rename.o
+# against the in-memory store (fake_db.o); history_rename_rocksdb_cmocka is
+# the -DHREN_REAL compile against RocksDB (../db_rocksdb.o), where the
+# restart test closes the env and opens it again.  Rows are real:
+# ../history_trim_codec.o builds the keys, ../history_record.o the values.
+HISTORY_RENAME_CMOCKA_DEPS = test_stub.o ../history_rename.o \
+	../history_trim_codec.o ../history_record.o ../db_casefold.o \
+	../ircd_snprintf.o ../ircd_alloc.o ../ircd_compress.o ../ircd_string.o
+HISTORY_RENAME_CMOCKA_OBJS = history_rename_cmocka.o fake_db.o $(HISTORY_RENAME_CMOCKA_DEPS)
+history_rename_cmocka: $(HISTORY_RENAME_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_RENAME_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
+
+history_rename_cmocka_real.o: ${srcdir}/history_rename_cmocka.c
+	${CC} ${CFLAGS} ${CPPFLAGS} -DHREN_REAL -c -o $@ ${srcdir}/history_rename_cmocka.c
+
+HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS = history_rename_cmocka_real.o ../db_rocksdb.o $(HISTORY_RENAME_CMOCKA_DEPS)
+history_rename_rocksdb_cmocka: $(HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS) $(ROCKSDB_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o
