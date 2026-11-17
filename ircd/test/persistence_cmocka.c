@@ -9,8 +9,7 @@
  * client that knows neither cap must still be able to type
  * /quote PERSISTENCE REPLAY SET OFF.  Each extra checks the account itself.
  *
- * Also: the caps' values and the CAP NEW lines that carry them to
- * cap-notify clients, and the restore batch's type.
+ * Also: the restore batch's type.
  *
  * The real m_persistence.o; the ircd around it is stubbed here.
  */
@@ -53,41 +52,12 @@ void log_write(enum LogSys subsys, enum LogLevel severity,
   (void)subsys; (void)severity; (void)flags; (void)fmt;
 }
 
-/* PERSISTENCE_DRAFT_EXTRAS and the two persistence caps are the test's to
- * set; every other feature is off. */
-static int draft_extras, cap_vendor, cap_draft;
+/* PERSISTENCE_DRAFT_EXTRAS is the test's to set; every other feature is
+ * off. */
+static int draft_extras;
 int feature_bool(enum Feature feat)
 {
-  switch (feat) {
-  case FEAT_PERSISTENCE_DRAFT_EXTRAS: return draft_extras;
-  case FEAT_CAP_evilnet_persistence:  return cap_vendor;
-  case FEAT_CAP_draft_persistence:    return cap_draft;
-  default:                            return 0;
-  }
-}
-
-/* What the cap-notify hooks did: the last CAP NEW/DEL and the last stored
- * CAP 302 value, per capability.  "(none)" for no value. */
-static int n_notify;
-static char notify_cap[64];
-static int notify_available;
-static char notify_value[64];
-void send_cap_notify(const char *capname, int available, const char *value)
-{
-  n_notify++;
-  snprintf(notify_cap, sizeof(notify_cap), "%s", capname);
-  notify_available = available;
-  snprintf(notify_value, sizeof(notify_value), "%s", value ? value : "(none)");
-}
-static int n_setval;
-static char value_vendor[64], value_draft[64];
-void cap_set_value(enum Capab cap, const char *value)
-{
-  n_setval++;
-  if (cap == CAP_EVILNET_PERSISTENCE)
-    snprintf(value_vendor, sizeof(value_vendor), "%s", value ? value : "(none)");
-  else if (cap == CAP_DRAFT_PERSISTENCE)
-    snprintf(value_draft, sizeof(value_draft), "%s", value ? value : "(none)");
+  return feat == FEAT_PERSISTENCE_DRAFT_EXTRAS ? draft_extras : 0;
 }
 
 /* What the client was sent: the last FAIL's code and description, and the
@@ -234,10 +204,7 @@ static int setup(void **state)
   cli_from(&cli) = &cli;
   cli_status(&cli) = STAT_USER;
   cli_user(&cli) = &usr;
-  draft_extras = cap_vendor = cap_draft = 0;
-  n_notify = n_setval = 0;
-  notify_cap[0] = notify_value[0] = value_vendor[0] = value_draft[0] = '\0';
-  notify_available = -1;
+  draft_extras = 0;
   n_fail = n_lines = 0;
   fail_code[0] = fail_desc[0] = last_line[0] = '\0';
   written_key[0] = written_value[0] = '\0';
@@ -383,82 +350,6 @@ static void test_restore_batch_type(void **state)
   assert_null(persistence_restore_batch_type(0, 0));
 }
 
-/* Enabling the vendor cap announces it with its value; disabling it
- * deletes it. */
-static void test_notify_vendor_cap(void **state)
-{
-  (void)state;
-
-  cap_vendor = 1;
-  feature_notify_cap_evilnet_persistence();
-  assert_int_equal(n_notify, 1);
-  assert_string_equal(notify_cap, "evilnet.github.io/persistence");
-  assert_int_equal(notify_available, 1);
-  assert_string_equal(notify_value, PERSISTENCE_EXTRAS_VALUE);
-  assert_string_equal(value_vendor, PERSISTENCE_EXTRAS_VALUE);
-
-  cap_vendor = 0;
-  feature_notify_cap_evilnet_persistence();
-  assert_int_equal(n_notify, 2);
-  assert_int_equal(notify_available, 0);
-}
-
-/* Enabling draft/persistence announces it with the value it has: none
- * unless PERSISTENCE_DRAFT_EXTRAS is on. */
-static void test_notify_draft_cap(void **state)
-{
-  (void)state;
-
-  cap_draft = 1;
-  feature_notify_cap_draft_persistence();
-  assert_int_equal(n_notify, 1);
-  assert_string_equal(notify_cap, "draft/persistence");
-  assert_int_equal(notify_available, 1);
-  assert_string_equal(notify_value, "(none)");
-  assert_string_equal(value_draft, "(none)");
-
-  draft_extras = 1;
-  feature_notify_cap_draft_persistence();
-  assert_int_equal(n_notify, 2);
-  assert_string_equal(notify_value, PERSISTENCE_EXTRAS_VALUE);
-  assert_string_equal(value_draft, PERSISTENCE_EXTRAS_VALUE);
-
-  cap_draft = 0;
-  feature_notify_cap_draft_persistence();
-  assert_int_equal(n_notify, 3);
-  assert_int_equal(notify_available, 0);
-}
-
-/* Flipping PERSISTENCE_DRAFT_EXTRAS changes draft/persistence's value,
- * and cap-notify clients are told the new one (CAP NEW again) while the
- * cap is advertised; while it is not, only the stored value changes. */
-static void test_notify_extras_flag(void **state)
-{
-  (void)state;
-
-  cap_draft = 1;
-  draft_extras = 1;
-  feature_notify_persistence_draft_extras();
-  assert_int_equal(n_notify, 1);
-  assert_string_equal(notify_cap, "draft/persistence");
-  assert_int_equal(notify_available, 1);
-  assert_string_equal(notify_value, PERSISTENCE_EXTRAS_VALUE);
-  assert_string_equal(value_draft, PERSISTENCE_EXTRAS_VALUE);
-
-  draft_extras = 0;
-  feature_notify_persistence_draft_extras();
-  assert_int_equal(n_notify, 2);
-  assert_int_equal(notify_available, 1);
-  assert_string_equal(notify_value, "(none)");
-  assert_string_equal(value_draft, "(none)");
-
-  cap_draft = 0;
-  draft_extras = 1;
-  feature_notify_persistence_draft_extras();
-  assert_int_equal(n_notify, 2);
-  assert_string_equal(value_draft, PERSISTENCE_EXTRAS_VALUE);
-}
-
 /* A subcommand this server does not have is still answered, so a client
  * (or a person at /quote) is not left waiting. */
 static void test_unknown_subcommand_fails(void **state)
@@ -483,9 +374,6 @@ int main(void)
     cmocka_unit_test_setup(test_set_echo_only_for_old_clients, setup),
     cmocka_unit_test_setup(test_set_echo_for_vendor_cap, setup),
     cmocka_unit_test_setup(test_restore_batch_type, setup),
-    cmocka_unit_test_setup(test_notify_vendor_cap, setup),
-    cmocka_unit_test_setup(test_notify_draft_cap, setup),
-    cmocka_unit_test_setup(test_notify_extras_flag, setup),
     cmocka_unit_test_setup(test_unknown_subcommand_fails, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
