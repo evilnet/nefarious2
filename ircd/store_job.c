@@ -156,7 +156,9 @@ unsigned int store_jobs_cap(void)
   if (workers <= 0)
     return 0;
   if (workers > 1)
-    workers--;      /* one worker stays free of reads */
+    workers--;      /* one worker never runs a read: a bound on a
+                     * password check's wait, not a free worker
+                     * (store_job.h) */
   return workers > STORE_JOBS_POOL_MAX ? STORE_JOBS_POOL_MAX
                                        : (unsigned int)workers;
 }

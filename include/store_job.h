@@ -46,9 +46,12 @@
  *
  * The pool is shared with the password checks (OPER, SASL, WEBIRC): at
  * most store_jobs_cap() jobs are in the pool at once, one worker fewer
- * than it has, so a password check never waits behind a queue of reads.
- * The jobs over the cap wait here, in order, and enter the pool as the
- * ones before them finish.
+ * than it has.  That bounds a password check's wait; it does not keep a
+ * worker free for it.  The pool's queue is first in, first out, so a
+ * check waits behind the checks already there and behind at most
+ * store_jobs_cap() reads -- with every other worker hashing, behind
+ * both -- and never behind the reads over the cap: those wait here, in
+ * order, and enter the pool as the ones before them finish.
  */
 #ifndef INCLUDED_store_job_h
 #define INCLUDED_store_job_h
