@@ -56,6 +56,13 @@
 
 int log_inassert = 0;
 
+/** Set on a thread whose log lines are dropped (log_thread_mute). */
+#ifdef HAVE_PTHREAD
+static __thread int log_muted;
+#else
+static int log_muted;
+#endif
+
 #define LOG_BUFSIZE 2048 /**< Maximum length for a log message. */
 #if LOG_ASYNC_MAX_ENTRY < LOG_BUFSIZE + 64
 #error "LOG_ASYNC_MAX_ENTRY must hold the line log_vwrite() queues"
@@ -388,6 +395,24 @@ log_resume(void)
   log_reopen();
 }
 
+/** Mute or unmute logging on the calling thread.
+ * @param[in] on Nonzero to drop this thread's log lines from now on.
+ */
+void
+log_thread_mute(int on)
+{
+  log_muted = on ? 1 : 0;
+}
+
+/** Is logging muted on the calling thread?
+ * @return Nonzero when log_thread_mute(1) was the thread's last call.
+ */
+int
+log_thread_muted(void)
+{
+  return log_muted;
+}
+
 /** Write a logging entry.
  * @param[in] subsys Target subsystem.
  * @param[in] severity Severity of message.
@@ -449,6 +474,11 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   assert((int)severity < L_LAST_LEVEL);
   assert(0 == (flags & ~LOG_NOMASK));
   assert(0 != fmt);
+
+  /* A muted thread (a thread pool worker) never gets further: everything
+   * below belongs to the main thread (log_thread_mute). */
+  if (log_muted)
+    return;
 
   /* find the log data and the severity data */
   desc = &logDesc[subsys];

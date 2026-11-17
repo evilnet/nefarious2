@@ -159,6 +159,10 @@ void vdebug(int level, const char *form, va_list vl)
   static int loop = 0;
   int err = errno;
 
+  /* A muted thread (a thread pool worker) logs nothing, and must not
+   * touch the main thread's loop guard either. */
+  if (log_thread_muted())
+    return;
   if (!loop && (debuglevel >= 0) && (level <= debuglevel))
   {
     loop = 1;

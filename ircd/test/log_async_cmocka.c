@@ -605,6 +605,41 @@ static void full_ring_spurious_wakeup_is_not_room(void **state)
   assert_true(position(log_path, "fill 6") < position(log_path, "overflow"));
 }
 
+/** A thread that muted itself (log_thread_mute: a thread pool worker
+ * reading the store) logs nothing -- no line queued, no file opened --
+ * and the mute is its own: the main thread still logs. */
+static void *log_from_muted_thread(void *arg)
+{
+  int *muted = (int *)arg;
+
+  log_thread_mute(1);
+  *muted = log_thread_muted();
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "from a worker");
+  return NULL;
+}
+
+static void a_muted_thread_logs_nothing(void **state)
+{
+  pthread_t th;
+  int muted = 0;
+
+  (void)state;
+  assert_int_equal(log_set_file("SYSTEM", log_path), 0);
+  assert_int_equal(pthread_create(&th, NULL, log_from_muted_thread, &muted), 0);
+  pthread_join(th, NULL);
+  log_async_flush();
+
+  assert_int_equal(muted, 1);
+  assert_int_equal(writes_completed(), 0);
+  assert_true(path_size(log_path) <= 0);
+  assert_int_equal(log_thread_muted(), 0);
+
+  log_write(LS_SYSTEM, L_CRIT, LOG_NOSYSLOG | LOG_NOSNOTICE, "from main");
+  log_async_flush();
+  assert_int_equal(writes_completed(), 1);
+  assert_true(path_size(log_path) > 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -624,6 +659,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(log_close_drains_before_it_closes,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(log_file_destroy_drains_before_it_closes,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(a_muted_thread_logs_nothing,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(shutdown_writes_the_queue,
                                     case_setup, case_teardown),
