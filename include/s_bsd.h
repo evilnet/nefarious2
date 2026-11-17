@@ -67,6 +67,7 @@ extern int  net_close_unregistered_connections(struct Client* source);
 extern void close_connection(struct Client *cptr);
 extern int exit_dead_client(struct Client *cptr, const char *dflt);
 extern void client_input_wake(struct Client *cptr);
+extern void client_input_resume(struct Client *cptr);
 #ifdef USE_SSL
 extern void add_connection(struct Listener* listener, int fd, void *ssl);
 #else

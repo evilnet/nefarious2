@@ -41,6 +41,11 @@ unsigned int ircrandom(void) { static unsigned int r = 40; return r += 2; }
 int hide_hostmask(struct Client *cptr) { return 0; }
 void bounce_emit_alias_update(struct Client *sptr, const char *what, const char *value) {}
 
+/* s_bsd.c: the client's later lines, held while the check was out, are
+ * parsed again once it answers. */
+static struct Client *resumed;
+void client_input_resume(struct Client *cptr) { resumed = cptr; }
+
 static int umodes_sent;
 void send_umode_out(struct Client *cptr, struct Client *sptr, struct Flags *old,
                     int prop) { umodes_sent++; }
@@ -137,6 +142,7 @@ static int setup(void **state)
   nblocks = 0;
   submitted = replies = last_reply = umodes_sent = 0;
   pending_cb = NULL;
+  resumed = NULL;
   return 0;
 }
 
@@ -158,9 +164,11 @@ static void unchanged_block_applies(void **state)
   assert_int_equal(submitted, 1);
   assert_true(IsSetHostPending(&client));
   assert_int_not_equal(cli_checkcookie(&client), 0);
+  assert_null(resumed);
   finish_check(CRYPT_VERIFY_MATCH);
   assert_false(IsSetHostPending(&client));
   assert_int_equal(cli_checkcookie(&client), 0);
+  assert_ptr_equal(resumed, &client);       /* answered: input resumes */
   assert_true(IsSetHost(&client));
   assert_string_equal(user.sethost, "user@spoof.example");
 }
@@ -187,6 +195,7 @@ static void changed_password_refused(void **state)
   finish_check(CRYPT_VERIFY_MATCH);
   assert_false(IsSetHost(&client));
   assert_int_equal(last_reply, ERR_PASSWDMISMATCH);
+  assert_ptr_equal(resumed, &client);
 }
 
 /** The descriptor now belongs to another connection (the client left, or a
@@ -200,6 +209,7 @@ static void another_connection_gets_nothing(void **state)
   finish_check(CRYPT_VERIFY_MATCH);
   assert_false(IsSetHost(&other));
   assert_int_equal(replies, 0);
+  assert_null(resumed);
 }
 
 /** A WEBIRC check still out holds the shared cookie: SETHOST is refused,
