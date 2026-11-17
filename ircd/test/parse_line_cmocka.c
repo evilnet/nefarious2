@@ -79,6 +79,7 @@ static struct {
   char batch_tag[128];     /* the batch= tag the PING handler saw */
   int concat;              /* and draft/multiline-concat */
   int ml_fails;            /* multiline_fail_batch() */
+  char reply_label[64];    /* the label the last send_reply() went under */
 } seen;
 
 static void record_handler(const char *cmd, int parc, char *parv[])
@@ -229,9 +230,10 @@ int protocol_violation(struct Client *cptr, const char *pattern, ...)
 
 int send_reply(struct Client *to, int reply, ...)
 {
-  (void)to;
   seen.numerics++;
   seen.last_numeric = reply;
+  snprintf(seen.reply_label, sizeof(seen.reply_label), "%s",
+           IsServer(to) ? "" : cli_label(to));
   return 0;
 }
 
@@ -1023,6 +1025,52 @@ static void user_cap(int cap, int on)
   }
 }
 
+/* A line cut in its body has its tag region whole: its 417 answers its
+ * label (labeled-response in use).  One cut in its tags has no label read
+ * -- the label may be the part cut -- and gets an unlabeled 417. */
+static void client_overlong_line_417_label(void **state)
+{
+  static char buf[5000];
+  size_t n;
+
+  (void)state;
+  user_cap(CAP_LABELEDRESP, 1);
+  user_cap(CAP_BATCH, 1);
+
+  strcpy(buf, "@a=1;label=Q1;b PING :");   /* body cut: labeled */
+  n = strlen(buf);
+  memset(buf + n, 'x', 507);
+  buf[n + 507] = '\0';
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
+  assert_int_equal(seen.handler_calls, 0);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+  assert_string_equal(seen.reply_label, "Q1");
+  assert_string_equal(cli_label(&user), "");   /* gone with its line */
+
+  strcpy(buf, "@label=Q2 PING :");         /* 4096-byte tags: unlabeled */
+  n = strlen("@label=Q2");
+  buf[n] = ';';
+  memset(buf + n + 1, 'a', 4095 - n);
+  strcpy(buf + 4096, " PING :x");
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+  assert_string_equal(seen.reply_label, "");
+
+  user_cap(CAP_BATCH, 0);                  /* not in use: unlabeled */
+  strcpy(buf, "@label=Q3 PING :");
+  n = strlen(buf);
+  memset(buf + n, 'x', 507);
+  buf[n + 507] = '\0';
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+  assert_string_equal(seen.reply_label, "");
+
+  user_cap(CAP_LABELEDRESP, 0);
+}
+
 static void client_label_ends_with_its_line(void **state)
 {
   char buf[64];
@@ -1246,6 +1294,7 @@ int main(void)
     cmocka_unit_test(client_ordinary_lines),
     cmocka_unit_test(client_overlong_line_gets_417),
     cmocka_unit_test(client_overlong_line_is_charged_and_fails_batch),
+    cmocka_unit_test(client_overlong_line_417_label),
     cmocka_unit_test(client_cannot_set_fallback_mark),
     cmocka_unit_test(server_bx_line_fills_the_stash),
   };
