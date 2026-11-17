@@ -236,7 +236,7 @@ extern enum RenameNameError rename_check_names(const char *oldname,
 extern const char *rename_name_error_text(enum RenameNameError err);
 
 /*
- * Relocation mode (evilnet/channel-relocate): the deadline.
+ * Relocation mode (evilnet.github.io/channel-relocate): the deadline.
  *
  * A relocated channel's old name stays behind as a tombstone until a
  * deadline, and every server has to dissolve it at the same moment.  So

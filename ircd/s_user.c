@@ -4658,7 +4658,7 @@ void init_isupport(void)
     }
   }
 
-  /* evilnet/channel-relocate: relocation mode + tombstone grace period */
+  /* evilnet.github.io/channel-relocate: relocation mode + tombstone grace period */
   if (feature_bool(FEAT_RENAME_CONSENT))
     add_isupport_i("RELOCATE", feature_int(FEAT_RELOCATE_GRACE));
 

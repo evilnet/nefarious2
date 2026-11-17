@@ -369,7 +369,7 @@ static struct capabilities {
   _CAP_V(DRAFT_ACCOUNTREG, 0, "draft/account-registration", FEAT_CAP_draft_account_registration, "before-connect,custom-account-name,min-password-length=5,max-password-length=300"),
   _CAP(DRAFT_READMARKER, 0, "draft/read-marker", FEAT_CAP_draft_read_marker),
   _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", FEAT_CAP_draft_channel_rename),
-  _CAP(EVILNET_RELOCATE, 0, "evilnet/channel-relocate", FEAT_CAP_evilnet_channel_relocate),
+  _CAP(EVILNET_RELOCATE, 0, "evilnet.github.io/channel-relocate", FEAT_CAP_evilnet_channel_relocate),
   _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=20,max-value-bytes=300"),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
   _CAP(DRAFT_AUTHTOKEN, 0, "draft/authtoken", FEAT_CAP_draft_authtoken),

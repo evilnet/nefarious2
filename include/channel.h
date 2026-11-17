@@ -530,7 +530,7 @@ extern void pending_rename_server_exit(struct Client *server);
 extern int rename_services_ac(struct Client *cptr, struct Client *sptr,
                               int parc, char *parv[]);
 
-/* Relocation tombstones (evilnet/channel-relocate).  Called from
+/* Relocation tombstones (evilnet.github.io/channel-relocate).  Called from
  * destruct_channel() so a tombstone channel that dies before its grace
  * period elapses takes its record and grace timer with it. */
 extern void relocate_tombstone_channel_gone(struct Channel *chptr);

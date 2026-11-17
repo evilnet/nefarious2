@@ -2272,7 +2272,7 @@ static void fallback_join_follows_each_bouncer_connection(void **state)
 }
 
 /* ====================================================================
- * Relocation mode (evilnet/channel-relocate)
+ * Relocation mode (evilnet.github.io/channel-relocate)
  * ==================================================================== */
 
 /** "<sptr> RN <old> <new> C [<expires>] :<reason>" arriving on link
@@ -4093,7 +4093,7 @@ static void crossing_loser_is_told_on_its_own_server(void **state)
   assert_true(was_destroyed(y));
 }
 
-/* ... and with evilnet/channel-relocate, as a RELOCATE from the winner's
+/* ... and with evilnet.github.io/channel-relocate, as a RELOCATE from the winner's
  * issuer. */
 static void crossing_loser_with_the_cap_gets_a_relocate(void **state)
 {
@@ -4725,7 +4725,7 @@ static void announcement_builds_the_record(void **state)
   assert_int_equal(ntimers, 0);
 }
 
-/* With evilnet/channel-relocate the local member gets a RELOCATE, from
+/* With evilnet.github.io/channel-relocate the local member gets a RELOCATE, from
  * the server (nobody here knows who relocated the channel). */
 static void announcement_tells_a_member_with_the_cap(void **state)
 {
