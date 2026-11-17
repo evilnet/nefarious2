@@ -481,6 +481,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                          chptr2->chname, chptr2->topic_nick,
                          chptr2->topic_time);
             }
+            send_markread_on_join(alias_source, chptr2->chname);
             if (!CapRecipientHas(alias_source, CAP_NOIMPLICITNAMES)
                 && !CapRecipientHas(alias_source, CAP_NOIMPLICITNAMES_LEGACY))
               do_names(alias_source, chptr2, NAMES_ALL|NAMES_EON);

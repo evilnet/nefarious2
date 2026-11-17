@@ -196,9 +196,7 @@ int webpush_line_markread(char *out, size_t outlen, const char *server,
   wl_put(&b, " ");
   if (!timestamp || !timestamp[0] || 0 == strcmp(timestamp, "*")) {
     /* The draft's form for "no marker" is the bare "*" (no "timestamp="
-     * prefix); send_markread (ircd/m_markread.c) instead sends clients
-     * "timestamp=*". The client tolerates both; this is a deliberate
-     * divergence from send_markread, not an oversight. */
+     * prefix), as send_markread (ircd/m_markread.c) sends it too. */
     wl_put(&b, "*");
   } else {
     wl_put(&b, "timestamp=");

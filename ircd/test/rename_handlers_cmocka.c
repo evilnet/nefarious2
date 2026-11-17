@@ -582,6 +582,14 @@ void do_names(struct Client *sptr, struct Channel *chptr, int filter)
   record_sent(sptr, buf);
 }
 
+void send_markread_on_join(struct Client *sptr, const char *target)
+{
+  char buf[LINE];
+
+  snprintf(buf, sizeof(buf), "(markread of %s)", target);
+  record_sent(sptr, buf);
+}
+
 void sendto_opmask_butone(struct Client *one, unsigned int mask,
                           const char *pattern, ...)
 {
@@ -2223,14 +2231,17 @@ static void fallback_join_has_the_form_the_member_negotiated(void **state)
   assert_string_equal(sent_to(plain, 0),
                       ":plain!user@host.example PART #old :Channel renamed to #new: why");
   assert_string_equal(sent_to(plain, 1), ":plain!user@host.example JOIN #new");
-  assert_string_equal(sent_to(plain, 2), "(names of #new)");
+  /* the JOIN's MARKREAD (draft/read-marker: before RPL_ENDOFNAMES) */
+  assert_string_equal(sent_to(plain, 2), "(markread of #new)");
+  assert_string_equal(sent_to(plain, 3), "(names of #new)");
 
   /* extended-join, logged in: account and realname */
   assert_string_equal(sent_to(ext, 0),
                       ":ext!user@host.example PART #old :Channel renamed to #new: why");
   assert_string_equal(sent_to(ext, 1),
                       ":ext!user@host.example JOIN #new extacct :Real Name");
-  assert_string_equal(sent_to(ext, 2), "(names of #new)");
+  assert_string_equal(sent_to(ext, 2), "(markread of #new)");
+  assert_string_equal(sent_to(ext, 3), "(names of #new)");
 
   /* extended-join, not logged in: "*" for the account */
   assert_string_equal(sent_to(extanon, 1),
