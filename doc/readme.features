@@ -994,10 +994,25 @@ THREAD_POOL_SIZE
  * Type: integer
  * Default: 4
 
-Worker threads for slow checks taken off the main loop (OPER, SETHOST
-and WEBIRC password hashes).  Read once at startup, after ircd.conf;
-a change (REHASH, SET) is logged and takes effect at the next restart.
-0 or less means the default; more than 64 means 64.
+Worker threads for work taken off the main loop.  Read once at startup,
+after ircd.conf; a change (REHASH, SET) is logged and takes effect at the
+next restart.  0 or less means the default; more than 64 means 64.
+
+Two things run there.  Password checks (OPER, SETHOST, WEBIRC) are
+hashed on a worker.  And a storage server's answer to another server's
+SEARCH is scanned there: each scan reads up to 50,000 history rows, and
+one SEARCH without `in=` asks for up to eight of them.  The scans take
+one worker fewer than the pool has (a pool of one: that one), at most
+eight.  That is a bound on a password check's wait, not a worker kept
+free: a check waits behind the checks already there and behind at most
+that many scans, never behind the scans over that number, which wait
+their turn, in order.  An allocation that fails on a worker ends the
+server with one line to syslog (and to stderr when the server kept it:
+-t or -x); it does not restart itself from there.  A failed assertion on
+a worker is reported the same way.  With no pool (it could not be
+started, or a build without threads) both run on the main loop as they
+did before: the answers are the same, and the server stalls for as long
+as each one takes.
 
 ASYNC_LOGGING
  * Type: boolean
@@ -1396,29 +1411,6 @@ of its own account (which resets the count) with guesses at another
 account, so only fake lag bounds how fast it guesses (12 guesses in 7.4
 seconds measured with fake lag off; with it on, roughly one guess every
 few seconds).
-
-THREAD_POOL_SIZE
-  * Type: integer
-  * Default: 4
-
-The number of worker threads the server starts for work that would
-otherwise hold up the main loop; 0 or less means the default.  Read once
-at start, from ircd.conf: a SET or REHASH does not resize the pool.  Two
-things run
-there.  Password checks (OPER, SETHOST, WEBIRC) are hashed on a worker.
-And a storage server's answer to another server's SEARCH is scanned
-there: each scan reads up to 50,000 history rows, and one SEARCH without
-`in=` asks for up to eight of them.  The scans take one worker fewer than
-the pool has (a pool of one: that one), at most eight.  That is a bound
-on a password check's wait, not a worker kept free: a check waits behind
-the checks already there and behind at most that many scans, never behind
-the scans over that number, which wait their turn, in order.  An
-allocation that fails on a worker ends the server with one line to
-syslog (and to stderr when the server kept it: -t or -x); it does not
-restart itself from there.  A failed assertion on a worker is reported
-the same way.  With no pool (it could not be started, or a build
-without threads) both run on the main loop as they did before: the answers
-are the same, and the server stalls for as long as each one takes.
 
 After an account change the connection's mode-synced user modes (+i, +p,
 +q, +R, +D, +Y, +y, +b) are those of the new account's settings, else the
