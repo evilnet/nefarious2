@@ -411,6 +411,24 @@ test_short_numnicks(void)
     printf("Passed: numnick lookups by length\n");
 }
 
+/** All 0s and all 1s are not valid addresses; anything else is. */
+static void
+test_validity(void)
+{
+    struct irc_in_addr a;
+
+    memset(&a, 0xff, sizeof(a));
+    assert(!irc_in_addr_valid(&a));
+    memset(&a, 0, sizeof(a));
+    assert(!irc_in_addr_valid(&a));
+    a.in6_16[0] = htons(0xffff);        /* ffff:: */
+    assert(irc_in_addr_valid(&a));
+    memset(&a, 0xff, sizeof(a));
+    a.in6_16[7] = 0;                    /* ffff:...:ffff:0 */
+    assert(irc_in_addr_valid(&a));
+    printf("Passed: all-0s and all-1s addresses are not valid\n");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -419,6 +437,8 @@ main(int argc, char *argv[])
     printf("Testing address parsing..\n");
     for (ii = 0; test_addrs[ii].text; ++ii)
         test_address(&test_addrs[ii]);
+
+    test_validity();
 
     printf("\nTesting ipmask parsing..\n");
     for (ii = 0; test_masks[ii].text; ++ii)
