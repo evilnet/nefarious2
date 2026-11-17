@@ -370,6 +370,25 @@ static void shutdown_stores(void)
                               * presence records */
 }
 
+/** The thread pool's signal pipe, as the event engine sees it.  A worker
+ * that finishes a task writes a byte to the pipe; with its read end in the
+ * engine the engine's wait returns at once, and the engine loop calls
+ * thread_pool_poll() after the events of that pass.  The pipe was never
+ * registered: a finished task -- an OPER's password check, and now a
+ * SEARCH scan another server waits for under CHATHISTORY_TIMEOUT -- was
+ * delivered only when a timer or a packet next woke the loop, a second or
+ * more later on a quiet server. */
+static struct Socket thread_pool_wake;
+static int thread_pool_wake_on;
+
+/** The pipe is readable (or the socket is going away): nothing to do
+ * here.  thread_pool_poll() empties the pipe and delivers the tasks, and
+ * the engine loop calls it once this pass's events are done. */
+static void thread_pool_wake_event(struct Event *ev)
+{
+  (void)ev;
+}
+
 /** Stop the threads that write to log and pipe descriptors, then close the
  * logs for good.  Producers before the consumer: the crypt workers (which
  * log, and signal the main loop through a pipe) are joined first, then the
@@ -384,6 +403,11 @@ static void shutdown_stores(void)
  * holds). */
 static void shutdown_writers(void)
 {
+  /* Out of the event engine before the pool closes the descriptor. */
+  if (thread_pool_wake_on) {
+    thread_pool_wake_on = 0;
+    socket_del(&thread_pool_wake);
+  }
   thread_pool_shutdown();
   log_async_shutdown();
   log_shutdown();
