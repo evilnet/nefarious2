@@ -117,6 +117,29 @@ static void mechanism_names(void **state)
   assert_false(sasl_mechanism_name_ok("PL AIN"));
 }
 
+/** A lower-case mechanism is taken when the advertised list has it, in
+ * the list's spelling; nothing else is, and never a part of an entry. */
+static void mechanism_listed(void **state)
+{
+  static const char list[] = "PLAIN,EXTERNAL,SCRAM-SHA-256";
+  (void)state;
+  assert_ptr_equal(sasl_mechanism_listed("plain", list), list);
+  assert_ptr_equal(sasl_mechanism_listed("Plain", list), list);
+  assert_ptr_equal(sasl_mechanism_listed("external", list), list + 6);
+  assert_ptr_equal(sasl_mechanism_listed("scram-sha-256", list), list + 15);
+  assert_null(sasl_mechanism_listed("plai", list));
+  assert_null(sasl_mechanism_listed("plain,external", list));
+  assert_null(sasl_mechanism_listed("scram-sha-25", list));
+  assert_null(sasl_mechanism_listed("scram-sha-2567", list));
+  assert_null(sasl_mechanism_listed("oauthbearer", list));
+  assert_null(sasl_mechanism_listed("", list));
+  assert_null(sasl_mechanism_listed("", ",PLAIN"));
+  assert_null(sasl_mechanism_listed("AGFiAGNk", list));
+  assert_null(sasl_mechanism_listed("plain", NULL));
+  assert_null(sasl_mechanism_listed("plain", ""));
+  assert_null(sasl_mechanism_listed(NULL, list));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -126,6 +149,7 @@ int main(void)
     cmocka_unit_test(remote_count_bounds),
     cmocka_unit_test(line_ends_message),
     cmocka_unit_test(mechanism_names),
+    cmocka_unit_test(mechanism_listed),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

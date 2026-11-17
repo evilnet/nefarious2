@@ -348,14 +348,23 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * What this catches is a client's response that outlived its exchange
    * -- credentials pipelined behind a CAP END that aborted it (906) --
    * which as a "mechanism" would go to IAuth, or to services (to every
-   * server when SASL_SERVER is "*"), in clear. */
+   * server when SASL_SERVER is "*"), in clear.
+   *
+   * A client that names an advertised mechanism in lower case ("plain")
+   * is taken at its word, and the line goes on in the advertised
+   * spelling: what a backend is sent is then a name out of this server's
+   * own list, never the client's bytes. */
   if (!cli_saslsession(cptr) && !cli_saslcookie(cptr) && !cli_saslheld(cptr)
       && !sasl_mechanism_name_ok(parv[1])) {
     const char *mechs = cap_sasl_mechanisms();
+    const char *listed = sasl_mechanism_listed(parv[1], mechs);
 
-    if (mechs)
-      send_reply(cptr, ERR_SASLMECHS, mechs);
-    return send_reply(cptr, ERR_SASLFAIL, "");
+    if (!listed) {
+      if (mechs)
+        send_reply(cptr, ERR_SASLMECHS, mechs);
+      return send_reply(cptr, ERR_SASLFAIL, "");
+    }
+    memcpy(parv[1], listed, strlen(parv[1]));   /* the same length */
   }
 
   /* A WEBIRC check still out: no exchange starts on the gateway's address

@@ -21,10 +21,13 @@
  * ("+" after an exact multiple), and the backend answers the whole.
  *
  * Also the shape of the line that starts an exchange: a mechanism name
- * (sasl_mechanism_name_ok()).
+ * (sasl_mechanism_name_ok()), or an advertised one in another case
+ * (sasl_mechanism_listed()).
  */
 #ifndef INCLUDED_sasl_turn_h
 #define INCLUDED_sasl_turn_h
+
+#include <string.h>
 
 /** Whether an exchange in flight waits for the client, not for its
  * backend.
@@ -108,6 +111,31 @@ static inline int sasl_mechanism_name_ok(const char *name)
       return 0;
   }
   return len > 0;
+}
+
+/** The entry of \a mechs, a comma-separated list of mechanism names (what
+ * the sasl capability advertises), that \a name spells in lower or mixed
+ * case: "plain" finds "PLAIN".  For a client that sends its mechanism in lower
+ * case, which sasl_mechanism_name_ok() refuses; the caller passes the
+ * list's spelling on, so that whatever the client sent, only a name out
+ * of the server's own list reaches a backend.
+ * @return The entry (ended by ',' or the end of the list), or NULL. */
+static inline const char *sasl_mechanism_listed(const char *name,
+                                                const char *mechs)
+{
+  while (name && *name && mechs && *mechs) {
+    const char *n = name;
+    const char *m = mechs;
+
+    for (; *m && *m != ','; m++, n++)
+      if (*n != *m && !(*n >= 'a' && *n <= 'z' && *n - 'a' + 'A' == *m))
+        break;
+    if ((!*m || *m == ',') && !*n && m != mechs)
+      return mechs;
+    mechs += strcspn(mechs, ",");
+    mechs += *mechs == ',';
+  }
+  return NULL;
 }
 
 #endif /* INCLUDED_sasl_turn_h */

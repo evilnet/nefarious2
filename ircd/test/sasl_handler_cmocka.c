@@ -4394,6 +4394,41 @@ static void credentials_as_a_mechanism_reach_no_tier(void **state)
   }
 }
 
+/** A client that names an advertised mechanism in lower case starts an
+ * exchange, and services get the advertised spelling, never the client's
+ * bytes; a lower-case name that is not advertised is refused as before. */
+static void lower_case_mechanism_goes_out_as_advertised(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int i, found = 0;
+
+  sasl_init_once();
+  local_off = 1;
+  ntlog = 0;
+  c = new_client(164, "rgn", 1, REG_KEEPS);
+  f = fake_of(c);
+
+  assert_int_equal(authenticate(c, "plain"), 0);
+  assert_false(has_numeric(f, ERR_SASLFAIL));
+  assert_true(cli_saslcookie(c) != 0);
+  for (i = 0; i < ntlog; i++) {
+    assert_null(strstr(tlog[i], "plain"));
+    if (!strncmp(tlog[i], "servers SASL", 12) && strstr(tlog[i], "S :PLAIN"))
+      found = 1;
+  }
+  assert_true(found);
+
+  ntlog = 0;
+  c = new_client(165, "rgo", 1, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "gssapi"), 0);
+  assert_true(has_numeric(f, ERR_SASLMECHS));
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_no_exchange(c);
+  assert_false(tlog_has_prefix("servers"));
+}
+
 /** An abort at registration is the server's, not the client's failure:
  * with the credentials already with services and their challenge back
  * (SCRAM's client-first), registering aborts the exchange without
@@ -6394,6 +6429,7 @@ int main(void)
     cmocka_unit_test_setup(registration_aborts_services_exchange, setup),
     cmocka_unit_test_setup(registration_abort_is_not_a_failure, setup),
     cmocka_unit_test_setup(credentials_as_a_mechanism_reach_no_tier, setup),
+    cmocka_unit_test_setup(lower_case_mechanism_goes_out_as_advertised, setup),
     cmocka_unit_test_setup(no_exchange_awaits_nothing, setup),
     cmocka_unit_test_setup(pipelined_credentials_stay_with_services, setup),
     cmocka_unit_test_setup(completing_login_is_not_aborted, setup),
