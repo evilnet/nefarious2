@@ -91,6 +91,20 @@ static void sequences(void **state)
   assert_true(v >= 302);                          /* 302, then CAP LS 301 */
 }
 
+/** cap-notify is on for good once a client sent CAP LS 302 (implied by
+ * it, and the spec gives such a client no way to disable it); below 302
+ * it is an ordinary capability, and no other one is kept on. */
+static void cap_notify_kept_on_at_302(void **state)
+{
+  (void)state;
+  assert_true(cap_kept_on(CAP_CAPNOTIFY, cap_version_after_ls(0, "302")));
+  assert_true(cap_kept_on(CAP_CAPNOTIFY, 303));
+  assert_false(cap_kept_on(CAP_CAPNOTIFY, 0));
+  assert_false(cap_kept_on(CAP_CAPNOTIFY, 301));
+  assert_false(cap_kept_on(CAP_SASL, 302));
+  assert_false(cap_kept_on(CAP_ECHOMSG, 302));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -100,6 +114,7 @@ int main(void)
     cmocka_unit_test(malformed_is_no_version),
     cmocka_unit_test(huge_version_saturates),
     cmocka_unit_test(sequences),
+    cmocka_unit_test(cap_notify_kept_on_at_302),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
