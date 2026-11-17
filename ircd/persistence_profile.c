@@ -259,8 +259,6 @@ int persistence_profile_set(const char *account, const char *profile,
   return profile_write(account, full_key, value);
 }
 
-static void clear_profile_rows(const char *account, const char *name);
-
 int persistence_profile_create(const char *account, const char *name,
                                 const char *parent)
 {
@@ -278,12 +276,6 @@ int persistence_profile_create(const char *account, const char *name,
     return -1;
   if (!persistence_profile_exists(account, effective_parent))
     return -1; /* parent must exist (default always does) */
-
-  /* Rows under the name with no parent row are leftovers (an older
-   * server's rename or delete moved the parent row and left keys of 64
-   * bytes or more, or a peer replicates such rows later): not this new
-   * profile's settings.  Remove them first. */
-  clear_profile_rows(account, name);
 
   return persistence_profile_set(account, name, PROFILE_PARENT_KEY,
                                   effective_parent);
@@ -384,24 +376,6 @@ static int has_children(const char *account, const char *name)
 static void fold_key(char *buf)
 {
   db_casefold_bytes(buf, buf, strlen(buf));
-}
-
-/** Remove every stored row under profile @a name (its parent row too). */
-static void clear_profile_rows(const char *account, const char *name)
-{
-  struct ProfileRow *list, *e;
-  char prefix[64];
-  size_t prefix_len;
-
-  ircd_snprintf(NULL, prefix, sizeof(prefix), "%s%s/",
-                PROFILE_KEY_PREFIX, name);
-  fold_key(prefix);
-  prefix_len = strlen(prefix);
-  list = collect_profile_rows(account);
-  for (e = list; e; e = e->next)
-    if (e->key && strncmp(e->key, prefix, prefix_len) == 0)
-      (void)profile_write(account, e->key, NULL);
-  free_profile_rows(list);
 }
 
 int persistence_profile_delete(const char *account, const char *name)
