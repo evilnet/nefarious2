@@ -301,6 +301,44 @@ static void test_ri_link_kind(void **state)
   assert_int_equal(ri_link_kind("Cx", 2), RI_LINK_LEGACY);
 }
 
+/* A REDACT whose original is under another name of the channel: its own
+ * entry carries that name and still reads as a REDACT; the entry under
+ * the original's name says the REDACT row is elsewhere. */
+static void test_ri_link_other_name(void **state)
+{
+  char val[16], name[8];
+  size_t n;
+
+  (void)state;
+  n = ri_link_redact_of(val, sizeof val, "#old");
+  assert_int_equal(n, 5);
+  assert_memory_equal(val, "O#old", 5);
+  assert_int_equal(ri_link_kind(val, n), RI_LINK_IS_REDACT);
+  assert_int_equal(ri_link_original_name(val, n, name, sizeof name), 1);
+  assert_string_equal(name, "#old");
+  /* a name that does not fit the buffer, either way, is refused */
+  assert_int_equal(ri_link_redact_of(val, 5, "#old"), 5);
+  assert_int_equal(ri_link_redact_of(val, 4, "#old"), 0);
+  assert_int_equal(ri_link_redact_of(val, sizeof val, ""), 0);
+  assert_int_equal(ri_link_original_name("O#old", 5, name, 5), 1);
+  assert_int_equal(ri_link_original_name("O#old", 5, name, 4), 0);
+  /* no name carried */
+  assert_int_equal(ri_link_original_name("R", 1, name, sizeof name), 0);
+  assert_int_equal(ri_link_original_name("O", 1, name, sizeof name), 0);
+  assert_int_equal(ri_link_original_name("R#old", 5, name, sizeof name), 0);
+  assert_int_equal(ri_link_kind("O", 1), RI_LINK_LEGACY);
+
+  n = ri_link_redact_by(val, sizeof val, "#new");
+  assert_int_equal(n, 5);
+  assert_memory_equal(val, "L#new", 5);
+  assert_int_equal(ri_link_kind(val, n), RI_LINK_IS_REDACT_ELSEWHERE);
+  assert_int_equal(ri_link_redact_row_name(val, n, name, sizeof name), 1);
+  assert_string_equal(name, "#new");
+  assert_int_equal(ri_link_original_name(val, n, name, sizeof name), 0);
+  assert_int_equal(ri_link_redact_row_name("O#old", 5, name, sizeof name), 0);
+  assert_int_equal(ri_link_kind("L", 1), RI_LINK_LEGACY);
+}
+
 /* ========== applying a redaction: rdx_row_decide / rdx_watermark_decide ========== */
 
 static void test_rdx_row_decide(void **state)
@@ -1613,6 +1651,7 @@ int main(void)
     cmocka_unit_test(test_ch_ad_features),
     cmocka_unit_test(test_ch_ad_letters),
     cmocka_unit_test(test_ri_link_kind),
+    cmocka_unit_test(test_ri_link_other_name),
     cmocka_unit_test(test_rdx_row_decide),
     cmocka_unit_test(test_rdx_wm_cut_keeps),
     cmocka_unit_test(test_rdx_wm_truncated_continues),

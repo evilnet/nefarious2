@@ -552,6 +552,94 @@ static void reply_index_put(struct db_writebatch *wb, const char *target,
   db_writebatch_put(wb, history_cf_reply, keybuf, (size_t)klen, &link, 1);
 }
 
+/** The name the original of a REDACT row is stored under, when that is
+ * not the REDACT row's own: the channel was renamed, or relocated, after
+ * the message and before the REDACT (hren_find_parent: a row of the same
+ * channel, whatever record joins the two names today).
+ * @param[out] oname That name, folded (CHANNELLEN + 1 bytes).
+ * @return 1 found; 0 the original is under @a target, or under no name
+ *   of the channel on this store; -1 a read failed. */
+static int redact_original_name(const char *target, const char *timestamp,
+                                const char *parent, char *oname)
+{
+  char ik[HISTORY_MSGID_LEN + 1 + CHANNELLEN + 2];
+  char pts[HISTORY_TIMESTAMP_LEN];
+  struct db_val v = { NULL, 0 };
+  time_t inc;
+  int ikl, rc;
+
+  if (!history_cf_renames || !IsChannelName(target)
+      || strlen(target) > CHANNELLEN)
+    return 0;
+  ikl = htc_msgid_key(ik, sizeof(ik), parent, target);
+  if (ikl < 0)
+    return 0;
+  rc = db_get(history_db_env, history_cf_msgid, ik, (size_t)ikl, NULL, &v);
+  if (rc == DB_OK) {
+    db_val_free(&v);
+    return 0;
+  }
+  if (rc != DB_NOTFOUND)
+    return -1;
+  inc = history_live_incarnation(target);
+  if (inc <= 0)
+    return 0;
+  return hren_find_parent(history_db_env, history_cf_renames,
+                          history_cf_msgid, history_cf_messages,
+                          history_row_incarnation, target,
+                          history_parse_ms(timestamp), (uint64_t)inc, parent,
+                          oname, pts, sizeof(pts));
+}
+
+/* Stage a REDACT row's reply-index entries on @a wb: its own, and when
+ * its original is stored under another name of the channel a second one
+ * under that name, each naming where the other row is (redact_index.h).
+ * A redaction is read off the index under the name the ORIGINAL is stored
+ * under -- the lookup, and the REDACT row a page shows with the message
+ * (history_attach_context) -- so it holds whichever name
+ * the original is read through -- the channel's after any number of
+ * renames, or a relocation's old channel -- and does not depend on the
+ * renames record still joining the two names (it keeps HREN_MAX_SEGS).
+ * When the original cannot be looked for the row is stored with its own
+ * entry alone, and the reads that walk the earlier names still find it. */
+static void reply_index_put_redact(struct db_writebatch *wb, const char *target,
+                                   const char *parent_msgid,
+                                   const char *timestamp, const char *child_msgid)
+{
+  char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char oname[CHANNELLEN + 1], own[CHANNELLEN + 1];
+  char val[CHANNELLEN + 2], back[CHANNELLEN + 2];
+  size_t vl, bl;
+  int klen, rc;
+
+  rc = redact_original_name(target, timestamp, parent_msgid, oname);
+  if (rc < 0)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "chathistory: could not look for the message %s redacted in %s "
+              "under the channel's earlier names; the redaction is stored "
+              "without a link to it", parent_msgid, target);
+  bl = 0;
+  if (rc > 0 && strlen(target) <= CHANNELLEN) {
+    db_casefold_bytes(own, target, strlen(target));
+    own[strlen(target)] = '\0';
+    bl = ri_link_redact_by(back, sizeof(back), own);
+  }
+  if (rc <= 0 || !bl || !(vl = ri_link_redact_of(val, sizeof(val), oname))) {
+    reply_index_put(wb, target, parent_msgid, timestamp, child_msgid, 1);
+    return;
+  }
+  klen = build_reply_index_key(keybuf, sizeof(keybuf), target, parent_msgid,
+                               timestamp, child_msgid);
+  if (klen < 0)
+    return;
+  db_writebatch_put(wb, history_cf_reply, keybuf, (size_t)klen, val, vl);
+  klen = build_reply_index_key(keybuf, sizeof(keybuf), oname, parent_msgid,
+                               timestamp, child_msgid);
+  if (klen < 0)
+    return;
+  db_writebatch_put(wb, history_cf_reply, keybuf, (size_t)klen, back, bl);
+}
+
 /*
  * Timestamp Conversion Functions
  *
@@ -1926,7 +2014,7 @@ store_retry:
   if (reply_parent[0])
     reply_index_put(wb, target, reply_parent, timestamp, msgid, 0);
   if (redact_parent[0]) {
-    reply_index_put(wb, target, redact_parent, timestamp, msgid, 1);
+    reply_index_put_redact(wb, target, redact_parent, timestamp, msgid);
     /* Catch-up index (design B): time-ordered so an absent store can
      * ask for redactions since T on return.  Same batch as the row; keyed
      * at the row's own time (trow.ms), which the trim delete reads back
@@ -5315,12 +5403,29 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
           struct db_val main_val = { NULL, 0 };
           int grc;
 
+          char elsewhere[CHANNELLEN + 1];
+          const char *rowname = name;
+
           memcpy(child_ts, child_part, ts_len);
           child_ts[ts_len] = '\0';
           memcpy(child_mid, sep + 1, mid_len);
           child_mid[mid_len] = '\0';
 
-          if (seg && history_parse_ms(child_ts) > seg->until_ms)
+          /* A REDACT row stored under another name of the channel, linked
+           * here when it was stored (reply_index_put_redact): the entry
+           * says under which.  It is later than the channel's stay under
+           * this name by nature, and is the message's context all the
+           * same -- the page hides a message whose REDACT row it holds. */
+          {
+            size_t vlen = 0;
+            const void *vbase = db_iter_value(ri_it, &vlen);
+
+            if (ri_link_redact_row_name(vbase, vlen, elsewhere,
+                                        sizeof(elsewhere)))
+              rowname = elsewhere;
+          }
+          if (rowname == name && seg
+              && history_parse_ms(child_ts) > seg->until_ms)
             goto next_child;
 
           /* Check if this child msgid is already in the primary list (avoid dup) */
@@ -5334,7 +5439,7 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
             goto next_child;
 
           /* Fetch the full message from main CF */
-          main_keylen = build_key(main_keybuf, sizeof(main_keybuf), name, child_ts, child_mid);
+          main_keylen = build_key(main_keybuf, sizeof(main_keybuf), rowname, child_ts, child_mid);
           if (main_keylen < 0)
             goto next_child;
 
@@ -5370,8 +5475,11 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
             MyFree(ctx);
             goto next_child;
           }
-          /* Under an earlier name, only the renamed channel's own rows. */
-          if (seg && (uint64_t)ctx->incarnation != seg->incarnation) {
+          /* Under an earlier name, only the renamed channel's own rows;
+           * through a link, only the REDACT row it was written for. */
+          if (rowname != name
+              ? ctx->type != HISTORY_REDACT
+              : (seg && (uint64_t)ctx->incarnation != seg->incarnation)) {
             MyFree(ctx);
             goto next_child;
           }
@@ -5380,7 +5488,7 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
           ircd_strncpy(ctx->target, target, sizeof(ctx->target));
           ircd_strncpy(ctx->timestamp, child_ts, sizeof(ctx->timestamp));
           ircd_strncpy(ctx->msgid, child_mid, sizeof(ctx->msgid));
-          ircd_strncpy(ctx->stored_as, name, sizeof(ctx->stored_as));
+          ircd_strncpy(ctx->stored_as, rowname, sizeof(ctx->stored_as));
           ctx->is_context = 1;
 
           /* Splice in after the parent AND after the context already hung
@@ -5446,7 +5554,11 @@ int history_redact_message(const char *target, const char *msgid)
  * when it was stored before the channel left that name (the parent's
  * msgid is the message's own, so what links to it there is its child;
  * past the segment's end the name is another channel's, whose members
- * can name any msgid). */
+ * can name any msgid).  An entry that says the REDACT row is under
+ * another name of the channel (RI_LINK_IS_REDACT_ELSEWHERE; the store
+ * wrote it after finding this message to be that channel's) answers yes
+ * under any name, whenever it was written: that is what keeps a message
+ * redacted when its REDACT row is under a name no longer read. */
 static int message_is_redacted_under(struct db_snapshot *snap, const char *target,
                                      const struct hren_seg *seg,
                                      const char *msgid, int max_children)
@@ -5487,9 +5599,23 @@ static int message_is_redacted_under(struct db_snapshot *snap, const char *targe
     int main_keylen;
     struct db_val main_val = { NULL, 0 };
     struct HistoryMessage child;
+    enum ri_link link;
 
     if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
       break;
+    {
+      size_t vlen = 0;
+      const void *vbase = db_iter_value(ri_it, &vlen);
+
+      link = ri_link_kind(vbase, vlen);
+    }
+    /* A REDACT row stored under another name of the channel, linked here
+     * when it was stored (reply_index_put_redact): it is later than the
+     * channel's stay under this name by nature, and counts all the same. */
+    if (link == RI_LINK_IS_REDACT_ELSEWHERE) {
+      redacted = 1;
+      continue;
+    }
     if (seg) {
       /* After the prefix: timestamp\0child_msgid */
       const char *cp = (const char *)kbase + plen;
@@ -5503,18 +5629,12 @@ static int message_is_redacted_under(struct db_snapshot *snap, const char *targe
       if (history_parse_ms(cts) > seg->until_ms)
         continue;
     }
-    {
-      size_t vlen = 0;
-      const void *vbase = db_iter_value(ri_it, &vlen);
-      enum ri_link link = ri_link_kind(vbase, vlen);
-
-      if (link == RI_LINK_IS_REDACT) {
-        redacted = 1;
-        continue;
-      }
-      if (link == RI_LINK_NOT_REDACT)
-        continue;
+    if (link == RI_LINK_IS_REDACT) {
+      redacted = 1;
+      continue;
     }
+    if (link == RI_LINK_NOT_REDACT)
+      continue;
     /* A legacy entry: read the child row, and count it. */
     if (max_children > 0 && ++seen > max_children) {
       unread = 1;   /* more legacy children than the caller will read */

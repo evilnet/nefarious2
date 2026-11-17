@@ -79,11 +79,40 @@ size_t ch_ad_letters(const char *param, char *out, size_t outsz);
  * only, and an entry it wrote is empty (RI_LINK_LEGACY: read the row). */
 #define RI_LINK_REDACT 'R'   /* the child is a REDACT of the parent */
 #define RI_LINK_CHILD  'C'   /* any other child: a reaction, a reply */
-enum ri_link { RI_LINK_LEGACY, RI_LINK_IS_REDACT, RI_LINK_NOT_REDACT };
+enum ri_link { RI_LINK_LEGACY, RI_LINK_IS_REDACT, RI_LINK_NOT_REDACT,
+               RI_LINK_IS_REDACT_ELSEWHERE };
+/* A REDACT whose original is stored under another name of the channel
+ * (a RENAME or a relocation came between them; history_rename.h) has two
+ * entries, each naming where the other row is.  Its own, under the name
+ * the REDACT row is stored under, is RI_LINK_REDACT_OF followed by the
+ * original's name, folded: the trim engine reads there where the original
+ * and the second entry are.  The second, under the original's name with
+ * the same parent, timestamp and child, is RI_LINK_REDACT_BY followed by
+ * the REDACT row's name, folded: whoever reads the original under its
+ * name finds it redacted, and finds the REDACT row to show with it,
+ * whatever name that row is under and whether or not a record still
+ * joins the two.  No row is stored under the second entry's own key. */
+#define RI_LINK_REDACT_OF 'O'
+#define RI_LINK_REDACT_BY 'L'
+/* The value of a REDACT row's own entry when its original is under
+ * @a name (ri_link_redact_of), and of the entry under the original's
+ * name when the REDACT row is under @a name (ri_link_redact_by).
+ * @return its length, 0 if it does not fit. */
+size_t ri_link_redact_of(char *buf, size_t size, const char *name);
+size_t ri_link_redact_by(char *buf, size_t size, const char *name);
+/* The name an entry value of that kind carries: the original's
+ * (ri_link_original_name, of a ri_link_redact_of value) or the REDACT
+ * row's (ri_link_redact_row_name, of a ri_link_redact_by value).
+ * @return 1 and @a name, 0 the value is not of that kind or the name
+ *   does not fit. */
+int ri_link_original_name(const void *value, size_t len, char *name, size_t size);
+int ri_link_redact_row_name(const void *value, size_t len, char *name, size_t size);
 /* The value byte to store for a REDACT link (@a redact) or any other. */
 char ri_link_value(int redact);
-/* What an entry value says: exactly "R" = IS_REDACT; exactly "C" =
- * NOT_REDACT; anything else -- empty (an older build), NULL, or a value
+/* What an entry value says: exactly "R", or RI_LINK_REDACT_OF and a name
+ * = IS_REDACT; RI_LINK_REDACT_BY and a name = IS_REDACT_ELSEWHERE (the
+ * parent is redacted, and the REDACT row is under that name); exactly
+ * "C" = NOT_REDACT; anything else -- empty (an older build), NULL, or a value
  * this build never writes -- = LEGACY: read the child row (fail closed). */
 enum ri_link ri_link_kind(const void *value, size_t len);
 

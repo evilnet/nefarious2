@@ -33,6 +33,7 @@
 #include "hash.h"
 #include "history.h"
 #include "history_rename.h"
+#include "chathistory_merge.h"
 #include "ircd.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
@@ -628,6 +629,133 @@ static void test_redact_across_the_rename(void **state)
   history_free_messages(list);
 }
 
+/** A stamp at the clock renames are timed by, each later than the last. */
+static const char *stamp_now(void)
+{
+  static char buf[4][HISTORY_TIMESTAMP_LEN];
+  static int next;
+  char *b = buf[next++ % 4];
+
+  usleep(2000);
+  history_format_ms(b, HISTORY_TIMESTAMP_LEN, history_recv_now_ms());
+  usleep(2000);
+  return b;
+}
+
+static int shown_redacted(const struct HistoryMessage *m, void *arg)
+{
+  return history_message_is_redacted((const char *)arg, m->msgid);
+}
+
+/** What a client is shown of @a target's latest page, as m_chathistory.c
+ * builds it: the page, its context attached (history_attach_context),
+ * through the page's redaction filter (hm_redact_filter) -- which hides a
+ * message only when the REDACT row naming it is on the list.  The msgids
+ * of the messages left, in order. */
+static const char *shown(const char *target)
+{
+  static char buf[512];
+  struct HistoryMessage *list = NULL, *m;
+  int n;
+
+  n = history_query_latest(target, HISTORY_REF_NONE, NULL, 50, &list, NULL);
+  assert_true(n >= 0);
+  n += history_attach_context(target, list);
+  hm_redact_filter(&list, n, NULL, shown_redacted, (void *)target);
+  buf[0] = '\0';
+  for (m = list; m; m = m->next) {
+    if (m->type != HISTORY_PRIVMSG)
+      continue;
+    if (buf[0])
+      strcat(buf, " ");
+    strcat(buf, m->msgid);
+  }
+  history_free_messages(list);
+  return buf;
+}
+
+/** #a with m1 m2, renamed to #b, where m1 is redacted (r1), renamed back
+ * to #a, and then away and back through other names until #b is no
+ * longer one of the names #a's record keeps. */
+static void redacted_then_renamed_out_of_reach(time_t creation,
+                                               const char *redact_ts)
+{
+  char other[16];
+  int i;
+
+  chan_make("#a", creation);
+  say("#a", ago(3000, 0), "m1");
+  say("#a", ago(2000, 0), "m2");
+  rename_chan("#a", "#b");
+  redact("#b", redact_ts, "r1", "m1");
+  assert_int_equal(history_message_is_redacted("#b", "m1"), 1);
+  assert_string_equal(shown("#b"), "m2");
+  rename_chan("#b", "#a");
+  assert_int_equal(history_message_is_redacted("#a", "m1"), 1);
+  assert_string_equal(shown("#a"), "m2");
+
+  for (i = 0; i < HREN_MAX_SEGS; i++) {
+    snprintf(other, sizeof other, "#t%d", i);
+    usleep(2000);
+    rename_chan("#a", other);
+    usleep(2000);
+    rename_chan(other, "#a");
+  }
+  /* #b is no longer followed ... */
+  assert_non_null(strstr(last_warning, "no longer followed"));
+}
+
+/* A redaction does not depend on the renames record: the REDACT row is
+ * under #b, a name the channel no longer reads, and the message it hides
+ * is under #a, which it does.  The message stays redacted. */
+static void test_redact_survives_the_names_cap(void **state)
+{
+  (void)state;
+
+  redacted_then_renamed_out_of_reach(INC, stamp_now());
+  assert_string_equal(latest("#a", 50), "m1 m2");
+  assert_int_equal(history_message_is_redacted("#a", "m1"), 1);
+  assert_int_equal(history_message_is_redacted("#a", "m2"), 0);
+  /* ... on the page a client gets, where the REDACT row rides along as
+   * the message's context from the name it is stored under */
+  assert_string_equal(shown("#a"), "m2");
+}
+
+/* A relocation leaves the old channel in place, with the history from
+ * before the move readable under both names.  A REDACT in the new channel
+ * of a message from before the move hides it in the old one too. */
+static void test_redact_reaches_the_relocation_tombstone(void **state)
+{
+  (void)state;
+
+  chan_make("#old", INC);
+  say("#old", ago(300, 0), "a1");
+  say("#old", ago(200, 0), "a2");
+  chan_make("#new", INC);                          /* relocate_execute() */
+  history_channel_renamed("#old", "#new", INC);
+  say("#old", ago(-20, 0), "t1");                  /* the tombstone's own */
+
+  redact("#new", ago(-30, 0), "r1", "a2");
+  assert_int_equal(history_message_is_redacted("#new", "a2"), 1);
+  assert_int_equal(history_message_is_redacted("#old", "a2"), 1);
+  assert_int_equal(history_message_is_redacted("#old", "a1"), 0);
+  assert_string_equal(shown("#new"), "a1");
+  assert_string_equal(shown("#old"), "a1 t1");
+
+  /* what the tombstone stored after the move is not the new channel's to
+   * redact */
+  redact("#new", ago(-31, 0), "r2", "t1");
+  assert_int_equal(history_message_is_redacted("#old", "t1"), 0);
+
+  /* nor does another channel's REDACT row naming the msgid hide anything */
+  chan_make("#evil", INC);
+  redact("#evil", ago(-32, 0), "x1", "a1");
+  assert_int_equal(history_message_is_redacted("#old", "a1"), 0);
+  assert_int_equal(history_message_is_redacted("#new", "a1"), 0);
+  assert_string_equal(shown("#new"), "a1");
+  assert_string_equal(shown("#old"), "a1 t1");
+}
+
 /** Run the trim engine until it has nothing left to do. */
 static void trim_until_idle(void)
 {
@@ -696,6 +824,23 @@ static void test_trim_redact_after_the_channel_moved_on(void **state)
   assert_string_equal(latest("#new", 50), "a1");
 }
 
+/* Trimming does not undo it either.  The REDACT row is past retention
+ * and its original is not (as above), and by now no record joins #b,
+ * where the REDACT row is, to #a: the original still goes with it. */
+static void test_trim_redact_past_the_names_cap(void **state)
+{
+  struct HistoryMessage *m = NULL;
+  (void)state;
+
+  retention_days = 7;
+  redacted_then_renamed_out_of_reach(now_s - 20 * 86400, ago(8 * 86400, 0));
+
+  trim_until_idle();
+
+  assert_int_equal(history_lookup_message("#a", "m1", &m), 1);
+  assert_string_equal(latest("#a", 50), "m2");
+}
+
 /* ------------------------------------------------------------------ */
 /* The burst-loss prune                                                */
 /* ------------------------------------------------------------------ */
@@ -724,7 +869,10 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_cap_is_logged, setup, teardown),
     cmocka_unit_test_setup_teardown(test_crossing_relocations, setup, teardown),
     cmocka_unit_test_setup_teardown(test_redact_across_the_rename, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_redact_survives_the_names_cap, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_redact_reaches_the_relocation_tombstone, setup, teardown),
     cmocka_unit_test_setup_teardown(test_trim_does_not_undo_a_redact_across_the_rename, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_trim_redact_past_the_names_cap, setup, teardown),
     cmocka_unit_test_setup_teardown(test_trim_redact_after_the_channel_moved_on, setup, teardown),
     cmocka_unit_test_setup_teardown(test_purge_incarnation_follows_the_rename, setup, teardown),
   };

@@ -271,6 +271,10 @@ char ri_link_value(int redact)
 
 enum ri_link ri_link_kind(const void *value, size_t len)
 {
+  if (value && len > 1 && ((const char *)value)[0] == RI_LINK_REDACT_OF)
+    return RI_LINK_IS_REDACT;   /* the REDACT row's own entry, as "R" */
+  if (value && len > 1 && ((const char *)value)[0] == RI_LINK_REDACT_BY)
+    return RI_LINK_IS_REDACT_ELSEWHERE;
   if (!value || len != 1)
     return RI_LINK_LEGACY;
   if (((const char *)value)[0] == RI_LINK_REDACT)
@@ -278,4 +282,46 @@ enum ri_link ri_link_kind(const void *value, size_t len)
   if (((const char *)value)[0] == RI_LINK_CHILD)
     return RI_LINK_NOT_REDACT;
   return RI_LINK_LEGACY;   /* not a value this build writes: read the row */
+}
+
+static size_t ri_link_named(char *buf, size_t size, char kind, const char *name)
+{
+  size_t n = name ? strlen(name) : 0;
+
+  if (!buf || !n || n + 1 > size)
+    return 0;
+  buf[0] = kind;
+  memcpy(buf + 1, name, n);
+  return n + 1;
+}
+
+static int ri_link_name(const void *value, size_t len, char kind, char *name,
+                        size_t size)
+{
+  if (!value || len < 2 || !name || len > size
+      || ((const char *)value)[0] != kind)
+    return 0;
+  memcpy(name, (const char *)value + 1, len - 1);
+  name[len - 1] = '\0';
+  return 1;
+}
+
+size_t ri_link_redact_of(char *buf, size_t size, const char *name)
+{
+  return ri_link_named(buf, size, RI_LINK_REDACT_OF, name);
+}
+
+size_t ri_link_redact_by(char *buf, size_t size, const char *name)
+{
+  return ri_link_named(buf, size, RI_LINK_REDACT_BY, name);
+}
+
+int ri_link_original_name(const void *value, size_t len, char *name, size_t size)
+{
+  return ri_link_name(value, len, RI_LINK_REDACT_OF, name, size);
+}
+
+int ri_link_redact_row_name(const void *value, size_t len, char *name, size_t size)
+{
+  return ri_link_name(value, len, RI_LINK_REDACT_BY, name, size);
 }

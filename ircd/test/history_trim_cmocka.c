@@ -3789,6 +3789,114 @@ static void test_evict_redact_renamed_lookup_fails(void **state)
   assert_int_equal(1, row_present("#old", 1000, "ORIG"));
 }
 
+/** What history.c writes when a REDACT row's original is stored under
+ * another name of the channel (@a oname): the REDACT row's own entry says
+ * where the original is, and an entry under that name hides the original
+ * for whoever reads it there (redact_index.h). */
+static void seed_redact_elsewhere(const char *target, uint64_t secs,
+                                  const char *msgid, const char *parent,
+                                  const char *oname)
+{
+  struct db_writebatch *wb = db_writebatch_new(env);
+  char rk[HTC_MSG_KEY_MAX], ts[32], val[HTC_TARGET_MAX + 2];
+  size_t vl;
+  int n;
+
+  assert_non_null(wb);
+  snprintf(ts, sizeof ts, "%llu.000", (unsigned long long)secs);
+  n = htc_reply_child_key(rk, sizeof rk, target, parent, ts, msgid);
+  assert_true(n > 0);
+  vl = ri_link_redact_of(val, sizeof val, oname);
+  assert_true(vl > 1);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.reply, rk, (size_t)n, val, vl));
+  n = htc_reply_child_key(rk, sizeof rk, oname, parent, ts, msgid);
+  assert_true(n > 0);
+  vl = ri_link_redact_by(val, sizeof val, target);
+  assert_true(vl > 1);
+  assert_int_equal(DB_OK, db_writebatch_put(wb, st.reply, rk, (size_t)n, val, vl));
+  assert_int_equal(DB_OK, db_writebatch_commit(wb, 0));
+  db_writebatch_destroy(wb);
+}
+
+/* The REDACT row's own entry names where its original is: the original
+ * and the entry that hides it there go with the REDACT row, and nobody is
+ * asked (the renames record may no longer join the two names). */
+static void test_evict_redact_takes_original_and_link_it_names(void **state)
+{
+  struct htrim_params p = ev_params(0);
+  (void)state;
+
+  evict_ready();
+  renamed_calls = 0;
+  renamed_answer = 0;
+  htrim_set_renamed_parent_cb(renamed_parent_cb);
+  seed_run("#n", "N", "-", 55, 500, 100);
+  seed_sized("#old", 1000, "ORIG", "a:bob", 100);
+  seed_redact("#new", 1001, "RDX", "a:mod", "ORIG", 100);
+  seed_redact_elsewhere("#new", 1001, "RDX", "ORIG", "#old");
+  seed_run("#f", "F", "a:mod", 30, 2000, 100);
+  assert_int_equal(1, redact_link("#old", "ORIG", 1001, "RDX"));
+
+  run_until_idle(&p);
+  htrim_set_renamed_parent_cb(NULL);
+  assert_int_equal(0, row_present("#new", 1001, "RDX"));
+  assert_int_equal(0, row_present("#old", 1000, "ORIG"));
+  assert_int_equal(0, redact_link("#new", "ORIG", 1001, "RDX"));
+  assert_int_equal(0, redact_link("#old", "ORIG", 1001, "RDX"));
+  assert_int_equal(0, renamed_calls);
+  assert_int_equal(0, owner_of("a:bob"));
+  assert_acct_matches_cf();
+}
+
+/* The usual order: the original, the older row, went first.  The entry
+ * under its name goes when the REDACT row does -- nothing is left behind
+ * in the index. */
+static void test_delete_redact_removes_link_under_other_name(void **state)
+{
+  char bt[HTC_BT_KEY_MAX];
+  struct htc_rec rec;
+  struct htrim_slice *s;
+  int btl;
+  (void)state;
+
+  seed_row("#new", "1001.000", "RDX", "a:mod", HTC_F_REDACT, "", "GONE", 0, &rec);
+  seed_redact_elsewhere("#new", 1001, "RDX", "GONE", "#old");
+  assert_int_equal(1, redact_link("#old", "GONE", 1001, "RDX"));
+
+  btl = bt_of(bt, sizeof bt, "#new", "1001.000", "RDX");
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  assert_int_equal(0, htrim_delete_row(s, HTRIM_PATH_AGEOUT, bt, (size_t)btl, &rec, 1));
+  assert_int_equal(1, htrim_slice_commit(s));
+  assert_int_equal(0, redact_link("#new", "GONE", 1001, "RDX"));
+  assert_int_equal(0, redact_link("#old", "GONE", 1001, "RDX"));
+}
+
+/* The REDACT row's entry cannot be read: nothing is staged that would
+ * leave the entry under the other name, or the original, behind. */
+static void test_delete_redact_link_read_fails(void **state)
+{
+  char bt[HTC_BT_KEY_MAX];
+  struct htc_rec rec;
+  struct htrim_slice *s;
+  int btl;
+  (void)state;
+
+  seed_sized("#old", 1000, "ORIG", "a:bob", 100);
+  seed_row("#new", "1001.000", "RDX", "a:mod", HTC_F_REDACT, "", "ORIG", 0, &rec);
+  seed_redact_elsewhere("#new", 1001, "RDX", "ORIG", "#old");
+
+  btl = bt_of(bt, sizeof bt, "#new", "1001.000", "RDX");
+  s = htrim_slice_begin(0);
+  assert_non_null(s);
+  fake_db_fail_get_at(env, 1);
+  assert_int_equal(-2, htrim_delete_row(s, HTRIM_PATH_AGEOUT, bt, (size_t)btl, &rec, 1));
+  htrim_slice_abort(s);
+  assert_int_equal(1, row_present("#new", 1001, "RDX"));
+  assert_int_equal(1, row_present("#old", 1000, "ORIG"));
+  assert_int_equal(1, redact_link("#old", "ORIG", 1001, "RDX"));
+}
+
 /* The emergency path is a walk like any other: a REDACT row it takes takes
  * its original, even a newer one the walk has not reached. */
 static void test_emergency_redact_takes_original(void **state)
@@ -6009,6 +6117,9 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_evict_redact_takes_original_under_earlier_name, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_redact_renamed_lookup_only_when_needed, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_redact_renamed_lookup_fails, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_evict_redact_takes_original_and_link_it_names, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delete_redact_removes_link_under_other_name, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_delete_redact_link_read_fails, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_owner_self_redaction_once, setup, teardown),
     cmocka_unit_test_setup_teardown(test_evict_redact_without_original, setup, teardown),
     cmocka_unit_test_setup_teardown(test_backfill_redact_takes_counted_original, setup, teardown),

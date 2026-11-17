@@ -108,11 +108,27 @@
  *
  * REDACTIONS AND TRIMMING.  A REDACT sent after a rename for a message
  * from before it is stored under the new name, its original under the
- * old one; reads join them.  The trim engine deletes a redacted original
- * together with its REDACT row (a redaction lives only in that row), and
- * finds the original under the other name through hren_find_parent: the
- * names that hold the msgid, narrowed to rows of the same incarnation
- * that a record joins with the REDACT row (hren_same_channel).
+ * old one.  The redaction must not depend on a record joining the two:
+ * the record keeps HREN_MAX_SEGS names, so enough later renames would
+ * make the REDACT row's name one that is no longer read and show the
+ * message again, and a relocation's old channel reads its own name
+ * only.  So when history.c stores a REDACT row it looks for the original
+ * (hren_find_parent: the names that hold the msgid, narrowed to rows of
+ * the same incarnation that a record joins with the REDACT row,
+ * hren_same_channel) and, when it is under another name, writes a second
+ * reply-index entry under THAT name (redact_index.h).  A redaction is
+ * read off the index under the name the original is stored under, which
+ * is the name the original is read through whatever the channel is
+ * called by then.  The REDACT row's own entry carries the other name:
+ * the trim engine deletes a redacted original together with its REDACT
+ * row (a redaction lives only in that row), and finds the original and
+ * the second entry there with no record to consult.  A REDACT row from
+ * before this (its entry names nothing) is still joined by the reads
+ * that walk the earlier names, and by hren_find_parent at trim.
+ *   The link runs one way.  What a relocation's old channel stores after
+ * the move is its own, REDACT rows included: one sent there for a
+ * message from before the move hides it in the old channel and not in
+ * the new one.
  *
  * PRESENCE.  With CHATHISTORY_STRICT_PRESENCE a row is checked against
  * the presence recorded under the name it is STORED under: a RENAME
@@ -132,6 +148,9 @@
  *    follow a rename.
  *  - Two renames whose times are equal to the millisecond are ordered by
  *    name when the cap chooses which entry to drop.
+ *  - A REDACT stored while its original is not on this store (it arrives
+ *    later, from another store) gets no second entry: it holds through
+ *    the names the record keeps, as before, and no further.
  *
  * No ircd dependency beyond the db_* API, db_casefold and the key codec
  * (history_trim_codec.h): unit-tested on the in-memory store and on

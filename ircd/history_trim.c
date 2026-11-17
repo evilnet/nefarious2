@@ -105,7 +105,9 @@
  * the messages key rebuilt from the record's stored ts (never from ms),
  * both msgid_index forms, the ml_content and matching ml_paste rows for
  * HTC_F_ML, a reply_index entry per non-empty reply_parent/redact_parent
- * recorded as that row's CHILD, the redact_index row for HTC_F_REDACT,
+ * recorded as that row's CHILD (and, for a REDACT row whose own entry
+ * names another name of the channel, its second entry under that name:
+ * redact_index.h), the redact_index row for HTC_F_REDACT,
  * and the by_time/by_owner rows -- plus the pending accounting delta and
  * touched-target bookkeeping described above.  A row's OWN children
  * (replies, redactions) are never touched.  The one cascade runs the
@@ -1730,8 +1732,9 @@ static int parent_ts(const char *target, const char *msgid, char *ts, size_t tsz
  *
  * The original is found through msgid_index (or its legacy bare-msgid
  * row) under the REDACT row's own name -- or, for a renamed channel,
- * under the name the renamed-parent callback gives -- and its record
- * taken from by_time.  An original with no readable
+ * under the name the REDACT row's own reply_index entry carries
+ * (@a oname), or else the one the renamed-parent callback gives -- and
+ * its record taken from by_time.  An original with no readable
  * by_time record (not indexed yet, or a record that does not parse) gets
  * one rebuilt from its messages row the way the backfill builds it, and
  * is counted only when its by_owner entry is there to say what it was
@@ -1742,7 +1745,8 @@ static int parent_ts(const char *target, const char *msgid, char *ts, size_t tsz
  * @return 0, or -1 a read failed or the slice is poisoned. */
 static int delete_redacted_parent(struct htrim_slice *s, enum htrim_path path,
                                   const char *target, const char *child_ts,
-                                  const char *child_msgid, const char *parent)
+                                  const char *child_msgid, const char *parent,
+                                  const char *oname)
 {
   char ts[HTC_TS_MAX], bt[HTC_BT_KEY_MAX], mk[HTC_MSG_KEY_MAX], bo[HTC_BO_KEY_MAX];
   char ptarget[HTC_TARGET_MAX];
@@ -1751,8 +1755,17 @@ static int delete_redacted_parent(struct htrim_slice *s, enum htrim_path path,
   int btl, mkl, bol, rc, parsed = 0, counted = 1;
 
   rc = parent_ts(target, parent, ts, sizeof ts);
+  if (rc == 0 && oname && oname[0]) {
+    /* Not under the REDACT row's own name, and its entry says where
+     * (redact_index.h): the store found the original there when it wrote
+     * the REDACT row, and nothing has to join the two names now. */
+    rc = parent_ts(oname, parent, ts, sizeof ts);
+    if (rc > 0)
+      target = oname;
+  }
   if (rc == 0 && renamed_parent_cb && child_msgid[0]) {
-    /* Not under the REDACT row's own name.  A renamed channel's original
+    /* Not under the REDACT row's own name, and its entry names no other
+     * (a row an earlier build stored).  A renamed channel's original
      * from before the rename is under the name the channel had then, and
      * the read side joins the two (history_rename.h): it goes with the
      * REDACT row all the same. */
@@ -1886,9 +1899,10 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   char mk[HTC_MSG_KEY_MAX];
   char ik[HTRIM_MSGID_KEY_MAX];
   char rk1[HTRIM_REPLY_KEY_MAX], rk2[HTRIM_REPLY_KEY_MAX];
+  char rk3[HTRIM_REPLY_KEY_MAX], oname[HTC_TARGET_MAX];
   char bo[HTC_BO_KEY_MAX];
   unsigned char xk[RDX_KEY_MAX];
-  int mkl, ikl = -1, rk1l = -1, rk2l = -1, xkl = -1, bol, bt_new, bo_new;
+  int mkl, ikl = -1, rk1l = -1, rk2l = -1, rk3l = -1, xkl = -1, bol, bt_new, bo_new;
 
   if (!s || !g.inited || !bt_key || !bt_klen
       || (int)path < 0 || path >= HTRIM_PATH_COUNT)
@@ -1932,6 +1946,31 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   if (bol < 0)
     return delete_index_only(s, path, bt_key, bt_klen, rec, counted);
 
+  /* A REDACT row whose original is under another name of the channel has
+   * a second entry there, and its own entry says under which name
+   * (redact_index.h).  That entry goes with the row -- it has no row of
+   * its own to take it later -- and the original is looked for there.
+   * An entry that cannot be read stops the slice: the row would go and
+   * leave both behind. */
+  oname[0] = '\0';
+  if (rk2l > 0 && (rec->flags & HTC_F_REDACT)) {
+    struct db_val v = { NULL, 0 };
+    int grc = db_get(g.st.env, g.st.reply, rk2, (size_t)rk2l, NULL, &v);
+
+    if (grc != DB_OK && grc != DB_NOTFOUND) {
+      s->broken = 1;
+      return -2;
+    }
+    if (grc == DB_OK) {
+      if (ri_link_original_name(v.base, v.len, oname, sizeof oname))
+        rk3l = htc_reply_child_key(rk3, sizeof rk3, oname, rec->redact_parent,
+                                   rec->ts, msgid);
+      else
+        oname[0] = '\0';
+      db_val_free(&v);
+    }
+  }
+
   /* A row this slice deleted in full already is a repeat.  One whose
    * index alone went (the index-only form, its record unreadable) still
    * loses its messages row and the rest now; its by_owner key, if gone
@@ -1958,6 +1997,8 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
     slice_del(s, g.st.reply, rk1, (size_t)rk1l);
   if (rk2l > 0)
     slice_del(s, g.st.reply, rk2, (size_t)rk2l);
+  if (rk3l > 0)
+    slice_del(s, g.st.reply, rk3, (size_t)rk3l);
   if (bt_new)
     slice_del(s, g.st.by_time, bt_key, bt_klen);
   if (bo_new)
@@ -1979,7 +2020,7 @@ int htrim_delete_row(struct htrim_slice *s, enum htrim_path path,
   if ((rec->flags & HTC_F_REDACT) && rec->redact_parent[0]
       && path != HTRIM_PATH_INCARNATION
       && delete_redacted_parent(s, path, target, rec->ts, msgid,
-                                rec->redact_parent) != 0)
+                                rec->redact_parent, oname) != 0)
     return -2;
   s->dup_hit = counted && !bo_new;   /* this row's bytes went already */
   return 0;

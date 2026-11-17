@@ -456,6 +456,7 @@ history_rename_rocksdb_cmocka: $(HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS)
 # channels and the rest of what history.c needs from the ircd are stubs
 # in the test.
 HISTORY_READ_CMOCKA_OBJS = history_read_cmocka.o ../history.o \
+	../chathistory_merge.o \
 	../history_rename.o ../history_trim.o ../history_trim_codec.o \
 	../history_record.o ../redact_index.o ../chathistory_recv.o \
 	../pm_pair_index.o ../db_casefold.o ../db_rocksdb.o ../crdt_hlc.o \
