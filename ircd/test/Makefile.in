@@ -133,7 +133,8 @@ CMOCKA_TESTPROGS = \
 	store_job_cmocka \
 	history_view_cmocka \
 	alloc_nomem_cmocka \
-	chathistory_search_job_cmocka
+	chathistory_search_job_cmocka \
+	persistence_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -259,6 +260,7 @@ DEP_SRC = \
 	history_view_cmocka.c \
 	alloc_nomem_cmocka.c \
 	chathistory_search_job_cmocka.c \
+	persistence_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -1190,6 +1192,14 @@ ml_discard_cmocka.o: ${srcdir}/ml_discard_cmocka.c ../m_batch.c
 ML_DISCARD_CMOCKA_OBJS = ml_discard_cmocka.o ../ircd_string.o
 ml_discard_cmocka: $(ML_DISCARD_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(ML_DISCARD_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# persistence tests - the PERSISTENCE extras (ATTACH, DETACH, LIST, PROFILE,
+# REPLAY) are dispatched for every connection, with or without the vendor
+# cap.  The real m_persistence.o; the ircd around it is stubbed in the test.
+PERSISTENCE_CMOCKA_OBJS = persistence_cmocka.o ../m_persistence.o \
+	../ircd_string.o ../ircd_snprintf.o
+persistence_cmocka: $(PERSISTENCE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(PERSISTENCE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
