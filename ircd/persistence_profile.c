@@ -21,6 +21,7 @@
 #include "config.h"
 
 #include "client.h"
+#include "db_casefold.h"
 #include "ircd_alloc.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
@@ -28,6 +29,7 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "metadata_lww.h"   /* md_wire_key_valid */
 #include "metadata_sync.h"
 #include "persistence_profile.h"
 #include "struct.h"
@@ -246,10 +248,18 @@ int persistence_profile_set(const char *account, const char *profile,
   }
 
   if (build_profile_key(full_key, sizeof(full_key), profile, key) < 0)
-    return -1;
+    return PERSISTENCE_PROFILE_BADKEY;
+  /* A key the wire refuses (over 127 bytes, or a byte outside 0x21-0x7e)
+   * would stay on this server, and one of 160 bytes or more is skipped by
+   * the store's walk, so a delete or rename would leave it behind.  An
+   * unset is let through: it removes such a row an older server wrote. */
+  if (value && !md_wire_key_valid(full_key))
+    return PERSISTENCE_PROFILE_BADKEY;
 
   return profile_write(account, full_key, value);
 }
+
+static void clear_profile_rows(const char *account, const char *name);
 
 int persistence_profile_create(const char *account, const char *name,
                                 const char *parent)
@@ -268,6 +278,12 @@ int persistence_profile_create(const char *account, const char *name,
     return -1;
   if (!persistence_profile_exists(account, effective_parent))
     return -1; /* parent must exist (default always does) */
+
+  /* Rows under the name with no parent row are leftovers (an older
+   * server's rename or delete moved the parent row and left keys of 64
+   * bytes or more, or a peer replicates such rows later): not this new
+   * profile's settings.  Remove them first. */
+  clear_profile_rows(account, name);
 
   return persistence_profile_set(account, name, PROFILE_PARENT_KEY,
                                   effective_parent);
@@ -367,8 +383,25 @@ static int has_children(const char *account, const char *name)
  * a name typed with capitals has to match the rows stored for it. */
 static void fold_key(char *buf)
 {
-  for (; *buf; buf++)
-    *buf = ToLower(*buf);
+  db_casefold_bytes(buf, buf, strlen(buf));
+}
+
+/** Remove every stored row under profile @a name (its parent row too). */
+static void clear_profile_rows(const char *account, const char *name)
+{
+  struct ProfileRow *list, *e;
+  char prefix[64];
+  size_t prefix_len;
+
+  ircd_snprintf(NULL, prefix, sizeof(prefix), "%s%s/",
+                PROFILE_KEY_PREFIX, name);
+  fold_key(prefix);
+  prefix_len = strlen(prefix);
+  list = collect_profile_rows(account);
+  for (e = list; e; e = e->next)
+    if (e->key && strncmp(e->key, prefix, prefix_len) == 0)
+      (void)profile_write(account, e->key, NULL);
+  free_profile_rows(list);
 }
 
 int persistence_profile_delete(const char *account, const char *name)
@@ -434,6 +467,20 @@ int persistence_profile_rename(const char *account,
   old_prefix_len = strlen(old_prefix);
 
   list = collect_profile_rows(account);
+
+  /* A longer name makes every key longer: refuse the rename, writing
+   * nothing, if one of them would no longer be a key the wire takes
+   * (see persistence_profile_set()). */
+  for (e = list; e; e = e->next) {
+    if (!e->key || strncmp(e->key, old_prefix, old_prefix_len) != 0)
+      continue;
+    if (build_profile_key(new_key, sizeof(new_key), new_name,
+                          e->key + old_prefix_len) < 0
+        || !md_wire_key_valid(new_key)) {
+      free_profile_rows(list);
+      return PERSISTENCE_PROFILE_BADKEY;
+    }
+  }
 
   /* Phase 1: copy old_name's keys to new_name.  collect_profile_rows()
    * returns the decoded, vis-stripped value -- e->value is the value to
