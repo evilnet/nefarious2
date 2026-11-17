@@ -1588,13 +1588,16 @@ conf_get_error_flag(void)
   return conf_error;
 }
 
-/** Set by rehash() when it returned without applying anything (the file
- * could not be read, the check found errors, or it kept changing). */
+/** Set by rehash() when it returned without applying anything: to
+ * CONF_ABANDON_ERRORS when the check found errors in the file (or crashed
+ * on it), to CONF_ABANDON_OTHER when the file could not be read or kept
+ * changing. */
 static int rehash_abandoned;
 
 /** Did the last rehash() stop before it discarded anything?  Then the
  * running configuration is the one from before it: nothing to reload.
- * @return Non-zero if the last rehash was abandoned.
+ * @return CONF_ABANDON_NONE if it applied the file; otherwise why it was
+ *   abandoned: only CONF_ABANDON_ERRORS says anything of the file.
  */
 int
 conf_rehash_abandoned(void)
@@ -1963,6 +1966,7 @@ static int rehash_precheck(void)
   }
 
   conf_error = 1;       /* conf_get_error_flag(): GitSync restores its copy */
+  rehash_abandoned = CONF_ABANDON_ERRORS;       /* the file is at fault */
   log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
             "changed: configuration file %s %s", configfile, what);
   sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
@@ -2041,7 +2045,9 @@ int rehash(struct Client *cptr, int sig)
 
   /* A file that changed while it was checked (a deploy writing it) is
    * opened and checked again, a few times. */
-  rehash_abandoned = 1;         /* until the old configuration is discarded */
+  /* Until the old configuration is discarded; rehash_precheck() says
+   * when the file itself is at fault. */
+  rehash_abandoned = CONF_ABANDON_OTHER;
   for (tries = 0; ; tries++) {
     if (!rehash_open_conf())
       return 0;
@@ -2057,7 +2063,7 @@ int rehash(struct Client *cptr, int sig)
       return 0;
     }
   }
-  rehash_abandoned = 0;
+  rehash_abandoned = CONF_ABANDON_NONE;
 
   while ((tmp2 = *tmp)) {
     if (tmp2->clients) {

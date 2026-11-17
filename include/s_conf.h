@@ -314,6 +314,12 @@ extern void clear_sslcert_confs(void);
 #endif
 
 extern int conf_get_error_flag(void);
+/** Why the last rehash() was abandoned (conf_rehash_abandoned()). */
+#define CONF_ABANDON_NONE   0 /**< Not abandoned: it applied the file. */
+#define CONF_ABANDON_ERRORS 1 /**< The check found errors in the file,
+                               *   or crashed on it. */
+#define CONF_ABANDON_OTHER  2 /**< The file could not be read, or kept
+                               *   changing: nothing is known of it. */
 extern int conf_rehash_abandoned(void);
 extern int conf_file_check(void);
 

@@ -1601,21 +1601,45 @@ gitsync_apply(const char *content, size_t len, int force,
 
   /* Check if config parsing failed */
   if (conf_get_error_flag()) {
-    sendto_opmask_butone(0, SNO_OLDSNO,
-                         "GitSync: Config parse error detected, %s",
+    int abandoned = conf_rehash_abandoned();
+    int clean = -1;
+    const char *what = abandoned == CONF_ABANDON_OTHER
+        ? "Rehash abandoned before the file was checked"
+        : "Config parse error";
+
+    sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: %s, %s", what,
                          had_backup ? "restoring backup"
                          : "removing the new file (no previous file)");
-    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: Config parse error, %s %s%s",
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s, %s %s%s", what,
               had_backup ? "restoring" : "removing", conf_file,
               had_backup ? " from backup" : " (no previous file)");
 
     /* Back to the configuration as it was: the backup, or no file at all
      * when there was none (an include of it then reads as empty). */
-    int abandoned = conf_rehash_abandoned();
-    int clean = -1;
 
-    if (had_backup ? 0 == rename(bak_file, conf_file)
-                   : 0 == unlink(conf_file)) {
+    if (abandoned == CONF_ABANDON_OTHER) {
+      /* The rehash read nothing of the file: it could not be read, or it
+       * kept changing while it was checked.  Nothing is known of the
+       * content, so it is put back as for any rehash that did not apply
+       * and tried again at the next sync, never refused. */
+      if (had_backup ? 0 == rename(bak_file, conf_file)
+                     : 0 == unlink(conf_file))
+        ircd_snprintf(0, gitsync_stats.last_error,
+                      sizeof(gitsync_stats.last_error),
+                      "Rehash with commit %.8s abandoned before the file was "
+                      "checked (it could not be read, or kept changing); %s; "
+                      "retried at the next sync", gitsync_stats.last_commit,
+                      had_backup ? "restored from backup"
+                      : "taken back (there was no previous file)");
+      else
+        ircd_snprintf(0, gitsync_stats.last_error,
+                      sizeof(gitsync_stats.last_error),
+                      "Rehash with commit %.8s abandoned - cannot %s %s: %s; "
+                      "retried at the next sync", gitsync_stats.last_commit,
+                      had_backup ? "restore the backup of" : "remove",
+                      conf_file, strerror(errno));
+    } else if (had_backup ? 0 == rename(bak_file, conf_file)
+                          : 0 == unlink(conf_file)) {
       /* An abandoned rehash changed nothing: the running configuration
        * is the one from before it, so there is nothing to reload -- only
        * whether the configuration is clean without the content to learn,
