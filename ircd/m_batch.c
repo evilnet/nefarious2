@@ -944,7 +944,8 @@ multiline_add_message(struct Client *sptr, const char *target,
   if (con_ml_is_notice(con) < 0) {
     con_ml_is_notice(con) = is_notice ? 1 : 0;
   } else if ((con_ml_is_notice(con) != 0) != (is_notice != 0)) {
-    send_fail(sptr, "BATCH", "MULTILINE_INVALID", con_ml_batch_id(con),
+    /* No context: "FAIL BATCH MULTILINE_INVALID :<description>" (spec). */
+    send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
               "Cannot mix PRIVMSG and NOTICE in multiline batch");
     clear_multiline_batch(con);
     return -1;
@@ -954,8 +955,8 @@ multiline_add_message(struct Client *sptr, const char *target,
 
   /* IRCv3 multiline spec: concat flag on blank line is invalid */
   if (concat && len == 0) {
-    send_fail(sptr, "BATCH", "MULTILINE_INVALID",
-              con_ml_batch_id(con),
+    /* No context: "FAIL BATCH MULTILINE_INVALID :<description>" (spec). */
+    send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
               "Cannot use concat tag on blank line");
     clear_multiline_batch(con);
     return -1;
@@ -1565,7 +1566,8 @@ process_multiline_batch(struct Client *sptr)
       if (text[0] != '\0') { has_content = 1; break; }
     }
     if (!has_content) {
-      send_fail(sptr, "BATCH", "MULTILINE_INVALID", con_ml_batch_id(con),
+      /* No context: "FAIL BATCH MULTILINE_INVALID :<description>" (spec). */
+      send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
                 "Batch consists entirely of blank lines");
       clear_multiline_batch(con);
       return 0;
