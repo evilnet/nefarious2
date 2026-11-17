@@ -1609,31 +1609,50 @@ static void test_iso_to_unix_accepts(void **state)
 {
     char buf[HISTORY_TIMESTAMP_LEN];
     (void)state;
+    /* the spec's form only: YYYY-MM-DDThh:mm:ss.sssZ */
     assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250Z", buf, sizeof(buf)), 0);
     assert_string_equal(buf, "1794916800.250");
-    /* end of string reads as UTC too */
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250", buf, sizeof(buf)), 0);
-    assert_string_equal(buf, "1794916800.250");
-    /* more than three fractional digits: cut to milliseconds */
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.123456Z", buf, sizeof(buf)), 0);
-    assert_string_equal(buf, "1794916800.123");
-    /* a short fraction is a decimal fraction */
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.5Z", buf, sizeof(buf)), 0);
-    assert_string_equal(buf, "1794916800.500");
-    /* no fraction */
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00Z", buf, sizeof(buf)), 0);
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.000Z", buf, sizeof(buf)), 0);
     assert_string_equal(buf, "1794916800.000");
+    /* the leap second server-time's example shows: the next second */
+    assert_int_equal(history_iso_to_unix("2026-11-17T11:59:60.419Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.419");
+    assert_int_equal(history_iso_to_unix("2024-02-29T00:00:00.000Z", buf, sizeof(buf)), 0);
 }
 
 static void test_iso_to_unix_refuses(void **state)
 {
+    static const char *const bad[] = {
+        "2026-11-17T12:00:00.250+02:00",  /* an offset */
+        "2026-11-17T12:00:00.250+00:00",  /* even a zero one */
+        "2026-11-17T12:00:00.250z",       /* lowercase z */
+        "2026-11-17t12:00:00.250Z",       /* lowercase t */
+        "2026-11-17T12:00:00.250Zjunk",   /* text after Z */
+        "2026-11-17T12:00:00.250",        /* no Z */
+        "2026-11-17T12:00:00Z",           /* no fraction */
+        "2026-11-17T12:00:00",            /* neither */
+        "2026-11-17T12:00:00.5Z",         /* one fractional digit */
+        "2026-11-17T12:00:00.1234Z",      /* four */
+        "2026-11-17T12:00:00.123456Z",    /* six */
+        "2026-11-17 12:00:00.250Z",       /* no T */
+        "2026-1-17T12:00:00.250Z",        /* a short field */
+        "2026-11-17T+2:00:00.250Z",       /* a sign in a field */
+        "2026-11-17T 2:00:00.250Z",       /* a space in a field */
+        "2026-11-17T12:00:61.250Z",       /* seconds 61 */
+        "2026-11-17T24:00:00.250Z",       /* hour 24 */
+        "2026-13-17T12:00:00.250Z",       /* month 13 */
+        "2026-11-31T12:00:00.250Z",       /* no 31 November */
+        "2026-02-29T12:00:00.250Z",       /* no 29 February in 2026 */
+        "1794916800.250",                 /* unix form: not this converter's */
+        "",
+    };
     char buf[HISTORY_TIMESTAMP_LEN];
+    size_t i;
     (void)state;
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250+02:00", buf, sizeof(buf)), -1);
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250+00:00", buf, sizeof(buf)), -1);
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250z", buf, sizeof(buf)), -1);
-    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250Zjunk", buf, sizeof(buf)), -1);
-    assert_int_equal(history_iso_to_unix("1794916800.250", buf, sizeof(buf)), -1);
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (history_iso_to_unix(bad[i], buf, sizeof(buf)) != -1)
+            fail_msg("accepted \"%s\"", bad[i]);
+    }
 }
 
 /* A walk is keyed from an ISO time that converts or a value already in

@@ -647,73 +647,72 @@ int history_deserialize_record(const void *data, size_t datalen,
 
 /* The timestamp converters a TIMESTAMP reference goes through, here
  * so ircd/test links them. */
+
+/** Read \a n decimal digits at \a p, nothing else (no sign, no space).
+ * @return The value, or -1 when any of the \a n characters is no digit. */
+static int iso_digits(const char *p, int n)
+{
+  int v = 0;
+
+  while (n-- > 0) {
+    if (*p < '0' || *p > '9')
+      return -1;
+    v = v * 10 + (*p++ - '0');
+  }
+  return v;
+}
+
+/** Convert a client's timestamp to the store's "sec.mmm" form.  Only the
+ * spec's form is taken: chathistory and read-marker say a timestamp
+ * "MUST have the format timestamp=YYYY-MM-DDThh:mm:ss.sssZ, as in the
+ * server-time extension" -- exactly three fractional digits, uppercase T
+ * and Z, nothing after the Z.  An offset ("+00:00"), a missing Z or
+ * fraction, a fraction of another length, a sign or a space in a field,
+ * or a date that does not exist is refused.  Seconds run to 60: the
+ * server-time spec's own example is a leap second, read as the next
+ * second (timegm()).
+ * @return 0 and \a unix_buf filled, or -1. */
 int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
 {
-  struct tm tm;
+  struct tm tm, check;
   time_t t;
-  unsigned int millis = 0;
-  const char *p;
-  char *end;
+  int year, mon, mday, hour, min, sec, millis;
 
   if (!iso_ts || !unix_buf || unix_buflen < 15)
     return -1;
 
-  /* Parse ISO 8601: YYYY-MM-DDThh:mm:ss[.sss]Z */
+  /* YYYY-MM-DDThh:mm:ss.sssZ: 24 characters, then the end. */
+  if (strlen(iso_ts) != 24
+      || iso_ts[4] != '-' || iso_ts[7] != '-' || iso_ts[10] != 'T'
+      || iso_ts[13] != ':' || iso_ts[16] != ':' || iso_ts[19] != '.'
+      || iso_ts[23] != 'Z')
+    return -1;
+  year = iso_digits(iso_ts, 4);
+  mon = iso_digits(iso_ts + 5, 2);
+  mday = iso_digits(iso_ts + 8, 2);
+  hour = iso_digits(iso_ts + 11, 2);
+  min = iso_digits(iso_ts + 14, 2);
+  sec = iso_digits(iso_ts + 17, 2);
+  millis = iso_digits(iso_ts + 20, 3);
+  if (year < 0 || mon < 1 || mon > 12 || mday < 1 || mday > 31
+      || hour < 0 || hour > 23 || min < 0 || min > 59
+      || sec < 0 || sec > 60 || millis < 0)
+    return -1;
+
   memset(&tm, 0, sizeof(tm));
-
-  /* Parse date */
-  tm.tm_year = strtol(iso_ts, &end, 10) - 1900;
-  if (!end || *end != '-') return -1;
-  p = end + 1;
-
-  tm.tm_mon = strtol(p, &end, 10) - 1;
-  if (!end || *end != '-') return -1;
-  p = end + 1;
-
-  tm.tm_mday = strtol(p, &end, 10);
-  if (!end || *end != 'T') return -1;
-  p = end + 1;
-
-  /* Parse time */
-  tm.tm_hour = strtol(p, &end, 10);
-  if (!end || *end != ':') return -1;
-  p = end + 1;
-
-  tm.tm_min = strtol(p, &end, 10);
-  if (!end || *end != ':') return -1;
-  p = end + 1;
-
-  tm.tm_sec = strtol(p, &end, 10);
-
-  /* Parse the optional fraction as a DECIMAL fraction: ".5" is 500 ms,
-   * ".12" is 120 ms, ".123456" is 123 ms.  strtoul on the digits read
-   * ".5" as 5 ms and clamped ".123456" to 999 (audit 2026-09-06). */
-  if (end && *end == '.') {
-    const char *d = end + 1;
-    unsigned int scale = 100;
-    millis = 0;
-    while (*d >= '0' && *d <= '9') {
-      if (scale)
-        millis += (unsigned int)(*d - '0') * scale;
-      scale /= 10;
-      d++;
-    }
-    end = (char *)d;
-  }
-
-  /* Nothing may follow but the "Z" of UTC.  An offset ("+02:00") or
-   * anything else used to be ignored, so the time was read as UTC and
-   * came out wrong by the offset. */
-  if (!end || (*end == 'Z' ? end[1] != '\0' : *end != '\0'))
-    return -1;
-
-  /* Convert to Unix time */
-  t = timegm(&tm);
-  if (t == (time_t)-1)
-    return -1;
+  tm.tm_year = year - 1900;
+  tm.tm_mon = mon - 1;
+  tm.tm_mday = mday;
+  tm.tm_hour = hour;
+  tm.tm_min = min;
+  t = timegm(&tm);             /* the minute; seconds added below */
+  if (t == (time_t)-1 || !gmtime_r(&t, &check)
+      || check.tm_mday != mday || check.tm_mon != mon - 1)
+    return -1;                 /* no such day (31 November, 29 February 2026) */
+  t += sec;
 
   ircd_snprintf(0, unix_buf, unix_buflen, "%lu.%03u",
-                (unsigned long)t, millis);
+                (unsigned long)t, (unsigned int)millis);
   return 0;
 }
 
