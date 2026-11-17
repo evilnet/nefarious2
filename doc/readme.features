@@ -2116,8 +2116,9 @@ CAP_evilnet_persistence
 Enables announcement of the 'evilnet.github.io/persistence' client
 capability: it tells a client that this server has the PERSISTENCE extras
 that are not part of the draft/persistence specification (ATTACH, DETACH,
-LIST, PROFILE, REPLAY).  Its value lists them as tokens
-(attach,detach,list,attach-cursor).  A held session's restored channel
+LIST, PROFILE, REPLAY).  Its value holds tokens a client checks before
+it relies on a behaviour (attach,detach,list,attach-cursor); PROFILE and
+REPLAY have none.  A held session's restored channel
 state is sent in a batch of this type to a connection that negotiated it
 (see PERSISTENCE_DRAFT_EXTRAS for the others).  'draft/persistence' itself
 is the specification's STATUS, GET and SET.
@@ -2153,8 +2154,12 @@ extras' value too (where such clients read attach-cursor), and a
 connection that did not negotiate the vendor capability gets a held
 session's restore in a 'draft/persistence' batch.  Set it to FALSE once
 clients request the vendor capability: 'draft/persistence' then has no
-value and every restore batch has the vendor type.  The subcommands
-themselves do not depend on this setting (see CAP_evilnet_persistence).
+value, a SET is answered with its STATUS alone (the 'PERSISTENCE SET'
+line before it goes only to a connection with the vendor capability),
+and a restore is wrapped in a batch only for a connection with the
+vendor capability; any other gets the same lines unwrapped, since it
+could not know the batch's type.  The subcommands themselves do not
+depend on this setting (see CAP_evilnet_persistence).
 
 UPING_ENABLE
  * Type: boolean

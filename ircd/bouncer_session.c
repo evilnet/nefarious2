@@ -18505,32 +18505,33 @@ void bounce_send_channel_state(struct Client *cptr)
   if (!cli_user(cptr))
     return;
 
-  /* Wrap the JOIN/TOPIC/NAMES burst in a draft/persistence batch
-   * whenever the client has negotiated `batch` and has at least one
-   * channel to restore.  The cap gate is `batch` only — the batch
-   * envelope is what requires client understanding, and unknown batch
-   * types are tolerated per the batch spec.  Its type is the vendor
-   * cap's name (N027: the persistence draft defines no batch type).
-   * Clients that additionally negotiate the persistence caps know to treat the batch contents as
-   * restoration rather than live activity; clients with only `batch`
-   * still benefit from the grouping signal.
+  /* Wrap the JOIN/TOPIC/NAMES burst in a batch when the client has
+   * negotiated `batch`, has at least one channel to restore, and can know
+   * the batch's type: unsolicited output a client may not understand is
+   * cap-gated.  The persistence draft defines no batch type, so:
+   *  - a connection that negotiated evilnet.github.io/persistence gets a
+   *    batch of that type (N027);
+   *  - while PERSISTENCE_DRAFT_EXTRAS keeps the old names working, any
+   *    other gets the old draft/persistence type, as before, so a client
+   *    written against it (Seance before evilnet/seance#327) still
+   *    recognises its restore (unknown batch types are tolerated per the
+   *    batch spec, the grey area of this transition);
+   *  - otherwise the same lines go out unwrapped.
    * Inside another batch open on the answer (a labeled registration
    * line's labeled-response batch) it is nested in it (send.c's nesting
    * model), never left out. */
-  wrap_in_persistence_batch =
-      MyConnect(cptr)
-      && CapRecipientHas(cptr, CAP_BATCH)
-      && cli_user(cptr)->channel != NULL;
+  {
+    int vendor = CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE);
 
-  /* The vendor type to a connection that negotiated the vendor cap; the
-   * old one to any other while PERSISTENCE_DRAFT_EXTRAS keeps the old
-   * names working, so a client written against them (Seance before
-   * evilnet/seance#327) still recognises its restore. */
-  if (wrap_in_persistence_batch)
-    send_batch_start(cptr, CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE)
-                           || !feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
-                           ? PERSISTENCE_RESTORE_BATCH
-                           : PERSISTENCE_RESTORE_BATCH_OLD);
+    wrap_in_persistence_batch =
+        MyConnect(cptr)
+        && CapRecipientHas(cptr, CAP_BATCH)
+        && cli_user(cptr)->channel != NULL
+        && (vendor || feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS));
+    if (wrap_in_persistence_batch)
+      send_batch_start(cptr, vendor ? PERSISTENCE_RESTORE_BATCH
+                                    : PERSISTENCE_RESTORE_BATCH_OLD);
+  }
 
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
     struct Channel *chptr = member->channel;

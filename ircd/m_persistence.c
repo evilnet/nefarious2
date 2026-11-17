@@ -17,24 +17,26 @@
  *
  * Specification: https://github.com/ircv3/ircv3-specifications/pull/503
  *
- * Phase 1 subcommands:
+ * The specification's subcommands:
  *   STATUS                  - query effective hold state
  *   GET                     - alias for STATUS (per draft)
  *   SET ON|OFF|DEFAULT      - set the persistence preference
+ * and the fork's extras, announced by evilnet.github.io/persistence and
+ * open to every connection: ATTACH, DETACH, LIST, PROFILE, REPLAY.
  *
  * Reply form:
  *   :<server> PERSISTENCE STATUS ON|OFF
- *   :<server> PERSISTENCE SET ON|OFF|DEFAULT
+ *   :<server> PERSISTENCE SET ON|OFF|DEFAULT   (before the STATUS; see
+ *                                               send_set_echo())
  *
  * Storage is the existing `draft/persistence/hold` metadata key (PRIVATE):
  *   ON      -> draft/persistence/hold = "1"
  *   OFF     -> draft/persistence/hold = "0"
  *   DEFAULT -> key deleted; falls back to FEAT_BOUNCER_DEFAULT_HOLD
  *
- * The `bouncer/` prefix is registered as server-managed (see
- * metadata.c::metadata_key_is_server_managed) so client-initiated
- * METADATA SET on this key is refused; PERSISTENCE is the supported
- * interface.
+ * The key is server-managed (metadata.c::metadata_key_is_server_managed),
+ * so client-initiated METADATA SET on it is refused; PERSISTENCE is the
+ * supported interface.
  */
 #include "config.h"
 
@@ -170,6 +172,19 @@ static void send_persistence_reply(struct Client *to, const char *what,
     return;
   sendrawto_one_answer(to, ":%s PERSISTENCE %s %s",
                 cli_name(&me), what, state);
+}
+
+/** The "PERSISTENCE SET <state>" line a SET is answered with before its
+ * STATUS.  The spec answers SET with the STATUS alone; this line is the
+ * fork's (Seance shows it), so only a connection that negotiated
+ * evilnet.github.io/persistence gets it, or any while
+ * PERSISTENCE_DRAFT_EXTRAS keeps the old behaviour for clients written
+ * against it. */
+static void send_set_echo(struct Client *to, const char *state)
+{
+  if (CapOwnHas(to, CAP_EVILNET_PERSISTENCE)
+      || feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS))
+    send_persistence_reply(to, "SET", state);
 }
 
 /** Public accessor for the resolved auto-replay state.  Used by
@@ -310,7 +325,7 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
      * reply sends the STATUS itself, after the SET line. */
     if (!bounce_get_session(sptr))
       bounce_hold_on(sptr, 0, NULL);
-    send_persistence_reply(sptr, "SET", "ON");
+    send_set_echo(sptr, "ON");
     persistence_send_status(sptr);
     return 0;
   }
@@ -330,7 +345,7 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
      * primary carries on outside it, every device of it goes. */
     if (session)
       bounce_member_end(session, sptr, sptr, BOUNCE_MEMBER_END_HOLD_OFF, NULL);
-    send_persistence_reply(sptr, "SET", "OFF");
+    send_set_echo(sptr, "OFF");
     /* A carried end is the holder's to apply: nothing here is OFF yet, so
      * the status is the outcome the reply promises. */
     if (carried)
@@ -343,7 +358,7 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   if (0 == ircd_strcmp(arg, "DEFAULT")) {
     metadata_account_write(&me, cli_account(sptr), "draft/persistence/hold",
                            NULL, METADATA_VIS_PRIVATE);
-    send_persistence_reply(sptr, "SET", "DEFAULT");
+    send_set_echo(sptr, "DEFAULT");
     persistence_send_status(sptr);
     return 0;
   }
