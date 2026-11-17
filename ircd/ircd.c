@@ -1146,6 +1146,9 @@ int main(int argc, char **argv) {
     if (log_async_init(0) < 0) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Async logging init failed; logging will be synchronous");
+    } else {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "Async logging on: a crash loses the lines still queued");
     }
   }
 

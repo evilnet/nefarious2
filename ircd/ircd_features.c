@@ -904,6 +904,18 @@ typedef int  (*feat_set_call)(struct Client* from, const char* const* fields, in
 typedef void (*feat_get_call)(struct Client* from, const char* const* fields, int count);
 /** Callback to notify of a feature's change. */
 typedef void (*feat_notify_call)(void);
+
+/** THREAD_POOL_SIZE or ASYNC_LOGGING changed on a running server (REHASH,
+ * SET).  Both are read once, at startup: say that the new value waits
+ * for a restart, rather than leave GET showing one that is not in force.
+ * Nothing while ircd.conf is first read (no server yet). */
+static void feature_notify_at_restart(void)
+{
+  if (cli_serv(&me))
+    log_write(LS_CONFIG, L_WARNING, 0, "THREAD_POOL_SIZE and ASYNC_LOGGING "
+              "are read at startup: the change takes effect at the next "
+              "restart");
+}
 /** Unmarks all sub-feature values prior to reading .conf. */
 typedef void (*feat_unmark_call)(void);
 /** Resets to defaults all currently unmarked values.
@@ -1060,8 +1072,8 @@ static struct FeatureDesc {
   F_I(TOS_SERVER, 0, 0x08, 0),
   F_I(TOS_CLIENT, 0, 0x08, 0),
   F_I(POLLS_PER_LOOP, 0, 200, 0),
-  F_I(THREAD_POOL_SIZE, 0, 4, 0),
-  F_B(ASYNC_LOGGING, 0, 0, 0),
+  F_I(THREAD_POOL_SIZE, 0, 4, feature_notify_at_restart),
+  F_B(ASYNC_LOGGING, 0, 0, feature_notify_at_restart),
   F_I(IRCD_RES_RETRIES, 0, 2, 0),
   F_I(IRCD_RES_TIMEOUT, 0, 4, 0),
   F_I(AUTH_TIMEOUT, 0, 9, 0),
