@@ -658,3 +658,55 @@ void send_markread_on_join(struct Client *sptr, const char *target)
   else
     send_join_markread(sptr, target, "*");
 }
+
+/** A channel's community moves from the name @a oldname to @a newname:
+ * copy its read markers there.  Markers are keyed by target name, so
+ * without the copy every MARKREAD of the new name -- the one a member
+ * gets with its JOIN, a client's get -- would report `*` for a channel
+ * the client had read.
+ *
+ * Called at the point a rename takes effect, on every server (its own
+ * rename, or a peer's): rename_channel(), and a relocation, where the old
+ * channel stays and a new one is made (m_rename.c).  Each server's store
+ * takes the same copies, so no MR goes out for them.
+ *
+ * Account markers: those of @a chptr's members, whose membership is the
+ * same on every server.  (The store is keyed account first: an account
+ * with no member here keeps its marker under the old name only.)
+ * Session markers (clients without an account, this server's alone): all
+ * of the old name's.  Each copy goes through the store's keep-the-newer
+ * rule, and the markers under @a oldname stay where they are.
+ * @param[in] chptr Channel holding the members, under either name.
+ * @param[in] oldname Name the markers are stored under.
+ * @param[in] newname Name they are copied to.
+ */
+void markread_channel_renamed(const struct Channel *chptr, const char *oldname,
+                              const char *newname)
+{
+  const struct Membership *member;
+  char ts[MARKREAD_TS_LEN];
+  unsigned int i;
+
+  if (!chptr || !ircd_strcmp(oldname, newname))
+    return;
+
+  if (metadata_lmdb_is_available()) {
+    for (member = chptr->members; member; member = member->next_member) {
+      const struct User *user = cli_user(member->user);
+
+      if (user && user->account[0]
+          && metadata_readmarker_get(user->account, oldname, ts) == 0)
+        (void)metadata_readmarker_set(user->account, newname, ts);
+    }
+  }
+
+  /* A copy goes under the new name, never the old one (the names differ,
+   * checked above), so the walk cannot meet its own copies. */
+  for (i = 0; i < SESSION_MR_HASH_SIZE; i++) {
+    struct session_markread_entry *e;
+
+    for (e = sm_buckets[i]; e; e = e->hnext)
+      if (0 == ircd_strcmp(e->target, oldname))
+        (void)session_markread_set(e->session_id, newname, e->timestamp);
+  }
+}

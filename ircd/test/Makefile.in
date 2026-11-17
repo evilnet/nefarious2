@@ -649,9 +649,10 @@ markread_wire_cmocka: $(MARKREAD_WIRE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(MARKREAD_WIRE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # markread_join tests - the MARKREAD of a JOIN goes out as one of its
-# replies (send_reply_line(): tagged like the TOPIC and NAMES around it):
-# the REAL m_markread.o with the marker store and the send layer stubbed
-# in the test.  Defines its own
+# replies (send_reply_line(): tagged like the TOPIC and NAMES around it),
+# and a rename carries a channel's read markers to its new name
+# (markread_channel_renamed()): the REAL m_markread.o with the marker
+# store and the send layer stubbed in the test.  Defines its own
 # log_write()/me, so test_stub.o is not linked.
 MARKREAD_JOIN_CMOCKA_OBJS = markread_join_cmocka.o ../m_markread.o \
 	../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o
