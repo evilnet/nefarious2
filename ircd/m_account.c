@@ -83,6 +83,7 @@
 #include "account_id.h"
 #include "bouncer_session.h"
 #include "client.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
@@ -204,12 +205,17 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         {
           char ac_msgid[64] = "";
+          uint64_t ac_time = 0;
           if (feature_bool(FEAT_MSGID)) {
             if (cli_s2s_msgid(cptr)[0])
               ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
             else
               generate_msgid(ac_msgid, sizeof(ac_msgid));
-            sendcmdto_set_client_msgid(ac_msgid);
+            /* The event's msgid and its time: the origin's, as the AC carried
+             * them (N067), or, from a peer that tagged none, minted here.  The
+             * lines below and the relay both carry them. */
+            ac_time = history_event_time_ms(cptr);
+            sendcmdto_set_client_event(ac_msgid, ac_time);
           }
           /* account-notify: the observers, and the user's own
            * connections ("including themselves"). */
@@ -219,12 +225,6 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
           /* Set S2S tags before relay so downstream servers reuse this msgid */
           if (ac_msgid[0]) {
-            uint64_t ac_time = cli_s2s_time_ms(cptr) ? cli_s2s_time_ms(cptr) : 0;
-            if (!ac_time) {
-              struct timeval tv;
-              gettimeofday(&tv, NULL);
-              ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-            }
             sendcmdto_set_s2s_tags(ac_time, ac_msgid);
             sendcmdto_want_s2s_tags(1);
           }
@@ -365,12 +365,17 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         {
           char ac_msgid[64] = "";
+          uint64_t ac_time = 0;
           if (feature_bool(FEAT_MSGID)) {
             if (cli_s2s_msgid(cptr)[0])
               ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
             else
               generate_msgid(ac_msgid, sizeof(ac_msgid));
-            sendcmdto_set_client_msgid(ac_msgid);
+            /* The event's msgid and its time: the origin's, as the AC carried
+             * them (N067), or, from a peer that tagged none, minted here.  The
+             * lines below and the relay both carry them. */
+            ac_time = history_event_time_ms(cptr);
+            sendcmdto_set_client_event(ac_msgid, ac_time);
           }
           /* account-notify: the observers, and the user's own
            * connections ("including themselves"), before the host
@@ -381,12 +386,6 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           sendcmdto_set_client_msgid(NULL);
 
           if (ac_msgid[0]) {
-            uint64_t ac_time = cli_s2s_time_ms(cptr) ? cli_s2s_time_ms(cptr) : 0;
-            if (!ac_time) {
-              struct timeval tv;
-              gettimeofday(&tv, NULL);
-              ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-            }
             sendcmdto_set_s2s_tags(ac_time, ac_msgid);
             sendcmdto_want_s2s_tags(1);
           }
@@ -552,24 +551,23 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
     {
       char ac_msgid[64] = "";
+      uint64_t ac_time = 0;
       if (feature_bool(FEAT_MSGID)) {
         if (cli_s2s_msgid(cptr)[0])
           ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
         else
           generate_msgid(ac_msgid, sizeof(ac_msgid));
-        sendcmdto_set_client_msgid(ac_msgid);
+        /* The event's msgid and its time: the origin's, as the AC carried
+         * them (N067), or, from a peer that tagged none, minted here.  The
+         * lines below and the relay both carry them. */
+        ac_time = history_event_time_ms(cptr);
+        sendcmdto_set_client_event(ac_msgid, ac_time);
       }
       sendcmdto_common_channels_capab_session(acptr, CMD_ACCOUNT, CAP_ACCNOTIFY,
                                               "%s", cli_user(acptr)->account);
       sendcmdto_set_client_msgid(NULL);
 
       if (ac_msgid[0]) {
-        uint64_t ac_time = cli_s2s_time_ms(cptr) ? cli_s2s_time_ms(cptr) : 0;
-        if (!ac_time) {
-          struct timeval tv;
-          gettimeofday(&tv, NULL);
-          ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-        }
         sendcmdto_set_s2s_tags(ac_time, ac_msgid);
         sendcmdto_want_s2s_tags(1);
       }
