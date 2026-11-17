@@ -46,6 +46,11 @@ struct Client;
 /** Maximum profile-name length on the wire and in storage. */
 #define PERSISTENCE_PROFILE_NAME_MAX 32
 
+/** persistence_profile_set() and _rename(): a key (the prefix, the
+ * profile's name and the setting) the wire would refuse -- over 127
+ * bytes -- so it would neither replicate nor be walked by a delete. */
+#define PERSISTENCE_PROFILE_BADKEY (-2)
+
 /** The reserved name of the implicit default profile. */
 #define PERSISTENCE_PROFILE_DEFAULT "default"
 

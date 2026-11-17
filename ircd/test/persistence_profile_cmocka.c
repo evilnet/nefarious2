@@ -107,6 +107,29 @@ int metadata_account_get(const char *account, const char *key, char *value)
   return 0;
 }
 
+/* The store's key fold (db_casefold.c), restated: its object brings the
+ * whole store with it. */
+void db_casefold_bytes(char *dst, const char *src, size_t n)
+{
+  size_t i;
+  for (i = 0; i < n; i++)
+    dst[i] = ToLower(src[i]);
+}
+
+/* The wire's key rule (metadata_lww.c), restated for a profile key: a
+ * draft/persistence/ key of 1-127 bytes, each 0x21-0x7e. */
+int md_wire_key_valid(const char *key)
+{
+  size_t len = strlen(key), i;
+
+  if (len == 0 || len > 127)
+    return 0;
+  for (i = 0; i < len; i++)
+    if ((unsigned char)key[i] < 0x21 || (unsigned char)key[i] > 0x7e)
+      return 0;
+  return 1;
+}
+
 int metadata_account_foreach_version(const char *account,
                      int (*cb)(const char *key, const struct md_version *v, void *arg),
                      void *arg)
@@ -116,6 +139,8 @@ int metadata_account_foreach_version(const char *account,
   for (i = 0; i < NROWS; i++) {
     struct md_version v;
     if (!rows[i].used)
+      continue;
+    if (strlen(rows[i].key) >= 160)   /* the real walk's keybuf[160] */
       continue;
     memset(&v, 0, sizeof(v));
     v.value = rows[i].value;
@@ -281,6 +306,61 @@ static void list_shows_long_names(void **state)
   assert_int_equal(listed, 2);    /* and the implicit default */
 }
 
+/* A setting whose full key the wire would refuse (over 127 bytes) is
+ * refused, not stored on this server alone; an unset of one goes
+ * through (it removes a row an older server wrote). */
+static void set_refuses_a_key_the_wire_refuses(void **state)
+{
+  char key[128];
+  size_t room = 127 - strlen(PROFILE_KEY_PREFIX "lk/");
+
+  (void)state;
+  assert_int_equal(persistence_profile_create(ACCT, "lk", NULL), 0);
+  memset(key, 'k', room);
+  key[room] = '\0';                            /* full key: 127 bytes */
+  assert_int_equal(persistence_profile_set(ACCT, "lk", key, "v"), 0);
+  key[room] = 'k';
+  key[room + 1] = '\0';                        /* 128 bytes */
+  assert_int_equal(persistence_profile_set(ACCT, "lk", key, "v"),
+                   PERSISTENCE_PROFILE_BADKEY);
+  assert_int_equal(count_prefix(PROFILE_KEY_PREFIX "lk/"), 2);
+  assert_int_equal(persistence_profile_set(ACCT, "lk", key, NULL), 0);
+}
+
+/* A rename to a longer name that would push a key over the limit is
+ * refused and changes nothing. */
+static void rename_refuses_a_key_grown_too_long(void **state)
+{
+  char key[128];
+  size_t room = 127 - strlen(PROFILE_KEY_PREFIX "lk/");
+
+  (void)state;
+  assert_int_equal(persistence_profile_create(ACCT, "lk", NULL), 0);
+  memset(key, 'k', room);
+  key[room] = '\0';
+  assert_int_equal(persistence_profile_set(ACCT, "lk", key, "v"), 0);
+  assert_int_equal(persistence_profile_rename(ACCT, "lk", "lkk"),
+                   PERSISTENCE_PROFILE_BADKEY);
+  assert_int_equal(count_prefix(PROFILE_KEY_PREFIX "lk/"), 2);
+  assert_int_equal(count_prefix(PROFILE_KEY_PREFIX "lkk/"), 0);
+}
+
+/* Rows an older server left under a name with no parent row are not a
+ * new profile of that name's settings: CREATE removes them. */
+static void create_clears_leftover_rows(void **state)
+{
+  char val[128];
+
+  (void)state;
+  assert_int_equal(metadata_account_write(NULL, ACCT,
+                     PROFILE_KEY_PREFIX LONG_NAME "/channels", "#old", 0), 0);
+  assert_int_equal(persistence_profile_create(ACCT, LONG_NAME, NULL), 0);
+  assert_int_not_equal(persistence_profile_get_own(ACCT, LONG_NAME,
+                                                   "channels", val,
+                                                   sizeof(val)), 0);
+  assert_int_equal(count_prefix(PROFILE_KEY_PREFIX LONG_NAME "/"), 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -290,6 +370,9 @@ int main(void)
     cmocka_unit_test_setup(delete_sees_long_children, setup),
     cmocka_unit_test_setup(list_shows_long_names, setup),
     cmocka_unit_test_setup(delete_and_rename_fold_the_name, setup),
+    cmocka_unit_test_setup(set_refuses_a_key_the_wire_refuses, setup),
+    cmocka_unit_test_setup(rename_refuses_a_key_grown_too_long, setup),
+    cmocka_unit_test_setup(create_clears_leftover_rows, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -466,6 +466,7 @@ static int persistence_cmd_profile_rename(struct Client *sptr,
 {
   const char *old_name;
   const char *new_name;
+  int rc;
 
   if (parc < 5) {
     send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE RENAME",
@@ -488,7 +489,14 @@ static int persistence_cmd_profile_rename(struct Client *sptr,
                   "PROFILE RENAME %s %s", old_name, new_name);
     return 0;
   }
-  if (persistence_profile_rename(cli_account(sptr), old_name, new_name) < 0) {
+  rc = persistence_profile_rename(cli_account(sptr), old_name, new_name);
+  if (rc == PERSISTENCE_PROFILE_BADKEY) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "A setting's key would be too long under the new name",
+                  "PROFILE RENAME %s %s", old_name, new_name);
+    return 0;
+  }
+  if (rc < 0) {
     send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
                   "Profile rename failed",
                   "PROFILE RENAME %s %s", old_name, new_name);
@@ -568,6 +576,7 @@ static int persistence_cmd_profile_set(struct Client *sptr,
   const char *name;
   const char *key;
   const char *value = NULL;
+  int rc;
 
   if (parc < 6) {
     send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE SET",
@@ -597,7 +606,6 @@ static int persistence_cmd_profile_set(struct Client *sptr,
   /* Special-case the `channels` key — set operations (+#x / -#x) and
    * DEFAULT (clear), not whole-value replacement. */
   if (0 == ircd_strcmp(key, "channels")) {
-    int rc;
     if (value == NULL) {
       rc = persistence_profile_channels_clear(cli_account(sptr), name);
     } else if (value[0] == '+') {
@@ -629,7 +637,13 @@ static int persistence_cmd_profile_set(struct Client *sptr,
     return 0;
   }
 
-  if (persistence_profile_set(cli_account(sptr), name, key, value) < 0) {
+  rc = persistence_profile_set(cli_account(sptr), name, key, value);
+  if (rc == PERSISTENCE_PROFILE_BADKEY) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Setting key too long", "PROFILE SET %s %s", name, key);
+    return 0;
+  }
+  if (rc < 0) {
     send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
                   "Profile set failed (cycle, invalid value, or storage error)",
                   "PROFILE SET %s %s", name, key);
