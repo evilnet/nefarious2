@@ -8926,7 +8926,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* A page selector this store cannot place (review A1b, issue 214):
      * not a row of the target here and not an id of the form this family
      * mints -- a legacy id the origin's target holds and this one does
-     * not.  The walk would come back empty, and a bare "E <reqid> 0" reads
+     * not -- or a timestamp this store cannot read (an origin on an
+     * older build passes a client's "+00:00" or "z" through).  The walk would come back empty, and a bare "E <reqid> 0" reads
      * at the origin as "this store has nothing in the span", which lets
      * the page claim draft/chathistory-end with this store's rows never
      * looked for.  Answer U, "never answered the query" (the flag the
@@ -8941,10 +8942,16 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       enum HistoryRefType t2;
       const char *v2;
       int unplaced = ref_type == HISTORY_REF_MSGID
-                     && history_msgid_ref_timestamp(target, ref_value, ts) < 0;
+                     ? history_msgid_ref_timestamp(target, ref_value, ts) < 0
+                     : ref_type == HISTORY_REF_TIMESTAMP
+                       && history_ref_to_unix(ref_value, ts, sizeof(ts)) != 0;
       if (!unplaced && query_subcmd_char == 'W' && ref2
-          && parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_MSGID)
-        unplaced = history_msgid_ref_timestamp(target, v2, ts) < 0;
+          && parse_s2s_reference(ref2, &t2, &v2) == 0) {
+        if (t2 == HISTORY_REF_MSGID)
+          unplaced = history_msgid_ref_timestamp(target, v2, ts) < 0;
+        else if (t2 == HISTORY_REF_TIMESTAMP)
+          unplaced = history_ref_to_unix(v2, ts, sizeof(ts)) != 0;
+      }
       if (unplaced) {
         Debug((DEBUG_DEBUG, "CH Q %s %c: a selector this store cannot place: E U",
                reqid, query_subcmd_char));

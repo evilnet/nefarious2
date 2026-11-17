@@ -465,76 +465,6 @@ int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_buflen)
   return 0;
 }
 
-int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
-{
-  struct tm tm;
-  time_t t;
-  unsigned int millis = 0;
-  const char *p;
-  char *end;
-
-  if (!iso_ts || !unix_buf || unix_buflen < 15)
-    return -1;
-
-  /* Parse ISO 8601: YYYY-MM-DDThh:mm:ss[.sss]Z */
-  memset(&tm, 0, sizeof(tm));
-
-  /* Parse date */
-  tm.tm_year = strtol(iso_ts, &end, 10) - 1900;
-  if (!end || *end != '-') return -1;
-  p = end + 1;
-
-  tm.tm_mon = strtol(p, &end, 10) - 1;
-  if (!end || *end != '-') return -1;
-  p = end + 1;
-
-  tm.tm_mday = strtol(p, &end, 10);
-  if (!end || *end != 'T') return -1;
-  p = end + 1;
-
-  /* Parse time */
-  tm.tm_hour = strtol(p, &end, 10);
-  if (!end || *end != ':') return -1;
-  p = end + 1;
-
-  tm.tm_min = strtol(p, &end, 10);
-  if (!end || *end != ':') return -1;
-  p = end + 1;
-
-  tm.tm_sec = strtol(p, &end, 10);
-
-  /* Parse the optional fraction as a DECIMAL fraction: ".5" is 500 ms,
-   * ".12" is 120 ms, ".123456" is 123 ms.  strtoul on the digits read
-   * ".5" as 5 ms and clamped ".123456" to 999 (audit 2026-09-06). */
-  if (end && *end == '.') {
-    const char *d = end + 1;
-    unsigned int scale = 100;
-    millis = 0;
-    while (*d >= '0' && *d <= '9') {
-      if (scale)
-        millis += (unsigned int)(*d - '0') * scale;
-      scale /= 10;
-      d++;
-    }
-    end = (char *)d;
-  }
-
-  /* Nothing may follow but the "Z" of UTC.  An offset ("+02:00") or
-   * anything else used to be ignored, so the time was read as UTC and
-   * came out wrong by the offset. */
-  if (!end || (*end == 'Z' ? end[1] != '\0' : *end != '\0'))
-    return -1;
-
-  /* Convert to Unix time */
-  t = timegm(&tm);
-  if (t == (time_t)-1)
-    return -1;
-
-  ircd_snprintf(0, unix_buf, unix_buflen, "%lu.%03u",
-                (unsigned long)t, millis);
-  return 0;
-}
-
 int history_init(const char *dbpath)
 {
   struct db_env_opts env_opts;
@@ -2386,10 +2316,10 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
       return 0; /* not a msgid this target holds or this family mints */
     reference = timestamp;
   } else if (ref_type == HISTORY_REF_TIMESTAMP) {
-    /* Client sends ISO 8601, convert to Unix for lookup */
-    if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
-      reference = timestamp;
-    /* If conversion fails, assume it's already Unix format */
+    /* ISO 8601 from a client, or sec.mmm already; nothing else */
+    if (history_ref_to_unix(reference, timestamp, sizeof(timestamp)) != 0)
+      return -1;
+    reference = timestamp;
   }
 
   /* Build starting key */
@@ -2427,10 +2357,10 @@ int history_query_after(const char *target, enum HistoryRefType ref_type,
       return 0;
     reference = timestamp;
   } else if (ref_type == HISTORY_REF_TIMESTAMP) {
-    /* Client sends ISO 8601, convert to Unix for lookup */
-    if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
-      reference = timestamp;
-    /* If conversion fails, assume it's already Unix format */
+    /* ISO 8601 from a client, or sec.mmm already; nothing else */
+    if (history_ref_to_unix(reference, timestamp, sizeof(timestamp)) != 0)
+      return -1;
+    reference = timestamp;
   }
 
   keylen = build_key(keybuf, sizeof(keybuf), target, reference, msgid);
@@ -2472,10 +2402,10 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
       return 0;
     reference = timestamp;
   } else if (ref_type == HISTORY_REF_TIMESTAMP) {
-    /* Client sends ISO 8601, convert to Unix for lookup */
-    if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
-      reference = timestamp;
-    /* If conversion fails, assume it's already Unix format */
+    /* ISO 8601 from a client, or sec.mmm already; nothing else */
+    if (history_ref_to_unix(reference, timestamp, sizeof(timestamp)) != 0)
+      return -1;
+    reference = timestamp;
   }
 
   /* LATEST with anchor: walk backwards from the end, stop at anchor.
@@ -2505,11 +2435,10 @@ int history_query_latest_after(const char *target, int limit,
 
   *result = NULL;
 
-  /* Convert after_timestamp if ISO 8601 */
-  if (history_iso_to_unix(after_timestamp, timestamp, sizeof(timestamp)) == 0)
-    floor_ts = timestamp;
-  else
-    floor_ts = after_timestamp;
+  /* ISO 8601, or sec.mmm already; nothing else */
+  if (history_ref_to_unix(after_timestamp, timestamp, sizeof(timestamp)) != 0)
+    return -1;
+  floor_ts = timestamp;
 
   /* Start key: far future (scan backward from end of target's range) */
   keylen = build_key(keybuf, sizeof(keybuf), target, "32503680000.000", NULL);
@@ -2731,8 +2660,11 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
   after_limit = limit - count_before - count_ref;
   if (ref_type == HISTORY_REF_TIMESTAMP) {
     uint64_t ms;
-    if (history_iso_to_unix(reference, unix_ts, sizeof(unix_ts)) != 0)
-      ircd_strncpy(unix_ts, reference, sizeof(unix_ts));
+    if (history_ref_to_unix(reference, unix_ts, sizeof(unix_ts)) != 0) {
+      history_free_messages(before);
+      history_free_messages(ref_msg);
+      return -1;
+    }
     ms = history_parse_ms(unix_ts);
     history_format_ms(prev_ts, sizeof(prev_ts), ms > 0 ? ms - 1 : 0);
     after_type = HISTORY_REF_TIMESTAMP;
@@ -2984,10 +2916,9 @@ static int between_build_keys(const char *target,
       return 1;
     ref1 = timestamp1;
   } else if (ref_type1 == HISTORY_REF_TIMESTAMP) {
-    if (history_iso_to_unix(reference1, timestamp1, sizeof(timestamp1)) == 0)
-      ref1 = timestamp1;
-    else
-      ref1 = reference1;  /* Assume already Unix format */
+    if (history_ref_to_unix(reference1, timestamp1, sizeof(timestamp1)) != 0)
+      return -1;
+    ref1 = timestamp1;
   } else {
     ref1 = reference1;
   }
@@ -2998,10 +2929,9 @@ static int between_build_keys(const char *target,
       return 1;
     ref2 = timestamp2;
   } else if (ref_type2 == HISTORY_REF_TIMESTAMP) {
-    if (history_iso_to_unix(reference2, timestamp2, sizeof(timestamp2)) == 0)
-      ref2 = timestamp2;
-    else
-      ref2 = reference2;
+    if (history_ref_to_unix(reference2, timestamp2, sizeof(timestamp2)) != 0)
+      return -1;
+    ref2 = timestamp2;
   } else {
     ref2 = reference2;
   }

@@ -34,6 +34,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef USE_ZSTD
 #include <zstd.h>
 #endif
@@ -643,3 +644,111 @@ int history_deserialize_record(const void *data, size_t datalen,
 {
   return deserialize_message((const char *)data, (int)datalen, msg);
 }
+
+/* The timestamp converters a TIMESTAMP reference goes through, here
+ * so ircd/test links them. */
+int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
+{
+  struct tm tm;
+  time_t t;
+  unsigned int millis = 0;
+  const char *p;
+  char *end;
+
+  if (!iso_ts || !unix_buf || unix_buflen < 15)
+    return -1;
+
+  /* Parse ISO 8601: YYYY-MM-DDThh:mm:ss[.sss]Z */
+  memset(&tm, 0, sizeof(tm));
+
+  /* Parse date */
+  tm.tm_year = strtol(iso_ts, &end, 10) - 1900;
+  if (!end || *end != '-') return -1;
+  p = end + 1;
+
+  tm.tm_mon = strtol(p, &end, 10) - 1;
+  if (!end || *end != '-') return -1;
+  p = end + 1;
+
+  tm.tm_mday = strtol(p, &end, 10);
+  if (!end || *end != 'T') return -1;
+  p = end + 1;
+
+  /* Parse time */
+  tm.tm_hour = strtol(p, &end, 10);
+  if (!end || *end != ':') return -1;
+  p = end + 1;
+
+  tm.tm_min = strtol(p, &end, 10);
+  if (!end || *end != ':') return -1;
+  p = end + 1;
+
+  tm.tm_sec = strtol(p, &end, 10);
+
+  /* Parse the optional fraction as a DECIMAL fraction: ".5" is 500 ms,
+   * ".12" is 120 ms, ".123456" is 123 ms.  strtoul on the digits read
+   * ".5" as 5 ms and clamped ".123456" to 999 (audit 2026-09-06). */
+  if (end && *end == '.') {
+    const char *d = end + 1;
+    unsigned int scale = 100;
+    millis = 0;
+    while (*d >= '0' && *d <= '9') {
+      if (scale)
+        millis += (unsigned int)(*d - '0') * scale;
+      scale /= 10;
+      d++;
+    }
+    end = (char *)d;
+  }
+
+  /* Nothing may follow but the "Z" of UTC.  An offset ("+02:00") or
+   * anything else used to be ignored, so the time was read as UTC and
+   * came out wrong by the offset. */
+  if (!end || (*end == 'Z' ? end[1] != '\0' : *end != '\0'))
+    return -1;
+
+  /* Convert to Unix time */
+  t = timegm(&tm);
+  if (t == (time_t)-1)
+    return -1;
+
+  ircd_snprintf(0, unix_buf, unix_buflen, "%lu.%03u",
+                (unsigned long)t, millis);
+  return 0;
+}
+
+/* A TIMESTAMP reference as a store key: an ISO 8601 time that converts,
+ * or a value already in the store's "sec.mmm" form (an S2S reference,
+ * a stored row's time).  Anything else is refused.  The walks used to
+ * take any ISO text that did not convert as if it were unix time, so an
+ * offset ("+00:00") a tip requester passed through on CH Q keyed the
+ * walk from the ISO text itself and returned the wrong page. */
+int history_ref_to_unix(const char *ref, char *unix_buf, size_t unix_buflen)
+{
+  const char *p;
+  size_t len;
+
+  if (!ref || !unix_buf)
+    return -1;
+  if (history_iso_to_unix(ref, unix_buf, unix_buflen) == 0)
+    return 0;
+  for (p = ref; *p >= '0' && *p <= '9'; p++)
+    ;
+  if (p == ref)
+    return -1;
+  if (*p == '.') {
+    const char *d = ++p;
+    for (; *p >= '0' && *p <= '9'; p++)
+      ;
+    if (p == d)
+      return -1;
+  }
+  if (*p != '\0')
+    return -1;
+  len = p - ref;
+  if (len >= unix_buflen)
+    return -1;
+  memcpy(unix_buf, ref, len + 1);
+  return 0;
+}
+

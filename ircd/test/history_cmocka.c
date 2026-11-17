@@ -1602,6 +1602,62 @@ static void test_stamp_newer_longer_seconds_wins(void **state)
   assert_true(history_stamp_newer("1792600200.5001", 15, "1792600200.500", 14));
 }
 
+/* ========== history_iso_to_unix / history_ref_to_unix (real, from
+ * ../history_record.o) ========== */
+
+static void test_iso_to_unix_accepts(void **state)
+{
+    char buf[HISTORY_TIMESTAMP_LEN];
+    (void)state;
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    /* end of string reads as UTC too */
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    /* more than three fractional digits: cut to milliseconds */
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.123456Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.123");
+    /* a short fraction is a decimal fraction */
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.5Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.500");
+    /* no fraction */
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.000");
+}
+
+static void test_iso_to_unix_refuses(void **state)
+{
+    char buf[HISTORY_TIMESTAMP_LEN];
+    (void)state;
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250+02:00", buf, sizeof(buf)), -1);
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250+00:00", buf, sizeof(buf)), -1);
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250z", buf, sizeof(buf)), -1);
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250Zjunk", buf, sizeof(buf)), -1);
+    assert_int_equal(history_iso_to_unix("1794916800.250", buf, sizeof(buf)), -1);
+}
+
+/* A walk is keyed from an ISO time that converts or a value already in
+ * sec.mmm form, never from ISO text that did not convert (review of
+ * #242: a tip requester's "+00:00" keyed the walk from the text). */
+static void test_ref_to_unix(void **state)
+{
+    char buf[HISTORY_TIMESTAMP_LEN];
+    (void)state;
+    assert_int_equal(history_ref_to_unix("2026-11-17T12:00:00.250Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    assert_int_equal(history_ref_to_unix("1794916800.250", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    assert_int_equal(history_ref_to_unix("1794916800", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800");
+    assert_int_equal(history_ref_to_unix("2026-11-17T12:00:00.250+00:00", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("2026-11-17T12:00:00.250z", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("1794916800.", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix(".250", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("1794916800.250x", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("123456789012345678901", buf, sizeof(buf)), -1);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -1693,6 +1749,9 @@ int main(void)
         cmocka_unit_test(test_parse_reference_null),
         cmocka_unit_test(test_parse_reference_invalid),
         cmocka_unit_test(test_parse_reference_case_sensitive),
+        cmocka_unit_test(test_iso_to_unix_accepts),
+        cmocka_unit_test(test_iso_to_unix_refuses),
+        cmocka_unit_test(test_ref_to_unix),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
