@@ -28,10 +28,7 @@
 #include <unistd.h>
 #include <cmocka.h>
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Waddress"
 #include "../s_conf.c"
-#pragma GCC diagnostic pop
 
 /* ------------------------------------------------------------------ */
 /* The ircd around read_configuration_file()                           */
