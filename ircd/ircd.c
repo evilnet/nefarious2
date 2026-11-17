@@ -1133,6 +1133,11 @@ int main(int argc, char **argv) {
   feature_init(); /* initialize features... */
 
   init_isupport(); /* initialize RPL_ISUPPORT... */
+  /* A configuration check (a REHASH runs one in a process of its own)
+   * says what it found on stderr, and nothing in the server's log files
+   * or syslog: a check of a file with errors is not the server failing. */
+  if (thisServer.bootopt & BOOT_CHKCONF)
+    log_shutdown();
   log_init(*argv);
   set_nomem_handlers(outofmemory, outofmemory_elsewhere);
 

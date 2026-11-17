@@ -1589,15 +1589,16 @@ conf_get_error_flag(void)
 }
 
 /** Set by rehash() when it returned without applying anything: to
- * CONF_ABANDON_ERRORS when the check found errors in the file (or crashed
- * on it), to CONF_ABANDON_OTHER when the file could not be read or kept
- * changing. */
+ * CONF_ABANDON_ERRORS when the check found errors in the file,
+ * CONF_ABANDON_CRASHED when it crashed on it, CONF_ABANDON_OTHER when the
+ * file could not be read, kept changing, or the check did not finish. */
 static int rehash_abandoned;
 
 /** Did the last rehash() stop before it discarded anything?  Then the
  * running configuration is the one from before it: nothing to reload.
  * @return CONF_ABANDON_NONE if it applied the file; otherwise why it was
- *   abandoned: only CONF_ABANDON_ERRORS says anything of the file.
+ *   abandoned: only CONF_ABANDON_ERRORS and CONF_ABANDON_CRASHED say
+ *   anything of the file.
  */
 int
 conf_rehash_abandoned(void)
@@ -1916,6 +1917,35 @@ static void rehash_conf_changed(void)
                        "rehash again", configfile);
 }
 
+/** The binary a configuration check runs, and the name it runs under.
+ * /proc/self/exe runs the image this server runs, even when an upgrade
+ * replaced the file; its argv[0] (what the check logs and is listed
+ * under) is the path it resolves to.  Elsewhere SPATH.
+ * @param[out] argv0 The resolved path.
+ * @param[in] len    Its size.
+ * @return What to execute. */
+static const char *precheck_binary(char *argv0, size_t len)
+{
+  static const char self[] = "/proc/self/exe";
+  static const char deleted[] = " (deleted)";
+  ssize_t n;
+
+  if (access(self, X_OK) != 0) {
+    ircd_strncpy(argv0, SPATH, len);
+    return SPATH;
+  }
+  n = readlink(self, argv0, len - 1);
+  if (n <= 0) {
+    ircd_strncpy(argv0, SPATH, len);
+    return self;
+  }
+  argv0[n] = '\0';
+  if ((size_t)n > sizeof(deleted) - 1
+      && !strcmp(argv0 + n - (sizeof(deleted) - 1), deleted))
+    argv0[n - (sizeof(deleted) - 1)] = '\0';
+  return self;
+}
+
 /** Read the new configuration in a fresh "ircd -k" before anything of
  * the running one is discarded (conf_precheck_run()).  A parse here
  * discards as it goes -- a syntax error loses its block, an error inside
@@ -1924,32 +1954,37 @@ static void rehash_conf_changed(void)
  * nothing changes, and the errors go to the operators.  A check that
  * could not run says nothing of the file, and the rehash goes ahead as
  * it did before the check existed.  One that crashed (a signal of its
- * own) abandons it too: the server's own parse would likely crash.
+ * own) abandons it too: the server's own parse would likely crash.  One
+ * that did not finish in time abandons it, and is not tried again: the
+ * server's own parse might hang the same way, and a retry would only
+ * block the server for another timeout.  A file that changed while it
+ * was checked is checked again, whatever the check said: errors found
+ * in a file caught mid-write say nothing of the file as written.
  * @return 1 to go ahead with the rehash, 0 to abandon it, -1 if the
  *   file changed while it was checked (check it again). */
 static int rehash_precheck(void)
 {
   static char out[4096];
+  char argv0[PATH_MAX];
   char *line, *next;
-  const char *exe = "/proc/self/exe";   /* the running binary */
+  const char *exe = precheck_binary(argv0, sizeof(argv0));
   const char *what = "has errors";
   int shown = 0, more = 0;
+  enum conf_precheck_result res;
 
-  if (access(exe, X_OK) != 0)
-    exe = SPATH;
   /* "." for -d: the server is in its working directory (main() went
    * there), and the -d it was given may be relative to where it started. */
-  switch (conf_precheck_run(exe, ".", configfile,
-                            CONF_PRECHECK_TIMEOUT_MS, out, sizeof(out))) {
+  res = conf_precheck_run(exe, argv0, ".", configfile,
+                          CONF_PRECHECK_TIMEOUT_MS, out, sizeof(out));
+  switch (res) {
   case CONF_PRECHECK_OK:
     return rehash_conf_unchanged() ? 1 : -1;
   case CONF_PRECHECK_UNAVAILABLE:
     sendto_opmask_butone(0, SNO_OLDSNO, "Rehash: the configuration check "
-                         "(%s -k) did not run or did not finish; rehashing "
-                         "without it (see the CONFIG log)", exe);
+                         "(%s -k) did not run; rehashing without it (see the "
+                         "CONFIG log)", argv0);
     log_write(LS_CONFIG, L_WARNING, LOG_NOSNOTICE, "Rehash: the configuration "
-              "check (%s -k) did not run or did not finish; rehashing "
-              "without it", exe);
+              "check (%s -k) did not run; rehashing without it", argv0);
     for (line = out; line && *line; line = next) {      /* why */
       if ((next = strchr(line, '\n')))
         *next++ = '\0';
@@ -1958,6 +1993,24 @@ static int rehash_precheck(void)
                   line);
     }
     return rehash_conf_unchanged() ? 1 : -1;
+  case CONF_PRECHECK_TIMEOUT:
+    conf_error = 1;     /* conf_get_error_flag(): GitSync restores its copy */
+    rehash_abandoned = CONF_ABANDON_OTHER;      /* nothing known of it */
+    log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
+              "changed: the configuration check (%s -k) did not finish in "
+              "%d s", argv0, CONF_PRECHECK_TIMEOUT_MS / 1000);
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
+                         "the configuration check (%s -k) did not finish in "
+                         "%d s (see the CONFIG log)", argv0,
+                         CONF_PRECHECK_TIMEOUT_MS / 1000);
+    for (line = out; line && *line; line = next) {      /* what it said */
+      if ((next = strchr(line, '\n')))
+        *next++ = '\0';
+      if (*line)
+        log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash check: %s",
+                  line);
+    }
+    return 0;
   case CONF_PRECHECK_CRASHED:
     what = "crashed the configuration check";
     break;
@@ -1965,8 +2018,15 @@ static int rehash_precheck(void)
     break;
   }
 
+  /* Errors in a file that changed while it was checked (a write caught
+   * half done, an include replaced in place) say nothing of the file as
+   * written: check it again. */
+  if (!rehash_conf_unchanged())
+    return -1;
   conf_error = 1;       /* conf_get_error_flag(): GitSync restores its copy */
-  rehash_abandoned = CONF_ABANDON_ERRORS;       /* the file is at fault */
+  /* the file is at fault */
+  rehash_abandoned = res == CONF_PRECHECK_CRASHED ? CONF_ABANDON_CRASHED
+                                                  : CONF_ABANDON_ERRORS;
   log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
             "changed: configuration file %s %s", configfile, what);
   sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
@@ -2000,22 +2060,24 @@ static int rehash_precheck(void)
  * anyone: for GitSync, which after an abandoned rehash puts its file back
  * and needs to know whether the configuration is clean without it.
  * @return 1 if clean, 0 if it has errors (or crashed the check), -1 if
- *   the check did not run.
+ *   the check did not run, -2 if it did not finish in time (nothing is
+ *   known of the file, and a rehash might hang the same way).
  */
 int conf_file_check(void)
 {
   static char out[4096];
-  const char *exe = "/proc/self/exe";   /* the running binary */
+  char argv0[PATH_MAX];
+  const char *exe = precheck_binary(argv0, sizeof(argv0));
 
-  if (access(exe, X_OK) != 0)
-    exe = SPATH;
-  switch (conf_precheck_run(exe, ".", configfile,
+  switch (conf_precheck_run(exe, argv0, ".", configfile,
                             CONF_PRECHECK_TIMEOUT_MS, out, sizeof(out))) {
   case CONF_PRECHECK_OK:
     return 1;
   case CONF_PRECHECK_ERRORS:
   case CONF_PRECHECK_CRASHED:
     return 0;
+  case CONF_PRECHECK_TIMEOUT:
+    return -2;
   default:
     return -1;
   }
