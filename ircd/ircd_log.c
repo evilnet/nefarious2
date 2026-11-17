@@ -318,8 +318,10 @@ log_init(const char *process_name)
   if (!EmptyString(process_name))
     logInfo.procname = process_name;
 
-  /* ok, open syslog; default facility: LOG_USER */
-  openlog(logInfo.procname, LOG_PID | LOG_NDELAY, logInfo.facility);
+  /* ok, open syslog; default facility: LOG_USER.  Not after
+   * log_shutdown() (a configuration check): nothing is syslogged. */
+  if (!logInfo.shut)
+    openlog(logInfo.procname, LOG_PID | LOG_NDELAY, logInfo.facility);
 }
 
 /** Reopen log files (so admins can do things like rotate log files).
