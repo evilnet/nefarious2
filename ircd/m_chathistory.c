@@ -5787,9 +5787,7 @@ static void complete_search_agg_part(struct FedRequest *req);
 struct SearchAgg {
   char client_yxx[6];        /**< the requester (cleared: it left) */
   char label[64];            /**< the SEARCH line's label */
-  int limit;
-  int pending;               /**< parts not finished, plus m_search's hold */
-  struct HistoryMessage *rows; /**< every finished part's rows, unsorted */
+  struct hm_search_agg core; /**< the parts, m_search's hold, the rows */
 };
 
 /** One channel's request in a SearchAgg (its FedRequest's cb_data). */
@@ -7981,18 +7979,6 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
   return presence_filter_messages(sptr, lookup_target, out, count, 0);
 }
 
-static int search_row_cmp(const void *a, const void *b)
-{
-  const struct HistoryMessage *ma = *(struct HistoryMessage *const *)a;
-  const struct HistoryMessage *mb = *(struct HistoryMessage *const *)b;
-  uint64_t ta = history_parse_ms(ma->timestamp);
-  uint64_t tb = history_parse_ms(mb->timestamp);
-
-  if (ta != tb)
-    return ta < tb ? -1 : 1;
-  return strcmp(ma->msgid, mb->msgid);
-}
-
 /** Send the search batch: @a head ascending, @a count rows.  Channel rows
  * go to their own channel; rows of the private conversation @a pm_other
  * (the other party's nick, or NULL) follow their direction. */
@@ -8048,37 +8034,6 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
  * out or hit its scan cap is not signalled: the spec has no marker for a
  * cut scan, and the client narrows its window when a full limit comes
  * back, exactly as against a single server. */
-/** Sort @a head by time and keep its newest @a limit, ascending; frees
- * the rest. */
-static struct HistoryMessage *search_keep_newest(struct HistoryMessage *head,
-                                                 int limit)
-{
-  struct HistoryMessage *m, **all, *out = NULL;
-  int total = 0, k, keep;
-
-  for (m = head; m; m = m->next)
-    total++;
-  if (total == 0)
-    return NULL;
-  all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
-  for (k = 0, m = head; m; m = m->next)
-    all[k++] = m;
-  if (total > 1)
-    qsort(all, total, sizeof(*all), search_row_cmp);
-  keep = total < limit ? total : limit;
-  for (k = total - 1; k >= 0; k--) {
-    all[k]->next = NULL;
-    if (k < total - keep) {
-      history_free_messages(all[k]);
-      continue;
-    }
-    all[k]->next = out;
-    out = all[k];
-  }
-  MyFree(all);
-  return out;
-}
-
 /** A finished SEARCH request's rows: the responders' rows that pass this
  * store's redaction check, merged with the local ones, newest limit kept,
  * ascending.  Takes them out of the request. */
@@ -8116,7 +8071,7 @@ static struct HistoryMessage *search_fed_rows(struct FedRequest *req)
   req->local_msgs = NULL;
   req->leg.msgs = NULL;
   req->leg.rows = 0;
-  return search_keep_newest(merged, req->limit);
+  return hm_keep_newest(merged, req->limit);
 }
 
 static void complete_search_fed(struct FedRequest *req)
@@ -8144,18 +8099,9 @@ static void complete_search_fed(struct FedRequest *req)
 static void search_agg_finish(struct SearchAgg *agg, struct HistoryMessage *rows)
 {
   struct Client *client;
-  struct HistoryMessage *tail;
 
-  if (rows) {
-    for (tail = rows; tail->next; tail = tail->next)
-      ;
-    tail->next = agg->rows;
-    agg->rows = rows;
-  }
-  if (--agg->pending > 0)
+  if (!hm_search_agg_finish(&agg->core, rows, &rows))
     return;
-  rows = search_keep_newest(agg->rows, agg->limit);
-  agg->rows = NULL;
   client = agg->client_yxx[0] ? findNUser(agg->client_yxx) : NULL;
   if (client)
     search_send(client, rows, NULL, agg->label[0] ? agg->label : NULL);
@@ -8190,6 +8136,53 @@ static void cleanup_search_agg_part(void *data)
   MyFree(part);
 }
 
+/** The selectors of a CH Q S line, escaped. */
+static void search_fed_selectors(const struct SearchMatch *sm, char *sel,
+                                 size_t n)
+{
+  char esc[BUFSIZE];
+
+  sel[0] = '\0';
+  if (sm->from[0]) {
+    search_sel_escape(sm->from, esc, sizeof(esc));
+    ircd_snprintf(0, sel, n, "from=%s", esc);
+  }
+  if (sm->text) {
+    size_t l = strlen(sel);
+    search_sel_escape(sm->text, esc, sizeof(esc));
+    ircd_snprintf(0, sel + l, n - l, "%stext=%s", l ? " " : "", esc);
+  }
+}
+
+/** Does the CH Q S line for @a target fit one 510-byte P10 line?  msgq
+ * cuts anything longer, and a cut inside "text=" would leave the
+ * responder a shorter selector than the user asked for, so it would
+ * answer rows that do not match.  Measured as sent (every destination
+ * numeric is two characters, the next request id), against the same
+ * "<YY> CH " prefix and safety margin as the other CH lines.  m_search
+ * refuses a query that does not fit for a channel it searches, whether
+ * or not another store is linked, so a search answers alike on one
+ * server and on many. */
+static int search_fed_line_fits(struct Client *sptr, const char *target,
+                                const char *before_unix,
+                                const char *after_unix, int limit,
+                                const struct SearchMatch *sm)
+{
+  char probe[BUFSIZE * 2], sel[BUFSIZE], reqid[32];
+  int len;
+
+  search_fed_selectors(sm, sel, sizeof(sel));
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me),
+                fed_reqid_counter + 1);
+  len = ircd_snprintf(0, probe, sizeof(probe),
+                      "Q %s S %s %d %s %s %s P%s%s %x :%s",
+                      target, before_unix, limit, reqid, "AB",
+                      after_unix && after_unix[0] ? after_unix : "*",
+                      cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
+                      requester_type_mask(sptr), sel);
+  return len >= 0 && 6 /* "<YY> CH " */ + (size_t)len + 4 < 510;
+}
+
 /** Fan a SEARCH out to every storage server for @a target.  Wire:
  *   CH Q <target> S T<before> <limit> <reqid> <dest> <T<after>|*> P<yxx> <mask> :<selectors>
  * Returns the request (which now owns @a local_rows) or NULL when nothing
@@ -8204,7 +8197,7 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
                                            int local_count)
 {
   struct FedRequest *req;
-  char reqid[32], sel[BUFSIZE], esc[BUFSIZE];
+  char reqid[32], sel[BUFSIZE];
   int i, si, server_count;
   time_t query_time = after_unix && after_unix[0] ? (time_t)strtoul(after_unix, NULL, 10) : 0;
 
@@ -8219,38 +8212,12 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
   if (i >= MAX_FED_REQUESTS)
     return NULL;
 
-  sel[0] = '\0';
-  if (sm->from[0]) {
-    search_sel_escape(sm->from, esc, sizeof(esc));
-    ircd_snprintf(0, sel, sizeof(sel), "from=%s", esc);
-  }
-  if (sm->text) {
-    size_t l = strlen(sel);
-    search_sel_escape(sm->text, esc, sizeof(esc));
-    ircd_snprintf(0, sel + l, sizeof(sel) - l, "%stext=%s", l ? " " : "", esc);
-  }
-
-  /* The whole CH Q S line must fit one 510-byte P10 line: msgq cuts
-   * anything longer, and a cut inside "text=" would leave the responder
-   * a shorter selector than the user asked for, so it would answer rows
-   * that do not match.  A query that cannot fit is not federated; the
-   * caller answers it from this store.  The line is measured as sent
-   * (every destination numeric is two characters), against the same
-   * "<YY> CH " prefix and safety margin as the other CH lines. */
+  /* m_search refused a query whose line cannot fit; never sent cut. */
+  if (!search_fed_line_fits(sptr, target, before_unix, after_unix, limit, sm))
+    return NULL;
+  search_fed_selectors(sm, sel, sizeof(sel));
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me),
-                fed_reqid_counter + 1);
-  {
-    char probe[BUFSIZE * 2];
-    int len = ircd_snprintf(0, probe, sizeof(probe),
-                            "Q %s S %s %d %s %s %s P%s%s %x :%s",
-                            target, before_unix, limit, reqid, "AB",
-                            after_unix && after_unix[0] ? after_unix : "*",
-                            cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
-                            requester_type_mask(sptr), sel);
-    if (len < 0 || 6 /* "<YY> CH " */ + (size_t)len + 4 >= 510)
-      return NULL;
-  }
-  ++fed_reqid_counter;
+                ++fed_reqid_counter);
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
   ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
   ircd_strncpy(req->target, target, sizeof(req->target) - 1);
@@ -9936,6 +9903,16 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "in", "No access to target");
       return 0;
     }
+    /* A channel's search goes to the other stores in one line: one that
+     * cannot fit is refused, here as with any number of servers linked,
+     * not answered from this store alone (search_fed_line_fits()). */
+    if (IsChannelName(in)
+        && !search_fed_line_fits(sptr, lookup_target, before_unix, after_unix,
+                                 limit, &sm)) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
+                "Selectors too long for this channel");
+      return 0;
+    }
     if (!IsChannelName(in))
       pm_other = in;
 
@@ -9992,8 +9969,23 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
     if (cli_label(sptr)[0])
       ircd_strncpy(agg->label, cli_label(sptr), sizeof(agg->label));
-    agg->limit = limit;
-    agg->pending = 1;   /* held until every channel is started */
+    hm_search_agg_init(&agg->core, limit);   /* held until every channel is started */
+
+    /* Any channel whose line cannot fit refuses the search, as with
+     * `in`: answering that channel from this store alone would drop its
+     * other stores' rows without a word (search_fed_line_fits()). */
+    for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
+      if (check_history_access(sptr, member->channel->chname, lookup_target,
+                               sizeof(lookup_target)) != 0)
+        continue;
+      if (!search_fed_line_fits(sptr, lookup_target, before_unix, after_unix,
+                                limit, &sm)) {
+        MyFree(agg);
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
+                  "Selectors too long for one of your channels");
+        return 0;
+      }
+    }
 
     for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
       struct HistoryMessage *rows = NULL;
@@ -10021,16 +10013,14 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         parts_left--;
         part = (struct SearchAggPart *)MyCalloc(1, sizeof(*part));
         part->agg = agg;
-        agg->pending++;
+        hm_search_agg_start(&agg->core);
         req->completion_cb = complete_search_agg_part;
         req->cb_data = part;
         req->cleanup_cb = cleanup_search_agg_part;
         req->label[0] = '\0';   /* the aggregate answers under it */
       } else {
-        /* Trimmed per channel, so the held rows stay bounded. */
-        rows = search_keep_newest(rows, limit);
-        if (rows) {
-          agg->pending++;
+        if (rows) {     /* trimmed to the limit as it is added */
+          hm_search_agg_start(&agg->core);
           search_agg_finish(agg, rows);
         }
       }

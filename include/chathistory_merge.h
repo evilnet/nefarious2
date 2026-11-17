@@ -460,4 +460,35 @@ extern int hm_targets_cut_partial(const struct hm_targets_resp *resp, int n,
                                   uint64_t first_ms, uint64_t second_ms,
                                   const struct HistoryTarget *page, int more);
 
+/** Sort @a list by time, then msgid, and keep its newest @a limit,
+ * ascending; the rest are freed.
+ * @return The kept rows (NULL when none). */
+extern struct HistoryMessage *hm_keep_newest(struct HistoryMessage *list,
+                                             int limit);
+
+/** A SEARCH answered from several parts (one per channel, federated or
+ * not), as one batch: the newest @a limit of all their rows, sent once
+ * the last part is in. */
+struct hm_search_agg {
+  int limit;
+  int pending;                 /**< parts not finished, plus the hold */
+  struct HistoryMessage *rows; /**< every finished part's rows */
+};
+
+/** Start an aggregate, held: it cannot finish until
+ * hm_search_agg_finish() releases the hold, however its parts end. */
+extern void hm_search_agg_init(struct hm_search_agg *a, int limit);
+
+/** One more part to wait for. */
+extern void hm_search_agg_start(struct hm_search_agg *a);
+
+/** A part finished with @a rows (taken; NULL for none, or for a part
+ * freed unfinished), or the hold released.
+ * @param[out] out When this was the last: the newest limit of all rows,
+ *                 ascending (the caller sends and frees them).
+ * @return 1 when this was the last, else 0. */
+extern int hm_search_agg_finish(struct hm_search_agg *a,
+                                struct HistoryMessage *rows,
+                                struct HistoryMessage **out);
+
 #endif /* INCLUDED_chathistory_merge_h */

@@ -2097,6 +2097,94 @@ static void test_targets_ref_ms_calendar(void **s)
   assert_int_equal(hm_targets_ref_ms("2026-12-31T23:59:59.999Z", &ms), 0);
 }
 
+/* ---- SEARCH without `in` (N013): hm_keep_newest and the aggregate ---- */
+
+static int ids_are(struct HistoryMessage *l, const char *want)
+{
+  char got[256] = "";
+
+  for (; l; l = l->next) {
+    if (got[0])
+      strcat(got, ",");
+    strcat(got, l->msgid);
+  }
+  if (strcmp(got, want))
+    print_error("rows %s, wanted %s\n", got, want);
+  return !strcmp(got, want);
+}
+
+/* Unsorted in, newest limit out ascending; ties by msgid. */
+static void test_keep_newest(void **state)
+{
+  struct HistoryMessage *l;
+  (void)state;
+
+  l = chain(5, row("c", "300.000", ""), row("a", "100.000", ""),
+            row("e", "500.000", ""), row("d2", "400.000", ""),
+            row("d1", "400.000", ""));
+  l = hm_keep_newest(l, 3);
+  assert_true(ids_are(l, "d1,d2,e"));
+  history_free_messages(l);
+  l = chain(2, row("b", "200.000", ""), row("a", "100.000", ""));
+  l = hm_keep_newest(l, 10);
+  assert_true(ids_are(l, "a,b"));
+  history_free_messages(l);
+  l = chain(1, row("a", "100.000", ""));
+  assert_null(hm_keep_newest(l, 0));
+  assert_null(hm_keep_newest(NULL, 5));
+}
+
+/* The hold: parts that end before every channel is started do not send
+ * the batch; releasing it does, with the newest limit across parts. */
+static void test_search_agg_hold_and_limit(void **state)
+{
+  struct hm_search_agg a;
+  struct HistoryMessage *out = (struct HistoryMessage *)1;
+  (void)state;
+
+  hm_search_agg_init(&a, 3);
+  hm_search_agg_start(&a);                  /* #a, federated */
+  hm_search_agg_start(&a);                  /* #b, local only */
+  assert_int_equal(hm_search_agg_finish(&a, chain(2, row("b1", "150.000", ""),
+                                                  row("b2", "450.000", "")),
+                                        &out), 0);
+  assert_null(out);
+  assert_int_equal(hm_search_agg_finish(&a, chain(3, row("a1", "100.000", ""),
+                                                  row("a3", "300.000", ""),
+                                                  row("a2", "200.000", "")),
+                                        &out), 0);
+  /* Every part is in, but the hold is not released: nothing sent yet. */
+  assert_null(out);
+  assert_int_equal(hm_search_agg_finish(&a, NULL, &out), 1);
+  assert_true(ids_are(out, "a2,a3,b2"));
+  history_free_messages(out);
+}
+
+/* A part freed unfinished (its request torn down: a split, a timeout)
+ * counts as finished with no rows, so the aggregate still answers; with
+ * no part at all, releasing the hold answers an empty batch. */
+static void test_search_agg_part_freed_and_empty(void **state)
+{
+  struct hm_search_agg a;
+  struct HistoryMessage *out;
+  (void)state;
+
+  hm_search_agg_init(&a, 5);
+  hm_search_agg_start(&a);
+  hm_search_agg_start(&a);
+  assert_int_equal(hm_search_agg_finish(&a, NULL, &out), 0);   /* the hold */
+  assert_int_equal(hm_search_agg_finish(&a, chain(1, row("x", "100.000", "")),
+                                        &out), 0);
+  assert_int_equal(hm_search_agg_finish(&a, NULL, &out), 1);   /* freed */
+  assert_true(ids_are(out, "x"));
+  history_free_messages(out);
+
+  hm_search_agg_init(&a, 5);
+  assert_int_equal(hm_search_agg_finish(&a, NULL, &out), 1);
+  assert_null(out);
+}
+
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -2169,6 +2257,9 @@ int main(void)
     cmocka_unit_test(test_trim_around_under_limit),
     cmocka_unit_test(test_context_parent),
     cmocka_unit_test(test_leg_drops_out_of_range_type),
+    cmocka_unit_test(test_keep_newest),
+    cmocka_unit_test(test_search_agg_hold_and_limit),
+    cmocka_unit_test(test_search_agg_part_freed_and_empty),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
