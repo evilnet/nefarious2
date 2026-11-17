@@ -3825,6 +3825,13 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
  * @param[in] one Client direction to skip (or NULL).
  * @param[in] skip Bitmask of SKIP_NONOPS and SKIP_NONVOICES indicating which clients to skip.
  * @param[in] pattern Format string for command arguments.
+ *
+ * With sendcmdto_want_s2s_tags(1) armed (and P10_MESSAGE_TAGS on), the
+ * line toward an IRCv3-aware link carries the compact tag region, built
+ * by format_s2s_tags() from the armed overrides (sendcmdto_set_s2s_tags:
+ * the event's time and msgid) exactly as sendcmdto_serv_butone() builds
+ * it; a legacy link gets the bare line.  Without it the line is bare, as
+ * before.  The overrides are cleared either way.
  */
 void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
                                       const char *tok, struct Channel *to,
@@ -3834,9 +3841,14 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_alias = NULL;
+  struct MsgBuf *tag_mb = NULL;
+  struct MsgBuf *tag_mb_alias = NULL;
   struct Membership *member;
   struct Client *alias_from = NULL;
   struct Client *primary_dir = NULL;
+  int want_tags = s2s_want_tags;
+
+  s2s_want_tags = 0;
 
   /* Split S2S delivery for aliases (see sendcmdto_serv_butone) */
   if (s2s_alias_source) {
@@ -3861,6 +3873,30 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
     va_end(vd.vd_args);
   }
 
+  /* The tagged variant for IRCv3-aware links (see the doc comment). */
+  if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    char s2s_tagbuf[128];
+    struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                            : (MyConnect(from) ? NULL : cli_from(from));
+    s2s_cptr_override = NULL;
+    if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+      va_start(vd.vd_args, pattern);
+      tag_mb = msgq_make(&me, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
+      va_end(vd.vd_args);
+      if (alias_from) {
+        va_start(vd.vd_args, pattern);
+        tag_mb_alias = msgq_make(&me, "%s%:#C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+        va_end(vd.vd_args);
+      }
+    }
+  }
+  /* Nothing else here reads the overrides: clear them, used or not, so
+   * they never stamp a later, unrelated server-bound line. */
+  s2s_cptr_override = NULL;
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
+  s2s_client_tags_override = NULL;
+
   /* send the buffer to each server */
   bump_sentalong(one);
   cli_sentalong(from) = sentalong_marker;
@@ -3874,15 +3910,21 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
       continue;
     cli_sentalong(member->user) = sentalong_marker;
-    if (serv_mb_alias && cli_from(member->user) == primary_dir
-        && IsIRCv3Aware(cli_from(member->user)))
-      send_buffer(member->user, serv_mb_alias, 0);
-    else
+    if (IsIRCv3Aware(cli_from(member->user))) {
+      if (serv_mb_alias && cli_from(member->user) == primary_dir)
+        send_buffer(member->user, tag_mb_alias ? tag_mb_alias : serv_mb_alias, 0);
+      else
+        send_buffer(member->user, tag_mb ? tag_mb : serv_mb, 0);
+    } else
       send_buffer(member->user, serv_mb, 0);
   }
   msgq_clean(serv_mb);
   if (serv_mb_alias)
     msgq_clean(serv_mb_alias);
+  if (tag_mb)
+    msgq_clean(tag_mb);
+  if (tag_mb_alias)
+    msgq_clean(tag_mb_alias);
 }
 
 /** Send a fork-only channel line to every IRCv3-aware server link with a
