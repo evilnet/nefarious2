@@ -2427,7 +2427,7 @@ hide_hostmask(struct Client *cptr)
 
     /* For clients without chghost capability, use QUIT+JOIN if enabled */
     if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
-      sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
+      sendcmdto_common_channels_capab_but_session(cptr, CMD_QUIT,
                     CAP_NONE, CAP_CHGHOST, ":%s",
                     feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
 
@@ -2465,9 +2465,9 @@ hide_hostmask(struct Client *cptr)
      * Skip clients with chghost capability - they got CHGHOST instead.
      */
     if (!IsDelayedJoin(chan)) {
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                          CAP_NONE, CAP_EXTJOIN, "%H", chan->channel);
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                          CAP_EXTJOIN, CAP_NONE, "%H %s :%s", chan->channel,
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
@@ -2475,23 +2475,23 @@ hide_hostmask(struct Client *cptr)
         away_notify_channel(cptr, chan->channel, cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +ohv %C %C %C", chan->channel, cptr,
                                        cptr, cptr);
     else if (IsChanOp(chan) && IsHalfOp(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +oh %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +ov %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +hv %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) || IsHalfOp(chan) || HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
         "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : (IsHalfOp(chan) ? 'h' : 'v'), cptr);
   }
   return 0;
@@ -2535,7 +2535,7 @@ unhide_hostmask(struct Client *cptr)
 
     /* For clients without chghost capability, use QUIT+JOIN if enabled */
     if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
-      sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
+      sendcmdto_common_channels_capab_but_session(cptr, CMD_QUIT,
                     CAP_NONE, CAP_CHGHOST, ":%s",
                     feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
     /* CHGHOST under the old user@host, to channel members and the user
@@ -2566,9 +2566,9 @@ unhide_hostmask(struct Client *cptr)
       continue;
     /* Send a JOIN unless the user's join has been delayed. */
     if (!IsDelayedJoin(chan)) {
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                          CAP_NONE, CAP_EXTJOIN, "%H", chan->channel);
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                          CAP_EXTJOIN, CAP_NONE, "%H %s :%s", chan->channel,
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
@@ -2576,23 +2576,23 @@ unhide_hostmask(struct Client *cptr)
         away_notify_channel(cptr, chan->channel, cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +ohv %C %C", chan->channel, cptr,
                                        cptr, cptr);
     else if (IsChanOp(chan) && IsHalfOp(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +oh %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +ov %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
                                        "%H +hv %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) || IsHalfOp(chan) || HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST | SKIP_SESSION,
         "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : (IsHalfOp(chan) ? 'h' : 'v'), cptr);
   }
   return 0;

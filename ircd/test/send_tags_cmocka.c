@@ -495,6 +495,57 @@ static void test_session_form_devices(void **state)
   m_src.next_member = NULL;
 }
 
+/* A host change for clients without chghost is a QUIT and a JOIN of the
+ * user's nick (hide_hostmask(), s_user.c).  The user's own bouncer device
+ * shares that nick: it must see neither, in a channel or not, while an
+ * observer still sees both.  The MODE that restores the user's status
+ * comes from the server, so the device is named by @a one there. */
+static void test_host_change_skips_own_devices(void **state)
+{
+  struct Membership m_dev1;
+  (void)state;
+  memset(&m_dev1, 0, sizeof(m_dev1));
+  m_dev1.user = &dev1;
+  m_dev1.channel = chan;
+  m_src.next_member = &m_dev1;               /* rcpt, src, dev1 */
+  m_src.next_channel = NULL;
+  cli_user(&src)->channel = &m_src;
+  make_device(&dev1, &src);
+
+  /* The old form reached the device; the session form does not. */
+  sendcmdto_common_channels_capab_butone(&src, CMD_QUIT, &src, CAP_NONE,
+                                         CAP_CHGHOST, ":%s", "host change");
+  assert_int_equal(count_to(&dev1), 1);
+  n_sent = 0;
+  sendcmdto_common_channels_capab_but_session(&src, CMD_QUIT, CAP_NONE,
+                                              CAP_CHGHOST, ":%s", "host change");
+  assert_int_equal(count_to(&src), 0);
+  assert_int_equal(count_to(&dev1), 0);
+  assert_int_equal(count_to(&rcpt), 1);
+
+  n_sent = 0;
+  sendcmdto_channel_capab_butserv_butone(&src, CMD_JOIN, chan, &src,
+                                         SKIP_CHGHOST | SKIP_SESSION,
+                                         CAP_NONE, CAP_NONE, "%H", chan);
+  sendcmdto_channel_butserv_butone(&rcpt, CMD_MODE, chan, &src,
+                                   SKIP_CHGHOST | SKIP_SESSION,
+                                   "%H +o %C", chan, &src);
+  assert_int_equal(count_to(&dev1), 0);
+  assert_int_equal(count_to(&src), 0);
+  assert_int_equal(count_to(&rcpt), 2);
+
+  /* Another user's device is an observer like any other. */
+  cli_user(&dev1)->alias_primary = &rcpt;
+  n_sent = 0;
+  sendcmdto_common_channels_capab_but_session(&src, CMD_QUIT, CAP_NONE,
+                                              CAP_CHGHOST, ":%s", "host change");
+  sendcmdto_channel_capab_butserv_butone(&src, CMD_JOIN, chan, &src,
+                                         SKIP_CHGHOST | SKIP_SESSION,
+                                         CAP_NONE, CAP_NONE, "%H", chan);
+  assert_int_equal(count_to(&dev1), 2);
+  m_src.next_member = NULL;
+}
+
 /* away_notify_common()'s star (m_away.c): a first send for draft/pre-away
  * clients with ":*", a second for the rest with the text.  The sender's
  * own copy -- a session primary of ours told of an away decided
@@ -528,6 +579,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_account_tag_only_no_account, setup, teardown),
     cmocka_unit_test_setup_teardown(test_long_oper_name_every_tag, setup, teardown),
     cmocka_unit_test_setup_teardown(test_session_form_tells_the_user_once, setup, teardown),
+    cmocka_unit_test_setup_teardown(test_host_change_skips_own_devices, setup, teardown),
     cmocka_unit_test_setup_teardown(test_session_form_no_channel, setup, teardown),
     cmocka_unit_test_setup_teardown(test_session_form_devices, setup, teardown),
     cmocka_unit_test_setup_teardown(test_away_star_sender_copy, setup, teardown),

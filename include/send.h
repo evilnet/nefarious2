@@ -317,6 +317,17 @@ extern void sendcmdto_common_channels_but_session(struct Client *from,
                                                   const char *tok,
                                                   const char *pattern, ...);
 
+/** sendcmdto_common_channels_capab_butone() with @a from as @a one, and
+ * none of @a from's own bouncer devices either: they share its nick, so a
+ * line that makes the nick look gone and back (the QUIT of a host change
+ * for clients without chghost) is not theirs to see. */
+extern void sendcmdto_common_channels_capab_but_session(struct Client *from,
+                                                        const char *cmd,
+                                                        const char *tok,
+                                                        int withcap,
+                                                        int skipcap,
+                                                        const char *pattern, ...);
+
 /* Send command to all channels user is on with or without a specified capability */
 extern void sendcmdto_common_channels_capab_butone(struct Client *from,
                                              const char *cmd,
@@ -419,6 +430,8 @@ extern void sendcmdto_channel_butone_with_client_tags(struct Client *from,
 #define SKIP_NONHOPS	0x10	/**< skip users that aren't halfopped (includes
                                    chanops) */
 #define SKIP_CHGHOST	0x20	/**< skip users that have chghost capability */
+#define SKIP_SESSION	0x40	/**< skip @a one's own bouncer devices: they
+                                   share its nick */
 
 /* Whether a channel message from a user skips this member (zombie, \a skip
  * flags, SILENCE on channel messages): the filter of the channel relay's
