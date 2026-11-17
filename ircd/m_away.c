@@ -567,17 +567,19 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     char away_msgid[64] = "";
     uint64_t away_time_ms = 0;
-    if (feature_bool(FEAT_MSGID)) {
-      if (cli_s2s_msgid(cptr)[0]) {
-        ircd_strncpy(away_msgid, cli_s2s_msgid(cptr), sizeof(away_msgid));
-        away_time_ms = cli_s2s_time_ms(cptr);
-      } else
-        generate_msgid(away_msgid, sizeof(away_msgid));
-      /* The event's one time: the tag's, else the minted msgid's (the
-       * HLC's), never a clock read per send. */
-      if (!away_time_ms)
-        away_time_ms = history_event_time_ms(NULL);
-    }
+    /* The origin's msgid and time travel on whatever this server's own
+     * FEAT_MSGID says: a server in the middle with it off still relays
+     * them, or the servers past it would mint their own and the event
+     * would carry two ids.  This server mints one only with it on. */
+    if (cli_s2s_msgid(cptr)[0]) {
+      ircd_strncpy(away_msgid, cli_s2s_msgid(cptr), sizeof(away_msgid));
+      away_time_ms = cli_s2s_time_ms(cptr);
+    } else if (feature_bool(FEAT_MSGID))
+      generate_msgid(away_msgid, sizeof(away_msgid));
+    /* The event's one time: the tag's, else the minted msgid's (the
+     * HLC's), never a clock read per send. */
+    if (away_msgid[0] && !away_time_ms)
+      away_time_ms = history_event_time_ms(NULL);
 
     /* Set S2S tags for downstream server relay */
     if (away_msgid[0]) {
@@ -603,8 +605,9 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       away_send_to_servers(sptr, cptr, NULL);
 
     /* Notify local channel members with away-notify (was missing for S2S) */
-    if (away_msgid[0])
-      sendcmdto_set_client_msgid(away_msgid);
+    /* Its own clients see a msgid only with FEAT_MSGID on. */
+    if (away_msgid[0] && feature_bool(FEAT_MSGID))
+      sendcmdto_set_client_event(away_msgid, away_time_ms);
 
     /* butone=NULL: notify every local channel member of sptr.
      * Excluding sptr makes sense for the user's own /away echo on the
