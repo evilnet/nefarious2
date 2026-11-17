@@ -95,6 +95,7 @@
 #include "numnicks.h"
 #include "send.h"
 #include "ssl.h"
+#include "recv_classify.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -115,6 +116,8 @@ int m_starttls(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return send_reply(sptr, ERR_STARTTLS, "STARTTLS failed. Already using TLS.");
 
   DBufClear(&(cli_recvQ(sptr)));
+  /* The recv classifier's line state goes with the bytes it counted. */
+  recv_classify_reset(cli_connect(sptr));
 
   send_reply(sptr, RPL_STARTTLS);
   SetStartTLS(sptr);

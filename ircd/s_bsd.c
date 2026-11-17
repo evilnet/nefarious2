@@ -1251,17 +1251,21 @@ static int ws_deliver(struct Client *cptr, char *buf, int len)
   /* WebSocket IRC: messages don't require \r\n, add \n for parser */
   if (buf[len - 1] != '\n')
     buf[len++] = '\n';
-  classify = recv_classify(cptr, buf, len);
-  if (classify == RECV_CLASSIFY_TAG_OVERRUN
-      || classify == RECV_CLASSIFY_MSG_OVERRUN) {
-    const char *why = classify == RECV_CLASSIFY_TAG_OVERRUN
-                      ? "Excess Flood: tag region too large"
-                      : "Excess Flood: message region too large";
+  /* An overlong message is cut down and answered with ERR_INPUTTOOLONG
+   * when parsed, as on a plain connection (recv_clip()).  Every message
+   * ends in the LF added above and is at most WS_MAX_PAYLOAD, under
+   * recv_clip()'s flood bound, so the Close below (1009, RFC 6455
+   * §7.4.1, as for a frame over WS_MAX_PAYLOAD) is a guard that cannot
+   * fire today. */
+  {
+    unsigned int kept = len;
 
-    /* A line over a recv cap is a message too big to process: RFC 6455
-     * §7.4.1 gives that 1009, as a frame over WS_MAX_PAYLOAD gets, and
-     * keeps 1008 (policy) for when "there is no other more suitable
-     * status code (e.g., 1003 or 1009)".  The reason is the exit's. */
+    classify = recv_clip(cptr, buf, &kept);
+    len = kept;
+  }
+  if (classify != RECV_CLASSIFY_OK) {
+    const char *why = "Excess Flood: line too long";
+
     websocket_set_close(cptr, 1009, why);
     return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, why);
   }
@@ -1854,7 +1858,18 @@ ssl_read_again:
      * it on the end of the receive queue and do it when its
      * turn comes around.
      */
-    if (length > 0) {
+    if (length > 0 && !IsServer(cptr) && !IsHandshake(cptr)) {
+      /* A client's overlong line is cut down here and answered with
+       * ERR_INPUTTOOLONG when parsed (recv_clip()); only a line that
+       * never ends drops the client. */
+      unsigned int kept = length;
+
+      if (recv_clip(cptr, readbuf, &kept) != RECV_CLASSIFY_OK)
+        return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: line too long");
+      length = kept;
+      if (length > 0 && dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
+        return exit_client_fault(cptr, BOUNCE_FORCED_BUFFER, "dbuf_put fail");
+    } else if (length > 0) {
       int classify = recv_classify(cptr, readbuf, length);
       if (classify == RECV_CLASSIFY_TAG_OVERRUN)
         return exit_client_fault(cptr, BOUNCE_FORCED_FLOOD, "Excess Flood: tag region too large");

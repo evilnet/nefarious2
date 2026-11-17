@@ -54,6 +54,10 @@ extern int format_batch_open_tags_delivered(char *buf, size_t buflen,
  */
 extern void s2s_multiline_cleanup_link(struct Client *link);
 
+/** Fail @a cptr's open client multiline batch with FAIL BATCH
+ * MULTILINE_INVALID; its reference stays dead (m_batch.c). */
+extern void multiline_fail_batch(struct Client *cptr);
+
 /** Discard @a cptr's open client multiline batch silently (m_batch.c). */
 extern void multiline_discard_batch(struct Client *cptr);
 

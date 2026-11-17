@@ -24,6 +24,8 @@
 #include "config.h"
 
 #include "parse.h"
+#include "recv_classify.h"
+#include "m_batch.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "class.h"
@@ -1497,6 +1499,35 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
   cli_msg_batch_tag(cptr)[0] = '\0';
   cli_msg_concat(cptr) = 0;
 
+  /* A line recv_clip() cut down: too long to run, and the client stays
+   * (message-tags: tags over the limit get ERR_INPUTTOOLONG; the body cap
+   * is answered the same way).  Its tags are not read, so the 417 carries
+   * no label.  It is charged as a line with a full body, or a client
+   * could have 417s answered at wire speed.  An open multiline batch
+   * fails: the cut line may have been one of its lines, and delivering
+   * the rest would change the message. */
+  if (!IsServer(cptr) && !IsHandshake(cptr)
+      && recv_line_overlong(cptr, buffer, bufend - buffer)) {
+    send_reply(cptr, ERR_INPUTTOOLONG);
+    if (cli_ml_batch_id(cptr)[0])
+      multiline_fail_batch(cptr);
+    if (!IsAnOper(cptr)) {
+      lagmin = get_lag_min(cptr);
+      lagfactor = get_lag_factor(cptr);
+      if (lagmin < 0)
+        lagmin = 2;
+      if (lagfactor < 0)
+        lagfactor = 120;
+      /* As a line with a full body: the parameters a line is charged
+       * for (below) are at most BUFSIZE.  Its cut tags cost nothing more,
+       * as legal tags do not. */
+      if (lagfactor > 0)
+        cli_since(cptr) += fakelag_charge_client(cptr, "",
+                             lagmin + BUFSIZE / lagfactor);
+    }
+    return -1;
+  }
+
   para[0] = cli_name(from);
   for (ch = buffer; *ch == ' '; ch++);  /* Eat leading spaces */
 
@@ -1508,7 +1539,7 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
     /* Registered clients must have negotiated *some* tag-using CAP
      * before they may send @-prefixed lines.  Without any such CAP,
      * the tag region would be a non-negotiated bytes channel — pair
-     * the recv-side 4095 byte cap (recv_classify) with a parse-side
+     * the recv-side 4095 byte cap (recv_clip) with a parse-side
      * rejection so the tag region is semantically gated, not just
      * byte-bounded.
      *

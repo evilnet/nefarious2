@@ -78,6 +78,7 @@ static struct {
   char label[64];          /* the label the PING handler saw */
   char batch_tag[128];     /* the batch= tag the PING handler saw */
   int concat;              /* and draft/multiline-concat */
+  int ml_fails;            /* multiline_fail_batch() */
 } seen;
 
 static void record_handler(const char *cmd, int parc, char *parv[])
@@ -346,6 +347,12 @@ int fakelag_charge_client(struct Client *cptr, const char *cmd, int lag)
 {
   (void)cmd;
   return fakelag_charge(&cli_lagcredit(cptr), lag);
+}
+
+void multiline_fail_batch(struct Client *cptr)
+{
+  (void)cptr;
+  seen.ml_fails++;
 }
 
 void batch_end_line(struct Client *cptr)
@@ -895,6 +902,79 @@ static void client_ordinary_lines(void **state)
   expect_handler("@x :pfx PING :hello", &o, "PING", "hello");
 }
 
+/* A line recv_clip() cut down (one byte past a cap) is answered with
+ * ERR_INPUTTOOLONG and never reaches a handler; one at the cap runs. */
+static void client_overlong_line_gets_417(void **state)
+{
+  static char buf[5000];
+
+  (void)state;
+  memcpy(buf, "PING :", 6);
+  memset(buf + 6, 'x', 507);
+  buf[513] = '\0';                      /* 513-byte body: over */
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + 513), -1);
+  assert_int_equal(seen.handler_calls, 0);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+
+  memcpy(buf, "PING :", 6);             /* 512: at the cap, runs */
+  memset(buf + 6, 'x', 506);
+  buf[512] = '\0';
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + 512), 0);
+  assert_int_equal(seen.handler_calls, 1);
+
+  buf[0] = '@';                         /* 4095-byte tag region: runs */
+  memset(buf + 1, 'a', 4094);
+  strcpy(buf + 4095, " PING :x");
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), 0);
+  assert_int_equal(seen.handler_calls, 1);
+
+  memcpy(buf, "@x PING :", 9);          /* tagged, 513-byte body: over */
+  memset(buf + 9, 'y', 507);
+  buf[516] = '\0';
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + 516), -1);
+  assert_int_equal(seen.handler_calls, 0);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+
+  buf[0] = '@';                         /* 4096-byte tag region: over */
+  memset(buf + 1, 'a', 4095);
+  strcpy(buf + 4096, " PING :x");
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + strlen(buf)), -1);
+  assert_int_equal(seen.handler_calls, 0);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+  assert_int_equal(seen.ml_fails, 0);   /* no batch open */
+}
+
+/* A cut line is charged fake lag like any line of its length, and fails
+ * an open multiline batch. */
+static void client_overlong_line_is_charged_and_fails_batch(void **state)
+{
+  static char buf[600];
+  time_t before;
+
+  (void)state;
+  memcpy(buf, "PING :", 6);
+  memset(buf + 6, 'x', 507);
+  buf[513] = '\0';
+  test_lagfactor = 120;
+  before = cli_since(&user);
+  strcpy(cli_ml_batch_id(&user), "ref1");
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + 513), -1);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+  assert_int_equal(seen.ml_fails, 1);
+  /* lagmin 2 (the stub's -1) + BUFSIZE / 120 = 6 seconds, the cost of a
+   * full-body line: not more for the cut bytes. */
+  assert_int_equal(cli_since(&user) - before, 2 + BUFSIZE / 120);
+  cli_ml_batch_id(&user)[0] = '\0';
+  cli_since(&user) = before;
+  test_lagfactor = 0;
+}
+
 /* labeled-response: the label belongs to its line.  The handler sees it;
  * once parse_client() returns -- the line handled, or refused before a
  * handler -- it is gone, so nothing sent to the client afterwards (a
@@ -1132,6 +1212,8 @@ int main(void)
     cmocka_unit_test(client_batch_fakelag_only_its_own_lines),
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
+    cmocka_unit_test(client_overlong_line_gets_417),
+    cmocka_unit_test(client_overlong_line_is_charged_and_fails_batch),
     cmocka_unit_test(client_cannot_set_fallback_mark),
     cmocka_unit_test(server_bx_line_fills_the_stash),
   };

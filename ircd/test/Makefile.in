@@ -820,12 +820,13 @@ send_tags_cmocka: $(SEND_TAGS_CMOCKA_OBJS)
 # -ffunction-sections and linked with --gc-sections: the program keeps
 # parse_server(), parse_client() and what they call, not the message table
 # and its handlers, so only those are stubbed in the test.
-# ../ircd_string.o supplies the character table msg_tree_parse() reads.
+# ../ircd_string.o supplies the character table msg_tree_parse() reads;
+# ../recv_classify.o the overlong-line check parse_client() makes first.
 parse_line_cmocka.o: ${srcdir}/parse_line_cmocka.c ../parse.c
 	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/parse_line_cmocka.c
 
 # The orphan hold's pure rules (parse_client() asks whether a PONG is free).
-PARSE_LINE_CMOCKA_OBJS = parse_line_cmocka.o ../ircd_string.o input_hold_test.o
+PARSE_LINE_CMOCKA_OBJS = parse_line_cmocka.o ../ircd_string.o ../recv_classify.o input_hold_test.o
 parse_line_cmocka: $(PARSE_LINE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(PARSE_LINE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
