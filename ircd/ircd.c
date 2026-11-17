@@ -364,7 +364,11 @@ static void shutdown_stores(void)
   bounce_db_shutdown();      /* persist bouncer sessions (metadata env) */
   history_shutdown();        /* history, multiline content, presence state:
                               * the presence CF lives on the metadata env,
-                              * so this goes first */
+                              * so this goes first.  It first waits for the
+                              * SEARCH scans the thread pool's workers are
+                              * in and cancels the queued ones
+                              * (store_jobs_quiesce): the pool itself is
+                              * stopped only in shutdown_writers() */
   webpush_store_shutdown();
   metadata_shutdown();       /* metadata, read markers, bouncer sessions,
                               * presence records */
@@ -374,7 +378,10 @@ static void shutdown_stores(void)
  * logs for good.  Producers before the consumer: the crypt workers (which
  * log, and signal the main loop through a pipe) are joined first, then the
  * async log writer drains its queue and exits -- a worker logging after
- * the writer stopped would lock its destroyed mutex.  log_shutdown() keeps
+ * the writer stopped would lock its destroyed mutex.  The pool's store
+ * jobs (store_job.h) are answered here too, the stores already closed:
+ * history_shutdown() saw the last of them out of the store, and their
+ * done() touches memory and the link only.  log_shutdown() keeps
  * the logs shut through close_connections() and whatever the dying event
  * batch still runs after server_die() returns: a log line there would
  * reopen its file on a number just closed (0, 1, 2, or one a client still

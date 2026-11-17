@@ -67,6 +67,7 @@ static void rdx_retry_cancel(int idx);
 #include "s_conf.h"
 #include "s_debug.h"
 #include "send.h"
+#include "store_job.h"
 #include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -5265,6 +5266,9 @@ void chathistory_fed_cleanup_link(struct Client *link)
   for (i = 0; i < MAX_PENDING_WRITE_CHUNKS; i++)
     if (pending_write_chunks[i] && pending_write_chunks[i]->link == link)
       free_write_chunk(pending_write_chunks[i]);
+  /* A SEARCH scan it asked for and is not here to hear the answer of
+   * (struct SearchJob): directly linked or behind the link that broke. */
+  store_jobs_link_gone(link);
 }
 
 /** Create a new chunk entry.  @a client_tags are the first line's ,C
@@ -7895,7 +7899,14 @@ static void search_sel_unescape(char *v)
  * newest @a limit unredacted matches in @a *out (the hook drops a redacted
  * one inside the walk: a list filter afterwards would find no REDACT row
  * to filter by, and could only return fewer than @a limit).
- * @a *truncated is set when the scan budget cut the window short. */
+ * @a *truncated is set when the scan budget cut the window short.
+ *
+ * The responder runs this on a thread pool worker (struct SearchJob), so
+ * the walk and everything under it -- search_row_hook, the presence hook,
+ * typing_only_veto -- read their arguments and the store and nothing
+ * else: no client, channel or feature, no log line (the worker's are
+ * dropped), no static buffer.  @a base then carries the view and the
+ * channel's incarnation the main thread read (HistoryRowFilter). */
 static int search_walk(const char *lookup_target, const char *before_unix,
                        int limit, struct SearchMatch *sm, int *budget,
                        const struct HistoryRowFilter *base,
@@ -7917,6 +7928,9 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   filter.type_mask = base ? base->type_mask : 0;
   filter.veto = base ? base->veto : NULL;
   filter.veto_ctx = base ? base->veto_ctx : NULL;
+  filter.view = base ? base->view : NULL;
+  filter.live_inc_set = base ? base->live_inc_set : 0;
+  filter.live_inc = base ? base->live_inc : 0;
   filter.scan_max = *budget;
 
   count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
@@ -7924,15 +7938,22 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   *budget -= filter.scanned;
   if (truncated)
     *truncated = filter.truncated;
-  /* A store whose reply index cannot be read hides every match (each one
-   * still a scanned row, so the budget ends the walk): say so. */
+  if (count < 0)
+    return -1;
+  return count;
+}
+
+/** A store whose reply index cannot be read hides every match (each one
+ * still a scanned row, so the budget ends the walk): say so, once per
+ * walk.  The walk only counts them (SearchMatch.redact_unread): it may be
+ * on a worker, and the log is the main thread's. */
+static void search_log_unread(const char *lookup_target,
+                              const struct SearchMatch *sm)
+{
   if (sm->redact_unread)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "SEARCH %s: %d match(es) not shown, their redaction could not be read",
               lookup_target, sm->redact_unread);
-  if (count < 0)
-    return -1;
-  return count;
 }
 
 static int search_one_target(struct Client *sptr, const char *lookup_target,
@@ -7961,11 +7982,129 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
 
   count = search_walk(lookup_target, before_unix, limit, sm, budget, phook,
                       out, NULL);
+  search_log_unread(lookup_target, sm);
   presence_query_filter_close(pf);
   if (count < 0)
     return -1;
   return presence_filter_messages(sptr, lookup_target, out, count, 0);
 }
+
+/* ---------------------------------------------------------------- */
+/* The responder's scan, off the main loop                            */
+/* ---------------------------------------------------------------- */
+
+/** One federated SEARCH this server answers (CH Q <target> S ...): the
+ * scan of up to SEARCH_SCAN_MAX rows as a store job (store_job.h), so it
+ * runs on a thread pool worker while the main loop goes on.  A SEARCH
+ * without `in` asks for up to SEARCH_FED_PARTS_MAX of these in a row; on
+ * the main loop they were about a quarter of a second each at the full
+ * budget.
+ *
+ * The main thread (ms_chathistory) parses the line and copies into the
+ * job everything the scan needs, as of that moment: the selectors, the
+ * requester's presence record and type mask, the channel's incarnation,
+ * and a view of the store (a snapshot).  The scan therefore returns what
+ * it would have returned had it run right there -- a row stored, or a
+ * PART that closes the requester's presence, while the job waited its
+ * turn changes nothing -- with one exception on the safe side: a match's
+ * redaction is looked up when the scan reaches it, so a REDACT that came
+ * in the meantime still hides its message.  The worker reads the job and
+ * the store and nothing else (search_walk).  search_job_done() sends the
+ * answer from the main thread: the rows, then E with T when the budget
+ * cut the scan short, or E 0 U when the store could not be read -- the
+ * lines the synchronous responder sent, later.
+ *
+ * The asking server may have left by then: chathistory_fed_cleanup_link()
+ * tells the jobs (store_jobs_link_gone), and one without a link sends
+ * nothing.  A DIE or RESTART closes the store first, which waits for the
+ * scans under way and cancels the rest (history_shutdown). */
+struct SearchJob {
+  struct StoreJob job;            /**< first; job.link is the asking server */
+  char origin_yxx[NUMNICKLEN + 1];/**< its numeric, checked again at the end */
+  char *reqid;                    /**< owned */
+  char *target;                   /**< owned */
+  char before[HISTORY_TIMESTAMP_LEN];
+  int limit;
+  char sel[BUFSIZE];              /**< the selectors; sm.text points into it */
+  struct SearchMatch sm;
+  struct PresenceQueryFilter *pf; /**< the requester's presence, or NULL */
+  struct HistoryRowFilter base;   /**< its hook, the type mask and veto, the
+                                   *   view and the incarnation */
+  struct HistoryView *view;       /**< held until the scan ran or is abandoned */
+  /* The scan's result. */
+  int count;                      /**< rows, or -1: the store could not be read */
+  int truncated;
+  int budget_left;
+  struct HistoryMessage *rows;
+};
+
+/** The scan: a thread pool worker, or the main thread when the job could
+ * not leave it. */
+static void search_job_run(struct StoreJob *job)
+{
+  struct SearchJob *sj = (struct SearchJob *)job;
+  int budget = SEARCH_SCAN_MAX;
+
+  sj->count = search_walk(sj->target, sj->before, sj->limit, &sj->sm, &budget,
+                          &sj->base, &sj->rows, &sj->truncated);
+  sj->budget_left = budget;
+  history_view_close(sj->view);
+  sj->view = NULL;
+  sj->base.view = NULL;
+}
+
+/** A job that will not run gives its view back (main thread). */
+static void search_job_abandon(struct StoreJob *job)
+{
+  struct SearchJob *sj = (struct SearchJob *)job;
+
+  history_view_close(sj->view);
+  sj->view = NULL;
+  sj->base.view = NULL;
+}
+
+/** Answer and free (main thread).  Nothing is sent when the scan never
+ * ran (the store is closing) or the asking server has left. */
+static void search_job_done(struct StoreJob *job, int ran)
+{
+  struct SearchJob *sj = (struct SearchJob *)job;
+  struct Client *origin = (struct Client *)job->link;
+  struct HistoryMessage *r;
+
+  /* The link is cleared when its server exits, so a non-NULL one is that
+   * server still; the numeric is the second look. */
+  if (origin && (!IsServer(origin) || FindNServer(sj->origin_yxx) != origin))
+    origin = NULL;
+
+  if (ran)
+    search_log_unread(sj->target, &sj->sm);
+  Debug((DEBUG_DEBUG, "CH Q S: %s %s -> %d row(s), truncated %d, budget left %d%s%s",
+         sj->target, sj->reqid, sj->count, sj->truncated, sj->budget_left,
+         ran ? "" : ", never ran", origin ? "" : ", no one to answer"));
+
+  if (ran && origin) {
+    if (sj->count < 0) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s 0 U", sj->reqid);
+    } else {
+      for (r = sj->rows; r; r = r->next)
+        send_ch_response(origin, sj->reqid, r);
+      if (sj->truncated)
+        sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s %d T", sj->reqid, sj->count);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s %d", sj->reqid, sj->count);
+    }
+  }
+
+  history_free_messages(sj->rows);
+  presence_query_filter_close(sj->pf);
+  MyFree(sj->reqid);
+  MyFree(sj->target);
+  MyFree(sj);
+}
+
+static const struct StoreJobOps search_job_ops = {
+  search_job_run, search_job_abandon, search_job_done
+};
 
 /** Send the search batch: @a head ascending, @a count rows.  Channel rows
  * go to their own channel; rows of the private conversation @a pm_other
@@ -8847,63 +8986,79 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * requester's presence already opened above.  Rows go back with
        * the page machinery; E carries T when our scan budget cut the
        * window short.  The walk drops a redacted match itself, so an
-       * older requester, which does not check, never receives one. */
-      struct SearchMatch ssm;
-      struct HistoryMessage *rows = NULL, *r;
-      int budget = SEARCH_SCAN_MAX, truncated = 0, n = 0;
-      char selbuf[BUFSIZE];
+       * older requester, which does not check, never receives one.
+       *
+       * Everything here is parsing and copying: the scan is a store job
+       * (struct SearchJob), which owns the presence filter from here on
+       * and answers from search_job_done(). */
+      struct SearchJob *sj;
+      struct SearchMatch *ssm;
       char before_buf[HISTORY_TIMESTAMP_LEN];
-      memset(&ssm, 0, sizeof(ssm));
+
       ircd_strncpy(before_buf, ref_type == HISTORY_REF_TIMESTAMP && ref_value ? ref_value : "",
                    sizeof(before_buf) - 1);
       before_buf[sizeof(before_buf) - 1] = '\0';
-      if (ref2) {
-        enum HistoryRefType t2;
-        const char *v2;
-        if (parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_TIMESTAMP && v2)
-          ssm.after_ms = (int64_t)history_parse_ms(v2);
-      }
-      selbuf[0] = '\0';
-      if (parc >= 12 && parv[11])
-        ircd_strncpy(selbuf, parv[11], sizeof(selbuf) - 1);
-      {
-        char *q = selbuf, *tok;
-        while ((tok = q) && *tok) {
-          char *sp = strchr(tok, ' ');
-          if (sp) { *sp = '\0'; q = sp + 1; } else q = tok + strlen(tok);
-          if (0 == strncmp(tok, "from=", 5)) {
-            ircd_strncpy(ssm.from, tok + 5, sizeof(ssm.from));
-            search_sel_unescape(ssm.from);
-          } else if (0 == strncmp(tok, "text=", 5)) {
-            search_sel_unescape(tok + 5);
-            if (tok[5])
-              ssm.text = tok + 5;
-          }
-        }
-      }
-      Debug((DEBUG_DEBUG, "CH Q S: target %s before '%s' after %lld limit %d from '%s' text '%s' reftype %d",
-             target, before_buf, (long long)ssm.after_ms, limit, ssm.from,
-             ssm.text ? ssm.text : "", (int)ref_type));
       if (!before_buf[0]) {
+        Debug((DEBUG_DEBUG, "CH Q S: target %s %s: no <before> (reftype %d)",
+               target, reqid, (int)ref_type));
         presence_query_filter_close(fed_pf);
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
         return 0;
       }
-      n = search_walk(target, before_buf, limit, &ssm, &budget, fed_hook, &rows, &truncated);
-      Debug((DEBUG_DEBUG, "CH Q S: %s -> %d row(s), truncated %d, budget left %d", target, n, truncated, budget));
-      presence_query_filter_close(fed_pf);
+
+      sj = (struct SearchJob *)MyCalloc(1, sizeof(*sj));
+      ssm = &sj->sm;
+      memcpy(sj->before, before_buf, sizeof(sj->before));
+      if (ref2) {
+        enum HistoryRefType t2;
+        const char *v2;
+        if (parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_TIMESTAMP && v2)
+          ssm->after_ms = (int64_t)history_parse_ms(v2);
+      }
+      if (parc >= 12 && parv[11])
+        ircd_strncpy(sj->sel, parv[11], sizeof(sj->sel) - 1);
+      {
+        char *q = sj->sel, *tok;
+        while ((tok = q) && *tok) {
+          char *sp = strchr(tok, ' ');
+          if (sp) { *sp = '\0'; q = sp + 1; } else q = tok + strlen(tok);
+          if (0 == strncmp(tok, "from=", 5)) {
+            ircd_strncpy(ssm->from, tok + 5, sizeof(ssm->from));
+            search_sel_unescape(ssm->from);
+          } else if (0 == strncmp(tok, "text=", 5)) {
+            search_sel_unescape(tok + 5);
+            if (tok[5])
+              ssm->text = tok + 5;
+          }
+        }
+      }
+      Debug((DEBUG_DEBUG, "CH Q S: target %s before '%s' after %lld limit %d from '%s' text '%s' reftype %d",
+             target, before_buf, (long long)ssm->after_ms, limit, ssm->from,
+             ssm->text ? ssm->text : "", (int)ref_type));
+
+      /* What the scan may not read for itself, as of now.  The presence
+       * hook's context is the filter, a copy of the requester's record
+       * (presence_query_filter_open), so the hook travels as it is. */
+      sj->job.ops = &search_job_ops;
+      sj->job.link = sptr;
+      ircd_strncpy(sj->origin_yxx, cli_yxx(sptr), sizeof(sj->origin_yxx));
+      DupString(sj->reqid, reqid);
+      DupString(sj->target, target);
+      sj->limit = limit;
+      sj->pf = fed_pf;
       fed_pf = NULL;
-      if (n < 0) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+      sj->base = *fed_hook;       /* hook and context, type mask, veto */
+      sj->base.live_inc_set = 1;
+      sj->base.live_inc = history_live_incarnation(target);
+      sj->view = history_view_open();
+      sj->base.view = sj->view;
+      if (!sj->view) {
+        /* No snapshot: the walk would have failed on it the same way. */
+        sj->count = -1;
+        search_job_done(&sj->job, 1);
         return 0;
       }
-      for (r = rows; r; r = r->next)
-        send_ch_response(sptr, reqid, r);
-      if (truncated)
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, n);
-      else
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, n);
-      history_free_messages(rows);
+      store_job_start(&sj->job);  /* may have answered and freed it already */
       return 0;
     } else if (query_subcmd_char == 'X') {
       presence_query_filter_close(fed_pf);
@@ -9758,6 +9913,17 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * wanting more asks narrower windows.  Without `in`, the channels the
  * requester is in are searched (private conversations need `in=<nick>`:
  * their keyspace is not enumerable per requester).
+ *
+ * Where the scans run.  The requester's own server scans its store here,
+ * on the main loop, before it asks the other storage servers: at most one
+ * budget per SEARCH.  It stays there because the channels of a SEARCH
+ * without `in` share that budget -- each walk starts with what the one
+ * before left -- and each channel's federated part is started, and may
+ * complete, between two of them; taking the walks off the loop means
+ * turning m_search into a state machine around the aggregate.  The other
+ * storage servers each scan a full budget per channel asked, up to
+ * SEARCH_FED_PARTS_MAX in a row for one SEARCH without `in`: those scans
+ * run on the thread pool (struct SearchJob).
  * ==================================================================== */
 
 /** Handle SEARCH (soju.im/search).  parv[1] is soju's `;`-joined attribute
