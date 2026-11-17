@@ -700,6 +700,20 @@ extern int history_redact_message(const char *target, const char *msgid);
  * @return 1 if redacted, 0 if not, -1 on error. */
 extern int history_message_is_redacted(const char *target, const char *msgid);
 
+struct HistoryView;
+/** history_message_is_redacted() for a walk through @a view
+ * (history_view_open): redacted when the view says so OR the store as it
+ * is now does.  Both are needed.  The store as it is now knows a REDACT
+ * that arrived after the view was opened.  The view knows a redaction the
+ * store has since forgotten: a trim deletes a redacted message together
+ * with its REDACT row and the index entry that links them, and the view
+ * still holds the message.  A NULL @a view is history_message_is_redacted().
+ * @return 1 if redacted in either, else -1 if either could not be read,
+ * else 0. */
+extern int history_message_is_redacted_view(struct HistoryView *view,
+                                            const char *target,
+                                            const char *msgid);
+
 /** One page's redaction lookups in one snapshot (W5 Task 15 fix round 1:
  * a page checks each context reaction it shows).  NULL with no store, or
  * when no snapshot could be taken. */
@@ -745,7 +759,8 @@ extern int history_is_available(void);
  *
  * What a thread pool worker may do with the store is this and no more:
  * history_query_before() with a filter that carries a view and the live
- * incarnation, history_message_is_redacted(), and history_view_close().
+ * incarnation, history_message_is_redacted() and its _view form, and
+ * history_view_close().
  * Those read the store's handles and nothing else of history.c's state,
  * RocksDB serves reads from any thread, and the thread's logging is muted
  * (log_thread_mute) so the walk's log lines and the backend's last-error
