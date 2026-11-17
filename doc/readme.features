@@ -1403,7 +1403,8 @@ THREAD_POOL_SIZE
 
 The number of worker threads the server starts for work that would
 otherwise hold up the main loop; 0 or less means the default.  Read once
-at start: a SET or REHASH does not resize the pool.  Two things run
+at start, from ircd.conf: a SET or REHASH does not resize the pool.  Two
+things run
 there.  Password checks (OPER, SETHOST, WEBIRC) are hashed on a worker.
 And a storage server's answer to another server's SEARCH is scanned
 there: each scan reads up to 50,000 history rows, and one SEARCH without
