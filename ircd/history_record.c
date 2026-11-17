@@ -662,30 +662,39 @@ static int iso_digits(const char *p, int n)
   return v;
 }
 
-/** Convert a client's timestamp to the store's "sec.mmm" form.  Only the
- * spec's form is taken: chathistory and read-marker say a timestamp
- * "MUST have the format timestamp=YYYY-MM-DDThh:mm:ss.sssZ, as in the
- * server-time extension" -- exactly three fractional digits, uppercase T
- * and Z, nothing after the Z.  An offset ("+00:00"), a missing Z or
- * fraction, a fraction of another length, a sign or a space in a field,
- * or a date that does not exist is refused.  Seconds run to 60: the
- * server-time spec's own example is a leap second, read as the next
- * second (timegm()).
+/** Convert an ISO 8601 UTC time to the store's "sec.mmm" form.
+ * \a strict takes only the form chathistory and read-marker require of
+ * a client: "MUST have the format timestamp=YYYY-MM-DDThh:mm:ss.sssZ,
+ * as in the server-time extension" -- exactly three fractional digits,
+ * uppercase T and Z, nothing after the Z.  Otherwise (an ISO time
+ * another server passed on, history_ref_to_unix()) the fraction may be
+ * missing or of any length (a decimal fraction: ".5" is 500 ms,
+ * ".123456" is 123 ms) and the Z may be missing: those are still
+ * unambiguous UTC, and an origin on an older build forwarded them.
+ * Either way an offset ("+00:00"), a lowercase t or z, a sign or a
+ * space in a field, anything after the Z, a date that does not exist,
+ * and a time before 1970 (no store key; it used to print as a huge
+ * unsigned value) are refused.  Seconds run to 60: the server-time
+ * spec's own example is a leap second, read as the next second.
  * @return 0 and \a unix_buf filled, or -1. */
-int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
+static int iso_to_unix(const char *iso_ts, int strict, char *unix_buf,
+                       size_t unix_buflen)
 {
   struct tm tm, check;
   time_t t;
+  const char *p;
   int year, mon, mday, hour, min, sec, millis;
 
   if (!iso_ts || !unix_buf || unix_buflen < 15)
     return -1;
 
-  /* YYYY-MM-DDThh:mm:ss.sssZ: 24 characters, then the end. */
-  if (strlen(iso_ts) != 24
+  /* YYYY-MM-DDThh:mm:ss, then (strict) .sssZ and the end. */
+  if (strlen(iso_ts) < 19
       || iso_ts[4] != '-' || iso_ts[7] != '-' || iso_ts[10] != 'T'
-      || iso_ts[13] != ':' || iso_ts[16] != ':' || iso_ts[19] != '.'
-      || iso_ts[23] != 'Z')
+      || iso_ts[13] != ':' || iso_ts[16] != ':')
+    return -1;
+  if (strict && (strlen(iso_ts) != 24 || iso_ts[19] != '.'
+                 || iso_ts[23] != 'Z'))
     return -1;
   year = iso_digits(iso_ts, 4);
   mon = iso_digits(iso_ts + 5, 2);
@@ -693,10 +702,27 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
   hour = iso_digits(iso_ts + 11, 2);
   min = iso_digits(iso_ts + 14, 2);
   sec = iso_digits(iso_ts + 17, 2);
-  millis = iso_digits(iso_ts + 20, 3);
   if (year < 0 || mon < 1 || mon > 12 || mday < 1 || mday > 31
       || hour < 0 || hour > 23 || min < 0 || min > 59
-      || sec < 0 || sec > 60 || millis < 0)
+      || sec < 0 || sec > 60)
+    return -1;
+
+  /* [.fraction][Z], then the end (strict: checked above to be .sssZ) */
+  millis = 0;
+  p = iso_ts + 19;
+  if (*p == '.') {
+    int scale = 100;
+
+    if (*++p < '0' || *p > '9')
+      return -1;
+    for (; *p >= '0' && *p <= '9'; p++) {
+      millis += (*p - '0') * scale;
+      scale /= 10;
+    }
+  }
+  if (*p == 'Z')
+    p++;
+  if (*p != '\0')
     return -1;
 
   memset(&tm, 0, sizeof(tm));
@@ -710,15 +736,27 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
       || check.tm_mday != mday || check.tm_mon != mon - 1)
     return -1;                 /* no such day (31 November, 29 February 2026) */
   t += sec;
+  if (t < 0)
+    return -1;                 /* before 1970 */
 
   ircd_snprintf(0, unix_buf, unix_buflen, "%lu.%03u",
                 (unsigned long)t, (unsigned int)millis);
   return 0;
 }
 
-/* A TIMESTAMP reference as a store key: an ISO 8601 time that converts,
+/** A client's timestamp: the spec's form only (iso_to_unix()). */
+int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
+{
+  return iso_to_unix(iso_ts, 1, unix_buf, unix_buflen);
+}
+
+/* A TIMESTAMP reference as a store key: an ISO 8601 UTC time that
+ * converts (leniently, iso_to_unix(): a CH Q from an origin on an older
+ * build carries the client's ISO text as that build's parser took it),
  * or a value already in the store's "sec.mmm" form (an S2S reference,
- * a stored row's time).  Anything else is refused.  The walks used to
+ * a stored row's time).  Client entry points check the strict form
+ * first (history_iso_to_unix()), so this leniency never reaches a
+ * client.  Anything else is refused.  The walks used to
  * take any ISO text that did not convert as if it were unix time, so an
  * offset ("+00:00") a tip requester passed through on CH Q keyed the
  * walk from the ISO text itself and returned the wrong page. */
@@ -729,7 +767,7 @@ int history_ref_to_unix(const char *ref, char *unix_buf, size_t unix_buflen)
 
   if (!ref || !unix_buf)
     return -1;
-  if (history_iso_to_unix(ref, unix_buf, unix_buflen) == 0)
+  if (iso_to_unix(ref, 0, unix_buf, unix_buflen) == 0)
     return 0;
   for (p = ref; *p >= '0' && *p <= '9'; p++)
     ;
