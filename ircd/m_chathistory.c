@@ -8218,7 +8218,27 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
     ircd_snprintf(0, sel + l, sizeof(sel) - l, "%stext=%s", l ? " " : "", esc);
   }
 
-  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), ++fed_reqid_counter);
+  /* The whole CH Q S line must fit one 510-byte P10 line: msgq cuts
+   * anything longer, and a cut inside "text=" would leave the responder
+   * a shorter selector than the user asked for, so it would answer rows
+   * that do not match.  A query that cannot fit is not federated; the
+   * caller answers it from this store.  The line is measured as sent
+   * (every destination numeric is two characters), against the same
+   * "<YY> CH " prefix and safety margin as the other CH lines. */
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me),
+                fed_reqid_counter + 1);
+  {
+    char probe[BUFSIZE * 2];
+    int len = ircd_snprintf(0, probe, sizeof(probe),
+                            "Q %s S %s %d %s %s %s P%s%s %x :%s",
+                            target, before_unix, limit, reqid, "AB",
+                            after_unix && after_unix[0] ? after_unix : "*",
+                            cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
+                            requester_type_mask(sptr), sel);
+    if (len < 0 || 6 /* "<YY> CH " */ + (size_t)len + 4 >= 510)
+      return NULL;
+  }
+  ++fed_reqid_counter;
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
   ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
   ircd_strncpy(req->target, target, sizeof(req->target) - 1);
