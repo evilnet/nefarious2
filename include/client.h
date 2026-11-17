@@ -569,6 +569,10 @@ struct Connection
                                               registration, refused after) */
   unsigned char       con_sasl_xflags;   /**< the SASL exchange in flight, for
                                               SASL_MAX_FAILURES (SASLX_*) */
+  unsigned char       con_sasl_unanswered; /**< lines of the exchange in flight
+                                              passed to services or IAuth and
+                                              not yet answered by a challenge
+                                              (sasl_turn.h) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
   char                con_label[64]; /**< Current command label for labeled-response */
@@ -1221,6 +1225,9 @@ struct Client {
 #define con_sasl_failures(con)  ((con)->con_sasl_failures)
 /** Get whether SASL_MAX_FAILURES was reached (final for the connection). */
 #define con_sasl_limited(con)   ((con)->con_sasl_limited)
+/** Get the number of the exchange's lines services or IAuth have not
+ * answered yet (sasl_turn.h). */
+#define con_sasl_unanswered(con) ((con)->con_sasl_unanswered)
 /** Get the SASLX_* marks of the connection's SASL exchange in flight. */
 #define con_sasl_xflags(con)    ((con)->con_sasl_xflags)
 /** The exchange's request has gone out to a backend (the client's
@@ -1230,6 +1237,10 @@ struct Client {
 #define SASLX_COUNTED     0x02
 /** The backend answered with a challenge: the client's turn. */
 #define SASLX_CLIENTTURN  0x04
+/** The exchange's login is being applied (sasl_login_apply()): no turn
+ * is the client's, whatever the exchange's state still says, so the
+ * registration check its own steps run must not abort it. */
+#define SASLX_COMPLETING  0x08
 /** Get the auth request for the connection. */
 #define con_auth(con)		((con)->con_auth)
 /** Get the current command label for labeled-response. */

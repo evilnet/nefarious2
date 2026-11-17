@@ -102,6 +102,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "sasl_auth.h"
+#include "sasl_turn.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -260,6 +261,37 @@ int authenticate_too_long(struct Client *cptr)
   return authenticate_end(cptr, 0);
 }
 
+/** Whether @a cptr has a SASL exchange in flight that waits for the
+ * client, not for its backend (sasl_turn_is_clients()).
+ * @param[in] cptr Local client.
+ */
+int sasl_exchange_awaits_client(struct Client *cptr)
+{
+  if (!MyConnect(cptr) || !cli_saslcookie(cptr) || IsSASLExchangeDone(cptr)
+      || (con_sasl_xflags(cli_connect(cptr)) & SASLX_COMPLETING))
+    return 0;
+  return sasl_turn_is_clients(
+      cli_saslsession(cptr) != NULL,
+      cli_saslsession(cptr)
+        && cli_saslsession(cptr)->state == SASL_STATE_WAITING_KC,
+      con_sasl_unanswered(cli_connect(cptr)));
+}
+
+/** The client completed registration while its exchange waits for it:
+ * abort the exchange in the tier that holds it, answer 906 (904 after a
+ * local error challenge), and let registration go on without a login.
+ * SASL 3.1: "If the client completes registration (with CAP END, NICK,
+ * USER and any other necessary messages) while the SASL authentication
+ * is still in progress, the server SHOULD abort it and send a 906
+ * numeric, then register the client without authentication."
+ * @return What resuming registration did to @a cptr (CPTR_KILLED when it
+ * exited or freed it).
+ */
+int sasl_abort_for_registration(struct Client *cptr)
+{
+  return authenticate_end(cptr, 1);
+}
+
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
@@ -341,6 +373,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
 
     EndSASLExchange(cptr);    /* a new exchange: a re-authentication if set below */
     con_sasl_xflags(cli_connect(cptr)) = 0;   /* nothing sent, nothing counted */
+    con_sasl_unanswered(cli_connect(cptr)) = 0;
 
     /* SASL_MAX_FAILURES, as it is now (a lowered value applies here too).
      * Before registration the connection is closed, as at the failure
@@ -457,6 +490,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
         return cli_auth(cptr) ? auth_sasl_done(cli_auth(cptr)) : 0;
       }
 
+      sasl_turn_line_out(&con_sasl_unanswered(cli_connect(cptr)));
+
       /* Send host info if configured */
       if (feature_bool(FEAT_SASL_SENDHOST))
         auth_send_sasl_host(cptr, cli_username(cptr), realhost, cli_sock_ip(cptr));
@@ -468,6 +503,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       /* The client's data went out to IAuth (SASL_MAX_FAILURES) */
       con_sasl_xflags(cli_connect(cptr)) |= SASLX_SENT;
       con_sasl_xflags(cli_connect(cptr)) &= ~SASLX_CLIENTTURN;
+      if (sasl_line_ends_message(parv[1]))   /* a response is answered once */
+        sasl_turn_line_out(&con_sasl_unanswered(cli_connect(cptr)));
     }
 
     /* The program went away as the line was sent: the exchange has
@@ -548,6 +585,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       else
         sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S :%s", acptr, &me,
                       cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+      sasl_turn_line_out(&con_sasl_unanswered(cli_connect(cptr)));
       if (feature_bool(FEAT_SASL_SENDHOST))
         sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u H :%s@%s:%s", acptr, &me,
                       cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
@@ -557,6 +595,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
                     cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
       con_sasl_xflags(cli_connect(cptr)) |= SASLX_SENT;   /* to services */
       con_sasl_xflags(cli_connect(cptr)) &= ~SASLX_CLIENTTURN;
+      if (sasl_line_ends_message(parv[1]))   /* a response is answered once */
+        sasl_turn_line_out(&con_sasl_unanswered(cli_connect(cptr)));
     }
   } else {
     if (first) {
@@ -569,6 +609,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       else
         sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S :%s", &me,
                               cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+      sasl_turn_line_out(&con_sasl_unanswered(cli_connect(cptr)));
       if (feature_bool(FEAT_SASL_SENDHOST))
         sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u H :%s@%s:%s", &me,
                               cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
@@ -578,6 +619,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
                             cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
       con_sasl_xflags(cli_connect(cptr)) |= SASLX_SENT;   /* to services */
       con_sasl_xflags(cli_connect(cptr)) &= ~SASLX_CLIENTTURN;
+      if (sasl_line_ends_message(parv[1]))   /* a response is answered once */
+        sasl_turn_line_out(&con_sasl_unanswered(cli_connect(cptr)));
     }
   }
 

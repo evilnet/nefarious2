@@ -224,6 +224,9 @@ int exit_client_msg(struct Client *cptr, struct Client *bcptr,
 
 /* What the code under test reaches on the way, none of it of interest. */
 int abort_sasl(struct Client *cptr, int timeout) { return 0; }
+/* m_authenticate.c (not linked): no exchange here waits for the client. */
+int sasl_exchange_awaits_client(struct Client *cptr) { return 0; }
+int sasl_abort_for_registration(struct Client *cptr) { fail(); return 0; }
 void geoip_apply(struct Client *cptr) {}
 int find_kill(struct Client *cptr) { return 0; }
 void authtoken_note_pass(struct Client *cptr) {}

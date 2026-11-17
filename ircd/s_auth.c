@@ -72,6 +72,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "sasl_auth.h"
+#include "sasl_turn.h"
 #include "send.h"
 #include "ssl.h"
 
@@ -648,6 +649,19 @@ static int check_auth_finished(struct AuthRequest *auth)
       && !FlagHas(&auth->flags, AR_SASL_PENDING))
     return exit_client(cptr, cptr, &me, "Too many SASL failures");
 
+  /* The client completed registration (CAP END, NICK, USER, ...) while
+   * its SASL exchange waits for it: abort the exchange with 906 and
+   * register it without a login (SASL 3.1), instead of holding
+   * registration until the exchange times out.  An exchange whose request
+   * is with the backend still holds it: the answer comes on its own. */
+  if (FlagHas(&auth->flags, AR_SASL_PENDING) && cptr && IsUserPort(cptr)) {
+    for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
+      if (flag != AR_SASL_PENDING && FlagHas(&auth->flags, flag))
+        break;
+    if (flag > AR_LAST_SCAN && sasl_exchange_awaits_client(cptr))
+      return sasl_abort_for_registration(cptr);
+  }
+
   /* Check non-iauth registration blocking flags. */
   for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
     if (FlagHas(&auth->flags, flag))
@@ -1033,6 +1047,15 @@ static void auth_recheck_callback(struct Event *ev)
  * result to its parser.
  * @param[in] auth Authorization request of a client.
  */
+void sasl_client_turn_check(struct Client *cptr)
+{
+  struct AuthRequest *auth;
+
+  if (cptr && MyConnect(cptr) && (auth = cli_auth(cptr))
+      && FlagHas(&auth->flags, AR_SASL_PENDING))
+    auth_recheck_later(auth);
+}
+
 void auth_recheck_later(struct AuthRequest *auth)
 {
   assert(auth != NULL);
@@ -4209,8 +4232,13 @@ static int iauth_cmd_sasl_challenge(struct IAuth *iauth, struct Client *cli,
 
   /* Forward challenge to client */
   sendrawto_one(cli, "AUTHENTICATE %s", params[0]);
-  /* IAuth answered: the client's turn (SASL_MAX_FAILURES) */
-  con_sasl_xflags(cli_connect(cli)) |= SASLX_CLIENTTURN;
+  /* IAuth answered: the client's turn (SASL_MAX_FAILURES) once no line
+   * of its is left unanswered, on a challenge's last line (sasl_turn.h) */
+  if (sasl_line_ends_message(params[0])
+      && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(cli)))) {
+    con_sasl_xflags(cli_connect(cli)) |= SASLX_CLIENTTURN;
+    sasl_client_turn_check(cli);
+  }
   return 0;
 }
 

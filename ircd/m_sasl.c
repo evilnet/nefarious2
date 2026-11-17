@@ -101,6 +101,7 @@
 #include "s_user.h"
 #include "metadata.h"
 #include "sasl_auth.h"
+#include "sasl_turn.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -270,8 +271,16 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (reply[0] == 'C') {
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     /* services answered: the client's turn (SASL_MAX_FAILURES: a timeout
-     * from here is the client's) */
-    con_sasl_xflags(cli_connect(acptr)) |= SASLX_CLIENTTURN;
+     * from here is the client's) once no line of its is left unanswered
+     * -- a client that sent its response before this challenge (pipelined
+     * credentials) still waits for services' answer to it.  A challenge
+     * of 400 bytes or more comes in several lines: its last one hands
+     * the turn over */
+    if (sasl_line_ends_message(data)
+        && sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(acptr)))) {
+      con_sasl_xflags(cli_connect(acptr)) |= SASLX_CLIENTTURN;
+      sasl_client_turn_check(acptr);
+    }
     return 0;
   } else if (reply[0] == 'L') {
     /* A logged-in client's re-authentication that services answer with an

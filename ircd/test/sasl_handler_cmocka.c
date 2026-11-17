@@ -72,6 +72,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "sasl_auth.h"
+#include "sasl_turn.h"
 #include "send.h"
 
 #ifdef USE_LIBKC
@@ -118,6 +119,9 @@ struct fake {
   int checks_unheld_in_login; /**< checks from auth_set_account() with no
                                    hold, inside sasl_complete_login() */
   int touched_after_free;     /**< a stub was handed it once freed */
+  int awaited_in_set_account; /**< auth_set_account() ran while the
+                                   exchange still looked the client's turn
+                                   (check_auth_finished() would abort it) */
   int numerics[16];           /**< numerics sent to it, in order */
   int n_numerics;
   char raw[600];              /**< the last raw line sent to it */
@@ -380,12 +384,21 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
   tlog_add("iauth R %s", account);      /* both forms tell IAuth the same */
   if (in_login && !f->hold)
     f->checks_unheld_in_login++;
+  if (sasl_exchange_awaits_client(&f->cli))
+    f->awaited_in_set_account++;
   return registration_check(f);
 }
 
 void auth_recheck_later(struct AuthRequest *auth)
 {
   fake_of_auth(auth)->recheck_queued = 1;
+}
+
+/* As s_auth.c: a check owed from the loop while the hold stands. */
+void sasl_client_turn_check(struct Client *cptr)
+{
+  if (cli_auth(cptr) && fake_of_auth(cli_auth(cptr))->hold)
+    fake_of_auth(cli_auth(cptr))->recheck_queued = 1;
 }
 
 void auth_set_account_later(struct AuthRequest *auth, const char *account)
@@ -4279,6 +4292,151 @@ static void star_abort_services_exchange(void **state)
   assert_no_exchange(c);
 }
 
+/** Registering mid-exchange (SASL 3.1, "the server SHOULD abort it and
+ * send a 906 numeric, then register the client"): a local exchange
+ * waiting for the client's data is the client's turn; the abort answers
+ * 906, ends the exchange and drops the hold, and registration runs. */
+static void registration_aborts_local_exchange_awaiting_client(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(150, "rga", 1, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_true(sasl_exchange_awaits_client(c));
+  assert_int_equal(sasl_abort_for_registration(c), 0);
+  assert_true(has_numeric(f, ERR_SASLABORTED));
+  assert_no_exchange(c);
+}
+
+/** ... and when registration exits the client, that is returned. */
+static void registration_abort_returns_registration_exit(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(151, "rgb", 1, REG_EXITS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(sasl_abort_for_registration(c), CPTR_KILLED);
+  assert_true(f->freed);
+  assert_int_equal(f->touched_after_free, 0);
+}
+
+/** A local exchange whose credentials are with Keycloak is the backend's
+ * turn: registration waits for the answer, as before. */
+static void registration_waits_for_keycloak(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  c = new_client(152, "rgc", 1, REG_KEEPS);
+  plain_pending(c, "rgc", "pw");
+  assert_false(sasl_exchange_awaits_client(c));
+  pend_deliver_kind(P_TOKEN, KC_SUCCESS);   /* the answer ends it */
+  assert_false(sasl_exchange_awaits_client(c));
+}
+
+/** Services: AUTHENTICATE PLAIN went out, and is services' to answer;
+ * once their "+" answers it (ms_sasl), it is the client's turn, and the
+ * abort tells services and answers 906. */
+static void registration_aborts_services_exchange(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  local_off = 1;
+  c = new_client(153, "rgd", 0, REG_KEEPS);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_false(sasl_exchange_awaits_client(c));          /* services' turn */
+  assert_true(sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(c))));
+  assert_true(sasl_exchange_awaits_client(c));
+  assert_int_equal(sasl_abort_for_registration(c), 0);
+  assert_int_equal(abort_reply, SASL_ABORT_REPLY_ABORTED);
+  assert_no_exchange(c);
+}
+
+/** Services, a response of 400 bytes or more: it goes out as several
+ * lines and services answer it once.  Their challenge to it is the
+ * client's turn, and registering then aborts (not held to the timeout). */
+static void chunked_response_answered_once(void **state)
+{
+  struct Client *c;
+  char chunk[401];
+
+  sasl_init_once();
+  local_off = 1;
+  c = new_client(157, "rgh", 0, REG_KEEPS);
+  memset(chunk, 'A', 400);
+  chunk[400] = '\0';
+  assert_int_equal(authenticate(c, "OAUTHBEARER"), 0);
+  assert_true(sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(c))));
+  assert_int_equal(authenticate(c, chunk), 0);
+  assert_int_equal(authenticate(c, chunk), 0);
+  assert_int_equal(authenticate(c, "AAAA"), 0);
+  assert_false(sasl_exchange_awaits_client(c));          /* services' turn */
+  assert_true(sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(c))));
+  assert_true(sasl_exchange_awaits_client(c));
+  assert_int_equal(sasl_abort_for_registration(c), 0);
+  assert_int_equal(abort_reply, SASL_ABORT_REPLY_ABORTED);
+  assert_no_exchange(c);
+}
+
+/** A login that completes in the client's own AUTHENTICATE (a local
+ * mechanism answered at once: a cached PLAIN, a local OAUTHBEARER, ...)
+ * is no exchange waiting for the client: the registration check its
+ * step 3 runs (auth_set_account()) must not abort the login it is part
+ * of, and the client registers logged in. */
+static void completing_login_is_not_aborted(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+
+  sasl_init_once();
+  c = new_client(156, "rgg", 1, REG_KEEPS);
+  f = fake_of(c);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_true(sasl_exchange_awaits_client(c));      /* the client's turn */
+  assert_int_equal(sasl_complete_login(c, "rgg", 0, NULL, 0), 0);
+  assert_int_equal(f->awaited_in_set_account, 0);
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_false(has_numeric(f, ERR_SASLABORTED));
+  assert_int_equal(f->registered, 1);
+  assert_false(sasl_exchange_awaits_client(c));
+}
+
+/** Services, pipelined credentials: PLAIN and the credentials went out
+ * before services' "+"; that "+" answers the mechanism, and the
+ * credentials are still services' to answer -- not the client's turn,
+ * so a client that registered meanwhile keeps waiting for its login. */
+static void pipelined_credentials_stay_with_services(void **state)
+{
+  struct Client *c;
+  char data[300];
+
+  sasl_init_once();
+  local_off = 1;
+  c = new_client(155, "rgf", 0, REG_KEEPS);
+  plain_b64("rgf", "pw", data);
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_int_equal(authenticate(c, data), 0);
+  assert_false(sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(c))));
+  assert_false(sasl_exchange_awaits_client(c));
+}
+
+/** No exchange: nothing awaits the client. */
+static void no_exchange_awaits_nothing(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  c = new_client(154, "rge", 1, REG_KEEPS);
+  assert_false(sasl_exchange_awaits_client(c));
+}
+
 /** e. account-notify (#220): a login after connection registration -- a
  * SASL PLAIN, a REGISTER -- tells the user itself ("including
  * themselves"), once; before registration nothing is sent (the
@@ -6169,6 +6327,14 @@ int main(void)
     cmocka_unit_test_setup(toolong_ends_services_exchange, setup),
     cmocka_unit_test_setup(toolong_services_registration_exits, setup),
     cmocka_unit_test_setup(star_abort_services_exchange, setup),
+    cmocka_unit_test_setup(registration_aborts_local_exchange_awaiting_client, setup),
+    cmocka_unit_test_setup(registration_abort_returns_registration_exit, setup),
+    cmocka_unit_test_setup(registration_waits_for_keycloak, setup),
+    cmocka_unit_test_setup(registration_aborts_services_exchange, setup),
+    cmocka_unit_test_setup(no_exchange_awaits_nothing, setup),
+    cmocka_unit_test_setup(pipelined_credentials_stay_with_services, setup),
+    cmocka_unit_test_setup(completing_login_is_not_aborted, setup),
+    cmocka_unit_test_setup(chunked_response_answered_once, setup),
     cmocka_unit_test_setup(toolong_ends_iauth_exchange, setup),
 #endif
     cmocka_unit_test_setup(held_during_webirc_check_then_replayed, setup),

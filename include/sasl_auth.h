@@ -160,6 +160,21 @@ extern void sasl_failure_count(struct Client *cptr);
  *  never went out. */
 extern void sasl_exchange_abandoned(struct Client *cptr, int timeout);
 
+/** Whether our client \a cptr has an exchange in flight that waits for
+ *  the client, not for its backend (m_authenticate.c). */
+extern int sasl_exchange_awaits_client(struct Client *cptr);
+
+/** Abort \a cptr's exchange because it completed registration mid-way:
+ *  906, then registration goes on (SASL 3.1).  Returns what that did to
+ *  \a cptr (CPTR_KILLED when it exited). */
+extern int sasl_abort_for_registration(struct Client *cptr);
+
+/** Owe our client \a cptr a registration check from the event loop when
+ *  its exchange has just turned to the client (a challenge went out):
+ *  if it completed registration meanwhile, the check aborts the exchange
+ *  (sasl_abort_for_registration()). */
+extern void sasl_client_turn_check(struct Client *cptr);
+
 /** SASL_REAUTH: what a logged-in SASL 3.2 (CAP LS 302) client's
  *  re-authentication may do.  A client that never sent CAP LS 302 cannot
  *  re-authenticate at all (m_authenticate()). */

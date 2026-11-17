@@ -93,6 +93,7 @@ CMOCKA_TESTPROGS = \
 	cap_notify_cmocka \
 	markread_wire_cmocka \
 	markread_join_cmocka \
+	sasl_turn_cmocka \
 	rename_proto_cmocka \
 	chathistory_ref_cmocka \
 	rename_handlers_cmocka \
@@ -215,6 +216,7 @@ DEP_SRC = \
 	cap_notify_cmocka.c \
 	markread_wire_cmocka.c \
 	markread_join_cmocka.c \
+	sasl_turn_cmocka.c \
 	rename_proto_cmocka.c \
 	chathistory_ref_cmocka.c \
 	rename_handlers_cmocka.c \
@@ -669,6 +671,11 @@ MARKREAD_JOIN_CMOCKA_OBJS = markread_join_cmocka.o ../m_markread.o \
 	../ircd_snprintf.o ../ircd_string.o ../ircd_alloc.o
 markread_join_cmocka: $(MARKREAD_JOIN_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(MARKREAD_JOIN_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# sasl_turn tests - whose turn a SASL exchange in flight is, which
+# decides whether registering mid-exchange aborts it (sasl_turn.h; pure)
+SASL_TURN_CMOCKA_OBJS = sasl_turn_cmocka.o
+sasl_turn_cmocka: $(SASL_TURN_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SASL_TURN_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # rename_proto tests - the argument-only parts of channel RENAME: the
 # services query cookie codec ("<numeric>.<n>") and the rules a rename's
