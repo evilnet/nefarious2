@@ -1040,12 +1040,12 @@ static void auth_recheck_callback(struct Event *ev)
   iauth_held_report();
 }
 
-/** Owe \a auth a registration check from the event loop.  For a Keycloak
- * answer that has just released what held registration, and for a client
- * held by an IAuth program that went away (see above); never for a
- * handler's own synchronous path, which checks at once and returns the
- * result to its parser.
- * @param[in] auth Authorization request of a client.
+/** The turn of \a cptr's SASL exchange may have passed to the client:
+ * owe it a registration check (auth_recheck_later()), so a client that
+ * already completed registration has its exchange aborted
+ * (sasl_abort_for_registration()).  Always deferred, so it is safe inside
+ * a backend callback that runs within another client's line.
+ * @param[in] cptr Client whose exchange changed hands.
  */
 void sasl_client_turn_check(struct Client *cptr)
 {
@@ -1056,6 +1056,13 @@ void sasl_client_turn_check(struct Client *cptr)
     auth_recheck_later(auth);
 }
 
+/** Owe \a auth a registration check from the event loop.  For a Keycloak
+ * answer that has just released what held registration, and for a client
+ * held by an IAuth program that went away (see above); never for a
+ * handler's own synchronous path, which checks at once and returns the
+ * result to its parser.
+ * @param[in] auth Authorization request of a client.
+ */
 void auth_recheck_later(struct AuthRequest *auth)
 {
   assert(auth != NULL);

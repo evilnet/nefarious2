@@ -4359,6 +4359,32 @@ static void registration_aborts_services_exchange(void **state)
   assert_no_exchange(c);
 }
 
+/** An abort at registration is the server's, not the client's failure:
+ * with the credentials already with services and their challenge back
+ * (SCRAM's client-first), registering aborts the exchange without
+ * counting toward SASL_MAX_FAILURES, so a limit of 1 does not close the
+ * connection SASL 3.1 says to register. */
+static void registration_abort_is_not_a_failure(void **state)
+{
+  struct Client *c;
+
+  sasl_init_once();
+  local_off = 1;
+  max_failures = 1;
+  c = new_client(158, "rgi", 0, REG_KEEPS);
+  assert_int_equal(authenticate(c, "SCRAM-SHA-256"), 0);
+  assert_true(sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(c))));
+  assert_int_equal(authenticate(c, "AAAA"), 0);      /* client-first goes out */
+  assert_true(con_sasl_xflags(cli_connect(c)) & SASLX_SENT);
+  assert_true(sasl_turn_challenge_in(&con_sasl_unanswered(cli_connect(c))));
+  assert_true(sasl_exchange_awaits_client(c));
+  assert_int_equal(sasl_abort_for_registration(c), 0);
+  assert_int_equal(abort_reply, SASL_ABORT_REPLY_ABORTED);
+  assert_int_equal(cli_sasl_failures(c), 0);
+  assert_false(con_sasl_limited(cli_connect(c)));
+  assert_no_exchange(c);
+}
+
 /** Services, a response of 400 bytes or more: it goes out as several
  * lines and services answer it once.  Their challenge to it is the
  * client's turn, and registering then aborts (not held to the timeout). */
@@ -6331,6 +6357,7 @@ int main(void)
     cmocka_unit_test_setup(registration_abort_returns_registration_exit, setup),
     cmocka_unit_test_setup(registration_waits_for_keycloak, setup),
     cmocka_unit_test_setup(registration_aborts_services_exchange, setup),
+    cmocka_unit_test_setup(registration_abort_is_not_a_failure, setup),
     cmocka_unit_test_setup(no_exchange_awaits_nothing, setup),
     cmocka_unit_test_setup(pipelined_credentials_stay_with_services, setup),
     cmocka_unit_test_setup(completing_login_is_not_aborted, setup),

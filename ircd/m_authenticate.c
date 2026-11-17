@@ -191,12 +191,16 @@ int authenticate_replay(struct Client *cptr)
  * gets 906 (904 after a local error challenge, RFC 7628 3.2.3); else the
  * caller has sent the failure numeric itself (905) and nothing more goes.
  * IAuth and services are told to drop their side (A X, SASL D A), as for
- * an abort.
+ * an abort.  @a for_registration: the abort is the server's, at
+ * registration (sasl_abort_for_registration()): it counts as no failure
+ * (SASL_MAX_FAILURES), so it can never close the connection the client is
+ * completing -- SASL 3.1 registers that client without authentication.
  * @return What resuming registration did to @a cptr (CPTR_KILLED when it
  * exited or freed it): the handler's own result, nothing may touch
  * @a cptr after it.
  */
-static int authenticate_end(struct Client *cptr, int client_abort)
+static int authenticate_end(struct Client *cptr, int client_abort,
+                            int for_registration)
 {
   /* Only an exchange in progress: a cookie whose exchange has not
    * completed -- a REGISTER login meanwhile, or the completed login a
@@ -209,7 +213,7 @@ static int authenticate_end(struct Client *cptr, int client_abort)
   /* The client abandons an exchange its credentials already went out for
    * (SASL_MAX_FAILURES; once per exchange).  A refused token's end is
    * counted below, and not at all when Keycloak could not be asked. */
-  if (client_abort && !(cli_saslsession(cptr)
+  if (client_abort && !for_registration && !(cli_saslsession(cptr)
                         && cli_saslsession(cptr)->state == SASL_STATE_FAILED))
     sasl_exchange_abandoned(cptr, 0);
 
@@ -221,7 +225,7 @@ static int authenticate_end(struct Client *cptr, int client_abort)
       if (cli_saslsession(cptr)->state == SASL_STATE_FAILED) {
         /* The end of a refused token: counted, unless Keycloak could not
          * be asked (SASL_MAX_FAILURES). */
-        if (!cli_saslsession(cptr)->fail_unavailable)
+        if (!cli_saslsession(cptr)->fail_unavailable && !for_registration)
           sasl_failure_count(cptr);
         send_reply(cptr, ERR_SASLFAIL, "");
       }
@@ -258,7 +262,7 @@ int authenticate_too_long(struct Client *cptr)
   if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr))
     sasl_failure_count(cptr);
   send_reply(cptr, ERR_SASLTOOLONG);
-  return authenticate_end(cptr, 0);
+  return authenticate_end(cptr, 0, 0);
 }
 
 /** Whether @a cptr has a SASL exchange in flight that waits for the
@@ -289,7 +293,7 @@ int sasl_exchange_awaits_client(struct Client *cptr)
  */
 int sasl_abort_for_registration(struct Client *cptr)
 {
-  return authenticate_end(cptr, 1);
+  return authenticate_end(cptr, 1, 1);
 }
 
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
@@ -334,7 +338,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       authenticate_held_free(cli_connect(cptr));
       return send_reply(cptr, ERR_SASLABORTED);
     }
-    return authenticate_end(cptr, 1);
+    return authenticate_end(cptr, 1, 0);
   }
 
   /* A WEBIRC check still out: no exchange starts on the gateway's address
