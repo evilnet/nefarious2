@@ -29,6 +29,7 @@
 #include "channel.h"
 #include "client.h"
 #include "gline.h"
+#include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
@@ -196,6 +197,11 @@ int ms_svsjoin(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       send_reply(acptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
 		 chptr->topic_time);
     }
+
+    /* An account's JOIN replies, MARKREAD included, come from
+     * bounce_send_alias_join_replies() (joinbuf_join()). */
+    if (!IsAccount(acptr))
+      send_markread_on_join(acptr, chptr->chname);
 
     /* Skip implicit NAMES if client has no-implicit-names capability
      * (ratified 2026-03-18; accept legacy draft/ form too). */

@@ -23,6 +23,7 @@
  *
  * Client Protocol (ISO 8601 timestamps per IRCv3 spec):
  *   MARKREAD <target> [timestamp=YYYY-MM-DDThh:mm:ss.sssZ]
+ *   (from the server: MARKREAD <target> timestamp=... or MARKREAD <target> *)
  *
  * Nefarious is authoritative for read markers. Storage is in the metadata
  * LMDB environment (available on all servers), synchronized via P10 MR token.
@@ -51,6 +52,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "markread_wire.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -241,7 +243,8 @@ static int parse_timestamp_param(const char *arg, char *unix_ts, size_t tslen)
  * @param[in] target Channel or nick.
  * @param[in] unix_ts Unix timestamp (or "*" if unknown).
  * @param[in] respond Non-zero when the line answers \a to's own MARKREAD:
- *   it carries that command's label (sendcmdto_one_event()).
+ *   it carries that command's label (sendcmdto_one_event()).  A JOIN's
+ *   MARKREAD goes through send_join_markread() instead.
  */
 static void send_markread(struct Client *to, const char *target, const char *unix_ts,
                           int respond)
@@ -249,12 +252,15 @@ static void send_markread(struct Client *to, const char *target, const char *uni
   char iso_ts[32];
   const char *ts;
 
-  /* Format: MARKREAD <target> timestamp=<ts>
-   * The timestamp can be "*" if unknown.
-   */
-  if (!unix_ts || !*unix_ts || *unix_ts == '*')
-    ts = "*";
-  else if (history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0)
+  /* Format: MARKREAD <target> timestamp=<ts>, or MARKREAD <target> *
+   * when no timestamp is known: "If there is no known last message read
+   * timestamp, the timestamp parameter is a literal `*`" (never
+   * "timestamp=*"). */
+  if (markread_ts_unknown(unix_ts)) {
+    sendcmdto_one_event(&me, CMD_MARKREAD, to, respond, "%s *", target);
+    return;
+  }
+  if (history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0)
     ts = iso_ts;
   else
     ts = unix_ts;   /* Conversion failed - send as-is (might already be ISO or invalid) */
@@ -305,6 +311,26 @@ static void notify_local_clients(const char *account, const char *target, const 
 
 /* X3 dependency removed - Nefarious is authoritative for read markers */
 
+/** The key a client's read markers are kept under: its account when it
+ * has one (persistent, shared by its connections and relayed S2S), else
+ * its session id (ephemeral, this connection only).
+ * @param[in] sptr A local user.
+ * @param[out] is_session Set to 1 for a session id, 0 for an account.
+ * @return The key, or NULL when the client has neither.
+ */
+static const char *markread_anchor(struct Client *sptr, int *is_session)
+{
+  if (cli_user(sptr) && cli_user(sptr)->account[0]) {
+    *is_session = 0;
+    return cli_user(sptr)->account;
+  }
+  if (cli_session_id(sptr)[0]) {
+    *is_session = 1;
+    return cli_session_id(sptr);
+  }
+  return NULL;
+}
+
 /** m_markread - Handle MARKREAD command from local client.
  *
  * parv[0] = sender prefix
@@ -338,13 +364,7 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * markers use the persistent metadata-LMDB path with MR broadcast.
    * is_session toggles between the two paths in the SET/GET blocks
    * below. */
-  if (cli_user(sptr) && cli_user(sptr)->account[0]) {
-    account = cli_user(sptr)->account;
-    is_session = 0;
-  } else if (cli_session_id(sptr)[0]) {
-    account = cli_session_id(sptr);
-    is_session = 1;
-  } else {
+  if (!(account = markread_anchor(sptr, &is_session))) {
     send_fail(sptr, "MARKREAD", "ACCOUNT_REQUIRED", NULL,
               "MARKREAD requires either an authenticated account or "
               "a session ID");
@@ -370,12 +390,22 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* A second parameter that is not "timestamp=..." -- the literal `*`
+   * included, which a client set command "MUST NOT" use -- is invalid,
+   * not a get. */
+  if (markread_arg_kind(parc, parc >= 3 ? parv[2] : NULL)
+      == MARKREAD_ARG_INVALID) {
+    send_fail(sptr, "MARKREAD", "INVALID_PARAMS", markread_fail_context(parv[2]),
+              "Invalid timestamp (expected timestamp=YYYY-MM-DDThh:mm:ss.sssZ)");
+    return 0;
+  }
+
   /* Check if timestamp parameter is present */
-  if (parc >= 3 && parv[2] && ircd_strncmp(parv[2], "timestamp=", 10) == 0) {
+  if (markread_arg_kind(parc, parc >= 3 ? parv[2] : NULL) == MARKREAD_ARG_SET) {
     /* Timestamp parameter provided - must be valid format for SET operation */
     if (!parse_timestamp_param(parv[2], timestamp, sizeof(timestamp))) {
       /* Invalid timestamp format */
-      send_fail(sptr, "MARKREAD", "INVALID_PARAMS", parv[2],
+      send_fail(sptr, "MARKREAD", "INVALID_PARAMS", markread_fail_context(parv[2]),
                 "Invalid timestamp format (expected ISO 8601)");
       return 0;
     }
@@ -567,6 +597,30 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   return 0;
 }
 
+/** Send the MARKREAD that is one of a JOIN's replies.  It is tagged as
+ * the TOPIC and NAMES around it are (sendrawto_one_answer()): with the
+ * batch open on \a to -- the JOIN's labeled batch, or the
+ * draft/persistence batch of a session's replay, which
+ * sendcmdto_one_event() would leave it out of -- else with the label of
+ * \a to's own JOIN.
+ * @param[in] to Client to send to.
+ * @param[in] target Channel name.
+ * @param[in] unix_ts Unix timestamp, or "*" when none is known.
+ */
+static void send_join_markread(struct Client *to, const char *target,
+                               const char *unix_ts)
+{
+  char iso_ts[32];
+
+  if (markread_ts_unknown(unix_ts))
+    sendrawto_one_answer(to, ":%s MARKREAD %s *", cli_name(&me), target);
+  else
+    sendrawto_one_answer(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me),
+                         target,
+                         history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0
+                         ? iso_ts : unix_ts);
+}
+
 /** Send MARKREAD for a target to a client after JOIN.
  * Called from m_join.c after sending JOIN but before RPL_ENDOFNAMES.
  * @param[in] sptr Client to send to.
@@ -576,28 +630,31 @@ void send_markread_on_join(struct Client *sptr, const char *target)
 {
   const char *account;
   char stored_ts[MARKREAD_TS_LEN];
-  int rc;
+  int is_session;
 
   /* Only for clients with draft/read-marker capability */
   if (!CapActive(sptr, CAP_DRAFT_READMARKER))
     return;
 
-  /* Must be logged in */
-  if (!cli_user(sptr) || !cli_user(sptr)->account[0])
-    return;
-
-  /* Check if readmarker storage is available (metadata LMDB) */
-  if (!metadata_lmdb_is_available())
-    return;
-
-  account = cli_user(sptr)->account;
-
-  /* Part of the JOIN's replies, not the answer to a MARKREAD. */
-  rc = metadata_readmarker_get(account, target, stored_ts);
-  if (rc == 0) {
-    send_markread(sptr, target, stored_ts, 0);
-  } else {
-    /* No stored marker - send "*" */
-    send_markread(sptr, target, "*", 0);
-  }
+  /* "after the server sends a server JOIN command to the client for a
+   * corresponding channel, the server MUST send a MARKREAD command for
+   * that channel": every client with the cap gets one, `*` when no
+   * timestamp is known.  A client without an account keeps its markers
+   * under its session id (m_markread()), so its join reports those;
+   * this used to send nothing at all to such a client.
+   *
+   * It is one of the JOIN's replies, so it is tagged as the TOPIC and
+   * NAMES around it are (send_join_markread()). */
+  account = markread_anchor(sptr, &is_session);
+  if (!account)
+    send_join_markread(sptr, target, "*");
+  else if (is_session)
+    send_join_markread(sptr, target,
+                       session_markread_get(account, target, stored_ts) == 0
+                       ? stored_ts : "*");
+  else if (metadata_lmdb_is_available()
+           && metadata_readmarker_get(account, target, stored_ts) == 0)
+    send_join_markread(sptr, target, stored_ts);
+  else
+    send_join_markread(sptr, target, "*");
 }

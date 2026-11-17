@@ -32,6 +32,7 @@
 #include "client.h"
 #include "destruct_event.h"
 #include "gline.h"
+#include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_events.h"
@@ -1002,6 +1003,7 @@ static void send_rename_to_member(struct Client *sptr, struct Client *acptr,
       send_reply(acptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
                  chptr->topic_time);
     }
+    send_markread_on_join(acptr, chptr->chname);
     do_names(acptr, chptr, NAMES_ALL|NAMES_EON);
   }
 }
