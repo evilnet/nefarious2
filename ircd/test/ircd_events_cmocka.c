@@ -643,13 +643,22 @@ static void error_raised_while_deleting_is_dropped(void **state)
   assert_int_equal(p.calls, 0);
 }
 
-/* DIE in the middle of a batch: the loop stops at once and forgets the
- * rest of the batch.  The engine frees its event array on the way out, so
+/* DIE in the middle of a batch: the loop stops at once -- no other
+ * handler of the batch, no timer -- and forgets the rest of the batch.  The engine frees its event array on the way out, so
  * a socket deleted afterwards (the exit path closes what is left) must not
  * walk entries that are no longer there. */
+static int late_timer_runs;
+
+static void late_timer(struct Event *ev)
+{
+  if (ev_type(ev) == ET_EXPIRE)
+    late_timer_runs++;
+}
+
 static void socket_deleted_after_die_mid_batch(void **state)
 {
   struct probe a, b;
+  struct Timer late;
 
   (void)state;
   probe_open(&a);
@@ -657,12 +666,17 @@ static void socket_deleted_after_die_mid_batch(void **state)
   a.stop_on_read = b.stop_on_read = 1;
   assert_int_equal(write(a.peer, "x", 1), 1);
   assert_int_equal(write(b.peer, "x", 1), 1);
+  CurrentTime = time(NULL);
+  late_timer_runs = 0;
+  timer_add(timer_init(&late), late_timer, NULL, TT_RELATIVE, 0);
 
   running = 1;
   event_loop();                 /* one read, then DIE: the other is left */
   running = 1;
 
-  assert_int_equal(a.calls + b.calls, 1);
+  assert_int_equal(a.calls + b.calls, 1);   /* no second handler */
+  assert_int_equal(late_timer_runs, 0);     /* and no timer after DIE */
+  timer_del(&late);
   probe_close(&a);              /* walks the engine's batch */
   probe_close(&b);
 }
