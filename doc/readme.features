@@ -2145,9 +2145,11 @@ existing configurations still load.
 
 PERSISTENCE_DRAFT_EXTRAS
  * Type: boolean
- * Default: TRUE
+ * Default: FALSE
 
-A transition for clients written before the PERSISTENCE extras were
+Off by default: clients are expected to request the vendor capability.
+Turn it on for a network whose clients still need the old names.  A
+transition for clients written before the PERSISTENCE extras were
 announced by 'evilnet.github.io/persistence'.  While TRUE, such a client
 sees the names it was written against: 'draft/persistence' carries the
 extras' value too (where such clients read attach-cursor), and a

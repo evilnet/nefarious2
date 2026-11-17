@@ -1537,7 +1537,7 @@ static struct FeatureDesc {
   F_I(BOUNCER_RESTORE_CRASH_WINDOW, 0, 600, feature_notify_bouncer_restore_crash_window), /* a start that dies sooner after restoring sessions does not get them back at the next (seconds; 0: off) */
   F_B(CAP_evilnet_persistence, 0, 1, feature_notify_cap_evilnet_persistence),
   F_B(CAP_draft_bouncer, 0, 0, 0),   /* obsolete: draft/bouncer is gone (N027); nothing reads it */
-  F_B(PERSISTENCE_DRAFT_EXTRAS, 0, 1, feature_notify_persistence_draft_extras),
+  F_B(PERSISTENCE_DRAFT_EXTRAS, 0, 0, feature_notify_persistence_draft_extras),
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
