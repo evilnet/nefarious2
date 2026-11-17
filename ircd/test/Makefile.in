@@ -53,6 +53,7 @@ CMOCKA_TESTPROGS = \
 	pm_pair_index_cmocka \
 	history_rename_cmocka \
 	history_rename_rocksdb_cmocka \
+	history_read_cmocka \
 	recv_classify_cmocka \
 	ml_route_cmocka \
 	nick_route_cmocka \
@@ -154,6 +155,7 @@ DEP_SRC = \
 	chathistory_recv_cmocka.c \
 	pm_pair_index_cmocka.c \
 	history_rename_cmocka.c \
+	history_read_cmocka.c \
 	recv_classify_cmocka.c \
 	ml_route_cmocka.c \
 	nick_route_cmocka.c \
@@ -443,6 +445,23 @@ history_rename_cmocka_real.o: ${srcdir}/history_rename_cmocka.c
 HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS = history_rename_cmocka_real.o ../db_rocksdb.o $(HISTORY_RENAME_CMOCKA_DEPS)
 history_rename_rocksdb_cmocka: $(HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_RENAME_ROCKSDB_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS) $(ROCKSDB_LIBS)
+
+# history_read tests - history.c's read paths for a renamed channel, on
+# the REAL ../history.o: rows stored with history_store_message, the
+# rename recorded with history_channel_renamed, and pages (LATEST, BEFORE,
+# AFTER, AROUND, BETWEEN), msgid and redaction lookups, context, the
+# TARGETS stamp, the burst-loss prune and the trim engine's REDACT cascade
+# read back through history.c -- linked with the trim engine and the
+# store (RocksDB, a mkdtemp()'d env) as the ircd links them.  The
+# channels and the rest of what history.c needs from the ircd are stubs
+# in the test.
+HISTORY_READ_CMOCKA_OBJS = history_read_cmocka.o ../history.o \
+	../history_rename.o ../history_trim.o ../history_trim_codec.o \
+	../history_record.o ../redact_index.o ../chathistory_recv.o \
+	../pm_pair_index.o ../db_casefold.o ../db_rocksdb.o ../crdt_hlc.o \
+	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o ../ircd_compress.o
+history_read_cmocka: $(HISTORY_READ_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_READ_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS) $(ROCKSDB_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o
