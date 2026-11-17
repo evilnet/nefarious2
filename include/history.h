@@ -795,9 +795,9 @@ extern int history_lookup_message(const char *target, const char *msgid,
 /** history_lookup_message() for a row a client may act on: a row of the
  * channel's previous incarnation (destroyed and created again) is hidden
  * from every history walk, and is "not found" here too.  For CHATHISTORY
- * AROUND's centre row, REDACT's lookup and the federated exact lookup
- * (CH Q X).  A peer's redaction applied to the store still uses
- * history_lookup_message().
+ * AROUND's centre row, the federated exact lookup (CH Q X), REDACT's
+ * lookup, and the judging of a redaction that reached this server from
+ * elsewhere (redact_row_judge, m_redact.c).
  * @return 0 on success, -1 on error, 1 if not found (or not live).
  */
 extern int history_lookup_live_message(const char *target, const char *msgid,

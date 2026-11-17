@@ -430,7 +430,10 @@ int redact_row_judge(const char *target, const char *msgid)
   struct HistoryMessage *m = NULL;
   int rc, redacted = 0;
 
-  rc = history_lookup_message(target, msgid, &m);
+  /* A row of the channel's previous incarnation is hidden from history
+   * and refused to a local REDACT (m_redact): from elsewhere it is no
+   * message of this channel either, so an orphan, not one to apply. */
+  rc = history_lookup_live_message(target, msgid, &m);
   if (m)
     history_free_messages(m);
   /* A REDACT row annotates the message through the reply index whether or
